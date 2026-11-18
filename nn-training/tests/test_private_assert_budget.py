@@ -108,7 +108,11 @@ def test_scan_sees_the_known_surface() -> None:
     assert sum(actual.values()) >= sanity_floor(baseline), (
         f"私有断言计数 {sum(actual.values())} 低于基线九成 —— 扫描面可能坏了"
     )
-    assert len(baseline) >= 100
+    # 扫描面活性：按**扫到的测试文件数**判，不按「还剩多少文件有私有断言」判
+    # （2026-11-18：G5 清到 97 个文件后，旧地板 `len(baseline) >= 100` 从「防扫描坏了」
+    # 变成了「不许清干净」——那是把进度当成故障。上面的两条锚点仍钉着具体文件。）
+    scanned = sum(1 for _ in (ROOT / "tests").rglob("*.py"))
+    assert scanned >= 150, f"只扫到 {scanned} 个测试文件 —— 扫描面可能坏了"
 
 
 def test_public_assertions_are_not_counted() -> None:

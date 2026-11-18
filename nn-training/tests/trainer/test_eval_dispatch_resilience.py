@@ -2069,10 +2069,12 @@ def test_replica_lane_flattens_inflight_tasks_across_rounds() -> None:
     # 鸭子类型桩：`_replica_grant` 只碰 seq / replica_candidates / claim_replica 三面。
     rounds: list[Any] = [early_round, late_round]
     arb = EvalArbiter()
-    assert arb._replica_grant(rounds, "n3", 100.0) is not None
+    first = arb._replica_grant(rounds, "n3", 100.0)
+    assert first is not None
     assert late_round.claims == [(2000, 7)], late_round.claims
     assert early_round.claims == [], "副本按轮序而不是任务序发牌（跨轮没平铺）"
-    assert arb._replica_grant(rounds, "n3", 100.0) is not None
+    second = arb._replica_grant(rounds, "n3", 100.0)
+    assert second is not None
     assert early_round.claims == [(2001, 5)], "游标不转：另一轮的候选永远轮不到"
 
 
@@ -2106,12 +2108,12 @@ def test_unregister_does_not_rewind_round_robin_cursor() -> None:
     a, stale, b = _Rnd("A"), _Rnd("stale"), _Rnd("B")
     arb.register(a)  # type: ignore[arg-type]
     arb.register(stale)  # type: ignore[arg-type]
-    assert arb._unique_grant(arb._rounds, "n1", 1.0) is a
+    granted = arb._unique_grant(arb._rounds, "n1", 1.0)
+    assert granted is a
     arb.unregister(stale)  # type: ignore[arg-type]
     arb.register(b)  # type: ignore[arg-type]
-    assert arb._unique_grant(arb._rounds, "n1", 2.0) is b, (
-        "游标被 unregister 归一化，A 又拿了一局"
-    )
+    granted = arb._unique_grant(arb._rounds, "n1", 2.0)
+    assert granted is b, "游标被 unregister 归一化，A 又拿了一局"
     assert a.claims == 1 and b.claims == 1
 
 

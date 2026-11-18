@@ -38,7 +38,8 @@ def test_stage_plan_matches_ts_build_course_jobs() -> None:
     plan = eco._stage_plan(games=7, n_stages=3, seed0=100)
     assert plan == [[100, 101, 102], [100, 101], [100, 101]]
     # 局数 < 关卡数：前面的关各 1 局，后面的关为空
-    assert eco._stage_plan(games=2, n_stages=4, seed0=9) == [[9], [9], [], []]
+    short = eco._stage_plan(games=2, n_stages=4, seed0=9)
+    assert short == [[9], [9], [], []]
 
 
 def test_row_id_is_inverse_of_game_index() -> None:
@@ -49,7 +50,8 @@ def test_row_id_is_inverse_of_game_index() -> None:
         seen.add(eco._row_id(405000, 3, 6, 0, stage_local, seed))
     assert seen == set(range(6))
     # 第二个权重的 id 段偏移 = games
-    assert eco._row_id(405000, 3, 6, 1, 0, 405000) == 6
+    row_id = eco._row_id(405000, 3, 6, 1, 0, 405000)
+    assert row_id == 6
 
 
 def test_to_tool_row_maps_b_layer_row() -> None:
@@ -120,7 +122,8 @@ def test_reset_run_ledgers_clears_both_ledgers(tmp_path) -> None:
     assert not (tmp_path / "eval_log.jsonl").exists()
     assert not (tmp_path / "dist-agent-meta.jsonl").exists()
     assert (tmp_path / "spec.json").exists()  # 非账本文件不动
-    assert eco._reset_run_ledgers(tmp_path) == []  # 幂等：干净目录不报错
+    again = eco._reset_run_ledgers(tmp_path)
+    assert again == []  # 幂等：干净目录不报错
 
 
 def test_oneshot_runner_uses_dedicated_weight_kind() -> None:

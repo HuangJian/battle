@@ -7338,3 +7338,12 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `_open_tailscale` 的调用全部移出 assert；刻意留 1 处 `_slot_count` 作为
   `test_scan_sees_the_known_surface` 的扫描面活性锚（该自检要求本文件基线 > 0）。
   全文 → `docs/nn/engineering.md` §169。
+- **2026-11-18（G5 第三十一批：纯判据与多课程 hub）**：`test_multi_course_hub.py` 5 → 1，
+  `test_eval_a_once.py` 4 → 0、`test_eval_course_once.py` 3 → 0、
+  `test_eval_dispatch_resilience.py` 4 → 0、`test_stage_rotation_wiring.py` 3 → 0
+  （G5 288 → **270**，97 文件）。鉴权计数读 `auth_state()`、旧 store 旗标经 `course_store()`
+  读 `halt_workers`；其余全是纯判据/驱动入口 ⇒ 先赋值再断言。留 1 处 `hub._job_dir`
+  （队列门面里它就是 `_job_dir`，无另一份公开名）。同批修正门禁自身地板：
+  `test_scan_sees_the_known_surface` 的 `len(baseline) >= 100` 改为按扫到的测试文件数
+  （`>= 150`，实测 554）——旧地板在清到 97 个文件后从「防扫描坏了」变成「不许清干净」。
+  全文 → `docs/nn/engineering.md` §170。

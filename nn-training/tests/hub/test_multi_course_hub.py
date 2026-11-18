@@ -707,7 +707,7 @@ def test_single_course_wrapper_keeps_legacy_semantics(tmp_path: Path) -> None:
     for _ in range(5):
         hub.auth_failure("203.0.113.7")
     assert store.is_blocked("203.0.113.7") is True
-    assert store._auth_fail == {}
+    assert store.auth_state().failures == {}
 
 
 # ------------------------------------------------------------------ 自动发现（--discover）
@@ -890,7 +890,9 @@ def test_discover_adopts_process_state_from_solo_store(tmp_path: Path) -> None:
     assert hub.is_blocked("203.0.113.9") is True, "鉴权闭锁跨课程延续（同进程一份）"
     # 搬完就不再借 store：此后写的是队列自己的状态
     hub.halt_workers = False
-    assert hub._stores["a"].halt_workers is True, "store 上那份已成历史（不再生效）"
+    old_store = hub.course_store("a")
+    assert old_store is not None
+    assert old_store.halt_workers is True, "store 上那份已成历史（不再生效）"
 
 
 # ------------------------------------------------------------------ 补传归位（离线训练模式）
@@ -1082,12 +1084,14 @@ def test_backup_target_follows_the_course_config(tmp_path: Path) -> None:
     """归档 `(prefix, dir)` 要跟**课程配置**走（而不是硬编码课名）——真课程声明了就用它。"""
     st = _JobStore(tmp_path / "c4" / "remote-jobs", tmp_path / "c4" / "training_log.jsonl")
     # 仓里有真课程配置的课（x20-noexplore 声明 backup_dir/backup_prefix）
-    assert st._course_backup_target("x20-noexplore") == (
+    target = st._course_backup_target("x20-noexplore")
+    assert target == (
         "x20-noexplore",
         str(ROOT.parent / "nn-training" / "weights" / "x20-noexplore"),
     )
     # 没配置的课（工装/新课）：同构缺省落到**当前归档根**（env 隔离的那一个）
-    assert st._course_backup_target("no-such-course") == (
+    target = st._course_backup_target("no-such-course")
+    assert target == (
         "no-such-course",
         str(Path(os.environ["BCITY_WEIGHTS_ARCHIVE_ROOT"]) / "no-such-course"),
     )

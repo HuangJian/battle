@@ -101,8 +101,10 @@ def test_read_summary_returns_last_row_for_iter_and_wver(tmp_path: Path) -> None
     p.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
     got = eval_a_once._read_summary(p, "a" * 16, 105)
     assert got is not None and got["sec"] == 47.0
-    assert eval_a_once._read_summary(p, "a" * 16, 999) is None
-    assert eval_a_once._read_summary(tmp_path / "missing.jsonl", "a" * 16, 105) is None
+    missing_iter = eval_a_once._read_summary(p, "a" * 16, 999)
+    assert missing_iter is None
+    missing_file = eval_a_once._read_summary(tmp_path / "missing.jsonl", "a" * 16, 105)
+    assert missing_file is None
 
 
 def test_write_summary_for_wver_backfills_reused_readout(tmp_path: Path) -> None:
@@ -135,8 +137,10 @@ def test_write_summary_for_wver_no_rows_returns_zero(tmp_path: Path) -> None:
     """账本里根本没有该 wver 的局 → 0（调用方据此响亮失败，不写空 summary）。"""
     p = tmp_path / "eval_log.jsonl"
     p.write_text(json.dumps(_row(wver="d" * 16)) + "\n", encoding="utf-8")
-    assert eval_a_once._write_summary_for_wver(p, "a" * 16, 177, time.time()) == 0
-    assert eval_a_once._read_summary(p, "a" * 16, 177) is None
+    written = eval_a_once._write_summary_for_wver(p, "a" * 16, 177, time.time())
+    assert written == 0
+    summary = eval_a_once._read_summary(p, "a" * 16, 177)
+    assert summary is None
 
 
 # ── it0 基线（`--baseline`；离线开课由控制台补派，2026-09-24） ─────────────────────

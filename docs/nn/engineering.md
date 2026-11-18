@@ -25,6 +25,29 @@
 
 ---
 
+## §170 G5 第三十一批：纯判据与多课程 hub（2026-11-18）
+
+`tests/hub/test_multi_course_hub.py` **5 → 1**；四个 trainer 文件清零：
+`test_eval_a_once.py` **4 → 0**、`test_eval_course_once.py` **3 → 0**、
+`test_eval_dispatch_resilience.py` **4 → 0**、`test_stage_rotation_wiring.py` **3 → 0**
+（G5 **288 → 270**，101 → 97 文件）。
+
+- 多课程 hub：鉴权计数改读 `auth_state().failures`（§163），旧 store 的停机旗标改经
+  `course_store()`（§164）再读公开的 `halt_workers`；`_course_backup_target(...)` 的两次
+  两元组结果先赋给 `target` 再断言。**留下 1 处** `hub._job_dir(...)`：队列门面里它就是
+  `_job_dir`（同名转发闭集的一员），没有另一份公开名可换。
+- 四个 trainer 文件全是**纯判据 / 驱动入口**（`_read_summary` / `_write_summary_for_wver` /
+  `_stage_plan` / `_row_id` / `_reset_run_ledgers` / `_replica_grant` / `_unique_grant` /
+  `_per_stage_quota` / `_volume_stages`）：返回值就是判据 ⇒ 统一赋给局部变量再断言。
+
+**顺带修正门禁自身的地板**：`test_scan_sees_the_known_surface` 里的
+`assert len(baseline) >= 100` 本意是「扫描面别坏」，但清到 97 个文件后它变成
+「不许清干净」（把进度当故障）。改成按**扫到的测试文件数**判（`>= 150`，实测 554）——
+扫描面活性与「存量还剩多少文件」解耦；两条具体文件锚点（`test_rollout_node.py` /
+`test_rollout_volume.py`）保留。
+
+---
+
 ## §169 G5 第三十批：节点监护的驱动入口（2026-11-18）
 
 `tests/remote/test_rollout_node.py` **8 → 1**（G5 **295 → 288**，101 文件不变）。
