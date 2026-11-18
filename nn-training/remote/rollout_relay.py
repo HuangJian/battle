@@ -428,16 +428,23 @@ class RelayLink:
 
     def start(self) -> None:
         self._started_at = time.time()
+        # 同一进程里上一次 cell 留下的轮询线程先收掉（跨进程那半在 `common.node_report`）：
+        # 两条链同时轮询同一个 node ⇒ hub 的任务随机分给两边、回执各走各的 rid，表面「成功」，
+        # 实际一半结果来自旧代码 —— 这正是 2026-11-18 DSW「旧日志格式又出现了」的根源。
+        stop_stale_links(self.log)
         for i in range(self._workers):
             t = threading.Thread(target=self._worker, name=f"relay-{i}", daemon=True)
             t.start()
             self._threads.append(t)
+        _LIVE_LINKS.append(self)
 
     def stop(self, timeout: float = 5.0) -> None:
         self._stop.set()
         for t in self._threads:
             t.join(timeout=timeout)
         self._threads.clear()
+        if self in _LIVE_LINKS:
+            _LIVE_LINKS.remove(self)
 
     def alive(self) -> bool:
         """至少一个轮询线程还活着（全停 = 通道已死，supervisor 据此重建）。"""
@@ -603,6 +610,30 @@ class RelayLink:
             self._counters[name] = int(self._counters.get(name, 0)) + 1
 
 
+#: 本进程里**起过**的链接（`start()` 进、`stop()` 出）。cell 重跑时必须先清场：上一次若被
+#: 第二个 Ctrl-C 打在 `finally` 上，`stop()` 就没跑完，轮询线程作为 daemon 继续替同一个 node
+#: 干活 —— 两份日志混流、任务被旧代码吃掉一半。daemon 线程**只能在同进程内**收，够不着它
+#: 就只能靠这张表；跨进程那半在 `common.node_report.reclaim_node_id`。
+_LIVE_LINKS: list[RelayLink] = []
+
+
+def stop_stale_links(log: Callable[[str], None], timeout: float = 1.0) -> int:
+    """叫停本进程里**其它**还活着的 relay 链接，返回叫停的条数（幂等）。
+
+    只设停止位、不硬等：`timeout` 是每条链接 join 的上限 —— 线程正卡在 20s 长轮询里时，
+    它会等这一拍回来才退，硬等下去只会把新通道的启动一起拖住。
+    """
+    stale = [lk for lk in list(_LIVE_LINKS) if lk.alive()]
+    for lk in stale:
+        lk.stop(timeout=timeout)
+    if stale:
+        log(
+            f"⚠ 上一次 cell 留下 {len(stale)} 条 relay 轮询还活着（同一 kernel 重跑）"
+            " —— 已叫停，它们会在当前那一拍长轮询返回后退出"
+        )
+    return len(stale)
+
+
 #: 起好后等 hub 告知本机端口的预算（秒）。hub 未升级（`/relay/` 404）或出网断 ⇒ 到点放弃。
 PORT_WAIT_SEC = 40.0
 
@@ -710,4 +741,5 @@ __all__ = [
     "RelayLink",
     "RelayUnreachable",
     "probe_hub",
+    "stop_stale_links",
 ]

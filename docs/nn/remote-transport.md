@@ -100,7 +100,9 @@
 （文案已换成 `relay 轮询失败（hub=host:port，X.Xs）：…`）。⇒ 只有一种解释：**盘上/进程上还有一份旧代码在跑**，
 最可能是 notebook 重启没杀掉的旧 `rollout-node` 子进程（两份进程的 stdout 混在同一个日志流里）。
 ⇒ 落地：启动横幅加 `pid=`，并新增 `_warn_if_node_id_taken()`（pidfile `<tmp>/battle-rollout-<id>.pid`，
-别的 pid 还活着就打「先 kill 它」），**只告警不退出**。⚠ 判活**禁止** `os.kill(pid, 0)`：Windows 上那是
+别的 pid 还活着就打「先 kill 它」），**只告警不退出**。（⚠ 这一步当天就被用户口径推翻：见 §159.2，
+`_warn_if_node_id_taken` 已换成 `reclaim_node_id` —— 不是告警，是**先清场再起**。）
+⚠ 判活**禁止** `os.kill(pid, 0)`：Windows 上那是
 `TerminateProcess`，会真把对方打死 —— 非 POSIX 一律保守当活着。
 
 **结论 2：hub 侧此刻仍然完全正常**（本机复测）——隧道 `/relay/dsw/_poll` 不带令牌 `401 / 1.08s`；
@@ -127,6 +129,50 @@ hub 日志里 18 条 `/relay/` **全部**来自本机测试（`104.194.71.215` �
 **这条现场给下一轮的判据**：再跑一次若看到 `TCP=` **全是 `timeout`** ⇒ 整组 anycast IP 被黑洞，重试无用
 （配 `CFG.net_proxy` 或换承载/机器）；若有 `ok` 而 HTTPS 挂 ⇒ 掐在 TLS/SNI（换域名或走代理）。
 notebook 的排查小节已补上「在节点上自己复核」的三行 `curl`（`cf-api` / `hub` / `github` 对照）。
+
+### §159.2 同一 `node_id` 只许一个消费者：cell 重跑**先清场再起**（同日，用户口径）
+
+上面 §159.1 的结论 1 只能解释现象（「旧进程还在说话」），治不了它 —— 告警写进日志仍然要人去 `kill`。
+用户当天给的口径是**动作**而不是提示：**「重复执行 `rollout.ipynb` 的 cell，应该把之前的所有进程杀掉，
+再重新起新进程。」** 于是把守卫从「只告警」升级成「先清场」，分两半落地：
+
+**① 跨进程（`common/node_report.reclaim_node_id`）** —— 节点启动第一步执行，返回被收掉的 pid（0 = 没有）。
+
+* pidfile 从**裸 pid** 升级成 **`pid|身份`**（`<tmp>/battle-rollout-<node_id>.pid`）；
+* **先 `SIGINT`**：对方的 `except KeyboardInterrupt` 会走 `finally`（`unregister` + 收 bun agent /
+  cloudflared）。这不是客气 —— SIGTERM/SIGKILL 没有这个待遇，会留下**占着 `agent_port` 的孤儿**，
+  新实例起来就用不了（`_start_agent` 绑不上端口）。`RECLAIM_GRACE_SEC=8` 还不退才 `SIGKILL`；
+* Windows 没有可靠的 SIGINT（`CTRL_C_EVENT` 要求同控制台）⇒ 直接 `taskkill /F /T`（`/T` 连子进程，
+  走 `common.proc.run_capture` 免得无控制台的父进程闪一块黑窗），且**不白等**那 8 秒；
+* **身份核验是前置条件，不是可选优化**：pid 会被系统回收，给陌生进程递 SIGINT 最坏能打断一台机器上
+  无关的训练 / kernel。`proc_identity(pid)` = Linux `/proc/<pid>/stat` 第 22 字段（启动戳；快、不起子进程），
+  没有 `/proc` 的平台回落 `common.instance_lock.proc_cmdline`（Windows 走 wmic / 新机回落 PowerShell CIM）。
+  **对不上就不动手**（判 pid 复用，打一行说明）；旧格式裸 pid（身份为空）同样只告警 —— 本次启动会把它
+  重写成新格式，**下一次重跑即生效**。
+
+**② 同进程（`remote/rollout_relay.stop_stale_links`）** —— 上一次 cell 若被**第二个 Ctrl-C 打在
+`finally` 上**，`stop()` 没跑完，daemon 轮询线程就活下来了。两条通道同时轮询同一个 node ⇒ hub 的任务
+随机分给两边、回执各走各自的 rid：**表面成功，实际一半结果来自旧代码**。daemon 线程只能在同进程收，
+够不着它就只能靠表：`RelayLink.start()` 起线程**前**扫 `_LIVE_LINKS` 叫停遗留链接（只设停止位、
+每条 `join` 上限 1s —— 硬等只会把新通道的启动一起拖住）。
+
+**真机验收（本机 Windows，非推断）**
+
+```
+child pid=24552 identity='cmd:D:\…\python.exe -c "import time; time.sleep(120)"'
+  | ⚠ 同一 node_id 的上一个节点还活着（pid=24552）—— 先收掉它再起新的 …
+  |   pid=24552 已收线（它自己的 bun agent / cloudflared 随它的 finally 一起收掉）
+reclaim -> killed=24552 用时 1.5s；child.poll()=1
+```
+
+反证两条同样实测：① 身份写成 `stamp:999999`（同一个 pid、对不上）⇒ `killed=0`、**子进程还活着**；
+② 旧格式裸 pid ⇒ `killed=0`、只打告警。单测：`test_rollout_node.py` **5** 例（先 SIGINT / SIGINT 被无视
+才 SIGKILL / pid 复用不动手 / 旧格式只告警 / 自己的 pid 与死 owner 静默）+ `test_rollout_relay.py` **2** 例
+（扫 `_LIVE_LINKS` · `start()` 先清场再起线程）。门禁 `NN_GATE_SKIP_E2E=1` → **6079 passed, 10 skipped**。
+
+**边界**：目标若是**上次会话的 kernel**，SIGINT 等于替它「中断那个 cell」—— 这正是用户要的效果，但所有
+动作都以身份核验为前置，避免误伤同机的训练进程；`SIGKILL` 分支会留孤儿子进程，日志如实说「手动 kill 后
+重跑」；同一个 kernel 里 cell 无法真正并发（Jupyter 排队执行）⇒ ②只覆盖「被双 Ctrl-C 打断」这条窄路。
 
 ## §158 采样节点的「只出网」接入：hub 会合 relay（2026-11-18）
 

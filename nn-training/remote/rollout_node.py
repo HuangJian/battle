@@ -983,10 +983,12 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
         f" 磁盘={floor_mb}/{warn_mb}MB node_id={node_id} pid={os.getpid()} "
         f"hub={'已配置 ' + (net_http.host_of(hub_url) or '?') if hub_configured else '未配置（降级为手工登记）'}"
     )
-    # 同一 node_id 只能有一个进程在轮询：两个进程会**抢同一个 hub 队列**，而且日志会混成
+    # 同一 node_id 只许一个进程在轮询：两个消费者会**抢同一个 hub 队列**，而且日志会混成
     # 「新旧两种格式同时出现」——2026-11-18 DSW 现场就这么误判过一次（旧进程没死）。
-    # 只告警不退出：误判一个活人的会话比多一条警告贵得多。实现在 `common/node_report`。
-    node_report.warn_if_node_id_taken(node_id, log)
+    # 用户口径（同日）：**cell 重跑必须先把上一次的进程杀干净再起**，所以这里不是告警而是清场
+    # （先 SIGINT 让旧进程走 finally 收掉自己的 bun agent/cloudflared，超时才 SIGKILL）。
+    # 实现在 `common/node_report`；pid 复用靠「pid|启动戳」核验，对不上不动手。
+    node_report.reclaim_node_id(node_id, log)
 
     # ── 2. bun（公网安装在 ensure 之前）───────────────────────────────────
     bun = _ensure_bun(code_dir, cfg, log)

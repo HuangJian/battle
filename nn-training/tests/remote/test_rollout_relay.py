@@ -482,3 +482,54 @@ def test_channel_open_failure_names_preflight_and_host(monkeypatch: pytest.Monke
     assert any(ln.startswith(f"relay 预检 127.0.0.1:{port} ") for ln in logs), logs
     joined = "\n".join(logs)
     assert f"hub=127.0.0.1:{port}" in joined and "cloudflared" in joined
+
+
+# ------------------------------------------------- cell 重跑：同进程遗留轮询线程（2026-11-18 DSW）
+
+
+def test_start_stops_leftover_links_from_previous_cell(monkeypatch: pytest.MonkeyPatch) -> None:
+    """同一 kernel 里重跑 cell：上一次的轮询线程（daemon）可能没跟着 `finally` 退出。
+
+    两条链同时轮询同一个 node ⇒ hub 的任务随机分给两边、回执各走各自的 rid，表面「成功」，
+    一半结果其实来自旧代码 —— 这正是 DSW 现场「旧日志格式又出现了」的根源。daemon 线程
+    只能在同进程内收，够不着它就只能靠 `_LIVE_LINKS` 这张表。
+    """
+    stopped: list[float] = []
+
+    class _Stale:
+        alive_now = True
+
+        def alive(self) -> bool:
+            return self.alive_now
+
+        def stop(self, timeout: float = 5.0) -> None:
+            stopped.append(timeout)
+            self.alive_now = False
+
+    stale, fresh = _Stale(), _Stale()
+    fresh.alive_now = False
+    monkeypatch.setattr(rr, "_LIVE_LINKS", [stale, fresh])
+    logs: list[str] = []
+    assert rr.stop_stale_links(logs.append) == 1, "只收还活着的那条"
+    assert stopped and stale.alive_now is False
+    assert len(logs) == 1, logs
+
+
+def test_new_link_sweeps_before_polling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """接线：`RelayLink.start()` 必须先清场再起线程（不然这张表永远只是个装饰）。"""
+    swept: list[int] = []
+
+    def _count_sweep(_log: object, timeout: float = 1.0) -> int:
+        swept.append(1)
+        return 0
+
+    monkeypatch.setattr(rr, "stop_stale_links", _count_sweep)
+    monkeypatch.setattr(rr.RelayLink, "_worker", lambda self: None)  # 线程空转即退，不碰网络
+    link = RelayLink(
+        hub_url="http://127.0.0.1:9", token="t", node_id="n1", agent_port=9, log=lambda _m: None
+    )
+    try:
+        link.start()
+        assert swept == [1]
+    finally:
+        link.stop()

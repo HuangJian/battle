@@ -1,8 +1,12 @@
-"""common/node_report.py — 节点侧观测的纯函数（磁盘阈值 / 水位行 / 超额认购判据）。
+"""common/node_report.py — 节点侧观测（磁盘阈值 / 水位行 / 超额认购判据）+ 同一 node_id 的归属卫兵。
 
 为什么在这里（2026-11-14，plan/node-throughput-and-keepalive P3；LOC 预算 <1000 行）：
 这些是「把 `/v1/status` 的字段变成一行人人能读的日志」的纯逻辑，与传输/监护无关；
 住在 `remote/rollout_node.py` 会把那个文件顶过预算，也不利于单测（不用起监护循环）。
+
+2026-11-18 追加 `reclaim_node_id`（同一 `node_id` 只许一个节点在轮询，cell 重跑**先清场**）：
+它同样属于「节点侧自己的记账」，但**不是纯函数**（会递信号）—— 放在这里仍是因为
+`rollout_node.py` 顶在 1000 行预算上，而不是因为它够纯。
 
 口径（AGENTS §9 观测面）：
 * 阈值一律用**生效值**（CFG 覆盖后的 `diskFloorMB/diskWarnMB`），不写死常量；
@@ -14,13 +18,16 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
 
 from common.distribution_limits import node_slots, node_slots_note
+from common.instance_lock import proc_cmdline
 from common.pid_probe import pid_alive
+from common.proc import run_capture
 
 DISK_FLOOR_MB_DEFAULT = 2048
 DISK_WARN_MB_DEFAULT = 4096
@@ -206,6 +213,12 @@ def workers_selfcheck_line(workers: int, slot_note: str, base_ms: int) -> str:
 
 # ────────────────────────── 同一 node_id 的重复进程（2026-11-18 DSW）──────────────────────────
 
+#: 收掉上一个节点进程的宽限（秒）：SIGINT 之后它还要 unregister + 收 bun agent/cloudflared，
+#: 这段是给它走完 `finally` 的预算；到点还活着才升级 SIGKILL（那一步会留下孤儿子进程）。
+RECLAIM_GRACE_SEC = 8.0
+#: 等对方退出时的轮询间隔（秒）。
+RECLAIM_POLL_SEC = 0.2
+
 
 def node_id_pidfile(node_id: str) -> Path:
     """同一 `node_id` 的「谁在轮询」记在临时目录（不进仓库、不进 CFG）。"""
@@ -213,30 +226,134 @@ def node_id_pidfile(node_id: str) -> Path:
     return Path(tempfile.gettempdir()) / f"battle-rollout-{safe}.pid"
 
 
-def warn_if_node_id_taken(node_id: str, log: Callable[[str], None]) -> int:
-    """同一 `node_id` 上已有进程在轮询时告警，返回那个 pid（没有 = `0`）。**只告警、不退出**。
+def proc_start_stamp(pid: int) -> str:
+    """进程启动戳（Linux `/proc/<pid>/stat` 第 22 字段）—— 用来排除 pid 复用。
 
-    2026-11-18 DSW 现场：旧进程没随 notebook 重启退出，两个进程同时轮询同一个 node ——
-    日志里新旧两种格式交替出现，看起来像「代码没生效」，实际是两份进程在说话。
-    误判一个还在干活的会话比多一条警告贵得多，所以这里永不 `sys.exit`。
-    返回值是给用例的结构化出口（判据不该靠对日志措辞断言）。
+    pid 会被系统回收：光凭「pid 相同」就给对方递信号，最坏是打断一个无关的训练 / kernel。
+    启动戳在同一台机器上单调、同一个 pid 不可能两次拿到同一个值。
+    读不到（非 Linux / 已退出 / 无权限）⇒ 空串（`proc_identity` 会去回落命令行）。
+    """
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    # comm 字段带括号且可能含空格 ⇒ 从**最后一个** `)` 之后切；切出的第 0 项是 state（第 3 字段）。
+    tail = raw.rsplit(")", 1)[-1].split()
+    return tail[19] if len(tail) > 19 else ""
+
+
+def proc_identity(pid: int) -> str:
+    """进程身份指纹（pidfile 里存的就是它）。空串 = 身份不可核验 ⇒ 调用方 fail-closed。
+
+    Linux 取启动戳（快、不起子进程）；没有 `/proc` 的平台（Windows / macOS）回落命令行
+    —— 复用 `common.instance_lock.proc_cmdline` 那唯一一份实现（Windows 走 wmic、新机回落
+    PowerShell CIM；macOS 无 `/proc` ⇒ 读不到就返回空）。
+    """
+    stamp = proc_start_stamp(pid)
+    if stamp:
+        return f"stamp:{stamp}"
+    line = proc_cmdline(pid)
+    return f"cmd:{line}" if line else ""
+
+
+def write_node_owner(path: Path, pid: int, ident: str) -> None:
+    """把「谁在轮询这个 node」记账（`pid|身份`）。写不下不影响启动。"""
+    try:
+        path.write_text(f"{pid}|{ident}", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def read_node_owner(path: Path) -> tuple[int, str]:
+    """pidfile → `(pid, 身份)`；残缺/不可读 → `(0, "")`。兼容裸 pid 旧格式（身份为空）。"""
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return 0, ""
+    pid_txt, _, ident = raw.partition("|")
+    try:
+        return int(pid_txt.strip() or "0"), ident.strip()
+    except ValueError:
+        return 0, ""
+
+
+def reclaim_signal(pid: int, *, interrupt: bool) -> bool:
+    """给 `pid` 递终止信号（True = 信号已发出）。
+
+    POSIX：`interrupt` → `SIGINT`，否则 `SIGKILL`。**先 SIGINT 不是客气**：对方的
+    `except KeyboardInterrupt` 会走 `finally`（unregister + 收 bun agent/cloudflared），
+    而 SIGTERM/SIGKILL 没有这个待遇 —— 会留下占着 `agent_port` 的孤儿，新实例起来就用不了。
+    Windows：没有可靠的 SIGINT（`CTRL_C_EVENT` 要求同控制台）⇒ 直接 `taskkill /F /T`
+    （`/T` 连子进程一起；走 `run_capture` 免得无控制台的父进程闪一块黑窗）。
+    """
+    if os.name == "nt":
+        if interrupt:
+            return False
+        try:
+            run_capture(["taskkill", "/F", "/T", "/PID", str(pid)], timeout=10)
+        except OSError:
+            return False  # taskkill 不在 PATH / 无权限：调用方会看到「还没退出」
+        return True
+    try:
+        # `SIGKILL` 在 Windows 的 typeshed 里不存在（本分支只在 POSIX 跑，getattr 只为过静态检查）。
+        os.kill(
+            pid, signal.SIGINT if interrupt else int(getattr(signal, "SIGKILL", signal.SIGTERM))
+        )
+    except OSError:
+        return False
+    return True
+
+
+def reclaim_kill(pid: int, log: Callable[[str], None]) -> int:
+    """收掉 `pid`（先 SIGINT 等它自己收线，超时再 SIGKILL），返回真收掉的 pid（0 = 没收掉）。"""
+    log(
+        f"⚠ 同一 node_id 的上一个节点还活着（pid={pid}）—— 先收掉它再起新的"
+        "（cell 重跑必须清场：两个消费者会抢同一个 hub 队列，日志也混成两份）"
+    )
+    # Windows 上「interrupt」这一步没有对应信号（返回 False）⇒ 别白等 8s，直接上 taskkill。
+    waited = reclaim_signal(pid, interrupt=True)
+    deadline = time.monotonic() + (RECLAIM_GRACE_SEC if waited else 0.0)
+    while time.monotonic() < deadline and pid_alive(pid):
+        time.sleep(RECLAIM_POLL_SEC)
+    if pid_alive(pid):
+        reclaim_signal(pid, interrupt=False)
+        time.sleep(RECLAIM_POLL_SEC)
+    if pid_alive(pid):
+        log(f"  pid={pid} 仍未退出 —— 它守的子进程可能已成孤儿；手动 kill 后重跑本 cell")
+        return 0
+    log(f"  pid={pid} 已收线（它自己的 bun agent / cloudflared 随它的 finally 一起收掉）")
+    return pid
+
+
+def reclaim_node_id(node_id: str, log: Callable[[str], None]) -> int:
+    """**先清场**：收掉同一 `node_id` 上遗留的上一个节点进程，再把本进程登记为 owner。
+
+    返回被收掉的 pid（`0` = 没有遗留 / 没法确认身份）。用户口径（2026-11-18）：重复执行
+    rollout cell 必须杀干净上一次的进程再起新的 —— 上一次实测（DSW）旧进程没随 notebook
+    重启退出，两个进程同时轮询同一个 node，日志里新旧两种格式交替出现，看起来像「代码
+    没生效」，实际是两份进程在说话。
+
+    **身份核验**：pidfile 记 `pid|身份`（Linux 启动戳 / 其它平台命令行，见 `proc_identity`）。
+    对不上就不动（pid 被系统复用给了别人 —— 给陌生进程递 SIGINT 最坏能打断一个无关的
+    kernel / 训练）。旧格式裸 pid（身份为空）同样只告警不动：没有身份就不该有信号；
+    本次启动会把它重写成新格式，下一次重跑即生效。
 
     判活一律用 `common.pid_probe.pid_alive`（唯一实现）：`os.kill(pid, 0)` 在 Windows 上是
     `TerminateProcess`，会真把对方打死 —— `tests/common/test_pid_probe_windows_safe.py` 守着它。
     """
     path = node_id_pidfile(node_id)
-    try:
-        other = int(path.read_text(encoding="utf-8").strip() or "0")
-    except (OSError, ValueError):
-        other = 0
-    taken = bool(other) and other != os.getpid() and pid_alive(other)
-    if taken:
-        log(
-            f"⚠ 同一 node_id 已有进程在轮询（pid={other}，本进程 pid={os.getpid()}）"
-            f" —— 两个消费者会抢同一个 hub 队列，日志也会混成两份；先 kill {other} 再启动"
-        )
-    try:
-        path.write_text(str(os.getpid()), encoding="utf-8")
-    except OSError:
-        pass  # 写不了 pidfile 不影响启动；下一次启动只是拿不到「已被占用」这条提示
-    return other if taken else 0
+    me = os.getpid()
+    other, stored = read_node_owner(path)
+    killed = 0
+    if other and other != me and pid_alive(other):
+        now = proc_identity(other)
+        if stored and now and stored == now:
+            killed = reclaim_kill(other, log)
+        else:
+            log(
+                f"⚠ 同一 node_id 的 pidfile 指向 pid={other}，但身份核验不过"
+                f"（存={stored or '空'} 现={now or '读不到'}）—— 判为 pid 复用，不动它"
+                + ("；旧格式 pidfile 无从核验，本次请手动 kill 后重跑" if not stored else "")
+            )
+    write_node_owner(path, me, proc_identity(me))
+    return killed

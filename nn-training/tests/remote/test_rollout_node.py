@@ -1615,34 +1615,108 @@ def test_banner_blames_relay_not_cloudflared_when_channel_is_relay() -> None:
 # ---------------------------------------------------------------- 同一 node_id 重复进程（2026-11-18 DSW）
 
 
-def test_warns_when_same_node_id_already_polling(
+class _ReclaimRig:
+    """清场用的小夹具：pidfile 在 tmp、信号记账、存活状态可控（不碰真进程）。"""
+
+    def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alive: bool = True) -> None:
+        monkeypatch.setattr(node_report.tempfile, "gettempdir", lambda: str(tmp_path))
+        self.path = tmp_path / "battle-rollout-dsw.pid"
+        self.alive = {"v": alive}
+        self.signals: list[bool] = []
+        self.ident = {"v": "stamp:777"}
+        monkeypatch.setattr(node_report, "pid_alive", lambda _p: self.alive["v"])
+        monkeypatch.setattr(node_report, "proc_identity", lambda _p: self.ident["v"])
+        monkeypatch.setattr(node_report, "reclaim_signal", self._signal)
+        # 别真睡 8s：这两条常量是「等对方走完 finally」的预算，用例里压成 0。
+        monkeypatch.setattr(node_report, "RECLAIM_GRACE_SEC", 0.0)
+        monkeypatch.setattr(node_report, "RECLAIM_POLL_SEC", 0.0)
+
+    def _signal(self, _pid: int, *, interrupt: bool) -> bool:
+        self.signals.append(interrupt)
+        if interrupt:
+            self.alive["v"] = False  # 收到 SIGINT 就走 finally 收线（真机行为）
+        return True
+
+    def write(self, text: str) -> None:
+        self.path.write_text(text, encoding="utf-8")
+
+    def owner_pid(self) -> int:
+        pid_txt, _, _stamp = self.path.read_text(encoding="utf-8").partition("|")
+        return int(pid_txt)
+
+
+def test_reclaims_previous_owner_before_starting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """已有别的 pid 在轮询同一个 node_id 时必须点名 —— 否则两份进程的日志混在一起，
-    看起来像「新代码没生效」（DSW 现场就这么误判过一次）。
+    """cell 重跑必须先杀干净上一个节点进程（2026-11-18 用户口径），且**先 SIGINT**：
 
+    对方的 `except KeyboardInterrupt` 会走 finally —— unregister + 收 bun agent/cloudflared；
+    SIGTERM/SIGKILL 没有这个待遇，会留下占着 agent_port 的孤儿，新实例起来就用不了。
     实现在 `common/node_report`（`rollout_node.py` 已顶在 1000 行预算上）。
     """
-    monkeypatch.setattr(node_report.tempfile, "gettempdir", lambda: str(tmp_path))
-    monkeypatch.setattr(node_report, "pid_alive", lambda _p: True)
-    (tmp_path / "battle-rollout-dsw.pid").write_text("4242", encoding="utf-8")
+    rig = _ReclaimRig(tmp_path, monkeypatch)
+    rig.write("4242|stamp:777")
     logs: list[str] = []
-    assert node_report.warn_if_node_id_taken("dsw", logs.append) == 4242, "要直接给出该 kill 的 pid"
-    assert len(logs) == 1, logs
-    # 本进程成为新的 owner：下次启动该看到自己的 pid，而不是继续报 4242
-    assert (tmp_path / "battle-rollout-dsw.pid").read_text(encoding="utf-8") == str(os.getpid())
+    assert node_report.reclaim_node_id("dsw", logs.append) == 4242
+    assert rig.signals == [True], "只许先礼（SIGINT）：不许一上来就 SIGKILL"
+    assert rig.owner_pid() == os.getpid(), "杀掉之后本进程才是 owner"
+    assert len(logs) == 2, logs  # 「发现/收线」两行，不多不少
 
 
-def test_no_warn_when_pidfile_is_own_or_dead(
+def test_hard_kills_when_the_old_node_ignores_sigint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """自己的 pid / 已死进程都不该告警（只告警不退出，但也不许刷噪声）。"""
-    monkeypatch.setattr(node_report.tempfile, "gettempdir", lambda: str(tmp_path))
-    path = tmp_path / "battle-rollout-dsw.pid"
+    """SIGINT 被无视（卡在不可中断的 IO 里）⇒ 到点升级 SIGKILL，并如实说「已收掉」。"""
+    rig = _ReclaimRig(tmp_path, monkeypatch)
+
+    def stubborn(_pid: int, *, interrupt: bool) -> bool:
+        rig.signals.append(interrupt)
+        if not interrupt:
+            rig.alive["v"] = False
+        return True
+
+    monkeypatch.setattr(node_report, "reclaim_signal", stubborn)
+    rig.write("4242|stamp:777")
+    assert node_report.reclaim_node_id("dsw", lambda _m: None) == 4242
+    assert rig.signals == [True, False]
+
+
+def test_never_signals_a_recycled_pid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """pid 复用：身份指纹对不上就**不动手**（给陌生进程递 SIGINT 最坏能打断无关的 kernel/训练）。"""
+    rig = _ReclaimRig(tmp_path, monkeypatch)
+    rig.ident["v"] = "stamp:999"  # 同一个 pid，但已是另一个进程
+    rig.write("4242|stamp:777")
     logs: list[str] = []
-    path.write_text(str(os.getpid()), encoding="utf-8")
-    assert node_report.warn_if_node_id_taken("dsw", logs.append) == 0
-    monkeypatch.setattr(node_report, "pid_alive", lambda _p: False)
-    path.write_text("4242", encoding="utf-8")
-    assert node_report.warn_if_node_id_taken("dsw", logs.append) == 0
+    assert node_report.reclaim_node_id("dsw", logs.append) == 0
+    assert rig.signals == []
+    assert len(logs) == 1, logs
+    assert rig.owner_pid() == os.getpid(), "核验不过也不妨碍本进程接管记账"
+
+
+def test_legacy_bare_pid_pidfile_is_reported_not_signalled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """旧格式（裸 pid、无启动戳）无从核验 ⇒ 只告警；本次启动把它重写成新格式，下一次生效。"""
+    rig = _ReclaimRig(tmp_path, monkeypatch)
+    rig.write("4242")
+    logs: list[str] = []
+    assert node_report.reclaim_node_id("dsw", logs.append) == 0
+    assert rig.signals == []
+    assert len(logs) == 1, logs
+    pid_txt, sep, stamp = rig.path.read_text(encoding="utf-8").partition("|")
+    assert sep and int(pid_txt) == os.getpid() and stamp == "stamp:777", "要迁移成 pid|身份"
+
+
+def test_no_reclaim_for_own_pid_or_dead_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """自己的 pid（同一 kernel 重跑）/ 已死的 owner 都不该递信号，也不该刷日志。"""
+    rig = _ReclaimRig(tmp_path, monkeypatch)
+    logs: list[str] = []
+    rig.write(f"{os.getpid()}|stamp:777")
+    assert node_report.reclaim_node_id("dsw", logs.append) == 0
+    rig.alive["v"] = False
+    rig.write("4242|stamp:777")
+    assert node_report.reclaim_node_id("dsw", logs.append) == 0
+    assert rig.signals == []
     assert logs == [], logs

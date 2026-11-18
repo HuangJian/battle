@@ -6137,3 +6137,13 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   - **hub 侧同时段复测仍正常**（隧道 `401/1.08s`；hub 日志 18 条 `/relay/` 全是本机测试，节点 0 条）⇒ DSW 的出网对该组 anycast IP 是黑洞，修法在承载侧（`CFG.net_proxy` / 非 CF 入口 / 换机器），不在代码侧。
   - **验收**：relay 单测 14→17、node +2；文本断言口径 A **不抬格**（措辞断言换成 `kind`/返回值结构判据）。
 
+
+## §2026-11-18-goalnn-node-reclaim-on-cell-rerun（cell 重跑 = **先清场再起**：SIGINT 收旧节点 + 同进程 relay 遗留线程一起收）
+
+- **用户口径（2026-11-18 原话）**：「重复执行 `rollout.ipynb` 的 cell，应该把之前的所有进程杀掉，再重新起新进程。」上一轮只做了「告警」（`_warn_if_node_id_taken`），实测证明**不够**：`§goalnn-relay-unreachable-forensics` 的复盘里，DSW 现场那几行旧格式日志只能来自**另一个还活着的旧进程**（notebook 重启不杀子进程），而告警只是把它写进日志给人看。
+- **决定 1（跨进程，`common/node_report.reclaim_node_id`）**：`node_id` 的 pidfile 从「裸 pid」升级为 **`pid|身份`**，`run()` 启动第一步**先收掉**上一个 owner（`0` = 没有）。**先 `SIGINT` 不是客气**：对方的 `except KeyboardInterrupt` 会走 `finally`（`unregister` + 收 bun agent / cloudflared），而 SIGTERM/SIGKILL 没有这个待遇 —— 会留下占着 `agent_port` 的孤儿，新实例起来就用不了。`RECLAIM_GRACE_SEC=8` 还不退才 `SIGKILL`；Windows 无可靠 SIGINT（`CTRL_C_EVENT` 要同控制台）⇒ 直接 `taskkill /F /T`（连子进程；走 `run_capture` 免得闪黑窗），且**不白等**那 8s。
+- **决定 2（同进程，`remote/rollout_relay.stop_stale_links`）**：上一次 cell 若被**第二个 Ctrl-C** 打在 `finally` 上，`stop()` 没跑完 ⇒ daemon 轮询线程活下来，与本次的通道**抢同一个 hub 队列**（任务随机分给两边、回执各走各的 rid，表面成功、一半结果来自旧代码）。daemon 线程只能同进程收 ⇒ `RelayLink.start()` 起线程**前**先扫 `_LIVE_LINKS` 叫停遗留链接（只设停止位、`join` 上限 1s，硬等只会拖住新通道）。
+- **身份核验（为什么要，而不是「pid 相同就杀」）**：pid 会被系统回收，给陌生进程递 SIGINT 最坏能打断一台机器上无关的训练 / kernel。`proc_identity()` = Linux `/proc/<pid>/stat` 第 22 字段（启动戳，快、不起子进程）→ 没有 `/proc` 的平台回落 `common.instance_lock.proc_cmdline`（Windows wmic/CIM、macOS 读不到即空）。**对不上就不动手**，只打一行说明；旧格式裸 pid（身份为空）同样只告警 —— 本次启动把它重写成新格式，下一次重跑即生效。
+- **验收（真机 + 单测）**：本机 Windows 实测 ① 真子进程 `pid=24552` 被 `taskkill /F /T` 收掉、1.5s 返回、pidfile 改写成本进程；② 身份写错 / 旧格式裸 pid 两种反证**都不动手、子进程还活着**。单测：`test_rollout_node.py` 5 例（先 SIGINT / SIGINT 被无视才 SIGKILL / pid 复用不动手 / 旧格式只告警 / 自己的 pid 与死 owner 静默）+ `test_rollout_relay.py` 2 例（扫 `_LIVE_LINKS` / `start()` 先清场）。门禁 `NN_GATE_SKIP_E2E=1` → **6079 passed, 10 skipped**（首轮两条 `test_hub_push_dispatch` / `test_remote_iter` 红，单跑绿 ⇒ xdist 抖动，复跑全绿）。
+- **风险与边界**：① 目标是**上次会话的 kernel** 时，SIGINT 等于替它「中断那个 cell」—— 这正是用户要的，但**不能**在别人正跑训练时误伤 ⇒ 全部动作以身份核验为前置；② `SIGKILL` 分支会留孤儿子进程（日志明说「手动 kill 后重跑」）；③ 同一个 kernel 里 cells 无法真正并发（Jupyter 排队）⇒ 决定 2 只覆盖「被双 Ctrl-C 打断」这条窄路；④ 之前记账的 `rollout.ipynb` `NO_PROXY` 窄口**仍未修**。
+- **代码** → `common/node_report.py`（`proc_start_stamp` / `proc_identity` / `read_node_owner` / `write_node_owner` / `reclaim_signal` / `reclaim_kill` / `reclaim_node_id`；`rollout_node.py` 已顶 1000 行预算）· `remote/rollout_relay.py`（`_LIVE_LINKS` / `stop_stale_links` / `RelayLink.start|stop`）· `remote/rollout_node.py`（启动第 2 步清场）· `ipynb/rollout.ipynb`（排查表：自动清场两行日志 + 身份核验口径）· 文 → `docs/nn/remote-transport.md` §159.2。
