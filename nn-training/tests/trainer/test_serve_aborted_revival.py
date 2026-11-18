@@ -87,6 +87,11 @@ class _FlakyLoop:
         self._consec_fail = 0
         _FlakyLoop.instances.append(self)
 
+    @property
+    def leg_aborted(self) -> bool:
+        """死腿判决的公开读数：`_leg_abort` 私有（`_revive_hygiene` 按槽位清它），读数走这里。"""
+        return self._leg_abort
+
     def _setup(self) -> None:
         self.setups += 1
 
@@ -276,7 +281,7 @@ def test_aborted_course_revives_on_marker_bump(
 
     assert rep.courses["bad"]["state"] in ("ready", "running")
     assert rep.courses["bad"]["rounds_done"] >= 2  # ★ W3：复活后真的续跑（不是立再死）
-    assert _FlakyLoop.instances[-1]._leg_abort is False  # ★ W3：判决态已清零
+    assert _FlakyLoop.instances[-1].leg_aborted is False  # ★ W3：判决态已清零
     assert _FlakyLoop.instances[-1].finishes == []  # 不是「一轮假收官」
     assert not rep.skipped and not rep.skipped_at  # 复活成功即摘名
 
@@ -309,7 +314,7 @@ def test_aborted_course_revives_via_skipped_channel(
     assert rep.courses["bad"]["rounds_done"] >= 2  # ★ 复活后连续两轮仍活（W3）
     assert calls == ["bad"]  # 没重走 open_course（课已开、只是被停腿）
     assert len(_FlakyLoop.instances) == 1  # 没重建引擎（热复用）
-    assert _FlakyLoop.instances[-1]._leg_abort is False
+    assert _FlakyLoop.instances[-1].leg_aborted is False
 
 
 # ─────────────────── W4：同拍只复活一次（不双入队） ───────────────────

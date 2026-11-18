@@ -7359,3 +7359,8 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   （`formula` / `builtin`）、`DelivererProcess.child()`、`StreamCollector.alpha_started`；
   其余为公开门面替换与纯判据调用移出 assert。留 `_TASK_PACK_TRIGGERS`（清单即契约）与
   `_p1_waiting`（计数器对称性白盒）各 1。全文 → `docs/nn/engineering.md` §172。
+- **2026-11-18（G5 第三十四批：轮级连击与假引擎死腿态）**：`test_loop_round.py` 5 → 0、
+  `test_serve_aborted_revival.py` 5 → 3（G5 236 → **229**，87 文件）。轮级 `_consec_fail`
+  复用已有的 `resume_state().consec_fail`；假引擎加 `leg_aborted` 公开读数（`_leg_abort`
+  保留给 `_revive_hygiene` 按槽位清账）；`_revive_hygiene` 的 `SimpleNamespace` 槽位契约
+  3 条刻意保留。全文 → `docs/nn/engineering.md` §173。

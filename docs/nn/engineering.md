@@ -25,6 +25,25 @@
 
 ---
 
+## §173 G5 第三十四批：轮级失败连击复用续跑读数 + 假引擎公开死腿态（2026-11-18）
+
+两个文件：`tests/worker/test_loop_round.py` **5 → 0**、
+`tests/trainer/test_serve_aborted_revival.py` **5 → 3**（G5 **236 → 229**，88 → 87 文件）。
+
+- 轮级失败连击（`_consec_fail`）**没有新开读数**：`resume_state().consec_fail` 早已是
+  这一格的公开面（`trainer/loop_lifecycle.py::resume_state`，字段名就是 `consec_fail`），
+  用例只是走了它。`_bare_loop` 用 `__new__` 拼骨架也成立——`resume_state()` 全走
+  `getattr` 兜底、无副作用。
+- `_FlakyLoop.leg_aborted`：测试替身自己的死腿态读数（`_leg_abort` 仍保留——它是
+  `_revive_hygiene` 按槽位清账的**契约面**，改名会让卫生函数静默跳过该替身）。
+
+**刻意留 3 处**：`test_revive_hygiene_clears_leg_state_and_only_this_course_context`
+用 `SimpleNamespace(_leg_abort=…, _remote_fail=…, _consec_fail=…)` 钉 `_revive_hygiene`
+**清哪些私有槽**——被测对象本身是 `SimpleNamespace`，私有槽名就是这条结构契约的输入，
+换成读数面反而测不到「按槽位清账」这件事。
+
+---
+
 ## §172 G5 第三十三批：三处状态读数 + 两处纯判据（2026-11-18）
 
 七个文件：`test_bc_dp.py` **4 → 0**、`test_reward_golden.py` **3 → 0**、
