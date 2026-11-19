@@ -20,7 +20,9 @@ import threading
 import time
 import urllib.error
 from collections.abc import Iterator
+from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from typing import Any
 
 import pytest
@@ -974,3 +976,102 @@ def test_reply_delivery_gives_up_after_budget_and_logs_once(
     assert len(calls) == rr.REPLY_TRIES, calls
     assert link.errors == 1
     assert len(logs) == 1, logs
+
+
+#: 一份 CF 边缘 5xx 的特征头（`server` + `cf-ray`）：证明死因行**没有**把「谁回的」丢掉。
+def _cf_headers() -> Message:
+    m = Message()
+    m["server"] = "cloudflare"
+    m["cf-ray"] = "a5cf302d0babae00-SJC"
+    return m
+
+
+def test_gateway_route_does_not_stop_the_other_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    """502/530 是**传输失败**，必须换下一条路由，且不能把这条坏路由记成「上次成功」。
+
+    2026-11-19 DSW 现场（`relay 轮询失败 … HTTP 502` 连刷 170 次）：旧实现把 HTTPError 一律当
+    「路由通了」⇒ 第一拍拿到 CF 的 502 就整条道判死、`_note_route` 还把坏腿钉成首选，
+    下一条腿（明明是好的）永远轮不到。
+    """
+    agent_log: dict = {}
+    agent_srv, agent_port = _fake_agent(agent_log)
+    hub_url, _state, hub_srv = _fake_hub([])
+    real_send = rr.http_pool.request
+    seen: list[str] = []
+
+    def _gateway_on_proxy(url: str, **kw: Any) -> tuple[int, bytes]:
+        if kw.get("no_proxy"):
+            seen.append("direct")
+            return real_send(url, **kw)
+        seen.append("inherit")
+        raise urllib.error.HTTPError(
+            url, 502, "Bad Gateway", _cf_headers(), BytesIO(b'{"error":1033}')
+        )
+
+    logs: list[str] = []
+    link = RelayLink(
+        hub_url=hub_url, token="t", node_id="n1", agent_port=agent_port, log=logs.append, workers=1
+    )
+    try:
+        monkeypatch.setattr(net_http, "bypass_proxy", lambda _u: False)
+        monkeypatch.setattr(rr.http_pool, "request", _gateway_on_proxy)
+        assert link._route_order() == ["inherit", "direct"]
+        answer = link._poll()
+        assert answer is not None and answer.get("local_port")
+        assert seen == ["inherit", "direct"], seen
+        assert link._route == "direct", "拿到网关码的那条腿不能当成「上次成功」"
+    finally:
+        link.stop()
+        hub_srv.shutdown()
+        agent_srv.shutdown()
+
+
+def test_gateway_failure_names_its_author(monkeypatch: pytest.MonkeyPatch) -> None:
+    """同一句 `HTTP 502` 有三个作者（代理 / CF 边缘 / hub 反代）——死因行必须带证据。
+
+    CF 的特征是 `server: cloudflare` + `cf-ray`，体里还有机读码（`error code: 1033`）。
+    把这些丢掉（旧实现读了 4KB 就扔），人只能在    「换域名 / 换机器 / 查 hub」之间瞎猜。
+    """
+
+    def _always_gateway(url: str, **kw: Any) -> tuple[int, bytes]:
+        raise urllib.error.HTTPError(
+            url, 530, "Origin DNS error", _cf_headers(), BytesIO(b'{"error":"1033"}')
+        )
+
+    link = RelayLink(
+        hub_url="http://127.0.0.1:9", token="t", node_id="n1", agent_port=9,
+        log=lambda _m: None, workers=1,
+    )
+    monkeypatch.setattr(rr.http_pool, "request", _always_gateway)
+    with pytest.raises(rr.RelayUnreachable) as exc:
+        link._poll()
+    text = str(exc.value)
+    # 按**证据字段**切（`；` / `（）` 是分隔符），不靠子串碰运气：
+    #   · 状态码与 CF 特征必须在场 —— 死因行不点名作者，人就只能在「代理/CF/hub」间瞎猜；
+    #   · 体前 120 字原样带上（`1033` 这个机读码在体里，别再让人去问 CF 要）。
+    fields = [f for f in text.replace("；", " ").replace("（", " ").replace("）", " ").split()]
+    assert {"530", "server=cloudflare"} <= set(fields), text
+    assert [f for f in fields if f.startswith("body=")] == ['body={"error":"1033"}'], text
+
+
+def test_channel_hub_url_follows_the_port_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """备用端口改写必须**交得出去**：注册打的就是这个地址。
+
+    2026-11-19 DSW：443 的 TLS 被中间层掐，通道自己改走 `:2096` 后长轮询在跑，而注册仍打
+    `CFG.hub_url` 的 `:443` ⇒ 恒 `handshake operation timed out`，连续多轮「★ 未注册」。
+    """
+    monkeypatch.setattr(
+        rr, "probe_hub", lambda *_a, **_k: (True, "预检行", {"alt_port": 2096, "routes": {}})
+    )
+    monkeypatch.setattr(rr.RelayLink, "start", lambda self: None)
+    monkeypatch.setattr(rr.RelayLink, "wait_local_port", lambda self, timeout=40.0: 8787)
+    ch = RelayChannel(
+        hub_url="https://hub.example.com", token="t", node_id="n1", agent_port=1,
+        log=lambda _m: None,
+    )
+    try:
+        assert ch.open("测试") == "http://127.0.0.1:8787/relay/n1"
+        assert ch.hub_url == "https://hub.example.com:2096", ch.hub_url
+        assert ch.link is not None and ch.link._route == "direct", "扫描只走过直连，就该钉直连"
+    finally:
+        ch.stop()

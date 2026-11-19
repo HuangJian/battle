@@ -663,7 +663,11 @@ def _start_cloudflared(
                 "cloudflared 安装失败（直连与镜像都不通）—— 可预置二进制后用 CFG.cloudflared_path 指路"
             )
             return None
-    cmd = [cf, "tunnel", "--url", f"http://localhost:{port}", "--no-autoupdate"]
+    # ★ origin 用 127.0.0.1 字面量，不用 `localhost`：cloudflared 是 Go 二进制，`localhost`
+    #   在本机解析出 `::1` 后只拨 IPv6 回环，而 agent（`Bun.serve` 缺省）与 hub 都只绑 IPv4
+    #   ⇒ 每条经隧道的请求都吃 `dial tcp [::1]:<port>: connectex: refused`，CF 回 502
+    #   （2026-11-19 现场：公网 10 发 8 个 502）。
+    cmd = [cf, "tunnel", "--url", f"http://127.0.0.1:{port}", "--no-autoupdate"]
     if protocol:
         cmd += ["--protocol", protocol]
     if edge_ip:
@@ -1058,7 +1062,7 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
         要打的是**本机回环**）。拿不到 ⇒ 本档放弃、URL 留空 —— 不拿错端口硬填。
         细节（起线程/等端口/失败清理）全在 `RelayChannel`，这里只管 link/url 两个变量。
         """
-        nonlocal link, url, relay
+        nonlocal link, url, relay, hub_url
         if not hub_configured:
             log(f"relay 通道候选（{reason}）—— hub 未配置（缺 HUB_IP/hub_url 或 HUB_TOKEN），跳过")
             return False
@@ -1070,8 +1074,13 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
                 workers=workers,
             )
         url = relay.supervise(reason)
-        if url:
-            link = LINK_RELAY
+        link = LINK_RELAY if url else link
+        # ★ 注册地址跟着**通道实际用的那个端口**走：443 的 TLS 被中间层按 SNI 掐掉时，
+        #   `probe_hub` 判 `port-blocked` 并当场把通道改到 `:2083/:2096`，而注册若仍打
+        #   `CFG.hub_url` 的 `:443` 就恒 `handshake operation timed out` —— 2026-11-19 DSW
+        #   现场「relay 就绪」与「★ 未注册」同屏的真因（改动前是两处故障拼在一起像两个 bug）。
+        #   改这一个变量 ⇒ 首注册、240s 重注册、横幅、注销全部自动跟随（单一真相）。
+        hub_url = relay.hub_url or hub_url
         return bool(url)
 
     if link == LINK_RELAY:

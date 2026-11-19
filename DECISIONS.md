@@ -6407,3 +6407,37 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   ③ 在 `_resize_locked` 里加「线程已准备退出」标志位（也能修 TOCTOU，但要在两个循环各加一份收尾协议，
   比「线程不自杀」复杂）。
 - **全文** → `docs/nn/remote-transport.md` §167。
+
+## §2026-11-19-goalnn-cloudflared-origin-ipv4（cloudflared 回源一律写 IPv4 字面量；换端口的改写必须交给注册）
+
+- **症状**：DSW 采样节点 relay 模式连续多轮接不上 hub。同一段日志里两件事同屏：
+  `relay 就绪（:2096 长轮询能通）` + `relay 轮询失败：HTTP 502`（3 分钟内 170 次）；
+  `注册失败: URLError: handshake operation timed out` ⇒ `★ 未注册`。此前五轮都在换域名 / 换机器 / 调代理。
+- **根因①（hub，502 的唯一来源）**：`cloudflared tunnel --url http://localhost:8787`。Go 把 `localhost`
+  解析成 `::1` 后只拨 IPv6 回环，而 hub 只绑 `127.0.0.1` ⇒ 每条回源 `dial tcp [::1]:8787: refused`，
+  CF 返回 **502**。取证：`127.0.0.1:8787/ping` = 401（hub 活着）、`[::1]:8787` = 连接被拒、
+  经隧道的 10 发并发 = **8×502 / 2×401**、cloudflared 日志 1080 条 `Unable to reach the origin service`、
+  `530` 与 cloudflared `Connection terminated` 同秒。⚠ `curl localhost` 会回落 v4 ⇒ 本机复现不出来。
+- **根因②（节点，永远注册不上）**：`probe_hub` 判 `port-blocked` 后 `RelayChannel` 只改自己的
+  `_args["hub_url"]`，`run()` 算出的 `hub_url` 仍原样喂给 `register()` ⇒ 长轮询在 `:2096`、注册恒打 `:443`
+  （被中间层按 SNI 掐）⇒ `handshake timed out`。
+- **根因③（诊断面）**：`_send` 把 502/504/52x/530 当「应答」——不换路由、还把坏路由记成「上次成功」。
+  同一文件里的预检早就把这些码归成「不通」，两份判据互相矛盾。
+- **裁定**：① 所有 spawn cloudflared 的地方（`dashboard/src/stack/hub.ts` · `specs.ts` ·
+  `remote/rollout_node.py` · `push_tunnel.py` · `push_bootstrap.py`）origin 一律写 `http://127.0.0.1:<port>`，
+  **禁 `localhost`**；② 新增 `RelayChannel.hub_url`（当前地址的唯一真相），`_open_relay` 里一句
+  `hub_url = relay.hub_url or hub_url` 让首注册 / 240s 重注册 / 横幅 / 注销四处全部跟随
+  （**不给三个调用点各包一层**：该文件 LOC=999 正压预算线，且单一真相本就该只有一个赋值点）；
+  ③ `_send` 把网关码按
+  传输失败处理（换路由、不记 route、全崩时死因行带 `server`/`cf-ray`/响应体前 120 字）；
+  ④ 换端口时钉 `direct`（扫描只验过直连那条）。
+- **护栏**：`tests/remote/test_rollout_relay.py` +3（网关码换路由 / 死因行点名 CF / `hub_url` 跟随改写）·
+  `tests/remote/test_rollout_node.py` +1（**整条 `run()`** + 假通道换端口 ⇒ 注册与注销都打 `:2096`）与
+  `_start_cloudflared` 参数断言（`http://127.0.0.1:8443`）· `dashboard/tests/training-multi-course.test.ts`
+  断言 `http://127.0.0.1:<hub>` 且不得出现 `//localhost:`。
+- **真机复测**：新隧道 `:443`/`:2096` 各 6 发并发 **0 个 502**；带 token `/ping` 两端口 `200`；
+  `/relay/dsw/_poll?wait=0` → `{"req": null, "local_port": 8787}`。
+- **被否决**：① 换域名 / 换机器 / 配代理（三个都治不了「回源拨错地址」）；② 让 hub 再绑 `::1`
+  （能救当下，但把「地址该写谁」这条规矩藏起来，Linux 上 `Bun.serve` 只绑 v4 时还会再犯）；
+  ③ 把备用端口扫描改成多路由（扫的是端口是否被掐，路由是另一维，混在一起判词会糊）。
+- **全文** → `docs/nn/remote-transport.md` §168。

@@ -356,7 +356,11 @@ export async function stepCloudflared(cfg: RlConfig, noTunnel = false): Promise<
         cfBin,
         'tunnel',
         '--url',
-        `http://localhost:${hubPort}`,
+        // ★ 必须是 127.0.0.1，不能写 `localhost`：cloudflared 是 Go 二进制，`localhost`
+        //   在本机解析出 `::1` 后**直接拨 IPv6 回环**，而 hub 只绑 `127.0.0.1` ⇒ 每条经隧道的
+        //   请求都吃 `dial tcp [::1]:8787: connectex: refused`，CF 把 502 回给节点。
+        //   2026-11-19 DSW 现场：公网 10 发 8 个 502、cloudflared 日志 1080 条 origin 不可达。
+        `http://127.0.0.1:${hubPort}`,
         '--metrics',
         `127.0.0.1:${metricsPort}`,
         '--logfile',

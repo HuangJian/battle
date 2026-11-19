@@ -6,6 +6,98 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §168 DSW 接不上 relay 的真因：cloudflared 回源写 `localhost` 被解析成 `::1`（502），且换端口后注册仍打 443（2026-11-19）
+
+**症状（用户 notebook 日志 + 本机取证，同一时刻两件事同屏）**：
+
+```
+[20:12:48] 预检 → TLS 443 全 timeout；备用端口 :2096 通（ok）⇒ 本次改走 :2096
+[20:12:50] relay 就绪：url=http://127.0.0.1:8787/relay/dsw        ← 长轮询**能通**
+[20:12:50] relay 轮询失败（hub=…:2096，1.7s）：HTTP 502
+[20:13:06] 注册失败: URLError: <urlopen error _ssl.c:989: The handshake operation timed out>
+[20:16:14] 轮询 累计 20/30/40…170 次：HTTP 502 → HTTP 530
+```
+
+看起来是「隧道烂 + 注册烂」两个故障，五轮都在换域名 / 换机器 / 调代理。实际**两个各自独立的 bug**，
+只有一个在 hub 侧：
+
+### 根因 ①（hub 侧，502 的唯一来源）：`--url http://localhost:8787`
+
+`cloudflared` 是 Go 二进制，`localhost` 在本机解析出 `::1` 后**只拨 IPv6 回环**，而 hub 绑的是
+`127.0.0.1`（`netstat` 只有 `TCP 127.0.0.1:8787 LISTENING`）。于是每一条回源都是：
+
+```
+ERR Unable to reach the origin service … dial tcp [::1]:8787: connectex:
+    No connection could be made because the target machine actively refused it.
+```
+
+CF 把它翻成 **502** 回给节点。本机取证读数：
+
+| 探测 | 读数 |
+|---|---|
+| `curl http://127.0.0.1:8787/ping` | `401`（1.9ms，hub 活着） |
+| `curl http://[::1]:8787/ping` | `curl: (7) Failed to connect … Could not connect` |
+| `curl http://localhost:8787/ping` | `401`（curl 会 Happy-Eyeballs 回落 v4 ⇒ **掩盖**了问题） |
+| 经公网隧道 `:2096/ping` **10 发并发** | **8×502 / 2×401** |
+| cloudflared 日志 | `Unable to reach the origin service` **1080 条**，`12:12Z` 起随 16 条道起跳 |
+| 旧的 `:2096` 预检为何曾报 `ok` | 那 2/10 的成功就是 `ok` 的来源 —— 预检**单发**，天然看不见 80% 的失败率 |
+
+`530` 是同一件事的另一面：cloudflared 的 control stream 被掐（日志 `Connection terminated`
+`12:16:14Z`，与节点的 530 突发**同一秒**），边缘重新注册前的那几秒没有活隧道。
+
+**修法**：所有 spawn cloudflared 的地方，origin 一律写 **IPv4 字面量**
+（`dashboard/src/stack/hub.ts` · `dashboard/src/stack/specs.ts` ·
+`remote/rollout_node.py` · `remote/push_tunnel.py` · `remote/push_bootstrap.py`）。
+不是「换个域名」也不是「换机器」——hub 一个字节都不用动。修后实测：同一条新隧道 `:443` 与
+`:2096` 各 6 发并发 **0 个 502**，带 token `/ping` 两端口都 `200`，
+`/relay/dsw/_poll?wait=0` 回 `{"req": null, "local_port": 8787}`。
+
+⚠ `curl localhost` 会回落 v4、`cloudflared` 不会 ⇒ **本机复现不出来**，只能看 cloudflared 日志里的
+`[::1]`。判据钉在代码里，别再用 `localhost` 试运气。
+
+### 根因 ②（节点侧，永远注册不上的真因）：换端口的改写没交给注册
+
+`probe_hub` 判 `port-blocked` 后，`RelayChannel.open` 只改**自己**的 `_args["hub_url"]`，而
+`run()` 开头算出的 `hub_url` 原样传给了 `register()` ⇒ 长轮询在 `:2096` 上跑，注册恒打
+`:443`（被中间层按 SNI 掐）⇒ `handshake operation timed out`，`★ 未注册` 一直挂着。
+**注册吃不到通道的改写**，所以「通道就绪」与「未注册」能同时成立。
+
+**修法**：`RelayChannel.hub_url` 属性（当前地址的唯一真相）+ `_open_relay` 里**一句**
+`hub_url = relay.hub_url or hub_url` —— 首注册 / 240s 重注册 / 横幅 / 注销四处全部跟随，
+非 relay 通道根本不进这个闭包（原样不动）。之所以写成「改一个局部变量」而不是「给三个调用点
+包一层纯函数」：`rollout_node.py` 的 LOC 正好压在 1000 预算线上（999），任何 +1 行都要靠拆模块
+偿还；而「同一份地址只有一个真相」本来就该由一个赋值点表达。
+
+### 根因 ③（诊断面）：`_send` 把网关码当「应答」
+
+`_probe_one_route` 早就把 502/504/52x/530 归成 `gateway-*`（不算通），而 `_send` 里
+`except HTTPError: self._note_route(route); raise` —— 一是**不换路由**，二是把这条**坏**路由
+记成「上次成功」，之后每一拍先撞它。现在网关码按**传输失败**处理：换下一条路由、不记 route、
+全崩时把 `server` / `cf-ray` / 响应体前 120 字塞进死因行。
+
+> 最后一条尤其值钱：`HTTP 502` 有三个作者（平台代理 / CF 边缘 / hub 反代），旧实现读了 4KB
+> 就扔掉 ⇒ 五轮排查里没有一条读数能区分它们。现在的死因行长这样：
+> `inherit=HTTP 502（server=cloudflare；cf-ray=a5cf…；body={"error":1033}）`。
+
+### 单测
+
+`tests/remote/test_rollout_relay.py` +3：网关码必须换路由且不记 route · 死因行带 `server=cloudflare`
+与机读码 · `RelayChannel.hub_url` 跟随端口改写（并钉 `direct`——扫描只验过直连那条）。
+`tests/remote/test_rollout_node.py` +1：**整条 `run()`** 跑一遍（假通道把端口改到 `:2096`），
+断言注册**和**注销都打 `:2096` —— 只有真跑才能证明「改一处、四处跟随」。
+`dashboard/tests/training-multi-course.test.ts`：`cloudflaredSpec` 断言 `http://127.0.0.1:<hub>` 且**不得**
+出现 `//localhost:`。`nn-training/tests/remote/` 全量 2610 例绿。
+
+### 边界
+
+* 绑定面没动：hub 仍只绑 `127.0.0.1`（隧道回源本来就是本机），改的是**回源怎么写地址**。
+* `localhost` → `::1` 这条在 Linux 云机上同样成立（`Bun.serve` 缺省绑 `0.0.0.0`，不带 v6），
+  所以节点侧 `--url` 一起改了，不只修 DSW。
+* 备用端口回退仍由 `probe_hub` 决定；本节的 ②③ 只是让它「改完能交出去」「坏腿不粘住」。
+* 隧道重开必然换域名（quick tunnel 语义）⇒ 节点的 `CFG.hub_url` 要跟着改；这不是本节能消掉的成本。
+
+决策 → `DECISIONS.md §2026-11-19-goalnn-cloudflared-origin-ipv4`。
+
 ## §167 全量门禁 e2e eval 族「同秒 workers-gone / 30s 零局」：eval 池缓存了 `eval_arbiter()` 的旧实例（2026-11-19）
 
 **症状**：全量跑（xdist）里 e2e 的 eval 用例**每次红不同一条**、单跑恒绿：`test_it_eval_deferred`

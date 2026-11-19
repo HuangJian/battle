@@ -1306,7 +1306,10 @@ def test_cf_cmd_carries_compat_flags(monkeypatch: pytest.MonkeyPatch, tmp_path: 
         "/bin/cloudflared",
         "tunnel",
         "--url",
-        "http://localhost:8443",
+        # ★ 必须是 IPv4 回环字面量：`localhost` 会被 cloudflared（Go）解析成 `::1` 后只拨
+        #   IPv6 回环，而 agent（`Bun.serve` 缺省绑 0.0.0.0）只在 IPv4 上 ⇒ origin 恒
+        #   `connection refused` ⇒ CF 回 502（2026-11-19 现场：公网 10 发 8 个 502）。
+        "http://127.0.0.1:8443",
         "--no-autoupdate",
         "--protocol",
         "http2",
@@ -1720,3 +1723,107 @@ def test_no_reclaim_for_own_pid_or_dead_owner(
     assert node_report.reclaim_node_id("dsw", logs.append) == 0
     assert rig.signals == []
     assert logs == [], logs
+
+
+# ---------------------------------------------------------------- 注册地址跟随通道
+
+
+def test_register_uses_the_port_the_relay_actually_used(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """relay 换端口之后，**注册必须打通道实际在用的那个口**（不是 `CFG.hub_url`）。
+
+    2026-11-19 DSW 现场：443 的 TLS 被中间层按 SNI 掐，`probe_hub` 判 `port-blocked` 并把
+    通道改到 `:2096`（长轮询真的在跑），而注册仍打 `CFG.hub_url` 的 `:443` ⇒ 恒
+    `URLError: handshake operation timed out`，节点连续多轮「★ 未注册」。
+    两件事同屏，看起来像两个故障，其实只有一个根因：注册没吃到通道的改写。
+
+    这里走**整条 `run()`**（不是纯函数）：唯一真相是 `_open_relay` 里那一句
+    `hub_url = relay.hub_url or hub_url`，它的消费方是首注册 / 240s 重注册 / 横幅 / 注销
+    四处 —— 只有真跑一遍才能证明「改一处、四处都跟随」。
+    """
+    code_dir = tmp_path / "code"
+    entry = code_dir / "tools" / "agent" / "sampler-agent.ts"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("// fake\n", encoding="utf-8")
+    posts: list[str] = []
+    logs: list[str] = []
+
+    class _Relay:
+        """假通道：`supervise` 第一拍就把端口改到备用口（真实现里是 `probe_hub` 干的）。"""
+
+        def __init__(self, **kw: Any) -> None:
+            self.hub_url = str(kw["hub_url"])
+
+        def supervise(self, _reason: str = "") -> str:
+            self.hub_url = "https://hub.example.com:2096"
+            return "http://127.0.0.1:8787"
+
+        def alive(self) -> bool:
+            return True
+
+        def stop(self) -> None:
+            pass
+
+        def stats_line(self) -> str:
+            return "relay fake"
+
+    def _register(**kw: object) -> dict:
+        posts.append(str(kw["hub_url"]))
+        return {
+            "ok": True,
+            "status": 200,
+            "action": "created",
+            "body": {},
+            "capabilities": [],
+            "error": None,
+            "kind": "",
+        }
+
+    unregs: list[str] = []
+
+    def _unregister(_urlopen: object, hub_url: str, *_a: object, **_k: object) -> dict:
+        unregs.append(str(hub_url))
+        return {"ok": True, "error": ""}
+
+    monkeypatch.setattr(rn, "unregister", _unregister)
+
+    monkeypatch.setattr(rn, "probe_cloud_env", lambda: "test")
+    monkeypatch.setattr(rn, "resolve_link", lambda *_a: rn.LINK_RELAY)
+    monkeypatch.setattr(rn, "RelayChannel", _Relay)
+    monkeypatch.setattr(rn, "_slot_count", lambda _n: (1, "test"))
+    monkeypatch.setattr(rn, "registry_url", lambda *_a: "https://hub.example.com")
+    monkeypatch.setattr(rn, "_ensure_bun", lambda *_a: "/bin/bun")
+    monkeypatch.setattr(rn, "_start_agent", lambda *_a: _Proc(None))
+    monkeypatch.setattr(rn, "_wait_auth", lambda *_a, **_k: "ak")
+    monkeypatch.setattr(rn, "_ping", lambda *_a, **_k: {"codeHash": "0123456789abcdef"})
+    monkeypatch.setattr(rn, "_sh", lambda *_a, **_k: SimpleNamespace(stdout="1.4.4"))
+    monkeypatch.setattr(rn, "_try_register_once", _register)
+    # 清场（`reclaim_node_id`）与注册地址无关：它会写共享 pidfile，跑完留下的记录会被
+    # 下一次运行当成「上一个节点还活着」而白等 8s（本用例曾因此固定耗时 10.5s）。
+    monkeypatch.setattr(rn.node_report, "reclaim_node_id", lambda *_a: 0)
+    # 假时钟：`max_session_hours` 缺省 0 ⇒ deadline=当前；`time.time()` 的粒度（Windows 15.6ms）
+    # 会让「第一拍就超时」偶尔判假。让 sleep 把时钟推过去，第二拍必 break（零真实等待）。
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(rn.time, "time", lambda: clock["now"])
+    monkeypatch.setattr(
+        rn.time, "sleep", lambda sec: clock.__setitem__("now", clock["now"] + sec + 1.0)
+    )
+
+    rn.run(
+        {
+            "code_dir": str(code_dir),
+            "link": "relay",
+            "node_id": "n",
+            "hub_url": "https://hub.example.com",
+            "hub_token": "tok",
+            "agent_port": 8443,
+            "workers": 1,
+        },
+        logs.append,
+        lambda key, default: {"HUB_TOKEN": "tok"}.get(key, default),
+    )
+    assert posts == ["https://hub.example.com:2096"], posts
+    # 注销（`finally`）是同一个 `hub_url` 的另一个消费方：它必须也打 2096，
+    # 否则 hub 侧会按 443 的旧地址留一条僵尸节点。
+    assert unregs == ["https://hub.example.com:2096"], unregs

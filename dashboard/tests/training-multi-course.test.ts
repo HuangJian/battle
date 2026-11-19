@@ -551,9 +551,12 @@ describe('P3 共享单隧道', () => {
     const spec = cloudflaredSpec(cfg, { pid: 1, course: 'course-b', slot: 1 })
     expect(spec.course).toBe('')
     expect(spec.cmd.join(' ')).toContain(`127.0.0.1:${sharedTunnelMetricsPort(cfg)}`)
-    expect(spec.cmd.join(' ')).toContain(`localhost:${sharedHubPort(cfg)}`)
+    // origin 必须是 IPv4 回环字面量：`localhost` 会被 cloudflared（Go）解析成 `::1`，
+    // 而 hub 只绑 127.0.0.1 ⇒ 每条经隧道的请求 502（2026-11-19 DSW 现场）。
+    expect(spec.cmd.join(' ')).toContain(`http://127.0.0.1:${sharedHubPort(cfg)}`)
+    expect(spec.cmd.join(' ')).not.toContain('//localhost:')
     // 旧形状的 per-course 端口不再出现（槽位 1 的 hub/metrics 口与共享地址不同）
-    expect(spec.cmd.join(' ')).not.toContain(`localhost:${slotPort(cfg, 1, 'hub')}`)
+    expect(spec.cmd.join(' ')).not.toContain(`127.0.0.1:${slotPort(cfg, 1, 'hub')}`)
     expect(spec.cmd.join(' ')).not.toContain(`127.0.0.1:${slotPort(cfg, 1, 'metrics')}`)
   })
 

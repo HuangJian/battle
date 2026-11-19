@@ -62,8 +62,10 @@ def start_cloudflared(
     import re
 
     log_f = open(log_path, "w", encoding="utf-8")
+    # 127.0.0.1 字面量：`localhost` 会被 cloudflared（Go）解析成 `::1` 后只拨 IPv6 回环，
+    # 而本机服务绑 IPv4 ⇒ origin 恒 connection refused ⇒ CF 回 502（2026-11-19 现场）。
     proc = subprocess.Popen(
-        [cf_bin, "tunnel", "--url", f"http://localhost:{port}", "--logfile", str(log_path)],
+        [cf_bin, "tunnel", "--url", f"http://127.0.0.1:{port}", "--logfile", str(log_path)],
         stdout=log_f,
         stderr=subprocess.STDOUT,
     )

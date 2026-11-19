@@ -158,6 +158,34 @@ def _err_text(e: BaseException) -> str:
     return text[:120]
 
 
+def _gw_detail(e: urllib.error.HTTPError) -> str:
+    """网关类失败 → 一句「**谁**回的这个 5xx」。
+
+    为什么必须有它（2026-11-19 DSW，查了五轮的根因）：`HTTP 502` 有三个完全不同的作者 ——
+    本机/平台代理、CF 边缘（回源不可达）、hub 自己的反代 —— 而三者的修法互不相干。
+    唯一能当场分开的证据就在响应里：CF 会带 `server: cloudflare` 与 `cf-ray`（体里还有
+    `error code: 1033` 这类机读码），代理通常只有自己的 `via`/`server`。**别把这个丢掉**
+    （`_probe_one_route` 的旧实现读了 4KB 又扔掉，于是日志只剩「HTTP 502」四个字）。
+    """
+    bits: list[str] = []
+    try:
+        hdrs = getattr(e, "headers", None) or {}
+        for key in ("server", "cf-ray", "via", "x-cache"):
+            val = hdrs.get(key) if hasattr(hdrs, "get") else None
+            if val:
+                bits.append(f"{key}={str(val)[:32]}")
+    except Exception:
+        pass
+    try:
+        raw = e.read() or b""
+        text = " ".join(raw[:400].decode("utf-8", "replace").split())
+        if text:
+            bits.append(f"body={text[:120]}")
+    except Exception:
+        pass
+    return f"（{'；'.join(bits)}）" if bits else ""
+
+
 def _route_open(route: str, req: Any, timeout: float):
     """按路由发一条请求，**两条路都并行竞速多地址**：`inherit` 挂进程代理，`direct` 摘掉代理。
 
@@ -239,7 +267,7 @@ def _probe_one_route(route: str, url: str, token: str, timeout: float) -> tuple[
     except urllib.error.HTTPError as e:  # 401/404 是**应答**：路由通了；502/530 不是
         ms = (time.monotonic() - t0) * 1000
         if e.code in GATEWAY_CODES:
-            return f"gateway-{e.code}", f"{route}=网关 {e.code}（{ms:.0f}ms）"
+            return f"gateway-{e.code}", f"{route}=网关 {e.code}（{ms:.0f}ms）{_gw_detail(e)}"
         return f"http-{e.code}", f"{route}=HTTP {e.code}（{ms:.0f}ms）"
     except Exception as e:
         return "fail", f"{route}={_err_text(e)}"
@@ -832,8 +860,17 @@ class RelayLink:
                     bucket="relay",
                     no_proxy=(route == "direct"),
                 )
-            except urllib.error.HTTPError:
-                # 4xx/5xx 是**应答**：路由通了（401 = 令牌、404 = hub 没升级），别换路由重试。
+            except urllib.error.HTTPError as e:
+                code = int(getattr(e, "code", 0) or 0)
+                if code in GATEWAY_CODES:
+                    # 网关类（502/504/52x/530）**不是应答**，是中间层/CF 边缘在说「我没把请求
+                    # 送到 hub」。把它当应答有两个后果，2026-11-19 DSW 现场两个都踩了：
+                    #   ① 这一拍直接失败、**不换路由**（另一条路由可能是好的）；
+                    #   ② `_note_route` 把这条坏路由记成「上次成功」，之后每一拍都先撞它。
+                    # 判据与预检同源：`_probe_one_route` 早就把 gateway 归到「不通」那一栏。
+                    fails.append(f"{route}=HTTP {code}{_gw_detail(e)}")
+                    continue
+                # 其余 4xx/5xx 是**应答**：路由通了（401 = 令牌、404 = hub 没升级），别换路由重试。
                 self._note_route(route)
                 raise
             except urllib.error.URLError as e:
@@ -1032,6 +1069,10 @@ class RelayChannel:
             link = RelayLink(**self._args)
             facts["routes"] = {}  # 旧路由结论属于 443，换端口后作废（不能拿去 pin 路由）
             ok = True
+            # 备用端口的判定**只走过 direct**（`_port_sweep`），而默认顺序是 inherit 优先
+            # ⇒ 不钉就会让第一拍先撞那条可能已经死掉的代理，把「换端口就够」白烧成一个长轮询
+            # 超时。钉的正是扫描已验证过的那条（它失败时 `_send` 仍会回落 inherit）。
+            link.pin_route("direct")
             self.log(f"  → 本次改走 :{alt}（{link.hub_url}）")
         picked = _pick_route(facts) if ok else ""
         if picked:
@@ -1056,6 +1097,17 @@ class RelayChannel:
         self.link = link
         self.log(f"relay 就绪：url={url}（hub 调本机回环，节点侧不需要任何入站端口）")
         return url
+
+    @property
+    def hub_url(self) -> str:
+        """**当前**的 hub 地址（含 `probe_hub` 自动改写过的备用端口）。
+
+        ★ 注册必须用它，不能用 `run()` 开头算出来的那一个。DSW 的中间层在 443 上按 SNI 掐 TLS，预检会把通道自己改走 `:2083/:2096`，
+        但注册当时仍打 `CFG.hub_url` 的 `:443` ⇒ **长轮询在跑、注册恒
+        `handshake operation timed out`**，日志连续多轮「★ 未注册」。同一份地址必须只有
+        一个真相：改端口的人（本类）负责把它交出去。
+        """
+        return str(self._args.get("hub_url") or "")
 
     @property
     def url(self) -> str:
