@@ -1459,7 +1459,7 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 | `remote/hub_client.py` | `publish_job` 56 参 | `PublishSpec` | B3 | **✅ 已修**：签名只剩 `(spec, *, log=_log)` |
 | `worker/ppo/engine.py` | 598 行 / 17 参 / 全局 RNG | `PPOLoop` + `Runtime` | B6/B8 | **✅ 已修**：`ppo_update` 是 85 行薄适配器 + `PPOContext` |
 | `worker/ppo/engine.py` 的 `a_hold` 嗅探 | 运行时类型判断 | `ActionSpace` Enum | B5 | **✅ 已修**：`common/contracts.py` 唯一来源 + 字节初筛门禁 |
-| `hub/queue.py` | 8 基类混入 | `CourseTable` / `WorkerBoard` / `Dispatch` + 同名转发属性 | B7 | **部分（2026-11-19）**：21 个状态字段已搬进三个协作者（`_HubQueue.__dict__` 不再持有；`_solo` 借表语义 / `_adopt_solo` 整表搬运 / 5 把旁路锁顺序逐字不变），组合类保留转发属性，138 个域方法与测试调用点未改。**仍是 8 混入 + Auth**（9 bases / MRO 14）：壳收敛与 §3 目标形状（7 bases）和 §6 DoD（≤4）冲突，按 §225 挂起 |
+| `hub/queue.py` | 8 基类混入 | `CourseTable` / `WorkerBoard` / `Dispatch` + `QueueScope` + 同名转发壳 | B7 | **✅ 已修（2026-11-19）**：bases **9 → 7**（6 混入 + Auth）、MRO **14 → 12**；21 个状态字段搬进 `CourseTable` / `WorkerBoard` / `Dispatch`（组合类只留转发属性），课程表 / 路由 / 停机 / 发现面 26 个方法搬进 `QueueScope` 协作者（组合类留同名壳）。锁对象与加锁顺序逐字不变，`_solo` 借表 / `_adopt_solo` 整表搬运 / 138 个域方法与测试调用点未改。`queue*.py` 4 035 → **4 207 行**（+172 全是转发壳；七个域文件本身 −38）。实现记录见 `docs/nn/engineering.md` §225 |
 | `hub/store.py`（`_JobStore`） | 六个域混入 + Auth | `Scheduler` / `LeaseBook` / `Ledger` + 转发壳 | B7 | **✅ 已修（2026-11-19）**：bases **7 → 4**（Wire / Results / Offline / Auth）、MRO **9 → 6**；调度 / 租约 / 账本三簇共 20 个状态字段与 62 个方法搬进协作者，组合类只留 64 个同名转发；唯一两相引用是 `Ledger.leases` 回填（构造顺序有断言） |
 | `trainer/loop_core.py` | 12 类混入组合 | 同上（编排层） | B7 | **部分**：12 → **4**（`RoundSteps`/`TrainingSteps`/`TrainingGuards`/`TrainingLifecycle`） |
 | `common/log.py` / `common/logutil.py` | 双时间戳 + 假声明 + 全局状态 | 统一格式 + `contextvars` | B2 | **✅ 已修**：`logutil.stamp()` 是唯一行格式（§143 把最后两份手拼也收了）、假声明已改正 |
@@ -1585,9 +1585,11 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
    ① ~~`_JobStore` 的调度/租约/账本三簇~~ **P1/P2/P4b 已落（2026-11-19）**：`Scheduler` /
    `LeaseBook` / `Ledger` 三个协作者 + 64 个转发壳，bases 7 → **4**、MRO 9 → **6**；
    `CourseTable` / `WorkerBoard` / `Dispatch`（P3/P4a）也已落地，`_HubQueue` 的 21 个状态
-   字段不再住组合类。**剩下的只有 `_HubQueue` 壳收敛**：§3 目标形状是 7 bases、§6 DoD 是
-   ≤4，二者矛盾；按 §9 停止条件挂起，先对齐设计再决定是否把 138 个域方法搬进协作者。
-   锁规则 L1–L5、测试迁移、DoD 复算与挂起理由见 `docs/nn/engineering.md` §224/§225；
+   字段不再住组合类。**`_HubQueue` 壳收敛也已落（S1/S3/S2，2026-11-19）**：`queue_discover`
+   并入 `queue_scope`（S1）、5 条私有断言提出 `assert`（S3）、`QueueScope` 切成协作者 +
+   26 个同名转发壳（S2）⇒ bases **9 → 7**、MRO **14 → 12**、hub 私有断言 **25 → 19**；
+   原稿的 ≤4 / ≤9 / ≤3 400 三个数字按 §9 重估为 ≤7 / ≤12 / ≤4 250（理由与最终读数见
+   `docs/nn/engineering.md` §225）；
    ② ~~`common/distribution.py`（1 434 物理行 / 线协议 + HTTP 客户端 + 权重下发 + 升级重启护栏
    四簇）~~ **第十刀已落（2026-11-19）**：升级/重启护栏整簇 12 名 → `remote/node_upgrade.py`
    （1 181 + 282 行），HTTP 漏斗改名公开的 `node_request`，G8 基线不变 + 新增「新家零 IO」断言；

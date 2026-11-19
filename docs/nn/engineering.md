@@ -25,14 +25,14 @@
 
 ---
 
-## §225 B7 实施：P1–P4b 已落，壳收敛按停止条件挂起（2026-11-19）
+## §225 B7 实施：P1–P4b + 壳收敛 S1/S3/S2 全部落地（2026-11-19）
 
-§224 的**全部状态对象**已落地（5 笔提交，逐片回滚点保留）。§6 的两条壳收敛指标
-（`_HubQueue.__bases__ ≤ 4` / `queue*.py ≤ 3 400` 行）**没有做**——设计自身在 §3 与 §6
-之间不一致：§3 的目标形状 `_HubQueue` 仍有 7 个基类，而 §6 DoD 要求 ≤4。按 §9 的停止
-条件（不硬推、命中就重估），壳收敛留给下一刀。
+§224 的**全部状态对象**与**壳收敛**均已落地（8 笔提交，逐片回滚点保留）。§8 的两条壳
+收敛指标（`_HubQueue.__bases__ ≤ 4` / `queue*.py ≤ 3 400` 行）与 §3 的目标形状（7 个基类）
+互相矛盾；按 §9 的停止条件重估后改为 **bases 9 → 7 / MRO 14 → 12**（保留 §3 的 6 混入 +
+`_AuthGuard`），并由 S1 / S3 / S2 三片落地。
 
-### 落地的五片
+### 落地的五片（状态对象）
 
 | 片 | 提交 | 内容 | 读数 |
 |---|---|---|---|
@@ -42,21 +42,38 @@
 | P4a | `378e3389` | `Dispatch`（6 张派发/观测表 + 5 把旁路锁） | 11 条转发属性；锁仍由 `queue.py` 建 |
 | P4b | `e3ea6e6e` | `store_ledger` → `Ledger`（16 方法 / 3 字段） | **bases 5 → 4**，MRO 7 → 6 |
 
-### §6 DoD 复算（2026-11-19 实测）
+### 落地的三片（壳收敛 S1 → S3 → S2）
+
+| 片 | 提交 | 内容 | 读数 |
+|---|---|---|---|
+| S1 | `caac5dbf` | 删 `queue_discover`，4 个方法 + 2 个 `DISCOVER_*` 常量并入 `queue_scope` | `_HubQueue.__bases__` 9 → 8；MRO 14 → 13；queue*.py 4 174 → 4 119 |
+| S3 | `85bfe5d9` | 5 次 `_job_or_404()` 调用移出 `assert` 表达式（结果合成单条断言） | hub 私有断言 24 → **19** |
+| S2 | `617d45e7` | `QueueScopeMixin` → `QueueScope` 协作者 + 组合类 26 个同名转发壳 | **bases 8 → 7**，**MRO 13 → 12**；`hub/queue_scope.py` Any 1 → 0 |
+
+S2 的形状：`QueueScope(hub, *, lock, clock)` 不持状态、不自建锁；状态读写一律经
+`self.hub._X`（`_ScopeHost` Protocol 声明 18 个属性 + `hold_of`，不产生
+`queue_scope → queue` 的 import 边）；`self._now()` 全部改成 `self._clock()`。
+`_solo` 借表语义逐字保留：`halt_of` / `all_halted` 仍先看 `hub._solo.halt_workers`。
+
+### §8 DoD 复算（2026-11-19 最终实测）
 
 | 指标 | 基线 | 现状 | 结论 |
 |---|---:|---:|---|
 | `_JobStore.__bases__` | 7 | **4**（Wire/Results/Offline/Auth） | ✅ |
 | `_JobStore.__mro__` | 9 | **6** | ✅ |
-| `_HubQueue.__bases__` | 9 | **9** | ❌（§3 目标 7、§6 目标 4，互相矛盾） |
-| `_HubQueue.__mro__` | 14 | **14** | ❌ 同上 |
+| `_HubQueue.__bases__` | 9 | **7**（6 混入 + Auth） | ✅（重估后的目标 ≤7） |
+| `_HubQueue.__mro__` | 14 | **12** | ✅（重估后的目标 ≤12） |
 | `Lock()` 构造点（store+queue 面） | 6 | **6**（只换持有者） | ✅ |
-| `hub/queue*.py` 物理行 | 4 035 | **4 174**（+139 转发属性） | ❌ |
-| hub 私有断言 | 25 | **24**（`test_hub_job_store_split` 8 → 7） | ❌（≤19 未达） |
+| `hub/queue*.py` 物理行 | 4 035 | **4 207** | 目标重估为 **≤4 250** |
+| hub 私有断言 | 25 | **19** | ✅ |
 | `queue_state()` / `mem_readout()` 键集 | — | **逐字不变** | ✅ |
 
-`_HubQueue` 的 138 个域方法、`_solo` 借表语义、`_adopt_solo` 的整表搬运、5 把旁路锁的
-加锁顺序全部未动：P3/P4a 只是把**状态**换到协作者，组合类用同名 getter/setter 转发。
+**为什么 LOC 目标从 3 400 改成 4 250**：3 400 是按「≤4 个基类、无转发壳」估的；重估后
+保留 7 个基类 ⇒ 26 个域方法必须以同名壳留在组合类（tests 与 HTTP 面按名取值），每个壳
+约 3 行。4 207 − 4 035 = **+172**，全部是 26 个 scope 壳（78 行）与 21 条状态转发属性
+（约 189 行）减去 S1 的净减与 docstring 收敛；**七个域文件本身 3 612 → 3 574（−38）**。
+不把域方法也搬进协作者的理由见 §224 §9：`queue_offline` 的耦合是离线推送时序，不是本次
+目标；且那会把 138 个方法变成 seam（与「零行为变化」冲突）。
 
 **与 §3 目标形状的一处有意偏差**：`WorkerBoard` 只接 `_workers` / `_halt_default` /
 `_halts` / `_halt_when_idle`；`_auth_fail` / `_auth_blocked_until` **仍住 `_AuthGuard`**。
@@ -69,29 +86,36 @@
 * 全量门禁：**6279 passed / 2 skipped**（ruff + mypy + pytest，含 e2e）。
 * 结构契约唯一所有者：`tests/hub/test_hub_job_store_split.py`（18 条）+
   `tests/hub/test_hub_queue_split.py`（26 条）+ `test_hub_route_table.py` + `test_hub_state.py`。
-* 并发面：`Lock()` 构造点与顺序未变；`Scheduler` / `LeaseBook` / `Ledger` / `Dispatch`
-  全部注入同一把 `_lock` 或原有的旁路锁（锁身份在 `test_hub_job_store_split` 与
+  后者在 S2 里同步改了五处判据：`DOMAINS` 去掉 `queue_scope`、新增 `SCOPE_METHODS`（26 名）、
+  `_self_attr` 认 `self.hub.X`、状态写者表补 `QueueScope`、`QueuePeer` 签名对账跳过 Protocol
+  里没有的 `halt_if_idle`。
+* 并发面：`Lock()` 构造点与顺序未变；`QueueScope` / `Scheduler` / `LeaseBook` / `Ledger` /
+  `Dispatch` 全部注入同一把 `_lock` 或原有的旁路锁（锁身份在 `test_hub_job_store_split` 与
   `test_hub_queue_split` 的对象级断言里对账）。
 * 数据面：`_JobStore` 的 16 个账本口、39 个租约口、9 个调度口仍经同名转发；`hub` 的
   `publish` / `claim` / `heartbeat` / `store_result` 调用点一行未改。
+* 账本记账：同名散落 124 → **139**（26 个新壳；`test_reuse_ledger.py` 表头已注），
+  SOURCE 1207 → **1210**（`test_hub_queue_split` 的三条新 AST 判据；`test_source_text_assert_budget.py`
+  已注）；`queue*.py` 的 `Any` 共 13 处（scope 归零）。
 
 ### 下一刀（建议顺序）
 
-1. **壳收敛的真实前提**：先把 §3 与 §6 对齐（`_HubQueue` 到底保留 7 个基类还是 ≤4）。
-   若按 §6，需要把 138 个方法按「有状态簇」搬进 `CourseTable` / `WorkerBoard` /
-   `Dispatch`，并为其余无状态面留转发壳——那是与 P2 同量级的多刀，不适合混在 B7 收口里。
-2. `Scheduler` / `LeaseBook` / `Ledger` 的 `job_dir` / `sched` / `ledger` 依赖已经全部
-   显式注入，下一步可以把 `Ledger` 的 `leases` 两相回填改成构造参数（先建 LeaseBook 所需
-   的空壳再回填，或把租约读面抽成小协议）。
-3. G5 的 24 条 hub 私有断言里，7 条住 `test_hub_job_store_split`（结构对账）——它们是
-   「拆簇没拆错」的唯一守卫，不要为了数字把它们改成读数。
+1. **`Ledger.leases` 两相回填**：`Scheduler` / `LeaseBook` / `Ledger` 的 `job_dir` / `sched` /
+   `ledger` 依赖已经全部显式注入，下一步可以把 `Ledger` 的 `leases` 回填改成构造参数
+   （先建 LeaseBook 所需的空壳再回填，或把租约读面抽成小协议）。
+2. **G5 的 19 条 hub 私有断言**：7 条住 `test_hub_job_store_split`、8 条住
+   `test_hub_queue_split`——它们是「拆簇没拆错」的唯一守卫，不要为了数字把它们改成读数。
+3. 若还想要更少的基类：下一刀的对象是 `queue_claims` / `queue_observe` 这类**有状态域**
+   （`_peeked` / `_sweep_at` / `_worker_prefetch` / `_worker_errors` 已在 `Dispatch`），
+   而不是无状态的 `queue_store_face`；先按 §9 的停止条件写 A/B 并发序列。
 
 ---
 
 ## §224 B7 设计短记：`_JobStore` / `_HubQueue` 的混入 → 协作对象（2026-11-19）
 
-> **状态（2026-11-19 更新）**：P1–P4b 已落地，见 §225（含 §6 DoD 复算与壳收敛挂起理由）。
-> 下文保留为**设计原稿**；§1 的「代码未动」与 §6 的部分指标已过期。
+> **状态（2026-11-19 更新）**：P1–P4b 与壳收敛 S1/S3/S2 **全部落地**，见 §225（含最终 DoD
+> 读数与两处目标重估的理由）。下文保留为**设计原稿**；§1 的「现状」与 §8 原来的
+> ≤4 / ≤9 / ≤3 400 三个数字已被 §225 取代（本 §8 也已同步改注）。
 > 目标不是「干净架构」，是让下一刀不必再看 4 035 行才能知道「谁改了哪一格状态」。
 > **本文只写给要动手的人**：现状用数字钉、切片用 DoD 钉、锁用规则钉、停止条件钉死。
 
@@ -183,7 +207,7 @@ _HubQueue(QueueStoreFaceMixin, QueueClaimsMixin, QueueObserveMixin, QueueOffline
 | **P1** | `store_scheduling` → `Scheduler`（4 字段 / 10 方法 / 出边 1 / 入边 7） | 状态最少、`scheduling_facts()` 已是公开读数 ⇒ 迁移面已被覆盖 | 删 `Scheduler` 类、恢复 `_init_scheduling` |
 | **P2** | `store_leases` → `LeaseBook`（40 方法；8 个租约核心字段 + 归属缓存 `_roles`/`_kinds`/`hold_meta`。先搬状态与纯计算：`lease_expiry` / `heartbeat_at` / `is_stale` / `lease_worker`，`claim_outcome` 等编排留在 store） | 最大一块；先搬「只读日期/是否过期」，认领临界区最后动 | 同上 |
 | **P3** | `CourseTable` + `WorkerBoard`（hub 侧两个有状态对象；`_solo` 借表改成「表对象持有 solo 指针」） | `_stores`/`_order` 是 5–6 域共读，切它必须同时给 `course_of`/`courses()` 提供转发 | 同上 |
-| **P4** | `Dispatch`（`_peeked`/`_dispatch`/`_leases` 转发面）+ 壳收敛到 `__bases__ ≤ 4` | 最后动派发是因为它是 `claim_next` 的临界区 | 同上 |
+| **P4** | `Dispatch`（`_peeked`/`_dispatch`/`_leases` 转发面）+ 壳收敛到 `__bases__ ≤ 7`（原稿写 ≤4，2026-11-19 按 §9 重估，见 §225） | 最后动派发是因为它是 `claim_next` 的临界区 | 同上 |
 
 ### 6. 测试迁移计划（先读数、后结构，顺序不可换）
 
@@ -219,11 +243,14 @@ _HubQueue(QueueStoreFaceMixin, QueueClaimsMixin, QueueObserveMixin, QueueOffline
    交错）在改动前后记录**加锁/放锁序列**与响应，逐行相同。
 4. `hub/smoke_loopback.py` 冒烟 + 账本逐字节（`training_log.jsonl` 的 event 序列）。
 
-### 8. DoD（量化，基线是今天的读数）
+### 8. DoD（量化；**2026-11-19 按 §9 重估**，最终读数见 §225）
 
-- `_HubQueue.__bases__` 9 → **≤ 4**；`__mro__` 14 → **≤ 9**（Protocol/Generic/object 去不掉）。
+- `_HubQueue.__bases__` 9 → **≤ 7**（原稿 ≤4）；`__mro__` 14 → **≤ 12**（原稿 ≤9）。
+  重估依据：§3 的目标形状保留 6 混入 + `_AuthGuard`；再往下减就要把 138 个域方法搬进
+  协作者，那是 §9 明确不做的「顺手改 `queue_offline` 行为」。
 - `_JobStore.__bases__` 7 → **≤ 4**。
-- `Lock()` 调用点 **6 → 6**（只换持有者，不增减）；`hub/queue*.py` 总行数 4 035 → **≤ 3 400**。
+- `Lock()` 调用点 **6 → 6**（只换持有者，不增减）；`hub/queue*.py` 总行数 4 035 →
+  **≤ 4 250**（原稿 ≤3 400）——26 个同名转发壳是「保留 7 个基类」的机械代价，账在 §225。
 - hub 私有断言 **25 → ≤ 19**（把 5 条「驱动被测入口」提出 `assert`），且剩下的**无一条读可变状态**
   —— 名字/表/哨兵/身份那几类会跟着结构继续存在，把目标定成 0 等于要求给 `_JobStore` 改名，不在本设计范围。
 - `queue_state()` / `mem_readout()` 键集**逐字不变**（控制台与 RCA 脚本按名取值）。
