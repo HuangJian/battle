@@ -480,7 +480,14 @@ BASELINE_FORM = 1513
 #:   与 G13/G14/G16/G7/上一格同一已知限边；口径 A 仍 0 条。净 +3 全来自这道新守卫；
 #:   同批把 `test_xla_step_diag.py` 的 demo 索引钉从「源码子串」改成 AST 接线 + 行为判据
 #:   （那条本来就在口径 B 之外，不抵账）。FORM 未动。
-BASELINE_SRC = 1173
+#: 2026-11-19 再抬到 **1174**（+1，实测）：B8 第十四刀的守卫
+#:   `tests/worker/test_ppo_cli_core.py` 里唯一的源码读点 —— 「goal / intent 的 `main()` 只剩
+#:   `run_cli(_spec())`、两个模块里不再有 `add_argument`」。这条契约**没有运行时出口**：
+#:   重新内联一份 parser 之后 `--help` 依旧逐字相同（另两条用例正是断言它相同），只有
+#:   看源码结构才能发现重复又长回来了。其余断言（文案 / 顺序 / 默认值）全是运行时 Action 表，
+#:   不读 `.py`；同一条用例已压成**单条** `_shell_violations(tree) == []`（首版 9 条，这就是
+#:   口径 B 的已知限边：它数函数内 assert，不看是否真在比措辞）。FORM 未动。
+BASELINE_SRC = 1174
 #: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。派生式（基线九成，见
 #: `tests/helpers/budget.py`）：两个计数器各自随自己的基线收紧，清理基线时不必回填数字。
 def _floor_of_form() -> int:

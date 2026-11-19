@@ -166,6 +166,7 @@
     "worker/ppo/backend.py": 18,
     "worker/ppo/checkpoint_paddle.py": 4,
     "worker/ppo/ckpt_convert.py": 8,
+    "worker/ppo/cli.py": 3,
     "worker/ppo/common.py": 1,
     "worker/ppo/engine.py": 13,
     "worker/ppo/engine_paddle.py": 3,

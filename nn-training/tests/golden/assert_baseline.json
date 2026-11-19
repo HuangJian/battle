@@ -28,8 +28,6 @@
   "worker/ppo/ckpt_convert.py": 1,
   "worker/ppo/engine.py": 2,
   "worker/ppo/engine_paddle.py": 1,
-  "worker/ppo/goal.py": 1,
-  "worker/ppo/intent.py": 1,
   "worker/train/bc_paddle.py": 1,
   "worker/train/intent_probe.py": 1
 }

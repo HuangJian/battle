@@ -42,14 +42,15 @@ from typing import cast
 
 import numpy as np
 import numpy.typing as npt
-import torch
 
-from common.cli import house_parser, run_main
+from common.cli import run_main
 from common.contracts import INTENT_EPISODE_FIELDS, IntentEpisode
 from worker.models.intent_net import IntentNet, export_intent_weights, load_intent_weights
 
 # 共享 PPO 基础设施（ppo_common.py；行为与旧内联实现逐字节一致，见其模块 doc）。
 from worker.ppo._episode import episode_from_shard
+from worker.ppo.cli import CliSpec
+from worker.ppo.cli import run as run_cli
 
 # `_ppo_load` 是 `worker/backend.py::RolloutBackend` 的成员（`trainer/stream.py` 调
 # `backend._ppo_load`）—— 更新循环搬去 `worker/ppo/loop.py` 后本模块不再直接用它，
@@ -58,7 +59,11 @@ from worker.ppo.common import _ppo_load as _ppo_load  # RolloutBackend 契约（
 from worker.ppo.common import log, masked_logsoftmax
 from worker.ppo.loop import HeadSpec, LossTerms, run_ppo
 from worker.ppo.np_core import (
-    chunk_episodes,
+    # `chunk_episodes` 是 `worker/backend.py::RolloutBackend` 的成员（`trainer/stream.py` 调 `backend.chunk_episodes`）；
+    # 本模块不再直接调用它，但这个名字必须留在模块命名空间里。
+    chunk_episodes as chunk_episodes,
+)
+from worker.ppo.np_core import (
     compute_gae,
     discover_shards,
     load_episodes_common,
@@ -266,100 +271,32 @@ update = ppo_update_intent
 load_episodes = load_episodes_intent
 
 
-def main():
-    ap = house_parser()
-    ap.add_argument("--init-from", type=str, default=None, help="B′/BC intent weights (init mode)")
-    ap.add_argument("--resume", type=str, default=None, help="RL intent weights (update mode)")
-    ap.add_argument("--data", type=str, default=None, help="intent trajectory shard root (update)")
-    ap.add_argument("--out", type=str, required=True)
-    ap.add_argument("--epochs", type=int, default=4)
-    ap.add_argument("--mb", type=int, default=512)
-    ap.add_argument("--lr", type=float, default=LR)
-    ap.add_argument(
-        "--value-warmup-epochs",
-        type=int,
-        default=0,
-        help="前 N 个 epoch 只训 value 头（策略冻结；B′ 冷启动 value 随机）",
-    )
-    ap.add_argument(
-        "--kl-coef",
-        type=float,
-        default=0.0,
-        help="kickstarting KL 惩罚系数（plan #5 衰减 0.5/iter；0=关闭）",
-    )
-    ap.add_argument(
-        "--ref-weights",
-        type=str,
-        default=None,
-        help="kickstarting 参考策略权重（B′ 冻结快照；缺省 = 当前权重）",
-    )
-    ap.add_argument("--device", type=str, default="cpu")
-    ap.add_argument("--seed", type=int, default=7)
-    ap.add_argument("--threads", type=int, default=8)
-    args = ap.parse_args()
-
-    # 全局播种已退役（§P1-7）：训练序列只由 `PPORng.from_seed(args.seed)` 决定。
-    ppo_rng = PPORng.from_seed(args.seed)
-    if args.threads > 0:
-        torch.set_num_threads(args.threads)
-    try:
-        torch.set_flush_denormal(True)
-    except (RuntimeError, AttributeError):
-        pass
-    device = torch.device(args.device)
-
-    if args.init_from and not args.data:
-        model = build_rl_net(args.init_from)
-        load_intent_weights(model, args.init_from)  # 主干+三头迁移；value 头保持随机
-        export_intent_weights(model, args.out)
-        log(f"[ppo_intent] init RL weights (B′/BC intent + random value) -> {args.out}")
-        log(f"[ppo_intent] params={sum(int(p.numel()) for p in model.parameters())}")
-        return
-
-    assert args.resume and args.data, "--resume and --data required in update mode"
-    model = build_rl_net(args.resume)
-    load_intent_weights(model, args.resume)
-    model.to(device)
-
-    episodes = load_episodes_intent(args.data)
-    total_steps = sum(e["obs"].shape[0] for e in episodes)
-    log(f"[ppo_intent] total intent-steps={total_steps}")
-
-    chunks = chunk_episodes(episodes, args.mb, rng=ppo_rng.chunk)
-    log(f"[ppo_intent] {len(episodes)} episodes -> {len(chunks)} minibatch chunks (mb={args.mb})")
-
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-    # kickstarting 参考策略：显式 ref-weights（B′ 快照）或当前权重（策略尚未被本 CLI 更新）。
-    ref_model = None
-    if args.kl_coef > 0:
-        ref_src = args.ref_weights or args.resume
-        ref_model = build_rl_net(ref_src)
-        load_intent_weights(ref_model, ref_src)
-        for p in ref_model.parameters():
-            p.requires_grad = False
-        ref_model.eval()
-        log(f"[ppo_intent] kickstarting: ref={ref_src} kl_coef={args.kl_coef}")
-    agg = ppo_update_intent(
-        model,
-        opt,
-        chunks,
-        args.epochs,
-        device,
-        seed=args.seed,
-        value_warmup_epochs=args.value_warmup_epochs,
-        ref_model=ref_model,
-        kl_coef=args.kl_coef,
-        rng=ppo_rng,
+#: CLI 面：顺序与文案在 `worker/ppo/cli.py`；这里只绑 intent 的五件事与两句差异。
+def _spec() -> CliSpec:
+    """intent 的 CLI 配置（**每次入口调用时**现取模块全局 ⇒ 打桩面不被冻结）。"""
+    return CliSpec(
+        tag="ppo_intent",
+        help_init="B′/BC intent weights (init mode)",
+        help_resume="RL intent weights (update mode)",
+        help_data="intent trajectory shard root (update)",
+        help_warmup="前 N 个 epoch 只训 value 头（策略冻结；B′ 冷启动 value 随机）",
+        help_kl="kickstarting KL 惩罚系数（plan #5 衰减 0.5/iter；0=关闭）",
+        help_ref="kickstarting 参考策略权重（B′ 冻结快照；缺省 = 当前权重）",
+        step_word="intent-steps",
+        init_desc="B′/BC intent + random value",
+        with_bc=False,
+        lr=LR,
+        build_net=build_rl_net,
+        load_weights=load_intent_weights,
+        export_weights=export_intent_weights,
+        load_episodes=load_episodes_intent,
+        update=ppo_update_intent,
     )
 
-    model.to("cpu")
-    export_intent_weights(model, args.out)
-    log(
-        f"[ppo_intent] update done epochs={args.epochs} "
-        f"policy={agg['policy']:.4f} value={agg['value']:.4f} "
-        f"entropy={agg['entropy']:.4f} kl={agg['kl']:.5f} "
-        f"early_stopped={agg['early_stopped']} mean_ret={agg['mean_ret']:.3f} -> {args.out}"
-    )
+
+def main() -> None:
+    """intent CLI（顺序与文案在 `worker/ppo/cli.py`；本函数只绑定 intent 的配置）。"""
+    run_cli(_spec())
 
 
 if __name__ == "__main__":

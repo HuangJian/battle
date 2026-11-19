@@ -152,8 +152,19 @@ _EXPECTED_EXEMPT_STEMS = frozenset(
 #: 2026-11-19 **降到 15**（−2，实测）：B8 的两刀各消一组结构克隆 ——
 #:   `goal ↔ intent` 的 update 循环（`worker/ppo/loop.py`）与 `engine ↔ engine_paddle`
 #:   的训练步（`worker/ppo/backend.py`）。`BASELINE_EXACT` 与同名两条未动。
-BASELINE_EXACT = 14
-BASELINE_CLONE = 15
+#: 2026-11-19 抬 exact 一格（14 → 15）：B8 第十四刀把 goal / intent 的 `main()` 也并进了
+#:   `worker/ppo/cli.py`。剩下的两个入口头**只剩一句** `run_cli(_spec())`（去 docstring 后
+#:   词法流 = `def main ( ) -> None : run_cli ( _spec ( ) )`）⇒ 被本条计成一组「逐字节相同」。
+#:   这一格是**目标状态本身**而不是又抄一份实现：顺序 / 参数定义 / 文案都只有 `cli.py` 一处，
+#:   两个头文件里已不剩第二个有逻辑的函数。消掉这一组只能写成 lambda / partial 去骗检测器，
+#:   那会让「入口长什么样」反过来变得不可读 —— 故不改。防线没松：壳一旦长回逻辑，
+#:   `tests/worker/test_ppo_cli_core.py`（形状 = 单句 `run_cli(_spec())`）与同文件的 clone
+#:   两条都会红。
+#:   同一刀的 clone 也抬一格（15 → 16）：`_spec` 在两边是同一形状的 `CliSpec(...)`
+#:   （18 个字段名逐字相同，只有字面量不同，`_shape` 把值抹平 ⇒ 记成一组结构克隆）。
+#:   它和 `main` 是同一个现象的两面：**配置与顺序各一份，两个入口只声明自己要什么**。
+BASELINE_EXACT = 15
+BASELINE_CLONE = 16
 BASELINE_SAME_NAME_GE3 = 113
 
 

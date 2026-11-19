@@ -25,6 +25,74 @@
 
 ---
 
+## §223 goal / intent 的 CLI 也并了：`worker/ppo/cli.py`（2026-11-19，B8 第十四刀）
+
+第十二刀（§221）刻意留下 `main()` 没并，理由是「并成配置表行数不会更短」。**那个取舍被推翻了**
+（用户点名）——理由不是行数，而是**同一处修正要改两遍**：`main` 里任何一条（例如
+「`--threads 0` 要保留启动器默认」「`--out` 必填」「ref 权重缺省 = 当前权重」）改了这边、忘了
+那边，不跑那一边就永远不红。顺序只该有三份里的**一份**。
+
+两个 `main()` 的差别实测只有 **九句文案 + 五个函数**（建网 / 载权重 / 导权重 / 装载 episodes /
+update）+ 三个数据位（`tag` / `step_word` / `init_desc` / `with_bc`）。这些进 frozen dataclass
+`CliSpec`，顺序进 `cli.run(spec)`（145 物理行 / LOC 101）。
+
+| 读数 | 前 | 后 |
+|---|---:|---:|
+| `worker/ppo/goal.py` LOC | 252 | **202** |
+| `worker/ppo/intent.py` LOC | 226 | **165** |
+| 新模块 `cli.py` LOC | — | 101 |
+| `goal ↔ intent` 函数内 12 行窗口（含 `main`） | 1（就是 `main`） | **0** |
+
+两个头里剩下的 CLI 面就是 `_spec()`（20 行字段）+ `main()`（两行）。
+
+### 接缝：`CliSpec` 只装「差异」，`run` 只装「顺序」
+
+```
+毕业 parser → 播种 / 线程 / denormal / device → init 分支 → update 分支
+（载权重 → 装载 → 切块 → Adam → 可选 kickstarting ref → update → 导出 → 收尾行）
+```
+
+`run` 里**没有一处 `if tag == "ppo_goal"`**：唯一的分支是数据位 `spec.with_bc`
+（goal 的收尾行有 `bc=` 列、intent 没有 —— schema 兼容占位），`help_warmup` /
+`help_kl` 用 `None` 表达「这个参数本来就不带 help」（两个头真的不一致，逐字保留）。
+
+### 证明：`--help` 逐字节 + 10 个场景的调用序列
+
+| 段 | 做法 | 结果 |
+|---|---|---|
+| `--help` | 切分前用 `-m worker.ppo.<head> --help` 各存一份（23 / 24 行），切分后 `diff` | **逐字节相同**（参数顺序 / 文案 / 默认值 / prog 都没动） |
+| 调用序列 | `tmp/ab_cli.py` 把改动前模块当 `old_*` 载入，两边把 I/O 打桩成记录器，跑 5 个场景 × 2 个头 | 10/10 **逐事件相同**：init / update / +kl / +kl+ref / 全参数改 |
+
+打桩面跟着走了一步：`_spec()` 是**函数**而不是模块级常量，每次入口调用时现取模块全局 ——
+否则「用例 patch `ppo_goal.build_rl_net`」会变成静默空操作（本仓三次翻车同款）。
+
+两处顺手收的：① `assert args.resume and args.data` 改成显式
+`raise AssertionError("--resume and --data required in update mode")`（G7：生产包的运行时校验
+不靠 `assert`，`-O` 下会被去掉；异常类型与文案逐字不变）；② 两个头文件里 `chunk_episodes` 已无
+直接调用，但它**是** `RolloutBackend` 的成员（`trainer/stream.py` 调 `backend.chunk_episodes`）⇒
+写成 `chunk_episodes as chunk_episodes` 留在命名空间里（re-export 形态，不进抑制符预算）。
+
+### 守卫与账本
+
+`tests/worker/test_ppo_cli_core.py`（6 条 / 2 个头对半）：① 参数**顺序 + help 文案**逐字冻结
+（读 `_parser(spec)._actions`）；② 默认值逐字冻结；③ `main()` 只能是单句 `run_cli(_spec())`，
+且两个模块里**不许有 `add_argument`**（AST —— 重新内联一份 parser 之后 `--help` 仍逐字相同，
+只有看结构才发现重复长回来了）。
+
+连带账本：`any_baseline` 新增 `worker/ppo/cli.py: 3`（`CliSpec` 的三个 `Callable` 尾巴：两个头的
+模型类不同、`GoalNet` 与 `IntentNet` 互不为超型 ⇒ `object` / Protocol 在 mypy 下过不了）；
+`remote_dag` 登记 `worker.ppo.cli` **L3**（common L2 / np_core L1 / rng L0）；
+`assert_baseline` 删 `goal` / `intent` 两条（1 → 0，assert 变成 `cli.py` 里的显式 raise，未记账）；
+源文本断言 1173 → **1174**（+1 = 那条 AST 守卫，首版 9 条已压成单条）；
+复用账本 `BASELINE_EXACT` 14 → **15**、`BASELINE_CLONE` 15 → **16** —— 两格都是**目标状态本身**
+（两个头剩下的 `main` 去 docstring 后词法流相同、`_spec` 是同形状的 `CliSpec(...)`），
+不是又抄了一份实现；逐条理由写在 `tests/test_reuse_ledger.py` 的基线注释里。
+
+验证：`bash tools/githook/nn-python-gate.sh` 全绿（ruff + mypy **985** 文件 + **6278 passed** /
+2 skipped / 63.37s；+6 = 新守卫）。
+
+---
+
 ## §222 `Backend` 算子表：torch / Paddle 的训练步合一（2026-11-19，B8 第十三刀）
 
 `worker/ppo/engine.py`（torch，per-tick）与 `worker/ppo/engine_paddle.py`（Paddle 双生）的

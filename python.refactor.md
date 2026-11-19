@@ -1380,7 +1380,7 @@ def build_argparser() -> argparse.ArgumentParser:
 | **B5**（5–7 天） | `common/contracts`：Shard/Manifest/Result/ActionSpace；删三处 `a_hold` 嗅探 | 类型检查覆盖数据面；v6/legacy 由 Enum 决定 | 中（**已完成**：`ActionSpace`+`HeadLayout`（2026-11-16）、三处嗅探清零、`Shard`/`ShardV6`/`Episode`/`EpisodeV6` 契约 + import 哨兵（2026-11-18，§126）、episode 跨三层收口（§127）、`Manifest`/`CloudResult` 的 pydantic 模型 + 两个薄包装（§128，L0 放行 pydantic 一个包，闭集三处）；**剩余**：`cfg`/`course` 的 schema 继续收（可选）） |
 | **B6**（5–7 天） | `Runtime`（rng/clock/executors）注入；PPO 改 `default_rng`；ckpt 存 bit generator（**三半边全落** 2026-11-17：executor = `Runtime` 收走 10 处就地建池 + G16 · rng = `PPORng` 三条流 + `rng_streams` 进 ckpt + AST 零容忍 · clock = `Runtime(clock=, monotonic=)` + `PushHooks` + G17 墙钟预算（482 处/92 文件冻结）· 裸线程 = `Runtime.thread()` 名字/登记/join + G18 零容忍闸（50 → **0 处**；四批：`CloudEvalRunner` · `LocalLane` · `DelivererProcess` · `UploaderProcess` · `PushDispatcher` · `HeartbeatPublisher` · `EvalExecutors` + 第三批 11 个类 + 第四批模块级扇出，见 §P1-6）） | 同 seed 两遍逐位一致；并发下可复现 | 中 |
 | **B7**（7–10 天） | 协作对象替混入（先 `Scheduler`/`LeaseBook`，保留转发壳）；测试迁移到 seams（**2026-11-19 另落两刀**：`hub/http_face.py` 的 55 支 `elif` 路由 → 两张数据表 + 纯函数 `match_route`（§217），五份可变类属性 → `HubState`（§218）） | `_HubQueue.__mro__` ≤ 4；私有断言存量下降 | 高（面广） |
-| **B8**（5–7 天） | `common.distribution` 拆分（**第一刀已落** 2026-11-16：codeHash 面 → `common/codehash.py`，仓库锚点 → `common/paths.py`，调用点与打桩面同步迁走；**第十刀已落** 2026-11-19：升级/重启护栏 12 名 → `remote/node_upgrade.py`，HTTP 漏斗改名公开的 `node_request`；**第十一刀已落** 2026-11-19：任务协议 / 权重传输拆成 `common/task_client` + `common/weights_client`，`distribution` 1 181 → 490 行）；`offline_boot` 生成式拆分（**已落** 2026-11-17：12 个 `.pyfrag` + `tools/build_offline_boot.py` + `--check` 守卫）；`PPOLoop` 统一四份实现（**第十二刀已落** 2026-11-19：numpy 两份（goal / intent）合成 `worker/ppo/loop.py`，克隆窗口 11 → 0；**第十三刀同日已落**：`engine ↔ engine_paddle` 的训练步合成 `worker/ppo/backend.py` + 20 字段 `Backend` 算子表，13 → 0，paddle parity 三段读数不变） | 单文件 < 1000 行（取消豁免）；克隆窗口下降 | 中 |
+| **B8**（5–7 天） | `common.distribution` 拆分（**第一刀已落** 2026-11-16：codeHash 面 → `common/codehash.py`，仓库锚点 → `common/paths.py`，调用点与打桩面同步迁走；**第十刀已落** 2026-11-19：升级/重启护栏 12 名 → `remote/node_upgrade.py`，HTTP 漏斗改名公开的 `node_request`；**第十一刀已落** 2026-11-19：任务协议 / 权重传输拆成 `common/task_client` + `common/weights_client`，`distribution` 1 181 → 490 行）；`offline_boot` 生成式拆分（**已落** 2026-11-17：12 个 `.pyfrag` + `tools/build_offline_boot.py` + `--check` 守卫）；`PPOLoop` 统一四份实现（**第十二刀已落** 2026-11-19：numpy 两份（goal / intent）合成 `worker/ppo/loop.py`，克隆窗口 11 → 0；**第十三刀同日已落**：`engine ↔ engine_paddle` 的训练步合成 `worker/ppo/backend.py` + 20 字段 `Backend` 算子表，13 → 0，paddle parity 三段读数不变；**第十四刀同日已落**：两个头的 `main()` 合成 `worker/ppo/cli.py`（`CliSpec` + 顺序），`--help` 逐字节不变） | 单文件 < 1000 行（取消豁免）；克隆窗口下降 | 中 |
 
 **不建议的路线**：一次性 `strict = true`、一次性删全部 `sys.path`、一次性把 hub 换 FastAPI。
 前两个会制造 1000 个红点并诱发"为了绿而加 ignore"；第三个引入运行时依赖，违背零依赖口径。
@@ -1631,8 +1631,8 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
    **第十二刀已落（同日，§221）**：`worker/ppo/loop.py`（276 物理行 / LOC 201）+ 两份 frozen
    dataclass 配置；两个入口只剩 `return run_ppo(...)`。读数：`goal` LOC **374 → 252**、
    `intent` **337 → 226**；克隆窗口按 `tools/audit/py_clones.py` 口径 **11 → 0**、按函数内口径
-   **14 → 0**（`main` 以外 9 个清零；剩下的只在 `main` 的 CLI 参数/help 表 —— **有意不并**，
-   并成配置表不会更短）。DoD ①~⑤ 全中（④ 实测 −122 / −111）；数值面 A/B 逐位（goal 5 例 +
+   **14 → 0**（`main` 以外 9 个清零；剩下的只在 `main` 的 CLI 参数/help 表 —— 当时判为**有意不并**，
+   并成配置表不会更短；⚠ 这个取舍已由**第十四刀**推翻，理由见下：行数不是判据，“修一处要改两遍”才是）。DoD ①~⑤ 全中（④ 实测 −122 / −111）；数值面 A/B 逐位（goal 5 例 +
    intent 3 例 + 两边空 chunks = 10 例，含 engage / ref-KL / warmup）。守卫落成
    `tests/worker/test_ppo_loop_core.py`（6 条：核心不知头名 / 入口只转发 / 零克隆窗口 /
    形参表冻结）。门禁 6265 passed。
@@ -1644,6 +1644,20 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
    的 torch 产物**逐字节相同**，Paddle `check` / `verify` 的读数也与改动前**逐位相同**
    （worst fwd 1.73e-06 / stats 1.37e-05 / weights 5.96e-04 / after 9.86e-04）。守
    `tests/worker/test_ppo_backend_parity.py`（6 条）。至此 B8 三个交付物全部到位。
+
+   **第十四刀已落（同日，§223）**：推翻第十二刀「`main` 有意不并」的取舍 —— 理由不是行数，
+   而是**同一处修正要改两遍**（`--threads 0` / `--out` 必填 / ref 权重缺省这类都住在那 90 行里）。
+   两个 `main()` 的差别实测只有 9 句文案 + 5 个函数 + 4 个数据位 ⇒ 进 frozen dataclass
+   `CliSpec`，顺序进 `worker/ppo/cli.py::run`（145 物理行 / LOC 101）；两个头只剩 `_spec()` +
+   `main()`（单句 `run_cli(_spec())`）。LOC：`goal` 252 → **202**、`intent` 226 → **165**；
+   `goal ↔ intent` 函数内窗口 **1 → 0**（最后那个就在 `main`）。证明：`-m worker.ppo.<head> --help`
+   切分前后 **逐字节相同**；`tmp/ab_cli.py` 把 I/O 打桩后跑 5 个场景 × 2 个头，
+   **10/10 逐事件相同**（init / update / +kl / +kl+ref / 全参数改）。守
+   `tests/worker/test_ppo_cli_core.py`（6 条：参数顺序与 help 文案冻结 / 默认值冻结 / `main` 只能
+   是单句 `run_cli(_spec())` 且两个文件不得再有 `add_argument`）。账本：`any_baseline` +3、
+   `remote_dag` 登记 `worker.ppo.cli` L3、`assert_baseline` 删 goal/intent 两条（改成显式 raise）、
+   源文本 1173 → 1174、复用账本 exact 14 → 15 / clone 15 → 16（两格都是目标状态本身，理由
+   写在 `tests/test_reuse_ledger.py`）。门禁 6278 passed。
 
 ## 附录 C：G9 剩余 29 处的归类（2026-11-15，逐条）
 

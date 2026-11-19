@@ -665,6 +665,10 @@ LAYERS: dict[str, int] = {
     # `worker.ppo.np_core`(L1) / `worker.ppo.rng`(L0) / `worker.ppo.trainer`(L0) ⇒ **L3**；
     # 它不认识两个头（靠 `HeadSpec` / `LossTerms` 传入）⇒ 两个 L4 头的向下边成立。
     "worker.ppo.loop": 3,
+    # 2026-11-19（B8 ④）：goal / intent 共用的 CLI 壳（parser 文案 + 顺序）。顶层只靠
+    # `worker.ppo.common`(L2) / `worker.ppo.np_core`(L1) / `worker.ppo.rng`(L0) + `common.cli`
+    # ⇒ **L3**；它不知道两个头的名字（五件事由 `CliSpec` 传进来）⇒ 两个 L4 头的向下边成立。
+    "worker.ppo.cli": 3,
     # 2026-10-27（Paddle 双生）：`engine` 的 Paddle 版（update 数学逐行对应）；顶层靠
     # `worker.ppo.trainer`(L0) 与 `worker.ppo.checkpoint_paddle`(L1) ⇒ **L2**（随 checkpoint_paddle
     # 同日降层；它不 import torch 侧 engine）。
