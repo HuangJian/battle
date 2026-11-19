@@ -45,6 +45,8 @@ import 后，陈旧的 `trainer.loop_steps.<名字>` 会**响亮** `AttributeErr
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import common.distribution
@@ -54,6 +56,18 @@ from common.protocol import RUN_MAX_ITERS_HARD_CAP
 from remote import weights_standard
 from worker.archive import backup_weights
 from worker.modes import _MODE_BACKUP_PREFIX
+
+
+@dataclass(frozen=True)
+class TsCodeView:
+    """TS 运行时 zip 的**进程内缓存读数**（`_ensure_ts_code` 懒建的结果）。
+
+    `sha256 == ""` 就是「还没建」——那枚空串是 `_ensure_ts_code` 自己的「无需重建」标记，
+    所以读数不另造一个 `built: bool`（两个字段说是同一件事时，迟早会不一致）。
+    """
+
+    sha256: str
+    zip_path: Path | None
 
 
 class TrainingExport:
@@ -72,6 +86,14 @@ class TrainingExport:
 
     #: 兄弟混入的方法（混入常态：在组合实例上解析）——声明类型，理由同 `trainer/loop_volume.py`。
     _remote_ppo: Any
+
+    def ts_code_view(self) -> TsCodeView:
+        """本簇懒建缓存的公开读数（用例 / 诊断共用；不触发打包、不写任何东西）。"""
+        zp = getattr(self, "_ts_code_zip_path", None)
+        return TsCodeView(
+            sha256=str(getattr(self, "_ts_code_sha256", "") or ""),
+            zip_path=None if zp is None else Path(zp),
+        )
 
     def _ensure_ts_code(self, job_root: str, *, log: Any) -> None:
         """M3：打包 rollout 用的 TS 运行时 zip（一次，缓存在 self 上）。

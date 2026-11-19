@@ -363,7 +363,9 @@ def test_p1_is_not_gated_by_p1_waiting():
     t.start()
     t.join(5)
     assert got, "P1 被 p1_waiting 门禁挡住了（这道门禁只能作用于 P2）"
-    assert s._p1_waiting == 1, "白盒置入的计数被吃掉了（增/减不对称）"
+    # 问观测面（`stats()`，控制台与长跑告警读的就是它），不伸手进计数器：
+    # 「置入 1 回来仍是 1」证明 P1 进出对称，不多不少（G5 第十四批）。
+    assert s.stats()["p1_waiting"] == 1, "白盒置入的计数被吃掉了（增/减不对称）"
 
 
 def test_p1_not_preempted_by_control():
