@@ -153,9 +153,9 @@ def prepare_process(argv: list[str] | None = None) -> str:
         ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO_ROOT, timeout=30
     ).stdout.strip()
     if branch and branch != "HEAD":
-        import common.distribution as _dc
+        import remote.node_upgrade as _nu
 
-        _dc.set_upgrade_branch(branch)
+        _nu.set_upgrade_branch(branch)
         log(f"[serve] node upgrade branch locked to training-machine branch: {branch}")
 
     bun = shutil.which("bun")

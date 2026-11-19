@@ -150,9 +150,9 @@ def _push_current_branch() -> None:
         ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO_ROOT, timeout=30
     ).stdout.strip()
     if current_branch and current_branch != "HEAD":
-        import common.distribution as dc
+        import remote.node_upgrade as nu
 
-        dc.set_upgrade_branch(current_branch)
+        nu.set_upgrade_branch(current_branch)
         log(f"[run_rl] node upgrade branch locked to training-machine branch: {current_branch}")
 
 

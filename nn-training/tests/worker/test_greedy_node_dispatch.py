@@ -53,7 +53,7 @@ def _capture_url(monkeypatch: pytest.MonkeyPatch, **kw) -> str:
         seen["url"] = url
         raise _BoomError()
 
-    monkeypatch.setattr(dist, "_request", fake_request)
+    monkeypatch.setattr(dist, "node_request", fake_request)
     with pytest.raises(dist.DistError):
         dist.fetch_task(
             "http://x/", "k", iter_id="i", wver="w", stage=2000, seed=7,
@@ -76,7 +76,7 @@ def test_poll_url_keeps_greedy_label_mode(monkeypatch: pytest.MonkeyPatch) -> No
         seen["url"] = url
         return 202, b'{"status": "running"}'
 
-    monkeypatch.setattr(dist, "_request", fake_request)
+    monkeypatch.setattr(dist, "node_request", fake_request)
     monkeypatch.setattr(dist, "POLL_MIN_BUDGET_SEC", 0.05)
     with pytest.raises(dist.DistError):
         dist._poll_result(

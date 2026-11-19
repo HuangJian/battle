@@ -38,7 +38,7 @@ class _Call:
 
 
 def _make_request_stub(script: list[tuple[int, bytes]], calls: list[_Call]):
-    """按序回放 (status, body)；记录每次 _request 的入参。"""
+    """按序回放 (status, body)；记录每次 node_request 的入参。"""
 
     def _request(url, auth_key, timeout, data=None, headers=None, method=None):
         calls.append(_Call(method or ("POST" if data is not None else "GET"), url, headers or {}, data))
@@ -53,7 +53,7 @@ def _make_request_stub(script: list[tuple[int, bytes]], calls: list[_Call]):
 def test_probe_hit_skips_body(monkeypatch) -> None:
     calls: list[_Call] = []
     script = [(200, json.dumps({"ok": True, "cached": True}).encode())]
-    monkeypatch.setattr(common.distribution, "_request", _make_request_stub(script, calls))
+    monkeypatch.setattr(common.distribution, "node_request", _make_request_stub(script, calls))
 
     mode = common.distribution.post_weights(
         "http://node",
@@ -82,7 +82,7 @@ def test_probe_unsupported_falls_back_to_full_post(monkeypatch) -> None:
         (404, b'{"error":"not found"}'),
         (204, b""),  # agent: 同 sha 幂等 kept（204 无 body）
     ]
-    monkeypatch.setattr(common.distribution, "_request", _make_request_stub(script, calls))
+    monkeypatch.setattr(common.distribution, "node_request", _make_request_stub(script, calls))
 
     mode = common.distribution.post_weights("http://node", "tok", "run.19", sha, weights)
     assert mode == "kept"
@@ -104,7 +104,7 @@ def test_probe_uncached_full_post_purged(monkeypatch) -> None:
         (200, json.dumps({"ok": True, "cached": False}).encode()),
         (200, json.dumps({"ok": True, "cache": "purged"}).encode()),
     ]
-    monkeypatch.setattr(common.distribution, "_request", _make_request_stub(script, calls))
+    monkeypatch.setattr(common.distribution, "node_request", _make_request_stub(script, calls))
 
     mode = common.distribution.post_weights("http://node", "tok", "run.19", "c" * 64, b"{}")
     assert mode == "purged"
@@ -124,7 +124,7 @@ def test_probe_network_error_falls_back(monkeypatch) -> None:
             raise OSError("connection reset")
         return 200, json.dumps({"cache": "purged"}).encode()
 
-    monkeypatch.setattr(common.distribution, "_request", _request)
+    monkeypatch.setattr(common.distribution, "node_request", _request)
     mode = common.distribution.post_weights("http://node", "tok", "run.19", "d" * 64, b"x")
     assert mode == "purged"
     assert [c.method for c in calls] == ["GET", "POST"]
@@ -134,14 +134,14 @@ def test_probe_weights_cached_shapes(monkeypatch) -> None:
     def _ok(url, auth_key, timeout, data=None, headers=None, method=None):
         return 200, json.dumps({"cached": True}).encode()
 
-    monkeypatch.setattr(common.distribution, "_request", _ok)
+    monkeypatch.setattr(common.distribution, "node_request", _ok)
     assert common.distribution.probe_weights_cached("http://n", "k", "e" * 64) is True
     assert common.distribution.probe_weights_cached("http://n", "k", "") is None
 
     def _boom(url, auth_key, timeout, data=None, headers=None, method=None):
         raise TimeoutError("t")
 
-    monkeypatch.setattr(common.distribution, "_request", _boom)
+    monkeypatch.setattr(common.distribution, "node_request", _boom)
     assert common.distribution.probe_weights_cached("http://n", "k", "e" * 64) is None
 
 

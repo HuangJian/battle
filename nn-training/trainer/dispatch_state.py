@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import common.distribution
+import remote.node_upgrade
 from common.log import log
 from common.proc import version_mm as mm
 from worker import node_identity
@@ -110,8 +111,8 @@ def admit_rollout_nodes(
             # codeHash 不符 ⇒ 节点可能 pull/restart 丢权重——缓存必须失效
             common.distribution.forget_weights_node(nid)
             # 主动升级（guarded，2026-09-01 重启循环修复②）：分支 = 训练机当前分支
-            # （common.distribution.UPGRADE_BRANCH 锁存）。护栏见 common.distribution.request_upgrade_
-            # guarded——跨代去重（同节点同 (agent codeHash, 期望 hash) 只杀一次，
+            # （remote.node_upgrade.UPGRADE_BRANCH 锁存）。护栏见 remote.node_upgrade.
+            # request_upgrade_guarded——跨代去重（同节点同 (agent codeHash, 期望 hash) 只杀一次，
             # F1：键含期望 hash）+ 脏工作区拒发（远端 pull 永不收敛，手动更新重启
             # 的进程不再被远控杀掉）。
             # F2（plan/dist-codehash-stale-fix.md）：mismatch 分支所有日志携带两侧
@@ -125,7 +126,7 @@ def admit_rollout_nodes(
                 )
                 dedup_streak.pop(nid, None)
                 continue
-            ok, reason = common.distribution.request_upgrade_guarded(
+            ok, reason = remote.node_upgrade.request_upgrade_guarded(
                 nid,
                 n["url"],
                 n.get("authKey", ""),
@@ -134,7 +135,7 @@ def admit_rollout_nodes(
                 dirty=dirty_files,
                 expected_hash=code_hash,
             )
-            if common.distribution.is_self_node(n["url"], nid):
+            if remote.node_upgrade.is_self_node(n["url"], nid):
                 log(
                     f"[dist] node {nid}: self node stale "
                     f"(local={local_short} remote={remote_short}) — restart-only "
@@ -154,11 +155,11 @@ def admit_rollout_nodes(
                     f"(local={local_short} remote={remote_short}) — restart already "
                     f"sent for this agent codeHash (dedup) — excluded this round"
                 )
-                if not common.distribution.is_self_node(n["url"], nid) and dedup_streak[nid] >= 3:
+                if not remote.node_upgrade.is_self_node(n["url"], nid) and dedup_streak[nid] >= 3:
                     log(
                         f"[dist] WARN node {nid}: stale for {dedup_streak[nid]} "
                         f"rounds, upgrade suppressed by dedup （去重有"
-                        f"{int(common.distribution.restart_dedup_cooldown_sec())}s 冷却窗，"
+                        f"{int(remote.node_upgrade.restart_dedup_cooldown_sec())}s 冷却窗，"
                         f"窗过后会自动重发一次）— 在节点执行 "
                         f"'bun tools/agent/codehash-report.ts' 与本机 diff"
                         f"（见 plan/dist-codehash-stale-fix.md §4）"

@@ -222,6 +222,14 @@ LAYERS: dict[str, int] = {
     # `common.*`（`net_http` / `protocol`）+ stdlib ⇒ **L0**；读者是 `job_round`(L4) 与
     # `run_loop`(L6) 两个宿主（顶层边，严格向上够不着它 ⇒ 无需改层）。
     "remote.error_report": 0,
+    # 训练机对采样节点的**远控升级 / 重启护栏**（2026-11-19，B8 从 `common/distribution.py`
+    # 整簇搬来）：`POST /v1/restart` + 去重/冷却/脏树判据。依赖面 = stdlib + `common.*`
+    # （wire client 的 `node_request`/`node_ping` 与 `dirty_hash_files`，**不在本账本内、不计边**）
+    # ⇒ 拓扑秩 **L0**；读者是 `trainer.*` 与 `tools/dist_upgrade_cli.py`（都不入账本），
+    # 所以把出口留在 `common.distribution`、只搬控制动作，不会制造反向边。
+    # ⚠ 它**不**自备 HTTP 出口：`_request` 已改名为 `common.distribution.node_request`，
+    # `tests/test_distribution_io_budget.py` 的零额度断言盯着这条（搬一次不许长一份 IO）。
+    "remote.node_upgrade": 0,
     # worker 生命周期上发腿（2026-10-31，`remote/lifecycle.py`）：站在 `remote.error_report`(L0)
     # 上面（用它发、并且要用 `error_payload`/`post_error` 的同步档）⇒ **L1**。读者只有
     # `remote.worker`(L5) 一处（`Lifecycle` 四调用点），严格向上。

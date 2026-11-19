@@ -1,8 +1,11 @@
-"""`common.distribution` 的两份进程级状态现在是显式对象（P0-5 / `common/__init__.py` 契约 #4）。
+"""`common.distribution` 的进程级状态现在是显式对象（P0-5 / `common/__init__.py` 契约 #4）。
 
-模块只留 `_REQUESTS` / `_RESTARTS` 两个默认实例，状态本体在 `RequestRegistry` /
-`RestartMemo` 里 ⇒ 每个实例自成一份，测试要隔离就自己 new 一个，不必去清（也不必读）
-模块私有集合。这里只验隔离性：两份实例互不可见，公开函数走的仍是默认实例。
+模块只留 `_REQUESTS` 一个默认实例，状态本体在 `RequestRegistry` 里 ⇒ 每个实例自成一份，
+测试要隔离就自己 new 一个，不必去清（也不必读）模块私有集合。这里只验隔离性：两份实例
+互不可见，公开函数走的仍是默认实例。
+
+（`RestartMemo` 那份 2026-11-19 随远控升级簇搬去 `remote/node_upgrade.py`，它的隔离用例
+也随之搬进 `tests/remote/test_node_upgrade.py::test_restart_memos_are_independent`。）
 """
 
 from __future__ import annotations
@@ -38,14 +41,3 @@ def test_bare_clear_only_clears_its_own_registry() -> None:
     a.clear_abort()
     assert a.is_aborted("s1") is False
     assert b.is_aborted("s1") is True
-
-
-def test_restart_memos_are_independent() -> None:
-    a = dist.RestartMemo()
-    b = dist.RestartMemo()
-    a.seen["mac"] = ("ping", "expected", 1.0)
-    assert a.seen == {"mac": ("ping", "expected", 1.0)}
-    assert b.seen == {}
-    b.reset()
-    assert b.seen == {}
-    assert a.seen.get("mac") == ("ping", "expected", 1.0)

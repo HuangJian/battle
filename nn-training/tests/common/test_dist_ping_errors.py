@@ -15,7 +15,7 @@ import common.distribution as dist
 
 
 def _patch_request(monkeypatch, fn) -> None:
-    monkeypatch.setattr(dist, "_request", fn)
+    monkeypatch.setattr(dist, "node_request", fn)
 
 
 def test_node_ping_treats_garbage_reply_as_node_unusable(monkeypatch) -> None:
@@ -29,7 +29,7 @@ def test_node_ping_treats_garbage_reply_as_node_unusable(monkeypatch) -> None:
 
 
 def test_node_ping_lets_a_programmer_error_through(monkeypatch) -> None:
-    """`_request` 抛的不看形状的错（`AttributeError` / `KeyError`）必须穿出去。
+    """`node_request` 抛的不看形状的错（`AttributeError` / `KeyError`）必须穿出去。
 
     改回 `except Exception` ⇒ 本用例红（返回 None，「节点不可用」被当成正常结论）。
     """

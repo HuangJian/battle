@@ -10,6 +10,12 @@
 门禁的扫描面因此**扩成两个模块**（按「模块 + 原语」记账），否则「搬个家」会被读成「副作用消失」，
 而实际上它们还在 L0 里，只是换了文件 —— 那正是这类门禁最容易自欺的地方。
 
+2026-11-19（B8 第十刀）：升级/重启簇从 `distribution.py` 整簇搬去 `remote/node_upgrade.py`。
+**基线数值一个不变**——那一簇从来没有自己的 IO 原语，它一直走 `_request` 漏斗。所以这次
+要锁的不是「额度降了几格」，而是「搬出去的那一半不许顺手长出口、也不许绕过同一漏斗」：
+`test_node_upgrade_has_no_io_primitives` 断言新模块零 IO 原语、且仍调（已改名为）
+`node_request`。把 IO 加回 L0 去「配合搬家」是这条路线上最容易犯的错。
+
 口径：AST 里 `Call` 的被调名命中 `IO_PRIMITIVES` 才计数。`_request(...)` 这类**内部漏斗**
 不计（它是同一处出口被多处复用，数它会把「调用点多」误报成「出口多」）；
 URL 编码 / `urlparse` 这类纯函数也不计。
@@ -49,6 +55,9 @@ BASELINE = {
 
 #: 扫描面 = L0 里**所有**碰出站 IO 的模块（新增一处 IO 就得先在这里露面）。
 L0_IO_MODULES = ("common.distribution", "common.codehash")
+
+#: B8 搬出去的那一半（不当 L0 扫，但锁死「它没有自己的出口」）。
+NODE_UPGRADE = "remote.node_upgrade"
 
 
 def _module_source(name: str) -> str:
@@ -111,3 +120,32 @@ def test_scan_sees_the_known_io_surface() -> None:
     assert actual.get("common.codehash|subprocess.run") == 1, "扫描入口坏了（git 子进程没数到）"
     assert set(actual) == set(BASELINE), actual
     assert sum(actual.values()) == sum(BASELINE.values()), actual
+
+
+@cache
+def _node_upgrade_calls() -> tuple[list[str], int]:
+    """返回（命中 IO 原语的调用名, `node_request` 漏斗的调用点数）。"""
+    tree = ast.parse(_module_source(NODE_UPGRADE))
+    found: list[str] = []
+    funnel = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        dotted = ast.unparse(node.func)
+        if dotted in IO_DOTTED or dotted in IO_BARE:
+            found.append(dotted)
+        elif dotted == "node_request":
+            funnel += 1
+    return found, funnel
+
+
+def test_node_upgrade_has_no_io_primitives() -> None:
+    """搬去 `remote/` 的升级/重启簇：零 IO 原语 + 仍走 `common.distribution.node_request`。
+
+    为什么盯着这条：G8 的基线没降（簇里本来就没有出口），于是「搬家成功」只能由
+    「新家不备出口、且不绕过旧漏斗」来证明。自备一个 `urlopen` 在这里既好写又好看
+    ——正是必须拦住的那种。
+    """
+    found, funnel = _node_upgrade_calls()
+    assert not found, f"`{NODE_UPGRADE}` 自备了出站副作用：{found}（应走 node_request 漏斗）"
+    assert funnel >= 1, f"`{NODE_UPGRADE}` 不再经 `common.distribution.node_request` 出口"

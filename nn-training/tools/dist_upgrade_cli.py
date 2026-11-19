@@ -1,13 +1,14 @@
 """tools/dist_upgrade_cli.py — 节点升级指令的一次性入口（供 TS 侧工具复用训练循环的守卫）。
 
 背景：训练循环（`trainer/dispatch.py` ping 门）发现节点 codeHash stale 时会
-`common.distribution.request_upgrade_guarded(...)` —— POST `/v1/restart {pullBranch}`，
+`remote.node_upgrade.request_upgrade_guarded(...)` —— POST `/v1/restart {pullBranch}`，
 带三重护栏（脏工作区拒发 / 跨代去重 / self 节点纯重启）。TS 侧的一次性评估工具
 （`tools/sim/eval-course-ckpt.ts`、`tools/sim/m1-eval.ts`）此前只打印一行 skipped、
 不升级也不汇总告警，等于把「远端不可用」静默降级成本地跑。
 
 本文件让 TS 侧**调用**这份守卫而不是移植它：守卫与 dirty 判据只有一处实现
-（`common.distribution`），TS 侧只做「拼 spec → spawn → 读 JSON → 打日志」。输入（stdin，UTF-8 JSON）——两种模式：
+（`remote.node_upgrade`，2026-11-19 从 `common.distribution` 整簇搬出），TS 侧只做
+「拼 spec → spawn → 读 JSON → 打日志」。输入（stdin，UTF-8 JSON）——两种模式：
 
   A) 扫描模式（**推荐**，调用方不 ping）：
     {
@@ -18,9 +19,9 @@
                    "atSec": 1758300000} ],  # 可选：跨调用去重 memo 预置（见下）；
                                             # atSec = 该次下发时刻（epoch 秒），冷却窗靠它判定过期
         "dirty": null, "dry_run": false, "timeout": 20.0,
-        "cooldown_sec": 600.0               # 可选：去重冷却窗（缺省 common.distribution 常量/env）
+        "cooldown_sec": 600.0               # 可选：去重冷却窗（缺省 remote.node_upgrade 常量/env）
     }
-    判 stale 的那一步直接走训练循环自己的 `common.distribution.upgrade_stale_nodes(...)`
+    判 stale 的那一步直接走训练循环自己的 `remote.node_upgrade.upgrade_stale_nodes(...)`
     （ping → codeHash ≠ expected → request_upgrade_guarded），调用方**不重复实现探测**。
 
   B) 显式节点模式（调用方已 ping 过，把 hash 传来）：
@@ -40,9 +41,9 @@ reason 取值同 `request_upgrade_guarded`：`restart-requested` / `dedup` /
 
 退出码：0 = 已处理（即使全部失败，逐条 reason 说明）；2 = spec 非法（结构性错误）。
 
-注意：本进程是一次性的 ⇒ `common.distribution._RESTARTS.seen` 的跨代去重只在**本次调用内**
+注意：本进程是一次性的 ⇒ `remote.node_upgrade._RESTARTS.seen` 的跨代去重只在**本次调用内**
 有效；跨调用去重由调用方持久化 memo，并经 spec 的 `seen` 预置回来（`seed_restart_state`），
-判据本身仍只有 common.distribution 一处实现。`pingHash` 就是给调用方写 memo 用的。
+判据本身仍只有 remote.node_upgrade 一处实现。`pingHash` 就是给调用方写 memo 用的。
 本文件不做任何删除/清理动作（沙箱安全），但仍按仓库纪律经
 `bash tools/githook/nn-py-safe.sh` 启动。
 """
@@ -59,6 +60,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import common.codehash
 import common.distribution
+import remote.node_upgrade
 from common.cli import run_main
 
 
@@ -68,7 +70,7 @@ def _fail(msg: str) -> int:
 
 
 def _cooldown_of(spec: dict) -> float | None:
-    """spec.cooldown_sec（可选）→ 去重冷却窗秒数；缺省 None = common.distribution 自己定
+    """spec.cooldown_sec（可选）→ 去重冷却窗秒数；缺省 None = remote.node_upgrade 自己定
     （env `NN_RESTART_DEDUP_COOLDOWN_S` > 常量）。非数字/负数视为非法输入。"""
     raw = spec.get("cooldown_sec")
     if raw is None:
@@ -85,7 +87,7 @@ def _cooldown_of(spec: dict) -> float | None:
 def run_scan(spec: dict) -> dict:
     """扫描模式：本 CLI 自己 ping 每个 enabled 节点，判 stale 后下发升级。
 
-    判据那一层**直接调用** `common.distribution.upgrade_stale_nodes`——调用方（TS 工具）不再
+    判据那一层**直接调用** `remote.node_upgrade.upgrade_stale_nodes`——调用方（TS 工具）不再
     自己 ping、不再自己比 codeHash（此前那套是训练循环的重复实现，2026-09-19 用户
     指出）。`seen` 预置跨调用 memo，使 `dedup` 分支与常驻训练循环逐字一致。
     """
@@ -105,7 +107,7 @@ def run_scan(spec: dict) -> dict:
     seen = spec.get("seen")
     if seen is not None and not isinstance(seen, list):
         raise ValueError("seen 必须是数组")
-    common.distribution.seed_restart_state(seen or [])
+    remote.node_upgrade.seed_restart_state(seen or [])
     cooldown = _cooldown_of(spec)
     cfg = common.distribution.load_dist_config(cfg_path)
     if not isinstance(cfg, dict):
@@ -134,7 +136,7 @@ def run_scan(spec: dict) -> dict:
                 }
             )
         return {"dirty": _report_dirty(), "results": results}
-    raw = common.distribution.upgrade_stale_nodes(
+    raw = remote.node_upgrade.upgrade_stale_nodes(
         cfg,
         expected_hash=expected,
         branch=branch,
@@ -201,20 +203,24 @@ def run_spec(spec: dict) -> dict:
             # dry 只看 dirty 与身份，不发 POST：给调用方一次「先说清楚再动手」的机会。
             eff_dirty = dirty
             if eff_dirty is None:
-                eff_dirty = [] if common.distribution.is_self_node(str(n["url"]), nid) else common.codehash.dirty_hash_files()
+                eff_dirty = (
+                    []
+                    if remote.node_upgrade.is_self_node(str(n["url"]), nid)
+                    else common.codehash.dirty_hash_files()
+                )
             why = (
                 f"dirty-tree:{len(eff_dirty)}"
-                if eff_dirty and not common.distribution.is_self_node(str(n["url"]), nid)
+                if eff_dirty and not remote.node_upgrade.is_self_node(str(n["url"]), nid)
                 else "planned"
             )
             results.append({"id": nid, "ok": False, "reason": why})
             continue
-        # dirty=None ⇒ 守卫内部自己探测（远端才探；self 直接跳过探测，同 common.distribution 语义）。
+        # dirty=None ⇒ 守卫内部自己探测（远端才探；self 直接跳过探测，同 remote.node_upgrade 语义）。
         if dirty is None:
-            eff_dirty = [] if common.distribution.is_self_node(str(n["url"]), nid) else None
+            eff_dirty = [] if remote.node_upgrade.is_self_node(str(n["url"]), nid) else None
         else:
             eff_dirty = dirty
-        ok, reason = common.distribution.request_upgrade_guarded(
+        ok, reason = remote.node_upgrade.request_upgrade_guarded(
             nid,
             str(n["url"]),
             str(n.get("authKey") or ""),

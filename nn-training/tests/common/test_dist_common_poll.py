@@ -22,7 +22,7 @@ def test_poll_result_abandon_fires_immediately(monkeypatch) -> None:
         time.sleep(0.4)
         return 202, b'{"status": "running"}'
 
-    monkeypatch.setattr(common.distribution, "_request", fake_request)
+    monkeypatch.setattr(common.distribution, "node_request", fake_request)
     monkeypatch.setattr(common.distribution.time, "sleep", lambda _s: None)
 
     # 0.9 → 0.25（2026-09-29，§43）：判据是「**置位后立刻**放弃、不是等 budget（600s）耗尽」——
@@ -51,7 +51,7 @@ def test_poll_result_no_abandon_keeps_polling(monkeypatch) -> None:
     def fake_request(url: str, auth_key: str, timeout: float = 30.0, **kw):
         return 202, b'{"status": "running"}'
 
-    monkeypatch.setattr(common.distribution, "_request", fake_request)
+    monkeypatch.setattr(common.distribution, "node_request", fake_request)
     monkeypatch.setattr(common.distribution.time, "sleep", lambda _s: None)
 
     # 预算地板调成毫秒级（2026-09-29，§43）：生产地板（1.0s）是「防住预算小到没意义的调用」，
@@ -77,7 +77,7 @@ def test_poll_result_forwards_v6_label_mode(monkeypatch) -> None:
         seen.append(url)
         return 202, b'{"status": "running"}'
 
-    monkeypatch.setattr(common.distribution, "_request", fake_request)
+    monkeypatch.setattr(common.distribution, "node_request", fake_request)
     monkeypatch.setattr(common.distribution, "POLL_MIN_BUDGET_SEC", 0.01)
     monkeypatch.setattr(common.distribution.time, "sleep", lambda _s: None)
     with pytest.raises(common.distribution.DistError, match="deadline exceeded"):
@@ -115,7 +115,7 @@ def test_fetch_task_marks_transport_reset_transient(monkeypatch) -> None:
     def boom(*a, **k):
         raise ConnectionResetError(10054, "An existing connection was forcibly closed")
 
-    monkeypatch.setattr(common.distribution, "_request", boom)
+    monkeypatch.setattr(common.distribution, "node_request", boom)
     with pytest.raises(common.distribution.DistError) as ei:
         _fetch()
     assert ei.value.transient is True
@@ -133,12 +133,12 @@ def test_fetch_task_marks_5xx_and_429_transient_but_not_4xx(monkeypatch) -> None
         return boom
 
     for code in (503, 429, 502):
-        monkeypatch.setattr(common.distribution, "_request", http(code))
+        monkeypatch.setattr(common.distribution, "node_request", http(code))
         with pytest.raises(common.distribution.DistError) as ei:
             _fetch()
         assert ei.value.status == code and ei.value.transient is True, code
     for code in (409, 404):
-        monkeypatch.setattr(common.distribution, "_request", http(code))
+        monkeypatch.setattr(common.distribution, "node_request", http(code))
         with pytest.raises(common.distribution.DistError) as ei:
             _fetch()
         assert ei.value.status == code and ei.value.transient is False, code
@@ -457,7 +457,7 @@ def test_abort_active_requests_never_blocks_and_gates_new_requests() -> None:
         assert not finished.is_set(), "abort 返回时 close 已完成 ⇒ 收工路径等了它"
         assert common.distribution.abort_scope("t-abort") is True
         with pytest.raises(common.distribution.DistError) as ei:
-            common.distribution._request("http://127.0.0.1:9/never", "", 1.0)
+            common.distribution.node_request("http://127.0.0.1:9/never", "", 1.0)
         assert ei.value.transient is True, "收工态拒绝必须按瞬断分类（调用方丢弃/背压）"
         # 别的作用域不受影响（rollout 与 eval 同进程并发，绝不能误伤）
         assert common.distribution.abort_scope("rollout") is False
@@ -517,7 +517,7 @@ def test_ping_nodes_parallel_accepts_key_and_authkey(monkeypatch) -> None:
 def test_poll_result_lets_a_programmer_error_through(monkeypatch) -> None:
     """窄捕的另一半：轮询里的程序员错不许被读成「节点慢」，重试到 deadline 再报超时。
 
-    2026-11-15 之前这里是 `except Exception`（注释写着「瞬断」）——于是 `_request` 回包之后
+    2026-11-15 之前这里是 `except Exception`（注释写着「瞬断」）——于是 `node_request` 回包之后
     解包/记账里抛的 `AttributeError` / `KeyError` 也被当成隧道抖动，睡一下重试，直到预算耗尽抛
     `deadline exceeded`。现场得到的是「节点跑了 X 分钟还没回结果」，真因一行都没有（与
     `remote/hub_http.py` 探针那条同族）。改成 `NET_ERRORS` 后这类错立刻穿出去。
@@ -526,7 +526,7 @@ def test_poll_result_lets_a_programmer_error_through(monkeypatch) -> None:
     def buggy_request(url: str, auth_key: str, timeout: float = 30.0, **kw):
         raise AttributeError("'bytes' object has no attribute 'get'")
 
-    monkeypatch.setattr(common.distribution, "_request", buggy_request)
+    monkeypatch.setattr(common.distribution, "node_request", buggy_request)
     monkeypatch.setattr(common.distribution.time, "sleep", lambda _s: None)
 
     with pytest.raises(AttributeError):

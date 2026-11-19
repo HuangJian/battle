@@ -89,8 +89,8 @@ def test_fetch_task_encodes_flag(monkeypatch) -> None:
         seen["url"] = url
         raise _BoomError()
 
-    monkeypatch.setattr(common.distribution, "_request", fake_request)
-    # _request 的异常会被包成 DistError——URL 已在抛错前捕获，断它即可。
+    monkeypatch.setattr(common.distribution, "node_request", fake_request)
+    # node_request 的异常会被包成 DistError——URL 已在抛错前捕获，断它即可。
     with pytest.raises(common.distribution.DistError):
         common.distribution.fetch_task(
             "http://x/", "k", iter_id="i", wver="w", stage=2000, seed=7,

@@ -35,7 +35,7 @@ LONG_FUNCS_BASELINE: dict[str, int] = {}
 #: 存量：包含 >8 参数函数的文件 → 个数。
 WIDE_FUNCS_BASELINE = {
     "biz/course_archive.py": 1,
-    "common/distribution.py": 2,
+    "common/distribution.py": 1,
     "common/race_metrics.py": 1,
     "common/task_key.py": 1,
     "hub/offline_ingest.py": 1,
@@ -55,6 +55,7 @@ WIDE_FUNCS_BASELINE = {
     "remote/job_lifecycle.py": 3,
     "remote/job_round.py": 2,
     "remote/lifecycle.py": 1,
+    "remote/node_upgrade.py": 1,
     "remote/offline_boot.py": 4,
     "remote/offline_deliver.py": 1,
     "remote/offline_eval.py": 1,
@@ -120,7 +121,9 @@ WIDE_FUNCS_BASELINE = {
 #: 2026-11-13：`log` / `fs` / `weights_ledger` 已改成显式对象（`LogRouter` / `JsonlLedger` /
 #: `WeightsLedger`），名册里对应的三条随之删除。
 #: 2026-11-14：`distribution` 的在飞登记 / 收工标记 / 重启去重 memo 搬进 `RequestRegistry` /
-#: `RestartMemo`（模块只留 `_REQUESTS` / `_RESTARTS` 两个默认实例），三条也删。
+#: `RestartMemo`（模块只留默认实例），三条也删。
+#: 2026-11-19：升级/重启簇整体搬去 `remote/node_upgrade.py`（`_REQUESTS` 留在 wire client），
+#: 本条名册因此只剩 `distribution` 的 `_REQUESTS` 一个实例。
 #: 2026-11-16：`platform_utils` 的 `_UNREAPED` 搬进 `UnreapedProcs` ⇒ **名册清零**。
 #: 这里保持一个空表而不是删掉名册：`test_l0_allowlist_is_still_needed` 靠它继续成立，
 #: 将来真有无法立刻拆的存量时，往这里加条目仍然要在上面写清日期与理由。
@@ -129,9 +132,9 @@ L0_MUTABLE_ALLOWED: dict[str, frozenset[str]] = {}
 #: `global` 语句的存量（按文件计数；出现在新文件 = 红）。
 GLOBAL_BASELINE = {
     "biz/reward_context.py": 2,
-    "common/distribution.py": 1,
     "hub/admin.py": 1,
     "remote/http.py": 1,
+    "remote/node_upgrade.py": 1,
     "remote/payload_slim.py": 1,
     "remote/tailscale_boot.py": 1,
     "remote/wire.py": 1,

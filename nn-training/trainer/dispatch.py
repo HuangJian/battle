@@ -14,6 +14,7 @@ import common.codehash
 import common.distribution
 import common.protocol
 import common.runtime
+import remote.node_upgrade
 from common.log import log
 
 # 本地对局子进程的无窗口 spawn 由 `trainer.queue_local` 负责（Windows 下不弹黑色 cmd 抢焦点）。
@@ -174,13 +175,13 @@ class RolloutDispatcher:
         # 指示它 git pull + 重启（本轮不参与，重启后 rescan 纳入）；拿不到升级分支时
         # 只告警、不重启（下面 `if not upgrade_branch`）。
         # 节点远控升级分支：**永远**以训练机当前分支为准（run_rl 启动时锁存到
-        # common.distribution.UPGRADE_BRANCH）。**不读 config 的 upgradeBranch**：
+        # remote.node_upgrade.UPGRADE_BRANCH）。**不读 config 的 upgradeBranch**：
         # 2026-08-30 事故里残留的 'intent-ai' 把全部节点 reset 回旧代码，而当时的
         # `upgrade_branch_or(explicit)` 是「显式值优先于锁存」⇒ 只要配置里有非空值就
         # 盖掉锁存。该键已从 rl-config.json 删除（plan/rl-config-cleanup.plan.md §3.1），
         # 读点去掉；2026-09-26 评审又把那个 `explicit` 参数一并拿掉
         # （`current_upgrade_branch()`）⇒ 坑在**签名层面**不再可能复现。
-        upgrade_branch = common.distribution.current_upgrade_branch()
+        upgrade_branch = remote.node_upgrade.current_upgrade_branch()
         wver = common.distribution.weights_fingerprint(rl_path)
         local_bun = bun_version(bun)
         iter_no = int(iter_id.rsplit(".", 1)[-1])

@@ -6,7 +6,7 @@
   ],
   "wall_clock_reads": {
     "biz/course_archive.py": 1,
-    "common/distribution.py": 9,
+    "common/distribution.py": 6,
     "common/instance_lock.py": 2,
     "common/net_http.py": 3,
     "hub/http_face.py": 6,
@@ -31,6 +31,7 @@
     "remote/job_round.py": 5,
     "remote/job_shell.py": 3,
     "remote/notebook_runtime.py": 14,
+    "remote/node_upgrade.py": 3,
     "remote/offline_deliver.py": 4,
     "remote/offline_eval.py": 5,
     "remote/offline_push.py": 7,

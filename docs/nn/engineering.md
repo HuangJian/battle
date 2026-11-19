@@ -25,6 +25,64 @@
 
 ---
 
+## §219 `common/distribution.py` 拆出升级/重启簇 → `remote/node_upgrade.py`（2026-11-19，B8 第十刀）
+
+`common/distribution.py` 最后一块「不是线协议」的东西搬走了：节点远控升级与重启护栏（`POST
+/v1/restart`、跨代去重、冷却窗、脏工作区拒发、`upgrade_stale_nodes` 扫描）整簇 12 个公开名搬到
+`remote/node_upgrade.py`（282 行）。**分发侧的 wire client 不动**：`fetch_task` / `post_weights` /
+`node_ping` 仍留在 `common.distribution`。
+
+为什么是这一分为二（而不是「搬整个文件」）：
+
+| 簇 | 消费者 | 能不能搬 |
+|---|---|---|
+| wire client（取任务 / 权重下发 / 探活） | `worker/`(L2) + `trainer/`(L4) | ❌ 搬去 `remote/` 会造出 `worker → remote` 的反向边（`tests/test_layering.py` 硬禁） |
+| 升级 / 重启护栏 | `trainer/*` + `tools/dist_upgrade_cli.py` | ✅ 全部在 L3 之上 ⇒ 落 `remote/`(L3) 无反向边 |
+
+**有一个名字必须跟改**：簇里从来没有自己的 HTTP 出口，一直复用 `_request` 漏斗。搬出去之后如果
+新模块继续调 `_request`，那要么把它变成跨模块私有名（`remote` 去碰 `common` 的私有实现），要么在
+新家复制一份出口（G8 会红）。所以漏斗改名为公开的 **`common.distribution.node_request`**（def 1 +
+调用 8），语义逐字节不变 —— 这次只是把「谁可以用这个出口」写进名字里。
+
+### G8 基线没有变，这才是要解释的地方
+
+`tests/test_distribution_io_budget.py` 的四个键、四个数字**一个没动**：簇本来就没有 IO 原语，
+搬走不等于额度下降。所以这一刀加的不是「降几格」，而是一条**新模块零 IO 断言**
+（`test_node_upgrade_has_no_io_primitives`）：`remote/node_upgrade.py` 里不许出现任何
+`IO_DOTTED` / `IO_BARE` 调用，且必须仍调 `node_request`。「搬出去的那一半顺手给自己开一个
+`urlopen`」是这条路线上最容易犯的错（本地好写、审查易漏、G8 因为扫的是 L0 完全看不见），
+所以判据必须跟着新家走。把 IO 加回 L0 去「配合搬家」同理被第一条用例挡住。
+
+### 测试面的连带改动（三处都是「搬家让旧写法变成哑弹」）
+
+1. `tests/common/test_upgrade.py` 拆成两半：升级用例 → `tests/remote/test_node_upgrade.py`（7 条）、
+   codeHash 文件集合用例 → `tests/common/test_codehash.py`。顺带把旧的 `check()` 助手写法改成真
+   `assert` —— 旧的「自己 print + 不抛」在 pytest 下判失败也不红，等于没有判据（其中 codeHash 那
+   半在门禁目录里，跑起来还要真的 git，已改成 `subprocess` 打桩 + 缺 git 时 `pytest.skip`）。
+2. `tests/tools/test_dist_upgrade_cli.py` 的 30 处打桩目标搬到 `remote.node_upgrade`，并顺手修了
+   **两条 inert 补丁**：`monkeypatch.setattr(common.codehash, "dirty_hash_files", …)` 对守卫是
+   无效的（守卫在 import 期就把名字绑到自己模块里了），也就是说「固定工作区干净」那两句从来没有
+   生效 —— 用例一直是靠「本仓此刻恰好没有脏的 SSOT 文件」绿的。现在打的是
+   `remote.node_upgrade.dirty_hash_files`（真读者）。`node_ping` 也分两种情况：非 dry 的扫描走守卫
+   模块的绑定，**dry** 那条必须留 `common.distribution`（ping 是 CLI 自己发的）。
+3. `tests/helpers/remote_dag.py`：登记 `remote.node_upgrade` 为**拓扑秩 L0**（只 import stdlib +
+   `common.*`，后者不在账本内不计边），附上「消费者全在它上面」的理由。
+
+### 数字（同一批一起改的，都是「数字跟着代码走」）
+
+`tests/test_python_shape_budget.py`：`common/distribution.py` 的宽函数 2 → **1**、`global` 1 → **0**，
+`remote/node_upgrade.py` 各 **1 / 1**（`request_upgrade_guarded` 的 9 参、`set_upgrade_branch` 的
+`global UPGRADE_BRANCH` —— 两者都是原样搬过去的存量，不是新增）。
+`tests/golden/env_reads_baseline.json`：`common.distribution.py` 5 → **4**、新增
+`remote/node_upgrade.py: 1`；`tests/golden/wall_clock_baseline.json`：9 → **6** + 新增 **3**。
+文本形态断言基线不动（**1513**），实际读数 **1512**（−1）：搬家带进来的两条 `"…" in …` 已改写成
+集合相等 / 列表为空，删掉的旧文件本来也是 0。
+
+验证：`bash tools/githook/nn-python-gate.sh` 全绿（ruff + mypy + **6255 passed** / 2 skipped /
+109.96s）。
+
+---
+
 ## §218 hub 的进程级状态收成一个 `HubState`（2026-11-19）
 
 `hub/http_face.py::HubHandler` 原先有**五份散着的可变类属性**（`ThreadingHTTPServer` 每请求新建

@@ -82,13 +82,14 @@ def main(argv: list[str] | None = None) -> None:
         finally:
             cleanup_lock(push_lock)
     import common.distribution as dc
+    import remote.node_upgrade as nu
 
     current_branch = run_capture(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO_ROOT, timeout=30
     ).stdout.strip()
     # 升级分支必须在 load_dist_config 之前钉住（节点远端分支的选择依赖它）。
     if current_branch and current_branch != "HEAD":
-        dc.set_upgrade_branch(current_branch)
+        nu.set_upgrade_branch(current_branch)
     runtime = resolve_bc_runtime(args, cfg=dc.load_dist_config())
 
     # ---- 单实例锁（与 run_rl 同实现、按课命名；双开响亮拒启）----

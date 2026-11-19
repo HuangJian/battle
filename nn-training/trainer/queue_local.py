@@ -23,6 +23,7 @@ from typing import Any
 
 import common.distribution
 import common.runtime
+import remote.node_upgrade
 from common import game_watch  # 进度行节流口径与节点侧 rollout 共用一份（`progress_due`）
 from common.log import log
 from common.paths import REPO_ROOT
@@ -484,7 +485,7 @@ def _rescan_stale_code(
     remote_short = str(ping.get("codeHash") or "")[:8] or "none"
     if not upgrade_branch:
         return True
-    ok, reason = common.distribution.request_upgrade_guarded(
+    ok, reason = remote.node_upgrade.request_upgrade_guarded(
         nid,
         n["url"],
         n.get("authKey", ""),
@@ -505,7 +506,7 @@ def _rescan_stale_code(
             f"(local={local_short} remote={remote_short}) — remote restart "
             f"suppressed ({reason}: uncommitted training-tree changes)"
         )
-    elif common.distribution.is_self_node(n["url"], nid):
+    elif remote.node_upgrade.is_self_node(n["url"], nid):
         log(
             f"[dist] rescan {nid}: self node stale "
             f"(local={local_short} remote={remote_short}) — restart-only "

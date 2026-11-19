@@ -6,7 +6,7 @@
   · 「避免同一份权重多次传递」→ 上传前先 `GET /v1/weights?sha=` 预检，命中就不传体。
 
 这里钉的是**训练侧**那一半（header 从哪来、预检命中时不发体、任何不确定都往「传」
-那边掉）。零 socket：`common.distribution._request` 被换成记账假实现。
+那边掉）。零 socket：`common.distribution.node_request` 被换成记账假实现。
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ import common.distribution
 
 
 class _Recorder:
-    """记账版 `_request`：按方法返回预设状态，并记下每次调用的 (method, url, headers, data)。"""
+    """记账版 `node_request`：按方法返回预设状态，并记下每次调用的 (method, url, headers, data)。"""
 
     def __init__(self, get_status: int = 200, get_body: dict | None = None) -> None:
         self.calls: list[dict] = []
@@ -81,7 +81,7 @@ def test_post_weights_sends_course_header_from_env(
     monkeypatch: pytest.MonkeyPatch, no_course_env: None
 ) -> None:
     rec = _Recorder()
-    monkeypatch.setattr(common.distribution, "_request", rec)
+    monkeypatch.setattr(common.distribution, "node_request", rec)
     monkeypatch.setenv(common.distribution.COURSE_ENV, "tiny-a")
     common.distribution.post_weights("http://n", "k", "run.3", "s" * 64, b"weights")
     assert rec.posts[0]["headers"]["X-Course"] == "tiny-a"
@@ -93,7 +93,7 @@ def test_post_weights_omits_course_header_when_unknown(
 ) -> None:
     """未知名 = 不发头（旧 agent 见到空头也无从使用，少一个字段少一份歧义）。"""
     rec = _Recorder()
-    monkeypatch.setattr(common.distribution, "_request", rec)
+    monkeypatch.setattr(common.distribution, "node_request", rec)
     common.distribution.post_weights("http://n", "k", "run.3", "s" * 64, b"weights")
     assert "X-Course" not in rec.posts[0]["headers"]
 
@@ -103,7 +103,7 @@ def test_post_weights_explicit_empty_course_beats_env(
 ) -> None:
     """显式 course="" 是「落旧桶」的意思——不该被进程身份悄悄覆盖。"""
     rec = _Recorder()
-    monkeypatch.setattr(common.distribution, "_request", rec)
+    monkeypatch.setattr(common.distribution, "node_request", rec)
     monkeypatch.setenv(common.distribution.COURSE_ENV, "tiny-a")
     common.distribution.post_weights("http://n", "k", "run.3", "s" * 64, b"weights", course="")
     assert "X-Course" not in rec.posts[0]["headers"]
@@ -112,7 +112,7 @@ def test_post_weights_explicit_empty_course_beats_env(
 def test_precheck_hit_skips_the_body(monkeypatch: pytest.MonkeyPatch) -> None:
     """命中即不传体——这就是「避免同一份权重多次传递」的落点。"""
     rec = _Recorder(get_body={"cached": True})
-    monkeypatch.setattr(common.distribution, "_request", rec)
+    monkeypatch.setattr(common.distribution, "node_request", rec)
     monkeypatch.setenv(common.distribution.COURSE_ENV, "tiny-a")
     mode = common.distribution.post_weights_cached("http://n", "k", "run.3", "ab" * 32, b"x" * 1000)
     assert mode == "cached"
@@ -123,7 +123,7 @@ def test_precheck_hit_skips_the_body(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_precheck_miss_posts_once(monkeypatch: pytest.MonkeyPatch) -> None:
     rec = _Recorder(get_body={"cached": False})
-    monkeypatch.setattr(common.distribution, "_request", rec)
+    monkeypatch.setattr(common.distribution, "node_request", rec)
     mode = common.distribution.post_weights_cached("http://n", "k", "run.3", "ab" * 32, b"x" * 1000)
     assert mode == "purged"
     assert len(rec.posts) == 1
@@ -138,7 +138,7 @@ def test_precheck_unknown_falls_back_to_upload(
     少传一次是省流量，**错判不传是 409 停活**（`wver not cached here` ⇒ 那一局作废）。
     """
     rec = _Recorder(get_status=status)
-    monkeypatch.setattr(common.distribution, "_request", rec)
+    monkeypatch.setattr(common.distribution, "node_request", rec)
     assert common.distribution.post_weights_cached("http://n", "k", "run.3", "ab" * 32, b"x") == "purged"
     assert len(rec.posts) == 1
 
@@ -146,7 +146,7 @@ def test_precheck_unknown_falls_back_to_upload(
 def test_precheck_empty_sha_does_not_ask(monkeypatch: pytest.MonkeyPatch) -> None:
     """空 sha（未开瘦身的旧路径）→ 连问都不问，直接按老路子上传。"""
     rec = _Recorder(get_body={"cached": True})
-    monkeypatch.setattr(common.distribution, "_request", rec)
+    monkeypatch.setattr(common.distribution, "node_request", rec)
     common.distribution.post_weights_cached("http://n", "k", "run.3", "", b"x")
     assert rec.gets == []
     assert len(rec.posts) == 1
@@ -165,7 +165,7 @@ class _TaskRecorder(_Recorder):
 
 def _task_call(monkeypatch: pytest.MonkeyPatch) -> dict:
     rec = _TaskRecorder()
-    monkeypatch.setattr(common.distribution, "_request", rec)
+    monkeypatch.setattr(common.distribution, "node_request", rec)
     common.distribution.fetch_task(
         "http://n",
         "k",

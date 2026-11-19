@@ -1,7 +1,7 @@
 {
   "env_reads": {
     "biz/batch_plan.py": 1,
-    "common/distribution.py": 5,
+    "common/distribution.py": 4,
     "common/hold_window.py": 1,
     "common/scratch.py": 1,
     "hub/queue_offline.py": 2,
@@ -17,6 +17,7 @@
     "remote/http.py": 2,
     "remote/notebook_runtime.py": 2,
     "remote/node_toolchain.py": 6,
+    "remote/node_upgrade.py": 1,
     "remote/offline_eval.py": 1,
     "remote/payload_proc.py": 1,
     "remote/worker.py": 1,
