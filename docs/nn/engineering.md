@@ -25,6 +25,64 @@
 
 ---
 
+## §226 P0-8 测试基础设施三项：serve_fast · 退役 check() 壳 · G19（2026-11-19）
+
+`python.refactor.md` §P0-8 的「解决方案」有 5 项；第 3/4/5 项本轮落地（第 1/2 项是
+端口对象与全量 monkeypatch 迁移，属 B7 同量级程序，见该文「剩余清单」）。
+
+### 1. `serve_forever`：全局改标准库 → 显式 `serve_fast`
+
+旧做法：根 `conftest.py` 把 `socketserver.BaseServer.serve_forever` 的缺省 `poll_interval`
+从 0.5s 改成 10ms，省掉每个测试服务的关服等待（实测一条用例 1.09s 里 1.005s 在两次
+`shutdown()`）。代价：**测试进程里改了标准库**，且「关服慢」这类生产行为在测试里永远
+不可复现。
+
+新做法：`tests/helpers/http_server.py::serve_fast(server)` 返回一个**未启动**的 daemon
+线程（`poll_interval=FAST_POLL_SEC`，与旧值同 10ms）；49 个测试文件 / 66 处
+`Thread(target=X.serve_forever, …)` 改成 `serve_fast(X)`，已有的 `.start()` / `.join()`
+形状不变。根 conftest 删掉补丁与 `import socketserver`（G6 的 `conftest.py: 1` 条目随之
+删除）。
+
+### 2. 退役 `check()`/`FAILS` 脚本壳
+
+9 个从 standalone 脚本迁来的文件（`tests/worker/test_ppo_{goal,intent,common}` /
+`test_np_core` / `test_student_model` / `test_rl_model` / `test_terminal_stats` /
+`e2e/test_run_rl{,_m1}`）用模块级 `FAILS` + `check(cond, msg)` 累积失败，在 pytest 下
+**只追加、无人断言**。本轮把 **345 处** 调用换成真 `assert`：
+
+* 3 处私有读数先取局部变量再断言（G5 不新增）；
+* 5 处 `assert False` 按 B011 改成 `raise AssertionError(...)`；
+* `FAILS` 声明、`check()` 定义、`main()` 里的 FAILS 汇总与 `sys.exit(1 if FAILS …)` 全部删除
+  （跑到末尾即 PASS）；
+* conftest 的 autouse `_no_silent_check_failures` 与它的 5 条自证用例退役；
+  `tests/test_conftest_check_guard.py` → `tests/test_conftest_hooks.py`，只留
+  「hook 只注册一份」与「`tmp_dir_for` 不建目录」两条。
+
+账本：文本形态断言 **1514 → 1525（+11）** —— 这些判据原先就存在，只是藏在 `check()`
+实参里、扫描器看不见；去掉包装后第一次被计入（理由记在 `BASELINE_FORM` 上方）。另有两处
+上界型断言第一次暴露，补了 `# timing-ok:`（`dt` 是 shard 步长字段，不是墙钟；`took < 40`
+是并行门禁下的挂起兜底）。
+
+### 3. G19：冻结「monkeypatch 打私有名」
+
+`tests/test_monkeypatch_targets_budget.py`：AST 扫 `tests/**` + `e2e/**` 的
+`monkeypatch.setattr/delattr`，只数**私有目标**（`"_x"` 或 `"pkg.mod._x"`；dunder 与非字面量
+不算）。现状 **379 处 / 91 文件**冻结进 `tests/golden/monkeypatch_private_baseline.json`，
+只拦增长 + 基线只许调小；另有扫描地板与口径自检各一条。
+
+为什么只冻结不迁移：全量 monkeypatch 是 4 160 处，迁移要先有端口对象（§P0-8 第 1 项）；
+G19 保证「端口对象铺开之前，白盒耦合不再长高」。新用例要打私有名之前，先问这个私有名
+该不该有 `*_view()` / `*_state()` 之类的公开读数（G5 的四十批就是这么长出来的）。
+
+### 验证
+
+* 全量门禁：**6277 passed / 2 skipped**（含 e2e；`serve_fast` 的 66 处调用点全部经真
+  HTTP 往返验证）。
+* 新门禁自检：G19 的 4 条用例（增长 / 只减 / 地板 / 口径）全绿。
+* 账本：G6 `conftest.py` 条目删除；FORM 1514 → 1525（逐笔见上）；G5 仍 140 / 46。
+
+---
+
 ## §225 B7 实施：P1–P4b + 壳收敛 S1/S3/S2 全部落地（2026-11-19）
 
 §224 的**全部状态对象**与**壳收敛**均已落地（8 笔提交，逐片回滚点保留）。§8 的两条壳
