@@ -328,8 +328,20 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
 DOMAIN_METHODS = tuple(m for _, (_, ms) in DOMAINS.items() for m in ms)
 MIXIN_CLASSES = tuple(cls for cls, _ in DOMAINS.values())
 
-#: 组合类自己留的（进程级 + 构造）。
-OWN_METHODS = ("__init__",)
+#: 组合类自己留的（进程级 + 构造 + B7-P3 的 10 条状态转发属性）。
+OWN_METHODS = (
+    "__init__",
+    "_stores",
+    "_order",
+    "_solo",
+    "_cursor",
+    "_locate_cache",
+    "_ambiguous",
+    "_workers",
+    "_halt_default",
+    "_halts",
+    "_halt_when_idle",
+)
 #: 组合类里那个「形参缺省值要在类体作用域解析」的别名（`__init__` 因此逐字节不动）。
 OWN_CONSTS = ("BC_EPOCH_BODY_MAX", "DISCOVER_FRESH_SEC")
 
@@ -403,6 +415,12 @@ FACADE_OWN = ("note_worker",)
 #: 末尾调它 —— 这是**同一个对象**的两段 `__init__`，不是两个对象）。
 AUTH_GUARD_FIELDS = frozenset({"_auth_blocked_until", "_auth_fail"})
 
+#: B7-P3：两张状态表搬进协作者；组合类只保留同名转发属性（getter + setter）。
+COURSE_TABLE_FIELDS = frozenset(
+    {"_stores", "_order", "_solo", "_cursor", "_locate_cache", "_ambiguous"}
+)
+BOARD_FIELDS = frozenset({"_workers", "_halt_default", "_halts", "_halt_when_idle"})
+
 #: 状态归属表：字段 -> 写它的方法集合（**三种写法都算**：`self.X = …` / `self.X[k] = …` /
 #: `self.X.append(...)`）。这条是「状态声明分散到七个模块之后，谁动它」的唯一对账面。
 STATE_WRITERS: dict[str, frozenset[str]] = {
@@ -410,16 +428,19 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
     "_auth_fail": frozenset({"_adopt_solo"}),
     # 2026-10-17（L3）：`drop_course` 摘课时要把四个旁表一起清（`_cursor` 若指向被摘的课，
     # 下一个轮转起点就是个空壳）⇒ 它是第五个写者。
-    "_cursor": frozenset({"__init__", "claim_job", "claim_next", "drop_course"}),
+    # B7-P3：10 个搬进协作者的字段不再由组合类 `__init__` 赋值（协作者自己的构造负责）。
+    "_cursor": frozenset({"claim_job", "claim_next", "drop_course"}),
+    "course_table": frozenset({"__init__"}),
+    "board": frozenset({"__init__"}),
     "_discover_fresh": frozenset({"__init__"}),
     "_discover_last": frozenset({"__init__", "discover"}),
     "_sweep_at": frozenset({"__init__", "sweep_dead_leases"}),
     "_discover_root": frozenset({"__init__"}),
-    "_halt_default": frozenset({"__init__", "_adopt_solo", "set_halt"}),
-    "_halts": frozenset({"__init__", "set_halt", "drop_course"}),
+    "_halt_default": frozenset({"_adopt_solo", "set_halt"}),
+    "_halts": frozenset({"set_halt", "drop_course"}),
     #: 2026-11-12（干完才停）：被别家活儿挡住时置门闩，空闲取活那一拍重评（`set_halt` 清）。
-    "_halt_when_idle": frozenset({"__init__", "halt_if_idle", "maybe_halt_when_idle", "set_halt"}),
-    "_locate_cache": frozenset({"__init__", "course_of", "drop_course"}),
+    "_halt_when_idle": frozenset({"halt_if_idle", "maybe_halt_when_idle", "set_halt"}),
+    "_locate_cache": frozenset({"course_of", "drop_course"}),
     #: ★M4b：模式表 `_modes` 随「课程无模式」删除；只剩启动参数的模式段标记（只读）。
     "_mode_ignored": frozenset({"__init__"}),
     #: 派发状态（课程 → 记录）：`dispatch_record` 首次载入时就地缓存（写），`_dispatch_update` 改，
@@ -428,7 +449,6 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
     "_dispatch": frozenset({"__init__", "dispatch_record", "_dispatch_update", "note_progress"}),
     "_dispatch_lock": frozenset({"__init__"}),
     "_no_marker_warned": frozenset({"__init__", "_serves_course", "drop_course"}),
-    "_ambiguous": frozenset({"__init__", "_note_ambiguous"}),
     "_disk_lock": frozenset({"__init__"}),
     "_lease_lock": frozenset({"__init__"}),
     "_leases": frozenset(
@@ -452,12 +472,13 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
     #: 是写入面（`note_worker_error` 追加 + 两条闸的剔除），锁只被 `__init__` 建。
     "_worker_errors": frozenset({"__init__", "note_worker_error"}),
     "_we_lock": frozenset({"__init__"}),
-    "_order": frozenset({"__init__", "add_course", "drop_course"}),
+    "_order": frozenset({"add_course", "drop_course"}),
     #: 多课程预取窗口（2026-10-02，plan/course-pill-precision §4.1）：写点只有启动与 peek。
     "_peeked": frozenset({"__init__", "peek_jobs", "drop_course"}),
-    "_solo": frozenset({"__init__", "_adopt_solo"}),
-    "_stores": frozenset({"__init__", "add_course", "drop_course"}),
-    "_workers": frozenset({"__init__", "_adopt_solo"}),
+    "_solo": frozenset({"_adopt_solo"}),
+    "_stores": frozenset({"add_course", "drop_course"}),
+    "_workers": frozenset({"_adopt_solo"}),
+    "_ambiguous": frozenset({"_note_ambiguous"}),
 }
 
 #: 八个混入 + 声明面允许的仓内依赖（多一个就说明又搬漏/搬多了）。
@@ -618,7 +639,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     assert len(seen) == 138, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
-    assert sorted(own) == list(OWN_METHODS), (
+    assert sorted(own) == sorted(OWN_METHODS), (
         f"组合类又定义了自己的方法：{sorted(set(own) - set(OWN_METHODS))}"
     )
     # 反向：整个类不得再在 hub_server 里出现（定义唯一是双向的），一个成员也不行。
@@ -988,7 +1009,7 @@ def test_the_state_writer_table_matches_reality() -> None:
     }
     # `_cursor` 是唯一的**跨簇写**（`claim_next`/`claim_job` 都在 `queue_claims`）：
     # 它是「轮转起点」，只有真正拿到活的那一方才推进（R2-C2）——离开这张表就能看出来。
-    assert STATE_WRITERS["_cursor"] == {"__init__", "claim_job", "claim_next", "drop_course"}
+    assert STATE_WRITERS["_cursor"] == {"claim_job", "claim_next", "drop_course"}
 
 
 def test_only_the_composed_init_declares_state_with_values() -> None:
@@ -1029,13 +1050,38 @@ def test_only_the_composed_init_declares_state_with_values() -> None:
             declared.add(n.target.attr)
         elif isinstance(n, ast.Assign):
             declared |= {t.attr for t in n.targets if isinstance(t, ast.Attribute)}
-    # 两个鉴权字段的声明点在 `hub/auth.py::_AuthGuard.__init__`（组合类在末尾调它）——
-    # 所以本类体里该少这两个，其余 20 个必须逐条在。
-    want = set(STATE_WRITERS) - AUTH_GUARD_FIELDS
+    # 两个鉴权字段的声明点在 `hub/auth.py::_AuthGuard.__init__`；两张状态表的 10 个字段
+    # 搬进 `course_table` / `board`（B7-P3），组合类只声明这两个协作者本身。
+    want = (
+        set(STATE_WRITERS) - AUTH_GUARD_FIELDS - COURSE_TABLE_FIELDS - BOARD_FIELDS
+    ) | {"course_table", "board"}
     assert declared == want, (
         f"`__init__` 申报的字段与状态表对不上：多 {sorted(declared - want)}，"
         f"少 {sorted(want - declared)}"
     )
+
+
+def test_the_two_state_tables_live_on_their_collaborators(tmp_path: Path) -> None:
+    """B7-P3：课程表 / worker 板的 10 个字段只在协作者上，组合类只留转发属性。"""
+    store = _JobStore(tmp_path / "jobs", tmp_path / "log.jsonl")
+    hub = _HubQueue({"c1": store}, order=["c1"])
+    table, board = hub.course_table, hub.board
+    assert type(table).__name__ == "CourseTable" and type(board).__name__ == "WorkerBoard"
+    table_stores, hub_stores = table._stores, hub._stores
+    table_order, hub_order = table._order, hub._order
+    solo, workers = table._solo, board._workers
+    hub_workers = hub._workers
+    assert table_stores is hub_stores and table_order is hub_order
+    assert solo is store, "单课程借表指针没有落在课程表上"
+    assert workers is hub_workers
+    for name in (*COURSE_TABLE_FIELDS, *BOARD_FIELDS):
+        assert name not in hub.__dict__, f"{name} 又存了一份在组合类实例上"
+    # 属性是**可写**的（`_adopt_solo` / `drop_course` 的整表替换语义），不是只读快照。
+    hub._cursor = "c1"
+    hub._halt_default = True
+    cursor, halt_default = table._cursor, board._halt_default
+    assert cursor == "c1" and halt_default is True
+    assert hub.courses() == ["c1"], "协作者属性不能吃掉既有的 `courses()` 读法"
 
 
 # ────────────── ⑤ 共同声明面 `QueuePeer` ──────────────
@@ -1221,6 +1267,9 @@ def test_the_layers_match_the_ledger() -> None:
     ⇒ 随迁 L8，必须仍严格向下。"""
     for domain in DOMAINS:
         assert dag.LAYERS[f"hub.{domain}"] == 3, domain
+    # B7-P3 的两个纯状态协作者：零仓内 import ⇒ L0，组合类站在它们上面。
+    assert dag.LAYERS["hub.course_table"] == 0
+    assert dag.LAYERS["hub.worker_board"] == 0
     assert dag.LAYERS["hub.queue_peer"] == 1
     assert dag.LAYERS["hub.store"] == 2
     assert dag.LAYERS["hub.queue"] == 4

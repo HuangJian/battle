@@ -157,6 +157,9 @@ LAYERS: dict[str, int] = {
     # 鉴权原语（S4 第十五刀）：`_is_loopback` + `_AuthGuard`（D9 闭锁）从 `hub_server` 下沉到这里。
     # 只靠标准库 ⇒ L0；`hub.store`（组合类）与 `hub.queue_auth`（鉴权域混入）都站在它上面。
     "hub.auth": 0,
+    # B7-P3：`_HubQueue` 的两张状态表（课程表 / worker 板）——零仓内 import 的纯状态叶子。
+    "hub.course_table": 0,
+    "hub.worker_board": 0,
     # worker 静默哨兵（2026-10-31，`plan` 外的热修；见 `hub/worker_pulse.py` 头部）：只靠
     # stdlib（time/threading）⇒ **L0**。读者是 `hub.http_face`(L5) 的类属性与 `hub.boot`(L6)
     # 的后台线程——两条边都严格向上，秩不变。

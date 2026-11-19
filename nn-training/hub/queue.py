@@ -60,6 +60,7 @@ from pathlib import Path
 from threading import Lock
 
 from hub.auth import _AuthGuard
+from hub.course_table import CourseTable
 from hub.queue_auth import QueueAuthMixin
 from hub.queue_claims import QueueClaimsMixin
 from hub.queue_discover import QueueDiscoverMixin
@@ -69,6 +70,7 @@ from hub.queue_resume import QueueResumeMixin
 from hub.queue_scope import QueueScopeMixin
 from hub.queue_store_face import QueueStoreFaceMixin
 from hub.store import _JobStore
+from hub.worker_board import WorkerBoard
 
 # `DISCOVER_FRESH_SEC` / `DISCOVER_SCAN_MIN_SEC` 两个类常量随发现簇搬进 `queue_discover`，
 # 本类经 MRO 继承（`hub.DISCOVER_SCAN_MIN_SEC` 这类实例访问照旧）。
@@ -123,15 +125,18 @@ class _HubQueue(
 
     def __init__(
         self,
-        stores,
-        order=None,
+        stores: dict[str, _JobStore],
+        order: list[str] | None = None,
         ignored_modes=None,
         now_fn=None,
         discover_root=None,
         discover_fresh_sec: float = DISCOVER_FRESH_SEC,
     ) -> None:
-        self._stores: dict[str, _JobStore] = dict(stores)
-        self._order: list[str] = [c for c in (order or list(self._stores)) if c in self._stores]
+        # B7-P3：课程表 / worker 登记与停机达令切成两个**有状态协作者**。组合类保留同名
+        # 属性（见本类末尾），既有 `self._stores[...]` 调用点与测试逐字不变。
+        # 名字用 `course_table` 而不是 `courses`：后者是既有的公开读法 `courses()`（方法）。
+        self.course_table: CourseTable[_JobStore] = CourseTable(stores, order)
+        self.board = WorkerBoard()
         #: 自动发现根（`--traj-root`）；None = 关（`--discover` 未给，零开销零行为变化）
         self._discover_root: Path | None = Path(discover_root) if discover_root else None
         self._discover_fresh = float(discover_fresh_sec)
@@ -145,22 +150,10 @@ class _HubQueue(
         self._mode_ignored: set[str] = {str(c) for c in (ignored_modes or ())}
         # hold 镜像同步到 store（★M1b：`__init__` 末段的 `_sync_hold` 循环——同步要时钟
         # （`hold_of`），必须在 `self._now` 赋值之后）。
-        #: 上次派发过的课程（轮转起点）；None = 从序首开始
-        self._cursor: str | None = None
-        #: job_id -> course（归属解析缓存；job_id 不可复用，故不会失效）
-        self._locate_cache: dict[str, str] = {}
         #: 课程 -> 最近被 `peek_jobs` 返回候选的时刻（秒）。多课程预取窗口的**观测面**状态
         #: （2026-10-02，plan/course-pill-precision §4.1）：只被 `/admin/queue` 读，不参与
         #: 任何派发判据；重启即清（窗口本来就是过程量，与租约同口径）。
         self._peeked: dict[str, float] = {}
-        #: jid -> 同时持有它的课程（≥2 = 身份歧义）。两个用途：`course_of` 的**去重打点**
-        #: （每个 job 作用域请求都会跑它，逐次打点会把日志刷爆），以及拒答时把
-        #: 「谁和谁撞了」带进 reason。观测面的**全量**清单另有 `ambiguous_jids()`（扫盘）。
-        self._ambiguous: dict[str, list[str]] = {}
-        #: 单课程 = 旧形状：进程级状态一律借那一份 store（见类 docstring ③）
-        self._solo: _JobStore | None = (
-            next(iter(self._stores.values())) if len(self._stores) == 1 else None
-        )
         #: 自动发现的扫描闸（`_discover_last` 初值 0 ⇒ 首次调用必扫）
         if self._discover_root is not None:
             self._discover_last = float("-inf")
@@ -210,14 +203,88 @@ class _HubQueue(
         # ★M4b：`_modes` 与 `dispatch_effective_mode` 已随「课程无模式」删除。
         for _c in self._order:
             self._sync_hold(_c)
-        #: 多课程时自己的 worker 登记表（worker_id -> last_seen）——避让链的唯一事实源。
-        self._workers: dict[str, float] = {}
-        # 停机达令**按课程**（2026-09-18 单 hub 化）：一个 hub 服务所有课程之后，若达令还是
-        # 进程级一个布尔，「A 课门禁 ABORT」会连坐 B 课的云机（B 的 worker 下一轮轮询就
-        # 拿到 halt 并自停）。故：无课程参数 = 全课程（旧调用方语义，落 `_halt_default`，
-        # 新发现的课也继承）；`?course=` = 只动那一门课的例外（`_halts`）。
-        self._halt_default = False
-        self._halts: dict[str, bool] = {}
-        # 「本轮干完再停」门闩（queue_scope.halt_if_idle 置位；空闲取活时重评）。
-        self._halt_when_idle = False
+
+    # ---- B7-P3：课程表 / worker 板的**转发属性**（状态只在协作者上） ----
+    # 八域混入仍写 `self._stores[...]` / `self._cursor = ...`：这些属性的 getter/setter 把
+    # 每一次读写落到 `self.course_table` / `self.board`，组合类自己**不存副本**。写口保留是为了
+    # `_adopt_solo` / `drop_course` 的整表替换语义（与旧实现逐字相同），不是给测试的缝。
+    @property
+    def _stores(self) -> dict[str, _JobStore]:
+        return self.course_table._stores
+
+    @_stores.setter
+    def _stores(self, value: dict[str, _JobStore]) -> None:
+        self.course_table._stores = value
+
+    @property
+    def _order(self) -> list[str]:
+        return self.course_table._order
+
+    @_order.setter
+    def _order(self, value: list[str]) -> None:
+        self.course_table._order = value
+
+    @property
+    def _solo(self) -> _JobStore | None:
+        return self.course_table._solo
+
+    @_solo.setter
+    def _solo(self, value: _JobStore | None) -> None:
+        self.course_table._solo = value
+
+    @property
+    def _cursor(self) -> str | None:
+        return self.course_table._cursor
+
+    @_cursor.setter
+    def _cursor(self, value: str | None) -> None:
+        self.course_table._cursor = value
+
+    @property
+    def _locate_cache(self) -> dict[str, str]:
+        return self.course_table._locate_cache
+
+    @_locate_cache.setter
+    def _locate_cache(self, value: dict[str, str]) -> None:
+        self.course_table._locate_cache = value
+
+    @property
+    def _ambiguous(self) -> dict[str, list[str]]:
+        return self.course_table._ambiguous
+
+    @_ambiguous.setter
+    def _ambiguous(self, value: dict[str, list[str]]) -> None:
+        self.course_table._ambiguous = value
+
+    @property
+    def _workers(self) -> dict[str, float]:
+        return self.board._workers
+
+    @_workers.setter
+    def _workers(self, value: dict[str, float]) -> None:
+        self.board._workers = value
+
+    @property
+    def _halt_default(self) -> bool:
+        return self.board._halt_default
+
+    @_halt_default.setter
+    def _halt_default(self, value: bool) -> None:
+        self.board._halt_default = value
+
+    @property
+    def _halts(self) -> dict[str, bool]:
+        return self.board._halts
+
+    @_halts.setter
+    def _halts(self, value: dict[str, bool]) -> None:
+        self.board._halts = value
+
+    @property
+    def _halt_when_idle(self) -> bool:
+        return self.board._halt_when_idle
+
+    @_halt_when_idle.setter
+    def _halt_when_idle(self, value: bool) -> None:
+        self.board._halt_when_idle = value
 
