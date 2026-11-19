@@ -101,32 +101,55 @@ if (edgeReady || (await httpOk(`${url}/ping`, …))) return url   // ← 短路�
 （顺带一个观察：这个 `|| ping` 其实是死分支，edge 未就绪时穿隧道 ping 几乎必然也失败，
 整条判据等价于只看 edge。）
 
-修法是把判据抽成**纯函数**（不探网络，因此不 spawn cloudflared 也能钉死）：
+修法第一步是把判据抽成**纯函数**（不探网络，因此不 spawn cloudflared 也能钉死）：
 
 ```ts
+// ✗ 首版（当天即回退，见下）
 export function tunnelRestartReason(prev, want): 'origin' | 'options' | null {
-  if ((prev.originUrl ?? '') !== want.origin) return 'origin'   // 回源错了，edge 再健康也是把流量送进 refused
+  if ((prev.originUrl ?? '') !== want.origin) return 'origin'
   if ((prev.cfProtocol ?? 'auto') !== want.protocol) return 'options'
-  if ((prev.cfEdgeIp ?? 'auto') !== want.edgeIp) return 'options'
   return null
 }
 ```
 
-配套三件事：① `originUrl` 成为账本字段（`core/types.ts`），每次 spawn 都写
-`http://127.0.0.1:<sharedHubPort>`；② 旧条目缺该字段 ⇒ 按「未知」重启**一次**把地址钉进去
-（`'' ≠ want` 天然落到重启分支，不需要额外的迁移代码）；③ 第六个 spawn 点
-`nn-training/hub/tunnel_ab_probe.py` 也改成 `127.0.0.1`。
+**这一步走反了 —— 当天就回退，值得单独记。** 它把「发现漂移」直接翻译成「杀旧起新」，而
+`kill + respawn` 对 quick tunnel 意味着**换域名**：CF 不允许重新领取同一 hostname，所以域名是
+**一次性凭据**。现场后果是：控制台一次心跳式重启把 `…trycloudflare.com` 换掉，所有把 hub url
+写死在 notebook cell / 配置 / 已部署节点里的服务**同时失联，且不可逆**。用户当场下了硬指令：
 
-**反向的取舍值得记一笔**：穿隧道 ping 失败**不再**单独触发重启。它多半是出网劣化或 hub 侧
-故障，而重启会把 quick tunnel 的域名换掉 —— 那是这条链上最贵的操作（所有已部署节点要跟着改
-`CFG.hub_url` 重跑）。所以 ping 只当诊断，**地址比对才当判据**：前者是漂移，后者是确定性证据。
+> 不要乱重启 hub 的 cloudflared tunnel！！！！很多服务都在连接原来的 hub url，重启后就连不上了！！！
+
+所以最终判据是**保域名优先**（`hub.ts::tunnelReuse`）：
+
+```ts
+export function tunnelReuse(prev, want, edgeReady) {
+  const drift = /* origin / options / null —— 只用来报警 */
+  if (!edgeReady) return { act: 'respawn', drift }   // edge 走了 = 这条隧道已无路可走，没有可保的域名
+  return { act: 'reuse', drift }                     // ★ edge 在线 ⇒ 永远复用，漂移只 warn
+}
+```
+
+三处的分工因此变得清楚：
+
+| 信号 | 处置 | 理由 |
+|---|---|---|
+| `edgeReady === true` | **复用**（漂移只 `warn`） | 隧道是本机与全网之间的唯一凭据；杀了 = 断所有人 |
+| `originUrl` / 选项不一致 | 只 `warn`，附「要生效请人显式停止→启动，并通知各处改 hub_url」 | 「该报警」≠「该杀」 |
+| `edge` 掉线 | 重建，日志明写「⚠ 域名会变，外部节点需重填 hub_url」 | 此时域名本来就拿不到流量，无可保 |
+| 穿隧道 ping 失败 | 只当诊断，不触发任何动作 | 多半是出网/hub 侧劣化，拿它换域名代价荒谬 |
+
+配套：① `originUrl` 成为账本字段（`core/types.ts`），每次 spawn 都写
+`http://127.0.0.1:<sharedHubPort>`，**只为报警**；② 第六个 spawn 点
+`nn-training/hub/tunnel_ab_probe.py` 也改成 `127.0.0.1`。
 
 ### 单测
 
-`dashboard/tests/tunnel-reuse-origin.test.ts`（新，7 例）：判据表 6 例（地址一致 ⇒ 复用 ·
-仍写 `localhost` ⇒ 重启 · 缺 `originUrl` ⇒ 重启 · hub 端口改了 ⇒ 重启 · 选项变了 ⇒ `options`）+
-spec 与内联 spawn 两条路径的 `--url`/`--metrics` 字面量对账（`hub.ts` 源码不得再出现
-`http://localhost`）。真进程行为仍由 `single-hub-tunnel` / `views-cloudflared-health` 守。
+`dashboard/tests/tunnel-reuse-origin.test.ts`（新，9 例）：判据表 6 例（一致 ⇒ 复用无漂移 ·
+仍写 `localhost` ⇒ **仍复用** + `drift=origin` · 缺 `originUrl` ⇒ 同上 · hub 端口改了 ⇒ 同上 ·
+选项变了 ⇒ **仍复用** + `drift=options`）+ edge 掉线 ⇒ `respawn` 2 例 + spec 与内联 spawn 两条
+路径的 `--url`/`--metrics` 字面量对账 + **结构断言「复用分支里 `killPid` 只许出现一次」**
+（谁再把「漂移就重启」加回来，这条先红）。真进程行为仍由 `single-hub-tunnel` /
+`views-cloudflared-health` 守。
 
 `tests/remote/test_rollout_relay.py` +3：网关码必须换路由且不记 route · 死因行带 `server=cloudflare`
 与机读码 · `RelayChannel.hub_url` 跟随端口改写（并钉 `direct`——扫描只验过直连那条）。

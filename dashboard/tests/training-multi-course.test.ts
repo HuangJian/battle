@@ -597,9 +597,9 @@ describe('P3 共享单隧道', () => {
     )
     // 两半同步：spawn 必须走共用 helper，不得再自拼 --protocol
     expect(src).toContain('...cfTunnelArgs(cfg)')
-    // 变更检测（防「改了选项不生效」的假成功）：登记值与当前配置不一致即杀旧起新。
-    // 2026-11-19 M2 起判据收进纯函数，**origin 也要比**——只比选项时，把 `--url` 从 localhost
-    // 改成 127.0.0.1 之后旧隧道会被原样复用（edge 在线就算「可复用」），现场长得像没修。
+    // 漂移检测（回源 / 选项）：登记值与当前配置不一致要能被发现。
+    // ⚠ 发现 ≠ 重启：quick tunnel 换域名会把所有已部署节点打死（2026-11-19 用户强烈指令），
+    // 所以这组判据只喂 `warn`。见 tunnel-reuse-origin.test.ts 的「edge 在线 ⇒ 永远复用」。
     expect(src).toContain('resolveCfTunnel(cfg)')
     expect([
       src.includes("(prev.cfProtocol ?? 'auto') !== want.protocol"),

@@ -285,25 +285,37 @@ export async function supersedeLegacyInstances(key: SharedComponent): Promise<st
   return struck
 }
 
-/** 复用既有隧道前的**静态判据**（不探网络）：回源地址 → 隧道选项。返回非 null 即必须重启。
+/** 复用 / 重建既有隧道的**判据表**（纯函数；`edgeReady` 由调用方探，本函数只下结论）。
  *
- *  为什么单独抽出来：2026-11-19 那次「代码修了没生效」的责任全在这张判据表上——旧实现
- *  用 `edgeReady || 穿隧道 ping` 做复用门，**根本没看 origin**，于是把 `--url` 从
- *  `localhost` 改成 `127.0.0.1` 之后，已经跑起来的那条旧隧道（回源拨 `::1`）照样被复用，
- *  节点继续吃 502。抽成纯函数后这条不变式可被用例直接钉死，不必真去 spawn cloudflared。
+ *  ★★ 硬不变式（2026-11-19 用户强烈指令）：**edge 在线的隧道永远复用，绝不重建**。
+ *  原因与取舍都反着来的：quick tunnel 的域名是**一次性凭据**，杀进程重新申请就换名 ⇒ 所有把
+ *  hub url 写死在 notebook cell / 配置 / 已部署节点里的服务**立刻失联**，而且改不回来（CF 不允许
+ *  重新领取同一 hostname）。所以「重启隧道」不是一次本机操作，是一次**全网断连**。
  *
- *  顺序有意为之：origin 排第一——回源错了，edge 再健康也是把流量送进 refused。 */
-export function tunnelRestartReason(
+ *  历史两刀都栽在这条线上：
+ *   · 旧码 `edgeReady || 穿隧道 ping` 短路或 ⇒ 从不看 origin，回源写成 `localhost`（Go 解析成
+ *     `::1`）的旧隧道在代码修好后仍被复用（「改了代码没生效」）；
+ *   · 上一刀改成「origin/选项不一致就杀旧起新」——**从一个坑跳进另一个更深的坑**：它会把一条
+ *     edge 健康、正服务全网的隧道主动杀掉换域名。
+ *
+ *  现在的分工：`drift` **只报警不重启**（`origin` 排第一：回源错了，edge 再健康也是把流量送进
+ *  refused）；只有 `edge` 掉线（此时这条隧道本来就没路了，没有可保的域名）才重建。
+ *  想应用新的 spawn 参数 ⇒ 由**人**显式「停止 + 启动」两步，并自行通知各处改 hub_url。 */
+export function tunnelReuse(
   prev: Pick<RegistryEntry, 'cfProtocol' | 'cfEdgeIp' | 'originUrl'>,
   want: { origin: string; protocol: string; edgeIp: string },
-): 'origin' | 'options' | null {
-  // 旧条目没有 `originUrl`（当时不记）⇒ 按「未知」处理并重启一次，把地址钉进账本。
-  if ((prev.originUrl ?? '') !== want.origin) return 'origin'
-  // M1 变更检测（plan §3.2）：登记的选项 != 当前配置 → 杀旧起新，否则「改了选项其实没生效」
-  // 的假成功。旧登记无这两字段（= 当时未传旗标）⇒ 按 'auto' 比对，缺省 http2/4 会重启一次。
-  if ((prev.cfProtocol ?? 'auto') !== want.protocol) return 'options'
-  if ((prev.cfEdgeIp ?? 'auto') !== want.edgeIp) return 'options'
-  return null
+  edgeReady: boolean,
+): { act: 'reuse' | 'respawn'; drift: 'origin' | 'options' | null } {
+  // 旧条目没有 `originUrl`（当时不记）⇒ 按「未知」报警，但**不**因此重启。
+  const drift: 'origin' | 'options' | null =
+    (prev.originUrl ?? '') !== want.origin
+      ? 'origin'
+      : (prev.cfProtocol ?? 'auto') !== want.protocol || (prev.cfEdgeIp ?? 'auto') !== want.edgeIp
+        ? 'options'
+        : null
+  // edge 走了 = 这条隧道已无路可走（域名此刻也拿不到流量），重建不额外损失什么。
+  if (!edgeReady) return { act: 'respawn', drift }
+  return { act: 'reuse', drift }
 }
 
 /** 共享**单**隧道步骤（3 次申请重试；URL 以日志输出为触发）。
@@ -324,42 +336,42 @@ export async function stepCloudflared(cfg: RlConfig, noTunnel = false): Promise<
     throw new Error('cloudflared 未安装')
   }
 
-  // 已有登记的隧道：先核对**静态条件**（回源地址 / 隧道选项），再谈 edge。
-  // M2（2026-11-19 事故）：这里的判据曾是 `edgeReady || 穿隧道 ping` —— 短路或 ⇒ edge 在线
-  // 就复用，从不看 origin。于是回源写成 `localhost`（Go 解析成 `::1`，hub 只绑 v4）的那条
-  // 旧隧道在代码修好之后**仍在服务**，节点继续吃 502，现场表现为「改了代码却没生效」。
-  // 反向的取舍：回源地址变了 ⇒ 必须杀旧起新（代价是换域名）；而**穿隧道 ping 失败不该单独
-  // 触发重启**——那多半是出网劣化/hub 侧故障，为一时的抖动换域名会让所有已部署节点失联。
-  // （顺带说明旧码的 `|| ping` 其实是死分支：edge 未就绪时 ping 几乎必然也失败，等价于只看 edge。）
+  // 已有登记的隧道：**只要 edge 在线就复用**，无论回源/选项是否有漂移（漂移只报警）。
+  // 2026-11-19：上一刀在这里「发现 origin 不一致就杀旧起新」，结果一次心跳式重启把域名换掉，
+  // 所有连着旧 hub url 的服务同时失联 —— 用户明确禁止。安全侧改成「保域名优先」：
+  // 隧道是本机与全网之间的**唯一凭据**，杀了就等于断了所有人，而换域名是不可逆的。
   const wantTunnel = resolveCfTunnel(cfg)
   const hubPort = sharedHubPort(cfg)
   const wantOrigin = `http://127.0.0.1:${hubPort}`
   if (prev && pidAlive(prev.pid) && prev.url) {
     const url = prev.url
-    const why = tunnelRestartReason(prev, {
-      origin: wantOrigin,
-      protocol: wantTunnel.protocol,
-      edgeIp: wantTunnel.edgeIp,
-    })
-    if (why === 'origin') {
+    const edgeReady = await tunnelEdgeReady(prev.metrics)
+    const { act, drift } = tunnelReuse(
+      prev,
+      { origin: wantOrigin, protocol: wantTunnel.protocol, edgeIp: wantTunnel.edgeIp },
+      edgeReady,
+    )
+    if (drift === 'origin') {
       warn(
-        `隧道回源地址变更（${prev.originUrl || '未登记'} → ${wantOrigin}）——重启 cloudflared：` +
-          '旧隧道仍在拨旧地址（`localhost` → `::1` ⇒ 502），复用它等于没修',
+        `隧道回源与登记不一致（${prev.originUrl || '未登记'} → ${wantOrigin}）——` +
+          '**不重启**（重启会换域名、断掉所有已部署节点）；请只读取证，确需生效由人显式' +
+          '「停止隧道 → 启动隧道」并通知各处改 hub_url',
       )
-      await killPid(prev.pid)
-    } else if (why === 'options') {
+    } else if (drift === 'options') {
       warn(
-        `隧道选项变更（${prev.cfProtocol ?? 'auto'}/${prev.cfEdgeIp ?? 'auto'} → ` +
-          `${wantTunnel.protocol}/${wantTunnel.edgeIp}）——重启 cloudflared 使新选项生效`,
+        `隧道选项与登记不一致（${prev.cfProtocol ?? 'auto'}/${prev.cfEdgeIp ?? 'auto'} → ` +
+          `${wantTunnel.protocol}/${wantTunnel.edgeIp}）——**不重启**，新选项下次自然启动才生效`,
       )
-      await killPid(prev.pid)
-    } else if (!(await tunnelEdgeReady(prev.metrics))) {
-      warn('cloudflared 进程存在但 edge 未连接，重启中...')
-      await killPid(prev.pid)
-    } else {
-      ok(`cloudflared 已在运行（edge 在线，回源 ${wantOrigin}）: ${url}`)
+    }
+    if (act === 'reuse') {
+      ok(`cloudflared 已在运行（edge 在线，复用现有域名）: ${url}`)
       return url
     }
+    warn(
+      'cloudflared 进程存在但 **edge 未连接**（该隧道已无路可走）——重建；' +
+        '⚠ 域名会变，外部节点需重新填 hub_url',
+    )
+    await killPid(prev.pid)
   }
 
   // 共享单隧道：一个 metrics 口（槽位 0 的 metrics）+ 一个 hub 目标端口（`hubPort` 已在
