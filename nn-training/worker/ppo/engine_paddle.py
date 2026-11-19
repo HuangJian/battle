@@ -27,7 +27,7 @@ import numpy as np
 import paddle
 
 from common.contracts import ActionSpace, head_layout
-from common.schema import MOVE_DIM
+from worker.ppo.backend import Backend, StepConfig, StepState, run_step
 from worker.ppo.checkpoint_paddle import load_ckpt, save_ckpt
 from worker.ppo.demo import DemoBank
 from worker.ppo.rng import PPORng
@@ -217,6 +217,32 @@ def _zero_stats() -> dict[str, float]:
     }
 
 
+def _paddle_backend() -> Backend:
+    """Paddle 侧的算子表（与 `engine._torch_backend` 逐字段对应，钩子调用时解引用）。"""
+    return Backend(
+        exp=lambda x: paddle.exp(x),
+        clip=lambda x, lo, hi: paddle.clip(x, lo, hi),
+        minimum=lambda a, b: paddle.minimum(a, b),
+        mse_loss=lambda a, b: F.mse_loss(a, b),
+        masked_logsoftmax=lambda logits, mask: masked_logsoftmax(logits, mask),
+        cat_logprob=lambda action, logp: cat_logprob(action, logp),
+        cat_entropy=lambda logp: cat_entropy(logp),
+        kl_rows=lambda logp, ref: (logp.exp() * (logp - ref)).sum(axis=-1),
+        approx_kl=lambda lp_old, lp_new: approx_kl_est(lp_old, lp_new),
+        zeros=_zero_scalar,
+        demo_masked_ce=lambda logits, target, mask: _demo_masked_ce(logits, target, mask),
+        demo_index=lambda _buf, idx: paddle.to_tensor(idx.astype(np.int64)),
+        zero_grad=lambda opt: opt.clear_grad(),
+        backward=lambda loss: loss.backward(),
+        clip_grad_norm=lambda params, mx: clip_grad_norm_(params, mx),
+        optimizer_step=lambda opt: opt.step(),
+        no_grad=paddle.no_grad,
+        sync=lambda values: sync_scalars(values),
+        anchor_pull=lambda model, rho: apply_value_anchor_pull(model, rho),
+        policy_rms=lambda model: policy_new_rms_of(model),
+    )
+
+
 def ppo_update(
     model,
     opt,
@@ -266,6 +292,27 @@ def ppo_update(
     layout = head_layout(space)
     demo_t, demo_n, demo_on = _prepare_demo(demo_bank, demo_bc_coef, demo_per_mb)
     ref_cache = _build_ref_cache(tensored, ref_model, kickstart_kl, space)
+    # 步级系数 / 跨步状态 / 算子表各构建一次（热路径不再分配）。
+    bk = _paddle_backend()
+    cfg = StepConfig(
+        clip=clip,
+        ent_coef=ent_c,
+        vf_coef=VF_COEF,
+        kl_coef=kl_coef,
+        kickstart_kl=kickstart_kl,
+        value_anchor=value_anchor,
+        demo_bc_coef=demo_bc_coef,
+        demo_per_mb=demo_per_mb,
+        max_grad_norm=MAX_GRAD_NORM,
+    )
+    st = StepState(
+        layout=layout,
+        tensored=tensored,
+        ref_cache=ref_cache,
+        demo_on=demo_on,
+        demo_n=demo_n,
+        demo_t=demo_t,
+    )
     t0 = time.time()
     last_hb = t0
     start_epoch, steps_done = load_ckpt(model, opt, ckpt_path, ppo_rng)
@@ -277,99 +324,8 @@ def ppo_update(
     for ep in range(start_epoch, epochs):
         perm = ppo_rng.epoch.permutation(len(tensored))
         for j, i in enumerate(perm):
-            e = tensored[int(i)]
-            obs = e["obs"]
-            sc = e["scalars"]
-            a_move = e["a_move"]
-            a_fire = e["a_fire"]
-            lp_move = e["lp_move"]
-            lp_fire = e["lp_fire"]
-            adv = e["adv"]
-            ret = e["ret"]
-            mask = e["mask"]
-
-            out = model(obs, sc, e.get("extra"))
-            if layout.has_hold:
-                mv, fr, hd, val = out
-            else:
-                mv, fr, val = out
-                hd = None
-            move_logp = masked_logsoftmax(mv, mask[:, layout.move_slice])
-            fire_logp = masked_logsoftmax(fr, mask[:, layout.fire_slice])
-            hold_logp = (
-                masked_logsoftmax(hd, mask[:, layout.hold_slice])
-                if layout.hold_slice is not None and hd is not None
-                else None
-            )
-
-            lp_new = cat_logprob(a_move, move_logp) + cat_logprob(a_fire, fire_logp)
-            lp_old = lp_move + lp_fire
-            if hold_logp is not None:
-                lp_new = lp_new + cat_logprob(e["a_hold"], hold_logp)
-                lp_old = lp_old + e["lp_hold"]
-
-            ratio = paddle.exp(lp_new - lp_old)
-            surr1 = ratio * adv
-            surr2 = paddle.clip(ratio, 1.0 - clip, 1.0 + clip) * adv
-            policy_loss = -paddle.minimum(surr1, surr2).mean()
-
-            value_loss = F.mse_loss(val.squeeze(-1), ret)
-            entropy = cat_entropy(move_logp) + cat_entropy(fire_logp)
-            if hold_logp is not None:
-                entropy = entropy + cat_entropy(hold_logp)
-
-            loss = policy_loss + VF_COEF * value_loss - ent_c * entropy
-            if kl_coef > 0.0:
-                loss = loss + kl_coef * ((ratio - 1.0) - (lp_new - lp_old)).mean()
-            kick_mean = _zero_scalar()
-            _ref = ref_cache[int(i)]
-            if _ref is not None:
-                kl_m = (move_logp.exp() * (move_logp - _ref[0])).sum(axis=-1)
-                kl_f = (fire_logp.exp() * (fire_logp - _ref[1])).sum(axis=-1)
-                kl_parts = kl_m + kl_f
-                if len(_ref) > 2 and hold_logp is not None:
-                    kl_parts = kl_parts + (hold_logp.exp() * (hold_logp - _ref[2])).sum(axis=-1)
-                kick_mean = kl_parts.mean()
-                loss = loss + kickstart_kl * kick_mean
-            demo_bc_mean = _zero_scalar()
-            if demo_on:
-                _didx = ppo_rng.demo.integers(0, demo_n, size=int(demo_per_mb))
-                _didx_t = paddle.to_tensor(_didx.astype(np.int64))
-                _dm = model(
-                    demo_t["obs"][_didx_t],
-                    demo_t["scalars"][_didx_t],
-                    demo_t["extra"][_didx_t] if "extra" in demo_t else None,
-                )[0]
-                _dmm = demo_t["masks"][_didx_t]
-                _dact = demo_t["actions"][_didx_t]
-                demo_bc_mean = _demo_masked_ce(_dm, _dact[:, 0], _dmm[:, :MOVE_DIM])
-                loss = loss + float(demo_bc_coef) * demo_bc_mean
-
-            opt.clear_grad()
-            loss.backward()
-            gn = clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
-            opt.step()
+            stats.append(run_step(bk, model, opt, st, cfg, ppo_rng, int(i)))
             steps_done += 1
-            value_new_rms = apply_value_anchor_pull(model, value_anchor)
-            policy_new_rms = policy_new_rms_of(model)
-
-            stats.append(
-                sync_scalars(
-                    {
-                        "policy": policy_loss,
-                        "value": value_loss,
-                        "entropy": entropy,
-                        "kl": approx_kl_est(lp_old, lp_new),
-                        "kickstart": kick_mean,
-                        "demo_bc": demo_bc_mean,
-                        "mean_ret": ret.mean(),
-                        "mean_adv": adv.mean(),
-                        "gnorm": gn,
-                        "value_new_rms": value_new_rms,
-                        "policy_new_rms": policy_new_rms,
-                    }
-                )
-            )
             if progress is not None:
                 now = time.time()
                 if now - last_hb >= HB_SEC:

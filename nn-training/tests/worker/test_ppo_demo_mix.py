@@ -188,3 +188,41 @@ def test_demo_bc_feeds_the_bank_extra_to_a_policy_extra_model() -> None:
     )
     assert np.isfinite(agg["demo_bc"])
     assert agg["demo_bc"] > 0.0, f"demo_bc={agg['demo_bc']}，BC 项疑似未生效"
+
+
+def test_demo_index_reuses_one_device_buffer(monkeypatch) -> None:
+    """demo 采样必须走**复用缓冲**：每步现造设备索引张量 ⇒ XLA 每步一次全图重编译。
+
+    真机实录 8~10s/步、编译命中时 0.31s/步（见 `tests/worker/test_xla_step_diag.py` 的
+    接线钉）。这条是**行为面**：`engine.demo_index` 每步都拿到**同一个**缓冲对象；退回
+    「每步现造设备张量」时缓冲是 `None`，退回「拿 numpy 直接索引」时这个钩子根本不会被
+    调用 —— 两者都让本用例红。
+    """
+    import worker.ppo.engine as eng
+
+    real = eng.demo_index
+    seen: list[tuple[int | None, tuple[int, ...]]] = []
+
+    def spy(buf, idx):
+        seen.append((None if buf is None else id(buf), tuple(idx.shape)))
+        return real(buf, idx)
+
+    monkeypatch.setattr(eng, "demo_index", spy)
+    np.random.seed(7)
+    model, opt = _fresh()
+    ppo_update(
+        model,
+        opt,
+        _chunks(),
+        1,
+        torch.device("cpu"),
+        kl_coef=0.0,
+        demo_bank=cast(DemoBank, _bank()),
+        demo_bc_coef=0.5,
+        demo_per_mb=8,
+    )
+    assert len(seen) == len(_chunks()), f"每步应调用一次 demo_index，实得 {len(seen)} 次"
+    buffers = {buf for buf, _ in seen}
+    assert buffers and None not in buffers, f"缓冲不能缺席（实得 {buffers}）"
+    assert len(buffers) == 1, f"缓冲必须跨步复用同一个对象，实得 {len(buffers)} 个"
+    assert all(shape == (8,) for _, shape in seen), seen

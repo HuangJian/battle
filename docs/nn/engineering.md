@@ -25,6 +25,80 @@
 
 ---
 
+## §222 `Backend` 算子表：torch / Paddle 的训练步合一（2026-11-19，B8 第十三刀）
+
+`worker/ppo/engine.py`（torch，per-tick）与 `worker/ppo/engine_paddle.py`（Paddle 双生）的
+minibatch 步曾是**同一顺序写两遍**：13 个 12 行克隆窗口**全部**落在这一步里（前向 → 三头
+掩码 log-softmax → ratio/surr → value/entropy → KL 惩罚 / BC 锚 / demo BC → backward →
+裁剪 → step → 值锚收缩 / policy rms → 一次同步）。本刀把**顺序**搬进
+`worker/ppo/backend.py`（216 物理行 / LOC 138），两个引擎只剩「循环 + 自己的遥测」。
+
+| 读数 | 前 | 后 |
+|---|---:|---:|
+| 克隆窗口 `engine ↔ engine_paddle`（`py_clones` 口径） | 13 | **0** |
+| `engine.py` LOC | 802 | **757** |
+| `engine_paddle.py` LOC | 323 | **282** |
+| 新模块 `backend.py` LOC | — | 138 |
+
+### 接缝：一张 20 个字段的 `Backend` 函数表
+
+`Backend` 是 frozen dataclass，字段全是**无状态纯函数 / 生命周期钩子**：算子面
+（`exp` / `clip` / `minimum` / `mse_loss` / `masked_logsoftmax` / `cat_logprob` / `cat_entropy` /
+`kl_rows` / `approx_kl` / `zeros` / `demo_masked_ce` / `demo_index`）与生命周期
+（`zero_grad` / `backward` / `clip_grad_norm` / `optimizer_step` / `no_grad` / `sync` /
+`anchor_pull` / `policy_rms`）。两个框架的实现各自留在自己的模块里
+（`engine._torch_backend` / `engine_paddle._paddle_backend`）—— `backend.py` **不 import
+任何后端**（由 `tests/worker/test_ppo_backend_parity.py` 的 AST 用例钉住），所以 Paddle-only 的
+解释器 import 共享核不会拖进 torch。
+
+两个附加的「数据」也一起搬了：`StepConfig`（一次 update 内恒定的系数：clip / vf / ent /
+kl / kickstart / anchor / demo / max_grad_norm）与 `StepState`（已物化的 chunk、预计算的 ref、
+demo 视图与复用索引缓冲）。
+
+### 刻意留在各自家里的（都是框架生命周期，不是数学）
+
+torch 侧：`torch.profiler`、XLA 步耗诊断（`_record_diag` / `_finish`）、每步 `xla_mark_step`、
+心跳与 `progress` bundle。Paddle 侧：`paddle.set_device`、`steps_out` 的步数出口、
+`checkpoint_paddle` 的落盘。两侧的 demo bank **物化**也不同（torch 走 `tensored_chunks`、
+Paddle 手建 dict）——那是数据准备，不是训练步。
+
+### 打桩面：钩子必须**调用时**解引用
+
+`_torch_backend` 的每个钩子都写成 `lambda …: 模块全局(…)`，而不是直接塞函数对象。
+一例就够：`tests/worker/test_ppo_scalar_sync.py` 把 `eng.sync_scalars` 换成
+逐项 `.item()` 的旧实现做端到端 A/B —— 绑定过早会让那次对照变成「新旧同一条路径」而照样绿。
+本仓已因「打桩静默失效」翻车三次（`common.codehash.dirty_hash_files` / `hub.server` /
+`weights_ledger`），所以这条不是风格，是必需。
+
+### 证明：三段都对到“位”
+
+| 段 | 做法 | 结果 |
+|---|---|---|
+| torch 侧逐位 | 改动前后各跑一次 `tools/paddle_parity.py fixture`（8 个 case：plain / kl+ent / kick / demo / extra+anchor / v6 / tower / ckpt） | `stats` / `weights_after` / 前后向 / `chunk.npz` / torch ckpt 目录 **逐字节相同** |
+| Paddle 对 torch | `check --dir`（Paddle 读 torch 基准跑同一步） | 8/8 PASS，读数与改动前**逐位相同**：fwd worst 1.73e-06 · stats 1.37e-05 · weights 5.96e-04 · after 9.86e-04 |
+| 反向（Paddle→torch） | `verify --dir`（torch 读 Paddle 导出的权重） | 9/9 PASS，worst 2.38e-05，与改动前同值 |
+
+不靠容差“变宽松”过关：容差未动，读数未动。
+
+### 守卫与账本
+
+`tests/worker/test_ppo_backend_parity.py`（6 条）：共享核零后端 import · 两张算子表每个字段
+都可调用 · 两个引擎都真的调 `run_step` · 两侧函数内 12 行克隆窗口为 0。另有两处旧挂靠跟着
+搬家：`test_xla_step_diag.py` 的 demo 索引回归钉改成**接线**判据（AST：`demo_index=` 的
+lambda 必须把 `buf`/`idx` 原样转发），行为面那条新增到
+`test_ppo_demo_mix.py::test_demo_index_reuses_one_device_buffer`（同一缓冲对象跨步复用）。
+
+连带账本：`any_baseline` 新增 `worker/ppo/backend.py: 18`（**为什么不是 `object`**：这些钩子的
+入参/返回就是 `torch.Tensor` 与 `paddle.Tensor`，共享核要对其做 `.mean()` / `*` / `.sum()`，
+`object` 在 mypy 下过不了；而 `TypedDict` 描述不了“张量”）；`remote_dag` 登记
+`worker.ppo.backend` **L1**；复用账本 `BASELINE_CLONE` **17 → 15**（−2）；`engine`/`goal` 的
+`Any` 计数未变。
+
+验证：`bash tools/githook/nn-python-gate.sh` 全绿（ruff + mypy **983** 文件 + **6272 passed** /
+2 skipped / 75.19s；+7 = 新守卫 6 条 + 行为化的 demo 索引钉，旧接线钉改成 AST 判据）。
+
+---
+
 ## §221 `PPOLoop` 第一刀：goal / intent 的 numpy 循环合成一份（2026-11-19，B8 第十二刀）
 
 B8 只剩 ④。`worker/ppo/goal.py`（515 物理行）与 `intent.py`（489）的 update 不是「拷了一整段」，

@@ -630,6 +630,10 @@ LAYERS: dict[str, int] = {
     # 2026-10-11（S3）：`load_episode_from_shard` 的骨架提到 `worker.ppo._episode`(L0)
     # （np-core 不再自含那两行）⇒ 从 L0 升为 **L1**。
     "worker.ppo.np_core": 1,
+    # 2026-11-19（B8 第十三刀）：torch / Paddle 共用的训练步与算子表。顶层只 import
+    # `common.contracts` / `common.schema`（= common 面，L0）⇒ **L1**；两个后端的引擎
+    # （`engine` L3 / `engine_paddle` L2）都向下指，反向为 0。
+    "worker.ppo.backend": 1,
     "worker.paired": 2,
     "worker.scripts.eval_bridge": 2,
     "worker.scripts.regen_reward_golden": 2,

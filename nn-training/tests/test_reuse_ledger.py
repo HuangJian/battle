@@ -149,8 +149,11 @@ _EXPECTED_EXEMPT_STEMS = frozenset(
 #:   `describe`（读数；与 `biz/reward_library` / `worker/stage_rotation` 的同名函数语义无关）。
 #:   **这不是复制实现**：`BASELINE_EXACT` 14 / `BASELINE_CLONE` 17 两条都未动（真重复会被那两条抓）。
 #:   协议名（dunder）在任何类里都同名，本条只防「同一个名字又被复制了一份」。
+#: 2026-11-19 **降到 15**（−2，实测）：B8 的两刀各消一组结构克隆 ——
+#:   `goal ↔ intent` 的 update 循环（`worker/ppo/loop.py`）与 `engine ↔ engine_paddle`
+#:   的训练步（`worker/ppo/backend.py`）。`BASELINE_EXACT` 与同名两条未动。
 BASELINE_EXACT = 14
-BASELINE_CLONE = 17
+BASELINE_CLONE = 15
 BASELINE_SAME_NAME_GE3 = 113
 
 

@@ -25,10 +25,10 @@ import pytest
 
 import worker.ppo.goal as ppo_goal
 import worker.ppo.intent as ppo_intent
+from tests.helpers.clone_windows import function_windows
 
 NN_DIR = Path(__file__).resolve().parents[2]
 PPO_DIR = NN_DIR / "worker" / "ppo"
-WIN = 12
 
 #: 两个入口的形参表（顺序敏感：stream.py 有一部分按位置传）。
 EXPECTED_PARAMS = [
@@ -121,34 +121,10 @@ def test_entries_stay_thin(name: str) -> None:
         assert call.func.id == "run_ppo", f"{fn.name} 转发到了 {call.func.id}（应为 run_ppo）"
 
 
-def _function_windows(path: Path) -> dict[tuple[str, ...], tuple[str, int]]:
-    """函数体内的 12 行归一窗口 → (所属函数名, 起始行)。
-
-    只收函数体内的行（模块序言的 import 块不是债），剔空行与纯注释行。
-    """
-    src = path.read_text(encoding="utf-8")
-    tree = ast.parse(src)
-    owners: dict[int, str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            for row in range(node.lineno, (node.end_lineno or node.lineno) + 1):
-                owners[row] = node.name
-    rows = [
-        (i, line.strip(), owners[i])
-        for i, line in enumerate(src.splitlines(), 1)
-        if line.strip() and not line.strip().startswith("#") and i in owners
-    ]
-    out: dict[tuple[str, ...], tuple[str, int]] = {}
-    for i in range(len(rows) - WIN + 1):
-        key = tuple(r[1] for r in rows[i : i + WIN])
-        out.setdefault(key, (rows[i][2], rows[i][0]))
-    return out
-
-
 def test_no_clone_windows_outside_the_cli() -> None:
     """两个头之间不许再有 12 行克隆窗口；`main`（CLI 参数/文案）是有意保留的例外。"""
-    goal = _function_windows(PPO_DIR / "goal.py")
-    intent = _function_windows(PPO_DIR / "intent.py")
+    goal = function_windows(PPO_DIR / "goal.py")
+    intent = function_windows(PPO_DIR / "intent.py")
     shared = set(goal) & set(intent)
     leaking = [
         (goal[w][0], goal[w][1], intent[w][0], intent[w][1]) for w in shared if "main" not in goal[w]

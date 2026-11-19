@@ -62,6 +62,7 @@ from worker.models.arch_meta import build_ppo as build_ppo_from_arch
 from worker.models.student import PPOStudent
 
 # 共享 PPO 基础设施（ppo_common.py；行为与旧内联实现逐字节一致，见其模块 doc）。
+from worker.ppo.backend import Backend, StepConfig, StepState, run_step
 from worker.ppo.common import (
     _ppo_load,
     _ppo_save,
@@ -267,6 +268,40 @@ def profile_steps(device: Any) -> int:
     except ValueError:
         n = 10
     return max(1, min(50, n))
+
+
+def _torch_backend(device) -> Backend:
+    """torch 侧的算子表（每个钩子与 `engine_paddle` 的同名实现逐式对应）。
+
+    为什么是 lambda 而不是直接塞函数对象：`tests/worker/test_ppo_scalar_sync.py` 会把
+    `eng.sync_scalars` 换成逐项 `.item()` 的旧实现来对账 —— 绑定过早会让那次 A/B 变成
+    「新旧同一条路径」而照样绿（本仓已因「打桩静默失效」翻车三次）。lambda 在**调用时**
+    查模块全局，既有打桩面逐个保留。
+
+    设备句柄（`zeros` / `optimizer_step`）在这里闭包；构建一次、每步复用（§14.1）。
+    """
+    return Backend(
+        exp=lambda x: torch.exp(x),
+        clip=lambda x, lo, hi: torch.clamp(x, lo, hi),
+        minimum=lambda a, b: torch.minimum(a, b),
+        mse_loss=lambda a, b: F.mse_loss(a, b),
+        masked_logsoftmax=lambda logits, mask: masked_logsoftmax(logits, mask),
+        cat_logprob=lambda action, logp: cat_logprob(action, logp),
+        cat_entropy=lambda logp: cat_entropy(logp),
+        kl_rows=lambda logp, ref: (logp.exp() * (logp - ref)).sum(dim=-1),
+        approx_kl=lambda lp_old, lp_new: approx_kl_est(lp_old, lp_new),
+        zeros=lambda: torch.zeros((), device=device),
+        demo_masked_ce=lambda logits, target, mask: _demo_masked_ce(logits, target, mask),
+        demo_index=lambda buf, idx: demo_index(buf, idx),
+        zero_grad=lambda opt: opt.zero_grad(),
+        backward=lambda loss: loss.backward(),
+        clip_grad_norm=lambda params, mx: nn.utils.clip_grad_norm_(params, mx),
+        optimizer_step=lambda opt: optimizer_step(opt, device),
+        no_grad=torch.no_grad,
+        sync=lambda values: sync_scalars(values),
+        anchor_pull=lambda model, rho: apply_value_anchor_pull(model, rho),
+        policy_rms=lambda model: policy_new_rms_of(model),
+    )
 
 
 @dataclass
@@ -534,7 +569,7 @@ def _precompute_ref(ctx: PPOContext) -> list[tuple[torch.Tensor, ...] | None]:
     return ref_cache
 
 
-def _prepare(ctx: PPOContext) -> None:
+def _prepare(ctx: PPOContext) -> tuple[Backend, StepConfig, StepState]:
     """建 update 的派生状态：profiler / tensored chunks / 诊断 / demo / ref / 续跑。"""
     model, opt, device = ctx.model, ctx.opt, ctx.device
     model.train()
@@ -580,156 +615,37 @@ def _prepare(ctx: PPOContext) -> None:
             f"[ppo] resume PPO from checkpoint: epoch {ctx.start_epoch}/{ctx.epochs} done "
             f"(continuing remaining {ctx.epochs - ctx.start_epoch})"
         )
-
-
-def _train_step(ctx: PPOContext, ep: int, j: int, i: int) -> None:
-    """一个 minibatch 步：前向 / loss / backward / optimizer / 遥测。"""
-    model, opt, device = ctx.model, ctx.opt, ctx.device
-    clip, ent_c, kl_coef = ctx.clip, ctx.ent_c, ctx.kl_coef
-    ref_cache, kickstart_kl = ctx.ref_cache, ctx.kickstart_kl
-    demo_on, demo_n, demo_per_mb = ctx.demo.on, ctx.demo.n, ctx.demo.per_mb
-    demo_idx_dev, demo_t, demo_bc_coef = (
-        ctx.demo.idx_dev,
-        ctx.demo.t,
-        ctx.demo.coef,
+    # 步级系数与跨步状态各构建**一次**（§14.1：热路径不分配对象）；算子表同理。
+    cfg = StepConfig(
+        clip=ctx.clip,
+        ent_coef=ctx.ent_c,
+        vf_coef=VF_COEF,
+        kl_coef=ctx.kl_coef,
+        kickstart_kl=ctx.kickstart_kl,
+        value_anchor=ctx.value_anchor,
+        demo_bc_coef=ctx.demo_bc_coef,
+        demo_per_mb=ctx.demo_per_mb,
+        max_grad_norm=MAX_GRAD_NORM,
     )
-    stats = ctx.stats
-    value_anchor = ctx.value_anchor
-    _step_walls = ctx.step_walls
-    _prof, _prof_steps, _prof_left = ctx.prof, ctx.prof_steps, ctx.prof_left
-    tensored = ctx.tensored
+    st = StepState(
+        layout=ctx.layout,
+        tensored=ctx.tensored,
+        ref_cache=ctx.ref_cache,
+        demo_on=ctx.demo.on,
+        demo_n=ctx.demo.n,
+        demo_t=ctx.demo.t,
+        demo_idx_buf=ctx.demo.idx_dev,
+    )
+    return _torch_backend(ctx.device), cfg, st
+
+
+def _train_step(
+    ctx: PPOContext, bk: Backend, cfg: StepConfig, st: StepState, ep: int, j: int, i: int
+) -> None:
+    """一个 minibatch 步：数学在 `backend.run_step`，这里只做 torch 侧遥测与执行边界。"""
+    device = ctx.device
     _step_t0 = time.time()
-    e = tensored[int(i)]
-    obs = e["obs"]
-    sc = e["scalars"]
-    a_move = e["a_move"]
-    a_fire = e["a_fire"]
-    lp_move = e["lp_move"]
-    lp_fire = e["lp_fire"]
-    adv = e["adv"]
-    ret = e["ret"]
-    mask = e["mask"]  # (T, 7) legacy / (T, 9) v6 —— 切片见下
-
-    # B1 v6（2026-10-20）：`PPOStudent.forward` 在 `action_v6` 下返回 **4-tuple**
-    # `(move, fire, hold, value)`，legacy 是 3-tuple。动作空间在 `_prepare` 已按
-    # shard 事实定一次（`ctx.space`），这里只消费契约，不再逐 chunk 嗅 `a_hold`。
-    layout = ctx.layout
-    out = model(obs, sc, e.get("extra"))
-    if layout.has_hold:
-        mv, fr, hd, val = out
-    else:
-        mv, fr, val = out
-        hd = None
-    # 掩码布局由 `HeadLayout` 给切片（**不能复用同一组切片**）：
-    #   legacy [move5 | fire2]         ⇒ :5 / 5:7
-    #   v6     [move4 | fire3 | hold2] ⇒ :4 / 4:7 / 7:9
-    # 用 legacy 的 `MOVE_DIM=5` 去切 v6 掩码，会把 hold[0] 当成 fire 的第 3 类、
-    # 同时切掉 move 的第 4 类（right）——静默错位，loss 照降。
-    move_logp = masked_logsoftmax(mv, mask[:, layout.move_slice])
-    fire_logp = masked_logsoftmax(fr, mask[:, layout.fire_slice])
-    hold_logp = (
-        masked_logsoftmax(hd, mask[:, layout.hold_slice])
-        if layout.hold_slice is not None and hd is not None
-        else None
-    )
-
-    lp_new = cat_logprob(a_move, move_logp) + cat_logprob(a_fire, fire_logp)
-    lp_old = lp_move + lp_fire
-    if hold_logp is not None:
-        lp_new = lp_new + cat_logprob(e["a_hold"], hold_logp)
-        lp_old = lp_old + e["lp_hold"]
-
-    ratio = torch.exp(lp_new - lp_old)
-    surr1 = ratio * adv
-    surr2 = torch.clamp(ratio, 1.0 - clip, 1.0 + clip) * adv
-    policy_loss = -torch.min(surr1, surr2).mean()
-
-    value_loss = F.mse_loss(val.squeeze(-1), ret)
-    entropy = cat_entropy(move_logp) + cat_entropy(fire_logp)
-    if hold_logp is not None:
-        entropy = entropy + cat_entropy(hold_logp)
-
-    loss = policy_loss + VF_COEF * value_loss - ent_c * entropy
-    if kl_coef > 0.0:
-        # 对采样策略的 KL 惩罚（与 approx_kl_est 同估计量，可微项）
-        loss = loss + kl_coef * ((ratio - 1.0) - (lp_new - lp_old)).mean()
-    kick_mean = torch.zeros((), device=device)
-    _ref = ref_cache[int(i)]
-    if _ref is not None:
-        # 预计算缓存（见上方 ref_cache）：数值与「此处现算 ref_model」逐位相同，
-        # 但每 chunk 只付一次前向而非每 epoch 一次。
-        # ★ v6：**三头都锚**。`hold` 是 v6 唯一新增的自由度，漏掉它等于
-        #   kickstart 对 hold 头完全不生效（策略可以第一时间把 hold 学坏，
-        #   而 move/fire 被钉住）——那就不是「BC-anchored」了。
-        kl_m = (move_logp.exp() * (move_logp - _ref[0])).sum(dim=-1)
-        kl_f = (fire_logp.exp() * (fire_logp - _ref[1])).sum(dim=-1)
-        kl_parts = kl_m + kl_f
-        if len(_ref) > 2 and hold_logp is not None:
-            kl_parts = kl_parts + (hold_logp.exp() * (hold_logp - _ref[2])).sum(dim=-1)
-        kick_mean = kl_parts.mean()
-        loss = loss + kickstart_kl * kick_mean
-    demo_bc_mean = torch.zeros((), device=device)
-    if demo_on:
-        # demo 流（`PPORng.demo`）：与 epoch 顺序**分开** —— 改动 demo 系数/抽样量不会
-        # 推歪哪个 chunk 先训（§P1-7）；状态随 ckpt 落盘，续跑从同一点接着抽。
-        _didx = ctx.rng.demo.integers(0, demo_n, size=int(demo_per_mb))
-        # 索引必须先落到**复用的设备张量**上再索引（否则每步一张新图 ⇒ 每步重编译，
-        # 见 ppo/common.demo_index）；抽样本的数与序完全不变。
-        _didx_t = demo_index(demo_idx_dev, _didx)
-        # 只取 move 头（2026-10-23）：v6 模型的 forward 是 4-tuple，写死
-        # `_dm, _, _ = model(...)` 会在 demo_bc_coef>0 的 v6 腿上同样炸
-        # （与上面 ref 缓存同一处漏改；本条是潜伏的第二实例）。
-        _dm = model(
-            demo_t["obs"][_didx_t],
-            demo_t["scalars"][_didx_t],
-            demo_t["extra"][_didx_t] if "extra" in demo_t else None,
-        )[0]
-        _dmm = demo_t["masks"][_didx_t]
-        _dact = demo_t["actions"][_didx_t]
-        # 只训 move（2026-10-18）：fire 的 mask 语义是「当前打得出去吗」，label 是
-        # 「有没有按住」；冷却期 hold 被 mask 判非法 ⇒ 可训练子集 43744 里 hold 只有
-        # 806（1.84%），fire CE 实际只教 release。恢复方式：加回
-        # `_demo_masked_ce(_df, _dact[:, 1], _dmm[:, MOVE_DIM:MOVE_DIM+FIRE_DIM])`
-        # （test_demo_fire_labels_do_not_reach_fire_head 会挡住静默复活）。
-        demo_bc_mean = _demo_masked_ce(_dm, _dact[:, 0], _dmm[:, :MOVE_DIM])
-        loss = loss + float(demo_bc_coef) * demo_bc_mean
-
-    opt.zero_grad()
-    loss.backward()
-    gn = nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
-    optimizer_step(opt, device)
-    # value 门控牵引（x26-obs it90 诊断）：冷 critic 在新列上拟合噪声 →
-    # advantage 污染。ρ>0 才收缩（=0 时只读数：对照腿数学恒等＋监控不盲）；
-    # 位置在 clip+step 之后 ⇒ 收缩不吃 clip 配额、不进 Adam 矩。
-    value_new_rms = apply_value_anchor_pull(model, value_anchor)
-    # policy 接线遥测（x27 冻结判决）：行为由 policy 双头解释——读数无条件
-    # （ρ 无关；policy 同拴已否决）。进同一份 sync_scalars 字典 ⇒ 不新增
-    # 设备同步（单测 test_ppo_scalar_sync 钉住"一次同步"+显式键集）。
-    policy_new_rms = policy_new_rms_of(model)
-
-    with torch.no_grad():
-        # 一次同步取全部 8 个标量。原实现逐项取 8 次 = CUDA 上 8 次全设备
-        # 同步（每次 drain 队列，把 CPU/GPU 流水线串起来）——详见
-        # ppo/common.sync_scalars 的说明。数值逐位不变。
-        stats.append(
-            sync_scalars(
-                {
-                    "policy": policy_loss,
-                    "value": value_loss,
-                    "entropy": entropy,
-                    "kl": approx_kl_est(lp_old, lp_new),
-                    "kickstart": kick_mean,
-                    "demo_bc": demo_bc_mean,
-                    "mean_ret": ret.mean(),
-                    "mean_adv": adv.mean(),
-                    "gnorm": gn,
-                    # W3：这两个是**设备侧张量**（不再每步 `float()` ⇒ 不再各付一次
-                    # 全设备同步），与其余 9 个标量同一次 `sync_scalars` 取回。
-                    "value_new_rms": value_new_rms,
-                    "policy_new_rms": policy_new_rms,
-                }
-            )
-        )
+    ctx.stats.append(run_step(bk, ctx.model, ctx.opt, st, cfg, ctx.rng, i))
     # 2026-09-11 根因修复（TPU）：每步强制图执行边界。torch_xla 惰性模式下
     # materialize（.tolist()）只断言其依赖子图，backward/optimizer 环节的
     # 在途节点不 drain，跨步骤累积 → 图线性膨胀 → 单步耗时随步数线性增长
@@ -738,6 +654,7 @@ def _train_step(ctx: PPOContext, ep: int, j: int, i: int) -> None:
     # 设备为 no-op，CPU/CUDA 数值与行为逐位不变。
     xla_mark_step(device)
     now = time.time()
+    _prof, _prof_steps, _prof_left = ctx.prof, ctx.prof_steps, ctx.prof_left
     if _prof is not None:
         # 采样窗口内不记墙钟：profiler 自身的开销会把 median 抬高（见 `profile_steps`）。
         _prof_left -= 1
@@ -752,10 +669,16 @@ def _train_step(ctx: PPOContext, ep: int, j: int, i: int) -> None:
             )
             _prof = None
     else:
-        _step_walls.append(now - _step_t0)
+        ctx.step_walls.append(now - _step_t0)
     ctx.prof, ctx.prof_left = _prof, _prof_left
     _record_diag(
-        ctx, ep, j, now, now - _step_t0, int(obs.shape[0]), _ref is not None
+        ctx,
+        ep,
+        j,
+        now,
+        now - _step_t0,
+        int(st.tensored[int(i)]["obs"].shape[0]),
+        st.ref_cache[int(i)] is not None,
     )
     _maybe_heartbeat(ctx, ep, j, now)
 
@@ -1090,12 +1013,12 @@ def ppo_update(
         value_anchor=value_anchor,
         rng=rng if rng is not None else PPORng.from_seed(0),
     )
-    _prepare(ctx)
+    bk, cfg, st = _prepare(ctx)
     for ep in range(ctx.start_epoch, ctx.epochs):
         perm = ctx.rng.epoch.permutation(len(ctx.tensored))
         n_ep_start = len(ctx.stats)
         for j, i in enumerate(perm):
-            _train_step(ctx, ep, j, int(i))
+            _train_step(ctx, bk, cfg, st, ep, j, int(i))
         _finish_epoch(ctx, ep, n_ep_start)
     _finish(ctx)
     return _aggregate(ctx)
