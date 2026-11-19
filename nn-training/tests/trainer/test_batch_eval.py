@@ -225,7 +225,8 @@ def test_window_close_no_new_games(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(common.weights_client, "post_weights", lambda *a, **k: "kept")
     monkeypatch.setattr("trainer.batch_runner.bun_version", lambda *a, **k: "9.9.9")
 
-    def fake_fetch(url, key, **kw):
+    def fake_fetch(spec, *args, **kw):
+        kw = dict(spec.__dict__)
         return (
             {
                 "wver": kw["wver"],
@@ -387,7 +388,8 @@ def test_transient_reset_is_backpressure_not_node_fault(tmp_path: Path, monkeypa
 
     seen_calls: dict[tuple[int, int], int] = {}
 
-    def fake_fetch(url, key, **kw):
+    def fake_fetch(spec, *args, **kw):
+        kw = dict(spec.__dict__)
         task = (int(kw["stage"]), int(kw["seed"]))
         n = seen_calls.get(task, 0) + 1
         seen_calls[task] = n
@@ -428,7 +430,8 @@ def test_hard_failure_still_trips_node(tmp_path: Path, monkeypatch) -> None:
     import common.codehash
     import common.distribution
 
-    def fake_fetch(url, key, **kw):
+    def fake_fetch(spec, *args, **kw):
+        dict(spec.__dict__)
         raise common.distribution.DistError(0, "TypeError: undefined is not an object ('s.obs')")
 
     out, logs, _ = _run_unit(
@@ -462,7 +465,8 @@ def test_remote_zero_participation_is_loud(tmp_path: Path, monkeypatch) -> None:
 
     calls = {"n": 0}
 
-    def fake_fetch(url, key, **kw):
+    def fake_fetch(spec, *args, **kw):
+        dict(spec.__dict__)
         # 前几次瞬断耗尽背压额度，随后一律硬失败 → 节点停派。
         calls["n"] += 1
         if calls["n"] % 2 == 0:
@@ -507,7 +511,9 @@ def test_tail_race_steals_slow_node_tail(tmp_path: Path, monkeypatch) -> None:
 
     calls: list[tuple[str, tuple[int, int]]] = []
 
-    def fake_fetch(url, key, **kw):
+    def fake_fetch(spec, *args, **kw):
+        kw = dict(spec.__dict__)
+        url = spec.url
         task = (int(kw["stage"]), int(kw["seed"]))
         slow = "slow" in url
         calls.append(("slow" if slow else "fast", task))
@@ -558,7 +564,8 @@ def test_backpressure_requeue_does_not_drain_attempts(tmp_path: Path, monkeypatc
     calls: dict[tuple[int, int], int] = {}
     victim: list[tuple[int, int]] = []
 
-    def fake_fetch(url, key, **kw):
+    def fake_fetch(spec, *args, **kw):
+        kw = dict(spec.__dict__)
         task = (int(kw["stage"]), int(kw["seed"]))
         if not victim:
             victim.append(task)
@@ -608,7 +615,8 @@ def test_settle_stall_exits_loudly_not_at_deadline(tmp_path: Path, monkeypatch) 
 
     victim: list[tuple[int, int]] = []
 
-    def fake_fetch(url, key, **kw):
+    def fake_fetch(spec, *args, **kw):
+        kw = dict(spec.__dict__)
         task = (int(kw["stage"]), int(kw["seed"]))
         if not victim:
             victim.append(task)
@@ -741,7 +749,8 @@ def test_working_node_is_never_repinged_or_reuploaded(tmp_path: Path, monkeypatc
         counts["post"] += 1
         return "kept"
 
-    def fake_fetch(url, key, **kw):
+    def fake_fetch(spec, *args, **kw):
+        kw = dict(spec.__dict__)
         return _ok_manifest(int(kw["stage"]), int(kw["seed"]), kw["wver"]), {}
 
     monkeypatch.setattr(common.distribution, "node_ping", fake_ping)
@@ -774,7 +783,8 @@ def test_unreachable_node_is_retried_then_joins(tmp_path: Path, monkeypatch) -> 
     def fake_post(*a, **k):
         return "kept"
 
-    def fake_fetch(url, key, **kw):
+    def fake_fetch(spec, *args, **kw):
+        kw = dict(spec.__dict__)
         if st["first_fetch_at"] == 0.0:
             st["first_fetch_at"] = time.monotonic()
         return _ok_manifest(int(kw["stage"]), int(kw["seed"]), kw["wver"]), {}
@@ -826,7 +836,9 @@ def test_fast_node_dispatches_without_waiting_for_slow_bringup(
             t["slow_weights_done"] = time.monotonic()
         return "kept"
 
-    def fake_fetch(url, key, **kw):
+    def fake_fetch(spec, *args, **kw):
+        kw = dict(spec.__dict__)
+        url = spec.url
         t.setdefault("first_fetch", time.monotonic())
         if "slow" not in url:
             fast_dispatched.set()
@@ -865,7 +877,9 @@ def test_settle_complete_closes_inflight_connections(tmp_path: Path, monkeypatch
         release.set()  # 模拟 close() 让阻塞的 read 立刻抛
         return 7
 
-    def fake_fetch(url, key, **kw):
+    def fake_fetch(spec, *args, **kw):
+        kw = dict(spec.__dict__)
+        url = spec.url
         if "slow" in url:
             release.wait(30.0)
             # 连接被关闭 → 与真实现同类的瞬断异常（回包已无用 ⇒ 必须按「无关」丢弃）
@@ -903,7 +917,8 @@ def test_unit_pairs_route_per_stage_params(tmp_path: Path, monkeypatch) -> None:
 
     got: dict[int, dict] = {}
 
-    def fake_fetch(url, key, **kw):
+    def fake_fetch(spec, *args, **kw):
+        kw = dict(spec.__dict__)
         got[int(kw["stage"])] = {
             "json": kw["stage_json"],
             "lives": kw["lives_override"],

@@ -39,7 +39,7 @@ from common.distribution import (
     write_shard,
 )
 from common.hashing import sha256_file
-from common.task_client import fetch_task
+from common.task_client import FetchTaskSpec, fetch_task
 from common.weights_client import PushHooks, post_weights_parallel
 from worker.bc_outcome import classify_outcome
 
@@ -197,23 +197,25 @@ class _Corpus:
             for attempt in (1, 2):  # 局失败重试一次（可能换节点）
                 try:
                     manifest, files = fetch_task(
-                        url,
-                        auth,
-                        iter_id=self.iter_id,
-                        wver=self.label_fp if self.action_v6 else BC_WVER,
-                        stage=stage,
-                        seed=seed,
-                        max_ticks=self.max_ticks,
-                        difficulty=self.difficulty,
-                        timeout=self.task_timeout_sec,
-                        mode=BC_V6_MODE if self.action_v6 else BC_MODE,
-                        stage_json=self.stage_json_for(stage) or "",
-                        lives_override=self.lives_override,
-                        player_level=self.player_level,
-                        course_fp=self.course_fp,
-                        wins=None if self.action_v6 else (1 if self.wins_only else 0),
-                        near_miss_times=None if self.action_v6 else self.near_miss_times,
-                        label_mode=self.label_mode if self.action_v6 else "",
+                        FetchTaskSpec(
+                            url=url,
+                            auth_key=auth,
+                            iter_id=self.iter_id,
+                            wver=self.label_fp if self.action_v6 else BC_WVER,
+                            stage=stage,
+                            seed=seed,
+                            max_ticks=self.max_ticks,
+                            difficulty=self.difficulty,
+                            timeout=self.task_timeout_sec,
+                            mode=BC_V6_MODE if self.action_v6 else BC_MODE,
+                            stage_json=self.stage_json_for(stage) or "",
+                            lives_override=self.lives_override,
+                            player_level=self.player_level,
+                            course_fp=self.course_fp,
+                            wins=None if self.action_v6 else (1 if self.wins_only else 0),
+                            near_miss_times=None if self.action_v6 else self.near_miss_times,
+                            label_mode=self.label_mode if self.action_v6 else "",
+                        )
                     )
                     reason = validate_result(
                         manifest, files, self.label_fp if self.action_v6 else BC_WVER, {(stage, seed)}, self.seen_keys

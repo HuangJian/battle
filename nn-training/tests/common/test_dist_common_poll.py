@@ -97,16 +97,18 @@ def test_poll_result_forwards_v6_label_mode(monkeypatch) -> None:
 
 def _fetch(url: str = "http://node") -> dict:
     m, _ = common.task_client.fetch_task(
-        url,
-        "tok",
-        iter_id="r.1",
-        wver="w",
-        stage=2000,
-        seed=1,
-        max_ticks=100,
-        difficulty="hard",
-        timeout=1.0,
-        mode="eval",
+        common.task_client.FetchTaskSpec(
+            url=url,
+            auth_key="tok",
+            iter_id="r.1",
+            wver="w",
+            stage=2000,
+            seed=1,
+            max_ticks=100,
+            difficulty="hard",
+            timeout=1.0,
+            mode="eval",
+        )
     )
     return m
 

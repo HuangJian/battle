@@ -15,7 +15,7 @@
   "hub/admin.py": 1,
   "hub/boot.py": 3,
   "hub/deltas.py": 1,
-  "hub/http_face.py": 3,
+  "hub/http_face.py": 2,
   "hub/offline_ingest.py": 1,
   "hub/offline_push.py": 2,
   "hub/offline_push_assign.py": 1,
@@ -137,9 +137,6 @@
   "worker/train/bc.py": 9,
   "worker/trainer_heartbeat.py": 1,
   "worker/workdir_sweep.py": 1,
-  "common/http_pool.py": 4,
   "remote/notebook_runtime.py": 2,
-  "remote/replay_corpus.py": 1,
-  "remote/rollout_relay.py": 7,
-  "worker/ppo/vram.py": 2
+  "remote/rollout_relay.py": 1
 }

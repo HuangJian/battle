@@ -24,7 +24,7 @@ import common.distribution
 import common.runtime
 from common import codehash_ref
 from common.distribution import node_ping
-from common.task_client import fetch_task, validate_eval_result
+from common.task_client import FetchTaskSpec, fetch_task, validate_eval_result
 from common.weights_client import post_weights_cached
 from worker.agent_meta import record_agent_meta, record_eval_failed
 
@@ -267,20 +267,22 @@ def _run_bc_eval_one(
         attempts += 1
         try:
             manifest, _files = fetch_task(
-                node["url"],
-                node.get("authKey", ""),
-                iter_id=iter_id,
-                wver=wver,
-                stage=stage,
-                seed=seed,
-                max_ticks=int(src["max_ticks"]),
-                difficulty=str(src["difficulty"]),
-                timeout=max(120.0, float(src["max_ticks"]) * 0.5 + 120.0),
-                mode="eval",
-                policy="nn",
-                stage_json=src["stage_json"](stage) or "",
-                lives_override=src["lives"],
-                player_level=src["level"],
+                FetchTaskSpec(
+                    url=node["url"],
+                    auth_key=node.get("authKey", ""),
+                    iter_id=iter_id,
+                    wver=wver,
+                    stage=stage,
+                    seed=seed,
+                    max_ticks=int(src["max_ticks"]),
+                    difficulty=str(src["difficulty"]),
+                    timeout=max(120.0, float(src["max_ticks"]) * 0.5 + 120.0),
+                    mode="eval",
+                    policy="nn",
+                    stage_json=src["stage_json"](stage) or "",
+                    lives_override=src["lives"],
+                    player_level=src["level"],
+                )
             )
             reason = validate_eval_result(manifest, wver)
             if reason:

@@ -21,12 +21,28 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, TypedDict
 
 from worker.volume_waves import parse_stages_arg
 
 #: 允许的档名（与 `CloudSamplingProfile` 的字段一一对应）。
 PROFILE_KEYS: tuple[str, ...] = ("gpu", "tpu")
+
+
+class Rotation(TypedDict):
+    """档的轮换配方（与课程文件同键名）。"""
+
+    mode: str
+    per_it: int
+    pinned: list[int]
+
+
+class CloudProfile(TypedDict):
+    """`profile_for_course` 的返回面（可直接进账本）。"""
+
+    name: str
+    target_transitions: int
+    rotation: Rotation
 
 
 def device_profile(device: object) -> str | None:
@@ -45,7 +61,7 @@ def device_profile(device: object) -> str | None:
     return None
 
 
-def profile_for_course(course: Any, device: object) -> dict[str, Any] | None:
+def profile_for_course(course: object, device: object) -> CloudProfile | None:
     """课程 + 本机 device → 生效档；没块/CPU ⇒ None；是云机但缺该档 ⇒ `ValueError`。
 
     返回 `{name, target_transitions, rotation:{mode, per_it, pinned}}`（可直接进账本）。
@@ -88,7 +104,7 @@ def profile_for_course(course: Any, device: object) -> dict[str, Any] | None:
     }
 
 
-def plan_for_profile(plan: Mapping[str, Any], profile: Mapping[str, Any]) -> dict[str, Any]:
+def plan_for_profile(plan: Mapping[str, Any], profile: CloudProfile) -> dict[str, Any]:
     """计划副本：target/topup 按档改，rotation 换成档配方；其余字段原样。
 
     只改**标量/硬顶**，不重解窗口——那一步仍是 `worker.plan.volume_for_round`（与本机链、

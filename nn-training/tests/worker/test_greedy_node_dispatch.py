@@ -57,8 +57,10 @@ def _capture_url(monkeypatch: pytest.MonkeyPatch, **kw) -> str:
     monkeypatch.setattr(dist, "node_request", fake_request)
     with pytest.raises(dist.DistError):
         task.fetch_task(
-            "http://x/", "k", iter_id="i", wver="w", stage=2000, seed=7,
-            max_ticks=100, difficulty="hard", timeout=5.0, **kw,
+            task.FetchTaskSpec(
+                url="http://x/", auth_key="k", iter_id="i", wver="w", stage=2000, seed=7,
+                max_ticks=100, difficulty="hard", timeout=5.0, **kw,
+            )
         )
     return seen["url"]
 

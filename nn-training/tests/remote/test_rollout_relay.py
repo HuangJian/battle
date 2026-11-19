@@ -219,7 +219,7 @@ def test_send_budget_is_one_timeout_across_routes(monkeypatch: pytest.MonkeyPatc
     assert spent <= 35.0 + 1e-6, f"跨路由总墙钟 {spent}s 超预算（每条都拿满 = 旧行为）"
     assert all(sec >= rr.ROUTE_MIN_SLICE_SEC for sec in seen), f"兜底被饿死：{seen}"
     # 没走到「预算已用尽」的跳过分支：兜底拿到了 12s，逐路由死因两条都写了。
-    assert link._last_error.count("timeout") == 2, link._last_error
+    assert link.last_error.count("timeout") == 2, link.last_error
 
 
 def test_forward_keeps_agent_4xx_as_reply() -> None:
@@ -317,7 +317,7 @@ def test_channel_ensure_rebuilds_after_workers_die() -> None:
         assert not ch.alive()
         again = ch.supervise("relay 线程死亡")
         assert again and ch.link is not None and ch.link is not old
-        assert not old._threads
+        assert old.thread_count() == 0
     finally:
         ch.stop()
         hub_srv.shutdown()
@@ -506,11 +506,11 @@ def test_poll_falls_back_to_direct_when_proxy_route_hangs(
         # 回环默认 `bypass_proxy` ⇒ 只有一条路由；这里人为放开，才验得到「代理吊死 → 直连」
         monkeypatch.setattr(net_http, "bypass_proxy", lambda _u: False)
         monkeypatch.setattr(rr.http_pool, "request", _hang)
-        assert link._route_order() == ["inherit", "direct"]
+        assert link.route_order() == ["inherit", "direct"]
         answer = link._poll()
         assert answer is not None and answer.get("local_port")
-        assert link._route == "direct", "成功的路由要记住，下一拍别再去撞代理"
-        assert link._route_order() == ["direct", "inherit"]
+        assert link.route == "direct", "成功的路由要记住，下一拍别再去撞代理"
+        assert link.route_order() == ["direct", "inherit"]
     finally:
         link.stop()
         hub_srv.shutdown()
@@ -528,7 +528,7 @@ def test_open_pins_route_from_preflight() -> None:
     try:
         assert ch.open("测试")
         assert ch.link is not None
-        assert ch.link._route == "direct", "回环只有直连一条腿，预检就该把结论传下去"
+        assert ch.link.route == "direct", "回环只有直连一条腿，预检就该把结论传下去"
     finally:
         ch.stop()
         hub_srv.shutdown()
@@ -843,7 +843,7 @@ def test_channel_switches_hub_url_to_the_alternate_port(monkeypatch: pytest.Monk
     )
     try:
         assert ch.open("测试") == ""  # 换过去也连不上（本机没有监听），但地址必须已经改了
-        assert ch._args["hub_url"] == "https://127.0.0.1:2083"
+        assert ch.hub_url == "https://127.0.0.1:2083"
     finally:
         ch.stop()
 
@@ -907,9 +907,9 @@ def test_relay_lanes_follow_agent_workers() -> None:
             workers=workers,
         )
 
-    assert chan(16)._args["workers"] == 16
+    assert chan(16).workers == 16
     # 小机器不缩水到 6 以下：控制面（ping/weights）也要有道走
-    assert chan(2)._args["workers"] == rr.POLL_WORKERS
+    assert chan(2).workers == rr.POLL_WORKERS
 
 
 def test_reply_delivery_retries_gateway_errors(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -928,7 +928,7 @@ def test_reply_delivery_retries_gateway_errors(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(rr, "REPLY_RETRY_SEC", 0.0)
     monkeypatch.setattr(link, "_post_reply", _flaky)
-    link._deliver("r1", {})
+    link._deliver("r1", {"status": 200, "headers": {}, "body_b64": ""})
     assert len(calls) == 3, calls
     assert link.errors == 0
     assert not logs, logs
@@ -949,7 +949,7 @@ def test_reply_delivery_does_not_retry_permanent_4xx(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(rr, "REPLY_RETRY_SEC", 0.0)
     monkeypatch.setattr(link, "_post_reply", _denied)
-    link._deliver("r1", {})
+    link._deliver("r1", {"status": 200, "headers": {}, "body_b64": ""})
     assert len(calls) == 1, calls
     assert link.errors == 1
     assert len(logs) == 1, logs  # 只响一次：不把同一条确定性失败刷三遍
@@ -972,7 +972,7 @@ def test_reply_delivery_gives_up_after_budget_and_logs_once(
 
     monkeypatch.setattr(rr, "REPLY_RETRY_SEC", 0.0)
     monkeypatch.setattr(link, "_post_reply", _down)
-    link._deliver("r1", {})
+    link._deliver("r1", {"status": 200, "headers": {}, "body_b64": ""})
     assert len(calls) == rr.REPLY_TRIES, calls
     assert link.errors == 1
     assert len(logs) == 1, logs
@@ -1015,11 +1015,11 @@ def test_gateway_route_does_not_stop_the_other_route(monkeypatch: pytest.MonkeyP
     try:
         monkeypatch.setattr(net_http, "bypass_proxy", lambda _u: False)
         monkeypatch.setattr(rr.http_pool, "request", _gateway_on_proxy)
-        assert link._route_order() == ["inherit", "direct"]
+        assert link.route_order() == ["inherit", "direct"]
         answer = link._poll()
         assert answer is not None and answer.get("local_port")
         assert seen == ["inherit", "direct"], seen
-        assert link._route == "direct", "拿到网关码的那条腿不能当成「上次成功」"
+        assert link.route == "direct", "拿到网关码的那条腿不能当成「上次成功」"
     finally:
         link.stop()
         hub_srv.shutdown()
@@ -1072,6 +1072,6 @@ def test_channel_hub_url_follows_the_port_switch(monkeypatch: pytest.MonkeyPatch
     try:
         assert ch.open("测试") == "http://127.0.0.1:8787/relay/n1"
         assert ch.hub_url == "https://hub.example.com:2096", ch.hub_url
-        assert ch.link is not None and ch.link._route == "direct", "扫描只走过直连，就该钉直连"
+        assert ch.link is not None and ch.link.route == "direct", "扫描只走过直连，就该钉直连"
     finally:
         ch.stop()

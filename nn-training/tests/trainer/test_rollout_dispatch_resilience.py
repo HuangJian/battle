@@ -443,6 +443,7 @@ def test_rescan_discovers_node_online_mid_round(tmp_path, monkeypatch) -> None:
     self_gate: list[bool] = []
 
     def fetch(url: str, *_a, **_kw):
+        url = getattr(url, "url", url)
         if "a97" in str(url):
             served["a97"] += 1
             if served["a97"] >= 2:
@@ -669,9 +670,10 @@ def test_alloc_timeout_aborts_original_and_requeues(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(common.task_client, "cancel_task", spy_cancel)
     release = threading.Event()
 
-    def fetch(url: str, *_a, **kw):
+    def fetch(spec, *_a, **kw):
+        url = getattr(spec, "url", spec)
         calls.append(url)
-        on_key = kw.get("on_key")
+        on_key = getattr(spec, "on_key", None) or kw.get("on_key")
         if on_key is not None:
             on_key("it-cancel:rollout:rollout:0:1")
         if len(calls) == 1:

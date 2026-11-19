@@ -25,6 +25,7 @@ import time
 import urllib.error
 import urllib.parse
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from common import distribution
 from common.distribution import (
@@ -174,67 +175,140 @@ def cancel_task(base_url: str, auth_key: str, key: str, timeout: float = 3.0) ->
         set_request_tag(old_tag)
 
 
-def fetch_task(
-    url: str,
-    auth_key: str,
-    *,
-    iter_id: str,
-    wver: str,
-    stage: int,
-    seed: int,
-    max_ticks: int,
-    difficulty: str,
-    timeout: float,
-    mode: str | None = None,
-    kind: str = "rollout",
-    # 标签/动作来源：`argmax`/`sampled` = BC v6 标签（`mode=bc-v6`）；
-    # `greedy` = RL greedy 分层采集（2026-11-10，所有节点通用）。非空即进 agent
-    # taskKey 后缀（`:lm<mode>`）⇒ 同一 iterId 下不同动作选择方式的局互不回放缓存。
-    label_mode: str = "",
-    replan: int = 0,
-    reward: str = "",
-    course: str | None = None,
-    dodge: str = "",
-    stage_json: str = "",
-    lives_override: int | None = None,
-    player_level: int | None = None,
-    course_fp: str = "",
+@dataclass(frozen=True, kw_only=True)
+class FetchTaskSpec:
+    """`fetch_task` 的参数对象（P0-3：把 33 个参数收成一个 frozen spec）。
+
+    形状与 `PublishSpec` / `TrainSpec` 同规：**必填**项在前、协议旋钮全部带缺省；
+    调用方只构造一次，传输层只认这个对象。新增旋钮 = 加一个字段（不再改签名），
+    因此「某条腿漏传」会变成 mypy 的缺字段错误，而不是运行时少一个 URL 参数。
+    """
+
+    url: str
+    auth_key: str
+    iter_id: str
+    wver: str
+    stage: int
+    seed: int
+    max_ticks: int
+    difficulty: str
+    timeout: float
+    mode: str | None = None
+    kind: str = "rollout"
+    # 标签/动作来源：`argmax`/`sampled` = BC v6 标签；`greedy` = RL greedy 分层采集。
+    label_mode: str = ""
+    replan: int = 0
+    reward: str = ""
+    course: str | None = None
+    dodge: str = ""
+    stage_json: str = ""
+    lives_override: int | None = None
+    player_level: int | None = None
+    course_fp: str = ""
     # BC 语料任务（mode="bc"）的 God-AI 教师参数（export-godai-bc 透传）。
-    wins: int | None = None,
-    near_miss_times: int | None = None,
-    abandon_event: threading.Event | None = None,
-    # T1.2 policy 透传（EvalBench）：'nn' | 'god'（C 层 God 基线）。
-    # agent 侧已就绪（sampler-agent.ts:1150 收 ?policy= → export-eval-game --policy）。
-    # 缓存键注意：agent taskKey 无 policy 分量——调用方必须用独立 iterId 命名空间
-    # 隔离不同 policy（A 层恒 nn；B/C 批用 batch 命名空间），否则 god/nn 同键串局。
-    policy: str = "nn",
-    # R2 事件 rung（plan/new-era-stop.plan.md §6）：True ⇒ agent 以事件门跑本局
-    # （均匀 K ∪ threat-ONSET + Δt≥3）；缺席/False = 老行为（agent 侧缺省）。
-    # agent taskKey 含 `:de1` 后缀（与 stageJsonHash 同规），旧缓存不串局；
-    # 不支持的旧 agent 由**调用方**凭 ping.decisionEventsSupport 提前排除（fail-closed，
-    # 同 stageJsonSupport），本函数只负责透传。
-    decision_events: bool = False,
-    # 决策周期 K（plan/k5-rhythm.plan.md）：课程 `decision_k`（默认 10）透传。
-    # **仅 ≠10 激活**（缺席/10 = 老 agent 照旧，URL 逐字节不变）；agent 端 taskKey 含
-    # `:k<N>` 后缀（缓存隔离）；旧 agent 无 decisionKSupport 能力位 —— 由调用方提前排除
-    # （fail-closed；本函数只透传，不查 ping）。
-    decision_k: int = 10,
-    # 评估/部署链推理规则（课程 `inference_rules.*`）：仅激活时透传（缺席 = 老 agent
-    # 照旧，URL 逐字节不变）；agent taskKey 含对应后缀（缓存隔离）；旧 agent 的能力位
-    # 由调用方提前排除（fail-closed；本函数只透传，不查 ping）。
-    skip_steel_only_shots: bool = False,
-    break_bricks_on_path: bool = False,
-    suppress_useless_fire: bool = False,
-    suppress_lead_miss_fire: bool = False,
-    # Hybrid opening（一次性课程评估 `--opening-connect`）：仅激活时透传。
-    opening_connect: bool = False,
-    # 语料运输格式（plan/replay-corpus.plan.md P2）：`replay` ⇒ agent 拼
-    # `--corpus-fmt replay`；仅 rollout 路径，缺省 full = 老 URL 逐字节不变。
-    corpus_fmt: str = "full",
-    # 键回调：请求发出前把 agent 认可的 taskKey 交回调用方。分配超时取消
-    # （/v1/cancel）必须与提交端逐字节同键，故由这里统一算，调用方不再复制配方。
-    on_key: Callable[[str], None] | None = None,
-) -> tuple[dict, dict]:
+    wins: int | None = None
+    near_miss_times: int | None = None
+    abandon_event: threading.Event | None = None
+    policy: str = "nn"
+    decision_events: bool = False
+    decision_k: int = 10
+    skip_steel_only_shots: bool = False
+    break_bricks_on_path: bool = False
+    suppress_useless_fire: bool = False
+    suppress_lead_miss_fire: bool = False
+    opening_connect: bool = False
+    corpus_fmt: str = "full"
+    on_key: Callable[[str], None] | None = None
+
+
+def _task_params(spec: FetchTaskSpec) -> dict:
+    """spec → agent 的查询参数（只拼串，不发请求）。"""
+    params = {
+        "iterId": spec.iter_id,
+        "wver": spec.wver,
+        "stage": spec.stage,
+        "seed": spec.seed,
+        "maxTicks": spec.max_ticks,
+        "difficulty": spec.difficulty,
+    }
+    if spec.mode:
+        params["mode"] = spec.mode
+    if spec.policy and spec.policy != "nn":
+        params["policy"] = spec.policy
+    if spec.kind != "rollout":
+        params["kind"] = spec.kind
+    if spec.label_mode:
+        params["labelMode"] = spec.label_mode
+    if spec.replan > 0:
+        params["replan"] = spec.replan
+    if spec.reward:
+        params["reward"] = spec.reward
+    if spec.dodge:
+        params["dodge"] = spec.dodge
+    if spec.stage_json:
+        params["stageJson"] = spec.stage_json
+        # 布局指纹（评审 R0-3 / LC §1.3）：agent resultCache 键并入该哈希，改 grid
+        # 不改 stage id 不再静默复用旧局。agent 侧对收到的 stageJson 算同一 sha256。
+        params["stageJsonHash"] = hashlib.sha256(spec.stage_json.encode("utf-8")).hexdigest()[:16]
+    if spec.lives_override is not None:
+        params["livesOverride"] = spec.lives_override
+    if spec.player_level is not None:
+        params["playerLevel"] = spec.player_level
+    # R2 事件 rung：仅激活时透传（缺席 = 老 agent 照旧，老行为逐字节不变）。
+    if spec.decision_events:
+        params["decisionEvents"] = "1"
+    # 决策周期 K：仅非默认值透传（缺席/10 = 老 agent 照旧，URL 逐字节不变）。
+    if int(spec.decision_k) != 10:
+        params["decisionK"] = str(int(spec.decision_k))
+    # 推理规则 / hybrid opening / replay：仅激活时透传（缺席 = 老 agent 照旧）。
+    if spec.skip_steel_only_shots:
+        params["skipSteelOnlyShots"] = "1"
+    if spec.break_bricks_on_path:
+        params["breakBricksOnPath"] = "1"
+    if spec.suppress_useless_fire:
+        params["suppressUselessFire"] = "1"
+    if spec.suppress_lead_miss_fire:
+        params["suppressLeadMissFire"] = "1"
+    if spec.opening_connect:
+        params["openingConnect"] = "1"
+    if str(spec.corpus_fmt or "full") == "replay":
+        params["corpusFmt"] = "replay"
+    if spec.course_fp:
+        params["courseFp"] = spec.course_fp
+    # v5 多课程：任务自报课程——agent 按 (course, kind) 取权重桶。缺省走进程级身份
+    # （旧训练侧不传 → 空串桶，行为与改造前一致）。
+    course = course_name_of() if spec.course is None else spec.course
+    if course:
+        params["course"] = course
+    if spec.wins is not None:
+        params["wins"] = spec.wins
+    if spec.near_miss_times is not None:
+        params["nearMissTimes"] = spec.near_miss_times
+    if spec.on_key is not None:
+        spec.on_key(
+            task_key(
+                spec.iter_id,
+                str(params.get("mode", "rollout")),
+                str(params.get("kind", "rollout")),
+                spec.stage,
+                spec.seed,
+                str(params.get("stageJsonHash", "")),
+                str(params.get("courseFp", "")),
+                str(params.get("decisionEvents", "")),
+                str(params.get("decisionK", "")),
+                str(params.get("labelMode", "")),
+                str(params.get("skipSteelOnlyShots", "")),
+                str(params.get("breakBricksOnPath", "")),
+                str(params.get("suppressUselessFire", "")),
+                str(params.get("suppressLeadMissFire", "")),
+                str(params.get("openingConnect", "")),
+                str(params.get("corpusFmt", "")),
+            )
+        )
+    return params
+
+
+def fetch_task(spec: FetchTaskSpec) -> tuple[dict, dict]:
     """获取一局结果 → (manifest, files)；失败抛 DistError。
 
     mode='eval' 请求干净评估局（agent 端贪心 runner、无 shards）；仅对 ping 返回
@@ -258,103 +332,24 @@ def fetch_task(
         sync 长连接无法中断，会把注定丢弃的局等满。
       · 环境变量 DIST_TASK_ASYNC=1（运维强制旧异步路径 / WAN 抖动排查）。
     """
-    params = {
-        "iterId": iter_id,
-        "wver": wver,
-        "stage": stage,
-        "seed": seed,
-        "maxTicks": max_ticks,
-        "difficulty": difficulty,
-    }
-    if mode:
-        params["mode"] = mode
-    if policy and policy != "nn":
-        params["policy"] = policy
-    if kind != "rollout":
-        params["kind"] = kind
-    if label_mode:
-        params["labelMode"] = label_mode
-    if replan > 0:
-        params["replan"] = replan
-    if reward:
-        params["reward"] = reward
-    if dodge:
-        params["dodge"] = dodge
-    if stage_json:
-        params["stageJson"] = stage_json
-        # 布局指纹（评审 R0-3 / LC §1.3）：agent resultCache 键并入该哈希，改 grid
-        # 不改 stage id 不再静默复用旧局。agent 侧对收到的 stageJson 算同一 sha256。
-        params["stageJsonHash"] = hashlib.sha256(stage_json.encode("utf-8")).hexdigest()[:16]
-    if lives_override is not None:
-        params["livesOverride"] = lives_override
-    if player_level is not None:
-        params["playerLevel"] = player_level
-    # R2 事件 rung：仅激活时透传（缺席 = 老 agent 照旧，老行为逐字节不变）。
-    if decision_events:
-        params["decisionEvents"] = "1"
-    # 决策周期 K：仅非默认值透传（缺席/10 = 老 agent 照旧，URL 逐字节不变）。
-    if int(decision_k) != 10:
-        params["decisionK"] = str(int(decision_k))
-    # 推理规则 / hybrid opening / replay：仅激活时透传（缺席 = 老 agent 照旧）。
-    if skip_steel_only_shots:
-        params["skipSteelOnlyShots"] = "1"
-    if break_bricks_on_path:
-        params["breakBricksOnPath"] = "1"
-    if suppress_useless_fire:
-        params["suppressUselessFire"] = "1"
-    if suppress_lead_miss_fire:
-        params["suppressLeadMissFire"] = "1"
-    if opening_connect:
-        params["openingConnect"] = "1"
-    if str(corpus_fmt or "full") == "replay":
-        params["corpusFmt"] = "replay"
-    if course_fp:
-        params["courseFp"] = course_fp
-    # v5 多课程：任务自报课程——agent 按 (course, kind) 取权重桶。缺省走进程级身份
-    # （旧训练侧不传 → 空串桶，行为与改造前一致）。
-    if course is None:
-        course = course_name_of()
-    if course:
-        params["course"] = course
-    if wins is not None:
-        params["wins"] = wins
-    if near_miss_times is not None:
-        params["nearMissTimes"] = near_miss_times
-    if on_key is not None:
-        on_key(
-            task_key(
-                iter_id,
-                str(params.get("mode", "rollout")),
-                str(params.get("kind", "rollout")),
-                stage,
-                seed,
-                str(params.get("stageJsonHash", "")),
-                str(params.get("courseFp", "")),
-                str(params.get("decisionEvents", "")),
-                str(params.get("decisionK", "")),
-                str(params.get("labelMode", "")),
-                str(params.get("skipSteelOnlyShots", "")),
-                str(params.get("breakBricksOnPath", "")),
-                str(params.get("suppressUselessFire", "")),
-                str(params.get("suppressLeadMissFire", "")),
-                str(params.get("openingConnect", "")),
-                str(params.get("corpusFmt", "")),
-            )
-        )
+    url, auth_key = spec.url, spec.auth_key
+    params = _task_params(spec)
     qs = urllib.parse.urlencode(params)
     base = url.rstrip("/")
     started = time.monotonic()
     try:
-        use_async = abandon_event is not None or os.environ.get("DIST_TASK_ASYNC") == "1"
+        use_async = spec.abandon_event is not None or os.environ.get("DIST_TASK_ASYNC") == "1"
         hdrs = {"x-async": "1"} if use_async else None
-        status, body = distribution.node_request(f"{base}/v1/task?{qs}", auth_key, timeout, headers=hdrs)
+        status, body = distribution.node_request(
+            f"{base}/v1/task?{qs}", auth_key, spec.timeout, headers=hdrs
+        )
         if status == 202:
             return _poll_result(
                 base,
                 auth_key,
                 params,
-                timeout - (time.monotonic() - started),
-                abandon_event=abandon_event,
+                spec.timeout - (time.monotonic() - started),
+                abandon_event=spec.abandon_event,
             )
         if status == 200:
             return unpack_container(body)

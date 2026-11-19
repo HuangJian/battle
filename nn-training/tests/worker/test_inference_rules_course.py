@@ -275,10 +275,12 @@ def test_fetch_task_encodes_param_and_key(monkeypatch) -> None:
     monkeypatch.setattr(common.task_client.distribution, "node_request", fake_request)
     with pytest.raises(common.task_client.DistError):
         common.task_client.fetch_task(
-            "http://x/", "k", iter_id="i", wver="w", stage=2000, seed=7,
-            max_ticks=100, difficulty="hard", timeout=5.0,
-            skip_steel_only_shots=True, break_bricks_on_path=True,
-            suppress_useless_fire=True, suppress_lead_miss_fire=False, on_key=keys.append,
+            common.task_client.FetchTaskSpec(
+                url="http://x/", auth_key="k", iter_id="i", wver="w", stage=2000, seed=7,
+                max_ticks=100, difficulty="hard", timeout=5.0,
+                skip_steel_only_shots=True, break_bricks_on_path=True,
+                suppress_useless_fire=True, suppress_lead_miss_fire=False, on_key=keys.append,
+            )
         )
     qs = urllib.parse.parse_qs(urllib.parse.urlparse(seen["url"]).query)
     assert qs.get(SKIP_PARAM) == ["1"]
@@ -291,9 +293,11 @@ def test_fetch_task_encodes_param_and_key(monkeypatch) -> None:
     keys.clear()
     with pytest.raises(common.task_client.DistError):
         common.task_client.fetch_task(
-            "http://x/", "k", iter_id="i", wver="w", stage=2000, seed=7,
-            max_ticks=100, difficulty="hard", timeout=5.0,
-            suppress_lead_miss_fire=True, on_key=keys.append,
+            common.task_client.FetchTaskSpec(
+                url="http://x/", auth_key="k", iter_id="i", wver="w", stage=2000, seed=7,
+                max_ticks=100, difficulty="hard", timeout=5.0,
+                suppress_lead_miss_fire=True, on_key=keys.append,
+            )
         )
     qs = urllib.parse.parse_qs(urllib.parse.urlparse(seen["url"]).query)
     assert qs.get(SKIP_PARAM) is None

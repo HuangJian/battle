@@ -251,28 +251,38 @@ class EvalExecutors:
 
             _ov = args_rollout_overrides(rnd.args)
             manifest, _files = common.task_client.fetch_task(
-                nd["url"],
-                nd["key"],
-                iter_id=rnd.eval_iter_id,
-                wver=rnd.wver,
-                stage=task[0],
-                seed=task[1],
-                max_ticks=rnd.args.max_ticks,
-                difficulty=rnd.args.difficulty,
-                timeout=rnd.task_timeout,
-                mode="eval",
-                kind=rnd.weights_kind,
-                course_fp=rnd.course_fp,
-                stage_json=stage_json_for_args(rnd.args, task[0]) or "",
-                decision_events=bool(getattr(rnd.args, "decision_events", False)),
-                decision_k=int(getattr(rnd.args, "decision_k", 10)),
-                skip_steel_only_shots=bool(getattr(rnd.args, "skip_steel_only_shots", False)),
-                opening_connect=bool(getattr(rnd.args, "opening_connect", False)),
-                break_bricks_on_path=bool(getattr(rnd.args, "break_bricks_on_path", False)),
-                suppress_useless_fire=bool(getattr(rnd.args, "suppress_useless_fire", False)),
-                suppress_lead_miss_fire=bool(getattr(rnd.args, "suppress_lead_miss_fire", False)),
-                lives_override=int(_ov["lives_override"]) if "lives_override" in _ov else None,
-                player_level=int(_ov["player_level"]) if "player_level" in _ov else None,
+                common.task_client.FetchTaskSpec(
+                    url=nd["url"],
+                    auth_key=nd["key"],
+                    iter_id=rnd.eval_iter_id,
+                    wver=rnd.wver,
+                    stage=task[0],
+                    seed=task[1],
+                    max_ticks=rnd.args.max_ticks,
+                    difficulty=rnd.args.difficulty,
+                    timeout=rnd.task_timeout,
+                    mode="eval",
+                    kind=rnd.weights_kind,
+                    course_fp=rnd.course_fp,
+                    stage_json=stage_json_for_args(rnd.args, task[0]) or "",
+                    decision_events=bool(getattr(rnd.args, "decision_events", False)),
+                    decision_k=int(getattr(rnd.args, "decision_k", 10)),
+                    skip_steel_only_shots=bool(
+                        getattr(rnd.args, "skip_steel_only_shots", False)
+                    ),
+                    opening_connect=bool(getattr(rnd.args, "opening_connect", False)),
+                    break_bricks_on_path=bool(
+                        getattr(rnd.args, "break_bricks_on_path", False)
+                    ),
+                    suppress_useless_fire=bool(
+                        getattr(rnd.args, "suppress_useless_fire", False)
+                    ),
+                    suppress_lead_miss_fire=bool(
+                        getattr(rnd.args, "suppress_lead_miss_fire", False)
+                    ),
+                    lives_override=int(_ov["lives_override"]) if "lives_override" in _ov else None,
+                    player_level=int(_ov["player_level"]) if "player_level" in _ov else None,
+                )
             )
             why = common.task_client.validate_eval_result(manifest, rnd.wver)
             if why:

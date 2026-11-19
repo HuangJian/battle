@@ -40,8 +40,8 @@ def _course(tmp_path: Path, **over: object) -> Path:
 def _mock_engine(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
     calls: list[dict] = []
 
-    def fake_fetch(url: str, key: str, **kw: object):
-        calls.append(kw)
+    def fake_fetch(spec, *args, **kw: object):
+        calls.append(dict(spec.__dict__))
         return (
             {
                 "win": True,
@@ -186,7 +186,7 @@ def test_dispatch_records_failed_games_in_agent_meta(
 
     c = load_bc_course("g0-4s2e")
 
-    def fail_fetch(url: str, key: str, **kw: object):
+    def fail_fetch(spec, *args, **kw: object):
         raise DistError(0, "boom")
 
     monkeypatch.setattr(be, "fetch_task", fail_fetch)

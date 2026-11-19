@@ -101,7 +101,6 @@
     "common/http_pool.py": 4,
     "common/node_report.py": 3,
     "hub/admin.py": 2,
-    "hub/relay.py": 8,
     "remote/replay_corpus.py": 5,
     "remote/rollout_relay.py": 15,
     "worker/ppo/lazy_corpus.py": 4

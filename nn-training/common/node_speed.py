@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
+from pathlib import Path
 from typing import Any
 
 #: 窗口长度（局）：用户 2026-11-14 裁定 K=50。
@@ -91,7 +92,7 @@ def parse_meta_rows(lines: Iterable[str]) -> dict[str, list[float]]:
 
 
 def seed_from_meta(
-    path: Any, k: int = K_DEFAULT, max_lines: int = SEED_MAX_LINES
+    path: str | Path, k: int = K_DEFAULT, max_lines: int = SEED_MAX_LINES
 ) -> dict[str, SpeedWindow]:
     """从 meta 文件**尾部**读一次播种（文件缺失/读不动 ⇒ 空表，绝不抛）。"""
     windows: dict[str, SpeedWindow] = {}
@@ -173,7 +174,7 @@ def order_round(
     nodes: list[dict],
     reuse: list[dict],
     need: list[dict],
-    meta_path: Any,
+    meta_path: str | Path,
     policy: Mapping[str, Any],
     log: Callable[[str], None],
 ) -> tuple[list[dict], list[dict]]:

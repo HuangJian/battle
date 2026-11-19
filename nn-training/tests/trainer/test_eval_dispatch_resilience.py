@@ -167,6 +167,7 @@ def test_transient_502_does_not_trip_node_and_games_settle(tmp_path, monkeypatch
     calls = {"n": 0}
 
     def fetch(*_a, **kw):
+        kw = dict(_a[0].__dict__) if _a else kw
         calls["n"] += 1
         h.tasks.append((kw["stage"], kw["seed"]))
         if calls["n"] <= 3:
@@ -190,6 +191,7 @@ def test_wver_409_reposts_weights_and_keeps_node(tmp_path, monkeypatch) -> None:
     calls = {"n": 0}
 
     def fetch(*_a, **kw):
+        kw = dict(_a[0].__dict__) if _a else kw
         calls["n"] += 1
         if calls["n"] == 1:
             raise common.distribution.DistError(409, '{"error":"wver not cached here"}')
@@ -229,6 +231,7 @@ def test_task_lost_404_requeues_without_tripping_node(tmp_path, monkeypatch) -> 
     calls = {"n": 0}
 
     def fetch(*_a, **kw):
+        kw = dict(_a[0].__dict__) if _a else kw
         calls["n"] += 1
         h.tasks.append((kw["stage"], kw["seed"]))
         if calls["n"] <= 4:
@@ -336,6 +339,7 @@ def test_soft_stopped_node_rejoins_after_backoff(tmp_path, monkeypatch) -> None:
     calls = {"n": 0}
 
     def fetch(*_a, **kw):
+        kw = dict(_a[0].__dict__) if _a else kw
         calls["n"] += 1
         if calls["n"] <= 2:
             raise common.distribution.DistError(503, '{"error":"busy"}')
@@ -366,6 +370,7 @@ def test_eval_yields_to_inflight_on_the_same_node(tmp_path, monkeypatch) -> None
 
     def make_fetch(h):
         def fetch(*_a, **kw):
+            kw = dict(_a[0].__dict__) if _a else kw
             with lock:
                 live["n"] += 1
                 peak["n"] = max(peak["n"], live["n"])
@@ -630,6 +635,7 @@ class _LaneHarness:
 
 def _fast_fetch(h):
     def fetch(*_a, **kw):
+        kw = dict(_a[0].__dict__) if _a else kw
         return h.manifest(kw["stage"], kw["seed"]), {}
 
     return fetch
@@ -860,8 +866,10 @@ def test_settled_full_teardown_does_not_wait_for_slow_node(tmp_path, monkeypatch
     slow_started = threading.Event()
     fast_gate: list[bool] = []
 
-    def fetch(_url, _key, **kw):
-        if _url == "http://slow.local":
+    def fetch(spec, *_a, **kw):
+        url = spec.url
+        kw = dict(spec.__dict__)
+        if url == "http://slow.local":
             slow_started.set()
             # sleep-ok: 夹具模拟的工作量：慢节点一口 SLOW_NODE_SEC（回包对结果无用，tail-race 已由快节点结算）
             h.time.sleep(SLOW_NODE_SEC)
@@ -907,6 +915,7 @@ def test_window_expiry_still_lands_inflight_games(tmp_path, monkeypatch) -> None
     past_window: list[bool] = []
 
     def fetch(*_a, **kw):
+        kw = dict(_a[0].__dict__) if _a else kw
         past_window.append(
             _wait_until(
                 lambda: h.time.monotonic() - h.play_t0 >= h.window_sec + 0.05, timeout=30.0
@@ -1018,6 +1027,7 @@ def test_eval_leg_uses_its_own_weights_kind(tmp_path, monkeypatch) -> None:
         return [{"id": n["id"], "url": n["url"], "key": "", "c": 1} for n in nodes]
 
     def fetch(*_a, **kw):
+        kw = dict(_a[0].__dict__) if _a else kw
         seen.append(kw)
         return h.manifest(kw["stage"], kw["seed"]), {}
 
@@ -1087,6 +1097,7 @@ def test_eval_fetch_carries_course_fp(tmp_path, monkeypatch) -> None:
     seen: list[dict] = []
 
     def fetch(*_a, **kw):
+        kw = dict(_a[0].__dict__) if _a else kw
         seen.append(kw)
         return h.manifest(kw["stage"], kw["seed"]), {}
 
@@ -1119,6 +1130,7 @@ def test_record_failure_keeps_game_out_of_landed(tmp_path, monkeypatch) -> None:
     bad: list[dict] = []
 
     def fetch(*_a, **kw):
+        kw = dict(_a[0].__dict__) if _a else kw
         m = h.manifest(kw["stage"], kw["seed"])
         if not bad:
             bad.append(m)  # 第一局模拟「行落盘失败」
@@ -1169,7 +1181,7 @@ def test_record_transient_failure_retries_then_lands(tmp_path, monkeypatch) -> N
         return orig_eval_row(manifest, **kw)
 
     monkeypatch.setattr(ed, "eval_row", flaky_eval_row)
-    rows = h.run(lambda *_a, **kw: (h.manifest(kw["stage"], kw["seed"]), {}))
+    rows = h.run(lambda spec, *_a, **kw: (h.manifest(spec.stage, spec.seed), {}))
     played = [r for r in rows if r.get("event") == "eval"]
     summ = [r for r in rows if r.get("event") == "eval_summary"]
     assert len(played) == 1 and calls["n"] == 2, (played, calls)
@@ -1212,6 +1224,7 @@ def test_fanout_copy_during_record_is_deduped(tmp_path, monkeypatch) -> None:
         return orig_eval_row(manifest, **kw)
 
     def fetch(*_a, **kw):
+        kw = dict(_a[0].__dict__) if _a else kw
         # 构造（2026-10-02 修满载 flake）：3 条腿（2 主副本 + 1 竞速副本）必须在**同一次
         # 在飞窗口**内齐到再放行——否则满载时竞速腿可能晚到、看到 inflight 已清而径直返回
         # （「没有副本」不是实现错，是构造没锁住）。两条主副本在 fetch 里等齐 ⇒ 竞速腿必然
@@ -1288,6 +1301,7 @@ def test_close_reason_settled_when_all_land(tmp_path, monkeypatch) -> None:
     h = _Harness(tmp_path, monkeypatch, games=4)
 
     def fetch(*_a, **kw):
+        kw = dict(_a[0].__dict__) if _a else kw
         return h.manifest(kw["stage"], kw["seed"]), {}
 
     rows = h.run(fetch)
@@ -1317,6 +1331,7 @@ def test_close_reason_window_when_deadline_hits(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(EvalRound, "arm_window", spy_arm)
 
     def fetch(*_a, **kw):
+        kw = dict(_a[0].__dict__) if _a else kw
         # 窗口从权重就绪起算；等它 arm 再睡，避免 arm 被调度推迟时这局在
         # 窗口开始前就跑完、把「窗口内跑不完」的夹具变成「跑得完」。
         assert armed.wait(timeout=10.0), "窗口没有 arm（用例内部死锁）"
@@ -1343,6 +1358,7 @@ def test_settled_full_requires_landed_not_claimed(tmp_path, monkeypatch) -> None
     bad: list[dict] = []
 
     def fetch(*_a, **kw):
+        kw = dict(_a[0].__dict__) if _a else kw
         m = h.manifest(kw["stage"], kw["seed"])
         if not bad:
             bad.append(m)
@@ -1517,6 +1533,7 @@ def test_local_failure_is_redispatched_to_a_live_node(tmp_path, monkeypatch) -> 
         )
 
     def fetch(*_a, **kw):
+        kw = dict(_a[0].__dict__) if _a else kw
         # sleep-ok: 夹具模拟的工作量：慢节点（比本机慢 ⇒ 改派先发生）
         time.sleep(0.3)
         return h.manifest(kw["stage"], kw["seed"]), {}
@@ -1698,7 +1715,7 @@ def test_eval_rows_and_summary_go_through_the_single_writer(tmp_path, monkeypatc
         real_append(path, row)
 
     monkeypatch.setattr(ed, "append_jsonl", spy)
-    h.run(lambda *a, **kw: (h.manifest(kw["stage"], kw["seed"]), {}))
+    h.run(lambda spec, *a, **kw: (h.manifest(spec.stage, spec.seed), {}))
 
     played = [r for r in seen if r.get("event") == "eval"]
     assert len(played) == 3, f"逐局行绕过了单写者：{seen}"
@@ -1727,7 +1744,9 @@ def test_weights_post_pipelines_node_start(tmp_path, monkeypatch) -> None:
     saw: dict[str, bool] = {"on_alive_passed": False, "pipelined": False}
     fetched = {"fast": 0, "slow": 0}
 
-    def fetch(url, *_a, **kw):
+    def fetch(spec, *_a, **kw):
+        url = spec.url
+        kw = dict(spec.__dict__)
         nid = "fast" if url == "http://fast.local" else "slow"
         fetched[nid] += 1
         if nid == "fast":
@@ -1801,6 +1820,7 @@ def test_rollout_freeze_stops_new_grants_and_keeps_inflight(
     calls = {"n": 0}
 
     def fetch(*_a, **kw):
+        kw = dict(_a[0].__dict__) if _a else kw
         calls["n"] += 1
         if calls["n"] == 1:
             started.set()
@@ -1873,6 +1893,7 @@ def test_course_rollout_does_not_freeze_sibling_course_eval(
     calls = {"a": 0, "b": 0}
 
     def fetch(*_a, **kw):
+        kw = dict(_a[0].__dict__) if _a else kw
         which = "a" if str(kw["iter_id"]).startswith("rid.a") else "b"
         calls[which] += 1
         h = ha if which == "a" else hb
@@ -1963,6 +1984,7 @@ def test_two_eval_rounds_share_dispatch_round_robin(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(EvalArbiter, "register", spy_register)
 
     def fetch(*_a, **kw):
+        kw = dict(_a[0].__dict__) if _a else kw
         order.append("A" if str(kw["iter_id"]).startswith("rid.a") else "B")
         if len(order) == 1:
             assert release.wait(timeout=30.0), "首局未被放行（用例内部死锁）"
@@ -2013,8 +2035,9 @@ def test_idle_worker_replicates_the_last_inflight_game(tmp_path, monkeypatch) ->
     calls: list[str] = []
     release = threading.Event()
 
-    def fetch(url, *_a, **kw):
-        calls.append(str(url))
+    def fetch(spec, *_a, **kw):
+        kw = dict(spec.__dict__)
+        calls.append(str(spec.url))
         if len(calls) <= 2:
             assert release.wait(timeout=30.0), "副本未能在 30s 内发出（用例前提失效）"
         return h.manifest(kw["stage"], kw["seed"]), {}
@@ -2139,6 +2162,7 @@ def test_post_weights_is_deferred_until_thaw(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(common.weights_client, "post_weights_parallel", post)
 
     def fetch(*_a, **kw):
+        kw = dict(_a[0].__dict__) if _a else kw
         return h.manifest(kw["stage"], kw["seed"]), {}
 
     monkeypatch.setattr(common.task_client, "fetch_task", fetch)

@@ -36,13 +36,21 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any
 from urllib.parse import urlsplit
 
 from common import net_http
 
-#: 连接缓存键：(scheme, host, port, proxy)。
+#: 连接缓存的键：(scheme, host, port, proxy)。
 _Key = tuple[str, str, int, str]
+
+#: 关闭一条连接/响应时的**真实失败面**：socket 已坏 = `OSError`、状态机不对 = `ValueError`、
+#: HTTP 帧不完整 = `HTTPException`。程序员错（`AttributeError` / `TypeError`）不在此列，
+#: 它们要穿出去——`close()` 自己写坏了不该被读成「对端先走」。
+_CLOSE_ERRORS = (OSError, ValueError, http.client.HTTPException)
+
+#: 读 body 的失败面；`AttributeError` 是**并发关闭**的已知形态（`abort_scope` 在另一条
+#: 线程双关 `_close_conn`），不是调用方 bug。
+_READ_ERRORS = (OSError, ValueError, http.client.HTTPException, AttributeError)
 
 _LOCAL = threading.local()
 _ACTIVE_LOCK = threading.Lock()
@@ -59,7 +67,7 @@ class _PoolState:
       （`<course>/<kind>`）；空串 = 未打标（旧调用方与测试），读面不带参时合并全桶。
     """
 
-    active: set[tuple[str, Any]] = field(default_factory=set)
+    active: set[tuple[str, http.client.HTTPResponse]] = field(default_factory=set)
     aborted: set[str] = field(default_factory=set)
     stats: dict[str, dict[str, int]] = field(default_factory=dict)
 
@@ -162,7 +170,7 @@ def close_thread() -> None:
     _used().clear()
 
 
-def _conns() -> dict[_Key, Any]:
+def _conns() -> dict[_Key, http.client.HTTPConnection]:
     box = getattr(_LOCAL, "conns", None)
     if box is None:
         box = _LOCAL.conns = {}
@@ -197,11 +205,11 @@ def _close_all() -> None:
     box.clear()
 
 
-def _close_quiet(conn: Any) -> None:
+def _close_quiet(conn: http.client.HTTPConnection) -> None:
     try:
         conn.close()
-    except Exception:
-        # 契约静默（G9 冻结，非旧债）：`close()` 失败没有处置分支（重试/上报只会再抛一次），
+    except _CLOSE_ERRORS:
+        # 契约静默（窄捕，非旧债）：`close()` 失败没有处置分支（重试/上报只会再抛一次），
         # 池只关心「这条连接再也不复用」；关闭动作本身在收工/换连接路径上。
         pass
 
@@ -222,7 +230,9 @@ def _proxy_for(scheme: str, host: str) -> str:
         if urllib.request.proxy_bypass(host):
             return ""
         proxies = urllib.request.getproxies()
-    except Exception:
+    except (OSError, ValueError, TypeError):
+        # 代理判定是**环境读面**（Windows 注册表 / env）：读不到就按直连走，
+        # 不把「本模块的解析 bug」伪装成「没有代理」。
         return ""
     return str(proxies.get(scheme) or proxies.get("all") or "").strip()
 
@@ -241,7 +251,7 @@ def _proxy_addr(proxy: str) -> tuple[str, str, int]:
 
 def _conn_for(
     bucket: str, scheme: str, host: str, port: int, proxy: str, timeout: float
-) -> tuple[Any, _Key]:
+) -> tuple[http.client.HTTPConnection, _Key]:
     """取（或建）本线程的该目标连接；返回 `(conn, 请求目标)`。
 
     `http` 走代理时请求行用绝对 URI（http.client 的要求），其余用 path?query。
@@ -293,7 +303,7 @@ def _drop_conn(bucket: str, key: _Key, reason: str = "error") -> None:
 # ---------------------------------------------------------------- abort（收工断连）
 
 
-def close_async(targets: list[Any], name: str) -> None:
+def close_async(targets: list[http.client.HTTPResponse], name: str) -> None:
     """交 daemon 线程逐个关响应（唯一一份：`distribution.abort_active_requests` 也用它）。
 
     **关连接必须异步**（2026-09-19 实测：`HTTPResponse.close()` 在别人读 body 时会阻塞，
@@ -306,8 +316,8 @@ def close_async(targets: list[Any], name: str) -> None:
         for r in targets:
             try:
                 r.close()
-            except Exception:
-                # 契约静默（G9 冻结，非旧债）：收工断连的**异步**关闭——调用方已走，
+            except _CLOSE_ERRORS:
+                # 契约静默（窄捕，非旧债）：收工断连的**异步**关闭——调用方已走，
                 # 这里再抛只会变成后台线程的未处理异常（与 10053 同一族，不是 hub 的错）。
                 pass
 
@@ -415,11 +425,12 @@ def request(
             with _ACTIVE_LOCK:
                 _STATE.active.add((scope, resp))
             body = resp.read()
-        except Exception as e:  # 读到一半的任何失败都是传输失败
+        except _READ_ERRORS as e:  # 读到一半的传输失败（含并发关闭的已知 AttributeError）
             # 已经拿到响应头 ⇒ 不在白名单（重发会把一局重新跑一遍）；收工关闭也走这里。
-            # 为什么宽到 Exception：`abort_scope` 在**另一条线程**关响应，CPython 的
-            # `HTTPResponse._close_conn` 双关时会抛 AttributeError('NoneType' has no
-            # attribute 'close')——那不是调用方 bug，而是并发关闭的已知形态。
+            # `_READ_ERRORS` 里含 `AttributeError`：`abort_scope` 在**另一条线程**关响应，
+            # CPython 的 `HTTPResponse._close_conn` 双关时会抛
+            # AttributeError('NoneType' has no attribute 'close') —— 那不是调用方 bug，
+            # 而是并发关闭的已知形态（其余程序员错仍穿出去）。
             _drop_conn(bucket, key, "abort" if abort_scope_active(scope) else "error")
             raise urllib.error.URLError(e) from e
         finally:

@@ -94,13 +94,17 @@ def test_fetch_task_encodes_flag(monkeypatch) -> None:
     # node_request 的异常会被包成 DistError——URL 已在抛错前捕获，断它即可。
     with pytest.raises(common.distribution.DistError):
         common.task_client.fetch_task(
-            "http://x/", "k", iter_id="i", wver="w", stage=2000, seed=7,
-            max_ticks=100, difficulty="hard", timeout=5.0, decision_events=True,
+            common.task_client.FetchTaskSpec(
+                url="http://x/", auth_key="k", iter_id="i", wver="w", stage=2000, seed=7,
+                max_ticks=100, difficulty="hard", timeout=5.0, decision_events=True,
+            )
         )
     assert "decisionEvents=1" in seen["url"]
     with pytest.raises(common.distribution.DistError):
         common.task_client.fetch_task(
-            "http://x/", "k", iter_id="i", wver="w", stage=2000, seed=7,
-            max_ticks=100, difficulty="hard", timeout=5.0,
+            common.task_client.FetchTaskSpec(
+                url="http://x/", auth_key="k", iter_id="i", wver="w", stage=2000, seed=7,
+                max_ticks=100, difficulty="hard", timeout=5.0,
+            )
         )
     assert "decisionEvents" not in seen["url"]

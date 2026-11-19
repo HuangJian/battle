@@ -31,10 +31,11 @@ PARAM_LIMIT = 8
 #: 2026-11-19：**清零**（第 37 刀拆掉最后一个 `_remote_ppo_publish`）——此后任何 >200 行
 #: 函数都是新增，直接红。
 LONG_FUNCS_BASELINE: dict[str, int] = {
-    # 2026-11-19 合入上游 goal-nn（74 提交）时的存量：这四处是**上游的协议面/编排面**
-    # （fetch 任务串、采样节点主流程、评估节点门、BC epoch 循环），合并时只做了结构适配；
+    # 2026-11-19 合入上游 goal-nn（74 提交）时的存量：这三处是**上游的编排面**
+    # （采样节点主流程、评估节点门、BC epoch 循环），合并时只做了结构适配；
     # 拆它们要按「独立所有者 + 独立触发条件」做，见 python.refactor.md §P0-2。
-    "common/task_client.py": 1,
+    # （`common/task_client.fetch_task` 已按 P0-2/P0-3 拆成 `FetchTaskSpec` + `_task_params`，
+    # `fetch_task` 只剩传输编排 ⇒ 条目删除。）
     "remote/rollout_node.py": 1,
     "trainer/eval_dispatch.py": 1,
     "worker/train/bc.py": 1,
@@ -44,8 +45,6 @@ LONG_FUNCS_BASELINE: dict[str, int] = {
 WIDE_FUNCS_BASELINE = {
     "biz/course_archive.py": 1,
     "common/race_metrics.py": 1,
-    # 2026-11-19（B8 第十一刀）：`fetch_task` 的 27 参随任务协议簇搬进 `task_client`。
-    "common/task_client.py": 1,
     "common/task_key.py": 1,
     "hub/offline_ingest.py": 1,
     "hub/offline_push.py": 2,

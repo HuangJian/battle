@@ -29,7 +29,7 @@ import json
 import os
 import tarfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -84,7 +84,7 @@ class JobState:
     unpack_sec: float = 0.0
     pruned_dirs: int = 0
     #: D10（plan/replay-corpus.plan.md）：replay pre-pass 的读数（full 路径 None）。
-    replay: dict | None = None
+    replay: Mapping[str, object] | None = None
     code_root: Path = Path()
     blob_root: Path = Path()
     init_w: Path | None = None

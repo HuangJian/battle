@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Iterable
 
 from common.codehash import dirty_hash_files
 from common.codehash_ref import is_self_node as _is_self_node
@@ -148,7 +149,7 @@ def reset_restart_state() -> None:
     _RESTARTS.reset()
 
 
-def seed_restart_state(entries: list) -> int:
+def seed_restart_state(entries: Iterable[object]) -> int:
     """把调用方持久化的跨代去重 memo 灌回 `_RESTARTS.seen`。返回灌入条数。
 
     一次性进程（CLI）专用：本模块的去重状态只活在进程内，调用方（TS 工具）把上次

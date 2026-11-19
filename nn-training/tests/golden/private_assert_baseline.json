@@ -47,7 +47,7 @@
   "tests/worker/test_shard_action_space_v6.py": 7,
   "tests/remote/test_corpus_capability.py": 1,
   "tests/remote/test_offline_bc_course.py": 3,
-  "tests/remote/test_rollout_relay.py": 22,
+  "tests/remote/test_rollout_relay.py": 10,
   "tests/trainer/test_loop_runner_budget.py": 1,
   "tests/worker/test_bc_dp.py": 2,
   "tests/worker/test_bc_xla.py": 3,

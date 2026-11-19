@@ -109,7 +109,7 @@ def test_stale_heartbeat_fails_fast_without_roundtrip(
     relay = relay_mod.RELAY
     _fresh(relay, node)
     relay.note_ping(node, {"alive": True})
-    relay._boxes[node].last_poll = time.time() - (CHANNEL_STALE_SEC + 5.0)
+    relay._boxes[node].last_poll = relay.now() - (CHANNEL_STALE_SEC + 5.0)
     monkeypatch.setattr(relay, "call", _boom)
 
     at = time.monotonic()
@@ -129,7 +129,7 @@ def test_expired_payload_is_served_then_refreshed_single_flight(
     relay = relay_mod.RELAY
     _fresh(relay, node)
     relay.note_ping(node, {"v": 1})
-    relay._boxes[node].ping_at = time.time() - (PING_TTL_SEC + 5.0)
+    relay._boxes[node].ping_at = relay.now() - (PING_TTL_SEC + 5.0)
 
     started, release = threading.Event(), threading.Event()
     seen: list[tuple[str, str, float]] = []
@@ -221,7 +221,7 @@ def test_fossil_payload_is_not_used(
     relay = relay_mod.RELAY
     _fresh(relay, node)
     relay.note_ping(node, {"v": 1})
-    relay._boxes[node].ping_at = time.time() - (PING_SERVE_MAX_SEC + 5.0)
+    relay._boxes[node].ping_at = relay.now() - (PING_SERVE_MAX_SEC + 5.0)
     calls: list[str] = []
 
     def fake_call(

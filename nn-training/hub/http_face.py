@@ -1101,9 +1101,9 @@ class HubHandler(
             )
             if status == 200:
                 self._cache_relay_ping(node, raw)
-        except Exception:  # 后台线程里的任何异常都与调用方无关（这条链路的语义是 best-effort）
-            # 契约静默（G9 冻结，非旧债）：ping 刷新是**旁路**，失败只会让下一次 ping
-            # 多问一跳；这里没有任何调用方在等它。
+        except RelayTimeoutError:
+            # 契约静默（窄捕，非旧债）：ping 刷新是**旁路**，失败只会让下一次 ping
+            # 多问一跳；这里没有任何调用方在等它。程序员错穿出去（线程 traceback 可见）。
             pass
         finally:
             NODE_RELAY.release_ping_refresh(node)

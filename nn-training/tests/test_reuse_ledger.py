@@ -181,10 +181,18 @@ _EXPECTED_EXEMPT_STEMS = frozenset(
 #:   两条仍未动，`_HubQueue` 上没有任何实现体。
 #: 2026-11-19 合入上游 goal-nn（74 提交）时实测 16（+1：上游新增的一处逐字节重复）。
 #: 债已登记：下一刀按 [['remote/hub_client.py', 'worker/bc_ledger.py']] 那类抽共用模块后调回。
+#: **2026-11-20 抬 clone 1 格（16 → 17）的账**（exact 仍 16）：
+#: `common/http_pool._close_quiet` 与 `common/distribution._closer` 的关闭循环原先逐字节相同
+#: （exact）；本轮按 G4/G9 把两处收窄成各自的真实异常集（连接对象 vs 响应对象、失败语义不同），
+#: 差异只在那行 `except`，其余仍是同一段关闭体 ⇒ 记为**结构克隆（1 组），没有新增实现**。
+#: 同一处缺陷仍须两侧同改（关闭失败都不许冒泡）。
 BASELINE_EXACT = 16
-BASELINE_CLONE = 16
+BASELINE_CLONE = 17
 #: 2026-11-19 合入上游（74 提交）实测 141（+2：relay / replay 的参数名与读取函数散落）。
-BASELINE_SAME_NAME_GE3 = 141
+#: **2026-11-20 抬同名 1 格（141 → 142）的账**：`remote/replay_corpus.ConvertPool` 协议声明
+#: `summary()`（长驻转换池的唯一读面，生产实现 = `worker.serve_pool`），与 `course_archive` /
+#: `serve_pool` 的同名**契约名**凑成 ≥3 —— 是协议镜像，不是新实现。
+BASELINE_SAME_NAME_GE3 = 142
 
 
 def _stems(modules: frozenset[str]) -> frozenset[str]:

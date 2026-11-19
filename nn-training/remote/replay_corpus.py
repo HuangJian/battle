@@ -24,9 +24,10 @@ import subprocess
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Protocol, TypedDict
 
 from common.errors import ProtocolError
+from common.log_bundle import LogBundle
 from common.platform_utils import physical_cores, rmtree_best_effort
 from common.proc import run_capture
 from common.runtime import Runtime
@@ -44,6 +45,44 @@ SHARD_TIMEOUT_SEC = 900.0
 #: 尖峰支配，物理核数已是最稳点（16w 15–18 s，12w 有 30–68 s 轮）。两者再受 shard 数收敛。
 VERIFY_WORKERS_NUM = 11
 VERIFY_WORKERS_DEN = 8
+
+
+class ConvertPool(Protocol):
+    """长驻转换池的最小面（生产 = `worker.serve_pool.pool_for_bundle`）。
+
+    用协议而不是 import `worker/`：`remote/` 不能依赖 `worker/`（分层账本）。池的
+    `try_capture` 返回 `None` = 给不出确定成功 ⇒ 调用方回退一次性 spawn。
+    """
+
+    def try_capture(
+        self,
+        argv: list[str],
+        timeout_sec: float,
+        *,
+        label: str,
+        kind: str,
+        where: str,
+    ) -> object | None: ...
+
+    def summary(self) -> str: ...
+
+    def close(self) -> None: ...
+
+
+class ConvertReadout(TypedDict):
+    """`convert_replay_corpus` 的读数面（iteration `wire` 子字典 + 日志）。"""
+
+    shards: int
+    reused: int
+    sec: float
+    converter_sha256: str
+    runtime: str
+    convert_workers: int
+    corpus_fmt: str
+    replay_bytes: int
+    labels_bytes: int
+    convert_jobs: int
+    convert_fallback: int
 
 
 def resolve_js_runtime() -> str:
@@ -206,21 +245,22 @@ def _convert_tx(
             t, converter=converter, runtime=runtime, timeout_sec=timeout_sec, label=shard_dir.name
         )
     )
+    ok = False
     try:
         run(tmp)
         _finish_shard(shard_dir, tmp, converter_sha)
+        ok = True
         return False
     except subprocess.TimeoutExpired as e:
-        rmtree_best_effort(tmp, ignore_errors=True)
         raise ProtocolError(
             f"replay 转换超时（{shard_dir.name}，>{timeout_sec:.0f}s）—— 确定性失败，不重试"
         ) from e
     except OSError as e:
-        rmtree_best_effort(tmp, ignore_errors=True)
         raise ProtocolError(f"replay 转换器起不来（{runtime}）：{e}") from e
-    except Exception:
-        rmtree_best_effort(tmp, ignore_errors=True)
-        raise
+    finally:
+        # 失败（含程序员错）一律清掉半截事务目录，再把原异常原样放出去。
+        if not ok:
+            rmtree_best_effort(tmp, ignore_errors=True)
 
 
 def convert_shard(
@@ -313,9 +353,9 @@ def convert_replay_corpus(
     *,
     log: Callable[[str], None] = lambda _m: None,
     workers: int | None = None,
-    pool_factory: Callable[[str, Path, int], Any] | None = None,
+    pool_factory: Callable[[str, Path, int], ConvertPool | None] | None = None,
     verify_only: bool = False,
-) -> dict[str, Any]:
+) -> ConvertReadout:
     """把一整轮 replay shard 就地转成 obs/scalars/extra，返回读数。
 
     `pool_factory(runtime, converter, workers)` = 长驻转换池的工厂，**由调用方注入**
@@ -364,7 +404,7 @@ def convert_replay_corpus(
         )
     else:
         log(f"replay 转换运行时：{runtime_name}（{runtime}）· 档位=primary")
-    t0 = time.time()
+    t0 = time.monotonic()
     reused = 0
     # D10 墙钟账（additive）：replay/labels 的真实字节在转换前量（转换只增不减）。
     replay_bytes, labels_bytes = _corpus_bytes(dirs)
@@ -393,11 +433,11 @@ def convert_replay_corpus(
 
     def _one(sd: Path) -> tuple[bool, float]:
         """（标记命中没、这个 shard 实际花了多久）。耗时按**并发**计 —— 每 shard 各算各的。"""
-        t = time.time()
+        t = time.monotonic()
         if verify_only:
             # 诊断路径：直接对真实 shard 跑 `--verify-only`，不建事务目录、不写标记/产物。
             _submit_via_pool(sd, sd.name)
-            return False, time.time() - t
+            return False, time.monotonic() - t
         reused_one = _convert_tx(
             sd,
             converter=converter,
@@ -406,7 +446,7 @@ def convert_replay_corpus(
             timeout_sec=SHARD_TIMEOUT_SEC,
             submit=lambda tmp: _submit_via_pool(tmp, sd.name),
         )
-        return reused_one, time.time() - t
+        return reused_one, time.monotonic() - t
 
     #: 真跑了子进程的 shard 的**单体耗时**（复用标记的不算 —— 它们没花转换时间）。
     durations: list[float] = []
@@ -423,7 +463,7 @@ def convert_replay_corpus(
         if pool is not None:
             log(pool.summary())
             pool.close()
-    sec = time.time() - t0
+    sec = time.monotonic() - t0
     spread = (
         f"单 shard 均值 {1000 * sum(durations) / len(durations):.1f}ms / "
         f"最长 {1000 * max(durations):.1f}ms"
@@ -458,11 +498,11 @@ def prepass(
     manifest: dict,
     *,
     log: Callable[[str], None] = lambda _m: None,
-    bundle: Any = None,
-    pool_factory: Callable[[str, Path, int], Any] | None = None,
+    bundle: LogBundle | None = None,
+    pool_factory: Callable[[str, Path, int], ConvertPool | None] | None = None,
     workers: int | None = None,
     verify_only: bool = False,
-) -> dict[str, Any] | None:
+) -> ConvertReadout | None:
     """`run_job` 的 replay pre-pass 入口：非 replay 原样返回 None（零行为变化）。
 
     kind 闸在这里而不是散在宿主里：replay 只允许 kind=ppo（节点自跑 rollout 的 kind=iter

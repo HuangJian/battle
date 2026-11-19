@@ -1005,30 +1005,28 @@ class _UnitLanes:
                 **eval_rule_kwargs(getattr(self.owner, "args", None)),
             )
         else:
-            m, _files = common.task_client.fetch_task(
-                nd["url"],
-                nd["key"],
-                iter_id=self.iter_id,
-                # 全量 wver（agent 桶按完整 sha 存；key16 会 409 —— 2026-09-19 实测）。
-                wver=self.wver,
-                stage=task[0],
-                seed=task[1],
-                max_ticks=up["maxTicks"],
-                difficulty=up["difficulty"],
-                timeout=self.task_timeout,
-                mode="eval",
-                kind=self.kind,
-                stage_json=up["stageJson"],
-                lives_override=up["lives"],
-                player_level=up["level"],
-                policy=self.owner.policy,
-                # R2 事件 rung：与本机份额同源（self.args，缺席 = 老行为）。
-                decision_events=bool(getattr(getattr(self.owner, "args", None), "decision_events", False)),
-                # 决策周期 K：与本机份额同源（缺席/10 = 老行为）。
-                decision_k=int(getattr(getattr(self.owner, "args", None), "decision_k", 10)),
-                # 顶钢空枪门/拆砖：与本机份额同源（缺席 = 老行为）。
-                **eval_rule_kwargs(getattr(self.owner, "args", None)),
-            )
+            m, _files = common.task_client.fetch_task(common.task_client.FetchTaskSpec(
+                    url=nd["url"],
+                    auth_key=nd["key"],
+                    iter_id=self.iter_id,
+                    # 全量 wver（agent 桶按完整 sha 存；key16 会 409 —— 2026-09-19 实测）。
+                    wver=self.wver,
+                    stage=task[0],
+                    seed=task[1],
+                    max_ticks=up["maxTicks"],
+                    difficulty=up["difficulty"],
+                    timeout=self.task_timeout,
+                    mode="eval",
+                    kind=self.kind,
+                    stage_json=up["stageJson"],
+                    lives_override=up["lives"],
+                    player_level=up["level"],
+                    policy=self.owner.policy,
+                    # R2 事件 rung / 决策周期 K / 推理规则：与本机份额同源（缺席 = 老行为）。
+                    decision_events=bool(getattr(getattr(self.owner, "args", None), "decision_events", False)),
+                    decision_k=int(getattr(getattr(self.owner, "args", None), "decision_k", 10)),
+                    **eval_rule_kwargs(getattr(self.owner, "args", None)),
+                ))
         why = common.task_client.validate_eval_result(m, self.wver)
         if why:
             raise common.distribution.DistError(0, why)

@@ -17,8 +17,5 @@
   "remote/worker_proc.py": 1,
   "worker/eval_gate.py": 1,
   "worker/ppo/np_core.py": 3,
-  "common/http_pool.py": 2,
-  "hub/http_face.py": 1,
-  "remote/notebook_runtime.py": 1,
-  "remote/rollout_relay.py": 2
+  "remote/notebook_runtime.py": 1
 }

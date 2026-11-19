@@ -336,48 +336,50 @@ def _execute(q: QueueState, claim: _Claim, nd: dict | None) -> _Exec:
                 q.args, nd_id, nd, stage_json=_sj
             )
             manifest, files = common.task_client.fetch_task(
-                nd["url"],
-                nd["key"],
-                iter_id=q.iter_id,
-                wver=q.wver,
-                stage=task[0],
-                seed=task[1],
-                max_ticks=q.args.max_ticks,
-                difficulty=q.args.difficulty,
-                timeout=q.task_timeout,
-                kind=q.wkind,
-                replan=getattr(q.args, "replan", 0),
-                reward=getattr(q.args, "reward", ""),
-                dodge=getattr(q.args, "dodge", ""),
-                # R2 事件 rung：与课程 decision_events 同步（缺席 = 老行为）。
-                decision_events=bool(getattr(q.args, "decision_events", False)),
-                opening_connect=bool(getattr(q.args, "opening_connect", False)),
-                # 决策周期 K：与课程 decision_k 同步（缺席/10 = 老行为）。
-                decision_k=int(getattr(q.args, "decision_k", 10)),
-                on_key=partial(remember_task_key, cancel_target),
-                # greedy 分层采集：labelMode=greedy 进 URL → agent 拼
-                # --teacher-argmax；该键已进 taskKey 与轮询配方，缓存隔离。
-                label_mode="greedy"
-                if getattr(q.args, "rollout_argmax", False)
-                else "",
-                stage_json=_sj or "",
-                lives_override=int(_ov["lives_override"])
-                if "lives_override" in _ov
-                else None,
-                player_level=int(_ov["player_level"])
-                if "player_level" in _ov
-                else None,
-                course_fp=_cfp,
-                # P2：语料格式（仅 per-tick RL rollout；eval/BC 不走这条腿）。
-                corpus_fmt=str(getattr(q.args, "corpus_fmt", "full") or "full"),
-                # 竞速收尾洞修复（2026-09-06）：all_settled 后竞速副本必是
-                # 输家——fetch 内部轮询立即放弃，trainer 不再等慢节点把
-                # 注定丢弃的局跑完（实测拖住发布 4.5 分钟）。
-                # 2026-09-14：只对 fanout_copy 传 abandon_event。主副本
-                # 必须走 sync（不带 x-async）——此前恒传 all_settled 使
-                # fetch_task 的 use_async 恒真，sync 默认形同虚设（实测
-                # 重启后 rollout 仍 ~50s）。竞速输家仍可经 async 轮询放弃。
-                abandon_event=q.all_settled if fanout_copy else None,
+                common.task_client.FetchTaskSpec(
+                    url=nd["url"],
+                    auth_key=nd["key"],
+                    iter_id=q.iter_id,
+                    wver=q.wver,
+                    stage=task[0],
+                    seed=task[1],
+                    max_ticks=q.args.max_ticks,
+                    difficulty=q.args.difficulty,
+                    timeout=q.task_timeout,
+                    kind=q.wkind,
+                    replan=getattr(q.args, "replan", 0),
+                    reward=getattr(q.args, "reward", ""),
+                    dodge=getattr(q.args, "dodge", ""),
+                    # R2 事件 rung：与课程 decision_events 同步（缺席 = 老行为）。
+                    decision_events=bool(getattr(q.args, "decision_events", False)),
+                    opening_connect=bool(getattr(q.args, "opening_connect", False)),
+                    # 决策周期 K：与课程 decision_k 同步（缺席/10 = 老行为）。
+                    decision_k=int(getattr(q.args, "decision_k", 10)),
+                    on_key=partial(remember_task_key, cancel_target),
+                    # greedy 分层采集：labelMode=greedy 进 URL → agent 拼
+                    # --teacher-argmax；该键已进 taskKey 与轮询配方，缓存隔离。
+                    label_mode="greedy"
+                    if getattr(q.args, "rollout_argmax", False)
+                    else "",
+                    stage_json=_sj or "",
+                    lives_override=int(_ov["lives_override"])
+                    if "lives_override" in _ov
+                    else None,
+                    player_level=int(_ov["player_level"])
+                    if "player_level" in _ov
+                    else None,
+                    course_fp=_cfp,
+                    # P2：语料格式（仅 per-tick RL rollout；eval/BC 不走这条腿）。
+                    corpus_fmt=str(getattr(q.args, "corpus_fmt", "full") or "full"),
+                    # 竞速收尾洞修复（2026-09-06）：all_settled 后竞速副本必是
+                    # 输家——fetch 内部轮询立即放弃，trainer 不再等慢节点把
+                    # 注定丢弃的局跑完（实测拖住发布 4.5 分钟）。
+                    # 2026-09-14：只对 fanout_copy 传 abandon_event。主副本
+                    # 必须走 sync（不带 x-async）——此前恒传 all_settled 使
+                    # fetch_task 的 use_async 恒真，sync 默认形同虚设（实测
+                    # 重启后 rollout 仍 ~50s）。竞速输家仍可经 async 轮询放弃。
+                    abandon_event=q.all_settled if fanout_copy else None,
+                )
             )
             why = common.distribution.validate_result(
                 manifest, files, q.wver, set(q.norm_pairs), q.seen

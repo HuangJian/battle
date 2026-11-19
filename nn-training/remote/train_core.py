@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -374,7 +374,7 @@ class TrainSpec:
     blob_miss_bytes: int
     prune_dirs: int = 0
     #: D10（plan/replay-corpus.plan.md）：replay pre-pass 的读数（full 路径 None）。
-    replay_info: dict | None = None
+    replay_info: Mapping[str, object] | None = None
     epoch_mult: float = 1.0
     backend: str = "torch"
     prep: Any = None

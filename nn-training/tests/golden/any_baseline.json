@@ -181,15 +181,11 @@
     "worker/trainer_gate.py": 3,
     "worker/trainer_heartbeat.py": 2,
     "worker/volume_waves.py": 6,
-    "common/http_pool.py": 5,
-    "common/node_speed.py": 4,
-    "hub/relay.py": 5,
+    "common/node_speed.py": 2,
     "remote/hub_client.py": 1,
-    "remote/replay_corpus.py": 5,
-    "remote/rollout_relay.py": 12,
-    "worker/cloud_sampling.py": 5,
+    "remote/rollout_relay.py": 1,
+    "worker/cloud_sampling.py": 2,
     "worker/iter_run.py": 3,
-    "worker/ppo/lazy_corpus.py": 3,
     "worker/ppo/vram.py": 5
   }
 }

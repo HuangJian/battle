@@ -169,15 +169,17 @@ def _task_call(monkeypatch: pytest.MonkeyPatch) -> dict:
     rec = _TaskRecorder()
     monkeypatch.setattr(common.distribution, "node_request", rec)
     common.task_client.fetch_task(
-        "http://n",
-        "k",
-        iter_id="run.3",
-        wver="w" * 64,
-        stage=1,
-        seed=2,
-        max_ticks=100,
-        difficulty="hard",
-        timeout=5.0,
+        common.task_client.FetchTaskSpec(
+            url="http://n",
+            auth_key="k",
+            iter_id="run.3",
+            wver="w" * 64,
+            stage=1,
+            seed=2,
+            max_ticks=100,
+            difficulty="hard",
+            timeout=5.0,
+        )
     )
     return rec.calls[0]
 

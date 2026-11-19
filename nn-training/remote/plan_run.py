@@ -37,7 +37,7 @@ import math
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import remote.land_provider as land_provider
 import remote.opt_standard as opt_standard
@@ -660,20 +660,20 @@ def _weight_bytes(result: dict) -> bytes:
     return bytes(decode_weights_json(str(result.get("weights_json") or "")))
 
 
-def _sampling_profile(ctx: RunContext) -> dict | None:
+def _sampling_profile(ctx: RunContext) -> cloud_sampling.CloudProfile | None:
     """本段生效的云端采样覆盖（device → 档；一次性解析并缓存）。
 
     块生效时把 `sample_mult` / `epoch_mult` 归 1（用户 2026-11-15 更正 ②：覆盖块与
     notebook 倍数不叠加）。缺档/坏计划在**第一轮开始前**转 `ProtocolError`，不静默回落。
     """
     if ctx.sampling_profile_checked:
-        return ctx.sampling_profile
+        return cast(cloud_sampling.CloudProfile | None, ctx.sampling_profile)
     try:
         profile = cloud_sampling.profile_for_course(ctx.course, ctx.device)
     except ValueError as e:
         raise ProtocolError(f"云端采样覆盖不可用：{e}") from e
     ctx.sampling_profile_checked = True
-    ctx.sampling_profile = profile
+    ctx.sampling_profile = dict(profile) if profile is not None else None
     if profile is not None:
         rot = profile["rotation"]
         if ctx.sample_mult != 1.0 or ctx.epoch_mult != 1.0:

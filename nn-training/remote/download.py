@@ -51,6 +51,7 @@ import hashlib
 import os
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -799,7 +800,7 @@ class PayloadLanded(NamedTuple):
     unpack_sec: float
     staged: bool = False
     pruned_dirs: int = 0
-    replay: dict | None = None
+    replay: Mapping[str, object] | None = None
 
 
 def _scan_shard_dirs(dest: Path) -> list[str]:
