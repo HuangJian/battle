@@ -1379,7 +1379,7 @@ def build_argparser() -> argparse.ArgumentParser:
 | **B4**（3–5 天） | 拆 `dispatch._run` 为 5 个相位方法 | `_run` ≤ 80 行；dispatch 测试全绿 | 中高（需一轮真跑） |
 | **B5**（5–7 天） | `common/contracts`：Shard/Manifest/Result/ActionSpace；删三处 `a_hold` 嗅探 | 类型检查覆盖数据面；v6/legacy 由 Enum 决定 | 中（**已完成**：`ActionSpace`+`HeadLayout`（2026-11-16）、三处嗅探清零、`Shard`/`ShardV6`/`Episode`/`EpisodeV6` 契约 + import 哨兵（2026-11-18，§126）、episode 跨三层收口（§127）、`Manifest`/`CloudResult` 的 pydantic 模型 + 两个薄包装（§128，L0 放行 pydantic 一个包，闭集三处）；**剩余**：`cfg`/`course` 的 schema 继续收（可选）） |
 | **B6**（5–7 天） | `Runtime`（rng/clock/executors）注入；PPO 改 `default_rng`；ckpt 存 bit generator（**三半边全落** 2026-11-17：executor = `Runtime` 收走 10 处就地建池 + G16 · rng = `PPORng` 三条流 + `rng_streams` 进 ckpt + AST 零容忍 · clock = `Runtime(clock=, monotonic=)` + `PushHooks` + G17 墙钟预算（482 处/92 文件冻结）· 裸线程 = `Runtime.thread()` 名字/登记/join + G18 零容忍闸（50 → **0 处**；四批：`CloudEvalRunner` · `LocalLane` · `DelivererProcess` · `UploaderProcess` · `PushDispatcher` · `HeartbeatPublisher` · `EvalExecutors` + 第三批 11 个类 + 第四批模块级扇出，见 §P1-6）） | 同 seed 两遍逐位一致；并发下可复现 | 中 |
-| **B7**（7–10 天） | 协作对象替混入（先 `Scheduler`/`LeaseBook`，保留转发壳）——**设计短记已落**：`docs/nn/engineering.md` §224（实测表 · 目标形状 · 锁规则 L1–L5 · 切片 P1–P4 逐片 DoD · 测试迁移三类 · 停止条件）；测试迁移到 seams（**2026-11-19 另落两刀**：`hub/http_face.py` 的 55 支 `elif` 路由 → 两张数据表 + 纯函数 `match_route`（§217），五份可变类属性 → `HubState`（§218）） | `_HubQueue.__mro__` ≤ 4；私有断言存量下降 | 高（面广） |
+| **B7**（7–10 天） | 协作对象替混入（`Scheduler` / `LeaseBook` / `Ledger` / `CourseTable` / `WorkerBoard` / `Dispatch`）——**P1–P4b 已落**（2026-11-19，5 笔提交，见 `docs/nn/engineering.md` §225）：`_JobStore` 的 bases 7 → **4**、MRO 9 → **6**；`_HubQueue` 的 10 + 11 个状态字段搬进协作者（138 个域方法与 5 把旁路锁不动）；锁集合/顺序不变、`queue_state()`/`mem_readout()` 键集逐字不变。**设计原稿**见 §224；**壳收敛未做**（§3 目标 7 个基类 vs §6 DoD ≤4 自相矛盾，按 §9 停止条件挂起——见 §225「下一刀」）。测试迁移到 seams（2026-11-19 另落两刀：`hub/http_face.py` 的 55 支 `elif` 路由 → 两张数据表 + 纯函数 `match_route`（§217），五份可变类属性 → `HubState`（§218）） | `_JobStore.__bases__` ≤ 4 ✅；`_HubQueue.__mro__` ≤ 9 ❌（挂起）；私有断言 25 → 24 | 高（面广） |
 | **B8**（5–7 天） | `common.distribution` 拆分（**第一刀已落** 2026-11-16：codeHash 面 → `common/codehash.py`，仓库锚点 → `common/paths.py`，调用点与打桩面同步迁走；**第十刀已落** 2026-11-19：升级/重启护栏 12 名 → `remote/node_upgrade.py`，HTTP 漏斗改名公开的 `node_request`；**第十一刀已落** 2026-11-19：任务协议 / 权重传输拆成 `common/task_client` + `common/weights_client`，`distribution` 1 181 → 490 行）；`offline_boot` 生成式拆分（**已落** 2026-11-17：12 个 `.pyfrag` + `tools/build_offline_boot.py` + `--check` 守卫）；`PPOLoop` 统一四份实现（**第十二刀已落** 2026-11-19：numpy 两份（goal / intent）合成 `worker/ppo/loop.py`，克隆窗口 11 → 0；**第十三刀同日已落**：`engine ↔ engine_paddle` 的训练步合成 `worker/ppo/backend.py` + 20 字段 `Backend` 算子表，13 → 0，paddle parity 三段读数不变；**第十四刀同日已落**：两个头的 `main()` 合成 `worker/ppo/cli.py`（`CliSpec` + 顺序），`--help` 逐字节不变） | 单文件 < 1000 行（取消豁免）；克隆窗口下降 | 中 |
 
 **不建议的路线**：一次性 `strict = true`、一次性删全部 `sys.path`、一次性把 hub 换 FastAPI。
@@ -1459,7 +1459,8 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 | `remote/hub_client.py` | `publish_job` 56 参 | `PublishSpec` | B3 | **✅ 已修**：签名只剩 `(spec, *, log=_log)` |
 | `worker/ppo/engine.py` | 598 行 / 17 参 / 全局 RNG | `PPOLoop` + `Runtime` | B6/B8 | **✅ 已修**：`ppo_update` 是 85 行薄适配器 + `PPOContext` |
 | `worker/ppo/engine.py` 的 `a_hold` 嗅探 | 运行时类型判断 | `ActionSpace` Enum | B5 | **✅ 已修**：`common/contracts.py` 唯一来源 + 字节初筛门禁 |
-| `hub/queue.py` | 8 基类混入 | `Scheduler`/`LeaseBook` + 转发壳 | B7 | **⏳ 未动**（有理由）：`_HubQueue` 仍是 8 混入组合，但结构被 `test_hub_queue_split` 钉住、每簇一把锁，**先建接缝再动结构**（§142 起）才是正路 |
+| `hub/queue.py` | 8 基类混入 | `CourseTable` / `WorkerBoard` / `Dispatch` + 同名转发属性 | B7 | **部分（2026-11-19）**：21 个状态字段已搬进三个协作者（`_HubQueue.__dict__` 不再持有；`_solo` 借表语义 / `_adopt_solo` 整表搬运 / 5 把旁路锁顺序逐字不变），组合类保留转发属性，138 个域方法与测试调用点未改。**仍是 8 混入 + Auth**（9 bases / MRO 14）：壳收敛与 §3 目标形状（7 bases）和 §6 DoD（≤4）冲突，按 §225 挂起 |
+| `hub/store.py`（`_JobStore`） | 六个域混入 + Auth | `Scheduler` / `LeaseBook` / `Ledger` + 转发壳 | B7 | **✅ 已修（2026-11-19）**：bases **7 → 4**（Wire / Results / Offline / Auth）、MRO **9 → 6**；调度 / 租约 / 账本三簇共 20 个状态字段与 62 个方法搬进协作者，组合类只留 64 个同名转发；唯一两相引用是 `Ledger.leases` 回填（构造顺序有断言） |
 | `trainer/loop_core.py` | 12 类混入组合 | 同上（编排层） | B7 | **部分**：12 → **4**（`RoundSteps`/`TrainingSteps`/`TrainingGuards`/`TrainingLifecycle`） |
 | `common/log.py` / `common/logutil.py` | 双时间戳 + 假声明 + 全局状态 | 统一格式 + `contextvars` | B2 | **✅ 已修**：`logutil.stamp()` 是唯一行格式（§143 把最后两份手拼也收了）、假声明已改正 |
 | `common/fs.py` | 线程泄漏 / 无 flush | `JsonlLedger` 对象 | B2/B6 | **✅ 已修**：文件里已无 `Thread(`，写入走 `JsonlLedger` |
@@ -1467,7 +1468,7 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 | `biz/reward_context.py` | 全局 `_current` | 显式参数 | B6 | **⏳ 未动**（有理由）：`set_current` 是**每 iter 整体替换**的加载期上下文，与「隐藏可变状态」不同型；改成显式参数要把 ctx 穿过整条 rollout 链 |
 | `remote/offline_boot.py` | 3552 行单文件 | 生成式拆分 | B8 | **✅ 已修**：`_offline_boot/*.pyfrag` 分片 + `tools/build_offline_boot.py`，字节一致由 `test_offline_boot_is_generated` 守 |
 | `hub/http_face.py` | 55 个 `elif` 路由 + 类属性状态 | `Route` 表 + `HubState` | B7 | **✅ 已修**（2026-11-19）：55 支 `elif` → `GET_ROUTES` / `POST_ROUTES` 两张数据表 + `match_route`（`do_GET`/`do_POST` 各 18 行，§217），五份可变类属性 → `HubState`（§218，第五份 `_REJECT_WARN_AT` 是新守卫抓到的）；守卫 `tests/hub/test_hub_route_table.py` + `test_hub_state.py`。宽捕已从 4 收到 2（§139）；`hub` / `push` / `offline_push` 三个注入的服务面不算状态，不动 |
-| `tests/**` | 3962 monkeypatch / 656 私有断言 | seams + 冻结门禁 | B7 前半 | **部分**：G5 门禁在位、**146 条 / 47 文件**（原 656 是另一种口径；2026-11-18 连做三十九批 702 → 172），monkeypatch 未动 |
+| `tests/**` | 3962 monkeypatch / 656 私有断言 | seams + 冻结门禁 | B7 前半 | **部分**：G5 门禁在位、**145 条 / 47 文件**（原 656 是另一种口径；2026-11-18 连做三十九批 702 → 172；2026-11-19 B7 P1–P4b 再 −1），monkeypatch 未动 |
 | `.github/workflows/nn-training.yml` | 只测 3.12 / `-x` | 版本矩阵 + 去 `-x` | B1 | **✅ 已修**：矩阵含 3.10 下界 + 3.12，`addopts` 去掉 `-x`，`test_python_version_matrix` 钉自洽 |
 | `pyproject.toml` | ruff 全局豁免 B023/SIM115；mypy 非 strict | 收回 + 白名单 | B1 | **✅ 已修**：两条全局 ignore 已移除，40 处违规清零（行级精确抑制） |
 | `tests/test_python_loc_budget.py` | 只管文件、豁免单文件 | 加函数级 + 生成式拆 | B1/B8 | **✅ 已修**：另有 `test_python_shape_budget.py`（>200 行 / >8 参按文件冻结；**>200 行函数已清零**，此后一律按新增判） |
@@ -1568,7 +1569,7 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
    **本轮收口（2026-11-19）**：共 37 刀，37 → **0**。逐条结构理由与接法见
    `docs/nn/engineering.md` §201；本批十五刀见 §202–§216。
    **形状门禁已无存量读数**：>200 行函数从此一律按新增判。
-2. **G5 剩余 146 条 / 47 文件**（2026-11-19 第十二~十六批拧了 26 条）已全部是结构守卫、状态/构造契约与两处扫描活性锚（详见
+2. **G5 剩余 145 条 / 47 文件**（2026-11-19 第十二~十六批拧了 26 条，B7 P1–P4b 再 −1）已全部是结构守卫、状态/构造契约与两处扫描活性锚（详见
    `docs/nn/engineering.md` §172–§178 与本文 G5 行）；**真正没动的另一半是 3,962 处
    `monkeypatch`**（判据没进门禁）与 **385 处私有属性赋值** —— 它们和 G5 是同一类耦合，
    但要先有「端口对象」才谈得上迁移（B7 后半）；
@@ -1581,10 +1582,12 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
    `HubState`，§217/§218）。**发现**：审计表只点了四份可变类属性，新守卫抓到了第五份
    `_REJECT_WARN_AT` —— 「隐藏状态」必须用门禁数，不能靠表的记忆。
 5. **下一刀的真实位置（按性价比）**：
-   ① `hub/queue.py::_HubQueue` 的 8 混入组合（B7 正题；先接缝后结构，§142 起的公开读数已经铺了
-   一部分：`queue_state()` / `active_worker_count()` / `result_token_ok` / `epoch_of`）。**切口与逐片
-   DoD 已定**：先 `_JobStore` 的 `Scheduler`/`LeaseBook`（9 基类 / 90 方法 / 32 站点 / 1 把锁），再
-   hub 侧；锁规则 L1–L5、测试迁移三类、停止条件见 `docs/nn/engineering.md` §224；
+   ① ~~`_JobStore` 的调度/租约/账本三簇~~ **P1/P2/P4b 已落（2026-11-19）**：`Scheduler` /
+   `LeaseBook` / `Ledger` 三个协作者 + 64 个转发壳，bases 7 → **4**、MRO 9 → **6**；
+   `CourseTable` / `WorkerBoard` / `Dispatch`（P3/P4a）也已落地，`_HubQueue` 的 21 个状态
+   字段不再住组合类。**剩下的只有 `_HubQueue` 壳收敛**：§3 目标形状是 7 bases、§6 DoD 是
+   ≤4，二者矛盾；按 §9 停止条件挂起，先对齐设计再决定是否把 138 个域方法搬进协作者。
+   锁规则 L1–L5、测试迁移、DoD 复算与挂起理由见 `docs/nn/engineering.md` §224/§225；
    ② ~~`common/distribution.py`（1 434 物理行 / 线协议 + HTTP 客户端 + 权重下发 + 升级重启护栏
    四簇）~~ **第十刀已落（2026-11-19）**：升级/重启护栏整簇 12 名 → `remote/node_upgrade.py`
    （1 181 + 282 行），HTTP 漏斗改名公开的 `node_request`，G8 基线不变 + 新增「新家零 IO」断言；
