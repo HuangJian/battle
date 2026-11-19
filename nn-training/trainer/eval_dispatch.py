@@ -29,6 +29,7 @@ from typing import Any
 import common.codehash
 import common.distribution
 import common.protocol
+import common.weights_client
 from common.fs import append_jsonl
 from common.log import log
 from common.proc import bun_version
@@ -526,10 +527,10 @@ class EvalDispatcher:
             return False
 
         nodes_ok = (
-            common.distribution.post_weights_parallel(
+            common.weights_client.post_weights_parallel(
                 alive, iter_id, wver, weights_bytes, timeout=post_budget,
                 kind=EVAL_WEIGHTS_KIND,
-                hooks=common.distribution.PushHooks(log=_log, on_alive=_on_weight_ready),
+                hooks=common.weights_client.PushHooks(log=_log, on_alive=_on_weight_ready),
             )
             if alive else []
         )

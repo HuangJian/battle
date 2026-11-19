@@ -24,6 +24,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import common.distribution
+import common.task_client
+import common.weights_client
 
 
 class _Recorder:
@@ -83,7 +85,7 @@ def test_post_weights_sends_course_header_from_env(
     rec = _Recorder()
     monkeypatch.setattr(common.distribution, "node_request", rec)
     monkeypatch.setenv(common.distribution.COURSE_ENV, "tiny-a")
-    common.distribution.post_weights("http://n", "k", "run.3", "s" * 64, b"weights")
+    common.weights_client.post_weights("http://n", "k", "run.3", "s" * 64, b"weights")
     assert rec.posts[0]["headers"]["X-Course"] == "tiny-a"
     assert rec.posts[0]["headers"]["X-Kind"] == "rollout"
 
@@ -94,7 +96,7 @@ def test_post_weights_omits_course_header_when_unknown(
     """未知名 = 不发头（旧 agent 见到空头也无从使用，少一个字段少一份歧义）。"""
     rec = _Recorder()
     monkeypatch.setattr(common.distribution, "node_request", rec)
-    common.distribution.post_weights("http://n", "k", "run.3", "s" * 64, b"weights")
+    common.weights_client.post_weights("http://n", "k", "run.3", "s" * 64, b"weights")
     assert "X-Course" not in rec.posts[0]["headers"]
 
 
@@ -105,7 +107,7 @@ def test_post_weights_explicit_empty_course_beats_env(
     rec = _Recorder()
     monkeypatch.setattr(common.distribution, "node_request", rec)
     monkeypatch.setenv(common.distribution.COURSE_ENV, "tiny-a")
-    common.distribution.post_weights("http://n", "k", "run.3", "s" * 64, b"weights", course="")
+    common.weights_client.post_weights("http://n", "k", "run.3", "s" * 64, b"weights", course="")
     assert "X-Course" not in rec.posts[0]["headers"]
 
 
@@ -114,7 +116,7 @@ def test_precheck_hit_skips_the_body(monkeypatch: pytest.MonkeyPatch) -> None:
     rec = _Recorder(get_body={"cached": True})
     monkeypatch.setattr(common.distribution, "node_request", rec)
     monkeypatch.setenv(common.distribution.COURSE_ENV, "tiny-a")
-    mode = common.distribution.post_weights_cached("http://n", "k", "run.3", "ab" * 32, b"x" * 1000)
+    mode = common.weights_client.post_weights_cached("http://n", "k", "run.3", "ab" * 32, b"x" * 1000)
     assert mode == "cached"
     assert len(rec.posts) == 0, "命中还上传 = 白传 ~0.5MB"
     assert rec.query(rec.gets[0])["sha"] == ["ab" * 32]
@@ -124,7 +126,7 @@ def test_precheck_hit_skips_the_body(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_precheck_miss_posts_once(monkeypatch: pytest.MonkeyPatch) -> None:
     rec = _Recorder(get_body={"cached": False})
     monkeypatch.setattr(common.distribution, "node_request", rec)
-    mode = common.distribution.post_weights_cached("http://n", "k", "run.3", "ab" * 32, b"x" * 1000)
+    mode = common.weights_client.post_weights_cached("http://n", "k", "run.3", "ab" * 32, b"x" * 1000)
     assert mode == "purged"
     assert len(rec.posts) == 1
 
@@ -139,7 +141,7 @@ def test_precheck_unknown_falls_back_to_upload(
     """
     rec = _Recorder(get_status=status)
     monkeypatch.setattr(common.distribution, "node_request", rec)
-    assert common.distribution.post_weights_cached("http://n", "k", "run.3", "ab" * 32, b"x") == "purged"
+    assert common.weights_client.post_weights_cached("http://n", "k", "run.3", "ab" * 32, b"x") == "purged"
     assert len(rec.posts) == 1
 
 
@@ -147,7 +149,7 @@ def test_precheck_empty_sha_does_not_ask(monkeypatch: pytest.MonkeyPatch) -> Non
     """空 sha（未开瘦身的旧路径）→ 连问都不问，直接按老路子上传。"""
     rec = _Recorder(get_body={"cached": True})
     monkeypatch.setattr(common.distribution, "node_request", rec)
-    common.distribution.post_weights_cached("http://n", "k", "run.3", "", b"x")
+    common.weights_client.post_weights_cached("http://n", "k", "run.3", "", b"x")
     assert rec.gets == []
     assert len(rec.posts) == 1
 
@@ -166,7 +168,7 @@ class _TaskRecorder(_Recorder):
 def _task_call(monkeypatch: pytest.MonkeyPatch) -> dict:
     rec = _TaskRecorder()
     monkeypatch.setattr(common.distribution, "node_request", rec)
-    common.distribution.fetch_task(
+    common.task_client.fetch_task(
         "http://n",
         "k",
         iter_id="run.3",

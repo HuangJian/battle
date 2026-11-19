@@ -76,6 +76,11 @@ RUNNER_IMPORTS = {
     # 2026-11-16 登记（B8 第一刀）：codeHash 实现搬到 `common/codehash.py`，
     # `compute_code_hash()` 的入边随之拆成两条；其余分发面仍走 `common.distribution`。
     "common.codehash",
+    # 2026-11-19 登记（B8 第十一刀）：取任务 / 结果校验 → `common.task_client`，
+    # 权重下发 → `common.weights_client`；执行器按新家 import（`node_request` 漏斗与
+    # `load_dist_config` 仍在 `common.distribution`）。
+    "common.task_client",
+    "common.weights_client",
     # 2026-11-02 登记（z4-polish.it60 缺局）：B/C 行与 A 层共用 `eval_log.jsonl` /
     # `dist-agent-meta.jsonl`，落账改走 `common.fs.append_jsonl` 的每路径单写者
     # （重叠的 eval 轮不再各自 open 互相覆盖行首）。

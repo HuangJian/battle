@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 import common.distribution as dist
+import common.task_client as task
 
 
 def _patch_request(monkeypatch, fn) -> None:
@@ -50,4 +51,4 @@ def test_cancel_task_lets_a_programmer_error_through(monkeypatch) -> None:
 
     _patch_request(monkeypatch, buggy)
     with pytest.raises(KeyError):
-        dist.cancel_task("http://node", "tok", "r.1:rollout:0:1")
+        task.cancel_task("http://node", "tok", "r.1:rollout:0:1")

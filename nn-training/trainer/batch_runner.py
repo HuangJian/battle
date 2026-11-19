@@ -42,6 +42,8 @@ from typing import NamedTuple
 import common.codehash
 import common.distribution
 import common.runtime
+import common.task_client
+import common.weights_client
 from biz.batch_plan import (
     batch_iter_id,
     is_transient_error,
@@ -752,7 +754,7 @@ class _UnitLanes:
             return False
         t_w = time.monotonic()
         try:
-            mode = common.distribution.post_weights(
+            mode = common.weights_client.post_weights(
                 str(nd.get("url") or ""),
                 str(nd.get("key") or ""),
                 self.iter_id,
@@ -996,7 +998,7 @@ class _UnitLanes:
                 decision_k=int(getattr(getattr(self.owner, "args", None), "decision_k", 10)),
             )
         else:
-            m, _files = common.distribution.fetch_task(
+            m, _files = common.task_client.fetch_task(
                 nd["url"],
                 nd["key"],
                 iter_id=self.iter_id,
@@ -1018,7 +1020,7 @@ class _UnitLanes:
                 # 决策周期 K：与本机份额同源（缺席/10 = 老行为）。
                 decision_k=int(getattr(getattr(self.owner, "args", None), "decision_k", 10)),
             )
-        why = common.distribution.validate_eval_result(m, self.wver)
+        why = common.task_client.validate_eval_result(m, self.wver)
         if why:
             raise common.distribution.DistError(0, why)
         return m

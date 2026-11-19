@@ -86,7 +86,7 @@ L4  hub/ · trainer/                          （hub 服务端 / 本机训练编
 | `common.payload` | **语料归档**（`pack_payload` / `unpack_payload` 双读 tar.xz+legacy zip / `find_payload` / 容器名常量）。依赖 = stdlib + `common.errors`（S5 第八刀） |
 | `common.manifest` | **job manifest 契约**（`PROTO` / 角色词汇 / `MANIFEST_*` schema / kind→role / TS·plan 产物契约 / rollout 规格校验 / shard 命名与 `data_fp`）。依赖 = stdlib + `common.errors` + `pydantic`（`Manifest` 模型；`normalize_manifest` 是薄包装） |
 | `common.game_watch` | 单局子进程**停滞看门狗**的口径常量与四行日志——原 `remote/game_watch.py` |
-| `common.distribution` | 分布式采样的 **wire client**（结果容器 v1+v2 / 取任务 / 权重下发 / 节点探活 / 唯一 HTTP 漏斗 `node_request`）——原 `dist_common.py`（**去 `dist_` 前缀**，2026-09-30 刀 2）；升级/重启护栏 2026-11-19 已搬到 `remote/node_upgrade.py`（codeHash 配方在 `common.codehash`） |
+| `common.distribution` | 分布式采样的**传输核心**（机器配置 `rl_config_path` / 错误分类 `DistError`+`is_transient_error` / 收工断连的在飞登记 / 唯一 HTTP 漏斗 `node_request` / 探活与权重指纹）——原 `dist_common.py`（**去 `dist_` 前缀**，2026-09-30 刀 2）；升级/重启护栏 → `remote/node_upgrade.py`；任务协议（取任务/轮询/取消/容器/能力握手）→ `common.task_client`；权重传输（探针/POST/并行下发/409 自愈）→ `common.weights_client`（三处均 2026-11-19，出站一律经 `node_request`，打桩面不随搬家变） |
 | `common.shard` | shard 清单 + 远端结果容器校验 + 唯一落盘出口——原 `dist_shard.py`（同上） |
 | `common.weights_ledger` | 进程内权重下发账本（同 it 补波复用）——原 `dist_weights_ledger.py`（同上） |
 | `common.schema` | 张量布局常量（`OBS_CHANNELS` / `MOVE_DIM` / `SCALAR_LAYOUT` …）——TS 侧 `src/nn/{obs-encoder,infer}.ts` 逐字镜像 |

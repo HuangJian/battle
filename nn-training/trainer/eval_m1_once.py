@@ -2,7 +2,7 @@
 
 **为什么是 Python 而不是 TS 里再写一套调度**（用户 2026-09-19 裁定，与
 `trainer/eval_course_once.py` 同一决定）：节点通信与重试机制早已在 Python 侧且经长期实战
-检验——`common.distribution.fetch_task`（ping/门/退避重试/权重下发/wver 409）、
+检验——`common.task_client.fetch_task`（ping/门/退避重试/权重 409）、
 `BatchEvalRunner`（失败连击停用 + 单局重排队 + 窗口 yield + 断点去重）、
 `policy.evalLocalSlots`（本机份额）。TS 侧只在**无分派**时用本机 worker 池跑
 （那是游戏引擎本身，不是节点通信）。

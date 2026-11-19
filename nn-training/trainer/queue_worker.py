@@ -13,6 +13,8 @@ from typing import Any
 
 import common.distribution
 import common.runtime
+import common.task_client
+import common.weights_client
 from common.platform_utils import rmtree_best_effort
 from trainer.queue_local import (
     LocalLane,
@@ -328,11 +330,11 @@ def _execute(q: QueueState, claim: _Claim, nd: dict | None) -> _Exec:
             _ov = args_rollout_overrides(q.args)
             _cfp = course_fp_for_args(q.args)  # D14 语料血缘
             # 节点能力握手（4 个能力位，fail-closed）拆到传输层，
-            # 见 common.distribution.check_node_capabilities。
-            common.distribution.check_node_capabilities(
+            # 见 common.task_client.check_node_capabilities。
+            common.task_client.check_node_capabilities(
                 q.args, nd_id, nd, stage_json=_sj
             )
-            manifest, files = common.distribution.fetch_task(
+            manifest, files = common.task_client.fetch_task(
                 nd["url"],
                 nd["key"],
                 iter_id=q.iter_id,
@@ -399,7 +401,7 @@ def _execute(q: QueueState, claim: _Claim, nd: dict | None) -> _Exec:
             nd is not None
             and isinstance(e, common.distribution.DistError)
             and e.status == 409
-            and common.distribution.refresh_weights(
+            and common.weights_client.refresh_weights(
                 nd,
                 iter_id=q.iter_id,
                 wver=q.wver,
@@ -417,7 +419,7 @@ def _execute(q: QueueState, claim: _Claim, nd: dict | None) -> _Exec:
         # 下次取活会重新握手）+ 立即回队、不耗 attempt 配额。
         # 2026-09-19 审计 F1：旧实现把它当确定性失败记 streak ⇒ 与 409 同族，
         # 3 条就把刚重启的节点熔断整轮。
-        task_lost = common.distribution.is_task_lost_error(e)
+        task_lost = common.task_client.is_task_lost_error(e)
         if task_lost:
             if nd is not None:
                 common.distribution.forget_weights_node(nd_id, kind=q.wkind)
@@ -795,14 +797,14 @@ def run_queue(q: QueueState) -> None:
         try:
             if not q.need:
                 return
-            common.distribution.post_weights_parallel(
+            common.weights_client.post_weights_parallel(
                 q.need,
                 q.iter_id,
                 q.wver,
                 q.weights_bytes,
                 timeout=min(300.0, max(60.0, q.task_timeout)),
                 kind=q.wkind,
-                hooks=common.distribution.PushHooks(
+                hooks=common.weights_client.PushHooks(
                     log=q.log, on_alive=_spawn_node_workers
                 ),
             )

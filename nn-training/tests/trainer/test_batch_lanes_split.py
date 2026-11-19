@@ -296,7 +296,7 @@ def test_bringup_rejects_a_node_whose_bootid_changed_within_the_unit(monkeypatch
 
     pings = iter([_ping("genA", 11), _ping("genB", 22)])
     monkeypatch.setattr(br.common.distribution, "node_ping", lambda *a, **k: next(pings))
-    monkeypatch.setattr(br.common.distribution, "post_weights", lambda *a, **k: "kept")
+    monkeypatch.setattr(br.common.weights_client, "post_weights", lambda *a, **k: "kept")
     monkeypatch.setattr(br.common.distribution, "note_weights_pushed", lambda *a, **k: None)
 
     lanes = _lanes()

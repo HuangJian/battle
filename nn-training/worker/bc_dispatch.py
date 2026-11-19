@@ -33,14 +33,14 @@ from common.distribution import (
     BC_MODE,
     BC_V6_MODE,
     BC_WVER,
-    fetch_task,
     load_dist_config,
     node_ping,
-    post_weights_parallel,
     validate_result,
     write_shard,
 )
 from common.hashing import sha256_file
+from common.task_client import fetch_task
+from common.weights_client import PushHooks, post_weights_parallel
 from worker.bc_outcome import classify_outcome
 
 #: 熔断后队列暂空时的让位轮询步长（秒）——与 `tripped_idle_polls` 相乘 = 等待总预算。
@@ -413,7 +413,7 @@ def dispatch_bc_corpus(
             weights_bytes=label_bytes,
             timeout=120.0,
             kind="rollout",
-            hooks=common.distribution.PushHooks(log=log),
+            hooks=PushHooks(log=log),
         )
         if not alive:
             raise BcDispatchError("label_policy 权重下发失败：无可用节点")

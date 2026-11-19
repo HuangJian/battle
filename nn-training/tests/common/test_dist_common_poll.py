@@ -11,6 +11,8 @@ import urllib.parse
 import pytest
 
 import common.distribution
+import common.task_client
+import common.weights_client
 from tests.helpers import source_scan
 
 
@@ -23,7 +25,7 @@ def test_poll_result_abandon_fires_immediately(monkeypatch) -> None:
         return 202, b'{"status": "running"}'
 
     monkeypatch.setattr(common.distribution, "node_request", fake_request)
-    monkeypatch.setattr(common.distribution.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(common.task_client.time, "sleep", lambda _s: None)
 
     # 0.9 → 0.25（2026-09-29，§43）：判据是「**置位后立刻**放弃、不是等 budget（600s）耗尽」——
     # 定时器值只决定这个事件何时发生；而 `fake_request` 每趟 0.4s ⇒ 放弃最多晚一趟被看到。
@@ -31,7 +33,7 @@ def test_poll_result_abandon_fires_immediately(monkeypatch) -> None:
     threading.Timer(0.25, ev.set).start()
     t0 = time.monotonic()
     with pytest.raises(common.distribution.DistError) as ei:
-        common.distribution._poll_result(
+        common.task_client._poll_result(
             "http://node",
             "tok",
             {"iterId": "r.1", "stage": 0, "seed": 1},
@@ -52,14 +54,14 @@ def test_poll_result_no_abandon_keeps_polling(monkeypatch) -> None:
         return 202, b'{"status": "running"}'
 
     monkeypatch.setattr(common.distribution, "node_request", fake_request)
-    monkeypatch.setattr(common.distribution.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(common.task_client.time, "sleep", lambda _s: None)
 
     # 预算地板调成毫秒级（2026-09-29，§43）：生产地板（1.0s）是「防住预算小到没意义的调用」，
     # 而本用例要验的是「预算耗尽 + deadline exceeded」这条**形状**，与预算绝对长度无关。
     # 不调时本用例就是「空转跑满 1s」（sleep 被打桩 ⇒ 还是满核忙等，并行下是真伤害）。
-    monkeypatch.setattr(common.distribution, "POLL_MIN_BUDGET_SEC", 0.05)
+    monkeypatch.setattr(common.task_client, "POLL_MIN_BUDGET_SEC", 0.05)
     with pytest.raises(common.distribution.DistError) as ei:
-        common.distribution._poll_result(
+        common.task_client._poll_result(
             "http://node",
             "tok",
             {"iterId": "r.1", "stage": 0, "seed": 1},
@@ -78,10 +80,10 @@ def test_poll_result_forwards_v6_label_mode(monkeypatch) -> None:
         return 202, b'{"status": "running"}'
 
     monkeypatch.setattr(common.distribution, "node_request", fake_request)
-    monkeypatch.setattr(common.distribution, "POLL_MIN_BUDGET_SEC", 0.01)
-    monkeypatch.setattr(common.distribution.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(common.task_client, "POLL_MIN_BUDGET_SEC", 0.01)
+    monkeypatch.setattr(common.task_client.time, "sleep", lambda _s: None)
     with pytest.raises(common.distribution.DistError, match="deadline exceeded"):
-        common.distribution._poll_result(
+        common.task_client._poll_result(
             "http://node",
             "tok",
             {"iterId": "r.1", "stage": 0, "seed": 1, "labelMode": "argmax"},
@@ -94,7 +96,7 @@ def test_poll_result_forwards_v6_label_mode(monkeypatch) -> None:
 
 
 def _fetch(url: str = "http://node") -> dict:
-    m, _ = common.distribution.fetch_task(
+    m, _ = common.task_client.fetch_task(
         url,
         "tok",
         iter_id="r.1",
@@ -181,8 +183,8 @@ def test_task_lost_classification_table() -> None:
     裸 404（路径写错之类客户端 bug）必须继续响亮失败——把它当成「节点重启」会把真实
     客户端 bug 静默成无限回队。
     """
-    tl = common.distribution.is_task_lost_error
-    marker = common.distribution.TASK_LOST_MARKER
+    tl = common.task_client.is_task_lost_error
+    marker = common.task_client.TASK_LOST_MARKER
     assert marker == "task lost on node"  # 与 _poll_result 的文案同源
     assert tl(common.distribution.DistError(404, f"{marker} (restart/purge): {{}}")) is True
     assert tl(common.distribution.DistError(404, "not found")) is False
@@ -223,13 +225,13 @@ def test_refresh_weights_reposts_and_forgets_cache(monkeypatch) -> None:
         seen.append((url, auth_key, iter_id, sha, kind))
         return "purged"
 
-    monkeypatch.setattr(common.distribution, "post_weights", ok_post)
+    monkeypatch.setattr(common.weights_client, "post_weights", ok_post)
     common.distribution.note_weights_pushed("w1", "a97")  # 脏缓存：客户端以为节点还持有
     assert common.distribution.weights_already_pushed("w1", "a97") is True
 
     logs: list[str] = []
     assert (
-        common.distribution.refresh_weights(
+        common.weights_client.refresh_weights(
             node,
             iter_id="it1",
             wver="w1",
@@ -254,11 +256,11 @@ def test_refresh_weights_failure_stays_cold(monkeypatch) -> None:
         seen.append(auth_key)
         raise common.distribution.DistError(503, "busy")
 
-    monkeypatch.setattr(common.distribution, "post_weights", boom)
+    monkeypatch.setattr(common.weights_client, "post_weights", boom)
     common.distribution.note_weights_pushed("w1", "a97")
     logs: list[str] = []
     assert (
-        common.distribution.refresh_weights(
+        common.weights_client.refresh_weights(
             node, iter_id="it1", wver="w1", weights_bytes=b"{}", log=logs.append
         )
         is False
@@ -289,7 +291,11 @@ def test_transient_judgement_defined_once_and_wired() -> None:
         # 扫描面 = `common.distribution` + **两棵业务树**（`trainer/` 编排 + `biz/` 纯逻辑，
         # 2026-09-30 刀 4）：只扫 `trainer/` 的话，B 层的同名转发若随家族搬进 `biz/`，
         # 「同名定义恰好一份」这条判据会静默少扫。
-        for path in [root / "common/distribution.py", *source_scan.logic_py_files(str(root))]:
+        for path in [
+            root / "common/distribution.py",
+            root / "common/task_client.py",
+            *source_scan.logic_py_files(str(root)),
+        ]:
             # 廉价预筛：`def <name>` 的 FunctionDef 要求名字本身就是源码里的一个标识符
             # ⇒ 文本里没有 `name` 就不可能有定义（全量解析两棵业务树只为了找它一次的性价比太低）。
             if name not in source_scan.read_text(str(path)):
@@ -348,9 +354,9 @@ def test_transient_judgement_defined_once_and_wired() -> None:
     # 接线判据 = rollout 腿整体真的调到了那几个单源函数（AST 调用名，不是源码文本）
     for name in (
         "common.distribution.is_transient_error",
-        "common.distribution.refresh_weights",
+        "common.weights_client.refresh_weights",
         # F1：取包丢失（404 重启）也必须接线；判据与标记只在 common.distribution（单源）
-        "common.distribution.is_task_lost_error",
+        "common.task_client.is_task_lost_error",
         "common.distribution.forget_weights_node",
     ):
         assert name in rollout_called, f"{name} 没接线"
@@ -367,7 +373,7 @@ def test_transient_judgement_defined_once_and_wired() -> None:
 
     rollout_trees = [ast.parse(src) for src in a_layers]
     # 409 是可刷新条件，rollout 腿必须有这一分支；标记字面量只许待在
-    # common.distribution（AST 常数，不是文本里有没有这三个字符）。
+    # common.task_client（AST 常数，不是文本里有没有这三个字符）。
     assert any(has_409(t) for t in rollout_trees) and not any(
         has_task_lost_literal(t) for t in rollout_trees
     ), "rollout 腿缺 409 分支，或标记字面量被复制进 A 层"
@@ -380,8 +386,9 @@ def test_transient_judgement_defined_once_and_wired() -> None:
     assert c_consts.isdisjoint({409, "task lost on node"}), (
         "eval_dispatch 又内联了传输判据常数（409 自愈 / 取包丢失标记只许在执行层）"
     )
-    # is_task_lost_error 只许有一份实现（不得复制回 A/B/C 层）
-    assert definers_of("is_task_lost_error") == ["distribution.py"]
+    # is_task_lost_error 只许有一份实现（2026-11-19 随任务协议簇搬进 `task_client`；
+    # 判据仍是「只此一份」——不得复制回 A/B/C 层，也不得在 distribution 留副本）。
+    assert definers_of("is_task_lost_error") == ["task_client.py"]
 
 
 def test_trace_enabled_env_contract(monkeypatch) -> None:
@@ -400,17 +407,17 @@ def test_trace_enabled_env_contract(monkeypatch) -> None:
 def test_post_weights_parallel_logs_per_node_and_ready(monkeypatch) -> None:
     """权重阶段必须留下可判读的事件：逐节点耗时 + 「ready on N/M … in Xs」总计。"""
     lines: list[str] = []
-    monkeypatch.setattr(common.distribution, "post_weights", lambda *a, **kw: "kept")
+    monkeypatch.setattr(common.weights_client, "post_weights", lambda *a, **kw: "kept")
 
     nd = {"id": "n1", "url": "http://n1"}
-    ok = common.distribution.post_weights_parallel(
+    ok = common.weights_client.post_weights_parallel(
         [nd],
         "it1",
         "ab" * 32,
         b"{}",
         timeout=5.0,
         kind="eval",
-        hooks=common.distribution.PushHooks(log=lines.append),
+        hooks=common.weights_client.PushHooks(log=lines.append),
     )
 
     assert ok == [nd]
@@ -527,10 +534,10 @@ def test_poll_result_lets_a_programmer_error_through(monkeypatch) -> None:
         raise AttributeError("'bytes' object has no attribute 'get'")
 
     monkeypatch.setattr(common.distribution, "node_request", buggy_request)
-    monkeypatch.setattr(common.distribution.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(common.task_client.time, "sleep", lambda _s: None)
 
     with pytest.raises(AttributeError):
-        common.distribution._poll_result(
+        common.task_client._poll_result(
             "http://node",
             "tok",
             {"iterId": "r.1", "stage": 0, "seed": 1},

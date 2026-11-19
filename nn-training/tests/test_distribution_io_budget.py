@@ -54,7 +54,15 @@ BASELINE = {
 }
 
 #: 扫描面 = L0 里**所有**碰出站 IO 的模块（新增一处 IO 就得先在这里露面）。
-L0_IO_MODULES = ("common.distribution", "common.codehash")
+#: 2026-11-19（第十一刀）：任务协议 / 权重传输拆成 `common.task_client` / `common.weights_client`
+#: —— 它们**没有**自己的出口（一律经 `common.distribution.node_request`），所以基线零变化；
+#: 把它们加进扫描面是为了让「搬家后又自备一个 urlopen」当场变红，而不是算作不在账内。
+L0_IO_MODULES = (
+    "common.distribution",
+    "common.codehash",
+    "common.task_client",
+    "common.weights_client",
+)
 
 #: B8 搬出去的那一半（不当 L0 扫，但锁死「它没有自己的出口」）。
 NODE_UPGRADE = "remote.node_upgrade"

@@ -25,12 +25,71 @@
 
 ---
 
+## §220 `common/distribution.py` 按职责分成三件：传输核心 / 任务协议 / 权重传输（2026-11-19，B8 第十一刀）
+
+上一刀把**不是线协议**的那簇（升级/重启）搬去了 `remote/`，剩下的是一个仍该再切的「wire
+client」：1181 行里有**四种读者不同的东西**。本刀按职责切成三件（都在 L0，不抬层）：
+
+| 新家 | 内容 | 行数 |
+|---|---|---|
+| `common/distribution.py` | 机器配置（`rl_config_path` / `load_dist_config` / `BC_*`）· 错误分类（`DistError` / `is_transient_error` / `NET_ERRORS` / `PING_ERRORS`）· 收工断连（`RequestRegistry` / `abort_active_requests`）· 唯一 HTTP 漏斗 `node_request` · 探活（`node_ping` / `ping_nodes_parallel` / `push_node_ping`）· `weights_fingerprint` | **490**（−691） |
+| `common/task_client.py` | `fetch_task` / `_poll_result` / `cancel_task` / 结果容器解包（BCV2+v1）· `validate_eval_result` · `check_node_capabilities` · `TASK_LOST_MARKER` / `is_task_lost_error` / `POLL_MIN_BUDGET_SEC` | **452** |
+| `common/weights_client.py` | `post_weights`（含 kept 探针短路径）· `post_weights_parallel` + `PushHooks` · `refresh_weights`（409 自愈）· `weights_cached_on_node` / `post_weights_cached` / `probe_weights_cached` | **315** |
+
+**为什么不是都搬去 `remote/`**（与第十刀同一条判据，结果反过来）：这两簇有 `worker/`(L2) 的
+读者（`bc_eval` / `bc_dispatch` / `eval_exec`）——搬进 `remote/`(L3) 就是把 `worker → remote` 的
+反向边造出来，`tests/test_layering.py` 当场拦。所以落点是「按职责分文件」而不是「抬层」。
+
+### 唯一真正的设计决定：出站怎么走（决定 20+ 条「零 socket」用例的死活）
+
+两簇的每一次出站都写成了 **`distribution.node_request(...)`（属性查找）**，而不是
+`from common.distribution import node_request`。理由只有一个但很硬：测试把
+`common.distribution.node_request` 当**唯一打桩面**（24 处）。`from … import` 会在新模块
+import 时绑一份副本 ⇒ 打桩变成**静默空操作**，用例仍然绿（它们本来就不发真请求）。
+本仓已经因这个坑翻车三次（`common.codehash.dirty_hash_files`、`hub.server` 的
+`SEND_TIMEOUT_SEC`、`weights_ledger` 的账本 dict），所以这次直接把它变成门禁：
+`tests/common/test_dist_client_split.py`（4 条）——① 搬走的名字不得在旧家重新实现；
+② 旧家不得 re-export 它们（`X as X` 会让旧打桩点「看着还在」）；③ 新家里**所有**
+`node_request` 调用都必须是属性形态（AST，不按文本）。
+
+### G8：基线不变，但扫描面从 2 个模块扩到 4 个
+
+两簇都没有自己的 IO 原语，所以四个数字动不了；`L0_IO_MODULES` 现在包含
+`common.task_client` / `common.weights_client`，基线里它们**零额度**——搬家后给自己开一个
+`urlopen` 会当场红，而不是因为「不在账内」静悄悄长出来。
+
+### 预算/账本连带（都是数字跟着代码走，无一抬基线）
+
+`WIDE_FUNCS_BASELINE`：`common/distribution.py` 1 → 0（`fetch_task` 的 27 参跟到
+`task_client`）；`GLOBAL_BASELINE` 无变；`env_reads_baseline` distribution 4 → 3、
+`task_client` 1；`wall_clock_baseline` distribution **6 → 0**（删键）、`task_client` 6；
+`except_baseline` distribution 2 → 1、`task_client` 1（`fetch_task` 的确定性失败兜底——
+边界本就写在代码里）；`test_batch_runner_split.RUNNER_IMPORTS` 登记两个新模块。
+文本形态断言基线不动（实际读数仍 1512）。
+
+### 测试面改动
+
+`tests/common/test_dist_common_poll.py` 的 `common.distribution.time` / `_poll_result` 打桩面
+跟着实现走（`task_client.time` / `task_client._poll_result`）；`test_dist_ping_errors` /
+`test_task_cancel` / `test_greedy_node_dispatch` 的 alias 调用（`dist.cancel_task` 等）改为
+`task.cancel_task`；`test_dist_weights_ledger_split` 那条「打桩打门面才生效」的用例改名并
+改为打 `common.weights_client`——它就是这次搬家的**受害者**：门面不再是实现所在模块。
+
+验证：`bash tools/githook/nn-python-gate.sh` 全绿（ruff + mypy 978 文件 + **6259 passed** /
+2 skipped / 73.48s；比上一刀 +4 = 新增的 `tests/common/test_dist_client_split.py` 四条守卫，
+搬走的用例都跟着函数走，没有复制一份）。
+
+---
+
 ## §219 `common/distribution.py` 拆出升级/重启簇 → `remote/node_upgrade.py`（2026-11-19，B8 第十刀）
 
 `common/distribution.py` 最后一块「不是线协议」的东西搬走了：节点远控升级与重启护栏（`POST
 /v1/restart`、跨代去重、冷却窗、脏工作区拒发、`upgrade_stale_nodes` 扫描）整簇 12 个公开名搬到
 `remote/node_upgrade.py`（282 行）。**分发侧的 wire client 不动**：`fetch_task` / `post_weights` /
 `node_ping` 仍留在 `common.distribution`。
+
+> 后记（同日，§220）：`fetch_task` / `post_weights` 确实随后又被分到了 `common/task_client.py` /
+> `common/weights_client.py` —— 同一刀口下「先定能不能搬、再定搬到哪一层」的顺序。
 
 为什么是这一分为二（而不是「搬整个文件」）：
 

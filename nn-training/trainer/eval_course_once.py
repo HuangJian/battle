@@ -4,7 +4,8 @@
 节点通信与重试机制早已在 Python 侧且经长期实战检验——
 
   * 节点门 / codeHash 判据：`common.codehash.check_code_hash`（SSOT = codehash-files.txt）
-  * ping + 任务下发 + 退避重试 + 权重下发 + wver/409：`common.distribution.fetch_task` / `post_weights_parallel`
+  * ping + 任务下发 + 退避重试 + 权重下发 + wver/409：`common.task_client.fetch_task` /
+    `common.weights_client.post_weights_parallel`
   * 失败连击停用（nodeFailStreak）、EVAL_TASK_ATTEMPTS 重排队：`BatchEvalRunner`
   * 本机份额：`policy.evalLocalSlots`（缺省 `eval_yield.EVAL_LOCAL_SLOTS_DEFAULT`）；
     机器级配置链（`rl.local_slots`）由调用方 TS 侧 `dist-node-gate.configLocalSlots`

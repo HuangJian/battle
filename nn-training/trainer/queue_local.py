@@ -23,6 +23,8 @@ from typing import Any
 
 import common.distribution
 import common.runtime
+import common.task_client
+import common.weights_client
 import remote.node_upgrade
 from common import game_watch  # 进度行节流口径与节点侧 rollout 共用一份（`progress_due`）
 from common.log import log
@@ -541,7 +543,7 @@ def _rescan_push_weights(
     if why == "rearm":
         common.distribution.forget_weights_node(nid)
     try:
-        return common.distribution.post_weights(
+        return common.weights_client.post_weights(
             n["url"],
             n.get("authKey", ""),
             iter_id,
@@ -859,7 +861,7 @@ def _cancel_remote_targets(targets: list[dict], log: Any) -> None:
         if not key:
             continue
         tried += 1
-        if common.distribution.cancel_task(str(t.get("url") or ""), str(t.get("auth") or ""), key):
+        if common.task_client.cancel_task(str(t.get("url") or ""), str(t.get("auth") or ""), key):
             ok += 1
     if tried:
         log(f"[dist] alloc-timeout: cancelled {ok}/{tried} remote task(s)")

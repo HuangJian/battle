@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import common.distribution as dist
+import common.task_client as task
 from worker.iter_job import build_iter_spec
 
 
@@ -55,7 +56,7 @@ def _capture_url(monkeypatch: pytest.MonkeyPatch, **kw) -> str:
 
     monkeypatch.setattr(dist, "node_request", fake_request)
     with pytest.raises(dist.DistError):
-        dist.fetch_task(
+        task.fetch_task(
             "http://x/", "k", iter_id="i", wver="w", stage=2000, seed=7,
             max_ticks=100, difficulty="hard", timeout=5.0, **kw,
         )
@@ -77,9 +78,9 @@ def test_poll_url_keeps_greedy_label_mode(monkeypatch: pytest.MonkeyPatch) -> No
         return 202, b'{"status": "running"}'
 
     monkeypatch.setattr(dist, "node_request", fake_request)
-    monkeypatch.setattr(dist, "POLL_MIN_BUDGET_SEC", 0.05)
+    monkeypatch.setattr(task, "POLL_MIN_BUDGET_SEC", 0.05)
     with pytest.raises(dist.DistError):
-        dist._poll_result(
+        task._poll_result(
             "http://node", "tok",
             {"iterId": "r.1", "stage": 2000, "seed": 7, "labelMode": "greedy"},
             budget=0.05, poll_s=0.02,
@@ -102,14 +103,14 @@ def test_node_capability_gate_fails_closed() -> None:
     """旧 agent 缺 greedyRolloutSupport ⇒ 拒派；新 agent 放行；未激活不查。"""
     greedy = _args(rollout_argmax=True)
     with pytest.raises(dist.DistError, match="greedyRolloutSupport"):
-        dist.check_node_capabilities(greedy, "old", {"ping": {}}, stage_json="")
-    dist.check_node_capabilities(
+        task.check_node_capabilities(greedy, "old", {"ping": {}}, stage_json="")
+    task.check_node_capabilities(
         greedy, "new", {"ping": {"greedyRolloutSupport": True}}, stage_json=""
     )
     # 普通采样波：旧节点照派（老行为逐字节不变）。
-    dist.check_node_capabilities(_args(), "old", {"ping": {}}, stage_json="")
+    task.check_node_capabilities(_args(), "old", {"ping": {}}, stage_json="")
     # 三个既有能力位仍由同一个入口守着。
     with pytest.raises(dist.DistError, match="decisionKSupport"):
-        dist.check_node_capabilities(
+        task.check_node_capabilities(
             _args(decision_k=5), "old", {"ping": {}}, stage_json=""
         )

@@ -26,6 +26,7 @@ from typing import Any
 import pytest
 
 import common.distribution
+import common.task_client
 import trainer.eval_dispatch as ed
 import worker.eval_exec as ee
 import worker.eval_yield as eval_yield
@@ -113,7 +114,7 @@ class _Harness:
             },
         )
         monkeypatch.setattr(
-            common.distribution,
+            common.weights_client,
             "post_weights_parallel",
             lambda nodes, *a, **k: [
                 # `baseC` = 扩容判据（`c<baseC` ⇒ 派发时让过位）；单节点夹具恒满额。
@@ -128,12 +129,12 @@ class _Harness:
             self.refreshed.append({"node": node["id"], **kw})
             return True
 
-        monkeypatch.setattr(common.distribution, "refresh_weights", fake_refresh)
+        monkeypatch.setattr(common.weights_client, "refresh_weights", fake_refresh)
 
     def run(self, fetch) -> list[dict]:
         """装好假节点（不碰网络）后跑一轮，返回 eval_log.jsonl 全部行。"""
         common.distribution.weights_push_cache_reset()
-        self.mp.setattr(common.distribution, "fetch_task", fetch)
+        self.mp.setattr(common.task_client, "fetch_task", fetch)
         ed.dispatch_eval_round("bun", str(self.weights), self.traj, self.args, self.cfg, "rid.c", 5)
         rows = [
             json.loads(line)
@@ -233,7 +234,7 @@ def test_task_lost_404_requeues_without_tripping_node(tmp_path, monkeypatch) -> 
         if calls["n"] <= 4:
             raise common.distribution.DistError(
                 404,
-                f"{common.distribution.TASK_LOST_MARKER} (restart/purge): "
+                f"{common.task_client.TASK_LOST_MARKER} (restart/purge): "
                 '{"error":"unknown task (expired/purged/restart)"}',
             )
         return h.manifest(kw["stage"], kw["seed"]), {}
@@ -556,8 +557,8 @@ class _LaneHarness:
 
         monkeypatch.setattr(common.codehash, "compute_code_hash", lambda: "deadbeef")
         monkeypatch.setattr(common.distribution, "node_ping", ping)
-        monkeypatch.setattr(common.distribution, "post_weights_parallel", post)
-        monkeypatch.setattr(common.distribution, "refresh_weights", lambda *a, **k: True)
+        monkeypatch.setattr(common.weights_client, "post_weights_parallel", post)
+        monkeypatch.setattr(common.weights_client, "refresh_weights", lambda *a, **k: True)
         monkeypatch.setattr(ed, "bun_version", lambda _bun: "1.1.0")
         monkeypatch.setattr(ed, "log", self.logs.append)
 
@@ -598,7 +599,7 @@ class _LaneHarness:
         本夹具的固定种子池与 it 无关，故用 run_id 做轮身份；`it` 只进日志/summary。
         """
         common.distribution.weights_push_cache_reset()
-        self.mp.setattr(common.distribution, "fetch_task", fetch)
+        self.mp.setattr(common.task_client, "fetch_task", fetch)
         t0 = self.time.monotonic()
         self.play_t0 = t0
         ed.dispatch_eval_round(
@@ -785,7 +786,7 @@ def test_fallback_only_partial_post_success_is_remote_only(tmp_path, monkeypatch
         tmp_path, monkeypatch, games=2, nodes=nodes, local_slots=1, fallback_only=True
     )
     h.mp.setattr(
-        common.distribution,
+        common.weights_client,
         "post_weights_parallel",
         lambda alive, *a, **k: [
             {"id": n["id"], "url": n["url"], "key": "", "c": 1} for n in alive[:1]
@@ -1020,7 +1021,7 @@ def test_eval_leg_uses_its_own_weights_kind(tmp_path, monkeypatch) -> None:
         seen.append(kw)
         return h.manifest(kw["stage"], kw["seed"]), {}
 
-    h.mp.setattr(common.distribution, "post_weights_parallel", spy_post)
+    h.mp.setattr(common.weights_client, "post_weights_parallel", spy_post)
     rows = h.run(fetch)
 
     assert ed.EVAL_WEIGHTS_KIND == "eval"  # 节点侧桶名（协议的一部分）
@@ -1411,7 +1412,7 @@ class _LocalHarness(_Harness):
         """
         common.distribution.weights_push_cache_reset()
         self.mp.setattr(ed, "run_local_eval_game", fake)
-        self.mp.setattr(common.distribution, "fetch_task", fetch or _never_fetch)
+        self.mp.setattr(common.task_client, "fetch_task", fetch or _never_fetch)
         own_gate = gate is None
         gate = gate or threading.Event()
         timer = None
@@ -1757,7 +1758,7 @@ def test_weights_post_pipelines_node_start(tmp_path, monkeypatch) -> None:
             for n in nodes_
         ]
 
-    h.mp.setattr(common.distribution, "post_weights_parallel", post)
+    h.mp.setattr(common.weights_client, "post_weights_parallel", post)
     rows, _ = h.play(fetch)
     assert saw["on_alive_passed"], "派发器没把 on_alive 传给权重下发（流水线断在参数上）"
     assert saw["pipelined"], "快节点在 POST 收工前没有开跑（旧形态：等最后一个节点就绪）"
@@ -2135,12 +2136,12 @@ def test_post_weights_is_deferred_until_thaw(tmp_path, monkeypatch) -> None:
             for n in nodes
         ]
 
-    monkeypatch.setattr(common.distribution, "post_weights_parallel", post)
+    monkeypatch.setattr(common.weights_client, "post_weights_parallel", post)
 
     def fetch(*_a, **kw):
         return h.manifest(kw["stage"], kw["seed"]), {}
 
-    monkeypatch.setattr(common.distribution, "fetch_task", fetch)
+    monkeypatch.setattr(common.task_client, "fetch_task", fetch)
     common.distribution.weights_push_cache_reset()
     arb = eval_arbiter()
     arb.freeze(None)

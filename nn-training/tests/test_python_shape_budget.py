@@ -35,8 +35,9 @@ LONG_FUNCS_BASELINE: dict[str, int] = {}
 #: 存量：包含 >8 参数函数的文件 → 个数。
 WIDE_FUNCS_BASELINE = {
     "biz/course_archive.py": 1,
-    "common/distribution.py": 1,
     "common/race_metrics.py": 1,
+    # 2026-11-19（B8 第十一刀）：`fetch_task` 的 27 参随任务协议簇搬进 `task_client`。
+    "common/task_client.py": 1,
     "common/task_key.py": 1,
     "hub/offline_ingest.py": 1,
     "hub/offline_push.py": 2,

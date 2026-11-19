@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import common.distribution
+import common.task_client
+import common.weights_client
 from common import runtime
 from worker.eval_arbiter import LOCAL_NODE, EvalRound, Grant, eval_arbiter
 
@@ -217,7 +219,7 @@ class EvalExecutors:
             from worker.config import args_rollout_overrides, stage_json_for_args
 
             _ov = args_rollout_overrides(rnd.args)
-            manifest, _files = common.distribution.fetch_task(
+            manifest, _files = common.task_client.fetch_task(
                 nd["url"],
                 nd["key"],
                 iter_id=rnd.eval_iter_id,
@@ -236,7 +238,7 @@ class EvalExecutors:
                 lives_override=int(_ov["lives_override"]) if "lives_override" in _ov else None,
                 player_level=int(_ov["player_level"]) if "player_level" in _ov else None,
             )
-            why = common.distribution.validate_eval_result(manifest, rnd.wver)
+            why = common.task_client.validate_eval_result(manifest, rnd.wver)
             if why:
                 raise common.distribution.DistError(0, why)
             ok = True
@@ -246,7 +248,7 @@ class EvalExecutors:
             if (
                 isinstance(e, common.distribution.DistError)
                 and e.status == 409
-                and common.distribution.refresh_weights(
+                and common.weights_client.refresh_weights(
                     nd,
                     iter_id=rnd.eval_iter_id,
                     wver=rnd.wver,
@@ -258,7 +260,7 @@ class EvalExecutors:
                 )
             ):
                 transient = True
-            task_lost = common.distribution.is_task_lost_error(e)
+            task_lost = common.task_client.is_task_lost_error(e)
             if task_lost:
                 common.distribution.forget_weights_node(nd["id"], kind=rnd.weights_kind)
                 transient = True
@@ -306,7 +308,7 @@ class EvalExecutors:
                 decision_events=bool(getattr(rnd.args, "decision_events", False)),
                 decision_k=int(getattr(rnd.args, "decision_k", 10)),
             )
-            why = common.distribution.validate_eval_result(manifest, rnd.wver)
+            why = common.task_client.validate_eval_result(manifest, rnd.wver)
             if why:
                 raise common.distribution.DistError(0, why)
             ok = True

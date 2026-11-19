@@ -27,6 +27,7 @@ import pytest
 
 import common.distribution
 import common.shard
+import common.task_client
 import trainer.dispatch as disp
 import trainer.queue_local as ql
 
@@ -106,7 +107,7 @@ class _Harness:
             "node_ping",
             ping_fn or (lambda *a, **k: dict(GOOD_PING)),
         )
-        monkeypatch.setattr(common.distribution, "post_weights", lambda *a, **k: "kept")
+        monkeypatch.setattr(common.weights_client, "post_weights", lambda *a, **k: "kept")
         monkeypatch.setattr(
             common.distribution, "validate_result", lambda manifest, files, wver, pairs, seen: ""
         )
@@ -119,7 +120,7 @@ class _Harness:
             self.refreshed.append({"node": node["id"], **kw})
             return True
 
-        monkeypatch.setattr(common.distribution, "refresh_weights", fake_refresh)
+        monkeypatch.setattr(common.weights_client, "refresh_weights", fake_refresh)
 
         def fake_post(
             nodes, iter_id, wver, weights_bytes, timeout, kind="rollout", hooks=None
@@ -139,14 +140,14 @@ class _Harness:
                 out.append(nd)
             return out
 
-        monkeypatch.setattr(common.distribution, "post_weights_parallel", fake_post)
+        monkeypatch.setattr(common.weights_client, "post_weights_parallel", fake_post)
 
     def run(
         self, fetch, halt_event=None, on_shard=None,
         on_queue_drained=None, on_queue_active=None,
     ) -> dict:
         common.distribution.weights_push_cache_reset()
-        self.mp.setattr(common.distribution, "fetch_task", fetch)
+        self.mp.setattr(common.task_client, "fetch_task", fetch)
         pairs = [(2000, i + 1) for i in range(self.games)]
         return disp.RolloutDispatcher(
             "bun",
@@ -332,7 +333,7 @@ def test_task_lost_404_requeues_without_tripping_node(tmp_path, monkeypatch) -> 
         if calls["n"] <= 4:
             raise common.distribution.DistError(
                 404,
-                f"{common.distribution.TASK_LOST_MARKER} (restart/purge): "
+                f"{common.task_client.TASK_LOST_MARKER} (restart/purge): "
                 '{"error":"unknown task (expired/purged/restart)"}',
             )
         return h.manifest(), {}
@@ -618,7 +619,7 @@ def test_alloc_timeout_aborts_original_and_requeues(tmp_path, monkeypatch) -> No
         return True
 
     monkeypatch.setattr(common.distribution, "abort_active_requests", spy_abort)
-    monkeypatch.setattr(common.distribution, "cancel_task", spy_cancel)
+    monkeypatch.setattr(common.task_client, "cancel_task", spy_cancel)
     release = threading.Event()
 
     def fetch(url: str, *_a, **kw):

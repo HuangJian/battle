@@ -6,8 +6,8 @@
   ],
   "wall_clock_reads": {
     "biz/course_archive.py": 1,
-    "common/distribution.py": 6,
     "common/instance_lock.py": 2,
+    "common/task_client.py": 6,
     "common/net_http.py": 3,
     "hub/http_face.py": 6,
     "hub/offline.py": 4,

@@ -21,7 +21,9 @@ from typing import Any
 import common.codehash
 import common.distribution
 import common.runtime
-from common.distribution import fetch_task, node_ping, post_weights_cached, validate_eval_result
+from common.distribution import node_ping
+from common.task_client import fetch_task, validate_eval_result
+from common.weights_client import post_weights_cached
 
 #: 与 biz/config.GATE_PLATEAU_METRICS 同词表（RL eval 展示口径）
 EVAL_METRIC_KEYS = ("win_rate", "kills_mean", "phits_mean", "pickup_mean", "timeout_frac")

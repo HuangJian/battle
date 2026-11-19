@@ -222,7 +222,7 @@ def test_window_close_no_new_games(tmp_path: Path, monkeypatch) -> None:
         "codeHash": common.codehash.compute_code_hash(),
     }
     monkeypatch.setattr(common.distribution, "node_ping", lambda *a, **k: dict(ping))
-    monkeypatch.setattr(common.distribution, "post_weights", lambda *a, **k: "kept")
+    monkeypatch.setattr(common.weights_client, "post_weights", lambda *a, **k: "kept")
     monkeypatch.setattr("trainer.batch_runner.bun_version", lambda *a, **k: "9.9.9")
 
     def fake_fetch(url, key, **kw):
@@ -240,7 +240,7 @@ def test_window_close_no_new_games(tmp_path: Path, monkeypatch) -> None:
             {},
         )
 
-    monkeypatch.setattr(common.distribution, "fetch_task", fake_fetch)
+    monkeypatch.setattr(common.task_client, "fetch_task", fake_fetch)
     # 窗只当「跑一会儿就关」的配速（断言只看「关窗后不派新局」，不看窗长）：
     # 2s → 0.4s（2026-09-26 墙钟收敛；fake 节点一局是瞬时的）。
     args = types.SimpleNamespace(eval_window_sec=0.4)
@@ -337,9 +337,9 @@ def _run_unit(
         "codeHash": common.codehash.compute_code_hash(),
     }
     monkeypatch.setattr(common.distribution, "node_ping", lambda *a, **k: dict(ping))
-    monkeypatch.setattr(common.distribution, "post_weights", lambda *a, **k: "kept")
+    monkeypatch.setattr(common.weights_client, "post_weights", lambda *a, **k: "kept")
     monkeypatch.setattr("trainer.batch_runner.bun_version", lambda *a, **k: "9.9.9")
-    monkeypatch.setattr(common.distribution, "fetch_task", fake_fetch)
+    monkeypatch.setattr(common.task_client, "fetch_task", fake_fetch)
     args = types.SimpleNamespace(eval_window_sec=window)
     cfg = {
         "policy": cfg_policy,
@@ -745,8 +745,8 @@ def test_working_node_is_never_repinged_or_reuploaded(tmp_path: Path, monkeypatc
         return _ok_manifest(int(kw["stage"]), int(kw["seed"]), kw["wver"]), {}
 
     monkeypatch.setattr(common.distribution, "node_ping", fake_ping)
-    monkeypatch.setattr(common.distribution, "post_weights", fake_post)
-    monkeypatch.setattr(common.distribution, "fetch_task", fake_fetch)
+    monkeypatch.setattr(common.weights_client, "post_weights", fake_post)
+    monkeypatch.setattr(common.task_client, "fetch_task", fake_fetch)
     nodes = [{"id": "n1", "url": "http://n1", "authKey": "", "enabled": True, "concurrency": 2}]
     r, logs, _ = _channels_runner(tmp_path, monkeypatch, nodes=nodes)
     out = r.run()
@@ -780,8 +780,8 @@ def test_unreachable_node_is_retried_then_joins(tmp_path: Path, monkeypatch) -> 
         return _ok_manifest(int(kw["stage"]), int(kw["seed"]), kw["wver"]), {}
 
     monkeypatch.setattr(common.distribution, "node_ping", fake_ping)
-    monkeypatch.setattr(common.distribution, "post_weights", fake_post)
-    monkeypatch.setattr(common.distribution, "fetch_task", fake_fetch)
+    monkeypatch.setattr(common.weights_client, "post_weights", fake_post)
+    monkeypatch.setattr(common.task_client, "fetch_task", fake_fetch)
     nodes = [{"id": "n1", "url": "http://n1", "authKey": "", "enabled": True, "concurrency": 2}]
     r, logs, _ = _channels_runner(
         tmp_path, monkeypatch, nodes=nodes, cfg_policy={"recoverPingSec": 0.05}
@@ -833,8 +833,8 @@ def test_fast_node_dispatches_without_waiting_for_slow_bringup(
         return _ok_manifest(int(kw["stage"]), int(kw["seed"]), kw["wver"]), {}
 
     monkeypatch.setattr(common.distribution, "node_ping", fake_ping)
-    monkeypatch.setattr(common.distribution, "post_weights", fake_post)
-    monkeypatch.setattr(common.distribution, "fetch_task", fake_fetch)
+    monkeypatch.setattr(common.weights_client, "post_weights", fake_post)
+    monkeypatch.setattr(common.task_client, "fetch_task", fake_fetch)
     nodes = [
         {"id": "fast", "url": "http://fast", "authKey": "", "enabled": True, "concurrency": 1},
         {"id": "slow", "url": "http://slow", "authKey": "", "enabled": True, "concurrency": 2},
@@ -873,8 +873,8 @@ def test_settle_complete_closes_inflight_connections(tmp_path: Path, monkeypatch
         return _ok_manifest(int(kw["stage"]), int(kw["seed"]), kw["wver"]), {}
 
     monkeypatch.setattr(common.distribution, "node_ping", lambda *a, **k: _ok_ping())
-    monkeypatch.setattr(common.distribution, "post_weights", lambda *a, **k: "kept")
-    monkeypatch.setattr(common.distribution, "fetch_task", fake_fetch)
+    monkeypatch.setattr(common.weights_client, "post_weights", lambda *a, **k: "kept")
+    monkeypatch.setattr(common.task_client, "fetch_task", fake_fetch)
     monkeypatch.setattr(common.distribution, "abort_active_requests", fake_abort)
     nodes = [
         {"id": "fast", "url": "http://fast", "authKey": "", "enabled": True, "concurrency": 2},
@@ -913,8 +913,8 @@ def test_unit_pairs_route_per_stage_params(tmp_path: Path, monkeypatch) -> None:
         return _ok_manifest(int(kw["stage"]), int(kw["seed"]), kw["wver"]), {}
 
     monkeypatch.setattr(common.distribution, "node_ping", lambda *a, **k: _ok_ping())
-    monkeypatch.setattr(common.distribution, "post_weights", lambda *a, **k: "kept")
-    monkeypatch.setattr(common.distribution, "fetch_task", fake_fetch)
+    monkeypatch.setattr(common.weights_client, "post_weights", lambda *a, **k: "kept")
+    monkeypatch.setattr(common.task_client, "fetch_task", fake_fetch)
     unit = {
         "rung": "multi",
         "stageId": 2000,
