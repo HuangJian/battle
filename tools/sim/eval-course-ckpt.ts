@@ -770,39 +770,13 @@ async function main(): Promise<void> {
     distLocalCfg,
     defaultWorkerCount(),
   )
-  // ── Hybrid opening 的正确性闸（2026-11-19 实测，用户报障）──────────────────
-  // 事实：`--opening-connect` **只在本机执行面生效**。
-  //   · 本机（`--no-dist` / 全本机槽）：S2020 Checkers 20 种子 **20/20 行为不同**
-  //     （seed 2000000001：ticks 4287→3473、firstKick 2069→965）；
-  //   · 远端节点：同一批 20 种子 **0/20 不同**、全盘 classic35 **700/700 逐字段全等**
-  //     （连 `moveHist` 都一样），且 `dist-agent-meta.jsonl` 里搜不到 `openingConnect`。
-  //   ⇒ 远端 agent 拿到的任务**没有按 per-task 开关切换**（节点侧疑似沿用旧构建/粘性参数），
-  //     于是远端臂恒等于"开"。这不是"面板不敏感"，是本工具链的一个静默错数字。
-  // 处置：开关在场 ⇒ **强制全本机槽**（慢但对）；要旧行为必须显式 `--opening-connect-remote`。
-  const openingConnectWanted = flag('opening-connect')
-  const allowRemoteOpening = flag('opening-connect-remote')
-  let distLocalEffective = distLocal
-  // 判据用「是否还有远端份额」：distLocal=0 恰恰是全远端（最容易踩坑的那档），
-  // 只写 `distLocal > 0` 会把它漏掉。
-  if (openingConnectWanted && !allowRemoteOpening && distLocal < defaultWorkerCount()) {
-    distLocalEffective = defaultWorkerCount()
-    process.stderr.write(
-      '[eval-course-ckpt] ⚠ --opening-connect 强制全本机执行：远端 agent 实测不认这个 per-task 开关\n' +
-        '  （本机 20/20 不同、远端 0/20；全盘 700/700 全等）——远端跑出来的臂会被误判成"空操作"。\n' +
-        `  distLocal: ${distLocal} → ${distLocalEffective}。确需远端请显式 --opening-connect-remote。\n`,
-    )
-  }
-  /** 本批是否禁止派远端（opening-connect 的正确性要求）。 */
-  const openingConnectLocalOnly = openingConnectWanted && !allowRemoteOpening
-  // 反方向的坑：**不带** flag 却派远端 ⇒ 远端 agent 实测无条件套 opening controller，
-  // 于是"bare 臂"其实是"开臂"。这条不再静默（2026-11-19 实测）。
-  if (!openingConnectWanted && !allowRemoteOpening && distLocalEffective < defaultWorkerCount()) {
-    process.stderr.write(
-      '[eval-course-ckpt] ⚠ 未带 --opening-connect，但本批会用远端节点：远端 agent 实测**无条件**\n' +
-        '  套 opening controller（2026-11-19：bare/带 flag 两批在 S2020 与全盘 classic35 上逐局全等）。\n' +
-        '  ⇒ 要"真 bare"请加 --dist-local <物理核数> 强制本机；本批结果不能当 bare 臂用。\n',
-    )
-  }
+  // ── Hybrid opening：2026-11-19 的两次误判，留档别踩 ──────────────────────
+  // 曾以为"flag 在远端被无条件应用"，并对带 flag 的批次强制本机跑。**真因不是节点**：
+  // `export-eval-game.ts` / `export-rl-rollout.ts` 的规则旗标是**模块级**变量，`main()` 只置
+  // true 从不复位 ⇒ `--serve`/persist-pool 里一个进程服务多局时，某局带过 `--opening-connect`
+  // 就让该 worker 之后所有局（含训练 rollout）恒"开"。已修（fcd8f3fb：进 main 先复位）。
+  // ⇒ 远端节点**本来就好用**，集群可直接跑双臂；单局复现用 `--dist-local <核数>` 强制本机。
+  /** 仅作 A/B 归因臂：`--opening-all` 让"已连通"的关也接管（缺省条件接管）。 */
   const iterId = arg('iter-id') ?? `evalcourse-${Date.now()}`
   const windowSec = parseRangeInt(arg('window-sec'), 86400)
   const t0 = Date.now()
@@ -851,12 +825,12 @@ async function main(): Promise<void> {
     iterId,
     runDir,
     out: outPath ?? `${runDir}/rows.jsonl`,
-    noNodes: openingConnectLocalOnly || !distCfgPath,
+    noNodes: !distCfgPath,
     // ⚠ 这里**故意不给 localSlots**：给了它，BatchEvalRunner 会走「长驻池」复用本机进程，
     //   而池的任务口径会把  吃掉（实测：给 localSlots ⇒ 20 局里 13 局
     //   拿回的是开的结果；不给 ⇒ 与 --no-dist 逐局一致）。opening-connect 批次一律走一次性路径。
-    localSlots: openingConnectLocalOnly ? undefined : distLocalEffective,
-    distCfgPath: openingConnectLocalOnly ? undefined : distCfgPath || undefined,
+    localSlots: distLocal,
+    distCfgPath: distCfgPath || undefined,
     windowSec,
     // R2 事件 rung：显式开关才走事件门（缺席 = 老行为；训练课程侧由课程 decision_events 字段驱动，
     // 手动 judge 由本 flag 驱动，两条腿语义一致）。
@@ -864,11 +838,10 @@ async function main(): Promise<void> {
     // 决策周期 K：显式开关才写 spec（缺席/10 = 老行为；K5 臂终判必须传 5，见 spec 注释）。
     decisionK,
     // Hybrid opening：显式开关才开（bare 默认；hybrid 是部署口径）。
-    openingConnect: openingConnectWanted || undefined,
+    openingConnect: flag('opening-connect') || undefined,
   })
   process.stderr.write(
-    `[eval-course-ckpt] 本机槽位 distLocal=${distLocalEffective}（来源：${distLocalSource}）` +
-      (openingConnectLocalOnly ? `；--opening-connect ⇒ 本批**禁派远端**（noNodes）\n` : `\n`),
+    `[eval-course-ckpt] 本机槽位 distLocal=${distLocal}（来源：${distLocalSource}）\n`,
   )
   mkdirSync(runDir, { recursive: true })
   const specPath = `${runDir}/spec.json`
@@ -879,7 +852,7 @@ async function main(): Promise<void> {
       `max_ticks=${course.max_ticks ?? 36000} lives=${course.player?.lives ?? 3} ` +
       `level=${course.player?.level ?? 0} ` +
       (distCfgPath ? `dist=${distCfgPath}` : 'dist=local') +
-      ` distLocal=${distLocalEffective}` +
+      ` distLocal=${distLocal}` +
       // 决策周期 K：仅非默认值时打印（缺席/10 = 老日志逐字不变；可审计「这批是几拍评估」）。
       (decisionK !== undefined && decisionK !== 10 ? ` decisionK=${decisionK}` : '') +
       ` iterId=${iterId} runDir=${runDir}\n`,
