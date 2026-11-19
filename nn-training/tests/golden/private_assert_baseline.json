@@ -36,7 +36,7 @@
   "tests/trainer/test_loop_guards_split.py": 9,
   "tests/trainer/test_loop_lifecycle_split.py": 1,
   "tests/trainer/test_loop_park.py": 1,
-  "tests/trainer/test_loop_remote_split.py": 9,
+  "tests/trainer/test_loop_remote_split.py": 4,
   "tests/trainer/test_loop_transport_split.py": 1,
   "tests/trainer/test_loop_volume_split.py": 3,
   "tests/trainer/test_offline_leg_retired.py": 11,

@@ -544,7 +544,10 @@ def test_fail_abort_writes_the_verdict_through_this_modules_seam(monkeypatch: py
     import trainer.loop_remote_fail as fail_mod
     from trainer.loop_remote_fail import TrainingRemoteFail
 
-    host = SimpleNamespace(_jsonl_path=Path("unused.jsonl"), _leg_abort=False)
+    # 真实例（裸 `__new__`）：停腿结果经公开读数 `remote_fail_state()` 问 —— SimpleNamespace
+    # 上取不到那个方法，而「取不到」不是这条用例要说的事（G5 第十五批）。
+    host = TrainingRemoteFail.__new__(TrainingRemoteFail)
+    host._jsonl_path = Path("unused.jsonl")
     verdicts: list[tuple[tuple, dict]] = []
     logs: list[str] = []
     monkeypatch.setattr(fail_mod, "write_gate_verdict", lambda *a, **k: verdicts.append((a, k)))
@@ -553,9 +556,9 @@ def test_fail_abort_writes_the_verdict_through_this_modules_seam(monkeypatch: py
     monkeypatch.setattr(root_mod, "write_gate_verdict", lambda *a, **k: root_seen.append(a), raising=False)
     monkeypatch.setattr(root_mod, "log", lambda m: root_seen.append(m), raising=False)
 
-    TrainingRemoteFail._abort_node_failure(cast(Any, host), 7, ValueError("node lacks bun"), where="远端 PPO")
+    host._abort_node_failure(7, ValueError("node lacks bun"), where="远端 PPO")
 
-    assert host._leg_abort is True
+    assert host.remote_fail_state().leg_aborted is True
     assert len(verdicts) == 1
     args, kwargs = verdicts[0]
     assert args[1] == 7 and args[2] == "ABORT" and kwargs.get("decider") == "loop"
@@ -584,13 +587,20 @@ def test_fail_policy_stops_the_leg(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # ① 节点已回报原因（确定性）⇒ 立即停腿、不消耗连败配额
     host = _FailHost(leg_abort=False, remote_fail=0)
-    assert host._handle_remote_failure(1, JobFailedError("no bun")) is True
-    assert host._leg_abort is True and host._remote_fail == 0
+    # 驱动入口的调用移出 assert 表达式（G5 口径：断言只留判据，别把私有调用包进去），
+    # 返回值仍旧逐字比对。
+    rc = host._handle_remote_failure(1, JobFailedError("no bun"))
+    assert rc is True
+    # 两个读数一起问（停腿 + 配额没被吃掉）：`remote_fail_state()` 就是这一簇的执行面。
+    st = host.remote_fail_state()
+    assert st.leg_aborted is True and st.consecutive_failures == 0
 
     # ② 可重试失败：计配额，第 3 次（2 → 3）停腿；**没有**本机降级这一档
     host2 = _FailHost(leg_abort=False, remote_fail=2)
-    assert host2._handle_remote_failure(5, TimeoutError("flaky")) is True
-    assert host2._remote_fail == 3 and host2._leg_abort is True
+    rc2 = host2._handle_remote_failure(5, TimeoutError("flaky"))
+    assert rc2 is True
+    st2 = host2.remote_fail_state()
+    assert st2.consecutive_failures == 3 and st2.leg_aborted is True
 
 
 def test_cross_cluster_handoff_resolves_to_one_object() -> None:

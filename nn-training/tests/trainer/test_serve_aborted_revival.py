@@ -417,6 +417,11 @@ def test_revive_hygiene_clears_leg_state_and_only_this_course_context() -> None:
     清它是安全的：`finished` 是内存加速器，盘上预算（`budget_exhausted`）与账本（`iteration_recorded`）
     都能重算 —— 真跑满的课清掉后第一次问 planner 立刻再置 True，只是白问一拍。
     """
+    # 这里**只能**裸读三个槽位（G5 第十五批认定，不是欠账）：
+    #  ① 本模块有 autouse fixture 把 `loop_core.TrainingLoop` 整体换成 `_FlakyLoop` ⇒ 真实例
+    #     在这个文件里拿不到，`remote_fail_state()` / `resume_state()` 无从谈起；
+    #  ② `_revive_hygiene` 是纯函数，它清的**就是这三个名字**（`hasattr` + `setattr` 的键）
+    #     —— 名字本身即契约，换读数反而把「到底清了哪几个键」藏起来。
     engine = SimpleNamespace(_leg_abort=True, _remote_fail=3, _consec_fail=5)
     runner = SimpleNamespace(
         contexts={"bad": object(), "other": object()}, finished=True, finish_reason="硬边界停车"
