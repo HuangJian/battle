@@ -1307,7 +1307,7 @@ def build_argparser() -> argparse.ArgumentParser:
 
 | # | 规则 | 实现 |
 |---|------|------|
-| G1 | 函数 ≤ 120 行、CC ≤ 40、参数 ≤ 7 | AST 扫描 + 白名单冻结存量（`tests/test_python_shape_budget.py`） |
+| G1 | 函数 ≤ 200 行、参数 ≤ 8（原提议 120/7，落地时取了本仓实测可守的口径，CC 未进门禁） | AST 扫描 + 白名单冻结存量（`tests/test_python_shape_budget.py`；**>200 行存量 2026-11-19 已清零**） |
 | G2 | `common/**` 无模块级可变容器、无 `global` | AST 扫描（`tests/test_python_shape_budget.py::test_common_has_no_new_mutable_module_state`，**名册已于 2026-11-16 清零**） |
 | G3 | 生产包新增 `print(` = 0（工具脚本豁免） | `tests/test_no_print_in_prod.py` |
 | G4 | 新增 `except Exception` 只允许在 `*_boundary` 白名单 | ruff `BLE001` + per-file-ignores |
@@ -1570,6 +1570,22 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
    但要先有「端口对象」才谈得上迁移（B7 后半）；
 3. **G3 剩余 126 处 `print`** 里有 `remote/deliver_zip.py`(15) 这种**故意**的 CLI 契约
    （`DELIVER_IMPORT_JSON=` 末行机器可读，加时间戳前缀就坏），别再拿它当欠账。
+
+**2026-11-19 续作（本轮只动 §10-B7 那一行）**：
+
+4. ~~`hub/http_face.py` 的 55 支 `elif` 路由 + 类属性状态~~ **✅ 已修**（两张数据表 +
+   `HubState`，§217/§218）。**发现**：审计表只点了四份可变类属性，新守卫抓到了第五份
+   `_REJECT_WARN_AT` —— 「隐藏状态」必须用门禁数，不能靠表的记忆。
+5. **下一刀的真实位置（按性价比）**：
+   ① `hub/queue.py::_HubQueue` 的 8 混入组合（B7 正题；先接缝后结构，§142 起的公开读数
+   已经铺了一部分：`queue_state()` / `active_worker_count()` / `result_token_ok` / `epoch_of`）；
+   ② `common/distribution.py`（1 434 物理行 / 文件内是线协议 + HTTP 客户端 + 权重下发 + 升级
+   重启护栏四簇，§0.4-10 的目标是只留纯函数、副作用去 `remote/`；动它要先更新 G8 的基线键）；
+   ③ 3,962 处 `monkeypatch`（要先有端口对象，与 ① 同一前提；建议先挑一个
+   「被 patch 最多」的模块做主例——实测前三是 `offline_boot` 139 / `common.distribution` 106 /
+   `iter_rollout` 57）；
+   ④ `PPOLoop` 四份实现合一（§0.4-11；**动数值就动训练**，要有真语料与 60-seed 基线，
+   不适合与纯搬移混做）。
 
 ## 附录 C：G9 剩余 29 处的归类（2026-11-15，逐条）
 
