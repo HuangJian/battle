@@ -1,19 +1,24 @@
 /**
- * hub-sync.ts — 页面加载时把 `CFG['hub_url']` 对齐到 dashboard 当前的 cloudflared 隧道。
+ * hub-sync.ts — 把页面 `CFG['hub_url']` 对齐到 dashboard 当前的 cloudflared 隧道。
  *
  * 触发面（boot）：Kaggle 帧、Colab、AI Studio 的 single 页；host/外层页拿不到 cell。
+ * 页面加载时同步一次，之后按 `intervalMs` 周期复查：hub 重启会换隧道域名，页面开着时
+ * 也要跟上（值没变就一次写都不发）。
  *
  * 纪律：
  *   · 只改 `hub_url` 的**值**（注释/缩进/其它键逐字不动）；值相同 ⇒ 一次写都不发；
  *   · 现值是手填的 IP 直连（`pinned`）⇒ 不换成隧道 URL，一次写都不发；
  *   · 拿不到 URL / 找不到 CFG cell / 编辑器拒绝写入 ⇒ 带原因失败，绝不假装成功；
- *   · 页首 notebook 可能还没挂好：有界轮询（默认 20s），到点就报「等不到」。
+ *   · 页首 notebook 可能还没挂好：首拍有界轮询（默认 20s），到点就报「等不到」；
+ *     周期拍只试一次，不成下一拍再来（不把 20s 的重试窗口叠在周期上）。
  */
 import type { Runtime } from '../../runtime'
 import type { CellRef, CmdResult, FrameAdapter } from '../sites/types'
 import { isHubUrl, normalizeHubUrl, planHubUrlEdit } from '../sites/hub-url'
 
 export const HUB_SYNC_WAIT_MS = 20_000
+/** 周期复查间隔：隧道域名可能随时被 hub 重启换掉（与下行命令轮询同节奏；值没变不写）。 */
+export const HUB_SYNC_INTERVAL_MS = 15_000
 const HUB_SYNC_POLL_MS = 750
 const HUB_SYNC_TIMEOUT_MS = 5000
 /** CFG 形状：`CFG = {` / `CFG={` / `CFG: {`（Kaggle 的 sourceText 会把多行拼成一行，故不锚行首）。 */
@@ -33,6 +38,16 @@ export interface HubSyncDeps {
   sleep?: (ms: number) => Promise<void>
   waitMs?: number
   pollMs?: number
+  /**
+   * 周期复查间隔（ms）；缺省 / ≤0 = 只做页面加载那一次。
+   * 周期拍不等待 notebook：一次不成，下一拍再来。
+   */
+  intervalMs?: number
+  /**
+   * 结果**变化**时回调（首拍也算）：同一 URL 的 `updated` / `unchanged` 视为同一状态，
+   * 失败原因不变也不重复（不刷屏）。周期拍的可重试失败（暂时没渲染 / 未就绪）静默跳过。
+   */
+  onResult?: (r: CmdResult) => void
 }
 
 export type HubFetch = { ok: true; url: string } | { ok: false; reason: string; retry?: boolean }
@@ -138,62 +153,114 @@ export interface HubSyncHandle {
   done: Promise<CmdResult>
 }
 
+/** 结果指纹：同一个 URL 的 `updated` / `unchanged` 算同一状态（换域名才算新结果）。 */
+function resultKey(r: CmdResult): string {
+  if (!r.ok) return `error:${r.reason}`
+  const detail = r.detail ?? ''
+  const hit = /^(?:updated|unchanged|kept)\s+(.*)$/.exec(detail)
+  return `ok:${hit ? hit[1] : detail}`
+}
+
 /**
- * 启动一次页面加载同步（幂等）：等 notebook 就绪 + URL 可取 ⇒ 只改 `hub_url` 的值。
- * 返回句柄：`cancel()` 用于页面卸载；`done` 是最终结果（成功/未改/带原因失败）。
+ * 启动同步（幂等）：页面加载那拍按 `waitMs` 等 notebook / URL；之后每 `intervalMs` 复查一次。
+ * 返回句柄：`cancel()` 用于页面卸载；`done` 是首拍结果（周期拍的结果走 `onResult`）。
  */
 export function startHubUrlSync(deps: HubSyncDeps): HubSyncHandle {
   const now = deps.now ?? (() => Date.now())
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
   const waitMs = deps.waitMs ?? HUB_SYNC_WAIT_MS
   const pollMs = Math.max(50, deps.pollMs ?? HUB_SYNC_POLL_MS)
-  const deadline = now() + waitMs
+  const intervalMs = Math.max(0, deps.intervalMs ?? 0)
   let cancelled = false
+  let lastKey: string | null = null
 
-  const done = (async (): Promise<CmdResult> => {
+  /** 一拍：`waitForMs` 内按 `pollMs` 重试（首拍用；周期拍传 0 = 只试一次）。 */
+  const runPass = async (waitForMs: number): Promise<CmdResult> => {
+    const deadline = now() + waitForMs
     let reason = '还没开始'
     let retry = true
-    while (!cancelled) {
-      const located = locateHubUrlCell(deps.adapter, deps.markers)
-      if (!located.ok) {
-        reason = located.reason
-        retry = located.retry
-      } else {
-        const hub = await fetchHubUrl(deps)
-        if (!hub.ok) {
-          reason = hub.reason
-          retry = hub.retry === true
+    let timedOut = false
+    try {
+      while (!cancelled) {
+        const located = locateHubUrlCell(deps.adapter, deps.markers)
+        if (!located.ok) {
+          reason = located.reason
+          retry = located.retry
         } else {
-          const source = deps.adapter.sourceText(located.cell)
-          const plan = planHubUrlEdit(source, hub.url)
-          if (!plan.ok) {
-            reason = plan.reason
-            retry = false
-          } else if (plan.pinned) {
-            deps.log?.(`hub_url 是手填的 IP（${plan.replaced}）⇒ 不替换成 ${hub.url}`)
-            return { ok: true, detail: `kept ${plan.replaced}` }
-          } else if (!plan.changed) {
-            deps.log?.(`hub_url 已是最新（${hub.url}）`)
-            return { ok: true, detail: `unchanged ${hub.url}` }
+          const hub = await fetchHubUrl(deps)
+          if (!hub.ok) {
+            reason = hub.reason
+            retry = hub.retry === true
           } else {
-            const r = await deps.adapter.replaceCellSource(located.cell, plan.text)
-            if (r.ok) {
-              deps.log?.(`hub_url 已更新 → ${hub.url}（原值：${plan.replaced || '空'}）`)
-              return { ok: true, detail: `updated ${hub.url}` }
+            const source = deps.adapter.sourceText(located.cell)
+            const plan = planHubUrlEdit(source, hub.url)
+            if (!plan.ok) {
+              reason = plan.reason
+              retry = false
+            } else if (plan.pinned) {
+              return { ok: true, detail: `kept ${plan.replaced}` }
+            } else if (!plan.changed) {
+              return { ok: true, detail: `unchanged ${hub.url}` }
+            } else {
+              const r = await deps.adapter.replaceCellSource(located.cell, plan.text)
+              if (r.ok) return { ok: true, detail: `updated ${hub.url}` }
+              reason = r.reason
+              retry = r.retry === true
             }
-            reason = r.reason
-            retry = r.retry === true
           }
         }
+        if (!retry) break
+        if (now() >= deadline) {
+          timedOut = true
+          break
+        }
+        await sleep(pollMs)
       }
-      if (!retry || now() >= deadline) break
-      await sleep(pollMs)
+    } catch (e) {
+      reason = `同步异常：${e instanceof Error ? e.message : String(e)}`
+      retry = false
     }
     const final = cancelled
       ? '页面已卸载（同步取消）'
-      : `${reason}${now() >= deadline ? '（等待超时）' : ''}`
-    deps.log?.(`hub_url 未同步：${final}`)
-    return { ok: false, reason: final }
+      : `${reason}${timedOut && waitForMs > 0 ? '（等待超时）' : ''}`
+    return { ok: false, reason: final, ...(retry ? { retry: true } : {}) }
+  }
+
+  /**
+   * 结果变化才上屏/落日志（周期拍每 15s 一次，不能每次都刷一行）。
+   * 周期拍的可重试失败（CFG cell 暂时没渲染 / notebook 未就绪 / dashboard 暂时问不到）
+   * 只是页面状态，不是同步失败：静默等下一拍，别让滚动页面刷出一串红字。
+   */
+  const report = (r: CmdResult, periodic: boolean): void => {
+    if (periodic && !r.ok && r.retry === true) return
+    const key = resultKey(r)
+    if (key === lastKey) return
+    lastKey = key
+    try {
+      deps.log?.(describeHubSync(r).text)
+    } catch {
+      /* 日志失败不影响同步 */
+    }
+    try {
+      deps.onResult?.(r)
+    } catch {
+      /* 上屏失败不影响同步 */
+    }
+  }
+
+  const watch = async (): Promise<void> => {
+    while (!cancelled) {
+      await sleep(intervalMs)
+      if (cancelled) break
+      report(await runPass(0), true)
+    }
+  }
+
+  const done = (async (): Promise<CmdResult> => {
+    const r = await runPass(waitMs)
+    report(r, false)
+    if (intervalMs > 0 && !cancelled) void watch().catch(() => {})
+    return r
   })()
 
   return {
