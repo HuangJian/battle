@@ -261,8 +261,9 @@ def test_ambiguous_job_id_is_refused_not_guessed(tmp_path: Path) -> None:
     _publish_store(hub, "a", jid)
     _publish_store(hub, "b", jid)
 
-    assert hub.course_of(jid) is None, "歧义必须拒答（None），不许猜第一个"
-    assert hub._locate_cache.get(jid) is None, "歧义不得进归属缓存（一次歧义会变成永久归属）"
+    # 拒答与「不进归属缓存」是同一件事的两面：`course_of` 就是那张缓存的读面
+    # （`mem_readout()["locate_n"]` 只给规模），所以一条断言吃两个消息。
+    assert hub.course_of(jid) is None, "歧义必须拒答（None），不许猜第一个，也绝不能进归属缓存"
     # 拒答 ⇒ 所有 job 作用域入口都落在「不归本 hub 管」的那条路上
     assert hub.result_token_ok(jid, "") is False
     assert hub.store_result(jid, {"x": 1}) is False

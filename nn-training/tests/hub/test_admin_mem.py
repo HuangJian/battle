@@ -52,6 +52,7 @@ def test_mem_readout_shape_is_fixed(tmp_path: Path) -> None:
         "leases_n",
         "workers_n",
         "dispatch_n",
+        "peeked_n",
         "prefetch_n",
         "offline_disks_n",
     }

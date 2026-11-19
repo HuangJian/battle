@@ -122,6 +122,9 @@ class QueueObserveMixin(QueuePeer):
             "leases_n": len(self._leases),
             "workers_n": len(self._workers),
             "dispatch_n": len(self._dispatch),
+            # 2026-11-19（G5 第十三批）：peek 时刻是「下次探测能否提前返回」的提速缓存，
+            # 摘课时必须跟着清 —— 原先只有私有面能问，现在与其余旁表同一个读数面。
+            "peeked_n": len(self._peeked),
             "prefetch_n": len(self._worker_prefetch),
             "offline_disks_n": len(self._offline_disks),
         }

@@ -92,12 +92,14 @@ def test_drop_course_clears_the_side_tables(tmp_path: Path) -> None:
     assert hub.drop_course("a") is False, "重复摘 = 幂等 False"
     # 公开口径：停机达令 / 轮转游标 / 课程表都能从既有查询问出来；
     # `_peeked`（peek 时刻）与 `_locate_cache`（归属缓存）是纯提速缓存，
-    # 清没清只影响下一次探测要花几毫秒 —— 它们本身就无处可问，留在私有面上。
+    # 清没清只影响下一次探测要花几毫秒 —— 它们没有业务语义，但有规模读数
+    # （`mem_readout()`，2026-11-19 G5 第十三批）。
     assert hub.halt_of("a") is False, "被摘的课还留着停机达令"
-    assert hub._peeked == {}, hub._peeked
+    mem = hub.mem_readout()
+    assert mem["peeked_n"] == 0, mem
     qs = hub.queue_state()
     assert qs["cursor"] is None, "游标指向被摘的课 ⇒ 下一个轮转起点是个空壳"
-    assert hub._locate_cache == {}, hub._locate_cache
+    assert mem["locate_n"] == 0, mem
     assert hub.courses() == ["b"]
     # 落盘的两个不动（`_dispatch` 落 `offline-dispatch.json`、`_leases` 关系重启后接管）
     assert isinstance(hub._dispatch, dict) and isinstance(hub._leases, dict)
