@@ -3,7 +3,6 @@
   "common/__init__.py": 99,
   "common/instance_lock.py": 51,
   "hub/http_face.py": 62,
-  "hub/queue.py": 53,
   "remote/code_snapshot.py": 64,
   "remote/offline_boot.py": 53,
   "remote/opt_delta.py": 60,

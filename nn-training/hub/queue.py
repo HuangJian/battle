@@ -1,55 +1,47 @@
 """hub/queue.py — `_HubQueue` 组合类：多课程单 hub 的调度面。
 
-S4 第十五刀把 1033 行 / 76 个方法的 `_HubQueue` 按**域**拆成七个混入（`hub/queue_*.py`），
-组合类只剩 docstring、一个类常量与 `__init__`：
+S4 第十五刀把 1033 行 / 76 个方法的 `_HubQueue` 按**域**拆成七个混入；B7 又把课程表 /
+归属路由 / 停机达令 / 自动发现（`queue_scope` + `queue_discover`）切成 `QueueScope`
+协作者，并把状态收进三个有状态对象。现在组合类只剩 docstring、三个类常量、
+`__init__`、26 个 scope 转发壳与 21 条状态转发属性：
 
 ```
-class _HubQueue(QueueScopeMixin, QueueDiscoverMixin, QueueAuthMixin, QueueClaimsMixin,
-                QueueResumeMixin, QueueObserveMixin, QueueStoreFaceMixin, _AuthGuard)
-  queue_scope       课程表 · 归属路由 · 停机达令 · worker 登记（状态的主人）
-  queue_discover    自动发现三相：扫盘 / 开课标记闸 / 「在训」判据
+class _HubQueue(QueueAuthMixin, QueueClaimsMixin, QueueResumeMixin,
+                QueueObserveMixin, QueueOfflineMixin, QueueStoreFaceMixin, _AuthGuard)
   queue_auth        鉴权面四覆写 + `halt_workers` 旧名的委派
   queue_claims      派发与认领：轮转挑选 · peek · 熔断告警 · 合法放弃
   queue_resume      续跑锚点 · 离线段补传产物 · 课程路径
   queue_observe     观测面（只读）· job 路径解析 · 哨兵根
-  queue_offline     离线任务清单 + 领取租约（第八个域，2026-09-25）
-  queue_store_face  job 作用域门面：18 个与 `_JobStore` 同名同签名的方法
+  queue_offline     离线任务清单 + 领取租约
+  queue_store_face  job 作用域门面：与 `_JobStore` 同名同签名的那批转发
+  .scope = QueueScope(...)   课程表 · 归属路由 · 停机达令 · worker 登记 · 自动发现
+  .course_table / .board     状态：课程表 6 字段 + worker 板 4 字段
+  .dispatch                  状态：6 张派发/观测表 + 5 把旁路锁
 ```
 
-## 为什么是「混入」而不是「协作对象」（与第十四刀同源，三条实测判据）
+## 为什么剩下的六个域仍是「混入」而不是「协作对象」（与第十四刀同源）
 
-1. **一把锁是类的不变式**：`_lock` 有 5 个直接读者（`_serves_course` / `active_worker_count` /
-   `claim_job` / `claim_next` / `note_worker`），而它就是 `_AuthGuard.__init__` 建的那一把。
-   协作对象各持一把锁 = **换语义**（并发行为不同），不满足「零行为变化」；
+1. **一把锁是类的不变式**：`_lock` 由 `_AuthGuard.__init__` 建，仍是派发热路径的直接读者
+   （`claim_job` / `claim_next` 经 scope 转发）。协作对象各持一把锁 = **换语义**
+   （并发行为不同），不满足「零行为变化」；
 2. **跨域互调是常态**：`claim_next` → `discover` / `_serves_course` /
    `active_worker_count` / `_announce_freeze`；`queue_state` → `halt_of` /
-   `active_courses` / `all_halted` / `active_worker_count`；
-   `resume_anchor` → `resume_sources`…混入把它们留在 `self.X` 上 ⇒ **零 seam**；
+   `active_courses` / `all_halted`；`resume_anchor` → `resume_sources`…留在 `self.X` 上
+   ⇒ **零 seam**；
 3. **tests 直接读私有状态**（`hub._stores` / `hub._order` / `hub._halts` /
-   `hub._locate_cache` / `hub._workers` / `hub._discover_last`，多处断言）——协作对象会让这些
-   **全部改路**；混入是同一个对象 ⇒ **一行测试都不用改**。
+   `hub._locate_cache` / `hub._workers` / `hub._discover_last`，多处断言）——状态转发属性
+   让这些读法**一行都不用改**。
 
-## 为什么 `__init__` 不拆成 `_init_<域>` 钩子（**本条与第十四刀刻意不同**）
-
-第十四刀把状态声明拆到四个 `_init_*` 钩子里，理由是那里的状态分布在 900 行里、四个域各自
-独立。这里**不拆**，两条理由：
-
-* `__init__` 只有 44 行，是一块**连续**的声明，读一遍就对得齐 —— 拆开反而要跳七个文件；
-* 几处状态**互相咬合**：`_solo` 决定 `_now`（`self._now = self._solo._now if self._solo is not
-  None else (now_fn or time.time)`，时钟必须与单课程 store 同源，否则 claimed 标记的时间戳
-  会混入真实墙钟）、`_discover_root` 存在与否决定 `_discover_last` 的初值、`_adopt_solo`
-  还要在运行期把 `_halt_default` / `_workers` / `_auth_fail` 从 store 搬到 `self` 上。
-  按域切这三处只会把一条直线扯成跳转。
-
-代价照旧明确记在案：七个混入各自的类体里，**状态一律是裸注解**（`_stores: dict[str, _JobStore]`，
-无值）—— 组合类的 `__init__` 是这些字段**唯一**的带值声明点。守卫
-`tests/hub/test_hub_queue_split.py` 钉住这条，并逐字段对账「谁写它」。
+组合类的 `__init__` 是状态字段**唯一**的带值声明点（`QueueScope` 里的状态一律经
+`self.hub._X` 读写）；守卫 `tests/hub/test_hub_queue_split.py` 钉住这条，并逐字段对账
+「谁写它」。
 
 ## 依赖方向
 
-`hub.queue → {hub.queue_* 七混入, hub.auth, hub.store}`（严格向下）。
-`hub/server.py` 是整个 hub 的组装 + HTTP 面，从上面拿 `_HubQueue` 并 re-export
-（`hs._HubQueue` 是约 10 个测试与 e2e 的取名字入口——**名字是契约，位置不是**）。
+`hub.queue → {hub.queue_* 混入, hub.queue_scope, hub.course_table, hub.worker_board,
+hub.dispatch_state, hub.auth, hub.store}`（严格向下）。`hub/server.py` 是整个 hub 的组装 +
+HTTP 面，从上面拿 `_HubQueue` 并 re-export（`hs._HubQueue` 是约 10 个测试与 e2e 的取名字
+入口——**名字是契约，位置不是**）。
 """
 
 from __future__ import annotations
@@ -72,8 +64,8 @@ from hub.queue_store_face import QueueStoreFaceMixin
 from hub.store import _JobStore
 from hub.worker_board import WorkerBoard
 
-# `DISCOVER_FRESH_SEC` / `DISCOVER_SCAN_MIN_SEC` 两个类常量随发现簇住 `queue_scope`
-# （B7-S1 并入），本类经 MRO 继承（`hub.DISCOVER_SCAN_MIN_SEC` 这类实例访问照旧）。
+# `DISCOVER_FRESH_SEC` / `DISCOVER_SCAN_MIN_SEC` 两个类常量随发现簇住 `queue_scope`，
+# 本类在类体里取一次名字（`__init__` 的形参缺省值在类体作用域解析）。
 # 注意 `DISCOVER_SCAN_SEC`（后台兜底线程的节拍，启动参数用）是**另一件事**，留在 hub_server。
 
 
@@ -114,7 +106,6 @@ class _HubQueue(
     """
 
     #: epoch POST 体上限（与 `_JobStore` 同源，不留第二份魔数）
-    #: 自动发现时判定「课程目录是不是活的」的新鲜窗口（秒）。
     BC_EPOCH_BODY_MAX = _JobStore.BC_EPOCH_BODY_MAX
 
     # `__init__` 的形参缺省值要在**类体作用域**里解析，所以要在这里取一次名字
@@ -188,114 +179,90 @@ class _HubQueue(
 
     # ---- B7-S2：课程表 / 路由 / 停机 / 发现面的**转发壳**（26 个口） ----
     # 实现与状态主人住 `self.scope`；跨域调用点（`self.course_of` 等）逐字不变。
+    # 壳不写 docstring（签名即全部信息），逐方法说明见 `hub/queue_scope.py`。
     def halt_of(self, course: str) -> bool:
-        """转发到 `QueueScope.halt_of`（B7-S2）。"""
         return self.scope.halt_of(course)
 
     def all_halted(self) -> bool:
-        """转发到 `QueueScope.all_halted`（B7-S2）。"""
         return self.scope.all_halted()
 
-    def _work_left(self, exclude: str = '') -> str | None:
-        """转发到 `QueueScope._work_left`（B7-S2）。"""
+    def _work_left(self, exclude: str = "") -> str | None:
         return self.scope._work_left(exclude)
 
-    def halt_if_idle(self, course: str = '') -> tuple[bool, str]:
-        """转发到 `QueueScope.halt_if_idle`（B7-S2）。"""
+    def halt_if_idle(self, course: str = "") -> tuple[bool, str]:
         return self.scope.halt_if_idle(course)
 
     def maybe_halt_when_idle(self) -> bool:
-        """转发到 `QueueScope.maybe_halt_when_idle`（B7-S2）。"""
         return self.scope.maybe_halt_when_idle()
 
-    def set_halt(self, halt: bool, course: str = '') -> bool:
-        """转发到 `QueueScope.set_halt`（B7-S2）。"""
+    def set_halt(self, halt: bool, course: str = "") -> bool:
         return self.scope.set_halt(halt, course)
 
     def add_course(self, name: str) -> bool:
-        """转发到 `QueueScope.add_course`（B7-S2）。"""
         return self.scope.add_course(name)
 
     def drop_course(self, name: str) -> bool:
-        """转发到 `QueueScope.drop_course`（B7-S2）。"""
         return self.scope.drop_course(name)
 
     def _adopt_solo(self) -> None:
-        """转发到 `QueueScope._adopt_solo`（B7-S2）。"""
         self.scope._adopt_solo()
 
     def _registry(self) -> dict[str, float]:
-        """转发到 `QueueScope._registry`（B7-S2）。"""
         return self.scope._registry()
 
     def note_worker(self, worker_id: str) -> None:
-        """转发到 `QueueScope.note_worker`（B7-S2）。"""
         self.scope.note_worker(worker_id)
 
     def worker_registry(self) -> dict[str, float]:
-        """转发到 `QueueScope.worker_registry`（B7-S2）。"""
         return self.scope.worker_registry()
 
     def active_worker_count(self) -> int:
-        """转发到 `QueueScope.active_worker_count`（B7-S2）。"""
         return self.scope.active_worker_count()
 
     def courses(self) -> list[str]:
-        """转发到 `QueueScope.courses`（B7-S2）。"""
         return self.scope.courses()
 
     def course_of(self, job_id: str) -> str | None:
-        """转发到 `QueueScope.course_of`（B7-S2）。"""
         return self.scope.course_of(job_id)
 
     def course_store(self, course: str) -> _JobStore | None:
-        """转发到 `QueueScope.course_store`（B7-S2）。"""
         return self.scope.course_store(course)
 
     def _store_of(self, job_id: str) -> _JobStore | None:
-        """转发到 `QueueScope._store_of`（B7-S2）。"""
         return self.scope._store_of(job_id)
 
     def mode_ignored(self, course: str) -> bool:
-        """转发到 `QueueScope.mode_ignored`（B7-S2）。"""
         return self.scope.mode_ignored(course)
 
     def active_courses(self) -> int:
-        """转发到 `QueueScope.active_courses`（B7-S2）。"""
         return self.scope.active_courses()
 
     def _sync_hold(self, course: str) -> None:
-        """转发到 `QueueScope._sync_hold`（B7-S2）。"""
         self.scope._sync_hold(course)
 
     def _note_ambiguous(self, job_id: str, holders: list[str]) -> None:
-        """转发到 `QueueScope._note_ambiguous`（B7-S2）。"""
         self.scope._note_ambiguous(job_id, holders)
 
     def ambiguous_jids(self) -> dict[str, list[str]]:
-        """转发到 `QueueScope.ambiguous_jids`（B7-S2）。"""
         return self.scope.ambiguous_jids()
 
     def discover(self, force: bool = False) -> list[str]:
-        """转发到 `QueueScope.discover`（B7-S2）。"""
         return self.scope.discover(force)
 
     def _drop_dead_courses(self, root: Path) -> list[str]:
-        """转发到 `QueueScope._drop_dead_courses`（B7-S2）。"""
         return self.scope._drop_dead_courses(root)
 
     def _serves_course(self, course: str) -> bool:
-        """转发到 `QueueScope._serves_course`（B7-S2）。"""
         return self.scope._serves_course(course)
 
     def _course_dir_live(self, ent: Path, now: float) -> bool:
-        """转发到 `QueueScope._course_dir_live`（B7-S2）。"""
         return self.scope._course_dir_live(ent, now)
 
     # ---- B7-P3：课程表 / worker 板的**转发属性**（状态只在协作者上） ----
-    # 八域混入仍写 `self._stores[...]` / `self._cursor = ...`：这些属性的 getter/setter 把
-    # 每一次读写落到 `self.course_table` / `self.board`，组合类自己**不存副本**。写口保留是为了
-    # `_adopt_solo` / `drop_course` 的整表替换语义（与旧实现逐字相同），不是给测试的缝。
+    # 其余混入与 `QueueScope` 仍写 `self._stores[...]` / `self._cursor = ...`：这些属性的
+    # getter/setter 把每一次读写落到 `self.course_table` / `self.board`，组合类自己**不存
+    # 副本**。写口保留是为了 `_adopt_solo` / `drop_course` 的整表替换语义（与旧实现逐字
+    # 相同），不是给测试的缝。
     @property
     def _stores(self) -> dict[str, _JobStore]:
         return self.course_table._stores
@@ -464,4 +431,3 @@ class _HubQueue(
     @_we_lock.setter
     def _we_lock(self, value: Lock) -> None:
         self.dispatch._we_lock = value
-
