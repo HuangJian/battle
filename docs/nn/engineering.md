@@ -25,6 +25,157 @@
 
 ---
 
+## §224 B7 设计短记：`_JobStore` / `_HubQueue` 的混入 → 协作对象（2026-11-19）
+
+> **状态**：设计已定、代码未动（Phase 1 未开工）。目标不是「干净架构」，是让下一刀不必
+> 再看 4 035 行才能知道「谁改了哪一格状态」。
+> **本文只写给要动手的人**：现状用数字钉、切片用 DoD 钉、锁用规则钉、停止条件钉死。
+
+### 1. 现状（2026-11-19 实测；口径 = AST 扫 `hub/queue*.py`、`hub/store*.py`，方法名册来自
+`tests/hub/test_hub_queue_split.py::DOMAINS`）
+
+| 组合类 | 基类 | `__mro__` | 方法 | 状态字段 | 跨簇边 / 站点 | 锁 | 组合类文件 |
+|---|---|---|---|---|---|---|---|
+| `_JobStore` | 7（6 混入 + `_AuthGuard`） | 9 | 90 | **20**（`_init_*` 钩子里的带值注解）+ 6 处方法内赋值 | **8 / 32** | 1（`_lock`） | `hub/store.py` 108 行，`__init__` 28 行 |
+| `_HubQueue` | 9（8 混入 + `_AuthGuard`） | **14** | **138** | **30**（9 个只被 `__init__` 写） | **15 / 90** | **6** | `hub/queue.py` 223 行，`__init__` 99 行 |
+
+`_HubQueue` 八个域（方法数 / 文件行数）：`queue_offline` 35 / 1285 · `queue_scope` 22 / 412 ·
+`queue_observe` 22 / 545 · `queue_claims` 18 / 544 · `queue_store_face` 19 / 141 ·
+`queue_resume` 12 / 391 · `queue_auth` 6 / 73 · `queue_discover` 4 / 221。**八域总行数 4 035**，
+组合类只剩声明 —— 这正是「一切都对，但没人读得完」的形态。
+
+`_JobStore` 六个簇（行数 / 方法 / 入边条数，入边 = 别的簇调它几个方法名）：
+`store_leases` 978 / 40 / **5** · `store_offline` 984 / 11 / 0 · `store_ledger` 419 / 17 / **20** ·
+`store_results` 297 / 7 / 0 · `store_scheduling` 177 / 10 / **7** · `store_wire` 57 / 5 / 0。
+出边最少的两个（`store_scheduling` 1 条、`store_wire` 0 条）就是本设计的起点。
+
+**锁不止一把**（这点最容易记错）：`_lock` 由 `_AuthGuard.__init__` 建，**7 个方法 / 7 处站点 /
+3 个域**（`queue_scope` 4：`active_worker_count` / `drop_course` / `note_worker` / `worker_registry` ·
+`queue_claims` 2：`claim_job` / `claim_next` · `queue_discover` 1：`_serves_course`）；另有 5 把在 `_HubQueue.__init__` 里建 —— `_lease_lock`(9) /
+`_dispatch_lock`(3) / `_disk_lock`(2) / `_pf_lock`(2) / `_we_lock`(2)，全部服务离线推送面。
+`_JobStore` 只有 `_lock` 一把，38 处站点。
+
+**状态耦合**（谁都得看的格子）：`_stores` 被 6 域读 · `_order` / `_now` 各 5 域 ·
+`_discover_root` 4 域 · `_solo` / `_cursor` / `_peeked` 各 3 域。30 个字段里 13 个被 ≥2 域读。
+
+**测试耦合**（`tests/hub/`，口径见 `tests/test_private_assert_budget.py`）：私有断言 **25**
+（`test_hub_job_store_split` 8 · `test_hub_queue_split` 8 · `test_hub_routes_split` 5 ·
+`test_hub_entry_split` 2 · `test_hub_discover_eviction` 1 · `test_multi_course_hub` 1；全仓 146）；
+**私有赋值 3**（`hub._cursor` / `hub._discover_root`，另 3 处是测试替身自己的字段）；
+`monkeypatch.setattr` **81** 个站点（本机行 grep 口径；全仓同口径 1 857。档案里那个 3 962 是
+另一种数法，**别混用**）。
+
+### 2. 为什么不能一次换掉（三条是 `hub/queue.py` 头注里早记下的，第四条是今天补的）
+
+1. **一把锁是类不变式**：`_lock` 是 `_AuthGuard.__init__` 建的那把，三域 7 个方法直接读它
+   （`hub/queue.py` 头注写的「5 个直接读者」是 2026-09 的口径，今天量到 6 个 + 1 个新读数）。
+   协作对象各持一把 = 换并发语义，「零行为变化」当场失效。
+2. **跨域互调是常态**：90 个跨域调用点（`store_face→scope` 19 · `claims→scope` 18 ·
+   `observe→scope` 18 · `offline→resume` 9 …）。切壳要么留 90 个 seam，要么把问询改成消息。
+3. **`_solo` 借表**：单课程期状态住 store，`_adopt_solo` 在运行期把 `_halt_default` /
+   `_workers` / `_auth_*` 搬到 hub 自己身上；`_now` 也跟着 store 的 `now_fn`（时钟必须同源）。
+   协作者必须在搬家时**换持有者**，或干脆不搬。
+4. **量出来的顺序**：`_JobStore` 是 9 基类 / 90 方法 / 32 站点 / 1 把锁；`_HubQueue` 是 14 / 138 /
+   90 / 6 把。先做前者不是因为它重要，是因为它**可证伪**——同样的手法跑通一次，后者才有把握。
+
+### 3. 目标形状（只切有状态的簇；没状态的继续当混入）
+
+```
+_JobStore(ResultsMixin, OfflineRoundsMixin, WireMeterMixin, _AuthGuard)
+    .sched   = Scheduler(lock=…, clock=…)      # 原 store_scheduling：_claimed/_computing/_ready/_epoch
+    .leases  = LeaseBook(lock=…, clock=…, job_dir=…, sched=…, ledger=…)
+
+_HubQueue(QueueStoreFaceMixin, QueueClaimsMixin, QueueObserveMixin, QueueOfflineMixin, QueueResumeMixin, QueueAuthMixin, _AuthGuard)
+    .courses = CourseTable(...)                 # _stores/_order/_solo/_cursor/_locate_cache/_ambiguous
+    .board   = WorkerBoard(lock=…, clock=…)     # _workers/_halt_default/_auth_fail/_auth_blocked_until
+```
+
+三条形状规则：
+
+* **无状态簇不切**（`store_wire` 5 方法零状态、`store_offline` 无钩子、`store_results` 无钩子）——
+  把纯函数搬成对象只换来一次 `self.wire.…`。
+* **名字是契约**：`hub.server._JobStore` / `_HubQueue` / `FREEZE_AFTER_RECLAIMS` / `ClaimOutcome`
+  这些**取名字的入口**一一保留（既有 re-export 做法不变）。
+* **冻结壳**：`queue_store_face` 的 19 个同名同签名转发、`FACADE_SAME_SIG` 那张表、
+  `GET_ROUTES`/`POST_ROUTES` 都不许动 —— 它们是 hub 对外的 HTTP 契约。
+
+### 4. 锁的规则（本设计最容易翻车的地方，逐条可判）
+
+* **L1 锁的集合不变**：1（`_lock`）+ 5（离线推送面的域锁），一个不多一个不少。变的只是**持有者**：
+  由组合根建好，构造时注入（`Scheduler(lock=self._lock)`）。
+* **L2 协作者不得自建锁**：`Lock()` 只许出现在 `hub/auth.py`（`_lock`）与 `hub/queue.py`（五把域锁）。
+  守卫写法：AST 扫 `Lock(` 调用点，闭集冻结（与 G18 线程所有权同款）。
+* **L3 加锁顺序不变**：现有 7 个 `_lock` 站点 + 5 把域锁的嵌套顺序逐站点对账；迁移中出现
+  「A 等 B、B 等 A」即回滚。
+* **L4 时钟注入**：协作者持 `clock: Callable[[], float]`，**不读** `self._now`；`_solo` 存在时传的是
+  store 的 `now_fn`（否则 claimed 时间戳混入真实墙钟，正是头注警告的那条）。
+* **L5 过渡期允许两处持同一把锁，禁止两把锁表示同一临界区**（后者是静默竞态）。
+
+### 5. 切片计划（每片 ≤ 1.5 天、可单独回滚；每片 DoD 相同，见 §6）
+
+| 片 | 内容 | 为什么这个顺序 | 回滚点 |
+|---|---|---|---|
+| **P0** | 读数面（**已完成**）：`queue_state()` / `mem_readout()` / `worker_registry()` / `auth_state()` / `scheduling_facts()` / `lease_worker()` / `result_token_ok()` / `epoch_of()` / `course_of()` / `hold_of()`；G5 656 → **146** | 先有读数才谈得上迁测试 | — |
+| **P1** | `store_scheduling` → `Scheduler`（4 字段 / 10 方法 / 出边 1 / 入边 7） | 状态最少、`scheduling_facts()` 已是公开读数 ⇒ 迁移面已被覆盖 | 删 `Scheduler` 类、恢复 `_init_scheduling` |
+| **P2** | `store_leases` → `LeaseBook`（40 方法；8 个租约核心字段 + 归属缓存 `_roles`/`_kinds`/`hold_meta`。先搬状态与纯计算：`lease_expiry` / `heartbeat_at` / `is_stale` / `lease_worker`，`claim_outcome` 等编排留在 store） | 最大一块；先搬「只读日期/是否过期」，认领临界区最后动 | 同上 |
+| **P3** | `CourseTable` + `WorkerBoard`（hub 侧两个有状态对象；`_solo` 借表改成「表对象持有 solo 指针」） | `_stores`/`_order` 是 5–6 域共读，切它必须同时给 `course_of`/`courses()` 提供转发 | 同上 |
+| **P4** | `Dispatch`（`_peeked`/`_dispatch`/`_leases` 转发面）+ 壳收敛到 `__bases__ ≤ 4` | 最后动派发是因为它是 `claim_next` 的临界区 | 同上 |
+
+### 6. 测试迁移计划（先读数、后结构，顺序不可换）
+
+25 条 hub 私有断言（2026-11-19 逐条看过）分五类，处理方式不同：
+
+| 类 | 条数 | 例 | 处理 |
+|---|---|---|---|
+| **名字/类结构契约** | 13 | `hs._JobStore is _JobStore` / `hs._JobStore.__mro__` / `__bases__` / 类常量 / `observe_mix._MISSING_ROOT.name` | **保留**。它们被计入只因类名带前导下划线（dunder 不算，所以 `__mro__` 本身不计）；换成读数就没人守「拆簇没拆错」。切片时**同步改名册与计数** |
+| **表格自检** | 1 | `STATE_WRITERS['_cursor'] == {…}` | 保留（它就是写者表本人） |
+| **哨兵路径** | 2 | `hub._job_dir(unknown)/'manifest.json'` 不存在 | 保留：`_MISSING_ROOT` 是「404 必不落到真目录」那条约束的唯一可执行形式 |
+| **身份/借表** | 3 | `hub._solo is st` / `hub._registry() is st._workers` | 保留：`_adopt_solo` 的语义就是**同一张表**（不是相等） |
+| **驱动被测入口的调用** | 5 | `rec._job_or_404() is None`（`_Probe` 继承路由 mixin） | 可选：把调用提出 `assert` 表达式（合法，只计数值 −5）；**不要**为计数而动，切片时顺手做 |
+| **可变状态读** | **0** | — | 这是 B7 的真正目标：G5 十二~十六批已把读数覆盖的那 5 条迁完 |
+
+另：`isinstance(hub._dispatch, dict) …`（1 条，`test_hub_discover_eviction`）属「旁表未被摘课清掉」的**类型契约**，归名字类。
+
+白盒种子 3 处（`hub._cursor = "a"` / `hub._discover_root = …` / 测试替身自己的字段）在切片时改成构造参数，
+**不要**为了让测试能跑而在生产加 `@property` 写口。
+
+`monkeypatch.setattr` 81 个站点的处理顺序：先端口化**时钟与路径**（`now_fn` / `clock` / `tmp` 注入，
+这些占大头且语义最干净），再 `log`，最后才碰「换类」那种（`loop_core.TrainingLoop` 式整类替换）。
+**不做一次性全换**：每轮只换同一符号的站点，跑绿再继续。
+
+**禁止项**：为迁测试放宽断言 · 新增 `# type: ignore`（拿 G6 的债换 G5）· 把**状态读**提出 `assert`
+来骗扫描（对「驱动被测入口」的调用提出去是合法的，本次已按此区分；对读不合法）。
+
+### 7. 怎么证明「没改行为」（每片都要跑）
+
+1. `bash tools/githook/nn-python-gate.sh` 全绿（ruff + mypy + 6278 pytest）。
+2. `tests/hub/test_hub_queue_split.py` / `test_hub_job_store_split.py` / `test_hub_route_table.py` /
+   `test_hub_state.py` 全过 —— 这四个是结构契约的**唯一所有者**。
+3. 并发序列 A/B：同一段脚本（publish → claim → heartbeat → start → ready → result，两 worker
+   交错）在改动前后记录**加锁/放锁序列**与响应，逐行相同。
+4. `hub/smoke_loopback.py` 冒烟 + 账本逐字节（`training_log.jsonl` 的 event 序列）。
+
+### 8. DoD（量化，基线是今天的读数）
+
+- `_HubQueue.__bases__` 9 → **≤ 4**；`__mro__` 14 → **≤ 9**（Protocol/Generic/object 去不掉）。
+- `_JobStore.__bases__` 7 → **≤ 4**。
+- `Lock()` 调用点 **6 → 6**（只换持有者，不增减）；`hub/queue*.py` 总行数 4 035 → **≤ 3 400**。
+- hub 私有断言 **25 → ≤ 19**（把 5 条「驱动被测入口」提出 `assert`），且剩下的**无一条读可变状态**
+  —— 名字/表/哨兵/身份那几类会跟着结构继续存在，把目标定成 0 等于要求给 `_JobStore` 改名，不在本设计范围。
+- `queue_state()` / `mem_readout()` 键集**逐字不变**（控制台与 RCA 脚本按名取值）。
+
+### 9. 明确不做 / 停止条件
+
+**不做**：改锁的数量或嵌套顺序 · 改 `_solo` 借表语义 · 改 `http_face` 路由表与 `HubState` ·
+把 `QueuePeer` Protocol 换成 ABC · 顺手改 `queue_offline` 的行为（它是本仓最长的 hub 文件，
+但它的耦合是**离线推送的时序**，不是本次目标）。
+
+**停止条件**（命中任一条就停手、重估，不硬推）：某片要改 >2 个加锁站点的嵌套顺序 ·
+某片需要新增 `# type: ignore` 或放宽任何守卫 · 某片让 `mem_readout()`/`queue_state()` 的键发生变化 ·
+A/B 并发序列出现任何一行差异。
+
+---
+
 ## §223 goal / intent 的 CLI 也并了：`worker/ppo/cli.py`（2026-11-19，B8 第十四刀）
 
 第十二刀（§221）刻意留下 `main()` 没并，理由是「并成配置表行数不会更短」。**那个取舍被推翻了**

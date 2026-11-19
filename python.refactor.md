@@ -1379,7 +1379,7 @@ def build_argparser() -> argparse.ArgumentParser:
 | **B4**（3–5 天） | 拆 `dispatch._run` 为 5 个相位方法 | `_run` ≤ 80 行；dispatch 测试全绿 | 中高（需一轮真跑） |
 | **B5**（5–7 天） | `common/contracts`：Shard/Manifest/Result/ActionSpace；删三处 `a_hold` 嗅探 | 类型检查覆盖数据面；v6/legacy 由 Enum 决定 | 中（**已完成**：`ActionSpace`+`HeadLayout`（2026-11-16）、三处嗅探清零、`Shard`/`ShardV6`/`Episode`/`EpisodeV6` 契约 + import 哨兵（2026-11-18，§126）、episode 跨三层收口（§127）、`Manifest`/`CloudResult` 的 pydantic 模型 + 两个薄包装（§128，L0 放行 pydantic 一个包，闭集三处）；**剩余**：`cfg`/`course` 的 schema 继续收（可选）） |
 | **B6**（5–7 天） | `Runtime`（rng/clock/executors）注入；PPO 改 `default_rng`；ckpt 存 bit generator（**三半边全落** 2026-11-17：executor = `Runtime` 收走 10 处就地建池 + G16 · rng = `PPORng` 三条流 + `rng_streams` 进 ckpt + AST 零容忍 · clock = `Runtime(clock=, monotonic=)` + `PushHooks` + G17 墙钟预算（482 处/92 文件冻结）· 裸线程 = `Runtime.thread()` 名字/登记/join + G18 零容忍闸（50 → **0 处**；四批：`CloudEvalRunner` · `LocalLane` · `DelivererProcess` · `UploaderProcess` · `PushDispatcher` · `HeartbeatPublisher` · `EvalExecutors` + 第三批 11 个类 + 第四批模块级扇出，见 §P1-6）） | 同 seed 两遍逐位一致；并发下可复现 | 中 |
-| **B7**（7–10 天） | 协作对象替混入（先 `Scheduler`/`LeaseBook`，保留转发壳）；测试迁移到 seams（**2026-11-19 另落两刀**：`hub/http_face.py` 的 55 支 `elif` 路由 → 两张数据表 + 纯函数 `match_route`（§217），五份可变类属性 → `HubState`（§218）） | `_HubQueue.__mro__` ≤ 4；私有断言存量下降 | 高（面广） |
+| **B7**（7–10 天） | 协作对象替混入（先 `Scheduler`/`LeaseBook`，保留转发壳）——**设计短记已落**：`docs/nn/engineering.md` §224（实测表 · 目标形状 · 锁规则 L1–L5 · 切片 P1–P4 逐片 DoD · 测试迁移三类 · 停止条件）；测试迁移到 seams（**2026-11-19 另落两刀**：`hub/http_face.py` 的 55 支 `elif` 路由 → 两张数据表 + 纯函数 `match_route`（§217），五份可变类属性 → `HubState`（§218）） | `_HubQueue.__mro__` ≤ 4；私有断言存量下降 | 高（面广） |
 | **B8**（5–7 天） | `common.distribution` 拆分（**第一刀已落** 2026-11-16：codeHash 面 → `common/codehash.py`，仓库锚点 → `common/paths.py`，调用点与打桩面同步迁走；**第十刀已落** 2026-11-19：升级/重启护栏 12 名 → `remote/node_upgrade.py`，HTTP 漏斗改名公开的 `node_request`；**第十一刀已落** 2026-11-19：任务协议 / 权重传输拆成 `common/task_client` + `common/weights_client`，`distribution` 1 181 → 490 行）；`offline_boot` 生成式拆分（**已落** 2026-11-17：12 个 `.pyfrag` + `tools/build_offline_boot.py` + `--check` 守卫）；`PPOLoop` 统一四份实现（**第十二刀已落** 2026-11-19：numpy 两份（goal / intent）合成 `worker/ppo/loop.py`，克隆窗口 11 → 0；**第十三刀同日已落**：`engine ↔ engine_paddle` 的训练步合成 `worker/ppo/backend.py` + 20 字段 `Backend` 算子表，13 → 0，paddle parity 三段读数不变；**第十四刀同日已落**：两个头的 `main()` 合成 `worker/ppo/cli.py`（`CliSpec` + 顺序），`--help` 逐字节不变） | 单文件 < 1000 行（取消豁免）；克隆窗口下降 | 中 |
 
 **不建议的路线**：一次性 `strict = true`、一次性删全部 `sys.path`、一次性把 hub 换 FastAPI。
@@ -1581,8 +1581,10 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
    `HubState`，§217/§218）。**发现**：审计表只点了四份可变类属性，新守卫抓到了第五份
    `_REJECT_WARN_AT` —— 「隐藏状态」必须用门禁数，不能靠表的记忆。
 5. **下一刀的真实位置（按性价比）**：
-   ① `hub/queue.py::_HubQueue` 的 8 混入组合（B7 正题；先接缝后结构，§142 起的公开读数
-   已经铺了一部分：`queue_state()` / `active_worker_count()` / `result_token_ok` / `epoch_of`）；
+   ① `hub/queue.py::_HubQueue` 的 8 混入组合（B7 正题；先接缝后结构，§142 起的公开读数已经铺了
+   一部分：`queue_state()` / `active_worker_count()` / `result_token_ok` / `epoch_of`）。**切口与逐片
+   DoD 已定**：先 `_JobStore` 的 `Scheduler`/`LeaseBook`（9 基类 / 90 方法 / 32 站点 / 1 把锁），再
+   hub 侧；锁规则 L1–L5、测试迁移三类、停止条件见 `docs/nn/engineering.md` §224；
    ② ~~`common/distribution.py`（1 434 物理行 / 线协议 + HTTP 客户端 + 权重下发 + 升级重启护栏
    四簇）~~ **第十刀已落（2026-11-19）**：升级/重启护栏整簇 12 名 → `remote/node_upgrade.py`
    （1 181 + 282 行），HTTP 漏斗改名公开的 `node_request`，G8 基线不变 + 新增「新家零 IO」断言；
