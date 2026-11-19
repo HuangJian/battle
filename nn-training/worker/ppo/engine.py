@@ -75,13 +75,13 @@ from worker.ppo.common import (
     sync_scalars,
 )
 from worker.ppo.demo import DemoBank
-from worker.ppo.np_core import (  # noqa: F401  (`load_episode_from_shard` = RolloutBackend 契约)
-    # `load_episode_from_shard` 是 `worker/backend.py::RolloutBackend` 的成员，由
-    # `trainer/stream.py` 运行期从「本模式的后端模块」上取；engine 自己**不调用**它，所以
-    # 必须靠 noqa 撑住 F401。要 import 形态而不是 `y = X.y` 赋值：静态契约扫描器只认
-    # `from X import y`（记为 `import:X`），赋值别名会变成 `<unresolved>`，
-    # `tests/worker/test_backend_contract_runtime.py` 的双向对账当场红。
-    #
+
+#: `load_episode_from_shard` 是 `worker/backend.py::RolloutBackend` 的成员，由
+#: `trainer/stream.py` 运行期从「本模式的后端模块」上取；engine 自己**不调用**它。
+#: `x as x` = ruff 认的**再导出**形态（无需 `noqa: F401`），而静态契约扫描器只认
+#: `from X import y`（记为 `import:X`）—— `y = X.y` 赋值会变成 `<unresolved>`，
+#: `tests/worker/test_backend_contract_runtime.py` 的双向对账当场红。
+from worker.ppo.np_core import (
     # 2026-11-16 清账：`compute_gae` / `discover_shards` / `discover_rl_shards` /
     # `load_episodes_common` / `load_shard` / `load_shard_fields` / `_RL_SHARD_SPEC`
     # 只剩两个 worker 测试在属性上取，已改成从 np_core 直取，影子删掉。
@@ -89,7 +89,6 @@ from worker.ppo.np_core import (  # noqa: F401  (`load_episode_from_shard` = Rol
     LAM,
     chunk_episodes,
     is_xla,
-    load_episode_from_shard,
     load_episodes,
     optimizer_step,
     xla_delta_str,
@@ -99,6 +98,7 @@ from worker.ppo.np_core import (  # noqa: F401  (`load_episode_from_shard` = Rol
     xla_metrics_delta,
     xla_metrics_snapshot,
 )
+from worker.ppo.np_core import load_episode_from_shard as load_episode_from_shard
 from worker.ppo.rng import PPORng
 from worker.ppo.trainer import aggregate_stats, tensored_chunks
 

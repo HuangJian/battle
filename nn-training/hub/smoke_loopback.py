@@ -230,8 +230,6 @@ def _assert_smoke_final(
 def main() -> int:
     args = _smoke_parser().parse_args()
 
-    import numpy as np  # noqa: F401 — 确保 import 顺序稳定
-
     work = REPO / args.work  # 2026-09-08 双 tmp 统一：锚定仓库根 tmp/，不用 ROOT(nn-training)/tmp
     if work.exists():
         rmtree_best_effort(work)  # 冒烟目录可整体重建（非训练产物）

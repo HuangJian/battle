@@ -59,20 +59,26 @@ def _scan() -> dict[str, dict[str, int]]:
         # 超过 conftest 的单用例 5s 警告阈值）。过滤只跳过“必然为 0”的文件，不改变计数。
         if "noqa" not in src and "type:" not in src:
             continue
-        n_noqa = n_ignore = 0
-        for tok in tokenize.generate_tokens(io.StringIO(src).readline):
-            if tok.type != tokenize.COMMENT:
-                continue
-            m = _NOQA.match(tok.string)
-            if m and "F401" in [c.strip() for c in (m.group(1) or "").split(",")]:
-                n_noqa += 1
-            if _TYPE_IGNORE.match(tok.string):
-                n_ignore += 1
+        n_noqa, n_ignore = _count_src(src)
         if n_noqa:
             counts[NOQA_F401][rel] = n_noqa
         if n_ignore:
             counts[TYPE_IGNORE][rel] = n_ignore
     return counts
+
+
+def _count_src(src: str) -> tuple[int, int]:
+    """一段源码里的（`noqa: F401` 条数, `type: ignore` 条数）—— 全仓扫描与自检共用这一份。"""
+    n_noqa = n_ignore = 0
+    for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+        if tok.type != tokenize.COMMENT:
+            continue
+        m = _NOQA.match(tok.string)
+        if m and "F401" in [c.strip() for c in (m.group(1) or "").split(",")]:
+            n_noqa += 1
+        if _TYPE_IGNORE.match(tok.string):
+            n_ignore += 1
+    return n_noqa, n_ignore
 
 
 @cache
@@ -126,28 +132,22 @@ def test_scan_ignores_strings_and_other_lint_codes() -> None:
         "z = 1  # type: ignore[attr-defined]\n"
         "w = 1  # noqa: E402,F401\n"
     )
-    n_noqa = n_ignore = 0
-    for tok in tokenize.generate_tokens(io.StringIO(src).readline):
-        if tok.type != tokenize.COMMENT:
-            continue
-        m = _NOQA.match(tok.string)
-        if m and "F401" in [c.strip() for c in (m.group(1) or "").split(",")]:
-            n_noqa += 1
-        if _TYPE_IGNORE.match(tok.string):
-            n_ignore += 1
-    assert n_noqa == 1
-    assert n_ignore == 1
+    assert _count_src(src) == (1, 1)
 
 
 def test_scan_sees_the_known_surface() -> None:
     """扫描入口自检：两类都有存量、已知文件在册、排除目录没混进来。"""
     baseline = _baseline()
-    # 锚点选**还没退役**的转发壳：`remote/offline_boot.py` 的模块级 `__getattr__`（P1-11
-    # 清单里仍在）。此前锚 `trainer/dispatch_queue.py`，它的 re-export 面 2026-11-14 归零后
-    # 这条自检就红了 —— 锚点不能选「刚被修好的文件」，否则门禁一被治好就自证失效。
-    assert baseline[NOQA_F401].get("remote/offline_boot.py", 0) > 0, (
-        "扫描入口坏了（re-export 壳没数到）"
+    # `noqa: F401` 面 2026-11-19 **归零**（最后三处：`hub/smoke_loopback.py` 的死 import 直接删、
+    # `remote/offline_boot.py` 的探测改 `importlib.import_module`、`worker/ppo/engine.py` 的
+    # re-export 改 `x as x`）⇒ 不再有「活文件」当锚点。旧锚（`remote/offline_boot.py`）正是被
+    # 治好的那个文件 —— 锚点不能选刚被修好的，否则门禁一被治好就自证失效（2026-11-14 已踩过一次）。
+    # 现在锚的是**扫描器本身**：同一段合成源码必须被数出 1 条，入口坏了（正则 / 过滤 / tokenize）
+    # 这条当场红；真实存量仍由上面两条「只许降」的用例守着。
+    assert not baseline[NOQA_F401], (
+        "noqa: F401 已全仓归零，基线里不该再留条目（留了就是额度回流）"
     )
+    assert _count_src("import os  # noqa: F401\n")[0] == 1, "扫描入口坏了（合成样本没数到）"
     # 下面是**扫描健康度地板**（不是额度）：`type: ignore` 真被清到接近零之前，几十个文件里
     # 仍有存量 ⇒ 数出来太小就说明扫描入口坏了。条数地板 = 基线九成（派生，见
     # `tests/helpers/budget.py`）⇒ 清理基线时不必回填数字；文件数地板仍是绝对值

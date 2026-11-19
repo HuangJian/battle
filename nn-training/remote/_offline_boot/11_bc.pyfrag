@@ -1,8 +1,12 @@
 # ═══ part 11/12: 11_bc — BC 腿：代码就绪 / 取一次 BC 作业 / run_bc_course / try_take_bc_job ═══
 def _bc_code_ready() -> bool:
-    """包内 `remote.worker` 是否已经可导入（冷启动判据，不触发下载）。"""
+    """包内 `remote.worker` 是否已经可导入（冷启动判据，不触发下载）。
+
+    用 `importlib.import_module` 而不是 `from remote.worker import worker_loop`：这里要的是
+    **「导得进来吗」这个事实**，不是那个符号 —— 静态 import 会立刻报 F401（一条 forever 的
+    `noqa`），而它在运行期的语义是「拿个名字然后不用」。"""
     try:
-        from remote.worker import worker_loop  # noqa: F401
+        importlib.import_module("remote.worker")
     except ImportError:
         return False
     return True
