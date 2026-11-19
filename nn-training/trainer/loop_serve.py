@@ -862,6 +862,7 @@ def _revive_aborted(
     report: ServeReport,
     course: str,
     *,
+    done_hooked: set[str],
     step_mode: bool,
     traj_root: str,
 ) -> bool:
@@ -871,6 +872,13 @@ def _revive_aborted(
     `runner=None` 的新 runtime，而池里还是旧引擎 ⇒ `ensure_ready` 对不上 ⇒ 每轮断言失败进
     无限 RETRY。故这里只重置队列（`_enqueue`），runtime/引擎原样复用——**复用前先过
     `_revive_hygiene`**（评审 F1：不清判决态 = 复活后立再死/假收官）。
+
+    ★ 2026-11-18（g6-speed-a1 it30 事故）：**`done_hooked` 也要摘名**。停腿那一刻
+    `_settle_rounds` 已经把课记进 `done_hooked`（「本状态已处理过」，ABORTED 分支），而复活
+    只清引擎判决态 ⇒ 复活后真跑满时被当成「已处理过」跳过 ⇒ **`finish_course` 整份不跑**：
+    没有 `run_complete`（控制台永远不亮「已完成」），更贵的是**收官 eval drain 不派**——
+    末点权重（a1 的 it30）永远没有干净评估，只能手点 evalA 补。`reopened_parked` 那条通道
+    一直有这行 discard（评审 F3/W4），本通道原先漏了。
     """
     _revive_hygiene(runtimes.get(course))  # ★ W3：先清判决态再重新入队
     try:
@@ -885,6 +893,8 @@ def _revive_aborted(
     report.skipped.pop(course, None)
     report.skipped_at.pop(course, None)
     report.failures.pop(course, None)
+    # 复活 = 这门课**还要再收官一次**：旧判定（「本状态已处理过」）从这一次起作废。
+    done_hooked.discard(course)
     log(f"[serve] 课程 {course} 一步级失败后判据已变化——重置队列，复用原 runtime/引擎重新入队")
     return True
 
@@ -1090,7 +1100,13 @@ def serve(
                         continue  # 用户已停课：不重开（再开课时标记变 ⇒ 下一拍自然复活）
                     if _c in runtimes:
                         _revive_aborted(
-                            sup, runtimes, report, _c, step_mode=step_mode, traj_root=traj_root
+                            sup,
+                            runtimes,
+                            report,
+                            _c,
+                            done_hooked=done_hooked,
+                            step_mode=step_mode,
+                            traj_root=traj_root,
                         )
                     else:
                         _revive_skipped(
