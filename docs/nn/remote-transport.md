@@ -6,6 +6,36 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §167 全量门禁 e2e eval 族「同秒 workers-gone / 30s 零局」：eval 池缓存了 `eval_arbiter()` 的旧实例（2026-11-19）
+
+**症状**：全量跑（xdist）里 e2e 的 eval 用例**每次红不同一条**、单跑恒绿：`test_it_eval_deferred`
+（I7 eval round never dispatched）、`test_it_eval_post_ppo_weights`（teardown「I10 2 eval games landed
+(got 0)」）、`test_it_mixed_cluster_rollout_pauses_new_eval_grants_but_keeps_inflight`、`test_eval_local_gate`
+（读不到 `eval-local/dist-agent-meta.jsonl`）。同一秒现场：`dispatch 6 … -> [(node,2)]` 紧跟
+`收工（worker 线程归零，未全落盘 0/6）【workers-gone：剩余待派 6（从未派出 6）、在飞 0】`；
+本机腿版本则是 30s 零局 + `window`。
+
+**根因**：`EvalExecutors.__init__` 把 `eval_arbiter()` 的**实例**缓存进 `self._arb`，而
+`trainer/eval_dispatch.py` 每轮现取单例再 `register(rnd)`。`tests/trainer/test_eval_dispatch_resilience.py`
+与 `test_eval_drain_dedup.py` 的夹具调 `reset_eval_arbiter()` **换掉进程单例** ⇒ 池线程守着旧仲裁器
+（永远看不到新登记的轮）⇒ `take()` 恒 `None`、一张牌也发不出去。单跑不在同一个 xdist worker、
+单例没被换过，所以恒绿。同现象还有第二个坑：池线程把 `take() is None` 当退出信号，而
+`_resize_locked` 看到它 `is_alive()` 就把 `stop` 清掉、判「不缺人」不补线程（TOCTOU）⇒ 线程卷尾退出后
+`active()` 归零、`supervise_round` 同秒判 `workers-gone`。
+
+**修**：① 池子默认**每次现取** `eval_arbiter()`（显式注入的替身照旧钉住）；② 线程寿命只由
+`stop`/`_closed` 决定，空闲（`take()` 回 `None`）按 `IDLE_POLL_SEC=50ms` 重问；③ `supervise_round`
+在 `workers-gone` 与窗口到期两条收工路各打一行现场读数（`pending/inflight` + 每节点
+`active/slots/routed` + `local: active/slots/ok/spawned`）——「没牌」和「没线程」从此不用猜。
+
+**验证**：两条护栏都在旧行为上确认过红（`test_pool_follows_a_replaced_arbiter_singleton`、
+`test_pool_thread_survives_brief_idle_so_a_new_round_still_has_a_consumer`）；
+`NN_GATE_NPROC=4` 全量多轮绿（6257 passed / 10 skipped）。
+
+**否决**：① 给 `supervise_round` 加「启动宽限」（治标，宽限过后照样零局）；② 让 `reset_eval_arbiter()`
+不换实例（拿掉用例间隔离）；③ 在 `_resize_locked` 里加「准备退出」标志位（两个循环各加一份收尾协议，
+比「线程不自杀」复杂）。
+
 ## §166 `_send` 的 timeout 是**跨路由总预算**，不是每条路由一份（2026-11-19）
 
 **一句话**：两条路由都黑洞时，一拍只烧一个 `timeout`（不是两倍），且兜底不被饿死。

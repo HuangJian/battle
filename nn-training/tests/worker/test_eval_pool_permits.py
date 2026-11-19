@@ -233,3 +233,51 @@ def test_grow_pools_trims_when_live_slots_drop(monkeypatch) -> None:
     assert grow_pools(rnd, execs) == 0
     assert rnd.caps == [("n1", 1)]
     assert execs.calls == [(1, 1, rnd)]
+
+
+class _EmptyArbiter:
+    """立刻回 None（= 仲裁器此刻没有任何轮需要这个节点，空闲自缩那条路）。"""
+
+    def take(self, nid: str, stop: threading.Event | None = None) -> None:
+        return None
+
+
+def test_pool_thread_survives_brief_idle_so_a_new_round_still_has_a_consumer() -> None:
+    """池线程不得因「这一拍没牌」退出（2026-11-19 全量门禁 e2e 同秒 workers-gone）。
+
+    `take()` 因空闲返回 None 时，线程正卷尾退出，而 `_resize_locked` 看到它 `is_alive()`
+    就把 `stop` 清掉、判「不缺人」不再补新线程 ⇒ `active()` 归零 ⇒ `supervise_round`
+    同一秒判 `workers-gone`（现场 `派=6 认领=0 落盘=0`）。单跑池子总是空的所以恒绿，
+    全量里进程复用池子就中招。线程寿命只由 `stop` / `_closed` 决定。
+    """
+    ex = EvalExecutors(arbiter=_EmptyArbiter())
+    nd = {"id": "n1", "c": 2}
+    assert ex.ensure_node(nd, 2) == 2
+    time.sleep(0.3)  # sleep-ok: 轮询步长（等「旧实现早该退光了」这个谓词；新实现必须仍在）
+    assert ex.active("n1") == 2, "空闲一拍后池线程必须还在（否则新轮无消费者）"
+    ex.close_pools()
+    assert _wait_until(lambda: ex.active("n1") == 0), "close_pools 后必须退干净"
+
+
+def test_pool_follows_a_replaced_arbiter_singleton() -> None:
+    """池子不得把 `eval_arbiter()` 的**实例**缓存住（2026-11-19 全量门禁 e2e 零局）。
+
+    夹具（`tests/trainer/test_eval_dispatch_resilience.py`、`test_eval_drain_dedup.py`）
+    调 `reset_eval_arbiter()` 换进程单例；`eval_dispatch` 每轮现取单例 `register(rnd)`。
+    池子若缓存旧实例 ⇒ 池线程守着一个永远看不到该轮的仲裁器 ⇒ `take()` 恒 None、
+    一张牌都发不出（现场：本机腿 `local:active=2/slots=2/ok=True` 却 30s 零局）。
+    显式注入的仲裁器仍须钉住（替身用法）。
+    """
+    from worker.eval_arbiter import eval_arbiter, reset_eval_arbiter
+
+    ex = EvalExecutors()
+    before = eval_arbiter()
+    assert ex._arb is before
+    reset_eval_arbiter()
+    try:
+        assert eval_arbiter() is not before, "reset_eval_arbiter 必须换实例"
+        assert ex._arb is eval_arbiter(), "池子缓存了旧仲裁器 ⇒ 新登记的轮永远发不出牌"
+        pinned = EvalExecutors(arbiter=before)
+        assert pinned._arb is before, "显式注入的仲裁器必须照旧钉住"
+    finally:
+        reset_eval_arbiter()

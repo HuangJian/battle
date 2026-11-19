@@ -6380,3 +6380,30 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   仍然会周期性踩到半写窗口）；② 只在 hub 侧对 `via=cf` 请求强制 `close_connection`（要信
   `CF-Connecting-IP` 头，而同一个 handler 还要服务 Tailscale 直连，判据比收益脆）。
 - **全文** → `docs/nn/remote-transport.md` §165。
+
+## §2026-11-19-goalnn-eval-pool-follows-arbiter（eval 池每次都现取 `eval_arbiter()` 单例 + 线程寿命只由 stop 定）
+
+- **症状**：全量门禁（xdist）里 e2e 的 eval 用例**每次红不同一条**、单跑恒绿：`test_it_eval_deferred`
+  （I7 eval round never dispatched）、`test_it_eval_post_ppo_weights`（teardown「I10 2 eval games landed
+  (got 0)」）、`test_it_mixed_cluster_rollout_pauses_new_eval_grants_but_keeps_inflight`、`test_eval_local_gate`
+  （读不到 `eval-local/dist-agent-meta.jsonl`）。同一秒现场：`dispatch 6 … -> [(node,2)]` 紧跟
+  `收工（worker 线程归零，未全落盘 0/6）【workers-gone：剩余待派 6（从未派出 6）、在飞 0】`；
+  本机腿版本则是 30s 零局 + `window`。
+- **根因**：`EvalExecutors.__init__` 把 `eval_arbiter()` 的**实例**缓存进 `self._arb`，而
+  `trainer/eval_dispatch.py` 每轮现取单例再 `register(rnd)`。`tests/trainer/test_eval_dispatch_resilience.py`
+  与 `test_eval_drain_dedup.py` 的 fixture 调 `reset_eval_arbiter()` **换掉进程单例** ⇒ 池线程守着旧仲裁器
+  （永远看不到新登记的轮）⇒ `take()` 恒 `None`、一张牌发不出去。单跑不在同一个 worker、单例没被换过，所以恒绿。
+- **裁定**：① `EvalExecutors` 默认**每次现取** `eval_arbiter()`（显式注入的替身照旧钉住）；
+  ② 池线程把 `take() is None`（空闲自缩那条）当重问信号而不是退出信号 —— 旧写法会让
+  「正卷尾退出的线程」被 `_resize_locked` 当成 `is_alive()` 的可用槽（TOCTOU）：`stop` 被清、不补新线程，
+  随后 `active()` 归零 ⇒ `supervise_round` 同秒判 `workers-gone`；线程寿命只由 `stop`/`_closed` 决定；
+  ③ `supervise_round` 在 `workers-gone` 与窗口到期两条收工路各打一行现场读数（`pending/inflight` +
+  每节点 `active/slots/routed` + `local: active/slots/ok/spawned`），把「没牌」与「没线程」分开。
+- **护栏**：`tests/worker/test_eval_pool_permits.py::test_pool_follows_a_replaced_arbiter_singleton`
+  （换单例后 `ex._arb is eval_arbiter()`，显式注入仍钉住）、`::test_pool_thread_survives_brief_idle_so_a_new_round_still_has_a_consumer`
+  （空闲一拍后 `active()==2`，`close_pools()` 后退干净）——两条都在旧行为上确认过红。
+- **被否决**：① 给 `supervise_round` 加「启动宽限」（治标：宽限过后照样零局，且把真因藏起来）；
+  ② 让 `reset_eval_arbiter()` 不换实例、只清场（会一并拿掉两条测试用例之间的隔离能力）；
+  ③ 在 `_resize_locked` 里加「线程已准备退出」标志位（也能修 TOCTOU，但要在两个循环各加一份收尾协议，
+  比「线程不自杀」复杂）。
+- **全文** → `docs/nn/remote-transport.md` §167。
