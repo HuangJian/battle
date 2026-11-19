@@ -3209,6 +3209,39 @@ LOC · 层级账本（`remote_dag`）· 抑制符（G6）。分片若叫 `.py`�
 2. **分片用 `.py`**：见上（会逼着抬基线或给门禁开洞）。
 3. **把 `offline_deliverable` 一起拼进来**：引导格是**按文件名**把两个文件一起从 raw 拉的，合并
    等于改运输契约；`__getattr__` 门面（36 名闭集）因此继续留着（`python.refactor.md` §P1-11 已改记）。
+
+---
+
+## §120 复活过的课不写收官副作用：停腿时记的「已处理」没摘名 ⇒ 末点 eval 与 `run_complete` 一起静默丢失（2026-11-18）
+
+**现场**：`g6-speed-a1` 跑满 it30（账本 30 条 `iteration`，`weights archived` it30 在 19:54:38 落下），
+但**账本里一条 `run_complete` 都没有**，日志里 `[eval] drain:` 零命中 ⇒ it30 的末点干净评估没人派，
+只能手点 evalA 补（`tmp/g6-speed-a1/_eval-it30` 20:34 那一份）。同批 ac/c1 完全同形。
+对照组 d1/d3/d6 的 `[eval] drain: 逐轮收尾 [30]` 都在——差别只有一处：**d 系没被停腿过**。
+
+**根因**（`trainer/loop_serve.py`）：三条腿 19:44 同时 `aborted ppo 连续失败 5 次`（远端 replay
+转换器炸），停腿那一刻 `_settle_rounds` 按 W1 规则把课记进 `done_hooked`（「本状态已处理过，
+不写收官副作用」）。19:45–20:13 它们经 `reopenable_skipped` → `_revive_aborted` 复活并真的跑到
+声明的 iters，但复活只调 `_revive_hygiene`（清引擎判决态）——**没从 `done_hooked` 摘名**。
+于是 20:18:50 最后一个队列到 `QUEUE_DONE` 时，`_settle_rounds` 第一行 `if course in done_hooked:
+continue` 把三门课全跳过 ⇒ `finish_course` 整份不跑：③ 收官 eval drain 不派（末点权重永远没有
+干净评估）· ④ `run_complete` 不写（控制台永远不亮「已完成」）。现场表现为进程 53 分钟静默空转
+（`step()` 返回 None、settle 全跳过、不打印任何东西），最容易误判成「卡死」。
+
+**修复**：`_revive_aborted(..., done_hooked=...)` 复活成功即 `done_hooked.discard(course)`
+（与 `reopened_parked` 通道 2026-10-11 评审 F3/W4 早就写下的那一行对齐）；参数**必修**，
+不给缺省值——漏传就等于这个 bug 原样复活。
+
+**验证**：新增 `tests/trainer/test_serve_aborted_revival.py::test_revived_course_still_gets_finish_course_at_the_end`
+（W6）——停腿（5 连败）→ 判据变复活 → 跑满 2 轮预算，断言 `finish_course` 收到 `it2`。
+未改代码时红（`finishes == []`，与现场同形：`done/it3` 但无收官），改后绿。
+
+**教训**：`done_hooked` 是「**本状态**已处理」而复活是「**新一段**开始」——任何让课程重新开始
+干活的内存账都必须在同一处摘名（`finished` / `_leg_abort` / `_stop_cause` 是同一张清单的三位
+前科）。另：末点评估缺失是**静默**的，读末点前先 grep 账本有没有 `run_complete`。
+
+---
+
 ## §119 hub 重启后按盘找回未认领 job + trainer 优先有训练进度的 job（2026-11-13）
 
 **现场**：g2-classic35 BC job `230f…` 在 AI Studio 上把 ep1–ep7 全传回共享盘（`epoch-weights/`、

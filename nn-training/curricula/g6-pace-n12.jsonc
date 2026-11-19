@@ -1,0 +1,274 @@
+// 课程 g6-pace-n12 —— **C 的窗口剂量腿**（2026-11-18 22:3x）
+// ⛔ **已停课**（2026-11-19 11:2x，跑到 it335 手动停）。判决：**窗口不是杠杆，本腿被 c1 全面支配**
+//     —— 完整读数与三条结论见文件尾「结课回填」。
+// ═══════════════════════════════════════════════════════════════════════════
+// 来由：`g6-speed-c1` 已把稠密逐杀配速压成 **−11.44 拍/轮（7 点趋势 t=−5.38；控件 +0.20，
+//   斜率差 t=−3.01）**，且 2100 局合并胜率不受损（89.71% vs 控件 89.62%）。本腿只动**窗口**：
+//     `paceEnd / paceSpan`：18000 / 18000 → **12000 / 12000**
+//   ⇒ 边际价 0.0133 → **0.0200 分/拍（1.5×）**；零额区从 0% 升到约 6%
+//     （c1@it60 胜局均值 7341、sd ~3100 ⇒ P(>12000) ≈ 6%）。
+//   `wPace` 仍 **12**（满量程 12×20 = 240 < wKill 300 ✓，不动）；其余 27 项与 c1 **逐字相同**。
+//
+// 本腿回答的唯一问题：**C 的效应由"边际价"驱动，还是由"稠密形状"驱动？**
+//   · 边际价驱动 ⇒ 1.5× 剂量应给出约 **−17 拍/轮**；
+//    · 形状驱动   ⇒ 换窗口几乎不动（仍在 −11 附近）。
+//
+// ★★ 并行纪律（2026-11-18 用户口径，已进 MEMORY.md）：本腿与 `g6-speed-c1` 的续段
+//   （it61–120）**同时开**，靠**轮替 rollout / PPO** 填满算力（A 采样时 B 更新，反之亦然）。
+//   因此**形状必须与 c1 完全一致** —— `target_transitions 24576 / mb 1024 / epochs 4 /
+//   workers 8` 一个都不许动。**不要为了"喂 GPU"去加大 batch 或 epochs**：那只会拉长本课
+//   的 PPO 段、让 rollout 段空转，还顺手换掉实验变量。
+//
+// 起点 / 语料配方 / 评估面板 / eval 网格与 c1 同源 ⇒ 可直接与 c1@it30、d1@it30 并读。
+{
+  "version": 5,
+  "name": "g6-pace-n12",
+  "mode": "per-tick",
+  // 任务侧一个字不动：35 关 / 20 敌 / 36000 拍 / hard / 3 命（关卡自带），基地环钢化。
+  "level": "classic35-safe-base",
+
+  // ── 语料轮换（与 g5-safe2 同配方）──────────────────────────────────────
+  "rotation_mode": "even",
+  "rotation_per_it": 7,
+
+  // ── 自主云机采样覆盖（g5-pilot 起的默认，块不进 flat_overrides）────────
+  "autonomous_cloud_overrides": {
+    "gpu": { "target_transitions": 49152, "rotation_mode": "even", "rotation_per_it": 7 },
+    "tpu": { "target_transitions": 215040, "rotation_mode": "even", "rotation_per_it": 35 },
+  },
+
+  // ── 奖励：**g6-speed-c1 逐字复用**（28 项公式逐字相同）───────────────
+  //   血缘：g5-safe2 → d1 → c1 → **本课 n12**。本腿只改两个数：
+  //   `paceEnd/paceSpan` 18000/18000 → 12000/12000（边际价 0.0133 → 0.0200）。
+  "reward": {
+    "formula": [
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wAcc*aimHits/(playerShots+1)",
+      "+ wWinHit*min(hitsInFreezeShieldWindow, winHitCap)",
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // ★ 唯一的实验变量。d1 = 24（g5-safe2 原价）· d3 = 72 · d6 = 144。
+      "+ wSpeed*where(clearTick>=0, max(0, min(1, (speedEnd-clearTick)/speedSpan)), 0)",
+      // ★ 本腿新增：**稠密逐杀配速**。kills 与 ticks 都是逐行累计列
+      //   （export-rl-rollout.ts:823-824）⇒ Φ 随 kill 台阶上涨、随 ticks 连续下滑，
+      //   np.diff 之后 = 「每次击杀当场按当时的 pace 兑现」+「每拍按已完成杀数抽税」。
+      //   与 19 拍优势视界解耦，且必须杀才拿钱 ⇒ 天然免疫送死套利。
+      "+ wPace*kills*max(0, min(1, (paceEnd-ticks)/paceSpan))",
+      "- wMissRate*min(1, playerShots/20)*max(0, aimMisses/(playerShots+1) - missRateFree)",
+      "- min(missHardCap, wMissHard*max(0, aimMisses - missHard)**2)",
+      "+ wFarHit*min(farCap, max(0, aimHitDistSum - farDistFree*aimHits))",
+      "+ wExplore*min(exploreCap, cellsVisited)",
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- wIdle*idleTicks/(ticks+1)",
+      "- wStuck*min(max(0, stuckTicks - stuckFree), stuckCap)",
+      "- wWall*min(max(0, wallPressTicks - wallFree), wallCap)",
+      "- wThreat*min(threatRateCap, threatTicks/(ticks+1))",
+      "- wHurt*min(hurtCap, hurtWeight)",
+      "- wPostHit*min(postHitRateCap, postHitLaneTicks/(ticks+1))",
+      "- wBurst*min(burstCap, damageBursts)",
+      "- wMaxDmg*min(maxDmgCap, max(0, maxDamage120 - maxDmgFree))",
+      "- wLowDmg*min(lowDmgCap, damageWhileLow)",
+      "- wNearSq*min(nearSqCap, nearSqSum)",
+      "- wEncl*min(enclRateCap, enclWeightTicks/(ticks+1))",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 2.5,
+      "wAcc": 5.0,
+      "wWinHit": 1.2,
+      "winHitCap": 12.0,
+      "wBrick": 1.0,
+      "brickCap": 12.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wWin": 80.0,
+      // ★ 实验变量：24 = 对照。
+      "wSpeed": 24.0,
+      "speedEnd": 9000.0,
+      "speedSpan": 3000.0,
+      "wPace": 12.0,
+      "paceEnd": 12000.0,
+      "paceSpan": 12000.0,
+      "wMissRate": 200.0,
+      "missRateFree": 0.3,
+      "wMissHard": 0.01,
+      "missHard": 80.0,
+      "missHardCap": 24.0,
+      "wFarHit": 1.5,
+      "farDistFree": 4.0,
+      "farCap": 120.0,
+      "wExplore": 0.05,
+      "exploreCap": 220.0,
+      "wDmg": 0.12,
+      "wDeath": 24.0,
+      "wIdle": 100.0,
+      "wStuck": 0.08,
+      "stuckFree": 200.0,
+      "stuckCap": 900.0,
+      "wWall": 0.08,
+      "wallFree": 350.0,
+      "wallCap": 300.0,
+      "wThreat": 180.0,
+      "threatRateCap": 0.2,
+      "wHurt": 0.12,
+      "hurtCap": 400.0,
+      "wPostHit": 1500.0,
+      "postHitRateCap": 0.03,
+      "wBurst": 8.0,
+      "burstCap": 8.0,
+      "wMaxDmg": 0.18,
+      "maxDmgFree": 120.0,
+      "maxDmgCap": 300.0,
+      "wLowDmg": 0.05,
+      "lowDmgCap": 600.0,
+      "wNearSq": 0.006,
+      "nearSqCap": 3000.0,
+      "wEncl": 60.0,
+      "enclRateCap": 0.4,
+    },
+    "terminal": {
+      "timeout": -60.0,
+      "lives_exhausted": -45.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+
+  // ── 起点与缰绳（三档相同）────────────────────────────────────────────────
+  "dodge": "",
+  "bc": "nn-training/weights/g5-lives/g5-lives.it230.20261116-063407.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "kickstart_decay": 0.5,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+
+  // ── 预算与优化器（与 g5-safe2 逐字相同，仅 iters/max_hours 缩短）────────
+  // ★ 2026-11-18 21:1x 续段：30 → 60（it31–60 从 it30 权重续跑）。首段 it1–30 的读数
+  //   是 reports/g6-speed-ladder-verdict-20261118.md 的基线，本键改动不改写它。
+  //   d1 必须同步改 60：DiD 要的是同窗控件，只续 c1 会重新引入"两腿漂移不同步"的混淆。
+  "iters": 500,
+  "max_hours": 24.0,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [{ "kl_coef": 0.02, "lr": 0.00012, "kl_cap": 0.1 }],
+
+  // ── 采样量 ───────────────────────────────────────────────────────────────
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261118,
+
+  // ── 决策门 ───────────────────────────────────────────────────────────────
+  "decision_events": false,
+  "decision_k": 10,
+
+  // ── 开局接管（**本课关键口径，eval 必须同步带 --opening-connect**）───────
+  "opening_connect": true,
+
+  // ── 产物路径（新实验 ⇒ 新目录，禁与 g5 系续跑）──────────────────────────
+  "out": "tmp/g6-pace-n12/weights.json",
+  "traj": "tmp/g6-pace-n12",
+  "backup_dir": "nn-training/weights/g6-pace-n12",
+  "backup_prefix": "g6-pace-n12",
+
+  // ── 过程熔断 ─────────────────────────────────────────────────────────────
+  "breakers_off": true,
+  "ent_break": 0.25,
+  "ent_break_consec": 8,
+  "ent_break_max_winrate": 0.0,
+
+  // ── 评估网格（与 g5 系同 seed ⇒ 可逐局配对）──────────────────────────────
+  "eval_stages": "2000-2034",
+  "eval_games_per_stage": 20,
+  "eval_every": 10,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 结课判据（预注册，**先写死再看数**）
+// ═══════════════════════════════════════════════════════════════════════════
+//   控件 A = `g6-speed-d1` it30：胜局 7655 · 拍/杀 437.9 · k/千 2.28 · 胜率 90.29%
+//   控件 B = `g6-speed-c1` it30：胜局 7494 · 拍/杀 428.1 · k/千 2.34 · 胜率 88.86%
+//            （同奖励、窗口 18000 ⇒ "只差窗口"的那一对）
+//
+//   主判（两条都过才算「窗口是杠杆」）：
+//     (i)  本腿自身 7 点趋势斜率 ≤ **−17 拍/轮**（= c1 的 −11.4 × 1.5，边际价线性外推）
+//     (ii) 与 c1@it30 的配对差 ≤ **−300 拍**（同起点、同迭代数，只差窗口）
+//   守卫：it30 三点合并胜率 ≥ 89.62%（d1 同窗）· deaths ≤ 1.40 · dmg ≤ 455 · base_destroyed = 0
+//
+//   读法（预先写死，避免事后编故事）：
+//     (i) ∈ [−17, −11.4] ⇒ 边际价是因子，但弹性 <1（次线性）；
+//     (i) ∈ [−11.4, −5]  ⇒ **窗口不是杠杆**，C 的效应来自"稠密"这个形状本身；
+//     (i) > −5          ⇒ 窗口换窄反而有害（零额区 6% 咬到了慢胜局）。
+//
+// ── 启动命令（**agent 不启动训练**，用户手工）──────────────────────────────
+//   控制台按课程名开课：g6-pace-n12（与 g6-speed-c1 的续段同时开，靠轮替 rollout/PPO 填满）
+//   自检：grep '"event": "iteration"' tmp/g6-pace-n12/training_log.jsonl | tail -1
+//         必须出现 "iter": 1（新腿）；c1 那边必须出现 "iter": 61（续段）
+//
+// ── 满量程核对（AGENTS 硬规则：线性奖惩满量程 < 主奖励）──────────────────
+//   Φ_pace 上限 = wPace × enemyTotal = 12 × 20 = **240 < wKill 满额 300** ✓
+//   边际价 = 12×20/12000 = **0.0200 分/拍**（c1 是 0.0133）· 兑现点 20 杀 / 7341 拍
+//     ⇒ 12×20×(12000−7341)/12000 = **+93.2 分**（c1 同点是 +134.0，总量降、斜率升）
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 结课回填（2026-11-19 11:2x，跑到 **it335** 手动停）—— **判决：窗口不是杠杆**
+// ═══════════════════════════════════════════════════════════════════════════
+// 运行：2026-11-18 22:42 → 11-19 10:54，335 轮（≈27.5 轮/h）· 4 次 run_start（iters 150→500）
+//       · **0 次 iter_error / 0 次熔断**（对照组 c1 同期有 10 次），训练本身健康
+// 面板：classic35-safe-base / 35×20 = 700 局 / lives 3 / hard / --opening-connect 开（与 c1 同源）
+//       34 个完整 eval 点：it0–it330
+//
+// ── 主判：两条里 (i) 惨败，(ii) 数字过但无效 ─────────────────────────────
+//   (i)  自身斜率 ≤ −17/轮（= c1 的 −11.4 × 1.5，边际价线性外推）
+//        实测 **−1.22 ± 0.23/轮（t=−5.32）** ⇒ **差 14 倍，FAIL**
+//   (ii) 与 c1@it30 的配对差 ≤ −300 拍
+//        实测 7147 − 7494 = **−347 ⇒ 数字 PASS，但这是错的比较**：
+//        c1@it30（7494）是 c1 七点里偏快的一个点；同迭代 c1@it330 = 7340，
+//        差只有 **−193 拍 ⇒ 落在噪声内**。⇒ 不可当证据。
+//
+// ── 逐点读数（胜局 ticks，vs 控件 d1@it30 = 7655）─────────────────────────
+//   it0 7952 · it100 7610 · it200 7433 · it300 7450 · **it330 7147（−6.6%）**
+//   **最低点就是终点 it330 ⇒ 从未越过 8% 线 7042，一次都没有**
+//   （对照 c1：it160/180/200/220/230 连续五个点在 7042 以下，最低 6889 = −10.0%）
+//   分段斜率：it0–100 **−1.24**（t=−0.84）· it100–200 **−1.49**（t=−1.63）
+//             · it200–330 **−0.64**（t=−0.83）⇒ 三段单独都不显著，全靠累积走出 −6.6%
+//
+// ── 末三点合并（it310/320/330，2100 局）──────────────────────────────────
+//   胜局 ticks **7275** · 胜率 **86.14%** · 死/局 **1.429** · dmg/局 **460.8**
+//   拍/杀 **426.0** · k/千 **2.35** · 超时 **69/2100**（3.3%，c1 同期 2%）
+//   bursts 1.19 · aimMisses 38.4 · stuckTicks 1081
+//
+// ── 守卫：三条全破 ──────────────────────────────────────────────────────
+//   胜率 86.14% < 89.62%  ✗   deaths 1.429 > 1.40  ✗   dmg 460.8 > 455  ✗
+//   ⇒ 本腿不是"提速"成功，是**又慢又贵**（比 c1 慢、比 c1 差、dmg 还更高）。
+//
+// ── ★ 决定性证据：被 c1 全面支配 ────────────────────────────────────────
+//   同迭代逐点对照（只差窗口这一个变量）：
+//     it100  n12 7610  c1 7134   ⇒ n12 **慢 476**
+//     it200  n12 7433  c1 7037   ⇒ n12 **慢 396**
+//     it300  n12 7450  c1 7346   ⇒ n12 **慢 104**
+//     it330  n12 7147  c1 7340   ⇒ n12 快 193（唯一反超，且 n12 胜率 86.14% vs c1 88.7%）
+//   支配判定：**c1@it230（6929 / 89.29% / 死 1.443）在"快"和"胜率"两个轴上都优于
+//   n12 末三点（7275 / 86.14% / 死 1.429）** ⇒ 窗口收窄是纯亏，没有一个维度赢。
+//
+// ── 结论（三条，都可复用）───────────────────────────────────────────────
+//   1. **窗口不是杠杆。C 的效应来自"稠密"这个形状本身，不是边际价。**
+//      预注册的读法表里，(i) 落在"**> −5 ⇒ 窗口换窄反而有害**"那一档，且实际更准确地说是
+//      "**更慢 + 更贵**"：不只是没提速，还把 winRate 和 dmg 一起弄坏。
+//   2. **零额区是毒**：窗口收到 12000 后，>12000 拍的慢胜局 pacing 兑现直接清零（约 6%），
+//      相当于"越慢越不给钱"，把 c1 设计里"每次都兑现"的优点丢了。
+//   3. **价格轴结构性关闭**：满量程规则要求 `wPace×20 < wKill 300` ⇒ **wPace ≤ 14**，
+//      只比 12 高 17%（低于 400 拍门限，测不出来）。**要放大 C 只能改形状（免罚带/分段），
+//      不能再改价。** 这条与 §9.11「13× 总量只换来 −2.1%」互为印证。
+//
+// ── 产物 ────────────────────────────────────────────────────────────────
+//   tmp/g6-pace-compare.py（同窗斜率 + 支配判定 + 预注册核对）
+//   tmp/g6-pace-health.py（七点体检 + 训练健康）
+//   reports/g6-speed-ladder-verdict-20261118.md §9.11（与 c1 续段并读）

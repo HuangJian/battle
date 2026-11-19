@@ -8,7 +8,9 @@
 2. **W5**：判据（课程文件 / 开课标记 / 账本）变了 ⇒ 复活；没变 ⇒ 不复活、不刷日志；
 3. **W3 复活卫生**：复活后**连续两轮仍活**——旧 `_leg_abort` 不清 = 立再死 / 一轮假收官
    （假引擎 `_FlakyLoop` 按真实 `step_ppo` 的形状建模「陈旧死腿判决 ⇒ 本轮立刻失败」）；
-4. **W4 去重**：同一「停→开」只复活一次（`_revive_aborted` 不被二次触发）。
+4. **W4 去重**：同一「停→开」只复活一次（`_revive_aborted` 不被二次触发）；
+5. **W6**（2026-11-18，g6-speed-a1 it30 事故）：复活后跑满仍要收官——`done_hooked` 的旧名
+   不摘 ⇒ 收官 drain（末点 eval）与 `run_complete` 一起静默丢失。
 
 全部确定性：假时钟（不真睡）、注入 `open_course`/账本、tmp 目录夹具；不碰 torch/网络。
 I-1（故障域）由既有 `tests/worker/test_loop_scheduler.py:262` 覆盖（D-7），此处不重复造。
@@ -149,14 +151,14 @@ def _enable(root: Path, course: str) -> Path:
     return marker
 
 
-def _runtime(root: Path, course: str) -> CourseRuntime:
+def _runtime(root: Path, course: str, *, iters: int = 100) -> CourseRuntime:
     return CourseRuntime(
         course=course,
         args=SimpleNamespace(
             mode="per-tick",
             traj=str(root / course),
             # 复活后要能连续跑几轮（预算别提前耗尽；`iters` 由 planner 的判据读）。
-            iters=100,
+            iters=iters,
             out_log="",
             remote_hub_url="",
             remote_token="",
@@ -165,12 +167,12 @@ def _runtime(root: Path, course: str) -> CourseRuntime:
     )
 
 
-def _fake_open(root: Path) -> tuple[Any, list[str]]:
+def _fake_open(root: Path, *, iters: int = 100) -> tuple[Any, list[str]]:
     calls: list[str] = []
 
     def _open(course: str, **kw: Any) -> CourseRuntime:
         calls.append(course)
-        return _runtime(root, course)
+        return _runtime(root, course, iters=iters)
 
     return _open, calls
 
@@ -315,6 +317,50 @@ def test_aborted_course_revives_via_skipped_channel(
     assert calls == ["bad"]  # 没重走 open_course（课已开、只是被停腿）
     assert len(_FlakyLoop.instances) == 1  # 没重建引擎（热复用）
     assert _FlakyLoop.instances[-1].leg_aborted is False
+
+
+# ─────────────────── W6：复活后跑满 ⇒ 收官副作用（drain）必须还在 ───────────────────
+
+
+def test_revived_course_still_gets_finish_course_at_the_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 2026-11-18（g6-speed-a1 it30 事故）：停腿→复活→真跑满，`finish_course` 必须还会跑。
+
+    现场：三条 g6-speed 腿 19:44 同时 `aborted ppo 连续失败 5 次`（远端 replay 转换器炸），
+    19:45–20:13 全部经本通道复活并跑到声明的 iters（账本里 it30 的 iteration 行都在），
+    但**一条 `run_complete` 都没有**，日志里 `[eval] drain:` 零命中 ⇒ it30 的末点评估没人派，
+    只能手点 evalA 补（a1 的 it10/it20 是自动跑出来的，唯独末点丢了）。
+
+    根因：停腿时 `_settle_rounds` 把课记进 `done_hooked`（「本状态已处理过」），复活只清了
+    引擎判决态（`_revive_hygiene`），**没从 `done_hooked` 摘名** ⇒ 复活后真跑满时被当成
+    「已处理过」跳过 ⇒ 收官 drain（末点 eval）与 `run_complete` 一起静默丢失。
+    「收官后被重开」那条通道一直有 `done_hooked.discard`（W4），本通道漏了这一行。
+
+    判据用 `finishes == [2]`：预算 2 轮，复活后跑满 it1–it2 ⇒ 收官副作用收到的指针 = it2。
+    """
+    curricula = _curricula(tmp_path, monkeypatch)
+    open_course, _calls = _fake_open(tmp_path, iters=2)
+    monkeypatch.setattr(loop_serve, "open_course", open_course)
+    _enable(tmp_path, "bad")
+    _FlakyLoop.fails_left = 5
+    _FlakyLoop.succeed_cap = 5  # 两轮跑不满 5 次成功：让课真的走到预算尽头（队列 DONE）
+
+    def fix() -> None:
+        (curricula / "bad.jsonc").write_text('{"fixed": true}\n', encoding="utf-8")
+
+    rep = _serve_until_interrupt(
+        tmp_path,
+        monkeypatch,
+        courses=["bad"],
+        hook=_post_abort_idle_hook(on_first_idle=fix, stop_after_idle=8),
+    )
+
+    assert rep.courses["bad"]["rounds_done"] == 2  # 复活后真的跑满了预算
+    assert _FlakyLoop.instances[-1].finishes == [2], (
+        "复活过的课跑满时必须照样收官（finish_course → 收官 eval drain）——"
+        "`done_hooked` 里的旧名要在复活时摘掉"
+    )
 
 
 # ─────────────────── W4：同拍只复活一次（不双入队） ───────────────────

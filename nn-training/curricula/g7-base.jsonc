@@ -1,0 +1,307 @@
+// 课程 g7-base —— **正常 35 关（砖基）守家腿**（2026-11-19 20:5x）
+// ═══════════════════════════════════════════════════════════════════════════
+// 立课依据（**取证用的是 c1@it730**；本课起点是 it740，两者差 10 轮，起点的实测基线另列在下方）：
+//   · 面板一换（只差基地环 8 格：钢 → 砖），同一份权重从 **87.57% 掉到 40.7%**；
+//   · **败局里 89.4% 是基地被毁**（370/414），"命打光"只剩 44 局；
+//   · 基地被毁局的画像与胜局**截然相反**：
+//       kills 8.4 vs 20.0 · ticks 3970 vs 6385 · deaths **0.65 vs 1.25**
+//       · dmg **245 vs 416** · cellsVisited **95 vs 154** · nearEnemy4Ticks **1140 vs 2197**
+//       · enemyDist **107 vs −1** · 基地压力速率 **0.145 vs 0.098** · 对基地开火 6.5 vs 3.8
+//     ⇒ **不是"回防了但打不过"，是"压根没去拦"**：它活得好好的、几乎不掉命、只走了 62% 的地图、
+//       离最近的敌人 107 单位远，基地在 ~4000 拍被三路偷掉。
+//   · 决定性事实：**c1 那 26 项奖励里没有任何一项碰基地**（`basePressureSum` / `baseWallIntact` /
+//     `thShotsAtBaseCum` 全是现成指标，一个都没进 formula）⇒ **这个技能从未被训练过**。
+//
+// 本课只加三项（全是"正常局免罚、异常才咬"的稠密项）：
+//   ① `+ wWallKeep*baseWallIntact`          每丢一块砖 −26（8 格满额 208）
+//   ② `- wPress*min(0.25, pressRate - 0.10)` 压力速率超过中位（0.108）才计费
+//   ③ `- wThShot*min(14, shots - 3)`        对基地开火超过正常值（3）才计费
+//   其余 **26 项与 c1 逐字相同**（wPace 12、wSpeed 24 都保留 —— 效率已证明可迁移，别丢）。
+//   ⇒ 本课公式数组共 **29 条**（26 共用 + 3 新增），逐行注释见 formula 块。
+//
+// ★ 实测支付（用**起点权重 it740** 在 classic35 的 700 局逐局算，不是估算）：
+//        组              三项合计
+//        胜局(259)       **+112.8**
+//        基地被毁(387)   **+14.2**
+//        命打光(54)      +102.0
+//     ⇒ **判别差 +98.6 分**（占收入 ~523 的 19%），且**只咬基地被毁**、几乎不咬命打光 ——
+//       这正是本课要区分的两种败法。
+//
+// ★★ 起点：**c1@it740**（`nn-training/weights/g6-speed-c1/g6-speed-c1.it740.20261119-203545.json`）
+//   已预置到 `tmp/g7-base/weights.json`，走 **resume 路径**（`out` 存在 ⇒ `resume=True`
+//   ⇒ 只 `load_state_into`，**不跑 `warm_start_normalize`**）。
+//   ⚠ **不要写进 `bc`**：`bc` 只在 `not resume` 时用，且随后无条件归一化（trunk ×alpha、
+//   policy 头 ×beta、**value 头清零**）—— 那会毁掉训练好的策略与 critic。`bc` 只作血缘记录。
+//
+// ★★ 面板切换：`"level": "classic35"`（原来 c1 用的是 `classic35-safe-base`）。
+//   两文件**只差基地环 8 格**（钢 vs 砖），关卡/敌数/命数/拍数上限/出生点全部相同。
+//   ⇒ 评估数字与 c1 的历史不可直接比。
+//
+// ★★ **起点基线（本课实际起点 c1@it740，classic35，700 局实测，21:0x 跑）**：
+//     通过率 **37.00%**（259/700）· 胜局 ticks **6560** · k/千 **2.51** · kills/局 13.05
+//     · dmg/局 **357** · 死/局 **1.06** · **基地被毁 387/700（55.3%）** · 超时 4
+//     · 压力速率 p90 **0.234** · 对基地开火 p90 **9** · cellsVisited **120**
+//   ⚠ it730 的同面板读数是 40.86% / 基毁 370 —— 与 it740 差 −3.86pp，但**配对 McNemar
+//     p=0.124（净 −27 局）⇒ 落在噪声内**，不构成真下降。两个数都不能单独当"真值"，
+//     所以**判读一律用 g7-base 与 g7-ctrl 的同迭代差**（见下），不用绝对水位。
+
+{
+  "version": 5,
+  "name": "g7-base",
+  "mode": "per-tick",
+  // 任务侧一个字不动：35 关 / 20 敌 / 36000 拍 / hard / 3 命（关卡自带），基地环钢化。
+  "level": "classic35",
+
+  // ── 语料轮换（与 g5-safe2 同配方）──────────────────────────────────────
+  "rotation_mode": "even",
+  "rotation_per_it": 7,
+
+  // ── 奖励：**g6-speed-d1 逐字复用 + 新增 1 项**（27 → 28 行）───────────
+  //   血缘：g5-safe2（原始来源）→ d1（wSpeed 24 对照）→ **本课 c1**。
+  //   本腿唯一新增 = 稠密逐杀配速 `+ wPace*kills*share(ticks)`；其余 27 项与 d1 逐字相同。
+  "reward": {
+    "formula": [
+      // 主收入：+15/杀 × 20 杀 = 满额 300 —— **所有其它项的满量程都以它为标尺**
+      "wKill*kills",
+      // 瞄准命中 +2.5/发（把"瞄准打中"与"乱射蹭到"分开）
+      "+ wHit*aimHits",
+      // 命中率项，上限约 5；分母是 shots+1 ⇒ 开多少枪都不封顶
+      "+ wAcc*aimHits/(playerShots+1)",
+      // 冻结/护盾窗口内的命中，满额 14.4（鼓励在无敌期输出）
+      "+ wWinHit*min(hitsInFreezeShieldWindow, winHitCap)",
+      // 打砖拆路，满额 12
+      "+ wBrick*min(aimBricks, brickCap)",
+      // 拾取道具，满额 24。⚠ 这是"状态→动作"链路自检项，**不是产品目标**——别拿拾取率当主门
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      // 通关 +80。**纯终端脉冲**：只在最后一拍出现 ⇒ 19 拍优势视界下不可学，只能靠击杀链间接传导
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 速度奖，满额 24，**同样是终端脉冲**；g6 阶梯（×1/×3/×6）已证 19 拍视界下全部无效
+      "+ wSpeed*where(clearTick>=0, max(0, min(1, (speedEnd-clearTick)/speedSpan)), 0)",
+      // **稠密逐杀配速**（c1 唯一的正结果，7 点趋势 −11.4 拍/轮）。kills/ticks 都是逐行累计列 ⇒ np.diff 后 = 每杀当场按当时 pace 兑现 + 每拍按已完成杀数抽税；必须杀才拿钱 ⇒ 免疫送死套利
+      "+ wPace*kills*max(0, min(1, (paceEnd-ticks)/paceSpan))",
+      // ★ g7 新增①：**基地墙存量**。8 格是逐行状态列 ⇒ np.diff 只在砖破那一拍产生 −26，稠密、当场兑现、不受视界限制。满量程 26×8 = 208
+      "+ wWallKeep*baseWallIntact",
+      // ★ g7 新增②：**基地压力速率**，只对超过中位的额外压力计费（免罚 0.10，实测中位 0.108）。满量程 800×0.25 = 200
+      "- wPress*min(pressCap, max(0, basePressureSum/(basePressureSamples+1) - pressFree))",
+      // ★ g7 新增③：**对基地开火次数**，免罚 3 发（胜局均值 3.8）。满量程 14×14 = 196。它测的是"有没有去拦"，不是"敌人开了几枪"
+      "- wThShot*min(thShotCap, max(0, thShotsAtBaseCum - thShotFree))",
+      // 空放率罚：超过 0.3 才计费，满额 200。`min(1, shots/20)` 是"开够 20 枪才全额生效"的软启动
+      "- wMissRate*min(1, playerShots/20)*max(0, aimMisses/(playerShots+1) - missRateFree)",
+      // 硬空放二次罚，**封顶只有 24**。⚠ 它在 aimMisses≈130 处就撞顶，再放 400 枪也只付 24 —— g6-uncap1 把它抬到 110 实测**无效**，别再动它
+      "- min(missHardCap, wMissHard*max(0, aimMisses - missHard)**2)",
+      // 远距离命中（超过每命中 4 格的部分），满额 180
+      "+ wFarHit*min(farCap, max(0, aimHitDistSum - farDistFree*aimHits))",
+      // 探索新格，满额只有 11（0.05×220）—— 压不住"缩着不动" ⇒ g7 的副判专门用 cellsVisited 盯这件事
+      "+ wExplore*min(exploreCap, cellsVisited)",
+      // 挨打 0.12/HP。实战里这是最大的防守项（一局 250–420 HP ⇒ 30–50 分）
+      "- wDmg*playerDamageTaken",
+      // 掉命 24/条。**这条的定价等号就是"1 命 = 3000 拍"**（wSpeed 24 覆盖 3000 拍跨度）
+      "- wDeath*playerDeaths",
+      // 空转占比，满额 100；比率式 ⇒ 随 ticks 增长而衰减
+      "- wIdle*idleTicks/(ticks+1)",
+      // 卡住罚：超出 200 拍才计，封顶 72。⚠ 2.4 万拍的病态局也只付 72 —— 已知缺陷，不是调参能治的
+      "- wStuck*min(max(0, stuckTicks - stuckFree), stuckCap)",
+      // 玩家顶墙罚：超出 350 才计，封顶 24
+      "- wWall*min(max(0, wallPressTicks - wallFree), wallCap)",
+      // 在敌人火线上的时间占比，封顶 36（占比 0.2）。它是"暴露"的总闸，但很便宜
+      "- wThreat*min(threatRateCap, threatTicks/(ticks+1))",
+      // hurtWeight 加权伤，封顶 48
+      "- wHurt*min(hurtCap, hurtWeight)",
+      // 被打之后仍留在火线上的占比，封顶 45
+      "- wPostHit*min(postHitRateCap, postHitLaneTicks/(ticks+1))",
+      // 连击罚：damageBursts 封顶 8 ⇒ 64。**胜局均值 0.97 / 基地被毁局 2.45**，最强败局判别子之一
+      "- wBurst*min(burstCap, damageBursts)",
+      // 单次 120 拍窗口内的最大伤害，超出 120 才计，封顶 54
+      "- wMaxDmg*min(maxDmgCap, max(0, maxDamage120 - maxDmgFree))",
+      // 低血时承受的伤害，封顶 30（600×0.05）
+      "- wLowDmg*min(lowDmgCap, damageWhileLow)",
+      // 贴脸平方和，封顶 18（0.006×3000）—— 太小，压不住交战距离
+      "- wNearSq*min(nearSqCap, nearSqSum)",
+      // 被围占比，封顶 24（0.4×60）
+      "- wEncl*min(enclRateCap, enclWeightTicks/(ticks+1))",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 2.5,
+      "wAcc": 5.0,
+      "wWinHit": 1.2,
+      "winHitCap": 12.0,
+      "wBrick": 1.0,
+      "brickCap": 12.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wWin": 80.0,
+      // ★ 实验变量：24 = 对照。
+      "wSpeed": 24.0,
+      "speedEnd": 9000.0,
+      "speedSpan": 3000.0,
+      "wPace": 12.0,
+      "paceEnd": 18000.0,
+      "paceSpan": 18000.0,
+      "wMissRate": 200.0,
+      "missRateFree": 0.3,
+      "wMissHard": 0.01,
+      "missHard": 80.0,
+      "missHardCap": 24.0,
+      "wFarHit": 1.5,
+      "farDistFree": 4.0,
+      "farCap": 120.0,
+      "wExplore": 0.05,
+      "exploreCap": 220.0,
+      "wDmg": 0.12,
+      "wDeath": 24.0,
+      "wIdle": 100.0,
+      "wStuck": 0.08,
+      "stuckFree": 200.0,
+      "stuckCap": 900.0,
+      "wWall": 0.08,
+      "wallFree": 350.0,
+      "wallCap": 300.0,
+      "wThreat": 180.0,
+      "threatRateCap": 0.2,
+      "wHurt": 0.12,
+      "hurtCap": 400.0,
+      "wPostHit": 1500.0,
+      "postHitRateCap": 0.03,
+      "wBurst": 8.0,
+      "burstCap": 8.0,
+      "wMaxDmg": 0.18,
+      "maxDmgFree": 120.0,
+      "maxDmgCap": 300.0,
+      "wLowDmg": 0.05,
+      "lowDmgCap": 600.0,
+      "wNearSq": 0.006,
+      "nearSqCap": 3000.0,
+      "wEncl": 60.0,
+      "enclRateCap": 0.4,
+      // ── g7 新增三项（分位依据见文件头）────────────────────────────────
+      "wWallKeep": 26.0,
+      "wPress": 800.0,
+      "pressFree": 0.1,
+      "pressCap": 0.25,
+      "wThShot": 14.0,
+      "thShotFree": 3.0,
+      "thShotCap": 14.0,
+    },
+    "terminal": {
+      "timeout": -60.0,
+      "lives_exhausted": -45.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+
+  // ── 起点与缰绳（三档相同）────────────────────────────────────────────────
+  "dodge": "",
+  "bc": "nn-training/weights/g6-speed-c1/g6-speed-c1.it740.20261119-203545.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "kickstart_decay": 0.5,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+
+  // ── 预算与优化器（与在跑的 g6-speed-c1 **逐字相同**：1.2e-4 / 4 epoch / mb 1024）──
+  //   ⚠ 这是**新腿**（起点 = c1@it740 权重的副本，自己的账本从 it1 开始），
+  //     所以这里没有"改大 iters 续跑"那套历史 —— iters 500 就是本课的全部预算。
+  //   ⚠ 与 g7 系列另一课**必须同步**：两课靠轮替 rollout/PPO 填满算力（MEMORY.md 硬规则），
+  //     预算/形状不一致 ⇒ 相位错开、轮替失效。
+  "iters": 500,
+  "max_hours": 48.0,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [{ "kl_coef": 0.02, "lr": 0.00012, "kl_cap": 0.1 }],
+
+  // ── 采样量 ───────────────────────────────────────────────────────────────
+  // 24576 = 与在跑课同形状（双课并行要相位互补，见 MEMORY.md「多课并行的算力经济学」）。
+  // ⚠ **`autonomous_cloud_overrides` 已删**（2026-11-19 21:1x 用户口径）⇒ GPU / TPU 云机上
+  //   **不再自动放大采样量**（原来 gpu 档 49152 / tpu 档 215040），全档一律按本行 24576 跑。
+  //   要恢复分档必须**两课同改**，否则形状不一致、轮替失效。
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261118,
+
+  // ── 决策门 ───────────────────────────────────────────────────────────────
+  "decision_events": false,
+  "decision_k": 10,
+
+  // ── 开局接管（撤回早前的"空操作"结论）────────────────────────────────────
+  // 2026-11-19 21:3x 实测纠正：
+  //   ① **它不是空操作**。`evaluateCorridor` 判定 classic35 有 **13/35 关是口袋阵**
+  //      （2001/2003/2004/2007/2012/2014/**2020 Checkers**/2021/2024/2025/2028/2029/2033），
+  //      这些关 `connected=false` ⇒ 按设计**会**触发 OpeningController 接管。另 22 关是 hug/lower 连通，
+  //      那 22 关确实不接管（条件接管臂）—— 这是"逐关看才准"的事，不是全局开关。
+  //   ② 单局直调（`export-eval-game.ts --opening-connect`）在 S2020 上差异巨大：
+  //      seed 2000000001 首杀 2069→**965** 拍、ticks 4287→**3473**、cellsVisited 104→127。
+  //   ③ **但 `eval-course-ckpt` 分布式路径实测无差异**：S2020 单关 20 种子 0/20 不同，
+  //      全盘 700 局 0/700 不同。**根因两条（2026-11-19 21:5x 定位并已修）**：
+  //        · 本机长驻池：`serve_pool` 的 worker 旗标在**启动时**固定，后续任务的
+  //          `--opening-connect` 被吞 ⇒ 同批串味（17/20 不同、3 局一模一样）。
+  //          修：`worker/eval_local.py` 在 `opening_connect` 或 `EVAL_POOL_DISABLE=1` 时绕过池。
+  //        · 远端 agent **无条件**套 controller（源码看着正确，疑似节点跑旧构建）。
+  //          修：`tools/sim/eval-course-ckpt.ts` 对带 flag 的批次**禁派远端**（noNodes、
+  //          不给 localSlots），并对"不带 flag 却用远端"发显式告警。
+  //      ⇒ 修复后本机双臂 **20/20 逐局不同**（bare 4287 / oc 3473，与单局直调吻合）。
+  //   ④ ⚠ 训练 rollout **是**带这个 flag 的（`trainer/dispatch.py:776` 透传、
+  //      课程 `opening_connect` 在 `flat_overrides` 里）⇒ **训练与我这套评估口径不一致**。
+  //      含义：本课的历史基线（37.00%）是在 13 个口袋关上"无辅助"跑出来的，偏悲观。
+  //   本课两侧同口径（都带 true），所以**两课之间的比较不受影响**；受影响的是与部署口径的绝对对比。
+  "opening_connect": true,
+
+  // ── 产物路径（新实验 ⇒ 新目录，禁与 g5 系续跑）──────────────────────────
+  "out": "tmp/g7-base/weights.json",
+  "traj": "tmp/g7-base",
+  "backup_dir": "nn-training/weights/g7-base",
+  "backup_prefix": "g7-base",
+
+  // ── 过程熔断 ─────────────────────────────────────────────────────────────
+  "breakers_off": true,
+  "ent_break": 0.25,
+  "ent_break_consec": 8,
+  "ent_break_max_winrate": 0.0,
+
+  // ── 评估网格（与 g5 系同 seed ⇒ 可逐局配对）──────────────────────────────
+  "eval_stages": "2000-2034",
+  "eval_games_per_stage": 20,
+  "eval_every": 10,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 结课判据（预注册，**先写死再看数**）
+// ═══════════════════════════════════════════════════════════════════════════
+//   起点基线（**c1@it740** 在 classic35，700 局实测）：
+//     通过率 **37.00%**（259/700）· 胜局 ticks **6560** · k/千 **2.51** · kills/局 13.05
+//     · dmg/局 **357** · 死/局 **1.06** · **基地被毁 387/700（55.3%）** · 超时 4
+//     · 压力速率 p90 0.234 · 开火 p90 9 · cellsVisited 120
+//
+//   主判（两条都过才算守家项有效）：
+//     (i)  通过率 ≥ **42.3%**（= 起点 37.00 + 5.3pp；700 局二项噪声 1.82pp 的约 2.9 倍）
+//     (ii) **基地被毁局数 ≤ 294/700**（起点 387，−24%）
+//   守卫（任一破 ⇒ 判"用效率换守家"，不采）：
+//     · k/千 ≥ **2.38**（起点 2.51，允许 −5%）—— 保住已迁移的战斗效率
+//     · 胜局 ticks ≤ **6888**（起点 6560，允许 +5%）
+//     · deaths ≤ 1.17 · dmg ≤ 380
+//   副判（机制咬没咬住；主判过而副判不过 ⇒ 不得宣称机制成立）：
+//     · 基地压力速率 p90 从 **0.234** 降到 ≤0.18
+//     · `thShotsAtBaseCum` p90 从 **9** 降到 ≤7
+//     · `cellsVisited` 均值从 **120**（全体）升到 ≥132 —— 它得出去拦，不是缩在家门口
+//   ⚠ 若通过率涨而 `cellsVisited` 反而降 ⇒ 学成了"龟缩守家"，与 (ii) 的意图相反，判负。
+//
+// ── 满量程核对（AGENTS 硬规则：每个线性项 < wKill 满额 300）────────────────
+//   ① wWallKeep × 8 = **208** < 300 ✓（丢光 8 格 −208）
+//   ② wPress × pressCap = 800 × 0.25 = **200** < 300 ✓（p99 速率 0.365 → 封顶 0.25）
+//   ③ wThShot × thShotCap = 14 × 14 = **196** < 300 ✓（实测 max 20 → 封顶 14）
+//   正常胜局实付 **+112.8**、基地被毁局 **+14.2**（差值 +98.6，见文件头实测表）
+//
+// ── 启动命令（**agent 不启动训练**，用户手工）──────────────────────────────
+//   控制台按课程名开课：g7-base
+//   自检：grep '"event": "iteration"' tmp/g7-base/training_log.jsonl | tail -1 ⇒ "iter": 1
+//   日志首行必须是 `resume weights <- tmp/g7-base/weights.json`
+//   （**看到 `init ... ->` 立刻停**：那说明 out 被清掉、正在走归一化）
+//
+// ── 与 c1 的关系 ─────────────────────────────────────────────────────────
+//   c1 可以继续跑（它测的是 safe-base 面板上的速度线），但它**不再是本课的有效控件**：
+//   面板不同、失败模式不同。本课的控件是「起点基线」这一行数字本身。

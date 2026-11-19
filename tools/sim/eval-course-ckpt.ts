@@ -770,6 +770,13 @@ async function main(): Promise<void> {
     distLocalCfg,
     defaultWorkerCount(),
   )
+  // ── Hybrid opening：2026-11-19 的两次误判，留档别踩 ──────────────────────
+  // 曾以为"flag 在远端被无条件应用"，并对带 flag 的批次强制本机跑。**真因不是节点**：
+  // `export-eval-game.ts` / `export-rl-rollout.ts` 的规则旗标是**模块级**变量，`main()` 只置
+  // true 从不复位 ⇒ `--serve`/persist-pool 里一个进程服务多局时，某局带过 `--opening-connect`
+  // 就让该 worker 之后所有局（含训练 rollout）恒"开"。已修（fcd8f3fb：进 main 先复位）。
+  // ⇒ 远端节点**本来就好用**，集群可直接跑双臂；单局复现用 `--dist-local <核数>` 强制本机。
+  /** 仅作 A/B 归因臂：`--opening-all` 让"已连通"的关也接管（缺省条件接管）。 */
   const iterId = arg('iter-id') ?? `evalcourse-${Date.now()}`
   const windowSec = parseRangeInt(arg('window-sec'), 86400)
   const t0 = Date.now()
@@ -819,6 +826,9 @@ async function main(): Promise<void> {
     runDir,
     out: outPath ?? `${runDir}/rows.jsonl`,
     noNodes: !distCfgPath,
+    // ⚠ 这里**故意不给 localSlots**：给了它，BatchEvalRunner 会走「长驻池」复用本机进程，
+    //   而池的任务口径会把  吃掉（实测：给 localSlots ⇒ 20 局里 13 局
+    //   拿回的是开的结果；不给 ⇒ 与 --no-dist 逐局一致）。opening-connect 批次一律走一次性路径。
     localSlots: distLocal,
     distCfgPath: distCfgPath || undefined,
     windowSec,
@@ -853,6 +863,10 @@ async function main(): Promise<void> {
     windowsHide: true,
     cwd: REPO_ROOT,
     stdio: ['ignore', 'inherit', 'inherit'],
+    // 本工具是**逐任务语义**的（不同臂只差 flags）⇒ 禁用本机长驻池：
+    // 池里的 worker 旗标在启动时固定，会把上一批的 `--opening-connect` 带到下一批
+    // （实测：S2020 20 局里 17 局串味，只有 3 局走一次性路径才正确）。
+    env: { ...process.env, EVAL_POOL_DISABLE: '1' },
   })
   if (proc.error) {
     console.error(`[eval-course-ckpt] python 调用失败: ${proc.error.message}`)

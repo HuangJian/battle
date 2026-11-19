@@ -1,0 +1,301 @@
+// 课程 g6-uncap1 —— **解饱和腿**：把四个"只在败局里饱和的封顶/免罚带"解开。
+// **意图 = 提高胜率且不损战斗效率**；名字给的是机制（uncap），不是又一个 safe 系列。
+// （2026-11-19 11:1x 由 c1@it390 的 700 局取证反推；原名 g6-safe2 已废弃，
+//   因为它既与 g5-safe2 无直接血缘，也不存在 g6-safe 这门课。）
+// ═══════════════════════════════════════════════════════════════════════════
+// ★★ 起点：**c1@it400 的权重**（2026-11-19 11:1x 用户口径："几百轮且有进步，不能浪费"；
+//   取整到 it400 是为了 DiD 偏移好算：`uncap1@itN` ↔ `c1@it(400+N)`）
+//   `nn-training/weights/g6-speed-c1/g6-speed-c1.it400.20261119-111000.json`
+//   ⇒ 已**预置**到 `tmp/g6-uncap1/weights.json`，走的是 **resume 路径**（`out` 已存在 ⇒
+//   `resume=True` ⇒ 只 `load_state_into`，**不跑 `warm_start_normalize`**）。
+//
+//   ⚠ **不要把这份权重写进 `bc`**：`worker/model_build.py` 里 `bc` 只在 `not resume` 时用，
+//   且随后无条件归一化（trunk ×alpha、policy 头 ×beta、**value 头清零**——该文件 meta 里
+//   没有 `args.value_coef`）。那会毁掉训练好的策略与 critic。`bc` 一栏只作血缘记录。
+//
+//   这样两臂**同起点、同相位**：
+//     · c1 从 it400 继续跑（它自己的 `out` 就是这份权重的来源）
+//     · uncap1 从同一份权重的副本起跑，自己的 `traj` 账本从 it1 开始
+//   ⇒ `uncap1@itN` 对 `c1@it(400+N)` 是**严格配对的 DiD**，不再是"远距离比两个不同阶段的水平"。
+//   ⚠ 前提：**要判到 uncap1 的 itN，c1 的 iters 必须 ≥ 400+N**。c1 现在写的是 500 ⇒
+//     只够覆盖到 uncap1 的 **it100**。要覆盖 it300，c1 的 iters 需 ≥ **700**。
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// 取证（it390，700 局：胜 602 / lives 耗尽 84 / 超时 14）：
+//   · **基地从不被破**：`baseWallIntact = 8.00` 在胜局/败局/超时局**全部相同**，
+//     `thBreach / thDirect / geoFallback` 全为 0 ⇒ **"基地安全"这条线已经死了，别再做。**
+//   · **86% 的败局是 lives 耗尽**，其签名与胜局对比：
+//       dmg 760 vs 413 · bursts **2.45 vs 0.97** · damageWhileLow **375 vs 186**
+//       · hurtWeight 269 vs 141 · maxDamage120 237 vs 168 · 死 3.06 vs 1.23
+//     ⇒ 死因是**「被打成连击 + 低血继续挨打」**，不是中局瞎走，也不是残局特有
+//       （残局死 24 局 / 中局死 60 局，两组签名几乎相同）。
+//   · **超时局（14 局）才是独立的病态**：`aimMisses 551 vs 30.7`（18×）、
+//     `playerShots 607 vs 86`、`stuckTicks 24111 vs 401`、`nearEnemy4Ticks 28468`。
+//     ⇒ **锁着一个打不到的敌人空放 600 枪、卡 2.4 万拍**。9/14 只差 1–2 个敌。
+//
+// 诊断出的**结构性缺陷**（不是"价格不够"，是"价格在病态区饱和了"）：
+//   `- min(missHardCap, wMissHard*max(0, aimMisses-80)**2)` 在 aimMisses≈130 处就撞上
+//   `missHardCap = 24`，之后**再多放 400 枪也是 24 分**。同样 `stuckCap = 900` 让
+//   2.4 万拍长征只值 72 分。**两个二次/线性项都在病态门槛处封顶，等于告诉网络"卡住免费"。**
+//
+// 本腿只动四个**在正常局几乎零成本**的项（全部保留 c1 的 wPace 12 与其余 23 项）：
+//   ① `missHardCap`  24 → **110**：把"对着打不到的敌人空放 600 枪"从 −24 变成 −110
+//   ② `stuckCap`    900 → **2600**：2.4 万拍长征从 −72 变成 −208
+//   ③ `wBurst` 8 → **24** + 新增 `burstFree 1.0`：连击 1 次免罚，第 2 次起每档 24 分
+//   ④ `wLowDmg` 0.05 → **0.15** + 新增 `lowDmgFree 120`：低血伤 120 点以内免罚，
+//      超出部分三倍计价（败局 375 ⇒ 255×0.15 = 38.3，原 18.8）
+//
+//   ★ **实测支付变化（按 it390 逐局算，不是手算）** —— 初稿写的"正常局零成本"是**错的**：
+//     bursts 是整数、stuck/lowDmg 是长尾分布，均值小 ≠ 逐局为 0。真实数字：
+//        组            原 c1     新      Δ
+//        胜           27.1    36.1   **+9.0**（收入的 1.7%）
+//        lives 耗尽    52.6    99.0   **+46.4**（8.8%）
+//        超时         105.8   324.4  **+218.7**（42%）
+//     ⇒ 判别力（败÷胜）从 **1.9× 提到 2.7×**，超时局从 −106 提到 −324。
+//       代价是正常胜局多付 9 分（1.7% 收入）—— 这是本腿唯一的成本，盯住它就能判"值不值"。
+//
+// **不动 `wDmg` / `wDeath`**：那两个是"总挨打量"的线性价，抬它们等于直接压交战
+// ⇒ 与「保证战斗效率」冲突。本腿只对**病态形态**（连击、低血续伤、空放、长卡）加价。
+//
+// ★★ 并行纪律：与在跑课同形状（24576 / 1024 / 4 / 1.2e-4），靠轮替 rollout/PPO 填满算力。
+{
+  "version": 5,
+  "name": "g6-uncap1",
+  "mode": "per-tick",
+  // 任务侧一个字不动：35 关 / 20 敌 / 36000 拍 / hard / 3 命（关卡自带），基地环钢化。
+  "level": "classic35-safe-base",
+
+  // ── 语料轮换（与 g6-speed-c1 同配方：even / 每轮 7 关）──────────────────
+  "rotation_mode": "even",
+  "rotation_per_it": 7,
+
+  // ── 自主云机采样覆盖（g5-pilot 起的默认，块不进 flat_overrides）────────
+  "autonomous_cloud_overrides": {
+    "gpu": { "target_transitions": 49152, "rotation_mode": "even", "rotation_per_it": 7 },
+    "tpu": { "target_transitions": 215040, "rotation_mode": "even", "rotation_per_it": 35 },
+  },
+
+  // ── 奖励：**g6-speed-c1 逐字复用，改其中 2 行 + 4 个参数**─────────────
+  //   血缘：g5-safe2 → d1（wSpeed 24 对照）→ c1（+wPace 12 稠密配速）→ **本课 uncap1**。
+  //   28 项里 26 项与 c1 逐字相同，只动四项（详见文件头「结构性缺陷」一节）：
+  //     ③ `- wBurst*min(burstCap, max(0, damageBursts - burstFree))`
+  //     ④ `- wLowDmg*min(lowDmgCap, max(0, damageWhileLow - lowDmgFree))`
+  //     ① `missHardCap` 24→110  ② `stuckCap` 900→2600（两行公式不变，只改封顶）
+  "reward": {
+    "formula": [
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wAcc*aimHits/(playerShots+1)",
+      "+ wWinHit*min(hitsInFreezeShieldWindow, winHitCap)",
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // ⚠ 本课**不**以 wSpeed 为变量：24 是 g6-speed-d1 的对照价，本课沿用不动。
+      //   （d1/d3/d6 那三档才是 wSpeed 24/72/144 的剂量腿。）
+      "+ wSpeed*where(clearTick>=0, max(0, min(1, (speedEnd-clearTick)/speedSpan)), 0)",
+      // ★ 本课沿用 c1 的机制：**稠密逐杀配速**（c1 的唯二新增项，另一项是 wSpeed 未动）。kills 与 ticks 都是逐行累计列
+      //   （export-rl-rollout.ts:823-824）⇒ Φ 随 kill 台阶上涨、随 ticks 连续下滑，
+      //   np.diff 之后 = 「每次击杀当场按当时的 pace 兑现」+「每拍按已完成杀数抽税」。
+      //   与 19 拍优势视界解耦，且必须杀才拿钱 ⇒ 天然免疫送死套利。
+      "+ wPace*kills*max(0, min(1, (paceEnd-ticks)/paceSpan))",
+      "- wMissRate*min(1, playerShots/20)*max(0, aimMisses/(playerShots+1) - missRateFree)",
+      "- min(missHardCap, wMissHard*max(0, aimMisses - missHard)**2)",
+      "+ wFarHit*min(farCap, max(0, aimHitDistSum - farDistFree*aimHits))",
+      "+ wExplore*min(exploreCap, cellsVisited)",
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- wIdle*idleTicks/(ticks+1)",
+      "- wStuck*min(max(0, stuckTicks - stuckFree), stuckCap)",
+      "- wWall*min(max(0, wallPressTicks - wallFree), wallCap)",
+      "- wThreat*min(threatRateCap, threatTicks/(ticks+1))",
+      "- wHurt*min(hurtCap, hurtWeight)",
+      "- wPostHit*min(postHitRateCap, postHitLaneTicks/(ticks+1))",
+      "- wBurst*min(burstCap, max(0, damageBursts - burstFree))",
+      "- wMaxDmg*min(maxDmgCap, max(0, maxDamage120 - maxDmgFree))",
+      "- wLowDmg*min(lowDmgCap, max(0, damageWhileLow - lowDmgFree))",
+      "- wNearSq*min(nearSqCap, nearSqSum)",
+      "- wEncl*min(enclRateCap, enclWeightTicks/(ticks+1))",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 2.5,
+      "wAcc": 5.0,
+      "wWinHit": 1.2,
+      "winHitCap": 12.0,
+      "wBrick": 1.0,
+      "brickCap": 12.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wWin": 80.0,
+      // ★ 实验变量：24 = 对照。
+      "wSpeed": 24.0,
+      "speedEnd": 9000.0,
+      "speedSpan": 3000.0,
+      "wPace": 12.0,
+      "paceEnd": 18000.0,
+      "paceSpan": 18000.0,
+      "wMissRate": 200.0,
+      "missRateFree": 0.3,
+      "wMissHard": 0.01,
+      "missHard": 80.0,
+      "missHardCap": 110.0,
+      "wFarHit": 1.5,
+      "farDistFree": 4.0,
+      "farCap": 120.0,
+      "wExplore": 0.05,
+      "exploreCap": 220.0,
+      "wDmg": 0.12,
+      "wDeath": 24.0,
+      "wIdle": 100.0,
+      "wStuck": 0.08,
+      "stuckFree": 200.0,
+      "stuckCap": 2600.0,
+      "wWall": 0.08,
+      "wallFree": 350.0,
+      "wallCap": 300.0,
+      "wThreat": 180.0,
+      "threatRateCap": 0.2,
+      "wHurt": 0.12,
+      "hurtCap": 400.0,
+      "wPostHit": 1500.0,
+      "postHitRateCap": 0.03,
+      "wBurst": 24.0,
+      "burstCap": 8.0,
+      "burstFree": 1.0,
+      "wMaxDmg": 0.18,
+      "maxDmgFree": 120.0,
+      "maxDmgCap": 300.0,
+      "wLowDmg": 0.15,
+      "lowDmgCap": 600.0,
+      "lowDmgFree": 120.0,
+      "wNearSq": 0.006,
+      "nearSqCap": 3000.0,
+      "wEncl": 60.0,
+      "enclRateCap": 0.4,
+    },
+    "terminal": {
+      "timeout": -60.0,
+      "lives_exhausted": -45.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+
+  // ── 起点与缰绳（三档相同）────────────────────────────────────────────────
+  "dodge": "",
+  "bc": "nn-training/weights/g6-speed-c1/g6-speed-c1.it400.20261119-111000.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "kickstart_decay": 0.5,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+
+  // ── 预算与优化器：与 g6-speed-c1 **逐字相同**（24576 / 1024 / 4 / 1.2e-4）──────
+  //   ⚠ 形状必须与在跑课一致：双课并行靠**轮替 rollout/PPO** 填满算力（MEMORY.md 硬规则），
+  //     不要为"喂 GPU"加大 batch 或 epochs。
+  //   本课是新腿（从 c1@it400 权重起跑、自己的账本从 it1 开始），**不是 c1 的续段**
+  //   ⇒ 这里没有"改大 iters 续跑"那套历史，iters 500 就是本课的全部预算。
+  "iters": 500,
+  "max_hours": 24.0,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [{ "kl_coef": 0.02, "lr": 0.00012, "kl_cap": 0.1 }],
+
+  // ── 采样量 ───────────────────────────────────────────────────────────────
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261118,
+
+  // ── 决策门 ───────────────────────────────────────────────────────────────
+  "decision_events": false,
+  "decision_k": 10,
+
+  // ── 开局接管（**本课关键口径，eval 必须同步带 --opening-connect**）───────
+  "opening_connect": true,
+
+  // ── 产物路径（新实验 ⇒ 新目录，禁与 g5 系续跑）──────────────────────────
+  "out": "tmp/g6-uncap1/weights.json",
+  "traj": "tmp/g6-uncap1",
+  "backup_dir": "nn-training/weights/g6-uncap1",
+  "backup_prefix": "g6-uncap1",
+
+  // ── 过程熔断 ─────────────────────────────────────────────────────────────
+  "breakers_off": true,
+  "ent_break": 0.25,
+  "ent_break_consec": 8,
+  "ent_break_max_winrate": 0.0,
+
+  // ── 评估网格（与 g5 系同 seed ⇒ 可逐局配对）──────────────────────────────
+  "eval_stages": "2000-2034",
+  "eval_games_per_stage": 20,
+  "eval_every": 10,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 结课判据（预注册，**先写死再看数**）
+// ═══════════════════════════════════════════════════════════════════════════
+//   对照 = **c1 的同一段**（它从 it400 起继续跑）⇒ `uncap1@itN` 对 `c1@it(400+N)`
+//   起点水平（c1@it400 附近，实测 it390 点）：胜率 86.00% · 胜局 ticks 7254 ·
+//     拍/杀 404.6 · k/千 2.47 · 超时 14/700 · bursts 0.97 · lowDmg 186 · aimMisses 30.7
+//
+//   主判（**胜率第一，效率是守卫**；窗口取 it80–120，因为起点已在平台上，效应更小更快显现）：
+//     `uncap1@it80–120` 三点合并胜率比 `c1@it480–520` **高 ≥ 1.0pp** ⇒ 安全项有效
+//     （起点 c1@it390 = 86.00%，同窗 c1 的自身漂移会给出真实基线，不再用死数字）
+//   守卫（任一破 ⇒ 判"用效率换安全"，不采）：
+//     · **k/千 不得低于 2.35**（c1 同窗 2.39–2.52）—— 这条是"战斗效率不变"的唯一判据
+//     · 胜局 ticks ≤ **7400**（c1 同窗 7030–7357，留 1% 余量）
+//     · deaths ≤ 1.40 · dmg ≤ 452
+//   副判（机制是否按预期咬住）：
+//     · `aimMisses` 的 p95 应从 ~550 降到 ≤200（空放硬化生效）
+//     · `stuckTicks` 的 p95 应从 ~24000 降到 ≤8000（长卡硬化生效）
+//     · 若主判过而副判不过 ⇒ 胜率涨的来源不是本腿设计的机制，需重新归因，不得宣称机制成立
+//
+// ── 满量程核对（AGENTS 硬规则：每个线性项 < wKill 满额 300）────────────────
+//   ① missHardCap 110（0.01×(x−80)² 封顶）…… 110 < 300 ✓
+//   ② wStuck×stuckCap = 0.08×2600 = **208** < 300 ✓（原 72）
+//   ③ wBurst×burstCap = 24×8 = **192** < 300 ✓（原 64）
+//   ④ wLowDmg×lowDmgCap = 0.15×600 = **90** < 300 ✓（原 30）
+//   正常胜局在四项上的合计支付：**27.1 → 36.1 分**（+9.0，见上表；不是"零成本"）
+//
+// ── 启动命令（**agent 不启动训练**，用户手工）──────────────────────────────
+//   控制台按课程名开课：g6-uncap1（与 g6-speed-c1 续段同时开）
+//   自检：grep '"event": "iteration"' tmp/g6-uncap1/training_log.jsonl | tail -1 ⇒ "iter": 1
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 结课回填（2026-11-19 22:5x，跑到 **it329** 后停课）—— **判决：主判 FAIL、机制未咬住**
+// ═══════════════════════════════════════════════════════════════════════════
+// 面板：classic35-safe-base / 35×20 = 700 局 / lives 3 / hard / --opening-connect 开（训练口径）
+//   本腿 = c1 的 26 项奖励 + 四项"解饱和"硬化（missHardCap 24→110、stuckCap 900→2600、
+//   wBurst 8→24 带 `burstFree 1.0`、wLowDmg 0.05→0.15 带 `lowDmgFree 120`）。
+//   起点 = c1@it400 权重（resume 路径，逐位对接：uncap1@it0 与 c1@it400 **完全相同**：
+//   7132 拍 / 88.71% / 拍杀 400.9 / k/千 2.49 ⇒ 起点校验通过）。
+//
+//   it0 → it320：**7132 → 7182 拍（+50，反而略慢）** · 胜率 88.57% → 88.71%（+0.14pp）
+//     · 拍/杀 400.9 → 412.2 · k/千 2.49 → 2.43 · dmg 459 → 440 · 死 1.44 → 1.36 · 超时 18 → 21
+//
+//   ── 预注册主判：FAIL ───────────────────────────────────────────────────
+//     判据 = `it80–120` 三点合并胜率比 c1 同窗（it480–520）高 ≥ **1.0pp**。
+//     实测：uncap1 **88.24%** vs c1 **88.38%** ⇒ **Δ = −0.14pp，FAIL**。
+//     守卫全过（ticks 7348 ≤7400 · k/千 2.38 ≥2.35 · 死 1.395 ≤1.40 · dmg 447.7 ≤452），
+//     但主判没过 ⇒ **按预注册不判有效**。
+//     事后看 it280/300/320 是 +1.95pp（88.76% vs 86.81%），**p=0.053、且是换了窗口**，
+//     不能当证据 —— 记在这里，不作为结论。
+//
+//   ── 机制副判：**没咬住**（而且我的判据本身是错的）──────────────────────
+//     预注册写的是"`aimMisses` p95 从 ~550 降到 ≤200"，实测算 **p95 = 92（uncap1）/ 87（c1）** ——
+//     两边都远低于 550，因为 **p95 被 95% 的正常局稀释，病灶只在 2.5% 的超时局里**。判据构造失败。
+//     改用条件统计（只看超时局）：
+//       超时率 **2.67%（c1）→ 2.52%（uncap1）** · 超时局 aimMisses **507 → 472** · stuck **21412 → 19913**
+//     ⇒ **四项硬化没能治住"锁着打不到的敌人空放 600 枪"**。
+//
+//   ★ 可复用结论（第三次复现同一条）：**加价治不了行为。**
+//     `missHardCap` ×4.6、`stuckCap` ×2.9、`burst` ×3 全都只让病态局多付钱，没让它少发生。
+//     卡死类病灶要从**观测/架构**下手（策略看不见"这个敌人打不到"），不是奖励塑形。
+//   ⚠ 判据设计教训：**病态只占 2% 时，别用全分布 p95 当机制判据** —— 会被正常局淹没。
+//     要么条件统计，要么用 p99/超时局子集。
+//
+//   复现：`tmp/g6-two-legs-2019.py`（含配对 DiD 与病灶条件统计）。

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -422,7 +423,15 @@ def run_local_eval_game(
     # 长驻池优先（§22.7）：与一次性同行径的 argv、同样的硬顶与告警口径；池没能服务（超时/
     # ERR/worker 死掉/没槽位…）就**当场回退**下面的 `run_eval_runner_capture` —— 只慢不错。
     pooled = None
-    if pool is not None:
+    # ⚠ `--opening-connect` 必须**绕开长驻池**（2026-11-19 实测，用户报障）：池里的 worker
+    #   是常驻进程，旗标在**启动那一刻**就固定了；`try_capture(cmd[1:])` 只把 argv 当任务参数转进去，
+    #   后续任务新增的 `--opening-connect` **不会**改变已在跑的 worker 的行为。
+    #   症状：同一批里有的局走了池（拿回"开"的结果）、有的走一次性（"关"），
+    #   于是"带不带 flag"看起来时灵时不灵（S2020 20 局：17/20 不同、3 局却完全一样）。
+    #   处置：只要本局带 opening_connect，就走下面的一次性 `run_eval_runner_capture`。
+    # 另：`EVAL_POOL_DISABLE=1` 由一次性评估工具（tools/sim/eval-course-ckpt.ts）设置 ——
+    # 那条链路是"逐任务语义"的（不同臂靠 flag 区分），**不能**复用任何常驻 worker。
+    if pool is not None and not opening_connect and os.environ.get("EVAL_POOL_DISABLE") != "1":
         # `cmd[1:]`（去掉 bun 本身）：池的任务口径与 iter 腿逐字相同 —— 送进去的 argv 都以
         # **导出器脚本**开头（`[script, …args]`），池内部再去掉脚本路径把 args 写进 stdin。
         pooled = pool.try_capture(

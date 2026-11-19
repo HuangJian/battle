@@ -189,6 +189,10 @@ export interface RegistryEntry {
   /** 本进程启动时实际生效的隧道选项（M1；复用判定用它检测「改了选项没生效」）。 */
   cfProtocol?: CfProtocol
   cfEdgeIp?: CfEdgeIp
+  /** 本进程启动时 `--url` 指向的回源地址（M2；复用判定用它检测「代码改了但旧隧道还在拨旧地址」）。
+   *  必须带具体主机字面量（`http://127.0.0.1:<port>`）：`localhost` 在 Go 里会解析成 `::1`，
+   *  而 hub 只绑 v4 ⇒ 回源恒 refused ⇒ CF 回 502。缺席 = 旧条目（按「未知」重启一次并补记）。 */
+  originUrl?: string
   /** 非正常退出记录（§380 exit-watchdog 写入；UI/API 展示退出原因）。 */
   error?: string
   exitAt?: string
