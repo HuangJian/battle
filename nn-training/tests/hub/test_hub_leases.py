@@ -109,7 +109,9 @@ def test_claim_excludes_from_pool_until_expiry(tmp_path: Path) -> None:
     assert store.claim("j" * 16) is None  # 并发领取竞负
     clock.t += 1
     assert store.heartbeat("j" * 16, token) is True  # 活 worker：有心跳
-    clock.t = store._leases["j" * 16] - 1  # 到期前一秒
+    expiry = store.lease_expiry("j" * 16)
+    assert expiry is not None
+    clock.t = expiry - 1  # 到期前一秒
     assert store.claimable_job_ids() == []  # 边界内仍独占
     clock.t += 1.001
     assert store.claimable_job_ids() == ["j" * 16]  # 过期回池
@@ -228,7 +230,9 @@ def test_heartbeat_once_never_reaped(tmp_path: Path) -> None:
     assert store.claim("j" * 16) is None
     assert store.inflight() == ["j" * 16]
     assert _orphan_events(store) == []
-    clock.t = store._leases["j" * 16] + 1  # 跨过这次的 TTL 到期点
+    expiry = store.lease_expiry("j" * 16)
+    assert expiry is not None
+    clock.t = expiry + 1  # 跨过这次的 TTL 到期点
     assert store.claimable_job_ids() == ["j" * 16]  # 既有过期路径回池
     assert store.claim("j" * 16)
     assert _orphan_events(store) == []  # 过期 ≠ 孤儿，不写那个事件
@@ -250,7 +254,9 @@ def test_push_lease_is_never_orphan_reaped(tmp_path: Path) -> None:
     assert store.claim("j" * 16) is None
     assert store.inflight() == ["j" * 16]
     assert _orphan_events(store) == []
-    clock.t = store._leases["j" * 16] + 1  # 跨过 TTL ⇒ 按**过期**回收
+    expiry = store.lease_expiry("j" * 16)
+    assert expiry is not None
+    clock.t = expiry + 1  # 跨过 TTL ⇒ 按**过期**回收
     assert store.claimable_job_ids() == ["j" * 16]
     assert store.claim("j" * 16)
     assert _orphan_events(store) == []

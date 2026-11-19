@@ -117,78 +117,6 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...], tuple[str, ...]]] = {
         ("record_payload_sent", "record_push_wire", "record_result_recv", "wire_stats"),
         ("_wire",),
     ),
-    "store_leases": (
-        leases_mod.LeaseMixin,
-        (
-            "claim",
-            "claim_outcome",
-            "_claim_locked",
-            # §52（2026-10-01）：租约死活判据（过期 ∨ 孤儿）——池过滤 / 认领闸 / 观测三面共用。
-            "_lease_state",
-            "_lease_held",
-            "abandon_job",
-            "_collect_expired_locked",
-            "reclaims",
-            "frozen_info",
-            "frozen_job_ids",
-            "consume_freeze_announcement",
-            "unfreeze",
-            "stale_holder",
-            # 2026-11-18（G5）：租约表的公开读数 —— 有记录（不回收）与四态判据（不回收）。
-            "has_lease",
-            "lease_state",
-            # 2026-11-18（G5 第三十五批）：租约到期时刻（纯读，判「这次操作有没有动租约表」）。
-            "lease_expiry",
-            # 2026-11-18（G5 第三十六批）：最近一次成功心跳的时刻（错 token 两次都不许动）。
-            "heartbeat_at",
-            "lease_worker",
-            "inflight",
-            # 2026-11-07（plan/dead-lease-sweep）：周期清扫的持锁回收入口。
-            "reap_dead_leases",
-            "heartbeat",
-            "release",
-            "result_token_ok",
-            "mark_completed",
-            # ★M1b / Q5（2026-10-07）：派发闸的第三层——课程 hold（本课程被接管 ⇒ 谁都不派）
-            # + `job_kind`（bc 只豁免角色闸）+ 判活窗。三道闸全在 `role_blocked` 一处定序。
-            "job_kind",
-            "hold_blocked",
-            "_hold_stale_sec",
-            # ★M5（Q5）：BC 进度租约——打点 / 读 / 判活窗 / drain 判据（四者同源一处）
-            "note_job_progress",
-            "job_progress_at",
-            "_bc_progress_stale_sec",
-            "bc_drain_of",
-            # 2026-11-12（用户口径）：BC **课程级**独占落盘（hub/trainer 重启不丢）。
-            "bc_exclusive_owner",
-            "_bc_lock_path",
-            "_bc_lock_write",
-            "_bc_lock_touch",
-            "_bc_lock_clear",
-            # 2026-11-12：dashboard 的人工「解除独占」口。
-            "release_bc_exclusive",
-        ),
-        (
-            "_leases",
-            "_lease_owners",
-            "_last_heartbeat",
-            "_lease_workers",
-            "_stale_holders",
-            "_reclaims",
-            "_frozen",
-            "_backup_authorized",
-            # 归属路由（2026-09-25 并入 origin）：`_roles` = job → online/offline；`_role_lock`
-            # 各一把。★M1b：`_kinds`（job → kind，Q5 的①）与 `hold_meta`（课程 hold 镜像）；
-            # ★M1c：`parked`（旧停摆位）已删——「这门课现在派不派活」只剩 hold 一个输入。
-            "_roles",
-            "_role_lock",
-            "_kinds",
-            "hold_meta",
-            # ★M5（Q5）：BC 进度锚 + 它的锁（`POST /jobs/{id}/epoch` 是**唯一**写入点）
-            "_last_progress",
-            "_progress_lock",
-        ),
-    ),
     "store_results": (
         results_mod.ResultsMixin,
         ("store_result", "store_job_failure", "store_bc_epoch", "get_bc_resume", "get_bc_metrics"),
@@ -228,10 +156,81 @@ SCHED_METHODS = (
 )
 SCHED_STATE = ("_claimed", "_computing", "_ready", "_epoch")
 
+#: B7-P2：租约簇整簇切成 `LeaseBook`（`hub/store_leases.py`）。`LEASE_METHODS` 是
+#: 转发壳的**闭集**（原簇对 hub 的 39 个口）；状态只在 `self.leases` 上。
+LEASE_METHODS = (
+    "role_blocked",
+    "hold_blocked",
+    "_hold_stale_sec",
+    "note_job_progress",
+    "job_progress_at",
+    "_bc_progress_stale_sec",
+    "bc_drain_of",
+    "_bc_lock_path",
+    "bc_exclusive_owner",
+    "_bc_lock_write",
+    "_bc_lock_touch",
+    "_bc_lock_clear",
+    "release_bc_exclusive",
+    "job_kind",
+    "job_role",
+    "claim",
+    "claim_outcome",
+    "_lease_state",
+    "lease_state",
+    "_lease_held",
+    "_claim_locked",
+    "abandon_job",
+    "_collect_expired_locked",
+    "reclaims",
+    "frozen_info",
+    "frozen_job_ids",
+    "consume_freeze_announcement",
+    "unfreeze",
+    "stale_holder",
+    "has_lease",
+    "lease_expiry",
+    "heartbeat_at",
+    "lease_worker",
+    "inflight",
+    "reap_dead_leases",
+    "heartbeat",
+    "release",
+    "result_token_ok",
+    "mark_completed",
+)
+#: 租约协作者给**其它簇**用的 5 个内部接缝（经 `self.leases.X` 调，不进组合类转发壳：
+#: 它们在 store.py 再留一份同名转发只会让「同名散落」账本多 5 条）。
+LEASE_HELPERS = (
+    "forget_job",
+    "clear_backup",
+    "is_frozen",
+    "lease_holder",
+    "active_lease_ids",
+)
+LEASE_STATE = (
+    "_leases",
+    "_lease_owners",
+    "_last_heartbeat",
+    "_lease_workers",
+    "_stale_holders",
+    "_reclaims",
+    "_frozen",
+    "_backup_authorized",
+    "_roles",
+    "_role_lock",
+    "_kinds",
+    "hold_meta",
+    "_last_progress",
+    "_progress_lock",
+)
+#: `LeaseBook.__init__` 除了上面 14 个状态之外还要接的 5 个注入面。
+LEASE_INJECTED = ("_lock", "_clock", "_job_dir", "sched", "ledger")
+
 #: 组合类自己留的（进程级 + 构造）：`halt_workers` / `_workers` 是**进程**概念，
 #: 多课程单 hub 下 `_HubQueue` 借的就是这一份（见其 docstring ③）。
-#: B7-P1 起还多 9 个转发方法（状态只在 `Scheduler` 上，组合类不存副本）。
-OWN_METHODS = ("__init__", "note_worker", *SCHED_METHODS)
+#: B7-P1/P2 起还多 9 + 39 个转发方法（状态只在协作者上，组合类不存副本）。
+OWN_METHODS = ("__init__", "note_worker", *SCHED_METHODS, *LEASE_METHODS)
 PROCESS_STATE = ("halt_workers", "_workers")
 
 #: 五个混入 + 协作者 + 两个「搬出后新增的邻居」允许的仓内依赖（多一个就说明又搬漏/搬多了）。
@@ -240,6 +239,7 @@ ALLOWED_IMPORTS = {
     "hub.auth": set(),
     # 组合类的**新家**（S4 第十五刀 + B7-P1）：五个混入 + 鉴权原语 + 调度协作者，全是向下。
     "hub.store": {
+        "common.protocol",
         "hub.auth",
         "hub.store_ledger",
         "hub.store_leases",
@@ -374,9 +374,9 @@ def test_every_method_lives_in_exactly_one_mixin() -> None:
             seen[m] = domain
     # 2026-11-18（G5）：71 → 77（`is_cancelled` 即时闸 + `has_lease` / `lease_state` /
     # `lease_expiry` / `heartbeat_at` 租约读数 + `ledger_offset` 增量读读数）。
-    # B7-P1：调度簇 9 个方法搬进 `Scheduler` ⇒ 77 → 68（混入只数剩下五个域）。
-    assert len(MIXIN_METHODS) == 68, len(MIXIN_METHODS)
-    assert len(seen) == 68, len(seen)
+    # B7-P1/P2：调度 9 + 租约 37 个方法搬进协作者 ⇒ 77 → 31（混入只数剩下四个域）。
+    assert len(MIXIN_METHODS) == 31, len(MIXIN_METHODS)
+    assert len(seen) == 31, len(seen)
     # 49 = 拆分前 `_JobStore` 的 49 个方法；2026-09-25 并入 origin 的课程侧落位后又多了 2 条
     # （`_course_backup_target` / `_land_offline_round_extras`）；2026-10-01 §52 加 2 条
     # （`_lease_state` 判据 + `_lease_held` 布尔视图）；2026-10-03 T0 加 1 条
@@ -387,8 +387,8 @@ def test_every_method_lives_in_exactly_one_mixin() -> None:
     # `bc_drain_of`——BC 进度租约与 drain 判据）；
     # 2026-10-11 W7（plan/aborted-course-revival）加 2 条（`cancel_job` / `_cancel_job_locked`）
     # ⇒ 64 + 2；2026-11-07（plan/dead-lease-sweep）加 1 条（`reap_dead_leases`）⇒ 65 + 2。
-    # B7-P1：68 个域方法 + 组合类自己的 11 个（构造 / note_worker / 9 个转发）。
-    assert len(MIXIN_METHODS) + len(OWN_METHODS) == 68 + 11, "_JobStore 的方法总数变了"
+    # B7-P1/P2：31 个域方法 + 组合类自己的 50 个（构造 / note_worker / 9 + 39 个转发）。
+    assert len(MIXIN_METHODS) + len(OWN_METHODS) == 31 + 50, "_JobStore 的方法总数变了"
 
 
 def test_the_mixins_do_not_share_any_defined_name() -> None:
@@ -413,9 +413,16 @@ def test_the_mixins_do_not_share_any_defined_name() -> None:
 
 def test_the_mixins_are_wired_into_the_store() -> None:
     """★ 对象级证明：`_JobStore.X is Mixin.X`（不是同名副本，也不是漏接了一个）。"""
+    combo = hs._JobStore
     for domain, (cls, methods, _) in DOMAINS.items():
         for m in methods:
-            assert getattr(hs._JobStore, m) is getattr(cls, m), f"{domain}::{m} 没接上 _JobStore"
+            assert getattr(combo, m) is getattr(cls, m), f"{domain}::{m} 没接上 _JobStore"
+    # B7-P2：租约面的 39 个口在组合类上是**转发壳**；5 个内部接缝只住 `LeaseBook`。
+    for m in LEASE_METHODS:
+        assert callable(getattr(combo, m)), f"LeaseBook::{m} 没有转发壳"
+    for m in LEASE_HELPERS:
+        assert callable(getattr(leases_mod.LeaseBook, m)), f"LeaseBook 少了内部接缝 {m}"
+        assert not hasattr(combo, m), f"{m} 只是协作者内部接缝，不该出现在组合类上"
 
 
 def test_the_mro_is_exactly_the_six_mixins_plus_auth_guard() -> None:
@@ -424,7 +431,6 @@ def test_the_mro_is_exactly_the_six_mixins_plus_auth_guard() -> None:
         "_JobStore",
         "LedgerMixin",
         "WireMeterMixin",
-        "LeaseMixin",
         "ResultsMixin",
         "OfflineRoundsMixin",
         "_AuthGuard",
@@ -466,16 +472,23 @@ def test_the_private_state_still_lives_on_one_object(tmp_path: Path) -> None:
     for name in SCHED_STATE:
         assert hasattr(sched, name), f"Scheduler 的 {name} 不在实例上"
         assert not hasattr(store, name), f"{name} 在组合类上又存了一份"
+    # 租约协作者：14 个状态只在 `leases` 上，组合类不得再存一份同名副本。
+    leases = store.leases
+    for name in LEASE_STATE:
+        assert hasattr(leases, name), f"LeaseBook 的 {name} 不在实例上"
+        assert not hasattr(store, name), f"{name} 在组合类上又存了一份"
+    assert leases.ledger is store and leases.sched is sched
     # 锁 / 时钟 / 依赖表全部注入同一份（L1/L2/L4）。先把私有读数取到局部——
     # 断言表达式里不出现私有属性（G5 的口径；这也是「读数不是耦合」的样子）。
-    sched_lock, store_lock = sched._lock, store._lock
-    sched_clock, store_now = sched._clock, store._now
-    sched_holders, store_holders = sched._lease_workers, store._lease_workers
-    sched_beats, store_beats = sched._last_heartbeat, store._last_heartbeat
-    assert sched_lock is store_lock, "Scheduler 没有拿到组合类那把锁"
-    assert sched_clock == store_now, "Scheduler 的时钟与组合类不同源"
-    assert sched_holders is store_holders
-    assert sched_beats is store_beats
+    sched_lock, lease_lock, store_lock = sched._lock, leases._lock, store._lock
+    sched_clock, lease_clock, store_now = sched._clock, leases._clock, store._now
+    sched_holders, lease_holders = sched._lease_workers, leases._lease_workers
+    sched_beats, lease_beats = sched._last_heartbeat, leases._last_heartbeat
+    assert sched_lock is store_lock and lease_lock is store_lock, "协作者没有拿到组合类那把锁"
+    assert sched_clock == store_now and lease_clock == store_now, "协作者的时钟与组合类不同源"
+    assert sched_holders is lease_holders and sched_beats is lease_beats, (
+        "调度与租约没有共享同一张租约表 —— 两份副本会让事实分叉"
+    )
     # 通用助手面（`_AuthGuard`）也照旧
     for name in ("auth_failure", "auth_success", "is_blocked", "blocked_remaining"):
         assert callable(getattr(store, name)), name
@@ -501,6 +514,12 @@ def test_each_init_hook_owns_its_fields_and_nobody_else_does() -> None:
         assert name in sched_fields, f"Scheduler 没声明 {name}"
         assert name not in owners, f"{name} 在 {owners[name]} 与 Scheduler 各写了一份"
     assert len(sched_fields) == len(SCHED_STATE) + 5, sorted(sched_fields)
+    # 租约协作者：14 个状态 + 5 个注入面，全部只由 `LeaseBook.__init__` 赋值。
+    lease_fields = _init_state(HUB_DIR / "store_leases.py", "LeaseBook", "__init__")
+    for name in LEASE_STATE:
+        assert name in lease_fields, f"LeaseBook 没声明 {name}"
+        assert name not in owners, f"{name} 在 {owners[name]} 与 LeaseBook 各写了一份"
+    assert lease_fields == set(LEASE_STATE) | set(LEASE_INJECTED), sorted(lease_fields)
     # 进程级那两件住组合类，不归任何域
     for name in PROCESS_STATE:
         assert name not in owners, f"{name} 是进程级状态，不该被域声明"
@@ -565,6 +584,23 @@ def test_the_init_calls_every_hook_exactly_once() -> None:
         "lock",
     ], [k.arg for k in ctor[0].keywords]
     assert "SchedulingMixin._init_scheduling" not in src
+    # B7-P2：租约协作者**恰好构造一次**，七个依赖全部按名注入（那两把旁路锁留在它内部）。
+    lease_ctor = [
+        n
+        for n in ast.walk(init)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "LeaseBook"
+    ]
+    assert len(lease_ctor) == 1, f"LeaseBook 构造了 {len(lease_ctor)} 次"
+    assert sorted(k.arg for k in lease_ctor[0].keywords if k.arg) == [
+        "clock",
+        "job_dir",
+        "last_heartbeat",
+        "lease_workers",
+        "ledger",
+        "lock",
+        "sched",
+    ], [k.arg for k in lease_ctor[0].keywords]
+    assert "LeaseMixin._init_leases" not in src
 
 
 def test_mixin_declarations_are_annotations_or_owned_constants() -> None:
@@ -622,11 +658,13 @@ def test_the_composed_class_moved_below_the_mixins() -> None:
         assert dag.LAYERS[f"hub.{domain}"] < dag.LAYERS["hub.store"], domain
     assert dag.LAYERS["hub.auth"] < dag.LAYERS["hub.store"]
     assert dag.LAYERS["hub.store"] < dag.LAYERS[hs.__name__]
-    # 组合类的类体只剩 docstring + 构造 / note_worker / 转发壳 / 只读属性（零个「域」实现）
+    # 组合类的类体只剩 docstring + 两条协作者类型注解 + 构造 / note_worker / 转发壳。
     body = _cls(_tree(STORE_MOD), "_JobStore").body
     members = [n for n in body if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant))]
-    kinds = [type(n).__name__ for n in members]
-    assert kinds == ["FunctionDef"] * len(OWN_METHODS), kinds
+    anns = [n for n in members if isinstance(n, ast.AnnAssign)]
+    assert [n.target.id for n in anns if isinstance(n.target, ast.Name)] == ["sched", "leases"] and len(anns) == 2, [
+        ast.unparse(n) for n in anns
+    ]
     fns = [n for n in members if isinstance(n, ast.FunctionDef)]
     assert [n.name for n in fns] == list(OWN_METHODS), [n.name for n in fns]
 
@@ -647,14 +685,15 @@ def test_the_mixins_never_import_each_other() -> None:
         # `tests/test_subproc_util.py` 按带引号的 argv 元素扫「起真服务进程」，写死会误伤
         # （第十/十一刀连踩两次，这是第三次）。从对象取还更强：改名也不会失效。
         assert hs.__name__ not in got, f"{domain}.py 反向 import 了组装模块"
-    # B7-P1：调度协作者同样**谁都不 import**（只靠 `common.protocol`），更不 import 组合类。
-    sched_imports = set()
-    for n in ast.walk(_tree(HUB_DIR / "store_scheduling.py")):
-        if isinstance(n, ast.ImportFrom) and n.module:
-            sched_imports.add(n.module)
-        elif isinstance(n, ast.Import):
-            sched_imports.update(a.name for a in n.names)
-    assert sched_imports & (siblings | {hs.__name__}) == set(), sched_imports
+    # B7-P1/P2：两个协作者同样**谁都不 import**（只靠 `common.protocol`），更不 import 组合类。
+    for collaborator in ("store_scheduling.py", "store_leases.py"):
+        got = set()
+        for n in ast.walk(_tree(HUB_DIR / collaborator)):
+            if isinstance(n, ast.ImportFrom) and n.module:
+                got.add(n.module)
+            elif isinstance(n, ast.Import):
+                got.update(a.name for a in n.names)
+        assert got & (siblings | {hs.__name__}) == set(), (collaborator, got)
 
 
 def test_the_layers_match_the_ledger() -> None:
@@ -665,6 +704,8 @@ def test_the_layers_match_the_ledger() -> None:
         assert lv < dag.LAYERS[host_key], domain
     assert dag.LAYERS["hub.store_scheduling"] == 0
     assert dag.LAYERS["hub.store_scheduling"] < dag.LAYERS["hub.store"]
+    assert dag.LAYERS["hub.store_leases"] == 0
+    assert dag.LAYERS["hub.store_leases"] < dag.LAYERS["hub.store"]
     assert dag.LAYERS["hub.store_offline"] == 1
     for domain in (*STATEFUL, "store_results"):
         assert dag.LAYERS[f"hub.{domain}"] == 0, domain

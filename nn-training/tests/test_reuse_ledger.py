@@ -163,9 +163,14 @@ _EXPECTED_EXEMPT_STEMS = frozenset(
 #:   同一刀的 clone 也抬一格（15 → 16）：`_spec` 在两边是同一形状的 `CliSpec(...)`
 #:   （18 个字段名逐字相同，只有字面量不同，`_shape` 把值抹平 ⇒ 记成一组结构克隆）。
 #:   它和 `main` 是同一个现象的两面：**配置与顺序各一份，两个入口只声明自己要什么**。
+#: 2026-11-19 抬同名一格（113 → 118）：B7-P2 的租约转发壳让 5 个名字跨过「≥3 模块」线 ——
+#:   `_claim_locked` / `abandon_job` / `job_kind` / `job_role` / `role_blocked`（定义住
+#:   `store_leases.py`，组合类各留一条同签名转发，调用点分别在 `worker/eval_arbiter` /
+#:   `remote/job_lifecycle` / `queue_claims`）。这与本行注释点名的「门面转发」是同一类
+#:   合法形态：真重复仍由 exact / clone 两条抓——它们一个没动。`_JobStore` 上不再有实现。
 BASELINE_EXACT = 15
 BASELINE_CLONE = 16
-BASELINE_SAME_NAME_GE3 = 113
+BASELINE_SAME_NAME_GE3 = 118
 
 
 def _stems(modules: frozenset[str]) -> frozenset[str]:

@@ -64,30 +64,11 @@ class LedgerMixin:
     #: 构造身份：组合类 `__init__` 直接声明（`_HubQueue` 与测试都直接读它们）
     job_root: Path
     jsonl_path: Path
-    #: 兄弟簇 `store_leases` 拥有的状态（本簇的 `claimable_job_ids` 要用它判「别处在做」）
-    _leases: dict[str, float]
-    #: 租约**持有人身份**（同住 `store_leases`）：`inflight_job_ids(not_held_by=…)` 要按它
-    #: 排掉「请求者自己正在跑的那份」（只读，**不**走 `lease_worker()`——那个会顺手回收死租约，
-    #: 而 peek 面按 R1-4 是无副作用的）。
-    _lease_workers: dict[str, str]
-    _frozen: dict[str, dict]
     #: 调度协作者（B7-P1）：撤单要跳过「有人承诺在跑」的两张表，并顺手撕掉痕迹。
     #: 与其它跨簇引用同款声明（`Any`），契约由 `test_hub_job_store_split` 的结构对账钉住。
     sched: Any
-    #: 兄弟簇 `store_leases` 的**唯一**死活判据的布尔视图（过期 ∨ 孤儿，§52）——池过滤与
-    #: 认领闸必须共用同一把尺子：只在过滤里加判据会做出「池里看得见、claim 说 held」
-    #: 那种更难查的形状。取布尔而不是状态字符串，是因为本簇拿不到那边的常量
-    #: （混入之间不许 import）。
-    _lease_held: Any
-    #: 归属缓存与它自己的锁（同住 `store_leases`）：`publish` 要随 manifest 一起失效它。
-    #: 用独立锁的理由见那里（`job_role` 会被持 `_lock` 的临界区调到，共锁会自锁）。
-    _roles: dict[str, str]
-    #: job → kind 缓存（★M1b：`publish` 要和 `_roles` 一起失效它 —— Q5 的 bc 豁免读它）。
-    _kinds: dict[str, str]
-    _role_lock: Lock
-    #: ★M5：BC 进度锚（同住 `store_leases`）——重发 = 新一轮，`publish` 要把它一并作废
-    #: （旧一轮的 epoch 时间戳会把新租约当场判成「在推进」）。
-    _last_progress: dict[str, float]
+    #: 租约协作者（B7-P2）：池过滤 / 在飞集 / 熔断判据 / 归属缓存失效都经它（只读面不回收）。
+    leases: Any
 
     def _init_ledger(self) -> None:
         #: 账本增量读缓存（H6）：文件 size -> 已解析事件列表
@@ -216,7 +197,7 @@ class LedgerMixin:
                 pending.pop(jid, None)
         eligible: list[tuple[str, float]] = []
         for jid, e in pending.items():
-            if jid in self._frozen:
+            if self.leases.is_frozen(jid):
                 # ★ 毒包熔断（§4.1）：认领后零回传满阈值 ⇒ 冻结，不再回池。
                 # 这是**独立于失败标记**的第二状态：重发同 job_id（publish_job）不清它，
                 # 解冻只走人工入口（`unfreeze`）——否则「重发即重试」会把冻结当场抹掉。
@@ -247,7 +228,7 @@ class LedgerMixin:
         已有结果未验收的 job 从池中剔除——首写锁定兜底（hub 重启丢租约时用）。
         """
         now = self._now()
-        return [jid for jid, _ts in self._unfinished_pending() if not self._lease_held(jid, now)]
+        return [jid for jid, _ts in self._unfinished_pending() if not self.leases._lease_held(jid, now)]
 
     def inflight_job_ids(self, *, not_held_by: str = "") -> list[str]:
         """**在飞集** = 「未完成」（同一个 `_unfinished_pending`）∧ **有活租约**，按发布序。
@@ -266,9 +247,9 @@ class LedgerMixin:
         now = self._now()
         out: list[str] = []
         for jid, _ts in self._unfinished_pending():
-            if not self._lease_held(jid, now):
+            if not self.leases._lease_held(jid, now):
                 continue
-            if not_held_by and self._lease_workers.get(jid, "") == not_held_by:
+            if not_held_by and self.leases.lease_holder(jid) == not_held_by:
                 continue
             out.append(jid)
         return out
@@ -361,15 +342,10 @@ class LedgerMixin:
         幂等：同 job_id 已发布 → 覆盖 payload 但**不重复**追加 job_pending
         （账本按 job_id 去重——重启后重发布不产生双 pending）。
         """
-        # 归属缓存随 manifest 一起失效（2026-09-25）：重发覆盖了 manifest ⇒ 缓存里的旧
-        # 归属就是**谎报**（`job_role` 用它判「这份活归谁」，而它是租约闸的输入）。发布路径
-        # 只此一处，放在这里就不需要「同 job_id 的 role 永不变」这条假设。
-        with self._role_lock:
-            self._roles.pop(job_id, None)
-            self._kinds.pop(job_id, None)  # 同理由：新的 manifest 可能换了 kind（Q5 的闸读它）
-        # ★M5：重发 = 新一轮跑（进度锚同属旧一轮）⇒ 一并作废，否则重发后一个旧 epoch
-        # 时间戳会把新租约当场判成「在推进」。
-        self._last_progress.pop(job_id, None)
+        # 归属缓存 / kind / 进度锚随 manifest 一起失效（2026-09-25；★M5 同因）：
+        # 重发覆盖了 manifest ⇒ 旧归属是**谎报**，旧进度锚会把新租约当场判成「在推进」。
+        # 失效动作的唯一实现住租约协作者（那些表的主人）；发布路径只此一处。
+        self.leases.forget_job(job_id)
         with self._lock:
             jd = self._job_dir(job_id)
             jd.mkdir(parents=True, exist_ok=True)

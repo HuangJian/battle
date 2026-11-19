@@ -363,11 +363,11 @@ class QueueScopeMixin(QueuePeer):
             return
         hold = self.hold_of(course)
         if str(hold.get("state") or "") != "live":
-            st.hold_meta = {}
+            st.leases.hold_meta = {}
             return
         # 到这里 hold 是活的（`hold_state` 只看进度）：镜像只带判活需要的两样
         # （`hold_blocked` 自己拿时钟对窗，不依赖「推的人刚刚才推过」）。
-        st.hold_meta = {
+        st.leases.hold_meta = {
             "worker_id": str(hold.get("worker_id") or ""),
             "last_progress_at": float(hold_progress_at(hold)),
         }

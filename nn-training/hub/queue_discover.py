@@ -153,7 +153,7 @@ class QueueDiscoverMixin(QueuePeer):
             st = self._stores[c]
             # ★ 在飞判据走**内存租约**，不走 `inflight_job_ids()`：后者要求 job 目录与
             # payload 还在盘上，而「目录整个没了」正是本函数的前提 ⇒ 它恒为空，等于没有这道闸。
-            if any(st._lease_held(jid, now) for jid in list(st._leases)):
+            if st.leases.active_lease_ids(now):
                 continue  # 有活租约在跑
             if str(self.hold_of(c).get("state") or "") == "live":
                 continue  # 离线盘正接管着

@@ -226,7 +226,7 @@ def test_backup_claim_takes_no_lease_and_does_not_steal(tmp_path: Path) -> None:
     assert store.result_token_ok(JID, "") is True, "备份的回传不吃 403（R1-2）"
     # 未授权的第三方仍然 403（授权是**逐 job 显式**的，不是放开整条闸）
     assert store.result_token_ok("k" * 16, "") is True  # 未知 job：无租约照收（既有语义）
-    store._backup_authorized.discard(JID)
+    store.leases.clear_backup(JID)
     assert store.result_token_ok(JID, "") is False
 
 
@@ -770,9 +770,9 @@ def test_replica_candidates_keep_every_gate_the_pool_keeps(tmp_path: Path) -> No
     _publish(store)
     store.claim_outcome(JID, worker_id="A")
     assert store.inflight_job_ids() == [JID]
-    store._frozen[JID] = {"reclaims": 3, "worker": "A", "ts": clock.t, "announced": True}
+    store.leases._frozen[JID] = {"reclaims": 3, "worker": "A", "ts": clock.t, "announced": True}
     assert store.inflight_job_ids() == [] and store.claimable_job_ids() == []
-    store._frozen.clear()
+    store.leases._frozen.clear()
     (store._job_dir(JID) / "result").mkdir(parents=True, exist_ok=True)
     assert store.inflight_job_ids() == [], "首写已分胜负 ⇒ 不是「没完成」了"
 

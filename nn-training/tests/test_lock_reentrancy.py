@@ -143,7 +143,10 @@ MIN_LOCK_SITES: Final = 60
 #:     `append()` 持账本锁只做「查/建追加位」；`_JsonlPath.__init__` 只造一把锁和一个
 #:     bool，没有回调、没有 I/O、也拿不到账本（追加在 `slot.lock` 下、账本锁**外**做）
 #:     ⇒ 不可能回头重入同一把。
-MAX_OPAQUE_CALLS: Final = 19
+#:   * `LeaseBook._clock` / `LeaseBook._job_dir`（2026-11-19，B7-P2）—— 两个都是组合根
+#:     注入的**纯可调用**（时钟 / 路径解析），与上面 `_now` / `_clock` 同族：只读时间戳、
+#:     拼 `Path`，既不回调 `LeaseBook` 也不碰任何锁。P1 的 `Scheduler._clock` 已在册。
+MAX_OPAQUE_CALLS: Final = 20
 
 LockKey = tuple[object, ...]
 

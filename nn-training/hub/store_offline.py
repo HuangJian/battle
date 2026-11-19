@@ -327,9 +327,9 @@ class OfflineRoundsMixin:
     #: 构造身份：组合类 `__init__` 直接声明
     job_root: Path
     jsonl_path: Path
-    #: 本课程的 hold 镜像（`LeaseMixin` 声明、`_HubQueue._sync_hold` 推）：补传行的 claim 身份
-    #: 兜底来源（plan/offline-leg-ppo-attribution §3-A）——只读，**不写**（写者仍是 `_HubQueue`）。
-    hold_meta: dict[str, Any]
+    #: 本课程的 hold 镜像住租约协作者（`leases.hold_meta`、`_HubQueue._sync_hold` 推）：
+    #: 补传行的 claim 身份兜底来源（plan/offline-leg-ppo-attribution §3-A）——只读，**不写**。
+    leases: Any
     #: 兄弟簇 `store_ledger` 的方法（补传产物要与 job 账本**分家**落自己那本，但仍走同一套追加原语）
     _append_ledger: Any
 
@@ -528,7 +528,7 @@ class OfflineRoundsMixin:
                             **(row if isinstance(row, dict) else {}),
                             # ★ 归属身份排在 `**row` **之后**：那是**位置判据**（客户端给的字节不许
                             #   冒名顶替 hub 的认定），别顺手挪到上面去。
-                            **_artifact_identity(body, self.hold_meta),
+                            **_artifact_identity(body, self.leases.hold_meta),
                             "ts": self._now(),
                         },
                         ensure_ascii=False,
@@ -545,7 +545,7 @@ class OfflineRoundsMixin:
                     # 读方按"我能不能直接用它"选地址时看这一个。
                     "landed_fp": full_fp,
                     "opt_form": opt_form,
-                    **_artifact_identity(body, self.hold_meta),
+                    **_artifact_identity(body, self.leases.hold_meta),
                     "ts": self._now(),
                 }
             )

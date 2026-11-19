@@ -158,6 +158,7 @@ class QueueObserveMixin(QueuePeer):
                 # 它只为让 drain 判活从领取那一刻起算）：不剔除，每一份刚认领的活都会长成
                 # 「刚回传过」——那比没有这一列更糟（把卡死读成活）。
                 progress = st.job_progress_at(jid)
+                hb = st.heartbeat_at(jid)
                 claimed_at = claimed.get("at")
                 if claimed_at is not None and progress <= float(claimed_at):
                     progress = 0.0
@@ -170,7 +171,9 @@ class QueueObserveMixin(QueuePeer):
                         "course": course,
                         "it": self._manifest_summary(jid).get("it"),
                         "worker": holder,
-                        "heartbeat_ago": round(now - st._last_heartbeat.get(jid, now), 1),
+                        # 与旧 `_last_heartbeat.get(jid, now)` 逐字等价：0.0 是合法时刻，
+                        # 不能写成 `hb or now`（假时钟从 0 起时会把「刚心跳」读成 0）。
+                        "heartbeat_ago": round(now - (now if hb is None else hb), 1),
                         "claimed_ago": _age_of(now, claimed),
                         # `computing_ago == None` = 认领了但还没 `POST /start`（关键下载/取包中）
                         # —— 读面据此把它与真「计算中」分档，别把「已认领」一律叫计算中（F5）。
@@ -337,7 +340,7 @@ class QueueObserveMixin(QueuePeer):
         st = self._store_of(job_id)
         if st is None:
             return None
-        exp = st._leases.get(job_id)
+        exp = st.lease_expiry(job_id)
         if exp is None:
             return None
         if st.job_kind(job_id) in BOTH_ROLE_KINDS:
@@ -357,7 +360,7 @@ class QueueObserveMixin(QueuePeer):
         st = self._store_of(job_id)
         if st is None:
             return None
-        hb = st._last_heartbeat.get(job_id)
+        hb = st.heartbeat_at(job_id)
         return None if hb is None else round(st._now() - hb, 1)
 
     def note_offline_disk(self, disk_id: str) -> None:

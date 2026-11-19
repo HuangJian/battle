@@ -548,24 +548,24 @@ def test_hold_mirror_is_pushed_to_the_store_and_reads_without_the_token(
     hub = _hub(tmp_path, clock)
     _course(tmp_path, hub)
     st = hub._stores[COURSE]
-    assert st.hold_meta == {}
+    assert st.leases.hold_meta == {}
     hub.note_hold(COURSE, worker_id="cloud-1", token="tok-1")
-    assert st.hold_meta == {"worker_id": "cloud-1", "last_progress_at": 1000.0}, st.hold_meta
+    assert st.leases.hold_meta == {"worker_id": "cloud-1", "last_progress_at": 1000.0}, st.leases.hold_meta
     assert st.hold_blocked() == "held:cloud-1"
     # 打点把进度锚推着走（闸跟着续命）
     clock[0] = 1500.0
     assert hub.note_progress(COURSE, token="tok-1") is True
-    assert st.hold_meta["last_progress_at"] == 1500.0
+    assert st.leases.hold_meta["last_progress_at"] == 1500.0
     # 清单面（`/admin/queue`）看得到 hold、看不到 token
     row = hub.queue_state()["courses"][COURSE]
     assert row["hold"]["worker_id"] == "cloud-1" and row["hold"]["state"] == "live"
     assert "token" not in row["hold"], row["hold"]
     # release / revoke 清镜像（清完协作派发当天恢复）
     hub.note_release(COURSE)
-    assert st.hold_meta == {} and st.hold_blocked() == ""
+    assert st.leases.hold_meta == {} and st.hold_blocked() == ""
     hub.note_hold(COURSE, worker_id="cloud-1", token="tok-1")
     assert hub.revoke_offline_lease(COURSE, "test") is True
-    assert st.hold_meta == {} and hub.hold_of(COURSE) == {}
+    assert st.leases.hold_meta == {} and hub.hold_of(COURSE) == {}
 
 
 # ─────────── 2026-10-21（plan/offline-deliver-stall §2.3）：宽限一代只给一次 ───────────

@@ -268,7 +268,7 @@ def test_hold_mirror_is_synced_from_the_dispatch_record_on_startup(tmp_path: Pat
         encoding="utf-8",
     )
     hub = _HubQueue({"c5-gae": store}, order=["c5-gae"])
-    assert store.hold_meta.get("worker_id") == "cloud-1", store.hold_meta
+    assert store.leases.hold_meta.get("worker_id") == "cloud-1", store.leases.hold_meta
     got = hub.claim_next(worker_id="on", role=ROLE_ONLINE)
     assert got is None, "接管中的课不许被在线盘领走（闸没推给 store 就是静默失效）"
 
@@ -301,6 +301,10 @@ _PAID_CALL = re.compile(
 #: ⚠ 文件名列的是**当前布局**（S4 第十五刀把 `_HubQueue` 拆进 `hub/queue_*.py`）：
 #: 名字是契约，位置不是 —— 搬家时改这张表，别改判据。
 _EXPECTED_CALL_SITES: dict[tuple[str, str], int] = {
+    # B7-P2：`_JobStore` 的两个**转发壳**（实现与状态住 `LeaseBook`）。它们不是第 5 条
+    # 认领路径——把 role 原样透传给协作者，所以同样受下面「每一跳都带 role=」的判据约束。
+    ("hub/store.py", "claim"): 1,
+    ("hub/store.py", "claim_outcome"): 1,
     # 两条腿都住 `hub/queue_claims.py`：`claim_next`（多课程轮转挑选）+ `Hub.claim`（push 派发腿）
     ("hub/queue_claims.py", "claim"): 2,
     # `Hub.claim_job`（HTTP `POST /jobs/{id}/claim` 的唯一实现入口）
