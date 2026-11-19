@@ -2171,6 +2171,19 @@ export function runEvalOne(
 /** 单局主入口（argv 显式传入：serve 模式下每局从 stdin 取一份；也供单测在进程内对拍）。 */
 export function main(argv: string[]): void {
   const t0 = Date.now()
+  // ── 每局重置模块级旗标（2026-11-19 事故，用户报障）────────────────────────
+  // 这些旗标声明在模块作用域（供 `openingWanted` 等下游读到），而 `--serve`/persist-pool
+  // 模式下**同一个进程服务多局**：旧实现在 `main` 里只「有旗标就置 true」，**从不复位** ⇒
+  // 一旦某局带过 `--opening-connect`，该 worker 之后**所有**局（含训练 rollout，池是同质的）
+  // 都恒「开」。症状：同节点连跑三次 bare/oc/bare 全给 oc 的值。
+  // 修法：进 `main` 先复位到默认再解析 argv —— 与一次性 spawn 的语义对齐（进程级默认）。
+  probeFlag = false
+  holdFallback = false
+  skipSteelOnlyShots = false
+  breakBricksOnPath = false
+  openingConnect = false
+  openingAll = process.env.OPENING_ALL === '1'
+  openingNoExit = process.env.OPENING_NO_EXIT === '1'
   let outDir = 'tmp/eval-out'
   let difficulty = 'hard'
   let stageIdx = -1

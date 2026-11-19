@@ -2488,6 +2488,12 @@ function parseRange(s: string): number[] {
 
 // export：同质长驻入口 `serve-any.ts` 要按 mode 分派到本导出器（其余三个导出器早已导出）。
 export function main(argv: string[] = process.argv.slice(2)): void {
+  // ── 每局重置模块级旗标（2026-11-19 事故）────────────────────────────────
+  // `--serve`/persist-pool 模式下同一进程服务多局；模块级 `openingConnect` 旧实现只置 true
+  // 从不清零 ⇒ 一局带过 `--opening-connect` 之后，该 worker 上**后续训练 rollout** 也恒「开」
+  // （池是同质的，eval 与 rollout 共用 worker）。与 `export-eval-game.ts::main` 同一修法。
+  openingConnect = false
+  openingAll = process.env.OPENING_ALL === '1'
   const t0 = Date.now()
   const args = argv
   let outDir = 'tmp/rl-traj'
