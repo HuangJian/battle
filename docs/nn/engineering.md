@@ -25,6 +25,55 @@
 
 ---
 
+## §217 hub 路由：55 支 `elif` → 两张数据表 + 纯函数查表（2026-11-19）
+
+`hub/http_face.py::HubHandler.do_GET` / `do_POST` 原先各是一条 **30 支的顺序 `elif`** 链
+（`path == "…"` 与 `path.startswith("/jobs/") and path.endswith("…")` 混排，各 ~70 行）。
+现在路由是**数据**：`GET_ROUTES`（30 行）/ `POST_ROUTES`（28 行，含 2 条 `/` 的别名行）
++ 纯函数 `match_route(table, path) -> str | None`；分派函数只剩「查表 → `getattr(self, name)()`」
+与两条异常边界 —— `do_GET` / `do_POST` **68 / 72 → 18 / 18 行**，文件 LOC 572 → 564
+（python.refactor.md 附录 B 的 `hub/http_face.py` 行，B7 前半）。
+
+**为什么要换**（不是口味）：旧形状里「加一个端点」= 往链条中间插一行，而两条更宽/更窄的规则
+（`/result` vs `/result-ready`、`job_contains` 那条 `epoch-weights`）**重叠时谁先声明谁赢**——
+插错位置会静默改掉既有端点的行为，而把处理方法 stub 掉的单元用例全绿
+（`test_node_register` 里那条端到端注释写的就是这个盲区）。表化之后，「哪条路径落到哪个方法」
+是**可穷举、可对账**的数据。
+
+三条判据/纪律：
+
+1. **表存方法名，不存闭包/绑定方法**：表在实例之前就存在（import 即断言），参数绑定交给
+   9 个零参包装方法（`_get_ping` / `_get_workers_halt|resume` / `_get_admin_push_workers` /
+   `_post_admin_courses` / `_post_admin_push_workers` / `_post_offline_claim|heartbeat|release`）
+   —— 于是表里没有 `(*args, **kwargs)` 这种「参数住在数据里」的间接面。
+2. **顺序即优先级**，但当前**没有**任何路径同时命中两行（新用例逐行造代表路径穷举证明）。
+   保留顺序语义只是为了让更宽的 `job_contains` 永远排在更具体的全等/后缀规则之后。
+3. **不冻结路由条数**：加端点不是欠债，让每次加端点都要改一个数字只会训练人「顺手改基线」。
+   守卫换成结构判据（见下）。
+
+新用例 `tests/hub/test_hub_route_table.py`（6 条）：① 每行的方法在 `HubHandler` 上可调用
+（含混入带来的那 26 个）· ② `(形态, 参数)` 不重复声明 · ③ 每行代表路径只命中它自己 ·
+④ `do_GET`/`do_POST` 的 AST 里**没有任何路径比较**（`path` / 字符串字面量作操作数；
+`name is None` 那种判空不算）——把 `elif` 链写回来就红 · ⑤ 三族带参端点的参数绑定
+（从**公开入口** `do_GET`/`do_POST` 验：halt/resume 的布尔 + `?course=`、admin 的
+`post=`/`set_action=`、offline 租约的 action 串）· ⑥ 未知路径 404 与方法抛
+`ProtocolError` ⇒ 400 两条边界仍在。
+
+顺带改的一处旧守卫：`tests/hub/test_admin_mem.py::test_admin_mem_route_is_wired_and_auth_gated`
+原先在 `do_GET` 的 AST 里找 `/admin/mem` 的 `Compare`（**钉的是形状**，表化后必然漏）；
+现在问表：`match_route(GET_ROUTES, "/admin/mem") == "_admin_mem"`。鉴权那条（`_admin_mem`
+第一条可执行语句是 `not self._auth_ok()`）逐字未动。
+
+**没做的**（附录 B 同一行的另一半）：`HubState` —— `_blocked_logged` / `_seen_worker_sources` /
+`_worker_source_warned` / `_worker_pulse` 仍是进程级类属性（`ThreadingHTTPServer` 每请求新建
+实例 ⇒ 类属性才是共享面）。那是「状态搬家」不是「路由搬家」，要连 `hub/boot.py` 的注入面
+一起改，单独一刀。
+
+验证：`bash tools/githook/nn-python-gate.sh` 全绿（ruff + mypy + 6251 passed / 2 skipped /
+69.75s）；`tests/hub` 单跑 604 条全绿。
+
+---
+
 ## §216 长函数存量第三十七刀：发布相位（trainer）444 → 192（2026-11-19）
 
 `trainer/loop_remote_job.py::TrainingRemoteJob._remote_ppo_publish` **444 → 192 行**，

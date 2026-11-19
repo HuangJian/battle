@@ -68,10 +68,11 @@ import ipaddress
 import json
 import time
 import urllib.parse
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from common.http_respond import respond_json
 from common.logutil import log_line, tag_logger
@@ -202,6 +203,127 @@ def attributed_source(peer: str, cf_header: str) -> tuple[str, str]:
     if cf and _is_ip_literal(cf) and not _is_loopback(cf):
         return cf, "cf"
     return p, "peer"
+
+# ------------------------------------------------------------------ 路由表
+#
+# **表是数据，分派是查表**（python.refactor.md 附录 B 的 `HubHandler` 行）：原先两个端点面各有
+# 一条 30 支的顺序 `elif path == … / startswith + endswith` 链，于是「加一个端点」= 往链条
+# 中间插一行 —— 插错位置会静默遮蔽后面的同后缀路由，而 stub 掉处理方法的单元用例全绿
+# （`test_node_register` 的端到端那条就是为这个形状写的）。现在一条路由 = 一行数据：
+# `do_GET` / `do_POST` 只剩「查表 → 调方法」与两条异常边界，表本身可被用例穷举、去重、
+# 与 `HubHandler` 对账（`tests/hub/test_hub_route_table.py`）。
+#
+# **顺序即优先级**：同表内先命中者胜。当前没有任何路径会同时命中两条（用例逐条穷举证明），
+# 保留顺序语义是为了让更宽的规则（`job_contains`）永远排在更具体的全等/后缀规则之后。
+
+#: 匹配形态：`exact` = 路径全等 · `job_suffix` = `/jobs/{id}<后缀>` ·
+#: `job_contains` = `/jobs/` 前缀且路径含该片段（`epoch-weights` 那类带中缀的）。
+RouteKind = Literal["exact", "job_suffix", "job_contains"]
+
+
+@dataclass(frozen=True, slots=True)
+class Route:
+    """一行路由：匹配形态 + 形态参数 + `HubHandler` 上的处理方法名。
+
+    `handler` 存**名字**而不是绑定方法/闭包：表因此在任何实例之前就存在（可 import 即断言），
+    且「哪个方法服务哪条路径」是数据，不是一张函数对象的间接表。参数绑定的那几条端点
+    （`/admin/workers/halt` 之类）各有一个零参包装方法，见 `HubHandler._get_*` / `_post_*`。
+    """
+
+    kind: RouteKind
+    value: str
+    handler: str
+
+
+def match_route(table: tuple[Route, ...], path: str) -> str | None:
+    """按表取处理方法名；一条都不命中 ⇒ `None`（调用方答 404）。纯函数 ⇒ 可穷举测试。"""
+    for route in table:
+        if route.kind == "exact":
+            hit = path == route.value
+        elif route.kind == "job_suffix":
+            hit = path.startswith("/jobs/") and path.endswith(route.value)
+        else:  # job_contains
+            hit = path.startswith("/jobs/") and route.value in path
+        if hit:
+            return route.handler
+    return None
+
+
+#: `GET` 端点表（判定顺序 = 声明顺序）。
+GET_ROUTES: tuple[Route, ...] = (
+    Route("exact", "/ping", "_get_ping"),
+    Route("exact", "/", "_get_ping"),
+    Route("exact", "/code", "_get_shared_code"),
+    Route("exact", "/jobs/peek", "_get_peek"),
+    Route("exact", "/admin/workers/halt", "_get_workers_halt"),
+    Route("exact", "/admin/workers/resume", "_get_workers_resume"),
+    Route("exact", "/admin/workers/status", "_admin_status"),
+    Route("exact", "/admin/mem", "_admin_mem"),
+    Route("exact", "/admin/queue", "_admin_queue"),
+    Route("exact", "/admin/push-workers", "_get_admin_push_workers"),
+    Route("exact", "/admin/offline-push-workers", "_admin_offline_push_workers"),
+    Route("exact", "/admin/nodes", "_admin_nodes_list"),
+    Route("exact", "/admin/courses", "_admin_courses"),
+    Route("exact", "/admin/net-probe", "_admin_net_probe"),
+    # 云机错误上报的读面（plan/component-error-registry §4.3-S3b）：**纯观测**的增量拉取，
+    # 与 `/admin/queue`/`/admin/offline` 同规（只读，不碰调度状态）。
+    Route("exact", ADMIN_WORKER_ERRORS_PATH, "_admin_errors"),
+    Route("exact", "/admin/offline", "_admin_offline"),
+    Route("exact", OFFLINE_TASK_PACK_PATH, "_get_task_pack"),
+    Route("exact", OFFLINE_TASKS_PATH, "_get_offline_tasks"),
+    Route("exact", OFFLINE_HOLD_PATH, "_get_offline_hold"),
+    Route("exact", OFFLINE_RESUME_PATH, "_get_offline_resume"),
+    Route("exact", OFFLINE_RESUME_BLOB_PATH, "_get_offline_resume_blob"),
+    Route("job_suffix", "/payload", "_get_payload"),
+    Route("job_suffix", "/ts_code", "_get_ts_code"),
+    Route("job_suffix", "/code", "_get_code"),
+    Route("job_suffix", "/blob", "_get_blob"),
+    Route("job_suffix", "/status", "_get_status"),
+    Route("job_suffix", "/result", "_get_result"),
+    Route("job_contains", "/epoch-weights/", "_get_bc_epoch_weights"),
+    Route("job_suffix", "/resume", "_get_bc_resume"),
+    Route("job_suffix", "/bc-metrics", "_get_bc_metrics"),
+)
+
+#: `POST` 端点表（判定顺序 = 声明顺序）。
+POST_ROUTES: tuple[Route, ...] = (
+    Route("job_suffix", "/heartbeat", "_post_heartbeat"),
+    Route("exact", "/jobs/priority", "_post_priority"),
+    Route("job_suffix", "/claim", "_post_claim"),
+    Route("job_suffix", "/start", "_post_start"),
+    Route("job_suffix", "/ready", "_post_ready"),
+    Route("job_suffix", "/result-ready", "_post_result_ready"),
+    Route("job_suffix", "/abandon", "_post_abandon"),
+    Route("job_suffix", "/release", "_post_release"),
+    Route("job_suffix", "/fail", "_post_fail"),
+    Route("job_suffix", "/result", "_post_result"),
+    Route("job_suffix", "/epoch", "_post_bc_epoch"),
+    Route("exact", "/admin/unfreeze", "_admin_unfreeze"),
+    # #8：清空课程级 BC 续训索引（只删别名；权重/历史不动）。
+    Route("exact", "/admin/bc-resume/clear", "_admin_clear_bc_resume"),
+    # 2026-11-12：人工解除 BC 课程独占（dashboard 按钮）。
+    Route("exact", "/admin/bc-exclusive/clear", "_admin_release_bc_exclusive"),
+    # 单 job 定向作废（2026-10-11 事故 W7）：与 /admin/unfreeze 同为人工口。
+    Route("exact", ADMIN_CANCEL_JOB_PATH, "_admin_cancel_job"),
+    Route("exact", "/admin/courses", "_post_admin_courses"),
+    Route("exact", "/admin/push-workers", "_post_admin_push_workers"),
+    Route("exact", "/admin/nodes/register", "_admin_nodes_register"),
+    Route("exact", "/admin/nodes/unregister", "_admin_nodes_unregister"),
+    Route("exact", "/admin/net-probe", "_admin_net_probe_upload"),
+    Route("exact", OFFLINE_ARTIFACT_PATH, "_post_offline_artifact"),
+    Route("exact", OFFLINE_RESULT_PATH, "_post_offline_result"),
+    Route("exact", OFFLINE_CLAIM_PATH, "_post_offline_claim"),
+    Route("exact", OFFLINE_HEARTBEAT_PATH, "_post_offline_heartbeat"),
+    Route("exact", OFFLINE_RELEASE_PATH, "_post_offline_release"),
+    Route("exact", OFFLINE_PROGRESS_PATH, "_post_offline_progress"),
+    # worker 的预取状态上报（plan/dashboard-ppo-live-rows）：**纯观测**——与 `/jobs/*` 那一族
+    # 分开（那一族有租约/游标语义），也不走 `/offline/*`（它报的是 job 队列的软持有，不是离线盘）。
+    Route("exact", ADMIN_WORKER_PREFETCH_PATH, "_post_worker_prefetch"),
+    # 云机的错误上报（plan/component-error-registry §4.3-S3b，同上形状来源）：报的是「只在云机
+    # 发生的失败」（机器级停滞/瞬时失败/离线段失败），与取活协议完全无关 ⇒ 同样刻意开在
+    # `/admin/*` 下，失败即丢、绝不参与派发判据。
+    Route("exact", ADMIN_WORKER_ERROR_PATH, "_post_worker_error"),
+)
 
 # ------------------------------------------------------------------ HTTP
 
@@ -573,6 +695,39 @@ class HubHandler(
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         return (qs.get(key) or [""])[0].strip()
 
+    # ---- 路由参数的绑定点 ----
+    # 表只存「方法名」（纯数据）；带参数的那几条端点在这里把参数钉住，于是表里没有闭包、
+    # 也没有 `getattr(self, name)(*args)` 这种「参数住在数据里的」间接面。
+    def _get_ping(self) -> None:
+        """/ping 与 / 的健康应答（鉴权闸先过——它是最早的存活探针，token 不对就不该报 ok）。"""
+        if not self._auth_ok():
+            return
+        self._json({"status": "ok"}, 200)
+
+    def _get_workers_halt(self) -> None:
+        self._admin_halt(True, self._query_course())
+
+    def _get_workers_resume(self) -> None:
+        self._admin_halt(False, self._query_course())
+
+    def _get_admin_push_workers(self) -> None:
+        self._admin_push_workers(set_action=False)
+
+    def _post_admin_courses(self) -> None:
+        self._admin_courses(post=True)
+
+    def _post_admin_push_workers(self) -> None:
+        self._admin_push_workers(set_action=True)
+
+    def _post_offline_claim(self) -> None:
+        self._post_offline_lease("claim")
+
+    def _post_offline_heartbeat(self) -> None:
+        self._post_offline_lease("heartbeat")
+
+    def _post_offline_release(self) -> None:
+        self._post_offline_lease("release")
+
     # ---- 路由 ----
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
@@ -581,70 +736,12 @@ class HubHandler(
             # 离线盘报名（取包链的全部端点都在这条前缀下；见 `_note_offline_disk`）。
             self._note_offline_disk()
         try:
-            if path == "/ping" or path == "/":
-                if not self._auth_ok():
-                    return
-                self._json({"status": "ok"}, 200)
-            elif path == "/code":
-                self._get_shared_code()
-            elif path == "/jobs/peek":
-                self._get_peek()
-            elif path == "/admin/workers/halt":
-                self._admin_halt(True, self._query_course())
-            elif path == "/admin/workers/resume":
-                self._admin_halt(False, self._query_course())
-            elif path == "/admin/workers/status":
-                self._admin_status()
-            elif path == "/admin/mem":
-                self._admin_mem()
-            elif path == "/admin/queue":
-                self._admin_queue()
-            elif path == "/admin/push-workers":
-                self._admin_push_workers(set_action=False)
-            elif path == "/admin/offline-push-workers":
-                self._admin_offline_push_workers()
-            elif path == "/admin/nodes":
-                self._admin_nodes_list()
-            elif path == "/admin/courses":
-                self._admin_courses()
-            elif path == "/admin/net-probe":
-                self._admin_net_probe()
-            elif path == ADMIN_WORKER_ERRORS_PATH:
-                # 云机错误上报的读面（plan/component-error-registry §4.3-S3b）：**纯观测**的
-                # 增量拉取，与 `/admin/queue`/`/admin/offline` 同规（只读，不碰调度状态）。
-                self._admin_errors()
-            elif path == "/admin/offline":
-                self._admin_offline()
-            elif path == OFFLINE_TASK_PACK_PATH:
-                self._get_task_pack()
-            elif path == OFFLINE_TASKS_PATH:
-                self._get_offline_tasks()
-            elif path == OFFLINE_HOLD_PATH:
-                self._get_offline_hold()
-            elif path == OFFLINE_RESUME_PATH:
-                self._get_offline_resume()
-            elif path == OFFLINE_RESUME_BLOB_PATH:
-                self._get_offline_resume_blob()
-            elif path.startswith("/jobs/") and path.endswith("/payload"):
-                self._get_payload()
-            elif path.startswith("/jobs/") and path.endswith("/ts_code"):
-                self._get_ts_code()
-            elif path.startswith("/jobs/") and path.endswith("/code"):
-                self._get_code()
-            elif path.startswith("/jobs/") and path.endswith("/blob"):
-                self._get_blob()
-            elif path.startswith("/jobs/") and path.endswith("/status"):
-                self._get_status()
-            elif path.startswith("/jobs/") and path.endswith("/result"):
-                self._get_result()
-            elif path.startswith("/jobs/") and "/epoch-weights/" in path:
-                self._get_bc_epoch_weights()
-            elif path.startswith("/jobs/") and path.endswith("/resume"):
-                self._get_bc_resume()
-            elif path.startswith("/jobs/") and path.endswith("/bc-metrics"):
-                self._get_bc_metrics()
-            else:
+            name = match_route(GET_ROUTES, path)
+            if name is None:
                 self._json({"error": "not found"}, 404)
+            else:
+                dispatch: Callable[[], None] = getattr(self, name)
+                dispatch()
         except (ProtocolError, ValueError) as e:
             self._json({"error": str(e)}, 400)
         except Exception as e:  # 服务器不因单请求崩溃
@@ -658,74 +755,12 @@ class HubHandler(
             # 同上：租约/补传也在这条前缀下（POST 面）。
             self._note_offline_disk()
         try:
-            if path.startswith("/jobs/") and path.endswith("/heartbeat"):
-                self._post_heartbeat()
-            elif path == "/jobs/priority":
-                self._post_priority()
-            elif path.startswith("/jobs/") and path.endswith("/claim"):
-                self._post_claim()
-            elif path.startswith("/jobs/") and path.endswith("/start"):
-                self._post_start()
-            elif path.startswith("/jobs/") and path.endswith("/ready"):
-                self._post_ready()
-            elif path.startswith("/jobs/") and path.endswith("/result-ready"):
-                # 2026-10-26：worker 的 PPO 一收口就敲一下，派发器的等待线程立刻取回。
-                self._post_result_ready()
-            elif path.startswith("/jobs/") and path.endswith("/abandon"):
-                self._post_abandon()
-            elif path.startswith("/jobs/") and path.endswith("/release"):
-                self._post_release()
-            elif path.startswith("/jobs/") and path.endswith("/fail"):
-                self._post_fail()
-            elif path.startswith("/jobs/") and path.endswith("/result"):
-                self._post_result()
-            elif path.startswith("/jobs/") and path.endswith("/epoch"):
-                self._post_bc_epoch()
-            elif path == "/admin/unfreeze":
-                self._admin_unfreeze()
-            elif path == "/admin/bc-resume/clear":
-                # #8：清空课程级 BC 续训索引（只删别名；权重/历史不动）。
-                self._admin_clear_bc_resume()
-            elif path == "/admin/bc-exclusive/clear":
-                # 2026-11-12：人工解除 BC 课程独占（dashboard 按钮）。
-                self._admin_release_bc_exclusive()
-            elif path == ADMIN_CANCEL_JOB_PATH:
-                # 单 job 定向作废（2026-10-11 事故 W7）：与 /admin/unfreeze 同为人工口。
-                self._admin_cancel_job()
-            elif path == "/admin/courses":
-                self._admin_courses(post=True)
-            elif path == "/admin/push-workers":
-                self._admin_push_workers(set_action=True)
-            elif path == "/admin/nodes/register":
-                self._admin_nodes_register()
-            elif path == "/admin/nodes/unregister":
-                self._admin_nodes_unregister()
-            elif path == "/admin/net-probe":
-                self._admin_net_probe_upload()
-            elif path == OFFLINE_ARTIFACT_PATH:
-                self._post_offline_artifact()
-            elif path == OFFLINE_RESULT_PATH:
-                self._post_offline_result()
-            elif path == OFFLINE_CLAIM_PATH:
-                self._post_offline_lease("claim")
-            elif path == OFFLINE_HEARTBEAT_PATH:
-                self._post_offline_lease("heartbeat")
-            elif path == OFFLINE_RELEASE_PATH:
-                self._post_offline_lease("release")
-            elif path == OFFLINE_PROGRESS_PATH:
-                self._post_offline_progress()
-            elif path == ADMIN_WORKER_PREFETCH_PATH:
-                # worker 的预取状态上报（plan/dashboard-ppo-live-rows）：**纯观测**——
-                # 与 `/jobs/*` 那一族分开（那一族有租约/游标语义），也不走 `/offline/*`
-                # （它报的是 job 队列的软持有，不是离线盘）。
-                self._post_worker_prefetch()
-            elif path == ADMIN_WORKER_ERROR_PATH:
-                # 云机的错误上报（plan/component-error-registry §4.3-S3b，同上形状来源）：
-                # 报的是「只在云机发生的失败」（机器级停滞/瞬时失败/离线段失败），与取活协议
-                # 完全无关 ⇒ 同样刻意开在 `/admin/*` 下，失败即丢、绝不参与派发判据。
-                self._post_worker_error()
-            else:
+            name = match_route(POST_ROUTES, path)
+            if name is None:
                 self._json({"error": "not found"}, 404)
+            else:
+                dispatch: Callable[[], None] = getattr(self, name)
+                dispatch()
         except (ProtocolError, ValueError) as e:
             self._json({"error": str(e)}, 400)
         except Exception as e:
