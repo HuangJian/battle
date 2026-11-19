@@ -73,11 +73,14 @@ class EvalTimingView:
     （与尾巴不同，它还没交棒）；`tail` 是已交棒给下一次 rollout 收官的 `(thread, 派发时刻)`；
     `backfill` 是重启补账的剩余缺口（None = 还没扫，空元组 = 扫过且无缺口）。
     `open_threads` 与 `open_eval_threads()` 同源（顺手剪掉已收工的）。
+    `tail_start` 是与 `tail` 成对的软等计时起点（交棒后复位成 None —— 「尾巴在手但没有
+    起点」不是合法态，两个字段一起读才说明得清）。
     """
 
     round_thread: EvalThread | None
     gate: threading.Event | None
     tail: tuple[EvalThread, float] | None
+    tail_start: float | None
     join_sec: float
     backfill: tuple[tuple[int, str], ...] | None
     pending_m: int | None
@@ -184,6 +187,7 @@ class TrainingEval:
             round_thread=self._eval_thread,
             gate=self._eval_gate,
             tail=self._eval_tail,
+            tail_start=self._eval_tail_start,
             join_sec=self._eval_join_sec,
             backfill=backfill,
             pending_m=self._eval_pending_m,

@@ -268,8 +268,10 @@ def test_slots_resolve_through_inheritance_on_a_bare_instance() -> None:
     for slot in CLUSTER_SLOTS:
         assert slot in TrainingEval.__annotations__, slot
     assert TrainingEval in TrainingSteps.__mro__
-    assert TrainingSteps()._eval_join_sec == 0.0
-    assert TrainingSteps()._eval_tail is None
+    # 用公开读数问，而不是伸手进槽位：读数能取到就说明继承解析通了（G5 第十二批）。
+    bare = TrainingSteps().eval_timing()
+    assert bare.join_sec == 0.0
+    assert bare.tail is None
 
 
 def test_cross_module_hands_are_the_two_declared_ones() -> None:
@@ -363,13 +365,14 @@ def test_stream_report_thread_hands_off_across_the_module_boundary() -> None:
     ts._eval_gate = None
 
     ts._log_report(5, time.time())  # 写：trainer/loop_steps.py::_log_report
-    assert ts._eval_thread is thread, "stream 报告的线程句柄没落进 _eval_thread"
+    assert ts.eval_timing().round_thread is thread, "stream 报告的线程句柄没进在飞轮"
     ts._join_eval(5)  # 读：trainer/loop_eval.py::_join_eval
 
-    assert ts._eval_tail is not None, "没跑完的尾巴应交棒给下一轮 rollout 边界"
-    assert ts._eval_tail[0] is thread
+    view = ts.eval_timing()
+    assert view.tail is not None, "没跑完的尾巴应交棒给下一轮 rollout 边界"
+    assert view.tail[0] is thread
     assert thread.joins == [], f"缺省不该站等：{thread.joins}"
-    assert ts._eval_tail_start is None, "交棒后时间基准复位"
+    assert view.tail_start is None, "交棒后时间基准复位"
 
 
 def test_eval_on_round_placeholder_fails_loudly() -> None:
