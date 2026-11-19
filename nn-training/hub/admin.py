@@ -21,7 +21,8 @@ re-export（没有别的读者）。
 
 ## 为什么这一组是 `hub_server` 里最安全的第一刀（plan §5.3.2 实测）
 
-① `HubHandler` 只有 3 个类属性（`hub` / `push` / `_blocked_logged`）⇒ 本组方法近乎无状态，
+① `HubHandler` 只有那几个类属性（当时 3 个：`hub` / `push` / `_blocked_logged`；2026-11-19 起
+   后者与另三份共享态收进 `HubState`（`http_face.state`））⇒ 本组方法近乎无状态，
 搬迁不改语义；② 本组只往外调 4 个通用助手，反向只有派发表调用；③ **测试接缝为零**——全仓对
 `hub.server` 的 patch 只有一处（`SEND_TIMEOUT_SEC`，不在本组），`tests/` 从它取的名字
 全是 `_JobStore` / `_HubQueue` / `as_hub` / `make_server`，本组一个都没被外部 import。

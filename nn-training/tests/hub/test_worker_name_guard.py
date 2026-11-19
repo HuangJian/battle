@@ -26,7 +26,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.protocol import AUTH_HEADER, WORKER_ID_HEADER
-from hub.http_face import CF_SOURCE_HEADER, HubHandler
+from hub.http_face import CF_SOURCE_HEADER, HubHandler, HubState
 from hub.server import _HubQueue, make_server
 
 TOKEN = "sekret"
@@ -35,12 +35,14 @@ WARN_FRAGMENT = "前提可能被打破"
 
 @pytest.fixture(autouse=True)
 def _clean_guard_state():
-    """守卫状态是 HubHandler 的 class 级 dict（进程内共享）——每个用例前后清干净。"""
-    HubHandler._seen_worker_sources.clear()
-    HubHandler._worker_source_warned.clear()
+    """守卫状态是 `HubHandler.state` 的进程级 dict——每个用例前后**整份换新**。
+
+    2026-11-19（`HubState`）：四份散着的类属性收成一个对象后，隔离从「逐表 `.clear()`」
+    变成「换一份」——漏清一张表不会再悄悄串到下一个用例。
+    """
+    HubHandler.state = HubState()
     yield
-    HubHandler._seen_worker_sources.clear()
-    HubHandler._worker_source_warned.clear()
+    HubHandler.state = HubState()
 
 
 @contextmanager

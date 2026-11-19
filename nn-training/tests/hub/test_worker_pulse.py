@@ -27,7 +27,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.protocol import WORKER_ID_HEADER
-from hub.http_face import HubHandler
+from hub.http_face import HubHandler, HubState
 from hub.worker_pulse import (
     WORKER_PULSE_MIN_TOUCHES,
     WORKER_PULSE_SILENCE_SEC,
@@ -151,11 +151,11 @@ class _PingHandler(HubHandler):
     """`/ping` 的最小宿主：真 `HubHandler`（**继承**，不是改方法）+ 自己的哨兵表。
 
     为什么用子类而不是往实例上赋值方法：mypy 的 `method-assign` 会把「给实例塞一个函数当
-    方法」判成错误（它确实也绕过了类型检查）；子类还能顺手把 `_worker_pulse` 换成本类独有
-    的一份，进程级类属性（`HubHandler._worker_pulse`）因此不被测试污染。
+    方法」判成错误（它确实也绕过了类型检查）；子类还能顺手把 `state` 换成本类独有的一份，
+    进程级共享态（`HubHandler.state`）因此不被测试污染。
     """
 
-    _worker_pulse = WorkerPulse()
+    state = HubState(pulse=WorkerPulse())
 
     def _auth_ok(self) -> bool:
         return True
@@ -176,7 +176,7 @@ def _handler(wid: str) -> Any:
 
 def test_do_get_touches_the_pulse() -> None:
     """⑤ 接线：带 `X-Worker-Id` 的请求真的打进了哨兵（这是整条腿的注入点）。"""
-    _PingHandler._worker_pulse.reset()  # 类属性是共享面：先清一次（本文件唯一改它的用例）
+    _PingHandler.state.pulse.reset()  # `state` 是共享面：先清一次（本文件唯一改它的用例）
     h = _handler("kaggle-c")
     for _ in range(WORKER_PULSE_MIN_TOUCHES):
         HubHandler.do_GET(h)

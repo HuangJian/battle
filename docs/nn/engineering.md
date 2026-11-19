@@ -25,6 +25,48 @@
 
 ---
 
+## §218 hub 的进程级状态收成一个 `HubState`（2026-11-19）
+
+`hub/http_face.py::HubHandler` 原先有**五份散着的可变类属性**（`ThreadingHTTPServer` 每请求新建
+实例 ⇒ 跨请求共享态只能挂类上）：
+
+| 旧类属性 | 现在 | 读者 |
+|---|---|---|
+| `_blocked_logged` | `state.blocked_logged` | `_log_blocked`（封禁拒绝日志 60s 节流） |
+| `_seen_worker_sources` | `state.seen_sources` | `_watch_worker_source`（同名异来源观测） |
+| `_worker_source_warned` | `state.source_warned` | 同上（告警节流） |
+| `_worker_pulse` | `state.pulse` | `do_GET`/`do_POST` 打点 + `pulse_events`/`pulse_readout`/`configure_pulse` |
+| `_REJECT_WARN_AT` | `state.reject_warn_at` | `_log_reject`（拒绝日志 60s 节流） |
+
+第五份（`_REJECT_WARN_AT`，住文件尾部、`_log_reject` 旁边）是**新守卫抓到**的：附录 B 那行
+只点了前四份，靠「类体里不许有可变容器类属性」的 AST 判据才把它浮出来 —— 这正是把
+「共享态只有一个家」写成门禁而不是写成注释的价值。
+
+`HubState` 是普通 `@dataclass`（**不加锁**：与现实同规 —— 三个 dict 的单次读/写在 CPython
+下原子，跨字段一致性在这个观测面上不是契约），默认实例在 import 期建一次，与类属性时代的
+生命周期逐字节等价；`hub/boot.py` 的注入面仍是 `configure_pulse` / `pulse_events` 两个
+classmethod（它们内部改成 `cls.state.pulse`）。
+
+两个可读性收益：① 写点在代码里长成 `self.state.blocked_logged[ip] = now`，「这是进程级共享态」
+在调用点就看得见；② 用例隔离从「逐表 `.clear()`」变成「整份换新」——
+`tests/hub/test_worker_name_guard.py` 的 fixture 与 `test_worker_pulse.py` 的 `_PingHandler`
+都改成了后者（漏清一张表不会再悄悄串到下一个用例）。
+
+新守卫 `tests/hub/test_hub_state.py`（3 条）：① `HubHandler` 类体里**不许**再有可变容器类属性
+（`{}` / `[]` / `set{}` / `dict()` / `list()` / `set()` / `defaultdict()`），唯一允许的共享态是
+`state: HubState = HubState()`（连声明形态一起钉）；② 两个 `HubState` 互不共享四张表与哨兵；
+③ `HubHandler.state` 是 import 期的**同一份**（两个 `object.__new__(HubHandler)` 请求实例看到它）
+—— 若有人把它改成 `__init__` 里的实例字段，封禁节流与同名来源告警会当场失效。
+
+没有搬的：`hub` / `push` / `offline_push` 三个**注入的服务面**不是状态（一个是调度面、两个是
+派发器），仍由 `make_server` 按类属性注入 —— 它们不是「隐藏可变状态」，是依赖。
+
+验证：`bash tools/githook/nn-python-gate.sh` 全绿（ruff+mypy+**6254 passed** / 2 skipped /
+72.04s）；`tests/hub` 单跑 607 条全绿。`hub/http_face.py` LOC 564 → 567（`HubState` 的
+字段表与说明）。
+
+---
+
 ## §217 hub 路由：55 支 `elif` → 两张数据表 + 纯函数查表（2026-11-19）
 
 `hub/http_face.py::HubHandler.do_GET` / `do_POST` 原先各是一条 **30 支的顺序 `elif`** 链

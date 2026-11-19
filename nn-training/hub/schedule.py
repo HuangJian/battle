@@ -15,8 +15,8 @@ worker 侧「我该干哪一份、还拿着没有、算到哪了」的全部端�
 
 ## 为什么这一组能整块搬
 
-① 本组方法**零类属性状态**（AST 实测：`self.` 只出现通用助手，不碰 `hub` / `push` / `_blocked_logged`
-之外任何实例状态）；② 依赖全向下：只 import `common.protocol`（常量 + `has_offline_capability`）
+① 本组方法**零类属性状态**（AST 实测：`self.` 只出现通用助手，不碰 `hub` / `push` /
+`state`（当时的 `_blocked_logged`）之外任何实例状态）；② 依赖全向下：只 import `common.protocol`（常量 + `has_offline_capability`）
 ⇒ 账本秩 **0**，与 `hub.admin` 同层；③ 只往外调通用助手，反向只有派发表调用（组合方向）。
 
 ## 为什么 `PEEK_MAX` / `PRIORITY_BODY_MAX` 搬到 `common.protocol`

@@ -69,7 +69,7 @@ import json
 import time
 import urllib.parse
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Literal
@@ -325,6 +325,43 @@ POST_ROUTES: tuple[Route, ...] = (
     Route("exact", ADMIN_WORKER_ERROR_PATH, "_post_worker_error"),
 )
 
+# ------------------------------------------------------------------ 进程级状态
+
+
+@dataclass
+class HubState:
+    """`HubHandler` 的**进程级可变状态**（`ThreadingHTTPServer` 每请求新建一个 handler 实例
+    ⇒ 共享面只能挂在类上；本对象就是那个「只此一份」的家）。
+
+    为什么收成一个对象，而不是四个类属性（python.refactor.md 附录 B 的 `HubState` 行）：
+
+      ① **可读**：写点在代码里长成 `self.state.blocked_logged[ip] = now`，「这是进程级共享状态」
+         在调用点就看得见；散成 `self._blocked_logged` 时与实例字段长得一模一样。
+      ② **可重置**：用例可以整体换一份干净的（`handler.state = HubState()`），而不是逐表
+         `.clear()`——后者漏清一张表不会报错，只会让用例之间偷偷串味。
+      ③ **零行为差**：默认实例在 import 期建一次（与类属性的生命周期逐字节等价），
+         `hub/boot.py` 的注入面仍然只有 `configure_pulse` / `pulse_events` 两个 classmethod。
+
+    字段都**只由本进程的请求线程写**，不加锁（与类属性时代同规：dict 的单次读/写在 CPython
+    下原子；跨字段一致性在这个观测面上不是契约）。
+    """
+
+    #: ip -> 上次打印「封禁拒绝」的墙钟（节流：被封客户端高频轮询时每 ip 每分钟一条）
+    blocked_logged: dict[str, float] = field(default_factory=dict)
+    #: 同名 worker 来源观测（plan/worker-name-readable G7）：worker 名 -> (来源, 末次见到秒)。
+    #: 只观测——同名在 `WORKER_SEEN_WINDOW_SEC` 内换了来源 ⇒ 一行告警；**不改名、不入账、
+    #: 不分配后缀**。
+    seen_sources: dict[str, tuple[str, float]] = field(default_factory=dict)
+    #: 上述告警的节流表：worker 名 -> 上次告警墙钟。
+    source_warned: dict[str, float] = field(default_factory=dict)
+    #: 拒绝日志的 60s 节流表：`"kind:jid:status"` -> 上次告警墙钟。
+    reject_warn_at: dict[str, float] = field(default_factory=dict)
+    #: ★ worker 静默哨兵（2026-10-31，`hub/worker_pulse.py`）：每个带 `X-Worker-Id` 的请求
+    #: `touch()` 一下，后台线程（`hub/boot.py` 的 `hub-worker-pulse`）每 5s 扫一拍，静默
+    #: ≥ 阈值且本 episod 有轮询节奏 ⇒ 一条 err 上报进 `note_worker_error` 的 ring。
+    pulse: WorkerPulse = field(default_factory=WorkerPulse)
+
+
 # ------------------------------------------------------------------ HTTP
 
 
@@ -351,33 +388,22 @@ class HubHandler(
     #: （探活/网络/线程都在里面），而这里只调它的 `state()` —— 鸭子类型足够。
     offline_push: Any = None
 
-    #: ip -> 上次打印「封禁拒绝」的墙钟（节流：被封客户端高频轮询时每 ip 每分钟一条）
-    _blocked_logged: dict[str, float] = {}
-
-    #: ★ 同名 worker 来源观测（plan/worker-name-readable G7）：worker 名 -> (来源, 末次见到秒)。
-    #: 只观测——同名在 `WORKER_SEEN_WINDOW_SEC` 内换了来源 ⇒ 一行告警；**不改名、不入账、
-    #: 不分配后缀**。两个 dict 都是进程级（与 `_blocked_logged` 同规：ThreadingHTTPServer
-    #: 每请求新建实例，类属性才是共享面）。
-    _seen_worker_sources: dict[str, tuple[str, float]] = {}
-    #: 上述告警的节流表：worker 名 -> 上次告警墙钟。
-    _worker_source_warned: dict[str, float] = {}
-
-    #: ★ worker 静默哨兵（2026-10-31，`hub/worker_pulse.py`）：每个带 `X-Worker-Id` 的请求
-    #: `touch()` 一下，后台线程（`hub/boot.py` 的 `hub-worker-pulse`）每 5s 扫一拍，静默
-    #: ≥ 阈值且本 episod 有轮询节奏 ⇒ 一条 err 上报进 `note_worker_error` 的 ring。
-    #: 与 `_seen_worker_sources` 同规：进程级类属性（ThreadingHTTPServer 每请求新建实例）。
-    _worker_pulse: WorkerPulse = WorkerPulse()
+    #: ★ **进程级可变状态**（闭锁节流 / 同名 worker 来源观测 / 静默哨兵）：四份散着的类属性
+    #: 现收进 `HubState`（2026-11-19，python.refactor.md 附录 B）。与 `hub` / `push` 同规挂类上
+    #: （`ThreadingHTTPServer` 每请求新建实例 ⇒ 类属性才是共享面），但**写点有名字**：
+    #: `self.state.blocked_logged[…]`。用例整体换一份干净的即可（`handler.state = HubState()`）。
+    state: HubState = HubState()
 
     # ---- 基础 ----
     @classmethod
     def pulse_events(cls) -> list[dict]:
         """扫一拍 worker 静默哨兵，返回本拍要上发的事件（**只给 `hub/boot.py` 的后台线程调**）。
 
-        为什么留这个 classmethod 而不是让引导链直接摸 `_worker_pulse`：状态是进程级类属性
+        为什么留这个 classmethod 而不是让引导链直接摸 `state.pulse`：状态是进程级共享面
         （`ThreadingHTTPServer` 每请求新建实例），但「谁有资格读它」应当是显式的——
         boot 只负责把事件翻译成 `note_worker_error` 的上报体 + 一行日志。
         """
-        return cls._worker_pulse.sweep()
+        return cls.state.pulse.sweep()
 
     @classmethod
     def configure_pulse(cls, *, silence_sec: float) -> None:
@@ -385,12 +411,12 @@ class HubHandler(
 
         与 `hub`/`push` 同规：**引导链注入类属性**，`HubHandler` 自己不读 CLI。
         """
-        cls._worker_pulse = WorkerPulse(silence_sec=silence_sec)
+        cls.state.pulse = WorkerPulse(silence_sec=silence_sec)
 
     @classmethod
     def pulse_readout(cls) -> dict:
         """当前哨兵快照（只读；诊断 / 用例用——`pulse_events` 会推进状态，不能拿它看）。"""
-        return cls._worker_pulse.readout()
+        return cls.state.pulse.readout()
 
     def log_message(self, fmt: str, *args: object) -> None:  # 只打非常规事件
         # 静默高频只读访问（/ping 健康检查、/jobs/peek 拉活、result/payload 轮询含 404）
@@ -453,9 +479,9 @@ class HubHandler(
         """封禁命中审计（每 ip 每 60s 一条）：被封客户端往往仍在高频轮询，
         不节流会把日志刷爆，但完全不打则「谁在被封」永远查不到。"""
         now = time.time()
-        if now - HubHandler._blocked_logged.get(ip, 0.0) < 60:
+        if now - self.state.blocked_logged.get(ip, 0.0) < 60:
             return
-        HubHandler._blocked_logged[ip] = now
+        self.state.blocked_logged[ip] = now
         log_line(
             f"hub-server {ip}",
             "BLOCKED — 请求被拒 "
@@ -731,7 +757,7 @@ class HubHandler(
     # ---- 路由 ----
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
-        self._worker_pulse.touch(self._worker_id())
+        self.state.pulse.touch(self._worker_id())
         if path.startswith("/offline/"):
             # 离线盘报名（取包链的全部端点都在这条前缀下；见 `_note_offline_disk`）。
             self._note_offline_disk()
@@ -750,7 +776,7 @@ class HubHandler(
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0]
-        self._worker_pulse.touch(self._worker_id())
+        self.state.pulse.touch(self._worker_id())
         if path.startswith("/offline/"):
             # 同上：租约/补传也在这条前缀下（POST 面）。
             self._note_offline_disk()
@@ -872,14 +898,14 @@ class HubHandler(
             self.client_address[0], hdrs.get(CF_SOURCE_HEADER, "") if hdrs else ""
         )
         now = time.time()
-        prev = self._seen_worker_sources.get(wid)
-        self._seen_worker_sources[wid] = (src, now)
+        prev = self.state.seen_sources.get(wid)
+        self.state.seen_sources[wid] = (src, now)
         if not prev or prev[0] == src or now - prev[1] > WORKER_SEEN_WINDOW_SEC:
             return
-        last = self._worker_source_warned.get(wid, 0.0)
+        last = self.state.source_warned.get(wid, 0.0)
         if now - last < WORKER_SOURCE_WARN_THROTTLE_SEC:
             return
-        self._worker_source_warned[wid] = now
+        self.state.source_warned[wid] = now
         _log(
             f"⚠ worker 名 {wid} 在 "
             f"{WORKER_SEEN_WINDOW_SEC:.0f}s 窗口内换了来源（{prev[0]} → {src}）——"
@@ -950,8 +976,6 @@ class HubHandler(
             self._json({"error": f"请求体截断（声明 {n}，实收 {len(raw)}）"}, 400)
             return None
         return raw
-    #: "kind:jid:status" -> 上次告警墙钟（hub 侧拒绝日志的 60s 节流用的）
-    _REJECT_WARN_AT: dict[str, float] = {}
 
     def _log_reject(
         self,
@@ -972,9 +996,9 @@ class HubHandler(
         """
         now = time.time()
         key = f"{kind}:{job_id}:{status}"
-        if now - self._REJECT_WARN_AT.get(key, 0.0) <= 60:
+        if now - self.state.reject_warn_at.get(key, 0.0) <= 60:
             return
-        self._REJECT_WARN_AT[key] = now
+        self.state.reject_warn_at[key] = now
         _log(
             f"{kind} 被拒: job={job_id} "
             f"course={course or '-'} worker={worker or '?'} status={status} "
