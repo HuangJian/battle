@@ -285,6 +285,27 @@ export async function supersedeLegacyInstances(key: SharedComponent): Promise<st
   return struck
 }
 
+/** 复用既有隧道前的**静态判据**（不探网络）：回源地址 → 隧道选项。返回非 null 即必须重启。
+ *
+ *  为什么单独抽出来：2026-11-19 那次「代码修了没生效」的责任全在这张判据表上——旧实现
+ *  用 `edgeReady || 穿隧道 ping` 做复用门，**根本没看 origin**，于是把 `--url` 从
+ *  `localhost` 改成 `127.0.0.1` 之后，已经跑起来的那条旧隧道（回源拨 `::1`）照样被复用，
+ *  节点继续吃 502。抽成纯函数后这条不变式可被用例直接钉死，不必真去 spawn cloudflared。
+ *
+ *  顺序有意为之：origin 排第一——回源错了，edge 再健康也是把流量送进 refused。 */
+export function tunnelRestartReason(
+  prev: Pick<RegistryEntry, 'cfProtocol' | 'cfEdgeIp' | 'originUrl'>,
+  want: { origin: string; protocol: string; edgeIp: string },
+): 'origin' | 'options' | null {
+  // 旧条目没有 `originUrl`（当时不记）⇒ 按「未知」处理并重启一次，把地址钉进账本。
+  if ((prev.originUrl ?? '') !== want.origin) return 'origin'
+  // M1 变更检测（plan §3.2）：登记的选项 != 当前配置 → 杀旧起新，否则「改了选项其实没生效」
+  // 的假成功。旧登记无这两字段（= 当时未传旗标）⇒ 按 'auto' 比对，缺省 http2/4 会重启一次。
+  if ((prev.cfProtocol ?? 'auto') !== want.protocol) return 'options'
+  if ((prev.cfEdgeIp ?? 'auto') !== want.edgeIp) return 'options'
+  return null
+}
+
 /** 共享**单**隧道步骤（3 次申请重试；URL 以日志输出为触发）。
  *
  *  一条隧道指向共享 hub 端口——它同时服务所有并行课程（hub 按 path 里的 job_id 路由）。
@@ -303,37 +324,47 @@ export async function stepCloudflared(cfg: RlConfig, noTunnel = false): Promise<
     throw new Error('cloudflared 未安装')
   }
 
-  // 已有登记的隧道：edge 就绪（本地 /ready）即复用；穿隧道 ping 失败可能是
-  // hub 出网劣化——只有 edge 未注册才重启
+  // 已有登记的隧道：先核对**静态条件**（回源地址 / 隧道选项），再谈 edge。
+  // M2（2026-11-19 事故）：这里的判据曾是 `edgeReady || 穿隧道 ping` —— 短路或 ⇒ edge 在线
+  // 就复用，从不看 origin。于是回源写成 `localhost`（Go 解析成 `::1`，hub 只绑 v4）的那条
+  // 旧隧道在代码修好之后**仍在服务**，节点继续吃 502，现场表现为「改了代码却没生效」。
+  // 反向的取舍：回源地址变了 ⇒ 必须杀旧起新（代价是换域名）；而**穿隧道 ping 失败不该单独
+  // 触发重启**——那多半是出网劣化/hub 侧故障，为一时的抖动换域名会让所有已部署节点失联。
+  // （顺带说明旧码的 `|| ping` 其实是死分支：edge 未就绪时 ping 几乎必然也失败，等价于只看 edge。）
   const wantTunnel = resolveCfTunnel(cfg)
+  const hubPort = sharedHubPort(cfg)
+  const wantOrigin = `http://127.0.0.1:${hubPort}`
   if (prev && pidAlive(prev.pid) && prev.url) {
     const url = prev.url
-    // M1 变更检测（plan §3.2）：登记的隧道选项 != 当前配置 → 杀旧起新，否则「改了
-    // 选项其实没生效」的假成功。旧登记无这两字段（= 当时未传旗标）⇒ 按 'auto' 比对，
-    // 缺省 http2/4 会触发一次重启把旧隧道升级到新缺省。
-    const prevProtocol = prev.cfProtocol ?? 'auto'
-    const prevEdgeIp = prev.cfEdgeIp ?? 'auto'
-    if (prevProtocol !== wantTunnel.protocol || prevEdgeIp !== wantTunnel.edgeIp) {
+    const why = tunnelRestartReason(prev, {
+      origin: wantOrigin,
+      protocol: wantTunnel.protocol,
+      edgeIp: wantTunnel.edgeIp,
+    })
+    if (why === 'origin') {
       warn(
-        `隧道选项变更（${prevProtocol}/${prevEdgeIp} → ${wantTunnel.protocol}/${wantTunnel.edgeIp}）` +
-          '——重启 cloudflared 使新选项生效（下次启动才会走新命令行）',
+        `隧道回源地址变更（${prev.originUrl || '未登记'} → ${wantOrigin}）——重启 cloudflared：` +
+          '旧隧道仍在拨旧地址（`localhost` → `::1` ⇒ 502），复用它等于没修',
       )
       await killPid(prev.pid)
-    } else {
-      const edgeReady = await tunnelEdgeReady(prev.metrics)
-      if (edgeReady || (await httpOk(`${url}/ping`, cfg.rl.remote_token, 10000))) {
-        if (edgeReady) ok(`cloudflared 已在运行（edge 在线）: ${url}`)
-        else ok(`cloudflared 已在运行: ${url}`)
-        return url
-      }
+    } else if (why === 'options') {
+      warn(
+        `隧道选项变更（${prev.cfProtocol ?? 'auto'}/${prev.cfEdgeIp ?? 'auto'} → ` +
+          `${wantTunnel.protocol}/${wantTunnel.edgeIp}）——重启 cloudflared 使新选项生效`,
+      )
+      await killPid(prev.pid)
+    } else if (!(await tunnelEdgeReady(prev.metrics))) {
       warn('cloudflared 进程存在但 edge 未连接，重启中...')
       await killPid(prev.pid)
+    } else {
+      ok(`cloudflared 已在运行（edge 在线，回源 ${wantOrigin}）: ${url}`)
+      return url
     }
   }
 
-  // 共享单隧道：一个 metrics 口（槽位 0 的 metrics）+ 一个 hub 目标端口。
+  // 共享单隧道：一个 metrics 口（槽位 0 的 metrics）+ 一个 hub 目标端口（`hubPort` 已在
+  // 复用判定之前算好——回源地址比对要用它）。
   const metricsPort = sharedTunnelMetricsPort(cfg)
-  const hubPort = sharedHubPort(cfg)
   // 换代接管：旧形状「每课一条隧道」全部收掉（服务的是同一件事），否则新隧道 `--metrics`
   // 会与它们在同一个口上撞车（bind 失败即退），而幸存者的 200 还会被当成新隧道的就绪。
   const superseded = await supersedeLegacyInstances('cloudflared')
@@ -378,6 +409,8 @@ export async function stepCloudflared(cfg: RlConfig, noTunnel = false): Promise<
       course: '',
       cfProtocol: wantTunnel.protocol,
       cfEdgeIp: wantTunnel.edgeIp,
+      // M2：把回源地址钉进账本——下一次启动靠它判「这条隧道拨的还是不是我们要的地址」。
+      originUrl: wantOrigin,
     })
     monitorTouch()
 
@@ -416,6 +449,8 @@ export async function stepCloudflared(cfg: RlConfig, noTunnel = false): Promise<
     course: '',
     cfProtocol: wantTunnel.protocol,
     cfEdgeIp: wantTunnel.edgeIp,
+    // M2：把回源地址钉进账本——下一次启动靠它判「这条隧道拨的还是不是我们要的地址」。
+    originUrl: wantOrigin,
   })
 
   // 隧道死活以本地 /ready 为准（不依赖出网）；穿隧道 ping 失败只降级为警告。

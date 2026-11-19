@@ -6,7 +6,7 @@ QoS 降质），不是代码路径 —— 所以它必须可重跑、同一台�
 
 做法（每次运行都自建环境，不依赖任何已启动的组件）：
   1. 在本机随机空闲端口起一个**真** hub-server（`make_server`，同 `smoke_loopback.py` 的口径）；
-  2. 每条腿：`cloudflared tunnel --url http://localhost:<hubPort> --protocol <p> --edge-ip-version 4`
+  2. 每条腿：`cloudflared tunnel --url http://127.0.0.1:<hubPort> --protocol <p> --edge-ip-version 4`
      起一条 quick tunnel，从 logfile 里等出 `https://*.trycloudflare.com` 地址；
   3. 双向各打 N 发 2MiB：上行 = POST `/admin/net-probe`（body 2MiB，服务端只读掉并回字节数）、
      下行 = GET `/admin/net-probe?bytes=2097152`；
@@ -114,7 +114,10 @@ def _start_tunnel(bin_path: str, hub_port: int, protocol: str, logfile: Path) ->
         bin_path,
         "tunnel",
         "--url",
-        f"http://localhost:{hub_port}",
+        # ★ 127.0.0.1 而非 localhost：Go 把 localhost 解析成 `::1`，而 hub 只绑 v4 ⇒
+        #   每条经隧道的请求都吃 `dial tcp [::1]:<port>: refused`，CF 回 502，
+        #   于是「A/B 谁更强」的分差里混进一整套 502（2026-11-19 实测）。
+        f"http://127.0.0.1:{hub_port}",
         "--no-autoupdate",
         "--protocol",
         protocol,

@@ -79,7 +79,54 @@ CF 把它翻成 **502** 回给节点。本机取证读数：
 > 就扔掉 ⇒ 五轮排查里没有一条读数能区分它们。现在的死因行长这样：
 > `inherit=HTTP 502（server=cloudflare；cf-ray=a5cf…；body={"error":1033}）`。
 
+### 根因 ④（同一事故的第二现场）：「代码修好了，但旧隧道还在服务」
+
+上面三条改完、DSW 重新部署之后，节点**依然**满屏 502/530（22:32–22:55 那段日志）。取证发现
+进程还是 21:16 起的那条：
+
+```
+pid 25896  cloudflared tunnel --url http://localhost:8787 --metrics 127.0.0.1:8788 …
+日志累计：72 × Unable to reach the origin service … dial tcp [::1]:8787: refused
+```
+
+原因在控制台的**复用判据**（`dashboard/src/stack/hub.ts::stepCloudflared`）：
+
+```ts
+const edgeReady = await tunnelEdgeReady(prev.metrics)
+if (edgeReady || (await httpOk(`${url}/ping`, …))) return url   // ← 短路或
+```
+
+`||` 短路 ⇒ **edge 在线就原样复用，从不看 origin**。于是把 `--url` 改对之后，已经跑起来的
+那条旧隧道照样被复用，节点继续吃 502 —— 现象长得像「代码没改对」，实际是「改对了但没换进程」。
+（顺带一个观察：这个 `|| ping` 其实是死分支，edge 未就绪时穿隧道 ping 几乎必然也失败，
+整条判据等价于只看 edge。）
+
+修法是把判据抽成**纯函数**（不探网络，因此不 spawn cloudflared 也能钉死）：
+
+```ts
+export function tunnelRestartReason(prev, want): 'origin' | 'options' | null {
+  if ((prev.originUrl ?? '') !== want.origin) return 'origin'   // 回源错了，edge 再健康也是把流量送进 refused
+  if ((prev.cfProtocol ?? 'auto') !== want.protocol) return 'options'
+  if ((prev.cfEdgeIp ?? 'auto') !== want.edgeIp) return 'options'
+  return null
+}
+```
+
+配套三件事：① `originUrl` 成为账本字段（`core/types.ts`），每次 spawn 都写
+`http://127.0.0.1:<sharedHubPort>`；② 旧条目缺该字段 ⇒ 按「未知」重启**一次**把地址钉进去
+（`'' ≠ want` 天然落到重启分支，不需要额外的迁移代码）；③ 第六个 spawn 点
+`nn-training/hub/tunnel_ab_probe.py` 也改成 `127.0.0.1`。
+
+**反向的取舍值得记一笔**：穿隧道 ping 失败**不再**单独触发重启。它多半是出网劣化或 hub 侧
+故障，而重启会把 quick tunnel 的域名换掉 —— 那是这条链上最贵的操作（所有已部署节点要跟着改
+`CFG.hub_url` 重跑）。所以 ping 只当诊断，**地址比对才当判据**：前者是漂移，后者是确定性证据。
+
 ### 单测
+
+`dashboard/tests/tunnel-reuse-origin.test.ts`（新，7 例）：判据表 6 例（地址一致 ⇒ 复用 ·
+仍写 `localhost` ⇒ 重启 · 缺 `originUrl` ⇒ 重启 · hub 端口改了 ⇒ 重启 · 选项变了 ⇒ `options`）+
+spec 与内联 spawn 两条路径的 `--url`/`--metrics` 字面量对账（`hub.ts` 源码不得再出现
+`http://localhost`）。真进程行为仍由 `single-hub-tunnel` / `views-cloudflared-health` 守。
 
 `tests/remote/test_rollout_relay.py` +3：网关码必须换路由且不记 route · 死因行带 `server=cloudflare`
 与机读码 · `RelayChannel.hub_url` 跟随端口改写（并钉 `direct`——扫描只验过直连那条）。
@@ -87,6 +134,9 @@ CF 把它翻成 **502** 回给节点。本机取证读数：
 断言注册**和**注销都打 `:2096` —— 只有真跑才能证明「改一处、四处跟随」。
 `dashboard/tests/training-multi-course.test.ts`：`cloudflaredSpec` 断言 `http://127.0.0.1:<hub>` 且**不得**
 出现 `//localhost:`。`nn-training/tests/remote/` 全量 2610 例绿。
+
+**真机复测（根因④修完）**：新进程 `Settings: … url:http://127.0.0.1:8787`、日志 `::1` 计数 **0**；
+`:443` / `:2096` / `:2083` 无 token 各 **401**、带 token 各 **200**，0 个 502。
 
 ### 边界
 

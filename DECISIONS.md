@@ -6440,4 +6440,13 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **被否决**：① 换域名 / 换机器 / 配代理（三个都治不了「回源拨错地址」）；② 让 hub 再绑 `::1`
   （能救当下，但把「地址该写谁」这条规矩藏起来，Linux 上 `Bun.serve` 只绑 v4 时还会再犯）；
   ③ 把备用端口扫描改成多路由（扫的是端口是否被掐，路由是另一维，混在一起判词会糊）。
-- **全文** → `docs/nn/remote-transport.md` §168。
+- **根因④（第二现场）**：改完上述三处、DSW 重新部署后仍满屏 502 —— 进程还是 21:16 起的那条
+  （`--url http://localhost:8787`，日志 72 条 `dial tcp [::1]:8787: refused`）。控制台复用判据是
+  `edgeReady || 穿隧道 ping`：**短路或 ⇒ edge 在线就复用，从不核对 origin** ⇒ 改对了代码、没换进程。
+- **裁定（M2）**：复用前先过静态判据 `tunnelRestartReason(prev, want)`：origin 不等 → 重启；
+  选项不等 → 重启；都过才看 edge。`originUrl` 入账本，旧条目缺它 ⇒ 按「未知」重启一次补记。
+  **ping 失败不再单独触发重启** —— 那多半是出网/hub 侧劣化，而换域名是这条链上最贵的操作
+  （所有已部署节点要跟着改 `CFG.hub_url`）。顺手修第六个 spawn 点 `hub/tunnel_ab_probe.py`。
+- **护栏**：`dashboard/tests/tunnel-reuse-origin.test.ts`（7 例；判据抽纯函数是为了**不 spawn
+  cloudflared 就能钉死**）。真机复测：日志 `::1` 计数 **0**，`:443/:2096/:2083` 无 token 401 /
+  带 token 200 / **0 个 502**。全文 → `docs/nn/remote-transport.md` §168。
