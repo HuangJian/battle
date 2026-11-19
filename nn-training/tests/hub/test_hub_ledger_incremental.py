@@ -135,7 +135,7 @@ def test_a_half_written_line_is_not_parsed_and_does_not_eat_the_next(tmp_path: P
     with open(st.jsonl_path, "a", encoding="utf-8") as f:
         f.write('{"event": "job_pendi')  # 写者正在追加
     assert len(_rows(st)) == 2, "半截行不该被解析"
-    partial = st.jsonl_path.stat().st_size - st._ledger_off
+    partial = st.jsonl_path.stat().st_size - st.ledger_offset()
     assert partial > 0, "半截行必须留在 offset 之外（下次接着读）"
     # 补全这一行 ⇒ 立刻能解析到，且不重解前面两行
     with open(st.jsonl_path, "a", encoding="utf-8") as f:

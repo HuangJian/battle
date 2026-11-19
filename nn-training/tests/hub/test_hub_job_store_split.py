@@ -80,38 +80,6 @@ AUTH_MOD = HUB_DIR / "auth.py"
 
 #: 域 -> （混入类, 文件内实现的方法, 该域在 `_init_*` 里声明的状态）
 DOMAINS: dict[str, tuple[type, tuple[str, ...], tuple[str, ...]]] = {
-    "store_ledger": (
-        ledger_mod.LedgerMixin,
-        (
-            "_job_dir",
-            "_read_ledger",
-            "_append_ledger",
-            #: 六轮 F1（2026-10-05）：净态折叠——`_claim_locked` 的即时闸对账 + `publish` 去重。
-            #: 2026-10-17（plan/export-must-not-cancel-live-job §5）公共化：第二个读者是
-            #: `/jobs/{id}/status`（status 与派发池同源）；训练侧同口径 = `worker.bc_ledger.job_net_event`。
-            "ledger_net_state",
-            # 2026-11-18（G5 第三十七批）：增量读的字节位（纯读，判「整份都解析完了」）。
-            "ledger_offset",
-            # 2026-10-06：未完成集拆成两个视图（池 = ∧无活租约 / 在飞 = ∧有活租约）——
-            # 空闲 worker 的备份副本候选源（`inflight_job_ids`），筛子只写一遍。
-            "_unfinished_pending",
-            "claimable_job_ids",
-            "inflight_job_ids",
-            "publish",
-            "job_failure",
-            "get_result",
-            "cancel_unsettled_jobs",
-            # 2026-10-11（plan/aborted-course-revival W7）：单 job 定向作废——全池版与单版本
-            # 共用 `_cancel_job_locked`（判据留入口、落账动作只此一份）。
-            "_cancel_job_locked",
-            "cancel_job",
-            # 2026-11-18（G5）：进程内即时闸的只读查询（不按账本对账；真闸是池 + claim 净态）。
-            "is_cancelled",
-        ),
-        # 2026-10-17（plan/hub-server-memory-slim L3）：`_ledger_off` = H6 真增量的另一半
-        # （已解析到的字节位）。没有它，size 一变就只能全文重解析。
-        ("_ledger_cache", "_ledger_off", "_cancelled"),
-    ),
     "store_wire": (
         wire_mod.WireMeterMixin,
         ("record_payload_sent", "record_push_wire", "record_result_recv", "wire_stats"),
@@ -155,6 +123,29 @@ SCHED_METHODS = (
     "_drop_commitment_locked",
 )
 SCHED_STATE = ("_claimed", "_computing", "_ready", "_epoch")
+
+#: B7-P4b：账本簇整簇切成 `Ledger`（`hub/store_ledger.py`）。16 个转发口 + 3 个状态。
+LEDGER_METHODS = (
+    "_job_dir",
+    "ledger_offset",
+    "_read_ledger",
+    "_read_ledger_from",
+    "_append_ledger",
+    "ledger_net_state",
+    "_unfinished_pending",
+    "claimable_job_ids",
+    "inflight_job_ids",
+    "_cancel_job_locked",
+    "is_cancelled",
+    "cancel_unsettled_jobs",
+    "cancel_job",
+    "publish",
+    "job_failure",
+    "get_result",
+)
+LEDGER_STATE = ("_ledger_cache", "_ledger_off", "_cancelled")
+#: `Ledger.__init__` 的注入面（锁 / 时钟 / 构造身份 / 调度协作者 / 晚回填的租约）。
+LEDGER_INJECTED = ("_lock", "_clock", "job_root", "jsonl_path", "sched", "leases")
 
 #: B7-P2：租约簇整簇切成 `LeaseBook`（`hub/store_leases.py`）。`LEASE_METHODS` 是
 #: 转发壳的**闭集**（原簇对 hub 的 39 个口）；状态只在 `self.leases` 上。
@@ -229,8 +220,8 @@ LEASE_INJECTED = ("_lock", "_clock", "_job_dir", "sched", "ledger")
 
 #: 组合类自己留的（进程级 + 构造）：`halt_workers` / `_workers` 是**进程**概念，
 #: 多课程单 hub 下 `_HubQueue` 借的就是这一份（见其 docstring ③）。
-#: B7-P1/P2 起还多 9 + 39 个转发方法（状态只在协作者上，组合类不存副本）。
-OWN_METHODS = ("__init__", "note_worker", *SCHED_METHODS, *LEASE_METHODS)
+#: B7-P1/P2/P4b 起还多 9 + 39 + 16 个转发方法（状态只在协作者上，组合类不存副本）。
+OWN_METHODS = ("__init__", "note_worker", *SCHED_METHODS, *LEDGER_METHODS, *LEASE_METHODS)
 PROCESS_STATE = ("halt_workers", "_workers")
 
 #: 五个混入 + 协作者 + 两个「搬出后新增的邻居」允许的仓内依赖（多一个就说明又搬漏/搬多了）。
@@ -374,9 +365,9 @@ def test_every_method_lives_in_exactly_one_mixin() -> None:
             seen[m] = domain
     # 2026-11-18（G5）：71 → 77（`is_cancelled` 即时闸 + `has_lease` / `lease_state` /
     # `lease_expiry` / `heartbeat_at` 租约读数 + `ledger_offset` 增量读读数）。
-    # B7-P1/P2：调度 9 + 租约 37 个方法搬进协作者 ⇒ 77 → 31（混入只数剩下四个域）。
-    assert len(MIXIN_METHODS) == 31, len(MIXIN_METHODS)
-    assert len(seen) == 31, len(seen)
+    # B7-P1/P2/P4b：调度 9 + 租约 37 + 账本 15 个方法搬进协作者 ⇒ 77 → 16（混入只剩三个域）。
+    assert len(MIXIN_METHODS) == 16, len(MIXIN_METHODS)
+    assert len(seen) == 16, len(seen)
     # 49 = 拆分前 `_JobStore` 的 49 个方法；2026-09-25 并入 origin 的课程侧落位后又多了 2 条
     # （`_course_backup_target` / `_land_offline_round_extras`）；2026-10-01 §52 加 2 条
     # （`_lease_state` 判据 + `_lease_held` 布尔视图）；2026-10-03 T0 加 1 条
@@ -387,8 +378,8 @@ def test_every_method_lives_in_exactly_one_mixin() -> None:
     # `bc_drain_of`——BC 进度租约与 drain 判据）；
     # 2026-10-11 W7（plan/aborted-course-revival）加 2 条（`cancel_job` / `_cancel_job_locked`）
     # ⇒ 64 + 2；2026-11-07（plan/dead-lease-sweep）加 1 条（`reap_dead_leases`）⇒ 65 + 2。
-    # B7-P1/P2：31 个域方法 + 组合类自己的 50 个（构造 / note_worker / 9 + 39 个转发）。
-    assert len(MIXIN_METHODS) + len(OWN_METHODS) == 31 + 50, "_JobStore 的方法总数变了"
+    # B7-P1/P2/P4b：16 个域方法 + 组合类自己的 66 个（构造 / note_worker / 9+39+16 个转发）。
+    assert len(MIXIN_METHODS) + len(OWN_METHODS) == 16 + 66, "_JobStore 的方法总数变了"
 
 
 def test_the_mixins_do_not_share_any_defined_name() -> None:
@@ -423,13 +414,15 @@ def test_the_mixins_are_wired_into_the_store() -> None:
     for m in LEASE_HELPERS:
         assert callable(getattr(leases_mod.LeaseBook, m)), f"LeaseBook 少了内部接缝 {m}"
         assert not hasattr(combo, m), f"{m} 只是协作者内部接缝，不该出现在组合类上"
+    # B7-P4b：账本面的 16 个口同样是转发壳（实现与状态住 `self.ledger`）。
+    for m in LEDGER_METHODS:
+        assert callable(getattr(combo, m)), f"Ledger::{m} 没有转发壳"
 
 
 def test_the_mro_is_exactly_the_six_mixins_plus_auth_guard() -> None:
     """MRO 逐项对账——多一个少一个都要红（否则「组合」只是口头上的）。"""
     assert [c.__name__ for c in hs._JobStore.__mro__] == [
         "_JobStore",
-        "LedgerMixin",
         "WireMeterMixin",
         "ResultsMixin",
         "OfflineRoundsMixin",
@@ -477,18 +470,40 @@ def test_the_private_state_still_lives_on_one_object(tmp_path: Path) -> None:
     for name in LEASE_STATE:
         assert hasattr(leases, name), f"LeaseBook 的 {name} 不在实例上"
         assert not hasattr(store, name), f"{name} 在组合类上又存了一份"
-    assert leases.ledger is store and leases.sched is sched
+    # 账本协作者：3 个状态只在 `ledger` 上，组合类不得再存一份同名副本。
+    ledger = store.ledger
+    for name in LEDGER_STATE:
+        assert hasattr(ledger, name), f"Ledger 的 {name} 不在实例上"
+        assert not hasattr(store, name), f"{name} 在组合类上又存了一份"
+    assert leases.ledger is ledger and leases.sched is sched
+    assert ledger.leases is leases and ledger.sched is sched
     # 锁 / 时钟 / 依赖表全部注入同一份（L1/L2/L4）。先把私有读数取到局部——
     # 断言表达式里不出现私有属性（G5 的口径；这也是「读数不是耦合」的样子）。
-    sched_lock, lease_lock, store_lock = sched._lock, leases._lock, store._lock
-    sched_clock, lease_clock, store_now = sched._clock, leases._clock, store._now
+    sched_lock, lease_lock, ledger_lock, store_lock = (
+        sched._lock,
+        leases._lock,
+        ledger._lock,
+        store._lock,
+    )
+    sched_clock, lease_clock, ledger_clock, store_now = (
+        sched._clock,
+        leases._clock,
+        ledger._clock,
+        store._now,
+    )
     sched_holders, lease_holders = sched._lease_workers, leases._lease_workers
     sched_beats, lease_beats = sched._last_heartbeat, leases._last_heartbeat
-    assert sched_lock is store_lock and lease_lock is store_lock, "协作者没有拿到组合类那把锁"
-    assert sched_clock == store_now and lease_clock == store_now, "协作者的时钟与组合类不同源"
+    ledger_root, store_root = ledger.job_root, store.job_root
+    assert (
+        sched_lock is store_lock and lease_lock is store_lock and ledger_lock is store_lock
+    ), "协作者没有拿到组合类那把锁"
+    assert (
+        sched_clock == store_now and lease_clock == store_now and ledger_clock == store_now
+    ), "协作者的时钟与组合类不同源"
     assert sched_holders is lease_holders and sched_beats is lease_beats, (
         "调度与租约没有共享同一张租约表 —— 两份副本会让事实分叉"
     )
+    assert ledger_root == store_root
     # 通用助手面（`_AuthGuard`）也照旧
     for name in ("auth_failure", "auth_success", "is_blocked", "blocked_remaining"):
         assert callable(getattr(store, name)), name
@@ -520,6 +535,12 @@ def test_each_init_hook_owns_its_fields_and_nobody_else_does() -> None:
         assert name in lease_fields, f"LeaseBook 没声明 {name}"
         assert name not in owners, f"{name} 在 {owners[name]} 与 LeaseBook 各写了一份"
     assert lease_fields == set(LEASE_STATE) | set(LEASE_INJECTED), sorted(lease_fields)
+    # 账本协作者：3 个状态 + 6 个注入面，全部只由 `Ledger.__init__` 赋值。
+    ledger_fields = _init_state(HUB_DIR / "store_ledger.py", "Ledger", "__init__")
+    for name in LEDGER_STATE:
+        assert name in ledger_fields, f"Ledger 没声明 {name}"
+        assert name not in owners, f"{name} 在 {owners[name]} 与 Ledger 各写了一份"
+    assert ledger_fields == set(LEDGER_STATE) | set(LEDGER_INJECTED), sorted(ledger_fields)
     # 进程级那两件住组合类，不归任何域
     for name in PROCESS_STATE:
         assert name not in owners, f"{name} 是进程级状态，不该被域声明"
@@ -601,6 +622,23 @@ def test_the_init_calls_every_hook_exactly_once() -> None:
         "sched",
     ], [k.arg for k in lease_ctor[0].keywords]
     assert "LeaseMixin._init_leases" not in src
+    # B7-P4b：账本协作者同样恰好构造一次，五个依赖按名注入（它是构造链的第一环）。
+    ledger_ctor = [
+        n
+        for n in ast.walk(init)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "Ledger"
+    ]
+    assert len(ledger_ctor) == 1, f"Ledger 构造了 {len(ledger_ctor)} 次"
+    assert sorted(k.arg for k in ledger_ctor[0].keywords if k.arg) == [
+        "clock",
+        "job_root",
+        "jsonl_path",
+        "lock",
+        "sched",
+    ], [k.arg for k in ledger_ctor[0].keywords]
+    assert "LedgerMixin._init_ledger" not in src
+    # 唯一的两相回填：LeaseBook 建好后写回 Ledger.leases。
+    assert "self.ledger.leases = self.leases" in src
 
 
 def test_mixin_declarations_are_annotations_or_owned_constants() -> None:
@@ -662,9 +700,11 @@ def test_the_composed_class_moved_below_the_mixins() -> None:
     body = _cls(_tree(STORE_MOD), "_JobStore").body
     members = [n for n in body if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant))]
     anns = [n for n in members if isinstance(n, ast.AnnAssign)]
-    assert [n.target.id for n in anns if isinstance(n.target, ast.Name)] == ["sched", "leases"] and len(anns) == 2, [
-        ast.unparse(n) for n in anns
-    ]
+    assert [n.target.id for n in anns if isinstance(n.target, ast.Name)] == [
+        "ledger",
+        "sched",
+        "leases",
+    ] and len(anns) == 3, [ast.unparse(n) for n in anns]
     fns = [n for n in members if isinstance(n, ast.FunctionDef)]
     assert [n.name for n in fns] == list(OWN_METHODS), [n.name for n in fns]
 
@@ -686,7 +726,7 @@ def test_the_mixins_never_import_each_other() -> None:
         # （第十/十一刀连踩两次，这是第三次）。从对象取还更强：改名也不会失效。
         assert hs.__name__ not in got, f"{domain}.py 反向 import 了组装模块"
     # B7-P1/P2：两个协作者同样**谁都不 import**（只靠 `common.protocol`），更不 import 组合类。
-    for collaborator in ("store_scheduling.py", "store_leases.py"):
+    for collaborator in ("store_scheduling.py", "store_leases.py", "store_ledger.py"):
         got = set()
         for n in ast.walk(_tree(HUB_DIR / collaborator)):
             if isinstance(n, ast.ImportFrom) and n.module:
@@ -704,6 +744,8 @@ def test_the_layers_match_the_ledger() -> None:
         assert lv < dag.LAYERS[host_key], domain
     assert dag.LAYERS["hub.store_scheduling"] == 0
     assert dag.LAYERS["hub.store_scheduling"] < dag.LAYERS["hub.store"]
+    assert dag.LAYERS["hub.store_ledger"] == 0
+    assert dag.LAYERS["hub.store_ledger"] < dag.LAYERS["hub.store"]
     assert dag.LAYERS["hub.store_leases"] == 0
     assert dag.LAYERS["hub.store_leases"] < dag.LAYERS["hub.store"]
     assert dag.LAYERS["hub.store_offline"] == 1

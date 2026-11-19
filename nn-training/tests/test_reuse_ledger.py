@@ -171,9 +171,13 @@ _EXPECTED_EXEMPT_STEMS = frozenset(
 #: 2026-11-19 再抬一格（118 → 119）：B7-P4 的 `_dispatch` 状态转发属性与
 #:   `remote/push_dispatch.py` / `hub/offline_push.py` 里的同名方法撞了名字（第三个模块）。
 #:   它只是一条 getter/setter，不是第三份实现；exact / clone 两条仍未动。
+#: 2026-11-19 再抬一格（119 → 124）：B7-P4b 的账本转发壳让 5 个名字跨过「≥3 模块」线 ——
+#:   `_append_ledger` / `_read_ledger` / `publish` / `ledger_net_state` / `is_cancelled`
+#:   （定义住 `store_ledger.py`，组合类各留一条转发；调用点另住 queue / remote / tests）。
+#:   与 P2 的同名抬格同型：门面转发，不是第二份实现；exact / clone 仍未动。
 BASELINE_EXACT = 15
 BASELINE_CLONE = 16
-BASELINE_SAME_NAME_GE3 = 119
+BASELINE_SAME_NAME_GE3 = 124
 
 
 def _stems(modules: frozenset[str]) -> frozenset[str]:

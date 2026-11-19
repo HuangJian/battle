@@ -53,24 +53,35 @@ def _ledger_event(raw: bytes) -> dict | None:
     return None
 
 
-class LedgerMixin:
-    """域混入：见模块头部。"""
+class Ledger:
+    """账本协作者：job 目录 · jsonl 双态账本 · 池/在飞两视图（B7-P4b）。
 
-    # ---- 由组合类 / 兄弟簇提供（混入只见 `self`，实现不在本模块）----
-    #: 全 store **唯一**的那把锁（`_AuthGuard.__init__` 里建；见 `hub_server._JobStore` 头部）
-    _lock: Lock
-    #: 时钟（`now_fn` 注入点，住 `_AuthGuard`）
-    _now: Any
-    #: 构造身份：组合类 `__init__` 直接声明（`_HubQueue` 与测试都直接读它们）
-    job_root: Path
-    jsonl_path: Path
-    #: 调度协作者（B7-P1）：撤单要跳过「有人承诺在跑」的两张表，并顺手撕掉痕迹。
-    #: 与其它跨簇引用同款声明（`Any`），契约由 `test_hub_job_store_split` 的结构对账钉住。
-    sched: Any
-    #: 租约协作者（B7-P2）：池过滤 / 在飞集 / 熔断判据 / 归属缓存失效都经它（只读面不回收）。
-    leases: Any
+    从原 `LedgerMixin` 整簇切出。锁 / 时钟由组合根注入同一份；`sched` 与 `leases`
+    是两个邻居协作者（撤单要撕承诺、池过滤要问租约死活）。`leases` 在组合根的构造
+    顺序里晚于本类，所以先置 None、建好后回填——这是唯一的两相引用。
+    """
 
-    def _init_ledger(self) -> None:
+    def __init__(
+        self,
+        *,
+        lock: Lock,
+        clock: Any,
+        job_root: Path,
+        jsonl_path: Path,
+        sched: Any,
+    ) -> None:
+        #: 全 store **唯一**的那把锁（`_AuthGuard.__init__` 里建；组合根注入）
+        self._lock = lock
+        #: 时钟（`now_fn` 注入点；不读组合类的 `_now`）
+        self._clock = clock
+        #: 构造身份（与 `_JobStore` 同源；测试直接读 `_JobStore.job_root`）
+        self.job_root = job_root
+        self.jsonl_path = jsonl_path
+        #: 调度协作者（B7-P1）：撤单要跳过「有人承诺在跑」的两张表，并顺手撕掉痕迹。
+        self.sched = sched
+        #: 租约协作者（B7-P2）：池过滤 / 在飞集 / 熔断判据 / 归属缓存失效都经它。
+        #: 组合根在 LeaseBook 建好后回填（本类先构造：它没有反向依赖）。
+        self.leases: Any = None
         #: 账本增量读缓存（H6）：文件 size -> 已解析事件列表
         self._ledger_cache: tuple[int, list[dict]] = (0, [])
         #: ★ H6 的**另一半**（2026-10-17，plan/hub-server-memory-slim L3）：已解析到的**字节位**。
@@ -92,6 +103,10 @@ class LedgerMixin:
     def ledger_offset(self) -> int:
         """增量读跟进到账本的第几个字节（只读；诊断 / 用例用，不做任何 IO）。"""
         return self._ledger_off
+
+    def ledger_rows(self) -> int:
+        """内存里缓存的账本行数（只读；`mem_readout` 的逐课读数）。"""
+        return len(self._ledger_cache[1])
 
     # ---- jsonl 账本（job_pending / job_completed 双态，§3.1/D8） ----
     def _read_ledger(self) -> list[dict]:
@@ -227,7 +242,7 @@ class LedgerMixin:
         超过宽限）也回池（死 worker 回收只管这一条，不管调大 TTL——it24 倒车禁令）。
         已有结果未验收的 job 从池中剔除——首写锁定兜底（hub 重启丢租约时用）。
         """
-        now = self._now()
+        now = self._clock()
         return [jid for jid, _ts in self._unfinished_pending() if not self.leases._lease_held(jid, now)]
 
     def inflight_job_ids(self, *, not_held_by: str = "") -> list[str]:
@@ -244,7 +259,7 @@ class LedgerMixin:
         `not_held_by`：把「**持有人就是请求者自己**」的那份排掉——空闲 worker 上一条 job 的结果
         可能还在异步回传（`ResultUploader`），把同一份活当备份再领一遍 = 同一张卡跑两遍。
         """
-        now = self._now()
+        now = self._clock()
         out: list[str] = []
         for jid, _ts in self._unfinished_pending():
             if not self.leases._lease_held(jid, now):
@@ -262,7 +277,7 @@ class LedgerMixin:
         判据（谁可撤）留在各自的入口，落账动作只有这一份（2026-10-11，W7）。
         """
         self._append_ledger(
-            {"event": "job_cancelled", "job_id": job_id, "reason": reason, "ts": self._now()}
+            {"event": "job_cancelled", "job_id": job_id, "reason": reason, "ts": self._clock()}
         )
         # 撕掉残留承诺并 bump epoch：拿着作废前 epoch 来的认领会被 `_claim_locked`
         # 判 `demoted` 拒掉，不必等它自己发现池子空了。
@@ -364,7 +379,7 @@ class LedgerMixin:
                         "job_id": job_id,
                         "runId": manifest.get("runId"),
                         "it": manifest.get("it"),
-                        "ts": self._now(),
+                        "ts": self._clock(),
                     }
                 )
                 self._cancelled.discard(job_id)

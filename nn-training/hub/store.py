@@ -22,7 +22,7 @@ from pathlib import Path
 from common.protocol import CLAIM_MODE_EXCLUSIVE, CLAIM_TTL_SEC, ROLE_ONLINE
 from hub.auth import _AuthGuard
 from hub.store_leases import ClaimOutcome, LeaseBook
-from hub.store_ledger import LedgerMixin
+from hub.store_ledger import Ledger
 from hub.store_offline import OfflineRoundsMixin
 from hub.store_results import ResultsMixin
 from hub.store_scheduling import Scheduler
@@ -53,7 +53,6 @@ from hub.store_wire import WireMeterMixin
 
 
 class _JobStore(
-    LedgerMixin,
     WireMeterMixin,
     ResultsMixin,
     OfflineRoundsMixin,
@@ -74,6 +73,8 @@ class _JobStore(
     mypy 看成 `Any`。
     """
 
+    #: 账本协作者（`hub/store_ledger.py::Ledger`）
+    ledger: Ledger
     #: 调度协作者（`hub/store_scheduling.py::Scheduler`）
     sched: Scheduler
     #: 租约协作者（`hub/store_leases.py::LeaseBook`）
@@ -87,7 +88,6 @@ class _JobStore(
         # 逐个显式调用，理由见本类上方那段「为什么不用 super() 链」。
         # （`store_results` / `store_offline` **没有钩子**：它们真的没有常驻状态——
         # 守卫对它们改成正面断言「方法体里零 `self.X = …` 赋值」，不造 `pass` 空钩。）
-        LedgerMixin._init_ledger(self)
         WireMeterMixin._init_wire(self)
         # 鉴权面（`_AuthGuard`）：进程级一份——多课程单 hub 下不按课程各算一套计数。
         # 它同时建了**本 store 唯一的那把 `_lock`** ⇒ 组合类不再自建一把（旧的
@@ -100,22 +100,31 @@ class _JobStore(
         # `Scheduler` 读它们判事实、`LeaseBook` 写它们续租（L5：同一临界区不允许两把锁）。
         lease_workers: dict[str, str] = {}
         last_heartbeat: dict[str, float] = {}
-        self.sched = Scheduler(
+        self.ledger = Ledger(
             lock=self._lock,
             clock=self._now,
-            job_dir=self._job_dir,
-            lease_workers=lease_workers,
-            last_heartbeat=last_heartbeat,
+            job_root=self.job_root,
+            jsonl_path=self.jsonl_path,
+            sched=Scheduler(
+                lock=self._lock,
+                clock=self._now,
+                job_dir=self._job_dir,
+                lease_workers=lease_workers,
+                last_heartbeat=last_heartbeat,
+            ),
         )
+        self.sched = self.ledger.sched
         self.leases = LeaseBook(
             lock=self._lock,
             clock=self._now,
-            job_dir=self._job_dir,
+            job_dir=self.ledger._job_dir,
             sched=self.sched,
-            ledger=self,
+            ledger=self.ledger,
             lease_workers=lease_workers,
             last_heartbeat=last_heartbeat,
         )
+        # 唯一的两相引用：Ledger 先构造（它没有反向依赖），LeaseBook 建好后再回填。
+        self.ledger.leases = self.leases
         # ---- 进程级状态（多课程单 hub 下 `_HubQueue` **借**的就是这一份）----
         # 它们不属于任何域：job 账本每课程一份，而「停机达令 / worker 登记」是**进程**概念
         # （借用关系写在 `_HubQueue` docstring ③）。
@@ -168,6 +177,71 @@ class _JobStore(
 
     def _drop_commitment_locked(self, job_id: str) -> None:
         self.sched._drop_commitment_locked(job_id)
+
+    # ---- B7-P4b：账本面的**转发壳**（15 个口；状态与实现住 `self.ledger`） ----
+    def _job_dir(self, job_id: str) -> Path:
+        """转发到 `Ledger._job_dir`（B7-P4b）。"""
+        return self.ledger._job_dir(job_id)
+
+    def ledger_offset(self) -> int:
+        """转发到 `Ledger.ledger_offset`（B7-P4b）。"""
+        return self.ledger.ledger_offset()
+
+    def _read_ledger(self) -> list[dict]:
+        """转发到 `Ledger._read_ledger`（B7-P4b）。"""
+        return self.ledger._read_ledger()
+
+    def _read_ledger_from(self, out: list[dict], off: int) -> int:
+        """转发到 `Ledger._read_ledger_from`（B7-P4b）。"""
+        return self.ledger._read_ledger_from(out, off)
+
+    def _append_ledger(self, event: dict) -> None:
+        """转发到 `Ledger._append_ledger`（B7-P4b）。"""
+        self.ledger._append_ledger(event)
+
+    def ledger_net_state(self, job_id: str) -> str:
+        """转发到 `Ledger.ledger_net_state`（B7-P4b）。"""
+        return self.ledger.ledger_net_state(job_id)
+
+    def _unfinished_pending(self) -> list[tuple[str, float]]:
+        """转发到 `Ledger._unfinished_pending`（B7-P4b）。"""
+        return self.ledger._unfinished_pending()
+
+    def claimable_job_ids(self) -> list[str]:
+        """转发到 `Ledger.claimable_job_ids`（B7-P4b）。"""
+        return self.ledger.claimable_job_ids()
+
+    def inflight_job_ids(self, *, not_held_by: str = '') -> list[str]:
+        """转发到 `Ledger.inflight_job_ids`（B7-P4b）。"""
+        return self.ledger.inflight_job_ids(not_held_by=not_held_by)
+
+    def _cancel_job_locked(self, job_id: str, *, reason: str) -> None:
+        """转发到 `Ledger._cancel_job_locked`（B7-P4b）。"""
+        self.ledger._cancel_job_locked(job_id, reason=reason)
+
+    def is_cancelled(self, job_id: str) -> bool:
+        """转发到 `Ledger.is_cancelled`（B7-P4b）。"""
+        return self.ledger.is_cancelled(job_id)
+
+    def cancel_unsettled_jobs(self, *, reason: str = 'mode-switch') -> list[str]:
+        """转发到 `Ledger.cancel_unsettled_jobs`（B7-P4b）。"""
+        return self.ledger.cancel_unsettled_jobs(reason=reason)
+
+    def cancel_job(self, job_id: str, *, reason: str = 'manual') -> dict:
+        """转发到 `Ledger.cancel_job`（B7-P4b）。"""
+        return self.ledger.cancel_job(job_id, reason=reason)
+
+    def publish(self, job_id: str, manifest: dict, payload_zip: bytes) -> None:
+        """转发到 `Ledger.publish`（B7-P4b）。"""
+        self.ledger.publish(job_id, manifest, payload_zip)
+
+    def job_failure(self, job_id: str) -> dict | None:
+        """转发到 `Ledger.job_failure`（B7-P4b）。"""
+        return self.ledger.job_failure(job_id)
+
+    def get_result(self, job_id: str) -> dict | None:
+        """转发到 `Ledger.get_result`（B7-P4b）。"""
+        return self.ledger.get_result(job_id)
 
     # ---- B7-P2：租约面的**转发壳**（37 个方法与 5 个辅助读数） ----
     # 跨簇调用点与 `hub` 对外面逐字不变；状态只在 `self.leases` 上，组合类不存副本。

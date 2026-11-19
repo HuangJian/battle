@@ -116,7 +116,7 @@ class QueueObserveMixin(QueuePeer):
             "courses": len(self._stores),
             # 账本行数 = 每份 `_ledger_cache` 的长度（未读过的课 = 0，读了才涨）。
             "ledger_rows": {
-                c: len(self._stores[c]._ledger_cache[1]) for c in self._order
+                c: self._stores[c].ledger.ledger_rows() for c in self._order
             },
             "locate_n": len(self._locate_cache),
             "leases_n": len(self._leases),
