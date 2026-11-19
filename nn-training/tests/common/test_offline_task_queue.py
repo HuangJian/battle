@@ -48,6 +48,7 @@ from common.protocol import (
 from hub import server as hub_server
 from hub.server import _HubQueue, make_server
 from remote import offline_boot
+from tests.helpers.http_server import serve_fast
 
 TOKEN = "sekret"
 INIT = b'{"format":"nn-weights-json","params":{"w":1}}'
@@ -59,7 +60,7 @@ def _boot(tmp_path: Path) -> tuple[str, _HubQueue, ThreadingHTTPServer]:
     """发现模式的真 HTTP hub（课程表靠盘上发现，与共享 hub 同形）。"""
     hub = _HubQueue({}, discover_root=tmp_path)
     srv = make_server(hub, 0, TOKEN, host="127.0.0.1")
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     return f"http://127.0.0.1:{srv.server_address[1]}", hub, srv
 
 
@@ -269,7 +270,7 @@ def test_tasks_without_a_traj_root_is_an_empty_list(tmp_path: Path) -> None:
     """hub 不知道课程根（`--discover` 未开）⇒ 空清单，不是 500。"""
     hub = _HubQueue({})
     srv = make_server(hub, 0, TOKEN, host="127.0.0.1")
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     base = f"http://127.0.0.1:{srv.server_address[1]}"
     st, raw = _req(base, OFFLINE_TASKS_PATH)
     assert st == 200 and _json(raw)["tasks"] == []

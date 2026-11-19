@@ -50,6 +50,7 @@ from common.protocol import (
 from remote.hub_client import PublishSpec, mark_job_completed, publish_job, wait_job
 from remote.worker_server import WorkerServerState, make_worker_server
 from tests.helpers.console_stub import NoHandoffConsole
+from tests.helpers.http_server import serve_fast
 from tests.subproc_util import spawn_bound_port
 
 #: hub 与 worker 共用的 Bearer（推模式下 worker 的 authKey 就是它）。
@@ -140,7 +141,7 @@ class _LiveWorker:
         self.srv = make_worker_server(self.state, 0, TOKEN)
         self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
         self.started: list[str] = []
-        self._thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
+        self._thread = serve_fast(self.srv)
         self._thread.start()
         self.state.set_starter(self._fake_starter)
 

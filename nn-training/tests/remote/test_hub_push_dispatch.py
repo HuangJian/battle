@@ -47,6 +47,7 @@ from hub.server import _HubQueue, _JobStore, make_server
 from remote.push_dispatch import PushDispatcher, PushWorkers
 from remote.worker_server import WorkerServerState, make_worker_server
 from tests.helpers import net_seams
+from tests.helpers.http_server import serve_fast
 from tests.helpers.push_worker import PAYLOAD, result_of
 
 # ------------------------------------------------------------------ 夹具与工具
@@ -406,7 +407,7 @@ def test_dispatch_pushes_to_idle_worker_and_ingests_result(tmp_path: Path, worke
     assert w1.received == ["j" * 16]
     # 真 hub 端点读它（训练侧 wait_job 走的就是这条）：
     srv = make_server(hub, 0, "sekret", host="127.0.0.1")
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     try:
         base = f"http://127.0.0.1:{srv.server_address[1]}"
@@ -934,7 +935,7 @@ def _queue_worker(tmp_path: Path, started: list[str]):
     cache = state.work_dir / "code_cache"
     cache.mkdir(parents=True, exist_ok=True)
     (cache / ("z" * 64)).write_bytes(b"fake-code")
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     return srv, state, th
 
@@ -1114,7 +1115,7 @@ def test_push_workers_admin_endpoint(tmp_path: Path, worker_factory) -> None:
     ws = _workers_with(tmp_path, worker_factory)
     disp = _dispatcher(hub, ws)
     srv = make_server(hub, 0, "sekret", host="127.0.0.1", push=disp)
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     try:
         base = f"http://127.0.0.1:{srv.server_address[1]}"
@@ -1143,7 +1144,7 @@ def test_push_workers_admin_endpoint(tmp_path: Path, worker_factory) -> None:
 
     # 未启用 push 派发的 hub：端点 409（响亮好过默默什么都没发生）
     srv2 = make_server(hub, 0, "sekret", host="127.0.0.1")
-    th2 = threading.Thread(target=srv2.serve_forever, daemon=True)
+    th2 = serve_fast(srv2)
     th2.start()
     try:
         base2 = f"http://127.0.0.1:{srv2.server_address[1]}"
@@ -1169,7 +1170,7 @@ def test_admin_push_workers_read_face_never_returns_credentials(
     ws.add({"id": "g1", "url": "https://w1.example", "authKey": "sekret-key"})
     disp = _dispatcher(hub, ws)
     srv = make_server(hub, 0, "sekret", host="127.0.0.1", push=disp)
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     try:
         base = f"http://127.0.0.1:{srv.server_address[1]}"
@@ -1302,7 +1303,7 @@ def test_result_ready_endpoint_auth_and_shapes(tmp_path: Path, worker_factory) -
     ws = _workers_with(tmp_path, worker_factory, (worker_factory(), {"id": "g1"}))
     disp = _dispatcher(hub, ws)
     srv = make_server(hub, 0, "sekret", host="127.0.0.1", push=disp)
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     try:
         base = f"http://127.0.0.1:{srv.server_address[1]}"
@@ -1323,7 +1324,7 @@ def test_result_ready_endpoint_auth_and_shapes(tmp_path: Path, worker_factory) -
 
     # 没开 push 派发器的 hub：409（先答「本机没这能力」再谈 token）
     srv2 = make_server(hub, 0, "sekret", host="127.0.0.1")
-    th2 = threading.Thread(target=srv2.serve_forever, daemon=True)
+    th2 = serve_fast(srv2)
     th2.start()
     try:
         base2 = f"http://127.0.0.1:{srv2.server_address[1]}"

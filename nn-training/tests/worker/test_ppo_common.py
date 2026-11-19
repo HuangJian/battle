@@ -36,42 +36,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import worker.ppo.common as ppo_common
 from worker.ppo.rng import PPORng
 
-FAILS: list[str] = []
-
-
-def check(cond: bool, msg: str) -> None:
-    if not cond:
-        FAILS.append(msg)
-        print(f"FAIL: {msg}")
-    else:
-        print(f"ok: {msg}")
-
 
 def test_masked_logsoftmax() -> None:
     logits = torch.tensor([[1.0, 2.0, 3.0], [0.5, -1.0, 4.0]])
     mask = torch.tensor([[1, 1, 0], [0, 1, 1]])
     out = ppo_common.masked_logsoftmax(logits, mask)
     # 无效位被压到极负（原实现用 -1e9 近似 -inf，与 worker.ppo.py 历史行为一致）
-    check(bool((out[0, 2] < -1e6).item()), "无效类 logp ≈ -inf（极负）")
+    assert bool((out[0, 2] < -1e6).item()), "无效类 logp ≈ -inf（极负）"
     # 有效位 = 仅在有效子集上的 log_softmax
     exp_0 = torch.log_softmax(logits[0, :2], dim=-1)
-    check(torch.allclose(out[0, :2], exp_0, atol=1e-6), "有效位 logp = log_softmax(有效子集)")
+    assert torch.allclose(out[0, :2], exp_0, atol=1e-6), "有效位 logp = log_softmax(有效子集)"
     # 概率和（exp）在有效位上 = 1
     probs = out.exp()
-    check(
-        bool(torch.isclose(probs[0, :2].sum(), torch.tensor(1.0), atol=1e-5).item()),
-        "有效位概率和为 1",
-    )
+    assert bool(torch.isclose(probs[0, :2].sum(), torch.tensor(1.0), atol=1e-5).item()), "有效位概率和为 1"
 
 
 def test_cat_logprob_entropy() -> None:
     logp = torch.tensor([[0.1, 0.5, 0.4], [0.2, 0.3, 0.5]])
     a = torch.tensor([1, 2])
     got = ppo_common.cat_logprob(a, logp)
-    check(torch.allclose(got, torch.tensor([0.5, 0.5])), "cat_logprob gather 正确")
+    assert torch.allclose(got, torch.tensor([0.5, 0.5])), "cat_logprob gather 正确"
     ent = ppo_common.cat_entropy(logp)
     manual = -(logp.exp() * logp).sum(dim=-1).mean()
-    check(bool(torch.isclose(ent, manual).item()), "cat_entropy 与手算一致")
+    assert bool(torch.isclose(ent, manual).item()), "cat_entropy 与手算一致"
 
 
 def test_ppo_save_load(tmp_path: Path) -> None:
@@ -86,26 +73,21 @@ def test_ppo_save_load(tmp_path: Path) -> None:
     ppo_common._ppo_save(td, model, opt, 3, rng)
     # 文件齐备
     for f in ("model.pt", "opt.pt", "state.json"):
-        check(os.path.exists(os.path.join(td, f)), f"checkpoint 文件 {f} 存在")
+        assert os.path.exists(os.path.join(td, f)), f"checkpoint 文件 {f} 存在"
     # 加载返回 epochs_done
     m2 = nn.Linear(4, 2)
     o2 = torch.optim.Adam(m2.parameters(), lr=0.1)
     want_next = rng.epoch.permutation(8).tolist()
     rng2 = PPORng.from_seed(11)
     done = ppo_common._ppo_load(td, m2, o2, rng2)
-    check(done == 3, f"_ppo_load 返回 epochs_done=3 (got {done})")
-    check(
-        np.array_equal(m2.weight.detach().numpy(), model.weight.detach().numpy()),
-        "checkpoint 加载后权重一致",
-    )
+    assert done == 3, f"_ppo_load 返回 epochs_done=3 (got {done})"
+    assert np.array_equal(m2.weight.detach().numpy(), model.weight.detach().numpy()), "checkpoint 加载后权重一致"
     # 无 checkpoint 路径
     m3 = nn.Linear(4, 2)
     o3 = torch.optim.Adam(m3.parameters(), lr=0.1)
-    check(
-        rng2.epoch.permutation(8).tolist() == want_next,
-        "续跑的 epoch 顺序从 ckpt 里那一点接着抽（不是从种子重来）",
-    )
-    check(ppo_common._ppo_load(None, m3, o3, PPORng.from_seed(0)) == 0, "ckpt_path=None → 0")
+    assert rng2.epoch.permutation(8).tolist() == want_next, "续跑的 epoch 顺序从 ckpt 里那一点接着抽（不是从种子重来）"
+    restored = ppo_common._ppo_load(None, m3, o3, PPORng.from_seed(0))
+    assert restored == 0, "ckpt_path=None → 0"
 
 
 def main() -> None:
@@ -115,9 +97,6 @@ def main() -> None:
     test_cat_logprob_entropy()
     test_backend_params_match_config()
     test_ppo_save_load(Path(_td))
-    if FAILS:
-        print(f"\n{len(FAILS)} FAILED")
-        sys.exit(1)
     print("\nAll tests passed.")
 
 

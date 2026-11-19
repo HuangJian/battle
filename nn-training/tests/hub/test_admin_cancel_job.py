@@ -33,6 +33,7 @@ from common.protocol import (
     COURSE_ENABLE_MARKER,
 )
 from hub.server import _HubQueue, make_server
+from tests.helpers.http_server import serve_fast
 
 TOKEN = "sekret"
 COURSE = "c-cancel"
@@ -41,7 +42,7 @@ COURSE = "c-cancel"
 def _boot(tmp_path: Path) -> tuple[str, _HubQueue, ThreadingHTTPServer]:
     hub = _HubQueue({}, discover_root=tmp_path)
     srv = make_server(hub, 0, TOKEN, host="127.0.0.1")
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     return f"http://127.0.0.1:{srv.server_address[1]}", hub, srv
 
 

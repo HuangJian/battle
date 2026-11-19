@@ -702,7 +702,7 @@ def _boot_server(tmp_path: Path, token: str = "sekret") -> tuple:
     store = _JobStore(tmp_path / "jobs", tmp_path / "training_log.jsonl")
     srv = make_server(store, 0, token, host="127.0.0.1")
     port = srv.server_address[1]
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     return f"http://127.0.0.1:{port}", store, srv, th
 
@@ -1502,6 +1502,7 @@ import remote.http as http_mod
 import remote.job_lifecycle as JL
 import remote.worker as worker_mod
 from common.protocol import RetryableError
+from tests.helpers.http_server import serve_fast
 
 
 @pytest.fixture()

@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 
 import remote.node_upgrade as nu
 from tests.helpers import net_seams
+from tests.helpers.http_server import serve_fast
 
 
 class MockAgent:
@@ -35,7 +36,7 @@ class MockAgent:
         self._handler_cls = self._make_handler()
         self.server = HTTPServer(("127.0.0.1", 0), self._handler_cls)
         self.port = self.server.server_address[1]
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread = serve_fast(self.server)
         self.thread.start()
 
     def _make_handler(self):

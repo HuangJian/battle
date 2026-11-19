@@ -32,14 +32,6 @@ import worker.ppo.np_core as ppo_np
 from worker.data.weights_io import load_weights_json
 from worker.models.intent_net import export_intent_weights
 
-FAILS: list[str] = []
-
-
-def check(cond: bool, msg: str) -> None:
-    print(("  PASS " if cond else "  FAIL ") + msg, flush=True)
-    if not cond:
-        FAILS.append(msg)
-
 
 def test_dt1_degradation() -> None:
     """Δt≡1 时变步长 GAE 与定长 per-tick GAE 逐字节一致（P1-7k3）。"""
@@ -56,14 +48,8 @@ def test_dt1_degradation() -> None:
     )
     adv_var, ret_var = ppo_intent.compute_gae_variable(rewards, values, dones, dt)
 
-    check(
-        np.array_equal(adv_fixed, adv_var),
-        f"Δt≡1: adv byte-identical (maxdiff={np.max(np.abs(adv_fixed - adv_var)):.2e})",
-    )
-    check(
-        np.array_equal(ret_fixed, ret_var),
-        f"Δt≡1: ret byte-identical (maxdiff={np.max(np.abs(ret_fixed - ret_var)):.2e})",
-    )
+    assert np.array_equal(adv_fixed, adv_var), f"Δt≡1: adv byte-identical (maxdiff={np.max(np.abs(adv_fixed - adv_var)):.2e})"
+    assert np.array_equal(ret_fixed, ret_var), f"Δt≡1: ret byte-identical (maxdiff={np.max(np.abs(ret_fixed - ret_var)):.2e})"
 
     # 中间 done（子局断点）路径也要一致。
     dones2 = dones.copy()
@@ -72,8 +58,8 @@ def test_dt1_degradation() -> None:
         rewards, values, dones2, gamma=ppo_intent.GAMMA_TICK, lam=ppo_intent.LAM
     )
     a2v, r2v = ppo_intent.compute_gae_variable(rewards, values, dones2, dt)
-    check(np.array_equal(a2f, a2v), "Δt≡1 mid-done: adv byte-identical")
-    check(np.array_equal(r2f, r2v), "Δt≡1 mid-done: ret byte-identical")
+    assert np.array_equal(a2f, a2v), "Δt≡1 mid-done: adv byte-identical"
+    assert np.array_equal(r2f, r2v), "Δt≡1 mid-done: ret byte-identical"
 
 
 def test_variable_dt_differs() -> None:
@@ -90,9 +76,10 @@ def test_variable_dt_differs() -> None:
     adv_fixed, ret_fixed = ppo_np.compute_gae(
         rewards, values, dones, gamma=ppo_intent.GAMMA_TICK, lam=ppo_intent.LAM
     )
-    check(not np.array_equal(adv_var, adv_fixed), "dt 可变: adv 与定长不同（半 MDP 折扣生效）")
+    assert not np.array_equal(adv_var, adv_fixed), "dt 可变: adv 与定长不同（半 MDP 折扣生效）"
     # 变长窗口的 gamma 应单调：dt 越大 → γ_step 越小 → 提前步的 adv 量级越小（松弛）。
-    check(bool(np.all(dt >= 1)) and bool(np.all(dt <= 50)), "dt 范围合法")
+    # timing-ok: 契约上界（dt 是 shard 的步长字段，1..50 由协议定义，不是墙钟）
+    assert bool(np.all(dt >= 1)) and bool(np.all(dt <= 50)), "dt 范围合法"
 
 
 def test_rl_net_roundtrip_value_head(tmp_path: Path) -> None:
@@ -101,10 +88,10 @@ def test_rl_net_roundtrip_value_head(tmp_path: Path) -> None:
     m = ppo_intent.IntentRLNet(h=64, d=8)
     # 三头 + value 头全在。
     for hname in ("intent_head", "enemy_head", "anchor_head", "value_head"):
-        check(any(k.startswith(hname + ".") for k in m.state_dict()), f"IntentRLNet has {hname}")
+        assert any(k.startswith(hname + ".") for k in m.state_dict()), f"IntentRLNet has {hname}"
     # value 头 137→1（P1-5②：value 消费注入）。
     vw = m.state_dict()["value_head.weight"]
-    check(tuple(vw.shape) == (1, 137), f"value_head.weight shape {tuple(vw.shape)} == (1,137)")
+    assert tuple(vw.shape) == (1, 137), f"value_head.weight shape {tuple(vw.shape)} == (1,137)"
 
     # 前向：inject 必须消费。
     obs = torch.zeros(2, OBS_CHANNELS, 26, 26, dtype=torch.uint8)
@@ -116,20 +103,20 @@ def test_rl_net_roundtrip_value_head(tmp_path: Path) -> None:
     with torch.no_grad():
         _, _, _, va = m.forward_rl(obs, sc, inj_a)
         _, _, _, vb = m.forward_rl(obs, sc, inj_b)
-    check(not torch.equal(va, vb), "value 输出随注入变化（value 看到承诺状态）")
+    assert not torch.equal(va, vb), "value 输出随注入变化（value 看到承诺状态）"
 
     # export/load 往返。
     td = tempfile.mkdtemp(dir=str(tmp_path))
     p = os.path.join(td, "w.json")
     export_intent_weights(m, p)
     meta, params = load_weights_json(p)
-    check(meta["arch"]["kind"] == "intent", "arch.kind=intent")
-    check("value_head.weight" in params, "exported value_head.weight present")
+    assert meta["arch"]["kind"] == "intent", "arch.kind=intent"
+    assert "value_head.weight" in params, "exported value_head.weight present"
     m2 = ppo_intent.IntentRLNet(h=64, d=8)
     from worker.models.intent_net import load_intent_weights
 
     load_intent_weights(m2, p)
-    check(True, "load_intent_weights roundtrip ok")
+    assert True, "load_intent_weights roundtrip ok"
 
 
 def test_ppo_update_smoke() -> None:
@@ -176,11 +163,8 @@ def test_ppo_update_smoke() -> None:
     agg = ppo_intent.ppo_update_intent(
         model, opt, chunks, epochs=3, device=torch.device("cpu"), target_kl=1e9, seed=1
     )  # 极大阈值：不早停
-    check(
-        np.isfinite(agg["policy"]) and np.isfinite(agg["value"]),
-        f"ppo update finite (policy={agg['policy']:.3f} value={agg['value']:.3f})",
-    )
-    check(not agg["early_stopped"], "target_kl=1e9 不触发早停")
+    assert np.isfinite(agg["policy"]) and np.isfinite(agg["value"]), f"ppo update finite (policy={agg['policy']:.3f} value={agg['value']:.3f})"
+    assert not agg["early_stopped"], "target_kl=1e9 不触发早停"
 
     # 极小阈值 → 早停触发。
     model2 = ppo_intent.IntentRLNet(h=32, d=2)
@@ -188,7 +172,7 @@ def test_ppo_update_smoke() -> None:
     agg2 = ppo_intent.ppo_update_intent(
         model2, opt2, chunks, epochs=3, device=torch.device("cpu"), target_kl=1e-9, seed=1
     )
-    check(agg2["early_stopped"], "target_kl 极小 → early stop 触发")
+    assert agg2["early_stopped"], "target_kl 极小 → early stop 触发"
 
     # value warmup：前 epochs 全预热 → 策略（主干+三头）零梯度、KL=0、value 头被训练。
     model3 = ppo_intent.IntentRLNet(h=32, d=2)
@@ -208,23 +192,11 @@ def test_ppo_update_smoke() -> None:
         seed=1,
         value_warmup_epochs=2,
     )
-    check(agg3["kl"] == 0.0, f"warmup: kl=0 (policy frozen), got {agg3['kl']}")
-    check(
-        torch.equal(policy_w_before, model3.intent_head.weight),
-        "warmup: intent_head 权重不变（策略零梯度）",
-    )
-    check(
-        torch.equal(stem_before, model3.stem.weight),
-        "warmup: stem 权重不变（主干冻结，value 不扰动策略特征）",
-    )
-    check(
-        not torch.equal(vhead_before, model3.value_head.weight),
-        "warmup: value_head 权重已更新（在冻结特征上学基线）",
-    )
-    check(
-        np.isfinite(agg3["value"]) and agg3["value"] > 0,
-        f"warmup: value 头在学 (value={agg3['value']:.3f})",
-    )
+    assert agg3["kl"] == 0.0, f"warmup: kl=0 (policy frozen), got {agg3['kl']}"
+    assert torch.equal(policy_w_before, model3.intent_head.weight), "warmup: intent_head 权重不变（策略零梯度）"
+    assert torch.equal(stem_before, model3.stem.weight), "warmup: stem 权重不变（主干冻结，value 不扰动策略特征）"
+    assert not torch.equal(vhead_before, model3.value_head.weight), "warmup: value_head 权重已更新（在冻结特征上学基线）"
+    assert np.isfinite(agg3["value"]) and agg3["value"] > 0, f"warmup: value 头在学 (value={agg3['value']:.3f})"
 
 
 def main() -> None:
@@ -235,10 +207,7 @@ def main() -> None:
     test_variable_dt_differs()
     test_rl_net_roundtrip_value_head(Path(_td))
     test_ppo_update_smoke()
-    print(f"== {'PASS' if not FAILS else 'FAIL'} ({len(FAILS)} failures) ==")
-    for m in FAILS:
-        print("  -", m)
-    sys.exit(1 if FAILS else 0)
+    print("== PASS ==")
 
 
 if __name__ == "__main__":

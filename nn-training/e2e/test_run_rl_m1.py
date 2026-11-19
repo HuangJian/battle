@@ -18,14 +18,6 @@ from common.cli import run_main
 from trainer import run_rl
 from trainer.eval_m1 import CLEAN_EVAL_MAX_RETRY, parse_m1_eval_report, run_clean_eval
 
-FAILS: list[str] = []
-
-
-def check(cond: bool, msg: str) -> None:
-    print(("  PASS " if cond else "  FAIL ") + msg, flush=True)
-    if not cond:
-        FAILS.append(msg)
-
 
 def _report_text(total: int, error: int, cleared: int, win_pct: float) -> str:
     """m1-eval 输出夹具：横幅在 stderr（合并文本首行）+ JSON report（stdout）。
@@ -40,19 +32,16 @@ def _report_text(total: int, error: int, cleared: int, win_pct: float) -> str:
 def test_parse_m1_eval_report() -> None:
     print("[fast] parse_m1_eval_report 从合并文本（stdout+stderr）提取结果")
     r = parse_m1_eval_report(_report_text(350, 0, 260, 74.3))
-    check(r["winRate"] == 0.743, f"winRate stderr 横幅 (got {r['winRate']})")
-    check(
-        r["total"] == 350 and r["cleared"] == 260 and r["error"] == 0,
-        f"total/cleared/error JSON (got {r})",
-    )
+    assert r["winRate"] == 0.743, f"winRate stderr 横幅 (got {r['winRate']})"
+    assert r["total"] == 350 and r["cleared"] == 260 and r["error"] == 0, f"total/cleared/error JSON (got {r})"
     r2 = parse_m1_eval_report(_report_text(350, 1830, 32, 9.1))
-    check(r2["error"] == 1830 and r2["total"] == 350, "error 计数正确")
+    assert r2["error"] == 1830 and r2["total"] == 350, "error 计数正确"
     r3 = parse_m1_eval_report(
         "[m1-eval] win rate 55.5% (gate 60%) -> FAIL\n" + _report_text(100, 0, 55, 55.5)
     )
-    check(r3["winRate"] == 0.555, "横幅大小写不敏感")
+    assert r3["winRate"] == 0.555, "横幅大小写不敏感"
     r4 = parse_m1_eval_report("some random output\nno report here")
-    check(r4["total"] == 0 and r4["error"] == 0 and r4["winRate"] is None, "无报告文本安全降级")
+    assert r4["total"] == 0 and r4["error"] == 0 and r4["winRate"] is None, "无报告文本安全降级"
 
 
 def test_run_clean_eval_rerun() -> None:
@@ -71,10 +60,7 @@ def test_run_clean_eval_rerun() -> None:
     res = run_clean_eval(
         "bun", "tmp/w.json", args, _runner=fake_clean(_report_text(350, 0, 260, 74.3))
     )
-    check(
-        len(calls) == 1 and res["retries"] == 0 and res["error"] == 0,
-        f"干净报告一次通过 (calls={len(calls)} retries={res['retries']})",
-    )
+    assert len(calls) == 1 and res["retries"] == 0 and res["error"] == 0, f"干净报告一次通过 (calls={len(calls)} retries={res['retries']})"
     seq = [_report_text(350, 1830, 32, 9.1), _report_text(350, 0, 262, 74.9)]
     n_calls = [0]
 
@@ -83,21 +69,15 @@ def test_run_clean_eval_rerun() -> None:
         return parse_m1_eval_report(seq.pop(0))
 
     res = run_clean_eval("bun", "tmp/w.json", args, _runner=seq_runner)
-    check(
-        n_calls[0] == 2 and res["error"] == 0 and res["retries"] == 1 and res["cleared"] == 262,
-        f"error 后自动重跑至干净 (calls={n_calls[0]})",
-    )
+    assert n_calls[0] == 2 and res["error"] == 0 and res["retries"] == 1 and res["cleared"] == 262, f"error 后自动重跑至干净 (calls={n_calls[0]})"
     calls.clear()
     res = run_clean_eval(
         "bun", "tmp/w.json", args, _runner=fake_clean(_report_text(350, 350, 0, 0.0))
     )
-    check(
-        len(calls) == CLEAN_EVAL_MAX_RETRY
+    assert (len(calls) == CLEAN_EVAL_MAX_RETRY
         and res["error"] > 0
-        and res["retries"] == CLEAN_EVAL_MAX_RETRY - 1,
-        "超限后接受 error 标记",
-    )
-    check(res["games"] == 350, f"games 兼容字段 (got {res['games']})")
+        and res["retries"] == CLEAN_EVAL_MAX_RETRY - 1), "超限后接受 error 标记"
+    assert res["games"] == 350, f"games 兼容字段 (got {res['games']})"
 
 
 def test_run_clean_eval_goal_cmd() -> None:
@@ -110,105 +90,73 @@ def test_run_clean_eval_goal_cmd() -> None:
         return {"winRate": 0.5, "total": 350, "cleared": 175, "error": 0}
 
     run_clean_eval("bun", "tmp/g.json", args, _runner=runner)
-    check(
-        "--policy intent-exec" in captured[-1] and "--intent-weights" in captured[-1],
-        "intent 用 intent-exec + --intent-weights",
-    )
+    assert "--policy intent-exec" in captured[-1] and "--intent-weights" in captured[-1], "intent 用 intent-exec + --intent-weights"
     captured.clear()
     args.goal = True
     run_clean_eval("bun", "tmp/g.json", args, _runner=runner)
-    check(
-        "--policy goal" in captured[-1] and "--goal-weights" in captured[-1],
-        "goal 用 goal + --goal-weights",
-    )
+    assert "--policy goal" in captured[-1] and "--goal-weights" in captured[-1], "goal 用 goal + --goal-weights"
 
 
 def test_resolve_mode() -> None:
     print("[fast] resolve_mode：--mode / --goal 预解析")
-    check(run_rl.resolve_mode(["--iters", "2"]) == "per-tick", "默认 per-tick")
-    check(run_rl.resolve_mode(["--mode", "intent"]) == "intent", "--mode intent")
-    check(run_rl.resolve_mode(["--mode=goal"]) == "goal", "--mode=goal")
-    check(run_rl.resolve_mode(["--goal"]) == "goal", "--goal 别名 → goal")
-    check(run_rl.resolve_mode(["--goal", "--mode", "intent"]) == "intent", "--mode 后出现者胜")
+    assert run_rl.resolve_mode(["--iters", "2"]) == "per-tick", "默认 per-tick"
+    assert run_rl.resolve_mode(["--mode", "intent"]) == "intent", "--mode intent"
+    assert run_rl.resolve_mode(["--mode=goal"]) == "goal", "--mode=goal"
+    assert run_rl.resolve_mode(["--goal"]) == "goal", "--goal 别名 → goal"
+    assert run_rl.resolve_mode(["--goal", "--mode", "intent"]) == "intent", "--mode 后出现者胜"
 
 
 def test_apply_mode_flags() -> None:
     print("[fast] apply_mode_flags：置位 intent_rollout/goal_rollout/goal")
     args = argparse.Namespace(mode="intent", goal=False)
     run_rl.apply_mode_flags(args)
-    check(
-        args.intent_rollout and not args.goal_rollout and not args.goal,
-        "intent：intent_rollout=True 其余 False",
-    )
+    assert args.intent_rollout and not args.goal_rollout and not args.goal, "intent：intent_rollout=True 其余 False"
     args = argparse.Namespace(mode="per-tick", goal=False)
     run_rl.apply_mode_flags(args)
-    check(
-        not args.intent_rollout and not args.goal_rollout and not args.goal,
-        "per-tick：三 flag 全 False",
-    )
+    assert not args.intent_rollout and not args.goal_rollout and not args.goal, "per-tick：三 flag 全 False"
     args = argparse.Namespace(mode="per-tick", goal=True)
     run_rl.apply_mode_flags(args)
-    check(
-        args.mode == "goal" and args.goal_rollout and args.goal,
-        "--goal 强制 mode=goal + goal_rollout/goal",
-    )
+    assert args.mode == "goal" and args.goal_rollout and args.goal, "--goal 强制 mode=goal + goal_rollout/goal"
 
 
 def test_merged_mode_args() -> None:
     print("[fast] merged_mode_args：rl.<mode> → intent_rl 遗留块 → rl 优先级")
     cfg = {"rl": {"a": 1, "b": 2}, "intent_rl": {"b": 3, "c": 4}}
     merged, src = run_rl.merged_mode_args(cfg, "intent")
-    check(
-        merged["a"] == 1 and merged["b"] == 3 and merged["c"] == 4, "intent_rl 遗留块覆盖 rl 同名键"
-    )
-    check(src["b"] == "intent_rl(legacy)", "来源标注 intent_rl(legacy)")
+    assert merged["a"] == 1 and merged["b"] == 3 and merged["c"] == 4, "intent_rl 遗留块覆盖 rl 同名键"
+    assert src["b"] == "intent_rl(legacy)", "来源标注 intent_rl(legacy)"
     cfg2 = {"rl": {"a": 1, "intent": {"b": 9}}, "intent_rl": {"b": 3}}
     merged2, src2 = run_rl.merged_mode_args(cfg2, "intent")
-    check(merged2["b"] == 9 and src2["b"] == "rl.intent", "rl.intent 嵌套块最优先")
+    assert merged2["b"] == 9 and src2["b"] == "rl.intent", "rl.intent 嵌套块最优先"
     merged3, _ = run_rl.merged_mode_args(cfg2, "per-tick")
-    check("b" not in merged3, "per-tick 忽略嵌套块与 intent_rl 遗留块")
+    assert "b" not in merged3, "per-tick 忽略嵌套块与 intent_rl 遗留块"
     merged4, _ = run_rl.merged_mode_args({"rl": {}, "intent_rl": {"b": 3}}, "goal")
-    check(merged4["b"] == 3, "goal 回退 intent_rl 遗留块")
+    assert merged4["b"] == 3, "goal 回退 intent_rl 遗留块"
 
 
 def test_stop_loss_hit() -> None:
     from worker.stop_loss import stop_loss_hit
 
     print("[fast] stop_loss_hit：止损判门分模式（原 iter15 Δ≤0 泛化 + P1-9 统计化）")
-    check(stop_loss_hit("per-tick", 15, 0.0, 20, {"delta": -0.1}) is False, "per-tick 永不触发")
-    check(stop_loss_hit("intent", 0, 0.0, 20, {"delta": -0.1}) is False, "stop_loss_at=0 关闭")
-    check(
-        stop_loss_hit("intent", 15, 0.0, 10, {"delta": -0.1}) is False,
-        "未到 stop-loss-at 不触发",
-    )
+    assert stop_loss_hit("per-tick", 15, 0.0, 20, {"delta": -0.1}) is False, "per-tick 永不触发"
+    assert stop_loss_hit("intent", 0, 0.0, 20, {"delta": -0.1}) is False, "stop_loss_at=0 关闭"
+    assert stop_loss_hit("intent", 15, 0.0, 10, {"delta": -0.1}) is False, "未到 stop-loss-at 不触发"
     # 旧调用方（eval_rec 无 games/winRate）：保持原语义 Δ≤bar 即停（无 σ 可推）。
-    check(stop_loss_hit("intent", 15, 0.0, 20, {"delta": -0.05}) is True, "Δ<=0 触发(legacy)")
-    check(stop_loss_hit("intent", 15, 0.0, 20, {"delta": 0.1}) is False, "Δ>0 不触发")
-    check(stop_loss_hit("goal", 15, 0.0, 20, {"delta": 0.0}) is True, "goal Δ==0 触发(legacy)")
-    check(stop_loss_hit("intent", 15, 0.0, 20, None) is False, "无 eval 记录不触发")
+    assert stop_loss_hit("intent", 15, 0.0, 20, {"delta": -0.05}) is True, "Δ<=0 触发(legacy)"
+    assert stop_loss_hit("intent", 15, 0.0, 20, {"delta": 0.1}) is False, "Δ>0 不触发"
+    assert stop_loss_hit("goal", 15, 0.0, 20, {"delta": 0.0}) is True, "goal Δ==0 触发(legacy)"
+    assert stop_loss_hit("intent", 15, 0.0, 20, None) is False, "无 eval 记录不触发"
     # P1-9 统计化：带 games/winRate 时要求 Δ ≤ −2σ（350 局 p≈0.72 → σ≈0.024 → −2σ≈−0.048）。
-    check(
-        stop_loss_hit("intent", 15, 0.0, 20, {"delta": -0.05, "games": 350, "winRate": 0.72})
-        is True,
-        "Δ=−0.05 ≤ −2σ(−0.048) 统计显著 → 触发",
-    )
-    check(
-        stop_loss_hit("intent", 15, 0.0, 20, {"delta": 0.0, "games": 350, "winRate": 0.72})
-        is False,
-        "Δ=0 不显著（旧逻辑会误停）——P1-9 修复核心断言",
-    )
-    check(
-        stop_loss_hit("intent", 15, 0.0, 20, {"delta": -0.02, "games": 350, "winRate": 0.72})
-        is False,
-        "Δ=−0.02 在噪声带内（−0.048, 0）→ 不触发",
-    )
-    check(
-        stop_loss_hit(
+    assert (stop_loss_hit("intent", 15, 0.0, 20, {"delta": -0.05, "games": 350, "winRate": 0.72})
+        is True), "Δ=−0.05 ≤ −2σ(−0.048) 统计显著 → 触发"
+    assert (stop_loss_hit("intent", 15, 0.0, 20, {"delta": 0.0, "games": 350, "winRate": 0.72})
+        is False), "Δ=0 不显著（旧逻辑会误停）——P1-9 修复核心断言"
+    assert (stop_loss_hit("intent", 15, 0.0, 20, {"delta": -0.02, "games": 350, "winRate": 0.72})
+        is False), "Δ=−0.02 在噪声带内（−0.048, 0）→ 不触发"
+    assert (stop_loss_hit(
             "intent", 15, 0.0, 20, {"delta": -0.02, "games": 350, "winRate": 0.72}, z_score=0.5
         )
-        is True,
-        "z 收紧（0.5σ）时 −0.02 也算显著——z 参数可调",
-    )
+        is True), "z 收紧（0.5σ）时 −0.02 也算显著——z 参数可调"
 
 
 def test_update_kwargs() -> None:
@@ -217,21 +165,15 @@ def test_update_kwargs() -> None:
         epochs=4, warmup_iters=2, kickstart_kl=1.0, kickstart_decay=0.5, seed=7
     )
     kw = run_rl.update_kwargs(args, 1, 1, object())
-    check(
-        kw["value_warmup_epochs"] == 4 and kw["seed"] == 7 and kw["kl_coef"] == 0.0,
-        "warmup：value-only + kl=0",
-    )
+    assert kw["value_warmup_epochs"] == 4 and kw["seed"] == 7 and kw["kl_coef"] == 0.0, "warmup：value-only + kl=0"
     kw = run_rl.update_kwargs(args, 3, 1, object())
-    check(
-        kw["value_warmup_epochs"] == 0 and abs(kw["kl_coef"] - 1.0) < 1e-9,
-        "策略迭代 kl=基础系数 1.0",
-    )
+    assert kw["value_warmup_epochs"] == 0 and abs(kw["kl_coef"] - 1.0) < 1e-9, "策略迭代 kl=基础系数 1.0"
     kw = run_rl.update_kwargs(args, 4, 1, object())
-    check(abs(kw["kl_coef"] - 0.5) < 1e-9, "kl 每策略迭代衰减 0.5")
+    assert abs(kw["kl_coef"] - 0.5) < 1e-9, "kl 每策略迭代衰减 0.5"
     args2 = types.SimpleNamespace(
         epochs=4, warmup_iters=1, kickstart_kl=0.0, kickstart_decay=0.5, seed=7
     )
-    check(run_rl.update_kwargs(args2, 3, 1, object())["kl_coef"] == 0.0, "kickstart_kl=0 关闭")
+    assert run_rl.update_kwargs(args2, 3, 1, object())["kl_coef"] == 0.0, "kickstart_kl=0 关闭"
 
 
 def test_kickstart_coef_anneals_to_exact_zero() -> None:
@@ -248,14 +190,11 @@ def test_kickstart_coef_anneals_to_exact_zero() -> None:
         epochs=4, warmup_iters=0, kickstart_kl=1.0, kickstart_decay=0.5, seed=7
     )
     # start_it=1 且 warmup=0 ⇒ policy_iter = it ⇒ kl_coef = 0.5^(it-1)
-    check(not coef_active(0.5**36), f"1e-11 量级不算活跃（阈值 {NEGLIGIBLE_COEF:g}）")
-    check(
-        run_rl.update_kwargs(args, 37, 1, None)["kl_coef"] == 0.0,
-        "it=37（0.5^36=1.455e-11）必须**精确**归零 —— 实测踩到的就是这一点",
-    )
+    assert not coef_active(0.5**36), f"1e-11 量级不算活跃（阈值 {NEGLIGIBLE_COEF:g}）"
+    assert run_rl.update_kwargs(args, 37, 1, None)["kl_coef"] == 0.0, "it=37（0.5^36=1.455e-11）必须**精确**归零 —— 实测踩到的就是这一点"
     # 边界：0.5^29=1.86e-9 > 1e-9 保留；0.5^30=9.31e-10 < 1e-9 归零
-    check(run_rl.update_kwargs(args, 30, 1, None)["kl_coef"] > 0.0, "阈值之上保留")
-    check(run_rl.update_kwargs(args, 31, 1, None)["kl_coef"] == 0.0, "阈值之下归零")
+    assert run_rl.update_kwargs(args, 30, 1, None)["kl_coef"] > 0.0, "阈值之上保留"
+    assert run_rl.update_kwargs(args, 31, 1, None)["kl_coef"] == 0.0, "阈值之下归零"
 
 
 def main() -> None:
@@ -273,11 +212,6 @@ def main() -> None:
     test_kickstart_startup_check()
     test_validate_args_kickstart_gates()
     print()
-    if FAILS:
-        print(f"RESULT: {len(FAILS)} FAILURE(S)")
-        for f in FAILS:
-            print("  - " + f)
-        raise SystemExit(1)
     print("RESULT: ALL PASS")
 
 
@@ -290,21 +224,12 @@ def test_update_kwargs_kickstart_zerowarmup() -> None:
     args = types.SimpleNamespace(
         epochs=4, warmup_iters=0, kickstart_kl=1.0, kickstart_decay=0.5, seed=7
     )
-    check(
-        abs(run_rl.update_kwargs(args, 1, 1, object())["kl_coef"] - 1.0) < 1e-9,
-        "warmup 0 → it1 kl=1.0（缰绳勒住 smash 轮）",
-    )
-    check(
-        abs(run_rl.update_kwargs(args, 2, 1, object())["kl_coef"] - 0.5) < 1e-9,
-        "it2 衰减到 0.5",
-    )
+    assert abs(run_rl.update_kwargs(args, 1, 1, object())["kl_coef"] - 1.0) < 1e-9, "warmup 0 → it1 kl=1.0（缰绳勒住 smash 轮）"
+    assert abs(run_rl.update_kwargs(args, 2, 1, object())["kl_coef"] - 0.5) < 1e-9, "it2 衰减到 0.5"
     args1 = types.SimpleNamespace(
         epochs=4, warmup_iters=1, kickstart_kl=1.0, kickstart_decay=0.5, seed=7
     )
-    check(
-        run_rl.update_kwargs(args1, 1, 1, object())["kl_coef"] == 0.0,
-        "warmup 1 → it1 kl=0（footgun，validate_args 应拦截，见下）",
-    )
+    assert run_rl.update_kwargs(args1, 1, 1, object())["kl_coef"] == 0.0, "warmup 1 → it1 kl=0（footgun，validate_args 应拦截，见下）"
 
 
 def test_kickstart_coef_ignores_restart() -> None:
@@ -314,19 +239,16 @@ def test_kickstart_coef_ignores_restart() -> None:
     args = types.SimpleNamespace(
         epochs=4, warmup_iters=0, kickstart_kl=1.0, kickstart_decay=0.5, seed=7
     )
-    check(abs(kickstart_coef(args, 1) - 1.0) < 1e-9, "it1 满额 1.0（fresh 行为不变）")
-    check(abs(kickstart_coef(args, 2) - 0.5) < 1e-9, "it2 衰减 0.5")
+    assert abs(kickstart_coef(args, 1) - 1.0) < 1e-9, "it1 满额 1.0（fresh 行为不变）"
+    assert abs(kickstart_coef(args, 2) - 0.5) < 1e-9, "it2 衰减 0.5"
     # it31 ⇒ 0.5^30 = 9.31e-10 < NEGLIGIBLE_COEF(1e-9) ⇒ 系数**精确** 0.0，不是 0.5**30。
     # 旧断言写的是 `abs(… - 0.5**30) < 1e-12` —— 那是归零机制（2026-09-10）落地前的期望，
     # 之后一直静默绿（边界与 test_kickstart_coef_anneals_to_exact_zero 完全同处）。
-    check(
-        kickstart_coef(args, 31) == 0.0,
-        "it31 精确归零（resume 不得回到 1.0——旧代码传 start_it 会满额）",
-    )
+    assert kickstart_coef(args, 31) == 0.0, "it31 精确归零（resume 不得回到 1.0——旧代码传 start_it 会满额）"
     args0 = types.SimpleNamespace(
         epochs=4, warmup_iters=0, kickstart_kl=0.0, kickstart_decay=0.5, seed=7
     )
-    check(kickstart_coef(args0, 31) == 0.0, "kickstart_kl=0 恒关")
+    assert kickstart_coef(args0, 31) == 0.0, "kickstart_kl=0 恒关"
 
 
 def test_kickstart_startup_check() -> None:
@@ -336,7 +258,7 @@ def test_kickstart_startup_check() -> None:
     from trainer.loop_lifecycle import _kickstart_startup_check
 
     off = types.SimpleNamespace(kickstart_ref=False)
-    check(_kickstart_startup_check(off, 31) == 0.0, "未启用 → 0.0 零副作用")
+    assert _kickstart_startup_check(off, 31) == 0.0, "未启用 → 0.0 零副作用"
     with tempfile.TemporaryDirectory() as td:
         bc = str(Path(td) / "w.json")
         Path(bc).write_text("{}", encoding="utf-8")
@@ -350,10 +272,7 @@ def test_kickstart_startup_check() -> None:
             bc=bc,
         )
         # 同 test_kickstart_coef_ignores_restart：it31 已在 NEGLIGIBLE_COEF 之下 ⇒ 精确 0.0。
-        check(
-            _kickstart_startup_check(args, 31) == 0.0,
-            "resume it31 → kk == 0.0（不回满额）",
-        )
+        assert _kickstart_startup_check(args, 31) == 0.0, "resume it31 → kk == 0.0（不回满额）"
         missing = types.SimpleNamespace(
             epochs=4,
             warmup_iters=0,
@@ -365,9 +284,9 @@ def test_kickstart_startup_check() -> None:
         )
         try:
             _kickstart_startup_check(missing, 31)
-            check(False, "缺 bc 应拦截")
+            raise AssertionError("缺 bc 应拦截")
         except SystemExit as e:
-            check("in-use" in str(e), "拦截信息指到 in-use 备份")
+            assert "in-use" in str(e), "拦截信息指到 in-use 备份"
 
 
 def test_validate_args_kickstart_gates() -> None:
@@ -377,18 +296,17 @@ def test_validate_args_kickstart_gates() -> None:
     ok = types.SimpleNamespace(mode="per-tick", kickstart_ref=True, warmup_iters=0)
     try:
         validate_args(ok)
-        check(True, "per-tick + ref + warmup 0 通过")
     except SystemExit as e:
-        check(False, f"合法组合不应拦截：{e}")
+        raise AssertionError(f"合法组合不应拦截：{e}") from e
     bad_mode = types.SimpleNamespace(mode="intent", kickstart_ref=True, warmup_iters=0)
     try:
         validate_args(bad_mode)
-        check(False, "intent + ref 应拦截")
+        raise AssertionError("intent + ref 应拦截")
     except SystemExit:
-        check(True, "intent + ref 拦截")
+        pass
     bad_warm = types.SimpleNamespace(mode="per-tick", kickstart_ref=True, warmup_iters=1)
     try:
         validate_args(bad_warm)
-        check(False, "warmup!=0 应拦截")
+        raise AssertionError("warmup!=0 应拦截")
     except SystemExit:
-        check(True, "warmup!=0 拦截")
+        pass

@@ -224,7 +224,7 @@ class _FakeConsole:
         self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
         # `shutdown()` 会等满一个 poll_interval；每个 e2e 用例都起一份假控制台，
         # 缺省 0.5s 的关服延迟就是白付（真 HTTP 请求仍然即时处理，不受影响）。
-        threading.Thread(target=self.srv.serve_forever, args=(0.05,), daemon=True).start()
+        serve_fast(self.srv).start()
 
     def handoff_courses(self) -> list[str]:
         """被请求过的 `autoOfflineHandoff` 课程名（顺序即请求顺序）。"""
@@ -726,6 +726,7 @@ from common.protocol import (
 )
 from remote.hub_client import PublishSpec, publish_job
 from remote.job_lifecycle import claim_job, peek_jobs
+from tests.helpers.http_server import serve_fast
 
 
 def _admin_offline(hub: _Hub) -> dict:

@@ -45,6 +45,7 @@ from common.protocol import (
 )
 from hub.server import FREEZE_AFTER_RECLAIMS, _JobStore, make_server
 from remote.hub_client import wait_job
+from tests.helpers.http_server import serve_fast
 from tests.helpers.hub_poll import hub_poll
 
 TOKEN = "sekret"
@@ -254,7 +255,7 @@ def _boot(
     store = _store(tmp_path, clock)
     srv = make_server(store, 0, TOKEN, host="127.0.0.1")
     port = srv.server_address[1]
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     return f"http://127.0.0.1:{port}", store, srv, th
 

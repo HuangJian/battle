@@ -60,6 +60,7 @@ from remote.error_report import (
     report_error,
 )
 from remote.job_lifecycle import worker_tag
+from tests.helpers.http_server import serve_fast
 from tests.remote.test_worker_reap_stall import (
     _job,
     _patch_hub,
@@ -116,7 +117,7 @@ class _FakeHub:
         self._srv.status = status  # type: ignore[attr-defined]
         self._srv.delay = delay  # type: ignore[attr-defined]
         self._srv.calls = self.calls  # type: ignore[attr-defined]
-        self._th = threading.Thread(target=self._srv.serve_forever, daemon=True)
+        self._th = serve_fast(self._srv)
 
     def __enter__(self) -> _FakeHub:
         self._th.start()
@@ -242,7 +243,7 @@ def test_report_error_lands_in_a_real_hub_ring(tmp_path: Path) -> None:
 
     hubq = _HubQueue({}, discover_root=tmp_path)
     srv = make_server(hubq, 0, TOKEN, host="127.0.0.1")
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     try:
         report_error(
             f"http://127.0.0.1:{srv.server_address[1]}",

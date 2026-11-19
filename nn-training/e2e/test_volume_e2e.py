@@ -64,6 +64,7 @@ from common.schema import (
 # 下一行的 import 为「本轮 shard 段账」：生产上由 `TrainingLoop.__init__` 建，
 # 本夹具用真 `_dispatch_volume_wave` ⇒ 状态契约得补齐（plan/payload-zero-disk §3.2）。
 from remote.payload_pack import ShardSegments
+from tests.helpers.http_server import serve_fast
 from trainer.loop_core import TrainingLoop
 
 #: 假节点的 ping 门（与 dispatch.bun_version / compute_code_hash 同源）。
@@ -482,7 +483,7 @@ def _env(
     srv = _VolServer(("127.0.0.1", 0), _VolAgent)
     srv.samples = {int(k.split("_")[1]): int(v) for k, v in server_kw.items() if k.startswith("n_")}
     srv.schema = {int(k.split("_")[1]): str(v) for k, v in server_kw.items() if k.startswith("s_")}
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     cfg = {
         "nodes": [
             {

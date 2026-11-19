@@ -58,6 +58,7 @@ from common.schema import (
     POLICY_EXTRA_DIM,
     SCALAR_DIM,
 )
+from tests.helpers.http_server import serve_fast
 from tests.subproc_util import run_utf8
 from trainer import run_rl
 from trainer.dispatch_queue import run_rollout_queue  # 真家（旧经 trainer.run_rl 再导出）
@@ -72,33 +73,7 @@ from worker.resume import (
     resumed_manifests,
 )
 
-FAILS: list[str] = []
 ITEST = os.environ.get("RUN_RL_ITEST") == "1" or "--itest" in sys.argv
-
-
-def check(cond: bool, msg: str) -> None:
-    print(("  PASS " if cond else "  FAIL ") + msg, flush=True)
-    if not cond:
-        FAILS.append(msg)
-
-
-@pytest.fixture(autouse=True)
-def _fail_loudly():
-    """任何 check() 记下的失败都必须让 pytest 变红（不许静默通过）。
-
-    历史坑（2026-09-20）：check() 只往模块级 FAILS 追加，只有**显式写了**
-    `f0 = len(FAILS) … raise` 的用例才会变红。`test_it_stream_smoke` 漏了那一段，
-    它的时序断言（I3 eval after weight distribution）于是静默 pass 了很久 ——
-    直到 xdist `-n 12` 下用例落到不同 worker/顺序才偶发红（门禁里表现为「随机
-    flake」）。这里用 autouse fixture 把义务交给框架：新增用例不可能再忘。
-    各用例手写的 f0/raise 已随之删除（本文件原设计）。
-    standalone 入口（main()）不走 fixture，但末尾 `if FAILS: SystemExit(1)` 兜同样的底。
-    """
-    f0 = len(FAILS)
-    yield
-    new = FAILS[f0:]
-    if new:
-        raise AssertionError("; ".join(new))
 
 
 def test_mirror_scalar_lockstep() -> None:
@@ -112,10 +87,7 @@ def test_mirror_scalar_lockstep() -> None:
     # 不抛错，它**静默 FAIL 了很长一段时间**（由模块级 _fail_loudly 揭出）。
     # 2026-10-12（obs-v5）：同一坑再验证一次 —— 追加 33=pickupRelX 后本行必须同步（本次由
     # nn-python-gate 全量 pytest 抓出，e2e/ 不在平时的子集里）。
-    check(
-        SCALAR_X_INDICES == [15, 18, 29, 33],
-        f"SCALAR_X_INDICES == [15,18,29,33] (got {SCALAR_X_INDICES})",
-    )
+    assert SCALAR_X_INDICES == [15, 18, 29, 33], f"SCALAR_X_INDICES == [15,18,29,33] (got {SCALAR_X_INDICES})"
     n = 26
     # mirror_x expects (C, H, W) — the trailing (1,) batch dim was a historic typo.
     obs = np.zeros((14, n, n), dtype=np.uint8)
@@ -130,14 +102,14 @@ def test_mirror_scalar_lockstep() -> None:
     sc[20] = 0.7  # 旧索引必须已是死位（不再参与翻转）
     sc[23] = 0.7
     obs2, sc2, mv2, ex2 = mirror_x(obs, sc, 3)  # left (3) → right (4)
-    check(mv2 == 4, "move left<->right flip")
-    check(ex2 is None, "mirror_x(extra=None) -> None (旧调用零破坏)")
-    check(abs(sc2[15] - (-0.5)) < 1e-6, "scalar[15] flips sign under mirrorX")
-    check(abs(sc2[18] - 0.25) < 1e-6, "scalar[18] flips sign under mirrorX")
-    check(abs(sc2[29] - (-0.3)) < 1e-6, "scalar[29] (iceVx) flips sign under mirrorX")
-    check(abs(sc2[33] - 0.4) < 1e-6, "scalar[33] (pickupRelX) flips sign under mirrorX")
-    check(abs(sc2[20] - 0.7) < 1e-6, "legacy scalar[20] is now a dead slot (no flip)")
-    check(abs(sc2[23] - 0.7) < 1e-6, "legacy scalar[23] is now a dead slot (no flip)")
+    assert mv2 == 4, "move left<->right flip"
+    assert ex2 is None, "mirror_x(extra=None) -> None (旧调用零破坏)"
+    assert abs(sc2[15] - (-0.5)) < 1e-6, "scalar[15] flips sign under mirrorX"
+    assert abs(sc2[18] - 0.25) < 1e-6, "scalar[18] flips sign under mirrorX"
+    assert abs(sc2[29] - (-0.3)) < 1e-6, "scalar[29] (iceVx) flips sign under mirrorX"
+    assert abs(sc2[33] - 0.4) < 1e-6, "scalar[33] (pickupRelX) flips sign under mirrorX"
+    assert abs(sc2[20] - 0.7) < 1e-6, "legacy scalar[20] is now a dead slot (no flip)"
+    assert abs(sc2[23] - 0.7) < 1e-6, "legacy scalar[23] is now a dead slot (no flip)"
 
 
 def _mk_shard(traj: Path, stage: int, seed: int, wver: str, *, aggregate: bool = False) -> None:
@@ -181,35 +153,26 @@ def test_resume_scope(tmp: Path) -> None:
     _mk_shard(traj, 5, 555, "b" * 64)  # 旧权重代际
     plan = {(0, 111), (3, 222)}
     done_all = completed_pairs(traj, wver)
-    check(done_all == {(0, 111), (3, 222), (9, 999)}, "done filters by wver only")
+    assert done_all == {(0, 111), (3, 222), (9, 999)}, "done filters by wver only"
     done_plan = done_all & plan
-    check(done_plan == {(0, 111), (3, 222)}, "plan intersection")
+    assert done_plan == {(0, 111), (3, 222)}, "plan intersection"
     rm = resumed_manifests(traj, wver, only=plan)
-    check(
-        {(m["stage"], m["seed"]) for m in rm} == {(0, 111), (3, 222)},
-        "resumed honors only=plan (drops off-plan)",
-    )
+    assert {(m["stage"], m["seed"]) for m in rm} == {(0, 111), (3, 222)}, "resumed honors only=plan (drops off-plan)"
     agg = [m for m in rm if m.get("games") == 1 and m.get("node") == "fake"]
-    check(len(agg) == 1, "aggregate-schema manifest passed through")
+    assert len(agg) == 1, "aggregate-schema manifest passed through"
     legacy = [m for m in rm if m.get("node") != "fake"]
-    check(
-        len(legacy) == 1 and legacy[0]["games"] == 1 and legacy[0]["totalSamples"] == 30,
-        "legacy schema converted to aggregate shape",
-    )
+    assert len(legacy) == 1 and legacy[0]["games"] == 1 and legacy[0]["totalSamples"] == 30, "legacy schema converted to aggregate shape"
     rm_ex = resumed_manifests(traj, wver, only=plan, exclude={(0, 111)})
-    check({(m["stage"], m["seed"]) for m in rm_ex} == {(3, 222)}, "exclude=seen honored")
+    assert {(m["stage"], m["seed"]) for m in rm_ex} == {(3, 222)}, "exclude=seen honored"
 
     # 吞吐 T4 提前预采：double-wver 对账——本轮 θ_N(wver) 之外还需认上一轮 epoch3
     # 快照（extra_wver）采的首波 shard（预采首波 wver=θ_{N,e3}，否则被当未完成清场）。
     _mk_shard(traj, 7, 777, "e" * 64)  # 模拟预采首波：wver=快照指纹（extra）
     e_done = completed_pairs(traj, wver, extra_wver="e" * 64)
-    check((7, 777) in e_done, "extra-wver precollected shard counted as done")
+    assert (7, 777) in e_done, "extra-wver precollected shard counted as done"
     rm_e = resumed_manifests(traj, wver, only={(7, 777)}, extra_wver="e" * 64)
-    check(len(rm_e) == 1 and rm_e[0]["stage"] == 7, "resumed honors extra-wver shard")
-    check(
-        (7, 777) not in completed_pairs(traj, wver),
-        "without extra_wver precollected shard NOT treated as current-θ shard",
-    )
+    assert len(rm_e) == 1 and rm_e[0]["stage"] == 7, "resumed honors extra-wver shard"
+    assert (7, 777) not in completed_pairs(traj, wver), "without extra_wver precollected shard NOT treated as current-θ shard"
 
 
 def test_jsonl_anchors(tmp: Path) -> None:
@@ -224,9 +187,9 @@ def test_jsonl_anchors(tmp: Path) -> None:
         {"event": "circuit_break", "iter": 7},
     ]
     jl.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
-    check(last_completed_iter(jl) == 7, "last iteration event wins (errors ignored)")
-    check(last_rotate_seed(jl) == 42, "rotateSeed inherited from last run_start")
-    check(peak_entropy(jl) is None, "no entropy field -> no F4 ENT baseline (cold start)")
+    assert last_completed_iter(jl) == 7, "last iteration event wins (errors ignored)"
+    assert last_rotate_seed(jl) == 42, "rotateSeed inherited from last run_start"
+    assert peak_entropy(jl) is None, "no entropy field -> no F4 ENT baseline (cold start)"
 
     rows2 = [
         {"event": "iteration", "iter": 1, "entropy": 0.254},
@@ -237,10 +200,7 @@ def test_jsonl_anchors(tmp: Path) -> None:
     (tmp / "log2.jsonl").write_text(
         "\n".join(json.dumps(r) for r in rows2) + "\n", encoding="utf-8"
     )
-    check(
-        peak_entropy(tmp / "log2.jsonl") == 0.377,
-        "peak entropy inherited (F4 ENT relative-collapse baseline survives relaunch)",
-    )
+    assert peak_entropy(tmp / "log2.jsonl") == 0.377, "peak entropy inherited (F4 ENT relative-collapse baseline survives relaunch)"
 
 
 # ---------------- 集成层（RUN_RL_ITEST=1）----------------
@@ -581,7 +541,7 @@ def _itest_env(
     common.distribution.weights_push_cache_reset()
     monkeypatch.setattr(_rdispatch, "run_local_rollout", _stub_local_rollout)
     srv = FakeServer(("127.0.0.1", 0), FakeAgent)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     cfg = {
         "nodes": [
             {
@@ -625,9 +585,9 @@ def test_it_queue_normal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
         wts = [t for kind, t, _x in srv.events if kind == "weights"]
         disp_pairs = {p for kind, _t, p in srv.events if kind == "dispatch"}
         node_disp = [t for kind, t, _x in srv.events if kind == "dispatch"]
-        check(rep.get("missing") == [] and rep["games"] == 2, "I1 settled fully")
-        check(rep.get("dist_phase_sec") is not None, "I1 dist_phase_sec present")
-        check(len(drained_ts) == 1, f"I1 queue-drained fired once (got {len(drained_ts)})")
+        assert rep.get("missing") == [] and rep["games"] == 2, "I1 settled fully"
+        assert rep.get("dist_phase_sec") is not None, "I1 dist_phase_sec present"
+        assert len(drained_ts) == 1, f"I1 queue-drained fired once (got {len(drained_ts)})"
         # 【2026-09-21 修订】原断言 `drained_ts[0] > wts[0]` 与本代码性质不符：本地槽是**复用**
         # 的（`cap_full = max(1, min(workers, n_tasks))` ⇒ local_slots_max=0 也有 2 条本地
         # 腿），2 局 × 0.01s 能在后台 `weights-push` 仍**在途**时就清空队列 ⇒ 与 I3 同一条
@@ -635,15 +595,12 @@ def test_it_queue_normal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
         # 与任何改动无关）——§97 同族。真正有结构保证、且断言它才有回归价值的是：**节点采样
         # 派发晚于其权重落地**（节点 worker 线程在 POST 成功后才孵化，
         # `trainer/dispatch.py::_push_need_and_spawn`）。
-        check(
-            not node_disp or (bool(wts) and wts[0] < node_disp[0]),
-            "I1 node sampling task dispatched only after weights pushed "
+        assert not node_disp or (bool(wts) and wts[0] < node_disp[0]), ("I1 node sampling task dispatched only after weights pushed "
             f"[weights_events={len(wts)} first={wts[0] if wts else None} "
             f"first_node_dispatch={node_disp[0] if node_disp else None} "
-            f"drained={drained_ts[0] if drained_ts else None}]",
-        )
-        check(disp_pairs == {(0, 111), (3, 222)}, "I1 all pairs still dispatched")
-        check(rep["dist"]["offPlanShards"] == 0, "I1 no off-plan shards")
+            f"drained={drained_ts[0] if drained_ts else None}]")
+        assert disp_pairs == {(0, 111), (3, 222)}, "I1 all pairs still dispatched"
+        assert rep["dist"]["offPlanShards"] == 0, "I1 no off-plan shards"
     finally:
         srv.shutdown()
 
@@ -668,9 +625,9 @@ def test_it_halt_preset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
             halt_event=ev,
             on_queue_drained=lambda: calls.append(1),
         )
-        check(rep2.get("halt_aborted") is True, "I2 halt_aborted flagged")
-        check(len(rep2["missing"]) == 2 and rep2["games"] == 0, "I2 nothing dispatched/settled")
-        check(calls == [], "I2 queue-drained NOT fired under pre-set halt")
+        assert rep2.get("halt_aborted") is True, "I2 halt_aborted flagged"
+        assert len(rep2["missing"]) == 2 and rep2["games"] == 0, "I2 nothing dispatched/settled"
+        assert calls == [], "I2 queue-drained NOT fired under pre-set halt"
     finally:
         srv.shutdown()
 
@@ -742,7 +699,7 @@ def test_it_stream_local_loser_retire(tmp_path: Path, monkeypatch: pytest.Monkey
                 on_collect_done=_on_collect_done,
                 backend=stub3b,
             )
-        except BaseException as e:  # 回归证据：任何异常（含 BaseException）都要留成 FAILS
+        except BaseException as e:  # 回归证据：任何异常（含 BaseException）都要留成断言失败
             rep3b = None
             err = e
         # 输家的结算/retire 发生在**被放弃的 daemon worker 线程**里（tail-join 0s 后
@@ -753,19 +710,13 @@ def test_it_stream_local_loser_retire(tmp_path: Path, monkeypatch: pytest.Monkey
             time.sleep(0.02)
         retired = [ln for ln in lines if "retired" in ln]
         local_retired = [ln for ln in retired if "node=local" in ln]
-        check(err is None, f"I3b collector 未抛（got {err!r}）")
-        check(
-            bool(local_retired),
-            f"I3b 本地副本做了 dup 输家并 retire 本地 shard 目录（got {retired}）",
-        )
-        check(
-            all("/dist/" not in ln for ln in local_retired),
-            f"I3b retire 的是本地布局 w{{idx}}/rl_sX_seedY（got {local_retired}）",
-        )
+        assert err is None, f"I3b collector 未抛（got {err!r}）"
+        assert bool(local_retired), f"I3b 本地副本做了 dup 输家并 retire 本地 shard 目录（got {retired}）"
+        assert all("/dist/" not in ln for ln in local_retired), f"I3b retire 的是本地布局 w{{idx}}/rl_sX_seedY（got {local_retired}）"
         if rep3b is not None:
             sm3b = rep3b.pop("_stream")
-            check(rep3b["games"] == 4 and sm3b["waves"] >= 1, "I3b 4 局全部训练结算")
-            check(sm3b["halted"] is False, "I3b 无熔断")
+            assert rep3b["games"] == 4 and sm3b["waves"] >= 1, "I3b 4 局全部训练结算"
+            assert sm3b["halted"] is False, "I3b 无熔断"
     finally:
         srv.shutdown()
 
@@ -802,10 +753,10 @@ def test_it_stream_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
             backend=stub3,
         )
         sm = rep3.pop("_stream")
-        check(rep3["games"] == 4 and sm["waves"] >= 1, "I3 streamed round trained")
-        check(stub3.updates >= 1, f"I3 stub PPO invoked for waves ({stub3.updates})")
-        check(sm["halted"] is False and sm["dropped_games"] == 0, "I3 no halt (cap high)")
-        check(len(fired) == 1, f"I3 eval fired exactly once (got {len(fired)})")
+        assert rep3["games"] == 4 and sm["waves"] >= 1, "I3 streamed round trained"
+        assert stub3.updates >= 1, f"I3 stub PPO invoked for waves ({stub3.updates})"
+        assert sm["halted"] is False and sm["dropped_games"] == 0, "I3 no halt (cap high)"
+        assert len(fired) == 1, f"I3 eval fired exactly once (got {len(fired)})"
         wts3 = [t for kind, t, _x in srv.events if kind == "weights"]
         node_disp = [t for kind, t, _x in srv.events if kind == "dispatch"]
         # 【2026-09-20 修订】原断言是「eval 晚于节点权重 POST」，而那不是本代码的性质：
@@ -816,14 +767,11 @@ def test_it_stream_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
         # kind='eval' 权重握手（`trainer/eval_dispatch.py`），不依赖这条 rollout POST 的完成。
         # 有结构保证的是这一条（断言它才有回归价值）：**节点采样派发**晚于其权重落地
         # ——节点 worker 线程在 POST 成功后才孵化（`trainer/dispatch.py::_push_need_and_spawn`）。
-        check(
-            not node_disp or (bool(wts3) and wts3[0] < node_disp[0]),
-            "I3 node sampling task dispatched only after weights pushed "
+        assert not node_disp or (bool(wts3) and wts3[0] < node_disp[0]), ("I3 node sampling task dispatched only after weights pushed "
             f"[weights_events={len(wts3)} first={wts3[0] if wts3 else None} "
             f"first_node_dispatch={node_disp[0] if node_disp else None} "
-            f"eval_fired={fired[0] if fired else None}]",
-        )
-        check("_eval_thread" in rep3, "I3 eval thread returned via report")
+            f"eval_fired={fired[0] if fired else None}]")
+        assert "_eval_thread" in rep3, "I3 eval thread returned via report"
     finally:
         srv.shutdown()
 
@@ -852,8 +800,8 @@ def test_it_stream_halt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
             backend=stub4,
         )
         sm4 = rep4.pop("_stream")
-        check(sm4["halted"] is True, f"I4 halted (cum_kl={sm4['kl_cum']:.1f})")
-        check(sm4["waves"] >= 1 and "_eval_thread" not in rep4, "I4 coherent without eval cb")
+        assert sm4["halted"] is True, f"I4 halted (cum_kl={sm4['kl_cum']:.1f})"
+        assert sm4["waves"] >= 1 and "_eval_thread" not in rep4, "I4 coherent without eval cb"
     finally:
         srv.shutdown()
 
@@ -877,10 +825,7 @@ def test_it_local_suspend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
             local_slots_max=2,
             local_suspend=susp,
         )
-        check(
-            rep5a["games"] == 2 and "local" not in rep5a["dist"]["nodes"],
-            f"I5 suspended -> zero local settlements (byNode={rep5a['dist']['nodes']})",
-        )
+        assert rep5a["games"] == 2 and "local" not in rep5a["dist"]["nodes"], f"I5 suspended -> zero local settlements (byNode={rep5a['dist']['nodes']})"
         traj = tmp_path / "i5b"
         traj.mkdir()
         # 2026-09-29（§46 满机 flake 复现）：I5b 断言「本机**拥有**头部任务」，但竞速道
@@ -902,10 +847,7 @@ def test_it_local_suspend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
             "i5.52",
             local_slots_max=2,
         )
-        check(
-            rep5b["games"] == 2 and rep5b["dist"]["nodes"] == {"local": 2},
-            f"I5b no-suspend -> local owns head tasks ({rep5b['dist']['nodes']})",
-        )
+        assert rep5b["games"] == 2 and rep5b["dist"]["nodes"] == {"local": 2}, f"I5b no-suspend -> local owns head tasks ({rep5b['dist']['nodes']})"
     finally:
         srv.shutdown()
 
@@ -948,9 +890,9 @@ def test_it_longtail_race(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         )
         took6 = time.time() - t0
         n_slow_disp = sum(1 for kind, _t, p in srv.events if kind == "dispatch" and p == (0, 111))
-        check(rep6["games"] == 2 and rep6["missing"] == [], "I6 long-tail race settled all")
-        check(n_slow_disp >= 2, f"I6 slow task re-raced by idle slot (dispatches={n_slow_disp})")
-        check(took6 < 40.0, f"I6 round not stalled on slow copy ({took6:.1f}s)")
+        assert rep6["games"] == 2 and rep6["missing"] == [], "I6 long-tail race settled all"
+        assert n_slow_disp >= 2, f"I6 slow task re-raced by idle slot (dispatches={n_slow_disp})"
+        assert took6 < 40.0, f"I6 round not stalled on slow copy ({took6:.1f}s)"
     finally:
         srv.slow_first = set()
         srv._slowed_once = set()
@@ -1000,11 +942,8 @@ def test_it_eval_deferred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
             local_slots_max=0,
         )
         t_collect = round(time.time() - t_collect, 1)
-        check(
-            rep7["games"] == 2 and rep7["missing"] == [],
-            f"I7 collection completes while slow eval in flight ({t_collect}s)",
-        )
-        check(eval_th.is_alive(), "I7 slow eval still running afterwards (deferred to background)")
+        assert rep7["games"] == 2 and rep7["missing"] == [], f"I7 collection completes while slow eval in flight ({t_collect}s)"
+        assert eval_th.is_alive(), "I7 slow eval still running afterwards (deferred to background)"
         srv.eval_gate.set()  # 放行：eval 局现在结算；join 证明它在后台真的收了尾
         eval_th.join(timeout=45)
     finally:
@@ -1054,23 +993,20 @@ def test_it_eval_post_ppo_weights(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         ts._report = {"winRate": 0.5}
         ts._eval_on_round = lambda m: m % 5 == 0  # type: ignore[method-assign,assignment]
         ts._dispatch_delayed_eval(6, cfg)
-        check(ts._eval_thread is not None, "I10 delayed eval dispatched for round 6")
-        assert ts._eval_thread is not None
-        ts._eval_thread.join(timeout=120)
+        eval_thread = ts._eval_thread
+        assert eval_thread is not None, "I10 delayed eval dispatched for round 6"
+        eval_thread.join(timeout=120)
         fp5 = common.distribution.weights_fingerprint(str(arch5))
         fp6 = common.distribution.weights_fingerprint(str(WEIGHTS))
-        check(fp5 != fp6, "I10 fixture sanity: archive/live bytes differ")
+        assert fp5 != fp6, "I10 fixture sanity: archive/live bytes differ"
         rows = [
             json.loads(line)
             for line in (traj / "eval_log.jsonl").read_text(encoding="utf-8").splitlines()
             if '"event": "eval"' in line
         ]
-        check(len(rows) == 2, f"I10 2 eval games landed (got {len(rows)})")
-        check(all(r["iter"] == 5 for r in rows), "I10 rows labeled weights-round 5")
-        check(
-            all(r["wver"] == fp5[:16] for r in rows),
-            "I10 rows ran archive W5 bytes (not live pointer)",
-        )
+        assert len(rows) == 2, f"I10 2 eval games landed (got {len(rows)})"
+        assert all(r["iter"] == 5 for r in rows), "I10 rows labeled weights-round 5"
+        assert all(r["wver"] == fp5[:16] for r in rows), "I10 rows ran archive W5 bytes (not live pointer)"
     finally:
         srv.shutdown()
 
@@ -1211,49 +1147,41 @@ def test_it_mixed_cluster_rollout_only_freezes_own_course_eval(
             bun, str(w_a), traj_a, [(0, 111), (3, 222)], args_a, cfg, "mix.7",
             local_slots_max=0,
         )
-        check(rep["games"] == 2 and rep["missing"] == [], "混跑：A 课 rollout 2 局全结算")
-        check(th_b.is_alive(), "混跑：B 课 eval 在 rollout 收尾时仍在飞（同节点并行）")
-        check(_eval_fetches(srv, "mix.a") == [], f"冻结期 A 课 0 局派出：{srv.eval_fetches}")
-        check(_eval_ledger(log_a)[0] == [], "冻结期 A 课 0 行落账")
+        assert rep["games"] == 2 and rep["missing"] == [], "混跑：A 课 rollout 2 局全结算"
+        assert th_b.is_alive(), "混跑：B 课 eval 在 rollout 收尾时仍在飞（同节点并行）"
+        assert _eval_fetches(srv, "mix.a") == [], f"冻结期 A 课 0 局派出：{srv.eval_fetches}"
+        assert _eval_ledger(log_a)[0] == [], "冻结期 A 课 0 行落账"
 
         # 放行在飞局：它们照常落账（rollout 只冻结**新投递**，不撤销在飞局）。
         srv.eval_gate.set()
         th_b.join(timeout=60)
-        check(not th_b.is_alive(), "B 课 eval 轮收工")
+        assert not th_b.is_alive(), "B 课 eval 轮收工"
         rows_b, summ_b = _eval_ledger(log_b)
-        check(len(rows_b) == 3, f"B 课 3 局落账（got {len(rows_b)}）")
-        check(
-            bool(summ_b)
+        assert len(rows_b) == 3, f"B 课 3 局落账（got {len(rows_b)}）"
+        assert (bool(summ_b)
             and summ_b[-1]["games"] == 3
             and summ_b[-1]["dropped"] == 0
             and summ_b[-1]["close_reason"] == "settled"
             and summ_b[-1]["course_fp"] == fp_b
-            and summ_b[-1]["nodes"] == {nid: 3},
-            f"B 课 summary 完整收工：{summ_b[-1] if summ_b else None}",
-        )
+            and summ_b[-1]["nodes"] == {nid: 3}), f"B 课 summary 完整收工：{summ_b[-1] if summ_b else None}"
         # 冻结仍是**按课**的：B 收工时 A 仍 0 局（进程级冻结的实现里这不可能发生）。
-        check(_eval_ledger(log_a)[0] == [], "B 收工时 A 课仍被冻结")
-        check(
-            [r["node"] for r in rows_b] == [nid] * 3, "B 课 3 局都由集群节点结算"
-        )
+        assert _eval_ledger(log_a)[0] == [], "B 收工时 A 课仍被冻结"
+        assert [r["node"] for r in rows_b] == [nid] * 3, "B 课 3 局都由集群节点结算"
 
         # —— 解冻：A 课同一轮继续领牌，收工读数完整 ——
         gate.end_rollout(fp_a)
         th_a.join(timeout=60)
-        check(not th_a.is_alive(), "解冻后 A 课 eval 收工")
+        assert not th_a.is_alive(), "解冻后 A 课 eval 收工"
         a_fetches = _eval_fetches(srv, "mix.a")
-        check(len(a_fetches) == 3, f"解冻后 A 课 3 局派出（got {len(a_fetches)}）")
+        assert len(a_fetches) == 3, f"解冻后 A 课 3 局派出（got {len(a_fetches)}）"
         rows_a, summ_a = _eval_ledger(log_a)
-        check(len(rows_a) == 3, f"A 课 3 局落账（got {len(rows_a)}）")
-        check(
-            bool(summ_a)
+        assert len(rows_a) == 3, f"A 课 3 局落账（got {len(rows_a)}）"
+        assert (bool(summ_a)
             and summ_a[-1]["games"] == 3
             and summ_a[-1]["dropped"] == 0
             and summ_a[-1]["close_reason"] == "settled"
             and summ_a[-1]["course_fp"] == fp_a
-            and summ_a[-1]["nodes"] == {nid: 3},
-            f"A 课 summary 完整收工：{summ_a[-1] if summ_a else None}",
-        )
+            and summ_a[-1]["nodes"] == {nid: 3}), f"A 课 summary 完整收工：{summ_a[-1] if summ_a else None}"
     finally:
         if srv.eval_gate is not None:
             srv.eval_gate.set()  # 断言失败也别把 handler 按满 120s
@@ -1318,41 +1246,32 @@ def test_it_mixed_cluster_rollout_pauses_new_eval_grants_but_keeps_inflight(
             bun, str(w_a), traj_a, [(0, 111), (3, 222)], args_a, cfg, "mix2.7",
             local_slots_max=0,
         )
-        check(rep["games"] == 2 and rep["missing"] == [], "混跑：rollout 2 局全结算")
-        check(th.is_alive(), "eval 轮活着等解冻（pending 2 局）")
-        check(len(_eval_fetches(srv, "mix2.a")) == 2, f"冻结期不许领新牌：{srv.eval_fetches}")
-        check(_eval_ledger(log_a)[0] == [], "在飞局未落账前 ledger 为空（handler 仍被按着）")
+        assert rep["games"] == 2 and rep["missing"] == [], "混跑：rollout 2 局全结算"
+        assert th.is_alive(), "eval 轮活着等解冻（pending 2 局）"
+        assert len(_eval_fetches(srv, "mix2.a")) == 2, f"冻结期不许领新牌：{srv.eval_fetches}"
+        assert _eval_ledger(log_a)[0] == [], "在飞局未落账前 ledger 为空（handler 仍被按着）"
 
         # 放行在飞局：它们照常结算；冻结仍在 ⇒ 池线程结算完只能等，不会领走 pending。
         srv.eval_gate.set()
         assert _wait_until(lambda: len(_eval_ledger(log_a)[0]) == 2), "在飞 2 局没有落账"
-        check(
-            len(_eval_fetches(srv, "mix2.a")) == 2,
-            f"在飞局落账后仍不许领新牌：{srv.eval_fetches}",
-        )
-        check(th.is_alive(), "pending 2 局仍被冻结挡着（轮未收工）")
+        assert len(_eval_fetches(srv, "mix2.a")) == 2, f"在飞局落账后仍不许领新牌：{srv.eval_fetches}"
+        assert th.is_alive(), "pending 2 局仍被冻结挡着（轮未收工）"
 
         gate.end_rollout(fp_a)
         froze = False
         th.join(timeout=60)
-        check(not th.is_alive(), "解冻后 eval 轮收工")
+        assert not th.is_alive(), "解冻后 eval 轮收工"
         rows, summ = _eval_ledger(log_a)
-        check(len(rows) == 4, f"解冻后补满 4 局（got {len(rows)}）")
-        check(
-            sorted((r["stage"], r["seed"]) for r in rows)
-            == sorted({(r["stage"], r["seed"]) for r in rows}),
-            "4 局逐局不重复",
-        )
-        check(
-            bool(summ)
+        assert len(rows) == 4, f"解冻后补满 4 局（got {len(rows)}）"
+        assert (sorted((r["stage"], r["seed"]) for r in rows)
+            == sorted({(r["stage"], r["seed"]) for r in rows})), "4 局逐局不重复"
+        assert (bool(summ)
             and summ[-1]["games"] == 4
             and summ[-1]["dropped"] == 0
             and summ[-1]["close_reason"] == "settled"
             and summ[-1]["course_fp"] == fp_a
-            and summ[-1]["nodes"] == {nid: 4},
-            f"summary 完整收工：{summ[-1] if summ else None}",
-        )
-        check(all(r["node"] == nid for r in rows), "4 局都由集群节点结算")
+            and summ[-1]["nodes"] == {nid: 4}), f"summary 完整收工：{summ[-1] if summ else None}"
+        assert all(r["node"] == nid for r in rows), "4 局都由集群节点结算"
     finally:
         if srv.eval_gate is not None:
             srv.eval_gate.set()
@@ -1392,15 +1311,9 @@ def test_it_precollect_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
             extra_wver="e" * 64,
         )
         disp8 = [p for kind, _t, p in srv.events if kind == "dispatch"]
-        check(
-            stub8.updates >= 2,
-            f"I8 precollected shard trained as first wave + rest collected (updates={stub8.updates})",
-        )
-        check(
-            pre_pair not in disp8 and cur_pair in disp8,
-            f"I8 collector skips precollected pair, dispatches only remaining ({disp8})",
-        )
-        check(rep8["games"] == 2, f"I8 report covers full plan (games={rep8['games']})")
+        assert stub8.updates >= 2, f"I8 precollected shard trained as first wave + rest collected (updates={stub8.updates})"
+        assert pre_pair not in disp8 and cur_pair in disp8, f"I8 collector skips precollected pair, dispatches only remaining ({disp8})"
+        assert rep8["games"] == 2, f"I8 report covers full plan (games={rep8['games']})"
     finally:
         srv.shutdown()
 
@@ -1478,7 +1391,7 @@ def test_it_early_race_v314(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
             bun, str(WEIGHTS), traj, plan9, args, cfg, "i9.9", local_slots_max=0
         )
         took9 = time.time() - t0
-        check(rep9["games"] == 8 and rep9["missing"] == [], "I9 all 8 settled")
+        assert rep9["games"] == 8 and rep9["missing"] == [], "I9 all 8 settled"
         # 竞速证据（§31 起**双通道 OR**，任一成立即过）：
         #   ① 日志通道：seed111 出现过 tail-race / dup settle / fanout copy 行——
         #      只可能在任务已在 in-flight 时由竞速副本触发；tail-race 派发行不采样，
@@ -1497,15 +1410,12 @@ def test_it_early_race_v314(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
         dup_dispatches = sum(
             1 for kind, _t, p in srv.events if kind == "dispatch" and p == (0, 111)
         )
-        check(
-            raced or dup_dispatches >= 2,
-            f"I9 slow in-flight task re-raced by idle slot "
-            f"(log evidence={raced}, dispatches={dup_dispatches})",
-        )
+        assert raced or dup_dispatches >= 2, (f"I9 slow in-flight task re-raced by idle slot "
+            f"(log evidence={raced}, dispatches={dup_dispatches})")
         # 死锁兜底（非性能上界）：健康轮 ~0.1-4s（含竞速 churn）；xdist 并行/高负载下实测
         # 可超 5s（2026-09-06 hook 门禁实测）→ 放宽到 30s，仍能抓住 queueWindowSec=120 的
         # 死锁空等（这才是本断言的目的：round 必须自己终结，不靠外部超时）。
-        check(took9 < 30.0, f"I9 round terminates ({took9:.2f}s)")
+        assert took9 < 30.0, f"I9 round terminates ({took9:.2f}s)"
     finally:
         srv.slow_first = set()
         srv._slowed_once = set()
@@ -1540,9 +1450,9 @@ def test_it_tail_join_grace_v317(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
             local_slots_max=0,
         )
         took10 = time.time() - t0
-        check(rep10["games"] == 3 and rep10["missing"] == [], "I10 all 3 settled")
+        assert rep10["games"] == 3 and rep10["missing"] == [], "I10 all 3 settled"
         # 上界 15s：正常收官 ~2-4s（含 2s grace）；无兜底则须等满 dup_hang(30s)。
-        check(took10 < 15.0, f"I10 tail join bounded by grace ({took10:.2f}s < 15s)")
+        assert took10 < 15.0, f"I10 tail join bounded by grace ({took10:.2f}s < 15s)"
     finally:
         srv.dup_hang = 0.0
         srv.shutdown()
@@ -1560,10 +1470,10 @@ def test_compute_gae() -> None:
     adv, ret = ppo_mod.compute_gae(rewards, values, dones, gamma=0.99, lam=0.95)
     # t=1: delta=-0.8（终止，无 bootstrap）→ adv1=-0.8
     # t=0: delta=1+0.99*0.8-0.5=1.292 → adv0=1.292+0.99*0.95*(-0.8)=0.5396
-    check(abs(adv[1] - (-0.8)) < 1e-6, "terminal step advantage == delta")
-    check(abs(adv[0] - 0.5396) < 1e-6, f"bootstrapped advantage (got {adv[0]:.6f})")
+    assert abs(adv[1] - (-0.8)) < 1e-6, "terminal step advantage == delta"
+    assert abs(adv[0] - 0.5396) < 1e-6, f"bootstrapped advantage (got {adv[0]:.6f})"
     # 手算期望：ret = adv + values = [1.0396, 0.0]；显式容差吸收 float32 舍入
-    check(np.allclose(ret, [1.0396, 0.0], atol=1e-6), f"returns hand-computed (got {ret})")
+    assert np.allclose(ret, [1.0396, 0.0], atol=1e-6), f"returns hand-computed (got {ret})"
 
 
 def test_chunk_episodes() -> None:
@@ -1580,15 +1490,15 @@ def test_chunk_episodes() -> None:
     chs = ppo_mod.chunk_episodes(eps, 600, rng=PPORng.from_seed(0).chunk)
     sizes = [c["obs"].shape[0] for c in chs]
     # 2026-09-23：全部恰好 mb；尾部 1000%600=400 步被丢弃（旧行为是一块 ragged 400）。
-    check(sizes == [600], f"all chunks exactly mb (got {sizes})")
+    assert sizes == [600], f"all chunks exactly mb (got {sizes})"
     total = sum(c["obs"].shape[0] for c in chs)
-    check(total == 600, f"尾部按 mb 对齐丢弃 (got total={total})")
-    check(all(set(c.keys()) == set(eps[0].keys()) for c in chs), "keys preserved per chunk")
+    assert total == 600, f"尾部按 mb 对齐丢弃 (got total={total})"
+    assert all(set(c.keys()) == set(eps[0].keys()) for c in chs), "keys preserved per chunk"
     # shuffle=False（对照路径）与单池路径保持旧行为。
     seq = ppo_mod.chunk_episodes(eps, 600, shuffle=False)
-    check([c["obs"].shape[0] for c in seq] == [600, 400], "shuffle=False 逐字节保留 ragged")
+    assert [c["obs"].shape[0] for c in seq] == [600, 400], "shuffle=False 逐字节保留 ragged"
     one = ppo_mod.chunk_episodes([eps[1]], 600)
-    check([c["obs"].shape[0] for c in one] == [400], "单池不重排、不对齐")
+    assert [c["obs"].shape[0] for c in one] == [400], "单池不重排、不对齐"
 
 
 def test_backup_weights(tmp: Path) -> None:
@@ -1603,9 +1513,9 @@ def test_backup_weights(tmp: Path) -> None:
     try:
         for it in (1, 2, 3):
             out = rl_archive.backup_weights(str(src), it)
-            check(out is not None, f"backup it{it} returned path")
+            assert out is not None, f"backup it{it} returned path"
         remain = sorted(p.name.split(".")[1] for p in bdir.glob("rl-weights.it*.json"))
-        check(remain == ["it1", "it2", "it3"], f"只归档不清理（got {remain}）")
+        assert remain == ["it1", "it2", "it3"], f"只归档不清理（got {remain}）"
     finally:
         rl_archive.WEIGHTS_BACKUP_DIR = old_dir
 
@@ -1677,12 +1587,12 @@ def test_eval_local_gate(tmp: Path) -> None:
         # gate/宽限期放行、余量边界、零预留回退旧路径
         from worker.eval_yield import hold_for_local
 
-        check(not hold_for_local(6, 2, True, False), "reserve: gate set → no hold")
-        check(hold_for_local(2, 2, False, False), "reserve: within tail → hold for local")
-        check(not hold_for_local(3, 2, False, False), "reserve: above tail → nodes flow")
-        check(not hold_for_local(2, 2, False, True), "reserve: release grace forces flow")
-        check(not hold_for_local(0, 2, False, False), "reserve: empty pending → no hold")
-        check(not hold_for_local(6, 0, False, False), "reserve: 0 slots → legacy behavior")
+        assert not hold_for_local(6, 2, True, False), "reserve: gate set → no hold"
+        assert hold_for_local(2, 2, False, False), "reserve: within tail → hold for local"
+        assert not hold_for_local(3, 2, False, False), "reserve: above tail → nodes flow"
+        assert not hold_for_local(2, 2, False, True), "reserve: release grace forces flow"
+        assert not hold_for_local(0, 2, False, False), "reserve: empty pending → no hold"
+        assert not hold_for_local(6, 0, False, False), "reserve: 0 slots → legacy behavior"
         # A：兜底模式 + 无可用节点 → 3 关 ×2 种子全部由 local 结算并聚合进 summary
         traj_a = work / "trajA"
         ed.dispatch_eval_round(
@@ -1703,40 +1613,26 @@ def test_eval_local_gate(tmp: Path) -> None:
         ]
         eval_rows = [r for r in rows if r.get("event") == "eval"]
         summ = [r for r in rows if r.get("event") == "eval_summary"]
-        check(
-            len(calls) == 6 and len(eval_rows) == 6,
-            f"gate set → all 6 games ran locally (calls={len(calls)}, rows={len(eval_rows)})",
-        )
-        check(
-            all(r.get("node") == "local" for r in eval_rows), "ledger rows attributed to node=local"
-        )
-        check(
-            bool(summ)
+        assert len(calls) == 6 and len(eval_rows) == 6, f"gate set → all 6 games ran locally (calls={len(calls)}, rows={len(eval_rows)})"
+        assert all(r.get("node") == "local" for r in eval_rows), "ledger rows attributed to node=local"
+        assert (bool(summ)
             and summ[-1]["games"] == 6
             and summ[-1]["nodes"] == {"local": 6}
-            and summ[-1]["dropped"] == 0,
-            "summary aggregates local-only round",
-        )
+            and summ[-1]["dropped"] == 0), "summary aggregates local-only round"
         # 2026-10-18 plan/eval-gap-honesty §2b（D1b）：scratch 迁出 it<N>/ ⇒
         # 快照落 traj 的兄弟目录 `_eval-<traj>/`（轮转删 it<N>/ 时评估不受影响）。
-        check(
-            (work / "_eval-trajA" / "_eval_frozen_weights.json").exists(),
-            "frozen weights snapshot written into eval scratch (_eval-<it>/)",
-        )
+        assert (work / "_eval-trajA" / "_eval_frozen_weights.json").exists(), "frozen weights snapshot written into eval scratch (_eval-<it>/)"
         # 采样机健康账本：eval 局同册入账（mode:"eval"），喂「采样机健康」表指标
         meta_rows = [
             json.loads(line)
             for line in (work / "dist-agent-meta.jsonl").read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
-        check(
-            len(meta_rows) == 6
+        assert (len(meta_rows) == 6
             and all(
                 r.get("mode") == "eval" and r.get("ok") and r.get("node") == "local"
                 for r in meta_rows
-            ),
-            f"meta ledger records 6 eval games ({len(meta_rows)} rows)",
-        )
+            )), f"meta ledger records 6 eval games ({len(meta_rows)} rows)"
         # B：gate 从不放行，且**无可用节点** → 轮末必须主动放行本机（防 600s 空等，
         # eval_local.release_local_gate_if_starved / 2026-09-15 用户口径），窗口到期自然
         # 收场（不挂死、不越权训练侧）。
@@ -1756,11 +1652,9 @@ def test_eval_local_gate(tmp: Path) -> None:
         # 它仍在等门、被放行后就按 rl_b 跑（桩断言让这 6 局全部失败 ⇒ 仍 0 结算）。
         # 故断言换成当下真值：无节点时闸真的被主动放行；不得挂死；不得结算任何一局。
         # 「关门则让位」语义由 hold_for_local 单函数断言（本段上文）+ I7 慢 eval 用例覆盖。
-        check(
-            gate_open_never.is_set(),
-            "starved round releases local gate (anti-dead-wait, 2026-09-15)",
-        )
-        check(took < 40, f"closed-gate round exits at window ({took:.1f}s)")  # 并行门禁放宽
+        assert gate_open_never.is_set(), "starved round releases local gate (anti-dead-wait, 2026-09-15)"
+        # timing-ok: 上界兜底（只兜挂死；正常收线 < 1s，40s 是并行门禁下的余量）
+        assert took < 40, f"closed-gate round exits at window ({took:.1f}s)"
         rows_b = [
             json.loads(line)
             for line in (work / "eval_log.jsonl").read_text(encoding="utf-8").splitlines()
@@ -1769,10 +1663,7 @@ def test_eval_local_gate(tmp: Path) -> None:
         summ_b = [r for r in rows_b if r.get("event") == "eval_summary" and r.get("iter") == 2]
         # 「0 结算 / 6 全丢」是确定性的：被放行后本地跑的也是 rl_b（桩按 phase-A 权重断言 ⇒
         # 每局都失败），故不可能有局落账。
-        check(
-            bool(summ_b) and summ_b[-1]["games"] == 0 and summ_b[-1]["dropped"] == 6,
-            "closed-gate round settles nothing, all dropped",
-        )
+        assert bool(summ_b) and summ_b[-1]["games"] == 0 and summ_b[-1]["dropped"] == 6, "closed-gate round settles nothing, all dropped"
     finally:
         ed.run_local_eval_game = orig
 
@@ -1816,10 +1707,10 @@ def test_eval_fallback_only_healthy_remote(
     ]
     played = [r for r in rows if r.get("event") == "eval"]
     summ = [r for r in rows if r.get("event") == "eval_summary"]
-    check(len(played) == 2, f"healthy remote settles 2 games (got {len(played)})")
-    check(all(r.get("node") == "fake" for r in played), "all rows attributed to the remote node")
-    check(bool(summ) and "local" not in (summ[-1].get("nodes") or {}), "summary has no local")
-    check(local_calls == [], f"local runner never called (got {local_calls})")
+    assert len(played) == 2, f"healthy remote settles 2 games (got {len(played)})"
+    assert all(r.get("node") == "fake" for r in played), "all rows attributed to the remote node"
+    assert bool(summ) and "local" not in (summ[-1].get("nodes") or {}), "summary has no local"
+    assert local_calls == [], f"local runner never called (got {local_calls})"
 
 
 def test_race_tier_ok() -> None:
@@ -1828,17 +1719,14 @@ def test_race_tier_ok() -> None:
 
     spd = {"a": 5.0, "b": 20.0, "c": 8.0, "d": 60.0, "e": 12.0}
     # 按耗时升序：a(5) < c(8) < e(12) < b(20) < d(60) → top-3 = {a, c, e}
-    check(race_tier_ok(spd, "a", 3) is True, "fastest in top-3")
-    check(race_tier_ok(spd, "c", 3) is True, "2nd-fast in top-3")
-    check(race_tier_ok(spd, "e", 3) is True, "3rd-fast in top-3")
-    check(race_tier_ok(spd, "b", 3) is False, "4th-fast excluded (b=20)")
-    check(race_tier_ok(spd, "d", 3) is False, "slowest excluded (d=60)")
-    check(race_tier_ok(spd, "local", 3) is True, "local always races (no RPC)")
-    check(race_tier_ok({}, "a", 3) is True, "no speed data -> optimistic pass")
-    check(
-        race_tier_ok({"a": 5.0, "b": 9.0}, "b", 3) is True,
-        "node count <= top_n -> all in tier (degenerate no-gate)",
-    )
+    assert race_tier_ok(spd, "a", 3) is True, "fastest in top-3"
+    assert race_tier_ok(spd, "c", 3) is True, "2nd-fast in top-3"
+    assert race_tier_ok(spd, "e", 3) is True, "3rd-fast in top-3"
+    assert race_tier_ok(spd, "b", 3) is False, "4th-fast excluded (b=20)"
+    assert race_tier_ok(spd, "d", 3) is False, "slowest excluded (d=60)"
+    assert race_tier_ok(spd, "local", 3) is True, "local always races (no RPC)"
+    assert race_tier_ok({}, "a", 3) is True, "no speed data -> optimistic pass"
+    assert race_tier_ok({"a": 5.0, "b": 9.0}, "b", 3) is True, "node count <= top_n -> all in tier (degenerate no-gate)"
 
 
 def test_register_inflight_v314() -> None:
@@ -1849,32 +1737,24 @@ def test_register_inflight_v314() -> None:
     inflight: dict[tuple[int, int], int] = {}
     register_inflight(inflight, (2000, 612570782))  # 早派（pending > tailFanoutN）也登记
     register_inflight(inflight, (2002, 179564083))
-    check(inflight[(2000, 612570782)] == 1, "first dispatch registers at count=1")
+    assert inflight[(2000, 612570782)] == 1, "first dispatch registers at count=1"
     register_inflight(inflight, (2000, 612570782))  # 失败 requeue 后再派发 → 计数累加
-    check(inflight[(2000, 612570782)] == 2, "re-dispatch accumulates copy count")
+    assert inflight[(2000, 612570782)] == 2, "re-dispatch accumulates copy count"
     # 登记即竞速候选：早派任务立即能被 pick_tail_race 选中（副本数 dup=2 内）
-    check(
-        pick_tail_race(inflight, 2) == (2002, 179564083),
-        "early-dispatched non-full task is raceable (dup-full one skipped)",
-    )
-    check(pick_tail_race(inflight, 3) == (2000, 612570782), "under higher dup the smaller key wins")
+    assert pick_tail_race(inflight, 2) == (2002, 179564083), "early-dispatched non-full task is raceable (dup-full one skipped)"
+    assert pick_tail_race(inflight, 3) == (2000, 612570782), "under higher dup the smaller key wins"
 
 
 def test_pick_tail_race() -> None:
     """v3.10 长尾竞速选择纯函数（queue.pick_tail_race，用户裁定"有空槽就派发"）。"""
     from trainer.queue_local import pick_tail_race
 
-    check(pick_tail_race({}, 2) is None, "empty inflight -> None")
-    check(pick_tail_race({(1, 2): 1}, 2) == (1, 2), "single raceable task picked")
-    check(pick_tail_race({(1, 2): 2}, 2) is None, "dup full -> None")
-    check(pick_tail_race({(1, 2): 1}, 1) is None, "dup=1 disables racing")
-    check(
-        pick_tail_race({(5, 9): 2, (3, 4): 1, (0, 7): 1}, 2) == (0, 7),
-        "lexicographically smallest raceable task picked",
-    )
-    check(
-        pick_tail_race({(0, 7): 2, (3, 4): 1}, 2) == (3, 4), "only non-full in-flight task picked"
-    )
+    assert pick_tail_race({}, 2) is None, "empty inflight -> None"
+    assert pick_tail_race({(1, 2): 1}, 2) == (1, 2), "single raceable task picked"
+    assert pick_tail_race({(1, 2): 2}, 2) is None, "dup full -> None"
+    assert pick_tail_race({(1, 2): 1}, 1) is None, "dup=1 disables racing"
+    assert pick_tail_race({(5, 9): 2, (3, 4): 1, (0, 7): 1}, 2) == (0, 7), "lexicographically smallest raceable task picked"
+    assert pick_tail_race({(0, 7): 2, (3, 4): 1}, 2) == (3, 4), "only non-full in-flight task picked"
 
 
 def test_pick_race_target_v316() -> None:
@@ -1892,27 +1772,21 @@ def test_pick_race_target_v316() -> None:
     nodes = {(2000, 1): {"a"}, (2000, 2): {"a"}}
     blocked: dict[tuple[int, int], set[str]] = {(2000, 1): {"b"}}
     cand = pick_race_target(inflight, "b", nodes, blocked)
-    check(cand == (2000, 2), "b was blocked on (2000,1), picks (2000,2)")
+    assert cand == (2000, 2), "b was blocked on (2000,1), picks (2000,2)"
 
     cand = pick_race_target(inflight, "a", nodes, blocked)
-    check(cand is None, "a already holds both tasks — no race back")
+    assert cand is None, "a already holds both tasks — no race back"
 
     cand = pick_race_target(inflight, "c", nodes, blocked)
-    check(cand == (2000, 1), "c is not blocked, picks lex min")
+    assert cand == (2000, 1), "c is not blocked, picks lex min"
 
     # 无 dup：已有 2 份副本仍可被第三节点竞速
     multi = {(2000, 9): 2}
     multi_nodes = {(2000, 9): {"a", "b"}}
-    check(
-        pick_race_target(multi, "c", multi_nodes, {}) == (2000, 9),
-        "no dup cap — third node can race a 2-copy task",
-    )
+    assert pick_race_target(multi, "c", multi_nodes, {}) == (2000, 9), "no dup cap — third node can race a 2-copy task"
 
     inflight_empty: dict[tuple[int, int], int] = {}
-    check(
-        pick_race_target(inflight_empty, "a", {}, {}) is None,
-        "empty inflight -> None",
-    )
+    assert pick_race_target(inflight_empty, "a", {}, {}) is None, "empty inflight -> None"
 
 
 def main() -> None:
@@ -1959,11 +1833,6 @@ def main() -> None:
     else:
         print("[skip] integration tier: set RUN_RL_ITEST=1 to enable")
     print()
-    if FAILS:
-        print(f"RESULT: {len(FAILS)} FAILURE(S)")
-        for f in FAILS:
-            print("  - " + f)
-        raise SystemExit(1)
     print("RESULT: ALL PASS")
 
 
@@ -1977,9 +1846,9 @@ def test_scan_shards_mtime_cache(tmp: Path) -> None:
     wver = "abc123"
     # 空目录：无 shard
     rl_resume._SCAN_CACHE.clear()
-    check(rl_resume.completed_pairs(traj, wver) == set(), "空目录无 done")
-    check(len(rl_resume._SCAN_CACHE) == 1, "首次扫描写入缓存")
-    check(rl_resume.completed_pairs(traj, wver) == set(), "缓存命中结果一致")
+    assert rl_resume.completed_pairs(traj, wver) == set(), "空目录无 done"
+    assert len(rl_resume._SCAN_CACHE) == 1, "首次扫描写入缓存"
+    assert rl_resume.completed_pairs(traj, wver) == set(), "缓存命中结果一致"
 
     # 写入一个完整 shard（manifest 含 stage/seed/wver）→ 签名变 → 重扫应命中
     shard = traj / "rl_s0_seed111"
@@ -1990,24 +1859,15 @@ def test_scan_shards_mtime_cache(tmp: Path) -> None:
     (shard / "manifest.json").write_text(
         _json.dumps({"stage": 0, "seed": 111, "wver": wver}), encoding="utf-8"
     )
-    check(
-        rl_resume.completed_pairs(traj, wver) == {(0, 111)},
-        "新 shard 落盘后缓存失效重扫",
-    )
-    check(
-        rl_resume.completed_pairs(traj, wver) == {(0, 111)},
-        "签名未变缓存命中",
-    )
+    assert rl_resume.completed_pairs(traj, wver) == {(0, 111)}, "新 shard 落盘后缓存失效重扫"
+    assert rl_resume.completed_pairs(traj, wver) == {(0, 111)}, "签名未变缓存命中"
     # wver 不匹配的 shard 不计入
     shard2 = traj / "rl_s1_seed222"
     shard2.mkdir()
     (shard2 / "manifest.json").write_text(
         _json.dumps({"stage": 1, "seed": 222, "wver": "other"}), encoding="utf-8"
     )
-    check(
-        rl_resume.completed_pairs(traj, wver) == {(0, 111)},
-        "wver 不匹配不计入",
-    )
+    assert rl_resume.completed_pairs(traj, wver) == {(0, 111)}, "wver 不匹配不计入"
 
 
 def test_rl_config_validation() -> None:
@@ -2028,16 +1888,16 @@ def test_rl_config_validation() -> None:
             return True
 
     # 合法默认
-    check(RLConfig().collect_errors() == [], "默认配置合法")
+    assert RLConfig().collect_errors() == [], "默认配置合法"
     # 互斥：precollect_games + precollect_samples
-    check(_raises(precollect_games=5, precollect_samples=1000), "games/samples 互斥拦截")
+    assert _raises(precollect_games=5, precollect_samples=1000), "games/samples 互斥拦截"
     # 范围
-    check(_raises(workers=0), "workers<1 拦截")
-    check(_raises(mb=0), "mb<1 拦截")
-    check(_raises(lr=0), "lr<=0 拦截")
-    check(_raises(adv_norm="bogus"), "adv_norm 非法拦截")
-    check(_raises(mode="bogus"), "mode 非法拦截")
-    check(_raises(reward="toy:"), "reward toy: 缺 arm 拦截")
+    assert _raises(workers=0), "workers<1 拦截"
+    assert _raises(mb=0), "mb<1 拦截"
+    assert _raises(lr=0), "lr<=0 拦截"
+    assert _raises(adv_norm="bogus"), "adv_norm 非法拦截"
+    assert _raises(mode="bogus"), "mode 非法拦截"
+    assert _raises(reward="toy:"), "reward toy: 缺 arm 拦截"
     # validate_args 对 Namespace：非法 → SystemExit
     bad = types.SimpleNamespace(
         mode="per-tick",
@@ -2062,9 +1922,9 @@ def test_rl_config_validation() -> None:
     )
     try:
         validate_args(bad)
-        check(False, "互斥组合应 SystemExit")
+        raise AssertionError("互斥组合应 SystemExit")
     except SystemExit:
-        check(True, "互斥组合启动期拦截")
+        pass
 
 
 if __name__ == "__main__":

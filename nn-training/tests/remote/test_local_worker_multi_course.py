@@ -28,6 +28,7 @@ from pathlib import Path
 from common.protocol import COURSE_ENABLE_MARKER, normalize_manifest
 from hub.server import _HubQueue, _JobStore, make_server
 from remote.worker import acquire_job
+from tests.helpers.http_server import serve_fast
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -99,7 +100,7 @@ def _publish(hub: _HubQueue, course: str, jid: str) -> None:
 def _boot(tmp_path: Path, hub: _HubQueue):
     srv = make_server(hub, 0, TOKEN, host="127.0.0.1")
     port = int(srv.server_address[1])
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     return f"http://127.0.0.1:{port}", srv, th
 

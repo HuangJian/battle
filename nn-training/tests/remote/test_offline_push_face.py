@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
 
 import remote.offline_push_face as face
 from common.protocol import OFFLINE_PUSH_PROTO
+from tests.helpers.http_server import serve_fast
 
 TOKEN = "t-0k"
 
@@ -90,7 +91,7 @@ class _Server:
         self.state.set_starter(starter or (lambda _t, _d, _o: None))
         self.srv = face.make_face_server(self.state, 0, TOKEN, host="127.0.0.1")
         self.port = int(self.srv.server_address[1])
-        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        serve_fast(self.srv).start()
 
     def url(self, path: str) -> str:
         return f"http://127.0.0.1:{self.port}{path}"

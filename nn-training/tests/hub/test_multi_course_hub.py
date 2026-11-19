@@ -48,6 +48,7 @@ from common.protocol import (
     rotation_order,
 )
 from hub.server import _HubQueue, _JobStore, as_hub, make_server
+from tests.helpers.http_server import serve_fast
 from tests.helpers.hub_poll import hub_poll
 from tests.subproc_util import spawn_bound_port
 
@@ -292,7 +293,7 @@ def test_offline_role_worker_no_longer_claims_online_jobs(tmp_path: Path) -> Non
 def _boot(tmp_path: Path, hub: _HubQueue) -> tuple:
     srv = make_server(hub, 0, "sekret", host="127.0.0.1")
     port = srv.server_address[1]
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     return f"http://127.0.0.1:{port}", hub, srv, th
 

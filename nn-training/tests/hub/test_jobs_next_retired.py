@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hub.server import _HubQueue, make_server
+from tests.helpers.http_server import serve_fast
 from tests.helpers.hub_poll import hub_poll
 
 #: 生产代码（非测试）搜索根：这些一律不得再引用退役端点。
@@ -51,7 +52,7 @@ def test_old_poll_endpoint_is_404(tmp_path: Path) -> None:
 
     hub = _HubQueue({}, discover_root=tmp_path)
     srv = make_server(hub, 0, "sekret", host="127.0.0.1")
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     try:
         req = urllib.request.Request(
@@ -90,7 +91,7 @@ def test_hub_poll_returns_legacy_shape(tmp_path: Path) -> None:
 
     hub = _HubQueue({}, discover_root=tmp_path)
     srv = make_server(hub, 0, "sekret", host="127.0.0.1")
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     try:
         assert hub_poll(f"http://127.0.0.1:{srv.server_address[1]}", "sekret") is None

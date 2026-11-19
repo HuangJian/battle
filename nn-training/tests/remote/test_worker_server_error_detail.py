@@ -36,6 +36,7 @@ if str(ROOT) not in sys.path:
 from common.protocol import normalize_manifest
 from remote.push_dispatch import PUSH_FAILURE_DETAIL_FALLBACK, push_failure_record
 from remote.worker_server import WorkerServerState, make_worker_server
+from tests.helpers.http_server import serve_fast
 from tests.remote.test_remote_ppo import (
     _http,
     _mini_manifest,
@@ -53,7 +54,7 @@ def _boot(tmp_path: Path) -> tuple[WorkerServerState, object, threading.Thread, 
     """起一个 push 云的 worker_server（随机端口）；返回 (state, srv, thread, base)。"""
     state = WorkerServerState(tmp_path / "work")
     srv = make_worker_server(state, 0, "tok")
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     return state, srv, th, f"http://127.0.0.1:{srv.server_address[1]}"
 

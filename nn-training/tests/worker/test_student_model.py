@@ -41,16 +41,6 @@ from worker.models.student import (
     param_count,
 )
 
-FAILS: list[str] = []
-
-
-def check(cond: bool, msg: str) -> None:
-    if not cond:
-        FAILS.append(msg)
-        print(f"FAIL: {msg}")
-    else:
-        print(f"ok: {msg}")
-
 
 def _dummy(batch: int = 2, device="cpu"):
     obs = torch.zeros(batch, OBS_CHANNELS, BOARD, BOARD, dtype=torch.uint8, device=device)
@@ -63,11 +53,11 @@ def test_student_forward_shape_and_budget() -> None:
     m = StudentNet()
     obs, sc = _dummy()
     mv, fr = m(obs, sc)
-    check(tuple(mv.shape) == (2, MOVE_DIM), f"move logits (2,{MOVE_DIM}) (got {tuple(mv.shape)})")
-    check(tuple(fr.shape) == (2, FIRE_DIM), f"fire logits (2,{FIRE_DIM}) (got {tuple(fr.shape)})")
+    assert tuple(mv.shape) == (2, MOVE_DIM), f"move logits (2,{MOVE_DIM}) (got {tuple(mv.shape)})"
+    assert tuple(fr.shape) == (2, FIRE_DIM), f"fire logits (2,{FIRE_DIM}) (got {tuple(fr.shape)})"
     n = param_count(m)
-    check(n <= 200_000, f"参数预算 ≤200K（实际 {n}）")
-    check(n < 80_000, f"67.5K 甜点量级（实际 {n}）")
+    assert n <= 200_000, f"参数预算 ≤200K（实际 {n}）"
+    assert n < 80_000, f"67.5K 甜点量级（实际 {n}）"
 
 
 def test_ppo_student_value_head() -> None:
@@ -75,20 +65,15 @@ def test_ppo_student_value_head() -> None:
     m = PPOStudent()
     obs, sc = _dummy()
     mv, fr, val = m(obs, sc)
-    check(tuple(val.shape) == (2, 1), f"value head (2,1)（got {tuple(val.shape)}）")
+    assert tuple(val.shape) == (2, 1), f"value head (2,1)（got {tuple(val.shape)}）"
     # #6 回归断言：线上 move 头出维必须 == common.schema.MOVE_DIM == 5（B案不改 dims）。
-    check(
-        tuple(m.move_head.weight.shape) == (MOVE_DIM, m.head_hidden),
-        f"move_head.weight shape ({MOVE_DIM},{m.head_hidden})（got {tuple(m.move_head.weight.shape)}）",
-    )
-    check(m.move_head.weight.shape[0] == 5, "线上动作头 == 5 槽（0=STOP,1..4=方向）")
+    assert tuple(m.move_head.weight.shape) == (MOVE_DIM, m.head_hidden), f"move_head.weight shape ({MOVE_DIM},{m.head_hidden})（got {tuple(m.move_head.weight.shape)}）"
+    assert m.move_head.weight.shape[0] == 5, "线上动作头 == 5 槽（0=STOP,1..4=方向）"
     # value head 是额外参数；学生主干与 StudentNet 同参数
     n_student = param_count(StudentNet())
     n_ppo = param_count(m)
-    check(
-        n_ppo == n_student + 129,  # 128+1 = head_hidden→1
-        f"PPOStudent = StudentNet + value_head（{n_ppo} vs {n_student}+129）",
-    )
+    # 128+1 = head_hidden→1
+    assert n_ppo == n_student + 129, f"PPOStudent = StudentNet + value_head（{n_ppo} vs {n_student}+129）"
 
 
 def test_action_v6_heads() -> None:
@@ -97,48 +82,45 @@ def test_action_v6_heads() -> None:
     m = StudentNet(h=16, d=2, action_v6=True)
     obs, sc = _dummy()
     mv, fr, hd = m(obs, sc)
-    check(tuple(mv.shape) == (2, MOVE4_DIM), f"v6 move logits (2,{MOVE4_DIM})（got {tuple(mv.shape)}）")
-    check(tuple(fr.shape) == (2, FIRE3_DIM), f"v6 fire logits (2,{FIRE3_DIM})（got {tuple(fr.shape)}）")
-    check(tuple(hd.shape) == (2, HOLD_DIM), f"v6 hold logits (2,{HOLD_DIM})（got {tuple(hd.shape)}）")
-    check(m.arch().get("actionV6") is True, "arch 记录 actionV6（与权重同行的自述）")
+    assert tuple(mv.shape) == (2, MOVE4_DIM), f"v6 move logits (2,{MOVE4_DIM})（got {tuple(mv.shape)}）"
+    assert tuple(fr.shape) == (2, FIRE3_DIM), f"v6 fire logits (2,{FIRE3_DIM})（got {tuple(fr.shape)}）"
+    assert tuple(hd.shape) == (2, HOLD_DIM), f"v6 hold logits (2,{HOLD_DIM})（got {tuple(hd.shape)}）"
+    assert m.arch().get("actionV6") is True, "arch 记录 actionV6（与权重同行的自述）"
 
     pm = PPOStudent(h=16, d=2, action_v6=True)
     out = pm(obs, sc)
-    check(len(out) == 4, f"PPOStudent v6 = (move, fire, hold, value)（got {len(out)}）")
-    check(tuple(out[3].shape) == (2, 1), "v6 value head (2,1)")
+    assert len(out) == 4, f"PPOStudent v6 = (move, fire, hold, value)（got {len(out)}）"
+    assert tuple(out[3].shape) == (2, 1), "v6 value head (2,1)"
 
     # Legacy default must stay exactly 5/2 and expose no hold head.
     legacy = StudentNet(h=16, d=2)
-    check(legacy.hold_head is None, "legacy StudentNet 不带 hold_head")
-    check(legacy.arch().get("actionV6") is None, "legacy arch 不写 actionV6")
+    assert legacy.hold_head is None, "legacy StudentNet 不带 hold_head"
+    assert legacy.arch().get("actionV6") is None, "legacy arch 不写 actionV6"
 
 
 def test_coord_channels_formula() -> None:
     coords = coord_channels(BOARD, "cpu")
-    check(tuple(coords.shape) == (2, BOARD, BOARD), "coord 形状 (2,26,26)")
-    check(coords.dtype == torch.uint8, "coord dtype uint8（与 obs 同尺度）")
+    assert tuple(coords.shape) == (2, BOARD, BOARD), "coord 形状 (2,26,26)"
+    assert coords.dtype == torch.uint8, "coord dtype uint8（与 obs 同尺度）"
     # 公式：ch0[row][col] = round(col/25*255)；ch1 = round(row/25*255)
     col = torch.tensor([0, 1, 12, 25], dtype=torch.float32)
     exp_x = (col / (BOARD - 1) * 255).round().to(torch.uint8)
     got_x = coords[0, 0, [0, 1, 12, 25]]
-    check(torch.equal(got_x, exp_x), f"ch0 沿列 = round(col/25*255)（got {got_x.tolist()}）")
+    assert torch.equal(got_x, exp_x), f"ch0 沿列 = round(col/25*255)（got {got_x.tolist()}）"
     row = torch.tensor([0, 13, 25], dtype=torch.float32)
     exp_y = (row / (BOARD - 1) * 255).round().to(torch.uint8)
     got_y = coords[1, [0, 13, 25], 0]
-    check(torch.equal(got_y, exp_y), f"ch1 沿行 = round(row/25*255)（got {got_y.tolist()}）")
-    check(coords[0, 0, 0].item() == 0 and coords[0, 0, 25].item() == 255, "坐标通道端点 0/255")
+    assert torch.equal(got_y, exp_y), f"ch1 沿行 = round(row/25*255)（got {got_y.tolist()}）"
+    assert coords[0, 0, 0].item() == 0 and coords[0, 0, 25].item() == 255, "坐标通道端点 0/255"
 
 
 def test_arch_metadata() -> None:
     m = StudentNet()
     a = m.arch()
-    check(a["kind"] == "student", "arch.kind == student")
-    check(a["h"] == DEFAULT_H and a["d"] == DEFAULT_D, "arch 记录 h/d")
-    check(a["head_hidden"] == 128, "arch 记录 head_hidden")
-    check(
-        a["in_ch"] == OBS_CHANNELS and a["board"] == BOARD and a["scalar_dim"] == SCALAR_DIM,
-        "arch 记录输入维度",
-    )
+    assert a["kind"] == "student", "arch.kind == student"
+    assert a["h"] == DEFAULT_H and a["d"] == DEFAULT_D, "arch 记录 h/d"
+    assert a["head_hidden"] == 128, "arch 记录 head_hidden"
+    assert a["in_ch"] == OBS_CHANNELS and a["board"] == BOARD and a["scalar_dim"] == SCALAR_DIM, "arch 记录输入维度"
 
 
 def test_deterministic_init() -> None:
@@ -147,7 +129,7 @@ def test_deterministic_init() -> None:
     torch.manual_seed(99)
     m2 = StudentNet()
     for (k1, p1), (k2, p2) in zip(m1.state_dict().items(), m2.state_dict().items(), strict=True):
-        check(k1 == k2 and torch.equal(p1, p2), f"同 seed 初始化逐位一致（{k1}）")
+        assert k1 == k2 and torch.equal(p1, p2), f"同 seed 初始化逐位一致（{k1}）"
 
 
 def main() -> None:
@@ -157,9 +139,6 @@ def main() -> None:
     test_coord_channels_formula()
     test_arch_metadata()
     test_deterministic_init()
-    if FAILS:
-        print(f"\n{len(FAILS)} FAILED")
-        sys.exit(1)
     print("\nAll tests passed.")
 
 

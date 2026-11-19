@@ -42,6 +42,7 @@ from common.protocol import (
     encode_weights_json,
 )
 from hub.server import _HubQueue, _JobStore, make_server
+from tests.helpers.http_server import serve_fast
 
 TOKEN = "sekret"
 COURSE = "c5-gae"
@@ -60,7 +61,7 @@ def _boot(tmp_path: Path, now_fn=None) -> tuple[str, _HubQueue, ThreadingHTTPSer
     store = _JobStore(d / "remote-jobs", d / "training_log.jsonl", now_fn=now_fn)
     hub = _HubQueue({COURSE: store}, order=[COURSE], now_fn=now_fn)
     srv = make_server(hub, 0, TOKEN, host="127.0.0.1")
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     return f"http://127.0.0.1:{srv.server_address[1]}", hub, srv
 
 

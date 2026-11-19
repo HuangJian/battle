@@ -40,6 +40,7 @@ from remote.artifacts import atomic_write_json
 from remote.deliver_outbox import FINAL_NAME, read_state, round_path
 from remote.deliver_proc import DelivererProcess
 from remote.offline_deliver import SEG_END_KIND_ENV, OfflineDeliverer
+from tests.helpers.http_server import serve_fast
 from tests.remote.test_offline_deliver import RUN, _make_artifacts
 
 TOKEN = "sekret-proc"
@@ -122,7 +123,7 @@ class _HubStub:
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread = serve_fast(self._server)
         self._thread.start()
 
     def artifact_bodies(self) -> list[dict]:

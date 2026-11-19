@@ -63,6 +63,7 @@ from hub.queue import _HubQueue
 from hub.store import _JobStore
 from tests.helpers import remote_dag as dag
 from tests.helpers import source_scan
+from tests.helpers.http_server import serve_fast
 
 NN_ROOT = ROOT
 ENTRY = NN_ROOT / "hub" / "server.py"
@@ -349,7 +350,7 @@ def test_the_facade_can_still_serve_a_real_ping(tmp_path: Path) -> None:
     """
     hub = _HubQueue({"": _JobStore(tmp_path / "jobs", tmp_path / "log.jsonl")}, order=[""])
     srv = hs.make_server(hub, 0, "tok", host="127.0.0.1")
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     try:
         port = srv.server_address[1]

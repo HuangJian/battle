@@ -29,6 +29,7 @@ from remote.push_register import (
     should_register,
     unregister,
 )
+from tests.helpers.http_server import serve_fast
 
 
 class _Resp:
@@ -321,7 +322,7 @@ def test_registry_registers_against_a_real_hub(tmp_path, monkeypatch) -> None:
     )
     hub = _JobStore(tmp_path / "jobs", tmp_path / "ledger.jsonl")
     srv = make_server(hub, 0, "sekret", host="127.0.0.1")
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     try:
         base = f"http://127.0.0.1:{srv.server_address[1]}"
         reg = Registry(

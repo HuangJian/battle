@@ -39,6 +39,7 @@ if str(ROOT) not in sys.path:
 from common.protocol import FAIL_NAME, JobFailedError, normalize_manifest
 from hub.server import _JobStore
 from remote.hub_client import PublishSpec, publish_job, report_job_failure, wait_job
+from tests.helpers.http_server import serve_fast
 from tests.remote.test_remote_ppo import (
     _boot_server,
     _http,
@@ -339,7 +340,7 @@ def test_push_node_failure_is_410_and_fails_fast(tmp_path: Path) -> None:
 
     state = WorkerServerState(tmp_path / "work")
     srv = make_worker_server(state, 0, "tok")
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     try:
         base = f"http://127.0.0.1:{srv.server_address[1]}"

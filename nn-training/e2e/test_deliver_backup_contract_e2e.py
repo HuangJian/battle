@@ -35,6 +35,7 @@ import pytest
 from remote.artifacts import ArtifactStore
 from remote.deliver_proc import DelivererProcess
 from remote.offline_deliver import BACKUP_GRACE_SEC, OfflineDeliverer
+from tests.helpers.http_server import serve_fast
 
 
 class _ProbeProcess(DelivererProcess):
@@ -94,7 +95,7 @@ class _Hub:
         self.srv = ThreadingHTTPServer(("127.0.0.1", 0), _H)
         self.srv.daemon_threads = True
         self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
-        self._t = threading.Thread(target=self.srv.serve_forever, daemon=True)
+        self._t = serve_fast(self.srv)
         self._t.start()
 
     def close(self) -> None:

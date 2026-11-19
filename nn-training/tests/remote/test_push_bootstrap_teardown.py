@@ -36,12 +36,13 @@ from remote.push_bootstrap import (
     start_bootstrap_server,
     tail_text_lines,
 )
+from tests.helpers.http_server import serve_fast
 from tests.subproc_util import free_port
 
 
 def _running_bootstrap(port: int, tmp_path: Path):
     srv = start_bootstrap_server(port, "tok", tmp_path, lambda raw: None)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     return srv
 
 

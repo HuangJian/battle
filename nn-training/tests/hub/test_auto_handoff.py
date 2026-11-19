@@ -62,6 +62,7 @@ from hub.queue_offline import (
 )
 from hub.server import _HubQueue, make_server
 from hub.task_pack import lease_verdict
+from tests.helpers.http_server import serve_fast
 
 TOKEN = "sekret"
 #: autouse 夹具会把 `console_export_status` 打桩；这里的解析用例要拿**真函数**（import 期抓一份）。
@@ -100,7 +101,7 @@ def _boot(
 ) -> tuple[str, _HubQueue, ThreadingHTTPServer]:
     hub = _HubQueue({}, discover_root=tmp_path, now_fn=now_fn)
     srv = make_server(hub, 0, TOKEN, host="127.0.0.1")
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     return f"http://127.0.0.1:{srv.server_address[1]}", hub, srv
 
 

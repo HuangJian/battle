@@ -37,6 +37,7 @@ import pytest
 
 import common.distribution as dist
 from common import net_http
+from tests.helpers.http_server import serve_fast
 
 # 黑洞地址（RFC 3849 文档段，永不路由）；本文件不会真去连它们——connect 被桩截住。
 _BLACKHOLES = frozenset({"2001:db8::1", "2001:db8::2"})
@@ -67,7 +68,7 @@ def wired(monkeypatch):
     """
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     port = srv.server_address[1]
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
 
     release = threading.Event()

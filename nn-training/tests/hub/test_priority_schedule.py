@@ -60,6 +60,7 @@ from common.protocol import (
 )
 from hub.server import _HubQueue, _JobStore, make_server
 from tests.helpers import hub_seams
+from tests.helpers.http_server import serve_fast
 
 TOKEN = "sekret"
 JID = "j" * 16
@@ -131,7 +132,7 @@ def _hub(tmp_path: Path):
     hub = _HubQueue({}, discover_root=tmp_path)
     hub.discover()
     srv: ThreadingHTTPServer = make_server(hub, 0, TOKEN, host="127.0.0.1")
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     try:
         yield f"http://127.0.0.1:{srv.server_address[1]}", hub
     finally:

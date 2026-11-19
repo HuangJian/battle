@@ -30,6 +30,7 @@ if str(ROOT) not in sys.path:
 
 import remote.worker as W
 from remote.bulk_sched import BULK_P1_CRITICAL, BULK_P2_PREFETCH
+from tests.helpers.http_server import serve_fast
 
 TOKEN = "sekret"
 JID = "j" * 16
@@ -124,7 +125,7 @@ def hub(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(W._BULK, "_yield_step", 0.1)
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     srv.daemon_threads = True
-    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t = serve_fast(srv)
     t.start()
     W._BULK.reset()
     W._WIRE.clear()

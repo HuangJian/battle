@@ -42,6 +42,7 @@ from hub.offline_ingest import ingest_offline_artifact
 from hub.offline_push import OfflinePushDispatcher, OfflinePushWorkers
 from hub.server import _HubQueue, _JobStore, make_server
 from remote.offline_push_face import PushFaceState, make_face_server
+from tests.helpers.http_server import serve_fast
 
 TOKEN = "t0k3n"
 COURSE = "c5-gae"
@@ -138,7 +139,7 @@ class _Worker:
         self.state = PushFaceState(work_dir=tmp_path / "worker", log=lambda _m: None)
         self.state.set_starter(self._starter)
         self.server = make_face_server(self.state, 0, TOKEN, host="127.0.0.1")
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        serve_fast(self.server).start()
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
 
     def _starter(self, task: dict, task_dir: Path, outbox: Path) -> None:
@@ -1096,7 +1097,7 @@ class _OldWorker:
                     respond_json(self, {"error": "not found"}, 404)
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        serve_fast(self.server).start()
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
 
     def close(self) -> None:
@@ -1231,7 +1232,7 @@ def test_admin_offline_push_workers_exposes_state_without_secrets(tmp_path: Path
         }
     )
     srv = make_server(hub, 0, TOKEN, host="127.0.0.1", offline_push=disp)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     try:
         base = f"http://127.0.0.1:{srv.server_address[1]}"
         status, body = _admin_get(base, "/admin/offline-push-workers")
@@ -1250,7 +1251,7 @@ def test_admin_offline_push_workers_exposes_state_without_secrets(tmp_path: Path
 
     # 没挂离线派发器的 hub ⇒ 409（控制台据此显示「未挂载」，不把整行画成空）
     srv2 = make_server(hub, 0, TOKEN, host="127.0.0.1")
-    threading.Thread(target=srv2.serve_forever, daemon=True).start()
+    serve_fast(srv2).start()
     try:
         base2 = f"http://127.0.0.1:{srv2.server_address[1]}"
         assert _admin_get(base2, "/admin/offline-push-workers")[0] == 409

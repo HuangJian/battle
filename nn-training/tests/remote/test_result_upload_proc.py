@@ -40,6 +40,7 @@ from remote.result_upload import (
     UploadTask,
 )
 from remote.upload_proc import UploaderProcess, make_uploader
+from tests.helpers.http_server import serve_fast
 
 JID1 = "a1" * 8
 JID2 = "b2" * 8
@@ -399,7 +400,7 @@ def test_real_child_process_posts_to_the_hub() -> None:
 
     _Hub.seen = []
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Hub)
-    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t = serve_fast(srv)
     t.start()
     base = f"http://127.0.0.1:{srv.server_address[1]}"
     logs: list[str] = []

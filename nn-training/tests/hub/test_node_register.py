@@ -25,6 +25,7 @@ import pytest
 from common import distribution
 from common.protocol import NODE_CAPABILITIES
 from hub.admin import AdminRoutes
+from tests.helpers.http_server import serve_fast
 
 
 class _Stub(AdminRoutes):
@@ -129,7 +130,7 @@ def test_http_face_dispatches_the_nodes_endpoints(
     hub = _JobStore(tmp_path / "jobs", tmp_path / "ledger.jsonl")
     srv = make_server(hub, 0, "sekret", host="127.0.0.1")
     base = f"http://127.0.0.1:{srv.server_address[1]}"
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     try:
         code, _ = _http(base, "/admin/nodes", token="")
         assert code == 401, "无 Bearer 必须 401（与其余 admin 端点同鉴权）"

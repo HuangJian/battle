@@ -33,15 +33,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import worker.ppo.np_core as np_core
 from worker.ppo.rng import PPORng
 
-FAILS: list[str] = []
-
-
-def check(cond: bool, msg: str) -> None:
-    if not cond:
-        FAILS.append(msg)
-        print(f"FAIL: {msg}")
-    else:
-        print(f"ok: {msg}")
 
 def test_gae_dt1_degradation() -> None:
     """变步长 GAE（dt 全 1）与定长 GAE 逐字节一致（γ 同源）。"""
@@ -55,8 +46,8 @@ def test_gae_dt1_degradation() -> None:
 
     adv_fixed, ret_fixed = np_core.compute_gae(rewards, values, dones, gamma, lam)
     adv_var, ret_var = np_core.compute_gae(rewards, values, dones, gamma, lam, dt)
-    check(np.array_equal(adv_fixed, adv_var), "GAE dt=1 → adv 与定长逐字节一致")
-    check(np.array_equal(ret_fixed, ret_var), "GAE dt=1 → ret 与定长逐字节一致")
+    assert np.array_equal(adv_fixed, adv_var), "GAE dt=1 → adv 与定长逐字节一致"
+    assert np.array_equal(ret_fixed, ret_var), "GAE dt=1 → ret 与定长逐字节一致"
 
 def test_gae_hand_computed() -> None:
     """定长 GAE 手算验证（N=3，已知数值）。"""
@@ -70,8 +61,8 @@ def test_gae_hand_computed() -> None:
     #   t=1: delta=0.0+0.9*0.4-0.6=-0.24 → adv1=-0.24+0.9*0.8*1*1.6=0.912
     #   t=0: delta=1.0+0.9*0.6-0.5=1.04 → adv0=1.04+0.9*0.8*1*0.912=1.69664
     expected = np.array([1.69664, 0.912, 1.6], dtype=np.float32)
-    check(np.allclose(adv, expected, atol=1e-5), f"定长 GAE 手算匹配 (got {adv})")
-    check(np.allclose(ret, adv + values, atol=1e-5), "ret = adv + values")
+    assert np.allclose(adv, expected, atol=1e-5), f"定长 GAE 手算匹配 (got {adv})"
+    assert np.allclose(ret, adv + values, atol=1e-5), "ret = adv + values"
 
 def test_gae_variable_differs() -> None:
     """dt≠1 时变步长结果与定长不同（变步长确实生效）。"""
@@ -84,7 +75,7 @@ def test_gae_variable_differs() -> None:
     dt = np.full(N, 3, dtype=np.int64)  # 每个意图步 = 3 tick
     adv_var, _ = np_core.compute_gae(rewards, values, dones, gamma, lam, dt)
     adv_fixed, _ = np_core.compute_gae(rewards, values, dones, gamma, lam)
-    check(not np.allclose(adv_var, adv_fixed, atol=1e-6), "dt=3 的变步长 adv 与定长 adv 确有差异")
+    assert not np.allclose(adv_var, adv_fixed, atol=1e-6), "dt=3 的变步长 adv 与定长 adv 确有差异"
 
 def test_chunk_episodes() -> None:
     """mb 对齐（2026-09-23，见 docs/nn.progress.md §140）。
@@ -161,15 +152,12 @@ def test_chunk_episodes_requires_rng() -> None:
     try:
         np_core.chunk_episodes(eps, 2)
     except ValueError as e:
-        check("rng" in str(e), f"报错要指名 rng（got {e}）")
+        assert "rng" in str(e), f"报错要指名 rng（got {e}）"
     else:
         raise AssertionError("chunk_episodes(shuffle=True) 缺 rng 必须 ValueError")
     # 对照：shuffle=False 照旧无需 rng
     seq = np_core.chunk_episodes(eps, 2, shuffle=False)
-    check(
-        [c["obs"].shape[0] for c in seq] == [2, 2, 2, 2],
-        "shuffle=False 不需要 rng（两局各切两块）",
-    )
+    assert [c["obs"].shape[0] for c in seq] == [2, 2, 2, 2], "shuffle=False 不需要 rng（两局各切两块）"
 
 
 def test_ppo_rng_state_roundtrip() -> None:
@@ -179,13 +167,12 @@ def test_ppo_rng_state_roundtrip() -> None:
     blob = a.state()
     want = a.chunk.permutation(32).copy()
     b = PPORng.from_seed(123)  # 另一个同种子的实例，靠 restore 接上
-    check(b.restore(blob), "restore 应接受自家 state")
+    assert b.restore(blob), "restore 应接受自家 state"
     np.testing.assert_array_equal(b.chunk.permutation(32), want)
-    check(a.epoch.permutation(16).tolist() == b.epoch.permutation(16).tolist(),
-          "另两条流不受 chunk 消耗影响")
+    assert a.epoch.permutation(16).tolist() == b.epoch.permutation(16).tolist(), "另两条流不受 chunk 消耗影响"
     # 旧 ckpt（全局 MT19937 时代）没有 rng_streams ⇒ False，且不抛
-    check(PPORng.from_seed(0).restore(None) is False, "缺项 ⇒ False")
-    check(PPORng.from_seed(0).restore({"chunk": {}}) is False, "坏项 ⇒ 整份拒收")
+    assert PPORng.from_seed(0).restore(None) is False, "缺项 ⇒ False"
+    assert PPORng.from_seed(0).restore({"chunk": {}}) is False, "坏项 ⇒ 整份拒收"
 
 def test_discover_and_load_shard_fields(tmp_path: Path) -> None:
     td = tempfile.mkdtemp(dir=str(tmp_path))
@@ -200,15 +187,15 @@ def test_discover_and_load_shard_fields(tmp_path: Path) -> None:
     partial.mkdir()
     np.save(partial / "obs.npy", np.zeros(1))
     found = np_core.discover_shards(str(root), ("reward.npy", "obs.npy"))
-    check(found == [str(shard)], f"discover 只含完整 shard (got {found})")
+    assert found == [str(shard)], f"discover 只含完整 shard (got {found})"
     spec: dict[str, tuple[str, npt.DTypeLike]] = {
         "obs": ("obs.npy", np.uint8),
         "reward": ("reward.npy", np.float32),
         "dt": ("dt.npy", np.int64),
     }
     d = np_core.load_shard_fields(str(shard), spec)
-    check(set(d.keys()) == {"obs", "reward", "dt"}, "load_shard_fields 字段齐备")
-    check(d["obs"].dtype == np.uint8 and d["dt"].dtype == np.int64, "字段 dtype 按 spec 转换")
+    assert set(d.keys()) == {"obs", "reward", "dt"}, "load_shard_fields 字段齐备"
+    assert d["obs"].dtype == np.uint8 and d["dt"].dtype == np.int64, "字段 dtype 按 spec 转换"
 
 def _ret_norm_shards(tmp_path: Path) -> dict[str, dict[str, npt.NDArray]]:
     """两个 marker 目录 + 按名取数的 synthetic payload（ret 尺度不一，模拟
@@ -386,9 +373,6 @@ def main() -> None:
     test_chunk_episodes_requires_rng()
     test_ppo_rng_state_roundtrip()
     test_discover_and_load_shard_fields(Path(_td))
-    if FAILS:
-        print(f"\n{len(FAILS)} FAILED")
-        sys.exit(1)
     print("\nAll tests passed.")
 
 

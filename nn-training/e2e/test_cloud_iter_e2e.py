@@ -73,6 +73,7 @@ from common.protocol import (
 )
 from hub.server import _JobStore, make_server
 from remote.worker import d14_corpus_match  # 该模块顶层零 torch（延迟导入）
+from tests.helpers.http_server import serve_fast
 from tests.helpers.hub_poll import hub_poll
 from trainer.loop_core import TrainingLoop
 from worker.cli import build_argparser  # 模块级：真 CLI 解析器（大对象，别在用例内首次 import）
@@ -357,7 +358,7 @@ class _Hub:
         self.srv = make_server(store, 0, TOKEN, host="127.0.0.1")
         self.port = self.srv.server_address[1]
         self.url = f"http://127.0.0.1:{self.port}"
-        self.thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
+        self.thread = serve_fast(self.srv)
         self.thread.start()
 
     def close(self) -> None:

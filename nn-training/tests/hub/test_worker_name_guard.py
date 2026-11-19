@@ -28,6 +28,7 @@ if str(ROOT) not in sys.path:
 from common.protocol import AUTH_HEADER, WORKER_ID_HEADER
 from hub.http_face import CF_SOURCE_HEADER, HubHandler, HubState
 from hub.server import _HubQueue, make_server
+from tests.helpers.http_server import serve_fast
 
 TOKEN = "sekret"
 WARN_FRAGMENT = "前提可能被打破"
@@ -50,7 +51,7 @@ def _hub(tmp_path: Path):
     hub = _HubQueue({}, discover_root=tmp_path)
     hub.discover()
     srv: ThreadingHTTPServer = make_server(hub, 0, TOKEN, host="127.0.0.1")
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     try:
         yield f"http://127.0.0.1:{srv.server_address[1]}", hub
     finally:

@@ -20,6 +20,7 @@ import pytest
 from common.protocol import AUTH_HEADER, RESULT_READY_PATH
 from remote import push_bootstrap as pb
 from remote import worker_server as ws
+from tests.helpers.http_server import serve_fast
 
 
 class _HubStub:
@@ -47,7 +48,7 @@ class _HubStub:
 
         self.srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
-        self.thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
+        self.thread = serve_fast(self.srv)
         self.thread.start()
 
     def close(self) -> None:
