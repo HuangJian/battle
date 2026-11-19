@@ -6295,3 +6295,88 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   （`CHANNEL_STALE_SEC` / `PING_TTL_SEC` / `PING_SERVE_MAX_SEC` / `channel_age` / `ping_snapshot`）·
   `hub/http_face.py`（`_serve_relay_ping` / `_refresh_relay_ping` / `_cache_relay_ping`）。
 
+
+## §2026-11-19-goalnn-relay-lanes-follow-workers（relay 的道数必须盖住 agent 的 worker 数：6 条道把 16 worker 的节点腰斩）
+
+- **现场（hub 日志 `tmp/hub-server.out` 09:40–11:24 + trainer 读数）**：节点自报
+  `relay polls=606 / served=539 / errors≈19`，`served/polls=89%` ⇒ 每条长轮询几乎总带着活；
+  而节点侧 `workers=16`、trainer 给 dsw 的 `concurrency=12`，**relay 只有 6 条道**
+  （`POLL_WORKERS=6`）。trainer 实测 `dsw wall=6.6–7.9s/局`，同时段 hub burst 峰值
+  `95–108 局/分`（`v1/task` 200）—— 6 条道 × 单局算力 ~3.7s 正是 97 局/分，**两条独立读数对上了**：
+  传输层在算力层前面当天花板，16 个 worker 只用到 ~37%，trainer 看到的一半 wall 是排队。
+- **裁定**：道数不是「探活/控制面的缓冲」而是**并发上限**（一条长轮询线程一次只驮一条请求，
+  `_forward` 在它自己的线程里跑完才回去取下一拍）。`RelayChannel` 必须接收 agent 的 worker 数，
+  `workers = max(POLL_WORKERS, agent_workers)`：dsw 16、8C 小机器保底 6。控制面（ping）走
+  hub 的心跳缓存短路，不占道；weights 只发生在轮次边界，另有富余道。
+- **被否决**：① 抬高 `CFG.workers`（算力层不是瓶颈，抬了只会加排队）；② 给 `_forward` 加
+  线程池 + 队列（多一层背压，且队列里的请求照样吃调用方预算，收益与直接加道相同）；
+  ③ 让 trainer 把 dsw 的 `concurrency` 降到 6（等于承认传输层决定算力，方向反了）。
+- **同批修的两处**：回执投递单发 → **3 次短退避重试**（4xx 不重试：确定性失败；CF 502/530
+  现场 10:31:52 一次丢三条，丢一条 = 一整局白跑，hub 侧 `CALL_TTL=180s` 内重发幂等）；
+  hub 访问日志 `print()`（正文/换行两次 write）→ **单次 write**（relay 行成片粘成
+  `… 200 -[11:24:05] …`，而这份日志正是排查 relay 的唯一入口）。
+- **护栏**：`tests/remote/test_rollout_relay.py` +4（道数跟随 workers / 502 重试两次后成功 /
+  4xx 不重试 / 三次失败只记一行）· `tests/hub/test_hub_auth_d9_order.py` +1（一行一次 write）。
+- **未验证**：真机需重启 DSW 节点（节点代码随 clone 更新）；hub 需重启才吃到日志原子写。
+- **全文** → `docs/nn/remote-transport.md` §163；代码 → `remote/rollout_relay.py`
+  （`POLL_WORKERS` / `REPLY_TRIES` / `RelayChannel(workers=)` / `_deliver`）·
+  `remote/rollout_node.py`（`RelayChannel(..., workers=workers)`）· `hub/http_face.py`
+  （`HubHandler._log_lock`）。
+
+## §2026-11-19-goalnn-relay-keepalive（relay 的 poll/reply 走长连接：hub 升 HTTP/1.1 + 复用 `common/http_pool`）
+
+- **现场**：一条道每局固定付两笔与算力无关的往返 —— 回执新建一条连接、下一次长轮询再新建一条。
+  urllib 不发 keep-alive，而 hub 是 `BaseHTTPRequestHandler` 的默认 `HTTP/1.0`（每条响应后必关），
+  所以客户端的池也只能一拍一建。隧道单程 ~0.5–0.7s（预检 `_poll?wait=0` 1074ms），
+  在 `wall=6.6–7.9s/局` 里白扔 10–20%，还被读成「hub pending 里等道」（§163）。
+- **裁定**：① `HubHandler.protocol_version = "HTTP/1.1"`（前提：每个响应都带 `Content-Length`，
+  写头入口只有 `respond_json` / `_send_headers` 两处）；② relay 的 `_poll`/`_post_reply` 走
+  `common.http_pool.request`（thread-local、每请求 timeout、urllib 同语义异常），
+  `direct` 腿用新增的 `no_proxy=True`（池键含代理 ⇒ 两条路由各自一条连接）；
+  ③ 道线程退场 `http_pool.close_thread()`（否则 hub 侧每条 1.1 连接永久挂一个 handler）。
+  路由回落与「4xx/5xx 算路由通、不切换」的判据原样保留；预检继续走一次性 `_route_open`。
+- **顺手**：对端提前断开（`ConnectionError`）的两个分支补 `close_connection = True` ——
+  1.1 下 handler 会回头读下一请求，死 socket 会读出一段 `socketserver` traceback
+  （`test_hub_client_gone` 的红就是这条）。`stats_line()` 末尾加池读数 `reuse/connect`。
+- **被否决**：① 在 1.0 上手写 `Connection: keep-alive`（事实标准，还要自管 `close_connection`
+  与响应定长 = 手写半个 1.1）；② 另写 relay 专用客户端/httpx（第二份代理/竞速/超时真相；池本来
+  就是为此存在的，`NODE_HTTP_POOL=0` 还是同一条逃生口）；③ HTTP/2 多路复用（换协议的代价远大于
+  这一格收益）。
+- **护栏**：`tests/hub/test_hub_keepalive.py`（同一连接连发两次 200 + `Content-Length`）·
+  `tests/remote/test_rollout_relay.py::test_lane_reuses_one_tcp_connection`（服务端看到的客户端端口
+  恒为 1；降回 1.0 时 6 拍 = 6 个端口，已实测红）· `tests/common/test_http_pool.py` +2
+  （`no_proxy` 强制直连且与代理腿各占一条连接 / `close_thread` 关连接不清统计）。
+  门禁：`tests/hub` 615 passed · `tests/remote + tests/common` 2434 passed / 1 skipped ·
+  ruff / mypy · LOC 与文本断言预算未动（1502 / 1092）。
+- **未验证**：真机需**重启 hub**（协议版本是类属性）并重跑 DSW cell（节点代码随 clone 更新）。
+- **全文** → `docs/nn/remote-transport.md` §164；代码 → `hub/http_face.py`（`protocol_version` /
+  `close_connection`）· `common/http_pool.py`（`no_proxy` / `close_thread`）·
+  `remote/rollout_relay.py`（`_send` / `_poll` / `_post_reply` / `stats_line`）。
+- **⚠ ①③ 已被撤销**：同日下午首次上真机即把 DSW 节点的隧道打黑 20 分钟 ⇒ `§2026-11-19-goalnn-hub-stays-http10`。
+- **补充（同日，`_send` 的预算口径）**：`timeout` 改为**跨路由总预算**（每段拿 `剩余 - 12s × 后续路由数`，
+  下限 12s）。原因：被打黑时每拍 70.4s = 35s × **两条路由**（原实现逐路由一份 timeout），6 条道
+  一起空转、失败计数翻倍。均分被否决（长轮询自己要 20s，均分会把健康空拍切成假超时）。
+  护栏：`test_send_budget_is_one_timeout_across_routes`；全文 → `docs/nn/remote-transport.md` §166。
+
+## §2026-11-19-goalnn-hub-stays-http10（hub 的 origin 面永不复用连接：1.1 被撤销，节点侧池化保留）
+
+- **事故**：hub 12:34 重启后带 1.1。12:41 cloudflared 报 `Unable to reach the origin service …
+  HTTP/1.x transport connection broken: malformed HTTP status code "HTML>"`（= 把上一条响应体的
+  残片当成下一响应的状态行），12:42 `use of closed network connection`，**12:44:50 之后 hub 再没
+  收到任何 `via=cf` 请求**；节点侧从 12:47 起每拍固定 70.4s（= 35s × 两条路由）全 timeout，
+  `errors` 10 → 80，产出冻结在 380 局。同期 hub 健康（11 线程，jobs/admin 正常）、隧道也活着
+  （从本机 `:2083/healthz` 1.2s 到 hub）⇒ 死的只有「cloudflared → hub」那条被复用的连接。
+- **机理**：origin 复用下只要有一条响应没写完整（`_send_body` 停滞、头部已发之后抛异常），
+  下一条响应就会被当成残片解析 ⇒ 连接**永久**失同步；1.0 的「响应完就关」让半写无法穿越。
+  节点那一侧当时跑的是 HEAD（无池化代码），真正上线的东西只有 hub 的 1.1。
+- **裁定**：① `HubHandler` 保持 `HTTP/1.0`（不设 `protocol_version`，理由写进类注释）；
+  ② 节点侧照旧走 `common/http_pool` —— 被复用的对端是 **Cloudflare edge**，省的是节点↔edge 的
+  TLS 握手（~0.5s/局），origin 是不是 1.1 只省本地回环的 0.2ms 级开销；
+  ③ 恢复姿势：重启 hub（丢 1.1）+ 重启 cloudflared / 重跑 cell（丢被毒死的隧道连接，不自愈）。
+- **护栏**：`tests/hub/test_hub_origin_close.py`（`resp.will_close` 为真 + `conn.sock is None` +
+  `Content-Length` 定长）；`tests/remote/test_rollout_relay.py` 的复用用例改用假 1.1 hub 并注明
+  「生产里被复用的对端是 edge」。
+- **被否决**：① 保留 1.1 并给每条连接加「N 拍后主动关」（延迟失同步而不是消除它，且每条道
+  仍然会周期性踩到半写窗口）；② 只在 hub 侧对 `via=cf` 请求强制 `close_connection`（要信
+  `CF-Connecting-IP` 头，而同一个 handler 还要服务 Tailscale 直连，判据比收益脆）。
+- **全文** → `docs/nn/remote-transport.md` §165。

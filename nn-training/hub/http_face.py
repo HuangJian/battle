@@ -67,6 +67,7 @@ from __future__ import annotations
 import base64
 import ipaddress
 import json
+import sys
 import threading
 import time
 import urllib.parse
@@ -229,6 +230,13 @@ class HubHandler(
     与改造前逐字节等价（见 `make_server`）。
     """
 
+    #: ★ **不要**在这里设 `protocol_version = "HTTP/1.1"`（2026-11-19 撤销，事故全文见
+    #: `docs/nn/remote-transport.md` §165）。隧道 origin 面（cloudflared → hub）一旦复用连接，
+    #: 任何一条被截断/半写（`_send_body` 停滞、头部已发后出错）的响应都会让那条连接**永久**
+    #: 失同步：现场 cloudflared 打 `malformed HTTP status code "HTML>"`，此后 20 分钟里
+    #: relay 的请求一条都不再到达 origin（节点侧表现为两条路由全 timeout）。1.0 的「每条响应
+    #: 后必关」正是这条失同步的天然兜底。relay 的复用收益在**客户端 ↔ Cloudflare edge** 那一段，
+    #: origin 说不说 1.1 与它无关 ⇒ 拿稳定性换这点本地回环开销不值。
     hub: _HubQueue = None  # type: ignore[assignment]  # 由 factory 注入
     #: hub 中介 push 派发器（`--push` 时注入；None = 未启用，端点 409）。
     push: PushDispatcher | None = None
@@ -292,6 +300,12 @@ class HubHandler(
         """
         cls._worker_pulse = WorkerPulse(silence_sec=silence_sec)
 
+    #: 访问日志的写入锁：`print()` 是**两次** `write`（正文 + 换行），`ThreadingHTTPServer`
+    #: 的高并发下会交错成 `… 200 -[11:24:05] [hub-server …] "GET …" 200 -` —— 现场
+    #: `hub-server.out` 里成片的 relay 行就是这么粘在一起的（那行日志正是排查 relay 问题的
+    #: 入口，粘了就解析不出请求/状态）。一次 `write` 一行，句柄只在这里持有。
+    _log_lock = threading.Lock()
+
     def log_message(self, fmt: str, *args: object) -> None:  # 只打非常规事件
         # 静默高频只读访问（/ping 健康检查、/jobs/peek 拉活、result/payload 轮询含 404）
         # ——这些在多 worker 下每秒可打多行，把 hub-server.out 刷爆。POST result、
@@ -317,10 +331,10 @@ class HubHandler(
         hdrs = self.headers
         src_ip, via = attributed_source(peer, hdrs.get(CF_SOURCE_HEADER, "") if hdrs else "")
         tag = f"{peer} src={src_ip} via=cf" if via == "cf" else peer
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server {tag}] {line}",
-            flush=True,
-        )
+        # **单次 write**（正文+换行一起）：分两次 `print` 会被其它线程插进去，日志行互相粘接。
+        with HubHandler._log_lock:
+            sys.stdout.write(f"[{time.strftime('%H:%M:%S')}] [hub-server {tag}] {line}\n")
+            sys.stdout.flush()
 
     def _auth_ok(self) -> bool:
         peer = self.client_address[0]

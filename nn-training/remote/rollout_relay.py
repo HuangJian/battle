@@ -18,6 +18,10 @@ hub 侧实现与协议见 `hub/relay.py` 头部。
    `HTTP_PROXY`，塞进代理会把 loopback 请求送出去再转回来（`net_http` 头部就是这条事故）；
 3. **轮询失败只退避，不重注册**：这条通道的存活由 `rollout_node` 的监护循环判（线程全停 ⇒
    重建），这里不碰 `reg_state`/`url` —— 那两份状态归 supervisor。
+
+**连接复用**（2026-11-19）：poll/reply 走 `common.http_pool`（thread-local 长连接），一条道
+一个 TLS 会话到底 —— 原先每条请求新建 TCP+TLS，每局白付 ~0.5–1.5s 死时间。池的异常语义与
+urllib 相同（≥400 → `HTTPError`、传输失败 → `URLError`），所以路由回落那套判据原样留着。
 """
 
 from __future__ import annotations
@@ -35,13 +39,37 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any
 
-from common import net_http
+from common import http_pool, net_http
 
 #: 单条长轮询的挂起时长（秒）；hub 侧 `POLL_WAIT_MAX=60` 是它的上限。
 POLL_WAIT_SEC = 20.0
-#: 轮询线程数：agent 侧同时可能有多条请求（权重 POST / 取任务 / 取结果 / 探活），
+#: 轮询线程数（**下限**）：agent 侧同时可能有多条请求（权重 POST / 取任务 / 取结果 / 探活），
 #: 少了会出现队头阻塞（一条 20s 的 `_poll` 会把下一次 ping 排到后面）。
+#:
+#: 它同时是「hub→节点**同时在飞请求**」的硬上限：一条长轮询线程一次只驮一条请求，
+#: `_forward` 在它自己的线程里跑完、交完回执，才回去取下一拍。
+#:
+#: 2026-11-19 现场（hub 日志 + trainer 的 `[dist] node dsw` 读数）：agent `workers=16`、
+#: trainer 给 dsw 的 `concurrency=12`，而这里固定 6 ⇒ 节点并发被腰斩成 6。实测 dsw 单局
+#: 算力 ~3.7s、6 条道 = 97 局/分封顶，正好是现场 burst 的 98 局/分；而 trainer 侧看到的
+#: wall 是 6.6–7.9s/局（一半时间在 hub 的 pending 队列里等道），16 个 worker 只用到 ~37%。
+#: ⇒ `RelayChannel` 必须把 agent 的 worker 数传进来，别让传输层变成算力天花板。
 POLL_WORKERS = 6
+#: 回执投递的重试次数：CF 隧道偶发 502/530（现场 10:31:52 连丢三条）不该让一整局白跑。
+#: 重发是**幂等**的：hub 按 rid 认领，迟到/重复的回执只会记 `late`，不会新建条目。
+REPLY_TRIES = 3
+#: 回执重试的退避基数（秒）：第 n 次失败后等 `REPLY_RETRY_SEC × n`，三次共 ~1.5s，
+#: 远小于 hub 侧 `CALL_TTL_SEC=180` 与调用方 45s 的 `/v1/result` 预算。
+REPLY_RETRY_SEC = 0.5
+#: 跨路由**总预算**里给后续路由留的最小切片（秒）。一条请求的 `timeout` 是**整条请求的总预算**，
+#: 不是「每条路由一份」：两条都黑洞时总墙钟必须 ≈ 一个 budget，不能是两倍。
+#:
+#: 2026-11-19 现场（hub 1.1 把隧道打黑那 20 分钟）：节点每拍固定 70.4s = 35s（`poll_wait+15`）
+#: × 2 条路由，6 条道一起空转 ⇒ 恢复检测被拖慢一倍、失败计数涨一倍。
+#: 为什么不是「均分」（budget/路由数）：长轮询自己就要挂 `poll_wait`（20s），均分给首段 17.5s
+#: 会把**健康路由上的正常空拍**切成假超时 —— 首段必须留够 `poll_wait + 余量`，余下的才给兜底。
+#: 12s 够「建连 + 拿到一个非长轮询应答」，也够把一条死路由判死。
+ROUTE_MIN_SLICE_SEC = 12.0
 #: 轮询失败后的退避（秒）：hub 短暂 5xx / 本机抖动都不该打满 CPU。
 BACKOFF_SEC = 2.0
 #: 单条请求体的上限（权重包 ~几 MB；超过它一定是把别的什么东西塞进来了）。
@@ -722,9 +750,13 @@ class RelayLink:
 
     def stats_line(self) -> str:
         uptime = int(time.time() - self._started_at) if self._started_at else 0
+        st = http_pool.pool_stats("relay")
+        reuse, conn = int(st["reuse"]), int(st["connect"])
+        rate = f"{100.0 * reuse / (reuse + conn):.0f}%" if reuse + conn else "-"
         return (
             f"relay polls={self.polls} served={self.served} errors={self.errors} "
-            f"route={self._route or '?'} workers={self._workers} 秒={uptime}"
+            f"route={self._route or '?'} workers={self._workers} 秒={uptime} "
+            f"pool={reuse}复用/{conn}建连（{rate}）"
         )
 
     @property
@@ -755,21 +787,55 @@ class RelayLink:
             return [self._route, *rest]
         return rest
 
-    def _open(self, req: Any, timeout: float):
-        """按路由发请求：第一条成功的胜；全崩 ⇒ `RelayUnreachable`（带逐路由结论）。"""
+    def _send(
+        self,
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        body: bytes | None,
+        timeout: float,
+    ) -> tuple[int, bytes]:
+        """按路由发请求（**长连接池**）：第一条成功的胜；全崩 ⇒ `RelayUnreachable`。
+
+        `no_proxy` 是「摘代理」那条路由的实现：池键含代理 ⇒ 两条路由各自复用各自的连接。
+
+        `timeout` 是**这条请求的总预算**（跨路由共享），不是每条路由各一份：
+        每段拿 `剩余 - 12s × 后续路由数`（下限 `ROUTE_MIN_SLICE_SEC`），所以「两条都黑洞」
+        的墙钟 ≈ 一个 budget。先失败得快（连接被拒/502）时节省的时间会留给兜底那一段，
+        健康的兜底仍能跑完整的 `poll_wait`。
+        """
         fails: list[str] = []
-        for route in self._route_order():
+        deadline = time.monotonic() + max(1.0, float(timeout))
+        order = self._route_order()
+        for idx, route in enumerate(order):
+            remain = deadline - time.monotonic()
+            after = len(order) - idx - 1
+            slice_sec = remain - ROUTE_MIN_SLICE_SEC * after if after else remain
+            if after and slice_sec < ROUTE_MIN_SLICE_SEC:
+                # 首段已把预算吃光：兜底仍要有一小段（判死 + 说清死因），但总墙钟不再翻倍。
+                slice_sec = min(remain, ROUTE_MIN_SLICE_SEC)
+            if slice_sec <= 0.2:
+                fails.append(f"{route}=跳过（预算已用尽）")
+                continue
             try:
-                resp = _route_open(route, req, timeout)
+                status, raw = http_pool.request(
+                    url,
+                    method=method,
+                    headers=headers,
+                    data=body,
+                    timeout=round(slice_sec, 3),
+                    bucket="relay",
+                    no_proxy=(route == "direct"),
+                )
             except urllib.error.HTTPError:
                 # 4xx/5xx 是**应答**：路由通了（401 = 令牌、404 = hub 没升级），别换路由重试。
                 self._note_route(route)
                 raise
-            except Exception as e:
+            except urllib.error.URLError as e:
                 fails.append(f"{route}={_err_text(e)}")
                 continue
             self._note_route(route)
-            return resp
+            return status, raw
         self._last_error = "；".join(fails)
         raise RelayUnreachable(self._last_error)
 
@@ -784,6 +850,13 @@ class RelayLink:
             self._route = route
 
     def _worker(self) -> None:
+        """线程入口：退场时关掉本线程的池连接（hub 那条 HTTP/1.1 连接会一直挂着一个 handler）。"""
+        try:
+            self._serve_lane()
+        finally:
+            http_pool.close_thread()
+
+    def _serve_lane(self) -> None:
         while not self._stop.is_set():
             started = time.monotonic()
             try:
@@ -807,13 +880,32 @@ class RelayLink:
             resp = _forward(self.agent_port, req)
             # 计「已执行」先于投递回执：回执丢了也算服务过一次（否则观测面会把干过的活报成 0）。
             self._bump("served")
+            self._deliver(str(req["rid"]), resp)
+
+    def _deliver(self, rid: str, resp: dict[str, Any]) -> None:
+        """交回执，**短退避重试**（隧道抖一下不该整局白跑）。
+
+        只重试「可能有救」的失败：网关类 5xx（CF 502/530）与传输异常。4xx 是**确定性**的
+        （401 令牌不对 / 404 hub 没升级 / 413 体过大），重发只会把同一条错误刷三遍。
+        """
+        last: BaseException = RuntimeError("未尝试")
+        for attempt in range(1, REPLY_TRIES + 1):
             try:
-                self._post_reply(str(req["rid"]), resp)
+                self._post_reply(rid, resp)
+                return
+            except urllib.error.HTTPError as e:
+                last = e
+                if 400 <= int(e.code) < 500:
+                    break
             except Exception as e:
-                self._bump("errors")
-                self.log(
-                    f"relay 回执投递失败（{_err_text(e)}）—— 调用方会看到超时（hub={self.hub_host}）"
-                )
+                last = e
+            if attempt < REPLY_TRIES and self._stop.wait(REPLY_RETRY_SEC * attempt):
+                break
+        self._bump("errors")
+        self.log(
+            f"relay 回执投递失败（重试 {REPLY_TRIES} 次后放弃：{_err_text(last)}）"
+            f"—— 调用方会看到超时（hub={self.hub_host}）"
+        )
 
     def _log_failure(self, e: BaseException, elapsed: float) -> None:
         """首条打全（host + 死因 + 耗时），之后每 `ERR_LOG_EVERY` 条汇总一次。
@@ -830,20 +922,22 @@ class RelayLink:
 
     def _poll(self) -> dict[str, Any] | None:
         url = f"{self.hub_url}/relay/{self.node_id}/_poll?wait={self.poll_wait:g}"
-        req = urllib.request.Request(url, method="GET")
-        req.add_header("Authorization", f"Bearer {self.token}")
-        with self._open(req, self.poll_wait + 15.0) as r:
-            data = json.loads(r.read().decode("utf-8"))
+        _status, raw = self._send(
+            "GET", url, {"Authorization": f"Bearer {self.token}"}, None, self.poll_wait + 15.0
+        )
+        data = json.loads(raw.decode("utf-8"))
         return data if isinstance(data, dict) else None
 
     def _post_reply(self, rid: str, resp: dict[str, Any]) -> None:
         url = f"{self.hub_url}/relay/{self.node_id}/_reply/{rid}"
         payload = json.dumps(resp, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(url, data=payload, method="POST")
-        req.add_header("Authorization", f"Bearer {self.token}")
-        req.add_header("Content-Type", "application/json")
-        with self._open(req, REPLY_TIMEOUT_SEC) as r:
-            r.read()
+        self._send(
+            "POST",
+            url,
+            {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"},
+            payload,
+            REPLY_TIMEOUT_SEC,
+        )
 
     def _bump(self, name: str) -> None:
         with self._lock:
@@ -894,6 +988,7 @@ class RelayChannel:
         node_id: str,
         agent_port: int,
         log: Callable[[str], None],
+        workers: int = POLL_WORKERS,
         wait_sec: float = PORT_WAIT_SEC,
     ) -> None:
         self._args: dict[str, Any] = {
@@ -902,6 +997,9 @@ class RelayChannel:
             "node_id": node_id,
             "agent_port": agent_port,
             "log": log,
+            # **并发天花板**（见 `POLL_WORKERS` 注释）：调用方把 agent 的 worker 数传进来，
+            # 传输层就不能比算力层更窄；小机器上仍保底 `POLL_WORKERS` 条道。
+            "workers": max(POLL_WORKERS, int(workers)),
         }
         self.log = log
         self._wait_sec = max(0.0, float(wait_sec))

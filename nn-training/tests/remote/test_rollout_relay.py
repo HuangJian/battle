@@ -17,9 +17,11 @@ import base64
 import json
 import socket
 import threading
+import time
 import urllib.error
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 
 import pytest
 
@@ -29,6 +31,9 @@ from remote.rollout_relay import RelayChannel, RelayLink, RelayUnreachable, _for
 
 
 class _Quiet(BaseHTTPRequestHandler):
+    #: 真 hub 是 HTTP/1.1（`hub/http_face.HubHandler`）——假 hub 不跟着升，复用用例就测不到东西。
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, fmt: str, *args: object) -> None:  # 静默：测试输出只留断言
         return
 
@@ -74,11 +79,18 @@ def _fake_agent(log: dict) -> tuple[ThreadingHTTPServer, int]:
 
 def _fake_hub(pending: list[dict]) -> tuple[str, dict, ThreadingHTTPServer]:
     """假 hub：`_poll` 出一发待办，`_reply` 记回执并放行 `done`。"""
-    state: dict = {"pending": list(pending), "replies": {}, "port": 0, "done": threading.Event()}
+    state: dict = {
+        "pending": list(pending),
+        "replies": {},
+        "port": 0,
+        "ports": set(),
+        "done": threading.Event(),
+    }
     lock = threading.Lock()
 
     class Hub(_Quiet):
         def do_GET(self) -> None:
+            state["ports"].add(self.client_address[1])  # 一条道复用一个 TCP ⇒ 只应出现一个端口
             if not self.path.startswith("/relay/n1/_poll"):
                 self._json({"error": "not found"}, 404)
                 return
@@ -87,6 +99,7 @@ def _fake_hub(pending: list[dict]) -> tuple[str, dict, ThreadingHTTPServer]:
             self._json({"req": req, "local_port": state["port"]})
 
         def do_POST(self) -> None:
+            state["ports"].add(self.client_address[1])
             n = int(self.headers.get("Content-Length", "0") or 0)
             body = json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
             rid = self.path.rsplit("/", 1)[-1]
@@ -140,6 +153,71 @@ def test_link_serves_request_end_to_end_and_learns_local_port() -> None:
         link.stop()
         hub_srv.shutdown()
         agent_srv.shutdown()
+
+
+def test_lane_reuses_one_tcp_connection() -> None:
+    """一条道 = 一条 TCP：poll/reply 走 `common.http_pool`，不再每拍重建。
+
+    判据取**服务端看到的客户端端口**（一条复用连接只有一个），而不是池自己的计数 ——
+    计数器写错时那种用例会自己骗自己。
+
+    这里的假 hub 说 1.1；**真 hub 恒为 1.0**（origin 面不许复用，见
+    `tests/hub/test_hub_origin_close.py` / §165）—— 生产里被复用的对端是**Cloudflare
+    edge**，节点到 edge 那一段才是这笔死时间的出处，两者互不影响。
+    """
+    agent_log: dict = {}
+    agent_srv, agent_port = _fake_agent(agent_log)
+    hub_url, state, hub_srv = _fake_hub([])
+    logs: list[str] = []
+    link = RelayLink(
+        hub_url=hub_url, token="t", node_id="n1", agent_port=agent_port, log=logs.append, workers=1
+    )
+    link.start()
+    try:
+        deadline = time.monotonic() + 5.0
+        while link.polls < 4 and time.monotonic() < deadline:
+            time.sleep(0.01)  # sleep-ok: 轮询步长（等的是谓词：已跑满 4 拍）
+        assert link.polls >= 4, f"道没跑起来（logs={logs}）"
+        assert len(state["ports"]) == 1, f"每拍新建了连接：{state['ports']}"
+    finally:
+        link.stop()
+        hub_srv.shutdown()
+        agent_srv.shutdown()
+
+
+def test_send_budget_is_one_timeout_across_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """两条路由都黑洞时，一拍只烧**一个** timeout（2026-11-19：每拍固定 70.4s = 35s × 2）。
+
+    假时钟 + 假 `http_pool.request`：每次尝试把给它的那段预算“烧光”再抛 timeout，
+    于是断言的是**真实语义**（总墙钟 ≈ 一个 budget），而不是计数器。
+    """
+    # 必须是**非** bypass 目标：回环目标 `_route_order()` 只给 `direct` 一条路（无兜底可测）。
+    link = RelayLink(
+        hub_url="https://hub.example.invalid:2083",
+        token="t",
+        node_id="n1",
+        agent_port=1,
+        log=lambda _m: None,
+    )
+    clock = {"t": 1000.0}
+    seen: list[float] = []
+
+    def fake_request(url: str, **kw: Any) -> tuple[int, bytes]:
+        seen.append(float(kw["timeout"]))
+        clock["t"] += float(kw["timeout"])
+        raise urllib.error.URLError(TimeoutError("sim"))
+
+    monkeypatch.setattr(rr.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(rr.http_pool, "request", fake_request)
+    t0 = clock["t"]
+    with pytest.raises(RelayUnreachable):
+        link._send("GET", "http://hub/relay/n1/_poll?wait=20", {}, None, 35.0)
+    spent = clock["t"] - t0
+    assert len(seen) == 2, f"两条路由都要试（seen={seen}）"
+    assert spent <= 35.0 + 1e-6, f"跨路由总墙钟 {spent}s 超预算（每条都拿满 = 旧行为）"
+    assert all(sec >= rr.ROUTE_MIN_SLICE_SEC for sec in seen), f"兜底被饿死：{seen}"
+    # 没走到「预算已用尽」的跳过分支：兜底拿到了 12s，逐路由死因两条都写了。
+    assert link._last_error.count("timeout") == 2, link._last_error
 
 
 def test_forward_keeps_agent_4xx_as_reply() -> None:
@@ -411,11 +489,11 @@ def test_poll_falls_back_to_direct_when_proxy_route_hangs(
     agent_log: dict = {}
     agent_srv, agent_port = _fake_agent(agent_log)
     hub_url, _state, hub_srv = _fake_hub([])
-    real_racing = net_http.racing_opener
+    real_send = rr.http_pool.request
 
-    def _hang(*, no_proxy: bool = False):
-        if no_proxy:  # 「直连」那条腿必须还是真的（否则这条用例只是在测桩）
-            return real_racing(no_proxy=True)
+    def _hang(url: str, **kw: Any) -> tuple[int, bytes]:
+        if kw.get("no_proxy"):  # 「直连」那条腿必须还是真的（否则这条用例只是在测桩）
+            return real_send(url, **kw)
         raise urllib.error.URLError(TimeoutError("timed out"))
 
     logs: list[str] = []
@@ -425,7 +503,7 @@ def test_poll_falls_back_to_direct_when_proxy_route_hangs(
     try:
         # 回环默认 `bypass_proxy` ⇒ 只有一条路由；这里人为放开，才验得到「代理吊死 → 直连」
         monkeypatch.setattr(net_http, "bypass_proxy", lambda _u: False)
-        monkeypatch.setattr(net_http, "racing_opener", _hang)
+        monkeypatch.setattr(rr.http_pool, "request", _hang)
         assert link._route_order() == ["inherit", "direct"]
         answer = link._poll()
         assert answer is not None and answer.get("local_port")
@@ -774,3 +852,95 @@ def test_tls_verdict_reports_timeout_and_handshake_error() -> None:
         assert verdict2.startswith("err:tls") or verdict2.startswith("err:conn"), verdict2
     finally:
         closed.close()
+
+
+# ------------------------------------------------- 传输层不许比算力层更窄（2026-11-19 DSW）
+
+def test_relay_lanes_follow_agent_workers() -> None:
+    """通道的道数 = agent 的 worker 数（下限 `POLL_WORKERS`）。
+
+    现场（hub 日志 + `[dist] node dsw`）：agent workers=16、trainer concurrency=12，而道数
+    固定 6 ⇒ 单局 3.7s 的节点被卡在 97 局/分，trainer 侧 wall 翻倍到 7.9s/局。道数少于
+    worker 数时，传输层就是算力天花板。
+    """
+    logs: list[str] = []
+
+    def chan(workers: int) -> RelayChannel:
+        return RelayChannel(
+            hub_url="http://127.0.0.1:9",
+            token="t",
+            node_id="n1",
+            agent_port=9,
+            log=logs.append,
+            workers=workers,
+        )
+
+    assert chan(16)._args["workers"] == 16
+    # 小机器不缩水到 6 以下：控制面（ping/weights）也要有道走
+    assert chan(2)._args["workers"] == rr.POLL_WORKERS
+
+
+def test_reply_delivery_retries_gateway_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CF 偶发 502/530 时回执要重发：丢一条 = 一整局白跑（hub 侧等到超时再回队重算）。"""
+    logs: list[str] = []
+    link = RelayLink(
+        hub_url="http://127.0.0.1:9", token="t", node_id="n1", agent_port=9,
+        log=logs.append, workers=1,
+    )
+    calls: list[str] = []
+
+    def _flaky(rid: str, resp: dict) -> None:
+        calls.append(rid)
+        if len(calls) < 3:
+            raise urllib.error.HTTPError("u", 502, "bad gateway", {}, None)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(rr, "REPLY_RETRY_SEC", 0.0)
+    monkeypatch.setattr(link, "_post_reply", _flaky)
+    link._deliver("r1", {})
+    assert len(calls) == 3, calls
+    assert link.errors == 0
+    assert not logs, logs
+
+
+def test_reply_delivery_does_not_retry_permanent_4xx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """401/404 是确定性失败（令牌不对 / hub 没升级）：重发只会把同一条错误刷三遍。"""
+    logs: list[str] = []
+    link = RelayLink(
+        hub_url="http://127.0.0.1:9", token="t", node_id="n1", agent_port=9,
+        log=logs.append, workers=1,
+    )
+    calls: list[str] = []
+
+    def _denied(rid: str, resp: dict) -> None:
+        calls.append(rid)
+        raise urllib.error.HTTPError("u", 401, "unauthorized", {}, None)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(rr, "REPLY_RETRY_SEC", 0.0)
+    monkeypatch.setattr(link, "_post_reply", _denied)
+    link._deliver("r1", {})
+    assert len(calls) == 1, calls
+    assert link.errors == 1
+    assert len(logs) == 1, logs  # 只响一次：不把同一条确定性失败刷三遍
+
+
+def test_reply_delivery_gives_up_after_budget_and_logs_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """真断了（三次都失败）⇒ 一次错误 + 一行日志，不刷屏；调用方那一侧的超时语义不变。"""
+    logs: list[str] = []
+    link = RelayLink(
+        hub_url="http://127.0.0.1:9", token="t", node_id="n1", agent_port=9,
+        log=logs.append, workers=1,
+    )
+    calls: list[str] = []
+
+    def _down(rid: str, resp: dict) -> None:
+        calls.append(rid)
+        raise urllib.error.URLError(TimeoutError("timed out"))
+
+    monkeypatch.setattr(rr, "REPLY_RETRY_SEC", 0.0)
+    monkeypatch.setattr(link, "_post_reply", _down)
+    link._deliver("r1", {})
+    assert len(calls) == rr.REPLY_TRIES, calls
+    assert link.errors == 1
+    assert len(logs) == 1, logs

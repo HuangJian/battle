@@ -6,6 +6,204 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §166 `_send` 的 timeout 是**跨路由总预算**，不是每条路由一份（2026-11-19）
+
+**一句话**：两条路由都黑洞时，一拍只烧一个 `timeout`（不是两倍），且兜底不被饿死。
+
+### 现场读数
+
+2026-11-19 隧道被打黑那 20 分钟：节点每拍固定 **70.4s** = 35s（`poll_wait + 15`）× **两条路由**
+（`inherit` + `direct`），6 条道一起空转 ⇒ 失败计数 10 → 80（≈5 次/分）、恢复检测被拖慢一倍。
+原来的实现里 `timeout` 是**逐路由**传给 `http_pool.request` 的，`_route_order()` 有两条就自然翻倍。
+
+### 裁定
+
+`_send(timeout=T)` 先算 `deadline = now + T`，每段拿 `剩余 - ROUTE_MIN_SLICE_SEC × 后续路由数`
+（下限 `ROUTE_MIN_SLICE_SEC = 12s`）⇒ 两段之和 ≈ T。
+
+两件不能弄反的事：
+
+1. **不能均分**（T/2 = 17.5s）：长轮询自己就要挂 `poll_wait`（20s），均分会把**健康路由上的
+   正常空拍**切成假超时 —— 首段必须留够 `poll_wait + 余量`。
+2. **兜底不能被饿死**：首段失败得快（连接被拒 / 502）时省下的时间要留给兜底，
+   健康的兜底仍能跑完一次完整长轮询。
+
+代价：若首段是「慢慢超时」（23s 用光）而兜底其实健康，兜底只拿到 12s（< `poll_wait`）⇒
+这一拍返回空、下一拍重来。不会丢任务（`_poll` 的空拍本就是正常分支），只是多一次往返。
+
+### 护栏
+
+`tests/remote/test_rollout_relay.py::test_send_budget_is_one_timeout_across_routes`：
+假时钟 + 假 `http_pool.request`（每段把拿到的预算“烧光”再抛 timeout），断言总墙钟 ≤ 一个
+budget、两条路由都试到、每段 ≥ `ROUTE_MIN_SLICE_SEC`。
+
+---
+
+## §165 撤销 hub 的 HTTP/1.1：隧道 origin 面复用连接会被一条坏响应永久毒死（2026-11-19 现场事故）
+
+**一句话**：`hub` 的 origin 面（cloudflared → `localhost:8787`）**必须**每条响应后关连接。
+节点侧的池化照旧 —— 被复用的对端是 **Cloudflare edge**，不是 origin。
+
+### 现场（12:34 → 13:01，DSW 节点 `polls` 停在 469 / `served` 438，产出冻结在 380 局）
+
+| 时刻（本地） | 事件 |
+|---|---|
+| 12:34:10 | hub 重启，吃到工作树里的 `protocol_version = "HTTP/1.1"` |
+| 12:41:48Z(=本地 12:41) | cloudflared：`Unable to reach the origin service … malformed HTTP status code "HTML>"` |
+| 12:41:50 | 节点：`relay 轮询失败 … HTTP 502` |
+| 12:42:42 | cloudflared：`readfrom tcp 127.0.0.1:4011->127.0.0.1:8787 … use of closed network connection` |
+| 12:44:50 | hub 日志里**最后一条** `via=cf` 请求（`_poll?wait=20` 200） |
+| 12:47:14 起 | 节点每拍 `70.4s`：`inherit=timeout；direct=timeout`，errors 10 → 80（≈5 次/分 = 6 道 / 70s） |
+| 13:03 | hub 仍健康（11 线程，jobs/admin 正常）；隧道也活着（从本机打 `:2083/healthz` 1.2s 到 hub） |
+
+**判读**：hub 没死、隧道没死，死的是「cloudflared → hub」那条**被复用**的连接。
+`socket` 复用下只要有一条响应没写完整（`_send_body` 停滞、头部已发之后抛异常、
+`ConnectionError` 提前退出），下一个响应就会被当成上一条的**残片**去解析 ——
+`malformed HTTP status code "HTML>"` 正是「读到上一条响应体的尾巴」。
+1.0 的「响应完就关」让这种半写**不可能穿越到下一条请求**；1.1 把它变成永久失同步，
+于是 cloudflared 的那条 origin 连接挂死，之后 relay 的请求**一条都到不了 hub**
+（节点侧自然看到两条路由全 timeout；70.4s = 35s × 2 条路由）。
+
+**节点侧不是肇事者**：那次 cell 跑的是 HEAD `54d0718`，里面**没有**池化代码（本次改动全部
+还在工作区未提交）—— 但这也说明「节点新代码 + hub 1.1」的组合从未被测过，而 hub 1.1 是
+唯一真正上线的东西。
+
+### 裁定
+
+* **hub 保持 `HTTP/1.0`**（`HubHandler` 不设 `protocol_version`），并把「别设」的理由写进类注释。
+* **节点侧池化保留**：`_poll`/`_post_reply` 仍走 `common/http_pool`（thread-local、每请求 timeout、
+  `no_proxy` 给 direct 腿），`close_thread()` 仍要在道退场时调。收益本来就是**客户端 ↔ CF edge**
+  那一段（省 TLS 握手 ~0.5s/局），origin 是不是 1.1 与它无关 —— 那一段是 127.0.0.1 本地回环，
+  省下来的是 0.2ms 级，不值一条隧道的稳定性。
+* **护栏**：`tests/hub/test_hub_origin_close.py` —— 读完后 `resp.will_close` 必须为真、
+  `conn.sock is None`（服务端主动关），且响应仍带 `Content-Length`。谁把 1.1 加回来，这条就红。
+
+### 运维：这类挂死怎么恢复
+
+`cloudflared` 的 origin 池一旦挂死不会自愈（客户端超时不会把它唤醒）。恢复顺序：
+**重启 hub**（丢掉 1.1）→ **重启 cloudflared 或重跑 DSW cell**（丢掉那条被毒死的隧道连接）。
+判断「是不是这一类」的两条读数：hub 日志里 `via=cf` 彻底停摆**而**本地/`/admin/*` 照常；
+节点侧每拍固定在 `wait+15` 的两倍（70s）。
+
+---
+
+## §164 relay 的连接复用：hub 升 HTTP/1.1 + poll/reply 走长连接池（2026-11-19）
+
+> ⚠ **①（hub 升 1.1）与 ③（`close_connection`）已被 §165 撤销** —— 保留原文只为记录
+> 当初的推导；现行结论看 §165。②（节点池化 + `no_proxy`）与 `stats_line` 的池读数仍然有效。
+
+**一句话**：一条道一个 TLS 会话到底，不再每拍重建 TCP+TLS。
+
+### 现场的两笔死时间
+
+节点每完成一局，固定要付两笔**与算力无关**的往返：`_post_reply`（回执）新建一条连接，
+下一次 `_poll` 再新建一条。urllib 不发 keep-alive，hub 又是 `HTTP/1.0`（`BaseHTTPRequestHandler`
+的默认值）⇒ 每条响应之后服务端**必然关连接**，客户端的池也只能一拍一建。真机读数是
+隧道单程 ~0.5–0.7s（预检 `_poll?wait=0` 1074ms、注册探活 860ms 都是**建连 + 一次往返**），
+所以每局白扔 ~0.5–1.5s —— 在 `wall=6.6–7.9s/局` 里占到 10–20%，而这部分被算进了
+「hub pending 里等道」（§163）。
+
+### 三处改动
+
+**① hub 说 HTTP/1.1**（`hub/http_face.HubHandler.protocol_version`）。原先没设，就是 1.0。
+前提是**每个响应都带 `Content-Length`** —— 全仓写头入口只有 `respond_json` 与
+`_send_headers` 两处（都先算长度再 `end_headers`），流式 body 也先声明总长 ⇒ 可复用。
+反向风险写在类属性注释里：将来谁加一个裸 `send_response`，客户端会被挂到超时。
+
+**② 节点 poll/reply 走 `common/http_pool`**（thread-local、每请求 timeout、代理/竞速/异常语义
+与 urllib 对齐）。`_open`/`_route_open` 的**路由回落**判据原样保留：`inherit` 撞不上就换
+`direct`，4xx/5xx 仍算「路由通了」不切换。`direct` 那条腿用新增的 `no_proxy=True`（池键里
+带着代理 ⇒ 两条路由各自一条连接，不串味）。预检（`probe_hub` / `_probe_one_route`）仍然
+一次性走 `_route_open`：它要的是「这条腿通不通」，不该占着道。
+
+**③ 道线程退场关自己的连接**（`http_pool.close_thread()`，不动统计）。不关的话，hub 侧那条
+1.1 连接会一直挂着一个 handler 线程，cell 重跑（`stop_stale_links`）时越积越多。
+
+顺手补的两处：`stats_line()` 末尾加 `pool={reuse}复用/{connect}建连（率）`（现场读数：
+建连 ~16 条之后复用率应当贴近 100%）；对端提前断开（`ConnectionError`）的两个分支补
+`close_connection = True` —— 1.1 下 handler 会回头读下一请求，读一条死 socket 就是一段
+`socketserver` 的 traceback（`test_hub_client_gone` 抓到的正是这个）。
+
+### 被否决
+
+* **在 1.0 上手写 `Connection: keep-alive`**：那是事实标准而不是规范，还得自己接管
+  `close_connection` 与响应定长两件事 —— 等于手写半个 1.1，收益一样。
+* **另写一套 relay 专用客户端（httpx/自管 TLS）**：多一份代理/竞速/超时真相，且本仓库
+  `common/http_pool.py` 就是为此存在的（`NODE_HTTP_POOL=0` 还是同一条逃生口）。
+* **HTTP/2 / 多路复用**：hub 是 stdlib `ThreadingHTTPServer`，换协议栈的代价远大于这一格收益。
+
+### 验证
+
+反证用例先红后绿：把假 hub 降回 1.0 ⇒ 6 拍长轮询打出 **6 个客户端端口**
+（`test_lane_reuses_one_tcp_connection`），1.1 下恒为 **1**；`test_hub_keepalive` 同一条
+`HTTPConnection` 连发两次 200 并断言 `Content-Length`（该用例已按 §165 反向重写为
+`test_hub_origin_close`）。门禁：`tests/hub` **615 passed**、
+`tests/remote + tests/common` **2434 passed / 1 skipped**、ruff / mypy 3 源文件、LOC 与文本断言
+预算（1502 / 1092 未动）。
+
+**真机生效**：节点随 clone 更新；**hub 必须重启**（协议版本是进程级类属性）。
+
+## §163 relay 的道数 = 算力并发（2026-11-19，DSW 现场：6 条道把 16 worker 的节点腰斩）
+
+**读数来源**：hub 日志 `tmp/hub-server.out`（06:38 重启，覆盖 09:40–11:24 的整个会话）＋
+节点自报的 `relay polls/served/errors` 行＋trainer 的 `[dist] node dsw` / `node order` 行。
+节点侧日志是用户贴的那份 notebook 输出。
+
+### 现场
+
+| 时刻（节点自报） | polls | served | served/polls | 备注 |
+|---|---|---|---|---|
+| 10:00:55（20.1min） | 1155 | 1014 | 88% | 43 局/分 |
+| 10:40:55（60.4min） | 3393 | 3012 | 89% | errors=18（CF 抖） |
+| 11:20:55（100min） | 5260 | 4541 | 86% | 29 局/分 |
+
+`served/polls≈89%` 的含义很硬：**每条长轮询返回时几乎总带着一条活**（空拍才会等满
+`wait=20`）。6 条道 ÷ 624s 做 606 次轮询 = 每道每拍 6.2s，其中 ~5.5s 花在
+`_forward` + 回执上 ⇒ 通道是满载的。
+
+同一时段 trainer 的读数（`tmp/trainer-cluster.log`）：
+
+```
+[dist] node dsw: online, concurrency=12（config=12 workers=16 cpus=8）
+[dist] node order: … dsw wall=7.9s/局 n=50 …
+```
+
+hub 侧 burst 的峰值是 **95–108 局/分**（`v1/task` 200：09:56=95 · 10:15=85 · 10:54=108 ·
+11:11=101）；6 条道 × `60/3.7s` = **97 局/分**，正落在实测区间里。⇒ 单局算力约 3.7s，
+节点能跑 12–16 并发，**传输层只给了 6**：trainer 看到的 `wall=7.9s` 里有一半是
+hub `pending` 队列里等道的时间（`CALL_TTL=180s` 内还在预算里，所以不会报错，只是白等）。
+
+另一条与节点无关、但读数上容易误判的事实：产出是**周期性 burst**（09:47–49、09:55–57、
+10:06–08、10:15–17…），burst 之外 rollout 只有 20 局/分 —— 那是训练循环在跑 PPO 更新，
+节点本来就该闲着。**不要拿「30 分钟均值 44 局/分」去判节点算力**；要判就看 burst 峰值。
+
+### 三处修法
+
+| 件 | 改 | 为什么 |
+|---|---|---|
+| `remote/rollout_relay.py` | `RelayChannel(workers=...)` → `RelayLink(workers=)`，`max(POLL_WORKERS=6, agent_workers)` | 道数就是「hub→节点同时在飞请求」的上限（一条线程一次驮一条）；6 条道把 16 worker 腰斩成 6 并发 |
+| `remote/rollout_node.py` | `RelayChannel(..., workers=workers)` | 把 agent 的真实并发传进传输层，别让传输层决定算力 |
+| `remote/rollout_relay.py::_deliver` | 回执 3 次短退避重试（0.5/1.0s），4xx 不重试 | 现场 10:31:52 一次丢三条回执（CF 502/530）；丢一条 = 一整局白跑，hub 侧 `CALL_TTL=180s` 内重发幂等（迟到的按 rid 记 `late`） |
+| `hub/http_face.py::log_message` | 一行一次 `write`（加 `_log_lock`） | `print()` 是正文/换行两次写，并发下粘成 `… 200 -[11:24:05] [hub-server …] "GET …"` —— 这份日志正是排查 relay 的唯一入口 |
+
+### 稳定性读数的边界
+
+* **36.1s 的轮询超时**（10:07:58）：`_poll` 的 socket 预算是 `wait+15=35s`，隧道丢了响应就烧满。
+  6 条道时这一条占 1/6 通道 ~36s；16 条道后同样故障只占 1/16 —— 加道本身就是这档故障的稀释。
+* **注册 422 / 30s 退避**（09:40:53）：hub 的注册门打 `/v1/ping` 得 502（agent 还没监听），
+  不是 relay 坏了；节点在 30s 后重注册成功。这条**本次未改**：真因是 agent 启动慢，缩短退避
+  只会在 agent 未就绪时多打几次必然 422。
+* **`v1/result` 404**（每 10 分钟 11–41 条）：是竞速 fanout 的输家副本（`task lost on node`），
+  trainer 自己会丢；不是节点丢包。
+
+### 验证
+
+`tests/remote/test_rollout_relay.py` +4（道数跟随 workers / 502 两次后成功 / 401 不重试 /
+三次失败只记一行）· `tests/hub/test_hub_auth_d9_order.py` +1（一行一次 write）·
+三个文件 mypy + ruff 干净、`tests/remote/test_rollout_node.py` 全绿。
+
+**未验证**：真机复测（节点代码随 clone 更新，需重启 DSW cell；hub 需重启才吃到日志原子写）。
+
 ## §162 Paddle 后端支持 PPO lazy loader（2026-11-18）
 
 **现场**：生产缺省已在 2026-11-17 切成 `ppo_loader=lazy`（§156），但 Paddle worker 的

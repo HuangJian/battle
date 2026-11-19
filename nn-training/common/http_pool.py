@@ -138,6 +138,17 @@ def reset() -> None:
         _STATS.clear()
 
 
+def close_thread() -> None:
+    """关掉**本线程**缓存的连接，**不动统计**。
+
+    长驻线程（relay 的每条 poll 道）退出前调用：线程对象被回收并不保证立刻关 socket，
+    而 hub 侧那条 HTTP/1.1 连接会把一个 handler 线程一起挂住。`reset()` 会连统计一起清，
+    不能给收尾用 —— 读数要留到进程退出。
+    """
+    _close_all()
+    _used().clear()
+
+
 def _conns() -> dict[_Key, Any]:
     box = getattr(_LOCAL, "conns", None)
     if box is None:
@@ -342,11 +353,15 @@ def request(
     method: str | None = None,
     scope: str = "",
     bucket: str = "",
+    no_proxy: bool = False,
 ) -> tuple[int, bytes]:
     """发一个请求，返回 `(status, body)`。≥400 抛 `HTTPError`，传输失败抛 `URLError`。
 
     `bucket` = 计数分桶标签（`common.distribution.pool_bucket()` 拼的 `<course>/<kind>`）。
     同一进程多课程并发时，没有它就只能读到一个被互梃的进程级数字（plan §2.2）。
+
+    `no_proxy=True` = **强制直连**（不看 `HTTPS_PROXY`/注册表），给「摘代理」那条路由用：
+    池键里就带着代理，所以同 host 的直连与走代理是两条连接，互不串味。
     """
     parts = urlsplit(url)
     scheme = (parts.scheme or "http").lower()
@@ -354,7 +369,7 @@ def request(
     if not host:
         raise urllib.error.URLError(ValueError(f"invalid url: {url!r}"))
     port = parts.port or (443 if scheme == "https" else 80)
-    proxy = _proxy_for(scheme, host)
+    proxy = "" if no_proxy else _proxy_for(scheme, host)
     target = _request_target(url, scheme, proxy)
     verb = method or ("POST" if data is not None else "GET")
     hdrs = dict(headers or {})

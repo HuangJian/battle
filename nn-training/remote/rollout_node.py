@@ -1063,14 +1063,16 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
             log(f"relay 通道候选（{reason}）—— hub 未配置（缺 HUB_IP/hub_url 或 HUB_TOKEN），跳过")
             return False
         if relay is None:
+            # `workers` = agent 的 worker 数（下限 6）：6 条道会把 16 worker 的节点腰斩成 6 并发
+            # （2026-11-19 hub 日志实测，见 `POLL_WORKERS` 注释）。
             relay = RelayChannel(
-                hub_url=hub_url, token=hub_token, node_id=node_id, agent_port=port, log=log
+                hub_url=hub_url, token=hub_token, node_id=node_id, agent_port=port, log=log,
+                workers=workers,
             )
         url = relay.supervise(reason)
-        if not url:
-            return False
-        link = LINK_RELAY
-        return True
+        if url:
+            link = LINK_RELAY
+        return bool(url)
 
     if link == LINK_RELAY:
         _open_relay("通道决策=relay")

@@ -229,6 +229,30 @@ def test_abort_scope_closes_inflight_and_never_retries(srv) -> None:
     assert http_pool.pool_stats().get("drop_abort") == 1, http_pool.pool_stats()
 
 
+def test_no_proxy_forces_direct_and_keeps_its_own_connection(srv, monkeypatch) -> None:
+    """`no_proxy=True` = 强制直连（relay 的「摘代理」那条腿）。
+
+    桩里把代理指向一个死端口：不传该参 ⇒ `URLError`（证明桩真的在拦），传了 ⇒ 真连得上。
+    池键含代理 ⇒ 两条路由各自一条连接，不会把直连的响应借给代理腿。
+    """
+    monkeypatch.setattr(http_pool, "_proxy_for", lambda *_a: "http://127.0.0.1:9")
+    with pytest.raises(urllib.error.URLError):
+        http_pool.request(f"{srv}/ok", timeout=2)
+    assert http_pool.request(f"{srv}/ok", timeout=2, no_proxy=True)[1] == b"ok"
+
+
+def test_close_thread_drops_connections_but_keeps_counters(srv) -> None:
+    """线程退场用 `close_thread()`：连接关了，读数留着（`reset()` 会把统计一起清）。"""
+    http_pool.request(f"{srv}/ok")
+    http_pool.request(f"{srv}/ok")
+    assert _H.conns == 1
+    http_pool.close_thread()
+    http_pool.request(f"{srv}/ok")
+    assert _H.conns == 2, "close_thread 之后必须重新建连"
+    assert http_pool.pool_stats()["connect"] == 2, http_pool.pool_stats()
+    assert http_pool.pool_stats()["reuse"] == 1
+
+
 def test_https_through_proxy_uses_tls_connection() -> None:
     """经 http 代理的 **https 目标**：连接类按目标 scheme 选，且 CONNECT 到目标。
 

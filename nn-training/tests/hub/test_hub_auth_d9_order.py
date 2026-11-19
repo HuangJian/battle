@@ -25,6 +25,7 @@
 """
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -289,6 +290,36 @@ def test_access_log_carries_attributed_source(capsys: Any, tmp_path: Path) -> No
     )
     out = capsys.readouterr().out
     assert "[hub-server 100.124.208.62]" in out and "via=cf" not in out, out
+
+
+def test_access_log_is_one_write_per_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """一行日志必须**一次 write**（正文 + 换行）：`print()` 分两次写，并发线程插进来就成
+    `… 200 -[11:24:05] [hub-server …] "GET …" 200 -`——现场 relay 行成片粘接，
+    而 hub-server.out 正是排查 relay 的唯一入口。"""
+    store = _boot_server(tmp_path)[1]
+    writes: list[str] = []
+
+    class _Rec:
+        def write(self, s: str) -> int:
+            writes.append(s)
+            return len(s)
+
+        def flush(self) -> None:
+            return None
+
+    monkeypatch.setattr(sys, "stdout", _Rec())
+    HubHandler.log_message(  # type: ignore[arg-type]
+        cast(
+            HubHandler,
+            _stub_handler(store, "sekret", "127.0.0.1", "Bearer sekret", cf="203.0.113.7"),
+        ),
+        '"GET /relay/dsw/_poll?wait=20 HTTP/1.1" 200 -',
+    )
+    # 一行 = 一次 write（正文与换行同一次）：分两次就会被并发线程插进去。
+    assert len(writes) == 1, writes
+    assert writes[0].startswith("[") and writes[0].endswith("200 -\n"), writes
 
 
 def test_access_log_survives_missing_headers(capsys: Any, tmp_path: Path) -> None:

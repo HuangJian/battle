@@ -623,12 +623,24 @@ def test_submit_defers_the_job_build_to_the_background_thread(
 
     monkeypatch.setattr(offline_eval, "run_cloud_eval", lambda **job: {"ran": True, **job})
     logs, log = _logs()
-    runner = CloudEvalRunner(slow_build, log=log)
+    caller = threading.current_thread()
+    build_thread: list[threading.Thread] = []
+
+    def recording_build(it: int) -> dict:
+        build_thread.append(threading.current_thread())
+        return slow_build(it)
+
+    runner = CloudEvalRunner(recording_build, log=log)
     t0 = time.time()
     assert runner.submit(5)
     submit_sec = time.time() - t0
-    # timing-ok: 契约上界（提交即返回；装配挪到后台就是契约本体）
-    assert submit_sec < 0.1, f"装配又回到调用线程了：submit 阻塞 {submit_sec:.2f}s"
+    # 契约本体是**不在调用线程**求值（2026-11-19：原来用 0.1s 秒表判，xdist 满载下
+    # 0.11s 就假红 —— 秒表量到的是调度抖动，不是「在谁身上跑」）。
+    # timing-ok: 上界兜底（真回到调用线程会等满 slow_build 的 5s；不量机器快慢）
+    assert submit_sec < 5.0, f"submit 把装配等完了：{submit_sec:.2f}s（slow_build 诈 5s）"
+    release.set()
+    assert built.wait(5), "后台线程没开始装配"
+    assert build_thread and build_thread[0] is not caller, "装配又回到调用线程了"
     release.set()
     assert built.wait(5), "后台线程没开始装配"
     assert runner.drain(timeout=5.0) is True

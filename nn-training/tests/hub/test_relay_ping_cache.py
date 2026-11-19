@@ -145,7 +145,10 @@ def test_expired_payload_is_served_then_refreshed_single_flight(
     ) -> tuple[int, dict[str, str], bytes]:
         seen.append((method, path, timeout))
         started.set()
-        release.wait(10.0)
+        # 呆真：只在用例放行时才返回。原来的 10s 上界会在 xdist 满载时**自己到期**
+        # （一次调度停顿就能越过）⇒ busy 被清、后面的请求又起一次刷新 ⇒
+        # `len(seen) == 2` 假红（2026-11-19 全量门禁）。上界只为用例崩掉时收尾。
+        release.wait(120.0)
         return 200, {"Content-Type": "application/json"}, b'{"v": 2}'
 
     monkeypatch.setattr(relay, "call", fake_call)
