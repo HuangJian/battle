@@ -106,3 +106,28 @@ def test_reopen_clears_finished_so_live_budget_takes_effect() -> None:
 
     assert runner.finished is False
     assert [t.it for t in runner.planner("c", 501, None)] == [501]
+
+
+def test_pending_steps_refuses_over_budget_round() -> None:
+    """★ 2026-11-17 事故（`replay-a-cont`）：`iters=20` 跑了 it21。
+
+    `planner` 判一次不够——预采/队列可能在「判满之前」把下一轮排进来。`_pending_steps`
+    必须再判一次，且**绝不执行**预算外的轮（多烧一轮 + 末点读数不对应声明的样本轴）。
+    """
+    loop = _Loop(next_it=21, iters=20)
+    runner = _runner(loop)
+
+    assert runner._pending_steps("c", 21) == []
+    assert runner.finished is True
+    assert runner.finish_reason.startswith("iters=") is True
+
+
+def test_pending_steps_allows_the_last_budgeted_round() -> None:
+    """正向对照：it20 是**预算内**的最后一轮，13 步全放行（不能把边界判成越界）。"""
+    loop = _Loop(next_it=20, iters=20)
+    runner = _runner(loop)
+
+    tasks = runner._pending_steps("c", 20)
+    assert [t.kind for t in tasks][:2] == ["precollect_join", "prepare_iter"]
+    assert len(tasks) == 13
+    assert runner.finished is False

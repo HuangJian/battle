@@ -328,11 +328,18 @@ def _ppo_done_log(
     不再单列 `job … PPO done in …` 一行：steps/chunks/kl + engine 折叠读数并入下游 wire
     总账行（`wire._wire_flush` 读取 `_WIRE[jid]["ppo_line"]` 拼到行尾，2026-10-28）。
     """
+    from worker.ppo.trainer import chunk_count, chunk_rows, loader_desc
+
     ppo_sec = round(time.time() - t_ppo, 1)
     _wire_time(jid, "ppo", time.time() - t_ppo)
-    train_b.add("steps", f"{sum(c['obs'].shape[0] for c in chunks)}/{total_steps}（训练/池子）")
-    train_b.add("chunks", len(chunks))
+    train_b.add("steps", f"{chunk_rows(chunks)}/{total_steps}（训练/池子）")
+    train_b.add("chunks", chunk_count(chunks))
+    train_b.add("loader", loader_desc(chunks))
     train_b.add("kl", agg.get("kl"))
+    # D8/D10：逐步 KL 与 clip fraction（旧 worker 无键 ⇒ 回落 kl / 0）。
+    per_step_kl = agg.get("per_step_kl", agg.get("kl"))
+    train_b.add("per_step_kl", per_step_kl)
+    train_b.add("clip", agg.get("clip_fraction"))
     ppo_line = train_b.text()
     if ppo_line:
         note_ppo_tail(jid, ppo_line)
@@ -366,6 +373,8 @@ class TrainSpec:
     blob_hits: int
     blob_miss_bytes: int
     prune_dirs: int = 0
+    #: D10（plan/replay-corpus.plan.md）：replay pre-pass 的读数（full 路径 None）。
+    replay_info: dict | None = None
     epoch_mult: float = 1.0
     backend: str = "torch"
     prep: Any = None
@@ -785,6 +794,9 @@ def _torch_ppo(st: _CoreRun) -> None:
     # ——与装载段的 `prep_b` 分开两本账：装载行**必须**在进 PPO 之前落下来（否则卡在 PPO 里
     # 就什么都看不见）。
     train_b = LogBundle(log)
+    # P3（plan/replay-corpus.plan.md D6）：默认 eager；manifest 带 ppo_loader=lazy
+    # 才走 mmap + 逐批上卡。lazy 是独立开关，回滚 = 不带这个键。
+    ppo_loader = str(manifest.get("ppo_loader", "eager") or "eager")
     try:
         _load_ppo_data(st, ppo_engine)
         total_steps, chunks = st.total_steps, st.chunks
@@ -812,6 +824,7 @@ def _torch_ppo(st: _CoreRun) -> None:
             # 组 3（日志节食）：epoch 行 + PPO 完成行攒成一行，未完成时每 60s 心跳一次。
             progress=train_b,
             progress_head=f"job {jid}: PPO 训练中",
+            lazy=ppo_loader == "lazy",
         )
     except ProtocolError:
         raise
@@ -980,6 +993,7 @@ def _paddle_model(st: _CoreRun) -> None:
     st.prep_b = prep_b
     # `--threads` 在 Paddle 侧只能靠环境变量，且必须早于 import（见 remote/paddle_env.py）。
     paddle_env.apply(spec.torch_threads, prep_b)
+    paddle_env.silence_import_warnings()
     import numpy as np
     import paddle
 
@@ -1193,6 +1207,9 @@ def _paddle_ppo(st: _CoreRun) -> None:
             progress=train_b,
             progress_head=f"job {jid}: PPO 训练中",
             steps_out=steps_box,
+            # 判据来自装载器本身（`LazyChunks.lazy`），不重读 manifest —— 避免「说 lazy
+            # 实际 eager」的错账；eager list 没有这个属性 ⇒ False。
+            lazy=bool(getattr(st.chunks, "lazy", False)),
             log=spec.log,
         )
     except ProtocolError:

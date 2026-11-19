@@ -91,6 +91,7 @@ def test_spec_declares_hold_columns_as_optional() -> None:
     # 用 `.get(...)` 逐键比形状（`==` 判据，不是 `in` 文本断言）。
     assert np_core._RL_SHARD_SPEC.get("a_hold") == ("a_hold.npy", np.int64)
     assert np_core._RL_SHARD_SPEC.get("lp_hold") == ("lp_hold.npy", np.float32)
-    assert frozenset({"a_hold", "lp_hold"}) == np_core._RL_SHARD_OPTIONAL
+    # policy_mask 同为可选（hybrid opening 才有；缺席 = 老 shard 逐字节不变）。
+    assert frozenset({"a_hold", "lp_hold", "policy_mask"}) == np_core._RL_SHARD_OPTIONAL
     # 派生表（只有 reward.npy 的 shard）必须自动带上，不抄第二份名单
     assert np_core._RL_SHARD_SPEC_REWARD.get("a_hold") == ("a_hold.npy", np.int64)

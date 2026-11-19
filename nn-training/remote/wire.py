@@ -97,6 +97,15 @@ def _wire_block(**over: object) -> dict:
         # （命中/payload 恒 0）。缺省 = 本轮没有权重解析（echo / BC）。
         "weights_src": "",
         "weights_bytes": 0,
+        # D10（plan/replay-corpus.plan.md，2026-11-16）：语料运输格式 + replay pre-pass 的
+        # 墙钟/字节账。full 路径保持 full/0（「没走 replay」是事实，不是未测量）。
+        "corpus_fmt": "full",
+        "replay_bytes": 0,
+        "labels_bytes": 0,
+        "convert_sec": 0.0,
+        "convert_workers": 0,
+        "convert_jobs": 0,
+        "convert_fallback": 0,
     }
     w.update({k: v for k, v in over.items() if v is not None})
     return w

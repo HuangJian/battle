@@ -359,7 +359,10 @@ def test_the_facade_can_still_serve_a_real_ping(tmp_path: Path) -> None:
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
             assert resp.status == 200
-            assert json.loads(resp.read()) == {"status": "ok"}
+            ping_json = json.loads(resp.read())
+            assert ping_json.get("status") == "ok"
+            # 2026-11-16：additive 能力位（plan/replay-corpus.plan.md D2/B7）。
+            assert ping_json.get("capabilities") == ["replay_corpus"]
         # 反面对账：错 token 必须 401（证明走的仍是真 `_auth_ok`，不是某个放行的桩）。
         bad = urllib.request.Request(
             f"http://127.0.0.1:{port}/ping", headers={"Authorization": "Bearer nope"}

@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from common.log import log
 from trainer.loop_core import (
     ROUND_BUNDLE_EXIT,
     ROUND_NEXT,
@@ -162,6 +163,24 @@ class LoopRunner:
         return [Task(course, want, ROUND_KIND, params={})]
 
     def _pending_steps(self, course: str, it: int) -> list[Task]:
+        """本轮 13 步里的待办。
+
+        ★ 2026-11-17（`replay-a-cont` it21 事故）：**这里也要判预算**。`planner` 判一次
+        不够——预采/队列可能在「判满之前」就把下一轮排进来，于是 `iters=20` 的课真的跑了
+        it21（账本 21 条 iteration、`run_complete` 写两次「it20/20」「it21/20」）。
+        预算外的轮**绝不执行**：多烧一轮，且末点读数不再对应声明的样本轴。
+        判据与 `planner` 同源（`budget_exhausted` + `_budget_iters`），不写第二份口径。
+        """
+        budget = self._budget_iters()
+        if budget_exhausted(it, budget):
+            if not self.finished:
+                self.finished = True
+                self.finish_reason = f"iters={budget} 跑满（拦下预算外的 it{it}）"
+                log(
+                    f"[serve] {course}: 拦下预算外的 it{it}"
+                    f"（budget={budget}）——预采/队列在判满前排进来的一轮，不执行"
+                )
+            return []
         return pending_tasks(round_tasks(course, it), self.facts(course, it))
 
     def facts(self, course: str, it: int) -> RoundFacts:

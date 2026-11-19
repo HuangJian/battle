@@ -48,6 +48,7 @@ from typing import Any
 
 import common.runtime
 import remote.course_cache as course_cache
+from common.logutil import course_tag, tagged
 from common.protocol import (
     CLAIM_MODE_BACKUP,
     HEARTBEAT_SEC,
@@ -424,6 +425,14 @@ def run_one_round(
     （幂等重拉）。
     """
 
+    manifest = job.get("manifest") or {}
+    # ★2026-11-13（用户口径）：云端 GPU worker 一机多课，而 jid 是幂等键的哈希 ⇒ 只看 jid
+    # 分不出正在训练的是哪门课。**一个 job 的每一行日志**（claim / 准备完成 / PPO 心跳 /
+    # 失败回报）都带上课程名；`course_name` 缺席 = 空串，旧行逐字节不变（见 `course_tag`）。
+    # ⚠ 预取腿必须用**未包装**的那份：它下的是**下一份**活（可能是另一门课），带上本 job 的
+    #   课程名就是谎报归属（而这些行本来就自带 `prefetch <jid8>` 标签）。
+    pf_log = log
+    log = tagged(log, course_tag(manifest))
     ctx = _Round(
         base_url=base_url,
         token=token,
@@ -446,6 +455,7 @@ def run_one_round(
         uploader=uploader,
         run_job_fn=run_job_fn,
         log=log,
+        pf_log=pf_log,
     )
     ctx.start()
     return ctx.run()
@@ -477,6 +487,8 @@ class _Round:
     uploader: UploaderLike
     run_job_fn: Callable[..., dict]
     log: Callable[[str], None]
+    #: 预取腿的日志出口（**不带**本 job 的课程前缀：它下的是下一份活，可能属于另一门课）。
+    pf_log: Callable[[str], None]
     # 本轮运行期状态（start 装配、run 收尾）
     jid: str = ""
     job_it: int = 0
@@ -572,7 +584,7 @@ class _Round:
                         depth=self.prefetch_depth,
                         unpack_n=self.prefetch_unpack,
                         skip={self.jid},
-                        log=self.log,
+                        log=self.pf_log,
                     )
                 )
                 if not remote_ok:
@@ -589,7 +601,7 @@ class _Round:
                             "depth": self.prefetch_depth,
                             "unpack_n": self.prefetch_unpack,
                             "skip": {self.jid},
-                            "log": self.log,
+                            "log": self.pf_log,
                         },
                         daemon=True,
                     )

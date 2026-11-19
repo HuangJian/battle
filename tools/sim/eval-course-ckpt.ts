@@ -205,6 +205,8 @@ export interface CourseOnceSpec {
   /** 决策周期 K（plan/k5-rhythm.plan.md）：缺席/10 = 老行为；K5 臂终判必须显式传 5
    *  （训练/评估同节奏——否则拿 10 拍 hold 评一个按 5 拍训练的 policy）。 */
   decisionK?: number
+  /** Hybrid opening：True ⇒ 每局 eval 都套 OpeningController（部署口径）。缺席 = bare。 */
+  openingConnect?: boolean
 }
 
 export function buildSpec(o: {
@@ -222,6 +224,7 @@ export function buildSpec(o: {
   windowSec?: number
   decisionEvents?: boolean
   decisionK?: number
+  openingConnect?: boolean
 }): CourseOnceSpec {
   const spec: CourseOnceSpec = {
     course: o.course,
@@ -240,6 +243,7 @@ export function buildSpec(o: {
   if (o.decisionEvents) spec.decisionEvents = true
   // 决策周期 K：仅非默认值写进 spec（缺席/10 = 老行为，spec 逐字节不变）。
   if (o.decisionK !== undefined && o.decisionK !== 10) spec.decisionK = o.decisionK
+  if (o.openingConnect) spec.openingConnect = true
   return spec
 }
 
@@ -823,6 +827,8 @@ async function main(): Promise<void> {
     decisionEvents: flag('decision-events') || undefined,
     // 决策周期 K：显式开关才写 spec（缺席/10 = 老行为；K5 臂终判必须传 5，见 spec 注释）。
     decisionK,
+    // Hybrid opening：显式开关才开（bare 默认；hybrid 是部署口径）。
+    openingConnect: flag('opening-connect') || undefined,
   })
   process.stderr.write(
     `[eval-course-ckpt] 本机槽位 distLocal=${distLocal}（来源：${distLocalSource}）\n`,

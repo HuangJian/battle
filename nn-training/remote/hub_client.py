@@ -27,7 +27,7 @@ import shutil
 import time
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:  # 只在类型面（运行时由 wire_diet 分支内延迟 import）
     from remote.payload_slim import ShardSlim
@@ -793,9 +793,12 @@ def _publish_stage(spec: PublishSpec, facts: PublishFacts) -> PublishStaged:
     # 4) manifest 预建（payload_sha256 占位）→ 打包（payload 内不再带占位 manifest）
     extra_files: list[Path] = []
     tmp_extra_dir = job_root_p / ".extra_tmp"
+    from remote.replay_corpus import attach_converter, converter_sha
+
+    _is_replay = str(spec.corpus_fmt or "full") == "replay"
     # ⚠ 这个 mkdir 刻意**挪到守卫之后**（下方 4b）：守卫要求「拒发时不留任何痕迹」，
     # 而 `.extra_tmp` 也算痕迹（半份 job 目录比没有 job 更危险）。
-    m = {
+    m: dict[str, Any] = {
         "proto": 1,
         "runId": spec.run_id,
         "it": spec.it,
@@ -832,6 +835,15 @@ def _publish_stage(spec: PublishSpec, facts: PublishFacts) -> PublishStaged:
         "slim": bool(spec.slim),
         "data_fp": facts.fp,
         "payload_sha256": "",
+        # P2：语料格式 + 转换器契约进身份（full 省略 = 旧 job_id 逐字节不变）。
+        **(
+            {
+                "corpus_fmt": "replay",
+                "replay_converter_sha256": converter_sha(spec.replay_converter_path or ""),
+            }
+            if _is_replay
+            else {}
+        ),
     }
     # job 身份：幂等键的五个分量在上面那份字面量里就齐了（下面只补**非键**字段），
     # 所以刻意在这里算出来——守卫要在**任何写盘之前**用它。
@@ -856,6 +868,9 @@ def _publish_stage(spec: PublishSpec, facts: PublishFacts) -> PublishStaged:
             "处置：给其中一门课不同的课程文件（改注释也算），或换 runId 重启那条腿。"
         )
     tmp_extra_dir.mkdir(parents=True, exist_ok=True)
+    # trainer 预构建的转换器 bundle：随 payload 根下发（worker 只跑不建；full = no-op）。
+    if _is_replay:
+        attach_converter(extra_files, tmp_extra_dir, spec.replay_converter_path or "")
     if rollout_spec is not None:
         m["ts_code_sha256"] = str(spec.ts_code_sha256)
         m["rollout"] = rollout_spec

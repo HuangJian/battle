@@ -21,6 +21,7 @@ from trainer.queue_local import (
     QueueEdgeGate,
     abort_other_tags,
     drop_attempt,
+    join_targets,
     next_attempt_tag,
     note_cancel_target,
     pick_race_target,
@@ -350,6 +351,7 @@ def _execute(q: QueueState, claim: _Claim, nd: dict | None) -> _Exec:
                 dodge=getattr(q.args, "dodge", ""),
                 # R2 事件 rung：与课程 decision_events 同步（缺席 = 老行为）。
                 decision_events=bool(getattr(q.args, "decision_events", False)),
+                opening_connect=bool(getattr(q.args, "opening_connect", False)),
                 # 决策周期 K：与课程 decision_k 同步（缺席/10 = 老行为）。
                 decision_k=int(getattr(q.args, "decision_k", 10)),
                 on_key=partial(remember_task_key, cancel_target),
@@ -366,6 +368,8 @@ def _execute(q: QueueState, claim: _Claim, nd: dict | None) -> _Exec:
                 if "player_level" in _ov
                 else None,
                 course_fp=_cfp,
+                # P2：语料格式（仅 per-tick RL rollout；eval/BC 不走这条腿）。
+                corpus_fmt=str(getattr(q.args, "corpus_fmt", "full") or "full"),
                 # 竞速收尾洞修复（2026-09-06）：all_settled 后竞速副本必是
                 # 输家——fetch 内部轮询立即放弃，trainer 不再等慢节点把
                 # 注定丢弃的局跑完（实测拖住发布 4.5 分钟）。
@@ -653,7 +657,7 @@ def _settle_failure(
         q.pending.append(task)
         q.stats["retried"] += 1
         q.log(
-            f"[dist] s{task[0]}/seed{task[1]} failed ({err}) — requeued "
+            f"[dist] s{task[0]}/seed{task[1]} node={nd_id or 'local'} failed ({err}) — requeued "
             f"(attempt {attempt}/{MAX_TASK_ATTEMPTS}"
             + (
                 ", busy"
@@ -885,21 +889,21 @@ def run_queue(q: QueueState) -> None:
         # 2026-09-29（§43）：钳住后退出时刻 = deadline，与窗口语义逐字对齐。
         q.all_settled.wait(min(0.5, max(0.0, q.deadline - time.time())))
     halted = q.halt_event is not None and q.halt_event.is_set()
+    # 结算口径要读它（`missing` 的「池语义只算派过的」分支、halt_kind 的 quota/external）：
+    # 旧实现里 `halted` 是调度器循环的局部量，搬进 `QueueState` 后必须写回，否则恒 False。
+    q.halted = q.halted or halted
     tail_join_sec = resolve_tail_join_sec(q.policy, q.all_settled.is_set(), halted)
     join_until = time.time() + max(0.0, tail_join_sec)
-    seen_join: set[int] = set()
-    for t in list(q.threads) + list(q.extra_threads):
-        tid = id(t)
-        if tid in seen_join:
-            continue
-        seen_join.add(tid)
+    for t in join_targets(q.threads, q.extra_threads):
         if t.ident is None and not t.is_alive():
             continue  # 尚未 start（或已从列表里被复用）——join 会 RuntimeError
         try:
             t.join(timeout=max(0.0, join_until - time.time()))
         except RuntimeError:
             pass
-    stuck = [t.name for t in list(q.threads) + list(q.extra_threads) if t.is_alive()]
+    # 两张表**有交集**（节点 worker 同时进两表、rescan 只进 extra_threads）：
+    # 去重前相加会把在飞 worker 报成近 2×（现场 89，实际约一半）。
+    stuck = [t.name for t in join_targets(q.threads, q.extra_threads) if t.is_alive()]
     if stuck:
         q.log(
             f"[dist] tail-join grace {tail_join_sec:.0f}s 到期：{len(stuck)} 个 worker "

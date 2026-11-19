@@ -43,15 +43,9 @@ import {
   RESPAWN_SHIELD_MS,
 } from '../constants'
 
-// Deliberate hidden-state exemption (refactor.trae.md §4.3): the module-level
-// id counter survives World resets so restored snapshots never reissue ids that
-// are still live in replay/undo history. Rationale recorded at types.ts
-// (WorldSnapshot id field doc) — this does NOT contradict the "no hidden state"
-// banner below, which is about gameplay state.
-let nextId = 1
-export function genId(): number {
-  return nextId++
-}
+// Entity ids live in ./ids (process-global allocator + cross-process reserve).
+// Re-exported here because every existing caller imports `genId` from World.
+export { genId } from './ids'
 
 /** Spawn queue entry */
 export interface SpawnEntry {
@@ -266,6 +260,24 @@ export class World {
   // 栅栏道具 (fence): the frame at which the temporary steel ring around the
   // base reverts to brick. undefined = no active fence. Snapshot-safe.
   fenceExpireFrame?: number
+  /**
+   * §2026-11-18-fence-ownership 栅栏归属：本道具**自己铺下**的环格（`row * GRID + col`）。
+   *
+   * `updateFence` 到期时只回滚这个集合，绝不回滚「环上所有 steel」——否则
+   * 环本来就是永久钢的关卡（`classic35-safe-base`）会被拾一次 fence 就永久
+   * 降级成砖，基地此后可被普通敌弹打穿（`reports/safe-base-fence-ring-20261118.md`：
+   * it230@3 命 700 局里 15.6% 的局中招，环破局基地被毁 52.3%，全池胜率被吃掉 8.1pp）。
+   *
+   * **不入 tickHash**：它是「谁铺的」这一创作侧元数据，任何分歧都会在到期那一拍
+   * 体现为地形网格分歧（地形已在 hash 内），加进来只会让全部历史 hash 失效而无检测增益。
+   * 快照字段（rewind 到 fence 生效中途必须回滚同一批格）。
+   */
+  fenceCells: number[] = []
+  /**
+   * 旧快照兼容（只在 `restoreWorld` 里派生，不入快照）：老存档没有 `fenceCells`，
+   * 只能用老语义（到期回滚环上所有 steel）。见 `WorldSerializer.restoreWorld`。
+   */
+  fenceRevertAll = false
 
   // --- obs v3 sN4 / reward stuckTicks（dsf A4 同源，判定 = stuck-detect.ts）---
   /** 连续停滞 tick 数：中心 cell 不变且本 tick 未命中敌车 ⇒ +1，否则清零。
@@ -357,6 +369,8 @@ export class World {
     this.frenzyStock = 0
     this.sacrificeStock = 0
     this.fenceExpireFrame = undefined
+    this.fenceCells = []
+    this.fenceRevertAll = false
     this.empTimer = 0
     this.rewindStock = 0
     this.rewindPending = false
@@ -501,6 +515,8 @@ export class World {
     this.pickupWindowTimer = 0
     this.pickupWindowEntered = false
     this.fenceExpireFrame = undefined // fence is stage-scoped; never carries across stages
+    this.fenceCells = [] // §2026-11-18-fence-ownership: ownership is stage-scoped too
+    this.fenceRevertAll = false
 
     // Build spawn queue. The tier roll is intentionally NOT performed here:
     // it happens at spawn time in `Simulation.updateSpawning` so the RNG cost
@@ -570,6 +586,8 @@ export class World {
     this.events.clear()
     this.stageIndex = index
     this.fenceExpireFrame = undefined
+    this.fenceCells = []
+    this.fenceRevertAll = false
   }
 
   /**
@@ -853,6 +871,10 @@ export class World {
     // V8 folds into a tight compare chain; inserting an extra branch to
     // short-circuit the common case costs more than the compares it saves.
     // Do not "optimize" this ordering again.
+    //
+    // (perf 2026-11-16, REJECTED) 把逐格比较换成本位图（按 `revision` 失效）实测快 1.5%，
+    // 但测试/工具会直接写 `world.tileMap.grid[r][c]` 而不 bump revision ⇒ 陈旧位图，
+    // 44 个 God-AI 用例红。**只要 `grid` 还能被直接改写，就不要给本函数加缓存。**
     for (let r = r0; r <= r1; r++) {
       const row = grid[r]
       for (let c = c0; c <= c1; c++) {

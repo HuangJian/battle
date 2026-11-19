@@ -213,6 +213,63 @@ def _is_writable_dir(path: Path) -> bool:
     return True
 
 
+#: `/proc/mounts` 把挂载点里的空格写成 `\040`。用 chr(92) 拼出来，避免源码转义被吃
+#: （直接写字面量容易踩：单反斜杠的 `'040'` 在 Python 里是空格）。
+_OCTAL_ESC_SPACE = chr(92) + '040'
+
+
+def on_tmpfs(path: Path, *, mounts_text: str | None = None, name: str | None = None) -> bool:
+    """`path` 是否落在 **tmpfs** 上（Linux 读 `/proc/mounts`；非 posix 恒 False）。
+
+    为什么需要这个判定（2026-11-16，用户提问引出）：重建出来的 `obs.npy` 是**训练期热数据**
+    （35×20 实测 3.97 GB）。落 tmpfs 时这些页**不可回收**，等于从 torch 的内存预算里硬扣；
+    落普通盘则是 page cache，压力下内核随时能还回来。本模块的定位亦然：tmpfs 只该给
+    rollout/eval 那种「写-读-丢」的短命 scratch，不该长期钉住体积巨大的训练语料。
+
+    取**最长匹配挂载点**（`/tmp` 是 xfs、只有 `/run` 是 tmpfs 时不能误判）；读不到挂载表不抛。
+    """
+    if (name or os.name) != 'posix':
+        return False
+    try:
+        raw = Path(path)
+        targets = [raw]
+        resolved = raw.resolve()
+        if resolved != raw:
+            # 符号链接（macOS 的 /tmp → /private/tmp）按真实路径判；纯字符串路径 resolve 会改写
+            # 盘符（跨平台测试），所以两种形态都试。
+            targets.append(resolved)
+        if mounts_text is None:
+            mounts_text = Path('/proc/mounts').read_text(encoding='utf-8')
+    except OSError:
+        return False
+    best, best_type = '', ''
+    for line in mounts_text.splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        mp = parts[1].replace(_OCTAL_ESC_SPACE, ' ')
+        root = Path(mp)
+        if any(t == root or root in t.parents for t in targets) and len(mp) > len(best):
+            best, best_type = mp, parts[2]
+    return best_type == 'tmpfs'
+
+
+def warn_if_tmpfs(work_dir: str | Path, *, say=lambda _m: None) -> bool:
+    """`work_dir` 落在 tmpfs 上就喊一行（**不改落点**，落点归调用方）。返回是否命中。
+
+    `--out`/`work_dir` 下面住着 kind=ppo 的 payload 与重建的 `obs.npy`（3.97 GB / 35×20）。
+    生产路径（`notebook_runtime`）缺省 `/tmp/remote-worker` = 磁盘，是对的；但**相对缺省会锚到
+    仓库根**，仓库若放在 `/dev/shm` 下（本机与云机实测都这么干过）就会整批落进 tmpfs。
+    """
+    if not on_tmpfs(Path(work_dir)):
+        return False
+    say(
+        f'WARN: work_dir 落在 tmpfs（{work_dir}）—— payload 与重建的 obs.npy 会钉住 RAM'
+        '（tmpfs 页不可回收，与 torch 抢内存预算）；训练机型请显式指到本地盘（如 /tmp/remote-worker）'
+    )
+    return True
+
+
 def resolve_scratch_root(
     job_root: Path,
     *,

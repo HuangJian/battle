@@ -62,6 +62,33 @@ cell 文本与 `remote/rollout_node.py` 的源码 —— 「cell 能不能 `comp
 同一批新用例里能改成行为判据的全改了（errno/首行/阈值/队列收敛/落盘集合/镜像文件的**计数**均走
 等值或属性判据），所以这一格是 3 而不是 20（首轮实测 +20 已压到 +3）。
 
+**2026-11-17 抬 FORM 一格的账**（探活失败归因：hub 的 422 读面 + 云机转述；形态 1493 → **1498**
+= +5，SOURCE 未动 = 1121）：这 5 条全在**操作员现场读数行**上 —— 真机上「HTTP 400 / 连接超时 /
+authKey 不符」被压成一句「无应答，或 authKey 不符」，现场只能另起 curl 猜（`6e4e42cf` 的故障）：
+
+  · `tests/hub/test_node_register.py` **4**：`节点探活失败` 那一行必须同时带 URL、端点、原因与耗时
+    （`ms）——回 422，不写盘`）。同一用例的机读面已按结构判据钉住（`probe["url"/"path"/"reason"/"ms"]`、
+    `last[2] == 422`、`error.startswith("节点 ping 不通")`），文本只剩「这行有没有把归因写出来」。
+  · `tests/remote/test_push_register.py` **1**：老 hub 的 422 没有 `probe` 键 ⇒ 云机日志必须照旧转述
+    原始 detail（不静默、不编原因）。`hint == ""`、`status == 422` 与 `ok is False` 已另按结构判据钉住。
+
+⚠ 同一批里能改成结构判据的都改了（节点探测的返回/落盘/422 状态全部读字段与返回值）——这一格是
+**+5** 而不是整段测试的 +20；留下的都是「日志行本身就是交付物」的 A 类（模块头的分类）。
+
+**2026-11-18 抬 FORM 一格的账**（relay 连不上 hub 的现场读面；形态 1498 → **1502** = +4，
+SOURCE 未动 = 1121）：DSW 现场 6 个线程各卡 35s，日志只有 `relay 轮询失败（URLError）` ——
+`URLError` 一个词同时意味着 DNS 失败/被拒/TLS 失败/代理吊死/地址黑洞，而地址与耗时一个字没打，
+排查只能靠猜（正是这次事故本身）。`remote/rollout_relay.probe_hub` 因此多了一条预检行：
+
+  · `tests/remote/test_rollout_relay.py` **2**：① 预检判词必须点出该改哪个开关（`hub_url`）；
+    ② 放弃时那两行必须带 `hub=<host:port>` 且**不再**把人指向 cloudflared（relay 模式没有那个进程）。
+  · `tests/remote/test_rollout_node.py` **1**：relay 模式的启动横幅同理（空 URL 时不许说
+    「看 cloudflared 日志尾部」）。第三条在 `test_rollout_relay.py` 里已并进同一 assert。
+
+⚠ 这一格能压到 +4 的原因和上一格一样：预检新增了**结构化出口** `facts = {host, port, dns, routes}`，
+DNS/逐路由结论（`ok` / `http-401` / `fail`）全部走 `facts` 断言，`_err_text` 的三种死因走
+`.startswith(...)` 而非子串；文本只剩「这行有没有把现场信息写出来」。
+
 **2026-10-14 抬 SOURCE 一格的账**（`plan/wire-diet.plan.md` §12 切片 2；+1，FORM 未动）：
 R3/M4 把 opt 回传改成 **delta 容器**，而「哪个形态位 + 哪几个调用**同处产物段**」是这一刀的
 **接口面**：`run_training_core` 的产物段必须同时调 `opt_fmt_of`（形态位唯一口径）· `pack_opt_delta`
@@ -416,7 +443,11 @@ ROOT = Path(__file__).resolve().parents[1]
 #:   全部换成真 `assert`（`python.refactor.md` §P0-8）。这些文本形态判据**原先就存在**，只是
 #:   藏在 `check()` 的调用实参里、扫描器看不见（`check("x" in text, …)` 不是 Assert 节点）；
 #:   去掉包装后第一次被计入。不是新判据，也没有放宽任何断言 —— 逐条仍是原来那句。
-BASELINE_FORM = 1525
+#: 2026-11-18 再抬 **+4**（relay 通道连不上 hub 的三处操作员读面 —— `probe_hub` 的机读面已按
+#:   `facts["host"/"dns"/"routes"]` 钉住；文本只补「这行有没有把现场写出来」）。
+#: 2026-11-19 合入上游 goal-nn（74 提交）后实测 1534（+9：上游的 relay / replay / eval
+#: 读面用例；其中 4 条已在前一行记过账，其余同上口径 —— 文本本身是交付物）。
+BASELINE_FORM = 1534
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
 #: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092；
 #: 2026-10-18 course-metrics 备份库用例抬到 **1096**（+4，实测值；理由见模块头末段）；

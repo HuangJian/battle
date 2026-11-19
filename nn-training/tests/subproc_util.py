@@ -30,13 +30,17 @@ from typing import Any, TypeVar
 #: 不硬编码在调用点：`tests/test_subproc_util.py` 拿真守卫把它钉死。
 PORT_TAKEN_MARKER = "已被占用——拒绝启动"
 
-#: 端口被抢的**两张脸**（判据函数 `port_race_seen()` 的唯一事实源）：
+#: 端口不可用的**三张脸**（判据函数 `port_race_seen()` 的唯一事实源）：
 #:   ① 守卫 probe 时已被占 ⇒ 子进程带 `PORT_TAKEN_MARKER` 干净拒启；
 #:   ② 守卫 probe **之后**才被抢 ⇒ bind 抛**裸** `OSError: [Errno 98] Address already in use`
 #:      （2026-10-06 实测：`socketserver.server_bind` 里冒出来，输出**不含**守卫文案 ⇒ 只认 ①
 #:      的旧版把它读成「非端口冲突」当场硬失败；Linux = errno 98 / EADDRINUSE，
-#:      Windows = WinError 10048 / WSAEADDRINUSE）。
-#: 两种都是「换端口重试」的理由；非端口死法（真 bug）不许落进来。
+#:      Windows = WinError 10048 / WSAEADDRINUSE）；
+#:   ③ Windows 的 `WinError 10013`（WSAEACCES）：端口被**别处以独占方式持有**、或落在
+#:      Hyper-V/WinNAT 的保留段 ⇒ bind 直接权限拒绝（2026-11-19 全量门禁现场：三启里的胜者
+#:      拿到锁、探端口时空闲、bind 时抛 10013 ⇒ 旧判据把它读成「存活的那个必须真的在服务」
+#:      的真 bug，红在假象上）。它和 ①② 是同一件事：**这个端口此刻不可 bind**，换端口即可。
+#: 三种都是「换端口重试」的理由；非端口死法（真 bug）不许落进来。
 PORT_RACE_PATTERNS = (
     PORT_TAKEN_MARKER,
     "Address already in use",
@@ -44,6 +48,8 @@ PORT_RACE_PATTERNS = (
     "[Errno 98]",
     "WinError 10048",
     "WSAEADDRINUSE",
+    "WinError 10013",
+    "WSAEACCES",
 )
 
 
@@ -52,7 +58,8 @@ def port_race_seen(lines: list[str]) -> bool:
 
     抽成函数而不是让两个调用点各写一遍 `any(...)`：判据只该有一处（§3.1 单份性），
     而 `spawn_bound_port()`（单进程）与 `retry_on_port_stolen()` 的场景（多进程抢同一端口）
-    必须给同一个答案。
+    必须给同一个答案。三张脸（守卫拒启 / 裸 EADDRINUSE / Windows 10013 权限拒绝）都是
+    「这个端口此刻不可用」，见 `PORT_RACE_PATTERNS`。
     """
     return any(p in ln for p in PORT_RACE_PATTERNS for ln in lines)
 
@@ -123,7 +130,7 @@ def retry_on_port_stolen(
     给「**多个**进程抢同一个端口」这类无法用 `spawn_bound_port()` 表达的场景（典型：三启
     同时启动、期望恰好一个成为实例）：这类用例必须自己选端口并交给 N 个子进程，选端口的
     TOCTOU 窗口照样存在。判据由场景自己给：全灭**且**输出里出现过端口竞争痕迹
-    （`port_race_seen()`——守卫文案或裸 `EADDRINUSE`，两张脸都算）⇒ 抛 `PortStolenError`
+    （`port_race_seen()`——守卫文案 / 裸 `EADDRINUSE` / Windows 10013，三张脸都算）⇒ 抛 `PortStolenError`
     （端口被外人抢走，不是被测行为不对）；其它失败照旧红。
 
     调用方仍需自己收尸：`scenario` 里已死的进程重跑时会再被 `_kill` 一次（无害）。

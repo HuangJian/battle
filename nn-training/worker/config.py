@@ -86,6 +86,12 @@ from biz.course_spec import (
     STAGE_JSON_MAX_BYTES as STAGE_JSON_MAX_BYTES,
 )
 from biz.course_spec import (
+    AutonomousCloudOverridesBlock as AutonomousCloudOverridesBlock,
+)
+from biz.course_spec import (
+    CloudSamplingProfile as CloudSamplingProfile,
+)
+from biz.course_spec import (
     CourseConfig as CourseConfig,
 )
 from biz.course_spec import (
@@ -102,6 +108,9 @@ from biz.course_spec import (
 )
 from biz.course_spec import (
     GreedyQuotaBlock as GreedyQuotaBlock,
+)
+from biz.course_spec import (
+    InferenceRulesBlock as InferenceRulesBlock,
 )
 from biz.course_spec import (
     KickstartBurnBlock as KickstartBurnBlock,
@@ -413,6 +422,13 @@ def apply_course(args, course: CourseConfig) -> None:
         args.lives_override = course.player.lives
     if course.player.level is not None:
         args.player_level = course.player.level
+    # 评估/部署链的推理侧规则（默认全关）：只有 eval 面（课程 judge / in-loop
+    # eval / replay 导出）读 `args.skip_steel_only_shots`；训练 rollout（worker.cmd）
+    # 刻意不读（源码门禁用例钉住）。
+    args.skip_steel_only_shots = bool(course.inference_rules.skip_steel_only_shots)
+    args.break_bricks_on_path = bool(course.inference_rules.break_bricks_on_path)
+    args.suppress_useless_fire = bool(course.inference_rules.suppress_useless_fire)
+    args.suppress_lead_miss_fire = bool(course.inference_rules.suppress_lead_miss_fire)
     log(
         f"[course] {course.name}: mode={course.mode} stages={course.stages_range()} "
         f"iters={course.iters} out={course.out} overrides={len(overrides)} 键"

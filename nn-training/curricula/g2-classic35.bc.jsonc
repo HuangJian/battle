@@ -1,0 +1,156 @@
+// BC 课程 g2-classic35 —— 35 关 God 迷宫语料 + 从零蒸馏（2026-11-12）
+//
+// 状态：**已结课（2026-11-13，80/80；ep80 选为 RL 起点）**——见文件尾「结课报告」。
+//   采集：1400 局 / 877,866 样本 / 9.8 GB / 315.6s。
+// 依据（用户 23:21）：bc-collect-v1 + bc-v6-train 的失败，一个重要原因是
+//   `bc-v6-train.init_from = z7-maze.it0`（= y28-steady.it300 的迁移），把 x/y 系
+//   「无探索项 / 站着打」的旧策略带进迷宫关。本课**从随机权重起**，直接用 God 在
+//   35 关迷宫上的语料蒸馏，不继承任何旧策略。
+//
+// ══ 0. 与 bc-v6-train 的关键差别 ═══════════════════════════════════════════
+//   ① `init_from: ""`（随机）——bc-v6 是 z7-maze/y28 迁移；
+//   ② 语料是 **argmax 标签**（`export-godai-labels.ts` 的 `actionFromFrame`），
+//      bc-collect-v1 是 `sampleCat` 采样标签（move 标签熵 1.3777 ≈ ln4，策略高熵）；
+//   ③ `mirror_p 0.5` **真生效**（v6 的 `_MOVE_FLIP_V6` 已在 `dataset.py` 启用；
+//      bc-v6 时被强制 0）；
+//   ④ `weight_exponent 0.3`（g1c 标定；bc-v6 默认 1.0，fire 预测 23.6% vs 标签 9.9%）；
+//   ⑤ 推理默认 joint argmax（`policy-input.ts` 已改）——bc-v6 权重零训练 +13pp 的杠杆。
+//
+// ══ 1. 语料 ═══════════════════════════════════════════════════════════════
+//   `tmp/g2-classic35-corpus`（fixed，随 `kind=bc` payload 上传云机）：
+//     bun tools/sim/export-godai-labels.ts --stages 1-35 \
+//       --seeds 2000000001-2000000020 --difficulty hard --max-ticks 30000 \
+//       --lives-override 3 --player-level 0 --wins 0 --near-miss-times 0 \
+//       --god-hold-k 10 --action-v6
+//   35 关 × 20 seed = 700 局；3 命 / 0 星 / 20 敌 / 30000 拍；v6 三头 + extra(57)。
+//   追加一轮（用户 23:31「每关再加 20 seeds」）：`--seeds 2000000021-2000000040`
+//   写同一目录（seed 不重叠）。
+//   实测：**1400 shards / 877,866 样本 / 9.8 GB / 315.6s**；标签 a_move up 36.8 /
+//   down 23.4 / left 20.2 / right 19.6、a_fire 8.8%、**a_hold turn-only 14.1%**
+//   （4s2e 11.2%；迷宫转向多，但比首轮抽样的 23.4% 均衡）。
+//   ⚠ 评估链的 level `classic35-safe-base` 默认 36000 拍；本课语料按用户口径
+//   **30000** 拍采，评估仍用 level 默认（两者差 6000 拍，报告里标注）。
+//
+// ══ 2. 训练 ═══════════════════════════════════════════════════════════════
+//   80 epoch / batch 256 / lr 3e-3 / patience 20 / ckpt 10；`value_coef 0`；
+//   `action_v6 + policy_extra`（与部署链同构）。80 epoch 在 50–100 万帧上约 2.7–4h。
+//
+// ══ 3. 判据 ═══════════════════════════════════════════════════════════════
+//   行为门沿用 bc-v6：win / 拾取 / cells / 长停段；**新增冻死率**（bc-v6 65/200 局
+//   开局首停 ≥50、11 关 0% 冻死）。判决面板用 held-out seed（不用训练 seed 2000000001+）。
+//   教师上限 God 35 关 K=1 ~95.9% / inner-K=10 ~90% ⇒ BC 目标 ≤90%，不按 100%。
+// ══════════════════════════════════════════════════════════════════════════
+{
+  "version": 1,
+  "name": "g2-classic35",
+  "kind": "bc",
+  "level": "classic35-safe-base",
+  "max_ticks": 30000,
+  "action_v6": true,
+
+  "corpus": {
+    "source": "fixed",
+    "fixed_dir": "D:/github/battle2/tmp/g2-classic35-corpus",
+    "games_per_stage": 0,
+    "wins_only": false,
+    "near_miss_times": 0,
+    "seed_rotate": 0,
+    "outcome_policy": "all",
+  },
+
+  "train": {
+    "arch": "student",
+    "epochs": 80,
+    "patience": 20,
+    "batch": 256,
+    "lr": 0.003,
+    "mirror_p": 0.5,
+    "val_split": 0.1,
+    "value_coef": 0.0,
+    "policy_coef": 1.0,
+    "train_heads": "all",
+    "seed": 1234,
+    "ckpt_every": 10,
+    "fire_pos_weight": "auto",
+    "weight_exponent": 0.3,
+    "policy_extra": true,
+    "init_from": "",
+  },
+
+  "eval": {
+    "every_epochs": 5,
+    "games_per_stage": 20,
+    "levels": ["classic35-safe-base"],
+  },
+
+  "iters": 1,
+  "auto_stop": true,
+  "workers": 8,
+  "out": "nn-training/weights/g2-classic35/weights.json",
+  "traj": "tmp/g2-classic35",
+  "data_dir": "tmp/g2-classic35/bc-data",
+  "backup_dir": "nn-training/weights/g2-classic35",
+  "backup_prefix": "g2-classic35",
+}
+
+// ── 结课报告（2026-11-13，80/80 epochs）──────────────────────────────────────
+// ① 训练账
+//   80/80 跑满（11-13 09:29–13:09；隔夜 job 被租约回收，见 ⑥）。
+//   train_loss 1.2133→0.8737；val_loss 0.9963→0.8974；move_acc .7458→.7756；
+//   fire_acc .9089→.9144；hold_acc .9524→.9603；lr 3e-3 衰减。
+//   对比 bc-v6：move_acc 0.588 → 本课 0.776（argmax 标签 + 从零起的效果）。
+//
+// ② 周期 eval（每 5 epoch，35 关 × 20 seed = 700 局/点；win / pickup）：
+//   ep5 18.3/63.6 · ep10 23.6/61.2 · ep15 12.9/65.4 · ep20 26.1/64.3 ·
+//   ep25 21.7/66.9 · ep30 17.4/67.0 · ep35 23.3/69.6 · ep40 19.3/65.7 ·
+//   ep45 26.7/72.9 · ep50 26.0/74.4 · ep55 21.7/74.0 · ep60 27.4/74.0 ·
+//   ep65 26.3/74.8 · ep70 27.4/74.6 · ep75 27.3/74.6 · **ep80 28.6/75.2**。
+//   cells 中位 99.5→135.1；timeout 7.7%→3.9%。ep45 有一次行为跃升
+//   （cells 110→135、pickup 65.7→72.9、timeout 6.7→3.9），之后平台。
+//
+// ③ 八档离线横评（held-out 2000001001..020，35×20=700 局/档，joint 默认开；集群 4 节点，5600 局全远端）：
+//   ckpt   win%   拾取   kills  go/to   cells  stop%  冻死%  长停%
+//   ep10  26.57  69.8  12.47  474/40  121   16.1   2.9   22.0
+//   ep20  28.43  72.6  13.31  452/49  124   15.9   2.9   21.0
+//   ep30  29.43  75.8  13.14  454/40  128   12.3   2.9   19.9
+//   ep40  27.00  73.7  12.82  473/38  135   17.3   2.9   23.1
+//   ep50  26.71  74.8  12.81  492/21  134   11.3   2.9   14.0
+//   ep60  27.00  74.5  13.18  485/26  135   12.7   2.9   16.7
+//   ep70  26.14  74.5  12.90  494/23  132   11.9   2.9   15.6
+//   ep80  28.43  74.4  13.14  471/30  134   11.5   2.9   14.9
+//   **八档在行为上不可分辨**：ep30 对其余 7 档配对 McNemar p=0.148–0.714；
+//   训练 30 epoch 后没有可测收益（与 bc-v6「后 62 epoch 不可分辨」同型）。
+//
+// ④ 行为门 vs bc-v6（不可直接相减：起点/标签/面板/局数全不同）
+//   冻死率 2.9%（20/700） vs bc-v6 32.5%（65/200）；
+//   长停段 14.9% vs 80%；cells 134 vs 118；
+//   win 28.4–28.6% vs 53.85%（bc-v6 从 y28 迁移 + 采样标签 + 1950 局旧面板）。
+//   判词：**从零 + argmax + mirror + w_exp 0.3 把「开局冻死」治好了**；
+//   但胜率仍只有 28–29%，离 God 35 关 90–96% 很远，训练轮数不是瓶颈。
+//
+// ⑤ 选型与后继
+//   ep30 数值最高（29.43/75.8）；ep80 行为最稳（stop 11.5 / 长停 14.9 / cells 134，
+//   与 ep30 的 win 差 1pp、p=0.70）。**用户 2026-11-13 拍板：ep80 进 RL。**
+//   后继：RL 起点 = ep80；推理规则按 `plan/nn-input-inference-rules.plan.md` v3.1
+//   先做 P-1b 测量（A3 剂量 + C 族/走位族暴露率），再决定是否写规则。
+//
+// ⑥ 交付与备份
+//   `nn-training/weights/g2-classic35/`（2026-11-13 20:12 备份；`.gitignore` 第 36 行
+//   `nn-training/weights/**/*.json` ⇒ 不入版本库）：
+//     `weights.json`（= ep80，sha256 `0c2713b5…`）
+//     `g2-classic35.ep{10,20,30,40,50,60,70,80}.<原快照时间戳>.json`（各 398,128 B，
+//       sha256 互不相同；时间戳取自 epoch-weights 源文件 mtime，09:17–13:03）
+//   来源：`tmp/g2-classic35/remote-jobs/230f0ed1fb418205/epoch-weights/ep10..80.json`
+//   （gzip+base64 快照）；解包后标准权重（`tmp/g2-ckpts/ep*.json` 即此产物）。
+//   ep80 wver `fb380c01…`。
+//   ⚠ 账本只有 `job_result_accepted`、没有落盘事件；本次备份是**人工从 epoch 快照恢复**，
+//   不是训练栈自动写回。下次开课要查 `out` 写回为什么没发生。
+//
+// ⑦ 事故与口径
+//   23:45 发布 job → 05:02 / 05:17 / 05:32 三次 `lease-orphan-reaped`（云机租约）
+//   → 08:41 `bc_round_job_missing` → 08:45 取消旧 job 重发 → 09:29 才真正开跑；
+//   隔夜损失约 9h。`bc_round_job_missing` 是重启告警，不是训练丢 epoch。
+//   语料 30000 拍；评估 level 默认 36000 拍（差 6000，禁止与别的面板相减）。
+//   周期 eval panel seed0=1（1..20），横评 2000001001..020；两者都与训练 seed
+//   2000000001..040 不重叠。joint argmax 默认开（commit `917ebc7c`）。
+// ──────────────────────────────────────────────────────────────────────────

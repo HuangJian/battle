@@ -64,7 +64,17 @@ const TERRAIN_CHAR: Record<string, string> = {
  * remap ids identically.
  */
 class CanonBuilder {
-  private parts: string[] = []
+  /**
+   * **增量 FNV**（不是先拼串再 `fnv1a`）。每次 hash 要拼 ~700 个字段：旧形态先建
+   * `parts[]`（`join('|')`）再整串 FNV，2026-11-16 profile 里 `push`+`join`+`fnv1a` 占了
+   * hash 的全部成本，且大字符串是 rope —— 首次 `charCodeAt` 还要先拍平一次。
+   *
+   * 这里逐字段、逐字符直接推进同一个 FNV 状态：字段间插 `|`、无尾分隔符 ——
+   * 与 `fnv1a(parts.join('|'))` **逐位等价**（字节序与乘法次数完全一致），
+   * 省掉整串构造与拍平。
+   */
+  private h = FNV_OFFSET
+  private started = false
   private remap = new Map<number, number>()
   private next = 1
 
@@ -81,12 +91,101 @@ class CanonBuilder {
 
   /** Append scalars in canonical order (undefined/null → empty string). */
   push(...vals: Array<string | number | boolean | null | undefined>): void {
-    for (const v of vals) this.parts.push(v === null || v === undefined ? '' : String(v))
+    for (let i = 0; i < vals.length; i++) {
+      // 分隔符直接推进（'|' = 124）：省掉每字段一次单字符 `feed` 调用。
+      if (this.started) this.feedCode(124)
+      const v = vals[i]
+      if (v !== null && v !== undefined) {
+        // 数字走整数快路径；字符串就地推进（每 hash ~700 字段，省一次函数调用/字段）。
+        if (typeof v === 'number') this.feedNum(v)
+        else if (typeof v === 'string') {
+          let h = this.h
+          for (let k = 0; k < v.length; k++) {
+            h = Math.imul(h ^ v.charCodeAt(k), FNV_PRIME) >>> 0
+          }
+          this.h = h
+        } else this.feed(v === true ? 'true' : 'false')
+      }
+      this.started = true
+    }
+  }
+
+  /**
+   * 数字直接推进 FNV（整数快路径）。
+   *
+   * `String(v)` 是 `push` 自耗的大头（本机 profile 4.1%）。整数（|v| ≤ 2^31-1）
+   * 逐位算字符码写入，与 `String(v)` 的十进制表示**逐字节相同**（含 `-0` → "0"）；
+   * 浮点与大整数（rng state、带小数的坐标）仍走 `String`，格式完全一致。
+   */
+  private feedNum(v: number): void {
+    if (!Number.isInteger(v) || v > 2147483647 || v < -2147483647) {
+      this.feed(String(v))
+      return
+    }
+    if (v < 0) {
+      this.feedCode(45) // '-'
+      v = -v
+    }
+    if (v === 0) {
+      this.feedCode(48) // '0'（-0 也落在这里）
+      return
+    }
+    let mag = 1
+    while (v >= mag * 10) mag *= 10
+    for (; mag >= 1; mag /= 10) {
+      this.feedCode(48 + (((v / mag) | 0) % 10))
+    }
+  }
+
+  /** 单字符推进（与 `feed(String.fromCharCode(code))` 逐位等价）。 */
+  private feedCode(code: number): void {
+    this.h = Math.imul(this.h ^ code, FNV_PRIME) >>> 0
+  }
+
+  /** FNV-1a 推进（与 `fnv1a` 同一算式：`h ^= code; h = imul(h, prime) >>> 0`）。 */
+  private feed(s: string): void {
+    let h = this.h
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i)
+      h = Math.imul(h, FNV_PRIME) >>> 0
+    }
+    this.h = h
   }
 
   build(): string {
-    return this.parts.join('|')
+    return this.h.toString(16).padStart(8, '0')
   }
+}
+
+/**
+ * 地形文本（676 字符）的纯 memo，按 `TileMap.revision` 失效。
+ *
+ * 为什么要它：地形串每 100 tick 的 tickHash 都要重拼一遍，而地形**绝大多数时候没变** ——
+ * 本机 profile 里 `worldTickHash` 自身 14.6 µs/hash 几乎全是这 676 次字符串拼接。
+ *
+ * 为什么不算 §2.2 的隐藏状态：它是 `(tileMap, revision) → string` 的**纯函数缓存**，
+ * 不参与任何玩法判定；revision 覆盖 `loadStage`/`set`/`destroy`/`destroyAllBaseCells`
+ * 与快照还原（`TileMap.ts` 的 §127 契约），因此命中与否的返回值逐字节相同。
+ */
+const TERRAIN_TEXT_CACHE = new WeakMap<object, { revision: number; text: string }>()
+
+function terrainText(map: {
+  revision: number
+  grid: ReadonlyArray<ReadonlyArray<string>>
+}): string {
+  const hit = TERRAIN_TEXT_CACHE.get(map)
+  if (hit !== undefined && hit.revision === map.revision) return hit.text
+  const grid = map.grid
+  let text = ''
+  for (let r = 0; r < GRID; r++) {
+    const row = grid[r]
+    for (let c = 0; c < GRID; c++) {
+      const t = row[c]
+      text += TERRAIN_CHAR[t] ?? t
+    }
+  }
+  TERRAIN_TEXT_CACHE.set(map, { revision: map.revision, text })
+  return text
 }
 
 /** All gameplay-relevant scalar fields of a tank (types.ts Tank + AIState). */
@@ -222,15 +321,7 @@ export function worldTickHash(world: World): string {
   )
 
   // Tile grid — full 26×26 grid, one char per sub-block (676 chars)
-  let grid = ''
-  for (let r = 0; r < GRID; r++) {
-    const row = world.tileMap.grid[r]
-    for (let c = 0; c < GRID; c++) {
-      const t = row[c]
-      grid += TERRAIN_CHAR[t] ?? t
-    }
-  }
-  b.push('G', grid)
+  b.push('G', terrainText(world.tileMap))
 
   // Entities — deterministic traversal order (see class doc)
   if (world.player) pushTank(b, world.player)
@@ -240,5 +331,6 @@ export function worldTickHash(world: World): string {
   for (const bl of world.bullets) pushBullet(b, bl)
   for (const pu of world.powerUps) pushPowerUp(b, pu)
 
-  return fnv1a(b.build())
+  // `build()` 已经是 FNV-1a 摘要（增量推进），**不要**再套一层 `fnv1a`。
+  return b.build()
 }

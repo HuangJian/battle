@@ -77,7 +77,7 @@
   "tests/trainer/test_loop_transport_split.py": 2,
   "tests/trainer/test_offline_leg_retired.py": 2,
   "tests/trainer/test_ppo_watchdog.py": 1,
-  "tests/trainer/test_rollout_dispatch_resilience.py": 1,
+  "tests/trainer/test_rollout_dispatch_resilience.py": 2,
   "tests/trainer/test_serve_aborted_revival.py": 1,
   "tests/trainer/test_serve_bc.py": 4,
   "tests/trainer/test_stream_collect_end.py": 2,
@@ -89,5 +89,12 @@
   "tests/worker/test_rl_resume.py": 1,
   "tests/worker/test_serve_course_overrides.py": 1,
   "tests/worker/test_sibling_reuse.py": 1,
-  "tests/worker/test_to_cpu_batch.py": 9
+  "tests/worker/test_to_cpu_batch.py": 9,
+  "tests/common/test_http_pool.py": 1,
+  "tests/remote/test_corpus_capability.py": 2,
+  "tests/remote/test_job_log_course.py": 3,
+  "tests/remote/test_rollout_relay.py": 15,
+  "tests/remote/test_tailscale_boot_bun.py": 3,
+  "tests/remote/test_worker_replay_prepass.py": 1,
+  "tests/worker/test_bc_xla.py": 5
 }

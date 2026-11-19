@@ -4,8 +4,10 @@ import {
   applyPageAutoSave,
   autoSaveKeyFor,
   loadConfig,
+  loadIdleStop,
   loadStopPpo,
   saveAutoSave,
+  saveIdleStop,
   saveStopPpo,
   type BncConfig,
 } from '../config'
@@ -37,6 +39,10 @@ import {
   type PanelHistoryRow,
 } from '../ui/panel'
 import {
+  createTabTitleReporter,
+  createTabTitleSync as createGenericTabTitleSync,
+} from '../ui/tab-title'
+import {
   createFrameBridge,
   createHostBridge,
   type BridgeMessage,
@@ -45,6 +51,13 @@ import {
 import { installAutoContinue } from './auto-continue'
 import { runFrameCommand, type CommandDeps, type CommandReply } from './commands'
 import { createOfflineWatch } from './offline-watch'
+import {
+  createIdleStop,
+  fetchHubQueueFacts,
+  IDLE_CONFIRM_SEC,
+  IDLE_POLL_MS,
+  type IdleStopDue,
+} from './idle-stop'
 import { createStopCmdPoller } from './stop-cmd'
 import { describeHubSync, startHubUrlSync } from './hub-sync'
 import {
@@ -174,6 +187,14 @@ function makeLog(scope: Record<string, unknown>): (msg: string) => void {
   return (msg) => info?.(`[bnc] ${msg}`)
 }
 
+/** 有没有 code cell 在执行（含排队）——标签页标题的 ▶️ 用同一个判据。 */
+function cellsExecuting(adapter: FrameAdapter): boolean {
+  for (const cell of adapter.cells()) {
+    if (cell.kind === 'code' && adapter.cellExecuting(cell)) return true
+  }
+  return false
+}
+
 /** host 侧：监听自己的 window，但**定向发给 iframe.contentWindow**。 */
 function hostBridgeWindow(win: Window): BridgeWindow {
   return {
@@ -243,6 +264,8 @@ function startFrame(
     log(`配置已复制到剪贴板（自动保存按页存 ${autoSaveKeyFor(page)}；其余在 bnc:config）`)
   }
 
+  /** attach 后强制补报一次执行态：host 会先撤掉 ▶️，不能等 5 拍心跳。 */
+  let forceCellReport = false
   const bridge = createFrameBridge(frameBridgeWindow(win), {
     handle: (name, args) =>
       runFrameCommand(
@@ -256,6 +279,7 @@ function startFrame(
       if (m.sessionBase) loop.setSessionBase(m.sessionBase)
       if (m.autoSave) loop.setAutoSave(m.autoSave.enabled, m.autoSave.intervalSec)
       startLoop()
+      forceCellReport = true
       log(`bridge attach（nonce=${m.nonce ?? '∅'}）`)
     },
     onError: (reason) => log(`bridge: ${reason}`),
@@ -309,6 +333,21 @@ function startFrame(
           }
         }, 1000)
 
+  // 有 code cell 在执行 ⇒ 外层标签页标题加 ▶️（帧自己的标题不进标签栏，只有 host 能改）。
+  // 只在变化时发，另每 5 拍补一条心跳：host 的桥短暂出错时会清掉状态，不能等到 cell 停掉才恢复。
+  let lastCellsBusy: boolean | null = null
+  let cellTicks = 0
+  const cellsTimer = setInterval(() => {
+    cellTicks += 1
+    // 还没有 attach（单独打开帧）时没有回报对象；别把心跳堆进 pendingNotes。
+    if (!bridge.nonce) return
+    const busy = cellsExecuting(adapter)
+    if (!forceCellReport && busy === lastCellsBusy && cellTicks % 5 !== 0) return
+    forceCellReport = false
+    lastCellsBusy = busy
+    bridge.note('status:cells', { value: busy ? '1' : '0' })
+  }, 1000)
+
   // 页首同步 CFG['hub_url']：hub 的 cloudflared 隧道换了 URL，notebook 里的配置跟着换。
   // 结果经 bridge 送到外层面板（成功 / 未改 / 失败原因都要看得见，不能只进 console）。
   const hubSync = config.enabled
@@ -350,6 +389,7 @@ function startFrame(
   return () => {
     clearTimeout(startFallback)
     if (offlineTimer !== null) clearInterval(offlineTimer)
+    clearInterval(cellsTimer)
     hubSync?.cancel()
     loop.stop()
     bridge.destroy()
@@ -367,17 +407,24 @@ function startHost(
   const session = parseKaggleSession(href)
   const sessionAdapter = new KaggleSessionAdapter(doc, href)
   const notebookKey = parseKaggleNotebookKey(href)
+  /** 标题告警用状态（`Starting` 不算中止；也许落成「限额 / 断开」的站点判据更准，见适配器）。 */
+  const sessionTitleState = (): 'running' | 'idle' | 'stopped' | 'unknown' =>
+    sessionAdapter.titleState?.() ?? sessionAdapter.sessionState()
 
   // Kaggle 把标签页标题写死成「Kaggle Notebook Editor」：多开 notebook 分不出哪个是哪个。
   // 每秒把 document.title 钉成本 notebook 的名字；URL 用当前的（SPA 换页跟着走）。
-  const syncTabTitle = createTabTitleSync(doc, () => {
-    try {
-      return doc.location.href || href
-    } catch {
-      return href
-    }
-  })
-  syncTabTitle()
+  // 状态前缀（⏹️ 会话已停 / ▶️ cell 在跑）由 reporter 管：人在后台标签也能看见异常。
+  const tabTitle = createTabTitleReporter(
+    createTabTitleSync(doc, () => {
+      try {
+        return doc.location.href || href
+      } catch {
+        return href
+      }
+    }),
+  )
+  tabTitle.refresh()
+  tabTitle.observeSession(sessionTitleState())
 
   /** frame 回报的会话键（含页面标签）：多开页签时必须用**这一页**的，不能拿外层 URL 猜。 */
   let frameSession = ''
@@ -436,6 +483,11 @@ function startHost(
       }
     },
     onNote: (m) => {
+      // frame 每秒报「有没有 code cell 在执行」：只上标题，不写 op（心跳会刷屏）。
+      if (m.name === 'status:cells') {
+        tabTitle.setRunning(m.value === '1')
+        return
+      }
       if (m.name === 'offline:detected') {
         offlineDetected = true
         panel?.setStopPpoVisible(true)
@@ -474,6 +526,8 @@ function startHost(
     },
     onError: (reason) => {
       ready = false
+      // 桥断了就收不到 cell 心跳：先撤掉 ▶️，重新 attach 后帧会补报（含 5s 心跳）。
+      tabTitle.setRunning(false)
       log(`bridge: ${reason}`)
       op('bridge:error', reason)
     },
@@ -517,7 +571,10 @@ function startHost(
         op('stop:flush:fail', f.reason ?? '未排空')
       }
     }
-    return sessionAdapter.stopSession()
+    const r = await sessionAdapter.stopSession()
+    // 适配器只在自己看到 Stopped 时才 ok ⇒ 这一下是明确的中止，标题立刻上 ⏹️。
+    if (r.ok) tabTitle.markStopped()
+    return r
   }
 
   let sched: Scheduler | null = null
@@ -625,6 +682,14 @@ function startHost(
         op('stopPpo', enabled ? 'on' : 'off')
         return null
       },
+      // 全局开关（不按页）：停的是这台机器的会话，两个角色都读同一个键。
+      idleStop: loadIdleStop(runtime, false),
+      onIdleStopChange: (enabled) => {
+        saveIdleStop(runtime, enabled)
+        op('idleStop:switch', enabled ? 'on' : 'off')
+        idleStop?.reset() // 重新武装：刚打开的窗口从下一拍重新计
+        return null
+      },
       onScheduleAdd: async (input) => {
         op('schedule:add:request', `${input.action} ${input.at}`)
         if (!sched) {
@@ -728,14 +793,57 @@ function startHost(
       })
     : null
   stopCmd?.start()
+
+  // 空闲停会话（选项在面板，开关全局）：hub 不可达 / 队列静默 ⇒ 倒计时（可取消）⇒ stopNow。
+  // 判据只看 dashboard 的 /api/hubQueue：页面不碰 hub 地址与 token（与 hub_url 同步同一条纪律）。
+  const onIdleDue = async (due: IdleStopDue): Promise<void> => {
+    const text =
+      due.kind === 'unreachable' ? `hub 不可达（${due.detail}）` : `没有待训练任务（${due.detail}）`
+    op('idleStop:due', text)
+    await ops.flush() // 先把证据排空：会话停掉之后这份日志可能没人再搬
+    panel?.setStatus(`空闲停会话：${text}`, 'warn')
+    // 后台页弹不出倒计时 ⇒ 按开关的预授权执行（与调度器 confirm 同一口径），证据行已落。
+    const proceed =
+      doc.hidden || !panel ? true : await panel.countdown(`即将停会话：${text}`, IDLE_CONFIRM_SEC)
+    if (!proceed) {
+      op('idleStop:cancel', text)
+      idleStop?.reset() // 取消后重新计窗（不然这次判决之后再也不喊）
+      panel?.setStatus('已取消：空闲停会话', 'ok')
+      return
+    }
+    const r = await stopNow()
+    op('idleStop:stop', `${r.ok ? 'ok' : 'fail'} ${text}${r.ok ? '' : `：${r.reason ?? '未知'}`}`)
+    panel?.setStatus(
+      r.ok ? '空闲停会话已执行（hub 上没活了）' : `空闲停会话失败：${r.reason ?? '未知'}`,
+      r.ok ? 'ok' : 'error',
+    )
+  }
+  const idleStop = config.enabled
+    ? createIdleStop({
+        enabled: () => loadIdleStop(runtime, false),
+        // 离线训练页（battle.offline.ipynb）：整课在本机跑时 hub 队列静默，得把 live hold 算成活。
+        autonomous: () => offlineDetected,
+        facts: () => fetchHubQueueFacts({ runtime, dashboardBase: config.dashboardBase }),
+        onEvent: op,
+        onDue: (due) => void onIdleDue(due),
+      })
+    : null
+  const idleTimer = idleStop ? setInterval(() => void idleStop.poll(), IDLE_POLL_MS) : null
+
   // 倒计时只上 cell 徽标：每秒把「运行 cell」的剩余时间刷进帧内（不占面板）；
-  // 同一拍把标签页标题钉住（Kaggle 会把它覆写回固定文案）。
+  // 同一拍把标签页标题钉住（Kaggle 会把它覆写回固定文案），并每 5s 读一次会话状态
+  // （限额关机 / 平台闲时关机不会经过我们的停会话路径，只能看页面自己的状态）。
+  let sessionPollTick = 0
   const markTimer = setInterval(() => {
     syncMarks()
-    syncTabTitle()
+    tabTitle.refresh()
+    sessionPollTick += 1
+    if (sessionPollTick % 5 === 0) tabTitle.observeSession(sessionTitleState())
   }, 1000)
   const onVisibility = (): void => {
     void sched?.tick()
+    // 切回这一页时立刻对一次状态，不等下一个 5s 拍。
+    tabTitle.observeSession(sessionTitleState())
   }
   doc.addEventListener('visibilitychange', onVisibility)
 
@@ -770,8 +878,10 @@ function startHost(
     if (frame !== current) {
       current = frame
       ready = false
+      tabTitle.setRunning(false) // 新帧要重新回报执行态（旧帧的 ▶️ 不能留着）
       frame.addEventListener('load', () => {
         ready = false
+        tabTitle.setRunning(false)
         log('iframe load → 重新 attach')
         if (frame.contentWindow) bridge.attach(origin, frame.contentWindow)
       })
@@ -784,6 +894,7 @@ function startHost(
   return () => {
     clearInterval(timer)
     clearInterval(markTimer)
+    if (idleTimer !== null) clearInterval(idleTimer)
     autoContinue.dispose()
     stopCmd?.stop()
     sched?.stop()
@@ -822,6 +933,22 @@ function startSingle(
       : site === 'modelscope'
         ? new ModelscopeSessionAdapter(doc)
         : new ColabSessionAdapter(doc, href)
+  /** 标题告警用状态（适配器可覆写；缺省同 `sessionState`）。 */
+  const sessionTitleState = (): 'running' | 'idle' | 'stopped' | 'unknown' =>
+    sessionAdapter.titleState?.() ?? sessionAdapter.sessionState()
+  // 标签页标题：名字跟随页面自己（Colab/AI Studio/魔搭不会像 Kaggle 那样把它覆写成通用文案），
+  // 状态图标（⏹️ 会话已停 / ▶️ cell 在跑）与 host 同口径。
+  const tabTitle = createTabTitleReporter(
+    createGenericTabTitleSync(doc, () => {
+      try {
+        return doc.location.href || href
+      } catch {
+        return href
+      }
+    }),
+  )
+  tabTitle.refresh()
+  tabTitle.observeSession(sessionTitleState())
   /** 魔搭的 notebook 名不在 URL 里，只能从工作台标签读；warm 起来之前是空串（见下面的补读）。 */
   let notebookKey =
     site === 'aistudio'
@@ -931,6 +1058,18 @@ function startSingle(
       ? { ok: true, ...(typeof r.value === 'string' ? { detail: r.value } : {}) }
       : { ok: false, reason: r.reason ?? '失败', ...(r.retry ? { retry: true } : {}) }
 
+  /** 停会话的唯一出口：成功 ⇒ 标题上 ⏹️（三条路径共用：hub 叫停 / 空闲停 / 定时停）。 */
+  const stopNow = async (): Promise<{
+    ok: boolean
+    reason?: string
+    detail?: string
+    retry?: boolean
+  }> => {
+    const r = toCmd(await send('stopSession'))
+    if (r.ok) tabTitle.markStopped()
+    return r
+  }
+
   /** 本页的执行历史（内存，刷新即清空）。 */
   const history: PanelHistoryRow[] = []
   const HISTORY_MAX = 5
@@ -1023,6 +1162,14 @@ function startSingle(
         op('stopPpo', enabled ? 'on' : 'off')
         return null
       },
+      // 全局开关（不按页）：停的是这台机器的会话，两个角色都读同一个键。
+      idleStop: loadIdleStop(runtime, false),
+      onIdleStopChange: (enabled) => {
+        saveIdleStop(runtime, enabled)
+        op('idleStop:switch', enabled ? 'on' : 'off')
+        idleStop?.reset() // 重新武装：刚打开的窗口从下一拍重新计
+        return null
+      },
       onScheduleAdd: async (input) => {
         op('schedule:add:request', `${input.action} ${input.at}`)
         if (!sched) {
@@ -1075,11 +1222,46 @@ function startSingle(
         dashboardBase: config.dashboardBase,
         site,
         session: () => loop.session.slice(0, 64),
-        stop: async () => toCmd(await send('stopSession')),
+        stop: stopNow,
         onEvent: op,
       })
     : null
   stopCmd?.start()
+
+  // 空闲停会话（与 host 同口径：开关全局、判据只看 /api/hubQueue）：停会话走本页适配器。
+  const onIdleDue = async (due: IdleStopDue): Promise<void> => {
+    const text =
+      due.kind === 'unreachable' ? `hub 不可达（${due.detail}）` : `没有待训练任务（${due.detail}）`
+    op('idleStop:due', text)
+    await ops.flush() // 先把证据排空：会话停掉之后这份日志可能没人再搬
+    panel?.setStatus(`空闲停会话：${text}`, 'warn')
+    // 后台页弹不出倒计时 ⇒ 按开关的预授权执行（与调度器 confirm 同一口径），证据行已落。
+    const proceed =
+      doc.hidden || !panel ? true : await panel.countdown(`即将停会话：${text}`, IDLE_CONFIRM_SEC)
+    if (!proceed) {
+      op('idleStop:cancel', text)
+      idleStop?.reset() // 取消后重新计窗（不然这次判决之后再也不喊）
+      panel?.setStatus('已取消：空闲停会话', 'ok')
+      return
+    }
+    const r = await stopNow()
+    op('idleStop:stop', `${r.ok ? 'ok' : 'fail'} ${text}${r.ok ? '' : `：${r.reason ?? '未知'}`}`)
+    panel?.setStatus(
+      r.ok ? '空闲停会话已执行（hub 上没活了）' : `空闲停会话失败：${r.reason ?? '未知'}`,
+      r.ok ? 'ok' : 'error',
+    )
+  }
+  const idleStop = config.enabled
+    ? createIdleStop({
+        enabled: () => loadIdleStop(runtime, false),
+        // 与 host 同口径：离线训练页整课在本机跑时，hub 队列静默只有 live hold 能证明在训。
+        autonomous: () => offlineDetected,
+        facts: () => fetchHubQueueFacts({ runtime, dashboardBase: config.dashboardBase }),
+        onEvent: op,
+        onDue: (due) => void onIdleDue(due),
+      })
+    : null
+  const idleTimer = idleStop ? setInterval(() => void idleStop.poll(), IDLE_POLL_MS) : null
 
   // 魔搭的 notebook 身份在 URL 里没有（帧地址只有 `?t=&lang=`），只能等工作台把标签渲染出来；
   // 读到就换日志键/任务桶，最多等 30s（换键 = 换一份日志，与 host 的 attach 同口径）。
@@ -1189,9 +1371,10 @@ function startSingle(
             : task.action === 'run-all'
               ? 'runAllCells'
               : 'runCell'
-      const result = toCmd(
-        await send(name, task.action === 'run-cell' ? (task.target ?? {}) : undefined),
-      )
+      const result =
+        task.action === 'stop-session'
+          ? await stopNow()
+          : toCmd(await send(name, task.action === 'run-cell' ? (task.target ?? {}) : undefined))
       // 执行历史只留本页内存：刷新页面即清空（不写 GM 存储，跨页签不串）；
       // 可重试的「还没到时候」不进历史（否则每 20s 一行刷屏），最终结果才记。
       if (!result.retry) recordHistory(task, result)
@@ -1206,9 +1389,19 @@ function startSingle(
   })
   panel.setSchedule(sched.rows())
   sched.start()
-  const markTimer = setInterval(syncMarks, 1000)
+  // 同一 1s 拍：定时徽标 + 标签页标题（cell 执行态直接读本页 DOM），会话状态每 5s 对一次。
+  let sessionPollTick = 0
+  const markTimer = setInterval(() => {
+    syncMarks()
+    tabTitle.setRunning(cellsExecuting(adapter))
+    tabTitle.refresh()
+    sessionPollTick += 1
+    if (sessionPollTick % 5 === 0) tabTitle.observeSession(sessionTitleState())
+  }, 1000)
   const onVisibility = (): void => {
     void sched?.tick()
+    tabTitle.setRunning(cellsExecuting(adapter))
+    tabTitle.observeSession(sessionTitleState())
   }
   doc.addEventListener('visibilitychange', onVisibility)
 
@@ -1232,6 +1425,7 @@ function startSingle(
 
   return () => {
     clearInterval(markTimer)
+    if (idleTimer !== null) clearInterval(idleTimer)
     if (offlineTimer !== null) clearInterval(offlineTimer)
     if (identityTimer !== null) clearInterval(identityTimer)
     stopCmd?.stop()

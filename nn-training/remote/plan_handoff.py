@@ -310,6 +310,10 @@ class RunContext:
         #: 2026-10-30（用户口径「prep 行只留必要读数」）：漂移不再进 prep 那行，
         #: 改成「值变了才报一行」——静默会让人以为两边一致。
         self.quota_drift_reported: str = ""
+        #: ★ 2026-11-15（云端采样覆盖）：本段按 device 选中的档（None = 未开/CPU）。
+        #: `sampling_profile_checked` = 解析只做一次（`remote/plan_run._sampling_profile`）。
+        self.sampling_profile: dict[str, Any] | None = None
+        self.sampling_profile_checked: bool = False
 
     def planned_range(self) -> list[int]:
         """本次实际要跑的轮次（计划区间 ∩ CLI 上限）。"""

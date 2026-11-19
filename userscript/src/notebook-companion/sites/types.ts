@@ -63,6 +63,11 @@ export interface FrameAdapter {
 export interface SessionAdapter {
   readonly site: SiteId
   sessionState(): 'running' | 'idle' | 'stopped' | 'unknown'
+  /**
+   * 标签页标题的告警口径（可选）：默认同 `sessionState`。区别只在「正在起会话」（Kaggle 的
+   * `Starting`）——停会话的后置条件把它当 done 是对的，但标题不能把「正在起」报成「已中止」。
+   */
+  titleState?(): 'running' | 'idle' | 'stopped' | 'unknown'
   stopSession(): Promise<CmdResult>
   sessionId(): string
 }

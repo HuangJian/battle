@@ -139,6 +139,8 @@ class TrainingRemoteJob(TrainingRemotePush):
     #: 在每个文件里类型可见，否则 mypy 报 attr-defined。
     _commit_journal: Any
     _ensure_ts_code: Any
+    #: P2：replay 转换器 bundle 的懒构建（实现在 `trainer/loop_export.py`）。
+    _ensure_replay_converter: Any
     #: `_remote_ppo_publish` 里以 `hasattr`/`getattr` 动态访问（EvalBoard 让位属于编排层）——
     #: 声明只为让「借用声明闭集 = 派生集」这条不变式成立；注解不产生类属性，`hasattr` 语义不变。
     _evalboard_idle: Any
@@ -632,7 +634,8 @@ class TrainingRemoteJob(TrainingRemotePush):
         #   命中即不再读盘/重压（打包只剩拼接 + sha256）；缺的（local 兜底腿 / 预采子进程 /
         #   配额裁剪后补漏）由 `_pack_segmented` 现场读盘。轮号或 `wire_diet` 对不上 ⇒ `None`
         #   （宁可慢一轮，也不发一份与 manifest 自述不符的字节）。
-        _taken = self._payload_parts.take(it, wire_diet=wire_diet)
+        corpus_fmt = str(getattr(args, "corpus_fmt", "full") or "full")
+        _taken = self._payload_parts.take(it, wire_diet=wire_diet, corpus_fmt=corpus_fmt)
         if mem and _taken is None:
             # 零落盘轮没有盘上副本可回退（`take` 的降级路只在有磁盘 shard 时成立）。
             raise SystemExit(
@@ -643,6 +646,16 @@ class TrainingRemoteJob(TrainingRemotePush):
         if rollout_spec:
             # M3：TS 运行时 zip（一次打包，缓存在 self 上——sha 不变就不重打）。
             self._ensure_ts_code(job_root, log=log)
+        # P2：replay 语料的转换器 bundle（trainer 预构建、随 payload 下发；worker 只跑不建）。
+        # kind=iter 的 rollout 由节点自己跑，本 plan 强制 full（请求 replay 直接拒）。
+        replay_converter_path = ""
+        if corpus_fmt == "replay":
+            if rollout_spec:
+                raise SystemExit(
+                    f"[run_rl] it{it}: corpus_fmt=replay 只支持 kind=ppo（节点自跑 rollout 的 "
+                    "kind=iter 强制 full）——拒绝发布一份节点无法转换的语料"
+                )
+            replay_converter_path, _conv_sha = self._ensure_replay_converter(job_root, log=log)
         # ★ 2026-10-15：发布出去的 init 必须是**整份**——`publish_job` 用它算
         #   `init_weights_fp`（= 云机下一轮 init 的内容地址）并把它当 init blob 上传；
         #   离线腿的 delta 容器会被云机当权重装载（`JSON.parse` 报 BWD1）且算不出有意义的地址。

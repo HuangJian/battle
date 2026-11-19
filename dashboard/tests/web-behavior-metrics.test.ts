@@ -17,12 +17,17 @@ import {
   DEFAULT_TREND_VISIBILITY,
   BEHAVIOR_METRICS,
   behaviorTrendKey,
+  moveTrendKey,
   parseBehaviorMetricStats,
   parseTrendVisibility,
+  resolveTrendOrder,
   sliceSeries,
+  TREND_BASE_CHARTS,
+  TREND_CHART_ORDER_KEYS,
   TREND_RANGE_OPTIONS,
   type IterRow,
   type MetricStats,
+  type TrendChartKey,
 } from '../src/web/view'
 
 function stats(mean: number): MetricStats {
@@ -149,6 +154,43 @@ describe('走势图显示配置', () => {
 
   it('范围档位文案为 全量 / 最近60% / 最近30%', () => {
     expect(TREND_RANGE_OPTIONS.map((o) => o.label)).toEqual(['全量', '最近60%', '最近30%'])
+  })
+})
+
+describe('走势图顺序', () => {
+  it('默认序 = 基础六图在前 + 全部逐局指标（键集不重不漏）', () => {
+    const order = resolveTrendOrder(null)
+    expect(order.slice(0, TREND_BASE_CHARTS.length)).toEqual(TREND_BASE_CHARTS.map((c) => c.key))
+    expect(order.length).toBe(TREND_CHART_ORDER_KEYS.length)
+    expect(new Set(order).size).toBe(order.length)
+    for (const m of BEHAVIOR_METRICS) expect(order).toContain(behaviorTrendKey(m.key))
+  })
+
+  it('存储序生效；缺键按默认位归位；未知键 / 坏存储丢弃', () => {
+    const order = resolveTrendOrder(['pu', 'nope', 'kills'])
+    // 存储序权威：道具排在最前，击杀在它后面；未知键不进来。
+    expect(order[0]).toBe('pu')
+    expect(order.indexOf('pu')).toBeLessThan(order.indexOf('kills'))
+    expect(order).not.toContain('nope' as TrendChartKey)
+    // 缺的键按默认序归位：「胜局耗时」仍在「胜局残血」之前，不会全部被甩到末尾。
+    expect(order.indexOf('winTicks')).toBeLessThan(order.indexOf('winHp'))
+    expect(order.length).toBe(TREND_CHART_ORDER_KEYS.length)
+    expect(resolveTrendOrder([])).toEqual([...TREND_CHART_ORDER_KEYS])
+    expect(resolveTrendOrder(null)).toEqual([...TREND_CHART_ORDER_KEYS])
+  })
+
+  it('moveTrendKey 只在勾选中的键之间换位，中间没勾选的原地不动', () => {
+    const order = resolveTrendOrder(null)
+    const on = new Set<TrendChartKey>(['winRate', 'winHp'])
+    const visible = (k: TrendChartKey): boolean => on.has(k)
+    // 胜率下移：跨过没勾选的四张，落到胜局残血后面。
+    const next = moveTrendKey(order, 'winRate', 1, visible)
+    expect(next.indexOf('winRate')).toBe(order.indexOf('winHp'))
+    expect(next.indexOf('winHp')).toBe(order.indexOf('winRate'))
+    expect(next.indexOf('dmgPerKill')).toBe(order.indexOf('dmgPerKill'))
+    // 到头 ⇒ 原样；位置号不变。
+    expect(moveTrendKey(next, 'winRate', 1, visible)).toEqual(next)
+    expect(moveTrendKey(next, 'nope' as TrendChartKey, -1, visible)).toEqual(next)
   })
 })
 

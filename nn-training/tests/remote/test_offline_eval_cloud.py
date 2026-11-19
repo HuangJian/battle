@@ -634,22 +634,24 @@ def test_submit_defers_the_job_build_to_the_background_thread(
 
     monkeypatch.setattr(offline_eval, "run_cloud_eval", lambda **job: {"ran": True, **job})
     logs, log = _logs()
-    runner = CloudEvalRunner(slow_build, log=log)
-    ok: list[bool] = []
-    done = threading.Event()
+    caller = threading.current_thread()
+    build_thread: list[threading.Thread] = []
 
-    def _submit() -> None:
-        ok.append(runner.submit(5))
-        done.set()
+    def recording_build(it: int) -> dict:
+        build_thread.append(threading.current_thread())
+        return slow_build(it)
 
-    th = threading.Thread(target=_submit, daemon=True)
-    th.start()
-    assert done.wait(10.0), "submit 没回来 —— 装配又落回调用线程了"
-    assert ok == [True], ok
-    # ★ 核心判据：submit 回来时装配**还没结束**（`elapsed < 0.1s` 换成事件，2026-11-15）
-    assert not built_done.is_set(), "submit 返回时装配已完成 ⇒ 它在调用线程里做了这件事"
+    runner = CloudEvalRunner(recording_build, log=log)
+    t0 = time.time()
+    assert runner.submit(5)
+    submit_sec = time.time() - t0
+    # 契约本体是**不在调用线程**求值（2026-11-19：原来用 0.1s 秒表判，xdist 满载下
+    # 0.11s 就假红 —— 秒表量到的是调度抖动，不是「在谁身上跑」）。
+    # timing-ok: 上界兜底（真回到调用线程会等满 slow_build 的 5s；不量机器快慢）
+    assert submit_sec < 5.0, f"submit 把装配等完了：{submit_sec:.2f}s（slow_build 诈 5s）"
     release.set()
     assert built.wait(5), "后台线程没开始装配"
+    assert build_thread and build_thread[0] is not caller, "装配又回到调用线程了"
     assert built_done.wait(10.0), "放行后装配必须跑完"
     assert runner.drain(timeout=5.0) is True
     # 结果穿透 = 后台线程真的把 thunk 求了值（`_build` 抛的话这里不会有结果）

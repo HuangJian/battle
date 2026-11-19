@@ -151,8 +151,19 @@ class ScheduleRoutes:
         worker_id = str(body.get("worker_id") or self._worker_id())
         self._watch_worker_source(worker_id)
         role = role_from_header(self.headers.get(ROLE_HEADER, ""))
+        # 能力位（2026-11-16，plan/replay-corpus.plan.md D2/B7）：旧 worker 不发该键 ⇒ 空表
+        # ⇒ replay job 在 store 的唯一租约入口被拒（full job 不受影响）。
+        caps_raw = body.get("capabilities")
+        capabilities = (
+            [str(c) for c in caps_raw] if isinstance(caps_raw, list) else []
+        )
         out = self.hub.claim_job(
-            jid, mode=mode, worker_id=worker_id, expected_epoch=want_epoch, role=role
+            jid,
+            mode=mode,
+            worker_id=worker_id,
+            expected_epoch=want_epoch,
+            role=role,
+            capabilities=capabilities,
         )
         course = self.hub.course_of(jid) or ""
         if out.ok:

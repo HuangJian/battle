@@ -27,7 +27,7 @@ import shutil
 import time
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import paddle
@@ -55,12 +55,15 @@ from worker.train.bc_core import (
     smoothed_val_loss,
 )
 
+if TYPE_CHECKING:
+    from worker.data.npyio import ArrayField
+
 #: 与 torch 侧同一组 torch-only 设备门（Paddle 没有 XLA/DataParallel/MPS 路径）。
 _TORCH_ONLY_DEVICES = ("tpu", "xla", "cuda-dp", "dp", "mps")
 
 
 def _split(
-    data: dict[str, np.ndarray], val_split: float, seed: int
+    data: dict[str, ArrayField], val_split: float, seed: int
 ) -> tuple[np.ndarray, np.ndarray, dict[str, int], str]:
     """train/val 下标（与 `data/dataset.make_loaders` 同判据）。
 
@@ -71,6 +74,8 @@ def _split(
     n_val = int(n * float(val_split))
     rng = np.random.default_rng(seed)
     shard_ids = data.get("shard_ids")
+    if shard_ids is not None and not isinstance(shard_ids, np.ndarray):
+        raise TypeError("[bc_paddle] shard_ids 必须是整份 ndarray（不走 lazy 分片视图）")
     if should_split_by_shards(shard_ids):
         assert shard_ids is not None
         n_shards = int(shard_ids.max()) + 1
@@ -88,7 +93,7 @@ def _split(
     return tr_idx, val_idx, sizes, "sample"
 
 
-def _class_counts(data: dict[str, np.ndarray], idx: np.ndarray, action_v6: bool) -> dict:
+def _class_counts(data: dict[str, ArrayField], idx: np.ndarray, action_v6: bool) -> dict:
     moves = Counter(int(v) for v in data["actions"][idx, 0])
     fires = Counter(int(v) for v in data["actions"][idx, 1])
     if action_v6:
@@ -107,6 +112,17 @@ def _majority_baseline(counts: dict) -> dict[str, float]:
     return out
 
 
+def _kept(keep: paddle.Tensor) -> paddle.Tensor:
+    """布尔掩码 → 保留行的**升序下标**（与 `x[keep]` 同序）。
+
+    为什么不用 `x[keep]`：Paddle 3.3 的布尔下标在 C++ 里对未初始化 Tensor 调 `reshape`，
+    每个进程打一条 `tensor.cc:111` 弃用警告（2026-11-13 由 BC 训练日志定位到 `_masked_ce`）；
+    `nonzero` + `gather` 是同一语义的无警告写法。索引只算一次、两个张量共用
+    （`nonzero` 会同步设备，热路径别算两遍）。
+    """
+    return paddle.nonzero(keep).flatten()
+
+
 def _masked_ce(
     logits: paddle.Tensor,
     target: paddle.Tensor,
@@ -118,8 +134,12 @@ def _masked_ce(
     if not bool(keep.any().item()):
         return logits.sum() * 0.0
     z = paddle.where(mask > 0, logits, paddle.full_like(logits, -1e9))
+    idx = _kept(keep)
     per = F.cross_entropy(
-        z[keep], target[keep].astype("int64"), reduction="none", weight=class_weight
+        paddle.gather(z, idx),
+        paddle.gather(target.astype("int64"), idx),
+        reduction="none",
+        weight=class_weight,
     )
     return per.mean()
 
@@ -136,8 +156,11 @@ def _masked_acc(
     if not bool(keep.any().item()):
         return 0.0
     z = paddle.where(mask > 0, logits, paddle.full_like(logits, -1e9))
-    pred = z.argmax(axis=-1)
-    return _scalar((pred[keep] == target[keep].astype("int64")).astype("float32").mean())
+    idx = _kept(keep)
+    hit = paddle.gather(z.argmax(axis=-1), idx) == paddle.gather(
+        target.astype("int64"), idx
+    )
+    return _scalar(hit.astype("float32").mean())
 
 
 def _clip_grad_norm(parameters, max_norm: float) -> paddle.Tensor:
@@ -154,7 +177,7 @@ def _clip_grad_norm(parameters, max_norm: float) -> paddle.Tensor:
 
 
 def _make_batch(
-    data: dict[str, np.ndarray],
+    data: dict[str, ArrayField],
     idx: np.ndarray,
     action_v6: bool,
     rng: np.random.Generator | None,
@@ -240,7 +263,14 @@ def train(args: Any) -> dict[str, Any]:
 
     action_v6 = bool(getattr(args, "action_v6", False))
     policy_extra = bool(getattr(args, "policy_extra", False))
-    data = load_dataset(str(args.data_dir), action_v6=action_v6)
+    # 2026-11-13：逐 shard mmap（大语料不再整份 concatenate），与 torch 侧同一条路。
+    data = load_dataset(
+        str(args.data_dir),
+        action_v6=action_v6,
+        lazy=True,
+        batch_size=int(args.batch),
+        num_workers=0,
+    )
     tr_idx, val_idx, sizes, split_kind = _split(data, float(args.val_split), seed)
     say(
         f"[train] samples total={sizes['total']} train={sizes['train']} val={sizes['val']}"
@@ -363,7 +393,7 @@ def train(args: Any) -> dict[str, Any]:
 class _Train:
     """Paddle BC 一轮训练的装配与收尾（epoch 循环与最终交付都从这里取状态）。"""
 
-    data: dict[str, np.ndarray]
+    data: dict[str, ArrayField]
     tr_idx: np.ndarray
     val_idx: np.ndarray
     sizes: dict[str, int]
@@ -416,7 +446,10 @@ class _Train:
                     if float(getattr(args, "value_coef", 0.0) or 0.0) > 0 and bool(
                         valid.any().item()
                     ):
-                        vloss = F.mse_loss(vpred.squeeze(-1)[valid], b["ret"][valid])
+                        vi = _kept(valid)
+                        vloss = F.mse_loss(
+                            paddle.gather(vpred.squeeze(-1), vi), paddle.gather(b["ret"], vi)
+                        )
                         loss = loss + float(args.value_coef) * vloss
                         nv = int(_scalar(valid.astype("int64").sum()))
                         run["vloss"] += _scalar(vloss) * nv
@@ -428,7 +461,10 @@ class _Train:
                     )
                     valid = ~paddle.isnan(b["ret"])
                     if bool(valid.any().item()):
-                        vloss = F.mse_loss(vpred.squeeze(-1)[valid], b["ret"][valid])
+                        vi = _kept(valid)
+                        vloss = F.mse_loss(
+                            paddle.gather(vpred.squeeze(-1), vi), paddle.gather(b["ret"], vi)
+                        )
                         loss = loss + float(args.value_coef) * vloss
                         nv = int(_scalar(valid.astype("int64").sum()))
                         run["vloss"] += _scalar(vloss) * nv
@@ -497,7 +533,10 @@ class _Train:
                     if self.use_value:
                         valid = ~paddle.isnan(b["ret"])
                         if bool(valid.any().item()):
-                            vloss = F.mse_loss(vpred.squeeze(-1)[valid], b["ret"][valid])
+                            vi = _kept(valid)
+                            vloss = F.mse_loss(
+                                paddle.gather(vpred.squeeze(-1), vi), paddle.gather(b["ret"], vi)
+                            )
                             nv = int(_scalar(valid.astype("int64").sum()))
                             v["vloss"] += _scalar(vloss) * nv
                             v["vn"] += nv

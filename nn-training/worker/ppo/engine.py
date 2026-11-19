@@ -68,6 +68,7 @@ from worker.ppo.common import (
     _ppo_save,
     approx_kl_est,
     cat_entropy,
+    cat_entropy_per,
     cat_logprob,
     demo_index,
     log,
@@ -89,7 +90,6 @@ from worker.ppo.np_core import (
     LAM,
     chunk_episodes,
     is_xla,
-    load_episodes,
     optimizer_step,
     xla_delta_str,
     xla_device_speed_probe,
@@ -99,8 +99,18 @@ from worker.ppo.np_core import (
     xla_metrics_snapshot,
 )
 from worker.ppo.np_core import load_episode_from_shard as load_episode_from_shard
+from worker.ppo.np_core import (
+    load_episodes as load_episodes,  # 契约成员：backend 面的装载入口（这里不调用，测试按属性取）
+)
 from worker.ppo.rng import PPORng
-from worker.ppo.trainer import aggregate_stats, tensored_chunks
+from worker.ppo.trainer import (
+    aggregate_stats,
+    chunk_count,
+    corpus_samples,
+    tensored_batch,
+    tensored_chunks,
+)
+from worker.ppo.vram import require_corpus, torch_free_bytes
 
 # ---------------- hyper-params (CLI-overridable) ----------------
 # R6（2026-08-25 训练质量审计）：it1–it68 未收敛（winRate ~10% 水平、value 预测量级
@@ -288,6 +298,8 @@ def _torch_backend(device) -> Backend:
         masked_logsoftmax=lambda logits, mask: masked_logsoftmax(logits, mask),
         cat_logprob=lambda action, logp: cat_logprob(action, logp),
         cat_entropy=lambda logp: cat_entropy(logp),
+        cat_entropy_per=lambda logp: cat_entropy_per(logp),
+        astype=lambda x, dt: x.to(dt),
         kl_rows=lambda logp, ref: (logp.exp() * (logp - ref)).sum(dim=-1),
         approx_kl=lambda lp_old, lp_new: approx_kl_est(lp_old, lp_new),
         zeros=lambda: torch.zeros((), device=device),
@@ -362,7 +374,15 @@ class PPOContext:
     #: 三条显式随机流（§P1-7）：epoch 顺序 / demo 抽样都在这里，全局 np.random 不再参与。
     rng: PPORng = field(default_factory=lambda: PPORng.from_seed(0))
     clip: float = CLIP_EPS
-    tensored: list[dict] = field(default_factory=list)
+    #: P3 lazy：`chunks` 是 `LazyChunks`（逐 chunk 物化），此处不建全量 torch 副本。
+    lazy: bool = False
+    #: D8：>0 时每个 epoch 末尾检查平均 KL，超过即停剩余 epoch（缺省 0 = 关闭）。
+    target_kl: float = 0.0
+    #: D8：本轮是否因 target_kl 提前收工（进 `agg`，账本可归因）。
+    early_stopped: bool = False
+    #: chunk 数（lazy 下 `LazyChunks` 没有可靠的 `len` 语义时由 `chunk_count` 给）。
+    n_chunks: int = 0
+    tensored: Any = field(default_factory=list)
     total_steps: int = 0
     stats: list[dict[str, float]] = field(default_factory=list)
     step_walls: list[float] = field(default_factory=list)
@@ -503,11 +523,40 @@ def _setup_demo(ctx: PPOContext) -> _Demo:
     )
 
 
+def _ref_heads(ctx: PPOContext, e: dict) -> tuple[torch.Tensor, ...]:
+    """冻结 ref 模型在当前 chunk 上的分头 log-softmax（eager 预计算 / lazy 首次现算共用）。
+
+    两条路径数值逐位相同（ref 冻结且与训练模型状态无关）；共用同一份「头数 vs 数据
+    动作空间」校验，避免 lazy 复制一份后漂移。
+    """
+    ref_model = ctx.ref_model
+    _ro = ref_model(e["obs"], e["scalars"], e.get("extra"))
+    _m = e["mask"]
+    _ref_space = ActionSpace.from_forward_arity(len(_ro))
+    if _ref_space is not ctx.space:
+        raise ValueError(
+            f"[ppo] kickstart ref 与数据动作空间不同源：ref 返回 {len(_ro)} 个头"
+            f"（{_ref_space.value}），chunk 是 {ctx.space.value}"
+            "——掩码切片会静默错位，拒绝训练（ref 权重与 rollout 语料不是同一代）"
+        )
+    _layout = head_layout(_ref_space)
+    _heads: tuple[torch.Tensor, ...] = (
+        masked_logsoftmax(_ro[0], _m[:, _layout.move_slice]),
+        masked_logsoftmax(_ro[1], _m[:, _layout.fire_slice]),
+    )
+    if _layout.hold_slice is not None:
+        _heads = (*_heads, masked_logsoftmax(_ro[2], _m[:, _layout.hold_slice]))
+    return _heads
+
+
 def _precompute_ref(ctx: PPOContext) -> list[tuple[torch.Tensor, ...] | None]:
     """每个 chunk 只算一次 ref 前向（原每 epoch 重算；数值逐位不变）。"""
     ref_model, kickstart_kl = ctx.ref_model, ctx.kickstart_kl
     tensored, device = ctx.tensored, ctx.device
-    ref_cache: list[tuple[torch.Tensor, ...] | None] = [None] * len(tensored)
+    ref_cache: list[tuple[torch.Tensor, ...] | None] = [None] * ctx.n_chunks
+    if ctx.lazy:
+        # lazy：chunk 首次使用时现算（见 `_train_step`）；这里不物化任何 chunk。
+        return ref_cache
     if ref_model is not None and kickstart_kl > 0:
         # 2026-09-11 慢 job（TPU 45~52 s/step，eta~5.9h）修复：落执行边界，否则
         # 这段惰性图一直挂着，会与首个训练步的图拼成巨型图（首步 ~24s 编译 +
@@ -527,37 +576,12 @@ def _precompute_ref(ctx: PPOContext) -> list[tuple[torch.Tensor, ...] | None]:
         _t_ref = time.time()
         with torch.no_grad():
             for _i, _e in enumerate(tensored):
-                # ★ B1 v6（2026-10-23）：ref 的**头数**与数据的**动作空间**必须同源。
-                #   旧实现写死 `_rm, _rf, _ = ref_model(...)`：v6 ref（`PPOStudent.forward`
-                #   在 `action_v6` 下返回 4-tuple）上直接
-                #   `ValueError: too many values to unpack (expected 3)`。
-                #   现场：y32-nohp / y32-tempo（起点 y31-fire.it370 的 arch.actionV6=true，
-                #   且两腿 `kickstart_ref: true`）——v6 落地后第一对开 kickstart 的腿。
-                #   判据用 `len(out)` 而不是模型属性：DataParallel 包装下属性代理不可靠。
-                #   并用数据的 `a_hold` 交叉校验——3 头 ref 配 7 宽掩码会让切片静默错位
-                #   （hold 两列被当 fire 的第 3 类），比崩掉更糟。
-                _ro = ref_model(_e["obs"], _e["scalars"], _e.get("extra"))
-                _m = _e["mask"]
-                _ref_space = ActionSpace.from_forward_arity(len(_ro))
-                if _ref_space is not ctx.space:
-                    raise ValueError(
-                        f"[ppo] kickstart ref 与数据动作空间不同源：ref 返回 {len(_ro)} 个头"
-                        f"（{_ref_space.value}），chunk 是 {ctx.space.value}"
-                        "——掩码切片会静默错位，拒绝训练（ref 权重与 rollout 语料不是同一代）"
-                    )
-                _layout = head_layout(_ref_space)
-                _heads: tuple[torch.Tensor, ...] = (
-                    masked_logsoftmax(_ro[0], _m[:, _layout.move_slice]),
-                    masked_logsoftmax(_ro[1], _m[:, _layout.fire_slice]),
-                )
-                if _layout.hold_slice is not None:
-                    _heads = (*_heads, masked_logsoftmax(_ro[2], _m[:, _layout.hold_slice]))
-                ref_cache[_i] = _heads
+                ref_cache[_i] = _ref_heads(ctx, _e)
                 xla_mark_step(device)
         # 注意：日志必须在 mark_step **之后**打——惰性 XLA 下循环里一次前向都没真跑，
         # 打在前面得到的是 0s 的假数字（这正是本次误判的由来）。
         log(
-            f"[ppo] kickstart ref 预计算完成：{len(tensored)} chunks（原每 epoch 重算）"
+            f"[ppo] kickstart ref 预计算完成：{ctx.n_chunks} chunks（原每 epoch 重算）"
             f"，{time.time() - _t_ref:.1f}s（{device} 执行实耗，XLA 含编译）"
         )
     # ---- XLA 预物化（2026-09-22）：chunk/demo/索引张量必须在**进入循环前**落设备 ----
@@ -585,10 +609,16 @@ def _prepare(ctx: PPOContext) -> tuple[Backend, StepConfig, StepState]:
         ctx.prof_left = ctx.prof_steps
     # Convert numpy -> torch ONCE per chunk (not once per epoch): identical
     # values, ~epochs× less conversion overhead.
-    ctx.tensored = tensored_chunks(ctx.chunks, device)
-    ctx.total_steps = len(ctx.tensored) * ctx.epochs
+    # P3 lazy：chunks 自己就是按需物化的序列，这里不物化全量（每步 tensored_batch）。
+    # eager 全量上卡前查显存：不足响亮拒绝（用户 2026-11-16）；探测不到则放行。
+    if not ctx.lazy:
+        require_corpus(ctx.chunks, torch_free_bytes(device))
+    ctx.tensored = ctx.chunks if ctx.lazy else tensored_chunks(ctx.chunks, device)
+    ctx.n_chunks = chunk_count(ctx.chunks)
+    ctx.total_steps = ctx.n_chunks * ctx.epochs
     # 动作空间只在数据边界嗅一次；下面的 ref 与每个 minibatch 都读这份契约。
-    ctx.space = ActionSpace.from_batch(ctx.tensored[0]) if ctx.tensored else ActionSpace.LEGACY
+    _first = ctx.tensored.get(0) if ctx.lazy else (ctx.tensored[0] if ctx.tensored else None)
+    ctx.space = ActionSpace.from_batch(_first) if _first is not None else ActionSpace.LEGACY
     ctx.layout = head_layout(ctx.space)
     ctx.diag = _setup_diag(device)
     ctx.demo = _setup_demo(ctx)
@@ -603,10 +633,10 @@ def _prepare(ctx: PPOContext) -> tuple[Backend, StepConfig, StepState]:
     # 非 XLA 设备为 no-op（xla_mark_step 内部判断），CPU/CUDA 数值与行为逐位不变。
     if is_xla(device):
         xla_mark_step(device)
-        if ctx.diag.on:
+        if ctx.diag.on and not ctx.lazy:
             ctx.diag.bundle.add(
                 "预物化",
-                f"{len(ctx.tensored)} 个 chunk + demo 张量已落设备"
+                f"{ctx.n_chunks} 个 chunk + demo 张量已落设备"
                 f"（循环前一次 mark；否则每个 chunk 首次使用各付一次全图编译）",
             )
     ctx.start_epoch = _ppo_load(ctx.ckpt_path, model, opt, ctx.rng)
@@ -645,7 +675,19 @@ def _train_step(
     """一个 minibatch 步：数学在 `backend.run_step`，这里只做 torch 侧遥测与执行边界。"""
     device = ctx.device
     _step_t0 = time.time()
-    ctx.stats.append(run_step(bk, ctx.model, ctx.opt, st, cfg, ctx.rng, i))
+    if ctx.lazy:
+        # 只把当前 minibatch 上卡（mb=1024 的 obs u1 ≈ 11.8 MB），
+        # 全量 chunks 不再有 torch 副本 ⇒ 4–6 GB VRAM 可跑 35×20。
+        e = tensored_batch(st.tensored.get(int(i)), device)
+        if ctx.ref_model is not None and ctx.kickstart_kl > 0 and st.ref_cache[int(i)] is None:
+            # lazy：chunk 首次使用时现算（ref 冻结 ⇒ 与 eager 预计算逐位相同）。
+            # 落一次执行边界，避免把 ref 图与当前训练步拼成一张更大的图（TPU）。
+            with torch.no_grad():
+                st.ref_cache[int(i)] = _ref_heads(ctx, e)
+            xla_mark_step(device)
+    else:
+        e = st.tensored[int(i)]
+    ctx.stats.append(run_step(bk, ctx.model, ctx.opt, st, cfg, ctx.rng, i, batch=e))
     # 2026-09-11 根因修复（TPU）：每步强制图执行边界。torch_xla 惰性模式下
     # materialize（.tolist()）只断言其依赖子图，backward/optimizer 环节的
     # 在途节点不 drain，跨步骤累积 → 图线性膨胀 → 单步耗时随步数线性增长
@@ -677,7 +719,7 @@ def _train_step(
         j,
         now,
         now - _step_t0,
-        int(st.tensored[int(i)]["obs"].shape[0]),
+        int(e["obs"].shape[0]),
         st.ref_cache[int(i)] is not None,
     )
     _maybe_heartbeat(ctx, ep, j, now)
@@ -701,11 +743,11 @@ def _record_diag(
     diag_worst, diag_worst_delta, diag_sig = d.worst, d.worst_delta, d.sig
     diag_compile_dom, diag_reset = d.compile_dom, d.reset
     demo_on, demo_per_mb = ctx.demo.on, ctx.demo.per_mb
-    kl_coef, tensored, total_steps = ctx.kl_coef, ctx.tensored, ctx.total_steps
+    kl_coef, n_chunks, total_steps = ctx.kl_coef, ctx.n_chunks, ctx.total_steps
     # XLA 步耗读数（必须在 mark_step 之后：编译/执行都已 drain，否则恒为 0）。
     # 未取样的步只累计墙钟——delta 是累积的，中间发生的编译仍会落在下一次读数里。
     if diag_on:
-        _done = ep * len(tensored) + j + 1
+        _done = ep * n_chunks + j + 1
         _wall_s = wall_s
         diag_wall += _wall_s
         _acc = diag_by_b.setdefault(int(batch_size), {"iters": 0.0, "wall": 0.0})
@@ -760,7 +802,7 @@ def _record_diag(
 def _maybe_heartbeat(ctx: PPOContext, ep: int, j: int, now: float) -> None:
     """60s 心跳：给 progress bundle 就攒进去，否则逐字节旧输出。"""
     last_hb = ctx.last_hb
-    stats, tensored = ctx.stats, ctx.tensored
+    stats, n_chunks = ctx.stats, ctx.n_chunks
     epochs, total_steps, t0 = ctx.epochs, ctx.total_steps, ctx.t0
     progress, progress_head = ctx.progress, ctx.progress_head
     # Heartbeat: pure-print progress/health line; wall-clock only.
@@ -771,11 +813,11 @@ def _maybe_heartbeat(ctx: PPOContext, ep: int, j: int, now: float) -> None:
         last_hb = now
         recent = stats[-32:]
         n_r = len(recent)
-        done_steps = ep * len(tensored) + j + 1
+        done_steps = ep * n_chunks + j + 1
         elapsed = now - t0
         eta = elapsed / done_steps * (total_steps - done_steps)
         _hb = (
-            f"ep {ep + 1}/{epochs} chunk {j + 1}/{len(tensored)} "
+            f"ep {ep + 1}/{epochs} chunk {j + 1}/{n_chunks} "
             f"step {done_steps}/{total_steps} "
             f"elapsed={elapsed:.0f}s eta~{eta:.0f}s "
             f"kl={sum(s['kl'] for s in recent) / n_r:.4f} "
@@ -923,14 +965,18 @@ def _aggregate(ctx: PPOContext) -> dict:
             "value": 0.0,
             "entropy": 0.0,
             "kl": 0.0,
+            "per_step_kl": 0.0,
+            "clip_fraction": 0.0,
             "kickstart": 0.0,
             "demo_bc": 0.0,
             "gnorm": 0.0,
             "mean_ret": 0.0,
             "value_new_rms": 0.0,
             "policy_new_rms": 0.0,
+            "early_stopped": False,
         }
     agg = aggregate_stats(stats, list(stats[0].keys()))
+    agg["early_stopped"] = ctx.early_stopped
     return agg
 
 
@@ -954,6 +1000,8 @@ def ppo_update(
     progress_head: str = "[ppo] PPO",
     value_anchor: float = 0.0,
     rng: PPORng | None = None,
+    lazy: bool = False,
+    target_kl: float = 0.0,
 ):
     """chunks: list of minibatch dicts (obs (B,14,26,26) / scalars (B,24) / ...).
 
@@ -992,6 +1040,15 @@ def ppo_update(
     样本里 hold 只有 806（1.84%），fire CE 实际只教 release。2026-10-18 评审后的
     move-only 消融；恢复方式见调用点）。三者任一缺席/非正即关闭，默认路径数学逐字节
     不变（含额外 stat 键 demo_bc，关闭时恒 0.0）。
+
+    lazy（P3，plan/replay-corpus.plan.md D6）：`chunks` 是 `LazyChunks`（逐 chunk
+    物化 numpy）。此时**不**建 `tensored_chunks` 全量副本，每步 `tensored_batch`
+    现转当前 minibatch 并上卡；ref 缓存改为 chunk 首次使用时现算（ref 冻结，数值
+    逐位相同）。默认 False = 旧路径逐字节不变。
+
+    target_kl（D8，plan/replay-corpus.plan.md §7.2 第 8 条）：>0 时每个 epoch 末尾
+    检查本 epoch 的平均 approx KL，超过即打印并停止剩余 epoch（镜像 intent 后端）。
+    缺省 0 = 关闭，数学与步数逐字节不变；读数 `per_step_kl`/`clip_fraction` 恒开。
     """
     ctx = PPOContext(
         model=model,
@@ -1012,14 +1069,28 @@ def ppo_update(
         progress_head=progress_head,
         value_anchor=value_anchor,
         rng=rng if rng is not None else PPORng.from_seed(0),
+        lazy=bool(lazy),
+        target_kl=float(target_kl or 0.0),
     )
     bk, cfg, st = _prepare(ctx)
     for ep in range(ctx.start_epoch, ctx.epochs):
-        perm = ctx.rng.epoch.permutation(len(ctx.tensored))
+        perm = ctx.rng.epoch.permutation(ctx.n_chunks)
         n_ep_start = len(ctx.stats)
         for j, i in enumerate(perm):
             _train_step(ctx, bk, cfg, st, ep, j, int(i))
         _finish_epoch(ctx, ep, n_ep_start)
+        if ctx.target_kl > 0.0:
+            # D8 轮内中止阈值（镜像 intent 后端）：只在本 epoch 结束后判，缺省关闭。
+            _ep_stats = ctx.stats[n_ep_start:]
+            if _ep_stats:
+                _ep_kl = sum(s["kl"] for s in _ep_stats) / len(_ep_stats)
+                if _ep_kl > ctx.target_kl:
+                    log(
+                        f"[ppo] target_kl={ctx.target_kl:g} exceeded (epoch {ep + 1} "
+                        f"kl={_ep_kl:.4f}) — early stopping remaining epochs"
+                    )
+                    ctx.early_stopped = True
+                    break
     _finish(ctx)
     return _aggregate(ctx)
 
@@ -1071,6 +1142,20 @@ def main():
         "截断在 GAE 之前，逐关独立）。0 = 历史行为：全收（默认）。"
         "由 run_rl 按 ceil(target_transitions / 关数) 算好透传。",
     )
+    ap.add_argument(
+        "--ppo-loader",
+        choices=("eager", "lazy"),
+        # P3 收尾（2026-11-17）：与 `worker/cli.py` 同一缺省 —— lazy。回滚 = eager。
+        default="lazy",
+        help="PPO 语料装载器：lazy=obs 逐 shard mmap + 逐 minibatch 上卡（默认）；"
+        "eager=整份 concatenate（回滚档，峰值 ≈ 3× obs）",
+    )
+    ap.add_argument(
+        "--target-kl",
+        type=float,
+        default=0.0,
+        help=">0：每个 epoch 末尾 kl 超阈值即停剩余 epoch（D8；缺省 0 = 关闭）",
+    )
     args = ap.parse_args()
 
     # 全局播种已退役（§P1-7）：训练序列只由 `PPORng.from_seed(args.seed)` 的三条流决定
@@ -1107,21 +1192,35 @@ def main():
     load_state_into(model, args.resume)
     model.to(device)
 
-    episodes = load_episodes(
+    from worker.ppo.lazy_corpus import load_ppo_corpus
+
+    episodes = load_ppo_corpus(
         args.data,
-        args.gamma,
-        args.lam,
+        loader=args.ppo_loader,
+        gamma=args.gamma,
+        lam=args.lam,
         normalize_ret=bool(args.normalize_ret),
         per_stage_quota=int(args.per_stage_quota),
+        mb=args.mb,
     )
-    total_steps = sum(e["obs"].shape[0] for e in episodes)
+    # lazy 语料只有 .samples（不物化 episodes）；eager 列表走原求和。
+    total_steps = corpus_samples(episodes)
     log(f"[ppo] total transition steps={total_steps}")
 
     chunks = chunk_episodes(episodes, args.mb, rng=ppo_rng.chunk)
-    log(f"[ppo] {len(episodes)} episodes -> {len(chunks)} minibatch chunks (mb={args.mb})")
+    log(f"[ppo] {total_steps} rows -> {chunk_count(chunks)} minibatch chunks (mb={args.mb})")
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-    agg = ppo_update(model, opt, chunks, args.epochs, device, rng=ppo_rng)
+    agg = ppo_update(
+        model,
+        opt,
+        chunks,
+        args.epochs,
+        device,
+        rng=ppo_rng,
+        lazy=args.ppo_loader == "lazy",
+        target_kl=float(args.target_kl),
+    )
 
     model.to("cpu")
     save_weights_json(model, args.out)

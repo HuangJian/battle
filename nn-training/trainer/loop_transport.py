@@ -599,6 +599,15 @@ def _wire_from_result(
         # 归因用。旧行无此键（additive），读取侧按 None 处置。
         "wire_diet": c.get("wire_diet"),
         "rollout_src": c.get("rollout_src"),
+        # D10（plan/replay-corpus.plan.md，2026-11-16）：语料格式与 replay pre-pass 账。
+        # 旧 worker 的 wire 没有这些键 ⇒ 这里的 None 表示「未上报」，不是 0。
+        "corpus_fmt": w.get("corpus_fmt"),
+        "replay_bytes": w.get("replay_bytes"),
+        "labels_bytes": w.get("labels_bytes"),
+        "convert_sec": w.get("convert_sec"),
+        "convert_workers": w.get("convert_workers"),
+        "convert_jobs": w.get("convert_jobs"),
+        "convert_fallback": w.get("convert_fallback"),
         # worker 侧拆分原样挂上（观测用；plan §2.2 未把它写进 hub 字典，但两半
         # 互不覆盖，合起来才是完整的“秒/字节到哪去了”的答案）。
         "worker": (dict(w) if w else None),
@@ -617,6 +626,9 @@ def _remote_forward_agg(agg: dict) -> dict:
         "value": float(agg.get("value", 0.0)),
         "entropy": float(agg.get("entropy", 0.0)),
         "kl": float(agg.get("kl", 0.0)),
+        "per_step_kl": float(agg.get("per_step_kl", agg.get("kl", 0.0)) or 0.0),
+        "clip_fraction": float(agg.get("clip_fraction", 0.0) or 0.0),
+        "early_stopped": bool(agg.get("early_stopped", False)),
         "mean_ret": float(agg.get("mean_ret", 0.0)),
         "kickstart": float(agg.get("kickstart", 0.0) or 0.0),
         # demo 混 batch 遥测（同 kickstart additive；旧 worker 无此键 → 0.0）。

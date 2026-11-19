@@ -1,4 +1,5 @@
 import type { World, SpawnEntry } from '../game/World'
+import { reserveNextId } from '../game/ids'
 import type { Tank, Bullet, PowerUp, TerrainType } from '../types'
 import type { WorldSnapshot } from './types'
 import { DEFAULT_P2_SPAWN, GRID } from '../constants'
@@ -106,6 +107,7 @@ export function cloneWorld(world: World): WorldSnapshot {
     frenzyStock: world.frenzyStock,
     sacrificeStock: world.sacrificeStock,
     fenceExpireFrame: world.fenceExpireFrame,
+    fenceCells: world.fenceCells.slice(),
     // obs v3 sN4 / reward stuckTicks（dsf A4 同源）：跨 tick 状态入快照。
     // playerHitEnemyThisTick 是 intra-tick 瞬态（快照边界恒 false），不入快照。
     stuckTicks: world.stuckTicks,
@@ -115,6 +117,37 @@ export function cloneWorld(world: World): WorldSnapshot {
     rewindStock: world.rewindStock,
     mines: world.mines.map((m) => ({ ...m })),
   }
+}
+
+/**
+ * The global id allocator must never reissue an id that the restored snapshot
+ * already contains. Snapshot ids can come from another process (replay
+ * playback, corpus rebuild, imported save), while the local counter may still
+ * be low — without this bump, a later spawn can collide with a live tank's id
+ * and identity checks (`ownerId === tank.id`, tickHash canonicalisation) start
+ * resolving to the wrong entity. First observed 2026-11-17 as a rare
+ * worker-history-dependent tickHash mismatch in replay→shard write pools.
+ *
+ * Scans every id-bearing field: entity ids, bullet ownerIds (owners may be dead
+ * and absent from the entity arrays), active commander, and mines.
+ */
+function reserveSnapshotIds(snap: WorldSnapshot): void {
+  let maxId = 0
+  const track = (id: number | null | undefined): void => {
+    if (typeof id === 'number' && id > maxId) maxId = id
+  }
+  track(snap.player?.id)
+  track(snap.player2?.id)
+  for (const t of snap.tanks) track(t.id)
+  for (const t of snap.allies ?? []) track(t.id)
+  for (const b of snap.bullets) {
+    track(b.id)
+    track(b.ownerId)
+  }
+  for (const p of snap.powerUps) track(p.id)
+  for (const m of snap.mines ?? []) track(m.id)
+  track(snap.activeCommanderId)
+  if (maxId > 0) reserveNextId(maxId)
 }
 
 /**
@@ -128,6 +161,8 @@ export function cloneWorld(world: World): WorldSnapshot {
  * loading a snapshot restores history, it does not rewrite it).
  */
 export function restoreWorld(world: World, snap: WorldSnapshot): void {
+  reserveSnapshotIds(snap)
+
   // Tile grid
   for (let r = 0; r < GRID; r++) {
     for (let c = 0; c < GRID; c++) {
@@ -239,6 +274,16 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
   world.frenzyStock = snap.frenzyStock ?? 0
   world.sacrificeStock = snap.sacrificeStock ?? 0
   world.fenceExpireFrame = snap.fenceExpireFrame
+  // §2026-11-18-fence-ownership 栅栏归属：新快照带 `fenceCells`（本道具自己铺的格）。旧快照没有该字段，
+  // 而到期回滚必须复刻当时的旧语义（回滚环上所有 steel），否则旧 replay/save 会在
+  // fence 到期那一拍出现地形分歧 ⇒ 用 `fenceRevertAll` 显式标记，别偷偷改变历史行为。
+  if (snap.fenceCells !== undefined) {
+    world.fenceCells = snap.fenceCells.slice()
+    world.fenceRevertAll = false
+  } else {
+    world.fenceCells = []
+    world.fenceRevertAll = snap.fenceExpireFrame !== undefined
+  }
   // obs v3 sN4：旧快照（无该字段）默认 0/null（ms F3 快照兼容）
   world.stuckTicks = snap.stuckTicks ?? 0
   world.prevStuckCell = snap.prevStuckCell ?? null

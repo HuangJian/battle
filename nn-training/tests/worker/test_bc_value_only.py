@@ -86,8 +86,10 @@ def _args(corpus: Path, init: Path, out: Path, **over: object) -> SimpleNamespac
 
 def test_v6_loader_reads_optional_returns(corpus: Path) -> None:
     data = load_dataset(str(corpus), action_v6=True)
-    assert data["returns"].shape == (N * 4,)
-    assert np.isfinite(data["returns"]).all()
+    returns = data["returns"]
+    assert isinstance(returns, np.ndarray)  # returns 恒为整份数组（不走 lazy 分片视图）
+    assert returns.shape == (N * 4,)
+    assert np.isfinite(returns).all()
 
 
 def test_value_only_preserves_every_non_value_parameter(corpus: Path, tmp_path: Path) -> None:

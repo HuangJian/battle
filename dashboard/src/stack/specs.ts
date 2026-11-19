@@ -284,7 +284,10 @@ export function cloudflaredSpec(cfg: RlConfig, entry?: RegistryEntry): ProcSpec 
       cfBin ?? 'cloudflared',
       'tunnel',
       '--url',
-      `http://localhost:${sharedHubPort(cfg)}`,
+      // ★ 127.0.0.1 而不是 `localhost`：cloudflared（Go）把 `localhost` 解析成 `::1` 后只拨
+      //   IPv6 回环，而 hub 绑的是 127.0.0.1 ⇒ origin 恒 `connection refused` ⇒ CF 回 502。
+      //   与 `hub.ts` 的 spawn 参数逐字同规（`single-hub-tunnel` 门禁守这一点）。
+      `http://127.0.0.1:${sharedHubPort(cfg)}`,
       '--metrics',
       `127.0.0.1:${metricsPort}`,
       '--logfile',

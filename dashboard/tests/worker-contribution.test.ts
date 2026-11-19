@@ -645,8 +645,16 @@ describe('WorkerContribution SSR（plan W3a/W3b）', () => {
     expect(html).toContain('tc-nodes__group--ppo')
     expect(html).toContain('aria-label="采样节点（rollout / eval）"')
     expect(html).toContain('aria-label="PPO worker（push）"')
-    expect(html).toContain('单位：局')
-    expect(html).toContain('单位：job')
+    // 2026-11-15 用户：块头解释里去掉单位后缀（单位由合计读数自身给出：局 / job），
+    // 随后再要求 PPO 块头连「云端 push」也去掉 ⇒ PPO 块头只剩标题 + 时间跨度 + 合计。
+    expect(html).toContain('<span class="tc-muted tc-small">rollout / eval</span>')
+    expect(html).not.toContain('云端 push')
+    // 时间跨度选择：两块头各一枚、**互不联动**；options 与节点统计页同档，默认都是近 24 小时。
+    expect(html.split('tc-nodes__window').length - 1).toBe(2)
+    expect(html.split('aria-label="采样块时间跨度"').length - 1).toBe(1)
+    expect(html.split('aria-label="PPO 块时间跨度"').length - 1).toBe(1)
+    for (const o of WINDOW_OPTIONS) expect(html).toContain(`>${o.label}</option>`)
+    expect(html.split('<option selected value="24h">近 24 小时</option>').length - 1).toBe(2)
     expect(html).toContain('tc-contrib-brief--sampling')
     expect(html).toContain('tc-contrib-brief--ppo')
     expect(html).toContain('采样合计')
@@ -661,11 +669,16 @@ describe('WorkerContribution SSR（plan W3a/W3b）', () => {
     expect(rollHead).toContain('采样合计')
     expect(rollHead).toContain('tc-contrib-brief--sampling')
     expect(rollHead).toContain('self')
+    // 选择器紧挨在合计读数前（不是吊在块尾的另一套窗口控制）。
+    expect(rollHead.indexOf('tc-nodes__window')).toBeGreaterThan(-1)
+    expect(rollHead.indexOf('tc-nodes__window')).toBeLessThan(rollHead.indexOf('采样合计'))
     const ppoHeadStart = html.indexOf('tc-nodes__grouphd', html.indexOf('tc-nodes__group--ppo'))
     const ppoHead = html.slice(ppoHeadStart, html.indexOf('</div>', ppoHeadStart))
     expect(ppoHead).toContain('PPO 合计')
     expect(ppoHead).toContain('tc-contrib-brief--ppo')
     expect(ppoHead).toContain('cloudA')
+    expect(ppoHead.indexOf('tc-nodes__window')).toBeGreaterThan(-1)
+    expect(ppoHead.indexOf('tc-nodes__window')).toBeLessThan(ppoHead.indexOf('PPO 合计'))
     expect(html.split('采样合计').length - 1).toBe(1)
     expect(html.split('PPO 合计').length - 1).toBe(1)
     // 采样块在上、PPO 块在下（采样块头在 PPO 块之前）

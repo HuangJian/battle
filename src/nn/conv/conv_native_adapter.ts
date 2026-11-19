@@ -19,9 +19,22 @@
  *   ③ 本机 `bun tools/agent/native-build.ts` 的 tmp/native 产物。
  *
  * 三条铁律（评审 B2/B4）：
- *  ① **首用 attestation**：加载后先拿真实权重跑几次 native 与 wasm 的逐字节对拍，
- *     过了才投产。异质节点各自编译 ⇒ 「本机 8/8 逐位一致」不能外推，只能在**本机**验。
+ *  ① **首用 attestation**：加载后先拿真实权重跑几次 native 与 wasm 的对拍，过了才投产。
+ *     异质节点各自编译 ⇒ 「本机 8/8 一致」不能外推，只能在**本机**验。
  *     对拍不过 / 库缺失 / ABI 不符 / wasm 参考不可用 ⇒ 立刻关 native 并**响亮**记一行。
+ *     **口径是容差不是逐字节（2026-11-16 起）**：native 用 `-ffp-contract=fast`（x64 加
+ *     `-mfma`）换 +8.4% 吞吐，乘加融合只把两次舍入变一次，实测 `bufA` 最大差
+ *     6e-5/152 ≈ 4e-7 相对，而 wasm 侧没有 FMA 指令 ⇒ 两侧**结构性**地不再逐位。
+ *     容差取「相对张量最大绝对值的 1e-5」（见 `ATTEST_TOLERANCE`），比观测值宽 ~20×、
+ *     比错内核（全 0 输出 = 相对差 1）紧 10^5 倍。**同节点同输入的重跑仍是逐字节确定的**
+ *     （语料复现性靠这个，不靠跨后端逐位）。
+ *  ①b **硬异常不在守卫范围内**：`-mfma` 产物在 Haswell(2013) 之前的 x64 上一执行就 SIGILL，
+ *     进程级的 try/catch 拦不住。因此 x64 发**两条产物**（基线 + `-fma`），由 `native-variant.ts`
+ *     在子进程里试跑一次再决定用哪条（探针不过就只试基线，见下）。保命开关仍是 `NN_NATIVE=0`
+ *     （强制 wasm）。
+ *  ①c **变体探测**：`variantOrder()` → `preferredVariants()` —— 探针（子进程真跑一次内核）
+ *     通过则 `[fma, 基线]`，否则只有基线；结果落盘缓存（`tmp/nn-native-variant.json`，机器级、
+ *     一次）。arm64 只有一条产物（FMA 属基础 ISA），不走探针。
  *  ② **不算数就回落**：任何时候 run 抛错 ⇒ 关 native（进程内永久）+ 一行日志，
  *     调用方（infer.features）自动走 wasm/TS —— 绝不静默用可疑内核。
  *  ③ **来源可查**：`featuresEngine()` 暴露本进程实际用过的后端（进 shard manifest 与日志），
@@ -33,7 +46,16 @@ import { createRequire } from 'node:module'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { NATIVE_ABI, nativeLibBasename, nativeTargetFor, PREBUILT_DIR } from './native-prebuilt'
+import {
+  NATIVE_ABI,
+  nativeLibBasename,
+  nativeTargetFor,
+  nativeTargetVariants,
+  PREBUILT_DIR,
+  type NativeTarget,
+  type NativeVariant,
+} from './native-prebuilt'
+import { preferredVariants } from './native-variant'
 import { D, H, IN_CH, SP, STEM_W } from './conv-shape'
 
 // 形状常量走 ./conv-shape（与 wasm 侧、engine-bench 同一份；见该文件的事故说明）。
@@ -54,6 +76,8 @@ export interface NativeStatus {
   tested: boolean
   reason: string
   libPath: string | null
+  /** 实际用的变体：`fma` = 乘加融合产物（Haswell+），`baseline` = 宽基线产物。 */
+  variant: NativeVariant | null
 }
 
 interface ConvModelView {
@@ -112,37 +136,22 @@ function requireBunFfi(): FfiLib | null {
   return _ffi
 }
 
-/**
- * 候选库路径，按优先级：
- *   ① `NN_NATIVE_LIB`（显式指路，含节点上手工放库的场合）
- *   ② **入库 prebuilt**（`src/nn/conv/prebuilt/<platform>-<arch>/…`，**模块相对**）
- *      —— 节点机器多数没有 clang，这是它们在远端唯一能拿到的 native 臂（native-prebuilt.ts）。
- *      打包产物走同一条：rollout-runner 把库按同一相对路径 `prebuilt/<目标>/` 拷进 bundle，
- *      于是 `import.meta.url` 相对解析在"源码"与"bundle"两种形态下都成立。
- *   ③ 同一份 prebuilt 的 **cwd（仓根）相对**路径（源码被打包到别处、cwd 仍是仓根时用）
- *   ④ cwd（仓根）的 tmp/native：本机 `bun tools/agent/native-build.ts` 的开发产物
- */
-export function nativeLibCandidates(): string[] {
+/** 某个目标的两条候选路径（模块相对 = 源码/bundle 两种形态都成立；cwd 相对 = 源码不在 bundle 里时）。 */
+function prebuiltCandidates(t: NativeTarget): string[] {
   const n = nativeLibBasename(process.platform)
   const out: string[] = []
-  const env = process.env.NN_NATIVE_LIB
-  if (env) out.push(env)
-  const id = `${process.platform}-${process.arch}`
-  if (nativeTargetFor(process.platform, process.arch)) {
-    // 本模块生在 `<repo>/src/nn/conv/` ⇒ 相对它就落到 prebuilt 根。
-    try {
-      out.push(fileURLToPath(new URL(`prebuilt/${id}/${n}`, import.meta.url)))
-    } catch {
-      /* ignore */
-    }
-    out.push(path.join(process.cwd(), PREBUILT_DIR, id, n))
+  // 本模块生在 `<repo>/src/nn/conv/` ⇒ 相对它就落到 prebuilt 根。
+  try {
+    out.push(fileURLToPath(new URL(`prebuilt/${t.id}/${n}`, import.meta.url)))
+  } catch {
+    /* ignore */
   }
-  out.push(path.join(process.cwd(), 'tmp', 'native', n))
+  out.push(path.join(process.cwd(), PREBUILT_DIR, t.id, n))
   return out
 }
 
-function resolveLib(): string | null {
-  for (const p of nativeLibCandidates()) {
+function firstExisting(paths: string[]): string | null {
+  for (const p of paths) {
     try {
       if (p && fs.existsSync(p)) return p
     } catch {
@@ -150,6 +159,64 @@ function resolveLib(): string | null {
     }
   }
   return null
+}
+
+/**
+ * 本机该优先尝试的目标，按偏好排序：
+ *   · x64 且**探针确认**本机跑得动 `-fma` 产物 ⇒ `[fma, 基线]`；
+ *   · 否则只有基线（变体连候选都不进，排除了任何「被莫名加载」的路径）。
+ *
+ * 探针为什么必须在这里跑（见 native-variant.ts）：选错 = SIGILL，拦不住；结果落盘缓存，
+ * 一台机器只付一次 ~40–120 ms 的进程启动。
+ */
+function variantOrder(): NativeTarget[] {
+  const variants = nativeTargetVariants(process.platform, process.arch) // 基线在前
+  if (!variants.some((t) => t.variant === 'fma')) return variants
+  const order = preferredVariants(
+    variants.map((t) => ({
+      variant: t.variant,
+      libPath: firstExisting(prebuiltCandidates(t)) ?? '',
+    })),
+    { abi: ABI },
+  )
+  return order.flatMap((v) => variants.filter((t) => (t.variant ?? 'baseline') === v))
+}
+
+/**
+ * 候选库路径，按优先级：
+ *   ① `NN_NATIVE_LIB`（显式指路，含节点上手工放库的场合）
+ *   ② **入库 prebuilt**（`src/nn/conv/prebuilt/<目标>/…`，**模块相对**）—— 先变体后基线，
+ *      顺序由 `variantOrder()` 探针定；节点机器多数没有 clang，这是它们在远端唯一能拿到的
+ *      native 臂（native-prebuilt.ts）。打包产物走同一条：rollout-runner 把库按同一相对路径
+ *      `prebuilt/<目标>/` 拷进 bundle，于是 `import.meta.url` 相对解析在"源码"与"bundle"
+ *      两种形态下都成立。
+ *   ③ 同一份 prebuilt 的 **cwd（仓根）相对**路径（源码被打包到别处、cwd 仍是仓根时用）
+ *   ④ cwd（仓根）的 tmp/native：本机 `bun tools/agent/native-build.ts` 的开发产物
+ *      （本机构建用基线 flags ⇒ 任何 AVX1 CPU 都安全，见 tools/agent/native-build.ts::hostTarget）
+ */
+export function nativeLibCandidates(): string[] {
+  const n = nativeLibBasename(process.platform)
+  const out: string[] = []
+  const env = process.env.NN_NATIVE_LIB
+  if (env) out.push(env)
+  for (const t of variantOrder()) out.push(...prebuiltCandidates(t))
+  out.push(path.join(process.cwd(), 'tmp', 'native', n))
+  return out
+}
+
+/** 从解析到的路径反推变体（目录名带 `-fma`）。 */
+function variantOf(libPath: string | null): NativeVariant | null {
+  if (!libPath) return null
+  return libPath
+    .replace(/\\/g, '/')
+    .split('/')
+    .some((seg) => seg.endsWith('-fma'))
+    ? 'fma'
+    : 'baseline'
+}
+
+function resolveLib(): string | null {
+  return firstExisting(nativeLibCandidates())
 }
 
 /** 加载共享库（只做「能不能用」的判定，不 attest）。 */
@@ -266,9 +333,40 @@ interface AttestRef {
 }
 
 /**
- * 首用 attestation：真实权重 + 确定性伪随机输入 ×3，native 与 wasm 逐字节对拍。
- * 通过 ⇒ available；任何一处不符/抛错 ⇒ 关 native（响亮）。
+ * 首用 attestation：真实权重 + 确定性伪随机输入 ×3，native 与 wasm **容差对拍**
+ * （阈值见下方 `ATTEST_TOLERANCE`；不是逐字节相同 —— FMA 收缩让两侧差 ~1 ulp）。
+ * 通过 ⇒ available；任何一处超出容差/抛错 ⇒ 关 native（响亮）。
  */
+/**
+ * attestation 容差：`max|native−wasm| ≤ ATTEST_TOLERANCE × max(1, max|wasm|)`（逐张量）。
+ *
+ * 为什么是「相对张量最大绝对值」而不是逐元素相对误差：`bufA` 里的元素从 1e-3 到 152
+ * 跨 5 个数量级，逐元素相对误差在近零元素上会放大到 3%（实测），毫无判别力；而绝对误差
+ * 天然随量级缩放（实测 6e-5 @ max 152）。分母取张量 max 又把「整块偏移/错权重」类错误
+ * 拉到相对差 ~1，所以 1e-5 这条线两边都有三个数量级余量。
+ */
+export const ATTEST_TOLERANCE = 1e-5
+
+interface TolCheck {
+  ok: boolean
+  maxDiff: number
+  bound: number
+}
+
+function withinTolerance(got: Float32Array, want: Float32Array): TolCheck {
+  let scale = 1
+  for (let i = 0; i < want.length; i++) {
+    const v = Math.abs(want[i])
+    if (v > scale) scale = v
+  }
+  let maxDiff = 0
+  for (let i = 0; i < got.length; i++) {
+    const d = Math.abs(got[i] - want[i])
+    if (d > maxDiff) maxDiff = d
+  }
+  return { ok: maxDiff <= ATTEST_TOLERANCE * scale, maxDiff, bound: ATTEST_TOLERANCE * scale }
+}
+
 function attest(k: NativeKernel, m: ConvModelView, ref: AttestRef): boolean {
   const blob = ensureBlob(k, m)
   if (!blob) {
@@ -303,14 +401,12 @@ function attest(k: NativeKernel, m: ConvModelView, ref: AttestRef): boolean {
         _reason = `kernel 返回 ${rc}`
         return false
       }
-      const eqP = Buffer.from(m.pooled.buffer, m.pooled.byteOffset, m.pooled.byteLength).equals(
-        Buffer.from(wPooled.buffer, wPooled.byteOffset, wPooled.byteLength),
-      )
-      const eqB = Buffer.from(m.bufA.buffer, m.bufA.byteOffset, m.bufA.byteLength).equals(
-        Buffer.from(wBufA.buffer, wBufA.byteOffset, wBufA.byteLength),
-      )
-      if (!eqP || !eqB) {
-        _reason = `attestation 失败 trial=${t}（pooled 逐位=${eqP} bufA 逐位=${eqB}）→ 本机 native 内核与 wasm 不一致，回落`
+      const tolP = withinTolerance(m.pooled, wPooled)
+      const tolB = withinTolerance(m.bufA, wBufA)
+      if (!tolP.ok || !tolB.ok) {
+        _reason =
+          `attestation 失败 trial=${t}（pooled 差 ${tolP.maxDiff.toExponential(2)}>${tolP.bound.toExponential(2)}=容差 内=${tolP.ok}；` +
+          `bufA 差 ${tolB.maxDiff.toExponential(2)}>${tolB.bound.toExponential(2)}=容差 内=${tolB.ok}）→ 本机 native 内核与 wasm 不一致，回落`
         return false
       }
     }
@@ -343,9 +439,12 @@ export function runStudentConvNative(model: unknown, ref: AttestRef): boolean {
       tested: true,
       reason: _reason,
       libPath: resolveLib(),
+      variant: variantOf(resolveLib()),
     }
     if (ok) {
-      console.log(`[features] native 启用（lib=${_status.libPath}，attest=3/3 逐字节 vs wasm）`)
+      console.log(
+        `[features] native 启用（lib=${_status.libPath} variant=${_status.variant}，attest=3/3 容差≤${ATTEST_TOLERANCE}·max|·| vs wasm）`,
+      )
     } else {
       console.warn(`[features] native 关闭: ${_status.reason} → 回落 wasm/TS`)
     }
@@ -368,6 +467,7 @@ export function runStudentConvNative(model: unknown, ref: AttestRef): boolean {
       tested: true,
       reason: `运行期异常: ${e instanceof Error ? e.message : String(e)}`,
       libPath: resolveLib(),
+      variant: variantOf(resolveLib()),
     }
     console.warn(`[features] native 运行期异常 → 本进程关闭: ${_status.reason}`)
     return false
@@ -388,11 +488,13 @@ export function featuresEngine(): FeaturesEngine | 'unknown' {
 export function nativeStatus(): NativeStatus {
   if (_status) return _status
   const k = loadKernel()
+  const libPath = resolveLib()
   return {
     available: false,
     tested: false,
     reason: k ? '未 attest' : _reason,
-    libPath: resolveLib(),
+    libPath,
+    variant: variantOf(libPath),
   }
 }
 
@@ -408,11 +510,13 @@ export function setNativeConvEnabled(enabled: boolean): void {
     _status = null
     return
   }
+  const libPath = resolveLib()
   _status = {
     available: false,
     tested: true,
     reason: 'setNativeConvEnabled(false)（基准/测试强制关闭）',
-    libPath: resolveLib(),
+    libPath,
+    variant: variantOf(libPath),
   }
 }
 

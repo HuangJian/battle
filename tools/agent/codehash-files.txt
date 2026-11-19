@@ -56,6 +56,9 @@ tools/sim/export-eval-game.ts
 tools/sim/export-godai-bc.ts
 tools/sim/serve-loop.ts
 tools/sim/serve-any.ts
+# BCV2 容器格式 + manifest.elapsedSec 服务计时口径（serviceElapsedSec 单一来源）：
+# 它决定 rollout/eval 结果容器的字节与口径，改它 = 改 agent 侧协议行为。
+tools/sim/pack-container.ts
 src/types.ts
 src/game/
 src/config/

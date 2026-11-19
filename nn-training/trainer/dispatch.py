@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import secrets
 import threading
@@ -11,10 +12,12 @@ from collections import deque
 from pathlib import Path
 
 import common.codehash
+import common.codehash_ref as codehash_ref
 import common.distribution
 import common.protocol
 import common.runtime
 import remote.node_upgrade
+from common import node_speed
 from common.log import log
 
 # 本地对局子进程的无窗口 spawn 由 `trainer.queue_local` 负责（Windows 下不弹黑色 cmd 抢焦点）。
@@ -24,6 +27,7 @@ from remote import weights_standard
 from trainer.dispatch_state import DispatchState, admit_rollout_nodes
 from trainer.queue_local import (
     QueueEdgeGate,
+    halt_missing_split,
     make_local_pool,
     run_local_rollout,
     run_rollout,
@@ -47,7 +51,9 @@ from worker.sibling_reuse import reuse_rollouts
 
 # 分布式采样（plan/distributed-rollout.md v3.3）：runId 使 iterId={runId}.{it} 全局唯一，
 # 杜绝 relaunch 后旧 run 未取结果与新 run 任务在 agent 侧混叠。
-RUN_ID = secrets.token_hex(8)
+# GPU 真机验证课（plan/replay-corpus.plan.md §6.6）：四档共用同一个 runId ⇒
+# `job_seed(runId,it,init_weights_fp)` 在档间可比；未给 env 时保持随机（旧行为逐字节不变）。
+RUN_ID = os.environ.get("NN_VERIFY_RUN_ID") or secrets.token_hex(8)
 
 # F6（plan/dist-codehash-stale-fix.md）：dedup 静默排除的显式告警计数。RolloutDispatcher
 # 每迭代新建实例，计数器必须挂模块级才跨轮累积；连续 ≥3 轮 dedup 且非 self ⇒ WARN。
@@ -194,11 +200,10 @@ class RolloutDispatcher:
         # ping 超时（statusTimeoutSec=3s）全部并行——7 死节点从串行 ~21s/轮 压到 ~3s；
         # 判定与日志按配置顺序串行回放（保序、保线程安全）。节点中途上线的接管仍靠
         # 下一轮迭代的 ping 门（与 rollout 既有语义一致）。
-        code_hash = common.codehash.compute_code_hash()
-        # 脏工作区护栏（2026-09-01 重启循环修复①）：期望 codeHash 由训练机工作区算出，
-        # 含未提交改动时远端 git pull 永不收敛 ⇒ 对远端节点下发 pull+restart 是无效扰动
-        # （实测：节点拉到最新提交后 hash 仍不等 → 每轮 rescan 再杀一次，无限重启循环）。
-        # 每轮检测一次；self/回环节点不受限（代码同源，纯重启即可拾取工作区代码）。
+        # 脏工作区护栏（2026-09-01 重启循环修复①）：参考 codeHash 以 self 自报为准
+        # （self 缺失才回退工作区现算）。含未提交改动时远端 git pull 永不收敛 ⇒ 下发
+        # pull+restart 是无效扰动（实测：节点拉到最新提交后 hash 仍不等 → 每轮 rescan
+        # 再杀一次，无限重启循环）。self/回环节点不受限（代码同源，纯重启即可拾取）。
         dirty_files = common.codehash.dirty_hash_files()
         if dirty_files:
             log(
@@ -209,6 +214,7 @@ class RolloutDispatcher:
         # push 节点（`gpu_push` / `offline_push`）没有 `/v1/ping`：留在候选表里只会每轮换一条
         # `ping failed — excluded this round`（判据见 `common/protocol.sampler_nodes`）。
         cfg_nodes = common.protocol.sampler_nodes(cfg.get("nodes", []))
+        # F6：跨轮 dedup 计数（模块级 dict 的局部别名）
 
         def _probe(n: dict):
             nid = str(n.get("id") or n.get("url") or "?")
@@ -221,6 +227,9 @@ class RolloutDispatcher:
             with common.runtime.Runtime(scope="dispatch-probe") as _rt:
                 probe_results = list(_rt.map(_probe, cfg_nodes, workers=min(8, len(cfg_nodes))))
 
+        # 参考 codeHash = self 自报的（2026-11-15）：不是 hub 工作区现算的那份
+        # （脏工作区时那套 hash 没人在跑，会把整个集群判成代码不符）。
+        code_hash = codehash_ref.reference_code_hash(cfg_nodes, probe_results)
         # 准入判据从 `st` 读：先把本相位算出的字段写进去（方法末尾的写入是给后续相位的）。
         st.code_hash, st.upgrade_branch = code_hash, upgrade_branch
         st.dirty_files, st.local_bun = dirty_files, local_bun
@@ -283,6 +292,9 @@ class RolloutDispatcher:
         with open(rl_path, "rb") as f:
             weights_bytes = f.read()
         reuse, need = common.distribution.partition_weights_nodes(nodes, wver, kind=wkind)
+        # 快节点先拿首波（**不减槽**，开关 `policy.nodeOrderBySpeed`）；need 节点的线程在权重
+        # POST 完成回调里孵化（并行）⇒ 这层排序对它是尽力而为。
+        reuse, need = node_speed.order_round(nodes, reuse, need, st.meta_path, st.policy, log)
         if reuse:
             log(
                 f"[dist] weights[{wkind}] reuse wver={wver[:12]}… skip POST for "
@@ -541,6 +553,7 @@ class RolloutDispatcher:
         st.all_tasks = q.all_tasks
         st.n_total_tasks = q.n_total_tasks
         st.seen = q.seen
+        st.missing_keys = q.missing_keys
         st.attempts = q.attempts
         st.results = q.results
         st.stats = q.stats
@@ -559,6 +572,7 @@ class RolloutDispatcher:
         nodes, plan_set, done = st.nodes, st.plan_set, st.done
         done_all, all_tasks, n_total_tasks = st.done_all, st.all_tasks, st.n_total_tasks
         attempts, seen, results = st.attempts, st.seen, st.results
+        missing_keys = st.missing_keys
         stats, race_drops, halted = st.stats, st.race_drops, st.halted
         local_lane, sum_game_sec = st.local_lane, st.sum_game_sec
         sum_game_sec_by_node = st.sum_game_sec_by_node
@@ -570,9 +584,13 @@ class RolloutDispatcher:
         #   竞速副本不进 `attempts`：它们跑了却没回结果，halted 时算 missing 是正确语义。
         missing = sorted(k for k in (set(attempts) if halted and self.pool_halt else all_tasks) if k not in seen)
         by_node = common.distribution.by_node_of(results)
+        # 行尾带传输层复用率（2026-11-14 P4）：`NODE_HTTP_POOL=0` ⇒ 后缀为空。
+        # 分桶后同一条行同时打 rollout 与 eval（2026-11-14 评审）：同进程里 eval 与 rollout
+        # 并发，只打一个数永远说不清是谁的；两个桶相加才等于旧的进程级口径。
         log(
             f"[dist] round done: ok={len(results)}/{n_total_tasks} missing={len(missing)} "
             f"retried={stats['retried']} byNode={json.dumps(by_node)}"
+            + common.distribution.pool_round_suffix()
         )
         # 竞速账 + 重复执行率（口径见 `common.distribution.race_stats`；2026-10-21 收口）
         if _race_line := common.distribution.race_log_line(
@@ -613,9 +631,17 @@ class RolloutDispatcher:
         combined["dist_phase_sec"] = round((t_dist_done_box[0] or time.time()) - t_queue_enter, 1)
         if halt_event is not None and halt_event.is_set():
             combined["halt_aborted"] = True
+            # 停派原因必须在行里分开（2026-11-15 现场）：原实现写死「KL halt」，而 g5 的停
+            # **全部**来自 volume 的逐关配额 ⇒ 读日志的人把「配额收工」误当熔断，还把
+            # missing 当成「没派出去」。判据只有 `pool_halt`（外部熔断不置位它）。
+            combined["halt_kind"] = "quota" if self.pool_halt else "external"
+            # missing 的三个去向互不相交（inflight=派过未结算 · never_dispatched=从未派出，
+            # 只有非 pool_halt 才计入 missing · failed=试满 MAX_TASK_ATTEMPTS），同行分开报。
+            combined["halt_split"] = split = halt_missing_split(attempts, all_tasks, seen, missing_keys)
             log(
-                f"[dist] KL halt active — dispatch stopped early "
-                f"({len(missing)} task(s) left undispatched/unsettled)"
+                f"[dist] {combined['halt_kind']} halt — dispatch stopped early "
+                f"(missing={len(missing)} · inflight={split['inflight']} "
+                f"never_dispatched={split['never_dispatched']} failed={split['failed']})"
             )
         # rollout 采集耗时（用户口径 2026-09-19）：权重就绪开始分发 → 样本齐可交 PPO。
         # 边分发边开采下含与采集重叠的分发墙钟（端到端，不是「纯仿真」）。

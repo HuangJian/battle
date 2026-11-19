@@ -45,6 +45,7 @@ import {
 import type { InputLike } from '../../src/game/Input'
 import { DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { InputRecorder } from '../../src/replay/InputRecorder'
+import { type ReplayType, replayTypeFromOutcome } from '../../src/replay/types'
 import { serializeReplayFile, buildReplayFilename } from '../../src/replay/file'
 import type { SimOutcome } from './simulation-runner'
 import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'fs'
@@ -233,8 +234,9 @@ function main(): void {
 
     // Filename 用真实竞技场号（s1020/1021/1022，便于区分），envelope 的
     // stageIndex 用 0（arena 语义，同 export-rl-rollout 的 killScore 修复）。
-    const status: 'clear' | 'base' | 'died' | 'timeout' =
-      out.outcome === 'stage_clear' ? 'clear' : out.outcome === 'gameover' ? 'died' : 'timeout'
+    // 同一处历史 bug 的两份副本：曾按 `outcome === 'gameover'` 判定 ⇒ 永不命中，
+    // 且 `base_destroyed` 也落进 'timeout'（旧链还丢过 'base'）。统一走唯一映射。
+    const status: ReplayType = replayTypeFromOutcome(out.outcome)
     const filename = buildReplayFilename({
       difficulty,
       stageIndex: r.stageId - 1,

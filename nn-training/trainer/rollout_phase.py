@@ -212,8 +212,11 @@ def begin_payload_parts(args, it: int, parts: Any) -> None:
     slim 在这里建（而不是在 `ShardSegments.begin` 里）：那个模块是 payload 字节的叶子，
     不依赖 `remote.payload_slim`（否则 DAG 层号会抬起来连坐上位模块）。
     """
+    # 语料格式（plan/replay-corpus.plan.md P1）：缺省 full = 旧行为；replay 的段成员集不同，
+    # 必须跟 `take()` 的读侧同源（否则 full↔replay 热切换时旧段会冒充新格式）。
+    corpus_fmt = str(getattr(args, "corpus_fmt", "full") or "full")
     if not int(getattr(args, "wire_diet", 1) or 0):
-        parts.begin(int(it), wire_diet=False)
+        parts.begin(int(it), wire_diet=False, corpus_fmt=corpus_fmt)
         return
     from biz.reward_library import METRICS_VERSION
     from remote.payload_slim import build_slim
@@ -224,8 +227,9 @@ def begin_payload_parts(args, it: int, parts: Any) -> None:
         reward_spec=spec,
         it=int(it),
         metrics_version=int(METRICS_VERSION),
+        corpus_fmt=corpus_fmt,
     )
-    parts.begin(int(it), wire_diet=True, slim=slim)
+    parts.begin(int(it), wire_diet=True, slim=slim, corpus_fmt=corpus_fmt)
 
 
 def _stream_extra_kwargs(

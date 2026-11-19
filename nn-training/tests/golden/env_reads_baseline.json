@@ -31,6 +31,11 @@
     "worker/ppo/np_core.py": 1,
     "worker/serve_pool.py": 1,
     "worker/sibling_reuse.py": 1,
-    "worker/trainer_heartbeat.py": 2
+    "worker/trainer_heartbeat.py": 2,
+    "common/http_pool.py": 2,
+    "common/net_http.py": 2,
+    "trainer/dispatch.py": 1,
+    "trainer/dispatch_queue.py": 1,
+    "worker/train/bc.py": 1
   }
 }

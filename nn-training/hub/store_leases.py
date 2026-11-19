@@ -52,6 +52,7 @@ from typing import Any
 
 from common.protocol import (
     BOTH_ROLE_KINDS,
+    CAP_REPLAY_CORPUS,
     CLAIM_MODE_BACKUP,
     CLAIM_MODE_EXCLUSIVE,
     CLAIM_MODES,
@@ -189,6 +190,10 @@ class LeaseBook:
         #: job_id -> 归属 kind 缓存（`manifest.kind`；★Q5 的 BC 豁免要它）。失效点与 `_roles`
         #: 同（`publish` 重发覆盖 manifest ⇒ 旧归属/旧 kind 作废）；同样只缓存**读成功**的值。
         self._kinds: dict[str, str] = {}
+        #: job_id -> 语料格式缓存（`manifest.corpus_fmt`；2026-11-16，plan/replay-corpus D2/B7）。
+        #: 认领闸要判「这份活是不是 replay」——manifest 在盘上，每拍每候选重读是白烧 IO。
+        #: 失效点与 `_roles`/`_kinds` 同（`publish` 重发覆盖 manifest）。
+        self._fmts: dict[str, str] = {}
         self._role_lock = Lock()
         #: ★M5：`job_id -> 最近一次进度信号（`POST /jobs/{id}/epoch`）时刻`。
         #: 为什么 BC 要一条**独立于心跳**的活性信号：bc 作业是小时级长跑，心跳只证明
@@ -212,6 +217,7 @@ class LeaseBook:
         with self._role_lock:
             self._roles.pop(job_id, None)
             self._kinds.pop(job_id, None)
+            self._fmts.pop(job_id, None)  # 同理由：新的 manifest 可能换了 corpus_fmt
         self._last_progress.pop(job_id, None)
 
     def clear_backup(self, job_id: str) -> None:
@@ -480,6 +486,27 @@ class LeaseBook:
             self._kinds[job_id] = kind
         return kind
 
+    def job_corpus_fmt(self, job_id: str) -> str:
+        """job 的语料格式（`manifest.corpus_fmt`；读不到/旧 job ⇒ `"full"`）。
+
+        与 `job_kind`/`job_role` 同款的缓存与兜底：这是 claim 闸的输入，每拍每候选都要读；
+        缺省 full 保证旧 job 与旧 hub 行为逐字节不变。
+        """
+        with self._role_lock:
+            cached = self._fmts.get(job_id)
+        if cached is not None:
+            return cached
+        try:
+            man = json.loads((self._job_dir(job_id) / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return "full"
+        if not isinstance(man, dict):
+            return "full"
+        fmt = str(man.get("corpus_fmt") or "full")
+        with self._role_lock:
+            self._fmts[job_id] = fmt
+        return fmt
+
     def job_role(self, job_id: str) -> str:
         """job 的**归属角色**（`manifest.role`；旧 job 按 `kind` 兜底；读不到 ⇒ online）。
 
@@ -512,6 +539,7 @@ class LeaseBook:
         mode: str | None = None,
         expected_epoch: int | None = None,
         role: str = ROLE_ONLINE,
+        capabilities: list[str] | None = None,
     ) -> str | None:
         """领取（独占 = 设租约 + owner + last_heartbeat 三件套**同时置**）。
 
@@ -538,6 +566,7 @@ class LeaseBook:
             avoid_stale_holder=avoid_stale_holder,
             expected_epoch=expected_epoch,
             role=role,
+            capabilities=capabilities,
         )
         return token if ok else None
 
@@ -550,6 +579,7 @@ class LeaseBook:
         avoid_stale_holder: bool = False,
         expected_epoch: int | None = None,
         role: str = ROLE_ONLINE,
+        capabilities: list[str] | None = None,
     ) -> ClaimOutcome:
         """带原因的领取（新 HTTP 面的唯一入口）：区分「降级」与「领不到」。
 
@@ -565,6 +595,7 @@ class LeaseBook:
             avoid_stale_holder=avoid_stale_holder,
             expected_epoch=expected_epoch,
             role=role,
+            capabilities=capabilities,
         )
         if ok:
             status = "backup" if mode == CLAIM_MODE_BACKUP else "ok"
@@ -650,6 +681,7 @@ class LeaseBook:
         avoid_stale_holder: bool,
         expected_epoch: int | None,
         role: str = ROLE_ONLINE,
+        capabilities: list[str] | None = None,
     ) -> tuple[bool, str, str]:
         """claim 的**唯一**临界区（返回 `(ok, token, 原因)`）。
 
@@ -686,6 +718,14 @@ class LeaseBook:
                 # 各自的调用点再各判一次，那又是两套会漂的判据（push 腿根本不经过
                 # `claim_job`，就是这条的必要性所在）。
                 return False, "", blocked
+            # 语料能力闸（2026-11-16，plan/replay-corpus.plan.md D2/B7）：replay job 只发给
+            # 声明了 `replay_corpus` 的 claimer。旧 worker 不发该键 ⇒ 这里 fail-closed——
+            # 否则旧 worker 会拿到只有 replay 的 payload、把 0 个 shard 当 0 样本训练。
+            # 位置在归属闸之后、租约判定之前：不消耗租约、不改 epoch。
+            if self.job_corpus_fmt(job_id) == "replay" and CAP_REPLAY_CORPUS not in set(
+                capabilities or ()
+            ):
+                return False, "", "no_replay_corpus"
             now = self._clock()
             if mode == CLAIM_MODE_BACKUP:
                 if self.job_kind(job_id) in BOTH_ROLE_KINDS:

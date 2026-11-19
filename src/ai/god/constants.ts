@@ -92,9 +92,9 @@ export const BASE_CENTER_Y_PX = BASE_POS.row * CELL + CELL
  * (the old dodgeCounterFireRangeCells param was removed in §101). */
 export const COUNTER_FIRE_RANGE_CELLS = 5
 
-/** Float ms→ticks (no rounding, min 0). Used by ThreatBudget for threat-timing
- *  arithmetic where fractional ticks are intentional. */
-export const msToTicksFloat = (ms: number): number => Math.max(0, ms / TICK_MS)
+/** Float ms→ticks (no rounding, min 0). Shared implementation lives in
+ *  `src/utils/time.ts`; kept re-exported here for existing God-AI call sites. */
+export { msToTicksFloat } from '../../utils/time'
 
 /**
  * Shots-to-kill from a tank's raw `hp`.

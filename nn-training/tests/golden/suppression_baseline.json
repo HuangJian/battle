@@ -67,6 +67,9 @@
     "trainer/loop_volume.py": 1,
     "worker/forensics.py": 2,
     "worker/model_build.py": 1,
-    "worker/scripts/measure_checkpoint_rss.py": 2
+    "worker/scripts/measure_checkpoint_rss.py": 2,
+    "tests/remote/test_rollout_relay.py": 5,
+    "tests/trainer/test_rollout_dispatch_resilience.py": 1,
+    "tools/coverage_report.py": 2
   }
 }

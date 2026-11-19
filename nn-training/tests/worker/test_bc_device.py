@@ -14,7 +14,8 @@
   2. 判据看的是**卡数**而不是 `is_available` 标志（`available=True, count=0` 也要落 cpu）；
   3. 非 `cuda-dp` 路径**不得调用探针**（`torch.cuda.is_available()` 不是零成本，
      纯 CPU 机上更不该被顺带调用）；
-  4. `remote/bc_job._bc_device` 的透传 + tpu/xla 响亮拒绝（那半边本就零 torch）。
+  4. `remote/bc_job._bc_device` 的透传（含 tpu/xla——2026-11-13 BC 有了 XLA 训练路径；
+     那半边本就零 torch）。
 
 **不在这里**：`torch.device` 的构造（含 `cuda-dp` → `torch.device("cuda")` 这条映射）
 与 `_bc_raw` 的 `"module."` 前缀防线——它们要真 torch，留在 `tests/worker/test_bc_dp.py`。
@@ -31,7 +32,6 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from common.protocol import ProtocolError
 from remote.bc_job import _bc_device
 from worker.train.device import DP_DEVICE_ALIASES, resolve_bc_device
 
@@ -89,8 +89,11 @@ def test_worker_bc_device_passthrough(arg: str, expect: str) -> None:
     assert _bc_device(arg) == expect
 
 
-@pytest.mark.parametrize("arg", ["tpu", "xla"])
-def test_worker_bc_device_tpu_rejected(arg: str) -> None:
-    """train/bc.py 无 xla 路径 ⇒ 确定性拒绝，绝不静默降级。"""
-    with pytest.raises(ProtocolError, match="cuda/cuda-dp"):
-        _bc_device(arg)
+@pytest.mark.parametrize("arg,expect", [("tpu", "tpu"), ("xla", "xla"), ("TPU", "tpu")])
+def test_worker_bc_device_passes_tpu_through(arg: str, expect: str) -> None:
+    """2026-11-13：BC 有了 XLA 训练路径 ⇒ tpu/xla 不再拒收，原样交给 train/bc.py。
+
+    （此前这里钉的是 `ProtocolError` 拒绝；拒绝的理由是 train/bc.py 没有 xla 路径，
+    现在那条路径已接上 `worker/ppo/np_core` 的 XLA 助手。）
+    """
+    assert _bc_device(arg) == expect

@@ -60,6 +60,8 @@ SHARD_KEYS = (
     "mask",
     "reward",
     "stage",
+    # Hybrid opening（可选盘上列；加载端缺文件时补全 1）。
+    "policy_mask",
 )
 SHARD_KEYS_V6 = (*SHARD_KEYS, "a_hold", "lp_hold")
 
@@ -76,6 +78,8 @@ EPISODE_KEYS = (
     "adv",
     "ret",
     "mask",
+    # Hybrid opening（controller 接管的步 = 0）。
+    "policy_mask",
 )
 EPISODE_KEYS_V6 = (*EPISODE_KEYS, "a_hold", "lp_hold")
 GOAL_EPISODE_KEYS = (

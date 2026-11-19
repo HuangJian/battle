@@ -100,6 +100,9 @@ MANIFEST_OPTIONAL_DEFAULTS: dict[str, object] = {
     "ref_weights_b64": "",  # §363：BC ref 权重 base64；空 = 无
     "ref_weights_fp": "",  # §363：上者 sha256（有字节时必对上）
     "shuffle": True,
+    # P3（plan/replay-corpus.plan.md D6）：PPO 语料装载器。旧 hub 产出的 manifest
+    # 没有这个键 ⇒ 默认 eager（逐字节旧行为）；lazy 由发布端显式写入。
+    "ppo_loader": "eager",
     "schedule_raw": [],  # ppo_schedule 解析前原始表（审计）
     "opt_init": "",  # base64 tar（model/opt/numpy RNG）；空 = 无（首轮）
     # 严格样本量配额（target_transitions 路线）：训练侧逐关只收前 ceil(target/关数) 步。
@@ -417,6 +420,12 @@ def normalize_manifest(m: dict) -> dict:
         out.setdefault(k, v)
     if model.kind == "iter":
         out["rollout"] = model.rollout  # 归一化后的规格（argv[0] 归位、默认值补齐）
+    # P3：装载器只认两档；拼错的值不能静默退化成 eager（那是「manifest 说 lazy，
+    # 日志一切正常只是没生效」的错账）。
+    if out.get("ppo_loader") not in ("eager", "lazy"):
+        raise ProtocolError(
+            f"ppo_loader={out.get('ppo_loader')!r} 未知（只认 'eager' | 'lazy'）——拒收"
+        )
     return out
 
 

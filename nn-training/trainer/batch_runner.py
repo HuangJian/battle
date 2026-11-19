@@ -40,16 +40,18 @@ from pathlib import Path
 from typing import NamedTuple
 
 import common.codehash
+import common.codehash_ref as codehash_ref
 import common.distribution
 import common.runtime
 import common.task_client
 import common.weights_client
 from biz.batch_plan import (
     batch_iter_id,
+    eval_rule_kwargs,
+    eval_rules_reject_reason,
     is_transient_error,
     kind_for_policy,
     node_gate_reason,
-    node_supports_decision_events,
     node_supports_decision_k,
 )
 from common.fs import append_jsonl
@@ -238,8 +240,7 @@ class BatchEvalRunner:
           - 本单元的 pair 全都已结算（`_done_keys`）⇒ settled=total，不重复跑。
         """
 
-        args = self.args
-        unit = self.unit
+        args, unit = self.args, self.unit
         policy_cfg = self.cfg.get("policy", {})
         status_timeout = common.distribution.status_timeout_of(policy_cfg)
         task_timeout = float(policy_cfg.get("taskTimeoutSec", 900))
@@ -305,14 +306,12 @@ class BatchEvalRunner:
         else:
             seeds = [int(s) for s in unit["seeds"]]
             pairs = [(int(unit["stageId"]), s) for s in seeds]
-        total = len(pairs)
-        done_before = self._done_keys(key16)
+        total, done_before = len(pairs), self._done_keys(key16)
         todo = [p for p in pairs if p not in done_before]
         if not todo:
             log(f"[batcheval] {unit['rung']} u{self.unit_idx}: already settled — skip")
             return {"settled": total, "total": total, "dropped": 0}
-        t_start = time.time()
-        trace = common.distribution.trace_enabled()
+        t_start, trace = time.time(), common.distribution.trace_enabled()
         # R4-G1 心跳：单元开始（console 只读，显示当前批/单元/rung）。
         _heartbeat(
             window_open=(
@@ -341,7 +340,6 @@ class BatchEvalRunner:
 
         local_bun = bun_version(self.bun)
         # 节点门指纹（2026-09-17 统一）：与 rollout 门同源 = SSOT 清单的 codeHash。
-        code_hash_local = common.codehash.compute_code_hash()
         # ---- 派发通道：**每节点各自就绪、各自派单**（用户 2026-09-19 五条裁定）----
         # 旧实现是三个**串行阶段**：ping 全部节点 → 全部节点收权重 → 才开派。慢节点把整批
         # 拖住（实测 gate 6.83s + weights 0.79s，**且每个单元重跑一遍**），而**已经就绪的
@@ -349,6 +347,8 @@ class BatchEvalRunner:
         # 节点一条通道：ping 通 → 传权重 → **立刻**派活，不等任何别的节点；就绪的节点不再
         # 被 ping、不再重传同一份权重；失联节点每 recover_ping_sec 重探，通了立即派单。
         enabled_nodes = [n for n in self.cfg.get("nodes", []) if n.get("enabled", True)]
+        # 节点门指纹（2026-09-17 统一；2026-11-15 起参考值 = self 自报）：与 rollout 同源。
+        code_hash_local = codehash_ref.reference_code_hash(enabled_nodes, timeout=status_timeout)
         # 本机槽位不需要任何门/权重 ⇒ 与节点通道并行、**立刻**开工。
         local_on = local_weights is not None and local_slots > 0
         log(
@@ -710,14 +710,11 @@ class _UnitLanes:
                 )
             lane["next_try"] = time.time() + self.recover_ping_sec
             return False
-        # R2 事件 rung：本批要事件门 ⇒ 无能力位节点拒派（旧 agent 静默跑均匀局混入，
-        # 与 stageJsonSupport 同规；self.args 缺席 = 老行为不查）。
-        if bool(getattr(getattr(self.owner, "args", None), "decision_events", False)) and not node_supports_decision_events(ping):
+        # eval 规则 / 事件门 / hybrid opening：统一能力位门（旧 agent 拒派，不静默降级）。
+        why_rules = eval_rules_reject_reason(getattr(self.owner, "args", None), ping)
+        if why_rules:
             if lane["tries"] == 1 or lane["tries"] % 3 == 0:
-                log(
-                    f'[batcheval] node {nid}: 缺 decisionEventsSupport 能力位（旧 agent）——'
-                    f'事件任务被拒；不降级'
-                )
+                log(f'[batcheval] node {nid}: {why_rules}')
             lane["next_try"] = time.time() + self.recover_ping_sec
             return False
         # 决策周期 K（plan/k5-rhythm.plan.md）：本批 K≠10 ⇒ 无能力位节点拒派
@@ -728,6 +725,12 @@ class _UnitLanes:
                     f'[batcheval] node {nid}: 缺 decisionKSupport 能力位（旧 agent）——'
                     f'K≠10 任务被拒；不降级'
                 )
+            lane["next_try"] = time.time() + self.recover_ping_sec
+            return False
+        # 顶钢空枪门/拆砖：开启批只派给有能力位的节点（旧 agent 静默跑关闭态 = 混批）。
+        if sso_why := eval_rules_reject_reason(getattr(self.owner, "args", None), ping):
+            if lane["tries"] == 1 or lane["tries"] % 3 == 0:
+                log(f'[batcheval] node {nid}: {sso_why}')
             lane["next_try"] = time.time() + self.recover_ping_sec
             return False
         # 本轮（本单元）bootId 核（plan/sampler-single-instance.plan.md §8-Q2）：就绪节点永不
@@ -771,8 +774,9 @@ class _UnitLanes:
             lane["next_try"] = time.time() + self.recover_ping_sec
             return False
         common.distribution.note_weights_pushed(self.wver, nid)
-        lane["c"] = max(
-            1, int(lane["raw"].get("concurrency") or ping.get("cpus") or 1)
+        # 与 rollout/eval 腿同一份口径（2026-11-14）：config 优先，缺省 workers → cpus。
+        lane["c"] = common.distribution.node_slots(
+            lane["raw"].get("concurrency"), ping.get("cpus"), ping.get("workers")
         )
         lane["ready"] = True
         with self.lock:
@@ -820,7 +824,8 @@ class _UnitLanes:
 
     def supervise(self, nd: dict) -> None:
         """一个节点的通道：未就绪 → 重探；就绪 → 起槽位线程；掉线 → 交回重探。"""
-        common.distribution.set_request_tag(self.req_scope)
+        # `kind="batch"`（2026-11-14）：节点腿自成 `batch` 计数桶（与同进程 rollout/eval 分开）。
+        common.distribution.set_request_tag(self.req_scope, kind="batch")
         lane = self.lane_state(nd)
         nid = str(lane["id"])
         while not self.all_done.is_set() and time.time() < self.deadline:
@@ -996,6 +1001,8 @@ class _UnitLanes:
                 decision_events=bool(getattr(getattr(self.owner, "args", None), "decision_events", False)),
                 # 决策周期 K：手动 judge 由 spec.decisionK 驱动（缺席/10 = 老行为）。
                 decision_k=int(getattr(getattr(self.owner, "args", None), "decision_k", 10)),
+                # 顶钢空枪门/拆砖（课程 inference_rules；缺席 = 老行为）。
+                **eval_rule_kwargs(getattr(self.owner, "args", None)),
             )
         else:
             m, _files = common.task_client.fetch_task(
@@ -1019,6 +1026,8 @@ class _UnitLanes:
                 decision_events=bool(getattr(getattr(self.owner, "args", None), "decision_events", False)),
                 # 决策周期 K：与本机份额同源（缺席/10 = 老行为）。
                 decision_k=int(getattr(getattr(self.owner, "args", None), "decision_k", 10)),
+                # 顶钢空枪门/拆砖：与本机份额同源（缺席 = 老行为）。
+                **eval_rule_kwargs(getattr(self.owner, "args", None)),
             )
         why = common.task_client.validate_eval_result(m, self.wver)
         if why:
@@ -1026,7 +1035,7 @@ class _UnitLanes:
         return m
 
     def worker(self, nd: dict, lane: dict, slot: int) -> None:
-        common.distribution.set_request_tag(self.req_scope)
+        common.distribution.set_request_tag(self.req_scope, kind="batch")
         nid = str(nd["id"])
         while time.time() < self.deadline and not self.all_done.is_set():
             task = None

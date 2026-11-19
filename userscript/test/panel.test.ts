@@ -3,6 +3,7 @@ import { loadDom, type DomHandle } from '../happydom'
 import type { Runtime } from '../src/runtime'
 import {
   mountPanel,
+  PANEL_Z_INDEX,
   parsePanelPosition,
   readPanelPosition,
   type PanelPosition,
@@ -53,6 +54,15 @@ describe('面板：按钮 → handler，状态/忙态可见', () => {
     expect(calls).toEqual(['saveAndClear', 'scrollTop'])
     panel.destroy()
     expect(w.document.querySelector('#bnc-panel-host')).toBeNull()
+  })
+
+  it('浮窗 z-index 用 32 位上限（压过页面原生弹窗），最小化小方块同值', () => {
+    const panel = mountPanel(docOf(dom()), {})
+    const css = panel.host.shadowRoot!.querySelector('style')!.textContent ?? ''
+    expect(PANEL_Z_INDEX).toBe(2147483647)
+    expect(css.match(new RegExp(`z-index: ${PANEL_Z_INDEX}`, 'g'))).toHaveLength(2)
+    expect(css).not.toContain('z-index: 2147483646')
+    panel.destroy()
   })
 
   it('setSession：面板上能看见本页写哪份日志（多开页签时靠它认页面）', () => {

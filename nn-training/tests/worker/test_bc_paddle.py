@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-pytest.importorskip("paddle")
+paddle = pytest.importorskip("paddle")
 
 from common.schema import BOARD, OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM
 from worker.models.student_paddle import PPOStudent, save_weights_json
@@ -81,8 +81,9 @@ def test_paddle_bc_runs_one_v6_epoch_and_exports_weights(tmp_path) -> None:
     assert out["history"]["hold_acc"] and len(out["history"]["hold_acc"]) == 1
     assert out["history"]["train_loss"] and out["history"]["val_loss"]
     assert out["delivered_epoch"] == 1
-    # history 按 4 位小数落账，返回值是未舍入的原始 float：容差取落账精度。
-    assert out["best_val_loss"] == pytest.approx(out["history"]["val_loss"][-1], abs=1e-4)
+    # 返回的是**原始** val_loss，`history` 只存 round(...,4)；按同一舍入口径精确对账
+    # （Paddle 真跑后暴露：原始 7.665659… vs history 7.6657 不能按 1e-6 比）。
+    assert round(out["best_val_loss"], 4) == out["history"]["val_loss"][-1]
     assert seen and seen[0][0] == 1 and set(seen[0][1]) >= {"hold_acc"}
     assert (tmp_path / "out" / "weights.json").is_file()
     meta = json.loads((tmp_path / "out" / "weights.json").read_text(encoding="utf-8"))
@@ -106,9 +107,8 @@ def test_paddle_bc_delivers_epoch_chosen_by_smoothed_val_loss(tmp_path) -> None:
     delivered = select_best_epoch(out["history"]["val_loss"], window=SMOOTH_WINDOW)
     assert delivered is not None and delivered >= SMOOTH_WINDOW
     assert out["delivered_epoch"] == delivered
-    assert out["best_val_loss"] == pytest.approx(
-        out["history"]["val_loss"][delivered - 1], abs=1e-4
-    )
+    # 同 `bc.py`：best_val 是原始 val_loss，history 是 4 位小数版本。
+    assert round(out["best_val_loss"], 4) == out["history"]["val_loss"][delivered - 1]
     meta = json.loads((tmp_path / "out" / "weights.json").read_text(encoding="utf-8"))
     assert meta["delivered_epoch"] == delivered
     # ⚠ 落账口径对落账口径（2026-11-15）：meta 写的是 `round(best_smoothed, 4)`，返回值是未舍入的
@@ -130,3 +130,34 @@ def test_paddle_bc_rejects_torch_only_device(tmp_path) -> None:
     _write_v6_shard(tmp_path / "data" / "bc_s0_seed1")
     with pytest.raises(ValueError, match="torch 专属"):
         bc_paddle.train(_args(tmp_path, device="cuda-dp"))
+
+
+def test_paddle_masked_ce_drops_rows_with_fewer_than_two_legal_classes() -> None:
+    """行选择与 torch 版同语义：0/1 个合法类的样本整行剔除，2+ 保留（`_kept` 升序 gather）。
+
+    Paddle 3.3 的布尔下标 `x[keep]` 在 C++ 里对未初始化 Tensor 调 `reshape`，每进程打一条
+    `tensor.cc:111` 弃用警告（BC 训练日志里那条）；implementation 改走 `nonzero` + `gather`，
+    本用例就钉住「同序、同值」这条等价前提。
+    """
+    logits = np.array(
+        [[2.0, 0.5, -1.0], [0.1, 0.2, 0.3], [0.0, 0.0, 0.0], [-0.5, 1.5, 0.25]],
+        dtype=np.float32,
+    )
+    mask = np.array([[1, 1, 1], [1, 0, 0], [0, 0, 0], [1, 1, 0]], dtype=np.float32)
+    target = np.array([2, 1, 0, 1], dtype=np.int64)
+
+    loss = bc_paddle._masked_ce(
+        paddle.to_tensor(logits), paddle.to_tensor(target), paddle.to_tensor(mask)
+    )
+    acc = bc_paddle._masked_acc(
+        paddle.to_tensor(logits), paddle.to_tensor(target), paddle.to_tensor(mask)
+    )
+
+    z = np.where(mask > 0, logits, -1e9).astype(np.float32)
+    z = z - z.max(axis=1, keepdims=True)
+    logp = z - np.log(np.exp(z).sum(axis=1, keepdims=True))
+    kept = mask.sum(axis=1) >= 2
+    ref = float((-logp[np.arange(len(target)), target])[kept].mean())
+    assert float(loss) == pytest.approx(ref, rel=1e-5)
+    # 保留行：row0 预测 0（错）、row3 预测 1（对）⇒ 0.5。
+    assert acc == pytest.approx(0.5)

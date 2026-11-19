@@ -165,6 +165,7 @@ LEASE_METHODS = (
     "release_bc_exclusive",
     "job_kind",
     "job_role",
+    "job_corpus_fmt",
     "claim",
     "claim_outcome",
     "_lease_state",
@@ -214,8 +215,10 @@ LEASE_STATE = (
     "hold_meta",
     "_last_progress",
     "_progress_lock",
+    # D10：manifest 的 corpus_fmt 进程内缓存（claim 的能力闸用；forget_job 时清）。
+    "_fmts",
 )
-#: `LeaseBook.__init__` 除了上面 14 个状态之外还要接的 5 个注入面。
+#: `LeaseBook.__init__` 除了上面 15 个状态之外还要接的 5 个注入面。
 LEASE_INJECTED = ("_lock", "_clock", "_job_dir", "sched", "ledger")
 
 #: 组合类自己留的（进程级 + 构造）：`halt_workers` / `_workers` 是**进程**概念，
@@ -379,7 +382,7 @@ def test_every_method_lives_in_exactly_one_mixin() -> None:
     # 2026-10-11 W7（plan/aborted-course-revival）加 2 条（`cancel_job` / `_cancel_job_locked`）
     # ⇒ 64 + 2；2026-11-07（plan/dead-lease-sweep）加 1 条（`reap_dead_leases`）⇒ 65 + 2。
     # B7-P1/P2/P4b：16 个域方法 + 组合类自己的 66 个（构造 / note_worker / 9+39+16 个转发）。
-    assert len(MIXIN_METHODS) + len(OWN_METHODS) == 16 + 66, "_JobStore 的方法总数变了"
+    assert len(MIXIN_METHODS) + len(OWN_METHODS) == 16 + 67, "_JobStore 的方法总数变了"
 
 
 def test_the_mixins_do_not_share_any_defined_name() -> None:
@@ -529,7 +532,7 @@ def test_each_init_hook_owns_its_fields_and_nobody_else_does() -> None:
         assert name in sched_fields, f"Scheduler 没声明 {name}"
         assert name not in owners, f"{name} 在 {owners[name]} 与 Scheduler 各写了一份"
     assert len(sched_fields) == len(SCHED_STATE) + 5, sorted(sched_fields)
-    # 租约协作者：14 个状态 + 5 个注入面，全部只由 `LeaseBook.__init__` 赋值。
+    # 租约协作者：15 个状态 + 5 个注入面，全部只由 `LeaseBook.__init__` 赋值。
     lease_fields = _init_state(HUB_DIR / "store_leases.py", "LeaseBook", "__init__")
     for name in LEASE_STATE:
         assert name in lease_fields, f"LeaseBook 没声明 {name}"

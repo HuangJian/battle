@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from common.schema import OBS_CHANNELS, SCALAR_DIM
+from common.schema import FIRE_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -46,6 +46,11 @@ ENGINE_KEYS = {
     "value_new_rms",
     # x27 冻结判决的接线遥测（`policy_new_rms_of` 的返回值；纯只读、无 ρ 参数）。
     "policy_new_rms",
+    # D8/D10：逐步 KL 与 clip fraction（`kl` 的别名读数 + ratio 出界占比）。
+    "per_step_kl",
+    "clip_fraction",
+    # D8：轮内中止阈值是否触发（缺省关闭 ⇒ 恒 False）。
+    "early_stopped",
 }
 
 
@@ -134,6 +139,74 @@ def test_engine_stats_keys_unchanged() -> None:
     assert set(agg) == ENGINE_KEYS, f"键集变化：{set(agg) ^ ENGINE_KEYS}"
     for k, v in agg.items():
         assert np.isfinite(v), f"{k} 非有限值：{v!r}"
+    assert agg["early_stopped"] is False, "target_kl 缺省关闭时不得早停"
+
+
+def _set_lp_old_from_model(chunks: list[dict], model, delta: float = 0.0) -> None:
+    """把每批的 lp_move/lp_fire 设成模型当前 logprob（+delta）——读数的确定性夹具。
+
+    delta=0 ⇒ 第一步 ratio 恰为 1（clip_fraction=0 / per_step_kl=0）；
+    delta=-10 ⇒ ratio=e^10（全部出界 ⇒ clip_fraction=1）。
+    """
+    from worker.ppo.common import cat_logprob, masked_logsoftmax
+
+    with torch.no_grad():
+        for c in chunks:
+            mv, fr, _val = model(
+                torch.from_numpy(c["obs"]), torch.from_numpy(c["scalars"])
+            )
+            mask = torch.from_numpy(c["mask"])
+            lp_m = cat_logprob(
+                torch.from_numpy(c["a_move"]), masked_logsoftmax(mv, mask[:, :MOVE_DIM])
+            )
+            lp_f = cat_logprob(
+                torch.from_numpy(c["a_fire"]),
+                masked_logsoftmax(fr, mask[:, MOVE_DIM : MOVE_DIM + FIRE_DIM]),
+            )
+            c["lp_move"] = (lp_m + delta).numpy().astype(np.float32)
+            c["lp_fire"] = (lp_f + delta).numpy().astype(np.float32)
+
+
+def test_clip_fraction_and_per_step_kl_readouts() -> None:
+    """D8/D10：ratio=1 ⇒ clip=0 / per_step_kl=0；整体偏移 ⇒ clip=1。"""
+    np.random.seed(7)
+    torch.manual_seed(7)
+    model = PPOStudent(h=8, d=1)
+    chunks = _chunks(n_chunks=1, b=8, seed=7)
+    _set_lp_old_from_model(chunks, model, delta=0.0)
+    opt = torch.optim.Adam(model.parameters(), lr=1.5e-4)
+    agg = ppo_update(model, opt, chunks, 1, torch.device("cpu"))
+    assert agg["clip_fraction"] == 0.0, f"ratio=1 时不应有出界样本：{agg['clip_fraction']}"
+    assert agg["per_step_kl"] == 0.0, f"ratio=1 时 KL 应为 0：{agg['per_step_kl']}"
+
+    torch.manual_seed(7)
+    model2 = PPOStudent(h=8, d=1)
+    chunks2 = _chunks(n_chunks=1, b=8, seed=7)
+    _set_lp_old_from_model(chunks2, model2, delta=-10.0)
+    opt2 = torch.optim.Adam(model2.parameters(), lr=1.5e-4)
+    agg2 = ppo_update(model2, opt2, chunks2, 1, torch.device("cpu"))
+    assert agg2["clip_fraction"] == 1.0, f"ratio=e^10 应全部出界：{agg2['clip_fraction']}"
+    assert agg2["per_step_kl"] > 1.0, f"大漂移的 KL 读数应显著为正：{agg2['per_step_kl']}"
+
+
+def test_target_kl_stops_remaining_epochs() -> None:
+    """D8 轮内中止：阈值极小 ⇒ 第一个 epoch 后停；回调只被调一次。"""
+    np.random.seed(11)
+    torch.manual_seed(11)
+    model = PPOStudent(h=8, d=1)
+    opt = torch.optim.Adam(model.parameters(), lr=1.5e-4)
+    epochs_seen: list[int] = []
+    agg = ppo_update(
+        model,
+        opt,
+        _chunks(n_chunks=2, seed=11),
+        3,
+        torch.device("cpu"),
+        target_kl=1e-12,
+        on_epoch_done=lambda ep, _m: epochs_seen.append(ep),
+    )
+    assert agg["early_stopped"] is True
+    assert epochs_seen == [1], f"应在 epoch 1 后停，实际 {epochs_seen}"
 
 
 def _intent_fixture(n: int = 64, seed: int = 11):

@@ -7,10 +7,7 @@
   * 单局正常是**亚秒级**（云机 220 并发 328 局 4s；8 并发 600 局 57s）⇒ 用户口径
     「单局 >5s 肯定不正常」，所以 >5s 的局**当场杀掉原地重跑**，不留着等 651s。
 
-一条口径一组常量，任何调用点都不许再抄一份数字：
-（上面两条是「单局多慢算不正常」；下面是「一条线程卡多久算机器卡住」——前者管慢局，
-后者管**不可取消的阻塞**：D 状态的挂载点 IO / `Popen` 等子进程 exec 的握手，它们既不返回
-也不抛，硬顶与看门狗都碰不到它们。）
+一条口径一组常量，不许再抄第二份数字：上面是「单局多慢」，下面是「线程卡多久算机器卡住」。
 
   * ``SLOW_GAME_WARN_SEC`` (20.0) —— 点名线：超过它就打一行**带局身份**（`s3/d7`）的 WARN。
     与硬顶（30.0）**不同值**：20–30s 那段是「跑完了但慢」（点名线负责），30s 才是「不再等」。
@@ -21,6 +18,9 @@
     kill + 原地重跑。旧口径「0 = 不限」在本机可以（卡住的是自己的终端），在云机上等于
     「一个卡住的 bun 子进程永远等下去」—— 就是上面那 651s 的成因。
     （5.0 → 30.0，2026-10-26：经典 35 关 + 3 命的长局在 4 核 CPU 上常态 6–15s，5s 是误杀。）
+    ★ 2026-11-18：它现在只是**地板**。真正的缺省硬顶由面板的终局线推（`game_timeout_sec`：
+      `max(30s, max_ticks × PER_TICK_BUDGET_SEC)`）—— 36000 拍的面板上「合法但拉满」的局
+      就是 17–30s（云机实测 max 27.45s = 30s 上限的 92%），固定值会杀掉最贵的那几局重跑。
   * ``RETRY_TIMEOUT_FACTOR`` (4.0) —— **重试尝试**的上限倍数（30s → 120s）。为什么重试反而
     放宽：实测单局墙钟是重尾的（本机强并发下 rollout p50 1.8s / p99 16.8s，eval p50 1.2~
     1.6s / p90 3.2~4.2s / p99 7~8s，见 `docs/nn/runtime-opt.md` §8），首次尝试超限已属异常
@@ -70,6 +70,17 @@ SLOW_GAME_WARN_SEC = 20.0
 #:   ⚠ 连带：`game_ceiling_sec()`（一局整链路上界）= 3×(2×30×4+reap)+20 ≈ 755s——
 #:   它是「兜永不返回」的兜底，不是常态路径；真卡住由 `STALL_WARN_SEC`(120s) 先点名。
 DEFAULT_GAME_TIMEOUT_SEC = 30.0
+#: **每拍（tick）的墙钟预算**（秒）：一局能跑多久由面板自己的终局线决定 —— 36000 拍的面板上，
+#: 一条**合法**的拉满局就是 17–30s，不是异常。
+#:
+#: 标定（2026-11-18，云机 224 核 / 222 并发的逐局真数据，`tmp/g5-pilot/it72/per-game.json`）：
+#: p50 7470 拍 ↔ 5.26s（0.70 ms/拍）· p99 23955 拍 ↔ 13.90s（0.58）· 拉满 36000 拍 ↔ 17–30s
+#:  ⇒ 实测 **0.48–0.85 ms/拍**。这里取 1.2 ms（上限的 1.4×）作为「合法最坏值」的预算。
+#: 为什么必须由 tick 预算推导而不是一个固定秒数（现场）：`classic35-safe-base` 的终局线是
+#: 36000 拍，而缺省硬顶 30s 比它的合法最坏值只高 0–4s（实测 max 27.45s = 92% 上限）——
+#: 机器稍慢一点就会把**最贵的那几局**（拉满的长局）杀掉再跑一遍：白烧 25s+，要命的是它
+#: 烧在最贵的那批局上。
+PER_TICK_BUDGET_SEC = 0.0012
 #: 重试尝试的上限倍数（首次 30s ⇒ 重试 120s）；调用方显式给上限时不放大。
 RETRY_TIMEOUT_FACTOR = 4.0
 #: **显式**配置档的重试放大（2026-10-25）：比自定档保守一半 —— 首次严格照配置，重试才放宽
@@ -154,6 +165,54 @@ DRAIN_CEILING_SEC = 30.0
 STALL_WARN_SEC = 120.0
 
 
+def max_ticks_of(argv: Sequence[str]) -> int:
+    """argv 的 `--max-ticks`（= 这一局允许跑多少拍）；缺席/非整数 ⇒ `0`（= 未知，走兜底硬顶）。
+
+    为什么要从 argv 取：两条腿的命令都由 `worker/cmd` / `run_local_eval_game` 拼装，`--max-ticks`
+    就在里面（= 课程/关卡的终局线）⇒ 看门狗不需要外部再传一个可能漂移的数。
+    """
+    try:
+        i = list(argv).index("--max-ticks")
+    except ValueError:
+        return 0
+    seq = list(argv)
+    if i + 1 >= len(seq):
+        return 0
+    try:
+        n = int(str(seq[i + 1]))
+    except (TypeError, ValueError):
+        return 0
+    return max(0, n)
+
+
+def game_timeout_sec(max_ticks: int = 0, *, base_sec: float | None = None) -> float:
+    """一局**首次尝试**的缺省硬顶：`max(兜底, tick 预算 × 每拍预算)`，取 0.1s 精度。
+
+    `max_ticks ≤ 0`（老计划没有这个旗标 / 未知面板）⇒ 原样返回兜底值（今天的行为）。
+    `base_sec` 可覆盖兜底（调用方自己的常量），但不参与缩放：缩放只由面板决定。
+    """
+    floor = DEFAULT_GAME_TIMEOUT_SEC if base_sec is None else float(base_sec)
+    ticks = max(0, int(max_ticks or 0))
+    # 只把**推导出来的那一项**取 0.1s（读数好看）；地板原值返回 —— 地板可能是 0.05s 这种
+    # 测试/紧档值，一并 round 会把 0.05 抬成 0.1（一个静默的口径漂移）。
+    return max(floor, round(ticks * PER_TICK_BUDGET_SEC, 1))
+
+
+def slow_warn_sec(timeout_sec: float) -> float:
+    """本次尝试的**点名线**：`SLOW_GAME_WARN_SEC + max(0, 硬顶 − 兜底硬顶)`。
+
+    语义 =「点名线给硬顶让出**同一份**余量」（今天那对 20s/30s 的余量就是 10s）：硬顶随面板的
+    tick 预算抬高多少，点名线就抬多少 —— 缺省档（30s）逐字返回 20s，2026-10-26 的标定一个字
+    不改；36000 拍的面板（硬顶 43.2s）⇒ 点名 33.2s，让「合法但拉满」的局不再每轮假警报，而
+    真正的退化（43s 都跑不完）仍会在杀之前先说话。
+
+    写成「常量 + 增量」而不是「硬顶 − 固定余量」：`SLOW_GAME_WARN_SEC` 仍是**可以单独调**的那个
+    旋钮（不是从硬顶反算出来的派生值）—— 三个用例用它把点名线压到几十毫秒，写死成差值就调不动了。
+    """
+    extra = max(0.0, float(timeout_sec) - float(DEFAULT_GAME_TIMEOUT_SEC))
+    return round(SLOW_GAME_WARN_SEC + extra, 1)
+
+
 def attempt_timeout_sec(base_sec: float, attempt: int, explicit: bool = False) -> float:
     """第 `attempt` 次尝试的硬顶（秒）。
 
@@ -182,8 +241,12 @@ def game_ceiling_sec(base_sec: float, explicit: bool = False, reap_sec: float | 
 
 
 def warn_is_redundant(timeout_sec: float) -> bool:
-    """软告警是否与硬顶同值（同值 ⇒ 只打超时行，不再多打一行 WARN）。"""
-    return float(timeout_sec) <= SLOW_GAME_WARN_SEC
+    """软告警是否与硬顶同值（同值 ⇒ 只打超时行，不再多打一行 WARN）。
+
+    判据是「点名线 ≥ 硬顶」，而点名线随硬顶走（`slow_warn_sec`）⇒ 缺省 30s 档仍为 False
+    （20 < 30，跑完但慢的局要说话），硬顶 ≤ 20s 的紧档仍为 True（来不及说就被杀）。
+    """
+    return slow_warn_sec(float(timeout_sec)) >= float(timeout_sec)
 
 
 def progress_due(
@@ -219,7 +282,7 @@ def slow_warn_line(
     """软告警行（**带局身份**；`kind` = `rollout` / `eval`）。"""
     return (
         f"WARN {kind} 单局异常慢：{label} 已 {elapsed:.1f}s"
-        f"（正常 <{SLOW_GAME_WARN_SEC:g}s；硬顶 {timeout_sec:g}s；"
+        f"（正常 <{slow_warn_sec(timeout_sec):g}s；硬顶 {timeout_sec:g}s；"
         f"第 {attempt}/{GAME_MAX_ATTEMPTS} 次）——现场见 {where}"
     )
 
@@ -244,7 +307,8 @@ def stall_line(kind: str, inflight: int, since_sec: float, labels: Sequence[str]
     return (
         f"WARN {kind} 整轮停滞：{since_sec:.0f}s 里一局都没结算（还有 {inflight} 局在飞"
         + (f"：{who}" if who else "")
-        + "）——单局看门狗只管单局（5s 硬顶），卡住的往往是**子进程回收或挂载点 IO**，"
+        + "）——单局看门狗只管单局（按面板 tick 预算推导的硬顶，见 `game_timeout_sec`），"
+        "卡住的往往是**子进程回收或挂载点 IO**，"
         "查那两条（common.platform_utils.reap_bounded 的那本账）"
     )
 
@@ -333,7 +397,13 @@ def drain_fail_line(kind: str, label: str, n_done: int, n_failed: int, where: st
     )
 
 
-def game_time_summary(kind: str, items: list[tuple[float, str]], *, retried: int = 0) -> str:
+def game_time_summary(
+    kind: str,
+    items: list[tuple[float, str]],
+    *,
+    retried: int = 0,
+    warn_sec: float = SLOW_GAME_WARN_SEC,
+) -> str:
     """一轮结束时的**单局耗时分布**（每轮都打：5s 这条线要靠真数据校准，不靠猜）。
 
     `items` = 逐局 `(墙钟秒, 局身份)`（**成功那次尝试**的墙钟；重试次数用 `retried` 另计）。
@@ -344,10 +414,11 @@ def game_time_summary(kind: str, items: list[tuple[float, str]], *, retried: int
     if n == 0:
         return f"{kind} 单局耗时：本轮没有跑成的局（重试过的局 {retried} 个）"
     slowest = sorted(items, key=lambda x: x[0], reverse=True)[:3]
-    over = sum(1 for s in secs if s >= SLOW_GAME_WARN_SEC)
+    line = max(SLOW_GAME_WARN_SEC, float(warn_sec))
+    over = sum(1 for s in secs if s >= line)
     return (
         f"{kind} 单局耗时（{n} 局）：p50={_pct(secs, 0.5):.2f}s p90={_pct(secs, 0.9):.2f}s "
-        f"p99={_pct(secs, 0.99):.2f}s max={secs[-1]:.2f}s｜≥{SLOW_GAME_WARN_SEC:g}s 有 {over} 局"
+        f"p99={_pct(secs, 0.99):.2f}s max={secs[-1]:.2f}s｜≥{line:g}s 有 {over} 局"
         f"｜重试过的局 {retried} 个｜最慢：" + "、".join(f"{lab}={s:.2f}s" for s, lab in slowest)
     )
 
@@ -368,6 +439,7 @@ __all__ = [
     "GAME_IO_SLACK_SEC",
     "GAME_MAX_ATTEMPTS",
     "GAME_POLL_SEC",
+    "PER_TICK_BUDGET_SEC",
     "RETRY_TIMEOUT_FACTOR",
     "SCAN_CEILING_SEC",
     "SLOW_GAME_WARN_SEC",
@@ -380,10 +452,13 @@ __all__ = [
     "game_ceiling_sec",
     "game_label",
     "game_time_summary",
+    "game_timeout_sec",
     "hard_cap_line",
+    "max_ticks_of",
     "retry_line",
     "scan_ceiling_line",
     "slow_warn_line",
+    "slow_warn_sec",
     "stall_line",
     "warn_is_redundant",
 ]

@@ -25,7 +25,8 @@
  *   · 因此这些产物**不带 DT_NEEDED/LC_LOAD_DYLIB**，glibc/musl/bionic/libSystem
  *     都能 dlopen —— Android/Termux（bionic）也在覆盖内。
  * 语义与 memset/memcpy 逐字节等价（float 按值赋值，无类型双关），故不影响
- * 「native 与 wasm 逐位一致」这一契约。
+ * 「native 与 wasm 在 `ATTEST_TOLERANCE` 内一致」这一契约（**不是逐位**：native 侧
+ * `-ffp-contract=fast` + `-mfma` 让 FMA 只舍入一次，末位差 ~1 ulp，见 conv_native.h）。
  *
  * 构建：bun tools/agent/native-build.ts（本机库 + CLI）· --cross（6 目标 prebuilt）
  *       · --wasm（prebuilt/wasm/conv.wasm）。flags 钉死在 native-prebuilt.ts（本目录）。

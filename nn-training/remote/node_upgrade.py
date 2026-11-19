@@ -23,9 +23,9 @@ from __future__ import annotations
 import json
 import os
 import time
-import urllib.parse
 
 from common.codehash import dirty_hash_files
+from common.codehash_ref import is_self_node as _is_self_node
 from common.distribution import NET_ERRORS, node_ping, node_request
 
 # 训练机当前分支（run_rl/run_bc/loop_serve 启动时锁存）。节点远控升级**永远**用这个
@@ -46,15 +46,12 @@ def is_self_node(url: str, node_id: str = "") -> bool:
     远控语义（2026-08-30 用户修订）：stale 时允许远控，但只做**纯重启**
     （request_upgrade 不带 pullBranch ⇒ agent 不做任何 git 操作，重启进程即
     拾取工作区新代码）；**禁止 pull**——共享工作区上的 git pull 是破坏性的
-    （曾把本机 reset 回旧分支，2026-08-30 事故）。codeHash 正确时零动作。"""
-    if node_id.strip().lower() == "self":
-        return True
-    try:
-        host = (urllib.parse.urlparse(url).hostname or "").lower()
-    except ValueError:
-        # `.hostname` 只在端口非法时抛（如 `http://host:abc`）：这是配置错，判「不是本机」。
-        return False
-    return host in ("127.0.0.1", "localhost", "::1")
+    （曾把本机 reset 回旧分支，2026-08-30 事故）。codeHash 正确时零动作。
+
+    判据本体住 `common/codehash_ref.py`（`common/` 不能反向 import `remote/`，
+    而参考 codeHash 的挑选也要用它）——这里只转调，不写第二份。
+    """
+    return _is_self_node(url, node_id)
 
 
 def current_upgrade_branch() -> str:

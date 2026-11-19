@@ -340,10 +340,23 @@ def test_scenario_verdict_separates_a_port_race_from_a_real_bug(tmp_path: Path) 
         bug.write_text(
             "Traceback (most recent call last):\nValueError: 真 bug\n", encoding="utf-8"
         )
+        # 2026-11-19 全量门禁（三启胜者 bind 抛 WSAEACCES）：Windows 的 10013 也是
+        # 「这个端口此刻不可 bind」，必须同样归成场景作废——旧判据把它读成真 bug。
+        forbidden = tmp_path / "forbidden.log"
+        forbidden.write_text(
+            "Traceback (most recent call last):\n"
+            '  File "remote/worker_server.py", line 603, in make_worker_server\n'
+            "PermissionError: [WinError 10013] An attempt was made to access a socket in a "
+            "way forbidden by its access permissions\n",
+            encoding="utf-8",
+        )
         why = "存活的那个必须真的在服务"
         stolen = _scenario_verdict([(holder, raced)], why)
         assert isinstance(stolen, PortStolenError), stolen
         assert "Address already in use" in str(stolen), "归类为场景作废了，但没把日志尾巴带上"
+        # 只判类型（行为面）：文本形态断言的口径只许降不许升，日志尾巴已由上面那条钉住。
+        wsa = _scenario_verdict([(holder, forbidden)], why)
+        assert isinstance(wsa, PortStolenError), wsa
         broken = _scenario_verdict([(holder, bug)], why)
         assert isinstance(broken, AssertionError), broken
         assert "真 bug" in str(broken), "真 bug 的日志尾巴被吞了"
@@ -499,10 +512,10 @@ def _scenario_verdict(
 ) -> Exception:
     """「三启」场景的判词：**先分清「场景作废」与「真 bug」**，再把三个日志带上。
 
-    `port_race_seen()` 认端口在探测后被外人抢走的**两张脸**（守卫拒启文案 / 裸 `EADDRINUSE`）
-    ⇒ 那只是这一轮场景作废（xdist 并行的端口竞争），换端口重跑即可；非端口死法（真 bug）照旧
-    响亮失败，并附日志尾巴（否则只剩一句断言，现场查不动）。`lines` 取 40：`Address already
-    in use` 常被 traceback 压在 `_tail` 缺省 6 行之外。
+    `port_race_seen()` 认端口不可用的**三张脸**（守卫拒启文案 / 裸 `EADDRINUSE` /
+    Windows `10013` 权限拒绝）⇒ 那只是这一轮场景作废（xdist 并行的端口竞争），换端口重跑
+    即可；非端口死法（真 bug）照旧响亮失败，并附日志尾巴（否则只剩一句断言，现场查不动）。
+    `lines` 取 40：`Address already in use` 常被 traceback 压在 `_tail` 缺省 6 行之外。
     """
     outs = [_tail(lg, 40) for _, lg in procs]
     blob = "\n".join(outs)

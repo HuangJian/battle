@@ -41,7 +41,7 @@
     "remote/push_client.py": 4,
     "remote/push_tunnel.py": 2,
     "remote/result_upload.py": 4,
-    "remote/rollout_node.py": 14,
+    "remote/rollout_node.py": 18,
     "remote/rollout_tunnel.py": 2,
     "remote/train_common.py": 4,
     "remote/train_core.py": 27,
@@ -50,7 +50,7 @@
     "remote/wire.py": 3,
     "remote/worker.py": 10,
     "remote/worker_proc.py": 1,
-    "trainer/batch_runner.py": 29,
+    "trainer/batch_runner.py": 30,
     "trainer/batch_store.py": 2,
     "trainer/bc_ingest.py": 6,
     "trainer/bc_loop.py": 7,
@@ -95,8 +95,15 @@
     "worker/ppo/np_core.py": 9,
     "worker/serve_pool.py": 6,
     "worker/sibling_reuse.py": 2,
-    "worker/train/bc.py": 2,
+    "worker/train/bc.py": 6,
     "worker/train/bc_paddle.py": 2,
-    "worker/train/goal_bc.py": 5
+    "worker/train/goal_bc.py": 5,
+    "common/http_pool.py": 4,
+    "common/node_report.py": 3,
+    "hub/admin.py": 2,
+    "hub/relay.py": 8,
+    "remote/replay_corpus.py": 5,
+    "remote/rollout_relay.py": 15,
+    "worker/ppo/lazy_corpus.py": 4
   }
 }

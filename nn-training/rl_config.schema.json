@@ -44,6 +44,7 @@
       "cf_edge_ip",
       "slim",
       "wire_diet",
+      "corpus_fmt",
       "rollout_src",
       "remote_transport",
       "remote_job_root",

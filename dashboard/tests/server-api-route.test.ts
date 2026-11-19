@@ -10,6 +10,7 @@
 import { actions, loadConfig, post, postJson } from './helpers/console-fixture'
 import { configPath } from '../src/core/paths'
 import { EVAL_A_BUSY_KEY } from '../src/server/eval-a-run'
+import { evalBcBusyKey } from '../src/server/eval-bc-run'
 import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'fs'
 
@@ -140,6 +141,31 @@ describe('console/api.routeAction', () => {
       expect(r.message).toContain('已在运行')
     } finally {
       actions.busy.delete(EVAL_A_BUSY_KEY)
+    }
+  })
+
+  it('evalBcEpoch 参数非法 ⇒ 400（不 spawn）', async () => {
+    const r = (await postJson('evalBcEpoch', {
+      course: 'c4-dodge',
+      it: 2,
+      epoch: 0,
+    })) as { __status: number }
+    expect(r.__status).toBe(400)
+  })
+
+  it('evalBcEpoch 同课程已有 eval ⇒ 409（忙判在 spawn 之前）', async () => {
+    const key = evalBcBusyKey('c4-dodge')
+    actions.busy.add(key)
+    try {
+      const r = (await postJson('evalBcEpoch', {
+        course: 'c4-dodge',
+        it: 2,
+        epoch: 17,
+      })) as { __status: number; message: string }
+      expect(r.__status).toBe(409)
+      expect(r.message).toContain('已有 BC eval')
+    } finally {
+      actions.busy.delete(key)
     }
   })
 

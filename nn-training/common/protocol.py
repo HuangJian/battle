@@ -377,6 +377,9 @@ from common.scheduling import (
     CAP_OFFLINE_PUSH as CAP_OFFLINE_PUSH,
 )
 from common.scheduling import (
+    CAP_REPLAY_CORPUS as CAP_REPLAY_CORPUS,
+)
+from common.scheduling import (
     CLAIM_MODE_BACKUP as CLAIM_MODE_BACKUP,
 )
 from common.scheduling import (

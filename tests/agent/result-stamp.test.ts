@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { stampServiceSec } from '../../tools/agent/sampler-agent'
-import { buildPack, unpackContainer } from '../../tools/sim/pack-container'
+import { serveResult, stampServiceSec } from '../../tools/agent/sampler-agent'
+import { buildPack, serviceElapsedSec, unpackContainer } from '../../tools/sim/pack-container'
 
 /**
  * 服务耗时戳（elapsedSec）的两个不变量。
@@ -52,11 +52,36 @@ describe('stampServiceSec（服务耗时戳）', () => {
     expect(stampServiceSec('no-such-key', junk, 1000, 9000)).toBe(junk)
   })
 
-  it('同步出口只发盖章值（结构钉子：served = serveResult(key, buf) 既进缓存又对外）', () => {
+  it('同步出口只发 serveResult 的返回值（结构钉子：缓存 == 对外 + 零拷贝）', () => {
     const src = readFileSync(join(REPO_ROOT, 'tools', 'agent', 'sampler-agent.ts'), 'utf8')
     // 事故形态：缓存盖章、对外发原件
     expect(src.includes('controller.enqueue(new Uint8Array(buf))')).toBe(false)
     expect(src.includes('const served = serveResult(key, buf)')).toBe(true)
-    expect(src.includes('controller.enqueue(new Uint8Array(served))')).toBe(true)
+    expect(src.includes('controller.enqueue(served)')).toBe(true)
+    // 容器已在 resultCache 里，出口与轮询命中都不该再整体复制一份
+    expect(src.includes('new Uint8Array(cached.buf)')).toBe(false)
+    expect(src.includes('new Uint8Array(served)')).toBe(false)
+  })
+})
+
+describe('服务计时前移（2026-11-14，真机容器实测）', () => {
+  it('serviceElapsedSec：有服务起点用起点，缺席/非法值回退导出器 t0', () => {
+    const t0 = 1_700_000_000_000
+    const now = t0 + 9_400
+    expect(serviceElapsedSec(t0, [], now)).toBe(9.4)
+    expect(serviceElapsedSec(t0, ['--service-started-at-ms', String(t0 + 5_100)], now)).toBe(4.3)
+    expect(serviceElapsedSec(t0, ['--service-started-at-ms', 'garbage'], now)).toBe(9.4)
+    expect(serviceElapsedSec(t0, ['--service-started-at-ms'], now)).toBe(9.4)
+  })
+
+  it('serveResult 原样返回同一个 buffer（不再解包重压）', () => {
+    const before = pack()
+    expect(serveResult('service-clock-probe', before)).toBe(before)
+  })
+
+  it('结果出口不得再调 stampServiceSec（13–44ms/局同步阻塞的回归钉子）', () => {
+    const src = readFileSync(join(REPO_ROOT, 'tools', 'agent', 'sampler-agent.ts'), 'utf8')
+    expect(src.includes('const served = stampServiceSec(key, buf)')).toBe(false)
+    expect(src).toContain('--service-started-at-ms')
   })
 })

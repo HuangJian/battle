@@ -21,7 +21,7 @@ import json
 import math
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
 from biz.reward_library import OUTCOMES
 
@@ -602,6 +602,43 @@ class PlayerBlock(BaseModel):
     level: int | None = None
 
 
+class InferenceRulesBlock(BaseModel):
+    """课程 `inference_rules` 块：**评估/部署链**启用的推理侧规则（默认全关）。
+
+    单一事实来源 = `src/nn/inference-rules.ts` + `--skip-steel-only-shots`（plan/
+    nn-input-inference-rules.plan.md）。只作用于 `export-eval-game`（节点评估、
+    课程 judge、replay 导出）；**训练链（rollout / dagger）刻意不认**，因此
+    不进 `corpus_identity_fp`（训练语料身份不变）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: 抑制“顶钢空枪”（沿发射方向首阻弹格是 steel、且车道内没有可命中敌）。
+    #: 默认 False = 行为逐字节不变。
+    skip_steel_only_shots: bool = False
+    #: 拆砖免绕路（所选 move 方向被砖挡/2 格内有砖、且策略没开火 ⇒ 强制拆墙）。
+    #: 默认 False；基地保护圈内的砖不拆。
+    break_bricks_on_path: bool = False
+    #: B8 通用废射门：要开火但该方向静态 `usefulFire=false` 且首阻弹格不是砖 ⇒ 抑制。
+    #: 700 对确认 +16.29pp；**与 suppress_lead_miss_fire 同机制，二者互斥**。
+    suppress_useless_fire: bool = False
+    #: B10 预测门：按子弹到达时刻的敌人位置外推仍打不到且首阻弹格不是砖 ⇒ 抑制。
+    #: 700 对确认 +13.29pp；**与 suppress_useless_fire 互斥**。
+    suppress_lead_miss_fire: bool = False
+
+    @model_validator(mode="after")
+    def _shot_gates_mutually_exclusive(self) -> InferenceRulesBlock:
+        """B8/B10 是同一机制的两个阈值（状态 vs 预测），同时开启不构成组合规则
+        （`NNInput` 里 B8 会静默优先）⇒ 课程文件直接拒，不制造“以为两个都开了”。"""
+        both_on = self.suppress_useless_fire and self.suppress_lead_miss_fire
+        if not both_on:
+            return self
+        raise ValueError(
+            "inference_rules：suppress_useless_fire 与 suppress_lead_miss_fire "
+            "同机制，不得同时开启"
+        )
+
+
 class StateInitBlock(BaseModel):
     """课程 `state_init` 块：rollout 的**起始分布** = 人类 demo 中段**世界快照**交棒
     （plan/x20-state-init.plan.md；课程 `curricula/x20-state-init.jsonc`）。
@@ -821,6 +858,58 @@ def block_dict(block: Any) -> dict | None:
     return None
 
 
+class CloudSamplingProfile(BaseModel):
+    """自主云机某一类设备（gpu / tpu）的**完整采样策略**。
+
+    2026-11-15（用户更正 ①）：同一门课可能先后在 GPU / TPU 云机交替训练 ⇒ 采集策略必须
+    按设备分档，且每档**自包含**（target + 窗口），避免「只改 per_it、忘了抬 target」的
+    静默退化（评审阻塞项）。
+
+    `target_transitions` 与 `rotation_mode` 必填；`rotation_per_it` 在 even 下必须 ≥1
+    （0 会让窗口退化成 1 关——见 `window_for` 的 clamp），pinned 下 0 = 只采 pinned。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_transitions: StrictInt = Field(gt=0, description="本设备每轮总 transitions（必填，>0）")
+    rotation_mode: Literal["even", "pinned"]
+    rotation_per_it: StrictInt = Field(default=0, ge=0)
+    rotation_pinned: str = ""
+
+    @model_validator(mode="after")
+    def _even_needs_per_it(self) -> CloudSamplingProfile:
+        if self.rotation_mode == "even" and int(self.rotation_per_it) < 1:
+            raise ValueError(
+                "autonomous_cloud_overrides.*.rotation_per_it 在 even 下必须 ≥1"
+                "（0 会让窗口退化成 1 关；加载期拒，不等到第一轮）"
+            )
+        return self
+
+
+class AutonomousCloudOverridesBlock(BaseModel):
+    """课程文件里的云端采样覆盖：**按设备分档**，只在云机执行面按本机 device 选一档。
+
+    2026-11-15 用户更正：同一门课在 GPU / TPU 云机交替训练，两套语料策略必须共存于同一
+    课程文件；顶层四键仍是 hub 基线（导出计划与 `est_s_all` 的来源），块只在
+    `remote/plan_run` 按 `ctx.device` 生效。块**不**进 `corpus_identity_fp` /
+    `flat_overrides`（它是执行变体，见 `docs/nn/training-stack.md` §76）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    gpu: CloudSamplingProfile | None = None
+    tpu: CloudSamplingProfile | None = None
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> AutonomousCloudOverridesBlock:
+        if self.gpu is None and self.tpu is None:
+            raise ValueError(
+                "autonomous_cloud_overrides 不能是空块：至少写 gpu 或 tpu 一档"
+                "（空块 = 无操作，多半是写错了键）"
+            )
+        return self
+
+
 class CourseConfig(BaseModel, CustomStagesMixin):
     """课程配置文件（`nn-training/curricula/*.jsonc`）。
 
@@ -916,6 +1005,12 @@ class CourseConfig(BaseModel, CustomStagesMixin):
     #: 模式 2 的 pinned 关号规格串（与 `--stages`/`--seeds` 同一个 `parse_stages_arg`，例 `"2033-2034"`）。
     #: 刻意不用 list：`flat_overrides` 只产出**扁平标量** dest（argparse 侧没有 dict/list 型 dest 先例）。
     rotation_pinned: str = ""
+    #: 云端采样覆盖（2026-11-15）：按**本机 device**（gpu / tpu）选一档完整采样策略，
+    #: 只在云机执行面（`remote/plan_run`）生效；顶层 `target_transitions` / `rotation_*`
+    #: 仍是 hub 基线（导出计划与 `est_s_all` 的来源）。缺席 = 老行为逐字节不变。
+    #: ⚠ 刻意**不进** `flat_overrides` / `corpus_identity_fp`：它是执行变体（同 `sample_mult`），
+    #: 每轮账本 `sampling_profile` 留痕；GPU/TPU 段各自独立 run/traj。
+    autonomous_cloud_overrides: AutonomousCloudOverridesBlock | None = None
 
     @model_validator(mode="after")
     def _rotation_requires_dynamic_volume(self) -> CourseConfig:
@@ -939,6 +1034,19 @@ class CourseConfig(BaseModel, CustomStagesMixin):
                 "rotation_mode 需要 target_transitions > 0：窗口的达标线 = ceil(target / 窗口关数)，"
                 "没有它窗口一个函数都不会被调到（采样照旧全关，且不报错）"
             )
+        if self.autonomous_cloud_overrides is not None:
+            if self.mode != "per-tick":
+                raise ValueError(
+                    "autonomous_cloud_overrides 只在 mode=per-tick 下生效（当前 mode="
+                    f"{self.mode!r}）：档里的 target/窗口是 per-tick 动态采集的量"
+                )
+            if int(self.target_transitions) <= 0 or not str(self.rotation_mode).strip():
+                raise ValueError(
+                    "autonomous_cloud_overrides 需要顶层 target_transitions > 0 且 "
+                    "rotation_mode 非空：云端覆盖是在 hub 导出的 volume 计划上逐轮重解"
+                    "（计划必须带 est_s_all 全关估计），不是凭空生成采样计划——"
+                    "请先把 hub 基线写成一份完整策略"
+                )
         return self
     seeds: str = "0-3"
     #: 只对 `"level": ...` 课程生效的四类**环境覆盖**（2026-10-28，docs/nn/training-stack.md §49）。
@@ -960,6 +1068,10 @@ class CourseConfig(BaseModel, CustomStagesMixin):
     #: 进 `corpus_identity_fp`（仅激活时：transition 粒度变了，"一个样本是什么"已变，
     #: 与 seed_rotate/state_init 同类；缺席不进，老课程指纹不动）。
     decision_events: bool = False
+    #: Hybrid opening（plan/g4-opening-hybrid §13）：True ⇒ rollout/eval 都拼
+    #: `--opening-connect`（默认条件接管：只对 strict 不连通的关生效）。
+    #: 缺席/False = 老行为逐字节不变。
+    opening_connect: bool = False
     #: 决策周期 K（均匀决策门 `t % K === 0` 的 K；单一来源 = TS `src/nn/decision-gate.ts`
     #: 的 `DEFAULT_DECISION_K`，本字段是它在课程面的通道）。缺席/10 = 历史默认（全链
     #: 逐字节不变）。**仅 ≠10 激活**：只有非默认值才透传 `--decision-k` / wire `decisionK` /
@@ -967,6 +1079,10 @@ class CourseConfig(BaseModel, CustomStagesMixin):
     #: 激活时：K 变 = 决策粒度变 ⇒ 样本身份变（同 decision_events 待遇）；
     #: ⚠ `est_samples_per_game` 必须按 K 重标定（= 局均 ticks ÷ K；K=5 时 ≈ 2×）。
     decision_k: int = 10
+    #: 评估/部署链的推理侧规则开关（默认全关；plan/nn-input-inference-rules.plan.md）。
+    #: 只由 eval 链消费（`export-eval-game --skip-steel-only-shots`），训练
+    #: rollout/dagger 不认；刻意不进 `corpus_identity_fp`（训练语料身份不变）。
+    inference_rules: InferenceRulesBlock = Field(default_factory=InferenceRulesBlock)
 
     @field_validator("decision_k", mode="before")
     @classmethod
@@ -1075,6 +1191,19 @@ class CourseConfig(BaseModel, CustomStagesMixin):
     #: ⚠ 打开它 = 策略崩坏时**不会停车**（`--serve` 下进程常在，会一路跑到 iters 上限），
     #: 必须人工盯 `kl` / `mean_ret` / `value`；判完立刻改回 False。
     breakers_off: bool = False
+
+    # ---- 语料/装载器（plan/replay-corpus.plan.md §6.6 GPU 云机真机验证）----
+    # A2（2026-11-17）：缺省与 argparse 对齐成 replay（真源 = `worker/cli.py --corpus-fmt`
+    # ← rl-config 的 `rl.corpus_fmt`）。**注意这个字段是"显式才生效"**：`flat_overrides`
+    # 靠 `model_fields_set` 判定 ⇒ 课程不写就一行都不覆盖（所以这里的缺省只是文档值，
+    # 真正生效的缺省在 argparse 侧）。同机腿（kind=iter / --export-bundle）由
+    # `trainer/loop_round_steps._resolve_corpus_fmt` 在轮边界强制回 full。
+    # 为什么进课程而不是只留 CLI：run_rl 是「课程单一事实来源，无 CLI 逐参覆盖」，
+    # 四档验证课必须能各自声明这两个开关，否则就得靠 BCITY_RL_CONFIG 分叉。
+    corpus_fmt: Literal["full", "replay"] = "replay"
+    # 2026-11-17（P3 收尾）：缺省 lazy（与 `worker/cli.py --ppo-loader` 同值）。
+    # 验证臂必须**显式写**（verify-fe2/re = eager），否则五档对照全变成 lazy、归因失效。
+    ppo_loader: Literal["eager", "lazy"] = "lazy"
 
     # ---- 课程结束门（可选；缺席 = 关闭，老课程逐字节不变）----
     gates: GatesSpec | None = None
@@ -1235,9 +1364,14 @@ class CourseConfig(BaseModel, CustomStagesMixin):
             # 决策事件补充（§6 R2；漏映射 = 静默失效，ent_break/paired_rotate_seed 前科）：
             # 缺席 = args 走 getattr 缺省 False ⇒ 均匀 K 老行为。
             "decision_events": "decision_events",
+            # Hybrid opening（漏映射 = 静默失效）：缺席 = getattr 缺省 False。
+            "opening_connect": "opening_connect",
             # 决策周期 K（plan/k5-rhythm.plan.md；漏映射 = 静默失效，同上）：
             # 缺席 = args 走 getattr 缺省 10 ⇒ 均匀 K=10 老行为。
             "decision_k": "decision_k",
+            # ⚠ `inference_rules` 刻意不在表里：它是 eval/deploy-only（block → 扁平
+            # `args.skip_steel_only_shots` 由 `worker.config.apply_course` 单独写），进本表
+            # 会让训练 rollout/CLI 以为存在同名训练开关（这里是有意不映射）。
             "bc": "bc",
             "lr": "lr",
             "epochs": "epochs",
@@ -1279,6 +1413,9 @@ class CourseConfig(BaseModel, CustomStagesMixin):
             # 关闭全部过程熔断（KL/熵/NaN）。漏映射 = 静默失效（ent_break 前科）——
             # 课程里写了 true 却照常熔断，会被误读成「开关没用」。
             "breakers_off": "breakers_off",
+            # replay 真机验证的四个执行档（同上：显式才覆盖；漏映射 = 课程写了也不生效）。
+            "corpus_fmt": "corpus_fmt",
+            "ppo_loader": "ppo_loader",
         }
         out: dict[str, Any] = {}
         for src_key, dst_key in mapping.items():

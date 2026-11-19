@@ -67,13 +67,23 @@ describe('console/api 切课程（机群级探测跨课程共用）', () => {
       expect(probe.pings()).toBeGreaterThan(0)
       expect(probe.hub()).toBeGreaterThan(0)
       const coldPings = probe.pings()
-      const coldHub = probe.hub()
 
-      // ★ 切换课程：没看过的课，此前会在这里把上面两笔探测整个重做一遍（2-3s）
-      const b = await api.buildStateView('course-b')
+      // ★ 切换课程：没看过的课，此前会在这里把上面两笔探测整个重做一遍（2-3s）。
+      // 判据不能是「计数不涨」：机群级缓存是 SWR，超过 5s TTL 时会**后台**重算
+      // （本帧不 await）⇒ 慢机上首帧 >5s 时计数会涨，但切课并没有变慢（2026-11-13 flake）。
+      // 用 hold + 墙钟守卫钉真正的语义：本帧若仍 await 新探测，就挂到守卫红。
+      probe.hold()
+      const guard = guardMs('切课仍在等机群级探测（机群级缓存没跨课程共用？）')
+      let b: Awaited<ReturnType<typeof api.buildStateView>>
+      try {
+        b = await Promise.race([api.buildStateView('course-b'), guard.promise])
+      } finally {
+        guard.done()
+        probe.release()
+      }
       expect(b.course).toBe('course-b')
-      expect(probe.pings()).toBe(coldPings)
-      expect(probe.hub()).toBe(coldHub)
+      // 后台 SWR 重算允许增加；这里只确认计数没有倒退。
+      expect(probe.pings()).toBeGreaterThanOrEqual(coldPings)
 
       // 课程级部分**没有**被串：组件日志尾按新课程解析（复用旧课整块快照是最省事、
       // 也最错的做法——那会把「秒级延迟」换成「显示别课数据」）。
@@ -83,9 +93,15 @@ describe('console/api 切课程（机群级探测跨课程共用）', () => {
       expect(logOf(b)).toContain('course-b')
       expect(logOf(a)).not.toBe(logOf(b))
 
-      // 切回去也不重探（课程级快照在 TTL 内仍命中）
-      await api.buildStateView('course-a')
-      expect(probe.pings()).toBe(coldPings)
+      // 切回去也不等重探（课程级快照在 TTL 内仍命中）；同样用 hold+guard 判本帧是否 await。
+      probe.hold()
+      const guardBack = guardMs('切回课程仍在等机群级探测')
+      try {
+        await Promise.race([api.buildStateView('course-a'), guardBack.promise])
+      } finally {
+        guardBack.done()
+        probe.release()
+      }
     } finally {
       probe.stop()
       reg.restore()

@@ -10,7 +10,11 @@
  * native 侧同一个入口 `cf_student_features(wblob, in16, pooled, bufA)`：
  * 权重是**单 blob**（顺序 == conv_native.h::CF_BLOB_FLOATS == native 侧 ensureBlob），
  * 不再有六区分别上传 + 11 参调用，bufB/bufC 由内核自己的静态区承担。
- * 两侧输出逐位一致由 tests/native-parity.test.ts 钉死（native↔wasm 逐字节）。
+ * 两侧的契约是**容差等价，不是逐位**：逐张量
+ * `max|native−wasm| ≤ ATTEST_TOLERANCE(=1e-5) × max(1, max|wasm|)`，由 tests/native-parity.test.ts 钉死。
+ * 原因在 native 侧的编译参数：`-ffp-contract=fast`（x64 加 `-mfma`）把「乘、加各舍入一次」并成
+ * 「只舍入一次」⇒ 末位差 ~1 ulp（实测 bufA 最大差 6e-5，该张量 max 152）。本文件的
+ * `-ffp-contract=off` 是**必须保留的另一半** —— 它就是让这条差停在容差线内的那个约束。
  *
  * 契约：仅适用于 h=64 / d=8 / board=26 / IN_CH=19 的 per-tick/intent/goal student 特征
  * （共享 StudentModel.features 骨架）。不匹配 / 缺 wasm / ABI 不符 → 返回 false 走 TS 原路径。

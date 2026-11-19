@@ -14,8 +14,12 @@
 `remote/train_core.py` 已顶到 LOC 预算（`tests/test_python_loc_budget.py`）。放在这里还顺手钉住
 「两核共用同一份判据」——哪天只改一边，混跑就开始分叉。
 
-层号 **L2**（`tests/helpers/remote_dag.py`）：只碰 `common.protocol`(L0)；`worker.config`(L1) 与
-`biz.reward_*` 都在**函数内**延迟 import。`train_core`(L4) 站在本模块上面。
+层号 **L3**（`tests/helpers/remote_dag.py`）：顶层只碰 `common.*`(L0) 与 `remote.wire`(L1)；
+`worker.config`(L1) 与 `biz.reward_*` 都在**函数内**延迟 import；`load_ppo_episodes` 延迟
+import `worker.ppo.lazy_corpus`(L2) ⇒ 秩 = 1 + 2 = **L3**。`train_core`(L4) 站在本模块上面。
+
+2026-11-16（P3）：PPO 收尾账（`_ppo_done_log` / `_agg_block` + lazy chunks 的步数/装载器
+读数）从 `train_core` 搬来这里——同一类「两条核共用的账」判据，也让训练核回到 LOC 预算内。
 """
 
 from __future__ import annotations
@@ -102,6 +106,27 @@ def copy_iter_metrics(result: dict, iter_info: dict | None) -> None:
             result[key] = iter_info[key]
 
 
+def load_ppo_episodes(shards_root: str, manifest: dict, prep_b: Any) -> Any:
+    """PPO 语料装载 —— `ppo_loader=eager|lazy` 的**唯一分派点**（两条训练核共用）。
+
+    eager 逐字节走旧 `np_core.load_episodes`；lazy 走 obs mmap + 逐 minibatch 物化。
+    协议缺省仍是 eager（旧 manifest 不带键），lazy 始终由发布端显式声明。
+    """
+    from worker.ppo.lazy_corpus import load_ppo_corpus
+
+    return load_ppo_corpus(
+        shards_root,
+        loader=str(manifest.get("ppo_loader", "eager") or "eager"),
+        gamma=float(manifest["gamma"]),
+        lam=float(manifest["lam"]),
+        normalize_adv=str(manifest["adv_norm"]) != "none",
+        normalize_ret=bool(manifest.get("normalize_ret", False)),
+        per_stage_quota=int(manifest.get("per_stage_quota", 0) or 0),
+        mb=int(manifest["mb"]),
+        bundle=prep_b,
+    )
+
+
 def ppo_shards_root(job_dir: str | Path, iter_info: dict | None) -> str:
     """PPO 的**装载根**（`plan/rollout-topup-fastpath` §3.5 / 评审 P0-1）。
 
@@ -182,25 +207,31 @@ def check_demo_bank(
     )
 
 
-def _agg_block(agg: dict, chunks: list, total_steps: int) -> dict:
+def _agg_block(agg: dict, chunks: Any, total_steps: int) -> dict:
     """进 `result.agg` 的读数——两条核同一份字段（hub 侧按 backend 无关的同一形状读）。
 
     value/policy 的 `*_new_rms` 是门控遥测（x26-obs it90 / x27 冻结判决）：旧 worker 无此键
     ⇒ 0.0，additive；`steps` 是 mb 对齐后**实际训练**的步数（池子总量另有 `steps_pooled`）。
     """
+    from worker.ppo.trainer import chunk_count, chunk_rows
+
     return {
         "policy": float(agg.get("policy", 0.0)),
         "value": float(agg.get("value", 0.0)),
         "entropy": float(agg.get("entropy", 0.0)),
         "kl": float(agg.get("kl", 0.0)),
+        "per_step_kl": float(agg.get("per_step_kl", agg.get("kl", 0.0)) or 0.0),
+        "clip_fraction": float(agg.get("clip_fraction", 0.0) or 0.0),
+        # D8 轮内中止阈值是否触发（缺省关闭 ⇒ False；旧 worker 无键 ⇒ False）。
+        "early_stopped": bool(agg.get("early_stopped", False)),
         "kickstart": float(agg.get("kickstart", 0.0)),
         "demo_bc": float(agg.get("demo_bc", 0.0)),
         "mean_ret": float(agg.get("mean_ret", 0.0)),
         "value_new_rms": float(agg.get("value_new_rms", 0.0) or 0.0),
         "policy_new_rms": float(agg.get("policy_new_rms", 0.0) or 0.0),
-        "steps": int(sum(c["obs"].shape[0] for c in chunks)),
+        "steps": chunk_rows(chunks),
         "steps_pooled": int(total_steps),
-        "chunks": len(chunks),
+        "chunks": chunk_count(chunks),
     }
 
 
@@ -258,17 +289,13 @@ def _load_ppo_data(st: _CoreRun, engine) -> None:
     spec = st.spec
     manifest = spec.manifest
     prep_b = st.prep_b
-    episodes = engine.load_episodes(
-        st.shards_root,
-        float(manifest["gamma"]),
-        float(manifest["lam"]),
-        normalize_adv=str(manifest["adv_norm"]) != "none",
-        normalize_ret=bool(manifest.get("normalize_ret", False)),
-        per_stage_quota=int(manifest.get("per_stage_quota", 0) or 0),
-        bundle=prep_b,
-    )
+    # P3（plan/replay-corpus.plan.md D6）：eager/lazy 的**唯一分派点**是
+    # `load_ppo_episodes`（两条训练核共用）——这里不再各写一份是否 lazy 的判断。
+    episodes = load_ppo_episodes(st.shards_root, manifest, prep_b)
     prep_b.emit(f"job {spec.jid}: 准备完成 {time.time() - spec.t_prep:.1f}s")
-    st.total_steps = sum(e["obs"].shape[0] for e in episodes)
+    from worker.ppo.trainer import corpus_samples
+
+    st.total_steps = corpus_samples(episodes)
     # `st.rng` 一定在位（两腿在算 per-job 种子时派生；手工构造的用字段缺省=种子 0）。
     st.chunks = engine.chunk_episodes(
         episodes, int(manifest["mb"]), shuffle=bool(manifest["shuffle"]), rng=st.rng.chunk
@@ -320,8 +347,15 @@ def _core_result(st: _CoreRun) -> tuple[dict, Any]:
         ts_code_hit=ts_code_hit,
         rollout_sec=(iter_info or {}).get("rollout_sec"),
         bun_version=(iter_info or {}).get("bun_version"),
+        # D10（plan/replay-corpus.plan.md）：语料格式 + replay pre-pass 的墙钟/字节账。
+        corpus_fmt=str(manifest.get("corpus_fmt") or "full"),
+        replay_bytes=(st.spec.replay_info or {}).get("replay_bytes"),
+        labels_bytes=(st.spec.replay_info or {}).get("labels_bytes"),
+        convert_sec=(st.spec.replay_info or {}).get("sec"),
+        convert_workers=(st.spec.replay_info or {}).get("convert_workers"),
+        convert_jobs=(st.spec.replay_info or {}).get("convert_jobs"),
+        convert_fallback=(st.spec.replay_info or {}).get("convert_fallback"),
     )
     # 两遍收敛（同 echo 路径）：result_bytes 与自身体长自指，一遍差它的十进制位数。
-    result["wire"]["result_bytes"] = len(pack_result_v2(result))
     result["wire"]["result_bytes"] = len(pack_result_v2(result))
     return result, course

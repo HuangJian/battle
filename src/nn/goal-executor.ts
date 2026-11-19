@@ -30,8 +30,7 @@ import type { InputLike } from '../game/Input'
 import type { World } from '../game/World'
 import type { RNG } from '../utils/RNG'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../ai/GodAIInput'
-import { findPath } from '../ai/god/pathfind'
-import { shouldFireInDirImpl } from '../ai/god/FireControl'
+import { findPath } from '../utils/pathfind'
 import { ObsEncoder } from './obs-encoder'
 import { buildGoalModelFromText, type GoalModelLike } from './infer'
 import { writeGoalInject, GOAL_INJECT_DIM } from './goal-inject'
@@ -547,12 +546,12 @@ export class GoalExecutor implements InputLike {
       this.moveDir = dir
       // L3-min：凿墙开火（路径方向被砖挡）+ 顺路交战判定（FireControl 物理层原样）。
       this.firing =
-        dir !== null && (canBreak || shouldFireInDirImpl(this.god, pcx, pcy, dir, !this.arrived))
+        dir !== null && (canBreak || this.god.shouldFireInDir(pcx, pcy, dir, !this.arrived))
     } else {
       this.moveDir = dir
       this.firing =
         p !== null &&
-        shouldFireInDirImpl(this.god, p.x + p.w / 2, p.y + p.h / 2, p ? p.dir : 'up', false)
+        this.god.shouldFireInDir(p.x + p.w / 2, p.y + p.h / 2, p ? p.dir : 'up', false)
     }
   }
 

@@ -16,14 +16,17 @@ from __future__ import annotations
 
 import hashlib
 import time
+from pathlib import Path
 from typing import Any
 
 import common.codehash
 import common.distribution
 import common.runtime
+from common import codehash_ref
 from common.distribution import node_ping
 from common.task_client import fetch_task, validate_eval_result
 from common.weights_client import post_weights_cached
+from worker.agent_meta import record_agent_meta, record_eval_failed
 
 #: 与 biz/config.GATE_PLATEAU_METRICS 同词表（RL eval 展示口径）
 EVAL_METRIC_KEYS = ("win_rate", "kills_mean", "phits_mean", "pickup_mean", "timeout_frac")
@@ -35,7 +38,10 @@ class BcEvalError(RuntimeError):
 
 def eval_capable_nodes(cfg: dict | None, log=lambda msg: None) -> list[dict]:
     """enabled + evalSupport + codeHash 与训练机一致的节点。"""
-    expected = common.codehash.compute_code_hash()
+    # 参考值 = self 自报（2026-11-15，同 rollout/eval/batch）：hub 有未提交改动时不再全群 stale。
+    expected = codehash_ref.reference_code_hash(
+        [n for n in (cfg or {}).get("nodes", []) if n.get("enabled", True)]
+    )
     out: list[dict] = []
     for n in (cfg or {}).get("nodes", []):
         if not n.get("enabled", True):
@@ -243,7 +249,7 @@ def _run_bc_eval_one(
     src: dict,
     level_name: str,
     log,
-) -> dict | None:
+) -> tuple[dict | None, str]:
     """单局 BC 评估；**busy 走退避重排**（2026-09-14，与 biz/bc_dispatch 同语义）。
 
     为什么加：节点并发槽满时回 503 busy，旧实现把它当普通失败「立刻重试一次」，
@@ -251,10 +257,12 @@ def _run_bc_eval_one(
     n=14/30（评估样本不足 ⇒ 均值噪声大，误判能力变化）。busy 是**限流信号**，
     不是节点故障：退避等槽位释放，且**不消耗** attempt 配额。
 
+    返回 `(manifest, "")` = 成功；`(None, reason)` = 本局放弃（原因进机器健康账）。
     自 `dispatch_bc_eval` 的 `_run_one` 闭包原样搬出（求值参数改为显式透传）。
     """
     attempts = 0
     busy_tries = 0
+    last_err = ""
     while attempts < 2:
         attempts += 1
         try:
@@ -277,9 +285,10 @@ def _run_bc_eval_one(
             reason = validate_eval_result(manifest, wver)
             if reason:
                 raise common.distribution.DistError(0, f"validate: {reason}")
-            return manifest
+            return manifest, ""
         except common.distribution.DistError as e:
             reason = str(e.reason)
+            last_err = reason
             if "busy" in reason[:64].lower() and busy_tries < BUSY_RETRY_LIMIT:
                 busy_tries += 1
                 attempts -= 1  # busy 不消耗 attempt 配额
@@ -290,11 +299,12 @@ def _run_bc_eval_one(
                 f"attempt {attempts} failed: {reason[:140]}"
             )
         except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
             log(
                 f"[bc-eval] {node.get('id')} {level_name} s{stage} seed{seed} "
-                f"attempt {attempts} error: {type(e).__name__}: {e}"
+                f"attempt {attempts} error: {last_err}"
             )
-    return None
+    return None, last_err or "failed"
 
 
 def dispatch_bc_eval(
@@ -309,6 +319,7 @@ def dispatch_bc_eval(
     nodes: list[dict] | None = None,
     course: Any | None = None,
     course_env: bool = False,
+    meta_path: str | Path | None = None,
     log=lambda msg: print(msg, flush=True),
 ) -> dict:
     """把一份 BC 权重在 eval 图上跑干净评估并聚合。
@@ -330,6 +341,10 @@ def dispatch_bc_eval(
     课程顶层的 `max_ticks` 不进这条链（各图用自己关卡文件的值），所以面板读数**禁止跨
     面板相减**；`sentinel_only=True` 写死「周期 eval 只作哨兵，判决只认 200 局行为门」。
     无可用节点 / 权重推送全败 → BcEvalError（调用方决定降级或中止）。
+
+    `meta_path` 非空 ⇒ 每局结算后追加一行 `dist-agent-meta.jsonl`（与 A/B 层同一份机器
+    健康账）：`node` 取承载该局的节点、`mode="eval"`。**BC eval 以前不写这本账**，节点页
+    「今日贡献」因此把 BC 手动 eval 的局数系统性漏掉（2026-11-13 报障）。
     """
     if nodes is None:
         from common.distribution import load_dist_config
@@ -389,12 +404,13 @@ def dispatch_bc_eval(
             src: dict[str, Any] = src,
             level_name: str = level_name,
         ) -> None:
+            node_id = str(node.get("id") or "?")
             while True:
                 try:
                     stage, seed = work.get_nowait()
                 except _q.Empty:
                     return
-                m = _run_bc_eval_one(
+                m, err = _run_bc_eval_one(
                     node,
                     stage,
                     seed,
@@ -409,6 +425,28 @@ def dispatch_bc_eval(
                         rows.append({"failed": True})
                     else:
                         rows.append(m)
+                    # 机器健康账（与 A/B 层同一份）：节点页「今日贡献」按它聚合；
+                    # 不写 = BC eval 的局数在节点页系统性缺失（2026-11-13 报障）。
+                    if meta_path is not None:
+                        if m is None:
+                            record_eval_failed(
+                                meta_path, int(it), (int(stage), int(seed)), node_id, err
+                            )
+                        else:
+                            record_agent_meta(
+                                meta_path,
+                                {
+                                    "node": node_id,
+                                    "mode": "eval",
+                                    "it": int(it),
+                                    "stage": int(stage),
+                                    "seed": int(seed),
+                                    "ok": True,
+                                    "win": 1 if m.get("win") else 0,
+                                    "elapsedSec": m.get("elapsedSec"),
+                                    "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                },
+                            )
 
         #: 槽位线程归这里（`bc-eval-<槽位>`）：本函数自己起、自己 join。
         rt = common.runtime.Runtime(scope="bc-eval")

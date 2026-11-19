@@ -788,6 +788,8 @@ class PayloadLanded(NamedTuple):
     * `unpack_sec` —— 解包墙钟（M0 统一计量的另一段）；`staged` 时它是**预取时**的读数。
     * `staged` —— 本次是「预取已解好、只搬入」（plan/prefetch-stage-unpack §2.2）。
     * `pruned_dirs` —— 本次轮转掉几个旧 job 目录（**不进人读的那一行**，进 `wire.prune_dirs`）。
+    * `replay` —— replay pre-pass 的读数（`convert_replay_corpus` 的返回值）；full 路径为
+      `None`（2026-11-16，plan/replay-corpus.plan.md D10 墙钟账）。
     """
 
     payload_nbytes: int
@@ -797,6 +799,7 @@ class PayloadLanded(NamedTuple):
     unpack_sec: float
     staged: bool = False
     pruned_dirs: int = 0
+    replay: dict | None = None
 
 
 def _scan_shard_dirs(dest: Path) -> list[str]:
@@ -874,6 +877,46 @@ def _adopt_staged(
     )
 
 
+def _ensure_payload(
+    base_url: str,
+    token: str,
+    jid: str,
+    manifest: dict,
+    work_dir: Path,
+    *,
+    preloaded: dict | None = None,
+    log=lambda msg: None,
+    bundle: Any = None,
+) -> PayloadLanded:
+    """payload 落地 + replay 语料 pre-pass（P2；非 replay 原样返回，零行为变化）。
+
+    位置契约：转换必须在 D14/PPO 装载**之前**完成 —— 后面两步都要看到重建出的 obs.npy。
+    保留本名作为调用入口（`run_job` 的 patch 接缝 = `remote.worker._ensure_payload`）。
+    """
+    landed = _ensure_payload_raw(
+        base_url, token, jid, manifest, work_dir, preloaded=preloaded, log=log, bundle=bundle
+    )
+    if landed is not None:
+        from remote.replay_corpus import prepass
+        from worker import serve_pool
+
+        # 池工厂**在这里**注入而不是在 `replay_corpus` 里 import：`remote/` 不能依赖
+        # `worker/`（`tests/test_remote_dag.py` 按 import 边算拓扑秩）。本模块是 L3，够得着。
+        # payload 里只有预建 `replay_converter.js`（没有 TS 树）⇒ 走单模式 bundle 池。
+        got = prepass(
+            landed.job_dir,
+            list(landed.shard_dirs),
+            manifest,
+            log=log,
+            bundle=bundle,
+            pool_factory=serve_pool.pool_for_bundle,
+        )
+        if got is not None:
+            # D10：把转换读数随 landed 交给训练核，最终进 result["wire"]。
+            landed = landed._replace(replay=got)
+    return landed
+
+
 class CodeLanded(NamedTuple):
     """code.zip 落地后的三处目录——**三处都要回传**，调用方不许自己再推导一遍。
 
@@ -891,7 +934,7 @@ class CodeLanded(NamedTuple):
     blob_root: Path
 
 
-def _ensure_payload(
+def _ensure_payload_raw(
     base_url: str,
     token: str,
     jid: str,

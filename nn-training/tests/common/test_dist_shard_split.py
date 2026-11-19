@@ -157,6 +157,18 @@ def test_shard_files_for_picks_by_collector_and_intent_marker() -> None:
     assert shard_mod._shard_files_for({"collector": "other"}) == shard_mod.SHARD_FILES
 
 
+def test_validate_result_accepts_replay_corpus_fileset() -> None:
+    """P2（plan/replay-corpus.plan.md）：replay 结果容器 = 标签 + replay 两成员，无 obs 三张。"""
+    man = {"wver": "w1", "stage": 3, "seed": 7, "corpus_fmt": "replay"}
+    files = {name: b"\x00\x01" for name in shard_mod.replay_shard_files()}
+    assert shard_mod._shard_files_for(man) == shard_mod.replay_shard_files()
+    assert shard_mod.validate_result(man, files, "w1", {(3, 7)}, set()) is None
+    # 混进 full 的 obs/scalars/extra ⇒ 清单外成员，响亮拒收。
+    mixed = dict(files)
+    mixed["obs.npy"] = b"\x00"
+    assert shard_mod.validate_result(man, mixed, "w1", {(3, 7)}, set()) is not None
+
+
 def _petick_files(**over: str | bytes) -> dict:
     files: dict = {name: b"\x00\x01" for name in shard_mod.SHARD_FILES}
     files.update(over)

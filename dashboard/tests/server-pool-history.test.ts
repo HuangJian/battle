@@ -25,6 +25,7 @@ import { DASHBOARD_ROOT } from '../src/core/paths'
 import {
   aggMemoReusable,
   aggregateNodeHistory,
+  courseOfStreamDir,
   emptyHistory,
   invalidateNodeHistoryMemo,
   poolHistoryCounters,
@@ -35,6 +36,7 @@ import {
   localDayKey,
   parseTsMs,
   pickBaseIter,
+  projectCourseBreakdown,
   projectWindow,
   pruneByEpoch,
   pushWindowSample,
@@ -212,6 +214,33 @@ describe('pool-history · 贡献数取最近完成轮（进行中那一轮不计
       expect(win.hist.get('a1')!.winRollout).toBe(2)
       expect(win.hist.get('a1')!.winEval).toBe(1)
     })
+  })
+
+  it('独立 eval run（tmp/<组>/<run>.run/）的 meta 也进池：手动 eval 局不被漏计', () => {
+    // 2026-11-13 报障：`eval-course-ckpt` 的 runDir = `<out>.run/`，meta 落在
+    // tmp/<组>/<run>.run/ 下；旧扫描只认 tmp/X 与 tmp/X/traj ⇒ 节点页「今日贡献」全 0。
+    withPoolRoot(
+      {
+        name: 'group/eval-x.jsonl.run',
+        meta: [metaRow('a1', 0, 'eval'), metaRow('a1', 0, 'eval'), metaRow('a2', 0, 'eval')],
+      },
+      () => {
+        const agg = aggregateNodeHistory()
+        const win = projectWindow(agg, resolveWindow('all', now, agg.epochMs))
+        expect(win.hist.get('a1')!.winEval).toBe(2)
+        expect(win.hist.get('a2')!.winEval).toBe(1)
+        // 课维度取 run 名（不是组名）：贡献矩阵不把 o2-analysis 这类组当课程。
+        const cb = projectCourseBreakdown(agg, resolveWindow('all', now, agg.epochMs))
+        expect(cb.get('a1')?.get('eval-x')?.eval).toBe(2)
+      },
+    )
+  })
+
+  it('courseOfStreamDir：普通流取首段；独立 run 取 run 名（不把组名当课程）', () => {
+    expect(courseOfStreamDir('g2')).toBe('g2')
+    expect(courseOfStreamDir('g2/traj')).toBe('g2')
+    expect(courseOfStreamDir('o2-analysis/g2-ep30.jsonl.run')).toBe('g2-ep30')
+    expect(courseOfStreamDir('eval-x.run')).toBe('eval-x')
   })
 
   it('水位只作用于**计数/样本**；时间戳类字段取**全部**行（可达性口径，二轮评审补正）', () => {

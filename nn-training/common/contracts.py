@@ -158,6 +158,8 @@ class Shard(TypedDict):
     mask: np.ndarray
     reward: np.ndarray
     stage: np.ndarray
+    #: Hybrid opening（可选盘上列）：controller 接管的步 = 0；缺文件时加载端补全 1。
+    policy_mask: np.ndarray
 
 
 class ShardV6(Shard):
@@ -185,6 +187,8 @@ class Episode(TypedDict):
     adv: np.ndarray
     ret: np.ndarray
     mask: np.ndarray
+    #: Hybrid opening（可选）：controller 接管的步 = 0（PPO 的 policy/entropy/KL 不看它们）。
+    policy_mask: np.ndarray
 
 
 class EpisodeV6(Episode):

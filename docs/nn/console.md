@@ -13,6 +13,67 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §54 BC eval 也写机器健康账：节点页「今日贡献」不再漏掉手动 evalA（2026-11-13）
+
+**报障**：`/nodes` 的采样节点「今天」窗口全为 0，但操作员手动点了几次 BC epoch 表的 `evalA`（`tmp/g2-classic35/evalBc.log`
+有 4 次 n=700 的记录）。
+
+**根因（两条，都指向同一本账）**：
+1. `evalBcEpoch` → `eval_bc_once.py` → `bc_ingest.run_epoch_eval` → `worker/bc_eval.dispatch_bc_eval` 只把
+   聚合行写进课程账本（`training_log.jsonl` 的 `bc_eval`），**从不写 `dist-agent-meta.jsonl`**——而节点页的
+   窗口贡献/成功率/耗时的唯一数据源就是后者（`agent_meta` 模块 docstring 的调用者名单里也没有 BC eval）。
+2. `scanPoolStreams` 只认 `tmp/X` 与 `tmp/X/traj`；`tools/sim/eval-course-ckpt.ts` 的独立 eval run（`<out>.run/`）
+   虽然写了 meta，也被扫描层漏掉。
+
+**修法**：`dispatch_bc_eval` 新增 `meta_path` 参数，每局结算后写一行机器健康账（成功
+`{node, mode:"eval", it, stage, seed, ok:true, win, elapsedSec, ts}`；失败走 `record_eval_failed` 的
+`{node, mode, it, stage, seed, ok:false, reason, ts}`）。两个调用点——手动 `run_epoch_eval` 与本地 BC 腿
+`bc_loop`——都传 `jsonl_path.parent / "dist-agent-meta.jsonl"`（即 `tmp/<课程>/dist-agent-meta.jsonl`）。
+`scanPoolStreams` 在 depth 1 额外下探 `.run` 目录（只收 meta、不下探更深），独立 eval run 的局数也进池。
+
+**边界**：修复前已跑过的 evalA **没有 meta，无法回溯**（没有节点归属可恢复）；重跑一次才会上屏。节点 pill 的
+「最近完成轮贡献」仍只认训练账本的 `rollout_end` / `iteration`（BC 课没有这两种事件）⇒ 它继续显示「—」，
+**窗口内局数（`winEval`）与贡献度列表**则立刻有数。
+
+**门禁**：dashboard 全量 **2121 pass** · `pytest nn-training/tests/worker/test_bc_eval_course_env.py`（7 pass，含
+成功/失败两路 meta 断言）+ `test_bc_ingest_restart.py`（14）+ `test_bc_epoch_archive.py`（7）+ `test_bc_loop.py`
+（40）· `mypy` 909 文件 / `ruff check` 五条改动文件全绿。
+
+**现场验证（2026-11-13 12:13）**：修复后新起的一次 evalBc（it1 ep65）在 30s 内写出 137+ 条 meta；
+运行中的控制台 `/api/pool?days=today` 立即从全 0 变成 `self 72 / dsw 35 / mac 24 …`（eval 列）。
+独立 `.run` 流的 35 局在独立聚合里可见——**控制台进程需重启**才加载扫描层改动。
+
+## §53 空闲自动停会话：hub 不可达 / 队列静默 ⇒ 云机会话自己收摊（2026-11-13）
+
+**背景**：云机 worker 页按分钟烧配额。两种情况下一整段时间都拿不到活：① hub 不可达（隧道挂 / hub 进程停）；
+② 整条 hub 队列静默（没有 pending、没有 in-flight）。用户口径：「云机 worker 启动或者完成课程训练后，如果
+hub 不可达或者没有待训练任务，则自动关闭对话节省配额。」会话只能由**浏览器里的面板**停（停止键/Stop 都是页面 UI），
+所以判决落在伴生脚本，事实面新增一个只读端点。
+
+**为什么不从页面直接问 hub**：伴生脚本的 `@connect` 只有 `127.0.0.1`/`localhost`（它整份设计的前提 =「只跟回环
+说话」），隧道域名与 tailnet IP 都不可枚举；hub 的 token 也不应该进浏览器的 GM 存储。所以判断留在页面，事实由
+dashboard 现取一次（复用 `liveHub()`，与总览同一条腿）。
+
+| 环节 | 接口 / 模块 | 口径 |
+|---|---|---|
+| 事实面 | `GET /api/hubQueue`（`api/hub-queue.ts::summarizeHubQueue`） | 逐课合成 `pending`/`inflight`/`pendingUnheld`/`heldLive`；`ok:false` = 没有 hub 应答（**不可知 ≠ 空队列**） |
+| 判决 | `userscript/src/notebook-companion/app/idle-stop.ts::createIdleStop` | 静默满 10 分钟 ⇒ `empty`；连续 3 拍问不到 ⇒ `unreachable`；**在飞也算活**；自主盘的 `heldLive` 也算活 |
+| 执行 | `boot.ts`（host / single 两条腿） | `panel.countdown(…, 60)` 可取消 ⇒ `stopNow()` / `stopSession`；`doc.hidden` 按预授权执行 |
+| 证据 | `POST /api/notebookOp`（既有） | `idleStop:on/off/miss/quiet/due/cancel/stop`（`stop` 最后一行 = 成败 + 原因） |
+
+**开关**：面板「空闲自动停会话（省配额）」，**全局**一个键 `bnc:idleStop`（不按页——停的是这台机器的会话；
+Kaggle 的面板在外层页，按页只会让「外层开了里层不生效」变成坑），默认 false。
+
+**边界**：① 一拍 = 60s 一次 `/api/hubQueue`（hub 侧 1.2s 超时，代价与总览同量级）；② 静默窗口 10 分钟是为
+「两轮之间训练侧还没发下一份 job」留的余量，停前还有 60s 倒计时；③ 只在本页**开着**时生效（关掉页签就没人判了）；
+④ 判据不看 cell 状态——队列静默与「worker 刚启动还没领到第一份」同形，都该收摊；⑤ **自主盘**（识别到
+`battle.offline.ipynb` 训练 cell）整课在本机跑时 hub 队列全静默，必须把课程的 **live hold** 算成活，否则开训
+10 分钟后会掐掉正在训练的会话；协作盘反之不看 hold（它领不到被 hold 压住的课），只看 `pendingUnheld` + `inflight`。
+
+**门禁**：`cd dashboard && bun run typecheck && bun run test`（**2119 pass**）· `cd userscript && bun run check`
+（typecheck 68 文件 / oxlint 0 / **345 pass** / dist 两份重建）。用例：`dashboard/tests/hub-queue.test.ts`、
+`userscript/test/idle-stop.test.ts`、`userscript/test/idle-wiring.test.ts`（+ `config.test.ts` 的全局键）。
+
 ## §52 `stopOthers` 接成真命令：dashboard 中转，其它页 15s 内停会话（2026-11-11）
 
 **背景**：`§2026-11-09-goalnn-offline-start-report` 只上报、不发命令（面板上写着「dashboard 目前只记录」）。

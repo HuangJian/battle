@@ -593,6 +593,18 @@ def run_rollout_stream(
     相位（2026-11-18，长函数存量第三十六刀）：执行面（collector 回调 / wave 装载 /
     drain / 收尾）住 `_StreamRun`，输入与运行时状态住 `_StreamCtx`；本函数只做装配。
     """
+    # ★ A2（2026-11-17）fail-closed：本机 PPO 的两条装载路（`_drain` 的
+    # `load_episode_from_shard` 与收官兜底的 `load_episodes`）都要 obs/scalars/extra。
+    # 语料一旦是 replay 形态（这三张不在盘上，worker 侧靠转换器重建），它们会炸在
+    # 「找不到 obs.npy」上——那个 traceback 看不出根因是**语料格式**。在入口一次说清。
+    # 注：`args.stream` 自 plan/accident.plan.md §3 起被启动期恒置 0，正常跑不到这里；
+    # 见到本行说明有人重新打开了本机 PPO（那时本机也要有 replay 转换腿，今天没有）。
+    if str(getattr(args, "corpus_fmt", "full") or "full") == "replay":
+        raise SystemExit(
+            "[stream] 本机 PPO（stream）与 corpus_fmt=replay 不相容：replay 语料盘上没有 "
+            "obs/scalars/extra（由 worker 侧转换器重建，本机没有这条转换腿）。"
+            "请用 `--corpus-fmt full`，或让 PPO 走远端（kind=ppo，那是默认路径）。"
+        )
     # 延迟 import：`worker/ppo/__init__` 会拉起 engine(torch)，本模块的模块级面不许有 torch
     # （同 `_default_ppo_backend` 的理由；`--collect-only` 子进程也加载本模块）。
     from worker.ppo.rng import PPORng

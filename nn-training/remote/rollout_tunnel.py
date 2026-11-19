@@ -13,13 +13,20 @@
 
 from __future__ import annotations
 
+import os
+import socket
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from remote import tailscale_boot
 from remote.push_tunnel import tunnel_url_of
+
+#: 隧道预检的单次 HTTPS/TCP 预算（秒）。两个探针共用一个值：它们的读者是同一行日志。
+CLOUDFLARED_PROBE_TIMEOUT = 3.0
 
 #: 公网 URL 探针节拍与判死阈值：一次 530/超时是常态，连续失败才是证据。
 PROBE_SEC = 60.0
@@ -34,6 +41,79 @@ DEAD_HINTS = (
     "tls handshake",
     "error",
 )
+
+
+def direct_env() -> dict[str, str]:
+    """给 cloudflared 子进程的「直连」环境：摘掉代理键，但保留 NO_PROXY 的本地回环。
+
+    为什么不能用 `platform_net_env()`：它只在 tailscale `set_proxy_env()` 跑过之后才有
+    还原对象；cf-only 路径（没有 TS_AUTHKEY）里它是空操作，平台代理仍在。
+    为什么不能连 `NO_PROXY` 一起清：cloudflared 还要访问 `http://localhost:<port>`，
+    没有 bypass 条目时它可能被塞进代理。
+    """
+    env = dict(os.environ)
+    for key in tailscale_boot.PROXY_ENV_KEYS:
+        if key.lower() != "no_proxy":
+            env.pop(key, None)
+    bypass = env.get("NO_PROXY") or env.get("no_proxy") or ""
+    parts = [p for p in ("localhost", "127.0.0.1", "::1", bypass) if p]
+    env["NO_PROXY"] = ",".join(dict.fromkeys(parts))
+    env["no_proxy"] = env["NO_PROXY"]
+    return env
+
+
+def probe_https(
+    posture: str,
+    host: str = "api.trycloudflare.com",
+    timeout: float = CLOUDFLARED_PROBE_TIMEOUT,
+) -> bool:
+    """代理感知的 HTTPS 可达性：`direct` 显式不挂代理，`inherit` 用进程当前代理。
+
+    为什么不用 `socket.create_connection`：原始 socket 不读 `HTTP(S)_PROXY`，
+    `inherit` 与 `direct` 的结果必然相同（plan/rollout-tunnel-url-retry B3）。
+    """
+    handlers = [urllib.request.ProxyHandler({})] if posture == "direct" else []
+    opener = urllib.request.build_opener(*handlers)
+    req = urllib.request.Request(f"https://{host}/", method="HEAD")
+    try:
+        with opener.open(req, timeout=timeout):
+            return True
+    except urllib.error.HTTPError:
+        return True  # 404/405 也说明 DNS/TLS/代理链通了
+    except Exception:
+        return False
+
+
+def probe_tcp(host: str, port: int, timeout: float = CLOUDFLARED_PROBE_TIMEOUT) -> bool:
+    """原始 TCP 可达性（不看代理；只作边缘 7844 的诊断，不参与姿势选择）。"""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def net_probe(log: Callable[[str], None]) -> tuple[str, str]:
+    """一次预检：用代理感知的 HTTPS 选首选姿势，原始 TCP 只诊断边缘 7844。"""
+    inherit = probe_https("inherit")
+    direct = probe_https("direct")
+    edge = probe_tcp("region1.v2.argotunnel.com", 7844)
+    log(
+        "预检: api.trycloudflare.com:443 "
+        f"inherit={'ok' if inherit else 'fail'} direct={'ok' if direct else 'fail'} "
+        f"｜ 边缘7844 tcp={'ok' if edge else 'fail'}"
+    )
+    if inherit:
+        log("⇒ 采用 inherit 姿势")
+        return "inherit", "direct"
+    if direct:
+        log("⇒ inherit 不通、direct 可达 ⇒ 先试 direct 姿势")
+        return "direct", "inherit"
+    log(
+        "⇒ 公网不可达：api.trycloudflare.com:443 两种姿势都不通（检查出网/DNS）；"
+        "仍按 inherit 尝试"
+    )
+    return "inherit", "direct"
 
 
 def dump_tail(path: Path, log: Callable[[str], None], n: int = 40) -> None:

@@ -64,8 +64,11 @@ token 永不落日志。
 
 from __future__ import annotations
 
+import base64
 import ipaddress
 import json
+import sys
+import threading
 import time
 import urllib.parse
 from collections.abc import Callable, Iterator
@@ -82,6 +85,7 @@ from common.protocol import (
     ADMIN_WORKER_ERRORS_PATH,
     ADMIN_WORKER_PREFETCH_PATH,
     AUTH_HEADER,
+    CAP_REPLAY_CORPUS,
     OFFLINE_ARTIFACT_PATH,
     OFFLINE_CLAIM_PATH,
     OFFLINE_HEARTBEAT_PATH,
@@ -116,6 +120,11 @@ from hub.offline import OfflineRoutes
 # 类属性 `hub: _HubQueue` 要能模块级解析（`from __future__ import annotations` 只推迟求值，
 # mypy 仍要那个名字在）⇒ 组合类随本模块一起 import。`hub.queue` 是 L4，本模块据它算 L5。
 from hub.queue import _HubQueue
+from hub.relay import CHANNEL_STALE_SEC, PING_SERVE_MAX_SEC, PING_TTL_SEC, RelayTimeoutError
+from hub.relay import POLL_WAIT_DEFAULT as RELAY_POLL_WAIT
+from hub.relay import POLL_WAIT_MAX as RELAY_POLL_WAIT_MAX
+from hub.relay import RELAY as NODE_RELAY
+from hub.relay import content_type_of as _relay_ctype
 from hub.result import ResultRoutes
 from hub.schedule import ScheduleRoutes
 
@@ -165,6 +174,22 @@ SEND_CHUNK = 256 * 1024
 
 #: 打「发送完成」日志的最小 body（字节）：小 JSON 不打（高频），payload/code 这类必打。
 SEND_LOG_MIN_BYTES = 256 * 1024
+
+#: 「对端提前断开」的日志节流（首条 + 每 N 条一条）。
+#:
+#: 2026-11-18 DSW 现场：`ERROR /relay/dsw/v1/result: [WinError 10053] An established connection
+#: was aborted by the software in your host machine` 一分钟 16 条，全被组件错误注册表当成
+#: 「未处理错误」上报。**它不是 hub 的错误** —— 10053/10054 的语义是「这条连接被对端/本机
+#: 栈终止」，而 relay 的 `/relay/<node>/v1/result` 会让 hub 等最多 45s 再写回执，调用方自己的
+#: timeout 更短时必然出现这一幕。记成 ERROR 有两个害处：真错误被淹、复盘时分不清「链路抖动」
+#: 与「hub 崩了」。
+CLIENT_GONE_LOG_EVERY = 10
+
+#: relay 模式下**后台刷新** `/v1/ping` 载荷的等待上限（秒）。
+#:
+#: 它不受调用方预算（3s）约束：这条线程的存在意义只是「让下一次请求命中缓存」，给足一个
+#: 长轮询周期才可能成功；而它失败也不影响任何调用方。
+RELAY_PING_REFRESH_SEC = 25.0
 
 
 def _is_ip_literal(s: str) -> bool:
@@ -356,6 +381,8 @@ class HubState:
     source_warned: dict[str, float] = field(default_factory=dict)
     #: 拒绝日志的 60s 节流表：`"kind:jid:status"` -> 上次告警墙钟。
     reject_warn_at: dict[str, float] = field(default_factory=dict)
+    #: ★ 对端提前断开的累计次数（2026-11-18）：只进「不该打 ERROR」那条分支的读数。
+    client_gone: dict[str, int] = field(default_factory=lambda: {"n": 0})
     #: ★ worker 静默哨兵（2026-10-31，`hub/worker_pulse.py`）：每个带 `X-Worker-Id` 的请求
     #: `touch()` 一下，后台线程（`hub/boot.py` 的 `hub-worker-pulse`）每 5s 扫一拍，静默
     #: ≥ 阈值且本 episod 有轮询节奏 ⇒ 一条 err 上报进 `note_worker_error` 的 ring。
@@ -380,6 +407,13 @@ class HubHandler(
     与改造前逐字节等价（见 `make_server`）。
     """
 
+    #: ★ **不要**在这里设 `protocol_version = "HTTP/1.1"`（2026-11-19 撤销，事故全文见
+    #: `docs/nn/remote-transport.md` §165）。隧道 origin 面（cloudflared → hub）一旦复用连接，
+    #: 任何一条被截断/半写（`_send_body` 停滞、头部已发后出错）的响应都会让那条连接**永久**
+    #: 失同步：现场 cloudflared 打 `malformed HTTP status code "HTML>"`，此后 20 分钟里
+    #: relay 的请求一条都不再到达 origin（节点侧表现为两条路由全 timeout）。1.0 的「每条响应
+    #: 后必关」正是这条失同步的天然兜底。relay 的复用收益在**客户端 ↔ Cloudflare edge** 那一段，
+    #: origin 说不说 1.1 与它无关 ⇒ 拿稳定性换这点本地回环开销不值。
     hub: _HubQueue = None  # type: ignore[assignment]  # 由 factory 注入
     #: hub 中介 push 派发器（`--push` 时注入；None = 未启用，端点 409）。
     push: PushDispatcher | None = None
@@ -393,6 +427,22 @@ class HubHandler(
     #: （`ThreadingHTTPServer` 每请求新建实例 ⇒ 类属性才是共享面），但**写点有名字**：
     #: `self.state.blocked_logged[…]`。用例整体换一份干净的即可（`handler.state = HubState()`）。
     state: HubState = HubState()
+
+    @classmethod
+    def note_client_gone(cls, path: str, err: BaseException) -> str:
+        """对端先走 ⇒ 该打的那一行（`""` = 这一条不打了，只计数）。
+
+        判据不是「异常长得像不像 10053」（那是 Windows 文案），而是**异常类型**：
+        `ConnectionError` 一族（`ConnectionAbortedError` 10053 / `ConnectionResetError` 10054 /
+        `BrokenPipeError`）的语义统一是「这条连接没了」。对端走了，hub 再回 500 也没人收 ——
+        上一版正是在这里写 500，写失败又把 traceback 打进了错误注册表。
+        """
+        gone = cls.state.client_gone
+        gone["n"] = int(gone.get("n", 0)) + 1
+        n = int(gone["n"])
+        if n == 1 or n % CLIENT_GONE_LOG_EVERY == 0:
+            return f"WARN {path}: 对端提前断开（累计 {n} 次，非 hub 错误）：{err}"
+        return ""
 
     # ---- 基础 ----
     @classmethod
@@ -418,6 +468,12 @@ class HubHandler(
         """当前哨兵快照（只读；诊断 / 用例用——`pulse_events` 会推进状态，不能拿它看）。"""
         return cls.state.pulse.readout()
 
+    #: 访问日志的写入锁：`print()` 是**两次** `write`（正文 + 换行），`ThreadingHTTPServer`
+    #: 的高并发下会交错成 `… 200 -[11:24:05] [hub-server …] "GET …" 200 -` —— 现场
+    #: `hub-server.out` 里成片的 relay 行就是这么粘在一起的（那行日志正是排查 relay 问题的
+    #: 入口，粘了就解析不出请求/状态）。一次 `write` 一行，句柄只在这里持有。
+    _log_lock = threading.Lock()
+
     def log_message(self, fmt: str, *args: object) -> None:  # 只打非常规事件
         # 静默高频只读访问（/ping 健康检查、/jobs/peek 拉活、result/payload 轮询含 404）
         # ——这些在多 worker 下每秒可打多行，把 hub-server.out 刷爆。POST result、
@@ -426,10 +482,14 @@ class HubHandler(
         # 恰恰最爱发生在这些高频路径上，静默等于抹掉唯一的破案线索。
         line = fmt % args
         if (
-            '"GET /ping ' in line
-            or '"GET /jobs/peek' in line
-            or ('"GET /jobs/' in line and ('/result ' in line or '/payload ' in line))
-        ) and ' 401 ' not in line and ' 403 ' not in line:
+            (
+                '"GET /ping ' in line
+                or '"GET /jobs/peek' in line
+                or ('"GET /jobs/' in line and ("/result " in line or "/payload " in line))
+            )
+            and " 401 " not in line
+            and " 403 " not in line
+        ):
             return
         # 隧道来源还原（B，2026-09-17）：回源流量在这里本来全写成 127.0.0.1（x1-rebirth 事故
         # 排查时最大的阻雾），有归因来源就补上——`log_message` 只打非常规事件，不刷屏。
@@ -439,7 +499,10 @@ class HubHandler(
         hdrs = self.headers
         src_ip, via = attributed_source(peer, hdrs.get(CF_SOURCE_HEADER, "") if hdrs else "")
         tag = f"{peer} src={src_ip} via=cf" if via == "cf" else peer
-        log_line(f"hub-server {tag}", line)
+        # **单次 write**（正文+换行一起）：分两次 `print` 会被其它线程插进去，日志行互相粘接。
+        with HubHandler._log_lock:
+            sys.stdout.write(f"[{time.strftime('%H:%M:%S')}] [hub-server {tag}] {line}\n")
+            sys.stdout.flush()
 
     def _auth_ok(self) -> bool:
         peer = self.client_address[0]
@@ -728,7 +791,9 @@ class HubHandler(
         """/ping 与 / 的健康应答（鉴权闸先过——它是最早的存活探针，token 不对就不该报 ok）。"""
         if not self._auth_ok():
             return
-        self._json({"status": "ok"}, 200)
+        # 能力位（2026-11-16，plan/replay-corpus.plan.md D2/B7）：hub 自己声明支持
+        # replay 语料（claim 闸 + 转换器合同已在本进程）。additive；旧客户端忽略。
+        self._json({"status": "ok", "capabilities": [CAP_REPLAY_CORPUS]}, 200)
 
     def _get_workers_halt(self) -> None:
         self._admin_halt(True, self._query_course())
@@ -762,6 +827,9 @@ class HubHandler(
             # 离线盘报名（取包链的全部端点都在这条前缀下；见 `_note_offline_disk`）。
             self._note_offline_disk()
         try:
+            if path.startswith("/relay/"):
+                self._relay_route(method="GET")
+                return
             name = match_route(GET_ROUTES, path)
             if name is None:
                 self._json({"error": "not found"}, 404)
@@ -770,6 +838,13 @@ class HubHandler(
                 dispatch()
         except (ProtocolError, ValueError) as e:
             self._json({"error": str(e)}, 400)
+        except ConnectionError as e:
+            # 对端提前断开（10053/10054/EPIPE）：**不是** hub 出错，也不回 500 ——
+            # 那条 socket 已经死了，写只会再抛一次同样的事（而那一次的 traceback 才是
+            # dashboard 里那条「未处理错误」）。计数 + 节流一行 WARN，见 `note_client_gone`。
+            note = self.note_client_gone(path, e)
+            if note:
+                self.log_message("%s", note)
         except Exception as e:  # 服务器不因单请求崩溃
             self.log_message("ERROR %s: %s", path, e)
             self._json({"error": "internal"}, 500)
@@ -781,6 +856,9 @@ class HubHandler(
             # 同上：租约/补传也在这条前缀下（POST 面）。
             self._note_offline_disk()
         try:
+            if path.startswith("/relay/"):
+                self._relay_route(method="POST")
+                return
             name = match_route(POST_ROUTES, path)
             if name is None:
                 self._json({"error": "not found"}, 404)
@@ -789,6 +867,12 @@ class HubHandler(
                 dispatch()
         except (ProtocolError, ValueError) as e:
             self._json({"error": str(e)}, 400)
+        except ConnectionError as e:
+            # 同 `do_GET`：对端先走不是 hub 的错误。relay 的回执就写在这条分支上 ——
+            # `/relay/<node>/v1/result` 等 45s 才写，调用方 timeout 更短时必然撞上。
+            note = self.note_client_gone(path, e)
+            if note:
+                self.log_message("%s", note)
         except Exception as e:
             self.log_message("ERROR %s: %s", path, e)
             self._json({"error": "internal"}, 500)
@@ -875,6 +959,161 @@ class HubHandler(
         except _BODY_READ_ERRORS as e:
             self._json({"error": f"read body failed: {e}"}, 400)
             return None
+
+    # ───────────── relay：只能出网（无入站隧道）的节点的反向会合面 ─────────────
+    # 协议与「为什么需要」见 `hub/relay.py` 头部；这里只做 HTTP 形状：
+    #   * `_poll` / `_reply` 是**节点侧**（Bearer = HUB_TOKEN，与其余端点同一把锁）；
+    #   * 其余路径是**调用方侧**（trainer / eval / dashboard，全部与 hub 同机）⇒ 只接受
+    #     本机回环，且**绝不放行经隧道的流量**：cloudflared 回源的对端也是 127.0.0.1，靠
+    #     `attributed_source` 的 `via == "peer"` 区分；否则公网上任何人知道 node id 就能
+    #     借 hub 打本机。
+    #: 调用方等待上限**按路径**取（与调用方自己的 urllib 预算同量级；比它短会让健康的慢请求
+    #: 变成 504，比它长则节点掉线时白占一个 handler 线程）。
+    _RELAY_TIMEOUTS: tuple[tuple[str, float], ...] = (
+        ("/v1/result", 45.0),
+        ("/v1/task", 45.0),
+        ("/v1/weights", 150.0),
+    )
+
+    def _relay_route(self, *, method: str) -> None:
+        raw_path = self.path
+        path = raw_path.split("?", 1)[0]
+        node, _, tail = path[len("/relay/") :].partition("/")
+        if not node or not tail:
+            self._json({"error": "not found"}, 404)
+            return
+        if tail == "_poll":
+            if not self._auth_ok():
+                return
+            wait = self._query_float("wait", RELAY_POLL_WAIT)
+            req = NODE_RELAY.poll(node, min(max(wait, 0.0), RELAY_POLL_WAIT_MAX))
+            # `local_port` 是「注册 URL 该填哪个端口」的唯一来源：节点只知道 hub 的**公网**
+            # 地址，而 trainer 要打的是**本机回环**（两者端口可以不同）。
+            port = int(getattr(self.server, "server_address", ("", 0))[1])
+            self._json({"req": req, "local_port": port}, 200)
+            return
+        if tail.startswith("_reply/"):
+            if not self._auth_ok():
+                return
+            rid = tail[len("_reply/") :]
+            raw = self._read_raw_body()
+            if raw is None:
+                return
+            try:
+                body = json.loads(raw.decode("utf-8")) if raw else {}
+            except ValueError as e:
+                self._json({"error": f"bad json: {e}"}, 400)
+                return
+            if not isinstance(body, dict):
+                self._json({"error": "体必须是对象"}, 400)
+                return
+            try:
+                payload = base64.b64decode(str(body.get("body_b64") or ""), validate=True)
+            except (ValueError, TypeError):
+                self._json({"error": "body_b64 非法"}, 400)
+                return
+            ok = NODE_RELAY.reply(
+                node, rid, int(body.get("status") or 0), dict(body.get("headers") or {}), payload
+            )
+            self._json({"ok": ok}, 200)
+            return
+        # —— 调用方侧（本机回环）——
+        peer = self.client_address[0]
+        _ip, via = attributed_source(
+            peer, self.headers.get(CF_SOURCE_HEADER, "") if self.headers else ""
+        )
+        if via != "peer" or not _is_loopback(peer):
+            self._json({"error": "relay 调用面只接受本机回环（trainer 与 hub 同机）"}, 403)
+            return
+        # 探活短路：`/v1/ping` 拿「通道心跳 + 上次载荷」答，不等往返（见 `_serve_relay_ping`）。
+        # 位置有讲究：必须在回环闸之后（否则公网能拿它当探测器）、在 `call` 之前（否则又等一轮）。
+        if method == "GET" and tail == "v1/ping" and self._serve_relay_ping(node):
+            return
+        raw = b""
+        if method != "GET":
+            raw = self._read_raw_body()
+            if raw is None:
+                return
+        target = "/" + tail + (("?" + raw_path.split("?", 1)[1]) if "?" in raw_path else "")
+        timeout = next((t for pfx, t in self._RELAY_TIMEOUTS if target.startswith(pfx)), 15.0)
+        try:
+            status, rhdrs, body = NODE_RELAY.call(
+                node, method, target, dict(self.headers.items()), raw, timeout=timeout
+            )
+        except RelayTimeoutError as e:
+            self._json({"error": f"relay timeout: {e}"}, 504)
+            return
+        if tail == "v1/ping" and status == 200:
+            # 回落路径也得**把载荷存下来**：否则缓存永远空 ⇒ 每次都走真调用，短路白写。
+            self._cache_relay_ping(node, body)
+        self._send_headers(len(body), status=status or 502, ctype=_relay_ctype(rhdrs))
+        if body:
+            self.wfile.write(body)
+
+    @staticmethod
+    def _cache_relay_ping(node: str, raw: bytes) -> bool:
+        """把一次（真调用或后台刷新拿到的）`/v1/ping` 载荷记进缓存；`False` = 这体不能用。"""
+        try:
+            payload = json.loads(raw.decode("utf-8")) if raw else None
+        except (ValueError, UnicodeDecodeError):
+            return False
+        if not isinstance(payload, dict):
+            return False
+        NODE_RELAY.note_ping(node, payload)
+        return True
+
+    def _serve_relay_ping(self, node: str) -> bool:
+        """`/v1/ping` 用**通道心跳 + 上次载荷**回答；`False` = 这次答不了，照旧走真调用。
+
+        治什么（2026-11-18 DSW 稳定性）：hub 每轮派发都要 ping（调用方预算 3s），而 relay
+        一次调用得等节点下一次长轮询（≤20s）⇒ 约一半探活**假失败**（节点被当成「这轮够不着」），
+        同时那个 handler 线程空占到 15s 才放手。今夜 hub 日志：`/relay/dsw/v1/ping`
+        186 ok / 192 ×「对端先走」/ 67 ×504 —— 全是同一个结构性问题，不是隧道坏。
+
+        判据换成**本地事实**：节点最近一次 `_poll` 有多久（= 通道活着）+ 上一次真 ping 的载荷。
+        过期载荷照用、**后台刷一次**（单飞行），于是稳态下 ping 零往返、零超时；
+        载荷比 `PING_SERVE_MAX_SEC` 还旧就老实走真调用（不拿化石台账骗派发器）。
+        """
+        age = NODE_RELAY.channel_age(node)
+        if age is not None and age > CHANNEL_STALE_SEC:
+            # 通道确实断了（节点不再轮询）⇒ **快速失败**，别让调用方等 15s 才拿到同样的结论
+            self._json({"error": f"relay 通道心跳过期（{age:.0f}s 未轮询）"}, 503)
+            return True
+        body, cache_age = NODE_RELAY.ping_snapshot(node)
+        if body is None or cache_age > PING_SERVE_MAX_SEC:
+            return False
+        body["relayAgeSec"] = round(cache_age, 1)
+        self._json(body, 200)
+        if cache_age > PING_TTL_SEC and NODE_RELAY.claim_ping_refresh(node):
+            threading.Thread(
+                target=self._refresh_relay_ping,
+                args=(node, dict(self.headers.items())),
+                daemon=True,
+                name=f"relay-ping-refresh:{node}",
+            ).start()
+        return True
+
+    def _refresh_relay_ping(self, node: str, headers: dict[str, str]) -> None:
+        """后台把过期载荷刷一遍：**不阻塞任何调用方**，成败都由自己放回单飞行。"""
+        try:
+            status, _hdrs, raw = NODE_RELAY.call(
+                node, "GET", "/v1/ping", headers, b"", timeout=RELAY_PING_REFRESH_SEC
+            )
+            if status == 200:
+                self._cache_relay_ping(node, raw)
+        except Exception:  # 后台线程里的任何异常都与调用方无关（这条链路的语义是 best-effort）
+            # 契约静默（G9 冻结，非旧债）：ping 刷新是**旁路**，失败只会让下一次 ping
+            # 多问一跳；这里没有任何调用方在等它。
+            pass
+        finally:
+            NODE_RELAY.release_ping_refresh(node)
+
+    def _query_float(self, key: str, default: float) -> float:
+        """查询参数取浮点；缺失/非法 ⇒ 缺省（`_poll` 的 wait 是唯一读者）。"""
+        try:
+            return float(self._query_str(key) or default)
+        except ValueError:
+            return default
 
     def _worker_id(self) -> str:
         return self.headers.get(WORKER_ID_HEADER, "")

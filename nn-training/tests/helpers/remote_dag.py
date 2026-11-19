@@ -144,6 +144,9 @@ LAYERS: dict[str, int] = {
     # 面(L2) + 注册(L0) + 隧道(L0) ⇒ **L3**；训练子进程入口 `offline_push_task` 站在
     # `offline_boot`(L8) 上 ⇒ **L9**（与「入口模块只做接线」的先例一致）。
     "remote.push_tunnel": 0,
+    # 反向会合通道（2026-11-18）：只用 stdlib + `common.net_http`，不 import 任何 remote/hub
+    # 模块 ⇒ 叶子。读者是 `remote.rollout_node`（supervisor）。
+    "remote.rollout_relay": 0,
     "remote.offline_push_face": 2,
     "remote.offline_push": 3,
     "remote.offline_push_task": 9,
@@ -167,6 +170,9 @@ LAYERS: dict[str, int] = {
     # 的后台线程——两条边都严格向上，秩不变。
     "hub.worker_pulse": 0,
     "hub.blob": 0,
+    # 反向会合面的**引擎**（2026-11-18）：纯 stdlib、零 hub/remote import ⇒ 叶子。HTTP 形状在
+    # `hub.http_face._relay_route`（它 import 本模块，方向向下）。
+    "hub.relay": 0,
     "hub.schedule": 0,
     # 状态类拆分（S4 第十四刀）：`_JobStore` 的六个域混入。五个只靠协议层；`store_offline`
     # 另需 `remote.artifacts`（L0）⇒ 高一档住 L1。它们彼此**零 import**（跨域调用经 `self`）。
@@ -245,6 +251,9 @@ LAYERS: dict[str, int] = {
     # 全局层号里（层号 = 拓扑秩，跨包一致）。谁把它们当成「另一个包的账本」挪走，
     # 那些边就会静默消失 —— `test_layer_numbers_are_dense_and_meaningful` 会当场报空洞。
     "worker.serve_pool": 0,
+    # 轮级/批级状态（`RoundContext` / `IterRun`，2026-11-19 从 `iter_rollout` 搬出以守
+    # 单文件 LOC 预算）：只 import `common.*` ⇒ **L0**；`iter_rollout`(L1) 站在它上面。
+    "worker.iter_run": 0,
     "remote.tailscale_boot": 0,
     # 采样节点 quick tunnel 的日志/健康工具（2026-11-08，LOC 预算拆分）：依赖
     # `remote.tailscale_boot`(L0) 与 `remote.push_tunnel`(L0) ⇒ 拓扑秩 **L1**。
@@ -284,6 +293,9 @@ LAYERS: dict[str, int] = {
     # 它的秩抬到 2（np_core 是 L1），于是 hub_client(L1) 站在它上面就违规；常量因此下沉到
     # `common/shard.py`（两边都够得着的唯一定义处）。
     "remote.payload_slim": 0,
+    # P2 replay 语料 pre-pass（2026-11-15）：只 import `common.errors` / `common.proc`（叶子）
+    # + stdlib ⇒ **L0**。读者是 `download`(L3) 与 `hub_client`(L1)（只取 attach 辅助），边向下。
+    "remote.replay_corpus": 0,
     # R0/M0：本机权威副本的**身份映射**（2026-10-14，plan/wire-diet.plan.md §3 R0）。只 import
     # stdlib（json/hashlib/os/time/pathlib）——刻意不碰 `common.*`/`worker.*` 以外的东西，
     # 也不 import `remote.*` ⇒ **L0**（写它的 `download`(L3)/`train_core`(L4) 都在它上面）。
@@ -415,9 +427,10 @@ LAYERS: dict[str, int] = {
     "remote.upload_worker": 4,
     # 训练核的**框架无关半场**（2026-10-27，Paddle 双生）：有效遍数 / kick 开关 / blob 需求 /
     # 课程装配 / demo bank 校验。顶层只碰 `common.protocol`（不在账本内）；`worker.config`(L1)
-    # 与 `biz.reward_*` 都是**函数内**延迟 import ⇒ 拓扑秩 = 1 + 1 = **L2**。
+    # 与 `biz.reward_*` 都是**函数内**延迟 import。2026-11-18 P3 收尾：`load_ppo_episodes`
+    # 在这里做 eager/lazy 的唯一分派，延迟 import `worker.ppo.lazy_corpus`(L2) ⇒ 秩 **L3**。
     # 读它的是 `remote.train_core`(L4)；两核必须共用同一份判据（分叉 = 混跑时一边收一边拒）。
-    "remote.train_common": 2,
+    "remote.train_common": 3,
     "remote.train_core": 4,
     # HTTP 面（S4 第十六刀）：`HubHandler` 本体 + 通用助手 + 来源判定从 `hub_server` 搬到这里。
     # 它组装五组路由混入（最深 `hub.result` L4）⇒ 秩算出来是 **L5**（不是「随便挑一层」，
@@ -548,6 +561,8 @@ LAYERS: dict[str, int] = {
     #: （`episode_from_shard`）——只 import numpy ⇒ 秩 0。
     "worker.ppo._episode": 0,
     "worker.ppo.trainer": 0,
+    #: 2026-11-16 显存预检：纯判定 + `common.errors`（叶子），两侧 ppo engine 共用 ⇒ 秩 0。
+    "worker.ppo.vram": 0,
     "worker.reports": 0,
     "worker.resume": 0,
     # 同族课程产物直取（plan/episode-reuse.plan.md）：`common.log` + 延迟 import 的
@@ -603,6 +618,11 @@ LAYERS: dict[str, int] = {
     # 分关采样分配纯函数（2026-10-07，plan/rollout-stage-balance §3）：靠 `worker.volume_quota`(L1)
     # 的 `target_per_stage` 与 `worker.volume_math`(L0) ⇒ 2026-10-11 S3 起秩 2。
     "worker.volume_alloc": 2,
+    # 2026-11-16（P3，plan/replay-corpus.plan.md D6）：PPO lazy 语料（obs 逐 shard
+    # mmap + 常驻小字段 + row_map）。顶层靠 `worker.ppo.np_core`(L1) 与
+    # `worker.data.npyio`(L0) ⇒ **L2**。读者是 `worker.ppo.engine`(L3，函数内延迟)
+    # 与 `remote.train_core`(L5)；np_core **不**反向 import 它（否则就是环）。
+    "worker.ppo.lazy_corpus": 2,
     # 结局分类（bc_dispatch 与 bc_corpus 共用；无 worker 依赖）⇒ **L0**。
     "worker.bc_outcome": 0,
     "worker.bc_config": 2,
@@ -649,6 +669,9 @@ LAYERS: dict[str, int] = {
     # **一份公式，不抄第二份**）；2026-10-11 S3：alloc 升到 L2 ⇒ 本模块 **L3**。
     # 唯一账本内读者 `worker.plan`(L4) 仍在它上面。
     "worker.volume_waves": 3,
+    # 云端采样覆盖（2026-11-15）：顶层只靠 `worker.volume_waves`(L3) 的 `parse_stages_arg`
+    # ⇒ 秩 4（与 `worker.plan` 同级）；唯一账本内读者 `remote.plan_run`(L5) 在它上面。
+    "worker.cloud_sampling": 4,
     # 逐轮采样子集（窗口，2026-10-27，plan/it-stage-ratation）：顶层只靠
     # `worker.volume_waves`(L3) 的 `parse_stages_arg`（pinned 规格串与 `--stages` 同一个解析器）
     # ⇒ 秩 4。消费者全在 `trainer/`（导出 / 本机连续配额 / `_per_stage_quota`），

@@ -18,8 +18,11 @@ import {
   applyInitSnapshot,
   loadInitSnapshot,
   runOneBench,
+  shardNpyEntries,
+  writeRlShard,
   type ShardData,
 } from '../tools/sim/export-rl-rollout'
+import { convertReplayShard } from '../tools/sim/replay-to-shard'
 import { hashIndexFor, materializeCuts } from '../tools/sim/build-state-init-bank'
 
 /**
@@ -254,6 +257,45 @@ describe('P1 注入语义（applyInitSnapshot / runOneBench 端到端）', () =>
     expect(m[0][0]).toBe(CUT)
     expect(m[m.length - 1][0]).toBeGreaterThanOrEqual(CUT)
     expect(m[m.length - 1][0]).toBeLessThanOrEqual(900)
+  })
+
+  it('P1 replay identity：交棒段 replay 重建与 full 逐字节相同', () => {
+    const dir = tmp()
+    const snap = writeSnapshot(dir)
+    const run = (corpusFmt: 'full' | 'replay') =>
+      runOneBench(
+        0,
+        STAGES[0],
+        4242,
+        'classic',
+        900,
+        WEIGHTS,
+        'off',
+        false,
+        1,
+        null,
+        { path: snap.path },
+        false,
+        corpusFmt,
+      )
+    const full = run('full')
+    const replay = run('replay')
+    expect(replay.replay).not.toBeNull()
+    const shardDir = join(dir, 'replay-shard')
+    writeRlShard(shardDir, replay.shard, {}, replay.replay, 'replay')
+    const out = join(dir, 'converted')
+    convertReplayShard({ shardDir, outDir: out })
+    const ref = new Map(
+      shardNpyEntries(full.shard, 'full').map((e) => [e.name, Buffer.from(e.data)]),
+    )
+    for (const name of ['obs.npy', 'scalars.npy', 'extra.npy']) {
+      expect(Buffer.compare(readFileSync(join(out, name)), ref.get(name)!)).toBe(0)
+    }
+    // 交棒点必须被 replay_meta 记录（转换器只依赖 replay，不重跑 snapshot 注入）。
+    const meta = JSON.parse(readFileSync(join(shardDir, 'replay_meta.json'), 'utf8')) as {
+      initTick: number
+    }
+    expect(meta.initTick).toBe(300)
   })
 
   it('快照与 tickHash 不匹配（被改过/版本不一致）⇒ 该局响亮失败，不静默跑标准开局', () => {

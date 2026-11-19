@@ -7,6 +7,9 @@ queue_local 的 run_rollout / run_local_rollout 曾各自手工拼装
 
 from __future__ import annotations
 
+#: `local_code_sha()` 的进程内记忆（空 = 还没算）。
+_CODE_SHA_MEMO: list[str] = []
+
 
 def build_rollout_cmd(
     bun: str,
@@ -19,6 +22,7 @@ def build_rollout_cmd(
     wver: str = "",
     node_label: str = "",
     node_side: bool = False,
+    code_sha: str = "",
 ) -> list[str]:
     """按 args.goal_rollout / intent_rollout 选 exporter 并拼装 bun 命令。
 
@@ -96,6 +100,24 @@ def build_rollout_cmd(
         # 普通 rollout 不置位 ⇒ 命令逐字节不变。TS 侧据此写 manifest labelMode。
         if bool(getattr(args, "rollout_argmax", False)):
             cmd.append("--teacher-argmax")
+        # P2（plan/replay-corpus.plan.md）：replay 语料只产 replay+标签（不产 obs 三张）。
+        # 只在显式 replay 时追加 ⇒ full 命令逐字节不变。
+        # ★ A2（2026-11-17）：`node_side=True`（kind=iter 整轮上云 / --export-bundle 离线包）
+        # **一律 full** —— 那种情况下 rollout 与 PPO 在同一台机器上，语料不上路：replay 零收益，
+        # 而盘上从此没有 obs（节点侧任何同机读 shard 的腿都会断）。判据的单一出处是
+        # `trainer/loop_round_steps._resolve_corpus_fmt`（它改的是 args），这里只是**同一规则的
+        # 第二道闸**：本函数的 args 可能来自节点自己的 CLI 缺省（那缺省 2026-11-17 起已是 replay）。
+        want_replay = (
+            not node_side and str(getattr(args, "corpus_fmt", "full") or "full") == "replay"
+        )
+        if want_replay:
+            cmd += ["--corpus-fmt", "replay"]
+            # 2026-11-17（docs/nn/remote-transport.md §154）：把本机现算的 codeHash 透传给导出器，
+            # 它就不必自己遍历 180 个文件（实测 13.5 ms/进程，成本全在 syscall 上）。**只在本机腿**
+            # 透传：远端跑的树是 job 里解出来的 ts_code.zip，拿 hub 的 hash 当它的身份就是撒谎。
+            # 与 `--corpus-fmt replay` 同一条分支是巧合也是纪律——replay_meta.codeSha 只有 replay
+            # 语料才有，而 replay 恒为本机腿（`node_side` 一律 full，见上）。
+            cmd += ["--code-sha", code_sha or local_code_sha()]
         # goal-nn 卡 A2/A3：玩具奖励臂 / dodge 模式覆盖（''=不传，导出器按 stage 解析默认）。
         # A2 已废（plan/rl-training-config.md §4：奖励由课程配置公式驱动，TS 不再算
         # reward）——不再追加 --reward；--dodge 保留透传。
@@ -142,6 +164,23 @@ def build_rollout_cmd(
             # 未知 flag 静默忽略）——c6-gae 本地 3命1星事故根因，见 tests/worker/test_rl_cmd.py。
             cmd += [f"--{k.replace('_', '-')}", v]
     return cmd
+
+
+def local_code_sha() -> str:
+    """本机 TS 代码身份（`--code-sha` 的取值）：**进程内只算一次**。
+
+    成本口径：`common.codehash.compute_code_hash()` ≈ 0.03 s（同 180 个文件，Python 侧比 TS
+    略慢）；逐局重算（35 局/轮）比导出器自己算还贵，故按进程记忆。
+
+    与 `sampler-agent.ts::memoizedCodeHash` 同一假设："运行中的代码" = 进程启动时那份，要换
+    hash 只有重启。运行中 git pull 的窗口里 `replay_meta.codeSha` 可能标旧码——这是审计字段，
+    与节点门无关（门比的是 ping 自报值），且该窗口本来就无人在跑新代码。
+    """
+    if not _CODE_SHA_MEMO:
+        from common.codehash import compute_code_hash
+
+        _CODE_SHA_MEMO.append(compute_code_hash())
+    return _CODE_SHA_MEMO[0]
 
 
 def course_fp_for_args(args) -> str:

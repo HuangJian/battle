@@ -112,6 +112,7 @@ def _flag_rows(mode: str, rl_args: dict) -> tuple[tuple[tuple[str, ...], dict[st
         (("--force",), {"action": "store_true", "help": "run_rl 单实例锁（.run_rl.lock）强制接管——运维重启时旧进程" "未被 --kill-previous 杀掉的兜底"}),
         (("--epochs",), {"type": int, "default": 4}),
         (("--mb",), {"type": int, "default": _d("mb", 512), "help": "minibatch size — 512 halves gradient steps vs 256 " "(faster PPO, smaller per-iteration KL drift)"}),
+        (("--ppo-loader",), {"choices": ("eager", "lazy"), "default": _d("ppo_loader", "lazy"), "help": "PPO 语料装载器（P3，plan/replay-corpus.plan.md D6）：lazy=obs 逐 shard " "mmap + 逐 minibatch 上卡（默认；峰值 ≈ 常驻小字段 + mb 行，与语料总量无关）；" "eager=整份 concatenate（回滚档；峰值 ≈ 3× obs）。"}),
         (("--lr",), {"type": float, "default": _d("lr", 3e-4), "help": "PPO learning rate（默认 3e-4，与 ppo/engine.py LR 同步；collect-only " "子进程不得 import torch，故不用模块常量）"}),
         (("--adv-norm",), {"choices": ("auto", "global", "wave", "none"), "default": _d("adv_norm", "auto"), "help": "advantage 归一化粒度（P1-7，2026-09-02）：auto=流式 wave / 串行 " "global（保持现状）；global=整轮归一；wave=每 wave 归一；none=不归一 " "（供对照实验）。同一套超参在不同粒度下数学不同，显式记录口径"}),
         (("--seed",), {"type": int, "default": _d("seed", 7)}),

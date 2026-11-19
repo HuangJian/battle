@@ -31,11 +31,21 @@ class _Slot:
     stop: threading.Event
 
 
+#: 池线程拿到 `None`（= 「此刻没有轮需要这个节点」的空闲自缩）后的重问间隔。
+#: 线程寿命**只由** `stop`/`_closed` 决定：见 `_node_loop` 里的注释。
+IDLE_POLL_SEC = 0.05
+
+
 class EvalExecutors:
     """按节点 id 的可缩容线程池（进程级单例；rollout 冻结由仲裁器负责）。"""
 
     def __init__(self, arbiter: Any | None = None) -> None:
-        self._arb = arbiter if arbiter is not None else eval_arbiter()
+        # 显式传入的仲裁器照旧钉住；默认**不缓存**，每次现取 `eval_arbiter()`。
+        # `reset_eval_arbiter()` 会**换掉进程单例**（测试夹具），而 `eval_dispatch` 每轮
+        # 现取单例登记轮次：池子缓存了旧实例就永远看不见新登记的轮 ⇒ `take()` 一直
+        # 拿 None、一张牌也发不出去（2026-11-19 全量门禁 e2e：`派=6 认领=0 落盘=0`，
+        # 本机腿 `local:active=2/slots=2/ok=True` 却 30s 零局；单跑同实例所以恒绿）。
+        self._arb_fixed = arbiter
         self._lock = threading.Lock()
         #: 每个槽位的线程都归这里（`eval-exec-<key>-<i>`）：节点池会**伸缩**，登记表只留活着的
         #: （`Runtime.thread` 起新线程时顺手丢掉已退出的）；谁等它们仍由 `close_pools` 的预算定。
@@ -123,6 +133,15 @@ class EvalExecutors:
             pool[:] = [s for s in pool if s.thread.is_alive()]
             return len(pool)
 
+    @property
+    def _arb(self) -> Any:
+        return self._arb_fixed if self._arb_fixed is not None else eval_arbiter()
+
+    def pool_size(self, nid: str) -> int:
+        """池里**登记**的槽数（已停/已死也算）。`active` 只数能领牌的。诊断用。"""
+        with self._lock:
+            return len(self._pools.get(nid, []))
+
     def active(self, nid: str) -> int:
         """还在领牌的线程数（缩容中/已置退出信号的不算）。"""
         with self._lock:
@@ -154,7 +173,16 @@ class EvalExecutors:
                 return
             grant = self._arb.take(nid, stop=stop)
             if grant is None:
-                return
+                # `take()` 的 None 有两个来源：① 进程仲裁器关停；② 仲裁器里已经**没有轮**
+                # 需要这个节点（`IDLE_EXIT_SEC` 空闲自缩）。②不可容忍就死：新轮到来时
+                # `_resize_locked` 看到这个线程 `is_alive()` 就把它的 `stop` 清掉、判「不缺
+                # 人」不再补新线程 —— 而它正从 `take()` 返回并卷尾退出 ⇒ `active()` 归零、
+                # `supervise_round` 同一秒判 `workers-gone`（2026-11-19 全量门禁：e2e `派=6
+                # 认领=0 落盘=0`，单跑恒绿、全量必红，因为单跑池子总是空的）。
+                # ⇒ 线程寿命只由 `stop`/`_closed` 决定，空闲就小睡再问。
+                if stop.wait(IDLE_POLL_SEC):
+                    return
+                continue
             try:
                 self._execute_node(grant)
             except Exception as e:  # 单局异常不得杀死整条腿（旧 worker 同样兜底）
@@ -175,7 +203,9 @@ class EvalExecutors:
                 return
             grant = self._arb.take(LOCAL_NODE, stop=stop)
             if grant is None:
-                return
+                if stop.wait(IDLE_POLL_SEC):
+                    return
+                continue
             try:
                 self._execute_local(grant)
             except Exception as e:
@@ -198,7 +228,8 @@ class EvalExecutors:
 
     def _execute_node(self, grant: Grant) -> None:
         rnd = grant.round
-        common.distribution.set_request_tag(rnd.req_scope)
+        # `kind="eval"`（2026-11-14）：节点腿自成 `eval` 计数桶，不与同进程的 rollout 互梃。
+        common.distribution.set_request_tag(rnd.req_scope, kind="eval")
         nd = rnd.node_info(grant.node)
         if nd is None:
             rnd.settle_task(
@@ -235,6 +266,11 @@ class EvalExecutors:
                 stage_json=stage_json_for_args(rnd.args, task[0]) or "",
                 decision_events=bool(getattr(rnd.args, "decision_events", False)),
                 decision_k=int(getattr(rnd.args, "decision_k", 10)),
+                skip_steel_only_shots=bool(getattr(rnd.args, "skip_steel_only_shots", False)),
+                opening_connect=bool(getattr(rnd.args, "opening_connect", False)),
+                break_bricks_on_path=bool(getattr(rnd.args, "break_bricks_on_path", False)),
+                suppress_useless_fire=bool(getattr(rnd.args, "suppress_useless_fire", False)),
+                suppress_lead_miss_fire=bool(getattr(rnd.args, "suppress_lead_miss_fire", False)),
                 lives_override=int(_ov["lives_override"]) if "lives_override" in _ov else None,
                 player_level=int(_ov["player_level"]) if "player_level" in _ov else None,
             )
@@ -307,6 +343,11 @@ class EvalExecutors:
                 player_level=int(_ov["player_level"]) if "player_level" in _ov else None,
                 decision_events=bool(getattr(rnd.args, "decision_events", False)),
                 decision_k=int(getattr(rnd.args, "decision_k", 10)),
+                skip_steel_only_shots=bool(getattr(rnd.args, "skip_steel_only_shots", False)),
+                opening_connect=bool(getattr(rnd.args, "opening_connect", False)),
+                break_bricks_on_path=bool(getattr(rnd.args, "break_bricks_on_path", False)),
+                suppress_useless_fire=bool(getattr(rnd.args, "suppress_useless_fire", False)),
+                suppress_lead_miss_fire=bool(getattr(rnd.args, "suppress_lead_miss_fire", False)),
             )
             why = common.task_client.validate_eval_result(manifest, rnd.wver)
             if why:

@@ -1,0 +1,136 @@
+// 课程 g3-survival —— g2 BC ep80 的 35 关 RL 试点·生存/收尾臂（2026-11-13）
+//
+// 与 g3-balanced 完全同起点 / 同关卡 / 同预算 / 同 eval；**唯一变量 = 生存与收尾价格**。
+// z/o 教训见 g3-balanced 头注：不再买移动/拾取，不搬 y35 的空旷关税项。
+//
+// 本臂要回答：ep80 的 2.82/3 死亡与 19.96%「差一点清完」能否被更强的死亡/承伤/
+// 胜利价格修好，同时不把策略压成站桩（ep80 的优点是 stop 11.5% / cells 135）。
+// 相对 balanced 的改动（只 5 个数）：
+//   wWin 60→80 · wSpeed 6→8 · wDmg .08→.12 · wDeath 18→24 · terminal lives −35→−45
+// 保持：wKill 15 / wHit 1.5 / wAcc 5 / wPickup 4(cap6) / wIdle 100。
+// 量级（ep80）：dmg −93、death −68、win 23；kill 仍 197（不会弃战）。
+// 不按敌种加价：wKill 统一；armor 多吃的命中已由 wHit 支付，敌种构成是关卡固定的。
+// 风险：过量生存价 → 站桩/少杀。人工盯盘重点：stop / cells / kills / win；
+//       若出现站桩签名（stop 明显上升、cells 掉到 100 以下）或 kills 掉 >2，
+//       由人决定停课/回退，不设固定 it 的自动判决。
+// ⚠ `breakers_off: true`（用户口径）：KL/熵/NaN 自动熔断全关，唯一保险 = 人工盯盘。
+//   坍塌即停腿：KL ≥0.15 连续 2 轮 / entropy 单轮跌 >0.10 或 <0.5 连续 2 轮 /
+//   eval win 连续 2 点比 it0 低 >2pp / stop >50% 或 cells <50 / 出现 NaN/Inf。
+//   停腿后先判因（lr / kl_coef / value 头 / reward），不要原地重启续跑。
+// 评估：主评估裸策略；B8-on 由人按训练表现决定跑哪些检查点，两条分开报、不可相减。
+// 预算：300 轮 / 24h；target 24 576；rotation even / 7 关轮换（与另两臂同口径）。
+{
+  "version": 5,
+  "name": "g3-survival",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "rotation_mode": "even",
+  "rotation_per_it": 7,
+  "reward": {
+    "formula": [
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wAcc*aimHits/(playerShots+1)",
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "+ wSpeed*where(clearTick>=0, max(0, min(1, (13000-clearTick)/1400)), 0)",
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- wIdle*idleTicks/(ticks+1)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wAcc": 5.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wWin": 80.0,
+      "wSpeed": 8.0,
+      "wDmg": 0.12,
+      "wDeath": 24.0,
+      "wIdle": 100.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -45.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/g2-classic35/weights.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 300,
+  "max_hours": 24.0,
+  "lr": 0.00008,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00008,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20270225,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/g3-survival/weights.json",
+  "traj": "tmp/g3-survival",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "breakers_off": true,
+  "backup_dir": "nn-training/weights/g3-survival",
+  "backup_prefix": "g3-survival",
+  "eval_stages": "2000-2034",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}
+
+// ── 结课报告（2026-11-14，300/300 it，正常收官）─────────────────────────────
+// ① 运行账：11-13 22:55:40 → 11-14 07:29:08，**300/300 跑满**（reason=iters，
+//    「正常收官（it300/300）」），≈8h33m、≈103s/it。
+//    无 NaN / 无中断；`breakers_off: true` 全程未触发（KL 峰值 0.0036，远低于 0.15）。
+// ② 主曲线（eval 35 关 × 20 seed = 700 局/点，固定种子）：
+//    it0 27.14% → it50 72.9% → it100 73.4% → it200 79.6% → it300 77.6%
+//    · 晚期窗口 it250–300 均值 **79.90%**；峰值 **82.6% @ it290**（单点 700 局，
+//      SE≈1.5pp；它不是无偏基线，但被 g4-* 选为起点——用户点名）。
+//    · 与同起点 g3-balanced 的同 (iter,stage,seed) 配对：
+//      it200–300 均值 **79.59% vs 77.78%**，**+1.80pp**
+//      （按 35 关聚类 bootstrap 95% CI [+0.65,+3.01]；27 关更好 / 8 关更差）。
+// ③ 行为账（it0 → it250–300）：
+//    kills 13.17 → 18.50 · deaths 2.85 → 1.64 · stop 11.0% → 2.04%
+//    · cells 135.5 → 149.9 · dmg 770 → 513 · armor kills 2.26 → 3.86
+//    · 拾取 3.56/4.75 → 5.35/6.85（75% → 78%）
+//    · 开火 61.8 → 113.4 发/局；命中 28.72 → 41.31；空射 27.71 → 62.69；
+//      hit% 46.4% → 37.5% ⇒ 总命中 +44%，枪法同样变差（多打的弹约 2/3 是空射）。
+//    · 输局结构：≥17 杀 11.0% → **28.6%**、≤10 杀 49.8% → **30.3%**；
+//      命尽 14.8% / max_ticks 5.4%（钢基地基毁 ≈0%）。
+// ④ 健康度：entropy 0.831（首 10 轮）→ 0.482（末 10 轮），min 0.411；KL max 0.0036；
+//    value loss 0.996 → ~0.58；无坍塌。⚠ 同 balanced：头注「entropy <0.5 连续 2 轮」
+//    在 it75–76 附近就满足（194/300 轮 <0.5，最长连续 51 轮），按字面早该停；
+//    实际跑满 300 轮且后段仍涨点 ⇒ 后继课程已改 ent_break 0.25 + 正常熔断。
+// ⑤ 相对 balanced 的胜负手（it200–300 分关）：
+//    +2018 +11.4pp · +2030 +9.0pp · +2007 +8.1pp · +2034 +6.9pp · +2013 +4.8pp
+//    −2008 −8.6pp（timeout 18.6%→31.4%）· −2023 −2.9pp · −2005 −2.4pp · −2014 −1.9pp
+//    ⇒ 生存价在「三条命耗尽」的关有效（2018 命尽 52.4%→41.7%、2030 60.2%→51.0%），
+//      在「打不完」的关会把问题推向 timeout（2008）。
+// ⑥ 分关短板（it200–300 均值）：
+//    2030 48.8% · 2020 42.6%（timeout 50.5%、kills 10.3、~30k 拍）· 2018 54.0%
+//    · 2026 54.8% · 2007 65.5% · 2034 68.1% · 2008 62.4%
+//    ⇒ 与 balanced 同一批弱关；剩余 ~20% 输局 = 收尾/命尽；90% 线还差 ~10pp。
+// ⑦ 判词：**两臂里的胜者，但不是终局**。它把 ep80 的 27.1% 抬到晚期 79.9%，
+//    并在同 seed 配对下比 balanced 高 1.8pp；但 it300 单点回落到 77.6%，
+//    说明「最后一轮」不是可靠交付点——后继课程用 it290 起点，不承诺 82.6%。
+//    后继：`g4-precision`（火控/杀伤质量）与 `g4-mobility`（机动/走位/反卡位），
+//    均为 500 it / 24h，起点 = `g3-survival.it290.20261114-065008.json`。
+// ⑧ 产物：`tmp/g3-survival/{training_log,eval_log}.jsonl`（eval 61 点 × 700 局）、
+//    `tmp/g3-survival/weights.json`、`nn-training/weights/g3-survival/`（it1–300 全量备份；
+//    it290 = 后继起点）。

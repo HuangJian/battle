@@ -305,7 +305,11 @@ class _JobStore(
         """转发到 `LeaseBook.job_role`（B7-P2）。"""
         return self.leases.job_role(job_id)
 
-    def claim(self, job_id: str, ttl: float = CLAIM_TTL_SEC, worker_id: str = '', avoid_stale_holder: bool = False, mode: str | None = None, expected_epoch: int | None = None, role: str = ROLE_ONLINE) -> str | None:
+    def job_corpus_fmt(self, job_id: str) -> str:
+        """转发到 `LeaseBook.job_corpus_fmt`（D10：claim 的能力闸与账本口径同源）。"""
+        return self.leases.job_corpus_fmt(job_id)
+
+    def claim(self, job_id: str, ttl: float = CLAIM_TTL_SEC, worker_id: str = '', avoid_stale_holder: bool = False, mode: str | None = None, expected_epoch: int | None = None, role: str = ROLE_ONLINE, capabilities: list[str] | None = None) -> str | None:
         """转发到 `LeaseBook.claim`（B7-P2）。"""
         return self.leases.claim(
             job_id,
@@ -315,11 +319,12 @@ class _JobStore(
             mode=mode,
             expected_epoch=expected_epoch,
             role=role,
+            capabilities=capabilities,
         )
 
-    def claim_outcome(self, job_id: str, *, mode: str = CLAIM_MODE_EXCLUSIVE, worker_id: str = '', avoid_stale_holder: bool = False, expected_epoch: int | None = None, role: str = ROLE_ONLINE) -> ClaimOutcome:
+    def claim_outcome(self, job_id: str, *, mode: str = CLAIM_MODE_EXCLUSIVE, worker_id: str = '', avoid_stale_holder: bool = False, expected_epoch: int | None = None, role: str = ROLE_ONLINE, capabilities: list[str] | None = None) -> ClaimOutcome:
         """转发到 `LeaseBook.claim_outcome`（B7-P2）。"""
-        return self.leases.claim_outcome(job_id, mode=mode, worker_id=worker_id, avoid_stale_holder=avoid_stale_holder, expected_epoch=expected_epoch, role=role)
+        return self.leases.claim_outcome(job_id, mode=mode, worker_id=worker_id, avoid_stale_holder=avoid_stale_holder, expected_epoch=expected_epoch, role=role, capabilities=capabilities)
 
     def _lease_state(self, job_id: str, now: float) -> str:
         """转发到 `LeaseBook._lease_state`（B7-P2）。"""

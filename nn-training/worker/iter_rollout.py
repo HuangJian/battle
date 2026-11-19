@@ -38,14 +38,14 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_COMPLETED, wait
-from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
 # 单局看门狗的口径常量与 eval **共用一份**（`common/game_watch.py`）：点名线 20s、首次尝试硬顶
 # 30s（2026-10-26 由 5s 放宽：经典 35 关 3 命的长局在 4 核 CPU 上常态 6–15s，5s 是误杀）、
-# 重试上限 ×4、最多 3 次、轮询 0.5s。
+# 重试上限 ×4、最多 3 次、轮询 0.5s。**两条线都随面板的 tick 预算缩放**（2026-11-18：
+# 36000 拍的面板上合法拉满局就是 17–30s ⇒ 硬顶 43.2s / 点名 33.2s，见 `game_watch.game_timeout_sec`）。
 # **一律通过模块属性读**（`game_watch.X`）而不是 `from ... import X`：import 会把值抄成第二份
 # 绑定，测试 patch 了 `game_watch` 的那一份、调用点却还在读旧绑定（两处不一致就是静默的错口径）。
 from common import game_watch, progress_hook, runtime, scratch
@@ -77,6 +77,8 @@ from common.protocol import (
     validate_rollout_spec,
 )
 from worker import serve_pool
+from worker.iter_run import IterRun as _IterRun
+from worker.iter_run import RoundContext as RoundContext
 
 #: 每局日志（诊断用；与本地 `run_rollout` 的 `w{i}/rollout.log` 同名同形）。
 ROLLOUT_LOG_NAME = "rollout.log"
@@ -411,7 +413,7 @@ def _run_one_game(
                 if (
                     not warned
                     and not game_watch.warn_is_redundant(timeout_sec)
-                    and elapsed >= game_watch.SLOW_GAME_WARN_SEC
+                    and elapsed >= game_watch.slow_warn_sec(timeout_sec)
                 ):
                     warned = True
                     log(
@@ -874,105 +876,8 @@ def _pool_width(spec: dict, workers: int, slots: int) -> int:
     return max(1, int(workers))
 
 
-@dataclass
-class RoundContext:
-    """一轮 job 的**轮级**资源：首批解析一次，补差批复用（`plan/rollout-topup-fastpath` §3.2）。
-
-    为什么需要它（2026-10-11 现场）：补差批复用的是同一个 `run_iter_rollout`，于是**每一批**
-    都重付一遍「与批内局数无关」的开销——落点探针（8MB + fsync ×(1+候选数)）、TS 树安装、
-    权重镜像、以及最贵的**长驻池建池 + 冷启动**（94 个 bun：exec + traverse + wasm + attest×3）。
-    批越小这笔开销占比越高（it34 补差2 只有 **1 局**，却付了 48.9s 的壳子）⇒ 池的收益
-    （`docs/nn/runtime-opt.md` §20 的 1.59×）被「池的生命周期 = 批」吃掉了。
-
-    ⚠ 只装**轮级**的东西：`jd` / `s_layout` / `exec_dir` 是**批级**的（每批一个 `topup{k}/`，
-    各自的 scratch 私有目录 / `--out` 续号 / 轮末清理都属于批）。
-    ⚠ **池的所有权随 ctx 转移**：`ctx=None`（老调用）= 本轮自建自收（逐字今天）；
-    传 ctx = 调用方建、调用方在**补差跑完之后、PPO 之前** `close()`（`remote/worker.py`）
-    ——别让 94 个常驻 bun 陪 PPO 吃内存。
-    """
-
-    #: **轮级** scratch 布局（探针结论；`None` = 回退档：不换根 / 产出住真 job 目录）。
-    #: 批级布局由它镜像而来：`batch_layout(layout, batch_rel(轮 job 目录, 批 job 目录))`。
-    layout: scratch.ScratchLayout | None = None
-    #: TS 树在 scratch 的家（按名寻址 ⇒ 跨批同一份）；`None` = 本轮未换根。
-    ts_home: Path | None = None
-    #: 轮的真实 job 目录（首批那个；补差批是它下面的 `topup{k}/`）。
-    job_dir: Path | None = None
-    #: 长驻池（生命周期 = 轮）。
-    pool: Any = None
-    #: 轮级**槽位**（= 本机能同时跑的局数上限；补差批的满铺器拿它当 `width`，池宽也按它）。
-    workers: int = 0
-    #: 首批是否已完成解析（落点 / TS 树）；补差批看到 `True` 就跳过那一整段。
-    resolved: bool = False
-    #: 落点段耗时（读数用；旧名 `probe_sec` —— 探针已删，2026-10-14）。
-    setup_sec: float = 0.0
-
-    @property
-    def root(self) -> Path | None:
-        """scratch 介质根（`None` = 回退档）。"""
-        return None if self.layout is None else self.layout.root
-
-    def close(self) -> None:
-        """收掉本 ctx 拥有的长驻池（幂等）。**不**动 scratch 上的产出。"""
-        pool, self.pool = self.pool, None
-        if pool is not None:
-            pool.close()
-
-    def cleanup(self, log=lambda msg: None) -> None:
-        """轮末回收本地盘占用（**PPO 之后**叫；幂等、尽力而为、绝不抛）。
-
-        取消搬回（§3.5）后产出就住在轮 scratch 目录里（PPO 要读它）⇒ 清理从「每批 `finally`」
-        前移到「全 job 收尾、PPO 之后」：清**本轮的** scratch 目录（ts 家不在里面、永不清）。
-        有上界（`DRAIN_CEILING_SEC`）：挂住的挂载点清不动就留着（下一轮同名会重建），不阻塞收尾。
-        """
-        if self.layout is None:
-            return
-        ok, _ = call_bounded(
-            partial(scratch.clear_dir, self.layout.job),
-            float(game_watch.DRAIN_CEILING_SEC),
-            name="scratch-cleanup",
-        )
-        if not ok:
-            log(
-                f"WARN rollout scratch 轮末没清完（{game_watch.DRAIN_CEILING_SEC:g}s 内没返回）："
-                f"{self.layout.job}——本地盘占着就占着（下一轮同名会重建），不阻塞收尾"
-            )
 
 
-@dataclass
-class _IterRun:
-    """一轮 rollout 的批级状态（轮级资源仍住 `RoundContext`）。"""
-
-    job_dir: str | Path
-    spec: dict
-    ts_dir: str | Path | None
-    log: Any
-    ctx: RoundContext | None
-    it: int
-    next_game: Any
-    on_game_settled: Any
-    volume_line: Any
-    jd: Path = field(default_factory=Path)
-    tsd: Path = field(default_factory=Path)
-    t0: float = 0.0
-    bun: str = ""
-    ver: str = ""
-    templates: list[list[str]] = field(default_factory=list)
-    argvs: list[list[str]] = field(default_factory=list)
-    slots: int = 0
-    workers: int = 0
-    timeout_sec: float = 0.0
-    explicit: bool = False
-    rb: Any = None
-    rctx: RoundContext = field(default_factory=RoundContext)
-    exec_jd: Path = field(default_factory=Path)
-    shards_root: Path = field(default_factory=Path)
-    pool: Any = None
-    game_secs: dict[int, float] = field(default_factory=dict)
-    game_attempts: dict[int, int] = field(default_factory=dict)
-    round_retries: int = 0
-    retry_cap: int = 0
-    ok: bool = False
 
 
 def _setup_run(r: _IterRun) -> None:
@@ -1012,7 +917,13 @@ def _setup_run(r: _IterRun) -> None:
     # （旧口径「0 = 不限」= 卡住的局可以永远等下去；本机历史行为不能当云机的安全策略）。
     requested = float(spec.get("game_timeout_sec") or 0.0)
     explicit = requested > 0
-    timeout_sec = requested if explicit else game_watch.DEFAULT_GAME_TIMEOUT_SEC
+    # ★ 缺省硬顶随**面板的 tick 预算**走（2026-11-18）：`--max-ticks` 就在每条 argv 里（= 关卡
+    #   的终局线）。固定 30s 在 36000 拍的面板上只比合法最坏值高 0–4s ⇒ 机器稍慢就把最贵的
+    #   长局杀掉重跑（现场 max 27.45s = 92% 上限）。没这个旗标（老计划）⇒ 逐字回到兜底值。
+    r.panel_ticks = game_watch.max_ticks_of(templates[0]) if templates else 0
+    timeout_sec = requested if explicit else game_watch.game_timeout_sec(r.panel_ticks)
+    #: 点名线跟着硬顶走（`slow_warn_sec`：缺省 30s 档仍是 20s，一个字不改）。
+    r.warn_sec = game_watch.slow_warn_sec(timeout_sec)
     # ★ 2026-09-24（日志节食）：本轮的「设置 + 看门狗口径 + 池 + 进度 + 收尾 + 单局耗时」
     # 攒成**一行**（完成时打；未完成时每 60s 心跳一次）。原来这七行随轮刷，云端整段跑几
     # 小时会把控制台日志面板拖死（用户报障）。例外：**重试**与**慢局点名**仍是「发生了才
@@ -1184,12 +1095,18 @@ def _setup_scratch(r: _IterRun) -> None:
         rb.add("产出落点", f"{jd}（回退原地＝今天的行为：不换根，产出住真 job 目录）")
     rb.add("ts_root", tsd)
     rb.note(
-        f"单局看门狗：软告警 >{game_watch.SLOW_GAME_WARN_SEC:g}s（正常一局亚秒级），"
-        f"首次尝试硬顶 {timeout_sec:g}s"
+        f"单局看门狗：软告警 >{r.warn_sec:g}s，首次尝试硬顶 {timeout_sec:g}s"
         + (
             "（plan 指定，每次尝试都用它）"
             if explicit
-            else f"（plan 未指定，用节点兜底 {game_watch.DEFAULT_GAME_TIMEOUT_SEC:g}s）"
+            else (
+                f"（plan 未指定 ⇒ 按面板 {r.panel_ticks} 拍的 tick 预算推导："
+                f"{game_watch.PER_TICK_BUDGET_SEC * 1000:g}ms/拍，不低于兜底"
+                f" {game_watch.DEFAULT_GAME_TIMEOUT_SEC:g}s）"
+                if r.panel_ticks > 0
+                else f"（plan 未指定，用节点兜底 {game_watch.DEFAULT_GAME_TIMEOUT_SEC:g}s；"
+                "argv 无 --max-ticks ⇒ 不按面板推导）"
+            )
         )
         + f"；超时/rc≠0 原地重跑同一 argv，最多 {game_watch.GAME_MAX_ATTEMPTS} 次"
         + (
@@ -1560,6 +1477,7 @@ def _finish_run(r: _IterRun) -> dict[str, Any]:
             "rollout",
             list(zip(secs_list, [_game_label(a) for a in argvs], strict=True)),
             retried=sum(1 for v in game_attempts.values() if v > 1),
+            warn_sec=r.warn_sec,
         ),
         final_only=True,
     )

@@ -39,6 +39,55 @@ from worker.cmd import build_rollout_cmd, corpus_fp_for_args, course_fp_for_args
 from worker.reports import combine_reports
 from worker.sibling_reuse import reuse_rollout, rollout_sources
 
+
+def _thread_for(target, args):
+    """采样线程工厂（单测注入点）：门禁并行时 `Thread.start()` 会抛 `can't start new thread`。"""
+    name = getattr(target, "__name__", "worker")
+    return threading.Thread(target=target, args=args, daemon=True, name=f"node-worker:{name}")
+
+
+def spawn_node_workers(
+    nd: dict,
+    *,
+    lock: Any,
+    alive: list,
+    spawned_ids: set[str],
+    threads: list,
+    extra_threads: list,
+    worker: Callable[[dict], None],
+    log: Callable[[str], None],
+) -> None:
+    """单节点权重就绪后立即孵化采样线程（POST 成功回调 / reuse / rescan）。
+
+    2026-11-15 从 `trainer/dispatch.py` 搬来（那边已到 1000 LOC）。**先 start 再入列表**：
+    join 快照可能与 append 竞态，对未 start 的线程 join 会 RuntimeError。
+
+    `spawned_ids` = 「这轮已经派过工」的标记。旧写法**先打标记再 start**，`Thread.start()`
+    抛（并行门禁/机器打满时实测 `can't start new thread`）⇒ 整个节点静默判死到窗口到期
+    （同日门禁偶发：一轮两局全 missing，日志里只有 push 线程被 abort）。现在**一线程都
+    没起来才回滚标记**（rescan 能在窗口内补孵），并响亮记一行。
+    """
+    with lock:
+        if nd["id"] in spawned_ids:
+            return
+        spawned_ids.add(nd["id"])
+        if nd not in alive:
+            alive.append(nd)
+    first = True
+    for _ in range(nd["c"]):
+        try:
+            t = _thread_for(worker, (nd,))
+            t.start()
+        except RuntimeError as e:
+            if first:
+                with lock:
+                    spawned_ids.discard(nd["id"])
+            log(f"[dist] node {nd['id']}: spawn failed ({e}) — 本轮不派该节点")
+            return
+        threads.append(t)
+        extra_threads.append(t)
+        first = False
+
 #: 本机腿交给长驻池的单局硬顶（秒）——**故意远大于任何合法长局**。
 #:
 #: 本机口径一直是「不限」（`game_watch` 对 `DEFAULT_GAME_TIMEOUT_SEC` 的注释：本机卡住的是
@@ -703,7 +752,10 @@ def rescan_nodes(
             if boot_why:
                 log(f"[dist] rescan {nid}: {boot_why} — 本轮不再回场")
                 continue
-            c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
+            # 与 rollout 腿同一份口径（2026-11-14）：config 优先，缺省 workers → cpus。
+            c_n = common.distribution.node_slots(
+                n.get("concurrency"), ping.get("cpus"), ping.get("workers")
+            )
             mode = _rescan_push_weights(
                 nid, n, why, iter_id, wver, weights_bytes, task_timeout, wkind
             )
@@ -764,6 +816,40 @@ def resolve_tail_join_sec(policy: dict, all_settled: bool, halted: bool) -> floa
     if all_settled or halted:
         return float(policy.get("tailGraceJoinSec", 0))
     return float(policy.get("tailGraceJoinSecDeadline", 5))
+
+
+def halt_missing_split(
+    attempts: dict[tuple[int, int], int],
+    all_tasks: list[tuple[int, int]],
+    seen: set[tuple[int, int]],
+    missing_keys: set[tuple[int, int]],
+) -> dict[str, int]:
+    """停派时 `missing` 的三个互不相交去向（`inflight / never_dispatched / failed`）。
+
+    2026-11-15 现场：日志原写「KL halt active — (24 task(s) left undispatched/unsettled)」，
+    而 g5 的停派**全部**来自 volume 的逐关配额，那 24 个缺口也**全是在飞**（结果迟到、
+    无人读）。`pool_halt` 语义下没派出去的候选不计入 `missing`，所以 `never_dispatched`
+    必须单独报，两种口径才能对账。
+    """
+    return {
+        "inflight": sum(1 for k in attempts if k not in seen and k not in missing_keys),
+        "never_dispatched": sum(1 for k in all_tasks if k not in attempts),
+        "failed": sum(1 for k in attempts if k in missing_keys),
+    }
+
+
+def join_targets(
+    threads: list[threading.Thread], extra_threads: list[threading.Thread]
+) -> list[threading.Thread]:
+    """join 与「仍在收尾」统计的**唯一口径**：按身份去重后合并两张表。
+
+    两个列表是**部分交集**，不是包含关系：`dispatch._spawn_node_workers` 的节点 worker
+    同时进 `threads` 与 `extra_threads`（边分发边开采），而 rescan 补孵的线程只进
+    `extra_threads`。旧实现 `list(threads) + list(extra_threads)` 把节点 worker 数成两份
+    ⇒ 2026-11-15 现场 `tail-join grace … 89 个 worker`，实际约一半；join 也会对同一线程
+    join 两次（第二遍白等一份 grace）。
+    """
+    return list(dict.fromkeys([*threads, *extra_threads]))
 
 
 def ensure_games(m: dict) -> dict:

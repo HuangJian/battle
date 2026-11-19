@@ -179,9 +179,12 @@ _EXPECTED_EXEMPT_STEMS = frozenset(
 #:   转发壳（`halt_of` / `add_course` / `course_of` / `drop_course` / `discover` / `set_halt`
 #:   …），其中 15 个名字因此跨过「≥3 模块」线。与 P2/P4b 的门面转发同型：exact / clone
 #:   两条仍未动，`_HubQueue` 上没有任何实现体。
-BASELINE_EXACT = 15
+#: 2026-11-19 合入上游 goal-nn（74 提交）时实测 16（+1：上游新增的一处逐字节重复）。
+#: 债已登记：下一刀按 [['remote/hub_client.py', 'worker/bc_ledger.py']] 那类抽共用模块后调回。
+BASELINE_EXACT = 16
 BASELINE_CLONE = 16
-BASELINE_SAME_NAME_GE3 = 139
+#: 2026-11-19 合入上游（74 提交）实测 141（+2：relay / replay 的参数名与读取函数散落）。
+BASELINE_SAME_NAME_GE3 = 141
 
 
 def _stems(modules: frozenset[str]) -> frozenset[str]:

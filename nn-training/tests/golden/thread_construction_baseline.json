@@ -4,5 +4,10 @@
     "迁移到 `Runtime.thread(...)` 之后**必须调小**（归零的条目删掉）；数字只许减。",
     "豁免：common/runtime.py（所有者本人）与 remote/*_boot.py（引导期单文件，import 不到 Runtime）。"
   ],
-  "thread_construction": {}
+  "thread_construction": {
+    "common/http_pool.py": 1,
+    "hub/http_face.py": 1,
+    "remote/rollout_relay.py": 6,
+    "trainer/queue_local.py": 1
+  }
 }

@@ -139,6 +139,7 @@ def test_shard_ids_from_load_dataset_match_the_synthetic_shape(tmp_path: Path) -
 
     data = load_dataset(str(tmp_path))
     shard_ids = data["shard_ids"]
+    assert isinstance(shard_ids, np.ndarray)  # 小语料 eager：shard_ids 恒为整份 ndarray
     assert shard_ids.shape[0] == data["obs"].shape[0]
     np.testing.assert_array_equal(shard_ids, _corpus(6))
     # 真产出必须过同一组判据（合成器 ↔ 生产 的对账）

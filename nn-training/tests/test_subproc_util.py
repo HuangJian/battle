@@ -168,12 +168,17 @@ def test_raw_bind_conflict_retries_with_a_new_port() -> None:
             _reap(srv.proc)
 
 
-def test_port_race_seen_covers_both_faces_and_spares_real_deaths() -> None:
-    """判据函数本身：守卫文案 + 裸 errno 两种脸都认，别的死法一律不认。"""
+def test_port_race_seen_covers_every_face_and_spares_real_deaths() -> None:
+    """判据函数本身：守卫文案 + 裸 errno + Windows 10013 三种脸都认，别的死法一律不认。"""
     assert port_race_seen([f"端口 127.0.0.1:1 {PORT_TAKEN_MARKER}（禁止双监听）"])
     assert port_race_seen(["OSError: [Errno 98] Address already in use"])
     assert port_race_seen(["OSError: [WinError 10048] 通常每个套接字地址只允许使用一次。"])
     assert port_race_seen(["socket.error: EADDRINUSE"])
+    # 2026-11-19 全量门禁：三启的胜者 bind 时抛 WSAEACCES（端口被独占/落在保留段）——
+    # 与「被占」同一件事（这个端口此刻不可 bind），必须换端口重试而不是判成真 bug。
+    assert port_race_seen(
+        ["PermissionError: [WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions"]
+    )
     assert not port_race_seen(["boom"]), "非端口原因的死法绝不能被读成端口竞争"
     assert not port_race_seen([]), "空输出同理"
 

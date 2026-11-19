@@ -293,9 +293,23 @@ def _export(args: argparse.Namespace, manifest_path: Path) -> int:
     #   漏一处就是「train/deploy 静默分裂」——`run_local_eval_game` 的 docstring 点名过这类。
     decision_events = bool(getattr(ns, "decision_events", False))
     decision_k = int(getattr(ns, "decision_k", 10))
+    # 评估/部署链推理规则（课程 inference_rules；缺席 = 老行为）。重放必须与
+    # 账本那一局同口径，否则“关/开”两态不是同一策略（与 decision_k 同类事故）。
+    skip_steel_only_shots = bool(getattr(ns, "skip_steel_only_shots", False))
+    break_bricks_on_path = bool(getattr(ns, "break_bricks_on_path", False))
+    suppress_useless_fire = bool(getattr(ns, "suppress_useless_fire", False))
+    suppress_lead_miss_fire = bool(getattr(ns, "suppress_lead_miss_fire", False))
+    # Hybrid opening（课程 `opening_connect`）：重放必须与账本同口径，
+    # 否则账本开了条件接管、导出跑 bare —— s2020 会从 gameover/6076 变成 timeout/36000。
+    opening_connect = bool(getattr(ns, "opening_connect", False))
     log(
         f"[replay-exp] it{args.iter} 语义口径: decision_k={decision_k} "
-        f"decision_events={decision_events} max_ticks={max_ticks} difficulty={difficulty}"
+        f"decision_events={decision_events} skip_steel_only_shots={skip_steel_only_shots} "
+        f"break_bricks_on_path={break_bricks_on_path} "
+        f"suppress_useless_fire={suppress_useless_fire} "
+        f"suppress_lead_miss_fire={suppress_lead_miss_fire} "
+        f"opening_connect={opening_connect} "
+        f"max_ticks={max_ticks} difficulty={difficulty}"
     )
 
     # 上一轮产物清场（同课程重导出不残留旧文件；manifest 在 traj 直下不受影响）。
@@ -341,6 +355,11 @@ def _export(args: argparse.Namespace, manifest_path: Path) -> int:
                 # 决策节奏与账本那一局同口径（缺省 False/10 只对 decision_k==10 的课成立）。
                 decision_events=decision_events,
                 decision_k=decision_k,
+                skip_steel_only_shots=skip_steel_only_shots,
+                break_bricks_on_path=break_bricks_on_path,
+                suppress_useless_fire=suppress_useless_fire,
+                suppress_lead_miss_fire=suppress_lead_miss_fire,
+                opening_connect=opening_connect,
                 policy="nn",
                 replay_dir=str(out_dir),
             )

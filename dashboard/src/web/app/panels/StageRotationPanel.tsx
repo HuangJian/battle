@@ -8,6 +8,12 @@
  *    ② 该轮**逐关**采集账（收到 / 达标线 / 局数 / 硬顶 / est / 缺口）——判「是采不到还是没采」；
  *    ③ 最近若干轮的窗口一览（判「每轮换到哪批关、有没有长期缺口」——单点数字看不出趋势）。
  *
+ *  **2026-11-14 集约化（用户）**：原来三块各一张全宽表（十几关 + 十二轮 ≈ 大半屏），现在：
+ *   · 健康（每关达标、没触硬顶）⇒ 只留一块 badge，点「展开明细」才铺明细；
+ *   · 有缺口 / 读数不全 ⇒ **默认展开**（问题不该藏在一次点击后面）；
+ *   · 明细本身也从表改成格：逐关一格「关号 · 收到/达标线」（颜色 = 达标 / 缺口，悬停给局数·
+ *     硬顶·est），最近轮次一行一轮。同样的信息，高度是原来的三分之一。
+ *
  *  数据源只有一条、且只读：`stateView.metrics.iters[].rotation / .volume`（账本 `rotation` /
  *  `volume_stage_stats` 子字典，经 `server/iters.ts` 搬运）。**无任何轮换/分关读数 ⇒ 整块不渲染**
  *  （老课程页零变化）；缺哪一格就显 `—`，绝不编 0（0 在配额语义里是「真的没采到」）。
@@ -16,14 +22,20 @@
  *  控制台不重算窗口（它 import 不到 `nn-training/`，重算还需要课程配置 + rotate_seed）。
  */
 
+import { useState } from 'preact/hooks'
 import {
   type ConsoleStateView,
   type IterRow,
+  healthText,
+  rotationHealth,
   stageRangeText,
+  stageTitle,
   volumeText,
+  volumeTitle,
   windowText,
+  windowTitle,
 } from '../../view'
-import { Badge, Pill } from '../../components/Pill'
+import { Badge } from '../../components/Pill'
 import { SectionHeader } from '../../components/SectionHeader'
 
 /** 最新一轮**有采样范围读数**的行（iters 一般已按 iter 降序，但不假设——取最大者）。 */
@@ -40,168 +52,144 @@ function latestSampled(rows: IterRow[]): IterRow | null {
 const RECENT = 12
 
 export function StageRotationPanel({ stateView }: { stateView: ConsoleStateView | null }) {
+  // 展开态：null = 跟着健康判据走（健康收起 / 不健康展开），点过就按用户的选择。
+  const [open, setOpen] = useState<boolean | null>(null)
+
   const rows = stateView?.metrics.iters ?? []
   const rowsWithData = rows.filter(
     (r) => (r.rotation ?? null) !== null || (r.volume ?? null) !== null,
   )
   const latest = latestSampled(rows)
   if (!latest) return null
+
   const rot = latest.rotation ?? null
   const vol = latest.volume ?? null
+  const health = rotationHealth(latest)
+  const expanded = open ?? health !== 'ok'
   const recent = [...rowsWithData].sort((a, b) => b.iter - a.iter).slice(0, RECENT)
 
   return (
-    <section className="tc-mx" aria-label="采集窗口">
+    <section className="tc-card tc-rot" aria-label="采集窗口">
       <SectionHeader
         title="采集窗口"
         count={rowsWithData.length}
         hint="逐轮采样子集（rotation_mode）：每轮只采窗口里的关，ceil(关数/每轮关数) 轮覆盖一遍。读数全部从账本搬运（不重算窗口）"
         note={
-          rot ? (
-            <>
-              {' '}
-              <Badge tone="a">轮换 {rot.mode}</Badge>{' '}
-              <Badge tone="gray">
-                窗口 {rot.window.length}/{rot.all} 关
-              </Badge>
-              {vol?.halted ? <Badge tone="g">满额收工</Badge> : null}
-              {latest.capped ? (
-                <Badge
-                  tone="y"
-                  title="有单关触局数硬顶而配额未满（缺口是「顶到了」，不是「还没补」）"
-                >
-                  触硬顶
+          <>
+            {' '}
+            <Badge
+              tone={health === 'ok' ? 'g' : health === 'gap' ? 'y' : 'gray'}
+              title="健康 = 逐关账在手、每关都到达标线、没触单关局数硬顶。有缺口或读数不全时明细默认展开"
+            >
+              {healthText(latest)}
+            </Badge>{' '}
+            {rot ? (
+              <>
+                <Badge tone="a">轮换 {rot.mode}</Badge>{' '}
+                <Badge tone="gray">
+                  窗口 {rot.window.length}/{rot.all} 关
                 </Badge>
-              ) : null}
-            </>
-          ) : (
-            <>
-              {' '}
+              </>
+            ) : (
               <Badge tone="gray" title="未开轮换：每轮采 --stages 全集（关集 = 账本分关账的键）">
                 全关采集
               </Badge>
-            </>
-          )
+            )}
+            {vol?.halted ? <Badge tone="g">满额收工</Badge> : null}
+            {latest.capped ? (
+              <Badge
+                tone="y"
+                title="有单关触局数硬顶而配额未满（缺口是「顶到了」，不是「还没补」）"
+              >
+                触硬顶
+              </Badge>
+            ) : null}
+          </>
+        }
+        actions={
+          <button
+            type="button"
+            className="tc-link"
+            aria-expanded={expanded}
+            title={expanded ? '收起逐关明细与最近轮次' : '展开逐关明细与最近轮次'}
+            onClick={() => setOpen(!expanded)}
+          >
+            {expanded ? '收起明细' : '展开明细'}
+          </button>
         }
       />
 
-      <div className="tc-line tc-mb-2">
-        <span className="tc-small">
-          <strong>it{latest.iter}</strong> <span className="tc-muted">{latest.time}</span>{' '}
-          <span className="tc-muted tc-small">
-            {rot ? `窗口关号 ${stageRangeText(rot.window)}` : '窗口 = 全集'}
-            {vol ? ` · ${volumeText(vol)}` : ''}
-            {vol?.quota !== null && vol?.quota !== undefined ? `（每关 ${vol.quota}）` : ''}
-          </span>
-        </span>
-      </div>
+      {expanded ? (
+        <div className="tc-rot__body">
+          <div className="tc-rot__line">
+            <b>it{latest.iter}</b>
+            <span className="tc-muted">{latest.time}</span>
+            <span className="tc-muted">
+              {rot ? `窗口关号 ${stageRangeText(rot.window)}` : '窗口 = 全集'}
+              {vol ? ` · ${volumeText(vol)}` : ''}
+              {vol?.quota !== null && vol?.quota !== undefined ? `（每关 ${vol.quota}）` : ''}
+            </span>
+          </div>
 
-      {vol ? (
-        <table className="tc-wire__tbl tc-wire__tbl--full tc-mb-3">
-          <thead>
-            <tr>
-              <th className="tc-small tc-muted">关</th>
-              <th
-                className="tc-small tc-muted"
-                title="已结算 shard 的 nSamples 之和（与 target 同单位）"
-              >
-                收到
-              </th>
-              <th className="tc-small tc-muted" title="本关达标线 = ceil(target / 窗口关数)">
-                达标线
-              </th>
-              <th className="tc-small tc-muted">局数</th>
-              <th
-                className="tc-small tc-muted"
-                title="单关局数硬顶；空 = 不设（无估计的关不猜一个顶）"
-              >
-                硬顶
-              </th>
-              <th className="tc-small tc-muted" title="本关局均样本量估计（盘上历史派生）">
-                est
-              </th>
-              <th className="tc-small tc-muted" title="缺口 = 达标线 − 收到；0 = 已达标">
-                缺口
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {vol.stages.map((s) => (
-              <tr key={s.stage}>
-                <td className="tc-small">
-                  {s.stage}
+          {vol ? (
+            <ul className="tc-rot__stages" aria-label="逐关采集账">
+              {vol.stages.map((s) => (
+                <li
+                  className="tc-rot__st"
+                  data-tone={s.quota === null ? 'na' : (s.shortfall ?? 0) > 0 ? 'gap' : 'ok'}
+                  key={s.stage}
+                  title={stageTitle(s)}
+                >
+                  <b>{s.stage}</b>
+                  <span>
+                    {s.collected}
+                    <i>/{s.quota ?? '—'}</i>
+                  </span>
                   {rot && rot.pinned.includes(s.stage) ? (
-                    <span className="tc-pill tc-pill--note" title="pinned：每轮恒采">
+                    <span className="tc-rot__pin" title="pinned：每轮恒采">
                       pin
                     </span>
                   ) : null}
-                </td>
-                <td className="tc-small">{s.collected}</td>
-                <td className="tc-small">{s.quota ?? '—'}</td>
-                <td className="tc-small">{s.games ?? '—'}</td>
-                <td className="tc-small">{s.capGames ?? '—'}</td>
-                <td className="tc-small">{s.estS ?? '—'}</td>
-                <td className="tc-small">
-                  {s.shortfall === null ? (
-                    '—'
-                  ) : s.shortfall > 0 ? (
-                    <Badge tone="y">{s.shortfall}</Badge>
-                  ) : (
-                    '0'
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      ) : (
-        <div className="tc-caption tc-mb-3">
-          该轮账本没有分关采集账（本机腿才有 `volume_stage_stats`；云机/离线腿尚未搬进账本）。
-        </div>
-      )}
-
-      {recent.length > 1 ? (
-        <div>
-          <div className="tc-small tc-mb-1">
-            <strong>最近 {recent.length} 轮</strong>{' '}
-            <span className="tc-muted tc-small">（新→旧；判「每轮换到哪批关」与长期缺口）</span>
-          </div>
-          <table className="tc-wire__tbl tc-wire__tbl--full">
-            <thead>
-              <tr>
-                <th className="tc-small tc-muted">it</th>
-                <th className="tc-small tc-muted">窗口</th>
-                <th className="tc-small tc-muted">关号</th>
-                <th className="tc-small tc-muted">各关进度</th>
-                <th className="tc-small tc-muted">备注</th>
-              </tr>
-            </thead>
-            <tbody>
-              {recent.map((r) => (
-                <tr key={r.iter}>
-                  <td className="tc-small">{r.iter}</td>
-                  <td className="tc-small">{windowText(r.rotation)}</td>
-                  <td className="tc-small tc-mono">
-                    {r.rotation ? stageRangeText(r.rotation.window) : '—'}
-                  </td>
-                  <td className="tc-small">{volumeText(r.volume)}</td>
-                  <td className="tc-small">
-                    {r.capped ? (
-                      <Pill tone="y" title="有单关触局数硬顶而配额未满">
-                        触硬顶
-                      </Pill>
-                    ) : (r.volume?.halted ?? null) ? (
-                      <Pill tone="g" title="逐关配额全部达成，池里剩下的候选没派出去">
-                        满额
-                      </Pill>
-                    ) : (
-                      ''
-                    )}
-                  </td>
-                </tr>
+                  {s.shortfall ? <span className="tc-rot__gap">缺 {s.shortfall}</span> : null}
+                </li>
               ))}
-            </tbody>
-          </table>
+            </ul>
+          ) : (
+            <div className="tc-caption tc-caption--flush">
+              该轮账本没有分关采集账（本机腿才有 `volume_stage_stats`；云机/离线腿尚未搬进账本）。
+            </div>
+          )}
+
+          {recent.length > 1 ? (
+            <div className="tc-rot__recent">
+              <span className="tc-small">
+                <b>最近 {recent.length} 轮</b>{' '}
+                <span className="tc-muted">（新→旧；判「每轮换到哪批关」与长期缺口）</span>
+              </span>
+              <ul className="tc-rot__rounds" aria-label="最近轮次窗口">
+                {recent.map((r) => (
+                  <li
+                    className="tc-rot__rd"
+                    key={r.iter}
+                    title={`${windowTitle(r.rotation)}；${volumeTitle(r.volume)}`}
+                  >
+                    <b>it{r.iter}</b>
+                    <span>{windowText(r.rotation)}</span>
+                    <span>{volumeText(r.volume)}</span>
+                    {r.capped ? (
+                      <Badge tone="y" title="有单关触局数硬顶而配额未满">
+                        触硬顶
+                      </Badge>
+                    ) : (r.volume?.halted ?? null) ? (
+                      <Badge tone="g" title="逐关配额全部达成，池里剩下的候选没派出去">
+                        满额
+                      </Badge>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
         </div>
       ) : null}
     </section>

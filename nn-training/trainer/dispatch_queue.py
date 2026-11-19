@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import secrets
 import threading
 from pathlib import Path
@@ -10,7 +11,9 @@ from pathlib import Path
 # 把 `batch_plan.py` 搬进 `biz/` —— 见 DECISIONS
 # §2026-11-14-retire-dispatch-queue-reexport-surface 与 §2026-11-14-batch-plan-belongs-to-biz。
 
-RUN_ID = secrets.token_hex(8)  # runId 使 iterId 全局唯一（跨 relaunch 防混叠）
+# GPU 真机验证课（plan/replay-corpus.plan.md §6.6）：四档共用同一个 runId ⇒
+# `job_seed(runId,it,init_weights_fp)` 在档间可比；未给 env 时保持随机（旧行为逐字节不变）。
+RUN_ID = os.environ.get("NN_VERIFY_RUN_ID") or secrets.token_hex(8)  # runId 使 iterId 全局唯一（跨 relaunch 防混叠）
 
 
 def dispatches_jobs(args) -> bool:

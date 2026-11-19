@@ -5552,6 +5552,10 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-11-goalnn-rollout-node-liveness-budgets
 
+> **2026-11-14 修订**：**决定 C（并发取小）已被 §2026-11-14-goalnn-dispatch-slots-and-keepalive 取代**
+> ——派工线程要覆盖隧道往返与回传（`wall 9.3s` / `svc 2.3s`），按核数取小让节点 64% 时间空转。
+> 决定 A/B（探活预算、超时不摘权重账本）仍成立。
+
 ## §2026-11-11-goalnn-rollout-racing-connect（rollout 每轮 63s 的真因：串行 connect 的「每地址 timeout」；更正并收回上一条的预算修法）
 
 - **现场**：`o2-loot3` / `o2-notax3` 每轮 rollout **63.6s / 62.8s**（预期 <40s）。分相计时：节点门
@@ -6852,7 +6856,7 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   ⇒ 同 bank 两侧喂给模型的输入不同。`policy_extra=True` 的 `StudentNet` 在 `_require_extra` 处
   拒绝 `extra=None`（明确「不静默用 0」）⇒ torch「demo 开 + 带 extra 模型」腿每次更新直接炸；
   legacy 模型看不出差别。修 `_setup_demo` 与 Paddle 同口径（存在即物化）；先红后修用例
-  `test_demo_bc_feeds_the_bank_extra_to_a_policy_extra_model`。详见 `docs/nn/training-stack.md` §73。
+  `test_demo_bc_feeds_the_bank_extra_to_a_policy_extra_model`。详见 `docs/nn/training-stack.md` §77。
 - **2026-11-17（B8：`remote/offline_boot.py` 改生成物，12 段源码 `.pyfrag` + 拼接器）**：审计 §0.4-12 /
   §7.6 要求「3554 行改成生成物：源码拆多文件、构建时拼成单文件发行」。动前的约束是硬的：
   `offline_boot` 是 **standalone 运输单元**（notebook 引导格从 GitHub raw **按文件名**拉它，那时
@@ -7579,3 +7583,755 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   code_snapshot / kickstart_demo / pack_inputs / after_publish / export_bundle），
   长函数存量 **1 → 0**——`LONG_FUNCS_BASELINE` **清空**（存量清零，此后一律按新增判）。
   全文 → `docs/nn/engineering.md` §216。
+## §2026-11-13-goalnn-bc-corpus-lazy-mmap（BC 大语料逐 shard mmap + 训练前内存预检）
+
+- **决定**：训练装载改 `lazy=True`（obs/scalars/extra 走 ShardArray，每 shard mmap），
+  `NNDataset` 不再整份 `.astype` 复制；装载前用 `available_memory_bytes` +
+  `check_corpus_memory` 在分配前拒绝，错误给出可用/需要/处置。
+- **被否决**：先写一份拼接后的 mmap `.npy`——多占一份磁盘，Colab/Kaggle 工作盘不够；
+  eager 装载只 warning——内核仍会重启 notebook；靠异常兜底——没有机会解释原因。
+- **后果**：g2-classic35 旧峰值 ~19.7 GiB → lazy ~1.1 GiB；代价是每 epoch 从本地盘随机读
+  9.4 GiB。`load_dataset` 默认仍 eager（小语料工具行为不变），只有训练路径默认 lazy。
+
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-13-goalnn-bc-corpus-lazy-mmap
+
+## §2026-11-13-paddle-import-warning-noise（Paddle 日志两条噪声：ccache 提示按文案屏蔽 + 布尔下标换 `nonzero`/`gather`）
+
+- **决定**：`remote/paddle_env.silence_import_warnings()` 在 `import paddle` 前按**文案**
+  `No ccache found\.` 屏蔽那一条 UserWarning（不抬 `GLOG_minloglevel`、不全局静音）；Paddle 侧
+  布尔下标 `x[keep]` 全部换 `nonzero` + `gather`（`bc_paddle._kept` / `engine_paddle`），消掉
+  `tensor.cc:111` 的 reshape 弃用警告。
+- **被否决**：安装 ccache（本仓不经 `cpp_extension` 编译算子，装了只消警告不省时间）；
+  `GLOG_minloglevel=2` / 全局 `simplefilter("ignore")`（连 `gpu_resources` 的 device NOTE 与业务
+  UserWarning 一起吞）；只写文档保留提示（每次开跑都带红字，运维会当故障追）。
+- **后果**：BC/PPO 训练日志不再出现这两条；`nonzero` 与 `x[keep]` 同序同值（`_masked_ce` 单测
+  钉住），索引每 batch 只算一次、两个张量共用，设备同步量与布尔下标同量级。
+
+—— 全文（定位过程 / 证据 / 边界）→ `docs/decisions/details/goalnn.md` §2026-11-13-paddle-import-warning-noise
+
+## §2026-11-13-goalnn-hub-restart-job-reconcile（hub 重启后按盘找回未认领 job + trainer 优先有训练进度的 job）
+
+- **决定**：① hub 的 `course_of()` 在课程表无归属时按盘
+  `<root>/<course>/remote-jobs/<jid>` 找，唯一命中且该课有 `training-enabled.txt` ⇒ 按需
+  `add_course` 登记（歧义仍拒答）；② trainer 的 `find_round_job` 对同一 `it` 的多个未收口 job
+  先探测全部候选，优先认领盘上有结果/训练进度的（`result/` > `bc-resume`/`bc-metrics`/
+  `epoch-weights` > 空壳），`unreachable` 仍立即保守认领。
+- **被否决**：hub 重启时无条件重扫全部课程目录（陈旧实验目录会被复活、变成可派发）；
+  trainer 只按 manifest 最新认领（正是本次事故：新空 job 永久遮住旧 job 的 epoch）；trainer
+  向 hub 要「哪个 job 有租约」（租约在内存里，hub 一重启就没了）。
+- **后果**：等 GPU 超过 discover 新鲜窗的 job，在 hub 重启后 `/status`、`/result`、
+  `/epoch-weights` 仍可路由；重发布出的空 job 不再抢走旧 job 的认领权。可按需登记的课程仍需
+  盘上有 `training-enabled.txt`，未开课目录不会因一次查询复活。
+
+—— 全文（背景 / 备选与否决 / 验证 / 恢复步骤）→ `docs/decisions/details/goalnn.md` §2026-11-13-goalnn-hub-restart-job-reconcile
+
+## §2026-11-13-goalnn-notebook-idle-stop（云机 worker 页空闲即停会话：hub 不可达 / 队列静默）
+
+- **决定**：伴生脚本新增面板开关「空闲自动停会话（省配额）」（**全局**键 `bnc:idleStop`，默认关）：每 60s
+  问一次 dashboard 新增的只读端点 `GET /api/hubQueue`（逐课合成 `pending`/`inflight`/`pendingUnheld`/
+  `heldLive`，与总览同一条 `liveHub()` 腿）；整条队列静默（`pendingUnheld=0 ∧ inflight=0`，自主盘再加
+  `heldLive=0`）满 10 分钟 ⇒ `empty`，连续 3 拍问不到 ⇒ `unreachable`；判决成立后走 60s 倒计时（可取消），
+  再按角色停会话（Kaggle host `stopNow()`：先 flush 再点外层 Stop；Colab/AI Studio/魔搭走本页 `stopSession`）。
+  每一步落 op（`idleStop:on/off/miss/quiet/due/cancel/stop`）。
+- **被否决**：① 页面直接问 hub（伴生脚本的 `@connect` 只有回环，隧道域名/tailnet IP 不可枚举，且 hub token
+  不该进浏览器）；② 以「cell 结束」为判据（worker 启动后空转与训练结束后静默同形，cell 状态读不到也不可靠）；
+  ③ 一拍就停（两轮之间训练侧还没发下一份 job ⇒ 白掐一次会话）；④ 按页存开关（Kaggle 面板在外层页，里层
+  不生效）；⑤ 把在飞当「没活」（本机正在算的那份就是 inflight，缺它 = 掐掉自己的 job）；⑥ 只看
+  `pending`/`inflight`、不看课程 live hold（自主盘整课在本机跑时 hub 队列全静默，开训 10 分钟后会掐掉在训
+  会话；协作盘反过来要剔除被 hold 压住的 pending）。
+- **后果**：云机会话在「没活可干」时自己收摊，不再空烧配额；hub/队列的读面完全不变（新增端点只读、`activity:false`
+  不进空闲闸）。旧版 dashboard 没有该端点 ⇒ 页面按「问不到」计拍，3 拍后同样停会话（行为对旧版仍是「省配额」）。
+
+—— 全文（背景 / 通道 / 边界 / 验证）→ `docs/decisions/details/goalnn.md` §2026-11-13-goalnn-notebook-idle-stop
+
+## §2026-11-13-goalnn-offline-bc-kind-dir（自主云机领不到 BC 课：kind 判据改读权威 curricula + `pending_export` 只属于 RL）
+
+- **决定**：hub 的 BC/RL 判据从「`<discover_root>/../curricula` 找 `<课>.bc.jsonc`」改成读
+  `hub.store_offline.CURRICULA_DIR`（与归档/控制台同一份）；`begin_pending_export` 对 BC 课返回
+  `bc_course`（**不写** `pending_export`），缺包 claim 映射 409 `bc_course`；`offline_stalled`
+  忽略 BC 课的历史 `pending_export` 记录。
+- **被否决**：保留 `<discover_root>/../curricula` 并加「不存在再回退」——把「curricula 放哪」
+  重新变成隐式部署优先级；在 `queue_offline` 另抄一个 `CURRICULA_DIR`——与归档/控制台那份常量
+  必然漂移；在 claim 入口新增 hub 域方法做 BC 判断——白改成员计数/门面清单，且缺包腿之后的
+  BC 门仍然够不着。
+- **后果**：控制台起的 hub（`--traj-root <repo>/tmp`）下每门 BC 课的清单行是 `kind=bc` ⇒
+  自主云机走 `run_bc_course`（代码 bootstrap + `/jobs/{id}/claim`），不再每拍读回
+  `pending_export` 空转；盘上历史记录被读面忽略（不报假停滞）。**hub 需重启**才生效。
+
+—— 全文（背景 / 根因链 / 验证）→ `docs/decisions/details/goalnn.md` §2026-11-13-goalnn-offline-bc-kind-dir
+
+## §2026-11-13-goalnn-bc-device-auto-and-mmap-warning（BC 云机两条 warning：`auto` 设备未解析 / memmap 只读数组喂 torch）
+
+- **决定**：① 设备归一化的唯一实现下沉到 `remote.bc_job.normalize_job_device(device, backend, *,
+  paddle_probe=…)`；worker 的 `run_job` 与离线引导的 `_run_bc_once` 都调它 —— BC 腿在
+  `worker_loop` **之前**把 `auto` 解析掉（TPU 机上落 cpu：BC 训练核无 XLA 路径，`_bc_device`
+  会拒 tpu）。② `NNDataset.__getitem__` 对只读数组逐帧 `np.array` 复制（lazy 的 obs/scalars/extra
+  是 `mmap_mode="r"` 只读视图），消掉 torch collate 的「NumPy array is not writable」UserWarning。
+- **被否决**：① BC 腿直接调 `notebook_runtime.resolve_device`——它会把 auto 解析成 `tpu`，随后
+  `_bc_device` 响亮拒单（BC 完全跑不了），TPU 机的正确落点是 cpu；② 只屏蔽那条 UserWarning——
+  torch 明确要求「copy the array or make it writable」，且未来版本可能直接拒收；③ 换自定义
+  collate——多一份 batch 组装语义（mask 分片/scalars）要维护，收益只是省一次 memcpy。
+- **后果**：设备落点与 worker 兜底结果**逐值相同**（torch：cuda/cpu；paddle：问 paddle），
+  但不再经过「未经解析」告警分支；lazy 语料每样本多一次 ~11 KiB memcpy（eager 路径零成本）。
+
+—— 全文（背景 / 备选与否决 / 验证）→ `docs/decisions/details/goalnn.md` §2026-11-13-goalnn-bc-device-auto-and-mmap-warning
+
+## §2026-11-13-goalnn-bc-tpu-xla（BC 上 TPU：训练核接 XLA 路径，`auto` 解析 CUDA → TPU → CPU）
+
+- **决定**：① `worker/train/bc.py` 接 `worker/ppo/np_core` 的 XLA 助手：训练步走
+  `optimizer_step`（`xm.optimizer_step`）+ 每批 `xla_mark_step`；新增 `_setup_xla`
+  （编译缓存 → 指纹/速度自检 → **非 TPU 的 XLA 后端拒跑**，与 PPO `train_core` 同一套判据）；
+  `_resolve_bc_device` 把 `tpu`/`xla` 映成 `xla_device()` 句柄。② 权重路径全部走 CPU 副本：
+  `best_state` 用 `to_cpu_batch` 一次批量 D2H、每 epoch 回传/ckpt 用 `HostModule`、参数计数
+  挪到 `.to(dev)` 之前；XLA 上 masked CE/acc/value-MSE 改**静态形状**（布尔索引会按有效样本数
+  每批重编译）。③ `remote/bc_job._bc_device` 透传 tpu/xla；离线引导 `_run_bc_once` 的 `auto`
+  改用 RL 腿同一份 `resolve_device`（`use_multi_gpu=False`：BC 多卡仍须显式 cuda-dp）。
+- **被否决**：① BC 腿继续调 `normalize_job_device`（`auto` 永不落 tpu——TPU 机永远跑 CPU）；
+  ② 直接 `torch.device("xla")`（部分 torch_xla 版本拿不到带序号的句柄，PPO 已踩过）；
+  ③ 让 `HostModule`/批量 D2H 只在收尾用、每 epoch 逐张量 `.cpu()`（42 参数 ≈10s/次 × 500 epoch）；
+  ④ 不改 `_masked_ce` 的布尔索引（XLA 图签名随批内有效样本数漂移 ⇒ 每批重编译）。
+- **后果**：TPU 云机上的 BC 真正跑在 XLA 设备上；设备解析/指纹/拒跑与 PPO 同源。CPU/CUDA 路径
+  逐位不变（所有 XLA 分支都有 `is_xla` 门）。边界：单设备 XLA（8 核 SPMD 见
+  §2026-11-13-goalnn-bc-tpu-spmd-8core）；每批 `.item()` 仍是一次设备同步（诊断读数要它）。
+
+—— 全文（背景 / 备选与否决 / 验证 / 边界）→ `docs/decisions/details/goalnn.md` §2026-11-13-goalnn-bc-tpu-xla
+
+## §2026-11-13-goalnn-bc-tpu-spmd-8core（BC 吃满 TPU v5e-8 的 8 核：单进程 SPMD 数据并行）
+
+- **决定**：`worker/train/bc.py` 在 XLA 多核（`global_device_count > 1`）时开 **单进程 SPMD**：
+  `_xla_spmd_mesh` 先 `xr.use_spmd()`（**必须先于任何 runtime 初始化**——`global_device_count()`
+  本身就会建 PJRT client，先数设备会走 force 分支并在 `xla_device()` 处崩）再建 1-D `data` mesh
+  （核数用 SPMD 的 `global_runtime_device_count()`）；
+  `_shard_model` 把参数**复制**到各核，`_shard_batch` 把 obs/scalars/extra/标签/掩码/return 按
+  dim0 切到 `data` 轴；`make_loaders(drop_last=<SPMD>)` 保证整批可整切、`_assert_spmd_batch`
+  要求 `--batch` 是核数倍数；SPMD 下训练步走**裸 `opt.step()`**（复制参数上的梯度已由 XLA
+  归约，再调 `xm.optimizer_step` 会二次归约、放大 world_size 倍）。单核/不可用 ⇒ 原单设备路径。
+- **被否决**：① `xmp.spawn` / `torchrun` 多进程数据并行——BC 的 job 生命周期（单份
+  stdout / resume / on_epoch 回传 / result）都在 `worker_loop` 一个进程里，多进程要重做 8 份
+  rank 收口；② SPMD 下仍调 `xm.optimizer_step`——`reduce_gradients` 可能再 all-reduce 一次；
+  ③ 不 drop_last、靠 ragged tail 切分——`mark_sharding` 不做非整切分；④ 切分参数（tensor
+  parallel）——73K 参数的小模型上收益为负，复制+数据并行才是正解。
+- **后果**：v5e-8 的 8 核全部参与前向/反向；**global batch 语义不变**（mb=256 ⇒ 每核 32，
+  LR/优化步数不变）。代价：尾批丢弃（每 epoch ≤ mb−1 个样本，g2b 877k 语料 ≈0.03%）；
+  每步多一次跨核 all-reduce（小模型上是主要新增开销，但仍远小于 8× 吞吐收益）。
+  CPU/CUDA 路径逐位不变（`drop_last` 缺省 False、mesh=None）。`world_size()` 在无复制时恒为 1，
+  核数判据用 `global_device_count`。
+
+—— 全文（背景 / 备选与否决 / 验证 / 边界）→ `docs/decisions/details/goalnn.md` §2026-11-13-goalnn-bc-tpu-spmd-8core
+
+## §2026-11-13-goalnn-inference-rules-course-block（评估链推理规则：课程 `inference_rules` 块 + 部署面英文名）
+
+- **背景**：顶钢空枪门（历史 ID B1）确认 +6.00pp 后需要可部署的开关，但训练链必须恒关——规则会改写 PPO/DAgger 的动作分布，训练语料不再对应模型自身能力。旧方案 `--b1-gate` 是单点 CLI 且规则 ID 不直观。
+- **决定**：课程文件新增 `inference_rules` 块（默认全关；`extra="forbid"` 拼错即拒），当前唯一键 `skip_steel_only_shots`。只由 eval 链消费：`eval_course_once` → `args.skip_steel_only_shots` → 本机 `run_local_eval_game` / 远端 `fetch_task`（`?skipSteelOnlyShots=1`）→ agent 拼 `--skip-steel-only-shots`；节点能力位 `skipSteelOnlyShotsSupport`（旧 agent fail-closed）；任务键后缀 `:skipSteelShots`；报告归因 `inferenceRules.skipSteelOnlyShots`。规则 ID（B1/A3…）只作历史实验索引；配置/CLI/报告/节点参数一律用英文描述名。
+- **被否决**：① 评估链默认开——+6pp 只在 ep80/hard 上确认，其他 checkpoint/难度未验证，且历史读数会静默换口径；② 只保留 `export-eval-game` 手动开关——课程 judge/dashboard 永远用不到；③ 统一 `--inference-rules` bitmask——当前只有一条规则，先用课程块，等第二条规则过确认再抽象。
+- **后果**：课程不写块 = 行为逐字节不变；该块不进 `corpus_identity_fp`；训练 rollout 命令不读该开关（行为测试 + TS 源码门禁钉住）。代价：开启批次只派给有 `skipSteelOnlyShotsSupport` 的新 agent，旧节点被 fail-closed 排除。
+
+—— 全文 → `docs/nn/training-stack.md` §74
+
+## §2026-11-13-goalnn-break-bricks-v1-negative（拆砖免绕路 v1：判负降 dormant）
+
+- **背景**：部署面已支持课程 `inference_rules.break_bricks_on_path`（默认关；本机/远端/agent/能力位/任务键全链透传）。v1 定义 = 所选 move 方向被砖挡（hold）或 2 格内有砖（advance）且策略没开火时，朝该方向强制拆墙；基地保护圈砖不拆。
+- **决定**：175 对 screening（两臂 B1 开，ep80 × classic35-safe-base × seeds 2000002001-2005）control **46.86%** → rule **43.43%**，Δ **−3.43pp**；McNemar b=37/c=31 **p=0.545**；按关 bootstrap 95% CI **[−12.0, +5.14]**；kills 15.41→14.90。win 无改善 + CI 跨 0 ⇒ **不做确认/部署，B2 v1 降 dormant**；B1×B2 组合不再做。
+- **被否决**：① 以 pilot 继续冻结 20-seed 确认（点估计为负，先验方向不成立）；② 直接部署（违反“win 无显著改善一律不部署”）；③ 删除部署面（保留为默认关的实验开关，后续变体需新预注册）。
+- **后果**：`break_bricks_on_path` 默认 false，课程不写 = 行为逐字节不变；训练链仍不认该开关（源码门禁 + 行为测试）。B2 变体（如只在“砖是唯一阻挡且目标在砖后”时触发）需新预注册 + 新筛选段。
+
+—— 全文 → `docs/nn/training-stack.md` §74
+
+## §2026-11-14-goalnn-dispatch-slots-and-keepalive（派工槽位不再取小 + 节点 workers ×2 + 长连接池 + 磁盘阈值可配）
+
+- **现场（gcs，2 物理核，2026-11-14 00:29）**：30min 599 局（rollout 219 / eval 380）＝ 20 局/分；节点侧 `svc 2.16s / wall 9.33s` ⇒ 槽位占用 36%。派发日志 `concurrency=2` 而配置是 4——`node_slots = min(config, cpus)` 把操作者旋钮吃掉一半。传输：新建连接 0.77s / 复用 0.32s，结果包 163KB ⇒ 瓶颈不是带宽。
+- **决定**：① `node_slots(configured, cpus, workers)` = 显式 config 优先，缺省 `ping.workers → cpus`；`/v1/ping` 增报 `workers`；rollout/eval/rescan/batch 四处共用（**修订 §2026-11-11 决定 C**）。② 节点 `CFG.workers=0` auto = `min(有效核, 物理核) × 2` + `workers 自检` 行（`★ workers 超额认购`：ping ≥1.5×基准且 ≥1s）。③ 派工顺序按 50 局 `wallSec` 窗口升序，**只排序不减槽**（`policy.nodeOrderBySpeed`，K=50 / 冷启动 5 局；窗口每轮现读 `dist-agent-meta.jsonl` 尾部，不驻留内存）。④ `common/http_pool.py` thread-local keep-alive，**每请求刷新 timeout**，**白名单重发**（收工态与 `/v1/task` 不重发）。⑤ `CFG.disk_floor_mb/disk_warn_mb` 可配（默认 2048/4096 不抬高）+ agent 两个 CLI + 10min 周期行 + 档位切换即时行（同一次 `/v1/status`）。
+- **被否决**：`min(config, workers)`（节点没重启时等于没修）；速度加权减槽 / 中央列表调度；批量派发 + 跨局 gzip（实测 +0.5% / −2.3%）；「传输失败一律重发」（sync `/v1/task` 在 agent 侧不幂等，会重复开局）；把拒收地板默认抬到 4~5GB（§2026-10-09 已否）。
+- **后果**：派工线程可超过节点池容量（多出的是准入排队，不是故障），护栏 = `[dist]` 超额告警行 + `admission.waiting`；`workers=物理核×2` 在 2 核机上是 §2026-11-11 事故同型配置，护栏 = `★ workers 超额认购` 行 + `CFG.workers=物理核` 回退；eval 与 rollout 共用一条并发旋钮（用户裁定），抢槽风险由 `eval_slot_cap` 让位兜底并记在风险 R8。三个回退旋钮都不改代码：`CFG.workers` / `nodeOrderBySpeed=0` / `NODE_HTTP_POOL=0`。
+- **验收**：`tests/common/test_http_pool.py` 8 条 + `tests/trainer/test_node_speed.py` 6 条 + `test_node_probe_budgets.py` 7 条 + `tests/remote/test_rollout_node.py` + `tests/agent/disk-level.test.ts` 17 条；`bun run check` 2780 passed、`bun run build` 过、`tests/{common,trainer,remote}` 全绿、`nn-python-gate` 绿。
+
+—— 全文（现场读数 / DoD / 风险 / 上线顺序）→ `plan/node-throughput-and-keepalive.plan.md`；链路细节 → `docs/nn/remote-transport.md` §152
+
+## §2026-11-14-goalnn-g4-special-course（g4-special：替换 g4-precision 的生存/特殊兵种臂）
+
+- **背景**：g4-precision 100 轮中期判负（胜率 −3.1pp vs it290；空射税只买到“少开枪”，远距/背击 gate fail）；g4-mobility 的胜率增益全部来自命耗尽 −1.59pp，机动机制（stuck/wall/freeze/brick）没动。用户裁定：每个关卡敌人种类/数量固定 ⇒ **不做 wKillPower/wKillArmor**；课程名 **g4-special**，不升序号；bc = `g4-mobility.it125`。
+- **决定**：新建 `nn-training/curricula/g4-special.jsonc`（500 it / 24h）。奖励 = g3 收入骨架 + mobility 生存四件套（threat/hurt/postHit/encl），**不新增任何价格项**；删除 precision 的 miss/back/side/far 与 mobility 的 stuck/wall/freeze/brick；低血/爆发税不重蹈（y21-chain2 判低血税“空气”，x24-stack5/x26-obs 判 wBurst 稀疏税判阴，damageWhileLow/damageBursts 只作读数）。训练侧 `rotation_mode: pinned` 钉 13 个失败贡献最高的关（2006/2007/2008/2010/2011/2013/2018/2019/2020/2024/2026/2030/2034），每轮 2 关余额；eval 仍全 35 关 ×20 seed。主判：it400–500 胜率 ≥83.5%，lives_ex ≤10.5%，hard13 ≥72.0%；守卫 stop ≤5% / cells ≥140 / max_ticks ≤6% / shots ≥70。
+- **被否决**：① 按兵种击杀定价（固定关集下等于给必经事件加价）；② 继续给 g4-precision 加价或续跑（§15.5）；③ 加大 stuck/wall 税修超时尾（g4-mobility 已证机制不动，瓶颈是能力不是价格）；④ 用 it125 单点 11.0% 当基线（同 arm it120 是 14.57%；用 110–130 五点窗口 12.26%）。
+- **后果**：g4-precision 由人在控制台停，本改动不操作训练开关；g4-special 新 out/traj/backup，禁与 g4-mobility/precision 续跑；bc 已在 `nn-training/weights/in-use/` 留备份（§379）。课程加载 + `test_jsonc_courses_load` 已过；开课仍由人在控制台点。
+
+—— 全文（价目校准 / 判据 / 风险）→ `nn-training/curricula/g4-special.jsonc`
+
+## §2026-11-14-goalnn-node-transport-attribution（节点池计数按课程/用途分桶 + drop 原因 + `NO_PROXY` 让 LAN 直连）
+
+- **现场（2026-11-14 评审，实测而非推断）**：① 原 plan 的根因「同步 `/v1/task` 是 close-delimited」**不成立**——Bun 1.4.4 对流式 `Response` 自己就发 `Transfer-Encoding: chunked`（`curl -D -` + `resp.chunked=True/will_close=False`），显式加该头输出逐字节无差别；拿真 `common.http_pool.request` 打**逐字节复刻**的 sync task 形状三连发 = `reuse=2 connect=1 drop=0`。② 真正每请求重连的是 **LAN 三台**：`NO_PROXY` 里写着 `192.168.0.0/16`，但 `proxy_bypass()` 在 Windows 读注册表、不读 env ⇒ a96/a97/a98 全走 `127.0.0.1:7890`，代理对每条响应回 `Connection: close`（同一 `/v1/status`：经代理 3 发 0.282s / 直连 0.109s）。③ `[dist] round done` 的池计数是**进程级 + 读后清零**，而一个 serve 进程并发跑 10+ 课程（`y26-clear`/`g4-special`/`o2-gq`/`z2-*` …）⇒ 原 plan 的「connect=79 ≈ 65 局」是错误归因。④ kaggle/dsw 隧道本身 keep-alive 正常（`Connection: keep-alive`，`num_connects=0`）。
+- **决定**：① `http_pool` 计数按 **`<course>/<kind>` 桶**存，`stats_suffix(bucket)` 与 `pool_round_suffix()`（rollout+eval 两段）打到 `[dist] round done`；② `drop` 拆原因 `will_close|error|abort|redirect|idle`（「掉在哪一跳」是这条链上唯一值钱的读数）；③ `net_http.env_no_proxy` 读 `NO_PROXY`（`*`/精确/`.suffix`/IPv4 CIDR），`bypass_proxy` = 回环 + 它，`urlopen`/`racing_urlopen`/池三处同判据；**不硬编码私网段**（尊重 operator 的字面配置）；④ kind 由 URL 推断（`/v1/task|result` 按 `mode=eval` 分 rollout/eval），eval/batch 腿用 `set_request_tag(tag, kind=…)` 覆盖；⑤ idle 老化 `NODE_HTTP_POOL_IDLE_SEC` **默认 0（不老化）**——常量等现场读数，不拍 120s。
+- **被否决**：给 agent 加 `Transfer-Encoding: chunked`（空操作，前提已被证伪）；`SAMPLER_TASK_CHUNKED` 开关与 `taskChunkedSupport` 能力位（把 Bun 的既成事实写进协议 = 噪声）；硬编码 `10./172./192.168.` 绕开代理（与 §2026-11-11 的「判据只看 host，不做 LAN 例外」冲突，且换台机器就变味）；HTTP/2 多路复用与跨 it 进程池（缓议，理由改为「先查清连接为什么掉」）；把 idle 超龄写成 120s。
+- **后果**：LAN 三台恢复 keep-alive 且少一跳；日志行新增两段 `pool[rollout] … pool[eval] …`（旧字段位置不变）；`NODE_HTTP_POOL=0` 的回退腿也绕开 `NO_PROXY` 网段（两条腿同政策）；**已知 latent**：https 目标经代理时池路径建的是 `HTTPConnection` + `set_tunnel`（缺 TLS 包装）⇒ 会得到「plain HTTP to HTTPS port」，生产未触发（控制台把 `.trycloudflare.com` 塞进 `NO_PROXY`，走直连），记在 §153 待修。
+- **验收**：`tests/common/test_http_pool.py` 13 条 + `tests/common/test_net_http_env_no_proxy.py` 8 条；`nn-python-gate` 6054 passed；现场读数：a96/a97/a98 三连发 = `connect=1 reuse=2 drop=0`。
+
+—— 全文（现场读数 / DoD / 分步）→ `plan/task-stream-chunked-keepalive.plan.md`；链路细节 → `docs/nn/remote-transport.md` §153
+
+## §2026-11-14-goalnn-safe-base-single-layer（classic35-safe-base 基地环单层化：只改环 8 格，环外恢复 classic35）
+
+- **背景/决定**：整格钢把 5 个 13×13 源格连带环外 12 格变成钢，S9 Twin Towers 等原本没有口袋的关被挤成出生点口袋（用户 2026-11-14 指出）。改为半格钢码 `(5,11)=20 BR / (6,11)=9 BOTTOM / (7,11)=19 BL / (5,12)=8 RIGHT / (7,12)=10 LEFT`；26×26 只差环 8 格（brick→steel），环外与 classic35 逐格一致。
+- **验收**：`bun tmp/verify-safe-base.ts` 35/35（diff=8、环外 0、可达 0.0%）；`test_bc_eval_course_env` 加载通过。滚动的 g4-mobility / g4-special 的 eval/rollout 语料变了，跨单层化前后的点不可横比（§15.5）。
+- **被否决**：整格钢（S9 口袋）；`tiles26`（Python `StageSpec.grid` 必须 13×13，`stage_json` 只下发 grid；半格码已能精确表达）。
+- **后果**：g4-open 以新地形重测的 `it380` 700 局为基线 B；旧地形 it380 的 84.43%/低杀 18 只作规划参照。
+
+—— 全文（地形差异 / 生成器 / 评测影响）→ `plan/g4-opening-hybrid.plan.md` §4.5
+
+## §2026-11-14-goalnn-shared-modules-from-god（`src/nn` 不再直接依赖 `src/ai/god`：公共件下沉）
+
+- **背景/决定**：用户 2026-11-14 要求 `src/nn` 不要从 `src/ai/god` 取公共件。A*（`src/utils/pathfind.ts`）、基地环（`src/utils/base-ring.ts`）、`ThreatBudget`（`src/ai/threat-budget.ts`）、turn gate（`src/utils/turn-gate.ts`）、冰面滑行（`src/utils/ice-glide.ts`）、中央突破判定（`src/utils/central-breach.ts`）下沉；`src/ai/god` 旧路径保留 re-export，现有 God-AI 调用点不改。`GoalExecutor` 的 `shouldFireInDirImpl` 改走 `GodAIInput.shouldFireInDir` 公共方法（同实现，少一层直接 import）。
+- **验收**：`grep "from '../ai/god" src/nn` 无命中；`bun run typecheck` / `bun run check` 绿（2809 pass）。
+- **被否决**：把 `OpeningController` 放进 `src/ai` 绕过边界——问题在公共件没有公共位置，不是 controller 的位置。
+- **后果**：`src/utils/pathfind.ts` 现在是 A* 唯一实现；`src/ai/god/pathfind.ts` 只是壳。新增跨层使用者应 import 共享层，不要再往 `src/ai/god` 加。
+## §2026-11-14-goalnn-sampler-service-clock-in-exporter（结果容器计时前移到导出器，删掉 agent 侧全量重压）
+
+- **现场（真实测量，非推断）**：用 `~/dev/github/battle-rollout/tmp/dist-agent/weights-rollout-0d824e10c0f30142.json`（11-14 18:57 生产权重）+ 课程 `z9-r4b` 的 `max_ticks=12000 / K=10` 跑 5 局真实 rollout + 1 局 eval。BCV2 容器 pack **87–287 KB**、frame **3.1–12.6 MB / 13 entries**；`stampServiceSec` 中位 **13.2–43.6 ms/局**（eval 仅 0.24 ms），其中 gzip 占 10–30 ms。8 workers 推算占主线程 5.4–17.8%；2s 窗口 10ms 定时器最大漂移 **32.8 ms**（空闲 0.1 ms）。原注释「~1MB / 十几 ms，相对整局可忽略」被证伪。原始读数 `tmp/sampler-perf/bench-results.txt`（一次性脚本，不入库）。
+- **决定**：agent 每局把接单时刻经 `--service-started-at-ms` 透给导出器；`tools/sim/pack-container.ts::serviceElapsedSec` 成为 `manifest.elapsedSec` 单一来源（参数缺席 = 回退导出器 `t0`，本机直跑口径逐字节不变）；5 个导出器（rl / eval / goal / intent / bc）全部改用它；`serveResult` 退化为「同一个 buffer 既进缓存又对外」，不再解包重压。`stampServiceSec` 保留为回滚档与单测标的，结果出口不得再调用（源码级钉子）。`pack-container.ts` 入 `codehash-files.txt`。**gzip level 6 保持不变**（用户裁定）。
+- **被否决（均有实测）**：① 异步 zlib 把压缩挪到 libuv（只搬走阻塞、不省 CPU，云机会与子进程 NN 抢核）；② 容器加明文 trailer 让 agent O(1) patch（要改 `common/distribution.unpack_container` + trainer 侧，协议面更大）；③ P1 全组——`readFileSync` 0.02–0.09 ms、mkdir+write+read+rm 0.49–0.80 ms、report 写盘 0.07–0.11 ms、`new Uint8Array` 0.035 ms、`statfsSync` 0.003 ms——全是噪声级，却要翻 codeHash + 改结构钉子 ⇒ 不做；④ persist worker stderr 未消费属健壮性，另案，不夹带进本次性能改动。
+- **后果**：`elapsedSec` 口径从「agent 结果就绪」变为「子进程打包完成」，差 = readFileSync + 微任务 ≪ 0.1 s，而字段本身 `toFixed(1)` ⇒ 对 `race_metrics.effective_slots` 的 E 判据无实质影响。真机 A/B：rollout / eval 两容器除 `elapsedSec` 外 manifest 与 13 个 entries **逐字节一致**；出口 14.285 ms → **0.001 ms**。⚠ `sampler-agent.ts` + 5 导出器 + `pack-container.ts` 全在 codeHash SSOT ⇒ **触发全集群升级波**；混跑由 codeHash 门挡住（同 commit 部署是既有惯例）。
+- **验收**：`tests/agent/result-stamp.test.ts` 6 例（serviceElapsedSec 纯函数、serveResult 原样返回、源码级回归钉子）；`bun run check` / `bun run build` 绿。
+- **修订（同日 22:00，用户裁定「P1 剩余各项若合最佳实践，即使墙钟无改善也可改」）**：判据从「实测收益」改为「工程最佳实践 + 不破坏契约」，补做 4 项，均在 `sampler-agent.ts`：① 结果出口零拷贝——`/v1/task` 与 `/v1/result` 缓存命中改 `new Response(bodyView(cached.buf))`、同步流改 `controller.enqueue(served)`，去掉 3 处整包 `new Uint8Array(buf)` 复制；`bodyView()` 用 `buf.buffer as ArrayBuffer` 造零拷贝视图（Node `Buffer<ArrayBufferLike>` 不满足 `BodyInit`，直接传会 TS2345），真实容器实测 byte-equal 且共享底层，结构钉子同步更新；② `runGame` 生命周期同步 FS 全改 `fs.promises`（mkdir/read/rm），并用 `read + catch` 替掉 `existsSync → read` 的 TOCTOU，finally 清理吞异常以免盖掉主结果；③ persist worker 的 stderr 管道加消费者并留 4KB 尾部诊断（写满 64KB 会把 worker 永久堵在 write 上，只能等 600s 超时）；④ stdout 由「逐行 `buf.slice(nl+1)`」改成按 chunk `lastIndexOf('\n')` 一次切行，消掉 O(N²) 复制。**仍不做**：跳过 `_rl_report.json`/`_eval_report.json` 落盘（B4 哨兵 + `queue_local.py`/`iter_rollout.py`/`workdir_sweep.py` 等是真实消费方，属契约不是死写）；`statfsSync` 缓存与权重 miss 负缓存（把「当前事实」变成带 TTL 的模块状态，与磁盘告警回差同拍、磁盘回查语义冲突）。新增 `tests/agent/persist-pool.test.ts` 3 条源码级 IO 卫生钉子。
+
+## §2026-11-15-goalnn-self-codehash-reference（rollout 节点门基准 = self 自报的 codeHash）
+
+- **动机（用户 2026-11-15 点名）**：hub 工作区有未提交改动时 `compute_code_hash()` 算的是「谁都没在跑的那份」；节点门拿它当 expected ⇒ 全部远端节点判 `codeHash mismatch` 被排除（本地改代码 = 全集群瘫痪，只剩本机腿）。
+- **决定**：rollout 派工（`trainer/dispatch._run`，rescan 共用同一参数）的参考 hash 改走 `common.distribution.reference_code_hash(cfg_nodes, probes)`：**self 节点 `/v1/ping` 自报的 codeHash 优先**（节点 id = self 或回环 URL），self 缺失/未报才回落 `compute_code_hash()`。self 的 agent 报的是实际在跑的代码，与远端同一把尺子。
+- **被否决**：① 不设门（真 stale 节点会静默跑旧代码）；② 多数节点投票当基准（少数派会被判 stale，且引入跨轮投票状态）；③ 只在 `dirty_files` 时跳门（那是工作区事实，不是「self 在跑哪份」的证据）。
+- **后果**：self 未重启时基准 = 旧代码 ⇒ 集群按旧代码继续跑（用户口径：宁跑不瘫）；提交+push+重启 self 后基准自动跟进。eval/batch 腿仍用工作区现算（本次未改）。`dirty_files` 仍只用于「远端 pull 不可收敛 ⇒ 抑制 restart」，语义不变。
+- **验收**：`tests/trainer/test_rollout_dispatch_resilience.py` 3 条（prefers self / fallback / dirty workspace keeps cluster，`slotsOnline=2`）；`dispatch.py` LOC 仍 999；`bun run check` + `bun run pygate` 绿。
+
+## §2026-11-15-goalnn-autonomous-cloud-overrides（课程级 `autonomous_cloud_overrides`：GPU/TPU 各一套语料采集策略）
+
+- **背景**：同一门课程会**先后在 GPU / TPU 云机交替训练**（用户 2026-11-15 更正）——设备不同，每轮能采的局数/窗口不同；只写一套顶层 target 会让另一类设备欠采样。同时有覆盖块时 notebook `CFG.sample_mult` / `CFG.epoch_mult` **不再生效**（用户同日更正 ②），否则同一档被乘两次。
+- **决定**：课程新增 `autonomous_cloud_overrides: {gpu: 档, tpu: 档}`，每档自包含 `target_transitions`（StrictInt>0）+ `rotation_mode`（even/pinned）+ `rotation_per_it`（even≥1，pinned≥0，pinned 需 `rotation_pinned`）。选档在**执行面** `remote/plan_run._sampling_profile` 按 `ctx.device` 做（cuda*→gpu，tpu/xla*→tpu）；缺档首轮前 `ProtocolError`，不回落。选中档 ⇒ 两个倍数强制 1.0 并打一行「忽略 CFG 倍数」；`worker/cloud_sampling.plan_for_profile` 用档 target + 档 rotation 重解 `volume`（按 `est_s_all` 抬 topup cap），后续 `volume_for_round` / `pairs_for` / `rotation_event` 全走档计划。块**不进** `flat_overrides` / `corpus_identity_fp`；每轮产物 `sampling_profile` 进账本。课程前置：`mode=per-tick` + 顶层 `target_transitions>0` + 顶层 `rotation_mode` 非空。
+- **被否决**：① 只写 per-device `rotation_per_it` 而沿用顶层小 target（漏乘，TPU 档仍欠采样）；② 课程级 `effective_sampling` 双真源（计划与课程各一套，改一处静默失效）；③ 开课 `target % mb` 警告（`chunk_episodes` 丢尾，`mb` 可被 `ppo_schedule` 逐段改）；④ 允许 `even + per_it=0`（等于关轮换却写 even，静默）；⑤ 用 int 收 bool（`true` 会变 1 混过校验）。
+- **后果**：不写块 = 行为逐字节不变；块生效时 notebook 倍数是**死旋钮**（日志留痕）。GPU/TPU 档实际 pairs 不同 ⇒ 各自独立 run/traj，不能横比；块本身不是语料身份（同 `sample_mult`）。CPU/未知设备不选档，倍数照旧。`n % mb` 尾部丢弃仍存在（本轮不修）。
+- **验收**：`tests/biz/test_autonomous_cloud_overrides.py`、`tests/worker/test_cloud_sampling.py`、`tests/remote/test_plan_run_cloud_sampling.py`；`bun run pygate` 绿。
+
+—— 全文（课程形状 / 执行面 / 风险）→ `docs/nn/training-stack.md` §76
+
+—— 全文（现场 / 风险）→ `nn-training/common/distribution.py::reference_code_hash` 与 `trainer/dispatch.py` 注释
+
+## §2026-11-15-goalnn-conv-wasm-clang20-retest（clang20 下档位/ReLU 复测：现役组合即局部最优，不动）
+
+- **现场（用户 2026-11-15 点名复跑 `conv-wasm-clang20-retry.md`）**：本机 clang 20.1.0 按 `wasmBuildFlags()` 重编 8px 得到**与现役 `conv.wasm` 逐字节相同**的产物（`6e506781…` / 7350 B）⇒ 测量对象就是生产内核。三问全部为「否」：① clang20 下 **16px 比 8px 慢 5%**（clang22 上 8→16 是断崖提速，方向相反）；② **无分支 ReLU（fabs/mulbool/ltzero）都不提速**（clang20 的 `x > 0 ? x : 0` 本来就出 `f32x4.pmax` 16 处、`replace_lane` 0 处，改写只增 mul/add）；③ **`-mrelaxed-simd` 产出字节相同的 wasm**（clang22 上 4.75 ms 的收益来自绕开 gt/select 退化，clang20 无此退化可绕）。档位补扫 4/12/20/24/32 分别 2.59×/1.117×/1.116×/1.112×/1.123×，8px 是双侧局部最优。native 那一臂同样：8/12/20/24/32 px 分别 1.053/1.151/2.352/1.085/1.235×，16px 最优。
+- **决定**：**保持现役，不改 `src/nn/conv/*`、不重编 prebuilt**（判定标准「内核 >5% 且端到端同向」无变体满足）。同时确认生产实跑的是 **native**（prebuilt + `NN_NATIVE_LIB`），wasm 只是回落臂；本机 native 比 wasm 快 **1.45~1.52× 端到端**（rollout 1511~1522 vs 2181~2315 ms；eval 1466~1510 vs 2208~2228 ms），内核层 1.63×（1.65 vs 2.73 ms/forward），且两次 rollout 的 13 个 `.npy` **逐字节相同**、manifest 只差 `feat` 字段 ⇒ 后端选择不影响轨迹与语料。
+- **被否决**：① 统一到 16px（clang20 上更慢，且 clang20 的 8px 已无退化）；② 预先改成 fabs 以防「未来后端退化」（慢 2.4%，退化应由代码生成门禁抓）；③ `-mrelaxed-simd`（零字节差异、改 NaN 语义）；④ FMA（本机实测 native px16 `-mfma -ffp-contract=fast` 只 **+8.4%** 内核 / 端到端 −7.5%，远低于 macOS 文档的 +23%；且会被运行期 attestation 整条关掉——见同条「FMA 补测」）。
+- **FMA 补测（用户 2026-11-15 二次点名「训练侧全 native、wasm 只留浏览器」）**：本机只加收缩 flags、其余按生产配方，native px16 `-mfma -ffp-contract=fast` = **0.9228× 时间（+8.4% 吞吐，92/100 轮）**，`vmulps 151→35`/`vaddps 158→42`/`vfmadd 0→166`；`-ffp-contract=fast` 单开（无 `-mfma`）产出**字节相同**的 DLL（AVX1 无 FMA 指令）；`fma8` 1.0203×、`fma24` 1.1532×、`avx2+fma` 0.9206×（无额外收益）⇒ px16 仍最优。数值上 `bufA` 66.7% 元素差 1e-7 量级；**端到端同局轨迹不变**（s16/seed860001 + 860002–860013 共 13/13 局动作、分数、obs/mask 全同，仅 `lp_*`/`value` 末位不同）——即 FMA 只改 PPO 梯度数值，不改采样轨迹。但仍然不落地：① 运行期 attestation 实测打印「attestation 失败 → 回落 wasm」（要么改成按目标入库 golden 自证，要么白丢 native 1.63×）；② arm64 换 `-ffp-contract=fast` 会自动融合（`fmla 0→60`），x64↔arm64 是否逐位相同本机不可验；③ `native-parity` 门会红 + x64 基线抬到 Haswell（2013+）+ `data_fp` 变更新纪元。
+- **更新（2026-11-16）：本节「不落地」已被推翻** —— 用户口径是「所有训练提速都是有价值的」。三道坎逐条解除（attestation 改容差、parity 门改容差、`data_fp` 实为 `(dir,wver,stage,seed)` 的 sha 不含字节故不漂），FMA 已落地，见 **§2026-11-16-goalnn-conv-fma**。
+- **口径教训（可复用）**：共享桌面（Chrome + 训练 worker 常驻，总 CPU 20~25%）上，「每变体独立进程取中位」**不可用**——A/A 对照（四个相同二进制）都能差 7~16%。改成**成对交替比值**（每轮紧邻两臂、奇偶轮换先后、取比值中位）后偏置降到 **0.4%**（自编 native px16 vs 现役 DLL = 1.0039×）。以后在本机做内核 A/B 一律用这个口径，别用 `tools/perf/conv-ab.ts`（`IN_CH=18` 已过时，见交接文档 §3.2）。
+- **后果**：`src/nn/` 不变 ⇒ 无 codeHash 升级波。剩下的墙钟杠杆不在内核：每局固定开销 ~215 ms / 1.5 s（14%，一局一进程，`export-rl-rollout.ts` 头部禁止在该文件加池），以及**当前迭代墙钟主要卡在 PPO worker 缺位**（`job … pending 已等 370s；hub 在线 worker = 0`，而 `pure_collect_sec=12.6`）—— 抠内核 3% 远不如补训练 worker。
+- **验收**：合成内核 10 个变体 × 3 组输入哈希全对（`4870538e41f3`/`94fe41d85c0a`/`68cd276a2c3c`）；native↔wasm 端到端 shard 逐字节相同；`--check-prebuilt` 保持 fresh。完整数据 → `conv-wasm-clang20-retry.md` §10（harness 在 `tmp/retry/`，gitignored）。
+
+## §2026-11-15-goalnn-opening-null-move（v6 opening `move=null`：直接采用适配器修复，不保留开关）
+
+- **背景/决定**：v6 `OpeningController.move=null` 旧适配写成 `hold=1 + move=0(up)`，按 `SimulationPlayer` 的 turn-only 语义会在转向冷却允许时把坦克转向 up。修复放在适配器：新增 `src/nn/opening-input.ts::encodeOpeningAction()`，v6 null → **当前已提交朝向**（`prevMoveDir ?? dir ?? 'up'`）+ `hold=1`；不碰 `SimulationPlayer` 的 hold/move 正交语义，也不改 OpeningController。**用户 2026-11-15 拍板直接采用，默认即新行为；不设 `OPENING_HOLD_CURRENT` / `--opening-hold-current` / `--opening-null-turn`，旧路径从生产代码移除。**
+- **证据**：探针 6 关/30 个 null tick：v6 null 转向 4→0、位移 0→0；legacy 两臂均 0。g5-safe2.it185 700 局 eval：总体 81.86%→80.71%（−1.14pp），opening 13 关 80.77%→77.69%（−3.08pp，McNemar p=0.302），非 opening 440 局逐局相同；opening clearTick −270、stuck −52、baseWallIntact +0.15、playerDamageTaken +8.8。
+- **被否决**：在 `SimulationPlayer` 加「hold 忽略 move」（用户已否决非正交语义，影响所有 v6 动作）；在 OpeningController 返回当前朝向（controller 不该知道朝向/冷却）；只修 rollout 不修 eval（口径分叉）；**保留旧行为/运行时开关**（用户明确「不用留开关」，旧 `null→up+hold` 路径移除）。
+- **后果**：所有 eval/rollout 默认走新行为；采用后是新 baseline，跨采用前后的 eval/训练点不可横比。A/B 负点估计不作为否决（机制正确性优先），但记录在新 baseline 里；若采用后出现回归，回滚方式是 git revert 本次改动，而不是运行时 flag。
+
+—— 全文（映射表 / A/B / 分关读数）→ `plan/opening-null-move.plan.md` §9
+
+## §2026-11-15-goalnn-replay-corpus-p1p2（replay 语料运输：请求级 corpus_fmt + 两段 wire + worker pre-pass）
+
+- **背景/决定**：35 关按 7 关轮换的根因是 payload 体积。采用**请求级 `corpus_fmt=full|replay`**：replay 只产 `replay.json` + `replay_meta.json` + 非 obs 标签，obs/scalars/extra 由 worker 用纯 JS 转换器重建。full 仍逐字节旧路径；`kind=iter`/eval 强制 full。转换器由 trainer 预构建（`bun build --target=node`）随 kind=ppo payload 根下发，worker 只跑不建；世界只由 `ReplayInput` 驱动，不重跑 OpeningController、不用 `a_*` 驱动。
+- **关键契约**：`replay_meta` 带 `nSamples/decisionTicksList/obsHash/tickHashes/codeSha/initTick/opening`；`decisionTicksList` **相对 replay 帧序号**（state_init 的绝对游戏时钟会错位）；`payload_slim` 在 replay 时 DROP obs/scalars/extra 且格式不符响亮拒收；`corpus_fmt` + `replay_converter_sha256` 进 job 幂等键（full 省略分量，旧 job_id 不变）；worker pre-pass 为 shard 级事务（`<shard>.conv-tmp` 硬链接输入 → 转换+校验+完成标记 → 目录换入；失败原目录不动）。
+- **本机证据（2026-11-15）**：1015 局（35 关 × 29 seed，hard，1200 tick）= 121,702 决策 / 1,216,991 tick；Bun 进程内、Node bundle、WSL Linux Node 三端 obs/scalars/extra **0 mismatch**。Node 转换 12.7 µs/tick；WSL（/mnt/d 9p）57 µs/tick。录制开销：60 局 full 14,454 ms vs replay 14,601 ms（+1.02%）；recordFrame+hash 1.2 ms/局。60 样本 shard 体积：full_raw 10,976 B / full_diet 9,200 B / replay_diet 3,928 B。
+- **被否决**：① replay-only（worker 重算前向/metrics 在 2 vCPU 上净亏）；② packer 事后看 `replay.json` 猜格式（请求显式声明）；③ 在 sampler 端转换（同机无 wire 收益，白烧 CPU）；④ 只做逐文件原子写（崩溃留半成品；改为 shard 级事务）；⑤ 用 `a_*` 标签驱动世界（opening 接管段 `a_*` ≠ 执行动作）。
+- **后果/未完成**：默认 full，生产课尚未切 replay；同机 `replay+eager` vs `full+eager` 的真 PPO 数值对账、2 vCPU 云机写盘/重哈希墙钟、hub 显式 capability 仍未验。完整方案 → `plan/replay-corpus.plan.md`；代码 → `tools/sim/replay-to-shard.ts`、`nn-training/remote/replay_corpus.py`、`tools/agent/sampler-agent.ts`。
+
+## §2026-11-16-goalnn-ppo-lazy-loader（PPO lazy mmap + 逐批上卡：`--ppo-loader` 独立开关）
+
+- **背景/决定**：eager 的 `load_episodes → chunk_episodes` 先 `np.concatenate` 全量再 fancy-index ⇒ 峰值 ≈3× obs（491k = 5.65 GB obs ⇒ 11–17 GB），且 `tensored_chunks` 把全部 chunk 常驻 VRAM。新增 `--ppo-loader=eager|lazy`（默认 eager，逐字节旧路径）；lazy = obs 逐 shard `mmap_mode="r"` + 其余字段（≈200 MB）常驻 + 全局 `np.random.permutation`（与 eager 同一条 RNG 流）+ 显式 `row_map`（`row_shard`/`row_local`）+ 每 minibatch 只 fancy-index mb 行、`tensored_batch` 逐批 `.to(device)`；kickstart ref 改为 chunk 首次使用时现算（ref 冻结，数值逐位相同）。分派唯一入口 = `worker/ppo/lazy_corpus.load_ppo_corpus`；`ppo_loader` 走课程 CLI → `build_ppo_job`（eager **省略** manifest 键）→ `train_core`；Paddle 后端响亮拒收 lazy。
+- **对账契约**：shard 顺序/行序 = eager 的 `discover_rl_shards` + concatenate 顺序；quota 截断在 GAE 之前；adv/ret 归一含被丢尾部；`drop_last`/单 shard 不裁尾/全局置换顺序与 eager 相同；demo bank 的 np RNG 逐步同序；逐批转换不引入 `channels_last`（eager 当前也未传 `memory_format`，两路同源，代码赢）。
+- **本机证据（2026-11-16）**：`tests/worker/test_ppo_lazy_loader.py` 9 条——eager/lazy 同 seed 的 row_map/行序/GAE/adv・ret/minibatch/demo RNG/kickstart/最终权重逐字节一致；`per_stage_quota` 截断在 GAE 前；drop_last 与单 shard；v6 可选列；混装拒收；lazy 路径不调用 `tensored_chunks`（逐批 8 行上卡）；491k/mb=1024 峰值公式 ≈1.0 GiB ≤2 GiB；合成语料 gather 冷/热 ≈693/654 MB/s。
+- **被否决**：① ~~默认直接切 lazy~~（**2026-11-17 撤销**：装载段实测 + 缺省已切，见 §2026-11-17-goalnn-ppo-lazy-default）；② 让 lazy 依赖 `np_core.load_episodes` 的返回类型（会造成 worker 层成环）；③ 把 lazy 塞进 `np_core`（LOC 预算 + numpy-only 核心职责）；④ Paddle 侧静默回退 eager（manifest 与日志各说各话）。
+- **后果/未完成**：生产默认仍 eager；35×20 真语料的 scan+GAE/H2D/update 端到端墙钟、4–6 GB VRAM 真机、冷/热 page cache 仍未验。完整方案 → `plan/replay-corpus.plan.md` §5/P3；代码 → `nn-training/worker/ppo/lazy_corpus.py`、`worker/ppo/engine.py`、`remote/train_core.py`。
+
+## §2026-11-16-goalnn-conv-fma（native features 内核乘加融合：x64 `-mfma` + 全目标 `-ffp-contract=fast`，逐位门 → 容差门）
+
+- **背景/决定**：用户口径「所有训练提速都是有价值的，FMA 能上尽量上」。native 内核（`src/nn/conv/conv.c`）原先 `-ffp-contract=off` 的唯一理由是 native↔wasm 逐位一致，代价 = 丢掉乘加融合。落地：`nativeFlags()` 全目标 `-ffp-contract=fast`；x64 三个目标 vector 加 `-mfma`（arm64 的 FMA 属基础 ISA，`fast` 一条就够：实测 `fmla 0→60`）；`-fno-fast-math` 保持不变（重结合/近似除法仍禁）；wasm 仍 `-ffp-contract=off`（指令集无 FMA，产物字节不随编译器版本漂）。`NATIVE_ABI` 不升（签名/权重布局没变）。
+- **闸门口径变更（本条真正的代价）**：native 与 wasm 从「逐字节相同」降级为「1e-6 量级相同」，于是三个逐位门改成容差门：① 运行期首用 attestation（`ATTEST_TOLERANCE = 1e-5 × max(1, max|wasm 张量|)`，见 `conv_native_adapter.ts`）；② `tests/native-parity.test.ts`（共享库 + 参考 CLI，容差比较器独立重实现）；③ `tests/native-prebuilt.test.ts` 的 WSL 真机 dlopen linux-x64 产物。容差选型有实测依据：`bufA` 元素跨 1e-3…152 五个数量级，逐元素相对误差在近零元素上放大到 3%（无判别力），绝对误差则随量级缩放（实测 6e-5 @ max 152 ⇒ 4e-7 相对）；分母取张量 max 后，「错内核」的相对差是 1（poison 库用例仍是 3.16>3.16e-5）⇒ 两侧各留 ~10^2 / 10^5 倍余量。**同节点同输入的重跑仍逐字节确定**：语料复现性靠这个，不靠跨后端逐位。
+- **本机证据（2026-11-16，clang 20.1.0）**：内核 ffi 微基准成对 100 轮 = **0.9228× 时间（+8.4% 吞吐）**，`vmulps 151→35 / vaddps 158→42 / vfmadd 0→166`；端到端 A/B（s16/seed860001，同权重交替 5 轮）1448 → 1340 ms（**−7.5%**）。**生产路径（入库 prebuilt + 真 attestation，零旁路）13 个种子 860001–860013**（weights `ac039c6f`，hard，12000 tick 上限）对 `NN_NATIVE=0` wasm 臂：`a_move/a_fire/a_hold/obs/mask/scalars` **13/13 局全 0 元素不同**，outcome/score/ticks 相同；native/wasm 单局墙钟比 0.59–0.67×。prebuilt：win32-x64 16384→15360 B（`vfmadd` 50 条）、linux-arm64/darwin-arm64 `fmla 60`、**wasm 仍 `6e506781…` 字节未变**；WSL 真机 linux-x64 产物最大差 1.43e-6；`--check-prebuilt` fresh，`bun run check` 2963 pass / 7 skip / 0 fail，`bun run build` 绿。
+- **顺带修的缺口**：`nativeStaleReason()` 此前只比源码 sha + 产物 sha，**不比 flags** —— 只改编译参数的改动（正是本条）会让 `bun tools/agent/native-build.ts` 直接 reuse 旧库（实测踩中：先 reuse 了非 FMA 的旧 DLL）。现在 flags 不一致即判「盘上 flags 已变」，与文件头「指纹校验：源码/flags/产物 sha 全对才算新鲜」的原意对齐。
+- **代价/风险（写明）**：① x64 CPU 基线从 Sandy Bridge(2011) 抬到 **Haswell(2013)**：更老的 CPU 首次调用即 SIGILL，进程级 catch 拦不住 ⇒ 节点保命开关 = `NN_NATIVE=0`（回 wasm），已写进 adapter 头注 ①b；② arm64 的融合是 clang 自动收缩（不是显式 `-mfma`），本机无 arm64 ⇒ 真值证据只能来自节点自己的容差 attestation（产物里 `fmla 60` 已核实）；③ 历史 shard 的 `lp_*`/`value` 末位与今后不同——`data_fp` 只对 `(name, wver, stage, seed)` 求 sha（`common/manifest.py::data_fp_entries`）故不判异血缘，但逐字节 diff 会看到 1e-7 差异。
+- **被否决**：① 用「per-target golden 哈希」替代容差 attestation（arm64/darwin 本机跑不了，golden 只能覆盖本机目标 ⇒ 退化成「只有一台机器有真证据」）；② `-mavx2` / `-march=native`（基线代价 >> 收益，AVX2 只多 ~2%）；③ 在 `conv.c` 里 CPUID + `__attribute__((target))` 多版本分派（freestanding 下要手写 CPUID，为 8% 做内核手术且没有老 CPU 可验）；④ 只给 x64 开 FMA、arm64 保持逐位（语料按架构分叉，而 arm64 只要一条 flag）。
+- **后果/未完成**：`docs/nn.progress.md` 未决 #10（arm64 要不要为 FMA 开新纪元）就此结案——选「开」，但走容差闸门而非重做基线（任务侧/奖励/关卡不动，13/13 局动作与分数不变）；arm64 真机吞吐（§14/§15 估 FMA 上限 +32%）仍未测 → **2026-11-16 已补测：a95 真机为 −30~35%（§2026-11-16-goalnn-conv-variant）**；`tools/det-golden.v1.sha256`（God-AI 确定性）不受影响，未动。
+
+## §2026-11-16-goalnn-conv-variant（x64 发两份内核产物：基线 + `-fma`，运行时子进程试跑选；arm64 真机验 FMA）
+
+- **背景**：FMA 落地（§2026-11-16-goalnn-conv-fma）把 x64 基线抬到 Haswell(2013)，更老的 CPU 首用即 SIGILL。用户 2026-11-16 提问「能不能保留两个 prebuilt，不支持 FMA 的用无 FMA 的那份」，并指出 a95（Android arm64）节点已 USB 连着本机可做真机验证。
+- **决定（x64 双产物）**：矩阵从 6 个 native 目标变 **9 个**：`<platform>-x64`（`-mavx -msse4.2`，Sandy Bridge 2011+）与 `<platform>-x64-fma`（`+ -mfma`，Haswell 2013+）各一条，**独立目录 + 独立 manifest 条目**（不覆盖、不混装）。arm64 仍只一条（FMA 属基础 ISA，`-ffp-contract=fast` 自动融合）。
+- **决定（怎么选）**：新 `src/nn/conv/native-variant.ts` —— **在子进程里 `dlopen` 变体产物 + 调一次 `cf_student_features`，退出码 0 才算本机可用**；结果落盘 `tmp/nn-native-variant.json`（键 = 平台/架构 + 探针版本 + 产物 sha），一台机器只付一次 ~40–120 ms。不解析 `/proc/cpuinfo` / `sysctl` / 注册表：三套平台三套解析会漂，且字符串说有 `fma` 不代表 OS 真让你用。探针不过 ⇒ 变体连候选路径都不进（`nativeLibCandidates()` 里直接没有它）；本机构建（`hostTarget`）固定基线 flags；`rollout-runner` 按 `targetId` 把库镜进 bundle 同名目录（变体不能混装）；`NativeStatus.variant` 让「这局到底用了哪份」可查。
+- **证据（本机，win32-x64）**：默认解析 `win32-x64-fma`（日志 `variant=fma`）；`NN_NATIVE_LIB=<基线>` 走基线且 attest 通过 ⇒ 两条都在生产路径被实测。生产 A/B（s16/seed860001，同权重，6 对交替）fma 2180/2200/2375/2392/2445/2518 ms vs 基线 2556/2690/2720/2728/2793/2881 ms（成对中位比 ≈0.86×）；两臂 outcome/score/ticks 完全相同（只有 `lp_*`/`value` 末位差）。WSL 真机：`linux-x64` 基线与 wasm **逐字节 0 差**、`linux-x64-fma` 最大差 1.43e-6。
+- **证据（a95 / arm64 真机，2026-11-16）**：**两臂都取代码库的产物，设备上零编译**（用户点名「不要现编，用代码库里的老版本」）——参考臂 = `git show HEAD:src/nn/conv/prebuilt/linux-arm64/conv_native.so`（clang 20、`-ffp-contract=off`、`fmla 0`），被测臂 = 现役同名产物（同 clang 20、`fast`、`fmla 60`），harness = 设备自带 python3 + ctypes。结果：加载与调用成功（bionic 上真能 dlopen 入库产物，此前只有设计声明）；真实权重 × 3 组随机输入 worst `bufA` 9.155e-5 @ 张量 max 198.7（相对 4.6e-7，容差线 1.99e-3 ⇒ 余量 21×）、`pooled` 4.77e-7 ⇒ **ATTEST=PASS**；**内核吞吐 6.42–6.70 ms → 4.36–4.49 ms（−30~35%，3 次重跑 0.697/0.651/0.683×）**，远高于 x64 的 +8.4%。两臂只差 `-ffp-contract`，没有编译器版本这类额外变量。
+- **被否决**：① 解析 CPU 特性字符串（平台各一套、虚拟化会骗人）；② 在本进程里试跑变体（SIGILL 拦不住 = 节点整局挂）；③ 只留一条产物（要么抬基线、要么白丢 8%）；④ `-march=native` / `conv.c` 内 CPUID 多版本分派（freestanding 手写 CPUID，为 8% 做内核手术）；⑤ 给 arm64 也加变体（没有「不支持 FMA 的 arm64」可兼容）。
+- **后果**：prebuilt 从 6 目标变 9 目标（每平台多 ~15–17 KB），`codeHash` 变更 ⇒ 节点需 pull；探针结论绑定产物 sha，重编 prebuilt 会自动重探；探针/缓存写不进去只影响速度（每次进程多一次 spawn），不影响正确性。全文 → `docs/nn/runtime-opt.md` §45。
+
+## §2026-11-16-goalnn-replay-rebuild-perf（replay→语料重建：编码器/哈希/落盘五处热点，产出逐字节不变）
+
+- **背景/决定**：用户要求对「replay 重建训练语料」全流程做 profile 并极限提速。Bun CPU profile（100 µs 采样 × 153k tick）+ 分段实测（冷热分开）后，重建的稳态成本 = 仿真 tick ~49% · ObsEncoder ~20% · obs sha256 ~6.5% · npy 落盘 ~9% · tickHash ~5% · parse/setup ~3%。改动五处，全部是**纯派生缓存的等价替换**（不改玩法、不改 obs 语义、不改任何文件字节）：① `ObsEncoder.encodeDistEnemy`：可通行表（按 `TileMap.revision` 失效）+ 四邻索引表（越界烘进表）+ 访问戳取代 `dist.fill(-1)` + 归一化 LUT，取代每决策 2 704 次 `% / BOARD` 与 676 次 `Math.round(255·d/dRef)`；② `ObsEncoder.encode`：ch0–ch5（地形 + 基地）整块缓存（同 revision 命中时一次 `set` 取代 676×switch 重扫）；③ `worldTickHash`：地形文本 memo（`WeakMap<TileMap>`，revision 失效）+ `CanonBuilder` 改**增量 FNV**（逐字段推进同一状态，取代 `parts[] + join('|') + fnv1a` 的整串构造与 rope 拍平）；④ `npy.ts` 新增 `writeNpyFile`（头 + 数据两段 `write`，不 `Buffer.concat` 拷整块）；⑤ `replay-to-shard.ts`：obsHash 改**一次** `sha256(obsFlat)`（规格本就是 `sha256(concat(obs_i))`，省 N 次原生 `update`）、决策 tick 用单调游标代替 `Set.has`、三张张量直写。
+- **证据（本机 Ryzen 7 5800H / Bun 1.4.4，4 个 replay shard = 19 169 tick / 1 919 样本，min-of-N）**：`ObsEncoder.encode` 23.64 → **9.39 µs/op**；`worldTickHash` 34.36 → **11.54 µs/op**；重建（verify-only）10.57 → **6.22 µs/tick（−41%）**；含落盘 10.91 → **7.32 µs/tick（−33%）**。**identity 零容差**：与 `git worktree add --detach HEAD` 的原始树对同一批 shard 各跑一遍，obs/scalars/extra **12/12 文件 sha256 完全相同**；`tickHash` 链与 `obsHash` 均对**录像里记录的值**校验通过（哈希改动被录像钉住，不是自证）。`bun run freeze:check` OK（God-AI 确定性签名 `ea915876…` 不变）、`bun run check` 2969 pass / 7 skip / 0 fail、lint 0 error。
+- **被否决**：① 只做端到端 ablation 归因（每段重跑同一循环，后跑的段白吃 JIT ⇒ 出现「encode 段比 tick 段还短」的伪指标；改用静止世界微基准 A/B）；② 把地形 memo 放 `TileMap` 字段（污染快照/深比较；encoder 实例字段 + revision 键是最小面）；③ 跳过 `consumeEvents()`（省不了多少，且改变事件缓冲语义）；④ 让 replay 记录敌方 AI 意图以跳掉 AI 重算（要改 replay 格式 + RNG 流，属新纪元且作废旧语料）；⑤ 非 sha256 的快速哈希（identity 规格写死 sha256）。
+- **后果/未完成**：剩下的墙钟就是仿真本身（~49%，其中敌方 AI ≈26%），本次不动玩法代码。`plan/replay-corpus.plan.md` §1.4/§6.1 的「21.4 µs/tick / 254 µs/样本」是**云机旧口径**，按本机比例应再低 ~30–40%，云机复测待办。代码 → `src/nn/obs-encoder.ts`、`src/replay/tickHash.ts`、`src/nn/npy.ts`、`tools/sim/replay-to-shard.ts`；基准 → `tools/sim/replay-to-shard.bench.ts`（`--gen / --ablate / --micro / --rounds [--write]`）。
+
+## §2026-11-17-sim-tickhash-id-space（replay→shard tickHash 偶发偏离：跨进程实体 id 复用，restore 后预留 id 空间）
+
+- **背景**：`plan/tickhash-flake.plan.md` 记录 700-shard 写盘池在 7/10 worker 下约 1/700 出现 `tickHash mismatch at checkpoint tNNNN`（shard 随机、中局窗口），同 shard 隔离跑/同进程重复跑/verify-only 池全绿；当时头号嫌疑是 `Math.pow`/`Math.hypot` 的 JIT 分层差异。
+- **复现（3/3 确定性）**：池驱动落 JSONL（worker/seq/shard/ok）后，把失败 worker 的前缀在**单进程**按同序重放：**fresh 进程 5/5 失败**，同进程第 2/3 遍通过；失败前先 `advance-ids 1`（多吃一个 id）即 **5/5 通过**；`BUN_JSC_useJIT=0` 仍 5/5 失败 ⇒ 与 JIT/并发/写盘无关，是进程内 id 空间状态。
+- **根因**：`restoreWorld` 装入的快照实体 id 来自**另一个进程**（导出/银行），而本地 `genId()` 是模块级计数器、从 1 起且 restore 不推进。worker 先跑过若干 shard 后本地计数器爬到快照 id 区间，新生成实体（子弹/敌人/道具/地雷）就**重发**快照里仍活着的 id。两个活实体同 id 时：`ownerId === tank.id`、guard-AI 的 id 键、`activeCommanderId` 会认错实体；`worldTickHash` 的**首现重映射**把两个实体折进同一个 canonical slot，hash 随分配历史变化 ⇒ 同一 replay 在不同 worker 前缀下算出不同链。
+- **直接证据**：失败/通过两遍在 t2368 首次分叉；该 tick 的完整 `WorldSnapshot` diff **只有 9 个 id/ownerId 字段不同**；对两份快照各自 `worldTickHash` 得到 `69844575` vs `0d9f195c`，拆 canonical payload 后首个差异正是重映射撞号（`1 vs 7`）。
+- **修法**：`src/game/ids.ts` 成为 `genId` 唯一来源并新增 `reserveNextId(maxId)`；`WorldSerializer.restoreWorld` 开头 `reserveSnapshotIds(snap)` 扫描 player/player2/tanks/allies/bullets（含 `ownerId`）/powerUps/mines/`activeCommanderId`，把全局计数器单调抬到快照最大 id 之上。`World.ts` 保留 `export { genId }` 以免动既有 import 面，也不引入 World↔WorldSerializer 运行时环。
+- **验证**：修复后同一 worker 前缀 fresh 进程 **5/5 通过**；**7 worker 写盘池 700 shard × 5 轮 = 3500/3500**，每轮 `samples=503963 ticks=5035728` 与顺序口径逐项相等（wall 10.7/12.8/25.0/12.3/115.8 s，末轮为盘噪声，写盘口径取 best-of-N）；7 worker verify-only 700/700。新增 `tests/snapshot-id-space.test.ts` 3 例：**关掉 reserve 时 3/3 红、开启后 3/3 绿**（单次 foreign restore 预留、worker 前缀连续 restore 不撞、bijective 重编号下 tickHash 不变）。
+- **被否决**：① H1 跨 shard 模块级 cache（失败前缀可复现，但 `advance-ids 1` 即消失 ⇒ 不是 cache 内容）；② H2 写盘扰动（verify-only 也走同一 restore，且 no-JIT 仍失败）；③ H4 哈希 memo/增量实现（同快照重复算稳定，且两遍唯一差异是 id 字段）；④ H5 记录侧 tickHash 错（隔离重放能通过，录像链本身自洽）；⑤ H6 JIT/硬件 bit flip（no-JIT 5/5 复现、失败点确定性）；⑥ 失败后重试（掩盖问题，违反零重试纪律）。
+- **代价/风险**：不改玩法语义、不改 replay 格式、不改 tickHash 规格；restore 多一次 O(entities) 扫描（每 shard 一次，可忽略）。`genId` 仍是进程级隐藏计数器（原豁免不变）——现在它只会单调增长，跨进程快照的 id 空间在 restore 时被显式预留。旧 replay/快照无需迁移（id 只要求唯一，不要求从 1 连续）。
+- **后果**：`plan/replay-corpus.plan.md` §1.4 的「写盘池 ≤3」解除，生产写盘池可回到全核宽度；`plan/tickhash-flake.plan.md` 收尾。转换器保留 env-gated 诊断装置（`CONV_TRACE` 每 tick hash、`CONV_SNAP_*` 窗口快照），默认零开销。
+
+## §2026-11-17-goalnn-ppo-lazy-default（P3 收尾：PPO 装载器缺省切 lazy）
+
+- **背景**：`plan/replay-corpus.plan.md` P3/D6 的懒装载器与等价测试 2026-11-16 已落地，但缺省仍是 `eager`（当时的否决理由①=未做真机 35×20 墙钟/VRAM 验证）。用户 2026-11-17 指令：按 plan P3 落地 lazy loader、压训练轮墙钟。
+- **决定**：三处缺省同值切 `lazy` —— `worker/cli.py --ppo-loader`（`_d("ppo_loader","lazy")`；生产真源 = rl-config `rl.ppo_loader`，本机该键未写）、`worker/ppo/engine.py` 独立 CLI、`biz/course_spec.py::CourseConfig.ppo_loader`（文档值，「显式才覆盖」）。**协议缺省不动**：`common/manifest.py` 与 `remote/train_core.py` 仍 `"eager"`，发布端只在 `!= "eager"` 时写键 ⇒ 旧 manifest 逐字节旧路径、lazy 永远显式声明；回滚 = `--ppo-loader eager` / `rl.ppo_loader:"eager"`（课程里的显式值优先）。Paddle 后端仍**响亮拒收** lazy（实验臂必须显式 eager，不静默退回）。
+- **证据（本机 2026-11-17，`tools/perf/ppo-loader-bench.py`：40 shard × 502 = 20,080 样本 / obs 220 MB / mb=1024）**：scan+GAE eager **2.14 s** vs lazy **0.20 s**；随机 gather 90 MB **0.09 s（1,002 MB/s）**；每 mb 转 torch（CPU）**6 ms / 8 批**；`gather(rows)` 与 eager `concatenate()[rows]` **逐字节相同**。等价测试 10 例绿（chunk / 最终权重逐字节 + 新增「缺省必须是 lazy」钉子）。
+- **仍未被本机证明**：35×20 真语料的 GPU H2D / update 墙钟与显存余量（本机无 GPU；RSS 探针缺 psutil ⇒ 留空不编数）——判据在 plan §6.6 五档 verify（`verify-fl` vs `verify-fe` 即装载器 A/B），回滚一个 flag。
+- **否决**：① 继续等 GPU 真机再切（装载段已有量级差，且 lazy 峰值与语料总量无关，等下去只是继续付 ~3× obs 峰值）；② 只切课程缺省、不动 CLI（rl-config 缺键时仍 eager ⇒ 生产不生效，账实不符）；③ 连协议缺省一起切（旧 manifest 会从 eager 变 lazy，等于**静默**改变历史包语义）；④ paddle 静默退回 eager（manifest 与日志各说各话，2026-11-16 已否决，维持）。
+- 全文 → `docs/nn/remote-transport.md` §156；代码 `nn-training/worker/{cli,ppo/engine}.py` · `biz/course_spec.py` · `tools/perf/ppo-loader-bench.py` · `tests/worker/test_ppo_lazy_loader.py`。
+
+## §2026-11-17-goalnn-replay-f16-symmetric（取消 f16 单边偏置 + `corpus_fmt` 翻成生产缺省 replay）
+
+- **背景**（2026-11-17 补记，决定当日已实施于 `c170ba26`）：五臂真机 A/B（`reports/replay-corpus-five-arm-20261117.md`）里 `fe`/`fe2`/`fl` 三臂逐字节相同，而 `re`/`l`（replay 语料）与它们的 it1 语料**同源**（samples 65026=65026、30 shard、kept 24577、rotation/volume_stage_stats 逐字相同）却在 it2 就分叉（终态权重 max|Δ| 9.5e-3、changed 18940/73668）。
+- **根因**：`remote/payload_slim._member` 里 `REPLAY_DROP_FILES` 排在 f16 **之前**，而 `scalars`/`extra` 同时出现在 `RL_F16_FIELDS` 与 `REPLAY_DROP_FILES` 里 ⇒ **full 语料这两张被量化成 f16，replay 语料由转换器以 f4 重造**。同一份 rollout 的两种表示精度不等价 —— 这不是「误差多大」的问题，是「两臂必须被同等对待」的问题。plan §7 没抓到是因为那次对账是**离线比两份 npy**，绕过了 `payload_slim`（f16 只在上线传输时发生）。
+- **决定**：① `common/shard.py:139` 的 `RL_F16_FIELDS` 收窄成 `("lp_move","lp_fire")`（`scalars`/`extra` 移出）。`lp_*` 两臂都不过 DROP ⇒ f16 对称，保留；代价实测（xz 后）payload **+474 KB / +10.5%**（4.50 → 4.98 MB），下载 +0.3 s（obs 才是压缩大头，「翻倍」的直觉估法不成立）。② 默认值翻成 `replay`：`worker/cli.py --corpus-fmt`、`rl-config.json` 的 `rl.corpus_fmt`、`biz/course_spec.CourseSpec.corpus_fmt`（后者是文档值，`model_fields_set` 决定显式才生效）。③ **默认不是全局**：`trainer/loop_round_steps._resolve_corpus_fmt`（:363）按「rollout 与 PPO 是否同一台机器」裁决，`rollout_src=node`（kind=iter）与 `--export-bundle`（kind=run）**强制回 full** 并留一行日志（显式请求被降级必须可解释）；`worker/cmd.build_rollout_cmd(node_side=True)` 是同一规则的第二道闸。该函数可重入（每轮都调）⇒ 从 `args._corpus_fmt_req` 的**请求**起算，不从上一轮结果起算，否则一次降级会把整门课永久钉在 full。
+- **护栏**：`tests/remote/test_payload_slim.py::test_f16_set_never_intersects_replay_drop_set`（:239）断言两表**不相交**（把根因铸成断言，而不是逐字段查精度）；`trainer/stream.py` 的本机 PPO 兜底读盘遇 replay 显式 `SystemExit`（该腿自 `plan/accident.plan.md §3` 起 `args.stream` 恒 0，正常跑不到，但绝不静默炸在「找不到 obs.npy」）。
+- **迁移口径**：历史权重链的「语料精度」**一次性断代** —— 2026-11-17 之前的 full 语料是 f16 版 `scalars/extra`，之后是 f32。跨这条线的权重比较里 `changed` 是**下界**（微差被 i16 权重容器吃掉），不据此判「没学到东西」。已训练权重本身不受影响（不 bump shard schema）。
+- **被否决**：① 只改转换器去对齐 f16（replay 侧没有原值，转出来的就是 f32，量化回去等于人为造差）；② 整个取消 f16（`lp_*` 两臂对称，取消只是白丢压缩）；③ 只翻默认不加「同机回 full」闸（同机腿零 wire 收益却白烧 CPU，且节点盘上不再有 obs ⇒ 同机读 shard 的腿会断）；④ 新老语料混算不声明（跨断代点的 `changed` 会被误读成「没变化」）。
+- 全文 → `docs/nn/remote-transport.md` §155；代码 → `nn-training/common/shard.py` · `remote/payload_slim.py` · `trainer/loop_round_steps.py` · `worker/cmd.py`。
+
+## §2026-11-17-goalnn-prebuilt-reproducible（prebuilt 逐字节可复现 + 过期判据改「剥注释摘要」）
+
+- **背景**（2026-11-17 补记，实施于 `0534585e`）：起因是「改 C 注释要不要重跑 9 目标交叉编译」——原判据是**源码原始字节 sha256**，改一个注释字节就要重编全套，为注释付这个代价不值，于是 3 个 C 文件里「native↔wasm 逐位一致」的错话一直留着。查这件事时挖出更严重的一条：**「源码不变 ⇒ 二进制不变」这个前提根本不成立** —— 同一份 `conv.c` + 同一份 flags 连编两次差 **11 字节**。
+- **根因**：**产物文件名被编进了产物**。临时名 `<out>.tmp-<pid>` 的 pid 进了 `.rdata`（实测能直接搜到 `conv_native.dll.tmp-20780` 这类 ASCII），PE 头 `TimeDateStamp`（偏移 `0x80` 与 `0x3c0c`）是第二个；`-Brepro` 只压得住后者。拆解实验：固定输出名逐字节相同 / 换输出名立刻不同 / 同 basename 换目录仍相同 ⇒ 唯一不确定源 = basename 里的 pid。
+- **决定**：① pid 从**文件名**挪到**目录名**（旧 `<dir>/conv_native.dll.tmp-5680` → 新 `<dir>/.build-5680/conv_native.dll`），`tmpSibling`/`commitTmp`/`dropTmp` 覆盖 4 处（共享库 / 参考 CLI / wasm / prebuilt 9 目标）；② 参考 CLI 补 `reproducibleLinkArgs()`（coff `-Brepro` / macho `-no_uuid`）—— 它链系统 libc，用不了 `nativeLinkArgs` 那套 freestanding 参数，所以**从来没拿到过** `-Brepro`；③ 过期判据换成 `SOURCE_DIGEST_SCHEME='c-strip-comments+lf/v1'`（`tools/agent/native-build.ts:160`）：剥注释 + 归一 LF 后取摘要，旧 manifest 无 `digest` 时回落原始 sha（重建一次即迁移）。已证「剥注释重编 = 逐字节同产物」：改注释 `--check-prebuilt` rc=0、改一个代码字节立刻 rc=1。
+- **被否决**：① 保留原始 sha 判据、每次改注释都重跑 `--cross`（数秒 + 大段 manifest diff，换来的只是「不用想」）；② 手写简单注释剥离器（正则扛不住字符串里的 `//`）；③ 把 `sources[].sha256` 写回 manifest（改注释后必然与盘上不符，且已无消费者）。
+- **后果/坑**：`codeHash` 集内文件字节一变 ⇒ 节点判 stale，**跑批前先重启 hub**（`code.zip` 快照在 hub 启动时锚定）。⚠ **Windows：正被映射的 .dll 不能 rename 覆盖（EPERM）** ⇒ hub/worker/dashboard 活着时重建 prebuilt 会失败，且**只失败在它加载的那个变体**（x64 是 `fma`）—— 停掉占用方再重跑。
+- 全文 → `reports/build-repro-20261117.md`；代码 → `tools/agent/native-build.ts` · `src/nn/conv/native-prebuilt.ts` · `conv.c`/`conv_cli.c`/`conv_wasm.h` 的注释。
+
+## §2026-11-17-goalnn-replay-p2-verdict-c（P2 gate 判据改「实测噪声底 ∪ 2 ulp」，判 PASS）
+
+- **背景**：`plan/replay-corpus.plan.md` P2 的判据原是「逐位相同、无容差」，依据是 s1 里 `fe` vs `fe2` 两轮 44/44 张量 bit-identical（把噪声底当成 0）。A2 之后 s2 复跑仍非逐位 ⇒ 先判 FAIL；s3（同 fmt 第三次独立跑）随后证明**噪声底不是 0**。
+- **根因**：`src/nn/conv/conv_native_adapter.ts:347` 的 `ATTEST_TOLERANCE=1e-5` 是**相对容差**（注释自承比观测值宽 ~20×），rollout 每局在 native（FMA，一次舍入）与 wasm（两次舍入）之间**动态选**，两者差 1 ulp 也被放行 ⇒ 同配置两次独立采集**构造上就不逐位相同**。「逐位无容差」在混合后端下不可达，不是被测对象有问题。
+- **决定**：判据改 C —— `容差(项) = max(实测噪声底(项), 2×ulp32(|x|))`，逐项判 `|Δ| ≤ 容差`；判决里**分开报告**「≤ 实测底」与「靠预算兜住」两种，后者单列不藏。噪声底取**两对**独立重跑逐项 max（`fe-s2↔fe-s3`、`re-s2↔re-s3`），并先过有效性闸：四臂 it1 的 `shards=30` / `data_fp=75f03448f325` 全同 ⇒ 噪声对与 A/B 对是**同一批局**。2 ulp 预算必须留 —— 有限对样本包不住下一次抽样的尾部。
+- **判决**：P2 **PASS**。44 张量 **41 个逐位相同**，余 3 个各差 1–2 个元素、每个正好 **1 ulp（2.3842e-07）**；`value`/`entropy` 逐位；`policy` 1.649e-10 ≤ 底；`kl` 4.123e-11（**0.2 ulp**，超底 1.17×，靠预算兜住）；`mean_ret` 落在相邻量化档（7.761e-11 与底同值 ⇒ 离散台阶，非连续量）。**并且**：钉死后端（`NN_NATIVE=0`）后零容差直比，两路 `obs`/`scalars`/`extra` 三张 **sha256 逐字节相同**（`tmp/replay-verify/ab/`）⇒ P2 的原始命题成立，残余 2.38e-07 **100% 来自后端选择**、与 `corpus_fmt` 无关。运行时另有零容差闸常年守着：`tools/sim/replay-to-shard.ts:290-295` 的 `obsHash`/`nSamples`/`decisionTicks`/tickHash 链/终局状态五项，不符即 `throw` 不写半成品。
+- **不做**：不为「逐位」去钉后端（`NN_NATIVE=0` 实测慢 **3.5×**，`elapsedSec` 1.6 → 5.7，直接吃采样吞吐）。真要清理走 `-ffp-contract=off` 重编（根治，但要重编 wasm + 6 个平台 DLL，改完 `ATTEST_TOLERANCE` 才真收窄），与下一次 `src/nn/**` 正常改动合并在一个重启窗口里做。
+- **被否决**：① 维持逐位判据并「重采到逐位」（重采掩盖真差，且构造上永远采不到）；② 用 per-target golden 哈希替代容差 attestation（arm64/darwin 本机跑不了，退化成「只有一台机器有真证据」）；③ 48h 后把已知不匹配转为可接受（时间不是证据）。
+- **后果**：`plan/replay-corpus.plan.md` P2 勾绿，DoD 与新增 §6.6.2 同步；`conv.ts`/`conv_native_adapter.ts`/`conv_wasm_adapter.ts`/`conv_ts.ts` 里「逐字节/逐位一致」的错话改成容差等价（`bun test tests/native-parity.test.ts` 11 pass）。
+- 全文 → `reports/p2-verdict-c-20261117.md` · `docs/nn/remote-transport.md` §157。
+
+## §2026-11-17-goalnn-replay-pilot-verdict（三臂 pilot：刷新频率有效，冻结大池最差；P5「扩量」前提被否）
+
+- **背景**：`plan/replay-corpus.plan.md` §6.5 的三臂 pilot —— 在**等总样本（≈491,520）、等 mb、等 epochs（1,920 步）**前提下，只改「数据刷新频率 / on-policy 滞后」。
+  三臂：A 7 关/it × 20 it（20 次刷新）· B 35 关/it × 4 it（4 次）· C 35 关/it × 1 it（1 次冻结）。全量报告 → `reports/replay-pilot-verdict-20261117.md`。
+- **决定**：**接受「刷新频率对样本效率有可测正效应」这一方向**，并按预注册规则判 **B 臂 No-Go**（连续 3 个样本锚点 < A −2pp）。
+  **同时否定 P5 原定的「10×/20× 扩量」路线**——扩量（35 关一次采满、一轮训完）正是 C 臂的做法，而 C 是三臂里最差的（C−A = −6.86pp，CI [−11.29, −2.29]）。
+- **证据（kaggle Tesla T4 ×2，三臂同 runId、同起点 sha `bec039d88e2dcc9e`、同 700 局面板）**：
+  it0 三臂逐字相同 **471/700 = 67.3%**；终点/峰值 A 77.7%（it15）/ 75.0%（it20）· B 72.4% · C 68.1%。
+  B−A 四个锚点 = **+3.00 / −3.57 / −6.57 / −2.57pp**（唯一 CI 排除 0 的是 −6.57 [−11.00, −2.14]）；C−B（干净对照，同为 35 关）= **−4.29pp** [−9.00, +0.29]。
+  **排除替代解释**：PPO 计算时间三臂 431/423/428 s、步数都是 1,920（排除算力）；kl 全部 0.0006–0.0027、entropy 0.41–0.50（排除崩塌）；样本量极差 4,096 = 0.83%，比效应小一个数量级。
+- **被否决**：① 把 C 的 68.1% 当「大池不行」的定理（1 个训练 seed、1 个终点，CI 还含 0）；② 用 A 的 35.9 min 墙钟当「高频刷新不能上产」的结论（差额是**每轮固定开销**，不是 PPO 算力）；③ 继续按 P5 扩量（把池子再加大只会更像 C）。
+- **后果 / 下一步**：P5 改为三件事 —— ① 补 **3 个独立训练 seed** 复跑 **A vs C 两个端点**（不是全跑）；② 压每轮固定开销（A 每轮 PPO 21 s，其余 ≈104 s 是打包/发布/等 worker/回传），这条决定高频刷新能否上产；③ 若要把它做成生产自动旋钮，需正文 §D9 的 it 内样本轴调度（`it_equiv`），本 plan 不做。
+- **不做**：不据此改任务侧（关卡/命数/敌数/max_ticks）；不把 B/C 的读数写进任何「配方已证」的结论（§6.3 统计边界：CI 只覆盖 eval-seed 噪声）。
+
+## §2026-11-17-goalnn-replay-followup-legs（四条后续腿：继续降池 +7pp 唯一超散布；A 的「平台」是抽样低点）
+
+- **背景**：pilot 判决（§2026-11-17-goalnn-replay-pilot-verdict）留下两个问题 ——「池子还能不能再降」「A 到 491k 后是不是平台」。四条腿并行跑完（同机 T4×2、同进程、同 700 局面板）：`replay-dose2`（池 12,288 × 40 it）· `replay-a-cont`（A 的 it20 续训 20 轮）· `replay-a-lr2`（lr 2e-4）· `replay-a-s2`（同配方只换 `paired_rotate_seed`）。全文 → `reports/replay-pilot-verdict-20261117.md` 附节。
+- **决定**：① **接受「继续降池」为下一步**（D2 终点 **82.0%**，vs A 75.0% = **+7.00pp** [+3.00,+11.29]，且曲线单调不回落）；② **撤回「A 是平台」的判断**（CONT 从 A 的 it20 继续训到 **81.3%**）；③ **不采纳 lr 2e-4**（+3.14pp 落在实测散布内），但记为「与 D2 组合再测」的候选；④ **新增一条判读纪律：单 run 内 <4pp 的差不作结论**。
+- **证据（kaggle T4 ×2，四条腿均 `replay+lazy`、同 runId、同面板）**：
+  | 腿 | 终点 | Δ vs A | 说明 |
+  |---|---:|---:|---|
+  | A（基线） | 75.0% | — | 曲线 67.3→77.7→**75.0**（先涨后掉） |
+  | D2（池减半） | **82.0%** | **+7.00pp** [+3.00,+11.29] | 单调 67.3→74.0→77.0→79.4→82.0；**高于 g5-safe 80.94% 平台** |
+  | CONT（续训） | 78.9%（it15 **81.3%**） | +3.86pp（基线不同） | 从 A 的 it20 起，+6.3pp 到峰值 |
+  | LR2（lr 2e-4） | 78.1% | +3.14pp [−1.00,+7.43] | kl 0.0016–0.0051、ent 0.42–0.50，前期更快 |
+  | S2（换批局） | 79.0% | +4.00pp [−0.29,+8.43] | **散布标尺**：同配方换数据即差 4pp |
+  **机制**：五腿 PPO 算力 423–446 s、步数 1,920（含 D2 的 40×48）⇒ 差异不是算力。
+- **被否决**：① 用 LR2 的 +3.1pp 判「高 lr 有效」（<4pp 散布，且 kl 未进危险区也不代表有效）；② 用 A 的 75.0% 当配方上限（S2/CONT 都更高）；③ 把 pilot 的 B−A −6.57pp 当铁证（同量级散布存在）。
+- **顺带发现的 harness 缺陷（未修，需单独立项）**：`replay-a-cont` 声明 `iters=20` 却跑了 **21 轮**（`run_complete` 在 it20 写完后又跑 it21，同一 `run_start`），且 it20 的 eval **重复派发 469 局**（1,169 行含重复 `(stage,seed)`）。影响：多烧一轮、最后一点不再是 700 局、`run_complete.cause=iters` 语义失真。本报告已去重并用 it15 作主读数，但缺陷本身未修。
+- **后果 / 下一步**：P5 改为「继续降池（6,144 × 80 it）+ D2 与 lr 的组合腿」，并在开跑前**先修 iters 边界**（否则每条腿都多烧一轮、末点读数不可信）；配方推广仍需 ≥3 个独立训练 seed（换 runId = 换 trainer 进程）。
+
+## §2026-11-17-nntrain-iters-boundary-and-eval-drain（iters 边界超一轮 + 收官 drain 重派在飞轮）
+
+- **背景**：`replay-a-cont` 声明 `iters=20` 却跑了 **21 轮**（`run_complete` 写两次「it20/20」「it21/20」），且 it20 的 eval 落了 **1,169 行**（700 + 469 条重复 `(stage,seed)`）。22:05 复查发现 `replay-a-lr2` 同样在跑 it21 ⇒ **系统性**，非单课偶发。
+- **根因（两条独立）**：① 预算判满只在 `LoopRunner.planner`，而预采/队列可能在「判满之前」就把下一轮排进来 ⇒ 那一轮照样被执行；② 收官 drain 的「未覆盖」判据只看 `eval_summary`，而**在飞的轮还没写 summary** ⇒ 收官那一刻必然判成未覆盖再派一次。
+- **决定**：① `LoopRunner._pending_steps` 加**第二道预算闸**（`budget_exhausted(it, budget)` ⇒ 空表 + `finished` + 一行日志「拦下预算外的 itN」），判据与 `planner` 同源；② 新增 `EvalArbiter.active_its(course_fp)` 与纯函数 `drop_inflight_rounds`，drain 前把在飞轮剔出候选并单独记一行。**判据的语义改成「这轮是不是已经有人在做」，而不是「账上有没有结论」**——后者在收官瞬间必然为假。
+- **证据**：`test_pending_steps_refuses_over_budget_round` 回退实现即红（`_pending_steps("c", 21)` 返回 13 个 Task，实测已复现）；修复后绿，并有正向对照 `test_pending_steps_allows_the_last_budgeted_round`（it20=预算内必须放行）。`test_eval_drain_dedup.py` 5 例钉住去重语义（在飞剔除、旧缺口保留、umbrella 空集、`active_its` 默认空）。相关五文件 85 pass。
+- **被否决**：① 只改 `planner`（预采/队列已能绕过它，是本次的实际漏点）；② 在 `run_step` 里拦（四态里没有「不执行这一轮」的终态，拦不成）；③ 靠事后去重（读数还能救，但多烧的一轮与 `run_complete` 双写仍然污染账本）。
+- **后果**：修复需**重启 trainer** 生效（进程内加载）⇒ runId 变（`98b8d9b9…` → `375bfcf6…`），跨重启的两批课不能互相比 `job_seed`。已收官的七门课先 `stopCourse` 再重启，避免复活时被重新排队。
+
+## §2026-11-18-goalnn-replay-batch2（第二批三腿：D2 的 82% 是高抽样，真实平台 77–79%；**语料调度这条路到头**）
+
+- **背景**：承接 `§2026-11-17-goalnn-replay-followup-legs` 的「继续降池」决定，跑三条单变量腿：`replay-d35`（池不变、窗口 7→35 关）· `replay-dose4`（池 12,288→6,144 × 80 it）· `replay-dose2-lr2`（+lr 2e-4）。本批 runId `375bfcf6…`（修 iters 边界后重启），与第一批只按 eval 面板配对。全文 → `reports/replay-pilot-verdict-20261117.md` 附二。
+- **决定**：① **撤回「D2 的 82.0% 破了 g5-safe 80.94% 平台」**——三条独立腿全部落在 77.0–77.7%，终点 vs D2 = −4.29 / −4.43 / −5.00pp 且四条 CI 不含 0；结合 S2 实测的 4pp 散布，**D2 的 82.0% 是 +4~5pp 的高抽样，真实平台 77–79%**。② **停止语料调度方向的调参**：池大小（6k/12k/24.5k/123k/491k）、每轮关数（7/35）、刷新次数（1/4/20/40/80）已全部扫过，落在同一簇。③ **新纪律：新腿只跑 25 万样本（约 10 轮 × 24.5k）就够判**——实测后半程（245k→491k）平均只值 **+0.37pp**，八条腿里四条是负的。
+- **证据**：D35 77.7% · D4 77.6%（峰值 80.0% @it60）· DLR 77.0%；参考 D2 82.0% / S2 79.0% / CONT 78.9% / LR2 78.1% / A 75.0% / B 72.4% / C 68.1%。
+  单变量读数：**广度**（D35）−4.3pp ⇒ 窄窗口不劣（**「多样性 vs 更新率」仍未分离**，因为 D2 本身是高抽样）；**池大小**（D4）−4.4pp ⇒ 不再降池；**lr 组合**（DLR）−5.0pp ⇒ 小池 + 高 lr 互相抵消（同一 lr 在 24.5k 池上是 +3.1pp）。
+- **被否决**：① 继续按「降池」推进（D4 已证无益且更贵）；② 用 D2 的 82.0% 当配方上限写进任何结论；③ 把 6,144 的 it60 峰值 80.0% 当拐点（单点、单 seed，且终点回落到 77.6%）。
+- **后果 / 下一步**：瓶颈不在样本量（25 万饱和）、不在算力（PPO 423–446 s 全同）、不在熵/kl（0.0002–0.0051）。要破 80.94% 只能动**奖励塑形 / 观测 / 架构**三类之一，**不是**语料调度。开新腿前按「25 万样本」定预算。
+
+## §2026-11-18-goalnn-corpus-iso-score-surface（语料调度处在「等分面」上：换路径不换高度；轮换不产生遗忘）
+
+- **背景**：用户提出核心质疑 —— replay→npy 的原始动机是「每 it 覆盖全 35 关 + seeds≥5 保多样性，避免偏置语料被过拟合并被后续迭代洗掉」，但八条腿实测显示「每 it 只 7 关轮换」「每 it 语料减半」都不影响质量。需要一个机制解释，而不是「反正没差」。
+- **决定**：把结论定为 **77–79% 是一个等分面（iso-score surface）**，语料调度只改变到达路径、不改变高度。据此：① **停止在语料调度上花算力**；② 明确 replay 基础设施的价值**只在传输与可行性**（s2t 12×、35×20 可行），不在「覆盖/多样性改善质量」；③ 后续只动**奖励塑形 / 观测 / 架构**。
+- **证据（四条，全部可从 `reports/replay-pilot-verdict-20261117.md` 附三复算）**：
+  1. **轮换不产生遗忘**：A（7 关/轮×20）终点逐关分数与「距上次训练几轮」相关 **r=+0.09**，lag0 73% / lag4 **77%** ⇒「互相拉扯被洗掉」不成立。
+  2. **同分不同策**：任意两腿在同 700 局上的通过/不通过一致率只有 **65–71%**，而「各自 ~78%、彼此独立」的基线 ≈ **66%** ⇒ 胜负几乎无关联。**连 S2（同配方只换一批局）也只有 65.1%**。
+  3. **强项在换、总分不变**：逐关剖面跨腿相关 **r=0.50–0.72**，各腿最差关各不相同（2034/2030/2026/2032）。
+  4. **饱和**：245,760→491,520 平均增益 **+0.37pp**（八条腿，四条为负）。
+- **机制**：① 35 关是同一规则下的布局变体（20 敌/3 命/同奖励/同观测），**单模态** ⇒ 7 关已张成该分布，加覆盖率边际信息≈0；多样性只在多模态任务上值钱。② 刷新频率的收益在 ~20 次饱和，唯一悬崖在最左端（C：1 次刷新 68.1%）。
+- **被否决**：① 「多试几组池大小/关数就能找到更好的点」（五个维度已扫遍，同层）；② 「先把覆盖做满再谈别的」（覆盖不是约束）；③ 「轮换导致遗忘，所以要在每轮都覆盖全关」（r=+0.09 直接否掉）。
+- **后果**：新腿预算按 **25 万样本**（≈10 轮 × 24.5k）；任何「换采样」提案先默认驳回，除非能说明它改变了**学什么**而不是**看哪些局**。
+
+## §2026-11-18-goalnn-reward-term-diagnosis（7,000 局奖励诊断：排序对、五税空转、终局定价反了）
+
+- **背景**：语料调度被判「等分面」（`§2026-11-18-goalnn-corpus-iso-score-surface`）后，下一个候选是奖励。用户要求先用**盘上既有数据**诊断，不新跑批。
+- **证据（7,000 局 = 10 条腿终点 eval，同一 700 局面板；`tmp/reward-term-analysis.py` 逐项复算，全文 `reports/reward-terms-vs-win-20261118.md`）**：
+  1. **排序正确**：Φ 判别赢/输 **AUC = 0.985**；同 `(stage,seed)` 的 10,581 对「一赢一输」里只有 **1.0%** 反转；「该项在输局更划算（ΔΦ<0）」的项 **为零**。⇒ **不重排奖励**。
+  2. **五项纯税空转**：`wThreat −11.46 / wEncl −5.99 / wIdle −4.25 / wStuck −4.24 / wWall −3.36` 在**赢局照收**，合计 **−29.3 分/局**（占赢局 Φ 的 8.3%），而与本局胜负的相关只有 **r = 0.02–0.14**。历史侧证：g5-safe 收课时已记「税一直在收、行为没变」，safe2 加到 4.5× 仍无变化。
+  3. **终局定价反了**：`base_destroyed = −35` 比 `lives_exhausted = −45` 更轻，**只值 2.3 个击杀**；而 **8.4% 的局（412/4,900）是基地被拆**。极端案例：17 杀 0 伤 0 死但基地被拆 ⇒ Φ **+362**；20 杀通关但承伤 1,566 死 5 次 ⇒ Φ **+2**。
+  4. 判别力集中在两项：`wKill`（ΔΦ +95.2，r=0.79）与 `wWin`（+80.0，r=1.00）合计 **61.6%**；**击杀的权重是通关的 3.75 倍**。
+- **决定**：开两条干预腿（各 **25 万样本 ≈ 10 轮**，不跑满 491k）：**T1 砍税**（删/缩那五项，至少 `wThreat`+`wEncl`）与 **T2 修终局**（`base_destroyed` −35 → **−90**）。**不**重排奖励、**不**加新税、**不**动 `wKill`。
+- **被否决**：① 重排奖励（AUC 0.985 已足够）；② 继续加税（两次历史实测无效）；③ 动 `wKill`（判别力主力，风险最高）；④ 只凭本报告下结论（相关性 ≠ 因果，T1/T2 才是干预）。
+- **局限**：全部是终点策略分布；某项「无判别力」也可能是它**已经完成任务**（`wIdle`/`wWall` 大概率属这类）——那删它没有收益也没有坏处。T2 有「变龟缩」风险，用 25 万样本先看 78% 有没有动。
+
+## §2026-11-18-goalnn-rollout-relay-rendezvous（采样节点「只出网」接入：hub 会合 relay，cloudflared 失败自动回落）
+
+- **背景（ModelScope / 阿里云 8C32G 真机 2026-11-18）**：`rollout.ipynb` 在这台机器上**建不出任何 quick tunnel** —— `预检: api.trycloudflare.com:443 inherit=fail direct=fail ｜ 边缘7844 tcp=fail`，cloudflared 停在 `Requesting new quick Tunnel on trycloudflare.com...` 16s 后 `rc=1`，三次阶梯（http2/direct/auto）一模一样；而同一台机器 `github.com:443` 119ms / `registry.npmmirror.com:443` 20ms 通，**hub 自己的 `*.trycloudflare.com` 也通**（443 tcp ok 417ms、未带令牌时回 401）。⇒ 缺的是「hub→节点入站」这半条，不是没网，也不是脚本姿势：7844 是 Cloudflare 写死的唯一边缘端口，cloudflared 的边缘拨号**不读** `HTTP(S)_PROXY`（PR #1514 仍未合入），换协议/换 edge IP/填 `CFG.net_proxy` 都到不了。
+- **决定**：新增 `link=relay` —— 节点**出站长轮询** hub，hub 把它「本该发给节点 URL 的请求」放进队列，节点在本机 `127.0.0.1:<agent_port>` 执行后交回执。`auto` 下它是 **cloudflared/tailscale 都建不起来时的最后一档**（`CFG.link=cloudflared` 显式强压时不回落）。
+  - 节点按 **hub 告知的本机端口**注册 `http://127.0.0.1:<hub 端口>/relay/<node>`（`_poll` 应答带 `local_port`；trainer 与 hub 同机）⇒ `common.distribution` / trainer / eval / dashboard 的调用面**零改动**。
+  - 鉴权：节点侧 `_poll`/`_reply` 用 `HUB_TOKEN`（与其余端点同一把锁）；调用侧**只接受本机回环且 `via=="peer"`**（cloudflared 回源对端也是 127.0.0.1，靠归因头区分）—— 否则任何人知道 node id 就能借 hub 打本机。
+  - 一切等待有界：调用方 timeout（按路径 15/45/150s）· `_poll` wait ≤60s · 待办上限 32（满了丢最老）· 回执 TTL 180s；**迟到回执按 rid 丢弃**（rid 已不在 `calls` 里 ⇒ `reply` 返回 False），绝不让上一条的答案串给下一条。
+- **通道所有者 = `remote/rollout_relay.py::RelayChannel`**（起/等端口/失败清理/监护重建）；`rollout_node` 只持有它并维护 `link`/`url` 两个变量 —— 通道状态（线程/端口/URL）一旦有两份写者，「重建后忘清注册 URL」就是下一个事故。监护判据 = 轮询线程全停 ⇒ `supervise()` 重建 + 清 `reg_state["url"]` 强制重注册（回环端口可能变）。
+- **顺带的归属调整**：`remote/rollout_node.py` 已顶在 1000 行 LOC 预算（门禁红），把「预检/姿态」四项（`direct_env`/`probe_https`/`probe_tcp`/`net_probe`）下沉到 `remote/rollout_tunnel.py`，`rollout_node` 保留同名 re-export（`X as X`），测试里的 `rn._net_probe` / `rn._direct_env` 用法不变。
+- **证据**：`tests/hub/test_relay.py`（往返含请求体逐字节 / 空拍 / 超时后迟到回执丢弃 / 路由只收回环与 CF 归因 403）· `tests/remote/test_rollout_relay.py` 6 例（hub→agent→hub 全链路 / `local_port` 与注册 URL / agent 4xx 原样回执 vs 端口不通 502 / `RelayChannel` 起通道 / 老 hub 不回 `local_port` 时放弃且不留半开通道 / 线程全停后 `supervise` 重建）· `tests/remote/test_rollout_node.py`（`resolve_link` 强压表 +2）· 分层账本登记 `hub/relay`/`remote/rollout_relay` 均 L0；`nn-python-gate.sh` 全绿（ruff + mypy 941 文件 + pytest 6191 passed）。
+- **被否决**：① named tunnel / 域名（用户排除，且仍要走 7844）· ② 第三方免费隧道（把 1/3 算力押在一个免费服务 + 它的域名可达性上，且新增运行时依赖）· ③ 在 hub 上开 CONNECT 代理给 cloudflared 用（家宽上行与公网暴露面都更差，且**建隧道那一步 443 仍不通**）· ④ 把 rollout/eval 派发改成原生 pull（要动「谁发起」语义与 agent 的任务参数面，是主链路手术；relay 复用的是同一条线上契约）。
+- **代价/边界**：每请求多一跳节点↔hub RTT（国内 200–400ms），对 3s ping 门与 20s `/v1/result` 轮询够用；带宽不增加（权重本来就经 hub 家宽出、节点回包）。`nodes[].url` 在控制台显示为 `http://127.0.0.1:<port>/relay/<id>`，语义是「只在这台 hub 上有效」。
+- **未验证（记账，不假装有）**：真机复测未做（需 ModelScope 重跑 + hub 重启到带 `/relay/` 的版本）；relay 通道下 `emit_output_summary` 的 `/v1/status` 读数与「relay 线程死亡重建」在真机上的恢复时间未测。
+- **全文** → `docs/nn/remote-transport.md` §158；代码 → `hub/relay.py` · `hub/http_face.py::_relay_route` · `remote/rollout_relay.py`（`RelayLink` + `RelayChannel`）· `remote/rollout_node.py` · `remote/rollout_tunnel.py`（预检下沉）。
+
+## §2026-11-18-goalnn-relay-unreachable-forensics（relay 连不上 hub 时日志不能自证：预检 + 竞速 connect + 死因字面化）
+
+- **背景（`node_id=dsw` 真机 2026-11-18，`link=relay`）**：`hub_url` 是**正确**的公网 quick tunnel，节点却稳定失败 —— `relay 轮询失败（URLError）——2s 后重试` 同秒 6 条、每条静默 **35s**，40s 后报 `relay 未就绪（40s 内 hub 未应答长轮询）`，再 `★ 未注册：隧道 URL 未取到`，每 60s 重建一次挂 3 轮。
+- **三条实测证据（本机，非推断）**：① hub 隧道 `/relay/dsw/_poll?wait=2` 不带令牌回 `401` / **1.2s** ⇒ 路由在、hub 已升级、鉴权在工作；② `tmp/hub-server.out`（223MB）grep `/relay/` = **0 次** ⇒ 节点轮询**一条都没到过 hub**；③ 对照地址 `100.124.208.62:8787`→`401`/0.1s、`127.0.0.1:8900`→`404`/**0.0s** ⇒ DNS 失败/端口拒绝/404/530 **全是秒级**，只有地址黑洞或代理吊死才 35s。旁证：同机当天能自建 quick tunnel 并 `节点登记` ⇒ 到 CF 边缘通。
+- **35s 的来源（这次拿到直接读数）**：hub 域名 DNS 返回 `2606:4700::6810:e784(v6), 2606:4700::6810:e684(v6), 104.16.230.132(v4), 104.16.231.132(v4)` —— **先 2 个 IPv6 再 2 个 IPv4**；`create_connection` 的 timeout 是**每地址**的 ⇒ 串行 connect 墙钟 = N×timeout（20s poll + 15s connect ≈ 35s）。
+- **决定（`remote/rollout_relay.py` 四处）**：① `_err_text()` 把 `URLError` 翻成 timeout / refused / DNS / TLS / HTTP code，日志补 `hub=host:port` 与实测耗时，首条全文、之后每 10 条汇总（治 6 线程同拍刷屏）；② 两条路由**都竞速**（`racing_opener(no_proxy=True)` / `racing_opener()`），`_route_order()` 上次成功优先，`HTTPError` 视为应答不换路由，全崩才抛 `RelayUnreachable`（继承 `URLError`，`reason` 带逐路由结论）；③ 新增 `probe_hub()`（6s 内出 `(ok, 一行, facts{host,port,dns,routes})`），`RelayChannel.open()` 起线程**前**打这行并 `pin_route()`；④ `_banner_lines` 的 relay 分支改说「真因看预检那行 / relay 只需出网」，不再把人指向不存在的 cloudflared 日志。
+- **两处易错细节**：**端口判定禁用「有没有 `https://`」**（`http://1.2.3.4:8787` 会被读成 80）⇒ `_host_port()` 走 `urlsplit` + 显式 `parts.port` 优先；**回环/`NO_PROXY` 目标只跑 `direct`**（否则 LAN 代理把必然通的回环请求吊满 6s，实测某用例 6.12s 超阈值）。
+- **证据**：`tests/remote/test_rollout_relay.py` 6 → **14** 例 · `test_rollout_node.py` +1 · `test_source_text_assert_budget.py` 口径 A `1498 → 1502`（先把能结构化的结构化，只留确需看文本的 4 条）· `nn-python-gate.sh` 全绿（ruff + mypy + **6202 passed, 10 skipped** / 150s）。
+- **被否决**：① 只改日志文案（真因是竞速与路由，文案只能让它下次更快被读出来）；② 把 `hub_url` 换成 tailnet 地址（节点到不了，且不是本次真因）；③ 在 relay 里加「自动重解析 DNS 换 IP」的重试层（`racing_opener` 已经按地址族并行拨，再加一层只会掩盖问题）；④ 顺手修 `rollout.ipynb` 的 `NO_PROXY` 窄口（`direct` 腿已天然绕代理，改动面大于收益）。
+- **边界**：quick tunnel 域名**每次 hub 重启都变**，relay 节点的 `hub_url` 是死值，换域名须重跑 cell（现在 6s 就能看到 `timeout`/`DNS`，不再等 40s 的一句「hub 未应答」）；`NO_PROXY` 只含 `CFG.hub_ip` 的窄口**未修**（记账）。
+- **全文** → `docs/nn/remote-transport.md` §159；代码 → `remote/rollout_relay.py`（`_err_text` / `_route_open` / `_open` / `pin_route` / `probe_hub` / `RelayChannel.open`）· `remote/rollout_node.py`（横幅 relay 分支 + 环境行打 hub 主机）· `ipynb/rollout.ipynb`（CFG 注释：`hub_port` 8787 ≠ dashboard 8900、relay 必须填公网地址、新增「relay 起不来先看哪一行」小节）。
+- **复盘（同日 15:23 真机复跑，`commit=bcce16b`，见 §159.1）**：
+  - **旧格式日志 ≠ 新代码没生效**：`grep "2s 后重试"` 全仓 rc=1 ⇒ 那几行只能来自**另一个还活着的旧进程**（notebook 重启不杀 `rollout-node` 子进程）。⇒ 横幅加 `pid=`，新增 `_warn_if_node_id_taken()`（`<tmp>/battle-rollout-<id>.pid`，别人活着就打「先 kill 它」），**只告警不退出**；判活**禁** `os.kill(pid,0)`（Windows 上等于 TerminateProcess）。
+  - **`HTTPError` 一律算「路由通」是 bug**：实测 LAN 代理对黑洞地址回 `502/5047ms`，旧实现会 `ok=True` 并把代理腿钉住，之后每拍长轮询都吃 502。⇒ `GATEWAY_CODES={502,504,52x,530}` 记 `gateway-<code>`，不算通也不进 `_pick_route`；`503` 排除（hub 自己的熔断说明链路通）。
+  - **`timeout` 仍分不清三件事** ⇒ 预检失败时追加**逐 IP 裸 TCP**（并行、2s），判词分 `dns/blackhole/tls/unroutable`，结构化出口 `facts["hint"]`；两条路由的 HTTPS 预检改**并行**（串行 12s → 6s）。
+  - **hub 侧同时段复测仍正常**（隧道 `401/1.08s`；hub 日志 18 条 `/relay/` 全是本机测试，节点 0 条）⇒ DSW 的出网对该组 anycast IP 是黑洞，修法在承载侧（`CFG.net_proxy` / 非 CF 入口 / 换机器），不在代码侧。
+  - **验收**：relay 单测 14→17、node +2；文本断言口径 A **不抬格**（措辞断言换成 `kind`/返回值结构判据）。
+
+
+## §2026-11-18-goalnn-node-reclaim-on-cell-rerun（cell 重跑 = **先清场再起**：SIGINT 收旧节点 + 同进程 relay 遗留线程一起收）
+
+- **用户口径（2026-11-18 原话）**：「重复执行 `rollout.ipynb` 的 cell，应该把之前的所有进程杀掉，再重新起新进程。」上一轮只做了「告警」（`_warn_if_node_id_taken`），实测证明**不够**：`§goalnn-relay-unreachable-forensics` 的复盘里，DSW 现场那几行旧格式日志只能来自**另一个还活着的旧进程**（notebook 重启不杀子进程），而告警只是把它写进日志给人看。
+- **决定 1（跨进程，`common/node_report.reclaim_node_id`）**：`node_id` 的 pidfile 从「裸 pid」升级为 **`pid|身份`**，`run()` 启动第一步**先收掉**上一个 owner（`0` = 没有）。**先 `SIGINT` 不是客气**：对方的 `except KeyboardInterrupt` 会走 `finally`（`unregister` + 收 bun agent / cloudflared），而 SIGTERM/SIGKILL 没有这个待遇 —— 会留下占着 `agent_port` 的孤儿，新实例起来就用不了。`RECLAIM_GRACE_SEC=8` 还不退才 `SIGKILL`；Windows 无可靠 SIGINT（`CTRL_C_EVENT` 要同控制台）⇒ 直接 `taskkill /F /T`（连子进程；走 `run_capture` 免得闪黑窗），且**不白等**那 8s。
+- **决定 2（同进程，`remote/rollout_relay.stop_stale_links`）**：上一次 cell 若被**第二个 Ctrl-C** 打在 `finally` 上，`stop()` 没跑完 ⇒ daemon 轮询线程活下来，与本次的通道**抢同一个 hub 队列**（任务随机分给两边、回执各走各的 rid，表面成功、一半结果来自旧代码）。daemon 线程只能同进程收 ⇒ `RelayLink.start()` 起线程**前**先扫 `_LIVE_LINKS` 叫停遗留链接（只设停止位、`join` 上限 1s，硬等只会拖住新通道）。
+- **身份核验（为什么要，而不是「pid 相同就杀」）**：pid 会被系统回收，给陌生进程递 SIGINT 最坏能打断一台机器上无关的训练 / kernel。`proc_identity()` = Linux `/proc/<pid>/stat` 第 22 字段（启动戳，快、不起子进程）→ 没有 `/proc` 的平台回落 `common.instance_lock.proc_cmdline`（Windows wmic/CIM、macOS 读不到即空）。**对不上就不动手**，只打一行说明；旧格式裸 pid（身份为空）同样只告警 —— 本次启动把它重写成新格式，下一次重跑即生效。
+- **验收（真机 + 单测）**：本机 Windows 实测 ① 真子进程 `pid=24552` 被 `taskkill /F /T` 收掉、1.5s 返回、pidfile 改写成本进程；② 身份写错 / 旧格式裸 pid 两种反证**都不动手、子进程还活着**。单测：`test_rollout_node.py` 5 例（先 SIGINT / SIGINT 被无视才 SIGKILL / pid 复用不动手 / 旧格式只告警 / 自己的 pid 与死 owner 静默）+ `test_rollout_relay.py` 2 例（扫 `_LIVE_LINKS` / `start()` 先清场）。门禁 `NN_GATE_SKIP_E2E=1` → **6079 passed, 10 skipped**（首轮两条 `test_hub_push_dispatch` / `test_remote_iter` 红，单跑绿 ⇒ xdist 抖动，复跑全绿）。
+- **风险与边界**：① 目标是**上次会话的 kernel** 时，SIGINT 等于替它「中断那个 cell」—— 这正是用户要的，但**不能**在别人正跑训练时误伤 ⇒ 全部动作以身份核验为前置；② `SIGKILL` 分支会留孤儿子进程（日志明说「手动 kill 后重跑」）；③ 同一个 kernel 里 cells 无法真正并发（Jupyter 排队）⇒ 决定 2 只覆盖「被双 Ctrl-C 打断」这条窄路；④ 之前记账的 `rollout.ipynb` `NO_PROXY` 窄口**仍未修**。
+- **代码** → `common/node_report.py`（`proc_start_stamp` / `proc_identity` / `read_node_owner` / `write_node_owner` / `reclaim_signal` / `reclaim_kill` / `reclaim_node_id`；`rollout_node.py` 已顶 1000 行预算）· `remote/rollout_relay.py`（`_LIVE_LINKS` / `stop_stale_links` / `RelayLink.start|stop`）· `remote/rollout_node.py`（启动第 2 步清场）· `ipynb/rollout.ipynb`（排查表：自动清场两行日志 + 身份核验口径）· 文 → `docs/nn/remote-transport.md` §159.2。
+
+## §2026-11-18-goalnn-relay-tls-layer（`TCP 通而 HTTPS 不通` 再切一刀：裸 TLS 握手 + 对照主机，判词分四类）
+
+- **背景（`node_id=dsw` 第三次真机 2026-11-18 18:46，`commit=48f6ae4`）**：上一轮新增的逐 IP 裸 TCP 第一次给出了决定性读数 —— `TCP=104.16.230.132:443 ok,104.16.231.132:443 ok,2606:4700::6810:e684:443 unreachable,2606:4700::6810:e784:443 unreachable`，而两条 HTTPS 路由仍全 `timeout`。两件事当场钉死：① v4 两个地址 **TCP 全通** ⇒ 不是黑洞/DNS/「这台机器上不了网」；② v6 两个地址 `unreachable` ⇒ DSW 无 v6 路由，属正常，不该当故障修。
+- **问题**：`TCP 通 + HTTPS 无应答` 这一句仍同时覆盖三种**互斥**成因，而修法成本差一个量级 —— ①握手就被丢（DPI 按 SNI 过滤 / 路径 MTU 黑洞）⇒ 换隧道域名即可；②握手成功、HTTP 不回（隧道死了域名还在 / hub 进程没跑 / 反代挂住）⇒ 去 hub 机器；③中间人顶证书 ⇒ 走代理并信根证书。
+- **决定 1（`remote/rollout_relay._tls_verdict` / `_tls_sweep`）**：TCP 通了才切**第四层：裸 TLS 握手**（不发 HTTP，`TLS_PROBE_SEC=3.0`，CF 边缘正常 ~150ms，多地址并行）。`verdict ∈ {ok:<版本>, timeout, err:cert:…, err:tls:…, err:conn:<errno>}`。只在 `https://` 上跑 —— `http://1.2.3.4:8787` 的裸握手必然失败，把它写成 `tls-blocked` 只会把人送去换机器。
+- **决定 2（对照主机 `CTRL_HOST="api.trycloudflare.com"`）**：同一 CF 边缘、同一套泛域名证书，但**不带隧道域名那段随机前缀**；与 hub 的 TLS 探测**并行**（对照不该再吃一份预算），端口恒用 443（问的是「本机到 CF 边缘的 TLS 通不通」）。判定表：hub 无应答 + 对照也卡 ⇒ `tls-blocked`（走代理/非 CF 入口/换机器）；hub 无应答 + 对照成功 ⇒ **`sni-blocked`（重建 quick tunnel 换域名，最便宜的一档）**；hub 握手成功 ⇒ `app-stall`（问题在 hub 侧）；证书/TLS 错误 ⇒ `tls-error`（MITM）。对照四地址结论一致时压成 `ok:TLSv1.3（4 个地址一致）`，否则单行会被淹。
+- **真机验收（本机 Windows，两条都实测）**：① 公网隧道健康 ⇒ `ok=True`、`inherit/direct=HTTP 401`、**不切 TLS 层**；② 本机监听只 accept 不说话（人为构造「TCP 通、握手不回话」）⇒ `TLS=127.0.0.1 timeout（握手无应答）；对照 api.trycloudflare.com=ok:TLSv1.3（4 个地址一致）`、`hint=sni-blocked`。⇒ 同一台机器上「hub 域名的握手被丢」与「到 CF 边缘的握手是好的」确实能分开。
+- **对 18:46 那次的判读（诚实版）**：落在 `tls-blocked` / `sni-blocked` 之间，**必须等 DSW 跑出带 `TLS=` 与 `对照 …` 的新日志才能定**；旧判词「换域名或走代理」两边都指得对，但成本差一个量级，所以这一层值得加，不是文案美化。
+- **证据**：`tests/remote/test_rollout_relay.py` 17 → **23** 例（+4：`tls-blocked` 对照也卡 / `sni-blocked` 对照成功 / `app-stall` 握手成功 / `_tls_verdict` 两条真路径 —— 只 accept 不说话 → `timeout`、accept 后立刻 close → `err:tls*`）。判据全部钉 `facts["hint"]` / `facts["tls"]` / `facts["tls_ctrl"]`，**不钉子串** ⇒ 文本形态断言口径**不抬格**（护栏仍 1502；第一版写了 `assert "TLS=" in line` 被护栏拦下，改成结构化断言）。
+- **边界**：裸握手不验应用层，`ok` 只说明「能握手」；对照主机只覆盖 CF 这条路径，hub 换非 CF 入口（自建反代 / 内网直连）时对照要跟着换，否则 `sni-blocked` 会误报。`__all__` 已导出 `TLS_PROBE_SEC` / `CTRL_HOST`。
+- **全文** → `docs/nn/remote-transport.md` §159.3；代码 → `remote/rollout_relay.py`（`TLS_PROBE_SEC` / `CTRL_HOST` / `_tls_verdict` / `_tls_sweep` / `_fail_hint` 四类新分支 / `probe_hub` 第四层）· `tests/remote/test_rollout_relay.py`（`_stub_layers` 打桩 + 4 例）。
+
+## §2026-11-18-goalnn-online-worker-bun-for-replay — 两块在线盘**开机供给 bun**（落持久缓存）：replay → npy 的转换在 worker 侧跑
+
+- **用户口径（2026-11-18 原话）**：「两块在线盘环境启动后，需要先安装 bun，以执行 replay 到 npy 的转换。
+  需要像 rollout 一样，定义安装文件的持久化位置，避免每次新会话都下载。」
+- **为什么**：`corpus_fmt=replay`（2026-11-17 起默认）把 `replay.json` 下给 worker，obs/scalars/extra 由
+  `remote/replay_corpus` 在 worker 进程里重建，运行时顺序 **Bun 优先**、Node 兜底（plan D5）⇒ 开机没 bun
+  就每个会话都退到 Node（1.15× 慢，两套运行时口径）。
+- **决定**（`§2026-09-25-…-online-worker-no-bun` 的例外再扩一格，沿 `§2026-10-21-…-bun-for-self-collect`
+  四条硬约束）：① 装机**复用** `remote/rollout_node.ensure_bun`（⇒ `_ensure_bun` + `_bin_cache_dir`），
+  不另写一份；② 供给点**早于任何 worker 子进程**（`run_notebook` 第一件事 + `notebook_boot._push`
+  因 push 先 spawn 而自己补一次）；③ 持久位置是**数据**（`CFG.bin_cache_dir` / `BATTLE_BIN_CACHE`，
+  否则按平台持久根 → `.battle-bin/bun`）；④ 装不上**不致命**（回落 node，仅记一行）。
+- **读数（同日补）**：转换开场打 `replay 转换运行时：<bun|node>（<路径>）· 档位=primary|fallback`（回落附
+  原因）+ 回落档**额外**一条 `WARN … 比 bun 慢约 1.15×（22.1→25.4 µs/tick）…修法：持久缓存 / corpus_fmt=full`
+  （**每轮都打、不设 warned 位**：去重会让长会话在日志滚过后重新静默）；收尾行补 `单 shard 均值/最长`，
+  bundle 行带运行时 —— 原先只有末尾 `runtime=node`，读者得先知道「本该是 bun」才看得出回落。
+- **被否决**：cell 内联装（两份装机必漂 + 在线 cell 禁安装机制）· 在 `resolve_js_runtime` 里 JIT 装
+  （把公网下载塞进 job 关键路径）· 只在 worker 进程里装（装完还得重启才进 PATH）。
+- **护栏**：`tests/remote/test_tailscale_boot_bun.py`（一份实现 / 早于 spawn / 持久位置是数据 / 不致命）+
+  `test_worker_replay_prepass.py::test_logs_runtime_and_per_shard_elapsed`；文本断言口径 A/B 不抬格。
+- **全文** → `docs/nn/remote-transport.md` §160；代码 → `remote/{rollout_node,notebook_runtime,notebook_boot,replay_corpus}.py` ·
+  `ipynb/battle.{tailscale,cloudflared}.ipynb`。
+
+## §2026-11-18-goalnn-relay-cf-blocked-verdict
+
+- **现场**：DSW relay 预检 `TCP` 全 ok、`TLS` 全 timeout、唯一对照 `api.trycloudflare.com` 也 timeout ⇒
+  判词 `tls-blocked`（「走代理 / 换非 CF 入口 / 换机器」）。**这一步是误判**：对照与 hub 同属
+  `trycloudflare.com` 后缀，按这个后缀掐时对照必然一起卡 ⇒ 最便宜的修法（换个域名，同一边缘）被抹掉。
+- **裁定**：预检带**两条用途不同的对照**（同预算内并行）——`CTRL_HOST = cloudflare.com`（同边缘、不同注册域）
+  与 `CTRL_HOST_NET = registry.npmmirror.com`（非 CF）。hub 卡 + 前者通 ⇒ `sni-blocked`（换域名最便宜）；
+  前者也卡 + 后者通 ⇒ 新判词 **`cf-blocked`**（只有 CF 被掐 ⇒ 换非 CF 入口 / 代理，**换机器无用**）；
+  两个都卡 ⇒ `tls-blocked`（本机 TLS 出网整体被掐）。对照问不到（DNS 空）时如实降级，不升格成「整家 CF」。
+- **被否决**：保留单对照并对 `tls-blocked` 的措辞加一句「也可能是按域名掐」（读者要在两种修法间自己猜，
+  等于把 §159.3 刚消灭的猜的那一步又请回来）· 把 `github.com` 当非 CF 对照（DSW 上它常要走 gh-proxy 镜像，
+  拿它当「本机出网正常」的证据会把 `tls-blocked` 误报成 `cf-blocked`）。
+- **护栏**：`tests/remote/test_rollout_relay.py` 21 → 25 例，判据只钉 `facts["hint"]` / `tls_ctrl` / `tls_net`，
+  文本断言仍 1502（+0）。
+- **全文** → `docs/nn/remote-transport.md` §161；代码 → `remote/rollout_relay.py` · notebook 排查表 → `ipynb/rollout.ipynb`。
+
+## §2026-11-18-goalnn-paddle-ppo-lazy（Paddle 后端支持 PPO lazy loader：共用分派 + 逐批上卡 + ref 惰性预计算）
+
+- **背景/决定**：生产缺省 `ppo_loader=lazy`（§2026-11-17-goalnn-ppo-lazy-default）后，Paddle worker 仍对 lazy
+  job **响亮拒收**（`remote/paddle_env.check_ppo_loader`）⇒ `g6-speed-c1` 等课程在 Paddle 节点上直接失败
+  （`job … REJECTED: paddle 后端不支持 ppo_loader='lazy'`）。本条把 P3 lazy 接到 Paddle 双生，**取代**
+  §2026-11-16-goalnn-ppo-lazy-loader 与 §2026-11-17-goalnn-ppo-lazy-default 里「Paddle 拒收 lazy」那一条。
+- **实现**：`remote/train_common.load_ppo_episodes` 成为**两条训练核共用的唯一分派点**（eager 逐字节旧
+  `np_core.load_episodes`；lazy 只在 manifest 显式声明时走 mmap）；Paddle 核改用它，并把装载器自身的
+  `.lazy` 传给 `engine_paddle.ppo_update(lazy=…)`（不重读 manifest，避免「说 lazy 实际 eager」的错账）。
+  引擎 lazy 路径跳过 `require_corpus`/全量 `tensored_chunks`，每步 `tensored_batch` 只搬当前 minibatch；
+  kickstart ref 改为 chunk 首次使用时现算（`_ref_logprobs` 抽出，与 eager 共用同一份头数/动作空间校验）。
+  删除 `paddle_env.check_ppo_loader` 与整条拒收路径。
+- **证据（本机 2026-11-18，paddle 3.3.1）**：`tests/worker/test_ppo_lazy_loader.py` +3 条 —— 分派器按
+  manifest 透传 `loader/mb/per_stage_quota`（缺键仍 eager）；Paddle eager/lazy 同 seed 的**最终权重逐字节
+  一致**且统计量 `abs=1e-12`；lazy 只逐批搬 `mb` 行且 `tensored_chunks` 被调用即失败（2 chunks × 2 epochs
+  = 4 次 `(8,C,B,B)`）。`tests/remote/test_train_core_split.py` 用 `__code__.co_names` 钉住 Paddle 核引用
+  `load_ppo_episodes`、不再引用 `load_episodes`/`check_ppo_loader`。`bash tools/githook/nn-python-gate.sh`
+  全绿：ruff / mypy 941 文件 / **6232 passed, 10 skipped**。
+- **层号**：`remote.train_common` L2 → **L3**（延迟 import `worker.ppo.lazy_corpus`(L2)，拓扑秩 = 1+2）；
+  读它的 `remote.train_core`(L4) 不变（账本已同步）。
+- **被否决**：① Paddle 静默退回 eager（manifest 与日志各说各话，2026-11-16 已否决）；② 把装载分派留在
+  `train_core`（有效 LOC 981，且两核共用判据会重新分叉）；③ 复制 torch `tensored_batch` 的
+  `memory_format` 分支（Paddle 无此参数；逐批 `paddle.to_tensor` 已覆盖语义）。
+- **后果/未完成**：Paddle GPU 真机（AI Studio）的 35×20 H2D/update 墙钟与显存余量尚未测；判据 = 同一 job
+  在 torch / Paddle 节点的 `wire` 行与 `loader=lazy peak=…` 读数。回滚 = job 显式 `--ppo-loader=eager`
+  （Paddle 侧旧路径逐字节不变）。全文 → `docs/nn/remote-transport.md` §162。
+
+## §2026-11-18-goalnn-relay-alt-port-fallback（中间层只掐 443/8443 ⇒ 预检失败后**换端口**自救，不换域名不换机器）
+
+- **现场**：判词已收敛到 `sni-blocked`（同边缘的 `cloudflare.com` 能握手），但用户在 DSW 上直接 `curl`
+  拿到决定性读数：`https://<hub>:443 = 000`、`https://<hub>:80 = 301`（80 层没拦，CF 强制跳 HTTPS）、
+  **`2053/2083/2087/2096` 全回 `401`**（那是 hub 自己的鉴权在回话 ⇒ TLS+HTTP 整链通）、`8443 = 000`、
+  tailnet 控制面 `000`。
+- **裁定**：中间层不是掐机器、不是掐 CF、不是掐域名整体，而是**在 443/8443 上按 SNI 掐这个域名** ⇒
+  唯一要改的是**端口**。`probe_hub` 在端口级失败（`blackhole / sni-blocked / tls-blocked / cf-blocked /
+  tls-error`）之后，对 CF 官方的五个备用 HTTPS 端口各发一次**真的**预检（并行）；有 `ok`/`http-*` ⇒ 判词
+  改写 **`port-blocked`** + `facts["alt_port"]`，`RelayChannel.open` **当场改写 `hub_url`** 再起线程
+  （改写结果留在 `_args`，线程死亡重建不重复扫描）。`app-stall` 不扫（那是 hub 自己有问题，换端口一样不回）。
+- **为什么用真请求而不是裸握手**：`gateway-5xx` 表示端口通但 CF 够不到上游，换过去只会从「超时」变成「530」；
+  只有拿到 `http-*` 才算端到端可用。
+- **被否决**：① 换自有域名 + 命名隧道（成本高一个数量级，且要动 CF 侧；实测同域换端口就够）；
+  ② 走 80 端口（`301` 证明 80 未拦，但 quick tunnel 没有「关掉强制 HTTPS」的开关）；③ tailnet 保底
+  （`E=000`，DSW 上同样死）；④ 只写文档让人手改 `hub_url`（下次换机器又要人手改一遍）。
+- **护栏**：`tests/remote/test_rollout_relay.py` 25 → **29** 例；文本断言口径不抬格（`"x" not in facts`
+  改成 `set.isdisjoint`，护栏仍 1502）。
+- **全文** → `docs/nn/remote-transport.md` §159.4；代码 → `remote/rollout_relay.py`
+  （`ALT_HTTPS_PORTS` / `_port_sweep` / `with_port`）。
+
+## §2026-11-18-goalnn-relay-client-gone-is-warn（`/relay/…/v1/result` 的 `WinError 10053` 是「对端先走」，不进错误注册表）
+
+- **现场**：端口回退生效后 DSW 节点真连上了，hub 一分钟报 16 条
+  `ERROR /relay/dsw/v1/result: [WinError 10053] An established connection was aborted by the software
+  in your host machine`，全被组件错误注册表按「未处理错误」上报。
+- **裁定**：`10053`（`ConnectionAbortedError`）/`10054`（`ConnectionResetError`）/`BrokenPipeError`
+  语义统一是**这条连接没了** —— relay 的 `/v1/result` 在 hub 侧要让 hub 等节点回执（45s）才写响应，
+  调用方 urllib 预算更短时必然撞上。这是**链路抖动**，不是 hub 故障 ⇒ 判据用**异常类型**（不用
+  Windows 文案），`do_GET`/`do_POST` 各加一条 `except ConnectionError`：**不记 ERROR、不回 500、
+  不再抛**，只落一行节流的 `WARN … 对端提前断开（累计 N 次，非 hub 错误）`（首条 + 每 10 条一条）。
+- **上一版为什么连 traceback 都进了注册表**：`except Exception` 里先记 ERROR，再
+  `_json({"error":"internal"}, 500)` —— 写在死 socket 上**又抛一次**，那一次的栈才是注册表里那条。
+  对端都没了，500 没有收件人。
+- **被否决**：① 把 hub 侧 `/v1/result` 等待从 45s 降到几秒（会把健康的慢局变成 504）；
+  ② 全局 `except ConnectionError: pass`（真错误会被一起咽掉，反证用例专门钉这一条）。
+- **护栏**：`tests/hub/test_hub_client_gone.py` 3 例（真起 `make_server` + `SO_LINGER=0` 发 RST ⇒
+  只有 WARN、无 ERROR、stderr 无 traceback、下一条请求仍 200 / `RuntimeError` 仍 500 / 节流 1·10·20）。
+  ⚠ `linger` 结构 Windows 是 `HH`、POSIX 是 `ii`，写错会让用例假绿。
+- **全文** → `docs/nn/remote-transport.md` §159.5；代码 → `hub/http_face.py`
+  （`CLIENT_GONE_LOG_EVERY` / `HubHandler.note_client_gone`）。
+
+## §2026-11-18-goalnn-relay-ping-from-heartbeat（relay 模式的探活**不再等一次往返**：通道心跳 + 载荷缓存）
+
+- **现场**：端口回退 + `对端先走` 降噪后节点在 DSW 连续工作了，但用户读数仍「稳定性不佳」，
+  并给了决定性反证：直连（`--noproxy '*'`）连发三次同一请求 `401 1.26s / 401 3.52s / curl(28) 6.00s 0 字节`
+  ⇒ 链路通（401 = hub 鉴权在回话）但**延迟从 1.3s 漂到超时**，「改走直连就更稳」当场作废。
+  hub 日志 22:40–23:20 定量：`/relay/dsw/v1/ping` **186 ok / 192 ×「对端先走」/ 67 ×504**；
+  节点自报 `polls=499 served=438 errors=83`（16.6% 轮询失败）；530 突发与 hub 侧 `task 504` 扎堆时间吻合。
+- **裁定**：病灶是**设计**把「一次本地事实查询」实现成了「一次分布式往返」—— 调用方预算
+  `STATUS_TIMEOUT_SEC=3s`，而 relay 一次 `call` 要等节点下一次长轮询（`POLL_WAIT_DEFAULT=20s`）⇒
+  约一半探活**注定假失败**，handler 线程还空占 15s。判据换成两个本地事实：
+  ① `channel_age`（节点每次 `_poll` 刷新的**通道心跳**，> `CHANNEL_STALE_SEC=60s` ⇒ **503 快速失败**）
+  ② 上一次成功 `/v1/ping` 的**载荷缓存**（`PING_TTL_SEC=30s` 过期即后台刷一次、单飞行；
+  `PING_SERVE_MAX_SEC=120s` 之外老实走真调用，不拿化石台账喂 `codeHash`/`bootId` 门）。
+- **为什么 TTL 是 30s 不是 600s**：载荷里带 `codeHash`（派发门，a98 = 两版本混跑）与 `bootId`
+  （单实例门），滞后必须短；下界又被「刷新本身要等一次长轮询」夹住 ⇒ 30s 是两头夹出来的，
+  120s 只是**隧道黑洞**那一档的兜底。已知代价（relay 模式下这两个门最多滞后 120s）写进文档。
+- **被否决**：① 让节点把轮询间隔缩到 3s（隧道请求 ×7，`_poll` 今夜已 1903 条/3h，稀缺资源不能这么烧）；
+  ② 把 hub 侧探活预算抬到 20s（注册会被拖成 20s+，且调用方还是超时）；③ 只靠直连/换路（用户读数已否）。
+- **易踩**：回落路径**也得把载荷存下来**（否则缓存永远空，短路白写）；单飞行标记只由认领者
+  `finally` 放回（`note_ping` 顺手放会让两条路互相打开重入权）。
+- **护栏**：`tests/hub/test_relay_ping_cache.py` **6 例**（零往返 / 503 快速失败 / 先答后刷 + 单飞行 /
+  回落即缓存 / 化石不用 / 开关语义），文本断言口径不抬格（`"relayAgeSec" in payload` 改成
+  `set(payload) >= {...}`，护栏仍 1502）。
+- **全文** → `docs/nn/remote-transport.md` §159.6；代码 → `hub/relay.py`
+  （`CHANNEL_STALE_SEC` / `PING_TTL_SEC` / `PING_SERVE_MAX_SEC` / `channel_age` / `ping_snapshot`）·
+  `hub/http_face.py`（`_serve_relay_ping` / `_refresh_relay_ping` / `_cache_relay_ping`）。
+
+
+## §2026-11-19-goalnn-relay-lanes-follow-workers（relay 的道数必须盖住 agent 的 worker 数：6 条道把 16 worker 的节点腰斩）
+
+- **现场（hub 日志 `tmp/hub-server.out` 09:40–11:24 + trainer 读数）**：节点自报
+  `relay polls=606 / served=539 / errors≈19`，`served/polls=89%` ⇒ 每条长轮询几乎总带着活；
+  而节点侧 `workers=16`、trainer 给 dsw 的 `concurrency=12`，**relay 只有 6 条道**
+  （`POLL_WORKERS=6`）。trainer 实测 `dsw wall=6.6–7.9s/局`，同时段 hub burst 峰值
+  `95–108 局/分`（`v1/task` 200）—— 6 条道 × 单局算力 ~3.7s 正是 97 局/分，**两条独立读数对上了**：
+  传输层在算力层前面当天花板，16 个 worker 只用到 ~37%，trainer 看到的一半 wall 是排队。
+- **裁定**：道数不是「探活/控制面的缓冲」而是**并发上限**（一条长轮询线程一次只驮一条请求，
+  `_forward` 在它自己的线程里跑完才回去取下一拍）。`RelayChannel` 必须接收 agent 的 worker 数，
+  `workers = max(POLL_WORKERS, agent_workers)`：dsw 16、8C 小机器保底 6。控制面（ping）走
+  hub 的心跳缓存短路，不占道；weights 只发生在轮次边界，另有富余道。
+- **被否决**：① 抬高 `CFG.workers`（算力层不是瓶颈，抬了只会加排队）；② 给 `_forward` 加
+  线程池 + 队列（多一层背压，且队列里的请求照样吃调用方预算，收益与直接加道相同）；
+  ③ 让 trainer 把 dsw 的 `concurrency` 降到 6（等于承认传输层决定算力，方向反了）。
+- **同批修的两处**：回执投递单发 → **3 次短退避重试**（4xx 不重试：确定性失败；CF 502/530
+  现场 10:31:52 一次丢三条，丢一条 = 一整局白跑，hub 侧 `CALL_TTL=180s` 内重发幂等）；
+  hub 访问日志 `print()`（正文/换行两次 write）→ **单次 write**（relay 行成片粘成
+  `… 200 -[11:24:05] …`，而这份日志正是排查 relay 的唯一入口）。
+- **护栏**：`tests/remote/test_rollout_relay.py` +4（道数跟随 workers / 502 重试两次后成功 /
+  4xx 不重试 / 三次失败只记一行）· `tests/hub/test_hub_auth_d9_order.py` +1（一行一次 write）。
+- **未验证**：真机需重启 DSW 节点（节点代码随 clone 更新）；hub 需重启才吃到日志原子写。
+- **全文** → `docs/nn/remote-transport.md` §163；代码 → `remote/rollout_relay.py`
+  （`POLL_WORKERS` / `REPLY_TRIES` / `RelayChannel(workers=)` / `_deliver`）·
+  `remote/rollout_node.py`（`RelayChannel(..., workers=workers)`）· `hub/http_face.py`
+  （`HubHandler._log_lock`）。
+
+## §2026-11-19-goalnn-relay-keepalive（relay 的 poll/reply 走长连接：hub 升 HTTP/1.1 + 复用 `common/http_pool`）
+
+- **现场**：一条道每局固定付两笔与算力无关的往返 —— 回执新建一条连接、下一次长轮询再新建一条。
+  urllib 不发 keep-alive，而 hub 是 `BaseHTTPRequestHandler` 的默认 `HTTP/1.0`（每条响应后必关），
+  所以客户端的池也只能一拍一建。隧道单程 ~0.5–0.7s（预检 `_poll?wait=0` 1074ms），
+  在 `wall=6.6–7.9s/局` 里白扔 10–20%，还被读成「hub pending 里等道」（§163）。
+- **裁定**：① `HubHandler.protocol_version = "HTTP/1.1"`（前提：每个响应都带 `Content-Length`，
+  写头入口只有 `respond_json` / `_send_headers` 两处）；② relay 的 `_poll`/`_post_reply` 走
+  `common.http_pool.request`（thread-local、每请求 timeout、urllib 同语义异常），
+  `direct` 腿用新增的 `no_proxy=True`（池键含代理 ⇒ 两条路由各自一条连接）；
+  ③ 道线程退场 `http_pool.close_thread()`（否则 hub 侧每条 1.1 连接永久挂一个 handler）。
+  路由回落与「4xx/5xx 算路由通、不切换」的判据原样保留；预检继续走一次性 `_route_open`。
+- **顺手**：对端提前断开（`ConnectionError`）的两个分支补 `close_connection = True` ——
+  1.1 下 handler 会回头读下一请求，死 socket 会读出一段 `socketserver` traceback
+  （`test_hub_client_gone` 的红就是这条）。`stats_line()` 末尾加池读数 `reuse/connect`。
+- **被否决**：① 在 1.0 上手写 `Connection: keep-alive`（事实标准，还要自管 `close_connection`
+  与响应定长 = 手写半个 1.1）；② 另写 relay 专用客户端/httpx（第二份代理/竞速/超时真相；池本来
+  就是为此存在的，`NODE_HTTP_POOL=0` 还是同一条逃生口）；③ HTTP/2 多路复用（换协议的代价远大于
+  这一格收益）。
+- **护栏**：`tests/hub/test_hub_keepalive.py`（同一连接连发两次 200 + `Content-Length`）·
+  `tests/remote/test_rollout_relay.py::test_lane_reuses_one_tcp_connection`（服务端看到的客户端端口
+  恒为 1；降回 1.0 时 6 拍 = 6 个端口，已实测红）· `tests/common/test_http_pool.py` +2
+  （`no_proxy` 强制直连且与代理腿各占一条连接 / `close_thread` 关连接不清统计）。
+  门禁：`tests/hub` 615 passed · `tests/remote + tests/common` 2434 passed / 1 skipped ·
+  ruff / mypy · LOC 与文本断言预算未动（1502 / 1092）。
+- **未验证**：真机需**重启 hub**（协议版本是类属性）并重跑 DSW cell（节点代码随 clone 更新）。
+- **全文** → `docs/nn/remote-transport.md` §164；代码 → `hub/http_face.py`（`protocol_version` /
+  `close_connection`）· `common/http_pool.py`（`no_proxy` / `close_thread`）·
+  `remote/rollout_relay.py`（`_send` / `_poll` / `_post_reply` / `stats_line`）。
+- **⚠ ①③ 已被撤销**：同日下午首次上真机即把 DSW 节点的隧道打黑 20 分钟 ⇒ `§2026-11-19-goalnn-hub-stays-http10`。
+- **补充（同日，`_send` 的预算口径）**：`timeout` 改为**跨路由总预算**（每段拿 `剩余 - 12s × 后续路由数`，
+  下限 12s）。原因：被打黑时每拍 70.4s = 35s × **两条路由**（原实现逐路由一份 timeout），6 条道
+  一起空转、失败计数翻倍。均分被否决（长轮询自己要 20s，均分会把健康空拍切成假超时）。
+  护栏：`test_send_budget_is_one_timeout_across_routes`；全文 → `docs/nn/remote-transport.md` §166。
+
+## §2026-11-19-goalnn-hub-stays-http10（hub 的 origin 面永不复用连接：1.1 被撤销，节点侧池化保留）
+
+- **事故**：hub 12:34 重启后带 1.1。12:41 cloudflared 报 `Unable to reach the origin service …
+  HTTP/1.x transport connection broken: malformed HTTP status code "HTML>"`（= 把上一条响应体的
+  残片当成下一响应的状态行），12:42 `use of closed network connection`，**12:44:50 之后 hub 再没
+  收到任何 `via=cf` 请求**；节点侧从 12:47 起每拍固定 70.4s（= 35s × 两条路由）全 timeout，
+  `errors` 10 → 80，产出冻结在 380 局。同期 hub 健康（11 线程，jobs/admin 正常）、隧道也活着
+  （从本机 `:2083/healthz` 1.2s 到 hub）⇒ 死的只有「cloudflared → hub」那条被复用的连接。
+- **机理**：origin 复用下只要有一条响应没写完整（`_send_body` 停滞、头部已发之后抛异常），
+  下一条响应就会被当成残片解析 ⇒ 连接**永久**失同步；1.0 的「响应完就关」让半写无法穿越。
+  节点那一侧当时跑的是 HEAD（无池化代码），真正上线的东西只有 hub 的 1.1。
+- **裁定**：① `HubHandler` 保持 `HTTP/1.0`（不设 `protocol_version`，理由写进类注释）；
+  ② 节点侧照旧走 `common/http_pool` —— 被复用的对端是 **Cloudflare edge**，省的是节点↔edge 的
+  TLS 握手（~0.5s/局），origin 是不是 1.1 只省本地回环的 0.2ms 级开销；
+  ③ 恢复姿势：重启 hub（丢 1.1）+ 重启 cloudflared / 重跑 cell（丢被毒死的隧道连接，不自愈）。
+- **护栏**：`tests/hub/test_hub_origin_close.py`（`resp.will_close` 为真 + `conn.sock is None` +
+  `Content-Length` 定长）；`tests/remote/test_rollout_relay.py` 的复用用例改用假 1.1 hub 并注明
+  「生产里被复用的对端是 edge」。
+- **被否决**：① 保留 1.1 并给每条连接加「N 拍后主动关」（延迟失同步而不是消除它，且每条道
+  仍然会周期性踩到半写窗口）；② 只在 hub 侧对 `via=cf` 请求强制 `close_connection`（要信
+  `CF-Connecting-IP` 头，而同一个 handler 还要服务 Tailscale 直连，判据比收益脆）。
+- **全文** → `docs/nn/remote-transport.md` §165。
+
+## §2026-11-19-goalnn-eval-pool-follows-arbiter（eval 池每次都现取 `eval_arbiter()` 单例 + 线程寿命只由 stop 定）
+
+- **症状**：全量门禁（xdist）里 e2e 的 eval 用例**每次红不同一条**、单跑恒绿：`test_it_eval_deferred`
+  （I7 eval round never dispatched）、`test_it_eval_post_ppo_weights`（teardown「I10 2 eval games landed
+  (got 0)」）、`test_it_mixed_cluster_rollout_pauses_new_eval_grants_but_keeps_inflight`、`test_eval_local_gate`
+  （读不到 `eval-local/dist-agent-meta.jsonl`）。同一秒现场：`dispatch 6 … -> [(node,2)]` 紧跟
+  `收工（worker 线程归零，未全落盘 0/6）【workers-gone：剩余待派 6（从未派出 6）、在飞 0】`；
+  本机腿版本则是 30s 零局 + `window`。
+- **根因**：`EvalExecutors.__init__` 把 `eval_arbiter()` 的**实例**缓存进 `self._arb`，而
+  `trainer/eval_dispatch.py` 每轮现取单例再 `register(rnd)`。`tests/trainer/test_eval_dispatch_resilience.py`
+  与 `test_eval_drain_dedup.py` 的 fixture 调 `reset_eval_arbiter()` **换掉进程单例** ⇒ 池线程守着旧仲裁器
+  （永远看不到新登记的轮）⇒ `take()` 恒 `None`、一张牌发不出去。单跑不在同一个 worker、单例没被换过，所以恒绿。
+- **裁定**：① `EvalExecutors` 默认**每次现取** `eval_arbiter()`（显式注入的替身照旧钉住）；
+  ② 池线程把 `take() is None`（空闲自缩那条）当重问信号而不是退出信号 —— 旧写法会让
+  「正卷尾退出的线程」被 `_resize_locked` 当成 `is_alive()` 的可用槽（TOCTOU）：`stop` 被清、不补新线程，
+  随后 `active()` 归零 ⇒ `supervise_round` 同秒判 `workers-gone`；线程寿命只由 `stop`/`_closed` 决定；
+  ③ `supervise_round` 在 `workers-gone` 与窗口到期两条收工路各打一行现场读数（`pending/inflight` +
+  每节点 `active/slots/routed` + `local: active/slots/ok/spawned`），把「没牌」与「没线程」分开。
+- **护栏**：`tests/worker/test_eval_pool_permits.py::test_pool_follows_a_replaced_arbiter_singleton`
+  （换单例后 `ex._arb is eval_arbiter()`，显式注入仍钉住）、`::test_pool_thread_survives_brief_idle_so_a_new_round_still_has_a_consumer`
+  （空闲一拍后 `active()==2`，`close_pools()` 后退干净）——两条都在旧行为上确认过红。
+- **被否决**：① 给 `supervise_round` 加「启动宽限」（治标：宽限过后照样零局，且把真因藏起来）；
+  ② 让 `reset_eval_arbiter()` 不换实例、只清场（会一并拿掉两条测试用例之间的隔离能力）；
+  ③ 在 `_resize_locked` 里加「线程已准备退出」标志位（也能修 TOCTOU，但要在两个循环各加一份收尾协议，
+  比「线程不自杀」复杂）。
+- **全文** → `docs/nn/remote-transport.md` §167。
+
+## §2026-11-19-goalnn-cloudflared-origin-ipv4（cloudflared 回源一律写 IPv4 字面量；换端口的改写必须交给注册）
+
+- **症状**：DSW 采样节点 relay 模式连续多轮接不上 hub。同一段日志里两件事同屏：
+  `relay 就绪（:2096 长轮询能通）` + `relay 轮询失败：HTTP 502`（3 分钟内 170 次）；
+  `注册失败: URLError: handshake operation timed out` ⇒ `★ 未注册`。此前五轮都在换域名 / 换机器 / 调代理。
+- **根因①（hub，502 的唯一来源）**：`cloudflared tunnel --url http://localhost:8787`。Go 把 `localhost`
+  解析成 `::1` 后只拨 IPv6 回环，而 hub 只绑 `127.0.0.1` ⇒ 每条回源 `dial tcp [::1]:8787: refused`，
+  CF 返回 **502**。取证：`127.0.0.1:8787/ping` = 401（hub 活着）、`[::1]:8787` = 连接被拒、
+  经隧道的 10 发并发 = **8×502 / 2×401**、cloudflared 日志 1080 条 `Unable to reach the origin service`、
+  `530` 与 cloudflared `Connection terminated` 同秒。⚠ `curl localhost` 会回落 v4 ⇒ 本机复现不出来。
+- **根因②（节点，永远注册不上）**：`probe_hub` 判 `port-blocked` 后 `RelayChannel` 只改自己的
+  `_args["hub_url"]`，`run()` 算出的 `hub_url` 仍原样喂给 `register()` ⇒ 长轮询在 `:2096`、注册恒打 `:443`
+  （被中间层按 SNI 掐）⇒ `handshake timed out`。
+- **根因③（诊断面）**：`_send` 把 502/504/52x/530 当「应答」——不换路由、还把坏路由记成「上次成功」。
+  同一文件里的预检早就把这些码归成「不通」，两份判据互相矛盾。
+- **裁定**：① 所有 spawn cloudflared 的地方（`dashboard/src/stack/hub.ts` · `specs.ts` ·
+  `remote/rollout_node.py` · `push_tunnel.py` · `push_bootstrap.py`）origin 一律写 `http://127.0.0.1:<port>`，
+  **禁 `localhost`**；② 新增 `RelayChannel.hub_url`（当前地址的唯一真相），`_open_relay` 里一句
+  `hub_url = relay.hub_url or hub_url` 让首注册 / 240s 重注册 / 横幅 / 注销四处全部跟随
+  （**不给三个调用点各包一层**：该文件 LOC=999 正压预算线，且单一真相本就该只有一个赋值点）；
+  ③ `_send` 把网关码按
+  传输失败处理（换路由、不记 route、全崩时死因行带 `server`/`cf-ray`/响应体前 120 字）；
+  ④ 换端口时钉 `direct`（扫描只验过直连那条）。
+- **护栏**：`tests/remote/test_rollout_relay.py` +3（网关码换路由 / 死因行点名 CF / `hub_url` 跟随改写）·
+  `tests/remote/test_rollout_node.py` +1（**整条 `run()`** + 假通道换端口 ⇒ 注册与注销都打 `:2096`）与
+  `_start_cloudflared` 参数断言（`http://127.0.0.1:8443`）· `dashboard/tests/training-multi-course.test.ts`
+  断言 `http://127.0.0.1:<hub>` 且不得出现 `//localhost:`。
+- **真机复测**：新隧道 `:443`/`:2096` 各 6 发并发 **0 个 502**；带 token `/ping` 两端口 `200`；
+  `/relay/dsw/_poll?wait=0` → `{"req": null, "local_port": 8787}`。
+- **被否决**：① 换域名 / 换机器 / 配代理（三个都治不了「回源拨错地址」）；② 让 hub 再绑 `::1`
+  （能救当下，但把「地址该写谁」这条规矩藏起来，Linux 上 `Bun.serve` 只绑 v4 时还会再犯）；
+  ③ 把备用端口扫描改成多路由（扫的是端口是否被掐，路由是另一维，混在一起判词会糊）。
+- **全文** → `docs/nn/remote-transport.md` §168。

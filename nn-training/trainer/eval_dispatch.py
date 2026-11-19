@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import common.codehash
+import common.codehash_ref as codehash_ref
 import common.distribution
 import common.protocol
 import common.weights_client
@@ -399,7 +400,6 @@ class EvalDispatcher:
         # 该清单）。不再比 ping.engineEpoch：该字段已从 /v1/ping 移除（engine_epoch
         # 退为账本记录值），也不再需要「旧 agent 无字段→过渡期放行」的分支——
         # codeHash 是 rollout 门一直都在用的字段。
-        code_hash_local = common.codehash.compute_code_hash()
         alive = []
         # 并行 ping（保序）：串行墙钟 = Σ 每台延迟（两台超时即 ~7s），而节点门每轮
         # 重跑一次；并行 == 最慢一台（同 batch_eval，2026-09-19 审计 B2）。
@@ -407,6 +407,12 @@ class EvalDispatcher:
         # （否则每轮评估都在日志里留一条「ping 失败/超时」，见 `sampler_nodes`）。
         enabled_nodes = common.protocol.sampler_nodes(cfg.get("nodes", []))
         pings = common.distribution.ping_nodes_parallel(enabled_nodes, timeout=status_timeout)
+        # 参考 hash = self 自报的（同 rollout 门，2026-11-15）：零新增请求（复用上面的 pings）。
+        probes = [
+            (str(n.get("id") or n.get("url") or "?"), p)
+            for n, p in zip(enabled_nodes, pings, strict=True)
+        ]
+        code_hash_local = codehash_ref.reference_code_hash(enabled_nodes, probes)
         for n, ping in zip(enabled_nodes, pings, strict=True):
             nid = str(n.get("id") or n.get("url") or "?")
             if ping is None:
@@ -431,6 +437,15 @@ class EvalDispatcher:
                 continue
             # R2 事件 rung：事件课程的局只派给能力位节点（旧 agent 静默跑均匀局混入）。
             # 缺席 = 老课程不查（getattr 缺省 False）。
+            # Hybrid opening：无能力位节点跳过（旧 agent 静默跑 bare 混入）。
+            if bool(getattr(args, "opening_connect", False)) and not ping.get(
+                "openingConnectSupport"
+            ):
+                _log(
+                    f"[eval] node {nid}: hybrid opening eval 需 openingConnectSupport"
+                    f"能力位（旧 agent）—— skipped，任务落本机 local"
+                )
+                continue
             if bool(getattr(args, "decision_events", False)) and not ping.get(
                 "decisionEventsSupport"
             ):
@@ -444,6 +459,43 @@ class EvalDispatcher:
             if int(getattr(args, "decision_k", 10)) != 10 and not ping.get("decisionKSupport"):
                 _log(
                     f"[eval] node {nid}: K≠10 课程 eval 需 decisionKSupport 能力位"
+                    f"（旧 agent）—— skipped，任务落本机 local"
+                )
+                continue
+            # 顶钢空枪门（课程 inference_rules.skip_steel_only_shots）：开启批只派给
+            # 有能力位的节点（旧 agent 静默跑关闭态 = 混批，fail-closed）。
+            if bool(getattr(args, "skip_steel_only_shots", False)) and not ping.get(
+                "skipSteelOnlyShotsSupport"
+            ):
+                _log(
+                    f"[eval] node {nid}: 顶钢空枪门 eval 需 skipSteelOnlyShotsSupport 能力位"
+                    f"（旧 agent）—— skipped，任务落本机 local"
+                )
+                continue
+            # 拆砖免绕路：同上，开启批只派给有能力位的节点。
+            if bool(getattr(args, "break_bricks_on_path", False)) and not ping.get(
+                "breakBricksOnPathSupport"
+            ):
+                _log(
+                    f"[eval] node {nid}: 拆砖 eval 需 breakBricksOnPathSupport 能力位"
+                    f"（旧 agent）—— skipped，任务落本机 local"
+                )
+                continue
+            # B8 通用废射门：同上，开启批只派给有能力位的节点。
+            if bool(getattr(args, "suppress_useless_fire", False)) and not ping.get(
+                "suppressUselessFireSupport"
+            ):
+                _log(
+                    f"[eval] node {nid}: 通用废射门 eval 需 suppressUselessFireSupport 能力位"
+                    f"（旧 agent）—— skipped，任务落本机 local"
+                )
+                continue
+            # B10 预测门：同上。
+            if bool(getattr(args, "suppress_lead_miss_fire", False)) and not ping.get(
+                "suppressLeadMissFireSupport"
+            ):
+                _log(
+                    f"[eval] node {nid}: 预测门 eval 需 suppressLeadMissFireSupport 能力位"
                     f"（旧 agent）—— skipped，任务落本机 local"
                 )
                 continue
@@ -473,7 +525,11 @@ class EvalDispatcher:
                     },
                 )
                 continue
-            base_c = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
+            # 与 rollout 腿同一份口径（2026-11-14）：显式 config 优先，缺省回落
+            # 节点自报 `workers` → `cpus`（见 common.distribution.node_slots）。
+            base_c = common.distribution.node_slots(
+                n.get("concurrency"), ping.get("cpus"), ping.get("workers")
+            )
             # 让位（2026-11-01，docs/nn/runtime-opt.md §39）：节点自报在飞 = 本课 rollout
             # （以及别的腿/课程）正占着的槽。eval 只拿剩下的，不把自己的 concurrency
             # 再加一遍；**不留 floor**（2026-11-03 用户口径「全力保证 rollout」）——

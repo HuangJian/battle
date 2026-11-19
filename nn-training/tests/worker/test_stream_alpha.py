@@ -94,13 +94,49 @@ def test_alpha_never_reads_est() -> None:
     assert drive(a) == drive(b), "est 设 0 / 99999 不得改变 α 的派发序列"
 
 
+def test_alpha_counts_in_flight_games_on_a_wide_pool() -> None:
+    """★ 宽池不许叠派：222 槽的自主云机现场（g5-pilot it74：计划 4–5 seed/关 ⇒ ~140 局，
+    实派 435 局、过采 250051）。
+
+    病在 `_next_alpha` 只看「collected < quota」——槽位一空就问下一局，**在飞的局不算账**，
+    于是 222 个槽位在配额早就够了的情况下还在同一批关上加派，直到最后一局结算才停；
+    多出来的那批（≈ 一整个池宽）全是白烧的算力/墙钟。quota 档有这条闸（`got + 在飞 × est
+    ≥ quota`），α 档当初以「不读 est」为名一起丢了它 —— 但「在飞也算账」不需要 est，
+    用**实测** samples/局就够（`samples_s`，一局结算就有）。
+
+    用例形状 = 生产形状：三个槽位以外的空位一次问到底，结算还是**批量**回来的。
+    """
+    col = _collector()  # 3 关 × quota 300，每局 100 样本 ⇒ 理论 3 局/关 = 9 局
+    slots = 12  # 机器比缺口宽（现场 222 vs 需求 ~140）
+    inflight: list[list[str]] = []
+    while True:
+        while len(inflight) < slots:
+            argv = col.next_game()
+            if not argv:
+                break
+            inflight.append(argv)
+        if not inflight:
+            break
+        for argv in inflight:  # 一批一起结算（宽池的形态：同一拍回来好几局）
+            _settle(col, argv, 100, 101.0 + col._dispatched)
+        inflight = []
+    assert col._dispatched <= 10, (
+        f"宽池叠派：派了 {col._dispatched} 局，配额只需要 9 局"
+        f"（在飞 {col.games}/已结算 {col.settled}）"
+    )
+    assert col.volume()["shortfall_by_stage"] == {}, "省算力不许省成短采"
+
+
 def test_alpha_cap_is_frozen_on_entry() -> None:
     col = _collector()
     cold = [col.next_game() for _ in range(2 * len(STAGES))]
     for i, argv in enumerate(cold):
         assert argv
         _settle(col, argv, 100, 101.0 + i)
-    assert col.next_game()
+    # 冷启动之后的下一局也要**结算**（宽池闸把「在飞」算账 ⇒ 派出去就得跑完，不能悬着）
+    first = col.next_game()
+    assert first
+    _settle(col, first, 100, 101.5)
     caps = {s: col._alpha_cap(s) for s in STAGES}
     for i in range(3):
         argv = col.next_game()

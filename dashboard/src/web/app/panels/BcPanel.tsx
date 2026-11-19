@@ -52,6 +52,10 @@ interface BcEpochsView {
   pointer: BcPointerView
   /** 服务端按完整 epoch 行算好的缺号（150 epoch 课也正确）；旧服务端缺省 ⇒ 面板退回本地算。 */
   missing?: number[]
+  /** 全部已评 `(it, epoch)`（旧服务端没有 ⇒ 退回 `evals` 的最近 20 条）。 */
+  evaluated?: Array<{ it: number; epoch: number }>
+  /** 同课程是否有手动 BC eval 在跑（服务端 busy 键）；旧服务端缺省 = false。 */
+  evalRunning?: boolean
   codeSnapshot: BcCodeSnapshot | null
 }
 
@@ -61,6 +65,8 @@ const EMPTY: BcEpochsView = {
   evalEveryEpochs: null,
   pointer: { epoch: null, total: null },
   missing: [],
+  evaluated: [],
+  evalRunning: false,
   codeSnapshot: null,
 }
 
@@ -76,82 +82,132 @@ function tsTime(ts: number): string {
 /** epoch 行 + 该 epoch 的 eval 总胜率（跨地图按局数加权；无 eval = null）。 */
 interface BcEpochViewRow extends BcEpochRow {
   evalWinRate: number | null
+  /** 该 `(it, epoch)` 是否已有 bc_eval（服务端按全量账本给集合，不按最近 20 条猜）。 */
+  hasEval: boolean
+}
+
+/** 未评 epoch 的 evalA 按钮 / 已评标记（首页简表与完整指标表共用）。 */
+export function BcEvalCell({
+  row,
+  enabled,
+  running,
+  onEval,
+}: {
+  row: { it: number; epoch: number; hasEval?: boolean }
+  enabled: boolean
+  running: boolean
+  onEval: (row: { it: number; epoch: number }) => void
+}) {
+  if (row.hasEval) {
+    return (
+      <span className="tc-muted" title="该 epoch 已有 bc_eval 读数">
+        已评
+      </span>
+    )
+  }
+  if (!enabled) return <span className="tc-muted">—</span>
+  return (
+    <button
+      type="button"
+      className="tc-btn tc-btn--sm"
+      disabled={running}
+      title={`为 it${row.it} ep${row.epoch} 启动 BC 多地图 eval（日志 tmp/<课程>/evalBc.log）`}
+      onClick={() => onEval(row)}
+    >
+      {running ? '…' : 'evalA'}
+    </button>
+  )
 }
 
 /** epoch 指标列（完整指标表 modal 用；首页 6 行简表是同一份列语义的静态展开）。 */
-const EPOCH_COLUMNS: Col<BcEpochViewRow>[] = [
-  {
-    key: 'epoch',
-    label: 'epoch',
-    align: 'num',
-    cell: (r) => <b>{r.epoch}</b>,
-    sortValue: (r) => r.epoch,
-  },
-  {
-    key: 'it',
-    label: 'it',
-    align: 'num',
-    cell: (r) => r.it,
-    sortValue: (r) => r.it,
-  },
-  {
-    key: 'train_loss',
-    label: 'train loss',
-    align: 'num',
-    cell: (r) => fmt(r.trainLoss),
-    sortValue: (r) => r.trainLoss ?? -1,
-  },
-  {
-    key: 'val_loss',
-    label: 'val loss',
-    align: 'num',
-    cell: (r) => fmt(r.valLoss),
-    sortValue: (r) => r.valLoss ?? -1,
-  },
-  {
-    key: 'move_acc',
-    label: 'move acc',
-    align: 'num',
-    cell: (r) => fmt(r.moveAcc, 3),
-    sortValue: (r) => r.moveAcc ?? -1,
-  },
-  {
-    key: 'fire_acc',
-    label: 'fire acc',
-    align: 'num',
-    cell: (r) => fmt(r.fireAcc, 3),
-    sortValue: (r) => r.fireAcc ?? -1,
-  },
-  {
-    key: 'hold_acc',
-    label: 'hold acc',
-    align: 'num',
-    hiddenByDefault: true,
-    cell: (r) => fmt(r.holdAcc, 3),
-    sortValue: (r) => r.holdAcc ?? -1,
-  },
-  {
-    key: 'eval_win',
-    label: 'eval win',
-    align: 'num',
-    cell: (r) => fmt(r.evalWinRate, 3),
-    sortValue: (r) => r.evalWinRate ?? -1,
-  },
-  {
-    key: 'lr',
-    label: 'lr',
-    align: 'num',
-    hiddenByDefault: true,
-    cell: (r) => (r.lr === null ? '—' : r.lr.toExponential(2)),
-    sortValue: (r) => r.lr ?? -1,
-  },
-  {
-    key: 'ts',
-    label: '时间',
-    cell: (r) => tsTime(r.ts),
-    sortValue: (r) => r.ts,
-  },
-]
+function epochColumns(
+  onEval: (row: { it: number; epoch: number }) => void,
+  opts: { evalEnabled: boolean; evalRunning: boolean },
+): Col<BcEpochViewRow>[] {
+  return [
+    {
+      key: 'epoch',
+      label: 'epoch',
+      align: 'num',
+      cell: (r) => <b>{r.epoch}</b>,
+      sortValue: (r) => r.epoch,
+    },
+    {
+      key: 'it',
+      label: 'it',
+      align: 'num',
+      cell: (r) => r.it,
+      sortValue: (r) => r.it,
+    },
+    {
+      key: 'train_loss',
+      label: 'train loss',
+      align: 'num',
+      cell: (r) => fmt(r.trainLoss),
+      sortValue: (r) => r.trainLoss ?? -1,
+    },
+    {
+      key: 'val_loss',
+      label: 'val loss',
+      align: 'num',
+      cell: (r) => fmt(r.valLoss),
+      sortValue: (r) => r.valLoss ?? -1,
+    },
+    {
+      key: 'move_acc',
+      label: 'move acc',
+      align: 'num',
+      cell: (r) => fmt(r.moveAcc, 3),
+      sortValue: (r) => r.moveAcc ?? -1,
+    },
+    {
+      key: 'fire_acc',
+      label: 'fire acc',
+      align: 'num',
+      cell: (r) => fmt(r.fireAcc, 3),
+      sortValue: (r) => r.fireAcc ?? -1,
+    },
+    {
+      key: 'hold_acc',
+      label: 'hold acc',
+      align: 'num',
+      hiddenByDefault: true,
+      cell: (r) => fmt(r.holdAcc, 3),
+      sortValue: (r) => r.holdAcc ?? -1,
+    },
+    {
+      key: 'eval_win',
+      label: 'eval win',
+      align: 'num',
+      cell: (r) => fmt(r.evalWinRate, 3),
+      sortValue: (r) => r.evalWinRate ?? -1,
+    },
+    {
+      key: 'lr',
+      label: 'lr',
+      align: 'num',
+      hiddenByDefault: true,
+      cell: (r) => (r.lr === null ? '—' : r.lr.toExponential(2)),
+      sortValue: (r) => r.lr ?? -1,
+    },
+    {
+      key: 'eval_action',
+      label: 'eval',
+      align: 'num',
+      cell: (r) => (
+        <BcEvalCell row={r} enabled={opts.evalEnabled} running={opts.evalRunning} onEval={onEval} />
+      ),
+      sortValue: (r) => (r.hasEval ? 1 : 0),
+    },
+    {
+      key: 'ts',
+      label: '时间',
+      cell: (r) => tsTime(r.ts),
+      sortValue: (r) => r.ts,
+    },
+  ]
+}
+
 export function BcPanel({ course, enabled = true }: BcPanelProps) {
   const [view, setView] = useState<BcEpochsView>(EMPTY)
   const [error, setError] = useState<string | null>(null)
@@ -162,6 +218,7 @@ export function BcPanel({ course, enabled = true }: BcPanelProps) {
   const [releaseMsg, setReleaseMsg] = useState('')
   const [rebuilding, setRebuilding] = useState(false)
   const [snapshotMsg, setSnapshotMsg] = useState('')
+  const [evalMsg, setEvalMsg] = useState('')
 
   /** #8：清空课程级 BC 续训索引（需要该课先暂停；动作层再校验一次）。 */
   const onClearProgress = async (): Promise<void> => {
@@ -238,9 +295,15 @@ export function BcPanel({ course, enabled = true }: BcPanelProps) {
 
   // 该 epoch 的 eval 胜率（表列与趋势图共用一份聚合口径）。
   const evalWin = evalWinByEpoch(evals)
+  const evaluatedKeys = new Set(
+    (view.evaluated ?? evals.map((e) => ({ it: e.it, epoch: e.epoch }))).map(
+      (e) => `${e.it}:${e.epoch}`,
+    ),
+  )
   const viewRows: BcEpochViewRow[] = epochs.map((e) => ({
     ...e,
     evalWinRate: evalWin.get(e.epoch) ?? null,
+    hasEval: evaluatedKeys.has(`${e.it}:${e.epoch}`),
   }))
   // 最新 6 个 epoch（按**全局 epoch** 倒序；重启后 it 会重置，不能当新旧的判据）。
   const latest = [...viewRows].sort((a, b) => b.epoch - a.epoch).slice(0, 6)
@@ -250,6 +313,25 @@ export function BcPanel({ course, enabled = true }: BcPanelProps) {
   const evalFlat = evals.flatMap((e) =>
     (e.levels ?? []).map((l) => ({ ...l, epoch: e.epoch, it: e.it, wver: e.wver, ts: e.ts })),
   )
+
+  // 自动 eval 关闭时不给按钮（CLI 支持手动，但界面不把「eval 关闭」误演成可点）。
+  const evalEnabled = view.evalEveryEpochs !== null && view.evalEveryEpochs > 0
+  const onEvalEpoch = async (row: { it: number; epoch: number }): Promise<void> => {
+    if (!course || view.evalRunning) return
+    setEvalMsg(`it${row.it} ep${row.epoch} eval 启动中…`)
+    const r = await postAction('evalBcEpoch', {
+      course,
+      it: row.it,
+      epoch: row.epoch,
+      requester: 'bc-panel',
+    })
+    setEvalMsg(r.message)
+    if (r.ok) void refresh().catch(() => undefined)
+  }
+  const columns = epochColumns(onEvalEpoch, {
+    evalEnabled,
+    evalRunning: !!view.evalRunning,
+  })
 
   return (
     <div className="tc-card tc-card--pad">
@@ -336,6 +418,7 @@ export function BcPanel({ course, enabled = true }: BcPanelProps) {
       {releaseMsg ? <p className="tc-muted tc-small">{releaseMsg}</p> : null}
       {clearMsg ? <p className="tc-muted tc-small">{clearMsg}</p> : null}
       {snapshotMsg ? <p className="tc-muted tc-small">{snapshotMsg}</p> : null}
+      {evalMsg ? <p className="tc-muted tc-small">{evalMsg}</p> : null}
 
       {epochs.length === 0 ? (
         <p className="tc-muted tc-small">
@@ -356,6 +439,7 @@ export function BcPanel({ course, enabled = true }: BcPanelProps) {
               <th className="tc-num">fire acc</th>
               <th className="tc-num">hold acc</th>
               <th className="tc-num">eval win</th>
+              <th className="tc-num">eval</th>
               <th className="tc-num">lr</th>
             </tr>
           </thead>
@@ -373,6 +457,14 @@ export function BcPanel({ course, enabled = true }: BcPanelProps) {
                 <td className="tc-num">{fmt(r.fireAcc, 3)}</td>
                 <td className="tc-num">{fmt(r.holdAcc, 3)}</td>
                 <td className="tc-num">{fmt(r.evalWinRate, 3)}</td>
+                <td className="tc-num">
+                  <BcEvalCell
+                    row={r}
+                    enabled={evalEnabled}
+                    running={!!view.evalRunning}
+                    onEval={onEvalEpoch}
+                  />
+                </td>
                 <td className="tc-num">{r.lr === null ? '—' : r.lr.toExponential(2)}</td>
               </tr>
             ))}
@@ -407,7 +499,7 @@ export function BcPanel({ course, enabled = true }: BcPanelProps) {
               </button>
             </div>
             <DataTable<BcEpochViewRow>
-              columns={EPOCH_COLUMNS}
+              columns={columns}
               rows={viewRows}
               rowKey={(r) => `${r.it}-${r.epoch}`}
               initialSortKey="epoch"

@@ -77,6 +77,14 @@ import { buildModelFromText } from '../../src/nn/infer'
 import { MOVE_DIM, decodeMove, encodeMove } from '../../src/nn/action-space'
 import { MASK_V6_DIM, decodeMove4, encodeMove4 } from '../../src/nn/action-space-v6'
 import { featuresEngine } from '../../src/nn/conv/conv'
+import { OpeningController } from '../../src/nn/opening-controller'
+import { encodeOpeningAction } from '../../src/nn/opening-input'
+import { InputRecorder } from '../../src/replay/InputRecorder'
+import { type ReplayType, replayTypeFromOutcome } from '../../src/replay/types'
+import { serializeReplayFile } from '../../src/replay/file'
+import { computeCodeHash } from '../agent/codehash-files'
+import { evaluateCorridor } from '../../src/nn/opening-corridor'
+import { computePlayer2SpawnCol } from '../../src/utils/helpers'
 import { dodgeL0 } from '../../src/nn/dodge-l0'
 import {
   DANGER_HP_THRESHOLD,
@@ -137,7 +145,7 @@ import { restoreWorld } from '../../src/snapshot/WorldSerializer'
 import type { WorldSnapshot } from '../../src/snapshot/types'
 import { worldTickHash } from '../../src/replay/tickHash'
 import { basename } from 'path'
-import { buildPack } from './pack-container'
+import { buildPack, serviceElapsedSec } from './pack-container'
 import { runServe } from './serve-loop'
 import {
   scoreRun,
@@ -199,6 +207,30 @@ export const RL_SHARD_FILES = [
  * 应该以事实为准（并且加载端会发现 mask 宽度对不上而响亮报错）。
  */
 export const RL_SHARD_FILES_V6 = [...RL_SHARD_FILES, 'a_hold.npy', 'lp_hold.npy'] as const
+
+/**
+ * Hybrid opening 的**可选**追加文件：仅 `--opening-connect` 时落盘。
+ * 1 = NN 控制，0 = 开场 controller 控制（PPO 在这些样本上不算 policy/entropy loss）。
+ * 缺席 = 老行为逐字节不变；加载端按文件存在性判据，缺失时补全 1。
+ */
+export const RL_SHARD_FILES_OPENING = [...RL_SHARD_FILES, 'policy_mask.npy'] as const
+
+/**
+ * replay 格式（`--corpus-fmt=replay`）的 shard 成员：不产 obs/scalars/extra
+ * （worker 从 replay 重建），加 replay.json + replay_meta.json。
+ * 顺序 = `writeRlShard` 的落盘顺序（标签 → replay），与内存 `--pack-memory` 路径一致。
+ */
+const OBS_SHARD_FILES: ReadonlySet<string> = new Set(['obs.npy', 'scalars.npy', 'extra.npy'])
+export const RL_SHARD_REPLAY_EXTRA = ['replay.json', 'replay_meta.json'] as const
+export function replayShardFileNames(names: readonly string[]): string[] {
+  return [...names.filter((n) => !OBS_SHARD_FILES.has(n)), ...RL_SHARD_REPLAY_EXTRA]
+}
+
+/** 模块级 CLI 开关（runOne / packOneShard / main 共用；默认关 = 老行为逐字节不变）。 */
+let openingConnect = false
+/** --opening-all：A/B 的全局臂；默认 false = 条件接管（只 strict 不连通的关）。 */
+let openingAll = process.env.OPENING_ALL === '1'
+export const RL_SHARD_FILES_V6_OPENING = [...RL_SHARD_FILES_V6, 'policy_mask.npy'] as const
 
 // ---- 41 维指标列序（MUST mirror `nn-training/biz/reward_library.py::METRICS`）----
 // 改任一侧必须同步另一侧 + manifest metrics_version 不变则任何 shape[0] 下游
@@ -995,6 +1027,8 @@ export interface ShardData {
   metrics: number[][]
   done: number[]
   mask: number[]
+  /** Hybrid opening：每决策步 1=NN / 0=controller（可选，缺省视为全 1）。 */
+  policyMask?: number[]
   n: number
 }
 
@@ -1014,6 +1048,7 @@ function newShard(v6 = false): ShardData {
     metrics: [],
     done: [],
     mask: [],
+    policyMask: [],
     n: 0,
   }
 }
@@ -1126,6 +1161,38 @@ export function applyInitSnapshot(
   if (playerLevelOverride !== null) world.playerLevel = playerLevelOverride
 }
 
+export interface ReplayArtifact {
+  /** `.replay` 文件正文（JSON 字符串；磁盘/内存共用同一份字节）。 */
+  file: string
+  /** `replay_meta.json`（诊断/闸门用；不参与 frames 解码）。 */
+  meta: Record<string, unknown>
+}
+
+/** rollout 侧 TS 代码身份（惰性；同一进程只算一次，失败退空串不阻断导出）。 */
+let replayCodeShaMemo: string | null = null
+/**
+ * `--code-sha`：launcher 已在**同一份树**上算过 codeHash（`worker/cmd.py::local_code_sha`，
+ * 与 `computeCodeHash()` 是「同字节同哈希」的双语契约）⇒ 直接采用，跳过整棵树的遍历。
+ *
+ * 为什么要这个口子：`computeCodeHash()` 实测 13.5 ms/进程（180 个文件 / 2.67 MB；sha256 本身
+ * ≈0 ms，成本全在 180 次 open+read 的 syscall 上），而它是**每进程常量** —— 池化腿每个 worker
+ * 付一次、逐局 spawn 的腿每局付一次。给了就用 launcher 那份；没给（直跑 CLI / `runOneBench` /
+ * 节点腿）照旧现算。每次 `main()` 都会重设本变量 ⇒ `serve-any.ts` 长驻进程不会把上一局的
+ * 覆盖值带到下一局。
+ */
+let replayCodeShaOverride = ''
+function replayCodeSha(): string {
+  if (replayCodeShaOverride) return replayCodeShaOverride
+  if (replayCodeShaMemo === null) {
+    try {
+      replayCodeShaMemo = computeCodeHash()
+    } catch {
+      replayCodeShaMemo = ''
+    }
+  }
+  return replayCodeShaMemo
+}
+
 interface RunResult {
   shard: ShardData
   /** 起始分布注入的事实（未注入 = 空串 / 0 / null；manifest 只在注入时追加这三个字段）。 */
@@ -1195,6 +1262,8 @@ interface RunResult {
   startLives: number
   puGotTank: number
   puGotOther: number
+  /** `--corpus-fmt=replay` 时的逐局 replay 产物；full = null。 */
+  replay: ReplayArtifact | null
 }
 
 /** dodge 模式解析（卡 A3）：arena → l0；真实关 → off（既有 rollout 逐字节不变）。 */
@@ -1255,6 +1324,8 @@ function runOne(
    *  行为策略是 δ(a)，正确权重应为 π_new(a)，而 `engine.py` 用的是 π_new/π_old
    *  （相差 1/π_old(a)）。首 epoch ratio=1 只说明数值自洽，不说明权重正确。 */
   teacherArgmax = false,
+  /** `--corpus-fmt=replay`：逐局录制 replay（默认 full = 旧 shard 逐字节不变）。 */
+  corpusFmt: 'full' | 'replay' = 'full',
 ): RunResult {
   const world = new World()
   world.rng.reseed(seed)
@@ -1313,6 +1384,59 @@ function runOne(
     }
   }
   scripted.reset()
+  // Hybrid opening（--opening-connect）：与评估链同一个 controller；部署口径 = 全局出袋。
+  // 只在开局接管，done 之后本局不再触发；NN 仍照常编码/采样/记 logprob（mask=0 不算 loss）。
+  // 默认条件接管（用户 2026-11-15 拍板）：strict 已连通的关不抢方向盘，让 NN 自己学。
+  // --opening-all / OPENING_ALL=1 只作 A/B 的全局臂。
+  let openingWanted = openingConnect
+  if (openingWanted && !openingAll) {
+    const sp = world.playerSpawnPoint
+    const p1 = { col: sp.col, row: sp.row }
+    const p2 = { col: computePlayer2SpawnCol(sp.col), row: sp.row }
+    openingWanted = !evaluateCorridor(world.tileMap, p1, p2).connected
+  }
+  const openingCtrl = openingWanted ? new OpeningController({ exitPocket: true }) : null
+  let openingDone = false
+  /** replay_meta 的 opening 审计面（D4）：done 的 tick / abort 原因 / 最终 phase。 */
+  let openingDoneTick: number | null = null
+  let openingAbortReason: string | null = null
+  let openingPhase: string | null = null
+  // P1（plan/replay-corpus.plan.md）：replay 格式逐局录制输入；full 不创建 recorder，
+  // 不 clone 世界、不算 tickHash ⇒ full 路径内存/字节不变。
+  const recorder = corpusFmt === 'replay' ? new InputRecorder() : null
+  const obsHasher = recorder ? new Bun.CryptoHasher('sha256') : null
+  /**
+   * replay 格式的 obs 直写缓冲：决策 obs 按 64 样本一块连续落盘，块满即喂哈希器、尾块局末补齐
+   * （D4 规格 = `sha256(concat(obs_i))` ⇒ 分块 update 与逐决策 / 整局一次 update 都字节等价）。
+   *
+   * 为什么要有它（2026-11-17 profile，678 决策 / 6771 tick 的局）：旧写法每决策
+   * `encoder.obs.slice()`（51 KB 拷贝，实测 4.2 ms/局）+ 一次 `hasher.update`（678 次原生
+   * 调用合计 4.0 ms/局，而整块一次 update 只要 3.8 ms）。改成直写后两项都消失，只剩
+   * 678 × `.set()` ≈ 1.1 ms/局。full 路径不分配（`obsFlat = null`，旧行为逐字节不变）。
+   *
+   * **固定块**（64 样本，≈735 KB）而不是整局一块：`max_ticks` 拉到 36k 时整局缓冲 = 41 MB/局，
+   * 手机/小内存节点 × 多个并发 worker 会顶到 GB 级；分块后内存有界（块满即喂哈希器，
+   * 顺序仍是决策序，与一次 update 字节等价）。
+   */
+  const obsStride = OBS_CHANNELS * BOARD * BOARD
+  /** 每次哈希的决策样本数（64 × 11,492 B ≈ 735 KB/块）。 */
+  const OBS_HASH_CHUNK = 64
+  const obsEstSamples = Math.max(1, Math.ceil(Math.max(0, maxTicks - initTick) / decisionK) + 2)
+  let obsFlat: Uint8Array | null = obsHasher
+    ? new Uint8Array(Math.min(OBS_HASH_CHUNK, obsEstSamples) * obsStride)
+    : null
+  let obsSamples = 0
+  /**
+   * replay 的 obsHash（D4 = `sha256(concat(obs_i))`）：满块已在决策拍增量喂过，这里只补尾块
+   * （不足 64 样本的那一段）再取摘要 —— 与「整局一块一次 update」逐字节等价。
+   */
+  const obsHashHex = (): string | null => {
+    if (!obsHasher || !obsFlat) return null
+    const tail = obsSamples % OBS_HASH_CHUNK
+    if (tail > 0) obsHasher.update(obsFlat.subarray(0, tail * obsStride))
+    return `sha256:${obsHasher.digest('hex')}`
+  }
+  recorder?.startNew(world)
   // R2 决策门（唯一实现）：逐 tick 喂（事件模式要沿检测 + 最小间隔闸）。
   const gateCfg = createDecisionGateConfig(decisionEvents, decisionK)
   const gate = createDecisionGateState()
@@ -1486,9 +1610,10 @@ function runOne(
   }
 
   let pending: {
-    obs: Uint8Array
-    sc: Float32Array
-    ex: Float32Array
+    /** full 才有（replay 的 obs 已直写进 `obsFlat`，scaler/extra 无人消费）。 */
+    obs?: Uint8Array
+    sc?: Float32Array
+    ex?: Float32Array
     aMove: number
     aFire: number
     lpMove: number
@@ -1498,10 +1623,16 @@ function runOne(
     lpHold?: number
     value: number
     mask: number[]
+    /** per-decision：1 = NN 控制，0 = 开场 controller 控制。 */
+    policyMask: number
   } | null = null
   let t = initTick // 游戏时钟继续走：cut 吃掉 T（max_ticks 仍对游戏时钟算）
   let outcome = 'timeout'
   let decisionTicks = 0 // 决策步数（K 间隔；事件模式下含事件步——分布看 decisionReadout）
+  /** replay_meta 用：事件模式下决策 tick 不是均匀 K，必须显式记录。 */
+  const decisionTickList: number[] = []
+  /** P1 录制开销读数（只 replay 格式计时；full = 0，零开销）。 */
+  let recordMs = 0
   let dodgeTicks = 0 // L0/保底层覆盖采样动作的决策 tick 数（§3.5 覆盖率口径）
 
   // 每决策步推一行 + 终局再推一行 ⇒ shard.metrics 恒为 [N+1] 行、每行 METRICS_DIM 列
@@ -1510,9 +1641,13 @@ function runOne(
 
   const flushPending = (term: boolean): void => {
     if (!pending) return
-    shard.obs.push(pending.obs)
-    shard.scalars.push(pending.sc)
-    shard.extra.push(pending.ex)
+    // replay 格式不保留 obs/scalars/extra（worker 用 replay 重建）；full 逐字节不变。
+    // replay 的 obsHash 在局末对 `obsFlat` 一次算（不再逐决策 update）。
+    if (corpusFmt === 'full' && pending.obs && pending.sc && pending.ex) {
+      shard.obs.push(pending.obs)
+      shard.scalars.push(pending.sc)
+      shard.extra.push(pending.ex)
+    }
     shard.aMove.push(pending.aMove)
     shard.aFire.push(pending.aFire)
     shard.lpMove.push(pending.lpMove)
@@ -1523,6 +1658,8 @@ function runOne(
       shard.lpHold.push(pending.lpHold ?? 0)
     }
     shard.value.push(pending.value)
+    // 只有真接管本局时才落 policy_mask（条件接管的未接管关保持老 shard 格式）。
+    if (openingCtrl) shard.policyMask!.push(pending.policyMask)
     shard.done.push(term ? 1 : 0)
     const mDim = maskDimFor(shard.v6)
     for (let j = 0; j < mDim; j++) shard.mask.push(pending.mask[j])
@@ -1532,9 +1669,20 @@ function runOne(
 
   while (t < maxTicks) {
     if (decisionDue(t, world, gate, gateCfg)) {
+      // full 路径不分配（旧行为零额外内存）；replay 才需要显式决策 tick 列表。
+      // ★ 相对 replay 帧序号（state_init 从 initTick 起录）：转换器按 frames[0..] 遍历，
+      //   绝对游戏时钟会让交棒段的决策 tick 全部错位。
+      if (corpusFmt === 'replay') decisionTickList.push(t - initTick)
       // §368 提速③：obs 只在决策 tick 编码（原本每 tick 都编码，占整局 1.8–2.3%；
       // 非决策 tick 的编码结果无人消费——obs 只在下面 forward 与 pending 快照里用）。
       encoder.encode(world)
+      if (obsFlat && obsHasher) {
+        // replay：直写进固定块（`set` 11.5 KB ≈ 1.7 µs/决策）；块满即喂哈希器。
+        const slot = obsSamples % OBS_HASH_CHUNK
+        obsFlat.set(encoder.obs, slot * obsStride)
+        obsSamples++
+        if (slot === OBS_HASH_CHUNK - 1) obsHasher.update(obsFlat)
+      }
       model.forward(encoder.obs, encoder.scalars, encoder.extra)
       // 掩码宽度随权重走（legacy 7 / v6 9）；`computeMasks` 的 v6 分支返回
       // move4/fire3/hold2（`obs-encoder.ts:848-858`），legacy 返回 move5/fire2。
@@ -1585,9 +1733,14 @@ function runOne(
       if (pending) flushPending(false)
 
       pending = {
-        obs: encoder.obs.slice(),
-        sc: encoder.scalars.slice(),
-        ex: encoder.extra.slice(),
+        // full 才拷三张张量（旧行为零变化）；replay 的 obs 直写进 `obsFlat`，另两张无人读。
+        ...(corpusFmt === 'full'
+          ? {
+              obs: encoder.obs.slice(),
+              sc: encoder.scalars.slice(),
+              ex: encoder.extra.slice(),
+            }
+          : {}),
         aMove,
         aFire: fr.idx,
         lpMove,
@@ -1595,6 +1748,8 @@ function runOne(
         value,
         // v6：掩码 = move4 + fire3 + hold2（9 位）；legacy = move5 + fire2（7 位）。
         mask: v6 ? [...masks.move, ...masks.fire, ...masks.hold] : [...masks.move, ...masks.fire],
+        // per-decision：controller 接管的样本不算 policy/entropy loss。
+        policyMask: openingCtrl && !openingDone ? 0 : 1,
         ...(hd !== null ? { aHold: hd.idx, lpHold: hd.logp } : {}),
       }
       scripted.setAction(aMove, fr.idx, hd ? hd.idx : 0)
@@ -1616,7 +1771,28 @@ function runOne(
     // metrics v13：本 tick 前的玩家位置 —— `wallPressTicks` 唯一判据（px，不是格）。
     const pxBefore = world.player?.x ?? -1
     const pyBefore = world.player?.y ?? -1
+    // controller 每 tick 给动作（NN 的决策仍每 K 拍跑一次并被 held 覆盖）。
+    if (openingCtrl && !openingDone) {
+      const os = openingCtrl.step(world)
+      const act = os.action
+      // plan/opening-null-move：v6 null → 当前已提交朝向 + hold（原地不动）。
+      const currentDir = world.player?.prevMoveDir ?? world.player?.dir ?? 'up'
+      const sa = encodeOpeningAction(act, v6, currentDir)
+      scripted.setAction(sa.move, sa.fire, sa.hold)
+      openingPhase = os.phase
+      if (!openingDone && os.done) {
+        openingDone = true
+        openingDoneTick = t
+        openingAbortReason = os.abortReason
+      }
+    }
     sim.tick()
+    // InputRecorder 契约：post-tick、endFrame 前读输入（GameLoop 同序）。
+    if (recorder) {
+      const recT0 = performance.now()
+      recorder.recordFrame(scripted)
+      recordMs += performance.now() - recT0
+    }
     scripted.endFrame()
     t++
 
@@ -1965,8 +2141,87 @@ function runOne(
   for (const k of Object.keys(scored.dims) as DimensionKey[]) {
     dims[k] = { value: scored.dims[k].value, raw: scored.dims[k].raw }
   }
+  // P1：replay 产物在局末统一落成同一份文本；full = null（旧路径零变化）。
+  const rec = recorder?.finalize() ?? null
+  const stageName = String((stage as { name?: unknown })?.name ?? stageIdx)
+  const replayStage = customStage || isArenaId(stageIdx) ? 0 : stageIdx
+  // 终局四态 → ReplayType 的唯一映射（历史 bug：此处曾写 `outcome === 'gameover'`，
+  // 而 'gameover' 不是 outcome 取值 ⇒ lives_exhausted 局全被写成 'timeout'，
+  // 转换器 `final status died != recorded timeout` 硬失败。见 src/replay/types.ts 注释）。
+  const replayStatus: ReplayType = replayTypeFromOutcome(outcome)
+  const replay: ReplayArtifact | null = rec
+    ? {
+        file: serializeReplayFile({
+          source: 'sim',
+          seed,
+          sim: {
+            seed,
+            difficulty,
+            stageIndex: replayStage,
+            stageName,
+            outcome,
+            status: replayStatus,
+            maxTicks,
+          },
+          finalState: {
+            score: gatedScore,
+            lives: world.lives,
+            killCount: world.killCount,
+            ticks: t,
+          },
+          initialSnapshot: rec.snapshot,
+          frames: rec.frames,
+          totalTicks: rec.tickCount,
+          metadata: {
+            stage: replayStage,
+            stageName,
+            difficulty,
+            lives: world.lives,
+            playerLevel: world.playerLevel,
+            score: gatedScore,
+            killCount: world.killCount,
+            enemiesTotal: tel.enemyTotal,
+            playTimeMs: rec.tickCount * (1000 / 60),
+          },
+          tickHashes: rec.tickHashes,
+        }),
+        meta: {
+          version: 1,
+          corpus_fmt: 'replay',
+          stage: replayStage,
+          stageName,
+          seed,
+          difficulty,
+          k: decisionK,
+          /** replay 帧数（不是游戏时钟；state_init 时游戏时钟 = initTick + ticks）。 */
+          ticks: rec.tickCount,
+          decisionTicks,
+          decisionTicksList: decisionTickList,
+          nSamples: shard.n,
+          obsHash: obsHashHex(),
+          tickHashes: rec.tickHashes.length,
+          /** P1 录制开销（recordFrame 含每 100 tick 的 worldTickHash）；full 路径不存在。 */
+          recordMs: +recordMs.toFixed(1),
+          opening: {
+            connect: openingConnect,
+            all: openingAll,
+            wanted: openingWanted,
+            done: openingDone,
+            doneTick: openingDoneTick,
+            abortReason: openingAbortReason,
+            phase: openingPhase,
+          },
+          /** rollout 侧 TS 代码身份（D4；converter 用它判定「重建端代码是否同源」）。
+           * 有 `--code-sha` 时逐字符等于该值（launcher 同一份树现算），否则本进程现算。 */
+          codeSha: replayCodeSha(),
+          initTick,
+        },
+      }
+    : null
+  if (replay) replay.meta.bytes = Buffer.byteLength(replay.file, 'utf8')
   return {
     shard,
+    replay,
     initSnapshot: initSnapshotName,
     initTick,
     initCounters,
@@ -2034,24 +2289,48 @@ function visitedCellsAdd(set: Set<number>, col: number, row: number): void {
   set.add(row * GRID + col)
 }
 
-export function writeRlShard(dir: string, d: ShardData, manifest: unknown): void {
+export function writeRlShard(
+  dir: string,
+  d: ShardData,
+  manifest: unknown,
+  replay: ReplayArtifact | null = null,
+  corpusFmt: 'full' | 'replay' = 'full',
+): void {
   mkdirSync(dir, { recursive: true })
-  for (const { name, data } of shardNpyEntries(d)) {
+  for (const { name, data } of shardNpyEntries(d, corpusFmt)) {
     writeFileSync(`${dir}/${name}`, data)
+  }
+  if (replay) {
+    for (const { name, data } of replayEntries(replay)) writeFileSync(`${dir}/${name}`, data)
   }
   writeFileSync(`${dir}/manifest.json`, JSON.stringify(manifest, null, 2))
 }
 
-/** 局末 shard → 内存 npy 字节（与 writeRlShard 同布局；sampler 热路径 / perf 对比用）。 */
-export function shardNpyEntries(d: ShardData): Array<{ name: string; data: Buffer }> {
+/** replay 的两个 shard 成员（磁盘/内存同一份字节；P1 零落盘入口复用）。 */
+export function replayEntries(replay: ReplayArtifact): Array<{ name: string; data: Buffer }> {
+  return [
+    { name: 'replay.json', data: Buffer.from(replay.file, 'utf8') },
+    { name: 'replay_meta.json', data: Buffer.from(JSON.stringify(replay.meta, null, 2), 'utf8') },
+  ]
+}
+
+/**
+ * 局末 shard → 内存 npy 字节（与 writeRlShard 同布局；sampler 热路径 / perf 对比用）。
+ * `corpusFmt='replay'`：不产 obs/scalars/extra（worker 从 replay 重建），其余成员与 full 同字节。
+ */
+export function shardNpyEntries(
+  d: ShardData,
+  corpusFmt: 'full' | 'replay' = 'full',
+): Array<{ name: string; data: Buffer }> {
   const N = d.n
   if (N === 0) return []
   if (d.metrics.length !== N + 1) {
     throw new Error(`metrics row count ${d.metrics.length} != n+1=${N + 1} —— 指标行失配，拒绝打包`)
   }
-  const obs = new Uint8Array(N * OBS_CHANNELS * BOARD * BOARD)
-  const scalars = new Float32Array(N * SCALAR_DIM)
-  const extra = new Float32Array(N * POLICY_EXTRA_DIM)
+  const withObs = corpusFmt === 'full'
+  const obs = withObs ? new Uint8Array(N * OBS_CHANNELS * BOARD * BOARD) : null
+  const scalars = withObs ? new Float32Array(N * SCALAR_DIM) : null
+  const extra = withObs ? new Float32Array(N * POLICY_EXTRA_DIM) : null
   const aMove = new Uint8Array(N)
   const aFire = new Uint8Array(N)
   // v6：第三头的动作与 logp（legacy shard 不落这两个文件 —— 消费方按文件存在性判 v6）。
@@ -2073,9 +2352,11 @@ export function shardNpyEntries(d: ShardData): Array<{ name: string; data: Buffe
   const maskDim = maskDimFor(v6)
   const mask = new Uint8Array(N * maskDim)
   for (let i = 0; i < N; i++) {
-    obs.set(d.obs[i], i * OBS_CHANNELS * BOARD * BOARD)
-    scalars.set(d.scalars[i], i * SCALAR_DIM)
-    extra.set(d.extra[i], i * POLICY_EXTRA_DIM)
+    if (obs && scalars && extra) {
+      obs.set(d.obs[i], i * OBS_CHANNELS * BOARD * BOARD)
+      scalars.set(d.scalars[i], i * SCALAR_DIM)
+      extra.set(d.extra[i], i * POLICY_EXTRA_DIM)
+    }
     aMove[i] = d.aMove[i]
     aFire[i] = d.aFire[i]
     if (aHold && lpHold) {
@@ -2089,12 +2370,22 @@ export function shardNpyEntries(d: ShardData): Array<{ name: string; data: Buffe
     for (let j = 0; j < maskDim; j++) mask[i * maskDim + j] = d.mask[i * maskDim + j]
   }
   for (let i = 0; i <= N; i++) {
-    metrics.set(d.metrics[i], i * METRICS_DIM)
+    // ★ 2026-11-17（payload 瘦身 B，docs/nn/remote-transport.md §154 ⑤）：metrics 填成
+    //   **列主序**（元素 (i,j) 在 `i + j*rows`），随 `npyBytes(..., 'F')` 落盘。
+    //   90 列计数器在列方向几乎不变、行方向隔了 360 B ⇒ 行主序让 deflate 只能拿 13×，
+    //   列主序拿 20×（gz6 实测 19,032 → 14,403 B）。numpy 按头里的 `fortran_order` 还原
+    //   成同一逻辑数组（shape/dtype 不变），**读侧零改动**。
+    const row = d.metrics[i]
+    for (let j = 0; j < METRICS_DIM; j++) metrics[j * (N + 1) + i] = row[j]
   }
   const out = [
-    { name: 'obs.npy', data: npyBytes(obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1') },
-    { name: 'scalars.npy', data: npyBytes(scalars, [N, SCALAR_DIM], 'f4') },
-    { name: 'extra.npy', data: npyBytes(extra, [N, POLICY_EXTRA_DIM], 'f4') },
+    ...(obs && scalars && extra
+      ? [
+          { name: 'obs.npy', data: npyBytes(obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1') },
+          { name: 'scalars.npy', data: npyBytes(scalars, [N, SCALAR_DIM], 'f4') },
+          { name: 'extra.npy', data: npyBytes(extra, [N, POLICY_EXTRA_DIM], 'f4') },
+        ]
+      : []),
     { name: 'a_move.npy', data: npyBytes(aMove, [N], 'u1') },
     { name: 'a_fire.npy', data: npyBytes(aFire, [N], 'u1') },
     { name: 'lp_move.npy', data: npyBytes(lpMove, [N], 'f4') },
@@ -2102,9 +2393,19 @@ export function shardNpyEntries(d: ShardData): Array<{ name: string; data: Buffe
     { name: 'value.npy', data: npyBytes(value, [N], 'f4') },
     // ★ 2026-10-26：`'f8'` → `'f4'`（payload 瘦身 A）。79 列全是整型计数器，f4 精确；
     //   读侧 `np.asarray(float64)` 一进来就升回 f8 ⇒ 公式引擎与旧语料逐位等价。
-    { name: 'metrics.npy', data: npyBytes(metrics, [N + 1, METRICS_DIM], 'f4') },
+    // ★ 2026-11-17：列主序 + `fortran_order: True`（payload 瘦身 B，见上方填值处的注释）。
+    { name: 'metrics.npy', data: npyBytes(metrics, [N + 1, METRICS_DIM], 'f4', 'F') },
     { name: 'done.npy', data: npyBytes(done, [N], 'u1') },
     { name: 'mask.npy', data: npyBytes(mask, [N, maskDim], 'u1') },
+    // Hybrid opening：仅开关开启时落盘，缺席 = 老 payload 逐字节不变。
+    ...(d.policyMask && d.policyMask.length > 0
+      ? [
+          {
+            name: 'policy_mask.npy',
+            data: npyBytes(new Uint8Array(d.policyMask ?? []), [N], 'u1'),
+          },
+        ]
+      : []),
   ]
   if (aHold && lpHold) {
     // 顺序 = `RL_SHARD_FILES_V6` 的尾部（pack 与校验按名取，不按位置）。
@@ -2131,6 +2432,8 @@ export function runOneBench(
   init: { path: string } | null = null,
   /** x2 事件 rung（R2）：同 `runOne`。 */
   decisionEvents = false,
+  /** P0 identity 批量校验：同 `runOne`（默认 full）。 */
+  corpusFmt: 'full' | 'replay' = 'full',
 ): RunResult {
   return runOne(
     stageIdx,
@@ -2145,6 +2448,9 @@ export function runOneBench(
     playerLevelOverride,
     init,
     decisionEvents,
+    DEFAULT_DECISION_K,
+    false,
+    corpusFmt,
   )
 }
 
@@ -2222,6 +2528,12 @@ export function main(argv: string[] = process.argv.slice(2)): void {
   // 决策周期 K（plan/k5-rhythm.plan.md）：缺省 = 单一来源常量（10，旧行为逐字节不变）；
   // 仅课程 decision_k≠10 时由 --decision-k 显式传入（值非法 = 响亮拒，不静默回退）。
   let decisionK = DEFAULT_DECISION_K
+  // P1（plan/replay-corpus.plan.md）：语料运输格式。full = 旧 11 npy 逐字节不变；
+  // replay = 额外落 replay.json + replay_meta.json（wire 瘦身在 P2）。
+  let corpusFmt: 'full' | 'replay' = 'full'
+  // 2026-11-17（docs/nn/remote-transport.md §154）：launcher 透传的 TS 代码身份。
+  // 缺席 = 本进程现算 `computeCodeHash()`（旧行为，直跑 CLI 与节点腿逐字节不变）。
+  let codeShaArg = ''
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--out') outDir = args[++i]
     else if (args[i] === '--difficulty') difficulty = args[++i]
@@ -2236,6 +2548,15 @@ export function main(argv: string[] = process.argv.slice(2)): void {
     // greedy 采集开关：BC 语料与 greedy 分层配额共用（plan/greedy-outcome-quota rev4）；
     // 动作取 argmax 而非采样。普通采样 rollout 不传 ⇒ 旧 manifest 逐字节不变。
     else if (args[i] === '--teacher-argmax') teacherArgmax = true
+    else if (args[i] === '--opening-connect') openingConnect = true
+    else if (args[i] === '--opening-all') openingAll = true
+    else if (args[i] === '--corpus-fmt') {
+      const v = args[++i]
+      if (v !== 'full' && v !== 'replay') {
+        throw new Error(`--corpus-fmt 只接受 full|replay，收到：${v}`)
+      }
+      corpusFmt = v
+    }
     // 分布式溯源字段（plan/distributed-rollout.md v3.3）：仅在显式传入时写入，
     // 保证本机既有调用的 manifest/_rl_report 逐字节不变。
     else if (args[i] === '--wver') wver = args[++i]
@@ -2247,7 +2568,15 @@ export function main(argv: string[] = process.argv.slice(2)): void {
     else if (args[i] === '--init-snapshot') initSnapshotPath = args[++i]
     else if (args[i] === '--decision-events') decisionEvents = true
     else if (args[i] === '--decision-k') decisionK = parseInt(args[++i], 10)
+    else if (args[i] === '--code-sha') codeShaArg = args[++i]
   }
+  // 格式错 = 响亮拒：半截值一旦写进 replay_meta 就是一条假身份，比缺字段更糟。
+  if (codeShaArg && !/^[0-9a-f]{16,64}$/.test(codeShaArg)) {
+    throw new Error(
+      `[export-rl-rollout] --code-sha 只收 16–64 位小写 hex（收到 ${JSON.stringify(codeShaArg)}）`,
+    )
+  }
+  replayCodeShaOverride = codeShaArg
   if (!Number.isInteger(decisionK) || decisionK < 1) {
     throw new Error(`[export-rl-rollout] --decision-k 非法（${decisionK}；必须 ≥1 的整数）`)
   }
@@ -2321,6 +2650,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
         decisionEvents,
         decisionK,
         teacherArgmax,
+        corpusFmt,
       )
       decisionReadouts.push(res.decisionReadout)
       outcomes[res.outcome] = (outcomes[res.outcome] ?? 0) + 1
@@ -2343,6 +2673,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
         // greedy 采集 provenance（plan/greedy-outcome-quota rev4）：只在 --teacher-argmax
         // 时写；旧 shard 无此键 = 采样语料（逐字节不变）。trim/兄弟复用据此判模式。
         ...(teacherArgmax ? { labelMode: 'greedy' } : {}),
+        ...(corpusFmt === 'replay' ? { corpus_fmt: 'replay' } : {}),
         difficulty,
         stage: si,
         seed,
@@ -2416,9 +2747,12 @@ export function main(argv: string[] = process.argv.slice(2)): void {
       if (res.shard.n > 0) {
         lastShardManifest = manifest
         if (packMemory && packPath) {
-          lastPackEntries = shardNpyEntries(res.shard)
+          lastPackEntries = [
+            ...shardNpyEntries(res.shard, corpusFmt),
+            ...(res.replay ? replayEntries(res.replay) : []),
+          ]
         } else {
-          writeRlShard(`${outDir}/${shardName}`, res.shard, manifest)
+          writeRlShard(`${outDir}/${shardName}`, res.shard, manifest, res.replay, corpusFmt)
         }
       }
       totalSamples += res.shard.n
@@ -2532,7 +2866,16 @@ export function main(argv: string[] = process.argv.slice(2)): void {
       // v6 shard 多 a_hold/lp_hold 两个文件；判据 = 盘上**实际**存在的那个（事实优先），
       // 不用 manifest 标志（标志与文件不一致时，以文件为准——加载端会因宽度对不上报错）。
       const hasHoldFiles = existsSync(`${shardDir}/a_hold.npy`)
-      entries = (hasHoldFiles ? RL_SHARD_FILES_V6 : RL_SHARD_FILES).map((name) => ({
+      const hasPolicyMask = existsSync(`${shardDir}/policy_mask.npy`)
+      const fullNames = hasHoldFiles
+        ? hasPolicyMask
+          ? RL_SHARD_FILES_V6_OPENING
+          : RL_SHARD_FILES_V6
+        : hasPolicyMask
+          ? RL_SHARD_FILES_OPENING
+          : RL_SHARD_FILES
+      const names = corpusFmt === 'replay' ? replayShardFileNames(fullNames) : fullNames
+      entries = names.map((name) => ({
         name,
         data: readFileSync(`${shardDir}/${name}`),
       }))
@@ -2540,7 +2883,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
     const packManifest = {
       ...(lastShardManifest ?? summary),
       mode: 'rollout',
-      elapsedSec: +((Date.now() - t0) / 1000).toFixed(1),
+      elapsedSec: serviceElapsedSec(t0, argv),
     }
     writeFileSync(packPath, buildPack(packManifest, entries))
   }

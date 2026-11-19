@@ -8,7 +8,7 @@
 
 ---
 
-## §73 demo BC 的 `extra` 只在 Paddle 侧进模型：同 bank 两侧输入不同（2026-11-16）
+## §77 demo BC 的 `extra` 只在 Paddle 侧进模型：同 bank 两侧输入不同（2026-11-16）
 
 **背景**（做 `demo_bank` 类型化时发现）：`demo_bank` 的 `.npz` 有五个字段
 （`obs` / `scalars` / `extra` / `actions` / `masks`），安全阀 `check_demo_bank` **五个都要求**。
@@ -45,6 +45,178 @@
 键集只差 `extra` 那一列，正是上文「缺 `extra` 的只可能是没走安全阀的调用方，那种 bank 对 legacy
 模型仍有效」的形态；返回注仍写 `DemoBank | None`，引擎侧的口径不动。行为零变化（cast 运行期是
 恒等内容），但 `tools/paddle_parity.py` 自此被我的 mypy 口径覆盖 —— 本机仍无 paddle，八用例未重跑。
+## §76 课程级云端采样覆盖 `autonomous_cloud_overrides`（GPU/TPU 分档；2026-11-15）
+
+**背景**：同一门课程会在 GPU / TPU 云机之间交替训练（用户 2026-11-15 更正）。设备不同 ⇒ 每轮
+能采的局数/窗口不同，课程需要**按设备各一套**采集策略；同时有覆盖块时 notebook 的
+`sample_mult` / `epoch_mult` 不再生效（否则同一档被乘两次）。
+
+**课程形状**
+
+```jsonc
+"autonomous_cloud_overrides": {
+  "gpu": { "target_transitions": 24576, "rotation_mode": "even", "rotation_per_it": 7 },
+  "tpu": { "target_transitions": 24576, "rotation_mode": "pinned", "rotation_per_it": 2,
+           "rotation_pinned": [2033, 2034] }
+}
+```
+
+- 每档**自包含**：`target_transitions`（StrictInt > 0）、`rotation_mode`（`even` / `pinned`）、
+  `rotation_per_it`（even ≥1，pinned ≥0）；pinned 必须带非空 `rotation_pinned`。
+- 档名是**设备类别**不是机器：`cuda*` → `gpu`，`tpu` / `xla*` → `tpu`；CPU/未知设备不选档。
+- 块在场 ⇒ 课程必须 `mode=per-tick`、顶层 `target_transitions > 0`、顶层 `rotation_mode` 非空
+  （顶层是 hub/导出用的基线；档在运行时整体替换 target + rotation）。
+- 导出计划必须带 `est_s_all`（档窗口重解 volume 用）；缺 → 执行面 `ProtocolError`。
+
+**执行面**
+
+- `remote/plan_run._sampling_profile(ctx)` 在**首轮前**按 `ctx.device` 选档并缓存；块里没有当前
+  设备档 ⇒ `ProtocolError`（不静默回落）。
+- 选中档 ⇒ `ctx.sample_mult = ctx.epoch_mult = 1.0` + 一行「忽略 CFG.sample_mult/epoch_mult」；
+  CPU/未知设备保持 notebook 倍数。
+- `worker/cloud_sampling.plan_for_profile` 把顶层计划换成档计划：`volume` 按 `est_s_all` 重解窗口
+  （按比例抬高 topup cap），`rotation` 写档配方；`plan_run` 后续 `volume_for_round` / `pairs_for`
+  / `rotation_event` 全用档计划，并 `pop("rotation")` 防 `pairs_for` 二次派生。
+- 每轮产物带 `sampling_profile`，`remote/artifacts.LEDGER_FIELDS` 搬到课程账本；块**不进**
+  `flat_overrides` / `corpus_identity_fp`（同 `sample_mult`：执行变体，不是语料身份）。
+  GPU/TPU 实际 pairs 不同 ⇒ 各自独立 run/traj，不能横比。
+
+**刻意不做**：`target % mb` 警告（`chunk_episodes` 丢尾，且 `mb` 可被 `ppo_schedule` 逐段改）；
+`even + per_it=0` 允许（加载期拒）；bool 经 `StrictInt` 混入（拒）。
+
+**验证**：`tests/biz/test_autonomous_cloud_overrides.py`（模型/前置/身份/倍数无关）、
+`tests/worker/test_cloud_sampling.py`（设备归一/缺档/档计划/volume 重解）、
+`tests/remote/test_plan_run_cloud_sampling.py`（倍数归 1/缓存/缺档/账本搬运）。
+
+---
+
+## §75 评估链推理规则：B8/B10 空枪门接入 `inference_rules`（2026-11-13）
+
+**背景**：B8（通用废射门）与 B10（预测门）在 ep80/hard 的 700 对确认中分别
+**+16.29pp**（p=6.2e-12, CI [+12.43,+20.71]）与 **+13.29pp**（p=5.4e-8,
+CI [+8.86,+18.86]）。两者同一机制（抑制空枪），B10 多了「按子弹到达时刻外推」，
+按 plan §3.1 **不组合**。本轮只做部署面接线，**默认全关**，不改任何课程文件。
+
+**实现**
+- 课程块 `inference_rules` 新增两个键（`extra="forbid"`，默认 False）：
+
+  ```jsonc
+  // 二选一；同时写两个 = 课程文件响亮拒（同机制，不构成组合规则）
+  "inference_rules": { "suppress_useless_fire": true }
+  // 或
+  "inference_rules": { "suppress_lead_miss_fire": true }
+  ```
+
+  `InferenceRulesBlock` 加 `model_validator`：两键同真直接 `ValueError`。
+- 透传链与 §74 完全同构：`apply_course` 写扁平 `args.suppress_useless_fire` /
+  `args.suppress_lead_miss_fire` → `eval_course_once` 读课程块 → `BatchEvalRunner`
+  本机腿 `run_local_eval_game` / 远端腿 `fetch_task` → agent eval 分支拼
+  `--suppress-useless-fire` / `--suppress-lead-miss-fire`（rollout 分支不拼）。
+- 远端参数 `?suppressUselessFire=1` / `?suppressLeadMissFire=1`；能力位
+  `suppressUselessFireSupport` / `suppressLeadMissFireSupport`（旧 agent fail-closed）；
+  任务键仅激活时加 `:suppressUselessFire` / `:suppressLeadMissFire`；报告归因
+  `inferenceRules.{suppressUselessFire,suppressLeadMissFire}`。
+- `export-eval-game` 加同名 CLI；两 flag 同开直接 `exit 2`。默认关时报告 schema
+  与行为逐字节不变（`inferenceRules` 键不写）。
+
+**验证**：`nn-training/tests/worker/test_inference_rules_course.py` 10 例（默认/互斥/
+corpus 指纹不变/rollout 无开关/本机命令/远端参数与键/能力门）；
+`tests/agent/decision-events-taskkey.test.ts` 键后缀与顺序；
+`tests/nn/inference-rules.test.ts` 源码门禁（训练链三文件不得出现新开关与谓词）；
+`export-eval-game` 实跑 stage 0 seed 2000003001：B8/B10 各自报告归因正确，同开 exit 2。
+
+**边界**：部署面只承诺「可开、可归因、旧 agent 不混批」；**没有**任何课程默认开启，
+也没有把 `NNInput` 默认翻成 true。B8/B10 的跨 checkpoint / 难度泛化仍未测。
+
+---
+
+## §74 评估链推理规则：课程 `inference_rules` 块（2026-11-13）
+
+**背景**：顶钢空枪门（历史 ID B1）在 ep80/hard 上确认 +6.00pp（700 对，CI [+2.57,+9.57]），
+需要可部署、可归因的开关。规则改写模型输出后的动作 ⇒ **训练链必须恒关**（否则 PPO 的
+logprob 对不上实际动作、DAgger 标签分布被改），只允许评估/部署链显式开启。
+
+**实现**
+- 课程文件新增 `inference_rules` 块（`extra="forbid"`，默认全关），当前两个键
+  `skip_steel_only_shots` / `break_bricks_on_path`：
+
+  ```jsonc
+  // 只影响评估/判分链；不写 = 全关（命令与报告逐字节不变）
+  "inference_rules": { "skip_steel_only_shots": true, "break_bricks_on_path": false }
+  ```
+
+  `CourseConfig.inference_rules` 只做形状校验；
+  `apply_course` 单独写扁平 `args.skip_steel_only_shots` / `args.break_bricks_on_path`
+  （刻意不进 `flat_overrides`，训练 CLI 没有同名开关）。
+- `trainer/eval_course_once.py` 从课程文件读块（拼错响亮拒）→ 写上述两个 args；
+  `BatchEvalRunner` 的本机腿（`run_local_eval_game`）与远端腿（`fetch_task`）同值透传。
+- 远端：`?skipSteelOnlyShots=1` / `?breakBricksOnPath=1`；agent 在 **eval 分支**拼
+  `--skip-steel-only-shots` / `--break-bricks-on-path`（rollout 分支不拼）；节点能力位
+  `skipSteelOnlyShotsSupport` / `breakBricksOnPathSupport`，旧 agent fail-closed；
+  任务键仅激活时加 `:skipSteelShots` / `:breakBricks`（缓存隔离）。报告归因
+  `inferenceRules.{skipSteelOnlyShots,breakBricksOnPath}`。
+- 名称：规则 ID 只作历史索引；部署面统一英文描述名（`skip_steel_only_shots` /
+  `break_bricks_on_path` 及对应 camelCase / CLI / 能力位）。
+
+**验证**：`nn-training/tests/worker/test_inference_rules_course.py`（课程块默认/拒拼写错/
+corpus 身份不变/rollout 命令无开关/本机命令/远端参数与键/能力门）；TS
+`tests/nn/inference-rules.test.ts` 源码门禁（训练链三文件不得出现这些开关）与
+`tests/agent/decision-events-taskkey.test.ts` 键后缀；`bun run check` 与 `bun run pygate` 全绿。
+B2 v1 的 175 对 A/B（两臂 B1 开）为 **−3.43pp（p=0.545, CI [−12.0,+5.14]）** ⇒ 判负、
+降 dormant；`break_bricks_on_path` 保留为默认关的实验开关，**不得部署**。
+B4 v1（冰上反向 ⇒ 松键）的冰关 80 对 A/B 为 **−8.75pp（p=0.337, CI [−22.5,0]）** ⇒ 同样
+判负、降 dormant；`releaseReverseOnIce` 只保留为 NNInput 的实验口，**未接课程部署链**。
+
+**边界**：课程不写块 ⇒ 命令与报告逐字节不变；`inference_rules` 不进 `corpus_identity_fp`
+（训练语料身份不变）；开启批次只派给新 agent（能力位 fail-closed）；本批**不**把开关翻默认，
+B1 的跨 checkpoint/难度泛化仍需另测。
+
+---
+
+## §73 BC 大语料内存：逐 shard mmap + 训练前预检（2026-11-13）
+
+**背景**（g2-classic35）：语料 1400 shards / 877,866 样本 / 9.7 GiB，Colab 训练报
+"Your notebook tried to allocate more memory than is available. It has restarted."。根因不在模型或
+批次，而在装载：`_load_dataset_v6` 对每个 shard `np.load` 后用 `np.concatenate` 拼全部
+（逐 shard 原数组 + 拼接结果 ≈ 2× ≈ 19.7 GiB），随后 `NNDataset.__init__` 的 `.astype(...)`
+又复制一份大张量。12–16 GiB 的 notebook 必死。
+
+**实现**
+- `worker/data/npyio.py::ShardArray`：只读拼接视图，每个 shard 一个
+  `np.load(mmap_mode="r")`；int / slice / 整数数组 / bool 索引按 shard 定位。**不实现
+  `__array__`**——整份物化只能显式 `materialize()`，防下游一句 `np.asarray` 把语料拉回内存。
+- `worker/data/npyio.py`：`load_dataset(..., lazy=True)` 让 `obs/scalars/extra` 走
+  `ShardArray`；动作/掩码这类小数组仍整份拼。`make_loaders` **默认 lazy=True**，
+  `bc_paddle` / `bc_learnability_probe` 同；评测小工具默认 eager（行为逐字节不变）。
+- `NNDataset._field`：dtype 已匹配就原样返回——旧 `.astype(np.uint8)` 会复制整份观测
+  （eager 路径也白付一份）。
+- `_class_counts`：训练前不再 iterate 整个 train DataLoader；直接从
+  `_AugWrapper.inner.actions/hold` 的标签数组计数（镜像只互换 left↔right，不改变类别
+  分布）。省掉一个「把 9.4 GiB obs 从盘上读一遍」的 epoch。
+- 预检：`plan_corpus_memory`（stat + 只开 obs 头取 N）→ `check_corpus_memory`。
+  eager 估计 `2× + 256 MiB`；lazy 估计 `非 obs 张量 + 在飞批次 + 768 MiB`。装不下在
+  **分配前** `MemoryError`，错误里给「语料 / 需要 / 可用 / 处置」。可用内存探测在
+  `common/platform_utils.available_memory_bytes()`（Linux `MemAvailable` / Windows
+  `GlobalMemoryStatusEx`；macOS 返回 `None`，不拿总量冒充可用）。>256 MiB 的语料打一行
+  `[npyio] 内存预检：…`。
+
+**g2-classic35 实测读数**（本机 13.9 GiB 可用）：旧路径估计峰值 **19.75 GiB ⇒ 预检拒绝**；
+mmap 路径估计峰值 **1.11 GiB ⇒ 放行**。代价：每个 epoch 从本地盘随机读 9.4 GiB
+（mmap page cache 可回收），比全内存慢；这是 12–16 GiB 机器能跑完的唯一路径。语料必须在
+**本地盘**（mmap 不适用于网络盘/流式目录）。
+
+**验证**：`tests/worker/test_corpus_memory.py`（lazy/eager 逐字节一致、跨 shard 边界/
+负下标/切片、预检拒绝与「可用内存未知不编造」）+ `test_bc_v6_data` 钉住 `make_loaders`
+的 `_AugWrapper.inner.obs` 是 `ShardArray`；ruff + mypy 绿，聚焦用例全绿。Paddle 3.3.1
+（CPU）实跑 `tests/worker/test_bc_paddle.py` **4 passed**（此前无 Paddle 时整文件 skip），
+证明 `bc_paddle.train` 的 lazy 装载 / 逐帧取 batch 链路闭合；同时修正该测试对原始
+`best_val_loss` 与 4 位小数 `history` 的精度断言（生产代码未改）。
+
+**边界**：`load_dataset(lazy=True)` 的 `obs/scalars/extra` 不再是 `np.ndarray`；需要整份
+数组的下游（`eval_bridge.quick_eval` 这类小语料工具）必须用默认 eager，或显式
+`.materialize()`。macOS 上无可用内存读数 ⇒ 预检只记录、不拒绝。
+
+---
 
 ## §72 BC 末轮 eval 兜底 + 重启补评（2026-11-12）
 
@@ -1538,9 +1710,12 @@ manifest 取 outcome/score/metrics_version ⇒ 交给 slim 的必须是「`files
   paddle 却没装 ⇒ 就该在那台机器上报错，而不是悄悄换回 torch 跑一份看起来一样的产物）。
 - paddle 后端**只接 `kind=ppo`**（= §42 定的迁移范围），BC/iter 在**任何下载之前**拒单——
   别让 AI Studio 机器传完 payload 才炸 "No module named torch"。
-- `--device auto` 在 paddle 后端先问 `paddle_cuda_available()`（`normalize_ppo_device` 的 auto
-  问的是 torch，Paddle-only 机上恒 False ⇒ 不先问这一下，AI Studio 的 GPU 任务会被静默判成
-  cpu，慢两个数量级且日志一切正常）。`normalize_ppo_device` 仍只有**一个**调用点。
+- `--device auto` 在 paddle 后端先问 `paddle_cuda_available()`，这条判据的唯一实现是
+  `bc_job.normalize_job_device`（`normalize_ppo_device` 的 auto 问的是 torch，Paddle-only 机上
+  恒 False ⇒ 不先问这一下，AI Studio 的 GPU 任务会被静默判成 cpu，慢两个数量级且日志一切正常）。
+  worker（`run_job`）与离线引导的 BC 腿（`offline_boot._run_bc_once`）都调它 —— 后者在
+  `worker_loop` 之前把 `auto` 解析掉，否则 worker 会打「--device 'auto' 未经解析」并把
+  BC 在 TPU 机上兜底成 cpu。
 - 训练核里 paddle 侧响亮拒收 XLA/DataParallel/MPS（torch 专属实验臂）；`--threads` 在 Paddle
   3.3 无等价旋钮（保留形参、值被忽略，`prep` 行可读）。
 

@@ -128,6 +128,8 @@ def load_shard_fields(
     spec: dict[str, tuple[str, npt.DTypeLike]],
     shapes: dict[str, tuple[int, ...]] | None = None,
     optional: set[str] | None = None,
+    *,
+    mmap: bool = False,
 ) -> dict[str, np.ndarray]:
     """Load a shard by field spec {key: (filename, dtype)} with zero-copy astype.
 
@@ -143,13 +145,20 @@ def load_shard_fields(
     `optional`（B1 v6，2026-10-20）：这些键**文件缺失时整键省略**，不报错也不填 None。
     用途 = v6 才有的 `a_hold`/`lp_hold`（legacy shard 没有）。判据是**文件存在性**
     （事实），调用方据此决定走 5/2 还是 4/3/2。
+
+    `mmap`（P3 lazy loader，2026-11-16）：`np.load(mmap_mode="r")` 读盘。dtype 已符合
+    时 astype(copy=False) 返回同一个只读 memmap（零拷贝），只读取到的页进内存 ——
+    `worker.ppo.lazy_corpus` 用它把 5.65 GB obs 留给 page cache。默认 False =
+    eager 路径逐字节不变。
     """
     out: dict[str, np.ndarray] = {}
     for key, (fname, dtype) in spec.items():
         path = os.path.join(dirpath, fname)
         if optional and key in optional and not os.path.exists(path):
             continue
-        arr = np.load(path).astype(dtype, copy=False)
+        arr = np.load(
+            path, allow_pickle=False, mmap_mode="r" if mmap else None
+        ).astype(dtype, copy=False)
         exp = (shapes or {}).get(key)
         if exp is not None and tuple(arr.shape[1:]) != tuple(exp):
             got = tuple(arr.shape[1:])
@@ -535,7 +544,17 @@ def chunk_episodes(
     逐字节不变（`idx` 的抽样顺序未动）。
     归一化（load_episodes_common 的 adv/ret）覆盖**整池**（含被丢的 <mb 步）——
     刻意保持「归一化粒度 = 本轮池」的既有语义，不因丢弃而改变。
+
+    P3 lazy loader：`episodes` 可以是 `worker.ppo.lazy_corpus.LazyCorpus`（鸭子类型
+    判据 `make_chunks`）——此时 chunk 在 `.get(i)` 才物化，但 RNG 消费与切块
+    规则由 lazy 侧复刻同一套（不在本函数重复实现）。
     """
+    maker = getattr(episodes, "make_chunks", None)
+    if callable(maker):
+        # lazy corpus：返回 LazyChunks（鸭子类型序列）；签名保留 list 是为了不把
+        # lazy_corpus 的类型拖进这个 numpy-only 核心（双向 import = 环）。
+        # rng 与 eager 分支同一条显式流（§P1-7）：lazy 不许再读全局 np.random。
+        return cast(list[dict], maker(mb, shuffle=shuffle, rng=rng))
     if not shuffle or len(episodes) <= 1:
         out: list[dict] = []
         for e in episodes:
@@ -756,10 +775,12 @@ _RL_SHARD_SPEC: dict[str, tuple[str, npt.DTypeLike]] = {
     # 填 0 会让 `a_hold` 恒为 0，训练时静默学一个"永不 hold"的策略）。
     "a_hold": ("a_hold.npy", np.int64),
     "lp_hold": ("lp_hold.npy", np.float32),
+    # Hybrid opening（可选）：controller 接管的样本不算 policy loss。
+    "policy_mask": ("policy_mask.npy", np.float32),
 }
 
 #: v6 专有字段（legacy shard 没有这些文件）。见 `load_shard_fields(optional=...)`。
-_RL_SHARD_OPTIONAL: frozenset[str] = frozenset({"a_hold", "lp_hold"})
+_RL_SHARD_OPTIONAL: frozenset[str] = frozenset({"a_hold", "lp_hold", "policy_mask"})
 
 #: 掩码宽度 → 是否为 v6（唯一判据来源；两侧常量在 TS `action-space-v6.ts` 与
 #: `common/schema.py`，这里只做"读到的东西自洽吗"的校验）。
@@ -782,7 +803,11 @@ COMPUTED_SHARD_KEYS: frozenset[str] = frozenset({"reward", "stage"})
 # 声明。只改一边时 **import 当场炸**，而不是等训练时报 ValueError 或静默少读一列。
 # 换算：`metrics` 读时被算成 `reward` 后 pop 掉；`reward` / `stage` 是加载端现算的两列。
 _V6_ONLY_KEYS = frozenset(ShardV6.__annotations__) - frozenset(Shard.__annotations__)
-if _V6_ONLY_KEYS != _RL_SHARD_OPTIONAL or frozenset(Shard.__annotations__) != (
+#: 可选但**不是** v6 专有的列：legacy/v6 都可能没有（hybrid opening 的 policy_mask）。
+_OPTIONAL_NOT_V6 = frozenset({"policy_mask"})
+if (_V6_ONLY_KEYS | _OPTIONAL_NOT_V6) != _RL_SHARD_OPTIONAL or frozenset(
+    Shard.__annotations__
+) != (
     frozenset(_RL_SHARD_SPEC) - frozenset(DROPPED_SHARD_KEYS) - _V6_ONLY_KEYS
     | frozenset(COMPUTED_SHARD_KEYS)
 ):
@@ -797,7 +822,7 @@ def discover_rl_shards(root: str) -> list[str]:
     return discover_shards(root, ("obs.npy",), need_any=RL_REWARD_FILES)
 
 
-def load_shard(dirpath: str) -> Shard | ShardV6:
+def load_shard(dirpath: str, *, mmap: bool = False) -> Shard | ShardV6:
     """读 shard 字段 + manifest → `reward`（N 样本）。
 
     两条奖励来源（wire-diet，2026-10-14，§3 P1）：
@@ -807,6 +832,9 @@ def load_shard(dirpath: str) -> Shard | ShardV6:
         （`reward_meta.json` 的 it / metrics_version / formula_hash vs holder）后直读。
         校验不是可选项：奖励在别处算，`it` 用错在数值上与正常 reward 无从区分 —— 只有 meta
         里记的「实际用过的 it/版本/指纹」抓得到（评审 P1-4）。
+
+    `mmap=True`（P3 lazy loader）：字段走 `np.load(mmap_mode="r")`；奖励仍**当场算完**
+    （metrics 只在这一步用，随后丢弃），训练期只留 obs 的 mmap 与小字段。
     """
     manifest: dict = {}
     mp = os.path.join(dirpath, "manifest.json")
@@ -816,7 +844,7 @@ def load_shard(dirpath: str) -> Shard | ShardV6:
     has_metrics = os.path.exists(os.path.join(dirpath, METRICS_NAME))
     spec = _RL_SHARD_SPEC if has_metrics else _RL_SHARD_SPEC_REWARD
     d = load_shard_fields(
-        dirpath, spec, _RL_SHARD_SHAPES, optional=set(_RL_SHARD_OPTIONAL)
+        dirpath, spec, _RL_SHARD_SHAPES, optional=set(_RL_SHARD_OPTIONAL), mmap=mmap
     )
     n_obs = int(d["obs"].shape[0])
     # ★ B1 v6 掩码宽度校验（2026-10-20）：`mask` 此前**完全没有形状校验**
@@ -827,6 +855,10 @@ def load_shard(dirpath: str) -> Shard | ShardV6:
     # 判据只有一处（`ActionSpace.from_batch`）：本文件不再自己查 `a_hold` 在不在，
     # 否则「v6 是什么」就有第二个定义，拼错键名只会静默走 legacy（§0.1 第 3 条）。
     is_v6 = ActionSpace.from_batch(d).is_v6
+    # 老 shard 没有 policy_mask ⇒ 全 1（老行为逐字节不变）；
+    # 必须补齐，否则 chunk_episodes 混用键集会 KeyError。
+    if "policy_mask" not in d:
+        d["policy_mask"] = np.ones(n_obs, dtype=np.float32)
     _check_mask_width(d["mask"], is_v6, dirpath)
     if has_metrics:
         metrics = d.pop("metrics")  # [N+1,76]
@@ -867,6 +899,7 @@ def _as_shard(d: dict[str, np.ndarray], *, is_v6: bool) -> Shard | ShardV6:
             mask=d["mask"],
             reward=d["reward"],
             stage=d["stage"],
+            policy_mask=d["policy_mask"],
         )
     return ShardV6(
         obs=d["obs"],
@@ -881,6 +914,7 @@ def _as_shard(d: dict[str, np.ndarray], *, is_v6: bool) -> Shard | ShardV6:
         mask=d["mask"],
         reward=d["reward"],
         stage=d["stage"],
+        policy_mask=d["policy_mask"],
         a_hold=d["a_hold"],
         lp_hold=d["lp_hold"],
     )

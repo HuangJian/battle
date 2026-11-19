@@ -83,6 +83,8 @@ class JobState:
     payload_dl_sec: float = 0.0
     unpack_sec: float = 0.0
     pruned_dirs: int = 0
+    #: D10（plan/replay-corpus.plan.md）：replay pre-pass 的读数（full 路径 None）。
+    replay: dict | None = None
     code_root: Path = Path()
     blob_root: Path = Path()
     init_w: Path | None = None
@@ -184,6 +186,7 @@ def land_materials(st: JobState) -> None:
     st.payload_dl_sec = landed.dl_sec
     st.unpack_sec = landed.unpack_sec
     st.payload_nbytes = landed.payload_nbytes
+    st.replay = landed.replay
     # ★ 2026-10-30：prune 计数**不进人读的那一行**（每轮一句家务事 ⇒ 纯重复），
     #   改由 wire 账带着（`wire.prune_dirs`）。
     st.pruned_dirs = landed.pruned_dirs

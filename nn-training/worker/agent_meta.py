@@ -5,8 +5,9 @@
 排障时它是唯一能回答「这台机器到底在干活吗」的东西。
 
 **为什么单独一层**（与 `biz/bc_ledger.py` / `biz/train_ledger.py` 同一条理由）：
-写它有**两个调用者**——rollout 派发（`trainer/dispatch.py`）与干净评估派发
-（`trainer/eval_dispatch.py` / `trainer/batch_runner.py`，经 `trainer/dispatch_queue.py` re-export）——
+写它有**三个调用者**——rollout 派发（`trainer/dispatch.py`）、干净评估派发
+（`trainer/eval_dispatch.py` / `trainer/batch_runner.py`，经 `trainer/dispatch_queue.py` re-export）
+与 BC 评估（`worker/bc_eval.py`，2026-11-13 接入）——
 而写成 JSONL 的**协议只有一条**（单行、`ensure_ascii=False`、追加、父目录按需创建）。
 历史状态是两份字形相同的实现（`trainer/dispatch.py::_record_agent_meta` 与
 `trainer/dispatch_queue.py::_record_agent_meta`），差别只在哪份先被谁 import——正是「第二份真相」

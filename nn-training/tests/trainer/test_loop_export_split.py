@@ -32,7 +32,7 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
 
 ## 本文件钉住什么
 
-1. 四成员定义只在新家（`TrainingSteps` / `loop_steps.py` 里零同名定义）；
+1. 五成员定义只在新家（`TrainingSteps` / `loop_steps.py` 里零同名定义）；
 2. 接线是**对象级**同一（`TrainingSteps.X is TrainingExport.X`）；
 3. 组装逐字：`TrainingSteps.__bases__` 三件套 + `__mro__[1]` + 本簇不在组合类直接基类里；
 4. 借用声明闭集 = 派生集（含 `args`），且类体零带值槽位；
@@ -63,6 +63,7 @@ CLASS = "TrainingExport"
 #: 只有用例伸手进去问，现在有一个不触发打包的只读面；成员集故意逐格列举，加一个就得改这里）。
 MEMBERS = (
     "_ensure_ts_code",
+    "_ensure_replay_converter",
     "_volume_plan_block",
     "_export_offline_bundle",
     "_export_weights",
@@ -96,6 +97,8 @@ STEPS_BASES = ("TrainingRemote", "TrainingEval", "TrainingExport")
 #: （`_export_offline_bundle` → 它）。退役的正面守卫在 `tests/trainer/test_offline_leg_retired.py`。
 INBOUND_CALLS: dict[str, dict[str, int]] = {
     "_ensure_ts_code": {"loop_remote_job.py": 1},
+    # P2：replay 转换器 bundle 的懒构建（`_remote_ppo_publish` 在 corpus_fmt=replay 时调）。
+    "_ensure_replay_converter": {"loop_remote_job.py": 1},
     # 只剩 loop_export 自己那条链（`_export_offline_bundle` → 它）。
     "_volume_plan_block": {"loop_export.py": 1},
     "_export_offline_bundle": {"loop_round_steps.py": 1},
@@ -132,12 +135,14 @@ TOP_IMPORTS = frozenset(
         "common.paths",
         "worker.modes",
         "common.protocol",
+        # P2：replay 转换器 bundle 的构建（显式 UTF-8 + Windows 无黑窗）。
+        "common.proc",
         "remote",
     }
 )
-#: `dataclasses` 随 `TsCodeView` 进来（2026-11-19）；`pathlib` 原文就有（`Path`），只是在
-#: 头部注里没被点名。
-STDLIB_IMPORTS = frozenset({"os", "pathlib", "typing", "dataclasses"})
+#: `dataclasses` 随 `TsCodeView` 进来（2026-11-19）；`hashlib` 随 replay 转换器（2026-11-15）；
+#: `pathlib` 原文就有（`Path`），只是在头部注里没被点名。
+STDLIB_IMPORTS = frozenset({"hashlib", "os", "pathlib", "typing", "dataclasses"})
 
 #: 反向边（禁）：成环或把叶子拉回编排上游。
 FORBIDDEN_IMPORTS = frozenset(
@@ -279,7 +284,7 @@ def _self_calls(path: Path, cls_name: str, method: str) -> set[str]:
 
 
 def test_members_live_in_the_new_home_only() -> None:
-    """四成员定义只在新家；旧家（`TrainingSteps`）零同名定义。"""
+    """五成员定义只在新家；旧家（`TrainingSteps`）零同名定义。"""
     got = set(_methods(EXPORT_PY, CLASS))
     assert got == set(MEMBERS), f"新家成员集变了：{sorted(got ^ set(MEMBERS))}"
     left = set(_methods(STEPS_PY, "TrainingSteps"))

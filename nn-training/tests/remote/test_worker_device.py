@@ -71,6 +71,12 @@ def test_run_job_normalizes_device_once_before_kind_fork() -> None:
       ② 归一化只写在 PPO 分支里 ⇒ BC 分叉（`device=device` → `_bc_device`）仍透传 `auto`。
     所以：一次、且在分叉前。
 
+    ★ 2026-11-13：归一化的**唯一实现**下沉到 `remote.bc_job.normalize_job_device`
+    （离线引导的 BC 腿也要在 `worker_loop` 之前解析 `auto`，见
+    `tests/remote/test_offline_bc_course.py::test_run_bc_once_resolves_auto_device_before_the_worker`）；
+    本用例随之钉新调用点。`paddle_probe` 按本模块名字传入，保住
+    `test_ppo_backend_switch` 对 `worker.paddle_cuda_available` 的打桩缝。
+
     2026-11-18（长函数第三十五刀）：两个调用点都搬了家 —— 归一化留在宿主的
     `_guard_code_and_device`（`_ACTIVE_CODE_SHA` 同处），bc 分叉进了 `remote/job_shell`。
     判据不变：`run_job` 的调用顺序里 guard 必须早于 bc 分叉，且归一化只有一处。
@@ -78,7 +84,8 @@ def test_run_job_normalizes_device_once_before_kind_fork() -> None:
     src = (ROOT / "remote" / "worker.py").read_text(encoding="utf-8")
     flat = " ".join(src.split())
 
-    assert flat.count("normalize_ppo_device(st.device)") == 1, (
+    call = "st.device = normalize_job_device("
+    assert flat.count(call) == 1, (
         "应只归一化一次；每条链各自归一化必然漏掉其中一条"
     )
     assert flat.index("_guard_code_and_device(st)") < flat.index("bc_or_none(st"), (

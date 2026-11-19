@@ -90,7 +90,8 @@ def test_memory_source_matches_disk_source(tmp_path: Path) -> None:
 
 def test_member_bytes_of_rejects_missing_member(tmp_path: Path) -> None:
     files = _shard_bytes()
-    del files["scalars.npy"]
-    # `_f16_bytes` 走 `src.array()` ⇒ 缺 key 时报「不可解析」（带成员名），语义足够定位。
-    with pytest.raises(Exception, match=r"scalars\.npy"):
-        _slim().member_bytes_of(FNAME, files, "scalars.npy")
+    # A2 后探针用 `lp_move.npy`（仍在 f16 表内）：`_f16_bytes` 走 `src.array()` ⇒ 缺 key
+    # 时报「不可解析」（带成员名），语义足够定位。
+    del files["lp_move.npy"]
+    with pytest.raises(Exception, match=r"lp_move\.npy"):
+        _slim().member_bytes_of(FNAME, files, "lp_move.npy")

@@ -86,6 +86,20 @@ class EvalTimingView:
     pending_m: int | None
     open_threads: tuple[EvalThread, ...]
 
+def drop_inflight_rounds(cand: list[int], active: set[int]) -> tuple[list[int], list[int]]:
+    """drain 去重：**已在飞**的评估轮不重派。返回 `(保留, 跳过)`。
+
+    2026-11-17 事故（`replay-a-cont` it20）：收官 drain 的「未覆盖」判据只看
+    `eval_summary`，而那一轮还在飞、还没写 summary ⇒ 被判成未覆盖**再派一次**，
+    同一 `(stage,seed)` 落两行（700 + 469 = 1,169 行），末点胜率直接不可用。
+
+    判据要问「这轮是不是已经有人在做」，而不是「账上有没有结论」——后者在
+    收官那一刻必然为假。纯函数，单测钉住（`tests/trainer/test_eval_drain_dedup.py`）。
+    """
+    keep = [m for m in cand if m not in active]
+    skipped = [m for m in cand if m in active]
+    return keep, skipped
+
 
 class TrainingEval:
     """in-loop 评估链 mixin：派发 → 尾巴收拢 → PPO 收官 join/交棒 → 收官 drain。
@@ -552,6 +566,17 @@ class TrainingEval:
                 return
             if not cand:
                 log("[eval] drain: 评估轮权重均已完整 summary——无需收尾 eval")
+                return
+            from worker.eval_arbiter import eval_arbiter
+
+            cand, inflight = drop_inflight_rounds(cand, eval_arbiter().active_its(self._eval_course_fp()))
+            if inflight:
+                log(
+                    f"[eval] drain: it{inflight} 仍在本课的在飞轮里——**不重派**"
+                    "（重派会把同一 (stage,seed) 落两行；现场 2026-11-17 replay-a-cont it20）"
+                )
+            if not cand:
+                log("[eval] drain: 剩余未覆盖轮全部在飞——无需收尾派发")
                 return
             log(f"[eval] drain: 逐轮收尾 {cand}（升序，各自归档权重；block={block}）")
 

@@ -14,8 +14,7 @@
  *                     结果缓存 LRU：同键重入直接回放。
  *   GET  /v1/result   异步取包：200 容器 | 202 在跑 | 500 局失败（一次性消费）| 404 过期。
  *   POST /v1/cancel   按 taskKey 取消在飞任务（分配超时后停掉远端算力；404 = 已结束/过期）。
- *   GET  /v1/status   健康快照（巡检用）。
- *   GET  /v1/ping     存活 + codeHash + bunVersion + agentVersion + cpus。
+ *   GET  /v1/status   健康快照（巡检用）。 *   GET /v1/ping     存活 + codeHash + bunVersion + agentVersion + cpus + workers。
  *
  * 仅用 bun/node 内建（Bun.serve / node:child_process / node:zlib / node:crypto /
  * node:fs），零 npm 第三方依赖、无构建步骤（bun 直跑 TS 源码）。Bun.serve 若出现
@@ -165,6 +164,10 @@ let cacheMaxItems = 32
  *  `--admission-wait-ms 0` = 回退档（逐字节旧行为：池满立即 busy）。 */
 let admissionWaitMs = ADMISSION_WAIT_MS
 let admissionQueueMax = ADMISSION_QUEUE_MAX
+/** 磁盘阈值的**覆盖槽**（0 = 用冻结默认值）。为什么先存覆盖值再算生效值： `DISK_FLOOR_MB`
+ *  等常量声明在文件的磁盘段（更靠后），在这里直接读会踩 `const` 的 TDZ。生效值在那边算。 */
+let diskFloorOverride: number | null = null
+let diskWarnOverride: number | null = null
 /** --no-node：强制 rollout 子进程走 bun（A/B 对照与回滚开关；见 rollout-runner.ts）。 */
 let forceBun = false
 /** 长驻 worker（§368 提速④）：默认开（2026-09-08 用户指令"全量开关"）；
@@ -196,6 +199,8 @@ let missLogSuppressed = 0
     else if (a === '--no-prewarm') prewarmEnabled = false
     else if (a === '--pool-idle-ms') poolIdleMs = Math.max(0, parseInt(argv[++i], 10))
     else if (a === '--pool-floor') poolFloor = Math.max(1, parseInt(argv[++i], 10))
+    else if (a === '--disk-floor-mb') diskFloorOverride = parseInt(argv[++i], 10)
+    else if (a === '--disk-warn-mb') diskWarnOverride = parseInt(argv[++i], 10)
     else if (a === '--takeover') cliTakeover = true
   }
 }
@@ -882,6 +887,30 @@ export const DISK_WARN_MB = 4096
 /** 回差：入档用严格 `<`、出档要 `>= 阈值 + 回差` ⇒ 阈值附近不抖振（512 MB ≈ 2.5h 排水量）。 */
 export const DISK_HYST_MB = 512
 
+/** **生效阈值**（2026-11-14，plan/node-throughput-and-keepalive P3）：默认 = 上面两个冻结常量，
+ *  可被 `--disk-floor-mb` / `--disk-warn-mb` 覆盖（rollout_node 从 `CFG.disk_floor_mb` 透传）。
+ *  `ping`/`status` 回显与 `/v1/task` 的拒收门都读**这两个值**，不再直读常量——否则控制台看到
+ *  的阈值和真正生效的阈值会不是一回事。
+ *  范围校验（响亮失败）：floor ∈ [512, 65536]、warn ≥ floor + 512。 */
+// `??` 而不是 `||`：手工传 `--disk-floor-mb abc` ⇒ NaN ⇒ 下面的范围校验会响亮失败，
+// 而不是静默退回默认值（「阈值填坏了」必须在启动时就看见）。
+let diskFloorMb = diskFloorOverride ?? DISK_FLOOR_MB
+let diskWarnMb = diskWarnOverride ?? DISK_WARN_MB
+if (!(diskFloorMb >= 512 && diskFloorMb <= 65536)) {
+  console.error(`[sampler-agent] --disk-floor-mb 需在 [512, 65536]，收到 ${diskFloorMb}`)
+  process.exit(2)
+}
+if (!(diskWarnMb >= diskFloorMb + DISK_HYST_MB)) {
+  console.error(
+    `[sampler-agent] --disk-warn-mb 需 ≥ floor+${DISK_HYST_MB}（floor=${diskFloorMb}），收到 ${diskWarnMb}`,
+  )
+  process.exit(2)
+}
+/** 生效值（观测/测试用；agent 是单实例进程，启动后不变）。 */
+export function diskThresholds(): { floorMB: number; warnMB: number } {
+  return { floorMB: diskFloorMb, warnMB: diskWarnMb }
+}
+
 /** 磁盘档位（wire 契约；dashboard 侧同口径类型见 `web/view/console-types.ts::DiskLevel`）。 */
 export type DiskLevel = 'ok' | 'warn' | 'critical'
 
@@ -932,11 +961,11 @@ function diskReport(): {
     return {
       diskFreeMB: null,
       diskLevel: null,
-      diskWarnMB: DISK_WARN_MB,
-      diskFloorMB: DISK_FLOOR_MB,
+      diskWarnMB: diskWarnMb,
+      diskFloorMB: diskFloorMb,
       diskLevelSince: null,
     }
-  const next = classifyDiskFree(free, diskLevel)
+  const next = classifyDiskFree(free, diskLevel, { floor: diskFloorMb, warn: diskWarnMb })
   if (next !== diskLevel) {
     diskLevel = next
     diskLevelSince = Date.now()
@@ -944,8 +973,8 @@ function diskReport(): {
   return {
     diskFreeMB: free,
     diskLevel,
-    diskWarnMB: DISK_WARN_MB,
-    diskFloorMB: DISK_FLOOR_MB,
+    diskWarnMB: diskWarnMb,
+    diskFloorMB: diskFloorMb,
     diskLevelSince,
   }
 }
@@ -1152,6 +1181,8 @@ interface PoolWorker {
   /** 预热「等这一个就绪」的钩子；就绪或退出各调一次（只挂在对它感兴趣的那段时间）。 */
   readyWait: ((ok: boolean) => void) | null
   buf: string
+  /** stderr 尾部（有界 4KB）：只用于 worker 异常退出时的诊断，不参与协议。 */
+  errTail: string
   pending: ((outcome: WorkerSettle, msg: string) => void) | null
   /** 空闲起点（ms）：在飞时置 null，settle 回池时刷新。空闲回收（reapPlan）的判据。 */
   idleSinceMs: number | null
@@ -1181,6 +1212,7 @@ function persistSpawn(plan: LaunchPlan): PoolWorker | null {
       ready: false,
       readyWait: null,
       buf: '',
+      errTail: '',
       pending: null,
       idleSinceMs: Date.now(),
     }
@@ -1196,11 +1228,18 @@ function persistSpawn(plan: LaunchPlan): PoolWorker | null {
     }
     child.stdout.setEncoding('utf8')
     child.stdout.on('data', (c: string) => {
-      w.buf += c
-      let nl = w.buf.indexOf('\n')
-      while (nl >= 0) {
-        const line = w.buf.slice(0, nl).trim()
-        w.buf = w.buf.slice(nl + 1)
+      // 一次切出本拍所有完整行：旧实现每处理一行就 `buf.slice(nl + 1)` 复制剩余全串，
+      // 一个 chunk 含 N 行即 O(N × chunk)（导出器每局会往 stdout 打若干行汇总日志）。
+      const data = w.buf + c
+      const lastNl = data.lastIndexOf('\n')
+      if (lastNl < 0) {
+        w.buf = data
+        return
+      }
+      const lines = data.slice(0, lastNl).split('\n')
+      w.buf = data.slice(lastNl + 1)
+      for (const raw of lines) {
+        const line = raw.trim()
         if (line.startsWith('__SERVE_READY__')) {
           w.ready = true
           const wait = w.readyWait
@@ -1211,8 +1250,14 @@ function persistSpawn(plan: LaunchPlan): PoolWorker | null {
         } else if (line.startsWith('__SERVE_OK__')) settle('ok', '')
         else if (line.startsWith('__SERVE_ERR__'))
           settle('taskErr', line.slice('__SERVE_ERR__'.length).trim() || 'worker error')
-        nl = w.buf.indexOf('\n')
       }
+    })
+    // stdio 第三路是 'pipe' 就必须有人消费：worker 的报错/堆栈写满 64KB 管道后会
+    // 永久阻塞在 write 上，整局只能等 600s 超时回收。标记行协议只走 stdout，
+    // stderr 留 4KB 尾部供异常退出诊断。
+    child.stderr?.setEncoding('utf8')
+    child.stderr?.on('data', (c: string) => {
+      w.errTail = (w.errTail + c).slice(-4000)
     })
     child.on('error', () => settle('dead', 'spawn error'))
     child.on('close', (code, signal) => {
@@ -1225,7 +1270,8 @@ function persistSpawn(plan: LaunchPlan): PoolWorker | null {
       // 正常关池（SIGTERM idle / restart）不刷屏；busy 中途被杀或异常退出才留痕
       if (w.busy || (code !== 0 && code !== null) || signal != null) {
         console.log(
-          `[sampler-agent] persist worker closed code=${code} signal=${signal} (was busy=${w.busy})`,
+          `[sampler-agent] persist worker closed code=${code} signal=${signal} (was busy=${w.busy})` +
+            (w.errTail ? ` stderr=${w.errTail.slice(-600)}` : ''),
         )
       }
       settle('dead', 'worker exited')
@@ -1515,10 +1561,14 @@ async function runViaPersistWorker(
   detachAbort()
   taskTimer.cancel()
   if (settled === 'ok') {
-    if (fs.existsSync(path.join(gameDir, '_result.pack'))) return { outcome: 'ok', worker: null }
-    // 报 OK 却没产物 ⇒ 这个 worker 不可信，回收
-    recyclePersistWorker(w)
-    return { outcome: 'failed', worker: null }
+    try {
+      await fs.promises.access(path.join(gameDir, '_result.pack'))
+      return { outcome: 'ok', worker: null }
+    } catch {
+      // 报 OK 却没产物 ⇒ 这个 worker 不可信，回收
+      recyclePersistWorker(w)
+      return { outcome: 'failed', worker: null }
+    }
   }
   // taskErr：worker 健康（serve-loop 已在等下一行）⇒ 留着，由调用方按兜底结果定夺
   if (settled === 'taskErr') return { outcome: 'taskErr', worker: w }
@@ -1577,11 +1627,32 @@ async function runGame(
   // 决策周期 K（plan/k5-rhythm.plan.md）：`?decisionK=<n>` 时本局按该 K 跑
   // （评估/rollout 同传）；缺席/10 = 导出器缺省（旧训练侧逐字节不变）。
   decisionK: number = DEFAULT_DECISION_K,
-  // v6 BC 标签来源：argmax=教师最优动作，sampled=策略采样（BC 的行为克隆标签）。
+  // 评估/部署链推理规则（课程 `inference_rules.skip_steel_only_shots`）：
+  // `?skipSteelOnlyShots=1` 时评估局抑制「顶钢空枪」；缺席/false = 老行为。
+  // 训练 rollout 分支不消费（评估专用）。
+  skipSteelOnlyShots = false,
+  // 评估/部署链推理规则：`?breakBricksOnPath=1` 时评估局拆掉挡路的砖；
+  // 训练 rollout 分支不消费（评估专用）。
+  breakBricksOnPath = false,
+  // 评估/部署链推理规则：`?suppressUselessFire=1` 时评估局抑制「打不到任何坦克」的空枪。
+  // 与 suppressLeadMissFire 同机制，二者不得同开（提交端互斥校验）。
+  suppressUselessFire = false,
+  // 评估/部署链推理规则：`?suppressLeadMissFire=1` 时按子弹到达时刻的敌人位置判空枪。
+  suppressLeadMissFire = false,
+  // Hybrid opening：`?openingConnect=1` 时 eval/rollout 都拼 `--opening-connect`
+  // （默认条件接管：只对 strict 不连通的关生效）。缺席 = 老行为。
+  openingConnect = false,
+  // v5 多课程：本局权重该从哪门课的桶里取（空串 = 旧单课程桶）。
   // 仅 mode=bc-v6 消费；legacy bc / rollout 保持原行为。
   labelMode: string = 'argmax',
+  // P2（plan/replay-corpus.plan.md）：`replay` = 导出器逐局录 replay、不产 obs/scalars/extra。
+  // 只对 per-tick RL rollout 生效（eval/BC/intent/goal 由 /v1/task 提前 400，强制 full）。
+  corpusFmt: 'full' | 'replay' = 'full',
   // 取消信号（/v1/cancel）：abort ⇒ 杀子进程 / 回收长驻 worker，结果不再回包。
   signal?: AbortSignal,
+  // 接单时刻：透给导出器，让它在打包时自己写 manifest.elapsedSec
+  // （单一来源 tools/sim/pack-container.ts::serviceElapsedSec）。0 = 旧口径（本机直跑）。
+  serviceStartedAtMs = 0,
 ): Promise<Buffer> {
   if (signal?.aborted) throw new Error('task cancelled')
   // 多桶：按 (course, kind, wver) 精确取——同节点可同时服务多个课程/权重的训练流。
@@ -1607,7 +1678,9 @@ async function runGame(
   const isGoalRollout = kind === 'goal' && !isEval
   const seq = ++gameSeq
   const gameDir = path.join(WORK_DIR, `game-${process.pid}-${seq}`)
-  fs.mkdirSync(gameDir, { recursive: true })
+  // 单线程事件循环服务里不做同步 FS：慢盘 / 挂载点抖动会卡住所有在飞请求
+  // （docs/nn/runtime-opt.md 记过挂载点挂住导致整轮拒收）。
+  await fs.promises.mkdir(gameDir, { recursive: true })
   try {
     // §353：exporter 入口先取出，交给 runner 决定用 bun 直跑 TS 还是 node 跑打包产物。
     const entryTs = isEval
@@ -1675,6 +1748,13 @@ async function runGame(
         // 决策周期 K（plan/k5-rhythm.plan.md）：仅非默认值透传（缺席 = 导出器缺省 10，
         // 旧训练侧/旧调用逐字节不变）；评估必须与训练同节奏。
         if (decisionK !== DEFAULT_DECISION_K) args.push('--decision-k', String(decisionK))
+        // 评估/部署链推理规则：顶钢空枪门（训练 rollout 分支不拼此开关）。
+        if (skipSteelOnlyShots) args.push('--skip-steel-only-shots')
+        if (breakBricksOnPath) args.push('--break-bricks-on-path')
+        if (suppressUselessFire) args.push('--suppress-useless-fire')
+        if (suppressLeadMissFire) args.push('--suppress-lead-miss-fire')
+        // Hybrid opening：评估局套 opening controller（默认条件接管）。
+        if (openingConnect) args.push('--opening-connect')
       } else {
         args.push('--stages', String(stage), '--seeds', String(seed))
         // greedy 分层采集（plan/greedy-outcome-quota rev5）：**所有节点**都要能按 argmax
@@ -1686,6 +1766,11 @@ async function runGame(
         if (decisionEvents) args.push('--decision-events')
         // 决策周期 K：仅非默认值透传（缺席 = 导出器缺省 10，旧训练侧逐字节不变）。
         if (decisionK !== DEFAULT_DECISION_K) args.push('--decision-k', String(decisionK))
+        // Hybrid opening：rollout 也套同一个 controller（policy_mask 由导出器落）。
+        if (openingConnect) args.push('--opening-connect')
+        // P2：replay 语料（仅 per-tick RL rollout；intent/goal 已在 /v1/task 拒收）。
+        if (corpusFmt === 'replay' && !isIntentRollout && !isGoalRollout)
+          args.push('--corpus-fmt', 'replay')
         // M1d：课程自定义关 stageJson + 命数/星级覆盖（plan §5.2，导出器端四守卫）。
         if (stageJson) args.push('--stage-json', stageJson)
         if (livesOverride) args.push('--lives-override', livesOverride)
@@ -1725,6 +1810,10 @@ async function runGame(
         '--pack-memory',
       )
     }
+    // 服务时长由导出器在子进程内一次写进容器 manifest：agent 侧不再为了改这一个
+    // 字段把整个 BCV2 容器 gunzip + 重压（真实容器 3.1–12.6 MB frame，实测
+    // 13–44 ms/局同步阻塞主线程）。缺席该参数时导出器回退自己的 t0，旧口径不变。
+    if (serviceStartedAtMs > 0) args.push('--service-started-at-ms', String(serviceStartedAtMs))
     const plan = runner.launch(entryTs, args)
     let packBuf: Buffer | null = null
     // §368：--persist 时 per-tick rollout 走长驻 worker（省每局进程启动/JIT 预热/wasm 编译），
@@ -1743,7 +1832,7 @@ async function runGame(
     if (attempt === 'ok') {
       persistBreaker = notePersistAttempt(persistBreaker, 'ok', Date.now())
       runner.noteSuccess(plan.engine)
-      packBuf = fs.readFileSync(packFile)
+      packBuf = await fs.promises.readFile(packFile)
     } else if (attempt === 'busy') {
       // 背压显式入账（状态不变）：旧实现把「池满」也算失败，3 连就把池永久关掉。
       persistBreaker = notePersistAttempt(persistBreaker, 'busy', Date.now())
@@ -1796,15 +1885,18 @@ async function runGame(
         notePoolFailure()
       }
       // 子进程已把结果打成 BCV2 容器（manifest 含 stage/seed/mode/elapsedSec 溯源戳），
-      // 主线程只做一次顺序读——不再读 12 个 shard + base64 + gzip。
-      if (!fs.existsSync(packFile)) {
+      // 主线程只做一次异步顺序读——不再读 12 个 shard + base64 + gzip。
+      // 直接 read + catch，而非 existsSync 再 read（TOCTOU + 两次系统调用）。
+      try {
+        packBuf = await fs.promises.readFile(packFile)
+      } catch {
         throw new Error(`${scriptName} produced no result pack: ${tail}`)
       }
-      packBuf = fs.readFileSync(packFile)
     }
     return packBuf
   } finally {
-    fs.rmSync(gameDir, { recursive: true, force: true })
+    // 清理失败不得盖掉任务本身的结果/异常。
+    await fs.promises.rm(gameDir, { recursive: true, force: true }).catch(() => {})
   }
 }
 
@@ -1820,6 +1912,13 @@ const admission = createAdmission({
   queueMax: admissionQueueMax,
   waitMs: admissionWaitMs,
 })
+
+/** Buffer → BodyInit 的**零拷贝视图**：TS 的 `BodyInit` 只接受
+ * `ArrayBufferView<ArrayBuffer>`，而 Node `Buffer` 的泛型是 `ArrayBufferLike`，
+ * 直接传会 TS2345；`new Uint8Array(buf)` 虽能过检但会整包复制一次。 */
+function bodyView(buf: Buffer): BodyInit {
+  return new Uint8Array(buf.buffer as ArrayBuffer, buf.byteOffset, buf.byteLength)
+}
 
 function jsonResponse(obj: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(obj), {
@@ -1847,13 +1946,15 @@ async function admit(signal?: AbortSignal): Promise<Response | null> {
   return admissionBusy(Date.now() - t0)
 }
 
-/** 服务耗时改口径（2026-09-06 用户指令）：elapsedSec 从「子进程内纯游戏耗时」改为
- * 「任务生命周期」= 接单（inflight startedAt；同步模式即 HTTP 请求起点）→ 结果就绪，
- * 含 bun 子进程冷启动（本机实测 ~2.2s/局）与打包开销——与 local 直跑的 Popen 墙钟
- * 同口径，节点间「平均耗时」可横向比（此前 local 4.2s vs 同机 self 2.0s 的差就是
- * 被排除的冷启动）。实现 = 解包 BCV2 → 改写 manifest.elapsedSec → 重打包（~1MB
- * 容器 gunzip+gzip 十几 ms，相对整局可忽略）；解包失败不吞结果——容器原样返回
- * （保留旧口径）。纯游戏时长不再单列（shard 的 ticks 可间接推算）。 */
+/** 旧实现（2026-09-06 起）：在 agent 主线程解包 BCV2 → 改写 manifest.elapsedSec
+ * → 重打包，让 elapsedSec 从「子进程纯游戏耗时」变成「接单 → 结果就绪」的任务
+ * 生命周期口径（与 local 直跑的 Popen 墙钟同口径，节点间可横向比）。
+ *
+ * 2026-11-14 起**停用**：真实生产容器 frame 3.1–12.6 MB，这段同步 gunzip+gzip 实测
+ * 13–44 ms/局（最大包 43.6 ms），8 workers 下占主线程 5–18%，2s 窗口内 10ms
+ * 定时器最大漂移 32.8 ms —— 原注释「~1MB / 十几 ms，相对整局可忽略」不成立。
+ * 计时已前移到导出器（`--service-started-at-ms` → `serviceElapsedSec`），容器在
+ * 子进程一次成型。本函数保留为回滚档与单测标的，**结果出口不得再调用它**。 */
 export function stampServiceSec(
   key: string,
   buf: Buffer,
@@ -1875,18 +1976,16 @@ export function stampServiceSec(
 }
 
 /**
- * 结果容器的**唯一出口**：盖章一次，**同一个** buffer 既进缓存又发给客户端。
+ * 结果容器的**唯一出口**：同一个 buffer 既进缓存又发给客户端。
  *
- * 为什么要有这个函数（2026-09-21 真机归因，docs/nn.progress.md §126）：同步路径曾经
- * `lruPut(key, stampServiceSec(key, buf))` 之后 `enqueue(new Uint8Array(buf))`——缓存里
- * 是盖章的、发出去的是原件 ⇒ 客户端拿到的 elapsedSec 缺了子进程冷启动（a95 实测同一局
- * 0.7s vs 真值 3.2s，只有第二次请求命中缓存才看到真值）。同步/异步两处都走这个出口，
- * 「盖章值 == 对外值」由**代码结构**保证，不靠人记得改两遍。
+ * 2026-09-21 真机归因（docs/nn.progress.md §126）：同步路径曾把盖章副本放进缓存、
+ * 原件发给客户端 ⇒ 同一局两个 elapsedSec。现在 elapsedSec 由导出器在打包时写定
+ * （见 runGame 的 `--service-started-at-ms`），出口只保证「缓存值 == 对外值」，
+ * 不再解包重压。结构钉子见 tests/agent/result-stamp.test.ts。
  */
 export function serveResult(key: string, buf: Buffer): Buffer {
-  const served = stampServiceSec(key, buf)
-  lruPut(key, served)
-  return served
+  lruPut(key, buf)
+  return buf
 }
 
 // ---------------- HTTP handler ----------------
@@ -1917,6 +2016,20 @@ export function taskKey(
   // v6 BC 标签来源（argmax/sampled）：同一 iterId 下两种标签是不同语料，
   // 仅非空时进 `:lm<mode>` 后缀（legacy 键逐字节不变）。
   lm = '',
+  // 评估/部署链推理规则（顶钢空枪门）：同一 (stage, seed) 在开/关两态是不同局，
+  // 仅激活时进 `:skipSteelShots` 后缀（老键逐字节不变）。
+  sso = '',
+  // 拆砖免绕路：同 (stage, seed) 开/关是不同局，仅激活时进 `:breakBricks` 后缀。
+  bbo = '',
+  // B8 通用废射门：同 (stage, seed) 开/关是不同局，仅激活时进 `:suppressUselessFire`。
+  suf = '',
+  // B10 预测门：同 (stage, seed) 开/关是不同局，仅激活时进 `:suppressLeadMissFire`。
+  slm = '',
+  // Hybrid opening：bare / hybrid 是不同局，仅激活时进 `:hybridOpen`。
+  oc = '',
+  // replay 语料（plan/replay-corpus.plan.md P2）：同 (stage,seed) 的 full/replay 是不同
+  // 产物，仅 replay 时进 `:cfr` 后缀（full 键逐字节不变）。
+  cf = '',
 ): string {
   let base: string
   if (sjHash && courseFp)
@@ -1924,7 +2037,7 @@ export function taskKey(
   else if (sjHash) base = `${iterId}:${mode}:${kind}:${stage}:${seed}:${sjHash}`
   else if (courseFp) base = `${iterId}:${mode}:${kind}:${stage}:${seed}:c${courseFp.slice(0, 16)}`
   else base = `${iterId}:${mode}:${kind}:${stage}:${seed}`
-  return `${base}${de ? ':de1' : ''}${dk ? `:k${dk}` : ''}${lm ? `:lm${lm}` : ''}`
+  return `${base}${de ? ':de1' : ''}${dk ? `:k${dk}` : ''}${lm ? `:lm${lm}` : ''}${sso ? ':skipSteelShots' : ''}${bbo ? ':breakBricks' : ''}${suf ? ':suppressUselessFire' : ''}${slm ? ':suppressLeadMissFire' : ''}${oc ? ':hybridOpen' : ''}${cf ? ':cfr' : ''}`
 }
 
 function beginTask(
@@ -1955,8 +2068,20 @@ function beginTask(
   decisionEvents = false,
   // 决策周期 K：`?decisionK=<n>` 时本局按该 K 跑；缺席/10 = 导出器缺省（同上）。
   decisionK: number = DEFAULT_DECISION_K,
+  // 评估/部署链推理规则：`?skipSteelOnlyShots=1` 时评估局抑制顶钢空枪。
+  skipSteelOnlyShots = false,
+  // 评估/部署链推理规则：`?breakBricksOnPath=1` 时评估局拆掉挡路的砖。
+  breakBricksOnPath = false,
+  // 评估/部署链推理规则：`?suppressUselessFire=1` 时抑制静态车道空枪。
+  suppressUselessFire = false,
+  // 评估/部署链推理规则：`?suppressLeadMissFire=1` 时抑制预测空枪。
+  suppressLeadMissFire = false,
+  // Hybrid opening：`?openingConnect=1` 时 eval/rollout 都拼 `--opening-connect`。
+  openingConnect = false,
   // v6 BC 标签来源（argmax/sampled）；legacy bc/rollout 忽略。
   labelMode: string = 'argmax',
+  // P2：`replay` = 导出器逐局录 replay、不产 obs/scalars/extra（仅 per-tick RL rollout）。
+  corpusFmt: 'full' | 'replay' = 'full',
 ): void {
   const task = newInflightTask(stage, seed)
   inflight.set(key, task)
@@ -1984,8 +2109,15 @@ function beginTask(
     course,
     decisionEvents,
     decisionK,
+    skipSteelOnlyShots,
+    breakBricksOnPath,
+    suppressUselessFire,
+    suppressLeadMissFire,
+    openingConnect,
     labelMode,
+    corpusFmt,
     task.signal,
+    task.startedAt,
   )
     .then((buf) => {
       serveResult(key, buf)
@@ -2334,6 +2466,35 @@ async function handle(req: Request): Promise<Response> {
     const decisionK = dkRaw === null ? DEFAULT_DECISION_K : Number.parseInt(dkRaw, 10)
     if (!Number.isInteger(decisionK) || decisionK < 1)
       return jsonResponse({ error: `decisionK invalid: ${dkRaw}` }, 400)
+    // 评估/部署链推理规则：`?skipSteelOnlyShots=1` 时评估局抑制顶钢空枪；
+    // 缺席 = 老行为（训练 rollout 不发该参数）。
+    const skipSteelOnlyShots = url.searchParams.get('skipSteelOnlyShots') === '1'
+    // 拆砖免绕路：`?breakBricksOnPath=1`；缺席 = 老行为。
+    const breakBricksOnPath = url.searchParams.get('breakBricksOnPath') === '1'
+    // B8/B10（同机制，互斥）：`?suppressUselessFire=1` / `?suppressLeadMissFire=1`。
+    const suppressUselessFire = url.searchParams.get('suppressUselessFire') === '1'
+    const suppressLeadMissFire = url.searchParams.get('suppressLeadMissFire') === '1'
+    // Hybrid opening：评估/rollout 共用（缺省 = 老行为）。
+    const openingConnect = url.searchParams.get('openingConnect') === '1'
+    // P2（plan/replay-corpus.plan.md）：`?corpusFmt=replay` 让 rollout 只产 replay+标签。
+    // 值非法 = 400；eval/BC/intent/goal 强制 full（请求 replay 直接拒，不静默降级）。
+    const cfRaw = url.searchParams.get('corpusFmt')
+    if (cfRaw !== null && cfRaw !== 'full' && cfRaw !== 'replay')
+      return jsonResponse({ error: `corpusFmt invalid: ${cfRaw}` }, 400)
+    const corpusFmt: 'full' | 'replay' = cfRaw === 'replay' ? 'replay' : 'full'
+    if (
+      corpusFmt === 'replay' &&
+      (mode === 'eval' || mode === 'bc' || mode === 'bc-v6' || kind === 'intent' || kind === 'goal')
+    )
+      return jsonResponse(
+        { error: 'corpusFmt=replay 只支持 per-tick RL rollout（eval/BC/intent/goal 强制 full）' },
+        400,
+      )
+    if (suppressUselessFire && suppressLeadMissFire)
+      return jsonResponse(
+        { error: 'suppressUselessFire 与 suppressLeadMissFire 同机制，不得同时开启' },
+        400,
+      )
     if (stageJson && (stageJson.length > 16384 || !jsonParseSafe(stageJson)))
       return jsonResponse({ error: 'stageJson invalid/oversized' }, 400)
     if (mode === 'eval' && policy === 'intent-exec' && !latestWeightsOfKind('intent'))
@@ -2344,8 +2505,9 @@ async function handle(req: Request): Promise<Response> {
     if (mode === 'eval' && policy === 'goal' && !latestWeightsOfKind('goal'))
       return jsonResponse({ error: 'goal weights not cached (POST /v1/weights x-kind=goal)' }, 409)
     const free = diskFreeMB()
-    // 地板是冻结的 2048（plan/self-node-disk-alert §4.1）；判据住纯函数（守门用例吃它）。
-    if (decideTaskAdmission(free) === 'low-disk')
+    // 地板缺省冻结 2048（plan/self-node-disk-alert §4.1），可被 CFG/CLI 覆盖（P3）；
+    // 判据住纯函数（守门用例吃它）。
+    if (decideTaskAdmission(free, diskFloorMb) === 'low-disk')
       return jsonResponse({ error: `low disk: ${free}MB` }, 503)
     // key 含 mode+kind：避免同 iterId 下 eval 与 rollout 同 (stage,seed) 撞缓存。
     // M1d：stageJson 布局指纹进键（python 端算同一 sha256[:16]，见 common.distribution）。
@@ -2363,6 +2525,12 @@ async function handle(req: Request): Promise<Response> {
       decisionEvents ? 'de1' : '',
       decisionK !== DEFAULT_DECISION_K ? String(decisionK) : '',
       labelMode,
+      skipSteelOnlyShots ? '1' : '',
+      breakBricksOnPath ? '1' : '',
+      suppressUselessFire ? '1' : '',
+      suppressLeadMissFire ? '1' : '',
+      openingConnect ? '1' : '',
+      corpusFmt === 'replay' ? 'replay' : '',
     )
     const cached = resultCache.get(key)
     if (cached) {
@@ -2370,7 +2538,7 @@ async function handle(req: Request): Promise<Response> {
       // LRU touch
       resultCache.delete(key)
       resultCache.set(key, cached)
-      return new Response(new Uint8Array(cached.buf), {
+      return new Response(bodyView(cached.buf), {
         headers: { 'Content-Type': 'application/octet-stream' },
       })
     }
@@ -2412,7 +2580,13 @@ async function handle(req: Request): Promise<Response> {
         course, // v5 多课程：异步路径同规（取 (course,kind) 桶）
         decisionEvents,
         decisionK,
+        skipSteelOnlyShots,
+        breakBricksOnPath,
+        suppressUselessFire,
+        suppressLeadMissFire,
+        openingConnect,
         labelMode,
+        corpusFmt,
       )
       return jsonResponse({ status: 'accepted', token: key }, 202)
     }
@@ -2458,19 +2632,28 @@ async function handle(req: Request): Promise<Response> {
           course, // v5 多课程：同步流式路径同规（取 (course,kind) 桶）
           decisionEvents,
           decisionK,
+          skipSteelOnlyShots,
+          breakBricksOnPath,
+          suppressUselessFire,
+          suppressLeadMissFire,
+          openingConnect,
           labelMode,
+          corpusFmt,
           task.signal,
+          task.startedAt,
         )
           .then((buf) => {
             if (hb) clearInterval(hb)
-            // 盖章 = 唯一出口（2026-09-21 修）：此前存盖章副本、发原件，客户端拿到的
-            // elapsedSec 漏掉子进程冷启动（a95 实测 0.7s vs 真值 3.2s）。
+            // 唯一出口（2026-09-21 修；2026-11-14 起不再盖章，只保证缓存 == 对外）：
+            // 此前存盖章副本、发原件，客户端拿到的 elapsedSec 漏掉子进程冷启动
+            // （a95 实测 0.7s vs 真值 3.2s）。
             const served = serveResult(key, buf)
             gamesDoneTotal++
             gamesDoneByIter.set(iterId, (gamesDoneByIter.get(iterId) ?? 0) + 1)
             noteTaskOutput(mode, iterId, true)
             try {
-              controller.enqueue(new Uint8Array(served))
+              // Buffer 本身就是 Uint8Array：不需再 `new Uint8Array(buf)` 全量复制一遍。
+              controller.enqueue(served)
               controller.close()
             } catch {
               /* client gone */
@@ -2523,6 +2706,16 @@ async function handle(req: Request): Promise<Response> {
     const dkPoll = Number.parseInt(url.searchParams.get('decisionK') ?? '', 10)
     // v6 BC 标签来源：与提交端同配方（空串 = legacy 键不变）。
     const lmPoll = url.searchParams.get('labelMode') ?? ''
+    // 评估/部署链推理规则：与提交端同配方（缺席 = 老键不变）。
+    const ssoPoll = url.searchParams.get('skipSteelOnlyShots') === '1' ? '1' : ''
+    // 拆砖免绕路：与提交端同配方。
+    const bboPoll = url.searchParams.get('breakBricksOnPath') === '1' ? '1' : ''
+    // B8/B10：与提交端同配方（缺席 = 老键不变）。
+    const sufPoll = url.searchParams.get('suppressUselessFire') === '1' ? '1' : ''
+    const slmPoll = url.searchParams.get('suppressLeadMissFire') === '1' ? '1' : ''
+    const ocPoll = url.searchParams.get('openingConnect') === '1' ? '1' : ''
+    // P2：replay 语料键后缀（与提交端同配方；缺席 = 老键不变）。
+    const cfPoll = url.searchParams.get('corpusFmt') === 'replay' ? 'replay' : ''
     const key = taskKey(
       iterId,
       mode,
@@ -2534,6 +2727,12 @@ async function handle(req: Request): Promise<Response> {
       url.searchParams.get('decisionEvents') === '1' ? 'de1' : '',
       Number.isInteger(dkPoll) && dkPoll !== DEFAULT_DECISION_K ? String(dkPoll) : '',
       lmPoll,
+      ssoPoll,
+      bboPoll,
+      sufPoll,
+      slmPoll,
+      ocPoll,
+      cfPoll,
     )
     const cached = resultCache.get(key)
     if (cached) {
@@ -2542,7 +2741,7 @@ async function handle(req: Request): Promise<Response> {
       cacheHits++
       resultCache.delete(key)
       resultCache.set(key, cached)
-      return new Response(new Uint8Array(cached.buf), {
+      return new Response(bodyView(cached.buf), {
         headers: { 'Content-Type': 'application/octet-stream' },
       })
     }
@@ -2648,6 +2847,17 @@ async function handle(req: Request): Promise<Response> {
       bunVersion: Bun.version,
       agentVersion: cachedGitShortHash(),
       cpus: CPUS,
+      // 派工缺省（2026-11-14，plan/node-throughput-and-keepalive P1）：trainer 的派工槽位在
+      // config 缺省时回落到这里（节点自报的池容量 = `--workers`）；旧消费方忽略未知字段。
+      // 与 `/v1/status.workers` 同源（同一个模块变量），不是新事实。
+      workers,
+      // 准入排队（2026-11-15，加法）：与 `/v1/status.admission` 同源同值。训练侧把
+      // `queueFull/timedOut` 的**累计增量**打进每轮日志（503 归因）；旧消费方忽略。
+      admission: {
+        active: admission.active(),
+        waiting: admission.waiting(),
+        ...admission.counters(),
+      },
       // 节点门唯一指纹就是上面的 codeHash（rollout 与 eval 同一判据，唯一事实来源 =
       // codehash-files.txt）。2026-09-17 起不再报 engineEpoch：它是账本记录值，不是门。
       // §353：rollout 引擎与 node 版本（纯观测；调度口径不变）
@@ -2664,6 +2874,25 @@ async function handle(req: Request): Promise<Response> {
       // 旧 agent 无此字段 ⇒ 训练侧不派 K≠10 任务（fail-closed：旧 agent 会静默按
       // K=10 跑，混批比不派更坏；同 decisionEventsSupport）。
       decisionKSupport: true,
+      // 评估/部署链推理规则支持位（课程 inference_rules.skip_steel_only_shots）：
+      // `/v1/task?skipSteelOnlyShots=1` 时评估局拼 --skip-steel-only-shots。
+      // 旧 agent 无此字段 ⇒ 训练侧不派开启批（fail-closed，同 decisionKSupport）。
+      skipSteelOnlyShotsSupport: true,
+      // 拆砖免绕路支持位：`/v1/task?breakBricksOnPath=1` 时评估局拼
+      // --break-bricks-on-path。旧 agent 无此字段 ⇒ 不派开启批（fail-closed）。
+      breakBricksOnPathSupport: true,
+      // B8 通用废射门支持位：`/v1/task?suppressUselessFire=1` 时评估局拼
+      // --suppress-useless-fire。旧 agent 无此字段 ⇒ 不派开启批（fail-closed）。
+      suppressUselessFireSupport: true,
+      // B10 预测门支持位：`/v1/task?suppressLeadMissFire=1` 时评估局拼
+      // --suppress-lead-miss-fire。旧 agent 无此字段 ⇒ 不派开启批。
+      suppressLeadMissFireSupport: true,
+      // Hybrid opening：`/v1/task?openingConnect=1` 时 eval/rollout 拼 --opening-connect。
+      openingConnectSupport: true,
+      // replay 语料支持位（plan/replay-corpus.plan.md P2）：`?corpusFmt=replay` 时
+      // export-rl-rollout 逐局录 replay、不产 obs/scalars/extra。旧 agent 无此字段 ⇒
+      // 训练侧只在有此能力位的节点上派 replay 任务（fail-closed，同 decisionKSupport）。
+      replayCorpusSupport: true,
       // BC 语料任务支持位（2026-09-13）：/v1/task ?mode=bc（God-AI 单局 → BCV2 npy
       // shard）。旧 agent 无此字段 → bc_dispatch 不派（fail-closed，同 stageJsonSupport）。
       bcSupport: true,
@@ -2700,8 +2929,9 @@ if (import.meta.main) {
   }
   if (showHelp) {
     console.log(
-      'usage: bun tools/dist/sampler-agent.ts --port 8443 [--workers N] [--cache-mb 2048] [--max-cache-items 32] [--pool-idle-ms 1800000] [--pool-floor 4] [--print-code-hash] [--print-code-hash-files] [--no-node] [--no-persist] [--no-prewarm] [--takeover]\n' +
-        '       --workers/cpus default = physical cores；idle reap: idle≥--pool-idle-ms down to --pool-floor (0 = off)',
+      'usage: bun tools/dist/sampler-agent.ts --port 8443 [--workers N] [--cache-mb 2048] [--max-cache-items 32] [--pool-idle-ms 1800000] [--pool-floor 4] [--disk-floor-mb 2048] [--disk-warn-mb 4096] [--print-code-hash] [--print-code-hash-files] [--no-node] [--no-persist] [--no-prewarm] [--takeover]\n' +
+        '       --workers/cpus default = physical cores；idle reap: idle≥--pool-idle-ms down to --pool-floor (0 = off)\n' +
+        '       --disk-floor-mb/--disk-warn-mb override the frozen 2048/4096 thresholds (warn ≥ floor+512)',
     )
     process.exit(0)
   }

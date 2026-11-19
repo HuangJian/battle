@@ -46,8 +46,11 @@ git checkout <协调器当前的完整 commit hash>
 git status                    # 必须干净
 
 # ③ 启动 agent（首启生成 tools/agent/agent.auth 并打印 authKey）
-#    --workers 缺省 = **物理核数**（2026-10-04）；池里每个 worker 常驻 ~75–100MB，
+#    --workers 缺省 = **物理核数 ×2**（2026-11-14：一局 `svc 2.2s / wall 9.3s`，槽位只在
+#    服务段被占住，多一倍池槽把装载/打包的空档叠起来）；池里每个 worker 常驻 ~75–100MB，
 #    按 HT 逻辑核预铺/放行只是把常驻内存翻倍 —— 显式传 N 才能覆盖。
+#    2 核小机器上 ×2 = 4 与 §2026-11-11 事故同型 ⇒ 看启动期的 `workers 自检` 行与
+#    `★ workers 超额认购`（ping ≥1.5×基准且 ≥1s）；要回到旧口径就显式传物理核数。
 bun tools/agent/sampler-agent.ts --port 8443 --workers <N>
 #    日志应出现: [sampler-agent] listening on 0.0.0.0:8443 workers=<N> ...
 
@@ -161,11 +164,15 @@ bun tools/agent/sampler-agent.ts --port 8443 --workers <N>
 按 §2 启动 agent 后，平板在局域网内即天然可达——协调器直接填
 `http://<平板IP>:8443`（`ip addr | grep inet` 查 IP）。无隧道环节。
 
-`--workers` 建议：8 核平板先 **4**，稳定后升 6（缺省 = 物理核数，8 核机 = 8；传值即覆盖）。
+`--workers` 建议：8 核平板先 **4**，稳定后升 6（缺省 = 物理核 ×2，8 核机 = 16；传值即覆盖）。
 一局一个单线程进程。
 空闲回收默认开：池空闲 ≥30min 时收回到 floor=min(4, workers)（`--pool-floor` 调保底、
 `--pool-idle-ms 0` 关）——池「只涨不回缩」的最大项由它兜住，热路径常见波次仍零冷启。
 全程插电；热节流导致后期变慢是物理现象，不是故障。
+
+复核**入库的 arm64 内核产物**（不改任何代码、设备上零编译）：USB 连着设备就能跑
+`bun tools/diag/arm64-prebuilt-probe.ts`（exit 0 = PASS；比的是 `git show HEAD:` 里的老产物与现役
+`prebuilt/linux-arm64/conv_native.so`，用 Termux 自带 python3，约 15 s）。
 
 ## 4. Google Cloud Shell（cloudflared 出站隧道）
 
@@ -254,9 +261,14 @@ while ($true) {
 }
 ```
 
-⚠️ **concurrency 必须 ≤ 该节点 agent 实际 `--workers`**。超出的任务会吃
-`HTTP 503 busy`，nodeFailStreak=3 连败即整轮熔断出局（2026-08-24 生产实测教训，
-详见 docs/nn/legacy.md §10.4）。
+**concurrency 与 `--workers` 的关系（2026-11-14 起）**：不再要求 `concurrency ≤ --workers`。
+派工线程每局会被隧道往返与结果回传整段占住（实测 `wall 9.3s` / 节点服务 `2.3s`），所以
+`concurrency` 略大于 `--workers` 是**有意**的——多出的那部分在节点准入队列里排队（有界：
+`--admission-wait-ms` 12s / `--admission-queue-max` 32），不是故障。判据换成可观测的：
+`/v1/status.admission.waiting` 持续大于「派工数 − workers」、或 `timedOut` 递增 ⇒ 降并发。
+派发日志会打 `concurrency=N（config=C workers=W cpus=P）`；`C > 2W` 时同一行尾部追加「超额派工」。
+（历史教训：2026-08-24 的「concurrency > workers ⇒ 连败熔断」在旧实现里成立，因为那时
+池满直接 503 且计入 nodeFailStreak；准入排队上线后 503 走背压豁免，见 docs/nn/legacy.md §10.4。）
 
 安全：authKey 是节点唯一门禁。走公网隧道时尤其保管好；疑似泄露就删掉该节点
 的 `tools/agent/agent.auth` 重启 agent 轮换，再同步更新 rl-config.json。
@@ -280,7 +292,7 @@ while ($true) {
 | `codeHash mismatch — excluded (red)` | commit 不一致或有本地改动 | `git status` 必须干净且在指定 commit；日志含 `local=xxx remote=yyy`——按 §7.1 双侧 codehash-report diff 定位 |
 | 日志连续多轮 `(dedup) — excluded` | 同 (agent hash, 期望 hash) 已被要求重启过（F1 键含期望值） | 训练机改集内文件 commit+push 后期望 hash 变化自动再发升级；持续 dedup 按 §7.1 双侧 diff |
 | `bunVersion ... differs — excluded (red)` | 非 1.4.x | 更换 bun 构建（major.minor 必须一致） |
-| 大量 `HTTP 503: {"error":"busy"}` | concurrency > workers | 调低 rl-config.json 的 concurrency |
+| 大量 `HTTP 503: {"error":"busy"}` | concurrency 显著大于节点的真实容量（准入队列也满了） | 先看 `/v1/status.admission.waiting`/`timedOut`；持续升就调低 rl-config.json 的 concurrency（单次 503 是背压豁免，不算节点故障） |
 | `wver not cached here` (409) | 该节点尚未收到本轮权重 | 等下轮 weights POST；持续出现则查 POST 失败行 |
 | `Remote end closed` | 传输中断连（休眠/省电断网） | 插电 + wake-lock；任务 900s 超时自动回队 |
 
@@ -310,7 +322,7 @@ diff local.tsv mac.tsv
 | 节点多出 `.DS_Store` / 临时文件（`.pyc`/`*~`/`*.log` 等） | 删除；此类噪声已由 F3 过滤规则永久免疫（双侧同规则） |
 | 节点有本地未提交改动 | 决定 commit+push，或 `git checkout -- <文件>` 还原（**禁用 git stash**） |
 | `core.autocrlf` 与训练机（`input`）不一致 | 对齐后重新 checkout 集内文件 |
-| `src/nn/conv/prebuilt/wasm/conv.wasm`（或 `prebuilt/<平台>/conv_native.*`）字节不同 | 从训练机复制覆盖，勿在节点本地重编（`bun tools/agent/native-build.ts --cross` 一次重出 6 native + wasm） |
+| `src/nn/conv/prebuilt/wasm/conv.wasm`（或 `prebuilt/<平台>/conv_native.*`）字节不同 | 从训练机复制覆盖，勿在节点本地重编（`bun tools/agent/native-build.ts --cross` 一次重出 9 native + wasm） |
 | 分支/目录不对 | 确认 agent 的 `REPO_ROOT` 与分支 = 训练机 `UPGRADE_BRANCH` |
 
 > 训练机侧自身先自查：`common.distribution.dirty_hash_files()` 非空（集内有未提交改动）时，远端

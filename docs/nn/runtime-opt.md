@@ -8,6 +8,181 @@
 
 ---
 
+## §47 单局看门狗的 20s/30s 没跟上面板的 tick 预算：36000 拍的合法长局每轮被判「异常慢」（2026-11-18）
+
+**现场（g5-pilot，TPU 云机 224 核 / 222 并发）**：一份日志里 **1415 行**「单局异常慢」
+（rollout 504 / eval 914），每轮 eval 的 `≥20s 有 11–27 局`、`max 26–27.5s`，而
+`重试过的局 0 个`、`失败 0`——**没有一局真卡住**，全部正常跑完。
+
+**第一步：先证明它们不是异常。** 云机逐局真数据（`tmp/g5-pilot/it72/per-game.json`，446 局）：
+`ticks` p50 **7470** / p90 12001 / p99 **23955** / max **36000**；同轮墙钟 p50 5.26s / p99 13.90s
+⇒ **0.48–0.85 ms/拍**，墙钟就是拍数的线性函数。超过 20s 的那批 = 24000–36000 拍的局，
+其中拉满的局就是关卡终局线（`nn-training/levels/classic35-safe-base.jsonc`：`max_ticks 36000`，
+35 关共用）——**这是任务侧的终局标准，不是机器问题**。
+
+旁证（同一条分布的三件事）：
+
+* 慢局点名集中在一个关：**s2020 占 766/1415（54%）**（其后 s2012 105、s2008 73、s2032 63），
+  而 s2020 的 ticks 均值 16147（面板 p50 的 2.2 倍）；
+* **同一个 `(stage,seed)` 每轮都慢**（`s2020/d2000000006` 在 37 轮里 37 次）⇒ 确定性，不是抖动；
+* eval 比 rollout 尾巴重（max 27.5s vs 22.4s）：eval 是固定 A 层语料 35 关 × 20 seed，
+  s2020 的 20 局全在里面；rollout 每关只抽 4–5 个 seed。
+
+**根因：口径没跟面板走。** 20s/30s 这对数是 2026-10-26 按「经典 35 关长局 6–15s」标定的
+（当时的长局是 18057/16151 拍，**从没跑到终局线**）。这一版面板的终局线是 36000 拍 ⇒ 一条
+**合法**的拉满局就是 17–30s，于是：
+
+1. 点名线 20s **结构性假警报**：每轮 4% 的 eval 局（max-tick 那批）必然越过它；
+2. 硬顶 30s 离合法最坏值只差 0–4s（实测 max 27.45s = **92% 的上限**）——机器稍慢一点就会把
+   **最贵的那几局**杀掉再重跑一遍（白烧 25s+，且烧在最贵的局上），重试上限还是 ×4。
+
+**修法（`common/game_watch.py`，两条腿共用一份口径）**：
+
+* 缺省硬顶由面板自己的终局线推：`game_timeout_sec(max_ticks) = max(30s, max_ticks × 1.2ms)`
+  （1.2ms = 实测上限 0.85 的 1.4×）；`--max-ticks` 从**这一局自己的 argv** 取
+  （`max_ticks_of`；rollout 的三种导出器与 eval 都带它），缺席 = 0 ⇒ 逐字回到兜底 30s；
+* 点名线给硬顶让出**同一份**余量：`slow_warn_sec(cap) = 20s + max(0, cap − 30s)` ——
+  缺省档**逐字仍是 20s**（2026-10-26 的标定一个字不改），36000 拍的面板 ⇒ 硬顶 43.2s / 点名 33.2s；
+* 写入端三处（一次性 rollout、`serve_pool._submit`、`run_eval_runner_capture`）与两处分布行
+  （`game_time_summary(warn_sec=…)`）统一读这两个函数 —— 不再各自数一份秒数。
+
+**效果（按 it75 的实测分布）**：`≥20s 有 14 局` 与 1415 行点名全部消失（合法局最慢 27.5s <
+33.2s），而任何**真**退化（36000 拍仍 >33.2s）照样先打 WARN、43.2s 才杀；短面板
+（≤25000 拍，例如 12000 拍的老课）行为**逐字节不变**。代价：一条真卡住的局多等 13.2s 才被
+杀（点名线先说话，`STALL_WARN_SEC=120s` 的整轮停滞线不受影响）。
+
+**复现**：`tests/common/test_game_watch.py::test_panel_tick_budget_lifts_the_default_cap_and_the_warn_line`
+（修前 `game_timeout_sec` 不存在/硬顶 30s 压着 27.45s 的合法最坏值）与
+`::test_max_ticks_of_reads_the_exporter_flag`。
+
+---
+
+## §46 采集 α 档的「在飞不算账」：222 宽云机每轮多派 ~2.5 倍局（2026-11-18）
+
+**现场（g5-pilot it72–74，TPU 自助云机，35 关 × 3072 配额）**：`kind=iter rollout done` 里
+`games=435–455`、`已采 357571/107520`、`过采 250051`，每轮都一样；PPO 侧 `dropped 276 shards`
+——采到的样本里 **70% 直接丢弃**，rollout 墙钟 22s（≈ 两个满波）里一半以上是白烧。
+计划侧没有问题：首批 138 局（`Σ ceil(3072/est_hi)`，4–5 seed/关）刚好对得上课程注释里的
+「35×3072（4–5 seed/关）」；多出来的局全是**现场调度器派的**。
+
+**根因 = `worker/stream_collect._next_alpha` 只在「`collected < quota`」上判停，在飞的局不进账**。
+槽位一空就问下一局（`iter_rollout._fill`），222 个槽位在配额早就够了的情况下还在同一批关上加派，
+直到最后一局结算才停 ⇒ 多派的量 ≈ 一整个池宽（现场 435 vs 需要 ~140）。
+`quota` 档有这条闸（`got + 在飞 × est ≥ quota`），α 档当初以「不读 est」为名把它一起丢了 ——
+但这条闸**不需要** est：用实测 `samples_s`（一局结算就有）就能算「在飞的局预计算不算补齐」。
+
+**修法**：α 的候选循环加同一口径的在飞闸（`got + 在飞 × 实测局均 ≥ quota ⇒ 本关先不派`），
+没有实测的关只留一局在飞；全部候选都被在飞挡住时返回 `[]`（软停，供给不关），只有「满额 /
+触顶 / no_data」才返回 `None`（终局）。
+
+**标定**（离散热事件仿真：35 关、配额 3072、每局 822 样本、222 槽、8 seed × 5 变体）：
+
+| 档 | 派局 | 已采 | 过采 | 缺口 |
+|---|---|---|---|---|
+| α（修前） | 392 | 322224 | 214704 | 0 |
+| quota（旧口径对照） | 175 | 143850 | 36330 | 0 |
+| **α（修后）** | **140** | **115080** | **7560** | **0** |
+
+5 个变体（est 全 0 / 窄池 4 槽 / 每局 300 / 2000 样本）× 8 seed 全部 `缺口 0`：省算力没有省成短采。
+过采下限 = 「每关最后一局超出的部分」（每局 2000 样本时 30%，不可再压）。
+
+**为什么不只是把 `sched` 改回 `quota`**：α 的派发顺序（wall × 剩余局数 / 在飞）在**结算顺序**上
+比 quota 的 est 反解更省墙钟，缺的只是这条闸；而且生产缺省就是 α（`loop_export` 缺省写 alpha），
+改缺省等于把现场所有云机轮的采集形态一起动一遍（`test_default_sched_is_alpha...` 钉住的是产品
+口径，不是 bug）。
+
+**复现**：`tests/worker/test_stream_alpha.py::test_alpha_counts_in_flight_games_on_a_wide_pool`
+（12 槽 / 3 关 / 每关 3 局 ⇒ 修前 18 局、修后 9 局，且短采为空）。
+
+---
+
+## §45 x64 发两份内核产物（基线 + `-fma`）+ 子进程试跑选；arm64 真机验 FMA（2026-11-16）
+
+**用户口径**：①「x64 CPU 基线从 Sandy Bridge 抬到 Haswell —— 能不能保留两个 prebuilt，不支持 FMA
+的用无 FMA 的那份？」②「本机没有 arm64 —— a95 节点已 USB 连本机，adb 可用」。
+
+### 一、双产物（`src/nn/conv/native-prebuilt.ts`）
+
+矩阵 6 → **9 个 native 目标**：x64 三平台各两条（`<p>-x64` = `-mavx -msse4.2`，Sandy Bridge 2011+；
+`<p>-x64-fma` = `+ -mfma`，Haswell 2013+），**独立目录 + 独立 manifest 条目**；arm64 仍一条（FMA 属
+基础 ISA，`-ffp-contract=fast` 一条 flag 就融合）。本机构建（`hostTarget`）固定基线 flags —— 它是
+「未知机器的便利路径」，不该跟 `-mfma`。
+
+### 二、怎么选（新 `src/nn/conv/native-variant.ts`）
+
+**子进程试跑，不信字符串**：`bun -e` 里 dlopen 变体产物 → 问 ABI → 用 dummy 权重跑一次
+`cf_student_features`；**退出码 0 才算本机可用**。SIGILL 死在子进程里，父进程只看到非 0。
+解析 `/proc/cpuinfo` / `sysctl` / 注册表一律否决：三套平台三套解析会漂，且「字符串里有 fma」不代表
+OS/虚拟化真让你用；而选错的代价是**节点整局挂**。结果落盘 `tmp/nn-native-variant.json`（键 = 平台/架构
++ 探针版本 + 产物 sha），一台机器一次 ~40–120 ms；写不进去只影响速度（每进程多一次 spawn）。
+
+调用链：`nativeLibCandidates()` → `variantOrder()`（探针不过 ⇒ 变体**连候选都不进**）→
+`preferredVariants()`；`NativeStatus.variant` 让「这局到底用了哪份」可查；`rollout-runner` 按
+`resolveNativeLib().targetId` 把库镜进 bundle 同名目录（**变体不能混装**：镜到基线目录会让适配器以为
+自己用了基线）。
+
+### 三、证据
+
+- **本机 win32-x64**：默认解析 `win32-x64-fma`；`NN_NATIVE_LIB=<基线>` 走基线且 attest 通过。
+  生产 A/B（s16/seed860001，同权重，6 对交替）：fma 2180/2200/2375/2392/2445/2518 ms vs 基线
+  2556/2690/2720/2728/2793/2881 ms（成对中位比 **≈0.86×**）；outcome/score/ticks 完全相同。
+- **WSL 真机**：`linux-x64` 基线与 wasm **逐字节 0 差**（无 FMA ⇒ 融合不可能发生）、`linux-x64-fma`
+  最大差 1.43e-6。两条产物都在门禁里真 dlopen。
+- **a95（Android 12 / arm64-v8a / M2002J9E）真机**：**两条臂都是入库产物，设备上零编译**
+  （用户 2026-11-16 点名「不要现编，用代码库里的老版本」）——参考臂 = `git show
+  HEAD:src/nn/conv/prebuilt/linux-arm64/conv_native.so`（clang 20、`-ffp-contract=off`、`fmla 0`，
+  即老版本/本机 wasm 等价物），被测臂 = 现役 `prebuilt/linux-arm64/conv_native.so`（同 clang 20、
+  `-ffp-contract=fast`、`fmla 60`）⇒ 两臂之间**唯一的变量就是乘加融合**（没有 clang 21 vs 20 这类
+  额外差异）。harness 用设备上的 python3 + ctypes（`.so` 只有 9 KB，`adb push` 即用，不需要 clang）：
+  ① 入库产物在 bionic 上**真能 dlopen**（此前只有设计声明）；② 真实权重 × 3 组随机输入：worst
+  `bufA` 9.155e-5 @ 张量 max 198.7（相对 4.6e-7，容差线 1.99e-3 ⇒ 余量 21×），`pooled` 4.77e-7 ⇒
+  **ATTEST=PASS**；③ 内核稳态 **6.42–6.70 ms → 4.36–4.49 ms（−30~35%，3 次重跑 0.697/0.651/0.683×）**。
+  旁证：早一版「设备上现编 clang 21 参考臂」给出的差值逐位相同（4.768e-7 / 9.155e-5）⇒
+  编译器版本确实不是变量，但结论不该依赖这个巧合。
+
+⇒ arm64 的 FMA 收益比 x64（+8.4%）大得多，「训练侧全 native」在 arm64 节点上是强赚的；x64 老机器
+则自动落到基线产物，既不会 SIGILL 也不丢新机器的 8%。
+
+**复核已固化成一条命令**（2026-11-16，用户点名「提成正式脚本」）：
+
+```
+bun tools/diag/arm64-prebuilt-probe.ts     # USB 连着 arm64 设备即可；约 15 s；exit 0 = PASS
+```
+
+它自己干完这些：`git show HEAD:src/nn/conv/prebuilt/linux-arm64/conv_native.so` 取参考臂 →
+训练机侧用真实权重（`buildModelFromText`）产 blob + 3 组 ±1 输入（与 `attest()` 同种子）→ `adb push`
+到 Termux 并 `run-as` 执行 `tools/diag/arm64-prebuilt-probe.py`（设备自带 python3 + ctypes，
+**零编译**，两臂都直接 dlopen 入库产物）→ 打印逐张量差值/容差线/吞吐比 → 清理设备侧目录。
+开关：`--serial`（多设备点名）/ `--weights`（默认取 `tmp/**` 最新）/ `--rev` 或 `--old-lib`（换参考臂）/
+`--new-lib` / `--keep`（保留设备侧文件）。无设备/非 arm64/缺 `python3` 都响亮 exit 1 并指路
+`tools/agent/agent-setup.md` §3。
+
+## §44 native 内核 FMA 落地：x64 `-mfma` + 全目标 `-ffp-contract=fast`，逐位门变容差门（2026-11-16）
+
+**用户口径**：「所有训练提速都是有价值的，FMA 能上尽量上」。此前 `-ffp-contract=off` 的唯一理由是
+native↔wasm 逐位一致，代价就是丢掉乘加融合（决策与实测 → `DECISIONS.md`
+§2026-11-16-goalnn-conv-fma）。
+
+**改了什么**：`native-prebuilt.ts::nativeFlags()` 全目标 `-ffp-contract=fast`；x64 三个目标 vector
+加 `-mfma`；arm64 不需要 `-mfma`（FMA 属基础 ISA，`fast` 单 flag 就融合）；`-fno-fast-math` 不变；
+wasm 仍 `off`（产物字节不变，仍 `6e506781…`）。
+
+**证据（本机 clang 20.1.0）**：
+
+- 内核 ffi 微基准成对 100 轮 **0.9228× 时间 / +8.4% 吞吐**；`vmulps 151→35`、`vaddps 158→42`、
+  `vfmadd 0→166`；`fma8` / `fma24` / `avx2+fma` 都不如 `fma16` ⇒ px16 仍最优。
+- 端到端 A/B（s16/seed860001，同权重交替 5 轮）：native 1448 ms → FMA **1340 ms（−7.5%）**。
+- **生产路径零旁路**（入库 prebuilt + 真 attestation）13 种子 860001–860013 对 wasm 臂：
+  `a_move/a_fire/a_hold/obs/mask/scalars` **13/13 局全 0 元素不同**，outcome/score/ticks 相同；
+  native/wasm 单局墙钟比 0.59–0.67×。⇒ FMA 只动 `lp_*`/`value` 末位（PPO 梯度数值），不动采样轨迹。
+- 三个逐位门改容差门：运行期 attestation（`ATTEST_TOLERANCE = 1e-5 × max(1, max|wasm 张量|)`）、
+  `tests/native-parity.test.ts`、`tests/native-prebuilt.test.ts` 的 WSL 真机（实测最大差 1.43e-6）。
+
+**代价**：x64 CPU 基线抬到 **Haswell(2013)**（更老的 CPU 首用即 SIGILL，保命开关 `NN_NATIVE=0`）；
+arm64 融合是 clang 自动收缩，真值证据只能来自节点自己的容差 attestation（产物 `fmla 60` 已核实）。
+
+**顺带**：`nativeStaleReason()` 补上 flags 比对（此前只改编译参数的改动会 reuse 旧库，实测踩中）。
+
 ## §43 云机 serve pool 跨轮保留 + 采集 α 单腿（2026-11-04，P0a/P0b/P1）
 
 **现场**：TPU 云机 330GB 内存只用了 ~16GB，但每个 kind=iter 轮、每个 eval 点都要重付 94 个 bun

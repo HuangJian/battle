@@ -30,7 +30,15 @@ PARAM_LIMIT = 8
 #: 存量：包含 >200 行函数的文件 → 该文件里这类函数的**个数**。
 #: 2026-11-19：**清零**（第 37 刀拆掉最后一个 `_remote_ppo_publish`）——此后任何 >200 行
 #: 函数都是新增，直接红。
-LONG_FUNCS_BASELINE: dict[str, int] = {}
+LONG_FUNCS_BASELINE: dict[str, int] = {
+    # 2026-11-19 合入上游 goal-nn（74 提交）时的存量：这四处是**上游的协议面/编排面**
+    # （fetch 任务串、采样节点主流程、评估节点门、BC epoch 循环），合并时只做了结构适配；
+    # 拆它们要按「独立所有者 + 独立触发条件」做，见 python.refactor.md §P0-2。
+    "common/task_client.py": 1,
+    "remote/rollout_node.py": 1,
+    "trainer/eval_dispatch.py": 1,
+    "worker/train/bc.py": 1,
+}
 
 #: 存量：包含 >8 参数函数的文件 → 个数。
 WIDE_FUNCS_BASELINE = {
@@ -42,6 +50,16 @@ WIDE_FUNCS_BASELINE = {
     "hub/offline_ingest.py": 1,
     "hub/offline_push.py": 2,
     "hub/offline_push_pack.py": 1,
+    # 2026-11-19 合入上游：claim 的能力位参数（capabilities）让这四个签名跨过 8 参；
+    # 下一刀应把 (job_id, ttl, worker, mode, epoch, role, capabilities) 收成一个 LeaseSpec。
+    "hub/queue_claims.py": 1,
+    "hub/queue_peer.py": 1,
+    "hub/store.py": 1,
+    "hub/store_leases.py": 2,
+    # P3 lazy loader 的装载参数（loader/gamma/lam/normalize/配额/mb/bundle）本就 >8。
+    "worker/ppo/lazy_corpus.py": 1,
+    # 上游合入的宽签名（BC 数据集）——同批登记，待收对象。
+    "worker/data/dataset.py": 1,
     "remote/bc_job.py": 1,
     "remote/bundle.py": 2,
     "remote/colab_bc.py": 1,
@@ -53,7 +71,8 @@ WIDE_FUNCS_BASELINE = {
     "remote/http.py": 2,
     "remote/hub_client.py": 3,
     "remote/hub_http.py": 2,
-    "remote/job_lifecycle.py": 3,
+    # 2026-11-19 合入上游的 relay/replay 参数（原 3 处 → 4 处）。
+    "remote/job_lifecycle.py": 4,
     "remote/job_round.py": 2,
     "remote/lifecycle.py": 1,
     "remote/node_upgrade.py": 1,
@@ -68,7 +87,8 @@ WIDE_FUNCS_BASELINE = {
     "remote/push_client.py": 1,
     "remote/push_dispatch.py": 2,
     "remote/push_register.py": 1,
-    "remote/rollout_node.py": 1,
+    # 2026-11-19 合入上游：`run` 的交易参数 + relay 通道参数（原 1 处 → 2 处）。
+    "remote/rollout_node.py": 2,
     "remote/run_loop.py": 1,
     "remote/tailscale_boot.py": 1,
     "remote/train_core.py": 5,

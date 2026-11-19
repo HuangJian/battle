@@ -946,6 +946,10 @@ def test_unit_pairs_route_per_stage_params(tmp_path: Path, monkeypatch) -> None:
     nodes = [{"id": "n1", "url": "http://n1", "authKey": "", "enabled": True, "concurrency": 2}]
     r, logs, _ = _channels_runner(tmp_path, monkeypatch, nodes=nodes, unit=unit)
     out = r.run()
-    assert out["total"] == 2 and out["settled"] == 2 and out["dropped"] == 0, out
+    # 带上 runner 日志：全量跑里偶发 `dropped=2`（2026-11-19），没有日志就只能看到两个计数。
+    assert out["total"] == 2 and out["settled"] == 2 and out["dropped"] == 0, (
+        out,
+        [m for m in logs if "batcheval" in m][-12:],
+    )
     assert got[2000] == {"json": '{"name":"a"}', "lives": 1, "level": 0, "max": 100}, got
     assert got[2001] == {"json": '{"name":"b"}', "lives": 3, "level": 2, "max": 200}, got

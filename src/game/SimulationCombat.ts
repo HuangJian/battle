@@ -52,6 +52,11 @@ function isBaseProtectionCell(col: number, row: number): boolean {
  *
  */
 
+// (perf 2026-11-16, REJECTED) tankHitsTank 的前置「占格戳」粗筛（每 tick 标记坦克 2×3 格、
+// 位掩码区分 self）实测把 175-shard 语料的 tickHash 链跑崩：粗筛说「没别的坦克」时仍有
+// 真实重叠被漏掉（典型原因：同一格被两辆坦克跨格覆盖时的边界），所以回退到精确坐标扫描。
+// 教训同类于 World 位图：**能用像素重叠判定的地方，别用格级近似去否定**。
+
 export class CombatSystem {
   constructor(private d: SimulationSystems) {}
   // ================================================================
@@ -255,9 +260,17 @@ export class CombatSystem {
       // overlap path was movement, now closed. (Bullets still pass through
       // spawning tanks — they are invulnerable — via the separate check in
       // bulletHitsTank.)
-      if (aabb(newX, newY, self.w, self.h, other.x, other.y, other.w, other.h)) {
-        return true
+      // 内联 aabb 的否定式（同一比较、零函数调用）：绝大多数候选坦克在第一项
+      // 就比较失败，直接跳过，不再进函数体。
+      if (
+        newX >= other.x + other.w ||
+        newX + self.w <= other.x ||
+        newY >= other.y + other.h ||
+        newY + self.h <= other.y
+      ) {
+        continue
       }
+      return true
     }
     return false
   }

@@ -964,6 +964,20 @@ function addHotMirrorCandidates(metas: MetaCandidate[], ledgers: LedgerCandidate
 
 let scanMemo: PoolStreamsScan | null = null
 
+/** 流目录 → 课程标签（日桶/矩阵的课维度）。
+ *
+ *  普通流取首段（`tmp/<课>` / `tmp/<课>/traj`）；独立 eval run（`tmp/<组>/<run>.run/`）
+ *  取 run 名（去掉 `.run` / `.jsonl.run`）——否则贡献矩阵会冒出一个组名（`o2-analysis`）
+ *  当课程，而那一列其实是若干次手动 eval。 */
+export function courseOfStreamDir(dir: string): string {
+  const segs = dir.split('/').filter(Boolean)
+  const last = segs[segs.length - 1] ?? dir
+  if (last.endsWith('.run')) {
+    return last.replace(/\.jsonl\.run$/, '').replace(/\.run$/, '') || last
+  }
+  return segs[0] ?? dir
+}
+
 /** 扫描 memo 的复用判定（与 `aggMemoReusable` 同规的增量版）。 */
 function scanReusable(m: PoolStreamsScan, root: string, nowMs: number): boolean {
   return m.root === root && nowMs - m.at < AGG_MEMO_MIN_MS
@@ -971,8 +985,9 @@ function scanReusable(m: PoolStreamsScan, root: string, nowMs: number): boolean 
 
 /** 扫描池根下的两组候选（**fs 层的唯一扫描实现**）：
  *
- *  · meta：递归 tmp/X（一层）或 tmp/X/traj（两层）下的 `dist-agent-meta.jsonl`
- *    （与 §366 的跳子树规则一致：`itN` 迭代目录不下探）；
+ *  · meta：递归 tmp/X（一层）、tmp/X/traj 或 tmp/X/<run>.run（两层）下的
+ *    `dist-agent-meta.jsonl`（与 §366 的跳子树规则一致：`itN` 迭代目录不下探；
+ *    `.run` 是独立 eval run 的固定后缀，见 `tools/sim/eval-course-ckpt.ts`）；
  *  · 账本：`tmp/<课>/training_log.jsonl`，`<课>` 优先于 `<课>/traj/`（与旧
  *    `listCourseLedgers` 的 break 语义相同，不双计）。
  *
@@ -1000,7 +1015,12 @@ export function scanPoolStreams(nowMs: number = Date.now()): PoolStreamsScan {
       const childRel = rel ? `${rel}/${d.name}` : d.name
       if (d.isDirectory()) {
         if (depth < 1) walk(childRel, depth + 1)
-        else if (depth === 1 && d.name === 'traj') walk(childRel, depth + 1)
+        else if (depth === 1 && (d.name === 'traj' || d.name.endsWith('.run'))) {
+          // 独立 eval run（`tools/sim/eval-course-ckpt.ts` 的 `<out>.run/`）也写
+          // `dist-agent-meta.jsonl`。旧实现只认 `traj` ⇒ 手动 eval 的局数在节点页
+          // 「今日贡献」里系统性漏掉（2026-11-13 报障）。只下探一层、只收 meta。
+          walk(childRel, depth + 1)
+        }
         continue
       }
       const p = join(root, childRel)
@@ -1565,7 +1585,7 @@ export function aggregateNodeHistory(nowMs: number = Date.now()): HistoryAggrega
   const alive = new Set<string>()
   for (const src of srcs) {
     alive.add(src.path)
-    const course = src.dir.split('/')[0] ?? src.dir
+    const course = courseOfStreamDir(src.dir)
     const seq = seqByDir.get(src.dir) ?? 0
     let st = streams.get(src.path)
     if (!st || st.dir !== src.dir) {

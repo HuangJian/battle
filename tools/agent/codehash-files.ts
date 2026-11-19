@@ -59,15 +59,50 @@ export function collectCodeHashEntries(
   } catch {
     return out
   }
+  // 2026-11-17 性能（identity 逐字节不变）：旧版对每个条目先 stat 再读——walk 里每项一次
+  // `statSync`，清单文件项还多一次 `existsSync`。180 个文件实测 15–17 ms/次，而 sha256 本身
+  // ≈0 ms：成本全在**多余的 syscall**（Windows 上每次 open/stat 数十 µs）。现在目录判定走
+  // `withFileTypes` 的 dirent，缺失/非普通文件只在**读失败后**用一次 stat 兜底区分 ⇒ entry 集
+  // 与内容不变，syscall 减一半左右。
+  const push = (p: string): void => {
+    let content: Buffer
+    try {
+      content = fs.readFileSync(p)
+    } catch (e) {
+      // 慢路径（仅这份条目读不出来时）：区分「本来就不该收」与真 I/O 故障。
+      // 静默吞掉 EACCES/EBUSY 会给出一个「少文件」的错 hash —— 比崩掉更危险，故照旧上抛。
+      let isFile = false
+      try {
+        isFile = fs.statSync(p).isFile()
+      } catch {
+        isFile = false
+      }
+      if (!isFile) return // 不存在 / 目录 / 非普通文件 ⇒ 与旧 existsSync+isFile 同义
+      throw e
+    }
+    out.push({ relPath: path.relative(REPO_ROOT, p), content })
+  }
   const walk = (dir: string): void => {
-    if (!fs.existsSync(dir)) return
-    for (const name of fs.readdirSync(dir)) {
-      if (isSkippedCodeHashDir(name)) continue
-      const p = path.join(dir, name)
-      const st = fs.statSync(p)
-      if (st.isDirectory()) walk(p)
-      else if (!isSkippedCodeHashFile(name))
-        out.push({ relPath: path.relative(REPO_ROOT, p), content: fs.readFileSync(p) })
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return // 目录不存在（旧版 existsSync 守卫同义）
+    }
+    for (const e of entries) {
+      if (isSkippedCodeHashDir(e.name)) continue
+      const p = path.join(dir, e.name)
+      // 符号链接按旧语义跟随（旧版 statSync 会解引用，dirent 不会）
+      let isDir = e.isDirectory()
+      if (!isDir && e.isSymbolicLink()) {
+        try {
+          isDir = fs.statSync(p).isDirectory()
+        } catch {
+          isDir = false
+        }
+      }
+      if (isDir) walk(p)
+      else if (!isSkippedCodeHashFile(e.name)) push(p)
     }
   }
   for (const raw of text.split(/\r?\n/)) {
@@ -75,11 +110,7 @@ export function collectCodeHashEntries(
     if (!spec || spec.startsWith('#')) continue
     const s = spec.replace(/\\/g, '/')
     if (s.endsWith('/')) walk(path.join(REPO_ROOT, ...s.slice(0, -1).split('/')))
-    else {
-      const p = path.join(REPO_ROOT, ...s.split('/'))
-      if (fs.existsSync(p) && fs.statSync(p).isFile())
-        out.push({ relPath: path.relative(REPO_ROOT, p), content: fs.readFileSync(p) })
-    }
+    else push(path.join(REPO_ROOT, ...s.split('/')))
   }
   // relPath 归一化正斜杠——Windows 上的 self agent 用 path.relative 会产出反斜杠，
   // 与 Python 侧（已归一化）哈希不一致 ⇒ self 永远 codeHash 红姻。

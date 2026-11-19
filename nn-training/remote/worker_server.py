@@ -47,10 +47,11 @@ from common.instance_lock import (
     default_instance_lock_path,
     release_instance_lock,
 )
-from common.logutil import log_line, tag_logger
+from common.logutil import course_tag, log_line, tag_logger, tagged
 from common.port_guard import ensure_port_free
 from common.protocol import (
     BLOB_INIT,
+    CAP_REPLAY_CORPUS,
     RESULT_READY_PATH,
     WIRE_JOB_MAGIC,
     CodeChangedError,
@@ -334,6 +335,11 @@ def _execute_job(
 ) -> None:
     """后台执行：run_job 全套（preloaded push 路径）→ 状态落表。异常进 failed（HUB 可见）。"""
     jid = manifest["job_id"]
+    # ★2026-11-13（用户口径）：本服务的日志里每个 job 只有 16 位 jid（幂等键哈希，故意
+    # 不含课名）—— 一台 GPU worker 同时接多门课的活时，从日志分不出在训哪门课。
+    # 包一层 ⇒ accepted/准备完成/PPO/收账/失败**每一行**都带课程名；缺 `course_name`
+    # 的旧 job = 空串，旧行逐字节不变（`common/logutil.course_tag`）。
+    log = tagged(log, course_tag(manifest))
     state.set_state(jid, "running")
     worker_wire_start(jid)  # 阶段占比（in/out/ppo/other）的 wall 从开跑起算
     try:
@@ -473,6 +479,10 @@ def make_worker_server(
                             "busy": state.busy(),
                             "queued": state.queued(),
                             "done": state.done_total,
+                            # 能力位（2026-11-16，plan/replay-corpus.plan.md D2/B7）：
+                            # 本进程含 replay pre-pass；push 派发器据此不把 replay job
+                            # 推给旧 worker_server（additive）。
+                            "capabilities": [CAP_REPLAY_CORPUS],
                         }
                     )
                 elif path == "/code-sha":
@@ -548,6 +558,9 @@ def make_worker_server(
                     return
                 manifest = fields["manifest"]
                 jid = manifest["job_id"]
+                # 受理/排队的这三行在主线程上打（早于 `_execute_job` 包装日志）——
+                # 同一个课程前缀，云端日志里「谁在训」从第一行就看得见。
+                _ctag = course_tag(manifest)
                 payload_zip = fields["payload_zip"]
                 code_zip = fields["code_zip"]
                 ts_code_zip = fields["ts_code_zip"]
@@ -565,10 +578,10 @@ def make_worker_server(
                 if verdict["action"] == "duplicate":
                     # 幂等：超时重试/重复 POST 不重复 spawn（修旧 busy-409 下的重传风暴）。
                     rec = state.get(jid) or {"state": "queued"}
-                    log(f"job {jid} 重复提交——幂等受理（当前 {rec.get('state')}），不重复执行")
+                    log(f"{_ctag}job {jid} 重复提交——幂等受理（当前 {rec.get('state')}），不重复执行")
                     self._json({"job_id": jid, "status": rec.get("state", "queued")}, 202)
                 elif verdict["action"] == "queue":
-                    log(f"job {jid} 入队（position={verdict['position']}）— 在跑 job 结束后即顶上")
+                    log(f"{_ctag}job {jid} 入队（position={verdict['position']}）— 在跑 job 结束后即顶上")
                     self._json(
                         {"job_id": jid, "status": "queued", "position": verdict["position"]}, 202
                     )
@@ -577,7 +590,7 @@ def make_worker_server(
                         {"error": f"busy — 队列已满（{WORKER_QUEUE_MAX}），稍后重试"}, 409
                     )
                 else:
-                    log(f"job {jid} accepted（echo={echo}）— PPO 后台执行")
+                    log(f"{_ctag}job {jid} accepted（echo={echo}）— PPO 后台执行")
                     self._json({"job_id": jid, "status": "accepted"}, 202)
             except (ProtocolError, ValueError, KeyError) as e:
                 self._json({"error": str(e)}, 400)

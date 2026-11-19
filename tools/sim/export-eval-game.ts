@@ -54,8 +54,22 @@ import {
   BOARD,
 } from '../../src/nn/obs-encoder'
 import { buildModelFromText } from '../../src/nn/infer'
+import {
+  brickAheadWithin,
+  brickBlocksAdvance,
+  leadMissShot,
+  steelOnlyShot,
+  turnWillCommit,
+  uselessShot,
+  usefulFire,
+} from '../../src/nn/inference-rules'
 import { decodeMove } from '../../src/nn/action-space'
 import { decodeMove4, MOVE4_DECODE } from '../../src/nn/action-space-v6'
+import { OpeningController, type OpeningTraceEvent } from '../../src/nn/opening-controller'
+import { encodeOpeningAction } from '../../src/nn/opening-input'
+import { centralBrickCells, evaluateCorridor } from '../../src/nn/opening-corridor'
+import { RING_CELLS } from '../../src/utils/base-ring'
+import { computePlayer2SpawnCol } from '../../src/utils/helpers'
 import { corridorCells, nearestPickupCenter } from '../../src/nn/danger-metrics'
 import { featuresEngine } from '../../src/nn/conv/conv'
 import { GoalExecutor } from '../../src/nn/goal-executor'
@@ -145,7 +159,7 @@ function enemyKindIndex(kind: string): number {
       return -1
   }
 }
-import { buildPack } from './pack-container'
+import { buildPack, serviceElapsedSec } from './pack-container'
 import { runServe } from './serve-loop'
 
 const MAX_TICKS = 36000
@@ -217,8 +231,62 @@ class ScriptedInput {
 // 诊断探针开关（CLI 在 `main` 里写；默认关 ⇒ 行为与报告 schema 逐字节不变）。
 let probeFlag = false
 let holdFallback = false
-/** F3：v6 的 (move, hold) 联合 argmax（默认关，旧行为逐字节不变）。 */
-let jointArgmax = false
+/** 顶钢空枪门（默认关；`--skip-steel-only-shots` 打开。只用于评估/部署推理，
+ *  训练链 export-rl-rollout / export-dagger-beta 不得打开）。 */
+let skipSteelOnlyShots = false
+/** 拆砖免绕路（默认关；`--break-bricks-on-path` 打开。只用于评估/部署推理，
+ *  训练链不得打开）：所选方向被砖挡/2 格内有砖且策略没开火时强制拆墙。 */
+let breakBricksOnPath = false
+/**
+ * Hybrid opening policy wrapper（默认关；`--opening-connect` 打开）。
+ * 与训练 rollout 共用 `OpeningController`；`inference_rules` 仍是 eval/deploy-only，
+ * 本开关是 policy wrapper，训练链也认。bare 报告逐字节不变（只在开启时加 `opening` 段）。
+ */
+let openingConnect = false
+/** 条件接管：只对 strict `evaluateCorridor` 判不连通的关启用（A/B 归因臂）。 */
+let openingAll = process.env.OPENING_ALL === '1'
+/** 关闭出袋（A/B 归因臂）：仍开挖通道，但 handoff 前不把坦克推到通道中点。 */
+let openingNoExit = process.env.OPENING_NO_EXIT === '1'
+interface OpeningReport {
+  activeTicks: number
+  bricksBroken: number
+  p1p2Connected: boolean
+  enemyConnected: boolean
+  corridorBand: string | null
+  corridorLength: number
+  corridorRelaxed: boolean
+  exitPocketDone: boolean
+  exitPocketTicks: number
+  abortReason: string | null
+  baseRingBreach: number
+  centralBreachCells: number
+  hardConstraintOk: boolean
+  /** plan/opening-null-move：move=null tick 的诊断（additive）。 */
+  nullTicks: number
+  nullTurned: number
+  nullTurnedUp: number
+  nullMoved: number
+}
+let openingReport: OpeningReport | null = null
+
+/** 数当前地图上的砖（opening 期间相对 stage start 的 delta）。 */
+function countBrickTiles(world: World): number {
+  let n = 0
+  const g = world.tileMap.grid
+  for (let r = 0; r < GRID; r++) {
+    const row = g[r]
+    for (let c = 0; c < GRID; c++) if (row[c] === 'brick') n++
+  }
+  return n
+}
+
+/** B8 通用废射门（默认关；`--suppress-useless-fire` 打开。评估/部署专用，训练链恒关）。 */
+let suppressUselessFire = false
+/** B10 预测门（默认关；`--suppress-lead-miss-fire` 打开。评估/部署专用）。 */
+let suppressLeadMissFire = false
+/** F3：v6 的 (move, hold) 联合 argmax（默认开，与部署链 NNInput 同口径；
+ * 复现旧读数用 --no-joint-argmax）。 */
+let jointArgmax = true
 /** 推理道具偏置（默认 0 = 关）。 */
 let pickupBias = 0
 let pickupRadius = 2
@@ -799,8 +867,8 @@ export function runEvalOne(
   decisionK: number = DEFAULT_DECISION_K,
   /** 兜底实验：前方被挡时从可走方向里挑一个前进（默认 false = 旧行为）。 */
   holdFallback = false,
-  /** F3：v6 的 (move, hold) 联合 argmax（默认 false = 旧行为）。 */
-  jointArgmax = false,
+  /** F3：v6 的 (move, hold) 联合 argmax（默认 true = 部署链同口径）。 */
+  jointArgmax = true,
   /** 推理道具偏置：>0 时在「道具近且无敌人」帧给朝道具的 move logits 加分。 */
   pickupBias = 0,
   pickupRadius = 2,
@@ -892,6 +960,66 @@ export function runEvalOne(
   // scripted.reset() 使远程 god 局用默认参数打，与本地 runSimulation 不等价）。
   ai.reset()
   if (goalGod) goalGod.reset()
+
+  // ── Hybrid opening (--opening-connect) ─────────────────────────────────
+  // 只在 policy=nn 且显式开开关时接管；bare 路径连对象都不构造。
+  // 部署口径 = 全局出袋（用户 2026-11-14 裁定）；训练 rollout 用同一个 controller。
+  // 条件接管（归因臂）：strict 已连通的关保持 bare，避免给本来正常的关白加开局。
+  let openingWanted = openingConnect && policy === 'nn'
+  // 默认条件接管（用户 2026-11-15 拍板）：strict 已连通的关不抢方向盘，让 NN 自己学。
+  // --opening-all / OPENING_ALL=1 只作 A/B 的全局臂。
+  if (openingWanted && !openingAll) {
+    const sp = world.playerSpawnPoint
+    const p1 = { col: sp.col, row: sp.row }
+    const p2 = { col: computePlayer2SpawnCol(sp.col), row: sp.row }
+    openingWanted = !evaluateCorridor(world.tileMap, p1, p2).connected
+  }
+  const openingCtrl = openingWanted
+    ? new OpeningController({
+        exitPocket: !openingNoExit,
+        ...(process.env.OPENING_TRACE === '1'
+          ? {
+              onTrace: (e: OpeningTraceEvent) =>
+                console.error(
+                  `[opening-trace] central_gone col=${e.col} row=${e.row} planned=${e.planned}`,
+                ),
+            }
+          : {}),
+      })
+    : null
+  let openingDone = false
+  openingReport = null
+  let openingRingSolid0: boolean[] = []
+  let openingCentralKeys0 = new Set<string>()
+  let openingBricks0 = 0
+  if (openingCtrl) {
+    openingRingSolid0 = RING_CELLS.map((c) => {
+      const t = world.tileMap.get(c.col, c.row)
+      return t === 'brick' || t === 'steel' || t === 'base'
+    })
+    openingCentralKeys0 = new Set(centralBrickCells(world.tileMap).map((c) => `${c.col},${c.row}`))
+    openingBricks0 = countBrickTiles(world)
+    openingReport = {
+      activeTicks: 0,
+      bricksBroken: 0,
+      p1p2Connected: false,
+      enemyConnected: false,
+      corridorBand: null,
+      corridorLength: 0,
+      corridorRelaxed: false,
+      exitPocketDone: false,
+      exitPocketTicks: 0,
+      abortReason: null,
+      baseRingBreach: 0,
+      centralBreachCells: 0,
+      hardConstraintOk: true,
+      nullTicks: 0,
+      nullTurned: 0,
+      nullTurnedUp: 0,
+      nullMoved: 0,
+    }
+  }
+
   // 录制（可选）：采样点契约与 simulation-runner 一致——loadStageData → reset →
   // startNew（克隆初始快照），循环内 sim.tick() → recordFrame → endFrame。
   const recorder = replayDir ? new InputRecorder() : null
@@ -1316,7 +1444,66 @@ export function runEvalOne(
           if (forced && hd === 1) probe.holdForcedPredicted++
           if (!forced && hd === 1) probe.holdVoluntary++
         }
-        scripted.setAction(mv, fr, hd)
+        // 顶钢空枪门（默认关）：只抑制「即将发射方向首阻弹格是 steel、且
+        // lane 内没有可命中敌」的发射；fr=2 且转向会被拒时引擎本来就跳过，
+        // 不在此处理。与 `NNInput` 的 `skipSteelOnlyShots` 同谓词（`steelOnlyShot`）。
+        let fire = fr
+        if (skipSteelOnlyShots && v6 && fire !== 0 && world.player) {
+          const bp = world.player
+          let shotDir: Direction | null = null
+          if (fire === 1) {
+            shotDir = bp.prevMoveDir ?? bp.dir
+          } else {
+            const mvDir = MOVE4_DECODE[mv] ?? null
+            if (mvDir && turnWillCommit(world, bp, mvDir, (world.frame + 1) * TICK_MS)) {
+              shotDir = mvDir
+            }
+          }
+          if (shotDir && steelOnlyShot(world, bp, shotDir)) fire = 0
+        }
+        // B8 通用废射门 / B10 预测门（默认关）：B1 的超集（B8）/ 加预测外推（B10）。
+        // fr=2 且转向会被拒时引擎本来就跳过，不在此处理；砖由 B2 管，谓词内豁免。
+        if ((suppressUselessFire || suppressLeadMissFire) && v6 && fire !== 0 && world.player) {
+          const bp = world.player
+          let shotDir: Direction | null = null
+          if (fire === 1) {
+            shotDir = bp.prevMoveDir ?? bp.dir
+          } else {
+            const mvDir = MOVE4_DECODE[mv] ?? null
+            if (mvDir && turnWillCommit(world, bp, mvDir, (world.frame + 1) * TICK_MS)) {
+              shotDir = mvDir
+            }
+          }
+          if (shotDir) {
+            const suppress = suppressUselessFire
+              ? uselessShot(world, bp, shotDir)
+              : leadMissShot(world, bp, shotDir)
+            if (suppress) fire = 0
+          }
+        }
+        // 拆砖免绕路（默认关）：策略没开火、所选方向被砖挡/2 格内有砖 ⇒ 强制拆墙。
+        // 只在 fire gate ready 时置位；基地圈砖由 `brickAheadWithin` 排除。
+        if (breakBricksOnPath && v6 && fire === 0 && world.player) {
+          const bp = world.player
+          const mvDir = MOVE4_DECODE[mv] ?? null
+          if (mvDir) {
+            const wantBrick =
+              hd === 1
+                ? brickBlocksAdvance(world, bp, mvDir)
+                : brickAheadWithin(world, bp, mvDir, 2)
+            if (wantBrick && !usefulFire(world, bp, mvDir)) {
+              if (
+                turnWillCommit(world, bp, mvDir, (world.frame + 1) * TICK_MS) &&
+                masks.fire[2] === 1
+              ) {
+                fire = 2
+              } else if (bp.prevMoveDir === mvDir && masks.fire[1] === 1) {
+                fire = 1
+              }
+            }
+          }
+        }
+        scripted.setAction(mv, fire, hd)
         moveHist[mv]++
         decisions++
         // 「没在前进」的判据随动作空间变（与 export-rl-rollout 的 stopHeld 同源）：
@@ -1333,7 +1520,64 @@ export function runEvalOne(
     const pxBefore = world.player?.x ?? -1
     const pyBefore = world.player?.y ?? -1
     const freezeBefore = world.freezeTimer
+    let openingNullTick = false
+    let openingDirBefore: string | null = null
+
+    // Hybrid opening：controller 每拍给动作，直接覆盖 scripted 的输出（NN 仍照常
+    // 决策/编码/计数，只是这一拍的动作不算它的）。done 之后本局不再触发。
+    if (openingCtrl && !openingDone && openingReport) {
+      const os = openingCtrl.step(world)
+      const act = os.action
+      // plan/opening-null-move：v6 null → 当前已提交朝向 + hold（原地不动）。
+      const currentDir = world.player?.prevMoveDir ?? world.player?.dir ?? 'up'
+      const sa = encodeOpeningAction(act, v6, currentDir)
+      openingNullTick = act.move === null
+      openingDirBefore = world.player?.dir ?? null
+      scripted.setAction(sa.move, sa.fire, sa.hold)
+      openingReport.activeTicks++
+      if (os.done) {
+        openingDone = true
+        const snap = openingCtrl.snapshot()
+        openingReport.abortReason = os.abortReason
+        openingReport.p1p2Connected = snap.p1p2Connected
+        openingReport.enemyConnected = snap.enemyConnected
+        openingReport.corridorBand = snap.corridorBand
+        openingReport.corridorLength = snap.corridorLength
+        openingReport.corridorRelaxed = snap.corridorRelaxed
+        openingReport.exitPocketDone = snap.exitPocketDone
+        openingReport.exitPocketTicks = snap.exitPocketTicks
+        // 相对 stage start 的 delta，只在 openingActive 期间归因。
+        openingReport.bricksBroken = Math.max(0, openingBricks0 - countBrickTiles(world))
+        openingReport.baseRingBreach = RING_CELLS.reduce((n, c, i) => {
+          if (!openingRingSolid0[i]) return n
+          return n + (world.tileMap.get(c.col, c.row) === 'empty' ? 1 : 0)
+        }, 0)
+        openingReport.centralBreachCells = [...openingCentralKeys0].reduce((n, k) => {
+          const [c, r] = k.split(',').map(Number)
+          return n + (world.tileMap.get(c, r) === 'brick' ? 0 : 1)
+        }, 0)
+        openingReport.hardConstraintOk =
+          openingReport.baseRingBreach === 0 && openingReport.centralBreachCells <= 4
+        if (!openingReport.hardConstraintOk) {
+          console.error(
+            `[export-eval-game] OPENING HARD CONSTRAINT FAIL: ring=${openingReport.baseRingBreach} central=${openingReport.centralBreachCells}`,
+          )
+        }
+      }
+    }
+
     sim.tick()
+    if (openingNullTick && openingReport) {
+      openingReport.nullTicks++
+      const afterDir = world.player?.dir ?? null
+      if (openingDirBefore !== afterDir) {
+        openingReport.nullTurned++
+        if (afterDir === 'up') openingReport.nullTurnedUp++
+      }
+      if ((world.player?.x ?? -1) !== pxBefore || (world.player?.y ?? -1) !== pyBefore) {
+        openingReport.nullMoved++
+      }
+    }
     if (world.player?.alive && !world.player.moving) idleTicks++
     if (probeOn) {
       probe.ticks++
@@ -1976,15 +2220,31 @@ export function main(argv: string[]): void {
     else if (argv[i] === '--decision-k') decisionK = parseInt(argv[++i], 10)
     else if (argv[i] === '--probe') probeFlag = true
     else if (argv[i] === '--hold-fallback') holdFallback = true
+    else if (argv[i] === '--opening-connect') openingConnect = true
+    else if (argv[i] === '--opening-all') openingAll = true
+    else if (argv[i] === '--opening-no-exit') openingNoExit = true
+    else if (argv[i] === '--skip-steel-only-shots') skipSteelOnlyShots = true
+    else if (argv[i] === '--break-bricks-on-path') breakBricksOnPath = true
+    else if (argv[i] === '--suppress-useless-fire') suppressUselessFire = true
+    else if (argv[i] === '--suppress-lead-miss-fire') suppressLeadMissFire = true
     else if (argv[i] === '--joint-argmax') jointArgmax = true
     else if (argv[i] === '--pickup-bias') pickupBias = parseFloat(argv[++i])
     else if (argv[i] === '--pickup-radius') pickupRadius = parseInt(argv[++i], 10)
     else if (argv[i] === '--enemy-clear-cells') enemyClearCells = parseInt(argv[++i], 10)
+    else if (argv[i] === '--no-joint-argmax') jointArgmax = false
     else if (argv[i] === '--ablate-extra') ablateSpec = argv[++i]
     else if (argv[i] === '--ablate-ch') ablateChSpec = argv[++i]
   }
   if (!Number.isInteger(decisionK) || decisionK < 1) {
     console.error(`[export-eval-game] --decision-k 非法（${decisionK}；必须 ≥1 的整数）`)
+    process.exit(2)
+  }
+  // B8/B10 同机制（抑制空枪），按 plan/nn-input-inference-rules.plan.md §3.1 不组合；
+  // NNInput 里两者同开时 B8 优先，这里直接拒绝而不是静默改变语义。
+  if (suppressUselessFire && suppressLeadMissFire) {
+    console.error(
+      '[export-eval-game] --suppress-useless-fire 与 --suppress-lead-miss-fire 同机制，不得同时开启',
+    )
     process.exit(2)
   }
   if (!Number.isInteger(stageIdx) || !Number.isInteger(seed)) {
@@ -2168,8 +2428,21 @@ export function main(argv: string[]): void {
     // manifest 同口径（rollout-eval-opt.plan.md §4 记账）——「以为开了 native 其实回落了」
     // 在 eval 侧同样要能事后看出来。与 wver **解耦**（本机直跑无 wver 也要记）。
     // 不进任何 data_fp（eval 侧本就没有）。
+    // 推理规则归因（默认关 ⇒ 不写键，旧报告逐字节不变）。
+    ...(skipSteelOnlyShots || breakBricksOnPath || suppressUselessFire || suppressLeadMissFire
+      ? {
+          inferenceRules: {
+            ...(skipSteelOnlyShots ? { skipSteelOnlyShots: true } : {}),
+            ...(breakBricksOnPath ? { breakBricksOnPath: true } : {}),
+            ...(suppressUselessFire ? { suppressUselessFire: true } : {}),
+            ...(suppressLeadMissFire ? { suppressLeadMissFire: true } : {}),
+          },
+        }
+      : {}),
     feat: featuresEngine(),
     ...(wver ? { wver, node: nodeLabel } : {}),
+    // Hybrid opening 归因（默认关 ⇒ 不写键，bare 报告逐字节不变）。
+    ...(openingConnect && openingReport ? { opening: openingReport } : {}),
   }
   writeFileSync(`${outDir}/_eval_report.json`, JSON.stringify(report, null, 2))
   if (packPath) {
@@ -2177,7 +2450,7 @@ export function main(argv: string[]): void {
     const packManifest = {
       ...report,
       mode: 'eval',
-      elapsedSec: +((Date.now() - t0) / 1000).toFixed(1),
+      elapsedSec: serviceElapsedSec(t0, argv),
     }
     writeFileSync(packPath, buildPack(packManifest, []))
   }

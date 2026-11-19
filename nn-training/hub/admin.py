@@ -158,7 +158,8 @@ def _deterministic_fill(n: int) -> bytes:
 #     后者是 2026-10-25 用户口径（见 `_merge_managed_node` 里那段长注释：配额用完的云机不会
 #     来注销，人只能手动停；而新会话/新通道一起来就必须能自己翻回）。
 #   * `concurrency` 只在**新条目**且 body 给值时才写（F2：缺省不写键 = 派发按 `ping.cpus`）；
-#   * ping 门：`common.distribution.node_ping` 不通 ⇒ 422 不写盘（`skipPing=true` 可绕过，日志响亮）。
+#   * ping 门：`common.distribution.node_probe` 不通 ⇒ 422 不写盘，并打一行可归因日志
+#     （URL + 端点 + 失败原因 + 耗时）；`skipPing=true` 可绕过，日志响亮。
 
 #: 节点 id 合法域（与 `dashboard/src/web/view/course-overview.ts::validWorkerId` 同域：
 #: 1-40 位 `[A-Za-z0-9._-]`；它会进日志与 rl-config，含空格会让「谁在跑」读不出来）。
@@ -912,16 +913,30 @@ class AdminRoutes:
             # 采样节点是 rollout agent 的 `GET /v1/ping`。打错端点时两台服务都不会答（422），
             # 或者更糟：把「另一个服务在同一端口上答了 200」当成节点在线。
             push_kind = bool(_kind_caps(kind))
-            ping = (
-                distribution.push_node_ping(url, auth_key)
-                if push_kind
-                else distribution.node_ping(url, auth_key)
-            )
+            probe_path = "/ping" if push_kind else "/v1/ping"
+            t0 = time.monotonic()
+            ping, why = distribution.node_probe(url, auth_key, path=probe_path)
+            probe_ms = (time.monotonic() - t0) * 1000.0
             if ping is None:
+                # 可归因的一行（2026-11-17 现场）：以前只有「无应答，或 authKey 不符」，400 /
+                # 连接超时 / authKey 不符分不开。URL + 端点 + 原因 + 耗时都进日志；HTTP 应答
+                # 保持原样（节点侧按前缀识别 422，不依赖这段文字）。
+                _log(
+                    f"节点探活失败 id={nid} kind={kind or 'sampler'} url={url}{probe_path}"
+                    f" {why or '无应答'}（{probe_ms:.0f}ms）——回 422，不写盘"
+                )
                 self._json(
                     {
-                        "error": f"节点 ping 不通（{url}{'/ping' if push_kind else '/v1/ping'} "
-                        "无应答，或 authKey 不符）——不写盘"
+                        "error": f"节点 ping 不通（{url}{probe_path} "
+                        "无应答，或 authKey 不符）——不写盘",
+                        # 机读面（2026-11-17）：云机把原因直接打进自己的日志，不必再去翻 hub
+                        # 日志对时间；旧节点忽略未知键，`error` 前缀逐字不变。
+                        "probe": {
+                            "url": url,
+                            "path": probe_path,
+                            "reason": why or "无应答",
+                            "ms": round(probe_ms, 1),
+                        },
                     },
                     422,
                 )

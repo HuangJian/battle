@@ -10,19 +10,22 @@
  *   version 0x01 0x00            (2 bytes)
  *   hdr_len uint16 LE            (2 bytes)
  *   header  dict repr + spaces   (64-byte aligned total prefix)
- *   raw     C-order bytes
+ *   raw     C-order bytes（缺省；`order: 'F'` 时是列主序，头里写 `fortran_order: True`）
  *
- * We use C-order (fortran_order: False) — the plan's "fortran 序" referred to
- * the deterministic layout, which C-order already guarantees for our fixed
- * shapes. numpy.load does not require fortran order.
+ * 缺省 C-order（fortran_order: False）—— 确定性布局；`order: 'F'` 是**压缩友好**的变体：
+ * 列方向连续的同一列数据在 deflate 里压缩率明显更高（metrics.npy 实测 gz6 −24%，
+ * 见 docs/nn/remote-transport.md §154 ⑤）。numpy 两种都能读，读侧无需分叉。
  */
 
-import { writeFileSync, mkdirSync } from 'fs'
+import { closeSync, mkdirSync, openSync, writeFileSync, writeSync } from 'fs'
 import { dirname } from 'path'
 import { OBS_CHANNELS, BOARD, SCALAR_DIM, SCHEMA_FINGERPRINT } from './obs-encoder'
 import { POLICY_EXTRA_DIM } from './policy-extra'
 
 export type NpyDtype = 'u1' | 'u2' | 'i1' | 'f4' | 'f8'
+
+/** 数据布局：`C` = 行主序（缺省，与历史字节逐字节相同）；`F` = 列主序（压缩友好）。 */
+export type NpyOrder = 'C' | 'F'
 
 const DESCR: Record<NpyDtype, string> = {
   u1: '<u1',
@@ -37,12 +40,16 @@ const DESCR: Record<NpyDtype, string> = {
  * `writeNpy` — callers that don't want a temp file (e.g. the distributed BC
  * exporter packing shards straight into a BCV2 container) use this directly.
  */
-export function npyBytes(view: ArrayBufferView, shape: number[], dtype: NpyDtype): Buffer {
+/**
+ * `.npy` 头（magic + version + hlen + 64 字节对齐的 dict）。`npyBytes` 与
+ * `writeNpyFile` 共用这一份 —— 两条路径落盘的字节必须完全相同。
+ */
+export function npyHeader(shape: number[], dtype: NpyDtype, order: NpyOrder = 'C'): Buffer {
   // A 1-D shape like [N] must serialize as "(N,)" — Python parses "(N)" as a
   // bare integer, not a tuple, and numpy.load rejects it. Multi-dim is fine
   // either way, so always add the trailing comma for the single-dim case.
   const shapeStr = shape.length === 1 ? `(${shape[0]},)` : `(${shape.join(', ')})`
-  const header = `{'descr': '${DESCR[dtype]}', 'fortran_order': False, 'shape': ${shapeStr}, }`
+  const header = `{'descr': '${DESCR[dtype]}', 'fortran_order': ${order === 'F' ? 'True' : 'False'}, 'shape': ${shapeStr}, }`
   const headerBytes = Buffer.from(header, 'latin1')
   // Data offset = 6 (magic) + 2 (version) + 2 (len) + len(header) + pad
   // must be a multiple of 64 (numpy alignment).
@@ -56,8 +63,60 @@ export function npyBytes(view: ArrayBufferView, shape: number[], dtype: NpyDtype
   // shape resolution.
   lenBuf.writeUInt16LE(headerBytes.length + pad, 0)
   const padBuf = Buffer.alloc(pad, 0x20) // spaces, like numpy
+  return Buffer.concat([magic, version, lenBuf, headerBytes, padBuf])
+}
+
+/**
+ * Serialize one array to raw `.npy` bytes (in memory).
+ *
+ * `order: 'F'` 要求 `view` 已经是**列主序**排列（元素 (i,j) 在 `i + j*rows`），本函数
+ * 只负责照实写头——转置由调用方做（它本来就在填缓冲）。
+ */
+export function npyBytes(
+  view: ArrayBufferView,
+  shape: number[],
+  dtype: NpyDtype,
+  order: NpyOrder = 'C',
+): Buffer {
   const dataBuf = Buffer.from(view.buffer, view.byteOffset, view.byteLength)
-  return Buffer.concat([magic, version, lenBuf, headerBytes, padBuf, dataBuf])
+  return Buffer.concat([npyHeader(shape, dtype, order), dataBuf])
+}
+
+/**
+ * 直接落盘的 `.npy` 写（头 + 数据两次 `write`，**不做整块拷贝**）。
+ *
+ * 为什么要有它：`npyBytes` 的 `Buffer.concat` 把整块数据再拷一份。35×20 语料的 obs 是
+ * **3.97 GB** —— 白烧一次 3.97 GB 的内存带宽与峰值内存（每 shard 两份 obs）。本函数落盘
+ * 字节与 `writeFileSync(path, npyBytes(...))` **逐字节相同**（同一个 `npyHeader`）。
+ * 两段 `writeSync` 而非 `writevSync`：后者在部分运行时/平台上不保证全量写，头部半截落盘
+ * 比多一次 syscall 贵得多。
+ */
+export function writeNpyFile(
+  path: string,
+  view: ArrayBufferView,
+  shape: number[],
+  dtype: NpyDtype,
+): void {
+  const header = npyHeader(shape, dtype)
+  const data =
+    view instanceof Uint8Array
+      ? view
+      : new Uint8Array(view.buffer, view.byteOffset, view.byteLength)
+  const fd = openSync(path, 'w')
+  try {
+    writeAll(fd, header)
+    writeAll(fd, data)
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/** 写完一段（`writeSync` 对普通文件是全量写；短写仍循环兜底，绝不静默截断）。 */
+function writeAll(fd: number, buf: Uint8Array): void {
+  let off = 0
+  while (off < buf.length) {
+    off += writeSync(fd, buf, off, buf.length - off)
+  }
 }
 
 /**

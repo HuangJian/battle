@@ -10,6 +10,7 @@ from typing import Any
 
 import common.distribution
 import remote.node_upgrade
+from common import node_report
 from common.log import log
 from common.proc import version_mm as mm
 from worker import node_identity
@@ -70,6 +71,8 @@ class DispatchState:
     all_tasks: list[tuple[int, int]] = field(default_factory=list)
     n_total_tasks: int = 0
     seen: set[tuple[int, int]] = field(default_factory=set)
+    #: 试满尝试次数仍没结果的局（`halt_split` 的 failed 档；也是「已结算」口径的一部分）。
+    missing_keys: set[tuple[int, int]] = field(default_factory=set)
     attempts: dict[tuple[int, int], int] = field(default_factory=dict)
     results: list[dict] = field(default_factory=list)
     stats: dict = field(default_factory=dict)
@@ -213,10 +216,13 @@ def admit_rollout_nodes(
                 },
             )
             continue
-        # 并发按「配置 vs 节点自报核数」取小（2026-11-11）：kaggle 只报 2 核而 config 钉 4
-        # 时，4 个重型 worker 抢 2 个核会把父进程的 HTTP 拖成几十秒（评审见 node_slots）。
-        c_n = common.distribution.node_slots(n.get("concurrency"), ping.get("cpus"))
-        log(f"[dist] node {nid}: online, concurrency={c_n}")
+        # 派工槽位（2026-11-14 收口，plan/node-throughput-and-keepalive P1）：显式 config 是
+        # 操作者旋钮（控制台「并发」），缺省回落节点自报池容量 `workers` → `cpus`。
+        # 不再与核数取小——派工线程每局被隧道往返与回传整段占住（wall 9.3s / svc 2.3s），
+        # 按核数取小会让节点 2 个游戏槽 64% 时间空转。超额认购的防线交给 agent
+        # 准入队列（有界排队 / 503），多出的线程是**排队**，不是故障。
+        c_n, _online = node_report.node_online(nid, n, ping)
+        log(_online)
         nodes.append(
             {
                 "id": nid,

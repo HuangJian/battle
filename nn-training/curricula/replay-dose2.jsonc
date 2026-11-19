@@ -1,0 +1,157 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// replay-dose2.jsonc — 刷新频率「剂量-响应」第二档（plan/replay-corpus.plan.md §6.5 延伸）
+//
+// ⚠ 本文件由 `tmp/gen-replay-dose2.py` 从 **`replay-pilot-a.jsonc`** 派生，只改四个旋钮：
+//      iters 20 → 40 · target_transitions 24,576 → 12,288 · eval_every 5 → 10 · name/落点
+//    其余（奖励/架构/超参/起点/关卡/执行档）与 A 臂逐字节相同 —— 生成器带 diff 断言。
+//
+// 1. 它回答什么
+//    A 臂（7 关 × 5 局 = 24.5k/轮，20 次刷新）在 pilot 里赢过 B/C。这条腿把池子**再砍一半**
+//    （7 关 × ~3 局 = 12.3k/轮，40 次刷新），总样本与总步数完全相同（491,520 / 1,920 步）。
+//    ⇒ 若终点仍 ≥ A +1pp，说明「还能更快」；若持平（±1pp）说明 A 附近就是拐点。
+//
+// 2. 与 A 臂的样本轴
+//    40 轮 × 12,288 = 491,520 = A 的 20 × 24,576。锚点 it10/20/30/40 = 122,880 / 245,760 /
+//    368,640 / 491,520，与 pilot 的四个样本锚点**逐点对齐** ⇒ 可以直接拿 A 的曲线做配对比较
+//    （判读用 `tmp/cmp-replay-pilot.py`；把 ARMS 里加一条即可，或手工按同一函数算）。
+//
+// 3. 开跑前置（与 pilot 同款，缺一不可）
+//    · **先预置起点权重**：`cp nn-training/weights/replay-verify/replay-verify-s5.json
+//      tmp/replay-dose2/weights.json`（sha 必须 = bec039d88e2d…；缺失时 it1 直接 FileNotFoundError）；
+//    · 与 A 臂**同一个 trainer 进程**（否则 runId 变 ⇒ job_seed 变，不能与 A 配对）；
+//    · `--local-ppo-slots` ≥1；不要用 CLI 覆盖 `--corpus-fmt` / `--ppo-loader`。
+//
+// 4. 判据（先写死）
+//    · 主读：**终点（491,520）与 A 臂终点（494,592）的配对差**（同一 700 局 eval 面板，bootstrap CI）；
+//    · 决策：Δ ≥ +1pp ⇒ 「继续往下降」；−1pp < Δ < +1pp ⇒ 拐点在 A 附近，停止降池；
+//      Δ ≤ −1pp ⇒ 池子过小，A 就是最优档；
+//    · 机制门：kl 抬到 >0.05 或 entropy 连续下降 ⇒ 停腿（池子小 ⇒ 每轮 update 更"过拟合"当前批）。
+//
+// 5. 已知风险
+//    每轮 12 chunk × 4 epoch = 48 步；池子越小，adv 估计方差越大、每轮固定开销（≈25 s 等待）
+//    占比越高（40 轮 ≈ 17 min 纯等待）。这条腿本身也是「每轮开销」的放大器，读数请连墙钟一起看。
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  "version": 5,
+  "name": "replay-dose2",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "rotation_mode": "even",
+  "rotation_per_it": 7,
+  "reward": {
+    "formula": [
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wAcc*aimHits/(playerShots+1)",
+      "+ wWinHit*min(hitsInFreezeShieldWindow, winHitCap)",
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "+ wSpeed*where(clearTick>=0, max(0, min(1, (13000-clearTick)/1400)), 0)",
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- wIdle*idleTicks/(ticks+1)",
+      "- wStuck*min(max(0, stuckTicks - stuckFree), stuckCap)",
+      "- wWall*min(max(0, wallPressTicks - wallFree), wallCap)",
+      "- wThreat*min(threatRateCap, threatTicks/(ticks+1))",
+      "- wHurt*min(hurtWeight, hurtCap)",
+      "- wPostHit*min(postHitRateCap, postHitLaneTicks/(ticks+1))",
+      "- wEncl*min(enclRateCap, enclWeightTicks/(ticks+1))",
+      "- min(missCap2, wMiss2*max(0, aimMisses - missFree)**2)",
+      "+ wAccGood*min(accCap, max(0, aimHits/(playerShots+1) - accFree))",
+      "- wBurst*min(damageBursts, burstCap)",
+      "- wMaxDmg*min(max(0, maxDamage120 - maxDmgFree), maxDmgCap)",
+      "- wLowDmg*min(damageWhileLow, lowDmgCap)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wAcc": 5.0,
+      "wWinHit": 1.2,
+      "winHitCap": 12.0,
+      "wBrick": 1.0,
+      "brickCap": 12.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wWin": 80.0,
+      "wSpeed": 8.0,
+      "wDmg": 0.12,
+      "wDeath": 24.0,
+      "wIdle": 100.0,
+      "wStuck": 0.04,
+      "stuckFree": 300.0,
+      "stuckCap": 900.0,
+      "wWall": 0.08,
+      "wallFree": 350.0,
+      "wallCap": 300.0,
+      "wThreat": 130.0,
+      "threatRateCap": 0.25,
+      "wHurt": 0.09,
+      "hurtCap": 500.0,
+      "wPostHit": 800.0,
+      "postHitRateCap": 0.035,
+      "wEncl": 40.0,
+      "enclRateCap": 0.4,
+      "wMiss2": 0.0015,
+      "missFree": 40.0,
+      "missCap2": 12.0,
+      "wAccGood": 200.0,
+      "accFree": 0.45,
+      "accCap": 0.15,
+      "wBurst": 4.0,
+      "burstCap": 8.0,
+      "wMaxDmg": 0.1,
+      "maxDmgFree": 120.0,
+      "maxDmgCap": 300.0,
+      "wLowDmg": 0.03,
+      "lowDmgCap": 600.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -45.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/replay-verify/replay-verify-s5.json",
+  "kickstart_ref": false,
+  "kickstart_init": 0.0,
+  "kickstart_decay": 0.5,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 40,
+  "max_hours": 6.0,
+  "lr": 8e-5,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 8e-5,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 12288,
+  "paired_rotate_seed": 20261115,
+  "decision_events": false,
+  "decision_k": 10,
+  "opening_connect": true,
+  "breakers_off": true,
+  "ent_break": 0.25,
+  "ent_break_consec": 8,
+  "ent_break_max_winrate": 0.0,
+  "eval_stages": "2000-2034",
+  "eval_games_per_stage": 20,
+  "eval_every": 10,
+  "corpus_fmt": "replay",
+  "ppo_loader": "lazy",
+  "out": "tmp/replay-dose2/weights.json",
+  "traj": "tmp/replay-dose2",
+  "backup_dir": "nn-training/weights/replay-dose2",
+  "backup_prefix": "replay-dose2",
+}

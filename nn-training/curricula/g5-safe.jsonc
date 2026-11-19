@@ -1,0 +1,267 @@
+// 课程 g5-safe —— g5-aim 的并行躲弹臂（2026-11-15）
+// 状态：**已停课**（2026-11-15，it231/500；由 g5-safe2 接替；主 2 过 / 主 1 全负）。
+//   结课读数与判词见文件尾「结课报告」；g5-safe.it230 已被 g5-aim2 / g5-safe2 采用为 bc。
+//
+// ── 0. 一句话 ───────────────────────────────────────────────────────────────
+//   与 g5-aim **同起点（g4-mobility.it380）、同关卡、同预算、同 eval**，在它的“打得准”价格之上再加
+//   “别站着连续挨打”的价格：连续饮弹 / 120t 滑窗最大承伤 / 低血承伤，并把
+//   threat/hurt/postHit 三条火线税加重。本臂只回答：
+//   **能不能把 damageBursts 从 1.14/局 压到 ≤0.8、maxDamage120 从 164.9 压到 ≤140、
+//   threat 率从 6.7% 压到 ≤5.5%，同时胜率不掉超过 1pp。**
+//
+// ── 1. 剂量基线（新地形 × it380 × 700 局，2026-11-15）────────────────────────
+//   damageBursts 1.14/局（p50 1 / p90 3）· maxDamage120 164.9（p50 172 / p90 256）
+//   · damageWhileLow 197.8（p50 172 / p90 372）· threat 6.7%（577/8574）
+//   · postHit 0.85%（73/8574）· hurtWeight 156.6 · dmg 439.8 · deaths 1.34。
+//   这些是“傻站着连续饮弹”的直接画像：burst 次数不多但每次都很贵（滑窗 165 点）。
+//
+// ── 2. 本臂相对 g5-aim 的增量（其余逐字继承）────────────────────────────────
+//   ⑭ `- wBurst*min(damageBursts, burstCap)`：相邻两笔扣血间隔 ≤120t 的次数，
+//      每次 −4，封 8 次（满量程 −32）。基线 −4.6。
+//   ⑮ `- wMaxDmg*min(max(0, maxDamage120 - maxDmgFree), maxDmgCap)`：
+//      120t 滑窗最大承伤超过 120 的部分每点 −0.10，封 300（−18）。基线 −4.5。
+//   ⑯ `- wLowDmg*min(damageWhileLow, lowDmgCap)`：低血（hp<0.4）时承伤每点 −0.03，
+//      封 600（−18）。基线 −5.9。只在低血时罚，避免与 wDmg 重复计价正常承伤。
+//   加重：wThreat 100→**130**（rateCap 0.3→0.25）· wHurt 0.06→**0.09**（cap 600→500）
+//      · wPostHit 600→**800**（rateCap 0.04→0.035）。
+//   ⇒ 相对 g5-aim 的额外净税基线 ≈ −23.4（Φ −7%）；g5-aim 自身 +13.6 ⇒ 合计 **−9.8**
+//      （Φ −3.0%），比 g4-mobility 的 −9.4% 更轻，value 头可吸收。
+//
+// ── 3. 预注册判据（主判只认 eval）───────────────────────────────────────────
+//   主 1（躲弹·机制门）：damageBursts **≤0.8/局**；maxDamage120 **≤140**；
+//      threat 率 **≤5.5%**；postHit 率 **≤0.7%**。
+//   主 2（胜率）：it400–500 的 eval 均值 ≥ **80.0%**（新地形 B=80.29）；
+//      与 g5-aim 同期同 (stage,seed) 配对差 ≥ **−1pp**（不劣化）。
+//   守卫（任一破 ⇒ 停腿复盘）：
+//     kills ≥17.5 · deaths ≤1.9 · **stop ≤6%** · **cells ≥130** · shots ≥70
+//     · timeout ≤7% · 连续 2 个 eval 点 win <78%。
+//   ⚠ 本臂最大风险 = **躲成站桩**：threat/hurt/postHit 三税加重 + 新增三税，最容易
+//     把 NN 压回“蹲远处不打”。stop >6% 或 cells <130 立刻停，不要用“胜率还没掉”
+//     辩护——站桩是延迟爆炸（z8 旧伤：idle 税满量程 3×wWin，96% 局主动送死）。
+//   ⚠ 低血承伤项有“y21 判空气”的前科：只作小剂量（0.03），若剂量 <1% 触发率
+//     下一轮删掉，不要加价硬凑。
+//
+// ── 4. 纪律 ────────────────────────────────────────────────────────────────
+//   ① 与 g5-aim 并行：同 bc、同 rotation、同 target_transitions、同 eval 网格，
+//      只差 reward ⇒ 可直接归因“躲弹价格”的贡献。
+//   ② 新奖励 = 新实验 ⇒ 新 out/traj/backup；禁与 g5-aim / g4-mobility 续跑。
+//   ③ 不做按兵种定价；inference_rules 不启用；机制门只作解释项。
+{
+  "version": 5,
+  "name": "g5-safe",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "rotation_mode": "even",
+  "rotation_per_it": 7,
+  "reward": {
+    "formula": [
+      // ① 收入骨架（与 g5-aim 逐字相同）。
+      // 杀一辆敌车 +15；基线 18.6 杀/局 ⇒ +279.5，最大收入项。
+      "wKill*kills",
+      // 每命中一发 +1.5；基线 42.6 命中/局 ⇒ +63.9。
+      "+ wHit*aimHits",
+      // 命中率项 5×命中率；基线 40.5% ⇒ +2.0。
+      "+ wAcc*aimHits/(playerShots+1)",
+      // 冻/盾窗内命中 +1.2/发，封 12 发（+14.4）；基线 8.47 发 ⇒ +10.2。
+      "+ wWinHit*min(hitsInFreezeShieldWindow, winHitCap)",
+      // 每拆一格砖 +1.0，封 12 格（+12）；基线 7.26 格 ⇒ +7.3。
+      "+ wBrick*min(aimBricks, brickCap)",
+      // 捡一个道具 +4，封 6 个（+24）；基线 5.38 个 ⇒ +21.5。
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      // 通关 +80；基线 80.3% 胜率 ⇒ +64.2。主奖，任何税不许压过它。
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 通关提速最多 +8（13000 拍拐点、1400 拍满速）；基线 clearTick 7476 ⇒ 多数局 +8。
+      "+ wSpeed*where(clearTick>=0, max(0, min(1, (13000-clearTick)/1400)), 0)",
+      // ② 承伤/死亡/不动（与 g5-aim 逐字相同）。
+      // 每掉 1 血 −0.12；基线 439.8 血/局 ⇒ −52.8，只罚真掉血。
+      "- wDmg*playerDamageTaken",
+      // 每死一次 −24；基线 1.34 次/局 ⇒ −32.2。
+      "- wDeath*playerDeaths",
+      // 不动拍占比 ×100；基线 2.9% ⇒ −2.9，防站桩。
+      "- wIdle*idleTicks/(ticks+1)",
+      // 死锁超过 300 拍的部分 −0.04/拍，封 900 拍（−36）。
+      "- wStuck*min(max(0, stuckTicks - stuckFree), stuckCap)",
+      // 顶墙超过 350 拍的部分 −0.08/拍，封 300 拍（−24）。
+      "- wWall*min(max(0, wallPressTicks - wallFree), wallCap)",
+      // ③ 火线三税：本臂相对 g5-aim **加重**（100→130 / 0.06→0.09 / 600→800）。
+      // 火线拍占比 ×130，封 25%（−32.5）；基线 6.7% ⇒ −8.7（比 g5-aim 多 −2.0）。
+      "- wThreat*min(threatRateCap, threatTicks/(ticks+1))",
+      // 火线近失/命中加权 −0.09/点，封 500（−45）；基线 156.6 ⇒ −14.1（多 −4.7）。
+      "- wHurt*min(hurtWeight, hurtCap)",
+      // 挨打后赖线拍占比 ×800，封 3.5%（−28）；基线 0.85% ⇒ −6.8（多 −1.7）。
+      "- wPostHit*min(postHitRateCap, postHitLaneTicks/(ticks+1))",
+      // 被夹拍占比 ×40，封 40%（−16）；基线 16.5% ⇒ −6.6（与 g5-aim 相同）。
+      "- wEncl*min(enclRateCap, enclWeightTicks/(ticks+1))",
+      // ④ g5-aim 的瞄准两项（逐字继承）。
+      // 累进空射税（与 g5-aim 逐字相同）：前 40 发免税，超出二次累进，封顶 12。
+      "- min(missCap2, wMiss2*max(0, aimMisses - missFree)**2)",
+      // 命中率超额奖：超过 45% 的部分每 1pp +2 分，封 15pp（+30）；基线 40.5% ⇒ 0。
+      "+ wAccGood*min(accCap, max(0, aimHits/(playerShots+1) - accFree))",
+      // ⑤ 本臂新增：连续饮弹 / 滑窗最大承伤 / 低血承伤。
+      // ⑭ 连续饮弹：相邻两笔扣血间隔 ≤120t 的次数 ×4，封 8 次（−32）；基线 1.14 ⇒ −4.6。
+      "- wBurst*min(damageBursts, burstCap)",
+      // ⑮ 滑窗最大承伤：120t 窗口最大承伤超过 120 的部分 ×0.10，封 300（−18）；基线 164.9 ⇒ −4.5。
+      "- wMaxDmg*min(max(0, maxDamage120 - maxDmgFree), maxDmgCap)",
+      // ⑯ 低血承伤：扣血时 hp<0.4 的伤害 ×0.03，封 600（−18）；基线 197.8 ⇒ −5.9。
+      "- wLowDmg*min(damageWhileLow, lowDmgCap)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wAcc": 5.0,
+      "wWinHit": 1.2,
+      "winHitCap": 12.0,
+      "wBrick": 1.0,
+      "brickCap": 12.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wWin": 80.0,
+      "wSpeed": 8.0,
+      "wDmg": 0.12,
+      "wDeath": 24.0,
+      "wIdle": 100.0,
+      "wStuck": 0.04,
+      "stuckFree": 300.0,
+      "stuckCap": 900.0,
+      "wWall": 0.08,
+      "wallFree": 350.0,
+      "wallCap": 300.0,
+      // 火线三税加重（相对 g5-aim：100/0.06/600 → 130/0.09/800）。
+      "wThreat": 130.0,
+      "threatRateCap": 0.25,
+      "wHurt": 0.09,
+      "hurtCap": 500.0,
+      "wPostHit": 800.0,
+      "postHitRateCap": 0.035,
+      "wEncl": 40.0,
+      "enclRateCap": 0.4,
+      "wMiss2": 0.0015,
+      "missFree": 40.0,
+      "missCap2": 12.0,
+      "wAccGood": 200.0,
+      "accFree": 0.45,
+      "accCap": 0.15,
+      // 新增三税。
+      "wBurst": 4.0,
+      "burstCap": 8.0,
+      "wMaxDmg": 0.1,
+      "maxDmgFree": 120.0,
+      "maxDmgCap": 300.0,
+      "wLowDmg": 0.03,
+      "lowDmgCap": 600.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -45.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/g4-mobility/g4-mobility.it380.20261114-194719.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "kickstart_decay": 0.5,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 500,
+  "max_hours": 24.0,
+  "lr": 0.00008,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00008,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261115,
+  "decision_events": false,
+  "decision_k": 10,
+  // Hybrid opening（用户 2026-11-15 02:00 要求）：eval/rollout 都套条件接管；
+  // 只对 strict 不连通的 13 关生效（如 s2021），路本来就通的关不抢方向盘。
+  "opening_connect": true,
+  "out": "tmp/g5-safe/weights.json",
+  "traj": "tmp/g5-safe",
+  "breakers_off": true,
+  "ent_break": 0.25,
+  "ent_break_consec": 8,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/g5-safe",
+  "backup_prefix": "g5-safe",
+  "eval_stages": "2000-2034",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}
+
+// ── 结课报告（2026-11-15，231/500 it，人工停课）───────────────────────────────
+// ① 运行账：11-15 02:03:25 → 07:47:48，**231/500 it**（≈5h44m、≈89s/it）；
+//    停课 = 用户人工停 + 由 g5-safe2 接替（09:02:47 开课），不是熔断。
+//    最后完整 eval = it230（行时间 07:45:41–07:47:55 回齐）；最后 checkpoint = it231（07:47:48）；
+//    it232 采集已发布（07:48:13）但从未回包，不计入交付点。
+//    `breakers_off: true` 全程未触发：KL max 0.0014 / min 0.0002，entropy min 0.4322（阈值 0.25）。
+//    正式链 checkpoint = it1–231（231 个）；权重目录另有 01:2x/01:4x 两次试跑的 it1–11 残件，
+//    不计入本账。
+//    eval 47 点（it0…230）× 700 局 = **32,900 局**（35 关 × 20 seed）。
+// ② 主曲线（铁律：连续 5 点 = 25 it = 3500 局；基线 = 起始窗 it0–20）：
+//    起始窗 **79.37%** → 末窗 it210–230 **80.94%**（+1.57pp，SE 0.90，p=0.089，未过 0.05）。
+//    单点峰值 82.70% @ it205；**五点窗峰值 81.31% @ it205–225**。
+//    最后三窗 80.74 / 81.31 / 80.94（跨度 0.57pp ⇒ 已平台化）。
+//    预注册主 2：≥80.0% **pass**（80.94）；与 g5-aim 同 (stage,seed) 配对 **+0.80pp**
+//      （SE 0.92，p=0.38）⇒ 方向对但不显著；「不劣化 ≥−1pp」**pass**。
+// ③ 行为账（起始窗 → 末窗，3500 局/窗）：
+//    win +1.57pp · clearTick 7325 → **7265（−61；配对 −74±143，p=0.31）**
+//    · 胜局残血 61.0% → **62.9%（+1.9pp；配对 +2.1±2.0pp，p=0.009）**
+//    · 承伤 461.2 → **454.4（−6.8；配对 p=0.17）**
+//    · kills 18.71 → 18.87 · deaths 1.43 → 1.41 · cells 149.2 → 151.5（+2.3，p=0.002）
+//    · shots 94.27 → 92.48 · hits 42.42 → 42.85（+0.43，p=0.027）· misses 41.62 → 39.45
+//    · 躲弹四项：bursts **1.266 → 1.214** · maxD120 **175.7 → 174.4**
+//      · threat **7.36% → 7.25%** · postHit **0.877% → 0.880%**
+//    ⇒ 四项全都在动，但都是零头；win 的四项改善主要来自骨架，不是躲弹税。
+// ④ 机制门 / 守卫（末窗，hybrid 面板 vs 预注册阈值）：
+//    主 1 四项**全 fail**：bursts 1.214（≤0.8）· maxD120 174.4（≤140）
+//      · threat 7.25%（≤5.5%）· postHit 0.880%（≤0.7%）。
+//    即使按设计基线的 bare it380（bursts 1.14 / maxD 164.9 / threat 6.7% / postHit 0.85%）比，
+//      末窗四项也全部更差（+0.07 / +9.5 / +0.55pp / +0.03pp）。
+//    守卫全过：kills 18.87 ≥17.5 · deaths 1.41 ≤1.9 · shots 92.48 ≥70 · stop 1.16% ≤6%
+//      · cells 151.5 ≥130 · timeout 2.09% ≤7% · 连续 <78% 最长 1 点（无 2 连）。
+//    ⇒ 不是被守卫杀的；是「主 2 过、主 1 全负 + 后继接替」的人工停课。
+// ⑤ 分关（末窗，100 局/关）：
+//    最差 **2030 43%** · 2018 59% · 2032 64% · 2011 66% · 2001 71%（<70 共 4 关，<60 共 2 关）。
+//    自身 Δ（起始窗→末窗）：**2030 −17pp** · 2018 −9 · 2003/2016 −4；
+//      改善 2012 +15 · 2014/2010 +10 · 2006/2007 +8 ⇒ 35 关均值 +1.57pp 里 2030 单关吃掉 −0.5pp。
+//    2030 拆开（100 局）：43/55/2；kills 16.46 · dmg 668.3（比 aim 的 681.6 更低）
+//      · deaths 2.37（同 aim 2.36）· cells 93.1（aim 98.6）· **stuck 673（aim 451，+49%）**
+//      ⇒ 不是被打死的，是绕/等卡死（与 08:20 进展报告同结论）。
+//    失败结构（667/3500）：gameover 594（89.1%）· max_ticks 73（10.9%）；低杀超时 13（0.37%）。
+// ⑥ 剂量账（3500 局/窗，按课程公式逐局算 Φ，含 terminal）：
+//    Φ **298.71 → 308.83（+10.12/局）**。新增三税在起始窗合计 **−17.66/局**
+//    （burst −5.06 / maxD −6.29 / lowDmg −6.30；设计估 −15.0）；含火线三税加重的总价
+//    safe−aim ≈ **−26.5**（设计估 −23.4）。末窗三税 −17.2、总价 ≈ −25.6 ⇒ **税一直在收，
+//    行为没变**：四项躲弹读数只动了零头。这不是「税不够重」（safe2 已加到 4.5×），
+//    而是「这些读数与胜率弱相关」的先验。
+// ⑦ off-policy 诊断（关闭 opening_connect 的单点 700 局；违反 11-15 铁律，**不作主判**）：
+//    it380 基线 B → it231（`tmp/g5-safe/bare-it231.jsonl`），同协议同 700 (stage,seed)：
+//    win **80.29% → 82.00%（+1.71pp，SE 1.98，p=0.39）**；shots −7.6（p=0.057）
+//      · hits +0.24（p=0.60）· misses −7.9（p=0.043）· kills +0.09 · dmg **+7.0（p=0.53）**
+//      · 胜局耗时 +22（p=0.88）· acc 40.48% → 43.89% · postHit 0.854% → 0.705%。
+//    ⇒ 方向与 hybrid 面板一致（+1.6 ~ +1.7pp），但**承伤符号相反**（bare +7.0 / hybrid −6.8）：
+//      「safe 更省血」只在开局接管面板成立，不能当部署结论。
+// ⑧ 判词：**主 2 过、主 1 全负，半程有效；不续跑**。
+//    ① 四项主指标方向全对（hybrid 面板：win +1.57 / tick −61 / 残血 +1.9 / 承伤 −6.8），
+//       但只有残血过显著（p=0.009），win 配对 p=0.38、承伤 p=0.17。
+//    ② 躲弹税买到的变化量 = bursts −0.05、maxD −1.3、threat −0.11pp、postHit +0.003pp：
+//       与阈值（−0.34 / −24.9 / −1.2pp / −0.15pp）差一个数量级 ⇒ 继续加同一套税没有依据。
+//    ③ 唯一结构性退步 = S2030（−17pp、stuck +49%、cells −5.5）⇒ 后继 safe2 的守卫
+//       已把 stuck >900 / cells <140 写成停腿线；S2030 仍是第一条要盯的关。
+// ⑨ 产物：`tmp/g5-safe/{training_log,eval_log}.jsonl`（231 it；eval 47 点 / 32,900 行）、
+//    `tmp/g5-safe/weights.json`、`nn-training/weights/g5-safe/`（正式链 it1–231）。
+//    交付点 = **it230/it231**；`g5-safe.it230.20261115-074454.json` 已被
+//    g5-aim2 / g5-safe2 采用为 bc（两课 09:01/09:02 开课）。
+//    ⚠ 本次只改注释（无可执行键变化）⇒ `course_fp` 随文件字节变；本课已停，禁续跑（§15.5）。

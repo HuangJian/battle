@@ -8,7 +8,7 @@
  *  纯数据 + 纯函数（无 JSX / 无 IO），与其它 `view/` 模块同规：服务端与客户端共用。
  */
 
-import type { IterRotation, IterVolume } from './metric-types'
+import type { IterRotation, IterVolume, IterVolumeStage } from './metric-types'
 
 /** 关号清单 → 压缩文字（`[0,1,2,5]` ⇒ `0-2,5`；非连续关号 `2000-2004,2030-2034` 照旧）。 */
 export function stageRangeText(stages: readonly number[]): string {
@@ -71,6 +71,55 @@ export function volumeTitle(v: IterVolume | null | undefined): string {
     return `${s.stage}: ${s.collected}/${s.quota}${gap}${est}`
   })
   return `本轮逐关采集账${v.rule ? `（${v.rule}）` : ''}：${parts.join(' · ')}`
+}
+
+/** 采集健康判据（用户 2026-11-14：「健康就显示一个 badge，点开才看明细」）。
+ *
+ *  · `ok`      —— 逐关账在手、每关 `shortfall ≤ 0`、没触单关硬顶；
+ *  · `gap`     —— 任何一关有缺口，或触了硬顶（「顶到了」不是「快好了」）；
+ *  · `unknown` —— 没分关账 / 达标线或缺口未知（不可知 ≠ 健康，也 ≠ 有病）。 */
+export type RotationHealth = 'ok' | 'gap' | 'unknown'
+
+export function rotationHealth(row: {
+  volume?: IterVolume | null
+  capped?: boolean | null
+}): RotationHealth {
+  const v = row.volume ?? null
+  if (!v || v.stages.length === 0) return 'unknown'
+  if (row.capped) return 'gap'
+  let unknown = v.quota === null
+  for (const s of v.stages) {
+    if (s.quota === null || s.shortfall === null) {
+      unknown = true
+      continue
+    }
+    if (s.shortfall > 0) return 'gap'
+  }
+  return unknown ? 'unknown' : 'ok'
+}
+
+/** 健康 badge 文案：`采集健康 达标 12/12` / `采集有缺口 达标 9/12` / `采集读数不全`。
+ *  缺口是「顶出来的」时直接说「触硬顶」——那时达标数看着漂亮，原因不在没采够。 */
+export function healthText(row: { volume?: IterVolume | null; capped?: boolean | null }): string {
+  const h = rotationHealth(row)
+  if (h === 'unknown') return '采集读数不全'
+  const total = row.volume?.stages.length ?? 0
+  const met = metStages(row.volume)
+  const tail = met === null ? '' : ` 达标 ${met}/${total}`
+  if (h === 'ok') return `采集健康${tail}`
+  return row.capped ? '采集有缺口 触硬顶' : `采集有缺口${tail}`
+}
+
+/** 逐关一格（chip）的 hover 口径：收到 / 达标线 / 缺口 / 局数（硬顶）/ est。 */
+export function stageTitle(s: IterVolumeStage): string {
+  const parts = [`关 ${s.stage}：收到 ${s.collected}`]
+  parts.push(s.quota === null ? '达标线未知' : `达标线 ${s.quota}`)
+  if (s.shortfall !== null && s.shortfall > 0) parts.push(`缺 ${s.shortfall}`)
+  if (s.games !== null) {
+    parts.push(`局 ${s.games}${s.capGames !== null ? `/${s.capGames}` : ''}`)
+  }
+  if (s.estS !== null) parts.push(`est ${s.estS}`)
+  return parts.join(' · ')
 }
 
 /** 一轮在面板上的一句话读数（窗口 + 达标 + 触顶）。 */

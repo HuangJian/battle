@@ -99,7 +99,9 @@ def start_quick_tunnel(
                 cf_bin,
                 "tunnel",
                 "--url",
-                f"http://localhost:{port}",
+                # 127.0.0.1 字面量：`localhost` 会被 cloudflared（Go）解析成 `::1` 后只拨 IPv6
+                # 回环，而本机服务绑 IPv4 ⇒ origin 恒 connection refused ⇒ CF 回 502。
+                f"http://127.0.0.1:{port}",
                 "--logfile",
                 str(cf_path),
             ],

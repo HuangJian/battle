@@ -54,7 +54,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from common import net_http, runtime
+from common import http_pool, net_http, runtime
 from common.distribution_limits import STATUS_TIMEOUT_SEC as STATUS_TIMEOUT_SEC
 from common.distribution_limits import node_slots as node_slots
 from common.distribution_limits import status_timeout_of as status_timeout_of
@@ -330,21 +330,77 @@ class RequestRegistry:
 _REQUESTS = RequestRegistry()
 
 
-def set_request_tag(tag: str) -> None:
+def set_request_tag(tag: str, kind: str | None = None) -> None:
     """给**当前线程**的 HTTP 请求打标（`abort_active_requests` 的作用域键）。
 
     线程本地，不继承：调用方须在每个自建线程（worker/supervisor）开头显式设置。
     空 tag = 不参与收工断连（rollout/A/C 层的既有行为逐字不变）。
+
+    `kind` 顺带设计数桶的用途段（`None` = 不动已有 kind）：tag 与 kind 同在请求上下文里，
+    两个都设时不必写两行（`trainer/dispatch.py` 等文件有 LOC 预算）。
     """
     _TAG.value = tag
+    if kind is not None:
+        set_request_kind(kind)
 
 
 def request_tag() -> str:
     return str(getattr(_TAG, "value", "") or "")
 
 
+#: 请求用途（`http_pool` 计数分桶的第二段）。thread-local，与 `_TAG` 同纪律。
+_KIND = threading.local()
+
+
+def set_request_kind(kind: str) -> None:
+    """给**当前线程**的 HTTP 请求打用途标签（`rollout|eval|batch|weights|probe|other`）。
+
+    2026-11-14 评审：池计数是进程级且读后清零，而一个 serve 进程并发跑 10+ 课程 ⇒
+    没有这一层就分不清「谁的 connect」。线程本地、不继承：调用方须在每个自建线程
+    （rollout worker / eval 节点腿 / batch supervisor）开头显式设置；空串 = 回到 path 推断。
+    """
+    _KIND.value = kind
+
+
+def request_kind() -> str:
+    return str(getattr(_KIND, "value", "") or "")
+
+
+def _kind_from_url(url: str) -> str:
+    """未显式设 kind 时的推断：探活 → probe · 权重面 → weights · 任务面按 `mode` 分
+    （`mode=eval` = 评估腿，其余 = rollout）。推断就够用的地方不设 thread-local（LOC 预算）。"""
+    parts = urllib.parse.urlsplit(url)
+    path = parts.path or ""
+    if path in ("/v1/weights", "/v1/blob-sha", "/v1/code-sha"):
+        return "weights"
+    if path.startswith("/v1/ping") or path.startswith("/v1/status") or path == "/v1/restart":
+        return "probe"
+    if path in ("/v1/task", "/v1/result"):
+        mode = urllib.parse.parse_qs(parts.query).get("mode", [""])[0]
+        return "eval" if mode == "eval" else "rollout"
+    return "other"
+
+
+def pool_bucket(kind: str | None = None) -> str:
+    """`http_pool` 的计数桶 = `<course>/<kind>`（唯一拼法；空课程/空 kind 自动省略）。
+
+    为什么带课程名：同一个 trainer 进程同时跑多门课（现场 10+），而池计数是**进程级**的
+    ——只分 kind 不分课程，两个课程的行依然互相抢桶（plan §2.2）。
+    """
+    k = (request_kind() if kind is None else kind).strip()
+    return "/".join(p for p in (course_name_of(), k) if p)
+
+
+def pool_round_suffix(kinds: tuple[str, ...] = ("rollout", "eval")) -> str:
+    """`[dist] round done` 行尾的**全部**桶读数（只打一个数永远说不清是谁的）。"""
+    return "".join(http_pool.stats_suffix(pool_bucket(k)) for k in kinds)
+
+
 def abort_active_requests(tag: str = "") -> int:
     """停发同作用域的新请求 + **交 daemon 线程**关闭其全部在飞连接（返回待关条数）。
+
+    同时通知长连接池（`common.http_pool`）：池内响应也要关、该作用域不得再重发
+    （「收工即断连」不允许把一局重新开起来）。
 
     **为什么关连接必须异步**（2026-09-19 实测）：`HTTPResponse.close()` 可能阻塞——
     若响应体正被读线程消费，close 要等它让出内部锁；800 局探针实测主线程在
@@ -356,6 +412,8 @@ def abort_active_requests(tag: str = "") -> int:
     调用方不再依赖它们的结果。
     """
     scope = tag or request_tag()
+    # 长连接池也要关、且该作用域不得再重发（「收工即断连」不允许把一局重新开起来）。
+    http_pool.abort_scope(scope)
     targets = _REQUESTS.begin_abort(scope)
     if targets:
 
@@ -381,6 +439,7 @@ def clear_abort(tag: str = "") -> None:
     空 = 全清（旧调用方逐字不变）。
     """
     _REQUESTS.clear_abort(tag)
+    http_pool.clear_abort(tag)
 
 
 def abort_scope(tag: str = "") -> bool:
@@ -406,6 +465,19 @@ def node_request(
         # 收工后不再发新请求（settled 已满 = 本单元不需要任何新结果）。
         raise DistError(0, "aborted: settled complete", transient=True)
     auth = {"Authorization": f"Bearer {auth_key}", **(headers or {})}
+    # 长连接池（2026-11-14，P4）：本机→节点每请求新建连接要 0.77s，复用 0.32s。池内保留
+    # **竞速 connect**（§149 的 IPv6 税修复住那里）与 urllib 的异常语义（HTTPError/URLError）；
+    # `NODE_HTTP_POOL=0` 逐字节回退到下面的 racing_urlopen 分支。
+    if http_pool.enabled():
+        return http_pool.request(
+            url,
+            timeout=timeout,
+            data=data,
+            headers=auth,
+            method=method,
+            scope=scope,
+            bucket=pool_bucket(request_kind() or _kind_from_url(url)),
+        )
     req = urllib.request.Request(url, data=data, headers=auth, method=method)
     # 竞速 connect（2026-11-11）：云机隧道主机名解析出多个地址，stdlib 串行试、每个地址
     # 各给一份 timeout ⇒ 本机无 IPv6 路由时一次 ping 的 tcp 段就要 16s（见 common/net_http.py）。
@@ -446,17 +518,42 @@ def ping_nodes_parallel(nodes: list, timeout: float = STATUS_TIMEOUT_SEC) -> lis
         return rt.map(_one, nodes, workers=min(8, len(nodes)))
 
 
+def node_probe(
+    url: str,
+    auth_key: str,
+    timeout: float = STATUS_TIMEOUT_SEC,
+    *,
+    path: str = "/v1/ping",
+) -> tuple[dict | None, str]:
+    """探活 + **失败归因**：返回 `(info, why)`，成功时 `why == ""`。
+
+    `node_ping`（采样 `/v1/ping`）与 `push_node_ping`（push `/ping`）都只是它的薄壳。
+
+    为什么把原因带出来（2026-11-17 真机）：hub 的注册门对每台云机恒 422，而日志只有
+    「无应答，或 authKey 不符」——`400`、连接超时、authKey 不符三种完全不同的故障被压成
+    一句话，现场只能另起 curl 猜。归因串**只进日志**，不进任何 HTTP 应答；判定仍是
+    `info is None`（逐字不变）。
+    """
+    try:
+        status, body = node_request(url.rstrip("/") + path, auth_key, timeout)
+        if status != 200:
+            return None, f"HTTP {status}"
+        # json.loads 返回 Any；节点探活契约固定为 dict。
+        info: Any = json.loads(body.decode("utf-8"))
+        if not isinstance(info, dict):
+            return None, f"应答不是对象（{type(info).__name__}）"
+        return info, ""
+    except urllib.error.HTTPError as e:
+        return None, f"HTTPError {e.code}"
+    except PING_ERRORS as e:
+        # 只吞**网络面**（`PING_ERRORS`）：程序员错（AttributeError/KeyError）必须穿出去，
+        # 否则「节点全部不可用」会把自己的 bug 掩盖成一条正常结论（DECISIONS 2026-11-15）。
+        return None, f"{type(e).__name__}: {e}"
+
+
 def node_ping(url: str, auth_key: str, timeout: float = STATUS_TIMEOUT_SEC) -> dict | None:
     """GET /v1/ping → dict；任何失败返回 None（调用侧决定排除该节点）。"""
-    try:
-        status, body = node_request(url.rstrip("/") + "/v1/ping", auth_key, timeout)
-        if status == 200:
-            # json.loads 返回 Any；节点 /v1/ping 契约固定为 dict。
-            info: dict = json.loads(body.decode("utf-8"))
-            return info
-    except PING_ERRORS:
-        return None
-    return None
+    return node_probe(url, auth_key, timeout)[0]
 
 
 def push_node_ping(url: str, auth_key: str, timeout: float = 3.0) -> dict | None:
@@ -465,16 +562,9 @@ def push_node_ping(url: str, auth_key: str, timeout: float = 3.0) -> dict | None
     为什么不能复用 `node_ping`：push 类节点（`gpu_push` / `offline_push`）跑的是
     `remote/worker_server.py`，它的探活面是 **`/ping`**（Bearer），不是 rollout agent 的
     `/v1/ping`（query token）。同一个 hub 同时伺候两种节点，判据必须按 `kind` 分流
-    （`hub.admin._admin_nodes_register`）。
+    （`hub.admin._admin_nodes_register`）——两者共用 `node_probe` 的实现与归因。
     """
-    try:
-        status, body = node_request(url.rstrip("/") + "/ping", auth_key, timeout)
-        if status == 200:
-            info: Any = json.loads(body.decode("utf-8"))
-            return info if isinstance(info, dict) else None
-    except PING_ERRORS:
-        return None
-    return None
+    return node_probe(url, auth_key, timeout, path="/ping")[0]
 
 
 #: 进程级课程身份（环境变量名）。训练进程 = 一门课，`apply_course` 挂上后所有

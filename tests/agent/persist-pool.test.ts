@@ -295,3 +295,34 @@ describe('sampler-agent 接线（源级钉子）', () => {
     expect(src.includes('} else dry++')).toBe(true)
   })
 })
+
+describe('长驻池 IO 卫生（2026-11-14，最佳实践；不以墙钟收益为判据）', () => {
+  const src = readFileSync(join(REPO_ROOT, 'tools', 'agent', 'sampler-agent.ts'), 'utf8')
+
+  it('stderr 管道必须有人消费（写满 64KB 会把 worker 永久堵在 write 上）', () => {
+    expect(src.includes("stdio: ['pipe', 'pipe', 'pipe']")).toBe(true)
+    expect(src.includes('child.stderr?.on(')).toBe(true)
+    expect(src.includes('errTail')).toBe(true)
+  })
+
+  it('stdout 按 chunk 一次切行，不逐行 slice 整个缓冲（O(N²) 复制）', () => {
+    expect(src.includes('data.lastIndexOf')).toBe(true)
+    expect(src.includes('w.buf = w.buf.slice(nl + 1)')).toBe(false)
+  })
+
+  it('runGame 生命周期不做同步 FS（单线程服务不阻塞事件循环）', () => {
+    const from = src.indexOf('async function runGame(')
+    const runGame = src.slice(from, src.indexOf('function jsonResponse(', from))
+    for (const bad of [
+      'mkdirSync(gameDir',
+      'readFileSync(packFile)',
+      'rmSync(gameDir',
+      'existsSync(packFile)',
+    ]) {
+      expect(runGame.includes(bad)).toBe(false)
+    }
+    expect(runGame.includes('fs.promises.mkdir')).toBe(true)
+    expect(runGame.includes('fs.promises.readFile')).toBe(true)
+    expect(runGame.includes('fs.promises.rm')).toBe(true)
+  })
+})

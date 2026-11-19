@@ -651,8 +651,8 @@ class EvalRound:
                     if leg < self.attempts_transient_max and task not in self.seen:
                         self._requeue_locked(task, True, leg)
                         self._log(
-                            f"[eval] s{task[0]}/seed{task[1]} failed ({err})"
-                            " — requeued（瞬断/背压，不计节点故障）"
+                            f"[eval] s{task[0]}/seed{task[1]} node={nid}"
+                            f" failed ({err}) — requeued（瞬断/背压，不计节点故障）"
                         )
                     elif task not in self.seen:
                         self._record_failed_locked(task, nid, err, err_errno, msg_head)
@@ -669,7 +669,10 @@ class EvalRound:
                     )
                 elif leg < self.attempts_max and task not in self.seen:
                     self._requeue_locked(task, False, leg)
-                    self._log(f"[eval] s{task[0]}/seed{task[1]} failed ({err}) — requeued")
+                    self._log(
+                        f"[eval] s{task[0]}/seed{task[1]} node={nid}"
+                        f" failed ({err}) — requeued"
+                    )
                 elif task not in self.seen:
                     self._record_failed_locked(task, nid, err, err_errno, msg_head)
                     self._log(
@@ -689,7 +692,8 @@ class EvalRound:
                     else ""
                 )
                 self._log(
-                    f"[eval] s{task[0]}/seed{task[1]} failed ({err}) — requeued{suffix}"
+                    f"[eval] s{task[0]}/seed{task[1]} node={nid}"
+                    f" failed ({err}) — requeued{suffix}"
                 )
             elif task not in self.seen:
                 self._fail_recorder(self.meta_path, self.it, task, nid, err)
@@ -1031,6 +1035,17 @@ class EvalArbiter:
         """该课仍登记在仲裁器里的轮数（在跑或尚未收工）。"""
         with self._cond:
             return sum(1 for rnd in self._rounds if rnd.course_fp == course_fp)
+
+    def active_its(self, course_fp: str) -> set[int]:
+        """该课**仍在飞**的评估轮号（登记了但还没收工）。
+
+        用途：收官 drain 的**去重**（2026-11-17 事故）——drain 用 `eval_summary` 判「哪轮
+        没覆盖」，而在飞的轮还没写 summary ⇒ 会被判成未覆盖**再派一次**，同一 `(stage,seed)`
+        落两行（现场 `replay-a-cont` it20：700 + 469 = 1,169 行）。判据要问「这轮是不是已经
+        有人在做」，而不是「账上有没有结论」。
+        """
+        with self._cond:
+            return {int(rnd.it) for rnd in self._rounds if rnd.course_fp == course_fp}
 
     def reset_for_tests(self) -> None:
         with self._cond:

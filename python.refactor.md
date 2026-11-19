@@ -650,7 +650,7 @@ bank 的 `extra` 只有 Paddle 侧进模型，torch 侧 `_setup_demo` 从来没�
 `policy_extra=True` 的模型这意味着 demo 段前向拿 `extra=None`，而模型拒绝静默用 0
 （`ValueError`），legacy 模型则**看不出差别**（「两侧输入不同但都绿」）。先红后修：
 `tests/worker/test_ppo_demo_mix.py::test_demo_bc_feeds_the_bank_extra_to_a_policy_extra_model`
-（旧实现 ValueError，修复后 `demo_bc > 0`）。记录见 `docs/nn/training-stack.md` §73。
+（旧实现 ValueError，修复后 `demo_bc > 0`）。记录见 `docs/nn/training-stack.md` §77。
 
 **2026-11-14 第一步（已落地）**：`warn_unused_ignores` 由 false 翻成 **true**，清掉它当场指出的
 **111 条无用 `type: ignore`（54 个文件）**，G6 的 `type: ignore` 存量 271/98 → **163/68**。三条

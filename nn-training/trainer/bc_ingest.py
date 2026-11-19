@@ -265,6 +265,9 @@ def run_epoch_eval(
             cfg=cfg,
             course=course,
             course_env=bool(course.eval.course_env),
+            # 机器健康账（与训练同一份）：节点页「今日贡献」只读 dist-agent-meta；
+            # BC eval 不写它 = 手动 evalA 的局数系统性漏计（2026-11-13 报障）。
+            meta_path=jsonl_path.parent / "dist-agent-meta.jsonl",
             log=log,
         )
         append_ledger(jsonl_path, {"event": "bc_eval", "it": int(it), **result})

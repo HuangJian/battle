@@ -3,11 +3,14 @@ import {
   applyPageAutoSave,
   autoSaveKeyFor,
   DEFAULT_CONFIG,
+  IDLE_STOP_KEY,
   isLoopbackHttpBase,
   loadAutoSave,
+  loadIdleStop,
   loadStopPpo,
   sanitizeConfig,
   saveAutoSave,
+  saveIdleStop,
   saveStopPpo,
   stopPpoKeyFor,
 } from '../src/notebook-companion/config'
@@ -129,5 +132,19 @@ describe('停止其它 PPO：按页隔离', () => {
     data.set(stopPpoKeyFor('p2'), 'yes')
     expect(loadStopPpo(runtime, 'p2', true)).toBe(true)
     expect(loadStopPpo(runtime, 'p2', false)).toBe(false)
+  })
+})
+
+describe('空闲停会话：全局一份（不按页）', () => {
+  it('默认关；读写同一个键；坏值回退 fallback', () => {
+    const { runtime, data } = memoryRuntime()
+    expect(loadIdleStop(runtime)).toBe(false)
+    saveIdleStop(runtime, true)
+    expect(loadIdleStop(runtime)).toBe(true)
+    expect(data.get(IDLE_STOP_KEY)).toBe(true)
+    // 不按页：没有任何 page 参数能把两个页面分开
+    data.set(IDLE_STOP_KEY, 'on')
+    expect(loadIdleStop(runtime, true)).toBe(true)
+    expect(loadIdleStop(runtime, false)).toBe(false)
   })
 })

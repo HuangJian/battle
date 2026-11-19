@@ -162,6 +162,23 @@ def rescue_round(rnd: EvalRound, execs: Any) -> str:
         return ""
     if rnd.yielded_nodes():
         return ""  # 让过位、只是当下被占满：别把「等间隙」记成 workers-gone
+    # 判死前的现场（2026-11-19：全量门禁里 e2e eval 轮同秒判死、单跑恒绿）。
+    # 只在这一条路上打 ⇒ 正常轮不增噪；`slots=0` = 池子根本没孵，`slots>0/active=0`
+    # = 线程孵了但退光了（`take()` 返回 None 或 stop 已置）。
+    rnd.log(
+        f"[eval] it{rnd.it}: 判死诊断 pending={queue_len} "
+        + " ".join(
+            [
+                f"{str(nid)[:16]}:active={execs.active(nid)}/slots={execs.pool_size(nid)}"
+                f"/routed={rnd.node_routable(nid, now)}"
+                for nid in rnd.node_ids()
+            ]
+            + [
+                f"local:active={execs.active(LOCAL_NODE)}/slots={execs.pool_size(LOCAL_NODE)}"
+                f"/ok={rnd.local_ok(now)}"
+            ]
+        )
+    )
     return "workers-gone"
 
 
@@ -180,6 +197,26 @@ def supervise_round(
             return "settled"
         now = time.time()
         if rnd.expired(now):
+            if rnd.pending_len() > 0:
+                # 窗口跑完了还有待派 ⇒ 线程活着却没领到牌（2026-11-19：本机兜底轮
+                # 30s 一张未发）。读数直接指向是「没线程」还是「有线程但没牌」。
+                rnd.log(
+                    f"[eval] it{rnd.it}: 窗口到期诊断 pending={rnd.pending_len()}"
+                    f"/inflight={rnd.inflight_len()} "
+                    + " ".join(
+                        [
+                            f"{str(nid)[:16]}:active={execs.active(nid)}"
+                            f"/slots={execs.pool_size(nid)}"
+                            for nid in rnd.node_ids()
+                        ]
+                        + [
+                            f"local:active={execs.active(LOCAL_NODE)}"
+                            f"/slots={execs.pool_size(LOCAL_NODE)}"
+                            f"/ok={rnd.local_ok(now)}"
+                            f"/spawned={rnd.local_spawned}"
+                        ]
+                    )
+                )
             return "window"
         has_work = rnd.has_work()
         if not has_work and rnd.writers_pending() <= 0:

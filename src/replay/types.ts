@@ -18,6 +18,31 @@ import type { WorldSnapshot } from '../snapshot/types'
  */
 export type ReplayType = 'clear' | 'base' | 'died' | 'timeout'
 
+/**
+ * 仿真的终局四态。与 Python 侧 `biz/reward_library.py::OUTCOMES` **同一个集合**
+ * （训练侧 `terminal` 公式必须列全四项，缺 `base_destroyed` = 弃基地零罚）。
+ *
+ * 注意这里**没有** `'gameover'`：`'gameover'` 是 `world.state` 的取值，不是 outcome。
+ * 2026-11-16 事故：两个导出器把 `outcome === 'gameover'` 当判定条件，该分支永不命中
+ * ⇒ 所有 `lives_exhausted` 局被写成 `status='timeout'`（replay 语料转换器据此断言，
+ * 直接抛 `final status died != recorded timeout`，长局语料全军覆没）。
+ */
+export type SimOutcome = 'stage_clear' | 'base_destroyed' | 'lives_exhausted' | 'timeout'
+
+/**
+ * `SimOutcome` → `ReplayType` 的**唯一**映射（导出器与校验器共用，禁止各处重写 if 链）。
+ *
+ * `lives_exhausted → 'died'`、`base_destroyed → 'base'` 两条与 `replay-to-shard.ts::statusOf`
+ * 对 `world.state === 'gameover'` 的摆动判定（`isBaseDestroyed() ? 'base' : 'died'`）一一对应。
+ * 未知值一律落 `'timeout'`（`ReplayType` 只有四态，不能抛）。
+ */
+export function replayTypeFromOutcome(outcome: SimOutcome | string): ReplayType {
+  if (outcome === 'stage_clear') return 'clear'
+  if (outcome === 'base_destroyed') return 'base'
+  if (outcome === 'lives_exhausted') return 'died'
+  return 'timeout'
+}
+
 /** Replays are addressed by UUID. */
 export type ReplayID = string
 

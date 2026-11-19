@@ -166,6 +166,31 @@ describe('buildBcEpochsView.pointer：BC 面板表头的进度指针', () => {
     expect(v.missing).toEqual([]) // 实际存在的 ep1..50 不得被报缺
   })
 
+  it('已评集合不随 evals 最近 20 条截断（老 epoch 不会被误显示成可补评）', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'tc-bc-evaluated-'))
+    mkdirSync(path.join(root, 'bc-evaluated'), { recursive: true })
+    const lines = [
+      L('run_start', { epochs: 30 }),
+      L('job_pending', { job_id: 'j', it: 1 }),
+      ...Array.from({ length: 25 }, (_, i) =>
+        L('bc_eval', {
+          it: 1,
+          epoch: i + 1,
+          wver: 'w',
+          levels: [{ level: 'a', n: 1 }],
+          ts: i,
+        }),
+      ),
+    ]
+    writeFileSync(path.join(root, 'bc-evaluated', 'training_log.jsonl'), lines.join('\n'), 'utf8')
+    process.env.BCITY_TMP_LOGS_DIR = root
+    const v = await buildBcEpochsView('bc-evaluated')
+    expect(v.evals).toHaveLength(20)
+    expect(v.evaluated).toHaveLength(25)
+    expect(v.evaluated[0]).toEqual({ it: 1, epoch: 1 })
+    expect(v.evaluated.at(-1)).toEqual({ it: 1, epoch: 25 })
+  })
+
   it('g1e 形状：完成 60、指标缺 25/27/60 ⇒ 服务端按完整行给出缺号', async () => {
     const root = mkdtempSync(path.join(tmpdir(), 'tc-bc-g1e-'))
     mkdirSync(path.join(root, 'bc-g1e'), { recursive: true })

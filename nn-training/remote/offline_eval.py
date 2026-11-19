@@ -470,7 +470,7 @@ class _EvalRound:
             if attempt > 1:
                 shutil.rmtree(game_dir, ignore_errors=True)  # 上一把可能留半截 _eval_report
                 log(
-                    f"[eval-cloud] self.it{self.it}: "
+                    f"[eval-cloud] it{self.it}: "
                     + game_watch.retry_line("eval", lab, attempt, err_txt, cap)
                 )
             t_game = time.time()
@@ -651,7 +651,12 @@ class _EvalRound:
         # 单局耗时分布（每轮都打）：<5s 这条线（以及重试次数）靠真数据校准，不靠猜。
         eb.add(
             "单局耗时",
-            game_watch.game_time_summary("eval", self.game_walls, retried=len(self.retried_games)),
+            game_watch.game_time_summary(
+                "eval",
+                self.game_walls,
+                retried=len(self.retried_games),
+                warn_sec=game_watch.slow_warn_sec(self.base_cap),
+            ),
             final_only=True,
         )
         # `out["servePool"]` 已在内层 finally 写入（评审 C2）；这里不再读 pool.*。
@@ -814,7 +819,14 @@ def run_cloud_eval(
         # 首次尝试的硬顶：调用方显式给了正数就完全按它（每次尝试都用它），否则节点兜底 +
         # 重试放宽（`attempt_timeout_sec`）——理由与 rollout 逐字相同。
         explicit = float(game_timeout_sec or 0.0) > 0
-        base_cap = float(game_timeout_sec) if explicit else game_watch.DEFAULT_GAME_TIMEOUT_SEC
+        # ★ 缺省硬顶随**面板的 tick 预算**走（2026-11-18，与 rollout 腿同一口径）：`classic35-safe-base`
+        #   的终局线是 36000 拍，一条合法拉满局就是 17–30s —— 固定 30s 只比它高 0–4s（实测 max
+        #   27.45s = 92% 上限）⇒ 机器稍慢就杀掉重跑最贵的那几局。`plan.max_ticks` 就是那个预算。
+        base_cap = (
+            float(game_timeout_sec)
+            if explicit
+            else game_watch.game_timeout_sec(int(plan.max_ticks))
+        )
 
         ctx = _EvalRound(
             it=int(it),

@@ -219,6 +219,18 @@ def fetch_task(
     # `:k<N>` 后缀（缓存隔离）；旧 agent 无 decisionKSupport 能力位 —— 由调用方提前排除
     # （fail-closed；本函数只透传，不查 ping）。
     decision_k: int = 10,
+    # 评估/部署链推理规则（课程 `inference_rules.*`）：仅激活时透传（缺席 = 老 agent
+    # 照旧，URL 逐字节不变）；agent taskKey 含对应后缀（缓存隔离）；旧 agent 的能力位
+    # 由调用方提前排除（fail-closed；本函数只透传，不查 ping）。
+    skip_steel_only_shots: bool = False,
+    break_bricks_on_path: bool = False,
+    suppress_useless_fire: bool = False,
+    suppress_lead_miss_fire: bool = False,
+    # Hybrid opening（一次性课程评估 `--opening-connect`）：仅激活时透传。
+    opening_connect: bool = False,
+    # 语料运输格式（plan/replay-corpus.plan.md P2）：`replay` ⇒ agent 拼
+    # `--corpus-fmt replay`；仅 rollout 路径，缺省 full = 老 URL 逐字节不变。
+    corpus_fmt: str = "full",
     # 键回调：请求发出前把 agent 认可的 taskKey 交回调用方。分配超时取消
     # （/v1/cancel）必须与提交端逐字节同键，故由这里统一算，调用方不再复制配方。
     on_key: Callable[[str], None] | None = None,
@@ -283,6 +295,19 @@ def fetch_task(
     # 决策周期 K：仅非默认值透传（缺席/10 = 老 agent 照旧，URL 逐字节不变）。
     if int(decision_k) != 10:
         params["decisionK"] = str(int(decision_k))
+    # 推理规则 / hybrid opening / replay：仅激活时透传（缺席 = 老 agent 照旧）。
+    if skip_steel_only_shots:
+        params["skipSteelOnlyShots"] = "1"
+    if break_bricks_on_path:
+        params["breakBricksOnPath"] = "1"
+    if suppress_useless_fire:
+        params["suppressUselessFire"] = "1"
+    if suppress_lead_miss_fire:
+        params["suppressLeadMissFire"] = "1"
+    if opening_connect:
+        params["openingConnect"] = "1"
+    if str(corpus_fmt or "full") == "replay":
+        params["corpusFmt"] = "replay"
     if course_fp:
         params["courseFp"] = course_fp
     # v5 多课程：任务自报课程——agent 按 (course, kind) 取权重桶。缺省走进程级身份
@@ -308,6 +333,12 @@ def fetch_task(
                 str(params.get("decisionEvents", "")),
                 str(params.get("decisionK", "")),
                 str(params.get("labelMode", "")),
+                str(params.get("skipSteelOnlyShots", "")),
+                str(params.get("breakBricksOnPath", "")),
+                str(params.get("suppressUselessFire", "")),
+                str(params.get("suppressLeadMissFire", "")),
+                str(params.get("openingConnect", "")),
+                str(params.get("corpusFmt", "")),
             )
         )
     qs = urllib.parse.urlencode(params)

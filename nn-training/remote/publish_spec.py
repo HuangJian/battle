@@ -78,6 +78,11 @@ class PublishSpec:
     rollout_spec: dict | None = None
     ts_code_sha256: str = ""
     ts_code_zip_path: str | Path | None = None
+    #: P2（plan/replay-corpus.plan.md）：语料运输格式 + trainer 预构建的转换器 bundle。
+    #: replay 时必须给 converter（随 payload 附件下发，worker 只跑不建）；
+    #: full 时两者都省略 ⇒ manifest/payload 逐字节旧行为。
+    corpus_fmt: str = "full"
+    replay_converter_path: str | Path | None = None
     plan_bytes: bytes | None = None
     register: bool = True
     dispatch: str = ""

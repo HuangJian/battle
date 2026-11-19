@@ -55,6 +55,7 @@ from worker.ppo.rng import PPORng
 # 只有位置形式两边都收）⇒ 单一实现住在 `worker.ppo.trainer`(L0，免框架)，这里再导出：
 # Paddle 双生（`worker.ppo.engine_paddle`）从同一个地方取，不再各存一份。
 from worker.ppo.trainer import cat_entropy as cat_entropy
+from worker.ppo.trainer import cat_entropy_per as cat_entropy_per
 
 
 # ---------------- 标量同步（N 次 device→host 同步收成 1 次） ----------------

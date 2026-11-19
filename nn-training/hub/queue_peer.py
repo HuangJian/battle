@@ -111,6 +111,7 @@ class QueuePeer(Protocol):
         mode: str | None = None,
         expected_epoch: int | None = None,
         role: str = ROLE_ONLINE,
+        capabilities: list[str] | None = None,
     ) -> str | None: ...
     def peek_jobs(
         self,
@@ -130,6 +131,7 @@ class QueuePeer(Protocol):
         worker_id: str = "",
         expected_epoch: int | None = None,
         role: str = ROLE_ONLINE,
+        capabilities: list[str] | None = None,
     ) -> ClaimOutcome: ...
     def priority_view(
         self,

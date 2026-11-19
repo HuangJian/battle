@@ -7,6 +7,8 @@
  *  指标表、显示配置都从同一份表里长出来。
  */
 
+import { resolveColOrder } from './col-order'
+
 // ────────────────────────── 统计量 ──────────────────────────
 
 export type MetricStatKey = 'mean' | 'median' | 'min' | 'max' | 'p90' | 'p99'
@@ -1011,6 +1013,45 @@ export function parseTrendVisibility(
     /* 坏 JSON 退默认 */
   }
   return out
+}
+
+// ────────────────────────── 走势图顺序（用户 2026-11-14） ──────────────────────────
+
+/** 全部走势键的**默认上屏顺序**：基础六图在前，逐局指标按注册表序（= 改造前的画面）。 */
+export const TREND_CHART_ORDER_KEYS: readonly TrendChartKey[] = [
+  ...TREND_BASE_CHARTS.map((c) => c.key),
+  ...BEHAVIOR_METRICS.map((m) => behaviorTrendKey(m.key)),
+]
+
+/** 存储键序（JSON 字符串数组）→ **完整键序**。
+ *
+ *  与列顺序（`col-order.ts`）共用同一套规则，理由也一样：
+ *   · 存的是**全部键**（含没勾选的）：只存可见键的话，取消勾选再勾回来它就掉回默认位，
+ *     用户排好的位置会漂；
+ *   · 存储里没有的键按默认序归位（新加的指标不会消失、也不会被甩到末尾）；
+ *   · 坏存储 / 空 ⇒ 默认序，永不抛。 */
+export function resolveTrendOrder(order: readonly string[] | null): TrendChartKey[] {
+  if (!order || order.length === 0) return [...TREND_CHART_ORDER_KEYS]
+  return resolveColOrder(TREND_CHART_ORDER_KEYS, order, [TREND_CHART_ORDER_KEYS]) as TrendChartKey[]
+}
+
+/** 上移 / 下移一位。只在 `visible` 为真的键之间挪：中间没勾选的键原地不动
+ *  （否则点一下「上移」，列表看上去没反应）。到头 / 键不在序里 ⇒ 原样返回。 */
+export function moveTrendKey(
+  order: readonly TrendChartKey[],
+  key: TrendChartKey,
+  delta: -1 | 1,
+  visible: (k: TrendChartKey) => boolean = () => true,
+): TrendChartKey[] {
+  const i = order.indexOf(key)
+  if (i < 0) return [...order]
+  let j = i + delta
+  while (j >= 0 && j < order.length && !visible(order[j])) j += delta
+  if (j < 0 || j >= order.length) return [...order]
+  const next = [...order]
+  next[i] = order[j]
+  next[j] = key
+  return next
 }
 
 /** 浮窗里六条统计曲线的配色（与卡片单图区分；颜色只用于 SVG 属性）。 */

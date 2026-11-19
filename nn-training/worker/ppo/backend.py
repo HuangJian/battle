@@ -27,7 +27,7 @@ minibatch 步曾是**同一顺序写两遍**：
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import Any
@@ -52,6 +52,10 @@ class Backend:
     masked_logsoftmax: Callable[..., Any]
     cat_logprob: Callable[..., Any]
     cat_entropy: Callable[..., Any]
+    #: 逐样本熵（`cat_entropy` 的 batch 维版本）：hybrid opening 的 policy_mask 加权用。
+    cat_entropy_per: Callable[..., Any]
+    #: dtype 转换（torch `Tensor.to(dtype)` / Paddle `Tensor.astype(dtype)`）。
+    astype: Callable[..., Any]
     #: `(logp, ref_logp) → Σ_a π_a·(log π_a − log π_ref)`（逐行，不取均值）。
     kl_rows: Callable[..., Any]
     approx_kl: Callable[..., Any]
@@ -91,8 +95,11 @@ class StepState:
     """跨 minibatch 的共享状态（张量已物化、ref 已预算、demo 已上设备）。"""
 
     layout: HeadLayout
-    tensored: list[dict]
-    ref_cache: Sequence[tuple[Any, ...] | None]
+    #: eager = `list[dict]`（全量已上卡）；lazy = `LazyChunks`（`.get(i)` 才物化，
+    #: 每步由引擎 `tensored_batch` 现转）⇒ 类型是两者的并集，不是纯 list。
+    tensored: Any
+    #: 可变：lazy 下 chunk 首次使用时把现算的 ref 写回同一槽位。
+    ref_cache: list[tuple[Any, ...] | None]
     demo_on: bool = False
     demo_n: int = 0
     demo_t: dict[str, Any] = field(default_factory=dict)
@@ -108,12 +115,17 @@ def run_step(
     cfg: StepConfig,
     rng,
     i: int,
+    *,
+    batch: dict | None = None,
 ) -> dict[str, float]:
     """一个 minibatch：前向 → loss → backward → 裁剪 → step → 遥测（**唯一实现**）。
 
     返回统计行（11 个键，顺序即 `sync` 的取值顺序）——调用方只负责循环 / 心跳 / 诊断。
+
+    `batch` = 调用方已物化好的当前 minibatch（P3 lazy：`tensored_batch` 现转的那份）；
+    None = 从 `st.tensored[i]` 取（eager 路径，逐字节不变）。
     """
-    e = st.tensored[int(i)]
+    e = st.tensored[int(i)] if batch is None else batch
     obs = e["obs"]
     sc = e["scalars"]
     mask = e["mask"]  # (T, 7) legacy / (T, 9) v6 —— 切片由 `HeadLayout` 给
@@ -149,17 +161,39 @@ def run_step(
     ratio = bk.exp(lp_new - lp_old)
     surr1 = ratio * adv
     surr2 = bk.clip(ratio, 1.0 - cfg.clip, 1.0 + cfg.clip) * adv
-    policy_loss = -bk.minimum(surr1, surr2).mean()
-
-    value_loss = bk.mse_loss(val.squeeze(-1), ret)
-    entropy = bk.cat_entropy(move_logp) + bk.cat_entropy(fire_logp)
-    if hold_logp is not None:
-        entropy = entropy + bk.cat_entropy(hold_logp)
-
-    loss = policy_loss + cfg.vf_coef * value_loss - cfg.ent_coef * entropy
-    if cfg.kl_coef > 0.0:
-        # 对采样策略（lp_old）的 KL 惩罚：与 approx_kl 同估计量，但保留可微项。
-        loss = loss + cfg.kl_coef * ((ratio - 1.0) - (lp_new - lp_old)).mean()
+    # 标准 PPO clip fraction（D8/D10 读数）：ratio 落在 [1-ε, 1+ε] 之外的样本占比。
+    # 只读、不参与 loss；有 policy_mask 时用同一份 w/denom 做掩码加权。
+    clipped = (ratio < 1.0 - cfg.clip) | (ratio > 1.0 + cfg.clip)
+    # Hybrid opening：policy_mask=0（controller 接管）的样本不产生 policy/entropy/KL
+    # 梯度；value loss 仍用全 tick（价值目标有效）。缺省（老 shard 无该字段）⇒ 走原
+    # mean 分支，数值逐字节不变。
+    pm = e.get("policy_mask")
+    if pm is None:
+        policy_loss = -bk.minimum(surr1, surr2).mean()
+        clip_frac = bk.astype(clipped, surr1.dtype).mean()
+        value_loss = bk.mse_loss(val.squeeze(-1), ret)
+        entropy = bk.cat_entropy(move_logp) + bk.cat_entropy(fire_logp)
+        if hold_logp is not None:
+            entropy = entropy + bk.cat_entropy(hold_logp)
+        loss = policy_loss + cfg.vf_coef * value_loss - cfg.ent_coef * entropy
+        if cfg.kl_coef > 0.0:
+            # 对采样策略（lp_old）的 KL 惩罚：与 approx_kl 同估计量，但保留可微项。
+            loss = loss + cfg.kl_coef * ((ratio - 1.0) - (lp_new - lp_old)).mean()
+    else:
+        w = bk.astype(pm.reshape(-1), surr1.dtype)
+        denom = bk.clip(w.sum(), 1.0, 1e30)
+        surr = -bk.minimum(surr1, surr2).reshape(-1)
+        policy_loss = (surr * w).sum() / denom
+        ent_per = bk.cat_entropy_per(move_logp) + bk.cat_entropy_per(fire_logp)
+        if hold_logp is not None:
+            ent_per = ent_per + bk.cat_entropy_per(hold_logp)
+        entropy = (ent_per.reshape(-1) * w).sum() / denom
+        value_loss = bk.mse_loss(val.squeeze(-1), ret)
+        loss = policy_loss + cfg.vf_coef * value_loss - cfg.ent_coef * entropy
+        clip_frac = (bk.astype(clipped, surr1.dtype).reshape(-1) * w).sum() / denom
+        if cfg.kl_coef > 0.0:
+            kl_per = ((ratio - 1.0) - (lp_new - lp_old)).reshape(-1)
+            loss = loss + cfg.kl_coef * (kl_per * w).sum() / denom
     kick_mean = bk.zeros()
     ref = st.ref_cache[int(i)]
     if ref is not None:
@@ -200,13 +234,18 @@ def run_step(
     policy_new_rms = bk.policy_rms(model)
 
     with bk.no_grad():
-        # 一次同步取全部 11 个标量：逐项 `.item()` 在 CUDA 上每次都是全设备同步。
+        # 一次同步取全部标量：逐项 `.item()` 在 CUDA 上每次都是全设备同步。
+        # D8/D10：`per_step_kl` 与 `kl` 是同一个估计量（保留 `kl` 供既有熔断/日志）；
+        # `clip_fraction` 是 ratio 出界样本占比。二者都只读，不改变梯度。
+        kl_est = bk.approx_kl(lp_old, lp_new)
         return bk.sync(
             {
                 "policy": policy_loss,
                 "value": value_loss,
                 "entropy": entropy,
-                "kl": bk.approx_kl(lp_old, lp_new),
+                "kl": kl_est,
+                "per_step_kl": kl_est,
+                "clip_fraction": clip_frac,
                 "kickstart": kick_mean,
                 "demo_bc": demo_bc_mean,
                 "mean_ret": ret.mean(),

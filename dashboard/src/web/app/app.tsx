@@ -615,6 +615,7 @@ export function App({ initial }: AppProps) {
                 onMore={() => navigate('nodes')}
                 readOnly={readOnly}
                 probesPending={stateView?.probesPending === true}
+                stateTick={stateView?.time}
               />
             </PanelErrorBoundary>
             {/* 课程矩阵（**两区通用**，取代原「并行课程总览」+「训练调度器」两张表）：

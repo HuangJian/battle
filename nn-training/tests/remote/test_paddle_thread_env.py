@@ -10,13 +10,14 @@
 from __future__ import annotations
 
 import sys
+import warnings
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from remote.paddle_env import apply_thread_env
+from remote.paddle_env import apply_thread_env, silence_import_warnings
 
 
 def test_sets_both_envs_when_absent() -> None:
@@ -41,6 +42,22 @@ def test_non_positive_is_noop() -> None:
         env: dict[str, str] = {}
         assert apply_thread_env(n, env=env) == {}
         assert env == {}, f"n={n} 不该写任何键"
+
+
+def test_silences_only_the_paddle_ccache_probe_warning() -> None:
+    """import 期的 ccache 提示是噪声；屏蔽必须**只**命中这一条文案。
+
+    反面（其它 UserWarning 照旧可见）由同一个 catch 捕获：真被一起吞掉时这里只剩 0 条。
+    """
+    silence_import_warnings()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.warn(
+            "No ccache found. Please be aware that recompiling all source files may be required.",
+            UserWarning,
+            stacklevel=2,
+        )
+        warnings.warn("业务侧 UserWarning 必须照旧可见", UserWarning, stacklevel=2)
+    assert [str(w.message) for w in caught] == ["业务侧 UserWarning 必须照旧可见"]
 
 
 def test_called_before_importing_paddle_and_numpy() -> None:

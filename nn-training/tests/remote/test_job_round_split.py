@@ -91,6 +91,9 @@ ALIVE_TEXT = "polling hub"
 #: `<job_dir>/backup/` —— 「作业工作区怎么摆」本就是 job_fs 的职责（`_persist_result` 同族），
 #: 放在这一轮里会让 job 目录布局知识漏进 L4。
 ALLOWED_PROJECT_IMPORTS = {
+    # 日志行格式的唯一来源（2026-11-13）：job 行带课程名（`course_tag`/`tagged`）——
+    # 共享 hub 一机多课时，云端日志只看 16 位 jid 分不出在训哪门课。
+    "common.logutil",
     "common.protocol",
     # `_StartBeacon` 的「已开跑」线程归 `Runtime` 名下（§P1-6 第三批）：`common.runtime` 是
     # L0、stdlib-only 的并发所有者，与本模块的依赖面同层。

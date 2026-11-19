@@ -524,6 +524,23 @@ def test_delta_form_branch_keeps_the_local_f32_copy() -> None:
     } <= called, f"训练核产物段没接全 delta 形态：{sorted(called)}"
 
 
+def test_paddle_core_uses_the_shared_corpus_dispatch() -> None:
+    """Paddle 核与 torch 核走同一个装载分派点（2026-11-18：lazy 不再对 Paddle 拒收）。
+
+    直接调 `ppo_np.load_episodes` = 绕过 `manifest.ppo_loader`（lazy job 会静默按 eager 跑）；
+    留 `check_ppo_loader` 则是把已经支持的 job 拒之门外。判据取函数真实引用的全局/属性名
+    （`__code__.co_names`），不读源码文本。
+    """
+    # 本仓把「读 shard + 切块」收进 `_load_ppo_data`（两条核共用），分派点住在它的函数体里
+    # ⇒ 判据同时看 Paddle 核的调用面与那个共用函数的引用面。
+    names = set(core_mod._paddle_ppo.__code__.co_names)
+    assert names >= {"_load_ppo_data"}, "Paddle 核没走共用装载入口"
+    names |= set(core_mod._load_ppo_data.__code__.co_names)
+    assert names >= {"load_ppo_episodes"}, "Paddle 核没走共用分派点"
+    assert names.isdisjoint({"load_episodes"}), "Paddle 核绕过了 ppo_loader（lazy 会静默退 eager）"
+    assert names.isdisjoint({"check_ppo_loader"}), "lazy 已支持，不得再拒收"
+
+
 def test_the_kick_gate_is_a_pure_read_of_the_manifest() -> None:
     """`kick_kl_value` = 纯 manifest 读：低于 `coef_active` 阈值 ⇒ 0（关）。
 
