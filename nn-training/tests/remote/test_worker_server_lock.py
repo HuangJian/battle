@@ -216,9 +216,10 @@ def _scenario_verdict(
 ) -> Exception:
     """「三启」场景的判词（与 `tests/common/test_instance_lock.py` 同形）。
 
-    端口在探测后被外人抢走（守卫拒启文案 / 裸 `EADDRINUSE`，`port_race_seen()` 两张脸都认）
-    ⇒ 场景作废，换端口重跑；非端口死法（真 bug）照旧响亮失败并附日志尾巴。`lines` 取 40：
-    `Address already in use` 常被 traceback 压在 `_tail` 缺省行数之外。
+    端口不可用（守卫拒启文案 / 裸 `EADDRINUSE` / Windows `10013` 权限拒绝，
+    `port_race_seen()` 三张脸都认）⇒ 场景作废，换端口重跑；非端口死法（真 bug）照旧响亮
+    失败并附日志尾巴。`lines` 取 40：`Address already in use` 常被 traceback 压在 `_tail`
+    缺省行数之外。
     """
     outs = [_tail(lg, 40) for _, lg in procs]
     blob = "\n".join(outs)
