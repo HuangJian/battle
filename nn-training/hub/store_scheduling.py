@@ -1,6 +1,6 @@
-"""hub/store_scheduling.py — 调度优先级：**谁在做 / 谁掉队 / 谁该切走**。
+"""hub/store_scheduling.py — `Scheduler`：**谁在做 / 谁掉队 / 谁该切走**（B7-P1）。
 
-`_JobStore` 的六个域混入之一（S4 第十四刀）。事实源是三张表：
+从原 `SchedulingMixin` 切出的**有状态协作者**。事实源仍是三张表：
 
 | 表 | 含义 | 谁写 |
 |---|---|---|
@@ -12,16 +12,25 @@
 租约」：备份副本**不设租约**，只看租约就判不出「别处在做」⇒ 所有 job 都被判成 highest
 ⇒ 多张卡同抢一份（= race 换个名字）。
 
+## 锁与时钟（§224 L1–L5）
+
+`_lock` 由 `hub/auth.py::_AuthGuard` 建，组合类 `_JobStore` 注入**同一把**；本协作者
+**不自建锁**。时钟同样注入（`clock`，单课程期 = store 的 `now_fn`）——协作者不读
+组合类的 `_now`，否则 claimed 时间戳会混入真实墙钟。`job_dir` / `lease_workers` /
+`last_heartbeat` 也是注入的依赖（前两者住账本簇与租约簇）：同一次加锁下读到的就是同一份
+事实。`/ready` 顺手刷新心跳锚仍是租约簇的语义，本类只写那一张表（P2 由 LeaseBook 接走）。
+
 ## 依赖方向
 
-`store_scheduling → {common.protocol}`（向下）；跨域调用只有 `self._job_dir`（住
-`store_ledger`）。**不 import 任何兄弟混入**。
+本模块只 import `common.protocol`（L0）。跨簇调用由组合类 `_JobStore` 的同名转发壳承接；
+协作者之间互相看不到（`store_leases` 经注入的 `sched` 访问本类）。
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from pathlib import Path
 from threading import Lock
-from typing import Any
 
 from common.protocol import (
     FAIL_NAME,
@@ -33,21 +42,28 @@ from common.protocol import (
 )
 
 
-class SchedulingMixin:
-    """域混入：见模块头部。"""
+class Scheduler:
+    """调度面：三张表 + epoch。所有方法都假定与组合类共享同一把 `_lock`。"""
 
-    # ---- 由组合类 / 兄弟簇提供（混入只见 `self`，实现不在本模块）----
-    #: 全 store **唯一**的那把锁（`_AuthGuard.__init__` 里建；见 `hub_server._JobStore` 头部）
-    _lock: Lock
-    #: 时钟（`now_fn` 注入点，住 `_AuthGuard`）
-    _now: Any
-    #: 兄弟簇 `store_leases` 拥有的状态（掉队判据要看「持有者是谁」）
-    _last_heartbeat: dict[str, float]
-    _lease_workers: dict[str, str]
-    #: 兄弟簇 `store_ledger` 的方法
-    _job_dir: Any
-
-    def _init_scheduling(self) -> None:
+    def __init__(
+        self,
+        *,
+        lock: Lock,
+        clock: Callable[[], float],
+        job_dir: Callable[[str], Path],
+        lease_workers: dict[str, str],
+        last_heartbeat: dict[str, float],
+    ) -> None:
+        #: 全 store **唯一**的那把锁（`_AuthGuard.__init__` 里建；组合类注入）
+        self._lock = lock
+        #: 时钟（`now_fn` 注入点；不读组合类的 `_now`）
+        self._clock = clock
+        #: 账本簇的 job 目录解析（`_facts_locked` 的 `landed` 判据）
+        self._job_dir = job_dir
+        #: 租约簇的持有人表（`lease_worker` 读数；与租约写入同一临界区）
+        self._lease_workers = lease_workers
+        #: 租约簇的心跳锚（`/ready` 带 worker_id 时刷新，原实现直接写那张表）
+        self._last_heartbeat = last_heartbeat
         # ---- 调度优先级（2026-09-22，plan/transfer-scheduling §2.1/§2.3）----
         #: job_id -> {"worker", "at"}：**有人承诺在跑**（exclusive claim 成功/`/start` 时写）。
         #: 与 `_leases` 的分工：租约管「别人现在不能领」，`_claimed` 管「有人在做这件事」
@@ -86,8 +102,8 @@ class SchedulingMixin:
         """
         with self._lock:
             wid = str(worker_id or "").strip() or str((self._claimed.get(job_id) or {}).get("worker", ""))
-            self._computing[job_id] = {"worker": wid, "at": self._now()}
-            self._claimed.setdefault(job_id, {"worker": wid, "at": self._now()})
+            self._computing[job_id] = {"worker": wid, "at": self._clock()}
+            self._claimed.setdefault(job_id, {"worker": wid, "at": self._clock()})
             self._bump_epoch_locked()
             return True
 
@@ -96,7 +112,7 @@ class SchedulingMixin:
         with self._lock:
             self._ready.add(job_id)
             if worker_id:
-                self._last_heartbeat[job_id] = self._now()
+                self._last_heartbeat[job_id] = self._clock()
             self._bump_epoch_locked()
             return True
 
@@ -139,7 +155,7 @@ class SchedulingMixin:
             ready_elsewhere=bool(facts["ready"]),
             claimed_elsewhere=bool(facts["claimed"]),
             computing_elsewhere_since=facts["computing_at"],
-            now=self._now(),
+            now=self._clock(),
         )
 
     def priority_for(self, job_id: str, *, exclude_worker: str = "") -> tuple[str, str]:
@@ -150,11 +166,11 @@ class SchedulingMixin:
         if p == PRIORITY_NONE:
             why = "结果已落盘（唯一硬闸：放弃）"
         elif p == PRIORITY_HIGH:
-            why = f"别处在算且超阈值（computing_at 起 {self._now() - float(facts['computing_at']):.0f}s）"
+            why = f"别处在算且超阈值（computing_at 起 {self._clock() - float(facts['computing_at']):.0f}s）"
         elif p == PRIORITY_MEDIUM and facts.get("computing_at"):
             # 中档里再分一层：已开算 vs 只承诺（还在下载/装载）。R2-C1 的两把时钟在
             # **观测行**上也要分得出来——否则「卡在下载」与「算得慢」在日志里同一句话。
-            why = f"别处在算（computing_at 起 {self._now() - float(facts['computing_at']):.0f}s，未超阈值）"
+            why = f"别处在算（computing_at 起 {self._clock() - float(facts['computing_at']):.0f}s，未超阈值）"
         elif p == PRIORITY_MEDIUM:
             why = "别处已承诺在跑（尚未开算：还在下载/装载）"
         elif p == PRIORITY_LOW:

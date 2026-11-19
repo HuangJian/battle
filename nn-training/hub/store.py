@@ -24,7 +24,7 @@ from hub.store_leases import LeaseMixin
 from hub.store_ledger import LedgerMixin
 from hub.store_offline import OfflineRoundsMixin
 from hub.store_results import ResultsMixin
-from hub.store_scheduling import SchedulingMixin
+from hub.store_scheduling import Scheduler
 from hub.store_wire import WireMeterMixin
 
 # ───────────────── 状态类：六个域混入 + 组合（S4 第十四刀）─────────────────
@@ -54,7 +54,6 @@ from hub.store_wire import WireMeterMixin
 class _JobStore(
     LedgerMixin,
     WireMeterMixin,
-    SchedulingMixin,
     LeaseMixin,
     ResultsMixin,
     OfflineRoundsMixin,
@@ -80,13 +79,21 @@ class _JobStore(
         # 守卫对它们改成正面断言「方法体里零 `self.X = …` 赋值」，不造 `pass` 空钩。）
         LedgerMixin._init_ledger(self)
         WireMeterMixin._init_wire(self)
-        SchedulingMixin._init_scheduling(self)
         LeaseMixin._init_leases(self)
         # 鉴权面（`_AuthGuard`）：进程级一份——多课程单 hub 下不按课程各算一套计数。
         # 它同时建了**本 store 唯一的那把 `_lock`** ⇒ 组合类不再自建一把（旧的
         # `self._lock = Lock()` 本来就会被这一行覆盖掉：一个被丢弃的锁对象是下次读的人
         # 的陷阱，第十四刀顺手删了）。
         _AuthGuard.__init__(self, now_fn)
+        # B7-P1：调度面从混入切成协作者。锁 / 时钟 / 账本目录 / 租约表全部**注入同一份**
+        # （L1/L2/L4）——协作者不自建锁，也不读组合类的 `_now`。
+        self.sched = Scheduler(
+            lock=self._lock,
+            clock=self._now,
+            job_dir=self._job_dir,
+            lease_workers=self._lease_workers,
+            last_heartbeat=self._last_heartbeat,
+        )
         # ---- 进程级状态（多课程单 hub 下 `_HubQueue` **借**的就是这一份）----
         # 它们不属于任何域：job 账本每课程一份，而「停机达令 / worker 登记」是**进程**概念
         # （借用关系写在 `_HubQueue` docstring ③）。
@@ -106,3 +113,36 @@ class _JobStore(
             return
         with self._lock:
             self._workers[wid] = self._now()
+
+    # ---- B7-P1：调度面的**转发壳**（跨簇调用点与 `hub` 对外面逐字不变） ----
+    # 名字与签名是契约：`queue_store_face` 的 `_params` 对账与 `tests/hub/test_hub_queue_split.py`
+    # 把 `start_job` / `set_ready` 冻在 `FACADE_SAME_SIG` 里；本壳只是把它们交给 `self.sched`。
+    def _bump_epoch_locked(self) -> None:
+        self.sched._bump_epoch_locked()
+
+    def scheduling_epoch(self) -> int:
+        return int(self.sched.scheduling_epoch())
+
+    def start_job(self, job_id: str, worker_id: str = "") -> bool:
+        return bool(self.sched.start_job(job_id, worker_id))
+
+    def set_ready(self, job_id: str, worker_id: str = "") -> bool:
+        return bool(self.sched.set_ready(job_id, worker_id))
+
+    def scheduling_facts(self, job_id: str, *, exclude_worker: str = "") -> dict:
+        facts: dict = self.sched.scheduling_facts(job_id, exclude_worker=exclude_worker)
+        return facts
+
+    def _facts_locked(self, job_id: str, *, exclude_worker: str = "") -> dict:
+        facts: dict = self.sched._facts_locked(job_id, exclude_worker=exclude_worker)
+        return facts
+
+    def _job_priority_locked(self, job_id: str, *, exclude_worker: str = "") -> str:
+        return str(self.sched._job_priority_locked(job_id, exclude_worker=exclude_worker))
+
+    def priority_for(self, job_id: str, *, exclude_worker: str = "") -> tuple[str, str]:
+        out: tuple[str, str] = self.sched.priority_for(job_id, exclude_worker=exclude_worker)
+        return out
+
+    def _drop_commitment_locked(self, job_id: str) -> None:
+        self.sched._drop_commitment_locked(job_id)

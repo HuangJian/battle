@@ -71,11 +71,9 @@ class LedgerMixin:
     #: 而 peek 面按 R1-4 是无副作用的）。
     _lease_workers: dict[str, str]
     _frozen: dict[str, dict]
-    #: 兄弟簇 `store_scheduling` 的「有人承诺在跑」痕迹：撤单（`cancel_unsettled_jobs`）
-    #: 要跳过它们（在飞的不撤），并顺手撕掉以让拿旧 epoch 来的认领被 `demoted` 拒。
-    _claimed: dict[str, dict]
-    _computing: dict[str, dict]
-    _drop_commitment_locked: Any
+    #: 调度协作者（B7-P1）：撤单要跳过「有人承诺在跑」的两张表，并顺手撕掉痕迹。
+    #: 与其它跨簇引用同款声明（`Any`），契约由 `test_hub_job_store_split` 的结构对账钉住。
+    sched: Any
     #: 兄弟簇 `store_leases` 的**唯一**死活判据的布尔视图（过期 ∨ 孤儿，§52）——池过滤与
     #: 认领闸必须共用同一把尺子：只在过滤里加判据会做出「池里看得见、claim 说 held」
     #: 那种更难查的形状。取布尔而不是状态字符串，是因为本簇拿不到那边的常量
@@ -287,7 +285,7 @@ class LedgerMixin:
         )
         # 撕掉残留承诺并 bump epoch：拿着作废前 epoch 来的认领会被 `_claim_locked`
         # 判 `demoted` 拒掉，不必等它自己发现池子空了。
-        self._drop_commitment_locked(job_id)
+        self.sched._drop_commitment_locked(job_id)
         self._cancelled.add(job_id)
 
     def is_cancelled(self, job_id: str) -> bool:
@@ -317,7 +315,7 @@ class LedgerMixin:
         升级为账本——`job_cancelled` 的读面本来就这么设计的，见 `_read_ledger`）。
         """
         with self._lock:
-            claimed = set(self._claimed) | set(self._computing)
+            claimed = set(self.sched._claimed) | set(self.sched._computing)
             drop = [jid for jid in self.claimable_job_ids() if jid not in claimed]
             for jid in drop:
                 self._cancel_job_locked(jid, reason=reason)
@@ -338,7 +336,7 @@ class LedgerMixin:
         「哪一个」的寻址，不是第二份口径（评审 F4）。
         """
         with self._lock:
-            claimed = set(self._claimed) | set(self._computing)
+            claimed = set(self.sched._claimed) | set(self.sched._computing)
             if job_id in claimed:
                 return {
                     "job_id": job_id,

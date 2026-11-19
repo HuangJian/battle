@@ -122,15 +122,10 @@ class LeaseMixin:
     _lock: Lock
     #: 时钟（`now_fn` 注入点，住 `_AuthGuard`）
     _now: Any
-    #: 兄弟簇 `store_scheduling` 的状态与方法（认领要同时读三张优先级表并推 epoch）
-    _claimed: dict[str, dict]
-    _epoch: int
-    _bump_epoch_locked: Any
-    _drop_commitment_locked: Any
-    _job_priority_locked: Any
-    #: 调度事实面（`store_scheduling._facts_locked`；备份腿的「已结算不发」闸要用它的 `landed`
-    #: ——盘上 `result/` ∨ `fail.json`，与 `claimable_job_ids` 同一条式子）。
-    _facts_locked: Any
+    #: 调度协作者（B7-P1：原 `store_scheduling` 混入的 9 个方法与 4 个字段）。
+    #: 与其它跨簇引用同款声明（`Any`）：契约由 `tests/hub/test_hub_job_store_split.py`
+    #: 的结构对账钉住，不在这里复制一份协议——混入之间零 import 是更硬的约束。
+    sched: Any
     #: 兄弟簇 `store_ledger` 的状态与方法（读账本判「这份 job 还在不在池里」）
     _job_dir: Any
     _append_ledger: Any
@@ -571,7 +566,7 @@ class LeaseMixin:
             # 锚缺省回落到 claim 时刻：判据不全时宁可保守继续独占到窗口结束。
             prog = self.job_progress_at(job_id)
             if prog <= 0.0:
-                prog = float((self._claimed.get(job_id) or {}).get("at") or 0.0)
+                prog = float((self.sched._claimed.get(job_id) or {}).get("at") or 0.0)
             if prog <= 0.0 or now - prog > self._bc_progress_stale_sec():
                 return LEASE_ORPHAN
             return LEASE_ALIVE
@@ -579,7 +574,7 @@ class LeaseMixin:
             return LEASE_EXPIRED
         if self._lease_workers.get(job_id, "").startswith(PUSH_WORKER_PREFIX):
             return LEASE_ALIVE  # push 派发器代持：豁免（见 docstring）
-        at = (self._claimed.get(job_id) or {}).get("at")
+        at = (self.sched._claimed.get(job_id) or {}).get("at")
         if at is None:
             return LEASE_ALIVE  # 判据不全（不该发生）⇒ 保守：不当孤儿
         at = float(at)
@@ -656,7 +651,7 @@ class LeaseMixin:
                     # ★M5（需求 7）：BC **不发备份副本**——它「领取后独占」，而备份那份
                     # 不会有 epoch（进度只从开辟的那一份来），发出去只会多一个影子跑者。
                     return False, "", "no_backup"
-                if self._facts_locked(job_id)["landed"]:
+                if self.sched._facts_locked(job_id)["landed"]:
                     # ★ 已结算（`result/` 或 `fail.json` 在盘）⇒ **不发备份副本**（2026-10-11）。
                     # 为什么这条闸必须住 claim：派发器的自有账本读数已由 `_snapshot()` 收敛成
                     # **一份**（自洽了），但 store 侧的事实（别人的活跑没跑完、结算没结算）
@@ -690,18 +685,18 @@ class LeaseMixin:
                 self._collect_expired_locked(job_id, orphan=state == LEASE_ORPHAN)
                 if self._frozen.get(job_id):
                     return False, "", "frozen"  # ★ 刚达阈（或已冻结）
-            if not recovering and job_id in self._claimed:
+            if not recovering and job_id in self.sched._claimed:
                 # ★ highest 唯一性闸（R1-5）：同一份 job 只能有一个「承诺在跑」的人。
                 # 这一条才是「N 个 worker 同拍问询全拿 highest」的真正闸门——epoch 只是
                 # 提醒「调度面变过」，不匹配本身不等于有人抢了**这一份**。
-                if expected_epoch is not None and int(expected_epoch) != self._epoch:
+                if expected_epoch is not None and int(expected_epoch) != self.sched._epoch:
                     return False, "", "demoted"
                 return False, "", "held"
             # 调度面在问询之后变过 ⇒ **在该 job 上重新判一次**（§2.3 ③）：仍是最高才放行。
             if (
                 expected_epoch is not None
-                and int(expected_epoch) != self._epoch
-                and self._job_priority_locked(job_id, exclude_worker=worker_id)
+                and int(expected_epoch) != self.sched._epoch
+                and self.sched._job_priority_locked(job_id, exclude_worker=worker_id)
                 != PRIORITY_HIGHEST
             ):
                 return False, "", "demoted"
@@ -713,7 +708,7 @@ class LeaseMixin:
             token = secrets.token_hex(16)
             self._leases[job_id] = now + ttl
             self._lease_owners[job_id] = token
-            self._claimed[job_id] = {"worker": worker_id, "at": now}
+            self.sched._claimed[job_id] = {"worker": worker_id, "at": now}
             if worker_id:
                 self._lease_workers[job_id] = worker_id
                 self._stale_holders.pop(job_id, None)  # 有人接手了 ⇒ 避让记录使命结束
@@ -721,7 +716,7 @@ class LeaseMixin:
             self.note_job_progress(job_id, now)  # ★M5：领取即第一个进度锚（同 hold 口径）
             if self.job_kind(job_id) in BOTH_ROLE_KINDS:
                 self._bc_lock_write(job_id, worker_id)  # 课程级独占落盘（重启不丢）
-            self._bump_epoch_locked()
+            self.sched._bump_epoch_locked()
             return True, token, "ok"
 
     def abandon_job(self, job_id: str, worker_id: str = "") -> bool:
@@ -741,7 +736,7 @@ class LeaseMixin:
             self._last_progress.pop(job_id, None)  # ★M5：放弃 ⇒ 进度锚一并清（不留死读数）
             self._bc_lock_clear(job_id)
             self._stale_holders.pop(job_id, None)  # 主动放弃 ≠ 跑死，不该触发避让
-            self._drop_commitment_locked(job_id)
+            self.sched._drop_commitment_locked(job_id)
             return True
 
     def _collect_expired_locked(self, job_id: str, *, orphan: bool = False) -> str:
@@ -762,7 +757,7 @@ class LeaseMixin:
         """
         now = self._now()
         # 静默读数（**先读后清**：`_drop_commitment_locked` 会把 `_claimed` 一起撕掉）
-        at = (self._claimed.get(job_id) or {}).get("at")
+        at = (self.sched._claimed.get(job_id) or {}).get("at")
         silent_sec = round(now - float(at)) if at is not None else 0
         dead = self._lease_workers.get(job_id, "")
         self._leases.pop(job_id, None)
@@ -772,7 +767,7 @@ class LeaseMixin:
         self._bc_lock_clear(job_id)
         # 过期 = 承诺失效：不清的话「有人承诺在跑」会在死 worker 上永远挂着 ⇒
         # 该 job 的优先级永远上不到 highest（唯一性闸的判据）。
-        self._drop_commitment_locked(job_id)
+        self.sched._drop_commitment_locked(job_id)
         if dead:
             self._stale_holders[job_id] = dead
         jd = self._job_dir(job_id)
@@ -947,7 +942,7 @@ class LeaseMixin:
             self._last_heartbeat.pop(job_id, None)
             self._last_progress.pop(job_id, None)  # ★M5：还租约 ⇒ 不再是 drain
             self._bc_lock_clear(job_id)
-            self._drop_commitment_locked(job_id)  # 还租约 = 撒销承诺（见该方法 docstring）
+            self.sched._drop_commitment_locked(job_id)  # 还租约 = 撒销承诺（见该方法 docstring）
             return True
 
     def result_token_ok(self, job_id: str, lease_token: str) -> bool:

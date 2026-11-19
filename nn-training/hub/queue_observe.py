@@ -146,8 +146,8 @@ class QueueObserveMixin(QueuePeer):
                 # 认领龄 / 开算龄（2026-10-02，pill 精确化）：同一把 `_lock` 下的一致读，
                 # **零新状态**（`_claimed` / `_computing` 早就有）。缺失 → None（见 `_age_of`）。
                 with st._lock:
-                    claimed = dict(st._claimed.get(jid) or {})
-                    computing = dict(st._computing.get(jid) or {})
+                    claimed = dict(st.sched._claimed.get(jid) or {})
+                    computing = dict(st.sched._computing.get(jid) or {})
                 # ★2026-11-12：BC 的唯一活性信号（`POST /jobs/{id}/epoch` → `note_job_progress`）。
                 # BC 作业**从不**打 `/start`（`remote/worker.py` 的 bc 分叉在 `job_round`
                 # 之前早退）⇒ 只给 `computing_ago` 的话，一门每 epoch 都在回传权重与指标的
@@ -347,7 +347,7 @@ class QueueObserveMixin(QueuePeer):
             now = float(st._now())
             prog = float(st.job_progress_at(job_id))
             if prog <= 0.0:
-                prog = float((st._claimed.get(job_id) or {}).get("at") or 0.0)
+                prog = float((st.sched._claimed.get(job_id) or {}).get("at") or 0.0)
             if prog > 0.0:
                 return round(max(0.0, float(st._bc_progress_stale_sec()) - (now - prog)), 1)
         return round(float(exp) - float(st._now()), 1)
