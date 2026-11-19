@@ -24,7 +24,7 @@ import {
   replaceMonacoSource,
 } from '../src/notebook-companion/sites/hub-url'
 import { KaggleFrameAdapter } from '../src/notebook-companion/sites/kaggle'
-import type { FrameAdapter } from '../src/notebook-companion/sites/types'
+import type { CmdResult, FrameAdapter } from '../src/notebook-companion/sites/types'
 import type { Runtime } from '../src/runtime'
 
 const CFG = [
@@ -312,6 +312,89 @@ describe('hub-sync：找 cell / 取 URL / 写一次', () => {
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.reason).toContain('hub_url')
     expect(writes).toHaveLength(0)
+  })
+
+  it('周期复查：URL 换了 ⇒ 自动再写一次；同一 URL 不重复回调', async () => {
+    const { adapter, writes } = adapterWith(['x = 1', CFG])
+    const NEW = 'https://new.trycloudflare.com'
+    let hub = HUB
+    const results: CmdResult[] = []
+    let resolveSecond!: () => void
+    const second = new Promise<void>((r) => {
+      resolveSecond = r
+    })
+    const handle = startHubUrlSync({
+      runtime: {
+        gmRequest: async () => ({
+          status: 200,
+          statusText: '',
+          responseText: JSON.stringify({ ok: true, hubUrl: hub }),
+          responseHeaders: '',
+        }),
+      },
+      dashboardBase: 'http://127.0.0.1:8900',
+      adapter,
+      markers: ['CFG = {'],
+      intervalMs: 1,
+      now: () => 0,
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      onResult: (r) => {
+        results.push(r)
+        if (results.length === 1) hub = NEW
+        if (results.length === 2) resolveSecond()
+      },
+    })
+    await second
+    // 多留几拍「值没变」：不应再回调，也不应再写。
+    await new Promise((r) => setTimeout(r, 20))
+    handle.cancel()
+    expect(writes).toHaveLength(2)
+    expect(writes[1]).toContain(`"hub_url": "${NEW}"`)
+    expect(results.map((r) => (r.ok ? r.detail : r.reason))).toEqual([
+      `updated ${HUB}`,
+      `updated ${NEW}`,
+    ])
+  })
+
+  it('周期复查：首拍 notebook 未就绪也继续试，就绪后补写；期间不重复报错', async () => {
+    let ready = false
+    const base = adapterWith([CFG])
+    const adapter: FrameAdapter = {
+      ...base.adapter,
+      get ready() {
+        return ready
+      },
+    }
+    const results: CmdResult[] = []
+    let resolveSecond!: () => void
+    const second = new Promise<void>((r) => {
+      resolveSecond = r
+    })
+    const handle = startHubUrlSync({
+      runtime: runtimeReturning({ ok: true, hubUrl: HUB }),
+      dashboardBase: 'http://127.0.0.1:8900',
+      adapter,
+      markers: ['CFG = {'],
+      waitMs: 0,
+      intervalMs: 1,
+      now: () => 0,
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      onResult: (r) => {
+        results.push(r)
+        if (results.length === 2) resolveSecond()
+      },
+    })
+    // 多留几拍「还没就绪」：可重试失败是页面状态，不该每次周期都上屏。
+    await new Promise((r) => setTimeout(r, 20))
+    expect(results).toHaveLength(1)
+    ready = true
+    await second
+    handle.cancel()
+    expect(results).toHaveLength(2)
+    expect(results[0]!.ok).toBe(false)
+    if (!results[0]!.ok) expect(results[0]!.reason).toContain('笔记本未就绪')
+    expect(results[1]).toEqual({ ok: true, detail: `updated ${HUB}` })
+    expect(base.writes).toHaveLength(1)
   })
 })
 

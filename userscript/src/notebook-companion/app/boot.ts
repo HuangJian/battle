@@ -59,7 +59,7 @@ import {
   type IdleStopDue,
 } from './idle-stop'
 import { createStopCmdPoller } from './stop-cmd'
-import { describeHubSync, startHubUrlSync } from './hub-sync'
+import { describeHubSync, HUB_SYNC_INTERVAL_MS, startHubUrlSync } from './hub-sync'
 import {
   actionLabel,
   countdownLabel,
@@ -349,6 +349,7 @@ function startFrame(
   }, 1000)
 
   // 页首同步 CFG['hub_url']：hub 的 cloudflared 隧道换了 URL，notebook 里的配置跟着换。
+  // 页面开着时隧道也可能被 hub 重启换掉 ⇒ 周期复查（值没变就一次写都不发）。
   // 结果经 bridge 送到外层面板（成功 / 未改 / 失败原因都要看得见，不能只进 console）。
   const hubSync = config.enabled
     ? startHubUrlSync({
@@ -356,18 +357,16 @@ function startFrame(
         dashboardBase: config.dashboardBase,
         adapter,
         markers: config.configMarkers,
+        intervalMs: HUB_SYNC_INTERVAL_MS,
         log: (msg) => log(`hub: ${msg}`),
+        onResult: (r) => {
+          bridge.note(
+            'hub:sync',
+            r.ok ? { ok: true, value: r.detail ?? 'ok' } : { ok: false, reason: r.reason },
+          )
+        },
       })
     : null
-  if (hubSync) {
-    void hubSync.done.then((r) => {
-      log(`hub 同步：${r.ok ? (r.detail ?? 'ok') : r.reason}`)
-      bridge.note(
-        'hub:sync',
-        r.ok ? { ok: true, value: r.detail ?? 'ok' } : { ok: false, reason: r.reason },
-      )
-    })
-  }
 
   // 自动清空的「近 10s 有交互」闸：捕获阶段，不改页面行为。
   const touch = (): void => loop.lastInteractionAt(Date.now())
@@ -413,7 +412,7 @@ function startHost(
 
   // Kaggle 把标签页标题写死成「Kaggle Notebook Editor」：多开 notebook 分不出哪个是哪个。
   // 每秒把 document.title 钉成本 notebook 的名字；URL 用当前的（SPA 换页跟着走）。
-  // 状态前缀（⏹️ 会话已停 / ▶️ cell 在跑）由 reporter 管：人在后台标签也能看见异常。
+  // 状态前缀（⛔ 会话已停 / ▶️ cell 在跑 / ⏰ 有定时任务）由 reporter 管：人在后台标签也能看见异常。
   const tabTitle = createTabTitleReporter(
     createTabTitleSync(doc, () => {
       try {
@@ -572,7 +571,7 @@ function startHost(
       }
     }
     const r = await sessionAdapter.stopSession()
-    // 适配器只在自己看到 Stopped 时才 ok ⇒ 这一下是明确的中止，标题立刻上 ⏹️。
+    // 适配器只在自己看到 Stopped 时才 ok ⇒ 这一下是明确的中止，标题立刻上 ⛔。
     if (r.ok) tabTitle.markStopped()
     return r
   }
@@ -601,6 +600,11 @@ function startHost(
   /** 只显示属于这一页的任务：运行类看 notebook，停止/中断看本页会话（与调度器同口径）。 */
   function belongsHere(task: SchedulerTask): boolean {
     return taskBelongsTo(task, { notebookKey, session: frameSession })
+  }
+
+  /** 本页有启用的定时任务 ⇒ 标题挂 ⏰（停用 / 跑完立刻撤）。 */
+  function hasScheduledTasks(): boolean {
+    return (sched?.tasks() ?? []).some((t) => t.enabled && belongsHere(t))
   }
 
   /**
@@ -775,11 +779,13 @@ function startHost(
       panel?.setSchedule(rows)
       // 增删/执行后状态栏跟着任务表改口：删空后不再留着「已添加定时：HH:MM」
       panel?.setStatus(scheduleStatusText(rows.length), 'ok')
+      tabTitle.setScheduled(hasScheduledTasks())
       syncMarks()
     },
   })
   panel.setSchedule(sched.rows())
   sched.start()
+  tabTitle.setScheduled(hasScheduledTasks())
   // 下行命令（`stopOthers`）：别的页开始离线训练时，dashboard 会让我们停会话。
   // 与 op 日志同一条通道（GET /api/notebookCmds → stopNow → ack 落 op）；伴生脚本关掉就不取。
   const stopCmd = config.enabled
@@ -836,6 +842,7 @@ function startHost(
   let sessionPollTick = 0
   const markTimer = setInterval(() => {
     syncMarks()
+    tabTitle.setScheduled(hasScheduledTasks())
     tabTitle.refresh()
     sessionPollTick += 1
     if (sessionPollTick % 5 === 0) tabTitle.observeSession(sessionTitleState())
@@ -937,7 +944,7 @@ function startSingle(
   const sessionTitleState = (): 'running' | 'idle' | 'stopped' | 'unknown' =>
     sessionAdapter.titleState?.() ?? sessionAdapter.sessionState()
   // 标签页标题：名字跟随页面自己（Colab/AI Studio/魔搭不会像 Kaggle 那样把它覆写成通用文案），
-  // 状态图标（⏹️ 会话已停 / ▶️ cell 在跑）与 host 同口径。
+  // 状态图标（⛔ 会话已停 / ▶️ cell 在跑 / ⏰ 有定时任务）与 host 同口径。
   const tabTitle = createTabTitleReporter(
     createGenericTabTitleSync(doc, () => {
       try {
@@ -987,22 +994,22 @@ function startSingle(
   op('boot', `${site} single notebook=${notebookKey || '∅'} session=${loop.session} page=${page}`)
 
   // 页首同步 CFG['hub_url']（与 Kaggle 帧同一条路径；single 页没有桥，结果进操作日志）。
+  // 页面开着时隧道也可能被 hub 重启换掉 ⇒ 周期复查（值没变就一次写都不发）。
   const hubSync = config.enabled
     ? startHubUrlSync({
         runtime,
         dashboardBase: config.dashboardBase,
         adapter,
         markers: config.configMarkers,
+        intervalMs: HUB_SYNC_INTERVAL_MS,
         log: (msg) => log(`hub: ${msg}`),
+        onResult: (r) => {
+          op('hub:sync', r.ok ? (r.detail ?? 'ok') : r.reason)
+          const view = describeHubSync(r)
+          panel?.setHubSync(view.text, view.tone)
+        },
       })
     : null
-  if (hubSync) {
-    void hubSync.done.then((r) => {
-      op('hub:sync', r.ok ? (r.detail ?? 'ok') : r.reason)
-      const view = describeHubSync(r)
-      panel?.setHubSync(view.text, view.tone)
-    })
-  }
 
   const openLog = (): void => {
     op('log:open', `notebook:${loop.session}`)
@@ -1058,7 +1065,7 @@ function startSingle(
       ? { ok: true, ...(typeof r.value === 'string' ? { detail: r.value } : {}) }
       : { ok: false, reason: r.reason ?? '失败', ...(r.retry ? { retry: true } : {}) }
 
-  /** 停会话的唯一出口：成功 ⇒ 标题上 ⏹️（三条路径共用：hub 叫停 / 空闲停 / 定时停）。 */
+  /** 停会话的唯一出口：成功 ⇒ 标题上 ⛔（三条路径共用：hub 叫停 / 空闲停 / 定时停）。 */
   const stopNow = async (): Promise<{
     ok: boolean
     reason?: string
@@ -1092,6 +1099,11 @@ function startSingle(
   /** 只显示属于这一页的任务（GM 存储跨页共享，与 host 同口径）。 */
   function belongsHere(task: SchedulerTask): boolean {
     return taskBelongsTo(task, { notebookKey, session: loop.session })
+  }
+
+  /** 本页有启用的定时任务 ⇒ 标题挂 ⏰（停用 / 跑完立刻撤）。 */
+  function hasScheduledTasks(): boolean {
+    return (sched?.tasks() ?? []).some((t) => t.enabled && belongsHere(t))
   }
 
   /** 定时徽标：没有桥，直接贴在本页 DOM；每秒重贴 ⇒ cell 重渲染后下一拍自愈。 */
@@ -1384,16 +1396,19 @@ function startSingle(
       const rows = sched?.rows() ?? []
       panel?.setSchedule(rows)
       panel?.setStatus(scheduleStatusText(rows.length), 'ok')
+      tabTitle.setScheduled(hasScheduledTasks())
       syncMarks()
     },
   })
   panel.setSchedule(sched.rows())
   sched.start()
+  tabTitle.setScheduled(hasScheduledTasks())
   // 同一 1s 拍：定时徽标 + 标签页标题（cell 执行态直接读本页 DOM），会话状态每 5s 对一次。
   let sessionPollTick = 0
   const markTimer = setInterval(() => {
     syncMarks()
     tabTitle.setRunning(cellsExecuting(adapter))
+    tabTitle.setScheduled(hasScheduledTasks())
     tabTitle.refresh()
     sessionPollTick += 1
     if (sessionPollTick % 5 === 0) tabTitle.observeSession(sessionTitleState())
