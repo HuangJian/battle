@@ -344,7 +344,6 @@ LAYERS: dict[str, int] = {
     # 于是八个都是 **L3**。
     "hub.queue_auth": 3,
     "hub.queue_claims": 3,
-    "hub.queue_discover": 3,
     "hub.queue_observe": 3,
     # 离线任务清单 + 租约域（合并 origin 时新拆的混入）：要 `hub.store`(L2) 与
     # `hub.task_pack`(L1) ⇒ 与其余七个同秩 **L3**。

@@ -64,7 +64,6 @@ from hub.course_table import CourseTable
 from hub.dispatch_state import Dispatch, DispatchLocks, DispatchTables
 from hub.queue_auth import QueueAuthMixin
 from hub.queue_claims import QueueClaimsMixin
-from hub.queue_discover import QueueDiscoverMixin
 from hub.queue_observe import QueueObserveMixin
 from hub.queue_offline import QueueOfflineMixin
 from hub.queue_resume import QueueResumeMixin
@@ -73,9 +72,9 @@ from hub.queue_store_face import QueueStoreFaceMixin
 from hub.store import _JobStore
 from hub.worker_board import WorkerBoard
 
-# `DISCOVER_FRESH_SEC` / `DISCOVER_SCAN_MIN_SEC` 两个类常量随发现簇搬进 `queue_discover`，
-# 本类经 MRO 继承（`hub.DISCOVER_SCAN_MIN_SEC` 这类实例访问照旧）。
-# ba注意 `DISCOVER_SCAN_SEC`（后台兜底线程的节拍，启动参数用）是**另一件事**，留在 hub_server。
+# `DISCOVER_FRESH_SEC` / `DISCOVER_SCAN_MIN_SEC` 两个类常量随发现簇住 `queue_scope`
+# （B7-S1 并入），本类经 MRO 继承（`hub.DISCOVER_SCAN_MIN_SEC` 这类实例访问照旧）。
+# 注意 `DISCOVER_SCAN_SEC`（后台兜底线程的节拍，启动参数用）是**另一件事**，留在 hub_server。
 
 
 # ------------------------------------------------------------------ 组合
@@ -83,7 +82,6 @@ from hub.worker_board import WorkerBoard
 
 class _HubQueue(
     QueueScopeMixin,
-    QueueDiscoverMixin,
     QueueAuthMixin,
     QueueClaimsMixin,
     QueueResumeMixin,
@@ -121,8 +119,8 @@ class _HubQueue(
     BC_EPOCH_BODY_MAX = _JobStore.BC_EPOCH_BODY_MAX
 
     # `__init__` 的形参缺省值要在**类体作用域**里解析，所以要在这里取一次名字
-    # （常量本身只有一份，住 `queue_discover`——与 `BC_EPOCH_BODY_MAX` 同一个做法）。
-    DISCOVER_FRESH_SEC = QueueDiscoverMixin.DISCOVER_FRESH_SEC
+    # （常量本身只有一份，住 `queue_scope`——与 `BC_EPOCH_BODY_MAX` 同一个做法）。
+    DISCOVER_FRESH_SEC = QueueScopeMixin.DISCOVER_FRESH_SEC
 
     def __init__(
         self,

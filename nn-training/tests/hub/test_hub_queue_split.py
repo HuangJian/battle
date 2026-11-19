@@ -6,11 +6,10 @@
 组合类住 `hub/queue.py`，只剩 docstring + 两个类常量 + `__init__`：
 
 ```
-class _HubQueue(QueueScopeMixin, QueueDiscoverMixin, QueueAuthMixin, QueueClaimsMixin,
+class _HubQueue(QueueScopeMixin, QueueAuthMixin, QueueClaimsMixin,
                 QueueResumeMixin, QueueObserveMixin, QueueOfflineMixin, QueueStoreFaceMixin,
                 _AuthGuard)
-  queue_scope       课程表 · 归属路由 · 模式 · 停机达令 · worker 登记（状态的主人）
-  queue_discover    自动发现三相：扫盘 / 开课标记闸 / 「在训」判据
+  queue_scope       课程表 · 归属路由 · 模式 · 停机达令 · worker 登记 · 自动发现三相
   queue_auth        鉴权面四覆写 + halt_workers 旧名的委派（本簇**继承** `_AuthGuard`）
   queue_claims      派发与认领：轮转挑选 · peek · 熔断告警 · 合法放弃 · 归属/停摆闸探针
   queue_resume      续跑锚点 · 离线段补传产物 · 课程路径
@@ -96,7 +95,6 @@ if str(ROOT) not in sys.path:
 
 import hub.queue_auth as auth_mix
 import hub.queue_claims as claims_mix
-import hub.queue_discover as discover_mix
 import hub.queue_observe as observe_mix
 import hub.queue_offline as offline_mix
 import hub.queue_peer as peer_mod
@@ -152,12 +150,12 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "ambiguous_jids",
             # 2026-10-17（plan/hub-server-memory-slim L3）：课程表可淘汰（`add_course` 的反面）。
             "drop_course",
+            # B7-S1：原 `queue_discover` 三相并入本簇（同一份课程表 / 同一把 `_lock`）。
+            "discover",
+            "_serves_course",
+            "_course_dir_live",
+            "_drop_dead_courses",
         ),
-    ),
-    "queue_discover": (
-        discover_mix.QueueDiscoverMixin,
-        # 2026-10-17（L3）：`_drop_dead_courses` = 扫描时顺带淘汰（课程表只增不减的另一半）。
-        ("discover", "_serves_course", "_course_dir_live", "_drop_dead_courses"),
     ),
     "queue_auth": (
         auth_mix.QueueAuthMixin,
@@ -516,7 +514,6 @@ ALLOWED_IMPORTS = {
         "hub.store",
         "hub.task_pack",
     },
-    "hub.queue_discover": {"common.logutil", "common.protocol", "hub.queue_peer", "hub.store"},
     "hub.queue_auth": {
         "hub.auth",
         "hub.queue_peer",
@@ -647,6 +644,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     # 2026-11-07（plan/dead-lease-sweep）：+1（`sweep_dead_leases`：周期清扫死租约）⇒ 130。
     # 2026-11-12：+1（`clear_bc_exclusive`：dashboard 的人工「解除 BC 独占」口）⇒ 135。
     # 2026-11-18（G5）：+1（`auth_state`：D9 闭锁的只读快照）⇒ 136；再 +1（`course_store`）⇒ 137。
+    # B7-S1：`queue_discover` 的 4 个方法并入 `queue_scope` ⇒ 总数不变（138），只是换域。
     assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 138, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
@@ -742,11 +740,11 @@ def test_queue_auth_inherits_the_guard_so_its_unbound_calls_type_check() -> None
 def test_class_constants_are_reachable_through_the_mro() -> None:
     """类常量随簇搬走，但**名字是契约**（`hub.DISCOVER_FRESH_SEC` / `hub.BC_EPOCH_BODY_MAX`）。"""
     assert (
-        _HubQueue.DISCOVER_FRESH_SEC == discover_mix.QueueDiscoverMixin.DISCOVER_FRESH_SEC == 3600.0
+        _HubQueue.DISCOVER_FRESH_SEC == scope_mix.QueueScopeMixin.DISCOVER_FRESH_SEC == 3600.0
     )
     assert (
         _HubQueue.DISCOVER_SCAN_MIN_SEC
-        == discover_mix.QueueDiscoverMixin.DISCOVER_SCAN_MIN_SEC
+        == scope_mix.QueueScopeMixin.DISCOVER_SCAN_MIN_SEC
         == 2.0
     )
     assert _HubQueue.BC_EPOCH_BODY_MAX == _JobStore.BC_EPOCH_BODY_MAX == 4 * 1024 * 1024
@@ -1043,9 +1041,9 @@ def test_only_the_composed_init_declares_state_with_values() -> None:
     for domain, (cls, _) in DOMAINS.items():
         path = HUB_DIR / f"{domain}.py"
         valued = _own_consts(path, cls.__name__)
-        # 类常量随簇走（发现簇两个）；除此之外不得带值。
+        # 类常量随簇走（发现三相已并入 `queue_scope`，两个常量跟它走）；除此之外不得带值。
         allowed = (
-            {"DISCOVER_FRESH_SEC", "DISCOVER_SCAN_MIN_SEC"} if domain == "queue_discover" else set()
+            {"DISCOVER_FRESH_SEC", "DISCOVER_SCAN_MIN_SEC"} if domain == "queue_scope" else set()
         )
         assert valued == allowed, f"{domain} 冒出了带值声明：{sorted(valued - allowed)}"
     # 组合类的类体只有那两个常量（`_JobStore.BC_EPOCH_BODY_MAX` 的同源转发 + 形参缺省值）。

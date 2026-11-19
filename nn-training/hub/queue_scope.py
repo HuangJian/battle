@@ -17,6 +17,10 @@
 * **进程级状态**（停机达令 / worker 登记 / 鉴权计数）：单课程时**借**那一份 `_JobStore`
   的，多课程时用自己的 —— 既有用例会在 store 上预热 `_auth_blocked_until` / 摆 `_workers`
   再发 HTTP 请求，若本类另有副本，那些预热就不生效了（见 `_adopt_solo` / `_registry`）。
+* **自动发现三相**（B7-S1 从 `queue_discover` 并入）：`discover` 扫盘登记新鲜课程、
+  `_serves_course` 是派发前的开课标记闸、`_course_dir_live` 判「在训」。并入的理由：
+  它们只经 `self` 读写课程表与 `_lock`，与 scope 是同一份状态、同一把锁；独立成基类
+  只增加一层壳。两个 `DISCOVER_*` 类常量也随本簇走。
 
 ## 依赖方向
 
@@ -38,7 +42,12 @@ from threading import Lock
 from typing import Any
 
 from common.logutil import tag_logger
-from common.protocol import WORKER_SEEN_WINDOW_SEC
+from common.protocol import (
+    COURSE_ENABLE_MARKER,
+    WORKER_SEEN_WINDOW_SEC,
+    ProtocolError,
+    parse_course_arg,
+)
 from hub.queue_peer import QueuePeer
 from hub.store import _JobStore
 from hub.task_pack import course_finished as _course_finished
@@ -53,7 +62,17 @@ _ENABLE_MARKER = "training-enabled.txt"
 
 
 class QueueScopeMixin(QueuePeer):
-    """域混入：见模块头部。"""
+    """域混入：见模块头部（含 `--discover` 三相：B7-S1 从 `queue_discover` 并入）。"""
+
+    #: 自动发现时判定「课程目录是不是活的」的新鲜窗口（秒）。
+    #: 一个 PPO 轮次是分钟级（rollout 采集 + 云端结算 10–30min），窗口取 1h：正在跑的课
+    #: 每轮都会在 `remote-jobs/` 里增删条目、往 jsonl 追加行，秒级就落在窗口内；而几天前
+    #: 的陈旧实验目录（同样的磁盘形状，同样残留 pending job）永远不会被误当成「在跑的课」
+    #: ——误登记会把已死课程的 job 继续派给真 GPU worker（白烧租约）。
+    DISCOVER_FRESH_SEC = 3600.0
+    #: 两次扫描之间的最小间隔（秒）：`claim_next` 是派发热路径（worker 每几秒一轮询），
+    #: 每次 readdir 都扫一遍没必要，也没意义。
+    DISCOVER_SCAN_MIN_SEC = 2.0
 
     # ---- 由组合类 `__init__` / 兄弟簇提供（混入只见 `self`；声明一律是裸注解）----
     #: jid -> 同时持有它的课程（≥2 = 身份歧义）：`course_of` 去重打点 + 拒答理由用它。
@@ -63,6 +82,9 @@ class QueueScopeMixin(QueuePeer):
     #: 轮转游标（`drop_course` 摘到它时置 None ⇒ 必须显式是 `str | None`）；
     #: 真正的**推进**在 `queue_claims`（`claim_next` / `claim_job`），那里另有同名声明。
     _cursor: str | None
+    #: 发现三相的时钟读数与扫描闸（B7-S1：原 `queue_discover` 的状态声明）。
+    _discover_fresh: float
+    _discover_last: float
     _discover_root: Path | None
     _halt_default: bool
     _halts: dict[str, bool]
@@ -410,3 +432,149 @@ class QueueScopeMixin(QueuePeer):
                     continue
                 seen.setdefault(p.name, []).append(course)
         return {jid: cs for jid, cs in sorted(seen.items()) if len(cs) > 1}
+
+    def discover(self, force: bool = False) -> list[str]:
+        """扫 `<traj_root>/<course>/{remote-jobs,offline}`，把新鲜且未登记的课程登记进来。
+
+        返回本次新增的课程（目录序，稳定）。`--discover` 未开 → 恒空（零开销）。
+
+        `force=True` 跳过一次扫描的最小间隔闸：**只在「这一刻必须看到真课程表」的动作用**
+        —— ① 人工动作 `POST /admin/courses` 指名要某门课；② hub 启动时（`hub/boot.py`
+        的引导链，2026-09-29 加：盘上已有的课不该等一个后台节拍才登记，缺省节拍 5s ⇒
+        控制台/worker 启动初期看到空表）。为什么需要它（2026-09-23 事故，用户报障「三个离线课里有一个
+        显示在训」）：间隔闸是为了给派发热路径（`claim_next` 每拍调）减去重扫成本，但
+        它也让「刚建好 `remote-jobs/` 的课」在下一次顺带扫描之前不存在于 `_stores` 里
+        ——而那个窗口里打来的 mode POST 只会得到 400（「需要合法 course」），控制台
+        那一次有界重试（默认 3×2s）可能整段落在窗口内 ⇒ 意图从此静默失配（该课留在
+        online，面板一直显示「在训/切离线」）。指名一门课的写动作有资格要求一次真扫。
+
+        为什么以**磁盘**为发现源、而不是让控制台/训练器走一次 HTTP 注册：训练侧把 job
+        发布到 `<traj>/remote-jobs` 是**文件系统事实**（hub 与 trainer 共享同一份盘），
+        所以「有新课程在跑」这件事本身就写在盘上。再加一条注册旁路就是「会失败、会乱序、
+        会忘了调」的第二事实源——而漏注册的后果是那门课**永久饿死**（跨课程轮转表里
+        没有它），且表面上「训练正常」。
+        """
+        root = self._discover_root
+        if root is None:
+            return []
+        now = self._now()
+        if not force and now - self._discover_last < self.DISCOVER_SCAN_MIN_SEC:
+            return []
+        self._discover_last = now
+        try:
+            entries = sorted(root.iterdir(), key=lambda p: p.name)
+        except OSError:
+            return []
+        added: list[str] = []
+        for ent in entries:
+            try:
+                if not ent.is_dir():
+                    continue
+            except OSError:
+                continue
+            if ent.name in self._stores:
+                continue
+            try:
+                parse_course_arg(ent.name)
+            except ProtocolError:
+                continue  # 非课程目录（tmp/training-start 之类）——安静跳过
+            if not self._course_dir_live(ent, now):
+                continue
+            if self.add_course(ent.name):
+                added.append(ent.name)
+        # ---- ★ 淘汰（2026-10-17，plan/hub-server-memory-slim L3）：课程表**只增不减**的
+        # 那一半。目录被删 / 停课删了开课标记 = **确定性**的死信号（不靠"超时"猜——
+        # 卡住的课不该被当成死课摘掉）。且**在飞或有人接管时不摘**：淘汰是为了释放内存，
+        # 不是给正在跑的活断电。
+        dropped = self._drop_dead_courses(root)
+        if dropped:
+            _log(f"dropped courses: {', '.join(dropped)}")
+        if added:
+            _log(f"discovered courses: {', '.join(added)}")
+        return added
+
+    def _drop_dead_courses(self, root: Path) -> list[str]:
+        """摘掉「**课程目录整个没了**」且没有在飞、没人接管的课程（目录序，稳定）。
+
+        ⚠ 判据只取「目录不存在」这**一条**，不取「开课标记被删」：停课（删
+        `training-enabled.txt`）之后那门课的权重/任务包还在盘上，控制台要能看见它、
+        云机要能取它的包、人要能导它的段——把它从课程表摘掉 = 那些入口 404
+        （派发那一层已经由 `_serves_course` 挡住了，摘表只带来损失）。
+        只有目录本身没了（tmp 被清 / 课程目录被删）时，留着 store 与它的账本缓存
+        才是纯亏：那正是 2026-10-17 那次 tmp 清空之后内存一份没少的形状。
+        """
+        out: list[str] = []
+        now = self._now()
+        for c in sorted(self._stores):
+            ent = root / c
+            if ent.is_dir():
+                continue  # 目录还在 ⇒ 不摘（停课 ≠ 死课）
+            st = self._stores[c]
+            # ★ 在飞判据走**内存租约**，不走 `inflight_job_ids()`：后者要求 job 目录与
+            # payload 还在盘上，而「目录整个没了」正是本函数的前提 ⇒ 它恒为空，等于没有这道闸。
+            if st.leases.active_lease_ids(now):
+                continue  # 有活租约在跑
+            if str(self.hold_of(c).get("state") or "") == "live":
+                continue  # 离线盘正接管着
+            if self.drop_course(c):
+                out.append(c)
+        return out
+
+    def _serves_course(self, course: str) -> bool:
+        """派发闸：**发现模式**下课程目录必须仍带开课标记（`training-enabled.txt`）。
+
+        为什么发现时判过还要在这里再判一次（2026-09-20 事故）：课程表是**发现那一刻**
+        建的，而 `remote-jobs/` 里躺着的 pending job 不会自己消失。没有这道闸，任何
+        在旧表/旧代码里登记过的课程会把它的**陈旧 job 继续派给真 GPU worker**——
+        白烧租约，云端逐份失败（D14 血缘不匹配 / 旧 code.zip 触发自重启），而训练侧
+        什么都看不到（那门课早就不跑了）。用户口径：「课程开训需要用户手动开启」——
+        删掉标记就该立刻停止派发，不能等到下一次发现扫描或靠控制台记得置离线。
+
+        单课程模式（`--job-root` 直给、无 `--discover`）不受影响：那条路径的「开课」
+        就是有人显式起了这个 hub。
+        """
+        if self._discover_root is None:
+            return True
+        st = self._stores.get(course)
+        if st is None:
+            return False
+        if (st.job_root.parent / COURSE_ENABLE_MARKER).exists():
+            return True
+        with self._lock:
+            if course not in self._no_marker_warned:
+                self._no_marker_warned.add(course)
+                _log(
+                    f"跳过未开课的 {course}：无 {COURSE_ENABLE_MARKER}"
+                    "（控制台「训练」写入 / 「停课」删除）——队列原样保留，开课即恢复派发",
+                )
+        return False
+
+    def _course_dir_live(self, ent: Path, now: float) -> bool:
+        """课程目录「在训」判据：**已开课标记**存在，且 `{remote-jobs,offline}` 之一存在且新鲜。
+
+        ★ 开课标记（`training-enabled.txt`）是 2026-09-20 加的**显式闸**：没有它，hub 会把
+        tmp/ 下每一门历史课（都有 remote-jobs/ 残影）都当成「在跑的课」登记进课程表，并继续
+        把残留的 pending job 派给真 GPU worker（白烧租约）。用户口径：「课程开训需要用户手动
+        开启」；标记由控制台开课写、停课删（`remote.protocol.COURSE_ENABLE_MARKER`）。
+        """
+        if not (ent / COURSE_ENABLE_MARKER).exists():
+            return False
+        # ★ 2026-09-25（评审 S-1）：活证据多一条「**已导出的任务包**」，且不再要求
+        #   `remote-jobs`/`offline` 目录存在。为什么：**离线课本机不训练** ⇒ 那两个目录与
+        #   training_log 一小时后全部变旧，而这门课在 hub 表里消失会造成两处静默失效：
+        #   ① 控制台的「导出任务包」按课程名找目录（表里没它就找不到）⇒ 意图失配；
+        #   ② 云机取包的 404 正文里 `known_courses` 也不会有它（排障人被指向错方向）。
+        #   包是文件系统事实（与 `task_pack_path` 同源推导），与「开课标记」一样可靠。
+        newest = 0.0
+        for p in (
+            ent / "remote-jobs",
+            ent / "offline",
+            ent / "training_log.jsonl",
+            ent / f"task-{ent.name}.zip",
+        ):
+            try:
+                newest = max(newest, p.stat().st_mtime)
+            except OSError:
+                continue
+        return newest > 0 and now - newest <= self._discover_fresh
+

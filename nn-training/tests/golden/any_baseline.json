@@ -32,7 +32,6 @@
     "hub/offline_push_assign.py": 2,
     "hub/offline_push_pack.py": 1,
     "hub/offline_push_workers.py": 2,
-    "hub/queue_discover.py": 3,
     "hub/queue_observe.py": 9,
     "hub/queue_offline.py": 3,
     "hub/queue_peer.py": 1,
