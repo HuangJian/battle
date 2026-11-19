@@ -35,7 +35,6 @@
     "hub/queue_observe.py": 9,
     "hub/queue_offline.py": 3,
     "hub/queue_peer.py": 1,
-    "hub/queue_scope.py": 1,
     "hub/result.py": 10,
     "hub/schedule.py": 15,
     "hub/store_leases.py": 3,

@@ -67,7 +67,7 @@ from hub.queue_claims import QueueClaimsMixin
 from hub.queue_observe import QueueObserveMixin
 from hub.queue_offline import QueueOfflineMixin
 from hub.queue_resume import QueueResumeMixin
-from hub.queue_scope import QueueScopeMixin
+from hub.queue_scope import QueueScope
 from hub.queue_store_face import QueueStoreFaceMixin
 from hub.store import _JobStore
 from hub.worker_board import WorkerBoard
@@ -81,7 +81,6 @@ from hub.worker_board import WorkerBoard
 
 
 class _HubQueue(
-    QueueScopeMixin,
     QueueAuthMixin,
     QueueClaimsMixin,
     QueueResumeMixin,
@@ -120,7 +119,8 @@ class _HubQueue(
 
     # `__init__` 的形参缺省值要在**类体作用域**里解析，所以要在这里取一次名字
     # （常量本身只有一份，住 `queue_scope`——与 `BC_EPOCH_BODY_MAX` 同一个做法）。
-    DISCOVER_FRESH_SEC = QueueScopeMixin.DISCOVER_FRESH_SEC
+    DISCOVER_FRESH_SEC = QueueScope.DISCOVER_FRESH_SEC
+    DISCOVER_SCAN_MIN_SEC = QueueScope.DISCOVER_SCAN_MIN_SEC
 
     def __init__(
         self,
@@ -175,12 +175,122 @@ class _HubQueue(
         # 时钟与单课程 store 同源（测试注入的假时钟必须一致，否则 claimed 标记的时间戳
         # 会混入真实墙钟）。
         self._now = self._solo._now if self._solo is not None else (now_fn or time.time)
+        # B7-S2：课程表 / 路由 / 停机 / 发现面切成 `QueueScope` 协作者。构造排在 `_now`
+        # 之后（`add_course` 要给新 store 同一个 now_fn），在 hold 同步循环之前（后者经
+        # `self._sync_hold` 转发进 scope）。
+        self.scope = QueueScope(self, lock=self._lock, clock=self._now)
         # 盘上的 hold 镜像同步（★M1b）：必须排在 `self._now` **之后** —— 盘上有 hold 时
         # `_dispatch_load` 要打恢复宽限（`hold-restored`），那需要时钟。旧顺序下「带 hold
         # 重启」= 构造期 AttributeError（hub 直接起不来）。
         # ★M4b：`_modes` 与 `dispatch_effective_mode` 已随「课程无模式」删除。
         for _c in self._order:
             self._sync_hold(_c)
+
+    # ---- B7-S2：课程表 / 路由 / 停机 / 发现面的**转发壳**（26 个口） ----
+    # 实现与状态主人住 `self.scope`；跨域调用点（`self.course_of` 等）逐字不变。
+    def halt_of(self, course: str) -> bool:
+        """转发到 `QueueScope.halt_of`（B7-S2）。"""
+        return self.scope.halt_of(course)
+
+    def all_halted(self) -> bool:
+        """转发到 `QueueScope.all_halted`（B7-S2）。"""
+        return self.scope.all_halted()
+
+    def _work_left(self, exclude: str = '') -> str | None:
+        """转发到 `QueueScope._work_left`（B7-S2）。"""
+        return self.scope._work_left(exclude)
+
+    def halt_if_idle(self, course: str = '') -> tuple[bool, str]:
+        """转发到 `QueueScope.halt_if_idle`（B7-S2）。"""
+        return self.scope.halt_if_idle(course)
+
+    def maybe_halt_when_idle(self) -> bool:
+        """转发到 `QueueScope.maybe_halt_when_idle`（B7-S2）。"""
+        return self.scope.maybe_halt_when_idle()
+
+    def set_halt(self, halt: bool, course: str = '') -> bool:
+        """转发到 `QueueScope.set_halt`（B7-S2）。"""
+        return self.scope.set_halt(halt, course)
+
+    def add_course(self, name: str) -> bool:
+        """转发到 `QueueScope.add_course`（B7-S2）。"""
+        return self.scope.add_course(name)
+
+    def drop_course(self, name: str) -> bool:
+        """转发到 `QueueScope.drop_course`（B7-S2）。"""
+        return self.scope.drop_course(name)
+
+    def _adopt_solo(self) -> None:
+        """转发到 `QueueScope._adopt_solo`（B7-S2）。"""
+        self.scope._adopt_solo()
+
+    def _registry(self) -> dict[str, float]:
+        """转发到 `QueueScope._registry`（B7-S2）。"""
+        return self.scope._registry()
+
+    def note_worker(self, worker_id: str) -> None:
+        """转发到 `QueueScope.note_worker`（B7-S2）。"""
+        self.scope.note_worker(worker_id)
+
+    def worker_registry(self) -> dict[str, float]:
+        """转发到 `QueueScope.worker_registry`（B7-S2）。"""
+        return self.scope.worker_registry()
+
+    def active_worker_count(self) -> int:
+        """转发到 `QueueScope.active_worker_count`（B7-S2）。"""
+        return self.scope.active_worker_count()
+
+    def courses(self) -> list[str]:
+        """转发到 `QueueScope.courses`（B7-S2）。"""
+        return self.scope.courses()
+
+    def course_of(self, job_id: str) -> str | None:
+        """转发到 `QueueScope.course_of`（B7-S2）。"""
+        return self.scope.course_of(job_id)
+
+    def course_store(self, course: str) -> _JobStore | None:
+        """转发到 `QueueScope.course_store`（B7-S2）。"""
+        return self.scope.course_store(course)
+
+    def _store_of(self, job_id: str) -> _JobStore | None:
+        """转发到 `QueueScope._store_of`（B7-S2）。"""
+        return self.scope._store_of(job_id)
+
+    def mode_ignored(self, course: str) -> bool:
+        """转发到 `QueueScope.mode_ignored`（B7-S2）。"""
+        return self.scope.mode_ignored(course)
+
+    def active_courses(self) -> int:
+        """转发到 `QueueScope.active_courses`（B7-S2）。"""
+        return self.scope.active_courses()
+
+    def _sync_hold(self, course: str) -> None:
+        """转发到 `QueueScope._sync_hold`（B7-S2）。"""
+        self.scope._sync_hold(course)
+
+    def _note_ambiguous(self, job_id: str, holders: list[str]) -> None:
+        """转发到 `QueueScope._note_ambiguous`（B7-S2）。"""
+        self.scope._note_ambiguous(job_id, holders)
+
+    def ambiguous_jids(self) -> dict[str, list[str]]:
+        """转发到 `QueueScope.ambiguous_jids`（B7-S2）。"""
+        return self.scope.ambiguous_jids()
+
+    def discover(self, force: bool = False) -> list[str]:
+        """转发到 `QueueScope.discover`（B7-S2）。"""
+        return self.scope.discover(force)
+
+    def _drop_dead_courses(self, root: Path) -> list[str]:
+        """转发到 `QueueScope._drop_dead_courses`（B7-S2）。"""
+        return self.scope._drop_dead_courses(root)
+
+    def _serves_course(self, course: str) -> bool:
+        """转发到 `QueueScope._serves_course`（B7-S2）。"""
+        return self.scope._serves_course(course)
+
+    def _course_dir_live(self, ent: Path, now: float) -> bool:
+        """转发到 `QueueScope._course_dir_live`（B7-S2）。"""
+        return self.scope._course_dir_live(ent, now)
 
     # ---- B7-P3：课程表 / worker 板的**转发属性**（状态只在协作者上） ----
     # 八域混入仍写 `self._stores[...]` / `self._cursor = ...`：这些属性的 getter/setter 把

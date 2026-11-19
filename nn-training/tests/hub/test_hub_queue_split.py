@@ -117,46 +117,6 @@ QUEUE_MOD = HUB_DIR / "queue.py"
 #: 域 -> （混入类, 该域实现的成员）。八个域的并集**恰好**是拆分前 `_HubQueue` 的 91 个域成员
 #: （第 92 个是组合类的 `__init__`）。
 DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
-    "queue_scope": (
-        scope_mix.QueueScopeMixin,
-        (
-            "halt_of",
-            "all_halted",
-            # 2026-11-12（干完才停）：BC 收官只申请 `if_idle=1`，有活就先置门闩。
-            "halt_if_idle",
-            "maybe_halt_when_idle",
-            "_work_left",
-            "set_halt",
-            "add_course",
-            "_adopt_solo",
-            "_registry",
-            "note_worker",
-            # 2026-11-19（G5 第十六批）：登记表的只读副本（用例不再伸手进 `_workers`/
-            # `_registry()`）；与 `_registry()` 的分工 = 「活引用 vs 快照」。
-            "worker_registry",
-            "active_worker_count",
-            "courses",
-            "course_of",
-            # 2026-11-18（G5）：课程 → store 的只读入口（诊断/用例不再伸手进 `_stores`）。
-            "course_store",
-            "_store_of",
-            # ★M4b：启动参数里的模式段标记（`--course a=offline` ⇒ WARN + 忽略）。
-            "mode_ignored",
-            "active_courses",
-            # ★M1b：hold 镜像的推送（派发闸第三层）——★M1c 起它是**唯一**的闸输入推送口
-            # （旧的 `_sync_parked` 随 `parked` 一起退役）。
-            "_sync_hold",
-            "_note_ambiguous",
-            "ambiguous_jids",
-            # 2026-10-17（plan/hub-server-memory-slim L3）：课程表可淘汰（`add_course` 的反面）。
-            "drop_course",
-            # B7-S1：原 `queue_discover` 三相并入本簇（同一份课程表 / 同一把 `_lock`）。
-            "discover",
-            "_serves_course",
-            "_course_dir_live",
-            "_drop_dead_courses",
-        ),
-    ),
     "queue_auth": (
         auth_mix.QueueAuthMixin,
         (
@@ -326,6 +286,37 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
 DOMAIN_METHODS = tuple(m for _, (_, ms) in DOMAINS.items() for m in ms)
 MIXIN_CLASSES = tuple(cls for cls, _ in DOMAINS.values())
 
+#: B7-S2：`queue_scope` 从混入切成 `QueueScope` 协作者（26 个方法，组合类留 26 个转发）。
+#: 它不再是基类，但仍要逐个核签名 / 核转发 / 核状态写者。
+SCOPE_METHODS = (
+    "halt_of",
+    "all_halted",
+    "halt_if_idle",
+    "maybe_halt_when_idle",
+    "_work_left",
+    "set_halt",
+    "add_course",
+    "_adopt_solo",
+    "_registry",
+    "note_worker",
+    "worker_registry",
+    "active_worker_count",
+    "courses",
+    "course_of",
+    "course_store",
+    "_store_of",
+    "mode_ignored",
+    "active_courses",
+    "_sync_hold",
+    "_note_ambiguous",
+    "ambiguous_jids",
+    "drop_course",
+    "discover",
+    "_serves_course",
+    "_course_dir_live",
+    "_drop_dead_courses",
+)
+
 #: 组合类自己留的（进程级 + 构造 + B7-P3 的 10 条状态转发属性）。
 OWN_METHODS = (
     "__init__",
@@ -350,9 +341,10 @@ OWN_METHODS = (
     "_pf_lock",
     "_worker_errors",
     "_we_lock",
+    *SCOPE_METHODS,
 )
 #: 组合类里那个「形参缺省值要在类体作用域解析」的别名（`__init__` 因此逐字节不动）。
-OWN_CONSTS = ("BC_EPOCH_BODY_MAX", "DISCOVER_FRESH_SEC")
+OWN_CONSTS = ("BC_EPOCH_BODY_MAX", "DISCOVER_FRESH_SEC", "DISCOVER_SCAN_MIN_SEC")
 
 #: ★ 门面契约：与 `_JobStore` 同名的方法**逐参数完全一致**的那批（`inspect.signature` 对账）。
 #: 前五个是鉴权面（`_JobStore` 经 `_AuthGuard` 继承，`_HubQueue` 覆写后转发）——所以它们也在
@@ -457,6 +449,8 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
     "course_table": frozenset({"__init__"}),
     "board": frozenset({"__init__"}),
     "dispatch": frozenset({"__init__"}),
+    # B7-S2：组合类只声明 `self.scope`；scope 自己不再持有状态字段。
+    "scope": frozenset({"__init__"}),
     "_discover_fresh": frozenset({"__init__"}),
     "_discover_last": frozenset({"__init__", "discover"}),
     "_sweep_at": frozenset({"__init__", "sweep_dead_leases"}),
@@ -510,7 +504,6 @@ ALLOWED_IMPORTS = {
     "hub.queue_scope": {
         "common.logutil",
         "common.protocol",
-        "hub.queue_peer",
         "hub.store",
         "hub.task_pack",
     },
@@ -579,11 +572,20 @@ _MUTATORS = frozenset(
 
 
 def _self_attr(node: ast.AST) -> str | None:
-    """`self.X` → "X"（读取 / 赋值 / 下标 / 方法宿主四种形态都认）。"""
+    """`self.X` / `self.hub.X` → "X"（读取 / 赋值 / 下标 / 方法宿主四种形态都认）。
+
+    B7-S2：`QueueScope` 协作者经 `self.hub._stores` 读写组合类状态；对它来说，这两
+    种形态是**同一格**，所以写者表 / store 取用表不必分两套。
+    """
+    if not isinstance(node, ast.Attribute):
+        return None
+    if isinstance(node.value, ast.Name) and node.value.id == "self":
+        return node.attr
     if (
-        isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "self"
+        isinstance(node.value, ast.Attribute)
+        and node.value.attr == "hub"
+        and isinstance(node.value.value, ast.Name)
+        and node.value.value.id == "self"
     ):
         return node.attr
     return None
@@ -644,8 +646,8 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     # 2026-11-07（plan/dead-lease-sweep）：+1（`sweep_dead_leases`：周期清扫死租约）⇒ 130。
     # 2026-11-12：+1（`clear_bc_exclusive`：dashboard 的人工「解除 BC 独占」口）⇒ 135。
     # 2026-11-18（G5）：+1（`auth_state`：D9 闭锁的只读快照）⇒ 136；再 +1（`course_store`）⇒ 137。
-    # B7-S1：`queue_discover` 的 4 个方法并入 `queue_scope` ⇒ 总数不变（138），只是换域。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 138, len(DOMAIN_METHODS)
+    # B7-S2：`queue_scope` 的 26 个方法切成协作者 ⇒ 混入方法 138 → 112。
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 112, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -655,7 +657,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 138, len(seen)
+    assert len(seen) == 112, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == sorted(OWN_METHODS), (
@@ -688,7 +690,8 @@ def test_the_eight_mixins_do_not_share_any_realized_name() -> None:
             seen[name] = domain
     # 120 个域成员名 + 两个发现类常量（`halt_workers` 的 setter 与 getter 同名，不另算一项）；
     # 2026-10-11 W7：域成员名 120→121（`cancel_job`），故此刻不清点总数（见上一测的断言）。
-    expect = set(DOMAIN_METHODS) | {"DISCOVER_FRESH_SEC", "DISCOVER_SCAN_MIN_SEC"}
+    # B7-S2：发现两常量随 `queue_scope` 搬进协作者，不再由任何混入定义。
+    expect = set(DOMAIN_METHODS)
     assert len(seen) == len(expect) and set(seen) == expect, (len(seen), sorted(set(seen) ^ expect))
 
 
@@ -696,10 +699,13 @@ def test_the_eight_mixins_do_not_share_any_realized_name() -> None:
 
 
 def test_the_composed_class_is_wired_to_the_mixins_by_object_identity() -> None:
-    """★ 对象级证明：`_HubQueue.X is Mixin.X`（不是同名副本，也不是漏接了一个）。"""
+    """★ 对象级证明：混入 `is` 同一函数；scope 是**转发壳**（实现住协作者）。"""
     for domain, (cls, methods) in DOMAINS.items():
         for m in methods:
             assert getattr(_HubQueue, m) is getattr(cls, m), f"{domain}::{m} 没接上 _HubQueue"
+    for m in SCOPE_METHODS:
+        assert callable(getattr(_HubQueue, m)), f"QueueScope::{m} 没有转发壳"
+        assert callable(getattr(scope_mix.QueueScope, m)), f"QueueScope 少了 {m}"
 
 
 def test_the_mro_is_exactly_the_declared_order() -> None:
@@ -717,6 +723,7 @@ def test_the_mro_is_exactly_the_declared_order() -> None:
         "Generic",
         "object",
     ]
+    # B7-S2：`QueueScope` 不是基类（组合类只持有 `self.scope`），bases 表已隐含这一点。
     assert _HubQueue.__bases__ == (*MIXIN_CLASSES, hs._AuthGuard)
 
 
@@ -739,14 +746,8 @@ def test_queue_auth_inherits_the_guard_so_its_unbound_calls_type_check() -> None
 
 def test_class_constants_are_reachable_through_the_mro() -> None:
     """类常量随簇搬走，但**名字是契约**（`hub.DISCOVER_FRESH_SEC` / `hub.BC_EPOCH_BODY_MAX`）。"""
-    assert (
-        _HubQueue.DISCOVER_FRESH_SEC == scope_mix.QueueScopeMixin.DISCOVER_FRESH_SEC == 3600.0
-    )
-    assert (
-        _HubQueue.DISCOVER_SCAN_MIN_SEC
-        == scope_mix.QueueScopeMixin.DISCOVER_SCAN_MIN_SEC
-        == 2.0
-    )
+    assert _HubQueue.DISCOVER_FRESH_SEC == scope_mix.QueueScope.DISCOVER_FRESH_SEC == 3600.0
+    assert _HubQueue.DISCOVER_SCAN_MIN_SEC == scope_mix.QueueScope.DISCOVER_SCAN_MIN_SEC == 2.0
     assert _HubQueue.BC_EPOCH_BODY_MAX == _JobStore.BC_EPOCH_BODY_MAX == 4 * 1024 * 1024
     assert set(OWN_CONSTS) <= _own_consts(QUEUE_MOD, "_HubQueue")
 
@@ -944,14 +945,14 @@ def test_the_one_non_forwarding_same_name_method_owns_its_state() -> None:
     assert FACADE_OWN == ("note_worker",)
     fn = next(
         n
-        for n in ast.walk(_cls(_tree(HUB_DIR / "queue_scope.py"), "QueueScopeMixin"))
+        for n in ast.walk(_cls(_tree(HUB_DIR / "queue_scope.py"), "QueueScope"))
         if isinstance(n, ast.FunctionDef) and n.name == "note_worker"
     )
     picks = [sub for sub in ast.walk(fn) if isinstance(sub, ast.Call)]
     assert [p.func.attr for p in picks if isinstance(p.func, ast.Attribute)] == [
         "strip",
         "_registry",
-        "_now",
+        "_clock",
     ], [ast.unparse(p) for p in picks]
     assert not any(
         isinstance(sub, ast.Attribute) and _self_attr(sub) in ("_solo", "_stores")
@@ -1019,6 +1020,11 @@ def test_the_state_writer_table_matches_reality() -> None:
     for domain, (cls, _) in DOMAINS.items():
         for attr, who in _writers(HUB_DIR / f"{domain}.py", cls.__name__).items():
             actual.setdefault(attr, set()).update(who)
+    scope_writers = _writers(HUB_DIR / "queue_scope.py", "QueueScope")
+    for attr in ("hub", "_lock", "_clock"):
+        scope_writers.pop(attr, None)
+    for attr, who in scope_writers.items():
+        actual.setdefault(attr, set()).update(who)
     for attr, who in _writers(QUEUE_MOD, "_HubQueue").items():
         actual.setdefault(attr, set()).update(who)
     assert {k: frozenset(v) for k, v in actual.items()} == STATE_WRITERS, {
@@ -1077,7 +1083,7 @@ def test_only_the_composed_init_declares_state_with_values() -> None:
         - COURSE_TABLE_FIELDS
         - BOARD_FIELDS
         - DISPATCH_FIELDS
-    ) | {"course_table", "board", "dispatch"}
+    ) | {"course_table", "board", "dispatch", "scope"}
     assert declared == want, (
         f"`__init__` 申报的字段与状态表对不上：多 {sorted(declared - want)}，"
         f"少 {sorted(want - declared)}"
@@ -1161,6 +1167,13 @@ dag.assert_remote_module(
 
 def test_queue_peer_signatures_match_the_real_implementations() -> None:
     """★ 声明面与真实现**逐参数一致**：漂了就是一个在骗 mypy 的柱子。"""
+    for name in SCOPE_METHODS:
+        declared = getattr(peer_mod.QueuePeer, name, None)
+        if declared is None:
+            continue  # 少数 hub 内部口（如 halt_if_idle）本来就不在共同声明面上
+        assert _params(getattr(scope_mix.QueueScope, name)) == _params(declared), (
+            f"QueueScope::{name} 与 QueuePeer 签名漂了"
+        )
     for domain, (cls, methods) in DOMAINS.items():
         for name in methods:
             real = getattr(cls, name, None)

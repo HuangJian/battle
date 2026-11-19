@@ -175,9 +175,13 @@ _EXPECTED_EXEMPT_STEMS = frozenset(
 #:   `_append_ledger` / `_read_ledger` / `publish` / `ledger_net_state` / `is_cancelled`
 #:   （定义住 `store_ledger.py`，组合类各留一条转发；调用点另住 queue / remote / tests）。
 #:   与 P2 的同名抬格同型：门面转发，不是第二份实现；exact / clone 仍未动。
+#: 2026-11-19 再抬一格（124 → 139）：B7-S2 把 `queue_scope` 的 26 个方法改成组合类上的
+#:   转发壳（`halt_of` / `add_course` / `course_of` / `drop_course` / `discover` / `set_halt`
+#:   …），其中 15 个名字因此跨过「≥3 模块」线。与 P2/P4b 的门面转发同型：exact / clone
+#:   两条仍未动，`_HubQueue` 上没有任何实现体。
 BASELINE_EXACT = 15
 BASELINE_CLONE = 16
-BASELINE_SAME_NAME_GE3 = 124
+BASELINE_SAME_NAME_GE3 = 139
 
 
 def _stems(modules: frozenset[str]) -> frozenset[str]:
