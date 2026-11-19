@@ -767,6 +767,36 @@ def test_probe_falls_back_to_a_working_alternate_port(monkeypatch: pytest.Monkey
     assert facts["alt_ports"]["2083"] == "http-401", facts
 
 
+def test_probe_re_sweeps_when_the_configured_port_is_already_an_alt_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """配置就在备用端口上（DSW 现场的 `:2083`）时也必须再扫——旧写法整段跳过。
+
+    2026-11-19 现场：节点 `hub_url=…:2083` 的 TLS 全无应答，而预检的守卫是
+    `port not in ALT_HTTPS_PORTS` ⇒ 一个候选都没试，直接判成「按域名/SNI 掐」、建议换域名。
+    真因可能只是这个端口当天被掐（前一天 443 被掐、2083 是通的）。
+    """
+    _stub_layers(
+        monkeypatch,
+        tls=("timeout", "握手无应答"),
+        ctrl=("ok:TLSv1.3", "TLSv1.3（120ms）"),
+        net=("ok:TLSv1.3", "TLSv1.3（60ms）"),
+    )
+    swept = {443: "fail", 2096: "fail", 2053: "http-401", 2087: "fail", 8443: "fail"}
+    seen: dict[str, tuple[int, ...]] = {}
+
+    def fake_sweep(host: str, ports: object, token: str, node_id: str, t: float) -> dict[int, str]:
+        seen["ports"] = tuple(ports)  # type: ignore[arg-type]
+        return dict(swept)
+
+    monkeypatch.setattr(rr, "_port_sweep", fake_sweep)
+    _ok, _line, facts = probe_hub("https://hub.example.com:2083", "t", "n1", timeout=0.2)
+    assert facts["hint"] == "port-blocked", facts
+    assert facts["alt_port"] == 2053, facts
+    assert 2083 not in seen["ports"], "当前端口不必再扫"
+    assert 443 in seen["ports"], "从备用端口回退时，443 也是候选（可能只是当天被掐）"
+
+
 def test_probe_skips_the_port_sweep_when_the_hub_side_is_down(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

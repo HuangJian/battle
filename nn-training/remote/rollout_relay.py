@@ -525,13 +525,18 @@ def probe_hub(
         # （`000`），而 2053/2083/2087/2096 全回 401（TLS+HTTP 整链通、hub 在回话），8443 也被掐。
         # ⇒ 那个中间层只盯标准 HTTPS 端口。它比「换域名 / 换机器 / 配代理」便宜一个数量级，
         # 所以放在所有判词之后、只在**端口级失败**时问一次。
-        if scheme == "https" and kind in _SWEEP_HINTS and port not in ALT_HTTPS_PORTS:
+        # 候选 = 备用端口里**除当前端口**之外的全部（含 443）：配置已经落在备用端口上时
+        # （2026-11-19 DSW 现场就是 :2083），旧写法整段跳过扫描 ⇒ 2083 被掐那天
+        # 443/2053/2096/2087/8443 一个都没试过，直接判成「按域名/SNI 掐」，唯一的自救路
+        # 被自己的守卫挡掉了。
+        cands = tuple(p for p in (443, *ALT_HTTPS_PORTS) if p != port)
+        if scheme == "https" and kind in _SWEEP_HINTS and cands:
             swept = _port_sweep(
-                host, ALT_HTTPS_PORTS, token, node_id, min(timeout, PROBE_TIMEOUT_SEC)
+                host, cands, token, node_id, min(timeout, PROBE_TIMEOUT_SEC)
             )
             facts["alt_ports"] = {str(p): v for p, v in swept.items()}
             alt = next(
-                (p for p in ALT_HTTPS_PORTS if str(swept.get(p, "")).startswith(("ok", "http-"))),
+                (p for p in cands if str(swept.get(p, "")).startswith(("ok", "http-"))),
                 0,
             )
             if alt:
@@ -544,7 +549,7 @@ def probe_hub(
                 )
                 line += f" ｜ 备用端口 :{alt} 通（{swept[alt]}）"
             else:
-                line += " ｜ 备用端口全不通（" + ",".join(str(p) for p in ALT_HTTPS_PORTS) + "）"
+                line += " ｜ 备用端口全不通（" + ",".join(str(p) for p in cands) + "）"
         facts["hint"] = kind
         line += " ⇒ " + hint
         line += "；hub 未升级只会 404，不会超时"
