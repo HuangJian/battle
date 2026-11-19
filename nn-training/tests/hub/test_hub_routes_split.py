@@ -470,24 +470,31 @@ def test_job_or_404_gates_auth_then_identity_then_manifest(tmp_path: Path) -> No
     d = _job(tmp_path, manifest=False)
     hub = _FakeHub(d)
 
+    # 5 次调用全部在断言外（G5：私有方法不出现在 assert 表达式里），结果一次性对账。
     rec = _Probe("/jobs/j1/status", hub=hub).auth(False)
-    assert rec._job_or_404() is None
-    assert rec.calls_json == [], "鉴权不过时助手不该自己回错（`_auth_ok` 已经回过）"
-
+    denied = rec._job_or_404()
+    denied_calls = list(rec.calls_json)
     rec = _Probe("/jobs", hub=hub).auth(True)
-    assert rec._job_or_404() is None
-    assert rec.calls_json == [({"error": "not found"}, 404)]
-
+    unknown = rec._job_or_404()
+    unknown_calls = list(rec.calls_json)
     rec = _Probe("/jobs/j1/status", hub=hub).auth(True)
-    assert rec._job_or_404() == "j1", "known=False 不查 manifest"
-
+    plain = rec._job_or_404()
     rec = _Probe("/jobs/j1/start", hub=hub).auth(True)
-    assert rec._job_or_404(known=True) is None, "known=True 必须挡住没有 manifest 的 job"
-    assert rec.calls_json == [({"error": "not found"}, 404)]
-
+    no_manifest = rec._job_or_404(known=True)
+    no_manifest_calls = list(rec.calls_json)
     (d / "manifest.json").write_text("{}", encoding="utf-8")
     rec = _Probe("/jobs/j1/start", hub=hub).auth(True)
-    assert rec._job_or_404(known=True) == "j1"
+    known = rec._job_or_404(known=True)
+    assert (
+        denied is None
+        and denied_calls == []
+        and unknown is None
+        and unknown_calls == [({"error": "not found"}, 404)]
+        and plain == "j1"
+        and no_manifest is None
+        and no_manifest_calls == [({"error": "not found"}, 404)]
+        and known == "j1"
+    ), (denied, denied_calls, unknown, unknown_calls, plain, no_manifest, no_manifest_calls, known)
 
 
 def test_job_body_keeps_the_order_gate_then_body(tmp_path: Path) -> None:

@@ -10,7 +10,6 @@
   "tests/hub/test_hub_entry_split.py": 2,
   "tests/hub/test_hub_job_store_split.py": 7,
   "tests/hub/test_hub_queue_split.py": 8,
-  "tests/hub/test_hub_routes_split.py": 5,
   "tests/hub/test_multi_course_hub.py": 1,
   "tests/remote/test_code_sentinel.py": 3,
   "tests/remote/test_code_snapshot.py": 1,
