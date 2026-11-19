@@ -1592,6 +1592,38 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
    ④ `PPOLoop` 四份实现合一（§0.4-11；**动数值就动训练**，要有真语料与 60-seed 基线，
    不适合与纯搬移混做）。
 
+6. **B8 审计（2026-11-19，同日第三轮）**：B8 的三个交付物现在只剩 **④ `PPOLoop`**。
+   两项已落：`common.distribution` 490 行（第十/十一刀）、`offline_boot` 12 段生成物（§118）。
+   验收的两半都量过了：① 单文件 < 1000 行——`worker/ppo/` 四个循环的 **LOC**（口径 =
+   `tests/test_python_loc_budget.py::loc_of`，不是物理行）为 `engine` **802** · `goal` **374** ·
+   `intent` **337** · `engine_paddle` **323** ⇒ 达标；② 克隆窗口（12 行归一窗口，剔空行/注释）
+   实测 `goal ↔ intent` **26** · `engine ↔ engine_paddle` **13** · `engine ↔ goal/intent` **0**
+   ⇒ **降窗口的下一刀只能落在前两对**。`goal ↔ intent` 的 26 里有 **12 个在模块序言**
+   （import/常量/docstring，不是债），**函数内的真重复是 14 个**：循环体 9（`ppo_update_goal`
+   ↔ `ppo_update_intent`）+ `main` 5；`engine ↔ engine_paddle` 的 13 个**全部**落在训练步里
+   （`_train_step` ↔ paddle 的 `ppo_update`）—— 密度更高，但每一行都在数值路径上。
+
+   **决定：下一刀 = `goal ↔ intent` 合一（numpy 侧 PPOLoop v0）**，理由三条：
+   · 同一后端（纯 numpy）且两文件各有独立冒烟用例（`test_ppo_goal` / `test_ppo_intent` /
+     `test_ppo_numerics` / `test_ppo_rng_streams`）⇒ 可以用「搬移 + 逐位对账」守住数值；
+   · 它的重复不在「拷了一整段」，而在**同一顺序写了两次**：`main`（83/94）· `load_episode_from_shard`
+     （20/22）· `load_episodes_*`（17/17）· `build_rl_net`（13/13）与两个循环体（188/175）——
+     正是 `PPOLoop` 要抽的「装载 → 前向 → loss 组装 → step → 诊断」五段；把顺序抽成一份
+     两块**配置**（`HeadSpec` + `LossTerms`）才能得到计划里说的「四份变四份配置」；
+   · `engine ↔ engine_paddle` 那一对是**后端协议**（forward/backward/optimizer_step +
+     paddle parity 六条命令），风险高一个量级，放在 `PPOLoop` 接缝被证明之后再做；
+     `apply_value_anchor_pull` / `policy_new_rms_of` 的双生也留给那一刀。
+
+   落地形状（防「第 24 个混入」）：新模块只放**顺序**（装载 → 前向 → loss → step → 诊断），
+   两端差异全部表达成 `HeadSpec`（几头 / 动作空间 / 掩码语义）+ `LossTerms`（哪几项 / 系数来源）
+   数据，循环体里**零 `if` 分叉**；两个旧入口保留为薄适配器（`goal.ppo_update_goal` /
+   `intent.ppo_update_intent` 的签名不动，它们有独立 CLI 与测试在打）。
+   DoD：① 克隆窗口 `goal ↔ intent` → 0（同一份检测脚本）；② 两侧冒烟用例全绿且
+   `test_ppo_numerics` 的逐位/容差判据不变；③ 两个入口签名与 argv 逐字节不变；
+   ④ 两个文件 LOC 各降 ≥ 100（14 个窗口 + 重复的 `main`/loader 夹在两者之间）；
+   ⑤ 新增一条守卫：循环体里不得出现 `if args.kind == …` 式分叉
+   （AST 判据，与 `test_single_ppo_path` 同风格）。
+
 ## 附录 C：G9 剩余 29 处的归类（2026-11-15，逐条）
 
 > G9 门禁（`tests/test_silent_except_budget.py`）冻结的口径是「`except Exception/BaseException/裸 except`
