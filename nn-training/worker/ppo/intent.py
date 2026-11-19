@@ -38,13 +38,11 @@ if _ilu.find_spec("common") is None:
     _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent.parent))
 
 import os
-import time
 from typing import cast
 
 import numpy as np
 import numpy.typing as npt
 import torch
-import torch.nn.functional as F
 
 from common.cli import house_parser, run_main
 from common.contracts import INTENT_EPISODE_FIELDS, IntentEpisode
@@ -52,24 +50,21 @@ from worker.models.intent_net import IntentNet, export_intent_weights, load_inte
 
 # 共享 PPO 基础设施（ppo_common.py；行为与旧内联实现逐字节一致，见其模块 doc）。
 from worker.ppo._episode import episode_from_shard
-from worker.ppo.common import (
-    _ppo_load,
-    _ppo_save,
-    approx_kl_est,
-    log,
-    masked_logsoftmax,
-    sync_scalars,
-)
+
+# `_ppo_load` 是 `worker/backend.py::RolloutBackend` 的成员（`trainer/stream.py` 调
+# `backend._ppo_load`）—— 更新循环搬去 `worker/ppo/loop.py` 后本模块不再直接用它，
+# 但这个名字必须留在模块命名空间里。
+from worker.ppo.common import _ppo_load as _ppo_load  # RolloutBackend 契约（见上）
+from worker.ppo.common import log, masked_logsoftmax
+from worker.ppo.loop import HeadSpec, LossTerms, run_ppo
 from worker.ppo.np_core import (
     chunk_episodes,
     compute_gae,
     discover_shards,
     load_episodes_common,
     load_shard_fields,
-    optimizer_step,
 )
 from worker.ppo.rng import PPORng
-from worker.ppo.trainer import tensored_chunks
 
 # ---- hyper-params（与 ppo.py 同源；γ 换算口径 P1-5③）----
 GAMMA_TICK = 0.995  # per-tick 折扣（与 ppo.py GAMMA 一致）
@@ -200,8 +195,14 @@ def load_episodes_intent(
 
 
 # ---------------- PPO update ----------------
-# masked_logsoftmax / chunk_episodes / checkpoint 原语（_ppo_save/_ppo_load）由
-# ppo_common 提供（re-export 见顶部 import）；ppo_update_intent 直接使用。
+#: 名字面：intent 的列名 + 日志前缀（没有 `bc` 统计列）。
+_SPEC = HeadSpec(tag="ppo_intent", a_key="a_intent", lp_key="lp_intent", mask_key="mask")
+
+
+def _forward_intent(model, obs, sc, inj, mask):
+    """意图头前向：三头 logits → 掩码 log-softmax（无辅助项 ⇒ 第二项恒 `None`）。"""
+    i_log, _en, _an, val = model.forward_rl(obs, sc, inj)
+    return masked_logsoftmax(i_log, mask), None, val
 
 
 def ppo_update_intent(
@@ -221,6 +222,10 @@ def ppo_update_intent(
 ):
     """chunks: intent 步 minibatch dicts（obs/scalars/inject/a_intent/lp_intent/adv/ret/mask）。
 
+    **顺序在 `worker/ppo/loop.py::run_ppo`**（B8 ④：与 goal 曾各写一份同一顺序）；这里只
+    给两份配置：`_SPEC`（列名/日志前缀）+ `LossTerms`（前向 = 三头 + 掩码 softmax，
+    无辅助项）。数值逐位不变。
+
     value_warmup_epochs（M8 冷启动，plan "kickstarting 辅助项递减"）：前 N 个 epoch 只训
     value 头（policy loss/entropy 置零——策略权重零梯度）。B′ 冷启动 value 头为随机，
     直接 PPO 会让优势被 value 噪声主导、策略单 epoch 塌缩（实测 KL 爆炸 262）。先让
@@ -236,152 +241,24 @@ def ppo_update_intent(
     target_kl 早停：单 epoch 平均近似 KL > target_kl → 停止剩余 epoch（P1-1k3 pace 护栏）。
     ckpt_path: 非空则每 epoch 落盘（model/opt/epochs_done/numpy RNG），支持断点续跑。
     """
-    if not chunks:
-        return {
-            "policy": 0.0,
-            "value": 0.0,
-            "entropy": 0.0,
-            "kl": 0.0,
-            "gnorm": 0.0,
-            "mean_ret": 0.0,
-            "early_stopped": False,
-        }
-    # §P1-7（2026-11-17）：随机流显式给（`PPORng`），全局 `np.random` 不再参与；
-    # 没给就是工具/冒烟的调用面（种子参数仍在，保持它们原来的默认值）。
-    ppo_rng = rng if rng is not None else PPORng.from_seed(seed)
-    # P1-5（2026-09-02）：**不在 update 内重播种 RNG**。旧实现每次 update 调
-    # np.random.seed(seed) → 流式模式每波调用 update → 每波 minibatch permutation
-    # 序列逐字节相同（叠加连续切片的强相关性，等于每波用同一顺序消化高度相关语料）。
-    # RNG 由调用方（CLI main / run_rl 主循环）播种一次；seed 参数保留供签名兼容。
-    model.train()
-    clip = CLIP_EPS
-    stats: list[dict[str, float]] = []
-    tensored = tensored_chunks(chunks, device)
-    # `[ppo_intent] update start: …` 行已退役（2026-10-06，用户指令「删除云机 worker 刷屏 log」；
-    # 与 engine/goal 同族，一次删干净）：chunk/epoch 数与配置同源，每 job 复述一次。
-    t0 = time.time()
-    last_hb = t0
-    start_epoch = 0
-    if ckpt_path:
-        start_epoch = _ppo_load(ckpt_path, model, opt, ppo_rng)
-        if start_epoch:
-            log(f"[ppo_intent] resume PPO from checkpoint: epoch {start_epoch}/{epochs} done")
-
-    early_stopped = False
-    for ep in range(start_epoch, epochs):
-        warmup = ep < value_warmup_epochs
-        # warmup 只训 value 头（冻结主干+三头，防扰动 B′ 策略特征）；否则全量可训。
-        for name, p in model.named_parameters():
-            p.requires_grad = (not warmup) or name.startswith("value_head.")
-        perm = ppo_rng.epoch.permutation(len(tensored))
-        n_ep_start = len(stats)
-        for j, i in enumerate(perm):
-            e = tensored[int(i)]
-            obs = e["obs"]
-            sc = e["scalars"]
-            inj = e["inject"]
-            a = e["a_intent"]
-            lp_old = e["lp_intent"]
-            adv = e["adv"]
-            ret = e["ret"]
-            mask = e["mask"]
-
-            i_log, _en, _an, val = model.forward_rl(obs, sc, inj)
-            lp_new = masked_logsoftmax(i_log, mask)
-            lp_new_a = lp_new.gather(1, a.unsqueeze(1)).squeeze(1)
-
-            value_loss = F.mse_loss(val.squeeze(-1), ret)
-            entropy = -(lp_new.exp() * lp_new).sum(dim=-1).mean()
-
-            if warmup:
-                # value-only 预热：策略 loss/entropy 不入 loss（主干已冻结）。
-                policy_loss = torch.zeros((), device=device)
-                loss = VF_COEF * value_loss
-            else:
-                ratio = torch.exp(lp_new_a - lp_old)
-                surr1 = ratio * adv
-                surr2 = torch.clamp(ratio, 1.0 - clip, 1.0 + clip) * adv
-                policy_loss = -torch.min(surr1, surr2).mean()
-                loss = policy_loss + VF_COEF * value_loss - ENT_COEF * entropy
-                if ref_model is not None and kl_coef > 0:
-                    with torch.no_grad():
-                        r_log, _re, _ra, _rv = ref_model.forward_rl(obs, sc, inj)
-                        rp_ref = masked_logsoftmax(r_log, mask)
-                    # KL(π_curr ‖ π_ref) = Σ_a π_curr·(log π_curr − log π_ref)
-                    kl_to_ref = (lp_new.exp() * (lp_new - rp_ref)).sum(dim=-1).mean()
-                    loss = loss + kl_coef * kl_to_ref
-
-            opt.zero_grad()
-            loss.backward()
-            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
-            optimizer_step(opt, device)
-
-            with torch.no_grad():
-                # warmup 期 kl 恒 0（原实现短路成 Python float 0.0）；这里用等价的
-                # 0 维零张量，保持「一次同步」路径统一。
-                kl_t = (
-                    torch.zeros((), device=device)
-                    if warmup
-                    else approx_kl_est(lp_old, lp_new_a)
-                )
-                stats.append(
-                    sync_scalars(
-                        {
-                            "policy": policy_loss,
-                            "value": value_loss,
-                            "entropy": entropy,
-                            "kl": kl_t,
-                            "mean_ret": ret.mean(),
-                            "gnorm": gn,
-                        }
-                    )
-                )
-            now = time.time()
-            if now - last_hb >= HB_SEC:
-                last_hb = now
-                recent = stats[-32:]
-                n_r = len(recent)
-                log(
-                    f"[ppo_intent] ep {ep + 1}/{epochs}{'[warmup]' if warmup else ''} "
-                    f"chunk {j + 1}/{len(tensored)} elapsed={now - t0:.0f}s "
-                    f"kl={sum(s['kl'] for s in recent) / n_r:.4f} "
-                    f"entropy={sum(s['entropy'] for s in recent) / n_r:.4f} "
-                    f"policy={sum(s['policy'] for s in recent) / n_r:.4f} "
-                    f"value={sum(s['value'] for s in recent) / n_r:.4f}"
-                )
-        if ckpt_path:
-            _ppo_save(ckpt_path, model, opt, ep + 1, ppo_rng)
-        if on_epoch_done is not None:
-            on_epoch_done(ep + 1, model)
-        ep_stats = stats[n_ep_start:]
-        n_e = max(1, len(ep_stats))
-        ep_kl = sum(s["kl"] for s in ep_stats) / n_e
-        log(
-            f"[ppo_intent] epoch {ep + 1}/{epochs}{'[warmup]' if warmup else ''} done "
-            f"({time.time() - t0:.0f}s total): kl={ep_kl:.4f} "
-            f"entropy={sum(s['entropy'] for s in ep_stats) / n_e:.4f} "
-            f"policy={sum(s['policy'] for s in ep_stats) / n_e:.4f} "
-            f"value={sum(s['value'] for s in ep_stats) / n_e:.4f}"
-        )
-        if not warmup and ep_kl > target_kl:
-            log(
-                f"[ppo_intent] target_kl={target_kl} exceeded (epoch {ep + 1} kl={ep_kl:.4f}) "
-                f"— early stopping remaining epochs"
-            )
-            early_stopped = True
-            break
-
-    n = len(stats)
-    agg = (
-        {k: sum(s[k] for s in stats) / n for k in stats[0]}
-        if n
-        else {"policy": 0.0, "value": 0.0, "entropy": 0.0, "kl": 0.0, "gnorm": 0.0, "mean_ret": 0.0}
+    return run_ppo(
+        model,
+        opt,
+        chunks,
+        epochs,
+        device,
+        spec=_SPEC,
+        terms=LossTerms(forward=_forward_intent, ent_coef=ENT_COEF),
+        ckpt_path=ckpt_path,
+        target_kl=target_kl,
+        seed=seed,
+        value_warmup_epochs=value_warmup_epochs,
+        ref_model=ref_model,
+        kl_coef=kl_coef,
+        on_epoch_done=on_epoch_done,
+        rng=rng,
     )
-    agg["early_stopped"] = early_stopped
-    return agg
 
-
-# ---- stream backend 接口别名（trainer/stream.py 的 backend.update / load_episodes / _ppo_load）----
 # ---- stream backend 接口别名（trainer/stream.py 的 backend.update / load_episodes）----
 # 意图 RL 与 per-tick RL 共用同一套流式基础设施；checkpoint 原语由 ppo_common
 # 提供（顶部 import _ppo_save/_ppo_load）。ppo 不依赖本模块，无环。

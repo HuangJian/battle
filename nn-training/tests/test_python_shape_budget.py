@@ -111,6 +111,9 @@ WIDE_FUNCS_BASELINE = {
     "worker/ppo/engine_paddle.py": 1,
     "worker/ppo/goal.py": 1,
     "worker/ppo/intent.py": 1,
+    # 2026-11-19（B8 ④）：`run_ppo` 的 13 个形参就是两个入口的契约本身
+    # （ckpt/target_kl/seed/warmup/ref/kl/on_epoch_done/rng），包成对象只会把它隐形。
+    "worker/ppo/loop.py": 1,
     "worker/ppo/np_core.py": 1,
     "worker/resume.py": 2,
     "worker/train/intent_probe.py": 1,

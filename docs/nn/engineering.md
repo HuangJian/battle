@@ -25,6 +25,69 @@
 
 ---
 
+## §221 `PPOLoop` 第一刀：goal / intent 的 numpy 循环合成一份（2026-11-19，B8 第十二刀）
+
+B8 只剩 ④。`worker/ppo/goal.py`（515 物理行）与 `intent.py`（489）的 update 不是「拷了一整段」，
+而是**同一顺序写了两遍**（装载 → 前向 → loss 组装 → 反向 → 记录 → 早停）。本刀把「顺序」
+搬进 `worker/ppo/loop.py`（276 物理行 / LOC 201），两个头只剩配置 + 转发。
+
+| 读数 | 前 | 后 |
+|---|---:|---:|
+| `worker/ppo/goal.py` LOC | 374 | **252** |
+| `worker/ppo/intent.py` LOC | 337 | **226** |
+| 克隆窗口（`tools/audit/py_clones.py` 口径，整文件） | 11 | **0** |
+| 函数内 12 行窗口（含稀疏窗口，剔模块序言） | 14 | **0**（`main` 以外 9 个清零） |
+
+### 接缝：`HeadSpec` + `LossTerms`（两个都是 frozen dataclass）
+
+* `HeadSpec(tag, a_key, lp_key, mask_key, stats_with_bc)`：只装**名字** —— 动作 / 旧 logp /
+  掩码的列名、日志前缀、goal 特有的 `bc` 统计列（schema 兼容占位）。
+* `LossTerms(forward, ent_coef, vf_coef=1.0, clip_eps=0.2, max_grad_norm=1.0, aux=None)`：
+  只装**算式** —— 前向返回 `(logp, aux_logits, value)`；goal 的 aux = engage CE，intent 没有 aux。
+  系数由调用方给（`ENT_COEF` 的历史注释留在各自模块，两条线本来就同值）。
+
+核心里**零 `if <头名>`**：唯一的条件分支是 `spec.stats_with_bc`（一个数据位）与 `aux` /
+`ref_model` 的存在性。`tests/worker/test_ppo_loop_core.py`（6 条）把这点变成红：
+① 核心的字符串字面量里不许出现 `goal` / `intent`（AST，docstring 例外）；
+② 两个入口体必须是单条 `return run_ppo(...)`，且调用图里不许出现 `permutation` /
+`clip_grad_norm_` / `sync_scalars` / `approx_kl_est`（AST，不按文本）；
+③ 两个头之间不许再有函数内 12 行克隆窗口（唯一例外 `main`）；
+④ 两个入口的形参表逐字冻结（13 个，`stream.py` 与 `RolloutBackend` 按名字调用）。
+
+### 数值：A/B 逐位，10 个用例
+
+`tmp/ab_loop_cut.py`（一次性；用 `git show HEAD:…` 把改动前的模块当 `old_*` 载入）同种子跑两遍，
+比较聚合 dict 的**每一个 float**：goal fine / coarse / `engage_label` / `ref+kl` / warmup、
+intent base / `ref+kl` / warmup、两边的空 chunks 键集 —— **全部逐位相同**。保持同序的三处细节：
+
+1. 每个 chunk 仍只有一次 `sync_scalars`（6 个标量一次同步）；
+2. warmup 期 `kl` 仍是精确 `0.0`（0 维零张量 → 同一个 `float`）；
+3. KL 仍是 `loss + kl_coef · (Σ π_curr·Δlogp).mean()`，同表达式、同结合顺序。
+
+### 预算/账本连带
+
+* `WIDE_FUNCS_BASELINE`：新模块 `worker/ppo/loop.py: 1`（`run_ppo` 的 13 参就是两个入口的契约
+  本身；`_step` 用 `_StepCtx` 收到 6 参，不进基线）。
+* `any_baseline`：**不动**（核心用 `object` + `dict[str, torch.Tensor]`，0 处 `Any`）。
+* `wall_clock_baseline`：`goal` 3 → 0、`intent` 3 → 0（删键），`loop.py` 3（心跳/耗时仍是就地读）。
+* `suppression_baseline`：**不动** —— `_ppo_load` 的 re-export 用 `from … import _ppo_load as
+  _ppo_load` 表达（ruff 认这个形态是 re-export），没有新增 `noqa`。
+* `remote_dag`：`worker.ppo.loop` 登记 **L3**（common L2 / np_core L1 / rng+trainer L0）；两个 L4
+  头向下指，反向边为 0。
+* 文本断言基线 1165 → **1170**（净 +5 = 新守卫那 6 条 AST 判据，前一格本就比实测宽 1）。
+
+### 仍然留下的
+
+`main` 的 CLI 参数表与 help 文案（约 5 个稀疏窗口）**有意不并**：并成一张配置表行数不会更短，
+而每读一个参数都要先在脑子里展开一次 spec —— 与 MANIFEST §10「读得懂胜过今天优雅」相反。
+`engine ↔ engine_paddle` 那 13 个窗口（**全部**落在训练步里）留给下一刀：那是后端协议
+（forward / backward / optimizer_step），要 paddle parity + 真语料，不与纯搬移混做。
+
+验证：`bash tools/githook/nn-python-gate.sh` 全绿（ruff + mypy **980** 文件 + **6265 passed** /
+2 skipped / 71.86s；+6 = 新守卫，入口原有用例全部保留、没有复制一份）。
+
+---
+
 ## §220 `common/distribution.py` 按职责分成三件：传输核心 / 任务协议 / 权重传输（2026-11-19，B8 第十一刀）
 
 上一刀把**不是线协议**的那簇（升级/重启）搬去了 `remote/`，剩下的是一个仍该再切的「wire
