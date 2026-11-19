@@ -341,6 +341,17 @@ OWN_METHODS = (
     "_halt_default",
     "_halts",
     "_halt_when_idle",
+    "_peeked",
+    "_dispatch",
+    "_dispatch_lock",
+    "_leases",
+    "_lease_lock",
+    "_offline_disks",
+    "_disk_lock",
+    "_worker_prefetch",
+    "_pf_lock",
+    "_worker_errors",
+    "_we_lock",
 )
 #: 组合类里那个「形参缺省值要在类体作用域解析」的别名（`__init__` 因此逐字节不动）。
 OWN_CONSTS = ("BC_EPOCH_BODY_MAX", "DISCOVER_FRESH_SEC")
@@ -420,6 +431,21 @@ COURSE_TABLE_FIELDS = frozenset(
     {"_stores", "_order", "_solo", "_cursor", "_locate_cache", "_ambiguous"}
 )
 BOARD_FIELDS = frozenset({"_workers", "_halt_default", "_halts", "_halt_when_idle"})
+DISPATCH_FIELDS = frozenset(
+    {
+        "_peeked",
+        "_dispatch",
+        "_dispatch_lock",
+        "_leases",
+        "_lease_lock",
+        "_offline_disks",
+        "_disk_lock",
+        "_worker_prefetch",
+        "_pf_lock",
+        "_worker_errors",
+        "_we_lock",
+    }
+)
 
 #: 状态归属表：字段 -> 写它的方法集合（**三种写法都算**：`self.X = …` / `self.X[k] = …` /
 #: `self.X.append(...)`）。这条是「状态声明分散到七个模块之后，谁动它」的唯一对账面。
@@ -432,6 +458,7 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
     "_cursor": frozenset({"claim_job", "claim_next", "drop_course"}),
     "course_table": frozenset({"__init__"}),
     "board": frozenset({"__init__"}),
+    "dispatch": frozenset({"__init__"}),
     "_discover_fresh": frozenset({"__init__"}),
     "_discover_last": frozenset({"__init__", "discover"}),
     "_sweep_at": frozenset({"__init__", "sweep_dead_leases"}),
@@ -446,14 +473,10 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
     #: 派发状态（课程 → 记录）：`dispatch_record` 首次载入时就地缓存（写），`_dispatch_update` 改，
     #: `note_progress` 的**节流腿**也在内存里就地改（落盘才走 `_dispatch_update`——节流基准
     #: 只认盘上那份的 `updated_at`）。
-    "_dispatch": frozenset({"__init__", "dispatch_record", "_dispatch_update", "note_progress"}),
-    "_dispatch_lock": frozenset({"__init__"}),
+    "_dispatch": frozenset({"dispatch_record", "_dispatch_update", "note_progress"}),
     "_no_marker_warned": frozenset({"__init__", "_serves_course", "drop_course"}),
-    "_disk_lock": frozenset({"__init__"}),
-    "_lease_lock": frozenset({"__init__"}),
     "_leases": frozenset(
         {
-            "__init__",
             "_lease_rec_locked",
             "claim_offline",
             "heartbeat_offline",
@@ -463,18 +486,16 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
         }
     ),
     "_now": frozenset({"__init__"}),
-    "_offline_disks": frozenset({"__init__", "note_offline_disk"}),
+    "_offline_disks": frozenset({"note_offline_disk"}),
     #: worker 预取状态上报（2026-10-09，plan/dashboard-ppo-live-rows）：唯一写者是写入面
     #: （`note_worker_prefetch` 整体换记录），锁只被 `__init__` 建。
-    "_worker_prefetch": frozenset({"__init__", "note_worker_prefetch"}),
-    "_pf_lock": frozenset({"__init__"}),
+    "_worker_prefetch": frozenset({"note_worker_prefetch"}),
     #: 云机错误上报的中继 ring（2026-10-16，plan/component-error-registry §4.3-S3b）：唯一写者
     #: 是写入面（`note_worker_error` 追加 + 两条闸的剔除），锁只被 `__init__` 建。
-    "_worker_errors": frozenset({"__init__", "note_worker_error"}),
-    "_we_lock": frozenset({"__init__"}),
+    "_worker_errors": frozenset({"note_worker_error"}),
     "_order": frozenset({"add_course", "drop_course"}),
     #: 多课程预取窗口（2026-10-02，plan/course-pill-precision §4.1）：写点只有启动与 peek。
-    "_peeked": frozenset({"__init__", "peek_jobs", "drop_course"}),
+    "_peeked": frozenset({"peek_jobs", "drop_course"}),
     "_solo": frozenset({"_adopt_solo"}),
     "_stores": frozenset({"add_course", "drop_course"}),
     "_workers": frozenset({"_adopt_solo"}),
@@ -1050,23 +1071,31 @@ def test_only_the_composed_init_declares_state_with_values() -> None:
             declared.add(n.target.attr)
         elif isinstance(n, ast.Assign):
             declared |= {t.attr for t in n.targets if isinstance(t, ast.Attribute)}
-    # 两个鉴权字段的声明点在 `hub/auth.py::_AuthGuard.__init__`；两张状态表的 10 个字段
-    # 搬进 `course_table` / `board`（B7-P3），组合类只声明这两个协作者本身。
+    # 两个鉴权字段的声明点在 `hub/auth.py::_AuthGuard.__init__`；三张状态表的 21 个字段
+    # 搬进 `course_table` / `board` / `dispatch`（B7-P3/P4），组合类只声明这两个协作者本身。
     want = (
-        set(STATE_WRITERS) - AUTH_GUARD_FIELDS - COURSE_TABLE_FIELDS - BOARD_FIELDS
-    ) | {"course_table", "board"}
+        set(STATE_WRITERS)
+        - AUTH_GUARD_FIELDS
+        - COURSE_TABLE_FIELDS
+        - BOARD_FIELDS
+        - DISPATCH_FIELDS
+    ) | {"course_table", "board", "dispatch"}
     assert declared == want, (
         f"`__init__` 申报的字段与状态表对不上：多 {sorted(declared - want)}，"
         f"少 {sorted(want - declared)}"
     )
 
 
-def test_the_two_state_tables_live_on_their_collaborators(tmp_path: Path) -> None:
-    """B7-P3：课程表 / worker 板的 10 个字段只在协作者上，组合类只留转发属性。"""
+def test_the_state_tables_live_on_their_collaborators(tmp_path: Path) -> None:
+    """B7-P3/P4：课程表 / worker 板 / 派发旁表的 21 个字段只在协作者上，组合类只留转发属性。"""
     store = _JobStore(tmp_path / "jobs", tmp_path / "log.jsonl")
     hub = _HubQueue({"c1": store}, order=["c1"])
-    table, board = hub.course_table, hub.board
-    assert type(table).__name__ == "CourseTable" and type(board).__name__ == "WorkerBoard"
+    table, board, dispatch = hub.course_table, hub.board, hub.dispatch
+    assert (
+        type(table).__name__ == "CourseTable"
+        and type(board).__name__ == "WorkerBoard"
+        and type(dispatch).__name__ == "Dispatch"
+    )
     table_stores, hub_stores = table._stores, hub._stores
     table_order, hub_order = table._order, hub._order
     solo, workers = table._solo, board._workers
@@ -1074,8 +1103,12 @@ def test_the_two_state_tables_live_on_their_collaborators(tmp_path: Path) -> Non
     assert table_stores is hub_stores and table_order is hub_order
     assert solo is store, "单课程借表指针没有落在课程表上"
     assert workers is hub_workers
-    for name in (*COURSE_TABLE_FIELDS, *BOARD_FIELDS):
+    for name in (*COURSE_TABLE_FIELDS, *BOARD_FIELDS, *DISPATCH_FIELDS):
         assert name not in hub.__dict__, f"{name} 又存了一份在组合类实例上"
+    for name in DISPATCH_FIELDS:
+        assert hasattr(dispatch, name), f"Dispatch 的 {name} 不在实例上"
+    hub_lease_lock, dispatch_lease_lock = hub._lease_lock, dispatch._lease_lock
+    assert hub_lease_lock is dispatch_lease_lock, "离线租约锁被复制成两把了"
     # 属性是**可写**的（`_adopt_solo` / `drop_course` 的整表替换语义），不是只读快照。
     hub._cursor = "c1"
     hub._halt_default = True
@@ -1270,6 +1303,7 @@ def test_the_layers_match_the_ledger() -> None:
     # B7-P3 的两个纯状态协作者：零仓内 import ⇒ L0，组合类站在它们上面。
     assert dag.LAYERS["hub.course_table"] == 0
     assert dag.LAYERS["hub.worker_board"] == 0
+    assert dag.LAYERS["hub.dispatch_state"] == 0
     assert dag.LAYERS["hub.queue_peer"] == 1
     assert dag.LAYERS["hub.store"] == 2
     assert dag.LAYERS["hub.queue"] == 4

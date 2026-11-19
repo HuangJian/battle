@@ -168,9 +168,12 @@ _EXPECTED_EXEMPT_STEMS = frozenset(
 #:   `store_leases.py`，组合类各留一条同签名转发，调用点分别在 `worker/eval_arbiter` /
 #:   `remote/job_lifecycle` / `queue_claims`）。这与本行注释点名的「门面转发」是同一类
 #:   合法形态：真重复仍由 exact / clone 两条抓——它们一个没动。`_JobStore` 上不再有实现。
+#: 2026-11-19 再抬一格（118 → 119）：B7-P4 的 `_dispatch` 状态转发属性与
+#:   `remote/push_dispatch.py` / `hub/offline_push.py` 里的同名方法撞了名字（第三个模块）。
+#:   它只是一条 getter/setter，不是第三份实现；exact / clone 两条仍未动。
 BASELINE_EXACT = 15
 BASELINE_CLONE = 16
-BASELINE_SAME_NAME_GE3 = 118
+BASELINE_SAME_NAME_GE3 = 119
 
 
 def _stems(modules: frozenset[str]) -> frozenset[str]:

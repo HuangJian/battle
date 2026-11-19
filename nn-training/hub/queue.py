@@ -61,6 +61,7 @@ from threading import Lock
 
 from hub.auth import _AuthGuard
 from hub.course_table import CourseTable
+from hub.dispatch_state import Dispatch, DispatchLocks, DispatchTables
 from hub.queue_auth import QueueAuthMixin
 from hub.queue_claims import QueueClaimsMixin
 from hub.queue_discover import QueueDiscoverMixin
@@ -150,49 +151,28 @@ class _HubQueue(
         self._mode_ignored: set[str] = {str(c) for c in (ignored_modes or ())}
         # hold 镜像同步到 store（★M1b：`__init__` 末段的 `_sync_hold` 循环——同步要时钟
         # （`hold_of`），必须在 `self._now` 赋值之后）。
-        #: 课程 -> 最近被 `peek_jobs` 返回候选的时刻（秒）。多课程预取窗口的**观测面**状态
-        #: （2026-10-02，plan/course-pill-precision §4.1）：只被 `/admin/queue` 读，不参与
-        #: 任何派发判据；重启即清（窗口本来就是过程量，与租约同口径）。
-        self._peeked: dict[str, float] = {}
+        # B7-P4：离线派发 / 观测的 6 张表 + 5 把旁路锁收进 `Dispatch`。锁仍由组合根建、
+        # 构造时注入（L2 闭集不破）；锁集合与加锁顺序逐字不变，只换持有者。
+        self.dispatch = Dispatch(
+            DispatchTables(
+                peeked={},
+                dispatch={},
+                leases={},
+                offline_disks={},
+                worker_prefetch={},
+                worker_errors=deque(),
+            ),
+            DispatchLocks(
+                dispatch_lock=Lock(),
+                lease_lock=Lock(),
+                disk_lock=Lock(),
+                pf_lock=Lock(),
+                we_lock=Lock(),
+            ),
+        )
         #: 自动发现的扫描闸（`_discover_last` 初值 0 ⇒ 首次调用必扫）
         if self._discover_root is not None:
             self._discover_last = float("-inf")
-        #: **离线租约**（课程 → `{token, worker_id, at, expires_at}`）：进程内、惰性过期。
-        #: 为什么住实例而不是模块（与 `_TASK_PACK_TRIGGERS` 不同）：生产一个进程一个 hub 两者等价，
-        #: 而单测里每个 hub 各自干净（共享就得分用例清账）。重启即清——与触发账本同口径：
-        #: 最坏情形由回传侧 `(run_id, it)` 首写幂等兜底（plan §3.2）。
-        self._leases: dict[str, dict] = {}
-        self._lease_lock = Lock()
-        #: **派发状态**（课程 → 记录；plan/auto-offline-handoff §3.2/§3.8，2026-10-03）：
-        #: `pinned` / claim 翻的 offline / 完成锚（包 sha）。与 `_leases` 相反——**落盘**
-        #: （`<课>/offline-dispatch.json`）：hub 重启回启动参数会把正在 TPU 上跑的课解封队列
-        #: （在线云机把它的 job 领走 = 同一份活两处跑，数据损坏级）。读写见 `queue_offline`。
-        self._dispatch: dict[str, dict] = {}
-        self._dispatch_lock = Lock()
-        #: 离线**盘**报名表：disk_id -> last_seen（秒）。★ 为什么单独一张表：跑
-        #: `battle.offline.ipynb` 的机器**不碰队列**（取包链全在 `/offline/*` 上），它的身份
-        #: 只能在那一面被看到；而「本环境有没有离线盘」这个读数此前恒为空（审计 §4-L3：
-        #: `CFG["offline_worker"]` 全仓只有测试设过）。与 `_leases` 同口径：进程内、只做观测
-        #: （重启即清，最坏情形由回传侧首写幂等兜底）。
-        self._offline_disks: dict[str, float] = {}
-        #: 独立锁：`offline_disk_readout` 会被 `/admin/queue` 调到，而那条路不持 `_lease_lock`
-        #: 也不该持 `_lock`（观测面不许和调度临界区互等）。
-        self._disk_lock = Lock()
-        #: **worker 预取状态上报**（worker_id → `{held, dl, at}`；plan/dashboard-ppo-live-rows）：
-        #: 「软持有里哪些下好了 / 哪些正在下」是 worker 本地事实，hub 只做**中转站**。
-        #: 与 `_offline_disks` 同口径：进程内、惰性 TTL、重启即清、**绝不进任何调度判据**。
-        self._worker_prefetch: dict[str, dict] = {}
-        #: 独立锁：`worker_prefetch_readout` 会被 `/admin/queue` 调到（同 `_disk_lock` 的理由——
-        #: 观测面不许和调度临界区互等）。
-        self._pf_lock = Lock()
-        #: **云机错误上报的 ring**（plan/component-error-registry §4.3-S3b，2026-10-16）：
-        #: 云机上「只在云机」的失败（pull 的机器级停滞/瞬时失败、离线段的失败）在这儿**中继**
-        #: 一拍，等控制台的 10s 节拍来拉。与 `_worker_prefetch` 同口径：进程内、TTL 剔除、
-        #: 重启即清、**绝不进任何派发判据**。为什么不做权威落盘：持久化只该有一个地方管
-        #: （控制台的错误账本），而 hub 的 import 面受纪律约束（顶层禁三方 import）。
-        self._worker_errors: deque[dict] = deque()
-        #: 独立锁（同 `_pf_lock` 的理由）。
-        self._we_lock = Lock()
         _AuthGuard.__init__(self, now_fn)
         # 时钟与单课程 store 同源（测试注入的假时钟必须一致，否则 claimed 标记的时间戳
         # 会混入真实墙钟）。
@@ -287,4 +267,93 @@ class _HubQueue(
     @_halt_when_idle.setter
     def _halt_when_idle(self, value: bool) -> None:
         self.board._halt_when_idle = value
+
+    # ---- B7-P4：离线派发 / 观测状态的转发属性（持有者 = `self.dispatch`） ----
+    @property
+    def _peeked(self) -> dict[str, float]:
+        return self.dispatch._peeked
+
+    @_peeked.setter
+    def _peeked(self, value: dict[str, float]) -> None:
+        self.dispatch._peeked = value
+
+    @property
+    def _dispatch(self) -> dict[str, dict]:
+        return self.dispatch._dispatch
+
+    @_dispatch.setter
+    def _dispatch(self, value: dict[str, dict]) -> None:
+        self.dispatch._dispatch = value
+
+    @property
+    def _dispatch_lock(self) -> Lock:
+        return self.dispatch._dispatch_lock
+
+    @_dispatch_lock.setter
+    def _dispatch_lock(self, value: Lock) -> None:
+        self.dispatch._dispatch_lock = value
+
+    @property
+    def _leases(self) -> dict[str, dict]:
+        return self.dispatch._leases
+
+    @_leases.setter
+    def _leases(self, value: dict[str, dict]) -> None:
+        self.dispatch._leases = value
+
+    @property
+    def _lease_lock(self) -> Lock:
+        return self.dispatch._lease_lock
+
+    @_lease_lock.setter
+    def _lease_lock(self, value: Lock) -> None:
+        self.dispatch._lease_lock = value
+
+    @property
+    def _offline_disks(self) -> dict[str, float]:
+        return self.dispatch._offline_disks
+
+    @_offline_disks.setter
+    def _offline_disks(self, value: dict[str, float]) -> None:
+        self.dispatch._offline_disks = value
+
+    @property
+    def _disk_lock(self) -> Lock:
+        return self.dispatch._disk_lock
+
+    @_disk_lock.setter
+    def _disk_lock(self, value: Lock) -> None:
+        self.dispatch._disk_lock = value
+
+    @property
+    def _worker_prefetch(self) -> dict[str, dict]:
+        return self.dispatch._worker_prefetch
+
+    @_worker_prefetch.setter
+    def _worker_prefetch(self, value: dict[str, dict]) -> None:
+        self.dispatch._worker_prefetch = value
+
+    @property
+    def _pf_lock(self) -> Lock:
+        return self.dispatch._pf_lock
+
+    @_pf_lock.setter
+    def _pf_lock(self, value: Lock) -> None:
+        self.dispatch._pf_lock = value
+
+    @property
+    def _worker_errors(self) -> deque[dict]:
+        return self.dispatch._worker_errors
+
+    @_worker_errors.setter
+    def _worker_errors(self, value: deque[dict]) -> None:
+        self.dispatch._worker_errors = value
+
+    @property
+    def _we_lock(self) -> Lock:
+        return self.dispatch._we_lock
+
+    @_we_lock.setter
+    def _we_lock(self, value: Lock) -> None:
+        self.dispatch._we_lock = value
 
