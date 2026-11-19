@@ -93,7 +93,8 @@ def _store(tmp_path: Path, clock: _Clock) -> _JobStore:
 
 def _publish(store: _JobStore, jid: str = JID, payload: bytes = b"payload-bytes") -> None:
     store.publish(jid, _manifest(jid), payload)
-    assert (store._job_dir(jid) / PAYLOAD_NAME).exists()
+    # `job_root` 是公开属性（`_job_dir` 就是它加 id）；拼路径不必走私有助手。
+    assert (store.job_root / jid / PAYLOAD_NAME).exists()
 
 
 def _expire(clock: _Clock) -> None:

@@ -133,6 +133,9 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "_adopt_solo",
             "_registry",
             "note_worker",
+            # 2026-11-19（G5 第十六批）：登记表的只读副本（用例不再伸手进 `_workers`/
+            # `_registry()`）；与 `_registry()` 的分工 = 「活引用 vs 快照」。
+            "worker_registry",
             "active_worker_count",
             "courses",
             "course_of",
@@ -602,7 +605,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     # 2026-11-07（plan/dead-lease-sweep）：+1（`sweep_dead_leases`：周期清扫死租约）⇒ 130。
     # 2026-11-12：+1（`clear_bc_exclusive`：dashboard 的人工「解除 BC 独占」口）⇒ 135。
     # 2026-11-18（G5）：+1（`auth_state`：D9 闭锁的只读快照）⇒ 136；再 +1（`course_store`）⇒ 137。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 137, len(DOMAIN_METHODS)
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 138, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -612,7 +615,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 137, len(seen)
+    assert len(seen) == 138, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == list(OWN_METHODS), (
@@ -1321,7 +1324,7 @@ def test_one_lock_governs_even_the_outermost_facade(tmp_path: Path) -> None:
     finally:
         hub._lock.release()
     assert done.wait(5.0), "释放锁之后读者仍没动静"
-    assert set(hub._registry()) >= {"w1"}
+    assert set(hub.worker_registry()) >= {"w1"}
 
 
 def test_adopt_solo_carries_process_state_across_the_domains(tmp_path: Path) -> None:
@@ -1347,8 +1350,9 @@ def test_adopt_solo_carries_process_state_across_the_domains(tmp_path: Path) -> 
     assert hub.discover() == ["c2"]
     assert hub._solo is None
     assert hub.halt_of("") is True, "停机达令被多发现一门课静默清了"
-    assert hub._registry().get("w9") == 123.0, "worker 登记被清了"
-    assert hub._auth_fail.get("203.0.113.9") == 4, "鉴权计数被清了"
+    # 读数面：登记表取副本（`worker_registry()`）、鉴权计数取快照（`auth_state()`）。
+    assert hub.worker_registry().get("w9") == 123.0, "worker 登记被清了"
+    assert hub.auth_state().failures.get("203.0.113.9") == 4, "鉴权计数被清了"
     assert hub.is_blocked("203.0.113.9") is True, "鉴权闭锁被清了"
 
 

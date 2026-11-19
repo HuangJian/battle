@@ -250,6 +250,16 @@ class QueueScopeMixin(QueuePeer):
         with self._lock:
             reg[wid] = self._now()
 
+    def worker_registry(self) -> dict[str, float]:
+        """worker 登记表的**副本**（id → 最近一次轮询时刻；诊断 / 用例读，不窗口过滤）。
+
+        与 `_registry()` 的分工：那个返回**正在用的那张表**（单课程时就是 store 那份，
+        身份本身由 `_adopt_solo` 的用例钉住），改它会直接改状态；读数面只给副本。
+        不按 `WORKER_SEEN_WINDOW_SEC` 过滤：问「登记还在不在」的人不该被时钟影响。
+        """
+        with self._lock:
+            return dict(self._registry())
+
     def active_worker_count(self) -> int:
         """窗口内**不同** worker 数（避让判据「还有别的卡能接手」的唯一口径）。"""
         now = self._now()

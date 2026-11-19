@@ -99,5 +99,6 @@ def test_guard_does_not_alter_names_or_ledger(tmp_path: Path, capsys) -> None:
         second = _peek(base, "kaggle-c", "203.0.113.8")
         assert first == second, "同名异来源不得改变响应"
         assert WARN_FRAGMENT in capsys.readouterr().out
-        assert set(hub._workers) == {"kaggle-c"}, hub._workers
+        reg = hub.worker_registry()
+        assert set(reg) == {"kaggle-c"}, reg
     assert not list(tmp_path.rglob("training_log.jsonl")), "守卫不得写账"
