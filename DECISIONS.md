@@ -8531,3 +8531,145 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   —— 用 monkeypatch 把 `GetCurrentProcess.restype` 改成 `HANDLE`（与 paddle 同款），断言
   `snapshot()` 仍有真读数且不带 `probe_errors['rss']`。改前**确定性红**（报错原文与现场逐字一致），
   改后绿；全量门禁 0 failed（103s），带采样插件的全量里**一条探针失败痕迹都没有**。
+## §2026-11-20-eval-round-spec（P0-3 的参数对象：装载值可以收成一个对象，装配点只能有一个）
+
+- **背景**：`python.refactor.md` §P0-3 里最大的宽签名 = `worker/eval_arbiter.EvalRound.__init__`
+  的 **40 个关键字参数**。这些值本来就住在派发器配置与 `_EvalRun` 里，构造时又被摊开一次 ⇒
+  加一个装载值要改四处，漏一处就是运行期 `AttributeError`。
+- **决定**：① `RoundSpec`（frozen + kw_only）是唯一装载对象，`EvalRound(spec)` 只收它；轮内可变
+  状态仍由 `__init__` 现建（执行层读的 `rnd.total` / `rnd.pending` 一个没变）。② 装配点唯一 =
+  `trainer/eval_dispatch._round_spec`（值住哪儿就哪儿装配，不在 `eval_arbiter` 里再摊一次）。
+  ③ 注入回调按形状声明（`RowBuilder`/`LogFn`/`MetaOkHook`/`FailedMetaHook`），`Any` 21 → 16。
+  ④ 同文件 `EvalRound.settle_task` 的 9 个结果位（含从没人读的 `wall_sec`）→ `SettleOutcome`，
+  死参直接删。⇒ `worker/eval_arbiter.py` 宽签名 **2 → 0**、全仓 132 → 130。
+- **被否决**：① 把 `EvalRound` 自己做成 `@dataclass`（40 字段全在类体）—— 综合出的 `__init__`
+  不是 AST 里的 `FunctionDef`，形状门禁数不到它 = **让门禁看不见代码**；② `for f in fields(spec):
+  setattr(...)` 复制 —— mypy 推不出属性类型，要么补 40 行类级注解要么全仓退成 `Any`；
+  ③ 再按语义切三个小对象 —— `rnd.eval_dir` 这类读点 230 处，改路径 = 改执行层契约；
+  ④ 保留 `wall_sec`「以后可能有人读」—— 死参就是死参。
+- **护栏**：`tests/worker/test_eval_round_spec.py`（6 条：单对象构造 / 字段表冻结 / frozen+kw_only /
+  状态现建 / 装配点唯一 / 生产调用只传一个位置参数；后两条对 HEAD 实测红：旧 40 参、旧调用
+  `kw=40`）。`WIDE_FUNCS_BASELINE` 删条目（不是留 0）、`any_baseline` 21 → 16。
+- **全文**：`docs/nn/engineering.md §229`。
+- **§2026-11-20-batch-unit-ledger**：`trainer/batch_runner.py` 拆出 `trainer/batch_lanes.py`（通道机器
+  `_UnitLanes` / `_UnitPlan` / 两个背压常量），`BatchEvalRunner._settle_unit` 的 15 个位置参数 →
+  **一个 `UnitLedger`**（frozen + kw_only，装配点 `_UnitLanes.ledger(threads=…)`）。
+- **为什么先拆再收**：`batch_runner.py` 的 LOC 是 **999/1000**（G-LOC 天花板），加数据类即超预算 ——
+  与 `worker/iter_rollout.py` 同一前置条件。机器（状态 + 主循环）与收尾本来就该分住：搬家后
+  `batch_runner` LOC 336 / `batch_lanes` 694，全仓宽签名 **130 → 129**。
+- **代价 = patch 锚点换家**，按「谁裸名读、谁必须绑定」重分：`_record_agent_meta` /
+  `run_local_eval_game` / `BUSY_BACKOFF_CAP_SEC` / `STUCK_GRACE_SEC` 的锚点改为
+  `trainer.batch_lanes`；`log` **两家都绑**（收尾行在 runner、通道行在 lanes）；`bun_version` 不动
+  （只有 `_open_unit` 读）。守卫**改锚点不删守卫**，并新增两条反向断言：`br.STUCK_GRACE_SEC` /
+  `bl.bun_version` 这种「名字在、没人读」的交叉转发也红（patch 打哪家都可能空转）。
+- **被否决**：① 把 `UnitLedger` 塞进 999 行文件（超预算）；② 让 `batch_lanes` 反向 import
+  `trainer.batch_runner` 取 `log`（成环 + patch 锚点歧义）—— 改 `LaneOwner` Protocol；③ `_settle_unit`
+  收一个裸 `dict`（丢类型与 frozen，形状门禁失明）。
+- **顺手修的守卫盲区**（同族陷阱第 4 次：换方法 → 换类 → **换模块**）：`test_batch_plan_split` 的入边
+  归属者表已扫三个模块（否则执行侧两条入边静默退化成 4/6）；wver 实参 / 三个行构造守卫 /
+  `GATE_SITES` 全部改读新家。基线按实测簿记（G4 6→3+3 · G7 2→1+1 · G17 30→7+23 · G5 3→1 ·
+  G19 SOURCE 1210→1221，性质未变）。
+- **全文**：`docs/nn/engineering.md §230`。
+
+## §2026-11-20-run-setup-spec（`RunSetup`：三个宽签名收成一个旋钮袋，`device` 缺省按入口取）
+
+- **背景**：`python.refactor.md` §7 的「下一批」——`remote/plan_handoff.open_run_context`(35)、
+  `remote/run_loop.run_standalone`(29)、`remote/plan_run.run_plan_job`(25) 与 `RunContext.__init__`(29)
+  是同一条链上的四个宽签名（装配点 + 两条入口 + 状态对象）。已有 `PublishSpec` / `TrainSpec` /
+  `RoundSpec` / `UnitLedger` 的先例。
+- **决定**：引入 `remote/plan_handoff.RunSetup`（frozen + kw_only，37 字段）：
+  - 三条入口都只收它（`run_plan_job` 另收上一份产物 `first_result`）；
+  - **除身份位外全部带缺省**——它是**旋钮袋**，不是 `RoundSpec` 那种全必填（各调用方只传自己那几簇，
+    `run_standalone` 最小形态 = `RunSetup(artifacts_dir=…)`）；
+  - 规范化（`int` / `float` / 放大倍数 / 轮换 / `Path`）从 `RunContext.__init__` 上移到
+    `RunSetup.__post_init__`（frozen ⇒ `object.__setattr__`），`RunContext.__init__` 只剩 4 参；
+  - 身份位（plan / manifest / job_dir / work_dir）由入口回填，`_require_run_identity` 是**唯一**校验点。
+- **`device` 的缺省不统一**：`RunSetup.device = None` 表「按入口取缺省」，因为两条腿历史缺省不同
+  （`run_standalone` = `"cuda"`、装配点 = `"cpu"`）。悄悄统一 = 一条腿突然不用 GPU 了。
+- **顺手删死参**：`run_plan_job(job_id=…)` 函数体 0 读点（AST 实测）。`first_result` 留在形参
+  （它是上一段的产物，不是旋钮）。
+- **账**：全仓宽签名 129 → 125（`WIDE_FUNCS_BASELINE` 三条删除）；`Any` 基线三处下调
+  （11→9 / 10→8 / 3→2）；同名 ≥3 模块 142 → 143（已在 `tests/test_reuse_ledger.py` 记账：门面转发同型）。
+- **否决**：① 只收 `RunContext.__init__` 不动两个入口（调用点仍是 33 个 kwarg，等于没减宽）；
+  ② 加一层 builder（`dataclasses.replace` 已经是「只覆盖几个旋钮」的语义）。
+- **守卫**：`tests/remote/test_run_setup_spec.py`（字段表闭集 / frozen + kw_only / 三条入口形参表 /
+  身份守卫恰一处 / 两条入口都走装配点 / `RunContext.__init__` 恰 5 参）。
+
+## §2026-11-20-rescan-spec（全仓最宽的 `rescan_nodes`(27 参) → `RescanSpec`；字段是引用不是快照）
+
+- **背景**：`trainer/queue_local.rescan_nodes` 是全仓最宽的签名（27 参，其中 19 个位置参数），
+  它的 docstring 自己记着两次事故：实参逐位对应，第 19 个错位过一次 ⇒ 线程启动即抛 ⇒
+  `rollout-rescan` 报废 ⇒ 运行中上线的节点永远不被发现（症状只有「新节点不干活」）。
+  唯一调用点是一串 27 项的 `kwargs=dict(...)`。
+- **决定**：`RescanSpec`（frozen + kw_only，27 字段）住定义点 `trainer/queue_local.py`；
+  `rescan_nodes(spec)` 只收一个对象，函数体逐字保留（顶部解包）；装配点
+  `trainer/queue_worker` 改成 `kwargs=dict(spec=RescanSpec(...))`（仍全关键字，错位只可能落在一个键）。
+- **为什么抄 `QueueState` 的字段表而不是直接收 `q`**：`queue_worker` → `queue_local` 是单行道，
+  反向 import `QueueState` 就是环。类型照抄其注解（`lock: threading.Lock`、`all_settled:
+  threading.Event`、`iter_id: str`），`Any` 一位没加。
+- **frozen 不等于快照**：`spawned_ids` / `alive` / `streaks` / `extra_threads` 与主循环**共享**同一份
+  容器（rescan 要登记新节点、补孵线程）——这一点写进类 docstring。
+- **账**：全仓宽签名 125 → 124（`WIDE_FUNCS_BASELINE` 的 `trainer/queue_local.py` 3 → 2）；
+  LOC 756/1000；`Any` / exact / clone / 同名四条基线未动。
+- **守卫**：`tests/trainer/test_rescan_spec.py`（字段闭集 / frozen + kw_only / 形参恰 `["spec"]` /
+  唯一调用点按关键字传 `spec`，探针 `tests/helpers/run_setup_probe.thread_kwarg_keys`）。
+
+## §2026-11-20-job-exec-spec（`_execute_job`(14 参) → `JobExecSpec`：线程调用点只收位置参数）
+
+- **背景**：push 模式下每个 job 由 `Runtime.thread(_execute_job, …)` 起线程，而 `Runtime.thread(...)`
+  只收位置参数（写关键字会语法错误）⇒ 调用点逐位传 11 个实参。这与 §232 的 `rescan_nodes`（27 参 /
+  19 位置，第 19 个错位过一次）是同一条失效面。
+- **决定**：`JobExecSpec`（frozen + kw_only，14 字段）住 `remote/worker_server.py`；
+  `_execute_job(spec)` 只收一个对象（函数体逐字保留 + 顶部解包；正文要重新绑定 `log`，故解包成
+  `spec_log`）。生产调用点 `thread(_execute_job, JobExecSpec(...))`；两处直接调用的测试同样构造 spec。
+- **账**：全仓宽签名 124 → 123（`WIDE_FUNCS_BASELINE` 删 `remote/worker_server.py`）；
+  `Any` 未加（`log: Callable[[str], None]`）。
+- **守卫**：`tests/remote/test_job_exec_spec.py`（字段闭集 / frozen + kw_only / 形参恰 `["spec"]` /
+  线程调用点位置实参形状恰 `["JobExecSpec_call"]`）。
+- **坑**：`tests/test_subproc_util.py` 的「起真服务进程」守卫按字面量 `"remote.worker_server",` 认人，
+  只读形状的守卫文件必须把它写成模块常量（否则被误判成 spawn 了服务）。
+
+## §2026-11-20-log-prefix-context-propagation（`contextvars` 前缀在派生线程里会丢：`Runtime` 三个入口派生时拷上下文）
+
+- **背景**：`common/log.py` 的前缀/课 sink 已在 2026-11-13 收进 `LogRouter`（`ContextVar` +
+  实例级 sink），`common/**` 的模块级可变容器已清零（`L0_MUTABLE_ALLOWED = {}`）。但 `ContextVar`
+  **不自动进新线程** ⇒ `prefix_scope(课)` 里派生的线程读到空前缀，`[课]` 标签静默消失
+  （旧实现是进程级字符串，那些行反而带标签）。
+- **决定**：在 `common.runtime.Runtime.thread()` / `submit()` / `map()` **派生那一刻**
+  `contextvars.copy_context()`，用 `ctx.run(partial(...))` 执行（`Context.run` 不收 kwargs）。
+  语义按拷贝：子线程读得到父上下文，写回不去。
+- **不做**：`rt.pool(...)` 返回 stdlib `ThreadPoolExecutor`，绕过 `submit()`/`map()` 直接投的任务
+  不传播（`concurrent.futures` 无钩子；包一层要换返回类型，1 处生产调用不值）——写进 docstring。
+- **守卫**：`tests/common/test_log_router.py` 四条（跨线程隔离 / `Runtime.thread` 继承 /
+  `submit`+`map` 继承 / sink 实例隔离）。
+- **账**：五条基线（`Any`/宽签名/同名/exact/clone）与文本断言基线均未动。
+
+## §2026-11-20-upgrade-branch-latch（`UPGRADE_BRANCH` 的 `global` 换成 `BranchLatch`；`net_http` 的 opener 缓存故意不对象化）
+
+- **背景**：`python.refactor.md` P0-5 表剩两行，复核后发现对象**已不存在**：`net_http._RACING_OPENERS`
+  在 B8 换成 `@functools.cache racing_opener(no_proxy)`；`distribution` 的 `_RESTART_SEEN` /
+  `UPGRADE_BRANCH` 2026-11-14 对象化、2026-11-19 整簇搬去 `remote/node_upgrade.py`（`fea6cded`）。
+- **决定一**：`remote/node_upgrade.UPGRADE_BRANCH`（`str | None` + `global`）→ `BranchLatch` 对象
+  （`_BRANCH` 默认实例，`set()`/`get()`，`None` 入口收成 `""`）。公开函数签名不变，4 个消费者零改动；
+  `GLOBAL_BASELINE` 删 `"remote/node_upgrade.py": 1`。
+- **决定二**：`net_http` 的两个 `functools.cache` opener **不对象化**——它们无状态（`build_opener`
+  结果不随环境变），缓存只省构造；包成类只增间接。审计原话「测试间串味」已不成立（键是入参）。
+- **守卫**：`tests/remote/test_node_upgrade.py::test_branch_latches_are_independent_and_default_to_empty`；
+  既有 `test_dist_upgrade_cli` 守「`current_upgrade_branch()` 零参 / `upgrade_branch_or` 不复活」。
+- **不动**：`worker/eval_exec._EXECUTORS`、`worker/eval_arbiter._ARBITER`、`hub/http_face` 类属性、
+  `biz/reward_context` 的 2 条 `global`（各自一轮独立重构）。
+
+## §2026-11-20-eval-cell-ownership（eval 线程池与仲裁器的单例改成 `Cell` 持有；`retire=` 放构造参数）
+
+- **背景**：`worker/eval_exec._EXECUTORS`（`global` ×2 + 锁外惰性判断）与
+  `worker/eval_arbiter._ARBITER`（`global` 换实例）是两个 L2 进程级单例，`GLOBAL_BASELINE` 靠
+  按文件记账守。进程里确实只有一份，问题在形状：写点不封闭、惰性判断在锁外、换实例无归属。
+- **决定**：新增 `common/cell.py::Cell`（`get()` / `replace()`，值在构造时就造好），两个模块各留
+  一个持有者；公开入口 `eval_executors()` / `eval_arbiter()` / `reset_eval_*()` 签名不变。
+  `GLOBAL_BASELINE` 删 `worker/eval_exec.py: 2`、`worker/eval_arbiter.py: 1`。
+- **不做惰性构造**：带锁版本要么让 `test_lock_reentrancy` 的目标面棘轮 +1（锁内调注入构造器），
+  要么丢 exactly-once（锁外调，第二份被丢弃=旧 bug 变体）。构造廉价无副作用 ⇒ 模块加载时造。
+- **退休钩子放构造参数** `retire=`：放 `replace(old, close=…)` 会让两处 `reset_*` 变成形状相同的
+  三行，`test_reuse_ledger` 的结构克隆基线 17 → 18。声明在拥有值的那一行，只写一次。
+- **守卫**：`tests/common/test_cell.py` 五条（同对象直到 replace / 退休旧值只一次 / 无 retire 时
+  只丢引用 / 两个 Cell 互不相见）。

@@ -20,7 +20,8 @@ import common.distribution
 import common.task_client
 import common.weights_client
 from common import runtime
-from worker.eval_arbiter import LOCAL_NODE, EvalRound, Grant, eval_arbiter
+from common.cell import Cell
+from worker.eval_arbiter import LOCAL_NODE, EvalRound, Grant, SettleOutcome, eval_arbiter
 
 
 @dataclass
@@ -191,10 +192,7 @@ class EvalExecutors:
                 )
                 grant.round.settle_task(
                     grant,
-                    ok=False,
-                    err=f"{type(e).__name__}: {str(e)[:160]}",
-                    transient=False,
-                    node_alive=False,
+                    SettleOutcome(ok=False, err=f"{type(e).__name__}: {str(e)[:160]}"),
                 )
 
     def _local_loop(self, _nid: str, stop: threading.Event) -> None:
@@ -214,10 +212,11 @@ class EvalExecutors:
                 )
                 grant.round.settle_task(
                     grant,
-                    ok=False,
-                    err=f"{type(e).__name__}: {str(e)[:160]}",
-                    transient=False,
-                    node_alive=self.node_alive_for(grant.round),
+                    SettleOutcome(
+                        ok=False,
+                        err=f"{type(e).__name__}: {str(e)[:160]}",
+                        node_alive=self.node_alive_for(grant.round),
+                    ),
                 )
 
     @staticmethod
@@ -234,10 +233,7 @@ class EvalExecutors:
         if nd is None:
             rnd.settle_task(
                 grant,
-                ok=False,
-                err="node gone（POST 后节点被剔除）",
-                transient=True,
-                node_alive=False,
+                SettleOutcome(ok=False, err="node gone（POST 后节点被剔除）", transient=True),
             )
             return
         task = grant.task
@@ -313,13 +309,14 @@ class EvalExecutors:
         wall_sec = round(time.time() - grant.started, 3)
         accepted = rnd.settle_task(
             grant,
-            ok=ok,
-            manifest=manifest,
-            err=err,
-            transient=transient,
-            task_lost=task_lost,
-            wall_sec=wall_sec,
-            node_alive=self.node_alive_for(rnd),
+            SettleOutcome(
+                ok=ok,
+                manifest=manifest,
+                err=err,
+                transient=transient,
+                task_lost=task_lost,
+                node_alive=self.node_alive_for(rnd),
+            ),
         )
         if accepted:
             self._record_and_log(rnd, grant, manifest, wall_sec)
@@ -371,14 +368,15 @@ class EvalExecutors:
         wall_sec = round(time.time() - grant.started, 3)
         accepted = rnd.settle_task(
             grant,
-            ok=ok,
-            manifest=manifest,
-            err=err,
-            transient=transient,
-            err_errno=err_errno,
-            msg_head=msg_head,
-            wall_sec=wall_sec,
-            node_alive=self.node_alive_for(rnd),
+            SettleOutcome(
+                ok=ok,
+                manifest=manifest,
+                err=err,
+                transient=transient,
+                err_errno=err_errno,
+                msg_head=msg_head,
+                node_alive=self.node_alive_for(rnd),
+            ),
         )
         if accepted:
             self._record_and_log(rnd, grant, manifest, wall_sec)
@@ -407,19 +405,17 @@ class EvalExecutors:
         )
 
 
-_EXECUTORS: EvalExecutors | None = None
+#: 进程级那一份池子住这里（P0-5）：`Cell` 负责「一份值 + 取/换」，不再是模块级可变量 +
+#: `global`。构造在这一行完成（建锁、建 Runtime、建空字典，无副作用）——旧写法的惰性判断在
+#: 锁外，两个线程同时首次 `eval_executors()` 会造出两份池子，孤儿那份连 `close_pools()` 都
+#: 够不着。
+_EXECUTORS = Cell(EvalExecutors(), retire=EvalExecutors.close_pools)
 
 
 def eval_executors() -> EvalExecutors:
-    global _EXECUTORS
-    if _EXECUTORS is None:
-        _EXECUTORS = EvalExecutors()
-    return _EXECUTORS
+    return _EXECUTORS.get()
 
 
 def reset_eval_executors() -> EvalExecutors:
-    global _EXECUTORS
-    if _EXECUTORS is not None:
-        _EXECUTORS.close_pools()
-    _EXECUTORS = EvalExecutors()
-    return _EXECUTORS
+    """换一份新的（测试夹具 / 真停机后重来）；旧池子的线程在 `retire` 里收尾。"""
+    return _EXECUTORS.replace(EvalExecutors())

@@ -19,6 +19,7 @@ from common.platform_utils import rmtree_best_effort
 from trainer.queue_local import (
     LocalLane,
     QueueEdgeGate,
+    RescanSpec,
     abort_other_tags,
     drop_attempt,
     join_targets,
@@ -831,37 +832,40 @@ def run_queue(q: QueueState) -> None:
     if q.rescan_sec > 0 and q.cfg.get("nodes"):
         scan_t = rt.thread(
             rescan_nodes,
-            # **全部关键字传参**：本调用有 20+ 实参，历史上第 19 个位置参数错位
-            # 过（线程启动即抛，运行中上线的节点永远不被发现——见函数 docstring）。
+            # 只传一个 spec（2026-11-20，§P0-3 第四刀续）：这里曾是 27 个实参的 `dict(...)`，
+            # 历史上第 19 个位置参数错位过一次（线程启动即抛，运行中上线的节点永远不被
+            # 发现——见 `rescan_nodes` 与 `RescanSpec` 的 docstring）。
             kwargs=dict(
-                cfg=q.cfg,
-                code_hash=q.code_hash,
-                upgrade_branch=q.upgrade_branch,
-                dirty_files=q.dirty_files,
-                local_bun=q.local_bun,
-                spawned_ids=q.spawned_ids,
-                alive=q.alive,
-                lock=q.lock,
-                weights_bytes=q.weights_bytes,
-                iter_id=q.iter_id,
-                wver=q.wver,
-                task_timeout=q.task_timeout,
-                status_timeout=q.status_timeout,
-                all_settled=q.all_settled,
-                deadline=q.deadline,
-                rescan_sec=q.rescan_sec,
-                worker=worker,
-                extra_threads=q.extra_threads,
-                # v3.14b：halt 感知——熔断后 rescan 立即退出，主 join 不再白等超时
-                halt_event=q.halt_event,
-                # A4：首个 pass 提前 / 权重 kind / 回场重置失败计数所需的状态。
-                first_probe_sec=q.recover_first_sec,
-                wkind=q.wkind,
-                streaks=q.streaks,
-                soft_streaks=q.soft_streaks,
-                fail_streak_max=q.fail_streak_max,
-                soft_streak_max=q.soft_streak_max,
-                rearm_cap=q.rearm_cap,
+                spec=RescanSpec(
+                    cfg=q.cfg,
+                    code_hash=q.code_hash,
+                    upgrade_branch=q.upgrade_branch,
+                    dirty_files=q.dirty_files,
+                    local_bun=q.local_bun,
+                    spawned_ids=q.spawned_ids,
+                    alive=q.alive,
+                    lock=q.lock,
+                    weights_bytes=q.weights_bytes,
+                    iter_id=q.iter_id,
+                    wver=q.wver,
+                    task_timeout=q.task_timeout,
+                    status_timeout=q.status_timeout,
+                    all_settled=q.all_settled,
+                    deadline=q.deadline,
+                    rescan_sec=q.rescan_sec,
+                    worker=worker,
+                    extra_threads=q.extra_threads,
+                    # v3.14b：halt 感知——熔断后 rescan 立即退出，主 join 不再白等超时
+                    halt_event=q.halt_event,
+                    # A4：首个 pass 提前 / 权重 kind / 回场重置失败计数所需的状态。
+                    first_probe_sec=q.recover_first_sec,
+                    wkind=q.wkind,
+                    streaks=q.streaks,
+                    soft_streaks=q.soft_streaks,
+                    fail_streak_max=q.fail_streak_max,
+                    soft_streak_max=q.soft_streak_max,
+                    rearm_cap=q.rearm_cap,
+                )
             ),
             daemon=True,
             name="rollout-rescan",

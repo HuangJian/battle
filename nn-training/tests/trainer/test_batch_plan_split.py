@@ -47,10 +47,14 @@ EVAL_PATH = RL / "batch_eval.py"
 #: S27/B3：执行器（`BatchEvalRunner` / `dispatch_batch_bg`）纯搬到本模块，四个入边
 #: 调用点随之移家 ⇒ 入边闭集要**两个宿主一起数**（见 `_inbound_calls`）。
 RUNNER_PATH = RL / "batch_runner.py"
+#: 2026-11-20：通道机器（`_UnitLanes`）搬去 `trainer/batch_lanes.py` 后，执行侧的两条
+#: 入边（`worker` / `bringup`）的宿主也换了模块 ⇒ 要**三个宿主一起数**。
+LANES_PATH = RL / "batch_lanes.py"
 
 PLAN_SRC = PLAN_PATH.read_text(encoding="utf-8")
 EVAL_SRC = EVAL_PATH.read_text(encoding="utf-8")
 RUNNER_SRC = RUNNER_PATH.read_text(encoding="utf-8")
+LANES_SRC = LANES_PATH.read_text(encoding="utf-8")
 
 #: 搬走的 23 个成员：13 个函数 + 10 个常量（含 2 个私有名）。
 MOVED_FUNCS = (
@@ -305,12 +309,15 @@ def _inbound_calls() -> dict[str, dict[str, int]]:
 
     B3 把 `BatchEvalRunner` 整段搬进 `trainer/batch_runner.py`，四个入边调用点跟着搬家；
     只数旧家会**静默**退化成「2/6」（漏掉执行侧那四条），所以宿主要显式列出。
+    2026-11-20：机器又搬去 `trainer/batch_lanes.py`（同一族陷阱第四次：换方法 → 换类 → 换模块），
+    只数前两个宿主就只剩「4/6」。
     """
     got = _calls_by_owner(EVAL_SRC, set(MOVED_FUNCS))
-    for name, by_owner in _calls_by_owner(RUNNER_SRC, set(MOVED_FUNCS)).items():
-        slot = got.setdefault(name, {})
-        for owner, count in by_owner.items():
-            slot[owner] = slot.get(owner, 0) + count
+    for src in (RUNNER_SRC, LANES_SRC):
+        for name, by_owner in _calls_by_owner(src, set(MOVED_FUNCS)).items():
+            slot = got.setdefault(name, {})
+            for owner, count in by_owner.items():
+                slot[owner] = slot.get(owner, 0) + count
     return got
 
 

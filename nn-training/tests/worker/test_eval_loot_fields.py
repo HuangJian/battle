@@ -82,12 +82,12 @@ def test_writers_wire_three_loot_columns() -> None:
     （in-loop 派发器与 `remote/offline_eval.py` 共用）。于是判据分两档：
 
       * 走 `eval_row` 的写入方：三列由那一处保证（本文件只断言它们接了共享构造点）；
-      * 自己拼行的写入方（`trainer/batch_runner.py`，原住 `trainer/batch_eval.py`）：必须
+      * 自己拼行的写入方（`trainer/batch_lanes.py`，2026-11-20 前住 `trainer/batch_runner.py`）：必须
         自己接到 `eval_loot_fields`。
     """
     for rel, marker in (
         ("trainer/eval_dispatch.py", "eval_row"),
-        ("trainer/batch_runner.py", "eval_loot_fields"),
+        ("trainer/batch_lanes.py", "eval_loot_fields"),
         ("remote/offline_eval.py", "eval_row"),
     ):
         src = (ROOT / rel).read_text(encoding="utf-8")

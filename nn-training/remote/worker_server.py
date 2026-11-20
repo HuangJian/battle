@@ -35,6 +35,7 @@ import urllib.parse
 import urllib.request
 from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -314,32 +315,61 @@ def notify_result_ready(
     return ok
 
 
-def _execute_job(
-    state: WorkerServerState,
-    manifest: dict,
-    payload_zip: bytes,
-    code_zip: bytes | None,
-    ts_code_zip: bytes | None,
-    blobs: dict | None,
-    work_dir: Path,
-    device: str,
-    torch_threads: int,
-    echo: bool,
+@dataclass(frozen=True, kw_only=True)
+class JobExecSpec:
+    """`_execute_job` 的全部输入（原来是 14 个参数，调用点按**位置**逐位传）。
+
+    **为什么合成一个对象（2026-11-20，§P0-3 第六刀）**：唯一的生产调用点是
+    `Runtime.thread(_execute_job, state, manifest, …, log, daemon=True)` —— 而
+    `Runtime.thread(...)` 只收位置参数（写 `epoch_mult=…` 会直接语法错误），于是 11 个实参
+    必须按形参顺序逐位对上。同一形状在 `rescan_nodes` 上已经出过一次事故（第 19 个错位 ⇒
+    线程启动即抛）。合成对象后这条线程只剩一个位置实参，插入/调整字段都不可能再静默错位。
+
+    测试也走同一个对象（三处用例原本同样「前 10 个位置 + 后面关键字」两套写法）。
+    """
+
+    state: WorkerServerState
+    manifest: dict
+    payload_zip: bytes
+    code_zip: bytes | None
+    ts_code_zip: bytes | None
+    blobs: dict | None
+    work_dir: Path
+    device: str
+    torch_threads: int
+    echo: bool
     #: hub 的基址（`--hub-url`）；空 = 不发通知，纯轮询（手动起服务/旧部署）。
-    hub_url: str = "",
+    hub_url: str = ""
     #: 本节点的 push token（= `--token`）；通知用它鉴权，与 hub→worker 的 Bearer 同一把。
-    push_token: str = "",
+    push_token: str = ""
     #: ★ 2026-10-26：训练侧放大 —— PPO 每轮更新遍数 × N（缺省 1.0 = manifest 原样）。
-    epoch_mult: float = 1.0,
-    log=_log,
-) -> None:
+    epoch_mult: float = 1.0
+    log: Callable[[str], None] = _log
+
+
+def _execute_job(spec: JobExecSpec) -> None:
     """后台执行：run_job 全套（preloaded push 路径）→ 状态落表。异常进 failed（HUB 可见）。"""
+    # 解包（函数体逐字保留）：要改语义请改 `JobExecSpec` 或函数体。
+    state = spec.state
+    manifest = spec.manifest
+    payload_zip = spec.payload_zip
+    code_zip = spec.code_zip
+    ts_code_zip = spec.ts_code_zip
+    blobs = spec.blobs
+    work_dir = spec.work_dir
+    device = spec.device
+    torch_threads = spec.torch_threads
+    echo = spec.echo
+    hub_url = spec.hub_url
+    push_token = spec.push_token
+    epoch_mult = spec.epoch_mult
+    spec_log = spec.log
     jid = manifest["job_id"]
     # ★2026-11-13（用户口径）：本服务的日志里每个 job 只有 16 位 jid（幂等键哈希，故意
     # 不含课名）—— 一台 GPU worker 同时接多门课的活时，从日志分不出在训哪门课。
     # 包一层 ⇒ accepted/准备完成/PPO/收账/失败**每一行**都带课程名；缺 `course_name`
     # 的旧 job = 空串，旧行逐字节不变（`common/logutil.course_tag`）。
-    log = tagged(log, course_tag(manifest))
+    log = tagged(spec_log, course_tag(manifest))
     state.set_state(jid, "running")
     worker_wire_start(jid)  # 阶段占比（in/out/ppo/other）的 wall 从开跑起算
     try:
@@ -612,22 +642,24 @@ def make_worker_server(
         #: 一个 job 一条线程（`worker-job-<jid前8>-run`）：它跑完自己把状态写回 `state`。
         common.runtime.Runtime(scope=f"worker-job-{jid[:8]}").thread(
             _execute_job,
-            state,
-            item["manifest"],
-            item["payload_zip"],
-            item["code_zip"],
-            item.get("ts_code_zip"),
-            item.get("blobs"),
-            state.work_dir,
-            device,
-            torch_threads,
-            item["echo"],
-            # `Runtime.thread(...)` 只收位置参数：缺省参数必须按形参顺序放进来
-            # （写成 `epoch_mult=…` 会让整个文件语法错误）。
-            hub_url,
-            token,
-            epoch_mult,
-            log,
+            # 只传一个 spec（2026-11-20，§P0-3 第六刀）：`Runtime.thread(...)` 只收位置参数，
+            # 这里曾逐位传 11 个实参（同一形状在 `rescan_nodes` 上出过事故）。
+            JobExecSpec(
+                state=state,
+                manifest=item["manifest"],
+                payload_zip=item["payload_zip"],
+                code_zip=item["code_zip"],
+                ts_code_zip=item.get("ts_code_zip"),
+                blobs=item.get("blobs"),
+                work_dir=state.work_dir,
+                device=device,
+                torch_threads=torch_threads,
+                echo=item["echo"],
+                hub_url=hub_url,
+                push_token=token,
+                epoch_mult=epoch_mult,
+                log=log,
+            ),
             daemon=True,
             name="run",
         )

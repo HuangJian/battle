@@ -28,6 +28,7 @@ import json
 import shutil
 import sys
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,7 @@ from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
 from remote.cloud_pool import CLOUD_EVAL_POOL, CLOUD_ROLLOUT_POOL
 from remote.error_report import report_error
 from remote.plan_handoff import ROTATION_POLICIES as ROTATION_POLICIES
+from remote.plan_handoff import RunSetup
 from remote.plan_run import (
     TS_TREE_DIR as TS_TREE_DIR,
 )
@@ -136,64 +138,21 @@ def ensure_ts_cache_layout(root: Path, *, ts_tree: Path | None, sha: str) -> Pat
     return cache_root
 
 
-def run_standalone(
-    *,
-    artifacts_dir: str | Path,
-    plan: dict | None = None,
-    manifest: dict | None = None,
-    work_dir: str | Path | None = None,
-    ts_code_dir: str | Path | None = None,
-    code_cache_dir: Path | None = None,
-    device: Any = "cuda",
-    torch_threads: int = 0,
-    max_iters: int = 0,
-    budget_sec: float = 0.0,
-    #: 云机 A 层评估（`eval_on_cloud`）：每 `eval_every` 轮在本机跑 A 层语料。
-    eval_on_cloud: bool = False,
-    eval_slots: int = 0,
-    eval_game_timeout_sec: float = 0.0,
-    #: rollout 并行局数（0 = 按本机核数自动；与 eval 同一口径，见 `RunContext.rollout_workers`）。
-    rollout_workers: int = 0,
-    #: ★ 2026-10-24：高配云机的训练侧放大（1.0 = 计划/课程原样；见 `RunContext.sample_mult`）。
-    sample_mult: float = 1.0,
-    epoch_mult: float = 1.0,
-    #: ★ 2026-10-28（云机轮换）：笔记本开关（`CFG["rotation"]` → `--rotation`）；
-    #: auto = 跟随计划，on = 计划没带就拒跑，off = 降级全关采样（见 `ROTATION_POLICIES`）。
-    rotation: str = "auto",
-    #: hub 给的续跑锚点目录（`--resume-dir`；见 `apply_resume_overlay`）。
-    resume_dir: str | Path | None = None,
-    #: 产物补传（可选）：给了 hub 地址 + token 就会在每轮落盘后尽力推一份上去。
-    #: 全离线腿的常见形态是「一开始连不上（甚至 hub 关机）、后来能连上了」——
-    #: 这里不做任何"记住连不上就别试"的记忆，每轮都探一次（探不到就一跳而过）。
-    hub_url: str = "",
-    hub_token: str = "",
-    #: 本份产物在 hub 里的归位键（见 `OfflineDeliverer.course`；空 = 单课程 hub）。
-    hub_course: str = "",
-    #: 本课租约 token（`--hub-lease-file`；见 `OfflineDeliverer.hub_lease`）。空 = 不声称
-    #: 持有 ⇒ hub 侧不推进活动起点（P1-1），但补传照落。
-    hub_lease: str = "",
-    #: 网络侧**备份抽屉**（`--backup-root`）：产物没能回传成功的轮写这里
-    #: （消费方 = `remote/offline_deliver.py` 的备份腿）。空 = 不做备份（纯离线腿 / 老调用方）。
-    backup_root: str | Path | None = None,
-    #: ★ 2026-10-23（plan/push-mode-notebooks §6.4a / P0-1）：**本地 outbox**（push 模式）。
-    #: 非空 = 补传腿只往这个目录写 body（hub 自己来拉）；与 `deliver=False` 共存时 outbox 仍然活。
-    outbox_dir: str | Path | None = None,
-    #: ★ 2026-10-23（W4）：取消哨兵（push 腿的 `/offline/push/cancel` 写它）。
-    #: 非空时 `plan_run` 在**轮边界**检查：命中 ⇒ 本段 `state="cancelled"`，产物自洽可续跑。
-    stop_file: str | Path | None = None,
-    #: ★ 2026-10-24（F7）：outbox 地板（`it <= N` 的轮不物化 —— hub 已经有）。
-    #: 来自 push 任务包的 `resume_it`；缺省 0 = 全部物化。
-    floor_it: int = 0,
-    deliver: bool = True,
-    run_job_fn: Callable[..., dict] | None = None,
-    log: Callable[[str], None] = _log_default,
-) -> dict:
+def run_standalone(setup: RunSetup) -> dict:
     """**无 hub 续跑**：产物目录是唯一输入（新会话 / 换了台机器都走这条）。
 
     接续点是 `state.json.last_it`（其权重/opt 已在目录里）；`plan`/`manifest` 缺省从目录
     读回——所以命令行的最小形态就是 `python -m remote.run_loop --artifacts <dir>`。
+
+    **2026-11-20（§P0-3 第四刀）**：29 个关键字参数 → 一个 `RunSetup`。本函数只做**入口侧
+    的解析**（产物目录 → plan/manifest/course/工作目录/TS 缓存布局），真装配仍在
+    `open_run_context`（唯一装配点：两条入口都从它过）。
     """
-    root = Path(artifacts_dir)
+    log = setup.log
+    if setup.artifacts_dir is None and setup.job_dir is None:
+        raise ProtocolError("run_standalone 需要 artifacts_dir —— 产物目录是这条腿的唯一输入")
+    root = Path(setup.artifacts_dir or setup.job_dir or "")
+    plan, manifest = setup.plan, setup.manifest
     if plan is None or manifest is None:
         plan, manifest = load_planned_manifest(root)
     # ★ 2026-09-22 事故修复：**加载课程上下文**。此前 `run_standalone` 从不传 course ⇒
@@ -201,55 +160,38 @@ def run_standalone(
     # stageJson ⇒ `retarget_argv` 把计划里的 `--stage-json` **整对删掉** ⇒ 导出器解析
     # stage 2000 失败 → 静默空局（0 samples、rc=0、零 shard）→「没有任何 shard」误报
     # 成环境问题。与交互 worker 同款加载（`biz.config.load_course`，快照即来源）。
+    course = setup.course
     course_path = root / "course.jsonc"
-    course = None
-    if course_path.exists():
+    if course is None and course_path.exists():
         try:
             from worker.config import load_course
 
             course = load_course(str(course_path))
         except Exception as e:
             log(f"WARN: 课程快照加载失败（自定义关 stage 将不可解析，rollout 会出空局）: {e}")
-    wd = Path(work_dir) if work_dir is not None else root / "work"
+    wd = Path(setup.work_dir) if setup.work_dir is not None else root / "work"
     sha = str(manifest.get("ts_code_sha256", "") or "")
     ts_root = ensure_ts_cache_layout(
         root,
-        ts_tree=Path(ts_code_dir) if ts_code_dir is not None else None,
+        ts_tree=Path(setup.ts_tree) if setup.ts_tree is not None else None,
         sha=sha,
     )
     ctx = open_run_context(
-        plan=plan,
-        plan_sha256=sha256_bytes((root / ArtifactStore.PLAN_NAME).read_bytes()),
-        manifest=manifest,
-        job_dir=root,
-        work_dir=wd,
-        artifacts_dir=root,
-        device=device,
-        torch_threads=torch_threads,
-        code_cache_dir=code_cache_dir,
-        ts_code_cache_dir=ts_root,
-        ts_tree=Path(ts_code_dir) if ts_code_dir is not None else root / TS_TREE_DIR,
-        course=course,
-        max_iters=max_iters,
-        budget_sec=budget_sec,
-        eval_on_cloud=eval_on_cloud,
-        eval_slots=eval_slots,
-        eval_game_timeout_sec=eval_game_timeout_sec,
-        rollout_workers=rollout_workers,
-        sample_mult=sample_mult,
-        epoch_mult=epoch_mult,
-        rotation=rotation,
-        hub_url=hub_url,
-        hub_token=hub_token,
-        hub_course=hub_course,
-        hub_lease=hub_lease,
-        backup_root=backup_root,
-        outbox_dir=str(outbox_dir or ""),
-        stop_file=str(stop_file or ""),
-        floor_it=int(floor_it or 0),
-        deliver=deliver,
-        run_job_fn=run_job_fn or _real_run_job,  # 入口侧的注入：CLI 缺省 = 真 worker
-        log=log,
+        replace(
+            setup,
+            plan=plan,
+            manifest=manifest,
+            plan_sha256=sha256_bytes((root / ArtifactStore.PLAN_NAME).read_bytes()),
+            job_dir=root,
+            work_dir=wd,
+            artifacts_dir=root,
+            # 这条腿的历史缺省是 `"cuda"`（spec 的 `None` = 按入口取缺省，见 `RunSetup.device`）。
+            device="cuda" if setup.device is None else setup.device,
+            ts_code_cache_dir=ts_root,
+            ts_tree=Path(setup.ts_tree) if setup.ts_tree is not None else root / TS_TREE_DIR,
+            course=course,
+            run_job_fn=setup.run_job_fn or _real_run_job,  # 入口侧的注入：CLI 缺省 = 真 worker
+        )
     )
     if ts_root is None:
         log(
@@ -259,7 +201,7 @@ def run_standalone(
     _require_offline_runtime(ctx, work_dir=wd)
     # hub 给的续跑锚点（若任务包比 hub 上的最新进度旧）：**在起点读取之前**采纳，
     # 于是下面 start_from 自然从锚点那一轮之后接上。
-    apply_resume_overlay(ctx, resume_dir)
+    apply_resume_overlay(ctx, setup.resume_dir)
     st = ctx.store.read_state() or {}
     start_from = int(st.get("last_it", plan["start_it"]))
     log(f"续跑起点 it{start_from}（计划 it{plan['start_it']} → it{plan['end_it']}）")
@@ -650,32 +592,34 @@ def main(argv: list[str] | None = None) -> int:
     try:
         plan, manifest = load_planned_manifest(root)
         result = run_standalone(
-            artifacts_dir=root,
-            plan=plan,
-            manifest=manifest,
-            work_dir=Path(args.work_dir) if args.work_dir else None,
-            ts_code_dir=Path(args.ts_root) if args.ts_root else None,
-            device=args.device,
-            torch_threads=args.threads,
-            max_iters=args.max_iters,
-            budget_sec=args.budget_sec,
-            eval_on_cloud=bool(args.eval_on_cloud),
-            eval_slots=int(args.eval_slots),
-            eval_game_timeout_sec=float(args.eval_game_timeout_sec),
-            rollout_workers=int(args.rollout_workers),
-            sample_mult=float(args.sample_mult),
-            epoch_mult=float(args.epoch_mult),
-            rotation=str(args.rotation),
-            resume_dir=args.resume_dir or None,
-            hub_url=args.hub_url,
-            hub_token=hub_token,
-            hub_course=args.hub_course,
-            hub_lease=hub_lease,
-            backup_root=Path(args.backup_root) if args.backup_root else None,
-            outbox_dir=args.outbox,
-            stop_file=args.stop_file or None,
-            floor_it=int(args.floor_it or 0),
-            deliver=not args.no_deliver,
+            RunSetup(
+                artifacts_dir=root,
+                plan=plan,
+                manifest=manifest,
+                work_dir=Path(args.work_dir) if args.work_dir else None,
+                ts_tree=Path(args.ts_root) if args.ts_root else None,
+                device=args.device,
+                torch_threads=args.threads,
+                max_iters=args.max_iters,
+                budget_sec=args.budget_sec,
+                eval_on_cloud=bool(args.eval_on_cloud),
+                eval_slots=int(args.eval_slots),
+                eval_game_timeout_sec=float(args.eval_game_timeout_sec),
+                rollout_workers=int(args.rollout_workers),
+                sample_mult=float(args.sample_mult),
+                epoch_mult=float(args.epoch_mult),
+                rotation=str(args.rotation),
+                resume_dir=args.resume_dir or None,
+                hub_url=args.hub_url,
+                hub_token=hub_token,
+                hub_course=args.hub_course,
+                hub_lease=hub_lease,
+                backup_root=Path(args.backup_root) if args.backup_root else None,
+                outbox_dir=args.outbox,
+                stop_file=args.stop_file or "",
+                floor_it=int(args.floor_it or 0),
+                deliver=not args.no_deliver,
+            )
         )
     except (ProtocolError, RetryableError) as e:
         print(f"[run] 失败：{type(e).__name__}: {e}", file=sys.stderr, flush=True)

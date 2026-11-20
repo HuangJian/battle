@@ -36,6 +36,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -88,6 +89,9 @@ from remote.plan_handoff import (
 )
 from remote.plan_handoff import (
     RunContext as RunContext,
+)
+from remote.plan_handoff import (
+    RunSetup as RunSetup,
 )
 from remote.plan_handoff import (
     _blob_roots as _blob_roots,
@@ -908,42 +912,12 @@ def _close_eval(ctx: RunContext, *, timeout: float | None = None) -> None:
 # ------------------------------------------------------------------ 主循环
 
 
-def run_plan_job(
-    *,
-    job_id: str,
-    manifest: dict,
-    job_dir: Path,
-    work_dir: Path,
-    plan: dict,
-    plan_sha256: str,
-    first_result: dict,
-    course: Any = None,
-    device: Any = "cpu",
-    torch_threads: int = 0,
-    code_cache_dir: Path | None = None,
-    ts_code_cache_dir: Path | None = None,
-    artifacts_dir: str | Path | None = None,
-    max_iters: int = 0,
-    budget_sec: float = 0.0,
-    #: 云机 A 层评估（`eval_on_cloud`；见 `remote/offline_eval.py`）。
-    eval_on_cloud: bool = False,
-    eval_slots: int = 0,
-    eval_game_timeout_sec: float = 0.0,
-    #: rollout 并行局数（0 = 按本机核数自动；与 eval 同一口径，见 `RunContext.rollout_workers`）。
-    rollout_workers: int = 0,
-    #: 产物补传（可选）：给了 hub 地址 + token 就在每轮落盘后尽力推一份上去
-    #: （hub 中途失联也不至于「跑完一整段、控制面一无所知」）。
-    hub_url: str = "",
-    hub_token: str = "",
-    #: 本份产物在 hub 里的**归位键**（多课程 hub 的课程键；见 `OfflineDeliverer.course`）。
-    #: 领活路径由 hub 在轮询面下发（`remote/worker.py` 传进来），全离线包那条腿
-    #: 由 `--hub-course` 给。空 = 单课程 hub。
-    hub_course: str = "",
-    deliver: bool = True,
-    run_job_fn: Callable[..., dict] | None = None,
-    log: Callable[[str], None] = _log_default,
-) -> dict:
+def run_plan_job(setup: RunSetup, first_result: dict) -> dict:
     """从「首轮结果」续跑：`first_result` 已经跑完，接着把计划剩下的轮次跑完。
+
+    **2026-11-20（§P0-3 第四刀）**：25 个关键字参数 → 一个 `RunSetup`；顺手删掉**死参**
+    `job_id`（函数体零读点）与 `manifest` / `plan` / `work_dir` 等身份位的重复声明 ——
+    它们本来就住在 `RunSetup` 里。`first_result` 不是旋钮（它是**上一次的产物**），留在形参上。
 
     ★ 2026-09-25：**今天没有生产调用者**。它曾经是「hub 发一份 `kind=run` 整段 job、
     worker 接着跑完」那条腿的尾巴——那条腿已退役（`plan/online-offline-role-routing.plan.md`
@@ -957,31 +931,9 @@ def run_plan_job(
     收尾策略：正常跑完、预算到点、还是中途抛错，都 `finalize` 产物（state + 全量 zip）
     之后再返回/抛出——**任何时刻停下，卷上的目录都是自洽可续的**。
     """
-    ctx = open_run_context(
-        plan=plan,
-        plan_sha256=plan_sha256,
-        manifest=manifest,
-        job_dir=Path(job_dir),
-        work_dir=work_dir,
-        artifacts_dir=artifacts_dir,
-        device=device,
-        torch_threads=torch_threads,
-        code_cache_dir=code_cache_dir,
-        ts_code_cache_dir=ts_code_cache_dir,
-        ts_tree=ts_code_cache_dir,
-        course=course,
-        max_iters=max_iters,
-        budget_sec=budget_sec,
-        eval_on_cloud=eval_on_cloud,
-        eval_slots=eval_slots,
-        eval_game_timeout_sec=eval_game_timeout_sec,
-        hub_url=hub_url,
-        hub_token=hub_token,
-        hub_course=hub_course,
-        deliver=deliver,
-        run_job_fn=run_job_fn,
-        log=log,
-    )
+    # `ts_tree` 与 `ts_code_cache_dir` 历史同值（kind=run 的 payload 只带一份运行时树）。
+    ctx = open_run_context(replace(setup, ts_tree=setup.ts_code_cache_dir))
+    manifest = setup.manifest or {}
     anchor_it = int(manifest["it"])
     session: list[dict] = []
     state = ctx.store.read_state() or {}

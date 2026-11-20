@@ -243,16 +243,16 @@ def test_run_job_forwards_the_hub_course_into_the_backfeed() -> None:
     import ast
 
     # 三处形参（run_plan_job/open_run_context/run_standalone）+ 两跳透传，判据都是 AST。
-    params = 0
+    fields = 0  # `hub_course` 的**声明点**数：`RunSetup` 造齐后只剩一份（曾散在三个签名里）
     kwargs: set[str] = set()
     for name in ("run_loop.py", "plan_run.py", "plan_handoff.py"):
         tree = ast.parse((root / "remote" / name).read_text(encoding="utf-8"))
-        params += sum(
+        fields += sum(
             1
             for n in ast.walk(tree)
-            if isinstance(n, ast.FunctionDef)
-            for a in (*n.args.posonlyargs, *n.args.args, *n.args.kwonlyargs)
-            if a.arg == "hub_course"
+            if isinstance(n, ast.AnnAssign)
+            and isinstance(n.target, ast.Name)
+            and n.target.id == "hub_course"
         )
         kwargs |= {
             k.arg
@@ -261,7 +261,7 @@ def test_run_job_forwards_the_hub_course_into_the_backfeed() -> None:
             for k in n.keywords
             if k.arg is not None
         }
-    assert params == 3  # run_plan_job/open_run_context/run_standalone
+    assert fields == 1, f"`hub_course` 又散回多个签名了（声明点={fields}，应只有 `RunSetup` 一处）"
     assert {"hub_course", "course"} <= kwargs  # 透传 + make_deliverer 那一跳
 
 

@@ -722,6 +722,7 @@ def test_maybe_cloud_eval_only_submits_when_due_and_never_raises(
 
 
 def _ctx(tmp_path: Path, *, start_it: int = 1, end_it: int = 6):
+    from remote.plan_handoff import RunSetup
     from remote.run_loop import RunContext
 
     plan = {"start_it": start_it, "end_it": end_it, "pair_args": {}}
@@ -730,12 +731,14 @@ def _ctx(tmp_path: Path, *, start_it: int = 1, end_it: int = 6):
     store.start(plan, manifest, plan_sha256="x" * 64)
     logs, log = _logs()
     ctx = RunContext(
-        plan=plan,
-        plan_sha256="x" * 64,
-        manifest=manifest,
+        RunSetup(
+            plan=plan,
+            plan_sha256="x" * 64,
+            manifest=manifest,
+            work_dir=tmp_path / "work",
+            log=log,
+        ),
         store=store,
-        work_dir=tmp_path / "work",
-        log=log,
     )
     return ctx, logs
 

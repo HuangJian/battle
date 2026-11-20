@@ -51,12 +51,14 @@ G18 按文件冻结、只许调小）。`rt.thread(target, name=…)` 是它们�
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import os
 import threading
 import time
 from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
+from functools import partial
 from types import TracebackType
 from typing import TypeVar
 
@@ -243,6 +245,12 @@ class Runtime:
         """
         if not name:
             raise ValueError("Runtime.thread 必须给 name（转储里靠它分清是谁）")
+        # 上下文传播（2026-11-20，§P0-5 收尾）：`contextvars` **不会**自动进新线程，于是
+        # `prefix_scope("课")` 里派生的线程发出来的行会丢掉 `[课]` 前缀——旧实现是进程级字符串，
+        # 那些行反而是带标签的。这里把当时的上下文**拷一份**给子线程：既保住标签，也不让
+        # 子线程的写回污染父线程（contextvars 的拷贝语义）。
+        ctx = contextvars.copy_context()
+        call = partial(target, *args, **(kwargs or {}))
         with self._lock:
             if self._closed:
                 raise RuntimeError(f"Runtime[{self.scope}] 已关闭，不能再起线程 {name!r}")
@@ -250,9 +258,8 @@ class Runtime:
             # 攒着已退出的那些只会让 `describe()` 越读越长。收尾要 join 仍走 `join_threads()`。
             self._threads = [t for t in self._threads if t.is_alive()]
             t = threading.Thread(
-                target=target,
-                args=args,
-                kwargs=kwargs or {},
+                target=ctx.run,
+                args=(call,),
                 name=NAME_FORMAT.format(scope=self.scope, pool=name),
                 daemon=daemon,
             )
@@ -327,9 +334,14 @@ class Runtime:
         return max(1, self.ceiling - sum(self._sizes.values()))
 
     def submit(self, fn: Callable[..., R], /, *args: object, **kwargs: object) -> Future[R]:
-        """投到默认池（`"main"`）；要独立线程名就 `rt.pool("名字").submit(...)`。"""
+        """投到默认池（`"main"`）；要独立线程名就 `rt.pool("名字").submit(...)`。
+
+        与 `thread()` 一样**传播当前上下文**（`concurrent.futures` 自己不做）：在
+        `prefix_scope(课)` 里投出去的工作，行仍带 `[课]`。注意：**绕过本方法**、直接对
+        `rt.pool(...).submit(...)` 投的任务不继承（那是 stdlib 的池，没有钩子）。
+        """
         self.check()
-        return self.pool().submit(fn, *args, **kwargs)
+        return self.pool().submit(contextvars.copy_context().run, partial(fn, *args, **kwargs))
 
     def map(
         self,
@@ -349,11 +361,12 @@ class Runtime:
             return []
         self.check()
         ex = self.pool(name, workers=workers)
+        # 每个任务拷一份**投递时**的上下文（与 `submit()` 同一口径）：前缀进得去，写回出不来。
         futs: list[Future[R]] = []
         try:
             for item in seq:
                 self.check()
-                futs.append(ex.submit(fn, item))
+                futs.append(ex.submit(contextvars.copy_context().run, partial(fn, item)))
         finally:
             if self._stop.is_set():
                 for f in futs:

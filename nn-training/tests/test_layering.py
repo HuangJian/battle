@@ -165,6 +165,10 @@ TRAINER_ORCHESTRATION = frozenset(
         # 2026-11-14：`batch_plan` 搬去 `biz/`（纯逻辑，真回 B 层）。它此前住这里，靠的是
         # `from trainer.dispatch_queue import mm` 这条 re-export 边 —— 一条转发就能让
         # 「trainer/ 只有编排」这条门禁对纯逻辑视而不见，本集合的「少一个也红」正好接住。
+        #: 2026-11-20：`batch_lanes`（批单元的通道机器）从 `batch_runner` 里拆出来 —— 它照旧
+        #: 调 `worker.eval_local` / `worker.node_identity` / 传输面 ⇒ 仍是编排成员（不是纯逻辑，
+        #: 不入住 `biz/`）；`batch_runner` 经它仍可达，名字不动。
+        "batch_lanes",
         "batch_runner",
         "batch_store",
         "bc_ingest",

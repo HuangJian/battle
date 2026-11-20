@@ -272,7 +272,7 @@ def test_entry_injects_the_real_worker_and_keeps_it_deferred() -> None:
     拆环不能把它弄丢——所以这条与 `plan_run` 的分层断言配套存在。
     """
     src = ENTRY_FILE.read_text(encoding="utf-8")
-    assert "run_job_fn=run_job_fn or _real_run_job" in src, "入口没有再兜底真 worker"
+    assert "setup.run_job_fn or _real_run_job" in src, "入口没有再兜底真 worker"
     assert "remote.worker" not in _top_level_imports(ENTRY_FILE), (
         "run_loop 顶层 import 了 worker ⇒ 顶层不再 torch-light"
     )

@@ -37,6 +37,7 @@ from hub.server import _HubQueue, _JobStore
 from remote import offline_boot, offline_eval
 from remote import weights_delta as wd
 from remote.artifacts import ArtifactStore, sha256_bytes
+from remote.plan_handoff import RunSetup
 from remote.run_loop import (
     _close_eval,
     _maybe_cloud_eval,
@@ -105,20 +106,20 @@ def _run_ctx(
     (tmp_path / "job" / "init_weights.json").write_bytes(b'{"w":0}')
     logs: list[str] = []
     ctx = open_run_context(
-        plan={"start_it": 1, "end_it": 5, "pair_args": {}, "workers": plan_workers},
-        plan_sha256="x" * 64,
-        # ★ 真实契约：`manifest.it == plan.start_it + 1`（plan.start_it=1 ⇒ it=2）。
-        # 旧夹具写 `it=1`（与 start_it 相等）——那正是 2026-10-11 事故的错世界模型。
-        manifest={"runId": "run-eval", "it": 2, "commit": "c" * 40, "course_fp": "f" * 16},
-        job_dir=tmp_path / "job",
-        work_dir=tmp_path / "work",
-        artifacts_dir=tmp_path / "art",
-        eval_on_cloud=eval_on_cloud,
-        eval_slots=eval_slots,
-        rollout_workers=rollout_workers,
-        course=course,
-        log=logs.append,
-    )
+              RunSetup(
+                  plan={"start_it": 1, "end_it": 5, "pair_args": {}, "workers": plan_workers},
+                  plan_sha256="x" * 64,
+                  manifest={"runId": "run-eval", "it": 2, "commit": "c" * 40, "course_fp": "f" * 16},
+                  job_dir=tmp_path / "job",
+                  work_dir=tmp_path / "work",
+                  artifacts_dir=tmp_path / "art",
+                  eval_on_cloud=eval_on_cloud,
+                  eval_slots=eval_slots,
+                  rollout_workers=rollout_workers,
+                  course=course,
+                  log=logs.append,
+              )
+          )
     return ctx, logs
 
 

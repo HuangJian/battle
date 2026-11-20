@@ -148,17 +148,19 @@ def test_push_execute_logs_carry_the_course_name(
 
     state = worker_server.WorkerServerState(tmp_path)
     worker_server._execute_job(
-        state,
-        {"job_id": JID, "course_name": COURSE},
-        b"",
-        None,
-        None,
-        {},
-        tmp_path,
-        "cpu",
-        0,
-        False,
-        log=msgs.append,
+        worker_server.JobExecSpec(
+            state=state,
+            manifest={"job_id": JID, "course_name": COURSE},
+            payload_zip=b"",
+            code_zip=None,
+            ts_code_zip=None,
+            blobs={},
+            work_dir=tmp_path,
+            device="cpu",
+            torch_threads=0,
+            echo=False,
+            log=msgs.append,
+        )
     )
     _assert_all_tagged(msgs)
     assert any(m.endswith("done — result ready for pickup") for m in msgs), msgs

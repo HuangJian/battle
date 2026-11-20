@@ -30,6 +30,7 @@ import remote.run_loop as run_loop_mod
 from remote import deliver_parts
 from remote.deliver_outbox import LocalOutboxDeliverer, read_state, round_path
 from remote.deliver_proc import make_deliverer
+from remote.plan_handoff import RunSetup
 from remote.run_loop import run_standalone
 from tests.remote.test_offline_deliver import RUN, _make_artifacts
 from tests.remote.test_run_loop import (
@@ -55,15 +56,16 @@ def test_run_standalone_with_outbox_writes_rounds_and_constructs_no_http_leg(
     monkeypatch.setattr(deliver_proc_mod, "OfflineDeliverer", _never)
 
     res = run_standalone(
-        artifacts_dir=art,
-        run_job_fn=_FakeRunJob(tmp_path),
-        device="cpu",
-        code_cache_dir=_warm_code_cache(tmp_path),
-        outbox_dir=out,
-        # ★ 任务包就是这么调的：`--outbox` + `--no-deliver`（只关 HTTP，outbox 必须活）。
-        deliver=False,
-        log=_quiet,
-    )
+              RunSetup(
+                  artifacts_dir=art,
+                  run_job_fn=_FakeRunJob(tmp_path),
+                  device="cpu",
+                  code_cache_dir=_warm_code_cache(tmp_path),
+                  outbox_dir=out,
+                  deliver=False,
+                  log=_quiet,
+              )
+          )
     planned = planned_iters(plan)
     assert res["it_end"] == planned[-1]
     # 缺省 `floor_it=0` ⇒ 产物目录账本里的每一轮都物化（**不丢**优先于不发重复体；
@@ -99,23 +101,22 @@ def test_main_passes_the_outbox_and_never_backfills_the_pack_hub_url(
             "ts_code_tree": "",
         },
     )
-    seen: dict[str, Any] = {}
+    captured: list[RunSetup] = []
 
-    def spy(*_a: Any, **kw: Any) -> dict[str, Any]:
-        seen.clear()
-        seen.update(kw)
+    def spy(setup: RunSetup) -> dict[str, Any]:
+        captured.append(setup)
         return {"it_end": 3, "run_state": "noop", "artifacts": {"dir": str(dest), "zip": "x"}}
 
     monkeypatch.setattr(run_loop_mod, "run_standalone", spy)
     argv = ["--bundle", str(tmp_path / "task.zip"), "--artifacts", str(dest)]
 
     assert run_loop_mod.main([*argv, "--outbox", str(out)]) == 0
-    assert seen["outbox_dir"] == str(out)
-    assert seen["hub_url"] == "", "outbox 模式回填 hub_url ⇒ 这条腿就变回 HTTP（且没有 token）"
+    assert captured[-1].outbox_dir == str(out)
+    assert captured[-1].hub_url == "", "outbox 模式回填 hub_url ⇒ 这条腿就变回 HTTP（且没有 token）"
 
     assert run_loop_mod.main(argv) == 0
-    assert seen["outbox_dir"] == ""
-    assert seen["hub_url"] == "https://hub.example", "没有 outbox 时包里的地址仍要照旧带上"
+    assert captured[-1].outbox_dir == ""
+    assert captured[-1].hub_url == "https://hub.example", "没有 outbox 时包里的地址仍要照旧带上"
 
 
 def test_make_deliverer_builds_an_outbox_leg_without_any_hub_credentials(tmp_path: Path) -> None:

@@ -54,6 +54,7 @@ from remote.offline_deliver import (
     reset_rejected,
 )
 from remote.offline_deliver import main as deliver_main
+from remote.plan_handoff import RunSetup
 from remote.run_loop import run_plan_job
 from tests.remote.test_remote_ppo import _boot_server, _http
 from tests.remote.test_run_loop import _FakeRunJob, _prepare, _quiet
@@ -946,19 +947,20 @@ def test_run_plan_job_delivers_each_round_while_the_segment_runs(tmp_path: Path)
     base, store, srv, th = _boot_server(tmp_path)
     try:
         result = run_plan_job(
-            job_id=m["job_id"],
-            manifest=m,
-            job_dir=job_dir,
-            work_dir=tmp_path / "work",
-            plan=plan,
-            plan_sha256=m["plan_sha256"],
-            first_result=first,
-            artifacts_dir=tmp_path / "art",
-            hub_url=base,
-            hub_token="sekret",
-            run_job_fn=_FakeRunJob(tmp_path),
-            log=_quiet,
-        )
+                     RunSetup(
+                         manifest=m,
+                         job_dir=job_dir,
+                         work_dir=tmp_path / "work",
+                         plan=plan,
+                         plan_sha256=m["plan_sha256"],
+                         artifacts_dir=tmp_path / "art",
+                         hub_url=base,
+                         hub_token="sekret",
+                         run_job_fn=_FakeRunJob(tmp_path),
+                         log=_quiet,
+                     ),
+                         first,
+                 )
         run_dir = store.offline_run_dir("run-runloop")
         delivered = sorted(
             int(p.name[3:]) for p in run_dir.glob("it-*") if (p / "weights.json").exists()
@@ -986,20 +988,21 @@ def test_max_iters_capped_segment_does_not_claim_end_it_reached(tmp_path: Path) 
     base, store, srv, th = _boot_server(tmp_path)
     try:
         result = run_plan_job(
-            job_id=m["job_id"],
-            manifest=m,
-            job_dir=job_dir,
-            work_dir=tmp_path / "work",
-            plan=plan,
-            plan_sha256=m["plan_sha256"],
-            first_result=first,
-            artifacts_dir=tmp_path / "art",
-            max_iters=2,
-            hub_url=base,
-            hub_token="sekret",
-            run_job_fn=_FakeRunJob(tmp_path),
-            log=_quiet,
-        )
+                     RunSetup(
+                         manifest=m,
+                         job_dir=job_dir,
+                         work_dir=tmp_path / "work",
+                         plan=plan,
+                         plan_sha256=m["plan_sha256"],
+                         artifacts_dir=tmp_path / "art",
+                         max_iters=2,
+                         hub_url=base,
+                         hub_token="sekret",
+                         run_job_fn=_FakeRunJob(tmp_path),
+                         log=_quiet,
+                     ),
+                         first,
+                 )
         assert result["it_end"] == 3 and result["run_state"] == "complete"
         rec = json.loads(
             (store.offline_run_dir("run-runloop") / "result.json").read_text(encoding="utf-8")
@@ -1144,19 +1147,20 @@ def test_run_plan_job_ignores_delivery_failures(tmp_path: Path, hub_down: _Refus
     """补传坏掉（hub 没人听）时整段照常跑完 —— 这是本功能唯一不可让步的性质。"""
     plan, m, job_dir, first = _prepare(tmp_path, iters=3, start_it=1)
     result = run_plan_job(
-        job_id=m["job_id"],
-        manifest=m,
-        job_dir=job_dir,
-        work_dir=tmp_path / "work",
-        plan=plan,
-        plan_sha256=m["plan_sha256"],
-        first_result=first,
-        artifacts_dir=tmp_path / "art",
-        hub_url="http://127.0.0.1:1",
-        hub_token="sekret",
-        run_job_fn=_FakeRunJob(tmp_path),
-        log=_quiet,
-    )
+                 RunSetup(
+                     manifest=m,
+                     job_dir=job_dir,
+                     work_dir=tmp_path / "work",
+                     plan=plan,
+                     plan_sha256=m["plan_sha256"],
+                     artifacts_dir=tmp_path / "art",
+                     hub_url="http://127.0.0.1:1",
+                     hub_token="sekret",
+                     run_job_fn=_FakeRunJob(tmp_path),
+                     log=_quiet,
+                 ),
+                     first,
+             )
     assert result["it_end"] == 3 and result["run_state"] == "complete"
     assert hub_down.calls, "整段跑完了却一次补传都没试过 —— 「补传坏掉」不是被测出来的"
     assert (tmp_path / "art" / "artifacts.zip").exists()  # 产物照常

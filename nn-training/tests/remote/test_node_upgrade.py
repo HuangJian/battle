@@ -11,7 +11,8 @@
   4) `request_upgrade` 失败（非 200/202）返回 False；
   5) 跨代去重（F1：dedup 键含期望 hash）与冷却窗（F3：窗过后允许重发）；
   6) 脏工作区护栏（远端拒发 / self 节点纯重启且 pullBranch 强制空）；
-  7) `RestartMemo` 的实例隔离（进程级状态只有默认实例，测试自己 new 一份）。
+  7) `RestartMemo` / `BranchLatch` 的实例隔离（进程级状态只有默认实例，测试自己 new 一份）；
+  8) 分支锁存：`set(None)` 收敛成空串（调用方不再各自写 `or ""`）。
 """
 
 from __future__ import annotations
@@ -326,3 +327,21 @@ def test_restart_memos_are_independent() -> None:
     b.reset()
     assert b.seen == {}
     assert a.seen.get("mac") == ("ping", "expected", 1.0)
+
+
+def test_branch_latches_are_independent_and_default_to_empty() -> None:
+    """`BranchLatch` 是实例对象：两个实例互不相见，`set(None)` 收敛成 `""`。
+
+    为什么不是模块字符串 + `global`（2026-11-20 换掉）：字符串看不出「只有 set/get 两个合法
+    操作」，写点也拦不住；类之后 `GLOBAL_BASELINE` 里本文件那条归零，`None` 也不必每个读点
+    各写一遍 `or ""`。
+    """
+    a = nu.BranchLatch()
+    b = nu.BranchLatch()
+    assert a.get() == "" and b.get() == ""
+    a.set("goal-nn")
+    assert a.get() == "goal-nn"
+    assert b.get() == "", "另一个实例不得看到别人的锁存"
+    a.set(None)
+    assert a.get() == "", "None 收成空串（空串 = 不升级，调用方只告警）"
+    assert nu.BranchLatch("feature/x").get() == "feature/x"

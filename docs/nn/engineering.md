@@ -25,6 +25,360 @@
 
 ---
 
+## §236 P0-5 L2 两个单例：`_EXECUTORS` / `_ARBITER` 收进 `common.cell.Cell`（2026-11-20）
+
+**改的是什么（不是「去状态」）**：进程里确实只有一份 eval 线程池和一份仲裁器——要动的不是
+「有没有状态」，而是**谁拥有它**。旧形状：
+
+```
+_ARBITER = EvalArbiter()            # 名字就是唯一写点，靠约定
+
+_EXECUTORS: EvalExecutors | None = None
+def eval_executors() -> EvalExecutors:
+    global _EXECUTORS               # ①
+    if _EXECUTORS is None:          # ② 判断在锁外
+        _EXECUTORS = EvalExecutors()
+    return _EXECUTORS
+
+def reset_eval_arbiter() -> EvalArbiter:
+    global _ARBITER                 # ③ 换实例的那半截没有归属
+    ...
+```
+
+**新形状**：
+
+```
+_EXECUTORS = Cell(EvalExecutors(), retire=EvalExecutors.close_pools)
+def reset_eval_executors() -> EvalExecutors:
+    return _EXECUTORS.replace(EvalExecutors())
+
+_ARBITER: Cell[EvalArbiter] = Cell(EvalArbiter(), retire=EvalArbiter.reset_for_tests)
+def reset_eval_arbiter() -> EvalArbiter:
+    return _ARBITER.replace(EvalArbiter())
+```
+
+公开入口 `eval_executors()` / `eval_arbiter()` / `reset_eval_*()` **签名与语义不变**，三个消费者
+（`trainer/eval_dispatch`、`tests/trainer/test_eval_*`、`tests/worker/test_eval_pool_permits`）
+零改动；`GLOBAL_BASELINE` 里 `worker/eval_exec.py: 2` 与 `worker/eval_arbiter.py: 1` 两条归零。
+
+**三个设计选择，都是被门禁逼出来的（值得记住）**：
+
+1. **不做「首次 get 才构造」**。试过带锁版本：要么在临界区里调注入的构造器 ⇒
+   `test_lock_reentrancy` 的目标面棘轮 20 → 21（每次都得重新论证「它不会回头拿同一把锁」），
+   要么把构造放到锁外 ⇒ 丢了 exactly-once（慢半步的线程造出的第二份被丢弃，正是旧 bug 的变体）。
+   构造本身廉价无副作用，于是 `Cell(...)` 在模块加载时就造好：惰性路径整个消失，棘轮不动。
+2. **退休钩子是构造参数** `retire=`，不是 `replace(old, close=…)`。后者让两处 `reset_*` 退化成
+   形状相同的三行，`test_reuse_ledger` 的结构克隆基线当场 17 → 18。声明在**拥有值**的那一行，
+   既只写一次，也让「换掉就关」成为这份所有权的固定语义（`Cell` 仍不猜怎么关——调用方点名方法）。
+3. **`Cell` 里不放实例、只放类**。`common/__init__.py` 契约 4（无模块级可变状态）对 `common/**`
+   继续成立（`L0_MUTABLE_ALLOWED` 仍是空表）；两个实例都在 `worker/`。
+
+**行为上唯一的差别**：`EvalExecutors()` 从「首次 `eval_executors()` 时造」变成「import
+`worker.eval_exec` 时造」。构造函数只建锁 / `Runtime(scope="eval-exec")` / 三个空字典 ——
+不起线程、不碰盘，`tests/test_python_shape_budget` 与 §119 的「import 无副作用」口径都不受影响。
+
+**守卫**：`tests/common/test_cell.py`（同一对象直到 `replace` / `replace` 退休旧值且只退一次 /
+没声明 `retire` 就只丢引用 / 两个 `Cell` 互不相见）。
+
+## §235 P0-5 最后两行：审计对象已不存在，真正剩的 `global` 换成 `BranchLatch`（2026-11-20）
+
+**先对账（结论：这两行早就不是缺口的所在）**：
+
+* `common/net_http._RACING_OPENERS`（`dict[bool, OpenerDirector]`）**全仓已无此名**——B8 把它换成
+  `@functools.cache racing_opener(no_proxy)`：键就是那个 bool、用例要清就 `cache_clear()`。
+  另外 `no_proxy_opener()` 也是 `functools.cache`。**故意不再对象化**：两个 opener 都**无状态**
+  （`build_opener` 的结果不随环境/时序变），缓存只是省一次构造成本；包成类不会多保护什么，
+  只会多一层没人读的间接。
+* `common/distribution._RESTART_SEEN` / `UPGRADE_BRANCH`：`_RESTART_SEEN` 2026-11-14 已进
+  `RestartMemo`；**升级/重启整簇 2026-11-19 搬去 `remote/node_upgrade.py`**（`fea6cded`，
+  `docs/nn/engineering.md §219`），所以 `common/distribution.py` 里连名字都没有了。
+
+**真正剩下的那一处**：`remote/node_upgrade.py` 的 `UPGRADE_BRANCH: str | None` + `global`，
+即 `GLOBAL_BASELINE` 里本文件那条。它的问题不是「有状态」（训练机当前分支本来就是进程级事实），
+而是**形状**：字符串看不出「只允许 set/get」，`None` 逼每个读点写 `or ""`。
+
+**做法**：`class BranchLatch`（`set()` / `get()`，构造可带初值，`None` 在入口收成 `""`），模块只留
+`_BRANCH = BranchLatch()`；`set_upgrade_branch` / `current_upgrade_branch` **签名不变**（消费者
+`trainer/once_shot`、`run_bc`、`loop_serve`、`dispatch` 零改动），`GLOBAL_BASELINE` 删掉
+`"remote/node_upgrade.py": 1`。`RestartMemo` 早就是这个形状，现在同文件两块状态读起来一致。
+
+**守卫**：`tests/remote/test_node_upgrade.py::test_branch_latches_are_independent_and_default_to_empty`
+（实例互不相见 / 默认空串 / `set(None)` 收成 `""` / 构造初值）；`test_python_shape_budget`
+的 `global` 基线减一（只许调小的方向）。既有的
+`tests/tools/test_dist_upgrade_cli.py::…` 继续守着「`current_upgrade_branch()` 零参、`upgrade_branch_or`
+不得复活」。
+
+**P0-5 至此的状态**：`common/**` 的模块级可变容器 = 0（`L0_MUTABLE_ALLOWED = {}`），审计表八行全部
+标注已修/已搬家。**剩下的不在 P0-5 口径里**：`worker/eval_exec._EXECUTORS`、
+`worker/eval_arbiter._ARBITER` 两个 L2 单例、`hub/http_face` 的类属性，以及 `biz/reward_context`
+的 2 条 `global`（请求作用域上下文，裁定保留）。它们要动各自是一轮独立的重构。
+
+## §234 P0-5 收尾：日志前缀进 `contextvars` 之后，**派生线程**的上下文传播（2026-11-20）
+
+**起点（先说结论）**：`common/log.py` 的前缀与课日志句柄**早已**从模块级 `_PREFIX` /
+`_COURSE_SINKS` 收进 `LogRouter`（`ContextVar` 前缀 + 实例级 sink，`router=` 可注入，2026-11-13），
+`common/fs` / `common/weights_ledger` 同批对象化；`tests/test_python_shape_budget.py::
+test_common_has_no_new_mutable_module_state` 的 `L0_MUTABLE_ALLOWED = {}` 已经把 `common/**`
+压到**零模块级可变容器**。§7 里「P0-5 未完成」那三行是**陈旧记录**，本轮一并改成已修。
+
+**真正缺的那一半**：`contextvars` 的值**不会自动进新线程**（只有 asyncio task 会拷贝上下文）。
+于是 `prefix_scope(课)` 里派生的线程——本仓 75 处派生线程几乎全走 `common.runtime.Runtime.thread`
+（§122：它是裸线程的所有者）——发出来的行读到空前缀，`[课]` 标签**静默消失**。旧实现是模块级
+字符串，那些行反而是带标签的：换句话说，「修掉跨课程串味」的同时把「同课程内部的行标签」也
+削掉了。现场可复现（一行 `threading.Thread` 就是空）。
+
+**做法**：在**派生那一刻**拷贝上下文，用 `ctx.run(partial(...))` 执行——
+`Runtime.thread()` / `Runtime.submit()` / `Runtime.map()` 三个 Runtime 入口都做；`partial` 是因为
+`Context.run` 不收关键字实参。语义是 `contextvars` 的拷贝语义：子线程**读得到**父上下文
+（标签保住），写**回不去**（`set_prefix` 在子线程里不污染父线程）。
+
+**没做的**：`Runtime.pool(...)` 返回的是 stdlib `ThreadPoolExecutor`，绕过
+`submit()`/`map()` 直接 `rt.pool("x").submit(...)` 投出去的任务**不传播**（`concurrent.futures`
+没有钩子，包一层就要换返回类型，1 处生产调用不值）。这一条写进了 `submit()` 的 docstring 与
+§234 的用例注释里，而不是假装它不存在。
+
+**守卫（4 条，`tests/common/test_log_router.py`）**：
+`test_prefix_does_not_leak_across_threads`（隔离：子线程从空上下文开始、写法不回灌父线程）·
+`test_runtime_threads_inherit_the_course_prefix`（继承：子线程的行 == 父线程渲染出的同一行）·
+`test_runtime_submit_and_map_inherit_the_course_prefix`（池的两个 Runtime 入口）·
+`test_sinks_are_per_router_instance`（课日志句柄是**实例**字段：另一个 router 看不见、也不写）。
+
+**账**：`Any` / 宽签名 / 同名 / exact / clone 五条基线一位未动；`common/**` 的模块级可变容器
+仍是 0（`L0_MUTABLE_ALLOWED = {}`）；文本断言基线未涨（继承用例用**全等**比较：期望值是同一个
+`format_line()` 算出来的，不是「文本里有没有」）。
+
+## §233 P0-3 第六刀：`remote/worker_server._execute_job` 的 14 个参数 → `JobExecSpec`（2026-11-20）
+
+**触发**：`remote/worker_server` 的每个 push job 在一条线程里跑 `_execute_job`，而
+`common.runtime.Runtime.thread(...)` **只收位置参数**（源码注释自己写着「写成 `epoch_mult=…`
+会让整个文件语法错误」）⇒ 那个调用点逐位传了 11 个实参，缺省参数（`hub_url` / `push_token` /
+`epoch_mult` / `log`）必须严格按形参顺序摆进去。这与 §232 那个 27 参函数是**同一条失效面**
+（`rescan_nodes` 的第 19 个位置参数错位过一次：线程启动即抛，功能静默失联）。
+
+**做法**：`JobExecSpec`（frozen + kw_only，14 字段）住在 `remote/worker_server.py`；
+`_execute_job(spec)` 只收一个对象，函数体逐字保留（顶部解包；`log` 那行改名 `spec_log` 再
+`tagged(...)` 包一层，因为正文要**重新绑定** `log`）。生产调用点变成
+`thread(_execute_job, JobExecSpec(...), daemon=True, name="run")` —— 位置实参只剩 1 个。
+
+**测试也收敛到同一个对象**：三处直接调用（`test_result_ready` / `test_job_log_course`）原本是
+「前 10 个位置 + 后面关键字」的混合写法，正是错位的温床；现在都构造 spec。
+
+**账**：全仓宽签名 124 → **123**（`remote/worker_server.py` 1 → 0，`WIDE_FUNCS_BASELINE` 条目删除）；
+`Any` 基线该文件原本没有条目（`None`），本次也没加 —— `log` 用 `Callable[[str], None]`。
+
+**守卫**：`tests/remote/test_job_exec_spec.py` —— 字段表闭集 · frozen（行为式）+ 逐字段 `kw_only` ·
+`_execute_job` 形参恰 `["spec"]` · 线程调用点的**位置实参形状**恰 `["JobExecSpec_call"]`
+（探针 `tests/helpers/run_setup_probe.thread_positional_arg_kinds`：多一个位置实参就红）。
+
+**顺手记下的两条坑**：① `tests/test_subproc_util.py` 的「起真服务进程」守卫按字面量
+`"remote.worker_server",` 认人 —— 只读形状的守卫文件要把它写成模块常量，否则会被误判成 spawn
+了服务；② `Any` / 宽签名 / 同名三条基线都只降不涨，**降了要同步改基线**（`test_any_budget` 会把
+「基线比实测高」判红，逼着人把额度收回去）。
+
+## §232 P0-3 第五刀：`trainer/queue_local.rescan_nodes` 的 27 个参数 → `RescanSpec`（2026-11-20）
+
+**触发**：全仓最宽的签名（27 参，其中 19 个位置参数），且它的 docstring 自己记着两次事故 ——
+「v3.9 动态节点发现线程主体（dispatch.run() spawn，19 参逐位对应）」「修复前 dispatch 的 18 个实参
+会整体错位 → 线程启动即抛 `missing 6 required positional arguments`（rollout-rescan 线程报废，
+运行中上线的节点永远不被发现）」。唯一调用点是一串 27 项的 `kwargs=dict(...)`。
+
+**做法**：`RescanSpec`（frozen + kw_only，27 字段）住在 `trainer/queue_local.py`（定义点），
+`rescan_nodes(spec)` 只收一个对象，函数体**逐字保留**（顶部一段解包，与 `open_run_context` /
+`_settle_unit` 同一手法）。装配点 `trainer/queue_worker` 的那条 `rt.thread(...)` 改成
+`kwargs=dict(spec=RescanSpec(...))`——仍然全关键字，但错位只可能发生在**一个**键上。
+
+**为什么字段表要抄 `QueueState` 而不是直接收 `q`**：`trainer/queue_worker` → `trainer/queue_local`
+是单行道（模块头写着「从 dispatch_queue 拆出」），反向 import `QueueState` 就是环。类型照
+`QueueState` 的注解抄（`lock: threading.Lock` / `all_settled: threading.Event` / `iter_id: str`
+——注意 `iter_id` 是 **str**，不是轮号），`Any` 一位都没加（该文件 `Any` 基线 5 未动）。
+
+**字段是引用、不是拷贝**：`spawned_ids` / `alive` / `streaks` / `extra_threads` 与主循环共享
+同一份容器 —— frozen 只保证「这个对象不被重新绑定」，不深拷容器。这是本线程与主循环之间的
+**既有契约**（rescan 要往 `spawned_ids` 里登记、往 `extra_threads` 里补孵线程），写进类的
+docstring，免得下一个读者以为 frozen 等于快照。
+
+**账**：全仓宽签名 125 → **124**（`trainer/queue_local.py` 3 → 2，`WIDE_FUNCS_BASELINE` 下调）；
+LOC 756（预算 1000，加 60 行仍在线下）；`Any` / exact / clone / 同名四条基线一位未动。
+
+**守卫**：`tests/trainer/test_rescan_spec.py` —— 字段表闭集 · frozen（行为式）+ 逐字段 `kw_only` ·
+`rescan_nodes` 形参恰 `["spec"]` · 唯一调用点**按关键字**传 `spec`
+（`tests/helpers/run_setup_probe.thread_kwarg_keys` 从 `.thread(<target>, kwargs=…)` 里读出键名；
+位置传参正是原来那条事故的形态）。改回位置参数、加形参、少字段都会先红在这条上。
+
+## §231 P0-3 第四刀：`RunSetup` —— `open_run_context`(35) / `run_standalone`(29) / `run_plan_job`(25) 三个宽签名收成一个旋钮袋（2026-11-20）
+
+**触发**：`python.refactor.md` §7 明确排的「下一批」——三处宽签名（外加 `RunContext.__init__` 的 29 参）
+住在同一条链上：装配点 `open_run_context`，两条入口 `remote.run_loop.run_standalone`（无 hub 续跑）与
+`remote.plan_run.run_plan_job`（hub 派的整段 job，今天无生产调用者但仍是任务包/产物目录续跑共用的驱动）。
+
+**做法**：`remote/plan_handoff.RunSetup`（frozen + kw_only，37 个字段），四条改动一起落：
+
+- `open_run_context(setup)`：方法体**逐字不变**，顶部一段解包（`plan = setup.plan` …，与 `_settle_unit`
+  同一手法）。原来住 `RunContext.__init__` 的九笔规范化（`int` / `float` / `_positive_mult` /
+  `rotation_policy` / `Path`）上移到 `RunSetup.__post_init__`（frozen ⇒ `object.__setattr__`），
+  于是 `RunContext.__init__(setup, *, store, round_forms, ts_tree_dir)` 只剩搬字段，且 spec 可裸测。
+- 身份位（`plan` / `manifest` / `job_dir` / `work_dir`）在**入口**回填，`_require_run_identity` 是**唯一**
+  校验点（缺哪个点名哪个，`ProtocolError`）。`run_standalone` 从产物目录读回 plan/manifest，
+  `run_plan_job` 从 job payload 取；`RunContext.__init__` 自己只校验它用得到的三样（不要 `job_dir`）。
+- `run_standalone(setup)`：只做入口侧解析（root → plan/manifest/course/工作目录/TS 缓存布局），
+  再 `open_run_context(replace(setup, …))` 回填身份 + 缺省。
+- `run_plan_job(setup, first_result)`：`open_run_context(replace(setup, ts_tree=setup.ts_code_cache_dir))`
+  （历史两值同源）；顺手删**死参** `job_id`（AST 实测函数体 0 读点）。`first_result` **留在形参**——
+  它是上一段的产物，不是旋钮。
+
+**为什么不是「照抄 `RoundSpec` 那种全必填」**：这是**旋钮袋**。云机 A 层 eval / 训练放大 / 轮换 /
+补传 / outbox / push 取消面各一簇，调用方只传自己那几簇——`run_standalone` 的最小形态就是
+`RunSetup(artifacts_dir=…)`（CLI 只给 `--artifacts`）。全必填会把 33 个 kwarg 变成 33 个
+`field=None` 的样板，调用点为了传三个参数得造一整个对象。
+
+**`device` 的缺省按入口取（`RunSetup.device: Any | None = None`）**：两条腿的历史缺省不同
+（`run_standalone` = `"cuda"`、装配点/hub 腿 = `"cpu"`）。合成 spec 时**不许悄悄统一**——那等于
+「一条腿突然不用 GPU 了」；`None` 表「按入口取缺省」，各入口自己解析（`run_standalone` 写
+`"cuda" if setup.device is None else setup.device`）。
+
+**账**（三处基线都只降不涨）：全仓宽签名（>8 参）129 → **125**（`plan_handoff` 2 → 0、
+`plan_run` 1 → 0、`run_loop` 1 → 0，`WIDE_FUNCS_BASELINE` 三条删除）；`Any` 基线
+`plan_handoff` 11 → 9、`plan_run` 10 → 8、`run_loop` 3 → 2（`any_baseline.json`，`test_any_budget`
+的「降了要往下改」判据逼出来的）；同名 ≥3 模块 142 → **143**（`RunSetup` 出现在定义点 + 两条入口；
+与反复登记的「门面转发」同型，exact / clone 两条未动）。
+
+**被否决的方案**：① 只把 `RunContext.__init__` 收成 spec、不动两个入口——那调用点仍是 33 个 kwarg，
+等于没减宽；② 把「只覆盖几个旋钮」做成 builder——`dataclasses.replace` 已经是这个语义
+（入口 `replace(setup, …)` 就是覆盖单旋钮），多一层 builder 只是换个 API 名字。
+
+**守卫**：`tests/remote/test_run_setup_spec.py` —— 字段表冻结（37 个名字的闭集）· frozen（行为式：
+`setattr` 抛 `FrozenInstanceError`）+ 逐字段 `kw_only` · 三条入口的形参表（AST 实测）·
+`_require_run_identity` 在 `open_run_context` 里恰一次 · 两条入口都在函数体里调装配点且**不**自己拼
+`RunContext` · `RunContext.__init__` 恰 5 参。改宽签名/绕装配点都会先红在这一条上。
+
+**教训（落盘时踩到的）**：`ruff format` 在**本仓不是门禁的一部分**（门禁只跑 `ruff check`），
+仓库里大量文件并非 format-clean ⇒ 对着目录跑 `ruff format` 会重排上百个无关文件，并且会把
+行尾契约注释（`# sleep-ok: …`）挤到下一行，直接让 `tests/test_no_sleep_as_sync.py` 变红。
+**本轮全部回退重做**：新代码手写格式、只有改动块受影响。
+
+## §230 P0-3 第三刀：`trainer/batch_runner.py` 拆出通道机器为 `trainer/batch_lanes.py`，`_settle_unit` 收成 `(self, ledger)`（2026-11-20）
+
+**触发**：`python.refactor.md` §7 第②条 —— `BatchEvalRunner._settle_unit` 有 **15 个位置参数**
+（`unit_idx/unit_of/policy/bun/eval_log/batch/window_event/init_sha16/include_scorable/_rt/…`），
+而这些值**全部**是 `_UnitLanes` 自己的字段 ⇒ 本该是 `self.ledger(threads=…)` 一个对象。
+它之所以一直没收：`trainer/batch_runner.py` 的 LOC = **999/1000**（`tests/test_python_loc_budget.py`
+的天花板），加一个 `@dataclass` 就超预算 —— 与 `worker/iter_rollout.py` 同一个前置条件（先拆）。
+
+**拆法**
+
+1. 通道机器 **整块纯搬** 进 `trainer/batch_lanes.py`：`_UnitLanes`（562–1308 行，747 行）·
+   `_UnitPlan` · 它独占的两个常量（`BUSY_BACKOFF_CAP_SEC` / `STUCK_GRACE_SEC`）· 以及它读的
+   全部 import。**一个字没改语义**：切分是脚本化的（逐 hunk `assert old.count(...) == 期望`，
+   全命中才写盘），搬完的 `_settle_unit` 方法体靠顶部 15 行本地解包保持逐字不变。
+2. 新模块加 **`UnitLedger`**（frozen + kw_only，15 字段）与 **`_UnitLanes.ledger(threads=…)`** ——
+   唯一装配点，逐字段 `self.<同名>`。`_settle_unit(self, ledger)` 只收它。
+3. 反向边用 **`LaneOwner` Protocol** 表达（机器读 owner 的 11 个属性 + `_settle_unit`），
+   `batch_lanes` **不** import `batch_runner`（守卫 `test_machine_module_has_no_back_edge_to_the_runner`）。
+4. 收支：`batch_runner.py` 1345 物理行 → **511**（LOC 336）· `batch_lanes.py` **915**（LOC 694）；
+   全仓宽签名 **130 → 129**（`_settle_unit` 15 → 2），`batch_runner.py` 的宽签名基线 3 → 2。
+
+**代价：patch 锚点换家（这是本次最容易被静默吞掉的部分）**
+
+机器的依赖注入靠**模块全局**，所以 `monkeypatch.setattr("trainer.batch_runner.X")` 在机器搬走后
+就是**静默空操作**（单测仍绿、生产不生效 —— 表现为通道日志直接印到真实 stdout）。按「**谁裸名
+读、谁必须绑定**」重新分家：
+
+| 名字 | 旧锚点 | 新锚点 | 谁读 |
+|---|---|---|---|
+| `log` | `trainer.batch_runner` | **两家都绑**（收尾行在 runner、通道行在 lanes） | 两边都读 |
+| `_record_agent_meta` · `run_local_eval_game` | `trainer.batch_runner` | `trainer.batch_lanes` | 只有机器读 |
+| `bun_version` | `trainer.batch_runner` | 不动 | 只有 `_open_unit` 读 |
+| `BUSY_BACKOFF_CAP_SEC` · `STUCK_GRACE_SEC` | `trainer.batch_runner` | `trainer.batch_lanes` | 只有机器读 |
+
+守卫不删、只换锚点（2 个常量/3 个注入点各自的读法都还在）。**`br.STUCK_GRACE_SEC` 这种「名字在、
+没人读」的交叉转发也算红**（`test_runner_only_symbols_are_not_forwarded_by_the_facade` 新增两条
+`hasattr` 反向断言）—— 同一个坑的变体：patch 打哪家都可能空转。
+
+**顺带修的守卫盲区（同一族陷阱第 4 次）**：`test_batch_plan_split` 的入边归属者表原先只扫
+`batch_eval` + `batch_runner` 两个模块（前三次的形态是「换方法」「换类」），机器换**模块**后
+执行侧那两条入边（`is_transient_error` / `node_gate_reason`）会静默退化成 4/6 ⇒ 现在扫三个模块。
+同理 `test_batch_eval_wver` 的 wver 实参守卫（消费侧搬走、赋值点留在 runner）与三个行构造守卫
+（`test_eval_row_v8/v9/v10`、`test_eval_loot_fields`）都改成读新家；`test_node_identity` 的
+`GATE_SITES` 把 `batch_runner.py` 换成 `batch_lanes.py`（节点门的回场口随机器走）。
+
+**基线记账（全部按实测，性质未变）**：G4 宽捕 `trainer/batch_runner.py` 6 → 3 + 新家 3；
+G7 函数级 assert 2 → 1 + 新家 1；G17 墙钟直读 30 → 7 + 新家 23；G5 私有断言
+`test_batch_runner_phases.py` 3 → 1；G19 文本断言 **SOURCE 1210 → 1221**（+11：三个搬家守卫现在逐条
+检两个模块，判据全是 AST/`hasattr`，被口径 B「引用 `.py` 读出来的名字」计进；FORM 仍 1534）。
+`tests/test_layering.py` 的 `TRAINER_ORCHESTRATION` 登记 `batch_lanes`（它照旧调
+`worker.eval_local` / `worker.node_identity` / 传输面 ⇒ 仍是编排成员，不进 `biz/`）。
+
+**被否决**
+
+* 把 `UnitLedger` 塞进 999 行的 `batch_runner.py`（超 LOC 预算；且机器与收尾本来就该分开住）。
+* 让 `batch_lanes` 反向 `import trainer.batch_runner` 取 `log`（成环；且 patch 锚点会再次歧义）——
+  改 Protocol + 各自绑自己的 DI 名。
+* 把 `_settle_unit` 的 15 个形参改成一个裸 `dict`（丢类型、丢 frozen，且形状门禁看不见）。
+
+---
+
+## §229 P0-3 第一/二刀：`EvalRound` 的 40 个关键字参数 → `RoundSpec`；`settle_task` 的 9 个结果位 → `SettleOutcome`（2026-11-20）
+
+**触发**：`python.refactor.md` §P0-3 的剩余清单里最大的一处 ——
+`worker/eval_arbiter.py::EvalRound.__init__` 有 **40 个关键字参数**（`seq/it/iter_id/…/log`）。
+那些值本来就住在两处：派发器配置（`EvalDispatcher.self`）与每轮的派生状态
+（`trainer/eval_dispatch._EvalRun`）。构造时又被逐个摊开一次 ⇒ 「加一个装载值」要改四处
+（`_EvalRun` 字段 / 构造调用 / `__init__` 形参 / 赋值），漏一处就是运行期 `AttributeError`，
+而 40 个名字在调用点根本读不过来（现场：`_eval_register` 里 45 行的 `EvalRound(...)` 块）。
+
+**修法（与 `PublishSpec` / `TrainSpec` 同法）**
+
+1. `RoundSpec`（frozen + kw_only，40 字段）是**唯一**装载对象；`EvalRound.__init__(spec)` 只收它，
+   轮内可变状态（锁 / 节点表 / 计数 / `clock`）照旧在构造里现建，字段名逐个照抄 ⇒
+   **执行层与测试读的 `rnd.total` / `rnd.pending` 一个没变**（`eval_exec`、`eval_self_rescue`、
+   `object.__new__(EvalRound)` 的两个测试夹具都不用改）。
+2. 装配点 = `trainer/eval_dispatch._round_spec(r, meta_ok, record_failed_meta)`：值就住在那儿
+   （派发器配置 + `_EvalRun`），**不是**在 `eval_arbiter` 里再摊一次。`_eval_register` 因此少
+   了一半的开头解包，只剩 `arb/execs/meta_path/snapshot_path/local_slots/reused/it/_log`。
+3. 顺带把注入的回调**按形状声明**（`RowBuilder` / `LogFn` / `MetaOkHook` / `FailedMetaHook`
+   四个别名）：`worker/eval_arbiter.py` 的 `Any` 从 **21 → 16**（`tests/golden/any_baseline.json`
+   同步调小）。
+4. 第二刀 `SettleOutcome`（frozen + kw_only，8 位）：`settle_task` 从 `grant` + 10 个关键字
+   参数（`ok/manifest/err/transient/task_lost/err_errno/msg_head/**wall_sec**/node_alive`）
+   收成 `(grant, outcome)`。**`wall_sec` 是死参**：调用方算了递进来，仲裁体里一次都没读
+   （它只喂 `_record_and_log`，那一份仍由调用方自己留着）⇒ 直接删，不进对象。
+
+**读数**：`worker/eval_arbiter.py` 的宽签名 **2 → 0**（`tests/test_python_shape_budget.py`
+的 `WIDE_FUNCS_BASELINE` 条目**删除**，不是留 0）；全仓宽签名 **132 → 130**（86 文件）。
+LOC（门禁口径）：`eval_arbiter` 915 → **920**、`eval_dispatch` 716 → **710**、`eval_exec`
+340 → **337** —— 两个数据类（62 行声明）换掉 40 行形参 + 10 行结果形参，净增 5 行是"契约写在
+类体里"的代价，换来调用点读得懂。
+
+**证明**（守 `tests/worker/test_eval_round_spec.py`，6 条）：
+
+| 守卫 | 判据 | 旧码会红吗（实测） |
+|---|---|---|
+| `test_round_constructor_takes_one_object` | `inspect.signature(EvalRound)` = `(self, spec)` | **红**：旧 40 参 |
+| `test_round_spec_field_table_is_frozen` | 字段名元组逐字冻结（改契约必须改表） | — |
+| `test_round_spec_is_keyword_only_and_frozen` | 全字段 `kw_only` + `FrozenInstanceError` | — |
+| `test_round_builds_its_runtime_state_from_the_spec` | `pending` 是 `todo` 的**副本**（不共享）、`node_caps[local]`、钟取自 `window`+`post_budget`、`log()` 真转发 | — |
+| `test_production_assembles_the_spec_in_one_place` | 生产面构造 `RoundSpec` 的文件集合 == `{trainer/eval_dispatch.py}` | — |
+| `test_production_passes_one_object_to_eval_round` | 生产面 `EvalRound(...)` 只传 1 个位置参数、0 关键字 | **红**：旧调用 `args=0 kw=40` |
+
+**两处门禁自己先红，改的是源头不是基线**：① G6 抑制符 —— 测试里两个 `# type: ignore`
+（位置传参 + 属性赋值）换成「问 `dataclasses.fields(...).kw_only`」与「直接调
+`spec.__setattr__`」，**零抑制**；② G5 私有断言 —— 回调接线原来是断言 `rnd._row_builder is …`
+等 7 个私有名，改成只验带公开入口的那个（`rnd.log()` 真转发）+ `rnd.local_fn`（公开），
+其余私有名不许在测试里被摸。
+
+**否决**：① 把 `EvalRound` 自己变成 `@dataclass`（40 字段全在类体）—— 综合出来的 `__init__`
+不是 AST 里的 `FunctionDef` ⇒ 形状门禁**数不到它**，等于"让门禁看不见代码"，正是本仓最不许的
+那种绿；② `__init__` 里 `for f in fields(spec): setattr(self, f.name, …)` —— mypy 推不出属性类型，
+要么补 40 行类级注解（比现在更长），要么全仓读点变成 `Any`；③ 把 40 个字段按语义再切三个小对象
+（路径 / 限额 / 回调）—— `rnd.eval_dir` 这类读点有 230 处，改路径就是改执行层契约，与本次
+「只动构造面」的目的相反；④ 保留 `wall_sec` 进 `SettleOutcome`（"以后可能有人读"）—— 死参就是
+死参，要读时再加一行。
+
+**教训**：参数对象的收益不在行数，而在**装配点唯一**：`RoundSpec` 的值只有 `_round_spec` 一处
+来源，改字段名时编译器会指到唯一的那行；40 个关键字参数则让"谁给了这个值"无从追。同一文件里
+第二处宽签名（`settle_task`）顺手收掉，是因为它和第一处共享同一个原因（执行层把一组同位值摊开），
+分成两刀做只会让 `eval_arbiter` 的基线一半是旧形状。
+
 ## §228 门禁不能读本机训练产物：4 条 spawn 用例改「零权重现造」+ f4 容差改成逐位（2026-11-20）
 
 **触发**：`bun run check` 在干净树上稳定红 5 条——`export-rl-rollout-opening`(3) +

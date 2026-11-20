@@ -547,7 +547,15 @@ BASELINE_FORM = 1535
 #: 2026-11-19 再抬到 **1210**（+3，实测）：B7-S2 的队列结构守卫新增「26 个 scope 转发壳 /
 #:   `QueueScope` 签名与 QueuePeer 逐参数一致 / 状态写者表包含 `self.hub.X` 形态」三条 AST
 #:   判据（同一已知限边：基类集合与转发壳没有运行时出口；口径 A 仍 0 条）。
-BASELINE_SRC = 1210
+#: 2026-11-20 再抬到 **1221**（+11，实测）：`trainer/batch_runner.py` 拆出
+#:   `trainer/batch_lanes.py`（通道机器 + `UnitLedger`）—— 三个搬家守卫现在**逐条检两个模块**
+#:   （定义表 / import 闭集 / 裸名注入点 / 常量归属 / 入边归属者），判据全是 AST 与 `hasattr`
+#:   （没有一个是在比措辞），但口径 B 的已知限边就是「引用由 `.py` 读出来的名字的 assert 一律
+#:   计入」。逐笔：`test_batch_runner_phases.py` +6（`_settle_unit(self, ledger)` 与
+#:   `_UnitLanes.ledger()` 的装配点守卫）、`test_batch_runner_split.py` +5（两家对照的闭集 /
+#:   常量归属 / 无反向边），`test_batch_lanes_split.py` 净 0（删掉的那条文本判据已改成
+#:   AST 定义表判据，计数不变）。口径 A 仍 1534（新判据无一挂文本）。
+BASELINE_SRC = 1221
 #: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。派生式（基线九成，见
 #: `tests/helpers/budget.py`）：两个计数器各自随自己的基线收紧，清理基线时不必回填数字。
 def _floor_of_form() -> int:

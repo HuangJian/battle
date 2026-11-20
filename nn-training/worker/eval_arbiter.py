@@ -27,11 +27,13 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import count
 from pathlib import Path
 from typing import Any
 
+from common.cell import Cell
 from worker.eval_yield import (
     hold_for_local,
     local_release_due,
@@ -144,99 +146,145 @@ class Grant:
     gid: int = 0
 
 
+#: 一轮 eval 注入的回调签名（`RoundSpec` 的字段类型；派发器按这些接、执行层按这些调）。
+#: 具体实现住各自的家（行构造在 `worker/eval_local`、落盘在 `common/fs`…），这里只钉形状。
+RowBuilder = Callable[..., dict[str, Any]]
+LogFn = Callable[[str], None]
+#: 成功局的采样机健康行：`(nid, manifest, task, wall_sec, win)`。
+MetaOkHook = Callable[[str, dict[str, Any], tuple[int, int], float | None, int], None]
+#: 失败局归因：`(nid, task, reason)`。
+FailedMetaHook = Callable[[str, tuple[int, int], str], None]
+
+
+@dataclass(frozen=True, kw_only=True)
+class RoundSpec:
+    """一轮 eval 的**全部装载值**（`EvalRound.__init__` 曾是 40 个关键字参数）。
+
+    `EvalRound(spec)` 之后只读它：轮内可变状态（锁 / 节点表 / 计数 / `clock`）由
+    `EvalRound.__init__` 现建。frozen ⇒ 轮跑起来后装载值不会被改，`self.spec` 与轮上
+    字段永远一致。
+
+    装配点只有一个（`trainer/eval_dispatch._round_spec`）——值就住在那儿（派发器配置 +
+    `_EvalRun` 的派生值），没有第二个地方把它们摊开。见 `python.refactor.md` §P0-3。
+    """
+
+    seq: int
+    it: int
+    iter_id: str
+    eval_iter_id: str
+    wver: str
+    key16: str
+    course_fp: str
+    args: Any
+    bun: str
+    eval_dir: Path
+    eval_jsonl: Path
+    meta_path: Path
+    task_timeout: float
+    #: 窗口时长：只喂 `RoundClock`（轮上不再单独留一份，免得两处钟）。
+    window: float
+    post_budget: float
+    snapshot_path: str | None
+    local_slots: int
+    fallback_only: bool
+    reserved: int
+    local_gate: threading.Event | None
+    fail_streak_max: int
+    soft_streak_max: int
+    req_scope: str
+    total: int
+    pairs: list[tuple[int, int]]
+    #: 待办 → `pending`（构造时复制成 deque；原列表仍归调用方记账）。
+    todo: list[tuple[int, int]]
+    weights_kind: str
+    weights_bytes: bytes | None
+    attempts_max: int
+    attempts_transient_max: int
+    record_retry_max: int
+    reuse_node: str
+    # —— 注入的回调：落行 / 机器健康账 / 失败账 / 本机执行 / 收工断连 / 日志 ——
+    row_builder: RowBuilder
+    append_row: Callable[..., None]
+    meta_ok: MetaOkHook
+    record_failed_meta: FailedMetaHook
+    fail_recorder: Callable[..., None]
+    local_fn: Callable[..., dict[str, Any]]
+    #: 收工断连（返回值是「断了几条」，仲裁不看 ⇒ 按 `object` 接，不钉实现细节）。
+    abort_scope: Callable[[], object]
+    log: LogFn
+
+
+@dataclass(frozen=True, kw_only=True)
+class SettleOutcome:
+    """一局的结果（`settle_task` 曾是 `grant` + 9 个关键字参数，其中 `wall_sec` 从没人读）。
+
+    执行层总要把这几个位一起交上来（ok / 失败分类 / 归因），而仲裁只按它们分派回队、
+    记故障或落失败账 ⇒ 一个对象表达「这局怎么结束的」。`wall_sec` 不在这里：它只喂
+    落账面（`_record_and_log`），仲裁从来不看它。
+    """
+
+    ok: bool
+    manifest: dict[str, Any] | None = None
+    err: str = ""
+    transient: bool = False
+    task_lost: bool = False
+    err_errno: str = ""
+    msg_head: str = ""
+    node_alive: bool = False
+
+
 class EvalRound:
     """一轮 eval 的任务表 + 上下文（线程无关；线程只借它的上下文执行 Grant）。"""
 
-    def __init__(
-        self,
-        *,
-        seq: int,
-        it: int,
-        iter_id: str,
-        eval_iter_id: str,
-        wver: str,
-        key16: str,
-        course_fp: str,
-        args: Any,
-        bun: str,
-        eval_dir: Path,
-        eval_jsonl: Path,
-        meta_path: Path,
-        task_timeout: float,
-        window: float,
-        post_budget: float,
-        snapshot_path: str | None,
-        local_slots: int,
-        fallback_only: bool,
-        reserved: int,
-        local_gate: threading.Event | None,
-        fail_streak_max: int,
-        soft_streak_max: int,
-        req_scope: str,
-        total: int,
-        pairs: list[tuple[int, int]],
-        todo: list[tuple[int, int]],
-        weights_kind: str,
-        weights_bytes: bytes | None,
-        attempts_max: int,
-        attempts_transient_max: int,
-        record_retry_max: int,
-        reuse_node: str,
-        row_builder: Any,
-        append_row: Any,
-        meta_ok: Any,
-        record_failed_meta: Any,
-        fail_recorder: Any,
-        local_fn: Any,
-        abort_scope: Any,
-        log: Any,
-    ) -> None:
-        self.seq = seq
-        self.it = it
-        self.iter_id = iter_id
-        self.eval_iter_id = eval_iter_id
-        self.wver = wver
-        self.key16 = key16
-        self.course_fp = course_fp
-        self.args = args
-        self.bun = bun
-        self.eval_dir = eval_dir
-        self.eval_jsonl = eval_jsonl
-        self.meta_path = meta_path
-        self.task_timeout = task_timeout
-        self.clock = RoundClock(window, post_budget)
-        self.post_budget = post_budget
-        self.snapshot_path = snapshot_path
-        self.local_slots = local_slots
-        self.fallback_only = fallback_only
-        self.reserved = reserved
-        self.local_gate = local_gate
-        self.fail_streak_max = fail_streak_max
-        self.soft_streak_max = soft_streak_max
-        self.req_scope = req_scope
-        self.total = total
-        self.pairs = pairs
-        self.pending: deque[tuple[int, int]] = deque(todo)
-        self.weights_kind = weights_kind
-        self.weights_bytes = weights_bytes
-        self.attempts_max = attempts_max
-        self.attempts_transient_max = attempts_transient_max
-        self.record_retry_max = record_retry_max
-        self.reuse_node = reuse_node
-        self._row_builder = row_builder
-        self._append_row = append_row
-        self._meta_ok = meta_ok
-        self._record_failed_meta = record_failed_meta
-        self._fail_recorder = fail_recorder
-        self.local_fn = local_fn
-        self._abort_scope = abort_scope
-        self._log = log
+    def __init__(self, spec: RoundSpec) -> None:
+        """装载 `RoundSpec`，轮内状态在这里现建（P0-3：40 个关键字参数 → 一个对象）。"""
+        self.spec = spec
+        self.seq = spec.seq
+        self.it = spec.it
+        self.iter_id = spec.iter_id
+        self.eval_iter_id = spec.eval_iter_id
+        self.wver = spec.wver
+        self.key16 = spec.key16
+        self.course_fp = spec.course_fp
+        self.args = spec.args
+        self.bun = spec.bun
+        self.eval_dir = spec.eval_dir
+        self.eval_jsonl = spec.eval_jsonl
+        self.meta_path = spec.meta_path
+        self.task_timeout = spec.task_timeout
+        self.clock = RoundClock(spec.window, spec.post_budget)
+        self.post_budget = spec.post_budget
+        self.snapshot_path = spec.snapshot_path
+        self.local_slots = spec.local_slots
+        self.fallback_only = spec.fallback_only
+        self.reserved = spec.reserved
+        self.local_gate = spec.local_gate
+        self.fail_streak_max = spec.fail_streak_max
+        self.soft_streak_max = spec.soft_streak_max
+        self.req_scope = spec.req_scope
+        self.total = spec.total
+        self.pairs = spec.pairs
+        self.pending: deque[tuple[int, int]] = deque(spec.todo)
+        self.weights_kind = spec.weights_kind
+        self.weights_bytes = spec.weights_bytes
+        self.attempts_max = spec.attempts_max
+        self.attempts_transient_max = spec.attempts_transient_max
+        self.record_retry_max = spec.record_retry_max
+        self.reuse_node = spec.reuse_node
+        self._row_builder = spec.row_builder
+        self._append_row = spec.append_row
+        self._meta_ok = spec.meta_ok
+        self._record_failed_meta = spec.record_failed_meta
+        self._fail_recorder = spec.fail_recorder
+        self.local_fn = spec.local_fn
+        self._abort_scope = spec.abort_scope
+        self._log = spec.log
 
         self._lock = threading.Lock()
         self.nodes: dict[str, dict[str, Any]] = {}
         # 每节点许可（c）与本轮在该节点的在飞数：claim 时扣、settle 时还。
         # 池线程数只是物理载体；没有许可账时，历史大池会在下轮解冻后按旧槽数抢任务。
-        self.node_caps: dict[str, int] = {LOCAL_NODE: max(0, int(local_slots))}
+        self.node_caps: dict[str, int] = {LOCAL_NODE: max(0, int(spec.local_slots))}
         self.node_inflight: dict[str, int] = {}
         self.remote_ready = False
         self.attempts: dict[tuple[int, int], int] = {}
@@ -587,24 +635,14 @@ class EvalRound:
             self.retry_at[task] = time.time() + requeue_backoff_sec(leg)
         self.pending.append(task)
 
-    def settle_task(
-        self,
-        grant: Grant,
-        *,
-        ok: bool,
-        manifest: dict[str, Any] | None = None,
-        err: str = "",
-        transient: bool = False,
-        task_lost: bool = False,
-        err_errno: str = "",
-        msg_head: str = "",
-        wall_sec: float | None = None,
-        node_alive: bool = False,
-    ) -> bool:
+    def settle_task(self, grant: Grant, outcome: SettleOutcome) -> bool:
         """一局收尾。返回 True = 调用方应落盘（`record_with_retry`）。"""
         task = grant.task
         nid = grant.node
-        manifest = manifest or {}
+        ok = outcome.ok
+        err, transient, task_lost = outcome.err, outcome.transient, outcome.task_lost
+        err_errno, msg_head = outcome.err_errno, outcome.msg_head
+        node_alive = outcome.node_alive
         with self._lock:
             if grant.gid in self._done_grants:
                 return False
@@ -1131,15 +1169,14 @@ class EvalArbiter:
         return None
 
 
-_ARBITER = EvalArbiter()
+#: 进程级仲裁器住 `Cell`（P0-5）：模块只留一个持有者，换实例不再需要 `global`。
+_ARBITER: Cell[EvalArbiter] = Cell(EvalArbiter(), retire=EvalArbiter.reset_for_tests)
 
 
 def eval_arbiter() -> EvalArbiter:
-    return _ARBITER
+    return _ARBITER.get()
 
 
 def reset_eval_arbiter() -> EvalArbiter:
-    global _ARBITER
-    _ARBITER.reset_for_tests()
-    _ARBITER = EvalArbiter()
-    return _ARBITER
+    """换一份新仲裁器（测试夹具 / 真停机后重来）；旧的那份在 `retire` 里复位。"""
+    return _ARBITER.replace(EvalArbiter())

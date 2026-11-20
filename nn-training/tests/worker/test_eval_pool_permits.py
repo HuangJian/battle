@@ -23,6 +23,7 @@ from worker.eval_arbiter import (
     WAIT_MAX_SEC,
     EvalRound,
     RoundClock,
+    SettleOutcome,
 )
 from worker.eval_exec import EvalExecutors
 from worker.eval_self_rescue import grow_pools, next_grow_sec
@@ -126,7 +127,7 @@ def test_claim_unique_stops_at_node_cap_and_settle_returns_permit() -> None:
     assert rnd.claim_unique("n1", now) is None
     assert rnd.pending, "无许可时任务必须留在队列"
 
-    assert rnd.settle_task(g1, ok=True) is True
+    assert rnd.settle_task(g1, SettleOutcome(ok=True)) is True
     assert rnd.node_inflight["n1"] == 1
     g3 = rnd.claim_unique("n1", now)
     assert g3 is not None and g3.task == (0, 3), "结算归还许可后应继续取队首"
@@ -174,8 +175,8 @@ def test_eval_waste_counters_record_race_and_dup() -> None:
     assert replica is not None
     assert rnd.tail_race_grants == 1
 
-    assert rnd.settle_task(first, ok=True) is True
-    assert rnd.settle_task(replica, ok=True) is False
+    assert rnd.settle_task(first, SettleOutcome(ok=True)) is True
+    assert rnd.settle_task(replica, SettleOutcome(ok=True)) is False
     assert rnd.dup_games == 1
 
 

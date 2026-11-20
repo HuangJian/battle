@@ -83,25 +83,23 @@ WIDE_FUNCS_BASELINE = {
     "remote/opt_standard.py": 2,
     "remote/payload_pack.py": 1,
     "remote/payload_proc.py": 1,
-    "remote/plan_handoff.py": 2,
-    "remote/plan_run.py": 1,
     "remote/push_client.py": 1,
     "remote/push_dispatch.py": 2,
     "remote/push_register.py": 1,
     # 2026-11-19 合入上游：`run` 的交易参数 + relay 通道参数（原 1 处 → 2 处）。
     "remote/rollout_node.py": 2,
-    "remote/run_loop.py": 1,
     "remote/tailscale_boot.py": 1,
     "remote/train_core.py": 5,
     "remote/upload_proc.py": 2,
     "remote/worker.py": 2,
-    "remote/worker_server.py": 1,
     "tools/c9_critic_calibration.py": 1,
     "tools/p0_auc_probe.py": 1,
     "tools/spatial-probe-flatcv.py": 1,
     "tools/spatial-probe.py": 2,
     "tools/tpu-probe.py": 1,
-    "trainer/batch_runner.py": 3,
+    #: 2026-11-20：`_settle_unit` 的 15 参收成 `(self, ledger)`，通道机器搬去
+    #: `trainer/batch_lanes.py` ⇒ 本文件 3 → **2**（新家没有新增宽签名）。
+    "trainer/batch_runner.py": 2,
     "trainer/bc_ingest.py": 3,
     "trainer/bc_loop.py": 2,
     "trainer/dispatch.py": 1,
@@ -110,7 +108,7 @@ WIDE_FUNCS_BASELINE = {
     "trainer/loop_plan.py": 1,
     "trainer/loop_serve.py": 1,
     "trainer/loop_transport.py": 1,
-    "trainer/queue_local.py": 3,
+    "trainer/queue_local.py": 2,
     "trainer/rollout_phase.py": 1,
     "trainer/stream.py": 1,
     "worker/bc_collect.py": 1,
@@ -118,7 +116,10 @@ WIDE_FUNCS_BASELINE = {
     "worker/bc_eval.py": 2,
     "worker/breaker.py": 1,
     "worker/cmd.py": 1,
-    "worker/eval_arbiter.py": 2,
+    # 2026-11-20（python.refactor.md P0-3 第一/二刀）：`EvalRound.__init__` 的 40 个关键字
+    # 参数收进 `RoundSpec`（装配点 = `trainer/eval_dispatch._round_spec`），`settle_task`
+    # 的 9 个结果位（含一个从没人读的 `wall_sec`）收进 `SettleOutcome` ⇒ **条目删除，
+    # 本文件宽签名归零**。守 `tests/worker/test_eval_round_spec.py`。
     "worker/eval_local.py": 1,
     "worker/eval_track.py": 1,
     "worker/events.py": 2,
@@ -159,15 +160,12 @@ GLOBAL_BASELINE = {
     "biz/reward_context.py": 2,
     "hub/admin.py": 1,
     "remote/http.py": 1,
-    "remote/node_upgrade.py": 1,
     "remote/payload_slim.py": 1,
     "remote/tailscale_boot.py": 1,
     "remote/wire.py": 1,
     "remote/worker.py": 1,
     "tools/forkdist.py": 2,
     "tools/task.py": 1,
-    "worker/eval_arbiter.py": 1,
-    "worker/eval_exec.py": 2,
 }
 
 _MUTATORS = frozenset(

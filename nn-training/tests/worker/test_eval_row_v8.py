@@ -73,13 +73,13 @@ def test_batch_eval_record_uses_shared_helper():
     # 从本文件反推仓根：门禁（`nn-python-gate.sh`）的 cwd 是 `nn-training/`，
     # 写死仓根相对路径会 FileNotFoundError（2026-09-24 修）。
     # 2026-09-25 并入 origin 后：`batch_eval` 已拆成门面（`trainer/batch_eval.py`），执行器与它的
-    # `record` 住在 `trainer/batch_runner.py` ⇒ 锚点跟着搬（写死旧路径会让这条守卫**静默失效**：
-    # 门面里没有 `record`，断言只会变成在读一份无关文件）。
-    src = (pathlib.Path(__file__).resolve().parents[3] / "nn-training/trainer/batch_runner.py").read_text(
+    # `record` 住在 `trainer/batch_lanes.py`（2026-11-20 随通道机器搬离 `batch_runner.py`）⇒
+    # 锚点跟着搬（写死旧路径会让这条守卫**静默失效**：门面里没有 `record`，断言只会变成在读一份无关文件）。
+    src = (pathlib.Path(__file__).resolve().parents[3] / "nn-training/trainer/batch_lanes.py").read_text(
         encoding="utf-8"
     )
-    # 判据是「batch_runner 还引不引用聚合入口」（AST 名字），不是文件里有没有这串字：
+    # 判据是「通道机器还引不引用聚合入口」（AST 名字），不是文件里有没有这串字：
     # 换行/别名/参数里塞注释都不会影响结论。
     assert {n.id for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Name)} >= {"eval_metric_fields"}, (
-        "batch_runner 不再引用 eval_metric_fields（行构造与 v8 聚合入口断了）"
+        "通道机器不再引用 eval_metric_fields（行构造与 v8 聚合入口断了）"
     )
