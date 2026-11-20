@@ -36,6 +36,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from remote.plan_handoff import RunSetup
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -437,17 +439,18 @@ def test_iteration_manifest_carries_per_stage_quota(tmp_path: Path) -> None:
         return _iter_result(m, weights)
 
     run_loop_mod.run_plan_job(
-        job_id=manifest["job_id"],
-        manifest=manifest,
-        job_dir=job_dir,
-        work_dir=tmp_path / "work",
-        plan=plan,
-        plan_sha256=manifest["plan_sha256"],
-        first_result=first,
-        artifacts_dir=tmp_path / "art",
-        run_job_fn=_fake_run_job,
-        deliver=False,
-        log=lambda _m: None,
+        RunSetup(
+            manifest=manifest,
+            job_dir=job_dir,
+            work_dir=tmp_path / "work",
+            plan=plan,
+            plan_sha256=manifest["plan_sha256"],
+            artifacts_dir=tmp_path / "art",
+            run_job_fn=_fake_run_job,
+            deliver=False,
+            log=lambda _m: None,
+        ),
+            first,
     )
     assert calls, "自主段必须至少合成一轮 job"
     for m in calls:

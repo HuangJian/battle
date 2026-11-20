@@ -192,7 +192,13 @@ BASELINE_CLONE = 17
 #: **2026-11-20 抬同名 1 格（141 → 142）的账**：`remote/replay_corpus.ConvertPool` 协议声明
 #: `summary()`（长驻转换池的唯一读面，生产实现 = `worker.serve_pool`），与 `course_archive` /
 #: `serve_pool` 的同名**契约名**凑成 ≥3 —— 是协议镜像，不是新实现。
-BASELINE_SAME_NAME_GE3 = 142
+#: **2026-11-20 再抬同名 1 格（142 → 143）的账**：P0-3 第五刀把 `open_run_context`(35) /
+#: `run_standalone`(29) / `run_plan_job`(25) 三个宽签名收成一个 `RunSetup`（定义住
+#: `remote/plan_handoff.py`）。名字因此在三个模块出现：定义点 + 两条入口（`run_loop` 构造它、
+#: `plan_run` 收它做形参并按门面约定 `as RunSetup` 转出）。这与上面反复点名的「门面转发 /
+#: 入口同款形参」是同一类合法形态 —— 恰恰是这一刀**消掉**了三份重复的旋钮声明；
+#: exact / clone 两条都没动（16 / 17），真重复仍会被它们抓。
+BASELINE_SAME_NAME_GE3 = 143
 
 
 def _stems(modules: frozenset[str]) -> frozenset[str]:

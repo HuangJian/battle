@@ -35,6 +35,7 @@ import remote.delta_files as delta_files
 import remote.opt_delta as od
 import remote.opt_standard as os_std
 from remote.artifacts import ArtifactStore
+from remote.plan_handoff import RunSetup
 from remote.round_forms import RoundForms
 
 
@@ -364,17 +365,18 @@ def test_plan_run_wires_both_halves(tmp_path: Path) -> None:
         )
 
     run_plan_job(
-        job_id=m["job_id"],
-        manifest=m,
-        job_dir=job_dir,
-        work_dir=tmp_path / "work",
-        plan=plan,
-        plan_sha256=m["plan_sha256"],
-        first_result=first,
-        course=_Course(2),
-        artifacts_dir=tmp_path / "art",
-        run_job_fn=fake,
-        log=_quiet,
+        RunSetup(
+            manifest=m,
+            job_dir=job_dir,
+            work_dir=tmp_path / "work",
+            plan=plan,
+            plan_sha256=m["plan_sha256"],
+            course=_Course(2),
+            artifacts_dir=tmp_path / "art",
+            run_job_fn=fake,
+            log=_quiet,
+        ),
+            first,
     )
 
     # `_prepare` 的 `first_result` 已经是 it2（首位结果），所以这里只跑 it3/it4。

@@ -247,34 +247,34 @@ def test_run_loop_main_passes_stop_file_to_run_standalone(
     """`--stop-file` 不能在 CLI 这一层被静默丢掉（丢掉的形态是「取消永远不生效」）。"""
     import remote.run_loop as run_loop
 
-    captured: dict[str, object] = {}
+    seen: list[object] = []
+
+    def _spy(setup: object) -> dict[str, object]:
+        seen.append(setup)
+        return {"it_end": 0, "run_state": "noop", "artifacts": {"dir": "d", "zip": ""}}
+
     monkeypatch.setattr(run_loop, "load_planned_manifest", lambda _root: ({"start_it": 0}, {}))
-    monkeypatch.setattr(
-        run_loop,
-        "run_standalone",
-        lambda **kw: (
-            captured.update(kw),
-            {"it_end": 0, "run_state": "noop", "artifacts": {"dir": "d", "zip": ""}},
-        )[1],
-    )
+    monkeypatch.setattr(run_loop, "run_standalone", _spy)
     stop = tmp_path / "stop"
     rc = run_loop.main(["--artifacts", str(tmp_path), "--stop-file", str(stop)])
     assert rc == 0
-    assert captured["stop_file"] == str(stop), captured
+    assert seen and getattr(seen[-1], "stop_file", None) == str(stop), seen
 
 
 def test_run_context_carries_stop_file(tmp_path: Path) -> None:
     """更窄的接线判据：`RunContext(stop_file=…)` 逐字保留（`plan_run._drive` 读它）。"""
     from remote.artifacts import ArtifactStore
-    from remote.plan_handoff import RunContext
+    from remote.plan_handoff import RunContext, RunSetup
 
     store = ArtifactStore(tmp_path / "art", run_id="r1", log=lambda _m: None)
     ctx = RunContext(
-        plan={},
-        plan_sha256="p" * 64,
-        manifest={},
+        RunSetup(
+            plan={},
+            plan_sha256="p" * 64,
+            manifest={},
+            work_dir=tmp_path,
+            stop_file=str(tmp_path / "stop"),
+        ),
         store=store,
-        work_dir=tmp_path,
-        stop_file=str(tmp_path / "stop"),
     )
     assert ctx.stop_file == str(tmp_path / "stop")

@@ -47,6 +47,7 @@ from common.protocol import (
 )
 from remote import plan_run as plan_run_mod
 from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
+from remote.plan_handoff import RunSetup
 from remote.run_loop import (
     _combined,
     open_run_context,
@@ -242,19 +243,20 @@ def _run(
     plan, m, job_dir, first = _prepare(tmp_path, iters=iters, start_it=start_it)
     fake = _FakeRunJob(tmp_path)
     result = run_plan_job(
-        job_id=m["job_id"],
-        manifest=m,
-        job_dir=job_dir,
-        work_dir=tmp_path / "work",
-        plan=plan,
-        plan_sha256=m["plan_sha256"],
-        first_result=first,
-        artifacts_dir=tmp_path / "art",
-        run_job_fn=fake,
-        max_iters=max_iters,
-        budget_sec=budget_sec,
-        log=_quiet,
-    )
+                 RunSetup(
+                     manifest=m,
+                     job_dir=job_dir,
+                     work_dir=tmp_path / "work",
+                     plan=plan,
+                     plan_sha256=m["plan_sha256"],
+                     artifacts_dir=tmp_path / "art",
+                     run_job_fn=fake,
+                     max_iters=max_iters,
+                     budget_sec=budget_sec,
+                     log=_quiet,
+                 ),
+                     first,
+             )
     return plan, m, fake, result, tmp_path / "art"
 
 
@@ -305,17 +307,18 @@ def test_run_standalone_loads_course_snapshot_into_iter_spec(
     art = tmp_path / "art"
     # 先跑一段（anchor + 1 轮），让产物目录成形；再续跑就轮到 run_standalone 接管
     run_plan_job(
-        job_id=m["job_id"],
-        manifest=m,
-        job_dir=job_dir,
-        work_dir=tmp_path / "work",
-        plan=plan,
-        plan_sha256=m["plan_sha256"],
-        first_result=first,
-        artifacts_dir=art,
-        run_job_fn=_FakeRunJob(tmp_path),
-        max_iters=1,
-        log=_quiet,
+        RunSetup(
+            manifest=m,
+            job_dir=job_dir,
+            work_dir=tmp_path / "work",
+            plan=plan,
+            plan_sha256=m["plan_sha256"],
+            artifacts_dir=art,
+            run_job_fn=_FakeRunJob(tmp_path),
+            max_iters=1,
+            log=_quiet,
+        ),
+            first,
     )
     # 产物目录放课程快照（与 import_bundle 落盘同名同路径）
     (art / "course.jsonc").write_text(_COURSE_FIXTURE, encoding="utf-8")
@@ -332,11 +335,13 @@ def test_run_standalone_loads_course_snapshot_into_iter_spec(
 
     monkeypatch.setattr(plan_run_mod, "iter_spec", spy)
     run_standalone(
-        artifacts_dir=art,
-        max_iters=0,
-        code_cache_dir=_warm_code_cache(tmp_path),
-        run_job_fn=_FakeRunJob(tmp_path),
-        log=_quiet,
+        RunSetup(
+            artifacts_dir=art,
+            max_iters=0,
+            code_cache_dir=_warm_code_cache(tmp_path),
+            run_job_fn=_FakeRunJob(tmp_path),
+            log=_quiet,
+        )
     )
     assert (
         seen["course"] is not None
@@ -433,14 +438,16 @@ def test_combined_rejects_result_without_any_report(tmp_path: Path) -> None:
         plan_sha256=m["plan_sha256"],
     )
     ctx = open_run_context(
-        plan=build_plan(_args(), it=1, iters_total=2, rotate_seed=1, log=_quiet),
-        plan_sha256=m["plan_sha256"],
-        manifest=m,
-        job_dir=job_dir,
-        work_dir=tmp_path / "w2",
-        artifacts_dir=tmp_path / "art2",
-        log=_quiet,
-    )
+              RunSetup(
+                  plan=build_plan(_args(), it=1, iters_total=2, rotate_seed=1, log=_quiet),
+                  plan_sha256=m["plan_sha256"],
+                  manifest=m,
+                  job_dir=job_dir,
+                  work_dir=tmp_path / "w2",
+                  artifacts_dir=tmp_path / "art2",
+                  log=_quiet,
+              )
+          )
     with pytest.raises(ProtocolError) as ei:
         _combined(ctx, last_it=1, session=[], state="noop")
     assert "iters 为空" in str(ei.value)
@@ -517,13 +524,15 @@ def test_run_standalone_applies_both_multipliers(tmp_path: Path) -> None:
     base_pairs = len(pairs_for(plan, planned_iters(plan)[1]))
     fake = _FakeRunJob(tmp_path)
     run_standalone(
-        artifacts_dir=art,
-        max_iters=0,
-        sample_mult=2.0,
-        epoch_mult=1.5,
-        code_cache_dir=_warm_code_cache(tmp_path),
-        run_job_fn=fake,
-        log=_quiet,
+        RunSetup(
+            artifacts_dir=art,
+            max_iters=0,
+            sample_mult=2.0,
+            epoch_mult=1.5,
+            code_cache_dir=_warm_code_cache(tmp_path),
+            run_job_fn=fake,
+            log=_quiet,
+        )
     )
     assert len(fake.calls) == 1, fake.calls
     mm = fake.calls[0]["manifest"]
@@ -545,12 +554,14 @@ def test_budget_stops_before_starting_next_iteration(tmp_path: Path) -> None:
     assert [r["it"] for r in result["iters"]] == [m["it"]]  # 只有锚点轮
     fake2 = _FakeRunJob(tmp_path)
     res2 = run_standalone(
-        artifacts_dir=art,
-        run_job_fn=fake2,
-        device="cpu",
-        code_cache_dir=_warm_code_cache(tmp_path),
-        log=_quiet,
-    )
+               RunSetup(
+                   artifacts_dir=art,
+                   run_job_fn=fake2,
+                   device="cpu",
+                   code_cache_dir=_warm_code_cache(tmp_path),
+                   log=_quiet,
+               )
+           )
     assert res2["it_end"] == plan["end_it"]
     # 续跑从锚点**之后**接上（锚点轮不重跑）
     assert [c["manifest"]["it"] for c in fake2.calls] == planned_iters(plan)[1:]
@@ -577,12 +588,14 @@ def test_standalone_resume_continues_without_duplicate_rows(tmp_path: Path) -> N
     before = _ledger(art)
     fake2 = _FakeRunJob(tmp_path)
     res = run_standalone(
-        artifacts_dir=art,
-        run_job_fn=fake2,
-        device="cpu",
-        code_cache_dir=_warm_code_cache(tmp_path),
-        log=_quiet,
-    )
+              RunSetup(
+                  artifacts_dir=art,
+                  run_job_fn=fake2,
+                  device="cpu",
+                  code_cache_dir=_warm_code_cache(tmp_path),
+                  log=_quiet,
+              )
+          )
     assert [c["manifest"]["it"] for c in fake2.calls] == planned_iters(plan)[2:]
     after = _ledger(art)
     assert [r["it"] for r in after] == planned_iters(plan)  # 起点不记账
@@ -603,16 +616,16 @@ def test_main_accepts_artifacts_only_and_leaves_the_local_plan_alone(
     _plan, _m, _fake, _result, art = _run(tmp_path)  # 一份完整产物
     plan_before = (art / ArtifactStore.PLAN_NAME).read_bytes()
     man_before = (art / ArtifactStore.MANIFEST_NAME).read_bytes()
-    seen: dict[str, Any] = {}
+    captured: list[RunSetup] = []
 
-    def spy(*_a: Any, **kw: Any) -> dict[str, Any]:
-        seen.update(kw)
+    def spy(setup: RunSetup) -> dict[str, Any]:
+        captured.append(setup)
         return {"it_end": 3, "run_state": "noop", "artifacts": {"dir": str(art), "zip": "x"}}
 
     monkeypatch.setattr(run_loop_mod, "run_standalone", spy)
     assert run_loop_mod.main(["--artifacts", str(art)]) == 0
-    assert Path(str(seen["artifacts_dir"])) == art
-    assert seen["plan"] and seen["plan"]["end_it"] > 0, "计划/清单必须从产物目录读"
+    assert Path(str(captured[-1].artifacts_dir)) == art
+    assert captured[-1].plan and captured[-1].plan["end_it"] > 0, "计划/清单必须从产物目录读"
     assert (art / ArtifactStore.PLAN_NAME).read_bytes() == plan_before
     assert (art / ArtifactStore.MANIFEST_NAME).read_bytes() == man_before
 
@@ -626,25 +639,23 @@ def test_main_reads_the_lease_file_and_hands_it_to_the_runner(
     文件读不到 / 不给这个 flag ⇒ 空串（不抛）——凭据缺失只意味着「不推进」，不该拦住训练。
     """
     _plan, _m, _fake, _result, art = _run(tmp_path)  # 一份完整产物
-    seen: dict[str, Any] = {}
+    captured: list[RunSetup] = []
 
-    def spy(*_a: Any, **kw: Any) -> dict[str, Any]:
-        seen.update(kw)
+    def spy(setup: RunSetup) -> dict[str, Any]:
+        captured.append(setup)
         return {"it_end": 3, "run_state": "noop", "artifacts": {"dir": str(art), "zip": "x"}}
 
     lease_file = tmp_path / "hub.lease"
     lease_file.write_text("lease-9\n", encoding="utf-8")
     monkeypatch.setattr(run_loop_mod, "run_standalone", spy)
     assert run_loop_mod.main(["--artifacts", str(art), "--hub-lease-file", str(lease_file)]) == 0
-    assert seen["hub_lease"] == "lease-9"
-    seen.clear()
+    assert captured[-1].hub_lease == "lease-9"
     assert run_loop_mod.main(["--artifacts", str(art)]) == 0
-    assert seen["hub_lease"] == "", "不给 flag ⇒ 不带租约（补传照跑，只是不推进起点）"
-    seen.clear()
+    assert captured[-1].hub_lease == "", "不给 flag ⇒ 不带租约（补传照跑，只是不推进起点）"
     assert run_loop_mod.main(
         ["--artifacts", str(art), "--hub-lease-file", str(tmp_path / "missing")]
     ) == 0
-    assert seen["hub_lease"] == "", "文件读不到也不拦训练"
+    assert captured[-1].hub_lease == "", "文件读不到也不拦训练"
 
 
 def test_drive_says_the_local_segment_is_done_not_just_noop(tmp_path: Path) -> None:
@@ -656,11 +667,13 @@ def test_drive_says_the_local_segment_is_done_not_just_noop(tmp_path: Path) -> N
     _plan, _m, _fake, _result, art = _run(tmp_path)  # 整段已跑完
     logs: list[str] = []
     run_standalone(
-        artifacts_dir=art,
-        max_iters=0,
-        code_cache_dir=_warm_code_cache(tmp_path),
-        run_job_fn=_FakeRunJob(tmp_path),
-        log=logs.append,
+        RunSetup(
+            artifacts_dir=art,
+            max_iters=0,
+            code_cache_dir=_warm_code_cache(tmp_path),
+            run_job_fn=_FakeRunJob(tmp_path),
+            log=logs.append,
+        )
     )
     hit = [m for m in logs if "段落已完成" in m]
     assert hit, logs
@@ -678,17 +691,18 @@ def test_reclaim_skips_iterations_already_in_artifacts(tmp_path: Path) -> None:
     )
     fake2 = _FakeRunJob(tmp_path)
     res = run_plan_job(
-        job_id=m["job_id"],
-        manifest=m,
-        job_dir=job_dir,
-        work_dir=tmp_path / "work",
-        plan=plan,
-        plan_sha256=m["plan_sha256"],
-        first_result=first,
-        artifacts_dir=art,
-        run_job_fn=fake2,
-        log=_quiet,
-    )
+              RunSetup(
+                  manifest=m,
+                  job_dir=job_dir,
+                  work_dir=tmp_path / "work",
+                  plan=plan,
+                  plan_sha256=m["plan_sha256"],
+                  artifacts_dir=art,
+                  run_job_fn=fake2,
+                  log=_quiet,
+              ),
+                  first,
+          )
     assert [c["manifest"]["it"] for c in fake2.calls] == planned_iters(plan)[len(done) :]
     assert [r["it"] for r in _ledger(art)] == planned_iters(plan)  # 起点不记账
     assert res["it_end"] == plan["end_it"]
@@ -701,16 +715,17 @@ def test_iteration_failure_finalizes_artifacts_and_stays_resumable(tmp_path: Pat
     bad = _FakeRunJob(tmp_path, fail_at=3)
     with pytest.raises(RetryableError):
         run_plan_job(
-            job_id=m["job_id"],
-            manifest=m,
-            job_dir=job_dir,
-            work_dir=tmp_path / "work",
-            plan=plan,
-            plan_sha256=m["plan_sha256"],
-            first_result=first,
-            artifacts_dir=art,
-            run_job_fn=bad,
-            log=_quiet,
+            RunSetup(
+                manifest=m,
+                job_dir=job_dir,
+                work_dir=tmp_path / "work",
+                plan=plan,
+                plan_sha256=m["plan_sha256"],
+                artifacts_dir=art,
+                run_job_fn=bad,
+                log=_quiet,
+            ),
+                first,
         )
     # 锚点轮（it2）由 first_result 给定、不经替身；失败的是 it3（重试 3 次）
     assert [c["manifest"]["it"] for c in bad.calls] == [3, 3, 3]
@@ -720,12 +735,14 @@ def test_iteration_failure_finalizes_artifacts_and_stays_resumable(tmp_path: Pat
     assert ArtifactStore(art, run_id="run-runloop").weights_path(2).exists()
     good = _FakeRunJob(tmp_path)
     res = run_standalone(
-        artifacts_dir=art,
-        run_job_fn=good,
-        device="cpu",
-        code_cache_dir=_warm_code_cache(tmp_path),
-        log=_quiet,
-    )
+              RunSetup(
+                  artifacts_dir=art,
+                  run_job_fn=good,
+                  device="cpu",
+                  code_cache_dir=_warm_code_cache(tmp_path),
+                  log=_quiet,
+              )
+          )
     assert [c["manifest"]["it"] for c in good.calls] == [3, 4]
     assert res["it_end"] == 4
     assert [r["it"] for r in _ledger(art)] == [2, 3, 4]  # 起点（it1）不记账
@@ -788,27 +805,31 @@ def test_open_run_context_rejects_misaligned_plan_and_manifest(tmp_path: Path) -
     art = tmp_path / "art9"
     with pytest.raises(ProtocolError):
         open_run_context(
-            plan=plan,
-            plan_sha256=bad["plan_sha256"],
-            manifest=bad,
-            job_dir=job_dir,
-            work_dir=tmp_path / "w9",
-            artifacts_dir=art,
-            log=_quiet,
+            RunSetup(
+                plan=plan,
+                plan_sha256=bad["plan_sha256"],
+                manifest=bad,
+                job_dir=job_dir,
+                work_dir=tmp_path / "w9",
+                artifacts_dir=art,
+                log=_quiet,
+            )
         )
     assert not art.exists(), "拒收必须发生在任何落盘之前（不留脏产物）"
     # 正对照：只把 `it` 换回合法值，**同一个包**就开跑，并把起点按不变式落在 `it-{start_it}`
     # （判据在产物字节上，不在消息措辞上——「拒绝的确实是这条差一」由这份对照成立）
     ok = tmp_path / "art9ok"
     ctx = open_run_context(
-        plan=plan,
-        plan_sha256=m["plan_sha256"],
-        manifest=m,
-        job_dir=job_dir,
-        work_dir=tmp_path / "w9ok",
-        artifacts_dir=ok,
-        log=_quiet,
-    )
+              RunSetup(
+                  plan=plan,
+                  plan_sha256=m["plan_sha256"],
+                  manifest=m,
+                  job_dir=job_dir,
+                  work_dir=tmp_path / "w9ok",
+                  artifacts_dir=ok,
+                  log=_quiet,
+              )
+          )
     assert ctx.store.weights_path(plan["start_it"]).read_bytes() == ANCHOR_IN
 
 
@@ -818,13 +839,15 @@ def test_seed_checkpoint_requires_payload_weights(tmp_path: Path) -> None:
     (job_dir / "init_weights.json").unlink()
     with pytest.raises(ProtocolError) as ei:
         open_run_context(
-            plan=plan,
-            plan_sha256=m["plan_sha256"],
-            manifest=m,
-            job_dir=job_dir,
-            work_dir=tmp_path / "w3",
-            artifacts_dir=tmp_path / "art3",
-            log=_quiet,
+            RunSetup(
+                plan=plan,
+                plan_sha256=m["plan_sha256"],
+                manifest=m,
+                job_dir=job_dir,
+                work_dir=tmp_path / "w3",
+                artifacts_dir=tmp_path / "art3",
+                log=_quiet,
+            )
         )
     assert "起点权重" in str(ei.value)
 

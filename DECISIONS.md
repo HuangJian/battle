@@ -8570,3 +8570,27 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `GATE_SITES` 全部改读新家。基线按实测簿记（G4 6→3+3 · G7 2→1+1 · G17 30→7+23 · G5 3→1 ·
   G19 SOURCE 1210→1221，性质未变）。
 - **全文**：`docs/nn/engineering.md §230`。
+
+## §2026-11-20-run-setup-spec（`RunSetup`：三个宽签名收成一个旋钮袋，`device` 缺省按入口取）
+
+- **背景**：`python.refactor.md` §7 的「下一批」——`remote/plan_handoff.open_run_context`(35)、
+  `remote/run_loop.run_standalone`(29)、`remote/plan_run.run_plan_job`(25) 与 `RunContext.__init__`(29)
+  是同一条链上的四个宽签名（装配点 + 两条入口 + 状态对象）。已有 `PublishSpec` / `TrainSpec` /
+  `RoundSpec` / `UnitLedger` 的先例。
+- **决定**：引入 `remote/plan_handoff.RunSetup`（frozen + kw_only，37 字段）：
+  - 三条入口都只收它（`run_plan_job` 另收上一份产物 `first_result`）；
+  - **除身份位外全部带缺省**——它是**旋钮袋**，不是 `RoundSpec` 那种全必填（各调用方只传自己那几簇，
+    `run_standalone` 最小形态 = `RunSetup(artifacts_dir=…)`）；
+  - 规范化（`int` / `float` / 放大倍数 / 轮换 / `Path`）从 `RunContext.__init__` 上移到
+    `RunSetup.__post_init__`（frozen ⇒ `object.__setattr__`），`RunContext.__init__` 只剩 4 参；
+  - 身份位（plan / manifest / job_dir / work_dir）由入口回填，`_require_run_identity` 是**唯一**校验点。
+- **`device` 的缺省不统一**：`RunSetup.device = None` 表「按入口取缺省」，因为两条腿历史缺省不同
+  （`run_standalone` = `"cuda"`、装配点 = `"cpu"`）。悄悄统一 = 一条腿突然不用 GPU 了。
+- **顺手删死参**：`run_plan_job(job_id=…)` 函数体 0 读点（AST 实测）。`first_result` 留在形参
+  （它是上一段的产物，不是旋钮）。
+- **账**：全仓宽签名 129 → 125（`WIDE_FUNCS_BASELINE` 三条删除）；`Any` 基线三处下调
+  （11→9 / 10→8 / 3→2）；同名 ≥3 模块 142 → 143（已在 `tests/test_reuse_ledger.py` 记账：门面转发同型）。
+- **否决**：① 只收 `RunContext.__init__` 不动两个入口（调用点仍是 33 个 kwarg，等于没减宽）；
+  ② 加一层 builder（`dataclasses.replace` 已经是「只覆盖几个旋钮」的语义）。
+- **守卫**：`tests/remote/test_run_setup_spec.py`（字段表闭集 / frozen + kw_only / 三条入口形参表 /
+  身份守卫恰一处 / 两条入口都走装配点 / `RunContext.__init__` 恰 5 参）。

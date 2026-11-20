@@ -37,7 +37,7 @@ import json
 import shutil
 import time
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -204,103 +204,190 @@ def verify_plan_file(job_dir: str | Path, manifest: dict, *, log: Callable[[str]
 # ------------------------------------------------------------------ 运行上下文
 
 
+@dataclass(frozen=True, kw_only=True)
+class RunSetup:
+    """一次段启动的**全部旋钮**（`open_run_context` 原来是 35 个关键字参数）。
+
+    三条腿共用这一个对象：`remote.run_loop.run_standalone`（无 hub 续跑）·
+    `remote.plan_run.run_plan_job`（hub 派的整段 job）· `open_run_context`（装配点）。
+    为什么不是「照抄 `RoundSpec` 那种全必填」：这是**旋钮袋** —— 云机 A 层 eval / 训练放大 /
+    轮换 / 补传 / outbox / push 取消面各一簇，调用方只传自己那几簇（`run_standalone` 的
+    最小形态就是 `RunSetup(artifacts_dir=…)`）⇒ 除身份位外全部带缺省。
+
+    **规范化在 `__post_init__`**（`int` / `float` / 放大倍数 / 轮换三态 / `Path`）—— 原来这九笔
+    住在 `RunContext.__init__`，那是「状态对象顺手当了校验器」：`RunSetup` 变值对象后可以
+    裸测（不需要产物目录），`RunContext.__init__` 只剩搬字段。
+
+    身份位（`plan` / `manifest` / `job_dir` / `work_dir`）在**入口**回填并校验：
+    `run_standalone` 从产物目录读回 plan/manifest，`run_plan_job` 从 job payload 取；
+    装配点用 `_require_run_identity` 一个守卫（缺哪个就点名哪个）。
+    """
+
+    # ---- 身份（`run_standalone` 可以从产物目录回填前两个）----
+    plan: dict | None = None
+    plan_sha256: str = ""
+    manifest: dict | None = None
+    job_dir: Path | None = None
+    work_dir: Path | None = None
+    artifacts_dir: str | Path | None = None
+    # ---- 执行面 ----
+    #: 执行设备：`None` = **按入口取缺省** —— 离线续跑腿（`run_standalone`）的历史缺省是
+    #: `"cuda"`，hub 派发的整段 job 与装配点是 `"cpu"`。合成一个 spec 时**不许悄悄统一**：
+    #: 那等于「一条腿突然不用 GPU 了」。
+    device: Any | None = None
+    torch_threads: int = 0
+    code_cache_dir: Path | None = None
+    ts_code_cache_dir: Path | None = None
+    ts_tree: Path | None = None
+    #: 全离线：随产物/任务包携带的两份字节（`run_job` 的 preloaded）——为空时 `run_job` 会回落
+    #: 去下载（在线链路），或直接报错（纯离线且未带包）。
+    code_zip_bytes: bytes | None = None
+    ts_code_zip_bytes: bytes | None = None
+    course: Any = None
+    max_iters: int = 0
+    budget_sec: float = 0.0
+    # ---- 云机 A 层评估（可选；见 `remote/offline_eval.py`）----
+    eval_on_cloud: bool = False
+    eval_slots: int = 0
+    eval_game_timeout_sec: float = 0.0
+    #: rollout 并行局数（0 = 按本机核数自动；装配点解析成 `cpu_worker_slots()`）。
+    rollout_workers: int = 0
+    #: ★ 2026-10-24：高配云机的训练侧放大（1.0 = 计划/课程原样）。只影响训练采样与 PPO 遍数，
+    #: 不改评估语料、不改计划身份。
+    sample_mult: float = 1.0
+    epoch_mult: float = 1.0
+    #: ★ 2026-10-28（云机轮换）：三态开关（见 `ROTATION_POLICIES`）。
+    rotation: str = "auto"
+    # ---- 产物补传（可选；缺任一即关）----
+    hub_url: str = ""
+    hub_token: str = ""
+    #: hub 侧的课程键（多课程 hub 的补传归位键；空 = 单课程 hub）。见 `OfflineDeliverer.course`。
+    hub_course: str = ""
+    #: 本课租约 token（P1-1：补传体里的 `lease_token`；空 = 补传照落但不推进活动起点）。
+    hub_lease: str = ""
+    #: 网络侧**备份抽屉**（`--backup-root`）：产物没能回传成功的轮写这里。
+    #: 空 = 按 `resolve_backup_root` 的兜底链推（生产路径上由 `offline_boot` 显式传）。
+    backup_root: str | Path | None = None
+    deliver: bool = True
+    #: ★ 2026-10-23（plan/push-mode-notebooks §6.4a / P0-1）：非空 = **本地 outbox 模式**。
+    #: 这个分支**先于** `deliver` 判定：`--outbox` + `--no-deliver` 的语义是「只关 HTTP 补传，
+    #: outbox 必须活」（否则训练照跑、outbox 永远空、最后被 hold stale 判掉线）。
+    outbox_dir: str | Path | None = ""
+    #: ★ 2026-10-23（W4）：push 腿的取消哨兵（`--stop-file`，由 worker 服务的
+    #: `/offline/push/cancel` 写）。空 = 无取消面。
+    stop_file: str | Path | None = ""
+    #: ★ 2026-10-24（F7）：outbox 的**地板** —— `it <= floor_it` 的轮不物化（hub 已经有的）。
+    #: 值来自 push 任务的 `resume_it`；**缺省 0 = 全部物化**（错的方向必须是不丢数据）。
+    floor_it: int = 0
+    #: hub 给的续跑锚点目录（`--resume-dir`；离线续跑腿用，装配点不看它 —— 见
+    #: `remote.run_loop.apply_resume_overlay`）。
+    resume_dir: str | Path | None = None
+    #: 换实现不该动调用方（`DelivererProcess` 与本进程内线程版同接口，见 `DelivererLike`）。
+    deliverer: DelivererLike | None = None
+    run_job_fn: Callable[..., dict] | None = None
+    log: Callable[[str], None] = _log_default
+
+    def __post_init__(self) -> None:
+        """规范化（原来那九笔在 `RunContext.__init__`；frozen ⇒ `object.__setattr__`）。"""
+        job_dir = Path(self.job_dir) if self.job_dir is not None else None
+        work_dir = Path(self.work_dir) if self.work_dir is not None else None
+        plan = self.plan or {}
+        budget = self.budget_sec or plan.get("budget_sec", 0.0) or 0.0
+        for name, value in (
+            ("job_dir", job_dir),
+            ("work_dir", work_dir),
+            ("torch_threads", int(self.torch_threads or 0)),
+            ("max_iters", int(self.max_iters or 0)),
+            ("budget_sec", float(budget or 0.0)),
+            ("sample_mult", _positive_mult(self.sample_mult, "sample_mult")),
+            ("epoch_mult", _positive_mult(self.epoch_mult, "epoch_mult")),
+            ("rotation", rotation_policy(self.rotation)),
+            ("eval_slots", int(self.eval_slots or 0)),
+            ("eval_game_timeout_sec", float(self.eval_game_timeout_sec or 0.0)),
+            ("rollout_workers", int(self.rollout_workers or 0)),
+            ("stop_file", str(self.stop_file or "")),
+            ("outbox_dir", str(self.outbox_dir or "")),
+            ("floor_it", int(self.floor_it or 0)),
+        ):
+            object.__setattr__(self, name, value)
+
+
+def _require_run_identity(setup: RunSetup) -> tuple[dict, str, dict, Path, Path]:
+    """`RunSetup` 的五个身份位：入口回填之后必须齐（缺哪个就点名哪个）。
+
+    两条入口各自先解析再调用（`run_standalone` 从产物目录读回 plan/manifest，`run_plan_job`
+    从 job payload 取）——这里是**同一个**守卫，不是第二套判据。
+    """
+    plan, manifest = setup.plan, setup.manifest
+    if plan is None or manifest is None:
+        raise ProtocolError(
+            "RunSetup 缺 plan/manifest —— 这条腿必须先解析出计划与 manifest"
+            "（run_standalone 从产物目录回填，run_plan_job 从 job payload 取）"
+        )
+    if setup.job_dir is None or setup.work_dir is None:
+        raise ProtocolError("RunSetup 缺 job_dir/work_dir —— 产物目录与工作目录是必填身份")
+    return plan, setup.plan_sha256, manifest, Path(setup.job_dir), Path(setup.work_dir)
+
+
 class RunContext:
-    """一段自主运行的全部句柄（计划 + 产物 + 传递下去的执行参数）。"""
+    """一段自主运行的全部句柄（计划 + 产物 + 传递下去的执行参数）。
+
+    构造 = 「搬 `RunSetup` 的字段 + 装两个**派生**句柄」：`store`（产物目录的写面）与
+    `round_forms` / `ts_tree_dir`（装配点算好的轮形态与 TS 运行时根）。规范化与校验已上移到
+    `RunSetup`（§P0-3 第三刀），本类不再自带第二套 `int()` / `_positive_mult()`。
+    """
 
     def __init__(
         self,
+        setup: RunSetup,
         *,
-        plan: dict,
-        plan_sha256: str,
-        manifest: dict,
         store: ArtifactStore,
-        work_dir: Path,
-        #: 网络侧备份抽屉（产物没能回传成功的轮写这里；见 `remote/offline_deliver.backup_pending`）。
-        #: 由 `open_run_context` 经 `resolve_backup_root` 解析（生产路径 = `<网络产物根>/backup`）。
-        backup_root: Path | None = None,
-        device: Any = "cpu",
-        torch_threads: int = 0,
-        code_cache_dir: Path | None = None,
-        ts_code_cache_dir: Path | None = None,
-        # 全离线：随产物/任务包携带的两份字节（`run_job` 的 preloaded）——为空时
-        # `run_job` 会回落去下载（在线链路），或直接报错（纯离线且未带包）。
-        code_zip_bytes: bytes = b"",
-        ts_code_zip_bytes: bytes = b"",
-        course: Any = None,
-        max_iters: int = 0,
-        budget_sec: float = 0.0,
-        #: ★ 2026-10-24：高配云机的训练侧放大（1.0 = 计划/课程原样）。样本倍数作用在
-        #: **每轮采样量**（volume 课放大 target/配额；固定对集课补新种子），epoch 倍数
-        #: 作用在**每轮 PPO 遍数**。两者都不碰评估语料，也不改盘上的 plan/manifest 身份。
-        sample_mult: float = 1.0,
-        epoch_mult: float = 1.0,
-        #: ★ 2026-10-28（云机轮换）：笔记本开关（`--rotation auto|on|off`）。
-        #: auto = 跟随计划（包带轮换就逐轮换窗口）；on = 计划没带就拒跑（不猜）；
-        #: off = 把计划里的轮换降级成全关采样（账本 `rotation.override` 留痕）。
-        rotation: str = "auto",
-        #: 产物补传（「中途能连上 hub 就自动恢复在线回传」）：None = 这条腿没有补传
-        #: （纯离线且没给 hub 地址，或用户显式关掉）——产物照常落本地。
-        #: 类型是 `DelivererLike`：两种实现（进程内线程 / 独立子进程）同接口，换实现不动调用方。
-        deliverer: DelivererLike | None = None,
-        run_job_fn: Callable[..., dict] | None = None,
-        # ---- 云机 A 层评估（`eval_on_cloud`；见 `remote/offline_eval.py`）----
-        #: True = 每 `eval_every` 轮在本机跑一遍 A 层语料（同 in-loop 口径，永不拖垮训练）。
-        eval_on_cloud: bool = False,
-        eval_slots: int = 0,
-        eval_game_timeout_sec: float = 0.0,
-        #: rollout 的并行局数（`--rollout-workers`）。**它覆盖计划里钉着的 `plan.workers`**：
-        #: 后者是**导出那台机器**的规模（常在 8~16 核的本机导出，却要在 96 vCPU 的云机上跑），
-        #: 而 rollout 与 eval 是（**且必须**）交替跑的 ⇒ 两者共用同一口径
-        #: `common.platform_utils.cpu_worker_slots()`（用户 2026-09-22 立口径；2026-10-03 校准
-        #: 预留 4 → 2；2026-10-04 校准 ≤4 核全给：「如果 cpu 少于等于 4 核，则使用全部 cores」）。
-        #: 「交替」由
-        #: `EVAL_ALTERNATE_WAIT_SEC` 那条有界等保证（见它）。
-        #: 0 = 按本机核数自动。
-        rollout_workers: int = 0,
-        #: ★ 2026-10-23（plan/push-mode-notebooks §6.4 / W4）：取消哨兵文件（`--stop-file`）。
-        #: 非空时 `plan_run` 在**轮边界**（下一轮开始前）看它：命中 ⇒ 本段 `state="cancelled"`，
-        #: 产物自洽可续跑。空 = 没有取消面（pull / 本机训练）。
-        stop_file: str = "",
-        ts_tree_dir: Path | None = None,
-        #: 轮形态（`plan/anchor-full-rounds`）：None = 不分形（= 旧的「opt 每轮整份」）。
-        #: 驱动侧据此按轮设 `w_fmt`（锚点轮要整份权重）；落盘侧由 `store.after_write` 动手。
         round_forms: Any = None,
-        log: Callable[[str], None] = _log_default,
+        ts_tree_dir: Path | None = None,
     ) -> None:
+        # `RunContext` 不要 `job_dir`（产物根住在 `store.root`）：这里只校验它**用得到**的三样。
+        plan, manifest = setup.plan, setup.manifest
+        if plan is None or manifest is None or setup.work_dir is None:
+            raise ProtocolError(
+                "RunContext 需要已解析的 plan/manifest/work_dir —— 走 `open_run_context` 由"
+                "`_require_run_identity` 统一校验，直接构造只允许在测试里"
+            )
+        plan_sha256 = setup.plan_sha256
+        work_dir = Path(setup.work_dir)
         self.plan = plan
         self.plan_sha256 = plan_sha256
-        self.backup_root = backup_root
+        self.backup_root = setup.backup_root
         self.manifest = manifest
         self.store = store
-        self.work_dir = Path(work_dir)
-        self.device = device
-        self.torch_threads = int(torch_threads or 0)
-        self.code_cache_dir = code_cache_dir
-        self.ts_code_cache_dir = ts_code_cache_dir
-        self.code_zip_bytes = code_zip_bytes
-        self.ts_code_zip_bytes = ts_code_zip_bytes
+        self.work_dir = work_dir
+        self.device = "cpu" if setup.device is None else setup.device
+        self.torch_threads = setup.torch_threads
+        self.code_cache_dir = setup.code_cache_dir
+        self.ts_code_cache_dir = setup.ts_code_cache_dir
+        self.code_zip_bytes = setup.code_zip_bytes or b""
+        self.ts_code_zip_bytes = setup.ts_code_zip_bytes or b""
         #: 已加载的 CourseConfig（argv 重定向要按关卡取 stageJson；worker 侧在尾巴处已有）
-        self.course = course
-        self.max_iters = int(max_iters or 0)
-        self.budget_sec = float(budget_sec or plan.get("budget_sec", 0.0) or 0.0)
-        self.sample_mult = _positive_mult(sample_mult, "sample_mult")
-        self.epoch_mult = _positive_mult(epoch_mult, "epoch_mult")
-        self.rotation = rotation_policy(rotation)
-        self.deliverer = deliverer
-        self.run_job_fn = run_job_fn
-        self.eval_on_cloud = bool(eval_on_cloud)
-        self.eval_slots = int(eval_slots or 0)
-        self.eval_game_timeout_sec = float(eval_game_timeout_sec or 0.0)
-        self.rollout_workers = int(rollout_workers or 0)
-        self.stop_file = str(stop_file or "")
+        self.course = setup.course
+        self.max_iters = setup.max_iters
+        self.budget_sec = setup.budget_sec
+        self.sample_mult = setup.sample_mult
+        self.epoch_mult = setup.epoch_mult
+        self.rotation = setup.rotation
+        self.deliverer = setup.deliverer
+        self.run_job_fn = setup.run_job_fn
+        self.eval_on_cloud = setup.eval_on_cloud
+        self.eval_slots = setup.eval_slots
+        self.eval_game_timeout_sec = setup.eval_game_timeout_sec
+        self.rollout_workers = setup.rollout_workers
+        self.stop_file = setup.stop_file
         self.round_forms = round_forms
         #: TS 运行时树的**实际根**（云机评估的 `cwd`：`tools/sim/export-eval-game.ts` 在那儿）。
-        self.ts_tree_dir = Path(ts_tree_dir) if ts_tree_dir is not None else None
+        self.ts_tree_dir = ts_tree_dir
         #: 云机评估的后台执行者 / 口径（`_setup_cloud_eval` 装配；None = 不评估）。
         #: 执行者在**后台线程**里跑局（与下一轮 PPO 并行），所以这里的属性是可变引用。
         self.eval_runner: Any = None
         self.eval_plan: Any = None
-        self.log = log
+        self.log = setup.log
         self.t0 = time.time()
         #: 上一轮结果的 opt 原始字节的 sha（→ 下一轮 manifest.opt_sha，命中 blob_cache）
         self.last_opt_sha: str = ""
@@ -379,67 +466,37 @@ class RunContext:
         self.deliverer.close(timeout)
 
 
-def open_run_context(
-    *,
-    plan: dict,
-    plan_sha256: str,
-    manifest: dict,
-    job_dir: Path,
-    work_dir: Path,
-    artifacts_dir: str | Path | None = None,
-    device: Any = "cpu",
-    torch_threads: int = 0,
-    code_cache_dir: Path | None = None,
-    ts_code_cache_dir: Path | None = None,
-    ts_tree: Path | None = None,
-    code_zip_bytes: bytes | None = None,
-    ts_code_zip_bytes: bytes | None = None,
-    course: Any = None,
-    max_iters: int = 0,
-    budget_sec: float = 0.0,
-    # ---- 云机 A 层评估（可选；见 `remote/offline_eval.py`）----
-    eval_on_cloud: bool = False,
-    eval_slots: int = 0,
-    eval_game_timeout_sec: float = 0.0,
-    rollout_workers: int = 0,
-    #: ★ 2026-10-24：高配云机的训练侧放大（1.0 = 计划/课程原样）。只影响训练采样与
-    #: PPO 遍数，不改评估语料、不改计划身份。
-    sample_mult: float = 1.0,
-    epoch_mult: float = 1.0,
-    #: ★ 2026-10-28（云机轮换）：三态开关（见 `ROTATION_POLICIES`）。
-    rotation: str = "auto",
-    # ---- 产物补传（可选；缺任一即关）----
-    hub_url: str = "",
-    hub_token: str = "",
-    #: hub 侧的课程键（多课程 hub 的补传归位键；空 = 单课程 hub）。见 `OfflineDeliverer.course`。
-    hub_course: str = "",
-    #: 本课租约 token（P1-1：补传体里的 `lease_token`；空 = 补传照落但不推进活动起点）。
-    hub_lease: str = "",
-    #: 网络侧**备份抽屉**（`--backup-root`）：产物没能回传成功的轮写这里。
-    #: 空 = 按 `resolve_backup_root` 的兜底链推（生产路径上由 `offline_boot` 显式传）。
-    backup_root: str | Path | None = None,
-    deliver: bool = True,
-    #: ★ 2026-10-23（plan/push-mode-notebooks §6.4a / P0-1）：非空 = **本地 outbox 模式**。
-    #: 这个分支**先于** `deliver` 判定：`--outbox` + `--no-deliver` 的语义是「只关 HTTP 补传，
-    #: outbox 必须活」（否则训练照跑、outbox 永远空、最后被 hold stale 判掉线）。
-    outbox_dir: str = "",
-    #: ★ 2026-10-23（W4）：push 腿的取消哨兵（`--stop-file`，由 worker 服务的
-    #: `/offline/push/cancel` 写）。空 = 无取消面。
-    stop_file: str = "",
-    #: ★ 2026-10-24（F7）：outbox 的**地板** —— `it <= floor_it` 的轮不物化（hub 已经有的）。
-    #: 值来自 push 任务包的 `resume_it`；**缺省 0 = 全部物化**（错的方向必须是不丢数据）。
-    floor_it: int = 0,
-    #: 换实现不该动调用方（`DelivererProcess` 与本进程内线程版同接口，见 `DelivererLike`）。
-    deliverer: DelivererLike | None = None,
-    run_job_fn: Callable[..., dict] | None = None,
-    log: Callable[[str], None] = _log_default,
-) -> RunContext:
+def open_run_context(setup: RunSetup) -> RunContext:
     """建（或接上）产物目录 + 写出本段的起点 checkpoint，返回运行上下文。
 
     起点 checkpoint（`it-{start_it}`）= 本 job payload 里那份 init_weights / opt：**没有
     它产物目录就不自洽**（续跑要「最后一轮的权重」，而第一轮的输入正是上一段的产物——
     把它也写进来，产物才真正可以独立重放）。
+
+    **2026-11-20（§P0-3 第四刀）**：35 个关键字参数 → 一个 `RunSetup`。下面一段解包是为
+    保持方法体**逐字不变**（与 `_settle_unit` 的手法同一份理由）：要改语义请改 `RunSetup`
+    或方法体，别把「参数没了」当成「逻辑变了」。
     """
+    plan, plan_sha256, manifest, job_dir, work_dir = _require_run_identity(setup)
+    artifacts_dir = setup.artifacts_dir
+    #: 装配点的历史缺省是 `"cpu"`（`run_standalone` 那条腿是 `"cuda"`，各自在入口解析）。
+    device = "cpu" if setup.device is None else setup.device
+    ts_code_cache_dir = setup.ts_code_cache_dir
+    ts_tree = setup.ts_tree
+    code_zip_bytes = setup.code_zip_bytes
+    ts_code_zip_bytes = setup.ts_code_zip_bytes
+    course = setup.course
+    rollout_workers = setup.rollout_workers
+    hub_url = setup.hub_url
+    hub_token = setup.hub_token
+    hub_course = setup.hub_course
+    hub_lease = setup.hub_lease
+    backup_root = setup.backup_root
+    deliver = setup.deliver
+    outbox_dir = setup.outbox_dir
+    floor_it = setup.floor_it
+    deliverer = setup.deliverer
+    log = setup.log
     # ★ 事故回归：矛盾包在**任何落盘之前**当场拒收（曾经这条判据写反、又不住生产路径上）。
     _assert_plan_manifest_aligned(plan, manifest)
     root = resolve_artifact_dir(
@@ -462,42 +519,28 @@ def open_run_context(
         after_write=forms.after_write if forms is not None else None,
     )
     state = store.start(plan, manifest, plan_sha256=plan_sha256)
-    ctx = RunContext(
+    resolved = replace(
+        setup,
         plan=plan,
         plan_sha256=plan_sha256,
         manifest=manifest,
-        store=store,
+        job_dir=job_dir,
         work_dir=work_dir,
-        backup_root=backup,
         device=device,
-        torch_threads=torch_threads,
-        code_cache_dir=code_cache_dir,
-        ts_code_cache_dir=ts_code_cache_dir,
-        code_zip_bytes=(code_zip_bytes if code_zip_bytes is not None else _read_opt_file(root, BUNDLE_CODE_NAME)),
+        backup_root=backup,
+        code_zip_bytes=(
+            code_zip_bytes if code_zip_bytes is not None else _read_opt_file(root, BUNDLE_CODE_NAME)
+        ),
         ts_code_zip_bytes=(
             ts_code_zip_bytes
             if ts_code_zip_bytes is not None
             else _read_opt_file(root, TS_CODE_ZIP_NAME)
         ),
-        course=course,
-        max_iters=max_iters,
-        budget_sec=budget_sec,
-        eval_on_cloud=eval_on_cloud,
-        eval_slots=eval_slots,
-        eval_game_timeout_sec=eval_game_timeout_sec,
         # 缺省（0 = 自动）在这里解析：`open_run_context` 是唯一装配点，两条入口
         # （`--resume` 半离线 / 全离线包）都从这里过，解析一次就不会两边不一致。
         rollout_workers=(
-            int(rollout_workers)
-            if int(rollout_workers or 0) > 0
-            else cpu_worker_slots()
+            int(rollout_workers) if int(rollout_workers or 0) > 0 else cpu_worker_slots()
         ),
-        sample_mult=sample_mult,
-        epoch_mult=epoch_mult,
-        rotation=rotation,
-        round_forms=forms,
-        stop_file=stop_file,
-        ts_tree_dir=_ts_tree_root(ts_code_cache_dir, manifest),
         deliverer=(
             deliverer
             if deliverer is not None
@@ -538,8 +581,12 @@ def open_run_context(
                 else None
             )
         ),
-        run_job_fn=run_job_fn,
-        log=log,
+    )
+    ctx = RunContext(
+        resolved,
+        store=store,
+        round_forms=forms,
+        ts_tree_dir=_ts_tree_root(ts_code_cache_dir, manifest),
     )
     if ctx.sample_mult != 1.0 or ctx.epoch_mult != 1.0:
         log(

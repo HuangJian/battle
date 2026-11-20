@@ -26,6 +26,7 @@ import pytest
 
 from remote import plan_handoff
 from remote.artifacts import ArtifactStore
+from remote.plan_handoff import RunSetup
 from remote.plan_run import run_plan_job
 from tests.remote.test_run_loop import _iter_shaped_result, _prepare, _quiet
 
@@ -114,17 +115,18 @@ def test_eval_is_submitted_inside_a_ppo_window_not_between_rounds(scene) -> None
     """
     plan, m, job_dir, first, fake_job, runner, tmp = scene
     run_plan_job(
-        job_id="",
-        manifest=m,
-        job_dir=job_dir,
-        work_dir=tmp / "w",
-        artifacts_dir=tmp / "art",
-        plan=plan,
-        plan_sha256=m["plan_sha256"],
-        first_result=first,
-        run_job_fn=fake_job,
-        deliver=False,
-        log=_quiet,
+        RunSetup(
+            manifest=m,
+            job_dir=job_dir,
+            work_dir=tmp / "w",
+            artifacts_dir=tmp / "art",
+            plan=plan,
+            plan_sha256=m["plan_sha256"],
+            run_job_fn=fake_job,
+            deliver=False,
+            log=_quiet,
+        ),
+            first,
     )
     assert len(fake_job.rounds) >= 2, f"至少要跑两轮才看得出「藏在下一轮 PPO 里」：{fake_job.rounds}"
     assert runner.submits, "一条评估都没提交"
@@ -142,18 +144,19 @@ def test_each_round_leaves_a_complete_artifact_pair(scene) -> None:
     """整轮编排的产出面：每轮 `weights.json` + `opt.tar` + 一行账本（缺一不可）。"""
     plan, m, job_dir, first, fake_job, _runner, tmp = scene
     res = run_plan_job(
-        job_id="",
-        manifest=m,
-        job_dir=job_dir,
-        work_dir=tmp / "w2",
-        artifacts_dir=tmp / "art",
-        plan=plan,
-        plan_sha256=m["plan_sha256"],
-        first_result=first,
-        run_job_fn=fake_job,
-        deliver=False,
-        log=_quiet,
-    )
+              RunSetup(
+                  manifest=m,
+                  job_dir=job_dir,
+                  work_dir=tmp / "w2",
+                  artifacts_dir=tmp / "art",
+                  plan=plan,
+                  plan_sha256=m["plan_sha256"],
+                  run_job_fn=fake_job,
+                  deliver=False,
+                  log=_quiet,
+              ),
+                  first,
+          )
     store = ArtifactStore(tmp / "art", run_id="run-runloop")
     its = [r["it"] for r in fake_job.rounds]
     for it in its:
@@ -166,17 +169,18 @@ def test_round_loop_does_not_pause_for_eval(scene) -> None:
     """轮与轮之间的空档 ≈ 0：评估不许变成「轮边界上的等待」。"""
     plan, m, job_dir, first, fake_job, _runner, tmp = scene
     run_plan_job(
-        job_id="",
-        manifest=m,
-        job_dir=job_dir,
-        work_dir=tmp / "w3",
-        artifacts_dir=tmp / "art",
-        plan=plan,
-        plan_sha256=m["plan_sha256"],
-        first_result=first,
-        run_job_fn=fake_job,
-        deliver=False,
-        log=_quiet,
+        RunSetup(
+            manifest=m,
+            job_dir=job_dir,
+            work_dir=tmp / "w3",
+            artifacts_dir=tmp / "art",
+            plan=plan,
+            plan_sha256=m["plan_sha256"],
+            run_job_fn=fake_job,
+            deliver=False,
+            log=_quiet,
+        ),
+            first,
     )
     rounds = fake_job.rounds
     gaps = [rounds[i + 1]["roll0"] - rounds[i]["ppo1"] for i in range(len(rounds) - 1)]

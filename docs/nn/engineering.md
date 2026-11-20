@@ -25,6 +25,57 @@
 
 ---
 
+## §231 P0-3 第四刀：`RunSetup` —— `open_run_context`(35) / `run_standalone`(29) / `run_plan_job`(25) 三个宽签名收成一个旋钮袋（2026-11-20）
+
+**触发**：`python.refactor.md` §7 明确排的「下一批」——三处宽签名（外加 `RunContext.__init__` 的 29 参）
+住在同一条链上：装配点 `open_run_context`，两条入口 `remote.run_loop.run_standalone`（无 hub 续跑）与
+`remote.plan_run.run_plan_job`（hub 派的整段 job，今天无生产调用者但仍是任务包/产物目录续跑共用的驱动）。
+
+**做法**：`remote/plan_handoff.RunSetup`（frozen + kw_only，37 个字段），四条改动一起落：
+
+- `open_run_context(setup)`：方法体**逐字不变**，顶部一段解包（`plan = setup.plan` …，与 `_settle_unit`
+  同一手法）。原来住 `RunContext.__init__` 的九笔规范化（`int` / `float` / `_positive_mult` /
+  `rotation_policy` / `Path`）上移到 `RunSetup.__post_init__`（frozen ⇒ `object.__setattr__`），
+  于是 `RunContext.__init__(setup, *, store, round_forms, ts_tree_dir)` 只剩搬字段，且 spec 可裸测。
+- 身份位（`plan` / `manifest` / `job_dir` / `work_dir`）在**入口**回填，`_require_run_identity` 是**唯一**
+  校验点（缺哪个点名哪个，`ProtocolError`）。`run_standalone` 从产物目录读回 plan/manifest，
+  `run_plan_job` 从 job payload 取；`RunContext.__init__` 自己只校验它用得到的三样（不要 `job_dir`）。
+- `run_standalone(setup)`：只做入口侧解析（root → plan/manifest/course/工作目录/TS 缓存布局），
+  再 `open_run_context(replace(setup, …))` 回填身份 + 缺省。
+- `run_plan_job(setup, first_result)`：`open_run_context(replace(setup, ts_tree=setup.ts_code_cache_dir))`
+  （历史两值同源）；顺手删**死参** `job_id`（AST 实测函数体 0 读点）。`first_result` **留在形参**——
+  它是上一段的产物，不是旋钮。
+
+**为什么不是「照抄 `RoundSpec` 那种全必填」**：这是**旋钮袋**。云机 A 层 eval / 训练放大 / 轮换 /
+补传 / outbox / push 取消面各一簇，调用方只传自己那几簇——`run_standalone` 的最小形态就是
+`RunSetup(artifacts_dir=…)`（CLI 只给 `--artifacts`）。全必填会把 33 个 kwarg 变成 33 个
+`field=None` 的样板，调用点为了传三个参数得造一整个对象。
+
+**`device` 的缺省按入口取（`RunSetup.device: Any | None = None`）**：两条腿的历史缺省不同
+（`run_standalone` = `"cuda"`、装配点/hub 腿 = `"cpu"`）。合成 spec 时**不许悄悄统一**——那等于
+「一条腿突然不用 GPU 了」；`None` 表「按入口取缺省」，各入口自己解析（`run_standalone` 写
+`"cuda" if setup.device is None else setup.device`）。
+
+**账**（三处基线都只降不涨）：全仓宽签名（>8 参）129 → **125**（`plan_handoff` 2 → 0、
+`plan_run` 1 → 0、`run_loop` 1 → 0，`WIDE_FUNCS_BASELINE` 三条删除）；`Any` 基线
+`plan_handoff` 11 → 9、`plan_run` 10 → 8、`run_loop` 3 → 2（`any_baseline.json`，`test_any_budget`
+的「降了要往下改」判据逼出来的）；同名 ≥3 模块 142 → **143**（`RunSetup` 出现在定义点 + 两条入口；
+与反复登记的「门面转发」同型，exact / clone 两条未动）。
+
+**被否决的方案**：① 只把 `RunContext.__init__` 收成 spec、不动两个入口——那调用点仍是 33 个 kwarg，
+等于没减宽；② 把「只覆盖几个旋钮」做成 builder——`dataclasses.replace` 已经是这个语义
+（入口 `replace(setup, …)` 就是覆盖单旋钮），多一层 builder 只是换个 API 名字。
+
+**守卫**：`tests/remote/test_run_setup_spec.py` —— 字段表冻结（37 个名字的闭集）· frozen（行为式：
+`setattr` 抛 `FrozenInstanceError`）+ 逐字段 `kw_only` · 三条入口的形参表（AST 实测）·
+`_require_run_identity` 在 `open_run_context` 里恰一次 · 两条入口都在函数体里调装配点且**不**自己拼
+`RunContext` · `RunContext.__init__` 恰 5 参。改宽签名/绕装配点都会先红在这一条上。
+
+**教训（落盘时踩到的）**：`ruff format` 在**本仓不是门禁的一部分**（门禁只跑 `ruff check`），
+仓库里大量文件并非 format-clean ⇒ 对着目录跑 `ruff format` 会重排上百个无关文件，并且会把
+行尾契约注释（`# sleep-ok: …`）挤到下一行，直接让 `tests/test_no_sleep_as_sync.py` 变红。
+**本轮全部回退重做**：新代码手写格式、只有改动块受影响。
+
 ## §230 P0-3 第三刀：`trainer/batch_runner.py` 拆出通道机器为 `trainer/batch_lanes.py`，`_settle_unit` 收成 `(self, ledger)`（2026-11-20）
 
 **触发**：`python.refactor.md` §7 第②条 —— `BatchEvalRunner._settle_unit` 有 **15 个位置参数**

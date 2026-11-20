@@ -41,6 +41,7 @@ from remote.bundle import (
     import_bundle,
     read_bundle_index,
 )
+from remote.plan_handoff import RunSetup
 from remote.run_loop import run_standalone
 from worker.plan import build_plan, dump_plan, planned_iters
 
@@ -363,8 +364,13 @@ def test_imported_bundle_runs_whole_segment_without_hub(tmp_path: Path) -> None:
     import_bundle(zip_path, dest)
     fake = _FakeRunJob()
     res = run_standalone(
-        artifacts_dir=dest, run_job_fn=fake, code_cache_dir=tmp_path / "cc", log=_quiet
-    )
+              RunSetup(
+                  artifacts_dir=dest,
+                  run_job_fn=fake,
+                  code_cache_dir=tmp_path / "cc",
+                  log=_quiet,
+              )
+          )
     want = planned_iters(plan)  # 4, 5
     assert [c["it"] for c in fake.calls] == want
     assert fake.calls[0]["init_fp"] == sha256_bytes(INIT_W)  # 起点就是包里的权重
@@ -384,8 +390,13 @@ def test_imported_bundle_runs_whole_segment_without_hub(tmp_path: Path) -> None:
     # 再跑一次：无事可做（续跑判定认得出同一段；不会从 start_it 重来）
     again = _FakeRunJob()
     res2 = run_standalone(
-        artifacts_dir=dest, run_job_fn=again, code_cache_dir=tmp_path / "cc2", log=_quiet
-    )
+               RunSetup(
+                   artifacts_dir=dest,
+                   run_job_fn=again,
+                   code_cache_dir=tmp_path / "cc2",
+                   log=_quiet,
+               )
+           )
     assert again.calls == []
     assert res2["run_state"] == "noop" and res2["it_end"] == plan["end_it"]
 
@@ -409,7 +420,14 @@ def test_payload_of_offline_round_carries_init_weights(tmp_path: Path) -> None:
         seen.append((out / "init_weights.json").read_bytes())
         return _FakeRunJob()(base_url, token, job, **kw)
 
-    run_standalone(artifacts_dir=dest, run_job_fn=_spy, code_cache_dir=tmp_path / "cc3", log=_quiet)
+    run_standalone(
+        RunSetup(
+            artifacts_dir=dest,
+            run_job_fn=_spy,
+            code_cache_dir=tmp_path / "cc3",
+            log=_quiet,
+        )
+    )
     assert seen and seen[0] == INIT_W
 
 
@@ -555,7 +573,14 @@ def test_export_import_carries_ref_blob(tmp_path: Path) -> None:
     import_bundle(out, dest)
     assert (dest / "ref_weights.json").read_bytes() == REF_RAW
     fake = _FakeRunJob()
-    run_standalone(artifacts_dir=dest, run_job_fn=fake, code_cache_dir=tmp_path / "ccr", log=_quiet)
+    run_standalone(
+        RunSetup(
+            artifacts_dir=dest,
+            run_job_fn=fake,
+            code_cache_dir=tmp_path / "ccr",
+            log=_quiet,
+        )
+    )
     assert fake.calls, "全离线段没跑起来"
     # 种子在**启动期**完成（open_run_context 里），不是等到 it1 的 PPO 装载
     assert (dest / "work" / "blob_cache" / m["ref_sha"]).read_bytes() == REF_RAW
@@ -570,7 +595,12 @@ def test_missing_ref_bytes_refuse_at_startup_not_it1(tmp_path: Path) -> None:
     fake = _FakeRunJob()
     with pytest.raises(ProtocolError, match="kickstart ref"):
         run_standalone(
-            artifacts_dir=dest, run_job_fn=fake, code_cache_dir=tmp_path / "ccr2", log=_quiet
+            RunSetup(
+                artifacts_dir=dest,
+                run_job_fn=fake,
+                code_cache_dir=tmp_path / "ccr2",
+                log=_quiet,
+            )
         )
     assert fake.calls == [], "缺 ref 字节时一轮都不该跑（必须在启动期拒绝）"
 
@@ -633,7 +663,13 @@ def test_offline_start_opt_reaches_blob_cache(tmp_path: Path) -> None:
     dest = tmp_path / "artopt"
     import_bundle(zip_path, dest)
     fake = _FakeRunJob()
-    run_standalone(artifacts_dir=dest, run_job_fn=fake, log=_quiet)
+    run_standalone(
+        RunSetup(
+            artifacts_dir=dest,
+            run_job_fn=fake,
+            log=_quiet,
+        )
+    )
     assert fake.calls, "全离线段没跑起来"
     cache = dest / "work" / "blob_cache" / opt_sha
     assert cache.read_bytes() == opt_raw, "起点动量必须在启动期进 blob_cache（合成轮只认它）"
