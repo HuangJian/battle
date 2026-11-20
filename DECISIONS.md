@@ -8505,3 +8505,29 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   按模块清会让后续每个扫描模块重解析 650 份源码（~0.7s/次）——30MB 换 ~7s 墙钟不值，**决定保留**。
 - **门槛（写下来供下一个人判断）**：只处理「单个 worker 里 ≥100MB 且纯测试侧」的缓存；十几 MB 级
   一律不动（复杂度与墙钟风险大于收益）。
+
+## §2026-11-20-forensics-rss-probe-must-declare-ctypes-signatures（RSS 探针崩在「别人改了共享 ctypes 签名」上）
+
+- **报障**：`bun run pygate` 里 `tests/worker/test_commit_journal.py` 三条快照用例偶发红
+  （`probe_errors={'rss': …}`、`rss=0.0MB`），单跑绿、全量才红，且**同一进程内保质**（同 pid 连红）。
+- **现场（全量 + 采样插件抓到的原文）**：
+  `ctypes.ArgumentError: argument 1: OverflowError: int too long to convert`
+  @ `worker/forensics.py::_rss_mb_windows` 的 `psapi.GetProcessMemoryInfo(handle, …)`。
+- **根因**：`ctypes.windll` 是**每进程一份**的 `LibraryLoader`，函数对象也是共享的。
+  **paddle**（`paddle/base/core.py:147`）为拿自己的进程句柄写了
+  `ctypes.windll.kernel32.GetCurrentProcess.restype = ctypes.c_void_p` —— 这一改在全进程生效。
+  此后 `GetCurrentProcess()` 返回的是 `0xFFFFFFFFFFFFFFFF`（不再是未声明 restype 时按 `c_int`
+  截断出的 -1），而旧实现把它**直接**塞进未声明 `argtypes` 的 `GetProcessMemoryInfo`（按 `c_int`
+  转换）⇒ 溢出。**为什么看着像偶发**：只有先 import 过 paddle 的 worker 中招（`test_bc_paddle` /
+  `test_paddle_ppo_*` 与它们同 worker 的那些），且一旦中招就不再恢复。
+- **决定**（不是「测试放宽」）：`_rss_mb_windows` 显式声明 `GetProcessMemoryInfo` 的
+  `argtypes=[c_void_p, c_void_p, c_ulong]` / `restype=c_bool`，并把伪句柄包成
+  `ctypes.c_void_p(handle)` —— 后者对「别人改过 restype」与「没人改过」两种状态都成立
+  （`c_void_p(-1)` 与 `c_void_p(0xFFFF…)` 是同一个值）。同族先例：`hub/admin.py:rss_bytes`
+  早就在注释里记过这条，「只差谁先把这句话抄到 forensics 里」。
+- **为什么不去修 paddle**：那是第三方 wheel 里的进程级副作用，改不动；本仓能守住的是**自己的探针
+  不依赖别人的签名状态**（取证是诊断手段，不该被无关库的初始化毒化）。
+- **护栏**：`tests/worker/test_commit_journal.py::test_rss_probe_survives_a_foreign_module_rewriting_kernel32`
+  —— 用 monkeypatch 把 `GetCurrentProcess.restype` 改成 `HANDLE`（与 paddle 同款），断言
+  `snapshot()` 仍有真读数且不带 `probe_errors['rss']`。改前**确定性红**（报错原文与现场逐字一致），
+  改后绿；全量门禁 0 failed（103s），带采样插件的全量里**一条探针失败痕迹都没有**。

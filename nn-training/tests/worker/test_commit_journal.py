@@ -213,6 +213,43 @@ def test_snapshot_fields(tmp_path: Path) -> None:
     assert snap["disk_free_mb"][str(tmp_path)] > 0
 
 
+def test_rss_probe_survives_a_foreign_module_rewriting_kernel32(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★ 2026-11-20 全量门禁偶发红（同进程内**保质**）：第三方改写了进程级共享的 ctypes 签名。
+
+    现场：`paddle/base/core.py` 里 `ctypes.windll.kernel32.GetCurrentProcess.restype = c_void_p`
+    —— `ctypes.windll` 是**每进程一份**的 `LibraryLoader`，这一改在全进程生效。此后
+    `GetCurrentProcess()` 返回的是 `0xFFFFFFFFFFFFFFFF`（而不是默认 `c_int` 截断出的 -1），
+    而旧实现把 Python int **直接**塞进未声明 `argtypes` 的 `GetProcessMemoryInfo`（按 c_int 转换）
+    ⇒ `ctypes.ArgumentError: argument 1: OverflowError: int too long to convert`
+    ⇒ `rss_mb=0.0` 且 `probe_errors={'rss': ...}`。
+
+    症状为何看着像「偶发」：只有**先 import 过 paddle 的那些 worker** 中招，而一旦中招就一直是它
+    （现场 `test_commit_journal` 三条断言在同一个 pid 上连红）。判据：伪句柄变成 64 位语义之后，
+    `snapshot()` 仍必须拿到**真读数**，且不带 `probe_errors['rss']`。
+    """
+    if os.name != "nt":
+        pytest.skip("Windows 才有 psapi + 伪句柄这条路")
+
+    import ctypes
+    from ctypes import wintypes
+
+    import worker.forensics as forensics
+
+    # mypy 按 Linux 平台检查（typeshed 里 `ctypes.windll` 只在 Windows 存在）⇒ 经 `__dict__` 取，
+    # 不为这个测试加 `# type: ignore`（抑制符预算只许降不许升）。
+    k32 = ctypes.__dict__["windll"].kernel32
+    # 与 paddle 同款：把返回值声明成 64 位句柄（`HANDLE` == `c_void_p`），不再按 c_int 截断。
+    monkeypatch.setattr(k32.GetCurrentProcess, "restype", wintypes.HANDLE)
+
+    snap = forensics.snapshot("rss-poison", paths=[tmp_path])
+    # 取值即断言（不用字符串成员判据：那会被文本形态预算计入，而这完全不是「读源码文本」）。
+    rss_failure = (snap.get("probe_errors") or {}).get("rss")
+    assert rss_failure is None, f"共享签名被第三方改写后 RSS 探针崩了：{rss_failure}"
+    assert snap["rss_mb"] > 0, "探针必须给出真读数（0 会被当成 OOM 证据）"
+
+
 def test_log_snapshot_writes_jsonl(tmp_path: Path) -> None:
     jpath = tmp_path / "tl.jsonl"
     snap = log_snapshot("ppo_local_pre it1", jpath, paths=[tmp_path])

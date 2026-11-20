@@ -68,7 +68,20 @@ def _rss_mb_windows(errors: dict[str, str] | None = None) -> tuple[float, float]
         pmc.cb = ctypes.sizeof(PMC)
         kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]  # 仅 Windows 调用
         psapi = ctypes.windll.psapi  # type: ignore[attr-defined]
-        handle = kernel32.GetCurrentProcess()
+        # ★ 签名必须显式声明，伪句柄还必须包成 `c_void_p`（2026-11-20 全量门禁偶发红）。
+        #   现场：`probe_errors={'rss': 'ArgumentError: argument 1: OverflowError: int too long
+        #   to convert'}`，且同一进程里**保质**（三条快照用例同一个 pid 连红）。根因不在本文件：
+        #   `ctypes.windll` 是**每进程一份**的 `LibraryLoader`，**paddle**
+        #   （`paddle/base/core.py`）把共享的 `kernel32.GetCurrentProcess.restype` 改成了
+        #   `c_void_p` ⇒ 之后谁调 `GetCurrentProcess()` 拿到的都是 `0xFFFFFFFFFFFFFFFF`（而不再是
+        #   未声明 restype 时按 `c_int` 截断的 -1）；而未声明 `argtypes` 的
+        #   `GetProcessMemoryInfo` 把入参按 `c_int` 转换 ⇒ 溢出 ⇒ RSS 读数恒 0 且被当成「探针自己
+        #   失败」。两条同时做才算根除：`argtypes` 让调用按指针宽度走，`c_void_p(handle)` 对「别人
+        #   改过 restype」与「没人改过」两种状态都成立（`c_void_p(-1)` 与 `c_void_p(0xFFFF…)`
+        #   是同一个值）。同族先例与更详的事故叙述：`hub/admin.py:rss_bytes`。
+        psapi.GetProcessMemoryInfo.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong]
+        psapi.GetProcessMemoryInfo.restype = ctypes.c_bool
+        handle = ctypes.c_void_p(kernel32.GetCurrentProcess())
         if not psapi.GetProcessMemoryInfo(handle, ctypes.byref(pmc), pmc.cb):
             return None
         return pmc.WorkingSetSize / _MB, pmc.PeakWorkingSetSize / _MB
