@@ -34,6 +34,7 @@ import {
   defaultCompareCourses,
   filterCourseCandidates,
   isCompareMetric,
+  nearestEvalIter,
   nearestIter,
   parseCompareCourses,
   parseIterBound,
@@ -250,6 +251,23 @@ describe('色板 / hover / 门闩（纯函数）', () => {
     expect(nearestIter([1, 5, 10], 8)).toBe(10)
     expect(nearestIter([3, 7], 5)).toBe(3)
     expect(nearestIter([], 5)).toBe(null)
+  })
+
+  it('nearestEvalIter：eval 档只吸 eval 点，rollout 轮次不抢（无 eval 点 ⇒ null）', () => {
+    const rows = [
+      { key: 'winRate', iters: [1, 2, 3, 4, 5], vals: [0.1, 0.2, 0.3, 0.4, 0.5] },
+      { key: 'eval', iters: [2, 5], vals: [0.2, 0.5] },
+      { key: 'behavior-dangerTicks-mean-rollout', iters: [1, 3, 5], vals: [1, 2, 3] },
+      { key: 'behavior-dangerTicks-mean-eval', iters: [3], vals: [2] },
+    ]
+    // 鼠标在 4.4：最近的 eval 点是 5（rollout 的 4 不参与；若参与会吸到 4）
+    expect(nearestEvalIter(rows, 4.4)).toBe(5)
+    // 鼠标在 1.2：eval 的 2 vs 3；取 2
+    expect(nearestEvalIter(rows, 1.2)).toBe(2)
+    // 只给 rollout 序列 ⇒ 没有可吸的 eval 点（调用方回退到全部 iter）
+    expect(nearestEvalIter([{ key: 'winRate', iters: [1, 2], vals: [0.1, 0.2] }], 1.4)).toBe(null)
+    // eval 的 NaN 缺口不是「点」：it5 缺值 ⇒ 吸到 it2，而不是空值 it5
+    expect(nearestEvalIter([{ key: 'eval', iters: [2, 5], vals: [0.2, Number.NaN] }], 4.4)).toBe(2)
   })
 
   it('visibleCompareSeries：all 全收；rollout/eval 按 key 前缀过滤', () => {

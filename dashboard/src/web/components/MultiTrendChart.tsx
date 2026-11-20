@@ -11,15 +11,23 @@
  *   ② 断笔复用 `TrendChart` 导出的 `pathFrom`（缺值不连线，同一份语义只有一个实现）；
  *      与之配套的「孤点补圆点」判据同在 `TrendChart`（`isolatedPointIndexes`）——稀疏序列
  *      只落孤立 `M`，不补点就整条线不可见。
- *   ③ 布局一律走 class（内联样式属性在 `src/web/**` 只有 TrendChart 的 3 处计算值豁免）——所以
- *      hover 提示框画在 **SVG 内**（`<rect>`+`<text>`，坐标是属性），不是 HTML 浮层。
+ *   ③ 布局一律走 class；唯一例外是首页小图提示框的 `left`（计算值，同 TrendChart 的
+ *      提示框定位）。大图提示框仍画在 **SVG 内**（`<rect>`+`<text>`，坐标是属性）——
+ *      首页小图则用 SVG 外的 HTML 浮层，避免盖住折线（用户 2026-11-20）。
  *   ④ `width`/`height` 由调用方按**实测容器**给（缺省 720×240 供 SSR/旧调用方）：viewBox 与视口
  *      1:1 时缩放系数为 1 ⇒ 轴标签、圆点、描边都是设计尺寸；容器一变宽，画布就得跟着变。
  */
 
-import { useState } from 'preact/hooks'
+import { useLayoutEffect, useRef, useState } from 'preact/hooks'
 import type { JSX } from 'preact'
-import { compareYBounds, nearestIter, type CompareMetric } from '../view'
+import {
+  compareYBounds,
+  isEvalSeriesKey,
+  nearestEvalIter,
+  nearestIter,
+  trendTipCenter,
+  type CompareMetric,
+} from '../view'
 import { isolatedPointIndexes, pathFrom } from './TrendChart'
 
 export interface MultiTrendSeries {
@@ -37,7 +45,12 @@ export interface MultiTrendChartProps {
   seriesList: MultiTrendSeries[]
   /** 指标档位（决定 y 轴下界规则）；缺省 = 按数据自动缩放（统计曲线浮窗用）。 */
   metric?: CompareMetric
+  /** 显式 y 轴下界（首页多课图用：击杀/残血/道具的 abs↔pct 变体与逐局指标没有 CompareMetric 档位）。
+   *  给了就覆盖 `metric` 的规则；两个都不给 = 自动缩放。 */
+  yBounds?: { yFloor?: number; yMin?: number }
   fmt: (v: number | null) => string
+  /** 无障碍标签里的指标名（缺省按 `metric` 拼）。 */
+  label?: string
   /** 画布宽（px）= 容器实测宽；缺省 720。
    *
    *  **为什么必须传实数**：`viewBox` 与视口同尺寸时缩放系数恰好是 1，文字/圆点/描边才是设计
@@ -55,6 +68,16 @@ export interface MultiTrendChartProps {
    *  固定语料上的真读数，相邻两点之间连一条虚线是这条线的正常读法（`TrendChart` 的单图叠加层
    *  因为同时有 rollout 实线作参照，才保持只打点不连线）。 */
   bridgeGaps?: boolean
+  /** 首页小图模式：提示框按**课程**合并（当前课 + 对比课各一行），x 轴只标两端；
+   *  提示框画在**图上方**（HTML 浮层），不遮折线。 */
+  compact?: boolean
+  /** 「只看 eval」档：hover 吸附到最近的 eval 点（rollout 轮次不参与）。 */
+  snapToEval?: boolean
+  /** 同组共享的悬停迭代号（首页多张走势图联动；语义同 `TrendChart` 同名 prop）。
+   *  `undefined` = 组件自持；`null` = 受控但当前无 hover。 */
+  hoverIter?: number | null
+  /** 受控悬停回报（鼠标移入/移动/离开）。 */
+  onHoverIter?: (it: number | null) => void
 }
 
 /** 缺省画布宽（`width` 不传时：SSR 首帧与旧调用方都按它画）。 */
@@ -63,26 +86,34 @@ const PAD_L = 46
 const PAD_R = 12
 const PAD_T = 10
 const PAD_B = 24
-/** 画布宽下限（极窄容器下别把坐标轴压成负数）。 */
-const VB_W_MIN = 320
+/** 画布宽下限（极窄容器下别把坐标轴压成负数；首页小图可以窄到 ~220px）。 */
+const VB_W_MIN = 220
 /** 轴刻度统一字体（与 `TrendChart` 同款：小、灰、短横线属性）。 */
 const AXIS_FONT = { fontSize: '9', fill: 'var(--muted)' } as const
 /** 提示框宽度（给「课程名 eval: 0.123」留够；超出会被裁成省略号般的错觉，故宁宽勿窄）。 */
 const TIP_W = 168
 
 /** eval 口径 = 虚线（多课共图时不能再靠颜色区分口径——颜色已经被课程占用）。 */
-const isEvalKey = (key: string): boolean => key.startsWith('eval')
+const isEvalKey = isEvalSeriesKey
 
 export function MultiTrendChart({
   seriesList,
   metric,
+  yBounds,
   fmt,
+  label,
   width = VB_W_DEFAULT,
   height = 240,
   showLegend = true,
   bridgeGaps = false,
+  compact = false,
+  snapToEval = false,
+  hoverIter,
+  onHoverIter,
 }: MultiTrendChartProps) {
-  const [hover, setHover] = useState<number | null>(null)
+  const [localHover, setLocalHover] = useState<number | null>(null)
+  const controlled = hoverIter !== undefined
+  const hover = controlled ? hoverIter : localHover
   const vbW = Math.max(VB_W_MIN, Math.round(width))
 
   const allIters: number[] = []
@@ -91,6 +122,31 @@ export function MultiTrendChart({
     for (const it of s.iters) allIters.push(it)
     for (const v of s.vals) if (Number.isFinite(v)) nums.push(v)
   }
+
+  // x 几何与提示框定位必须在空态 return 之前算好：hook 不能住在条件分支里。
+  const itersSorted = [...new Set(allIters)].sort((a, b) => a - b)
+  const xMin = itersSorted[0] ?? 0
+  const xMax = itersSorted[itersSorted.length - 1] ?? xMin
+  const plotW = vbW - PAD_L - PAD_R
+  const plotH = height - PAD_T - PAD_B
+  const xOf = (it: number): number =>
+    xMin === xMax ? PAD_L + plotW / 2 : PAD_L + (plotW * (it - xMin)) / (xMax - xMin)
+
+  // 首页小图的提示框画在图上方的 HTML 浮层里：按准星 x 定位，再按实测框宽钳回图内。
+  // （SVG 内的 `<rect>` 会盖住折线；用户 2026-11-20 要求「不要遮挡走势图」。）
+  const chartRef = useRef<HTMLDivElement | null>(null)
+  const tipRef = useRef<HTMLDivElement | null>(null)
+  const [tipCx, setTipCx] = useState<number | null>(null)
+  useLayoutEffect(() => {
+    if (!compact || hover == null || hover < xMin || hover > xMax) {
+      setTipCx(null)
+      return
+    }
+    const chartW = chartRef.current?.offsetWidth ?? 0
+    const tipW = tipRef.current?.offsetWidth ?? 0
+    setTipCx(trendTipCenter((xOf(hover) / vbW) * chartW, chartW, tipW))
+  }, [compact, hover, xMin, xMax, vbW])
+
   if (nums.length === 0 || allIters.length === 0) {
     return (
       <div className="tc-mchart__empty tc-muted tc-small">
@@ -102,9 +158,9 @@ export function MultiTrendChart({
     )
   }
 
-  // y 轴下界规则住在 view 层（`compareYBounds` 单一出处）：本组件只负责把它翻译成像素。
-  // 无 metric（统计曲线浮窗）= 自动缩放，不套胜率/击杀那些档位的基底规则。
-  const bounds = metric ? compareYBounds(metric, seriesList) : {}
+  // y 轴下界规则住在 view 层（`compareYBounds` / `homeYBounds` 单一出处）：本组件只负责把它翻译成像素。
+  // 无 metric / yBounds（统计曲线浮窗）= 自动缩放，不套胜率/击杀那些档位的基底规则。
+  const bounds = yBounds ?? (metric ? compareYBounds(metric, seriesList) : {})
   const dataMin = Math.min(...nums)
   const dataMax = Math.max(...nums)
   let lo = bounds.yMin ?? (bounds.yFloor != null ? Math.min(dataMin, bounds.yFloor) : dataMin)
@@ -115,13 +171,6 @@ export function MultiTrendChart({
     hi += 0.5
   }
 
-  const itersSorted = [...new Set(allIters)].sort((a, b) => a - b)
-  const xMin = itersSorted[0] ?? 0
-  const xMax = itersSorted[itersSorted.length - 1] ?? xMin
-  const plotW = vbW - PAD_L - PAD_R
-  const plotH = height - PAD_T - PAD_B
-  const xOf = (it: number): number =>
-    xMin === xMax ? PAD_L + plotW / 2 : PAD_L + (plotW * (it - xMin)) / (xMax - xMin)
   const yOf = (v: number): number => PAD_T + plotH * (1 - (v - lo) / (hi - lo))
 
   /** 折线 `d`：默认断笔（`pathFrom` 缺值不连线）；`bridgeGaps` 的 eval 口径把相邻**有效**
@@ -146,7 +195,15 @@ export function MultiTrendChart({
     // 视口坐标 → viewBox 坐标（viewBox 宽 = 实测容器宽 ⇒ 两者 1:1，只差四舍五入的亚像素）。
     const vx = ((e.clientX - box.left) / box.width) * vbW
     const target = xMin === xMax ? xMin : xMin + ((vx - PAD_L) / plotW) * (xMax - xMin)
-    setHover(nearestIter(itersSorted, target))
+    // eval 档只吸附 eval 点；本图没有 eval 点时回退到全部 iter（不硬造点）。
+    const it =
+      (snapToEval ? nearestEvalIter(seriesList, target) : null) ?? nearestIter(itersSorted, target)
+    if (controlled) onHoverIter?.(it)
+    else setLocalHover(it)
+  }
+  const onLeave = (): void => {
+    if (controlled) onHoverIter?.(null)
+    else setLocalHover(null)
   }
 
   const valueAt = (s: MultiTrendSeries, it: number): number | null => {
@@ -156,28 +213,51 @@ export function MultiTrendChart({
     return typeof v === 'number' && Number.isFinite(v) ? v : null
   }
 
-  const tipLines =
-    hover == null
-      ? []
-      : seriesList.map((s) => ({
-          color: s.color,
-          text: `${s.course}${isEvalKey(s.key) ? ' · eval' : ''}: ${fmt(valueAt(s, hover))}`,
-        }))
+  const tipW = TIP_W
+  /** 首页小图：一门课一行（主口径 / eval 合并），否则 4 门课 × 2 条会把提示框撑出画布。 */
+  const tipLines = (() => {
+    if (hover == null || hover < xMin || hover > xMax) return []
+    if (!compact) {
+      return seriesList.map((s) => ({
+        color: s.color,
+        text: `${s.course}${isEvalKey(s.key) ? ' · eval' : ''}: ${fmt(valueAt(s, hover))}`,
+      }))
+    }
+    const byCourse = new Map<string, MultiTrendSeries[]>()
+    for (const s of seriesList) {
+      const list = byCourse.get(s.course)
+      if (list) list.push(s)
+      else byCourse.set(s.course, [s])
+    }
+    return [...byCourse].map(([course, list]) => ({
+      color: list[0]?.color ?? 'var(--muted)',
+      text: `${course.length > 12 ? `${course.slice(0, 11)}…` : course}: ${list
+        .map((s) => `${isEvalKey(s.key) ? 'eval ' : ''}${fmt(valueAt(s, hover))}`)
+        .join(' / ')}`,
+    }))
+  })()
   const tipH = 14 + tipLines.length * 11
-  const tipX = hover == null ? 0 : Math.min(Math.max(xOf(hover) + 8, PAD_L), vbW - PAD_R - TIP_W)
+  const tipX =
+    hover == null || hover < xMin || hover > xMax
+      ? 0
+      : Math.min(Math.max(xOf(hover) + 8, PAD_L), vbW - PAD_R - tipW)
   const midIter = Math.round((xMin + xMax) / 2)
+  /** 小图只标两端：3 个 `it…` 标签在 ~220px 里会互相压住。 */
+  const xTicks = compact ? [xMin, xMax] : [xMin, midIter, xMax]
 
   return (
-    <div className="tc-mchart">
+    <div className={`tc-mchart${compact ? ' tc-mchart--compact' : ''}`} ref={chartRef}>
       <svg
         className="tc-mchart__svg"
         viewBox={`0 0 ${vbW} ${height}`}
         width="100%"
         height={height}
         role="img"
-        aria-label={metric ? `多课程${metric}对比图` : '多序列统计对比图'}
+        aria-label={
+          label ? `多课程${label}对比图` : metric ? `多课程${metric}对比图` : '多序列统计对比图'
+        }
         onMouseMove={onMove}
-        onMouseLeave={() => setHover(null)}
+        onMouseLeave={onLeave}
       >
         {/* y 网格 + 刻度（下/中/上） */}
         {[0, 0.5, 1].map((t) => {
@@ -206,13 +286,13 @@ export function MultiTrendChart({
           )
         })}
 
-        {/* x 刻度：it 全域的两端 + 中点（数值，不是下标） */}
-        {[xMin, midIter, xMax].map((it, i) => (
+        {/* x 刻度：it 全域的两端（小图）/ 两端 + 中点（大图）——数值，不是下标 */}
+        {xTicks.map((it, i) => (
           <text
             key={`x${i}`}
             x={xOf(it).toFixed(1)}
             y={height - 6}
-            text-anchor={i === 0 ? 'start' : i === 2 ? 'end' : 'middle'}
+            text-anchor={i === 0 ? 'start' : i === xTicks.length - 1 ? 'end' : 'middle'}
             font-size={AXIS_FONT.fontSize}
             fill={AXIS_FONT.fill}
           >
@@ -247,8 +327,9 @@ export function MultiTrendChart({
           </g>
         ))}
 
-        {/* hover：竖线 + 各课点 + SVG 内提示框（对齐到最近的真实 iter，不是鼠标 x） */}
-        {hover != null ? (
+        {/* hover：竖线 + 各课点 + 提示框（对齐到最近的真实 iter，不是鼠标 x）。
+            首页小图的提示框是 SVG 外的 HTML 浮层（不遮折线），大图仍用 SVG 内提示框。 */}
+        {hover != null && hover >= xMin && hover <= xMax ? (
           <g>
             <line
               x1={xOf(hover).toFixed(1)}
@@ -271,32 +352,66 @@ export function MultiTrendChart({
                 />
               )
             })}
-            <g>
-              <rect
-                x={tipX}
-                y={PAD_T + 2}
-                width={TIP_W}
-                height={tipH}
-                rx="4"
-                fill="var(--card)"
-                fill-opacity="0.96"
-                stroke="var(--border)"
-              />
-              <text x={tipX + 6} y={PAD_T + 14} font-size="9" fill="var(--muted)">
-                it{hover}
-              </text>
-              {tipLines.map((l, i) => (
-                <g key={`t${i}`}>
-                  <rect x={tipX + 6} y={PAD_T + 20 + i * 11} width="6" height="6" fill={l.color} />
-                  <text x={tipX + 16} y={PAD_T + 26 + i * 11} font-size="9" fill="var(--text)">
-                    {l.text}
-                  </text>
-                </g>
-              ))}
-            </g>
+            {!compact ? (
+              <g>
+                <rect
+                  x={tipX}
+                  y={PAD_T + 2}
+                  width={tipW}
+                  height={tipH}
+                  rx="4"
+                  fill="var(--card)"
+                  fill-opacity="0.96"
+                  stroke="var(--border)"
+                />
+                <text x={tipX + 6} y={PAD_T + 14} font-size="9" fill="var(--muted)">
+                  it{hover}
+                </text>
+                {tipLines.map((l, i) => (
+                  <g key={`t${i}`}>
+                    <rect
+                      x={tipX + 6}
+                      y={PAD_T + 20 + i * 11}
+                      width="6"
+                      height="6"
+                      fill={l.color}
+                    />
+                    <text x={tipX + 16} y={PAD_T + 26 + i * 11} font-size="9" fill="var(--text)">
+                      {l.text}
+                    </text>
+                  </g>
+                ))}
+              </g>
+            ) : null}
           </g>
         ) : null}
       </svg>
+      {/* 首页小图提示框：在图上方，不遮折线；按准星 x 定位并钳回图内。 */}
+      {compact && hover != null && hover >= xMin && hover <= xMax && tipLines.length > 0 ? (
+        <div
+          className="tc-mchart__tip"
+          ref={tipRef}
+          style={{
+            left: tipCx != null ? `${tipCx}px` : `${(xOf(hover) / vbW) * 100}%`,
+          }}
+        >
+          <span className="tc-mchart__tip-it">it{hover}</span>
+          {tipLines.map((l, i) => (
+            <span className="tc-mchart__tip-row" key={`tip${i}`}>
+              <svg
+                className="tc-mchart__tip-dot"
+                viewBox="0 0 6 6"
+                width="6"
+                height="6"
+                aria-hidden="true"
+              >
+                <rect width="6" height="6" fill={l.color} />
+              </svg>
+              {l.text}
+            </span>
+          ))}
+        </div>
+      ) : null}
       {/* 图例：课色 + 口径（eval 虚线）。SVG 小条取色，避免内联样式（样式纪律）。 */}
       {showLegend ? (
         <div className="tc-mchart__legend">

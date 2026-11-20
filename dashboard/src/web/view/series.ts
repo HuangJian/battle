@@ -1,5 +1,10 @@
 /** series.ts — 指标序列切分与逐指标序列抽取（趋势图数据源）。 */
-import { behaviorMetricDef, type BehaviorMetricKey, type MetricStatKey } from './behavior-metrics'
+import {
+  behaviorMetricDef,
+  isMetricStat,
+  type BehaviorMetricKey,
+  type MetricStatKey,
+} from './behavior-metrics'
 import { formulaMetricName } from './formula-metrics'
 import { IterRow } from './metric-types'
 
@@ -100,6 +105,48 @@ const SPARSE_SERIES_KEYS: ReadonlySet<string> = new Set([
   'evalLossTicks',
 ])
 
+/** 稀疏口径判据（eval / 行为统计）：范围档位按**有效点**截取，而不是按迭代轮数。
+ *  行为指标的序列键不在上面的白名单里（键随指标/统计量变化），所以按前缀一并收进来。 */
+export function isSparseSeriesKey(key: string): boolean {
+  return SPARSE_SERIES_KEYS.has(key) || key.startsWith('behavior-')
+}
+
+/** 逐局指标序列键：`behavior-<指标>-<统计量>-<rollout|eval>`。
+ *  服务端按显式 key 取序列、客户端按同一形状查找——两边必须用同一个拼法。 */
+export function behaviorSeriesKey(
+  key: BehaviorMetricKey,
+  stat: MetricStatKey,
+  source: BehaviorMetricSource,
+): string {
+  return `behavior-${key}-${stat}-${source}`
+}
+
+export interface BehaviorSeriesKeyParts {
+  metric: BehaviorMetricKey
+  stat: MetricStatKey
+  source: BehaviorMetricSource
+}
+
+/** `behaviorSeriesKey` 的逆运算（从右往左切：指标名本身可能带连字符，统计量/口径是固定枚举）。
+ *  非法 / 旧版本残留 ⇒ null（调用方当作「不认识这个 key」）。 */
+export function parseBehaviorSeriesKey(key: string): BehaviorSeriesKeyParts | null {
+  if (!key.startsWith('behavior-')) return null
+  const parts = key.slice('behavior-'.length).split('-')
+  if (parts.length < 3) return null
+  const source = parts.pop()
+  const stat = parts.pop()
+  const metric = parts.join('-')
+  if (source !== 'rollout' && source !== 'eval') return null
+  if (!isMetricStat(stat)) return null
+  if (!behaviorMetricDef(metric)) return null
+  return { metric: metric as BehaviorMetricKey, stat, source }
+}
+
+/** 是否 eval 口径（基础序列以 `eval` 开头；逐局指标的 eval 序列以 `-eval` 结尾）。 */
+export function isEvalSeriesKey(key: string): boolean {
+  return key.startsWith('eval') || parseBehaviorSeriesKey(key)?.source === 'eval'
+}
+
 /**
  * 按范围档位截取序列。eval 源序列（eval 胜率 / 行为统计）在有限轮里常带 NaN 缺口，
  * 其「最近 N」语义 = 最近 N 个**有效**评估点（而非最近 N 轮迭代），
@@ -113,7 +160,7 @@ export function sliceSeries(series: Series, range: TrendRange): Series {
   const tail = (n: number): number =>
     range === 'all' ? n : Math.max(1, Math.ceil(n * (range === '60pct' ? 0.6 : 0.3)))
   // eval / 行为统计：先过滤到有效评估点，再按档位截取。
-  if (sparse || SPARSE_SERIES_KEYS.has(key)) {
+  if (sparse || isSparseSeriesKey(key)) {
     const pairs = vals.map((v, i) => ({ v, it: iters[i] })).filter((p) => Number.isFinite(p.v))
     const sliced = pairs.slice(-tail(pairs.length))
     return {
@@ -146,7 +193,7 @@ export function behaviorMetricSeries(
   const chrono = [...settledRows(rows)].sort((a, b) => a.iter - b.iter)
   const def = behaviorMetricDef(key)
   return {
-    key: `behavior-${key}-${stat}-${source}`,
+    key: behaviorSeriesKey(key, stat, source),
     label: `${def?.label ?? key}${source === 'eval' ? ' · eval' : ''}`,
     // 逐局指标就是 formula 里的指标变量本身（eval 专属两列没有公式名 ⇒ 缺省）。
     formula: formulaMetricName(key) ?? undefined,
@@ -428,5 +475,9 @@ export function metricSeries(rows: IterRow[]): Series[] {
     },
   ]
 }
+
+/** `metricSeries` 的键全集（服务端校验 `keys` 参数用；与函数本体同一出处——
+ *  新增一条序列时这里自动跟上，不会出现「表里漏了一个 key ⇒ 那个指标永远取不到」。 */
+export const METRIC_SERIES_KEYS: readonly string[] = metricSeries([]).map((s) => s.key)
 
 /** 训练阶段（顶栏图标用）。 */

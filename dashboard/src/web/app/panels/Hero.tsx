@@ -4,9 +4,13 @@
 
 import {
   applyColOrder,
+  behaviorMetricDef,
   behaviorMetricSeries,
+  behaviorSeriesKey,
   BEHAVIOR_METRICS,
   behaviorTrendKey,
+  buildHomeChartSeries,
+  colorOf,
   DEFAULT_BEHAVIOR_METRIC_STATS,
   DEFAULT_HIDDEN_COL_KEYS,
   DEFAULT_TREND_VISIBILITY,
@@ -16,12 +20,15 @@ import {
   fmtPaired,
   fmtPct,
   heroMainRows,
+  homeChartSpec,
+  homeYBounds,
   iterGroups,
   isTrendRange,
   isTrendSource,
   latestRow,
   METRIC_ORDER_KEYS,
   METRIC_ORDER_REFS,
+  METRIC_STAT_KEYS,
   METRIC_STAT_LABEL,
   metricSeries,
   moveColKey,
@@ -29,14 +36,19 @@ import {
   parseBehaviorMetricStats,
   parseColOrder,
   parseHiddenCols,
+  parseHomeCompareConfig,
   parseTrendVisibility,
+  preserveHomeCompareOnCourseSwitch,
+  requestedHomeSeriesKeys,
   resolveColOrder,
+  resolveHomeCompareColors,
   resolveTrendOrder,
   TC_HERO_ITER_VIEW,
   TC_HERO_ITERS_COLLAPSED,
   TC_HERO_ITERS_COLS,
   TC_HERO_ITERS_ORDER,
   TC_HERO_ITERS_STAT,
+  TC_TREND_COMPARE,
   TC_TREND_ORDER,
   TC_TREND_RANGE,
   TC_TREND_SCALE,
@@ -44,6 +56,7 @@ import {
   TC_TREND_STAT,
   TC_TREND_VISIBILITY,
   parseTrendScales,
+  toggleHiddenCourse,
   TREND_RANGE_OPTIONS,
   TREND_SCALES_DEFAULT,
   TREND_SOURCE_OPTIONS,
@@ -53,6 +66,9 @@ import {
   type ConsoleStateView,
   type EvalABanner,
   type EvalCkptFile,
+  type HomeChartLine,
+  type HomeChartSpec,
+  type HomeCompareConfig,
   type IterRow,
   type MetricStatKey,
   type PairedReferee,
@@ -67,11 +83,15 @@ import { EvalBanner } from '../../components/EvalBanner'
 import { SegmentedControl } from '../../components/SegmentedControl'
 import { Switch } from '../../components/Switch'
 import { COLOR_EVAL, TrendChart } from '../../components/TrendChart'
+import { TrendZoomButton } from '../../components/TrendZoomButton'
 import { TrendZoomModal, type ZoomTarget } from '../../components/TrendZoomModal'
 import type { Col } from '../../components/DataTable'
 import { colDragProps } from '../../components/col-drag'
 import { ckptForIter, loadCourseCkpts, startEvalA } from '../lib/eval-a'
+import { useHomeCompare } from '../lib/useHomeCompare'
 import { buildMetricCols, type MetricRow } from './metric-table-cols'
+import { HomeCompareCell } from './HomeCompareCell'
+import { HomeCompareLegend } from './HomeCompareLegend'
 import { ReplayExportModal } from './ReplayExportModal'
 import { CompareTrendsModal } from './CompareTrendsModal'
 import { TrendConfigModal, type TrendConfigDraft } from './TrendConfigModal'
@@ -202,24 +222,7 @@ export function TrendCell({
           {/* 放大是**独立按钮**：图表主体只负责 hover 读数（十字光标），两者不再抢同一个点击面。
               也不能给图表主体挂原生 `title`——浏览器浮层会和读数框抢悬停。 */}
           {onExpand ? (
-            <button
-              type="button"
-              className="tc-tcell__zoom"
-              aria-label={`放大走势图：${main.label}`}
-              title="放大走势图（浮窗内可切换统计量）"
-              onClick={() => onExpand(main, overlay)}
-            >
-              <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true">
-                <path
-                  d="M7.5 1H11v3.5M4.5 11H1V7.5M11 1 7.5 4.5M1 11l3.5-3.5"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.4"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                />
-              </svg>
-            </button>
+            <TrendZoomButton label={main.label} onClick={() => onExpand(main, overlay)} />
           ) : null}
         </div>
       ) : (
@@ -796,16 +799,75 @@ export function Hero({
     }
   }, [])
   const orderedCharts = resolveTrendOrder(trendOrder)
-  /** 「走势配置」点「完成」时一次性落三份偏好（草稿制：弹窗里的改动平时不写盘，
+
+  // 首页多课对比（用户 2026-11-20）：全局一组对比课，所有可见走势图同图叠线。
+  // SSR 首帧恒关（= 改造前的单课画面），hydrate 后从 localStorage 恢复偏好。
+  const [homeCompare, setHomeCompare] = useState<HomeCompareConfig>(() => ({
+    on: false,
+    courses: [],
+  }))
+  useEffect(() => {
+    try {
+      setHomeCompare(parseHomeCompareConfig(localStorage.getItem(TC_TREND_COMPARE)))
+    } catch {
+      /* 隐私模式等不可写场景忽略 */
+    }
+  }, [])
+  // 切换当前课时，若新当前课也在对比里：把它摘掉，把旧当前课补进对比集合（追加到末尾）。
+  // 例：A 在看、对比 B ⇒ 切到 B 后仍是 B vs A；不会因额外课列表只剩 B 而整块熄灭。
+  const prevCourseRef = useRef(course)
+  useEffect(() => {
+    const prev = prevCourseRef.current
+    if (prev === course) return
+    prevCourseRef.current = course
+    const next = preserveHomeCompareOnCourseSwitch(homeCompare, prev, course)
+    if (next === homeCompare) return
+    setHomeCompare(next)
+    try {
+      localStorage.setItem(TC_TREND_COMPARE, JSON.stringify(next))
+    } catch {
+      /* 隐私模式等不可写场景忽略 */
+    }
+  }, [course, homeCompare])
+  const visibleCharts = orderedCharts.filter((k) => visibility[k])
+  /** 配置里的额外课（含可能已删除的旧课；顺序 = 色序，删课不重排其余课的颜色）。 */
+  const compareExtras = homeCompare.courses.filter((c) => c !== course)
+  /** 每门课的固定色位（颜色跟课走：切当前课/增减对比课都不重排已有课；跨图同课同色）。 */
+  const compareColors = resolveHomeCompareColors(homeCompare, course)
+  /** 图例临时隐藏的课（不进 localStorage：刷新后恢复全部可见；只摘线，不改选课/请求）。 */
+  const [hiddenCompare, setHiddenCompare] = useState<string[]>([])
+  const toggleCompareCourse = (c: string): void => {
+    setHiddenCompare((h) => toggleHiddenCourse(h, c))
+  }
+  const knownCourses = new Set(stateView?.courses ?? [])
+  /** 真正发请求的额外课：只取盘上仍存在的（服务端也会再校验一次）。 */
+  const requestExtras = compareExtras.filter((c) => knownCourses.has(c))
+  const compareActive = homeCompare.on && requestExtras.length > 0 && head != null
+  // 请求键 = 可见图 × 当前数据源（去重排序）：图重排不触发重拉，切数据源/统计量/显隐才重拉。
+  const compareKeys = compareActive
+    ? requestedHomeSeriesKeys(visibleCharts, source, scales, metricStats)
+    : []
+  const homeCompareData = useHomeCompare({
+    enabled: compareActive,
+    courses: requestExtras,
+    keys: compareKeys,
+    refreshSec,
+  })
+
+  /** 「走势配置」点「完成」时一次性落四份偏好（草稿制：弹窗里的改动平时不写盘，
    *  也不会让首页在弹窗底下重排）。「关闭 / Esc」= 不调这里。 */
   const onApplyTrendConfig = (next: TrendConfigDraft): void => {
     setVisibility(next.visibility)
     setMetricStats(next.metricStats)
     setTrendOrder(next.order)
+    setHomeCompare(next.compare)
+    // 选课变了，旧的临时隐藏名单不再代表用户意图（避免新加的同名课一上来就被摘线）。
+    setHiddenCompare([])
     try {
       localStorage.setItem(TC_TREND_VISIBILITY, JSON.stringify(next.visibility))
       localStorage.setItem(TC_TREND_STAT, JSON.stringify(next.metricStats))
       localStorage.setItem(TC_TREND_ORDER, JSON.stringify(next.order))
+      localStorage.setItem(TC_TREND_COMPARE, JSON.stringify(next.compare))
     } catch {
       /* 隐私模式等不可写场景忽略 */
     }
@@ -857,6 +919,201 @@ export function Hero({
           onClose={() => setCompareOpen(false)}
         />
       </section>
+    )
+  }
+
+  // 当前课序列索引（基础序列 + 可见逐局指标的两条口径 × 六种统计量）：单课格与多课格共用一份，
+  // 不为每张图重复算。逐局指标只给勾选中的建（92 个全算一遍是纯浪费）；六种口径一次建齐，
+  // 放大浮窗切统计量时整组换线不用重算（用户 2026-11-20）。
+  const currentSeriesMap = new Map<string, Series>()
+  for (const s of series) currentSeriesMap.set(s.key, s)
+  for (const m of BEHAVIOR_METRICS) {
+    const key = behaviorTrendKey(m.key)
+    if (!visibility[key]) continue
+    for (const stat of METRIC_STAT_KEYS) {
+      for (const src of ['rollout', 'eval'] as const) {
+        currentSeriesMap.set(
+          behaviorSeriesKey(m.key, stat, src),
+          behaviorMetricSeries(iters, m.key, stat, src),
+        )
+      }
+    }
+  }
+
+  /** 多课格的图名 / 口径 / 格式（与单课格同一个词；未知旧键 ⇒ null）。 */
+  const compareChartMeta = (
+    chart: TrendChartKey,
+  ): {
+    label: string
+    title: string
+    fmt: (v: number | null) => string
+    spec: HomeChartSpec
+  } | null => {
+    const spec = homeChartSpec(chart, scales, metricStats)
+    if (!spec) return null
+    switch (chart) {
+      case 'winRate':
+        return {
+          label: '胜率',
+          title: 'rollout 采样胜率 + eval 胜率（橙色）；数据源档位可只看一边',
+          fmt: fmtPct,
+          spec,
+        }
+      case 'dmgPerKill':
+        return {
+          label: '承伤/杀',
+          title: '每杀承伤 / (命数×满血)（rollout 实线 · eval 橙点）；越小越会周旋',
+          fmt: fmtPct,
+          spec,
+        }
+      case 'winTicks':
+        return {
+          label: '胜局耗时',
+          title:
+            '胜局平均耗时（ticks；rollout 实线 · eval 橙点）；y 下界 = max(0, min×0.8, max×0.5)',
+          fmt: fmtInt,
+          spec,
+        }
+      case 'kills':
+        return {
+          label: '击杀',
+          title:
+            scales.kills === 'pct'
+              ? '歼灭率 = Σ击杀 / Σ关卡敌数（rollout 实线 · eval 橙点）'
+              : '每局平均击杀（rollout 实线 · eval 橙点）',
+          fmt: scales.kills === 'pct' ? fmtPct : fmtDec1,
+          spec,
+        }
+      case 'winHp':
+        return {
+          label: '胜局残血',
+          title:
+            scales.winHp === 'pct'
+              ? '胜局剩余总血量 / 单命满血（三命全在 = 300%；rollout 实线 · eval 橙点）'
+              : '胜局平均剩余 HP（剩余命每命计满额；rollout 实线 · eval 橙点）',
+          fmt: scales.winHp === 'pct' ? fmtPct : fmtInt,
+          spec,
+        }
+      case 'pu':
+        return {
+          label: '道具',
+          title:
+            scales.pu === 'pct'
+              ? '拾取率 = Σ拾取 / Σ掉落（rollout 实线 · eval 橙点）'
+              : '每局平均拾取数（rollout 实线 · eval 橙点）',
+          fmt: scales.pu === 'pct' ? fmtPct : fmtDec2,
+          spec,
+        }
+    }
+    if (!chart.startsWith('bm:')) return null
+    const def = behaviorMetricDef(chart.slice(3))
+    if (!def) return null
+    const statKey = metricStats[def.key] ?? 'mean'
+    return {
+      label: def.label,
+      title: `逐局统计（${METRIC_STAT_LABEL[statKey]}；rollout 实线 · eval 橙点）· ${def.title}`,
+      fmt: (v) => (v == null ? '—' : fmtMetricStat(v, def)),
+      spec,
+    }
+  }
+
+  /** 首页多课格：一条线 = 一门课 × 一个口径（当前课 + 配置的对比课）。 */
+  const compareCell = (chart: TrendChartKey): JSX.Element | null => {
+    const meta = compareChartMeta(chart)
+    if (!meta) return null
+    const lines = buildHomeChartSeries({
+      spec: meta.spec,
+      source,
+      range,
+      courses: [course, ...compareExtras],
+      colors: compareColors,
+      currentCourse: course,
+      currentSeries: (key) => currentSeriesMap.get(key),
+      extra: homeCompareData.data,
+    })
+    // 放大浮窗：多课模式下就是首页那张多课图的放大（同线条 / 同色位 / 同一份显隐名单）；
+    // 单课模式保持原来的单课序列 / 行为统计曲线浮窗。
+    const evalOnly = source === 'eval'
+    const mainKey = evalOnly ? meta.spec.evalKey : meta.spec.mainKey
+    const overlayKey = source === 'all' ? meta.spec.evalKey : undefined
+    const main = currentSeriesMap.get(mainKey)
+    const overlay = overlayKey ? currentSeriesMap.get(overlayKey) : undefined
+    const zoomBounds = homeYBounds(
+      meta.spec.yRule,
+      [main, overlay].filter((s): s is Series => s != null),
+    )
+    let zoomTarget: ZoomTarget | null = null
+    if (compareActive) {
+      if (lines.length > 0) {
+        // 逐局指标：六种统计量各自的多课线条一次备齐（对比课数据已随首页请求批量取回，
+        // 当前课六种口径已在 currentSeriesMap 现算好），浮窗点统计量即整组换线、每门课一条。
+        const metric = chart.startsWith('bm:') ? behaviorMetricDef(chart.slice(3)) : undefined
+        const currentStat = metric ? (metricStats[metric.key] ?? 'mean') : undefined
+        let statLines: Partial<Record<MetricStatKey, HomeChartLine[]>> | undefined
+        if (metric) {
+          statLines = Object.fromEntries(
+            METRIC_STAT_KEYS.map((stat) => {
+              const spec = homeChartSpec(chart, scales, { ...metricStats, [metric.key]: stat })!
+              return [
+                stat,
+                stat === currentStat
+                  ? lines // 首页刚算过同一组，不重复
+                  : buildHomeChartSeries({
+                      spec,
+                      source,
+                      range,
+                      courses: [course, ...compareExtras],
+                      colors: compareColors,
+                      currentCourse: course,
+                      currentSeries: (key) => currentSeriesMap.get(key),
+                      extra: homeCompareData.data,
+                    }),
+              ]
+            }),
+          ) as Partial<Record<MetricStatKey, HomeChartLine[]>>
+        }
+        zoomTarget = {
+          title: `${meta.label} · 多课对比`,
+          fmt: meta.fmt,
+          multi: { lines, yRule: meta.spec.yRule, source, statLines, stat: currentStat },
+        }
+      }
+    } else if (chart.startsWith('bm:')) {
+      const def = behaviorMetricDef(chart.slice(3))
+      if (def) {
+        const statKey = metricStats[def.key] ?? 'mean'
+        zoomTarget = {
+          title: `${meta.label}·${METRIC_STAT_LABEL[statKey]} · ${course}`,
+          fmt: meta.fmt,
+          behavior: { key: def.key, iters, stat: statKey, source },
+        }
+      }
+    } else if (main) {
+      zoomTarget = {
+        title: `${meta.label} · ${course}`,
+        series: main,
+        series2: overlay,
+        fmt: meta.fmt,
+        color: evalOnly ? COLOR_EVAL : undefined,
+        yFloor: zoomBounds.yFloor,
+        yMin: zoomBounds.yMin,
+      }
+    }
+    return (
+      <HomeCompareCell
+        label={meta.label}
+        title={meta.title}
+        course={course}
+        currentColor={colorOf(compareColors[course] ?? 0)}
+        lines={lines}
+        fmt={meta.fmt}
+        yRule={meta.spec.yRule}
+        source={source}
+        hoverIter={hoverIter}
+        onHoverIter={setHoverIter}
+        hiddenCourses={hiddenCompare}
+        onExpand={zoomTarget ? () => openZoom(zoomTarget) : undefined}
+      />
     )
   }
 
@@ -1030,8 +1287,8 @@ export function Hero({
     const fmt = (v: number | null): string => (v == null ? '—' : fmtMetricStat(v, m))
     charts[key] = (
       <TrendCell
-        series={behaviorMetricSeries(iters, m.key, statKey, 'rollout')}
-        seriesEval={behaviorMetricSeries(iters, m.key, statKey, 'eval')}
+        series={currentSeriesMap.get(behaviorSeriesKey(m.key, statKey, 'rollout'))}
+        seriesEval={currentSeriesMap.get(behaviorSeriesKey(m.key, statKey, 'eval'))}
         source={source}
         fmt={fmt}
         range={range}
@@ -1073,7 +1330,20 @@ export function Hero({
               </button>
             ))}
           </div>
-          <span className="tc-trendctl__end">
+          <div className="tc-trendctl__end">
+            {compareActive ? (
+              <HomeCompareLegend
+                entries={[
+                  { course, color: colorOf(compareColors[course] ?? 0) },
+                  ...requestExtras.map((c) => ({
+                    course: c,
+                    color: colorOf(compareColors[c] ?? 0),
+                  })),
+                ]}
+                hidden={hiddenCompare}
+                onToggle={toggleCompareCourse}
+              />
+            ) : null}
             <button
               type="button"
               className="tc-btn tc-btn--sm"
@@ -1092,18 +1362,19 @@ export function Hero({
             >
               比较课程
             </button>
-          </span>
+          </div>
         </div>
         {evalBanner ? (
           <EvalBanner banner={evalBanner} onDismiss={() => setEvalBanner(null)} />
         ) : null}
         <div className="tc-trends">
-          {/* 顺序 = 「走势配置」顶部排好的键序；勾选表只决定画不画，不再决定先后。 */}
-          {orderedCharts
-            .filter((k) => visibility[k])
-            .map((k) => (
-              <Fragment key={k}>{charts[k] ?? null}</Fragment>
-            ))}
+          {/* 顺序 = 「走势配置」顶部排好的键序；勾选表只决定画不画，不再决定先后。
+              多课对比开启时，同一张图叠当前课 + 配置的对比课（`HomeCompareCell`）。 */}
+          {visibleCharts.map((k) => (
+            <Fragment key={k}>
+              {compareActive ? (compareCell(k) ?? charts[k] ?? null) : (charts[k] ?? null)}
+            </Fragment>
+          ))}
           {!Object.values(visibility).some(Boolean) ? (
             <p className="tc-muted tc-small">走势图已全部隐藏；点「走势配置」重新显示。</p>
           ) : null}
@@ -1132,12 +1403,24 @@ export function Hero({
           order={orderedCharts}
           visibility={visibility}
           metricStats={metricStats}
+          currentCourse={course}
+          courses={stateView?.courses ?? []}
+          archived={(stateView?.archived ?? []).map((a) => a.course)}
+          compare={homeCompare}
           onApply={onApplyTrendConfig}
           onClose={() => setConfigOpen(false)}
         />
       ) : null}
       {/* 只在打开时挂载：首帧的可见统计量直接由 target 决定，不会先闪一下默认均值。 */}
-      {zoom ? <TrendZoomModal target={zoom} range={range} onClose={() => setZoom(null)} /> : null}
+      {zoom ? (
+        <TrendZoomModal
+          target={zoom}
+          range={range}
+          onClose={() => setZoom(null)}
+          hiddenCourses={hiddenCompare}
+          onToggleCourse={toggleCompareCourse}
+        />
+      ) : null}
     </section>
   )
 }

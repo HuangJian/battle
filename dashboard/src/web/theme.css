@@ -1005,9 +1005,13 @@ a.tc-btn {
 .tc-trend-range__btn--on:hover {
   color: #fff;
 }
-/* 「比较课程」入口：贴在趋势控制条右端（控制条本身 align-self:flex-start 靠左） */
+/* 「比较课程」入口：贴在趋势控制条右端（控制条本身 align-self:flex-start 靠左）。
+ * 2026-11-20 第四轮：多课对比图例并入这一组（与「走势配置」同排），不再单独占一行。 */
 .tc-trendctl__end {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 /* ── 比较课程弹窗（plan/dashboard-compare-trends.plan.md）：一张大图 + 选课/档位 ── */
@@ -1180,6 +1184,45 @@ a.tc-btn {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+/* 首页小图：提示框是 SVG 外的 HTML 浮层，定位基准必须是图容器。 */
+.tc-mchart--compact {
+  position: relative;
+}
+/* hover 提示框（首页小图）：图**上方**，不遮折线；左边缘由 TSX 的计算值给，
+ * 这里只负责外观与换行。多课一行一个色块，窄格自动折行。 */
+.tc-mchart__tip {
+  position: absolute;
+  bottom: calc(100% + 2px);
+  transform: translateX(-50%);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  max-width: 100%;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  box-shadow: var(--sh-1);
+  pointer-events: none;
+  z-index: 7;
+  font-size: var(--fs-xs);
+  line-height: 1.3;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.tc-mchart__tip-it {
+  color: var(--muted);
+}
+.tc-mchart__tip-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.tc-mchart__tip-dot {
+  flex: 0 0 auto;
 }
 .tc-mchart__svg {
   display: block;
@@ -1789,6 +1832,46 @@ a.tc-btn {
   flex: 1;
   min-width: 300px;
 }
+/* 首页多课对比的全局图例：当前课 + 配置的对比课（色序与每张图上的线一致）。
+ * 住在 `.tc-trendctl__end` 里（与「走势配置」同排）；不换行，避免又长出一条纵向空间。 */
+.tc-trends__cmp {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+.tc-trends__cmp-label {
+  white-space: nowrap;
+}
+.tc-trends__cmp .tc-chip {
+  background: var(--gray-bg);
+  color: var(--text);
+  /* 图例项是按钮（点一下摘/恢复该课曲线）：去掉 UA 边框与字体差异。 */
+  appearance: none;
+  border: none;
+  font-family: inherit;
+  cursor: pointer;
+}
+.tc-trends__cmp .tc-chip:hover {
+  filter: brightness(0.96);
+}
+.tc-trends__cmp .tc-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* 临时隐藏：删除线 + 灰字（色点保留，提醒点回来是哪门课）；与 aria-pressed 同源。 */
+.tc-trends__cmp .tc-chip--off {
+  color: var(--muted);
+  text-decoration: line-through;
+  opacity: 0.65;
+}
+.tc-trends__cmp .tc-chip--off:hover {
+  opacity: 0.85;
+}
+.tc-trends__cmp-dot {
+  flex: 0 0 auto;
+}
 .tc-tcell {
   display: flex;
   flex-direction: column;
@@ -2096,6 +2179,65 @@ a.tc-btn {
   background: var(--card);
   color: var(--text);
   font-size: var(--fs-xs);
+}
+/* 多课对比（用户 2026-11-20）：全局一组对比课；当前课恒在，额外课按色序排。 */
+.tc-trendcfg__cmp {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tc-trendcfg__cmp-dot {
+  flex: 0 0 auto;
+}
+.tc-trendcfg__cmp-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+}
+.tc-trendcfg__srch {
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+  background: var(--card);
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+.tc-trendcfg__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 140px;
+  overflow: auto;
+}
+.tc-trendcfg__cand {
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.tc-trendcfg__cand:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.tc-trendcfg__cand--on {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+.tc-trendcfg__cand--off {
+  border-style: dashed;
+  color: var(--muted);
+  cursor: not-allowed;
+}
+.tc-trendcfg__cand:disabled {
+  cursor: not-allowed;
 }
 /* 底部释义栏常驻：hover 任何一项都在同一个地方展开，不会被滚动容器裁掉。 */
 .tc-trendcfg__explain {

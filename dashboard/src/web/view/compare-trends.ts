@@ -11,7 +11,7 @@
  */
 
 import { fmtPct } from './format'
-import { type TrendSource } from './series'
+import { isEvalSeriesKey, type TrendSource } from './series'
 
 /** 同图课程数上限（读账本成本随门数线性上涨，plan §6-1）。 */
 export const COMPARE_MAX_COURSES = 8
@@ -141,6 +141,20 @@ export interface CompareTrendsView {
   courses: CompareCourseSeries[]
   unavailable: CompareUnavailable[]
   /** 各课账本 `mtimeMs:size` 的聚合串（客户端指纹门闩，见 `shouldApplyCompareData`）。 */
+  fingerprint: string
+  time: string
+}
+
+/** `GET /api/trendSeries` 响应：按**显式序列键**批量取数（首页多课走势图用）。
+ *
+ *  与 `CompareTrendsView` 的区别只在请求身份：这里没有 metric/source（键已经编码了口径），
+ *  因此同一个响应可以同时服务首页上多张不同指标的走势图。 */
+export interface TrendSeriesView {
+  keys: string[]
+  from: number | null
+  to: number | null
+  courses: CompareCourseSeries[]
+  unavailable: CompareUnavailable[]
   fingerprint: string
   time: string
 }
@@ -395,6 +409,27 @@ export function nearestIter(iters: number[], target: number): number | null {
     }
   }
   return best
+}
+
+/** 「只看 eval」档的 hover 吸附：只拿 eval 序列的**有效点**当候选，rollout 的密集轮次
+ *  与 eval 的 NaN 缺口都不参与。
+ *
+ *  为什么不能直接复用 `nearestIter(allIters)`：`all` 档同图有 rollout + eval 两条线，
+ *  按全部 iter 吸附时鼠标停在 eval 点附近也会被最近的 rollout 轮抢走，eval 读数经常是「—」。
+ *  这里返回 null = 本图没有有效 eval 点（调用方回退到全部 iter，诚实留空而不是硬造点）。 */
+export function nearestEvalIter(
+  seriesList: Array<{ key: string; iters: number[]; vals: number[] }>,
+  target: number,
+): number | null {
+  const iters: number[] = []
+  for (const s of seriesList) {
+    if (!isEvalSeriesKey(s.key)) continue
+    for (let i = 0; i < s.iters.length; i++) {
+      const it = s.iters[i]
+      if (Number.isFinite(s.vals[i]) && Number.isFinite(it)) iters.push(it)
+    }
+  }
+  return nearestIter(iters, target)
 }
 
 /** 请求身份（门闩的左半边：选项一变就必须覆盖，哪怕账本没动）。 */

@@ -3,6 +3,8 @@
  *  · 现有六项：放大同一张单指标图（rollout 实线 / eval 橙线按当前数据源）。
  *  · 行为指标：把六种统计量（均值/中位数/min/max/p90/p99）画成多条曲线，
  *    点击图例逐条显示/隐藏——统计量是同一轮逐局读数的不同切面，不是六条独立指标。
+ *  · 多课对比（用户 2026-11-20）：首页正在多课同图时，放大**仍是那张多课图**——直接复用
+ *    首页的线条/色位/口径；点课程名与首页图例共用同一份临时隐藏名单。
  *
  *  统计曲线按 Hero 当前的范围档位（全量/最近60%/最近30%）截取；颜色只走 SVG 属性，
  *  布局一律走 class（与 TrendChart / MultiTrendChart 同规）。
@@ -17,8 +19,11 @@ import {
   METRIC_STAT_KEYS,
   METRIC_STAT_LABEL,
   METRIC_STAT_OPTIONS,
+  homeYBounds,
   sliceSeries,
   type BehaviorMetricKey,
+  type HomeChartLine,
+  type HomeChartYRule,
   type IterRow,
   type MetricStatKey,
   type Series,
@@ -36,6 +41,16 @@ export interface ZoomTarget {
   color?: string
   yFloor?: number
   yMin?: number
+  /** 首页多课对比的放大：线条原样复用（含被临时隐藏的课），浮窗自己按隐藏名单过滤。 */
+  multi?: {
+    lines: HomeChartLine[]
+    yRule: HomeChartYRule
+    source: TrendSource
+    /** 逐局指标：六种统计量各自的多课线条（切换后每门课只画该统计量的线）。 */
+    statLines?: Partial<Record<MetricStatKey, HomeChartLine[]>>
+    /** 首页当前统计量（浮窗初始选中）。 */
+    stat?: MetricStatKey
+  }
   behavior?: {
     key: BehaviorMetricKey
     iters: IterRow[]
@@ -49,13 +64,24 @@ export interface TrendZoomModalProps {
   target: ZoomTarget | null
   range: TrendRange
   onClose: () => void
+  /** 首页的临时隐藏名单（放大浮窗与首页图例共用一份；不进 localStorage）。 */
+  hiddenCourses?: readonly string[]
+  /** 点课程名切换显隐（与首页图例同一个回调）。 */
+  onToggleCourse?: (course: string) => void
 }
 
 const MIN_CHART_H = 280
 
-export function TrendZoomModal({ target, range, onClose }: TrendZoomModalProps) {
-  const initialStat = target?.behavior?.stat ?? 'mean'
+export function TrendZoomModal({
+  target,
+  range,
+  onClose,
+  hiddenCourses = [],
+  onToggleCourse,
+}: TrendZoomModalProps) {
+  const initialStat = target?.multi?.stat ?? target?.behavior?.stat ?? 'mean'
   const [visibleStats, setVisibleStats] = useState<Set<MetricStatKey>>(() => new Set([initialStat]))
+  const [multiStat, setMultiStat] = useState<MetricStatKey>(initialStat)
   const [chartBox, setChartBox] = useState({ w: 1200, h: 560 })
   const slotRef = useRef<HTMLDivElement | null>(null)
 
@@ -63,7 +89,8 @@ export function TrendZoomModal({ target, range, onClose }: TrendZoomModalProps) 
   const behaviorStat = target?.behavior?.stat ?? 'mean'
   useEffect(() => {
     setVisibleStats(new Set([behaviorStat]))
-  }, [behaviorKey, behaviorStat])
+    setMultiStat(target?.multi?.stat ?? behaviorStat)
+  }, [behaviorKey, behaviorStat, target?.multi?.stat])
 
   useEffect(() => {
     if (!target) return
@@ -94,6 +121,21 @@ export function TrendZoomModal({ target, range, onClose }: TrendZoomModalProps) 
   }, [target, onClose])
 
   if (!target) return null
+
+  const multi = target.multi
+  /** 逐局指标切统计量 = 整组换线（每门课仍只一条该统计量的线）；其它图没有 statLines。 */
+  const drawnMultiLines = multi?.statLines?.[multiStat] ?? multi?.lines ?? []
+  /** 隐藏只摘线、不摘图例按钮（否则隐藏后就没入口点回来了）；y 轴按可见线重算。 */
+  const visibleMultiLines = drawnMultiLines.filter((l) => !hiddenCourses.includes(l.course))
+  const multiEntries: Array<{ course: string; color: string }> = []
+  if (multi) {
+    for (const l of drawnMultiLines) {
+      if (!multiEntries.some((e) => e.course === l.course)) {
+        multiEntries.push({ course: l.course, color: l.color })
+      }
+    }
+  }
+  const multiBounds = multi ? homeYBounds(multi.yRule, visibleMultiLines) : {}
 
   const behavior = target.behavior
   const def = behavior ? behaviorMetricDef(behavior.key) : undefined
@@ -137,9 +179,13 @@ export function TrendZoomModal({ target, range, onClose }: TrendZoomModalProps) 
         <div className="tc-trendzoom__hd">
           <h3>{target.title}</h3>
           <span className="tc-muted tc-small">
-            {def
-              ? `${def.title} · 逐局统计；点击图例显示/隐藏统计曲线`
-              : '当前范围档位下的放大走势'}
+            {multi
+              ? multi.statLines
+                ? '多课对比 · 点击统计量切换口径，点击课程名显隐曲线'
+                : '多课对比 · 点击课程名显示/隐藏曲线'
+              : def
+                ? `${def.title} · 逐局统计；点击图例显示/隐藏统计曲线`
+                : '当前范围档位下的放大走势'}
           </span>
           <button type="button" className="tc-link" onClick={onClose}>
             关闭
@@ -171,9 +217,63 @@ export function TrendZoomModal({ target, range, onClose }: TrendZoomModalProps) 
             ))}
           </div>
         ) : null}
+        {multi?.statLines ? (
+          <div className="tc-trendzoom__legend" role="group" aria-label="统计量切换">
+            {METRIC_STAT_OPTIONS.map((o) => (
+              <button
+                type="button"
+                key={o.value}
+                className={`tc-trendzoom__lg${multiStat === o.value ? '' : ' tc-trendzoom__lg--off'}`}
+                aria-pressed={multiStat === o.value}
+                title={`只看多门课程的${o.label}`}
+                onClick={() => setMultiStat(o.value)}
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        {multi ? (
+          <div className="tc-trendzoom__legend" role="group" aria-label="课程曲线显隐">
+            {multiEntries.map((e) => {
+              const off = hiddenCourses.includes(e.course)
+              return (
+                <button
+                  type="button"
+                  key={e.course}
+                  className={`tc-trendzoom__lg${off ? ' tc-trendzoom__lg--off' : ''}`}
+                  aria-pressed={off}
+                  aria-label={off ? `显示 ${e.course} 的曲线` : `隐藏 ${e.course} 的曲线`}
+                  onClick={() => onToggleCourse?.(e.course)}
+                >
+                  <svg viewBox="0 0 8 8" width="8" height="8" aria-hidden="true">
+                    <circle cx="4" cy="4" r="4" fill={e.color} />
+                  </svg>
+                  {e.course}
+                </button>
+              )
+            })}
+          </div>
+        ) : null}
 
         <div className="tc-trendzoom__chart" ref={slotRef}>
-          {behavior ? (
+          {multi ? (
+            visibleMultiLines.length > 0 ? (
+              <MultiTrendChart
+                seriesList={visibleMultiLines}
+                fmt={fmt}
+                yBounds={multiBounds}
+                label={target.title}
+                width={chartBox.w}
+                height={chartBox.h}
+                showLegend={false}
+                bridgeGaps={multi.source === 'eval'}
+                snapToEval={multi.source === 'eval'}
+              />
+            ) : (
+              <span className="tc-muted tc-small">全部课程已隐藏（点课程名恢复）</span>
+            )
+          ) : behavior ? (
             statSeries.length > 0 ? (
               <MultiTrendChart
                 seriesList={statSeries}
@@ -181,6 +281,7 @@ export function TrendZoomModal({ target, range, onClose }: TrendZoomModalProps) 
                 width={chartBox.w}
                 height={chartBox.h}
                 showLegend={false}
+                snapToEval={behaviorSource === 'eval'}
               />
             ) : (
               <span className="tc-muted tc-small">至少显示一条统计曲线</span>

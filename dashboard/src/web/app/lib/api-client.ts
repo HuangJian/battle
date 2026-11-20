@@ -14,6 +14,7 @@ import type {
   EvalRoundsView,
   LogPayload,
   PoolView,
+  TrendSeriesView,
   TrendSource,
 } from '../../view'
 
@@ -112,6 +113,25 @@ export async function fetchCompareTrends(params: {
   const r = await fetch(`/api/compareTrends?${q.toString()}`)
   if (!r.ok) throw new Error(`/api/compareTrends HTTP ${r.status}`)
   return (await r.json()) as CompareTrendsView
+}
+
+/** 首页走势图多课同图：按显式序列键批量取对比课（`GET /api/trendSeries`）。
+ *  当前课不走这里——Hero 已有 `/api/state.metrics.iters`，客户端现算。 */
+export async function fetchTrendSeries(params: {
+  courses: string[]
+  keys: string[]
+  from?: number | null
+  to?: number | null
+}): Promise<TrendSeriesView> {
+  const q = new URLSearchParams({
+    courses: params.courses.join(','),
+    keys: params.keys.join(','),
+  })
+  if (params.from != null) q.set('from', String(params.from))
+  if (params.to != null) q.set('to', String(params.to))
+  const r = await fetch(`/api/trendSeries?${q.toString()}`)
+  if (!r.ok) throw new Error(`/api/trendSeries HTTP ${r.status}`)
+  return (await r.json()) as TrendSeriesView
 }
 
 export async function fetchEvalBoard(fresh = false, course = ''): Promise<EvalBoardView> {

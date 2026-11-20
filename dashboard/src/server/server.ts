@@ -17,6 +17,8 @@
  *    - GET  /api/evalRounds           → 该课程全部可导出 eval 轮（弹窗轮次选择器；summary-only 扫描）
  *    - GET  /api/compareTrends        → 多课程同图对比（`?courses=a,b&metric=&source=&from=&to=`；
  *                                       比较弹窗打开时自持轮询，不进 /api/state）
+ *    - GET  /api/trendSeries          → 首页走势图多课同图（`?courses=&keys=&from=&to=`；
+ *                                       显式序列键批量取数，复用比较课程的账本缓存）
  *    - GET  /api/evalReplayJob        → replay 导出任务态（busy + manifest + 日志尾）
  *    - GET  /api/evalReplayFile       → 单局 .replay 下载（manifest 白名单）
  *    - POST /api/<act>   → 动作（api.routeAction → actions：启/停/冒烟/预设/开关/节点编辑）
@@ -73,6 +75,7 @@ import {
   buildEvalRoundsView,
   buildPoolView,
   buildStateView,
+  buildTrendSeriesView,
   componentLogPayload,
   curriculumLadderView,
   discoverCourses,
@@ -82,6 +85,7 @@ import {
   evalReplayFileResponse,
   parseEvalIterParam,
   parseCompareQuery,
+  parseTrendSeriesQuery,
   getLoopQueueView,
   poolCountersView,
   invalidatesSnapshot,
@@ -615,6 +619,18 @@ async function main(): Promise<void> {
     return json(await buildCompareTrendsView(parsed.params))
   }
 
+  // 首页走势图多课同图：显式序列键批量取数（同一份账本缓存；行为指标按需现算）。
+  const trendSeriesRoute: RouteFn = async (_req, { url }) => {
+    const parsed = parseTrendSeriesQuery({
+      courses: url.searchParams.get('courses'),
+      keys: url.searchParams.get('keys'),
+      from: url.searchParams.get('from'),
+      to: url.searchParams.get('to'),
+    })
+    if (!parsed.ok) return json({ ok: false, message: parsed.message }, 400)
+    return json(await buildTrendSeriesView(parsed.params))
+  }
+
   const evalReplayJobRoute: RouteFn = async (_req, { viewCourse }) => {
     // F4 闭合（串话归因，服务端路由）：此接口返回的 manifest = POST /api/replayExport 受理成功后
     // 落盘的 manifest，而不再是「最近一次导出的 manifest」。旧弹窗用法（此接口做轮选择）已废除
@@ -937,6 +953,7 @@ async function main(): Promise<void> {
     '/api/evalGames': { GET: guard(evalGamesRoute) },
     '/api/evalRounds': { GET: guard(evalRoundsRoute) },
     '/api/compareTrends': { GET: guard(compareTrendsRoute) },
+    '/api/trendSeries': { GET: guard(trendSeriesRoute) },
     '/api/evalReplayJob': { GET: guard(evalReplayJobRoute) },
     '/api/evalReplayFile': { GET: guard(evalReplayFileRoute) },
     '/api/errors': { GET: guard(errorsApiRoute) },

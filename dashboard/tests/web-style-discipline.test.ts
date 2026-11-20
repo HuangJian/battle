@@ -76,11 +76,12 @@ describe('视觉纪律：字号阶梯', () => {
 })
 
 describe('视觉纪律：内联布局样式', () => {
-  // 唯一豁免：TrendChart 的 3 处 `style=` 都是**计算值**（图形高度、提示框按
-  // x 比例定位），无法写成静态类名；SVG 坐标系是运行时才知道的。
-  // 键 = 仓库相对路径，值 = 允许的 `style=` 出现次数（写死次数，免得这个桶越积越大）。
+  // 豁免只给**计算值**：图形高度 / 提示框按 x 定位，无法写成静态类名；
+  // SVG 坐标系与实测框宽是运行时才知道的。键 = 仓库相对路径，值 = 允许的 `style=` 次数
+  // （写死次数，免得这个桶越积越大）。
   const ALLOWED: Record<string, number> = {
     'components/TrendChart.tsx': 3,
+    'components/MultiTrendChart.tsx': 1,
   }
 
   it('前提：扫到的 tsx 数量合理（防止路径写错导致扫描空转）', () => {
@@ -89,7 +90,7 @@ describe('视觉纪律：内联布局样式', () => {
     expect(files.some((f) => rel(f) === 'components/TrendChart.tsx')).toBe(true)
   })
 
-  it('除 TrendChart 的 3 处计算值外，tsx 里没有 style=', () => {
+  it('除豁免的计算值外，tsx 里没有 style=', () => {
     const offenders: string[] = []
     for (const f of webTsx()) {
       const n = (read(f).match(/style=/g) ?? []).length
@@ -123,6 +124,15 @@ describe('视觉纪律：内联布局样式', () => {
     expect(src).not.toMatch(/style=\{\{[^}\n]*:\s*['"][\d.]+(px|rem|em)/)
     // 前提：豁免的确实是「高度/定位」这类几何量（值里引用了变量）。
     expect(src).toMatch(/style=\{\{ height \}\}/)
+  })
+
+  it('MultiTrendChart 的豁免是首页提示框的 left 计算值（不是静态布局）', () => {
+    const src = read(join(WEB_DIR, 'components', 'MultiTrendChart.tsx'))
+    const heads = [...src.matchAll(/style=\{([^\n]*)/g)].map((m) => m[1])
+    expect(heads.length).toBe(ALLOWED['components/MultiTrendChart.tsx'])
+    // 值必须引用实测/计算的定位量（tipCx 或准星 x），不得是写死的 px/%。
+    expect(src).toMatch(/left:\s*tipCx/)
+    expect(src).not.toMatch(/style=\{\{[^}\n]*:\s*['"][\d.]+(px|rem|em)/)
   })
 })
 
