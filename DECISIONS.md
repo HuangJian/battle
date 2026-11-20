@@ -8613,3 +8613,18 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   LOC 756/1000；`Any` / exact / clone / 同名四条基线未动。
 - **守卫**：`tests/trainer/test_rescan_spec.py`（字段闭集 / frozen + kw_only / 形参恰 `["spec"]` /
   唯一调用点按关键字传 `spec`，探针 `tests/helpers/run_setup_probe.thread_kwarg_keys`）。
+
+## §2026-11-20-job-exec-spec（`_execute_job`(14 参) → `JobExecSpec`：线程调用点只收位置参数）
+
+- **背景**：push 模式下每个 job 由 `Runtime.thread(_execute_job, …)` 起线程，而 `Runtime.thread(...)`
+  只收位置参数（写关键字会语法错误）⇒ 调用点逐位传 11 个实参。这与 §232 的 `rescan_nodes`（27 参 /
+  19 位置，第 19 个错位过一次）是同一条失效面。
+- **决定**：`JobExecSpec`（frozen + kw_only，14 字段）住 `remote/worker_server.py`；
+  `_execute_job(spec)` 只收一个对象（函数体逐字保留 + 顶部解包；正文要重新绑定 `log`，故解包成
+  `spec_log`）。生产调用点 `thread(_execute_job, JobExecSpec(...))`；两处直接调用的测试同样构造 spec。
+- **账**：全仓宽签名 124 → 123（`WIDE_FUNCS_BASELINE` 删 `remote/worker_server.py`）；
+  `Any` 未加（`log: Callable[[str], None]`）。
+- **守卫**：`tests/remote/test_job_exec_spec.py`（字段闭集 / frozen + kw_only / 形参恰 `["spec"]` /
+  线程调用点位置实参形状恰 `["JobExecSpec_call"]`）。
+- **坑**：`tests/test_subproc_util.py` 的「起真服务进程」守卫按字面量 `"remote.worker_server",` 认人，
+  只读形状的守卫文件必须把它写成模块常量（否则被误判成 spawn 了服务）。

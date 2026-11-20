@@ -51,6 +51,49 @@ def called_names(module: str, name: str) -> list[str]:
     return out
 
 
+_THREAD_ATTRS = frozenset({"thread", "Thread"})
+
+
+def _thread_calls(module: str, target: str):
+    """模块里 `…thread(<target>, …)` / `<target>(…)` 之外的线程调用点（按 target 名过滤）。"""
+    mod = importlib.import_module(module)
+    tree = ast.parse(textwrap.dedent(inspect.getsource(mod)))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in _THREAD_ATTRS or not node.args:
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.Name) and first.id == target:
+            yield node
+
+
+def thread_positional_target(module: str, target: str) -> bool:
+    """存在把 `target` 当线程入口的调用点吗（防「扫了个寂寞」）。"""
+    return any(True for _ in _thread_calls(module, target))
+
+
+def thread_positional_arg_kinds(module: str, target: str) -> list[str]:
+    """**位置**实参的形状（`Name` → 变量名；`Call` → `"<被调名>_call"`）。
+
+    `thread_kwarg_keys` 的孪生探针：有的线程入口只收位置参数（`Runtime.thread(...)`）——
+    那里唯一安全的形状是「正好一个 spec 对象」，多一个位置实参就回到逐位对应的老毛病。
+    """
+    kinds: list[str] = []
+    for node in _thread_calls(module, target):
+        kinds = []
+        for a in node.args[1:]:
+            if isinstance(a, ast.Name):
+                kinds.append(a.id)
+            elif isinstance(a, ast.Call):
+                callee = a.func
+                nm = callee.id if isinstance(callee, ast.Name) else "?"
+                kinds.append(f"{nm}_call")
+            else:
+                kinds.append(type(a).__name__)
+    return kinds
+
+
 def thread_kwarg_keys(module: str, target: str) -> list[str]:
     """模块里 `…thread(<target>, kwargs={...})` 的关键字名（按 target 过滤，按源码顺序）。
 

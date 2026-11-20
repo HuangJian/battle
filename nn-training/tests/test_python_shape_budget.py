@@ -92,7 +92,6 @@ WIDE_FUNCS_BASELINE = {
     "remote/train_core.py": 5,
     "remote/upload_proc.py": 2,
     "remote/worker.py": 2,
-    "remote/worker_server.py": 1,
     "tools/c9_critic_calibration.py": 1,
     "tools/p0_auc_probe.py": 1,
     "tools/spatial-probe-flatcv.py": 1,

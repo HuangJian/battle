@@ -113,19 +113,21 @@ def test_execute_job_notifies_only_after_the_result_is_visible(
     monkeypatch.setattr(ws, "run_job", fake_run_job)
     monkeypatch.setattr(ws, "notify_result_ready", fake_notify)
     ws._execute_job(
-        state,
-        {"job_id": "j1"},
-        b"",
-        None,
-        None,
-        None,
-        tmp_path,
-        "cpu",
-        0,
-        False,
-        hub_url="http://hub/",
-        push_token="tok",
-        log=lambda _m: None,
+        ws.JobExecSpec(
+            state=state,
+            manifest={"job_id": "j1"},
+            payload_zip=b"",
+            code_zip=None,
+            ts_code_zip=None,
+            blobs=None,
+            work_dir=tmp_path,
+            device="cpu",
+            torch_threads=0,
+            echo=False,
+            hub_url="http://hub/",
+            push_token="tok",
+            log=lambda _m: None,
+        )
     )
     assert calls == [("http://hub/", "tok", "j1")]
     assert state.jobs["j1"]["state"] == "done"

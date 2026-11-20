@@ -25,6 +25,34 @@
 
 ---
 
+## §233 P0-3 第六刀：`remote/worker_server._execute_job` 的 14 个参数 → `JobExecSpec`（2026-11-20）
+
+**触发**：`remote/worker_server` 的每个 push job 在一条线程里跑 `_execute_job`，而
+`common.runtime.Runtime.thread(...)` **只收位置参数**（源码注释自己写着「写成 `epoch_mult=…`
+会让整个文件语法错误」）⇒ 那个调用点逐位传了 11 个实参，缺省参数（`hub_url` / `push_token` /
+`epoch_mult` / `log`）必须严格按形参顺序摆进去。这与 §232 那个 27 参函数是**同一条失效面**
+（`rescan_nodes` 的第 19 个位置参数错位过一次：线程启动即抛，功能静默失联）。
+
+**做法**：`JobExecSpec`（frozen + kw_only，14 字段）住在 `remote/worker_server.py`；
+`_execute_job(spec)` 只收一个对象，函数体逐字保留（顶部解包；`log` 那行改名 `spec_log` 再
+`tagged(...)` 包一层，因为正文要**重新绑定** `log`）。生产调用点变成
+`thread(_execute_job, JobExecSpec(...), daemon=True, name="run")` —— 位置实参只剩 1 个。
+
+**测试也收敛到同一个对象**：三处直接调用（`test_result_ready` / `test_job_log_course`）原本是
+「前 10 个位置 + 后面关键字」的混合写法，正是错位的温床；现在都构造 spec。
+
+**账**：全仓宽签名 124 → **123**（`remote/worker_server.py` 1 → 0，`WIDE_FUNCS_BASELINE` 条目删除）；
+`Any` 基线该文件原本没有条目（`None`），本次也没加 —— `log` 用 `Callable[[str], None]`。
+
+**守卫**：`tests/remote/test_job_exec_spec.py` —— 字段表闭集 · frozen（行为式）+ 逐字段 `kw_only` ·
+`_execute_job` 形参恰 `["spec"]` · 线程调用点的**位置实参形状**恰 `["JobExecSpec_call"]`
+（探针 `tests/helpers/run_setup_probe.thread_positional_arg_kinds`：多一个位置实参就红）。
+
+**顺手记下的两条坑**：① `tests/test_subproc_util.py` 的「起真服务进程」守卫按字面量
+`"remote.worker_server",` 认人 —— 只读形状的守卫文件要把它写成模块常量，否则会被误判成 spawn
+了服务；② `Any` / 宽签名 / 同名三条基线都只降不涨，**降了要同步改基线**（`test_any_budget` 会把
+「基线比实测高」判红，逼着人把额度收回去）。
+
 ## §232 P0-3 第五刀：`trainer/queue_local.rescan_nodes` 的 27 个参数 → `RescanSpec`（2026-11-20）
 
 **触发**：全仓最宽的签名（27 参，其中 19 个位置参数），且它的 docstring 自己记着两次事故 ——
