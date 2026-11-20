@@ -850,18 +850,23 @@ def _torch_artifacts(st: _CoreRun) -> None:
     init_w, log = spec.init_w, spec.log
     model, opt, device_t, epochs_eff = st.model, st.opt, st.device_t, st.epochs_eff
     opt_raw, opt_dir = st.opt_raw, st.opt_dir
-    raw_model = model
-    import torch
+    # ⚠ `st.model` 在 cuda-dp 下**已经是 DataParallel 包装器**（`_restore` 末尾落的），
+    #   直接拿它写产物会让 state_dict 的键全带 `module.` 前缀 ⇒ 权重 delta 与 init 权重
+    #   零交集（2026-11-20 kaggle-c 双 T4 现场：「新权重缺 44 个参数」整 job 被拒）。
+    #   剥壳只改键名：DP 与底层模块共享参数对象。
+    from worker.ppo.common import HostModule, _ppo_save, unwrap_module
+    from worker.ppo.np_core import xla_mark_step
 
-    from worker.data.weights_io import save_weights_json
+    raw_model = unwrap_module(model)
 
     _t_art = time.time()
 
     # ---- 产物：weights_json（save_weights_json，D12/G1）+ _ppo_save tar（D5） ----
     # XLA：先落图执行边界再物化回主机。否则 state_dict() / save_weights_json 读到的是
     # 尚未执行的惰性图（权重是最新一轮 `mark_step` 时的快照，不是本轮终态）。
-    from worker.ppo.common import HostModule, _ppo_save
-    from worker.ppo.np_core import xla_mark_step
+    import torch
+
+    from worker.data.weights_io import save_weights_json
 
     xla_mark_step(device_t)
     # ⚠ 用 raw_model 而非 model：DP 包装的 state_dict 键带 "module." 前缀（已实证），写出去会让

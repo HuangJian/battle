@@ -272,6 +272,25 @@ def to_cpu_batch(tensors: list) -> list:
     return out
 
 
+def unwrap_module(module: torch.nn.Module) -> torch.nn.Module:
+    """剥掉 `DataParallel` / `DistributedDataParallel` 外壳，返回持有参数的底层模块。
+
+    **为什么必须先剥**（2026-11-20 现场，kaggle-c 双 T4）：DP 包装后 `state_dict()` 的键
+    全部带 `module.` 前缀 ⇒ 回传的权重与 init 权重的参数集合**零交集**，
+    `remote/weights_delta.pack_weights_delta` 当场判「新权重缺 44 个参数」并把整个 job 拒掉
+    （`train_core._torch_artifacts` 里 `raw_model = model` 拿到的其实是包装器）。
+    DP 与底层模块**共享参数对象**，所以剥壳只影响键名，不影响数值。
+
+    嵌套最多剥 8 层（DP(DDP(m)) 这类组合），不猜别的属性名。
+    """
+    for _ in range(8):
+        if isinstance(module, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
+            module = module.module
+            continue
+        return module
+    return module
+
+
 class HostModule(torch.nn.Module):
     """`Module` 的**只读主机视图**：`state_dict()` 是已批量物化到 CPU 的副本，其余原样转发。
 
