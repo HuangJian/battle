@@ -8411,6 +8411,81 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   另外从 it210 起跑会污染对照腿（它已被旧三项奖励训过）并切断与 g7 的同迭代三向比对。命名沿用 `g7-` 前缀
   （`g7-base2` / `g7-ctrl2`，用户 2026-11-20 口径：不急着升序列），在跑的两课不动。
 - **全文**：`docs/nn/experiments.md §146`（g7 判决与病因）· `nn-training/curricula/g7-base2.jsonc` 文件头（实付表与判据）。
+## §2026-11-20-goalnn-base2-verdict-two-levers（加重惩罚不是解：base2 机制零位移且通过率 −6pp；改从「信用视界 / 采样密度」各开一腿）
+
+- **判决**：`g7-base2`（4 项基地项，判别差 +261）跑到 it120：通过率 33.71% vs `g7-ctrl2` 39.71%
+  （同迭代 Δ **−6.0pp**，p=0.019；末 3 点 −4.81pp，CI −8.5~−1.1），**毁局 lane 41.2→41.5、
+  对基地开火 6.58→7.05 一步没动**，四项**实付**自己也变差（−90.4→−95.8，ctrl2 −88.0）。
+- **关键量化**：四项的**组内 std = 胜局 168 / 毁局 200**，而"胜局 vs 毁局"的全部击杀收入差只有 **173**
+  （胜局 20 杀 = 300 恒定，std 0）⇒ 加进去的是**与学习信号等量、且策略不可控**的噪声 ⇒ SNR 腰斩。
+  这是"为什么更差"的机制解释，也是"再加项只会更糟"的判据。
+- **决定**：同一份奖励不变，各开一条**单旋钮**腿（同起点 c1@it740 / 同面板 classic35 / 同 24576·1024·4）：
+  ① `g7-lam98` = 只把 `lam 0.95 → 0.985`（有效视界 1/(1−γλ)：19→59 决策步 ≈ 190→590 拍）——
+     验「信号可学但信用视界够不到"出发拦截"」；γ 不动（折扣半衰期 346 步仍长于新视界）。
+  ② `g7-hot11` = 只把训练关收窄到 11 个高基毁关（基毁 ≥14/20 且胜 ≥3/20：
+     2003/2004/2005/2007/2014/2019/2021/2027/2031/2032/2033），用 `rotation_mode: pinned` +
+     `rotation_per_it: 0`，**不动 `stages`** ⇒ `course.stages` 仍 35 关、评估面板 700 局逐局可比。
+- **被否决**：① 继续加/加权奖励项（组内 std 已经把信号淹了，加重只会更糟）；② 给 `wWallKeep` 之外
+  再挂终局项（终局量 telescoping 后只剩结局代理，与 outcome 共线）；③ 用 `stage_select` 挑关
+  （按位置重编号成 2000..2010 ⇒ 评估侧 ≥2011 拿 None，面板静默缩水）；④ 直接动 TS 新增
+  「玩家离基地距离 × 基地受威胁」的每拍指标（要改 metrics 版本 + codehash ⇒ 重建 code.zip + 重启 hub，
+  quick tunnel 域名会换、所有节点要改 `hub_url`）—— 留到这两腿判死之后再谈。
+- **判死条件**：it120 时毁局 lane 仍 ≥40 ⇒ 在现有观测/动作空间下"靠奖励塑形教守家"判死，转 BC/人类语料。
+- **全文**：`docs/nn/experiments.md §147` · 课头 `nn-training/curricula/g7-lam98.jsonc` / `g7-hot11.jsonc`。
+
+## §2026-11-20-dashboard-compare-list-global（多课对比列表全局唯一，不随当前课增删）
+
+- **推翻**同日早先 `§2026-11-20-dashboard-home-multi-course-trends` 中「切当前课时把旧当前课补进 courses」
+  那一条（`preserveHomeCompareOnCourseSwitch`）。用户 16:0x 报障：两门课刚开到 it1，切课就把彼此
+  自动塞进多课对比——对比列表应当是用户显式配的那一份，不是切课副产品。
+- **决定**：`courses` 是**全局唯一**一份，只在「走势配置 · 完成」由用户增删；切当前课只改变显示层
+  第一条线画谁（`[course, ...compareExtras]` 去重），**不写回配置、不落 localStorage**。
+  色位仍按课名固定（`resolveHomeCompareColors`），同课跨图/跨切课不换色。
+- **实现**：删掉 `preserveHomeCompareOnCourseSwitch` 与 Hero 的 `prevCourseRef` effect；测试改钉
+  「切课不写回 courses / 不自动塞课」。
+- **全文**：`dashboard/tests/web-home-compare.test.ts`。
+
+## §2026-11-20-pill-queue-head-not-computing（队首待领 jid 不得读成「PPO·在算」）
+
+- **报障**：两门课 it1 rollout 完、等 PPO worker 接活（worker 未上线），顶部 pill 却写「PPO·在算」。
+- **根因**：`courseStatus` 的 `local-inflight` 分支把「训练侧 inflight + hub 无在飞」一律判成
+  「本机在算」；job 其实正躺在 hub **队首**等领取，那不是计算。
+- **决定**：加 `atQueueHead` 判据——训练侧 jid 命中 hub `nextJob` 时**不走**本机在算，
+  落到既有的「PPO·无人取 / PPO·预取」。既有用例（jid 不在队首、含远端队列有活）仍报在算，不动。
+- **全文**：`dashboard/tests/training-pills.test.ts`。
+
+## §2026-11-20-home-compare-current-must-be-listed（当前课不在列表 ⇒ 只画当前课）
+
+- **推翻**上一条 `§2026-11-20-dashboard-compare-list-global` 里「当前课在显示层临时并入第一条线」
+  那句。用户 16:1x 强口径：当前课程不在多课对比列表里，就只显示当前课程，不要叠对比曲线。
+- **决定**：`courses` 是**含当前课**在内的全局叠线列表（最多 6 门）。`compareActive` 增加
+  `currentInHomeCompare(config, course)` 判据——当前课未勾进列表 ⇒ 首页退回单课图。
+  配置弹窗候选不再排除当前课：它是列表里的普通一员，勾上才叠线，移除释放色位。
+  切当前课不改列表（上一条这点保留）。
+- **实现**：Hero 不再 `[course, ...compareExtras]`，直接 `courses: compareCourses`（列表原样）；
+  `requestExtras` 排除当前课（当前课序列客户端现算，不走端点）；图例 entries 同源于列表。
+- **全文**：`dashboard/tests/web-home-compare.test.ts`。
+## §2026-11-20-goalnn-dp-unwrap-before-artifacts（产物段必须先剥 DataParallel：`module.` 前缀会让权重 delta 全量拒发）
+
+- **事故**：`g7-lam98` / `g7-hot11` 的 it1 在 `kaggle-c`（**2×T4，cuda-dp**）上训练成功后全量被拒：
+  `weights delta：新权重缺 44 个参数（['blocks.0.dw.bias', …]）——拒发（结构不一致）`，`skip (not retried)`，
+  训练侧进 30s 一次的 `gate_verdict` 死循环。
+- **根因**：`remote/train_core._torch_artifacts` 里 `raw_model = model`，而 `st.model` 在 `cuda-dp` 下
+  **已经是被 `torch.nn.DataParallel` 包过的对象**（`_restore` 末尾落的）⇒ `HostModule` 取到的
+  `state_dict()` 键全带 `module.` 前缀 ⇒ 与 init 权重（`blocks.0.dw.weight` 等）**零交集** ⇒
+  `pack_weights_delta` 判「缺 44 个」。
+- **为什么潜伏**：只有 ≥2 卡的节点才走 DP 分支；今天之前跑 PPO 的都是单卡 DSW/T4。**单卡从不触发**。
+- **决定**：`worker/ppo/common.unwrap_module()` 剥壳（DP/DDP，最多 8 层），产物段一律用它；
+  剥壳只改键名（DP 与底层模块共享参数对象，数值等价）。**不**用「把该节点标成不可跑 PPO」绕过——
+  那等于让任何多卡节点都跑不了 PPO，且下次换机器再犯。
+- **被否决**：① 关掉节点的 `cuda-dp`（DP 是吞吐旋钮，不是错源；关掉只掩盖 bug）；
+  ② 在 `save_weights_json` 里统一 `removeprefix("module.")`（会在真名以 `module.` 开头的模型上误伤，
+  且治不了 `_ppo_save` 的 ckpt）；③ 新增一条「源码文本断言」守调用点（`test_source_text_assert_budget`
+  只许降不许升，抬格是欠债）⇒ 改为行为测试 + 调用点内联注释点明事故。
+- **护栏**：`nn-training/tests/worker/test_dp_artifact_unwrap.py`（剥壳 / 嵌套 / DP 前缀是病灶 /
+  `HostModule` 剥壳后键集与数值一致）。
+- **部署**：`code.zip` 是**发布时按工作区重打包**的内容寻址快照（加课程 jsonc 都会换 sha）⇒
+  **改完不需要重启 hub**，下一轮 publish 自动带上；节点侧 `code_sha` 变了会重新解包。
 
 ## §2026-11-20-gate-workers-capped-by-commit-headroom（门禁 worker 数按**提交余量**封顶，余量充足时一个不减）
 
@@ -8673,3 +8748,73 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   三行，`test_reuse_ledger` 的结构克隆基线 17 → 18。声明在拥有值的那一行，只写一次。
 - **守卫**：`tests/common/test_cell.py` 五条（同对象直到 replace / 退休旧值只一次 / 无 retire 时
   只丢引用 / 两个 Cell 互不相见）。
+## §2026-11-20-goalnn-base-defense-structural-verdict（三条杠杆都零位移 ⇒ "靠奖励塑形教守家"判死；行为不存在，加权/放宽视界/加密度都不解决）
+
+- **判决**：`g7-lam98`（λ 0.95→0.985，有效视界 190→590 拍）与 `g7-hot11`（11 关 pinned，每关密度 ×3.2）
+  各跑到 it101/103：**毁局 `thCostDirect+aimed` 43.2 / 45.4**（起点 41.2，预注册 ≤30，判死线 ≥40 **提前触发**）、
+  毁局对基地开火 6.72（≤5.5 未达）、胜率与参照腿无差异（Δ −2.7~+3.9pp，p 0.13–0.91）。
+- **三条互不相关的杠杆、同一个零结果**：奖励形态与量级（3 项 → 4 项，判别差 +261）→ lane 41.2→41.5；
+  信用视界（λ）→ 43.2；采样密度（11 关 ×3.2）→ 45.4。λ 的副作用按预期出现（kl 0.0073 vs 0.0054，+35%，
+  远低于 0.02 停线）⇒ 视界确实变了，只是变了也没用。
+- **结构性证据**：四项基地"实付"在**没有任何基地项的 `g7-ctrl2` 上也是 −89.7**，与拿它当奖励的两腿
+  （−77.5 / −88.7）同量级 ⇒ 这四个数主要是 outcome 代理，不是策略可控量。**策略在 100 轮里从未产生
+  "提前回防"这一行为**；PPO 只能放大已出现的行为 ⇒ 加权、放宽视界、提高密度都不改变它。
+- **决定**：停止"靠奖励塑形教守家"这条线（不再加第 4 个旋钮）。四个 checkpoint × 四腿的读数与脚本
+  （`tmp/g7-4leg-compare.py`）留档，供以后任何"再试试塑形"的提议直接引用。
+- **被否决**：① 再加一个奖励项/再调一次权重（组内 std 168–200 已与学习信号等量，见 §…base2 条）；
+  ② 用人类语料做 BC（用户口径：等通过率 >70% 再录；且败局语料只教"会失败"）；
+  ③ 现在就去改 TS 新增「玩家离基地距离 × 基地受威胁」的每拍指标（动 metrics 版本 + codehash
+  ⇒ 重建 code.zip + 重启 hub；quick tunnel 域名会换）—— 留作被点名的下一刀，不是顺手做。
+- **留下的方向**（下一次真要动守家时从这里挑）：**God-AI 教师引导**（AGENTS §0.2「教师只帮起步」允许；
+  拿 God 在"基地受威胁"局面跑出的轨迹做 BC/DAgger 预训练，把"回防"动作塞进策略支撑集 —— 这与"录人类语料"
+  是两件事，不需要等 >70%）。
+- **全文**：`docs/nn/experiments.md §148`。
+## §2026-11-20-goalnn-early-signal-snr（换早信号前先算 SNR：现有指标里没有能预测胜负的"早"信号；g8 用 breach 赌时序 + 新鲜对照）
+
+- **背景**：§148 追查发现威胁出现时玩家在 20 格外、direct→被毁只剩 380 拍，环墙早 900 拍挨打
+  ⇒ 拟把主项从 `thCostDirect` 换成 `thCostBreach`。
+- **先算再换**：单变量 SNR（it0，700 局）= 判别差 / 平均 std。结果 **direct −0.98 · wall-lost −0.84 ·
+  shots −0.70 · press −0.24 · breach −0.05**。胜局环墙总量 57.4 vs 毁局 59.5 —— **breach 几乎不预测胜负**。
+  早信号里没有"又早又可分"的项；换轴是**拿判别力换提前量**（四项合计判别差 +261 → +179）。
+- **决定**：仍做这一刀（用户口径"先按 1"），但把它写成**明确的赌**：
+  `g8-breach`（④ 换 breach 轴，24/unit、免罚 0.012/拍、封顶 6 units = 144；①②③ 不动）
+  + `g8-ctrl`（与 g7-ctrl2 逐字相同的无基地项对照，**这次要新鲜对照**：ctrl2 是单卡跑的，
+  现在 PPO 在 2×T4 `cuda-dp` 上，且 ctrl2 自己末段漂 8pp）。
+- **被否决**：① 第二个槽位也开早信号变体（同一注押两次，且没有对照就无法归因）；
+  ② 不设封顶让 breach 敞口定价（bd p90 108 units × 24 ≈ 2600，z8 的量级事故）；
+  ③ 直接把早/晚两项叠加（组内 std 已经 180+，叠加只是加噪声）。
+- **判死线**（it120）：毁局 breach 均值仍 ≥55 ⇒ "换早信号"判死，转 option 2（新增「玩家离基地距离 ×
+  基地受威胁」的每拍指标，动 codehash + 重启 hub）或 God-AI 教师。
+- **全文**：`docs/nn/experiments.md §149`（含 SNR 表）。
+## §2026-11-20-goalnn-four-axis-ladder（把 direct 与 directAimed 拆开定价：加总的打法是稀释，四轴阶梯 SNR 1.68）
+
+- **背景**：`g8-breach` / `g8-ctrl` 立课后用户改口径：改名 **`g7-breach`**、**删掉对照**、
+  新开 **`g7-def`**，要求"把 thBreach / thBreachAimed / thDirect / thDirectAimed 都用上"。
+- **发现**：四条轴拆开看差别极大（it0，700 局，SNR = 判别/平均 std）：
+  `Breach +0.03 · BreachAimed −0.15 · Direct −0.62 · **DirectAimed −1.41**`。
+  胜局 `DirectAimed` 中位 **0**、毁局 **17**。旧课用 `Direct + DirectAimed` **加总** ⇒ 强轴被弱轴稀释。
+- **决定**：`g7-def` 把四轴**分开定价**成阶梯（越接近致命越贵）：
+  免罚带 0.008 / 0.003 / 0.0015 / 0.0005 per tick，cap = 毁局 p90（43 / 25 / 35 / 26），
+  权重 0.93 / 2.0 / 2.6 / 4.5 ⇒ 满额 **40 / 50 / 91 / 117**（块合计 298，每项 < wKill 300）。
+  四轴块 SNR **1.68**；含 ①②③ 后判别 +233、整条 Φ 判别 **+590**（三个设计里最强）。
+- **形态**：只能用 metrics v13 的**累计成本流** `thCost*`（idx85–88）。`thBreach/thDirect`（idx79–82）
+  是每拍瞬时值，写进 Φ 会在进入/离开跳一次、持续暴露期间每步 r 恒 0（v13 注释里记着的坑）。
+- **被否决**：① 继续用 `Direct+DirectAimed` 加总（今天证伪）；② 只把 breach 一项上价（SNR −0.05，
+  等于加噪）；③ 保留 `g8-ctrl`（用户：没意义——机制项本身就是判据，胜率只作旁证）。
+- **判死线**（it120）：毁局 `DirectAimed` 均值仍 ≥15（起点 17.1）⇒ 四轴阶梯也判死，
+  转 God-AI 教师或新增「玩家离基地距离 × 基地受威胁」的每拍指标（动 codehash + 重启 hub）。
+- **全文**：`docs/nn/experiments.md §150`。
+## §2026-11-20-goalnn-def-ent-exploration（g7-breach 删除 + g7-def-ent 立课：只剩"探索不够"这个假设没被否）
+
+- **背景**：`g7-def`（四轴阶梯）立好后，`g7-breach` 成为它的**严格子集**（块 SNR −0.05 vs 1.68、
+  端到端判别 +536 vs +590）。用户 2026-11-20 22:04 口径：**删掉 g7-breach**，本轮只跑 def + ent。
+- **决定**：新开 **`g7-def-ent`** = `g7-def` 的奖励**逐字不动**，只把 `ppo_schedule[].ent_coef`
+  从引擎缺省 **0.01 提到 0.03**（3×）。两门同开 ⇒ **单旋钮 A/B**：谁在机制项上动，就知道瓶颈在哪一侧。
+- **理由**：前四次塑形（3 项 / 4 项 / λ0.985 / 11 关密度）全部零位移；§148 追查证明"回防"动作
+  在 rollout 里几乎没出现（威胁时玩家在 20 格外、71% 的对局不回防）。PPO 只能放大已出现的行为
+  ⇒ "探索不够"是唯一还没被否掉的假设，且它是**课程一行配置**，代价最低。
+- **被否决**：① 保留 g7-breach 当消融（只解释功劳归属，不产能力，占 4 小时槽位）；
+  ② 同时改 ent_coef + 奖励（两变量混杂，谁动都说不清）；③ 直接上 God-AI 教师/新指标（先让最便宜的一刀跑完）。
+- **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
+  转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
+- **全文**：`docs/nn/experiments.md §151`。
