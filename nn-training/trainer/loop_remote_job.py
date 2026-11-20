@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from common.log import log
 from common.protocol import coef_active
@@ -101,6 +101,28 @@ def _trim_shards_to_quota(
             acc += n
             kept_samples += n
     return kept, trimmed, kept_samples
+
+
+class PackInputs(NamedTuple):
+    """`_remote_pack_inputs` 的读数面（发布相位拼 `PublishSpec` 只读它）。
+
+    ★ 2026-11-20（kaggle 真机：`[ppo] no RL shards found` 连炸 5 次后整段会话结束）：
+    `corpus_fmt` / `replay_converter_path` **必须**与 `presegmented` / `diet_slim` 同一份读数
+    出门。`5382ec80` 合上游时把本方法拆成助手，`PublishSpec(...)` 那两行在冲突解决里被静默
+    丢掉 ⇒ 发布出去的 payload 已按 replay 瘦掉 obs（`payload_fmt=replay+…`），manifest 里却
+    没有 `corpus_fmt`（缺键 = full）⇒ worker 不跑 replay 转换，直接读一份没有 obs 的语料。
+    「打包用哪一档」与「manifest 自述哪一档」只许有一个来源（= 本对象），否则两处各读一遍
+    `args.corpus_fmt` 就还会漂。
+    """
+
+    slim: bool
+    wire_diet: bool
+    #: `ShardSegments.take()` 返回的浅拷贝（值是不可变 bytes）；`diet_slim` 是产出它们的
+    #: 那份 `ShardSlim`，本模块只负责原样转发（类型留在 `payload_slim`，此处不重复声明）。
+    presegmented: dict[str, bytes] | None
+    diet_slim: object | None
+    corpus_fmt: str
+    replay_converter_path: str
 
 
 class TrainingRemoteJob(TrainingRemotePush):
@@ -240,9 +262,7 @@ class TrainingRemoteJob(TrainingRemotePush):
         self._forensics(f"remote_pre_publish it{it}")
         # M0：打包（tar.xz + 编码）/ 落盘墙钟——iteration 事件的 wire.pack_sec。
         t_pack = time.time()
-        slim, wire_diet, presegmented, diet_slim = self._remote_pack_inputs(
-            args, it, rollout_spec, job_root, mem
-        )
+        pack = self._remote_pack_inputs(args, it, rollout_spec, job_root, mem)
         # ★ 2026-10-26 分段计时（**纯观测，跑一轮就撤**）：`pack_sec` 一直是黑盒——
         #   实测 `pack_payload_zip` 在 2.3 GB / 666 shard 上只要 54 s（`tmp/probe-it8-pack.py`），
         #   而现场 `pack_sec` = 161 s（it2）/ 243 s（it1）⇒ **约 93 s 不在这三段里的某一段**。
@@ -297,14 +317,18 @@ class TrainingRemoteJob(TrainingRemotePush):
                 # 保证 remote 与本机两条 PPO 路径装载口径一致。0 = 全收（历史行为）。
                 per_stage_quota=self._per_stage_quota(it),
                 # M2：瘦身开关 + 冒烟轮强制带 init_weights.json（echo 回显要用）。
-                slim=slim,
+                slim=pack.slim,
                 keep_init_weights=bool(getattr(args, "smoke", False)),
                 # wire-diet：真正生效的开关 + 本轮的奖励规格（课程公式的**显式**来源）。
-                wire_diet=wire_diet,
-                reward_spec=(course.reward_spec() if wire_diet else None),
+                wire_diet=pack.wire_diet,
+                reward_spec=(course.reward_spec() if pack.wire_diet else None),
                 # 零落盘：本轮已经压好的段 + 产出它们的那份 slim（`payload_fmt` 与读数同源）。
-                presegmented=presegmented,
-                diet_slim=diet_slim,
+                presegmented=pack.presegmented,
+                diet_slim=pack.diet_slim,
+                # P2：语料运输格式 + 转换器 bundle（缺 `corpus_fmt` 的 manifest = 缺键 = full，
+                # 而 payload 已按 replay 瘦掉 obs ⇒ worker 读一份没有 obs 的语料，见 `PackInputs`）。
+                corpus_fmt=pack.corpus_fmt,
+                replay_converter_path=pack.replay_converter_path or None,
                 # M3：kind=iter 的三件套（rollout 规格 + TS 运行时 sha/文件）；
                 # 非 iter 轮恒为默认（kind="ppo"，manifest 不含这两个键 —— 逐字节不变）。
                 #
@@ -621,8 +645,14 @@ class TrainingRemoteJob(TrainingRemotePush):
             demo_raw = self._demo_raw
         return kick_on, kick_kl, ref_b64, ref_fp, demo_raw, demo_coef, demo_per_mb
 
-    def _remote_pack_inputs(self, args, it: int, rollout_spec, job_root: str, mem: dict[str, dict]):
-        """打包开关 + 零落盘段账 + TS 运行时 + 标准权重整份化；返回 (slim, wire_diet, presegmented, diet_slim)。"""
+    def _remote_pack_inputs(
+        self, args, it: int, rollout_spec, job_root: str, mem: dict[str, dict]
+    ) -> PackInputs:
+        """打包开关 + 零落盘段账 + TS 运行时 + 标准权重整份化 → `PackInputs`。
+
+        语料格式与转换器路径也在这里出门（`PublishSpec` 的两个键），与 `take()` 读的是
+        **同一个局部量**——分头再读一遍 `args.corpus_fmt` 就会让 payload 与 manifest 自述漂开。
+        """
         # M2：协议瘦身开关（rl.slim / --remote-slim；默认开）。关 → 逐字节旧行为。
         slim = bool(int(getattr(args, "remote_slim", 1) or 0))
         # wire-diet（plan/wire-diet.plan.md §3 P1/P2）：payload 字节瘦身，**缺省开**
@@ -660,7 +690,14 @@ class TrainingRemoteJob(TrainingRemotePush):
         #   `init_weights_fp`（= 云机下一轮 init 的内容地址）并把它当 init blob 上传；
         #   离线腿的 delta 容器会被云机当权重装载（`JSON.parse` 报 BWD1）且算不出有意义的地址。
         weights_standard.ensure_standard_weights(args.out, log=log)
-        return slim, wire_diet, presegmented, diet_slim
+        return PackInputs(
+            slim=slim,
+            wire_diet=wire_diet,
+            presegmented=presegmented,
+            diet_slim=diet_slim,
+            corpus_fmt=corpus_fmt,
+            replay_converter_path=replay_converter_path,
+        )
 
     def _remote_after_publish(
         self,
