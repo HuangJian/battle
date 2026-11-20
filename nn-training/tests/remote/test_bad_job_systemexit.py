@@ -127,18 +127,22 @@ def test_push_leg_records_systemexit_and_keeps_serving(
     monkeypatch.setattr(ws, "run_job", _run_job)
     state = ws.WorkerServerState(tmp_path / "work")
     msgs: list[str] = []
+    # 2026-11-20 P0-3 第六刀：`_execute_job` 收单个只读 JobExecSpec（kw_only），
+    # 不再是 11 位置 + log 关键字——旧写法会让 mypy 报「参数过多 / 类型不匹配」。
     ws._execute_job(
-        state,
-        {"job_id": JID, "it": 104, "kind": "ppo"},
-        b"PK\x03\x04fake-payload",
-        None,
-        None,
-        None,
-        tmp_path / "work",
-        "cpu",
-        0,
-        False,
-        log=msgs.append,
+        ws.JobExecSpec(
+            state=state,
+            manifest={"job_id": JID, "it": 104, "kind": "ppo"},
+            payload_zip=b"PK\x03\x04fake-payload",
+            code_zip=None,
+            ts_code_zip=None,
+            blobs=None,
+            work_dir=tmp_path / "work",
+            device="cpu",
+            torch_threads=0,
+            echo=False,
+            log=msgs.append,
+        )
     )
     job = state.jobs[JID]
     assert job["state"] == "failed"
