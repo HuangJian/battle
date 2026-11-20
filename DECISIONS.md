@@ -8628,3 +8628,18 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   线程调用点位置实参形状恰 `["JobExecSpec_call"]`）。
 - **坑**：`tests/test_subproc_util.py` 的「起真服务进程」守卫按字面量 `"remote.worker_server",` 认人，
   只读形状的守卫文件必须把它写成模块常量（否则被误判成 spawn 了服务）。
+
+## §2026-11-20-log-prefix-context-propagation（`contextvars` 前缀在派生线程里会丢：`Runtime` 三个入口派生时拷上下文）
+
+- **背景**：`common/log.py` 的前缀/课 sink 已在 2026-11-13 收进 `LogRouter`（`ContextVar` +
+  实例级 sink），`common/**` 的模块级可变容器已清零（`L0_MUTABLE_ALLOWED = {}`）。但 `ContextVar`
+  **不自动进新线程** ⇒ `prefix_scope(课)` 里派生的线程读到空前缀，`[课]` 标签静默消失
+  （旧实现是进程级字符串，那些行反而带标签）。
+- **决定**：在 `common.runtime.Runtime.thread()` / `submit()` / `map()` **派生那一刻**
+  `contextvars.copy_context()`，用 `ctx.run(partial(...))` 执行（`Context.run` 不收 kwargs）。
+  语义按拷贝：子线程读得到父上下文，写回不去。
+- **不做**：`rt.pool(...)` 返回 stdlib `ThreadPoolExecutor`，绕过 `submit()`/`map()` 直接投的任务
+  不传播（`concurrent.futures` 无钩子；包一层要换返回类型，1 处生产调用不值）——写进 docstring。
+- **守卫**：`tests/common/test_log_router.py` 四条（跨线程隔离 / `Runtime.thread` 继承 /
+  `submit`+`map` 继承 / sink 实例隔离）。
+- **账**：五条基线（`Any`/宽签名/同名/exact/clone）与文本断言基线均未动。

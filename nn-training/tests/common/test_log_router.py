@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.log import (
+    LogRouter,
     close_course_sink,
     close_course_sinks,
     format_line,
@@ -26,6 +28,7 @@ from common.log import (
     open_course_sink,
     prefix_scope,
 )
+from common.runtime import Runtime
 
 STAMPED = re.compile(r"^\[\d\d:\d\d:\d\d\] ")
 
@@ -212,3 +215,86 @@ def test_close_failure_is_reported_once(capsys: pytest.CaptureFixture[str]) -> N
     head, _, cause = warns[0].partition("（")
     assert head.endswith("课 c7 的日志句柄关闭失败")
     assert cause.startswith("OSError: already gone")
+
+
+# ───────────────── 线程边界（2026-11-20）：隔离与继承，两条都要钉 ─────────────────
+
+
+def test_prefix_does_not_leak_across_threads() -> None:
+    """`ContextVar` 的**隔离**半边：一个线程置的前缀不会出现在别的线程里。
+
+    旧实现是模块级字符串，于是「A 课线程置的前缀」会被 B 课线程读到（现场：4 条 `it5 DONE`
+    里 3 条前缀是错的）。这里钉的是现在的语义：**新线程从空上下文开始**。
+    """
+    router = LogRouter()
+    seen: dict[str, str] = {}
+
+    def child() -> None:
+        seen["start"] = router.get_prefix()
+        router.set_prefix("from-child")
+        seen["after"] = router.get_prefix()
+
+    with router.prefix_scope("from-main"):
+        t = threading.Thread(target=child)
+        t.start()
+        t.join()
+        assert router.get_prefix() == "from-main", "子线程的写法不许回灌父线程"
+
+    assert seen == {"start": "", "after": "from-child"}
+
+
+def test_runtime_threads_inherit_the_course_prefix(capsys: pytest.CaptureFixture[str]) -> None:
+    """`Runtime.thread` 的**继承**半边：`prefix_scope` 里派生的线程，行仍带 `[课]`。
+
+    为什么这条必须存在：`contextvars` 不自动进新线程，而 `Runtime.thread` 是本仓 75 处派生
+    线程的**所有者**（§122）。没有传播的话，`prefix_scope(课)` 里起的 weights-push / rescan /
+    采样线程发出来的每一行都会静默丢掉课标签 —— 旧实现（进程级字符串）反而是带标签的。
+    """
+    router = LogRouter()
+    seen: list[str] = []
+    rendered: list[str] = []
+
+    def child() -> None:
+        router.log("from-child")
+        # 同一渲染函数算一遍作为期望值：全等比较（不是「文本里有没有」）。
+        rendered.append(router.format_line("from-child"))
+        seen.append(router.get_prefix())
+
+    with router.prefix_scope("c9-dodge"):
+        rt = Runtime(scope="log-ctx")
+        try:
+            rt.thread(child, name="child").join()
+        finally:
+            rt.close()
+
+    assert seen == ["c9-dodge"]
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if "from-child" in ln]
+    assert lines == rendered, lines
+
+
+def test_runtime_submit_and_map_inherit_the_course_prefix() -> None:
+    """池的两个 Runtime 入口（`submit` / `map`）同样传播——绕过它们直接投 `rt.pool()` 则不传播。"""
+    router = LogRouter()
+    with router.prefix_scope("c9-dodge"):
+        rt = Runtime(scope="log-ctx")
+        try:
+            got = rt.submit(router.get_prefix).result()
+            mapped = rt.map(lambda _i: router.get_prefix(), [0, 1])
+        finally:
+            rt.close()
+    assert got == "c9-dodge"
+    assert mapped == ["c9-dodge", "c9-dodge"]
+
+
+def test_sinks_are_per_router_instance(tmp_path: Path) -> None:
+    """课日志句柄住在 `LogRouter` 上：两个 router 的 sink 集合互不相见（显式所有权）。"""
+    a, b = LogRouter(), LogRouter()
+    fh = a.open_sink("c1", tmp_path / "a.log")
+    assert fh is not None
+    try:
+        assert set(a.sinks) == {"c1"}
+        assert b.sinks == {}, "另一个 router 不得看到别人的课日志句柄"
+        b.log("not-mirrored", course="c1")  # b 没有 c1 的 sink ⇒ 只上控制台
+        assert (tmp_path / "a.log").read_text(encoding="utf-8") == ""
+    finally:
+        a.close_sinks()

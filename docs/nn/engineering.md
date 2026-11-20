@@ -25,6 +25,40 @@
 
 ---
 
+## §234 P0-5 收尾：日志前缀进 `contextvars` 之后，**派生线程**的上下文传播（2026-11-20）
+
+**起点（先说结论）**：`common/log.py` 的前缀与课日志句柄**早已**从模块级 `_PREFIX` /
+`_COURSE_SINKS` 收进 `LogRouter`（`ContextVar` 前缀 + 实例级 sink，`router=` 可注入，2026-11-13），
+`common/fs` / `common/weights_ledger` 同批对象化；`tests/test_python_shape_budget.py::
+test_common_has_no_new_mutable_module_state` 的 `L0_MUTABLE_ALLOWED = {}` 已经把 `common/**`
+压到**零模块级可变容器**。§7 里「P0-5 未完成」那三行是**陈旧记录**，本轮一并改成已修。
+
+**真正缺的那一半**：`contextvars` 的值**不会自动进新线程**（只有 asyncio task 会拷贝上下文）。
+于是 `prefix_scope(课)` 里派生的线程——本仓 75 处派生线程几乎全走 `common.runtime.Runtime.thread`
+（§122：它是裸线程的所有者）——发出来的行读到空前缀，`[课]` 标签**静默消失**。旧实现是模块级
+字符串，那些行反而是带标签的：换句话说，「修掉跨课程串味」的同时把「同课程内部的行标签」也
+削掉了。现场可复现（一行 `threading.Thread` 就是空）。
+
+**做法**：在**派生那一刻**拷贝上下文，用 `ctx.run(partial(...))` 执行——
+`Runtime.thread()` / `Runtime.submit()` / `Runtime.map()` 三个 Runtime 入口都做；`partial` 是因为
+`Context.run` 不收关键字实参。语义是 `contextvars` 的拷贝语义：子线程**读得到**父上下文
+（标签保住），写**回不去**（`set_prefix` 在子线程里不污染父线程）。
+
+**没做的**：`Runtime.pool(...)` 返回的是 stdlib `ThreadPoolExecutor`，绕过
+`submit()`/`map()` 直接 `rt.pool("x").submit(...)` 投出去的任务**不传播**（`concurrent.futures`
+没有钩子，包一层就要换返回类型，1 处生产调用不值）。这一条写进了 `submit()` 的 docstring 与
+§234 的用例注释里，而不是假装它不存在。
+
+**守卫（4 条，`tests/common/test_log_router.py`）**：
+`test_prefix_does_not_leak_across_threads`（隔离：子线程从空上下文开始、写法不回灌父线程）·
+`test_runtime_threads_inherit_the_course_prefix`（继承：子线程的行 == 父线程渲染出的同一行）·
+`test_runtime_submit_and_map_inherit_the_course_prefix`（池的两个 Runtime 入口）·
+`test_sinks_are_per_router_instance`（课日志句柄是**实例**字段：另一个 router 看不见、也不写）。
+
+**账**：`Any` / 宽签名 / 同名 / exact / clone 五条基线一位未动；`common/**` 的模块级可变容器
+仍是 0（`L0_MUTABLE_ALLOWED = {}`）；文本断言基线未涨（继承用例用**全等**比较：期望值是同一个
+`format_line()` 算出来的，不是「文本里有没有」）。
+
 ## §233 P0-3 第六刀：`remote/worker_server._execute_job` 的 14 个参数 → `JobExecSpec`（2026-11-20）
 
 **触发**：`remote/worker_server` 的每个 push job 在一条线程里跑 `_execute_job`，而

@@ -351,9 +351,9 @@ else:
 
 | 文件 | 状态 | 后果 |
 |------|------|------|
-| `common/log.py:23,26` | `_PREFIX: str`、`_COURSE_SINKS: dict[str, Any]` | 日志路由是进程级隐式状态；并发课程互相污染（注释自己记录了"4 条 `it5 DONE` 里 3 条前缀是错的"） |
-| `common/fs.py:130` | `_JSONL_WRITERS: dict[str, _JsonlWriter]` | 每条路径一个**永不回收**的线程；进程退出无 flush/join |
-| `common/weights_ledger.py:21` | `_WEIGHTS_PUSHED: dict[...]` | 跨轮复用判据住进程内存 ⇒ 重启即失效（不可复现） |
+| ~~`common/log.py:23,26`~~ **已修 2026-11-13 / 收尾 2026-11-20（§234）** | ~~`_PREFIX: str`、`_COURSE_SINKS`~~ → `LogRouter`（`ContextVar` 前缀 + 实例级 sink，`router=` 可注入）；派生线程的上下文传播在 `Runtime.thread`/`submit`/`map` 补齐 | 原病：日志路由是进程级隐式状态，并发课程互相污染（现场：4 条 `it5 DONE` 里 3 条前缀是错的） |
+| ~~`common/fs.py:130`~~ **已修 2026-11-13** | ~~`_JSONL_WRITERS`~~ → `JsonlLedger`（实例级写者表 + `close()`） | 原病：每条路径一个永不回收的线程；进程退出无 flush/join |
+| ~~`common/weights_ledger.py:21`~~ **已修 2026-11-13** | ~~`_WEIGHTS_PUSHED`~~ → `WeightsLedger`（实例级账本，可注入） | 原病：跨轮复用判据住进程内存 ⇒ 重启即失效（不可复现） |
 | `common/net_http.py:93` | `_RACING_OPENERS: dict[bool, OpenerDirector]` | 缓存 opener，测试间串味 |
 | `common/distribution.py:647` | `_RESTART_SEEN`、`UPGRADE_BRANCH` | 升级分支是"进程级锁存"，注释承认它曾因配置覆盖导致全节点回滚事故 |
 | `common/platform_utils.py:417` | `_UNREAPED: list[Any]`（**已修** 2026-11-16：`UnreapedProcs`） | 无界增长（收尸失败的子进程） |
@@ -363,6 +363,12 @@ else:
 | `hub/http_face.py:192` 起 | `_blocked_logged` / `_seen_worker_sources` / `_worker_pulse` | **类属性当全局状态**，因为 `ThreadingHTTPServer` 每请求新建实例 |
 
 全仓 **14 处 `global` 语句**，集中在 L0/L1——最不该有状态的两层。
+
+> **2026-11-20 复核**：上表前三行（log / fs / weights_ledger）**已修**（2026-11-13 对象化 +
+> 注入契约；2026-11-20 §234 补齐派生线程的上下文传播），守卫是
+> `tests/test_python_shape_budget.py::test_common_has_no_new_mutable_module_state`
+> （`L0_MUTABLE_ALLOWED = {}`，即 `common/**` 现已零模块级可变容器）。剩下的是
+> `net_http` / `distribution` 两行 + L1/L2 的三个单例（eval_exec / eval_arbiter / http_face 类属性）。
 
 **为什么这是问题**
 
@@ -1709,7 +1715,9 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      「`UnitLedger` 的字段集 + 只收一个对象」重锚（`LEDGER_FIELDS` + `_settle()`
      构造 `UnitLedger`），没有删任何一条判据；顺带发现**同族陷阱第 4 种形态 = 换模块**（patch 锚点、
      入边归属者表、行构造守卫、`GATE_SITES` 都要跟着换家，否则静默空转）。
-   * **P0-5 剩余全局状态**：`worker/eval_exec._EXECUTORS` 与 `worker/eval_arbiter._ARBITER`
+   * **P0-5 剩余全局状态**：`common/log` / `common/fs` / `common/weights_ledger` 已对象化（§234），
+     `common/net_http._RACING_OPENERS` 与 `common/distribution._RESTART_SEEN` / `UPGRADE_BRANCH` 仍在；
+     `worker/eval_exec._EXECUTORS` 与 `worker/eval_arbiter._ARBITER`
      两个单例仍在（G2 只管 `common/**`）；`biz/reward_context._current` 按 §P0-5 原裁定
      保留（每 iter 整体替换的加载期上下文，不是隐藏可变状态）。
    * **B5 可选项**：`cfg`/`course` 的 schema（`biz/course_spec.py` 已是 pydantic；
