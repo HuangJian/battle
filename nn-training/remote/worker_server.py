@@ -374,6 +374,16 @@ def _execute_job(
         log(f"job {jid} REJECTED: {e}")
         log("  → 代码已变更：本服务进程无法热替换。请**重启 worker_server 进程**"
             "（notebook 重跑 push 单元格 / 本机重跑 remote_worker_serve），再重发本 job。")
+    except SystemExit as e:
+        # ★ 2026-11-20（与 pull 腿同一条不变量）：本函数跑在**后台线程**里，而 threading 的
+        # excepthook 只处理 `Exception` —— 逃出去的 `SystemExit` 只静默杀死这条线程，job 永远
+        # 停在 `running`，训练侧只能等满 25 分钟超时（坏 job 的代价被转嫁给了排队时间）。
+        # 线程里没有「进程级退出」可言 ⇒ 这里只表示这份活跑不成：落 failed，服务继续接活。
+        _reason = str(e) or type(e).__name__
+        state.set_error(
+            jid, f"{type(e).__name__}: {_reason}", kind=type(e).__name__, detail=exc_tail(e)
+        )
+        log(f"job {jid} FAILED: {_reason}")
     except Exception as e:
         state.set_error(jid, f"{type(e).__name__}: {e}", kind=type(e).__name__, detail=exc_tail(e))
         log(f"job {jid} FAILED: {e}")

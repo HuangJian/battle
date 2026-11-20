@@ -90,7 +90,7 @@ from remote.prefetch import (
 )
 from remote.result_upload import Outcome, UploaderLike, UploadTask
 from remote.wire import _wire_flush, _wire_hit, _wire_start, _wire_totals
-from remote.worker_proc import _request_reload
+from remote.worker_proc import HOT_RELOAD_EXIT, _request_reload
 
 
 @dataclass(frozen=True)
@@ -813,6 +813,32 @@ class _Round:
                 self.token,
                 self.jid,
                 str(e) or type(e).__name__,
+                kind=type(e).__name__,
+                detail=_failure_detail(e),
+                lease_token=self.lease_token,
+                worker_id=self.worker_id,
+                log=self.log,
+            )
+        except SystemExit as e:
+            # ★ 2026-11-20（kaggle 真机，用户口径「坏 job 只该报失败」）：`SystemExit` 是
+            # **BaseException**，下面那条 `except Exception` 接不住它 ⇒ 一次内容有问题的
+            # job（现场：payload 缺 `corpus_fmt`，语料里根本没有 obs）让子进程 rc=1，监督器
+            # 按「崩溃」重拉、又领回同一份坏 job，五次退避后「会话结束 rc=1」——**一台云机
+            # 的整段会话为一个坏 job 陪葬**。
+            # 这里的语义只有一条：**job 作用域里的 `SystemExit` = 这份活跑不成**（确定性：
+            # 同一份字节重领也会在同一处炸）⇒ 报给 hub 落终局（训练侧立刻带原因停腿），
+            # 然后继续轮询。
+            # 唯一例外是 `HOT_RELOAD_EXIT`：它请求的是「监督器换代码重拉进程」，在这里被
+            # 当失败吞掉就等于把热替换变成一份假失败（进程带着旧代码继续跑）。
+            if getattr(e, "code", None) == HOT_RELOAD_EXIT:
+                raise
+            _reason = str(e) or type(e).__name__
+            self.log(f"job {self.jid} FAILED: SystemExit: {_reason} — 报失败后继续轮询（worker 不退）")
+            report_job_failure(
+                self.base_url,
+                self.token,
+                self.jid,
+                _reason,
                 kind=type(e).__name__,
                 detail=_failure_detail(e),
                 lease_token=self.lease_token,
