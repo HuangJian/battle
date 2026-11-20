@@ -35,6 +35,11 @@ from common.runtime import Runtime
 CONVERTER_NAME = "replay_converter.js"
 MARKER_NAME = "replay_converted.json"
 MARKER_VERSION = 1
+#: 全量语料的 obs 文件名（`worker/ppo/np_core.discover_rl_shards` 的判据之一 ⇒ 缺它 =
+#: 训练核读不到任何一局）。本模块只在**体检**里读它，不写。
+OBS_NAME = "obs.npy"
+#: replay 语料的原件；转换后仍留在 shard 目录里（与重建出的 obs 并存）。
+REPLAY_NAME = "replay.json"
 #: 单 shard 转换上界（秒）。一局最多 ~36000 tick；实测 600 tick 约 60ms，
 #: 36000 tick 约 3.6s；900s 是「机器假死」与「真慢」的分界。
 SHARD_TIMEOUT_SEC = 900.0
@@ -492,9 +497,55 @@ def convert_replay_corpus(
     }
 
 
+def verify_corpus_format(shard_dirs: Sequence[Path | str], manifest: dict) -> None:
+    """解包后、训练前的一次对齐体检：**manifest 自述的语料格式 vs payload 里的真身**。
+
+    ★ 2026-11-20（kaggle 真机：`[ppo] no RL shards found` 连炸 5 次、整段会话 RC=1）：
+    发布端 merge 丢了一行 `PublishSpec(corpus_fmt=…)` ⇒ payload 按 replay 瘦掉了 obs，
+    manifest 里却没有 `corpus_fmt`（缺键 = full）⇒ worker 走 full 的路去读一份**没有 obs**
+    的语料。那道伤只在训练核里才炸（`discover_rl_shards` 返回空 → `SystemExit`），
+    也就是最深的、最说不清起因的那一层。
+
+    这里只 stat 每个 shard 的根、只看两个指标：`obs.npy`（full）与 `replay.json`（replay）。
+    对不上 = **内容决定性失败**（同一份字节重领也在同一处炸）⇒ `ProtocolError` ⇒
+    `report_job_failure` ⇒ hub 终局 ⇒ 训练侧带原因停腿；worker 继续轮询。
+
+    只在 `kind=ppo` 上判：replay 转换本来就只允许 ppo（见 `prepass` 的 kind 闸），
+    别的 kind 的 payload 不承诺语料格式（bc 自采集、iter 由节点自跑）。空 shard 列
+    不在这里判（那是另一件事：`convert_replay_corpus` 对 replay 有自己的「不训空」拒收）。
+    """
+    if str(manifest.get("kind") or "") != "ppo":
+        return
+    dirs: list[Path] = [p if isinstance(p, Path) else Path(p) for p in shard_dirs]
+    if not dirs:
+        return
+    declared = str(manifest.get("corpus_fmt") or "full")
+    if declared == "replay":
+        missing = [d for d in dirs if not (d / REPLAY_NAME).is_file()]
+        if missing:
+            raise ProtocolError(
+                f"corpus_fmt=replay 但 {len(missing)}/{len(dirs)} 个 shard 没有 {REPLAY_NAME}"
+                f"（manifest 与 payload 不是同一档；首个：{missing[0].name}）——拒收"
+            )
+        return
+    missing = [d for d in dirs if not (d / OBS_NAME).is_file()]
+    if missing:
+        hint = (
+            f"（这些 shard 带 {REPLAY_NAME} —— payload 其实按 replay 打包了）"
+            if (missing[0] / REPLAY_NAME).is_file()
+            else ""
+        )
+        raise ProtocolError(
+            f"manifest 自述 corpus_fmt={declared} 但 {len(missing)}/{len(dirs)} 个 shard 没有"
+            f" {OBS_NAME}{hint}——manifest 与 payload 不是同一档，拒收（重发同一轮才会好）"
+        )
+
+
 def prepass(
     job_dir: str | Path,
-    shard_dirs: list[Path | str],
+    # `Sequence` 而不是 `list[Path | str]`（2026-11-20）：`list` 不变性让 `list[Path]` 的调用方
+    # （单测 / `convert_shard`）mypy 全红——与 `convert_replay_corpus` 同一个口径。
+    shard_dirs: Sequence[Path | str],
     manifest: dict,
     *,
     log: Callable[[str], None] = lambda _m: None,
@@ -507,7 +558,12 @@ def prepass(
 
     kind 闸在这里而不是散在宿主里：replay 只允许 kind=ppo（节点自跑 rollout 的 kind=iter
     强制 full，同机没有 wire 收益）。
+
+    ★ 2026-11-20：**先进体检**（`verify_corpus_format`）再分档 —— 非 replay 的 job 也
+    要过一遍「manifest 自述与 payload 真身对齐吗」，否则 format 对不上只会一路走到训练核
+    才炸（`[ppo] no RL shards found`，弱到把整段云机会话带走）。
     """
+    verify_corpus_format(shard_dirs, manifest)
     if str(manifest.get("corpus_fmt") or "full") != "replay":
         return None
     if str(manifest.get("kind")) != "ppo":
@@ -557,6 +613,8 @@ def attach_converter(
 __all__ = [
     "CONVERTER_NAME",
     "MARKER_NAME",
+    "OBS_NAME",
+    "REPLAY_NAME",
     "attach_converter",
     "convert_replay_corpus",
     "convert_shard",
@@ -565,4 +623,5 @@ __all__ = [
     "prepass",
     "resolve_js_runtime",
     "verify_converter",
+    "verify_corpus_format",
 ]

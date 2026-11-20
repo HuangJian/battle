@@ -223,3 +223,46 @@ def test_changed_converter_invalidates_marker(tmp_path: Path) -> None:
     assert marker["converter_sha256"] == _sha(new_conv)
     # 重跑一遍才复用
     assert rc.convert_replay_corpus(job, shards, man2)["reused"] == 1
+
+
+# ───────────────── manifest 自述 vs payload 真身（2026-11-20 kaggle 真机） ─────────────────
+
+
+def test_full_manifest_over_replay_payload_is_rejected_at_prepass(tmp_path: Path) -> None:
+    """manifest 缺 `corpus_fmt`（= full）而 payload 只有 replay.json ⇒ 解包后就拒收。
+
+    现场：发布端丢了一行 `PublishSpec(corpus_fmt=…)` ⇒ payload 按 replay 瘦掉了 obs，
+    manifest 自述 full ⇒ 一路走到训练核才在 `discover_rl_shards` 抛 `SystemExit`
+    （`[ppo] no RL shards found`），一份坏 job 把整段云机会话带走。判据必须在这里成立：
+    两档指标对不上 = 内容决定性失败（ProtocolError ⇒ 报失败 ⇒ 训练侧带原因停腿）。
+    """
+    job, _man, shards = _job(tmp_path)
+    with pytest.raises(ProtocolError, match="corpus_fmt"):
+        rc.prepass(job, shards, {"kind": "ppo"})  # 缺键 = full（旧发布端的形状）
+    with pytest.raises(ProtocolError, match="payload"):
+        rc.prepass(job, shards, {"kind": "ppo", "corpus_fmt": "full"})
+
+
+def test_replay_manifest_over_full_payload_is_rejected(tmp_path: Path) -> None:
+    """反向：manifest 说 replay、payload 却是全量 obs（没有 replay.json）⇒ 同样拒收。"""
+    job, man, shards = _job(tmp_path)
+    for d in shards:
+        (d / "replay.json").unlink()
+        (d / "obs.npy").write_bytes(b"x")  # 已经有 obs = 这份不是 replay
+    with pytest.raises(ProtocolError, match=r"replay\.json"):
+        rc.prepass(job, shards, man)
+
+
+def test_matching_full_corpus_keeps_the_old_noop(tmp_path: Path) -> None:
+    """对齐的全量语料：prepass 仍返回 None（full 路径零行为变化）。"""
+    job, _man, shards = _job(tmp_path)
+    for d in shards:
+        (d / "replay.json").unlink()
+        (d / "obs.npy").write_bytes(b"x")
+    assert rc.prepass(job, shards, {"kind": "ppo", "corpus_fmt": "full"}) is None
+
+
+def test_non_ppo_kinds_are_not_format_checked(tmp_path: Path) -> None:
+    """别的 kind 不承诺语料格式（bc 自采集、iter 由节点自跑）⇒ 这道体检不碰它们。"""
+    job, _man, shards = _job(tmp_path)
+    assert rc.prepass(job, shards, {"kind": "bc"}) is None
