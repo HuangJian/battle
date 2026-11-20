@@ -31,7 +31,7 @@ import { tailscaleIp } from '../../core/net'
 import { sharedHubUrl } from '../../core/slots'
 import { remoteExecutionFace } from '../../stack/push-config'
 import { rlConfigSmoke } from '../../stack/smoke'
-import { slimToCfg } from '../../stack/specs'
+import { isSamplingFmt, slimToCfg } from '../../stack/specs'
 import { saveConsoleState } from './console-state'
 import { ActionError, ActionResult, done, guard, release } from './result'
 import { startComponent, StartCtx } from './start'
@@ -149,5 +149,35 @@ export async function setMode(key: string, value: string): Promise<ActionResult>
     )
   } finally {
     release(`mode:${key}`)
+  }
+}
+
+/** 全局采样格式（2026-11-20 用户：首页「采样格式 auto | full | replay」toggle）。
+ *
+ *  `auto` = 各课自己声明的 `corpus_fmt`（**删键**而不是写 `"auto"`：两侧都当缺省读，
+ *  但盘上少一个键 ⇒ 存量配置逐字节不变）；`full`/`replay` = 全局强制压过课程请求。
+ *
+ *  与 `setMode` 的区别：训练侧每轮边界重读一次（`worker.config_file.global_corpus_fmt`）
+ *  ⇒ **不用重启训练栈**，下一轮就生效——这正是「网络突然变差就切 replay」要的响应速度。 */
+export async function setSamplingFmt(value: string): Promise<ActionResult> {
+  guard('sampling-fmt')
+  try {
+    if (!isSamplingFmt(value)) {
+      throw new ActionError(`采样格式只接受 auto/full/replay，收到: ${value}`)
+    }
+    const cfg = loadConfig()
+    cfg.rl = cfg.rl || {}
+    if (value === 'auto') delete cfg.rl.corpus_fmt_mode
+    else cfg.rl.corpus_fmt_mode = value
+    saveConfig(cfg)
+    const smoke = rlConfigSmoke(cfg)
+    const effect = value === 'auto' ? '各课按自己的 corpus_fmt' : `全局强制 ${value}`
+    return done(
+      smoke.passed,
+      `采样格式 = ${value}（${effect}；已回写 rl-config.json，下一轮边界生效）`,
+      smoke.passed ? undefined : [smoke.detail ?? ''],
+    )
+  } finally {
+    release('sampling-fmt')
   }
 }

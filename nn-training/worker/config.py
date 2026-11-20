@@ -167,7 +167,13 @@ from biz.course_spec import (
 # 「课程解析面」→ `biz/course_resolve.py`（目录查找 / level 注入 / 字节冻结 / 跨课门校验）。
 # 实现搬家、名字留门面 ⇒ 全仓 `from biz.config import …` 一行不改。
 from worker.config_file import (
+    CORPUS_FMT_MODES as CORPUS_FMT_MODES,
+)
+from worker.config_file import (
     RL_CONFIG_ENV as RL_CONFIG_ENV,
+)
+from worker.config_file import (
+    global_corpus_fmt as global_corpus_fmt,
 )
 from worker.config_file import (
     read_rl_config_file as read_rl_config_file,

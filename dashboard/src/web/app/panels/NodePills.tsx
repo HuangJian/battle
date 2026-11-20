@@ -42,6 +42,7 @@ import {
   type PpoWorkerLiveView,
   WINDOW_OPTIONS,
 } from '../../view'
+import { SegmentedControl } from '../../components/SegmentedControl'
 import { Switch } from '../../components/Switch'
 import { StatusRow } from '../../components/StatusRow'
 import type { StatusTone } from '../../components/StatusDot'
@@ -78,7 +79,26 @@ export interface NodePillsProps {
   /** `/api/state` 每一拍的时间戳（`ConsoleStateView.time`）：非默认时间跨度的合计读数
    *  跟着服务端刷新节奏重取，不另立一套轮询。缺省 = 只在切换档位时取一次（测试/旧调用）。 */
   stateTick?: string
+  /** 全局采样格式的当前值（`stateView.modes.samplingFmt`；缺省 = auto）。
+   *  三档 toggle 渲染在采样块头「节点统计 ›」左边（2026-11-20 用户口径）。 */
+  samplingFmt?: string
 }
+
+/** 全局采样格式三档（2026-11-20 用户：首页「采样格式：auto | full | replay」，缺省 auto）。
+ *
+ *  `auto` = 各课自己的 `corpus_fmt`；`full`/`replay` = 全局强制（训练侧每轮边界生效）：
+ *  `replay` 省网络体积（网络差），`full` 省 PPO worker 重建语料的时间（网络好、样本不大）。
+ *  与 `core/types.ts::SamplingFmtMode` 同域，写落 `rl.corpus_fmt_mode`。 */
+const SAMPLING_FMT_OPTIONS = [
+  { value: 'auto', label: 'auto' },
+  { value: 'full', label: 'full' },
+  { value: 'replay', label: 'replay' },
+] as const
+type SamplingFmtUI = (typeof SAMPLING_FMT_OPTIONS)[number]['value']
+const SAMPLING_FMT_TITLE =
+  '采样格式（全局，下一轮生效）：auto = 各课按自己的 corpus_fmt；' +
+  'full = 传完整语料（省 PPO worker 重建时间，网络要好）；' +
+  'replay = 只传回放（省网络体积，网络差时用）'
 
 /** 只读视图的节点行提示。 */
 const RO_TITLE = '只读模式：节点编辑/冒烟仅限本机 localhost'
@@ -489,6 +509,7 @@ export function NodePills({
   readOnly,
   probesPending,
   stateTick,
+  samplingFmt,
 }: NodePillsProps) {
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
@@ -496,6 +517,9 @@ export function NodePills({
   /** 两块合计各自的窗口状态（互不联动）：默认都是近 24 小时。 */
   const sampling = useWindowBrief(brief ?? null, stateTick)
   const ppo = useWindowBrief(brief ?? null, stateTick)
+  /** 采样格式当前值：脏值/未提供一律按 auto（与 `resolveSamplingFmt` 同口径）。 */
+  const fmt: SamplingFmtUI =
+    samplingFmt === 'full' || samplingFmt === 'replay' ? samplingFmt : 'auto'
 
   // ★ 2026-11-02：先按**能力键**分家（`nodeRole`）——push 节点与采样节点同住 rl-config `nodes[]`，
   //   但单位（job / 局）与派发腿都不同，采样块的「贡献 vs 并发」判据对它们无意义。
@@ -592,6 +616,23 @@ export function NodePills({
               合计读数加载失败
             </span>
           ) : null}
+          {/* 全局采样格式（2026-11-20 用户）：紧贴「节点统计 ›」左边，缺省 auto。
+              它是**全局**开关（不随课程变）——放在采样块头而不是课程卡里，正是因为它
+              在「网络突然变差」时要能一眼找到、一键切走。 */}
+          {/* 只读视图**不**物理禁用（只读是动作边界不是按钮状态，同区其余控件）：
+              悬停提示说明「仅限本机」，真点击由服务端 403 + flash 兜底。 */}
+          <span
+            className="tc-muted tc-small"
+            title={readOnly ? `${SAMPLING_FMT_TITLE}\n${RO_TITLE}` : SAMPLING_FMT_TITLE}
+          >
+            采样格式
+          </span>
+          <SegmentedControl<SamplingFmtUI>
+            value={fmt}
+            options={SAMPLING_FMT_OPTIONS}
+            ariaLabel="采样格式（全局）"
+            onChange={(v) => onAction('setSamplingFmt', { value: v })}
+          />
           {/* 深链（全页唯一入口）：住采样块头右上角（2026-11-02 用户口径）——
               块里的读数都是纯展示，不各自带按钮。 */}
           <button

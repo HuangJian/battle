@@ -616,6 +616,7 @@ export function App({ initial }: AppProps) {
                 readOnly={readOnly}
                 probesPending={stateView?.probesPending === true}
                 stateTick={stateView?.time}
+                samplingFmt={stateView?.modes?.samplingFmt}
               />
             </PanelErrorBoundary>
             {/* 课程矩阵（**两区通用**，取代原「并行课程总览」+「训练调度器」两张表）：

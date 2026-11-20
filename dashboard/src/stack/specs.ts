@@ -32,6 +32,7 @@ import type {
   RegistryEntry,
   RlConfig,
   RolloutSrcMode,
+  SamplingFmtMode,
   SlimMode,
 } from '../core/types'
 
@@ -232,6 +233,24 @@ export function resolveSlim(cfg: RlConfig, course = ''): SlimMode {
 /** `SlimMode` → rl-config 能读的数值（**唯一**换算入口；写字符串会让训练启动报错）。 */
 export function slimToCfg(mode: SlimMode): 0 | 1 {
   return mode === 'off' ? 0 : 1
+}
+
+/** 写在 rl-config 上的三个合法采样格式（与 python `CORPUS_FMT_MODES` 同源）。 */
+export const SAMPLING_FMT_MODES: readonly SamplingFmtMode[] = ['auto', 'full', 'replay']
+
+/** 校验动作层传来的值（HTTP body 是 `unknown`）；不合白名单一律拒绝，不猜。 */
+export function isSamplingFmt(v: unknown): v is SamplingFmtMode {
+  return typeof v === 'string' && (SAMPLING_FMT_MODES as readonly string[]).includes(v)
+}
+
+/** 全局采样格式解析：`rl.corpus_fmt_mode` > 缺省 `'auto'`。
+ *
+ *  缺省为什么是 auto：python 侧 `global_corpus_fmt()` 读不到/脏值也回 `auto`，而
+ *  `auto` = 听各课自己的 `corpus_fmt`（存量配置的今天行为）——面板必须同口径，
+ *  否则会在没改过配置时谎报「全局已强制 full」。 */
+export function resolveSamplingFmt(cfg: RlConfig): SamplingFmtMode {
+  const raw = cfg.rl.corpus_fmt_mode
+  return isSamplingFmt(raw) ? raw : 'auto'
 }
 
 /** rollout 执行位置（M3）解析：per-course > rl.* > 缺省 `'local'`。

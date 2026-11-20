@@ -95,6 +95,15 @@ export type CfEdgeIp = '4' | '6' | 'auto'
  *  换算只允许走 `slimToCfg()`（dashboard 侧）一个入口。 */
 export type SlimMode = 'on' | 'off'
 
+/** 采样/语料格式（2026-11-20；控制台首页「采样格式」三档 toggle）。
+ *
+ *  `auto` = 各课自己的 `corpus_fmt`（今天的默认行为；课程文件说了算）；
+ *  `full` / `replay` = **全局强制**（压过课程请求，训练侧每轮边界生效）：
+ *  `replay` 省网络传输体积（网络差时选），`full` 省 PPO worker 重建语料的时间
+ *  （网络好且样本量不大时选）。与 `python worker.config_file.CORPUS_FMT_MODES`
+ *  逐字同源，写盘落在 `rl.corpus_fmt_mode`，两侧同一域（无需换算）。 */
+export type SamplingFmtMode = 'auto' | 'full' | 'replay'
+
 /** rollout 执行位置（M3，`plan/remote-wire-remediation.plan.md` §5）。
  *
  *  `local` = 本机采样（历史行为，整轮口径逐字节不变）；
@@ -137,6 +146,8 @@ export interface RlConfig {
     cf_edge_ip?: CfEdgeIp
     /** 协议瘦身（M2；缺省 1 = 开）。数字域，见 `SlimMode` 注释。 */
     slim?: 0 | 1
+    /** 全局采样格式（缺省 = auto，即听课程自己声明）。见 `SamplingFmtMode`。 */
+    corpus_fmt_mode?: SamplingFmtMode
     /** rollout 执行位置（M3；缺省 = local，即本机采样）。字符串域，见 `RolloutSrcMode`
      *  （`Retired` 值只作存量容忍读）。 */
     rollout_src?: RolloutSrcMode | RolloutSrcRetired

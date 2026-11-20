@@ -41,6 +41,27 @@ def rl_config_path() -> Path:
     return Path(common.distribution.rl_config_path())
 
 
+#: 控制台「采样格式」全局开关的合法值（rl-config 的 `rl.corpus_fmt_mode`）。
+#: 与 python `corpus_fmt` 同字面量域（`full` / `replay`），多一档 `auto` = 听课程自己声明。
+CORPUS_FMT_MODES = ("auto", "full", "replay")
+
+
+def global_corpus_fmt() -> str:
+    """控制台的**全局采样格式**（`rl.corpus_fmt_mode`）：`auto` / `full` / `replay`。
+
+    为什么读文件而不是解析期快照（2026-11-20 用户：控制台首页「采样格式」三档 toggle）：
+    网络好坏是会变的 —— `full` 体积大但 PPO worker 不用重建语料，`replay` 体积小但要烧转换
+    CPU。轮边界每个 tick 重读一次（小文件，一次几十微秒）⇒ **训练途中切换，下一轮生效**。
+
+    读不到 / 脏值 ⇒ `auto`：语料形态不是可以猜的东西（`full` 与 `replay` 的包不通用，
+    混了就是 `take()` 失配），所以只认白名单里的三个值。
+    """
+    rl = read_rl_config_file().get("rl")
+    raw = rl.get("corpus_fmt_mode") if isinstance(rl, dict) else ""
+    val = str(raw or "").strip().lower()
+    return val if val in CORPUS_FMT_MODES else "auto"
+
+
 def read_rl_config_file() -> dict:
     """读 rl-config.json（读不到 / 不是 dict → 空 dict）。
 

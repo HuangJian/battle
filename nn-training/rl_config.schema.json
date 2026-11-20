@@ -45,6 +45,7 @@
       "slim",
       "wire_diet",
       "corpus_fmt",
+      "corpus_fmt_mode",
       "rollout_src",
       "remote_transport",
       "remote_job_root",

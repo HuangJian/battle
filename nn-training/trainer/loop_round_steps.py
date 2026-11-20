@@ -43,7 +43,7 @@ from trainer.loop_steps import (
 )
 from trainer.loop_volume import TrainingVolume
 from trainer.rollout_phase import join_precollect_child, precollect_ready, spawn_next_collect
-from worker.config import course_key_of, resolve_course_quota
+from worker.config import course_key_of, global_corpus_fmt, resolve_course_quota
 from worker.eval_gate import eval_gate
 from worker.events import log_iter_error
 from worker.loop_round import (
@@ -379,10 +379,19 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
         上一轮的**结果**起算，否则一次降级会把整门课永久钉在 full。
         """
         args = self.args
-        req = str(
+        base = str(
             getattr(args, "_corpus_fmt_req", "") or getattr(args, "corpus_fmt", "full") or "full"
         )
-        args._corpus_fmt_req = req
+        args._corpus_fmt_req = base
+        # ★ 2026-11-20（用户：控制台首页「采样格式 auto | full | replay」）：全局档**压过课程**
+        #   ——它就是为了「网络差时全平台切 replay」而存在。每轮边界重读 rl-config（见
+        #   `worker.config_file.global_corpus_fmt`）⇒ 训练途中切换，下一轮生效；切回 auto
+        #   即恢复课程自己声明的值（`_corpus_fmt_req` 始终存**课程请求**，不被全局污染）。
+        g = global_corpus_fmt()
+        req = g if g in ("full", "replay") else base
+        if g in ("full", "replay") and g != base and g != getattr(self, "_corpus_fmt_global_note", ""):
+            self._corpus_fmt_global_note = g
+            log(f"[run_rl] 语料格式：控制台全局档 {g} 压过课程请求 {base}")
         same_machine = src == "node" or bool(getattr(args, "export_bundle", ""))
         want = "full" if same_machine else req
         if want != req and want != getattr(self, "_corpus_fmt_note", ""):

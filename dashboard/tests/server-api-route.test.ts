@@ -103,6 +103,25 @@ describe('console/api.routeAction', () => {
     expect(loadConfig().rl.stream).toBe(before ?? 0)
   })
 
+  it('采样格式：白名单外的值 → 400（auto|full|replay 之外不猜）', async () => {
+    for (const bad of ['FULL', 'replay2', 'on', '1', '']) {
+      const r = (await postJson('setSamplingFmt', { value: bad })) as { __status: number }
+      expect(`${bad}:${r.__status}`).toBe(`${bad}:400`)
+    }
+  })
+
+  it('采样格式回写 rl-config.json 的 rl.corpus_fmt_mode（写后还原；auto = 删键）', async () => {
+    const orig = loadConfig().rl.corpus_fmt_mode
+    const r = await postJson('setSamplingFmt', { value: 'replay' })
+    expect(r.ok).toBe(true)
+    expect(loadConfig().rl.corpus_fmt_mode).toBe('replay')
+    // auto 不写 "auto"：两侧都当缺省读，盘上少一个键 = 存量配置逐字节不变。
+    const r2 = await postJson('setSamplingFmt', { value: 'auto' })
+    expect(r2.ok).toBe(true)
+    expect(loadConfig().rl.corpus_fmt_mode).toBeUndefined()
+    if (orig !== undefined) await postJson('setSamplingFmt', { value: String(orig) })
+  })
+
   it('非法模式值 → 动作失败', async () => {
     const r = await postJson('setMode', { key: 'rl.stream', value: 'yes' })
     expect(r.ok).toBe(false)

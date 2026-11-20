@@ -7,7 +7,12 @@ import { type BcPointerView, type ConsoleStateView, type MetricsView } from '../
 import { courseEnabled, enabledCoursesByOpenOrder, isBcCourse } from '../../stack/courses'
 import { evalboardEnabled } from '../../core/feature-flags'
 import { loadConsoleState } from '../actions'
-import { resolveCfTunnel, resolveRolloutSrc, resolveSlim } from '../../stack/specs'
+import {
+  resolveCfTunnel,
+  resolveRolloutSrc,
+  resolveSamplingFmt,
+  resolveSlim,
+} from '../../stack/specs'
 import { readCourseMetrics } from './course-metrics-read'
 import { readArchived } from './archive'
 import { loadConfigSafe } from './config'
@@ -327,6 +332,8 @@ export async function buildStateView(
       slim: resolveSlim(cfg, course),
       // M3：rollout 执行位置的当前**生效**值（per-course > rl.* > 缺省 local）。
       rolloutSrc: resolveRolloutSrc(cfg, course),
+      // 2026-11-20：全局采样格式（rl.corpus_fmt_mode > 缺省 auto）——首页「采样格式」toggle 的当前值。
+      samplingFmt: resolveSamplingFmt(cfg),
     },
     // ★M4：`courseRolloutSrc`（逐课 rollout 源快照）已删——它存在的唯一理由是「意图 /
     //  hub 模式 / rl-config 三个源可能没对齐」的漂移徽标，而今天「这门课归谁」只有一个

@@ -7,7 +7,7 @@ export interface SegmentOption<T extends string> {
 
 export interface SegmentedControlProps<T extends string> {
   value: T
-  options: Array<SegmentOption<T>>
+  options: ReadonlyArray<SegmentOption<T>>
   onChange: (value: T) => void
   ariaLabel?: string
 }

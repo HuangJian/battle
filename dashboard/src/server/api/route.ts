@@ -26,6 +26,7 @@ import {
   setMode,
   setNodeConcurrency,
   setNodeEnabled,
+  setSamplingFmt,
   smokeComponent,
   smokeTrain,
   startComponent,
@@ -53,6 +54,7 @@ import {
 import { runRunPythonAsyncModule } from '../run-python'
 import { launchEvalA } from '../eval-a-run'
 import { launchEvalBc } from '../eval-bc-run'
+import { isSamplingFmt } from '../../stack/specs'
 import { ALL_COMPONENTS } from './component-meta'
 import { loadConfigSafe } from './config'
 import { actionCtx } from './courses'
@@ -339,6 +341,16 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         const key = bodyStr(body, 'key')
         const value = bodyStr(body, 'value')
         return okResp(await setMode(key, value))
+      }
+      case 'setSamplingFmt': {
+        // 全局采样格式（auto|full|replay）：参数错 = 400（与 preset 的 cf*/slim 同口径；
+        // 动作层还挡一道，直接调动作也不会写出脏值）。
+        // 训练侧每轮边界重读 `rl.corpus_fmt_mode` ⇒ 无需重启，下一轮生效。
+        const value = bodyStr(body, 'value')
+        if (!isSamplingFmt(value)) {
+          return errResp(`未知采样格式: ${value}（只接受 auto|full|replay）`, 400)
+        }
+        return okResp(await setSamplingFmt(value))
       }
       case 'getGateHaltMode': {
         // 门禁动作模式（2026-10-01 起**平台级**）：halt = 触发门禁时下发云端停机达令（缺省）；

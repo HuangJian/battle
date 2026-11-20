@@ -30,6 +30,9 @@ CONFIG_FILE = ROOT / "worker" / "config.py"
 NEW_FILE = ROOT / "worker" / "config_file.py"
 
 MOVED_NAMES = {"RL_CONFIG_ENV", "read_rl_config_file", "rl_config_path"}
+#: 后来**原生**长在 config_file.py 的名字（不是搬迁，但同样只许在这家实现）：
+#: 控制台「采样格式」全局开关（2026-11-20）。
+NATIVE_NAMES = {"CORPUS_FMT_MODES", "global_corpus_fmt"}
 
 ALLOWED_IMPORTS = {"__future__", "json", "pathlib", "typing", "common.distribution"}
 
@@ -62,8 +65,8 @@ def _imported_modules(path: Path) -> set[str]:
 
 def test_moved_names_are_defined_in_config_file_and_not_in_config() -> None:
     """定义唯一：搬走的名字只在新家实现（门面只许转发）。"""
-    assert _defined(NEW_FILE) == MOVED_NAMES
-    leftovers = MOVED_NAMES & _defined(CONFIG_FILE)
+    assert _defined(NEW_FILE) == MOVED_NAMES | NATIVE_NAMES
+    leftovers = (MOVED_NAMES | NATIVE_NAMES) & _defined(CONFIG_FILE)
     assert leftovers == set(), f"config.py 里仍在实现这些名字（应只做转发）：{sorted(leftovers)}"
 
 
@@ -79,7 +82,7 @@ def test_config_file_import_surface_is_closed() -> None:
 
 def test_config_facade_forwards_every_moved_name() -> None:
     """门面：每个搬走名都还在 `biz.config`，且与新家是**同一个对象**。"""
-    for name in sorted(MOVED_NAMES):
+    for name in sorted(MOVED_NAMES | NATIVE_NAMES):
         assert hasattr(config_mod, name), f"biz.config 丢了转发名 {name}"
         assert getattr(config_mod, name) is getattr(file_mod, name), (
             f"biz.config.{name} 不是 biz.config_file.{name}（转发成了副本）"

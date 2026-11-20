@@ -697,6 +697,46 @@ describe('WorkerContribution SSR（plan W3a/W3b）', () => {
     expect(rollHd).toContain('节点统计 ›')
   })
 
+  // ★ 2026-11-20 用户：「采样节点」区域加「采样格式：auto | full | replay」toggle，置于
+  //   「节点统计」左边，默认 auto —— 全局开关（网络差切 replay、网络好且样本不大切 full）。
+  it('采样格式 toggle：块头内、紧挨「节点统计 ›」左边，缺省 auto', () => {
+    const html = renderToString(
+      h(NodePills, { nodes: [], brief: null, onAction: () => {}, onMore: () => {} }),
+    )
+    const fmtAt = html.indexOf('aria-label="采样格式（全局）"')
+    expect(fmtAt).toBeGreaterThan(-1)
+    // 位置：在「节点统计 ›」**左边**（同一块头里，不是页尾另一套控件）。
+    expect(fmtAt).toBeLessThan(html.indexOf('节点统计 ›'))
+    const seg = html.slice(fmtAt, html.indexOf('节点统计 ›'))
+    for (const v of ['auto', 'full', 'replay']) expect(seg).toContain(`>${v}</button>`)
+    // 缺省 auto（且只有一档点亮）
+    expect(seg).toMatch(/tc-segmented__btn--on"[^>]*>auto<\/button>/)
+    expect(seg.split('tc-segmented__btn--on').length - 1).toBe(1)
+    expect(seg).not.toContain('disabled')
+  })
+
+  it('采样格式 toggle：显示服务端当前值；只读视图不物理禁用（只读是动作边界，服务端 403 兜底）', () => {
+    const html = renderToString(
+      h(NodePills, {
+        nodes: [],
+        brief: null,
+        samplingFmt: 'replay',
+        readOnly: true,
+        onAction: () => {},
+        onMore: () => {},
+      }),
+    )
+    const seg = html.slice(
+      html.indexOf('aria-label="采样格式（全局）"'),
+      html.indexOf('节点统计 ›'),
+    )
+    expect(seg).toMatch(/tc-segmented__btn--on"[^>]*>replay<\/button>/)
+    expect(seg).not.toContain('disabled')
+    // 悬停提示说明「仅限本机 localhost」（与同区其余动作控件的只读口径一致）
+    expect(html).toContain('title="采样格式（全局，下一轮生效）')
+    expect(html).toContain('只读模式：节点编辑/冒烟仅限本机 localhost')
+  })
+
   it('没有 PPO 读数 ⇒ 不画 PPO 块（空壳标题会被读成「有东西没加载出来」）', () => {
     const html = renderToString(
       h(NodePills, { nodes: [], brief: null, onAction: () => {}, onMore: () => {} }),
