@@ -10,12 +10,18 @@
   * 消费者全在它上面：`trainer/`（入口锁存分支 / ping 门 / rescan）与 `tools/dist_upgrade_cli.py`
     —— 没有 `common/` 或 `worker/` 的读者，所以搬上来不会制造反向边。
 
-两块状态都是有理由的进程级状态（不是隐藏可变容器）：
-  * `UPGRADE_BRANCH`：训练机当前分支的**锁存值**（`run_rl` / `run_bc` / `loop_serve` 启动时
-    `set_upgrade_branch` 一次）。远端升级永远用它，rl-config 的 `upgradeBranch` 已废弃——
+两块状态都是有理由的进程级状态，且**都住显式对象**（模块只留一个默认实例，没有模块级可变量、
+没有 `global`）：
+  * `_BRANCH`（`BranchLatch`）：训练机当前分支的**锁存值**（`run_rl` / `run_bc` / `loop_serve`
+    启动时 `set_upgrade_branch` 一次）。远端升级永远用它，rl-config 的 `upgradeBranch` 已废弃——
     2026-08-30 事故：残留旧分支名把全部节点 reset 回旧代码。
-  * `_RESTARTS`（`RestartMemo`）：跨代重启去重 + 冷却窗。显式对象，模块只留一个默认实例；
-    要隔离的测试自己 new 一份（`reset_restart_state` / `seed_restart_state` 是给 CLI 与用例的入口）。
+  * `_RESTARTS`（`RestartMemo`）：跨代重启去重 + 冷却窗。要隔离的测试自己 new 一份
+    （`reset_restart_state` / `seed_restart_state` 是给 CLI 与用例的入口）。
+
+为什么要对象化而不是一个模块字符串（2026-11-20，P0-5 收尾）：字符串 + `global` 在 AST 层面
+就是「进程级可变态」，读代码的人无法从类型看出它只有 set/get 两个合法操作；`BranchLatch` 把
+写入通道收成一个方法（顺带把 `None` 收成 `""`，调用方不必再写 `or ""`），`GLOBAL_BASELINE` 里
+本文件的那条也因此归零。
 """
 
 from __future__ import annotations
@@ -29,16 +35,34 @@ from common.codehash import dirty_hash_files
 from common.codehash_ref import is_self_node as _is_self_node
 from common.distribution import NET_ERRORS, node_ping, node_request
 
-# 训练机当前分支（run_rl/run_bc/loop_serve 启动时锁存）。节点远控升级**永远**用这个
-# 分支，且它是**唯一**来源——rl-config 的 upgradeBranch 已废弃（残留旧战役分支名曾把
-# 全部节点 reset 回旧代码，2026-08-30 事故）。取值入口 = `current_upgrade_branch()`；
-# 值随派发向下传给 `trainer/queue_local`，**没有**「调用方传 branch 进来」那条路了。
-UPGRADE_BRANCH: str | None = None
+
+class BranchLatch:
+    """训练机当前分支的锁存（`run_rl` / `run_bc` / `loop_serve` 启动时写一次）。
+
+    节点远控升级**永远**用这个分支，且它是**唯一**来源——rl-config 的 upgradeBranch 已废弃
+    （残留旧战役分支名曾把全部节点 reset 回旧代码，2026-08-30 事故）。取值入口 =
+    `current_upgrade_branch()`；值随派发向下传给 `trainer/queue_local`，**没有**
+    「调用方传 branch 进来」那条路了。
+
+    为什么是个对象：把「写」收成一个方法之后，模块里不再需要 `global`（那条基线归零），
+    而 `None` 也在入口处收成 `""` ——调用方不必每处再写 `or ""`。
+    """
+
+    def __init__(self, branch: str = "") -> None:
+        self._branch = str(branch or "")
+
+    def set(self, branch: str | None) -> None:
+        self._branch = str(branch or "")
+
+    def get(self) -> str:
+        return self._branch
+
+
+_BRANCH = BranchLatch()
 
 
 def set_upgrade_branch(branch: str) -> None:
-    global UPGRADE_BRANCH
-    UPGRADE_BRANCH = branch
+    _BRANCH.set(branch)
 
 
 def is_self_node(url: str, node_id: str = "") -> bool:
@@ -65,7 +89,7 @@ def current_upgrade_branch() -> str:
     那个 `explicit` 参数拿掉 ⇒「配置能盖锁存」在**签名层面**不再成立——要复发必须改签名，
     而不是顺手写一行 `or` 兜底回去。
     """
-    return UPGRADE_BRANCH or ""
+    return _BRANCH.get()
 
 
 def request_upgrade(url: str, auth_key: str, branch: str, timeout: float = 20.0) -> bool:

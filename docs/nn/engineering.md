@@ -25,6 +25,39 @@
 
 ---
 
+## §235 P0-5 最后两行：审计对象已不存在，真正剩的 `global` 换成 `BranchLatch`（2026-11-20）
+
+**先对账（结论：这两行早就不是缺口的所在）**：
+
+* `common/net_http._RACING_OPENERS`（`dict[bool, OpenerDirector]`）**全仓已无此名**——B8 把它换成
+  `@functools.cache racing_opener(no_proxy)`：键就是那个 bool、用例要清就 `cache_clear()`。
+  另外 `no_proxy_opener()` 也是 `functools.cache`。**故意不再对象化**：两个 opener 都**无状态**
+  （`build_opener` 的结果不随环境/时序变），缓存只是省一次构造成本；包成类不会多保护什么，
+  只会多一层没人读的间接。
+* `common/distribution._RESTART_SEEN` / `UPGRADE_BRANCH`：`_RESTART_SEEN` 2026-11-14 已进
+  `RestartMemo`；**升级/重启整簇 2026-11-19 搬去 `remote/node_upgrade.py`**（`fea6cded`，
+  `docs/nn/engineering.md §219`），所以 `common/distribution.py` 里连名字都没有了。
+
+**真正剩下的那一处**：`remote/node_upgrade.py` 的 `UPGRADE_BRANCH: str | None` + `global`，
+即 `GLOBAL_BASELINE` 里本文件那条。它的问题不是「有状态」（训练机当前分支本来就是进程级事实），
+而是**形状**：字符串看不出「只允许 set/get」，`None` 逼每个读点写 `or ""`。
+
+**做法**：`class BranchLatch`（`set()` / `get()`，构造可带初值，`None` 在入口收成 `""`），模块只留
+`_BRANCH = BranchLatch()`；`set_upgrade_branch` / `current_upgrade_branch` **签名不变**（消费者
+`trainer/once_shot`、`run_bc`、`loop_serve`、`dispatch` 零改动），`GLOBAL_BASELINE` 删掉
+`"remote/node_upgrade.py": 1`。`RestartMemo` 早就是这个形状，现在同文件两块状态读起来一致。
+
+**守卫**：`tests/remote/test_node_upgrade.py::test_branch_latches_are_independent_and_default_to_empty`
+（实例互不相见 / 默认空串 / `set(None)` 收成 `""` / 构造初值）；`test_python_shape_budget`
+的 `global` 基线减一（只许调小的方向）。既有的
+`tests/tools/test_dist_upgrade_cli.py::…` 继续守着「`current_upgrade_branch()` 零参、`upgrade_branch_or`
+不得复活」。
+
+**P0-5 至此的状态**：`common/**` 的模块级可变容器 = 0（`L0_MUTABLE_ALLOWED = {}`），审计表八行全部
+标注已修/已搬家。**剩下的不在 P0-5 口径里**：`worker/eval_exec._EXECUTORS`、
+`worker/eval_arbiter._ARBITER` 两个 L2 单例、`hub/http_face` 的类属性，以及 `biz/reward_context`
+的 2 条 `global`（请求作用域上下文，裁定保留）。它们要动各自是一轮独立的重构。
+
 ## §234 P0-5 收尾：日志前缀进 `contextvars` 之后，**派生线程**的上下文传播（2026-11-20）
 
 **起点（先说结论）**：`common/log.py` 的前缀与课日志句柄**早已**从模块级 `_PREFIX` /

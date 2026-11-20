@@ -8643,3 +8643,18 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **守卫**：`tests/common/test_log_router.py` 四条（跨线程隔离 / `Runtime.thread` 继承 /
   `submit`+`map` 继承 / sink 实例隔离）。
 - **账**：五条基线（`Any`/宽签名/同名/exact/clone）与文本断言基线均未动。
+
+## §2026-11-20-upgrade-branch-latch（`UPGRADE_BRANCH` 的 `global` 换成 `BranchLatch`；`net_http` 的 opener 缓存故意不对象化）
+
+- **背景**：`python.refactor.md` P0-5 表剩两行，复核后发现对象**已不存在**：`net_http._RACING_OPENERS`
+  在 B8 换成 `@functools.cache racing_opener(no_proxy)`；`distribution` 的 `_RESTART_SEEN` /
+  `UPGRADE_BRANCH` 2026-11-14 对象化、2026-11-19 整簇搬去 `remote/node_upgrade.py`（`fea6cded`）。
+- **决定一**：`remote/node_upgrade.UPGRADE_BRANCH`（`str | None` + `global`）→ `BranchLatch` 对象
+  （`_BRANCH` 默认实例，`set()`/`get()`，`None` 入口收成 `""`）。公开函数签名不变，4 个消费者零改动；
+  `GLOBAL_BASELINE` 删 `"remote/node_upgrade.py": 1`。
+- **决定二**：`net_http` 的两个 `functools.cache` opener **不对象化**——它们无状态（`build_opener`
+  结果不随环境变），缓存只省构造；包成类只增间接。审计原话「测试间串味」已不成立（键是入参）。
+- **守卫**：`tests/remote/test_node_upgrade.py::test_branch_latches_are_independent_and_default_to_empty`；
+  既有 `test_dist_upgrade_cli` 守「`current_upgrade_branch()` 零参 / `upgrade_branch_or` 不复活」。
+- **不动**：`worker/eval_exec._EXECUTORS`、`worker/eval_arbiter._ARBITER`、`hub/http_face` 类属性、
+  `biz/reward_context` 的 2 条 `global`（各自一轮独立重构）。
