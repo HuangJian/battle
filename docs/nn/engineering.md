@@ -25,6 +25,36 @@
 
 ---
 
+## §232 P0-3 第五刀：`trainer/queue_local.rescan_nodes` 的 27 个参数 → `RescanSpec`（2026-11-20）
+
+**触发**：全仓最宽的签名（27 参，其中 19 个位置参数），且它的 docstring 自己记着两次事故 ——
+「v3.9 动态节点发现线程主体（dispatch.run() spawn，19 参逐位对应）」「修复前 dispatch 的 18 个实参
+会整体错位 → 线程启动即抛 `missing 6 required positional arguments`（rollout-rescan 线程报废，
+运行中上线的节点永远不被发现）」。唯一调用点是一串 27 项的 `kwargs=dict(...)`。
+
+**做法**：`RescanSpec`（frozen + kw_only，27 字段）住在 `trainer/queue_local.py`（定义点），
+`rescan_nodes(spec)` 只收一个对象，函数体**逐字保留**（顶部一段解包，与 `open_run_context` /
+`_settle_unit` 同一手法）。装配点 `trainer/queue_worker` 的那条 `rt.thread(...)` 改成
+`kwargs=dict(spec=RescanSpec(...))`——仍然全关键字，但错位只可能发生在**一个**键上。
+
+**为什么字段表要抄 `QueueState` 而不是直接收 `q`**：`trainer/queue_worker` → `trainer/queue_local`
+是单行道（模块头写着「从 dispatch_queue 拆出」），反向 import `QueueState` 就是环。类型照
+`QueueState` 的注解抄（`lock: threading.Lock` / `all_settled: threading.Event` / `iter_id: str`
+——注意 `iter_id` 是 **str**，不是轮号），`Any` 一位都没加（该文件 `Any` 基线 5 未动）。
+
+**字段是引用、不是拷贝**：`spawned_ids` / `alive` / `streaks` / `extra_threads` 与主循环共享
+同一份容器 —— frozen 只保证「这个对象不被重新绑定」，不深拷容器。这是本线程与主循环之间的
+**既有契约**（rescan 要往 `spawned_ids` 里登记、往 `extra_threads` 里补孵线程），写进类的
+docstring，免得下一个读者以为 frozen 等于快照。
+
+**账**：全仓宽签名 125 → **124**（`trainer/queue_local.py` 3 → 2，`WIDE_FUNCS_BASELINE` 下调）；
+LOC 756（预算 1000，加 60 行仍在线下）；`Any` / exact / clone / 同名四条基线一位未动。
+
+**守卫**：`tests/trainer/test_rescan_spec.py` —— 字段表闭集 · frozen（行为式）+ 逐字段 `kw_only` ·
+`rescan_nodes` 形参恰 `["spec"]` · 唯一调用点**按关键字**传 `spec`
+（`tests/helpers/run_setup_probe.thread_kwarg_keys` 从 `.thread(<target>, kwargs=…)` 里读出键名；
+位置传参正是原来那条事故的形态）。改回位置参数、加形参、少字段都会先红在这条上。
+
 ## §231 P0-3 第四刀：`RunSetup` —— `open_run_context`(35) / `run_standalone`(29) / `run_plan_job`(25) 三个宽签名收成一个旋钮袋（2026-11-20）
 
 **触发**：`python.refactor.md` §7 明确排的「下一批」——三处宽签名（外加 `RunContext.__init__` 的 29 参）

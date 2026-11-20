@@ -18,6 +18,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -606,37 +607,56 @@ def _rescan_push_weights(
         return None
 
 
-def rescan_nodes(
-    cfg,
-    code_hash,
-    upgrade_branch,
-    dirty_files,
-    local_bun,
-    spawned_ids,
-    alive,
-    lock,
-    weights_bytes,
-    iter_id,
-    wver,
-    task_timeout,
-    status_timeout,
-    all_settled,
-    deadline,
-    rescan_sec,
-    worker,
-    extra_threads,
-    halt_event=None,
-    *,
-    first_probe_sec: float = 5.0,
-    wkind: str = "rollout",
-    streaks=None,
-    soft_streaks=None,
-    fail_streak_max: int = 3,
-    soft_streak_max: int = 9,
-    rearm_cap: int = 3,
-    rearm_warned=None,
-) -> None:
-    """v3.9 动态节点发现线程主体（dispatch.run() spawn，19 参逐位对应）。
+@dataclass(frozen=True, kw_only=True)
+class RescanSpec:
+    """`rescan_nodes` 的全部输入（原来是 27 个参数，其中 19 个是位置参数）。
+
+    **为什么合成一个对象（2026-11-20，§P0-3 第四刀续）**：这个函数是 `rescan_nodes` 文档里
+    两次事故的同一个成因面 —— 实参**逐位对应**，而调用点那串 `dict(...)` 有 20+ 项。历史上
+    第 19 个位置参数错位过一次：线程启动即抛 `missing 6 required positional arguments`，
+    `rollout-rescan` 线程报废 ⇒ 运行中上线的节点永远不被发现（看得见的症状只有「新节点
+    不干活」）。合成对象后只剩一个形参，错位不可能再「安静地」发生。
+
+    字段全是**引用**（`spawned_ids` / `alive` / `streaks` 与主循环共享同一份容器）：frozen 只
+    保证「这个对象不被重新绑定」，不深拷容器 —— 那是本线程与主循环之间的既有契约。
+    类型照 `trainer/queue_worker.QueueState` 抄（本模块不能反向 import 它：`queue_worker` →
+    `queue_local` 是单行道）。
+    """
+
+    cfg: dict
+    code_hash: str
+    upgrade_branch: str
+    dirty_files: list[str]
+    local_bun: str
+    spawned_ids: set[str]
+    alive: list[dict]
+    lock: threading.Lock
+    weights_bytes: bytes
+    iter_id: str
+    wver: str
+    task_timeout: float
+    status_timeout: float
+    all_settled: threading.Event
+    deadline: float
+    rescan_sec: float
+    worker: Callable[..., None]
+    extra_threads: list[threading.Thread]
+    halt_event: threading.Event | None = None
+    #: 首个 pass 提前到多久（A4：短波形态下等满 `rescan_sec` 等于永不扫描）。
+    first_probe_sec: float = 5.0
+    #: 权重下发用的 kind（漏传 ⇒ goal/intent 腿的权重进 rollout 桶，任务全 409）。
+    wkind: str = "rollout"
+    streaks: dict[str, int] | None = None
+    soft_streaks: dict[str, int] | None = None
+    fail_streak_max: int = 3
+    soft_streak_max: int = 9
+    #: 每节点每轮的补孵上界（防「永远失败的节点」无限起线程）。
+    rearm_cap: int = 3
+    rearm_warned: set[str] | None = None
+
+
+def rescan_nodes(spec: RescanSpec) -> None:
+    """v3.9 动态节点发现线程主体（`dispatch.run()` spawn，输入 = 一个 `RescanSpec`）。
 
     v3.14b：追加 halt_event —— KL 熔断后 rescan 线程必须立即退出，否则主线程
     join(timeout=max(30, window+taskTimeout)) 会白等满超时（实测 180s/次，
@@ -664,6 +684,34 @@ def rescan_nodes(
         腿的中途上线节点会把权重发进 rollout 桶，任务全 409；
       · `nd` 带 `ping`（旧实现漏带 ⇒ stageJson 任务在回场节点上被能力握手拒掉）。
     """
+    # 解包（方法体逐字保留）：要改语义请改 `RescanSpec` 或函数体，别把「参数没了」当逻辑变了。
+    cfg = spec.cfg
+    code_hash = spec.code_hash
+    upgrade_branch = spec.upgrade_branch
+    dirty_files = spec.dirty_files
+    local_bun = spec.local_bun
+    spawned_ids = spec.spawned_ids
+    alive = spec.alive
+    lock = spec.lock
+    weights_bytes = spec.weights_bytes
+    iter_id = spec.iter_id
+    wver = spec.wver
+    task_timeout = spec.task_timeout
+    status_timeout = spec.status_timeout
+    all_settled = spec.all_settled
+    deadline = spec.deadline
+    rescan_sec = spec.rescan_sec
+    worker = spec.worker
+    extra_threads = spec.extra_threads
+    halt_event = spec.halt_event
+    first_probe_sec = spec.first_probe_sec
+    wkind = spec.wkind
+    streaks = spec.streaks
+    soft_streaks = spec.soft_streaks
+    fail_streak_max = spec.fail_streak_max
+    soft_streak_max = spec.soft_streak_max
+    rearm_cap = spec.rearm_cap
+    rearm_warned = spec.rearm_warned
     #: 补孵的采样线程归它（名字 `queue-rescan-rearm:<节点>`）。建在**本线程体内**：
     #: 这份 Runtime 的生命期 = rescan 线程自己，不是跨轮单例；谁等线程仍由调用方的
     #: `extra_threads` 决定（与 `LocalLane` 同口径：所有者不替人 join）。

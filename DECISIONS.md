@@ -8594,3 +8594,22 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   ② 加一层 builder（`dataclasses.replace` 已经是「只覆盖几个旋钮」的语义）。
 - **守卫**：`tests/remote/test_run_setup_spec.py`（字段表闭集 / frozen + kw_only / 三条入口形参表 /
   身份守卫恰一处 / 两条入口都走装配点 / `RunContext.__init__` 恰 5 参）。
+
+## §2026-11-20-rescan-spec（全仓最宽的 `rescan_nodes`(27 参) → `RescanSpec`；字段是引用不是快照）
+
+- **背景**：`trainer/queue_local.rescan_nodes` 是全仓最宽的签名（27 参，其中 19 个位置参数），
+  它的 docstring 自己记着两次事故：实参逐位对应，第 19 个错位过一次 ⇒ 线程启动即抛 ⇒
+  `rollout-rescan` 报废 ⇒ 运行中上线的节点永远不被发现（症状只有「新节点不干活」）。
+  唯一调用点是一串 27 项的 `kwargs=dict(...)`。
+- **决定**：`RescanSpec`（frozen + kw_only，27 字段）住定义点 `trainer/queue_local.py`；
+  `rescan_nodes(spec)` 只收一个对象，函数体逐字保留（顶部解包）；装配点
+  `trainer/queue_worker` 改成 `kwargs=dict(spec=RescanSpec(...))`（仍全关键字，错位只可能落在一个键）。
+- **为什么抄 `QueueState` 的字段表而不是直接收 `q`**：`queue_worker` → `queue_local` 是单行道，
+  反向 import `QueueState` 就是环。类型照抄其注解（`lock: threading.Lock`、`all_settled:
+  threading.Event`、`iter_id: str`），`Any` 一位没加。
+- **frozen 不等于快照**：`spawned_ids` / `alive` / `streaks` / `extra_threads` 与主循环**共享**同一份
+  容器（rescan 要登记新节点、补孵线程）——这一点写进类 docstring。
+- **账**：全仓宽签名 125 → 124（`WIDE_FUNCS_BASELINE` 的 `trainer/queue_local.py` 3 → 2）；
+  LOC 756/1000；`Any` / exact / clone / 同名四条基线未动。
+- **守卫**：`tests/trainer/test_rescan_spec.py`（字段闭集 / frozen + kw_only / 形参恰 `["spec"]` /
+  唯一调用点按关键字传 `spec`，探针 `tests/helpers/run_setup_probe.thread_kwarg_keys`）。

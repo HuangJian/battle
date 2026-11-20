@@ -51,6 +51,34 @@ def called_names(module: str, name: str) -> list[str]:
     return out
 
 
+def thread_kwarg_keys(module: str, target: str) -> list[str]:
+    """模块里 `…thread(<target>, kwargs={...})` 的关键字名（按 target 过滤，按源码顺序）。
+
+    为什么单独一个探针：那条线程的契约就是「关键字传参」——历史上第 19 个**位置**实参
+    错位过一次（线程启动即抛，`rollout-rescan` 报废）。位置传参在这里必须是可观测量。
+    """
+    found: list[str] = []
+    mod = importlib.import_module(module)
+    tree = ast.parse(textwrap.dedent(inspect.getsource(mod)))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr != "thread" or not node.args:
+            continue
+        first = node.args[0]
+        if not (isinstance(first, ast.Name) and first.id == target):
+            continue
+        for kw in node.keywords:
+            if kw.arg != "kwargs":
+                continue
+            val = kw.value
+            if isinstance(val, ast.Call):
+                found += [k.arg for k in val.keywords if k.arg]
+            elif isinstance(val, ast.Dict):
+                found += [k.value for k in val.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+    return found
+
+
 def raise_count(module: str, name: str) -> int:
     """函数体里的 `raise` 条数（身份守卫 = 按缺失种类分几条）。"""
     return sum(1 for node in ast.walk(_body_tree(module, name)) if isinstance(node, ast.Raise))

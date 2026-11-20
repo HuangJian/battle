@@ -109,7 +109,7 @@ WIDE_FUNCS_BASELINE = {
     "trainer/loop_plan.py": 1,
     "trainer/loop_serve.py": 1,
     "trainer/loop_transport.py": 1,
-    "trainer/queue_local.py": 3,
+    "trainer/queue_local.py": 2,
     "trainer/rollout_phase.py": 1,
     "trainer/stream.py": 1,
     "worker/bc_collect.py": 1,
