@@ -216,6 +216,23 @@ def test_run_push_stays_quiet_when_the_dispatcher_is_mounted(
     )
     assert NO_DISPATCH_NOTE not in logs
 
+def _wait_for_log(path: Path, want: int, timeout: float = 10.0) -> list[str]:
+    """有界等 `run.log` 攒到 `want` 行，返回读到的行。
+
+    `on_exit` 由 wait 线程在 `proc.wait()` 一返回就调，而 tee 线程「读完管道 → 刷盘 → 关文件」
+    是**另一个事件**，两者没有同步（见 `offline_push._Child.spawn`）⇒ 紧跟 `on_exit` 读文件
+    在满载门禁下会偶发读到空/半截（2026-11-20 全量 nn python 门禁实测一次红）。判据是
+    「最终内容」而不是「on_exit 时刻的内容」。
+    """
+    end = time.time() + timeout
+    while True:
+        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        if len(lines) >= want or time.time() >= end:
+            return lines
+        # sleep-ok: 轮询步长（等的是 tee 线程把内容写完）
+        time.sleep(0.05)
+
+
 def test_child_spawn_runs_a_real_process_and_reports_its_exit_code(tmp_path: Path) -> None:
     child = sup._Child()
     got: list[int] = []
@@ -235,7 +252,8 @@ def test_child_spawn_runs_a_real_process_and_reports_its_exit_code(tmp_path: Pat
     )
     assert done.wait(30), "子进程 30s 内没退出"
     assert got == [0]
-    assert (tmp_path / "run.log").read_text(encoding="utf-8") == "hello-child\n"
+    # 子进程退出 ≠ tee 收尾：不能紧跟 on_exit 断言文件内容（见 _wait_for_log）
+    assert _wait_for_log(tmp_path / "run.log", 1) == ["hello-child"]
     assert child.running() is False
 
 
@@ -266,7 +284,11 @@ def test_child_output_is_teed_into_the_supervisor_log(tmp_path: Path) -> None:
         time.sleep(0.05)
     assert any(m.startswith("rollout ") for m in lines), lines
     assert any(m.startswith("ppo ") for m in lines), lines
-    assert len((tmp_path / "run.log").read_text(encoding="utf-8").splitlines()) >= 2
+    # 同一个「退出 ≠ 收尾」：run.log 也要有界等（tee 刷盘可能晚于 on_exit）
+    assert _wait_for_log(tmp_path / "run.log", 2) == [
+        "rollout 进度 it103 采集局 6/17 局",
+        "ppo 训练 4 遍",
+    ]
 
 
 def test_child_stop_writes_the_stop_file_and_terminates(
