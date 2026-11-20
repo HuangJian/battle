@@ -830,8 +830,23 @@ def test_with_port_keeps_scheme_path_and_ipv6_brackets() -> None:
 
 
 def test_channel_switches_hub_url_to_the_alternate_port(monkeypatch: pytest.MonkeyPatch) -> None:
-    """预检说「只有 :2083 通」时通道**自己改地址** —— 不让人回去改 CFG 再重跑 cell（≈3 分钟）。"""
+    """预检说「只有 :2083 通」时通道**自己改地址** —— 不让人回去改 CFG 再重跑 cell（≈3 分钟）。
+
+    对端用**拒绝替身**而不是死端口（AGENTS：`tests/conftest.py` 的 `BCITY_CONSOLE_URL`
+    注释、docs/nn/engineering.md §81）：没人听的端口在防火墙/沙箱里会把 SYN 黑洞化，
+    `connect` 要挂到长轮询预算，`stop()` 再等满 5s join（本机实测 5.4s/次）——
+    与环境相关且不测任何判据。抛 `ConnectionRefusedError` 与「本机没有监听」在 `_send` 里
+    走的是同一条 `except URLError` 分支，但墙钟是 µs 级。断言只多一条「桩真的被调到」：
+    将来通道不再发轮询时，这条用例不会靠「什么也没发生」而假绿。
+    """
     monkeypatch.setattr(rr, "probe_hub", lambda *_a, **_k: (False, "预检行", {"alt_port": 2083}))
+    calls = {"n": 0}
+
+    def _refuse(*_a, **_k):
+        calls["n"] += 1
+        raise urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+
+    monkeypatch.setattr(rr.http_pool, "request", _refuse)
     logs: list[str] = []
     ch = RelayChannel(
         hub_url="https://127.0.0.1",
@@ -844,6 +859,7 @@ def test_channel_switches_hub_url_to_the_alternate_port(monkeypatch: pytest.Monk
     try:
         assert ch.open("测试") == ""  # 换过去也连不上（本机没有监听），但地址必须已经改了
         assert ch.hub_url == "https://127.0.0.1:2083"
+        assert calls["n"] >= 1, f"通道根本没去 :2083 轮询（只改了字符串？）logs={logs}"
     finally:
         ch.stop()
 

@@ -53,6 +53,7 @@ import json
 from functools import cache
 from pathlib import Path
 
+from tests.helpers import source_scan
 from tests.helpers.budget import sanity_floor
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -94,7 +95,12 @@ def _scan() -> dict[str, int]:
             rel = p.relative_to(ROOT).as_posix()
             if rel.startswith(EXEMPT_PREFIXES):
                 continue
-            tree = ast.parse(p.read_text(encoding="utf-8", errors="replace"))
+            # 两道廉价预筛（都是**充分**条件，不改判据）：① 宽泛处理器（与 G4 同一份文本面）；
+            # ② 体内只有一个 `pass` ⇒ 源码里必有 `pass`。2026-11-20 实测 2.2s → 1.2s。
+            src = source_scan.read_text(str(p), "replace")
+            if "pass" not in src or source_scan.BROAD_EXCEPT_HINT.search(src) is None:
+                continue
+            tree = ast.parse(src, filename=str(p))
             n = sum(
                 1
                 for node in ast.walk(tree)

@@ -18,6 +18,8 @@ import ast
 from functools import lru_cache
 from pathlib import Path
 
+from tests.helpers import source_scan
+
 ROOT = Path(__file__).resolve().parents[1]
 
 #: 生产包（`tests/`、`e2e/` 不设形状预算：测试的体量是「覆盖了多少场景」的函数）。
@@ -195,18 +197,27 @@ def _prod_files() -> list[Path]:
 
 
 def _tree(p: Path) -> ast.AST:
-    return ast.parse(p.read_text(encoding="utf-8", errors="replace"))
+    return ast.parse(source_scan.read_text(str(p), "replace"), filename=str(p))
 
 
 @lru_cache(maxsize=1)
-def _shape_counts() -> tuple[dict[str, int], dict[str, int], int]:
-    """`(长函数计数, 宽参数计数, 函数总数)`；全进程只扫一次。"""
+def _shape_counts() -> tuple[dict[str, int], dict[str, int], int, dict[str, int]]:
+    """`(长函数计数, 宽参数计数, 函数总数, global 语句计数)`；全进程只扫一次。
+
+    四项共用**同一次** `ast.walk`：`global` 那项原来自己又 `rglob` + 解析了一遍整棵生产树
+    （2026-11-20 实测本文件 2.6s → 1.4s）。
+    """
     long_: dict[str, int] = {}
     wide: dict[str, int] = {}
+    globs: dict[str, int] = {}
     total = 0
     for p in _prod_files():
         rel = p.relative_to(ROOT).as_posix()
+        n_globals = 0
         for node in ast.walk(_tree(p)):
+            if isinstance(node, ast.Global):
+                n_globals += 1
+                continue
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             total += 1
@@ -217,7 +228,9 @@ def _shape_counts() -> tuple[dict[str, int], dict[str, int], int]:
                 long_[rel] = long_.get(rel, 0) + 1
             if nparams > PARAM_LIMIT:
                 wide[rel] = wide.get(rel, 0) + 1
-    return long_, wide, total
+        if n_globals:
+            globs[rel] = n_globals
+    return long_, wide, total, globs
 
 
 def _growth(actual: dict[str, int], baseline: dict[str, int]) -> dict[str, tuple[int, int]]:
@@ -278,20 +291,15 @@ def _mutated_names(tree: ast.AST) -> set[str]:
 
 
 def _globals() -> dict[str, int]:
-    """每个生产文件的 `global` 语句数。"""
-    out: dict[str, int] = {}
-    for p in _prod_files():
-        n = sum(isinstance(node, ast.Global) for node in ast.walk(_tree(p)))
-        if n:
-            out[p.relative_to(ROOT).as_posix()] = n
-    return out
+    """每个生产文件的 `global` 语句数（派生自 `_shape_counts` 的同一次扫描）。"""
+    return _shape_counts()[3]
 
 
 # ── 护栏本体 ───────────────────────────────────────────────────────────────
 
 
 def test_no_new_long_functions() -> None:
-    long_, _, total = _shape_counts()
+    long_, _, total, _ = _shape_counts()
     assert total >= 4000, f"只扫到 {total} 个函数——扫描入口坏了（ROOT={ROOT}）"
     over = _growth(long_, LONG_FUNCS_BASELINE)
     detail = "\n".join(f"  {rel}: {n} 个（基线 {base}）" for rel, (n, base) in over.items())
@@ -303,7 +311,7 @@ def test_no_new_long_functions() -> None:
 
 
 def test_no_new_wide_functions() -> None:
-    _, wide, _ = _shape_counts()
+    _, wide, _, _ = _shape_counts()
     over = _growth(wide, WIDE_FUNCS_BASELINE)
     detail = "\n".join(f"  {rel}: {n} 个（基线 {base}）" for rel, (n, base) in over.items())
     assert not over, (
@@ -325,15 +333,27 @@ def test_shape_metric_semantics() -> None:
     assert (fn.end_lineno or fn.lineno) - fn.lineno + 1 == 4
 
 
+@lru_cache(maxsize=1)
+def _common_state() -> dict[str, tuple[frozenset[str], frozenset[str]]]:
+    """`common/**` 每个文件的 `(模块级容器名, 运行期被改写的名字)`；两次检查共用一次解析。
+
+    `test_common_has_no_new_mutable_module_state` 与 `test_l0_allowlist_is_still_needed`
+    原来各 `rglob` + 解析一遍 `common/`（约 100 个文件），现在只付一次。
+    """
+    out: dict[str, tuple[frozenset[str], frozenset[str]]] = {}
+    for p in sorted((ROOT / "common").rglob("*.py")):
+        tree = _tree(p)
+        out[p.relative_to(ROOT).as_posix()] = (
+            frozenset(_module_containers(tree)),
+            frozenset(_mutated_names(tree)),
+        )
+    return out
+
+
 def test_common_has_no_new_mutable_module_state() -> None:
     bad: dict[str, list[str]] = {}
-    for p in sorted((ROOT / "common").rglob("*.py")):
-        rel = p.relative_to(ROOT).as_posix()
-        tree = _tree(p)
-        offenders = sorted(
-            set(_module_containers(tree)) & _mutated_names(tree)
-            - L0_MUTABLE_ALLOWED.get(rel, frozenset())
-        )
+    for rel, (containers, mutated) in _common_state().items():
+        offenders = sorted(containers & mutated - L0_MUTABLE_ALLOWED.get(rel, frozenset()))
         if offenders:
             bad[rel] = offenders
     detail = "\n".join(f"  {rel}: {names}" for rel, names in bad.items())
@@ -347,8 +367,8 @@ def test_common_has_no_new_mutable_module_state() -> None:
 def test_l0_allowlist_is_still_needed() -> None:
     """豁免会过期：某个允许项已经不再被改写 ⇒ 从 `L0_MUTABLE_ALLOWED` 删掉。"""
     for rel, allowed in sorted(L0_MUTABLE_ALLOWED.items()):
-        tree = _tree(ROOT / rel)
-        still = allowed & _mutated_names(tree) & set(_module_containers(tree))
+        containers, mutated = _common_state()[rel]
+        still = allowed & mutated & containers
         stale = sorted(allowed - still)
         assert not stale, f"{rel} 的豁免已过期（不再被改写）：{stale} —— 从名册里删掉"
 

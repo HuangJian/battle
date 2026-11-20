@@ -26,6 +26,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from tests.helpers import source_scan
+
 ROOT = Path(__file__).resolve().parents[1]
 
 #: 生产包（`tools/` 与 `worker/scripts/` 不数 —— 与 G3/G4/G14/G15 同款）。
@@ -81,7 +83,11 @@ def test_only_the_runtime_builds_pools() -> None:
         rel = p.relative_to(ROOT).as_posix()
         if rel == HOME:
             continue
-        for line in _pool_calls(p.read_text(encoding="utf-8", errors="replace")):
+        # 廉价预筛：两个池类名都含 `Executor`（2026-11-20 实测本文件 3 条从 ~4.5s 降到 ~0.6s）。
+        text = source_scan.read_text(str(p), "replace")
+        if "Executor" not in text:
+            continue
+        for line in _pool_calls(text):
             offenders.append(f"  {rel}:{line}")
     assert not offenders, (
         "这些地方绕过 `common.runtime.Runtime` 直接建了线程池（没有所有者/上限/取消点/线程名）：\n"
@@ -94,7 +100,10 @@ def test_every_runtime_names_its_scope() -> None:
     offenders: list[str] = []
     for p in _iter_face_py():
         rel = p.relative_to(ROOT).as_posix()
-        for line in _anonymous_runtimes(p.read_text(encoding="utf-8", errors="replace")):
+        text = source_scan.read_text(str(p), "replace")
+        if "Runtime" not in text:
+            continue
+        for line in _anonymous_runtimes(text):
             offenders.append(f"  {rel}:{line}")
     assert not offenders, (
         "`Runtime(...)` 没给 `scope=`（线程名与 `describe()` 都靠它）：\n" + "\n".join(offenders)
@@ -107,7 +116,10 @@ def test_the_migration_is_still_there() -> None:
     for p in _iter_face_py():
         if p.relative_to(ROOT).as_posix() == HOME:
             continue
-        tree = ast.parse(p.read_text(encoding="utf-8", errors="replace"))
+        text = source_scan.read_text(str(p), "replace")
+        if "Runtime" not in text:
+            continue
+        tree = ast.parse(text, filename=str(p))
         used += sum(
             1
             for node in ast.walk(tree)

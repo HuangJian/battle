@@ -37,6 +37,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers import source_scan
 from tests.helpers.remote_dag import STANDALONE_BOOT_MODULES
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -96,7 +97,12 @@ def _scan() -> tuple[dict[str, int], int]:
         rel = p.relative_to(ROOT).as_posix()
         if rel == OWNER_HOME or rel in EXEMPT:
             continue
-        direct, hits = _scan_file(p.read_text(encoding="utf-8", errors="replace"))
+        # 廉价预筛：两边计数只认 `Thread(...)` 与 `x.thread(...)` 两种文本形态。
+        # 373 个生产文件里只有 40 + 少数调用点提到它们（2026-11-20 实测 1.7s → 0.4s）。
+        text = source_scan.read_text(str(p), "replace")
+        if "Thread" not in text and ".thread" not in text:
+            continue
+        direct, hits = _scan_file(text)
         owned += hits
         if direct:
             counts[rel] = direct

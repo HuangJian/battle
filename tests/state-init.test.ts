@@ -8,7 +8,6 @@ import { cloneWorld } from '../src/snapshot/WorldSerializer'
 import { worldTickHash } from '../src/replay/tickHash'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { RULES } from '../src/config/rules'
-import { OBS_CHANNELS, SCALAR_DIM } from '../src/nn/obs-encoder'
 import { STAGES } from '../src/config/stages'
 import type { Direction } from '../src/constants'
 import type { InputLike } from '../src/game/Input'
@@ -24,6 +23,7 @@ import {
 } from '../tools/sim/export-rl-rollout'
 import { convertReplayShard } from '../tools/sim/replay-to-shard'
 import { hashIndexFor, materializeCuts } from '../tools/sim/build-state-init-bank'
+import { zeroStudentWeightsText } from './sim/zero-student-weights'
 
 /**
  * 起始分布注入（plan/x20-state-init.plan.md P0/P1）的护栏。
@@ -93,63 +93,9 @@ function tmp(): string {
   return mkdtempSync(join(tmpdir(), 'state-init-'))
 }
 
-/**
- * 一份零填充的最小 student 权重（只为把 `runOne` 跑起来）。
- *
- * 为什么不读真权重：RL 权重 JSON 落在 `nn-training/weights/**`（gitignore，不入库）——用例
- * 依赖它就会在干净的 clone 上红。形状 = **当前生产架构**（h=64 / d=8 / 8 block / 三头 + value 头），
- * 输入宽度跟住 `src/nn/obs-encoder.ts`（17 obs + 2 coord = 19 通道、标量 46）：形状错了
- * `StudentModel` 当场报维度错（这就是「schema 变了就红」的钉子），同时命中加速卷积内核的准入
- * ——native/wasm 只收 19 通道，旧 18 通道（16 obs / 30 标量）会静默回退 TS 特征路径
- * （实测 1200 拍 4.7s → 0.26s）。零权重下两条路径的 logits 都是 0，轨迹逐位相同。
- */
-function zeroStudentWeights(): string {
-  const h = 64
-  const d = 8
-  const inCh = OBS_CHANNELS
-  const scalarDim = SCALAR_DIM
-  const shapes: Record<string, number[]> = {
-    'stem.weight': [h, inCh + 2, 3, 3],
-    'stem.bias': [h],
-    'fc.weight': [128, h + scalarDim],
-    'fc.bias': [128],
-    'move_head.weight': [5, 128],
-    'move_head.bias': [5],
-    'fire_head.weight': [2, 128],
-    'fire_head.bias': [2],
-    'value_head.weight': [1, 128],
-    'value_head.bias': [1],
-  }
-  for (let i = 0; i < d; i++) {
-    shapes[`blocks.${i}.dw.weight`] = [h, 1, 5, 5]
-    shapes[`blocks.${i}.dw.bias`] = [h]
-    shapes[`blocks.${i}.pw.weight`] = [h, h, 1, 1]
-    shapes[`blocks.${i}.pw.bias`] = [h]
-  }
-  const params: Record<string, { shape: number[]; data: string }> = {}
-  for (const [name, shape] of Object.entries(shapes)) {
-    const n = shape.reduce((a, b) => a * b, 1)
-    const f32 = new Float32Array(n)
-    params[name] = { shape, data: Buffer.from(f32.buffer).toString('base64') }
-  }
-  return JSON.stringify({
-    format: 'nn-weights-json',
-    version: 1,
-    schema_major: 3,
-    arch: {
-      kind: 'student',
-      in_ch: inCh,
-      board: 26,
-      scalar_dim: scalarDim,
-      h,
-      d,
-      head_hidden: 128,
-    },
-    params,
-  })
-}
-
-const WEIGHTS = zeroStudentWeights()
+// 零填充 student 权重（生产架构）——夹具的唯一实现在 `sim/zero-student-weights.ts`。
+// 不读 `nn-training/weights/**`（gitignore，干净 clone 上不存在）。
+const WEIGHTS = zeroStudentWeightsText()
 
 describe('P0 切点物化（纯函数）', () => {
   it('按 [cut_from, cut_to] 步 cut_step 物化，上界对局尾回退', () => {

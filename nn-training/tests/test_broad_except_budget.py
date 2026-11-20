@@ -46,6 +46,7 @@ import json
 from functools import cache
 from pathlib import Path
 
+from tests.helpers import source_scan
 from tests.helpers.budget import sanity_floor
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,7 +75,12 @@ def _scan() -> dict[str, int]:
             rel = p.relative_to(ROOT).as_posix()
             if rel.startswith(EXEMPT_PREFIXES):
                 continue
-            tree = ast.parse(p.read_text(encoding="utf-8", errors="replace"))
+            # 廉价预筛（`source_scan.BROAD_EXCEPT_HINT` 的判据是充分的）：373 个生产文件里
+            # 只有 148 个可能出现宽泛处理器（2026-11-20 实测 2.2s → 1.3s）。
+            src = source_scan.read_text(str(p), "replace")
+            if source_scan.BROAD_EXCEPT_HINT.search(src) is None:
+                continue
+            tree = ast.parse(src, filename=str(p))
             n = sum(
                 1
                 for node in ast.walk(tree)
