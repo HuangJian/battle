@@ -238,7 +238,7 @@ worker 用）。浏览器是唯一「天然直连本机 dashboard、又不需要
 - **任务模型**（GM 存储，按站点分组；v1 只有本地时区）：
   `{id, at: 'HH:MM', days: 'daily'|'weekdays'|'1,3,5', action: 'run-cell'|'run-all'|'stop-session'|'interrupt',
     notebookKey, sessionAtCreate,
-    target?: {uuid?: string, index?: number, fingerprint?: string}, enabled,
+    target?: {uuid?: string, index?: number}, enabled,
     occurrences: {'<localDate>T<HH:MM>': {state, by, at, reason?}}}`。
 - **时间语义**（luna P1-7，逐条定死）：
   - 时区 = **设备本地时区**（不提供 per-job TZ）；创建页显示 `UTC±HH:MM` 与「下次触发 = …」。
@@ -261,9 +261,9 @@ worker 用）。浏览器是唯一「天然直连本机 dashboard、又不需要
     重读」把窗口压到可忽略；**不**用 `BroadcastChannel`（沙箱透传未验证）。
 - **页面 / 目标身份**：`run-*` 绑定 `notebookKey`（`<owner>/<slug>`，跨 run 稳定）；`stop`/`interrupt` 绑定
   `sessionAtCreate`（含 runId）——切到另一个 run 时**不执行**（fail closed，面板写原因）。
-  `target` 在创建时捕获 `{uuid, index, fingerprint}`（fingerprint = 前 200 字符的 FNV-1a）：触发时
-  uuid 命中且指纹一致 ⇒ 用；uuid 缺失 ⇒ 用 index 命中且指纹一致；多处命中 / 指纹不符 / 找不到 ⇒ **不执行**。
-  index 只作为 uuid 失效后的兜底，且必须指纹一致（cell 插入/删除后 index 会指到别的代码，luna P1-3）。
+  `target` 在创建时捕获 `{uuid, index}`：触发时 uuid 命中 ⇒ 用；uuid 缺失 ⇒ 用 index 命中（含懒渲染后）；
+  **不验内容指纹**（2026-11-20 用户收窄：任务设好后 cell 内容可能正当变化，典型是 hub URL 换域名，指纹会把
+  它判成「跑错代码」而拒绝执行）；位置失效（找不到）⇒ **不执行**。index 只剩 uuid 失效后的兜底。
 - **「启动运行时」**：Kaggle **没有**独立开机按钮，跑 cell 就是开机（会话懒启动）。所以 `run-cell` / `run-all`
   同时承担「启动 + 执行」；面板文案写「运行 cell（必要时自动开会话）」，不假装有开机键。
 - **停止**：外层帧点 `button[aria-label="Stop session"]`；若 2s 内出现 `[role="dialog"]`，找其中
@@ -770,8 +770,8 @@ attach，frame 回 `ready` 并在 `.jp-Notebook` 渲染后补 `status`（同一 
 1. `scheduler`（纯函数 `nextFireAt` / `shouldCatchUp`，注入 now）+ occurrence claim（1s 沉淀 + 重读）+
    30s watchdog + 倒计时取消；
 2. host `stopSession`（站点确认弹窗、停前 drain、10 min grace、绑定 `sessionAtCreate`）；
-3. 目标解析：uuid → index + fingerprint → **fail closed**；切 run / 换会话不执行；
-4. 用例：DST 春跳/秋回、跨日、迟到策略、两个标签同 occurrence 只执行一次、target 指纹不符不执行。
+3. 目标解析：uuid → index（不验指纹）→ 找不到 **fail closed**；切 run / 换会话不执行；
+4. 用例：DST 春跳/秋回、跨日、迟到策略、两个标签同 occurrence 只执行一次、目标找不到不执行。
 - **必红自查**：把 `stop` 也设成任意迟到可补跑 ⇒ 用例红；去掉 claim 重读 ⇒ 双标签用例红；
   target 只认 index ⇒ 「cell 插入后错跑」用例红。
 
@@ -807,7 +807,7 @@ attach，frame 回 `ready` 并在 `.jp-Notebook` 渲染后补 `status`（同一 
 | `test/diff.test.ts` | 尾锚命中 = 只发后缀；尾部 256 字符变 = `reset`；长度回退 = `reset`；`offset` 跳变（积压丢弃）= reset + `dropped`；空 → 有 → 空 → 有；**尾锚只扫 256 字符（计数器钉住，不随 offset 涨）** |
 | `test/observer.test.ts` | 在 `.cm-content` 打字**不**标 dirty；`.jp-OutputArea` 变标 dirty；折叠/展开只刷渲染集合；虚拟化进出不丢 offset |
 | `test/shipper.test.ts` | 全局 1 MiB/拍；串行；`offsetStart` 连续（错位 ⇒ 不发）；失败块不前进、已成功块前进、重发同 seq 幂等；400/413 停发；409 stale-epoch ⇒ reset；409 writer-conflict ⇒ 被动；**409 + tail 命中 ⇒ 续写（不重发历史）**、tail 不中 ⇒ reset；空 append 只续租；积压 10 MiB ⇒ 只留末尾 1 MiB + `dropped` 标记 |
-| `test/scheduler.test.ts` | 固定 `now` + 固定 TZ 下 `nextFireAt` 正确；1=周一…7=周日；days 不匹配不触发；迟到 ≤10min run 补跑；stop 在 grace 内执行、超过跳过；watchdog 补拍；同一 occurrence 键二次触发被 `claimed` 挡住；DST 春跳 02:30 不执行、秋回 01:30 只执行一次；target 指纹不符 / uuid 缺失且 index 指纹不符 ⇒ 不执行 |
+| `test/scheduler.test.ts` | 固定 `now` + 固定 TZ 下 `nextFireAt` 正确；1=周一…7=周日；days 不匹配不触发；迟到 ≤10min run 补跑；stop 在 grace 内执行、超过跳过；watchdog 补拍；同一 occurrence 键二次触发被 `claimed` 挡住；DST 春跳 02:30 不执行、秋回 01:30 只执行一次；target 找不到 ⇒ 不执行（不验内容指纹） |
 | `test/kaggle-frame.test.ts` | fixture 里 `cells()` 拿到 3 个；`outputText` 收 stdout + stderr 且顺序不乱；折叠 cell 仍能读 `sourceText`；非 active cell `runCell` 先选中；`command('hide-all-cell-code')` 走面板项 |
 | `test/kaggle-command-ladder.test.ts` | 只有隐藏 `li` 时能执行；有可见按钮时优先用它；两级都无效 ⇒ `{ok:false}`（注入 isVisible） |
 | `test/bridge.test.ts` | 错 origin / 错 nonce ⇒ 忽略；握手后 cmd/result 对账；iframe 重载 = 新 nonce；无 host 时 referrer session 仍搬运 |
@@ -861,7 +861,7 @@ attach，frame 回 `ready` 并在 `.jp-Notebook` 渲染后补 `status`（同一 
 - [ ] 定时：倒计时可取消；stop 在 grace 内执行、超过跳过；**隐藏标签页也按预授权执行**（不静默 skipped）；
       后台标签页恢复后不误发。
 - [ ] **跨标签只执行一次**：两个标签同 occurrence 只有一方 `claimed` 并执行；刷新 / 睡眠 / DST 边界按 §3.3 的
-      明文规则工作；target 指纹不符或会话已变 ⇒ 不执行且原因可见。
+      明文规则工作；target 找不到或会话已变 ⇒ 不执行且原因可见。
 - [ ] 不发 POST 到非回环地址；不从页面 `fetch`（只 `GM_xmlhttpRequest`）；不覆写站点 `onclick`；不永久改站点 DOM。
 - [ ] 自动清空**不在最近 10s 有输入 / 有非折叠选区 / 编辑器聚焦时触发**（不会抢走选区），积压未排空时
       跳过；延期可见（60s 提示、8 MiB 红条 + 一键「立即保存并清空」）；有用例钉住。
@@ -1088,7 +1088,7 @@ claim（`bnc:occurrences`，`claimSettleMs` 沉淀窗后转正；落定 claim �
 停会话·中断内核），早于现在就是**明天**的那一拍；到点执行**一次即消耗**（成功/失败/取消/过期都从任务表
 移除，occurrence 留 7 天），添加 stop-session 必须先勾「我确认到点会停止会话」。运行类绑 notebook
 （`owner/slug`）、停止/中断绑创建时的会话（含页面标签），到点前换页/换 run 一律 skipped（fail closed）。
-`run-cell` 的目标在创建时用 `captureTarget` 捕获（uuid/index/前 200 字符指纹），执行时指纹不符不跑；
+`run-cell` 的目标在创建时用 `captureTarget` 捕获（uuid/index），执行时按位置定位、不验内容；
 目标 cell **顶部挂醒目徽标**（`setScheduleMarks` 下发到帧内，amber 横幅 + 整段描边，虚拟化重渲染由
 observer 补回；任务删除/执行后徽标随之消失）。到点前 **10 分钟**起，面板提示区每秒刷新
 `⏰ 距<动作>还有 M:SS（HH:MM）`（`setNext`；>10 分钟不占地方，到点变成「即将开始」）。

@@ -65,7 +65,7 @@ function clearActive(doc: Document): void {
 }
 
 describe('frame 命令：定时任务的 cell 目标', () => {
-  it('captureTarget 抓当前 code cell（uuid/index/前 200 字符指纹）', async () => {
+  it('captureTarget 抓当前 code cell（uuid/index，不抓内容指纹）', async () => {
     const { doc, deps } = makeDeps()
     clearActive(doc)
     const cell = doc.querySelector<HTMLElement>('.jp-CodeCell')
@@ -74,13 +74,12 @@ describe('frame 命令：定时任务的 cell 目标', () => {
 
     const cap = await runFrameCommand(deps, 'captureTarget')
     expect(cap.ok).toBe(true)
-    const target = cap.value as { uuid: string; index: number; fingerprint: string }
+    const target = cap.value as { uuid: string; index: number }
     expect(target.uuid).toBeTruthy()
     expect(Number.isInteger(target.index)).toBe(true)
-    expect(target.fingerprint).toMatch(/^[0-9a-f]{16}$/)
   })
 
-  it('runCell：指纹一致才跑；uuid 缺失按 index + 指纹兜底；指纹不符/找不到 ⇒ 不跑', async () => {
+  it('runCell：按 uuid 跑（内容变了也跑）；uuid 缺失按 index 兜底；找不到 ⇒ 不跑', async () => {
     const { doc, deps } = makeDeps()
     clearActive(doc)
     const cell = doc.querySelector<HTMLElement>('.jp-CodeCell')!
@@ -91,24 +90,15 @@ describe('frame 命令：定时任务的 cell 目标', () => {
       cell.classList.add('jp-mod-executing')
     })
     const cap = await runFrameCommand(deps, 'captureTarget')
-    const target = cap.value as { uuid: string; index: number; fingerprint: string }
+    const target = cap.value as { uuid: string; index: number }
 
     expect((await runFrameCommand(deps, 'runCell', target)).ok).toBe(true)
-    expect(
-      (
-        await runFrameCommand(deps, 'runCell', {
-          index: target.index,
-          fingerprint: target.fingerprint,
-        })
-      ).ok,
-    ).toBe(true)
+    expect((await runFrameCommand(deps, 'runCell', { index: target.index })).ok).toBe(true)
 
-    const changed = await runFrameCommand(deps, 'runCell', {
-      ...target,
-      fingerprint: '0'.repeat(16),
-    })
-    expect(changed.ok).toBe(false)
-    expect(changed.reason).toContain('指纹')
+    // 旧任务里残留的 fingerprint（内容已变）不再参与判断 ⇒ 照样执行
+    expect(
+      (await runFrameCommand(deps, 'runCell', { ...target, fingerprint: '0'.repeat(16) })).ok,
+    ).toBe(true)
 
     const missing = await runFrameCommand(deps, 'runCell', { uuid: 'no-such-cell', index: 999 })
     expect(missing.ok).toBe(false)

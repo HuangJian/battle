@@ -29,11 +29,10 @@ import {
 
 export type ScheduleAction = 'run-cell' | 'run-all' | 'stop-session' | 'interrupt'
 
-/** 创建时捕获的 cell 目标（执行时验指纹，绝不跑错代码）。 */
+/** 创建时捕获的 cell 目标（只认位置，不验内容：任务设好后 cell 内容可能正当变化）。 */
 export interface ScheduleTarget {
   uuid?: string
   index?: number
-  fingerprint?: string
 }
 
 export interface SchedulerTask {
@@ -235,7 +234,6 @@ function sanitizeTarget(o: Record<string, unknown>): ScheduleTarget {
   const t: ScheduleTarget = {}
   if (typeof o.uuid === 'string' && o.uuid) t.uuid = o.uuid
   if (typeof o.index === 'number' && Number.isInteger(o.index)) t.index = o.index
-  if (typeof o.fingerprint === 'string' && o.fingerprint) t.fingerprint = o.fingerprint
   return t
 }
 
