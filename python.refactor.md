@@ -1694,6 +1694,17 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      ⇒ 该文件宽签名 **2 → 0**、全仓 132 → **130**。下一批按同一手法（先有装配点，再收签名）：
      `remote/plan_handoff.open_run_context` 35、`remote/run_loop.run_standalone` 29、
      `hub/queue_claims` 的 lease 族（`LeaseSpec`）。
+     **2026-11-20 复核（下一个接手的人先看这三条）**：
+     ① `open_run_context` / `run_standalone` 是**带缺省值的旋钮袋**（云机 A 层 eval / 放大 /
+     轮换 / 补传 / outbox 各一簇，调用方只传子集）⇒ 不能照抄 `RoundSpec`：先定「怎么表达
+     只覆盖几个旋钮」（`dataclasses.replace` 基准 + 覆盖，还是 builder），否则调用点会为了
+     传三个参数造一整个对象。
+     ② `trainer/batch_runner._settle_unit`（15 参，全部来自 `_UnitLanes` 自己的字段 ⇒ 本该是
+     `self.ledger(threads=…)` 一个对象）**卡在 LOC 999/1000** —— 加数据类就超预算，必须先拆
+     `trainer/batch_runner.py`（与 `worker/iter_rollout.py` 同一个前置条件）。
+     ③ 它的闭集判据已经写成守卫（`tests/trainer/test_batch_runner_phases.py::SETTLE_PARAMS`
+     + 调用点逐名对齐），所以收签名时**要改的是那条判据的锚点**（改成「`UnitLedger` 的字段集
+     + `_settle_unit` 只收一个对象」），而不是删掉守卫。
    * **P0-5 剩余全局状态**：`worker/eval_exec._EXECUTORS` 与 `worker/eval_arbiter._ARBITER`
      两个单例仍在（G2 只管 `common/**`）；`biz/reward_context._current` 按 §P0-5 原裁定
      保留（每 iter 整体替换的加载期上下文，不是隐藏可变状态）。
