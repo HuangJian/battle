@@ -25,6 +25,68 @@
 
 ---
 
+## §229 P0-3 第一/二刀：`EvalRound` 的 40 个关键字参数 → `RoundSpec`；`settle_task` 的 9 个结果位 → `SettleOutcome`（2026-11-20）
+
+**触发**：`python.refactor.md` §P0-3 的剩余清单里最大的一处 ——
+`worker/eval_arbiter.py::EvalRound.__init__` 有 **40 个关键字参数**（`seq/it/iter_id/…/log`）。
+那些值本来就住在两处：派发器配置（`EvalDispatcher.self`）与每轮的派生状态
+（`trainer/eval_dispatch._EvalRun`）。构造时又被逐个摊开一次 ⇒ 「加一个装载值」要改四处
+（`_EvalRun` 字段 / 构造调用 / `__init__` 形参 / 赋值），漏一处就是运行期 `AttributeError`，
+而 40 个名字在调用点根本读不过来（现场：`_eval_register` 里 45 行的 `EvalRound(...)` 块）。
+
+**修法（与 `PublishSpec` / `TrainSpec` 同法）**
+
+1. `RoundSpec`（frozen + kw_only，40 字段）是**唯一**装载对象；`EvalRound.__init__(spec)` 只收它，
+   轮内可变状态（锁 / 节点表 / 计数 / `clock`）照旧在构造里现建，字段名逐个照抄 ⇒
+   **执行层与测试读的 `rnd.total` / `rnd.pending` 一个没变**（`eval_exec`、`eval_self_rescue`、
+   `object.__new__(EvalRound)` 的两个测试夹具都不用改）。
+2. 装配点 = `trainer/eval_dispatch._round_spec(r, meta_ok, record_failed_meta)`：值就住在那儿
+   （派发器配置 + `_EvalRun`），**不是**在 `eval_arbiter` 里再摊一次。`_eval_register` 因此少
+   了一半的开头解包，只剩 `arb/execs/meta_path/snapshot_path/local_slots/reused/it/_log`。
+3. 顺带把注入的回调**按形状声明**（`RowBuilder` / `LogFn` / `MetaOkHook` / `FailedMetaHook`
+   四个别名）：`worker/eval_arbiter.py` 的 `Any` 从 **21 → 16**（`tests/golden/any_baseline.json`
+   同步调小）。
+4. 第二刀 `SettleOutcome`（frozen + kw_only，8 位）：`settle_task` 从 `grant` + 10 个关键字
+   参数（`ok/manifest/err/transient/task_lost/err_errno/msg_head/**wall_sec**/node_alive`）
+   收成 `(grant, outcome)`。**`wall_sec` 是死参**：调用方算了递进来，仲裁体里一次都没读
+   （它只喂 `_record_and_log`，那一份仍由调用方自己留着）⇒ 直接删，不进对象。
+
+**读数**：`worker/eval_arbiter.py` 的宽签名 **2 → 0**（`tests/test_python_shape_budget.py`
+的 `WIDE_FUNCS_BASELINE` 条目**删除**，不是留 0）；全仓宽签名 **132 → 130**（86 文件）。
+LOC（门禁口径）：`eval_arbiter` 915 → **920**、`eval_dispatch` 716 → **710**、`eval_exec`
+340 → **337** —— 两个数据类（62 行声明）换掉 40 行形参 + 10 行结果形参，净增 5 行是"契约写在
+类体里"的代价，换来调用点读得懂。
+
+**证明**（守 `tests/worker/test_eval_round_spec.py`，6 条）：
+
+| 守卫 | 判据 | 旧码会红吗（实测） |
+|---|---|---|
+| `test_round_constructor_takes_one_object` | `inspect.signature(EvalRound)` = `(self, spec)` | **红**：旧 40 参 |
+| `test_round_spec_field_table_is_frozen` | 字段名元组逐字冻结（改契约必须改表） | — |
+| `test_round_spec_is_keyword_only_and_frozen` | 全字段 `kw_only` + `FrozenInstanceError` | — |
+| `test_round_builds_its_runtime_state_from_the_spec` | `pending` 是 `todo` 的**副本**（不共享）、`node_caps[local]`、钟取自 `window`+`post_budget`、`log()` 真转发 | — |
+| `test_production_assembles_the_spec_in_one_place` | 生产面构造 `RoundSpec` 的文件集合 == `{trainer/eval_dispatch.py}` | — |
+| `test_production_passes_one_object_to_eval_round` | 生产面 `EvalRound(...)` 只传 1 个位置参数、0 关键字 | **红**：旧调用 `args=0 kw=40` |
+
+**两处门禁自己先红，改的是源头不是基线**：① G6 抑制符 —— 测试里两个 `# type: ignore`
+（位置传参 + 属性赋值）换成「问 `dataclasses.fields(...).kw_only`」与「直接调
+`spec.__setattr__`」，**零抑制**；② G5 私有断言 —— 回调接线原来是断言 `rnd._row_builder is …`
+等 7 个私有名，改成只验带公开入口的那个（`rnd.log()` 真转发）+ `rnd.local_fn`（公开），
+其余私有名不许在测试里被摸。
+
+**否决**：① 把 `EvalRound` 自己变成 `@dataclass`（40 字段全在类体）—— 综合出来的 `__init__`
+不是 AST 里的 `FunctionDef` ⇒ 形状门禁**数不到它**，等于"让门禁看不见代码"，正是本仓最不许的
+那种绿；② `__init__` 里 `for f in fields(spec): setattr(self, f.name, …)` —— mypy 推不出属性类型，
+要么补 40 行类级注解（比现在更长），要么全仓读点变成 `Any`；③ 把 40 个字段按语义再切三个小对象
+（路径 / 限额 / 回调）—— `rnd.eval_dir` 这类读点有 230 处，改路径就是改执行层契约，与本次
+「只动构造面」的目的相反；④ 保留 `wall_sec` 进 `SettleOutcome`（"以后可能有人读"）—— 死参就是
+死参，要读时再加一行。
+
+**教训**：参数对象的收益不在行数，而在**装配点唯一**：`RoundSpec` 的值只有 `_round_spec` 一处
+来源，改字段名时编译器会指到唯一的那行；40 个关键字参数则让"谁给了这个值"无从追。同一文件里
+第二处宽签名（`settle_task`）顺手收掉，是因为它和第一处共享同一个原因（执行层把一组同位值摊开），
+分成两刀做只会让 `eval_arbiter` 的基线一半是旧形状。
+
 ## §228 门禁不能读本机训练产物：4 条 spawn 用例改「零权重现造」+ f4 容差改成逐位（2026-11-20）
 
 **触发**：`bun run check` 在干净树上稳定红 5 条——`export-rl-rollout-opening`(3) +

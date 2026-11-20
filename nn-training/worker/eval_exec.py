@@ -20,7 +20,7 @@ import common.distribution
 import common.task_client
 import common.weights_client
 from common import runtime
-from worker.eval_arbiter import LOCAL_NODE, EvalRound, Grant, eval_arbiter
+from worker.eval_arbiter import LOCAL_NODE, EvalRound, Grant, SettleOutcome, eval_arbiter
 
 
 @dataclass
@@ -191,10 +191,7 @@ class EvalExecutors:
                 )
                 grant.round.settle_task(
                     grant,
-                    ok=False,
-                    err=f"{type(e).__name__}: {str(e)[:160]}",
-                    transient=False,
-                    node_alive=False,
+                    SettleOutcome(ok=False, err=f"{type(e).__name__}: {str(e)[:160]}"),
                 )
 
     def _local_loop(self, _nid: str, stop: threading.Event) -> None:
@@ -214,10 +211,11 @@ class EvalExecutors:
                 )
                 grant.round.settle_task(
                     grant,
-                    ok=False,
-                    err=f"{type(e).__name__}: {str(e)[:160]}",
-                    transient=False,
-                    node_alive=self.node_alive_for(grant.round),
+                    SettleOutcome(
+                        ok=False,
+                        err=f"{type(e).__name__}: {str(e)[:160]}",
+                        node_alive=self.node_alive_for(grant.round),
+                    ),
                 )
 
     @staticmethod
@@ -234,10 +232,7 @@ class EvalExecutors:
         if nd is None:
             rnd.settle_task(
                 grant,
-                ok=False,
-                err="node gone（POST 后节点被剔除）",
-                transient=True,
-                node_alive=False,
+                SettleOutcome(ok=False, err="node gone（POST 后节点被剔除）", transient=True),
             )
             return
         task = grant.task
@@ -313,13 +308,14 @@ class EvalExecutors:
         wall_sec = round(time.time() - grant.started, 3)
         accepted = rnd.settle_task(
             grant,
-            ok=ok,
-            manifest=manifest,
-            err=err,
-            transient=transient,
-            task_lost=task_lost,
-            wall_sec=wall_sec,
-            node_alive=self.node_alive_for(rnd),
+            SettleOutcome(
+                ok=ok,
+                manifest=manifest,
+                err=err,
+                transient=transient,
+                task_lost=task_lost,
+                node_alive=self.node_alive_for(rnd),
+            ),
         )
         if accepted:
             self._record_and_log(rnd, grant, manifest, wall_sec)
@@ -371,14 +367,15 @@ class EvalExecutors:
         wall_sec = round(time.time() - grant.started, 3)
         accepted = rnd.settle_task(
             grant,
-            ok=ok,
-            manifest=manifest,
-            err=err,
-            transient=transient,
-            err_errno=err_errno,
-            msg_head=msg_head,
-            wall_sec=wall_sec,
-            node_alive=self.node_alive_for(rnd),
+            SettleOutcome(
+                ok=ok,
+                manifest=manifest,
+                err=err,
+                transient=transient,
+                err_errno=err_errno,
+                msg_head=msg_head,
+                node_alive=self.node_alive_for(rnd),
+            ),
         )
         if accepted:
             self._record_and_log(rnd, grant, manifest, wall_sec)

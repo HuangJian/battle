@@ -8531,3 +8531,23 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   —— 用 monkeypatch 把 `GetCurrentProcess.restype` 改成 `HANDLE`（与 paddle 同款），断言
   `snapshot()` 仍有真读数且不带 `probe_errors['rss']`。改前**确定性红**（报错原文与现场逐字一致），
   改后绿；全量门禁 0 failed（103s），带采样插件的全量里**一条探针失败痕迹都没有**。
+## §2026-11-20-eval-round-spec（P0-3 的参数对象：装载值可以收成一个对象，装配点只能有一个）
+
+- **背景**：`python.refactor.md` §P0-3 里最大的宽签名 = `worker/eval_arbiter.EvalRound.__init__`
+  的 **40 个关键字参数**。这些值本来就住在派发器配置与 `_EvalRun` 里，构造时又被摊开一次 ⇒
+  加一个装载值要改四处，漏一处就是运行期 `AttributeError`。
+- **决定**：① `RoundSpec`（frozen + kw_only）是唯一装载对象，`EvalRound(spec)` 只收它；轮内可变
+  状态仍由 `__init__` 现建（执行层读的 `rnd.total` / `rnd.pending` 一个没变）。② 装配点唯一 =
+  `trainer/eval_dispatch._round_spec`（值住哪儿就哪儿装配，不在 `eval_arbiter` 里再摊一次）。
+  ③ 注入回调按形状声明（`RowBuilder`/`LogFn`/`MetaOkHook`/`FailedMetaHook`），`Any` 21 → 16。
+  ④ 同文件 `EvalRound.settle_task` 的 9 个结果位（含从没人读的 `wall_sec`）→ `SettleOutcome`，
+  死参直接删。⇒ `worker/eval_arbiter.py` 宽签名 **2 → 0**、全仓 132 → 130。
+- **被否决**：① 把 `EvalRound` 自己做成 `@dataclass`（40 字段全在类体）—— 综合出的 `__init__`
+  不是 AST 里的 `FunctionDef`，形状门禁数不到它 = **让门禁看不见代码**；② `for f in fields(spec):
+  setattr(...)` 复制 —— mypy 推不出属性类型，要么补 40 行类级注解要么全仓退成 `Any`；
+  ③ 再按语义切三个小对象 —— `rnd.eval_dir` 这类读点 230 处，改路径 = 改执行层契约；
+  ④ 保留 `wall_sec`「以后可能有人读」—— 死参就是死参。
+- **护栏**：`tests/worker/test_eval_round_spec.py`（6 条：单对象构造 / 字段表冻结 / frozen+kw_only /
+  状态现建 / 装配点唯一 / 生产调用只传一个位置参数；后两条对 HEAD 实测红：旧 40 参、旧调用
+  `kw=40`）。`WIDE_FUNCS_BASELINE` 删条目（不是留 0）、`any_baseline` 21 → 16。
+- **全文**：`docs/nn/engineering.md §229`。

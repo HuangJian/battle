@@ -118,7 +118,10 @@ WIDE_FUNCS_BASELINE = {
     "worker/bc_eval.py": 2,
     "worker/breaker.py": 1,
     "worker/cmd.py": 1,
-    "worker/eval_arbiter.py": 2,
+    # 2026-11-20（python.refactor.md P0-3 第一/二刀）：`EvalRound.__init__` 的 40 个关键字
+    # 参数收进 `RoundSpec`（装配点 = `trainer/eval_dispatch._round_spec`），`settle_task`
+    # 的 9 个结果位（含一个从没人读的 `wall_sec`）收进 `SettleOutcome` ⇒ **条目删除，
+    # 本文件宽签名归零**。守 `tests/worker/test_eval_round_spec.py`。
     "worker/eval_local.py": 1,
     "worker/eval_track.py": 1,
     "worker/events.py": 2,

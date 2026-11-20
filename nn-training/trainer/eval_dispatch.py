@@ -39,7 +39,13 @@ from remote import weights_standard
 from worker import node_identity
 from worker.agent_meta import record_agent_meta as _record_agent_meta
 from worker.agent_meta import record_eval_failed
-from worker.eval_arbiter import EvalRound, eval_arbiter
+from worker.eval_arbiter import (
+    EvalRound,
+    FailedMetaHook,
+    MetaOkHook,
+    RoundSpec,
+    eval_arbiter,
+)
 from worker.eval_exec import eval_executors
 
 # 同 queue.py：Windows 下隐藏本地评估子进程的控制台窗口（避免反复弹黑窗抢焦点）。
@@ -258,28 +264,64 @@ class EvalDispatcher:
         return True
 
 
+    def _round_spec(
+        self, r: _EvalRun, meta_ok: MetaOkHook, record_failed_meta: FailedMetaHook
+    ) -> RoundSpec:
+        """一轮 eval 的装载值：派发器配置 + `_EvalRun` 派生值 + 本模块常量。
+
+        这是 `RoundSpec` 的**唯一**装配点（P0-3）：`EvalRound.__init__` 只收这一个对象。
+        两个 meta 回调由 `_eval_register` 现造（它们捕获本轮的 meta 路径与日志），所以
+        当参数传进来；其余值就在这儿，不再摊成 40 个关键字参数。
+        """
+        return RoundSpec(
+            seq=r.arb.next_seq(),
+            it=self.it,
+            iter_id=self.iter_id,
+            eval_iter_id=r.eval_iter_id,
+            wver=r.wver,
+            key16=r.key16,
+            course_fp=r.course_fp,
+            args=self.args,
+            bun=self.bun,
+            eval_dir=r.eval_dir,
+            eval_jsonl=r.eval_jsonl,
+            meta_path=r.meta_path,
+            task_timeout=r.task_timeout,
+            window=r.window,
+            post_budget=r.post_budget,
+            snapshot_path=r.snapshot_path,
+            local_slots=r.local_slots,
+            fallback_only=self.local_fallback_only,
+            reserved=r.reserved,
+            local_gate=self.local_gate,
+            fail_streak_max=r.fail_streak_max,
+            soft_streak_max=r.soft_streak_max,
+            req_scope=r.req_scope,
+            total=r.total,
+            pairs=r.pairs,
+            todo=r.todo,
+            weights_kind=EVAL_WEIGHTS_KIND,
+            weights_bytes=None,
+            attempts_max=EVAL_TASK_ATTEMPTS,
+            attempts_transient_max=EVAL_TASK_ATTEMPTS_TRANSIENT,
+            record_retry_max=EVAL_RECORD_RETRY_MAX,
+            reuse_node=REUSE_NODE,
+            row_builder=eval_row,
+            append_row=append_jsonl,
+            meta_ok=meta_ok,
+            record_failed_meta=record_failed_meta,
+            fail_recorder=record_eval_failed,
+            local_fn=run_local_eval_game,
+            abort_scope=lambda: common.distribution.abort_active_requests(r.req_scope),
+            log=r.log,
+        )
+
     def _eval_register(self, r: _EvalRun) -> None:
         """登记 EvalRound；命中局先预落账，再按模式预孵本机池。"""
-        args, bun, it, iter_id = self.args, self.bun, self.it, self.iter_id
         arb, execs = r.arb, r.execs
-        eval_dir, eval_jsonl, meta_path = r.eval_dir, r.eval_jsonl, r.meta_path
-        eval_iter_id, wver, key16, course_fp = (
-            r.eval_iter_id,
-            r.wver,
-            r.key16,
-            r.course_fp,
-        )
-        task_timeout, window, post_budget = r.task_timeout, r.window, r.post_budget
-        snapshot_path, local_slots = r.snapshot_path, r.local_slots
-        reserved, local_gate = r.reserved, self.local_gate
-        fail_streak_max, soft_streak_max = r.fail_streak_max, r.soft_streak_max
-        req_scope, total, pairs, todo, reused = (
-            r.req_scope,
-            r.total,
-            r.pairs,
-            r.todo,
-            r.reused,
-        )
+        meta_path, snapshot_path = r.meta_path, r.snapshot_path
+        local_slots, reused = r.local_slots, r.reused
+        it = self.it
         _log = r.log
         def _meta_ok(nid: str, manifest: dict, task, wall_sec, win: int) -> None:
             """成功局的采样机健康行。
@@ -326,48 +368,7 @@ class EvalDispatcher:
                     f": {type(e).__name__}: {str(e)[:160]}"
                 )
 
-        rnd = EvalRound(
-            seq=arb.next_seq(),
-            it=it,
-            iter_id=iter_id,
-            eval_iter_id=eval_iter_id,
-            wver=wver,
-            key16=key16,
-            course_fp=course_fp,
-            args=args,
-            bun=bun,
-            eval_dir=eval_dir,
-            eval_jsonl=eval_jsonl,
-            meta_path=meta_path,
-            task_timeout=task_timeout,
-            window=window,
-            post_budget=post_budget,
-            snapshot_path=snapshot_path,
-            local_slots=local_slots,
-            fallback_only=self.local_fallback_only,
-            reserved=reserved,
-            local_gate=local_gate,
-            fail_streak_max=fail_streak_max,
-            soft_streak_max=soft_streak_max,
-            req_scope=req_scope,
-            total=total,
-            pairs=pairs,
-            todo=todo,
-            weights_kind=EVAL_WEIGHTS_KIND,
-            weights_bytes=None,
-            attempts_max=EVAL_TASK_ATTEMPTS,
-            attempts_transient_max=EVAL_TASK_ATTEMPTS_TRANSIENT,
-            record_retry_max=EVAL_RECORD_RETRY_MAX,
-            reuse_node=REUSE_NODE,
-            row_builder=eval_row,
-            append_row=append_jsonl,
-            meta_ok=_meta_ok,
-            record_failed_meta=_record_failed_meta,
-            fail_recorder=record_eval_failed,
-            local_fn=run_local_eval_game,
-            abort_scope=lambda: common.distribution.abort_active_requests(req_scope),
-            log=_log,
-        )
+        rnd = EvalRound(self._round_spec(r, _meta_ok, _record_failed_meta))
         arb.register(rnd)
         # 命中局预落账：行照落（进 `landed` 收工口径），但不占节点、不碰网络；
         # `seen` 同步登记，否则收官行会报「认领≠落盘」（那是给丢掉的真局用的告警）。
