@@ -35,6 +35,7 @@ import json
 from functools import cache
 from pathlib import Path
 
+from tests.helpers import source_scan
 from tests.helpers.budget import sanity_floor
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,7 +80,12 @@ def _count_private_targets(src: str) -> int:
 def _scan() -> dict[str, int]:
     counts: dict[str, int] = {}
     for p in _iter_face_py():
-        n = _count_private_targets(p.read_text(encoding="utf-8", errors="replace"))
+        # 廉价预筛：计数只认 `monkeypatch.setattr/delattr(...)` ⇒ 源码里必有这个名字。
+        # （2026-11-20 实测本段 2.6s → 1.1s，判据不变。）
+        src = source_scan.read_text(str(p), "replace")
+        if "monkeypatch" not in src:
+            continue
+        n = _count_private_targets(src)
         if n:
             counts[p.relative_to(ROOT).as_posix()] = n
     return counts

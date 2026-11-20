@@ -22,13 +22,14 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { unpackContainer } from '../../tools/sim/pack-container'
 import { METRICS_COLUMN_NAMES } from '../../tools/sim/export-rl-rollout'
+import { writeZeroStudentWeights } from './zero-student-weights'
 
-const WEIGHTS = 'nn-training/weights/g4-mobility/g4-mobility.it380.20261114-194719.json'
 const LEVEL = 'nn-training/levels/classic35-safe-base.jsonc'
 const MAX_TICKS = '600'
 const SHARD = 'rl_s0_seed1'
 
 let root = ''
+let weightsPath = ''
 let fullShard = ''
 let replayShard = ''
 
@@ -48,7 +49,7 @@ function runRollout(outDir: string, extra: string[], stage = '0'): void {
       '--lives-override',
       '3',
       '--weights',
-      WEIGHTS,
+      weightsPath,
       ...extra,
     ],
     { cwd: process.cwd(), stdout: 'pipe', stderr: 'pipe' },
@@ -71,6 +72,8 @@ function sameBytes(a: string, b: string): boolean {
 
 beforeAll(() => {
   root = mkdtempSync(join(tmpdir(), 'rollout-replay-'))
+  // 权重夹具现造（零填充生产架构）：`nn-training/weights/**` 是 gitignore。
+  weightsPath = writeZeroStudentWeights(root)
   runRollout(join(root, 'full'), [])
   runRollout(join(root, 'replay'), ['--corpus-fmt', 'replay'])
   fullShard = join(root, 'full', SHARD)
@@ -161,8 +164,11 @@ describe('export-rl-rollout: --corpus-fmt=replay', () => {
     for (const [name, v] of cols) {
       const j = METRICS_COLUMN_NAMES.indexOf(name)
       expect(j).toBeGreaterThanOrEqual(0)
-      // f4 存储 vs manifest 的 JS number（终局行 = metrics 最后一行）。
-      expect(Math.abs(at(rows - 1, j) - v)).toBeLessThan(1e-6)
+      // f4 存储 vs manifest 的 JS number（终局行 = metrics 最后一行）：写入是 Float32
+      // 舍入，读回来必须**逐位**等于 `Math.fround(v)`。绝对值容差 1e-6 在 |v| > ~8 时
+      // 物理上做不到（f4 相对精度 ~1.2e-7）——2026-11-20 换零权重夹具后 score 列
+      // 撞出 1.35e-6，说明旧写法只是在“本机默认权重恰好小”时绿。
+      expect(at(rows - 1, j) - Math.fround(v)).toBe(0)
     }
   })
 
@@ -188,7 +194,7 @@ describe('export-rl-rollout: --corpus-fmt=replay', () => {
         '--seeds',
         '1',
         '--weights',
-        WEIGHTS,
+        weightsPath,
         '--lives-override',
         '3',
         '--corpus-fmt',

@@ -18,14 +18,15 @@ import { describe, it, expect, beforeAll, afterAll } from 'bun:test'
 import { cpSync, mkdtempSync, readFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { writeZeroStudentWeights } from './sim/zero-student-weights'
 
 const REPO_ROOT = join(import.meta.dir, '..')
-const WEIGHTS = 'nn-training/weights/g4-mobility/g4-mobility.it380.20261114-194719.json'
 const MAX_TICKS = '600'
 const SHARD = 'rl_s0_seed1'
 const OBS_FILES = ['obs.npy', 'scalars.npy', 'extra.npy'] as const
 
 let root = ''
+let weightsPath = ''
 let shardA = ''
 let shardB = ''
 let shardC = ''
@@ -47,7 +48,7 @@ function runRollout(outDir: string): void {
       '--lives-override',
       '3',
       '--weights',
-      WEIGHTS,
+      weightsPath,
       '--corpus-fmt',
       'replay',
     ],
@@ -65,6 +66,8 @@ function convTask(shardDir: string, outDir: string): string[] {
 
 beforeAll(() => {
   root = mkdtempSync(join(tmpdir(), 'conv-serve-'))
+  // 权重夹具现造（零填充生产架构）：`nn-training/weights/**` 是 gitignore。
+  weightsPath = writeZeroStudentWeights(root)
   runRollout(join(root, 'replay'))
   const src = join(root, 'replay', SHARD)
   shardA = join(root, 'a')

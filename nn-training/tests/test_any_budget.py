@@ -32,9 +32,11 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from functools import cache
 from pathlib import Path
 
+from tests.helpers import source_scan
 from tests.helpers.budget import sanity_floor
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,7 +72,12 @@ def _count_any(src: str) -> int:
 def _scan() -> dict[str, int]:
     counts: dict[str, int] = {}
     for p in _iter_face_py():
-        n = _count_any(p.read_text(encoding="utf-8", errors="replace"))
+        # 廉价预筛：`Any` 的两种形态（`Any` / `*.Any`）都在源码里留这个标识符。
+        # 373 个生产文件里 197 个提到它（2026-11-20 实测 1.8s → 1.1s）。
+        text = source_scan.read_text(str(p), "replace")
+        if "Any" not in text:
+            continue
+        n = _count_any(text)
         if n:
             counts[p.relative_to(ROOT).as_posix()] = n
     return counts
@@ -121,11 +128,19 @@ def test_scan_floor() -> None:
     assert total >= sanity_floor(_baseline()), f"只数到 {total} 处 Any，扫描入口可能坏了"
 
 
+#: 「`Any` 被改名引入」的廉价预筛（`Any as A` 只有在 import 里才会出现）。
+#: 全仓 1.8s 的全量解析里这一半本来是重复付的（`_scan()` 刚解析过同一批文件）。
+_ANY_ALIAS_HINT = re.compile(r"\bAny\s+as\s+\w+")
+
+
 def test_any_is_not_aliased() -> None:
     """`from typing import Any as A` 会让上面两个判据同时失效 —— 单独拦掉。"""
     offenders: list[str] = []
     for p in _iter_face_py():
-        tree = ast.parse(p.read_text(encoding="utf-8", errors="replace"))
+        text = source_scan.read_text(str(p), "replace")
+        if _ANY_ALIAS_HINT.search(text) is None:
+            continue
+        tree = ast.parse(text, filename=str(p))
         for node in ast.walk(tree):
             if not isinstance(node, ast.ImportFrom):
                 continue

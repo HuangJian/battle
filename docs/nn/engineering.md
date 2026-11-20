@@ -25,6 +25,104 @@
 
 ---
 
+## §228 门禁不能读本机训练产物：4 条 spawn 用例改「零权重现造」+ f4 容差改成逐位（2026-11-20）
+
+**触发**：`bun run check` 在干净树上稳定红 5 条——`export-rl-rollout-opening`(3) +
+`replay-to-shard-serve` / `export-rl-rollout-replay` 的 `beforeAll`（bun 报 unnamed），
+错误全是 `ENOENT nn-training/weights/g4-mobility/g4-mobility.it380.20261114-194719.json`。
+
+**根因**：4 个 test 文件把**被 gitignore 的本机训练 checkpoint** 当夹具（`nn-training/weights/**`
+从不入库）。这不是「这台机器缺文件」的环境问题：任何人都 clone 不出那个文件 ⇒ 门禁的绿
+不取决于代码，取决于谁在本机跑过哪个课程。`verify-replay-corpus-offset` 当时用
+`it.skipIf(!HAS_WEIGHTS)` 挡住了，代价是一条契约在大半机器上**永远不跑**、且 skip 让红变绿
+这件事看起来像修好了。
+
+**修法**：新增 `tests/sim/zero-student-weights.ts`（零填充、确定性、形状 = 当前生产架构
+h=64/d=8/三头+value，宽度跟 `OBS_CHANNELS`/`SCALAR_DIM`），4 个文件改为 beforeAll 现造到
+临时目录；offset 用例**去掉 skipIf**，恢复执行。同一天把 `state-init` / `aim-dodge-buckets`
+两份内联副本也收敛进来（`zeroStudentWeightsText()` 进程内用、`writeZeroStudentWeights()`
+spawn 用）：原先改形状要改三处，漏一处就是“某些用例静默走旧宽度”。
+**不要**把 `tests/fixtures/student-golden*.json` 换成零权重——那些是带具体数值的金标夹具。判据一条没松，反而全仓多了 6 条真跑用例
+（`bun run check`：2840 pass / 5 fail / 17 skip → **2856 pass / 0 fail / 16 skip**）。
+
+**顺手抓到一条假绿**：`metrics.npy` 用例用 `|f4 - manifest| < 1e-6` 比终局行列值。f4 相对
+精度 ~1.2e-7 ⇒ |值| > 8.4 时**物理上不可能**满足；旧夹具下 score 列恰好小才绿，零权重下
+1.35e-6 立刻红。改成 `at(rows-1,j) - Math.fround(v) === 0`（逐位，比容差更强，且与写入
+舍入同源）。
+
+**否决**：①保留 `skipIf` 把红变绿——门禁继续与机器绑定；②commit 一份 365 KB 权重 JSON——
+训练产物进仓库、内容是任意 checkpoint，没人能解释它为什么该是那个值；③缩成 h=16/d=2 瘦身
+夹具——绕掉 `assertRolloutWeightsSchema` 与原生卷积准入，测试跑的就不是生产路径了。
+
+**教训**：测试夹具只能来自仓库内的构造式（代码/种子），不能来自 `gitignore` 的训练产物；
+需要「真权重」的用例应在**部署/评估**侧跑，不在 `bun run check` 里。
+
+## §227 pygate 慢用例第三轮：全仓扫描的「充分预筛」+ `ast.unparse` 替身 + 死端口替身（2026-11-20）
+
+**触发**（用户）：`bun run pygate` 一次全量里 10 条用例 >5s（`conftest.py` 的耗时警告），
+逐条看过去全是**同一件事**：一批预算门禁各自 `rglob("*.py")` → `ast.parse` 全仓，
+而 forkdist 是逐条动态派发 ⇒ 同一个模块的 2–3 条用例常落在不同 worker 上，`@cache` 帮不上，
+同一份 373 个生产文件的解析被付了十来遍。
+
+**读数（同一台 8c/16t，`pytest tests/ e2e/ --forkdist 8`）**：
+
+| 口径 | 改前 | 改后 |
+|---|---|---|
+| pytest 墙钟 | 84.4s（6572 用例） | 63.3 / 67.5 / 70.2 / 78.1s（4 次绿跑；本机负载窗波动大，同代码实测过 63–86s） |
+| pytest CPU（user+sys） | **474.1s** | **387.3s（−18%）** |
+| >5s 警告 | 7 条 / 10 个用例 | **0**（4 次连跑） |
+| 扫描族 call 合计（同口径 16 个模块，`--durations=0` 求和） | **168.6s** | **62.3s（−63%）** |
+| 全部 call 求和 | 510.5s | 376.9s（−26%） |
+
+**修法（全部不改判据，只改「要不要解析这个文件」）**：
+
+1. **充分性文本预筛**（`source_scan` 头部第 1 条建议的落地）：每个门禁的判据都能对应到源码里的
+   一个字面子串，先 `read_text`（共享缓存）再决定 `ast.parse`。命中的文件面：`assert` 53/373、
+   `print` 78/373、`Any` 197/373、`environ|getenv` 55/373、`\bload\b` 53/373、`Thread` 40/373、
+   `Executor` 27/373、宽泛 `except` 148/373（`source_scan.BROAD_EXCEPT_HINT`，G4/G9 共用）、
+   `# noqa|# type: ignore` 91/1029、`name as name` 12/983、私有断言形态 293/610、
+   `monkeypatch` 265/610。**判据是充分的**（合法 Python 里「AST 有它 ⇒ 源码里必有这个字面量」），
+   所以 A/B 对账是逐字节相等而不是「看起来差不多」。
+2. **`ast.unparse` 的廉价替身** `source_scan.dotted_name()`：`test_env_reads_budget` /
+   `test_wall_clock_budget` 原来对**每个** `Call` 节点 `unparse` 一次点分名（每节点一次完整格式化）。
+   两个文件 3.8s → 0.9s。
+3. **合并重复解析**：`test_python_shape_budget` 的 `global` 计数并进 `_shape_counts` 的同一次
+   `ast.walk`；`common/` 的两条可变状态检查并进一份 `_common_state()`。
+4. **`test_forward_names_are_live._facades()`**：门面要求 ≥3 个 `name as name` ⇒ 先 `re.findall`
+   那段字面量，5.8s（解析 1000+ 文件）→ 0.9s（解析 12 个）。
+5. **`test_suppression_budget` 的预筛从 `"type:"` 换成它自己计数的 `_TYPE_IGNORE` 正则**：
+   前者几乎每个类型注解都命中（tokenize 全仓 ~5s）。
+
+**死端口那一条**：`test_channel_switches_hub_url_to_the_alternate_port` 5.41s 不是抖动，是
+`_send` 的 connect 挂在本沙箱黑洞化的 `127.0.0.1:2083` 上、`RelayLink.stop()` 等满 5s join。
+按 §81 的规矩改成**拒绝替身**（`monkeypatch.setattr(rr.http_pool, "request", …)` 抛
+`URLError(ConnectionRefusedError)`）——`_send` 走的是与「本机没人听」逐字相同的分支，
+墙钟 µs 级；另加一条「桩真的被调到」的断言，避免将来通道不再轮询时这条用例靠「什么也没发生」假绿。
+5.41s → **0.40s**。
+
+**等价性对账**：`git worktree add --detach .ab-base HEAD`（不能放 `tmp/` 下——
+`source_scan` 的 `SKIP_PARTS` 含 `tmp`，会把整个扫描面筛空，这是本轮踩到的唯一一次口径事故），
+同一脚本在两个树里 dump 全部扫描输出：17 项**逐字节相同**；`_shape_counts` 由 3 元组变 4 元组
+（前 3 项相同，第 4 项 = `_globals()`，本身也逐字节相同）。
+
+**踩到的口径坑（会重犯，写在这里）**：在 `for p in ...rglob("*.py")` 的文件里新写一个
+`src = read_text(str(p))`，会让 `text_asserts` 口径 B 的**文件级**名字闭包把该文件里所有
+`assert … src` 记成「生产源码文本断言」（它不做作用域分析，已知限边见 `text_asserts` 头部）。
+本轮因此触发 `test_text_assert_counts_only_go_down` 红（+3/+4）。改法：扫描循环里的局部名用
+`text`，不要用自检用例已经在用的名字；净 −1。
+
+**被否决**：① 共享**常驻 AST** 缓存（`parse` 加 `@cache`）——同一进程跑完这族 23.6 → 14.5s，
+但它把 2026-09-29 花代价拆掉的 GC 压力（3.1×、越靠后越慢）请回来，而 forkdist 的逐条派发
+让每 worker 只吃 2–3 个模块 ⇒ 真实的每进程收益更小；② 在 `warmup.py` 里预热这些扫描——
+判据「预热成本 < 省下的并行 CPU / 核数」不成立（每项只被 2–3 个 worker 用到，预热是纯串行加法，
+与 §100 的同一条判据）；③ `--dist=loadfile` / 按模块分组派发——能消掉重复解析，但打乱负载均衡
+（§114 已实测 `loadscope` 79.1s vs 默认 73.9s）；④ 把十二个预算门禁合并成一份「全仓事实包」
+——收益最大但等于重写十二条判据的语义，留给「这族再长高」时做，届时的判据仍是这条：
+先量 `--durations=0` 的扫描族合计，再决定值不值。
+
+**验收**：`bun run pygate` 4 次绿（6572 passed / 2 skipped；ruff + mypy 1029 文件全绿），
+>5s 警告 0；根 `bun run check` / `bun run build` 见提交时读数。
+
 ## §226 P0-8 测试基础设施三项：serve_fast · 退役 check() 壳 · G19（2026-11-19）
 
 `python.refactor.md` §P0-8 的「解决方案」有 5 项；第 3/4/5 项本轮落地（第 1/2 项是

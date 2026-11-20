@@ -8,10 +8,17 @@ torch 2.7 的默认值已经是 `True`，但把安全语义寄托在**版本默�
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
+
+from tests.helpers import source_scan
 
 ROOT = Path(__file__).resolve().parents[1]
 PROD_DIRS = ("biz", "common", "hub", "remote", "train", "trainer", "worker")
+
+#: 廉价预筛：两种寻址形态（`torch.load` / `from torch import load` 后的 `load(...)`）
+#: 在源码里都留着 `load` 这个标识符。373 个生产文件里只有 53 个提到它（实测 4.8s → 0.7s）。
+_LOAD_HINT = re.compile(r"\bload\b")
 
 
 def _torch_load_calls(tree: ast.AST) -> list[ast.Call]:
@@ -45,7 +52,10 @@ def test_every_production_torch_load_is_weights_only() -> None:
     for d in PROD_DIRS:
         for p in (ROOT / d).rglob("*.py"):
             rel = p.relative_to(ROOT).as_posix()
-            tree = ast.parse(p.read_text(encoding="utf-8", errors="replace"))
+            src = source_scan.read_text(str(p), "replace")
+            if _LOAD_HINT.search(src) is None:
+                continue
+            tree = ast.parse(src, filename=str(p))
             for call in _torch_load_calls(tree):
                 total += 1
                 kw = {k.arg: k.value for k in call.keywords if k.arg}

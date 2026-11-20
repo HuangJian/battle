@@ -41,6 +41,11 @@ ALLOWED: frozenset[tuple[str, str]] = frozenset()
 #: 转发**声明行**（`    name as name,`）：只此一种形状，剥掉后剩下的才是真引用。
 _FORWARD_DECL = re.compile(r"^\s*(\w+) as \1,\s*$", re.MULTILINE)
 
+#: 「可能含转发块」的廉价预筛：`name as name` 的字面形态。判据要比 `_FORWARD_DECL` 松
+#: （不要求行首/逗号）—— 预筛只需**充分**：真门面的声明行一定命中它，多放几个候选进
+#: `ast.parse` 只是多几毫秒，漏掉一个就是把整条门禁变成永真。
+_FORWARD_HINT = re.compile(r"\b(\w+) as \1\b")
+
 #: 标识符（判活用的倒排索引键）。
 _IDENT = re.compile(r"\w+")
 
@@ -82,7 +87,7 @@ def _index() -> dict[str, frozenset[str]]:
 def _forwards(path: Path) -> dict[str, str]:
     """`{名字: 定义模块的相对路径}` —— 只认 `name as name`（改名转发不是本条管辖）。"""
     out: dict[str, str] = {}
-    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+    for node in ast.parse(_texts()[_rel(path)], filename=str(path)).body:
         if not isinstance(node, ast.ImportFrom) or not node.module:
             continue
         mod = _rel(ROOT / (node.module.replace(".", "/") + ".py"))
@@ -93,10 +98,24 @@ def _forwards(path: Path) -> dict[str, str]:
 
 
 @cache
+def _facade_candidates() -> tuple[Path, ...]:
+    """只把「文本里出现 ≥3 次 `name as name`」的文件送进 `ast.parse`。
+
+    门面判据要求 ≥3 个转发名 ⇒ 声明行在源码里必然留下同样多的字面量。全仓 1000+ 个 `.py`
+    里这种文件只有十几个：2026-11-20 实测本段 `ast.parse` 5.8s → 0.9s（**不改判据**，
+    只是先做一次 `re.findall` 的子串级预筛）。
+    读的是 `_texts()` 的缓存文本（同一份文件三个用例只读一次盘）。
+    """
+    return tuple(
+        ROOT / rel for rel, text in _texts().items() if len(_FORWARD_HINT.findall(text)) >= 3
+    )
+
+
+@cache
 def _facades() -> dict[str, dict[str, str]]:
     """`{门面文件: {名字: 定义模块}}`；不到 3 个转发名的不算门面（`as` 别名偶发现象）。"""
     out: dict[str, dict[str, str]] = {}
-    for p in _py_files():
+    for p in _facade_candidates():
         fwd = _forwards(p)
         if len(fwd) >= 3:
             out[_rel(p)] = fwd

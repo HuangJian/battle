@@ -1,10 +1,21 @@
-import { describe, it, expect } from 'bun:test'
+import { afterAll, beforeAll, describe, it, expect } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { writeZeroStudentWeights } from './zero-student-weights'
 
-const WEIGHTS = 'nn-training/weights/g4-mobility/g4-mobility.it380.20261114-194719.json'
 const LEVEL = 'nn-training/levels/classic35-safe-base.jsonc'
+
+// 权重夹具现造（零填充生产架构）：`nn-training/weights/**` 是 gitignore，干净 clone 上没有。
+let weightsDir = ''
+let WEIGHTS = ''
+beforeAll(() => {
+  weightsDir = mkdtempSync(join(tmpdir(), 'opening-weights-'))
+  WEIGHTS = writeZeroStudentWeights(weightsDir)
+})
+afterAll(() => {
+  if (weightsDir) rmSync(weightsDir, { recursive: true, force: true })
+})
 
 /** 读 npy（u1 / N 维）——只够本测试用，不引第三方解析器。 */
 function readNpyU8(path: string): number[] {

@@ -90,6 +90,11 @@ def _prod_files() -> list[Path]:
     return sorted(out)
 
 
+def _text(path: Path) -> str:
+    """共享的文本缓存（同一次 pytest 进程里别的门禁也读同一份）；`errors="replace"` 与旧读法一致。"""
+    return source_scan.read_text(str(path), "replace")
+
+
 def _parse(path: Path) -> ast.Module:
     """解析一份生产源码；**AST 用完即释放**（2026-11-20 门禁内存）。
 
@@ -105,6 +110,10 @@ def _parse(path: Path) -> ast.Module:
 def _module_level_asserts() -> list[str]:
     bad: list[str] = []
     for p in _prod_files():
+        # 廉价预筛：源码里连 `assert` 字样都没有 ⇒ 不可能有 Assert 节点（判据不变，
+        # 2026-11-20 实测本段 3.1s → 0.5s）。
+        if "assert" not in _text(p):
+            continue
         v = _ModuleAsserts()
         v.visit(_parse(p))
         bad.extend(f"{p.relative_to(ROOT).as_posix()}:{ln}" for ln in v.hits)
@@ -115,6 +124,8 @@ def _module_level_asserts() -> list[str]:
 def _scan() -> dict[str, int]:
     out: dict[str, int] = {}
     for p in _prod_files():
+        if "assert" not in _text(p):
+            continue
         n = sum(1 for node in ast.walk(_parse(p)) if isinstance(node, ast.Assert))
         if n:
             out[p.relative_to(ROOT).as_posix()] = n

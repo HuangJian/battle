@@ -43,6 +43,7 @@ GC 开着的实际代价：常驻 **2.55s** vs 不常驻 **0.82s**（3.1×）。
 
     files = source_scan.py_files(str(NN_ROOT / "trainer"))      # 该目录下 *.py（排序、缓存）
     mods = source_scan.imports(str(path), root=str(NN_ROOT))  # 完整点分模块名集合（缓存）
+    name = source_scan.dotted_name(call.func)                    # "os.getenv"（廉价，替代 ast.unparse）
 
 `imports` 是「读一次 AST 换一份 string set」——同一份文件被分层的固定点循环、多个用例反复问时
 只付一次解析；`test_layering` 的 `_trainer_reaching_remote` 以前在 while 循环里每次重新解析整棵
@@ -61,6 +62,7 @@ GC 开着的实际代价：常驻 **2.55s** vs 不常驻 **0.82s**（3.1×）。
 from __future__ import annotations
 
 import ast
+import re
 from collections.abc import Mapping
 from functools import cache
 from pathlib import Path
@@ -82,6 +84,24 @@ def parse(path: str, errors: str = "strict") -> ast.Module:
     return ast.parse(read_text(path, errors), filename=path)
 
 
+def dotted_name(node: ast.AST) -> str:
+    """`ast.unparse(node)` 的**廉价替身**：只拼 `Name` / `Attribute` 链，其余返回空串。
+
+    给「这一发调用是不是 `os.getenv` / `time.monotonic` / `rt.clock`」这类判据用。
+    `ast.unparse` 会为**每个** `Call` 节点做一次完整的格式化（整仓扫描里是秒级开销），
+    而这里只走一条属性链；不是纯点分名的节点（子脚本 / 调用结果 / 字面量）返回 `""`，
+    与 `ast.unparse` 得到 `"(x)"` / `"f()"` 的结果一样不会被白名单命中。
+    """
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return ""
+    parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
 @cache
 def py_files(root: str) -> tuple[Path, ...]:
     """`root` 下的 `*.py`（排序、缓存）。
@@ -90,6 +110,16 @@ def py_files(root: str) -> tuple[Path, ...]:
     缓存的是一份 Path 元组（小对象），代价可以忽略。
     """
     return tuple(sorted(Path(root).rglob("*.py")))
+
+
+#: 「可能含宽泛 `except`」的廉价预筛（G4 / G9 共用；两者的宽泛定义各在自己文件里，
+#: 但「源码长什么样」是同一件事实）。判据是**充分**的：宽泛处理器的类型一定是
+#: `Exception` / `BaseException`（括号不影响 AST 形状），或者根本没有类型（`except:`）；
+#: 合法 Python 不可能让这三样东西不在 `except` 后面的同一段源码里出现。
+#: 命中多余（如 `except (Exception,):`——AST 是 Tuple，不计）只会多解析一个文件，不会误判。
+BROAD_EXCEPT_HINT = re.compile(
+    r"except[\\\s]*(?:\(\s*)?(?:(?:Exception|BaseException)\b|:)"
+)
 
 
 #: 业务源码的**三棵树**（2026-09-30 刀 4 分家、刀 5 改名、**刀 6 加 `worker/`**）：
