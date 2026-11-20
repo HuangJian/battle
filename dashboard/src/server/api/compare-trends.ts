@@ -14,9 +14,12 @@
 import {
   COMPARE_METRIC_SPECS,
   COMPARE_MAX_COURSES,
+  METRIC_SERIES_KEYS,
+  behaviorMetricSeries,
   isCompareMetric,
   isTrendSource,
   metricSeries,
+  parseBehaviorSeriesKey,
   parseCompareCourses,
   parseIterRange,
   sliceIterRange,
@@ -27,6 +30,7 @@ import {
   type CompareUnavailable,
   type IterRow,
   type Series,
+  type TrendSeriesView,
   type TrendSource,
 } from '../../web/view'
 import { courseFileStat, resolveCourseFile } from './course-source'
@@ -89,6 +93,8 @@ export function parseCompareQuery(
 interface CompareCacheEntry {
   fp: string
   at: number
+  /** 账本行（行为指标的序列按需现算；缓存行 = 换指标/统计量不重读盘）。 */
+  rows: IterRow[]
   series: Map<string, Series>
 }
 
@@ -131,17 +137,17 @@ function ledgerFingerprint(course: string): string {
   return parts.join('&')
 }
 
-/** 读一门课的 19 条序列（缓存命中 = 不读正文；未命中 = `readIterMetrics` → `metricSeries`）。
+/** 读一门课的账本 + 19 条基础序列（缓存命中 = 不读正文；未命中 = `readIterMetrics` → `metricSeries`）。
  *  返回 null = 账本为空/不可读（调用方记 unavailable，不假装零数据）。 */
 async function seriesOf(
   course: string,
   fp: string,
   now: number,
-): Promise<Map<string, Series> | null> {
+): Promise<CompareCacheEntry | null> {
   const hit = courseCache.get(course)
   if (hit && hit.fp === fp && now - hit.at < COURSE_CACHE_TTL_MS) {
     cacheHits++
-    return hit.series
+    return hit
   }
   cacheMisses++
   let rows: IterRow[]
@@ -151,15 +157,20 @@ async function seriesOf(
     return null
   }
   if (rows.length === 0) return null
-  const series = new Map(metricSeries(rows).map((s) => [s.key, s]))
-  courseCache.set(course, { fp, at: now, series })
+  const entry: CompareCacheEntry = {
+    fp,
+    at: now,
+    rows,
+    series: new Map(metricSeries(rows).map((s) => [s.key, s])),
+  }
+  courseCache.set(course, entry)
   // 洪泛闸：条目超过 64 时清掉过期项（正常节奏下永不触发；留着是防「切换几十门课」把内存顶高）。
   if (courseCache.size > 64) {
     for (const [k, v] of courseCache) {
       if (now - v.at >= COURSE_CACHE_TTL_MS) courseCache.delete(k)
     }
   }
-  return series
+  return entry
 }
 
 /** 组装响应（纯读；`now` 可注入，便于单测谈 TTL 与指纹而不 sleeping）。 */
@@ -184,15 +195,15 @@ export async function buildCompareTrendsView(
       unavailable.push({ course, reason: 'tmp 与备份均无账本' })
       continue
     }
-    const byKey = await seriesOf(course, fp, now)
-    if (!byKey) {
+    const entry = await seriesOf(course, fp, now)
+    if (!entry) {
       unavailable.push({ course, reason: '账本不可读' })
       continue
     }
     const series: CompareSeriesData[] = []
     let points = 0
     for (const key of wantedKeys) {
-      const s = byKey.get(key)
+      const s = entry.series.get(key)
       if (!s) continue
       const sliced = sliceIterRange(s.iters, s.vals, q.from, q.to)
       for (const v of sliced.vals) if (v != null) points += 1
@@ -203,6 +214,126 @@ export async function buildCompareTrendsView(
   return {
     metric: q.metric,
     source: q.source,
+    from: q.from,
+    to: q.to,
+    courses,
+    unavailable,
+    fingerprint: fps.join('||'),
+    time: new Date(now).toISOString(),
+  }
+}
+
+// ────────────────────────── 首页多课走势（显式序列键） ──────────────────────────
+
+/** 单次请求的序列键上限（防手拼 URL 把「所有指标 × 所有统计量」一次拉空；
+ *  首页正常配置远低于它——96 张图全开也只有 192 个键）。 */
+export const TREND_SERIES_MAX_KEYS = 256
+
+export interface TrendSeriesQuery {
+  /** 已过 `sanitizeViewCourse`、已去重、已截断到上限。 */
+  courses: string[]
+  /** 已校验的序列键（`METRIC_SERIES_KEYS` 或 `behavior-<指标>-<统计量>-<口径>`）。 */
+  keys: string[]
+  from: number | null
+  to: number | null
+}
+
+export interface TrendSeriesQueryRaw {
+  courses?: string | null
+  keys?: string | null
+  from?: string | null
+  to?: string | null
+}
+
+/** `keys=a,b,c` → 校验后的键（去重保序；非法键单独列出，调用方据此 400）。 */
+function parseTrendSeriesKeys(raw: string | null | undefined): {
+  keys: string[]
+  invalid: string[]
+} {
+  const seen = new Set<string>()
+  const keys: string[] = []
+  const invalid: string[] = []
+  for (const part of (raw ?? '').split(',')) {
+    const key = part.trim()
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    if (METRIC_SERIES_KEYS.includes(key) || parseBehaviorSeriesKey(key) !== null) keys.push(key)
+    else invalid.push(key)
+  }
+  return { keys, invalid }
+}
+
+/** 解析 + 校验首页多课走势请求（路由层用；单测可直接打它，不架 HTTP）。
+ *
+ *  与 `parseCompareQuery` 的差别：这里没有 metric/source——键本身已经编码了口径；
+ *  同一个响应可以服务首页上多张不同指标的图。`from`/`to` 语义与比较端点一致。 */
+export function parseTrendSeriesQuery(
+  raw: TrendSeriesQueryRaw,
+): { ok: true; params: TrendSeriesQuery } | { ok: false; message: string } {
+  const courses = parseCompareCourses(raw.courses)
+    .map((c) => sanitizeViewCourse(c))
+    .filter((c) => c !== '')
+  if (courses.length === 0) return { ok: false, message: 'courses 参数无有效课程' }
+  const parsedKeys = parseTrendSeriesKeys(raw.keys)
+  if (parsedKeys.invalid.length > 0) {
+    return { ok: false, message: `keys 含非法序列：${parsedKeys.invalid.slice(0, 3).join(',')}` }
+  }
+  if (parsedKeys.keys.length === 0) return { ok: false, message: 'keys 参数无有效序列' }
+  if (parsedKeys.keys.length > TREND_SERIES_MAX_KEYS) {
+    return { ok: false, message: `keys 最多 ${TREND_SERIES_MAX_KEYS} 个` }
+  }
+  const range = parseIterRange(raw.from, raw.to)
+  if (!range.ok) return { ok: false, message: range.message }
+  return {
+    ok: true,
+    params: {
+      courses: courses.slice(0, COMPARE_MAX_COURSES),
+      keys: parsedKeys.keys,
+      from: range.range.from,
+      to: range.range.to,
+    },
+  }
+}
+
+/** 组装首页多课走势响应：逐课读账本（缓存），按显式键取序列。
+ *  行为指标第一次被请求时从缓存行现算并写回同一个 `series` 表——换统计量不重读盘。 */
+export async function buildTrendSeriesView(
+  q: TrendSeriesQuery,
+  now = Date.now(),
+): Promise<TrendSeriesView> {
+  const courses: CompareCourseSeries[] = []
+  const unavailable: CompareUnavailable[] = []
+  const fps: string[] = []
+  for (const course of q.courses) {
+    const fp = ledgerFingerprint(course)
+    fps.push(`${course}:${fp}`)
+    if (resolveCourseFile(course, 'training_log.jsonl').source === 'none') {
+      unavailable.push({ course, reason: 'tmp 与备份均无账本' })
+      continue
+    }
+    const entry = await seriesOf(course, fp, now)
+    if (!entry) {
+      unavailable.push({ course, reason: '账本不可读' })
+      continue
+    }
+    const series: CompareSeriesData[] = []
+    let points = 0
+    for (const key of q.keys) {
+      let s = entry.series.get(key)
+      if (!s) {
+        const parts = parseBehaviorSeriesKey(key)
+        if (!parts) continue
+        s = behaviorMetricSeries(entry.rows, parts.metric, parts.stat, parts.source)
+        entry.series.set(key, s)
+      }
+      const sliced = sliceIterRange(s.iters, s.vals, q.from, q.to)
+      for (const v of sliced.vals) if (v != null) points += 1
+      series.push({ key: s.key, label: s.label, iters: sliced.iters, vals: sliced.vals })
+    }
+    courses.push({ course, series, points })
+  }
+  return {
+    keys: q.keys,
     from: q.from,
     to: q.to,
     courses,

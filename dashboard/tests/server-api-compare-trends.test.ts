@@ -15,6 +15,7 @@ import { afterAll, beforeEach, describe, expect, it } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { behaviorSeriesKey } from '../src/web/view'
 
 const scratch = mkdtempSync(path.join(os.tmpdir(), 'bcity-cmp-'))
 const logs = path.join(scratch, 'logs')
@@ -44,6 +45,22 @@ function writeLog(name: string, lines: Array<Record<string, unknown>>): void {
   writeFileSync(
     path.join(logs, name, 'training_log.jsonl'),
     `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`,
+  )
+}
+
+/** 逐局指标夹具：`it<iter>/per-game.json`（与训练侧落盘形状一致）。 */
+function writePerGame(
+  name: string,
+  iter: number,
+  metricValues: Array<Record<string, number>>,
+): void {
+  const dir = path.join(logs, name, `it${iter}`)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(
+    path.join(dir, 'per-game.json'),
+    JSON.stringify(
+      metricValues.map((mv, i) => ({ stage: 1, seed: i + 1, nSamples: 1, metricValues: mv })),
+    ),
   )
 }
 
@@ -229,5 +246,118 @@ describe('课程级缓存（TTL + 指纹）', () => {
       ok(api.parseCompareQuery({ courses: 'cmp-y', metric: 'winRate', source: 'rollout' })),
     )
     expect(a.fingerprint).not.toBe(b.fingerprint)
+  })
+})
+
+describe('parseTrendSeriesQuery（首页多课走势）', () => {
+  it('courses / keys 必填；非法键与不存在的课一律 400（不静默回退）', () => {
+    mkCourse('cmp-a', [1], () => 0.5)
+    expect(api.parseTrendSeriesQuery({}).ok).toBe(false)
+    expect(api.parseTrendSeriesQuery({ courses: 'cmp-a' }).ok).toBe(false)
+    expect(api.parseTrendSeriesQuery({ courses: 'cmp-a', keys: '' }).ok).toBe(false)
+    expect(api.parseTrendSeriesQuery({ courses: 'cmp-a', keys: 'nope' }).ok).toBe(false)
+    expect(api.parseTrendSeriesQuery({ courses: 'ghost', keys: 'winRate' }).ok).toBe(false)
+    // 混合：非法键被点名（不是整串照收），合法课照常
+    const bad = api.parseTrendSeriesQuery({ courses: 'cmp-a', keys: 'winRate,nope' })
+    expect(bad.ok).toBe(false)
+    if (!bad.ok) expect(bad.message).toContain('nope')
+  })
+
+  it('基础序列键 + 行为指标键都收；去重保序；from/to 语义与比较端点一致', () => {
+    mkCourse('cmp-a', [1], () => 0.5)
+    const p = ok(
+      api.parseTrendSeriesQuery({
+        courses: 'cmp-a',
+        keys: 'winRate,eval,winRate',
+        from: '2',
+        to: '',
+      }),
+    )
+    expect(p.keys).toEqual(['winRate', 'eval'])
+    expect({ from: p.from, to: p.to }).toEqual({ from: 2, to: null })
+    const behavior = behaviorSeriesKey('dangerTicks', 'mean', 'rollout')
+    expect(ok(api.parseTrendSeriesQuery({ courses: 'cmp-a', keys: behavior })).keys).toEqual([
+      behavior,
+    ])
+  })
+})
+
+describe('buildTrendSeriesView（首页多课数据面）', () => {
+  it('按显式键取序列；缺 eval = null（不是 0）', async () => {
+    mkCourse('cmp-a', [1, 2, 3], () => 0.5)
+    writeFileSync(
+      path.join(logs, 'cmp-a', 'eval_log.jsonl'),
+      `${JSON.stringify({
+        event: 'eval_summary',
+        iter: 2,
+        time: 'e2',
+        wver: 'w1',
+        winRate: 0.42,
+        games: 4,
+        wins: 2,
+      })}\n`,
+    )
+    const view = await api.buildTrendSeriesView(
+      ok(api.parseTrendSeriesQuery({ courses: 'cmp-a', keys: 'winRate,eval' })),
+    )
+    expect(view.keys).toEqual(['winRate', 'eval'])
+    expect(view.courses[0]!.series.map((s) => s.key)).toEqual(['winRate', 'eval'])
+    expect(view.courses[0]!.series[0]!.vals).toEqual([0.5, 0.5, 0.5])
+    expect(view.courses[0]!.series[1]!.vals).toEqual([null, 0.42, null])
+  })
+
+  it('行为指标按需从缓存行现算；换统计量命中缓存、不重读盘', async () => {
+    mkCourse('cmp-a', [1, 2], () => 0.5)
+    writePerGame('cmp-a', 1, [{ dangerTicks: 4 }, { dangerTicks: 8 }])
+    writePerGame('cmp-a', 2, [{ dangerTicks: 10 }])
+    const mean = behaviorSeriesKey('dangerTicks', 'mean', 'rollout')
+    const v1 = await api.buildTrendSeriesView(
+      ok(api.parseTrendSeriesQuery({ courses: 'cmp-a', keys: mean })),
+    )
+    expect(v1.courses[0]!.series[0]!.vals).toEqual([6, 10])
+    const max = behaviorSeriesKey('dangerTicks', 'max', 'rollout')
+    const v2 = await api.buildTrendSeriesView(
+      ok(api.parseTrendSeriesQuery({ courses: 'cmp-a', keys: max })),
+    )
+    expect(v2.courses[0]!.series[0]!.vals).toEqual([8, 10])
+    expect(api.__compareCacheCounters()).toEqual({ hits: 1, misses: 1 })
+  })
+
+  it('from/to 只回该区间；无账本课进 unavailable，其余课照常', async () => {
+    mkCourse('cmp-a', [1, 2, 3, 4], (it) => it / 10)
+    declare('cmp-empty')
+    mkdirSync(path.join(logs, 'cmp-empty'), { recursive: true })
+    const sliced = await api.buildTrendSeriesView(
+      ok(
+        api.parseTrendSeriesQuery({
+          courses: 'cmp-a',
+          keys: 'winRate',
+          from: '2',
+          to: '3',
+        }),
+      ),
+    )
+    expect(sliced.courses[0]!.series[0]!.iters).toEqual([2, 3])
+    expect(sliced.courses[0]!.series[0]!.vals).toEqual([0.2, 0.3])
+    expect(sliced.courses[0]!.points).toBe(2)
+
+    const view = await api.buildTrendSeriesView(
+      ok(api.parseTrendSeriesQuery({ courses: 'cmp-a,cmp-empty', keys: 'winRate' })),
+    )
+    expect(view.courses.map((c) => c.course)).toEqual(['cmp-a'])
+    expect(view.unavailable).toEqual([{ course: 'cmp-empty', reason: 'tmp 与备份均无账本' }])
+    // 不可用课也进指纹（它一开账本，客户端门闩就会放新数据进来）
+    expect(view.fingerprint).toContain('cmp-empty')
+  })
+
+  it('与比较端点共用同一份账本缓存（先比较后首页只读一次盘）', async () => {
+    mkCourse('cmp-a', [1, 2], () => 0.5)
+    await api.buildCompareTrendsView(
+      ok(api.parseCompareQuery({ courses: 'cmp-a', metric: 'winRate', source: 'rollout' })),
+    )
+    await api.buildTrendSeriesView(
+      ok(api.parseTrendSeriesQuery({ courses: 'cmp-a', keys: 'winRate' })),
+    )
+    expect(api.__compareCacheCounters()).toEqual({ hits: 1, misses: 1 })
   })
 })

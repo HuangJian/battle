@@ -15,30 +15,43 @@
  *  **草稿制（用户 2026-11-14）**：勾选 / 统计量 / 顺序都只改弹窗内的草稿，点「完成」才一次性
  *  提交（Hero 写三份 localStorage）；「关闭 / Esc / 点遮罩」= 放弃这次改动。理由：90+ 项一次
  *  改好几处时，即时写盘会让首页在弹窗底下反复重排，也把误点永久记下来。
+ *
+ *  多课对比（用户 2026-11-20）：同一份草稿里再带一组**全局对比课**（当前课恒在 + 最多 6 门额外课）。
+ *  为什么是全局一组而不是每图各配：色序跨图必须一致，否则「红=kb2」会在另一张图上变成别的课；
+ *  首页小图再逐图配课只会把「看趋势」变成「配表」。开不开、选哪些课都跟勾选/顺序一起在「完成」落盘。
  */
 
 import { useEffect, useState } from 'preact/hooks'
+import type { JSX } from 'preact'
 import {
   BEHAVIOR_METRICS,
   BEHAVIOR_METRIC_GROUPS,
   behaviorMetricDef,
   behaviorTrendKey,
+  colorOf,
+  filterCourseCandidates,
+  HOME_COMPARE_MAX_COURSES,
   METRIC_STAT_OPTIONS,
   moveTrendKey,
   parseMetricStat,
+  resolveHomeCompareColors,
+  toggleHomeCompareCourseInConfig,
   TREND_BASE_CHARTS,
   type BehaviorMetricKey,
   type BehaviorMetricStatMap,
+  type HomeCompareConfig,
   type MetricStatKey,
   type TrendChartKey,
 } from '../../view'
 
-/** 点「完成」时交给 Hero 的整份草稿（顺序 / 显示表 / 统计量一起提交）。 */
+/** 点「完成」时交给 Hero 的整份草稿（顺序 / 显示表 / 统计量 / 多课对比一起提交）。 */
 export interface TrendConfigDraft {
   /** 完整键序（含没勾选的键），成为首页的上屏顺序。 */
   order: TrendChartKey[]
   visibility: Record<TrendChartKey, boolean>
   metricStats: BehaviorMetricStatMap
+  /** 首页走势图的多课对比（当前课恒在；courses 只存额外课）。 */
+  compare: HomeCompareConfig
 }
 
 export interface TrendConfigModalProps {
@@ -47,9 +60,26 @@ export interface TrendConfigModalProps {
   order: TrendChartKey[]
   visibility: Record<TrendChartKey, boolean>
   metricStats: BehaviorMetricStatMap
+  /** 当前查看课程（多课对比里恒在、不占额外名额）。 */
+  currentCourse: string
+  /** 全部可选课程（已排除封存课）。 */
+  courses: string[]
+  /** 封存课（只列出来说明为什么不能选；没有逐轮账本）。 */
+  archived?: string[]
+  /** 首页多课对比配置（草稿的初始值）。 */
+  compare: HomeCompareConfig
   /** 「完成」= 一次性提交草稿（唯一的生效通道）。 */
   onApply: (next: TrendConfigDraft) => void
   onClose: () => void
+}
+
+/** 草稿快照：连每门课的固定色位一起拷走。「完成」后 colors 丢了就会按位置重排颜色。 */
+function snapshotCompare(c: HomeCompareConfig): HomeCompareConfig {
+  return {
+    on: c.on,
+    courses: [...c.courses],
+    ...(c.colors ? { colors: { ...c.colors } } : {}),
+  }
 }
 
 /** 底部解释栏当前指向的指标（label / 账本英文键 / 大白话释义）。 */
@@ -77,6 +107,10 @@ export function TrendConfigModal({
   order,
   visibility,
   metricStats,
+  currentCourse,
+  courses,
+  archived = [],
+  compare,
   onApply,
   onClose,
 }: TrendConfigModalProps) {
@@ -86,14 +120,23 @@ export function TrendConfigModal({
     order: [...order],
     visibility: { ...visibility },
     metricStats: { ...metricStats },
+    compare: snapshotCompare(compare),
   }))
   /** 本次打开时勾过的键：× 之后置灰但不离场，点 ✓ 就地恢复。 */
   const [pinned, setPinned] = useState<ReadonlySet<TrendChartKey>>(() => new Set())
+  /** 对比课候选的搜索词（课程多时不用滚到底找）。 */
+  const [courseQuery, setCourseQuery] = useState('')
 
   useEffect(() => {
     if (!open) return
-    setDraft({ order: [...order], visibility: { ...visibility }, metricStats: { ...metricStats } })
+    setDraft({
+      order: [...order],
+      visibility: { ...visibility },
+      metricStats: { ...metricStats },
+      compare: snapshotCompare(compare),
+    })
     setPinned(new Set(order.filter((k) => visibility[k])))
+    setCourseQuery('')
     // 只在「打开」这一拍快照；开着的过程中 props 变了（轮询）不应该冲掉用户正在改的草稿。
     // oxlint 未开 react 插件，这里不需要依赖表。
   }, [open])
@@ -113,6 +156,9 @@ export function TrendConfigModal({
 
   if (!open) return null
 
+  /** 草稿里每门课的当前色位（增减课由 toggleHomeCompareCourseInConfig 同步维护）。 */
+  const compareColors = resolveHomeCompareColors(draft.compare, currentCourse)
+
   const explain = (label: string, key: string, hint: string): void => {
     setActive({ label, key, hint })
   }
@@ -130,16 +176,31 @@ export function TrendConfigModal({
       order: moveTrendKey(d.order, key, delta, (k) => d.visibility[k]),
     }))
   }
+  const setCompareOn = (on: boolean): void => {
+    setDraft((d) => ({ ...d, compare: { ...d.compare, on } }))
+  }
+  const toggleCompareCourse = (course: string): void => {
+    setDraft((d) => ({
+      ...d,
+      compare: toggleHomeCompareCourseInConfig(d.compare, currentCourse, course),
+    }))
+  }
 
   /** 顶部行：勾选中的 + 本次打开后取消过显示的（置灰那批）。 */
   const rows = draft.order.filter((k) => draft.visibility[k] || pinned.has(k))
   const onCount = rows.filter((k) => draft.visibility[k]).length
+
+  const candidates = courses.filter((c) => c !== currentCourse)
+  const visibleCandidates = filterCourseCandidates(candidates, courseQuery)
+  const archivedCandidates = archived.filter((a) => a !== currentCourse)
+  const compareAtCap = draft.compare.courses.length >= HOME_COMPARE_MAX_COURSES
 
   const apply = (): void => {
     onApply({
       order: draft.order,
       visibility: draft.visibility,
       metricStats: draft.metricStats,
+      compare: draft.compare,
     })
     onClose()
   }
@@ -158,7 +219,8 @@ export function TrendConfigModal({
           <p className="tc-muted tc-small tc-mt-0">
             勾选首页要显示的走势图，顶上按上屏顺序列出已勾选的图（↑↓ 换位置，× 取消显示）。
             每项都标了账本英文键，方便和课程文件的 formula 对照；鼠标移上去（或键盘聚焦），
-            底部会用大白话解释它是什么、该看什么。改完点「完成」才生效。
+            底部会用大白话解释它是什么、该看什么。下面的「多课对比」可以让首页所有走势图
+            同时叠几门课。改完点「完成」才生效。
           </p>
           <button type="button" className="tc-link" onClick={onClose}>
             关闭
@@ -249,6 +311,128 @@ export function TrendConfigModal({
                 })}
               </ol>
             )}
+          </section>
+
+          {/* 多课对比（用户 2026-11-20）：全局一组对比课，首页所有走势图同图叠线。
+              当前课恒在（第一色、不占名额）；courses 只存额外课，色序 = 这里的顺序。 */}
+          <section className="tc-trendcfg__sec">
+            <div className="tc-trendcfg__sec-hd">
+              <h4>
+                多课对比
+                <span className="tc-trendcfg__count">{draft.compare.courses.length + 1}</span>
+              </h4>
+              <span className="tc-muted tc-small">
+                开启后首页每张走势图都叠同一组课：当前课恒在（颜色跟课固定），另可选最多{' '}
+                {HOME_COMPARE_MAX_COURSES} 门。颜色跨图一致，悬停任一张图就能看各课读数。
+              </span>
+            </div>
+            <div className="tc-trendcfg__cmp">
+              <label className="tc-trendcfg__check">
+                <input
+                  type="checkbox"
+                  checked={draft.compare.on}
+                  onChange={(e) => setCompareOn(e.currentTarget.checked)}
+                />
+                <span>开启多课同图</span>
+              </label>
+              <span className="tc-chip">
+                <svg
+                  className="tc-trendcfg__cmp-dot"
+                  viewBox="0 0 8 8"
+                  width="8"
+                  height="8"
+                  aria-hidden="true"
+                >
+                  <circle cx="4" cy="4" r="4" fill={colorOf(compareColors[currentCourse] ?? 0)} />
+                </svg>
+                当前课：{currentCourse || '—'}
+              </span>
+              {draft.compare.courses.map((c, i) => (
+                <span className="tc-chip" key={c}>
+                  <svg
+                    className="tc-trendcfg__cmp-dot"
+                    viewBox="0 0 8 8"
+                    width="8"
+                    height="8"
+                    aria-hidden="true"
+                  >
+                    <circle cx="4" cy="4" r="4" fill={colorOf(compareColors[c] ?? i + 1)} />
+                  </svg>
+                  {c}
+                  <button
+                    type="button"
+                    className="tc-chip__x"
+                    aria-label={`移除对比课 ${c}`}
+                    title={`移除对比课 ${c}`}
+                    onClick={() => toggleCompareCourse(c)}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+              {draft.compare.courses.length === 0 ? (
+                <span className="tc-muted tc-small">
+                  还没选对比课；可以先选好，下次打开直接勾「开启」。
+                </span>
+              ) : null}
+              {compareAtCap ? (
+                <span className="tc-muted tc-small">
+                  最多 {HOME_COMPARE_MAX_COURSES} 门额外课（读账本成本随门数线性上涨）
+                </span>
+              ) : null}
+            </div>
+            <div className="tc-trendcfg__cmp-pick">
+              <input
+                className="tc-trendcfg__srch"
+                type="search"
+                placeholder="搜索课程"
+                aria-label="搜索对比课"
+                value={courseQuery}
+                onInput={(e: JSX.TargetedInputEvent<HTMLInputElement>) =>
+                  setCourseQuery(e.currentTarget.value)
+                }
+              />
+              <div className="tc-trendcfg__list">
+                {visibleCandidates.map((c) => {
+                  const picked = draft.compare.courses.includes(c)
+                  const disabled = !picked && compareAtCap
+                  return (
+                    <button
+                      type="button"
+                      className={`tc-trendcfg__cand${picked ? ' tc-trendcfg__cand--on' : ''}${
+                        disabled ? ' tc-trendcfg__cand--off' : ''
+                      }`}
+                      key={c}
+                      disabled={disabled}
+                      aria-pressed={picked}
+                      title={
+                        disabled
+                          ? `最多 ${HOME_COMPARE_MAX_COURSES} 门额外课`
+                          : picked
+                            ? `取消对比 ${c}`
+                            : `加入对比 ${c}`
+                      }
+                      onClick={() => toggleCompareCourse(c)}
+                    >
+                      {picked ? '✓ ' : ''}
+                      {c}
+                    </button>
+                  )
+                })}
+                {archivedCandidates.map((a) => (
+                  <span
+                    className="tc-trendcfg__cand tc-trendcfg__cand--off"
+                    key={`arch:${a}`}
+                    title="封存课只留归档清单（不扫盘不解压）⇒ 没有逐轮账本可比"
+                  >
+                    {a} · 封存 · 无逐轮账本
+                  </span>
+                ))}
+                {visibleCandidates.length === 0 && archivedCandidates.length === 0 ? (
+                  <span className="tc-muted tc-small">没有可选的课程</span>
+                ) : null}
+              </div>
+            </div>
           </section>
 
           <section className="tc-trendcfg__sec">

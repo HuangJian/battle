@@ -499,6 +499,7 @@ export function CompareTrendsModal({
               width={chartBox.w}
               height={chartBox.h}
               bridgeGaps={source === 'eval'}
+              snapToEval={source === 'eval'}
             />
           )}
         </div>

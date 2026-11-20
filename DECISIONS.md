@@ -6450,3 +6450,70 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **护栏**：`dashboard/tests/tunnel-reuse-origin.test.ts`（9 例，含「漂移 ⇒ 仍复用」与「复用分支
   `killPid` 只许一次」）。真机：`:443/:2096/:2083` 带 token 200、**0 个 502**。
   全文 → `docs/nn/remote-transport.md` §168。
+
+## §2026-11-20-dashboard-home-multi-course-trends（首页走势图直接多课同图：全局一组对比课 + 显式序列键批量端点）
+
+- **背景**：用户 2026-11-20 要求「首页配置的走势图也直接支持配置多个课程同图展示」——原来只有
+  「比较课程」浮窗能多课同图，来回开关太繁琐。本条**取代** `plan/dashboard-compare-trends.plan.md`
+  的非目标「不把多课曲线塞进 Hero 的小图」（用户需求优先）。
+- **裁定**：
+  ① **全局一组对比课**（当前课恒第一色 + 最多 3 门额外课），作用于所有可见走势图；不做每图各配一组——
+  色序跨图必须一致，否则同色在不同图代表不同课。
+  ② 当前课序列由 `/api/state.metrics.iters` 客户端现算；额外课走 `GET /api/trendSeries?courses=&keys=&from=&to=`，
+  按**显式序列键**批量取，复用比较端点的课程级账本缓存（行为指标从缓存行现算，换统计量不重读盘）。
+  ③ 范围档位在**每门课自己的序列**上客户端截取，稀疏 eval 保留 NaN 缺口（不连假趋势）；切档位不重新读盘。
+  ④ 配置存 `tc.trend.compare = {on, courses}`（只存额外课，顺序 = 色序），走「走势配置」草稿，点「完成」才落盘。
+  ⑤ `MultiTrendChart` 扩展 `yBounds` / `label` / `compact` / 受控 `hoverIter`：首页小图用「一课一行」提示框，
+  y 轴规则由 `homeYBounds` 单一出处给（cap03/zero/scaled）。
+- **被否决**：① 每图各配课程集（颜色身份跨图不一致）；② 把 N 门课塞进 `/api/state`（3s 轮询反复读 N 份账本）；
+  ③ 每张图各打一次 `/api/compareTrends`（映射复制、请求数随图数上涨）；④ 服务端做范围截取（切档位重拉，
+  且与单课图语义分叉）。
+- **补充（同日第二轮用户反馈）**：
+  ① 首页小图 hover 提示框改画在**图上方**的 HTML 浮层（`tc-mchart__tip`，`left` 按准星 x 计算后钳回图内），
+  不遮折线；大图（比较/放大浮窗）仍用 SVG 内提示框——空间足够且要贴着多条线对齐。
+  ② 放大入口恢复为图区**左下角独立按钮**（`TrendZoomButton`，单课格与多课格共用）；多课格放大只画**当前课**
+  （同一浮窗），对比课的数在 hover 提示里看；行为指标走统计曲线放大。
+  ③ 数据源为「eval」时 hover **只吸附 eval 点**（`nearestEvalIter`：只收 eval 序列的有限值点，NaN 缺口不算点）；
+  本图没有有效 eval 点才回退全部 iter。首页多课格、比较浮窗、统计放大浮窗统一走这条。
+- **护栏**：`web-home-compare.test.ts`（配置/映射/稀疏截取/合流/颜色/y 下界/`HomeCompareCell` SSR/配置弹窗/
+  Hero 源码纪律）· `server-api-compare-trends.test.ts`（`parseTrendSeriesQuery` + `buildTrendSeriesView` +
+  共用缓存）· `web-trend-config-modal.test.ts`（复选框计数）· `web-compare-trends.test.ts`（`nearestEvalIter`）·
+  `web-style-discipline.test.ts`（首页提示框 `left` 是唯一新增的计算值豁免）· 第三/四轮：`HomeCompareLegend`
+  SSR（`aria-pressed`/tooltip 文案）+ `HomeCompareCell.hiddenCourses`（隐藏不画线、格头读数仍在、全隐藏空态）。
+- **补充（同日第三/四轮）**：图例项改成按钮，点击把所有可见图上的该课曲线同步摘掉/恢复；`aria-pressed` 与
+  删除线+灰字同源。隐藏名单全局按课名、临时（不落盘）：不改选课/不重拉，格头当前课读数照报；配置「完成」清空；
+  全隐藏时图区提示恢复。图例并进走势控制条（与「走势配置」同排），说明语只做课程名 tooltip；被否决：每图各存一份、持久化。
+  切换当前课时，新当前课若在对比里 ⇒ 把它摘掉、旧当前课补进集合并落盘（集合不缩，唯一额外课时对比不熄灭；不专门保色位）。
+
+## §2026-11-20-goalnn-defense-reward-integrals（守家奖励必须是「累计/积分」形态：g7 的滑动均值与终局存量都学不动）
+
+- **背景**：`g7-base`（c1 的 26 项 + 3 项基地奖励）vs `g7-ctrl`（同起点/面板/形状，去掉那 3 项）跑到 it190：
+  通过率 37.29% → base **41.71%** / ctrl 35.57%；基地被毁 385 → **357**（预注册 ≤294 未达）。
+  **决定性证据 = 把三项公式反套到两课每局**：base 防守分 58.2→**58.8**、ctrl 58.2→52.5，
+  胜局/负局判别度 +114/+25 → **+106/+25**（没变）；毁局 cellsVisited 96.8→92.5（依旧「没去拦」）。
+- **决定**：新开两课 `g7-base2` / `g7-ctrl2`（同起点 c1@it740、同面板 classic35、同 24576·1024·4、同 500 轮），
+  g7-base2 只把这 4 项基地项换掉，其余 26 项与 c1 逐字相同：
+  ① `+ wWallKeep*baseWallIntact`（26，不动，208）；
+  ② 压力项 `- wPress*min(pressCap, mean − 0.10)` → **`- wPressInt*min(cap, basePressureSum − 0.10·basePressureSamples)`**（积分形态，216）；
+  ③ `- wThShot*min(5, max(0, thShotsAtBaseCum − 3.5))`（14/发 → **50/发**，250）；
+  ④ **新增** `- wThLane*min(37.5, max(0, thCostDirect + thCostDirectAimed − 0.006·ticks))`（300）——
+     用 metrics **v13 早已落盘、从未进过任何公式**的两列：每决策步「正压在鹰的两轴上、弹道无遮挡」的敌车数。
+- **理由**：奖励是势函数 `Φ`，`r = Φ[i+1] − Φ[i]`。**滑动均值**形态下每步 delta ∝ 1/t ⇒ 训练越久梯度越小
+  （v13 给 `thCost*` 写的「必须累计」注释就是这个坑）；**终局存量**形态 telescoping 后只剩终局差 ⇒ 与 outcome
+  共线，不携带「何时该回防」。改成累计量后每步 delta 恒等于当拍暴露，才是可学的信用分配信号。
+  实测把 4 项套回既有 700 局：胜局 p50 **+124** / 毁局 p50 **−196** ⇒ **判别差 +261（中位 +320）**，是 g7 的 2.6×。
+- **被否决**：① **BC/监督探针**（用户口径，2026-11-20）：败局语料只知道「这样会失败」，学不会「怎么防住」；
+  等 NN 通过率 >70% 再考虑录人类语料做 BC。② 只把 g7 的 `wPress` 系数调大：形态没变，放大的是前期噪声、
+  后期仍是 1/t。③ 新增「墙存量时间积分」指标：要动 `export-observations` + metrics 版本 + codehash
+  （⇒ 重建 code.zip + 重启 hub，quick tunnel 域名会换、所有节点要改 `hub_url`），而 `thCostDirect` 已够用。
+  ④ 四项都按 300 满额堆满：合计 974 = 3.2×wWin，z8 先例（满量程 3×wWin 的线性项把胜率打到 .547→0）⇒
+  保留封顶、并新增「送死守卫」（`lives_exhausted ≤ 60/700`）与「龟缩守卫」（`cellsVisited ≥ 110`）。
+- **护栏**：`g7-ctrl2` 同时开（同相位对照）；预注册含**机制判据**（毁局 `thCostDirect+aimed` ≤14 且
+  `thShotsAtBaseCum` ≤5）——没有它，胜率涨了也分不清守家与面板适应；纯课程侧改动 ⇒ 不动 TS、不动 metrics 版本、
+  不改 codehash（**无需重启 hub / 不碰 tunnel**）。
+- **起点与命名**：两课都从 **c1@it740** 起（不用 `g7-base.it210`）。依据：it210 的 base **39.43%**
+  （it190 的 41.71% 已回落）、ctrl **40.43%**（反超 base 1.0pp）；毁局 `thCostDirect` 在 it0/190/200/210 =
+  41.2/43.8/41.5/43.2 全程平 ⇒ 没有可继承的守家技能，"41.7% 当暖启动"是把一个幸运 checkpoint 当资产。
+  另外从 it210 起跑会污染对照腿（它已被旧三项奖励训过）并切断与 g7 的同迭代三向比对。命名沿用 `g7-` 前缀
+  （`g7-base2` / `g7-ctrl2`，用户 2026-11-20 口径：不急着升序列），在跑的两课不动。
+- **全文**：`docs/nn/experiments.md §146`（g7 判决与病因）· `nn-training/curricula/g7-base2.jsonc` 文件头（实付表与判据）。

@@ -63,6 +63,7 @@ export const CONSOLE_ROUTES: readonly ConsoleRoute[] = [
   { path: '/api/evalGames', methods: ['GET'] },
   { path: '/api/evalRounds', methods: ['GET'] },
   { path: '/api/compareTrends', methods: ['GET'] },
+  { path: '/api/trendSeries', methods: ['GET'] },
   { path: '/api/evalReplayJob', methods: ['GET'] },
   { path: '/api/evalReplayFile', methods: ['GET'] },
   { path: '/api/errors', methods: ['GET'] },

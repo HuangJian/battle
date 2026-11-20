@@ -34,6 +34,10 @@ function render(
       order,
       visibility,
       metricStats: DEFAULT_BEHAVIOR_METRIC_STATS,
+      currentCourse: 'cur',
+      courses: ['cur', 'other'],
+      archived: ['old'],
+      compare: { on: false, courses: [] },
       onApply: () => {},
       onClose: () => {},
     }),
@@ -73,9 +77,9 @@ describe('TrendConfigModal · 分组与英文键', () => {
       expect(html).toContain(`<span class="tc-trendcfg__cn">${c.label}</span>`)
       expect(html).toContain(`<code class="tc-trendcfg__key">${c.key}</code>`)
     }
-    // 复选框数量 = 六张基础图 + 全部逐局指标；统计量下拉只属于逐局指标。
+    // 复选框数量 = 六张基础图 + 全部逐局指标 + 多课对比开关；统计量下拉只属于逐局指标。
     expect((html.match(/type="checkbox"/g) ?? []).length).toBe(
-      TREND_BASE_CHARTS.length + BEHAVIOR_METRICS.length,
+      TREND_BASE_CHARTS.length + BEHAVIOR_METRICS.length + 1,
     )
     expect((html.match(/<select/g) ?? []).length).toBe(BEHAVIOR_METRICS.length)
   })
@@ -145,6 +149,10 @@ describe('TrendConfigModal · 分组与英文键', () => {
         order: resolveTrendOrder(null),
         visibility: DEFAULT_TREND_VISIBILITY,
         metricStats: DEFAULT_BEHAVIOR_METRIC_STATS,
+        currentCourse: 'cur',
+        courses: ['cur', 'other'],
+        archived: [],
+        compare: { on: false, courses: [] },
         onApply: () => {
           calls++
         },
