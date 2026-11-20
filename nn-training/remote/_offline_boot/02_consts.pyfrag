@@ -123,6 +123,18 @@ def _headers(token: str) -> dict[str, str]:
 #: 清单轮询的缺省间隔（秒）——`CFG.queue_poll_sec`（与等包轮询同档）。
 DEFAULT_QUEUE_POLL_SEC = 15.0
 
+#: **清单端点连不上**时的等待窗口（秒）——`CFG.hub_wait_sec`。
+#: 为什么需要它（2026-11-20 事故）：Kaggle 排队 30h 后开机的头几秒，hub 解析失败
+#: （`[Errno -2] Name or service not known`）；旧行为是**第一次取清单失败就 SystemExit**，
+#: 整场会话 5 秒判死，而 kernel 还活着继续烧 TPU 配额。连不上是**网络态**，不是配置错误：
+#: 开机 DNS 未就绪 / 隧道或 hub 刚重启都会这样，等几拍往往自己就好。所以这里给一个
+#: 独立窗口（不占 `idle_wait_sec`：我们还**不知道**有没有活，不能算空转），
+#: 过了窗口才响亮收工。
+#: 为什么是 1800（与 `DEFAULT_WAIT_SEC` 同档）：**提前放弃省不下任何东西** —— kernel 默认
+#: 不退出（`shutdown_kernel_on_exit=False`，cell 2 中途取回要它），放弃后配额照样烧到会话结束；
+#: 而 hub 回来了就能把剩下的几小时用上。所以要人想早收工就把它调小 / 设 0（第一拍即收工）。
+HUB_WAIT_SEC = 1800.0
+
 #: 等包缺省时长（秒）：hub 没导出 / 用户还没上传，都在这条线上等。
 DEFAULT_WAIT_SEC = 1800.0
 #: **清单全为终态**时的收工窗口（秒）——`CFG.idle_wait_terminal_sec`。

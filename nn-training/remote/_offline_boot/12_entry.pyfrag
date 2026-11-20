@@ -25,6 +25,11 @@ def run(
     #   userspace 引导会把平台 Secrets（公网 HTTPS）变成够不着的东西。
     creds = {
         "HUB_TOKEN": secret("HUB_TOKEN", cfg.get("hub_token")),
+        # `HUB_URL`：Secrets 里的公网隧道地址（优先于 CFG.hub_url）。为什么需要它：
+        #   `CFG.hub_url` 是**存 notebook 时**的字面量，而 quick tunnel 换域名是常态
+        #   ⇒ 排队 30h 后拿到的是一串已不存在的域名（2026-11-20 两次事故）。Secrets
+        #   可以在不重存 notebook 的前提下跟新地址。
+        "HUB_URL": secret("HUB_URL", ""),
         "HUB_IP": secret("HUB_IP", cfg.get("hub_ip")),
         "TS_AUTHKEY": secret("TS_AUTHKEY", cfg.get("ts_authkey")),
     }

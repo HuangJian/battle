@@ -260,8 +260,31 @@ def _local_sha(root: Path, fname: str, key: str) -> str:
 # ── hub 侧：解析地址 → 探活 → 取包 ─────────────────────────────────────────
 
 
+def _hub_url(raw: object) -> str:
+    """`HUB_URL` / `CFG.hub_url` 的合法形态 → 可用的 http(s) 地址（否则空串）。
+
+    为什么要过滤：这两个值一个是手填的、一个来自 Secrets——脏值（空、`<...>` 占位符、
+    误把 token 填进来）会被直接拼成 `<值>/offline/tasks`，`urllib` 只会报
+    `unknown url type`（2026-11-20 用例暴露）。裸主机名补 `https://`（手填常态）。
+    """
+    u = str(raw or "").strip().rstrip("/")
+    if not u or "<" in u:
+        return ""
+    if not u.startswith(("http://", "https://")):
+        if "." not in u:
+            return ""
+        u = "https://" + u
+    return u
+
+
 def hub_candidates(cfg: dict, creds: dict) -> list[str]:
-    """hub 候选地址（去重、保序）：`CFG.hub_url`（公网隧道 URL 或手填）→ `HUB_IP`（tailnet）。
+    """hub 候选地址（去重、保序）：`HUB_URL`（Secrets）→ `CFG.hub_url` → `HUB_IP`（tailnet）。
+
+    ★ 2026-11-20（Kaggle 排队 30h 白白烧掉两次的根因）：`CFG.hub_url` 是**存 notebook 时**
+    的字面量，而 cloudflared quick tunnel 换域名是常态（DECISIONS 禁令 #1）⇒ 排队越久，
+    存着的 URL 越可能是死的（`[Errno -2] Name or service not known`）。Secrets 里的
+    `HUB_URL` 可以在**不重存 notebook** 的前提下换掉，所以它排第一；两个都死也没关系，
+    清单获取会逐个试，全不行就按 `hub_wait_sec` 的窗口等/收工。
 
     离线盘两条路都可能通：本机 hub 用 cloudflared 暴露成公网 URL 时**不需要 tailscale**；
     只有走 tailnet IP 时才需要（那条路才去起 tailscale）。
@@ -271,9 +294,10 @@ def hub_candidates(cfg: dict, creds: dict) -> list[str]:
     （只留 `hub_url` 那条公网路）。
     """
     out: list[str] = []
-    u = str(cfg.get("hub_url") or "").strip().rstrip("/")
-    if u and "<" not in u:
-        out.append(u)
+    for raw in (creds.get("HUB_URL"), cfg.get("hub_url")):
+        u = _hub_url(raw)
+        if u and u not in out:
+            out.append(u)
     ip = "" if is_kaggle() else str(creds.get("HUB_IP") or "").strip()
     if ip:
         try:

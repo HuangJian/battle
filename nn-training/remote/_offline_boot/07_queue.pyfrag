@@ -68,35 +68,53 @@ def fetch_task_list(
     *,
     worker: str = "",
     timeout: float = PING_TIMEOUT,
+    probe: dict | None = None,
 ) -> list[dict] | None:
     """`GET /offline/tasks` → 任务清单；`None` = **hub 不支持 / 不可达**（调用方据此降级）。
 
     ★M1b / Q3：带 `?worker=` 时清单会把「一拖一」算进去（`busy` / `claimable` 按**这台盘**
     判）——这才是云机该看的那份（不带 = 上界语义，可能把「你这台盘正在跑别的课」漏掉，
     于是选了一门 claim 必吃 409 的课）。
+
+    ★ 2026-11-20：`probe` 非空时写 `probe["error"]` = `"unsupported"`（老 hub 404/405 /
+    形状不对）/ `"denied"`（401/403）/ `"unreachable"`（连不上：DNS、超时、5xx）——
+    **「配置错」与「网络还没好」必须分开**：旧实现把两者都算成 unsupported，于是开机
+    头几秒 DNS 没就绪就把整场会话判死（Kaggle 排队 30h 后 5 秒收工、kernel 继续烧配额）。
+    成功时清空。
     """
     url = f"{hub.rstrip('/')}{OFFLINE_TASKS_PATH}"
     if worker:
         url += f"?worker={urllib.parse.quote(worker)}"
     req = urllib.request.Request(url, headers=_headers(token))
+
+    def _mark(kind: str) -> None:
+        if probe is not None:
+            probe["error"] = kind
+
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             doc = _json_dict(resp.read())
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
             log(f"清单端点被拒 HTTP {e.code} —— HUB_TOKEN 不一致（本次降级到 CFG.course）")
+            _mark("denied")
         elif e.code in (404, 405):
             log("hub 没有 /offline/tasks（老 hub）⇒ 降级到 CFG.course（升级 hub 后即可不填 course）")
+            _mark("unsupported")
         else:
             log(f"清单端点取失败 HTTP {e.code}：{_http_error_body(e)}")
+            _mark("unreachable")
         return None
     except Exception as e:
         log(f"清单端点连不上（{type(e).__name__}: {e}）⇒ 降级到 CFG.course")
+        _mark("unreachable")
         return None
     tasks = doc.get("tasks")
     if not isinstance(tasks, list):
         log("清单端点回了意外形状（没有 tasks 列表）⇒ 降级到 CFG.course")
+        _mark("unsupported")
         return None
+    _mark("")
     log(f"hub 清单：{len(tasks)} 条（hub_version={doc.get('hub_version')}）")
     return [t for t in tasks if isinstance(t, dict)]
 

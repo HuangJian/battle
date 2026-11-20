@@ -343,6 +343,18 @@ def _headers(token: str) -> dict[str, str]:
 #: 清单轮询的缺省间隔（秒）——`CFG.queue_poll_sec`（与等包轮询同档）。
 DEFAULT_QUEUE_POLL_SEC = 15.0
 
+#: **清单端点连不上**时的等待窗口（秒）——`CFG.hub_wait_sec`。
+#: 为什么需要它（2026-11-20 事故）：Kaggle 排队 30h 后开机的头几秒，hub 解析失败
+#: （`[Errno -2] Name or service not known`）；旧行为是**第一次取清单失败就 SystemExit**，
+#: 整场会话 5 秒判死，而 kernel 还活着继续烧 TPU 配额。连不上是**网络态**，不是配置错误：
+#: 开机 DNS 未就绪 / 隧道或 hub 刚重启都会这样，等几拍往往自己就好。所以这里给一个
+#: 独立窗口（不占 `idle_wait_sec`：我们还**不知道**有没有活，不能算空转），
+#: 过了窗口才响亮收工。
+#: 为什么是 1800（与 `DEFAULT_WAIT_SEC` 同档）：**提前放弃省不下任何东西** —— kernel 默认
+#: 不退出（`shutdown_kernel_on_exit=False`，cell 2 中途取回要它），放弃后配额照样烧到会话结束；
+#: 而 hub 回来了就能把剩下的几小时用上。所以要人想早收工就把它调小 / 设 0（第一拍即收工）。
+HUB_WAIT_SEC = 1800.0
+
 #: 等包缺省时长（秒）：hub 没导出 / 用户还没上传，都在这条线上等。
 DEFAULT_WAIT_SEC = 1800.0
 #: **清单全为终态**时的收工窗口（秒）——`CFG.idle_wait_terminal_sec`。
@@ -701,8 +713,31 @@ def _local_sha(root: Path, fname: str, key: str) -> str:
 # ── hub 侧：解析地址 → 探活 → 取包 ─────────────────────────────────────────
 
 
+def _hub_url(raw: object) -> str:
+    """`HUB_URL` / `CFG.hub_url` 的合法形态 → 可用的 http(s) 地址（否则空串）。
+
+    为什么要过滤：这两个值一个是手填的、一个来自 Secrets——脏值（空、`<...>` 占位符、
+    误把 token 填进来）会被直接拼成 `<值>/offline/tasks`，`urllib` 只会报
+    `unknown url type`（2026-11-20 用例暴露）。裸主机名补 `https://`（手填常态）。
+    """
+    u = str(raw or "").strip().rstrip("/")
+    if not u or "<" in u:
+        return ""
+    if not u.startswith(("http://", "https://")):
+        if "." not in u:
+            return ""
+        u = "https://" + u
+    return u
+
+
 def hub_candidates(cfg: dict, creds: dict) -> list[str]:
-    """hub 候选地址（去重、保序）：`CFG.hub_url`（公网隧道 URL 或手填）→ `HUB_IP`（tailnet）。
+    """hub 候选地址（去重、保序）：`HUB_URL`（Secrets）→ `CFG.hub_url` → `HUB_IP`（tailnet）。
+
+    ★ 2026-11-20（Kaggle 排队 30h 白白烧掉两次的根因）：`CFG.hub_url` 是**存 notebook 时**
+    的字面量，而 cloudflared quick tunnel 换域名是常态（DECISIONS 禁令 #1）⇒ 排队越久，
+    存着的 URL 越可能是死的（`[Errno -2] Name or service not known`）。Secrets 里的
+    `HUB_URL` 可以在**不重存 notebook** 的前提下换掉，所以它排第一；两个都死也没关系，
+    清单获取会逐个试，全不行就按 `hub_wait_sec` 的窗口等/收工。
 
     离线盘两条路都可能通：本机 hub 用 cloudflared 暴露成公网 URL 时**不需要 tailscale**；
     只有走 tailnet IP 时才需要（那条路才去起 tailscale）。
@@ -712,9 +747,10 @@ def hub_candidates(cfg: dict, creds: dict) -> list[str]:
     （只留 `hub_url` 那条公网路）。
     """
     out: list[str] = []
-    u = str(cfg.get("hub_url") or "").strip().rstrip("/")
-    if u and "<" not in u:
-        out.append(u)
+    for raw in (creds.get("HUB_URL"), cfg.get("hub_url")):
+        u = _hub_url(raw)
+        if u and u not in out:
+            out.append(u)
     ip = "" if is_kaggle() else str(creds.get("HUB_IP") or "").strip()
     if ip:
         try:
@@ -2118,35 +2154,53 @@ def fetch_task_list(
     *,
     worker: str = "",
     timeout: float = PING_TIMEOUT,
+    probe: dict | None = None,
 ) -> list[dict] | None:
     """`GET /offline/tasks` → 任务清单；`None` = **hub 不支持 / 不可达**（调用方据此降级）。
 
     ★M1b / Q3：带 `?worker=` 时清单会把「一拖一」算进去（`busy` / `claimable` 按**这台盘**
     判）——这才是云机该看的那份（不带 = 上界语义，可能把「你这台盘正在跑别的课」漏掉，
     于是选了一门 claim 必吃 409 的课）。
+
+    ★ 2026-11-20：`probe` 非空时写 `probe["error"]` = `"unsupported"`（老 hub 404/405 /
+    形状不对）/ `"denied"`（401/403）/ `"unreachable"`（连不上：DNS、超时、5xx）——
+    **「配置错」与「网络还没好」必须分开**：旧实现把两者都算成 unsupported，于是开机
+    头几秒 DNS 没就绪就把整场会话判死（Kaggle 排队 30h 后 5 秒收工、kernel 继续烧配额）。
+    成功时清空。
     """
     url = f"{hub.rstrip('/')}{OFFLINE_TASKS_PATH}"
     if worker:
         url += f"?worker={urllib.parse.quote(worker)}"
     req = urllib.request.Request(url, headers=_headers(token))
+
+    def _mark(kind: str) -> None:
+        if probe is not None:
+            probe["error"] = kind
+
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             doc = _json_dict(resp.read())
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
             log(f"清单端点被拒 HTTP {e.code} —— HUB_TOKEN 不一致（本次降级到 CFG.course）")
+            _mark("denied")
         elif e.code in (404, 405):
             log("hub 没有 /offline/tasks（老 hub）⇒ 降级到 CFG.course（升级 hub 后即可不填 course）")
+            _mark("unsupported")
         else:
             log(f"清单端点取失败 HTTP {e.code}：{_http_error_body(e)}")
+            _mark("unreachable")
         return None
     except Exception as e:
         log(f"清单端点连不上（{type(e).__name__}: {e}）⇒ 降级到 CFG.course")
+        _mark("unreachable")
         return None
     tasks = doc.get("tasks")
     if not isinstance(tasks, list):
         log("清单端点回了意外形状（没有 tasks 列表）⇒ 降级到 CFG.course")
+        _mark("unsupported")
         return None
+    _mark("")
     log(f"hub 清单：{len(tasks)} 条（hub_version={doc.get('hub_version')}）")
     return [t for t in tasks if isinstance(t, dict)]
 
@@ -2716,14 +2770,31 @@ def resolve_courses(
         raise SystemExit(_no_courses_msg("hub 没有 /offline/tasks（本会话已探过）"))
     hubs = hub_candidates(cfg, creds)
     if not hubs:
-        raise SystemExit(_no_courses_msg("没有可用的 hub 地址（CFG.hub_url / HUB_IP 都没配）"))
-    tasks = fetch_task_list(
-        hubs[0], str(creds.get("HUB_TOKEN") or ""), log, worker=worker
-    )
+        raise SystemExit(
+            _no_courses_msg("没有可用的 hub 地址（HUB_URL / CFG.hub_url / HUB_IP 都没配）")
+        )
+    # 逐个试（Secrets 里的 `HUB_URL` 排第一，见 `hub_candidates`）：`CFG.hub_url` 是存 notebook
+    # 时的字面量，可能早已随隧道换域名死掉；一个候选不通不代表另一个不通。
+    tasks: list[dict] | None = None
+    for hub in hubs:
+        tasks = fetch_task_list(
+            hub, str(creds.get("HUB_TOKEN") or ""), log, worker=worker, probe=probe
+        )
+        if tasks is not None:
+            break
+    err = str((probe or {}).get("error") or "") if tasks is None else ""
+    if probe is not None:
+        # `unreachable` 是**网络态**（连不上：DNS 未就绪 / 隧道或 hub 刚重启），不是配置错误：
+        # 交回空表，由 `_run_auto` 按 `hub_wait_sec` 等它回来。旧行为：第一次失败就
+        # SystemExit ⇒ 开机头几秒一次 DNS 抖动判死整场会话（2026-11-20 两次事故）。
+        # 成功时显式清掉：上一拍的黑障状态不能拖进下一拍。
+        probe["unreachable"] = err == "unreachable"
     if tasks is None:
+        if err == "unreachable" and probe is not None:
+            return [], [], []
         if probe is not None:
             probe["unsupported"] = True
-        raise SystemExit(_no_courses_msg("hub 不支持任务清单（或本机连不上它）"))
+        raise SystemExit(_no_courses_msg(_TASKS_ERR_TEXT.get(err, "hub 不支持任务清单")))
 
     if holds is not None:
         # ★M5：先回填「本盘自己还持着哪些课」——**不管下面走哪一支**（可领的行会早退），
@@ -2889,6 +2960,14 @@ def all_terminal(rows: list[dict], served: dict[str, str] | None = None) -> bool
             continue
         return False
     return True
+
+
+#: 取清单失败的**非网络**原因（`fetch_task_list` 写进 `probe["error"]`）→ 响亮文案。
+#: `"unreachable"` 不在这张表里：那是网络态，由 `_run_auto` 的 `hub_wait_sec` 窗口处理。
+_TASKS_ERR_TEXT = {
+    "unsupported": "hub 没有 /offline/tasks（老 hub，或回的不是清单）",
+    "denied": "清单端点被拒（HUB_TOKEN 不一致）",
+}
 
 
 def _no_courses_msg(why: str) -> str:
@@ -3150,6 +3229,100 @@ def _run_batch(
     return rc
 
 
+def _run_task_round(
+    cfg: dict,
+    creds: dict,
+    log: Callable[[str], None],
+    keepalive_stop: threading.Event | None,
+    tasks: list[dict],
+    served: dict[str, str],
+    worker: str,
+) -> tuple[int, dict]:
+    """本拍有活：建租约上下文 → `_run_batch`。返回 `(rc, leases)`（`leases` 里带着中间态）。"""
+    hubs = hub_candidates(cfg, creds)
+    leases = {
+        "hub": hubs[0] if hubs else "",
+        "token": str(creds.get("HUB_TOKEN") or ""),
+        "worker": worker,
+        "served": served,
+    }
+    kind_map = {str(t["course"]): str(t.get("kind") or "rl") for t in tasks}
+    # 只在真有 BC 课时多传一个参数：RL-only 的批保持旧调用形状（测试桩 / 旧调用方都不用改），
+    # 而 BC 课一旦出现就与 RL 课走同一次 `_run_batch`。
+    batch_kwargs = {"kinds": kind_map} if "bc" in kind_map.values() else {}
+    rc = _run_batch(
+        cfg,
+        creds,
+        log,
+        keepalive_stop,
+        [str(t["course"]) for t in tasks],
+        multi=session_multi([str(t["course"]) for t in tasks], served),
+        leases=leases,
+        shas={str(t["course"]): str(t.get("pack_sha256") or "") for t in tasks},
+        **batch_kwargs,
+    )
+    return rc, leases
+
+
+def _record_round_outcome(
+    leases: dict, gave_up: set[str], poll: float, log: Callable[[str], None]
+) -> bool:
+    """记下本拍的放弃/撤销课，并判定「只是交接中间态」。
+
+    返回 True = 本拍一门没跑、只是 `pending_export` / `busy` 这类中间态（调用方要 backoff，
+    但**不消耗** `idle_wait_sec`：排导包的几分钟不能算空转）。
+    """
+    gave_up.update(leases.get("gave_up") or [])
+    # ★M3：租约在段内被撤销的课（人强制解除接管）——本会话不再领它（段已跑完并打包）。
+    # 与 `gave_up`（hub 触发导包到上界）同一处理，只是原因不同。
+    revoked_now = leases.get("revoked")
+    if revoked_now:
+        log("本会话不再领这些课（租约已被撤销）：" + "、".join(str(c) for c in revoked_now))
+        gave_up.update(str(c) for c in revoked_now)
+    raw_blockers = leases.get("blockers")
+    blockers: dict[str, str] = raw_blockers if isinstance(raw_blockers, dict) else {}
+    if leases.get("ran") or not (blockers or leases.get("gave_up")):
+        return False
+    log(
+        f"本拍没有可跑的课（{', '.join(sorted(blockers)) or '交接中'}）"
+        f"—— {poll:.0f}s 后再问（不占 idle 预算）"
+    )
+    return True
+
+
+def _wait_out_a_hub_blackout(
+    *,
+    waited: float,
+    hub_wait: float,
+    poll: float,
+    log: Callable[[str], None],
+    keepalive_stop: threading.Event | None,
+    budget: float,
+    start: float,
+    rc: int,
+) -> int | None:
+    """清单连不上的这一拍：`None` = 继续等；`int` = 该收工的 rc。
+
+    ``hub_wait_sec=0`` ⇒ 第一拍就收工（人要“立刻放弃”时的开关）。为什么默认等满 1800s：
+    kernel 默认不退出，提前放弃省不下配额，而 hub 回来了还能把剩下的几小时用上。
+    """
+    if waited >= hub_wait:
+        log(
+            f"hub 清单已 {waited:.0f}s 连不上（上限 hub_wait_sec={hub_wait:g}s）⇒ 收工。\n"
+            "  hub_url 可能已失效（cloudflared quick tunnel 换域名）："
+            "把当前地址写进 Kaggle Secrets 的 HUB_URL（或 CFG.hub_url）后重跑本 cell。"
+        )
+        return 3
+    if keepalive_stop is not None and keepalive_stop.is_set():
+        log("收到停机信号 ⇒ 收工")
+        return rc
+    if budget > 0 and time.monotonic() - start >= budget:
+        log(f"会话预算 session_budget_sec={budget:.0f}s 用尽 ⇒ 收工")
+        return rc
+    log(f"hub 清单还连不上 —— {poll:g}s 后再问（已等 {waited:.0f}s / 上限 {hub_wait:g}s）")
+    return None
+
+
 def _run_auto(
     cfg: dict, creds: dict, log: Callable[[str], None], keepalive_stop: Any
 ) -> int:
@@ -3202,10 +3375,14 @@ def _run_auto(
     # 终态窗口：**独立**锚点与预算（不占 idle_wait_sec——「没活了」与「活还没到」是两件事）。
     idle_wait_terminal = _num("idle_wait_terminal_sec", IDLE_WAIT_TERMINAL_SEC)
     poll = _num("queue_poll_sec", DEFAULT_QUEUE_POLL_SEC)
+    #: 清单连不上时的独立窗口（网络态，不占 idle 预算；理由见 `HUB_WAIT_SEC`）。
+    hub_wait = _num("hub_wait_sec", HUB_WAIT_SEC)
     start = time.monotonic()
     idle_since = start
     #: 终态窗口的锚点（`None` = 本拍不是「全终态」）。在**非终态**的每一拍复位。
     terminal_since: float | None = None
+    #: 清单连不上的锚点（`None` = 本拍取到了清单）。取到清单即复位。
+    hub_since: float | None = None
     while True:
         # 本机 worker id 在**取清单之前**备好：`resolve_courses` 要拿它认「自己的租约」
         # （hub 判 `mine` 直接续上——否则 cell 中断重跑会白等 900s TTL，G1 的原始动机）。
@@ -3222,54 +3399,42 @@ def _run_auto(
             worker=worker,
             holds=holds,
         )
+        if probe.get("unreachable"):
+            # 2026-11-20 事故（Kaggle 排队 30h 后开机 5 秒 SystemExit）：连不上是**网络态**，
+            # 不是「不知道跑哪几门课」。等它回来（开机 DNS 未就绪 / 网络抖动 / 隧道刚重启），
+            # 但窗口有限（`hub_wait_sec`），过了才响亮收工。也**不消耗** idle 预算：
+            # 我们还不知道有没有活。
+            now = time.monotonic()
+            if hub_since is None:
+                hub_since = now
+                log(
+                    "hub 清单连不上 —— 先不判死："
+                    f"每 {poll:g}s 再问，上限 hub_wait_sec={hub_wait:g}s（不占 idle 预算）"
+                )
+            _rc = _wait_out_a_hub_blackout(
+                waited=now - hub_since,
+                hub_wait=hub_wait,
+                poll=poll,
+                log=log,
+                keepalive_stop=keepalive_stop,
+                budget=budget,
+                start=start,
+                rc=rc,
+            )
+            if _rc is not None:
+                return _rc
+            time.sleep(poll)
+            continue
+        hub_since = None
         if tasks:
             idle_since = time.monotonic()
             terminal_since = None  # 有活 ⇒ 终态窗口作废（下一拍若全终态，重新起算）
-            hubs = hub_candidates(cfg, creds)
-            leases = {
-                "hub": hubs[0] if hubs else "",
-                "token": str(creds.get("HUB_TOKEN") or ""),
-                "worker": worker,
-                "served": served,
-            }
-            kind_map = {
-                str(t["course"]): str(t.get("kind") or "rl") for t in tasks
-            }
-            # 只在真有 BC 课时多传一个参数：RL-only 的批保持旧调用形状（测试桩 / 旧
-            # 调用方都不用改），而 BC 课一旦出现就与 RL 课走同一次 `_run_batch`。
-            batch_kwargs = {"kinds": kind_map} if "bc" in kind_map.values() else {}
-            batch_rc = _run_batch(
-                cfg,
-                creds,
-                log,
-                keepalive_stop,
-                [str(t["course"]) for t in tasks],
-                multi=session_multi([str(t["course"]) for t in tasks], served),
-                leases=leases,
-                shas={str(t["course"]): str(t.get("pack_sha256") or "") for t in tasks},
-                **batch_kwargs,
+            batch_rc, leases = _run_task_round(
+                cfg, creds, log, keepalive_stop, tasks, served, worker
             )
             rc = batch_rc or rc
-            gave_up.update(leases.get("gave_up") or [])
-            # ★M3：租约在段内被撤销的课（人强制解除接管）——本会话不再领它（段已跑完
-            # 并打包）。与 `gave_up`（hub 触发导包到上界）同一处理，只是原因不同。
-            revoked_now = leases.get("revoked")
-            if revoked_now:
-                log(
-                    "本会话不再领这些课（租约已被撤销）："
-                    + "、".join(str(c) for c in revoked_now)
-                )
-                gave_up.update(str(c) for c in revoked_now)
-            raw_blockers = leases.get("blockers")
-            blockers: dict[str, str] = raw_blockers if isinstance(raw_blockers, dict) else {}
-            if not leases.get("ran") and (blockers or leases.get("gave_up")):
-                # 全是自动交接的中间态（导包是分钟级 / 别的课在跑）：**不消耗 idle_wait_sec
-                # 预算**（否则排导包的这几分钟会被当成空转、会话提前收工），但要给自己一个
-                # backoff，别 tight loop 打爆 hub。
-                log(
-                    f"本拍没有可跑的课（{', '.join(sorted(blockers)) or '交接中'}）"
-                    f"—— {poll:.0f}s 后再问（不占 idle 预算）"
-                )
+            if _record_round_outcome(leases, gave_up, poll, log):
+                # 中间态（导包是分钟级 / 别的课在跑）：backoff，但**不消耗** idle 预算。
                 if _idle_take_bc():  # ★M5：空档里领一份 BC（跑完才回来）
                     idle_since = time.monotonic()
                 time.sleep(poll)
@@ -3628,6 +3793,11 @@ def run(
     #   userspace 引导会把平台 Secrets（公网 HTTPS）变成够不着的东西。
     creds = {
         "HUB_TOKEN": secret("HUB_TOKEN", cfg.get("hub_token")),
+        # `HUB_URL`：Secrets 里的公网隧道地址（优先于 CFG.hub_url）。为什么需要它：
+        #   `CFG.hub_url` 是**存 notebook 时**的字面量，而 quick tunnel 换域名是常态
+        #   ⇒ 排队 30h 后拿到的是一串已不存在的域名（2026-11-20 两次事故）。Secrets
+        #   可以在不重存 notebook 的前提下跟新地址。
+        "HUB_URL": secret("HUB_URL", ""),
         "HUB_IP": secret("HUB_IP", cfg.get("hub_ip")),
         "TS_AUTHKEY": secret("TS_AUTHKEY", cfg.get("ts_authkey")),
     }

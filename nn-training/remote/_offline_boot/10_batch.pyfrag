@@ -177,6 +177,100 @@ def _run_batch(
     return rc
 
 
+def _run_task_round(
+    cfg: dict,
+    creds: dict,
+    log: Callable[[str], None],
+    keepalive_stop: threading.Event | None,
+    tasks: list[dict],
+    served: dict[str, str],
+    worker: str,
+) -> tuple[int, dict]:
+    """本拍有活：建租约上下文 → `_run_batch`。返回 `(rc, leases)`（`leases` 里带着中间态）。"""
+    hubs = hub_candidates(cfg, creds)
+    leases = {
+        "hub": hubs[0] if hubs else "",
+        "token": str(creds.get("HUB_TOKEN") or ""),
+        "worker": worker,
+        "served": served,
+    }
+    kind_map = {str(t["course"]): str(t.get("kind") or "rl") for t in tasks}
+    # 只在真有 BC 课时多传一个参数：RL-only 的批保持旧调用形状（测试桩 / 旧调用方都不用改），
+    # 而 BC 课一旦出现就与 RL 课走同一次 `_run_batch`。
+    batch_kwargs = {"kinds": kind_map} if "bc" in kind_map.values() else {}
+    rc = _run_batch(
+        cfg,
+        creds,
+        log,
+        keepalive_stop,
+        [str(t["course"]) for t in tasks],
+        multi=session_multi([str(t["course"]) for t in tasks], served),
+        leases=leases,
+        shas={str(t["course"]): str(t.get("pack_sha256") or "") for t in tasks},
+        **batch_kwargs,
+    )
+    return rc, leases
+
+
+def _record_round_outcome(
+    leases: dict, gave_up: set[str], poll: float, log: Callable[[str], None]
+) -> bool:
+    """记下本拍的放弃/撤销课，并判定「只是交接中间态」。
+
+    返回 True = 本拍一门没跑、只是 `pending_export` / `busy` 这类中间态（调用方要 backoff，
+    但**不消耗** `idle_wait_sec`：排导包的几分钟不能算空转）。
+    """
+    gave_up.update(leases.get("gave_up") or [])
+    # ★M3：租约在段内被撤销的课（人强制解除接管）——本会话不再领它（段已跑完并打包）。
+    # 与 `gave_up`（hub 触发导包到上界）同一处理，只是原因不同。
+    revoked_now = leases.get("revoked")
+    if revoked_now:
+        log("本会话不再领这些课（租约已被撤销）：" + "、".join(str(c) for c in revoked_now))
+        gave_up.update(str(c) for c in revoked_now)
+    raw_blockers = leases.get("blockers")
+    blockers: dict[str, str] = raw_blockers if isinstance(raw_blockers, dict) else {}
+    if leases.get("ran") or not (blockers or leases.get("gave_up")):
+        return False
+    log(
+        f"本拍没有可跑的课（{', '.join(sorted(blockers)) or '交接中'}）"
+        f"—— {poll:.0f}s 后再问（不占 idle 预算）"
+    )
+    return True
+
+
+def _wait_out_a_hub_blackout(
+    *,
+    waited: float,
+    hub_wait: float,
+    poll: float,
+    log: Callable[[str], None],
+    keepalive_stop: threading.Event | None,
+    budget: float,
+    start: float,
+    rc: int,
+) -> int | None:
+    """清单连不上的这一拍：`None` = 继续等；`int` = 该收工的 rc。
+
+    ``hub_wait_sec=0`` ⇒ 第一拍就收工（人要“立刻放弃”时的开关）。为什么默认等满 1800s：
+    kernel 默认不退出，提前放弃省不下配额，而 hub 回来了还能把剩下的几小时用上。
+    """
+    if waited >= hub_wait:
+        log(
+            f"hub 清单已 {waited:.0f}s 连不上（上限 hub_wait_sec={hub_wait:g}s）⇒ 收工。\n"
+            "  hub_url 可能已失效（cloudflared quick tunnel 换域名）："
+            "把当前地址写进 Kaggle Secrets 的 HUB_URL（或 CFG.hub_url）后重跑本 cell。"
+        )
+        return 3
+    if keepalive_stop is not None and keepalive_stop.is_set():
+        log("收到停机信号 ⇒ 收工")
+        return rc
+    if budget > 0 and time.monotonic() - start >= budget:
+        log(f"会话预算 session_budget_sec={budget:.0f}s 用尽 ⇒ 收工")
+        return rc
+    log(f"hub 清单还连不上 —— {poll:g}s 后再问（已等 {waited:.0f}s / 上限 {hub_wait:g}s）")
+    return None
+
+
 def _run_auto(
     cfg: dict, creds: dict, log: Callable[[str], None], keepalive_stop: Any
 ) -> int:
@@ -229,10 +323,14 @@ def _run_auto(
     # 终态窗口：**独立**锚点与预算（不占 idle_wait_sec——「没活了」与「活还没到」是两件事）。
     idle_wait_terminal = _num("idle_wait_terminal_sec", IDLE_WAIT_TERMINAL_SEC)
     poll = _num("queue_poll_sec", DEFAULT_QUEUE_POLL_SEC)
+    #: 清单连不上时的独立窗口（网络态，不占 idle 预算；理由见 `HUB_WAIT_SEC`）。
+    hub_wait = _num("hub_wait_sec", HUB_WAIT_SEC)
     start = time.monotonic()
     idle_since = start
     #: 终态窗口的锚点（`None` = 本拍不是「全终态」）。在**非终态**的每一拍复位。
     terminal_since: float | None = None
+    #: 清单连不上的锚点（`None` = 本拍取到了清单）。取到清单即复位。
+    hub_since: float | None = None
     while True:
         # 本机 worker id 在**取清单之前**备好：`resolve_courses` 要拿它认「自己的租约」
         # （hub 判 `mine` 直接续上——否则 cell 中断重跑会白等 900s TTL，G1 的原始动机）。
@@ -249,54 +347,42 @@ def _run_auto(
             worker=worker,
             holds=holds,
         )
+        if probe.get("unreachable"):
+            # 2026-11-20 事故（Kaggle 排队 30h 后开机 5 秒 SystemExit）：连不上是**网络态**，
+            # 不是「不知道跑哪几门课」。等它回来（开机 DNS 未就绪 / 网络抖动 / 隧道刚重启），
+            # 但窗口有限（`hub_wait_sec`），过了才响亮收工。也**不消耗** idle 预算：
+            # 我们还不知道有没有活。
+            now = time.monotonic()
+            if hub_since is None:
+                hub_since = now
+                log(
+                    "hub 清单连不上 —— 先不判死："
+                    f"每 {poll:g}s 再问，上限 hub_wait_sec={hub_wait:g}s（不占 idle 预算）"
+                )
+            _rc = _wait_out_a_hub_blackout(
+                waited=now - hub_since,
+                hub_wait=hub_wait,
+                poll=poll,
+                log=log,
+                keepalive_stop=keepalive_stop,
+                budget=budget,
+                start=start,
+                rc=rc,
+            )
+            if _rc is not None:
+                return _rc
+            time.sleep(poll)
+            continue
+        hub_since = None
         if tasks:
             idle_since = time.monotonic()
             terminal_since = None  # 有活 ⇒ 终态窗口作废（下一拍若全终态，重新起算）
-            hubs = hub_candidates(cfg, creds)
-            leases = {
-                "hub": hubs[0] if hubs else "",
-                "token": str(creds.get("HUB_TOKEN") or ""),
-                "worker": worker,
-                "served": served,
-            }
-            kind_map = {
-                str(t["course"]): str(t.get("kind") or "rl") for t in tasks
-            }
-            # 只在真有 BC 课时多传一个参数：RL-only 的批保持旧调用形状（测试桩 / 旧
-            # 调用方都不用改），而 BC 课一旦出现就与 RL 课走同一次 `_run_batch`。
-            batch_kwargs = {"kinds": kind_map} if "bc" in kind_map.values() else {}
-            batch_rc = _run_batch(
-                cfg,
-                creds,
-                log,
-                keepalive_stop,
-                [str(t["course"]) for t in tasks],
-                multi=session_multi([str(t["course"]) for t in tasks], served),
-                leases=leases,
-                shas={str(t["course"]): str(t.get("pack_sha256") or "") for t in tasks},
-                **batch_kwargs,
+            batch_rc, leases = _run_task_round(
+                cfg, creds, log, keepalive_stop, tasks, served, worker
             )
             rc = batch_rc or rc
-            gave_up.update(leases.get("gave_up") or [])
-            # ★M3：租约在段内被撤销的课（人强制解除接管）——本会话不再领它（段已跑完
-            # 并打包）。与 `gave_up`（hub 触发导包到上界）同一处理，只是原因不同。
-            revoked_now = leases.get("revoked")
-            if revoked_now:
-                log(
-                    "本会话不再领这些课（租约已被撤销）："
-                    + "、".join(str(c) for c in revoked_now)
-                )
-                gave_up.update(str(c) for c in revoked_now)
-            raw_blockers = leases.get("blockers")
-            blockers: dict[str, str] = raw_blockers if isinstance(raw_blockers, dict) else {}
-            if not leases.get("ran") and (blockers or leases.get("gave_up")):
-                # 全是自动交接的中间态（导包是分钟级 / 别的课在跑）：**不消耗 idle_wait_sec
-                # 预算**（否则排导包的这几分钟会被当成空转、会话提前收工），但要给自己一个
-                # backoff，别 tight loop 打爆 hub。
-                log(
-                    f"本拍没有可跑的课（{', '.join(sorted(blockers)) or '交接中'}）"
-                    f"—— {poll:.0f}s 后再问（不占 idle 预算）"
-                )
+            if _record_round_outcome(leases, gave_up, poll, log):
+                # 中间态（导包是分钟级 / 别的课在跑）：backoff，但**不消耗** idle 预算。
                 if _idle_take_bc():  # ★M5：空档里领一份 BC（跑完才回来）
                     idle_since = time.monotonic()
                 time.sleep(poll)

@@ -188,7 +188,11 @@ def test_credentials_are_read_before_any_network_change() -> None:
 
 
 def test_run_reads_secrets_first_at_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """行为版守卫（比数行号硬）：三个 secret 先读完，然后才轮到取包。"""
+    """行为版守卫（比数行号硬）：四个 secret 先读完，然后才轮到取包。
+
+    `HUB_URL`（2026-11-20）与 `HUB_IP` 同一类：必须在任何网络改动**之前**读，否则 userspace
+    引导把平台代理改掉后 Secrets 就够不着了（2026-09-17 Kaggle 事故）。
+    """
     order: list[str] = []
 
     def spy_secret(key: str, cfg_val: str = "") -> str:
@@ -203,7 +207,13 @@ def test_run_reads_secrets_first_at_runtime(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setattr(offline_boot, "obtain_pack", spy_obtain)
     with pytest.raises(SystemExit, match="stop-here"):
         offline_boot.run({"course": "c5-gae", "work_dir": str(tmp_path)}, _quiet, spy_secret)
-    assert order == ["secret:HUB_TOKEN", "secret:HUB_IP", "secret:TS_AUTHKEY", "obtain_pack"]
+    assert order == [
+        "secret:HUB_TOKEN",
+        "secret:HUB_URL",
+        "secret:HUB_IP",
+        "secret:TS_AUTHKEY",
+        "obtain_pack",
+    ]
 
 
 def test_run_requires_a_course(tmp_path: Path) -> None:

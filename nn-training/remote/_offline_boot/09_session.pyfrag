@@ -45,14 +45,31 @@ def resolve_courses(
         raise SystemExit(_no_courses_msg("hub 没有 /offline/tasks（本会话已探过）"))
     hubs = hub_candidates(cfg, creds)
     if not hubs:
-        raise SystemExit(_no_courses_msg("没有可用的 hub 地址（CFG.hub_url / HUB_IP 都没配）"))
-    tasks = fetch_task_list(
-        hubs[0], str(creds.get("HUB_TOKEN") or ""), log, worker=worker
-    )
+        raise SystemExit(
+            _no_courses_msg("没有可用的 hub 地址（HUB_URL / CFG.hub_url / HUB_IP 都没配）")
+        )
+    # 逐个试（Secrets 里的 `HUB_URL` 排第一，见 `hub_candidates`）：`CFG.hub_url` 是存 notebook
+    # 时的字面量，可能早已随隧道换域名死掉；一个候选不通不代表另一个不通。
+    tasks: list[dict] | None = None
+    for hub in hubs:
+        tasks = fetch_task_list(
+            hub, str(creds.get("HUB_TOKEN") or ""), log, worker=worker, probe=probe
+        )
+        if tasks is not None:
+            break
+    err = str((probe or {}).get("error") or "") if tasks is None else ""
+    if probe is not None:
+        # `unreachable` 是**网络态**（连不上：DNS 未就绪 / 隧道或 hub 刚重启），不是配置错误：
+        # 交回空表，由 `_run_auto` 按 `hub_wait_sec` 等它回来。旧行为：第一次失败就
+        # SystemExit ⇒ 开机头几秒一次 DNS 抖动判死整场会话（2026-11-20 两次事故）。
+        # 成功时显式清掉：上一拍的黑障状态不能拖进下一拍。
+        probe["unreachable"] = err == "unreachable"
     if tasks is None:
+        if err == "unreachable" and probe is not None:
+            return [], [], []
         if probe is not None:
             probe["unsupported"] = True
-        raise SystemExit(_no_courses_msg("hub 不支持任务清单（或本机连不上它）"))
+        raise SystemExit(_no_courses_msg(_TASKS_ERR_TEXT.get(err, "hub 不支持任务清单")))
 
     if holds is not None:
         # ★M5：先回填「本盘自己还持着哪些课」——**不管下面走哪一支**（可领的行会早退），
@@ -218,6 +235,14 @@ def all_terminal(rows: list[dict], served: dict[str, str] | None = None) -> bool
             continue
         return False
     return True
+
+
+#: 取清单失败的**非网络**原因（`fetch_task_list` 写进 `probe["error"]`）→ 响亮文案。
+#: `"unreachable"` 不在这张表里：那是网络态，由 `_run_auto` 的 `hub_wait_sec` 窗口处理。
+_TASKS_ERR_TEXT = {
+    "unsupported": "hub 没有 /offline/tasks（老 hub，或回的不是清单）",
+    "denied": "清单端点被拒（HUB_TOKEN 不一致）",
+}
 
 
 def _no_courses_msg(why: str) -> str:

@@ -116,6 +116,11 @@ def _age(path: Path, secs: float = 7200.0) -> None:
     os.utime(path, (old, old))
 
 
+def _http_error(req: Any, code: int) -> urllib.error.HTTPError:
+    """打桩 `urlopen` 用的 HTTPError（`fp` 传 `None` 是第三方签名允许的边界）。"""
+    return urllib.error.HTTPError(req.full_url, code, "nope", {}, None)  # type: ignore[arg-type]
+
+
 def _offline_hub(tmp_path: Path) -> tuple[str, _HubQueue, ThreadingHTTPServer]:
     """起 hub + 一门在训的课（大部分清单用例的公共前戏）。
 
@@ -471,7 +476,7 @@ def test_fetch_task_list_returns_none_on_an_old_hub(monkeypatch: pytest.MonkeyPa
     """老 hub（404/405）⇒ 返回 `None`（调用方降级），日志点名「老 hub」。"""
 
     def not_found(req: Any, timeout: float | None = None) -> Any:
-        raise urllib.error.HTTPError(req.full_url, 404, "nope", {}, None)  # type: ignore[arg-type]
+        raise _http_error(req, 404)
 
     monkeypatch.setattr(urllib.request, "urlopen", not_found)
     lines: list[str] = []
@@ -502,6 +507,90 @@ def test_resolve_courses_filters_claimable_and_served(monkeypatch: pytest.Monkey
     got, _blocked, _manifest = offline_boot.resolve_courses({}, {}, lines.append, served={"b": "bb" * 32})
     assert [t["course"] for t in got] == ["a", "d"]
     assert any("已跑过这份包" in ln for ln in lines), lines
+
+
+def test_resolve_courses_waits_out_a_transient_hub_blackout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ 2026-11-20 事故：开机头几秒 hub 解析失败**不许**判死整场会话。
+
+    现场（`tmp/notebook-logs/kaggle/…-1andil.log`）：Kaggle 排队 30h 后，20:24:20 开机、
+    20:24:25 就 `SystemExit: CFG.course 没填，且拿不到任务清单`（真因上一行是
+    `URLError: [Errno -2] Name or service not known`），kernel 却继续活着烧 TPU 配额。
+    连不上是**网络态**：`resolve_courses` 返回空表 + `probe["unreachable"]`，交给
+    `_run_auto` 按 `hub_wait_sec` 等它回来；真正的配置错（老 hub / token 不一致）照旧响亮。
+    """
+
+    def dns_fail(hub: str, token: str, log: Any, **kw: Any) -> None:
+        kw["probe"]["error"] = "unreachable"
+        return None
+
+    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
+    monkeypatch.setattr(offline_boot, "fetch_task_list", dns_fail)
+    probe: dict = {}
+    got, blocked, manifest = offline_boot.resolve_courses(
+        {}, {}, lambda _m: None, probe=probe
+    )
+    assert (got, blocked, manifest) == ([], [], [])
+    assert probe.get("unreachable") is True
+    assert probe.get("unsupported") is not True, "网络态不能被记成「老 hub，本会话已探过」"
+
+
+def test_resolve_courses_falls_back_to_the_next_hub_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """第一个候选死了不代表没路：`HUB_URL` / `CFG.hub_url` 两条都试，哪个能用用哪个。"""
+    calls: list[str] = []
+
+    def fetch(hub: str, token: str, log: Any, **kw: Any) -> list[dict] | None:
+        calls.append(hub)
+        if hub == "http://dead":
+            kw["probe"]["error"] = "unreachable"
+            return None
+        kw["probe"]["error"] = ""
+        return [{"course": "a", "claimable": True, "pack": {"sha256": "aa" * 32}}]
+
+    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://dead", "http://live"])
+    monkeypatch.setattr(offline_boot, "fetch_task_list", fetch)
+    probe: dict = {}
+    got, _blocked, _manifest = offline_boot.resolve_courses({}, {}, lambda _m: None, probe=probe)
+    assert [t["course"] for t in got] == ["a"]
+    assert calls == ["http://dead", "http://live"]
+    assert probe.get("unreachable") is False, "成功的那拍必须把黑障标记清掉"
+
+
+def test_fetch_task_list_separates_network_blips_from_an_old_hub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`probe["error"]` 把三档分开：连不上 / 老 hub / 鉴权 —— 否则等待窗口无从判。"""
+
+    def dns_fail(req: Any, timeout: float | None = None) -> Any:
+        raise urllib.error.URLError(OSError(-2, "Name or service not known"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", dns_fail)
+    probe: dict = {}
+    assert offline_boot.fetch_task_list("http://hub", "tok", lambda _m: None, probe=probe) is None
+    assert probe["error"] == "unreachable"
+
+    def not_found(req: Any, timeout: float | None = None) -> Any:
+        raise _http_error(req, 404)
+
+    monkeypatch.setattr(urllib.request, "urlopen", not_found)
+    probe = {}
+    assert offline_boot.fetch_task_list("http://hub", "tok", lambda _m: None, probe=probe) is None
+    assert probe["error"] == "unsupported"
+
+
+def test_hub_candidates_try_the_secret_url_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Secrets 里的 `HUB_URL` 排第一：`CFG.hub_url` 是存 notebook 时的字面量，排队越久越可能死。"""
+    monkeypatch.setattr(offline_boot, "is_kaggle", lambda: True)
+    got = offline_boot.hub_candidates(
+        {"hub_url": "https://cell.example/"}, {"HUB_URL": "https://secret.example"}
+    )
+    assert got == ["https://secret.example", "https://cell.example"], got
+    assert offline_boot.hub_candidates(
+        {"hub_url": "https://same.example"}, {"HUB_URL": "https://same.example/"}
+    ) == ["https://same.example"]
 
 
 def test_resolve_courses_probes_an_old_hub_only_once(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -861,6 +950,61 @@ def test_run_auto_keeps_the_per_course_layout_when_the_next_round_has_one_course
     )
     assert rc == 1
     assert seen == [True, True], f"重进那一拍把产物根降维成共享根了：multi={seen}"
+
+
+def test_run_auto_keeps_polling_through_a_hub_blackout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★ 2026-11-20 事故的修法：黑了先等（不占 idle 预算），一恢复就照常领活跑。"""
+    rounds = {"n": 0}
+
+    def fake_resolve(
+        cfg: dict, creds: dict, log: Any, **kw: Any
+    ) -> tuple[list[dict], list[dict], list[dict]]:
+        rounds["n"] += 1
+        if rounds["n"] < 3:
+            kw["probe"]["unreachable"] = True
+            return [], [], []
+        kw["probe"]["unreachable"] = False
+        return [], [], []
+
+    monkeypatch.setattr(offline_boot, "resolve_courses", fake_resolve)
+    lines: list[str] = []
+    rc = offline_boot._run_auto(
+        {
+            "work_dir": str(tmp_path),
+            "queue_poll_sec": 0,
+            "hub_wait_sec": 60,
+            "idle_wait_sec": 0,
+        },
+        {"HUB_TOKEN": "tok"},
+        lines.append,
+        None,
+    )
+    assert rc == 0, "hub 回来后必须回到正常路径（这里 idle_wait_sec=0 ⇒ 空队列收工；不是 rc=3）"
+    assert rounds["n"] >= 3, f"黑了两个拍就放弃 / 没重试（只取了 {rounds['n']} 次清单）"
+
+
+def test_run_auto_bounds_the_wait_when_the_hub_never_comes_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """窗口是**有界**的：`hub_wait_sec` 用满 ⇒ rc=3 收工，并把下一步写清（`HUB_URL`）。"""
+
+    def fake_resolve(
+        cfg: dict, creds: dict, log: Any, **kw: Any
+    ) -> tuple[list[dict], list[dict], list[dict]]:
+        kw["probe"]["unreachable"] = True
+        return [], [], []
+
+    monkeypatch.setattr(offline_boot, "resolve_courses", fake_resolve)
+    lines: list[str] = []
+    rc = offline_boot._run_auto(
+        {"work_dir": str(tmp_path), "queue_poll_sec": 0, "hub_wait_sec": 0},
+        {"HUB_TOKEN": "tok"},
+        lines.append,
+        None,
+    )
+    assert rc == 3, f"hub 一直连不上要 rc=3 收工（不是 0 = 「队列空」）：{lines}"
 
 
 def test_run_auto_once_mode_returns_on_an_empty_queue(
