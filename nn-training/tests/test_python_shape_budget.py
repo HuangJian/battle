@@ -166,8 +166,6 @@ GLOBAL_BASELINE = {
     "remote/worker.py": 1,
     "tools/forkdist.py": 2,
     "tools/task.py": 1,
-    "worker/eval_arbiter.py": 1,
-    "worker/eval_exec.py": 2,
 }
 
 _MUTATORS = frozenset(

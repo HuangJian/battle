@@ -358,8 +358,8 @@ else:
 | ~~`common/distribution.py:647`~~ **已修（2026-11-14 对象化 / 2026-11-19 B8 搬家 / 2026-11-20 §235）** | ~~`_RESTART_SEEN`~~ → `RestartMemo`（默认实例 `_RESTARTS`）；~~`UPGRADE_BRANCH`~~ 已不在 `common/`：整簇搬去 `remote/node_upgrade.py`，锁存现在是 `BranchLatch` 对象（`_BRANCH`，无 `global`） | 原病：升级分支是进程级锁存且「显式值能盖锁存」——2026-08-30 事故的载体（配置残留旧分支名 ⇒ 全节点 reset 回旧代码）；`explicit` 通道已删（签名层面不可复发） |
 | `common/platform_utils.py:417` | `_UNREAPED: list[Any]`（**已修** 2026-11-16：`UnreapedProcs`） | 无界增长（收尸失败的子进程） |
 | `biz/reward_context.py:54` | `_current: RewardContext` | 加载期奖励的**隐式全局**；多课程/多线程下是竞态源 |
-| `worker/eval_exec.py:354` | `_EXECUTORS` 单例 | 线程池生命周期靠 `reset_*_for_tests()` 手工管理 |
-| `worker/eval_arbiter.py:1127` | `_ARBITER` 单例 | 同上 |
+| ~~`worker/eval_exec.py:354`~~ **已修 2026-11-20（§236）** | ~~`_EXECUTORS` 单例~~ → `Cell(EvalExecutors(), retire=…close_pools)` | 原病：`global` ×2 + 锁外惰性判断（两线程同时首次取会造出孤儿池子） |
+| ~~`worker/eval_arbiter.py:1127`~~ **已修 2026-11-20（§236）** | ~~`_ARBITER` 单例~~ → `Cell(EvalArbiter(), retire=…reset_for_tests)` | 原病：换实例的 `global` 没有归属 |
 | `hub/http_face.py:192` 起 | `_blocked_logged` / `_seen_worker_sources` / `_worker_pulse` | **类属性当全局状态**，因为 `ThreadingHTTPServer` 每请求新建实例 |
 
 全仓 **14 处 `global` 语句**，集中在 L0/L1——最不该有状态的两层。
@@ -370,8 +370,8 @@ else:
 > 锁存 2026-11-20 §235 对象化成 `BranchLatch`）。守卫是
 > `tests/test_python_shape_budget.py::test_common_has_no_new_mutable_module_state`
 > （`L0_MUTABLE_ALLOWED = {}`，即 `common/**` 现已零模块级可变容器）+ `GLOBAL_BASELINE` 收掉
-> `remote/node_upgrade.py`（`UPGRADE_BRANCH` 的 `global`）。**真正剩下的只有 L1/L2 的三个单例**：
-> `worker/eval_exec._EXECUTORS`、`worker/eval_arbiter._ARBITER`、`hub/http_face` 的类属性
+> `remote/node_upgrade.py`（`UPGRADE_BRANCH` 的 `global`），L2 的两个单例（`_EXECUTORS` /
+> `_ARBITER`）也收进 `common.cell.Cell`（§236）。**真正剩下的只有** `hub/http_face` 的类属性
 > （`_blocked_logged` / `_seen_worker_sources` / `_worker_pulse`）——外加 `biz/reward_context`
 > 的 2 条 `global`（裁定保留：请求作用域上下文，见该文件头）。
 
@@ -1723,8 +1723,9 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
    * **P0-5 剩余全局状态**：`common/**` 已清零（`L0_MUTABLE_ALLOWED = {}`）：`log` / `fs` /
      `weights_ledger` 对象化（§234），`net_http` 的两个 opener 换成 `functools.cache`（B8），
      `distribution` 的升级/重启簇搬去 `remote/node_upgrade.py` 且锁存改成 `BranchLatch`（§235）。
-     剩 `worker/eval_exec._EXECUTORS`、`worker/eval_arbiter._ARBITER` 两个单例 + `hub/http_face`
-     的类属性（G2 只管 `common/**`）；`biz/reward_context` 的 2 条 `global` 裁定保留（请求作用域）；`biz/reward_context._current` 按 §P0-5 原裁定
+     L2 的两个单例也收进 `Cell`（§236）。**剩** `hub/http_face` 的类属性（`_blocked_logged` /
+     `_seen_worker_sources` / `_worker_pulse`）与 `biz/reward_context` 的 2 条 `global`
+     （请求作用域上下文，裁定保留）；`biz/reward_context._current` 按 §P0-5 原裁定
      保留（每 iter 整体替换的加载期上下文，不是隐藏可变状态）。
    * **B5 可选项**：`cfg`/`course` 的 schema（`biz/course_spec.py` 已是 pydantic；
      `load_dist_config` 仍返回裸 dict）。`P1-5` 的 notebook 侧 26 处裸 dict CFG 同理

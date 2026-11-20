@@ -25,6 +25,61 @@
 
 ---
 
+## §236 P0-5 L2 两个单例：`_EXECUTORS` / `_ARBITER` 收进 `common.cell.Cell`（2026-11-20）
+
+**改的是什么（不是「去状态」）**：进程里确实只有一份 eval 线程池和一份仲裁器——要动的不是
+「有没有状态」，而是**谁拥有它**。旧形状：
+
+```
+_ARBITER = EvalArbiter()            # 名字就是唯一写点，靠约定
+
+_EXECUTORS: EvalExecutors | None = None
+def eval_executors() -> EvalExecutors:
+    global _EXECUTORS               # ①
+    if _EXECUTORS is None:          # ② 判断在锁外
+        _EXECUTORS = EvalExecutors()
+    return _EXECUTORS
+
+def reset_eval_arbiter() -> EvalArbiter:
+    global _ARBITER                 # ③ 换实例的那半截没有归属
+    ...
+```
+
+**新形状**：
+
+```
+_EXECUTORS = Cell(EvalExecutors(), retire=EvalExecutors.close_pools)
+def reset_eval_executors() -> EvalExecutors:
+    return _EXECUTORS.replace(EvalExecutors())
+
+_ARBITER: Cell[EvalArbiter] = Cell(EvalArbiter(), retire=EvalArbiter.reset_for_tests)
+def reset_eval_arbiter() -> EvalArbiter:
+    return _ARBITER.replace(EvalArbiter())
+```
+
+公开入口 `eval_executors()` / `eval_arbiter()` / `reset_eval_*()` **签名与语义不变**，三个消费者
+（`trainer/eval_dispatch`、`tests/trainer/test_eval_*`、`tests/worker/test_eval_pool_permits`）
+零改动；`GLOBAL_BASELINE` 里 `worker/eval_exec.py: 2` 与 `worker/eval_arbiter.py: 1` 两条归零。
+
+**三个设计选择，都是被门禁逼出来的（值得记住）**：
+
+1. **不做「首次 get 才构造」**。试过带锁版本：要么在临界区里调注入的构造器 ⇒
+   `test_lock_reentrancy` 的目标面棘轮 20 → 21（每次都得重新论证「它不会回头拿同一把锁」），
+   要么把构造放到锁外 ⇒ 丢了 exactly-once（慢半步的线程造出的第二份被丢弃，正是旧 bug 的变体）。
+   构造本身廉价无副作用，于是 `Cell(...)` 在模块加载时就造好：惰性路径整个消失，棘轮不动。
+2. **退休钩子是构造参数** `retire=`，不是 `replace(old, close=…)`。后者让两处 `reset_*` 退化成
+   形状相同的三行，`test_reuse_ledger` 的结构克隆基线当场 17 → 18。声明在**拥有值**的那一行，
+   既只写一次，也让「换掉就关」成为这份所有权的固定语义（`Cell` 仍不猜怎么关——调用方点名方法）。
+3. **`Cell` 里不放实例、只放类**。`common/__init__.py` 契约 4（无模块级可变状态）对 `common/**`
+   继续成立（`L0_MUTABLE_ALLOWED` 仍是空表）；两个实例都在 `worker/`。
+
+**行为上唯一的差别**：`EvalExecutors()` 从「首次 `eval_executors()` 时造」变成「import
+`worker.eval_exec` 时造」。构造函数只建锁 / `Runtime(scope="eval-exec")` / 三个空字典 ——
+不起线程、不碰盘，`tests/test_python_shape_budget` 与 §119 的「import 无副作用」口径都不受影响。
+
+**守卫**：`tests/common/test_cell.py`（同一对象直到 `replace` / `replace` 退休旧值且只退一次 /
+没声明 `retire` 就只丢引用 / 两个 `Cell` 互不相见）。
+
 ## §235 P0-5 最后两行：审计对象已不存在，真正剩的 `global` 换成 `BranchLatch`（2026-11-20）
 
 **先对账（结论：这两行早就不是缺口的所在）**：

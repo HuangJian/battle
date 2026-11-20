@@ -33,6 +33,7 @@ from itertools import count
 from pathlib import Path
 from typing import Any
 
+from common.cell import Cell
 from worker.eval_yield import (
     hold_for_local,
     local_release_due,
@@ -1168,15 +1169,14 @@ class EvalArbiter:
         return None
 
 
-_ARBITER = EvalArbiter()
+#: 进程级仲裁器住 `Cell`（P0-5）：模块只留一个持有者，换实例不再需要 `global`。
+_ARBITER: Cell[EvalArbiter] = Cell(EvalArbiter(), retire=EvalArbiter.reset_for_tests)
 
 
 def eval_arbiter() -> EvalArbiter:
-    return _ARBITER
+    return _ARBITER.get()
 
 
 def reset_eval_arbiter() -> EvalArbiter:
-    global _ARBITER
-    _ARBITER.reset_for_tests()
-    _ARBITER = EvalArbiter()
-    return _ARBITER
+    """换一份新仲裁器（测试夹具 / 真停机后重来）；旧的那份在 `retire` 里复位。"""
+    return _ARBITER.replace(EvalArbiter())

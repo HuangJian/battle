@@ -8658,3 +8658,18 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   既有 `test_dist_upgrade_cli` 守「`current_upgrade_branch()` 零参 / `upgrade_branch_or` 不复活」。
 - **不动**：`worker/eval_exec._EXECUTORS`、`worker/eval_arbiter._ARBITER`、`hub/http_face` 类属性、
   `biz/reward_context` 的 2 条 `global`（各自一轮独立重构）。
+
+## §2026-11-20-eval-cell-ownership（eval 线程池与仲裁器的单例改成 `Cell` 持有；`retire=` 放构造参数）
+
+- **背景**：`worker/eval_exec._EXECUTORS`（`global` ×2 + 锁外惰性判断）与
+  `worker/eval_arbiter._ARBITER`（`global` 换实例）是两个 L2 进程级单例，`GLOBAL_BASELINE` 靠
+  按文件记账守。进程里确实只有一份，问题在形状：写点不封闭、惰性判断在锁外、换实例无归属。
+- **决定**：新增 `common/cell.py::Cell`（`get()` / `replace()`，值在构造时就造好），两个模块各留
+  一个持有者；公开入口 `eval_executors()` / `eval_arbiter()` / `reset_eval_*()` 签名不变。
+  `GLOBAL_BASELINE` 删 `worker/eval_exec.py: 2`、`worker/eval_arbiter.py: 1`。
+- **不做惰性构造**：带锁版本要么让 `test_lock_reentrancy` 的目标面棘轮 +1（锁内调注入构造器），
+  要么丢 exactly-once（锁外调，第二份被丢弃=旧 bug 变体）。构造廉价无副作用 ⇒ 模块加载时造。
+- **退休钩子放构造参数** `retire=`：放 `replace(old, close=…)` 会让两处 `reset_*` 变成形状相同的
+  三行，`test_reuse_ledger` 的结构克隆基线 17 → 18。声明在拥有值的那一行，只写一次。
+- **守卫**：`tests/common/test_cell.py` 五条（同对象直到 replace / 退休旧值只一次 / 无 retire 时
+  只丢引用 / 两个 Cell 互不相见）。
