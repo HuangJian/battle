@@ -36,11 +36,11 @@ import {
   homeChartSpec,
   homeCompareRequestKey,
   homeSeriesFromCompare,
+  currentInHomeCompare,
   homeYBounds,
   HOME_COMPARE_MAX_COURSES,
   METRIC_STAT_KEYS,
   parseHomeCompareConfig,
-  preserveHomeCompareOnCourseSwitch,
   requestedHomeSeriesKeys,
   resolveHomeCompareColors,
   resolveTrendOrder,
@@ -93,60 +93,31 @@ describe('多课对比配置（纯函数）', () => {
     expect(toggleHomeCompareCourse(['a'], '  ')).toEqual(['a'])
   })
 
-  it('切到对比里的课：旧当前课接替进集合，所有课色位不变', () => {
-    // a 在看、对比 b/c ⇒ 切到 b：b 变当前（仍是其固定色位），旧当前课 a 补进集合。
-    expect(
-      preserveHomeCompareOnCourseSwitch(
-        { on: true, courses: ['b', 'c'], colors: { a: 0, b: 1, c: 2 } },
-        'a',
-        'b',
-      ),
-    ).toEqual({ on: true, courses: ['c', 'a'], colors: { b: 1, c: 2, a: 0 } })
-    // 唯一额外课 = 新当前课 ⇒ 仍剩旧当前课，对比不会整块熄灭；色位都保住。
-    expect(
-      preserveHomeCompareOnCourseSwitch(
-        { on: true, courses: ['b'], colors: { a: 0, b: 1 } },
-        'a',
-        'b',
-      ),
-    ).toEqual({ on: true, courses: ['a'], colors: { b: 1, a: 0 } })
-    // 开关关着也维持契约（下次打开还是同一组课、同一组色）。
-    expect(
-      preserveHomeCompareOnCourseSwitch(
-        { on: false, courses: ['b'], colors: { a: 0, b: 1 } },
-        'a',
-        'b',
-      ),
-    ).toEqual({ on: false, courses: ['a'], colors: { b: 1, a: 0 } })
+  it('当前课必须显式勾进列表才走多课（不在 ⇒ 只画当前课）', () => {
+    expect(currentInHomeCompare({ on: true, courses: ['b', 'c'] }, 'a')).toBe(false)
+    expect(currentInHomeCompare({ on: true, courses: ['a', 'b'] }, 'a')).toBe(true)
+    // 开关关着也照样认「勾没勾」，由调用方再与 on 相与。
+    expect(currentInHomeCompare({ on: false, courses: ['a'] }, 'a')).toBe(true)
   })
 
-  it('切到对比外的课：对比集合不动、已有课色位不动；同一门/无旧当前课 ⇒ 原样', () => {
-    const base = { on: true, courses: ['b'], colors: { a: 0, b: 1 } }
-    // c 不在对比里 ⇒ courses 仍是 ['b']，b 仍是色位 1；旧当前课 a 的色位释放给 c。
-    expect(preserveHomeCompareOnCourseSwitch(base, 'a', 'c')).toEqual({
-      on: true,
-      courses: ['b'],
-      colors: { c: 0, b: 1 },
-    })
-    expect(preserveHomeCompareOnCourseSwitch(base, 'b', 'b')).toBe(base)
-    expect(preserveHomeCompareOnCourseSwitch(base, '', 'b')).toBe(base)
-    // 旧当前课已在名单里 ⇒ 去重，不重复占名额。
-    expect(
-      preserveHomeCompareOnCourseSwitch(
-        { on: true, courses: ['b', 'a'], colors: { a: 0, b: 1 } },
-        'a',
-        'b',
-      ),
-    ).toEqual({ on: true, courses: ['a'], colors: { b: 1, a: 0 } })
+  it('当前课可被勾进/移出全局列表，其它课色位不动', () => {
+    const config = { on: true, courses: ['b'], colors: { b: 1 } }
+    const added = toggleHomeCompareCourseInConfig(config, 'a', 'a')
+    expect(added.courses).toEqual(['b', 'a'])
+    expect(added.colors!.b).toBe(1)
+    expect(Number.isInteger(added.colors!.a)).toBe(true)
+    expect(toggleHomeCompareCourseInConfig(added, 'a', 'a').courses).toEqual(['b'])
   })
 
-  it('切当前课不换色：b 从对比课升为当前课后，三门课的色位逐门不变', () => {
+  it('对比列表全局固定：切当前课不写回 courses，已有课色位不变', () => {
     const config = { on: true, courses: ['b', 'c'], colors: { a: 0, b: 1, c: 2 } }
     const before = resolveHomeCompareColors(config, 'a')
-    const after = resolveHomeCompareColors(preserveHomeCompareOnCourseSwitch(config, 'a', 'b'), 'b')
-    expect(after).toEqual(before)
+    const after = resolveHomeCompareColors(config, 'b')
+    // 同一门课的色位不随当前课变；切课路径根本不改配置（不会把 a 塞回 courses）。
     expect(colorOf(after['b']!)).toBe(colorOf(before['b']!))
-    expect(colorOf(after['a']!)).toBe(colorOf(before['a']!))
+    expect(colorOf(after['c']!)).toBe(colorOf(before['c']!))
+    expect(config.courses).toEqual(['b', 'c'])
+    expect(Object.keys(config.colors!).sort()).toEqual(['a', 'b', 'c'])
   })
 
   it('增减对比课：已有课的色位不动，新课取最小空闲槽，移除释放色位', () => {
@@ -695,7 +666,7 @@ describe('走势配置弹窗：多课对比草稿', () => {
     onClose: () => {},
   }
 
-  it('开关、当前课、已选对比课、候选与封存课都在同一节', () => {
+  it('开关、已选课、候选与封存课都在同一节', () => {
     const html = renderToString(
       h(TrendConfigModal, {
         ...base,
@@ -704,7 +675,7 @@ describe('走势配置弹窗：多课对比草稿', () => {
     )
     expect(html).toContain('多课对比')
     expect(html).toContain('开启多课同图')
-    expect(html).toContain('当前课：cur')
+    expect(html).toContain('当前课也要自己勾上')
     expect(html).toContain('aria-label="移除对比课 other"')
     // 已选课在候选里打勾；未选课是可点的候选。
     expect(html).toContain('>✓ other</button>')
@@ -714,11 +685,24 @@ describe('走势配置弹窗：多课对比草稿', () => {
     expect(html).not.toContain('>old</button>')
   })
 
+  it('当前课出现在候选里，可自己勾进列表（勾了才走多课）', () => {
+    const html = renderToString(
+      h(TrendConfigModal, {
+        ...base,
+        compare: { on: true, courses: [] },
+      }),
+    )
+    expect(html).toContain('>cur</button>')
+    // 不再显示「当前课：xxx」chip——它会让人以为当前课已经自动勾上。
+    expect(html).not.toContain('当前课：')
+    expect(html).toContain('没勾不会自动加进来')
+  })
+
   it('没选对比课 ⇒ 提示可以先选好；满员 ⇒ 其余候选禁用并说明原因', () => {
     const empty = renderToString(
       h(TrendConfigModal, { ...base, compare: { on: false, courses: [] } }),
     )
-    expect(empty).toContain('还没选对比课')
+    expect(empty).toContain('还没勾课')
 
     const capped = renderToString(
       h(TrendConfigModal, {
@@ -727,7 +711,7 @@ describe('走势配置弹窗：多课对比草稿', () => {
         compare: { on: true, courses: ['a', 'b', 'c', 'd', 'e', 'f'] },
       }),
     )
-    expect(capped).toContain(`最多 ${HOME_COMPARE_MAX_COURSES} 门额外课`)
+    expect(capped).toContain(`最多 ${HOME_COMPARE_MAX_COURSES} 门（含当前课）`)
     const i = capped.indexOf('>g</button>')
     expect(i).toBeGreaterThan(0)
     const tag = capped.slice(capped.lastIndexOf('<button', i), i + 1)
@@ -767,10 +751,19 @@ describe('Hero 接线（源码纪律）', () => {
     expect(end.indexOf('<HomeCompareLegend')).toBeLessThan(end.indexOf('走势配置'))
   })
 
-  it('切换当前课：新当前课原在对比里 ⇒ 旧当前课接替并落盘（对比不丢）', () => {
-    expect(heroSrc).toContain('preserveHomeCompareOnCourseSwitch')
-    expect(heroSrc).toContain('prevCourseRef')
-    expect(heroSrc).toContain('localStorage.setItem(TC_TREND_COMPARE, JSON.stringify(next))')
+  it('对比列表全局固定：切当前课不写回配置（不自动塞课）', () => {
+    expect(heroSrc).not.toContain('preserveHomeCompareOnCourseSwitch')
+    expect(heroSrc).not.toContain('prevCourseRef')
+    // 只有「走势配置 · 完成」写盘；切课路径不再动 TC_TREND_COMPARE。
+    expect(heroSrc).toContain(
+      'localStorage.setItem(TC_TREND_COMPARE, JSON.stringify(next.compare))',
+    )
+  })
+
+  it('当前课不在列表 ⇒ 单课：显示判据读列表，不再自动并入第一条线', () => {
+    expect(heroSrc).toContain('currentInHomeCompare(homeCompare, course)')
+    expect(heroSrc).toContain('courses: compareCourses')
+    expect(heroSrc).not.toContain('[course, ...compareExtras]')
   })
 
   it('放大浮窗沿用首页多课线条与同一份显隐名单', () => {

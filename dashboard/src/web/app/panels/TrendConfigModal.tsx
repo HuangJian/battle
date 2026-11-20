@@ -16,7 +16,7 @@
  *  提交（Hero 写三份 localStorage）；「关闭 / Esc / 点遮罩」= 放弃这次改动。理由：90+ 项一次
  *  改好几处时，即时写盘会让首页在弹窗底下反复重排，也把误点永久记下来。
  *
- *  多课对比（用户 2026-11-20）：同一份草稿里再带一组**全局对比课**（当前课恒在 + 最多 6 门额外课）。
+ *  多课对比（用户 2026-11-20）：同一份草稿里再带一组**全局叠线课**（最多 6 门，当前课也要自己勾进来）。
  *  为什么是全局一组而不是每图各配：色序跨图必须一致，否则「红=kb2」会在另一张图上变成别的课；
  *  首页小图再逐图配课只会把「看趋势」变成「配表」。开不开、选哪些课都跟勾选/顺序一起在「完成」落盘。
  */
@@ -190,9 +190,10 @@ export function TrendConfigModal({
   const rows = draft.order.filter((k) => draft.visibility[k] || pinned.has(k))
   const onCount = rows.filter((k) => draft.visibility[k]).length
 
-  const candidates = courses.filter((c) => c !== currentCourse)
+  /** 候选 = 全部课程（当前课也是列表里的普通一员：勾上它才会在首页走多课）。 */
+  const candidates = courses
   const visibleCandidates = filterCourseCandidates(candidates, courseQuery)
-  const archivedCandidates = archived.filter((a) => a !== currentCourse)
+  const archivedCandidates = archived
   const compareAtCap = draft.compare.courses.length >= HOME_COMPARE_MAX_COURSES
 
   const apply = (): void => {
@@ -219,8 +220,8 @@ export function TrendConfigModal({
           <p className="tc-muted tc-small tc-mt-0">
             勾选首页要显示的走势图，顶上按上屏顺序列出已勾选的图（↑↓ 换位置，× 取消显示）。
             每项都标了账本英文键，方便和课程文件的 formula 对照；鼠标移上去（或键盘聚焦），
-            底部会用大白话解释它是什么、该看什么。下面的「多课对比」可以让首页所有走势图
-            同时叠几门课。改完点「完成」才生效。
+            底部会用大白话解释它是什么、该看什么。下面的「多课对比」让首页走势图叠课：
+            勾了哪些就叠哪些，不勾就只画当前课。改完点「完成」才生效。
           </p>
           <button type="button" className="tc-link" onClick={onClose}>
             关闭
@@ -313,17 +314,17 @@ export function TrendConfigModal({
             )}
           </section>
 
-          {/* 多课对比（用户 2026-11-20）：全局一组对比课，首页所有走势图同图叠线。
-              当前课恒在（第一色、不占名额）；courses 只存额外课，色序 = 这里的顺序。 */}
+          {/* 多课对比（用户 2026-11-20）：全局一组课，首页所有走势图同图叠线。
+              当前课只是列表里的普通一员：勾进来才叠线，不勾就只画当前课。色序 = 这里的顺序。 */}
           <section className="tc-trendcfg__sec">
             <div className="tc-trendcfg__sec-hd">
               <h4>
                 多课对比
-                <span className="tc-trendcfg__count">{draft.compare.courses.length + 1}</span>
+                <span className="tc-trendcfg__count">{draft.compare.courses.length}</span>
               </h4>
               <span className="tc-muted tc-small">
-                开启后首页每张走势图都叠同一组课：当前课恒在（颜色跟课固定），另可选最多{' '}
-                {HOME_COMPARE_MAX_COURSES} 门。颜色跨图一致，悬停任一张图就能看各课读数。
+                从下面勾选要叠线的课（最多 {HOME_COMPARE_MAX_COURSES} 门）。当前课也要自己勾上，
+                没勾不会自动加进来，首页只画当前课一条；颜色跟课走，跨图一致。
               </span>
             </div>
             <div className="tc-trendcfg__cmp">
@@ -335,18 +336,6 @@ export function TrendConfigModal({
                 />
                 <span>开启多课同图</span>
               </label>
-              <span className="tc-chip">
-                <svg
-                  className="tc-trendcfg__cmp-dot"
-                  viewBox="0 0 8 8"
-                  width="8"
-                  height="8"
-                  aria-hidden="true"
-                >
-                  <circle cx="4" cy="4" r="4" fill={colorOf(compareColors[currentCourse] ?? 0)} />
-                </svg>
-                当前课：{currentCourse || '—'}
-              </span>
               {draft.compare.courses.map((c, i) => (
                 <span className="tc-chip" key={c}>
                   <svg
@@ -372,12 +361,12 @@ export function TrendConfigModal({
               ))}
               {draft.compare.courses.length === 0 ? (
                 <span className="tc-muted tc-small">
-                  还没选对比课；可以先选好，下次打开直接勾「开启」。
+                  还没勾课。不勾就只画当前课；把当前课和其它课都勾上，首页才叠多课曲线。
                 </span>
               ) : null}
               {compareAtCap ? (
                 <span className="tc-muted tc-small">
-                  最多 {HOME_COMPARE_MAX_COURSES} 门额外课（读账本成本随门数线性上涨）
+                  最多 {HOME_COMPARE_MAX_COURSES} 门（含当前课；读账本成本随门数线性上涨）
                 </span>
               ) : null}
             </div>
@@ -407,7 +396,7 @@ export function TrendConfigModal({
                       aria-pressed={picked}
                       title={
                         disabled
-                          ? `最多 ${HOME_COMPARE_MAX_COURSES} 门额外课`
+                          ? `最多 ${HOME_COMPARE_MAX_COURSES} 门（含当前课）`
                           : picked
                             ? `取消对比 ${c}`
                             : `加入对比 ${c}`

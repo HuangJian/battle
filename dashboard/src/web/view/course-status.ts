@@ -698,13 +698,18 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
     const trainingJids = lq.inflight.map((x) => x.jid).filter((x): x is string => !!x)
     const hubJids = new Set(hub.inflightDetail.map((d) => d.jobId).filter(Boolean))
     const matched = trainingJids.some((j) => hubJids.has(j))
+    // ★2026-11-20（用户报障 g7-hot11 / g7-lam98：it1 rollout 完等 worker，pill 却写「PPO·在算」）：
+    //   训练侧 jid 正躺在 hub **队首**等领取 ⇒ 那是「无人取 / 预取」，不是本机在算。
+    //   只有 hub 既没有在飞、也没有这一单在队首时，才能推断「训练侧自己在本机跑」。
+    const atQueueHead = hub.nextJob != null && trainingJids.includes(hub.nextJob)
     // 本机 inflight：训练侧在飞但 hub 无对应 job ⇒ 本机 PPO。**压过后面的排队态**
     // ——否则本机在算的同时远端队列有活，会被误读成「没人取」。
     if (
       lq.waiting.kind === 'inflight' &&
       trainingJids.length > 0 &&
       !matched &&
-      hub.inflight === 0
+      hub.inflight === 0 &&
+      !atQueueHead
     ) {
       return out(
         input,

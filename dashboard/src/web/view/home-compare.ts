@@ -1,8 +1,8 @@
 /** home-compare.ts — 首页走势图「多课同图」的纯函数与配置契约（client-safe：零 IO）。
  *
  *  用户 2026-11-20：原来只有「比较课程」浮窗能多课同图，操作太绕。现在首页的走势图
- *  直接按一份**全局比较课**配置叠线：当前课自动加入，另可选最多 6 门比较课；颜色跟课走，
- *  切换当前课也不换色。
+ *  直接按一份**全局比较课**配置叠线：当前课必须自己被勾进列表才叠线，不在列表里就只画
+ *  当前课。颜色跟课走；切换当前课不改列表也不换色。
  *
  *  为什么是全局一组而不是每图各配一组：
  *   · 色序跨图必须一致，否则「红=kb2」在两张图上会变成两门不同的课；
@@ -37,13 +37,13 @@ import {
   type TrendSource,
 } from './series'
 
-/** 首页同图最多再叠 6 门比较课（当前课 + 6 = 7 条线，仍在 8 色色板内；再多小图与提示框都读不动）。 */
+/** 首页同图最多 6 门课（**含当前课**，仍在 8 色色板内；再多小图与提示框都读不动）。 */
 export const HOME_COMPARE_MAX_COURSES = 6
 
 export interface HomeCompareConfig {
   /** 开关：关 = 首页保持单课（配置的课仍记住，下次打开不用重选）。 */
   on: boolean
-  /** **当前课之外的比较课**（当前课自动加入对比，不占这里的名额）。顺序 = 图例/叠线顺序。 */
+  /** 全局叠线的课（**含当前课**：当前课不在其中就只画当前课）。顺序 = 图例/叠线顺序。 */
   courses: string[]
   /** 课名 → 色板槽位（0 起）。颜色跟课走：切换当前课、改选课都不重排已有课的颜色。
    *  旧配置没有该字段 ⇒ 按「当前课 0、比较课按 courses 顺序 1..」迁移（与旧行为一致）。 */
@@ -151,15 +151,15 @@ function withVisibleColors(
   return next
 }
 
-/** 在配置层加/减一门比较课：课程顺序与每门课的固定色位一起更新。
- *  候选课不占当前课名额；移除课时释放它的色位，新加课取最小空闲色位。 */
+/** 在配置层加/减一门对比课（当前课也可勾：它是列表里的普通一员，用户 2026-11-20）。
+ *  移除课释放色位，新加课取最小空闲色位；色位按课名固定，不随顺序变。 */
 export function toggleHomeCompareCourseInConfig(
   config: HomeCompareConfig,
   currentCourse: string,
   course: string,
 ): HomeCompareConfig {
   const c = course.trim()
-  if (!c || c === currentCourse) return config
+  if (!c) return config
   const courses = toggleHomeCompareCourse(config.courses, c)
   if (courses === config.courses) return config
   const colors = resolveHomeCompareColors(config, currentCourse)
@@ -175,51 +175,13 @@ export function toggleHomeCompareCourseInConfig(
   return withVisibleColors({ ...config, courses }, colors, currentCourse)
 }
 
-/** 切换「当前课」时保持多课对比集合与每门课的颜色（用户 2026-11-20）。
- *
- *  新当前课原本是比较课 ⇒ 把它从 courses 里摘掉，再把**旧当前课补进集合**：
- *  对比一门不少；若它是唯一比较课，`compareActive` 也不会整个熄灭——这正是用户报的
- *  「切到对比里的课，对比没了」。两门课都沿用切换前的色位 ⇒ 同一门课不会因为换当前课而变色。
- *
- *  新当前课不在比较课里 / 同一门课 / 旧当前课为空 ⇒ 原样返回（不替用户改选课）；
- *  旧当前课已在名单里 ⇒ 去重，不重复占名额。与开关无关：关着时也维持契约
- *  （`courses` 不含当前课），下次打开仍是对比同一组课。 */
-export function preserveHomeCompareOnCourseSwitch(
-  config: HomeCompareConfig,
-  prevCourse: string,
-  nextCourse: string,
-): HomeCompareConfig {
-  if (!prevCourse || prevCourse === nextCourse) return config
-  const colors = resolveHomeCompareColors(config, prevCourse)
-  let courses: string[]
-  if (config.courses.includes(nextCourse)) {
-    courses = config.courses.filter((c) => c !== nextCourse && c !== prevCourse)
-    courses.push(prevCourse)
-  } else {
-    // 旧当前课离开对比；新当前课取它在 colors 里原本的色位（若有且空闲），否则取最小空闲槽。
-    courses = config.courses.filter((c) => c !== nextCourse && c !== prevCourse)
-    delete colors[prevCourse]
-    const used = new Set<number>()
-    for (const c of courses) {
-      const slot = colors[c]
-      if (slot != null) used.add(slot)
-    }
-    const stored = config.colors?.[nextCourse]
-    let slot = 0
-    if (
-      stored != null &&
-      Number.isInteger(stored) &&
-      stored >= 0 &&
-      stored < COMPARE_COLORS.length &&
-      !used.has(stored)
-    ) {
-      slot = stored
-    } else {
-      while (used.has(slot)) slot++
-    }
-    colors[nextCourse] = slot
-  }
-  return withVisibleColors({ ...config, courses }, colors, nextCourse)
+// 对比集合是**全局唯一**的一份，只在「走势配置」里由用户增删（用户 2026-11-20）。
+// 当前课必须**自己被勾进列表**才走多课；不在列表里就只画当前课，绝不自动并入第一条线。
+// 切当前课不改列表；色位按课名固定（resolveHomeCompareColors）。
+
+/** 当前课是否被用户显式勾进全局对比列表（用户 2026-11-20：不在 ⇒ 只画当前课单图）。 */
+export function currentInHomeCompare(config: HomeCompareConfig, currentCourse: string): boolean {
+  return config.courses.includes(currentCourse)
 }
 
 /** 请求身份（门闩用）：课程顺序与键序都算身份；服务端返回的 fingerprint 只描述账本。 */

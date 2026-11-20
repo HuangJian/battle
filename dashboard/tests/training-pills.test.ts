@@ -580,6 +580,34 @@ describe('★2026-10-02 coursePills：hub 派发态（已认领/云机算/卡住
     expect(p.title).toContain('等远端回传：ppo_remote@37')
   })
 
+  it('⑥b jid 正在 hub 队首等 worker ⇒ 「PPO·无人取」，不是「PPO·在算」（2026-11-20）', () => {
+    const jid = 'j1'
+    const args = {
+      courses: ['c'],
+      rows: [
+        row({
+          course: 'c',
+          waiting: { kind: 'inflight', text: `等远端回传：ppo_remote@1（jid=${jid}）` },
+          inflight: [{ phase: 'ppo_remote', round: '1', jid, dispatch: 'pull', dir: null }],
+        }),
+      ],
+      trainerRunning: true,
+    }
+    const [p] = view.coursePills({
+      ...args,
+      overview: ov(hubRow('c', { queuePending: 1, inflight: 0, peeked: false, nextJob: jid })),
+    })!
+    expect(p).toMatchObject({ status: 'PPO·无人取', tone: 'y' })
+    expect(p.status).not.toContain('在算')
+    expect(p.title).toContain('队首 j1')
+    // 同一架势但在预取窗口内 ⇒ 有人要跑，绿点「预取」。
+    const [q] = view.coursePills({
+      ...args,
+      overview: ov(hubRow('c', { queuePending: 1, inflight: 0, peeked: true, nextJob: jid })),
+    })!
+    expect(q!.status).toBe('PPO·预取')
+  })
+
   it('⑦ 跑满的课（state=done + idle 文案）⇒ 「已收官」且 title 带 it40/40（§1.5 回归钉子）', () => {
     const [p] = view.coursePills({
       courses: ['c'],

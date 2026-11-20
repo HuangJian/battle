@@ -2180,7 +2180,7 @@ a.tc-btn {
   color: var(--text);
   font-size: var(--fs-xs);
 }
-/* 多课对比（用户 2026-11-20）：全局一组对比课；当前课恒在，额外课按色序排。 */
+/* 多课对比（用户 2026-11-20）：全局一组叠线课；当前课也要勾进来，按色序排。 */
 .tc-trendcfg__cmp {
   display: flex;
   align-items: center;

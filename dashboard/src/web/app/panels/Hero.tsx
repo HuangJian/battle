@@ -11,6 +11,7 @@ import {
   behaviorTrendKey,
   buildHomeChartSeries,
   colorOf,
+  currentInHomeCompare,
   DEFAULT_BEHAVIOR_METRIC_STATS,
   DEFAULT_HIDDEN_COL_KEYS,
   DEFAULT_TREND_VISIBILITY,
@@ -38,7 +39,6 @@ import {
   parseHiddenCols,
   parseHomeCompareConfig,
   parseTrendVisibility,
-  preserveHomeCompareOnCourseSwitch,
   requestedHomeSeriesKeys,
   resolveColOrder,
   resolveHomeCompareColors,
@@ -813,25 +813,11 @@ export function Hero({
       /* 隐私模式等不可写场景忽略 */
     }
   }, [])
-  // 切换当前课时，若新当前课也在对比里：把它摘掉，把旧当前课补进对比集合（追加到末尾）。
-  // 例：A 在看、对比 B ⇒ 切到 B 后仍是 B vs A；不会因额外课列表只剩 B 而整块熄灭。
-  const prevCourseRef = useRef(course)
-  useEffect(() => {
-    const prev = prevCourseRef.current
-    if (prev === course) return
-    prevCourseRef.current = course
-    const next = preserveHomeCompareOnCourseSwitch(homeCompare, prev, course)
-    if (next === homeCompare) return
-    setHomeCompare(next)
-    try {
-      localStorage.setItem(TC_TREND_COMPARE, JSON.stringify(next))
-    } catch {
-      /* 隐私模式等不可写场景忽略 */
-    }
-  }, [course, homeCompare])
+  // 对比列表是**全局唯一**的一份，不随当前课变化（用户 2026-11-20）。当前课必须自己被勾进
+  // 列表才走多课；不在列表里 ⇒ 首页只画当前课，绝不自动把别的课叠上来。
   const visibleCharts = orderedCharts.filter((k) => visibility[k])
-  /** 配置里的额外课（含可能已删除的旧课；顺序 = 色序，删课不重排其余课的颜色）。 */
-  const compareExtras = homeCompare.courses.filter((c) => c !== course)
+  /** 全局对比列表原样（含可能已删除的旧课；顺序 = 色序，删课不重排其余课的颜色）。 */
+  const compareCourses = homeCompare.courses
   /** 每门课的固定色位（颜色跟课走：切当前课/增减对比课都不重排已有课；跨图同课同色）。 */
   const compareColors = resolveHomeCompareColors(homeCompare, course)
   /** 图例临时隐藏的课（不进 localStorage：刷新后恢复全部可见；只摘线，不改选课/请求）。 */
@@ -840,9 +826,13 @@ export function Hero({
     setHiddenCompare((h) => toggleHiddenCourse(h, c))
   }
   const knownCourses = new Set(stateView?.courses ?? [])
-  /** 真正发请求的额外课：只取盘上仍存在的（服务端也会再校验一次）。 */
-  const requestExtras = compareExtras.filter((c) => knownCourses.has(c))
-  const compareActive = homeCompare.on && requestExtras.length > 0 && head != null
+  /** 真正发请求的对比课：只取盘上仍存在的其它课（当前课由 currentSeriesMap 现算，不走端点）。 */
+  const requestExtras = compareCourses.filter((c) => c !== course && knownCourses.has(c))
+  const compareActive =
+    homeCompare.on &&
+    currentInHomeCompare(homeCompare, course) &&
+    requestExtras.length > 0 &&
+    head != null
   // 请求键 = 可见图 × 当前数据源（去重排序）：图重排不触发重拉，切数据源/统计量/显隐才重拉。
   const compareKeys = compareActive
     ? requestedHomeSeriesKeys(visibleCharts, source, scales, metricStats)
@@ -1025,7 +1015,7 @@ export function Hero({
       spec: meta.spec,
       source,
       range,
-      courses: [course, ...compareExtras],
+      courses: compareCourses,
       colors: compareColors,
       currentCourse: course,
       currentSeries: (key) => currentSeriesMap.get(key),
@@ -1062,7 +1052,7 @@ export function Hero({
                       spec,
                       source,
                       range,
-                      courses: [course, ...compareExtras],
+                      courses: compareCourses,
                       colors: compareColors,
                       currentCourse: course,
                       currentSeries: (key) => currentSeriesMap.get(key),
@@ -1333,13 +1323,10 @@ export function Hero({
           <div className="tc-trendctl__end">
             {compareActive ? (
               <HomeCompareLegend
-                entries={[
-                  { course, color: colorOf(compareColors[course] ?? 0) },
-                  ...requestExtras.map((c) => ({
-                    course: c,
-                    color: colorOf(compareColors[c] ?? 0),
-                  })),
-                ]}
+                entries={compareCourses.map((c) => ({
+                  course: c,
+                  color: colorOf(compareColors[c] ?? 0),
+                }))}
                 hidden={hiddenCompare}
                 onToggle={toggleCompareCourse}
               />
