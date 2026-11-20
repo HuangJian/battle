@@ -13,6 +13,12 @@ B5b 把那一整段按**状态所有者**收进 `_UnitLanes`：契约字段 → 
      `BatchEvalRunner._settle_unit`（B5a 的守卫在钉它）。
   ③ **★ 新获得的可测性**：`lane_state` / `mark_tripped` / `window_open` 这些相位现在**直接可调**
      —— 拆分前它们是 677 行方法里的闭包，只能靠「真跑一个单元」间接看。
+
+**2026-11-20 换家**：机器 + `_UnitPlan` + 两个机器独占常量整块搬到 `trainer/batch_lanes.py`
+（原模块 LOC 顶在 999/1000，收尾要的 `UnitLedger` 没地方落）。① 「类只许住一个模块」的锚点
+换成新家（旧家长回一份也红）；② **patch 锚点跟着读它的模块走** —— `log` / `_record_agent_meta`
+打在 `trainer.batch_lanes.*`（打在旧家 = 静默空操作）；③ 机器多一个方法 `ledger()`（本单元的
+15 个把手，收尾一次性交给 `BatchEvalRunner._settle_unit`）。
 """
 
 from __future__ import annotations
@@ -27,12 +33,17 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import trainer.batch_lanes as bl
 import trainer.batch_runner as br
 
-SRC = (ROOT / "trainer" / "batch_runner.py").read_text(encoding="utf-8")
+SRC = (ROOT / "trainer" / "batch_lanes.py").read_text(encoding="utf-8")
 TREE = ast.parse(SRC)
+RUNNER_SRC = (ROOT / "trainer" / "batch_runner.py").read_text(encoding="utf-8")
+RUNNER_TREE = ast.parse(RUNNER_SRC)
 LANES = next(n for n in TREE.body if isinstance(n, ast.ClassDef) and n.name == "_UnitLanes")
-RUNNER = next(n for n in TREE.body if isinstance(n, ast.ClassDef) and n.name == "BatchEvalRunner")
+RUNNER = next(
+    n for n in RUNNER_TREE.body if isinstance(n, ast.ClassDef) and n.name == "BatchEvalRunner"
+)
 LANES_METHODS = {n.name: n for n in LANES.body if isinstance(n, ast.FunctionDef)}
 
 #: 机器的方法（**闭集**：11 个原闭包 + `__init__` + `run()`；增删都要显式改本表）。
@@ -52,6 +63,8 @@ MACHINE_METHODS = (
     "fetch_manifest",
     "worker",
     "_watch",
+    # 2026-11-20：收尾要的 15 个把手一次交清（`UnitLedger` 的唯一装配点）。
+    "ledger",
     "run",
 )
 
@@ -106,10 +119,12 @@ def _self_attrs(node: ast.AST) -> list[str]:
 # ──────────────────────────── ① 结构契约 ────────────────────────────
 
 
-def test_machine_class_is_defined_exactly_once_in_the_runner_module() -> None:
-    """类只许住 `trainer/batch_runner.py` 一次 —— 换家（另一个模块）要让本用例显式改。"""
+def test_machine_class_is_defined_exactly_once_in_its_module() -> None:
+    """类只许住 `trainer/batch_lanes.py` 一次 —— 换家（另一个模块）要让本用例显式改。"""
     # 2026-09-30（刀 4）：扫描面 = 两棵业务树（`trainer/` 编排 + `biz/` 纯逻辑）——
     # 只扫 `trainer/` 的话，同一个类在 `biz/` 里长出来第二份也是绿的（表面缩小 = 守卫变瞎）。
+    # 2026-11-20：机器从 `trainer/batch_runner.py` 搬到 `trainer/batch_lanes.py`（LOC 人头），
+    # 锚点换来新家；旧家**不许**再长出一份（`homes == [新家]` 已经拦住了）。
     from tests.helpers import source_scan
 
     homes = sorted(
@@ -117,8 +132,9 @@ def test_machine_class_is_defined_exactly_once_in_the_runner_module() -> None:
         for p in source_scan.logic_py_files(str(ROOT))
         if p.name != "__pycache__" and "class _UnitLanes" in p.read_text(encoding="utf-8")
     )
-    assert homes == ["trainer/batch_runner.py"], homes
+    assert homes == ["trainer/batch_lanes.py"], homes
     assert SRC.count("class _UnitLanes") == 1
+
 
 
 def test_machine_method_face_is_the_designed_closed_set() -> None:
@@ -204,9 +220,9 @@ def test_machine_never_touches_the_ledger() -> None:
 # ────────────────────── ③ 功能性：相位现在直接可调 ──────────────────────
 
 
-def _lanes(**kw) -> br._UnitLanes:
+def _lanes(**kw) -> bl._UnitLanes:
     """只装需要的槽位（不走 `__init__`，避免为每个用例编一份 29 字段的 `_UnitPlan`）。"""
-    lanes = br._UnitLanes.__new__(br._UnitLanes)
+    lanes = bl._UnitLanes.__new__(bl._UnitLanes)
     lanes.owner = kw.get("owner", br.BatchEvalRunner.__new__(br.BatchEvalRunner))
     lanes.lanes = {}
     lanes.lock = threading.Lock()
@@ -233,7 +249,8 @@ def test_lane_state_normalizes_a_node_and_registers_it_once() -> None:
 def test_mark_tripped_gives_up_after_max_recovery_tries(monkeypatch) -> None:
     """掉线计数：交出槽位 + 排重探；到 `max_recovery_tries` 才**认定坏节点**（响亮一行）。"""
     logged: list[str] = []
-    monkeypatch.setattr(br, "log", logged.append)
+    # 2026-11-20：机器住 `trainer.batch_lanes` ⇒ 日志锚点搬过去（打在旧家 = 静默空操作）。
+    monkeypatch.setattr(bl, "log", logged.append)
     lanes = _lanes(max_recovery_tries=2)
     lane = lanes.lane_state({"id": "n1"})
     lane["ready"] = True
@@ -279,8 +296,8 @@ def test_bringup_rejects_a_node_whose_bootid_changed_within_the_unit(monkeypatch
     192 局的请求分给两个代码版本 ⇒ 45 列的旧 shard 混进 payload、云 worker 5 连炸。
     """
     logged: list[str] = []
-    monkeypatch.setattr(br, "log", logged.append)
-    monkeypatch.setattr(br, "_record_agent_meta", lambda *a, **k: None)
+    monkeypatch.setattr(bl, "log", logged.append)
+    monkeypatch.setattr(bl, "_record_agent_meta", lambda *a, **k: None)
 
     def _ping(boot: str, pid: int) -> dict:
         # 节点门（能力位 / bun / codeHash）全部放行 ⇒ 唯一变量就是 bootId

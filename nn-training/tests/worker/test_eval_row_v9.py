@@ -95,9 +95,9 @@ def test_batch_runner_record_uses_shared_helper():
     import ast
     import pathlib
 
-    src = (pathlib.Path(__file__).resolve().parents[3] / "nn-training/trainer/batch_runner.py").read_text(
+    src = (pathlib.Path(__file__).resolve().parents[3] / "nn-training/trainer/batch_lanes.py").read_text(
         encoding="utf-8"
     )
     assert {n.id for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Name)} >= {"eval_metric_fields"}, (
-        "batch_runner 不再引用 eval_metric_fields（行构造与 v9 聚合入口断了）"
+        "通道机器不再引用 eval_metric_fields（行构造与 v9 聚合入口断了）"
     )

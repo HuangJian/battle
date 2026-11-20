@@ -25,6 +25,67 @@
 
 ---
 
+## §230 P0-3 第三刀：`trainer/batch_runner.py` 拆出通道机器为 `trainer/batch_lanes.py`，`_settle_unit` 收成 `(self, ledger)`（2026-11-20）
+
+**触发**：`python.refactor.md` §7 第②条 —— `BatchEvalRunner._settle_unit` 有 **15 个位置参数**
+（`unit_idx/unit_of/policy/bun/eval_log/batch/window_event/init_sha16/include_scorable/_rt/…`），
+而这些值**全部**是 `_UnitLanes` 自己的字段 ⇒ 本该是 `self.ledger(threads=…)` 一个对象。
+它之所以一直没收：`trainer/batch_runner.py` 的 LOC = **999/1000**（`tests/test_python_loc_budget.py`
+的天花板），加一个 `@dataclass` 就超预算 —— 与 `worker/iter_rollout.py` 同一个前置条件（先拆）。
+
+**拆法**
+
+1. 通道机器 **整块纯搬** 进 `trainer/batch_lanes.py`：`_UnitLanes`（562–1308 行，747 行）·
+   `_UnitPlan` · 它独占的两个常量（`BUSY_BACKOFF_CAP_SEC` / `STUCK_GRACE_SEC`）· 以及它读的
+   全部 import。**一个字没改语义**：切分是脚本化的（逐 hunk `assert old.count(...) == 期望`，
+   全命中才写盘），搬完的 `_settle_unit` 方法体靠顶部 15 行本地解包保持逐字不变。
+2. 新模块加 **`UnitLedger`**（frozen + kw_only，15 字段）与 **`_UnitLanes.ledger(threads=…)`** ——
+   唯一装配点，逐字段 `self.<同名>`。`_settle_unit(self, ledger)` 只收它。
+3. 反向边用 **`LaneOwner` Protocol** 表达（机器读 owner 的 11 个属性 + `_settle_unit`），
+   `batch_lanes` **不** import `batch_runner`（守卫 `test_machine_module_has_no_back_edge_to_the_runner`）。
+4. 收支：`batch_runner.py` 1345 物理行 → **511**（LOC 336）· `batch_lanes.py` **915**（LOC 694）；
+   全仓宽签名 **130 → 129**（`_settle_unit` 15 → 2），`batch_runner.py` 的宽签名基线 3 → 2。
+
+**代价：patch 锚点换家（这是本次最容易被静默吞掉的部分）**
+
+机器的依赖注入靠**模块全局**，所以 `monkeypatch.setattr("trainer.batch_runner.X")` 在机器搬走后
+就是**静默空操作**（单测仍绿、生产不生效 —— 表现为通道日志直接印到真实 stdout）。按「**谁裸名
+读、谁必须绑定**」重新分家：
+
+| 名字 | 旧锚点 | 新锚点 | 谁读 |
+|---|---|---|---|
+| `log` | `trainer.batch_runner` | **两家都绑**（收尾行在 runner、通道行在 lanes） | 两边都读 |
+| `_record_agent_meta` · `run_local_eval_game` | `trainer.batch_runner` | `trainer.batch_lanes` | 只有机器读 |
+| `bun_version` | `trainer.batch_runner` | 不动 | 只有 `_open_unit` 读 |
+| `BUSY_BACKOFF_CAP_SEC` · `STUCK_GRACE_SEC` | `trainer.batch_runner` | `trainer.batch_lanes` | 只有机器读 |
+
+守卫不删、只换锚点（2 个常量/3 个注入点各自的读法都还在）。**`br.STUCK_GRACE_SEC` 这种「名字在、
+没人读」的交叉转发也算红**（`test_runner_only_symbols_are_not_forwarded_by_the_facade` 新增两条
+`hasattr` 反向断言）—— 同一个坑的变体：patch 打哪家都可能空转。
+
+**顺带修的守卫盲区（同一族陷阱第 4 次）**：`test_batch_plan_split` 的入边归属者表原先只扫
+`batch_eval` + `batch_runner` 两个模块（前三次的形态是「换方法」「换类」），机器换**模块**后
+执行侧那两条入边（`is_transient_error` / `node_gate_reason`）会静默退化成 4/6 ⇒ 现在扫三个模块。
+同理 `test_batch_eval_wver` 的 wver 实参守卫（消费侧搬走、赋值点留在 runner）与三个行构造守卫
+（`test_eval_row_v8/v9/v10`、`test_eval_loot_fields`）都改成读新家；`test_node_identity` 的
+`GATE_SITES` 把 `batch_runner.py` 换成 `batch_lanes.py`（节点门的回场口随机器走）。
+
+**基线记账（全部按实测，性质未变）**：G4 宽捕 `trainer/batch_runner.py` 6 → 3 + 新家 3；
+G7 函数级 assert 2 → 1 + 新家 1；G17 墙钟直读 30 → 7 + 新家 23；G5 私有断言
+`test_batch_runner_phases.py` 3 → 1；G19 文本断言 **SOURCE 1210 → 1221**（+11：三个搬家守卫现在逐条
+检两个模块，判据全是 AST/`hasattr`，被口径 B「引用 `.py` 读出来的名字」计进；FORM 仍 1534）。
+`tests/test_layering.py` 的 `TRAINER_ORCHESTRATION` 登记 `batch_lanes`（它照旧调
+`worker.eval_local` / `worker.node_identity` / 传输面 ⇒ 仍是编排成员，不进 `biz/`）。
+
+**被否决**
+
+* 把 `UnitLedger` 塞进 999 行的 `batch_runner.py`（超 LOC 预算；且机器与收尾本来就该分开住）。
+* 让 `batch_lanes` 反向 `import trainer.batch_runner` 取 `log`（成环；且 patch 锚点会再次歧义）——
+  改 Protocol + 各自绑自己的 DI 名。
+* 把 `_settle_unit` 的 15 个形参改成一个裸 `dict`（丢类型、丢 frozen，且形状门禁看不见）。
+
+---
+
 ## §229 P0-3 第一/二刀：`EvalRound` 的 40 个关键字参数 → `RoundSpec`；`settle_task` 的 9 个结果位 → `SettleOutcome`（2026-11-20）
 
 **触发**：`python.refactor.md` §P0-3 的剩余清单里最大的一处 ——

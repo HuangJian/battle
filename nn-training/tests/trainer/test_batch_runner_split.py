@@ -16,6 +16,11 @@
   ③ **功能性**：从**新家**直接调（不经门面）—— 心跳写点 + 失败静默 · `dispatch_batch_bg`
      起的线程 · `_done_keys` 的读盘口径。
 
+**2026-11-20 第二次换家**：通道机器（`_UnitLanes` / `_UnitPlan`）连同它独占的两个常量整块搬去
+`trainer/batch_lanes.py`（本模块 LOC 顶在 999/1000，收尾的 `UnitLedger` 没地方落）。契约随之变
+**两家对照**：定义唯一、注入点裸名、常量读取都按「谁裸名读、谁必须绑定」逐家判，且**交叉转发
+也算红**（`br.STUCK_GRACE_SEC` / `bl.bun_version` 那种转发 = patch 打哪家都可能静默空操作）。
+
 放在 `tests/` 而不是 `e2e/`：纯逻辑、无头、无网络、无真节点。
 """
 
@@ -32,43 +37,53 @@ if str(ROOT) not in sys.path:
 
 import common.runtime
 import trainer.batch_eval as be
+import trainer.batch_lanes as bl
 import trainer.batch_runner as br
 
 RL = ROOT / "trainer"
 RUNNER_PATH = RL / "batch_runner.py"
+LANES_PATH = RL / "batch_lanes.py"
 EVAL_PATH = RL / "batch_eval.py"
 RUNNER_SRC = RUNNER_PATH.read_text(encoding="utf-8")
+LANES_SRC = LANES_PATH.read_text(encoding="utf-8")
 EVAL_SRC = EVAL_PATH.read_text(encoding="utf-8")
 
 #: 搬进执行器模块的成员：2 个公开名 + 1 个私有名 + 5 个执行器独占常量。
 MOVED_PUBLIC = ("BatchEvalRunner", "dispatch_batch_bg")
 MOVED_PRIVATE = ("_heartbeat",)
-MOVED_CONSTS = (
-    "BUSY_BACKOFF_CAP_SEC",
-    "STUCK_GRACE_SEC",
+#: 2026-11-20：五个执行侧常量跟着「谁读它」分两家 —— 开单元/收尾那三个留在执行器，
+#: 通道机器独占的两个（背压上限 / 收尾僵死宽限）随机器搬去 `trainer/batch_lanes.py`。
+RUNNER_CONSTS = (
     "RECOVER_PING_SEC",
     "NO_CONSUMER_GRACE_SEC",
     "NODE_RECOVERY_TRIES",
 )
-MOVED = MOVED_PUBLIC + MOVED_PRIVATE + MOVED_CONSTS
+LANES_CONSTS = (
+    "BUSY_BACKOFF_CAP_SEC",
+    "STUCK_GRACE_SEC",
+)
+MOVED_CONSTS = (*RUNNER_CONSTS, *LANES_CONSTS)
+MOVED = (*MOVED_PUBLIC, *MOVED_PRIVATE, *MOVED_CONSTS)
+#: 机器的契约（机器 + 入参契约 + 收尾台账）也住新家：旧家一个都不许再定义。
+LANES_OWNED = ("_UnitLanes", "_UnitPlan", "UnitLedger", *LANES_CONSTS)
 
 #: **不**经门面转发的符号（只被本模块读 ⇒ 转发只会制造「静默空操作」的假象）。
-NOT_FORWARDED = MOVED_PRIVATE + MOVED_CONSTS
+NOT_FORWARDED = (*MOVED_PRIVATE, *MOVED_CONSTS)
 
-#: 执行器的依赖注入点（模块全局）。裸名读 = patch 生效；限定名读 = patch 静默失效。
-DI_NAMES = ("log", "bun_version", "run_local_eval_game")
+#: 依赖注入点（模块全局），按**读它的模块**分家。裸名读 = patch 生效；限定名读 = 静默失效。
+RUNNER_DI = ("log", "bun_version")
+LANES_DI = ("log", "_record_agent_meta", "run_local_eval_game")
+DI_NAMES = (*RUNNER_DI, *LANES_DI)
 
 #: 新家的顶层 import 闭集（多一个也红：新依赖必须显式登记在这里）。
 RUNNER_IMPORTS = {
     "__future__",
-    "collections",
     "hashlib",
     "json",
     "pathlib",
     "shutil",
     "threading",
     "time",
-    "typing",
     "common.distribution",
     # 2026-11-17（§P1-6 第四批）：单元线程归 `Runtime`（`batcheval-u<idx>-*`），
     # `common.runtime` 是 L0、stdlib-only 的并发所有者。
@@ -84,15 +99,6 @@ RUNNER_IMPORTS = {
     # 2026-11-15 登记：节点门参考 hash 改以 self 自报为准（rollout/eval/batch/BC 四条腿
     # 共用），判据单独成模块 —— `common/distribution.py` 已到 LOC 预算。
     "common.codehash_ref",
-    # 2026-11-02 登记（z4-polish.it60 缺局）：B/C 行与 A 层共用 `eval_log.jsonl` /
-    # `dist-agent-meta.jsonl`，落账改走 `common.fs.append_jsonl` 的每路径单写者
-    # （重叠的 eval 轮不再各自 open 互相覆盖行首）。
-    "common.fs",
-    # 2026-09-29 登记（plan/sampler-single-instance §8-Q2）：节点门多一道「本轮 bootId 一致」
-    # —— 节点 ping 结果的同一性账本（纯逻辑，零依赖）在 `worker/node_identity.py`，执行器在
-    # `bringup` 的回场口消费它。`from worker import node_identity` 的顶层名就是**裸包
-    # `worker`**（2026-09-30 刀 6 前它在 `biz/`，刀 4 前写作 `from rl import node_identity`）。
-    "worker",
     # 2026-10-15 登记（离线 delta 事故）：nn 腿读盘前先做**读侧落地**
     # （`remote/weights_standard.read_standard` —— 活动权重可能是离线腿回传的 delta 容器
     # `BWD1`，hub 原样落位；容器会让本机指纹与节点 cache 键对不上、节点侧 `JSON.parse` 直接报
@@ -102,19 +108,42 @@ RUNNER_IMPORTS = {
     # §2026-11-14-batch-plan-belongs-to-biz）—— 执行器照旧从**本模块**裸名取用。
     "biz.batch_plan",
     "trainer.batch_store",
-    "worker.eval_local",
     # 2026-09-27（S5 第十二刀）登记：本机份额缺省 `EVAL_LOCAL_SLOTS_DEFAULT` 随「让位/
     # 份额」族搬到 `biz/eval_yield.py` —— 执行器从判决面取份额，不再为一条缺省拖入运行器
     # （运行器那行仍在：`run_local_eval_game` 是本机槽位的执行面）。
     "worker.eval_yield",
     "common.log",
     # 2026-11-14 登记（`trainer.dispatch_queue` 的 re-export 面退役）：`bun_version` 回
-    # `common.proc`（缺省 fallback 就是 `"?"`），`_record_agent_meta` 回
-    # `worker.agent_meta.record_agent_meta`。历史名字留在**本模块**命名空间里 ——
-    # `monkeypatch.setattr(br, "bun_version" / "_record_agent_meta", …)` 打的就是这两处。
+    # `common.proc`（缺省 fallback 就是 `"?"`）。`_record_agent_meta` 自 2026-11-20 起只被
+    # 机器读 ⇒ 它绑在 `trainer.batch_lanes`（`monkeypatch.setattr(br, …)` 已失效）。
     "common.proc",
-    "worker.agent_meta",
+    # 2026-11-20：通道机器出包后，执行器只多一条**出边**（机器在 L0/L1 层，单向无环）；
+    # `worker.agent_meta` / `trainer.queue_local` / `common.fs` / `collections` / `typing` /
+    # `worker`（`node_identity`）/ `worker.eval_local`（五个注入名）随之搬去那个模块。
+    "trainer.batch_lanes",
+}
+
+#: 机器的顶层 import 闭集（同样多一个也红）。
+LANES_IMPORTS = {
+    "__future__",
+    "collections",
+    "dataclasses",
+    "pathlib",
+    "threading",
+    "time",
+    "typing",
+    "biz.batch_plan",
+    "common.distribution",
+    "common.fs",
+    "common.log",
+    "common.runtime",
+    "common.task_client",
+    "common.weights_client",
     "trainer.queue_local",
+    # 裸包 `worker` = `from worker import node_identity`（门指纹的同一性账本）。
+    "worker",
+    "worker.agent_meta",
+    "worker.eval_local",
 }
 
 
@@ -189,9 +218,14 @@ def _load_names_in(fragment: str) -> set[str]:
 
 
 def test_moved_members_are_defined_only_in_the_new_home() -> None:
-    runner, old = _top_bound(RUNNER_SRC), _top_bound(EVAL_SRC)
-    for name in MOVED:
+    runner, lanes, old = _top_bound(RUNNER_SRC), _top_bound(LANES_SRC), _top_bound(EVAL_SRC)
+    for name in MOVED_PUBLIC + MOVED_PRIVATE + RUNNER_CONSTS:
         assert name in runner, f"{name} 不在 trainer/batch_runner.py"
+        assert name not in lanes, f"{name} 不得在机器家里再定义一份"
+    for name in LANES_OWNED:
+        assert name in lanes, f"{name} 不在 trainer/batch_lanes.py"
+        assert name not in runner, f"{name} 仍定义在 trainer/batch_runner.py（机器没搬干净）"
+    for name in MOVED:
         assert name not in old, f"{name} 仍定义在 trainer/batch_eval.py"
 
 
@@ -209,8 +243,13 @@ def test_runner_only_symbols_are_not_forwarded_by_the_facade() -> None:
     会**静默**变成空操作 —— 单测仍绿、生产不生效。这里正面钉「不许有这条路」。
     """
     for name in NOT_FORWARDED:
-        assert hasattr(br, name), f"{name} 应住 trainer/batch_runner"
+        home = br if name in RUNNER_CONSTS + MOVED_PRIVATE else bl
+        assert hasattr(home, name), f"{name} 应住 {home.__name__}"
         assert not hasattr(be, name), f"{name} 不该经门面转发（patch 会静默失效）"
+    # 两家之间也不许互转：`br.STUCK_GRACE_SEC` / `bl.bun_version` 这种名字在、没人读的转发
+    # 是同一个坑的变体（patch 打哪家都可能静默空操作）。
+    assert not hasattr(br, "STUCK_GRACE_SEC"), "机器常量不许在执行器再绑一份"
+    assert not hasattr(bl, "bun_version"), "`bun_version` 只被开单元读 ⇒ 只绑执行器"
 
 
 def test_no_back_edge_to_the_old_home() -> None:
@@ -226,11 +265,23 @@ def test_no_back_edge_to_the_old_home() -> None:
 
 
 def test_top_level_import_closure_is_exact() -> None:
-    actual = _top_imports(RUNNER_SRC)
-    assert actual == RUNNER_IMPORTS, {
-        "多": sorted(actual - RUNNER_IMPORTS),
-        "少": sorted(RUNNER_IMPORTS - actual),
-    }
+    for src, allowed, home in (
+        (RUNNER_SRC, RUNNER_IMPORTS, "trainer/batch_runner.py"),
+        (LANES_SRC, LANES_IMPORTS, "trainer/batch_lanes.py"),
+    ):
+        actual = _top_imports(src)
+        assert actual == allowed, {
+            "家": home,
+            "多": sorted(actual - allowed),
+            "少": sorted(allowed - actual),
+        }
+
+
+def test_machine_module_has_no_back_edge_to_the_runner() -> None:
+    """新家单向：机器不得 import 执行器（成环）；执行器面走 `LaneOwner` 结构协议。"""
+    assert _top_imports(LANES_SRC) & {"trainer.batch_runner"} == set()
+    attrs = {n.attr for n in ast.walk(ast.parse(LANES_SRC)) if isinstance(n, ast.Attribute)}
+    assert attrs & {"batch_runner"} == set()
 
 
 def test_ledger_is_never_written_by_hand() -> None:
@@ -257,32 +308,36 @@ def test_ledger_is_never_written_by_hand() -> None:
 # ───────────────────── ② ★ 注入点：裸名读取（patch 生效的前提）─────────────────────
 
 
-def test_di_names_are_bound_and_called_bare_in_the_runner_module() -> None:
-    """三个注入点必须是**本模块的全局**、且以**裸名**调用。
+def test_di_names_are_bound_and_called_bare_per_home() -> None:
+    """注入点必须是**读它的那个模块**的全局、且以**裸名**调用。
 
-    `monkeypatch.setattr("trainer.batch_runner.bun_version", …)` 只改本模块的全局；调用点若写成
-    `common.distribution.bun_version(...)` 一类限定名，patch 就**静默失效**。这里两种形态都数。
+    `monkeypatch.setattr("trainer.batch_runner.bun_version", …)` 只改那一个模块的全局；调用点若写成
+    `common.distribution.bun_version(...)` 一类限定名，patch 就**静默失效**。逐家数两种形态。
     """
-    bare, qualified = _callee_forms(RUNNER_SRC, DI_NAMES)
-    assert all(n > 0 for n in bare.values()), bare
-    assert all(n == 0 for n in qualified.values()), qualified
-    for name in DI_NAMES:
-        assert hasattr(br, name), f"{name} 没绑进 trainer.batch_runner（patch 会静默失效）"
+    for src, names, mod in ((RUNNER_SRC, RUNNER_DI, br), (LANES_SRC, LANES_DI, bl)):
+        bare, qualified = _callee_forms(src, names)
+        assert all(n > 0 for n in bare.values()), (mod.__name__, bare)
+        assert all(n == 0 for n in qualified.values()), (mod.__name__, qualified)
+        for name in names:
+            assert hasattr(mod, name), f"{name} 没绑进 {mod.__name__}（patch 会静默失效）"
 
 
-def test_runner_constants_are_read_bare_inside_the_runner_classes() -> None:
-    """五个常量的读取必须发生在**执行侧的类成员**里且是裸名 —— 它们只被执行侧读。
+def test_constants_are_read_bare_in_the_class_that_uses_them() -> None:
+    """常量的读取必须发生在**读它的那个类的成员**里且是裸名。
 
-    2026-09-25（S31/B5b）：执行侧现在有两个类 —— 开单元/收尾住 `BatchEvalRunner`，通道机器住
-    `_UnitLanes`（常量读取随机器搬过去：`BUSY_BACKOFF_CAP_SEC` / `STUCK_GRACE_SEC`）。
-    只扫旧类会**静默**退化成「3/5」—— 与 `test_batch_plan_split` 的入边归属者同型。
-    两个类都在同一模块 ⇒ 裸名 patch 锚点（`trainer.batch_runner.X`）不迁移。
+    2026-09-25（S31/B5b）：执行侧两个类 —— 开单元/收尾住 `BatchEvalRunner`，通道机器住
+    `_UnitLanes`；2026-11-20 机器出包后**两个类还分住两个模块**，而 `monkeypatch.setattr`
+    的锚点是模块级的 ⇒ 「只扫旧类、只扫旧模块」都会静默退化成子集。
     """
-    loads: set[str] = set()
-    for cls in ("BatchEvalRunner", "_UnitLanes"):
-        loads |= _load_names_in(_class_member_src(RUNNER_SRC, cls))
-    missed = [c for c in MOVED_CONSTS if c not in loads]
-    assert missed == [], missed
+    runner_loads = _load_names_in(_class_member_src(RUNNER_SRC, "BatchEvalRunner"))
+    lanes_loads = _load_names_in(_class_member_src(LANES_SRC, "_UnitLanes"))
+    missed_runner = [c for c in RUNNER_CONSTS if c not in runner_loads]
+    missed_lanes = [c for c in LANES_CONSTS if c not in lanes_loads]
+    assert missed_runner == [], missed_runner
+    assert missed_lanes == [], missed_lanes
+    # 交叉读取 = 常量搬错家（只会在运行期炸，patch 也失效）
+    assert not [c for c in LANES_CONSTS if c in runner_loads]
+    assert not [c for c in RUNNER_CONSTS if c in lanes_loads]
 
 
 def test_constructor_call_in_dispatch_is_a_bare_global() -> None:

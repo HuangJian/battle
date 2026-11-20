@@ -31,6 +31,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import trainer.batch_runner as br
+from trainer.batch_lanes import UnitLedger
 from trainer.batch_store import BatchStore
 
 SRC = (ROOT / "trainer" / "batch_runner.py").read_text(encoding="utf-8")
@@ -39,9 +40,19 @@ CLS = next(
     n for n in TREE.body if isinstance(n, ast.ClassDef) and n.name == "BatchEvalRunner"
 )
 METHODS = {n.name: n for n in CLS.body if isinstance(n, ast.FunctionDef)}
-PLAN = next(n for n in TREE.body if isinstance(n, ast.ClassDef) and n.name == "_UnitPlan")
+#: 2026-11-20：机器 / 契约 / `UnitLedger` 已搬出本模块（LOC 999/1000）——
+#: 契约类与机器的锚点读新家，执行器相位仍读 `trainer/batch_runner.py`。
+LANES_SRC = (ROOT / "trainer" / "batch_lanes.py").read_text(encoding="utf-8")
+LANES_TREE = ast.parse(LANES_SRC)
+TREE = ast.parse(SRC)
+PLAN = next(n for n in LANES_TREE.body if isinstance(n, ast.ClassDef) and n.name == "_UnitPlan")
 #: 机器体（原 `_run_channels` 体内：状态 + 11 个闭包 + 主循环）自 S31/B5b 起住 `_UnitLanes`。
-LANES = next(n for n in TREE.body if isinstance(n, ast.ClassDef) and n.name == "_UnitLanes")
+LANES = next(
+    n for n in LANES_TREE.body if isinstance(n, ast.ClassDef) and n.name == "_UnitLanes"
+)
+LEDGER = next(
+    n for n in LANES_TREE.body if isinstance(n, ast.ClassDef) and n.name == "UnitLedger"
+)
 
 
 def _methods_of(cls: ast.ClassDef) -> dict[str, ast.FunctionDef]:
@@ -80,8 +91,10 @@ PLAN_FIELDS = (
     "req_scope",
 )
 
-#: `_settle_unit` 的 keyword-only 参数（= 机器要交出来的全部东西；闭集）。
-SETTLE_PARAMS = (
+#: `UnitLedger` 的字段（= 机器要交出来的全部东西；闭集）。
+#: 2026-11-20（P0-3）：`_settle_unit` 的 15 个关键字参数 → 一个 `UnitLedger`（住
+#: `trainer/batch_lanes.py`，由 `_UnitLanes.ledger()` 装配）⇒ 判据从「形参表」换成「字段表」。
+LEDGER_FIELDS = (
     "lock",
     "seen",
     "nodes_ready_ever",
@@ -169,42 +182,58 @@ def test_run_is_only_the_three_phase_wiring() -> None:
     assert not [n for n in ast.walk(METHODS["_run"]) if isinstance(n, ast.Subscript)]
 
 
-def test_settle_and_provenance_signatures_are_closed_sets() -> None:
-    settle = {a.arg for a in METHODS["_settle_unit"].args.kwonlyargs}
-    assert settle == set(SETTLE_PARAMS), sorted(settle ^ set(SETTLE_PARAMS))
-    assert METHODS["_settle_unit"].args.args == [] or [
-        a.arg for a in METHODS["_settle_unit"].args.args
-    ] == ["self"]
-    assert METHODS["_settle_unit"].args.kwonlyargs, "收尾参数必须 keyword-only"
+def test_settle_takes_one_ledger_and_provenance_keeps_its_closed_set() -> None:
+    """收尾：`(self, ledger)` 只收一个对象；字段闭集转给 `UnitLedger`——两处都要对得上。"""
+    settle = METHODS["_settle_unit"]
+    assert [a.arg for a in settle.args.args] == ["self", "ledger"], ast.unparse(settle.args)
+    assert not settle.args.kwonlyargs, "收尾不许再把字段摊成关键字参数（进 `UnitLedger`）"
+
+    fields = [
+        s.target.id
+        for s in LEDGER.body
+        if isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name)
+    ]
+    assert tuple(fields) == LEDGER_FIELDS, sorted(set(fields) ^ set(LEDGER_FIELDS))
+
     prov = {a.arg for a in METHODS["_log_provenance"].args.kwonlyargs}
     assert prov == set(PROV_PARAMS), sorted(prov ^ set(PROV_PARAMS))
 
-    # 调用点也是全关键字且名字对齐。
-    # 2026-09-25（S31/B5b）：`_settle_unit` 的调用点从 `_run_channels` 换到 `_UnitLanes.run`
-    # （机器体收进类；调用仍是 `self.owner._settle_unit(...)` ⇒ 归属者换了、参数表没换）。
-    for call, params in (
-        (
-            next(
-                n
-                for n in ast.walk(_methods_of(LANES)["run"])
-                if isinstance(n, ast.Call)
-                and isinstance(n.func, ast.Attribute)
-                and n.func.attr == "_settle_unit"
-            ),
-            SETTLE_PARAMS,
-        ),
-        (
-            next(
-                n
-                for n in ast.walk(METHODS["_settle_unit"])
-                if isinstance(n, ast.Call)
-                and isinstance(n.func, ast.Attribute)
-                and n.func.attr == "_log_provenance"
-            ),
-            PROV_PARAMS,
-        ),
-    ):
-        assert [k.arg for k in call.keywords] == list(params), "调用必须按参数表逐名传值"
+    # 调用点：机器交出一本账（`self.ledger(threads=…)`），一个位置参数、零关键字。
+    settle_call = next(
+        n
+        for n in ast.walk(_methods_of(LANES)["run"])
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "_settle_unit"
+    )
+    assert not settle_call.keywords, "`_settle_unit` 的调用点不许带字段 kwargs"
+    assert ast.unparse(settle_call.args[0]) == "self.ledger(threads=threads)"
+
+    prov_call = next(
+        n
+        for n in ast.walk(METHODS["_settle_unit"])
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "_log_provenance"
+    )
+    assert [k.arg for k in prov_call.keywords] == list(PROV_PARAMS), (
+        "调用必须按参数表逐名传值"
+    )
+
+
+def test_ledger_builder_is_the_single_assembly_point() -> None:
+    """`_UnitLanes.ledger()` 是本单元把手的**唯一**装配点：逐字段 `self.<同名>`，`threads` 是参数。"""
+    build = _methods_of(LANES)["ledger"]
+    calls = [
+        n
+        for n in ast.walk(build)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "UnitLedger"
+    ]
+    assert len(calls) == 1, "`ledger()` 必须恰好一处构造 `UnitLedger`"
+    kwargs = {k.arg: ast.unparse(k.value) for k in calls[0].keywords if k.arg}
+    assert tuple(kwargs) == LEDGER_FIELDS, sorted(set(kwargs) ^ set(LEDGER_FIELDS))
+    for name, value in kwargs.items():
+        want = "threads" if name == "threads" else f"self.{name}"
+        assert value == want, f"`{name}` 应从 `{want}` 取，实际 `{value}`"
+    assert [a.arg for a in build.args.kwonlyargs] == ["threads"], "`threads` 必须是唯一参数"
 
 
 # ──────────────────── ② 功能性：收尾/账块现在直接可测 ────────────────────
@@ -240,21 +269,23 @@ def _settle(
     """用**显式字面量**调收尾（`**dict` 会让 mypy 失去每参数类型 ⇒ 这里不省那几行）。"""
     return br.BatchEvalRunner._settle_unit(
         r,
-        lock=threading.Lock(),
-        seen=set(seen),
-        nodes_ready_ever=set(),
-        writers=[0],
-        dup_settles=[0],
-        stop_watch=threading.Event(),
-        all_done=threading.Event(),
-        node_games={"local": 2} if node_games is None else node_games,
-        node_soft_fails={},
-        node_hard_fails={},
-        threads=[],
-        unit={"rung": "c4l1"},
-        req_scope="batcheval:test",
-        todo=list(todo),
-        t_start=time.time(),
+        UnitLedger(
+            lock=threading.Lock(),
+            seen=set(seen),
+            nodes_ready_ever=set(),
+            writers=[0],
+            dup_settles=[0],
+            stop_watch=threading.Event(),
+            all_done=threading.Event(),
+            node_games={"local": 2} if node_games is None else node_games,
+            node_soft_fails={},
+            node_hard_fails={},
+            threads=[],
+            unit={"rung": "c4l1"},
+            req_scope="batcheval:test",
+            todo=list(todo),
+            t_start=time.time(),
+        ),
     )
 
 

@@ -15,7 +15,7 @@
 | P1-3 lint 豁免在保护 bug 类 | **已修** | `B023` / `SIM115` 从全局 `ignore` 移除；40 处违规清零（25 处循环变量显式绑定，8 处句柄改 `with`，7 处确实跨调用持有 → 行级精确抑制 + 理由） |
 | P0-6 时间戳两份实现 + 假声明 | **部分修** | `common/log.py::format_line` 改走 `common.logutil.stamp()`，删掉 `log(course=…)` 里的第二份格式化；`logutil.py` 指向不存在的 `biz/log.py` 的假声明已改正。`print` 仍剩 134 处。**`hub/` 包已收口**（54 → 1，唯一保留的是 `tunnel_ab_probe` 的 `print(json.dumps(results))` = 一次性 CLI 的机器读交付物）；**`remote/` 的日志格式也已单源**（13 文件 43 处：`log=lambda msg: print(f"[…][worker] {msg}")` 的默认回调换成模块级 `_log = tag_logger(…)`，`def _log(msg)` 包装的 body 换成 `log_line(tag, msg)`），手拼 `time.strftime` 的日志时间戳随之消失。两处**刻意保留**的手拼格式：`remote/worker_proc.py`（L0 纯 stdlib 秩，不许 import `common.*`）与`remote/deliver_zip.py` / `run_loop.py` 的协议输出面；`worker/iter_rollout.py` 的 `[iter]` 回调（该文件 LOC 已 999/1000，迁它要先拆，见 §P0-2）。2026-11-14 另修了日志层自己的盲区：`LogRouter` 的镜像写失败 / 句柄关闭失败原来都是裸 `pass`，「该课日志在丢行」与「这课本来没日志」长得一模一样 —— 现在按 `mirror:<课>` / `close:<课>` 各喊一次 WARN |
 | P0-5 `common/` 模块级可变状态 | **部分修** | `log` / `fs` / `weights_ledger` 已对象化：`LogRouter`（ContextVar 前缀 + 显式 sink 表）/ `JsonlLedger` / `WeightsLedger`，均可 `router=` / `ledger=` 注入，默认实例只是薄包装；新增隔离性用例。`net_http` 的 `_NO_PROXY_OPENER` / `_RACING_OPENERS` 两个懒单例改为 `functools.cache`，G2 名册对应项已删。`distribution` 的三份状态（在飞登记 / 收工标记 / 重启去重 memo）搬进 `RequestRegistry` / `RestartMemo` 显式对象；`platform_utils` 的 `_UNREAPED` 搬进 `UnreapedProcs`（`keep` / `sweep` / `__len__`，带 `store=` 可注入），**G2 名册清零**（`L0_MUTABLE_ALLOWED = {}`，名册本体保留给「过期豁免」用例） |
-| P0-3 参数爆炸（56 参） | **部分修** | `publish_job` 的 55 个字段收进 `PublishSpec`（frozen + kw_only，住 `remote/publish_spec.py`，L0），签名只剩 `spec` / `log`（`**fields` 过渡适配器已删，26 个调用点全部改传对象）；manifest 打包只读对象。`run_training_core` / `_run_training_core_paddle` 的 27 个 kwarg 收进 `TrainSpec`（frozen + kw_only，签名只剩 `(base_url, token, spec)`）；`build_argparser` 的 92 个 `add_argument` 收进模块级 `_flag_rows(mode, rl_args)` 的 `(flags, kwargs)` 数据表（650 → 7 行；表 164 行）。`ppo_update` 的 17 参入口保留为 trainer/stream 契约壳，内部运行时状态收进 `PPOContext`。**2026-11-20（§229）**：`worker/eval_arbiter.EvalRound.__init__` 的 40 个关键字参数 → `RoundSpec`（frozen + kw_only，装配点 `trainer/eval_dispatch._round_spec`；回调按形状声明，该文件 `Any` 21 → 16），`EvalRound.settle_task` 的 9 个结果位（含从没人读的 `wall_sec`）→ `SettleOutcome` ⇒ 该文件宽签名归零、全仓 132 → 130；守 `tests/worker/test_eval_round_spec.py` |
+| P0-3 参数爆炸（56 参） | **部分修** | `publish_job` 的 55 个字段收进 `PublishSpec`（frozen + kw_only，住 `remote/publish_spec.py`，L0），签名只剩 `spec` / `log`（`**fields` 过渡适配器已删，26 个调用点全部改传对象）；manifest 打包只读对象。`run_training_core` / `_run_training_core_paddle` 的 27 个 kwarg 收进 `TrainSpec`（frozen + kw_only，签名只剩 `(base_url, token, spec)`）；`build_argparser` 的 92 个 `add_argument` 收进模块级 `_flag_rows(mode, rl_args)` 的 `(flags, kwargs)` 数据表（650 → 7 行；表 164 行）。`ppo_update` 的 17 参入口保留为 trainer/stream 契约壳，内部运行时状态收进 `PPOContext`。**2026-11-20（§229）**：`worker/eval_arbiter.EvalRound.__init__` 的 40 个关键字参数 → `RoundSpec`（frozen + kw_only，装配点 `trainer/eval_dispatch._round_spec`；回调按形状声明，该文件 `Any` 21 → 16），`EvalRound.settle_task` 的 9 个结果位（含从没人读的 `wall_sec`）→ `SettleOutcome` ⇒ 该文件宽签名归零、全仓 132 → 130；守 `tests/worker/test_eval_round_spec.py`。**2026-11-20（§230）**：`trainer/batch_runner._settle_unit` 的 15 个位置参数 → 一个 `UnitLedger`（frozen + kw_only，装配点 `_UnitLanes.ledger(threads=…)`）—— 前置条件是把通道机器整块拆成 `trainer/batch_lanes.py`（LOC 999 → 336 + 694），全仓宽签名 130 → **129**；守 `tests/trainer/test_batch_runner_phases.py` 的 `LEDGER_FIELDS` 闭集 |
 | P0-4 动作空间嗅探 | **部分修（动作空间）** | 新增 stdlib-only `common/contracts.py`：`ActionSpace` + `HeadLayout`；PPO torch/Paddle 引擎只在数据边界 `from_batch` 一次，ref 用 `from_forward_arity` 校验，手写掩码切片改为契约切片；`tests/common/test_action_space_contract.py` 覆盖，`paddle_parity` 8 case 全 PASS。**2026-11-16 删掉最后两处 `a_hold` 嗅探**（`worker/ppo/np_core.py` 的 `load_shard` 掩码宽校验与 `load_episode_from_shard` 的字段集），并加门禁 `test_only_one_place_decides_v6`：生产面除 `common/contracts.py` 外不许再出现 `"a_hold" in …` / `.get("a_hold")`（字节初筛，0.16s）。**2026-11-18 数据面契约迈出第一步**：`common/contracts.py` 新增 `Shard` / `ShardV6` / `Episode` / `EpisodeV6`（零运行时成本 TypedDict，numpy 只在 `TYPE_CHECKING`），`np_core.load_shard` 返回 `Shard | ShardV6`、12/14 个键在 `_as_shard` 里逐个写出 ⇒ 拼错键名是 mypy 错误而不是静默走 legacy（实测 `a_holdd` 两条错）；字段表↔契约的同源判据做成 import 哨兵（读私有表会撞 G5）；三 backend 共用的骨架面收敛成一个有理由的 `ShardRow = Mapping[str, Any]`（G14 −1）。`tests/common/test_shard_contract.py` 覆盖键集 / episode 键序 / 零成本 / L0 不拉 numpy（见 `docs/nn/engineering.md` §126）。**2026-11-18 第三块：episode 契约跨 `RolloutBackend`/`trainer/stream`** —— 三个后端返回 `Episode|EpisodeV6` / `GoalEpisode` / `IntentEpisode`，协议面是 `EpisodeLike` union（stream 只碰 `adv`）；四串字段元组搬进 `common/contracts.py` 由声明序派生。顺手挤出 P0-1 同型破洞：stream 恒传 `(shard, gamma, lam)` 而 intent/goal 装载器只收 `dirpath`（`load_episodes` 别名只收 `(data_root, normalize_adv)`）⇒ 一接上就逐 shard TypeError 被吞成 `skip bad shard`；两个后端现已收下 gamma/lam 并传给 GAE（缺省 = 模块常量，数值不变），守卫 `test_episode_loaders_accept_stream_call_shape` 修前 4 红（`docs/nn/engineering.md` §127）。~~**manifest/result 仍是裸 dict —— B5 剩余那一半**~~ **2026-11-18 复核：该句已过期** —— `Manifest` / `CloudResult` 是字段级校验的 pydantic 模型（`common/manifest.py` / `common/protocol.py`，§128），`normalize_manifest` / `validate_result` 只是薄包装；B5 的剩余项只剩 `cfg`/`course` schema（可选）。
 | P0-2 `trainer/eval_dispatch.py::EvalDispatcher.run`（589 行） | **已拆** | `run` ~77 行只做编排；派生状态收进 `_EvalRun`，阶段拆成 `_eval_prepare`（127）/ `_eval_register`（120）/ `_eval_admit`（193）/ `_eval_start`（35）/ `_eval_close`（163）。节点门、权重 POST、收工对账、summary 与清理顺序逐字搬移 |
 | P0-2 `worker/iter_rollout.py::run_iter_rollout`（604 行 / 9 参） | **已拆** | 入口只剩编排（~50 行）；批级状态收进 `_IterRun`，阶段拆成 `_setup_run`（94）/ `_setup_scratch`（140）/ `_setup_pool`（48）/ `_drive_games`（172）/ `_run_games`（15）/ `_finish_run`（107），`_samples_of` 与 `_clean_stuck` 独立成模块函数。流式调度、带超时 wait、整轮重投、scratch/池/对账顺序逐字搬移 |
@@ -1686,7 +1686,7 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      的逐模块工程。
    * **P1-4 类型化**：`Any` 1178 处 / 181 文件（G14 冻结）；mypy 仍是非 strict。
      批量换 `object` 已实测否决（406 个红点），只能逐个数据边界换成 TypedDict / 协议。
-   * **P0-3 参数爆炸**：仍有 **130 个函数 >8 参数 / 86 文件**（2026-11-20 实测；形状门禁按文件
+   * **P0-3 参数爆炸**：仍有 **129 个函数 >8 参数 / 86 文件**（2026-11-20 实测；形状门禁按文件
      冻结。审计的「124」是 2026-11-19 上游合入前的读数，合入带进了新的宽签名）。
      ~~最大的 `worker/eval_arbiter.EvalRound.__init__` 41 参~~ **已收（2026-11-20，§229）**：
      40 个关键字参数 → `RoundSpec`（装配点 `trainer/eval_dispatch._round_spec`），
@@ -1699,12 +1699,14 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      轮换 / 补传 / outbox 各一簇，调用方只传子集）⇒ 不能照抄 `RoundSpec`：先定「怎么表达
      只覆盖几个旋钮」（`dataclasses.replace` 基准 + 覆盖，还是 builder），否则调用点会为了
      传三个参数造一整个对象。
-     ② `trainer/batch_runner._settle_unit`（15 参，全部来自 `_UnitLanes` 自己的字段 ⇒ 本该是
-     `self.ledger(threads=…)` 一个对象）**卡在 LOC 999/1000** —— 加数据类就超预算，必须先拆
-     `trainer/batch_runner.py`（与 `worker/iter_rollout.py` 同一个前置条件）。
-     ③ 它的闭集判据已经写成守卫（`tests/trainer/test_batch_runner_phases.py::SETTLE_PARAMS`
-     + 调用点逐名对齐），所以收签名时**要改的是那条判据的锚点**（改成「`UnitLedger` 的字段集
-     + `_settle_unit` 只收一个对象」），而不是删掉守卫。
+     ~~② `trainer/batch_runner._settle_unit`（15 参）卡在 LOC 999/1000~~
+     **已收（2026-11-20，§230）**：先把通道机器整块拆成 `trainer/batch_lanes.py`
+     （`_UnitLanes` / `_UnitPlan` / 两个背压常量；`batch_runner.py` LOC 999 → 336），再让
+     `_settle_unit(self, ledger)` 只收一个 `UnitLedger`（frozen + kw_only，装配点
+     `_UnitLanes.ledger(threads=…)`）⇒ 宽签名 130 → **129**。原猜的 ③ 成立且已兑现：守卫按
+     「`UnitLedger` 的字段集 + 只收一个对象」重锚（`LEDGER_FIELDS` + `_settle()`
+     构造 `UnitLedger`），没有删任何一条判据；顺带发现**同族陷阱第 4 种形态 = 换模块**（patch 锚点、
+     入边归属者表、行构造守卫、`GATE_SITES` 都要跟着换家，否则静默空转）。
    * **P0-5 剩余全局状态**：`worker/eval_exec._EXECUTORS` 与 `worker/eval_arbiter._ARBITER`
      两个单例仍在（G2 只管 `common/**`）；`biz/reward_context._current` 按 §P0-5 原裁定
      保留（每 iter 整体替换的加载期上下文，不是隐藏可变状态）。

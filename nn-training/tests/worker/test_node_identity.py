@@ -108,7 +108,8 @@ def test_ledger_is_bounded_to_the_recent_rounds() -> None:
 
 # ── 接线守卫（网关点必须真调这个判据；钉与查必须共用同一个 round key）────────────────
 
-GATE_SITES = ("dispatch_state.py", "queue_local.py", "eval_dispatch.py", "batch_runner.py")
+#: 2026-11-20：批评估的节点门（`bringup` 的回场口）随通道机器搬去 `batch_lanes.py`。
+GATE_SITES = ("dispatch_state.py", "queue_local.py", "eval_dispatch.py", "batch_lanes.py")
 
 
 def _src(name: str) -> str:

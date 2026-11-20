@@ -361,6 +361,9 @@ def _run_unit(
     batch = {"batch_id": "bp", "iter": 1, "units": {"of": 1, "done": []}}
     logs: list[str] = []
     monkeypatch.setattr("trainer.batch_runner.log", lambda m: logs.append(str(m)))
+    # 2026-11-20：通道机器住 `trainer.batch_lanes`（它的日志各自成闸）⇒ 两边都收，
+    # 否则「单元打了什么」只剩执行器一半（打在旧家 = 静默空操作）。
+    monkeypatch.setattr("trainer.batch_lanes.log", lambda m: logs.append(str(m)))
     r = be.BatchEvalRunner(
         "bun", str(weights), eval_log, args, cfg, batch, unit, 0, 1, "run1", epoch, "nn", None, ""
     )
@@ -476,7 +479,8 @@ def test_remote_zero_participation_is_loud(tmp_path: Path, monkeypatch) -> None:
     # 本机槽位签名：run_local_eval_game(bun, weights, stage, seed, dir, wver=…) —— manifest
     # 必须回显 wver（validate_eval_result 按 wver 对账）。
     monkeypatch.setattr(
-        "trainer.batch_runner.run_local_eval_game",
+        # 2026-11-20：本机槽位由机器（`trainer.batch_lanes`）调 ⇒ 注入口随机器改址。
+        "trainer.batch_lanes.run_local_eval_game",
         lambda *a, **k: _ok_manifest(int(a[2]), int(a[3]), str(k.get("wver", ""))),
         raising=False,
     )
@@ -606,12 +610,14 @@ def test_settle_stall_exits_loudly_not_at_deadline(tmp_path: Path, monkeypatch) 
     """
     import common.codehash
     import common.distribution
-    import trainer.batch_runner as br
 
-    # 常量与执行器同住（S27/B3）⇒ 注入口也是 `trainer.batch_runner`；打在旧家会是静默空操作。
+    # 常量随机器搬家（2026-11-20）⇒ 注入口是 `trainer.batch_lanes`；打在旧家会是静默空操作。
     # 0.5 → 0.2（2026-09-29，§43）：判据是「在 STUCK_GRACE_SEC 内响亮收工」（日志里有
     # 「收尾僵死」），宽限值就是本用例的固有开销（僵死必须真被守到）。
-    monkeypatch.setattr(br, "STUCK_GRACE_SEC", 0.2)
+    import trainer.batch_lanes as bl
+    import trainer.batch_runner as br
+
+    monkeypatch.setattr(bl, "STUCK_GRACE_SEC", 0.2)
 
     victim: list[tuple[int, int]] = []
 
@@ -686,6 +692,9 @@ def _channels_runner(
     batch = {"batch_id": "bch", "iter": 1, "units": {"of": 1, "done": []}}
     logs: list[str] = []
     monkeypatch.setattr("trainer.batch_runner.log", lambda m: logs.append(str(m)))
+    # 2026-11-20：通道机器住 `trainer.batch_lanes`（它的日志各自成闸）⇒ 两边都收，
+    # 否则「单元打了什么」只剩执行器一半（打在旧家 = 静默空操作）。
+    monkeypatch.setattr("trainer.batch_lanes.log", lambda m: logs.append(str(m)))
     r = be.BatchEvalRunner(
         "bun",
         str(weights),

@@ -20,6 +20,10 @@ import ast
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[2] / "trainer" / "batch_runner.py"
+#: 2026-11-20：消费侧（取任务 / 本机直跑 / manifest 对账）随通道机器搬去
+#: `trainer/batch_lanes.py`，而 `wver` 的**赋值点**仍在开单元的 `batch_runner.py` ⇒
+#: 两份都要扫（只扫旧家会静默退化成「0 个调用点」，不是「没截断」）。
+LANES_SRC = Path(__file__).resolve().parents[2] / "trainer" / "batch_lanes.py"
 
 #: 需要 wver 身份的调用点（远端取任务 / 本机直跑 / manifest 对账）。
 WVER_CALLS = ("fetch_task", "run_local_eval_game")
@@ -62,20 +66,21 @@ def _has_slice(node: ast.AST) -> bool:
 
 
 def test_wver_args_are_full_sha() -> None:
-    tree = ast.parse(SRC.read_text(encoding="utf-8"))
     checked = 0
-    for call in _all_calls(tree):
-        name = _callee_name(call)
-        if name in WVER_CALLS:
-            bad = _is_truncated(_kw_or_pos(call, "wver", 99))
-            assert bad is None, f"{name} 的 wver {bad}（agent 桶按全量 sha 存）"
-            checked += 1
-        elif name == "validate_eval_result":
-            # 位置实参 (manifest, expected_wver)：第二个必须与发车用的 wver 同值。
-            val = call.args[1] if len(call.args) > 1 else None
-            bad = _is_truncated(val)
-            assert bad is None, f"validate_eval_result 的 expected_wver {bad}"
-            checked += 1
+    for src in (SRC, LANES_SRC):
+        tree = ast.parse(src.read_text(encoding="utf-8"))
+        for call in _all_calls(tree):
+            name = _callee_name(call)
+            if name in WVER_CALLS:
+                bad = _is_truncated(_kw_or_pos(call, "wver", 99))
+                assert bad is None, f"{name} 的 wver {bad}（agent 桶按全量 sha 存）"
+                checked += 1
+            elif name == "validate_eval_result":
+                # 位置实参 (manifest, expected_wver)：第二个必须与发车用的 wver 同值。
+                val = call.args[1] if len(call.args) > 1 else None
+                bad = _is_truncated(val)
+                assert bad is None, f"validate_eval_result 的 expected_wver {bad}"
+                checked += 1
     assert checked >= 3, f"只检查到 {checked} 个 wver 调用点——调用点被改名/移动了？"
 
 

@@ -101,7 +101,9 @@ WIDE_FUNCS_BASELINE = {
     "tools/spatial-probe-flatcv.py": 1,
     "tools/spatial-probe.py": 2,
     "tools/tpu-probe.py": 1,
-    "trainer/batch_runner.py": 3,
+    #: 2026-11-20：`_settle_unit` 的 15 参收成 `(self, ledger)`，通道机器搬去
+    #: `trainer/batch_lanes.py` ⇒ 本文件 3 → **2**（新家没有新增宽签名）。
+    "trainer/batch_runner.py": 2,
     "trainer/bc_ingest.py": 3,
     "trainer/bc_loop.py": 2,
     "trainer/dispatch.py": 1,

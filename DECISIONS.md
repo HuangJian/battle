@@ -8551,3 +8551,22 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   状态现建 / 装配点唯一 / 生产调用只传一个位置参数；后两条对 HEAD 实测红：旧 40 参、旧调用
   `kw=40`）。`WIDE_FUNCS_BASELINE` 删条目（不是留 0）、`any_baseline` 21 → 16。
 - **全文**：`docs/nn/engineering.md §229`。
+- **§2026-11-20-batch-unit-ledger**：`trainer/batch_runner.py` 拆出 `trainer/batch_lanes.py`（通道机器
+  `_UnitLanes` / `_UnitPlan` / 两个背压常量），`BatchEvalRunner._settle_unit` 的 15 个位置参数 →
+  **一个 `UnitLedger`**（frozen + kw_only，装配点 `_UnitLanes.ledger(threads=…)`）。
+- **为什么先拆再收**：`batch_runner.py` 的 LOC 是 **999/1000**（G-LOC 天花板），加数据类即超预算 ——
+  与 `worker/iter_rollout.py` 同一前置条件。机器（状态 + 主循环）与收尾本来就该分住：搬家后
+  `batch_runner` LOC 336 / `batch_lanes` 694，全仓宽签名 **130 → 129**。
+- **代价 = patch 锚点换家**，按「谁裸名读、谁必须绑定」重分：`_record_agent_meta` /
+  `run_local_eval_game` / `BUSY_BACKOFF_CAP_SEC` / `STUCK_GRACE_SEC` 的锚点改为
+  `trainer.batch_lanes`；`log` **两家都绑**（收尾行在 runner、通道行在 lanes）；`bun_version` 不动
+  （只有 `_open_unit` 读）。守卫**改锚点不删守卫**，并新增两条反向断言：`br.STUCK_GRACE_SEC` /
+  `bl.bun_version` 这种「名字在、没人读」的交叉转发也红（patch 打哪家都可能空转）。
+- **被否决**：① 把 `UnitLedger` 塞进 999 行文件（超预算）；② 让 `batch_lanes` 反向 import
+  `trainer.batch_runner` 取 `log`（成环 + patch 锚点歧义）—— 改 `LaneOwner` Protocol；③ `_settle_unit`
+  收一个裸 `dict`（丢类型与 frozen，形状门禁失明）。
+- **顺手修的守卫盲区**（同族陷阱第 4 次：换方法 → 换类 → **换模块**）：`test_batch_plan_split` 的入边
+  归属者表已扫三个模块（否则执行侧两条入边静默退化成 4/6）；wver 实参 / 三个行构造守卫 /
+  `GATE_SITES` 全部改读新家。基线按实测簿记（G4 6→3+3 · G7 2→1+1 · G17 30→7+23 · G5 3→1 ·
+  G19 SOURCE 1210→1221，性质未变）。
+- **全文**：`docs/nn/engineering.md §230`。
