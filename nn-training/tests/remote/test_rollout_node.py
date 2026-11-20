@@ -435,6 +435,37 @@ def test_start_agent_passes_disk_thresholds(
     assert cmd[cmd.index("--workers") + 1] == "4"
 
 
+def test_start_agent_work_dir_env_decoupled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """CFG.work_dir → 子进程 SAMPLER_WORK_DIR：显式值透传；空/auto 不设（零行为变化）。"""
+    seen: list[dict[str, str]] = []
+
+    class _P:
+        def poll(self):
+            return None
+
+    def _fake_popen(_cmd: list[str], **kw: Any) -> _P:
+        seen.append(kw["env"])
+        return _P()
+
+    monkeypatch.setattr(rn.subprocess, "Popen", _fake_popen)
+    monkeypatch.delenv("SAMPLER_WORK_DIR", raising=False)
+    for cfg, want in (
+        ({"work_dir": "/dev/shm/battle-agent"}, "/dev/shm/battle-agent"),
+        ({"work_dir": "  /dev/shm/battle-agent  "}, "/dev/shm/battle-agent"),
+        ({"work_dir": ""}, None),
+        ({"work_dir": "auto"}, None),
+        ({}, None),
+    ):
+        rn._start_agent("bun", tmp_path / "a.ts", tmp_path, 8443, 4, cfg, tmp_path / "agent.log")
+        env = seen[-1]
+        assert env.get("SAMPLER_WORK_DIR") == want, cfg
+
+    # 父进程已带 SAMPLER_WORK_DIR 时，空 CFG 不该抹掉继承值（单测重定向通道不破坏）
+    monkeypatch.setenv("SAMPLER_WORK_DIR", str(tmp_path / "inherited"))
+    rn._start_agent("bun", tmp_path / "a.ts", tmp_path, 8443, 4, {}, tmp_path / "agent.log")
+    assert seen[-1].get("SAMPLER_WORK_DIR") == str(tmp_path / "inherited")
+
+
 def test_disk_line_three_levels_and_unknown() -> None:
     """周期行三档 + 不可知 + **生效**阈值（文本只引 status 的数字，不写死常量）。"""
     warn = {"diskFreeMB": 2706, "diskLevel": "warn", "diskWarnMB": 4096, "diskFloorMB": 2048}

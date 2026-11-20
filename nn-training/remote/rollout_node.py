@@ -405,6 +405,13 @@ def _start_agent(
     ] + [str(a) for a in (cfg.get("agent_extra") or [])]
     env = dict(os.environ)
     env[AGENT_SUPERVISED_ENV] = "1"
+    # work_dir 与 code_dir 解耦（2026-11-20）：agent 侧 WORK_DIR 只读 SAMPLER_WORK_DIR，
+    # 缺省 = <repo>/tmp/dist-agent（跟着 code_dir 走）。CFG 显式填了就透传给子进程，
+    # 这样 code_dir 可以留在网络盘做跨对话持久（代码/凭据），work_dir 单独指内存盘提速。
+    # 空/auto = 不动，零行为变化；不做 mkdir（agent 的 sweepWorkdirAtBoot 自己建）。
+    work_dir = str(cfg.get("work_dir") or "").strip()
+    if work_dir and work_dir.lower() != "auto":
+        env["SAMPLER_WORK_DIR"] = work_dir
     # `Popen` 在启动时继承/复制句柄，父进程随后关掉自己那一份：长跑的 agent 不该
     # 让 supervisor 每起一次就泄漏一个 fd。
     with open(agent_log, "a", encoding="utf-8", errors="replace") as fh:
@@ -861,8 +868,14 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
     hub_configured = bool(hub_url and hub_token)
     log(
         f"环境={env} 通道={link} workers={workers}（{slot_note}）"
-        f" 磁盘={floor_mb}/{warn_mb}MB node_id={node_id} pid={os.getpid()} "
+        f" 磁盘 free 阈值=warn<{warn_mb}MB / 熔断<{floor_mb}MB node_id={node_id} pid={os.getpid()} "
         f"hub={'已配置 ' + (net_http.host_of(hub_url) or '?') if hub_configured else '未配置（降级为手工登记）'}"
+    )
+    # workdir 落点单独一行：是不是真切到内存盘必须肉眼可验，不能只靠 CFG 字段猜。
+    _work_dir = str(cfg.get("work_dir") or "").strip()
+    log(
+        f"work_dir={_work_dir or '<code_dir>/tmp/dist-agent（默认）'}"
+        f"  code_dir={code_dir}"
     )
     # 同一 node_id 只许一个进程在轮询：两个消费者会**抢同一个 hub 队列**，而且日志会混成
     # 「新旧两种格式同时出现」——2026-11-18 DSW 现场就这么误判过一次（旧进程没死）。
