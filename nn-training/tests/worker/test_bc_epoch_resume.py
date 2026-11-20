@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import types
 from pathlib import Path
@@ -173,10 +174,16 @@ def test_bc_train_writes_null_when_val_loss_is_not_finite(tmp_path: Path) -> Non
 
     构造方式用**真实切分**：先跑一次 `make_loaders` 拿到 val 下标（同一个 seed ⇒ 逐字节可复现），
     只把那些行的 scalars 写成 NaN —— 训练行的梯度仍是干净的，所以权重有限、文件照写。
+
+    ⚠ **不要原地改写 `scalars.npy`**（2026-11-20 门禁稳定红）：`make_loaders(lazy=True)` 已经把
+    分片 mmap 住了（`worker/data/npyio.py::load_shard(mmap=True)`），Windows 拒绝覆盖仍被映射的
+    文件（WinError 1224 / `ERROR_USER_MAPPED_FILE`，CPython 没给它 errno 映射 ⇒ 报成
+    `OSError [Errno 22] Invalid argument`，看着像路径/沙箱问题，其实是文件锁）。
+    ⇒ 在**副本**语料上落 NaN：切分只由 seed 与 shard 形状决定，下标逐字节一致。
     """
     from worker.data.dataset import make_loaders
 
-    # ⚠ `_bc_args` 自己会调 `_make_corpus`（覆盖写）；先把 args 建好，再改盘上的 shard。
+    # ⚠ `_bc_args` 自己会调 `_make_corpus`（覆盖写）；先把 args 建好，再准备副本。
     ns = _bc_args(tmp_path, epochs=2)
     corpus = Path(ns.data_dir)
     _, val_dl, _ = make_loaders(
@@ -184,10 +191,14 @@ def test_bc_train_writes_null_when_val_loss_is_not_finite(tmp_path: Path) -> Non
     )
     val_idx = sorted(int(i) for i in val_dl.dataset.indices)
     assert val_idx, "val_split=0.2 必须有验证样本，否则这条用例什么都没测"
-    shard = corpus / "shard0" / "scalars.npy"
+    # 副本 = 另一个文件 ⇒ 不受上面那次 mmap 的文件锁影响（Windows 上原地写必 OSError）。
+    poisoned = tmp_path / "corpus_nan"
+    shutil.copytree(corpus, poisoned)
+    shard = poisoned / "shard0" / "scalars.npy"
     arr = np.load(shard)
     arr[val_idx, :] = np.nan
     np.save(shard, arr)
+    ns.data_dir = str(poisoned)
 
     out = bc_train(ns)
     assert out["best_smoothed_val_loss"] != out["best_smoothed_val_loss"]  # NaN，正是现场

@@ -98,7 +98,10 @@ def _args(root: Path, tmp_path: Path, **over: Any) -> types.SimpleNamespace:
         ckpt_every=0,
         checkpoint=None,
         epochs=1,
-        batch=16,
+        # 8 而不是 16（2026-11-20 门禁内存）：本文件的断言看的是「走了哪个 step /
+        # 批按 dim0 切成几片」，与每批条数无关；留着 8 是为了 SPMD 用例的「批必须能被
+        # 8 核整除」不变。实测两个跑 train 的用例 388 → 317MB。
+        batch=8,
         lr=1e-3,
         val_split=0.25,
         mirror_p=0.5,
@@ -314,8 +317,8 @@ def test_spmd_train_shards_every_batch_and_skips_optimizer_step(
         raise AssertionError("SPMD 下不得调 xm.optimizer_step（会二次归约）")
 
     monkeypatch.setattr(bc_mod, "optimizer_step", _no_xla_optimizer_step)
-    out = bc_mod.train(_args(corpus, tmp_path, batch=16))
+    out = bc_mod.train(_args(corpus, tmp_path, batch=8))
     assert Path(out["out"]).is_file()
-    assert (16, 17, 26, 26) in sharded, "obs 必须按 dim0 切分"
-    assert (16,) in sharded, "标签/掩码必须按 dim0 切分"
-    assert sharded.count((16,)) >= 3 * 2, "训练/验证的每个 batch 都要标注（含标签与掩码）"
+    assert (8, 17, 26, 26) in sharded, "obs 必须按 dim0 切分"
+    assert (8,) in sharded, "标签/掩码必须按 dim0 切分"
+    assert sharded.count((8,)) >= 3 * 2, "训练/验证的每个 batch 都要标注（含标签与掩码）"

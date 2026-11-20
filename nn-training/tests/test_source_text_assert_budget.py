@@ -447,7 +447,12 @@ ROOT = Path(__file__).resolve().parents[1]
 #:   `facts["host"/"dns"/"routes"]` 钉住；文本只补「这行有没有把现场写出来」）。
 #: 2026-11-19 合入上游 goal-nn（74 提交）后实测 1534（+9：上游的 relay / replay / eval
 #: 读面用例；其中 4 条已在前一行记过账，其余同上口径 —— 文本本身是交付物）。
-BASELINE_FORM = 1534
+#: 2026-11-20 抬到 **1535**（+1，实测）：门禁新增「worker 数按提交余量封顶」（`nn-python-gate.sh`
+#:   的 `memory_budget_workers` 接线）。这是**shell 脚本**：它没有可 import 的入口，“只在装不下
+#:   时才减 worker / 探不到时 fail-open” 除了读文本没有第二个出口（同文件里其它 `test_gate_*`
+#:   也是这么钉结构）。行为面已由 `common/platform_utils.memory_budget_workers` 的纯函数用例
+#:   覆盖，这里只钉接线（四个断言计进一格，其余不是文本形态）。
+BASELINE_FORM = 1535
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
 #: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092；
 #: 2026-10-18 course-metrics 备份库用例抬到 **1096**（+4，实测值；理由见模块头末段）；

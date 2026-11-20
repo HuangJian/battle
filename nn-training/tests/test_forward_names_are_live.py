@@ -19,8 +19,11 @@ from __future__ import annotations
 
 import ast
 import re
+from collections.abc import Iterator
 from functools import cache
 from pathlib import Path
+
+import pytest
 
 from tests.helpers.budget import sanity_floor_of
 
@@ -104,6 +107,19 @@ def _facades() -> dict[str, dict[str, str]]:
 def _own_uses(facade: str) -> str:
     """门面自身剔掉 `NAME as NAME,` 声明行之后的正文（免得「在 import 里提到过自己」判活）。"""
     return _FORWARD_DECL.sub("", _texts()[facade])
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _drop_scan_caches_after_the_module() -> Iterator[None]:
+    """本文件的用例跑完就把整仓扫描缓存**还回去**（2026-11-20 门禁内存）。
+
+    上面那几份 `@cache` 是纯提速：全仓 `.py` 文本 ≈30MB + `{标识符: 文件集合}` 索引（全量门禁的
+    逐用例峰值采样：本文件在那条 worker 里留下 **137MB 不还**）。它们在**本模块的三条用例之间**
+    必须共享（否则每条都重扫一遍全仓），但模块跑完再留着就是纯占内存——那个 worker 后面还要跑
+    几百条用例。"""
+    yield
+    for _fn in (_py_files, _texts, _index, _facades, _own_uses):
+        _fn.cache_clear()
 
 
 def _dead() -> dict[tuple[str, str], str]:

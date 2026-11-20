@@ -79,8 +79,12 @@ def test_dataset_returns_ten_tuple_with_split_masks(corpus: Path) -> None:
 
 
 def test_make_loaders_v6_and_three_head_ce(corpus: Path) -> None:
+    # batch 8 而不是 32（2026-11-20 门禁内存）：本用例只断言**形状/标签域/CE 有限**，
+    # 不看每批多少条；而 32×17×26×26 的 forward 实测单独就吃掉 ~160MB 提交量（门禁 8 worker
+    # 同时跑 ⇒ 直接叠到峰值上）。同一口径的先例见 `test_bc_epoch_resume.py` 的「样本减到
+    # 1 个 batch，语义断言不变」。
     train_dl, val_dl, sizes = make_loaders(
-        str(corpus), batch_size=32, val_split=0.25, action_v6=True
+        str(corpus), batch_size=8, val_split=0.25, action_v6=True
     )
     assert sizes["total"] == N * 4
     # 2026-11-13：训练装载默认 lazy（逐 shard mmap），NNDataset 不得把它整份复制。
@@ -160,7 +164,10 @@ def _train_args(tmp_path: Path, **over: object):
         ckpt_every=0,
         checkpoint=None,
         epochs=1,
-        batch=64,
+        # 16 而不是 64（2026-11-20 门禁内存）：这里断言的是**回传字段**（hold_acc /
+        # val_loss_weighted），与每批条数无关；64 条的 forward+backward 实测让本文件
+        # 峰值提交多 220MB（617 → 396MB）。
+        batch=16,
         lr=1e-3,
         val_split=0.25,
         mirror_p=0.5,

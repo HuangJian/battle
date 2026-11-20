@@ -216,6 +216,39 @@ def test_physical_cores_never_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     assert pu.physical_cores() == 1
 
 
+# ------------------------------------------------ 内存闸：worker 数再按提交余量封顶（门禁）
+
+
+def test_memory_budget_workers_keeps_every_core_when_there_is_room() -> None:
+    """余量充足（默认路径）⇒ 一个 worker 都不减 —— 门禁时钟一点不变。"""
+    assert pu.memory_budget_workers(8, 16 * 1024**3) == 8
+    assert pu.memory_budget_workers(32, 64 * 1024**3) == 32
+    # 恰好装得下也算充足（8 × 1GB + 1GB 预留 = 9GB）。
+    assert pu.memory_budget_workers(8, 9 * 1024**3) == 8
+
+
+def test_memory_budget_workers_shrinks_when_commit_headroom_is_tight() -> None:
+    """余量不够 ⇒ 只开装得下的数量（2026-11-20：两个开发环境同时跑会顶穿页文件）。
+
+    5.5GB − 1GB 预留 = 4.5GB ⇒ 每 worker 1GB ⇒ 4（而不是 8）。"""
+    assert pu.memory_budget_workers(8, 5_632 * 1024**2) == 4
+    assert pu.memory_budget_workers(16, 4 * 1024**3) == 3
+
+
+def test_memory_budget_workers_fails_open_and_never_zero() -> None:
+    """探测不到 ⇒ 维持核数（诚实未知，不猜）；兜底至少 1 个（零并发会当场卡死）。"""
+    assert pu.memory_budget_workers(8, None) == 8
+    assert pu.memory_budget_workers(8, 0) == 1
+    assert pu.memory_budget_workers(8, 100) == 1  # 余量小于预留
+    assert pu.memory_budget_workers(8, 8 * 1024**3, per_worker_mb=0) == 8  # 预算无意义 ⇒ 不闸
+
+
+def test_available_commit_bytes_is_a_positive_number_or_honest_none() -> None:
+    """探针只能两选一：给个正数，或者诚实说不知（macOS）；不得给 0/负数当真值。"""
+    got = pu.available_commit_bytes()
+    assert got is None or got > 0
+
+
 def test_physical_cores_is_at_most_effective_cores() -> None:
     """不变量：物理核数 ≤ 逻辑核数 —— 门禁的 worker 不会比运行时槽位口径还宽。
 

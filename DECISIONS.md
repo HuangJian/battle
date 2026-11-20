@@ -8411,3 +8411,97 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   另外从 it210 起跑会污染对照腿（它已被旧三项奖励训过）并切断与 g7 的同迭代三向比对。命名沿用 `g7-` 前缀
   （`g7-base2` / `g7-ctrl2`，用户 2026-11-20 口径：不急着升序列），在跑的两课不动。
 - **全文**：`docs/nn/experiments.md §146`（g7 判决与病因）· `nn-training/curricula/g7-base2.jsonc` 文件头（实付表与判据）。
+
+## §2026-11-20-gate-workers-capped-by-commit-headroom（门禁 worker 数按**提交余量**封顶，余量充足时一个不减）
+
+- **报障**：跑 `bun run pygate` 吃满内存；两个开发环境同时跑会 OOM。要求「不拖慢时钟」地降内存。
+- **实测（本机 8 核 / Win / xdist，采样器 5Hz 采全树 PrivateUsage）**：单份门禁峰值提交 **6.58GB**
+  / RSS 5.88GB；每 worker 峰值 673~859MB。分层：`--collect-only` 单独就 378MB（每个 worker
+  都要收集并 import 全量用例——Windows 无 fork，xdist 只能这样起）；跑起来后每个 worker 再累积
+  100~480MB，且**是弥散增长**（逐用例 delta 最大 177MB，没有可摘的大户；`_heapmin` 与
+  `gc.collect` 都验证过：这不是「堆没还」，是真留存）。
+- **根因**：峰值 ≈ worker 数 × 每 worker 内存。每 worker 的形状改不动（地板是 import、增长弥散），
+  **唯一旋钮是 worker 数**。
+- **决定**：`nn-python-gate.sh` 在算完核数后，再问一次 `available_commit_bytes()`
+  （Windows = `GlobalMemoryStatusEx().ullAvailPageFile`；Linux = `MemAvailable`；macOS = None），
+  经 `common.platform_utils.memory_budget_workers(cores, free, per_worker_mb, reserve_mb)` **单向封顶**：
+  余量够 ⇒ 原样（**时钟不变**）；不够 ⇒ 装得下几个开几个；探不到 ⇒ 维持核数（fail-open，并打一行说明）。
+  预算 1024MB/worker（实测 859MB 向上取整）、预留 1024MB，`NN_GATE_MEM_PER_WORKER_MB` /
+  `NN_GATE_MEM_RESERVE_MB` 可按机器重标。
+- **被否决**：① 默认就按「给另一个环境留一份」砍半（如 reserve=cores×预算）——余量充足时也慢 12%，
+  违背「不拖慢时钟」；② 减少 worker 以外的旋钮：`_heapmin`/`gc.freeze`/Arena 调参全部实测无效
+  （见上），改每 worker 形状要先砍 import 地板，做不到；③ 用「torch 池 ‖ 免 torch 池」拆分降内存——
+  文件头已实测更慢（33s → 40/41s）。
+- **已知边界**：两个环境**同一瞬间**启动仍可能各自取满核数（单份峰值就是 6.5GB）；先起后起的那份
+  会看到已被吃掉的余量并自动变窄。跨进程预留文件属于另一个设计点，本次不做。
+- **验证**：单跑 `NN_GATE_MEM_PER_WORKER_MB=4096`（模拟内存紧张）⇒ 打印「8 → 3」、峰值提交
+  6515 → **3973MB**（-39%）、墙钟 98 → 181s；默认参数下**不封顶**、峰值 6515MB、墙钟与改动前同量级。
+  口径守卫：`tests/common/test_platform_utils_cores.py`（纯函数四例）+
+  `tests/test_githook_scripts.py::test_gate_caps_workers_by_available_commit`（只许减、fail-open、逃生口）。
+
+## §2026-11-20-gate-worker-growth-is-native-fragmentation（门禁每 worker 那 100~480MB 是原生碎片，不是泄漏）
+
+- **问题**：单个 worker 的提交量从「收集完 378MB」涨到 673~859MB，要找「谁留住了」。
+  （上一批收益已落地：门禁 worker 数按提交余量封顶；见上一节。）
+- **逐项实测（同一次全量、`-n 8`）**：
+  - **Python 对象**：`gc.get_objects()` 两次快照差 ≈ **+60MB/worker**（dict +21 / function +13 /
+    type +9 / list +5 …），其余全在原生侧。
+  - **存活张量**：`pytest_sessionfinish` 时 `isinstance(o, torch.Tensor)` 计数 **= 0**（total 0MB）
+    ⇒ 不是「有人把张量/梯度留在全局里」。
+  - **已释放但没还给系统？** `msvcrt._heapmin()` 返回 0、`HeapCompact(GetProcessHeap())` 只回收
+    **3.6MB** ⇒ 也不能靠「定时收紧堆」追回。
+  - **逐用例 delta**：大全在真跑训练步的用例（AST 扫描类 177MB 那种是瞬时的，跑完就还）。
+    文件级终值（全新进程、180MB 地板）：`test_bc_v6_data` **+437MB**、`test_ppo_lazy_loader`
+    +294、`bc_epoch_resume` +145、`log_diet` +142、`ppo_common` +138、`rl_model` +123、
+    `spatial_leg_smoke` +105、`p0_auc_probe` +102。
+  - **成因定位**：一次 64 条的 `forward+backward`（17×26×26 输入）单独就吃掉 ~216MB 瞬时 + ~90MB
+    不回退；`DNNL_PRIMITIVE_CACHE_CAPACITY=0` 只省 5MB ⇒ 是 MKL-DNN 卷积侧的 workspace/池与
+    堆碎片，env 与 trim 都碰不到，**随「每个 worker 做了多少卷积」线性增长**。
+- **决定（唯一还能改的形状：测试自己分配多少）**：把「只验回传字段/形状」的训练类用例的 batch
+  缩到语义够用：`test_bc_v6_data`（loader 用例 32→8、train 参数 64→16）、`test_bc_policy_heads`
+  与 `test_bc_value_only`（32→8）。**不动任何断言**；同一口径的先例是 `test_bc_epoch_resume.py`
+  的「样本减到 1 个 batch，语义断言不变」。实测：`test_bc_v6_data` 文件终值 617 → **396MB**，
+  全量门禁峰值提交 6515 → **6300MB**（-3.3%，墙钟 98~123s 噪声内）。
+- **被否决**：① 关 `torch.backends.mkldnn`（换卷积实现 = 改数值，KL/CE 的精确断言就废了）；
+  ② 按用例 `gc.collect()`（原生内存不受影响，白付墙钟）；③ 继续缩 `test_ppo_lazy_loader`
+  （它断言的就是「每批转移次数 = chunks × epochs」，缩大会把判据一起缩）。
+- **天花板（写清楚，免得下个人再找）**：全量门禁的每 worker 增长总计只有 ~435MB，测试侧再怎么
+  省也超不过这笔；**真正的旋钮是 worker 数**（上一节的提交余量闸），内存闸变窄时每 worker 反而
+  会长得更高（实测 3 worker 时单进程 1086MB）。
+- **全仓扫描补记（2026-11-20 同批）**：把 `tests/` + `e2e/` 里所有 `batch=` / `batch_size=` 旋钮
+  （≥16 的全部逐条看判据）过了一遍，最终只动了 4 个文件 7 处：`test_bc_v6_data`（32→8、64→16）、
+  `test_bc_policy_heads` / `test_bc_value_only`（32→8）、`test_bc_xla`（16→8，两条 SPMD 断言里的
+  `(16,…)` 同步改成 `(8,…)`——**判据宽度不变**，8 仍满足「批能被 8 核整除」）。
+  **有实测理由放过的两处**：`test_shard_split`（`batch_size=64` 只走 `make_loaders`，文件终值
+  192MB ≈ torch 地板 180MB，且批构成就是它的断言面）；`test_ppo_lazy_loader`（把 parity 用例的
+  `mb` 8→4 只省 41MB：348→307MB，该文件的 348MB 主要是**三个 `PPOStudent` + 一次 `ppo_update`**
+  本身，不是 batch；再缩就要缩判据）。
+  全量复测：峰值提交 **6515 → 5998MB（-7.9%）**，墙钟 120.9s（基线 123s，噪声内），pytest 只剩
+  已知的 `test_commit_journal` RSS 三条偶发红。
+- **非 batch 大户扫描（2026-11-20 同批，逐用例**峰值**采样）**：给整棵门禁加了 20ms 采样线程，
+  6583 条用例的「峰值增量 / 峰值后留存」全部落表。结论分两类：
+  - **可修（已修，Python 侧缓存常驻，与 batch 无关）**：
+    ① `tests/test_module_asserts.py::_parse` 挂着 `@cache` ⇒ 650 个生产文件的 **AST 常驻**
+    （实测该用例在 worker 里峰值 +189MB 且**一分不还**，整个 worker 底盘 219MB）。改成
+    `source_scan.parse`（AST 用完即释放、文本仍走缓存）⇒ 同一条 worker 的占用 **219 → 62MB**
+    （峰值 +189 → +29）。这正是 `tests/helpers/source_scan.py` 头部 2026-09-29 记过的净亏损反模式。
+    ② `tests/test_forward_names_are_live.py` 的 `_texts/_index/_py_files/_facades` 缓存（全仓
+    `.py` ≈30MB 文本 + 标识符索引）在模块跑完后仍留着 ⇒ 加 module 级 autouse fixture 在
+    teardown `cache_clear()`：模块内仍共享（速度不变），模块跑完把 **137MB** 还回去
+    （该 worker 结束提交量 190 → 53MB）。
+  - **看着大但改不动（有实测理由）**：`e2e/test_volume_e2e.py` 九条 124~248MB 峰值，但**留存
+    全 ≈0MB**，且它们都是各自 worker 里**第一条**碰 `trainer.dispatch` 全链路的用例（一次性
+    import/夹具，8 worker ⇒ 8 份）——缩 quota/帧数只会改掉「几波收敛 / 过冲 ≤1 波」这条判据
+    本身。其余留存大户（129/90/81/76/72/71/66/48MB）全是训练类用例的原生 churn（存活张量 = 0、
+    `HeapCompact` 只回收 3.6MB 那两条已把「泄漏 / 堆没还」排除，见上一节）。
+  - **累计复测**：峰值提交 6515 → 6300 → 5998 → **5949MB（-8.7%）**；墙钟 120~134s（机器噪声带，
+    本批的墙钟代价 ~2s：跨用例重解析 650 份源码 ~0.7s/次×3）。
+- **`@cache` 全量盘点（2026-11-20 同批）**：把 `tests/` + `e2e/` 里所有 `@cache` / `@lru_cache` 与模块级
+  大字典（`_MODULES_CACHE` / `_REPO_CACHE` / 三个图集合…）逐个**单文件跑完量进程提交量**（pytest 地板
+  ~30MB）：其余全部落在 **36~60MB**，即比地板多 5~30MB 的「每文件计数小字典」级别——与先前两处
+  （AST 189MB、标识符索引 137MB）差一个数量级，**不再动**。
+  唯一还在跨模块持有全仓数据的是 `tests/helpers/source_scan` 的文本/事实缓存（7 个扫描模块叠在同一
+  worker 里实测结束 123MB，清掉它 72→42MB / 63→48MB，即 **15~30MB**）；但它是**共享提速**缓存，
+  按模块清会让后续每个扫描模块重解析 650 份源码（~0.7s/次）——30MB 换 ~7s 墙钟不值，**决定保留**。
+- **门槛（写下来供下一个人判断）**：只处理「单个 worker 里 ≥100MB 且纯测试侧」的缓存；十几 MB 级
+  一律不动（复杂度与墙钟风险大于收益）。

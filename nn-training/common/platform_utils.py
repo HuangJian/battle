@@ -183,29 +183,99 @@ def available_memory_bytes() -> int | None:
                     return None
         return None
     if sys.platform == "win32":
-        try:
-            import ctypes
-
-            class _MemoryStatusEx(ctypes.Structure):
-                _fields_ = [
-                    ("dwLength", ctypes.c_ulong),
-                    ("dwMemoryLoad", ctypes.c_ulong),
-                    ("ullTotalPhys", ctypes.c_ulonglong),
-                    ("ullAvailPhys", ctypes.c_ulonglong),
-                    ("ullTotalPageFile", ctypes.c_ulonglong),
-                    ("ullAvailPageFile", ctypes.c_ulonglong),
-                    ("ullTotalVirtual", ctypes.c_ulonglong),
-                    ("ullAvailVirtual", ctypes.c_ulonglong),
-                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-                ]
-
-            status = _MemoryStatusEx()
-            status.dwLength = ctypes.sizeof(_MemoryStatusEx)
-            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-                return int(status.ullAvailPhys)
-        except Exception:  # 探测失败 = 拿不到事实，绝不打断训练
-            return None
+        got = _win_memory_avail()
+        return got[0] if got is not None else None
     return None
+
+
+def _win_memory_avail() -> tuple[int, int] | None:
+    """`(可用物理内存, 可用提交量)` 字节；非 Windows / 探测失败 ⇒ None（绝不抛）。
+
+    两个字段是**两个不同的问题**：`ullAvailPhys` 回答「还有多少内存可用」，
+    `ullAvailPageFile` 回答「还能再提交多少」（见 `available_commit_bytes`）。返回元组而非
+    结构体：`ctypes.Structure` 的具体类型会是本函数内部类，拿它做返回标注只能标 `Any`
+    （`test_any_budget` 的基线里没这笔）。
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        class _MemoryStatusEx(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = _MemoryStatusEx()
+        status.dwLength = ctypes.sizeof(_MemoryStatusEx)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return int(status.ullAvailPhys), int(status.ullAvailPageFile)
+    except Exception:  # 探测失败 = 拿不到事实，绝不打断训练
+        return None
+    return None
+
+
+def available_commit_bytes() -> int | None:
+    """本机还能**提交**多少字节（Windows 口径 = 提交上限 − 已提交）；探测不到 ⇒ None。
+
+    与 `available_memory_bytes()`（可用物理内存）**不是同一个问题**：Windows 上「内存不够」
+    的第一症状从来不是缺物理页，而是提交量顶到 `CommitLimit`（= 物理内存 + pagefile），
+    报错是 `1455 paging file is too small` / `1450 insufficient system resources` 这类
+    **分配当场失败**，进程直接消失、没有 Python 堆栈。要判断「这台机器还能不能再起 N 个
+    worker」，必须问的是提交余量。
+
+    口径：Windows = `GlobalMemoryStatusEx().ullAvailPageFile`（文档语义：本进程最多还能提交
+    多少；等于或小于系统级余量 ⇒ 偏保守，正合适）；Linux = `/proc/meminfo` 的 `MemAvailable`
+    （无 overcommit 记账，物理可用即事实上限）；macOS 没有零依赖等价物 ⇒ None（诚实未知）。
+    """
+    if sys.platform == "win32":
+        got = _win_memory_avail()
+        return got[1] if got is not None else None
+    if sys.platform.startswith("linux"):
+        return available_memory_bytes()
+    return None
+
+
+def memory_budget_workers(
+    cores: int,
+    free_bytes: int | None,
+    *,
+    per_worker_mb: int = 1024,
+    reserve_mb: int = 1024,
+) -> int:
+    """在 `cores` 之内，再按**提交余量**封顶并行 worker 数（1 ≤ 结果 ≤ cores）。
+
+    为什么（2026-11-20 两个开发环境同时跑门禁）：门禁的峰值提交量 = worker 数 × 每 worker
+    峰值（本机 8 核 Windows/xdist 实测 6.58GB：每 worker 峰值 673~859MB，其中 378MB 是
+    「收集并 import 全量用例」的地板，其余是跑起来后的累积增长）。两个环境同时跑 ≈ 13GB，
+    再加上编辑器/浏览器，就顶穿页文件 ⇒ 两边一起出假红。**降 worker 是唯一不改变每 worker
+    内存形状的旋钮**，所以这里只封顶、不改其他参数。
+
+    语义刻意单向：
+      * 余量充足 ⇒ 返回 `cores`（**时钟一点不变**，这是默认路径）；
+      * 余量不足 ⇒ 返回能装下的数量（慢一点，但不会把两边一起打死）；
+      * 探测不到（macOS / 权限）⇒ 返回 `cores`（诚实未知，不猜）。
+
+    `per_worker_mb` / `reserve_mb` 是**预算**而非实测：1024MB/worker 是本机（8 核、Windows、
+    xdist）实测峰值 859MB 向上取整；`reserve_mb` 留给操作系统、编辑器与本进程自身。
+    """
+    n = max(1, int(cores))
+    if free_bytes is None:
+        return n
+    if per_worker_mb <= 0:
+        return n
+    budget_mb = free_bytes // (1024 * 1024) - max(0, reserve_mb)
+    if budget_mb <= 0:
+        return 1
+    return max(1, min(n, int(budget_mb // per_worker_mb)))
 
 
 def cgroup_cpu_quota() -> int | None:

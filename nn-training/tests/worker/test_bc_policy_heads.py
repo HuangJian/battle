@@ -58,7 +58,9 @@ def _args(corpus: Path, init: Path, out: Path, **over: object) -> SimpleNamespac
         ckpt_every=0,
         checkpoint=None,
         epochs=1,
-        batch=32,
+        # 8 而不是 32（2026-11-20 门禁内存）：本文件断言的是三个头的行为/回传，
+        # 与每批条数无关；大 batch 的 forward+backward 是在给全量门禁的峰值添砖。
+        batch=8,
         lr=1e-3,
         val_split=0.25,
         mirror_p=0.0,

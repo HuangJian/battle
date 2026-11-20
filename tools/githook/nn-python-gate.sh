@@ -41,6 +41,9 @@
 #   默认 worker  = min(**物理核数**, 32)（2026-10-03 起口径 = 物理核，超线程不计入）：
 #                 核数走 platform_utils.physical_cores()；上界 32 只作内存兜底
 #                 （-n 12 峰值 pytest 进程树 RSS ≈ 3.9GB）。NN_GATE_NPROC 覆盖。
+#                 **再按提交余量封顶**（2026-11-20）：见下方「内存闸」一节——余量够就一个
+#                 都不减（时钟不变），余量不够才变窄（防「两个开发环境同时跑」双双顶穿
+#                 页文件：本机实测单份峰值提交 6.58GB，两份 ≈ 13GB）。
 #   默认内线程   = 1（OMP/MKL/OPENBLAS，须在 python 启动前 export）。NN_GATE_THREADS 覆盖
 #                 （0 = 不设，退回 torch 自己的默认 = 各 worker 开满物理核）。
 #   注：该 env 随进程树继承到测试 spawn 的子进程（如 trainer/train_loop.py 的 os.environ.setdefault）；
@@ -203,6 +206,45 @@ esac
 NPROC=${NN_GATE_NPROC:-$CORES}
 [ "$NPROC" -gt 32 ] && NPROC=32
 [ "$NPROC" -lt 1 ] && NPROC=1
+
+# ---- 内存闸：worker 数再按**提交余量**封顶（2026-11-20）----
+# 现场：「两个开发环境同时跑门禁」⇒ 两份 worker 数 × 每 worker 峰值。本机（8 核、Windows、
+# xdist）实测单份：峰值**提交** 6.58GB / RSS 5.88GB，每 worker 673~859MB —— 其中 378MB 是
+# `--collect-only` 就付掉的**地板**（每个 worker 都要收集并 import 全量用例；Windows 没有
+# os.fork，xdist 只能这么起），其余是跑起来之后的累积增长（实测弥散：单条用例最大 delta
+# 177MB，没有可摘的大户）。8 worker ⇒ 6.5GB；两份 ≈ 13GB，叠上编辑器/浏览器就顶穿页文件
+# （Windows 症状是 `1455 paging file is too small`：分配当场失败、进程消失、没有 Python 堆栈）。
+# 每 worker 的形状改不动（地板是 import，增长是弥散的）⇒ **唯一的旋钮是 worker 数**，
+# 所以这里只做**单向**封顶，不改其他任何参数：
+#   · 余量够 ⇒ 一个都不减（**时钟一点不变**，这是默认路径）；
+#   · 余量不够 ⇒ 装得下几个开几个（慢一点，但两边都活着）；
+#   · 探不到提交余量（macOS / 权限）⇒ 维持核数口径，不猜（诚实未知）。
+# 预算取自实测而非愿望：1024MB/worker（实测峰值 859MB 向上取整），RESERVE 1024MB 留给
+# 操作系统、编辑器与本进程自身。NN_GATE_MEM_PER_WORKER_MB / NN_GATE_MEM_RESERVE_MB 可调。
+GATE_MEM_PER_WORKER_MB=${NN_GATE_MEM_PER_WORKER_MB:-1024}
+GATE_MEM_RESERVE_MB=${NN_GATE_MEM_RESERVE_MB:-1024}
+MEM_LINE=$(cd "$NN_ROOT" && "$NN_PY" -S -c \
+  "from common.platform_utils import available_commit_bytes, memory_budget_workers; fb = available_commit_bytes(); print(memory_budget_workers($NPROC, fb, per_worker_mb=$GATE_MEM_PER_WORKER_MB, reserve_mb=$GATE_MEM_RESERVE_MB), -1 if fb is None else fb // (1024 * 1024))" \
+  2>/dev/null || echo "")
+NPROC_MEM=""
+FREE_COMMIT_MB=""
+if [ -n "$MEM_LINE" ]; then
+  set -- $MEM_LINE
+  NPROC_MEM=$1
+  FREE_COMMIT_MB=${2:--1}
+fi
+case "$NPROC_MEM" in
+  '' | *[!0-9]*) : ;; # 探不到 ⇒ 维持核数口径（内存闸绝不因为探测失败而拒绝跑门禁）
+  *)
+    if [ "$NPROC_MEM" -lt "$NPROC" ]; then
+      echo " ▸ worker 数按提交余量封顶：$NPROC → $NPROC_MEM（可用提交 ${FREE_COMMIT_MB}MB，每 worker 预算 ${GATE_MEM_PER_WORKER_MB}MB，留 ${GATE_MEM_RESERVE_MB}MB）"
+      NPROC=$NPROC_MEM
+    fi
+    ;;
+esac
+if [ -z "$NPROC_MEM" ]; then
+  echo " ▸ 提交余量探测不到 ⇒ worker 数维持核数口径（$NPROC，不猜）"
+fi
 
 # ---- pytest 分发器：Linux = 「收集一次 + fork」，其余 = xdist -n（v3.19 2026-09-29）----
 # 为什么换：`-n 12` 下**每个 worker 都收集全部 ~275 个测试模块**（12 份里 11 份是冗的），

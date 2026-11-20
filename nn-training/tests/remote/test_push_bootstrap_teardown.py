@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import errno
 import re
 import socket
 import sys
@@ -110,30 +111,37 @@ def test_a_stolen_port_is_not_a_teardown_failure(
 ) -> None:
     """并行 worker 在窗口里抢走端口 ⇒ 换号重试，而不是记一笔假红。
 
-    判据 = 行为：第一轮故意递一个**已被告占用**的号（模拟被抢），断言这一轮让开（探号
-    调用 ≥2 次）且整个用例仍然通过。真回归（`server_close()` 缺失）每轮都占不上 ⇒ 红。
+    判据 = 行为：第一轮让 bind 当场 `EADDRINUSE`（模拟探号→bind 的窗口里被并行 worker 拿走），
+    断言这一轮让开（探号 / bind 都 ≥2 次）且整个用例仍然通过。真回归（`server_close()`
+    缺失）每轮都占不上 ⇒ 红。
+
+    ⚠ 不再用「hog socket 真占住端口」来造这个「被抢」（2026-11-20）：那只在 POSIX 成立。
+    Windows 的 SO_REUSEADDR 语义是「**允许再绑一次**」，而 `ThreadingHTTPServer` 默认开着它
+    ⇒ 被占的号照样 bind 成功，第一轮根本不让开，`len(seen) >= 2` 在 Windows 上稳定红
+    （此前记成「时序 flake」，因为 POSIX 侧确实靠 `EADDRINUSE` 成立）。现在把「被抢」直接
+    做成**第一次 bind 失败**，两个平台同一套语义，也不再多一个 socket 要靠时序收场。
     """
-    hog = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    hog.bind(("127.0.0.1", 0))
-    hog.listen(1)
-    stolen = int(hog.getsockname()[1])
-    real = free_port
+    real_start = start_bootstrap_server
+    real_free = free_port
+    attempts: list[int] = []
     seen: list[int] = []
 
-    def maybe_stolen(host: str = "127.0.0.1") -> int:
-        if not seen:
-            seen.append(stolen)
-            return stolen
-        port = real(host)
+    def stolen_once(port: int, *a: Any, **kw: Any) -> Any:
+        attempts.append(port)
+        if len(attempts) == 1:
+            raise OSError(errno.EADDRINUSE, "模拟：探号→bind 的窗口里被并行 worker 抢走")
+        return real_start(port, *a, **kw)
+
+    def counting_free(host: str = "127.0.0.1") -> int:
+        port = real_free(host)
         seen.append(port)
         return port
 
-    monkeypatch.setattr(sys.modules[__name__], "free_port", maybe_stolen)
-    try:
-        test_port_free_for_next_bind_after_teardown(tmp_path)
-    finally:
-        hog.close()
-    assert len(seen) >= 2, "被抢走的那一轮必须让开（换号重试），不是硬红"
+    monkeypatch.setattr(sys.modules[__name__], "free_port", counting_free)
+    monkeypatch.setattr(sys.modules[__name__], "start_bootstrap_server", stolen_once)
+    test_port_free_for_next_bind_after_teardown(tmp_path)
+    assert len(attempts) == 2, "被抢走的那一轮必须让开（换号重试），不是硬红"
+    assert len(seen) >= 2, "重试必须重新探号（换号），而不是拿同一个号硬碰"
 
 
 def test_call_site_uses_teardown_helper() -> None:

@@ -410,6 +410,28 @@ def test_gate_worker_count_scales_with_cores() -> None:
     )
 
 
+def test_gate_caps_workers_by_available_commit() -> None:
+    """worker 数还要按**提交余量**封顶（2026-11-20：两个开发环境同时跑 ⇒ 双双顶穿页文件）。
+
+    判据：内存闸只许**减**不许加（余量充足时一个 worker 都不减 ⇒ 门禁时钟不变），且必须
+    走 `common.platform_utils` 的唯一口径（预算/预留可调，方便真机上重标）。
+    """
+    code = _gate_code()
+    assert "memory_budget_workers" in code and "available_commit_bytes" in code, (
+        "门禁没问「还能提交多少内存」——那是 Windows 上「内存不够」的第一症状（1455 paging "
+        "file is too small），与可用物理内存不是同一个问题"
+    )
+    assert re.search(r'if \[ "\$NPROC_MEM" -lt "\$NPROC" \]', code), (
+        "内存闸必须单向（只在装不下时减 worker），否则余量充足时也会慢下来"
+    )
+    assert re.search(r'NPROC=\$NPROC_MEM', code), "算出来的封顶值没真正生效"
+    assert re.search(r'if \[ -z "\$NPROC_MEM" \]', code), (
+        "探不到提交余量时必须 fail-open（维持核数并说一声），不得因探测失败而拒跑门禁"
+    )
+    for knob in ("NN_GATE_MEM_PER_WORKER_MB", "NN_GATE_MEM_RESERVE_MB"):
+        assert knob in code, f"缺少 {knob} 逃生口（换机器要按实测重标预算）"
+
+
 def test_gate_picks_forkdist_by_python_and_kernel() -> None:
     """分发器选择（模块 docstring 第 7 条）：Windows python 一律 xdist，Linux 才 forkdist。"""
     code = _gate_code()

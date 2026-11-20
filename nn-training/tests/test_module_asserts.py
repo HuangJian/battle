@@ -34,6 +34,7 @@ from pathlib import Path
 import pytest
 
 from common import schema
+from tests.helpers import source_scan
 from tests.helpers.budget import sanity_floor
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,9 +90,16 @@ def _prod_files() -> list[Path]:
     return sorted(out)
 
 
-@cache
 def _parse(path: Path) -> ast.Module:
-    return ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    """解析一份生产源码；**AST 用完即释放**（2026-11-20 门禁内存）。
+
+    这里原来挂着 `@cache`：扫描面 650 个文件 ⇒ **~189MB 的 AST 常驻在那个 worker 里直到跑完**
+    （全量门禁逐用例峰值采样：本文件第一条用例峰值 +189MB，且**峰值后一分不还**）。而
+    `tests/helpers/source_scan.py` 早就记过同一个教训——常驻 AST 是净亏损（一个模块上万节点，
+    653 个文件≈百万级对象，之后每轮 cyclic GC 都要遍历它们；实测 GC 开着时 2.55s vs 0.82s）。
+    文本仍走 `source_scan.read_text` 的缓存（字符串小、GC 友好）；跨用例重解析 650 份文件的
+    代价是 ~0.7s/次，换掉 189MB 常驻。"""
+    return source_scan.parse(str(path), errors="replace")
 
 
 def _module_level_asserts() -> list[str]:

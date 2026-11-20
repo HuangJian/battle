@@ -65,7 +65,9 @@ def _args(corpus: Path, init: Path, out: Path, **over: object) -> SimpleNamespac
         ckpt_every=0,
         checkpoint=None,
         epochs=1,
-        batch=32,
+        # 8 而不是 32（2026-11-20 门禁内存）：断言面是 value-only 的回传口径，
+        # 与每批条数无关（同 `test_bc_policy_heads.py`）。
+        batch=8,
         lr=1e-3,
         val_split=0.25,
         mirror_p=0.0,
