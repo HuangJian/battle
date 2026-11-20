@@ -266,3 +266,25 @@ def test_non_ppo_kinds_are_not_format_checked(tmp_path: Path) -> None:
     """别的 kind 不承诺语料格式（bc 自采集、iter 由节点自跑）⇒ 这道体检不碰它们。"""
     job, _man, shards = _job(tmp_path)
     assert rc.prepass(job, shards, {"kind": "bc"}) is None
+
+
+def test_ppo_job_with_zero_shards_is_rejected(tmp_path: Path) -> None:
+    """kind=ppo 却一个 shard 都没有 ⇒ 解包处就拒收（训练核只会读到 0 局）。
+
+    依据（2026-11-20 追查）：发布端 `trainer/loop_transport._gate_round_shards` 对**本机轮**
+    硬门「无完整 shard 不许发布」，而 node 轮（`rollout_spec` 非空）发的是 `kind=iter`、
+    shard 集**必须为空**——两条合起来 ⇒ 生产上不存在「合法零 shard 的 ppo job」。
+    `--echo` 冒烟也不靠零 shard（`hub/smoke_loopback` 造的是真 shard）。
+    e2e 里那几份零 shard 的 ppo manifest 只看「能不能被领到」，从不解包。
+    """
+    job, man, _shards = _job(tmp_path)
+    with pytest.raises(ProtocolError, match="没有任何 shard"):
+        rc.prepass(job, [], man)
+    with pytest.raises(ProtocolError, match="没有任何 shard"):
+        rc.prepass(job, [], {"kind": "ppo", "corpus_fmt": "full"})
+
+
+def test_iter_job_with_zero_shards_stays_untouched(tmp_path: Path) -> None:
+    """kind=iter 的 shard 由节点自跑产出（发布时本来就是空的）⇒ 这道体检不碰。"""
+    job, _man, _shards = _job(tmp_path)
+    assert rc.prepass(job, [], {"kind": "iter", "corpus_fmt": "full"}) is None

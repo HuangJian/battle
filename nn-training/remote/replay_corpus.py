@@ -511,15 +511,27 @@ def verify_corpus_format(shard_dirs: Sequence[Path | str], manifest: dict) -> No
     `report_job_failure` ⇒ hub 终局 ⇒ 训练侧带原因停腿；worker 继续轮询。
 
     只在 `kind=ppo` 上判：replay 转换本来就只允许 ppo（见 `prepass` 的 kind 闸），
-    别的 kind 的 payload 不承诺语料格式（bc 自采集、iter 由节点自跑）。空 shard 列
-    不在这里判（那是另一件事：`convert_replay_corpus` 对 replay 有自己的「不训空」拒收）。
+    别的 kind 的 payload 不承诺语料格式（bc 自采集、iter 由节点自跑）。
+
+    **零 shard 也是 ppo 的不合法形状**（2026-11-20 追查）：发布端
+    `trainer/loop_transport._gate_round_shards` 对本机轮硬门「无完整 shard 不许发布」，
+    而 node 轮（`rollout_spec` 非空）发的是 `kind=iter`、shard 集**必须为空** ⇒ 生产上
+    不存在「合法零 shard 的 ppo job」（`--echo` 冒烟也不靠它：`hub/smoke_loopback` 造的是
+    真 shard）。到这儿还是空 = 坏包，而训练核见到它只会 `discover_rl_shards` 返回空。
+    特例：`corpus_fmt=replay` 的空集交给 `convert_replay_corpus` 自己拒（它有「不训空」
+    那一行，措辞与读数对 replay 更准）。
     """
     if str(manifest.get("kind") or "") != "ppo":
         return
     dirs: list[Path] = [p if isinstance(p, Path) else Path(p) for p in shard_dirs]
-    if not dirs:
-        return
     declared = str(manifest.get("corpus_fmt") or "full")
+    if not dirs:
+        if declared == "replay":
+            return  # `convert_replay_corpus` 的「没有任何 shard —— 不训空」那一行
+        raise ProtocolError(
+            "kind=ppo 的 payload 里没有任何 shard 目录"
+            f"（corpus_fmt={declared}）——训练核只会读到 0 局，拒收"
+        )
     if declared == "replay":
         missing = [d for d in dirs if not (d / REPLAY_NAME).is_file()]
         if missing:
