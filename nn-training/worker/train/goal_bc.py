@@ -32,10 +32,22 @@ import torch
 import torch.nn.functional as F
 
 from common.cli import house_parser, run_main
+from common.runtime import substream
 from worker.models.goal_net import GoalNet, export_goal_weights, load_goal_weights
-from worker.ppo.common import discover_shards, log
+from worker.ppo.common import log
+from worker.ppo.np_core import discover_shards
 
 UNREACH = 65535
+
+
+def epoch_rng(seed: int) -> np.random.Generator:
+    """每个 epoch 打乱 episode 顺序的**局部**随机流（`common.runtime.substream` 派生）。
+
+    此前这里靠 `np.random.seed(seed)` + `np.random.permutation(...)`：种子落在**全局** numpy
+    状态上，任何 import 期或别的库的 `np.random.*` 调用都会插进这条流 ⇒ 同 seed 两跑顺序不同
+    （「可复现」只对第一跑成立）。派生种子按流名分开，不受进程里别的随机调用影响。
+    """
+    return np.random.default_rng(list(substream(seed, "goal-bc-epoch")))
 LOAD_LOG_EVERY = 128
 HB_SEC = 30.0
 
@@ -141,8 +153,8 @@ def main():
     ap.add_argument("--threads", type=int, default=8)
     args = ap.parse_args()
 
-    np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+    rng = epoch_rng(args.seed)
     if args.threads > 0:
         torch.set_num_threads(args.threads)
     device = torch.device(args.device)
@@ -180,7 +192,7 @@ def main():
     t0 = time.time()
     last_hb = t0
     for ep in range(args.epochs):
-        order = np.random.permutation(len(episodes))
+        order = rng.permutation(len(episodes))
         ep_losses = []
         for bi in order:
             e = episodes[bi]

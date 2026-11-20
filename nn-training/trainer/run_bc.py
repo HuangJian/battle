@@ -4,7 +4,7 @@
   每轮 it：
     1. 账本已有 `bc_round_completed(it)` → 跳过（断点续跑）；
     2. 语料缺额 → biz/bc_dispatch.py 派 LAN 节点采 God-AI 语料（mode=bc）；
-    3. publish_job(kind=bc) → 云端 worker 跑 train/bc.py → 回传 BC 权重；
+    3. PublishSpec(kind=bc) → 云端 worker 跑 train/bc.py → 回传 BC 权重；
     4. verify_and_land_bc → `tmp/<course>/weights.json`；
     5. 归档 backup_weights → `nn-training/weights/<prefix>/…it<N>.<ts>.json` + WEIGHTS.md 行。
 
@@ -40,10 +40,10 @@ sys.path.insert(0, str(_SCRIPT_DIR.parent))
 
 from common.cli import run_main
 from common.log import log
+from common.paths import REPO_ROOT
 from common.platform_utils import force_utf8_stdio
 from common.proc import run_capture
 from trainer.bc_loop import BcLoop, bc_argparser, resolve_bc_runtime
-from trainer.dispatch_queue import REPO_ROOT
 from worker.archive import ensure_current_branch_pushed
 from worker.train.loop_util import acquire_lock, cleanup_lock, course_lock_path
 
@@ -82,13 +82,14 @@ def main(argv: list[str] | None = None) -> None:
         finally:
             cleanup_lock(push_lock)
     import common.distribution as dc
+    import remote.node_upgrade as nu
 
     current_branch = run_capture(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO_ROOT, timeout=30
     ).stdout.strip()
     # 升级分支必须在 load_dist_config 之前钉住（节点远端分支的选择依赖它）。
     if current_branch and current_branch != "HEAD":
-        dc.set_upgrade_branch(current_branch)
+        nu.set_upgrade_branch(current_branch)
     runtime = resolve_bc_runtime(args, cfg=dc.load_dist_config())
 
     # ---- 单实例锁（与 run_rl 同实现、按课命名；双开响亮拒启）----

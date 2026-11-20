@@ -14,12 +14,21 @@ HTTP（同样立即停腿），其余只计连败配额（连败 3 次停腿；*
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from common.log import log
 from common.protocol import JobFailedError
 from trainer.loop_transport import fatal_remote_http
 from worker.events import write_gate_verdict
+
+
+@dataclass(frozen=True)
+class RemoteFailState:
+    """远端失败策略的执行面读数（判决词表与异常分类不在这里）。"""
+
+    consecutive_failures: int
+    leg_aborted: bool
 
 
 class TrainingRemoteFail:
@@ -32,6 +41,13 @@ class TrainingRemoteFail:
     _leg_abort: bool
     #: 远端连续失败计数（成功即复位）。
     _remote_fail: int
+
+    def remote_fail_state(self) -> RemoteFailState:
+        """这一簇的公开读数（用例 / 诊断共用；不改变任何重试或停腿语义）。"""
+        return RemoteFailState(
+            consecutive_failures=int(getattr(self, "_remote_fail", 0) or 0),
+            leg_aborted=bool(getattr(self, "_leg_abort", False)),
+        )
 
     def _abort_node_failure(self, it: int, e: BaseException, *, where: str) -> None:
         """节点已回报原因的**确定性**失败 → 写 ABORT 判决 + 停腿标记。

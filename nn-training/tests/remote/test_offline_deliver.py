@@ -55,8 +55,8 @@ from remote.offline_deliver import (
 )
 from remote.offline_deliver import main as deliver_main
 from remote.run_loop import run_plan_job
-from tests.remote.test_remote_ppo import _boot_server, _http  # type: ignore
-from tests.remote.test_run_loop import _FakeRunJob, _prepare, _quiet  # type: ignore
+from tests.remote.test_remote_ppo import _boot_server, _http
+from tests.remote.test_run_loop import _FakeRunJob, _prepare, _quiet
 
 
 @pytest.fixture(autouse=True)
@@ -1214,7 +1214,7 @@ def test_status_reports_the_drawer_capacity_line(tmp_path: Path) -> None:
 
 def test_child_status_surface_carries_the_drawer_readings(tmp_path: Path) -> None:
     """子进程状态面是**白名单**（`deliver_worker._write_status`）⇒ 新读数不写进去 = 没实现（控制台看不见）。"""
-    from remote.deliver_worker import CtlReader, _write_status  # type: ignore
+    from remote.deliver_worker import CtlReader, _write_status
 
     root = _make_artifacts(tmp_path / "art", iters=(1,))
     _write_eval_log(root, it=1, games=1)
@@ -1296,7 +1296,8 @@ def test_new_rejection_records_its_age_and_tries(tmp_path: Path) -> None:
     """新记一笔拒收要带上 `at`/`tries`（不带 = 下一次加载就只剩「永久有效」这一种语义）。"""
     root = _make_artifacts(tmp_path / "art", iters=(1, 2))
     d = _deliverer("", root)
-    assert d._reject_round(1, "体形状不对", weights_fp="f" * 64) == "skip"
+    verdict = d._reject_round(1, "体形状不对", weights_fp="f" * 64)
+    assert verdict == "skip"
     d._save_ledger()
     row = json.loads((root / OFFLINE_DELIVERED_NAME).read_text(encoding="utf-8"))["rejected"][0]
     assert row["at"] > 0 and row["tries"] == 1
@@ -1333,10 +1334,12 @@ def test_reset_rejected_revives_the_round_even_while_the_session_is_alive(tmp_pa
     root = _make_artifacts(tmp_path / "art", iters=(1, 2))
     _write_ledger(root, artifacts=[1], rejected=[_rejected_row(root, 2, at=time.time())])
     d = _deliverer("", root)
-    assert 2 in d._rejected and 2 not in d.pending()
+    state = d.deliver_state()
+    assert 2 in state.rejected and 2 not in d.pending()
     assert reset_rejected(root, run_id=RUN, it=2, log=_quiet) == 1
     d._save_ledger()  # 活着的会话落盘一次
-    assert 2 not in d._rejected and 2 in d.pending(), "重置必须真的生效，而不是被下一次落盘覆盖回去"
+    state = d.deliver_state()
+    assert 2 not in state.rejected and 2 in d.pending(), "重置必须真的生效，而不是被下一次落盘覆盖回去"
     data = json.loads((root / OFFLINE_DELIVERED_NAME).read_text(encoding="utf-8"))
     assert data["rejected"] == [] and REJECTED_RESET_KEY in data
     assert json.loads((root / OFFLINE_DELIVERED_NAME).read_text(encoding="utf-8"))["artifacts"] == [1]
@@ -1353,10 +1356,10 @@ def test_reset_rejected_only_touches_the_named_round(tmp_path: Path) -> None:
         rejected=[_rejected_row(root, 2, at=now), _rejected_row(root, 3, at=now, why="409")],
     )
     d = _deliverer("", root)
-    assert sorted(d._rejected) == [2, 3]
+    assert d.deliver_state().rejected == (2, 3)
     assert reset_rejected(root, run_id=RUN, it=2, log=_quiet) == 1
     d._save_ledger()
-    assert sorted(d._rejected) == [3], "it3 的拒收不得被连坐放掉"
+    assert d.deliver_state().rejected == (3,), "it3 的拒收不得被连坐放掉"
     assert 2 in d.pending() and 3 not in d.pending()
 
 
@@ -1415,7 +1418,7 @@ def test_drawer_never_prunes_when_the_ledger_is_unreadable(tmp_path: Path) -> No
     # 账本被破坏（半截写入 / 人手动改坏）——同时把这一份标记成「已投递」（内存里）
     (root / OFFLINE_DELIVERED_NAME).write_text("{坏的 json", encoding="utf-8")
     d2 = _deliverer("", root, backup_root=drawer)
-    assert d2._ledger_readable is False
+    assert d2.deliver_state().ledger_readable is False
     d2._delivered.add(1)
     d2._prune_forced = True
     assert d2.backup_pending() == 0
@@ -2004,3 +2007,95 @@ def test_without_any_eval_rows_every_pending_round_is_sent(tmp_path: Path) -> No
 
     assert d.sync() == 3
     assert sorted(b["it"] for b in op.bodies) == [1, 2, 3]
+
+
+# ────────────────────────── 异常面（P0-7 第二十批） ──────────────────────────
+
+
+def test_probe_calls_only_transport_failure_unreachable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_DELIVER_NET_ERRORS` 的边界：传输失败 ⇒ 「不可达」；我们自己的 bug ⇒ 穿出去。
+
+    `probe()` 的处置是「本轮跳过补传 + 一行节流日志」——这对断连/超时/体被截断是**正确**的，
+    但 `AttributeError`（`_opener` 接口改形 / 配置访问拼错）被它读成「hub 不可达」以后，现场
+    永远只看到「hub 时好时坏」，而 `_post` 用的**同一个**常量（它的失败处置是「状态 0 = 没送达」，
+    同样只对传输失败成立）。
+    """
+    from common import net_http
+
+    root = _make_artifacts(tmp_path / "art", iters=(1,))
+    d = _deliverer("http://hub.invalid", root)
+
+    def refused(req, timeout: float = 30.0):
+        raise ConnectionRefusedError(111, "Connection refused")
+
+    monkeypatch.setattr(net_http, "urlopen", refused)
+    assert d.probe() is False, "断连是「不可达」——补传跳过本轮，训练照跑"
+
+    def buggy(req, timeout: float = 30.0):
+        raise AttributeError("opener lost .read")
+
+    monkeypatch.setattr(net_http, "urlopen", buggy)
+    # 新建一份：上一份刚把「不可达」进了负缓存（`PROBE_FAIL_TTL_SEC` 内不再真探）。
+    with pytest.raises(AttributeError):
+        _deliverer("http://hub.invalid", root).probe()
+
+
+def test_a_bad_run_id_is_the_only_constructor_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`sanitize_run_id` 的契约只有一种失败（`ProtocolError`）⇒ 构造器也只捕它。
+
+    `run_id` 是 hub 侧目录名，非法 ⇒ 这条腿不投产物（`run_id == ""`）。旧宽捕会把这个函数的
+    **bug**（正则改名 / 返回类型变了）也读成「没 run_id」，于是补传静默关闭。
+    """
+    root = _make_artifacts(tmp_path / "art")
+    bad = OfflineDeliverer(
+        base_url="http://hub.invalid",
+        token="t",
+        run_id="../evil",
+        artifacts_dir=root,
+        log=_quiet,
+    )
+    assert bad.run_id == "", "非法 run_id ⇒ 不投产物（不是崩，也不是拼进路径）"
+
+    import remote.offline_deliver as od
+
+    def buggy(_raw: object) -> str:
+        raise KeyError("RUN_ID_MAX was renamed")
+
+    monkeypatch.setattr(od, "sanitize_run_id", buggy)
+    with pytest.raises(KeyError):
+        OfflineDeliverer(
+            base_url="http://hub.invalid",
+            token="t",
+            run_id=RUN,
+            artifacts_dir=root,
+            log=_quiet,
+        )
+
+
+def test_backup_pending_treats_only_disk_and_row_shape_as_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`backup_pending` 的判据面只许失在「盘 + 账行形状」上（`backup_grace=0` 时也照这句）。
+
+    「算不出待投轮次」的后果是**跳过备份**（网络盘上少一份副本，训练与回传都不受影响）——
+    对 `OSError` 是对的；对我们自己的 `AttributeError` 则是一条永不生效的备份路径。
+    """
+    root = _make_artifacts(tmp_path / "art", iters=(1,))
+    d = _deliverer("http://hub.invalid", root, backup_root=tmp_path / "drawer")
+
+    def broken(_self) -> list[int]:
+        raise OSError("artifacts dir vanished")
+
+    monkeypatch.setattr(OfflineDeliverer, "pending", broken)
+    assert d.backup_pending() == 0, "盘坏了 ⇒ 跳过备份，不抛"
+
+    def buggy(_self) -> list[int]:
+        raise AttributeError("pending lost .iterdir")
+
+    monkeypatch.setattr(OfflineDeliverer, "pending", buggy)
+    with pytest.raises(AttributeError):
+        d.backup_pending()

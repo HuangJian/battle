@@ -2,7 +2,7 @@
 
 2026-09-25（S27/B3）从 `trainer/batch_eval.py` **纯搬**出来（成员逐字节对账见
 `tests/trainer/test_batch_runner_split.py`）—— 那是 §5.5.4 的第三步：B1 把纯规划/判据送到
-`trainer/batch_plan.py`、B2 把台账收进 `trainer/batch_store.py`，本模块收走**执行面**。
+`biz/batch_plan.py`、B2 把台账收进 `trainer/batch_store.py`，本模块收走**执行面**。
 一个单元 = 一个 100 局批次：通道机器（每节点各自 ping+权重就绪即派单）· 尾段竞速 ·
 背压重排 · 收尾三闸（settled / 僵死 / 零消费者宽限）。
 
@@ -39,12 +39,13 @@ from collections import deque
 from pathlib import Path
 from typing import NamedTuple
 
+import common.codehash
 import common.codehash_ref as codehash_ref
 import common.distribution
-from common.fs import append_jsonl
-from common.log import log
-from remote import weights_standard
-from trainer.batch_plan import (
+import common.runtime
+import common.task_client
+import common.weights_client
+from biz.batch_plan import (
     batch_iter_id,
     eval_rule_kwargs,
     eval_rules_reject_reason,
@@ -53,8 +54,11 @@ from trainer.batch_plan import (
     node_gate_reason,
     node_supports_decision_k,
 )
+from common.fs import append_jsonl
+from common.log import default_router, log
+from common.proc import bun_version
+from remote import weights_standard
 from trainer.batch_store import BatchStore, data_root
-from trainer.dispatch_queue import _record_agent_meta, bun_version
 
 # 尾竞速：与 A 层（trainer/eval_dispatch）**同一机制**（纯函数在 trainer/queue_local 单源）。
 from trainer.queue_local import (
@@ -64,6 +68,7 @@ from trainer.queue_local import (
     register_inflight,
 )
 from worker import node_identity
+from worker.agent_meta import record_agent_meta as _record_agent_meta
 from worker.eval_local import (
     EVAL_TASK_ATTEMPTS,
     eval_census_fields,
@@ -97,13 +102,22 @@ NODE_RECOVERY_TRIES = 3
 
 
 def _heartbeat(**patch: object) -> None:
-    """R4-G1：写 EvalBoard 心跳（失败静默——心跳绝不打断单元）。"""
+    """R4-G1：写 EvalBoard 心跳（心跳绝不打断单元，但失败**不复述成静默**）。
+
+    `write_state` 自己会把落盘失败喊出来（`worker/eval_heartbeat.py`），这里兜的是它**之前**
+    的失败：`worker.eval_heartbeat` 导不进来（打包/路径）、以及它内部任何别的异常。这两种在
+    console 上的表现与「心跳根本没调」长得一模一样 —— 「批评估忙了一小时」和「心跳早就不写了」
+    都只是屏幕上的一行旧状态，而唯一会去看的人正是靠它决定要不要干预。
+    """
     try:
         from worker.eval_heartbeat import write_state
 
         write_state(**patch)
-    except Exception:
-        pass
+    except Exception as e:  # 契约：降级，绝不反杀单元
+        default_router().warn_once(
+            "eval_heartbeat:batch",
+            f"批评估心跳没写成：{e!r}——console 的 runner_state 会停在旧值",
+        )
 
 
 class _UnitPlan(NamedTuple):
@@ -184,6 +198,9 @@ class BatchEvalRunner:
         self.unit = unit
         self.unit_idx = unit_idx
         self.unit_of = unit_of
+        #: 本单元的所有线程（节点槽位 / 监管 / 每 2s 采样）归这里 —— 一端一份，名字带单元号，
+        #: 转储里能直接对上是哪一批；谁 join 仍由调用方的 `threads` 表决定。
+        self._rt = common.runtime.Runtime(scope=f"batcheval-u{unit_idx}")
         self.run_id = run_id
         self.engine_epoch = engine_epoch
         self.policy = policy
@@ -223,8 +240,7 @@ class BatchEvalRunner:
           - 本单元的 pair 全都已结算（`_done_keys`）⇒ settled=total，不重复跑。
         """
 
-        args = self.args
-        unit = self.unit
+        args, unit = self.args, self.unit
         policy_cfg = self.cfg.get("policy", {})
         status_timeout = common.distribution.status_timeout_of(policy_cfg)
         task_timeout = float(policy_cfg.get("taskTimeoutSec", 900))
@@ -290,14 +306,12 @@ class BatchEvalRunner:
         else:
             seeds = [int(s) for s in unit["seeds"]]
             pairs = [(int(unit["stageId"]), s) for s in seeds]
-        total = len(pairs)
-        done_before = self._done_keys(key16)
+        total, done_before = len(pairs), self._done_keys(key16)
         todo = [p for p in pairs if p not in done_before]
         if not todo:
             log(f"[batcheval] {unit['rung']} u{self.unit_idx}: already settled — skip")
             return {"settled": total, "total": total, "dropped": 0}
-        t_start = time.time()
-        trace = common.distribution.trace_enabled()
+        t_start, trace = time.time(), common.distribution.trace_enabled()
         # R4-G1 心跳：单元开始（console 只读，显示当前批/单元/rung）。
         _heartbeat(
             window_open=(
@@ -325,6 +339,7 @@ class BatchEvalRunner:
         local_weights = snapshot_path or ((self.rl_path or "no-weights-god") if god else None)
 
         local_bun = bun_version(self.bun)
+        # 节点门指纹（2026-09-17 统一）：与 rollout 门同源 = SSOT 清单的 codeHash。
         # ---- 派发通道：**每节点各自就绪、各自派单**（用户 2026-09-19 五条裁定）----
         # 旧实现是三个**串行阶段**：ping 全部节点 → 全部节点收权重 → 才开派。慢节点把整批
         # 拖住（实测 gate 6.83s + weights 0.79s，**且每个单元重跑一遍**），而**已经就绪的
@@ -742,7 +757,7 @@ class _UnitLanes:
             return False
         t_w = time.monotonic()
         try:
-            mode = common.distribution.post_weights(
+            mode = common.weights_client.post_weights(
                 str(nd.get("url") or ""),
                 str(nd.get("key") or ""),
                 self.iter_id,
@@ -793,12 +808,18 @@ class _UnitLanes:
                 f' — 本单元不再等它（其余节点/本机槽位继续；查节点日志与 /v1/ping）'
             )
 
+    def _spawn(self, target, name: str, *args: object) -> threading.Thread:
+        """起一个**具名** daemon 线程（归本单元的 `Runtime`：名字 `batcheval-u<idx>-<name>`）。
+
+        没名字的线程在 `faulthandler` / `py-spy` 里只显示 `Thread-N`，出事时现场分不清它是
+        在等本机队列、监管某个节点，还是采样线程。
+        """
+        return self.owner._rt.thread(target, *args, name=name, daemon=True)
+
     def spawn_workers(self, nd: dict, lane: dict, count: int) -> list[threading.Thread]:
         ws: list[threading.Thread] = []
         for i in range(count):
-            t = threading.Thread(target=self.worker, args=(nd, lane, i), daemon=True)
-            t.start()
-            ws.append(t)
+            ws.append(self._spawn(self.worker, f"worker:{nd.get('id')}-{i}", nd, lane, i))
         return ws
 
     def supervise(self, nd: dict) -> None:
@@ -984,31 +1005,29 @@ class _UnitLanes:
                 **eval_rule_kwargs(getattr(self.owner, "args", None)),
             )
         else:
-            m, _files = common.distribution.fetch_task(
-                nd["url"],
-                nd["key"],
-                iter_id=self.iter_id,
-                # 全量 wver（agent 桶按完整 sha 存；key16 会 409 —— 2026-09-19 实测）。
-                wver=self.wver,
-                stage=task[0],
-                seed=task[1],
-                max_ticks=up["maxTicks"],
-                difficulty=up["difficulty"],
-                timeout=self.task_timeout,
-                mode="eval",
-                kind=self.kind,
-                stage_json=up["stageJson"],
-                lives_override=up["lives"],
-                player_level=up["level"],
-                policy=self.owner.policy,
-                # R2 事件 rung：与本机份额同源（self.args，缺席 = 老行为）。
-                decision_events=bool(getattr(getattr(self.owner, "args", None), "decision_events", False)),
-                # 决策周期 K：与本机份额同源（缺席/10 = 老行为）。
-                decision_k=int(getattr(getattr(self.owner, "args", None), "decision_k", 10)),
-                # 顶钢空枪门/拆砖：与本机份额同源（缺席 = 老行为）。
-                **eval_rule_kwargs(getattr(self.owner, "args", None)),
-            )
-        why = common.distribution.validate_eval_result(m, self.wver)
+            m, _files = common.task_client.fetch_task(common.task_client.FetchTaskSpec(
+                    url=nd["url"],
+                    auth_key=nd["key"],
+                    iter_id=self.iter_id,
+                    # 全量 wver（agent 桶按完整 sha 存；key16 会 409 —— 2026-09-19 实测）。
+                    wver=self.wver,
+                    stage=task[0],
+                    seed=task[1],
+                    max_ticks=up["maxTicks"],
+                    difficulty=up["difficulty"],
+                    timeout=self.task_timeout,
+                    mode="eval",
+                    kind=self.kind,
+                    stage_json=up["stageJson"],
+                    lives_override=up["lives"],
+                    player_level=up["level"],
+                    policy=self.owner.policy,
+                    # R2 事件 rung / 决策周期 K / 推理规则：与本机份额同源（缺席 = 老行为）。
+                    decision_events=bool(getattr(getattr(self.owner, "args", None), "decision_events", False)),
+                    decision_k=int(getattr(getattr(self.owner, "args", None), "decision_k", 10)),
+                    **eval_rule_kwargs(getattr(self.owner, "args", None)),
+                ))
+        why = common.task_client.validate_eval_result(m, self.wver)
         if why:
             raise common.distribution.DistError(0, why)
         return m
@@ -1217,13 +1236,11 @@ class _UnitLanes:
             threads += self.spawn_workers({"id": "local"}, local_lane, self.local_slots)
         # 每节点一条通道：各自就绪即派单；失联每 recover_ping_sec 重探（req 1/3/5）。
         for nd in self.enabled_nodes:
-            t = threading.Thread(target=self.supervise, args=(nd,), daemon=True)
-            t.start()
-            threads.append(t)
+            threads.append(self._spawn(self.supervise, f"supervise:{nd.get('id')}", nd))
         if self.trace:
             # 每 2s 一行在飞采样：掉档时一眼看出是「队列空了」还是「派发停了」。
 
-            threading.Thread(target=self._watch, daemon=True).start()
+            self._spawn(self._watch, "watch")
         # 收尾等待：settled 一满（all_done 由最后结算的 worker 置位）或墙钟到点即收工。
         # 「零消费者」只在**整批从未有过任何消费者**时生效（无节点就绪过 + 本机槽位 0）
         # ⇒ 有界响亮收摊，而不是默认 86400s 窗口里干等。
@@ -1324,7 +1341,5 @@ def dispatch_batch_bg(
         window_event,
         init_sha16,
     )
-    t_ = threading.Thread(target=runner.run, daemon=True, name=f"batcheval-u{unit_idx}")
-    t_.start()
-    return t_
+    return runner._rt.thread(runner.run, name="run", daemon=True)
 

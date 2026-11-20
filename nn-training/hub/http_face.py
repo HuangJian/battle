@@ -71,12 +71,14 @@ import sys
 import threading
 import time
 import urllib.parse
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from common.http_respond import respond_json
+from common.logutil import log_line, tag_logger
 from common.protocol import (
     ADMIN_CANCEL_JOB_PATH,
     ADMIN_WORKER_ERROR_PATH,
@@ -133,12 +135,28 @@ from hub.worker_pulse import WorkerPulse
 # 只 import 这一个名字（`PushWorkers` / `DEFAULT_PUSH_CONFIG` 是引导链的，住 `hub/boot.py`）。
 from remote.push_dispatch import PushDispatcher
 
+# ------------------------------------------------------------------ 日志出口
+
+#: 请求面/调度面的行日志：格式与时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+#: 迁移前本文件 8 处手拼 `[{time.strftime(...)}] [hub-server] …` ——输出逐字节不变
+#: （`stamp()` 就是 `[HH:MM:SS]`），只是不再有第二份时间戳实现（python.refactor.md §P0-6）。
+#: 固定 tag 用 `_log`；**tag 里带请求源**（`hub-server <ip> src=… via=cf`）的行直接调
+#: `log_line(<tag>, msg)` —— 动态 tag 不需要再包一层工厂。
+_log = tag_logger("hub-server", lambda: time)
+
 # ------------------------------------------------------------------ 来源判定
 
 #: Cloudflare 边缘注入的「真实客户端 IP」头（客户端自带的值由边缘覆写——本方案的**未实测假设**，
 #: 实测方法：向隧道发带伪造值的无效鉴权，看本文件的 AUTH FAIL 审计行 src= 显示哪个）。
 #: 只认它，不认 `X-Forwarded-For`：后者是**可追加的逗号列表**，取哪一段都是语义游戏。
 CF_SOURCE_HEADER = "CF-Connecting-IP"
+
+#: 「读请求体失败」的真失败形态（`_read_raw_body` / `_read_capped_body` 的路面）：
+#: 对端断/半开/半截 → `OSError`（`ConnectionResetError` / `TimeoutError` / `socket.timeout`
+#: 都是它）；`Content-Length` 不是整数 → `int()` 的 `ValueError`（两个助手都把解析包在
+#: 同一个 try 里，所以它也是 400）。**编程错不落这个集**：`AttributeError`（`rfile` 形状变了 /
+#: 头部对象被换掉）与 `TypeError` 是我们的 bug，该在日志里炸成 500 而不是声称「客户端发错了」。
+_BODY_READ_ERRORS = (OSError, ValueError)
 
 #: 同名 worker「异来源」告警的节流（秒）——两台机器交替轮询时避免每请求一行
 #: （plan/worker-name-readable G7；先例 = 本模块 `_blocked_logged` 的每分钟一条）。
@@ -211,6 +229,165 @@ def attributed_source(peer: str, cf_header: str) -> tuple[str, str]:
         return cf, "cf"
     return p, "peer"
 
+# ------------------------------------------------------------------ 路由表
+#
+# **表是数据，分派是查表**（python.refactor.md 附录 B 的 `HubHandler` 行）：原先两个端点面各有
+# 一条 30 支的顺序 `elif path == … / startswith + endswith` 链，于是「加一个端点」= 往链条
+# 中间插一行 —— 插错位置会静默遮蔽后面的同后缀路由，而 stub 掉处理方法的单元用例全绿
+# （`test_node_register` 的端到端那条就是为这个形状写的）。现在一条路由 = 一行数据：
+# `do_GET` / `do_POST` 只剩「查表 → 调方法」与两条异常边界，表本身可被用例穷举、去重、
+# 与 `HubHandler` 对账（`tests/hub/test_hub_route_table.py`）。
+#
+# **顺序即优先级**：同表内先命中者胜。当前没有任何路径会同时命中两条（用例逐条穷举证明），
+# 保留顺序语义是为了让更宽的规则（`job_contains`）永远排在更具体的全等/后缀规则之后。
+
+#: 匹配形态：`exact` = 路径全等 · `job_suffix` = `/jobs/{id}<后缀>` ·
+#: `job_contains` = `/jobs/` 前缀且路径含该片段（`epoch-weights` 那类带中缀的）。
+RouteKind = Literal["exact", "job_suffix", "job_contains"]
+
+
+@dataclass(frozen=True, slots=True)
+class Route:
+    """一行路由：匹配形态 + 形态参数 + `HubHandler` 上的处理方法名。
+
+    `handler` 存**名字**而不是绑定方法/闭包：表因此在任何实例之前就存在（可 import 即断言），
+    且「哪个方法服务哪条路径」是数据，不是一张函数对象的间接表。参数绑定的那几条端点
+    （`/admin/workers/halt` 之类）各有一个零参包装方法，见 `HubHandler._get_*` / `_post_*`。
+    """
+
+    kind: RouteKind
+    value: str
+    handler: str
+
+
+def match_route(table: tuple[Route, ...], path: str) -> str | None:
+    """按表取处理方法名；一条都不命中 ⇒ `None`（调用方答 404）。纯函数 ⇒ 可穷举测试。"""
+    for route in table:
+        if route.kind == "exact":
+            hit = path == route.value
+        elif route.kind == "job_suffix":
+            hit = path.startswith("/jobs/") and path.endswith(route.value)
+        else:  # job_contains
+            hit = path.startswith("/jobs/") and route.value in path
+        if hit:
+            return route.handler
+    return None
+
+
+#: `GET` 端点表（判定顺序 = 声明顺序）。
+GET_ROUTES: tuple[Route, ...] = (
+    Route("exact", "/ping", "_get_ping"),
+    Route("exact", "/", "_get_ping"),
+    Route("exact", "/code", "_get_shared_code"),
+    Route("exact", "/jobs/peek", "_get_peek"),
+    Route("exact", "/admin/workers/halt", "_get_workers_halt"),
+    Route("exact", "/admin/workers/resume", "_get_workers_resume"),
+    Route("exact", "/admin/workers/status", "_admin_status"),
+    Route("exact", "/admin/mem", "_admin_mem"),
+    Route("exact", "/admin/queue", "_admin_queue"),
+    Route("exact", "/admin/push-workers", "_get_admin_push_workers"),
+    Route("exact", "/admin/offline-push-workers", "_admin_offline_push_workers"),
+    Route("exact", "/admin/nodes", "_admin_nodes_list"),
+    Route("exact", "/admin/courses", "_admin_courses"),
+    Route("exact", "/admin/net-probe", "_admin_net_probe"),
+    # 云机错误上报的读面（plan/component-error-registry §4.3-S3b）：**纯观测**的增量拉取，
+    # 与 `/admin/queue`/`/admin/offline` 同规（只读，不碰调度状态）。
+    Route("exact", ADMIN_WORKER_ERRORS_PATH, "_admin_errors"),
+    Route("exact", "/admin/offline", "_admin_offline"),
+    Route("exact", OFFLINE_TASK_PACK_PATH, "_get_task_pack"),
+    Route("exact", OFFLINE_TASKS_PATH, "_get_offline_tasks"),
+    Route("exact", OFFLINE_HOLD_PATH, "_get_offline_hold"),
+    Route("exact", OFFLINE_RESUME_PATH, "_get_offline_resume"),
+    Route("exact", OFFLINE_RESUME_BLOB_PATH, "_get_offline_resume_blob"),
+    Route("job_suffix", "/payload", "_get_payload"),
+    Route("job_suffix", "/ts_code", "_get_ts_code"),
+    Route("job_suffix", "/code", "_get_code"),
+    Route("job_suffix", "/blob", "_get_blob"),
+    Route("job_suffix", "/status", "_get_status"),
+    Route("job_suffix", "/result", "_get_result"),
+    Route("job_contains", "/epoch-weights/", "_get_bc_epoch_weights"),
+    Route("job_suffix", "/resume", "_get_bc_resume"),
+    Route("job_suffix", "/bc-metrics", "_get_bc_metrics"),
+)
+
+#: `POST` 端点表（判定顺序 = 声明顺序）。
+POST_ROUTES: tuple[Route, ...] = (
+    Route("job_suffix", "/heartbeat", "_post_heartbeat"),
+    Route("exact", "/jobs/priority", "_post_priority"),
+    Route("job_suffix", "/claim", "_post_claim"),
+    Route("job_suffix", "/start", "_post_start"),
+    Route("job_suffix", "/ready", "_post_ready"),
+    Route("job_suffix", "/result-ready", "_post_result_ready"),
+    Route("job_suffix", "/abandon", "_post_abandon"),
+    Route("job_suffix", "/release", "_post_release"),
+    Route("job_suffix", "/fail", "_post_fail"),
+    Route("job_suffix", "/result", "_post_result"),
+    Route("job_suffix", "/epoch", "_post_bc_epoch"),
+    Route("exact", "/admin/unfreeze", "_admin_unfreeze"),
+    # #8：清空课程级 BC 续训索引（只删别名；权重/历史不动）。
+    Route("exact", "/admin/bc-resume/clear", "_admin_clear_bc_resume"),
+    # 2026-11-12：人工解除 BC 课程独占（dashboard 按钮）。
+    Route("exact", "/admin/bc-exclusive/clear", "_admin_release_bc_exclusive"),
+    # 单 job 定向作废（2026-10-11 事故 W7）：与 /admin/unfreeze 同为人工口。
+    Route("exact", ADMIN_CANCEL_JOB_PATH, "_admin_cancel_job"),
+    Route("exact", "/admin/courses", "_post_admin_courses"),
+    Route("exact", "/admin/push-workers", "_post_admin_push_workers"),
+    Route("exact", "/admin/nodes/register", "_admin_nodes_register"),
+    Route("exact", "/admin/nodes/unregister", "_admin_nodes_unregister"),
+    Route("exact", "/admin/net-probe", "_admin_net_probe_upload"),
+    Route("exact", OFFLINE_ARTIFACT_PATH, "_post_offline_artifact"),
+    Route("exact", OFFLINE_RESULT_PATH, "_post_offline_result"),
+    Route("exact", OFFLINE_CLAIM_PATH, "_post_offline_claim"),
+    Route("exact", OFFLINE_HEARTBEAT_PATH, "_post_offline_heartbeat"),
+    Route("exact", OFFLINE_RELEASE_PATH, "_post_offline_release"),
+    Route("exact", OFFLINE_PROGRESS_PATH, "_post_offline_progress"),
+    # worker 的预取状态上报（plan/dashboard-ppo-live-rows）：**纯观测**——与 `/jobs/*` 那一族
+    # 分开（那一族有租约/游标语义），也不走 `/offline/*`（它报的是 job 队列的软持有，不是离线盘）。
+    Route("exact", ADMIN_WORKER_PREFETCH_PATH, "_post_worker_prefetch"),
+    # 云机的错误上报（plan/component-error-registry §4.3-S3b，同上形状来源）：报的是「只在云机
+    # 发生的失败」（机器级停滞/瞬时失败/离线段失败），与取活协议完全无关 ⇒ 同样刻意开在
+    # `/admin/*` 下，失败即丢、绝不参与派发判据。
+    Route("exact", ADMIN_WORKER_ERROR_PATH, "_post_worker_error"),
+)
+
+# ------------------------------------------------------------------ 进程级状态
+
+
+@dataclass
+class HubState:
+    """`HubHandler` 的**进程级可变状态**（`ThreadingHTTPServer` 每请求新建一个 handler 实例
+    ⇒ 共享面只能挂在类上；本对象就是那个「只此一份」的家）。
+
+    为什么收成一个对象，而不是四个类属性（python.refactor.md 附录 B 的 `HubState` 行）：
+
+      ① **可读**：写点在代码里长成 `self.state.blocked_logged[ip] = now`，「这是进程级共享状态」
+         在调用点就看得见；散成 `self._blocked_logged` 时与实例字段长得一模一样。
+      ② **可重置**：用例可以整体换一份干净的（`handler.state = HubState()`），而不是逐表
+         `.clear()`——后者漏清一张表不会报错，只会让用例之间偷偷串味。
+      ③ **零行为差**：默认实例在 import 期建一次（与类属性的生命周期逐字节等价），
+         `hub/boot.py` 的注入面仍然只有 `configure_pulse` / `pulse_events` 两个 classmethod。
+
+    字段都**只由本进程的请求线程写**，不加锁（与类属性时代同规：dict 的单次读/写在 CPython
+    下原子；跨字段一致性在这个观测面上不是契约）。
+    """
+
+    #: ip -> 上次打印「封禁拒绝」的墙钟（节流：被封客户端高频轮询时每 ip 每分钟一条）
+    blocked_logged: dict[str, float] = field(default_factory=dict)
+    #: 同名 worker 来源观测（plan/worker-name-readable G7）：worker 名 -> (来源, 末次见到秒)。
+    #: 只观测——同名在 `WORKER_SEEN_WINDOW_SEC` 内换了来源 ⇒ 一行告警；**不改名、不入账、
+    #: 不分配后缀**。
+    seen_sources: dict[str, tuple[str, float]] = field(default_factory=dict)
+    #: 上述告警的节流表：worker 名 -> 上次告警墙钟。
+    source_warned: dict[str, float] = field(default_factory=dict)
+    #: 拒绝日志的 60s 节流表：`"kind:jid:status"` -> 上次告警墙钟。
+    reject_warn_at: dict[str, float] = field(default_factory=dict)
+    #: ★ 对端提前断开的累计次数（2026-11-18）：只进「不该打 ERROR」那条分支的读数。
+    client_gone: dict[str, int] = field(default_factory=lambda: {"n": 0})
+    #: ★ worker 静默哨兵（2026-10-31，`hub/worker_pulse.py`）：每个带 `X-Worker-Id` 的请求
+    #: `touch()` 一下，后台线程（`hub/boot.py` 的 `hub-worker-pulse`）每 5s 扫一拍，静默
+    #: ≥ 阈值且本 episod 有轮询节奏 ⇒ 一条 err 上报进 `note_worker_error` 的 ring。
+    pulse: WorkerPulse = field(default_factory=WorkerPulse)
+
 
 # ------------------------------------------------------------------ HTTP
 
@@ -245,26 +422,11 @@ class HubHandler(
     #: （探活/网络/线程都在里面），而这里只调它的 `state()` —— 鸭子类型足够。
     offline_push: Any = None
 
-    #: ip -> 上次打印「封禁拒绝」的墙钟（节流：被封客户端高频轮询时每 ip 每分钟一条）
-    _blocked_logged: dict[str, float] = {}
-
-    #: ★ 同名 worker 来源观测（plan/worker-name-readable G7）：worker 名 -> (来源, 末次见到秒)。
-    #: 只观测——同名在 `WORKER_SEEN_WINDOW_SEC` 内换了来源 ⇒ 一行告警；**不改名、不入账、
-    #: 不分配后缀**。两个 dict 都是进程级（与 `_blocked_logged` 同规：ThreadingHTTPServer
-    #: 每请求新建实例，类属性才是共享面）。
-    _seen_worker_sources: dict[str, tuple[str, float]] = {}
-    #: 上述告警的节流表：worker 名 -> 上次告警墙钟。
-    _worker_source_warned: dict[str, float] = {}
-
-    #: ★ worker 静默哨兵（2026-10-31，`hub/worker_pulse.py`）：每个带 `X-Worker-Id` 的请求
-    #: `touch()` 一下，后台线程（`hub/boot.py` 的 `hub-worker-pulse`）每 5s 扫一拍，静默
-    #: ≥ 阈值且本 episod 有轮询节奏 ⇒ 一条 err 上报进 `note_worker_error` 的 ring。
-    #: 与 `_seen_worker_sources` 同规：进程级类属性（ThreadingHTTPServer 每请求新建实例）。
-    _worker_pulse: WorkerPulse = WorkerPulse()
-
-    #: ★ 对端提前断开的累计次数（进程级，与 `_blocked_logged` 同规）。
-    #: 只进不该打 ERROR 的那条分支：它不是故障计数，是**链路抖动**的读数。
-    _client_gone: dict[str, int] = {"n": 0}
+    #: ★ **进程级可变状态**（闭锁节流 / 同名 worker 来源观测 / 静默哨兵）：四份散着的类属性
+    #: 现收进 `HubState`（2026-11-19，python.refactor.md 附录 B）。与 `hub` / `push` 同规挂类上
+    #: （`ThreadingHTTPServer` 每请求新建实例 ⇒ 类属性才是共享面），但**写点有名字**：
+    #: `self.state.blocked_logged[…]`。用例整体换一份干净的即可（`handler.state = HubState()`）。
+    state: HubState = HubState()
 
     @classmethod
     def note_client_gone(cls, path: str, err: BaseException) -> str:
@@ -275,8 +437,9 @@ class HubHandler(
         `BrokenPipeError`）的语义统一是「这条连接没了」。对端走了，hub 再回 500 也没人收 ——
         上一版正是在这里写 500，写失败又把 traceback 打进了错误注册表。
         """
-        cls._client_gone["n"] = int(cls._client_gone.get("n", 0)) + 1
-        n = int(cls._client_gone["n"])
+        gone = cls.state.client_gone
+        gone["n"] = int(gone.get("n", 0)) + 1
+        n = int(gone["n"])
         if n == 1 or n % CLIENT_GONE_LOG_EVERY == 0:
             return f"WARN {path}: 对端提前断开（累计 {n} 次，非 hub 错误）：{err}"
         return ""
@@ -286,11 +449,11 @@ class HubHandler(
     def pulse_events(cls) -> list[dict]:
         """扫一拍 worker 静默哨兵，返回本拍要上发的事件（**只给 `hub/boot.py` 的后台线程调**）。
 
-        为什么留这个 classmethod 而不是让引导链直接摸 `_worker_pulse`：状态是进程级类属性
+        为什么留这个 classmethod 而不是让引导链直接摸 `state.pulse`：状态是进程级共享面
         （`ThreadingHTTPServer` 每请求新建实例），但「谁有资格读它」应当是显式的——
         boot 只负责把事件翻译成 `note_worker_error` 的上报体 + 一行日志。
         """
-        return cls._worker_pulse.sweep()
+        return cls.state.pulse.sweep()
 
     @classmethod
     def configure_pulse(cls, *, silence_sec: float) -> None:
@@ -298,7 +461,12 @@ class HubHandler(
 
         与 `hub`/`push` 同规：**引导链注入类属性**，`HubHandler` 自己不读 CLI。
         """
-        cls._worker_pulse = WorkerPulse(silence_sec=silence_sec)
+        cls.state.pulse = WorkerPulse(silence_sec=silence_sec)
+
+    @classmethod
+    def pulse_readout(cls) -> dict:
+        """当前哨兵快照（只读；诊断 / 用例用——`pulse_events` 会推进状态，不能拿它看）。"""
+        return cls.state.pulse.readout()
 
     #: 访问日志的写入锁：`print()` 是**两次** `write`（正文 + 换行），`ThreadingHTTPServer`
     #: 的高并发下会交错成 `… 200 -[11:24:05] [hub-server …] "GET …" 200 -` —— 现场
@@ -361,10 +529,11 @@ class HubHandler(
             counter = f"AUTH FAIL {n}/5"
             note = " — 已封禁该 IP 3600s（仅拒无效鉴权；合法 token 不受影响）" if n >= 5 else ""
         src = f"peer={peer}" if via == "peer" else f"peer={peer} src={ip} via=cf"
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server {ip}] {counter} "
-            f"path={self.path.split('?', 1)[0]} {src}{note}",
-            flush=True,
+        # tag 里带变量（请求源）⇒ 用 `log_line` 直调；`log_line` 的 `[tag]` 位就是本仓的
+        # 「多段 tag」面（`hub-server <ip src=… via=cf>`），不必为它再包一层工厂。
+        log_line(
+            f"hub-server {ip}",
+            f"{counter} path={self.path.split('?', 1)[0]} {src}{note}",
         )
         self._json({"error": "unauthorized"}, 401)
         return False
@@ -373,16 +542,16 @@ class HubHandler(
         """封禁命中审计（每 ip 每 60s 一条）：被封客户端往往仍在高频轮询，
         不节流会把日志刷爆，但完全不打则「谁在被封」永远查不到。"""
         now = time.time()
-        if now - HubHandler._blocked_logged.get(ip, 0.0) < 60:
+        if now - self.state.blocked_logged.get(ip, 0.0) < 60:
             return
-        HubHandler._blocked_logged[ip] = now
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server {ip}] BLOCKED — 请求被拒 "
+        self.state.blocked_logged[ip] = now
+        log_line(
+            f"hub-server {ip}",
+            "BLOCKED — 请求被拒 "
             f"path={self.path.split('?', 1)[0]} 剩余封禁 "
             f"{int(self.hub.blocked_remaining(ip))}s（5/5 次**无效**鉴权触发；"
             f"合法 token 照常放行——本次请求的 token 不匹配；"
             f"归因: peer={peer} via={via}）",
-            flush=True,
         )
 
     # 响应形状（头部顺序 / UTF-8 / ensure_ascii=False / 长度算法）= 线协议的一部分：
@@ -466,11 +635,10 @@ class HubHandler(
                     sent += n
         except OSError as e:
             stalled = True
-            print(
-                f"[{time.strftime('%H:%M:%S')}] [hub-server] 响应发送**停滞** {path}："
+            _log(
+                f"响应发送**停滞** {path}："
                 f"已发 {sent}/{total} bytes 后 {time.time() - t0:.0f}s 无进展（{e!r}）"
-                "——对端半开，断开连接（不再永久占住 handler 线程）",
-                flush=True,
+                "——对端半开，断开连接（不再永久占住 handler 线程）"
             )
         finally:
             try:
@@ -478,11 +646,7 @@ class HubHandler(
             except OSError:
                 pass
         if not stalled and total >= SEND_LOG_MIN_BYTES:
-            print(
-                f"[{time.strftime('%H:%M:%S')}] [hub-server] 响应发送完成 {path} "
-                f"{sent} bytes in {time.time() - t0:.1f}s",
-                flush=True,
-            )
+            _log(f"响应发送完成 {path} {sent} bytes in {time.time() - t0:.1f}s")
 
     def _bytes(
         self,
@@ -620,82 +784,58 @@ class HubHandler(
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         return (qs.get(key) or [""])[0].strip()
 
+    # ---- 路由参数的绑定点 ----
+    # 表只存「方法名」（纯数据）；带参数的那几条端点在这里把参数钉住，于是表里没有闭包、
+    # 也没有 `getattr(self, name)(*args)` 这种「参数住在数据里的」间接面。
+    def _get_ping(self) -> None:
+        """/ping 与 / 的健康应答（鉴权闸先过——它是最早的存活探针，token 不对就不该报 ok）。"""
+        if not self._auth_ok():
+            return
+        # 能力位（2026-11-16，plan/replay-corpus.plan.md D2/B7）：hub 自己声明支持
+        # replay 语料（claim 闸 + 转换器合同已在本进程）。additive；旧客户端忽略。
+        self._json({"status": "ok", "capabilities": [CAP_REPLAY_CORPUS]}, 200)
+
+    def _get_workers_halt(self) -> None:
+        self._admin_halt(True, self._query_course())
+
+    def _get_workers_resume(self) -> None:
+        self._admin_halt(False, self._query_course())
+
+    def _get_admin_push_workers(self) -> None:
+        self._admin_push_workers(set_action=False)
+
+    def _post_admin_courses(self) -> None:
+        self._admin_courses(post=True)
+
+    def _post_admin_push_workers(self) -> None:
+        self._admin_push_workers(set_action=True)
+
+    def _post_offline_claim(self) -> None:
+        self._post_offline_lease("claim")
+
+    def _post_offline_heartbeat(self) -> None:
+        self._post_offline_lease("heartbeat")
+
+    def _post_offline_release(self) -> None:
+        self._post_offline_lease("release")
+
     # ---- 路由 ----
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
-        self._worker_pulse.touch(self._worker_id())
+        self.state.pulse.touch(self._worker_id())
         if path.startswith("/offline/"):
             # 离线盘报名（取包链的全部端点都在这条前缀下；见 `_note_offline_disk`）。
             self._note_offline_disk()
         try:
             if path.startswith("/relay/"):
                 self._relay_route(method="GET")
-            elif path == "/ping" or path == "/":
-                if not self._auth_ok():
-                    return
-                # 能力位（2026-11-16，plan/replay-corpus.plan.md D2/B7）：hub 自己声明支持
-                # replay 语料（claim 闸 + 转换器合同已在本进程）。additive；旧客户端忽略。
-                self._json({"status": "ok", "capabilities": [CAP_REPLAY_CORPUS]}, 200)
-            elif path == "/code":
-                self._get_shared_code()
-            elif path == "/jobs/peek":
-                self._get_peek()
-            elif path == "/admin/workers/halt":
-                self._admin_halt(True, self._query_course())
-            elif path == "/admin/workers/resume":
-                self._admin_halt(False, self._query_course())
-            elif path == "/admin/workers/status":
-                self._admin_status()
-            elif path == "/admin/mem":
-                self._admin_mem()
-            elif path == "/admin/queue":
-                self._admin_queue()
-            elif path == "/admin/push-workers":
-                self._admin_push_workers(set_action=False)
-            elif path == "/admin/offline-push-workers":
-                self._admin_offline_push_workers()
-            elif path == "/admin/nodes":
-                self._admin_nodes_list()
-            elif path == "/admin/courses":
-                self._admin_courses()
-            elif path == "/admin/net-probe":
-                self._admin_net_probe()
-            elif path == ADMIN_WORKER_ERRORS_PATH:
-                # 云机错误上报的读面（plan/component-error-registry §4.3-S3b）：**纯观测**的
-                # 增量拉取，与 `/admin/queue`/`/admin/offline` 同规（只读，不碰调度状态）。
-                self._admin_errors()
-            elif path == "/admin/offline":
-                self._admin_offline()
-            elif path == OFFLINE_TASK_PACK_PATH:
-                self._get_task_pack()
-            elif path == OFFLINE_TASKS_PATH:
-                self._get_offline_tasks()
-            elif path == OFFLINE_HOLD_PATH:
-                self._get_offline_hold()
-            elif path == OFFLINE_RESUME_PATH:
-                self._get_offline_resume()
-            elif path == OFFLINE_RESUME_BLOB_PATH:
-                self._get_offline_resume_blob()
-            elif path.startswith("/jobs/") and path.endswith("/payload"):
-                self._get_payload()
-            elif path.startswith("/jobs/") and path.endswith("/ts_code"):
-                self._get_ts_code()
-            elif path.startswith("/jobs/") and path.endswith("/code"):
-                self._get_code()
-            elif path.startswith("/jobs/") and path.endswith("/blob"):
-                self._get_blob()
-            elif path.startswith("/jobs/") and path.endswith("/status"):
-                self._get_status()
-            elif path.startswith("/jobs/") and path.endswith("/result"):
-                self._get_result()
-            elif path.startswith("/jobs/") and "/epoch-weights/" in path:
-                self._get_bc_epoch_weights()
-            elif path.startswith("/jobs/") and path.endswith("/resume"):
-                self._get_bc_resume()
-            elif path.startswith("/jobs/") and path.endswith("/bc-metrics"):
-                self._get_bc_metrics()
-            else:
+                return
+            name = match_route(GET_ROUTES, path)
+            if name is None:
                 self._json({"error": "not found"}, 404)
+            else:
+                dispatch: Callable[[], None] = getattr(self, name)
+                dispatch()
         except (ProtocolError, ValueError) as e:
             self._json({"error": str(e)}, 400)
         except ConnectionError as e:
@@ -711,81 +851,20 @@ class HubHandler(
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0]
-        self._worker_pulse.touch(self._worker_id())
+        self.state.pulse.touch(self._worker_id())
         if path.startswith("/offline/"):
             # 同上：租约/补传也在这条前缀下（POST 面）。
             self._note_offline_disk()
         try:
             if path.startswith("/relay/"):
                 self._relay_route(method="POST")
-            elif path.startswith("/jobs/") and path.endswith("/heartbeat"):
-                self._post_heartbeat()
-            elif path == "/jobs/priority":
-                self._post_priority()
-            elif path.startswith("/jobs/") and path.endswith("/claim"):
-                self._post_claim()
-            elif path.startswith("/jobs/") and path.endswith("/start"):
-                self._post_start()
-            elif path.startswith("/jobs/") and path.endswith("/ready"):
-                self._post_ready()
-            elif path.startswith("/jobs/") and path.endswith("/result-ready"):
-                # 2026-10-26：worker 的 PPO 一收口就敲一下，派发器的等待线程立刻取回。
-                self._post_result_ready()
-            elif path.startswith("/jobs/") and path.endswith("/abandon"):
-                self._post_abandon()
-            elif path.startswith("/jobs/") and path.endswith("/release"):
-                self._post_release()
-            elif path.startswith("/jobs/") and path.endswith("/fail"):
-                self._post_fail()
-            elif path.startswith("/jobs/") and path.endswith("/result"):
-                self._post_result()
-            elif path.startswith("/jobs/") and path.endswith("/epoch"):
-                self._post_bc_epoch()
-            elif path == "/admin/unfreeze":
-                self._admin_unfreeze()
-            elif path == "/admin/bc-resume/clear":
-                # #8：清空课程级 BC 续训索引（只删别名；权重/历史不动）。
-                self._admin_clear_bc_resume()
-            elif path == "/admin/bc-exclusive/clear":
-                # 2026-11-12：人工解除 BC 课程独占（dashboard 按钮）。
-                self._admin_release_bc_exclusive()
-            elif path == ADMIN_CANCEL_JOB_PATH:
-                # 单 job 定向作废（2026-10-11 事故 W7）：与 /admin/unfreeze 同为人工口。
-                self._admin_cancel_job()
-            elif path == "/admin/courses":
-                self._admin_courses(post=True)
-            elif path == "/admin/push-workers":
-                self._admin_push_workers(set_action=True)
-            elif path == "/admin/nodes/register":
-                self._admin_nodes_register()
-            elif path == "/admin/nodes/unregister":
-                self._admin_nodes_unregister()
-            elif path == "/admin/net-probe":
-                self._admin_net_probe_upload()
-            elif path == OFFLINE_ARTIFACT_PATH:
-                self._post_offline_artifact()
-            elif path == OFFLINE_RESULT_PATH:
-                self._post_offline_result()
-            elif path == OFFLINE_CLAIM_PATH:
-                self._post_offline_lease("claim")
-            elif path == OFFLINE_HEARTBEAT_PATH:
-                self._post_offline_lease("heartbeat")
-            elif path == OFFLINE_RELEASE_PATH:
-                self._post_offline_lease("release")
-            elif path == OFFLINE_PROGRESS_PATH:
-                self._post_offline_progress()
-            elif path == ADMIN_WORKER_PREFETCH_PATH:
-                # worker 的预取状态上报（plan/dashboard-ppo-live-rows）：**纯观测**——
-                # 与 `/jobs/*` 那一族分开（那一族有租约/游标语义），也不走 `/offline/*`
-                # （它报的是 job 队列的软持有，不是离线盘）。
-                self._post_worker_prefetch()
-            elif path == ADMIN_WORKER_ERROR_PATH:
-                # 云机的错误上报（plan/component-error-registry §4.3-S3b，同上形状来源）：
-                # 报的是「只在云机发生的失败」（机器级停滞/瞬时失败/离线段失败），与取活协议
-                # 完全无关 ⇒ 同样刻意开在 `/admin/*` 下，失败即丢、绝不参与派发判据。
-                self._post_worker_error()
-            else:
+                return
+            name = match_route(POST_ROUTES, path)
+            if name is None:
                 self._json({"error": "not found"}, 404)
+            else:
+                dispatch: Callable[[], None] = getattr(self, name)
+                dispatch()
         except (ProtocolError, ValueError) as e:
             self._json({"error": str(e)}, 400)
         except ConnectionError as e:
@@ -877,7 +956,7 @@ class HubHandler(
         """
         try:
             return self.rfile.read(int(self.headers.get("Content-Length", "0")))
-        except Exception as e:
+        except _BODY_READ_ERRORS as e:
             self._json({"error": f"read body failed: {e}"}, 400)
             return None
 
@@ -1010,6 +1089,7 @@ class HubHandler(
                 target=self._refresh_relay_ping,
                 args=(node, dict(self.headers.items())),
                 daemon=True,
+                name=f"relay-ping-refresh:{node}",
             ).start()
         return True
 
@@ -1021,7 +1101,9 @@ class HubHandler(
             )
             if status == 200:
                 self._cache_relay_ping(node, raw)
-        except Exception:  # 后台线程里的任何异常都与调用方无关（这条链路的语义是 best-effort）
+        except RelayTimeoutError:
+            # 契约静默（窄捕，非旧债）：ping 刷新是**旁路**，失败只会让下一次 ping
+            # 多问一跳；这里没有任何调用方在等它。程序员错穿出去（线程 traceback 可见）。
             pass
         finally:
             NODE_RELAY.release_ping_refresh(node)
@@ -1055,19 +1137,18 @@ class HubHandler(
             self.client_address[0], hdrs.get(CF_SOURCE_HEADER, "") if hdrs else ""
         )
         now = time.time()
-        prev = self._seen_worker_sources.get(wid)
-        self._seen_worker_sources[wid] = (src, now)
+        prev = self.state.seen_sources.get(wid)
+        self.state.seen_sources[wid] = (src, now)
         if not prev or prev[0] == src or now - prev[1] > WORKER_SEEN_WINDOW_SEC:
             return
-        last = self._worker_source_warned.get(wid, 0.0)
+        last = self.state.source_warned.get(wid, 0.0)
         if now - last < WORKER_SOURCE_WARN_THROTTLE_SEC:
             return
-        self._worker_source_warned[wid] = now
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] ⚠ worker 名 {wid} 在 "
+        self.state.source_warned[wid] = now
+        _log(
+            f"⚠ worker 名 {wid} 在 "
             f"{WORKER_SEEN_WINDOW_SEC:.0f}s 窗口内换了来源（{prev[0]} → {src}）——"
-            "「同环境单台」前提可能被打破（只观测，不改名/不入账）",
-            flush=True,
+            "「同环境单台」前提可能被打破（只观测，不改名/不入账）"
         )
 
     def _log_claim(self, jid: str, course: str, worker_id: str, mode: str, token: str) -> None:
@@ -1079,11 +1160,11 @@ class HubHandler(
         弄丢，等于把事故的取证面弄丢。`reclaims>0` 是「认领后零回传」计数（熔断前兆）。
         """
         n = self.hub.reclaims(jid)
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] claim job={jid} course={course or '-'} "
+        _log(
+            f"claim job={jid} course={course or '-'} "
             f"worker={worker_id or '?'} mode={mode} "
-            f"lease={token[:8] if token else 'none'}" + (f" reclaims={n}" if n else ""),
-            flush=True,
+            f"lease={token[:8] if token else 'none'}"
+            + (f" reclaims={n}" if n else "")
         )
 
     def _read_json_body(self, cap: int) -> dict | None:
@@ -1127,16 +1208,13 @@ class HubHandler(
             return None
         try:
             raw = self.rfile.read(n)
-        except Exception as e:
+        except _BODY_READ_ERRORS as e:
             self._json({"error": f"read body failed: {e}"}, 400)
             return None
         if len(raw) != n:
             self._json({"error": f"请求体截断（声明 {n}，实收 {len(raw)}）"}, 400)
             return None
         return raw
-
-    #: "kind:jid:status" -> 上次告警墙钟（hub 侧拒绝日志的 60s 节流用的）
-    _REJECT_WARN_AT: dict[str, float] = {}
 
     def _log_reject(
         self,
@@ -1157,12 +1235,11 @@ class HubHandler(
         """
         now = time.time()
         key = f"{kind}:{job_id}:{status}"
-        if now - self._REJECT_WARN_AT.get(key, 0.0) <= 60:
+        if now - self.state.reject_warn_at.get(key, 0.0) <= 60:
             return
-        self._REJECT_WARN_AT[key] = now
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] {kind} 被拒: job={job_id} "
+        self.state.reject_warn_at[key] = now
+        _log(
+            f"{kind} 被拒: job={job_id} "
             f"course={course or '-'} worker={worker or '?'} status={status} "
-            f"reason={reason or '-'}",
-            flush=True,
+            f"reason={reason or '-'}"
         )

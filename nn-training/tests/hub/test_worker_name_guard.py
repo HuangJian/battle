@@ -26,8 +26,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.protocol import AUTH_HEADER, WORKER_ID_HEADER
-from hub.http_face import CF_SOURCE_HEADER, HubHandler
+from hub.http_face import CF_SOURCE_HEADER, HubHandler, HubState
 from hub.server import _HubQueue, make_server
+from tests.helpers.http_server import serve_fast
 
 TOKEN = "sekret"
 WARN_FRAGMENT = "前提可能被打破"
@@ -35,12 +36,14 @@ WARN_FRAGMENT = "前提可能被打破"
 
 @pytest.fixture(autouse=True)
 def _clean_guard_state():
-    """守卫状态是 HubHandler 的 class 级 dict（进程内共享）——每个用例前后清干净。"""
-    HubHandler._seen_worker_sources.clear()
-    HubHandler._worker_source_warned.clear()
+    """守卫状态是 `HubHandler.state` 的进程级 dict——每个用例前后**整份换新**。
+
+    2026-11-19（`HubState`）：四份散着的类属性收成一个对象后，隔离从「逐表 `.clear()`」
+    变成「换一份」——漏清一张表不会再悄悄串到下一个用例。
+    """
+    HubHandler.state = HubState()
     yield
-    HubHandler._seen_worker_sources.clear()
-    HubHandler._worker_source_warned.clear()
+    HubHandler.state = HubState()
 
 
 @contextmanager
@@ -48,7 +51,7 @@ def _hub(tmp_path: Path):
     hub = _HubQueue({}, discover_root=tmp_path)
     hub.discover()
     srv: ThreadingHTTPServer = make_server(hub, 0, TOKEN, host="127.0.0.1")
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     try:
         yield f"http://127.0.0.1:{srv.server_address[1]}", hub
     finally:
@@ -97,5 +100,6 @@ def test_guard_does_not_alter_names_or_ledger(tmp_path: Path, capsys) -> None:
         second = _peek(base, "kaggle-c", "203.0.113.8")
         assert first == second, "同名异来源不得改变响应"
         assert WARN_FRAGMENT in capsys.readouterr().out
-        assert set(hub._workers) == {"kaggle-c"}, hub._workers
+        reg = hub.worker_registry()
+        assert set(reg) == {"kaggle-c"}, reg
     assert not list(tmp_path.rglob("training_log.jsonl")), "守卫不得写账"

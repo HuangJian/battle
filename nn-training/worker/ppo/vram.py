@@ -72,7 +72,9 @@ def torch_free_bytes(device: Any) -> int | None:
         return None
     try:
         return int(torch.cuda.mem_get_info(device)[0])
-    except Exception:
+    except (RuntimeError, OSError, ValueError, TypeError, AttributeError):
+        # 契约：探测失败 = 未知 = 放行（CPU / 老版本 CUDA API 都没理由拦住训练）。
+        # 收窄到第三方探测的真实失败面；`KeyError` 等我们自己的形状 bug 穿出去。
         return None
 
 
@@ -89,7 +91,10 @@ def paddle_free_bytes(device: Any) -> int | None:
         if probe is None:
             return None
         return int(probe()[0])
-    except Exception:
+    except (RuntimeError, OSError, ValueError, TypeError, AttributeError):
+        # 契约：探测失败 = 未知 = 放行（非 CUDA / 该版本无 API / 驱动拒绝都算）。
+        # `AttributeError` 在这里是「该版本没有 mem_get_info」的合法形态，必须吞；
+        # 我们自己的键名/形状 bug（KeyError 等）穿出去。
         return None
 
 

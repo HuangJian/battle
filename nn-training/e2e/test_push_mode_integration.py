@@ -38,6 +38,7 @@ from common.protocol import (
 )
 from remote.push_client import submit_job, wait_result
 from remote.worker_server import WorkerServerState, make_worker_server
+from tests.helpers.http_server import serve_fast
 from trainer.loop_steps import _push_job_round, require_remote_transport
 
 
@@ -500,7 +501,7 @@ class _LiveWorker:
         self.started: list[str] = []
         #: 每 job 解包后的 item（M3：验 ts_code_zip 真字节到达执行侧）。
         self.items: dict[str, dict] = {}
-        self._thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
+        self._thread = serve_fast(self.srv)
         self._thread.start()
         # 覆盖真 starter（会 spawn run_job 线程）——只记 jid 并立刻写结果。
         self.state.set_starter(self._fake_starter)
@@ -728,7 +729,7 @@ def test_bootstrap_http_upgrade_and_428(tmp_path: Path) -> None:
         0, "tok", code_dir, on_upgrade=lambda raw: upgraded.append(raw)
     )
     port = srv.server_address[1]
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     try:
 

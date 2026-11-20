@@ -130,18 +130,13 @@ def _assert_same_chunks(a: list[dict], b) -> None:
 
 
 def _parity(root: Path, mb: int, **load_kwargs):
-    """同 seed 跑 eager/lazy 两条装载 + 切块，返回两边的 chunks（顺带校验 RNG 流）。"""
-    np.random.seed(123)
+    """同一条显式 RNG 流（§P1-7）跑 eager/lazy 两条装载 + 切块，返回两边的 chunks。"""
     eps = _eager(root, **load_kwargs)
-    chunks_e = np_core.chunk_episodes(eps, mb)
-    after_e = np.random.permutation(19)
+    chunks_e = np_core.chunk_episodes(eps, mb, rng=np.random.default_rng(123))
 
-    np.random.seed(123)
     corpus = _lazy(root, mb=mb, **load_kwargs)
-    chunks_l = np_core.chunk_episodes(corpus, mb)
-    after_l = np.random.permutation(19)
+    chunks_l = np_core.chunk_episodes(corpus, mb, rng=np.random.default_rng(123))
 
-    np.testing.assert_array_equal(after_e, after_l, err_msg="两条路径的 RNG 消费不同")
     _assert_same_chunks(chunks_e, chunks_l)
     return eps, corpus, chunks_e, chunks_l
 
@@ -217,12 +212,10 @@ def _ppo_update_parity(tmp_path: Path) -> None:
     from worker.models.student import PPOStudent
     from worker.ppo.engine import ppo_update
 
-    np.random.seed(5)
     eps = _eager(tmp_path)
-    chunks_e = np_core.chunk_episodes(eps, 8)
-    np.random.seed(5)
+    chunks_e = np_core.chunk_episodes(eps, 8, rng=np.random.default_rng(5))
     corpus = _lazy(tmp_path, mb=8)
-    chunks_l = np_core.chunk_episodes(corpus, 8)
+    chunks_l = np_core.chunk_episodes(corpus, 8, rng=np.random.default_rng(5))
     _assert_same_chunks(chunks_e, chunks_l)
 
     torch.manual_seed(0)
@@ -401,10 +394,10 @@ def test_paddle_ppo_update_eager_lazy_final_weights_identical(tmp_path: Path) ->
 
     _write_shard(tmp_path, "s1", 12, seed=1)
     _write_shard(tmp_path, "s2", 12, seed=2)
-    np.random.seed(5)
-    chunks_e = np_core.chunk_episodes(_eager(tmp_path), 8)
-    np.random.seed(5)
-    chunks_l = np_core.chunk_episodes(_lazy(tmp_path, mb=8), 8)
+    chunks_e = np_core.chunk_episodes(_eager(tmp_path), 8, rng=np.random.default_rng(5))
+    chunks_l = np_core.chunk_episodes(
+        _lazy(tmp_path, mb=8), 8, rng=np.random.default_rng(5)
+    )
     _assert_same_chunks(chunks_e, chunks_l)
 
     paddle.set_device("cpu")
@@ -454,7 +447,9 @@ def test_paddle_lazy_transfers_only_per_batch(tmp_path: Path, monkeypatch) -> No
     from worker.ppo import engine_paddle as eng
 
     _write_shard(tmp_path, "s1", 16, seed=1)
-    chunks = np_core.chunk_episodes(_lazy(tmp_path, mb=8), 8)
+    chunks = np_core.chunk_episodes(
+        _lazy(tmp_path, mb=8), 8, rng=np.random.default_rng(0)
+    )
     seen: list[tuple[int, ...]] = []
     real_batch = eng.tensored_batch
 

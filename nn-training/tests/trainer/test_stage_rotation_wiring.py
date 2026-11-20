@@ -74,7 +74,8 @@ def test_per_stage_quota_follows_the_window() -> None:
     assert len(window) == 12
 
     expect = math.ceil(TARGET / len(window))
-    assert _Quota()._per_stage_quota(5) == expect
+    quota = _Quota()._per_stage_quota(5)
+    assert quota == expect
 
     block = volume_block(args, est_samples_per_game=0, stages_override=window)
     assert block is not None
@@ -86,7 +87,8 @@ def test_per_stage_quota_follows_the_window() -> None:
 def test_without_rotation_the_quota_is_byte_identical() -> None:
     """无 rotation ⇒ 分母仍是全集（`ceil(1200/35)=35`），老课程一行不差。"""
     stub = _Quota(rotation_mode="", rotation_per_it=0)
-    assert stub._per_stage_quota(5) == math.ceil(TARGET / 35)
+    quota = stub._per_stage_quota(5)
+    assert quota == math.ceil(TARGET / 35)
     block = volume_block(stub.args, est_samples_per_game=0)
     assert block is not None and block["per_stage_quota"] == math.ceil(TARGET / 35)
 
@@ -98,7 +100,8 @@ def test_volume_stages_returns_the_window_for_the_round() -> None:
     assert w == window_from_args(vol.args, 7, parse_stages_arg(FULL))
     assert len(w) == 12 and w == sorted(w)
     # 换一轮就换窗口（不是固定子集）
-    assert vol._volume_stages(8) != w
+    other = vol._volume_stages(8)
+    assert other != w
 
 
 def test_legacy_rotate_stages_is_still_refused() -> None:

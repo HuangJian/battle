@@ -134,14 +134,10 @@ class ResultsMixin:
     _lock: Lock
     #: 时钟（`now_fn` 注入点，住 `_AuthGuard`）
     _now: Any
-    #: 兄弟簇 `store_leases` 的状态（显式授权备份的回传放行票）
-    _backup_authorized: set[str]
     #: 兄弟簇 `store_ledger` 的方法
     _job_dir: Any
-    #: 兄弟簇 `store_leases` 的方法（★M5：epoch 是 BC 唯一的进度信号，落盘即打点）
-    note_job_progress: Any
-    #: 兄弟簇 `store_leases` 的方法（★2026-11-12：job 收官/失败 ⇒ 解除课程级 BC 独占）
-    _bc_lock_clear: Any
+    #: 租约协作者（B7-P2）：备份授权 / BC 进度锚 / 课程级独占锁都经它。
+    leases: Any
 
     # ---- 结果 ----
     def store_result(self, job_id: str, result: dict) -> bool:
@@ -156,8 +152,8 @@ class ResultsMixin:
             )
             # weights_json / opt_tar 以 base64 存于 result.json（< 数 MB，可接受）
             # 备份授权随胜负结束（同一份 job 不会再有人回传）：及时收紧 token 闸。
-            self._backup_authorized.discard(job_id)
-            self._bc_lock_clear(job_id)  # 收官 ⇒ 下一份 BC job 立刻可领（不等 900s 窗）
+            self.leases.clear_backup(job_id)
+            self.leases._bc_lock_clear(job_id)  # 收官 ⇒ 下一份 BC job 立刻可领（不等 900s 窗）
             return True
 
     def store_job_failure(self, job_id: str, rec: dict) -> bool:
@@ -181,7 +177,7 @@ class ResultsMixin:
             tmp = jd / (FAIL_NAME + ".tmp")
             tmp.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
             os.replace(tmp, dst)
-            self._bc_lock_clear(job_id)
+            self.leases._bc_lock_clear(job_id)
             return True
 
     # ---- BC 每 epoch 回传（2026-09-13，plan/bc-cloud-integration.plan.md）----
@@ -208,7 +204,7 @@ class ResultsMixin:
         # ★M5（Q5）：epoch 是 BC 作业**唯一**的进度信号（心跳只续租、不当活性）⇒ 落盘成功
         # 即打一个进度锚：`_lease_state` 的 bc 判活、`bc_drain_of`、900s 让出回收都读它。
         # 打点住 store（写入点唯一），handler 不另写一行。
-        self.note_job_progress(job_id)
+        self.leases.note_job_progress(job_id)
         with self._lock:
             epoch = body.get("epoch")
             if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 1:

@@ -194,7 +194,8 @@ def test_land_falls_back_to_the_old_form_when_the_sender_ignores_the_bit(tmp_pat
 
 def _publish(tmp_path: Path, *, it: int = 1, wfile: str | Path | None = None) -> dict:
     """`wfile=None` = 现造一份真的 init 权重；`wfile=""` = **没有** init 字节（首轮 / 旧路径）。"""
-    from remote.hub_client import publish_job
+    from remote.hub_client import PublishSpec, publish_job
+    from tests.helpers.publish_spec import publish_fields
 
     if wfile is None:
         wfile = tmp_path / "init_weights.json"
@@ -203,28 +204,25 @@ def _publish(tmp_path: Path, *, it: int = 1, wfile: str | Path | None = None) ->
     if not jsonl.exists():
         jsonl.write_text("", encoding="utf-8")
     return publish_job(
-        job_root=tmp_path / "jobs",
-        jsonl_path=jsonl,
-        run_id="r1",
-        it=it,
-        traj_dir=tmp_path / "traj",
-        shard_dirs=[],
-        commit="c" * 40,
-        code_sha256="z" * 64,
-        course='{"reward":{"formula":"score"}}',
-        course_fp="c" * 64,
-        reward_formula="score",
-        formula_hash="h" * 40,
-        metrics_version=1,
-        gamma=0.995,
-        lam=0.95,
-        mode="per-tick",
-        epochs=1,
-        mb=512,
-        lr=3e-4,
-        init_weights_path=str(wfile),
-        ckpt_remote_dir=None,
-        slim=True,
+        PublishSpec(
+            **publish_fields(
+                tmp_path,
+                jsonl_path=jsonl,
+                run_id="r1",
+                it=it,
+                traj_dir=tmp_path / "traj",
+                course='{"reward":{"formula":"score"}}',
+                course_fp="c" * 64,
+                reward_formula="score",
+                formula_hash="h" * 40,
+                metrics_version=1,
+                mb=512,
+                lr=3e-4,
+                init_weights_path=str(wfile),
+                ckpt_remote_dir=None,
+                slim=True,
+            )
+        ),
         log=_quiet,
     )
 

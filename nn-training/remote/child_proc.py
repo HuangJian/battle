@@ -22,10 +22,14 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterable
 from typing import IO, Any
 
+from common.logutil import tag_logger
 from common.platform_utils import POPEN_NO_WINDOW
+
+_log = tag_logger("child", lambda: time)
 
 #: 收线时给子进程自己的余量（秒）：关 stdin 之后它最多还需要把手上那一份做完。
 REAP_GRACE_SEC = 5.0
@@ -72,7 +76,9 @@ def spawn_module(
             bufsize=1,
             **POPEN_NO_WINDOW,
         )
-    except Exception as e:
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        # Popen 的真失败面（同 `deliver_proc._spawn`）。`env`/`sys.path` 拼错是我们自己的 bug
+        # （`AttributeError` / `TypeError`）⇒ 穿出去，而不是报成「Popen 失败」去查系统。
         return None, f"Popen 失败（{type(e).__name__}: {e}）"
     return proc, ""
 
@@ -89,6 +95,8 @@ def reap_child(proc: subprocess.Popen | None, *, grace: float = REAP_GRACE_SEC) 
         if proc.stdin is not None:
             proc.stdin.close()
     except Exception:
+        # 契约静默（G9 冻结，非旧债）：收尾级联的第一步 —— 管道已被对端关掉时 close 会抛，
+        # 而「父进程收线了」的结论已由读流 EOF 拿到，不靠这里。
         pass
     try:
         proc.wait(timeout=float(grace))
@@ -100,25 +108,56 @@ def reap_child(proc: subprocess.Popen | None, *, grace: float = REAP_GRACE_SEC) 
             try:
                 proc.kill()
             except Exception:
+                # 契约静默（G9 冻结，非旧债）：级联最后一级 —— terminate+wait 都失败才走到 kill，
+                # kill 再失败 = 进程已不受控；没有可做的事，也不该把收尾异常抛回调用方。
                 pass
 
 
-def pump_lines(stream: IO[str] | None, on_line: Callable[[str], None]) -> None:
-    """逐行读 `stream`（去行尾、跳过空行、整段吞异常），每行交给 `on_line`。EOF 即返回。
+def pump_lines(
+    stream: IO[str] | None,
+    on_line: Callable[[str], None],
+    *,
+    log: Callable[[str], None] | None = None,
+) -> None:
+    """逐行读 `stream`（去行尾、跳过空行），每行交给 `on_line`。EOF 即返回。**不抛**。
 
-    「整段吞异常」是有意的：管道可能被子进程的退出截断（`ValueError: I/O operation on closed
-    file` / `OSError`），那时**真正的信号是 EOF**（调用方据此判「子进程没了」），不是这条例外。
+    两种异常必须分开处理（2026-11-14）：
+
+    * **读流抛**（管道被子进程的退出截断：`ValueError: I/O operation on closed file` / `OSError`）
+      ⇒ 静默。那时**真正的信号是 EOF**（调用方据此判「子进程没了」），这条例外只是它的回声。
+    * **回调抛** ⇒ 那是**我们自己**的解析/记账代码出了 bug。旧实现让它把整个行泵一起带走：
+      线程当场停摆，调用方从此再也看不到子进程的任何一行（协议行也在其中），只能等到超时，
+      现场零线索。现在逐行兜住、继续读，收尾时一次性报「丢了几行 + 第一次的异常」——
+      坏行不进账，好行照走，**且这件事不再是静音的**。
     """
     if stream is None:
         return
+    dropped = 0
+    first: BaseException | None = None
     try:
         for line in stream:
             s = str(line).rstrip("\r\n")
             if not s:
                 continue
-            on_line(s)
+            try:
+                on_line(s)
+            except Exception as e:
+                dropped += 1
+                if first is None:
+                    first = e
     except Exception:
+        # 契约静默（G9 冻结，非旧债）：读流被截断 =「管道关了」这条正常收线（EOF 的回声）；
+        # 回调自己抛的异常上面已单独兜住并报数（dropped / first）。
         pass
+    if dropped:
+        try:
+            (log or _log)(
+                f"行泵：{dropped} 行被回调丢弃（第一次 {first!r}）—— 子进程仍在跑，其余行照读"
+            )
+        except (OSError, ValueError):
+            # 喊话本身失败 = 出口（stdout/管道）已经关了，到此为止。不吞的话这行会把整条行泵
+            # 带走：线程带着 traceback 死掉，调用方看到的还是「腿卡住」——正是本函数要治的形状。
+            pass
 
 
 def join_all(threads: Iterable[threading.Thread | None], *, timeout: float = 2.0) -> None:

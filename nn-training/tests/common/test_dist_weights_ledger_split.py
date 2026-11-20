@@ -28,6 +28,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import common.distribution as common_mod
+import common.weights_client as weights_mod
 import common.weights_ledger as ledger_mod
 from tests.helpers import source_scan
 
@@ -171,19 +172,21 @@ def test_the_two_modules_share_one_ledger_object() -> None:
     assert ledger_mod._WEIGHTS_PUSHED == {}
 
 
-def test_patching_the_facade_reaches_its_in_module_callers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """★ 活读取点：`post_weights_parallel` 读的是 `common.distribution` 的全局。
+def test_patching_the_implementation_reaches_its_in_module_callers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ 活读取点：`post_weights_parallel` 读的是 `common.weights_client` 的全局。
 
-    驻本模块的调用方（`post_weights_parallel` / `refresh_weights`）与 `rl.*` 的既有调用点
-    都按门面解析名字 ⇒ 打桩打门面才生效（打 `common.weights_ledger` 是静默空操作——
-    S5 第七/十一刀同款坑，patch 目标随实现走）。
+    2026-11-19（B8 第十一刀）：权重传输簇搬进 `common/weights_client.py` ⇒ 打桩必须打在
+    **实现所在模块**。打 `common.distribution` 那张旧门面现在是静默空操作（S5 第七/十一刀、
+    升级簇搬家同款坑，第三次：**patch 目标随实现走**）。
     """
     seen: list[tuple] = []
-    monkeypatch.setattr(common_mod, "note_weights_pushed", lambda *a, **k: seen.append((a, k)))
-    monkeypatch.setattr(common_mod, "post_weights", lambda *a, **k: "kept")
+    monkeypatch.setattr(weights_mod, "note_weights_pushed", lambda *a, **k: seen.append((a, k)))
+    monkeypatch.setattr(weights_mod, "post_weights", lambda *a, **k: "kept")
     nd = {"id": "n1", "url": "http://n1"}
 
-    ok = common_mod.post_weights_parallel([nd], "it1", "ab" * 32, b"{}", timeout=5.0)
+    ok = weights_mod.post_weights_parallel([nd], "it1", "ab" * 32, b"{}", timeout=5.0)
 
     assert ok == [nd]
     assert seen == [(("ab" * 32, "n1"), {"kind": "rollout"})], seen

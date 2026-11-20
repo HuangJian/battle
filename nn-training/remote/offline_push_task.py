@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from common.cli import house_parser, run_main
+from common.logutil import log_line
 
 
 def _argparser() -> argparse.ArgumentParser:
@@ -44,7 +45,7 @@ def _argparser() -> argparse.ArgumentParser:
 
 def _child_log(msg: str) -> None:
     """子进程 stdout/stderr 被服务端重定向到 `<task>/run.log`；前缀与 notebook 的 [offline] 同族。"""
-    print(f"[offline-push] {msg}", flush=True)
+    log_line("offline-push", msg)
 
 
 def load_task(task_dir: Path) -> dict:

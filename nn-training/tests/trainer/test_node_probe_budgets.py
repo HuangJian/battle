@@ -35,6 +35,7 @@ from typing import Any
 import pytest
 
 import common.distribution
+import remote.node_upgrade
 import trainer.dispatch as disp
 from tests.trainer.test_rollout_dispatch_resilience import GOOD_PING, _Harness, _node
 
@@ -102,7 +103,7 @@ def test_codehash_mismatch_still_forgets_the_weights_ledger(tmp_path, monkeypatc
     """真重启（codeHash 变了）才摘：那条路径的桶确实空了，不摘就会带脏缓存进 reuse。"""
     monkeypatch.setattr(common.distribution, "weights_push_cache_reset", lambda: None)
     # 不锁存升级分支 ⇒ mismatch 只打⛔「excluded (red)」，不发重启请求（不碰网络）
-    monkeypatch.setattr(common.distribution, "current_upgrade_branch", lambda: "")
+    monkeypatch.setattr(remote.node_upgrade, "current_upgrade_branch", lambda: "")
     stale = {**GOOD_PING, "codeHash": "ffffffff"}
     h = _Harness(
         tmp_path,

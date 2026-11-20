@@ -89,7 +89,7 @@ def test_timeout_is_bounded_and_reported() -> None:
 
 
 def test_thread_exception_is_a_failure_not_a_crash() -> None:
-    """③ 线程报错只让 settle 返回 False（job_started 自己吞异常，这里防未来改实现）。"""
+    """③ 线程报错只让 settle 返回 False（`job_started` 只记一行、不抛，这里防未来改实现）。"""
 
     def _boom() -> None:
         raise RuntimeError("boom")

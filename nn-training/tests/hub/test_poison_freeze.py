@@ -45,6 +45,7 @@ from common.protocol import (
 )
 from hub.server import FREEZE_AFTER_RECLAIMS, _JobStore, make_server
 from remote.hub_client import wait_job
+from tests.helpers.http_server import serve_fast
 from tests.helpers.hub_poll import hub_poll
 
 TOKEN = "sekret"
@@ -93,7 +94,8 @@ def _store(tmp_path: Path, clock: _Clock) -> _JobStore:
 
 def _publish(store: _JobStore, jid: str = JID, payload: bytes = b"payload-bytes") -> None:
     store.publish(jid, _manifest(jid), payload)
-    assert (store._job_dir(jid) / PAYLOAD_NAME).exists()
+    # `job_root` 是公开属性（`_job_dir` 就是它加 id）；拼路径不必走私有助手。
+    assert (store.job_root / jid / PAYLOAD_NAME).exists()
 
 
 def _expire(clock: _Clock) -> None:
@@ -253,7 +255,7 @@ def _boot(
     store = _store(tmp_path, clock)
     srv = make_server(store, 0, TOKEN, host="127.0.0.1")
     port = srv.server_address[1]
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     return f"http://127.0.0.1:{port}", store, srv, th
 

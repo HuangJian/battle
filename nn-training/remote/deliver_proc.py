@@ -25,9 +25,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import IO, Protocol
 
+from common import runtime
 from common.platform_utils import POPEN_NO_WINDOW
-from common.protocol import sanitize_run_id
+from common.protocol import ProtocolError, sanitize_run_id
 from remote import deliver_parts
+from remote.child_proc import pump_lines
 from remote.deliver_outbox import LocalOutboxDeliverer
 from remote.offline_deliver import (
     DRAIN_FLUSH_SEC,
@@ -170,11 +172,7 @@ class DelivererProcess:
         self.hub_lease = str(hub_lease or "").strip()
         self.worker_name = str(worker_name or "").strip()
         self.backup_root = Path(backup_root) if backup_root else None
-        self.work_dir = (
-            Path(work_dir)
-            if work_dir is not None
-            else (self.root / "work")
-        )
+        self.work_dir = Path(work_dir) if work_dir is not None else (self.root / "work")
         self._ctl_path_arg = Path(ctl_path) if ctl_path is not None else None
         self._status_path_arg = Path(status_path) if status_path is not None else None
         self.log = log
@@ -197,6 +195,9 @@ class DelivererProcess:
         # 跨线程互斥语义不变（只有 `_append` 用这把锁）。
         self._lock = threading.RLock()
         self._proc: subprocess.Popen | None = None
+        #: 两条管道线程的属性（名字 / 登记 / 收尾 join）在 `Runtime` 里：补传代理会**按需重启**
+        #: 子进程，重启一次就换一对线程，登记表只在活着的时候占位（见 `Runtime.thread`）。
+        self._rt = runtime.Runtime(scope="deliver-proc")
         self._forwarders: list[threading.Thread] = []
         self._boot = threading.Event()
         self._ctl: Path | None = None
@@ -232,7 +233,10 @@ class DelivererProcess:
         """
         try:
             rid = sanitize_run_id(self._run_id_raw)
-        except Exception:
+        except ProtocolError:
+            # 契约就这一种失败（规则见 `sanitize_run_id`）：非法 run_id ⇒ 用固定串占位，
+            # 保证文件名仍带会话身份。宽捕只会把这个函数的 bug（正则改名 / 返回非串）
+            # 也读成「没 run_id」。
             rid = "run"
         stamp = time.strftime("%Y%m%dT%H%M%S")
         return Path(self.work_dir) / f"{prefix}-{rid}-{stamp}-{os.getpid()}{suffix}"
@@ -255,6 +259,10 @@ class DelivererProcess:
         why = self._spawn(ctl, offset=0)
         if why:
             self._degrade(why)
+
+    def child(self) -> subprocess.Popen | None:
+        """子进程句柄（无 ⇒ `None`）。活引用：调用方只读（`poll()` / 观测）。"""
+        return self._proc
 
     def _spawn(self, ctl: Path, *, offset: int) -> str:
         """拉起子进程。返回 `""` = 成功（等到 `boot ok`），否则是**降级理由**。"""
@@ -279,7 +287,7 @@ class DelivererProcess:
             f"{self._tick_sec:g}",
         ]
         # ★ 2026-10-23（P0-1）：两条腿的**唯一 argv 差别**。outbox 模式不传 `--hub-url`
-        #（也就没有 token 那一环），子进程里一个 HTTP 客户端都不会被构造。
+        # （也就没有 token 那一环），子进程里一个 HTTP 客户端都不会被构造。
         if self.outbox is not None:
             argv += ["--outbox", str(self.outbox)]
             if self._floor_it > 0:
@@ -310,7 +318,7 @@ class DelivererProcess:
         if self.worker_name:
             env[WORKER_NAME_ENV] = self.worker_name
         # 段末三态（J2）同理：控制文件是主通道，这里另带一份供**子进程重启**后仍拿得到
-        #（老快照两个都不认 ⇒ hub 从包里的 plan.json 反推，见 `hub.task_pack.pack_seg_end_kind`）。
+        # （老快照两个都不认 ⇒ hub 从包里的 plan.json 反推，见 `hub.task_pack.pack_seg_end_kind`）。
         if self._seg_end_kind:
             env[SEG_END_KIND_ENV] = self._seg_end_kind
         self._boot = threading.Event()
@@ -330,19 +338,15 @@ class DelivererProcess:
                 # 裸 spawn 会给子进程新建一块**可见**控制台窗口（2026-10-13 用户报障）。
                 **POPEN_NO_WINDOW,
             )
-        except Exception as e:
+        except (OSError, ValueError, subprocess.SubprocessError) as e:
+            # Popen 的真失败面：OSError（权限/路径/资源）+ ValueError（argv/环境非法）+
+            # `SubprocessError`。我们自己的 bug（例如 env 形状读错）不在集里 ⇒ 穿出去。
             return f"Popen 失败（{type(e).__name__}: {e}）"
         self._proc = proc
         self._forwarders = [
-            threading.Thread(
-                target=self._forward, args=(proc.stdout,), name="deliver-out", daemon=True
-            ),
-            threading.Thread(
-                target=self._forward, args=(proc.stderr,), name="deliver-err", daemon=True
-            ),
+            self._rt.thread(self._forward, proc.stdout, name="out", daemon=True),
+            self._rt.thread(self._forward, proc.stderr, name="err", daemon=True),
         ]
-        for t in self._forwarders:
-            t.start()
         # 等 `boot ok`：**子进程一退就立刻判失败**（在飞的包里没有这个模块 ⇒ `No module named`
         # 是毫秒级的；等满 5s 只会白白拖慢降级）。
         deadline = time.monotonic() + PROC_BOOT_TIMEOUT_SEC
@@ -360,19 +364,21 @@ class DelivererProcess:
         return f"等 `boot ok` 超时（{PROC_BOOT_TIMEOUT_SEC:g}s）"
 
     def _forward(self, stream: IO[str] | None) -> None:
-        """子进程输出**逐行**转发（前缀/时间戳由调用方的日志约定给；同一套 `[deliver]` 行格式）。"""
-        if stream is None:
-            return
-        try:
-            for line in stream:
-                msg = str(line).rstrip("\r\n")
-                if not msg:
-                    continue
-                if "boot ok" in msg:
-                    self._boot.set()
-                self.log(msg)
-        except Exception:
-            pass
+        """子进程输出**逐行**转发（前缀/时间戳由调用方的日志约定给；同一套 `[deliver]` 行格式）。
+
+        逐行搬运交给 `remote.child_proc.pump_lines`（2026-11-14）：那里把「读流被截断」（EOF 的
+        回声，静默是对的）与「回调自己抛」分成两种口径，后者逐行兜住、继续读、收尾报数。
+        以前两者共罩一条宽捕 `pass`：`self.log` 一抛（它最终往 stdout 写 —— 父进程 stdout 被关/
+        管道断掉时 `print` 抛 `ValueError`），转发线程当场停摆，而 `_boot` **只有这条线程会置位**
+        ⇒ 子进程明明已打了 `boot ok`，父侧却只能看到「等 boot ok 超时」并 sticky 降级，现场零线索。
+        """
+
+        def on_line(msg: str) -> None:
+            if "boot ok" in msg:
+                self._boot.set()
+            self.log(msg)
+
+        pump_lines(stream, on_line, log=self.log)
 
     def _stop_child(
         self, proc: subprocess.Popen | None, *, budget: float, grace: float | None = None
@@ -390,6 +396,8 @@ class DelivererProcess:
             if proc.stdin is not None:
                 proc.stdin.close()  # stdin EOF = 第二条「父进程收线了」通道
         except Exception:
+            # 契约静默（G9 冻结，非旧债）：stdin EOF 是「父进程收线了」的第二条通道，
+            # 关不掉不影响主通道（wait 超时后仍有 terminate→kill 级联）。
             pass
         try:
             proc.wait(timeout=max(0.0, float(budget)) + float(grace))
@@ -402,10 +410,12 @@ class DelivererProcess:
                 try:
                     proc.kill()
                 except Exception:
+                    # 契约静默（G9 冻结，非旧债）：_stop_child 级联的最后一级（同 child_proc）——
+                    # kill 失败 = 子进程已不受控，没有别的动作可做。
                     pass
-        for t in self._forwarders:
-            t.join(timeout=2.0)
         self._forwarders = []
+        # 收尾交给所有者：join + 清登记（名字是 `deliver-proc-out` / `deliver-proc-err`）。
+        self._rt.join_threads(2.0)
 
     def _ensure_alive(self) -> None:
         """子进程**死了就按需重启**（★C1）——否则 `submit_*` 只是在往无人读的文件里写。
@@ -645,7 +655,9 @@ class DelivererProcess:
             mirror.backup_root = Path(self.backup_root)
             mirror.log = self.log
             return int(mirror.backup_pending(force=force))
-        except Exception as e:  # 备份绝不抛（它本就是第二份拷贝）
+        except (OSError, ValueError, KeyError) as e:  # 备份绝不抛（它本就是第二份拷贝）
+            # 失败面 = 盘 + 账行形状（与 `OfflineDeliverer.backup_pending` 同一个集）。
+            # 我们的 `AttributeError`（镜像装配错了）现在会穿出去而不是伪装成「备份腿异常」。
             self.log(f"WARN 备份腿异常（忽略）：{type(e).__name__}: {e}")
             return 0
 
@@ -862,7 +874,7 @@ def make_deliverer(
         hub_lease=hub_lease,
         worker_name=worker_name,
         backup_root=backup_root,
-            background=background if kind == "thread" else False,
+        background=background if kind == "thread" else False,
         eval_every=int(eval_every or 0),
         metrics_parts=bool(metrics_parts),
         adaptive=bool(adaptive),

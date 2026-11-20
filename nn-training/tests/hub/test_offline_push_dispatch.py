@@ -42,6 +42,7 @@ from hub.offline_ingest import ingest_offline_artifact
 from hub.offline_push import OfflinePushDispatcher, OfflinePushWorkers
 from hub.server import _HubQueue, _JobStore, make_server
 from remote.offline_push_face import PushFaceState, make_face_server
+from tests.helpers.http_server import serve_fast
 
 TOKEN = "t0k3n"
 COURSE = "c5-gae"
@@ -133,12 +134,12 @@ class _Worker:
         #: 多课程夹具用：假训练的产物按**收到的那一单的 (course, run_id)** 盖章（真 worker 就是这样）。
         self.follow_task_identity = follow_task_identity
         self.body_course = COURSE
-        self._late_body: tuple[int, bytes] | None = None
+        self.late_body: tuple[int, bytes] | None = None
         self.task: dict | None = None
         self.state = PushFaceState(work_dir=tmp_path / "worker", log=lambda _m: None)
         self.state.set_starter(self._starter)
         self.server = make_face_server(self.state, 0, TOKEN, host="127.0.0.1")
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        serve_fast(self.server).start()
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
 
     def _starter(self, task: dict, task_dir: Path, outbox: Path) -> None:
@@ -183,7 +184,7 @@ class _Worker:
                 _artifact_body(run_id=self.body_run_id, it=it2, course=self.body_course),
                 ensure_ascii=False,
             ).encode("utf-8")
-            self._late_body = (it2, raw2)
+            self.late_body = (it2, raw2)
             rounds_doc[str(it2)] = {
                 "rev": 0,
                 "file": f"rounds/it{it2:04d}.json",
@@ -248,8 +249,8 @@ class _Worker:
 
     def write_late_round(self) -> None:
         """补上 `late_round` 那一轮的 body（模拟「训练刚写到第二轮」；F1 的积压解除点）。"""
-        assert self._late_body is not None and self.state.outbox is not None
-        it, raw = self._late_body
+        assert self.late_body is not None and self.state.outbox is not None
+        it, raw = self.late_body
         (self.state.outbox / "rounds" / f"it{it:04d}.json").write_bytes(raw)
 
     def write_round(self, it: int) -> None:
@@ -507,7 +508,7 @@ def test_training_keeps_going_while_the_hub_is_away_then_backfills(tmp_path: Pat
         disp1.stop()
         for st in list(disp1._pumps.values()):
             st.stop.set()
-        assert _wait(lambda: not disp1._pumps)
+        assert _wait(lambda: disp1.pump_count() == 0)
 
         # 云机继续训练：又写完两轮，hub 那边一条都没有（也没人 ack ⇒ 一轮都没删）
         worker.write_round(2)
@@ -985,7 +986,8 @@ def test_adoption_accepts_only_the_same_unfinished_task(
         }
         monkeypatch.setattr(disp._client, "get_state", lambda _url, _key: dict(state))
         meta = {"task_id": tid, "pack_sha256": sha, "resume_it": 2}
-        assert disp._adopt_existing(COURSE, "http://w", "k", meta) is True
+        adopted = disp._adopt_existing(COURSE, "http://w", "k", meta)
+        assert adopted is True
         rec = disp.assignments.get(COURSE)
         assert rec is not None
         # 认领的是**同一单**（task_id/resume_it）；`phase` 仍是 `dispatching` —— 接管由
@@ -995,13 +997,15 @@ def test_adoption_accepts_only_the_same_unfinished_task(
         # 别人的单（id 不同）⇒ 不接管，账本原样
         disp.assignments.set_fields(COURSE, task_id="", phase="dispatching")
         state["task"] = {**state["task"], "task_id": "fedcba9876543210"}
-        assert disp._adopt_existing(COURSE, "http://w", "k", meta) is False
+        adopted = disp._adopt_existing(COURSE, "http://w", "k", meta)
+        assert adopted is False
         assert (disp.assignments.get(COURSE) or {}).get("task_id") == ""
 
         # 同 id 但已收尾（ack=true 且非 running）⇒ 重投只会 duplicate，不接管
         state["task"] = {**state["task"], "task_id": tid}
         state.update(phase="done", ack=True)
-        assert disp._adopt_existing(COURSE, "http://w", "k", meta) is False
+        adopted = disp._adopt_existing(COURSE, "http://w", "k", meta)
+        assert adopted is False
     finally:
         disp.stop()
 
@@ -1036,19 +1040,17 @@ def test_settle_without_an_answer_is_parked_then_replayed(
             cancel_task=lambda *_a, **_k: None, post_ack=lambda *_a, **_k: None
         )
         monkeypatch.setattr(disp, "_client", client)
-        assert (
-            disp._settle_assignment(
-                COURSE,
-                "http://w",
-                "k",
-                rec,
-                cancel=True,
-                free_worker=True,
-                reason="conflict",
-                failed=True,
-            )
-            is False
+        settled = disp._settle_assignment(
+            COURSE,
+            "http://w",
+            "k",
+            rec,
+            cancel=True,
+            free_worker=True,
+            reason="conflict",
+            failed=True,
         )
+        assert settled is False
         parked = disp.assignments.get(COURSE)
         assert parked is not None and parked["phase"] == "settling"
         assert parked["settle_reason"] == "conflict"
@@ -1067,9 +1069,10 @@ def test_settle_without_an_answer_is_parked_then_replayed(
 
         client.cancel_task = fake_cancel
         client.post_ack = fake_ack
-        assert disp._settle_retry(
+        retried = disp._settle_retry(
             COURSE, "http://w", "k", disp.assignments.get(COURSE) or parked
-        ) is True
+        )
+        assert retried is True
         assert calls == ["cancel", "ack"]
         assert disp.assignments.get(COURSE) is None
     finally:
@@ -1094,7 +1097,7 @@ class _OldWorker:
                     respond_json(self, {"error": "not found"}, 404)
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        serve_fast(self.server).start()
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
 
     def close(self) -> None:
@@ -1229,7 +1232,7 @@ def test_admin_offline_push_workers_exposes_state_without_secrets(tmp_path: Path
         }
     )
     srv = make_server(hub, 0, TOKEN, host="127.0.0.1", offline_push=disp)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     try:
         base = f"http://127.0.0.1:{srv.server_address[1]}"
         status, body = _admin_get(base, "/admin/offline-push-workers")
@@ -1248,10 +1251,64 @@ def test_admin_offline_push_workers_exposes_state_without_secrets(tmp_path: Path
 
     # 没挂离线派发器的 hub ⇒ 409（控制台据此显示「未挂载」，不把整行画成空）
     srv2 = make_server(hub, 0, TOKEN, host="127.0.0.1")
-    threading.Thread(target=srv2.serve_forever, daemon=True).start()
+    serve_fast(srv2).start()
     try:
         base2 = f"http://127.0.0.1:{srv2.server_address[1]}"
         assert _admin_get(base2, "/admin/offline-push-workers")[0] == 409
     finally:
         srv2.shutdown()
         srv2.server_close()
+
+
+# ── P0-7 第十八批：派发器的「读不到」与「我们错了」分开（2026-11-18）────────────
+
+
+def test_a_dispatcher_with_no_root_asks_the_hub_instead_of_guessing(tmp_path: Path, monkeypatch) -> None:
+    """`traj_root()` 说 None ⇒ cwd（契约）；它自己抛 ⇒ 穿出去（不是「推不出来」）。"""
+    hub, _ = _mk_hub(tmp_path)
+    workers = OfflinePushWorkers(tmp_path / "rl-config.json", log=lambda _m: None)
+
+    monkeypatch.setattr(hub, "traj_root", lambda: None)
+    disp = OfflinePushDispatcher(hub, workers, TOKEN, port=0, log=lambda _m: None)
+    assert disp.assignments is not None  # 构造成功 = 落到了 cwd，没有拿 bug 去换缺省
+
+    def boom():
+        raise AttributeError("discover root descriptor changed")
+
+    monkeypatch.setattr(hub, "traj_root", boom)
+    with pytest.raises(AttributeError):
+        OfflinePushDispatcher(hub, workers, TOKEN, port=0, log=lambda _m: None)
+
+
+def test_still_mine_treats_no_hold_as_mine_and_lets_our_bug_through(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`hold_of` 返回 None = 没人持有（仍是我的）；`AttributeError` 不该被读成「还是我的」。"""
+    hub, _ = _mk_hub(tmp_path)
+    disp, _workers = _dispatcher(hub, tmp_path)
+    rec = {"lease_token": "tok"}
+
+    monkeypatch.setattr(hub, "course_open", lambda _c: True)
+    monkeypatch.setattr(hub, "hold_of", lambda _c: None)
+    assert disp.still_mine(COURSE, rec) is True
+
+    def boom(_c):
+        raise AttributeError("hold record shape changed")
+
+    monkeypatch.setattr(hub, "hold_of", boom)
+    with pytest.raises(AttributeError):
+        disp.still_mine(COURSE, rec)
+
+
+def test_an_unreadable_store_still_fails_open(tmp_path: Path, monkeypatch) -> None:
+    """真失败形态：盘读不出来 ⇒ 不编（`still_mine` fail-open，`resume_ok` 保守）。"""
+    hub, _ = _mk_hub(tmp_path)
+    disp, _workers = _dispatcher(hub, tmp_path)
+
+    def broken(_c):
+        raise OSError("course tree is gone")
+
+    monkeypatch.setattr(hub, "course_open", broken)
+    assert disp.still_mine(COURSE, {"lease_token": "tok"}) is True
+    monkeypatch.setattr(hub, "resume_anchor", broken)
+    assert disp.resume_ok(COURSE, {"pack_path": str(tmp_path / COURSE / f"task-{COURSE}.zip")}) is False

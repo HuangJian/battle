@@ -102,8 +102,10 @@ _TABLE = [
 def test_segment_end_kind_table(
     name: str, plan: dict, state: str, it_end: int, want_kind: str, want_reached: bool
 ) -> None:
-    assert plan_run_mod._end_it_reached(plan, state=state, it_end=it_end) is want_reached, name
-    assert plan_run_mod._seg_end_kind(plan, state=state, it_end=it_end) == want_kind, name
+    reached = plan_run_mod._end_it_reached(plan, state=state, it_end=it_end)
+    assert reached is want_reached, name
+    kind = plan_run_mod._seg_end_kind(plan, state=state, it_end=it_end)
+    assert kind == want_kind, name
 
 
 def test_segment_end_kind_is_never_course_for_a_partial_segment() -> None:
@@ -113,8 +115,7 @@ def test_segment_end_kind_is_never_course_for_a_partial_segment() -> None:
     有限课程被 `--run-iters` 截短的那一段跑完后，课就停在那里（而它本该续下一段）。
     """
     partial = _plan(open_ended=False, end_it=5, iters_total=10)
-    assert plan_run_mod._end_it_reached(partial, state="complete", it_end=5) is True
-    assert (
-        plan_run_mod._seg_end_kind(partial, state="complete", it_end=5)
-        != plan_run_mod.SEG_END_COURSE
-    )
+    reached = plan_run_mod._end_it_reached(partial, state="complete", it_end=5)
+    assert reached is True
+    kind = plan_run_mod._seg_end_kind(partial, state="complete", it_end=5)
+    assert kind != plan_run_mod.SEG_END_COURSE

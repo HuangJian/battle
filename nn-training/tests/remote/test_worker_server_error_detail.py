@@ -36,7 +36,8 @@ if str(ROOT) not in sys.path:
 from common.protocol import normalize_manifest
 from remote.push_dispatch import PUSH_FAILURE_DETAIL_FALLBACK, push_failure_record
 from remote.worker_server import WorkerServerState, make_worker_server
-from tests.remote.test_remote_ppo import (  # type: ignore
+from tests.helpers.http_server import serve_fast
+from tests.remote.test_remote_ppo import (
     _http,
     _mini_manifest,
 )
@@ -53,9 +54,9 @@ def _boot(tmp_path: Path) -> tuple[WorkerServerState, object, threading.Thread, 
     """起一个 push 云的 worker_server（随机端口）；返回 (state, srv, thread, base)。"""
     state = WorkerServerState(tmp_path / "work")
     srv = make_worker_server(state, 0, "tok")
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
-    return state, srv, th, f"http://127.0.0.1:{srv.server_address[1]}"  # type: ignore[attr-defined]
+    return state, srv, th, f"http://127.0.0.1:{srv.server_address[1]}"
 
 
 def test_410_body_carries_fail_detail(tmp_path: Path) -> None:
@@ -64,13 +65,13 @@ def test_410_body_carries_fail_detail(tmp_path: Path) -> None:
     try:
         state.set_state("j1", "running")
         state.set_error("j1", "ProtocolError: bun 未安装", kind="ProtocolError", detail=_DETAIL)
-        st, body = _http(base, "tok", "/job/j1/result")  # type: ignore[arg-type]
+        st, body = _http(base, "tok", "/job/j1/result")
         assert st == 410, body
         assert body["failed"] is True
         assert body["fail_kind"] == "ProtocolError"
         assert body["fail_detail"] == _DETAIL  # 逐字节原样（截断已在 exc_tail 里做过）
         # 终局仍可重复读（幂等）——现场不会在第二次读时消失
-        st2, body2 = _http(base, "tok", "/job/j1/result")  # type: ignore[arg-type]
+        st2, body2 = _http(base, "tok", "/job/j1/result")
         assert (st2, body2["fail_detail"]) == (410, _DETAIL)
     finally:
         srv.shutdown()  # type: ignore[attr-defined]
@@ -82,7 +83,7 @@ def test_legacy_set_error_has_the_key_but_empty(tmp_path: Path) -> None:
     state, srv, th, base = _boot(tmp_path)
     try:
         state.set_error("j2", "RuntimeError: boom", kind="RuntimeError")
-        st, body = _http(base, "tok", "/job/j2/result")  # type: ignore[arg-type]
+        st, body = _http(base, "tok", "/job/j2/result")
         assert st == 410, body
         assert body["fail_detail"] == ""
     finally:
@@ -112,7 +113,7 @@ def test_execute_job_failure_really_fills_detail(tmp_path: Path, monkeypatch) ->
             )
         )
         jid = manifest["job_id"]
-        st, _ = _http(  # type: ignore[arg-type]
+        st, _ = _http(
             base,
             "tok",
             "/job",
@@ -129,7 +130,7 @@ def test_execute_job_failure_really_fills_detail(tmp_path: Path, monkeypatch) ->
         deadline, st2 = time.time() + 20.0, 202
         body2: dict = {}
         while time.time() < deadline:
-            st2, body2 = _http(base, "tok", f"/job/{jid}/result")  # type: ignore[arg-type]
+            st2, body2 = _http(base, "tok", f"/job/{jid}/result")
             if st2 == 410:
                 break
             # sleep-ok: 轮询步长（等的是谓词：job 是否已落 failed；20s 只兜挂起）

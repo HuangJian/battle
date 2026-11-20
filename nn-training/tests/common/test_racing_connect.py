@@ -18,7 +18,7 @@ gcs 的主机名恰好只解析出 IPv4 ⇒ 0.43s，同一个 Cloudflare，差�
 ## 本文件钉什么
 
 1. 前 N 个地址黑洞时，连接在**最快可达地址**的耗时内返回，不是 N×timeout；
-2. `common.distribution._request`（节点通信的唯一出口）真的走这条路；
+2. `common.distribution.node_request`（节点通信的唯一出口）真的走这条路；
 3. 输家连接必须关掉（不许漏 socket）；单地址快路径行为不变；
 4. 全黑洞时抛错，且墙钟被**总预算**兜住（不是 N×timeout）。
 
@@ -37,6 +37,7 @@ import pytest
 
 import common.distribution as dist
 from common import net_http
+from tests.helpers.http_server import serve_fast
 
 # 黑洞地址（RFC 3849 文档段，永不路由）；本文件不会真去连它们——connect 被桩截住。
 _BLACKHOLES = frozenset({"2001:db8::1", "2001:db8::2"})
@@ -67,7 +68,7 @@ def wired(monkeypatch):
     """
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     port = srv.server_address[1]
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
 
     release = threading.Event()
@@ -221,10 +222,10 @@ def test_all_blackholes_bounded_by_total_budget(wired, monkeypatch) -> None:
 
 
 def test_distribution_request_uses_racing_connect(wired) -> None:
-    """`_request` 是节点通信唯一出口：它不竞速，ping/探针/取任务就都还在交 IPv6 税。"""
+    """`node_request` 是节点通信唯一出口：它不竞速，ping/探针/取任务就都还在交 IPv6 税。"""
     box: dict = {}
-    t = _call_soon(lambda: dist._request(wired["url"] + "/v1/ping", "", 5.0), box)
-    assert not t.is_alive(), "_request 仍走串行 create_connection（节点门 17~19s 的真因）"
+    t = _call_soon(lambda: dist.node_request(wired["url"] + "/v1/ping", "", 5.0), box)
+    assert not t.is_alive(), "node_request 仍走串行 create_connection（节点门 17~19s 的真因）"
     assert box.keys().isdisjoint({"err"}), box.get("err")
     status, body = box["ok"]
     assert status == 200

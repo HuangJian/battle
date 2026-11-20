@@ -89,13 +89,28 @@ def early_stop_epoch(
     return None
 
 
+def is_improvement(candidate: float, best: float) -> bool:
+    """`candidate` 是不是一个**可用**的改善（严格更小且有限）。
+
+    为什么单列一条（2026-11-15）：`NaN < best` 恒 False，于是「这一轮算不出 val_loss」会被
+    静默当成「没改善」—— 在选权重的那一侧更糟：`best_at` 停在初值 0，函数返回 **0**，而 0
+    不是合法 epoch（1-based）。训练循环（`bc.py` / `bc_paddle.py` 双生）与本模块的选取判据
+    必须用**同一个**判据，否则「代码选的 epoch」与「按 history 重算的 epoch」会分叉。
+    """
+    return math.isfinite(candidate) and candidate < best
+
+
 def select_best_epoch(val_losses: list[float], window: int = SMOOTH_WINDOW) -> int | None:
-    """按**滑动平均** val_loss 选交付权重来自哪一 epoch（1-based；None = 窗口未满）。
+    """按**滑动平均** val_loss 选交付权重来自哪一 epoch（1-based；None = 没有候选）。
 
     B1（2026-11-07）：单点 `min(val_loss)` 由 fire 头噪声主导，等于在噪声里抽签；
     只看**完整窗口**的平滑值 ⇒ 一次尖峰不可能把交付权重拉过来。返回窗口**末端**
-    epoch（平滑曲线天然滞后：状态取窗口最后一天的权重）。训练不足 `window` 轮时返回
-    None，调用方按「交最后一轮」处理，而不是退回单点最小。
+    epoch（平滑曲线天然滞后：状态取窗口最后一天的权重）。
+
+    2026-11-15：**非有限窗口不是候选**（`is_improvement`）。两种 None 的语义相同 ——
+    「没有可用的候选，调用方交最后一轮」：不足 `window` 轮，或者所有窗口都吃了 NaN/inf
+    （训练发散时 val_loss 会是 NaN）。旧实现走后者会返回 0，调用方按「epoch 0」处理，
+    与「交最后一轮」的分支对不上。
     """
     w = max(1, window)
     if len(val_losses) < w:
@@ -104,22 +119,16 @@ def select_best_epoch(val_losses: list[float], window: int = SMOOTH_WINDOW) -> i
     best = float("inf")
     for i in range(w, len(val_losses) + 1):
         sm = sum(val_losses[i - w : i]) / w
-        if sm < best:
+        if is_improvement(sm, best):
             best = sm
             best_at = i
-    return best_at
+    return best_at or None
 
 
-def sanitize_json(o):
-    """递归把 float NaN → None（json.dump 默认写出非标准 `NaN` 字面量，
-    TS JSON.parse 会直接抛错——weights 文件里不能带 NaN）。"""
-    if isinstance(o, float) and math.isnan(o):
-        return None
-    if isinstance(o, dict):
-        return {k: sanitize_json(v) for k, v in o.items()}
-    if isinstance(o, (list, tuple)):
-        return [sanitize_json(v) for v in o]
-    return o
+# `sanitize_json` 2026-11-15 提到 `common.stats`（与 `common/fs` 的两个写入口共用一份实现：
+# 本模块只负责「weights meta 里的非有限值」，写盘那一侧不归这里管）。留转发名 —— `bc.py` /
+# `bc_paddle.py` 的调用点与 `__all__` 一行不改。
+from common.stats import sanitize_json as sanitize_json
 
 
 def resolve_fire_pos_weight(raw: object, counts: dict) -> float:

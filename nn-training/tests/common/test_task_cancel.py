@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import common.distribution as dist
+import common.task_client as task
 
 
 def test_task_key_matches_agent_vectors() -> None:
@@ -37,8 +38,8 @@ def test_cancel_task_posts_key(monkeypatch) -> None:
         calls.append((url, auth_key, timeout, data, headers, method))
         return 200, b"{}"
 
-    monkeypatch.setattr(dist, "_request", fake_request)
-    assert dist.cancel_task("http://node:1/", "secret", "it1:rollout:rollout:0:1", 2.0)
+    monkeypatch.setattr(dist, "node_request", fake_request)
+    assert task.cancel_task("http://node:1/", "secret", "it1:rollout:rollout:0:1", 2.0)
     url, auth_key, timeout, data, headers, method = calls[0]
     assert url == "http://node:1/v1/cancel"
     assert auth_key == "secret"
@@ -52,8 +53,8 @@ def test_cancel_task_is_quiet_on_error(monkeypatch) -> None:
     def boom(*_a, **_kw):
         raise OSError("node down")
 
-    monkeypatch.setattr(dist, "_request", boom)
-    assert dist.cancel_task("http://node:1", "secret", "key") is False
+    monkeypatch.setattr(dist, "node_request", boom)
+    assert task.cancel_task("http://node:1", "secret", "key") is False
 
-    monkeypatch.setattr(dist, "_request", lambda *_a, **_kw: (404, b""))
-    assert dist.cancel_task("http://node:1", "secret", "key") is False
+    monkeypatch.setattr(dist, "node_request", lambda *_a, **_kw: (404, b""))
+    assert task.cancel_task("http://node:1", "secret", "key") is False

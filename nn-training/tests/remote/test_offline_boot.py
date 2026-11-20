@@ -137,7 +137,7 @@ def test_read_pack_index_accepts_a_pack_written_by_the_exporter(
         "plan_sha256": sha256_bytes(plan),
         "commit": "c" * 40,
     }
-    monkeypatch.setattr(bundle_mod, "normalize_manifest", lambda m: m)  # type: ignore[arg-type]
+    monkeypatch.setattr(bundle_mod, "normalize_manifest", lambda m: m)
     w = tmp_path / "w"
     w.mkdir()
     (w / "init_weights.json").write_bytes(b"w")
@@ -574,7 +574,8 @@ def test_lease_file_is_owner_only_and_goes_to_argv(tmp_path: Path) -> None:
     no_lease = offline_boot.build_run_argv(cfg, tmp_path / "t.zip", tmp_path / "run", "h", "f")
     assert "--hub-lease-file" not in no_lease
     # 日志用的 argv 不得把它露出来（与 `--hub-token` 同一处理）
-    assert "***" in offline_boot._redact(["--hub-lease", "l3ak"])
+    redacted = offline_boot._redact(["--hub-lease", "l3ak"])
+    assert "***" in redacted
 
 
 def test_course_from_pack_name_only_speaks_when_it_is_sure(tmp_path: Path) -> None:
@@ -1009,3 +1010,113 @@ def test_boot_self_fingerprint_is_present() -> None:
     assert isinstance(offline_boot.BOOT_SELF, str) and offline_boot.BOOT_SELF.strip(), (
         "BOOT_SELF 是「内存里那一份」的唯一可读指纹，删了 notebook 的加载日志就只剩磁盘 sha"
     )
+
+
+def test_progress_judgement_tolerates_only_a_stale_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_progress_label` / `_should_log_progress` 的引导兜底（P0-7 第二十三批）。
+
+    引导形态里 `common/` 要到 `code.zip` 解开后才在 `sys.path` 上 —— 那时**没有这个包**是
+    正常的分支（`ImportError` ⇒ 退回最小标签 / 恒打）。另一类**真存在**的边界是**跨版本**：
+    解开的 `code.zip` 可能是老快照，老 `should_log_progress` 签名不同 ⇒ `TypeError`。
+
+    前者两个都不是「我们自己读错了」（`AttributeError` / `KeyError`）—— 那种要穿出去，否则
+    「进度行全消失」永远被读成「引导形态本来就这样」。
+    """
+    import types
+
+    stale = types.ModuleType("common.progress_text")
+
+    def old_signature(*_a: object, **_k: object) -> bool:
+        raise TypeError("should_log_progress() got an unexpected keyword argument 'shown'")
+
+    # 走 `__dict__`：`ModuleType` 上没有这两个名字的声明（属性赋值撞 mypy），`setattr` 撞
+    # ruff B010，而本仓禁新增抑制符 ⇒ 唯一直说意图的写法就是填模块字典。
+    stale.__dict__.update(
+        should_log_progress=old_signature,
+        progress_text=lambda *_a, **_k: "老标签",
+    )
+    monkeypatch.setitem(sys.modules, "common.progress_text", stale)
+
+    keep = offline_boot._should_log_progress(None, kind="ping", it=1, done=1, total=4)
+    assert keep is True, "跨版本签名不符 ⇒ 宁可恒打，也不许把进度行吞光"
+
+    def buggy_signature(*_a: object, **_k: object) -> bool:
+        raise AttributeError("should_log_progress lost .shown")
+
+    stale.__dict__.update(should_log_progress=buggy_signature)
+    with pytest.raises(AttributeError):
+        offline_boot._should_log_progress(None, kind="ping", it=1, done=1, total=4)
+
+
+def test_boot_net_errors_only_cover_the_wire(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_BOOT_NET_ERRORS` 的边界（P0-7 第二十四批）：引导态的三处读面只吞传输面。
+
+    `_post_json`（控制面小 JSON）与 `_http_error_parts`（HTTPError 的正文）在「连不上 / 体读不出来」
+    时都有正确缺省（`(0, {})` / `（无正文）`）；但把 `AttributeError` 也读成那件事，现场就是
+    「hub 时好时坏」，而真因（我们读响应/读配置的姿势坏了）一次也不会进日志。
+    """
+    from typing import Any, cast
+
+    lines: list[str] = []
+
+    def dead(*_a: object, **_k: object) -> Any:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(offline_boot.urllib.request, "urlopen", dead)
+    status, body = offline_boot._post_json("http://hub.invalid/x", "t", lines.append)
+    assert (status, body) == (0, {}), "连不上 ⇒ (0, {})（训练永不因网络停摆）"
+    assert len(lines) == 1, "失败要恰留一行（多一行是刷屏、零行是静默）"
+
+    class _TruncatedError:
+        def read(self) -> bytes:
+            raise ConnectionResetError("body truncated")
+
+    text, doc = offline_boot._http_error_parts(cast("Any", _TruncatedError()))
+    assert text == "（无正文）" and doc == {}, "体读不出来 ⇒ 保状态码优先，正文说清「无」"
+
+    class _BuggyError:
+        def read(self) -> bytes:
+            raise AttributeError("HTTPError lost .fp")
+
+    with pytest.raises(AttributeError):
+        offline_boot._http_error_parts(cast("Any", _BuggyError()))
+
+    def buggy(*_a: object, **_k: object) -> Any:
+        raise AttributeError("urlopen lost .read")
+
+    monkeypatch.setattr(offline_boot.urllib.request, "urlopen", buggy)
+    with pytest.raises(AttributeError):
+        offline_boot._post_json("http://hub.invalid/x", "t", lines.append)
+
+
+def test_hub_candidates_tolerates_a_missing_sibling_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`hub_candidates` 的 tailnet 候选（P0-7 第二十四批）：兄弟文件没拉下来 / 配置脏值 ⇒ 少一条候选；
+    `resolve_hub_url` 自己的 bug ⇒ 穿出去。
+
+    为什么值得分开：`resolve_hub_url` 是**纯字符串**函数（没有地址就返空串，不抛），所以它真抛
+    只能是我们的 bug；把它读成「没有 tailnet 候选」＝ 云机改用公网 URL 并**白起隧道**，而日志
+    看不出来少了什么。
+    """
+    monkeypatch.setattr(offline_boot, "is_kaggle", lambda: False)
+    cfg = {"hub_url": "http://hub.tailnet.ts.net:8787", "hub_port": 8787}
+    creds = {"HUB_IP": "100.64.0.5"}
+
+    class _MissingSibling:
+        def resolve_hub_url(self, *_a: object) -> str:
+            raise ImportError("tailscale_boot.py was not pulled")
+
+    monkeypatch.setattr(offline_boot, "_load_tailscale_boot", lambda: _MissingSibling())
+    only_public = offline_boot.hub_candidates(cfg, creds)
+    assert only_public == ["http://hub.tailnet.ts.net:8787"], only_public
+
+    class _BuggySibling:
+        def resolve_hub_url(self, *_a: object) -> str:
+            raise AttributeError("resolve_hub_url lost .split")
+
+    monkeypatch.setattr(offline_boot, "_load_tailscale_boot", lambda: _BuggySibling())
+    with pytest.raises(AttributeError):
+        offline_boot.hub_candidates(cfg, creds)

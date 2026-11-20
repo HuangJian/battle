@@ -16,12 +16,17 @@ import os
 import time
 from pathlib import Path
 
-_DEFAULT_ROOT = Path(__file__).resolve().parents[2] / "dashboard" / "data" / "evalboard"
+from common.log import default_router
+from common.settings import evalboard_data_root
 
 
 def data_root() -> Path:
-    """EvalStore 数据根（EVALBOARD_DATA 覆盖；与 `batch_store.data_root` 同口径）。"""
-    return Path(os.environ.get("EVALBOARD_DATA", str(_DEFAULT_ROOT)))
+    """EvalStore 数据根（`EVALBOARD_DATA` 覆盖）。
+
+    解读住 `common.settings.evalboard_data_root`：本模块是训练侧唯一写者，而**读者**（`trainer/`
+    的台账 / console）各有一份自己的取根逻辑 —— 同一根旋钮解两次就可能在盘上指到两个目录。
+    """
+    return evalboard_data_root()
 
 
 def now_ms() -> int:
@@ -35,7 +40,8 @@ def state_path(root: Path | None = None, /) -> Path:
 def write_state(root: Path | None = None, /, **patch: object) -> None:
     """合并写心跳（读旧 → update → 原子替换）。
 
-    任何 IO/解析失败都静默吞掉——心跳绝不打断训练主链。传 root 便于单测。
+    任何失败都**不抛**——心跳绝不打断训练主链。但「不抛」不等于「不留痕」（2026-11-14）：
+    落盘失败按落点喊一次 WARN。传 root 便于单测。
     """
     p = state_path(root)
     cur: dict = {}
@@ -52,5 +58,11 @@ def write_state(root: Path | None = None, /, **patch: object) -> None:
         tmp = p.with_name(p.name + ".tmp")
         tmp.write_text(json.dumps(cur, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, p)
-    except OSError:
-        pass
+    except OSError as e:
+        # 静默的后果不是「少一行心跳」，是**console 永久停在旧值**：evalboard 那一栏读的就是
+        # 这个文件，「训练卡在忙碌中」与「心跳写不进去」在屏幕上长得一模一样，而后者训练侧
+        # 一切正常 —— 没有人会去查磁盘。按落点去重：窗口开/关是每轮都写的，逐次喊会刷屏。
+        default_router().warn_once(
+            f"eval_heartbeat:{p}",
+            f"EvalBoard 心跳写不进去：{e!r}（落点 {p}）——console 的 runner_state 会停在旧值",
+        )

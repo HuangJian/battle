@@ -239,6 +239,109 @@ def tower_features(model: TowerProbe, bufa: np.ndarray, batch: int = 128) -> np.
 
 # ---------------- 主流程 ----------------
 
+def _probe_linear_bufa(
+    bufa: np.ndarray,
+    threat: np.ndarray,
+    hit: np.ndarray,
+    pincer: np.ndarray,
+    is_train: np.ndarray,
+    is_val: np.ndarray,
+    is_test: np.ndarray,
+    seed: int,
+) -> dict:
+    """S0′-1：bufA 线性探针（自 `main` 原样搬出）。"""
+    lab_names = ["front", "back", "left", "right"]
+    log("[probe] S0′-1 线性探针（bufA 43k 维）...")
+    x_flat_train = bufa[is_train].reshape(int(is_train.sum()), -1).astype(np.float32)
+    x_flat_val = bufa[is_val].reshape(int(is_val.sum()), -1).astype(np.float32)
+    x_flat_test = bufa[is_test].reshape(int(is_test.sum()), -1).astype(np.float32)
+    mean = x_flat_train.mean(axis=0, keepdims=True)
+    x_flat_train -= mean
+    x_flat_val -= mean
+    x_flat_test -= mean
+    s1: dict = {"threat_auc": {}, "hit_auc": {}, "confusion": {}}
+    clfs: dict = {}
+    for family, labels, feat_tr, feat_va, feat_te in (
+        ("threat", threat, x_flat_train, x_flat_val, x_flat_test),
+        ("hit", hit, x_flat_train, x_flat_val, x_flat_test),
+    ):
+        for d in range(4):
+            clf, vauc = train_linear(
+                feat_tr,
+                labels[is_train, d],
+                feat_va,
+                labels[is_val, d],
+                seed=seed + d,
+            )
+            te = auc_score(clf(torch.from_numpy(feat_te)).detach().numpy(), labels[is_test, d])
+            s1[f"{family}_auc"][lab_names[d]] = {"test_auc": te, "val_auc": vauc}
+            clfs[(family, d)] = clf
+            log(f"    {family}/{lab_names[d]}: testAUC={te:.3f} valAUC={vauc:.3f}")
+        # 方向混淆矩阵：clf_d 评 label_s
+        mat = np.full((4, 4), np.nan)
+        for d in range(4):
+            sc = clfs[(family, d)](torch.from_numpy(feat_te)).detach().numpy()
+            for s in range(4):
+                mat[d, s] = auc_score(sc, labels[is_test, s])
+        s1["confusion"][family] = mat.tolist()
+    # pincer（诊断附加）
+    clf_p, _ = train_linear(
+        x_flat_train,
+        pincer[is_train],
+        x_flat_val,
+        pincer[is_val],
+        seed=seed + 17,
+    )
+    s1["pincer_auc"] = auc_score(clf_p(torch.from_numpy(x_flat_test)).detach().numpy(), pincer[is_test])
+    log(f"    pincer: testAUC={s1['pincer_auc']:.3f}")
+    return s1
+
+
+def _probe_region16(
+    bufa: np.ndarray, is_train: np.ndarray, is_test: np.ndarray, seed: int
+) -> dict:
+    """S0′-2b：原始区块 16 类线性分类（诊断；自 `main` 原样搬出）。"""
+    log("[probe] S0′-2b 原始区块 16 类线性分类...")
+    n_b = min(2048, int(is_test.sum()) + int(is_train.sum()))
+    pool_b = min(int(is_train.sum()), n_b // 2)
+    pool_te = min(int(is_test.sum()), n_b - pool_b)
+    idx_tr = np.flatnonzero(is_train)[:pool_b]
+    idx_te = np.flatnonzero(is_test)[:pool_te]
+    blocks, base_lab = [], []
+    for idx_list in (idx_tr, idx_te):
+        for j, si in enumerate(idx_list):
+            for k in range(4):
+                r = (j * 4 + k) % 16
+                rb, cb = REGION_BOUNDS[r // 4], REGION_BOUNDS[r % 4]
+                b = bufa[si, :, rb[0] : rb[1], cb[0] : cb[1]]
+                # 2×2 均值把 7×7 收到 4×4（探针规模控制；线性受限，只作诊断）
+                tb_t = torch.from_numpy(b.astype(np.float32)).unsqueeze(0)
+                tb_np = F.avg_pool2d(tb_t, 2).squeeze(0).numpy()
+                blocks.append(tb_np.reshape(-1))
+                base_lab.append(r)
+    xb = np.stack(blocks).astype(np.float32)
+    yb = np.array(base_lab, dtype=np.int64)
+    ntr = pool_b * 4
+    torch.manual_seed(seed)
+    clf3 = nn.Linear(xb.shape[1], 16)
+    opt3 = torch.optim.AdamW(clf3.parameters(), lr=1e-3, weight_decay=1e-4)
+    xt3 = torch.from_numpy(xb[:ntr])
+    yt3 = torch.from_numpy(yb[:ntr])
+    for _ep in range(30):
+        perm3 = torch.randperm(ntr)
+        for i in range(0, ntr, 256):
+            sel = perm3[i : i + 256]
+            loss = F.cross_entropy(clf3(xt3[sel]), yt3[sel])
+            opt3.zero_grad()
+            loss.backward()
+            opt3.step()
+    with torch.no_grad():
+        pred = clf3(torch.from_numpy(xb[ntr:])).argmax(dim=1).numpy()
+    acc3 = float((pred == yb[ntr:]).mean())
+    log(f"    16-class acc={acc3:.3f} (baseline 0.0625, n={len(xb)})")
+    return {"test_acc": acc3, "baseline_1of16": 0.0625, "n": len(xb)}
+
+
 def main() -> None:
     ap = house_parser()
     ap.add_argument("--dump", default="tmp/spatial-probe/hu150")
@@ -314,51 +417,9 @@ def main() -> None:
     }
 
     # ================= S0′-1：线性探针 on bufA =================
-    log("[probe] S0′-1 线性探针（bufA 43k 维）...")
-    x_flat_train = bufa[is_train].reshape(int(is_train.sum()), -1).astype(np.float32)
-    x_flat_val = bufa[is_val].reshape(int(is_val.sum()), -1).astype(np.float32)
-    x_flat_test = bufa[is_test].reshape(int(is_test.sum()), -1).astype(np.float32)
-    mean = x_flat_train.mean(axis=0, keepdims=True)
-    x_flat_train -= mean
-    x_flat_val -= mean
-    x_flat_test -= mean
-    s1: dict = {"threat_auc": {}, "hit_auc": {}, "confusion": {}}
-    clfs: dict = {}
-    for family, labels, feat_tr, feat_va, feat_te in (
-        ("threat", threat, x_flat_train, x_flat_val, x_flat_test),
-        ("hit", hit, x_flat_train, x_flat_val, x_flat_test),
-    ):
-        for d in range(4):
-            clf, vauc = train_linear(
-                feat_tr,
-                labels[is_train, d],
-                feat_va,
-                labels[is_val, d],
-                seed=args.seed + d,
-            )
-            te = auc_score(clf(torch.from_numpy(feat_te)).detach().numpy(), labels[is_test, d])
-            s1[f"{family}_auc"][lab_names[d]] = {"test_auc": te, "val_auc": vauc}
-            clfs[(family, d)] = clf
-            log(f"    {family}/{lab_names[d]}: testAUC={te:.3f} valAUC={vauc:.3f}")
-        # 方向混淆矩阵：clf_d 评 label_s
-        mat = np.full((4, 4), np.nan)
-        for d in range(4):
-            sc = clfs[(family, d)](torch.from_numpy(feat_te)).detach().numpy()
-            for s in range(4):
-                mat[d, s] = auc_score(sc, labels[is_test, s])
-        s1["confusion"][family] = mat.tolist()
-    # pincer（诊断附加）
-    clf_p, _ = train_linear(
-        x_flat_train,
-        pincer[is_train],
-        x_flat_val,
-        pincer[is_val],
-        seed=args.seed + 17,
+    readings["S0p1_linear_bufA"] = _probe_linear_bufa(
+        bufa, threat, hit, pincer, is_train, is_val, is_test, args.seed
     )
-    s1["pincer_auc"] = auc_score(clf_p(torch.from_numpy(x_flat_test)).detach().numpy(), pincer[is_test])
-    del x_flat_train, x_flat_val, x_flat_test
-    readings["S0p1_linear_bufA"] = s1
-    log(f"    pincer: testAUC={s1['pincer_auc']:.3f}")
 
     # ================= S0′-1b：旧输入对照（pooled+scalars）=================
     log("[probe] S0′-1b 线性探针（pooled 64 + scalars 30）...")
@@ -426,45 +487,7 @@ def main() -> None:
     readings["S0p2_tower"] = s2
 
     # ================= S0′-2b：原始区块 16 类（诊断）=================
-    log("[probe] S0′-2b 原始区块 16 类线性分类...")
-    n_b = min(2048, int(is_test.sum()) + int(is_train.sum()))
-    pool_b = min(int(is_train.sum()), n_b // 2)
-    pool_te = min(int(is_test.sum()), n_b - pool_b)
-    idx_tr = np.flatnonzero(is_train)[:pool_b]
-    idx_te = np.flatnonzero(is_test)[:pool_te]
-    blocks, base_lab = [], []
-    for idx_list in (idx_tr, idx_te):
-        for j, si in enumerate(idx_list):
-            for k in range(4):
-                r = (j * 4 + k) % 16
-                rb, cb = REGION_BOUNDS[r // 4], REGION_BOUNDS[r % 4]
-                b = bufa[si, :, rb[0] : rb[1], cb[0] : cb[1]]
-                # 2×2 均值把 7×7 收到 4×4（探针规模控制；线性受限，只作诊断）
-                tb_t = torch.from_numpy(b.astype(np.float32)).unsqueeze(0)
-                tb_np = F.avg_pool2d(tb_t, 2).squeeze(0).numpy()
-                blocks.append(tb_np.reshape(-1))
-                base_lab.append(r)
-    xb = np.stack(blocks).astype(np.float32)
-    yb = np.array(base_lab, dtype=np.int64)
-    ntr = pool_b * 4
-    torch.manual_seed(args.seed)
-    clf3 = nn.Linear(xb.shape[1], 16)
-    opt3 = torch.optim.AdamW(clf3.parameters(), lr=1e-3, weight_decay=1e-4)
-    xt3 = torch.from_numpy(xb[:ntr])
-    yt3 = torch.from_numpy(yb[:ntr])
-    for _ep in range(30):
-        perm3 = torch.randperm(ntr)
-        for i in range(0, ntr, 256):
-            sel = perm3[i : i + 256]
-            loss = F.cross_entropy(clf3(xt3[sel]), yt3[sel])
-            opt3.zero_grad()
-            loss.backward()
-            opt3.step()
-    with torch.no_grad():
-        pred = clf3(torch.from_numpy(xb[ntr:])).argmax(dim=1).numpy()
-    acc3 = float((pred == yb[ntr:]).mean())
-    readings["S0p2b_region16"] = {"test_acc": acc3, "baseline_1of16": 0.0625, "n": len(xb)}
-    log(f"    16-class acc={acc3:.3f} (baseline 0.0625, n={len(xb)})")
+    readings["S0p2b_region16"] = _probe_region16(bufa, is_train, is_test, args.seed)
 
     # ---- 落盘 ----
     out = Path(args.out) if args.out else dump / "readings.json"

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import time
 from typing import Any
+
+from common.logutil import log_line
 
 
 def parse_range(s: str) -> list[int]:
@@ -79,10 +80,11 @@ def build_pairs(args: Any, it: int, rotate_seed: int) -> list[tuple[int, int]]:
             for i, stage in enumerate(active)
             for j in range(args.seeds_per_stage)
         ]
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [run_rl] curriculum: it{it} active "
+        log_line(
+            "run_rl",
+            f"curriculum: it{it} active "
             f"{n_active}/{len(order_list)} stages={active} "
-            f"(seeds {min(p[1] for p in pairs)}..{max(p[1] for p in pairs)})"
+            f"(seeds {min(p[1] for p in pairs)}..{max(p[1] for p in pairs)})",
         )
         return pairs
     if args.rotate_stages <= 0:
@@ -111,9 +113,9 @@ def build_pairs(args: Any, it: int, rotate_seed: int) -> list[tuple[int, int]]:
     rng_perm = np.random.default_rng([rotate_seed, 0xA11CE, epoch_idx])
     perm = [int(s) for s in rng_perm.permutation(args.total_stages)]
     if pos == 0:
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [run_rl] rotate: new epoch — permutation "
-            f"{perm} split into {per_epoch} batches"
+        log_line(
+            "run_rl",
+            f"rotate: new epoch — permutation {perm} split into {per_epoch} batches",
         )
     window = perm[pos * k : (pos + 1) * k]
     rng_draw = np.random.default_rng([rotate_seed, 0xB0B, it])
@@ -123,8 +125,9 @@ def build_pairs(args: Any, it: int, rotate_seed: int) -> list[tuple[int, int]]:
         for i, stage in enumerate(window)
         for j in range(args.seeds_per_stage)
     ]
-    print(
-        f"[{time.strftime('%H:%M:%S')}] [run_rl] rotate: batch {pos + 1}/{per_epoch} "
-        f"stages={window} (seeds {min(p[1] for p in pairs)}..{max(p[1] for p in pairs)})"
+    log_line(
+        "run_rl",
+        f"rotate: batch {pos + 1}/{per_epoch} "
+        f"stages={window} (seeds {min(p[1] for p in pairs)}..{max(p[1] for p in pairs)})",
     )
     return pairs

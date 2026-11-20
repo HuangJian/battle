@@ -4,7 +4,7 @@
 ## 这一刀切了什么
 
 `trainer/loop_core.py` 1386 → 923 行；`TrainingLoop`（25 方法）里**唯一一条真正的方法间调用链**
-——9 个成员 / 445 行（占原模块 32%，且恰好是旧类的**尾块**）——搬到
+——12 个成员 / 445 行（占原模块 32%，且恰好是旧类的**尾块**）——搬到
 `trainer/loop_volume.py::TrainingVolume`：
 
 ```
@@ -28,7 +28,7 @@ _volume_collect_continuous（VOLUME_RULE_V2 生产路径）───────
 
 ## 本文件钉住什么
 
-1. 9 个成员**定义**在新家，`TrainingLoop` 里**零同名定义**（门面只能是门面）；
+1. 12 个成员**定义**在新家，`TrainingLoop` 里**零同名定义**（门面只能是门面）；
 2. 接线是**对象级同一**（`TrainingLoop.X is TrainingVolume.X`），不是同名副本——既有用例
    （`tests/worker/test_rollout_volume.py` / `e2e/test_volume_e2e.py`）用的就是
    `TrainingLoop._volume_topup(cast(Any, stub), …)` 这种 **unbound 绑定**；
@@ -60,7 +60,7 @@ CORE_PY = NN_ROOT / "trainer" / "loop_core.py"
 STEPS_PY = NN_ROOT / "trainer" / "loop_steps.py"
 ROUND_STEPS_PY = NN_ROOT / "trainer" / "loop_round_steps.py"
 
-#: 这一簇的成员（闭集）：9 个方法 —— 新方法要么住在 `TrainingLoop`，要么改这张表。
+#: 这一簇的成员（闭集）：15 个方法 —— 新方法要么住在 `TrainingLoop`，要么改这张表。
 CLUSTER = (
     "_volume_active",
     "_volume_stages",
@@ -71,10 +71,22 @@ CLUSTER = (
     "_volume_journal_replay",
     "_volume_topup",
     "_volume_collect_continuous",
+    # 2026-11-18（长函数存量）：`_volume_collect_continuous` 拆出的循环段与收官段。
+    "_volume_continuous_loop",
+    "_volume_continuous_settle",
     # greedy 结果配额（plan/greedy-outcome-quota rev4）：独立采集阶段。
     "_volume_collect_greedy",
+    # 2026-11-18（长函数存量）：`_volume_collect_greedy` 拆出的派发波与盘上扫描。
+    "_dispatch_greedy_wave",
+    "_greedy_scan",
     # 2026-10-28（零落盘）：补波的「本波已采多少」要读本轮内存账（回传 shard 不在盘上）。
     "_round_mem_shards",
+    # 2026-11-18（G5）：公开只读观测面 —— 测试断言配额/分关账/greedy 读数走它，
+    # 不再逐条伸进私有槽位（`tests/worker/test_rollout_volume.py` 46 → 2）。
+    "volume_view",
+    # 2026-11-18（G5）：greedy 槽位的只读快照 —— 跨轮清零的契约改读它
+    # （`tests/worker/test_greedy_rollout_chain.py` 6 → 0）。
+    "greedy_view",
 )
 
 #: 随簇搬走的七个槽位（新家 = `TrainingVolume`）。
@@ -105,6 +117,7 @@ SIBLING_DECLARED = ("_volume_capped", "_volume_collected", "_volume_target")
 #: 顶层 import 面的闭集（模块名）。
 TOP_LEVEL_ALLOWED = {
     "__future__",
+    "dataclasses",
     "pathlib",
     "typing",
     "biz.course",
@@ -185,7 +198,7 @@ def _in_function_imports(path: Path) -> set[str]:
 
 
 def test_cluster_is_defined_in_loop_volume_only() -> None:
-    """10 个成员定义在 `TrainingVolume`；`TrainingLoop` 里**不得**再有同名定义。
+    """13 个成员定义在 `TrainingVolume`；`TrainingLoop` 里**不得**再有同名定义。
 
     这条挡的是「就地补一个同名方法」——那会让 `TrainingVolume` 里那份变成死代码，而测试
     （跑在组合实例上，MRO 取到旧类那份）照样绿。
@@ -195,7 +208,7 @@ def test_cluster_is_defined_in_loop_volume_only() -> None:
     assert set(CLUSTER) <= in_volume, sorted(set(CLUSTER) - in_volume)
     crept_back = sorted(set(CLUSTER) & in_core)
     assert crept_back == [], f"这些方法又回到 TrainingLoop 了：{crept_back}"
-    # 闭集：新家只装这 10 个方法（顺手往里塞 helper 会在这里红）
+    # 闭集：新家只装这 13 个方法（顺手往里塞 helper 会在这里红）
     assert in_volume == set(CLUSTER), sorted(in_volume ^ set(CLUSTER))
     # 旧模块里只剩**指路注释**（不是实现）：读者找 `_volume_topup` 时不会两手空空。
     core_src = CORE_PY.read_text(encoding="utf-8")

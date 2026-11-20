@@ -16,6 +16,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from common.log import default_router
+
 
 def _median(values: list[float]) -> float:
     """中位数（纯 Python，不依赖 numpy）。"""
@@ -151,6 +153,9 @@ def terminal_stats(
     return out
 
 
+WARN_KEY = "terminal_stats:write"
+
+
 def write_terminal_stats(
     traj_root: str,
     *,
@@ -161,7 +166,9 @@ def write_terminal_stats(
 ) -> None:
     """聚合终局指标并追加到 `<traj>/iteration-terminal.jsonl`。
 
-    不报错（warn-only），所有异常静默捕获。
+    不报错（这一层绝不反杀训练），但**失败要说一声**：这个文件只被「事后回看训练进程」的人读，
+    而它停更与「这轮没有终局数据」在盘上完全同形 —— 于是没人知道统计早就坏了。
+    按 key 去重（`WARN_KEY`）：坏掉的话每轮都会走到这里，逐轮喊会把日志刷成噪音。
     """
     try:
         rec = terminal_stats(iter_dir, it=it, identity=identity, expected_games=expected_games)
@@ -170,5 +177,7 @@ def write_terminal_stats(
         path = Path(traj_root) / "iteration-terminal.jsonl"
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    except Exception:
-        pass  # 统计失败不打断训练
+    except Exception as e:  # 统计失败不打断训练
+        default_router().warn_once(
+            WARN_KEY, f"终局统计没写进 iteration-terminal.jsonl：{e!r}——本轮读数会缺一行"
+        )

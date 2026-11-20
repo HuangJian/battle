@@ -12,33 +12,22 @@
 确定性（D5）：per-job 种子 = hash(runId, it, init_weights_fp)，load/chunk/update
 前重新播种——同 job 重发 chunk 逐字节一致。
 
-## S4 拆完之后，这个模块里**还剩什么**（2026-09-24 第十三刀）
+## 2026-11-18 收刀之后，这个模块里**还剩什么**
 
-只剩三个宿主函数：`run_job`（300 行，作业壳：网络 / 校验 / kind 分叉 / 上报，物料落地已搬到
-`remote/download.py`）· `worker_loop`（197 行，轮询壳：多 hub round-robin / 停机感知 / 空闲退出 /
-回传收尾）· `main`（127 行，入口：CLI → 子进程或监督器模式），外加一个纯函数 `_alive_log`。
-其余**几乎是整页**的显式转发门面：100 条 import / 109 个名字 / 287 行（第 36–370 行）。
+宿主只剩三件：`run_job`（134 行，编排：建 `JobState` → 调 `remote/job_shell.py` 的相位 →
+热替换护栏 → 训练核）· `worker_loop`（196 行，轮询壳：多 hub round-robin / 停机感知 /
+空闲退出 / 回传收尾）· `main`（CLI 入口：argparse → 子进程或监督器模式），外加
+`_alive_log` / `_guard_code_and_device` / `_start_services` 等小件与**整页**显式转发门面。
 
-**这三个都不宜再拆——理由不是「拆不动」，而是它们就是「宿主」这个概念的形状**：
-
-* `worker_loop` 持有**跨 job 存活**的东西（`uploader` 队列、`pf_stores`、`halt_seen`、
-  轮询计数器）。把它们搬走 = 把一个对象的生命周期交给两个模块管（第十刀已经量过：
-  `uploader` 必须留宿主，只能**传进**一轮）。
-* `main` 是 CLI：argparse 声明（~70 行）是**数据**，与「解析后怎么起进程」同属入口。
-  本仓同样把 CLI 留在入口模块的先例见 `remote/run_loop.py`。
-* `run_job` 的每个分支都只做一件事（拿物料 / 查红线 / 分叉 / 上核 / 收尾），再切就只是
-  把直线扯成跳转——本刀已经把里面**最像管道**的 69 行（物料落地）拿走了（350 → 300 行）。
-
-→ 下一步若还要动 `remote/`，目标应是 `hub_server` 的两个千行状态类（拆 = 拆状态），
-不是继续切这三个函数。
+`_ACTIVE_CODE_SHA` 与 `make_uploader(upload=post_result)` 的调用点**刻意留在这里**：
+它们是会话级单例 / patch 接缝（`test_worker_state_contract` 与
+`test_job_lifecycle_split` 钉住宿主），搬走会让既有注入静默失效。
 """
 
 from __future__ import annotations
 
-import json
 import os
 import sys
-import tarfile
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -46,25 +35,22 @@ from typing import Any
 
 from common.cli import house_parser, run_main
 from common.log_bundle import LogBundle
-from common.logutil import secs
+from common.logutil import log_line, tag_logger
+from common.paths import REPO_ROOT
 from common.protocol import (
     ROLE_OFFLINE,
     ROLE_ONLINE,
     CodeChangedError,
-    ProtocolError,
-    encode_opt_tar,
-    encode_weights_json,
     normalize_manifest,
-    pack_result_v2,
     validate_result,
 )
 
-# `RetryableError` 是**显式转发**（`as` 自别名）：`tests/remote/test_soft_hold_prefetch.py` 从本模块
-# 命名空间取它（`W.RetryableError`）来构造瞬时失败。本模块自己已不用它（payload/code 的
-# sha 对账随物料落地搬到 `remote/download.py`）——但名字是契约：它曾是 worker 的公共面。
-from common.protocol import (
-    RetryableError as RetryableError,
-)
+# `RetryableError` / `ProtocolError` 是**显式转发**（`as` 自别名）：`tests/remote/test_soft_hold_prefetch.py`
+# 从本模块命名空间取它们（`W.RetryableError` / `W.ProtocolError`）来构造瞬时/确定性失败。
+# 本模块自己已不用它们（payload/code 的 sha 对账与拒收判据随相位搬到
+# `remote/download.py` / `remote/job_shell.py`）——但名字是契约：它曾是 worker 的公共面。
+from common.protocol import ProtocolError as ProtocolError
+from common.protocol import RetryableError as RetryableError
 from common.protocol import (
     d14_corpus_match as protocol_d14_corpus_match,
 )
@@ -126,12 +112,11 @@ from remote.bulk_sched import (
 from remote.bulk_sched import (
     yield_worth_it as yield_worth_it,
 )
-from remote.cloud_pool import CLOUD_ROLLOUT_POOL, acquire_rollout, release_rollout
 
 # 下载簇（S4 第七刀）+ 物料落地（S4 第十二刀）：**显式转发**。
 # 注入点分档（第十二刀后重划）：
-#   * `run_job` **自己读**的只有 `_ensure_payload` / `_ensure_code` / `_ensure_ts_code`
-#     （物料落地三兄弟）⇒ patch `remote.worker.*` 对它们仍有效；
+#   * 物料落地三兄弟的**调用点**已随 `run_job` 的相位搬到 `remote/job_shell.py`
+#     ⇒ 要拦它们请 patch **`remote.job_shell.*`**（打在 worker 上是空操作）；
 #   * `download_*` / `_cache_blob` / `_resolve_blob` / `_progress_logger` 的**调用点**已全部
 #     落在 `remote.download` 内部（组内互调）或 `remote.job_round`（预取填充器）⇒ 要拦物料
 #     下载请 patch **`remote.download.*`**（打在 worker 上会**静默失效**——在 worker 命名空间
@@ -222,9 +207,6 @@ from remote.job_fs import (
     JOB_DIR_KEEP as JOB_DIR_KEEP,
 )
 from remote.job_fs import (
-    _git_head as _git_head,
-)
-from remote.job_fs import (
     _persist_result as _persist_result,
 )
 from remote.job_fs import (
@@ -309,7 +291,17 @@ from remote.job_lifecycle import (
 # `start_cancel_watcher` / `peek_jobs` / `download_payload` / `PREFETCH_ROUND_SEC`）的解析
 # 已随块搬到 `remote.job_round` ⇒ 拦截它们要 patch **该模块**（见其头部与
 # `tests/remote/test_job_round_split.py`）。
-from remote.job_round import run_one_round
+from remote.job_round import RoundOutcome, run_one_round
+from remote.job_shell import (
+    JobState,
+    bc_or_none,
+    check_mode_and_d14,
+    echo_smoke_result,
+    land_materials,
+    precheck_job,
+    resolve_job_weights,
+    run_iter_phase,
+)
 from remote.lifecycle import Lifecycle
 from remote.offline_greedy import collect_round
 from remote.payload_proc import PayloadProcess, make_prefetcher
@@ -322,6 +314,7 @@ from remote.prefetch import (
 from remote.result_upload import (
     RESULT_UPLOAD_MODE_DEFAULT,
     RESULT_UPLOAD_MODES,
+    UploaderLike,
 )
 
 # 显式转发（`as` 自别名）：测试/旧调用方从 `remote.worker` 取这个名字（线程模式的实现）。
@@ -329,6 +322,7 @@ from remote.result_upload import (
 from remote.result_upload import (
     ResultUploader as ResultUploader,
 )
+from remote.train_core import TrainSpec as TrainSpec
 from remote.train_core import (
     run_training_core as run_training_core,
 )
@@ -448,33 +442,64 @@ from remote.worker_proc import (
 from remote.worker_proc import (
     supervise_worker as supervise_worker,
 )
-from worker.iter_rollout import RoundContext, resolve_bun
-from worker.stream_collect import StreamCollector
+from remote.worker_session import (
+    _bulk_yield_params as _bulk_yield_params,
+)
+from remote.worker_session import (
+    _setup_bulk_yield as _setup_bulk_yield,
+)
+from remote.worker_session import (
+    acquire_retry,
+    close_worker,
+    hub_plan,
+    yield_self_check,
+)
+from remote.worker_session import (
+    epoch_mult_of as epoch_mult_of,
+)
+
+_log = tag_logger("worker", lambda: time)  # 日志格式/时间戳的唯一实现；监督器单点用 log_line
 
 # ------------------------------------------------------------------ PPO 执行
-
-
-def epoch_mult_of(value: object) -> float:
-    """`--epoch-mult` 的取值：**PPO 每轮更新遍数**的放大倍数（训练侧旋钮）。
-
-    与离线盘 `CFG.epoch_mult` 同一口径：有限正数、缺省 `1.0` = manifest/课程原样；
-    只放大 PPO 遍数（向上取整、最少 1），不改采样量/评估语料，也不改 manifest 身份。
-    非法值在**开跑之前**拒绝（argparse 报错 / `serve_forever` 启动即停）。
-    """
-    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-        raise ValueError(f"epoch_mult 必须是正数（当前 {value!r}）")
-    try:
-        v = float(value)
-    except (TypeError, ValueError) as e:
-        raise ValueError(f"epoch_mult 必须是正数（当前 {value!r}）") from e
-    if v != v or v in (float("inf"), float("-inf")) or v <= 0:
-        raise ValueError(f"epoch_mult 必须是有限正数（当前 {value!r}）")
-    return v
 
 
 # D14 比对规则的**唯一实现**住 `common.protocol`（发布端 `hub_client.iter_shard_dirs`
 # 打包时用同一条规则挑选 shard）——这里只做名字转发，保持既有 import/调用面不变。
 d14_corpus_match = protocol_d14_corpus_match
+
+
+def _guard_code_and_device(st: JobState) -> None:
+    """热替换护栏（`_ACTIVE_CODE_SHA`）+ 设备归一化（**必须在 kind 分叉之前**）。"""
+    global _ACTIVE_CODE_SHA
+    jid, manifest, log = st.jid, st.manifest, st.log
+
+    # ---- 热替换护栏（2026-09-11）：本进程已 import 的代码版本必须 == 本 job 要求 ----
+    # sys.path.insert 只影响**尚未导入**的模块；已进 sys.modules 的 ppo/rl 不会重读。
+    # 不查就会用旧代码跑出新结果：零报错、commit_echo 也照样回显，只有 sha 能揭穿。
+    _job_sha = str(manifest["code_sha256"])
+    if _ACTIVE_CODE_SHA is None:
+        _ACTIVE_CODE_SHA = _job_sha
+        st.prep_b.add("进程代码 sha", f"{_job_sha[:12]}…")
+    elif _job_sha != _ACTIVE_CODE_SHA:
+        raise CodeChangedError(_ACTIVE_CODE_SHA, _job_sha)
+
+    # ---- 设备归一化（**必须在 kind 分叉之前**）----
+    # BC 与 PPO 两条链都要用 device，且都要能接住未经解析的 "auto"：push-first 引导在
+    # `notebook_runtime.resolve_device()` 之前就把 worker spawn 了（只做
+    # `device_resolved or device` 兜底），字面量 "auto" 会一路传进来。
+    # 只归一化一次、放在分叉前，两条链共用 —— 2026-09-15 两次事故的教训：
+    # 第一次只改了 PPO 的分派条件（else 仍 `torch.device(device)`），第二次才发现
+    # BC 分叉也是直接透传原始 device。
+    _raw_dev = str(st.device or "cpu").strip().lower()
+    # 探针按**本模块**的名字传入：`test_ppo_backend_switch` 打桩的是 `worker.paddle_cuda_available`。
+    st.device = normalize_job_device(
+        st.device, st.backend, paddle_probe=paddle_cuda_available
+    )
+    if st.device != _raw_dev:
+        log(
+            f"job {jid}: --device {_raw_dev!r} 未经解析，worker 兜底为 {st.device}"
+            "（调用方应先 resolve_device；要多卡须显式 --device cuda-dp）"
+        )
 
 
 def run_job(
@@ -514,7 +539,7 @@ def run_job(
     # 的**唯一**时基；下载/解包/权重装载都已完成的那个瞬间）。
     should_cancel: Any = None,
     on_ppo_start: Any = None,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> dict:
     """执行单个 job：下载 → 校验 → PPO → 产出 weights_json + opt tar → POST。
 
@@ -529,389 +554,88 @@ def run_job(
     返回 hub 侧需要的 result dict（未 POST——调用方决定上传时机；本函数
     负责完成 PPO 与产物）。幂等：已完成（result 已落盘）的 job 由 hub 返回
     404/409，调用方跳过。
+
+    相位（2026-11-18，长函数存量第三十五刀）：下载前判据 / 物料落地 / bc 分叉 /
+    权重五源 / iter rollout / 红线与 D14 / 回显七段住 `remote/job_shell.py`；
+    本函数只保留**顺序编排** + 热替换护栏（`_ACTIVE_CODE_SHA` 是 worker 的模块单例）
+    + 训练核调用（`remote.train_core` 是 L4，搬进 job_shell 会把它顶到 L5）。
     """
-    jid = job["job_id"]
-    manifest = normalize_manifest(job["manifest"])
-    # 日志节食（2026-09-24）：本 job 的入口/启动/装载读数攒进这一行（`prep_b.emit`）。
-    prep_b = LogBundle(log) if prep is None else prep
     t_prep = time.time()
-
-    # ---- 离线腿已退役（2026-09-25，plan/online-offline-role-routing §7）：kind=run 拒收 ----
-    # 「hub 发一份 kind=run 整段 job、本机等 8h」那条腿**不再有生产端**：离线课由云机
-    # **取任务包**接手（`battle.offline.ipynb` → `/offline/tasks` → `/offline/task-pack`）。
-    # 为什么拒收而不是「当成 kind=iter 跑一轮」：半跑一轮会产出权重、让控制面看着像在推进，
-    # 而 hub 侧早就不等了 —— 那正是最难查的那类静默分叉（plan §7.2 的「不许白等」）。
-    # 位置在**最前**（连结果复用/能力自检之前）：拒单不发一号指令、不下载一个字节。
-    if str(manifest["kind"]) == "run":
-        raise ProtocolError(
-            f"job {jid}: kind=run（半离线整段）这条腿已于 2026-09-25 退役 —— 离线课由云机"
-            "取任务包接手：battle.offline.ipynb（/offline/tasks 清单 → /offline/task-pack 取包）。"
-            "本 worker 拒收这份活。"
-        )
-
-    # ---- 训练后端（2026-10-27，Paddle 双生）：**节点本地能力开关**，hub 不可见（用户口径②）----
-    # 2026-11-06（BC #10）：Paddle 后端现在跑 kind=ppo + kind=bc；节点侧 rollout 仍是
-    # torch/bun 语义。在**任何下载之前**拒单 —— 别让 AI Studio 机器传完 payload 才炸
-    # "No module named torch"。载荷是**入参**（`--backend` 一路传下来）；空串 = auto
-    # （看本机，torch 优先，逐字节旧行为）。
-    backend = resolve_ppo_backend(backend)
-    if backend == "paddle" and str(manifest["kind"]) not in ("ppo", "bc"):
-        raise ProtocolError(
-            f"job {jid}: 本 worker 是 Paddle 后端，只跑 kind=ppo/bc；这份活是 "
-            f"kind={manifest['kind']}——拒收（节点侧 rollout 仍是 torch/bun 语义）"
-        )
-
-    # ---- 结果复用（2026-09-05）：上次已算完但回传失败 → 本地缓存直接重传，不重算 PPO ----
-    cached_path = work_dir / jid / "_result.json"
-    if cached_path.exists():
-        try:
-            cached: dict = json.loads(cached_path.read_text(encoding="utf-8"))
-            validate_result(cached, manifest, commit_echo_must_match=False)
-            log(f"job {jid}: 复用上次算完的结果（上次回传失败）——直接重传")
-            return cached
-        except Exception:
-            pass  # 缓存缺失/跨 manifest/损坏 → 清场走全流程
-
-    # ---- 能力自检（plan/train-mode-hot-switch.plan.md L3.2，2026-09-24）------
-    # 缺 bun 在**零下载**时就拒单：`kind=iter` 的活要节点自己跑 rollout
-    # （`run_iter_rollout` → `resolve_bun`），而现状是先把 payload + code.zip + ts_code.zip
-    # 三件全下完（实测 3.42MB / 12.1s）才在 `run_iter_rollout` 里发现没 bun —— 全白传。
-    #
-    # ★ 位置很关键：必须在**结果复用块之后**。它前面那个 `_result.json` 命中是纯重传
-    #   （上次算完了、只是回传失败），重传不需要 bun —— 放在复用块之前会把这种情况误拒。
-    #
-    # 失败类型与原来一模一样（`resolve_bun` 抛 `ProtocolError`）：调用方按「确定性拒结」
-    # 处理（`worker_loop` 的 `except ProtocolError` 分支注释里就有「节点能力缺失如 bun
-    # 装不上」），hub 落终局 failed、训练侧停腿 —— 不动分类，只把判定前移。
-    # `echo` 走「只验传输链」（下方 kind 分叉里整个跳过 rollout）⇒ 不该要求 bun。
-    if str(manifest["kind"]) == "iter" and not echo:
-        resolve_bun(str((manifest.get("rollout") or {}).get("bun") or ""))
-
-    # ---- 物料落地（S4 第十二刀）：payload 与 code.zip 的「取字节 + 摆好」整段在
-    # `remote/download.py`（与 kind=iter 的 `_ensure_ts_code` 并列成三兄弟）。
-    # 这一刀之后 `run_job` 不再认识缓存树 / 解包 / 清场细节——它读三个 `_ensure_*` 的**返回值**，
-    # 那些返回值（`PayloadLanded` / `CodeLanded`）就是「摆到哪儿了」的完整答案。
-    # E1（plan/aistudio-transfer-hardening §4）：准备段的**计时**拆出来。
-    # 为什么值得：慢链路上「准备 95s」分不清是**在传**还是在**本地处理**；解包/blob 解析
-    # 是纯 CPU，把它们从准备合计里切出来，剩下的差额就是链路（而链路正是本 plan 的病灶）。
-    # ★ 2026-10-30（用户口径「准备完成行只留必要读数」）：「物料落地」**合计**段删掉——
-    #   它是「下载 + 解包 + code」三项的加总，而三项各自都已单独报（解包/blob 解析/payload），
-    #   每轮再打一遍加总只是重复。分项秒数仍进 wire 账（机器可读的那份没少）。
-    landed = _ensure_payload(
-        base_url, token, jid, manifest, work_dir, preloaded=preloaded, log=log, bundle=prep_b
-    )
-    job_dir = landed.job_dir
-    shard_dirs = landed.shard_dirs
-    payload_dl_sec, unpack_sec = landed.dl_sec, landed.unpack_sec
-    payload_nbytes = landed.payload_nbytes
-    # ★ 2026-10-30：prune 计数**不进人读的那一行**（每轮一句家务事 ⇒ 纯重复），
-    #   改由 wire 账带着（`wire.prune_dirs`）。
-    pruned_dirs = landed.pruned_dirs
-    # 解包这半场的读数照打（别写 0.0——那是诊断读数）；staged 时它**不在关键路径上**
-    # （关键路径的诚实性由 wall 保证：`other = wall − in − out − ppo`，解包已不在 wall 里）。
-    # ★ 2026-10-30（用户口径「准备完成行只留必要读数」）：括号里的解释删掉——秒数本身
-    # 就是读数，「不含传输」这类口径说明属于注释（代码里已写清），不该每轮重打一遍。
-    prep_b.add(
-        "解包",
-        f"{secs(unpack_sec)}s → {len(shard_dirs)} shard",
-    )
-    # `code_cache_dir` 是 run_job 的**入参**（共享根提示），落地后换成 per-sha 目录。
-    code = _ensure_code(
-        base_url,
-        token,
-        jid,
-        manifest,
-        job_dir,
-        work_dir,
-        code_cache_root=code_cache_dir,
-        preloaded=preloaded,
-        log=log,
-        bundle=prep_b,
-    )
-    code_root, code_cache_dir, blob_root = code.code_root, code.code_cache_dir, code.blob_root
-
-    # ---- 热替换护栏（2026-09-11）：本进程已 import 的代码版本必须 == 本 job 要求 ----
-    # sys.path.insert 只影响**尚未导入**的模块；已进 sys.modules 的 ppo/rl 不会重读。
-    # 不查就会用旧代码跑出新结果：零报错、commit_echo 也照样回显，只有 sha 能揭穿。
-    global _ACTIVE_CODE_SHA
-    _job_sha = str(manifest["code_sha256"])
-    if _ACTIVE_CODE_SHA is None:
-        _ACTIVE_CODE_SHA = _job_sha
-        prep_b.add("进程代码 sha", f"{_job_sha[:12]}…")
-    elif _job_sha != _ACTIVE_CODE_SHA:
-        raise CodeChangedError(_ACTIVE_CODE_SHA, _job_sha)
-
-    # ---- 设备归一化（**必须在 kind 分叉之前**）----
-    # BC 与 PPO 两条链都要用 device，且都要能接住未经解析的 "auto"：push-first 引导在
-    # `notebook_runtime.resolve_device()` 之前就把 worker spawn 了（只做
-    # `device_resolved or device` 兜底），字面量 "auto" 会一路传进来。
-    # 只归一化一次、放在分叉前，两条链共用 —— 2026-09-15 两次事故的教训：
-    # 第一次只改了 PPO 的分派条件（else 仍 `torch.device(device)`），第二次才发现
-    # BC 分叉也是直接透传原始 device。
-    _raw_dev = str(device or "cpu").strip().lower()
-    # 探针按**本模块**的名字传入：`test_ppo_backend_switch` 打桩的是 `worker.paddle_cuda_available`。
-    device = normalize_job_device(device, backend, paddle_probe=paddle_cuda_available)
-    if device != _raw_dev:
-        log(
-            f"job {jid}: --device {_raw_dev!r} 未经解析，worker 兜底为 {device}"
-            "（调用方应先 resolve_device；要多卡须显式 --device cuda-dp）"
-        )
-
-    # ---- kind 分叉（BC 整合，plan/bc-cloud-integration.plan.md §3）：bc 任务走独立
-    # 执行链（语料 npy shard 训练，无 reward/γ/λ/init-weights 语义）；ppo 任务继续
-    # 走下方 per-tick 红线 + PPO 链路（默认行为零变化）。
-    if str(manifest["kind"]) == "bc":
-        return _run_bc_job(
-            jid=jid,
-            manifest=manifest,
-            job_dir=job_dir,
-            shard_dirs=shard_dirs,
-            device=device,
-            torch_threads=torch_threads,
-            echo=echo,
-            base_url=base_url,
-            token=token,
-            lease_token=lease_token, backend=backend,
-            log=log,
-        )
-
-    # ---- opt-blob-diet（2026-09-24，plan/opt-blob-diet.plan.md §3.2/§3.3）：权重解析 ----
-    # 五源：W0 payload → W1 blob_cache → W2 preloaded → W3 GET blob（W4 旧形状 tar 的
-    # `model.pt` 由训练核的 restore 段承担）。**位置是本 plan 最容易做错的一处**：
-    #   ① 必须早于 `run_iter_rollout` —— kind=iter 的 rollout argv 是
-    #      `--weights init_weights.json`（相对 job 目录），权重不在就起不来；
-    #   ② 必须早于 `ppo_engine.build_ppo(...)` —— arch 从权重文件里读，缺文件会静默
-    #      退回默认 64/8/128（「建了错的模型却照跑」，§3.3-2）；
-    #   ③ 必须**晚于** BC 的 early-return —— BC job 的 `init_weights_fp` 是哨兵 `"bc"`，
-    #      进五源会给 hub 打一个必然 404 的 `?name=init`（§3.2 的 64-hex 规则）。
-    # 传输账的两个计数器在这里建账：后面的 opt/ref/demo blobs 与训练核共用这一手账。
-    blob_hits = 0
-    blob_miss_bytes = 0
-    t_blob = time.time()
-    init_w, weights_src, weights_wire_bytes = _resolve_weights(
-        job_dir=job_dir,
-        init_weights_fp=str(manifest["init_weights_fp"]),
-        # R0（M0）：本机 f32 副本的身份命中面（旧 hub 无 `opt_from` ⇒ 空串 ⇒ 不试）
-        course_fp=str(manifest.get("course_fp", "") or ""),
-        opt_from=str(manifest.get("opt_from", "") or ""),
-        it=int(manifest.get("it", 0) or 0),
-        blob_root=blob_root,
-        jid=jid,
+    st = JobState(
         base_url=base_url,
         token=token,
+        jid=job["job_id"],
+        manifest=normalize_manifest(job["manifest"]),
+        work_dir=work_dir,
+        device=device,
+        backend=backend,
+        echo=echo,
         preloaded=preloaded,
+        code_cache_dir=code_cache_dir,
+        ts_code_cache_dir=ts_code_cache_dir,
+        lease_token=lease_token,
+        torch_threads=torch_threads,
+        prep_b=LogBundle(log) if prep is None else prep,
         log=log,
     )
-    prep_b.add("blob 解析", f"{secs(time.time() - t_blob)}s src={weights_src}")
-    if weights_src in ("cache", "course_cache"):
-        blob_hits += 1
-    elif weights_src == "download":
-        blob_miss_bytes += weights_wire_bytes
-    if init_w is None and str(manifest["kind"]) == "iter":
-        # kind=iter 的**节点侧 rollout** 必须有权重文件：W4 那条 tar 退路对它无效
-        # （旧 hub 对这类 job 恒带 payload 内的 init_weights.json ⇒ 走 W0）。
-        # 新 hub 下这里只会在「四源全缺失」时触发 = 真的发错了活。
-        raise ProtocolError(
-            f"job {jid}: kind={manifest['kind']} 需要 init 权重但四源皆尽"
-            f"（试过 {'/'.join(WEIGHT_SOURCES[:4])}）"
-            f"；init_weights_fp={str(manifest['init_weights_fp'])[:12]}…——拒收"
-        )
-
-    # ---- M3 kind 分叉：iter = 一整轮上云（节点自己跑 rollout 产 shard）----
-    #
-    # 位置很关键：必须在 mode 红线 / D14 / echo **之前**——因为本轮真正要校验的 shard
-    # 是刚跑出来的（payload 里没有 shard），D14 必须看到它们；echo 轮则整个跳过 rollout
-    # （回显冒烟不跑任何重计算，只验 payload/code/ts_code 三样传输）。
-    iter_info: dict | None = None
-    rctx: RoundContext | None = None  # 轮级资源（kind=iter 非 echo 才有；PPO 之后由它回收 scratch）
-    ts_code_bytes = 0
-    ts_code_hit = False
-    if str(manifest["kind"]) == "iter":
-        ts_root = (
-            ts_code_cache_dir
-            if ts_code_cache_dir is not None
-            else code_root.parent / "ts_code_cache"
-        )
-        _ts_dir, ts_code_bytes, ts_code_hit = _ensure_ts_code(
-            base_url,
-            token,
-            jid,
-            manifest,
-            ts_root=ts_root,
-            preloaded=preloaded,
-            log=log,
-            bundle=prep_b,
-        )
-        if echo:
-            log(f"job {jid}: kind=iter + echo——跳过 rollout（只验传输链）")
-        else:
-            # 轮级资源（落点/TS 树/长驻池）在整轮共用：池在 `finally` 里收（rollout 之后、
-            # PPO 之前）——不让 94 个常驻 bun 陪 PPO 吃内存。
-            # ⚠ **ctx 的所有权在这里** ⇒ 收池必须罩住**整段**（含 rollout 自己抛的那些路径）：
-            #   rollout 失败（D14/verify/超界……）时若没人收，94 个常驻 bun 会一直挂着。
-            rctx = RoundContext()
-            # ★ 逐局流式采集（2026-10-27，用户口径）：`volume` 块在 ⇒ 本轮采哪几局由调度器
-            # **每结算一局重算一次**（差额最大的关先派，槽位空出即补，满额即停）——不再有
-            # 「一批跑完再算下一批」。`volume` 缺席（在线 kind=iter / 老计划）= 老行为逐字不变。
-            collector = StreamCollector.from_spec(
-                manifest["rollout"], log=log, started_at=time.time()
-            )
-            pool_key = str(manifest.get("ts_code_sha256", "") or "").strip().lower()
-            try:
-                # ★ 先建 collector 再取池：from_spec 抛错时池还没被取走。
-                rctx.pool = acquire_rollout(pool_key, log)
-                # 本轮 rollout（普通波 + 可选 greedy 波；后者在 PPO **之前**，见
-                # `remote/offline_greedy.collect_round` 与 plan/greedy-offline-autonomous）。
-                iter_info = collect_round(
-                    job_dir, manifest, ts_dir=_ts_dir, log=log, ctx=rctx,
-                    it=int(manifest.get("it", 0) or 0), collector=collector,
-                )
-                # ⚠ 这里是**有意重绑**，不是变量遮蔽的失误（M3 `2160b1da` 的原话：「本轮真正
-                #   要校验的 shard 是刚跑出来的（payload 里没有 shard），D14 必须看到它们」）。
-                #   自主腿的 payload 就是 `pack_payload([], …)`（`plan_run.py:520`）⇒ 解包出的
-                #   `landed.shard_dirs` 是空表；不重绑的话下面那段 D14 变成空转。
-                shard_dirs = list(iter_info["shard_dirs"])
-            finally:
-                pool, rctx.pool = rctx.pool, None
-                release_rollout(pool_key, pool)
-                rctx.close()  # 池已摘走；这里只收落点/临时资源
-            if collector is not None:
-                # 轮报的 `volumeTopup`（读数面；`rule`/逐关账/缺口/浪费/触顶 与旧形态同键）。
-                iter_info["volumeTopup"] = collector.volume()
-                # ★ 2026-10-28（plan/it-stage-ratation §9.5）：另带一份**本机腿同形状**的分关账
-                #   （`trainer/loop_volume._volume_stage_stats`），随产物行回到账本 ⇒ 控制台的
-                #   「各关进度」列/面板在云机轮上也有读数（同一个解析器，不写第二个分支）。
-                # ★ 2026-11-11：合并而不是覆盖 —— greedy 波的 `volume_stage_stats["greedy"]`
-                #   已经先写进 `iter_info`（ `collect_round` 在 rollout 之后、这里之前跑）。
-                iter_info["volume_stage_stats"] = {
-                    **(iter_info.get("volume_stage_stats") or {}),
-                    **collector.stage_stats(),
-                }
-                # `collector.summary_line()` 已并进轮末那行（`volume_line=` 入参），不再单打。
-
-    # ---- mode 红线（v1：仅 per-tick） ----
-    if manifest["mode"] != "per-tick":
-        raise ProtocolError(f"mode={manifest['mode']!r} != per-tick——远程 v1 红线，拒收")
-
-    # ---- D14 语料血缘：job.course_fp == 每个 shard 的 manifest.course_fp ----
-    # （跨课程语料绝不混训——发布端已保证 shard 集按 course_fp 过滤，这里再校验一次）
-    # 读的 `shard_dirs` 按 kind 不同：普通 job = 解包出的 payload shard；kind=iter = 本轮现场
-    # 跑出来的（见 iter 分支里那次重绑的注释）。
-    _cfp = str(manifest["course_fp"])
-    _corpus = str(manifest.get("corpus_fp", "") or "")
-    for _sd in shard_dirs:
-        try:
-            with open(os.path.join(_sd, "manifest.json"), encoding="utf-8") as _f:
-                _sm = json.load(_f)
-        except (OSError, ValueError) as _e:
-            raise ProtocolError(f"D14 course_fp: 读 shard manifest 失败 {_sd}: {_e}") from _e
-        if not d14_corpus_match(_cfp, _corpus, _sm):
-            raise ProtocolError(
-                f"D14 course_fp 不匹配：job={_cfp[:12]}… shard={str(_sm.get('course_fp'))[:12]}… "
-                f"（{_sd}）——跨课程语料混入，拒收"
-            )
-
-    # ---- 冒烟回显（--echo，2026-09-05）：不拉 torch、不跑 PPO——把 payload 携带的
-    # init 权重与指纹原样回传为 job 结果（hub-start --smoke-only 的 Kaggle 交互预演，
-    # 用户拍板：真课程 + 作废轮，不建虚拟课程）。三重校验按构造必过
-    # （init_weights_fp/data_fp/commit_echo 均为 manifest 回显）；消费方
-    # （trainer/loop_steps._remote_ppo）见 result["smoke"] 作废本轮（it 不前进）。
+    cached = precheck_job(st, resolve_backend=resolve_ppo_backend)
+    if cached is not None:
+        return cached
+    land_materials(st)
+    _guard_code_and_device(st)
+    bc_result = bc_or_none(st, run_bc=_run_bc_job)
+    if bc_result is not None:
+        return bc_result
+    resolve_job_weights(st)
+    run_iter_phase(st, collect_round=collect_round)
+    check_mode_and_d14(st)
     if echo:
-        init_w = job_dir / "init_weights.json"
-        if not init_w.exists():
-            raise ProtocolError("payload 缺 init_weights.json——echo 冒烟无法回显")
-        # opt tar：manifest 携带则原样回显（Adam 动量 = 发布时状态）；首轮无 tar 时
-        # 回空 tar（解包为空目录——作废轮的落位产物会被 _prepare_iter_dir 清场，
-        # 真 PPO 轮会重新落位覆盖，永不消费空 tar）
-        opt_b64 = str(manifest.get("opt_init") or "")
-        if not opt_b64:
-            import io as _io
-
-            _buf = _io.BytesIO()
-            with tarfile.open(fileobj=_buf, mode="w:"):
-                pass
-            opt_b64 = encode_opt_tar(_buf.getvalue())
-        result = {
-            "job_id": jid,
-            "data_fp": manifest["data_fp"],
-            "init_weights_fp": manifest["init_weights_fp"],
-            "weights_json": encode_weights_json(init_w.read_bytes()),
-            "opt_tar_b64": opt_b64,
-            "agg": {
-                "policy": 0.0,
-                "value": 0.0,
-                "entropy": 0.0,
-                "kl": 0.0,
-                "kickstart": 0.0,
-                "mean_ret": 0.0,
-                "value_new_rms": 0.0,
-                "policy_new_rms": 0.0,
-                "steps": 0,
-                "chunks": 0,
-            },
-            "commit_echo": manifest["commit"],
-            "ppo_sec": 0.0,
-            "smoke": True,
-        }
-        result["wire"] = _wire_block(
-            payload_bytes=payload_nbytes,
-            payload_dl_sec=payload_dl_sec,
-            unpack_sec=unpack_sec,
-            prune_dirs=pruned_dirs,
-        )
-        # 两遍收敛：result_bytes 自己的十进制位数要算进体长（第一遍以占位 0 计）。
-        result["wire"]["result_bytes"] = len(pack_result_v2(result))
-        result["wire"]["result_bytes"] = len(pack_result_v2(result))
-        validate_result(result, manifest, commit_echo_must_match=False)
-        _persist_result(work_dir, jid, result)
-        log(f"job {jid}: ECHO (smoke) — init 权重原样回传（未跑 PPO）")
-        return result
+        return echo_smoke_result(st)
 
     # ---- 训练核（2026-09-24）：从算子到产物整段在 `remote/train_core.py`（L4）----
     # 本模块只剩「作业壳」：网络 / 校验 / 分叉 / 上报。核不认识 hub 的作业面，也不 import
     # 本模块（守卫钉住）；它读的模块全局都是**它自己命名空间**的（seam-free，见那边头部）。
     try:
-        result, course = run_training_core(
-            base_url,
-            token,
-            jid=jid,
-            job_dir=job_dir,
+        spec = TrainSpec(
+            jid=st.jid,
+            job_dir=st.job_dir,
             work_dir=work_dir,
-            manifest=manifest,
-            iter_info=iter_info,
-            blob_root=blob_root,
-            payload_bytes=payload_nbytes,
-            payload_dl_sec=payload_dl_sec,
-            unpack_sec=unpack_sec,
-            prune_dirs=pruned_dirs,
-            replay_info=landed.replay,
-            ts_code_bytes=ts_code_bytes,
-            ts_code_hit=ts_code_hit,
-            device=device,
+            manifest=st.manifest,
+            iter_info=st.iter_info,
+            blob_root=st.blob_root,
+            payload_bytes=st.payload_nbytes,
+            payload_dl_sec=st.payload_dl_sec,
+            unpack_sec=st.unpack_sec,
+            prune_dirs=st.pruned_dirs,
+            replay_info=st.replay,
+            ts_code_bytes=st.ts_code_bytes,
+            ts_code_hit=st.ts_code_hit,
+            device=st.device,
             torch_threads=torch_threads,
             epoch_mult=epoch_mult,
-            backend=backend,
+            backend=st.backend,
             preloaded=preloaded,
-            # opt-blob-diet：五源解析在**壳**里做完（必须早于 rollout），训练核只消费结果。
-            init_w=init_w,
-            weights_src=weights_src,
-            weights_wire_bytes=weights_wire_bytes,
-            blob_hits=blob_hits,
-            blob_miss_bytes=blob_miss_bytes,
-            prep=prep_b,
+            # opt-blob-diet：五源解析在壳里做完（必须早于 rollout），训练核只消费结果。
+            init_w=st.init_w,
+            weights_src=st.weights_src,
+            weights_wire_bytes=st.weights_wire_bytes,
+            blob_hits=st.blob_hits,
+            blob_miss_bytes=st.blob_miss_bytes,
+            prep=st.prep_b,
             t_prep=t_prep,
             should_cancel=should_cancel,
             on_ppo_start=on_ppo_start,
             log=log,
         )
+        result, course = run_training_core(base_url, token, spec)
     finally:
         # ★ 2026-10-11（§3.5）：产出不搬回 ⇒ 本地盘回收从「每批 finally」移到**全 job 收尾、PPO 之后**
         #（PPO 读的就是这份产出）。清本轮 scratch 目录（ts 家不在里面、永不清）；失败也尽力清、
         # 幂等、不抛（`cleanup` 自带墙钟上界，清不动只 WARN）。
-        if rctx is not None:
-            rctx.cleanup(log=log)
-    validate_result(result, manifest, commit_echo_must_match=False)  # 自查
-    _persist_result(work_dir, jid, result)
+        if st.rctx is not None:
+            st.rctx.cleanup(log=log)
+    validate_result(result, st.manifest, commit_echo_must_match=False)  # 自查
+    _persist_result(work_dir, st.jid, result)
     return result
 
 
@@ -931,20 +655,6 @@ ALIVE_LOG_SEC = 60.0
 BULK_YIELD_MODES = ("auto", "always", "never")
 
 
-def _bulk_yield_params(mode: str) -> tuple[float, float | None]:
-    """CLI 档位 → `(after_sec, total_budget_sec)`（判据看函数名，不看 argparse）。
-
-    * `auto`（缺省）= 条件让路：控制面在途 ≥ `YIELD_AFTER_SEC_DEFAULT` 才让，单条传输累计 ≤5s；
-    * `always` = **逐字旧语义**（控制面一在途就让，无累计上限）——现场逃生口 / A/B 基线；
-    * `never` = 永不让路（`after=inf`）——量「让路到底买到了什么」的极端臂。
-    """
-    if mode == "always":
-        return 0.0, None
-    if mode == "never":
-        return float("inf"), None
-    return YIELD_AFTER_SEC_DEFAULT, PAUSE_BUDGET_SEC
-
-
 def _alive_log(log: Any, *, halted: bool, done: int, polls: int, idle_since: float) -> None:
     """空闲期打一行存活日志：周期内请求数（验证轮询周期真在生效）+ 连续空闲秒数（判孤儿 job）。
 
@@ -953,6 +663,87 @@ def _alive_log(log: Any, *, halted: bool, done: int, polls: int, idle_since: flo
     """
     where = "cloud halted, polling hub" if halted else "polling hub"
     log(f"{where} (no job yet, {done} done, {polls} polls, idle {int(time.time() - idle_since)}s)")
+
+
+def _start_services(
+    base_url: str,
+    token: str,
+    work_dir: Path,
+    device: str,
+    role: str,
+    once: bool,
+    log,
+) -> tuple[str, Lifecycle]:
+    """身份 + 生命周期上发：两件跨 job 存活的会话级服务。"""
+    # 身份只算一次（旧路径每个轮询都调 worker_tag()：hostname 系统调用不贵但没必要
+    # 每秒一次；而 hub 的登记表靠这个值去重，值必须稳定）。plan/worker-name-readable：
+    # 这里用完整上下文（离线归属 + hub URL）算出 `<env>-<link>`，随后**显式下传**给
+    # post_result / report_job_failure / UploadTask——纯函数、零模块级状态。
+    worker_id = worker_tag(offline=(role == ROLE_OFFLINE), hub_url=base_url)
+    # 启动行播报身份（plan/worker-name-readable §8 字段验证）：人在真机上核一次
+    # 「名字与所在平台/链路一致」——hub 侧 claim 日志也有，但这一行不需要 hub 就能看。
+    log(f"worker 身份：{worker_id}")
+    # 生命周期上发（2026-10-31，`remote/lifecycle.py`）：启动 / 读点 / SIGTERM / 收线四条。
+    # 云机被整机收走时，**只有 hub 侧的请求间隔**还留着（notebook 日志是浏览器抓的，人不在就断）
+    # ⇒ 这四条是「云机自己说的最后一句」。不阻塞训练、失败即丢、不进任何判据。
+    life = Lifecycle(
+        base_url, token, worker_id, work_dir=work_dir, device=device, role=role, once=once, log=log
+    )
+    life.start()
+    return worker_id, life
+
+
+def _ensure_pf_store(
+    stores: dict[int, PrefetchStore | PayloadProcess],
+    hi: int,
+    part_dir: Path,
+    prefetch_mode: str,
+    prefetch_depth: int,
+    prefetch_unpack: int,
+    log,
+) -> None:
+    """首次轮询到某 hub 时建预取暂存区（进程 / 线程模式），并清上一会话残壳。"""
+    if prefetch_depth <= 0 or hi in stores:
+        return
+    # staged 条数上限 = **槽位数**（2026-10-12：撤销 256MiB 字节闸，见
+    # `prefetch.PREFETCH_DEPTH_DEFAULT` 上的长注——「盘上的量 = 条数 × 实测体积」，
+    # 条数是配置整数、体积每轮都在日志里，都不需要猜）。下限取 unpack_n：解包
+    # 旋钮开到比 depth 大时，允许留的 staged 副本不该反而变少。
+    stores[hi] = make_prefetcher(
+        part_dir,
+        mode=prefetch_mode,
+        log=log,
+        staged_max=max(prefetch_depth, prefetch_unpack),
+    )
+    # 建 store 时先扫一遍：清上一会话遗留的残壳 / 崩溃孤儿（`prefetch/` 在
+    # `prune_job_dirs` 豁免名单里，否则它们永远没人收；plan §2.3）。
+    # 进程模式的 `init` 已经扫过（子进程是暂存区的**唯一写者**）⇒ 不重复下一道命令。
+    if isinstance(stores[hi], PrefetchStore):
+        stores[hi].prune()
+
+
+def _poll_halt(job: object, hi: int, halt_seen: dict[int, bool], log) -> None:
+    """§386：停机达令只在状态**翻转**时动作（停不掉则照常执行任务）；hub resume 后复位。"""
+    got_halt = isinstance(job, dict) and job.get("halt") is True
+    if got_halt and not halt_seen.get(hi):
+        # §386：停机命令随任务同发——先尝试真停机（Colab unassign）；
+        # 停不掉（Kaggle 无 API）→ **照常执行下面的任务**（云机活着就不闲置，能继续训练）。
+        halt_seen[hi] = True
+        log("云端停机达令已送达：先尝试停机宿主实例（停不掉则照常执行任务）")
+        _release_cloud_machine(log)
+    elif not got_halt and halt_seen.get(hi):
+        halt_seen[hi] = False  # 停机条件消失（hub resume）→ 复位
+
+
+def _once_result(uploader: UploaderLike, round_: RoundOutcome, done: int) -> int:
+    """--once 收尾：先 drain 再按落定判成败（H8）；失败返回 -1、成功返回已完成数。"""
+    uploader.drain()
+    job_ok = round_.ok
+    if round_.uploaded:
+        _out = uploader.outcome(round_.jid)
+        if _out is not None:
+            job_ok = _out.ok
+    return -1 if not job_ok else done
 
 
 def worker_loop(
@@ -994,7 +785,7 @@ def worker_loop(
     # A3 持久缓存根（plan/aistudio-transfer-hardening §3.3）：None = 旧行为（缓存住 work_dir）。
     # 给了就只把**内容寻址缓存**挪过去（code/ts_code/blob），job 目录不动。
     cache_dir: Path | None = None,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> int:
     """无状态轮询主循环。返回处理的 job 数。
 
@@ -1010,87 +801,28 @@ def worker_loop(
       留共享根。异 commit job 由既有 _ACTIVE_CODE_SHA 守卫转 86 + 监督器重拉。
     """
     done = 0
-    set_bulk_log(log)  # 调度器的排队/让路/抢占日志与 worker 同一条流
-    # bulk 让路策略（W1）：装配 + 启动行（可见即判据）。`configure_yield` 返回旧策略，
-    # **退出时必须还原**：`_BULK` 是进程单例，不还原会把 auto 泄漏给同进程后续使用者
-    # （测试套件里多处在同一进程调 `worker_loop`，plan/transfer-residual §3.5 ★）。
-    _yield_after, _yield_total = _bulk_yield_params(bulk_yield)
-    _prev_yield = _BULK.configure_yield(after_sec=_yield_after, total_budget_sec=_yield_total)
-    # 下行腿分进程后的 P1 协同（2026-10-20）：预取的 P2 在**子进程**里，而本进程的关键下载/回传
-    # （P1）要能挡住它。`_BULK` 的 P1 进出等待在这里广播给每个预取子进程（`foreign_p1` 同口径：
-    # 不开新工 + 当场打断在飞的那份）。**多个 hub ⇒ 多个子进程 ⇒ 全广播**（每一条 P2 都该让）。
-    # 与 `configure_yield` 同一条纪律：`_BULK` 是进程单例 ⇒ 退出时必须还原。
-    def _p1_broadcast(waiting: bool) -> None:
-        for _pf in list(pf_stores.values()):
-            note = getattr(_pf, "note_p1", None)
-            if note is not None:
-                note(waiting)
-
-    _prev_p1_observer = _BULK.set_p1_observer(_p1_broadcast)
+    _prev_yield, _prev_p1_observer, pf_stores = _setup_bulk_yield(bulk_yield, log)
     #: 会话级让路自适应（A2）：`--bulk-yield never` 起步就不需要它；其余档位每轮收尾复查
     #: 控制面分位数，超阈值即**就地降为 never 语义**并打一行原因（一次性、不回升）。
     _yield_live = bulk_yield != "never"
-    _after_s = "∞" if _yield_after == float("inf") else f"{_yield_after:.1f}"
-    _total_s = "∞" if _yield_total is None else f"{_yield_total:.0f}"
-    log(f"bulk 让路策略：mode={bulk_yield} after={_after_s}s total<={_total_s}s")
-    # 身份只算一次（旧路径每个轮询都调 worker_tag()：hostname 系统调用不贵但没必要
-    # 每秒一次；而 hub 的登记表靠这个值去重，值必须稳定）。plan/worker-name-readable：
-    # 这里用完整上下文（离线归属 + hub URL）算出 `<env>-<link>`，随后**显式下传**给
-    # post_result / report_job_failure / UploadTask——纯函数、零模块级状态。
-    worker_id = worker_tag(offline=(role == ROLE_OFFLINE), hub_url=base_url)
-    # 启动行播报身份（plan/worker-name-readable §8 字段验证）：人在真机上核一次
-    # 「名字与所在平台/链路一致」——hub 侧 claim 日志也有，但这一行不需要 hub 就能看。
-    log(f"worker 身份：{worker_id}")
-    # 生命周期上发（2026-10-31，`remote/lifecycle.py`）：启动 / 读点 / SIGTERM / 收线四条。
-    # 云机被整机收走时，**只有 hub 侧的请求间隔**还留着（notebook 日志是浏览器抓的，人不在就断）
-    # ⇒ 这四条是「云机自己说的最后一句」。不阻塞训练、失败即丢、不进任何判据。
-    life = Lifecycle(
-        base_url, token, worker_id, work_dir=work_dir, device=device, role=role, once=once, log=log
+    # 会话级服务先起（静默的缓存根 mkdir 在它之前，日志顺序与拆分前一致）。
+    hubs, multi, _cache_root, _code_cache_arg = hub_plan(
+        hub_urls, base_url, work_dir, cache_dir
     )
-    life.start()
+    worker_id, life = _start_services(base_url, token, work_dir, device, role, once, log)
     idle_since = time.time()
     _last_alive_log = time.time()
     _polls_since_log = 0
     _polls_since_accept = 0
-    #: 连续 acquire 失败次数（iii-2，2026-10-12）：控制面一次超时常常就是链路抖动，**首败不退避**
-    #: —— 12s 超时已经等过了，再睡一个 poll_sec 等于把自己的抖动放大成 17s 空转（真机：`acquire
-    #: failed` 之后 `retry in 5.0s`）。连败才退避：那时才像 hub 真出问题，退避要挡住热循环。
+    #: 连续 acquire 失败次数（iii-2）：首败不退避、连败才退避（理由见 `acquire_retry`）。
     _acquire_fails = 0
-    # 多 hub 轮询（P3b §3.8）：None/空 → 单 hub（默认行为零变化）；多 hub round-robin。
-    hubs = [u for u in (hub_urls or [base_url]) if u]
-    if not hubs:
-        hubs = [base_url]
-    multi = len(hubs) > 1
-    # A3 持久缓存根（plan/aistudio-transfer-hardening §3.3）：`cache_dir` 给了就把**内容寻址
-    # 缓存**（code / ts_code / blob）挂到它下面（跨会话复用），**job 工作目录仍走 work_dir**
-    # （`/tmp`，每轮清场重建的语义不变）。缺省 None ⇒ 逐字旧行为（`work_dir/code_cache`）。
-    _cache_root = Path(cache_dir) if cache_dir is not None else work_dir
-    shared_code_cache = _cache_root / "code_cache"
-    if cache_dir is not None:
-        _cache_root.mkdir(parents=True, exist_ok=True)
-    # 单 hub 且无 cache_dir 时**故意仍传 None**（保持改造前的调用形状）；否则显式给根。
-    _code_cache_arg = shared_code_cache if (multi or cache_dir is not None) else None
     hi = 0
     # §386：停机状态感知（过渡尝试一次；halt 清除后复位，下次停机可再试）——按 hub 独立。
     halt_seen: dict[int, bool] = {}
-    # P2.5 异步回传（2026-09-22）：把 `out` 从关键路径上摘下来。`post_result` 按**调用时**
-    # 解析（供测试 monkeypatch）；`sync` = 逐字回退到改造前（`--result-upload sync`）。
-    # ★ 2026-10-20（plan/ppo-worker-transfer-isolation）：`process` 档把整条回传腿搬进
-    # **独立子进程**（`remote/upload_worker.py`）——与自主 worker 的补传腿同形：`json.dumps`
-    # （~1.6MB）+ gzip + HTTP 不再压在训练线程的 GIL 上。子进程起不来 ⇒ 它自己 sticky 降级回
-    # 线程（响亮一行），训练永不受影响。
+    # P2.5：`post_result` 按**调用时**解析 ⇒ patch `remote.worker.post_result` 仍生效。
     uploader = make_uploader(
-        upload=post_result,
-        mode=result_upload,
-        log=log,
-        # 子进程交回的传输账重放进**本进程**的每 job 账（实现住 `job_lifecycle`：
-        # `_wire_add` 一族的调用点归那一簇，`test_job_lifecycle_split` 有闸）。
-        record_wire=record_upload_wire,
+        upload=post_result, mode=result_upload, log=log, record_wire=record_upload_wire
     )
-
-    # P2 软持有暂存区（按 hub 分区；`blob_cache` 共享根与 run_job 的口径一致）。
-    # 缺省 = 进程模式（`PayloadProcess`）；`thread` 档 = 进程内 `PrefetchStore`（旧行为）。
-    pf_stores: dict[int, PrefetchStore | PayloadProcess] = {}
     try:
         while True:
             base_url = hubs[hi]
@@ -1099,22 +831,9 @@ def worker_loop(
             part_dir = work_dir / f"hub{hi}" if multi else work_dir
             if multi:
                 part_dir.mkdir(parents=True, exist_ok=True)
-            if prefetch_depth > 0 and hi not in pf_stores:
-                # staged 条数上限 = **槽位数**（2026-10-12：撤销 256MiB 字节闸，见
-                # `prefetch.PREFETCH_DEPTH_DEFAULT` 上的长注——「盘上的量 = 条数 × 实测体积」，
-                # 条数是配置整数、体积每轮都在日志里，都不需要猜）。下限取 unpack_n：解包
-                # 旋钮开到比 depth 大时，允许留的 staged 副本不该反而变少。
-                pf_stores[hi] = make_prefetcher(
-                    part_dir,
-                    mode=prefetch_mode,
-                    log=log,
-                    staged_max=max(prefetch_depth, prefetch_unpack),
-                )
-                # 建 store 时先扫一遍：清上一会话遗留的残壳 / 崩溃孤儿（`prefetch/` 在
-                # `prune_job_dirs` 豁免名单里，否则它们永远没人收；plan §2.3）。
-                # 进程模式的 `init` 已经扫过（子进程是暂存区的**唯一写者**）⇒ 不重复下一道命令。
-                if isinstance(pf_stores[hi], PrefetchStore):
-                    pf_stores[hi].prune()
+            _ensure_pf_store(
+                pf_stores, hi, part_dir, prefetch_mode, prefetch_depth, prefetch_unpack, log
+            )
             pf_store = pf_stores.get(hi)
             try:
                 _polls_since_log += 1
@@ -1133,25 +852,13 @@ def worker_loop(
                     log=log,
                 )
             except Exception as e:
-                _acquire_fails += 1
-                # iii-2：首败**立即重试**（见 `_acquire_fails` 的注释）；连败才退避。
-                wait_s = 0.0 if _acquire_fails < 2 else poll_sec
-                tail = "立即重试" if wait_s <= 0.0 else f"retry in {wait_s}s"
-                log(f"acquire failed: {e} — {tail}（连续 {_acquire_fails} 次）")
+                _acquire_fails, wait_s = acquire_retry(_acquire_fails, e, poll_sec, log)
                 if wait_s > 0.0:
                     time.sleep(wait_s)
                 hi = (hi + 1) % len(hubs)
                 continue
             _acquire_fails = 0  # 控制面通了（无论有没有活）：连败计数归零
-            got_halt = isinstance(job, dict) and job.get("halt") is True
-            if got_halt and not halt_seen.get(hi):
-                # §386：停机命令随任务同发——先尝试真停机（Colab unassign）；
-                # 停不掉（Kaggle 无 API）→ **照常执行下面的任务**（云机活着就不闲置，能继续训练）。
-                halt_seen[hi] = True
-                log("云端停机达令已送达：先尝试停机宿主实例（停不掉则照常执行任务）")
-                _release_cloud_machine(log)
-            elif not got_halt and halt_seen.get(hi):
-                halt_seen[hi] = False  # 停机条件消失（hub resume）→ 复位
+            _poll_halt(job, hi, halt_seen, log)
             if job is None:
                 if once:
                     break  # --once：无 job 或已处理完都退出（冒烟/单发）
@@ -1221,74 +928,20 @@ def worker_loop(
                 # 「距上次**被接受**」变成「距上次**产出结果**」（收没收看落定行/收尾行）。
                 # 它是存活日志里的诊断读数（是不是在疯狂轮询却不产活），不是判据。
                 _polls_since_accept = 0
-            # ── A2 让路自适应关闭（plan/aistudio-transfer-hardening §3.2）──────
-            # 每轮收尾复查一次控制面分位数：**纯函数判定 + 一行原因**（静默关闭会被读成 bug）。
-            # 一次性降级、会话内不回升——分位数是会话累计的（`stats()` 的 `p0_ms` 只增不清），
-            # 回升需要「这一轮比之前好」，那是另一个判据，本轮不做。
-            if _yield_live:
-                _sd = _BULK.stats()
-                # ★ 直接**下标**取（不是 `.get(..., 0.0)`）：键名被改时这里当场 KeyError，
-                #   而不是静默拿到 0.0 ⇒「分位为 0 = 没数据」⇒ 自适应永不触发、无人察觉。
-                #   （两个键都恒在，见 `BulkScheduler.stats()`；对应用例
-                #   `test_the_check_reads_the_quantiles_stats_exposes`。）
-                _p50 = float(_sd["p0_rt_ms_p50"])
-                _p95 = float(_sd["p0_rt_ms_p95"])
-                if not yield_worth_it(p50_ms=_p50, p95_ms=_p95, n=int(_sd["p0_count"])):
-                    _yield_live = False
-                    _BULK.configure_yield(after_sec=float("inf"), total_budget_sec=0)
-                    log(
-                        f"让路自适应关闭：p0_p95={_p95 / 1000:.1f}s ≫ p50={_p50 / 1000:.1f}s"
-                        f"（n={int(_sd['p0_count'])}，控制面尾部不是被 bulk 挤的）"
-                        "——让路只拖长传输；回退档 --bulk-yield always"
-                    )
+            # A2 让路自适应关闭：每轮收尾复查一次分位，判据/原因行在 `yield_self_check`。
+            _yield_live = yield_self_check(_yield_live, log)
             if round_.stop:
                 life.why("hub 要求停算")
                 return done
-            job_ok = round_.ok
             if once:
                 # H8（review-hy）：--once 模式 job 失败必须非零退出——冒烟/单发场景
                 # 退出码 0 会静默掩盖失败（smoke 只判 returncode）。
                 # P2.5：async 下成败只能等回传落定才知道，所以 --once 必须先 drain 再判。
-                uploader.drain()
-                if round_.uploaded:
-                    _out = uploader.outcome(round_.jid)
-                    if _out is not None:
-                        job_ok = _out.ok
-                return -1 if not job_ok else done
+                return _once_result(uploader, round_, done)
             hi = (hi + 1) % len(hubs)  # 跑完一个换下一 hub（round-robin 公平）
         return done
     finally:
-        # 让路策略还原（W1/§3.5 ★）：库层缺省必须回到老语义，否则同进程后续使用者
-        # （测试 / 多会话）继承 auto——`test_control_plane_bypass.py` 那类「要求无条件让路」
-        # 的既有用例会确定性变红。
-        _BULK.configure_yield(after_sec=_prev_yield[0], total_budget_sec=_prev_yield[1])
-        _BULK.set_p1_observer(_prev_p1_observer)
-        # 下行腿收尾（2026-10-20）：进程模式要收掉填充线程与子进程（否则一个会话漏一个
-        # `python -m remote.payload_worker`）。它**不丢任何东西**——暂存区是软持有（无租约），
-        # 没被 claim 的候选本来就要蒸发。
-        for _pf in list(pf_stores.values()):
-            _closer = getattr(_pf, "close", None)
-            if _closer is not None:
-                _closer()
-        # P2.5（2026-09-22）：**每条**退出路径都要过这里——`break`（空闲/停机）、
-        # `--once` 的 return、热替换的 SystemExit(86)、以及任何异常。队列里可能还有
-        # 没送出去的结果；不等它落定就退出 = 静默丢掉最贵的产物（训练侧要等租约
-        # 过期才看得出来，正是「3.5 小时静默」那一类事故）。
-        _drained = uploader.close()
-        _st = uploader.stats()
-        log(
-            f"回传收尾: mode={_st['mode']} 提交={_st['submitted']} "
-            f"成功={_st['ok']} 失败={_st['failed']} 未落定={_st['pending']} "
-            f"同步退化={_st['sync_fallback']}"
-        )
-        if not _drained or _st['failed']:
-            log(
-                "★ 回传收尾有未落定/失败的结果——训练侧会在租约过期后才发现，"
-                "请按上面的 jid 排查（hub 日志 / 网络）"
-            )
-        # 收线上报放在**回传收尾之后**：最后一个读点因此包含「结果到底交没交出去」之后的状态。
-        CLOUD_ROLLOUT_POOL.close_all()
-        life.close(done)
+        close_worker(_prev_yield, _prev_p1_observer, pf_stores, uploader, life, done, log)
 
 
 def main() -> None:
@@ -1399,25 +1052,25 @@ def main() -> None:
         try:
             token = Path(args.token_file).read_text(encoding="utf-8").strip()
         except OSError as e:
-            print(f"[{time.strftime('%H:%M:%S')}] [worker] ERROR: 读 --token-file 失败: {e}", flush=True)
+            _log(f"ERROR: 读 --token-file 失败: {e}")
             sys.exit(1)
     if not token:
-        print(f"[{time.strftime('%H:%M:%S')}] [worker] ERROR: 需要 --token 或 --token-file", flush=True)
+        _log("ERROR: 需要 --token 或 --token-file")
         sys.exit(1)
     # 2026-09-08 双 tmp 统一：相对 work 路径锚定仓库根（remote/ 上溯 3 层），
     # 不再落到 nn-training/tmp（此前 spawn cwd=nn-training 时相对路径走偏）。
     out = Path(args.out)
     if not out.is_absolute():
-        out = Path(__file__).resolve().parents[2] / out
+        out = REPO_ROOT / out
     out.mkdir(parents=True, exist_ok=True)
     # P3b：--poll 可重复/逗号分隔（同 token）；单值 = 旧行为。顺序即轮询顺序。
     raw_polls = args.poll if isinstance(args.poll, list) else [args.poll]
     hub_urls = [u.strip().rstrip("/") for p in raw_polls for u in str(p).split(",") if u.strip()]
     if not hub_urls:
-        print(f"[{time.strftime('%H:%M:%S')}] [worker] ERROR: --poll 为空", flush=True)
+        _log("ERROR: --poll 为空")
         sys.exit(1)
     if len(hub_urls) > 1:
-        print(f"[{time.strftime('%H:%M:%S')}] [worker] 多 hub 轮询（round-robin）：{hub_urls}", flush=True)
+        _log(f"多 hub 轮询（round-robin）：{hub_urls}")
     if os.environ.get("REMOTE_WORKER_CHILD") == "1":
         # ── 子进程模式（由监督器 supervise_worker / 新版 main() 拉起）──
         # 热替换必须退 HOT_RELOAD_EXIT(86) 让监督器重拉：worker_loop 以
@@ -1445,7 +1098,7 @@ def main() -> None:
             result_upload=args.result_upload,
             cache_dir=Path(args.cache_dir) if args.cache_dir else None,
         )
-        print(f"[{time.strftime('%H:%M:%S')}] [worker] done: {n} job(s) processed", flush=True)
+        _log(f"done: {n} job(s) processed")
         # H8：--once 失败（返回 -1）→ 非零退出码
         sys.exit(0 if n >= 0 else 1)
     # ── 监督器模式（默认入口）──
@@ -1455,7 +1108,7 @@ def main() -> None:
     # sys.argv[1:] 就是可重放的热替换参数（argv[0] 可能是 -m 或脚本路径，统一由
     # supervise_worker 用 `-m remote.worker` 重建，故这里只取参数部分）。
     rc = supervise_worker(sys.argv[1:])
-    print(f"[{time.strftime('%H:%M:%S')}] [worker-supervisor] worker exited: rc={rc}", flush=True)
+    log_line("worker-supervisor", f"worker exited: rc={rc}")
     sys.exit(rc)
 
 

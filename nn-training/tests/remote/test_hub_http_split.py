@@ -31,6 +31,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import pytest
+
 import remote.hub_client as hub_client_mod
 import remote.hub_http as hub_http_mod
 from tests.helpers import remote_dag as dag
@@ -66,12 +68,18 @@ MOVED_NAMES = {
 #: `hub_http.py` 允许的 import 面（stdlib + 协议层；多一个即红）。
 ALLOWED_IMPORTS = {
     "__future__",
+    # 2026-11-15：`NET_ERRORS` 里点名 `http.client.HTTPException`（窄捕的捕获面必须写得出
+    # 「协议层错乱」这个形状）。stdlib 叶子模块，导入期不攥住网络栈，也不是 `urllib.*` 那种
+    # 要延迟到 `_request` 里的东西。
+    "http.client",
     "json",
     "time",
     "typing",
     "urllib.error",
     "urllib.parse",
     "urllib.request",
+    # 2026-11-14（python.refactor.md §P0-6）：`log=` 默认回调的时间戳不再手拼。
+    "common.logutil",
     "common.protocol",
     "common.net_http",
 }
@@ -294,3 +302,19 @@ def test_probe_classifies_ready_pending_transient_and_terminal_failure(monkeypat
         assert e.kind == "ProtocolError" and "bun 缺失" in str(e)
     else:  # pragma: no cover - 走到这里说明终局失败被吞了
         raise AssertionError("410 必须抛 JobFailedError（终局失败不得混入 transient）")
+
+
+def test_probe_does_not_disguise_a_programmer_error_as_transient(monkeypatch) -> None:
+    """窄捕的另一半：`_request` 自己抛的程序员错不许被读成「hub 没答」。
+
+    传输壳的 `except Exception` 原本把两件事抹平了 —— 「网络层瞬时失败」（→ `PROBE_TRANSIENT`，
+    下一拍再问）与「我们自己的 bug」（`AttributeError` / `TypeError` / `KeyError`）。后者的现场
+    表现是「hub 一直没答」，于是等待环变成静默挂死，而真因（形状变了/字段拼错）永远看不到。
+    2026-11-15 改成 `common.errors.NET_ERRORS`（`common.protocol` 门面转发）后，这类错穿出去。
+    """
+    def _buggy(*_a: object, **_k: object) -> None:
+        raise AttributeError("'dict' object has no attribute 'decode'")
+
+    monkeypatch.setattr(hub_http_mod, "_request", _buggy)
+    with pytest.raises(AttributeError):
+        hub_http_mod.probe_job_result("http://hub", "t", "j1")

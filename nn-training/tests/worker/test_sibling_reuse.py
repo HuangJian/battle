@@ -62,7 +62,7 @@ def _reuse_on(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(sr, "CURRICULA_DIR", lib)
 
 
-def _course(name: str):  # type: ignore[no-untyped-def]
+def _course(name: str):
     return load_course(CURRICULA / f"{name}.jsonc")
 
 
@@ -123,6 +123,39 @@ def test_siblings_are_identity_matched_and_exclude_self(
     assert LEG_B in names, names
     assert LEG_A not in names, "自己不能算自己的兄弟（会借自己、也会自增依赖）"
     assert OTHER not in names, "身份不同的课不得进候选"
+
+
+def test_a_broken_course_file_is_skipped_but_our_shape_bug_is_not(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★ 两个半边各钉一条（P0-7 第十九批）：坏课文件跳过；已校验课程的指纹抛错要穿出去。
+
+    `load_course` 的失败面是**文件面**（盘错 / jsonc 坏 / 引用的 level 找不到 / pydantic 校验）
+    ⇒ `(OSError, ValueError, KeyError)` 全包，一个坏课不该拖死训练。
+    而 `episode_identity_fp` 对**过了 pydantic 的** `CourseConfig` 是全函数（`_identity_payload`
+    两种 `stages` 形状都吃）⇒ 它再抛就不是「坏课」而是我们的形状假设坏了。旧代码那里
+    `except Exception: continue` 把这种 bug 读成「不重复用」：训练照跑，复用默默死了。
+    """
+    a, b = _course(LEG_A), _course(LEG_B)
+    roots = {a.traj: tmp_path / "a", b.traj: tmp_path / "b"}
+    for p in roots.values():
+        p.mkdir(parents=True)
+    _wire_trajs(monkeypatch, roots)
+    (sr.CURRICULA_DIR / "broken.jsonc").write_text("{ not jsonc", encoding="utf-8")
+    assert [n for n, _root in sr.sibling_courses(a)] == [LEG_B]
+
+    import biz.corpus_fp as fp_mod
+
+    real = fp_mod.episode_identity_fp
+
+    def buggy(course):
+        if course.name == LEG_B:
+            raise AttributeError("identity payload lost ['stages']")
+        return real(course)
+
+    monkeypatch.setattr(fp_mod, "episode_identity_fp", buggy)
+    with pytest.raises(AttributeError):
+        sr.sibling_courses(a)
 
 
 def test_sibling_with_missing_workdir_is_skipped(

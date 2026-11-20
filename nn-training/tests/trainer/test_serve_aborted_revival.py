@@ -89,6 +89,11 @@ class _FlakyLoop:
         self._consec_fail = 0
         _FlakyLoop.instances.append(self)
 
+    @property
+    def leg_aborted(self) -> bool:
+        """死腿判决的公开读数：`_leg_abort` 私有（`_revive_hygiene` 按槽位清它），读数走这里。"""
+        return self._leg_abort
+
     def _setup(self) -> None:
         self.setups += 1
 
@@ -278,7 +283,7 @@ def test_aborted_course_revives_on_marker_bump(
 
     assert rep.courses["bad"]["state"] in ("ready", "running")
     assert rep.courses["bad"]["rounds_done"] >= 2  # ★ W3：复活后真的续跑（不是立再死）
-    assert _FlakyLoop.instances[-1]._leg_abort is False  # ★ W3：判决态已清零
+    assert _FlakyLoop.instances[-1].leg_aborted is False  # ★ W3：判决态已清零
     assert _FlakyLoop.instances[-1].finishes == []  # 不是「一轮假收官」
     assert not rep.skipped and not rep.skipped_at  # 复活成功即摘名
 
@@ -311,7 +316,7 @@ def test_aborted_course_revives_via_skipped_channel(
     assert rep.courses["bad"]["rounds_done"] >= 2  # ★ 复活后连续两轮仍活（W3）
     assert calls == ["bad"]  # 没重走 open_course（课已开、只是被停腿）
     assert len(_FlakyLoop.instances) == 1  # 没重建引擎（热复用）
-    assert _FlakyLoop.instances[-1]._leg_abort is False
+    assert _FlakyLoop.instances[-1].leg_aborted is False
 
 
 # ─────────────────── W6：复活后跑满 ⇒ 收官副作用（drain）必须还在 ───────────────────
@@ -458,6 +463,11 @@ def test_revive_hygiene_clears_leg_state_and_only_this_course_context() -> None:
     清它是安全的：`finished` 是内存加速器，盘上预算（`budget_exhausted`）与账本（`iteration_recorded`）
     都能重算 —— 真跑满的课清掉后第一次问 planner 立刻再置 True，只是白问一拍。
     """
+    # 这里**只能**裸读三个槽位（G5 第十五批认定，不是欠账）：
+    #  ① 本模块有 autouse fixture 把 `loop_core.TrainingLoop` 整体换成 `_FlakyLoop` ⇒ 真实例
+    #     在这个文件里拿不到，`remote_fail_state()` / `resume_state()` 无从谈起；
+    #  ② `_revive_hygiene` 是纯函数，它清的**就是这三个名字**（`hasattr` + `setattr` 的键）
+    #     —— 名字本身即契约，换读数反而把「到底清了哪几个键」藏起来。
     engine = SimpleNamespace(_leg_abort=True, _remote_fail=3, _consec_fail=5)
     runner = SimpleNamespace(
         contexts={"bad": object(), "other": object()}, finished=True, finish_reason="硬边界停车"

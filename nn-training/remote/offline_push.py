@@ -37,6 +37,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from common import runtime
 from common.env_probe import probe_cloud_env
 from common.logutil import tag_logger
 from common.proc import POPEN_NO_WINDOW
@@ -90,6 +91,9 @@ class _Child:
     """当前训练子进程的句柄（一个任务一个；退出后保留 rc 供 `/state` 读）。"""
 
     def __init__(self) -> None:
+        #: 两条旁路线程（`push-child-tee-<id>` / `push-child-wait-<id>`）：一条把子进程的
+        #: 输出同时写日志文件与日志行，一条等它退出。
+        self._rt = runtime.Runtime(scope="push-child")
         self.proc: subprocess.Popen[bytes] | None = None
         self.task_id = ""
         self._lock = threading.Lock()
@@ -115,7 +119,8 @@ class _Child:
         #   单元输出里 ⇒ 同一份代码，两条腿看到的明细天差地别。
         #   现在用一根 **tee 线程**：同一份字节**同时**进 `run.log` 与 supervisor 日志，逐字透出、
         #   不加前缀（子进程自己带 `[HH:MM:SS]`）—— 因为"日志面只有一份措辞"（2026-10-25 口径）。
-        log_f = open(log_path, "a", encoding="utf-8", buffering=1)
+        # 句柄由 `_tee` 线程持有，在其 finally 里关闭（跨线程存活）
+        log_f = open(log_path, "a", encoding="utf-8", buffering=1)  # noqa: SIM115
         try:
             proc = subprocess.Popen(
                 argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
@@ -151,7 +156,7 @@ class _Child:
                     except OSError:
                         pass
 
-        threading.Thread(target=_tee, name=f"push-child-tee-{task_id}", daemon=True).start()
+        self._rt.thread(_tee, name=f"tee-{task_id}", daemon=True)
 
         def _wait() -> None:
             rc = int(proc.wait())
@@ -159,7 +164,7 @@ class _Child:
                 self.proc = None
             on_exit(rc)
 
-        threading.Thread(target=_wait, name=f"push-child-{task_id}", daemon=True).start()
+        self._rt.thread(_wait, name=f"wait-{task_id}", daemon=True)
 
     def request_stop(self, *, stop_file: Path, grace: float = CANCEL_GRACE_SEC) -> None:
         """写 stop 文件 → 有界等 → 还在就 terminate（产物在轮边界已是自洽的）。
@@ -235,7 +240,8 @@ def run_push(
     server = make_face_server(state, port, push_token, log=log)
     # 隧道要指向**实际绑上的**端口（`push_port=0` 时与入参不同）。
     port = int(server.server_address[1])
-    threading.Thread(target=server.serve_forever, name="offline-push-face", daemon=True).start()
+    #: 服务线程归它自己那份 Runtime（`offline-push-face-serve`）：进程活多久它活多久。
+    runtime.Runtime(scope="offline-push-face").thread(server.serve_forever, name="serve", daemon=True)
     log(f"worker 服务已监听 :{port}（端点 /offline/push/*，Bearer 鉴权）")
 
     child = _Child()

@@ -31,7 +31,7 @@ if str(ROOT) not in sys.path:
 
 from common.errors import ProtocolError
 from remote import opt_delta as od
-from remote.hub_client import _extract_tar
+from remote.hub_client import PublishSpec, _extract_tar
 from remote.opt_delta import land_opt_delta as _land_opt_delta
 
 
@@ -171,6 +171,7 @@ def test_land_dispatches_on_the_magic_not_the_bit(tmp_path: Path) -> None:
 
 def _publish(tmp_path: Path, *, it: int = 1, ckpt_dir: Path | None = None, slim: bool = True) -> dict:
     from remote.hub_client import publish_job
+    from tests.helpers.publish_spec import publish_fields
 
     wfile = tmp_path / "init_weights.json"
     if not wfile.exists():
@@ -179,28 +180,25 @@ def _publish(tmp_path: Path, *, it: int = 1, ckpt_dir: Path | None = None, slim:
     if not jsonl.exists():
         jsonl.write_text("", encoding="utf-8")
     return publish_job(
-        job_root=tmp_path / "jobs",
-        jsonl_path=jsonl,
-        run_id="r1",
-        it=it,
-        traj_dir=tmp_path / "traj",
-        shard_dirs=[],
-        commit="c" * 40,
-        code_sha256="z" * 64,
-        course='{"reward":{"formula":"score"}}',
-        course_fp="c" * 64,
-        reward_formula="score",
-        formula_hash="h" * 40,
-        metrics_version=1,
-        gamma=0.995,
-        lam=0.95,
-        mode="per-tick",
-        epochs=1,
-        mb=512,
-        lr=3e-4,
-        init_weights_path=str(wfile),
-        ckpt_remote_dir=ckpt_dir,
-        slim=slim,
+        PublishSpec(
+            **publish_fields(
+                tmp_path,
+                jsonl_path=jsonl,
+                run_id="r1",
+                it=it,
+                traj_dir=tmp_path / "traj",
+                course='{"reward":{"formula":"score"}}',
+                course_fp="c" * 64,
+                reward_formula="score",
+                formula_hash="h" * 40,
+                metrics_version=1,
+                mb=512,
+                lr=3e-4,
+                init_weights_path=str(wfile),
+                ckpt_remote_dir=ckpt_dir,
+                slim=slim,
+            )
+        ),
         log=_quiet,
     )
 

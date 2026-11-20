@@ -7,8 +7,9 @@ ret 归一），却因同住一个 `import torch` 的测试文件而在无 torch
 
 覆盖：
   * compute_gae：定长手算 / dt=1 变步长退化 / dt≠1 确有差异；
-  * chunk_episodes：mb 对齐（尾部丢弃）与 shuffle=False 对照路径、重排守恒；
-  * _pack/_unpack_np_state：RNG 状态精确往返；
+  * chunk_episodes：mb 对齐（尾部丢弃）与 shuffle=False 对照路径、重排守恒、
+    `shuffle=True` 缺 rng 必须响亮拒（§P1-7：不给全局 np.random 留后门）；
+  * PPORng：`chunk` 流状态往返后逐位接上；
   * discover_shards / load_shard_fields：marker 过滤 + 零拷贝 astype 字段表；
   * load_episodes_common：normalize_ret off/on 的逐字节锚。
 
@@ -30,16 +31,8 @@ from common.schema import OBS_CHANNELS
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import worker.ppo.np_core as np_core
+from worker.ppo.rng import PPORng
 
-FAILS: list[str] = []
-
-
-def check(cond: bool, msg: str) -> None:
-    if not cond:
-        FAILS.append(msg)
-        print(f"FAIL: {msg}")
-    else:
-        print(f"ok: {msg}")
 
 def test_gae_dt1_degradation() -> None:
     """变步长 GAE（dt 全 1）与定长 GAE 逐字节一致（γ 同源）。"""
@@ -53,8 +46,8 @@ def test_gae_dt1_degradation() -> None:
 
     adv_fixed, ret_fixed = np_core.compute_gae(rewards, values, dones, gamma, lam)
     adv_var, ret_var = np_core.compute_gae(rewards, values, dones, gamma, lam, dt)
-    check(np.array_equal(adv_fixed, adv_var), "GAE dt=1 → adv 与定长逐字节一致")
-    check(np.array_equal(ret_fixed, ret_var), "GAE dt=1 → ret 与定长逐字节一致")
+    assert np.array_equal(adv_fixed, adv_var), "GAE dt=1 → adv 与定长逐字节一致"
+    assert np.array_equal(ret_fixed, ret_var), "GAE dt=1 → ret 与定长逐字节一致"
 
 def test_gae_hand_computed() -> None:
     """定长 GAE 手算验证（N=3，已知数值）。"""
@@ -68,8 +61,8 @@ def test_gae_hand_computed() -> None:
     #   t=1: delta=0.0+0.9*0.4-0.6=-0.24 → adv1=-0.24+0.9*0.8*1*1.6=0.912
     #   t=0: delta=1.0+0.9*0.6-0.5=1.04 → adv0=1.04+0.9*0.8*1*0.912=1.69664
     expected = np.array([1.69664, 0.912, 1.6], dtype=np.float32)
-    check(np.allclose(adv, expected, atol=1e-5), f"定长 GAE 手算匹配 (got {adv})")
-    check(np.allclose(ret, adv + values, atol=1e-5), "ret = adv + values")
+    assert np.allclose(adv, expected, atol=1e-5), f"定长 GAE 手算匹配 (got {adv})"
+    assert np.allclose(ret, adv + values, atol=1e-5), "ret = adv + values"
 
 def test_gae_variable_differs() -> None:
     """dt≠1 时变步长结果与定长不同（变步长确实生效）。"""
@@ -82,7 +75,7 @@ def test_gae_variable_differs() -> None:
     dt = np.full(N, 3, dtype=np.int64)  # 每个意图步 = 3 tick
     adv_var, _ = np_core.compute_gae(rewards, values, dones, gamma, lam, dt)
     adv_fixed, _ = np_core.compute_gae(rewards, values, dones, gamma, lam)
-    check(not np.allclose(adv_var, adv_fixed, atol=1e-6), "dt=3 的变步长 adv 与定长 adv 确有差异")
+    assert not np.allclose(adv_var, adv_fixed, atol=1e-6), "dt=3 的变步长 adv 与定长 adv 确有差异"
 
 def test_chunk_episodes() -> None:
     """mb 对齐（2026-09-23，见 docs/nn.progress.md §140）。
@@ -98,8 +91,8 @@ def test_chunk_episodes() -> None:
         {"obs": np.zeros((10, 3), dtype=np.uint8), "adv": np.zeros(10)},
         {"obs": np.zeros((5, 3), dtype=np.uint8), "adv": np.zeros(5)},
     ]
-    np.random.seed(0)
-    chunks = np_core.chunk_episodes(eps, 4)
+    rng = PPORng.from_seed(0)
+    chunks = np_core.chunk_episodes(eps, 4, rng=rng.chunk)
     sizes = [c["obs"].shape[0] for c in chunks]
     assert sizes == [4, 4, 4], f"每块恰为 mb=4（15 步裁到 12）(got {sizes})"
     assert sum(sizes) == 12 == (15 // 4) * 4, "尾部 15%4=3 步丢弃"
@@ -112,10 +105,10 @@ def test_chunk_episodes() -> None:
         and seq[3]["obs"][0, 0] == eps[1]["obs"][0, 0]
     ), "shuffle=False 不跨 episode 混数据"
     # 单池：不重排、不裁（裁尾有偏）。
-    one = np_core.chunk_episodes([eps[0]], 4)
+    one = np_core.chunk_episodes([eps[0]], 4, rng=PPORng.from_seed(0).chunk)
     assert [c["obs"].shape[0] for c in one] == [4, 4, 2], "单池保持旧形状"
     # 池子 < mb：保留一块（裁成 0 块 = 静默不训练）。
-    tiny = np_core.chunk_episodes([eps[0], eps[1]], 99)
+    tiny = np_core.chunk_episodes([eps[0], eps[1]], 99, rng=PPORng.from_seed(0).chunk)
     assert [c["obs"].shape[0] for c in tiny] == [15], "池子 < mb 时不裁"
 
 def test_chunk_episodes_shuffle_preserves_data() -> None:
@@ -136,7 +129,7 @@ def test_chunk_episodes_shuffle_preserves_data() -> None:
     old_chunks = np_core.chunk_episodes(eps, mb=8, shuffle=False)
     np.testing.assert_array_equal(old_chunks[0]["obs"], eps[0]["obs"][:8])
     # shuffle=True：行数守恒 + 元素集合不变（拼回后与 flatten 一致）
-    sh_chunks = np_core.chunk_episodes(eps, mb=8, shuffle=True)
+    sh_chunks = np_core.chunk_episodes(eps, mb=8, shuffle=True, rng=PPORng.from_seed(7).chunk)
     assert sum(c["obs"].shape[0] for c in sh_chunks) == total
     flat_adv = np.concatenate([e["adv"] for e in eps])
     got_adv = np.concatenate([c["adv"] for c in sh_chunks])
@@ -145,14 +138,41 @@ def test_chunk_episodes_shuffle_preserves_data() -> None:
     first_flat = np.concatenate([e["adv"] for e in eps])
     assert not np.array_equal(got_adv, first_flat), "应发生重排"
 
-def test_np_state_roundtrip() -> None:
-    np.random.seed(42)
-    _ = np.random.permutation(100)  # 消耗一些状态
-    packed = np_core._pack_np_state()
-    expected = np.random.permutation(50).copy()
-    np_core._unpack_np_state(packed)
-    got = np.random.permutation(50).copy()
-    check(np.array_equal(got, expected), "numpy RNG 状态 pack/unpack 精确重建")
+def test_chunk_episodes_requires_rng() -> None:
+    """§P1-7：`shuffle=True` 不给 rng ⇒ ValueError（旧路径读全局 np.random，已拆）。
+
+    为什么不是「None 就退回全局」：那等于留一条谁都能踩、谁也不会注意的后门 ——
+    「同一 seed ⇒ 同一条轨迹」的前提就又没了。`shuffle=False` 不抽样，故不需要 rng。
+    """
+    # 两局起才走重排路径（单池不重排 ⇒ 本来就不需要 rng，见 `len(episodes) <= 1`）。
+    eps: list[dict] = [
+        {"obs": np.zeros((4, 3), dtype=np.uint8), "adv": np.zeros(4)},
+        {"obs": np.zeros((4, 3), dtype=np.uint8), "adv": np.zeros(4)},
+    ]
+    try:
+        np_core.chunk_episodes(eps, 2)
+    except ValueError as e:
+        assert "rng" in str(e), f"报错要指名 rng（got {e}）"
+    else:
+        raise AssertionError("chunk_episodes(shuffle=True) 缺 rng 必须 ValueError")
+    # 对照：shuffle=False 照旧无需 rng
+    seq = np_core.chunk_episodes(eps, 2, shuffle=False)
+    assert [c["obs"].shape[0] for c in seq] == [2, 2, 2, 2], "shuffle=False 不需要 rng（两局各切两块）"
+
+
+def test_ppo_rng_state_roundtrip() -> None:
+    """ckpt 存的 `bit_generator.state` 灌回去 ⇒ 下一位抽样逐位相同（§P1-7）。"""
+    a = PPORng.from_seed(123)
+    _ = a.chunk.permutation(64)  # 先走一段，别停在原点
+    blob = a.state()
+    want = a.chunk.permutation(32).copy()
+    b = PPORng.from_seed(123)  # 另一个同种子的实例，靠 restore 接上
+    assert b.restore(blob), "restore 应接受自家 state"
+    np.testing.assert_array_equal(b.chunk.permutation(32), want)
+    assert a.epoch.permutation(16).tolist() == b.epoch.permutation(16).tolist(), "另两条流不受 chunk 消耗影响"
+    # 旧 ckpt（全局 MT19937 时代）没有 rng_streams ⇒ False，且不抛
+    assert PPORng.from_seed(0).restore(None) is False, "缺项 ⇒ False"
+    assert PPORng.from_seed(0).restore({"chunk": {}}) is False, "坏项 ⇒ 整份拒收"
 
 def test_discover_and_load_shard_fields(tmp_path: Path) -> None:
     td = tempfile.mkdtemp(dir=str(tmp_path))
@@ -167,15 +187,15 @@ def test_discover_and_load_shard_fields(tmp_path: Path) -> None:
     partial.mkdir()
     np.save(partial / "obs.npy", np.zeros(1))
     found = np_core.discover_shards(str(root), ("reward.npy", "obs.npy"))
-    check(found == [str(shard)], f"discover 只含完整 shard (got {found})")
+    assert found == [str(shard)], f"discover 只含完整 shard (got {found})"
     spec: dict[str, tuple[str, npt.DTypeLike]] = {
         "obs": ("obs.npy", np.uint8),
         "reward": ("reward.npy", np.float32),
         "dt": ("dt.npy", np.int64),
     }
     d = np_core.load_shard_fields(str(shard), spec)
-    check(set(d.keys()) == {"obs", "reward", "dt"}, "load_shard_fields 字段齐备")
-    check(d["obs"].dtype == np.uint8 and d["dt"].dtype == np.int64, "字段 dtype 按 spec 转换")
+    assert set(d.keys()) == {"obs", "reward", "dt"}, "load_shard_fields 字段齐备"
+    assert d["obs"].dtype == np.uint8 and d["dt"].dtype == np.int64, "字段 dtype 按 spec 转换"
 
 def _ret_norm_shards(tmp_path: Path) -> dict[str, dict[str, npt.NDArray]]:
     """两个 marker 目录 + 按名取数的 synthetic payload（ret 尺度不一，模拟
@@ -293,18 +313,66 @@ def test_gae_variable_dt_matches_fixed_when_dt1() -> None:
     np.testing.assert_array_equal(ret_var, ret_fixed)
 
 
+def _gae_reference(rewards, values, dones, gamma, lam, dt=None):
+    """2026-11-16 向量化之前的循环实现，逐字保留 —— 独立重实现对账用（§8）。"""
+    N = len(rewards)
+    adv = np.zeros(N, dtype=np.float32)
+    last = 0.0
+    for t in reversed(range(N)):
+        non_term = 1.0 - float(dones[t])
+        gamma_step = float(gamma) if dt is None else float(gamma ** float(dt[t]))
+        next_value = 0.0 if t + 1 >= N else float(values[t + 1])
+        delta = float(rewards[t]) + gamma_step * next_value - float(values[t])
+        last = delta + gamma_step * lam * non_term * last
+        adv[t] = last
+    return adv, adv + np.asarray(values, dtype=np.float32)
+
+def test_gae_bit_exact_against_reference_loop() -> None:
+    """P1-12 向量化必须是**逐字节**改写（不是 `allclose`）。
+
+    `adv` 按 float64 累积再落 float32、`ret = adv + values` 也是 float32 加法，所以任何
+    舍入顺序的改动都会动 golden 签名。六种长度 × 三种终止密度 × 三种 γ × 三种 dt 路径
+    全覆盖，含 N=0 边界与 Python list 输入（Sequence 契约）+ 大动态范围。
+    """
+    rng = np.random.default_rng(20261116)
+    cases = 0
+    for n in (0, 1, 2, 5, 33, 200):
+        r = rng.standard_normal(n).astype(np.float32)
+        v = rng.standard_normal(n).astype(np.float32)
+        for done_rate in (0.0, 0.05, 0.5):
+            d = (rng.random(n) < done_rate).astype(np.int64)
+            for gamma in (0.99, 0.995, 1.0):
+                for dt in (None, rng.integers(0, 9, n).astype(np.int64),
+                           rng.integers(1, 3, n).astype(np.float64)):
+                    got = np_core.compute_gae(r, v, d, gamma, 0.95, dt)
+                    want = _gae_reference(r, v, d, gamma, 0.95, dt)
+                    for a, b in zip(got, want, strict=True):
+                        assert a.dtype == np.float32 and b.dtype == np.float32
+                        np.testing.assert_array_equal(a.view(np.int32), b.view(np.int32))
+                    cases += 1
+    big_r = [1e30, -1e30, 0.5, 0.0, 1.0, 2.0, 3.0]
+    big_v = [1e30, 1e20, -3.0, 0.0, 0.0, 7.0, 8.0]
+    big_d = [0, 0, 1, 0, 0, 0, 1]
+    for dt in (None, np.full(7, 3, dtype=np.int64)):
+        got = np_core.compute_gae(big_r, big_v, big_d, 1.0, 0.95, dt)
+        want = _gae_reference(big_r, big_v, big_d, 1.0, 0.95, dt)
+        for a, b in zip(got, want, strict=True):
+            np.testing.assert_array_equal(a.view(np.int32), b.view(np.int32))
+        cases += 1
+    print(f"ok: GAE 向量化版与循环参照逐字节一致（{cases} 组）")
+
+
 def main() -> None:
     _td = tempfile.mkdtemp(dir=str(Path(__file__).resolve().parents[2] / "tmp" / "manual-tests"))
     test_gae_dt1_degradation()
     test_gae_hand_computed()
     test_gae_variable_differs()
+    test_gae_bit_exact_against_reference_loop()
     test_chunk_episodes()
     test_chunk_episodes_shuffle_preserves_data()
-    test_np_state_roundtrip()
+    test_chunk_episodes_requires_rng()
+    test_ppo_rng_state_roundtrip()
     test_discover_and_load_shard_fields(Path(_td))
-    if FAILS:
-        print(f"\n{len(FAILS)} FAILED")
-        sys.exit(1)
     print("\nAll tests passed.")
 
 

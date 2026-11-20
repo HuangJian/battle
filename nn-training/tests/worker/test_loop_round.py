@@ -256,7 +256,7 @@ def test_composition_writes_iter_error_and_retries_on_exception(
     out = loop.run_one_round(2)
 
     assert out == RoundOutcome(ROUND_RETRY, 2)  # it 不前跳
-    assert loop._consec_fail == 1
+    assert loop.resume_state().consec_fail == 1
     assert sleeps == [30]  # 组合路径（单课程前台）自带退避
     rows = [
         json.loads(line)
@@ -306,7 +306,7 @@ def test_composition_refuses_to_yield_loudly(tmp_path: Path) -> None:
     _install_fake_steps(loop, [], yield_at="ppo")
     with pytest.raises(RoundYieldError, match="让位"):
         loop.run_one_round(3)
-    assert loop._consec_fail == 0
+    assert loop.resume_state().consec_fail == 0
     assert not (tmp_path / "training_log.jsonl").exists()  # 不是失败：不留 iter_error
 
 
@@ -324,12 +324,12 @@ def test_smoke_void_round_stops_cleanly_without_counting_a_failure(
     _stub(loop, "round_steps", lambda: [boom])
     loop.args = types.SimpleNamespace(smoke=True)
     assert loop.run_one_round(9) == RoundOutcome(ROUND_SMOKE_STOP, 9)
-    assert loop._consec_fail == 0  # 冒烟作废不是失败：不计连击、不落 iter_error
+    assert loop.resume_state().consec_fail == 0  # 冒烟作废不是失败：不计连击、不落 iter_error
     assert not (tmp_path / "training_log.jsonl").exists()
 
     loop.args = types.SimpleNamespace(smoke=False)
     assert loop.run_one_round(9) == RoundOutcome(ROUND_RETRY, 9)
-    assert loop._consec_fail == 0
+    assert loop.resume_state().consec_fail == 0
 
 
 def test_composition_does_not_retry_deterministic_failure(
@@ -345,4 +345,4 @@ def test_composition_does_not_retry_deterministic_failure(
     with pytest.raises(BaseNotFoundError):
         loop.round_failure(BaseNotFoundError("基准不在本机"), 3, backoff=True)
     assert sleeps == []  # 没有退避重试
-    assert loop._consec_fail == 1  # 但这次失败仍然计账
+    assert loop.resume_state().consec_fail == 1  # 但这次失败仍然计账

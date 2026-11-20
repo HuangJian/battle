@@ -17,13 +17,18 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from pathlib import Path
 from typing import Any
 
 import common.distribution
+import common.runtime
+import common.task_client
+import common.weights_client
+import remote.node_upgrade
 from common import game_watch  # 进度行节流口径与节点侧 rollout 共用一份（`progress_due`）
 from common.log import log
+from common.paths import REPO_ROOT
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from remote import weights_standard
 
@@ -34,14 +39,11 @@ from worker.cmd import build_rollout_cmd, corpus_fp_for_args, course_fp_for_args
 from worker.reports import combine_reports
 from worker.sibling_reuse import reuse_rollout, rollout_sources
 
-REPO_ROOT = (
-    Path(__file__).resolve().parents[2]
-)  # 仓库根 battle2（trainer/ 上溯 3 层，修正 2026-09-02）
-
 
 def _thread_for(target, args):
     """采样线程工厂（单测注入点）：门禁并行时 `Thread.start()` 会抛 `can't start new thread`。"""
-    return threading.Thread(target=target, args=args, daemon=True)
+    name = getattr(target, "__name__", "worker")
+    return threading.Thread(target=target, args=args, daemon=True, name=f"node-worker:{name}")
 
 
 def spawn_node_workers(
@@ -202,6 +204,9 @@ class LocalLane:
         self.deadline = deadline
         self.lock = lock
         self.threads = threads
+        #: 本机槽线程的属性在这里（§P1-6 裸线程那一半）：名字 `rollout-local-<槽位>`、
+        #: 登记在本域。谁等它们仍由调用方的 `threads` 表决定（`LocalLane` 不替人 join）。
+        self._rt = common.runtime.Runtime(scope="rollout-local")
         self._slots: list[tuple[int, threading.Thread]] = []
         #: 本机槽「有容量却无活」的累计线程秒（P2-2 观测；不进 dupRate）。
         self.idle_sec = 0.0
@@ -213,18 +218,15 @@ class LocalLane:
     def spawn(self, n: int) -> None:
         for _ in range(max(0, n)):
             slot = len(self._slots)
-            t = threading.Thread(
-                target=self.worker, args=(None, slot), daemon=True, name="rollout-local"
-            )
-            t.start()
+            # 名字带槽位：三条约同名线程在转储里等于没名字。
+            t = self._rt.thread(self.worker, None, slot, name=f"worker-{slot}", daemon=True)
             self.threads.append(t)
             self._slots.append((slot, t))
 
     def slot_allowed(self, slot: int) -> bool:
         """失联补孵的槽位在远端恢复后返回 False（调用方持锁）。"""
         return (
-            slot < self.local_cap[0]
-            or time.time() - self.last_remote_ok[0] > self.remote_dead_sec
+            slot < self.local_cap[0] or time.time() - self.last_remote_ok[0] > self.remote_dead_sec
         )
 
     def watch(self) -> None:
@@ -249,11 +251,7 @@ class LocalLane:
     def start(self) -> None:
         self.spawn(self.local_slots)
         if self.local_slots < self.cap_full:
-            t = threading.Thread(
-                target=self.watch, daemon=True, name="rollout-local-watch"
-            )
-            t.start()
-            self.threads.append(t)
+            self.threads.append(self._rt.thread(self.watch, name="watch", daemon=True))
 
 
 def make_local_pool(
@@ -424,7 +422,7 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
         t0 = time.time()
         last_log_at = t0
         results: list[tuple[int, dict | None]] = [(1, None)] * len(pairs)
-        with ThreadPoolExecutor(max_workers=workers) as ex:
+        with common.runtime.Runtime(scope="local-rollout", workers=workers) as ex:
             futures = {ex.submit(run_one, i, si, sd): i for i, (si, sd) in enumerate(pairs)}
             for done_n, fut in enumerate(as_completed(futures), 1):
                 results[futures[fut]] = fut.result()
@@ -520,6 +518,94 @@ def run_local_rollout(
     return report
 
 
+def _rescan_stale_code(
+    nid: str, n: dict, ping: dict, code_hash: str, upgrade_branch, dirty_files
+) -> bool:
+    """rescan 的 codeHash 门（自 `rescan_nodes` 原样搬出）。
+
+    ping 与本地一致 ⇒ False（继续正常回场）；不一致 ⇒ 视情形请求 guarded 重启、
+    记日志，返回 True（本节点本 pass 不再回场）。日志文案与去重口径逐字保留。
+    """
+    if ping.get("codeHash") == code_hash:
+        return False
+    # guarded 重启（跨代去重 + 脏树拒发，同 ping 门）；dedup 静默跳过
+    # （rescan 周期 ~15s，重复刷屏无信息量）。F2：日志带两侧 hash——
+    # 与 ping 门同口径，运维一眼看出差异在哪一侧。
+    common.distribution.forget_weights_node(nid)
+    local_short = code_hash[:8]
+    remote_short = str(ping.get("codeHash") or "")[:8] or "none"
+    if not upgrade_branch:
+        return True
+    ok, reason = remote.node_upgrade.request_upgrade_guarded(
+        nid,
+        n["url"],
+        n.get("authKey", ""),
+        upgrade_branch,
+        str(ping.get("codeHash")),
+        dirty=dirty_files,
+        expected_hash=code_hash,
+    )
+    if reason == "restart-requested":
+        log(
+            f"[dist] rescan {nid}: codeHash stale "
+            f"(local={local_short} remote={remote_short}) — requested "
+            f"upgrade to {upgrade_branch} (accepted)"
+        )
+    elif reason.startswith("dirty-tree"):
+        log(
+            f"[dist] rescan {nid}: codeHash stale "
+            f"(local={local_short} remote={remote_short}) — remote restart "
+            f"suppressed ({reason}: uncommitted training-tree changes)"
+        )
+    elif remote.node_upgrade.is_self_node(n["url"], nid):
+        log(
+            f"[dist] rescan {nid}: self node stale "
+            f"(local={local_short} remote={remote_short}) — restart-only "
+            f"({reason})"
+        )
+    elif reason != "dedup":
+        log(
+            f"[dist] rescan {nid}: codeHash stale "
+            f"(local={local_short} remote={remote_short}) — upgrade "
+            f"request failed ({reason})"
+        )
+    return True
+
+
+def _rescan_push_weights(
+    nid: str,
+    n: dict,
+    why: str,
+    iter_id: str,
+    wver: str,
+    weights_bytes,
+    task_timeout: float,
+    wkind: str,
+) -> str | None:
+    """为回场/新上线节点备好权重 → mode；POST 失败返回 None（调用方跳过本节点）。
+
+    自 `rescan_nodes` 原样搬出：新节点走进程内复用缓存；回场节点强制重握手（先
+    forget，post_weights 自带 cached 探针）。kind 与 rollout 腿一致的口径不变。
+    """
+    if why == "new" and common.distribution.weights_already_pushed(wver, nid, kind=wkind):
+        return "kept(cache)"
+    if why == "rearm":
+        common.distribution.forget_weights_node(nid)
+    try:
+        return common.weights_client.post_weights(
+            n["url"],
+            n.get("authKey", ""),
+            iter_id,
+            wver,
+            weights_bytes,
+            timeout=min(300.0, max(60.0, task_timeout)),
+            kind=wkind,
+        )
+    except common.distribution.DistError as e:
+        log(f"[dist] rescan {nid}: weights POST failed ({e}) — skip this round")
+        return None
+
+
 def rescan_nodes(
     cfg,
     code_hash,
@@ -578,6 +664,10 @@ def rescan_nodes(
         腿的中途上线节点会把权重发进 rollout 桶，任务全 409；
       · `nd` 带 `ping`（旧实现漏带 ⇒ stageJson 任务在回场节点上被能力握手拒掉）。
     """
+    #: 补孵的采样线程归它（名字 `queue-rescan-rearm:<节点>`）。建在**本线程体内**：
+    #: 这份 Runtime 的生命期 = rescan 线程自己，不是跨轮单例；谁等线程仍由调用方的
+    #: `extra_threads` 决定（与 `LocalLane` 同口径：所有者不替人 join）。
+    rt = common.runtime.Runtime(scope="queue-rescan")
     configured = [n for n in cfg.get("nodes", []) if n.get("enabled", True)]
     streaks = {} if streaks is None else streaks
     soft_streaks = {} if soft_streaks is None else soft_streaks
@@ -647,48 +737,7 @@ def rescan_nodes(
                             f"不再补孵（节点持续失败，见日志根因）"
                         )
                     continue
-            if ping.get("codeHash") != code_hash:
-                # guarded 重启（跨代去重 + 脏树拒发，同 ping 门）；dedup 静默跳过
-                # （rescan 周期 ~15s，重复刷屏无信息量）。F2：日志带两侧 hash——
-                # 与 ping 门同口径，运维一眼看出差异在哪一侧。
-                common.distribution.forget_weights_node(nid)
-                local_short = code_hash[:8]
-                remote_short = str(ping.get("codeHash") or "")[:8] or "none"
-                if not upgrade_branch:
-                    continue
-                ok, reason = common.distribution.request_upgrade_guarded(
-                    nid,
-                    n["url"],
-                    n.get("authKey", ""),
-                    upgrade_branch,
-                    str(ping.get("codeHash")),
-                    dirty=dirty_files,
-                    expected_hash=code_hash,
-                )
-                if reason == "restart-requested":
-                    log(
-                        f"[dist] rescan {nid}: codeHash stale "
-                        f"(local={local_short} remote={remote_short}) — requested "
-                        f"upgrade to {upgrade_branch} (accepted)"
-                    )
-                elif reason.startswith("dirty-tree"):
-                    log(
-                        f"[dist] rescan {nid}: codeHash stale "
-                        f"(local={local_short} remote={remote_short}) — remote restart "
-                        f"suppressed ({reason}: uncommitted training-tree changes)"
-                    )
-                elif common.distribution.is_self_node(n["url"], nid):
-                    log(
-                        f"[dist] rescan {nid}: self node stale "
-                        f"(local={local_short} remote={remote_short}) — restart-only "
-                        f"({reason})"
-                    )
-                elif reason != "dedup":
-                    log(
-                        f"[dist] rescan {nid}: codeHash stale "
-                        f"(local={local_short} remote={remote_short}) — upgrade "
-                        f"request failed ({reason})"
-                    )
+            if _rescan_stale_code(nid, n, ping, code_hash, upgrade_branch, dirty_files):
                 continue
             remote_full = str(ping.get("bunVersion", "?"))
             # mm 就地内联（param 已删）：major.minor 一致性红线（确定性，M4）
@@ -707,28 +756,11 @@ def rescan_nodes(
             c_n = common.distribution.node_slots(
                 n.get("concurrency"), ping.get("cpus"), ping.get("workers")
             )
-            # 权重：新上线节点走进程内复用缓存；**回场节点强制重握手**（它可能刚重启，
-            # 桶里那份也可能已被别的客户端挤掉；post_weights 自带 cached 探针，命中即
-            # 'kept'）。kind 必须与 rollout 腿一致——旧实现漏传，goal/intent 腿会把权重
-            # 发进 rollout 桶，任务全 409（与 A1 同一类陷阱）。
-            if why == "new" and common.distribution.weights_already_pushed(wver, nid, kind=wkind):
-                mode = "kept(cache)"
-            else:
-                if why == "rearm":
-                    common.distribution.forget_weights_node(nid)
-                try:
-                    mode = common.distribution.post_weights(
-                        n["url"],
-                        n.get("authKey", ""),
-                        iter_id,
-                        wver,
-                        weights_bytes,
-                        timeout=min(300.0, max(60.0, task_timeout)),
-                        kind=wkind,
-                    )
-                except common.distribution.DistError as e:
-                    log(f"[dist] rescan {nid}: weights POST failed ({e}) — skip this round")
-                    continue
+            mode = _rescan_push_weights(
+                nid, n, why, iter_id, wver, weights_bytes, task_timeout, wkind
+            )
+            if mode is None:
+                continue
             # nd 带 ping：漏带会让 stageJson 任务在回场/中途上线节点上被能力握手拒掉
             # （旧实现 bug，自定义关课程下等于把这些节点白孵）。
             nd = {
@@ -759,8 +791,7 @@ def rescan_nodes(
                     f"（第 {rearm_counts[nid]}/{rearm_cap} 次）"
                 )
             for _ in range(c_n):
-                t = threading.Thread(target=worker, args=(nd,), daemon=True)
-                t.start()
+                t = rt.thread(worker, nd, name=f"rearm:{nd.get('id')}", daemon=True)
                 extra_threads.append(t)
 
 
@@ -916,9 +947,7 @@ def _cancel_remote_targets(targets: list[dict], log: Any) -> None:
         if not key:
             continue
         tried += 1
-        if common.distribution.cancel_task(
-            str(t.get("url") or ""), str(t.get("auth") or ""), key
-        ):
+        if common.task_client.cancel_task(str(t.get("url") or ""), str(t.get("auth") or ""), key):
             ok += 1
     if tried:
         log(f"[dist] alloc-timeout: cancelled {ok}/{tried} remote task(s)")
@@ -966,10 +995,7 @@ def reap_alloc_timeouts(
                 f"({timeout_sec:.0f}s) — re-queued, cooling nodes: {blocked}"
             )
         else:
-            log(
-                f"[dist] alloc-timeout s{task[0]}/seed{task[1]} "
-                f"({timeout_sec:.0f}s) — re-queued"
-            )
+            log(f"[dist] alloc-timeout s{task[0]}/seed{task[1]} ({timeout_sec:.0f}s) — re-queued")
 
     # 关掉超时那一份的 HTTP 响应（异步轮询会立刻抛；同步请求若已拿到响应头也能被
     # reset）。关不到的部分由原请求自己的 timeout 兜底——至少不再让 reaper 被
@@ -982,12 +1008,9 @@ def reap_alloc_timeouts(
     # 断本端连接只省本端的等待；有 cancelSupport 的节点还要真正停掉远端算力。
     # daemon 线程：reaper 在 dispatch 锁内跑，HTTP 不得持锁。
     if cancel_targets:
-        threading.Thread(
-            target=_cancel_remote_targets,
-            args=(cancel_targets, log),
-            daemon=True,
-            name="alloc-cancel",
-        ).start()
+        common.runtime.Runtime(scope="alloc-cancel").thread(
+            _cancel_remote_targets, cancel_targets, log, name="fire", daemon=True
+        )
     return len(reaped)
 
 

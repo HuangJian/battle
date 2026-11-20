@@ -1,7 +1,7 @@
 """reward_context —— 加载期 holder（评审 R1-1 / LC §4.1）。
 
 为什么需要它：`update_kwargs` 是 **update 期**参数，到不了 `compute_gae` 的
-**加载**点（`ppo.engine.load_episode_from_shard` / `load_episodes`）。而奖励与
+**加载**点（`ppo.np_core.load_episode_from_shard` / `load_episodes`）。而奖励与
 gamma/lam 恰恰是在加载期消费的——schedule 让它们每 iter 可变，就必须有一个
 加载期可见的注入通道。
 

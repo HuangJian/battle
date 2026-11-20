@@ -1,13 +1,17 @@
 """test_batch_plan_split — B 层「批语料规划 + 判据/门」出包（S25/B1）的契约守卫。
 
+★ 2026-11-14：被测模块搬去了 `biz/batch_plan.py`（它从来只依赖 `common.*`），本守卫
+**留在 `tests/trainer/`**：它钉的两条边（`batch_eval` 的门面再导出、`batch_runner` 的入边
+调用点）都是 `trainer/` 里的宿主，换目录反而会让「谁在消费它」读不出来。
+
 2026-09-25：`trainer/batch_eval.py`（1805 行 / 35 顶层函数）拆它的**第一步 B1** —— 纯规划 +
-判据/门（23 个成员）纯搬到新模块 `trainer/batch_plan.py`（`plan/nn-training-refactor.md` §5.5.4）。
+判据/门（23 个成员）纯搬到新模块 `biz/batch_plan.py`（`plan/nn-training-refactor.md` §5.5.4）。
 
 本文件钉的不是「行为」（那是既有用例的事，如 `test_batch_eval` / `test_verdict_corpus` /
 `test_dist_common_poll`），而是**这次搬家的契约**：
 
-  ① **定义唯一**：23 个成员只在 `trainer/batch_plan.py` 里定义，旧家不再有同名定义；
-  ② **门面再导出**：`trainer.batch_eval.X is trainer.batch_plan.X` 逐条恒等 —— 这是「既有
+  ① **定义唯一**：23 个成员只在 `biz/batch_plan.py` 里定义，旧家不再有同名定义；
+  ② **门面再导出**：`trainer.batch_eval.X is biz.batch_plan.X` 逐条恒等 —— 这是「既有
      `from trainer.batch_eval import plan_units` 等调用点一行不改」的机器形式；
   ③ **纯函数面**：零锁、零台账读写（`_claim_locked` / `read_batches` / `write_batches` … 一个都不许
      出现）、零类、禁反向边（不得 import 旧家）、顶层 import 闭集；
@@ -30,12 +34,15 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import biz.batch_plan as bp
+import common.codehash
 import common.distribution
 import trainer.batch_eval as be
-import trainer.batch_plan as bp
 
 RL = ROOT / "trainer"
-PLAN_PATH = RL / "batch_plan.py"
+#: 2026-11-14：规划面（B 层纯函数）搬去 `biz/`（它从来只依赖 `common.*`，此前靠一条
+#: re-export 边假装是编排）。宿主 `batch_eval` / `batch_runner` 仍在 `trainer/`。
+PLAN_PATH = ROOT / "biz" / "batch_plan.py"
 EVAL_PATH = RL / "batch_eval.py"
 #: S27/B3：执行器（`BatchEvalRunner` / `dispatch_batch_bg`）纯搬到本模块，四个入边
 #: 调用点随之移家 ⇒ 入边闭集要**两个宿主一起数**（见 `_inbound_calls`）。
@@ -61,8 +68,9 @@ MOVED_FUNCS = (
     "batch_iter_id",
     "select_next_unit",
 )
+#: 2026-11-16：`REPO_ROOT` 从这份名单里去掉 —— 它不再是某个模块的私有常量，而是
+#: `common/paths.py` 的单源（`MOVED` 的口径是「这个落地模块自己定义的名字」）。
 MOVED_CONSTS = (
-    "REPO_ROOT",
     "LADDER_JSON",
     "CORPORA_JSON",
     "LEVELS_DIR",
@@ -103,8 +111,16 @@ PLAN_IMPORTS = {
     "os",
     "pathlib",
     "common.distribution",
+    # 2026-11-16：codeHash 判据搬到 `common/codehash.py`（B8 第一刀）⇒ 入边从
+    # `common.distribution` 分出一条。两个模块都是 L0（只读文件 / 只发 HTTP），
+    # 这条闭包仍然不含传输层、不含 trainer 内部。
+    "common.codehash",
     "common.jsonc",
-    "trainer.dispatch_queue",
+    # 2026-11-16：仓根常量改从单源取（`common/paths.py`），不再自己数层数。
+    "common.paths",
+    # 2026-11-14：`mm` 从 `common.proc.version_mm` 直接取（此前经 `trainer.dispatch_queue`
+    # 的 re-export 面转发 —— 那正是它「假装碰传输层」的那条边）。
+    "common.proc",
 }
 
 #: 批规划模块里**不许出现**的名字（锁 / 台账 / 执行器 / 进程生命周期）。
@@ -209,7 +225,7 @@ def _ok_ping() -> dict:
         "stageJsonSupport": True,
         "bunVersion": "9.9.9",
         "cpus": 2,
-        "codeHash": common.distribution.compute_code_hash(),
+        "codeHash": common.codehash.compute_code_hash(),
     }
 
 
@@ -219,7 +235,7 @@ def _ok_ping() -> dict:
 def test_moved_members_are_defined_only_in_the_new_home() -> None:
     plan, old = _top_bound(PLAN_SRC), _top_bound(EVAL_SRC)
     for name in MOVED:
-        assert name in plan, f"{name} 不在 trainer/batch_plan.py"
+        assert name in plan, f"{name} 不在 biz/batch_plan.py"
         assert name not in old, f"{name} 仍定义在 trainer/batch_eval.py"
 
 
@@ -276,7 +292,7 @@ def test_old_home_has_no_back_edge_to_new_home_members_beyond_the_import() -> No
     tree = ast.parse(EVAL_SRC)
     imported = set()
     for node in tree.body:
-        if isinstance(node, ast.ImportFrom) and node.module == "trainer.batch_plan":
+        if isinstance(node, ast.ImportFrom) and node.module == "biz.batch_plan":
             imported |= {a.name for a in node.names}
     assert imported == set(PUBLIC_MOVED), sorted(imported ^ set(PUBLIC_MOVED))
 
@@ -326,8 +342,11 @@ def test_moved_constants_are_only_reexported_never_used_by_the_old_home() -> Non
         for n in ast.walk(ast.parse(store_src))
         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
     ]
-    assert store_names.count("REPO_ROOT") == 1
-    assert 'DEFAULT_DATA_ROOT = REPO_ROOT / "dashboard" / "data" / "evalboard"' in store_src
+    # 2026-11-16：那份路径常量搬去 `common/settings.py`（`EVALBOARD_DATA` 有两个读者：本包的
+    # 台账与 `worker/eval_heartbeat` 的心跳，而 `worker/` 不能 import `trainer/`）⇒ 旧家零次
+    # `REPO_ROOT`、也不再自己拼 `dashboard/data/evalboard`。
+    assert store_names.count("REPO_ROOT") == 0
+    # 旋钮「只在一处解读」由 G13（`tests/test_env_reads_budget.py`）行为化地抓着，这里不再抄文本判据。
 
 
 # ────────────────────────── ⑤ 功能性：从**新家**直接调（不经门面）──────────────────────────
@@ -406,7 +425,7 @@ def test_select_next_unit_runs_from_the_new_home() -> None:
 
 
 def test_gate_and_classification_run_from_the_new_home() -> None:
-    h = common.distribution.compute_code_hash()
+    h = common.codehash.compute_code_hash()
     ok = _ok_ping()
     assert bp.node_gate_reason(ok, "9.9.9", h) is None
     assert "evalSupport" in (bp.node_gate_reason({**ok, "evalSupport": False}, "9.9.9", h) or "")
@@ -437,5 +456,7 @@ def test_batch_iter_id_namespace_from_the_new_home() -> None:
 
 def test_forces_of_is_the_ladder_stage_json_helper() -> None:
     """`_forces_of` 是 `plan_units` 写 stageJson 的一环：私有，但影响 agent 的缓存键。"""
-    assert bp._forces_of({"enemies": ["basic", "power", "player"]}) == "aca"
-    assert bp._forces_of({"enemies": []}) == ""
+    mixed = bp._forces_of({"enemies": ["basic", "power", "player"]})
+    empty = bp._forces_of({"enemies": []})
+    assert mixed == "aca"
+    assert empty == ""

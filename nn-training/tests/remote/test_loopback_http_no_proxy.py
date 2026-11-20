@@ -28,6 +28,7 @@ from common import net_http
 from remote.hub_client import _request as hub_request
 from remote.push_dispatch import _http as push_http
 from remote.worker import _request as worker_request
+from tests.helpers.http_server import serve_fast
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -46,7 +47,7 @@ class _Handler(BaseHTTPRequestHandler):
 @pytest.fixture
 def local_server():
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     try:
         yield f"http://127.0.0.1:{srv.server_address[1]}"

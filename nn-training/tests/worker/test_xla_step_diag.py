@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -258,9 +259,10 @@ class TestEngineWiring:
 
     def test_diag_is_taken_after_mark_step(self) -> None:
         """读数必须在 mark_step 之后（编译/执行已被 drain），否则那些量恒为 0。"""
-        i_mark = self.src.index("xla_mark_step(device)\n            now = time.time()")
-        i_snap = self.src.index("_snap = xla_metrics_snapshot()", i_mark)
-        assert i_snap > i_mark
+        m = re.search(r"xla_mark_step\(device\)\n\s+now = time\.time\(\)", self.src)
+        assert m is not None, "每步 mark_step 后必须立刻取时"
+        i_snap = self.src.index("_snap = xla_metrics_snapshot()", m.end())
+        assert i_snap > m.end()
 
     def test_tensors_are_materialized_before_the_loop(self) -> None:
         """chunk/demo 张量必须在进循环前物化：否则每个 chunk 的**首次使用**会把 host→device
@@ -268,8 +270,8 @@ class TestEngineWiring:
         0.9~2.4s/步——变体集被填满的形态）。"""
         # P3（2026-11-16）：转换点改成 `chunks if lazy else tensored_chunks(chunks, device)`，
         # 判据从整句赋值退到**转换调用**本身（位置语义不变：转换 → 预物化 mark → 循环）。
-        i_conv = self.src.index("tensored_chunks(chunks, device)")
-        i_loop = self.src.index("for ep in range(start_epoch, epochs):")
+        i_conv = self.src.index("tensored_chunks(ctx.chunks, device)")
+        i_loop = self.src.index("for ep in range(ctx.start_epoch, ctx.epochs):")
         i_pre = self.src.rindex("xla_mark_step(device)", i_conv, i_loop)
         assert i_conv < i_pre < i_loop, "预物化必须夹在转换之后、循环之前"
         assert "is_xla(device)" in self.src
@@ -279,10 +281,36 @@ class TestEngineWiring:
         assert "demo 索引复用缓冲已启用" in self.src
 
     def test_demo_index_goes_through_the_reused_buffer(self) -> None:
-        """回归钉：不得再把 host numpy 索引直接交给高级索引（那是每步重编译的源头）。"""
-        assert "demo_index(demo_idx_dev, _didx)" in self.src
-        assert "demo_t[\"obs\"][_didx]" not in self.src
-        assert "demo_idx_dev = torch.zeros(" in self.src
+        """回归钉：demo 采样必须走**复用缓冲**，不得把 host numpy 索引直接交给高级索引
+        （XLA 上那是每步重编译的源头）。
+
+        2026-11-19（B8 第十三刀）：步内数学搬进 `worker/ppo/backend.py`，所以这里只钉**接线**
+        —— torch 算子表的 `demo_index` 必须把调用方给的缓冲与索引**原样转发**给
+        `common.demo_index`（本文件是免 torch 的，行为面那条在
+        `test_ppo_demo_mix.py::test_demo_index_reuses_one_device_buffer`）。
+        """
+        import ast
+
+        tree = ast.parse(self.src)
+        table = [
+            kw
+            for fn in ast.walk(tree)
+            if isinstance(fn, ast.FunctionDef) and fn.name == "_torch_backend"
+            for call in ast.walk(fn)
+            if isinstance(call, ast.Call)
+            for kw in call.keywords
+            if kw.arg == "demo_index"
+        ]
+        assert len(table) == 1, "`_torch_backend` 里应恰好有一处 `demo_index=` 接线"
+        lam = table[0].value
+        assert isinstance(lam, ast.Lambda), f"demo_index 接线应为 lambda，实得 {type(lam).__name__}"
+        body = lam.body
+        assert isinstance(body, ast.Call) and isinstance(body.func, ast.Name)
+        assert body.func.id == "demo_index", f"转发到了 {body.func.id}（应为 common.demo_index）"
+        argv = [a.arg for a in lam.args.args]
+        assert argv == ["buf", "idx"], argv
+        forwarded = [a.id for a in body.args if isinstance(a, ast.Name)]
+        assert forwarded == ["buf", "idx"], f"缓冲必须原样转发，实得 {forwarded}"
 
     def test_diag_baseline_only_advances_inside_the_sampling_branch(self) -> None:
         """未取样的步不推进基线：否则两次采样之间的编译会被静默丢掉。"""

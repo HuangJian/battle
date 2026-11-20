@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 import os
 from collections import namedtuple
+from collections.abc import Callable
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -115,45 +116,53 @@ LEASE_ORPHAN = "orphan"
 LEASE_DEAD = (LEASE_EXPIRED, LEASE_ORPHAN)
 
 
-class LeaseMixin:
-    """域混入：见模块头部。"""
+class LeaseBook:
+    """租约协作者：租约表 · 归属缓存 · BC 进度 · 课程级独占（B7-P2）。
 
-    # ---- 由组合类 / 兄弟簇提供（混入只见 `self`，实现不在本模块）----
-    #: 全 store **唯一**的那把锁（`_AuthGuard.__init__` 里建；见 `hub_server._JobStore` 头部）
-    _lock: Lock
-    #: 时钟（`now_fn` 注入点，住 `_AuthGuard`）
-    _now: Any
-    #: 兄弟簇 `store_scheduling` 的状态与方法（认领要同时读三张优先级表并推 epoch）
-    _claimed: dict[str, dict]
-    _epoch: int
-    _bump_epoch_locked: Any
-    _drop_commitment_locked: Any
-    _job_priority_locked: Any
-    #: 调度事实面（`store_scheduling._facts_locked`；备份腿的「已结算不发」闸要用它的 `landed`
-    #: ——盘上 `result/` ∨ `fail.json`，与 `claimable_job_ids` 同一条式子）。
-    _facts_locked: Any
-    #: 兄弟簇 `store_ledger` 的状态与方法（读账本判「这份 job 还在不在池里」）
-    _job_dir: Any
-    _append_ledger: Any
-    _read_ledger: Any
-    #: 该 jid 的账本净态（`store_ledger.ledger_net_state`；六轮 F1 的即时闸对账用；
-    #: 2026-10-17 起公共化——`hub/result.py` 的 status 也是它的读者）。
-    ledger_net_state: Any
-    #: 兄弟簇 `store_ledger` 的撤单即时闸（`cancel_unsettled_jobs` 填；见 `_claim_locked`）。
-    _cancelled: set[str]
+    从原 `LeaseMixin` 整簇切出：37 个方法与 14 个状态字段。锁 / 时钟 / job 目录解析由
+    组合根注入**同一份**（L1/L2/L4）；两张需要与调度协作者共享的表（`_lease_workers` /
+    `_last_heartbeat`）也由组合根建好、双方各持同一引用（不是副本）。认领临界区的加锁
+    顺序逐字未动：`_claim_locked` 仍是唯一入口，仍在同一把 `_lock` 下。
 
-    def _init_leases(self) -> None:
+    本类不自建新锁类型（`_role_lock` / `_progress_lock` 是原簇已有的两把旁路锁）。
+    账本侧的跨簇调用经注入的 `ledger`（组合根传 `_JobStore` 自身），与 P1 的 `sched`
+    同一形状。
+    """
+
+    def __init__(
+        self,
+        *,
+        lock: Lock,
+        clock: Callable[[], float],
+        job_dir: Callable[[str], Path],
+        sched: Any,
+        ledger: Any,
+        lease_workers: dict[str, str],
+        last_heartbeat: dict[str, float],
+    ) -> None:
+        #: 全 store **唯一**的那把锁（`_AuthGuard.__init__` 里建；组合根注入）
+        self._lock = lock
+        #: 时钟（`now_fn` 注入点；不读组合类的 `_now`）
+        self._clock = clock
+        #: 账本簇的目录解析（`job_kind` / `job_role` / 心跳的前置判据）
+        self._job_dir = job_dir
+        #: 调度协作者（认领要同时读三张优先级表并推 epoch）
+        self.sched = sched
+        #: 账本簇（append / read / ledger_net_state / 撤单即时闸）
+        self.ledger = ledger
         #: job_id -> lease 到期时间戳（monotonic 无关；用墙钟，重启即空）
         self._leases: dict[str, float] = {}
         #: job_id -> 租约持有人 lease_token（H2；重启即丢，随租约重建）
         self._lease_owners: dict[str, str] = {}
-        #: job_id -> 最近一次心跳（领取算一次）墙钟（P3b 可观测；/jobs/status 暴露）
-        self._last_heartbeat: dict[str, float] = {}
+        #: job_id -> 最近一次心跳（领取算一次）墙钟（P3b 可观测；/jobs/status 暴露）。
+        #: 组合根建表并同时交给 `Scheduler`（`/ready` 刷新同一个锚）。
+        self._last_heartbeat = last_heartbeat
         #: job_id -> 租约持有人的 worker 身份（v5 多课程单 hub，2026-09-18）。
         #: 与 `_lease_owners`（token，鉴权用）**分工不同**：这个只用来回答「上一份租约是
         #: 谁跑死的」，从而在超时回收时把那台 worker 排除在本次重派之外（用户口径：
         #: 超时回落队首后「改为推送其它 worker」）。无身份（旧 worker / 手写 curl）不记。
-        self._lease_workers: dict[str, str] = {}
+        #: 与 `Scheduler` 的 `lease_workers` 是**同一张表**（L5：两处持同一把锁的同一份事实）。
+        self._lease_workers = lease_workers
         #: job_id -> 上一次租约**过期**时死掉的持有人（不避让自己时不清，避免误让）
         self._stale_holders: dict[str, str] = {}
         #: job_id -> 「认领后零回传」次数（毒包熔断的判据，见 FREEZE_AFTER_RECLAIMS）。
@@ -198,6 +207,34 @@ class LeaseMixin:
         #: （它是唯一知道 hold 住哪一层的层）。活性**自判**（时间戳 vs 窗）：闸不能依赖
         #: 「推的人刚刚才推过」——hub 重启、长时间不派发都会让镜像陈旧，而那正是假活现场。
         self.hold_meta: dict[str, Any] = {}
+
+    def forget_job(self, job_id: str) -> None:
+        """重发覆盖 manifest ⇒ 作废归属 / kind / 进度缓存（`publish` 的唯一失效入口）。
+
+        锁序与旧 `publish` 内联写法逐字相同：先把 `_roles`/`_kinds` 在同一把
+        `_role_lock` 下摘掉，再摘进度锚（后者原实现**不**持 `_progress_lock`，保持一致）。
+        """
+        with self._role_lock:
+            self._roles.pop(job_id, None)
+            self._kinds.pop(job_id, None)
+            self._fmts.pop(job_id, None)  # 同理由：新的 manifest 可能换了 corpus_fmt
+        self._last_progress.pop(job_id, None)
+
+    def clear_backup(self, job_id: str) -> None:
+        """撤销备份回传授权（胜负已分时由结果落位调用）。"""
+        self._backup_authorized.discard(job_id)
+
+    def is_frozen(self, job_id: str) -> bool:
+        """该 job 是否处于毒包熔断（纯读、不加锁；与旧池过滤里的直接读同口径）。"""
+        return job_id in self._frozen
+
+    def lease_holder(self, job_id: str) -> str:
+        """租约持有人身份（纯读、**不**回收；与 `lease_worker()` 的区别见那里）。"""
+        return self._lease_workers.get(job_id, "")
+
+    def active_lease_ids(self, now: float) -> list[str]:
+        """持有**活**租约的 job_id（纯读；调用方自带时刻，供发现面一次性判定）。"""
+        return [jid for jid in self._leases if self._lease_held(jid, now)]
 
     def role_blocked(self, job_id: str, role: str) -> str:
         """这份活能不能交给 `role`；`""` = 可以，否则是拒因。
@@ -245,7 +282,7 @@ class LeaseMixin:
             return ""
         worker = str(meta.get("worker_id") or "")
         last = float(meta.get("last_progress_at") or 0.0)
-        if worker and last > 0.0 and (self._now() - last) <= self._hold_stale_sec():
+        if worker and last > 0.0 and (self._clock() - last) <= self._hold_stale_sec():
             return f"held:{worker}"
         return ""
 
@@ -269,7 +306,7 @@ class LeaseMixin:
         `bc_drain_of` / 让出回收）的**唯一写入点**——第二个写点出现时，「心跳能不能续命」
         这类问题就会有两份答案（本仓第四次同一教训：判据与写入各住一处必漂）。
         """
-        now = self._now() if at is None else float(at)
+        now = self._clock() if at is None else float(at)
         with self._progress_lock:
             self._last_progress[job_id] = now
         self._bc_lock_touch(job_id)  # 课程级独占窗跟随 epoch 进度续命（落盘）
@@ -305,7 +342,7 @@ class LeaseMixin:
         wid = str(worker_id or "").strip()
         if not wid:
             return ""
-        now = self._now()
+        now = self._clock()
         for jid in list(self._leases):
             if self.job_kind(jid) not in BOTH_ROLE_KINDS:
                 continue
@@ -339,12 +376,12 @@ class LeaseMixin:
         prog = float(rec.get("progress_at") or 0.0)
         claimed = float(rec.get("claimed_at") or 0.0)
         anchor = prog if prog > 0.0 else claimed
-        if anchor <= 0.0 or self._now() - anchor > self._bc_progress_stale_sec():
+        if anchor <= 0.0 or self._clock() - anchor > self._bc_progress_stale_sec():
             return "", ""
         return str(rec.get("worker_id") or ""), str(rec.get("job_id") or "")
 
     def _bc_lock_write(self, job_id: str, worker_id: str) -> None:
-        now = self._now()
+        now = self._clock()
         rec = {"job_id": job_id, "worker_id": worker_id, "claimed_at": now, "progress_at": now}
         p = self._bc_lock_path()
         try:
@@ -367,7 +404,7 @@ class LeaseMixin:
         · 记录属于**另一个仍新鲜**的 job ⇒ 不动（僵尸 epoch 不该抢走现行锁）。
         """
         p = self._bc_lock_path()
-        now = self._now()
+        now = self._clock()
         try:
             rec = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -601,7 +638,7 @@ class LeaseMixin:
             # 锚缺省回落到 claim 时刻：判据不全时宁可保守继续独占到窗口结束。
             prog = self.job_progress_at(job_id)
             if prog <= 0.0:
-                prog = float((self._claimed.get(job_id) or {}).get("at") or 0.0)
+                prog = float((self.sched._claimed.get(job_id) or {}).get("at") or 0.0)
             if prog <= 0.0 or now - prog > self._bc_progress_stale_sec():
                 return LEASE_ORPHAN
             return LEASE_ALIVE
@@ -609,13 +646,21 @@ class LeaseMixin:
             return LEASE_EXPIRED
         if self._lease_workers.get(job_id, "").startswith(PUSH_WORKER_PREFIX):
             return LEASE_ALIVE  # push 派发器代持：豁免（见 docstring）
-        at = (self._claimed.get(job_id) or {}).get("at")
+        at = (self.sched._claimed.get(job_id) or {}).get("at")
         if at is None:
             return LEASE_ALIVE  # 判据不全（不该发生）⇒ 保守：不当孤儿
         at = float(at)
         if at >= now - ORPHAN_GRACE_SEC:
             return LEASE_ALIVE  # 宽限内
         return LEASE_ALIVE if float(self._last_heartbeat.get(job_id, 0.0)) > at else LEASE_ORPHAN
+
+    def lease_state(self, job_id: str, now: float | None = None) -> str:
+        """租约状态的**公开读数**（四态；`now=None` ⇒ 本 store 时钟）。
+
+        纯读、不回收 —— 会回收的是 `lease_worker()` / `reap_dead_leases()`。诊断与用例
+        要的是「按这把尺子它算哪一档」，不该直接调私有判据。
+        """
+        return self._lease_state(job_id, self._clock() if now is None else float(now))
 
     def _lease_held(self, job_id: str, now: float) -> bool:
         """`_lease_state` 的布尔视图：这份 job 现在被**活租约**挡着吗（池的判据）。
@@ -654,7 +699,7 @@ class LeaseMixin:
             if job_id in self._frozen:
                 # ★ 熔断（§4.1）：任何入口都不再下发（含备份副本）。
                 return False, "", "frozen"
-            if job_id in self._cancelled:
+            if job_id in self.ledger._cancelled:
                 # ★ 撤单（plan/switch-mode-drops-jobs）：切模式时被作废的 job——**进程内即时闸**，
                 # 挡「worker 拿着作废前 peek 到的 jid 来 claim」这个秒级窗口。真闸在账本
                 # （`claimable_job_ids` 把 job_cancelled 排除）。
@@ -662,9 +707,9 @@ class LeaseMixin:
                 # 磁盘 IPC（`remote.hub_client.publish_job` 无条件追加 `job_pending`），hub
                 # 收不到「复活」信号；只靠本 set 会得到「账本 pending（peek 可见）∧ claim 永远
                 # cancelled」的撒谎形状。净态为 pending ⇒ discard 放行；completed/cancelled ⇒ 照旧拒。
-                if self.ledger_net_state(job_id) != "job_pending":
+                if self.ledger.ledger_net_state(job_id) != "job_pending":
                     return False, "", "cancelled"
-                self._cancelled.discard(job_id)
+                self.ledger._cancelled.discard(job_id)
             blocked = self.role_blocked(job_id, role)
             if blocked:
                 # ★ 归属/停摆闸（2026-09-25，plan/online-offline-role-routing §2.2）：租约
@@ -681,13 +726,13 @@ class LeaseMixin:
                 capabilities or ()
             ):
                 return False, "", "no_replay_corpus"
-            now = self._now()
+            now = self._clock()
             if mode == CLAIM_MODE_BACKUP:
                 if self.job_kind(job_id) in BOTH_ROLE_KINDS:
                     # ★M5（需求 7）：BC **不发备份副本**——它「领取后独占」，而备份那份
                     # 不会有 epoch（进度只从开辟的那一份来），发出去只会多一个影子跑者。
                     return False, "", "no_backup"
-                if self._facts_locked(job_id)["landed"]:
+                if self.sched._facts_locked(job_id)["landed"]:
                     # ★ 已结算（`result/` 或 `fail.json` 在盘）⇒ **不发备份副本**（2026-10-11）。
                     # 为什么这条闸必须住 claim：派发器的自有账本读数已由 `_snapshot()` 收敛成
                     # **一份**（自洽了），但 store 侧的事实（别人的活跑没跑完、结算没结算）
@@ -721,18 +766,18 @@ class LeaseMixin:
                 self._collect_expired_locked(job_id, orphan=state == LEASE_ORPHAN)
                 if self._frozen.get(job_id):
                     return False, "", "frozen"  # ★ 刚达阈（或已冻结）
-            if not recovering and job_id in self._claimed:
+            if not recovering and job_id in self.sched._claimed:
                 # ★ highest 唯一性闸（R1-5）：同一份 job 只能有一个「承诺在跑」的人。
                 # 这一条才是「N 个 worker 同拍问询全拿 highest」的真正闸门——epoch 只是
                 # 提醒「调度面变过」，不匹配本身不等于有人抢了**这一份**。
-                if expected_epoch is not None and int(expected_epoch) != self._epoch:
+                if expected_epoch is not None and int(expected_epoch) != self.sched._epoch:
                     return False, "", "demoted"
                 return False, "", "held"
             # 调度面在问询之后变过 ⇒ **在该 job 上重新判一次**（§2.3 ③）：仍是最高才放行。
             if (
                 expected_epoch is not None
-                and int(expected_epoch) != self._epoch
-                and self._job_priority_locked(job_id, exclude_worker=worker_id)
+                and int(expected_epoch) != self.sched._epoch
+                and self.sched._job_priority_locked(job_id, exclude_worker=worker_id)
                 != PRIORITY_HIGHEST
             ):
                 return False, "", "demoted"
@@ -744,7 +789,7 @@ class LeaseMixin:
             token = secrets.token_hex(16)
             self._leases[job_id] = now + ttl
             self._lease_owners[job_id] = token
-            self._claimed[job_id] = {"worker": worker_id, "at": now}
+            self.sched._claimed[job_id] = {"worker": worker_id, "at": now}
             if worker_id:
                 self._lease_workers[job_id] = worker_id
                 self._stale_holders.pop(job_id, None)  # 有人接手了 ⇒ 避让记录使命结束
@@ -752,7 +797,7 @@ class LeaseMixin:
             self.note_job_progress(job_id, now)  # ★M5：领取即第一个进度锚（同 hold 口径）
             if self.job_kind(job_id) in BOTH_ROLE_KINDS:
                 self._bc_lock_write(job_id, worker_id)  # 课程级独占落盘（重启不丢）
-            self._bump_epoch_locked()
+            self.sched._bump_epoch_locked()
             return True, token, "ok"
 
     def abandon_job(self, job_id: str, worker_id: str = "") -> bool:
@@ -772,7 +817,7 @@ class LeaseMixin:
             self._last_progress.pop(job_id, None)  # ★M5：放弃 ⇒ 进度锚一并清（不留死读数）
             self._bc_lock_clear(job_id)
             self._stale_holders.pop(job_id, None)  # 主动放弃 ≠ 跑死，不该触发避让
-            self._drop_commitment_locked(job_id)
+            self.sched._drop_commitment_locked(job_id)
             return True
 
     def _collect_expired_locked(self, job_id: str, *, orphan: bool = False) -> str:
@@ -791,9 +836,9 @@ class LeaseMixin:
 
         「零回传」只在**结果未落盘且失败标记不在**时计数——已结算的 job 不算毒包。
         """
-        now = self._now()
+        now = self._clock()
         # 静默读数（**先读后清**：`_drop_commitment_locked` 会把 `_claimed` 一起撕掉）
-        at = (self._claimed.get(job_id) or {}).get("at")
+        at = (self.sched._claimed.get(job_id) or {}).get("at")
         silent_sec = round(now - float(at)) if at is not None else 0
         dead = self._lease_workers.get(job_id, "")
         self._leases.pop(job_id, None)
@@ -803,7 +848,7 @@ class LeaseMixin:
         self._bc_lock_clear(job_id)
         # 过期 = 承诺失效：不清的话「有人承诺在跑」会在死 worker 上永远挂着 ⇒
         # 该 job 的优先级永远上不到 highest（唯一性闸的判据）。
-        self._drop_commitment_locked(job_id)
+        self.sched._drop_commitment_locked(job_id)
         if dead:
             self._stale_holders[job_id] = dead
         jd = self._job_dir(job_id)
@@ -815,11 +860,11 @@ class LeaseMixin:
                 self._frozen[job_id] = {
                     "reclaims": n,
                     "worker": dead,
-                    "ts": self._now(),
+                    "ts": self._clock(),
                     "announced": False,
                 }
         if orphan:
-            self._append_ledger(
+            self.ledger._append_ledger(
                 {
                     "event": "lease-orphan-reaped",
                     "job_id": job_id,
@@ -876,6 +921,32 @@ class LeaseMixin:
         with self._lock:
             return self._stale_holders.get(job_id, "")
 
+    def has_lease(self, job_id: str) -> bool:
+        """这份 job **有租约记录**吗（不判死活、不触发回收；观测 / 用例用）。
+
+        与 `lease_worker()` 的区别：后者会顺手回收死租约并回答「谁在跑」；这里只回答
+        「租约表里还有没有这一行」（清扫节流窗内「没被回收」的可观测证据）。
+        """
+        with self._lock:
+            return job_id in self._leases
+
+    def lease_expiry(self, job_id: str) -> float | None:
+        """租约的到期时刻（本 store 时钟；无租约 → None）。纯读、不回收。
+
+        用来回答「这次操作有没有动过租约表」——例如备份认领不得顺手续期原持有者的租约。
+        """
+        with self._lock:
+            return self._leases.get(job_id)
+
+    def heartbeat_at(self, job_id: str) -> float | None:
+        """最近一次**成功**心跳的时刻（本 store 时钟；没有 → None）。纯读、不回收。
+
+        与 `lease_expiry` 的区别：那是「这行租约还在不在」，这是「持有人在不在」——
+        错 token 的心跳两者都不该动。
+        """
+        with self._lock:
+            return self._last_heartbeat.get(job_id)
+
     def lease_worker(self, job_id: str) -> str:
         """当前租约持有人身份（无 → 空串）；同时在租约为死（过期 ∨ 孤儿）时走**同一个**
         回收入口（`_collect_expired_locked`：stale 记录 + 毒包计数）——本函数是 `/admin/queue`
@@ -883,7 +954,7 @@ class LeaseMixin:
         with self._lock:
             if self._leases.get(job_id) is None:
                 return ""
-            state = self._lease_state(job_id, self._now())
+            state = self._lease_state(job_id, self._clock())
             if state in LEASE_DEAD:
                 self._collect_expired_locked(job_id, orphan=state == LEASE_ORPHAN)
                 return ""
@@ -895,7 +966,7 @@ class LeaseMixin:
         死租约（过期 ∨ 孤儿，§52）不算在飞——否则孤儿会以「在飞」的形状骗过总览：
         池里已经回它了，UI 却还在说这台机器在跑。
         """
-        now = self._now()
+        now = self._clock()
         with self._lock:
             return [jid for jid in self._leases if self._lease_held(jid, now)]
 
@@ -912,7 +983,7 @@ class LeaseMixin:
         可能已回收/已重领，回收计数会多算；持 `_lock` 一次枚举 + 回收，计数才是真值。
         回收动作仍只走 `_collect_expired_locked`（stale 记录 / 毒包计数 / 账本事件的唯一实现）。
         """
-        now = self._now()
+        now = self._clock()
         with self._lock:
             dead = [(jid, self._lease_state(jid, now)) for jid in self._leases]
             doomed = [(jid, state) for jid, state in dead if state in LEASE_DEAD]
@@ -933,7 +1004,7 @@ class LeaseMixin:
             owner = self._lease_owners.get(job_id)
             if owner is None or owner != lease_token:
                 return False
-            now = self._now()
+            now = self._clock()
             self._leases[job_id] = now + CLAIM_TTL_SEC
             self._last_heartbeat[job_id] = now
             return True
@@ -952,14 +1023,14 @@ class LeaseMixin:
             self._last_heartbeat.pop(job_id, None)
             self._last_progress.pop(job_id, None)  # ★M5：还租约 ⇒ 不再是 drain
             self._bc_lock_clear(job_id)
-            self._drop_commitment_locked(job_id)  # 还租约 = 撒销承诺（见该方法 docstring）
+            self.sched._drop_commitment_locked(job_id)  # 还租约 = 撒销承诺（见该方法 docstring）
             return True
 
     def result_token_ok(self, job_id: str, lease_token: str) -> bool:
         """结果回传鉴权（P3b）：有活租约 → 须持有人 token；无租约（过期/释放/
         从未领取/旧 worker）→ 照收。HTTP 层薄调用本函数。"""
         with self._lock:
-            if self._leases.get(job_id, 0) > self._now():
+            if self._leases.get(job_id, 0) > self._clock():
                 owner = self._lease_owners.get(job_id)
                 if bool(lease_token) and owner == lease_token:
                     return True
@@ -977,7 +1048,7 @@ class LeaseMixin:
             self._last_heartbeat.pop(job_id, None)
             self._last_progress.pop(job_id, None)  # ★M5：验收落位 ⇒ 进度锚清
             completed_ids = {
-                e.get("job_id") for e in self._read_ledger() if e.get("event") == "job_completed"
+                e.get("job_id") for e in self.ledger._read_ledger() if e.get("event") == "job_completed"
             }
             if job_id not in completed_ids:
-                self._append_ledger({"event": "job_completed", "job_id": job_id, "ts": self._now()})
+                self.ledger._append_ledger({"event": "job_completed", "job_id": job_id, "ts": self._clock()})

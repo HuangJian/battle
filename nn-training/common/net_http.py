@@ -32,6 +32,7 @@
 
 from __future__ import annotations
 
+import functools
 import http.client
 import ipaddress
 import os
@@ -42,8 +43,7 @@ import urllib.request
 from typing import Any
 from urllib.parse import urlsplit
 
-#: 无代理 opener（进程内复用；`ProxyHandler({})` = 任何 scheme 都不走代理）。
-_NO_PROXY_OPENER: urllib.request.OpenerDirector | None = None
+from common import runtime
 
 
 def host_of(url_or_host: str) -> str:
@@ -122,12 +122,10 @@ def bypass_proxy(url_or_host: str) -> bool:
     return is_loopback(url_or_host) or env_no_proxy(url_or_host)
 
 
+@functools.cache
 def no_proxy_opener() -> urllib.request.OpenerDirector:
-    """无代理 opener（单例；`build_opener` 不便宜，本机热路径每轮都要用）。"""
-    global _NO_PROXY_OPENER
-    if _NO_PROXY_OPENER is None:
-        _NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    return _NO_PROXY_OPENER
+    """无代理 opener（缓存；`build_opener` 不便宜，本机热路径每轮都要用）。"""
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def urlopen(req: Any, timeout: float = 30.0):
@@ -147,9 +145,6 @@ def urlopen(req: Any, timeout: float = 30.0):
 
 #: 一次竞速最多同时开拨几个地址（隧道主机名通常 2~4 个；上限只防 DNS 抽风）。
 _RACE_MAX = 8
-
-#: 竞速 opener（按「是否绕代理」各一份；`build_opener` 不便宜，节点热路径每轮几百发）。
-_RACING_OPENERS: dict[bool, urllib.request.OpenerDirector] = {}
 
 
 def racing_create_connection(
@@ -225,11 +220,10 @@ def racing_create_connection(
         else:
             done.set()
 
-    threads = [
-        threading.Thread(target=_attempt, args=c, name="race-connect", daemon=True) for c in cands
-    ]
-    for t in threads:
-        t.start()
+    #: 竞速连接线程归这里（`race-connect-<序号>`）：同一批里每条要认得出是第几个候选。
+    rt = runtime.Runtime(scope="race")
+    for i, c in enumerate(cands):
+        rt.thread(_attempt, *c, name=f"connect-{i}", daemon=True)
     done.wait(None if deadline is None else max(0.0, deadline - time.monotonic()))
     with lock:
         # 置位后晚到的成功者会自关（见 _attempt）——否则主线程放弃 = 漏一个 fd。
@@ -286,20 +280,17 @@ class _RacingHTTPSHandler(urllib.request.HTTPSHandler):
         return self.do_open(_RacingHTTPSConnection, req, context=self._context)
 
 
+@functools.cache
 def racing_opener(no_proxy: bool = False) -> urllib.request.OpenerDirector:
     """带竞速 connect 的 opener；其余 handler 与 `urlopen` 的缺省 opener 同款。
 
     `no_proxy=False` 时**不**塞 ProxyHandler ⇒ `build_opener` 自己按环境装一个，
     代理语义与 `urllib.request.urlopen` 逐字一致（云机侧的显式代理需求不受影响）。
     """
-    cached = _RACING_OPENERS.get(no_proxy)
-    if cached is None:
-        handlers: list[Any] = [_RacingHTTPHandler, _RacingHTTPSHandler]
-        if no_proxy:
-            handlers.append(urllib.request.ProxyHandler({}))
-        cached = urllib.request.build_opener(*handlers)
-        _RACING_OPENERS[no_proxy] = cached
-    return cached
+    handlers: list[Any] = [_RacingHTTPHandler, _RacingHTTPSHandler]
+    if no_proxy:
+        handlers.append(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(*handlers)
 
 
 def racing_urlopen(req: Any, timeout: float = 30.0):

@@ -88,7 +88,7 @@ class _Host(HubHandler):
     def __new__(cls, path: str = "/jobs/x/blob", keep: bool = True) -> _Host:
         self = object.__new__(cls)
         self.path = path
-        self.connection = _Conn()  # type: ignore[assignment]
+        self.connection = _Conn()
         self.sink = _Sink(keep=keep)
         self.wfile = self.sink  # type: ignore[assignment]
         self.headers = Message()

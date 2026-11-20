@@ -301,7 +301,7 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
 
         - `args._it` / `args._rotate_seed`：起始分布（state_init）派生的 key 两半；
         - holder（reward_context）：reward_fn + gamma/lam + it + 血缘——loaders
-          （ppo.engine.load_shard）读取，奖励唯一定义源=课程配置公式；
+          （ppo.np_core.load_shard）读取，奖励唯一定义源=课程配置公式；
         - ppo_schedule（按绝对 iter 查表）：lr 改 opt.param_groups（保 Adam
           动量）、epochs/mb 改 args（串行/流式每轮读取）、kl_coef 存 args._kl_coef
           供 update 期注入。
@@ -629,7 +629,7 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
         )
 
     def _record_iteration(self, it: int) -> None:
-        """iteration 事件落账（字段契约在 biz/events.py::write_iteration）。
+        """iteration 事件落账（字段契约在 worker/events.py::write_iteration）。
 
         R2a：写入后立刻并入 `LedgerView`（`_ledger_apply`）——视图因此始终 == 盘上
         账本，且没有第二次全文件扫描（用户 2026-09-18 裁决：每课只读一遍）。

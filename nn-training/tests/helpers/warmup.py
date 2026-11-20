@@ -153,7 +153,7 @@ def _sources_mention(items: Iterable[object], markers: tuple[str, ...]) -> bool:
     return False
 
 
-def _needed(needed_by: str, markers: tuple[str, ...], items: Iterable[object]) -> bool:
+def needed(needed_by: str, markers: tuple[str, ...], items: Iterable[object]) -> bool:
     """两项取或的判据：源码面提到（主）或已经 import 进来（兜）。"""
     return _sources_mention(items, markers) or _session_uses(needed_by)
 
@@ -161,12 +161,12 @@ def _needed(needed_by: str, markers: tuple[str, ...], items: Iterable[object]) -
 def warm_all(items: Iterable[object] = ()) -> None:
     """跑一遍清单，逐项打一行读数（§16.3：长任务每步可观测）。
 
-    `items` = `session.items`：判据要看它们的源码（见 `_needed`）；不传就只看 `sys.modules`。
+    `items` = `session.items`：判据要看它们的源码（见 `needed`）；不传就只看 `sys.modules`。
     """
     total = 0.0
     done = 0
     for name, fn, needed_by, markers in WARMUPS:
-        if not _needed(needed_by, markers, items):
+        if not needed(needed_by, markers, items):
             print(f"[warmup] {name} 跳过（本次会话没人用到 {needed_by}）", flush=True)
             continue
         t0 = time.perf_counter()

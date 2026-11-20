@@ -18,7 +18,7 @@ import base64
 import json
 import math
 import os
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import paddle
@@ -101,9 +101,12 @@ class TorchLinear(nn.Layer):
         )
 
     def forward(self, x: paddle.Tensor) -> paddle.Tensor:
-        # paddle.matmul 在类型存根里返回 Any；显式接住再返回，别把 Any 漏出本函数。
-        out: paddle.Tensor = paddle.matmul(x, self.weight, transpose_y=True) + self.bias
-        return out
+        # Paddle 3.3.1 的 `paddle.matmul` 没有类型化返回（stub 解析为 Any）；
+        # cast 只补类型，不改 kernel（`Tensor.matmul` 走另一条分派，数值会漂）。
+        return cast(
+            paddle.Tensor,
+            paddle.matmul(x, self.weight, transpose_y=True) + self.bias,
+        )
 
 
 class ConvMixerBlock(nn.Layer):

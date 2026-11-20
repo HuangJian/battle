@@ -3,7 +3,7 @@
 **一个 hub 进程**（`--discover --push`，命令行**不点课程名**）+ **一堂真 worker_server**
 （starter 换成写结果的假执行器 ⇒ 不跑 rollout / PPO / torch），两门课的 hubpush job 各自走通：
 
-    训练侧 publish_job(dispatch="push")        ← 真磁盘 IPC：<traj>/<课>/remote-jobs/<jid>/
+    训练侧 PublishSpec(dispatch="push")        ← 真磁盘 IPC：<traj>/<课>/remote-jobs/<jid>/
         ↓
     hub（真进程；课程表从盘上发现）              ← discover：训练侧发布即「这门课在跑」
         ↓  push_client.submit_job（真线协议，code.zip 随体上传）
@@ -47,9 +47,10 @@ from common.protocol import (
     OFFLINE_CLAIM_PATH,
     OFFLINE_RELEASE_PATH,
 )
-from remote.hub_client import mark_job_completed, publish_job, wait_job
+from remote.hub_client import PublishSpec, mark_job_completed, publish_job, wait_job
 from remote.worker_server import WorkerServerState, make_worker_server
 from tests.helpers.console_stub import NoHandoffConsole
+from tests.helpers.http_server import serve_fast
 from tests.subproc_util import spawn_bound_port
 
 #: hub 与 worker 共用的 Bearer（推模式下 worker 的 authKey 就是它）。
@@ -140,7 +141,7 @@ class _LiveWorker:
         self.srv = make_worker_server(self.state, 0, TOKEN)
         self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
         self.started: list[str] = []
-        self._thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
+        self._thread = serve_fast(self.srv)
         self._thread.start()
         self.state.set_starter(self._fake_starter)
 
@@ -329,29 +330,31 @@ def _publish(course: str, job_root: Path, jsonl: Path, traj_root: Path, code_zip
     if not wfile.exists():
         wfile.write_text('{"format":"nn-weights-json","params":{}}', encoding="utf-8")
     man = publish_job(
-        job_root=job_root,
-        jsonl_path=jsonl,
-        run_id=SHARED_RUN_ID,
-        it=1,
-        traj_dir=traj_root / course / "it1",
-        shard_dirs=[],
-        commit="c" * 40,
-        code_sha256=_sha(code_zip.read_bytes()),
-        code_zip_path=code_zip,
-        course='// course jsonc\n{"reward": {"formula": "score"}}',
-        course_name=course,
-        course_fp=_course_fp(course),
-        init_weights_path=str(wfile),
-        reward_formula="score",
-        formula_hash="h" * 40,
-        metrics_version=1,
-        gamma=0.995,
-        lam=0.95,
-        mode="per-tick",
-        epochs=1,
-        mb=512,
-        lr=3e-4,
-        dispatch="push",
+        PublishSpec(
+            job_root=job_root,
+            jsonl_path=jsonl,
+            run_id=SHARED_RUN_ID,
+            it=1,
+            traj_dir=traj_root / course / "it1",
+            shard_dirs=[],
+            commit="c" * 40,
+            code_sha256=_sha(code_zip.read_bytes()),
+            code_zip_path=code_zip,
+            course='// course jsonc\n{"reward": {"formula": "score"}}',
+            course_name=course,
+            course_fp=_course_fp(course),
+            init_weights_path=str(wfile),
+            reward_formula="score",
+            formula_hash="h" * 40,
+            metrics_version=1,
+            gamma=0.995,
+            lam=0.95,
+            mode="per-tick",
+            epochs=1,
+            mb=512,
+            lr=3e-4,
+            dispatch="push",
+        ),
         log=_quiet,
     )
     return man

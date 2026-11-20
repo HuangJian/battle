@@ -23,10 +23,11 @@ import time
 from pathlib import Path
 
 from common.log import log
+from common.paths import REPO_ROOT
 
 # Windows：spawn 子进程（bun 评估）时用 CREATE_NO_WINDOW，避免黑控制台窗口抢焦点。
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
-from trainer.dispatch_queue import REPO_ROOT
+from common.runtime import Runtime
 
 
 def parse_m1_eval_report(text: str) -> dict:
@@ -220,9 +221,8 @@ def dispatch_eval_bg_m1(
         except Exception as e:
             log(f"WARN clean eval it{it} failed (ignored): {e}")
 
-    t = threading.Thread(target=_body, daemon=True, name=f"eval-m1-it{it}")
-    t.start()
-    return t
+    #: 本轮 eval 的线程归这里（`eval-m1-it<轮>`）：调用方 `join` 的语义不变。
+    return Runtime(scope=f"eval-m1-it{it}").thread(_body, name="body", daemon=True)
 
 
 def read_eval_summary(jsonl_path: Path, it: int) -> dict | None:

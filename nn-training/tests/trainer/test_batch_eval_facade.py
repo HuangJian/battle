@@ -26,8 +26,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import biz.batch_plan as bp
 import trainer.batch_eval as be
-import trainer.batch_plan as bp
 import trainer.batch_runner as br
 import trainer.batch_store as bs
 
@@ -51,7 +51,8 @@ PLAN_EXPORTS = (
     "LADDER_JSON",
     "LEVELS_DIR",
     "REGRESSION_EVERY",
-    "REPO_ROOT",
+    # 2026-11-16：`REPO_ROOT` 不再是门面的转发项 —— 它现在直接住 `common/paths.py`
+    # （谁要就 `from common.paths import REPO_ROOT`），门面里那条 `X as X` 自别名已删。
     "SEGMENT_LEN",
     "batch_iter_id",
     "corpora_path",
@@ -84,8 +85,8 @@ STORE_EXPORTS = (
 )
 RUNNER_EXPORTS = ("BatchEvalRunner", "dispatch_batch_bg")
 
-HOMES = {"trainer.batch_plan": PLAN_EXPORTS, "trainer.batch_store": STORE_EXPORTS, "trainer.batch_runner": RUNNER_EXPORTS}
-HOME_MODULES = {"trainer.batch_plan": bp, "trainer.batch_store": bs, "trainer.batch_runner": br}
+HOMES = {"biz.batch_plan": PLAN_EXPORTS, "trainer.batch_store": STORE_EXPORTS, "trainer.batch_runner": RUNNER_EXPORTS}
+HOME_MODULES = {"biz.batch_plan": bp, "trainer.batch_store": bs, "trainer.batch_runner": br}
 
 #: 刻意**不**经门面转发的名字。它们只被新家的代码读，所以转发只会制造
 #: 「名字还在旧家、没人读」的静默空操作（S16/S19 记过两次的坑）⇒ 在门面上必须**响亮**

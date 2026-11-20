@@ -28,6 +28,7 @@ import pytest
 import common.codehash_ref
 import common.distribution
 import common.shard
+import common.task_client
 import trainer.dispatch as disp
 import trainer.queue_local as ql
 
@@ -102,14 +103,14 @@ class _Harness:
         self.local_slots = local_slots
         # 本机腿的测试统一打桩：不启真 bun、不建长驻池。
         monkeypatch.setattr(disp, "make_local_pool", lambda *a, **k: None)
-        monkeypatch.setattr(common.distribution, "compute_code_hash", lambda: "deadbeef")
+        monkeypatch.setattr(common.codehash, "compute_code_hash", lambda: "deadbeef")
         monkeypatch.setattr(disp, "bun_version", lambda _bun: "1.1.0")
         monkeypatch.setattr(
             common.distribution,
             "node_ping",
             ping_fn or (lambda *a, **k: dict(GOOD_PING)),
         )
-        monkeypatch.setattr(common.distribution, "post_weights", lambda *a, **k: "kept")
+        monkeypatch.setattr(common.weights_client, "post_weights", lambda *a, **k: "kept")
         monkeypatch.setattr(
             common.distribution, "validate_result", lambda manifest, files, wver, pairs, seen: ""
         )
@@ -122,11 +123,12 @@ class _Harness:
             self.refreshed.append({"node": node["id"], **kw})
             return True
 
-        monkeypatch.setattr(common.distribution, "refresh_weights", fake_refresh)
+        monkeypatch.setattr(common.weights_client, "refresh_weights", fake_refresh)
 
         def fake_post(
-            nodes, iter_id, wver, weights_bytes, timeout, kind="rollout", log=None, on_alive=None
+            nodes, iter_id, wver, weights_bytes, timeout, kind="rollout", hooks=None
         ):
+            on_alive = hooks.on_alive if hooks is not None else None
             out = []
             for n in nodes:
                 nd = {
@@ -141,14 +143,14 @@ class _Harness:
                 out.append(nd)
             return out
 
-        monkeypatch.setattr(common.distribution, "post_weights_parallel", fake_post)
+        monkeypatch.setattr(common.weights_client, "post_weights_parallel", fake_post)
 
     def run(
         self, fetch, halt_event=None, on_shard=None,
         on_queue_drained=None, on_queue_active=None, pool_halt: bool = False,
     ) -> dict:
         common.distribution.weights_push_cache_reset()
-        self.mp.setattr(common.distribution, "fetch_task", fetch)
+        self.mp.setattr(common.task_client, "fetch_task", fetch)
         pairs = [(2000, i + 1) for i in range(self.games)]
         return disp.RolloutDispatcher(
             "bun",
@@ -337,7 +339,7 @@ def test_task_lost_404_requeues_without_tripping_node(tmp_path, monkeypatch) -> 
         if calls["n"] <= 4:
             raise common.distribution.DistError(
                 404,
-                f"{common.distribution.TASK_LOST_MARKER} (restart/purge): "
+                f"{common.task_client.TASK_LOST_MARKER} (restart/purge): "
                 '{"error":"unknown task (expired/purged/restart)"}',
             )
         return h.manifest(), {}
@@ -441,6 +443,7 @@ def test_rescan_discovers_node_online_mid_round(tmp_path, monkeypatch) -> None:
     self_gate: list[bool] = []
 
     def fetch(url: str, *_a, **_kw):
+        url = getattr(url, "url", url)
         if "a97" in str(url):
             served["a97"] += 1
             if served["a97"] >= 2:
@@ -664,12 +667,13 @@ def test_alloc_timeout_aborts_original_and_requeues(tmp_path, monkeypatch) -> No
         return True
 
     monkeypatch.setattr(common.distribution, "abort_active_requests", spy_abort)
-    monkeypatch.setattr(common.distribution, "cancel_task", spy_cancel)
+    monkeypatch.setattr(common.task_client, "cancel_task", spy_cancel)
     release = threading.Event()
 
-    def fetch(url: str, *_a, **kw):
+    def fetch(spec, *_a, **kw):
+        url = getattr(spec, "url", spec)
         calls.append(url)
-        on_key = kw.get("on_key")
+        on_key = getattr(spec, "on_key", None) or kw.get("on_key")
         if on_key is not None:
             on_key("it-cancel:rollout:rollout:0:1")
         if len(calls) == 1:
@@ -792,7 +796,7 @@ def test_local_slots_zero_falls_back_when_remote_dead(tmp_path, monkeypatch) -> 
 
 
 def test_successful_round_does_not_leave_aborted_attempt_tags(tmp_path, monkeypatch) -> None:
-    """成功结算的 attempt tag 不许留在 `_ABORTED_TAGS`。
+    """成功结算的 attempt tag 不许留在登记表的收工标记里。
 
     旧实现先 `clear_abort(task_tag)`、再在结算分支把**本任务的所有** tag（含刚成功
     这一份）标成 aborted ⇒ 下一波 dispatcher 的 `_tag_seq` 从 1 重来，同名 tag 一取活
@@ -806,7 +810,7 @@ def test_successful_round_does_not_leave_aborted_attempt_tags(tmp_path, monkeypa
 
     report = h.run(fetch)
     assert report["missing"] == [], report.get("missing")
-    assert not common.distribution._ABORTED_TAGS, common.distribution._ABORTED_TAGS
+    assert not common.distribution.aborted_tags(), common.distribution.aborted_tags()
 
 
 def test_requeue_line_names_the_node(tmp_path, monkeypatch) -> None:
@@ -841,7 +845,7 @@ def test_reference_code_hash_prefers_self_node() -> None:
 
 def test_reference_code_hash_falls_back_to_workspace(monkeypatch) -> None:
     """self 不在候选表 ⇒ 回落本机现算（老行为不变）。"""
-    monkeypatch.setattr(common.distribution, "compute_code_hash", lambda: "local")
+    monkeypatch.setattr(common.codehash, "compute_code_hash", lambda: "local")
     nodes = [{"id": "a97", "url": "http://a97:8443"}]
     assert common.codehash_ref.reference_code_hash(nodes, [("a97", {"codeHash": "aaa"})]) == "local"
 
@@ -874,7 +878,7 @@ def test_dirty_workspace_does_not_exclude_the_cluster(tmp_path, monkeypatch) -> 
         ping_fn=lambda *_a, **_k: dict(GOOD_PING, codeHash=cluster),
     )
     # 工作区现算的是「谁都没在跑」的那份（模拟本地改代码未 commit/push）
-    monkeypatch.setattr(common.distribution, "compute_code_hash", lambda: "d" * 64)
+    monkeypatch.setattr(common.codehash, "compute_code_hash", lambda: "d" * 64)
 
     report = h.run(lambda *_a, **_k: (h.manifest(), {}))
 

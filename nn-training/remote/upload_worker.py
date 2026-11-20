@@ -36,11 +36,12 @@ from typing import Any
 
 #: 落定行的前缀（父侧 `upload_proc` 的解析口径；两边同源 = `result_upload.OUTCOME_PREFIX`，
 #: L0 契约模块 —— 子进程与父侧进程都只从它 import，不互相 import）。
+from common.logutil import log_line
 from remote.result_upload import OUTCOME_PREFIX
 
 
 def _log(msg: str) -> None:
-    print(f"[upload] {msg}", flush=True)
+    log_line("upload", msg)
 
 
 def _post_one(task: dict[str, Any], post_result) -> dict[str, Any]:
@@ -103,6 +104,8 @@ def main() -> int:
         try:
             reconfigure(encoding="utf-8", errors="replace")
         except Exception:
+            # 契约静默（G9 冻结，非旧债）：Windows 控制台不接受 reconfigure 时退化成运行环境缺省；
+            # 协议行是纯 ASCII，不影响正确性（没有该方法的情形上面已 getattr 判过）。
             pass
     # 导入放在这里：`boot ok` 必须在**依赖链能 import** 之后才打（父侧靠它判「真的活着」）。
     from remote.job_lifecycle import post_result

@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from common import protocol as _protocol
+from common import runtime
 from common.platform_utils import kill_process_tree, popen_own_group
 from common.protocol import SERVE_ANY_SCRIPT as _SERVE_ANY_SCRIPT
 from common.protocol import serve_mode_for as _serve_mode_for
@@ -243,6 +244,8 @@ class _Worker:
 
     def __init__(self, proc: subprocess.Popen) -> None:
         self.proc = proc
+        #: 读线程归这里（`serve-worker-<pid>-read`）：同一池里多条 worker，pid 才是区分位。
+        self._rt = runtime.Runtime(scope=f"serve-worker-{proc.pid}")
         self.busy = False
         self.dead = False
         #: 就绪或**已退出**都会置位 —— 等待方靠它立刻醒，不会为一个死进程等满就绪上限。
@@ -251,8 +254,7 @@ class _Worker:
         self.result: tuple[bool, str] | None = None  # (ok, msg)
         self._lock = threading.Lock()
         self._lines: list[str] = []
-        self._thread = threading.Thread(target=self._read, name="serve-reader", daemon=True)
-        self._thread.start()
+        self._thread = self._rt.thread(self._read, name="read", daemon=True)
 
     def _read(self) -> None:
         """读线程：分离「协议标记」与「对局日志」，前者唤醒等待者，后者留给 submit 落盘。"""
@@ -455,8 +457,20 @@ class ServePool:
         for w in dead:
             try:
                 w.kill()
-            except Exception:
-                pass
+            except Exception as e:
+                # 「只从列表剔掉会留尸」正是这段存在的理由（见 docstring）⇒ 连 kill 自己失败
+                # 也必须说出来：那一份是**仍在吃内存**的孤儿，而 `killed` 已经把它算进去了。
+                self.log(f"[pool] dead worker kill 失败（进程可能仍在）：{e!r}")
+
+    def workers(self) -> tuple[_Worker, ...]:
+        """池里当前持有的 worker（**活引用**，顺序 = 尝试顺序）。
+
+        只读快照：返回元组（调用方拿不走列表本体，池后续的增删不影响它）；元素是**同一个**
+        worker 对象 —— 用例靠这一点断言「跨轮复用不重建」「未就绪不杀」，诊断也靠它问
+        `proc.poll()` / `dead` / `ready`。
+        """
+        with self._lock:
+            return tuple(self._workers)
 
     def close(self) -> None:
         self.closed = True

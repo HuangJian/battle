@@ -711,7 +711,7 @@ def _boot_server(tmp_path: Path, token: str = "sekret") -> tuple:
     store = _JobStore(tmp_path / "jobs", tmp_path / "training_log.jsonl")
     srv = make_server(store, 0, token, host="127.0.0.1")
     port = srv.server_address[1]
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     return f"http://127.0.0.1:{port}", store, srv, th
 
@@ -857,7 +857,7 @@ def test_hub_admin_client_set_cloud_halt(tmp_path: Path) -> None:
 
     TrainingLoop 与 console 都走该函数下发停机/恢复；无 hub（local/push）短路 False。
     """
-    from remote.hub_client import set_cloud_halt
+    from remote.hub_client import PublishSpec, set_cloud_halt
 
     base, _store, srv, th = _boot_server(tmp_path)
     try:
@@ -1073,7 +1073,7 @@ def test_publish_job_slim_blob_and_payload_diet(tmp_path: Path) -> None:
     """M2：slim=True → payload 去冗余文件；opt/ref 只留 sha；blob 落盘（pull 端点源）。"""
     import tarfile as _tar
 
-    from remote.hub_client import publish_job
+    from remote.hub_client import PublishSpec, publish_job
     from remote.opt_delta import opt_tar_bytes as _opt_tar_bytes
 
     shard_dir = tmp_path / "rl_s1_seed10"
@@ -1091,30 +1091,32 @@ def test_publish_job_slim_blob_and_payload_diet(tmp_path: Path) -> None:
 
     jroot = tmp_path / "jobs"
     m = publish_job(
-        job_root=jroot,
-        jsonl_path=tmp_path / "log.jsonl",
-        run_id="r",
-        it=2,
-        traj_dir=str(tmp_path / "traj"),
-        shard_dirs=[shard_dir],
-        commit="c" * 40,
-        code_sha256="z" * 64,
-        course="{}",
-        course_fp="f" * 64,
-        reward_formula="score",
-        formula_hash="h" * 40,
-        metrics_version=1,
-        gamma=0.995,
-        lam=0.95,
-        mode="per-tick",
-        epochs=1,
-        mb=8,
-        lr=3e-4,
-        init_weights_path=str(init_w),
-        ckpt_remote_dir=str(ckpt),
-        ref_weights_b64=base64.b64encode(ref_raw).decode("ascii"),
-        ref_weights_fp=ref_fp,
-        slim=True,
+        PublishSpec(
+            job_root=jroot,
+            jsonl_path=tmp_path / "log.jsonl",
+            run_id="r",
+            it=2,
+            traj_dir=str(tmp_path / "traj"),
+            shard_dirs=[shard_dir],
+            commit="c" * 40,
+            code_sha256="z" * 64,
+            course="{}",
+            course_fp="f" * 64,
+            reward_formula="score",
+            formula_hash="h" * 40,
+            metrics_version=1,
+            gamma=0.995,
+            lam=0.95,
+            mode="per-tick",
+            epochs=1,
+            mb=8,
+            lr=3e-4,
+            init_weights_path=str(init_w),
+            ckpt_remote_dir=str(ckpt),
+            ref_weights_b64=base64.b64encode(ref_raw).decode("ascii"),
+            ref_weights_fp=ref_fp,
+            slim=True,
+        ),
         log=lambda _m: None,
     )
     jid = str(m["job_id"])
@@ -1142,7 +1144,7 @@ def test_publish_job_slim_off_restores_legacy_inline(tmp_path: Path) -> None:
     manifest 无 opt_sha/ref_sha（逐字节旧行为）。"""
     import tarfile as _tar
 
-    from remote.hub_client import publish_job
+    from remote.hub_client import PublishSpec, publish_job
     from remote.opt_delta import opt_tar_bytes as _opt_tar_bytes
 
     shard_dir = tmp_path / "rl_s1_seed10"
@@ -1158,30 +1160,32 @@ def test_publish_job_slim_off_restores_legacy_inline(tmp_path: Path) -> None:
 
     jroot = tmp_path / "jobs"
     m = publish_job(
-        job_root=jroot,
-        jsonl_path=tmp_path / "log.jsonl",
-        run_id="r",
-        it=2,
-        traj_dir=str(tmp_path / "traj"),
-        shard_dirs=[shard_dir],
-        commit="c" * 40,
-        code_sha256="z" * 64,
-        course="{}",
-        course_fp="f" * 64,
-        reward_formula="score",
-        formula_hash="h" * 40,
-        metrics_version=1,
-        gamma=0.995,
-        lam=0.95,
-        mode="per-tick",
-        epochs=1,
-        mb=8,
-        lr=3e-4,
-        init_weights_path=str(init_w),
-        ckpt_remote_dir=str(ckpt),
-        ref_weights_b64=base64.b64encode(ref_raw).decode("ascii"),
-        ref_weights_fp=hashlib.sha256(ref_raw).hexdigest(),
-        slim=False,
+        PublishSpec(
+            job_root=jroot,
+            jsonl_path=tmp_path / "log.jsonl",
+            run_id="r",
+            it=2,
+            traj_dir=str(tmp_path / "traj"),
+            shard_dirs=[shard_dir],
+            commit="c" * 40,
+            code_sha256="z" * 64,
+            course="{}",
+            course_fp="f" * 64,
+            reward_formula="score",
+            formula_hash="h" * 40,
+            metrics_version=1,
+            gamma=0.995,
+            lam=0.95,
+            mode="per-tick",
+            epochs=1,
+            mb=8,
+            lr=3e-4,
+            init_weights_path=str(init_w),
+            ckpt_remote_dir=str(ckpt),
+            ref_weights_b64=base64.b64encode(ref_raw).decode("ascii"),
+            ref_weights_fp=hashlib.sha256(ref_raw).hexdigest(),
+            slim=False,
+        ),
         log=lambda _m: None,
     )
     jid = str(m["job_id"])
@@ -1526,6 +1530,7 @@ import remote.http as http_mod
 import remote.job_lifecycle as JL
 import remote.worker as worker_mod
 from common.protocol import RetryableError
+from tests.helpers.http_server import serve_fast
 
 
 @pytest.fixture()
@@ -1732,7 +1737,8 @@ def test_cancel_stale_jobs_old_runs_only(tmp_path: Path) -> None:
     n2 = cancel_stale_jobs(jl, it=5, keep_job_id="keep-d")
     assert n2 == 0  # 幂等：已 cancelled 的不重复
 
-    evs = [json.loads(line) for line in open(jl, encoding="utf-8")]
+    with open(jl, encoding="utf-8") as f:
+        evs = [json.loads(line) for line in f]
     cancelled = sorted(e["job_id"] for e in evs if e.get("event") == "job_cancelled")
     assert cancelled == ["old-a", "old-b"]
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import re
 import threading
 import time
 from urllib.error import URLError
@@ -19,6 +20,7 @@ from urllib.error import URLError
 import pytest
 
 import common.distribution
+import common.weights_client
 
 
 @pytest.fixture(autouse=True)
@@ -37,7 +39,7 @@ class _Call:
 
 
 def _make_request_stub(script: list[tuple[int, bytes]], calls: list[_Call]):
-    """按序回放 (status, body)；记录每次 _request 的入参。"""
+    """按序回放 (status, body)；记录每次 node_request 的入参。"""
 
     def _request(url, auth_key, timeout, data=None, headers=None, method=None):
         calls.append(_Call(method or ("POST" if data is not None else "GET"), url, headers or {}, data))
@@ -52,9 +54,9 @@ def _make_request_stub(script: list[tuple[int, bytes]], calls: list[_Call]):
 def test_probe_hit_skips_body(monkeypatch) -> None:
     calls: list[_Call] = []
     script = [(200, json.dumps({"ok": True, "cached": True}).encode())]
-    monkeypatch.setattr(common.distribution, "_request", _make_request_stub(script, calls))
+    monkeypatch.setattr(common.distribution, "node_request", _make_request_stub(script, calls))
 
-    mode = common.distribution.post_weights(
+    mode = common.weights_client.post_weights(
         "http://node",
         "tok",
         "run.19",
@@ -81,9 +83,9 @@ def test_probe_unsupported_falls_back_to_full_post(monkeypatch) -> None:
         (404, b'{"error":"not found"}'),
         (204, b""),  # agent: 同 sha 幂等 kept（204 无 body）
     ]
-    monkeypatch.setattr(common.distribution, "_request", _make_request_stub(script, calls))
+    monkeypatch.setattr(common.distribution, "node_request", _make_request_stub(script, calls))
 
-    mode = common.distribution.post_weights("http://node", "tok", "run.19", sha, weights)
+    mode = common.weights_client.post_weights("http://node", "tok", "run.19", sha, weights)
     assert mode == "kept"
     assert len(calls) == 2
     assert calls[0].method == "GET"
@@ -103,9 +105,9 @@ def test_probe_uncached_full_post_purged(monkeypatch) -> None:
         (200, json.dumps({"ok": True, "cached": False}).encode()),
         (200, json.dumps({"ok": True, "cache": "purged"}).encode()),
     ]
-    monkeypatch.setattr(common.distribution, "_request", _make_request_stub(script, calls))
+    monkeypatch.setattr(common.distribution, "node_request", _make_request_stub(script, calls))
 
-    mode = common.distribution.post_weights("http://node", "tok", "run.19", "c" * 64, b"{}")
+    mode = common.weights_client.post_weights("http://node", "tok", "run.19", "c" * 64, b"{}")
     assert mode == "purged"
     assert len(calls) == 2
     assert calls[1].method == "POST"
@@ -123,8 +125,8 @@ def test_probe_network_error_falls_back(monkeypatch) -> None:
             raise OSError("connection reset")
         return 200, json.dumps({"cache": "purged"}).encode()
 
-    monkeypatch.setattr(common.distribution, "_request", _request)
-    mode = common.distribution.post_weights("http://node", "tok", "run.19", "d" * 64, b"x")
+    monkeypatch.setattr(common.distribution, "node_request", _request)
+    mode = common.weights_client.post_weights("http://node", "tok", "run.19", "d" * 64, b"x")
     assert mode == "purged"
     assert [c.method for c in calls] == ["GET", "POST"]
 
@@ -133,15 +135,15 @@ def test_probe_weights_cached_shapes(monkeypatch) -> None:
     def _ok(url, auth_key, timeout, data=None, headers=None, method=None):
         return 200, json.dumps({"cached": True}).encode()
 
-    monkeypatch.setattr(common.distribution, "_request", _ok)
-    assert common.distribution.probe_weights_cached("http://n", "k", "e" * 64) is True
-    assert common.distribution.probe_weights_cached("http://n", "k", "") is None
+    monkeypatch.setattr(common.distribution, "node_request", _ok)
+    assert common.weights_client.probe_weights_cached("http://n", "k", "e" * 64) is True
+    assert common.weights_client.probe_weights_cached("http://n", "k", "") is None
 
     def _boom(url, auth_key, timeout, data=None, headers=None, method=None):
         raise TimeoutError("t")
 
-    monkeypatch.setattr(common.distribution, "_request", _boom)
-    assert common.distribution.probe_weights_cached("http://n", "k", "e" * 64) is None
+    monkeypatch.setattr(common.distribution, "node_request", _boom)
+    assert common.weights_client.probe_weights_cached("http://n", "k", "e" * 64) is None
 
 
 def test_post_weights_parallel_order_and_failures(monkeypatch) -> None:
@@ -159,15 +161,15 @@ def test_post_weights_parallel_order_and_failures(monkeypatch) -> None:
             raise common.distribution.DistError(503, "busy")
         return "kept" if "self" in url else "purged"
 
-    monkeypatch.setattr(common.distribution, "post_weights", fake_post)
-    alive = common.distribution.post_weights_parallel(
+    monkeypatch.setattr(common.weights_client, "post_weights", fake_post)
+    alive = common.weights_client.post_weights_parallel(
         nodes,
         "run.19",
         "w" * 64,
         b"{}",
         timeout=5.0,
         kind="rollout",
-        log=logs.append,
+        hooks=common.weights_client.PushHooks(log=logs.append),
     )
     assert [n["id"] for n in alive] == ["self", "a97"]  # 入参顺序
     assert sorted(seen) == ["http://a97", "http://mac", "http://self"]
@@ -179,6 +181,36 @@ def test_post_weights_parallel_order_and_failures(monkeypatch) -> None:
     assert "weights[rollout] -> a97 (purged," in joined
     # 阶段总计（分发起点）：ready on N/M + 总墙钟 + sha 前 12 位
     assert "ready on 2/3 nodes" in joined and "sha wwwwwwwwwwww" in joined
+
+
+def test_post_weights_parallel_timings_come_from_the_injected_clock(monkeypatch) -> None:
+    """§P1-6 的 clock 半边：阶段计时读的是 `Runtime(monotonic=)`，不是模块里的 `time`。
+
+    判据刻意用**确定的数字**（注入 4 个 tick）而不是「日志里有 `0.xs`」—— 后者在任何人把计时
+    换回 `time.monotonic()` 之后照样绿，而这道接缝存在的理由正是「这段时长能被固定下来」。
+    """
+    nodes = [{"id": "self", "url": "http://self", "key": "k", "c": 8}]
+    logs: list[str] = []
+
+    def fake_post(url, auth_key, iter_id, sha, weights_bytes, timeout=120.0, kind="rollout"):
+        return "kept"
+
+    # 单节点 ⇒ 四个读数全在主线程、顺序确定：t0 / 提交 / 完成 / 收尾。
+    ticks = iter([100.0, 100.5, 101.0, 102.5])
+    monkeypatch.setattr(common.weights_client, "post_weights", fake_post)
+    alive = common.weights_client.post_weights_parallel(
+        nodes,
+        "run.1",
+        "w" * 64,
+        b"{}",
+        timeout=5.0,
+        hooks=common.weights_client.PushHooks(log=logs.append, monotonic=lambda: next(ticks)),
+    )
+    assert [n["id"] for n in alive] == ["self"]
+    # 判据是**数值**（不是子串）：两条行里的秒数必须恰好是注入时钟给的差
+    # （逐节点 101.0-100.5=0.5s，阶段总计 102.5-100.0=2.5s）。
+    got = [float(x) for line in logs for x in re.findall(r"(\d+\.\d+)s", line)]
+    assert got == [0.5, 2.5], (got, logs)
 
 
 def test_post_weights_parallel_excludes_node_on_raw_socket_error(monkeypatch) -> None:
@@ -200,9 +232,15 @@ def test_post_weights_parallel_excludes_node_on_raw_socket_error(monkeypatch) ->
             raise URLError(ConnectionResetError(10054, "forcibly closed by the remote host"))
         return "purged"
 
-    monkeypatch.setattr(common.distribution, "post_weights", fake_post)
-    alive = common.distribution.post_weights_parallel(
-        nodes, "run.19", "w" * 64, b"{}", timeout=5.0, kind="eval", log=logs.append
+    monkeypatch.setattr(common.weights_client, "post_weights", fake_post)
+    alive = common.weights_client.post_weights_parallel(
+        nodes,
+        "run.19",
+        "w" * 64,
+        b"{}",
+        timeout=5.0,
+        kind="eval",
+        hooks=common.weights_client.PushHooks(log=logs.append),
     )
     assert [n["id"] for n in alive] == ["self", "a97"]
     # 「就绪 2/3」由上面的 alive 行为面覆盖；文本只钉操作员归因：为什么剔的是 kaggle。
@@ -214,8 +252,8 @@ def test_post_weights_parallel_empty(monkeypatch) -> None:
     def fail(*a, **k):
         raise AssertionError("must not call post_weights on empty node list")
 
-    monkeypatch.setattr(common.distribution, "post_weights", fail)
-    assert common.distribution.post_weights_parallel([], "r", "s", b"", timeout=1.0) == []
+    monkeypatch.setattr(common.weights_client, "post_weights", fail)
+    assert common.weights_client.post_weights_parallel([], "r", "s", b"", timeout=1.0) == []
 
 
 def test_weights_push_cache_reuse_partition_and_forget(monkeypatch) -> None:
@@ -227,7 +265,7 @@ def test_weights_push_cache_reuse_partition_and_forget(monkeypatch) -> None:
         calls.append(url)
         return "purged"
 
-    monkeypatch.setattr(common.distribution, "post_weights", fake_post)
+    monkeypatch.setattr(common.weights_client, "post_weights", fake_post)
     nodes = [
         {"id": "self", "url": "http://self", "key": "k"},
         {"id": "mac", "url": "http://mac", "key": "k"},
@@ -236,7 +274,7 @@ def test_weights_push_cache_reuse_partition_and_forget(monkeypatch) -> None:
     # 初波：全部 need
     reuse, need = common.distribution.partition_weights_nodes(nodes, wver)
     assert reuse == [] and need == nodes
-    alive = common.distribution.post_weights_parallel(nodes, "r.1", wver, b"{}", timeout=5.0)
+    alive = common.weights_client.post_weights_parallel(nodes, "r.1", wver, b"{}", timeout=5.0)
     assert [n["id"] for n in alive] == ["self", "mac"]
     assert common.distribution.weights_already_pushed(wver, "self")
     assert common.distribution.weights_already_pushed(wver, "mac")
@@ -264,13 +302,13 @@ def test_post_weights_parallel_notes_cache(monkeypatch) -> None:
             raise common.distribution.DistError(500, "x")
         return "kept"
 
-    monkeypatch.setattr(common.distribution, "post_weights", fake_post)
+    monkeypatch.setattr(common.weights_client, "post_weights", fake_post)
     nodes = [
         {"id": "ok", "url": "http://ok", "key": "k"},
         {"id": "bad", "url": "http://bad", "key": "k"},
     ]
     wver = "c" * 64
-    alive = common.distribution.post_weights_parallel(nodes, "r", wver, b"x", timeout=5.0)
+    alive = common.weights_client.post_weights_parallel(nodes, "r", wver, b"x", timeout=5.0)
     assert [n["id"] for n in alive] == ["ok"]
     assert common.distribution.weights_already_pushed(wver, "ok")
     assert not common.distribution.weights_already_pushed(wver, "bad")
@@ -301,19 +339,19 @@ def test_post_weights_parallel_on_alive_fires_per_success(monkeypatch) -> None:
             raise common.distribution.DistError(500, "x")
         return "purged"
 
-    monkeypatch.setattr(common.distribution, "post_weights", fake_post)
+    monkeypatch.setattr(common.weights_client, "post_weights", fake_post)
     nodes = [
         {"id": "fast", "url": "http://fast", "key": "k", "c": 1},
         {"id": "slow", "url": "http://slow", "key": "k", "c": 1},
         {"id": "fail", "url": "http://fail", "key": "k", "c": 1},
     ]
-    alive = common.distribution.post_weights_parallel(
+    alive = common.weights_client.post_weights_parallel(
         nodes,
         "r",
         "d" * 64,
         b"x",
         timeout=5.0,
-        on_alive=lambda nd: spawned.append(nd["id"]),
+        hooks=common.weights_client.PushHooks(on_alive=lambda nd: spawned.append(nd["id"])),
     )
     assert sorted(spawned) == ["fast", "slow"]
     assert "fail" not in spawned

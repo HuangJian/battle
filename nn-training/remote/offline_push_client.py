@@ -213,6 +213,8 @@ def _download(
         try:
             resp.close()
         except Exception:
+            # 契约静默（G9 冻结，非旧债）：已在 finally，成功/失败路径都要走；
+            # 这里抛只会把已有结论替换成「关连接失败」。
             pass
 
 
@@ -256,7 +258,8 @@ def post_task(
     except OSError:
         return None
     try:
-        fh = open(path, "rb")
+        # 流式上传需要句柄活过 `_open`，在 finally 里关闭
+        fh = open(path, "rb")  # noqa: SIM115
     except OSError:
         return None
     try:

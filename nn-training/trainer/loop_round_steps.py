@@ -739,4 +739,11 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
 
 
 # 步骤方法名与步骤表必须一一对应（加一步就得加实现，漏了在 import 期就响亮）。
-assert set(STEP_METHOD) == set(ROUND_TASKS), "loop_round.STEP_METHOD 与 ROUND_TASKS 不同步"
+# 显式 `raise` 而不是 `assert`：`python -O` 会删掉 assert，而这条不变量正是「加一步却忘了
+# 写实现」时唯一会在 import 期拦住的东西（G7：生产包不许用模块级 assert 做运行时校验）。
+if set(STEP_METHOD) != set(ROUND_TASKS):
+    raise RuntimeError(
+        "loop_round.STEP_METHOD 与 ROUND_TASKS 不同步："
+        f"缺实现 {sorted(set(ROUND_TASKS) - set(STEP_METHOD))}，"
+        f"多声明 {sorted(set(STEP_METHOD) - set(ROUND_TASKS))}"
+    )

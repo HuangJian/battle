@@ -210,7 +210,10 @@ def _rebuild_opt_tar_torch(
     import torch
 
     return opt_delta.rebuilt_opt_tar(
-        container, torch.load(base_p, map_location="cpu"), out_dir=out_dir, log=log
+        container,
+        torch.load(base_p, map_location="cpu", weights_only=True),
+        out_dir=out_dir,
+        log=log,
     )
 
 

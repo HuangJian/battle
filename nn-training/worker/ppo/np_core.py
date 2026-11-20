@@ -22,6 +22,15 @@ from typing import Any, cast
 import numpy as np
 import numpy.typing as npt
 
+from common.contracts import (
+    EPISODE_FIELDS,
+    EPISODE_FIELDS_V6,
+    ActionSpace,
+    Episode,
+    EpisodeV6,
+    Shard,
+    ShardV6,
+)
 from common.errors import ProtocolError
 from common.log import log
 from common.schema import (
@@ -47,11 +56,8 @@ from common.shard import (
     REWARD_VERSION,
     RL_REWARD_FILES,
 )
-from worker.ppo._episode import episode_from_shard
+from worker.ppo._episode import ShardRow, episode_from_shard
 
-# numpy 的 RandomState.get_state() 存根把 legacy 默认标成 False（→ dict），但 numpy 2.x
-# 实测返回的是 legacy 元组。显式传 legacy=True 并断言元组形态，双层保险。
-_RNGState = tuple[str, np.ndarray, int, int, float]
 
 # ---------------- GAE ----------------
 def compute_gae(
@@ -66,19 +72,39 @@ def compute_gae(
 
     dt=None — 定长 per-tick 折扣（ppo.py 原路径，逐字节一致）。
     dt 给定 — 变步长折扣 γ_step = γ^Δt（ppo_intent.py 原路径；Δt≡1 时退化为定长）。
+
+    2026-11-16（P1-12）：能向量化的那半（γ_step / δ / carry）挪进 numpy，tick 循环里只剩
+    一行递推（64→4096 步实测 3.1~4.5x）。**逐字节不变**靠三条约束：
+    ① 递推仍逐 tick 串行 —— 写成 cumprod(1/P_t · Σ P_k δ_k) 形式会改舍入，而 `adv` 虽存
+      float32 却按 float64 累积，累乘再相除与逐项乘加不是同一个数；
+    ② γ^Δt 走 **Python pow 查表**，不用 `np.power`：numpy 对整数指数有自己的快路径，
+      末位不保证与 Python pow 相同；表只按 distinct Δt 建（变步长语料的 Δt 取值个数远小于 N）；
+    ③ 中间量先转 Python float 列表再递推 —— 列表下标比 numpy 标量快，`.tolist()` 是精确转换。
     """
     N = len(rewards)
-    adv = np.zeros(N, dtype=np.float32)
+    if N == 0:
+        adv: npt.NDArray[np.float32] = np.zeros(0, dtype=np.float32)
+        return adv, adv + np.asarray(values, dtype=np.float32)
+    v = np.asarray(values, dtype=np.float64)
+    if dt is None:
+        gamma_step: npt.NDArray[np.float64] = np.full(N, float(gamma), dtype=np.float64)
+    else:
+        dt64 = np.asarray(dt, dtype=np.float64)
+        uniq = np.unique(dt64)
+        pow_lut = np.array([float(gamma ** float(u)) for u in uniq.tolist()], dtype=np.float64)
+        gamma_step = pow_lut[np.searchsorted(uniq, dt64)]
+    v_next = np.empty_like(v)  # V(s_{t+1})；末 tick 之后无状态 ⇒ 0.0
+    v_next[:-1] = v[1:]
+    v_next[-1] = 0.0
+    delta = (np.asarray(rewards, dtype=np.float64) + gamma_step * v_next - v).tolist()
+    carry = (gamma_step * lam * (1.0 - np.asarray(dones, dtype=np.float64))).tolist()
+    adv_out = [0.0] * N
     last = 0.0
-    for t in reversed(range(N)):
-        non_term = 1.0 - float(dones[t])
-        gamma_step = float(gamma) if dt is None else float(gamma ** float(dt[t]))
-        next_value = 0.0 if t + 1 >= N else float(values[t + 1])
-        delta = float(rewards[t]) + gamma_step * next_value - float(values[t])
-        last = delta + gamma_step * lam * non_term * last
-        adv[t] = last
-    ret = adv + np.asarray(values, dtype=np.float32)
-    return adv, ret
+    for t in range(N - 1, -1, -1):
+        last = delta[t] + carry[t] * last
+        adv_out[t] = last
+    adv = np.asarray(adv_out, dtype=np.float32)
+    return adv, adv + np.asarray(values, dtype=np.float32)
 
 # ---------------- shard discovery / loading ----------------
 def discover_shards(
@@ -144,16 +170,9 @@ def load_shard_fields(
         out[key] = arr
     return out
 
-# ---------------- checkpoint (epoch-granularity, RNG-preserving) ----------------
-def _pack_np_state() -> list:
-    """numpy MT19937 全局状态 → JSON 可序列化（续跑需精确重建 epoch 乱序）。"""
-    s = cast(_RNGState, np.random.get_state(legacy=True))
-    return [s[0], s[1].tolist(), s[2], s[3], s[4]]
-
-def _unpack_np_state(packed: list) -> None:
-    np.random.set_state(
-        (packed[0], np.asarray(packed[1], dtype=np.uint32), packed[2], packed[3], packed[4])
-    )
+# ---------------- checkpoint (epoch-granularity) ----------------
+# RNG 面的存取已搬到 `worker/ppo/rng.py::PPORng`（显式三条流 + `bit_generator.state`）：
+# 全局 MT19937 状态不再是任何东西的续跑依据（§P1-7）。
 
 def is_xla(device) -> bool:
     """device 是否为 XLA/TPU（torch.device('xla') 或 xm.xla_device()）。"""
@@ -308,17 +327,21 @@ def xla_fingerprint(device: object = None) -> dict:
         try:
             out[key] = fn()
         except Exception:
+            # 契约静默（G9 冻结，非旧债）：torch_xla 的能力探测 —— 不同版本属性集合不同，
+            # 缺项进 out 就是「这台机器没有这个信息」，返回 dict 少 key 已是显式结论。
             pass
     try:
         out["replication_devices"] = int(
             torch_xla._XLAC._xla_get_replication_devices_count()
         )
     except Exception:
+        # 契约静默（G9 冻结，非旧债）：同上，复制设备数在非 PJRT 后端不存在。
         pass
     try:
         dev = str(device) if device is not None else str(xla_device())
         out["attrs"] = str(xr.runtime_device_attributes(dev))
     except Exception:
+        # 契约静默（G9 冻结，非旧债）：同上，设备属性串是诊断信息，缺了就少一个键。
         pass
     return out
 
@@ -490,7 +513,13 @@ def xla_delta_str(d: dict[str, float]) -> str:
     )
 
 # ---------------- minibatch chunking ----------------
-def chunk_episodes(episodes: list[dict], mb: int, shuffle: bool = True) -> list[dict]:
+def chunk_episodes(
+    episodes: Sequence[ShardRow],
+    mb: int,
+    shuffle: bool = True,
+    *,
+    rng: np.random.Generator | None = None,
+) -> list[dict]:
     """Split per-episode dicts into fixed-size minibatch chunks (every chunk exactly `mb`).
 
     GAE is computed per-episode BEFORE chunking; chunks are only an update-
@@ -501,8 +530,10 @@ def chunk_episodes(episodes: list[dict], mb: int, shuffle: bool = True) -> list[
     严重违反（梯度方差大 → KL spikes → 熔断/早停；H1 假设的主因）。默认改为
     **全局 transition 级重排**：展平全部 episodes → 单次 permutation → 按 mb 切片。
     GAE/adv/ret 是逐 transition 存储的，重排不改变任何数学（on-policy 正确性
-    不受影响）；RNG 用全局 np.random（由 main 播种，可复现）。
-    shuffle=False 保留旧行为（逐字节一致，供对照实验）。
+    不受影响）。重排必须由调用方给 `rng`（`PPORng.chunk`，2026-11-17 §P1-7）：
+    不再读全局 `np.random` —— 全局流与 epoch 顺序/demo 抽样共用一本账时，
+    任何第三方抽一次数就会把训练序列改掉。
+    shuffle=False 保留旧行为（逐字节一致，供对照实验），此时不需要 `rng`。
 
     mb 对齐（2026-09-23，见 docs/nn.progress.md §140）：重排路径**丢弃尾部
     `n % mb` 步**，让每个 chunk 恰为 `mb` 行（旧行为是末块 ragged）。为什么值这个
@@ -522,7 +553,8 @@ def chunk_episodes(episodes: list[dict], mb: int, shuffle: bool = True) -> list[
     if callable(maker):
         # lazy corpus：返回 LazyChunks（鸭子类型序列）；签名保留 list 是为了不把
         # lazy_corpus 的类型拖进这个 numpy-only 核心（双向 import = 环）。
-        return cast(list[dict], maker(mb, shuffle=shuffle))
+        # rng 与 eager 分支同一条显式流（§P1-7）：lazy 不许再读全局 np.random。
+        return cast(list[dict], maker(mb, shuffle=shuffle, rng=rng))
     if not shuffle or len(episodes) <= 1:
         out: list[dict] = []
         for e in episodes:
@@ -530,10 +562,15 @@ def chunk_episodes(episodes: list[dict], mb: int, shuffle: bool = True) -> list[
             for s in range(0, n, mb):
                 out.append({k: v[s : s + mb] for k, v in e.items()})
         return out
+    if rng is None:
+        raise ValueError(
+            "chunk_episodes(shuffle=True) 必须给 rng（PPORng.chunk）："
+            "重排不许再读全局 np.random（§P1-7）"
+        )
     keys = list(episodes[0].keys())
     flat = {k: np.concatenate([e[k] for e in episodes], axis=0) for k in keys}
     n = flat["obs"].shape[0]
-    idx = np.random.permutation(n)
+    idx = rng.permutation(n)
     n_used = (n // mb) * mb
     if n_used == 0:
         # 池子不足一个 mb（只在小样本冒烟/单测里出现）：保留旧的一块 ragged。
@@ -545,7 +582,7 @@ def chunk_episodes(episodes: list[dict], mb: int, shuffle: bool = True) -> list[
     ]
 
 # ---------------- episode loading skeleton (ppo / ppo_intent 共用) ----------------
-def trim_shard_arrays(d: dict[str, np.ndarray], keep: int) -> dict[str, np.ndarray]:
+def trim_shard_arrays(d: ShardRow, keep: int) -> ShardRow:
     """把 shard 的逐 step 数组截到前 `keep` 步（**在 GAE 之前**调用）。
 
     为什么必须在 GAE 之前：GAE 是**反向递推**（从局末往回算），保留段的 advantage
@@ -582,8 +619,8 @@ def load_episodes_common(
     #: 奖励面的「或」判据（wire-diet §3 P1）：per-tick RL 是 metrics.npy **或** reward.npy。
     #: 缺省空 = 逐字节旧行为（intent/goal/BC 调用点不传）。
     need_any_files: Sequence[str] = (),
-    shard_loader: Callable[[str], dict[str, np.ndarray]],
-    gae: Callable[[dict[str, np.ndarray]], tuple[np.ndarray, np.ndarray]],
+    shard_loader: Callable[[str], ShardRow],
+    gae: Callable[[ShardRow], tuple[np.ndarray, np.ndarray]],
     gae_name: str,
     normalize_ret: bool,
     load_log_every: int = 128,
@@ -756,12 +793,36 @@ _RL_SHARD_SPEC_REWARD: dict[str, tuple[str, npt.DTypeLike]] = {
     k: v for k, v in _RL_SHARD_SPEC.items() if k != "metrics"
 }
 
+#: 字段表里有、但读时被算成 `reward` 后 pop 掉的一列（所以不在 `Shard` 契约里）。
+DROPPED_SHARD_KEYS: frozenset[str] = frozenset({"metrics"})
+#: 加载端现算、不在字段表里的两列（`load_shard` 最后追加）。
+COMPUTED_SHARD_KEYS: frozenset[str] = frozenset({"reward", "stage"})
+
+# 与数据面契约的自洽哨兵（同 `common/contracts.py` 里 HeadLayout↔schema 那一条）：字段表
+# （`_RL_SHARD_SPEC`，loader 用）与契约（`common.contracts.Shard`/`ShardV6`，mypy 用）是两处
+# 声明。只改一边时 **import 当场炸**，而不是等训练时报 ValueError 或静默少读一列。
+# 换算：`metrics` 读时被算成 `reward` 后 pop 掉；`reward` / `stage` 是加载端现算的两列。
+_V6_ONLY_KEYS = frozenset(ShardV6.__annotations__) - frozenset(Shard.__annotations__)
+#: 可选但**不是** v6 专有的列：legacy/v6 都可能没有（hybrid opening 的 policy_mask）。
+_OPTIONAL_NOT_V6 = frozenset({"policy_mask"})
+if (_V6_ONLY_KEYS | _OPTIONAL_NOT_V6) != _RL_SHARD_OPTIONAL or frozenset(
+    Shard.__annotations__
+) != (
+    frozenset(_RL_SHARD_SPEC) - frozenset(DROPPED_SHARD_KEYS) - _V6_ONLY_KEYS
+    | frozenset(COMPUTED_SHARD_KEYS)
+):
+    raise AssertionError(
+        "字段表与 common.contracts 不同源："
+        f"spec={sorted(_RL_SHARD_SPEC)}、optional={sorted(_RL_SHARD_OPTIONAL)}、"
+        f"Shard={sorted(Shard.__annotations__)}、v6 多出={sorted(_V6_ONLY_KEYS)}"
+    )
+
 
 def discover_rl_shards(root: str) -> list[str]:
     return discover_shards(root, ("obs.npy",), need_any=RL_REWARD_FILES)
 
 
-def load_shard(dirpath: str, *, mmap: bool = False) -> dict[str, np.ndarray]:
+def load_shard(dirpath: str, *, mmap: bool = False) -> Shard | ShardV6:
     """读 shard 字段 + manifest → `reward`（N 样本）。
 
     两条奖励来源（wire-diet，2026-10-14，§3 P1）：
@@ -791,7 +852,9 @@ def load_shard(dirpath: str, *, mmap: bool = False) -> dict[str, np.ndarray]:
     # 静默读到训练完才表现异常（第 4–6 列被当 fire、第 7–8 列不存在）。
     # 判据：`a_hold.npy` 存在 ⇔ 9 宽；不存在 ⇔ 7 宽。两侧不一致 = 导出端/加载端
     # 版本不同源（或有人只改了一半），必须响亮。
-    is_v6 = "a_hold" in d
+    # 判据只有一处（`ActionSpace.from_batch`）：本文件不再自己查 `a_hold` 在不在，
+    # 否则「v6 是什么」就有第二个定义，拼错键名只会静默走 legacy（§0.1 第 3 条）。
+    is_v6 = ActionSpace.from_batch(d).is_v6
     # 老 shard 没有 policy_mask ⇒ 全 1（老行为逐字节不变）；
     # 必须补齐，否则 chunk_episodes 混用键集会 KeyError。
     if "policy_mask" not in d:
@@ -812,7 +875,49 @@ def load_shard(dirpath: str, *, mmap: bool = False) -> dict[str, np.ndarray]:
     # 0 维数组 ⇒ trim_shard_arrays 不会截它。manifest 缺该键时取 -1（所有 shard 归一组，
     # 配额退化为全局，加载日志里会显示只有 1 个 stage）。
     d["stage"] = np.asarray(int(manifest.get("stage", -1)))
-    return d
+    return _as_shard(d, is_v6=is_v6)
+
+
+def _as_shard(d: dict[str, np.ndarray], *, is_v6: bool) -> Shard | ShardV6:
+    """裸 dict（字段表 `_RL_SHARD_SPEC` 派生）→ 具名契约（`common.contracts.Shard`）。
+
+    键名逐个写出来是**有意的**：这就是契约的检查点 —— 字段表的键与契约的键
+    对不上时（拼错 / 只改一边）mypy 当场报错，而不是等到训练时 ValueError 或静默错位。
+    一次 shard 级拷贝（十几行指针），与每 shard 上百 MB 的数组相比可忽。
+    """
+    if not is_v6:
+        return Shard(
+            obs=d["obs"],
+            scalars=d["scalars"],
+            extra=d["extra"],
+            a_move=d["a_move"],
+            a_fire=d["a_fire"],
+            lp_move=d["lp_move"],
+            lp_fire=d["lp_fire"],
+            value=d["value"],
+            done=d["done"],
+            mask=d["mask"],
+            reward=d["reward"],
+            stage=d["stage"],
+            policy_mask=d["policy_mask"],
+        )
+    return ShardV6(
+        obs=d["obs"],
+        scalars=d["scalars"],
+        extra=d["extra"],
+        a_move=d["a_move"],
+        a_fire=d["a_fire"],
+        lp_move=d["lp_move"],
+        lp_fire=d["lp_fire"],
+        value=d["value"],
+        done=d["done"],
+        mask=d["mask"],
+        reward=d["reward"],
+        stage=d["stage"],
+        policy_mask=d["policy_mask"],
+        a_hold=d["a_hold"],
+        lp_hold=d["lp_hold"],
+    )
 
 
 def _check_mask_width(mask: np.ndarray, is_v6: bool, dirpath: str) -> None:
@@ -946,34 +1051,28 @@ def _reward_from_npy(dirpath: str, n_obs: int) -> np.ndarray:
     return np.asarray(r, dtype=np.float32)
 
 
-def load_episode_from_shard(dirpath: str, gamma: float = GAMMA, lam: float = LAM) -> dict | None:
+def load_episode_from_shard(
+    dirpath: str, gamma: float = GAMMA, lam: float = LAM
+) -> Episode | EpisodeV6 | None:
     """流式 backend 接口（trainer/stream.py）：单个 shard → 可训练 episode（adv/ret 未归一）。
 
     ppo_intent.load_episode_from_shard 同签名——run_rollout_stream 以 backend 参数
     复用同一套流式基础设施（工程化共享，勿在 stream 内复制第二份加载逻辑）。
+
+    返回 `common.contracts.Episode`（v6 盘上是 `EpisodeV6`）：键集**与序**都由那一份声明决定
+    （`EPISODE_FIELDS*` 就是它的声明序），所以下面的 cast 不是「相信骨架」：键集与序本来就
+    是同一份事实。
     """
     d = load_shard(dirpath)
     # B1 v6：多两个字段（存在性判据，见 `_RL_SHARD_OPTIONAL`）。legacy 分支的
     # `fields` 元组逐字不变 ⇒ 历史 shard 的 episode 字典键集也逐字不变。
-    base = (
-        "obs",
-        "scalars",
-        "a_move",
-        "a_fire",
-        "lp_move",
-        "lp_fire",
-        "value",
-        "adv",  # 占位：GAE 现算
-        "ret",
-        "mask",
-        "policy_mask",
-    )
-    fields = (*base, "a_hold", "lp_hold") if "a_hold" in d else base
-    return episode_from_shard(
+    fields = EPISODE_FIELDS_V6 if ActionSpace.from_batch(d).is_v6 else EPISODE_FIELDS
+    ep = episode_from_shard(
         d,
         lambda x: compute_gae(x["reward"], x["value"], x["done"], gamma, lam),
         fields=fields,
     )
+    return None if ep is None else cast("Episode | EpisodeV6", ep)
 
 
 def load_episodes(

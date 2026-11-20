@@ -55,7 +55,7 @@ class _ReadMeter:
                     me.bytes += len(b)
                     return b
 
-                f.read = read  # type: ignore[method-assign]
+                f.read = read
             return f
 
         monkeypatch.setattr(sl, "open", fake, raising=False)
@@ -98,7 +98,7 @@ def test_first_read_parses_the_whole_file(tmp_path: Path) -> None:
     st = _store(tmp_path)
     _append(st, 5)
     assert _rows(st) == _expect(st.jsonl_path)
-    assert st._ledger_off == st.jsonl_path.stat().st_size, "整份都解析完了 ⇒ offset 到头"
+    assert st.ledger_offset() == st.jsonl_path.stat().st_size, "整份都解析完了 ⇒ offset 到头"
 
 
 def test_appending_one_row_reads_only_the_new_bytes(tmp_path: Path, monkeypatch: Any) -> None:
@@ -135,7 +135,7 @@ def test_a_half_written_line_is_not_parsed_and_does_not_eat_the_next(tmp_path: P
     with open(st.jsonl_path, "a", encoding="utf-8") as f:
         f.write('{"event": "job_pendi')  # 写者正在追加
     assert len(_rows(st)) == 2, "半截行不该被解析"
-    partial = st.jsonl_path.stat().st_size - st._ledger_off
+    partial = st.jsonl_path.stat().st_size - st.ledger_offset()
     assert partial > 0, "半截行必须留在 offset 之外（下次接着读）"
     # 补全这一行 ⇒ 立刻能解析到，且不重解前面两行
     with open(st.jsonl_path, "a", encoding="utf-8") as f:

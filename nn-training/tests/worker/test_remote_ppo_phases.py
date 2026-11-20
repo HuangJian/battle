@@ -133,7 +133,8 @@ def test_not_resumable_blocks_and_lands() -> None:
     """组合语义（`resumable=False`）：就地阻塞取结果——没人接手，让位等于不回来。"""
     rig = _Rig(probe_result=None)
     ctx = RoundContext(it=1)  # 默认不可续跑
-    assert rig.step._remote_ppo_step(ctx) is None
+    outcome = rig.step._remote_ppo_step(ctx)
+    assert outcome is None
     assert rig.calls == ["publish", "probe", "fetch", "land"]
     assert rig.landed[0]["job"] == "job-1"
 
@@ -141,9 +142,10 @@ def test_not_resumable_blocks_and_lands() -> None:
 def test_ready_probe_lands_without_fetch() -> None:
     rig = _Rig(probe_result={"agg": {}, "job": "job-1"})
     ctx = RoundContext(it=1, resumable=True)
-    assert rig.step._remote_ppo_step(ctx) is None
+    outcome = rig.step._remote_ppo_step(ctx)
+    assert outcome is None
     assert rig.calls == ["publish", "probe", "land"]
-    assert rig.step._remote_fail == 0  # 成功即复位连败（下一段失败从头计）
+    assert rig.step.remote_fail_state().consecutive_failures == 0  # 成功即复位连败
 
 
 def test_probe_terminal_failure_goes_through_the_policy_and_reraises() -> None:
@@ -199,8 +201,9 @@ def test_real_policy_is_wired_into_the_phase_driver(
     _stub(st, "_remote_ppo_publish", boom)
     with pytest.raises(HubClientError):
         st._remote_ppo_step(RoundContext(it=3, resumable=True))
-    assert st._remote_fail == 3
-    assert st._leg_abort is True  # 停腿，绝不下沉到本机
+    state = st.remote_fail_state()
+    assert state.consecutive_failures == 3
+    assert state.leg_aborted is True  # 停腿，绝不下沉到本机
 
 
 def test_land_failure_goes_through_the_policy() -> None:

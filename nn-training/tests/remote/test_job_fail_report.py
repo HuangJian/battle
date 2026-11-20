@@ -38,8 +38,9 @@ if str(ROOT) not in sys.path:
 
 from common.protocol import FAIL_NAME, JobFailedError, normalize_manifest
 from hub.server import _JobStore
-from remote.hub_client import publish_job, report_job_failure, wait_job
-from tests.remote.test_remote_ppo import (  # type: ignore
+from remote.hub_client import PublishSpec, publish_job, report_job_failure, wait_job
+from tests.helpers.http_server import serve_fast
+from tests.remote.test_remote_ppo import (
     _boot_server,
     _http,
     _mini_manifest,
@@ -287,16 +288,15 @@ def test_republish_same_job_clears_failure_marker(tmp_path: Path) -> None:
         epochs=1,
         mb=8,
         lr=3e-4,
-        log=_QUIET,
     )
-    m = publish_job(**kwargs)  # type: ignore[arg-type]
+    m = publish_job(PublishSpec(**kwargs), log=_QUIET)  # type: ignore[arg-type]
     jid = str(m["job_id"])
     jd = jroot / jid
     (jd / FAIL_NAME).write_text(json.dumps({"reason": "bun 未安装"}), encoding="utf-8")
     store = _JobStore(jroot, tmp_path / "log.jsonl")
     assert store.claimable_job_ids() == []  # 已失败 → 不回池
 
-    m2 = publish_job(**kwargs)  # type: ignore[arg-type]
+    m2 = publish_job(PublishSpec(**kwargs), log=_QUIET)  # type: ignore[arg-type]
     assert str(m2["job_id"]) == jid, "同幂等键必须得到同 job_id（否则测的不是重试路径）"
     assert not (jd / FAIL_NAME).exists()
     assert store.claimable_job_ids() == [jid]  # 重发即重试
@@ -313,8 +313,8 @@ def test_push_round_promotes_node_failure_over_retryable() -> None:
         raise JobFailedError("job j 失败: bun 未安装 [kind=ProtocolError]", kind="ProtocolError")
 
     orig_submit, orig_wait = lt._push_submit, lt._push_wait_result
-    lt._push_submit = lambda *a, **k: {}  # type: ignore[assignment]
-    lt._push_wait_result = _boom  # type: ignore[assignment]
+    lt._push_submit = lambda *a, **k: {}
+    lt._push_wait_result = _boom
     try:
         nodes = [{"url": "http://a", "authKey": ""}, {"url": "http://b", "authKey": ""}]
         with pytest.raises(JobFailedError) as ei:
@@ -330,7 +330,7 @@ def test_push_round_promotes_node_failure_over_retryable() -> None:
             )
         assert "bun" in str(ei.value)  # 原因原样上浮，不被 RetryableError 吃掉
     finally:
-        lt._push_submit, lt._push_wait_result = orig_submit, orig_wait  # type: ignore[assignment]
+        lt._push_submit, lt._push_wait_result = orig_submit, orig_wait
 
 
 def test_push_node_failure_is_410_and_fails_fast(tmp_path: Path) -> None:
@@ -340,7 +340,7 @@ def test_push_node_failure_is_410_and_fails_fast(tmp_path: Path) -> None:
 
     state = WorkerServerState(tmp_path / "work")
     srv = make_worker_server(state, 0, "tok")
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     try:
         base = f"http://127.0.0.1:{srv.server_address[1]}"

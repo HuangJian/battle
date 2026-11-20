@@ -30,6 +30,7 @@ import errno
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -723,7 +724,7 @@ def test_clean_attempt_survives_rglob_race(tmp_path: Path, monkeypatch: pytest.M
 
     real_rglob = Path.rglob
 
-    def racing_rglob(self: Path, pattern: str):  # type: ignore[no-untyped-def]
+    def racing_rglob(self: Path, pattern: str):
         # 只在扫 job 根时模拟「并发 rmtree 把目录删了」的窗口
         if self == job:
             raise FileNotFoundError(2, "No such file or directory", str(self / "r" / "w196"))
@@ -747,8 +748,10 @@ def test_clean_partial_shape_is_unchanged_on_the_fallback_path(tmp_path: Path) -
     job.mkdir()
     argv = ["stub.py", "--out", "w0", "--stages", "0", "--seeds", "0"]
     ex = tmp_path / "ex"
-    assert iter_rollout._clean_partial(job, job, argv).keywords == {}, "回退档不多传参数"
-    assert iter_rollout._clean_partial(job, ex, argv).keywords == {"exec_root": ex}
+    same_root = iter_rollout._clean_partial(job, job, argv)
+    other_root = iter_rollout._clean_partial(job, ex, argv)
+    assert same_root.keywords == {}, "回退档不多传参数"
+    assert other_root.keywords == {"exec_root": ex}
     iter_rollout._clean_attempt(job, argv)  # 两参直调（替身的形状）照旧可用
 
 
@@ -828,40 +831,62 @@ def test_eval_builder_falls_back_when_a_step_exceeds_its_ceiling(
 ) -> None:
     """★ A4 / DoD-4（镜像旧「探针超界」用例）：落点段任一步超界 ⇒ **本段**回退原地 + 响亮一行。
 
-    判定不看措辞：① 三条路径全是「今天的」（不换根）；② **后续轮不再等** —— 超界一次就
-    把本段降档（`state["layout"] = None`），不是每轮各付一遍注定等满的上界；③ 有一条 WARN。
+    判定不看措辞，也**不看墙钟**：① 三条路径全是「今天的」（不换根）；② 被超界放弃的那一笔
+    **没有跑完**（`finished == []` —— 这是「没等它」的事实，不是「机器够快」）；③ 有一条 WARN；
+    ④ **后续轮不再等** —— 超界一次就把本段降档（`state["layout"] = None`），判据是「第四轮
+    一次 `call_bounded` 都不再进」，不是「第四轮跑得快」。
+
+    为什么换掉原来的 `first < 1.5` / `second < 0.5`（2026-11-17 全量 flake：满载实测 2.46s）：
+    那两个数字把「上界被遵守」与「进程没被换出 / 没撞上 GC」混成一条断言，而它们的量级
+    （0.3s×5 = 1.5s）正好在调度毛刺的同一档。夹具改成**永不返回**的桩之后，「没包上界」的
+    回归形态是**挂起**（pytest 60s 上限把它变成红），不再靠余量。
     """
+    from remote import plan_handoff as ph
     from remote.plan_handoff import _eval_job_builder
 
     local = _local_root(tmp_path)
     _only_candidate(monkeypatch, local)
     monkeypatch.setattr(game_watch, "DRAIN_CEILING_SEC", 0.3)
 
-    def slow_install(*a: Any, **kw: Any) -> bool:
-        # 夹具模拟「坏盘上既不返回也不抛」的那一笔写；睡的不是「等对方先跑」。
-        time.sleep(2.0)  # sleep-ok: 夹具模拟的工作量
+    release = threading.Event()
+    finished: list[str] = []
+
+    def stuck_install(*a: Any, **kw: Any) -> bool:
+        # 夹具：坏盘上既不返回也不抛的那一笔写（只有本用例放行才结束）。
+        release.wait(30.0)
+        finished.append("install")
         return True
 
-    monkeypatch.setattr(scratch, "install_file", slow_install)
+    monkeypatch.setattr(scratch, "install_file", stuck_install)
+    bounded: list[str] = []
+    real_bounded = ph.call_bounded
+
+    def counted(fn: Any, timeout: float, *, name: str = "") -> tuple[bool, Any]:
+        bounded.append(name)
+        return real_bounded(fn, timeout, name=name)
+
+    monkeypatch.setattr(ph, "call_bounded", counted)
     ctx = _eval_ctx(tmp_path)
     msgs: list[str] = []
     ctx.log = msgs.append
     build = _eval_job_builder(cast(Any, ctx), _eval_plan())
-    t0 = time.time()
-    job = build(3)
-    first = time.time() - t0
-    # 判据就是被测的那条上界本身（未包上界时这里实测 2s+）
-    assert first < 1.5, f"超界必须在上界内返回（实测 {first:.2f}s）"  # timing-ok: 契约上界（0.3s×5）
-    assert Path(job["weights_path"]) == ctx.store.weights_path(3), "超界 ⇒ 逐字回退档（不换根）"
-    assert Path(job["work_dir"]) == ctx.work_dir / "eval-work"
-    assert Path(job["ts_root"]) == ctx.ts_tree_dir
-    assert any("超界或失败" in m for m in msgs), msgs
-    # 第二次：本段已降档 ⇒ 不再进落点段（不许每轮再等一遍）
-    t1 = time.time()
-    job4 = build(4)
-    second = time.time() - t1
-    assert second < 0.5, f"降档后不许每轮再等（实测 {second:.3f}s）"  # timing-ok: 契约（降档即零落点 IO）
-    assert Path(job4["weights_path"]) == ctx.store.weights_path(4)
+    try:
+        t0 = time.time()
+        job = build(3)
+        first = time.time() - t0
+        assert not finished, "超界的那一笔必须被放弃（等到它返回 = 上界没生效）"
+        assert first < 5.0, f"超界必须在上界内返回（实测 {first:.2f}s）"  # timing-ok: 上界兜底（3 步 × 0.3s = 1.5s，5.0 只挡挂起）
+        assert Path(job["weights_path"]) == ctx.store.weights_path(3), "超界 ⇒ 逐字回退档（不换根）"
+        assert Path(job["work_dir"]) == ctx.work_dir / "eval-work"
+        assert Path(job["ts_root"]) == ctx.ts_tree_dir
+        assert any("超界或失败" in m for m in msgs), msgs
+        entered = len(bounded)
+        # 第二次：本段已降档 ⇒ 不再进落点段（判据 = 上界调用的**次数**，与快慢无关）
+        job4 = build(4)
+        assert len(bounded) == entered, f"降档后不许每轮再等：又进了 {bounded[entered:]} 这一步"
+        assert Path(job4["weights_path"]) == ctx.store.weights_path(4)
+    finally:
+        release.set()  # 放走那条被放弃的 daemon 线程（否则它要等满 30s）
 
 
 def test_eval_builder_falls_back_and_keeps_the_ledger(

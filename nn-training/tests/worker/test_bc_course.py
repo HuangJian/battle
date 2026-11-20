@@ -190,7 +190,9 @@ def test_bc_dispatch_trips_broken_node_and_requeues(tmp_path: Path, monkeypatch)
 
     calls: dict[str, int] = {"bad": 0, "good": 0}
 
-    def fake_fetch(url: str, _auth: str, **kw):
+    def fake_fetch(spec, *args, **kw):
+        kw = dict(spec.__dict__)
+        url = spec.url
         nid = "bad" if "bad" in url else "good"
         calls[nid] += 1
         if nid == "bad":
@@ -249,7 +251,9 @@ def test_bc_dispatch_failfast_disabled_keeps_old_behavior(tmp_path: Path, monkey
 
     seen: list[str] = []
 
-    def fake_fetch(url: str, _auth: str, **kw):
+    def fake_fetch(spec, *args, **kw):
+        dict(spec.__dict__)
+        url = spec.url
         seen.append(url)
         raise D.common.distribution.DistError(0, "boom")
 
@@ -277,7 +281,8 @@ def test_bc_dispatch_busy_is_not_a_node_fault(tmp_path: Path, monkeypatch) -> No
 
     calls = {"n": 0}
 
-    def fake_fetch(_url: str, _auth: str, **kw):
+    def fake_fetch(spec, *args, **kw):
+        kw = dict(spec.__dict__)
         calls["n"] += 1
         if int(kw["seed"]) == 1:  # seed1 一直 busy；其余正常
             raise D.common.distribution.DistError(0, "busy")
@@ -314,7 +319,8 @@ def test_bc_dispatch_busy_backpressure_then_success(tmp_path: Path, monkeypatch)
 
     state = {"busy": 3}
 
-    def fake_fetch(_url: str, _auth: str, **kw):
+    def fake_fetch(spec, *args, **kw):
+        kw = dict(spec.__dict__)
         if state["busy"] > 0:
             state["busy"] -= 1
             raise D.common.distribution.DistError(0, "busy")
@@ -927,7 +933,8 @@ def test_bc_dispatch_v6_uploads_label_weights_and_filters_wins(
         posts.append(kw)
         return nodes
 
-    def fake_fetch(_url: str, _auth: str, **kw):
+    def fake_fetch(spec, *args, **kw):
+        kw = dict(spec.__dict__)
         calls.append(kw)
         stage, seed = int(kw["stage"]), int(kw["seed"])
         outcome = "stage_clear" if seed == 1 else "loss"

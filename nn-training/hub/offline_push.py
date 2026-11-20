@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from common import runtime
 from common.logutil import tag_logger
 from common.progress_text import progress_text, should_log_progress
 from common.protocol import (
@@ -66,10 +67,19 @@ from hub.offline_pack_fresh import pack_still_fresh
 from hub.offline_push_assign import OfflinePushAssignments
 from hub.offline_push_pack import TMP_PREFIX
 from hub.offline_push_pack import build_task_zip as _build_task_zip
+
+#: 「hub 的本地读面失败了」的异常集（P0-7 第十八批，2026-11-18）。
+#:
+#: 派发器的运气**不能**决定于一本书读不读得出来（`traj_root` / `resume_anchor` /
+#: `offline_tasks` / `hold_of` / `release_offline` 都在进程内读盘或读内存账），所以这些位置要捕；
+#: 但以前的 `except Exception` 把本模块自己的 bug（`AttributeError`：账本形状变了；
+#: `TypeError`：参数拼错）也读成「读不到 ⇒ 不编」——而 fail-open 的那几处（`still_mine`）
+#: 会把 bug 读成「还是我的」，于是永远不放手。
+_STORE_READ_ERRORS: tuple[type[BaseException], ...] = (OSError, ValueError, KeyError)
 from hub.offline_push_workers import OfflinePushWorkers
 from hub.task_pack import pack_index_meta
 from remote import offline_push_client as client
-from remote.push_dispatch import run_tick_loop
+from remote.push_dispatch import TickLoopHost
 
 #: 调度拍（秒）：与 GPU 派发器同一量级；hub 的派发延迟 = 一拍 + 一次 zip 组装。
 OFFLINE_PUSH_POLL_SEC = 10.0
@@ -118,7 +128,7 @@ class _PumpState:
     shown: tuple[str, int, int, int] | None = None
 
 
-class OfflinePushDispatcher:
+class OfflinePushDispatcher(TickLoopHost):
     """hub 侧的离线 push 派发器（调度拍 + 每单一条 pump 线程）。
 
     `assignments` / `port` 决定在途账本落点（`<root>/offline-push.<port>.json`）；`root`
@@ -141,6 +151,9 @@ class OfflinePushDispatcher:
         log: Any = _log_default,
         client_mod: Any = client,
     ) -> None:
+        #: tick 线程与每课 pump 的属性（`hub-offline-push-tick` / `-pump-<course>`）。
+        #: hub 侧派发器与 worker 侧同构，线程名也同一套（转储里一眼分清是谁在推）。
+        self._rt = runtime.Runtime(scope="hub-offline-push")
         self.hub = hub
         self.workers = workers
         self.token = str(token or "")
@@ -170,29 +183,11 @@ class OfflinePushDispatcher:
 
     # ------------------------------------------------------------ 生命周期
     def _default_root(self) -> Path:
-        root = None
-        try:
-            root = self.hub.traj_root()
-        except Exception:
-            root = None
+        # `traj_root()` 的契约是 `Path | None`（进度推不出来就 None，不抛）⇒ 这里没有可捕的：
+        # 以前那条 `except Exception` 只能吞掉本模块的 bug，而缺省值是 `Path.cwd()` −—
+        # 一个扫错目录的派发器比一个响亮地挂掉的派发器危险得多。
+        root = self.hub.traj_root()
         return Path(root) if root is not None else Path.cwd()
-
-    def start(self) -> None:
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(
-            target=run_tick_loop,
-            kwargs={
-                "stop": self._stop,
-                "wake": self._wake,
-                "poll_sec": self.poll_sec,
-                "tick": self.tick,
-                "log": self._log,
-            },
-            name="hub-offline-push",
-            daemon=True,
-        )
-        self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
@@ -202,6 +197,14 @@ class OfflinePushDispatcher:
         for st in pumps:
             st.stop.set()
 
+    def pump_count(self) -> int:
+        """仍在跑的拉取线程数（0 = 所有单都已收摊）。
+
+        公开读数：`tick()["assignments"]` 回答「还有哪些单在册」，这里回答「线程退干净没有」
+        —— 两者不是同一件事（收摊的最后一步是 ack/释放，账本先空、线程后退出）。
+        """
+        with self._lock:
+            return len(self._pumps)
 
     # ------------------------------------------------------------ 单拍
     def tick(self, *, now: float | None = None, ping: bool | None = None) -> dict:
@@ -399,10 +402,8 @@ class OfflinePushDispatcher:
         self._cooldown[key] = (self._now() if now is None else float(now), float(sec or 0.0))
 
     def _pack_meta(self, pack: Path) -> dict:
-        try:
-            return pack_index_meta(pack)
-        except Exception:
-            return {"run_id": "", "it": 0, "end_it": 0}
+        # `pack_index_meta` 自己是总的（读不出来 ⇒ 各字段空值，见 `hub/task_pack.py`）⇒ 不需要捕。
+        return pack_index_meta(pack)
 
     def _pack_for(self, course: str, row: dict, wid: str, now: float) -> Path | None:
         """这门课现在能不能派：有包（且不是过期包）→ 返回路径；否则「请导包」并返回 None。
@@ -505,7 +506,7 @@ class OfflinePushDispatcher:
         """比包更新的续跑锚点（**整份**）；没有/不比包新 ⇒ None。"""
         try:
             anchor = self.hub.resume_anchor(course)
-        except Exception as e:
+        except _STORE_READ_ERRORS as e:
             self._log(f"{course}: 取续跑锚点失败（{type(e).__name__}: {e}）——本单从包起点跑")
             return None
         if not anchor or int(anchor.get("it") or 0) <= pack_it:
@@ -534,13 +535,16 @@ class OfflinePushDispatcher:
             if old is not None and old.thread is not None and old.thread.is_alive():
                 return
             self._pumps[course] = st
-        st.thread = threading.Thread(
-            target=self._pump,
-            args=(course, dict(rec), url, key, st),
-            name=f"hub-offline-push-{course[:12]}",
+        st.thread = self._rt.thread(
+            self._pump,
+            course,
+            dict(rec),
+            url,
+            key,
+            st,
+            name=f"pump-{course[:12]}",
             daemon=True,
         )
-        st.thread.start()
 
     def _pump(self, course: str, rec: dict, url: str, key: str, st: _PumpState) -> None:
         """一条 assignment 的整条腿（提议 → **云机受理** → 接管 → 逐轮拉取 → ack → 收尾）。"""
@@ -686,7 +690,7 @@ class OfflinePushDispatcher:
                 for p in root.glob("it*")
                 if p.is_dir() and p.name[2:].isdigit()
             ]
-        except Exception:
+        except _STORE_READ_ERRORS:
             return  # 读不到就不编（这条只是告警，不是判据）
         newest = max(nums) if nums else 0
         if newest <= floor:
@@ -705,20 +709,24 @@ class OfflinePushDispatcher:
         """
         try:
             rows = self.hub.offline_tasks(worker=str(rec.get("worker_id") or ""))
-        except Exception:
+        except _STORE_READ_ERRORS:
             return True, ""  # 清单读不到 ⇒ 不编：接管仍可能成功，claim 会给出真拒因
         return pack_still_fresh(
-            rows, {**rec, "course": course}, resume_ok=self._resume_ok(course, rec)
+            rows, {**rec, "course": course}, resume_ok=self.resume_ok(course, rec)
         )
 
-    def _resume_ok(self, course: str, rec: dict) -> bool:
-        """有没有**比包更新**的整份续跑锚点（有 ⇒ 「包过期」能靠 `resume/` 补齐，不必重导）。"""
+    def resume_ok(self, course: str, rec: dict) -> bool:
+        """有没有**比包更新**的整份续跑锚点（有 ⇒ 「包过期」能靠 `resume/` 补齐，不必重导）。
+
+        公开：它是关于一份派发记录的**查询**（不调网络、不改状态），测试该问它而不是问
+        pump 线程的内脏（G5 禁新增私有断言）。
+        """
         try:
             pack = Path(str(rec.get("pack_path") or ""))
             if not pack.is_file():
                 return False
             return self._anchor(course, int(self._pack_meta(pack).get("it") or 0)) is not None
-        except Exception:
+        except _STORE_READ_ERRORS:
             return False
 
     @staticmethod
@@ -788,7 +796,7 @@ class OfflinePushDispatcher:
             return
         try:
             self.hub.release_offline(course, lease)
-        except Exception as e:
+        except _STORE_READ_ERRORS as e:
             self._log(f"{course}: release 失败（{type(e).__name__}: {e}）——等 TTL")
 
     def _pump_loop(self, course: str, url: str, key: str, st: _PumpState) -> None:
@@ -816,7 +824,7 @@ class OfflinePushDispatcher:
                     course, url, key, rec, cancel=False, free_worker=False, reason="worker-disabled"
                 )
                 return
-            if not self._still_mine(course, rec):
+            if not self.still_mine(course, rec):
                 self._log(
                     f"{course}: 租约已不属于我们（换主/停课）——收下已入账的轮后退出，不 cancel"
                 )
@@ -874,14 +882,18 @@ class OfflinePushDispatcher:
                 if status not in (200, 404, 409):
                     self._log(f"{course}: 收线时 ack 没成（{status}）——已入账的轮重启后再收")
 
-    def _still_mine(self, course: str, rec: dict) -> bool:
-        """课程还开着、租约 token 还是我们的（**不调网络**：两个本地读面）。"""
+    def still_mine(self, course: str, rec: dict) -> bool:
+        """课程还开着、租约 token 还是我们的（**不调网络**：两个本地读面）。
+
+        公开：同 `resume_ok` —— 关于一份派发记录的只读查询（fail-open：读不到 ⇒ 「还是我的」，
+        宁可多拉一拍也不提前放手）。
+        """
         try:
             if not self.hub.course_open(course):
                 return False
-            hold = self.hub.hold_of(course)
+            hold = self.hub.hold_of(course) or {}  # 形状显式化：None = 没人持有
             return str(hold.get("token") or "") == str(rec.get("lease_token") or "") or not hold
-        except Exception:
+        except _STORE_READ_ERRORS:
             return True
 
     def _note_progress(self, course: str, url: str, key: str, rec: dict, st: _PumpState) -> None:

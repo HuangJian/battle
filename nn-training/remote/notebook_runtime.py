@@ -33,17 +33,19 @@ from __future__ import annotations
 
 import glob
 import hashlib
+import http.client
 import json
 import math
 import os
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 from typing import Any, cast
 
+import common.runtime
 from common.env_probe import probe_cloud_env
+from common.errors import NET_ERRORS as _BASE_NET_ERRORS
 from common.logutil import tag_logger
 from common.pid_probe import pid_alive
 from common.proc import run_capture
@@ -56,6 +58,20 @@ from remote.push_tunnel import find_cloudflared, start_quick_tunnel, tunnel_url_
 #: 2026-10-11（plan/nn-training-reuse-and-deps §S2）：4 份同形 `_log_default` 收敛为工厂；
 #: `lambda: time` 保留「每次重读本模块 `time`」的注入缝（7 处假钟用例钉着）。
 _log_default = tag_logger("battle-rl", lambda: time)
+
+#: hub / 本地 worker_server 的**网络层**异常面（2026-11-15，G4 窄捕；基底见 `common/errors.py`）。
+#:
+#: notebook cell 里这些出站点原本一律 `except Exception`，打成「FATAL: hub 不可达（X）——检查隧道
+#: URL 是否过期」。那是最贵的一种误诊：真因可能是本模块自己的 bug（`AttributeError` / `KeyError`），
+#: 而运维被指去排查隧道 —— 顺着这句话查上半小时也不会碰到真问题。
+#: `OSError` 覆盖 URLError / TimeoutError / SSLError / 连接重置；`HTTPException` 是 stdlib 协议层
+#: 错乱（`IncompleteRead` / `BadStatusLine`）；`RetryableError` / 防御性 `RuntimeError` 同基底。
+#: 见 DECISIONS §2026-11-15-network-error-surface-is-a-named-tuple。
+NET_ERRORS: tuple[type[BaseException], ...] = (*_BASE_NET_ERRORS, http.client.HTTPException)
+
+#: `/ping` 类**探针**：网络面 + 回执读不出来（200 但 body 不是 JSON ⇒ `ValueError`）。探针的义务是
+#: 「这一拍拿没拿到可用状态」，读不出来与连不上同档；而看字段的错（形状变了）仍照抛。
+PROBE_ERRORS: tuple[type[BaseException], ...] = (*NET_ERRORS, ValueError)
 
 def _epoch_mult_of(cfg: dict[str, Any]) -> float:
     """`CFG.epoch_mult`：PPO 每轮更新遍数 × N（缺省 1.0 = 课程/manifest 原样）。
@@ -153,7 +169,11 @@ def _run_probe(log, code: str, what: str) -> dict | None:
         # run_capture 显式 UTF-8：这台机器上 torch 可能吐出带中文的 warning/错误行，
         # 裸 text=True 会在读线程里抛 UnicodeDecodeError ⇒ stdout 变成 None（§19）。
         r = run_capture([sys.executable, "-u", "-c", code], timeout=60)
-    except BaseException as e:  # 子进程起不来/超时——探测失败按未知
+    except (OSError, subprocess.SubprocessError) as e:
+        # 子进程起不来（`OSError`：解释器没了 / 权限）/ 超时（`TimeoutExpired` 是
+        # `SubprocessError`）⇒ 探测失败按未知。**故意不含 `BaseException`**：原来那条宽捕
+        # 连 Ctrl-C（`KeyboardInterrupt`）都吞成「按未知处理」—— 在两分钟的 torch 探测里
+        # 按了 Ctrl-C 却看着它继续跑，比崩掉更糟（2026-11-15，G4 窄捕）。
         log(f"{what} 探测子进程异常（{type(e).__name__}: {e}）—— 按未知处理")
         return None
     if r.returncode != 0:
@@ -378,7 +398,9 @@ def resolve_device(cfg: dict[str, Any], log) -> str:
     if iu.find_spec("torch_xla") is not None:
         try:
             xla_ver: str = md.version("torch_xla")
-        except Exception:
+        except md.PackageNotFoundError:
+            # 唯一合理的失败：`find_spec` 看见了但元数据缺（精简镜像）。别的错照抛 ——
+            # 「版本未知」这句不许把本模块的 bug 也说成它。
             xla_ver = "（已安装，版本未知）"
         os.environ.setdefault("PJRT_DEVICE", "TPU")
         log(f"torch_xla {xla_ver}（内核未导入——设备留给 worker 子进程）")
@@ -498,7 +520,7 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
     except HTTPError as e:
         log(f"FATAL: hub /ping HTTP {e.code} — {'token 不匹配' if e.code in (401, 403) else 'hub 异常'}")
         return -2
-    except Exception as e:
+    except NET_ERRORS as e:
         log(f"FATAL: hub 不可达（{type(e).__name__}: {e}）——检查隧道 URL 是否过期")
         return -2
 
@@ -530,7 +552,9 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
         token_file.write_text(hub_token, encoding="utf-8")
         try:
             token_file.chmod(0o600)
-        except Exception:
+        except OSError:
+            # Colab/Kaggle 的 FUSE 挂载点不一定支持 chmod（EOPNOTSUPP）。文件本来就只有本进程读，
+            # 权限位是纵深防御 —— 这一段失败不影响 token 有效性。
             pass
         specs.append(
             (
@@ -574,12 +598,9 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
         except KeyboardInterrupt:
             rcs[name] = 0
 
-    threads = [
-        threading.Thread(target=_run, args=(name, argv), name=f"sup-{name}", daemon=True)
-        for name, argv in specs
-    ]
-    for t in threads:
-        t.start()
+    #: 每个实例一条监督器线程（`notebook-supervise-<实例>`）：本函数自己 join。
+    rt = common.runtime.Runtime(scope="notebook-supervise")
+    threads = [rt.thread(_run, name, argv, name=f"{name}", daemon=True) for name, argv in specs]
     try:
         for t in threads:
             t.join()
@@ -671,221 +692,138 @@ def _refresh_registration(reg: Any, cf_log: Path, cur_url: str, push_token: str,
     return cur_url
 
 
-def run_push_worker(cfg: dict[str, Any], log) -> int:
-    """启动 worker_server + cloudflared 隧道，等 hub 推 job。返回码同 pull。
-
-    bootstrap 语义：cell 已经从 hub /code 解包好代码（cfg["code_dir"]）——服务进程
-    的 PYTHONPATH 指向它；job 真正执行用的是 hub 随 job 下发的 code.zip（worker_server
-    收下后入 sys.path、在新进程里跑）。
-
-    already_serving（push-first 升级后）：bootstrap 已起好 worker_server/cloudflared，
-    本函数只做守候 + 日志，**不再**重复安装/拉起；此时**也要**注册 —— bootstrap 的内联
-    注册只覆盖「服务已起、URL 已有」那一瞬，URL 换名/重启后的重注册住在这里。
-
-    自动注册（2026-10-23，plan/push-mode-notebooks §5.2）：URL 拿到后 `Registry.ensure()`；
-    退出（含 Ctrl-C / 会话到顶 / serve 早退）一律 `unregister()` ⇒ hub 上 `enabled=false`。
-    """
-    already = cfg.get("already_serving") or None
+def _wait_existing_serving(cfg, log, reg, already: dict) -> int:
+    """接管 bootstrap 已起好的 push 服务（不再安装/拉起，只守候 + 重注册）。"""
     work_dir = Path(str(cfg.get("work_dir") or "/tmp/remote-worker-serve"))
-    work_dir.mkdir(parents=True, exist_ok=True)
-    boot_dir = Path(str(cfg.get("code_dir") or "/tmp/worker-code"))
-    if cfg.get("code_dir") and not (boot_dir / "remote").is_dir():
-        # 2026-10-26 真机（battle.cloudflared push + source=github）：cell 把**仓库根**铺进
-        # code_dir，而 `remote/` 实际住 `nn-training/` 下 ⇒ 子进程 `-m remote.remote_worker_serve`
-        # 一条 ImportError，宿主要白等满 wait_ping 的 30s 才判死，日志只剩「serve 未就绪」。
-        # code_dir 的契约只有一条：根 = `nn-training/` 的内容。不满足按配置致命处理（-2 = 不重启）。
-        log(
-            f"FATAL: code_dir={boot_dir} 下没有 remote/ 包（契约：根 = nn-training/ 的内容）"
-            "—— 引导阶段把代码铺错层了，检查 cell 的代码来源"
-        )
-        return -2
     serve_log = work_dir / "serve.log"
     cf_log = work_dir / "cloudflared.log"
-    reg = _push_registry(cfg, log)
-    cfg["node_id"] = reg.node_id  # push-first 内联注册/升级后复用同一个 id
     push_tok = str(cfg.get("push_token") or "")
-    # ★ 2026-10-26：训练侧放大（PPO 每轮更新遍数 × N）——它在**起服务时**定下，
-    #   所以 push-first 升级前就得校验；非缺省才进 argv（旧 cfg 行为逐字不变）。
-    epoch_mult = _epoch_mult_of(cfg)
-    if epoch_mult != 1.0:
-        log(f"训练放大：PPO epochs×{epoch_mult:g}（只改更新遍数；不改采样/评估）")
+    serve_pid = int(already.get("serve_pid") or 0)
+    cf_pid = already.get("cf_pid")
+    cf_url = str(already.get("cf_url") or "") or _tunnel_url_of(cf_log)
+    log(f"接管已就绪 push 服务（serve_pid={serve_pid} tunnel={cf_url or '?'}）")
+    _register_or_warn(reg, cf_url, push_tok, log)
+    serve_tail_off = 0
+    last_status_at = 0.0
+    as_last_done = -1
+    as_last_queued = -1
+    as_last_busy: bool | None = None
+    #: 同主分支：忙且过程日志还在流 ⇒ 不刷「守候中…」（见那里的注释）。
+    last_serve_line_at = 0.0
+    last_beat_at = 0.0
+    deadline = time.time() + int(cfg["max_session_hours"]) * 3600
+    t0 = time.time()
 
-    if already:
-        serve_pid = int(already.get("serve_pid") or 0)
-        cf_pid = already.get("cf_pid")
-        cf_url = str(already.get("cf_url") or "") or _tunnel_url_of(cf_log)
-        log(f"接管已就绪 push 服务（serve_pid={serve_pid} tunnel={cf_url or '?'}）")
-        _register_or_warn(reg, cf_url, push_tok, log)
-        serve_tail_off = 0
-        last_status_at = 0.0
-        as_last_done = -1
-        as_last_queued = -1
-        as_last_busy: bool | None = None
-        #: 同主分支：忙且过程日志还在流 ⇒ 不刷「守候中…」（见那里的注释）。
-        last_serve_line_at = 0.0
-        last_beat_at = 0.0
-        deadline = time.time() + int(cfg["max_session_hours"]) * 3600
-        t0 = time.time()
-
-        def _drain() -> int:
-            nonlocal serve_tail_off, last_serve_line_at
-            try:
-                size = serve_log.stat().st_size
-            except OSError:
-                return 0
-            if size < serve_tail_off:
-                serve_tail_off = 0
-            if size <= serve_tail_off:
-                return 0
-            try:
-                with open(serve_log, encoding="utf-8", errors="replace") as f:
-                    f.seek(serve_tail_off)
-                    chunk = f.read()
-                serve_tail_off = size
-            except OSError:
-                return 0
-            n = 0
-            for line in chunk.splitlines():
-                if line.strip():
-                    log(f"[serve] {line.rstrip()}")
-                    n += 1
-            if n:
-                last_serve_line_at = time.time()
-            return n
-
-        def _ping() -> dict | None:
-            try:
-                from urllib.request import Request, urlopen
-
-                req = Request(
-                    f"http://127.0.0.1:{cfg['push_port']}/ping",
-                    headers={"Authorization": f"Bearer {cfg['push_token']}"},
-                )
-                with urlopen(req, timeout=4) as r:
-                    obj = json.loads(r.read().decode("utf-8", "replace"))
-                return obj if isinstance(obj, dict) else None
-            except Exception:
-                return None
-
+    def _drain() -> int:
+        nonlocal serve_tail_off, last_serve_line_at
         try:
-            while True:
-                if not _pid_alive(serve_pid):
-                    _drain()
-                    log(f"worker_server 退出 (pid {serve_pid})")
-                    return 0
-                if cf_pid and not _pid_alive(int(cf_pid)):
-                    # 2026-10-26 真机：这里只 ping 127.0.0.1、只看 serve 存活 ⇒ 隧道死了完全看不出来
-                    # （hub 侧是 Cloudflare 1033/530，本机日志一路「守候中」）。bootstrap 起的
-                    # cloudflared 没了只能重开 cell（重建隧道 + 重注册），故按配置致命收摊。
-                    _drain()
-                    log(
-                        f"⚠ cloudflared 已退出 (pid {cf_pid}) —— 隧道没了，hub 再也够不到本机"
-                        "（本机只 ping 127.0.0.1，看不出隧道死活）⇒ 请重跑本 cell"
-                    )
-                    return -2
-                _drain()
-                now = time.time()
-                if now - last_status_at >= 15:
-                    cf_url = _refresh_registration(reg, cf_log, cf_url, push_tok, log)
-                    st = _ping()
-                    if st is not None:
-                        busy = bool(st.get("busy"))
-                        queued = int(st.get("queued") or 0)
-                        done = int(st.get("done") or 0)
-                        if done != as_last_done or busy != as_last_busy or queued != as_last_queued:
-                            log(
-                                f"worker 状态: busy={busy} queued={queued} done={done}"
-                                + ("（在跑 job）" if busy else "（空闲，等 hub 推送）")
-                            )
-                            as_last_done, as_last_busy, as_last_queued = done, busy, queued
-                        elif busy and now - last_serve_line_at < _SERVE_QUIET_SEC:
-                            pass  # 过程日志还在流 ⇒ 不刷「守候中…」（同主分支口径）
-                        elif now - last_beat_at >= _HEARTBEAT_SEC:
-                            last_beat_at = now
-                            log(
-                                f"守候中… busy={busy} queued={queued} done={done}"
-                                f" wait={int(now - t0)}s"
-                            )
-                    else:
-                        log("worker /ping 暂不可达（瞬断/重启中）——继续守候")
-                    last_status_at = now
-                if time.time() > deadline:
-                    log(f"会话到顶 ({cfg['max_session_hours']}h)——干净收摊")
-                    return 0
-                time.sleep(5)
-        except KeyboardInterrupt:
-            log("收到中断")
-            if _pid_alive(serve_pid):
-                try:
-                    os.kill(serve_pid, 15)
-                except OSError:
-                    pass
-            if cf_pid:
-                try:
-                    os.kill(int(cf_pid), 15)
-                except OSError:
-                    pass
+            size = serve_log.stat().st_size
+        except OSError:
             return 0
-        finally:
-            # 会话收线：hub 上 enabled=false（下个会话注册时会恢复）。
-            reg.unregister()
-
-    # ── cloudflared 查找 / 自动安装（与离线 push 同一条实现：`remote/push_tunnel`）──
-    cf_bin = find_cloudflared(str(cfg.get("cloudflared_path") or ""), log=log)
-    if not cf_bin:
-        return -2
-
-    # ── 启动 worker_server ──
-    serve_env = dict(os.environ)
-    serve_env["PYTHONPATH"] = (str(boot_dir) + os.pathsep + serve_env.get("PYTHONPATH", "")).rstrip(os.pathsep)
-    # 结果就绪通知的目标（与注册同址）；缺 hub 地址 ⇒ 不传，服务端回落纯轮询。
-    hub_base = _hub_base_of(cfg)
-    with open(serve_log, "w") as log_f:
-        serve_argv = [sys.executable, "-u", "-m", "remote.remote_worker_serve",
-                      "--port", str(cfg["push_port"]), "--token", str(cfg["push_token"]),
-                      "--work", str(work_dir), "--device", str(cfg["device_resolved"])]
-        if epoch_mult != 1.0:
-            serve_argv += ["--epoch-mult", f"{epoch_mult:g}"]
-        if hub_base:
-            serve_argv += ["--hub-url", hub_base]
-        serve_proc = subprocess.Popen(
-            serve_argv,
-            stdout=log_f, stderr=subprocess.STDOUT, env=serve_env,
-        )
-    log(f"worker_server 启动 (PID {serve_proc.pid})，等就绪…")
-
-    from urllib.request import Request, urlopen
-
-    def _ping_ok() -> bool:
+        if size < serve_tail_off:
+            serve_tail_off = 0
+        if size <= serve_tail_off:
+            return 0
         try:
+            with open(serve_log, encoding="utf-8", errors="replace") as f:
+                f.seek(serve_tail_off)
+                chunk = f.read()
+            serve_tail_off = size
+        except OSError:
+            return 0
+        n = 0
+        for line in chunk.splitlines():
+            if line.strip():
+                log(f"[serve] {line.rstrip()}")
+                n += 1
+        if n:
+            last_serve_line_at = time.time()
+        return n
+
+    def _ping() -> dict | None:
+        try:
+            from urllib.request import Request, urlopen
+
             req = Request(
                 f"http://127.0.0.1:{cfg['push_port']}/ping",
                 headers={"Authorization": f"Bearer {cfg['push_token']}"},
             )
-            with urlopen(req, timeout=5) as r:
-                return bool(r.status == 200)
-        except Exception:
-            return False
+            with urlopen(req, timeout=4) as r:
+                obj = json.loads(r.read().decode("utf-8", "replace"))
+            return obj if isinstance(obj, dict) else None
+        except PROBE_ERRORS:
+            return None
 
-    t0 = time.time()
-    while time.time() - t0 < 30 and not _ping_ok():
-        time.sleep(1)
-    if not _ping_ok():
-        log(f"worker_server 30s 未就绪——查 {serve_log}")
-        serve_proc.kill()
-        return -1
-    log("worker_server 就绪")
+    try:
+        while True:
+            if not _pid_alive(serve_pid):
+                _drain()
+                log(f"worker_server 退出 (pid {serve_pid})")
+                return 0
+            if cf_pid and not _pid_alive(int(cf_pid)):
+                # 2026-10-26 真机：这里只 ping 127.0.0.1、只看 serve 存活 ⇒ 隧道死了完全看不出来
+                # （hub 侧是 Cloudflare 1033/530，本机日志一路「守候中」）。bootstrap 起的
+                # cloudflared 没了只能重开 cell（重建隧道 + 重注册），故按配置致命收摊。
+                _drain()
+                log(
+                    f"⚠ cloudflared 已退出 (pid {cf_pid}) —— 隧道没了，hub 再也够不到本机"
+                    "（本机只 ping 127.0.0.1，看不出隧道死活）⇒ 请重跑本 cell"
+                )
+                return -2
+            _drain()
+            now = time.time()
+            if now - last_status_at >= 15:
+                cf_url = _refresh_registration(reg, cf_log, cf_url, push_tok, log)
+                st = _ping()
+                if st is not None:
+                    busy = bool(st.get("busy"))
+                    queued = int(st.get("queued") or 0)
+                    done = int(st.get("done") or 0)
+                    if done != as_last_done or busy != as_last_busy or queued != as_last_queued:
+                        log(
+                            f"worker 状态: busy={busy} queued={queued} done={done}"
+                            + ("（在跑 job）" if busy else "（空闲，等 hub 推送）")
+                        )
+                        as_last_done, as_last_busy, as_last_queued = done, busy, queued
+                    elif busy and now - last_serve_line_at < _SERVE_QUIET_SEC:
+                        pass  # 过程日志还在流 ⇒ 不刷「守候中…」（同主分支口径）
+                    elif now - last_beat_at >= _HEARTBEAT_SEC:
+                        last_beat_at = now
+                        log(
+                            f"守候中… busy={busy} queued={queued} done={done}"
+                            f" wait={int(now - t0)}s"
+                        )
+                else:
+                    log("worker /ping 暂不可达（瞬断/重启中）——继续守候")
+                last_status_at = now
+            if time.time() > deadline:
+                log(f"会话到顶 ({cfg['max_session_hours']}h)——干净收摊")
+                return 0
+            time.sleep(5)
+    except KeyboardInterrupt:
+        log("收到中断")
+        if _pid_alive(serve_pid):
+            try:
+                os.kill(serve_pid, 15)
+            except OSError:
+                pass
+        if cf_pid:
+            try:
+                os.kill(int(cf_pid), 15)
+            except OSError:
+                pass
+        return 0
+    finally:
+        # 会话收线：hub 上 enabled=false（下个会话注册时会恢复）。
+        reg.unregister()
 
-    # ── cloudflared 隧道 ──
-    cf_proc, cf_url = start_quick_tunnel(
-        cf_bin, int(cfg["push_port"]), cf_log, wait_sec=60, log=log
-    )
-    if cf_url:
-        log(f"★ 隧道 URL: {cf_url}")
-        _register_or_warn(reg, cf_url, push_tok, log)
-    else:
-        log(f"⚠ 隧道 URL 未取得（超时/出错）——hub 推送将不可达；日志见 {cf_log}")
 
+def _wait_started_serving(cfg, log, reg, serve_proc, cf_proc, cf_url: str) -> int:
+    """本函数起好服务后的守候：转发 serve.log + /ping 状态 + 到点收摊。"""
+    work_dir = Path(str(cfg.get("work_dir") or "/tmp/remote-worker-serve"))
+    serve_log = work_dir / "serve.log"
+    cf_log = work_dir / "cloudflared.log"
+    push_tok = str(cfg.get("push_token") or "")
     # ── 等待 job（会话上限内守着 + 持续日志，对齐 pull 模式可观测性）──
     # 历史：隧道 URL 打完后只剩 sleep(30)——notebook cell 上看起来「挂死」。
     # 现在：① 转发 serve.log 新行（job 受理/执行/完成都在里面，worker_server 已带时间戳）
@@ -933,6 +871,8 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
         return n
 
     def _ping_status() -> dict | None:
+        from urllib.request import Request, urlopen
+
         try:
             req = Request(
                 f"http://127.0.0.1:{cfg['push_port']}/ping",
@@ -944,7 +884,7 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
 
             obj = _json.loads(body.decode("utf-8", "replace"))
             return obj if isinstance(obj, dict) else None
-        except Exception:
+        except PROBE_ERRORS:
             return None
 
     log("进入推送守候（转发 serve.log + /ping 状态；中断本 cell 停机）")
@@ -1009,6 +949,107 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
             log("worker_server 已停")
 
 
+def run_push_worker(cfg: dict[str, Any], log) -> int:
+    """启动 worker_server + cloudflared 隧道，等 hub 推 job。返回码同 pull。
+
+    bootstrap 语义：cell 已经从 hub /code 解包好代码（cfg["code_dir"]）——服务进程
+    的 PYTHONPATH 指向它；job 真正执行用的是 hub 随 job 下发的 code.zip（worker_server
+    收下后入 sys.path、在新进程里跑）。
+
+    already_serving（push-first 升级后）：bootstrap 已起好 worker_server/cloudflared，
+    本函数只做守候 + 日志，**不再**重复安装/拉起；此时**也要**注册 —— bootstrap 的内联
+    注册只覆盖「服务已起、URL 已有」那一瞬，URL 换名/重启后的重注册住在这里。
+
+    自动注册（2026-10-23，plan/push-mode-notebooks §5.2）：URL 拿到后 `Registry.ensure()`；
+    退出（含 Ctrl-C / 会话到顶 / serve 早退）一律 `unregister()` ⇒ hub 上 `enabled=false`。
+    """
+    already = cfg.get("already_serving") or None
+    work_dir = Path(str(cfg.get("work_dir") or "/tmp/remote-worker-serve"))
+    work_dir.mkdir(parents=True, exist_ok=True)
+    boot_dir = Path(str(cfg.get("code_dir") or "/tmp/worker-code"))
+    if cfg.get("code_dir") and not (boot_dir / "remote").is_dir():
+        # 2026-10-26 真机（battle.cloudflared push + source=github）：cell 把**仓库根**铺进
+        # code_dir，而 `remote/` 实际住 `nn-training/` 下 ⇒ 子进程 `-m remote.remote_worker_serve`
+        # 一条 ImportError，宿主要白等满 wait_ping 的 30s 才判死，日志只剩「serve 未就绪」。
+        # code_dir 的契约只有一条：根 = `nn-training/` 的内容。不满足按配置致命处理（-2 = 不重启）。
+        log(
+            f"FATAL: code_dir={boot_dir} 下没有 remote/ 包（契约：根 = nn-training/ 的内容）"
+            "—— 引导阶段把代码铺错层了，检查 cell 的代码来源"
+        )
+        return -2
+    serve_log = work_dir / "serve.log"
+    cf_log = work_dir / "cloudflared.log"
+    reg = _push_registry(cfg, log)
+    cfg["node_id"] = reg.node_id  # push-first 内联注册/升级后复用同一个 id
+    push_tok = str(cfg.get("push_token") or "")
+    # ★ 2026-10-26：训练侧放大（PPO 每轮更新遍数 × N）——它在**起服务时**定下，
+    #   所以 push-first 升级前就得校验；非缺省才进 argv（旧 cfg 行为逐字不变）。
+    epoch_mult = _epoch_mult_of(cfg)
+    if epoch_mult != 1.0:
+        log(f"训练放大：PPO epochs×{epoch_mult:g}（只改更新遍数；不改采样/评估）")
+
+    if already:
+        return _wait_existing_serving(cfg, log, reg, already)
+
+    # ── cloudflared 查找 / 自动安装（与离线 push 同一条实现：`remote/push_tunnel`）──
+    cf_bin = find_cloudflared(str(cfg.get("cloudflared_path") or ""), log=log)
+    if not cf_bin:
+        return -2
+
+    # ── 启动 worker_server ──
+    serve_env = dict(os.environ)
+    serve_env["PYTHONPATH"] = (str(boot_dir) + os.pathsep + serve_env.get("PYTHONPATH", "")).rstrip(os.pathsep)
+    # 结果就绪通知的目标（与注册同址）；缺 hub 地址 ⇒ 不传，服务端回落纯轮询。
+    hub_base = _hub_base_of(cfg)
+    with open(serve_log, "w") as log_f:
+        serve_argv = [sys.executable, "-u", "-m", "remote.remote_worker_serve",
+                      "--port", str(cfg["push_port"]), "--token", str(cfg["push_token"]),
+                      "--work", str(work_dir), "--device", str(cfg["device_resolved"])]
+        if epoch_mult != 1.0:
+            serve_argv += ["--epoch-mult", f"{epoch_mult:g}"]
+        if hub_base:
+            serve_argv += ["--hub-url", hub_base]
+        serve_proc = subprocess.Popen(
+            serve_argv,
+            stdout=log_f, stderr=subprocess.STDOUT, env=serve_env,
+        )
+    log(f"worker_server 启动 (PID {serve_proc.pid})，等就绪…")
+
+    from urllib.request import Request, urlopen
+
+    def _ping_ok() -> bool:
+        try:
+            req = Request(
+                f"http://127.0.0.1:{cfg['push_port']}/ping",
+                headers={"Authorization": f"Bearer {cfg['push_token']}"},
+            )
+            with urlopen(req, timeout=5) as r:
+                return bool(r.status == 200)
+        except NET_ERRORS:
+            return False
+
+    t0 = time.time()
+    while time.time() - t0 < 30 and not _ping_ok():
+        time.sleep(1)
+    if not _ping_ok():
+        log(f"worker_server 30s 未就绪——查 {serve_log}")
+        serve_proc.kill()
+        return -1
+    log("worker_server 就绪")
+
+    # ── cloudflared 隧道 ──
+    cf_proc, cf_url = start_quick_tunnel(
+        cf_bin, int(cfg["push_port"]), cf_log, wait_sec=60, log=log
+    )
+    if cf_url:
+        log(f"★ 隧道 URL: {cf_url}")
+        _register_or_warn(reg, cf_url, push_tok, log)
+    else:
+        log(f"⚠ 隧道 URL 未取得（超时/出错）——hub 推送将不可达；日志见 {cf_log}")
+
+    return _wait_started_serving(cfg, log, reg, serve_proc, cf_proc, cf_url)
+
+
 # ════════════════════════ 入口：banner → runner → 崩溃退避重启 ════════════════════════
 
 
@@ -1050,6 +1091,8 @@ def ensure_replay_bun(cfg: dict[str, Any], log) -> str:
 
         ver = bun_version(bun, timeout=30.0, fallback="", require_zero=True)
     except Exception:
+        # 契约静默（G9 冻结，非旧债）：`--version` 只是日志读数；供给成功与否由上面的
+        # 路径判定，读不到版本不该让 worker 起不来。
         pass
     log(f"bun 就绪: {bun}{(' v' + ver) if ver else ''}（replay → npy 转换的运行时）")
     return bun

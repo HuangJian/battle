@@ -4,20 +4,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from common.cli import run_main
 from common.platform_utils import rmtree_best_effort
 from worker.terminal_stats import terminal_stats
-
-FAILS: list[str] = []
-
-
-def check(cond: bool, label: str) -> None:
-    if not cond:
-        FAILS.append(label)
-        print(f"  FAIL: {label}")
-    else:
-        print(f"  OK: {label}")
 
 
 def _write_manifest(
@@ -69,21 +62,21 @@ def test_terminal_stats_basic(tmp_path: Path) -> None:
     _write_manifest(it_dir, ".", 2002, 1, kills=2, powerups=1, ticks=3000, nsamples=300)
 
     rec = terminal_stats(str(it_dir), it=1)
-    check(rec["games"] == 4, "4 games after dedup (skipped local-eval, dedup 2000/1)")
-    check(rec["kills"]["total"] == 10.0, "kills total = 3+0+5+2 = 10")
-    check(rec["kills"]["mean"] == 2.5, "kills mean = 10/4 = 2.5")
-    check(rec["powerUps"]["total"] == 4.0, "powerups total = 1+0+2+1 = 4")
-    check(rec["ticks"]["mean"] == 4000.0, "ticks mean = (4500+500+8000+3000)/4 = 4000")
-    check(rec["outcomes"]["lives_exhausted"] == 4, "all 4 lives_exhausted")
-    check(rec["win_rate"] == 0.0, "win_rate = 0")
-    check(rec["by_stage"]["2000"]["games"] == 2, "stage 2000 has 2 games")
+    assert rec["games"] == 4, "4 games after dedup (skipped local-eval, dedup 2000/1)"
+    assert rec["kills"]["total"] == 10.0, "kills total = 3+0+5+2 = 10"
+    assert rec["kills"]["mean"] == 2.5, "kills mean = 10/4 = 2.5"
+    assert rec["powerUps"]["total"] == 4.0, "powerups total = 1+0+2+1 = 4"
+    assert rec["ticks"]["mean"] == 4000.0, "ticks mean = (4500+500+8000+3000)/4 = 4000"
+    assert rec["outcomes"]["lives_exhausted"] == 4, "all 4 lives_exhausted"
+    assert rec["win_rate"] == 0.0, "win_rate = 0"
+    assert rec["by_stage"]["2000"]["games"] == 2, "stage 2000 has 2 games"
     # 去重保留 nSamples 最大者（w0=450 ⇒ kills=3），另一份 (2000,1) kills=1 被丢弃，
     # 故本 stage 的 kills 是 3+0=3。旧期望 4.0 是「两份都算」的误写（kills["total"]==10
     # 早已证明去重只留了 3），因 check() 只聚合不抛错而静默绿了很久
     # （2026-09-26 conftest 的 _no_silent_check_failures 揭出）。
-    check(rec["by_stage"]["2000"]["kills_total"] == 3.0, "stage 2000 kills = 3+0 = 3（去重后）")
-    check(rec["by_stage"]["2001"]["games"] == 1, "stage 2001 has 1 game")
-    check(rec["by_stage"]["2001"]["kills_total"] == 5.0, "stage 2001 kills = 5")
+    assert rec["by_stage"]["2000"]["kills_total"] == 3.0, "stage 2000 kills = 3+0 = 3（去重后）"
+    assert rec["by_stage"]["2001"]["games"] == 1, "stage 2001 has 1 game"
+    assert rec["by_stage"]["2001"]["kills_total"] == 5.0, "stage 2001 kills = 5"
 
 
 def test_terminal_stats_no_manifests(tmp_path: Path) -> None:
@@ -92,14 +85,14 @@ def test_terminal_stats_no_manifests(tmp_path: Path) -> None:
     it_dir = tmp / "it_empty"
     it_dir.mkdir(parents=True, exist_ok=True)
     rec = terminal_stats(str(it_dir), it=5)
-    check(rec["games"] == 0, "empty dir: games=0")
-    check("error" in rec, "empty dir: has error key")
+    assert rec["games"] == 0, "empty dir: games=0"
+    assert "error" in rec, "empty dir: has error key"
 
 
 def test_terminal_stats_missing_dir() -> None:
     """不存在的目录返回 games=0 不崩溃。"""
     rec = terminal_stats("/nonexistent/path", it=3)
-    check(rec["games"] == 0, "missing dir: games=0")
+    assert rec["games"] == 0, "missing dir: games=0"
 
 
 def test_terminal_stats_win_rate(tmp_path: Path) -> None:
@@ -116,12 +109,12 @@ def test_terminal_stats_win_rate(tmp_path: Path) -> None:
     _write_manifest(it_dir, "w0", 2000, 4, kills=1, powerups=0, ticks=1500, nsamples=150)
 
     rec = terminal_stats(str(it_dir), it=2)
-    check(rec["games"] == 4, "4 games")
-    check(rec["win_rate"] == 0.5, "win_rate = 2/4 = 0.5")
-    check(rec["outcomes"]["stage_clear"] == 2, "2 stage_clear")
-    check(rec["outcomes"]["lives_exhausted"] == 2, "2 lives_exhausted")
-    check(rec["kills"]["total"] == 9.0, "kills total = 5+0+3+1 = 9")
-    check(rec["kills"]["max"] == 5.0, "kills max = 5")
+    assert rec["games"] == 4, "4 games"
+    assert rec["win_rate"] == 0.5, "win_rate = 2/4 = 0.5"
+    assert rec["outcomes"]["stage_clear"] == 2, "2 stage_clear"
+    assert rec["outcomes"]["lives_exhausted"] == 2, "2 lives_exhausted"
+    assert rec["kills"]["total"] == 9.0, "kills total = 5+0+3+1 = 9"
+    assert rec["kills"]["max"] == 5.0, "kills max = 5"
 
 
 def test_terminal_stats_dedup_nsamples(tmp_path: Path) -> None:
@@ -134,9 +127,9 @@ def test_terminal_stats_dedup_nsamples(tmp_path: Path) -> None:
     _write_manifest(it_dir, "dist/b", 2000, 1, kills=5, powerups=2, ticks=8000, nsamples=800)
 
     rec = terminal_stats(str(it_dir), it=3)
-    check(rec["games"] == 1, "1 game after dedup")
-    check(rec["kills"]["total"] == 5.0, "took max nSamples version: kills=5")
-    check(rec["ticks"]["mean"] == 8000.0, "took max nSamples version: ticks=8000")
+    assert rec["games"] == 1, "1 game after dedup"
+    assert rec["kills"]["total"] == 5.0, "took max nSamples version: kills=5"
+    assert rec["ticks"]["mean"] == 8000.0, "took max nSamples version: ticks=8000"
 
 
 def test_terminal_stats_ignores_metrics_npy(tmp_path: Path) -> None:
@@ -149,8 +142,8 @@ def test_terminal_stats_ignores_metrics_npy(tmp_path: Path) -> None:
         "garbage", encoding="utf-8"
     )
     rec = terminal_stats(str(it_dir), it=4)
-    check(rec["games"] == 1, "metrics.npy ignored: 1 game")
-    check(rec["kills"]["total"] == 2.0, "metrics.npy ignored: kills=2")
+    assert rec["games"] == 1, "metrics.npy ignored: 1 game"
+    assert rec["kills"]["total"] == 2.0, "metrics.npy ignored: kills=2"
 
 
 def main() -> None:
@@ -169,14 +162,26 @@ def main() -> None:
         rmtree_best_effort(root, ignore_errors=True)
 
     print()
-    if FAILS:
-        print(f"RESULT: {len(FAILS)} FAILURE(S)")
-        for f in FAILS:
-            print("  - " + f)
-        sys.exit(1)
-    else:
-        print("RESULT: ALL PASS")
+    print("RESULT: ALL PASS")
 
 
 if __name__ == "__main__":
     run_main(main)
+
+
+def test_write_failure_is_reported_once(
+    tmp_path: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """写不进去与「这轮没有终局数据」在盘上同形 ⇒ 失败必须留一行（按 key 去重，不刷屏）。"""
+    from worker import terminal_stats as ts
+
+    def _boom(*_a: Any, **_k: Any) -> dict[str, Any]:
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(ts, "terminal_stats", _boom)
+    ts.write_terminal_stats(str(tmp_path), it=1, iter_dir=str(tmp_path))  # 不抛即契约
+    ts.write_terminal_stats(str(tmp_path), it=2, iter_dir=str(tmp_path))
+
+    out = capsys.readouterr().out
+    assert out.count("iteration-terminal.jsonl") == 1, f"同一 key 只许喊一次，实际：{out!r}"
+    assert "No space left on device" in out, "成因要带上，否则与「本来就没有终局数据」分不开"

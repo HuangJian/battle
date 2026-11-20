@@ -48,6 +48,7 @@ from common.protocol import (
 from hub import server as hub_server
 from hub.server import _HubQueue, make_server
 from remote import offline_boot
+from tests.helpers.http_server import serve_fast
 
 TOKEN = "sekret"
 INIT = b'{"format":"nn-weights-json","params":{"w":1}}'
@@ -59,7 +60,7 @@ def _boot(tmp_path: Path) -> tuple[str, _HubQueue, ThreadingHTTPServer]:
     """发现模式的真 HTTP hub（课程表靠盘上发现，与共享 hub 同形）。"""
     hub = _HubQueue({}, discover_root=tmp_path)
     srv = make_server(hub, 0, TOKEN, host="127.0.0.1")
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     return f"http://127.0.0.1:{srv.server_address[1]}", hub, srv
 
 
@@ -269,7 +270,7 @@ def test_tasks_without_a_traj_root_is_an_empty_list(tmp_path: Path) -> None:
     """hub 不知道课程根（`--discover` 未开）⇒ 空清单，不是 500。"""
     hub = _HubQueue({})
     srv = make_server(hub, 0, TOKEN, host="127.0.0.1")
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     base = f"http://127.0.0.1:{srv.server_address[1]}"
     st, raw = _req(base, OFFLINE_TASKS_PATH)
     assert st == 200 and _json(raw)["tasks"] == []
@@ -388,7 +389,7 @@ def test_heartbeat_extends_and_reports_expired_or_taken(tmp_path: Path) -> None:
     st, raw = _req(base, f"{OFFLINE_HEARTBEAT_PATH}?course=c5-gae&lease=bogus", method="POST")
     assert st == 409 and _json(raw)["expired"] is False
     # 惰性过期：时钟一推过 TTL，租约当场无主（不用清理线程）。
-    hub._now = lambda: 10**10  # type: ignore[method-assign]
+    hub._now = lambda: 10**10
     st, raw = _req(base, f"{OFFLINE_HEARTBEAT_PATH}?course=c5-gae&lease={tok}", method="POST")
     assert st == 409 and _json(raw)["expired"] is True
 
@@ -412,7 +413,7 @@ def test_release_of_an_expired_lease_is_a_noop_success(tmp_path: Path) -> None:
     base, hub, _srv = _offline_hub(tmp_path)
     _write_pack(tmp_path)
     tok = _lease_of(base)
-    hub._now = lambda: 10**10  # type: ignore[method-assign]
+    hub._now = lambda: 10**10
     st, _doc = _req(base, f"{OFFLINE_RELEASE_PATH}?course=c5-gae&lease={tok}", method="POST")
     assert st == 200
 
@@ -1471,7 +1472,9 @@ def test_progress_ping_409_outcomes_stop_pinging() -> None:
     ):
         hits: list[int] = []
 
-        def fake_post(url: str, token: str, log: Any, *, timeout: float = 0.0, _b: dict = body):
+        def fake_post(
+            url: str, token: str, log: Any, *, timeout: float = 0.0, _b: dict = body, hits: list = hits
+        ):
             hits.append(1)
             return 409, dict(_b)
 
@@ -1653,7 +1656,7 @@ def test_progress_ping_refreshes_the_hold_on_a_real_hub(tmp_path: Path) -> None:
     with hub._lease_lock:
         hub._leases["c5-gae"]["expires_at"] = now + 10_000.0
     real_now = hub._now
-    hub._now = lambda: now + 2_000.0  # type: ignore[method-assign]
+    hub._now = lambda: now + 2_000.0
     try:
         assert hub.hold_of("c5-gae")["state"] == "stale"
         detach, lines = _pinger(base, tok, token=TOKEN)
@@ -1663,10 +1666,11 @@ def test_progress_ping_refreshes_the_hold_on_a_real_hub(tmp_path: Path) -> None:
         assert hub.hold_of("c5-gae")["state"] == "live", "打点刷活了 hold"
         assert detach() == ""
     finally:
-        hub._now = real_now  # type: ignore[method-assign]
+        hub._now = real_now
     # 2026-10-25：日志行与发报解耦 —— 「进度」那一行由 `progress_text` 单独打，
     # 送达另起一行（不再把 label 塞进送达行里重复一遍）。
-    assert any(offline_boot._progress_label("iter", it=0, done=1, total=4) in ln for ln in lines), lines
+    label = offline_boot._progress_label("iter", it=0, done=1, total=4)
+    assert any(label in ln for ln in lines), lines
     # ★ 2026-10-30（云机 log 节食）：「[打点] 已送达 hub」那一行**删掉了**（每轮一句、
     # 零新信息——送达这件事上面那句 `state == "live"` 已经用**行为**证明了：hold 被刷活
     # 只可能是这一记打点 POST 干的）。原来这里还有一条文本断言钉它 ⇒ 跟着删（判据归位到行为面）。
@@ -1844,7 +1848,8 @@ def test_explicit_leases_stays_empty_without_a_hub(monkeypatch: pytest.MonkeyPat
     """没有可用的 hub 地址 ⇒ 点名腿不领租约（纯离线 + 手动包：取包/回传照旧）。"""
     _no_net(monkeypatch)
     lines: list[str] = []
-    assert offline_boot._explicit_leases({}, {}, lines.append) == {}
+    leases = offline_boot._explicit_leases({}, {}, lines.append)
+    assert leases == {}
     assert any("纯离线" in ln for ln in lines), lines
 
 

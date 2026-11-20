@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from common.log import log
 from trainer.loop_core import (
     ROUND_BUNDLE_EXIT,
     ROUND_NEXT,
@@ -175,7 +176,7 @@ class LoopRunner:
             if not self.finished:
                 self.finished = True
                 self.finish_reason = f"iters={budget} 跑满（拦下预算外的 it{it}）"
-                print(
+                log(
                     f"[serve] {course}: 拦下预算外的 it{it}"
                     f"（budget={budget}）——预采/队列在判满前排进来的一轮，不执行"
                 )

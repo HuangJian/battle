@@ -217,6 +217,8 @@ def register(
         try:
             detail = e.read().decode("utf-8", "replace")[:300]
         except Exception:  # 读体失败不改判定
+            # 契约静默（G9 冻结，非旧债）：判据是 e.code，响应体只是让日志更具体；
+            # 读不到就少一段细节，不改判定。
             pass
         kind = classify_error(e)
         hint = probe_hint(detail)
@@ -363,6 +365,11 @@ class Registry:
     def configured(self) -> bool:
         """hub/token 齐不齐（缺任一把 = 自动注册不可用，重试也不会变好）。"""
         return bool(self.hub and self.hub_token)
+
+    @property
+    def retry_step(self) -> int:
+        """当前退避档位（0 = 从未失败；诊断 / 用例用）。"""
+        return self._step
 
     def info(self) -> dict:
         return {

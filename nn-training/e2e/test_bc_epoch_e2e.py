@@ -31,10 +31,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import common.codehash
 import common.distribution
 from common.protocol import AUTH_HEADER, decode_weights_json, encode_weights_json
 from hub.server import _JobStore, make_server
 from remote import worker as worker_mod
+from tests.helpers.http_server import serve_fast
 from tests.helpers.hub_poll import hub_poll
 from trainer import bc_loop
 from worker import bc_eval as bc_eval_mod
@@ -80,7 +82,7 @@ def _boot_hub(tmp_path: Path) -> tuple[str, _JobStore, Any]:
     """真 hub-server（随机端口）。返回 (base_url, store, srv)。"""
     store = _JobStore(tmp_path / "jobs", tmp_path / "hub-ledger.jsonl")
     srv = make_server(store, 0, TOKEN, host="127.0.0.1")
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     return f"http://127.0.0.1:{srv.server_address[1]}", store, srv
 
@@ -215,7 +217,7 @@ class _FakeEvalNodeHandler(BaseHTTPRequestHandler):
             self._send_json(
                 {
                     "evalSupport": True,
-                    "codeHash": common.distribution.compute_code_hash(),
+                    "codeHash": common.codehash.compute_code_hash(),
                     "concurrency": 2,
                 }
             )
@@ -261,7 +263,7 @@ class _FakeEvalNodeHandler(BaseHTTPRequestHandler):
 def _boot_fake_eval_node() -> tuple[str, ThreadingHTTPServer]:
     _FakeEvalNodeHandler.hits = {"weights": 0, "tasks": 0}  # 类级计数器按测试复位
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _FakeEvalNodeHandler)
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     return f"http://127.0.0.1:{srv.server_address[1]}", srv
 

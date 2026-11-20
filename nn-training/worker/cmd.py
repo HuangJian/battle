@@ -169,7 +169,7 @@ def build_rollout_cmd(
 def local_code_sha() -> str:
     """本机 TS 代码身份（`--code-sha` 的取值）：**进程内只算一次**。
 
-    成本口径：`common.distribution.compute_code_hash()` ≈ 0.03 s（同 180 个文件，Python 侧比 TS
+    成本口径：`common.codehash.compute_code_hash()` ≈ 0.03 s（同 180 个文件，Python 侧比 TS
     略慢）；逐局重算（35 局/轮）比导出器自己算还贵，故按进程记忆。
 
     与 `sampler-agent.ts::memoizedCodeHash` 同一假设："运行中的代码" = 进程启动时那份，要换
@@ -177,9 +177,9 @@ def local_code_sha() -> str:
     与节点门无关（门比的是 ping 自报值），且该窗口本来就无人在跑新代码。
     """
     if not _CODE_SHA_MEMO:
-        import common.distribution
+        from common.codehash import compute_code_hash
 
-        _CODE_SHA_MEMO.append(common.distribution.compute_code_hash())
+        _CODE_SHA_MEMO.append(compute_code_hash())
     return _CODE_SHA_MEMO[0]
 
 

@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 
 from common.port_guard import ensure_port_free
+from tests.helpers.http_server import serve_fast
 from tests.subproc_util import free_port
 
 
@@ -28,7 +29,7 @@ def test_occupied_port_refuses() -> None:
     """已有活监听者 → 守卫拒绝（RuntimeError）。"""
     srv = HTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
     port = srv.server_address[1]
-    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t = serve_fast(srv)
     t.start()
     try:
         with pytest.raises(RuntimeError, match="已被占用"):

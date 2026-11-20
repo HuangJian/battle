@@ -178,7 +178,11 @@ def test_credentials_are_read_before_any_network_change() -> None:
     assert "creds: dict" in src[src.index("def _run_auto(") :][:400], "_run_auto 同上"
     per_course = src[src.index("def run_one_course(") :]
     assert "creds: dict" in per_course[:400], "run_one_course 必须收下已读好的凭据"
-    assert per_course.index("pack = obtain_pack(") > 0
+    # 2026-11-18（长函数存量）：取包那一段搬进同文件的 `_choose_pack`（只从 ctx 拿凭据），
+    # 时序判据跟着搬：`obtain_pack` 仍只出现在一个收 `creds` 的地方。
+    per_pack = src[src.index("def _choose_pack(") :]
+    per_pack = per_pack[: per_pack.index("\ndef ")]
+    assert "pack = obtain_pack(" in per_pack
     sig = src[src.index("def obtain_pack(") : src.index("def obtain_pack(") + 200]
     assert "creds: dict" in sig, "obtain_pack 必须收下已读好的凭据，而不是自己去读"
 
@@ -198,7 +202,7 @@ def test_run_reads_secrets_first_at_runtime(tmp_path: Path, monkeypatch: pytest.
 
     monkeypatch.setattr(offline_boot, "obtain_pack", spy_obtain)
     with pytest.raises(SystemExit, match="stop-here"):
-        offline_boot.run({"course": "c5-gae", "work_dir": str(tmp_path)}, _quiet, spy_secret)  # type: ignore[arg-type]
+        offline_boot.run({"course": "c5-gae", "work_dir": str(tmp_path)}, _quiet, spy_secret)
     assert order == ["secret:HUB_TOKEN", "secret:HUB_IP", "secret:TS_AUTHKEY", "obtain_pack"]
 
 

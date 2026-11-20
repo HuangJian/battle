@@ -160,6 +160,34 @@ def test_update_accepts_stream_injected_kwargs(mode: str) -> None:
     assert not err, f"backend {mode!r} 的 update 绑定不了 stream.py 的调用形状：{err}"
 
 
+#: `trainer/stream.py` 装载 episode 的两次调用形状（**契约来源就是调用点**）：
+#: 逐 shard 装载 `(shard, gamma, lam)`；没有新结算时的全盘回退 `(root, gamma, lam)`。
+STREAM_EPISODE_LOAD_ARGS = ("path", 0.995, 0.95)
+
+
+@pytest.mark.parametrize("mode", _MODES)
+@pytest.mark.parametrize("member", ("load_episode_from_shard", "load_episodes"))
+def test_episode_loaders_accept_stream_call_shape(mode: str, member: str) -> None:
+    """装载面签名契约：三个后端都能接住 stream.py 的**实际**调用（带 gamma/lam）。
+
+    为什么这条必须有：`stream.py` 恒传 `float(args.gamma), float(args.lam)`，而 intent/goal 的
+    `load_episode_from_shard(dirpath)` 只收一个参数 ⇒ 逐 shard 装载全部 TypeError，又被
+    `except Exception -> "skip bad shard"` 吞成一行日志（不崩、不训）；回退路径的
+    `load_episodes(root, gamma, lam)` 更是直接抛（intent/goal 的别名只收 `(data_root, normalize_adv)`）。
+    P0-1 的原形：契约只活在注释里，缺陷等训练中途才爆。
+    """
+    m = _SCANS[mode].members[member]
+    assert m.node is not None, f"backend {mode!r} 的 {member} 解析不出函数定义（来路 {m.kind!r}）"
+    sig = scan.signature_from_def(m.node)
+    try:
+        sig.bind(*STREAM_EPISODE_LOAD_ARGS)
+    except TypeError as e:
+        raise AssertionError(
+            f"backend {mode!r} 的 {member} 绑定不了 stream.py 的调用形状"
+            f"{STREAM_EPISODE_LOAD_ARGS}：{e}；当前形参={list(sig.parameters)}"
+        ) from None
+
+
 @pytest.mark.parametrize("mode", _MODES)
 def test_update_is_exposed(mode: str) -> None:
     """stream.py:286 调用的是 `update`，不是 `ppo_update*`——别名必须存在且是普通函数。

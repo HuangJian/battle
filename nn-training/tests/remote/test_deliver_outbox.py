@@ -38,7 +38,7 @@ from remote.deliver_outbox import (
     round_path,
 )
 from remote.offline_deliver import OfflineDeliverer
-from tests.remote.test_offline_deliver import RUN, _make_artifacts  # type: ignore
+from tests.remote.test_offline_deliver import RUN, _make_artifacts
 
 #: 两边共用的时钟（`ts` 是体里唯一随时间变的字段；不给同一个值就没法比字节）。
 NOW = 1_234_567.5
@@ -400,7 +400,7 @@ def test_background_mode_writes_the_same_files_without_blocking(tmp_path: Path) 
         assert (out / FINAL_NAME).exists()
     finally:
         ob.close(5.0)
-    assert ob._thread is None, "收线必须把线程停掉（否则进程退不干净）"
+    assert ob.running is False, "收线必须把线程停掉（否则进程退不干净）"
     assert read_state(out)["rounds"]["1"]["rev"] == 1
 
 

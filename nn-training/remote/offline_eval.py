@@ -29,14 +29,14 @@ import os
 import shutil
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 # 单局看门狗口径：**一律通过模块属性读**（`game_watch.X`）——import 会把值抄成第二份绑定，
 # 测试 patch 了 game_watch 那份、调用点还在读旧绑定就是静默的错口径。
-from common import game_watch
+from common import game_watch, runtime
 from common.fs import append_jsonl
 from common.log import log as _rl_log
 from common.log_bundle import LogBundle
@@ -233,6 +233,9 @@ class CloudEvalRunner:
         self._idle.set()
         self._stopping = False
         self._thread: threading.Thread | None = None
+        #: 后台线程的属性在这里（§P1-6 裸线程那一半）：名字统一成 `cloud-eval-runner-loop`、
+        #: 登记在本域，`drain` 的 join 语义不变（谁等它仍由 `drain` 决定）。
+        self._rt = runtime.Runtime(scope="cloud-eval-runner")
         #: 已跑完的评估结果（`run_cloud_eval` 的返回 dict，按提交顺序）
         self.results: list[dict] = []
 
@@ -314,8 +317,7 @@ class CloudEvalRunner:
     def _ensure_thread(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
-        self._thread = threading.Thread(target=self._loop, daemon=True, name="cloud-eval-runner")
-        self._thread.start()
+        self._thread = self._rt.thread(self._loop, name="loop", daemon=True)
 
     def _loop(self) -> None:
         """后台循环：**已提交的活一定跑完**，只有在「要停且无事可做」时才退出。
@@ -363,6 +365,327 @@ class CloudEvalRunner:
             self._idle.set()
             if self._stopping:
                 return
+
+
+def _eval_preflight(
+    plan: CloudEvalPlan,
+    it: int,
+    weights_path: Path,
+    ts_root: str | Path,
+    bun: str,
+    eval_jsonl: Path,
+    log,
+) -> tuple[_EvalPrep | None, str]:
+    """本轮能不能评 + 要评哪些局；返回 `(预检结果, wver)`，None = 本轮无读数。"""
+    if not plan.enabled:
+        log(f"[eval-cloud] it{it}: 课程没配 eval 语料（eval_games_per_stage=0）——跳过")
+        return None, ""
+    pairs = eval_pairs(plan, it)
+    if not pairs:
+        return None, ""
+    wpath = Path(weights_path)
+    if not wpath.is_file():
+        log(f"[eval-cloud] it{it}: 权重不在盘上（{wpath}）——跳过本轮评估")
+        return None, ""
+    from remote.artifacts import sha256_file
+
+    key16 = sha256_file(wpath)[:16]
+    bun_bin = find_bun(bun)
+    if not bun_bin:
+        log("[eval-cloud] 找不到 bun（rollout/eval 的 TS 运行时）——跳过本轮评估")
+        return None, key16
+    ts = Path(ts_root) if str(ts_root or "") else None
+    if ts is None or not ts.is_dir():
+        log(f"[eval-cloud] TS 运行时树不在（{ts_root}）——跳过本轮评估（导出器跑不起来）")
+        return None, key16
+
+    done = eval_done_keys(eval_jsonl, key16, min_iter=1)
+    todo = [p for p in pairs if p not in done]
+    if not todo:
+        log(f"[eval-cloud] it{it}: wver={key16[:12]}… 已评过（{len(pairs)} 局）——跳过")
+    return _EvalPrep(pairs=pairs, todo=todo, key16=key16, bun_bin=bun_bin, wpath=wpath, ts=ts), key16
+
+
+@dataclass
+class _EvalPrep:
+    """预检通过后的本轮输入（字段即原 `run_cloud_eval` 里那组局部量）。"""
+
+    pairs: list[tuple[int, int]]
+    todo: list[tuple[int, int]]
+    key16: str
+    bun_bin: str
+    wpath: Path
+    ts: Path
+
+
+@dataclass
+class _EvalRound:
+    """一轮云评估的共享状态（逐局线程与轮内重投都从这里取）。"""
+
+    it: int
+    plan: CloudEvalPlan
+    eval_jsonl: Path
+    work_dir: str | Path
+    bun_bin: str
+    wpath: Path
+    ts: Path
+    pool_key: str
+    key16: str
+    base_cap: float
+    explicit: bool
+    lock: threading.Lock
+    seen: set[tuple[int, int]]
+    wins: list[int]
+    cleared_total: list[int]
+    outcomes: dict[str, int]
+    node_games: dict[str, int]
+    failed: list[tuple[int, int, str]]
+    game_walls: list[tuple[float, str]]
+    retried_games: list[int]
+    machine_stuck: list[tuple[int, int]]
+    pairs: list[tuple[int, int]]
+    todo: list[tuple[int, int]]
+
+    def run_one(self, task: tuple[int, int], course, log, pool) -> None:
+        """单局：原地重试 → 落账；机器级停滞只登记，交给整轮重投。"""
+        stage, seed = task
+        game_dir = Path(self.work_dir) / f"eval-{int(self.it)}-s{stage}-d{seed}"
+        # 单局**原地重试**（与 rollout 同一口径，`common/game_watch.py`）：单局的失败几乎
+        # 总是环境性的（宿主机饥饿/慢局/mini-batch 里卡住），而这一局是确定性的（种子固定）
+        # ⇒ 重跑同一命令要么拿到同一份结果，要么再次响亮失败。旧行为是一把不过就丢一局，
+        # 于是读数里那些「永远失败」的局每轮都没人管。
+        manifest: dict | None = None
+        err_txt = ""
+        lab = game_watch.game_label(stage, seed)
+        wall = 0.0
+        for attempt in range(1, game_watch.GAME_MAX_ATTEMPTS + 1):
+            cap = game_watch.attempt_timeout_sec(self.base_cap, attempt, explicit=self.explicit)
+            # 一局**整条链路**的墙钟上界（与 rollout 腿同一个口径，见
+            # `game_watch.game_ceiling_sec`）：一局的路径上有不可取消的阻塞点（挂住的挂载点
+            # 上的 mkdir/open/写盘、`Popen` 等子进程 exec 的握手），它们既不返回也不抛 ⇒
+            # 那一局的 slot 永远不回来、`ex.map` 永远收不齐（2026-10-06 rollout 腿的现场；
+            # 这条腿同形）。超界按**机器级停滞**收场：轮内重投只补没评的局（与
+            # `UnreapableChildError` 同一条处置）。每次尝试重算——常量可被用例 patch。
+            ceiling_sec = game_watch.game_ceiling_sec(self.base_cap, explicit=self.explicit)
+            if attempt > 1:
+                shutil.rmtree(game_dir, ignore_errors=True)  # 上一把可能留半截 _eval_report
+                log(
+                    f"[eval-cloud] it{self.it}: "
+                    + game_watch.retry_line("eval", lab, attempt, err_txt, cap)
+                )
+            t_game = time.time()
+            try:
+                # 真活跑在一条**可放弃的 daemon 线程**里，本线程只在 `ceiling_sec` 内等：
+                # 超界（不可取消的阻塞）不会把这一轮的 slot 永远按住。
+                finished, manifest = call_bounded(
+                    partial(
+                        run_local_eval_game,
+                        self.bun_bin,
+                        str(self.wpath),
+                        int(stage),
+                        int(seed),
+                        game_dir,
+                        int(self.plan.max_ticks),
+                        self.plan.difficulty,
+                        float(cap),
+                        self.key16,
+                        stage_json=(course.stage_json(int(stage)) if course is not None else "")
+                        or "",
+                        lives_override=self.plan.lives,
+                        player_level=self.plan.level,
+                        cwd=str(self.ts),
+                        log_fn=log,
+                        attempt=attempt,
+                        pool=pool,
+                        # R2 事件 rung：云机跑 ts_code 新鲜 bundle（sha 版），与本机同语义；
+                        # 缺席 = 老行为。课程无该键（旧课）⇒ getattr 缺省 False。
+                        decision_events=bool(getattr(course, "decision_events", False)),
+                        # 决策周期 K（plan/k5-rhythm.plan.md）：云机与本机同节奏；
+                        # 缺席/10 = 老行为（getattr 缺省 10）。
+                        decision_k=int(getattr(course, "decision_k", 10)),
+                    ),
+                    ceiling_sec,
+                    name=f"eval-{lab}",
+                )
+                if not finished:
+                    # 超界 = 机器卡在不可取消的 IO 上（与「收不了尸」同一族）：按机器级停滞
+                    # 收场 —— 不就地重跑，交给轮内重投只补没评的局。
+                    log(game_watch.ceiling_line("eval", lab, ceiling_sec, str(game_dir)))
+                    raise UnreapableChildError(
+                        f"[eval-cloud] self.it{self.it} 单局超界（{ceiling_sec:g}s 内整条链路都没返回）："
+                        f"{lab}——大概率卡在不可中断的 IO（挂住的挂载点：mkdir/open/写盘/"
+                        "子进程 exec 握手）；本局不再跑，交回整轮重投（不报失败、云机不停）；"
+                        f"现场 {game_dir}"
+                    ) from None
+                wall = time.time() - t_game
+                break
+            except UnreapableChildError:
+                # ★ **机器级停滞**（子进程 SIGKILL 之后收不了尸：D 状态 / 挂住的挂载点）。
+                # 两条纪律（与 rollout 腿逐字同源，见 `remote/protocol.UnreapableChildError`）：
+                #   ① **不原地重跑这一局**：`game_dir` 上可能还有活写者 ⇒ 两个进程写同一份
+                #      `_eval_report.json`（半截/交错）⇒ 静默错读数。重投的粒度是**整轮**：
+                #      先把它的半截产出删干净，再与其它没产出的局一起投（见轮循环）；
+                #   ② **不记 `failed`**：那是机器的问题，不是这一局的内容（记成失败就把机器
+                #      的错记在内容头上，而这一轮永远缺一个读数）。
+                # 这个分支立即返回（`wall`/`err_txt` 都不必写：它们只服务 `failed` 那一笔）。
+                with self.lock:
+                    self.machine_stuck.append((int(stage), int(seed)))
+                return
+            except Exception as e:  # 单局失败只放弃这一局（下一轮/下次导入会重试）
+                manifest = None
+                wall = time.time() - t_game
+                err_txt = f"{type(e).__name__}: {e}"
+        if manifest is None:
+            with self.lock:
+                self.failed.append((int(stage), int(seed), err_txt))
+            return
+        try:
+            row = eval_row(
+                manifest,
+                it=int(self.it),
+                key16=self.key16,
+                task=(int(stage), int(seed)),
+                node=CLOUD_NODE,
+                # 与 in-loop 腿同字段（`trainer/eval_dispatch` 的 wallSec）⇒ 两腿逐字段可比。
+                wall_sec=round(wall, 3),
+            )
+            # 每路径单写者（`common.fs.append_jsonl`）：本腿的槽位线程会并发落账，
+            # 写者把它们排成一条队（返回即落盘）。
+            append_jsonl(self.eval_jsonl, row)
+            with self.lock:
+                self.seen.add((int(stage), int(seed)))
+                self.game_walls.append((round(wall, 3), lab))
+                if attempt > 1:
+                    self.retried_games.append(attempt)
+                self.wins[0] += int(row["win"])
+                self.cleared_total[0] += int(row["cleared"])
+                oc = str(row.get("outcome") or "?")
+                self.outcomes[oc] = self.outcomes.get(oc, 0) + 1
+                self.node_games[CLOUD_NODE] = self.node_games.get(CLOUD_NODE, 0) + 1
+        except Exception as e:  # 落到这一支 = 局跑完了但账落不下去（磁盘/账本格式）
+            with self.lock:
+                self.failed.append((int(stage), int(seed), f"落账失败 {type(e).__name__}: {e}"))
+
+    def run_rounds(self, course, n_slots: int, eb, out, log, pool):
+        """轮循环：机器级停滞 ⇒ 轮内重投，只补没评的局。返回重投次数。"""
+        self.eval_jsonl.parent.mkdir(parents=True, exist_ok=True)
+        # ---- 轮循环：机器级停滞 ⇒ 轮内重投，**只补没评的局**（2026-09-25 用户口径：失败就重试，
+        # 不许关云机让任务失败，也不许空转烧配额）。
+        #
+        # 为什么重投必须在**轮内**而不是交回调用方：这一腿的调用方（`CloudEvalRunner` / 云机自主段）
+        # 根本没有重订机会——`run_cloud_eval` 的纪律是「永不抛」（抛出去这一轮连 summary 都没有），
+        # 而 rollout 腿那 3 次重试也不盖这条腿。留在这里的重投既不睡（每一趟都真的在跑活）、
+        # 也不吃任何外层预算，而且**机器一好就接上**。
+        #
+        # 出路（不许无限重投的那一档）：**内容面**失败（rc≠0 / 导出器确定性报错 / 落账失败）
+        # 仍归 `failed`（响亮记一笔，读数少一局）——那是这一轮该接受的结局，不是机器问题。
+        retry_cap = eval_round_retry_max()
+        round_retries = 0
+        pending = list(self.todo)
+        try:
+            while True:
+                self.machine_stuck.clear()
+                if n_slots <= 1:
+                    for task in pending:
+                        self.run_one(task, course, log, pool)
+                else:
+                    with runtime.Runtime(scope="cloud-eval") as rt:
+                        rt.map(partial(self.run_one, course=course, log=log, pool=pool), pending, workers=n_slots)
+                if not self.machine_stuck:
+                    break
+                # `round_retries` = **真的重投过几次**（计数在重投前自增），所以上限判在自增之前。
+                if retry_cap and round_retries >= retry_cap:
+                    # 只有操作员显式设了上限才走这里（缺省不限）。**不上抛**：把还没评的局记成本轮
+                    # `failed` 并照常收尾——评估腿抛出去等于整轮作废（连 summary 都没了）。
+                    with self.lock:
+                        self.failed.extend(
+                            (s, d, f"机器级停滞：轮内重投已达操作员上限（{retry_cap} 次）")
+                            for s, d in self.machine_stuck
+                        )
+                    log(
+                        f"WARN [eval-cloud] self.it{self.it} 机器级停滞：轮内已重投 {round_retries} 次仍有"
+                        f" {len(self.machine_stuck)} 局收不了尸（{ENV_EVAL_ROUND_RETRY_MAX}={retry_cap} 是"
+                        "操作员设的上限）——这些局记成本轮失败，训练继续"
+                    )
+                    break
+                round_retries += 1
+                # 只补**没评的**局：盘上账本（`eval_done_keys`）说了算，已落的行不重评
+                # （不许空转）；已在 `failed` 里的内容面失败也不重投（见上面的出路）。
+                done = eval_done_keys(self.eval_jsonl, self.key16, min_iter=1)
+                failed_keys = {(s, d) for s, d, _ in self.failed}
+                pending = sorted(p for p in self.pairs if p not in done and p not in failed_keys)
+                if not pending:
+                    break
+                log(
+                    f"WARN [eval-cloud] self.it{self.it} 整轮重投第 {round_retries} 次：本次尝试有"
+                    f" {len(self.machine_stuck)} 局收不了尸（机器级停滞，已结算 {len(self.seen)}/{len(self.pairs)} 局）"
+                    f"——只补这 {len(pending)} 局，先清掉它们的半截产出（旧写者可能还在）；"
+                    "不报失败、不睡、不占用外层重试预算、云机不停"
+                    + ("" if not retry_cap else f"（上限 {retry_cap} 次）")
+                )
+                for stage, seed in pending:
+                    rmtree_best_effort(
+                        Path(self.work_dir) / f"eval-{int(self.it)}-s{stage}-d{seed}", ignore_errors=True
+                    )
+        finally:
+            if pool is not None:
+                finished, pool = pool, None  # 防止外层 finally 再关
+                eb.add("servePool", finished.summary())
+                # ★ 评审 C2 的最终处置：读取/写 out 都在这里；原 :692-705 那段已删。
+                out["servePool"] = {
+                    "served": finished.served,
+                    "spawned": finished.spawned,
+                    "killed": finished.killed,
+                    "fallback": finished.fallback,
+                    "reasons": dict(finished.fallback_reasons),
+                }
+                if len(self.pool_key) == 64 and CLOUD_EVAL_POOL.enabled:
+                    CLOUD_EVAL_POOL.put(self.pool_key, finished)
+                else:
+                    finished.close()
+
+        return round_retries, pool
+
+    def finish_round(self, rollout_winrate, course_fp, eb, t0, out, round_retries: int, log) -> None:
+        """轮末：耗时分布 + 失败清单 + summary 结算（与 in-loop 同一份）。"""
+        # 单局耗时分布（每轮都打）：<5s 这条线（以及重试次数）靠真数据校准，不靠猜。
+        eb.add(
+            "单局耗时",
+            game_watch.game_time_summary(
+                "eval",
+                self.game_walls,
+                retried=len(self.retried_games),
+                warn_sec=game_watch.slow_warn_sec(self.base_cap),
+            ),
+            final_only=True,
+        )
+        # `out["servePool"]` 已在内层 finally 写入（评审 C2）；这里不再读 pool.*。
+        out["settled"] = len(self.seen)
+        out["failed"] = len(self.failed)
+        out["roundRetries"] = round_retries
+        for stage, seed, err in self.failed[:5]:
+            log(f"[eval-cloud] it{self.it}: 局 ({stage},{seed}) 失败：{err}")
+        if len(self.failed) > 5:
+            log(f"[eval-cloud] it{self.it}: 另有 {len(self.failed) - 5} 局失败（同上口径）")
+        # summary 走 in-loop 的同一份结算（含双轨/技能子指标/掉落口径）
+        settle_eval_summary(
+            self.eval_jsonl,
+            self.key16,
+            int(self.it),
+            self.pairs,
+            len(self.pairs),
+            self.seen,
+            self.wins,
+            self.cleared_total,
+            self.outcomes,
+            self.node_games,
+            lambda row: append_jsonl(self.eval_jsonl, row),
+            t0,
+            rollout_winrate,
+            course_fp=course_fp or "",
+            eval_bundle=eb,
+        )
+        out["ran"] = True
 
 
 def run_cloud_eval(
@@ -424,36 +747,16 @@ def run_cloud_eval(
     pool_key = str(ts_code_sha256 or "").strip().lower()
     set_eval_busy(True)
     try:
-        if not plan.enabled:
-            log(f"[eval-cloud] it{it}: 课程没配 eval 语料（eval_games_per_stage=0）——跳过")
-            return out
-        pairs = eval_pairs(plan, it)
-        if not pairs:
-            return out
-        wpath = Path(weights_path)
-        if not wpath.is_file():
-            log(f"[eval-cloud] it{it}: 权重不在盘上（{wpath}）——跳过本轮评估")
-            return out
-        from remote.artifacts import sha256_file
-
-        key16 = sha256_file(wpath)[:16]
+        prep, key16 = _eval_preflight(plan, it, weights_path, ts_root, bun, eval_jsonl, log)
         out["wver"] = key16
-        bun_bin = find_bun(bun)
-        if not bun_bin:
-            log("[eval-cloud] 找不到 bun（rollout/eval 的 TS 运行时）——跳过本轮评估")
+        if prep is None:
             return out
-        ts = Path(ts_root) if str(ts_root or "") else None
-        if ts is None or not ts.is_dir():
-            log(f"[eval-cloud] TS 运行时树不在（{ts_root}）——跳过本轮评估（导出器跑不起来）")
-            return out
-
-        done = eval_done_keys(eval_jsonl, key16, min_iter=1)
-        todo = [p for p in pairs if p not in done]
+        pairs, todo = prep.pairs, prep.todo
         out["games"] = len(pairs)
         out["skipped"] = len(pairs) - len(todo)
         if not todo:
-            log(f"[eval-cloud] it{it}: wver={key16[:12]}… 已评过（{len(pairs)} 局）——跳过")
             return out
+        wpath, ts, bun_bin = prep.wpath, prep.ts, prep.bun_bin
 
         # 调用方（`plan_run._setup_cloud_eval`）通常已经把缺省解析成具体数；直接调本函数时
         # 退回 `default_slots()`——同一口径，不依赖任何「对方在抢」的估算。
@@ -497,9 +800,7 @@ def run_cloud_eval(
                     "单局失败自动回退一次性 spawn",
                 )
             else:
-                eb.note(
-                    f"[eval-cloud] it{it} 长驻 worker 池起不来 ⇒ 本轮全部走一次性 spawn"
-                )
+                eb.note(f"[eval-cloud] it{it} 长驻 worker 池起不来 ⇒ 本轮全部走一次性 spawn")
                 pool.close()
                 pool = None
         lock = threading.Lock()
@@ -526,272 +827,36 @@ def run_cloud_eval(
             if explicit
             else game_watch.game_timeout_sec(int(plan.max_ticks))
         )
-        def run_one(task: tuple[int, int]) -> None:
-            stage, seed = task
-            game_dir = Path(work_dir) / f"eval-{int(it)}-s{stage}-d{seed}"
-            # 单局**原地重试**（与 rollout 同一口径，`common/game_watch.py`）：单局的失败几乎
-            # 总是环境性的（宿主机饥饿/慢局/mini-batch 里卡住），而这一局是确定性的（种子固定）
-            # ⇒ 重跑同一命令要么拿到同一份结果，要么再次响亮失败。旧行为是一把不过就丢一局，
-            # 于是读数里那些「永远失败」的局每轮都没人管。
-            manifest: dict | None = None
-            err_txt = ""
-            lab = game_watch.game_label(stage, seed)
-            wall = 0.0
-            for attempt in range(1, game_watch.GAME_MAX_ATTEMPTS + 1):
-                cap = game_watch.attempt_timeout_sec(base_cap, attempt, explicit=explicit)
-                # 一局**整条链路**的墙钟上界（与 rollout 腿同一个口径，见
-                # `game_watch.game_ceiling_sec`）：一局的路径上有不可取消的阻塞点（挂住的挂载点
-                # 上的 mkdir/open/写盘、`Popen` 等子进程 exec 的握手），它们既不返回也不抛 ⇒
-                # 那一局的 slot 永远不回来、`ex.map` 永远收不齐（2026-10-06 rollout 腿的现场；
-                # 这条腿同形）。超界按**机器级停滞**收场：轮内重投只补没评的局（与
-                # `UnreapableChildError` 同一条处置）。每次尝试重算——常量可被用例 patch。
-                ceiling_sec = game_watch.game_ceiling_sec(base_cap, explicit=explicit)
-                if attempt > 1:
-                    shutil.rmtree(game_dir, ignore_errors=True)  # 上一把可能留半截 _eval_report
-                    log(
-                        f"[eval-cloud] it{it}: "
-                        + game_watch.retry_line("eval", lab, attempt, err_txt, cap)
-                    )
-                t_game = time.time()
-                try:
-                    # 真活跑在一条**可放弃的 daemon 线程**里，本线程只在 `ceiling_sec` 内等：
-                    # 超界（不可取消的阻塞）不会把这一轮的 slot 永远按住。
-                    finished, manifest = call_bounded(
-                        lambda: run_local_eval_game(
-                            bun_bin,
-                            str(wpath),
-                            int(stage),
-                            int(seed),
-                            game_dir,
-                            int(plan.max_ticks),
-                            plan.difficulty,
-                            float(cap),
-                            key16,
-                            stage_json=(
-                                course.stage_json(int(stage)) if course is not None else ""
-                            )
-                            or "",
-                            lives_override=plan.lives,
-                            player_level=plan.level,
-                            cwd=str(ts),
-                            log_fn=log,
-                            attempt=attempt,
-                            pool=pool,
-                            # R2 事件 rung：云机跑 ts_code 新鲜 bundle（sha 版），与本机同语义；
-                            # 缺席 = 老行为。课程无该键（旧课）⇒ getattr 缺省 False。
-                            decision_events=bool(getattr(course, "decision_events", False)),
-                            # 决策周期 K（plan/k5-rhythm.plan.md）：云机与本机同节奏；
-                            # 缺席/10 = 老行为（getattr 缺省 10）。
-                            decision_k=int(getattr(course, "decision_k", 10)),
-                            # 评估/部署链推理规则（课程 inference_rules；缺席 = 老行为）：
-                            # 云机与本机同语义，漏传 = 重放/评估静默换策略。
-                            skip_steel_only_shots=bool(
-                                getattr(
-                                    getattr(course, "inference_rules", None),
-                                    "skip_steel_only_shots",
-                                    False,
-                                )
-                            ),
-                            break_bricks_on_path=bool(
-                                getattr(
-                                    getattr(course, "inference_rules", None),
-                                    "break_bricks_on_path",
-                                    False,
-                                )
-                            ),
-                            suppress_useless_fire=bool(
-                                getattr(
-                                    getattr(course, "inference_rules", None),
-                                    "suppress_useless_fire",
-                                    False,
-                                )
-                            ),
-                            suppress_lead_miss_fire=bool(
-                                getattr(
-                                    getattr(course, "inference_rules", None),
-                                    "suppress_lead_miss_fire",
-                                    False,
-                                )
-                            ),
-                        ),
-                        ceiling_sec,
-                        name=f"eval-{lab}",
-                    )
-                    if not finished:
-                        # 超界 = 机器卡在不可取消的 IO 上（与「收不了尸」同一族）：按机器级停滞
-                        # 收场 —— 不就地重跑，交给轮内重投只补没评的局。
-                        log(game_watch.ceiling_line("eval", lab, ceiling_sec, str(game_dir)))
-                        raise UnreapableChildError(
-                            f"[eval-cloud] it{it} 单局超界（{ceiling_sec:g}s 内整条链路都没返回）："
-                            f"{lab}——大概率卡在不可中断的 IO（挂住的挂载点：mkdir/open/写盘/"
-                            "子进程 exec 握手）；本局不再跑，交回整轮重投（不报失败、云机不停）；"
-                            f"现场 {game_dir}"
-                        ) from None
-                    wall = time.time() - t_game
-                    break
-                except UnreapableChildError:
-                    # ★ **机器级停滞**（子进程 SIGKILL 之后收不了尸：D 状态 / 挂住的挂载点）。
-                    # 两条纪律（与 rollout 腿逐字同源，见 `remote/protocol.UnreapableChildError`）：
-                    #   ① **不原地重跑这一局**：`game_dir` 上可能还有活写者 ⇒ 两个进程写同一份
-                    #      `_eval_report.json`（半截/交错）⇒ 静默错读数。重投的粒度是**整轮**：
-                    #      先把它的半截产出删干净，再与其它没产出的局一起投（见轮循环）；
-                    #   ② **不记 `failed`**：那是机器的问题，不是这一局的内容（记成失败就把机器
-                    #      的错记在内容头上，而这一轮永远缺一个读数）。
-                    # 这个分支立即返回（`wall`/`err_txt` 都不必写：它们只服务 `failed` 那一笔）。
-                    with lock:
-                        machine_stuck.append((int(stage), int(seed)))
-                    return
-                except Exception as e:  # 单局失败只放弃这一局（下一轮/下次导入会重试）
-                    manifest = None
-                    wall = time.time() - t_game
-                    err_txt = f"{type(e).__name__}: {e}"
-            if manifest is None:
-                with lock:
-                    failed.append((int(stage), int(seed), err_txt))
-                return
-            try:
-                row = eval_row(
-                    manifest,
-                    it=int(it),
-                    key16=key16,
-                    task=(int(stage), int(seed)),
-                    node=CLOUD_NODE,
-                    # 与 in-loop 腿同字段（`trainer/eval_dispatch` 的 wallSec）⇒ 两腿逐字段可比。
-                    wall_sec=round(wall, 3),
-                )
-                # 每路径单写者（`common.fs.append_jsonl`）：本腿的槽位线程会并发落账，
-                # 写者把它们排成一条队（返回即落盘）。
-                append_jsonl(eval_jsonl, row)
-                with lock:
-                    seen.add((int(stage), int(seed)))
-                    game_walls.append((round(wall, 3), lab))
-                    if attempt > 1:
-                        retried_games.append(attempt)
-                    wins[0] += int(row["win"])
-                    cleared_total[0] += int(row["cleared"])
-                    oc = str(row.get("outcome") or "?")
-                    outcomes[oc] = outcomes.get(oc, 0) + 1
-                    node_games[CLOUD_NODE] = node_games.get(CLOUD_NODE, 0) + 1
-            except Exception as e:  # 落到这一支 = 局跑完了但账落不下去（磁盘/账本格式）
-                with lock:
-                    failed.append((int(stage), int(seed), f"落账失败 {type(e).__name__}: {e}"))
 
+        ctx = _EvalRound(
+            it=int(it),
+            plan=plan,
+            eval_jsonl=eval_jsonl,
+            work_dir=work_dir,
+            bun_bin=bun_bin,
+            wpath=wpath,
+            ts=ts,
+            pool_key=pool_key,
+            key16=key16,
+            base_cap=base_cap,
+            explicit=explicit,
+            lock=lock,
+            seen=seen,
+            wins=wins,
+            cleared_total=cleared_total,
+            outcomes=outcomes,
+            node_games=node_games,
+            failed=failed,
+            game_walls=game_walls,
+            retried_games=retried_games,
+            machine_stuck=machine_stuck,
+            pairs=pairs,
+            todo=todo,
+        )
         eval_jsonl.parent.mkdir(parents=True, exist_ok=True)
-        # ---- 轮循环：机器级停滞 ⇒ 轮内重投，**只补没评的局**（2026-09-25 用户口径：失败就重试，
-        # 不许关云机让任务失败，也不许空转烧配额）。
-        #
-        # 为什么重投必须在**轮内**而不是交回调用方：这一腿的调用方（`CloudEvalRunner` / 云机自主段）
-        # 根本没有重订机会——`run_cloud_eval` 的纪律是「永不抛」（抛出去这一轮连 summary 都没有），
-        # 而 rollout 腿那 3 次重试也不盖这条腿。留在这里的重投既不睡（每一趟都真的在跑活）、
-        # 也不吃任何外层预算，而且**机器一好就接上**。
-        #
-        # 出路（不许无限重投的那一档）：**内容面**失败（rc≠0 / 导出器确定性报错 / 落账失败）
-        # 仍归 `failed`（响亮记一笔，读数少一局）——那是这一轮该接受的结局，不是机器问题。
-        retry_cap = eval_round_retry_max()
-        round_retries = 0
-        pending = list(todo)
-        try:
-            while True:
-                machine_stuck.clear()
-                if n_slots <= 1:
-                    for task in pending:
-                        run_one(task)
-                else:
-                    with ThreadPoolExecutor(
-                        max_workers=n_slots, thread_name_prefix="cloud-eval"
-                    ) as ex:
-                        list(ex.map(run_one, pending))
-                if not machine_stuck:
-                    break
-                # `round_retries` = **真的重投过几次**（计数在重投前自增），所以上限判在自增之前。
-                if retry_cap and round_retries >= retry_cap:
-                    # 只有操作员显式设了上限才走这里（缺省不限）。**不上抛**：把还没评的局记成本轮
-                    # `failed` 并照常收尾——评估腿抛出去等于整轮作废（连 summary 都没了）。
-                    with lock:
-                        failed.extend(
-                            (s, d, f"机器级停滞：轮内重投已达操作员上限（{retry_cap} 次）")
-                            for s, d in machine_stuck
-                        )
-                    log(
-                        f"WARN [eval-cloud] it{it} 机器级停滞：轮内已重投 {round_retries} 次仍有"
-                        f" {len(machine_stuck)} 局收不了尸（{ENV_EVAL_ROUND_RETRY_MAX}={retry_cap} 是"
-                        "操作员设的上限）——这些局记成本轮失败，训练继续"
-                    )
-                    break
-                round_retries += 1
-                # 只补**没评的**局：盘上账本（`eval_done_keys`）说了算，已落的行不重评
-                # （不许空转）；已在 `failed` 里的内容面失败也不重投（见上面的出路）。
-                done = eval_done_keys(eval_jsonl, key16, min_iter=1)
-                failed_keys = {(s, d) for s, d, _ in failed}
-                pending = sorted(p for p in pairs if p not in done and p not in failed_keys)
-                if not pending:
-                    break
-                log(
-                    f"WARN [eval-cloud] it{it} 整轮重投第 {round_retries} 次：本次尝试有"
-                    f" {len(machine_stuck)} 局收不了尸（机器级停滞，已结算 {len(seen)}/{len(pairs)} 局）"
-                    f"——只补这 {len(pending)} 局，先清掉它们的半截产出（旧写者可能还在）；"
-                    "不报失败、不睡、不占用外层重试预算、云机不停"
-                    + ("" if not retry_cap else f"（上限 {retry_cap} 次）")
-                )
-                for stage, seed in pending:
-                    rmtree_best_effort(
-                        Path(work_dir) / f"eval-{int(it)}-s{stage}-d{seed}", ignore_errors=True
-                    )
-        finally:
-            if pool is not None:
-                finished, pool = pool, None      # 防止外层 finally 再关
-                eb.add("servePool", finished.summary())
-                # ★ 评审 C2 的最终处置：读取/写 out 都在这里；原 :692-705 那段已删。
-                out["servePool"] = {
-                    "served": finished.served,
-                    "spawned": finished.spawned,
-                    "killed": finished.killed,
-                    "fallback": finished.fallback,
-                    "reasons": dict(finished.fallback_reasons),
-                }
-                if len(pool_key) == 64 and CLOUD_EVAL_POOL.enabled:
-                    CLOUD_EVAL_POOL.put(pool_key, finished)
-                else:
-                    finished.close()
+        round_retries, pool = ctx.run_rounds(course, n_slots, eb, out, log, pool)
 
-        # 单局耗时分布（每轮都打）：<5s 这条线（以及重试次数）靠真数据校准，不靠猜。
-        eb.add(
-            "单局耗时",
-            game_watch.game_time_summary(
-                "eval",
-                game_walls,
-                retried=len(retried_games),
-                warn_sec=game_watch.slow_warn_sec(base_cap),
-            ),
-            final_only=True,
-        )
-        # `out["servePool"]` 已在内层 finally 写入（评审 C2）；这里不再读 pool.*。
-        out["settled"] = len(seen)
-        out["failed"] = len(failed)
-        out["roundRetries"] = round_retries
-        for stage, seed, err in failed[:5]:
-            log(f"[eval-cloud] it{it}: 局 ({stage},{seed}) 失败：{err}")
-        if len(failed) > 5:
-            log(f"[eval-cloud] it{it}: 另有 {len(failed) - 5} 局失败（同上口径）")
-        # summary 走 in-loop 的同一份结算（含双轨/技能子指标/掉落口径）
-        settle_eval_summary(
-            eval_jsonl,
-            key16,
-            int(it),
-            pairs,
-            len(pairs),
-            seen,
-            wins,
-            cleared_total,
-            outcomes,
-            node_games,
-            lambda row: append_jsonl(eval_jsonl, row),
-            t0,
-            rollout_winrate,
-            course_fp=course_fp or "",
-            eval_bundle=eb,
-        )
-        out["ran"] = True
+        ctx.finish_round(rollout_winrate, course_fp, eb, t0, out, round_retries, log)
     except Exception as e:  # 评估是旁路：任何意外都只是「这一轮没有读数」
         log(f"[eval-cloud] it{it} 评估异常（已忽略，训练继续）：{type(e).__name__}: {e}")
         out["error"] = f"{type(e).__name__}: {e}"

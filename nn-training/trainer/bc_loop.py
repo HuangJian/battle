@@ -34,7 +34,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 import secrets
 import shutil
@@ -56,13 +55,16 @@ _STAMP_PREFIX = re.compile(r"^\[\d{2}:\d{2}:\d{2}\] ")
 def _strip_stamp(line: str) -> str:
     """剥掉行首的 `[HH:MM:SS] `（无戳行原样返回）。"""
     return _STAMP_PREFIX.sub("", line)
+from common.paths import REPO_ROOT
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from common.settings import push_node_from_env
 from remote.code_snapshot import (
     current_code_zip_path,
     published_code_zip,
     workspace_code_sha,
 )
 from remote.hub_client import (
+    PublishSpec,
     git_head,
     iter_bc_shard_dirs,
     mark_job_completed,
@@ -81,7 +83,6 @@ from trainer.bc_round_job import (
 from trainer.bc_round_job import (
     resolve_bc_init_weights as resolve_bc_init_weights,
 )
-from trainer.dispatch_queue import REPO_ROOT
 from worker.archive import backup_weights
 from worker.bc_collect import collect_corpus as _collect_corpus
 from worker.bc_collect import smoke_overrides as smoke_overrides
@@ -189,8 +190,10 @@ def append_weights_md_row(
                 **_POPEN_NO_WINDOW,
             )
             sha = raw.decode().strip() or "n/a"
-        except Exception:
-            pass
+        except (OSError, subprocess.SubprocessError):
+            pass  # git 不在 PATH / 超时 / cwd 没了 ⇒ 溯源列记 "n/a"（列本身是显式的）
+        # 其余照抛：命令拼错（TypeError/IndexError）与「git 不可用」是两件事，后者是本列
+        # 允许的降级，前者是我们自己的 bug。
         row = (
             f"| {trained_at} | `{Path(archive_path).name}` | {epochs} "
             f"| {samples[0]}/{samples[1]} | {best_val:.4f} "
@@ -316,7 +319,7 @@ def publish_bc_job(
     epochs = 1 if is_smoke else int(course.train.epochs)
     batch = min(int(course.train.batch), 256) if is_smoke else int(course.train.batch)
     init_src = resolve_bc_init_weights(course)
-    manifest = publish_job(
+    manifest = publish_job(PublishSpec(
         job_root=job_root,
         jsonl_path=jsonl_path,
         run_id=RUN_ID,
@@ -337,8 +340,7 @@ def publish_bc_job(
         kind="bc",
         init_weights_path=str(init_src) if init_src is not None else "",
         extra=bc_job_extra(course, it, smoke=is_smoke, course_key=course_key),
-        log=log,
-    )
+    ), log=log)
     # B7（2026-11-06）：快照是会话冻结的，但工作区可能已经变了。只告警、不拒发
     # （plan §16.2 B6）；结果落 job 旁挂文件，控制台据此显示「本次 job 快照 sha」
     # 与「过期」标记。按 pack_code_zip 的同一规则重打一份临时 zip 取 hash；
@@ -749,7 +751,7 @@ def resolve_bc_runtime(
     # 直推目标只从 env 来（冒烟预演注入本机的伪节点）。真实的 push 执行面走 hub 中介派发：
     # BC 课在共享 trainer 里没有 env，resolve_transport(auto) 因而落在 `hub`（发布到 hub、
     # 等 worker 领取）——与「所有 worker 都可能接到任何课程的活」同一个模型。
-    push_url = str(os.environ.get("REMOTE_PUSH_NODE") or "")
+    push_url = push_node_from_env()
     token = str(args.remote_token or rl_block.get("remote_token") or "")
     # 共享 hub（2026-09-18）：URL 是**全局**事实（一条隧道/一个 hub 服务所有课程）⇒
     # 只认单键 `rl.remote_hub_url`（python 侧与 run_rl 同口径）。旧 per-course 的

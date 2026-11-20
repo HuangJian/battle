@@ -98,7 +98,7 @@ class _FakePool:
 class _DeadPool(_FakePool):
     """`try_capture` 一律返回 None（池超时/熔断/握不上手）⇒ 必须回退一次性。"""
 
-    def try_capture(self, argv, timeout_sec, **kw):  # type: ignore[no-untyped-def]
+    def try_capture(self, argv, timeout_sec, **kw):
         self.tasks.append(list(argv))
         return None
 
@@ -108,7 +108,7 @@ class _RecordingPool(_FakePool):
 
     def try_capture(
         self, argv, timeout_sec, *, label='?', attempt=1, kind='eval', where=''
-    ):  # type: ignore[no-untyped-def]
+    ):
         self.tasks.append(list(argv))
         return (0.01, [])
 
@@ -155,18 +155,18 @@ def test_pool_passed_fixed_mode_and_bundle_entry() -> None:
     """池入口 = 预建 bundle 自己（payload 里没有 TS 树），mode 由池钉成 conv。"""
     seen: dict[str, object] = {}
 
-    def fake_make_pool(*a, **k):  # type: ignore[no-untyped-def]
+    def fake_make_pool(*a, **k):
         seen.update(k)
         return None
 
     orig = serve_pool.make_pool
-    serve_pool.make_pool = fake_make_pool  # type: ignore[assignment]
+    serve_pool.make_pool = fake_make_pool
     try:
         out = serve_pool.pool_for_bundle(
             'bun-stub', Path('/x/replay_converter.js'), 3, lambda _m: None
         )
     finally:
-        serve_pool.make_pool = orig  # type: ignore[assignment]
+        serve_pool.make_pool = orig
 
     assert out is None
     assert seen['entry'] == 'replay_converter.js'

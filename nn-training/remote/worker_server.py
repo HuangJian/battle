@@ -39,6 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import common.runtime
 from common import net_http
 from common.http_respond import respond_json
 from common.instance_lock import (
@@ -46,7 +47,7 @@ from common.instance_lock import (
     default_instance_lock_path,
     release_instance_lock,
 )
-from common.logutil import course_tag, tagged
+from common.logutil import course_tag, log_line, tag_logger, tagged
 from common.port_guard import ensure_port_free
 from common.protocol import (
     BLOB_INIT,
@@ -67,6 +68,9 @@ from remote.worker import _wire_start as worker_wire_start
 #: 命令行校验与 `serve_forever` 用**同一份**判据（别各写一遍）。
 from remote.worker import epoch_mult_of as epoch_mult_of
 from remote.worker import run_job
+
+#: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+_log = tag_logger("worker-serve", lambda: time)
 
 AUTH_HEADER = "Authorization"
 
@@ -327,7 +331,7 @@ def _execute_job(
     push_token: str = "",
     #: ★ 2026-10-26：训练侧放大 —— PPO 每轮更新遍数 × N（缺省 1.0 = manifest 原样）。
     epoch_mult: float = 1.0,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker-serve] {msg}", flush=True),
+    log=_log,
 ) -> None:
     """后台执行：run_job 全套（preloaded push 路径）→ 状态落表。异常进 failed（HUB 可见）。"""
     jid = manifest["job_id"]
@@ -380,6 +384,57 @@ def _execute_job(
         state.kick()  # 失败不堵队：队首立即顶上（流水线无间隙）
 
 
+def _decode_job_body(
+    raw: bytes, state: WorkerServerState
+) -> tuple[dict, tuple[dict, int] | None]:
+    """解析 `POST /job` 体 → 已校验字段；失败返回 `({}, (错误体, 状态码))`。
+
+    自 `make_worker_server` 的 do_POST 原样搬出：v2 解包 / JSON 解码 / manifest
+    normalize / payload sha 校验 / code、ts-code、blob 的 428 补传判定。解析异常
+    （ValueError / KeyError / ProtocolError）照旧上抛，由调用方的 400 兜底。
+    """
+    if raw.startswith(WIRE_JOB_MAGIC):
+        # M2 B5：v2 体（payload/code/blob 为裸二进制段）→ 旧 JSON 形状，
+        # 下游字段名不变（payload_b64/code_b64/blobs）。非法体响亮 400。
+        try:
+            body = unpack_job_v2(raw)
+        except ProtocolError as e:
+            return {}, ({"error": f"job v2 体非法: {e}"}, 400)
+    else:
+        body = json.loads(raw.decode("utf-8"))
+    manifest = normalize_manifest(body["manifest"])
+    payload_zip = base64.b64decode(body["payload_b64"])
+    if hashlib.sha256(payload_zip).hexdigest() != manifest["payload_sha256"]:
+        return {}, ({"error": "payload_sha256 不匹配——上传损坏（重传）"}, 400)
+    code_b64 = body.get("code_b64")
+    code_zip = base64.b64decode(code_b64) if code_b64 else None
+    if code_zip is None and not state.code_cached(manifest["code_sha256"]):
+        return {}, ({"error": "code-missing", "code_sha256": manifest["code_sha256"]}, 428)
+    # M3 kind=iter：TS 运行时 zip 同规（body 未带且缓存未命中 → 428 补传）。
+    ts_b64 = body.get("ts_code_b64")
+    ts_code_zip = base64.b64decode(ts_b64) if ts_b64 else None
+    _ts_sha = str(manifest.get("ts_code_sha256", "") or "")
+    if ts_code_zip is None and _ts_sha and not state.ts_code_cached(_ts_sha):
+        return {}, ({"error": "ts-code-missing", "ts_code_sha256": _ts_sha}, 428)
+    # M2 B3：opt/ref blob —— body 未带且本地缓存未命中 → 428 要求重发。
+    blobs_raw = body.get("blobs") or {}
+    blobs: dict[str, bytes] = {}
+    if isinstance(blobs_raw, dict):
+        for k, v in blobs_raw.items():
+            if isinstance(v, str) and v:
+                blobs[str(k)] = base64.b64decode(v)
+    need_blobs = missing_blobs(manifest, blobs, state.blob_cached)
+    if need_blobs:
+        return {}, ({"error": "blob-missing", "need": need_blobs}, 428)
+    return {
+        "manifest": manifest,
+        "payload_zip": payload_zip,
+        "code_zip": code_zip,
+        "ts_code_zip": ts_code_zip,
+        "blobs": blobs,
+    }, None
+
+
 def make_worker_server(
     state: WorkerServerState,
     port: int,
@@ -395,7 +450,7 @@ def make_worker_server(
     epoch_mult = epoch_mult_of(epoch_mult)
 
     def log(msg: str) -> None:
-        print(f"[{time.strftime('%H:%M:%S')}] [worker-serve] {msg}", flush=True)
+        log_line("worker-serve", msg)
 
     class Handler(BaseHTTPRequestHandler):
         def _auth_ok(self) -> bool:
@@ -497,50 +552,19 @@ def make_worker_server(
                     self._json({"error": "not found"}, 404)
                     return
                 raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-                if raw.startswith(WIRE_JOB_MAGIC):
-                    # M2 B5：v2 体（payload/code/blob 为裸二进制段）→ 旧 JSON 形状，
-                    # 下游字段名不变（payload_b64/code_b64/blobs）。非法体响亮 400。
-                    try:
-                        body = unpack_job_v2(raw)
-                    except ProtocolError as e:
-                        self._json({"error": f"job v2 体非法: {e}"}, 400)
-                        return
-                else:
-                    body = json.loads(raw.decode("utf-8"))
-                manifest = normalize_manifest(body["manifest"])
+                fields, err = _decode_job_body(raw, state)
+                if err is not None:
+                    self._json(err[0], err[1])
+                    return
+                manifest = fields["manifest"]
                 jid = manifest["job_id"]
                 # 受理/排队的这三行在主线程上打（早于 `_execute_job` 包装日志）——
                 # 同一个课程前缀，云端日志里「谁在训」从第一行就看得见。
                 _ctag = course_tag(manifest)
-                payload_zip = base64.b64decode(body["payload_b64"])
-                if hashlib.sha256(payload_zip).hexdigest() != manifest["payload_sha256"]:
-                    self._json({"error": "payload_sha256 不匹配——上传损坏（重传）"}, 400)
-                    return
-                code_b64 = body.get("code_b64")
-                code_zip = base64.b64decode(code_b64) if code_b64 else None
-                if code_zip is None and not state.code_cached(manifest["code_sha256"]):
-                    self._json(
-                        {"error": "code-missing", "code_sha256": manifest["code_sha256"]}, 428
-                    )
-                    return
-                # M3 kind=iter：TS 运行时 zip 同规（body 未带且缓存未命中 → 428 补传）。
-                ts_b64 = body.get("ts_code_b64")
-                ts_code_zip = base64.b64decode(ts_b64) if ts_b64 else None
-                _ts_sha = str(manifest.get("ts_code_sha256", "") or "")
-                if ts_code_zip is None and _ts_sha and not state.ts_code_cached(_ts_sha):
-                    self._json({"error": "ts-code-missing", "ts_code_sha256": _ts_sha}, 428)
-                    return
-                # M2 B3：opt/ref blob —— body 未带且本地缓存未命中 → 428 要求重发。
-                blobs_raw = body.get("blobs") or {}
-                blobs: dict[str, bytes] = {}
-                if isinstance(blobs_raw, dict):
-                    for k, v in blobs_raw.items():
-                        if isinstance(v, str) and v:
-                            blobs[str(k)] = base64.b64decode(v)
-                need_blobs = missing_blobs(manifest, blobs, state.blob_cached)
-                if need_blobs:
-                    self._json({"error": "blob-missing", "need": need_blobs}, 428)
-                    return
+                payload_zip = fields["payload_zip"]
+                code_zip = fields["code_zip"]
+                ts_code_zip = fields["ts_code_zip"]
+                blobs = fields["blobs"]
                 echo = self.headers.get("X-Smoke-Echo", "") == "1"
                 item = {
                     "manifest": manifest,
@@ -575,29 +599,28 @@ def make_worker_server(
                 self._json({"error": "internal"}, 500)
 
     def _starter(jid: str, item: dict) -> None:
-        threading.Thread(
-            target=_execute_job,
-            args=(
-                state,
-                item["manifest"],
-                item["payload_zip"],
-                item["code_zip"],
-                item.get("ts_code_zip"),
-                item.get("blobs"),
-                state.work_dir,
-                device,
-                torch_threads,
-                item["echo"],
-                # `threading.Thread(args=…)` 只收位置参数：缺省参数必须按形参顺序放进来
-                # （写成 `epoch_mult=…` 会让整个文件语法错误）。
-                hub_url,
-                token,
-                epoch_mult,
-                log,
-            ),
+        #: 一个 job 一条线程（`worker-job-<jid前8>-run`）：它跑完自己把状态写回 `state`。
+        common.runtime.Runtime(scope=f"worker-job-{jid[:8]}").thread(
+            _execute_job,
+            state,
+            item["manifest"],
+            item["payload_zip"],
+            item["code_zip"],
+            item.get("ts_code_zip"),
+            item.get("blobs"),
+            state.work_dir,
+            device,
+            torch_threads,
+            item["echo"],
+            # `Runtime.thread(...)` 只收位置参数：缺省参数必须按形参顺序放进来
+            # （写成 `epoch_mult=…` 会让整个文件语法错误）。
+            hub_url,
+            token,
+            epoch_mult,
+            log,
             daemon=True,
-            name=f"job-{jid[:8]}",
-        ).start()
+            name="run",
+        )
 
     state.set_starter(_starter)
     return ThreadingHTTPServer((host, port), Handler)

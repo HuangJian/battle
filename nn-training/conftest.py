@@ -24,11 +24,10 @@
 被同一条规则覆盖。实现用 `pytest_runtest_makereport` 改写 outcome —— 超预算的用例
 直接**判失败**（不是 teardown 报错），这样 `-x`、xdist、summary 全是标准语义。
 
-第二项职责（2026-09-26）：**模块级 `check()`/`FAILS` 的静默绿必须变红**。一批从
-standalone 脚本迁来的用例用 `FAILS: list[str]` + `check()` 累积失败，却只有脚本入口
-`main()` 才 `sys.exit(1 if FAILS else 0)` —— 在 pytest 下 `check()` 只追加、无人断言
-（全仓曾 `assert not FAILS` 零命中、9 个文件无 autouse 守卫）⇒ 整批用例永远绿。
-见下方 `_no_silent_check_failures`。
+第三项职责（2026-09-26 加，2026-11-19 退役）：模块级 `check()`/`FAILS` 的静默绿必须变红。
+一批从 standalone 脚本迁来的用例用 `FAILS: list[str]` + `check()` 累积失败，只有脚本入口
+`main()` 才 `sys.exit` —— 在 pytest 下 `check()` 只追加、无人断言。2026-11-19 已把 9 个
+文件全部改成真 `assert`（`python.refactor.md` §P0-8 第三项），本文件不再需要守卫夹具。
 """
 
 from __future__ import annotations
@@ -57,8 +56,6 @@ _BLAS_THREADS = os.environ.get("NN_TEST_BLAS_THREADS", "1")
 if _BLAS_THREADS != "0":
     for _blas_key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
         os.environ.setdefault(_blas_key, _BLAS_THREADS)
-
-import socketserver as _socketserver
 
 import pytest
 
@@ -159,50 +156,6 @@ def pytest_runtest_makereport(item, call):
             f"{item.nodeid} 耗时 {secs:.2f}s 超过警告阈值 {warn:g}s",
             stacklevel=1,
         )
-
-
-# ── 全局：HTTP 测试服务的「关服」延迟（2026-09-29，§43；与 §14 同族）────────────────
-# `BaseServer.serve_forever()` 的 `poll_interval` 缺省 **0.5s**，而 `shutdown()` 会
-# **无条件等** `__is_shut_down`（没有超时）⇒ 「关服」最坏要等一整个轮询周期。仓库里约
-# 40 处 `threading.Thread(target=srv.serve_forever, daemon=True)` 因此每条用例白付
-# 0~0.5s：实测 `test_hub_push_dispatch::test_push_workers_admin_endpoint` 的 1.09s 里
-# **1.005s 全在两次 `socketserver.shutdown()`**（`--durations` 只让人以为「这个用例很慢」）。
-# 把默认轮询周期收到 10ms：只改「服务循环多久醒一次」，测试的判据全都挂在请求/事件上，
-# 没人依赖 0.5s 的粒度；关服延迟从 ~0.25s 降到 ~5ms。显式传 `poll_interval=` 的调用点
-# 不受影响（只换默认值，不改签名语义）。
-_FAST_POLL_SEC = 0.01
-_orig_serve_forever = _socketserver.BaseServer.serve_forever
-
-
-def _serve_forever_fast_poll(self, poll_interval: float = _FAST_POLL_SEC) -> None:
-    _orig_serve_forever(self, poll_interval)
-
-
-# mypy 的 method-assign 是针对「改标准库方法」的通用警告：这里改的是**测试进程内**的默认
-# 轮询粒度，包装器签名与语义同原函数（仍然转发 `poll_interval`），故收敛到这一行。
-_socketserver.BaseServer.serve_forever = _serve_forever_fast_poll  # type: ignore[method-assign]
-
-
-@pytest.fixture(autouse=True)
-def _no_silent_check_failures(request):
-    """模块级 `check()`/`FAILS` 记下的失败必须让 pytest 变红（不许静默通过）。
-
-    历史坑：`check()` 只往模块级 `FAILS` 追加，只有显式写了 `f0 = len(FAILS) … raise`
-    的用例才会红（`e2e/test_run_rl.py` 先加过模块级 `_fail_loudly` 并记录了那次事故）；
-    其余 9 个文件的 `check()` 在 pytest 下是**空转**（`assert not FAILS` 全仓零命中），
-    其中 `test_rl_model` 是 0 真断言 / 10 个 check。把义务交给框架后，新增用例不可能再忘，
-    也不需要每个文件各抄一份 fixture。
-    standalone 入口（各文件 `main()`）不走 fixture，末尾的 `if FAILS: SystemExit(1)` 兜底。
-    """
-    fails = getattr(request.module, "FAILS", None)
-    if not isinstance(fails, list):
-        yield
-        return
-    before = len(fails)
-    yield
-    new = fails[before:]
-    if new:
-        raise AssertionError("check() 静默失败（模块级 FAILS 增长）: " + "; ".join(map(str, new)))
 
 
 @pytest.hookimpl(trylast=True)

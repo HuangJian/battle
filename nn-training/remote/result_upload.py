@@ -42,6 +42,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from common import runtime
+
 #: 回传模式（CLI `--result-upload` 同字面量域）：
 #: · `process` = 独立子进程（PPO worker 的传输隔离面）；
 #: · `async`   = 进程内后台线程（缺省；P2.5 的形状）；
@@ -130,7 +132,7 @@ class Outcome:
         return not self.error
 
 
-class ResultUploader:
+class ResultUploader(runtime.ThreadOwner):
     """后台回传队列：`submit()` 立刻返回，POST 在专用线程里做（叠在下一份 job 上）。
 
     `mode="sync"` 时 `submit()` 就是**同步**发完再返回（逐字等价于改造前的行为）。
@@ -151,6 +153,8 @@ class ResultUploader:
         self.mode = "async" if mode == "process" else (
             mode if mode in ("async", "sync") else RESULT_UPLOAD_MODE_DEFAULT
         )
+        #: 上传线程归这里（`result-upload-run`）：本类可降级到同步腿，线程只在 async 模式出现。
+        self._rt = runtime.Runtime(scope="result-upload")
         self._upload = upload
         self._drain_timeout = float(drain_timeout)
         self._enqueue_timeout = float(enqueue_timeout)
@@ -237,8 +241,7 @@ class ResultUploader:
 
     def _ensure_thread(self) -> None:
         if self._thread is None:
-            self._thread = threading.Thread(target=self._run, daemon=True, name="result-upload")
-            self._thread.start()
+            self._thread = self._rt.thread(self._run, daemon=True, name="run")
 
     def _run(self) -> None:
         while True:

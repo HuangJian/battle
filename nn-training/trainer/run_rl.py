@@ -39,21 +39,11 @@ from common.cli import run_main
 from common.instance_lock import acquire_instance_lock, release_instance_lock
 from common.log import Tee as _Tee
 from common.log import log
+from common.paths import REPO_ROOT
 from common.pid_probe import pid_alive as _pid_alive_impl
 from common.platform_utils import force_utf8_stdio
-from trainer.dispatch_queue import (  # noqa: F401 — run_rollout_queue re-exported for tests
-    REPO_ROOT,
-    run_rollout_queue,
-)
 from worker.cli import build_argparser
 from worker.modes import apply_mode_flags, merged_mode_args, resolve_mode
-from worker.resume import (
-    completed_pairs,  # noqa: F401 — re-exported for tests
-    last_completed_iter,  # noqa: F401 — re-exported for tests
-    last_rotate_seed,  # noqa: F401 — 轮换 seed 的唯一实现（预采腿用它；e2e/test_run_rl 直读）
-    peak_entropy,  # noqa: F401 — F4 ENT 相对崩塌基线回读（§339），re-exported for tests
-    resumed_manifests,  # noqa: F401 — re-exported for tests
-)
 from worker.rl_config_schema import check_rl_config
 from worker.schedule import kickstart_coef
 from worker.train.loop_util import course_key_from_path
@@ -82,7 +72,8 @@ def _setup_log_redirect(args) -> None:
         try:
             p = Path(args.out_log)
             p.parent.mkdir(parents=True, exist_ok=True)
-            sys.stdout = _Tee(sys.stdout, open(p, "a", encoding="utf-8"))
+            # 进程级 stdout 重定向：句柄随进程退出关闭，不能就地 with
+            sys.stdout = _Tee(sys.stdout, open(p, "a", encoding="utf-8"))  # noqa: SIM115
             log(f"[launch] stdout -> {p} (tee console+file, append)")
         except Exception as e:
             log(f"WARN cannot redirect stdout to {args.out_log}: {e}")
@@ -90,7 +81,8 @@ def _setup_log_redirect(args) -> None:
         try:
             pe = Path(args.err_log)
             pe.parent.mkdir(parents=True, exist_ok=True)
-            sys.stderr = _Tee(sys.stderr, open(pe, "a", encoding="utf-8"))
+            # 同上：进程级 stderr 重定向，句柄存活到进程退出
+            sys.stderr = _Tee(sys.stderr, open(pe, "a", encoding="utf-8"))  # noqa: SIM115
             log(f"[launch] stderr -> {pe} (tee console+file, append)")
         except Exception as e:
             log(f"WARN cannot redirect stderr to {args.err_log}: {e}")
@@ -212,7 +204,7 @@ def main() -> None:
     # 2026-09-30（刀 7）：入口从 nn-training/ 顶层搬进 trainer/ ⇒ 上溯层数 2 → 3
     # （仓根仍是父目录的父目录的父目录）。层数写错 = cwd 停在 nn-training/ ⇒ 上面那些
     # tmp/ 默认路径全部错位。
-    os.chdir(str(Path(__file__).resolve().parents[2]))
+    os.chdir(str(REPO_ROOT))
     ap, args, course, _rl_src, _rl_args = _parse(sys.argv[1:])
     if getattr(args, "echo_config", False):
         # 纯 dump 面（对拍 oracle 读它的 stdout）：**在分流之前**短路——`--echo-config`

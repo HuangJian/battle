@@ -41,32 +41,39 @@ if _ilu.find_spec("common") is None:
     _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent.parent))
 
 import os
-import time
+from typing import cast
 
 import numpy as np
 import numpy.typing as npt
 import torch
 import torch.nn.functional as F
 
-from common.cli import house_parser, run_main
+from common.cli import run_main
+from common.contracts import GOAL_EPISODE_FIELDS, GOAL_EPISODE_OPTIONAL, GoalEpisode
 from common.schema import BOARD
 from worker.models.goal_net import GoalNet, export_goal_weights, load_goal_weights
 from worker.ppo._episode import episode_from_shard
-from worker.ppo.common import (
-    _ppo_load,
-    _ppo_save,
-    approx_kl_est,
-    chunk_episodes,
+from worker.ppo.cli import CliSpec
+from worker.ppo.cli import run as run_cli
+
+# `_ppo_load` 是 `worker/backend.py::RolloutBackend` 的成员（`trainer/stream.py` 调
+# `backend._ppo_load`）—— 更新循环搬去 `worker/ppo/loop.py` 后本模块不再直接用它，
+# 但这个名字必须留在模块命名空间里。
+from worker.ppo.common import _ppo_load as _ppo_load  # RolloutBackend 契约（见上）
+from worker.ppo.common import log, masked_logsoftmax
+from worker.ppo.loop import HeadSpec, LossTerms, run_ppo
+from worker.ppo.np_core import (
+    # `chunk_episodes` 是 `worker/backend.py::RolloutBackend` 的成员（`trainer/stream.py` 调 `backend.chunk_episodes`）；
+    # 本模块不再直接调用它，但这个名字必须留在模块命名空间里。
+    chunk_episodes as chunk_episodes,
+)
+from worker.ppo.np_core import (
     compute_gae,
     discover_shards,
     load_episodes_common,
     load_shard_fields,
-    log,
-    masked_logsoftmax,
-    optimizer_step,
-    sync_scalars,
 )
-from worker.ppo.trainer import tensored_chunks
+from worker.ppo.rng import PPORng
 
 # ---- hyper-params（与 ppo_intent 同源；γ 口径 §12.1 γ_step = 0.995^dt）----
 GAMMA_TICK = 0.995
@@ -184,36 +191,41 @@ def compute_gae_variable(
     return compute_gae(rewards, values, dones, gamma_tick, lam, dt)
 
 
-def load_episode_from_shard(dirpath: str) -> dict | None:
-    """流式 backend 接口（trainer/stream.py）：goal shard → 可训练 episode（adv/ret 未归一）。"""
-    return episode_from_shard(
+def load_episode_from_shard(
+    dirpath: str, gamma: float = GAMMA_TICK, lam: float = LAM
+) -> GoalEpisode | None:
+    """流式 backend 接口（trainer/stream.py）：goal shard → 可训练 episode（adv/ret 未归一）。
+
+    `gamma` / `lam` **必须收**：stream.py 恒传 `(shard, args.gamma, args.lam)`，而本函数以前
+    只收 `dirpath` ⇒ 逐 shard 装载全类型 TypeError，被 `except Exception` 吞成一行
+    `skip bad shard`（不崩、也不训）。缺省值 = 模块常量（数值逐字节不变）。
+    """
+    ep = episode_from_shard(
         load_goal_shard(dirpath),
-        lambda d: compute_gae_variable(d["reward"], d["value"], d["done"], d["dt"]),
-        fields=(
-            "obs",
-            "scalars",
-            "inject",
-            "a_goal",
-            "lp_goal",
-            "value",
-            "adv",  # 占位：GAE 现算
-            "ret",
-            "goal_mask",
-            "dt",
-            "engage",
+        lambda d: compute_gae_variable(
+            d["reward"], d["value"], d["done"], d["dt"], gamma_tick=gamma, lam=lam
         ),
-        optional=("engage_label",),
+        fields=GOAL_EPISODE_FIELDS,
+        optional=GOAL_EPISODE_OPTIONAL,
     )
+    # 键集与序就是上面那份契约（fields 从它派生）⇒ cast 只是把骨架的动态 dict 交回静态类型。
+    # 带标注的盘上多一列 `engage_label`（`GoalEpisodeLabeled` 是子型）。
+    return None if ep is None else cast(GoalEpisode, ep)
 
 
-def load_episodes_goal(data_root: str, normalize_adv: bool = True) -> list[dict]:
+def load_episodes_goal(
+    data_root: str, gamma: float = GAMMA_TICK, lam: float = LAM, normalize_adv: bool = True
+) -> list[dict]:
+    """全盘回退装载（stream.py 无新结算时调它，**同样带** gamma/lam）。"""
     return load_episodes_common(
         data_root,
         label="ppo_goal",
         shard_kind="goal RL",
         need_files=("reward.npy", "obs.npy", "dt.npy", "goal_mask.npy"),
         shard_loader=load_goal_shard,
-        gae=lambda d: compute_gae_variable(d["reward"], d["value"], d["done"], d["dt"]),
+        gae=lambda d: compute_gae_variable(
+            d["reward"], d["value"], d["done"], d["dt"], gamma_tick=gamma, lam=lam
+        ),
         gae_name="variable-step GAE",
         normalize_adv=normalize_adv,
         normalize_ret=True,
@@ -221,6 +233,23 @@ def load_episodes_goal(data_root: str, normalize_adv: bool = True) -> list[dict]
 
 
 # ---------------- PPO update ----------------
+#: 名字面：goal 的列名 + 日志前缀 + `bc` 统计列（schema 兼容占位）。
+_SPEC = HeadSpec(
+    tag="ppo_goal",
+    a_key="a_goal",
+    lp_key="lp_goal",
+    mask_key="goal_mask",
+    stats_with_bc=True,
+)
+
+
+def _engage_ce(aux_logits, e: dict) -> torch.Tensor | None:
+    """engage 辅助 CE（仅 shard 带 `engage_label` 的离线标注语料；on-policy 不训）。"""
+    if "engage_label" not in e:
+        return None
+    return F.cross_entropy(aux_logits, e["engage_label"])
+
+
 def ppo_update_goal(
     model,
     opt,
@@ -234,9 +263,14 @@ def ppo_update_goal(
     ref_model: torch.nn.Module | None = None,
     kl_coef: float = 0.0,
     on_epoch_done=None,
+    rng: PPORng | None = None,
 ):
     """chunks: goal 承诺步 minibatch dicts（obs/scalars/inject/a_goal/lp_goal/adv/ret/goal_mask
     [+ engage_label]）。
+
+    **顺序在 `worker/ppo/loop.py::run_ppo`**（B8 ④：与 intent 曾各写一份同一顺序）；这里只
+    给两份配置：`_SPEC`（列名/日志前缀/bc 列）+ `LossTerms`（前向 = `policy_logprobs`，
+    辅助项 = engage CE）。数值逐位不变。
 
     on_epoch_done(ep_done, model)：每个 epoch 完成后同步回调（与 ppo / ppo_intent 逐
     行对齐）——双缓冲提前预采的触发点：stream 在 epoch3 完成时把 θ_{N,e3} 存盘 spawn
@@ -249,250 +283,55 @@ def ppo_update_goal(
     kickstarting：ref_model = goal-BC 冻结快照，kl_coef·KL(π_curr‖π_ref)，系数外置退火。
     target_kl 早停同 ppo_intent。
     """
-    if not chunks:
-        return {
-            "policy": 0.0,
-            "value": 0.0,
-            "entropy": 0.0,
-            "kl": 0.0,
-            "bc": 0.0,
-            "gnorm": 0.0,
-            "mean_ret": 0.0,
-            "early_stopped": False,
-        }
-    # P1-5（2026-09-02）：**不在 update 内重播种 RNG**。旧实现每次 update 调
-    # np.random.seed(seed) → 流式模式每波调用 update → 每波 minibatch permutation
-    # 序列逐字节相同（叠加连续切片的强相关性，等于每波用同一顺序消化高度相关语料）。
-    # RNG 由调用方（CLI main / run_rl 主循环）播种一次；seed 参数保留供签名兼容。
-    model.train()
-    clip = CLIP_EPS
-    stats: list[dict[str, float]] = []
-    tensored = tensored_chunks(chunks, device)
-    # `[ppo_goal] update start: …` 行已退役（2026-10-06，用户指令「删除云机 worker 刷屏 log」；
-    # 与 engine/intent 同族，一次删干净）：chunk/epoch 数与配置同源，每 job 复述一次。
-    t0 = time.time()
-    last_hb = t0
-    start_epoch = 0
-    if ckpt_path:
-        start_epoch = _ppo_load(ckpt_path, model, opt)
-        if start_epoch:
-            log(f"[ppo_goal] resume PPO from checkpoint: epoch {start_epoch}/{epochs} done")
-
-    early_stopped = False
-    for ep in range(start_epoch, epochs):
-        warmup = ep < value_warmup_epochs
-        for name, p in model.named_parameters():
-            p.requires_grad = (not warmup) or name.startswith("value_head.")
-        perm = np.random.permutation(len(tensored))
-        n_ep_start = len(stats)
-        for j, i in enumerate(perm):
-            e = tensored[int(i)]
-            obs = e["obs"]
-            sc = e["scalars"]
-            inj = e["inject"]
-            a = e["a_goal"]
-            lp_old = e["lp_goal"]
-            adv = e["adv"]
-            ret = e["ret"]
-            mask = e["goal_mask"]
-
-            lp_new, engage_log, val = policy_logprobs(model, obs, sc, inj, mask)
-            lp_new_a = lp_new.gather(1, a.unsqueeze(1)).squeeze(1)
-
-            value_loss = F.mse_loss(val.squeeze(-1), ret)
-            entropy = -(lp_new.exp() * lp_new).sum(dim=-1).mean()
-
-            if warmup:
-                policy_loss = torch.zeros((), device=device)
-                loss = VF_COEF * value_loss
-            else:
-                ratio = torch.exp(lp_new_a - lp_old)
-                surr1 = ratio * adv
-                surr2 = torch.clamp(ratio, 1.0 - clip, 1.0 + clip) * adv
-                policy_loss = -torch.min(surr1, surr2).mean()
-                loss = policy_loss + VF_COEF * value_loss - ENT_COEF * entropy
-                # engage 辅助 CE（仅离线标注语料带 engage_label 时；on-policy 不训）
-                if "engage_label" in e:
-                    engage_loss = F.cross_entropy(engage_log, e["engage_label"])
-                    loss = loss + engage_loss
-                if ref_model is not None and kl_coef > 0:
-                    with torch.no_grad():
-                        r_lp, _re, _rv = policy_logprobs(ref_model, obs, sc, inj, mask)
-                    kl_to_ref = (lp_new.exp() * (lp_new - r_lp)).sum(dim=-1).mean()
-                    loss = loss + kl_coef * kl_to_ref
-
-            opt.zero_grad()
-            loss.backward()
-            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
-            optimizer_step(opt, device)
-
-            with torch.no_grad():
-                # warmup 期 kl 恒 0（同 intent）；一次同步取全部标量。
-                kl_t = (
-                    torch.zeros((), device=device)
-                    if warmup
-                    else approx_kl_est(lp_old, lp_new_a)
-                )
-                m = sync_scalars(
-                    {
-                        "policy": policy_loss,
-                        "value": value_loss,
-                        "entropy": entropy,
-                        "kl": kl_t,
-                        "mean_ret": ret.mean(),
-                        "gnorm": gn,
-                    }
-                )
-            stats.append(
-                {
-                    "policy": m["policy"],
-                    "value": m["value"],
-                    "entropy": m["entropy"],
-                    "kl": m["kl"],
-                    "bc": 0.0,  # bc 软目标已清理（P2-6a）；保留键保 schema 兼容
-                    "mean_ret": m["mean_ret"],
-                    "gnorm": m["gnorm"],
-                }
-            )
-            now = time.time()
-            if now - last_hb >= HB_SEC:
-                last_hb = now
-                recent = stats[-32:]
-                n_r = len(recent)
-                log(
-                    f"[ppo_goal] ep {ep + 1}/{epochs}{'[warmup]' if warmup else ''} "
-                    f"chunk {j + 1}/{len(tensored)} elapsed={now - t0:.0f}s "
-                    f"kl={sum(s['kl'] for s in recent) / n_r:.4f} "
-                    f"entropy={sum(s['entropy'] for s in recent) / n_r:.4f} "
-                    f"policy={sum(s['policy'] for s in recent) / n_r:.4f} "
-                    f"value={sum(s['value'] for s in recent) / n_r:.4f}"
-                )
-        if ckpt_path:
-            _ppo_save(ckpt_path, model, opt, ep + 1)
-        if on_epoch_done is not None:
-            on_epoch_done(ep + 1, model)
-        ep_stats = stats[n_ep_start:]
-        n_e = max(1, len(ep_stats))
-        ep_kl = sum(s["kl"] for s in ep_stats) / n_e
-        log(
-            f"[ppo_goal] epoch {ep + 1}/{epochs}{'[warmup]' if warmup else ''} done "
-            f"({time.time() - t0:.0f}s total): kl={ep_kl:.4f} "
-            f"entropy={sum(s['entropy'] for s in ep_stats) / n_e:.4f} "
-            f"policy={sum(s['policy'] for s in ep_stats) / n_e:.4f} "
-            f"value={sum(s['value'] for s in ep_stats) / n_e:.4f}"
-        )
-        if not warmup and ep_kl > target_kl:
-            log(
-                f"[ppo_goal] target_kl={target_kl} exceeded (epoch {ep + 1} kl={ep_kl:.4f}) "
-                f"— early stopping remaining epochs"
-            )
-            early_stopped = True
-            break
-
-    n = len(stats)
-    agg = (
-        {k: sum(s[k] for s in stats) / n for k in stats[0]}
-        if n
-        else {
-            "policy": 0.0,
-            "value": 0.0,
-            "entropy": 0.0,
-            "kl": 0.0,
-            "bc": 0.0,
-            "gnorm": 0.0,
-            "mean_ret": 0.0,
-        }
+    return run_ppo(
+        model,
+        opt,
+        chunks,
+        epochs,
+        device,
+        spec=_SPEC,
+        terms=LossTerms(forward=policy_logprobs, ent_coef=ENT_COEF, aux=_engage_ce),
+        ckpt_path=ckpt_path,
+        target_kl=target_kl,
+        seed=seed,
+        value_warmup_epochs=value_warmup_epochs,
+        ref_model=ref_model,
+        kl_coef=kl_coef,
+        on_epoch_done=on_epoch_done,
+        rng=rng,
     )
-    agg["early_stopped"] = early_stopped
-    return agg
-
 
 # ---- stream backend 接口别名（trainer/stream.py 的 backend.update / load_episodes / _ppo_load）----
 update = ppo_update_goal
 load_episodes = load_episodes_goal
 
 
-def main():
-    ap = house_parser()
-    ap.add_argument("--init-from", type=str, default=None, help="goal-BC weights (init mode)")
-    ap.add_argument("--resume", type=str, default=None, help="RL goal weights (update mode)")
-    ap.add_argument("--data", type=str, default=None, help="goal trajectory shard root (update)")
-    ap.add_argument("--out", type=str, required=True)
-    ap.add_argument("--epochs", type=int, default=4)
-    ap.add_argument("--mb", type=int, default=512)
-    ap.add_argument("--lr", type=float, default=LR)
-    ap.add_argument("--value-warmup-epochs", type=int, default=0)
-    ap.add_argument("--kl-coef", type=float, default=0.0)
-    ap.add_argument(
-        "--ref-weights",
-        type=str,
-        default=None,
-        help="kickstarting 参考策略权重（goal-BC 冻结快照；缺省 = 当前权重）",
-    )
-    ap.add_argument("--device", type=str, default="cpu")
-    ap.add_argument("--seed", type=int, default=7)
-    ap.add_argument("--threads", type=int, default=8)
-    args = ap.parse_args()
-
-    np.random.seed(args.seed)
-    if args.threads > 0:
-        torch.set_num_threads(args.threads)
-    try:
-        torch.set_flush_denormal(True)
-    except (RuntimeError, AttributeError):
-        pass
-    device = torch.device(args.device)
-
-    if args.init_from and not args.data:
-        model = build_rl_net(args.init_from)
-        load_goal_weights(model, args.init_from)  # 主干+goal/engage 头迁移；value 头保持随机
-        export_goal_weights(model, args.out)
-        log(f"[ppo_goal] init RL weights (goal-BC + random value) -> {args.out}")
-        log(f"[ppo_goal] params={sum(int(p.numel()) for p in model.parameters())}")
-        return
-
-    assert args.resume and args.data, "--resume and --data required in update mode"
-    model = build_rl_net(args.resume)
-    load_goal_weights(model, args.resume)
-    model.to(device)
-
-    episodes = load_episodes_goal(args.data)
-    total_steps = sum(e["obs"].shape[0] for e in episodes)
-    log(f"[ppo_goal] total goal-steps={total_steps}")
-
-    chunks = chunk_episodes(episodes, args.mb)
-    log(f"[ppo_goal] {len(episodes)} episodes -> {len(chunks)} minibatch chunks (mb={args.mb})")
-
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-    ref_model = None
-    if args.kl_coef > 0:
-        ref_src = args.ref_weights or args.resume
-        ref_model = build_rl_net(ref_src)
-        load_goal_weights(ref_model, ref_src)
-        for p in ref_model.parameters():
-            p.requires_grad = False
-        ref_model.eval()
-        log(f"[ppo_goal] kickstarting: ref={ref_src} kl_coef={args.kl_coef}")
-    agg = ppo_update_goal(
-        model,
-        opt,
-        chunks,
-        args.epochs,
-        device,
-        seed=args.seed,
-        value_warmup_epochs=args.value_warmup_epochs,
-        ref_model=ref_model,
-        kl_coef=args.kl_coef,
+#: CLI 面：顺序与文案在 `worker/ppo/cli.py`；这里只绑 goal 的五件事与两句差异。
+def _spec() -> CliSpec:
+    """goal 的 CLI 配置（**每次入口调用时**现取模块全局 ⇒ 打桩面不被冻结）。"""
+    return CliSpec(
+        tag="ppo_goal",
+        help_init="goal-BC weights (init mode)",
+        help_resume="RL goal weights (update mode)",
+        help_data="goal trajectory shard root (update)",
+        help_warmup=None,
+        help_kl=None,
+        help_ref="kickstarting 参考策略权重（goal-BC 冻结快照；缺省 = 当前权重）",
+        step_word="goal-steps",
+        init_desc="goal-BC + random value",
+        with_bc=True,
+        lr=LR,
+        build_net=build_rl_net,
+        load_weights=load_goal_weights,
+        export_weights=export_goal_weights,
+        load_episodes=load_episodes_goal,
+        update=ppo_update_goal,
     )
 
-    model.to("cpu")
-    export_goal_weights(model, args.out)
-    log(
-        f"[ppo_goal] update done epochs={args.epochs} "
-        f"policy={agg['policy']:.4f} value={agg['value']:.4f} "
-        f"entropy={agg['entropy']:.4f} kl={agg['kl']:.5f} bc={agg['bc']:.4f} "
-        f"early_stopped={agg['early_stopped']} mean_ret={agg['mean_ret']:.3f} -> {args.out}"
-    )
+
+def main() -> None:
+    """goal CLI（顺序与文案在 `worker/ppo/cli.py`；本函数只绑定 goal 的配置）。"""
+    run_cli(_spec())
 
 
 if __name__ == "__main__":

@@ -50,6 +50,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from common import runtime
 from remote.child_proc import join_all, pump_lines, reap_child, repo_root, spawn_module
 from remote.prefetch import (
     PREFETCH_BUDGET_BYTES_DEFAULT,
@@ -97,6 +98,8 @@ class PayloadProcess:
         worker_module: str = PAYLOAD_WORKER_MODULE,
         spawn: Callable[[list[str]], subprocess.Popen] | None = None,
     ) -> None:
+        #: 读线程归这里（`payload-proc-out`）：下行腿独立成进程后，它是父侧唯一的长驻线程。
+        self._rt = runtime.Runtime(scope="payload-proc")
         self._work_dir = str(work_dir)
         self._budget_bytes = int(budget_bytes)
         self._staged_max = int(staged_max)
@@ -137,6 +140,11 @@ class PayloadProcess:
         """下行腿此刻是否真在子进程里（降级后 False ⇒ `job_round` 走旧填充线程）。"""
         return self._local is None
 
+    @property
+    def local_store(self) -> PrefetchStore | None:
+        """降级后的进程内实现（未降级 → None；`fills_out_of_process` 只回答真假）。"""
+        return self._local
+
     def start(self) -> None:
         """拉起子进程并完成 `init` 握手；**起不来是预期形态**（在飞的代码树里没有它）。"""
         if self._proc is not None or self._local is not None:
@@ -147,8 +155,7 @@ class PayloadProcess:
             return
         proc = self._proc
         self.pid = proc.pid if proc is not None else None
-        self._reader = threading.Thread(target=self._read_loop, name="payload-out", daemon=True)
-        self._reader.start()
+        self._reader = self._rt.thread(self._read_loop, name="out", daemon=True)
         # `init` 既是建 store 也是握手（`boot ok` 只是一行给人读的日志）：应答到了 = 依赖链
         # 真能 import + `prefetch/` 的孤儿清扫跑完了。
         task = (
@@ -451,7 +458,7 @@ class PayloadProcess:
                 return
             self._log(s)
 
-        pump_lines(proc.stdout if proc is not None else None, _on_line)
+        pump_lines(proc.stdout if proc is not None else None, _on_line, log=self._log)
         # EOF：子进程没了。收线过程中（`_closed`）由 `close()` 负责，不在这里降级。
         if not self._closed and self._local is None:
             code = None if proc is None else proc.poll()

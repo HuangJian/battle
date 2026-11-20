@@ -75,7 +75,7 @@ def _wait_gone(n: int = 1, *, timeout: float = 5.0) -> bool:
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if int(HubHandler._client_gone.get("n", 0)) >= n:
+        if int(HubHandler.state.client_gone.get("n", 0)) >= n:
             return True
         # sleep-ok: 轮询步长（等的是「计数已涨」这个谓词，兜底只挡挂起）
         time.sleep(0.02)
@@ -98,7 +98,7 @@ def test_client_gone_is_warn_not_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """调用方等不及先走了 ⇒ 一行 WARN（无 ERROR），且 hub 照常服务下一条请求。"""
-    monkeypatch.setattr(HubHandler, "_client_gone", {"n": 0})
+    monkeypatch.setattr(HubHandler.state, "client_gone", {"n": 0})
     lines = _record_logs(monkeypatch)
     srv = _boot(tmp_path)
     port = int(srv.server_address[1])
@@ -127,10 +127,10 @@ def test_client_gone_is_warn_not_error(
     assert waiting.wait(5.0), "hub 没进入「等回执」状态（relay 队列里没看到这条 call）"
     _hang_up(sock)
     t.join(5.0)
-    assert _wait_gone(1), f"没走到「对端先走」分支：{HubHandler._client_gone} / {lines}"
+    assert _wait_gone(1), f"没走到「对端先走」分支：{HubHandler.state.client_gone} / {lines}"
 
     # 结构面：那一族异常被**单独计数**了（不是走 `except Exception`），且只记了一次
-    assert HubHandler._client_gone["n"] == 1, HubHandler._client_gone
+    assert HubHandler.state.client_gone["n"] == 1, HubHandler.state.client_gone
     # 日志面：只有一行 WARN，且点名了路径与累计次数
     # （`send_response` 自己会打一行请求行，这里只看非请求行）
     notes = [ln for ln in lines if not ln.startswith('"')]
@@ -151,7 +151,7 @@ def test_real_error_still_logs_error_and_500(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """反证：真异常不许被 `except ConnectionError` 顺手咽掉 —— 仍要 ERROR + 500。"""
-    monkeypatch.setattr(HubHandler, "_client_gone", {"n": 0})
+    monkeypatch.setattr(HubHandler.state, "client_gone", {"n": 0})
     lines = _record_logs(monkeypatch)
     srv = _boot(tmp_path)
 
@@ -176,12 +176,12 @@ def test_real_error_still_logs_error_and_500(
     errors = [ln for ln in lines if ln.startswith("ERROR")]
     assert errors == ["ERROR /relay/n1/v1/ping: boom-for-test"], lines
     # 真异常**不进**「对端先走」那个计数 —— 两件事不能被合成一件事
-    assert HubHandler._client_gone["n"] == 0, HubHandler._client_gone
+    assert HubHandler.state.client_gone["n"] == 0, HubHandler.state.client_gone
 
 
 def test_warn_is_throttled_to_first_and_every_nth(monkeypatch: pytest.MonkeyPatch) -> None:
     """首条一定打（当场可见），此后每 N 条一条（15 连发不会刷 15 行红号）。"""
-    monkeypatch.setattr(HubHandler, "_client_gone", {"n": 0})
+    monkeypatch.setattr(HubHandler.state, "client_gone", {"n": 0})
     err = ConnectionAbortedError(10053, "An established connection was aborted")
     notes = [
         HubHandler.note_client_gone("/relay/dsw/v1/result", err)
@@ -193,4 +193,4 @@ def test_warn_is_throttled_to_first_and_every_nth(monkeypatch: pytest.MonkeyPatc
     assert kept[-1][1].startswith("WARN /relay/dsw/v1/result: 对端提前断开（累计 20 次"), kept[-1][
         1
     ]
-    assert HubHandler._client_gone["n"] == CLIENT_GONE_LOG_EVERY * 2
+    assert HubHandler.state.client_gone["n"] == CLIENT_GONE_LOG_EVERY * 2

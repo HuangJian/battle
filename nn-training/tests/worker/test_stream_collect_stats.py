@@ -47,7 +47,7 @@ def test_stage_stats_is_local_leg_shaped() -> None:
         assert cell["collected"] == 0
         assert cell["games"] == 0
         assert cell["est_s"] == col.ests[stage]
-        assert cell["cap_games"] == col._plan_caps[stage]
+        assert cell["cap_games"] == col.plan_cap(stage)
     # 一局都没采 ⇒ 每关都缺、halted=False
     assert stats["halted"] is False
     assert set(stats["shortfall"]) == {str(s) for s in STAGES}

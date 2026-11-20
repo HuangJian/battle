@@ -22,6 +22,7 @@ from urllib.request import urlopen
 
 from common.http_respond import respond_json
 from hub.http_face import HubHandler
+from tests.helpers.http_server import serve_fast
 
 
 class _Recorder:
@@ -80,7 +81,7 @@ def test_respond_json_over_a_real_socket() -> None:
             return
 
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _H)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     try:
         with urlopen(f"http://127.0.0.1:{srv.server_port}/x", timeout=5) as resp:
             assert resp.status == 201

@@ -142,7 +142,7 @@ def test_inactive_quota_writes_nothing(tmp_path: Path) -> None:
         )
         == {}
     )
-    assert run.seen == []  # type: ignore[attr-defined]
+    assert run.seen == []
     assert not root.exists()
 
 
@@ -183,9 +183,9 @@ def test_waves_exclude_ordinary_and_report_bins(tmp_path: Path) -> None:
         ests={0: 10, 1: 10},
         width=2,
     )
-    for wave in run.seen:  # type: ignore[attr-defined]
+    for wave in run.seen:
         assert set(wave).isdisjoint(set(ordinary)), "greedy 与普通采样撞了 (stage, seed)"
-    ivals = [p for wave in run.seen for p in wave]  # type: ignore[attr-defined]
+    ivals = [p for wave in run.seen for p in wave]
     assert len(ivals) == len(set(ivals)), "同一轮内 greedy 抽了重复的 (stage, seed)"
     stats = out["greedy_quota_stats"]
     assert stats["bins"]["win"] > 0

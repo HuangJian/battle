@@ -1,4 +1,4 @@
-"""`worker/ppo/engine.py::_profile_steps` —— `PPO_PROFILE` 开关的纯判定（2026-10-21）。
+"""`worker/ppo/engine.py::profile_steps` —— `PPO_PROFILE` 开关的纯判定（2026-10-21）。
 
 为什么单独立一条：PPO 步耗卡在 0.49s/step 时，`PPO_CUDA_DIAG` 只给 median/p95，分不清
 「GPU 真在算」还是「主机在排队」；`PPO_PROFILE=1` 是那条分岔的读数口。判定写成纯函数
@@ -24,33 +24,33 @@ def _env(monkeypatch: pytest.MonkeyPatch, **kw: str) -> None:
 
 def test_default_off_on_every_device(monkeypatch: pytest.MonkeyPatch) -> None:
     _env(monkeypatch)
-    assert eng._profile_steps("cuda") == 0
-    assert eng._profile_steps("cuda:0") == 0
-    assert eng._profile_steps("cpu") == 0
+    assert eng.profile_steps("cuda") == 0
+    assert eng.profile_steps("cuda:0") == 0
+    assert eng.profile_steps("cpu") == 0
 
 
 def test_enabled_only_on_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
     """CPU / XLA 上开也恒 0：CPU 没有 CUDA 活动列，XLA 的惰性图/profile 语义不同。"""
     _env(monkeypatch, PPO_PROFILE="1")
-    assert eng._profile_steps("cpu") == 0
-    assert eng._profile_steps("xla:0") == 0
-    assert eng._profile_steps("cuda") == 10
-    assert eng._profile_steps("cuda:1") == 10
+    assert eng.profile_steps("cpu") == 0
+    assert eng.profile_steps("xla:0") == 0
+    assert eng.profile_steps("cuda") == 10
+    assert eng.profile_steps("cuda:1") == 10
 
 
 def test_steps_env_is_clamped(monkeypatch: pytest.MonkeyPatch) -> None:
     _env(monkeypatch, PPO_PROFILE="1", PPO_PROFILE_STEPS="3")
-    assert eng._profile_steps("cuda") == 3
+    assert eng.profile_steps("cuda") == 3
     _env(monkeypatch, PPO_PROFILE="1", PPO_PROFILE_STEPS="0")
-    assert eng._profile_steps("cuda") == 1
+    assert eng.profile_steps("cuda") == 1
     _env(monkeypatch, PPO_PROFILE="1", PPO_PROFILE_STEPS="999")
-    assert eng._profile_steps("cuda") == 50
+    assert eng.profile_steps("cuda") == 50
 
 
 def test_garbage_steps_falls_back_to_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """环境变量手滑（`PPO_PROFILE_STEPS=abc`）不该让整单 PPO 炸 —— 回缺省 10。"""
     _env(monkeypatch, PPO_PROFILE="1", PPO_PROFILE_STEPS="abc")
-    assert eng._profile_steps("cuda") == 10
+    assert eng.profile_steps("cuda") == 10
 
 
 def test_torch_device_object_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -58,4 +58,4 @@ def test_torch_device_object_is_accepted(monkeypatch: pytest.MonkeyPatch) -> Non
     import torch
 
     _env(monkeypatch, PPO_PROFILE="1")
-    assert eng._profile_steps(torch.device("cpu")) == 0
+    assert eng.profile_steps(torch.device("cpu")) == 0

@@ -2,7 +2,7 @@
 
 被测 = `TrainingRemoteDrive._maybe_consume_redo` 接在 `_remote_ppo_step` 那一拍上的行为，
 意图文件 = 控制台写的 `tmp/<课>/redo-ppo.json`（形状 `{version,it,at}`，契约住
-`trainer/loop_control.py`，控制台半边由 `dashboard/tests/redo-ppo.test.ts` 钉）。
+`worker/loop_control.py`，控制台半边由 `dashboard/tests/redo-ppo.test.ts` 钉）。
 
 四条性质（每条都是「不做就会静默地不对」的那类）：
 
@@ -27,8 +27,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import trainer.loop_remote_drive as drive_mod
-from trainer.loop_control import read_redo_applied
 from trainer.loop_steps import TrainingSteps
+from worker.loop_control import read_redo_applied
 from worker.loop_round import RemotePpoJob, RoundContext
 
 JID = "j" * 16
@@ -113,11 +113,13 @@ def test_redo_cancels_then_republishes_the_same_jid_once(tmp_path: Path) -> None
     ctx = RoundContext(it=IT, resumable=True)
 
     # 第一拍：发布（还没有会话可撤——意图在下一拍才消费，因为它必须先有一个在飞会话）。
-    assert rig.step._remote_ppo_step(ctx) is not None
+    outcome = rig.step._remote_ppo_step(ctx)
+    assert outcome is not None
     assert rig.cancelled == []
 
     # 第二拍：命中意图 ⇒ 撤当前 sess、丢它、同拍重新发布。
-    assert rig.step._remote_ppo_step(ctx) is not None
+    outcome = rig.step._remote_ppo_step(ctx)
+    assert outcome is not None
     assert rig.cancelled == [JID]
     assert [s.jid for s in rig.published] == [JID, JID]
     assert [s.it for s in rig.published] == [IT, IT]
@@ -125,7 +127,8 @@ def test_redo_cancels_then_republishes_the_same_jid_once(tmp_path: Path) -> None
     assert read_redo_applied(tmp_path) == (IT, at)
 
     # 第三拍：同一份意图还在盘上，但回执的 at 与它相等 ⇒ **不得**再撤（否则无限重发）。
-    assert rig.step._remote_ppo_step(ctx) is not None
+    outcome = rig.step._remote_ppo_step(ctx)
+    assert outcome is not None
     assert rig.cancelled == [JID]
     assert rig.calls.count("publish") == 2
 

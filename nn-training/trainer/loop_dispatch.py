@@ -22,7 +22,7 @@ MRO 被改坏就响亮失败），真实现必须**在 MRO 里更靠前**。挂 
 ## DI seam
 
 `trainer.rollout_phase`（`dispatch_rollout_phase`）· `trainer.batch_eval`（`maybe_dispatch_batch`）·
-`biz.eval_heartbeat`（`write_state`）三处**延迟** import：那是原有的注入面，测试 patch 的一直是
+`worker.eval_heartbeat`（`write_state`）三处**延迟** import：那是原有的注入面，测试 patch 的一直是
 实现模块。
 """
 
@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from common.log import default_router
 from trainer.rollout_phase import begin_payload_parts, dispatch_rollout_phase
 
 
@@ -96,8 +97,10 @@ class TrainingDispatch:
             from worker.eval_heartbeat import now_ms, write_state
 
             write_state(window_open=False, last_window_closed_ts=now_ms())
-        except Exception:
-            pass
+        except Exception as e:  # 同上：心跳失败不得打断训练，但要说一声
+            default_router().warn_once(
+                "eval_heartbeat:close", f"关窗心跳没写成：{e!r}——console 会显示旧状态"
+            )
 
     def _rollout_phase(
         self,

@@ -139,9 +139,13 @@ def test_configure_rejects_mixing_with_xdist() -> None:
 def test_worker_count_option_accepts_ints_and_auto() -> None:
     """`--forkdist auto` 的解析（`make test NPROC=auto` / `tools/task.py` 的 `-n auto` 靠它）。"""
     fc = _plugin()
-    assert fc._worker_count_option("12") == 12
-    assert fc._worker_count_option(" auto ") == fc._AUTO
-    assert fc._worker_count_option("AUTO") == fc._AUTO
+    auto = fc._AUTO
+    twelve = fc._worker_count_option("12")
+    spaced_auto = fc._worker_count_option(" auto ")
+    upper_auto = fc._worker_count_option("AUTO")
+    assert twelve == 12
+    assert spaced_auto == auto
+    assert upper_auto == auto
     for bad in ("x", "0", "-3", ""):
         with pytest.raises(Exception) as e:
             fc._worker_count_option(bad)

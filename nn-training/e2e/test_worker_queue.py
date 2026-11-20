@@ -29,6 +29,7 @@ if str(ROOT) not in sys.path:
 import remote.job_round as JR
 import remote.lifecycle as LC
 from remote.worker_server import WORKER_QUEUE_MAX, WorkerServerState, make_worker_server
+from tests.helpers.http_server import serve_fast
 
 # 说明（下面两个用例的 `with` 里各钉生效面）：假 hub（`http://h0`/`http://h1`）下 worker 一轮
 # 里会真发 HTTP 的缝 = 预取填充器的 `peek_jobs`、阶段通知 `job_ready`，（2026-10-10 新增的）
@@ -128,7 +129,7 @@ class _Srv:
         self.srv = make_worker_server(state, 0, token)
         self.port = self.srv.server_address[1]
         self.token = token
-        self.thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
+        self.thread = serve_fast(self.srv)
         self.thread.start()
 
     def post_job(self, manifest: dict, payload: bytes, code: bytes | None = b"fake-code"):

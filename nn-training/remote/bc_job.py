@@ -35,6 +35,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from common.logutil import tag_logger
 from common.protocol import (
     ProtocolError,
     RetryableError,
@@ -46,6 +47,16 @@ from common.protocol import (
 )
 from remote.http import _request
 from remote.job_fs import _persist_result
+
+#: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+_log = tag_logger("worker", lambda: time)
+
+#: 「这一发 BC 传输没成」的真失败形态 —— `_request` 的路面就这三类：urllib 的
+#: `URLError`/`HTTPError` 与 socket 面都是 `OSError`；体半途断/首块太慢是 `RetryableError`；
+#: 响应体不像话是 `ProtocolError`（ValueError 子类，重试耗尽后上层拿到的又是
+#: `RetryableError`）。**编程错不在集里**：`AttributeError`/`TypeError` 是读响应姿势坏了，
+#: 不该被记成「网络不通」→ 白重试三轮再把有一半信息的失败当成瞬时失败。
+_BC_HTTP_ERRORS = (OSError, RetryableError, ProtocolError)
 
 __all__ = [
     "BC_EPOCH_BACKLOG_MAX",
@@ -70,7 +81,7 @@ def _bc_fetch_resume(
     token: str,
     jid: str,
     *,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> tuple[int, bytes] | None:
     """GET /jobs/{id}/resume → (epoch, weights_bytes) | None（404 = 全新训练）。
 
@@ -80,7 +91,7 @@ def _bc_fetch_resume(
     for attempt in range(1, 4):
         try:
             status, body = _request(base_url, token, f"/jobs/{jid}/resume", timeout=30.0)
-        except Exception as e:
+        except _BC_HTTP_ERRORS as e:
             status, body = None, repr(e).encode()
         if status == 200:
             try:
@@ -133,7 +144,7 @@ def _bc_load_local_resume(work_dir: Path, jid: str) -> tuple[int, bytes] | None:
         d = json.loads(p.read_text(encoding="utf-8"))
         return int(d["epoch"]), decode_weights_json(str(d["weights"]))
     except (OSError, ValueError, KeyError, TypeError) as e:
-        print(f"[{time.strftime('%H:%M:%S')}] [worker] bc local resume 损坏（忽略，全新训练）: {e}", flush=True)
+        _log(f"bc local resume 损坏（忽略，全新训练）: {e}")
         return None
 
 
@@ -150,7 +161,7 @@ def _bc_post_epoch(
     body: dict,
     lease_token: str,
     *,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> bool:
     """POST /jobs/{id}/epoch（每 epoch 权重+指标回传；租约校验在 hub 侧）。
 
@@ -175,7 +186,7 @@ def _bc_post_epoch(
                     **({"X-Lease-Token": lease_token} if lease_token else {}),
                 },
             )
-        except Exception as e:
+        except _BC_HTTP_ERRORS as e:
             status, resp = None, repr(e).encode()
         if status in (200, 201):
             return True
@@ -195,7 +206,7 @@ def _bc_backlog_add(
     body: dict,
     *,
     cap: int = BC_EPOCH_BACKLOG_MAX,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> None:
     """把一次失败的回传 body 记进 backlog（有界：超限丢最老的并留一行日志）。
 
@@ -215,7 +226,7 @@ def _bc_backlog_replay(
     pending: list[dict],
     lease_token: str,
     *,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> int:
     """按顺序重放 backlog；**遇到仍失败即停**（隧道还断着，接着捶只会拖慢训练）。
 
@@ -387,82 +398,58 @@ def resolve_bc_seed(manifest: dict) -> tuple[int, str]:
     return int(explicit), "course"
 
 
-def _run_bc_job(
-    *,
-    jid: str,
-    manifest: dict,
-    job_dir: Path,
-    shard_dirs: list[str],
-    device: str,
-    torch_threads: int,
-    echo: bool,
-    base_url: str = "",
-    token: str = "",
-    lease_token: str = "",
-    backend: str = "torch",
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
-) -> dict:
-    """云端 BC job（plan/bc-cloud-integration.plan.md §3；每 epoch 回传 2026-09-13）：
-    D14 语料血缘校验 →（--echo 冒烟回显）→ **resume 接续**（hub bc-resume 优先，
-    本地 bc-resume/ 兜底——中断重领同 job 从最后完成的 epoch 接着训，绝不从头重训）
-    → 按 `backend` 复用 `train/bc.py::train` 或 `train/bc_paddle.py::train`（on_epoch
-    回调每 epoch 回传权重+指标：hub POST /jobs/{id}/epoch 租约校验防旧 worker 覆盖新
-    resume + 本地原子覆盖）→ BC 权重 + metrics 回传。
+def _check_corpus_lineage(manifest: dict, shard_dirs: list[str]) -> None:
+    """D14 语料血缘：与 PPO 同规（BC shard manifest 同样携带 course_fp/corpus_fp）。
 
-    语料 = payload 解包出的 npy shard 目录（obs/scalars/actions/masks/conditions/
-    returns + manifest），bc.py 的 scan_shards 对 job_dir 递归扫描即全部装载。
+    自 `_run_bc_job` 原样搬出：fixed 源是课程显式声明的「原样使用现成语料」，
+    跳过血缘门；其余逐 shard 拒收。
     """
-    # ---- D14 语料血缘：与 PPO 同规（BC shard manifest 同样携带 course_fp/corpus_fp）----
-    # fixed 源是课程显式声明的「原样使用现成语料」：其 shard 可能来自别的课程版本，
-    # 按本课指纹拒收会把整个功能变成死路；发布端因此写入 corpus_source=fixed，
-    # 云端只对这一种显式来源跳过血缘门（其余仍逐 shard 拒收）。
-    if manifest.get("corpus_source") != "fixed":
-        _cfp = str(manifest["course_fp"])
-        _corpus = str(manifest.get("corpus_fp", "") or "")
-        for _sd in shard_dirs:
-            try:
-                with open(os.path.join(_sd, "manifest.json"), encoding="utf-8") as _f:
-                    _sm = json.load(_f)
-            except (OSError, ValueError) as _e:
-                raise ProtocolError(
-                    f"D14 course_fp: 读 shard manifest 失败 {_sd}: {_e}"
-                ) from _e
-            if not d14_corpus_match(_cfp, _corpus, _sm):
-                raise ProtocolError(
-                    f"D14 corpus_fp 不匹配：job={_corpus[:12] or _cfp[:12]}… "
-                    f"shard={str(_sm.get('corpus_fp') or _sm.get('course_fp'))[:12]}… "
-                    f"（{_sd}）——跨课程语料混入，拒收"
-                )
+    if manifest.get("corpus_source") == "fixed":
+        return
+    _cfp = str(manifest["course_fp"])
+    _corpus = str(manifest.get("corpus_fp", "") or "")
+    for _sd in shard_dirs:
+        try:
+            with open(os.path.join(_sd, "manifest.json"), encoding="utf-8") as _f:
+                _sm = json.load(_f)
+        except (OSError, ValueError) as _e:
+            raise ProtocolError(
+                f"D14 course_fp: 读 shard manifest 失败 {_sd}: {_e}"
+            ) from _e
+        if not d14_corpus_match(_cfp, _corpus, _sm):
+            raise ProtocolError(
+                f"D14 corpus_fp 不匹配：job={_corpus[:12] or _cfp[:12]}… "
+                f"shard={str(_sm.get('corpus_fp') or _sm.get('course_fp'))[:12]}… "
+                f"（{_sd}）——跨课程语料混入，拒收"
+            )
 
-    t0 = time.time()
 
-    # ---- 冒烟回显（--echo，2026-09-05 同语义）：不拉 torch 不训练——占位 weights +
-    # smoke 标记（消费方 run_bc 作废轮，不落盘不归档）。三重校验按构造必过。
-    if echo:
-        result = {
-            "job_id": jid,
-            "data_fp": manifest["data_fp"],
-            "init_weights_fp": manifest["init_weights_fp"],
-            "weights_json": encode_weights_json(b'{"smoke-placeholder":true}'),
-            "opt_tar_b64": "",
-            "metrics": {
-                "epochs": 0,
-                "train_samples": 0,
-                "val_samples": 0,
-                "best_val_loss": 0.0,
-            },
-            "commit_echo": manifest["commit"],
-            "bc_sec": 0.0,
-            "smoke": True,
-        }
-        validate_result(result, manifest, commit_echo_must_match=False)
-        _persist_result(job_dir.parent, jid, result)
-        log(f"job {jid}: ECHO (bc smoke) — 占位权重回传（未跑 BC）")
-        return result
+def _run_bc_echo(jid: str, manifest: dict, job_dir: Path, log) -> dict:
+    """`--echo` 冒烟回显：不拉 torch 不训练——占位权重 + smoke 标记（自调用点搬出）。"""
+    result = {
+        "job_id": jid,
+        "data_fp": manifest["data_fp"],
+        "init_weights_fp": manifest["init_weights_fp"],
+        "weights_json": encode_weights_json(b'{"smoke-placeholder":true}'),
+        "opt_tar_b64": "",
+        "metrics": {
+            "epochs": 0,
+            "train_samples": 0,
+            "val_samples": 0,
+            "best_val_loss": 0.0,
+        },
+        "commit_echo": manifest["commit"],
+        "bc_sec": 0.0,
+        "smoke": True,
+    }
+    validate_result(result, manifest, commit_echo_must_match=False)
+    _persist_result(job_dir.parent, jid, result)
+    log(f"job {jid}: ECHO (bc smoke) — 占位权重回传（未跑 BC）")
+    return result
 
-    # ---- 延迟 import 训练器（B7 同款；本模块顶层零 torch/paddle）----
-    from types import SimpleNamespace
 
+def _load_bc_trainer(backend: str, torch_threads: int):
+    """延迟 import 训练器（B7 同款；本模块顶层零 torch/paddle）→ (train, save_weights_json)。"""
     save_weights_json: Any
     if backend == "paddle":
         # `paddle.io` / numpy 在 import 期建线程池——线程旋钮必须早于它们。
@@ -483,6 +470,99 @@ def _run_bc_job(
         from worker.train.bc import train as bc_train
 
         save_weights_json = _torch_save_weights
+    return bc_train, save_weights_json
+
+
+def _bc_train_namespace(
+    manifest: dict,
+    out_path: Path,
+    total_epochs: int,
+    resume_epoch: int,
+    seed_int: int,
+    dev,
+    jid: str,
+    on_epoch,
+):
+    """构建 `train/bc*.py` 的 argv 命名空间（自 `_run_bc_job` 原样搬出）。"""
+    from types import SimpleNamespace
+
+    job_dir = out_path.parent
+    return SimpleNamespace(
+        data_dir=str(job_dir),
+        arch=str(manifest["arch"]),
+        out=str(out_path),
+        notes=f"bc-job {jid} course={manifest.get('course_name', '')}",
+        resume=None,
+        epoch_offset=0,
+        ckpt_every=0,  # 云端持久化走 on_epoch 回传（job_dir 重领即清场，盘上 ckpt 无意义）
+        checkpoint=None,
+        epochs=total_epochs - resume_epoch,
+        batch=int(manifest["mb"]),
+        lr=float(manifest["lr"]),
+        val_split=float(manifest.get("val_split", 0.1)),
+        mirror_p=float(manifest.get("mirror_p", 0.5)),
+        seed=seed_int,
+        num_workers=0,
+        device=dev,
+        value_coef=float(manifest.get("value_coef", 0.0) or 0.0),
+        # C9 value-only：旧 job 无此键 ⇒ 1.0（历史 BC 行为逐字节不变）
+        policy_coef=float(manifest.get("policy_coef", 1.0)),
+        # P2-B（2026-11-08）：可训参数范围；旧 job 无此键 ⇒ all（逐字节不变）
+        train_heads=str(manifest.get("train_heads", "all")),
+        # fire 头正例权重（2026-09-14）：'auto' 或数字；旧 job 无此键 → 0.0
+        # （关闭 = 历史语义，重放旧 job 行为不变）。
+        fire_pos_weight=manifest.get("fire_pos_weight", 0.0),
+        # B2：v6 class weight 强度；旧 job 无此键 ⇒ 1.0（历史行为，逐字节不变）
+        weight_exponent=float(manifest.get("weight_exponent", 1.0)),
+        # B3：早停；旧 job 无此键 ⇒ 0 = 关（跑满 epochs，逐字节不变）
+        patience=int(manifest.get("patience", 0) or 0),
+        # v6 三头（2026-11-04）：旧 job 无此键 ⇒ False = legacy 5/2 两头（逐字节不变）
+        action_v6=bool(manifest.get("action_v6", False)),
+        policy_extra=bool(manifest.get("policy_extra", False)),
+        on_epoch=on_epoch,
+    )
+
+
+def _run_bc_job(
+    *,
+    jid: str,
+    manifest: dict,
+    job_dir: Path,
+    shard_dirs: list[str],
+    device: str,
+    torch_threads: int,
+    echo: bool,
+    base_url: str = "",
+    token: str = "",
+    lease_token: str = "",
+    backend: str = "torch",
+    log=_log,
+) -> dict:
+    """云端 BC job（plan/bc-cloud-integration.plan.md §3；每 epoch 回传 2026-09-13）：
+    D14 语料血缘校验 →（--echo 冒烟回显）→ **resume 接续**（hub bc-resume 优先，
+    本地 bc-resume/ 兜底——中断重领同 job 从最后完成的 epoch 接着训，绝不从头重训）
+    → 按 `backend` 复用 `train/bc.py::train` 或 `train/bc_paddle.py::train`（on_epoch
+    回调每 epoch 回传权重+指标：hub POST /jobs/{id}/epoch 租约校验防旧 worker 覆盖新
+    resume + 本地原子覆盖）→ BC 权重 + metrics 回传。
+
+    语料 = payload 解包出的 npy shard 目录（obs/scalars/actions/masks/conditions/
+    returns + manifest），bc.py 的 scan_shards 对 job_dir 递归扫描即全部装载。
+    """
+    # ---- D14 语料血缘：与 PPO 同规（BC shard manifest 同样携带 course_fp/corpus_fp）----
+    # fixed 源是课程显式声明的「原样使用现成语料」：其 shard 可能来自别的课程版本，
+    # 按本课指纹拒收会把整个功能变成死路；发布端因此写入 corpus_source=fixed，
+    # 云端只对这一种显式来源跳过血缘门（其余仍逐 shard 拒收）。
+    _check_corpus_lineage(manifest, shard_dirs)
+
+    t0 = time.time()
+
+    # ---- 冒烟回显（--echo，2026-09-05 同语义）：不拉 torch 不训练——占位 weights +
+    # smoke 标记（消费方 run_bc 作废轮，不落盘不归档）。三重校验按构造必过。
+    if echo:
+        return _run_bc_echo(jid, manifest, job_dir, log)
+
+    # ---- 延迟 import 训练器（B7 同款；本模块顶层零 torch/paddle）----
+    bc_train, save_weights_json = _load_bc_trainer(backend, torch_threads)
 
     # 训练种子（2026-09-14 修正）：课程/调用方指定优先 —— 见 resolve_bc_seed。
     seed_int, seed_src = resolve_bc_seed(manifest)
@@ -553,39 +633,15 @@ def _run_bc_job(
             "resumed_complete": True,
         }
     else:
-        ns = SimpleNamespace(
-            data_dir=str(job_dir),
-            arch=str(manifest["arch"]),
-            out=str(out_path),
-            notes=f"bc-job {jid} course={manifest.get('course_name', '')}",
-            resume=None,
-            epoch_offset=0,
-            ckpt_every=0,  # 云端持久化走 on_epoch 回传（job_dir 重领即清场，盘上 ckpt 无意义）
-            checkpoint=None,
-            epochs=total_epochs - resume_epoch,
-            batch=int(manifest["mb"]),
-            lr=float(manifest["lr"]),
-            val_split=float(manifest.get("val_split", 0.1)),
-            mirror_p=float(manifest.get("mirror_p", 0.5)),
-            seed=seed_int,
-            num_workers=0,
-            device=dev,
-            value_coef=float(manifest.get("value_coef", 0.0) or 0.0),
-            # C9 value-only：旧 job 无此键 ⇒ 1.0（历史 BC 行为逐字节不变）
-            policy_coef=float(manifest.get("policy_coef", 1.0)),
-            # P2-B（2026-11-08）：可训参数范围；旧 job 无此键 ⇒ all（逐字节不变）
-            train_heads=str(manifest.get("train_heads", "all")),
-            # fire 头正例权重（2026-09-14）：'auto' 或数字；旧 job 无此键 → 0.0
-            # （关闭 = 历史语义，重放旧 job 行为不变）。
-            fire_pos_weight=manifest.get("fire_pos_weight", 0.0),
-            # B2：v6 class weight 强度；旧 job 无此键 ⇒ 1.0（历史行为，逐字节不变）
-            weight_exponent=float(manifest.get("weight_exponent", 1.0)),
-            # B3：早停；旧 job 无此键 ⇒ 0 = 关（跑满 epochs，逐字节不变）
-            patience=int(manifest.get("patience", 0) or 0),
-            # v6 三头（2026-11-04）：旧 job 无此键 ⇒ False = legacy 5/2 两头（逐字节不变）
-            action_v6=bool(manifest.get("action_v6", False)),
-            policy_extra=bool(manifest.get("policy_extra", False)),
-            on_epoch=_on_epoch,
+        ns = _bc_train_namespace(
+            manifest,
+            out_path,
+            total_epochs,
+            resume_epoch,
+            seed_int,
+            dev,
+            jid,
+            _on_epoch,
         )
         if resume_epoch:
             resume_in = job_dir / "bc-resume-in.json"

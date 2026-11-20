@@ -6,11 +6,10 @@
 组合类住 `hub/queue.py`，只剩 docstring + 两个类常量 + `__init__`：
 
 ```
-class _HubQueue(QueueScopeMixin, QueueDiscoverMixin, QueueAuthMixin, QueueClaimsMixin,
+class _HubQueue(QueueScopeMixin, QueueAuthMixin, QueueClaimsMixin,
                 QueueResumeMixin, QueueObserveMixin, QueueOfflineMixin, QueueStoreFaceMixin,
                 _AuthGuard)
-  queue_scope       课程表 · 归属路由 · 模式 · 停机达令 · worker 登记（状态的主人）
-  queue_discover    自动发现三相：扫盘 / 开课标记闸 / 「在训」判据
+  queue_scope       课程表 · 归属路由 · 模式 · 停机达令 · worker 登记 · 自动发现三相
   queue_auth        鉴权面四覆写 + halt_workers 旧名的委派（本簇**继承** `_AuthGuard`）
   queue_claims      派发与认领：轮转挑选 · peek · 熔断告警 · 合法放弃 · 归属/停摆闸探针
   queue_resume      续跑锚点 · 离线段补传产物 · 课程路径
@@ -96,7 +95,6 @@ if str(ROOT) not in sys.path:
 
 import hub.queue_auth as auth_mix
 import hub.queue_claims as claims_mix
-import hub.queue_discover as discover_mix
 import hub.queue_observe as observe_mix
 import hub.queue_offline as offline_mix
 import hub.queue_peer as peer_mod
@@ -119,47 +117,17 @@ QUEUE_MOD = HUB_DIR / "queue.py"
 #: 域 -> （混入类, 该域实现的成员）。八个域的并集**恰好**是拆分前 `_HubQueue` 的 91 个域成员
 #: （第 92 个是组合类的 `__init__`）。
 DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
-    "queue_scope": (
-        scope_mix.QueueScopeMixin,
-        (
-            "halt_of",
-            "all_halted",
-            # 2026-11-12（干完才停）：BC 收官只申请 `if_idle=1`，有活就先置门闩。
-            "halt_if_idle",
-            "maybe_halt_when_idle",
-            "_work_left",
-            "set_halt",
-            "add_course",
-            "_adopt_solo",
-            "_registry",
-            "note_worker",
-            "active_worker_count",
-            "courses",
-            "course_of",
-            # 2026-11-13（hub 重启后认不出旧 job）：课程表是 discover 的产物，而 discover
-            # 只登记「新鲜」课程 ⇒ 表里没有时按盘上 `remote-jobs/<jid>` 找归属并按需登记。
-            "_locate_by_disk",
-            "_store_of",
-            # ★M4b：启动参数里的模式段标记（`--course a=offline` ⇒ WARN + 忽略）。
-            "mode_ignored",
-            "active_courses",
-            # ★M1b：hold 镜像的推送（派发闸第三层）——★M1c 起它是**唯一**的闸输入推送口
-            # （旧的 `_sync_parked` 随 `parked` 一起退役）。
-            "_sync_hold",
-            "_note_ambiguous",
-            "ambiguous_jids",
-            # 2026-10-17（plan/hub-server-memory-slim L3）：课程表可淘汰（`add_course` 的反面）。
-            "drop_course",
-        ),
-    ),
-    "queue_discover": (
-        discover_mix.QueueDiscoverMixin,
-        # 2026-10-17（L3）：`_drop_dead_courses` = 扫描时顺带淘汰（课程表只增不减的另一半）。
-        ("discover", "_serves_course", "_course_dir_live", "_drop_dead_courses"),
-    ),
     "queue_auth": (
         auth_mix.QueueAuthMixin,
-        ("halt_workers", "auth_failure", "auth_success", "is_blocked", "blocked_remaining"),
+        (
+            "halt_workers",
+            "auth_failure",
+            "auth_success",
+            "is_blocked",
+            "blocked_remaining",
+            # 2026-11-18（G5）：D9 闭锁的只读快照（与鉴权四则同一条「单课程借 store」岔路）。
+            "auth_state",
+        ),
     ),
     "queue_claims": (
         claims_mix.QueueClaimsMixin,
@@ -318,17 +286,73 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
 DOMAIN_METHODS = tuple(m for _, (_, ms) in DOMAINS.items() for m in ms)
 MIXIN_CLASSES = tuple(cls for cls, _ in DOMAINS.values())
 
-#: 组合类自己留的（进程级 + 构造）。
-OWN_METHODS = ("__init__",)
+#: B7-S2：`queue_scope` 从混入切成 `QueueScope` 协作者（26 个方法，组合类留 26 个转发）。
+#: 它不再是基类，但仍要逐个核签名 / 核转发 / 核状态写者。
+SCOPE_METHODS = (
+    "halt_of",
+    "all_halted",
+    "halt_if_idle",
+    "maybe_halt_when_idle",
+    "_work_left",
+    "set_halt",
+    "add_course",
+    "_adopt_solo",
+    "_registry",
+    "note_worker",
+    "worker_registry",
+    "active_worker_count",
+    "courses",
+    "course_of",
+    "course_store",
+    "_store_of",
+    "mode_ignored",
+    "active_courses",
+    "_sync_hold",
+    "_note_ambiguous",
+    "ambiguous_jids",
+    "drop_course",
+    "discover",
+    "_serves_course",
+    "_course_dir_live",
+    "_drop_dead_courses",
+)
+
+#: 组合类自己留的（进程级 + 构造 + B7-P3 的 10 条状态转发属性）。
+OWN_METHODS = (
+    "__init__",
+    "_stores",
+    "_order",
+    "_solo",
+    "_cursor",
+    "_locate_cache",
+    "_ambiguous",
+    "_workers",
+    "_halt_default",
+    "_halts",
+    "_halt_when_idle",
+    "_peeked",
+    "_dispatch",
+    "_dispatch_lock",
+    "_leases",
+    "_lease_lock",
+    "_offline_disks",
+    "_disk_lock",
+    "_worker_prefetch",
+    "_pf_lock",
+    "_worker_errors",
+    "_we_lock",
+    *SCOPE_METHODS,
+)
 #: 组合类里那个「形参缺省值要在类体作用域解析」的别名（`__init__` 因此逐字节不动）。
-OWN_CONSTS = ("BC_EPOCH_BODY_MAX", "DISCOVER_FRESH_SEC")
+OWN_CONSTS = ("BC_EPOCH_BODY_MAX", "DISCOVER_FRESH_SEC", "DISCOVER_SCAN_MIN_SEC")
 
 #: ★ 门面契约：与 `_JobStore` 同名的方法**逐参数完全一致**的那批（`inspect.signature` 对账）。
-#: 前四个是鉴权面（`_JobStore` 经 `_AuthGuard` 继承，`_HubQueue` 覆写后转发）——所以它们也在
+#: 前五个是鉴权面（`_JobStore` 经 `_AuthGuard` 继承，`_HubQueue` 覆写后转发）——所以它们也在
 #: 这份名单里：门面不只是 `queue_store_face` 那一簇，而是**整个 `_HubQueue` 的对外承诺**。
 FACADE_SAME_SIG = (
     "_job_dir",
     "auth_failure",
+    "auth_state",
     "auth_success",
     "blocked_remaining",
     # 2026-10-11（plan/aborted-course-revival W7）：单 job 定向作废的门面转发
@@ -392,6 +416,27 @@ FACADE_OWN = ("note_worker",)
 #: 末尾调它 —— 这是**同一个对象**的两段 `__init__`，不是两个对象）。
 AUTH_GUARD_FIELDS = frozenset({"_auth_blocked_until", "_auth_fail"})
 
+#: B7-P3：两张状态表搬进协作者；组合类只保留同名转发属性（getter + setter）。
+COURSE_TABLE_FIELDS = frozenset(
+    {"_stores", "_order", "_solo", "_cursor", "_locate_cache", "_ambiguous"}
+)
+BOARD_FIELDS = frozenset({"_workers", "_halt_default", "_halts", "_halt_when_idle"})
+DISPATCH_FIELDS = frozenset(
+    {
+        "_peeked",
+        "_dispatch",
+        "_dispatch_lock",
+        "_leases",
+        "_lease_lock",
+        "_offline_disks",
+        "_disk_lock",
+        "_worker_prefetch",
+        "_pf_lock",
+        "_worker_errors",
+        "_we_lock",
+    }
+)
+
 #: 状态归属表：字段 -> 写它的方法集合（**三种写法都算**：`self.X = …` / `self.X[k] = …` /
 #: `self.X.append(...)`）。这条是「状态声明分散到七个模块之后，谁动它」的唯一对账面。
 STATE_WRITERS: dict[str, frozenset[str]] = {
@@ -399,30 +444,31 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
     "_auth_fail": frozenset({"_adopt_solo"}),
     # 2026-10-17（L3）：`drop_course` 摘课时要把四个旁表一起清（`_cursor` 若指向被摘的课，
     # 下一个轮转起点就是个空壳）⇒ 它是第五个写者。
-    "_cursor": frozenset({"__init__", "claim_job", "claim_next", "drop_course"}),
+    # B7-P3：10 个搬进协作者的字段不再由组合类 `__init__` 赋值（协作者自己的构造负责）。
+    "_cursor": frozenset({"claim_job", "claim_next", "drop_course"}),
+    "course_table": frozenset({"__init__"}),
+    "board": frozenset({"__init__"}),
+    "dispatch": frozenset({"__init__"}),
+    # B7-S2：组合类只声明 `self.scope`；scope 自己不再持有状态字段。
+    "scope": frozenset({"__init__"}),
     "_discover_fresh": frozenset({"__init__"}),
     "_discover_last": frozenset({"__init__", "discover"}),
     "_sweep_at": frozenset({"__init__", "sweep_dead_leases"}),
     "_discover_root": frozenset({"__init__"}),
-    "_halt_default": frozenset({"__init__", "_adopt_solo", "set_halt"}),
-    "_halts": frozenset({"__init__", "set_halt", "drop_course"}),
+    "_halt_default": frozenset({"_adopt_solo", "set_halt"}),
+    "_halts": frozenset({"set_halt", "drop_course"}),
     #: 2026-11-12（干完才停）：被别家活儿挡住时置门闩，空闲取活那一拍重评（`set_halt` 清）。
-    "_halt_when_idle": frozenset({"__init__", "halt_if_idle", "maybe_halt_when_idle", "set_halt"}),
-    "_locate_cache": frozenset({"__init__", "course_of", "drop_course"}),
+    "_halt_when_idle": frozenset({"halt_if_idle", "maybe_halt_when_idle", "set_halt"}),
+    "_locate_cache": frozenset({"course_of", "drop_course"}),
     #: ★M4b：模式表 `_modes` 随「课程无模式」删除；只剩启动参数的模式段标记（只读）。
     "_mode_ignored": frozenset({"__init__"}),
     #: 派发状态（课程 → 记录）：`dispatch_record` 首次载入时就地缓存（写），`_dispatch_update` 改，
     #: `note_progress` 的**节流腿**也在内存里就地改（落盘才走 `_dispatch_update`——节流基准
     #: 只认盘上那份的 `updated_at`）。
-    "_dispatch": frozenset({"__init__", "dispatch_record", "_dispatch_update", "note_progress"}),
-    "_dispatch_lock": frozenset({"__init__"}),
+    "_dispatch": frozenset({"dispatch_record", "_dispatch_update", "note_progress"}),
     "_no_marker_warned": frozenset({"__init__", "_serves_course", "drop_course"}),
-    "_ambiguous": frozenset({"__init__", "_note_ambiguous"}),
-    "_disk_lock": frozenset({"__init__"}),
-    "_lease_lock": frozenset({"__init__"}),
     "_leases": frozenset(
         {
-            "__init__",
             "_lease_rec_locked",
             "claim_offline",
             "heartbeat_offline",
@@ -432,21 +478,20 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
         }
     ),
     "_now": frozenset({"__init__"}),
-    "_offline_disks": frozenset({"__init__", "note_offline_disk"}),
+    "_offline_disks": frozenset({"note_offline_disk"}),
     #: worker 预取状态上报（2026-10-09，plan/dashboard-ppo-live-rows）：唯一写者是写入面
     #: （`note_worker_prefetch` 整体换记录），锁只被 `__init__` 建。
-    "_worker_prefetch": frozenset({"__init__", "note_worker_prefetch"}),
-    "_pf_lock": frozenset({"__init__"}),
+    "_worker_prefetch": frozenset({"note_worker_prefetch"}),
     #: 云机错误上报的中继 ring（2026-10-16，plan/component-error-registry §4.3-S3b）：唯一写者
     #: 是写入面（`note_worker_error` 追加 + 两条闸的剔除），锁只被 `__init__` 建。
-    "_worker_errors": frozenset({"__init__", "note_worker_error"}),
-    "_we_lock": frozenset({"__init__"}),
-    "_order": frozenset({"__init__", "add_course", "drop_course"}),
+    "_worker_errors": frozenset({"note_worker_error"}),
+    "_order": frozenset({"add_course", "drop_course"}),
     #: 多课程预取窗口（2026-10-02，plan/course-pill-precision §4.1）：写点只有启动与 peek。
-    "_peeked": frozenset({"__init__", "peek_jobs", "drop_course"}),
-    "_solo": frozenset({"__init__", "_adopt_solo"}),
-    "_stores": frozenset({"__init__", "add_course", "drop_course"}),
-    "_workers": frozenset({"__init__", "_adopt_solo"}),
+    "_peeked": frozenset({"peek_jobs", "drop_course"}),
+    "_solo": frozenset({"_adopt_solo"}),
+    "_stores": frozenset({"add_course", "drop_course"}),
+    "_workers": frozenset({"_adopt_solo"}),
+    "_ambiguous": frozenset({"_note_ambiguous"}),
 }
 
 #: 八个混入 + 声明面允许的仓内依赖（多一个就说明又搬漏/搬多了）。
@@ -454,14 +499,21 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
 ALLOWED_IMPORTS = {
     # ★M1b：`queue_scope` 多一个向下依赖 —— `hub.task_pack.hold_progress_at`（推 hold 镜像时
     # 取进度锚；判据源与 `queue_offline` 同一份，不另抄一个「进度怎么读」）。
-    "hub.queue_scope": {"common.protocol", "hub.queue_peer", "hub.store", "hub.task_pack"},
-    "hub.queue_discover": {"common.protocol", "hub.queue_peer", "hub.store"},
+    # 2026-11-14（python.refactor.md §P0-6）：四个混入的行日志改走 `common.logutil`
+    # （`[HH:MM:SS] [tag] msg` 的唯一实现）；它是 stdlib-only 的 L0 格式模块 ⇒ 层号不变。
+    "hub.queue_scope": {
+        "common.logutil",
+        "common.protocol",
+        "hub.store",
+        "hub.task_pack",
+    },
     "hub.queue_auth": {
         "hub.auth",
         "hub.queue_peer",
         "hub.store",
     },
     "hub.queue_claims": {
+        "common.logutil",
         "common.protocol",
         "hub.queue_peer",
         "hub.store",
@@ -478,6 +530,7 @@ ALLOWED_IMPORTS = {
         "remote.code_snapshot",
     },
     "hub.queue_offline": {
+        "common.logutil",
         "common.protocol",
         "hub.queue_peer",
         "hub.store",
@@ -517,15 +570,26 @@ def _own_consts(path: Path, cls_name: str, *, valued: bool = True) -> set[str]:
     return out
 
 
-_MUTATORS = frozenset({"append", "extend", "clear", "pop", "update", "add", "discard", "remove", "setdefault"})
+_MUTATORS = frozenset(
+    {"append", "extend", "clear", "pop", "update", "add", "discard", "remove", "setdefault"}
+)
 
 
 def _self_attr(node: ast.AST) -> str | None:
-    """`self.X` → "X"（读取 / 赋值 / 下标 / 方法宿主四种形态都认）。"""
+    """`self.X` / `self.hub.X` → "X"（读取 / 赋值 / 下标 / 方法宿主四种形态都认）。
+
+    B7-S2：`QueueScope` 协作者经 `self.hub._stores` 读写组合类状态；对它来说，这两
+    种形态是**同一格**，所以写者表 / store 取用表不必分两套。
+    """
+    if not isinstance(node, ast.Attribute):
+        return None
+    if isinstance(node.value, ast.Name) and node.value.id == "self":
+        return node.attr
     if (
-        isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "self"
+        isinstance(node.value, ast.Attribute)
+        and node.value.attr == "hub"
+        and isinstance(node.value.value, ast.Name)
+        and node.value.value.id == "self"
     ):
         return node.attr
     return None
@@ -585,9 +649,9 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     # 2026-10-23（plan/offline-deliver-full-and-gaps §3.4）：+1（`store_offline_metrics`）⇒ 129。
     # 2026-11-07（plan/dead-lease-sweep）：+1（`sweep_dead_leases`：周期清扫死租约）⇒ 130。
     # 2026-11-12：+1（`clear_bc_exclusive`：dashboard 的人工「解除 BC 独占」口）⇒ 135。
-    # 2026-11-13：+1（`_locate_by_disk`：hub 重启后课程表还没登记时，按盘上 job 目录
-    # 找归属并按需登记——否则 `/jobs/{id}/status` 404，trainer 会把在跑的旧 job 判丢）⇒ 136。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 136, len(DOMAIN_METHODS)
+    # 2026-11-18（G5）：+1（`auth_state`：D9 闭锁的只读快照）⇒ 136；再 +1（`course_store`）⇒ 137。
+    # B7-S2：`queue_scope` 的 26 个方法切成协作者 ⇒ 混入方法 138 → 112。
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 112, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -597,10 +661,10 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 136, len(seen)
+    assert len(seen) == 112, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
-    assert sorted(own) == list(OWN_METHODS), (
+    assert sorted(own) == sorted(OWN_METHODS), (
         f"组合类又定义了自己的方法：{sorted(set(own) - set(OWN_METHODS))}"
     )
     # 反向：整个类不得再在 hub_server 里出现（定义唯一是双向的），一个成员也不行。
@@ -630,7 +694,8 @@ def test_the_eight_mixins_do_not_share_any_realized_name() -> None:
             seen[name] = domain
     # 120 个域成员名 + 两个发现类常量（`halt_workers` 的 setter 与 getter 同名，不另算一项）；
     # 2026-10-11 W7：域成员名 120→121（`cancel_job`），故此刻不清点总数（见上一测的断言）。
-    expect = set(DOMAIN_METHODS) | {"DISCOVER_FRESH_SEC", "DISCOVER_SCAN_MIN_SEC"}
+    # B7-S2：发现两常量随 `queue_scope` 搬进协作者，不再由任何混入定义。
+    expect = set(DOMAIN_METHODS)
     assert len(seen) == len(expect) and set(seen) == expect, (len(seen), sorted(set(seen) ^ expect))
 
 
@@ -638,10 +703,13 @@ def test_the_eight_mixins_do_not_share_any_realized_name() -> None:
 
 
 def test_the_composed_class_is_wired_to_the_mixins_by_object_identity() -> None:
-    """★ 对象级证明：`_HubQueue.X is Mixin.X`（不是同名副本，也不是漏接了一个）。"""
+    """★ 对象级证明：混入 `is` 同一函数；scope 是**转发壳**（实现住协作者）。"""
     for domain, (cls, methods) in DOMAINS.items():
         for m in methods:
             assert getattr(_HubQueue, m) is getattr(cls, m), f"{domain}::{m} 没接上 _HubQueue"
+    for m in SCOPE_METHODS:
+        assert callable(getattr(_HubQueue, m)), f"QueueScope::{m} 没有转发壳"
+        assert callable(getattr(scope_mix.QueueScope, m)), f"QueueScope 少了 {m}"
 
 
 def test_the_mro_is_exactly_the_declared_order() -> None:
@@ -659,6 +727,7 @@ def test_the_mro_is_exactly_the_declared_order() -> None:
         "Generic",
         "object",
     ]
+    # B7-S2：`QueueScope` 不是基类（组合类只持有 `self.scope`），bases 表已隐含这一点。
     assert _HubQueue.__bases__ == (*MIXIN_CLASSES, hs._AuthGuard)
 
 
@@ -681,8 +750,8 @@ def test_queue_auth_inherits_the_guard_so_its_unbound_calls_type_check() -> None
 
 def test_class_constants_are_reachable_through_the_mro() -> None:
     """类常量随簇搬走，但**名字是契约**（`hub.DISCOVER_FRESH_SEC` / `hub.BC_EPOCH_BODY_MAX`）。"""
-    assert _HubQueue.DISCOVER_FRESH_SEC == discover_mix.QueueDiscoverMixin.DISCOVER_FRESH_SEC == 3600.0
-    assert _HubQueue.DISCOVER_SCAN_MIN_SEC == discover_mix.QueueDiscoverMixin.DISCOVER_SCAN_MIN_SEC == 2.0
+    assert _HubQueue.DISCOVER_FRESH_SEC == scope_mix.QueueScope.DISCOVER_FRESH_SEC == 3600.0
+    assert _HubQueue.DISCOVER_SCAN_MIN_SEC == scope_mix.QueueScope.DISCOVER_SCAN_MIN_SEC == 2.0
     assert _HubQueue.BC_EPOCH_BODY_MAX == _JobStore.BC_EPOCH_BODY_MAX == 4 * 1024 * 1024
     assert set(OWN_CONSTS) <= _own_consts(QUEUE_MOD, "_HubQueue")
 
@@ -763,7 +832,8 @@ def test_the_same_name_surface_is_exactly_the_declared_closed_set() -> None:
     # 2026-10-17（plan/export-must-not-cancel-live-job §5）：35 → 36（`ledger_net_state`
     # ——账本净态的读面；`/jobs/{id}/status` 与派发池同源）。
     # 2026-10-23（plan/offline-deliver-full-and-gaps §3.4）：36 → 37（`store_offline_metrics`）。
-    assert len(declared) == 38, len(declared)
+    # 2026-11-18（G5）：38 → 39（`auth_state` —— D9 闭锁的只读快照，鉴权面第五条）。
+    assert len(declared) == 39, len(declared)
     # 改名那一条**不是**同名（store 侧没有 `abandon`）⇒ 它不属于这个闭集，另处单独钉。
     assert set(FACADE_RENAMED) == {"abandon"} and FACADE_RENAMED.keys() & common == set()
     assert _callable_names(_JobStore) >= {"abandon_job"}
@@ -776,8 +846,8 @@ def test_the_identical_signature_facade_is_byte_for_byte_same_signature() -> Non
     有 3 个纯 `if st: st.X(...)`（无返回）、有 1 个带参注解返回值；漏一个或改一个名字就红。
     """
     # ★M5：30 → 31（`job_kind` 的逐字转发）；2026-10-11 W7：31 → 32（`cancel_job`）；
-    # 2026-10-17：32 → 33（`ledger_net_state`）。
-    assert len(FACADE_SAME_SIG) == 34
+    # 2026-10-17：32 → 33（`ledger_net_state`）；2026-11-18（G5）：34 → 35（`auth_state`）。
+    assert len(FACADE_SAME_SIG) == 35
     for name in FACADE_SAME_SIG:
         want = _params(getattr(_JobStore, name))
         got = _params(getattr(_HubQueue, name))
@@ -810,9 +880,7 @@ def test_every_facade_method_actually_forwards_to_the_store() -> None:
     `FACADE_OWN` 那一条（`note_worker`）**不在**这份名单里 —— 它的判据在下一段单独写。
     """
     owner = {m: d for d, (_, ms) in DOMAINS.items() for m in ms}
-    targets: dict[str, str] = dict.fromkeys(
-        (*FACADE_SAME_SIG, *FACADE_COURSE_EXTRA), "<same-name>"
-    )
+    targets: dict[str, str] = dict.fromkeys((*FACADE_SAME_SIG, *FACADE_COURSE_EXTRA), "<same-name>")
     targets.update(FACADE_RENAMED)
     # 异常名单里的条目**仍受签名承诺约束**（它在 `FACADE_SAME_SIG` 里），只是不当转发。
     for own in FACADE_OWN:
@@ -881,14 +949,14 @@ def test_the_one_non_forwarding_same_name_method_owns_its_state() -> None:
     assert FACADE_OWN == ("note_worker",)
     fn = next(
         n
-        for n in ast.walk(_cls(_tree(HUB_DIR / "queue_scope.py"), "QueueScopeMixin"))
+        for n in ast.walk(_cls(_tree(HUB_DIR / "queue_scope.py"), "QueueScope"))
         if isinstance(n, ast.FunctionDef) and n.name == "note_worker"
     )
     picks = [sub for sub in ast.walk(fn) if isinstance(sub, ast.Call)]
     assert [p.func.attr for p in picks if isinstance(p.func, ast.Attribute)] == [
         "strip",
         "_registry",
-        "_now",
+        "_clock",
     ], [ast.unparse(p) for p in picks]
     assert not any(
         isinstance(sub, ast.Attribute) and _self_attr(sub) in ("_solo", "_stores")
@@ -956,6 +1024,11 @@ def test_the_state_writer_table_matches_reality() -> None:
     for domain, (cls, _) in DOMAINS.items():
         for attr, who in _writers(HUB_DIR / f"{domain}.py", cls.__name__).items():
             actual.setdefault(attr, set()).update(who)
+    scope_writers = _writers(HUB_DIR / "queue_scope.py", "QueueScope")
+    for attr in ("hub", "_lock", "_clock"):
+        scope_writers.pop(attr, None)
+    for attr, who in scope_writers.items():
+        actual.setdefault(attr, set()).update(who)
     for attr, who in _writers(QUEUE_MOD, "_HubQueue").items():
         actual.setdefault(attr, set()).update(who)
     assert {k: frozenset(v) for k, v in actual.items()} == STATE_WRITERS, {
@@ -965,7 +1038,7 @@ def test_the_state_writer_table_matches_reality() -> None:
     }
     # `_cursor` 是唯一的**跨簇写**（`claim_next`/`claim_job` 都在 `queue_claims`）：
     # 它是「轮转起点」，只有真正拿到活的那一方才推进（R2-C2）——离开这张表就能看出来。
-    assert STATE_WRITERS["_cursor"] == {"__init__", "claim_job", "claim_next", "drop_course"}
+    assert STATE_WRITERS["_cursor"] == {"claim_job", "claim_next", "drop_course"}
 
 
 def test_only_the_composed_init_declares_state_with_values() -> None:
@@ -978,8 +1051,10 @@ def test_only_the_composed_init_declares_state_with_values() -> None:
     for domain, (cls, _) in DOMAINS.items():
         path = HUB_DIR / f"{domain}.py"
         valued = _own_consts(path, cls.__name__)
-        # 类常量随簇走（发现簇两个）；除此之外不得带值。
-        allowed = {"DISCOVER_FRESH_SEC", "DISCOVER_SCAN_MIN_SEC"} if domain == "queue_discover" else set()
+        # 类常量随簇走（发现三相已并入 `queue_scope`，两个常量跟它走）；除此之外不得带值。
+        allowed = (
+            {"DISCOVER_FRESH_SEC", "DISCOVER_SCAN_MIN_SEC"} if domain == "queue_scope" else set()
+        )
         assert valued == allowed, f"{domain} 冒出了带值声明：{sorted(valued - allowed)}"
     # 组合类的类体只有那两个常量（`_JobStore.BC_EPOCH_BODY_MAX` 的同源转发 + 形参缺省值）。
     assert _own_consts(QUEUE_MOD, "_HubQueue") == set(OWN_CONSTS)
@@ -1004,13 +1079,50 @@ def test_only_the_composed_init_declares_state_with_values() -> None:
             declared.add(n.target.attr)
         elif isinstance(n, ast.Assign):
             declared |= {t.attr for t in n.targets if isinstance(t, ast.Attribute)}
-    # 两个鉴权字段的声明点在 `hub/auth.py::_AuthGuard.__init__`（组合类在末尾调它）——
-    # 所以本类体里该少这两个，其余 20 个必须逐条在。
-    want = set(STATE_WRITERS) - AUTH_GUARD_FIELDS
+    # 两个鉴权字段的声明点在 `hub/auth.py::_AuthGuard.__init__`；三张状态表的 21 个字段
+    # 搬进 `course_table` / `board` / `dispatch`（B7-P3/P4），组合类只声明这两个协作者本身。
+    want = (
+        set(STATE_WRITERS)
+        - AUTH_GUARD_FIELDS
+        - COURSE_TABLE_FIELDS
+        - BOARD_FIELDS
+        - DISPATCH_FIELDS
+    ) | {"course_table", "board", "dispatch", "scope"}
     assert declared == want, (
         f"`__init__` 申报的字段与状态表对不上：多 {sorted(declared - want)}，"
         f"少 {sorted(want - declared)}"
     )
+
+
+def test_the_state_tables_live_on_their_collaborators(tmp_path: Path) -> None:
+    """B7-P3/P4：课程表 / worker 板 / 派发旁表的 21 个字段只在协作者上，组合类只留转发属性。"""
+    store = _JobStore(tmp_path / "jobs", tmp_path / "log.jsonl")
+    hub = _HubQueue({"c1": store}, order=["c1"])
+    table, board, dispatch = hub.course_table, hub.board, hub.dispatch
+    assert (
+        type(table).__name__ == "CourseTable"
+        and type(board).__name__ == "WorkerBoard"
+        and type(dispatch).__name__ == "Dispatch"
+    )
+    table_stores, hub_stores = table._stores, hub._stores
+    table_order, hub_order = table._order, hub._order
+    solo, workers = table._solo, board._workers
+    hub_workers = hub._workers
+    assert table_stores is hub_stores and table_order is hub_order
+    assert solo is store, "单课程借表指针没有落在课程表上"
+    assert workers is hub_workers
+    for name in (*COURSE_TABLE_FIELDS, *BOARD_FIELDS, *DISPATCH_FIELDS):
+        assert name not in hub.__dict__, f"{name} 又存了一份在组合类实例上"
+    for name in DISPATCH_FIELDS:
+        assert hasattr(dispatch, name), f"Dispatch 的 {name} 不在实例上"
+    hub_lease_lock, dispatch_lease_lock = hub._lease_lock, dispatch._lease_lock
+    assert hub_lease_lock is dispatch_lease_lock, "离线租约锁被复制成两把了"
+    # 属性是**可写**的（`_adopt_solo` / `drop_course` 的整表替换语义），不是只读快照。
+    hub._cursor = "c1"
+    hub._halt_default = True
+    cursor, halt_default = table._cursor, board._halt_default
+    assert cursor == "c1" and halt_default is True
+    assert hub.courses() == ["c1"], "协作者属性不能吃掉既有的 `courses()` 读法"
 
 
 # ────────────── ⑤ 共同声明面 `QueuePeer` ──────────────
@@ -1050,11 +1162,22 @@ def test_queue_peer_is_declarations_only() -> None:
         "混入 ≥L4 ⇒ hub.queue L5 ⇒ hub_server L6，与 smoke_loopback(L6) 同层"
     )
     # 它因此只能靠协议层 + `store_leases`（ClaimOutcome）⇒ L1
-dag.assert_remote_module("hub.queue_peer", allowed_project_imports=ALLOWED_IMPORTS["hub.queue_peer"])
+
+
+dag.assert_remote_module(
+    "hub.queue_peer", allowed_project_imports=ALLOWED_IMPORTS["hub.queue_peer"]
+)
 
 
 def test_queue_peer_signatures_match_the_real_implementations() -> None:
     """★ 声明面与真实现**逐参数一致**：漂了就是一个在骗 mypy 的柱子。"""
+    for name in SCOPE_METHODS:
+        declared = getattr(peer_mod.QueuePeer, name, None)
+        if declared is None:
+            continue  # 少数 hub 内部口（如 halt_if_idle）本来就不在共同声明面上
+        assert _params(getattr(scope_mix.QueueScope, name)) == _params(declared), (
+            f"QueueScope::{name} 与 QueuePeer 签名漂了"
+        )
     for domain, (cls, methods) in DOMAINS.items():
         for name in methods:
             real = getattr(cls, name, None)
@@ -1088,7 +1211,9 @@ def test_the_renamed_forward_is_declared_where_it_lives() -> None:
         for n in ast.walk(ast.parse((HUB_DIR / "queue_store_face.py").read_text(encoding="utf-8")))
         if isinstance(n, ast.FunctionDef)
     }
-    assert face_defs & {"abandon"} == set(), "`abandon` 不该住门面簇（它带 release / 零 reclaim 语义）"
+    assert face_defs & {"abandon"} == set(), (
+        "`abandon` 不该住门面簇（它带 release / 零 reclaim 语义）"
+    )
 
 
 # ────────────── ⑥ 依赖方向 / 账本 ──────────────
@@ -1145,9 +1270,7 @@ def test_only_resume_touches_the_logic_layer_and_only_lazily() -> None:
 
     resume = HUB_DIR / "queue_resume.py"
     tree = _tree(resume)
-    top_logic = {
-        _logic_layer_import(n) for n in tree.body if isinstance(n, ast.ImportFrom)
-    } - {""}
+    top_logic = {_logic_layer_import(n) for n in tree.body if isinstance(n, ast.ImportFrom)} - {""}
     assert top_logic == set(), f"queue_resume 顶层碰了业务层（trainer/biz）：{top_logic}"
     lazy: list[str] = []
     for n in ast.walk(tree):
@@ -1170,7 +1293,9 @@ def test_only_resume_touches_the_logic_layer_and_only_lazily() -> None:
 def test_the_mixins_never_import_each_other_nor_the_host() -> None:
     """★ 跨域调用**一律经 `self`**：混入之间零 import，也不得反向 import 组装模块。"""
     siblings = {f"hub.{d}" for d in DOMAINS}
-    host_key = hs.__name__  # 从**对象**取名字，不写带引号的字面量（`test_subproc_util` 的 spawn marker）
+    host_key = (
+        hs.__name__
+    )  # 从**对象**取名字，不写带引号的字面量（`test_subproc_util` 的 spawn marker）
     for domain in DOMAINS:
         tree = _tree(HUB_DIR / f"{domain}.py")
         got: set[str] = set()
@@ -1190,6 +1315,10 @@ def test_the_layers_match_the_ledger() -> None:
     ⇒ 随迁 L8，必须仍严格向下。"""
     for domain in DOMAINS:
         assert dag.LAYERS[f"hub.{domain}"] == 3, domain
+    # B7-P3 的两个纯状态协作者：零仓内 import ⇒ L0，组合类站在它们上面。
+    assert dag.LAYERS["hub.course_table"] == 0
+    assert dag.LAYERS["hub.worker_board"] == 0
+    assert dag.LAYERS["hub.dispatch_state"] == 0
     assert dag.LAYERS["hub.queue_peer"] == 1
     assert dag.LAYERS["hub.store"] == 2
     assert dag.LAYERS["hub.queue"] == 4
@@ -1207,15 +1336,23 @@ def test_the_sentinel_moved_with_its_only_reader() -> None:
     # `hub/boot.py`（S4 第十六刀；本刀之前住 `hub_server`），与发现簇的 `DISCOVER_SCAN_MIN_SEC`
     # （派发路径上的最小间隔闸）仍是两件事。
     assert hs.DISCOVER_SCAN_SEC == 5.0
-    assert _defined_names(BOOT) >= {"DISCOVER_SCAN_SEC"}, "常量没住在引导链里（换名/搬家会静默丢默认值）"
-    assert _defined_names(HUB_SERVER) & {"DISCOVER_SCAN_SEC"} == set(), "hub_server 又留了一份（搬漏）"
+    assert _defined_names(BOOT) >= {"DISCOVER_SCAN_SEC"}, (
+        "常量没住在引导链里（换名/搬家会静默丢默认值）"
+    )
+    assert _defined_names(HUB_SERVER) & {"DISCOVER_SCAN_SEC"} == set(), (
+        "hub_server 又留了一份（搬漏）"
+    )
 
 
 # ────────────── ⑦ ★ 功能性（跳出结构，真的跑） ──────────────
 
 
 def _make_hub(tmp_path: Path, *, courses: dict[str, _JobStore] | None = None) -> _HubQueue:
-    stores = courses if courses is not None else {"": _JobStore(tmp_path / "jobs", tmp_path / "log.jsonl")}
+    stores = (
+        courses
+        if courses is not None
+        else {"": _JobStore(tmp_path / "jobs", tmp_path / "log.jsonl")}
+    )
     return _HubQueue(stores, order=list(stores))
 
 
@@ -1234,7 +1371,8 @@ def test_cross_domain_chain_works_on_one_object(tmp_path: Path) -> None:
     added = hub.discover()
     assert added == ["c1"], added
     assert hub.courses() == ["c1"]
-    assert set(hub._stores) >= {"c1"} and hub.course_open("c1") is True
+    # 存储表本身是私有细节：公开口径是「观测面里有这一行」+「它是开着的」
+    assert bool(hub.queue_state()["courses"]) and hub.course_open("c1") is True
 
     # 发布一份 job（走 store 本体 —— 队列不做发布）并让它可领
     st = hub._stores["c1"]
@@ -1242,21 +1380,20 @@ def test_cross_domain_chain_works_on_one_object(tmp_path: Path) -> None:
     st.publish(jid, {"payload_sha256": "0" * 64}, b"PK\x03\x04fake")
     assert hub.claimable_job_ids("c1") == [jid]
     assert hub.course_of(jid) == "c1"  # 路由簇（一次 fs 探测 + 缓存）
-    assert hub._locate_cache[jid] == "c1"
 
     peeked = hub.peek_jobs(worker_id="w1", n=1)
     assert [p["job_id"] for p in peeked] == [jid], peeked
     assert peeked[0]["course"] == "c1"
-    assert hub._workers.get("w1")  # `peek_jobs` 顺带喂了避让链的登记表（R2-2）
+    assert hub.active_worker_count() >= 1  # `peek_jobs` 顺带喂了避让链的登记表（R2-2）
 
     got = hub.claim_next(worker_id="w1")
     assert got is not None and got[0] == "c1" and got[1] == jid, got
-    assert hub._cursor == "c1"  # 轮转游标只由真正拿到活的那一方推
-    assert st._leases.get(jid), "认领没在 store 上设租约"
-    # 门面簇（最后一层）在同一对象上看得见前四簇的成果
+    # 门面簇（最后一层）在同一对象上看得见前四簇的成果。租约本身（`_leases`）也是私有细节：
+    # 公开证据是「认领带回的 token 对得上」+「epoch 被推到 1 以上」——两者都只在真租约下成立。
     assert hub.result_token_ok(jid, got[2]) is True
     assert hub.epoch_of(jid) >= 1
 
+    # 轮转游标只由真正拿到活的那一方推（私有 `_cursor` 的公开口径就在观测面里）
     qs = hub.queue_state()
     assert qs["courses"]["c1"]["pending"] == [] and qs["cursor"] == "c1"
     assert qs["active_courses"] == 1
@@ -1285,7 +1422,7 @@ def test_one_lock_governs_even_the_outermost_facade(tmp_path: Path) -> None:
     finally:
         hub._lock.release()
     assert done.wait(5.0), "释放锁之后读者仍没动静"
-    assert set(hub._registry()) >= {"w1"}
+    assert set(hub.worker_registry()) >= {"w1"}
 
 
 def test_adopt_solo_carries_process_state_across_the_domains(tmp_path: Path) -> None:
@@ -1311,8 +1448,9 @@ def test_adopt_solo_carries_process_state_across_the_domains(tmp_path: Path) -> 
     assert hub.discover() == ["c2"]
     assert hub._solo is None
     assert hub.halt_of("") is True, "停机达令被多发现一门课静默清了"
-    assert hub._registry().get("w9") == 123.0, "worker 登记被清了"
-    assert hub._auth_fail.get("203.0.113.9") == 4, "鉴权计数被清了"
+    # 读数面：登记表取副本（`worker_registry()`）、鉴权计数取快照（`auth_state()`）。
+    assert hub.worker_registry().get("w9") == 123.0, "worker 登记被清了"
+    assert hub.auth_state().failures.get("203.0.113.9") == 4, "鉴权计数被清了"
     assert hub.is_blocked("203.0.113.9") is True, "鉴权闭锁被清了"
 
 

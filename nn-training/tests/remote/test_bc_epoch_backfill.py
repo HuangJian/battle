@@ -31,12 +31,12 @@ def _body(epoch: int, loss: float = 1.0) -> dict:
     }
 
 
-def _never_sleep(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def _never_sleep(monkeypatch) -> None:
     """`_bc_post_epoch` 的重试间隔（2s）在测试里不该真睡。"""
     monkeypatch.setattr(bc_job.time, "sleep", lambda _s: None)
 
 
-def test_post_epoch_reports_failure_on_tunnel_530(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_post_epoch_reports_failure_on_tunnel_530(monkeypatch) -> None:
     """回传失败必须**可判别**（返回 False）——否则调用方无从决定要不要进 backlog。"""
     _never_sleep(monkeypatch)
     paths: list[str] = []
@@ -52,7 +52,7 @@ def test_post_epoch_reports_failure_on_tunnel_530(monkeypatch) -> None:  # type:
     assert paths == [f"/jobs/{jid}/epoch"] * 2  # 原有语义：2 次尝试后放弃（不无限重试）
 
 
-def test_backlog_replay_posts_every_missing_epoch_then_clears(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_backlog_replay_posts_every_missing_epoch_then_clears(monkeypatch) -> None:
     """隧道恢复后逐个重放同一端点、同一 body；全部送达即清空（下一拍不再重复发）。"""
     _never_sleep(monkeypatch)
     posted: list[dict] = []
@@ -63,12 +63,15 @@ def test_backlog_replay_posts_every_missing_epoch_then_clears(monkeypatch) -> No
 
     monkeypatch.setattr(bc_job, "_request", fake_request)
     pending = [_body(5), _body(6)]
-    assert bc_job._bc_backlog_replay("http://hub", "t", "j" * 16, pending, "tok", log=lambda _m: None) == 0
+    left = bc_job._bc_backlog_replay(
+        "http://hub", "t", "j" * 16, pending, "tok", log=lambda _m: None
+    )
+    assert left == 0
     assert pending == []
     assert [b["epoch"] for b in posted] == [5, 6]
 
 
-def test_backlog_replay_keeps_rows_when_tunnel_still_down(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_backlog_replay_keeps_rows_when_tunnel_still_down(monkeypatch) -> None:
     """隧道还断着（再 530）⇒ **一行都不丢**：整批留在 backlog，返回剩余行数。"""
     _never_sleep(monkeypatch)
     calls: list[str] = []
@@ -79,7 +82,10 @@ def test_backlog_replay_keeps_rows_when_tunnel_still_down(monkeypatch) -> None: 
 
     monkeypatch.setattr(bc_job, "_request", fake_request)
     pending = [_body(5), _body(6)]
-    assert bc_job._bc_backlog_replay("http://hub", "t", "j" * 16, pending, "tok", log=lambda _m: None) == 2
+    left = bc_job._bc_backlog_replay(
+        "http://hub", "t", "j" * 16, pending, "tok", log=lambda _m: None
+    )
+    assert left == 2
     assert [b["epoch"] for b in pending] == [5, 6]
     # 第一条就失败 ⇒ 不接着捶剩下的（隧道断着时多打两次只是拖慢训练）
     assert calls == [f"/jobs/{'j' * 16}/epoch"] * 2

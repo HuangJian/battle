@@ -130,8 +130,10 @@ def test_metrics_only_rows_do_not_freeze_the_active_pointer(tmp_path: Path) -> N
     iters = [r for r in ledger if r.get("event") == "iteration"]
     assert iters and iters[-1]["iter"] == 10
     assert iters[-1]["weights_landed"] is False, "统计行必须可被读方识别为没有权重"
-    assert store._ledger_has_newer_iter(5) is False, "统计行不能冻结活动权重"
-    assert store._ledger_has_newer_iter(10) is False
+    newer_at_5 = store._ledger_has_newer_iter(5)
+    newer_at_10 = store._ledger_has_newer_iter(10)
+    assert newer_at_5 is False, "统计行不能冻结活动权重"
+    assert newer_at_10 is False
 
 
 def test_unknown_parts_is_rejected_loudly() -> None:

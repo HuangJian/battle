@@ -98,9 +98,10 @@ def test_plateau_only_remediate_does_not_halt_cloud(
         _reading("G4", "plateau", released=True),  # ← 唯一 released
         _reading("G7", "course_valid", released=False),
     )
-    assert TrainingGuards._apply_verdict(fake, 25, _res("REMEDIATE", readings)) is False
+    applied = TrainingGuards._apply_verdict(fake, 25, _res("REMEDIATE", readings))
+    assert applied is False
     assert halt_calls == []  # 关键：没有停机达令
-    assert fake._cloud_halted is False
+    assert fake.guard_state().cloud_halted is False
     # verdict 仍然落账（复盘取证不能少）
     txt = (tmp_path / "tl.jsonl").read_text(encoding="utf-8")
     assert '"verdict": "REMEDIATE"' in txt
@@ -110,9 +111,10 @@ def test_hard_gate_remediate_still_halts_cloud(tmp_path: Path, halt_calls: list[
     """G7(course_valid)/G13(duty) 这类硬门触发的 REMEDIATE 照常停机。"""
     fake = _fake(jsonl=tmp_path / "tl.jsonl")
     readings = (_reading("G7", "course_valid", released=True),)
-    assert TrainingGuards._apply_verdict(fake, 25, _res("REMEDIATE", readings)) is False
+    applied = TrainingGuards._apply_verdict(fake, 25, _res("REMEDIATE", readings))
+    assert applied is False
     assert halt_calls == [True]
-    assert fake._cloud_halted is True
+    assert fake.guard_state().cloud_halted is True
 
 
 def test_mixed_plateau_and_hard_still_halts(tmp_path: Path, halt_calls: list[bool]) -> None:
@@ -131,7 +133,8 @@ def test_empty_readings_keeps_legacy_halt_behaviour(
 ) -> None:
     """读不到 readings（老格式/异常）⇒ 维持既有停机行为，不因读不到而漏停。"""
     fake = _fake(jsonl=tmp_path / "tl.jsonl")
-    assert TrainingGuards._apply_verdict(fake, 3, _res("REMEDIATE", ())) is False
+    applied = TrainingGuards._apply_verdict(fake, 3, _res("REMEDIATE", ()))
+    assert applied is False
     assert halt_calls == [True]
 
 
@@ -145,9 +148,10 @@ def test_notify_mode_never_halts_even_for_hard_gate(
     fake = _fake(jsonl=tmp_path / "tl.jsonl")
     fake.args.gate_halt_mode = "notify"
     readings = (_reading("G7", "course_valid", released=True),)
-    assert TrainingGuards._apply_verdict(fake, 7, _res("REMEDIATE", readings)) is False
+    applied = TrainingGuards._apply_verdict(fake, 7, _res("REMEDIATE", readings))
+    assert applied is False
     assert halt_calls == []
-    assert fake._cloud_halted is False
+    assert fake.guard_state().cloud_halted is False
 
 
 def _intent_file() -> Path:
@@ -167,13 +171,15 @@ def test_platform_file_beats_startup_arg_and_hot_switches(
     fake._traj_root = tmp_path
     (tmp_path / "gate-halt-mode.txt").write_text("notify\n", encoding="utf-8")
     _intent_file().write_text(json.dumps({"mode": "notify", "until": None}), encoding="utf-8")
-    assert TrainingGuards._gate_halt_mode(fake) == "notify"
+    mode = TrainingGuards._gate_halt_mode(fake)
+    assert mode == "notify"
     readings = (_reading("G7", "course_valid", released=True),)
     TrainingGuards._apply_verdict(fake, 7, _res("REMEDIATE", readings))
     assert halt_calls == []
     # 平台文件切回 halt ⇒ 立即恢复停机（旧 txt 仍写着 notify，但不生效）
     _intent_file().write_text(json.dumps({"mode": "halt"}), encoding="utf-8")
-    assert TrainingGuards._gate_halt_mode(fake) == "halt"
+    mode = TrainingGuards._gate_halt_mode(fake)
+    assert mode == "halt"
 
 
 def test_bad_platform_file_falls_back_to_halt(tmp_path: Path) -> None:
@@ -181,11 +187,14 @@ def test_bad_platform_file_falls_back_to_halt(tmp_path: Path) -> None:
     fake = _fake(jsonl=tmp_path / "tl.jsonl")
     fake.args.gate_halt_mode = "notify"
     _intent_file().write_text("garbage", encoding="utf-8")
-    assert TrainingGuards._gate_halt_mode(fake) == "halt"  # 坏文件 ⇒ halt（红线 2）
+    mode = TrainingGuards._gate_halt_mode(fake)
+    assert mode == "halt"  # 坏文件 ⇒ halt（红线 2）
     _intent_file().unlink()
-    assert TrainingGuards._gate_halt_mode(fake) == "notify"  # 缺失 ⇒ CLI 兜底
+    mode = TrainingGuards._gate_halt_mode(fake)
+    assert mode == "notify"  # 缺失 ⇒ CLI 兜底
     fake.args.gate_halt_mode = "whatever"
-    assert TrainingGuards._gate_halt_mode(fake) == "halt"  # 都非法 ⇒ 缺省 halt
+    mode = TrainingGuards._gate_halt_mode(fake)
+    assert mode == "halt"  # 都非法 ⇒ 缺省 halt
 
 
 def test_legacy_txt_is_ignored_and_receipt_records_the_truth(
@@ -197,7 +206,8 @@ def test_legacy_txt_is_ignored_and_receipt_records_the_truth(
     fake._traj_root = tmp_path
     (tmp_path / "gate-halt-mode.txt").write_text("notify\n", encoding="utf-8")
     _intent_file().write_text(json.dumps({"mode": "notify", "until": None}), encoding="utf-8")
-    assert TrainingGuards._gate_halt_mode(fake) == "notify"
+    mode = TrainingGuards._gate_halt_mode(fake)
+    assert mode == "notify"
     out = capsys.readouterr().out
     assert "忽略课程级 gate-halt-mode.txt" in out
     assert "gate_mode=notify source=platform" in out
@@ -230,11 +240,13 @@ def test_soft_remediate_n_times_stops_leg(tmp_path: Path, halt_calls: list[bool]
     fake.args.gate_remediate_stop_after = 4
     readings = (_reading("G4", "plateau", released=True),)
     for i in range(3):
-        assert TrainingGuards._apply_verdict(fake, 25 + i * 5, _res("REMEDIATE", readings)) is False
-    assert getattr(fake, "_leg_abort", False) is False  # 未达阈值：照常继续
+        applied = TrainingGuards._apply_verdict(fake, 25 + i * 5, _res("REMEDIATE", readings))
+        assert applied is False
+    assert fake.guard_state().leg_abort is False  # 未达阈值：照常继续
     # 第 4 次：停腿（返回 True = 训练该停）+ ABORT 落账
-    assert TrainingGuards._apply_verdict(fake, 40, _res("REMEDIATE", readings)) is True
-    assert fake._leg_abort is True
+    applied = TrainingGuards._apply_verdict(fake, 40, _res("REMEDIATE", readings))
+    assert applied is True
+    assert fake.guard_state().leg_abort is True
     txt = (tmp_path / "tl.jsonl").read_text(encoding="utf-8")
     assert '"verdict": "ABORT"' in txt  # 停腿落账（write_gate_verdict 为 ensure_ascii，
     # 中文 reason 是 \u 转义——按结构断言，不按字面子串）
@@ -250,9 +262,10 @@ def test_soft_remediate_counter_resets_on_hard_verdict(
     hard = (_reading("G7", "course_valid", released=True),)
     TrainingGuards._apply_verdict(fake, 10, _res("REMEDIATE", soft))  # 计数=1
     TrainingGuards._apply_verdict(fake, 15, _res("REMEDIATE", hard))  # 硬门：不计数
-    assert getattr(fake, "_soft_remediate_count", 0) == 1
-    assert getattr(fake, "_leg_abort", False) is False
-    assert TrainingGuards._apply_verdict(fake, 20, _res("REMEDIATE", soft)) is True  # 计数=2 → 停
+    assert fake.guard_state().soft_remediate_count == 1
+    assert fake.guard_state().leg_abort is False
+    applied = TrainingGuards._apply_verdict(fake, 20, _res("REMEDIATE", soft))  # 计数=2 → 停
+    assert applied is True
 
 
 def test_soft_remediate_stop_disabled_with_zero(tmp_path: Path, halt_calls: list[bool]) -> None:
@@ -261,8 +274,9 @@ def test_soft_remediate_stop_disabled_with_zero(tmp_path: Path, halt_calls: list
     fake.args.gate_remediate_stop_after = 0
     readings = (_reading("G4", "plateau", released=True),)
     for i in range(10):
-        assert TrainingGuards._apply_verdict(fake, i, _res("REMEDIATE", readings)) is False
-    assert getattr(fake, "_leg_abort", False) is False
+        applied = TrainingGuards._apply_verdict(fake, i, _res("REMEDIATE", readings))
+        assert applied is False
+    assert fake.guard_state().leg_abort is False
 
 
 def test_soft_remediate_counter_is_per_leg(tmp_path: Path) -> None:
@@ -273,6 +287,6 @@ def test_soft_remediate_counter_is_per_leg(tmp_path: Path) -> None:
     readings = (_reading("G4", "plateau", released=True),)
     TrainingGuards._apply_verdict(a, 5, _res("REMEDIATE", readings))
     TrainingGuards._apply_verdict(a, 10, _res("REMEDIATE", readings))
-    assert a._leg_abort is True
-    assert getattr(b, "_soft_remediate_count", 0) == 0  # 新腿从零起算
-    assert getattr(b, "_leg_abort", False) is False
+    assert a.guard_state().leg_abort is True
+    assert b.guard_state().soft_remediate_count == 0  # 新腿从零起算
+    assert b.guard_state().leg_abort is False

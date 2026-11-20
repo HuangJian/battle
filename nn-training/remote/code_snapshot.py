@@ -81,6 +81,7 @@ from common.instance_lock import (
     proc_cmdline,
     release_instance_lock,
 )
+from common.paths import REPO_ROOT
 from common.pid_probe import pid_alive
 from common.proc import run_capture
 from common.protocol import TS_CODE_NAME
@@ -181,8 +182,8 @@ class CodeSnapshot:
 
 
 def _repo_root_default() -> Path:
-    """`remote/code_snapshot.py` → 仓根（`nn-training/` 的上一级）。"""
-    return Path(__file__).resolve().parents[2]
+    """`remote/code_snapshot.py` → 仓根（`nn-training/` 的上一级；单源见 `common/paths.py`）。"""
+    return REPO_ROOT
 
 
 def snapshot_dir(repo_root: str | Path | None = None) -> Path:

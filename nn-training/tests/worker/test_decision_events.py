@@ -9,7 +9,7 @@ import types
 
 import pytest
 
-from trainer.batch_plan import node_supports_decision_events
+from biz.batch_plan import node_supports_decision_events
 from worker.cmd import build_rollout_cmd
 from worker.config import CourseConfig, corpus_identity_fp
 
@@ -79,6 +79,7 @@ def test_node_gate_predicate() -> None:
 def test_fetch_task_encodes_flag(monkeypatch) -> None:
     """透传不断：flag 开 ⇒ 查询串带 decisionEvents=1；关 ⇒ 不带（旧 agent 照旧）。"""
     import common.distribution
+    import common.task_client
 
     seen: dict = {}
 
@@ -89,17 +90,21 @@ def test_fetch_task_encodes_flag(monkeypatch) -> None:
         seen["url"] = url
         raise _BoomError()
 
-    monkeypatch.setattr(common.distribution, "_request", fake_request)
-    # _request 的异常会被包成 DistError——URL 已在抛错前捕获，断它即可。
+    monkeypatch.setattr(common.distribution, "node_request", fake_request)
+    # node_request 的异常会被包成 DistError——URL 已在抛错前捕获，断它即可。
     with pytest.raises(common.distribution.DistError):
-        common.distribution.fetch_task(
-            "http://x/", "k", iter_id="i", wver="w", stage=2000, seed=7,
-            max_ticks=100, difficulty="hard", timeout=5.0, decision_events=True,
+        common.task_client.fetch_task(
+            common.task_client.FetchTaskSpec(
+                url="http://x/", auth_key="k", iter_id="i", wver="w", stage=2000, seed=7,
+                max_ticks=100, difficulty="hard", timeout=5.0, decision_events=True,
+            )
         )
     assert "decisionEvents=1" in seen["url"]
     with pytest.raises(common.distribution.DistError):
-        common.distribution.fetch_task(
-            "http://x/", "k", iter_id="i", wver="w", stage=2000, seed=7,
-            max_ticks=100, difficulty="hard", timeout=5.0,
+        common.task_client.fetch_task(
+            common.task_client.FetchTaskSpec(
+                url="http://x/", auth_key="k", iter_id="i", wver="w", stage=2000, seed=7,
+                max_ticks=100, difficulty="hard", timeout=5.0,
+            )
         )
     assert "decisionEvents" not in seen["url"]

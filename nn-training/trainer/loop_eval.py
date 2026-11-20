@@ -48,12 +48,43 @@ from __future__ import annotations
 import json
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
+import common.runtime
 from common.log import log
 from trainer.eval_m1 import read_eval_summary
 
+
+class EvalThread(Protocol):
+    """评估轮线程的最小可观测面（`threading.Thread` 与单测替身都满足它）。"""
+
+    def is_alive(self) -> bool: ...
+
+    def join(self, timeout: float | None = None) -> None: ...
+
+
+@dataclass(frozen=True)
+class EvalTimingView:
+    """in-loop 评估链的**只读快照**（G5：用例不再逐个伸手进私有槽位）。
+
+    字段名取「读这一簇的人关心什么」，不是内部布局镜像：`round_thread` 是当前在飞的那一轮
+    （与尾巴不同，它还没交棒）；`tail` 是已交棒给下一次 rollout 收官的 `(thread, 派发时刻)`；
+    `backfill` 是重启补账的剩余缺口（None = 还没扫，空元组 = 扫过且无缺口）。
+    `open_threads` 与 `open_eval_threads()` 同源（顺手剪掉已收工的）。
+    `tail_start` 是与 `tail` 成对的软等计时起点（交棒后复位成 None —— 「尾巴在手但没有
+    起点」不是合法态，两个字段一起读才说明得清）。
+    """
+
+    round_thread: EvalThread | None
+    gate: threading.Event | None
+    tail: tuple[EvalThread, float] | None
+    tail_start: float | None
+    join_sec: float
+    backfill: tuple[tuple[int, str], ...] | None
+    pending_m: int | None
+    open_threads: tuple[EvalThread, ...]
 
 def drop_inflight_rounds(cand: list[int], active: set[int]) -> tuple[list[int], list[int]]:
     """drain 去重：**已在飞**的评估轮不重派。返回 `(保留, 跳过)`。
@@ -96,8 +127,10 @@ class TrainingEval:
     _stream_meta: dict | None
 
     # ---- 本簇自己的状态（S4 第十七刀随簇搬来；旧类里也只被这一簇读写）--------------
-    _eval_thread: threading.Thread | None
-    _eval_gate: threading.Event | None
+    #: 当前在飞的一轮 eval（未收工；`_dispatch_delayed_eval` 每轮先清空再重新派发）。
+    #: 类级默认值同 `_eval_tail`：裸构造的实例（单测脚手架）没有 __init__ 赋值。
+    _eval_thread: threading.Thread | None = None
+    _eval_gate: threading.Event | None = None
     #: 本轮收官时仍未结束的 eval 尾巴 `(thread, 派发时刻)`——交给下一轮 rollout 收官
     #: 这个自然边界收拢（`_sweep_eval_tail`，不站等）。None = 无尾巴。
     #: 给类级默认值（而不只声明类型）：裸构造的实例（单测脚手架）没有 __init__ 赋值。
@@ -108,6 +141,9 @@ class TrainingEval:
     _eval_join_sec: float = 0.0
     #: `block=False` 收官 drain 的后台线程（serve 用；观测句柄，daemon 随进程退出）。
     _eval_drain_thread: threading.Thread | None = None
+    #: 收尾 drain 线程的属性（`eval-drain-*`）。mixin 没有 `__init__`，所以**首次使用时建**
+    #: （实例属性，非类属性 —— 类属性会被所有课程共享，等于一个隐藏单例）。
+    _eval_rt: common.runtime.Runtime | None = None
     #: 重启补账（F1）扫出的剩余旧缺口（升序 `(m, archive_path)`）：每轮延迟派发补一个。
     #: None = 还没扫（每进程一次）；[] = 扫过且无缺口。
     _eval_backfill: list[tuple[int, str]] | None = None
@@ -157,6 +193,20 @@ class TrainingEval:
         alive = tuple(t for t in self._eval_open if t.is_alive())
         self._eval_open = alive
         return alive
+
+    def eval_timing(self) -> EvalTimingView:
+        """这一簇的公开读数（监护 / 用例 / 诊断共用；只读，不改变任何等待语义）。"""
+        backfill = None if self._eval_backfill is None else tuple(self._eval_backfill)
+        return EvalTimingView(
+            round_thread=self._eval_thread,
+            gate=self._eval_gate,
+            tail=self._eval_tail,
+            tail_start=self._eval_tail_start,
+            join_sec=self._eval_join_sec,
+            backfill=backfill,
+            pending_m=self._eval_pending_m,
+            open_threads=self._eval_open_threads(),
+        )
 
     def _eval_course_fp(self) -> str:
         """本课文件血缘（`""` = 无课程身份的旧路径）：冻结与在飞轮数都按它分账。"""
@@ -294,7 +344,7 @@ class TrainingEval:
         （latest-wins）：本课轮一收工就派最新那个；被顶掉的旧轮由补账/收官 drain 从
         归档补，不占训练期的产能。
         """
-        from trainer.eval_dispatch import select_delayed_eval_it
+        from worker.eval_yield import select_delayed_eval_it
 
         args = self.args
         # 本轮采集刚落幕（rollout 收官）= 上一轮 eval 尾巴的自然收拢点：先收拢，再派新轮。
@@ -335,7 +385,8 @@ class TrainingEval:
     def _dispatch_eval_round(self, m: int, it: int, dist_cfg: dict | None) -> None:
         """为一轮已完成权重 W(m) 派发（读归档；归档缺席回落活指针 + WARN）。"""
         from trainer.dispatch_queue import RUN_ID
-        from trainer.eval_dispatch import dispatch_eval_bg, find_archive_weights
+        from trainer.eval_dispatch import dispatch_eval_bg
+        from worker.archive import find_archive_weights
 
         args = self.args
         src = find_archive_weights(
@@ -574,9 +625,11 @@ class TrainingEval:
             if block:
                 _drain_rounds()
             else:
-                self._eval_drain_thread = threading.Thread(
-                    target=_drain_rounds, daemon=True, name="eval-drain"
+                if self._eval_rt is None:
+                    self._eval_rt = common.runtime.Runtime(scope="eval-drain")
+                # 名字带起始轮号：收尾可能一次补很多轮（`cand` 升序），转储里要看出从哪轮起。
+                self._eval_drain_thread = self._eval_rt.thread(
+                    _drain_rounds, daemon=True, name=f"it{cand[0]}"
                 )
-                self._eval_drain_thread.start()
         except Exception as e:
             log(f"[eval] drain: 收尾 eval 失败（{type(e).__name__}: {e}）——不阻断收官")

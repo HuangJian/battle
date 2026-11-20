@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import base64
 import errno
+import http.client
 import json
 import socket
 import ssl
@@ -37,9 +38,56 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from typing import Any
+from typing import Any, TypedDict, cast
 
 from common import http_pool, net_http
+
+#: 传输面的失败集（本模块的三条真实边界：socket/TLS/超时 = `OSError`、HTTP 帧错误
+#: = `http.client.HTTPException`、body/JSON 不是期望形状 = `ValueError`）。
+#: 程序员错（`AttributeError` / `TypeError` / `KeyError`）**不在此列**：它们必须穿出去，
+#: 否则「回执形状变了」会被读成「网络抖动」—— 那正是 G4/G9 要拦的事故。
+_TRANSPORT_ERRORS = (OSError, http.client.HTTPException, ValueError)
+
+
+class RelayRequest(TypedDict, total=False):
+    """hub 下发的待执行请求（`/relay/<node>/_poll` 应答里的 `req`）。"""
+
+    method: str
+    path: str
+    body_b64: str
+    headers: dict[str, str]
+    rid: str
+
+
+class RelayReply(TypedDict):
+    """本机 agent 的回执（status/headers/body 三件，按原字节交回 hub）。"""
+
+    status: int
+    headers: dict[str, str]
+    body_b64: str
+
+
+class RelayPoll(TypedDict, total=False):
+    """`_poll` 的应答：端口通告（首拍）与待执行请求（空拍 = 都没有）。"""
+
+    local_port: int
+    req: RelayRequest
+
+
+class RelayFacts(TypedDict, total=False):
+    """`probe_hub` 的结构化读数（判据可消费；日志措辞不参与契约）。"""
+
+    host: str
+    port: int
+    dns: str
+    routes: dict[str, str]
+    tcp: dict[str, str]
+    tls: dict[str, str]
+    tls_ctrl: dict[str, str]
+    tls_net: dict[str, str]
+    alt_ports: dict[str, str]
+    alt_port: int
+    hint: str
 
 #: 单条长轮询的挂起时长（秒）；hub 侧 `POLL_WAIT_MAX=60` 是它的上限。
 POLL_WAIT_SEC = 20.0
@@ -174,19 +222,22 @@ def _gw_detail(e: urllib.error.HTTPError) -> str:
             val = hdrs.get(key) if hasattr(hdrs, "get") else None
             if val:
                 bits.append(f"{key}={str(val)[:32]}")
-    except Exception:
+    except _TRANSPORT_ERRORS:
+        # 契约静默（窄捕，非旧债）：死因附注是**观测面**——读不到头就少写一段，
+        # 绝不能让「诊断那一行」自己抛异常；程序员错仍穿出去。
         pass
     try:
         raw = e.read() or b""
         text = " ".join(raw[:400].decode("utf-8", "replace").split())
         if text:
             bits.append(f"body={text[:120]}")
-    except Exception:
+    except _TRANSPORT_ERRORS:
+        # 契约静默（窄捕，非旧债）：同上，body 摘录只用于人读死因。
         pass
     return f"（{'；'.join(bits)}）" if bits else ""
 
 
-def _route_open(route: str, req: Any, timeout: float):
+def _route_open(route: str, req: urllib.request.Request, timeout: float):
     """按路由发一条请求，**两条路都并行竞速多地址**：`inherit` 挂进程代理，`direct` 摘掉代理。
 
     竞速不是优化而是修 bug：云机的隧道域名常解析出 2 个 IPv6 + 2 个 IPv4（2026-11-18 实测
@@ -242,7 +293,12 @@ def _port_sweep(
         verdict, _human = _probe_one_route("direct", url, token, timeout)
         out[port] = verdict
 
-    threads = [threading.Thread(target=_sweep_port, args=(p,), daemon=True) for p in ports]
+    threads = [
+        threading.Thread(
+            target=_sweep_port, args=(p,), daemon=True, name=f"relay-sweep-port:{p}"
+        )
+        for p in ports
+    ]
     for t in threads:
         t.start()
     for t in threads:
@@ -269,7 +325,7 @@ def _probe_one_route(route: str, url: str, token: str, timeout: float) -> tuple[
         if e.code in GATEWAY_CODES:
             return f"gateway-{e.code}", f"{route}=网关 {e.code}（{ms:.0f}ms）{_gw_detail(e)}"
         return f"http-{e.code}", f"{route}=HTTP {e.code}（{ms:.0f}ms）"
-    except Exception as e:
+    except _TRANSPORT_ERRORS as e:
         return "fail", f"{route}={_err_text(e)}"
     return "ok", f"{route}=ok（{(time.monotonic() - t0) * 1000:.0f}ms）"
 
@@ -304,7 +360,12 @@ def _tcp_sweep(ips: list[str], port: int, timeout: float) -> dict[str, str]:
     def _sweep_addr(ip: str) -> None:
         out[ip] = _tcp_verdict(ip, port, timeout)
 
-    threads = [threading.Thread(target=_sweep_addr, args=(ip,), daemon=True) for ip in ips]
+    threads = [
+        threading.Thread(
+            target=_sweep_addr, args=(ip,), daemon=True, name=f"relay-sweep-tcp:{ip}"
+        )
+        for ip in ips
+    ]
     for t in threads:
         t.start()
     for t in threads:
@@ -348,7 +409,12 @@ def _tls_sweep(ips: list[str], port: int, sni: str, timeout: float) -> dict[str,
     def _sweep_tls(ip: str) -> None:
         out[ip] = _tls_verdict(ip, port, sni, timeout)
 
-    threads = [threading.Thread(target=_sweep_tls, args=(ip,), daemon=True) for ip in ips]
+    threads = [
+        threading.Thread(
+            target=_sweep_tls, args=(ip,), daemon=True, name=f"relay-sweep-tls:{ip}"
+        )
+        for ip in ips
+    ]
     for t in threads:
         t.start()
     for t in threads:
@@ -435,7 +501,7 @@ def _fail_hint(
 
 def probe_hub(
     hub_url: str, token: str, node_id: str, timeout: float = PROBE_TIMEOUT_SEC
-) -> tuple[bool, str, dict[str, Any]]:
+) -> tuple[bool, str, RelayFacts]:
     """relay 预检：**一条**人读日志 + 一份结构化读数（`(ok, line, facts)`）。
 
     真机事故（2026-11-18 DSW）就是这段缺失：hub 公网地址完全正确（本机 1.2s 401），
@@ -448,7 +514,7 @@ def probe_hub(
     host, port = _host_port(hub_url)
     ips = _resolve_ips(host, port)  # 只解析**一次**：DNS 轮转会让两条日志自相矛盾
     dns = _dns_summary(host, port, ips)
-    facts: dict[str, Any] = {"host": host, "port": port, "dns": dns, "routes": {}}
+    facts: RelayFacts = {"host": host, "port": port, "dns": dns, "routes": {}}
     url = f"{str(hub_url).rstrip('/')}/relay/{node_id}/_poll?wait=0"
     # 回环 / `NO_PROXY` 点名的目标只走直连：否则本机那台 LAN 代理会把一条「本来必然通」
     # 的回环请求也吊到 timeout，日志里就多出一条吓人的 `inherit=timeout`（实测 6s/次）。
@@ -463,7 +529,10 @@ def probe_hub(
     else:
         # 两条腿**并行**：串行就是 2×timeout（DSW 实测 12s），而预检要的只是「通不通」，
         # 两条路之间没有先后依赖；并行还顺带修掉「前一条把预算烧完、后一条没机会说话」。
-        ths = [threading.Thread(target=_run, args=(r,), daemon=True) for r in routes]
+        ths = [
+            threading.Thread(target=_run, args=(r,), daemon=True, name=f"relay-route:{r}")
+            for r in routes
+        ]
         for t in ths:
             t.start()
         for t in ths:
@@ -513,7 +582,9 @@ def probe_hub(
 
             # 两条对照与 hub 那轮 TLS **并行**：多问一家不该再加一份预算。
             ctl_threads = [
-                threading.Thread(target=_ctl_probe, args=(h,), daemon=True)
+                threading.Thread(
+                    target=_ctl_probe, args=(h,), daemon=True, name=f"relay-ctl-probe:{h}"
+                )
                 for h in (CTRL_HOST, CTRL_HOST_NET)
             ]
             for t in ctl_threads:
@@ -615,7 +686,7 @@ def _resolve_ips(host: str, port: int) -> list[str]:
     return out
 
 
-def _pick_route(facts: dict[str, Any]) -> str:
+def _pick_route(facts: RelayFacts) -> str:
     """预检读数 → 该钉哪条路由（`""` = 都不可用，别钉）。
 
     优先 `inherit`：`HTTPS_PROXY` 被显式配好时，出网大概率要它；`direct` 只是它的兜底。
@@ -634,8 +705,13 @@ def _b64(raw: bytes) -> str:
     return base64.b64encode(raw or b"").decode("ascii")
 
 
-def _forward(port: int, req: dict[str, Any]) -> dict[str, Any]:
-    """在本机 agent 上执行一条被转发的请求；**绝不抛**（失败也回一条可读的回执）。"""
+def _forward(port: int, req: RelayRequest) -> RelayReply:
+    """在本机 agent 上执行一条被转发的请求。
+
+    传输面失败（连不上/超时/HTTP 帧坏）**绝不抛**，回一条可读的 502 回执；**程序员错
+    （`AttributeError` / `TypeError` / `KeyError`）穿出去**，由 `_serve_lane` 的线程边界
+    记一行并退避——把回执形状的 bug 报成「agent 不通」是 G4 要拦的误诊。
+    """
     method = str(req.get("method") or "GET").upper()
     path = str(req.get("path") or "/")
     if not path.startswith("/"):
@@ -666,18 +742,18 @@ def _forward(port: int, req: dict[str, Any]) -> dict[str, Any]:
     except urllib.error.HTTPError as e:  # 4xx/5xx 是**应答**，不是转发失败
         try:
             raw = e.read(BODY_MAX)
-        except Exception:
+        except _TRANSPORT_ERRORS:
             raw = b""
         return {
             "status": int(e.code),
             "headers": dict(e.headers.items()) if e.headers else {},
             "body_b64": _b64(raw),
         }
-    except Exception as e:  # agent 没起/端口不通/超时
+    except _TRANSPORT_ERRORS as e:  # agent 没起/端口不通/超时（程序员错穿出去）
         return _reply_dict(502, {"error": f"relay 本地执行失败: {type(e).__name__}"})
 
 
-def _reply_dict(status: int, payload: dict[str, Any]) -> dict[str, Any]:
+def _reply_dict(status: int, payload: dict[str, Any]) -> RelayReply:
     return {
         "status": int(status),
         "headers": {"Content-Type": "application/json"},
@@ -740,9 +816,15 @@ class RelayLink:
         _LIVE_LINKS.append(self)
 
     def stop(self, timeout: float = 5.0) -> None:
+        """叫停全部轮询线程；`timeout` 是**整体**上限，不是每条线程一份。
+
+        每条 join 各给一份 timeout 会把关闭时间放大成 `N × timeout`（6 道 × 5s = 30s），
+        而线程是 daemon、真正的退出点由「这一拍长轮询回来」决定 —— 等不到就交给进程收尾。
+        """
         self._stop.set()
+        deadline = time.time() + max(0.0, float(timeout))
         for t in self._threads:
-            t.join(timeout=timeout)
+            t.join(timeout=max(0.0, deadline - time.time()))
         self._threads.clear()
         if self in _LIVE_LINKS:
             _LIVE_LINKS.remove(self)
@@ -750,6 +832,15 @@ class RelayLink:
     def alive(self) -> bool:
         """至少一个轮询线程还活着（全停 = 通道已死，supervisor 据此重建）。"""
         return any(t.is_alive() for t in self._threads) and not self._stop.is_set()
+
+    def thread_count(self) -> int:
+        """当前登记的轮询线程数（观测/用例读面；`stop()` 后为 0）。"""
+        return len(self._threads)
+
+    @property
+    def route(self) -> str:
+        """上一次成功的路由（`inherit` / `direct`；空 = 还没成功过）。"""
+        return self._route
 
     @property
     def polls(self) -> int:
@@ -805,7 +896,7 @@ class RelayLink:
 
     # ---------------------------------------------------------------- 轮询
 
-    def _route_order(self) -> list[str]:
+    def route_order(self) -> list[str]:
         """路由尝试顺序：回环/NO_PROXY 点名的目标**只能**直连；其余先试上次成功的。
 
         「先代理再直连」不是保险丝而是**真机必需**：平台（PAI-DSW / 企业网关）常把
@@ -839,7 +930,7 @@ class RelayLink:
         """
         fails: list[str] = []
         deadline = time.monotonic() + max(1.0, float(timeout))
-        order = self._route_order()
+        order = self.route_order()
         for idx, route in enumerate(order):
             remain = deadline - time.monotonic()
             after = len(order) - idx - 1
@@ -904,6 +995,9 @@ class RelayLink:
             try:
                 answer = self._poll()
             except Exception as e:
+                # 线程边界（**有意保留宽捕**）：一轮 poll 的可恢复失败面 = 网络 + HTTP 帧
+                # + body 解码；而线程**不许死**（死了 supervisor 会重建，但这一拍的死因
+                # 就只剩一条未捕获 traceback）。`_log_failure` 带 host/耗时/退避承诺。
                 self._bump("errors")
                 if self._stop.is_set():
                     return
@@ -924,7 +1018,7 @@ class RelayLink:
             self._bump("served")
             self._deliver(str(req["rid"]), resp)
 
-    def _deliver(self, rid: str, resp: dict[str, Any]) -> None:
+    def _deliver(self, rid: str, resp: RelayReply) -> None:
         """交回执，**短退避重试**（隧道抖一下不该整局白跑）。
 
         只重试「可能有救」的失败：网关类 5xx（CF 502/530）与传输异常。4xx 是**确定性**的
@@ -939,7 +1033,7 @@ class RelayLink:
                 last = e
                 if 400 <= int(e.code) < 500:
                     break
-            except Exception as e:
+            except _TRANSPORT_ERRORS as e:
                 last = e
             if attempt < REPLY_TRIES and self._stop.wait(REPLY_RETRY_SEC * attempt):
                 break
@@ -962,15 +1056,15 @@ class RelayLink:
         if self._err_seen % ERR_LOG_EVERY == 0:
             self.log(f"{head}：累计 {self._err_seen} 次，最近一次 {_err_text(e)}")
 
-    def _poll(self) -> dict[str, Any] | None:
+    def _poll(self) -> RelayPoll | None:
         url = f"{self.hub_url}/relay/{self.node_id}/_poll?wait={self.poll_wait:g}"
         _status, raw = self._send(
             "GET", url, {"Authorization": f"Bearer {self.token}"}, None, self.poll_wait + 15.0
         )
         data = json.loads(raw.decode("utf-8"))
-        return data if isinstance(data, dict) else None
+        return cast(RelayPoll, data) if isinstance(data, dict) else None
 
-    def _post_reply(self, rid: str, resp: dict[str, Any]) -> None:
+    def _post_reply(self, rid: str, resp: RelayReply) -> None:
         url = f"{self.hub_url}/relay/{self.node_id}/_reply/{rid}"
         payload = json.dumps(resp, ensure_ascii=False).encode("utf-8")
         self._send(
@@ -1033,16 +1127,13 @@ class RelayChannel:
         workers: int = POLL_WORKERS,
         wait_sec: float = PORT_WAIT_SEC,
     ) -> None:
-        self._args: dict[str, Any] = {
-            "hub_url": hub_url,
-            "token": token,
-            "node_id": node_id,
-            "agent_port": agent_port,
-            "log": log,
-            # **并发天花板**（见 `POLL_WORKERS` 注释）：调用方把 agent 的 worker 数传进来，
-            # 传输层就不能比算力层更窄；小机器上仍保底 `POLL_WORKERS` 条道。
-            "workers": max(POLL_WORKERS, int(workers)),
-        }
+        self._hub_url = hub_url
+        self._token = token
+        self._node_id = node_id
+        self._agent_port = agent_port
+        # **并发天花板**（见 `POLL_WORKERS` 注释）：调用方把 agent 的 worker 数传进来，
+        # 传输层就不能比算力层更窄；小机器上仍保底 `POLL_WORKERS` 条道。
+        self._workers = max(POLL_WORKERS, int(workers))
         self.log = log
         self._wait_sec = max(0.0, float(wait_sec))
         self.link: RelayLink | None = None
@@ -1055,7 +1146,14 @@ class RelayChannel:
         预检失败**不**短路：一次抖动不该让整台节点挂掉，通道照起（日志已经点名了）。
         """
         self.log(f"relay 通道（{reason}）：节点出站长轮询 hub，不做入站、不建隧道")
-        link = RelayLink(**self._args)
+        link = RelayLink(
+            hub_url=self._hub_url,
+            token=self._token,
+            node_id=self._node_id,
+            agent_port=self._agent_port,
+            log=self.log,
+            workers=self._workers,
+        )
         ok, line, facts = probe_hub(
             link.hub_url, link.token, link.node_id, timeout=PROBE_TIMEOUT_SEC
         )
@@ -1063,10 +1161,17 @@ class RelayChannel:
         alt = facts.get("alt_port")
         if alt:
             # 443 被中间层掐、备用端口整链通 ⇒ **当场换**，不让人回去改 CFG 再重跑
-            # （一次 cell 重跑 ≈ 3 分钟；而这条路上 20s 就能判完）。换完的 URL 留在 `_args` 里，
-            # 下一次 `open`（线程死亡重建）直接用新端口，不会再花一次预检的钱。
-            self._args["hub_url"] = with_port(link.hub_url, int(alt))
-            link = RelayLink(**self._args)
+            # （一次 cell 重跑 ≈ 3 分钟；而这条路上 20s 就能判完）。换完的 URL 记在
+            # `self._hub_url` 里，下一次 `open`（线程死亡重建）直接用新端口，不会再花一次预检的钱。
+            self._hub_url = with_port(link.hub_url, int(alt))
+            link = RelayLink(
+                hub_url=self._hub_url,
+                token=self._token,
+                node_id=self._node_id,
+                agent_port=self._agent_port,
+                log=self.log,
+                workers=self._workers,
+            )
             facts["routes"] = {}  # 旧路由结论属于 443，换端口后作废（不能拿去 pin 路由）
             ok = True
             # 备用端口的判定**只走过 direct**（`_port_sweep`），而默认顺序是 inherit 优先
@@ -1099,6 +1204,11 @@ class RelayChannel:
         return url
 
     @property
+    def workers(self) -> int:
+        """通道道数（观测/测试读面 = `max(POLL_WORKERS, agent workers)`）。"""
+        return self._workers
+
+    @property
     def hub_url(self) -> str:
         """**当前**的 hub 地址（含 `probe_hub` 自动改写过的备用端口）。
 
@@ -1107,7 +1217,7 @@ class RelayChannel:
         `handshake operation timed out`**，日志连续多轮「★ 未注册」。同一份地址必须只有
         一个真相：改端口的人（本类）负责把它交出去。
         """
-        return str(self._args.get("hub_url") or "")
+        return str(self._hub_url or "")
 
     @property
     def url(self) -> str:

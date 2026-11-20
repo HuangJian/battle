@@ -351,7 +351,7 @@ function serveWithRetry(
  *
  * F2（2026-09-19 审计）：POST /v1/update 只 pull、**不重启**，进程里跑的仍是启动时那份
  * 代码 ⇒ 这个 memo 必须继续报「运行中代码」的 hash。旧实现在 pull 成功后把它置空重算 ⇒ 节点会
- * 「报新代码、跑旧代码」，codeHash 门（common.distribution.check_code_hash）随即放行它——正是该门
+ * 「报新代码、跑旧代码」，codeHash 门（common.codehash.check_code_hash）随即放行它——正是该门
  * 要拦的东西的反向漏网。要换 hash，只有重启（/v1/restart，可带 pullBranch）。
  */
 export function memoizedCodeHash(): string {
@@ -413,7 +413,7 @@ const gitShortMemo: { value: string | null } = { value: null }
 // ---------------- engine_epoch 已**不再**是节点门字段（2026-09-17） ----------------
 // 用户指令：唯一事实来源 = tools/agent/codehash-files.txt，rollout 与 eval 同源。
 // 故 /v1/ping 只报 codeHash，eval 侧与 rollout 侧比的是**同一个值**；engine_epoch 退为
-// **账本记录值**（= sha256(codeHash)[0:16]，训练机侧算：common.distribution.compute_engine_epoch /
+// **账本记录值**（= sha256(codeHash)[0:16]，训练机侧算：common.codehash.compute_engine_epoch /
 // dashboard/src/evalboard/engine.ts）——它不再是节点门判据，也就没有 node↔trainer 的
 // 字段契约，不必出现在 ping 里（旧 agent 的 engineEpoch 字段被忽略即可）。
 
@@ -2922,7 +2922,7 @@ if (import.meta.main) {
     process.exit(0)
   }
   if (process.argv.includes('--print-code-hash-files')) {
-    // F4：TSV 报告（与 codehash-report.ts / common.distribution.code_hash_report() 同格式）。
+    // F4：TSV 报告（与 codehash-report.ts / common.codehash.code_hash_report() 同格式）。
     // console.log 已被时间戳包装覆盖，用 process.stdout.write 保证输出可 diff。
     process.stdout.write(codeHashReport() + '\n')
     process.exit(0)

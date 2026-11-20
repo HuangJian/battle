@@ -5,26 +5,15 @@ import secrets
 import threading
 from pathlib import Path
 
-# 以下五个名字是本模块的**公共 re-export 面**（原为本地定义，2026-09-23 收敛到唯一实现）。
-# 调用方（`trainer/batch_runner.py` / `trainer/eval_dispatch.py` / `trainer/rollout_phase.py` / e2e）与
-# 既有测试都从 `trainer.dispatch_queue` 取这些名字 ⇒ 名字留在原位，定义只留一份。
-#   · bun_version / mm  → `common.proc`（版本探测与 major.minor 比对）
-#   · _record_agent_meta → `biz.agent_meta`（dist-agent-meta.jsonl 的唯一写面）
-from common.proc import bun_version as _bun_version
-from common.proc import version_mm as mm  # noqa: F401 — re-export
-from worker.agent_meta import record_agent_meta as _record_agent_meta  # noqa: F401 — re-export
+# 本模块是**编排层**（`run_rollout_queue` 等），不是第二个 import 面：re-export 面已于
+# 2026-11-14 全部退役（版本探测 / agent meta / 轮级竞速 / `run_rollout` 都回到各自家里：
+# `common.proc` · `worker.agent_meta` · `trainer.queue_local`）。最后一条 `mm` 的后继是
+# 把 `batch_plan.py` 搬进 `biz/` —— 见 DECISIONS
+# §2026-11-14-retire-dispatch-queue-reexport-surface 与 §2026-11-14-batch-plan-belongs-to-biz。
 
-REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 = battle2（nn-training/trainer/ 上溯 3 层）
 # GPU 真机验证课（plan/replay-corpus.plan.md §6.6）：四档共用同一个 runId ⇒
 # `job_seed(runId,it,init_weights_fp)` 在档间可比；未给 env 时保持随机（旧行为逐字节不变）。
 RUN_ID = os.environ.get("NN_VERIFY_RUN_ID") or secrets.token_hex(8)  # runId 使 iterId 全局唯一（跨 relaunch 防混叠）
-from trainer.queue_local import (
-    pick_race_target,  # noqa: F401 — re-exported（in-flight race 选靶+节点排除，tests 引用）
-    pick_tail_race,  # noqa: F401 — re-exported（tests 引用）
-    race_tier_ok,  # noqa: F401 — re-exported（tests 引用）
-    register_inflight,  # noqa: F401 — re-exported（tests 引用）
-    run_rollout,  # noqa: F401 — re-exported（collect_only/loop 调用方）
-)
 
 
 def dispatches_jobs(args) -> bool:
@@ -60,15 +49,6 @@ def local_slots_max_of(args) -> int | None:
     except (TypeError, ValueError):
         return None
     return v if v >= 0 else None
-
-
-def bun_version(bun: str) -> str:
-    """`bun --version`；探测失败/空输出 → `"?"`（唯一实现见 `common.proc.bun_version`）。
-
-    保留本名与 1 参签名（薄包装），因为 `trainer/batch_runner.py` / `trainer/eval_dispatch.py` 从中
-    import、且测试用 `monkeypatch.setattr(mod, "bun_version", …)` 打桩。
-    """
-    return _bun_version(bun, fallback="?")
 
 
 def run_rollout_queue(

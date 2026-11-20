@@ -357,7 +357,8 @@ def test_guard_stops_the_leg_and_writes_a_replayable_ledger_event(tmp_path: Path
     # 2026-10-23 契约：auto 解析不出对端**不再回退 baseline**（见 DEAD 注释/DECISIONS）
     # ⇒ 要按「自己的起点」判必须显式写 mode=baseline。
     g = _guards(tmp_path, kickstart_burn={"mode": "baseline"})
-    assert g._kickstart_burn(3) is True, "连续三点低于基线就该停腿"
+    stopped = g._kickstart_burn(3)
+    assert stopped is True, "连续三点低于基线就该停腿"
 
     ledger = (tmp_path / "training_log.jsonl").read_text(encoding="utf-8").strip().splitlines()
     events = [json.loads(x) for x in ledger]
@@ -372,10 +373,12 @@ def test_guard_is_inert_without_kickstart_or_baseline(tmp_path: Path) -> None:
     _write_eval_rows(tmp_path, _rows(0.35, 0.10, 0.10, 0.10))
     g = _guards(tmp_path)
     g.args.kickstart_ref = False
-    assert g._kickstart_burn(3) is False, "没开缰绳就没有「回锚」这回事"
+    stopped = g._kickstart_burn(3)
+    assert stopped is False, "没开缰绳就没有「回锚」这回事"
     g.args.kickstart_ref = True
     _write_eval_rows(tmp_path, _rows(None, 0.10, 0.10, 0.10))
-    assert g._kickstart_burn(3) is False, "读不到基线（无 it0 行）不许停腿"
+    stopped = g._kickstart_burn(3)
+    assert stopped is False, "读不到基线（无 it0 行）不许停腿"
 
 
 def test_guard_also_halts_the_cloud_on_the_same_course(
@@ -399,7 +402,9 @@ def test_guard_also_halts_the_cloud_on_the_same_course(
     )
     g._cloud_halted = False
 
-    assert g._kickstart_burn(3) is True
+    stopped = g._kickstart_burn(3)
+
+    assert stopped is True
     assert calls == [(True, "t5-kk")], "停腿必须同时按课程下发云端停机达令"
 
 
@@ -407,12 +412,14 @@ def test_guard_counts_down_loudly_before_tripping(tmp_path: Path, capsys=None) -
     """未命中但有计数 ⇒ 落一行账（状态转移才写，不是每轮都写）。"""
     _write_eval_rows(tmp_path, _rows(0.35, 0.29, 0.28))
     g = _guards(tmp_path, kickstart_burn={"mode": "baseline"})
-    assert g._kickstart_burn(2) is False
+    stopped = g._kickstart_burn(2)
+    assert stopped is False
     lines = (tmp_path / "training_log.jsonl").read_text(encoding="utf-8").strip().splitlines()
     burn = [json.loads(x) for x in lines if json.loads(x)["event"] == "kickstart_burn"]
     assert len(burn) == 1 and burn[0]["streak"] == 2
     # 同值再判一次不再重复写（否则账本被淹）
-    assert g._kickstart_burn(2) is False
+    stopped = g._kickstart_burn(2)
+    assert stopped is False
     lines2 = (tmp_path / "training_log.jsonl").read_text(encoding="utf-8").strip().splitlines()
     assert len(lines2) == len(lines)
 
@@ -545,12 +552,13 @@ def test_paired_wiring_uses_the_peer_and_survives_shared_drift(
     _burn_write(tmp_path / "own", _rows(0.86, 0.79, 0.78, 0.77))
     _burn_write(tmp_path / "t-peer", _rows(0.86, 0.79, 0.78, 0.77))
     _burn_peer_run_start(tmp_path, BURN_V)
-    assert (
-        _burn_guard(tmp_path, burn={"mode": MODE_BASELINE})._kickstart_burn(3) is True
-    ), "显式 baseline ⇒ 按自己的起点停腿"
-    assert _burn_guard(tmp_path)._kickstart_burn(3) is False, "auto 解析出同 V 对端 ⇒ 改走配对读"
+    stopped = _burn_guard(tmp_path, burn={"mode": MODE_BASELINE})._kickstart_burn(3)
+    assert stopped is True, "显式 baseline ⇒ 按自己的起点停腿"
+    stopped = _burn_guard(tmp_path)._kickstart_burn(3)
+    assert stopped is False, "auto 解析出同 V 对端 ⇒ 改走配对读"
     g = _burn_guard(tmp_path, burn={"mode": MODE_PAIRED})
-    assert g._kickstart_burn(3) is False
+    stopped = g._kickstart_burn(3)
+    assert stopped is False
     assert _burn_events(tmp_path)[-1]["event"] == "gate_verdict"
 
 
@@ -563,7 +571,9 @@ def test_paired_wiring_stops_and_records_the_delta(
     _burn_write(tmp_path / "t-peer", _rows(0.86, 0.86, 0.86, 0.86))
     _burn_peer_run_start(tmp_path, BURN_V)
 
-    assert _burn_guard(tmp_path, burn={"mode": MODE_PAIRED})._kickstart_burn(3) is True
+    stopped = _burn_guard(tmp_path, burn={"mode": MODE_PAIRED})._kickstart_burn(3)
+
+    assert stopped is True
     events = _burn_events(tmp_path)
     burn = [e for e in events if e["event"] == "kickstart_burn"][-1]
     assert burn["mode"] == MODE_PAIRED and burn["streak"] == BURN_POINTS
@@ -586,7 +596,9 @@ def test_paired_wiring_refuses_a_mispaired_peer(tmp_path: Path, monkeypatch: pyt
     _burn_write(tmp_path / "t-peer", _rows(0.86, 0.86, 0.86, 0.86))
     _burn_peer_run_start(tmp_path, BURN_V + 82)
 
-    assert _burn_guard(tmp_path, burn={"mode": MODE_PAIRED})._kickstart_burn(3) is False, (
+    stopped = _burn_guard(tmp_path, burn={"mode": MODE_PAIRED})._kickstart_burn(3)
+
+    assert stopped is False, (
         "错配对端 ⇒ 不判（不再拿自己的起点代打）"
     )
     assert not [e for e in _burn_events(tmp_path) if e["event"] == "kickstart_burn"]
@@ -610,7 +622,8 @@ def test_ambiguous_peer_does_not_judge(tmp_path: Path, monkeypatch: pytest.Monke
         )
 
     g = _burn_guard(tmp_path, burn={"mode": MODE_PAIRED})
-    assert g._kickstart_burn(3) is False, "对端不唯一 ⇒ 不猜，也不改判自己的起点"
+    stopped = g._kickstart_burn(3)
+    assert stopped is False, "对端不唯一 ⇒ 不猜，也不改判自己的起点"
     assert not [e for e in _burn_events(tmp_path) if e["event"] == "kickstart_burn"], (
         "不判就不该落 kickstart_burn 台账（否则控制台会读到一条没发生过的判定）"
     )
@@ -626,7 +639,9 @@ def test_single_leg_auto_does_not_judge(tmp_path: Path, monkeypatch: pytest.Monk
     _burn_write(tmp_path / "t-peer", _rows(0.86, 0.86, 0.86, 0.86))
     _burn_peer_run_start(tmp_path, BURN_V)
 
-    assert _burn_guard(tmp_path, declared=None)._kickstart_burn(3) is False
+    stopped = _burn_guard(tmp_path, declared=None)._kickstart_burn(3)
+
+    assert stopped is False
     assert not [e for e in _burn_events(tmp_path) if e["event"] == "kickstart_burn"]
 
 
@@ -636,7 +651,9 @@ def test_guard_uses_the_course_block_and_module_defaults(tmp_path: Path) -> None
 
     g = _guards(tmp_path)
     g.args.kickstart_burn = {"margin_pp": 100.0, "points": 3, "mode": MODE_BASELINE}
-    assert g._kickstart_burn(3) is False, "课程块把噪声带放大到 100pp ⇒ 不停腿"
+    stopped = g._kickstart_burn(3)
+    assert stopped is False, "课程块把噪声带放大到 100pp ⇒ 不停腿"
 
     g2 = _guards(tmp_path, kickstart_burn={"mode": "baseline"})
-    assert g2._kickstart_burn(3) is True, "显式 baseline + 无 margin/points ⇒ 模块常量（5pp/3 点）"
+    stopped = g2._kickstart_burn(3)
+    assert stopped is True, "显式 baseline + 无 margin/points ⇒ 模块常量（5pp/3 点）"

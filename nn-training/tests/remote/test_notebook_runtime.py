@@ -384,7 +384,8 @@ def test_backend_comes_from_the_worker_resolver_not_a_local_copy(
         nbr, "_resolve_backend", _REAL_RESOLVE_BACKEND
     )  # 撤掉 autouse 的 torch 假货
     monkeypatch.setattr(bc_job, "resolve_ppo_backend", lambda req: f"paddle:{req}")
-    assert nbr._resolve_backend() == "paddle:auto"
+    backend = nbr._resolve_backend()
+    assert backend == "paddle:auto"
     monkeypatch.setattr(bc_job, "resolve_ppo_backend", real)
 
 
@@ -406,7 +407,8 @@ def test_run_probe_reads_last_json_line(monkeypatch: pytest.MonkeyPatch) -> None
             stdout="一些噪声\n" + '{"v": "3.3.1", "n": 1, "names": ["A100"]}\n'
         ),
     )
-    assert nbr._run_probe(lambda m: None, "code", "paddle") == {
+    probed = nbr._run_probe(lambda m: None, "code", "paddle")
+    assert probed == {
         "v": "3.3.1",
         "n": 1,
         "names": ["A100"],
@@ -432,7 +434,8 @@ def test_run_probe_unparsable_output_is_none(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(
         nbr, "run_capture", lambda argv, timeout=0: _FakeCompleted(stdout="not json\n")
     )
-    assert nbr._run_probe(lambda m: None, "code", "paddle") is None
+    probed = nbr._run_probe(lambda m: None, "code", "paddle")
+    assert probed is None
 
 
 # ------------------------------------------------------------------ _tpu_holders
@@ -450,7 +453,7 @@ def test_tpu_holders_parses_fd_links(monkeypatch: pytest.MonkeyPatch) -> None:
             raise OSError("bad link")
         return v
 
-    def fake_open(path: Any, *a: Any, **kw: Any):  # type: ignore[no-untyped-def]
+    def fake_open(path: Any, *a: Any, **kw: Any):
         if path == "/proc/123/cmdline":
             return io.BytesIO(b"python\0-m\0remote.worker")
         return real_open(path, *a, **kw)
@@ -458,12 +461,14 @@ def test_tpu_holders_parses_fd_links(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(nbr.os, "readlink", fake_readlink)
     monkeypatch.setattr("builtins.open", fake_open)
     # vfio 命中（cmdline 解析）收录；非 vfio（空串 / accel）跳过
-    assert nbr._tpu_holders() == [(123, "/dev/vfio/0", "python -m remote.worker")]
+    holders = nbr._tpu_holders()
+    assert holders == [(123, "/dev/vfio/0", "python -m remote.worker")]
 
 
 def test_tpu_holders_no_proc_no_crash() -> None:
     # Windows / 非 Linux：glob 空列表 → 空 holders（本机即为真）
-    assert nbr._tpu_holders() == []
+    holders = nbr._tpu_holders()
+    assert holders == []
 
 
 # ------------------------------------------------------------------ run_pull_worker
@@ -1243,9 +1248,12 @@ def test_sha12_matches_sha256_prefix() -> None:
 
 def test_hub_base_prefers_registry_url() -> None:
     """通知与注册**同一个**地址：`registry_url` > `hub_url`，去尾斜杠。"""
-    assert nbr._hub_base_of({"hub_url": "http://a/", "registry_url": "https://b/"}) == "https://b"
-    assert nbr._hub_base_of({"hub_url": "http://a/"}) == "http://a"
-    assert nbr._hub_base_of({}) == ""
+    base = nbr._hub_base_of({"hub_url": "http://a/", "registry_url": "https://b/"})
+    assert base == "https://b"
+    base = nbr._hub_base_of({"hub_url": "http://a/"})
+    assert base == "http://a"
+    base = nbr._hub_base_of({})
+    assert base == ""
 
 
 def test_push_worker_passes_result_ready_hub_url(
@@ -1405,3 +1413,65 @@ def test_push_registry_register_goes_through_proxy_aware_opener(
     # test_source_text_assert_budget.py` 的口径 A 就是给这种断言准备的，这里用不着它）
     paths = [urlsplit(str(getattr(r, "full_url", ""))).path for r in seen["reqs"]]
     assert paths == ["/admin/nodes/register", "/admin/nodes/unregister"], paths
+
+
+# ------------------------------------------------ 捕获面：hub 不可达 vs 我们自己的 bug（G4，2026-11-15）
+
+
+def test_pull_unreachable_hub_still_exits_minus2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """网络层失败（隧道过期 / DNS / 连接被拒）仍是「hub 不可达」⇒ -2（不重启、不白跑）。"""
+
+    def _down(req: Any, timeout: float = 15) -> Any:
+        raise OSError("tunnel expired")
+
+    monkeypatch.setattr(nbr, "_hub_open", _down)
+    assert nbr.run_pull_worker(_base_cfg(tmp_path), lambda m: None) == -2
+
+
+def test_pull_programmer_error_is_not_reported_as_an_unreachable_hub(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本模块自己的 bug 必须穿出去（改回 `except Exception` ⇒ 本用例红）。
+
+    旧行为把它打成「FATAL: hub 不可达（AttributeError: ...）——检查隧道 URL 是否过期」并返回 -2：
+    现场是一条**确定性的错误指引**（去查隧道），而真因是回执形状变了。这种误诊比崩溃贵得多
+    —— 崩溃带 traceback，误诊带一段言之凿凿的错方向。
+    """
+
+    def _buggy(req: Any, timeout: float = 15) -> Any:
+        raise AttributeError("'NoneType' object has no attribute 'read'")
+
+    monkeypatch.setattr(nbr, "_hub_open", _buggy)
+    with pytest.raises(AttributeError):
+        nbr.run_pull_worker(_base_cfg(tmp_path), lambda m: None)
+
+
+def test_unstartable_probe_child_falls_back_to_cpu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """探测子进程起不来（`OSError`）⇒ 真·未知 ⇒ 回落 CPU（与「装坏了 ⇒ FATAL」分开）。"""
+
+    def _no_python(argv, timeout=0):
+        raise OSError("interpreter missing")
+
+    monkeypatch.setattr(nbr, "run_capture", _no_python)
+    assert nbr.resolve_device(_base_cfg(tmp_path), lambda m: None) == "cpu"
+
+
+def test_probe_does_not_swallow_ctrl_c(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`KeyboardInterrupt` 必须穿出去：旧代码 `except BaseException` 把 Ctrl-C 变成「按未知处理」。
+
+    torch 探测最长 60s、两条核加起来两分钟——这期间按 Ctrl-C 却看着它继续跑，比崩掉更糟。
+    改回 `except BaseException` ⇒ 本用例红。
+    """
+
+    def _interrupted(argv, timeout=0):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(nbr, "run_capture", _interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        nbr.resolve_device(_base_cfg(tmp_path), lambda m: None)

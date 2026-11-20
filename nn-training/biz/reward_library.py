@@ -935,6 +935,15 @@ class RewardFn:
 
             self._builtin = get_builtin(spec.builtin)
 
+    @property
+    def backend(self) -> str:
+        """实际走哪条实现：`"formula"`（编译成功）或 `"builtin"`（降级卡回退）。
+
+        构造期定型、之后不变（`phi()` 的两个分支也只看它）；诊断与用例不必再伸手进
+        `_compiled` / `_builtin` 两格。
+        """
+        return "formula" if self._compiled is not None else "builtin"
+
     # ---- 参数折算 ----
 
     def resolve_params(self, it: int) -> dict[str, float]:

@@ -43,7 +43,7 @@ from worker.ppo.ckpt_convert import (
     paddle_state_to_torch,
     torch_state_to_paddle,
 )
-from worker.ppo.np_core import _pack_np_state, _unpack_np_state
+from worker.ppo.rng import PPORng
 
 __all__ = [
     "load_ckpt",
@@ -132,6 +132,7 @@ def save_ckpt(
     *,
     epochs_done: int,
     steps_done: int,
+    rng: PPORng,
 ) -> None:
     """epoch 粒度 checkpoint（与 `worker.ppo.common._ppo_save` 同布局，Paddle 侧实现）。"""
     os.makedirs(ckpt_path, exist_ok=True)
@@ -151,7 +152,7 @@ def save_ckpt(
             {
                 "epochs_done": int(epochs_done),
                 "steps_done": int(steps_done),
-                "rng": _pack_np_state(),
+                "rng_streams": rng.state(),
             },
             f,
         )
@@ -254,11 +255,12 @@ def load_opt_pt(model, opt, path: str | Path) -> int:
     return _load_opt_state(model, opt, state)
 
 
-def load_ckpt(model, opt, ckpt_path: str | None) -> tuple[int, int]:
+def load_ckpt(model, opt, ckpt_path: str | None, rng: PPORng) -> tuple[int, int]:
     """载入 torch 格式 checkpoint，返回 `(epochs_done, steps_done)`；目录不全 ⇒ `(0, 0)`。
 
     语义与 `worker.ppo.common._ppo_load` 一致：三件套缺一就算「没有 checkpoint」；
-    model/opt/RNG 三者任一读不动都**响亮**失败（不做半份续跑）。
+    model/opt/RNG 三者任一读不动都**响亮**失败（不做半份续跑）；旧 ckpt 缺 `rng_streams`
+    时只记一行 WARN（模型/优化器照常用，顺序从种子重建）。
     """
     if not ckpt_path:
         return (0, 0)
@@ -276,5 +278,11 @@ def load_ckpt(model, opt, ckpt_path: str | None) -> tuple[int, int]:
         st = json.load(f)
     load_model_pt(model, paths["model"])
     steps = load_opt_pt(model, opt, paths["opt"])
-    _unpack_np_state(st["rng"])
+    if not rng.restore(st.get("rng_streams")):
+        from common.log import log as _log
+
+        _log(
+            "[ppo-paddle] WARN 旧 checkpoint 无 rng_streams（全局 MT19937 时代产物）—— "
+            "随机流从种子重建：本段顺序与崩溃前不同，权重/动量照常接着用"
+        )
     return int(st.get("epochs_done", 0)), int(st.get("steps_done", steps))

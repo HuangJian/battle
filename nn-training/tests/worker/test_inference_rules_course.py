@@ -14,8 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from biz.course_spec import InferenceRulesBlock
-from trainer.batch_plan import (
+from biz.batch_plan import (
     eval_rule_kwargs,
     eval_rules_reject_reason,
     node_supports_break_bricks_on_path,
@@ -23,6 +22,7 @@ from trainer.batch_plan import (
     node_supports_suppress_lead_miss_fire,
     node_supports_suppress_useless_fire,
 )
+from biz.course_spec import InferenceRulesBlock
 from worker.cmd import build_rollout_cmd
 from worker.config import CourseConfig, apply_course, corpus_identity_fp
 from worker.eval_local import run_local_eval_game
@@ -260,7 +260,7 @@ def test_local_eval_cmd_flag_only_when_enabled(monkeypatch, tmp_path: Path) -> N
 
 def test_fetch_task_encodes_param_and_key(monkeypatch) -> None:
     """透传不断：开 ⇒ 查询串带两个规则参数且任务键带后缀；关 ⇒ 都不带。"""
-    import common.distribution
+    import common.task_client
 
     seen: dict = {}
     keys: list[str] = []
@@ -272,13 +272,15 @@ def test_fetch_task_encodes_param_and_key(monkeypatch) -> None:
         seen["url"] = url
         raise _BoomError()
 
-    monkeypatch.setattr(common.distribution, "_request", fake_request)
-    with pytest.raises(common.distribution.DistError):
-        common.distribution.fetch_task(
-            "http://x/", "k", iter_id="i", wver="w", stage=2000, seed=7,
-            max_ticks=100, difficulty="hard", timeout=5.0,
-            skip_steel_only_shots=True, break_bricks_on_path=True,
-            suppress_useless_fire=True, suppress_lead_miss_fire=False, on_key=keys.append,
+    monkeypatch.setattr(common.task_client.distribution, "node_request", fake_request)
+    with pytest.raises(common.task_client.DistError):
+        common.task_client.fetch_task(
+            common.task_client.FetchTaskSpec(
+                url="http://x/", auth_key="k", iter_id="i", wver="w", stage=2000, seed=7,
+                max_ticks=100, difficulty="hard", timeout=5.0,
+                skip_steel_only_shots=True, break_bricks_on_path=True,
+                suppress_useless_fire=True, suppress_lead_miss_fire=False, on_key=keys.append,
+            )
         )
     qs = urllib.parse.parse_qs(urllib.parse.urlparse(seen["url"]).query)
     assert qs.get(SKIP_PARAM) == ["1"]
@@ -289,11 +291,13 @@ def test_fetch_task_encodes_param_and_key(monkeypatch) -> None:
 
     seen.clear()
     keys.clear()
-    with pytest.raises(common.distribution.DistError):
-        common.distribution.fetch_task(
-            "http://x/", "k", iter_id="i", wver="w", stage=2000, seed=7,
-            max_ticks=100, difficulty="hard", timeout=5.0,
-            suppress_lead_miss_fire=True, on_key=keys.append,
+    with pytest.raises(common.task_client.DistError):
+        common.task_client.fetch_task(
+            common.task_client.FetchTaskSpec(
+                url="http://x/", auth_key="k", iter_id="i", wver="w", stage=2000, seed=7,
+                max_ticks=100, difficulty="hard", timeout=5.0,
+                suppress_lead_miss_fire=True, on_key=keys.append,
+            )
         )
     qs = urllib.parse.parse_qs(urllib.parse.urlparse(seen["url"]).query)
     assert qs.get(SKIP_PARAM) is None

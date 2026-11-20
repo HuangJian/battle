@@ -69,7 +69,7 @@ def _store(tmp_path: Path, clock: _Clock) -> _JobStore:
 
 def _publish(store: _JobStore, jid: str = "j" * 16) -> None:
     store.publish(jid, _mini_manifest(jid), b"payload-bytes")
-    assert ((store._job_dir(jid)) / PAYLOAD_NAME).exists()
+    assert (store.job_root / jid / PAYLOAD_NAME).exists()
 
 
 def _events(store: _JobStore) -> list[dict]:
@@ -109,7 +109,9 @@ def test_claim_excludes_from_pool_until_expiry(tmp_path: Path) -> None:
     assert store.claim("j" * 16) is None  # 并发领取竞负
     clock.t += 1
     assert store.heartbeat("j" * 16, token) is True  # 活 worker：有心跳
-    clock.t = store._leases["j" * 16] - 1  # 到期前一秒
+    expiry = store.lease_expiry("j" * 16)
+    assert expiry is not None
+    clock.t = expiry - 1  # 到期前一秒
     assert store.claimable_job_ids() == []  # 边界内仍独占
     clock.t += 1.001
     assert store.claimable_job_ids() == ["j" * 16]  # 过期回池
@@ -122,10 +124,12 @@ def test_claim_sets_owner_and_expiry_together(tmp_path: Path) -> None:
     _publish(store)
     token = store.claim("j" * 16)
     assert isinstance(token, str)
-    assert store._lease_owners.get("j" * 16) == token
-    assert store._leases.get("j" * 16) == clock.t + CLAIM_TTL_SEC
-    assert store._last_heartbeat.get("j" * 16) == clock.t
-    # 领取即有 owner → 心跳立即有效（旧 bug：只写 _leases 时恒 False）
+    # owner：token 对得上（公开口径是「这个 token 能代表持有人」，不是字典里有这行）
+    assert store.result_token_ok("j" * 16, token) is True
+    # expiry：领取后**立刻**还能让出去就是没租约 —— 公开面只回答「现在可不可领」不回答「到几点」
+    assert store.claimable_job_ids() == [], "领取后立即回池 ⇒ 根本没设租约"
+    # 心跳：领取即有 owner ⇒ 心跳立即有效（旧 bug：只写 `_leases` 时恒 False）。
+    # 这一条同时就是「`_last_heartbeat` 被戳了一记」的公开证据。
     assert store.heartbeat("j" * 16, token) is True
 
 
@@ -151,11 +155,11 @@ def test_failed_heartbeat_does_not_extend(tmp_path: Path) -> None:
     _publish(store)
     token = store.claim("j" * 16)
     assert isinstance(token, str)
-    expiry_before = store._leases["j" * 16]
+    expiry_before = store.lease_expiry("j" * 16)
     assert store.heartbeat("j" * 16, "wrong-token") is False
     assert store.heartbeat("no-such-job", token) is False
-    assert store._leases["j" * 16] == expiry_before  # 失败不延长
-    assert store._last_heartbeat["j" * 16] == clock.t  # 未动
+    assert store.lease_expiry("j" * 16) == expiry_before  # 失败不延长
+    assert store.heartbeat_at("j" * 16) == clock.t  # 未动
 
 
 def test_release_returns_to_pool_immediately(tmp_path: Path) -> None:
@@ -226,7 +230,9 @@ def test_heartbeat_once_never_reaped(tmp_path: Path) -> None:
     assert store.claim("j" * 16) is None
     assert store.inflight() == ["j" * 16]
     assert _orphan_events(store) == []
-    clock.t = store._leases["j" * 16] + 1  # 跨过这次的 TTL 到期点
+    expiry = store.lease_expiry("j" * 16)
+    assert expiry is not None
+    clock.t = expiry + 1  # 跨过这次的 TTL 到期点
     assert store.claimable_job_ids() == ["j" * 16]  # 既有过期路径回池
     assert store.claim("j" * 16)
     assert _orphan_events(store) == []  # 过期 ≠ 孤儿，不写那个事件
@@ -248,7 +254,9 @@ def test_push_lease_is_never_orphan_reaped(tmp_path: Path) -> None:
     assert store.claim("j" * 16) is None
     assert store.inflight() == ["j" * 16]
     assert _orphan_events(store) == []
-    clock.t = store._leases["j" * 16] + 1  # 跨过 TTL ⇒ 按**过期**回收
+    expiry = store.lease_expiry("j" * 16)
+    assert expiry is not None
+    clock.t = expiry + 1  # 跨过 TTL ⇒ 按**过期**回收
     assert store.claimable_job_ids() == ["j" * 16]
     assert store.claim("j" * 16)
     assert _orphan_events(store) == []

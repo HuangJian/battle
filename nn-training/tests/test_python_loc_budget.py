@@ -22,6 +22,13 @@
     顶层不得 `import remote.*`），§5.7.3 实测「取包面闭包 47/86 节点、心跳簇 29 节点」
     ⇒ 拆不开，只能留档豁免。
 
+    **2026-11-17：发行物改成生成物后，这条豁免只豁免发行物本身**（`python.refactor.md`
+    §7.6 / §10-B8）：源码拆在 `remote/_offline_boot/*.pyfrag`（12 段，按顶层块边界切），
+    由 `tools/build_offline_boot.py` 拼回单文件。于是「拆不开」不再是理由、只剩「运输契约要
+    单文件」这一条 —— 源码面因此也受同一条预算：
+    `test_generated_offline_boot_sources_stay_under_the_limit` 逐段量 LOC（口径同一个 `loc_of`），
+    防止下一个 1200 行被塞回某一段而豁免照旧。
+
 **防漂移**（三条，与 `test_githook_scripts.py` 同风格：把「静默失效」变成红）：
 
   1. 扫描必须真扫到货（`git` 调用失败 / cwd 不对 / 豁免面写宽 ⇒ 空跑也算绿）；
@@ -183,6 +190,26 @@ def test_exempt_dirs_are_test_layers_only() -> None:
     leaked = sorted(r for r in hits if not r.startswith(EXEMPT_DIR_ROOTS))
     assert not leaked, (
         f"以下路径被目录豁免片段误伤（只允许 {EXEMPT_DIR_ROOTS}）：\n  " + "\n  ".join(leaked)
+    )
+
+
+def test_generated_offline_boot_sources_stay_under_the_limit() -> None:
+    """生成物的**源码**也受同一条预算（豁免只豁免发行物）。
+
+    分片按顶层块边界切出，所以每段都能独立 `ast.parse` ⇒ 用的就是全仓同一个 `loc_of`，
+    不是另一套宽松口径。判据红了只有两条出路：把那段拆细（首选），或者承认发行物又回到
+    「没人拆」的状态、把豁免与证据一起重写。
+    """
+    from tools import build_offline_boot as gen
+
+    over: list[str] = []
+    for part in gen.part_paths():
+        n = loc_of(part.read_text(encoding="utf-8", errors="replace"))
+        if n >= LOC_LIMIT:
+            over.append(f"  {part.name}: {n} 行（超 {n - LOC_LIMIT}）")
+    assert not over, (
+        f"`remote/_offline_boot/` 的分片 LOC ≥ {LOC_LIMIT}（发行物豁免的前提就是源码在预算内）：\n"
+        + "\n".join(over)
     )
 
 

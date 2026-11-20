@@ -3,9 +3,10 @@ common/distribution.py — 分布式采样 trainer 侧公共工具（stdlib-only
 
 与 tools/agent/sampler-agent.ts 构成双语协议契约（plan/distributed-rollout.md v3.6）：
 
-- codeHash 配方（两侧实现必须逐字节一致）：对 glob 集（`src/nn/**` 全部文件 +
-  `tools/sim/export-rl-rollout.ts`）按 posix 相对路径字典序遍历，依次喂入
-  sha256(path 字节) 与 sha256(文件内容)，最终 hex。
+- codeHash 配方（两侧实现必须逐字节一致）→ `common/codehash.py`（2026-11-16 拆出：
+  它只读文件、不发请求）。
+- 远控升级 / 重启护栏 → `remote/node_upgrade.py`（2026-11-19 整簇搬出：它是跨机器的
+  控制动作，且 L0 不该再长一处出站副作用；本模块只留它要用的 HTTP 漏斗 `node_request`）。
 - 结果容器：
   - v2（BCV2，v3.6 起 agent 缺省）：gzip( magic u32 | headerLen u32 | headerJSON |
     entry* )，entry = nameLen u16 | name | dataLen u64 | 原始 npy 字节——由 exporter
@@ -33,31 +34,33 @@ common/distribution.py — 分布式采样 trainer 侧公共工具（stdlib-only
 ★ 2026-09-27（S5 第十一刀）：shard 清单 / 结果容器校验 / 落盘 → `common/shard.py`；
 进程内权重下发账本（`_WEIGHTS_PUSHED` + partition/note/forget）→ `common/weights_ledger.py`。
 两者都在本模块留 `X as X` 门面（历史调用点一行不改）。
+
+★ 2026-11-19（B8 第十一刀）：**任务协议**（提交 / 轮询 / 取消 / 结果容器 / 能力握手）→
+`common/task_client.py`；**权重传输**（探针 / POST / 并行下发 / 409 自愈）→
+`common/weights_client.py`。本模块此后只剩**传输核心**：机器配置 / 错误分类 / 收工断连的
+在飞登记 / 唯一 HTTP 漏斗 `node_request` / 探活（`node_ping` / `ping_nodes_parallel` /
+`push_node_ping`）/ 权重指纹。上面几簇都经属性查找调 `distribution.node_request`，
+所以「打桩打在漏斗上」这条缝没变（见 `docs/nn/engineering.md` §220）。
 """
 
 from __future__ import annotations
 
-import gzip
-import hashlib
+import http.client
 import json
 import os
-import struct
-import subprocess
 import threading
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
 from typing import Any
 
-from common import http_pool, net_http
+from common import http_pool, net_http, runtime
 from common.distribution_limits import STATUS_TIMEOUT_SEC as STATUS_TIMEOUT_SEC
 from common.distribution_limits import node_slots as node_slots
 from common.distribution_limits import status_timeout_of as status_timeout_of
+from common.errors import NET_ERRORS as _BASE_NET_ERRORS
 from common.hashing import sha256_file
-from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
-from common.proc import run_capture
+from common.paths import REPO_ROOT
 
 # 竞速账 / 采集口径 → `common/race_metrics.py`（2026-11-11 LOC 预算）。纯函数、无状态，
 # 日志行与 `dist` 块共用同一处算术；本模块只留门面，`common.distribution.race_stats` 等
@@ -118,11 +121,6 @@ from common.weights_ledger import (
 from common.weights_ledger import (
     weights_push_cache_reset as weights_push_cache_reset,
 )
-
-#: 仓库根。2026-09-30（刀 2）：本模块从 `nn-training/dist_common.py` 搬到
-#: `nn-training/common/distribution.py`，**多了一层** ⇒ 上溯 2 层变 3 层
-#: （同刀 1 `hub/store_offline.py` 的反向版本；两种错法都不报错，只是路径全指错）。
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 #: 机器本地启动配置的环境变量名（`rl-config.json` **永不入库**：`nn-training/.gitignore`
 #: 里 ignore 了它——它承载机器侧事实，控制台会直接改写它）。
@@ -190,6 +188,25 @@ class DistError(RuntimeError):
         self.transient = bool(transient)
 
 
+#: 节点交互能抛出的**网络层**异常面（2026-11-15，G4 窄捕；基底见 `common/errors.py`）。
+#:
+#: 本模块十来个「探活 / 探测 / 取消」出站点原本一律 `except Exception`，把
+#: 「节点没答」（连不上 / 超时 / 隧道抖动 —— 探活返回 None、探测返回 False 都是设计好的语义）
+#: 与本模块自己的 bug（回执形状变了 ⇒ `AttributeError`，字段拼错 ⇒ `KeyError`）抹成同一分支。
+#: 后者的现场表现是「全部节点不可用」：整批节点被静默排除、份额落到本地，而真因一行日志都没有。
+#: 因此这里点名：`OSError`（URLError / TimeoutError / SSLError / 10054）、
+#: `http.client.HTTPException`（`IncompleteRead` / `BadStatusLine`）、`RetryableError`、
+#: 防御性 `RuntimeError`（含本模块的 `DistError`：收工态自投，不是故障而是「本单元不需要了」）。
+#: 程序员的错不在这条边界里 —— 让它抛出去。
+#: 见 DECISIONS §2026-11-15-network-error-surface-is-a-named-tuple。
+NET_ERRORS: tuple[type[BaseException], ...] = (*_BASE_NET_ERRORS, http.client.HTTPException)
+
+#: 探活类出站点：网络面 + 回执读不出来（`200` 但 body 不是 JSON ⇒ `JSONDecodeError` /
+#: `UnicodeDecodeError`，都是 `ValueError`）。多一个成员就让探活返回「不可用」而不是崩，
+#: 这不削弱判据：形状不看字段（`AttributeError` / `KeyError`）的错仍照抛。
+PING_ERRORS: tuple[type[BaseException], ...] = (*NET_ERRORS, ValueError)
+
+
 def load_dist_config(path: str = CONFIG_PATH) -> dict | None:
     """每轮分派点调用一次（动态读取）；文件缺失/损坏返回 None（纯本地模式）。
 
@@ -216,120 +233,6 @@ def weights_fingerprint(path: str) -> str:
     之一（另两个在 `remote.artifacts` / `remote.hub_client`），现在只剩 `common.hashing`。
     """
     return sha256_file(path)
-
-
-def compute_code_hash() -> str:
-    entries = _collect_code_hash_files()
-    entries.sort(key=lambda e: e[0])
-    h = hashlib.sha256()
-    for rel, content in entries:
-        h.update(rel.encode())
-        h.update(hashlib.sha256(content).digest())
-    return h.hexdigest()
-
-
-CODE_HASH_MANIFEST = os.path.join(REPO_ROOT, "tools", "agent", "codehash-files.txt")
-
-
-def _skip_codehash_dir(name: str) -> bool:
-    """目录递归时的跳过规则（F3，plan/dist-codehash-stale-fix.md）：任一路径段以
-    '.' 开头（隐藏项 .git/.DS_Store/.venv）或名为 __pycache__ / node_modules。
-    与 tools/agent/codehash-files.ts isSkippedCodeHashDir 逐条对齐——契约写死在
-    codehash-files.txt 头部注释，任一侧改动必须双侧同步。"""
-    return name.startswith(".") or name in ("__pycache__", "node_modules")
-
-
-def _skip_codehash_file(name: str) -> bool:
-    """文件级跳过规则（F3）：隐藏项（. 开头）+ 编辑器/构建临时后缀。
-    与 tools/agent/codehash-files.ts isSkippedCodeHashFile 逐条对齐。"""
-    return name.startswith(".") or name.endswith(
-        (".pyc", ".orig", ".rej", ".bak", ".tmp", ".log", ".swp", "~")
-    )
-
-
-def _collect_code_hash_files() -> list[tuple[str, bytes]]:
-    """按 SSOT 清单 codehash-files.txt 展开 codeHash 文件集（与 sampler-agent.ts 同源）。
-
-    清单每行一个条目：'#' 注释 / 空行忽略；以 '/' 结尾 = 目录（递归纳入其下所有
-    文件，目录条目受 F3 噪声过滤）；其余 = 具体文件（相对 repo 根、posix 路径；
-    不存在则跳过，单文件条目不过滤）。两侧读同一清单、按同一规则展开，杜绝单侧
-    硬编码漂移（2026-09-01 事故教训）。
-    """
-    out: list[tuple[str, bytes]] = []
-    try:
-        with open(CODE_HASH_MANIFEST, encoding="utf-8") as f:
-            specs = [ln.strip() for ln in f if ln.strip() and not ln.lstrip().startswith("#")]
-    except OSError:
-        return out
-    for spec in specs:
-        spec = spec.replace("\\", "/")
-        if spec.endswith("/"):
-            root = os.path.join(REPO_ROOT, *spec.rstrip("/").split("/"))
-            for dirpath, dirnames, files in os.walk(root):
-                # F3：跳过隐藏/缓存目录（剪枝不递归），再按文件规则过滤。
-                dirnames[:] = [d for d in dirnames if not _skip_codehash_dir(d)]
-                for name in files:
-                    if _skip_codehash_file(name):
-                        continue
-                    p = os.path.join(dirpath, name)
-                    rel = os.path.relpath(p, REPO_ROOT).replace("\\", "/")
-                    with open(p, "rb") as f:
-                        out.append((rel, f.read()))
-        else:
-            p = os.path.join(REPO_ROOT, *spec.split("/"))
-            if os.path.isfile(p):
-                rel = os.path.relpath(p, REPO_ROOT).replace("\\", "/")
-                with open(p, "rb") as f:
-                    out.append((rel, f.read()))
-    return out
-
-
-def code_hash_report() -> str:
-    """codeHash 诊断报告（F4，plan/dist-codehash-stale-fix.md）：与
-    tools/agent/codehash-report.ts 同格式的 TSV，供双侧 diff 定位 stale 差异。
-
-    每行 `sha8\tsize\trelPath`（按 relPath 排序），末行 `codeHash=<full>`。
-    用法：python -c "import common.distribution;print(common.distribution.code_hash_report())"
-    """
-    entries = _collect_code_hash_files()
-    entries.sort(key=lambda e: e[0])
-    h = hashlib.sha256()
-    lines: list[str] = []
-    for rel, content in entries:
-        h.update(rel.encode())
-        h.update(hashlib.sha256(content).digest())
-        lines.append(f"{hashlib.sha256(content).digest().hex()[:8]}\t{len(content)}\t{rel}")
-    lines.append(f"codeHash={h.hexdigest()}")
-    return "\n".join(lines)
-
-
-# ---------------- 节点门指纹：唯一事实来源 = SSOT 清单（回 2026-09-17 用户指令） ----------------
-# rollout 门（dispatch / rescan）与 eval 门（eval_dispatch / batch_eval）现在比的是
-# **同一个值 = codeHash**（展开自 tools/agent/codehash-files.txt；引擎 src/game、config、
-# RNG、God AI 已并入该清单）。先例（engine_epoch 掺 git commit）会让任何与 rollout/eval
-# 无关的提交（dashboard / nn-training / docs）把全节点判 stale、逼运维重启 sampler-agent。
-def compute_engine_epoch() -> str:
-    """engine_epoch = sha256(codeHash)[:16]（codeHash 见 SSOT 清单；纯函数）。
-
-    **这是账本记录值，不是节点门判据**（节点门比 codeHash，见 check_code_hash）：
-    它进 EvalGameRow.engine / 心跳，供 S10 记录级漂移哨兵与跨轮可比性断言用。
-    """
-    return hashlib.sha256(compute_code_hash().encode()).hexdigest()[:16]
-
-
-def check_code_hash(ping: dict, expected: str) -> str | None:
-    """节点可用性判据（rollout 与 eval 同一门）：None=通过，否则拒收原因。
-
-    2026-09-17：eval 侧改比 codeHash（原先比 ping.engineEpoch）——该字段已从
-    /v1/ping 移除，engine_epoch 退为账本记录值。唯一事实来源 = SSOT 清单
-    （tools/agent/codehash-files.txt），与 rollout 无关的提交不会让本门变红。
-    """
-    got = ping.get("codeHash")
-    if not got:
-        return "missing codeHash (old agent — sync code + restart)"
-    if got != expected:
-        return f"codeHash mismatch: node={str(got)[:8]} expected={expected[:8]}"
-    return None
 
 
 # ---------------- HTTP ----------------
@@ -369,31 +272,6 @@ def is_transient_error(e: BaseException) -> bool:
     return _BUSY_HINT in str(e)[:64].lower()
 
 
-#: 「取包丢失」标记：节点重启 / 权重切换清场后结果缓存为空，轮询 /v1/result 答 404。
-#: **单一来源**——本常量在此定义，_poll_result 用它拼消息、is_task_lost_error 用它判据，
-#: A/C 层不得各写一份字面量。
-TASK_LOST_MARKER = "task lost on node"
-
-
-def is_task_lost_error(e: BaseException) -> bool:
-    """取包丢失（节点重启 / 清场后节点侧结果缓存为空）——**既非背压、也非节点故障**。
-
-    节点没坏，只是它**进程内**那份结果没了（`resultCache` / `failedTasks` / `inflight`
-    都是节点内存态，agent 一重启即空）⇒ 正确处置 = 立刻回队重跑（局是 (权重,关卡,种子)
-    的纯函数 ⇒ 字节一致）+ 清该节点 reuse 账本（重启同时也意味着它的权重桶可能空了）。
-
-    为什么不并入 is_transient_error：处置与措辞都不同（瞬断=背压退避重排；任务丢失=重新
-    提交），且**裸 404**（路径写错之类客户端 bug）必须继续响亮失败 ⇒ 判据要求
-    「状态 404 **∧** 文案带 TASK_LOST_MARKER」。
-
-    背景（2026-09-19 审计 F1）：旧实现把这条 404 当确定性失败记节点 streak ⇒ 与 409 同族，
-    3 条就把**刚重启**的节点熔断整轮，还白耗 attempt 配额。
-    """
-    return (
-        isinstance(e, DistError)
-        and e.status == 404
-        and str(e.reason).startswith(TASK_LOST_MARKER)
-    )
 
 
 # ---------------- 收工即断连（2026-09-19 用户裁定第 4 条） ----------------
@@ -402,10 +280,54 @@ def is_task_lost_error(e: BaseException) -> bool:
 # read 立刻抛（连接重置），而不是等慢节点把那一局算完（最长 taskTimeoutSec=900s）。
 # **作用域 = 线程 tag**：训练主循环里 rollout 与本层同进程并发，全局关连接会把别人的在飞
 # 请求一起打死（rollout 任务被当瞬断重排 = 白烧节点）⇒ 只关自己 tag 的请求。
-_ACTIVE_LOCK = threading.Lock()
-_ACTIVE: set[tuple[str, object]] = set()
-_ABORTED_TAGS: set[str] = set()
 _TAG = threading.local()
+
+
+class RequestRegistry:
+    """在飞 HTTP 响应登记 + 收工断连标记（显式对象；模块只留一个进程级默认实例）。
+
+    P0-5（`common/__init__.py` 契约 #4）：「`common/` 是 L0，模块级可变容器必须清零」
+    ⇒ 三份状态（锁 / 在飞集合 / 收工标记集）搬进本类，模块顶层只剩 `_REQUESTS` 这一个
+    对象。要隔离的测试自己 `RequestRegistry()`，不再去清/读模块私有集合。
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.active: set[tuple[str, object]] = set()
+        self.aborted: set[str] = set()
+
+    def begin_abort(self, scope: str) -> list[object]:
+        """置收工态并摘出该作用域的在飞响应（调用方负责异步 close）。"""
+        with self.lock:
+            self.aborted.add(scope)
+            return [r for t, r in self.active if t == scope]
+
+    def clear_abort(self, tag: str = "") -> None:
+        with self.lock:
+            if tag:
+                self.aborted.discard(tag)
+            else:
+                self.aborted.clear()
+
+    def is_aborted(self, tag: str) -> bool:
+        with self.lock:
+            return tag in self.aborted
+
+    def tags(self) -> set[str]:
+        """当前处于收工态的**全部**作用域（副本；诊断 / 用例用）。"""
+        with self.lock:
+            return set(self.aborted)
+
+    def track(self, key: tuple[str, object]) -> None:
+        with self.lock:
+            self.active.add(key)
+
+    def untrack(self, key: tuple[str, object]) -> None:
+        with self.lock:
+            self.active.discard(key)
+
+
+_REQUESTS = RequestRegistry()
 
 
 def set_request_tag(tag: str, kind: str | None = None) -> None:
@@ -490,11 +412,22 @@ def abort_active_requests(tag: str = "") -> int:
     调用方不再依赖它们的结果。
     """
     scope = tag or request_tag()
+    # 长连接池也要关、且该作用域不得再重发（「收工即断连」不允许把一局重新开起来）。
     http_pool.abort_scope(scope)
-    with _ACTIVE_LOCK:
-        _ABORTED_TAGS.add(scope)
-        targets = [r for t, r in _ACTIVE if t == scope]
-    http_pool.close_async(targets, "abort-close")
+    targets = _REQUESTS.begin_abort(scope)
+    if targets:
+
+        def _closer() -> None:
+            for r in targets:
+                try:
+                    r.close()  # type: ignore[attr-defined]
+                except Exception:
+                    # 契约静默（G9 冻结，非旧债）：守护线程里尽力关响应对象，没人在等它关完；
+                    # 目标类型不保证有 close（上面已显式 isinstance 筛过）。
+                    pass
+
+        #: 收尾线程归这里（`abort-close-drop`）：只关连接、没人等它（daemon）。
+        runtime.Runtime(scope="abort").thread(_closer, name="close-drop", daemon=True)
     return len(targets)
 
 
@@ -505,21 +438,21 @@ def clear_abort(tag: str = "") -> None:
     全局清空会把兄弟单元刚落下的收工态重新解封（尾巴线程又获准发请求）。
     空 = 全清（旧调用方逐字不变）。
     """
-    with _ACTIVE_LOCK:
-        if tag:
-            _ABORTED_TAGS.discard(tag)
-        else:
-            _ABORTED_TAGS.clear()
+    _REQUESTS.clear_abort(tag)
     http_pool.clear_abort(tag)
 
 
 def abort_scope(tag: str = "") -> bool:
     """该作用域是否处于收工态（回包无用 ⇒ 调用方丢弃而不是重排）。"""
-    with _ACTIVE_LOCK:
-        return (tag or request_tag()) in _ABORTED_TAGS
+    return _REQUESTS.is_aborted(tag or request_tag())
 
 
-def _request(
+def aborted_tags() -> set[str]:
+    """当前处于收工态的全部作用域（副本；诊断 / 用例用——判「成功结算有没有留脏」）。"""
+    return _REQUESTS.tags()
+
+
+def node_request(
     url: str,
     auth_key: str,
     timeout: float,
@@ -551,13 +484,11 @@ def _request(
     # 节点通信全走这条出口，所以 ping / 权重探针 / POST / 取任务 / 取结果一并受益。
     with net_http.racing_urlopen(req, timeout=timeout) as resp:
         key = (scope, resp)
-        with _ACTIVE_LOCK:
-            _ACTIVE.add(key)
+        _REQUESTS.track(key)
         try:
             return resp.status, resp.read()
         finally:
-            with _ACTIVE_LOCK:
-                _ACTIVE.discard(key)
+            _REQUESTS.untrack(key)
 
 
 # 探活/槽位预算的门面（2026-11-11 下沉，见 `common/distribution_limits.py`）：上面三行
@@ -572,7 +503,6 @@ def ping_nodes_parallel(nodes: list, timeout: float = STATUS_TIMEOUT_SEC) -> lis
     """
     if not nodes:
         return []
-    from concurrent.futures import ThreadPoolExecutor
 
     def _one(nd: dict) -> dict | None:
         # 键名兼容 `key`（归一化配置，eval_dispatch/batch_eval 用的形态）与 `authKey`
@@ -584,8 +514,8 @@ def ping_nodes_parallel(nodes: list, timeout: float = STATUS_TIMEOUT_SEC) -> lis
             timeout=timeout,
         )
 
-    with ThreadPoolExecutor(max_workers=min(8, len(nodes))) as ex:
-        return list(ex.map(_one, nodes))
+    with runtime.Runtime(scope="ping-nodes") as rt:
+        return rt.map(_one, nodes, workers=min(8, len(nodes)))
 
 
 def node_probe(
@@ -605,7 +535,7 @@ def node_probe(
     `info is None`（逐字不变）。
     """
     try:
-        status, body = _request(url.rstrip("/") + path, auth_key, timeout)
+        status, body = node_request(url.rstrip("/") + path, auth_key, timeout)
         if status != 200:
             return None, f"HTTP {status}"
         # json.loads 返回 Any；节点探活契约固定为 dict。
@@ -615,7 +545,9 @@ def node_probe(
         return info, ""
     except urllib.error.HTTPError as e:
         return None, f"HTTPError {e.code}"
-    except Exception as e:
+    except PING_ERRORS as e:
+        # 只吞**网络面**（`PING_ERRORS`）：程序员错（AttributeError/KeyError）必须穿出去，
+        # 否则「节点全部不可用」会把自己的 bug 掩盖成一条正常结论（DECISIONS 2026-11-15）。
         return None, f"{type(e).__name__}: {e}"
 
 
@@ -635,339 +567,6 @@ def push_node_ping(url: str, auth_key: str, timeout: float = 3.0) -> dict | None
     return node_probe(url, auth_key, timeout, path="/ping")[0]
 
 
-# 训练机当前分支（run_rl/run_bc/loop_serve 启动时锁存）。节点远控升级**永远**用这个
-# 分支，且它是**唯一**来源——rl-config 的 upgradeBranch 已废弃（残留旧战役分支名曾把
-# 全部节点 reset 回旧代码，2026-08-30 事故）。取值入口 = `current_upgrade_branch()`；
-# 值随派发向下传给 `trainer/queue_local`，**没有**「调用方传 branch 进来」那条路了。
-UPGRADE_BRANCH: str | None = None
-
-
-def set_upgrade_branch(branch: str) -> None:
-    global UPGRADE_BRANCH
-    UPGRADE_BRANCH = branch
-
-
-def is_self_node(url: str, node_id: str = "") -> bool:
-    """self/回环节点：agent 由训练机同一工作区启动——代码与训练机**天然同源**。
-
-    远控语义（2026-08-30 用户修订）：stale 时允许远控，但只做**纯重启**
-    （request_upgrade 不带 pullBranch ⇒ agent 不做任何 git 操作，重启进程即
-    拾取工作区新代码）；**禁止 pull**——共享工作区上的 git pull 是破坏性的
-    （曾把本机 reset 回旧分支，2026-08-30 事故）。codeHash 正确时零动作。"""
-    if node_id.strip().lower() == "self":
-        return True
-    try:
-        host = (urllib.parse.urlparse(url).hostname or "").lower()
-    except Exception:
-        return False
-    return host in ("127.0.0.1", "localhost", "::1")
-
-
-def current_upgrade_branch() -> str:
-    """节点远控升级要用的分支 = **训练机锁存的那一个**（空串 = 不升级，调用方只告警）。
-
-    ★ 2026-09-26（评审更正）：本函数此前是 `upgrade_branch_or(explicit)`，语义为
-    「**显式值优先于锁存**」——那正是 2026-08-30 事故的载体：rl-config 里残留的
-    `'intent-ai'` 只要非空就盖掉锁存，把全部节点 reset 回旧代码。读点已随
-    `policy.upgradeBranch` 一起删除（plan/rl-config-cleanup.plan.md §3.1），本次评审又把
-    那个 `explicit` 参数拿掉 ⇒「配置能盖锁存」在**签名层面**不再成立——要复发必须改签名，
-    而不是顺手写一行 `or` 兜底回去。
-    """
-    return UPGRADE_BRANCH or ""
-
-
-def request_upgrade(url: str, auth_key: str, branch: str, timeout: float = 20.0) -> bool:
-    """主动升级机制（M8）：POST /v1/restart {pullBranch} → agent 端 git pull + 重启。
-
-    编排层 ping 发现节点 codeHash 不符（stale）时调用——把它从「静默排除」升级为
-    「主动指示更新重启」。返回 True = 接受（agent 异步执行，重启窗口内不可达，
-    rescan 会在它恢复后按新 codeHash 纳入）。失败返回 False（不抛、不阻塞训练）。
-    """
-    try:
-        status, _body = _request(
-            url.rstrip("/") + "/v1/restart",
-            auth_key,
-            timeout,
-            data=json.dumps({"pullBranch": branch}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        return status in (200, 202)
-    except Exception:
-        return False
-
-
-# ---------------- 远控重启护栏（2026-09-01 重启循环修复） ----------------
-# 症状：① 远控重启过的进程被再次远控重启（无限循环，节点无法贡献）；
-#       ② 用户手动更新代码重启的进程被远控杀掉再重启。
-# 根因：expected codeHash 由训练机**工作区**文件内容算出——含未提交改动；远端
-#   `git pull` 只能拿到已推送提交，永远无法收敛到该 hash ⇒ 每轮 ping 门 / rescan
-#   都判 stale ⇒ 再杀再拉，无限循环（2026-09-01 实测四连杀）。叠加根因：旧实现的
-#   去重集合 upgrade_requested 是每轮局部变量，新一轮迭代重新建集合，stale 节点
-#   每轮、每次 rescan 都再收一次 restart。
-# 处置（双层）：
-#   - 脏工作区护栏：hash 集内有未提交改动时，拒绝对**远端**节点下发 pull+restart
-#     （无效且具破坏性）；self/回环节点豁免（代码同源，纯重启即拾取工作区新代码）。
-#   - 跨代去重：同一节点 + 同一 (agent codeHash, 期望 hash) 只下发一次 restart；
-#     节点 hash 变化（pull 生效 / 手动更新）或训练机期望值变化（本机 commit/切分支/
-#     改集内文件）后自动恢复资格（F1，plan/dist-codehash-stale-fix.md：dedup 键纳入
-#     期望 hash——否则 mac 类字节差异稳定后训练机永远不再下发升级，运维 pull+重启
-#     因 hash 不变反而永远无法重新纳管）。
-#: 升级去重**冷却窗**（秒，2026-09-19 审计 F3）。同节点、同 (agent codeHash, 期望 hash)
-#: 在窗内只下发一次 restart；**超窗后允许再发一次**（不收敛的节点由此自愈）。
-#: 为什么需要（旧行为 = 永久 dedup）：节点 pull 失败 / 环境不支持远端升级时，它会带着
-#: **同一个** codeHash 回来 ⇒ dedup 键永久命中 ⇒ 该节点再也收不到升级指令（训练循环里
-#: 直到训练机有新提交；TS 工具那条腿还把这个 memo 落盘到 tmp/node-upgrade-memo.json，
-#: 跨调用继续压制）。冷却窗既保住「防连环杀」（2026-09-01 重启循环事故），又给不收敛节点
-#: 一条自愈路径。`NN_RESTART_DEDUP_COOLDOWN_S` 可覆盖（0 = 关闭去重，每轮都发）。
-RESTART_DEDUP_COOLDOWN_SEC = 600.0
-#: nid -> (agent_ping_hash, expected_hash, 该次下发时刻)。第三项只为冷却窗存在。
-_RESTART_SEEN: dict[str, tuple[str, str, float]] = {}
-
-
-def restart_dedup_cooldown_sec(cooldown_sec: float | None = None) -> float:
-    """去重冷却窗秒数：显式传参 > env `NN_RESTART_DEDUP_COOLDOWN_S` > 缺省常量。"""
-    if cooldown_sec is not None:
-        return max(0.0, float(cooldown_sec))
-    raw = os.environ.get("NN_RESTART_DEDUP_COOLDOWN_S", "")
-    if raw.strip():
-        try:
-            return max(0.0, float(raw))
-        except ValueError:
-            return RESTART_DEDUP_COOLDOWN_SEC
-    return RESTART_DEDUP_COOLDOWN_SEC
-
-
-def reset_restart_state() -> None:
-    """测试专用：清空跨代去重状态（模块级状态，测试间必须隔离）。"""
-    _RESTART_SEEN.clear()
-
-
-def seed_restart_state(entries: list) -> int:
-    """把调用方持久化的跨代去重 memo 灌回 `_RESTART_SEEN`。返回灌入条数。
-
-    一次性进程（CLI）专用：本模块的去重状态只活在进程内，调用方（TS 工具）把上次
-    成功下发的 (nid, agent codeHash, 期望 hash) 存盘，下次调用前预置回来 ⇒ 守卫
-    的 `dedup` 分支语义与常驻训练循环**逐字一致**，不必在调用方重写判据。
-    每项须含 id / pingHash / expectedHash（全量 hex，不接受截断值）；可选 `atSec`
-    （= 该次下发的 epoch 秒，调用方 memo 里就有这个时间）——冷却窗靠它判定「是否已过期」，
-    **缺省 = 现在**（保持旧调用方的永久 dedup 语义不变，F3 向后兼容）。
-    """
-    n = 0
-    now = time.time()
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        nid = str(e.get("id") or "").strip()
-        ping_hash = str(e.get("pingHash") or "").strip()
-        exp_hash = str(e.get("expectedHash") or "").strip()
-        if not nid or not ping_hash or not exp_hash:
-            continue
-        at = e.get("atSec")
-        ts = float(at) if isinstance(at, (int, float)) and not isinstance(at, bool) else now
-        _RESTART_SEEN[nid] = (ping_hash, exp_hash, ts)
-        n += 1
-    return n
-
-
-def _parse_porcelain(text: str) -> list[str]:
-    """git status --porcelain v1 输出 → 路径列表（含改名目标、去引号）。"""
-    out: list[str] = []
-    for line in text.splitlines():
-        if len(line) < 4:
-            continue
-        # 格式：XY<space>PATH；改名行形如 "R  old -> new"
-        p = line[3:].split(" -> ", 1)[-1].strip().strip('"')
-        if p:
-            out.append(p)
-    return out
-
-
-def _git_index_blobs(rels: list[str]) -> dict[str, str]:
-    """索引中 rel → blob sha 映射；未跟踪路径不出现在结果里。"""
-    if not rels:
-        return {}
-    # 显式 UTF-8：`text=True` 单独用会按 locale 解码（zh-CN Windows = cp936），
-    # 中文路径/非 ASCII 会静默丢输出（docs/nn/engineering.md §19）。走 run_capture 统一。
-    proc = run_capture(["git", "ls-files", "-s", "--", *rels], cwd=REPO_ROOT, timeout=15)
-    if proc.returncode != 0:
-        return {}
-    out: dict[str, str] = {}
-    for line in proc.stdout.splitlines():
-        if "\t" not in line:
-            continue
-        meta, raw_path = line.split("\t", 1)
-        fields = meta.split()
-        if len(fields) < 2:
-            continue
-        out[raw_path.strip().strip('"').replace("\\", "/")] = fields[1]
-    return out
-
-
-def _git_cat_blobs(shas: list[str]) -> dict[str, bytes]:
-    """批量取 blob 原始字节（git cat-file --batch）；缺失的 sha 不进结果。"""
-    if not shas:
-        return {}
-    proc = subprocess.run(
-        ["git", "cat-file", "--batch"],
-        cwd=REPO_ROOT,
-        input=("\n".join(shas) + "\n").encode(),
-        capture_output=True,
-        timeout=30,
-        **_POPEN_NO_WINDOW,
-    )
-    out: dict[str, bytes] = {}
-    buf = proc.stdout
-    pos = 0
-    while pos < len(buf):
-        nl = buf.find(b"\n", pos)
-        if nl < 0:
-            break
-        parts = buf[pos:nl].decode("utf-8", "replace").split()
-        pos = nl + 1
-        if len(parts) < 3:
-            continue  # "<sha> missing"
-        oid, size = parts[0], int(parts[2])
-        out[oid] = buf[pos : pos + size]
-        pos += size + 1
-    return out
-
-
-def dirty_hash_files() -> list[str]:
-    """codeHash 覆盖集中「工作区字节 ≠ git 索引内容」的文件（含未跟踪文件）。
-
-    非空 ⇒ 期望 codeHash 含 pull 拿不到的本地字节，远端 git pull 永远无法收敛——
-    此时对远端节点下发 restart+pull 只会产生无效扰动（拉到同样的提交、hash 依旧
-    不等 → 下轮再杀，无限重启循环）。返回空列表 = 集内代码与索引逐字节一致。
-
-    判据用**原始字节 vs 索引 blob 字节**，不用 git status：core.autocrlf=input 会把
-    工作区 CRLF 规范化成 LF 再比对，「工作区 CRLF / 索引 LF」这类纯 EOL 污染被完全
-    隐藏（2026-09-09 mac 事故：git status 干净、dirty=[]，但 codeHash 与远端干净
-    checkout 只差一个 src/nn/wasm/conv_feats.c 的 CRLF，节点卡了 40 分钟）。
-
-    未跟踪文件同样计为 dirty——远端 pull 不会带出该文件。git 不可用/出错时返回 []
-    （保守放行）——跨代去重护栏仍兜底防循环。
-    """
-    entries = _collect_code_hash_files()
-    if not entries:
-        return []
-    try:
-        idx = _git_index_blobs([rel for rel, _ in entries])
-        blobs = _git_cat_blobs(sorted(set(idx.values())))
-    except Exception:
-        return []
-    dirty: list[str] = []
-    for rel, content in entries:
-        sha = idx.get(rel)
-        if sha is None or blobs.get(sha) != content:
-            dirty.append(rel)
-    return dirty
-
-
-def request_upgrade_guarded(
-    nid: str,
-    url: str,
-    auth_key: str,
-    branch: str,
-    ping_hash: str,
-    timeout: float = 20.0,
-    dirty: list[str] | None = None,
-    expected_hash: str = "",
-    cooldown_sec: float | None = None,
-) -> tuple[bool, str]:
-    """带护栏的重启请求（ping 门 / rescan / upgrade_stale_nodes 共用入口）。
-
-    返回 (ok, reason)：
-      restart-requested  — 已下发，节点将 pull + 重启（本轮生效；含**冷却窗过期后的重发**）
-      dedup              — 同节点同 (agent codeHash, 期望 hash) 且**仍在冷却窗内**，跳过
-                           （防连环杀；期望 hash 变化 ⇒ 立即允许再发一次，F1；
-                            冷却窗过期 ⇒ 也允许再发一次，F3——否则 pull 失败/不支持远端
-                            升级的节点会被永久压制，见 RESTART_DEDUP_COOLDOWN_SEC）
-      dirty-tree:<n>     — 期望 hash 含 n 个未提交文件，远端 pull 永不收敛，拒发
-      restart-failed     — agent 拒绝（409 grace / 5xx）或不可达；不写去重状态
-                           （协调器下轮 rescan 自动重试）
-    self/回环节点：永远**纯重启**（branch 强制空——共享工作区禁 pull），不受
-    脏工作区护栏限制，去重同样生效。
-    dirty 显式传参供测试与调用方复用每轮已检测结果；None = 自动检测。
-    expected_hash 默认 "" 使未传参调用方行为与旧版逐字等价（向后兼容）；调用方
-    必须显式传训练机当前 codeHash（F1 核心：dedup 键含期望值）。
-    """
-    if dirty is None:
-        dirty = [] if is_self_node(url, nid) else dirty_hash_files()
-    if not is_self_node(url, nid) and dirty:
-        return False, f"dirty-tree:{len(dirty)}"
-    key = (ping_hash, expected_hash)
-    prev = _RESTART_SEEN.get(nid)
-    # 冷却窗内 ⇒ dedup（防连环杀）；窗**已过**而节点仍 stale（pull 失败 / 环境不支持远端
-    # 升级）⇒ 允许再发一次，并把时钟重置（下一窗内继续 dedup）。F3：旧行为是永久 dedup，
-    # 这类节点会静默卡死到训练机出新提交为止（TS 工具的落盘 memo 还会跨调用压制）。
-    if (
-        prev is not None
-        and prev[:2] == key
-        and time.time() - prev[2] < restart_dedup_cooldown_sec(cooldown_sec)
-    ):
-        return False, "dedup"
-    actual_branch = "" if is_self_node(url, nid) else branch
-    ok = request_upgrade(url, auth_key, actual_branch, timeout=timeout)
-    if ok:
-        _RESTART_SEEN[nid] = (ping_hash, expected_hash, time.time())
-    return ok, ("restart-requested" if ok else "restart-failed")
-
-
-def upgrade_stale_nodes(
-    cfg: dict,
-    expected_hash: str,
-    branch: str,
-    status_timeout: float = 3.0,
-    restart_timeout: float = 20.0,
-    max_nodes: int = 16,
-    dirty: list[str] | None = None,
-    cooldown_sec: float | None = None,
-) -> list[dict]:
-    """主动升级扫描：ping 每个 enabled 节点，codeHash ≠ expected（stale）→
-    request_upgrade_guarded（跨代去重 + 脏工作区拒发，2026-09-01 重启循环修复）。
-
-    返回 [{id, upgraded, reason}]（诊断用）。不可达/失败跳过——升级机制是 best-effort，
-    绝不阻塞本轮 dispatch（stale 节点本轮仍不参与，待重启后由 rescan 纳入）。
-    """
-    out: list[dict] = []
-    for n in cfg.get("nodes", [])[:max_nodes]:
-        if not n.get("enabled", True):
-            continue
-        nid = str(n.get("id") or n.get("url") or "?")
-        ping = node_ping(n["url"], n.get("authKey", ""), timeout=status_timeout)
-        if ping is None:
-            out.append({"id": nid, "upgraded": False, "reason": "unreachable"})
-            continue
-        ping_hash = str(ping.get("codeHash"))
-        if ping_hash == expected_hash:
-            out.append({"id": nid, "upgraded": False, "reason": "current"})
-            continue
-        ok, reason = request_upgrade_guarded(
-            nid,
-            n["url"],
-            n.get("authKey", ""),
-            branch,
-            ping_hash,
-            timeout=restart_timeout,
-            dirty=dirty,
-            expected_hash=expected_hash,
-            cooldown_sec=cooldown_sec,
-        )
-        # pingHash 回传给调用方：一次性 CLI 要靠它把本次下发写进跨调用 memo
-        #（键 = (nid, agent ping hash, 期望 hash)，与 _RESTART_SEEN 同构）。
-        out.append(
-            {
-                "id": nid,
-                "upgraded": ok,
-                "reason": reason,
-                "pingHash": ping_hash,
-                "agentVersion": ping.get("agentVersion"),
-            }
-        )
-    return out
-
-
 #: 进程级课程身份（环境变量名）。训练进程 = 一门课，`apply_course` 挂上后所有
 #: 出站权重/任务都带它——agent 侧据此按 (course, kind) 分桶（多课程互不驱逐）。
 #: 为什么走环境变量而不是逐调用点加参数：这 9 个出站点散在 6 个文件的不同闭包里，
@@ -979,714 +578,3 @@ COURSE_ENV = "RL_COURSE_NAME"
 def course_name_of() -> str:
     """本进程的课程短名（未设/空 → 空串 = 旧单课程桶，agent 侧两向兼容）。"""
     return os.environ.get(COURSE_ENV, "").strip()
-
-
-def weights_cached_on_node(
-    url: str, auth_key: str, sha: str, kind: str = "rollout", timeout: float = 15.0
-) -> bool:
-    """`GET /v1/weights?sha=` → 节点是否已缓存该 sha（未知/失败/空 sha → False 保守上传）。
-
-    语义与 `push_client.code_cached_on_node` / `/blob-sha` 同族：**少传一次是省流量，
-    错判不传是 409 停活**，所以任何不确定都往「传」那边掉。旧 agent 没有这个端点
-    ⇒ 非 200 ⇒ False ⇒ 退化成改造前行为（多传一次，不影响正确性）。
-    """
-    if not sha:
-        return False
-    qs = urllib.parse.urlencode({"sha": sha, "kind": kind, "course": course_name_of()})
-    try:
-        status, body = _request(
-            url.rstrip("/") + f"/v1/weights?{qs}", auth_key, timeout, method="GET"
-        )
-        if status == 200:
-            return bool(json.loads(body.decode("utf-8")).get("cached"))
-    except Exception:
-        pass
-    return False
-
-
-def post_weights_cached(
-    url: str,
-    auth_key: str,
-    iter_id: str,
-    sha: str,
-    weights_bytes: bytes,
-    timeout: float = 120.0,
-    kind: str = "rollout",
-) -> str:
-    """带预检的 `post_weights`：节点已持有同一 sha → 只查不发，返回 `'cached'`。
-
-    为什么值得：POST 是「先收完整个体才知道已缓存」（返回 kept 时 ~0.5MB 已经传完）。
-    多课程并行时每个评估轮×每个节点都在重传同一份权重，白传量按「课程数 × 节点数」
-    放大，而权重按 sha 内容寻址、天然幂等——先问一句就能把这份白传全免掉。
-    """
-    if weights_cached_on_node(url, auth_key, sha, kind=kind):
-        return "cached"
-    return post_weights(url, auth_key, iter_id, sha, weights_bytes, timeout=timeout, kind=kind)
-
-
-def probe_weights_cached(
-    url: str,
-    auth_key: str,
-    sha: str,
-    kind: str = "rollout",
-    timeout: float = 3.0,
-) -> bool | None:
-    """GET /v1/weights/cached → True/False；探针不可用（旧 agent / 网络失败）→ None。
-
-    语义：节点该 kind 桶内是否已持有此 sha。None 时调用方必须走完整 POST。
-    """
-    if not sha:
-        return None
-    try:
-        status, body = _request(
-            url.rstrip("/") + "/v1/weights/cached",
-            auth_key,
-            timeout,
-            headers={"X-Weights-Sha256": sha, "X-Kind": kind},
-            method="GET",
-        )
-    except Exception:
-        return None
-    if status != 200:
-        return None
-    try:
-        info = json.loads(body.decode("utf-8")) if body else {}
-    except ValueError:
-        return None
-    if not isinstance(info, dict) or "cached" not in info:
-        return None
-    return bool(info.get("cached"))
-
-
-def post_weights(
-    url: str,
-    auth_key: str,
-    iter_id: str,
-    sha: str,
-    weights_bytes: bytes,
-    timeout: float = 120.0,
-    kind: str = "rollout",
-    course: str | None = None,
-) -> str:
-    """POST /v1/weights → 'kept' | 'purged'；失败抛 DistError。
-
-    kind（v3.7/M8）：'rollout'（per-tick RL 采样）/ 'intent'（意图权重桶——
-    intent-exec 评估 + 意图 RL rollout 共用）。agent 按 x-kind 分桶缓存。
-
-    course（v5 2026-09-18 多课程）：None = 用进程级身份（`COURSE_ENV`），空串 = 显式
-    落「旧单课程桶」。agent 侧按 **(course, kind)** 分桶——课程之间不再互相驱逐
-    （5 门课共用一个 `rollout` 桶时，64 桶被分摊，历史深度掉到 ~13 轮，慢节点回来
-    取旧权重就是 409）。
-
-    kept 短路径（2026-09-19，x20-rebirth it19 rollout 208s 复盘）：先探针
-    GET /v1/weights/cached；sha 已在桶内 → 不传 body 直接 'kept'（补波/同 it
-    多波的权重握手主成本）。探针 404/失败（旧 agent）→ 完整 POST，语义不变。
-    """
-    # 探针预算 5s（2026-11-11 收回 §148 的 15s）：当时抬到 15s 是想兜「云机忙时探针超时
-    # ⇒ 退化成整份重传」，但真因是串行 connect 的**每地址** timeout（15s 实测变成 30.83s，
-    # 节点明明已有这份权重）。竞速后单请求 ≈1s，5s 够用；探针超时的代价仍是后面那次全额
-    # POST，所以别顺手改成 0/跳过。
-    cached = probe_weights_cached(url, auth_key, sha, kind=kind, timeout=min(5.0, timeout))
-    if cached is True:
-        return "kept"
-    course_name = course_name_of() if course is None else course
-    headers = {
-        "Content-Encoding": "gzip",
-        "X-Iter-Id": iter_id,
-        "X-Weights-Sha256": sha,
-        "X-Kind": kind,
-    }
-    if course_name:
-        headers["X-Course"] = course_name
-    status, body = _request(
-        url.rstrip("/") + "/v1/weights",
-        auth_key,
-        timeout,
-        data=gzip.compress(weights_bytes),
-        headers=headers,
-        method="POST",
-    )
-    if status not in (200, 204):
-        raise DistError(status, body[:300].decode("utf-8", "replace"))
-    try:
-        info = json.loads(body.decode("utf-8")) if body else {}
-    except ValueError:
-        info = {}
-    return str(info.get("cache", "kept"))
-
-
-def refresh_weights(
-    node: dict,
-    *,
-    iter_id: str,
-    wver: str,
-    weights_bytes: bytes,
-    timeout: float = 120.0,
-    kind: str = "rollout",
-    err: str = "",
-    log=None,
-) -> bool:
-    """409「wver not cached here」的自愈路径：清 reuse 缓存 + 就地重发该权重。
-
-    节点侧那份权重会**在客户端不知情的情况下消失**：per-kind 桶只保留 KEEP 份、
-    所有客户端共享同一桶（别的训练作业 / 本机 eval 上传 / agent 重启都能挤掉），
-    而进程内 `_WEIGHTS_PUSHED` 仍以为在（它只在 ping 失败/codeHash 不符时失效）
-    ⇒ 任务持续 409 直到把节点**当故障熔断**（2026-09-19 x20-rebirth 09:48 a97：
-    5 条 409 → circuit-broken，7 槽位整轮闲置，同一 wver 44s 前刚收过）。
-
-    409 是**可刷新条件**而非节点故障：重发一次即可继续用同一节点。
-    返回 True = 重发成功 ⇒ 调用方**不得**记节点失败 streak。
-    """
-    nid = str(node.get("id") or node.get("url") or "?")
-    forget_weights_node(nid)  # 清脏缓存：下一次波次必须重新握手
-    try:
-        mode = post_weights(
-            node["url"],
-            str(node.get("key") if node.get("key") is not None else node.get("authKey", "")),
-            iter_id,
-            wver,
-            weights_bytes,
-            timeout=timeout,
-            kind=kind,
-        )
-    except DistError as e:
-        if log is not None:
-            log(
-                f"[dist] node {nid}: wver not cached（409: {err[:60]}）就地重发失败"
-                f"（{e}）—— 仍未持有权重，本任务回队"
-            )
-        return False
-    note_weights_pushed(wver, nid, kind=kind)
-    if log is not None:
-        log(
-            f"[dist] node {nid}: wver not cached（409）—— 已就地重发权重（{mode}）"
-            f"并清 reuse 缓存（可刷新条件，不记节点故障）"
-        )
-    return True
-
-
-def post_weights_parallel(
-    nodes: list,
-    iter_id: str,
-    wver: str,
-    weights_bytes: bytes,
-    timeout: float,
-    kind: str = "rollout",
-    log=None,
-    on_alive=None,
-) -> list:
-    """并行 POST 权重到全部节点 → alive 节点列表（保持入参顺序）。
-
-    失败节点记日志后排除（与串行版语义一致）。**边分发边开采**（2026-09-19）：
-    `on_alive(nd)` 在**该节点 POST 成功的瞬间**于 worker 线程回调（须线程安全），
-    调用方可立刻孵化该节点采样线程，无需等其它节点。返回值仍按入参顺序。
-    日志在每节点完成时输出。pure_collect 锚点由调用方定义（用户 2026-09-19：
-    权重开始分发 → 样本齐可交 PPO）。
-    """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    if not nodes:
-        return []
-
-    def _key_of(nd) -> str:
-        return str(nd.get("key") if nd.get("key") is not None else nd.get("authKey", ""))
-
-    def _push(nd):
-        nid = str(nd.get("id") or nd.get("url") or "?")
-        try:
-            mode = post_weights(
-                nd["url"],
-                _key_of(nd),
-                iter_id,
-                wver,
-                weights_bytes,
-                timeout=timeout,
-                kind=kind,
-            )
-            return nid, nd, mode, None
-        except (DistError, OSError) as e:
-            # 裸 socket 异常（URLError/10054、读超时）也只剔除该节点：`_request` 不包装
-            # OSError，放它穿过 `fut.result()` 会炸掉整批（2026-11-02 z4-polish it5：
-            # kaggle 一次 10054 → 整轮 800 局 eval 0 局派出、无 summary）。
-            return nid, nd, None, e
-
-    n = len(nodes)
-    ok_ids: set[str] = set()
-    t0 = time.monotonic()
-    with ThreadPoolExecutor(max_workers=min(8, n)) as ex:
-        futs = {ex.submit(_push, nd): nd for nd in nodes}
-        t_sub: dict[int, float] = {id(f): time.monotonic() for f in futs}
-        for fut in as_completed(futs):
-            nid, nd, mode, err = fut.result()
-            # 事件：**该节点权重就绪时刻**（用户 2026-09-19：排查「等十几秒 CPU 才满」
-            # 与评测中途的掉档——没有这条就看不出权重阶段占了多久）。
-            dt = time.monotonic() - t_sub[id(fut)]
-            if err is not None:
-                if log is not None:
-                    log(f"[dist] weights POST to {nid} failed ({err}, {dt:.2f}s) — excluded")
-                continue
-            note_weights_pushed(wver, nid, kind=kind)
-            if log is not None:
-                log(f"[dist] weights[{kind}] -> {nid} ({mode}, {dt:.2f}s)")
-            if on_alive is not None:
-                on_alive(nd)
-            ok_ids.add(nid)
-    if log is not None:
-        # 事件：**权重传输完毕**（阶段墙钟）——分发起点就是它。
-        log(
-            f"[dist] weights[{kind}] ready on {len(ok_ids)}/{n} nodes "
-            f"in {time.monotonic() - t0:.2f}s (sha {wver[:12]}…)"
-        )
-    return [nd for nd in nodes if str(nd.get("id") or nd.get("url") or "?") in ok_ids]
-
-
-def unpack_container(raw: bytes) -> tuple[dict, dict]:
-    """解结果容器（自动识别版本）→ (manifest, files)。
-
-    v2（BCV2）files 值为 bytes；v1（旧 agent）值为 base64 str——下游
-    validate_result/write_shard 双模兼容，勿假设其中一种。
-    """
-    frame = gzip.decompress(raw.lstrip(b" \t\r\n"))
-    if len(frame) >= 8:
-        (magic,) = struct.unpack_from(">I", frame, 0)
-        if magic == PACK_MAGIC:
-            return _unpack_bcv2(frame)
-    container = json.loads(frame.decode("utf-8"))
-    if not isinstance(container, dict) or not isinstance(container.get("files"), dict):
-        raise DistError(0, "container missing files map")
-    return container.get("manifest") or {}, container["files"]
-
-
-# BCV2 魔数 'B''C''V''2' —— 与 tools/sim/pack-container.ts 逐字节一致的双语契约。
-PACK_MAGIC = 0x42435632
-
-
-def _unpack_bcv2(frame: bytes) -> tuple[dict, dict]:
-    off = 4
-    (hlen,) = struct.unpack_from(">I", frame, off)
-    off += 4
-    header = json.loads(frame[off : off + hlen].decode("utf-8"))
-    off += hlen
-    manifest = header.get("manifest") or {}
-    files: dict[str, bytes] = {}
-    for spec in header.get("files") or []:
-        (nlen,) = struct.unpack_from(">H", frame, off)
-        off += 2
-        name = frame[off : off + nlen].decode("utf-8")
-        off += nlen
-        (dlen,) = struct.unpack_from(">Q", frame, off)
-        off += 8
-        if name != spec.get("name") or dlen != spec.get("len"):
-            raise DistError(0, f"bcv2 entry mismatch: {name!r} (header said {spec!r})")
-        files[name] = frame[off : off + dlen]
-        off += dlen
-    return manifest, files
-
-
-def check_node_capabilities(
-    args: object,
-    node_id: str,
-    nd: dict,
-    *,
-    stage_json: str | None = "",
-) -> None:
-    """节点能力握手（fail-closed）：缺能力位的旧 agent 一律拒派，绝不静默降级。
-
-    四条契约（plan §5.2 / LC §4.6 / k5-rhythm / greedy-outcome-quota rev5）：
-      · stageJsonSupport      —— 自定义关（旧 agent 会静默跑默认关）
-      · decisionEventsSupport —— 事件门（旧 agent 会静默跑均匀 K）
-      · decisionKSupport      —— K≠10（旧 agent 会静默按 K=10 跑）
-      · greedyRolloutSupport  —— `?labelMode=greedy`（旧 agent 会静默跑成采样局，
-        正是 o1-gq-* 前 9 轮 `bins` 全 0 的根因）
-    只在对应能力被激活时检查；缺席 = 老课程逐字节不变。
-    """
-    ping = nd.get("ping") or {}
-    if stage_json and not ping.get("stageJsonSupport"):
-        raise DistError(
-            0,
-            f"node {node_id} 缺 stageJsonSupport 能力位（旧 agent）——"
-            "stageJson 任务被拒；不降级（plan §5.2 能力握手）",
-        )
-    if bool(getattr(args, "decision_events", False)) and not ping.get(
-        "decisionEventsSupport"
-    ):
-        raise DistError(
-            0,
-            f"node {node_id} 缺 decisionEventsSupport 能力位（旧 agent）——"
-            "事件任务被拒；不降级（升级 agent 后自动加入）",
-        )
-    dk = int(getattr(args, "decision_k", 10))
-    if dk != 10 and not ping.get("decisionKSupport"):
-        raise DistError(
-            0,
-            f"node {node_id} 缺 decisionKSupport 能力位（旧 agent）——"
-            f"K={dk} 任务被拒；不降级（升级 agent 后自动加入）",
-        )
-    if str(getattr(args, "corpus_fmt", "full") or "full") == "replay" and not ping.get(
-        "replayCorpusSupport"
-    ):
-        raise DistError(
-            0,
-            f"node {node_id} 缺 replayCorpusSupport 能力位（旧 agent）——"
-            "replay 语料任务被拒；升级 sampler-agent 后自动加入（fail-closed，不降级成 full）",
-        )
-    if bool(getattr(args, "rollout_argmax", False)) and not ping.get(
-        "greedyRolloutSupport"
-    ):
-        raise DistError(
-            0,
-            f"node {node_id} 缺 greedyRolloutSupport 能力位（旧 agent）——"
-            "greedy 局被拒；升级 sampler-agent 后自动加入",
-        )
-
-
-def cancel_task(base_url: str, auth_key: str, key: str, timeout: float = 3.0) -> bool:
-    """POST /v1/cancel {key}；旧 agent / 404 / 网络错误一律 False（不抛）。
-
-    调用方在**独立 daemon 线程**里跑：不继承 worker 的 `rollout:*` 断连 tag，
-    否则 reaper 刚 `abort_active_requests` 过的作用域会把这条取消请求也拦掉。
-    """
-    old_tag = request_tag()
-    set_request_tag("")
-    try:
-        status, _ = _request(
-            base_url.rstrip("/") + "/v1/cancel",
-            auth_key,
-            timeout,
-            data=json.dumps({"key": key}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        return bool(status == 200)
-    except Exception:
-        return False
-    finally:
-        set_request_tag(old_tag)
-
-
-def fetch_task(
-    url: str,
-    auth_key: str,
-    *,
-    iter_id: str,
-    wver: str,
-    stage: int,
-    seed: int,
-    max_ticks: int,
-    difficulty: str,
-    timeout: float,
-    mode: str | None = None,
-    kind: str = "rollout",
-    # 标签/动作来源：`argmax`/`sampled` = BC v6 标签（`mode=bc-v6`）；
-    # `greedy` = RL greedy 分层采集（2026-11-10，所有节点通用）。非空即进 agent
-    # taskKey 后缀（`:lm<mode>`）⇒ 同一 iterId 下不同动作选择方式的局互不回放缓存。
-    label_mode: str = "",
-    replan: int = 0,
-    reward: str = "",
-    course: str | None = None,
-    dodge: str = "",
-    stage_json: str = "",
-    lives_override: int | None = None,
-    player_level: int | None = None,
-    course_fp: str = "",
-    # BC 语料任务（mode="bc"）的 God-AI 教师参数（export-godai-bc 透传）。
-    wins: int | None = None,
-    near_miss_times: int | None = None,
-    abandon_event: threading.Event | None = None,
-    # T1.2 policy 透传（EvalBench）：'nn' | 'god'（C 层 God 基线）。
-    # agent 侧已就绪（sampler-agent.ts:1150 收 ?policy= → export-eval-game --policy）。
-    # 缓存键注意：agent taskKey 无 policy 分量——调用方必须用独立 iterId 命名空间
-    # 隔离不同 policy（A 层恒 nn；B/C 批用 batch 命名空间），否则 god/nn 同键串局。
-    policy: str = "nn",
-    # R2 事件 rung（plan/new-era-stop.plan.md §6）：True ⇒ agent 以事件门跑本局
-    # （均匀 K ∪ threat-ONSET + Δt≥3）；缺席/False = 老行为（agent 侧缺省）。
-    # agent taskKey 含 `:de1` 后缀（与 stageJsonHash 同规），旧缓存不串局；
-    # 不支持的旧 agent 由**调用方**凭 ping.decisionEventsSupport 提前排除（fail-closed，
-    # 同 stageJsonSupport），本函数只负责透传。
-    decision_events: bool = False,
-    # 决策周期 K（plan/k5-rhythm.plan.md）：课程 `decision_k`（默认 10）透传。
-    # **仅 ≠10 激活**（缺席/10 = 老 agent 照旧，URL 逐字节不变）；agent 端 taskKey 含
-    # `:k<N>` 后缀（缓存隔离）；旧 agent 无 decisionKSupport 能力位 —— 由调用方提前排除
-    # （fail-closed；本函数只透传，不查 ping）。
-    decision_k: int = 10,
-    # 评估/部署链推理规则（课程 `inference_rules.skip_steel_only_shots`）：True ⇒
-    # agent 给 export-eval-game 拼 `--skip-steel-only-shots`（顶钢空枪门）。仅激活时
-    # 透传（缺席 = 老 agent 照旧，URL 逐字节不变）；agent taskKey 含 `:skipSteelShots`
-    # 后缀（缓存隔离）；旧 agent 无 skipSteelOnlyShotsSupport —— 由调用方提前排除
-    # （fail-closed；本函数只透传，不查 ping）。
-    skip_steel_only_shots: bool = False,
-    # 评估/部署链推理规则（课程 `inference_rules.break_bricks_on_path`）：True ⇒
-    # agent 拼 `--break-bricks-on-path`（拆砖免绕路）。仅激活时透传；agent taskKey
-    # 含 `:breakBricks` 后缀（缓存隔离）。
-    break_bricks_on_path: bool = False,
-    # B8 通用废射门（课程 `inference_rules.suppress_useless_fire`）：True ⇒ agent 拼
-    # `--suppress-useless-fire`。仅激活时透传；taskKey 含 `:suppressUselessFire`。
-    suppress_useless_fire: bool = False,
-    # B10 预测门（课程 `inference_rules.suppress_lead_miss_fire`）：True ⇒ agent 拼
-    # `--suppress-lead-miss-fire`。仅激活时透传；taskKey 含 `:suppressLeadMissFire`。
-    suppress_lead_miss_fire: bool = False,
-    # Hybrid opening（一次性课程评估 `--opening-connect`）：True ⇒ agent 给
-    # export-eval-game 拼 `--opening-connect`。仅激活时透传；taskKey 含
-    # `:hybridOpen` 后缀（bare/hybrid 缓存隔离）。缺省 False = 老行为逐字节不变。
-    opening_connect: bool = False,
-    # 语料运输格式（plan/replay-corpus.plan.md P2）：`replay` ⇒ agent 给
-    # export-rl-rollout 拼 `--corpus-fmt replay`（不产 obs/scalars/extra）。
-    # 仅 rollout 路径；eval/BC/intent/goal 由 agent 端 400 拒收（强制 full）。
-    # 缺省 full = 老 agent/老 URL 逐字节不变；taskKey 含 `:cfr` 后缀（缓存隔离）。
-    corpus_fmt: str = "full",
-    # 键回调：请求发出前把 agent 认可的 taskKey 交回调用方。分配超时取消
-    # （/v1/cancel）必须与提交端逐字节同键，故由这里统一算，调用方不再复制配方。
-    on_key: Callable[[str], None] | None = None,
-) -> tuple[dict, dict]:
-    """获取一局结果 → (manifest, files)；失败抛 DistError。
-
-    mode='eval' 请求干净评估局（agent 端贪心 runner、无 shards）；仅对 ping 返回
-    evalSupport=true 的节点使用——旧 agent 会静默忽略该参数跑成采样局。
-
-    kind（M8）：'intent' 请求意图权重桶（意图 RL rollout 走 export-intent-rollout.ts）。
-    replan（M8）：意图 rollout 的 replan cadence（0=不传）。
-    reward（goal-nn 卡 A2）：玩具奖励臂覆盖（''=不传，导出器按 stage 解析默认）。
-    dodge（goal-nn 卡 A3）：dodge 模式覆盖（''=不传，导出器按 stage 解析默认）。
-
-    stage_json / lives_override / player_level（M1d，plan/rl-training-config.md §5.2）：
-    课程自定义关透传参数（远端 export-rl-rollout --stage-json/--lives-override/
-    --player-level）。stageJson 非空时只派给 ping.stageJsonSupport=true 的节点
-    （旧 agent 不认识该参数会静默丢弃跑默认关——数据污染，绝不降级）。
-
-    缺省 **sync**（不带 x-async）：agent 跑完直接在同一连接回整包。timeout 必须
-    覆盖整局墙钟（arena2 ~1s；经典关可到数十秒）——短超时会把同步请求误杀。
-
-    仍走 x-async+轮询的例外：
-      · abandon_event 非 None（竞速输家）——轮询阶段可在 all_settled 时立刻放弃；
-        sync 长连接无法中断，会把注定丢弃的局等满。
-      · 环境变量 DIST_TASK_ASYNC=1（运维强制旧异步路径 / WAN 抖动排查）。
-    """
-    params = {
-        "iterId": iter_id,
-        "wver": wver,
-        "stage": stage,
-        "seed": seed,
-        "maxTicks": max_ticks,
-        "difficulty": difficulty,
-    }
-    if mode:
-        params["mode"] = mode
-    if policy and policy != "nn":
-        params["policy"] = policy
-    if kind != "rollout":
-        params["kind"] = kind
-    if label_mode:
-        params["labelMode"] = label_mode
-    if replan > 0:
-        params["replan"] = replan
-    if reward:
-        params["reward"] = reward
-    if dodge:
-        params["dodge"] = dodge
-    if stage_json:
-        params["stageJson"] = stage_json
-        # 布局指纹（评审 R0-3 / LC §1.3）：agent resultCache 键并入该哈希，改 grid
-        # 不改 stage id 不再静默复用旧局。agent 侧对收到的 stageJson 算同一 sha256。
-        params["stageJsonHash"] = hashlib.sha256(stage_json.encode("utf-8")).hexdigest()[:16]
-    if lives_override is not None:
-        params["livesOverride"] = lives_override
-    if player_level is not None:
-        params["playerLevel"] = player_level
-    # R2 事件 rung：仅激活时透传（缺席 = 老 agent 照旧，老行为逐字节不变）。
-    if decision_events:
-        params["decisionEvents"] = "1"
-    # 决策周期 K：仅非默认值透传（缺席/10 = 老 agent 照旧，URL 逐字节不变）。
-    if int(decision_k) != 10:
-        params["decisionK"] = str(int(decision_k))
-    # 顶钢空枪门：仅激活时透传（缺席 = 老 agent 照旧，URL 逐字节不变）。
-    if skip_steel_only_shots:
-        params["skipSteelOnlyShots"] = "1"
-    # 拆砖免绕路：仅激活时透传（缺席 = 老 agent 照旧，URL 逐字节不变）。
-    if break_bricks_on_path:
-        params["breakBricksOnPath"] = "1"
-    # B8/B10：仅激活时透传（缺席 = 老 agent 照旧，URL 逐字节不变）。
-    if suppress_useless_fire:
-        params["suppressUselessFire"] = "1"
-    if suppress_lead_miss_fire:
-        params["suppressLeadMissFire"] = "1"
-    # Hybrid opening：仅激活时透传（缺席 = 老 agent 照旧）。
-    if opening_connect:
-        params["openingConnect"] = "1"
-    # replay 语料：仅 replay 时透传（缺席 = 老 agent 照旧，URL 逐字节不变）。
-    if str(corpus_fmt or "full") == "replay":
-        params["corpusFmt"] = "replay"
-    if course_fp:
-        params["courseFp"] = course_fp
-    # v5 多课程：任务自报课程——agent 按 (course, kind) 取权重桶。缺省走进程级身份
-    #（旧训练侧不传 → 空串桶，行为与改造前一致）。
-    if course is None:
-        course = course_name_of()
-    if course:
-        params["course"] = course
-    if wins is not None:
-        params["wins"] = wins
-    if near_miss_times is not None:
-        params["nearMissTimes"] = near_miss_times
-    if on_key is not None:
-        on_key(
-            task_key(
-                iter_id,
-                str(params.get("mode", "rollout")),
-                str(params.get("kind", "rollout")),
-                stage,
-                seed,
-                str(params.get("stageJsonHash", "")),
-                str(params.get("courseFp", "")),
-                str(params.get("decisionEvents", "")),
-                str(params.get("decisionK", "")),
-                str(params.get("labelMode", "")),
-                str(params.get("skipSteelOnlyShots", "")),
-                str(params.get("breakBricksOnPath", "")),
-                str(params.get("suppressUselessFire", "")),
-                str(params.get("suppressLeadMissFire", "")),
-                str(params.get("openingConnect", "")),
-                str(params.get("corpusFmt", "")),
-            )
-        )
-    qs = urllib.parse.urlencode(params)
-    base = url.rstrip("/")
-    started = time.monotonic()
-    try:
-        use_async = abandon_event is not None or os.environ.get("DIST_TASK_ASYNC") == "1"
-        hdrs = {"x-async": "1"} if use_async else None
-        status, body = _request(f"{base}/v1/task?{qs}", auth_key, timeout, headers=hdrs)
-        if status == 202:
-            return _poll_result(
-                base,
-                auth_key,
-                params,
-                timeout - (time.monotonic() - started),
-                abandon_event=abandon_event,
-            )
-        if status == 200:
-            return unpack_container(body)
-        raise DistError(status, body[:300].decode("utf-8", "replace"))
-    except urllib.error.HTTPError as e:
-        raise DistError(
-            e.code,
-            e.read()[:300].decode("utf-8", "replace"),
-            transient=e.code in TRANSIENT_HTTP_STATUS,
-        ) from e
-    except DistError:
-        raise
-    except OSError as e:
-        # 传输层瞬断：连接被重置（WinError 10054）/超时/对端关闭 —— 节点可能只是满负荷。
-        # 标记 transient 由调用方背压重排，不当节点故障（2026-09-19：满负荷集群下
-        # 一瞬 10 次 10054 曾把 6 个节点全部熔断，评估份额静默全落本地）。
-        raise DistError(0, f"task fetch failed: {e}", transient=True) from e
-    except Exception as e:
-        # 其余非 DistError（损坏容器解包错等确定性错误）不标 transient：重试没有意义，
-        # 真实原因保留在 message 里。
-        raise DistError(0, f"task fetch failed: {e}") from e
-
-
-#: `_poll_result` 预算的**下限**（生产语义：防住「预算小到没意义」的调用）。
-#: 独立成模块常量而非内联 `max(1.0, …)`，是为了让用例能把它调到「毫秒级」而**不改判据**：
-#: 「未置位 ⇒ 持续轮询到预算耗尽」这条断言与预算绝对长度无关，但预算就是那些用例的
-#: 固有墙钟（2026-09-29，§43：`tests/common/test_dist_common_poll.py` 两例共 ~1s 全花在跑满下限）。
-POLL_MIN_BUDGET_SEC = 1.0
-
-
-def _poll_result(
-    base_url: str,
-    auth_key: str,
-    params: dict,
-    budget: float,
-    poll_s: float = 3.0,
-    abandon_event: threading.Event | None = None,
-) -> tuple[dict, dict]:
-    """轮询 GET /v1/result 直到取包/失败/超时。budget 秒内传输瞬断一律重试。
-
-    只有网络调用本身受瞬断重试保护；容器解包与非预期状态码是确定性错误，
-    必须立即抛出真实原因——绝不能被重试逻辑吞成误导性的 deadline exceeded。
-    abandon_event（2026-09-06，竞速收尾洞修复）：置位 = 本轮全部任务已结算，
-    本副本必是竞速输家（结果注定被丢弃）→ 立即放弃，trainer 不再等慢节点把
-    注定丢弃的局跑完（实测输家副本曾拖住发布 4.5 分钟）。
-    """
-    qparams = {
-        "iterId": params["iterId"],
-        "stage": params["stage"],
-        "seed": params["seed"],
-    }
-    # mode/kind 必须与提交端 key 配方一致（agent 的 result key = iterId:mode:kind:stage:seed）——
-    # 意图 rollout（kind=intent）不传则轮询落空 404（实测教训）。
-    if params.get("mode"):
-        qparams["mode"] = params["mode"]
-    if params.get("kind"):
-        qparams["kind"] = params["kind"]
-    # stageJsonHash 必须进轮询键（agent resultCache key 含布局指纹，M1d）
-    if params.get("stageJsonHash"):
-        qparams["stageJsonHash"] = params["stageJsonHash"]
-    # courseFp 必须进轮询键（agent resultCache key 含课程血缘，D14）
-    if params.get("courseFp"):
-        qparams["courseFp"] = params["courseFp"]
-    # 决策门分量必须进轮询键（agent resultCache key 含 `:de1` / `:k<N>` 后缀，
-    # 提交端与轮询端同配方——漏传 = 同上键永远找不到任务，2026-10-07 审计修复：
-    # decisionEvents 此前漏在这一层，事件课程的 async 竞速副本必 404）。
-    if params.get("decisionEvents"):
-        qparams["decisionEvents"] = params["decisionEvents"]
-    if params.get("decisionK"):
-        qparams["decisionK"] = params["decisionK"]
-    # v6 BC：labelMode 进提交端 taskKey 后缀，轮询端必须同配方（否则 async 必 404）。
-    if params.get("labelMode"):
-        qparams["labelMode"] = params["labelMode"]
-    # replay 语料：`corpusFmt` 进提交端 taskKey 后缀 `:cfr`，轮询端必须同配方。
-    if params.get("corpusFmt"):
-        qparams["corpusFmt"] = params["corpusFmt"]
-    qs = urllib.parse.urlencode(qparams)
-    deadline = time.monotonic() + max(POLL_MIN_BUDGET_SEC, budget)
-    while True:
-        if abandon_event is not None and abandon_event.is_set():
-            raise DistError(0, "abandoned: all tasks settled — race-loser copy dropped")
-        remain = deadline - time.monotonic()
-        if remain <= 0:
-            raise DistError(0, "async result deadline exceeded (game still running on node?)")
-        try:
-            status, body = _request(
-                f"{base_url}/v1/result?{qs}", auth_key, timeout=min(20.0, remain)
-            )
-        except urllib.error.HTTPError as e:
-            detail = e.read()[:300].decode("utf-8", "replace")
-            if e.code == 500:
-                # 局失败已被 agent 一次性消费；trainer 照常回队重试（可能换节点）
-                try:
-                    msg = json.loads(detail).get("error", detail)
-                except ValueError:
-                    msg = detail
-                raise DistError(500, str(msg)) from e
-            if e.code == 404:
-                # 文案前缀 = TASK_LOST_MARKER（单一来源）：客户端据此判定「重启/清场丢包」，
-                # 与「裸 404 = 路径写错」区分开。
-                raise DistError(404, f"{TASK_LOST_MARKER} (restart/purge): {detail}") from e
-            raise DistError(e.code, detail) from e
-        except Exception:
-            # 瞬断（休眠/SSH 重连/隧道抖动）：结果仍在节点缓存里，睡一下继续拉。
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(min(poll_s, max(0.5, deadline - time.monotonic())))
-            continue
-        if status == 200:
-            return unpack_container(body)
-        if status == 202:
-            time.sleep(min(poll_s, remain))
-            continue
-        raise DistError(status, body[:300].decode("utf-8", "replace"))
-
-
-def validate_eval_result(manifest: dict, expected_wver: str) -> str | None:
-    """干净评估局的轻量校验：无 shards，仅对账 wver、模式回显与关键字段。"""
-    if not isinstance(manifest, dict):
-        return "manifest is not an object"
-    if manifest.get("wver") != expected_wver:
-        return f"wver mismatch: got {manifest.get('wver')!r}"
-    if manifest.get("mode") != "eval":
-        return f"mode echo mismatch: got {manifest.get('mode')!r} (old agent ran sampled game?)"
-    for k in ("outcome", "ticks", "win", "stage", "seed"):
-        if k not in manifest:
-            return f"missing field {k!r}"
-    return None

@@ -139,7 +139,14 @@ MIN_LOCK_SITES: Final = 60
 #:     `trainer/eval_dispatch.py` 构造 `EvalRound` 时注入的两个模块级函数
 #:     （`course_logger(...)` / `record_eval_failed`），只收 round 的**数据**、收不到
 #:     round 实例 ⇒ 回不到 `EvalRound._lock`。
-MAX_OPAQUE_CALLS: Final = 18
+#:   * `JsonlLedger → _JsonlPath()`（2026-11-13，L0 对象化；2026-11-16 去线程后同形）——
+#:     `append()` 持账本锁只做「查/建追加位」；`_JsonlPath.__init__` 只造一把锁和一个
+#:     bool，没有回调、没有 I/O、也拿不到账本（追加在 `slot.lock` 下、账本锁**外**做）
+#:     ⇒ 不可能回头重入同一把。
+#:   * `LeaseBook._clock` / `LeaseBook._job_dir`（2026-11-19，B7-P2）—— 两个都是组合根
+#:     注入的**纯可调用**（时钟 / 路径解析），与上面 `_now` / `_clock` 同族：只读时间戳、
+#:     拼 `Path`，既不回调 `LeaseBook` 也不碰任何锁。P1 的 `Scheduler._clock` 已在册。
+MAX_OPAQUE_CALLS: Final = 20
 
 LockKey = tuple[object, ...]
 

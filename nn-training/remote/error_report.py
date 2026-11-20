@@ -31,12 +31,11 @@ from __future__ import annotations
 import json
 import os
 import socket
-import threading
 import time
 import urllib.request
 from typing import Any
 
-from common import net_http
+from common import net_http, runtime
 from common.protocol import ADMIN_WORKER_ERROR_PATH, AUTH_HEADER
 
 #: 单次上报的超时（秒）。取 2s：这比任何一次 job 传输都短几个数量级，又足够覆盖一次跨隧道
@@ -161,6 +160,9 @@ def report_error(
             try:
                 log(f"错误上报未送达（观测腿，失败即丢）：{payload['reason'][:120]}")
             except Exception:
+                # 契约静默（G9 冻结，非旧债）：观测腿的最后一站，这条日志本身就是尽力而为 ——
+                # 再套一层错误处理只能静默（上报此时已判定失败）。
                 pass
 
-    threading.Thread(target=_send, daemon=True, name="error-report").start()
+    #: 上报线程归这里（`error-report-send`）：上报本身失败即丢，没人等它。
+    runtime.Runtime(scope="error-report").thread(_send, name="send", daemon=True)

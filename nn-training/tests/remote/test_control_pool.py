@@ -200,12 +200,15 @@ def test_proxy_env_names_are_the_same_two_lists(monkeypatch) -> None:
     `ProxyHandler.proxies`。
     """
     _no_proxy(monkeypatch)
-    assert cp._proxy_for("http") == "" and cp._proxy_for("https") == ""
+    direct_http = cp._proxy_for("http")
+    direct_https = cp._proxy_for("https")
+    assert direct_http == "" and direct_https == ""
     for scheme in ("http", "https"):
         for suffix in (f"{scheme}_proxy", f"{scheme.upper()}_PROXY"):
             want = f"http://via-{suffix}:1"
             monkeypatch.setenv(suffix, want)
-            assert cp._proxy_for(scheme) == want, f"`_proxy_for` 不认 {suffix}"
+            got = cp._proxy_for(scheme)
+            assert got == want, f"`_proxy_for` 不认 {suffix}"
             assert _opener_proxies(monkeypatch).get(scheme) == want, (
                 f"`_get_opener` 不认 {suffix}——两侧口径分叉"
             )

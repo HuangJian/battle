@@ -53,9 +53,9 @@ from typing import Any
 
 from common.fs import atomic_write_bytes, atomic_write_json
 from common.hashing import sha256_bytes, sha256_file  # re-export：调用点与测试不变
+from common.paths import REPO_ROOT
 
-#: 仓库根（`nn-training/remote/artifacts.py` 上溯两层）。
-REPO_ROOT = Path(__file__).resolve().parents[2]
+#: 仓库根：唯一实现在 `common/paths.py`（本文件不再自己数层数）。
 #: 权重归档根（`nn-training/weights/`；即 `biz.archive.backup_weights` 的缺省目录）。
 #: **唯一定义处**（2026-10-15 去重）：回传落归档的 `hub.store_offline` 与读侧落地的
 #: `remote.weights_standard` 都站在它上面 —— 之前两处各留一份副本，各自定义 `_archive_root` /
@@ -577,7 +577,7 @@ run_id      : {self.run_id}
 
 
 #: 产物账本行 → **课程账本行**（`training_log.jsonl` 的 `iteration` 事件）的字段搬运表。
-#: 左 = 课程账本字段名（`biz/events.py::write_iteration`，也是控制台读的那一份），
+#: 左 = 课程账本字段名（`worker/events.py::write_iteration`，也是控制台读的那一份），
 #: 右 = (来源, 键)：`agg` = 产物行的聚合子字典，`report` = 采集报告子字典，`row` = 行本身；
 #: 键写成元组就是**下探路径**（如 `("scoreStats", "mean")`）——产物行是分层的，而课程账本平铺。
 #: 两个落地方（人工导入 `remote/deliver_zip`、实时补传 `hub.server`）走**同一张表**：

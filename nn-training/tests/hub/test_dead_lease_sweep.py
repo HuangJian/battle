@@ -95,9 +95,10 @@ def test_sweep_reaps_expired_lease_without_claim(tmp_path: Path) -> None:
 
     assert hub.sweep_dead_leases() == 1
     assert st.reclaims(JID) == 1
-    assert JID not in st._claimed
-    assert JID not in st._computing
-    assert JID not in st._ready
+    facts = st.scheduling_facts(JID)
+    assert facts["claimed"] is False
+    assert facts["computing_at"] is None
+    assert facts["ready"] is False
     assert hub.job_priority_of(JID) == PRIORITY_HIGHEST
     assert JID in hub.claimable_job_ids(COURSE)
 
@@ -186,7 +187,7 @@ def test_sweep_is_throttled(tmp_path: Path) -> None:
     clock.t += 0.3
     assert hub.sweep_dead_leases() == 0
     assert st.reclaims(JID) == 1
-    assert JID in st._leases, "没被回收：租约还在（虽然已死）"
+    assert st.has_lease(JID), "没被回收：租约还在（虽然已死）"
 
     clock.t += 1.0  # 跨过 SWEEP_MIN_SEC
     assert hub.sweep_dead_leases() == 1
@@ -206,6 +207,6 @@ def test_sweep_yields_bc_job_on_stale_progress(tmp_path: Path) -> None:
         assert st.heartbeat(JID, token) is True
     clock.t += 1
 
-    assert st._lease_state(JID, clock.t) == LEASE_ORPHAN
+    assert st.lease_state(JID, clock.t) == LEASE_ORPHAN
     assert hub.sweep_dead_leases() == 1
     assert st.reclaims(JID) == 1

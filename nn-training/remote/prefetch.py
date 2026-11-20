@@ -400,6 +400,11 @@ class PrefetchStore:
             self._handoff.pop(jid, None)
         self._drop_dir(jid)
 
+    def handoff_path(self, jid: str) -> Path | None:
+        """已交棒但**还没被搬走**的暂存目录（只读；消费它的是 `release_handoff`）。"""
+        with self._lock:
+            return self._handoff.get(jid)
+
     def release_handoff(self, jid: str | None = None) -> None:
         """放掉「已交给调用方但还没被搬走」的 staged 暂存（job 收尾用；幂等，不抛）。
 

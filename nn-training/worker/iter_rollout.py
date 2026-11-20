@@ -37,8 +37,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Sequence
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from concurrent.futures import FIRST_COMPLETED, wait
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
@@ -49,7 +48,7 @@ from typing import Any, cast
 # 36000 拍的面板上合法拉满局就是 17–30s ⇒ 硬顶 43.2s / 点名 33.2s，见 `game_watch.game_timeout_sec`）。
 # **一律通过模块属性读**（`game_watch.X`）而不是 `from ... import X`：import 会把值抄成第二份
 # 绑定，测试 patch 了 `game_watch` 的那一份、调用点却还在读旧绑定（两处不一致就是静默的错口径）。
-from common import game_watch, progress_hook, scratch
+from common import game_watch, progress_hook, runtime, scratch
 from common.log_bundle import LogBundle
 from common.platform_utils import (
     KILL_REAP_SEC,
@@ -78,6 +77,8 @@ from common.protocol import (
     validate_rollout_spec,
 )
 from worker import serve_pool
+from worker.iter_run import IterRun as _IterRun
+from worker.iter_run import RoundContext as RoundContext
 
 #: 每局日志（诊断用；与本地 `run_rollout` 的 `w{i}/rollout.log` 同名同形）。
 ROLLOUT_LOG_NAME = "rollout.log"
@@ -875,108 +876,14 @@ def _pool_width(spec: dict, workers: int, slots: int) -> int:
     return max(1, int(workers))
 
 
-@dataclass
-class RoundContext:
-    """一轮 job 的**轮级**资源：首批解析一次，补差批复用（`plan/rollout-topup-fastpath` §3.2）。
-
-    为什么需要它（2026-10-11 现场）：补差批复用的是同一个 `run_iter_rollout`，于是**每一批**
-    都重付一遍「与批内局数无关」的开销——落点探针（8MB + fsync ×(1+候选数)）、TS 树安装、
-    权重镜像、以及最贵的**长驻池建池 + 冷启动**（94 个 bun：exec + traverse + wasm + attest×3）。
-    批越小这笔开销占比越高（it34 补差2 只有 **1 局**，却付了 48.9s 的壳子）⇒ 池的收益
-    （`docs/nn/runtime-opt.md` §20 的 1.59×）被「池的生命周期 = 批」吃掉了。
-
-    ⚠ 只装**轮级**的东西：`jd` / `s_layout` / `exec_dir` 是**批级**的（每批一个 `topup{k}/`，
-    各自的 scratch 私有目录 / `--out` 续号 / 轮末清理都属于批）。
-    ⚠ **池的所有权随 ctx 转移**：`ctx=None`（老调用）= 本轮自建自收（逐字今天）；
-    传 ctx = 调用方建、调用方在**补差跑完之后、PPO 之前** `close()`（`remote/worker.py`）
-    ——别让 94 个常驻 bun 陪 PPO 吃内存。
-    """
-
-    #: **轮级** scratch 布局（探针结论；`None` = 回退档：不换根 / 产出住真 job 目录）。
-    #: 批级布局由它镜像而来：`batch_layout(layout, batch_rel(轮 job 目录, 批 job 目录))`。
-    layout: scratch.ScratchLayout | None = None
-    #: TS 树在 scratch 的家（按名寻址 ⇒ 跨批同一份）；`None` = 本轮未换根。
-    ts_home: Path | None = None
-    #: 轮的真实 job 目录（首批那个；补差批是它下面的 `topup{k}/`）。
-    job_dir: Path | None = None
-    #: 长驻池（生命周期 = 轮）。
-    pool: Any = None
-    #: 轮级**槽位**（= 本机能同时跑的局数上限；补差批的满铺器拿它当 `width`，池宽也按它）。
-    workers: int = 0
-    #: 首批是否已完成解析（落点 / TS 树）；补差批看到 `True` 就跳过那一整段。
-    resolved: bool = False
-    #: 落点段耗时（读数用；旧名 `probe_sec` —— 探针已删，2026-10-14）。
-    setup_sec: float = 0.0
-
-    @property
-    def root(self) -> Path | None:
-        """scratch 介质根（`None` = 回退档）。"""
-        return None if self.layout is None else self.layout.root
-
-    def close(self) -> None:
-        """收掉本 ctx 拥有的长驻池（幂等）。**不**动 scratch 上的产出。"""
-        pool, self.pool = self.pool, None
-        if pool is not None:
-            pool.close()
-
-    def cleanup(self, log=lambda msg: None) -> None:
-        """轮末回收本地盘占用（**PPO 之后**叫；幂等、尽力而为、绝不抛）。
-
-        取消搬回（§3.5）后产出就住在轮 scratch 目录里（PPO 要读它）⇒ 清理从「每批 `finally`」
-        前移到「全 job 收尾、PPO 之后」：清**本轮的** scratch 目录（ts 家不在里面、永不清）。
-        有上界（`DRAIN_CEILING_SEC`）：挂住的挂载点清不动就留着（下一轮同名会重建），不阻塞收尾。
-        """
-        if self.layout is None:
-            return
-        ok, _ = call_bounded(
-            partial(scratch.clear_dir, self.layout.job),
-            float(game_watch.DRAIN_CEILING_SEC),
-            name="scratch-cleanup",
-        )
-        if not ok:
-            log(
-                f"WARN rollout scratch 轮末没清完（{game_watch.DRAIN_CEILING_SEC:g}s 内没返回）："
-                f"{self.layout.job}——本地盘占着就占着（下一轮同名会重建），不阻塞收尾"
-            )
 
 
-def run_iter_rollout(
-    job_dir: str | Path,
-    spec: dict,
-    *,
-    ts_dir: str | Path | None = None,
-    log=lambda msg: print(f"[iter] {msg}", flush=True),
-    ctx: RoundContext | None = None,
-    it: int = 0,
-    next_game: Callable[[], list[str] | None] | None = None,
-    on_game_settled: Callable[..., None] | None = None,
-    #: 轮末想并进**同一行**的读数（流式采集的 `summary_line`）。在 `emit` 前一刻调用 ⇒
-    #: 拿到的是收官后的数；异常只记一行（读数不许把一轮 rollout 弄挂）。
-    #: 2026-10-29 日志瘦身：`流式采集：动态加采 …` 原来是独立一行，现在并进轮末那行。
-    volume_line: Callable[[], str] | None = None,
-) -> dict[str, Any]:
-    """执行整轮 rollout，返回 `{report, shard_dirs, rollout_sec, bun_version, game_secs}`。
 
-    ★ **逐局流式**（2026-10-27，用户口径：「采完一局，立即判差额最大的关，用空出的 worker
-    采它，直到所有关满额」）：`next_game` 非空时，本轮采哪几局由调度器**现场**决定——
-    每个槽位一空就调一次 `next_game()` 取下一局；`on_game_settled(argv, nSamples)` 把刚结算
-    那一局的产出告诉它（它据此重算「谁最缺」）。`spec["argv"]` 此时只当**每关一条模板**
-    （自定义关的 `--stage-json` 只在自己模板里），声明集 = 实际派出去的那一组，轮末按它
-    重算 `data_fp` 再逐位对账（`verify_shards` 一个字没放宽）。
 
-    `next_game` 缺席 ⇒ **逐字老行为**（argv 就是全部要跑的局，提交进池后收齐为止）。
-
-    spec 必须是已经过 `protocol.validate_rollout_spec` 的归一化字典（argv 白名单 +
-    相对路径 + 逐局 stage/seed 都在那里把关）。
-
-    `ts_dir` = 解包后的 TS 代码根（带 `src/` `tools/`）；缺省 = job 目录（单测里桩脚本
-    是绝对路径，不需要独立的 TS 根）。真实节点侧必须传，否则 `tools/sim/...` 找不到。
-
-    `it` = 本轮轮号（`manifest["it"]`），只用于**轮内打点的标签**：不传就报 `it0`，
-    云机/控制台的进度行会显示成「在处理第 0 轮」（2026-10-24 真机：`y34-hitfix` 已在
-    it102，进度行却一直是 `iter it0 2/17`）。它不参与任何判据。
-    """
-    from worker.reports import combine_reports, compact_per_game
+def _setup_run(r: _IterRun) -> None:
+    """路径 / bun / 并发口径 / 轮末日志容器（原 run_iter_rollout 的前半段）。"""
+    job_dir, spec, ts_dir = r.job_dir, r.spec, r.ts_dir
+    log, next_game = r.log, r.next_game
 
     jd = Path(job_dir)
     tsd = Path(ts_dir) if ts_dir is not None else jd
@@ -1013,10 +920,10 @@ def run_iter_rollout(
     # ★ 缺省硬顶随**面板的 tick 预算**走（2026-11-18）：`--max-ticks` 就在每条 argv 里（= 关卡
     #   的终局线）。固定 30s 在 36000 拍的面板上只比合法最坏值高 0–4s ⇒ 机器稍慢就把最贵的
     #   长局杀掉重跑（现场 max 27.45s = 92% 上限）。没这个旗标（老计划）⇒ 逐字回到兜底值。
-    panel_ticks = game_watch.max_ticks_of(templates[0]) if templates else 0
-    timeout_sec = requested if explicit else game_watch.game_timeout_sec(panel_ticks)
+    r.panel_ticks = game_watch.max_ticks_of(templates[0]) if templates else 0
+    timeout_sec = requested if explicit else game_watch.game_timeout_sec(r.panel_ticks)
     #: 点名线跟着硬顶走（`slow_warn_sec`：缺省 30s 档仍是 20s，一个字不改）。
-    warn_sec = game_watch.slow_warn_sec(timeout_sec)
+    r.warn_sec = game_watch.slow_warn_sec(timeout_sec)
     # ★ 2026-09-24（日志节食）：本轮的「设置 + 看门狗口径 + 池 + 进度 + 收尾 + 单局耗时」
     # 攒成**一行**（完成时打；未完成时每 60s 心跳一次）。原来这七行随轮刷，云端整段跑几
     # 小时会把控制台日志面板拖死（用户报障）。例外：**重试**与**慢局点名**仍是「发生了才
@@ -1063,13 +970,28 @@ def run_iter_rollout(
     # 换不过去就**逐字**走今天的行为（不换根）。
     # ★ 2026-10-11（§3.5）：**产出不再搬回** —— 换根档的 shard 就住在轮 scratch 目录里，
     #   节点自己的 PPO 读同一个根（`shards_root`）；回退档的 produce 根就是真 job 目录。
+    r.jd, r.tsd, r.t0 = jd, tsd, t0
+    r.bun, r.ver = bun, ver
+    r.templates, r.argvs = templates, argvs
+    r.slots = slots
+    r.workers, r.timeout_sec, r.explicit = workers, timeout_sec, explicit
+    r.retry_cap = round_retry_max()
+    r.rb = rb
+    r.rctx = r.ctx if r.ctx is not None else RoundContext()
+
+
+def _setup_scratch(r: _IterRun) -> None:
+    """轮级 scratch 解析 + 本批镜像/权重 + 产出根（补差批整段跳过）。"""
+    jd, tsd, spec = r.jd, r.tsd, r.spec
+    templates, argvs, slots = r.templates, r.argvs, r.slots
+    timeout_sec, explicit = r.timeout_sec, r.explicit
+    rb, rctx = r.rb, r.rctx
     exec_jd = jd
     s_layout: scratch.ScratchLayout | None = None
     # 整轮预算（不是单批）：产出不再搬走 ⇒ 峰值 = 首批 + 补差批之和（评审 P0-3）。
     # 基准 = 满铺批宽（A3）：补差批按**槽位**铺，首批可能只有 1 局。
     # 容量预算按**模板/计划**的局数算（流式档的 argvs 一开始是空的，拿它算会低估一整轮）。
     need = _round_need_bytes(spec, len(templates), slots=slots)
-    rctx = ctx if ctx is not None else RoundContext()
     if not rctx.resolved:
         rctx.workers = slots  # 轮级槽位：补差批的满铺器拿它当 width；池宽也按它（A1/A2）
     # ---- 首批：解析**轮级**资源（探针 → TS 树）；补差批整段跳过（plan §3.2）----
@@ -1173,15 +1095,15 @@ def run_iter_rollout(
         rb.add("产出落点", f"{jd}（回退原地＝今天的行为：不换根，产出住真 job 目录）")
     rb.add("ts_root", tsd)
     rb.note(
-        f"单局看门狗：软告警 >{warn_sec:g}s，首次尝试硬顶 {timeout_sec:g}s"
+        f"单局看门狗：软告警 >{r.warn_sec:g}s，首次尝试硬顶 {timeout_sec:g}s"
         + (
             "（plan 指定，每次尝试都用它）"
             if explicit
             else (
-                f"（plan 未指定 ⇒ 按面板 {panel_ticks} 拍的 tick 预算推导："
+                f"（plan 未指定 ⇒ 按面板 {r.panel_ticks} 拍的 tick 预算推导："
                 f"{game_watch.PER_TICK_BUDGET_SEC * 1000:g}ms/拍，不低于兜底"
                 f" {game_watch.DEFAULT_GAME_TIMEOUT_SEC:g}s）"
-                if panel_ticks > 0
+                if r.panel_ticks > 0
                 else f"（plan 未指定，用节点兜底 {game_watch.DEFAULT_GAME_TIMEOUT_SEC:g}s；"
                 "argv 无 --max-ticks ⇒ 不按面板推导）"
             )
@@ -1200,6 +1122,14 @@ def run_iter_rollout(
     #   「每批重建池」正是现场那 48.9s 里最贵的一段。
     #   ⚠ 建不起来（`make_pool` 返回 None = 开关关/脚本不在准入名单，或 `start()` 0 就绪）时
     #   **不缓存** ⇒ 下一批允许再试（有意：冷启动失败多为瞬态；确定性拒绝重试也只是常数级判断）。
+    r.tsd, r.exec_jd, r.shards_root = tsd, exec_jd, shards_root
+
+
+def _setup_pool(r: _IterRun) -> None:
+    """长驻池：沿用 / 窄池重建 / 冷启动失败退一次性 spawn。"""
+    spec, bun, tsd, templates = r.spec, r.bun, r.tsd, r.templates
+    workers, log, rb = r.workers, r.log, r.rb
+    rctx, pool = r.rctx, r.pool
     pool = rctx.pool
     #: 本批想要的池宽（A2）：有补差 ⇒ 轮级槽位；无补差 ⇒ 本批并发（逐字旧行为）。
     pool_width = _pool_width(spec, workers, rctx.workers)
@@ -1240,229 +1170,255 @@ def run_iter_rollout(
             pool = None
             rctx.pool = None  # 别把「已关掉的池」留给下一批复用（同一轮内的下一个批会直接用它）
     # 逐局的耗时/尝试次数按**下标**记（流式档的下标是现场长出来的，不能用定长列表）。
-    game_secs: dict[int, float] = {}
-    game_attempts: dict[int, int] = {}
-    ok = False
-    round_retries = 0  # 「整轮重投」次数（类：机器级停滞）
-    retry_cap = round_retry_max()
+    r.pool = pool
 
-    def _samples_of(argv: list[str]) -> int:
-        """一局实产的样本数（`nSamples`，回退 `totalSamples`）；读不到 ⇒ 0（掉局）。
 
-        流式调度的账本就靠它：每结算一局就把这个数交给 `on_game_settled`，下一局的
-        「谁最缺」用**实测**样本重算（不是 est 反解）。纯观测面：读不到不抛、只算 0。
-        """
-        out = _game_out_dir(argv)
-        if not out:
-            return 0
-        try:
-            stage = int(argv[argv.index("--stages") + 1])
-            seed = int(argv[argv.index("--seeds") + 1])
-        except (ValueError, IndexError):
-            return 0
-        mp = Path(exec_jd) / out / shard_name(stage, seed) / "manifest.json"
-        try:
-            mm = json.loads(mp.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return 0
-        if not isinstance(mm, dict):
-            return 0
-        for key in ("nSamples", "totalSamples"):
-            n = mm.get(key)
-            if isinstance(n, int) and not isinstance(n, bool) and n > 0:
-                return int(n)
+def _samples_of(exec_jd: Path, argv: list[str]) -> int:
+    """一局实产的样本数（`nSamples`，回退 `totalSamples`）；读不到 ⇒ 0（掉局）。
+
+    流式调度的账本就靠它：每结算一局就把这个数交给 `on_game_settled`，下一局的
+    「谁最缺」用**实测**样本重算（不是 est 反解）。纯观测面：读不到不抛、只算 0。
+    """
+    out = _game_out_dir(argv)
+    if not out:
         return 0
-
     try:
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            last_log_at = t0
-            settled_n = 0
-            # `pending` = 还没拿到结果的局（**跨重投存活**）：机器级停滞重投时只补这几个，
-            # 已结算的局一个字都不重跑（用户口径：不许空转烧配额）。
-            # ★ 流式档 `argvs` 一开始是空的：`pending` 只装重投的局，新局从 `next_game()` 来。
-            pending: list[int] = [i for i in range(len(argvs))]
-            supply_open = next_game is not None
-            while True:
-                # 一局**整条链路**的墙钟上界（见 `game_watch.game_ceiling_sec`）：它才是「一局
-                # 永不放跑整轮」的那条闸。不设它的话，任何一步不可取消的阻塞（挂住的挂载点上的
-                # mkdir/open/写盘、`Popen` 等 exec 的握手）都会让 future 永不结算 ⇒ 下面的 `wait`
-                # 永远收不齐 ⇒ 重投那套护栏一次也触发不了（2026-10-06 现场）。每次尝试重新算：
-                # 常量可被用例 patch，展开的值会进超界行（读数与判据同一份）。
-                ceiling_sec = game_watch.game_ceiling_sec(timeout_sec, explicit=explicit)
-                inflight: dict[Any, int] = {}
+        stage = int(argv[argv.index("--stages") + 1])
+        seed = int(argv[argv.index("--seeds") + 1])
+    except (ValueError, IndexError):
+        return 0
+    mp = Path(exec_jd) / out / shard_name(stage, seed) / "manifest.json"
+    try:
+        mm = json.loads(mp.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    if not isinstance(mm, dict):
+        return 0
+    for key in ("nSamples", "totalSamples"):
+        n = mm.get(key)
+        if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+            return int(n)
+    return 0
 
-                def _fill() -> None:
-                    """把**空出来的槽位**立刻填满：先补重投的局，再问调度器「下一局派哪一关」。
 
-                    ★ 这就是「采完一局 → 立即判断差额最大的关 → 立即用空出的 worker 采它」：
-                    每结算一局都会回头叫它一次，从来不「等这一批跑完」。
-                    """
-                    nonlocal supply_open
-                    while len(inflight) < workers:
-                        if pending:
-                            i = pending.pop(0)
-                        elif supply_open and next_game is not None:
-                            argv = next_game()
-                            if argv is None:
-                                supply_open = False  # 所有关满额（或触顶）⇒ 不再派新局
-                                break
-                            if not argv:
-                                # 本拍没活可派（在飞的局预计就补齐）——**不关供给**：
-                                # 下一局结算后 `_fill` 会再问一次（关了就静默短采）。
-                                break
-                            argvs.append(list(argv))
-                            i = len(argvs) - 1
-                        else:
+
+
+def _clean_stuck(r: _IterRun, stuck: list[int], ceiling_sec: float) -> None:
+    """清掉机器级停滞局的半截产出（有界；清不掉也照常重投）。"""
+    jd, exec_jd, argvs, log = r.jd, r.exec_jd, r.argvs, r.log
+    for i in stuck:
+        cleaned, _ = call_bounded(
+            _clean_partial(jd, exec_jd, argvs[i]),
+            ceiling_sec,
+            name=f"clean-{_game_label(argvs[i])}",
+        )
+        if not cleaned:
+            log(
+                f"WARN rollout 半截产出清不掉：{_game_label(argvs[i])}"
+                f"（{ceiling_sec:g}s 内没返回——挂载点 IO 还没好）"
+                "——不就地等，照常重投这一局（不是失败，云机不停）"
+            )
+
+
+def _drive_games(r: _IterRun) -> None:
+    """逐局流式调度 + 带超时 wait + 机器级停滞重投（原循环体逐字搬移）。"""
+    jd, exec_jd, tsd = r.jd, r.exec_jd, r.tsd
+    bun, workers, timeout_sec, explicit = r.bun, r.workers, r.timeout_sec, r.explicit
+    argvs, game_secs, game_attempts = r.argvs, r.game_secs, r.game_attempts
+    log, pool, next_game = r.log, r.pool, r.next_game
+    on_game_settled, it, t0, rb = r.on_game_settled, r.it, r.t0, r.rb
+    round_retries, retry_cap = r.round_retries, r.retry_cap
+    with runtime.Runtime(scope="iter-rollout", workers=workers) as ex:
+        last_log_at = t0
+        settled_n = 0
+        # `pending` = 还没拿到结果的局（**跨重投存活**）：机器级停滞重投时只补这几个，
+        # 已结算的局一个字都不重跑（用户口径：不许空转烧配额）。
+        # ★ 流式档 `argvs` 一开始是空的：`pending` 只装重投的局，新局从 `next_game()` 来。
+        pending: list[int] = [i for i in range(len(argvs))]
+        supply_open = next_game is not None
+        while True:
+            # 一局**整条链路**的墙钟上界（见 `game_watch.game_ceiling_sec`）：它才是「一局
+            # 永不放跑整轮」的那条闸。不设它的话，任何一步不可取消的阻塞（挂住的挂载点上的
+            # mkdir/open/写盘、`Popen` 等 exec 的握手）都会让 future 永不结算 ⇒ 下面的 `wait`
+            # 永远收不齐 ⇒ 重投那套护栏一次也触发不了（2026-10-06 现场）。每次尝试重新算：
+            # 常量可被用例 patch，展开的值会进超界行（读数与判据同一份）。
+            ceiling_sec = game_watch.game_ceiling_sec(timeout_sec, explicit=explicit)
+            inflight: dict[Any, int] = {}
+
+            def _fill(
+                inflight: dict[Any, int] = inflight,
+                pending: list[Any] = pending,
+                ceiling_sec: float = ceiling_sec,
+            ) -> None:
+                """把**空出来的槽位**立刻填满：先补重投的局，再问调度器「下一局派哪一关」。
+
+                ★ 这就是「采完一局 → 立即判断差额最大的关 → 立即用空出的 worker 采它」：
+                每结算一局都会回头叫它一次，从来不「等这一批跑完」。
+                """
+                nonlocal supply_open
+                while len(inflight) < workers:
+                    if pending:
+                        i = pending.pop(0)
+                    elif supply_open and next_game is not None:
+                        argv = next_game()
+                        if argv is None:
+                            supply_open = False  # 所有关满额（或触顶）⇒ 不再派新局
                             break
-                        inflight[
-                            ex.submit(
-                                _run_one_game_bounded,
-                                bun,
-                                argvs[i],
-                                exec_jd,
-                                tsd,
-                                _game_out_dir(argvs[i]),
-                                timeout_sec,
-                                log,
-                                explicit,
-                                pool,
-                                ceiling_sec=ceiling_sec,
-                                job_dir=jd,
-                            )
-                        ] = i
-
-                _fill()
-                # 循环用**带超时的 wait** 而不是 `as_completed`：`as_completed` 只在「有局结算」时
-                # 才醒，而进度行与心跳都挂在结算上 ⇒ 所有线程一起卡住时它们一起哑，日志进入完全
-                # 静默（2026-09-25 现场：5s 的 270/336 之后 890s 一行都没有）。带超时的 wait 每
-                # `GAME_POLL_SEC` 给我们一次说话的机会 —— 停滞就按 `STALL_WARN_SEC` 点名（带还在
-                # 飞的局身份，见 game_watch.stall_line）。
-                last_settle = time.time()
-                stalled_at = 0.0
-                stuck: list[int] = []  # 本次尝试里「机器级停滞」没产出结果的局
-                while inflight:
-                    finished, _ = wait(
-                        set(inflight),
-                        timeout=game_watch.GAME_POLL_SEC,
-                        return_when=FIRST_COMPLETED,
-                    )
-                    now = time.time()
-                    if not finished:
-                        if (now - last_settle) >= game_watch.STALL_WARN_SEC and (
-                            now - stalled_at
-                        ) >= game_watch.STALL_WARN_SEC:
-                            stalled_at = now
-                            log(
-                                game_watch.stall_line(
-                                    "rollout",
-                                    len(inflight),
-                                    now - last_settle,
-                                    [_game_label(argvs[inflight[f]]) for f in inflight],
-                                )
-                            )
-                        continue
-                    # 按**派单顺序**处理这一拍结算的局（同一拍多局 ⇒ 账本顺序确定）。
-                    for fut in sorted(finished, key=lambda f: inflight[f]):
-                        i = inflight.pop(fut)
-                        try:
-                            game_secs[i], game_attempts[i] = fut.result()
-                        except UnreapableChildError:
-                            # **机器级**：这一局没产出，但整轮**不失败**——记下来，等本次尝试
-                            # 其它在飞的局收完（它们可能只是慢），再由外层重投补它（见循环头）。
-                            stuck.append(i)
-                        else:
-                            # ★ 2026-10-11（§3.5）：跑局 future 正常返回**就是**结算（不再有搬回这一步）。
-                            # 语义放宽与它的补偿（轮末逐位对账）见 plan §3.5「语义放宽」：
-                            # 旧判据「搬不回去的局不算结算」随搬回一起消失，取而代之的是
-                            # `verify_shards` 的「实产集 == 声明集」——缺一局必响亮（不是静默少一局）。
-                            settled_n += 1
-                            if on_game_settled is not None:
-                                # 观测腿：账本报错了不许掀翻训练（调度器自己会兜）。
-                                try:
-                                    on_game_settled(
-                                        list(argvs[i]),
-                                        _samples_of(argvs[i]),
-                                        wall_sec=float(game_secs[i] or 0.0),
-                                        now=now,
-                                    )
-                                except Exception as e:
-                                    log(f"WARN 流式采集记账异常（忽略）：{type(e).__name__}: {e}")
-                        # 进度行**按时间**节流（`game_watch.progress_due`，缺省每分钟一句）：原来的
-                        # 「每 10 局一句」在高并发轮上是每秒数行 —— 云端离线课的日志就是被它刷屏的
-                        # （用户口径 2026-09-23）。最后一句恒打（轮结束的唯一落点）。
-                        rb.add("进度", f"{settled_n}/{len(argvs)} games settled ({now - t0:.0f}s)")
-                        # ★M3 / Q2：轮内**打点**（每结算一局上报一个完成事件）。真正的 HTTP 与
-                        # 时间节流在打点层（云机侧 `remote/offline_boot.py`，每 240s 最多一句）；
-                        # 本机训练没有注册者 ⇒ `report` 立刻返回（一次 dict 查找，零副作用）。
-                        # `it=` 必须带上轮号：不带就是 `it0`（看着像在处理第 0 轮，
-                        # 而这一轮实际是 it102 —— 打点层只是照抄，不会替你补）。
-                        # 流式档的 `total` = **已派发**局数（每派一局 +1）；它只参与百分比桶，
-                        # 日志行另有节流（`common.progress_text.should_log_progress`）。
-                        # ★ 2026-10-29（日志瘦身）：这里**照旧每局一报**（事件粒度不变），
-                        #   日志/发报的节流仍只在打点层做（`progress_hook` 的契约：上报口
-                        #   只报事实）。3s 的 rollout 之所以不再刷 5 行，是打点层给 `iter`
-                        #   这族加了「最多每分钟一行」（见 `remote/offline_boot._ping`）。
-                        progress_hook.report("iter", it=int(it), done=settled_n, total=len(argvs))
-                        if game_watch.progress_due(settled_n, len(argvs), now, last_log_at):
-                            last_log_at = now
-                            rb.beat("kind=iter rollout", now=now)
-                        # ★ 槽位空出来了 ⇒ 立刻问调度器「下一局派哪一关」（一局一拍）。
-                        _fill()
-                    last_settle = now
-                if not stuck:
-                    # 本次尝试全部收齐（重投集合空）⇒ 收工。流式档「还有没有下一局」由上一步
-                    # `_fill` 判过（`supply_open` 在 `next_game()` 返回 None 时就落了）。
-                    break
-                round_retries += 1
-                if retry_cap and round_retries > retry_cap:
-                    # 只有操作员显式设了上限才走这里（缺省不限）：上抛交回调用方自己的重试语义。
-                    raise RetryableError(
-                        f"rollout 机器级停滞：轮内已重投 {round_retries - 1} 次仍有 "
-                        f"{len(stuck)} 局没产出（收不了尸/超界；{ENV_ROUND_RETRY_MAX}={retry_cap} "
-                        "是操作员设的上限）"
-                        f"——剩余 {len(stuck)} 局交回上层重试；现场见各局 w*/rollout.log"
-                    ) from None
-                log(
-                    f"WARN rollout 整轮重投第 {round_retries} 次：本次尝试有 {len(stuck)} 局没产出"
-                    f"（机器级停滞：收不了尸/单局超界，已结算 {settled_n}/{len(argvs)} 局）——"
-                    f"只补这 {len(stuck)} 局，"
-                    f"先清掉它们的半截产出（旧写者可能还在）；不报失败、不退租约、云机不停"
-                    + ("" if not retry_cap else f"（上限 {retry_cap} 次）")
-                )
-                for i in stuck:
-                    # 清理也是**文件 IO**（rglob + rmtree）：挂住的挂载点上它会一样永不返回 ——
-                    # 主线程绝不能在这里被卡住（那同样会让整轮对日志静默）。有界地放弃它：
-                    # 旧写者本身正卡在不可中断的 IO 里，删不动也只能带着半截产出往下走
-                    # （下一轮的同名写入会截断它，兜底口径见 `_clean_attempt`）。
-                    # 两个根都扫（§3.5）：换根档半截产出就在 scratch 的产出根下，
-                    # 回退档 `exec_jd == jd` ⇒ 形状与今天逐字相同（`_clean_partial` 自己省那一个参数）。
-                    cleaned, _ = call_bounded(
-                        _clean_partial(jd, exec_jd, argvs[i]),
-                        ceiling_sec,
-                        name=f"clean-{_game_label(argvs[i])}",
-                    )
-                    if not cleaned:
-                        log(
-                            f"WARN rollout 半截产出清不掉：{_game_label(argvs[i])}"
-                            f"（{ceiling_sec:g}s 内没返回——挂载点 IO 还没好）"
-                            "——不就地等，照常重投这一局（不是失败，云机不停）"
+                        if not argv:
+                            # 本拍没活可派（在飞的局预计就补齐）——**不关供给**：
+                            # 下一局结算后 `_fill` 会再问一次（关了就静默短采）。
+                            break
+                        argvs.append(list(argv))
+                        i = len(argvs) - 1
+                    else:
+                        break
+                    inflight[
+                        ex.submit(
+                            _run_one_game_bounded,
+                            bun,
+                            argvs[i],
+                            exec_jd,
+                            tsd,
+                            _game_out_dir(argvs[i]),
+                            timeout_sec,
+                            log,
+                            explicit,
+                            pool,
+                            ceiling_sec=ceiling_sec,
+                            job_dir=jd,
                         )
-                pending = sorted(stuck)
-        ok = True
+                    ] = i
+
+            _fill()
+            # 循环用**带超时的 wait** 而不是 `as_completed`：`as_completed` 只在「有局结算」时
+            # 才醒，而进度行与心跳都挂在结算上 ⇒ 所有线程一起卡住时它们一起哑，日志进入完全
+            # 静默（2026-09-25 现场：5s 的 270/336 之后 890s 一行都没有）。带超时的 wait 每
+            # `GAME_POLL_SEC` 给我们一次说话的机会 —— 停滞就按 `STALL_WARN_SEC` 点名（带还在
+            # 飞的局身份，见 game_watch.stall_line）。
+            last_settle = time.time()
+            stalled_at = 0.0
+            stuck: list[int] = []  # 本次尝试里「机器级停滞」没产出结果的局
+            while inflight:
+                finished, _ = wait(
+                    set(inflight),
+                    timeout=game_watch.GAME_POLL_SEC,
+                    return_when=FIRST_COMPLETED,
+                )
+                now = time.time()
+                if not finished:
+                    if (now - last_settle) >= game_watch.STALL_WARN_SEC and (
+                        now - stalled_at
+                    ) >= game_watch.STALL_WARN_SEC:
+                        stalled_at = now
+                        log(
+                            game_watch.stall_line(
+                                "rollout",
+                                len(inflight),
+                                now - last_settle,
+                                [_game_label(argvs[inflight[f]]) for f in inflight],
+                            )
+                        )
+                    continue
+                # 按**派单顺序**处理这一拍结算的局（同一拍多局 ⇒ 账本顺序确定）。
+                for fut in sorted(finished, key=lambda f: inflight[f]):
+                    i = inflight.pop(fut)
+                    try:
+                        game_secs[i], game_attempts[i] = fut.result()
+                    except UnreapableChildError:
+                        # **机器级**：这一局没产出，但整轮**不失败**——记下来，等本次尝试
+                        # 其它在飞的局收完（它们可能只是慢），再由外层重投补它（见循环头）。
+                        stuck.append(i)
+                    else:
+                        # ★ 2026-10-11（§3.5）：跑局 future 正常返回**就是**结算（不再有搬回这一步）。
+                        # 语义放宽与它的补偿（轮末逐位对账）见 plan §3.5「语义放宽」：
+                        # 旧判据「搬不回去的局不算结算」随搬回一起消失，取而代之的是
+                        # `verify_shards` 的「实产集 == 声明集」——缺一局必响亮（不是静默少一局）。
+                        settled_n += 1
+                        if on_game_settled is not None:
+                            # 观测腿：账本报错了不许掀翻训练（调度器自己会兜）。
+                            try:
+                                on_game_settled(
+                                    list(argvs[i]),
+                                    _samples_of(exec_jd, argvs[i]),
+                                    wall_sec=float(game_secs[i] or 0.0),
+                                    now=now,
+                                )
+                            except Exception as e:
+                                log(f"WARN 流式采集记账异常（忽略）：{type(e).__name__}: {e}")
+                    # 进度行**按时间**节流（`game_watch.progress_due`，缺省每分钟一句）：原来的
+                    # 「每 10 局一句」在高并发轮上是每秒数行 —— 云端离线课的日志就是被它刷屏的
+                    # （用户口径 2026-09-23）。最后一句恒打（轮结束的唯一落点）。
+                    rb.add("进度", f"{settled_n}/{len(argvs)} games settled ({now - t0:.0f}s)")
+                    # ★M3 / Q2：轮内**打点**（每结算一局上报一个完成事件）。真正的 HTTP 与
+                    # 时间节流在打点层（云机侧 `remote/offline_boot.py`，每 240s 最多一句）；
+                    # 本机训练没有注册者 ⇒ `report` 立刻返回（一次 dict 查找，零副作用）。
+                    # `it=` 必须带上轮号：不带就是 `it0`（看着像在处理第 0 轮，
+                    # 而这一轮实际是 it102 —— 打点层只是照抄，不会替你补）。
+                    # 流式档的 `total` = **已派发**局数（每派一局 +1）；它只参与百分比桶，
+                    # 日志行另有节流（`common.progress_text.should_log_progress`）。
+                    # ★ 2026-10-29（日志瘦身）：这里**照旧每局一报**（事件粒度不变），
+                    #   日志/发报的节流仍只在打点层做（`progress_hook` 的契约：上报口
+                    #   只报事实）。3s 的 rollout 之所以不再刷 5 行，是打点层给 `iter`
+                    #   这族加了「最多每分钟一行」（见 `remote/offline_boot._ping`）。
+                    progress_hook.report("iter", it=int(it), done=settled_n, total=len(argvs))
+                    if game_watch.progress_due(settled_n, len(argvs), now, last_log_at):
+                        last_log_at = now
+                        rb.beat("kind=iter rollout", now=now)
+                    # ★ 槽位空出来了 ⇒ 立刻问调度器「下一局派哪一关」（一局一拍）。
+                    _fill()
+                last_settle = now
+            if not stuck:
+                # 本次尝试全部收齐（重投集合空）⇒ 收工。流式档「还有没有下一局」由上一步
+                # `_fill` 判过（`supply_open` 在 `next_game()` 返回 None 时就落了）。
+                break
+            round_retries += 1
+            if retry_cap and round_retries > retry_cap:
+                # 只有操作员显式设了上限才走这里（缺省不限）：上抛交回调用方自己的重试语义。
+                raise RetryableError(
+                    f"rollout 机器级停滞：轮内已重投 {round_retries - 1} 次仍有 "
+                    f"{len(stuck)} 局没产出（收不了尸/超界；{ENV_ROUND_RETRY_MAX}={retry_cap} "
+                    "是操作员设的上限）"
+                    f"——剩余 {len(stuck)} 局交回上层重试；现场见各局 w*/rollout.log"
+                ) from None
+            log(
+                f"WARN rollout 整轮重投第 {round_retries} 次：本次尝试有 {len(stuck)} 局没产出"
+                f"（机器级停滞：收不了尸/单局超界，已结算 {settled_n}/{len(argvs)} 局）——"
+                f"只补这 {len(stuck)} 局，"
+                f"先清掉它们的半截产出（旧写者可能还在）；不报失败、不退租约、云机不停"
+                + ("" if not retry_cap else f"（上限 {retry_cap} 次）")
+            )
+            _clean_stuck(r, stuck, ceiling_sec)
+            pending = sorted(stuck)
+    r.argvs, r.game_secs, r.game_attempts = argvs, game_secs, game_attempts
+    r.round_retries = round_retries
+
+
+def _run_games(r: _IterRun) -> None:
+    """驱动一轮；收尾无论成败都要交代池计数与中断现场。"""
+    try:
+        _drive_games(r)
+        r.ok = True
     finally:
+        pool = r.pool
         if pool is not None:
-            # 池的收益与代价（served/spawned/killed/fallback）进同一行的收尾字段。
-            rb.note(pool.summary(), final_only=True)
-            # 池的**生命周期 = 轮**（plan §3.2/S2）：传 ctx 的调用方自己收（`RoundContext.close()`，
-            # 在补差跑完之后、PPO 之前）——本批不收，否则补差批又要重建池。
-            if ctx is None:
+            r.rb.note(pool.summary(), final_only=True)
+            if r.ctx is None:
                 pool.close()
-        # ★ 2026-10-11（§3.5）：本批**不清** scratch —— 产出就是要留在那里（PPO 要读它）；
-        #   回收移到全 job 收尾、PPO 之后（`RoundContext.cleanup()`，由 `remote/worker.py` 叫）。
-        if not ok:
-            # 中断也要交代现场（看门狗口径/池计数/已结算到哪一局）——否则「为什么被杀了」
-            # 无从归因。重试/慢局那几行已经在抛出前各自打过了。
-            rb.emit("kind=iter rollout 中断")
+        if not r.ok:
+            r.rb.emit("kind=iter rollout 中断")
+
+
+def _finish_run(r: _IterRun) -> dict[str, Any]:
+    """轮末对账 / 聚合 / 汇总行 / 返回契约。"""
+    from worker.reports import combine_reports, compact_per_game
+
+    argvs, templates, spec = r.argvs, r.templates, r.spec
+    exec_jd, t0 = r.exec_jd, r.t0
+    game_secs, game_attempts = r.game_secs, r.game_attempts
+    rb, log, volume_line = r.rb, r.log, r.volume_line
+    pool, shards_root = r.pool, r.shards_root
+    workers, slots, ver, bun = r.workers, r.slots, r.ver, r.bun
+    round_retries = r.round_retries
     if round_retries:
         # 重投过就要可见（它是“机器卡过”的唯一记分）——正常轮恒空。
         rb.add("整轮重投", f"{round_retries} 次（机器级停滞：收不了尸/超界）")
@@ -1521,7 +1477,7 @@ def run_iter_rollout(
             "rollout",
             list(zip(secs_list, [_game_label(a) for a in argvs], strict=True)),
             retried=sum(1 for v in game_attempts.values() if v > 1),
-            warn_sec=warn_sec,
+            warn_sec=r.warn_sec,
         ),
         final_only=True,
     )
@@ -1557,3 +1513,58 @@ def run_iter_rollout(
             "reasons": dict(pool.fallback_reasons),
         },
     }
+
+
+
+def run_iter_rollout(
+    job_dir: str | Path,
+    spec: dict,
+    *,
+    ts_dir: str | Path | None = None,
+    log=lambda msg: print(f"[iter] {msg}", flush=True),
+    ctx: RoundContext | None = None,
+    it: int = 0,
+    next_game: Callable[[], list[str] | None] | None = None,
+    on_game_settled: Callable[..., None] | None = None,
+    #: 轮末想并进**同一行**的读数（流式采集的 `summary_line`）。在 `emit` 前一刻调用 ⇒
+    #: 拿到的是收官后的数；异常只记一行（读数不许把一轮 rollout 弄挂）。
+    #: 2026-10-29 日志瘦身：`流式采集：动态加采 …` 原来是独立一行，现在并进轮末那行。
+    volume_line: Callable[[], str] | None = None,
+) -> dict[str, Any]:
+    """执行整轮 rollout，返回 `{report, shard_dirs, rollout_sec, bun_version, game_secs}`。
+
+    ★ **逐局流式**（2026-10-27，用户口径：「采完一局，立即判差额最大的关，用空出的 worker
+    采它，直到所有关满额」）：`next_game` 非空时，本轮采哪几局由调度器**现场**决定——
+    每个槽位一空就调一次 `next_game()` 取下一局；`on_game_settled(argv, nSamples)` 把刚结算
+    那一局的产出告诉它（它据此重算「谁最缺」）。`spec["argv"]` 此时只当**每关一条模板**
+    （自定义关的 `--stage-json` 只在自己模板里），声明集 = 实际派出去的那一组，轮末按它
+    重算 `data_fp` 再逐位对账（`verify_shards` 一个字没放宽）。
+
+    `next_game` 缺席 ⇒ **逐字老行为**（argv 就是全部要跑的局，提交进池后收齐为止）。
+
+    spec 必须是已经过 `protocol.validate_rollout_spec` 的归一化字典（argv 白名单 +
+    相对路径 + 逐局 stage/seed 都在那里把关）。
+
+    `ts_dir` = 解包后的 TS 代码根（带 `src/` `tools/`）；缺省 = job 目录（单测里桩脚本
+    是绝对路径，不需要独立的 TS 根）。真实节点侧必须传，否则 `tools/sim/...` 找不到。
+
+    `it` = 本轮轮号（`manifest["it"]`），只用于**轮内打点的标签**：不传就报 `it0`，
+    云机/控制台的进度行会显示成「在处理第 0 轮」（2026-10-24 真机：`y34-hitfix` 已在
+    it102，进度行却一直是 `iter it0 2/17`）。它不参与任何判据。
+    """
+    r = _IterRun(
+        job_dir=job_dir,
+        spec=spec,
+        ts_dir=ts_dir,
+        log=log,
+        ctx=ctx,
+        it=it,
+        next_game=next_game,
+        on_game_settled=on_game_settled,
+        volume_line=volume_line,
+    )
+    _setup_run(r)
+    _setup_scratch(r)
+    _setup_pool(r)
+    _run_games(r)
+    return _finish_run(r)

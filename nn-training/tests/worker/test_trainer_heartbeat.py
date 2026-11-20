@@ -101,7 +101,7 @@ def test_start_writes_first_beat_and_stops(tmp_path: Path, monkeypatch) -> None:
         assert pub.writes >= 2, "写线程得真的在写"
     finally:
         pub.shutdown()
-    assert pub._thread is None
+    assert pub.running is False
 
 
 def test_read_heartbeat_tolerates_garbage(tmp_path: Path) -> None:

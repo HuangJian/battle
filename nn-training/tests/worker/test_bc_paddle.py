@@ -111,9 +111,13 @@ def test_paddle_bc_delivers_epoch_chosen_by_smoothed_val_loss(tmp_path) -> None:
     assert round(out["best_val_loss"], 4) == out["history"]["val_loss"][delivered - 1]
     meta = json.loads((tmp_path / "out" / "weights.json").read_text(encoding="utf-8"))
     assert meta["delivered_epoch"] == delivered
-    assert meta["best_smoothed_val_loss"] == pytest.approx(
-        out["best_smoothed_val_loss"]
-    )
+    # ⚠ 落账口径对落账口径（2026-11-15）：meta 写的是 `round(best_smoothed, 4)`，返回值是未舍入的
+    # 原始 float。曾经写成 `pytest.approx(out[...])`（默认**相对**容差 1e-6）⇒ 只在 4dp 舍入量
+    # （最大 5e-5）恰好超出 `1e-6 × 值` 时红：值 ≳ 5 就可能成立，于是这条用例偶尔红、又偶尔绿
+    # （现场值 25.586440000000003 落账 25.5864，差 4e-5 > 2.6e-5）。两边都取 4dp 后是**精确**相等，
+    # 既没有 flake，也比原来更严。
+    assert meta["best_smoothed_val_loss"] == round(out["best_smoothed_val_loss"], 4)
+    assert meta["best_val_loss"] == round(out["best_val_loss"], 4)
 
 
 def test_paddle_bc_rejects_legacy_nnpolicy(tmp_path) -> None:

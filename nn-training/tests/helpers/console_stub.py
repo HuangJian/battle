@@ -31,6 +31,8 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from tests.helpers.http_server import serve_fast
+
 
 class NoHandoffConsole:
     """假控制台：**没有**自动交接/导出端点（一律 404）——「控制台不在 / 太旧」的替身。
@@ -68,7 +70,7 @@ class NoHandoffConsole:
         self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
         # `shutdown()` 会等满一个 poll_interval；e2e 每个用例起一份假控制台，
         # 缺省 0.5s 的关服延迟是白付（请求处理仍是即时的）。
-        threading.Thread(target=self.srv.serve_forever, args=(0.05,), daemon=True).start()
+        serve_fast(self.srv).start()
 
     def close(self) -> None:
         self.srv.shutdown()

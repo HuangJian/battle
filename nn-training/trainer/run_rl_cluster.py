@@ -11,7 +11,7 @@
 全收官即退出（e2e / 单课调试用）。
 
 **控制面**（`--control-file`，默认 `tmp/loop-control.json`）：控制台写暂停意图，训练侧每拍读
-一次并施加到调度器（`trainer/loop_control.py`）。暂停**只影响调度**——队列与账本一个字不动。
+一次并施加到调度器（`worker/loop_control.py`）。暂停**只影响调度**——队列与账本一个字不动。
 
 用法：
   python nn-training/trainer/run_rl_cluster.py                          # 自动发现 tmp/*/training_log.jsonl

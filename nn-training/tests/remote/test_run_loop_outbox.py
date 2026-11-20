@@ -31,8 +31,8 @@ from remote import deliver_parts
 from remote.deliver_outbox import LocalOutboxDeliverer, read_state, round_path
 from remote.deliver_proc import make_deliverer
 from remote.run_loop import run_standalone
-from tests.remote.test_offline_deliver import RUN, _make_artifacts  # type: ignore
-from tests.remote.test_run_loop import (  # type: ignore
+from tests.remote.test_offline_deliver import RUN, _make_artifacts
+from tests.remote.test_run_loop import (
     _FakeRunJob,
     _quiet,
     _run,
@@ -176,7 +176,7 @@ def test_outbox_leg_reaches_the_body_through_the_parts_module(tmp_path: Path) ->
         outbox_dir=tmp_path / "outbox",
         artifacts_dir=root,
         run_id=RUN,
-        parts=_Noop(),  # type: ignore[arg-type]
+        parts=_Noop(),
         log=_quiet,
     )
     assert leg.sync() == 0

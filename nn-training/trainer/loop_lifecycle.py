@@ -54,16 +54,19 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import common.distribution
 from biz.course import resolve_rotate_seed
-from common.log import log
-from trainer.dispatch_queue import REPO_ROOT, RUN_ID
+from common.log import default_router, log
+from common.paths import REPO_ROOT
+from trainer.dispatch_queue import RUN_ID
 from trainer.loop_guards import TrainingGuards
 from trainer.loop_steps import kickstart_coef
 from trainer.rollout_phase import join_precollect_child
@@ -292,6 +295,24 @@ def export_refusal(*, export_path: str, iters_total: int, start_it: int) -> str:
     return ""
 
 
+@dataclass(frozen=True)
+class ResumeState:
+    """续跑接续面的只读快照（启动继承的槽位 + 账本摘要；判据本体不在这里）。"""
+
+    start_it: int
+    rotate_seed: int | None
+    soft_remediate_count: int
+    kl_streak: int
+    ent_peak: float | None
+    train_sec_total: float
+    train_samples_total: float
+    consec_fail: int
+    last_verdict: str | None
+    iterations_n: int
+    next_it: int
+    verdicts: tuple[str, ...]
+
+
 class TrainingLifecycle:
     """主循环骨架（7 方法 = 一条链；见本模块头注的宿主判据）。
 
@@ -357,6 +378,29 @@ class TrainingLifecycle:
     #: `round_failure` 声明为**精确签名**而不是 `Any`：`run_one_round` 直接 `return` 它，
     #: `Any` 会让 mypy 报 no-any-return（方法体要逐字节保持搬前原样，所以把精度放在声明里）。
     round_failure: Callable[..., RoundOutcome]  # RoundSteps（trainer/loop_round_steps.py）
+
+    def resume_state(self) -> ResumeState:
+        """续跑接续面的公开读数（启动继承后的槽位 + 账本摘要；不重扫盘）。"""
+        ledger = getattr(self, "_ledger", None)
+        verdicts = tuple(
+            str(getattr(v, "verdict", "") or "") for v in (getattr(ledger, "verdicts", []) or [])
+        )
+        ent_peak = getattr(self, "_ent_peak", None)
+        rotate_seed = getattr(self, "_rotate_seed", None)
+        return ResumeState(
+            start_it=int(getattr(self, "_start_it", 1) or 1),
+            rotate_seed=None if rotate_seed is None else int(rotate_seed),
+            soft_remediate_count=int(getattr(self, "_soft_remediate_count", 0) or 0),
+            kl_streak=int(getattr(self, "_kl_streak", 0) or 0),
+            ent_peak=None if ent_peak is None else float(ent_peak),
+            train_sec_total=float(getattr(self, "_train_sec_total", 0.0) or 0.0),
+            train_samples_total=float(getattr(self, "_train_samples_total", 0.0) or 0.0),
+            consec_fail=int(getattr(self, "_consec_fail", 0) or 0),
+            last_verdict=getattr(ledger, "last_verdict", None),
+            iterations_n=int(getattr(ledger, "iterations_n", 0) or 0),
+            next_it=int(getattr(ledger, "next_it", 1) or 1),
+            verdicts=verdicts,
+        )
 
     # ------------------------------------------------------------------ 编排
 
@@ -481,6 +525,18 @@ class TrainingLifecycle:
             # （调度器的退避是 `TaskResult.retry` 的 resume_at，不在任务体里睡 30s）。
             return self.round_failure(e, ctx.it, backoff=True)
 
+    def stop_reason(self) -> tuple[str, str]:
+        """下一次收官会用的停腿原因 `(cause, detail)` —— **只读，不清账**。
+
+        `finish_course` 把两格写进 `run_complete` 后立即清空（「读一次即清」：重启/重开不得
+        复用旧因）。诊断与用例要在任意时刻问「现在是什么原因」，走这条读面，不去碰槽位。
+        """
+        return str(self._stop_cause or ""), str(self._stop_detail or "")
+
+    def collect_child(self) -> subprocess.Popen | None:
+        """在飞预采子进程（无 ⇒ `None`）。活引用：调用方只读（`poll()` / 观测）。"""
+        return cast("subprocess.Popen | None", self._collect_child)
+
     def finish_course(self, it: int, *, drain: bool = True, block: bool = True) -> None:
         """**本课程**收官（一轮跑满）的四件事，不含停车循环（R2d 拆分）。
 
@@ -499,7 +555,7 @@ class TrainingLifecycle:
         total = args.iters if args.iters > 0 else "∞"
         # 在飞预采子进程（门判决等中途 break 时可能残留）：收敛掉，不留孤儿空烧。
         # 正常跑满时 spawn_next_collect 已因 it==iters 短路，child 恒为 None。
-        child = getattr(self, "_collect_child", None)
+        child = self.collect_child()
         if child is not None:
             try:
                 if child.poll() is None:
@@ -520,8 +576,7 @@ class TrainingLifecycle:
         #   ② 无限课程（`iters<=0`）从来不会因为"跑满"到这里 ⇒ 记 `unknown`（**绝不编原因**）。
         #   `reason` 尾部追加 `：<detail>`，保持旧词头与旧尾串逐字不变（手工 grep 与老读面
         #   不受影响：`正常收官（it238/500）` 仍是前缀）。
-        cause = str(getattr(self, "_stop_cause", "") or "")
-        detail = str(getattr(self, "_stop_detail", "") or "")
+        cause, detail = self.stop_reason()
         if not cause:
             cause, detail = ("iters", "跑满声明的轮数") if int(args.iters or 0) > 0 else ("unknown", "")
         self._stop_cause, self._stop_detail = "", ""  # 读一次即清（重启/重开不得复用旧因）
@@ -750,12 +805,16 @@ class TrainingLifecycle:
         """
         self._eb_window.set()
         # R4-G1 心跳：开窗（后续单元起止由 batch_eval 续写 batch/unit/rung）。
+        # 失败不抛（心跳不得反过来打断训练），但按 key 喊一次：console 的「训练忙碌中」读的就是
+        # 这个心跳 —— 写不进去与真卡住长得一模一样，而训练侧其实一切正常。
         try:
             from worker.eval_heartbeat import write_state
 
             write_state(window_open=True)
-        except Exception:
-            pass
+        except Exception as e:  # 心跳是可选落盘，失败边界就在本函数
+            default_router().warn_once(
+                "eval_heartbeat:open", f"开窗心跳没写成：{e!r}——console 会显示旧状态"
+            )
         t_prev = self._eb_thread
         if t_prev is not None and t_prev.is_alive():
             return

@@ -120,7 +120,7 @@ def test_finish_course_puts_the_stop_cause_into_run_complete(
     assert row["reason"].endswith("，本地停采、云机已停机")
     if detail:
         assert row["reason"].startswith(f"正常收官（it239/{iters}）：{detail}")
-    assert loop._stop_cause == "" and loop._stop_detail == "", "读一次即清（重开不得复用旧因）"
+    assert loop.stop_reason() == ("", ""), "读一次即清（重开不得复用旧因）"
 
 
 def test_budget_hard_cut_records_the_max_hours_cause(
@@ -140,11 +140,13 @@ def test_budget_hard_cut_records_the_max_hours_cause(
     loop._jsonl_path.write_text(
         json.dumps({"event": "run_start", "time": started}) + "\n", encoding="utf-8"
     )
-    assert TrainingGuardsGate._budget_hard_cut(loop, 239) is True
-    assert loop._stop_cause == "max_hours"
+    cut = TrainingGuardsGate._budget_hard_cut(loop, 239)
+    assert cut is True
+    cause, detail = loop.stop_reason()
+    assert cause == "max_hours"
     # 整串相等（不用子串：detail 的交付物就是这句给操作员读的话，全等比子串强，
     # 也不进 `test_source_text_assert_budget` 的计数口径）。
-    assert loop._stop_detail == "墙钟 12.0h 预算到顶（从课程首启累计 13.0h）"
+    assert detail == "墙钟 12.0h 预算到顶（从课程首启累计 13.0h）"
 
 
 
@@ -200,7 +202,7 @@ def test_park_drains_live_precollect_child(
     loop._collect_child = child  # type: ignore[assignment]
     loop._park_after_completion(80)
     assert child.terminated is True  # 在飞预采子进程被收敛，不留孤儿空烧
-    assert loop._collect_child is None
+    assert loop.collect_child() is None
 
 
 def test_park_without_hub_is_still_quiet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -19,9 +19,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+import common.codehash
 import common.distribution
+import common.runtime
 from common import codehash_ref
-from common.distribution import fetch_task, node_ping, post_weights_cached, validate_eval_result
+from common.distribution import node_ping
+from common.task_client import FetchTaskSpec, fetch_task, validate_eval_result
+from common.weights_client import post_weights_cached
 from worker.agent_meta import record_agent_meta, record_eval_failed
 
 #: 与 biz/config.GATE_PLATEAU_METRICS 同词表（RL eval 展示口径）
@@ -193,6 +197,118 @@ BUSY_RETRY_LIMIT = 4
 BUSY_BACKOFF_SEC = 0.5
 
 
+def _build_eval_sources(*, course_env: bool, course, eval_levels: list[str]) -> list[dict]:
+    """构造每个评估图源的配置（课程环境 / 关卡文件两路；自 `dispatch_bc_eval` 搬出）。"""
+    from worker.config import load_course, resolve_level
+
+    sources: list[dict] = []
+    if course_env:
+        if course is None:
+            raise BcEvalError("course_env=true 但未传 course（调用点漏透传）")
+        sources.append(
+            {
+                "name": str(getattr(course, "name", "") or "course"),
+                "stage_ids": list(course.stage_ids),
+                "stage_json": course.custom_stage_payload,
+                "max_ticks": int(course.max_ticks),
+                "difficulty": str(course.difficulty),
+                "lives": course.player.lives,
+                "level": course.player.level,
+                "enemies": sorted(
+                    {int(s.get("count") or 0) for s in course.stages if isinstance(s, dict)}
+                ),
+                "kind": "course",
+            }
+        )
+    else:
+        for level_name in eval_levels:
+            lvl = load_course(str(resolve_level(level_name)))
+            sources.append(
+                {
+                    "name": level_name,
+                    "stage_ids": list(lvl.stage_ids),
+                    "stage_json": lvl.stage_json,
+                    "max_ticks": int(lvl.max_ticks),
+                    "difficulty": str(lvl.difficulty),
+                    "lives": getattr(lvl.player, "lives", None),
+                    "level": getattr(lvl.player, "level", 0),
+                    "enemies": None,
+                    "kind": "levels",
+                }
+            )
+    return sources
+
+
+def _run_bc_eval_one(
+    node: dict,
+    stage: int,
+    seed: int,
+    *,
+    iter_id: str,
+    wver: str,
+    src: dict,
+    level_name: str,
+    log,
+) -> tuple[dict | None, str]:
+    """单局 BC 评估；**busy 走退避重排**（2026-09-14，与 biz/bc_dispatch 同语义）。
+
+    为什么加：节点并发槽满时回 503 busy，旧实现把它当普通失败「立刻重试一次」，
+    两次都撞 busy 就丢弃该局 —— 实测 10:38 那轮 mac 的 busy 让 arena6 只跑成
+    n=14/30（评估样本不足 ⇒ 均值噪声大，误判能力变化）。busy 是**限流信号**，
+    不是节点故障：退避等槽位释放，且**不消耗** attempt 配额。
+
+    返回 `(manifest, "")` = 成功；`(None, reason)` = 本局放弃（原因进机器健康账）。
+    自 `dispatch_bc_eval` 的 `_run_one` 闭包原样搬出（求值参数改为显式透传）。
+    """
+    attempts = 0
+    busy_tries = 0
+    last_err = ""
+    while attempts < 2:
+        attempts += 1
+        try:
+            manifest, _files = fetch_task(
+                FetchTaskSpec(
+                    url=node["url"],
+                    auth_key=node.get("authKey", ""),
+                    iter_id=iter_id,
+                    wver=wver,
+                    stage=stage,
+                    seed=seed,
+                    max_ticks=int(src["max_ticks"]),
+                    difficulty=str(src["difficulty"]),
+                    timeout=max(120.0, float(src["max_ticks"]) * 0.5 + 120.0),
+                    mode="eval",
+                    policy="nn",
+                    stage_json=src["stage_json"](stage) or "",
+                    lives_override=src["lives"],
+                    player_level=src["level"],
+                )
+            )
+            reason = validate_eval_result(manifest, wver)
+            if reason:
+                raise common.distribution.DistError(0, f"validate: {reason}")
+            return manifest, ""
+        except common.distribution.DistError as e:
+            reason = str(e.reason)
+            last_err = reason
+            if "busy" in reason[:64].lower() and busy_tries < BUSY_RETRY_LIMIT:
+                busy_tries += 1
+                attempts -= 1  # busy 不消耗 attempt 配额
+                time.sleep(BUSY_BACKOFF_SEC * busy_tries)
+                continue
+            log(
+                f"[bc-eval] {node.get('id')} {level_name} s{stage} seed{seed} "
+                f"attempt {attempts} failed: {reason[:140]}"
+            )
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            log(
+                f"[bc-eval] {node.get('id')} {level_name} s{stage} seed{seed} "
+                f"attempt {attempts} error: {last_err}"
+            )
+    return None, last_err or "failed"
+
+
 def dispatch_bc_eval(
     *,
     weights_bytes: bytes,
@@ -232,8 +348,6 @@ def dispatch_bc_eval(
     健康账）：`node` 取承载该局的节点、`mode="eval"`。**BC eval 以前不写这本账**，节点页
     「今日贡献」因此把 BC 手动 eval 的局数系统性漏掉（2026-11-13 报障）。
     """
-    from worker.config import load_course, resolve_level
-
     if nodes is None:
         from common.distribution import load_dist_config
 
@@ -263,41 +377,9 @@ def dispatch_bc_eval(
 
     level_rows: list[dict[str, Any]] = []
     t0 = time.time()
-    sources: list[dict[str, Any]] = []
-    if course_env:
-        if course is None:
-            raise BcEvalError("course_env=true 但未传 course（调用点漏透传）")
-        sources.append(
-            {
-                "name": str(getattr(course, "name", "") or "course"),
-                "stage_ids": list(course.stage_ids),
-                "stage_json": course.custom_stage_payload,
-                "max_ticks": int(course.max_ticks),
-                "difficulty": str(course.difficulty),
-                "lives": course.player.lives,
-                "level": course.player.level,
-                "enemies": sorted(
-                    {int(s.get("count") or 0) for s in course.stages if isinstance(s, dict)}
-                ),
-                "kind": "course",
-            }
-        )
-    else:
-        for level_name in eval_levels:
-            lvl = load_course(str(resolve_level(level_name)))
-            sources.append(
-                {
-                    "name": level_name,
-                    "stage_ids": list(lvl.stage_ids),
-                    "stage_json": lvl.stage_json,
-                    "max_ticks": int(lvl.max_ticks),
-                    "difficulty": str(lvl.difficulty),
-                    "lives": getattr(lvl.player, "lives", None),
-                    "level": getattr(lvl.player, "level", 0),
-                    "enemies": None,
-                    "kind": "levels",
-                }
-            )
+    sources = _build_eval_sources(
+        course_env=course_env, course=course, eval_levels=eval_levels
+    )
     for src in sources:
         level_name = str(src["name"])
         tasks: list[tuple[int, int]] = [
@@ -308,62 +390,6 @@ def dispatch_bc_eval(
         rows: list[dict[str, Any]] = []
         failed = 0
 
-        def _run_one(node: dict, stage: int, seed: int) -> tuple[dict[str, Any] | None, str]:
-            """单局评估；**busy 走退避重排**（2026-09-14，与 biz/bc_dispatch 同语义）。
-
-            为什么加：节点并发槽满时回 503 busy，旧实现把它当普通失败「立刻重试一次」，
-            两次都撞 busy 就丢弃该局 —— 实测 10:38 那轮 mac 的 busy 让 arena6 只跑成
-            n=14/30（评估样本不足 ⇒ 均值噪声大，误判能力变化）。busy 是**限流信号**，
-            不是节点故障：退避等槽位释放，且**不消耗** attempt 配额。
-
-            返回 `(manifest, "")` = 成功；`(None, reason)` = 本局放弃（原因进机器健康账）。
-            """
-            attempts = 0
-            busy_tries = 0
-            last_err = ""
-            while attempts < 2:
-                attempts += 1
-                try:
-                    manifest, _files = fetch_task(
-                        node["url"],
-                        node.get("authKey", ""),
-                        iter_id=iter_id,
-                        wver=wver,
-                        stage=stage,
-                        seed=seed,
-                        max_ticks=int(src["max_ticks"]),
-                        difficulty=str(src["difficulty"]),
-                        timeout=max(120.0, float(src["max_ticks"]) * 0.5 + 120.0),
-                        mode="eval",
-                        policy="nn",
-                        stage_json=src["stage_json"](stage) or "",
-                        lives_override=src["lives"],
-                        player_level=src["level"],
-                    )
-                    reason = validate_eval_result(manifest, wver)
-                    if reason:
-                        raise common.distribution.DistError(0, f"validate: {reason}")
-                    return manifest, ""
-                except common.distribution.DistError as e:
-                    reason = str(e.reason)
-                    last_err = reason
-                    if "busy" in reason[:64].lower() and busy_tries < BUSY_RETRY_LIMIT:
-                        busy_tries += 1
-                        attempts -= 1  # busy 不消耗 attempt 配额
-                        time.sleep(BUSY_BACKOFF_SEC * busy_tries)
-                        continue
-                    log(
-                        f"[bc-eval] {node.get('id')} {level_name} s{stage} seed{seed} "
-                        f"attempt {attempts} failed: {reason[:140]}"
-                    )
-                except Exception as e:
-                    last_err = f"{type(e).__name__}: {e}"
-                    log(
-                        f"[bc-eval] {node.get('id')} {level_name} s{stage} seed{seed} "
-                        f"attempt {attempts} error: {last_err}"
-                    )
-            return None, last_err or "failed"
-
         import queue as _q
         import threading as _th
 
@@ -372,14 +398,30 @@ def dispatch_bc_eval(
             work.put(task)
         lock = _th.Lock()
 
-        def slot_worker(node: dict) -> None:
+        def slot_worker(
+            node: dict,
+            work: Any = work,
+            lock: Any = lock,
+            rows: list[dict[str, Any]] = rows,
+            src: dict[str, Any] = src,
+            level_name: str = level_name,
+        ) -> None:
             node_id = str(node.get("id") or "?")
             while True:
                 try:
                     stage, seed = work.get_nowait()
                 except _q.Empty:
                     return
-                m, err = _run_one(node, stage, seed)
+                m, err = _run_bc_eval_one(
+                    node,
+                    stage,
+                    seed,
+                    iter_id=iter_id,
+                    wver=wver,
+                    src=src,
+                    level_name=level_name,
+                    log=log,
+                )
                 with lock:
                     if m is None:
                         rows.append({"failed": True})
@@ -408,12 +450,11 @@ def dispatch_bc_eval(
                                 },
                             )
 
+        #: 槽位线程归这里（`bc-eval-<槽位>`）：本函数自己起、自己 join。
+        rt = common.runtime.Runtime(scope="bc-eval")
         threads = [
-            _th.Thread(target=slot_worker, args=(n,), daemon=True, name=f"bc-eval-{i}")
-            for i, n in enumerate(slots)
+            rt.thread(slot_worker, n, daemon=True, name=f"{i}") for i, n in enumerate(slots)
         ]
-        for t in threads:
-            t.start()
         for t in threads:
             t.join()
 

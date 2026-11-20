@@ -108,7 +108,7 @@ def test_ledger_is_bounded_to_the_recent_rounds() -> None:
 
 # ── 接线守卫（网关点必须真调这个判据；钉与查必须共用同一个 round key）────────────────
 
-GATE_SITES = ("dispatch.py", "queue_local.py", "eval_dispatch.py", "batch_runner.py")
+GATE_SITES = ("dispatch_state.py", "queue_local.py", "eval_dispatch.py", "batch_runner.py")
 
 
 def _src(name: str) -> str:
@@ -124,9 +124,9 @@ def test_every_node_gate_site_consults_the_bootid_ledger() -> None:
 
 
 def test_rollout_pin_and_check_share_one_round_key_expression() -> None:
-    """钉在 `dispatch.py`、查在 `queue_local.py`——两处各写一份字面量必漂（漂了就永不报警）。"""
+    """钉在 `dispatch_state.py`、查在 `queue_local.py`——两处各写一份字面量必漂（漂了就永不报警）。"""
     pat = re.compile(r'node_identity\.round_key\("rollout",\s*([\w.]+)\)')
-    pin = pat.findall(_src("dispatch.py"))
+    pin = pat.findall(_src("dispatch_state.py"))
     check = pat.findall(_src("queue_local.py"))
     assert pin and check, f"rollout 的 round key 调用点没找到（pin={pin} check={check}）"
     assert set(pin) == set(check), (

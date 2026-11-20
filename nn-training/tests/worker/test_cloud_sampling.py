@@ -20,7 +20,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from biz.course_spec import CourseConfig
-from worker.cloud_sampling import device_profile, plan_for_profile, profile_for_course
+from worker.cloud_sampling import (
+    CloudProfile,
+    device_profile,
+    plan_for_profile,
+    profile_for_course,
+)
 from worker.plan import volume_for_round
 
 BASE: dict = {
@@ -98,7 +103,7 @@ def test_profile_for_course_selects_by_device_and_refuses_a_missing_tier() -> No
 
 
 def test_plan_for_profile_scales_target_cap_and_rotation() -> None:
-    profile = {
+    profile: CloudProfile = {
         "name": "tpu",
         "target_transitions": 30000,
         "rotation": {"mode": "even", "per_it": 2, "pinned": []},
@@ -118,7 +123,7 @@ def test_plan_for_profile_scales_target_cap_and_rotation() -> None:
 
 
 def test_plan_for_profile_requires_volume_and_full_est_table() -> None:
-    profile = {
+    profile: CloudProfile = {
         "name": "tpu",
         "target_transitions": 30000,
         "rotation": {"mode": "even", "per_it": 2, "pinned": []},

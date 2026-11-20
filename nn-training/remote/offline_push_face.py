@@ -516,7 +516,7 @@ class PushFaceState:
             with self._lock:
                 self.phase = "failed"
             return 500, {"error": "no starter installed", "proto": OFFLINE_PUSH_PROTO}
-        starter(self.task or {}, self.task_dir, self.outbox)  # type: ignore[arg-type]
+        starter(self.task or {}, self.task_dir, self.outbox)
         return 202, {
             "status": "accepted",
             "task_id": tid,

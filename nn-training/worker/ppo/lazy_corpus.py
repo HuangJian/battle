@@ -23,13 +23,14 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any
 
 import numpy as np
 
 import worker.ppo.np_core as np_core
 from common.log import log
+from common.log_bundle import LogBundle
 from worker.data.npyio import CorpusMemoryPlan, check_corpus_memory
+from worker.ppo._episode import ShardRow
 
 #: 取 chunk 时要交给训练器的字段（obs 单独走 mmap；reward/done/stage 是装载中间量）。
 #: 真正的键集来自 shard 本身（v6 的 a_hold/lp_hold 是可选列），这里只排除中间量。
@@ -101,11 +102,14 @@ class LazyCorpus:
             out[key] = self._fields[key][rows]
         return out
 
-    def make_chunks(self, mb: int, shuffle: bool = True) -> LazyChunks:
+    def make_chunks(
+        self, mb: int, shuffle: bool = True, *, rng: np.random.Generator | None = None
+    ) -> LazyChunks:
         """与 `np_core.chunk_episodes` **同语义**的 chunk 视图（延迟物化）。
 
-        ★ RNG 顺序是契约的一部分：shuffle 路径在这里消费一次
-        `np.random.permutation(n)`，与 eager 的 chunk_episodes 处在同一条全局流上；
+        ★ RNG 顺序是契约的一部分：shuffle 路径在这里消费一次 `permutation(n)`，
+        与 eager 的 chunk_episodes 用**同一条显式流**（`PPORng.chunk`，§P1-7）；
+        `rng=None` 只留给旧调用方/工具（生产入口一律显式传）。
         `shuffle=False` 或只有一个 shard 时**不消费 RNG**、不裁尾（eager 的
         `len(episodes) <= 1` 分支——单池裁尾等于裁局末，有偏）。
         """
@@ -130,9 +134,9 @@ class LazyCorpus:
                 sizes.extend([mb] * full)
                 if rest:
                     sizes.append(rest)
-            order = np.arange(n, dtype=np.int64)
+            order: np.ndarray = np.arange(n, dtype=np.int64)
             return LazyChunks(self, order, sizes)
-        idx = np.random.permutation(n)
+        idx = (rng if rng is not None else np.random).permutation(n)
         n_used = (n // mb) * mb
         if n_used == 0:
             # 与 eager 同一条兜底：池子 < mb 时保留一块 ragged（丢弃 = 静默不训练）。
@@ -184,7 +188,7 @@ def load_ppo_corpus(
     normalize_ret: bool = False,
     per_stage_quota: int = 0,
     mb: int = 512,
-    bundle: Any = None,
+    bundle: LogBundle | None = None,
 ):
     """`--ppo-loader` 的唯一分派点：eager = 旧 `np_core.load_episodes`（逐字节不变）。
 
@@ -224,7 +228,7 @@ def load_lazy_corpus(
     normalize_ret: bool = False,
     per_stage_quota: int = 0,
     mb: int = 512,
-    bundle: Any = None,
+    bundle: LogBundle | None = None,
 ) -> LazyCorpus:
     """Discover shards → mmap obs → per-shard GAE → global normalize → `LazyCorpus`.
 
@@ -250,20 +254,23 @@ def load_lazy_corpus(
     samples_phys = 0
     obs_bytes = 0
     other_bytes = 0
-    t_load = time.time()
+    t_load = time.monotonic()
     for k, sd in enumerate(shards):
         if k > 0 and k % 128 == 0:
             if bundle is not None:
-                bundle.add("装载", f"{k}/{len(shards)} {time.time() - t_load:.0f}s")
+                bundle.add("装载", f"{k}/{len(shards)} {time.monotonic() - t_load:.0f}s")
             else:
-                log(f"[ppo] lazy loading shards {k}/{len(shards)} ({time.time() - t_load:.0f}s)")
+                log(
+                    f"[ppo] lazy loading shards {k}/{len(shards)} "
+                    f"({time.monotonic() - t_load:.0f}s)"
+                )
         # 内存预检的足迹：只看盘上字节（obs 单列；其余字段含 metrics/reward，偏保守）。
         obs_path = os.path.join(sd, "obs.npy")
         obs_bytes += os.path.getsize(obs_path)
         for name in os.listdir(sd):
             if name.endswith(".npy") and name != "obs.npy":
                 other_bytes += os.path.getsize(os.path.join(sd, name))
-        d = np_core.load_shard(sd, mmap=True)
+        d: ShardRow = np_core.load_shard(sd, mmap=True)
         n = int(d["obs"].shape[0])
         samples_phys += n
         if n == 0:
@@ -330,7 +337,7 @@ def load_lazy_corpus(
         else:
             log(f"[ppo] {line}" + (f"; SHORT (供给不足) stages={short}" if short else ""))
 
-    elapsed = time.time() - t_load
+    elapsed = time.monotonic() - t_load
     plan = CorpusMemoryPlan(str(data_root), len(shards), samples_phys, obs_bytes, other_bytes)
     if bundle is not None:
         bundle.add("装载", f"{len(shards)}/{len(shards)} {elapsed:.0f}s")

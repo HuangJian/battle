@@ -769,7 +769,7 @@ def test_redo_intent_cancels_and_republishes_the_same_jid(
     _install_fake_remote(a, "a", ready)
 
     published: list[str] = []
-    real_publish = a._remote_ppo_publish  # type: ignore[attr-defined]
+    real_publish = a._remote_ppo_publish
     ledger = tmp_path / "a" / "training_log.jsonl"
 
     def publish(it: int) -> RemotePpoJob:

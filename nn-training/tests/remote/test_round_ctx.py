@@ -29,7 +29,7 @@ if str(ROOT) not in sys.path:
 import common.scratch as scratch
 import worker.iter_rollout as iter_rollout
 from common.protocol import INIT_WEIGHTS_NAME, ProtocolError
-from tests.remote.test_rollout_scratch import (  # type: ignore[import-not-found]
+from tests.remote.test_rollout_scratch import (
     _job_dir,
     _local_root,
     _only_candidate,

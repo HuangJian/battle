@@ -624,7 +624,7 @@ def _publish_iter(
     它决定 payload 带不带 `init_weights.json`（旧条件 `not use_opt_blob or keep_init_weights`）：
     有 opt blob ⇒ 不带（权重走 init blob）；首轮/导出包无 opt blob ⇒ 带（bundle 要它）。
     """
-    from remote.hub_client import publish_job
+    from remote.hub_client import PublishSpec, publish_job
 
     w = tmp_path / "init_weights.json"
     w.write_text('{"format":"nn-weights-json","params":{}}', encoding="utf-8")
@@ -638,33 +638,35 @@ def _publish_iter(
         ckpt.mkdir(parents=True)
         (ckpt / "opt.pt").write_bytes(b"adam-state")
     m = publish_job(
-        job_root=tmp_path / "jobs",
-        jsonl_path=jsonl,
-        run_id="r",
-        it=1,
-        traj_dir=tmp_path / "traj",
-        shard_dirs=[],
-        commit="c" * 40,
-        code_sha256="z" * 64,
-        course='{"reward":{"formula":"score"}}',
-        course_fp="f" * 64,
-        corpus_fp="",
-        reward_formula="score",
-        formula_hash="h" * 40,
-        metrics_version=1,
-        gamma=0.995,
-        lam=0.95,
-        mode="per-tick",
-        epochs=1,
-        mb=512,
-        lr=3e-4,
-        init_weights_path=str(w) if init_weights_path is None else init_weights_path,
-        ckpt_remote_dir=str(ckpt) if with_ckpt else None,
-        kind="iter",
-        rollout_spec=spec,
-        ts_code_sha256="t" * 64,
-        ts_code_zip_path=ts,
-        slim=slim,
+        PublishSpec(
+            job_root=tmp_path / "jobs",
+            jsonl_path=jsonl,
+            run_id="r",
+            it=1,
+            traj_dir=tmp_path / "traj",
+            shard_dirs=[],
+            commit="c" * 40,
+            code_sha256="z" * 64,
+            course='{"reward":{"formula":"score"}}',
+            course_fp="f" * 64,
+            corpus_fp="",
+            reward_formula="score",
+            formula_hash="h" * 40,
+            metrics_version=1,
+            gamma=0.995,
+            lam=0.95,
+            mode="per-tick",
+            epochs=1,
+            mb=512,
+            lr=3e-4,
+            init_weights_path=str(w) if init_weights_path is None else init_weights_path,
+            ckpt_remote_dir=str(ckpt) if with_ckpt else None,
+            kind="iter",
+            rollout_spec=spec,
+            ts_code_sha256="t" * 64,
+            ts_code_zip_path=ts,
+            slim=slim,
+        ),
         log=lambda _m: None,
     )
     return m, w
@@ -798,7 +800,7 @@ def test_publish_iter_manifest_and_layout(tmp_path: Path) -> None:
 
 def test_publish_iter_refuses_local_shards(tmp_path: Path) -> None:
     """混着发（既有本地 shard 又声明上云）= 双份采集 —— 发布端就拒。"""
-    from remote.hub_client import HubClientError, publish_job
+    from remote.hub_client import HubClientError, PublishSpec, publish_job
 
     spec = validate_rollout_spec(_spec([(3, 7)]))
     sd = tmp_path / shard_name(3, 7)
@@ -807,12 +809,58 @@ def test_publish_iter_refuses_local_shards(tmp_path: Path) -> None:
     w.write_text("{}", encoding="utf-8")
     with pytest.raises(HubClientError) as e:
         publish_job(
+            PublishSpec(
+                job_root=tmp_path / "jobs",
+                jsonl_path=tmp_path / "run.jsonl",
+                run_id="r",
+                it=1,
+                traj_dir=tmp_path / "traj",
+                shard_dirs=[sd],
+                commit="c" * 40,
+                code_sha256="z" * 64,
+                course="c",
+                course_fp="f" * 64,
+                reward_formula="score",
+                formula_hash="h" * 40,
+                metrics_version=1,
+                gamma=0.995,
+                lam=0.95,
+                mode="per-tick",
+                epochs=1,
+                mb=512,
+                lr=3e-4,
+                init_weights_path=str(w),
+                kind="iter",
+                rollout_spec=spec,
+                ts_code_sha256="t" * 64,
+            ),
+            log=lambda _m: None,
+        )
+    assert "不接受本地 shard" in str(e.value)
+
+
+def test_publish_iter_needs_ts_code_sha(tmp_path: Path) -> None:
+    from remote.hub_client import HubClientError
+
+    with pytest.raises(HubClientError) as e:
+        _publish_iter_missing_ts(tmp_path)
+    assert "ts_code_sha256" in str(e.value)
+
+
+def _publish_iter_missing_ts(tmp_path: Path) -> dict:
+    from remote.hub_client import PublishSpec, publish_job
+
+    spec = validate_rollout_spec(_spec([(3, 7)]))
+    w = tmp_path / "w.json"
+    w.write_text("{}", encoding="utf-8")
+    return publish_job(
+        PublishSpec(
             job_root=tmp_path / "jobs",
             jsonl_path=tmp_path / "run.jsonl",
             run_id="r",
             it=1,
             traj_dir=tmp_path / "traj",
-            shard_dirs=[sd],
+            shard_dirs=[],
             commit="c" * 40,
             code_sha256="z" * 64,
             course="c",
@@ -829,49 +877,7 @@ def test_publish_iter_refuses_local_shards(tmp_path: Path) -> None:
             init_weights_path=str(w),
             kind="iter",
             rollout_spec=spec,
-            ts_code_sha256="t" * 64,
-            log=lambda _m: None,
-        )
-    assert "不接受本地 shard" in str(e.value)
-
-
-def test_publish_iter_needs_ts_code_sha(tmp_path: Path) -> None:
-    from remote.hub_client import HubClientError
-
-    with pytest.raises(HubClientError) as e:
-        _publish_iter_missing_ts(tmp_path)
-    assert "ts_code_sha256" in str(e.value)
-
-
-def _publish_iter_missing_ts(tmp_path: Path) -> dict:
-    from remote.hub_client import publish_job
-
-    spec = validate_rollout_spec(_spec([(3, 7)]))
-    w = tmp_path / "w.json"
-    w.write_text("{}", encoding="utf-8")
-    return publish_job(
-        job_root=tmp_path / "jobs",
-        jsonl_path=tmp_path / "run.jsonl",
-        run_id="r",
-        it=1,
-        traj_dir=tmp_path / "traj",
-        shard_dirs=[],
-        commit="c" * 40,
-        code_sha256="z" * 64,
-        course="c",
-        course_fp="f" * 64,
-        reward_formula="score",
-        formula_hash="h" * 40,
-        metrics_version=1,
-        gamma=0.995,
-        lam=0.95,
-        mode="per-tick",
-        epochs=1,
-        mb=512,
-        lr=3e-4,
-        init_weights_path=str(w),
-        kind="iter",
-        rollout_spec=spec,
+        ),
         log=lambda _m: None,
     )
 
@@ -1571,10 +1577,10 @@ class _FlakyPopen:
     def __new__(cls, argv: object, **kw: object) -> Any:
         joined = " ".join(str(a) for a in (argv if isinstance(argv, (list, tuple)) else [argv]))
         if not cls.match or cls.match not in joined:
-            return cls.real(argv, **kw)  # type: ignore[misc]
+            return cls.real(argv, **kw)
         cls.made += 1
         if cls.made > cls.fail_first:
-            return cls.real(argv, **kw)  # type: ignore[misc]
+            return cls.real(argv, **kw)
         return object.__new__(cls)
 
     def __init__(self, argv: object, **_kw: object) -> None:
@@ -1613,12 +1619,10 @@ def test_kill_and_reap_bounds_the_wait_and_books_the_leftover(monkeypatch) -> No
     p = _UnreapablePopen(["stub"])
     _UnreapablePopen.instances.clear()
     try:
-        assert (
-            iter_rollout._kill_and_reap(
-                p, label="s0/d0", log=msgs.append, where="w0/rollout.log"
-            )
-            is False
+        reaped = iter_rollout._kill_and_reap(
+            p, label="s0/d0", log=msgs.append, where="w0/rollout.log"
         )
+        assert reaped is False
         assert killed == [p], "kill 必须走进程组那一条（连 bun 自己带的子进程一起带走）"
         assert p.unbounded_waits == 0, "不许出现无上限的 wait（那正是整轮挂住的成因）"
         assert p.bounded_waits == [0.05], p.bounded_waits
@@ -2081,7 +2085,7 @@ def test_remote_iter_fatal_http_aborts_without_retry(tmp_path: Path, monkeypatch
     assert [e["event"] for e in ev] == ["gate_verdict"]
     assert ev[0]["verdict"] == "ABORT" and ev[0]["iter"] == 4
     assert "HTTP 403" in ev[0]["reason"] and "node" in ev[0]["reason"]
-    assert st._leg_abort is True
+    assert st.remote_fail_state().leg_aborted is True
     assert st.calls == 1  # 一次就停，不重发
 
 
@@ -2094,7 +2098,7 @@ def test_remote_iter_transient_failure_stays_retryable(tmp_path: Path, monkeypat
     with pytest.raises(HubClientError):
         st._remote_iter(4, [(0, 0)])
     assert st.events() == []
-    assert st._leg_abort is False
+    assert st.remote_fail_state().leg_aborted is False
     assert st.calls == 1
 
 
@@ -2174,7 +2178,7 @@ def test_quota_incident_not_triggered_on_node_rollout(tmp_path: Path, monkeypatc
     node = _stub(True)
     for it in (1, 2, 3):
         TrainingLoop._check_quota_incident(node, it)
-    assert msgs == [] and node._zero_shard_streak == 0  # type: ignore[attr-defined]
+    assert msgs == [] and node._zero_shard_streak == 0
     # 对照：本机轮行为逐字不变（连续 2 轮零 shard → 响亮告警）
     local = _stub(False)
     TrainingLoop._check_quota_incident(local, 1)

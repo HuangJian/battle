@@ -38,8 +38,9 @@ from common.protocol import (
 )
 from hub.server import _HubQueue, make_server
 from remote import worker as W
-from tests.hub.test_role_routing import OFF_JID, _manifest, _store  # type: ignore
-from tests.remote.test_worker_bun_precheck import _job as _worker_job  # type: ignore
+from tests.helpers.http_server import serve_fast
+from tests.hub.test_role_routing import OFF_JID, _manifest, _store
+from tests.remote.test_worker_bun_precheck import _job as _worker_job
 from trainer.loop_round_steps import RoundSteps
 from trainer.loop_steps import TrainingSteps
 from worker.loop_round import (
@@ -128,7 +129,7 @@ def test_run_manifest_is_published_from_exactly_one_place_with_export_path() -> 
     ]
     assert len(forwards) == 1 and "export_path=export_path" in forwards[0], forwards
 
-    # `publish_job(kind=run, plan_bytes=…)` 也只有这一处（它是上面那个发布点的内部跳）。
+    # `PublishSpec(kind=run, plan_bytes=…)` 也只有这一处（它是上面那个发布点的内部跳）。
     calls = [
         rel
         for rel, s in _prod_sources().items()
@@ -508,7 +509,7 @@ def test_offline_face_registers_the_disk_identity(tmp_path: Path) -> None:
     """
     hub = _HubQueue({}, discover_root=tmp_path)
     srv = make_server(hub, 0, TOKEN, host="127.0.0.1")
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     base = f"http://127.0.0.1:{srv.server_address[1]}"
     try:
         _get(base, "/offline/tasks", {ROLE_HEADER: ROLE_HEADER_VALUE})

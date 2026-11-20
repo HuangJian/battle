@@ -16,9 +16,10 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
-__all__ = ["num_or_none"]
+__all__ = ["num_or_none", "sanitize_json"]
 
 
 def num_or_none(v: Any) -> float | None:
@@ -26,3 +27,24 @@ def num_or_none(v: Any) -> float | None:
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
     return float(v)
+
+
+def sanitize_json(o: Any) -> Any:
+    """递归把**非有限** float（NaN / ±Infinity）→ None，其余原样返回。
+
+    为什么归这里（2026-11-15）：`num_or_none` 的同族问题 —— 观测字段里出现 NaN 时，**落盘面**
+    与**判定面**要分开：判定面（`loop_guards_trip._is_nonfinite`）拿 NaN 当「数值崩坏 ⇒ 熔断」，
+    落盘面则必须写成 `null`，因为 `json.dump` 会把它写成**非标准**字面量 `NaN` / `Infinity`
+    （TS 端 `JSON.parse` 直接抛错 —— 坏的是「文件打开就崩」而不是「数值不准」）。
+
+    口径与 `num_or_none` 刻意不同：后者**原样透传**非有限值（它的语义是「数值化」），本函数
+    只管「能不能安全写进 JSON」。两个 Chokepoint（`common/fs.atomic_write_json` /
+    `JsonlLedger.append`）与 BC 的 weights meta 共用这一份实现。
+    """
+    if isinstance(o, float) and not math.isfinite(o):
+        return None
+    if isinstance(o, dict):
+        return {k: sanitize_json(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [sanitize_json(v) for v in o]
+    return o

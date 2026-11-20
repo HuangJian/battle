@@ -26,13 +26,22 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from common.log_bundle import LogBundle
 from common.logutil import secs
-from common.protocol import BLOB_OPT, BLOB_REF, ProtocolError, coef_active
-from remote.wire import _wire_time, note_ppo_tail
+from common.protocol import (
+    BLOB_OPT,
+    BLOB_REF,
+    ProtocolError,
+    coef_active,
+    encode_weights_json,
+    pack_result_v2,
+)
+from remote.wire import _wire_block
+from worker.ppo.demo import DEMO_BANK_FIELDS, DemoBank
+from worker.ppo.rng import PPORng
 
 
 def effective_epochs(manifest_epochs: int, epoch_mult: float) -> int:
@@ -166,58 +175,36 @@ def course_prep(manifest: dict, job_dir: Path, epoch_mult: float, prep_b: Any) -
     if epoch_mult != 1.0:
         prep_b.add(
             "训练放大",
-            f"PPO epochs ×{epoch_mult:g} ⇒ {epochs}"
-            f"（manifest {int(manifest.get('epochs') or 0)}）",
+            f"PPO epochs ×{epoch_mult:g} ⇒ {epochs}（manifest {int(manifest.get('epochs') or 0)}）",
         )
     return course, epochs
 
 
-def decode_demo_bank(raw: bytes) -> dict:
-    """demo bank 的 `.npz` 字节 → `{name: ndarray}`（numpy 只在函数体内 import）。"""
+def decode_demo_bank(raw: bytes) -> DemoBank:
+    """demo bank 的 `.npz` 字节 → `DemoBank`（numpy 只在函数体内 import）。
+
+    字段名对不对由 `check_demo_bank` 的安全阀判（这里只解码；`.npz` 的键是运行期才知道的，
+    所以返回处是 `cast` 而不是逐个取键 —— 取键会把「缺字段」变成 `KeyError`，而那种情况要
+    走安全阀那句「缺字段 X —— 拒收」）。
+    """
     import io
 
     import numpy as np
 
-    return {k: np.asarray(v) for k, v in dict(np.load(io.BytesIO(raw))).items()}
+    return cast(DemoBank, {k: np.asarray(v) for k, v in dict(np.load(io.BytesIO(raw))).items()})
 
 
 def check_demo_bank(
-    jid: str, bank: dict, coef: float, per_mb: int, src: str, prep_b: Any
+    jid: str, bank: DemoBank, coef: float, per_mb: int, src: str, prep_b: Any
 ) -> None:
     """demo bank 的字段安全阀 + 一行装载读数（缺字段 = 拒收，不静默当纯 PPO 跑）。"""
-    need = {"obs", "scalars", "extra", "actions", "masks"}
+    need = DEMO_BANK_FIELDS
     if not need.issubset(bank.keys()):
         raise ProtocolError(f"job {jid}: demo bank 缺字段 {sorted(need - set(bank.keys()))}——拒收")
     prep_b.add(
         "demo bank",
         f"N={bank['obs'].shape[0]} coef={coef:g} per_mb={per_mb} src={src}",
     )
-
-
-def _ppo_done_log(
-    jid: str, t_ppo: float, train_b: LogBundle, chunks: Any, total_steps: int, agg: dict
-) -> float:
-    """PPO 收尾读数（两条核同一组账、同一行措辞）→ 返回 `ppo_sec`（产物账要用）。
-
-    不再单列 `job … PPO done in …` 一行：steps/chunks/kl + engine 折叠读数并入下游 wire
-    总账行（`wire._wire_flush` 读取 `_WIRE[jid]["ppo_line"]` 拼到行尾，2026-10-28）。
-    """
-    from worker.ppo.trainer import chunk_count, chunk_rows, loader_desc
-
-    ppo_sec = round(time.time() - t_ppo, 1)
-    _wire_time(jid, "ppo", time.time() - t_ppo)
-    train_b.add("steps", f"{chunk_rows(chunks)}/{total_steps}（训练/池子）")
-    train_b.add("chunks", chunk_count(chunks))
-    train_b.add("loader", loader_desc(chunks))
-    train_b.add("kl", agg.get("kl"))
-    # D8/D10：逐步 KL 与 clip fraction（旧 worker 无键 ⇒ 回落 kl / 0）。
-    per_step_kl = agg.get("per_step_kl", agg.get("kl"))
-    train_b.add("per_step_kl", per_step_kl)
-    train_b.add("clip", agg.get("clip_fraction"))
-    ppo_line = train_b.text()
-    if ppo_line:
-        note_ppo_tail(jid, ppo_line)
-    return ppo_sec
 
 
 def _agg_block(agg: dict, chunks: Any, total_steps: int) -> dict:
@@ -246,3 +233,129 @@ def _agg_block(agg: dict, chunks: Any, total_steps: int) -> dict:
         "steps_pooled": int(total_steps),
         "chunks": chunk_count(chunks),
     }
+
+
+@dataclass
+class _CoreRun:
+    """一次训练核的派生状态；输入仍住 `TrainSpec`。"""
+
+    base_url: str
+    token: str
+    spec: Any
+    prep_b: Any = None
+    course: Any = None
+    epochs_eff: int = 0
+    model: Any = None
+    opt: Any = None
+    device_t: Any = None
+    use_dp: bool = False
+    opt_raw: bytes = b""
+    opt_dir: Path = field(default_factory=Path)
+    opt_restore_sec: float = 0.0
+    opt_src: str = ""
+    steps_init: int = 0
+    steps_box: dict[str, int] = field(default_factory=dict)
+    weights_src: str = ""
+    blob_hits: int = 0
+    blob_miss_bytes: int = 0
+    kick_kl: float = 0.0
+    batch: dict = field(default_factory=dict)
+    wanted: dict = field(default_factory=dict)
+    ref_model: Any = None
+    demo_coef: float = 0.0
+    demo_per_mb: int = 0
+    demo_bank: DemoBank | None = None
+    shards_root: str = ""
+    #: §P1-7 的三条显式随机流：两腿在算 per-job 种子那一行派生（`PPORng.from_seed`），
+    #: 切块重排与 PPO 循环都从它取 —— 全局 `np.random` 不再进训练序列。缺省 = 种子 0，
+    #: 只为工具/测试手工构造的 `_CoreRun`（生产两条腿在训练前一定会覆盖它）。
+    rng: PPORng = field(default_factory=lambda: PPORng.from_seed(0))
+    t_ppo: float = 0.0
+    train_b: Any = None
+    chunks: list = field(default_factory=list)
+    total_steps: int = 0
+    agg: dict = field(default_factory=dict)
+    ppo_sec: float = 0.0
+    wj_raw: bytes = b""
+    wj_sent_raw: bytes = b""
+    opt_tar_raw: bytes = b""
+    opt_sent_raw: bytes = b""
+    opt_tar_b64: str = ""
+    t_art: float = 0.0
+
+
+def _load_ppo_data(st: _CoreRun, engine) -> None:
+    """读 shard 并分块（torch/paddle 两条核共用同一组引擎契约）。"""
+    spec = st.spec
+    manifest = spec.manifest
+    prep_b = st.prep_b
+    # P3（plan/replay-corpus.plan.md D6）：eager/lazy 的**唯一分派点**是
+    # `load_ppo_episodes`（两条训练核共用）——这里不再各写一份是否 lazy 的判断。
+    episodes = load_ppo_episodes(st.shards_root, manifest, prep_b)
+    prep_b.emit(f"job {spec.jid}: 准备完成 {time.time() - spec.t_prep:.1f}s")
+    from worker.ppo.trainer import corpus_samples
+
+    st.total_steps = corpus_samples(episodes)
+    # `st.rng` 一定在位（两腿在算 per-job 种子时派生；手工构造的用字段缺省=种子 0）。
+    st.chunks = engine.chunk_episodes(
+        episodes, int(manifest["mb"]), shuffle=bool(manifest["shuffle"]), rng=st.rng.chunk
+    )
+
+
+def _core_result(st: _CoreRun) -> tuple[dict, Any]:
+    """两条核共用的 result / wire 形状（字节已在产物段准备好）。"""
+    spec = st.spec
+    jid, manifest, iter_info = spec.jid, spec.manifest, spec.iter_info
+    agg, chunks, total_steps, ppo_sec = st.agg, st.chunks, st.total_steps, st.ppo_sec
+    wj_sent_raw, opt_tar_b64 = st.wj_sent_raw, st.opt_tar_b64
+    course, opt_restore_sec = st.course, st.opt_restore_sec
+    blob_hits, blob_miss_bytes = st.blob_hits, st.blob_miss_bytes
+    weights_src = st.weights_src
+    payload_bytes, payload_dl_sec = spec.payload_bytes, spec.payload_dl_sec
+    unpack_sec, prune_dirs = spec.unpack_sec, spec.prune_dirs
+    weights_wire_bytes = spec.weights_wire_bytes
+    ts_code_bytes, ts_code_hit = spec.ts_code_bytes, spec.ts_code_hit
+    _t_art = st.t_art
+    result = {
+        "job_id": jid,
+        "data_fp": manifest["data_fp"],
+        "init_weights_fp": manifest["init_weights_fp"],
+        # 回传的 weights_json：旧形态用的是被缓存的那份字节（同字节 ⇒ 同 sha，别中途再读一次盘）；
+        # R1 形态位命中时这里是 delta 容器（本机那份全量仍是 `wj_raw`，见上面产物段）。
+        "weights_json": encode_weights_json(wj_sent_raw),
+        "opt_tar_b64": opt_tar_b64,
+        "agg": _agg_block(agg, chunks, total_steps),
+        "commit_echo": manifest["commit"],
+        "ppo_sec": ppo_sec,
+    }
+    # M3：节点自己跑的 rollout 的采集口径（两条后端腿共用一份；见 `train_common.copy_iter_metrics`）。
+    copy_iter_metrics(result, iter_info)
+    result["wire"] = _wire_block(
+        payload_bytes=payload_bytes,
+        payload_dl_sec=payload_dl_sec,
+        unpack_sec=unpack_sec,
+        prune_dirs=prune_dirs,
+        opt_restore_sec=opt_restore_sec,
+        grad_sec=ppo_sec,
+        # 产物段（save/pack/identity）自己的账：它不在 `ppo=` 里，是云机轮墙钟最大的一块暗区。
+        art_sec=time.time() - _t_art,
+        blob_hits=blob_hits,
+        blob_miss_bytes=blob_miss_bytes,
+        weights_src=weights_src,
+        weights_bytes=weights_wire_bytes,
+        ts_code_bytes=ts_code_bytes,
+        ts_code_hit=ts_code_hit,
+        rollout_sec=(iter_info or {}).get("rollout_sec"),
+        bun_version=(iter_info or {}).get("bun_version"),
+        # D10（plan/replay-corpus.plan.md）：语料格式 + replay pre-pass 的墙钟/字节账。
+        corpus_fmt=str(manifest.get("corpus_fmt") or "full"),
+        replay_bytes=(st.spec.replay_info or {}).get("replay_bytes"),
+        labels_bytes=(st.spec.replay_info or {}).get("labels_bytes"),
+        convert_sec=(st.spec.replay_info or {}).get("sec"),
+        convert_workers=(st.spec.replay_info or {}).get("convert_workers"),
+        convert_jobs=(st.spec.replay_info or {}).get("convert_jobs"),
+        convert_fallback=(st.spec.replay_info or {}).get("convert_fallback"),
+    )
+    # 两遍收敛（同 echo 路径）：result_bytes 与自身体长自指，一遍差它的十进制位数。
+    result["wire"]["result_bytes"] = len(pack_result_v2(result))
+    return result, course

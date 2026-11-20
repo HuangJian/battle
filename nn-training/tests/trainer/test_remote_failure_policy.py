@@ -50,22 +50,25 @@ def test_retryable_failures_abort_after_three(tmp_path: Path) -> None:
     """可重试失败：未满 3 次不写判决；第 3 次写 ABORT 并停腿（**不**下沉本机）。"""
     st = _Stub(tmp_path)
     for _ in range(2):
-        assert st._handle_remote_failure(2, TimeoutError("wait_job 超时")) is True
-    assert st.events() == [] and st._leg_abort is False
-    assert st._handle_remote_failure(2, TimeoutError("wait_job 超时")) is True
+        handled = st._handle_remote_failure(2, TimeoutError("wait_job 超时"))
+        assert handled is True
+    assert st.events() == [] and st.remote_fail_state().leg_aborted is False
+    handled = st._handle_remote_failure(2, TimeoutError("wait_job 超时"))
+    assert handled is True
     ev = st.events()
     assert [e["event"] for e in ev] == ["gate_verdict"]
     assert ev[0]["verdict"] == "ABORT" and ev[0]["iter"] == 2
     assert "无本机降级" in ev[0]["reason"]
-    assert st._leg_abort is True
+    assert st.remote_fail_state().leg_aborted is True
 
 
 def test_success_resets_counter_elsewhere(tmp_path: Path) -> None:
     """连败计数的复位点在**成功路径**（`_remote_ppo_step` 落位后置 0）——这里钉住契约。"""
     st = _Stub(tmp_path)
     st._remote_fail = 2
-    assert st._handle_remote_failure(1, TimeoutError("boom")) is True
-    assert st._remote_fail == 3  # 判决只加不减；复位由成功路径负责
+    handled = st._handle_remote_failure(1, TimeoutError("boom"))
+    assert handled is True
+    assert st.remote_fail_state().consecutive_failures == 3  # 判决只加不减；复位由成功路径负责
 
 
 def test_fatal_remote_http_aborts_on_first_failure(tmp_path: Path) -> None:
@@ -83,8 +86,8 @@ def test_fatal_remote_http_aborts_on_first_failure(tmp_path: Path) -> None:
     assert [e["event"] for e in ev] == ["gate_verdict"]
     assert ev[0]["verdict"] == "ABORT" and ev[0]["iter"] == 3
     assert "HTTP 403" in ev[0]["reason"]
-    assert st._leg_abort is True
-    assert st._remote_fail == 0  # 确定性失败不消耗连败配额
+    assert st.remote_fail_state().leg_aborted is True
+    assert st.remote_fail_state().consecutive_failures == 0  # 确定性失败不消耗连败配额
 
 
 def test_retryable_http_still_counts_consecutive(tmp_path: Path) -> None:
@@ -96,8 +99,9 @@ def test_retryable_http_still_counts_consecutive(tmp_path: Path) -> None:
     st._handle_remote_failure(4, HubClientError("wait_job: HTTP 500: boom"))
     assert st.events() == []  # 未达 3 次：不写判决
     st._handle_remote_failure(4, HubClientError("wait_job: HTTP 500: boom"))
-    assert st._remote_fail == 3
-    assert st._leg_abort is True
+    state = st.remote_fail_state()
+    assert state.consecutive_failures == 3
+    assert state.leg_aborted is True
 
 
 def test_node_failure_in_remote_retryable_set() -> None:
@@ -130,8 +134,8 @@ def test_node_failure_aborts_on_first_failure_with_reason(tmp_path: Path) -> Non
     assert [e["event"] for e in ev] == ["gate_verdict"]
     assert ev[0]["verdict"] == "ABORT" and ev[0]["iter"] == 6
     assert "bun 未安装" in ev[0]["reason"]
-    assert st._leg_abort is True
-    assert st._remote_fail == 0  # 确定性失败不消耗连败配额
+    assert st.remote_fail_state().leg_aborted is True
+    assert st.remote_fail_state().consecutive_failures == 0  # 确定性失败不消耗连败配额
 
 
 def test_jobfailed_marks_leg_dead_and_never_republishes(tmp_path: Path) -> None:
@@ -154,8 +158,9 @@ def test_jobfailed_marks_leg_dead_and_never_republishes(tmp_path: Path) -> None:
     st = _Stub(tmp_path)
     err = JobFailedError("job 43a4eb01cf9fe35c 失败: BadZipFile[kind=ProtocolError]", kind="ProtocolError")
     st._handle_remote_failure(58, err)
-    assert st._leg_abort is True
-    assert st._remote_fail == 0  # 确定性失败不消耗连败配额
+    state = st.remote_fail_state()
+    assert state.leg_aborted is True
+    assert state.consecutive_failures == 0  # 确定性失败不消耗连败配额
 
     # 重试段：bare loop（不跑 __init__）+ 真 `round_failure`
     loop = TrainingLoop.__new__(TrainingLoop)
@@ -165,9 +170,9 @@ def test_jobfailed_marks_leg_dead_and_never_republishes(tmp_path: Path) -> None:
     loop._leg_abort = True  # 由上面的判决段置位（真 mixin 写的）
     sleep_calls: list[float] = []
     publish_calls: list[str] = []
-    loop._ledger_apply = lambda _ev: None  # type: ignore[method-assign]
+    loop._ledger_apply = lambda _ev: None
     orig_sleep, orig_publish = hc.time.sleep, hc.publish_job
-    hc.time.sleep = lambda s: sleep_calls.append(float(s))  # type: ignore[assignment]
+    hc.time.sleep = lambda s: sleep_calls.append(float(s))
 
     def _spy_publish(jid: str, *a: object, **kw: object) -> object:
         publish_calls.append(str(jid))
@@ -183,10 +188,10 @@ def test_jobfailed_marks_leg_dead_and_never_republishes(tmp_path: Path) -> None:
             with pytest.raises(JobFailedError):
                 loop.round_failure(e, 58, backoff=False)
     finally:
-        hc.time.sleep, hc.publish_job = orig_sleep, orig_publish  # type: ignore[assignment]
+        hc.time.sleep, hc.publish_job = orig_sleep, orig_publish
     assert publish_calls == []  # 一个字都没再发出去
     assert sleep_calls == []  # 也没在「睡 30s 再试同一 job」的阶梯上转圈
-    assert loop._consec_fail == 1  # 失败留痕（iter_error）仍然照写；只是不再重试
+    assert loop.resume_state().consec_fail == 1  # 失败留痕（iter_error）仍然照写；只是不再重试
     # 对照：腿没被判死时同一条路会返回 ROUND_RETRY（重跑本轮 = 重发同一 job）——
     # 也就是说「不重发」靠的正是上面那个 `_leg_abort` 闸。
     loop._leg_abort = False
@@ -212,10 +217,10 @@ def test_wait_job_poll_backoff_on_network_errors() -> None:
     orig_req, orig_sleep = hub_http._request, hub_http.time.sleep
     hub_http._request = fake_request  # type: ignore[assignment]
     try:
-        hub_http.time.sleep = lambda s: sleeps.append(float(s))  # type: ignore[assignment]
+        hub_http.time.sleep = lambda s: sleeps.append(float(s))
         out = wait_job("http://x", "t", "j1", timeout_sec=10, poll_sec=5.0, log=lambda m: None)
     finally:
-        hub_http._request, hub_http.time.sleep = orig_req, orig_sleep  # type: ignore[assignment]
+        hub_http._request, hub_http.time.sleep = orig_req, orig_sleep
     assert out == {"ok": 1}
     assert sleeps == [5.0, 10.0, 20.0]  # 5 × 2^k，封顶 60
 
@@ -235,8 +240,8 @@ def test_wait_job_404_does_not_backoff() -> None:
     orig_req, orig_sleep = hub_http._request, hub_http.time.sleep
     hub_http._request = fake_request  # type: ignore[assignment]
     try:
-        hub_http.time.sleep = lambda s: sleeps.append(float(s))  # type: ignore[assignment]
+        hub_http.time.sleep = lambda s: sleeps.append(float(s))
         wait_job("http://x", "t", "j2", timeout_sec=10, poll_sec=5.0, log=lambda m: None)
     finally:
-        hub_http._request, hub_http.time.sleep = orig_req, orig_sleep  # type: ignore[assignment]
+        hub_http._request, hub_http.time.sleep = orig_req, orig_sleep
     assert sleeps == [5.0, 5.0]

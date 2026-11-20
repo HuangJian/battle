@@ -1,11 +1,11 @@
 """loop_guards —— TrainingGuards mixin：训练护栏（2026-09-02 从 trainer/loop_core.py 拆出）。
 
 训练护栏的**组合根**。四簇护栏各自住一个模块（S4 第二十三刀，判据同源）：
-  · `biz/loop_guards_trip.py::TrainingGuardsTrip`  —— **过程面**硬边界（F4 熔断 / 止损）；
-  · `biz/loop_guards_leg.py::TrainingGuardsLeg`    —— **结果面**停腿（干烧回锚 / 配对杀臂）；
-  · `biz/loop_guards_gate.py::TrainingGuardsGate`  —— **课程结束门**（M1 第四守卫，
+  · `worker/loop_guards_trip.py::TrainingGuardsTrip`  —— **过程面**硬边界（F4 熔断 / 止损）；
+  · `worker/loop_guards_leg.py::TrainingGuardsLeg`    —— **结果面**停腿（干烧回锚 / 配对杀臂）；
+  · `worker/loop_guards_gate.py::TrainingGuardsGate`  —— **课程结束门**（M1 第四守卫，
     plan/course-exit-and-shutdown.md §4）求值 + 判决落地 + 预算硬断；
-  · `biz/loop_guards_sweep.py::TrainingGuardsSweep` —— keepIters 目录轮转与目录回收。
+  · `worker/loop_guards_sweep.py::TrainingGuardsSweep` —— keepIters 目录轮转与目录回收。
 判据本体全在纯函数模块（`biz/breaker.py` / `biz/stop_loss.py` / `biz/kickstart_burn.py` /
 `biz/paired_kill.py` / `biz/gate_check.py`）；四簇只做「读训练状态 → 判 → 落日志/事件」。
 
@@ -25,6 +25,7 @@ S4 第二十三刀把 13 个成员按**判据同源**切成四簇（trip / leg /
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import common.distribution
@@ -35,6 +36,15 @@ from worker.loop_guards_gate import TrainingGuardsGate
 from worker.loop_guards_leg import TrainingGuardsLeg
 from worker.loop_guards_sweep import TrainingGuardsSweep
 from worker.loop_guards_trip import TrainingGuardsTrip
+
+
+@dataclass(frozen=True)
+class GuardStateView:
+    """门禁判决的**执行面**读数（判据词表与规则本体不在这里）。"""
+
+    cloud_halted: bool
+    leg_abort: bool
+    soft_remediate_count: int
 
 
 class TrainingGuards(
@@ -68,6 +78,14 @@ class TrainingGuards(
     _cloud_halted: bool
     #: R2a 账本视图（`loop_lifecycle._setup_common` 建立；缺失时各使用点退化，不阻断训练）。
     _ledger: Any
+
+    def guard_state(self) -> GuardStateView:
+        """这一层的公开读数（用例 / 诊断共用；不改变任何判决与停机语义）。"""
+        return GuardStateView(
+            cloud_halted=bool(getattr(self, "_cloud_halted", False)),
+            leg_abort=bool(getattr(self, "_leg_abort", False)),
+            soft_remediate_count=int(getattr(self, "_soft_remediate_count", 0) or 0),
+        )
 
     def _ledger_apply(self, event: dict | None) -> None:
         """把刚写入账本的事件并入本进程的 `LedgerView`（R2a，2026-09-18）。

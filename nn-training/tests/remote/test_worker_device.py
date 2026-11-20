@@ -63,7 +63,7 @@ class TestPassthrough:
 
 
 def test_run_job_normalizes_device_once_before_kind_fork() -> None:
-    """调用点源码守卫：`run_job` 必须在 **kind 分叉之前** 归一化设备，且全会只此一处。
+    """调用点源码守卫：设备归一化在 **kind 分叉之前**，且全会只此一处。
 
     两次真实事故的回归形态（`run_job` 太大、无法单测驱动，只能源码守）：
       ① 只把 PPO 的分派条件换成 `dev_str`，else 仍写 `torch.device(device)`
@@ -76,15 +76,19 @@ def test_run_job_normalizes_device_once_before_kind_fork() -> None:
     `tests/remote/test_offline_bc_course.py::test_run_bc_once_resolves_auto_device_before_the_worker`）；
     本用例随之钉新调用点。`paddle_probe` 按本模块名字传入，保住
     `test_ppo_backend_switch` 对 `worker.paddle_cuda_available` 的打桩缝。
+
+    2026-11-18（长函数第三十五刀）：两个调用点都搬了家 —— 归一化留在宿主的
+    `_guard_code_and_device`（`_ACTIVE_CODE_SHA` 同处），bc 分叉进了 `remote/job_shell`。
+    判据不变：`run_job` 的调用顺序里 guard 必须早于 bc 分叉，且归一化只有一处。
     """
     src = (ROOT / "remote" / "worker.py").read_text(encoding="utf-8")
     flat = " ".join(src.split())
 
-    call = "device = normalize_job_device(device, backend"
+    call = "st.device = normalize_job_device("
     assert flat.count(call) == 1, (
-        "run_job 应只归一化一次；每条链各自归一化必然漏掉其中一条"
+        "应只归一化一次；每条链各自归一化必然漏掉其中一条"
     )
-    assert flat.index(call) < flat.index('"kind"]) == "bc"'), (
+    assert flat.index("_guard_code_and_device(st)") < flat.index("bc_or_none(st"), (
         "设备归一化必须早于 BC/PPO 分叉，否则其中一条链会拿到未解析的 auto"
     )
 
@@ -99,7 +103,7 @@ def test_run_job_normalizes_device_once_before_kind_fork() -> None:
     fn = next(
         n
         for n in ast.parse(core_src).body
-        if isinstance(n, ast.FunctionDef) and n.name == "run_training_core"
+        if isinstance(n, ast.FunctionDef) and n.name == "_torch_model"
     )
     dev_args: list[str] = []
     for n in ast.walk(fn):

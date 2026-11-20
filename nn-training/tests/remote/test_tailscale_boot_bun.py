@@ -24,7 +24,7 @@
    replay 转换在 worker 子进程里跑，而它按 `shutil.which("bun")` 找运行时（PATH 只随 spawn 继承）。
 3. **持久位置是数据**：两块盘的 cell 都留 `CFG.bin_cache_dir` 口子（空 = 按平台自动探测）。
 4. **`tailscale_boot.ensure()` 仍然不碰 bun**（它只管 tailnet；退役符号不许回来）。
-5. **该有 bun 的链仍然有**：`battle.offline.ipynb`（cell 内联）与采样节点（`rollout_node`）。
+5. **该有 bun 的链仍然有**：`battle.offline.ipynb`（cell 内联）与采样节点（`node_toolchain`）。
 """
 
 from __future__ import annotations
@@ -38,7 +38,14 @@ from pathlib import Path
 import pytest
 
 from common import proc as common_proc
-from remote import notebook_boot, notebook_runtime, push_bootstrap, rollout_node, tailscale_boot
+from remote import (
+    node_toolchain,
+    notebook_boot,
+    notebook_runtime,
+    push_bootstrap,
+    rollout_node,
+    tailscale_boot,
+)
 
 NN = Path(__file__).resolve().parents[2]
 IPYNB = NN / "ipynb"
@@ -64,9 +71,11 @@ ONLINE_MODULES = {
 #: notebook 本身入库，再把名字加回这里」。2026-10-01 约定履行（用户裁决，见 `DECISIONS.md`
 #: §2026-09-25-goalnn-online-worker-no-bun）。
 #: ★ 2026-10-10：cell 拆薄（plan/rollout-node-auto-register v2）——离线盘仍住 cell，
-#: 采样节点的 bun 安装搬进 `remote/rollout_node.py`（`ROLLOUT_MODULES`），cell 里**不许**再有。
+#: 采样节点的 bun 安装搬进 `remote/node_toolchain.py`（`ROLLOUT_MODULES`），cell 里**不许**再有。
 ROLLOUT_DISKS = ("battle.offline.ipynb",)
-ROLLOUT_MODULES = {"remote/rollout_node.py": rollout_node}
+#: 采样节点的 bun 安装 2026-11-18 从 `rollout_node` 拆到 `node_toolchain`（同一份实现，
+#: `rollout_node.ensure_bun` 只是薄入口）⇒ 安装机制字面量住那里。
+ROLLOUT_MODULES = {"remote/node_toolchain.py": node_toolchain}
 
 
 def _cell_source(name: str) -> str:
@@ -193,11 +202,11 @@ def test_online_notebooks_expose_the_persistent_cache_knob() -> None:
 
 def test_shared_installer_keeps_the_persistent_cache_contract() -> None:
     """边界 3b（行为面）：显式 CFG / env 优先，否则落到平台持久根的 `.battle-bin/`。"""
-    assert rollout_node._bin_cache_dir({"bin_cache_dir": "/cfg/cache"}) == Path("/cfg/cache")
-    assert rollout_node._bin_cache_dir({}, isdir=lambda p: p == "/kaggle/working") == (
-        Path("/kaggle/working") / rollout_node.BIN_CACHE_SUBDIR
+    assert node_toolchain.bin_cache_dir({"bin_cache_dir": "/cfg/cache"}) == Path("/cfg/cache")
+    assert node_toolchain.bin_cache_dir({}, isdir=lambda p: p == "/kaggle/working") == (
+        Path("/kaggle/working") / node_toolchain.BIN_CACHE_SUBDIR
     )
-    assert rollout_node._bin_cache_dir({}, isdir=lambda _p: False) is None
+    assert node_toolchain.bin_cache_dir({}, isdir=lambda _p: False) is None
 
 
 def test_notebook_bun_goes_through_the_cache_aware_installer(
@@ -302,7 +311,7 @@ def test_rollout_chains_still_provide_bun() -> None:
 
     `battle.offline.ipynb` = Kaggle/TPU 上的离线盘（Kaggle 不给 tailnet ⇒ 只能走 cloudflared
     隧道进 hub），它自己跑 rollout，安装必须留在 cell 里；
-    采样节点的安装住 `remote/rollout_node.py`（见 `ROLLOUT_MODULES`）。
+    采样节点的安装住 `remote/node_toolchain.py`（见 `ROLLOUT_MODULES`）。
     """
     missing = [
         n for n in ROLLOUT_DISKS if not any(m in _cell_source(n) for m in INSTALL_MARKERS)

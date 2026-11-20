@@ -159,7 +159,7 @@ def note_ping_latency(ms: int, base_ms: int, state: dict, log: Callable[[str], N
     """超额认购即时行（靠 10 分钟节流，不逐拍刷屏）。"""
     if not over_subscribed(ms, base_ms):
         return
-    now = time.time()
+    now = time.monotonic()  # 节流是「隔了多久」，墙钟跳变不该让它提前/推后
     if now - float(state.get("warned_at") or 0.0) < LATENCY_WARN_EVERY_SEC:
         return
     state["warned_at"] = now

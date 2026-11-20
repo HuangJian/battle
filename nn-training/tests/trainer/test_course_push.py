@@ -18,6 +18,8 @@ import types
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 NN_ROOT = Path(__file__).resolve().parents[2]
 if str(NN_ROOT) not in sys.path:
     sys.path.insert(0, str(NN_ROOT))
@@ -122,8 +124,16 @@ def test_hub_push_ignores_the_course_block() -> None:
         assert _hub_push_opt_in() is True
 
 
-def test_hub_push_survives_a_broken_config() -> None:
-    """配置读不到 ⇒ 缺省（允许）——不炸训练；真生效还需 hub_url+token（resolve_hub_push 管）。"""
+def test_hub_push_survives_an_unreadable_config() -> None:
+    """配置读不到（`None`）⇒ 缺省（允许）——不炸训练；真生效还需 hub_url+token。"""
     with patch("trainer.loop_transport.common.distribution") as dc:
-        dc.load_dist_config.side_effect = RuntimeError("boom")
+        dc.load_dist_config.return_value = None
         assert _hub_push_opt_in() is True
+
+
+def test_hub_push_does_not_disguise_a_programmer_error() -> None:
+    """P0-7：这里以前的宽捕获把本模块的 bug 读成「未配置」⇒ 默默回直推节点。"""
+    with patch("trainer.loop_transport.common.distribution") as dc:
+        dc.load_dist_config.side_effect = AttributeError("cfg shape changed")
+        with pytest.raises(AttributeError):
+            _hub_push_opt_in()

@@ -20,8 +20,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from trainer.eval_dispatch import find_archive_weights, select_delayed_eval_it
 from trainer.loop_steps import TrainingSteps
+from worker.archive import find_archive_weights
 from worker.eval_local import (
     EVAL_JOIN_SOFT_SEC_DEFAULT,
     EVAL_LOCAL_EARLY_EPOCHS_DEFAULT,
@@ -31,6 +31,7 @@ from worker.eval_local import (
     eval_tail_overran,
     local_gate_release_plan,
 )
+from worker.eval_yield import select_delayed_eval_it
 
 
 def _every5(m: int) -> bool:
@@ -128,8 +129,9 @@ def test_dispatch_delayed_eval_wiring(tmp_path: Path, monkeypatch: pytest.Monkey
         "local_gate": None,
         "local_fallback_only": True,
     }
-    assert ts._eval_thread is not None
-    assert ts._eval_gate is None, "in-loop 不再建 local 份额门（只在集群全不可用时兜底）"
+    view = ts.eval_timing()
+    assert view.round_thread is not None
+    assert view.gate is None, "in-loop 不再建 local 份额门（只在集群全不可用时兜底）"
 
 
 def test_dispatch_delayed_eval_skips(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -138,7 +140,7 @@ def test_dispatch_delayed_eval_skips(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
     calls: list[tuple] = []
 
-    def _fake_bg(*a, **k):  # type: ignore[no-untyped-def]
+    def _fake_bg(*a, **k):
         calls.append(a)
         return threading.Thread()
 
@@ -146,7 +148,8 @@ def test_dispatch_delayed_eval_skips(tmp_path: Path, monkeypatch: pytest.MonkeyP
     ts = _steps(tmp_path)
     _archive(ts, 5, "{}")
     ts._dispatch_delayed_eval(7, {})  # M=6 非评估轮
-    assert calls == [] and ts._eval_thread is None and ts._eval_gate is None
+    view = ts.eval_timing()
+    assert calls == [] and view.round_thread is None and view.gate is None
 
     ts2 = _steps(tmp_path, _tag="i", mode="intent")
     ts2._dispatch_delayed_eval(6, {})
@@ -247,8 +250,9 @@ def test_dispatch_delayed_eval_never_builds_a_local_gate(
     ts = _steps(tmp_path, epochs=4)
     _archive(ts, 5, "{}")
     ts._dispatch_delayed_eval(6, {})
-    assert ts._eval_gate is None
-    assert ts._eval_thread is not None
+    view = ts.eval_timing()
+    assert view.gate is None
+    assert view.round_thread is not None
     assert seen == [{"local_gate": None, "local_fallback_only": True}]
     # ★ 两个本机 PPO 专属方法随 §3 删除：复活即红（它们是「本机核心留给 PPO」的残留）
     assert not hasattr(ts, "_regate_local_eval")
@@ -285,10 +289,11 @@ def test_join_eval_does_not_wait_by_default(
     ts._eval_thread = _AliveThread(joins)  # type: ignore[assignment]
     ts._eval_tail_start = 100.0
     ts._join_eval(2)
+    view = ts.eval_timing()
     assert joins == []  # 零固定秒数
-    assert ts._eval_gate.is_set()  # 收官必放行（本机份额不得被卡死）
-    assert ts._eval_tail is not None  # 交棒
-    assert ts._eval_tail[0] is ts._eval_thread and ts._eval_tail[1] == 100.0
+    assert view.gate is not None and view.gate.is_set()  # 收官必放行（本机份额不得被卡死）
+    assert view.tail is not None  # 交棒
+    assert view.tail[0] is view.round_thread and view.tail[1] == 100.0
 
 
 def test_join_eval_soft_wait_is_opt_in_escape_hatch(
@@ -302,8 +307,9 @@ def test_join_eval_soft_wait_is_opt_in_escape_hatch(
     ts._eval_thread = _AliveThread(joins)  # type: ignore[assignment]
     ts._eval_tail_start = 5.0
     ts._join_eval(2)
+    view = ts.eval_timing()
     assert joins == [12.5]
-    assert ts._eval_tail is not None and ts._eval_tail[1] == 5.0
+    assert view.tail is not None and view.tail[1] == 5.0
 
     # 显式值超过窗口预算 ⇒ 仍以预算为上限（不得等超过 eval_window_sec+60）
     joins.clear()
@@ -319,29 +325,31 @@ def test_sweep_eval_tail_at_rollout_boundary(tmp_path: Path) -> None:
     """收拢点（下一轮 rollout 收官）：已收官的尾巴只清账；在跑的零等待，只记日志。"""
     joins: list = []
     ts = _steps(tmp_path)
-    ts._eval_tail = (_FinishedThread(joins), time.time() - 120.0)  # type: ignore[assignment]
+    ts._eval_tail = (_FinishedThread(joins), time.time() - 120.0)
     ts._eval_join_sec = 0.0
     ts._sweep_eval_tail()
-    assert joins == [] and ts._eval_tail is None
+    view = ts.eval_timing()
+    assert joins == [] and view.tail is None
 
     # 仍在跑：不 join、不计入 eval_join_sec（缺省 0 ⇒ 不补等）
     ts2 = _steps(tmp_path, _tag="running")
-    ts2._eval_tail = (_AliveThread(joins), time.time() - 30.0)  # type: ignore[assignment]
+    ts2._eval_tail = (_AliveThread(joins), time.time() - 30.0)
     ts2._sweep_eval_tail()
-    assert joins == [] and ts2._eval_tail is None
-    assert ts2._eval_join_sec == 0.0
+    view2 = ts2.eval_timing()
+    assert joins == [] and view2.tail is None
+    assert view2.join_sec == 0.0
 
     # 应急旋钮 >0：边界处补等，秒数计入 eval_join_sec
     ts3 = _steps(tmp_path, _tag="soft")
     ts3._last_dist_cfg = {"policy": {"evalJoinSoftSec": 5}}
-    ts3._eval_tail = (_AliveThread(joins), time.time())  # type: ignore[assignment]
+    ts3._eval_tail = (_AliveThread(joins), time.time())
     ts3._sweep_eval_tail()
     assert joins == [5]
 
     # 无尾巴 = 纯空转（非评估轮也会走这里）
     ts4 = _steps(tmp_path, _tag="none")
     ts4._sweep_eval_tail()
-    assert ts4._eval_tail is None
+    assert ts4.eval_timing().tail is None
 
 
 def test_tail_harvested_when_next_rollout_ends(
@@ -352,16 +360,16 @@ def test_tail_harvested_when_next_rollout_ends(
 
     monkeypatch.setattr(ed, "dispatch_eval_bg", lambda *a, **k: threading.Thread())
     ts = _steps(tmp_path)
-    ts._eval_tail = (_FinishedThread([]), time.time() - 300.0)  # type: ignore[assignment]
+    ts._eval_tail = (_FinishedThread([]), time.time() - 300.0)
     _archive(ts, 5, "{}")
     ts._dispatch_delayed_eval(6, {})  # 下一轮 rollout 收官
-    assert ts._eval_tail is None  # 已收拢
+    assert ts.eval_timing().tail is None  # 已收拢
 
     # 非评估轮（m=None）也要收拢：不是等评估轮才清账
     ts2 = _steps(tmp_path, _tag="none")
-    ts2._eval_tail = (_FinishedThread([]), time.time())  # type: ignore[assignment]
+    ts2._eval_tail = (_FinishedThread([]), time.time())
     ts2._dispatch_delayed_eval(7, {})
-    assert ts2._eval_tail is None
+    assert ts2.eval_timing().tail is None
 
 
 class _FinishedThread:
@@ -544,16 +552,17 @@ def test_dispatch_backfills_old_gaps_one_per_round(
 
     ts._dispatch_delayed_eval(91, {})  # 正常派发 90（it-1）；本轮不再塞补账
     assert calls == [(90, str(a90))], calls
-    assert ts._eval_backfill is None, "当前轮在场时不扫描旧缺口"
+    assert ts.eval_timing().backfill is None, "当前轮在场时不扫描旧缺口"
 
     ts._dispatch_delayed_eval(92, {})  # 91 非评估轮、上一轮已不在跑 ⇒ 补 50
     assert calls[-1] == (50, str(a50)) and len(calls) == 2, calls
-    assert ts._eval_backfill is not None
-    assert [mm for mm, _p in ts._eval_backfill] == [55], "每轮只放行一个缺口"
+    backfill = ts.eval_timing().backfill
+    assert backfill is not None
+    assert [mm for mm, _p in backfill] == [55], "每轮只放行一个缺口"
 
     ts._dispatch_delayed_eval(93, {})  # 队列空：补 55
     assert [it for it, _ in calls][-1] == 55 and len(calls) == 3, calls
-    assert ts._eval_backfill == [], "缺口补完即止"
+    assert ts.eval_timing().backfill == (), "缺口补完即止"
 
     ts._dispatch_delayed_eval(94, {})  # 队列空：不再派
     assert len(calls) == 3, calls
@@ -577,7 +586,7 @@ def test_backfill_skips_smoke_and_is_a_noop_without_gaps(
     ts._eval_backfill = None
     _archive(ts, 50, "{}")
     ts._dispatch_delayed_eval(91, {})
-    assert ts._eval_backfill is None, "smoke 不做补账扫描"
+    assert ts.eval_timing().backfill is None, "smoke 不做补账扫描"
     assert 50 not in calls, calls
 
     fresh = _steps(tmp_path, _tag="fresh")
@@ -586,7 +595,7 @@ def test_backfill_skips_smoke_and_is_a_noop_without_gaps(
     fresh._dispatch_delayed_eval(6, {})  # 唯一的归档轮就是 it-1（正常派发负责）
     assert calls.count(5) == 1, "5 只由正常派发一次"
     fresh._dispatch_delayed_eval(7, {})  # 上一轮已不在跑 ⇒ 这一刻才扫补账
-    assert fresh._eval_backfill == [], "扫过且无缺口 ⇒ 空表"
+    assert fresh.eval_timing().backfill == (), "扫过且无缺口 ⇒ 空表"
 
 
 def test_backfill_yields_when_arbiter_has_same_course_round(
@@ -618,8 +627,9 @@ def test_backfill_yields_when_arbiter_has_same_course_round(
         _archive(ts, 90, "{}")
         ts._dispatch_delayed_eval(91, {})
         assert calls == [], f"本课已有轮在跑，却又派了新轮: {calls}"
-        assert ts._eval_pending_m == 90, "最新权重轮没有顺延"
-        assert ts._eval_backfill is None, "闸忙时连扫描都不做（下一轮再看）"
+        view = ts.eval_timing()
+        assert view.pending_m == 90, "最新权重轮没有顺延"
+        assert view.backfill is None, "闸忙时连扫描都不做（下一轮再看）"
     finally:
         arb.unregister(busy)  # type: ignore[arg-type]
 
@@ -662,17 +672,17 @@ def test_dispatch_caps_open_rounds_and_keeps_latest_pending(
     ts._dispatch_delayed_eval(7, {})  # m=6：顺延
     ts._dispatch_delayed_eval(8, {})  # m=7：覆盖顺延位（6 被更新值顶掉）
     assert calls == [5], f"单轮上限失效: {calls}"
-    assert ts._eval_pending_m == 7, "顺延位不是最新的权重轮"
+    assert ts.eval_timing().pending_m == 7, "顺延位不是最新的权重轮"
 
     hold.set()
-    for th in ts._eval_open:
+    for th in ts.eval_timing().open_threads:
         th.join(5)
-    assert ts._eval_open_threads() == ()
+    assert ts.eval_timing().open_threads == ()
 
     ts._dispatch_delayed_eval(9, {})  # 轮已收工：顺延位(7) 与当前(8) 取最新 = 8
     assert calls == [5, 8], f"收工后没有派最新的顺延轮: {calls}"
-    assert ts._eval_pending_m is None
-    for th in ts._eval_open:
+    assert ts.eval_timing().pending_m is None
+    for th in ts.eval_timing().open_threads:
         th.join(5)
 
 
@@ -699,13 +709,13 @@ def test_dispatch_defers_when_same_course_round_is_registered(
         _archive(ts, 5, "{}")
         _archive(ts, 6, "{}")
         ts._dispatch_delayed_eval(6, {})
-        assert calls == [] and ts._eval_pending_m == 5
+        assert calls == [] and ts.eval_timing().pending_m == 5
     finally:
         arb.unregister(busy)  # type: ignore[arg-type]
 
     ts._dispatch_delayed_eval(7, {})  # 当前(6) 比顺延位(5) 新 ⇒ 派 6
     assert calls == [6], calls
-    assert ts._eval_pending_m is None
+    assert ts.eval_timing().pending_m is None
 
 
 # ── 停课闸（2026-11-04 用户指令）：控制台停课 ⇒ 该课不再补任何 eval 空缺 ──────────
@@ -728,8 +738,9 @@ def test_stopped_course_dispatches_no_eval(tmp_path: Path, monkeypatch: pytest.M
     ts._eval_backfill = None  # 打开补账：停课时连扫描都不该发生
     ts._dispatch_delayed_eval(6, {})
     assert calls == [], "停课还在派 eval"
-    assert ts._eval_backfill is None, "停课还去扫旧缺口"
-    assert ts._eval_thread is None and ts._eval_gate is None
+    view = ts.eval_timing()
+    assert view.backfill is None, "停课还去扫旧缺口"
+    assert view.round_thread is None and view.gate is None
 
     marker.write_text("", encoding="utf-8")  # 重新开课
     ts._dispatch_delayed_eval(6, {})
@@ -777,7 +788,7 @@ def test_drain_stops_between_rounds(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     _archive(ts, 15, "{}")
     ts._drain_pending_eval()
     assert calls == [10], f"停课后仍派了后面的轮: {calls}"
-    assert ts._eval_thread is not None, "已派的轮不得被收回（在飞局不动）"
+    assert ts.eval_timing().round_thread is not None, "已派的轮不得被收回（在飞局不动）"
 
 
 def test_legacy_non_course_run_keeps_dispatching(
@@ -797,7 +808,7 @@ def test_legacy_non_course_run_keeps_dispatching(
     assert getattr(ts.args, "course_obj", None) is None
     from common.protocol import COURSE_ENABLE_MARKER
 
-    assert not (Path(ts._traj_dir).parent / COURSE_ENABLE_MARKER).exists()
+    assert not (tmp_path / "legacy" / "traj" / COURSE_ENABLE_MARKER).exists()
     _archive(ts, 5, "{}")
     ts._dispatch_delayed_eval(6, {})
     assert calls == [5], "无课程路径被停课闸误伤"

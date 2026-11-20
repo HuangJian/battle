@@ -234,8 +234,8 @@ def test_publish_records_code_snapshot_freshness(
     shard.mkdir()
     logs: list[str] = []
 
-    def fake_publish(**kw: Any) -> dict:
-        job_dir = Path(kw["job_root"]) / "jid-stale"
+    def fake_publish(spec: Any, **kw: Any) -> dict:
+        job_dir = Path(spec.job_root) / "jid-stale"
         job_dir.mkdir(parents=True, exist_ok=True)
         (job_dir / "manifest.json").write_text("{}", encoding="utf-8")
         return {"job_id": "jid-stale", "code_sha256": "a" * 64}
@@ -789,8 +789,8 @@ def test_finish_course_does_not_exit_and_skips_smoke(tmp_path: Path, rec: Record
 
 def test_resolve_bc_init_weights_semantics(tmp_path: Path) -> None:
     """`train.init_from` 解析：空⇒None；相对路径按仓库根锚定；缺失文件响亮拒发。"""
+    from common.paths import REPO_ROOT
     from trainer.bc_loop import resolve_bc_init_weights
-    from trainer.dispatch_queue import REPO_ROOT
     from worker.bc_config import BcCourseConfig, BcTrainBlock
 
     def course_with(init_from: str) -> BcCourseConfig:

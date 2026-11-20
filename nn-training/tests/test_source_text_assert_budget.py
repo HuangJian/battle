@@ -357,6 +357,7 @@ from pathlib import Path
 
 from tests.helpers import scan_cache
 from tests.helpers import text_asserts as TA
+from tests.helpers.budget import sanity_floor_of
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -410,12 +411,43 @@ ROOT = Path(__file__).resolve().parents[1]
 #:   同批其余判据均为数值/对象断言。涉及 `tests/tools/test_p0_*`、
 #:   `test_c9_critic_calibration.py`、`test_z11_seed_level.py`、
 #:   `tests/biz/test_w1_horizon_guard.py`。这是**产物契约**，不是新开的文风。
-#: 2026-11-17 抬到 **1498**（+5 = 探活失败归因的两条操作员读面：hub 的 422 归因行 4 + 云机转述
-#:   老 hub detail 1；机读面已经按 `probe` 字段/状态码钉住，文本只补「有没有把归因写出来」；
-#:   理由见模块头末段）。
-#: 2026-11-18 抬到 **1502**（+4，relay 通道连不上 hub 的三处操作员读面 —— 模块头末段
-#:   「2026-11-18」那格；`probe_hub` 的机读面已按 `facts["host"/"dns"/"routes"]` 钉住）。
-BASELINE_FORM = 1502
+#: 2026-11-14 抬到 **1498**（+5，实测）：`tests/remote/test_remote_hotswap.py` 新增两条停机留痕用例
+#:   —— `_release_cloud_machine` 的 `unassign()` 失败时，**日志正文本身**就是交付物（异常 repr + 「机器
+#:   未释放」+ 该怎么做）。行为面只能验「调了一次」，验不了「读日志的人知道机器还在计费」；
+#:   与上面 `test_notebook_runtime` / `test_offline_local_first` 同一类：操作员唯一的证据是那几行字。
+#: 2026-11-14 再抬到 **1500**（+2，实测）：`tests/trainer/test_loop_heartbeat_visibility.py` +
+#:   `tests/worker/test_eval_heartbeat.py` 的心跳留痕用例 —— 要钉的是**那行 WARN 里的后果说明**
+#:   （「console 会显示旧状态」/「runner_state 会停在旧值」）。行为面能验「喊了一次」，验不了
+#:   「读日志的人知道要不要管」；与上面几条同一类：措辞本身是交付物。
+#: 2026-11-15 抬到 **1501**（+1，实测）：`tests/remote/test_lifecycle.py` 的 SIGTERM 自投失败用例 ——
+#:   要钉的正是那句「进程仍在跑，hub 会当这台已下线」（重复计费）。行为面只能验「没抛 + 写了一次」，
+#:   验不了「读日志的人知不知道机器还在计费」；与上面几条同一类：措辞本身是交付物。
+#: 2026-11-15 抬到 **1511**（+3，实测）：G9 第十五批（`worker/terminal_stats` 写盘失败留痕 /
+#:   `worker/serve_pool` kill 失败留痕）—— 两条判据都是「盘上/日志上分不分得清『没有』与『坏了』」，
+#:   行为面只验得到「没抛」。逐笔：`iteration-terminal.jsonl` + `No space left on device`（2 条）、
+#:   `kill 失败` + `OSError`（2 条）；同批删掉的 `remote/job_fs._git_head` 测试（-1）抵消后净 +3。
+#: 2026-11-15 早前抬到 **1508**（+7，实测）：G9 第十四批（`trainer/batch_runner._heartbeat` 留痕 /
+#:   `worker/loop_guards_sweep` 收窄 `BaseException` / `remote/hub_client.git_head` 带成因）的
+#:   判据就是「读日志的人看没看到这一行、上面有没有成因」—— 行为面只能验「没抛 + 调了一次」，
+#:   验不了「`swept 0` 与『清理器炸了』在日志里长得不一样」。逐笔：心跳 2 条
+#:   （`runner_state 会停在旧值` / `ModuleNotFoundError`）、git_head 2 条（`TimeoutExpired` /
+#:   退出码 `128`）、`workdir-sweep it5 skipped` + `OSError` + `磁盘只读` 3 条。与上面几条同类：
+#:   措辞本身是交付物 ⇒ 这是口径 A 里少数几个**该有**的文本判据。
+#: 2026-11-15 抬到 **1513**（+2，实测）：B 类三处窄捕的用例 —— `processor` 侧只验了「没抛/返回值」，
+#:   但「节点回执不是 JSON 时要炸」「校验器崩了不许被读成缓存坏」这两条**只能看错误信息是否说明
+#:   了后果**（`_probe_sha` 的那句 docstring 就是交付物）。逐笔 2 条，全在 `test_push_probe_errors.py`。
+#: 2026-11-19 抬到 **1514**（+1，实测）：B7-P4b 的 `_JobStore.__init__` 断言「唯一的两相回填
+#:   `self.ledger.leases = self.leases` 恰好在场」——这条契约没有运行时出口（回填漏了只会在
+#:   `publish` 时炸），只能看源码文本。
+#: 2026-11-19 抬到 **1525**（+11，实测）：P0-8 第三项把 9 个脚本壳文件的 `check(cond, msg)`
+#:   全部换成真 `assert`（`python.refactor.md` §P0-8）。这些文本形态判据**原先就存在**，只是
+#:   藏在 `check()` 的调用实参里、扫描器看不见（`check("x" in text, …)` 不是 Assert 节点）；
+#:   去掉包装后第一次被计入。不是新判据，也没有放宽任何断言 —— 逐条仍是原来那句。
+#: 2026-11-18 再抬 **+4**（relay 通道连不上 hub 的三处操作员读面 —— `probe_hub` 的机读面已按
+#:   `facts["host"/"dns"/"routes"]` 钉住；文本只补「这行有没有把现场写出来」）。
+#: 2026-11-19 合入上游 goal-nn（74 提交）后实测 1534（+9：上游的 relay / replay / eval
+#: 读面用例；其中 4 条已在前一行记过账，其余同上口径 —— 文本本身是交付物）。
+BASELINE_FORM = 1534
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
 #: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092；
 #: 2026-10-18 course-metrics 备份库用例抬到 **1096**（+4，实测值；理由见模块头末段）；
@@ -437,9 +469,88 @@ BASELINE_FORM = 1502
 #: 2026-11-07 抬到 **1121**（+6，实测）：与上一格同批 C1–C9 探针，其中 6 条判据读
 #:   `.py` 源码面/产物文本（课程公式守卫、报告表头契约），按口径 B 的已知限边计进。
 #:   口径 A 仍 0 条；行为/数值断言未变。每笔理由同上，均为产物/源码契约。
-BASELINE_SRC = 1121
-#: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。
-SANITY_FLOOR = (400, 200)
+#: 2026-11-13 抬到 **1126**（+5，实测）：新增两条门禁
+#:   `tests/test_python_version_matrix.py` / `tests/test_python_shape_budget.py`。
+#:   它们判的是**数值/结构**（版本区间、每文件函数计数），不是措辞；被计进来是口径 B 的已知
+#:   边界（`.python-version` 含 `.py` 子串；扫描器里出现 `*.py`）。口径 A 仍 0 条。
+#:   ⚠ 一旦口径 B 能把「路径字符串」与「源码文本」分开，这 5 条应回退。
+#: 2026-11-14 抬到 **1132**（+6，实测）：G3 生产 print 门禁 `tests/test_no_print_in_prod.py`
+#:   用 AST 扫 `*.py` 源码面，整个文件的 assert 按口径 B 计进（判据是结构计数，不是措辞；
+#:   口径 A 仍 0 条）。与上面「扫描器里出现 `*.py`」同一已知限边。
+#: 2026-11-14 抬到 **1140**（+8，实测）：G4 宽泛异常门禁 `tests/test_broad_except_budget.py`
+#:   同样用 AST 扫 `*.py` 源码面（口径 B 的同一已知限边：判据是结构计数，不是措辞；
+#:   口径 A 仍 0 条）。同批 G6 抑制符门禁 `tests/test_suppression_budget.py` 再 +2 到 **1142**
+#:   （同样读 `*.py` 面）；G5 私有断言门禁 `tests/test_private_assert_budget.py` 再 +4 到 **1146**；
+#:   同日 G3 补一条「基线只许调小」（新增 1 条读 `*.py` 面的断言）⇒ **1147**。
+#: 2026-11-14 抬到 **1154**（+7，实测）：G9「宽泛捕获 + 只 pass」门禁
+#:   `tests/test_silent_except_budget.py` 同样用 AST 扫 `*.py` 源码面（口径 B 的同一已知限边：
+#:   判据是结构计数与基线账，不是措辞；口径 A 仍 0 条，是真「行为断言」）。
+#: 2026-11-15 抬到 **1155**（+1，实测）：新门禁 `tests/test_worker_forward_names_are_live.py`
+#:   （`remote/worker.py` 的转发名不得是死名）扫描面就是 `*.py` 全文 —— 与上面几格同一已知限边
+#:   （判据是「名字还有没有引用」，不是措辞）。口径 A 仍 0 条。
+#: 2026-11-16 抬到 **1157**（+2，实测）：新门禁 `tests/test_env_reads_budget.py`（G13）用 AST 扫
+#:   `*.py` 面数 env 直读 —— 与 G3/G4/G6/G9 同一已知限边（判据是「每个文件读了几次、旋钮有没有
+#:   第二个家」，不是措辞；口径 A 仍 0 条）。同批 `tests/trainer/test_batch_plan_split.py` 删掉一条
+#:   文本判据（那份路径常量已搬进 `common/settings.py`，改由 G13 行为化地抓）⇒ FORM 未动。
+#: 2026-11-16 抬到 **1159**（+2，实测）：新门禁 `tests/test_any_budget.py`（G14）用 AST 扫 `*.py` 面
+#:   数 `Any` 注解，并在同一文件里对**自己那两段示例源码**做口径自检（「注释里的字样不算 / `*.Any`
+#:   算」）—— 与 G13/G4/G6/G9 同一已知限边（判据是结构计数，不是措辞；口径 A 仍 0 条）。
+#: 2026-11-17 抬 SOURCE 一格到 **1160**（+1，实测）：新门禁 `tests/test_executor_ownership.py`（G16：
+#:   线程池只能由 `common.runtime.Runtime` 建）用 AST 扫 `*.py` 面 —— 与 G3/G4/G6/G9/G13/G14 同一
+#:   已知限边（判据是「谁构造了池」的结构计数 + 迁移有没有被回退，不是措辞；口径 A 仍 0 条）。
+#:   该文件里只有那条**两向护栏**（`Runtime(` 处数不低于迁移后的实测值）被口径 B 计进 ——
+#:   「迁移被无声回退」这个形态只能数处数，行为面没有可调的入口。FORM 未动。
+#: 2026-11-18 抬 SOURCE 一格到 **1165**（+5，实测）：G7 扩面（`tests/test_module_asserts.py`，
+#:   原 `test_common_module_asserts.py` 只 1 条）—— 新加的四组判据全在「生产源码的结构」上：
+#:   模块级 assert 零容忍 · 函数级存量只降不涨 · 基线不许留旧数字 · 命令面不许出现 `python -O`。
+#:   它们与 G13/G14/G16 同一已知限边（判据是 AST 结构计数，不是措辞；口径 A 仍 0 条）：要判
+#:   「生产包里有没有 import 期 assert」只能读生产源码，而行为面（import 一次）只能证明当前这些
+#:   模块碰巧不炸 —— 下一次有人写回模块级 assert，行为面看不出。FORM 未动。
+#: 2026-11-19 抬 SOURCE 一格到 **1170**（+5，实测）：B8 ④ 的新守卫
+#:   `tests/worker/test_ppo_loop_core.py`（goal ↔ intent 共用循环核心的六条，本文件实测 6 条）
+#:   全部是 **AST 结构判据**：核心的字符串字面量里有没有头名、入口体是不是单条
+#:   `return run_ppo(...)`、两个头之间还有没有 12 行克隆窗口、形参表是否冻结。
+#:   它们与 G13/G14/G16/G7 同一已知限边（“读 `.py` 面的断言”一律计进，不看是否真在比措辞）：
+#:   口径 A 仍 0 条。基线前一格本就比实测宽 1（HEAD 实测 1164）⇒ 净 +5。FORM 未动。
+#: 2026-11-19 再抬到 **1173**（+3，实测）：B8 第十三刀的守卫
+#:   `tests/worker/test_ppo_backend_parity.py`（共享核零后端 import · 两张算子表字段全接 ·
+#:   两个引擎都调 `run_step`）—— 三条全是 **AST 判据**（读源码只为 parse，不比措辞），
+#:   与 G13/G14/G16/G7/上一格同一已知限边；口径 A 仍 0 条。净 +3 全来自这道新守卫；
+#:   同批把 `test_xla_step_diag.py` 的 demo 索引钉从「源码子串」改成 AST 接线 + 行为判据
+#:   （那条本来就在口径 B 之外，不抵账）。FORM 未动。
+#: 2026-11-19 再抬到 **1174**（+1，实测）：B8 第十四刀的守卫
+#:   `tests/worker/test_ppo_cli_core.py` 里唯一的源码读点 —— 「goal / intent 的 `main()` 只剩
+#:   `run_cli(_spec())`、两个模块里不再有 `add_argument`」。这条契约**没有运行时出口**：
+#:   重新内联一份 parser 之后 `--help` 依旧逐字相同（另两条用例正是断言它相同），只有
+#:   看源码结构才能发现重复又长回来了。其余断言（文案 / 顺序 / 默认值）全是运行时 Action 表，
+#:   不读 `.py`；同一条用例已压成**单条** `_shell_violations(tree) == []`（首版 9 条，这就是
+#:   口径 B 的已知限边：它数函数内 assert，不看是否真在比措辞）。FORM 未动。
+#: 2026-11-19 再抬到 **1183**（+9，实测）：B7-P1 的结构守卫在
+#:   `tests/hub/test_hub_job_store_split.py` 增加 9 条 **AST 判据**（调度协作者的状态归属 /
+#:   MRO / 构造注入 / 组合类不复制状态 / 层号）。与上面几格同一已知限边：「`_JobStore` 的
+#:   基类集合与状态主人」没有运行时出口（类对象本身就是契约）；口径 A 仍 0 条。
+#: 2026-11-19 再抬到 **1195**（+12，实测）：B7-P2 的同一份结构守卫新增租约协作者的
+#:   状态归属 / 构造注入 / 39 个转发壳闭集 + 5 个内部接缝 / 协作者 import 隔离 / 层号判据。
+#:   与上一格同一已知限边（类对象与基类集合没有运行时出口）；口径 A 仍 0 条。
+#: 2026-11-19 再抬到 **1196**（+1，实测）：B7-P3 的队列结构守卫新增「10 个状态字段只住
+#:   `course_table` / `board`、组合类只留转发属性」一条 AST 判据（同一已知限边）。
+#: 2026-11-19 再抬到 **1197**（+1，实测）：B7-P4 把同一条判据扩到 `Dispatch` 的 11 个字段
+#:   与 5 把旁路锁的身份对账（同一已知限边：状态主人没有运行时读数，只能看 AST）。
+#: 2026-11-19 再抬到 **1207**（+10，实测）：B7-P4b 的账本协作者结构判据（16 个转发壳、
+#:   3 个状态 + 6 个注入面、MRO/层号、两相回填）。同一已知限边：类结构与构造顺序没有
+#:   运行时出口；口径 A 仍 0 条。
+#: 2026-11-19 再抬到 **1210**（+3，实测）：B7-S2 的队列结构守卫新增「26 个 scope 转发壳 /
+#:   `QueueScope` 签名与 QueuePeer 逐参数一致 / 状态写者表包含 `self.hub.X` 形态」三条 AST
+#:   判据（同一已知限边：基类集合与转发壳没有运行时出口；口径 A 仍 0 条）。
+BASELINE_SRC = 1210
+#: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。派生式（基线九成，见
+#: `tests/helpers/budget.py`）：两个计数器各自随自己的基线收紧，清理基线时不必回填数字。
+def _floor_of_form() -> int:
+    return sanity_floor_of(BASELINE_FORM)
+
+
+def _floor_of_src() -> int:
+    return sanity_floor_of(BASELINE_SRC)
 
 
 def test_text_assert_counts_only_go_down() -> None:
@@ -447,8 +558,9 @@ def test_text_assert_counts_only_go_down() -> None:
     # 判据与口径不变；命中率坏了也只影响快慢，不影响结论。
     cache = scan_cache.Cache("text-asserts", version=TA.CACHE_VERSION, root=ROOT)
     form, src, per_file = TA.totals(ROOT, cache=cache)
-    assert form > SANITY_FLOOR[0] and src > SANITY_FLOOR[1], (
-        f"计数异常偏小（形态 {form} / 源码面 {src}）—— 扫描面或口径坏了，护栏会恒绿"
+    assert form > _floor_of_form() and src > _floor_of_src(), (
+        f"计数异常偏小（形态 {form} / 源码面 {src}，地板 {_floor_of_form()}/{_floor_of_src()}）"
+        "—— 扫描面或口径坏了，护栏会恒绿"
     )
     top = sorted(per_file.items(), key=lambda kv: -kv[1][1])[:5]
     hint = "；".join(f"{rel}={s}" for rel, (_, s) in top)

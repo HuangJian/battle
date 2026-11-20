@@ -291,8 +291,9 @@ def test_metrics_batch_goes_to_parts_metrics(tmp_path: Path) -> None:
     d = _deliverer(tmp_path, logs, metrics_parts=True, opener=_metrics_opener(seen))
     d.sync()
     assert seen.count("metrics") == 1, seen
-    assert d._metrics_sent == {1}, "送达后统计件销账"
-    assert d._metrics_stat[0] == 1, "读数：1 轮 / 若干字节"
+    state = d.deliver_state()
+    assert state.metrics_sent == (1,), "送达后统计件销账"
+    assert state.metrics_stat[0] == 1, "读数：1 轮 / 若干字节"
 
 
 def test_metrics_batch_is_off_by_default(tmp_path: Path) -> None:
@@ -303,7 +304,7 @@ def test_metrics_batch_is_off_by_default(tmp_path: Path) -> None:
     d = _deliverer(tmp_path, logs, opener=_metrics_opener(seen))
     d.sync()
     assert seen.count("metrics") == 0
-    assert d._metrics_sent == {1}, "权重体已带 row ⇒ 销账"
+    assert d.deliver_state().metrics_sent == (1,), "权重体已带 row ⇒ 销账"
     assert d.status()["metrics_backlog"] == 0
 
 
@@ -324,7 +325,7 @@ def test_metrics_batch_survives_anchor_starvation(tmp_path: Path) -> None:
     assert d.pending_anchors() == [], "前提：1…4 里没有 5 的倍数"
     assert d.sync() == 0
     assert seen.count("metrics") == 1, seen
-    assert d._metrics_sent == {1, 2, 3, 4}
+    assert d.deliver_state().metrics_sent == (1, 2, 3, 4)
 
 
 def test_weights_without_row_do_not_mark_metrics_sent(tmp_path: Path) -> None:
@@ -341,7 +342,7 @@ def test_weights_without_row_do_not_mark_metrics_sent(tmp_path: Path) -> None:
     d = _deliverer(tmp_path, logs, metrics_parts=True, opener=_metrics_opener(seen))
     d.sync()
     assert seen.count("weights") == 1, seen
-    assert d._metrics_sent == set(), "没有 row 的权重体不许销统计账"
+    assert d.deliver_state().metrics_sent == (), "没有 row 的权重体不许销统计账"
     assert d.status()["metrics_backlog"] == 1
 
 
@@ -356,8 +357,8 @@ def test_metrics_batch_disables_itself_on_404_but_weights_still_flow(
         tmp_path, logs, metrics_parts=True, opener=_metrics_opener(seen, metrics_status=404)
     )
     d.sync()
-    assert d._metrics_unsupported is True
-    assert d._metrics_sent == {1}
+    assert d.deliver_state().metrics_unsupported is True
+    assert d.deliver_state().metrics_sent == (1,)
     assert seen.count("weights") >= 1, seen
 
 
@@ -378,9 +379,9 @@ def test_adaptive_every_mode_sends_every_round(tmp_path: Path) -> None:
         eval_every=5,
         opener=_metrics_opener(seen),
     )
-    assert d._modes.mode == "every"
+    assert d.deliver_state().mode == "every"
     d.sync()
-    assert set(d._delivered) == {1, 2, 3}, d._delivered
+    assert set(d.deliver_state().delivered) == {1, 2, 3}, d.deliver_state().delivered
     st = d.status()
     assert st["mode"] == "every" and st["adaptive"] is True
     assert st["backlog"] == 0 and st["eta"] == "0s"
@@ -400,7 +401,7 @@ def test_backlog_drains_past_sync_cap_in_every_mode(tmp_path: Path) -> None:
         opener=_metrics_opener([]),
     )
     d._push_backlog(d._now() + 30.0)
-    assert set(d._delivered) == set(range(1, 7)), d._delivered
+    assert set(d.deliver_state().delivered) == set(range(1, 7)), d.deliver_state().delivered
 
 
 def test_adaptive_off_means_anchors_only(tmp_path: Path) -> None:
@@ -417,7 +418,7 @@ def test_adaptive_off_means_anchors_only(tmp_path: Path) -> None:
     )
     assert d.adaptive is False
     d.sync()
-    assert d._modes.mode == "anchors"
+    assert d.deliver_state().mode == "anchors"
     assert seen.count("weights") == 0, seen
     assert d.status()["mode"] == "anchors"
     assert d.status()["adaptive"] is False

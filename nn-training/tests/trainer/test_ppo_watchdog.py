@@ -130,7 +130,8 @@ def test_lost_after_grace_republishes_the_same_jid(tmp_path: Path, monkeypatch) 
     # 宽限内的第二次询问：仍不撤（宽限是必须的——publish→hub 扫到目录有秒级窗口）。
     _due(sess)
     sess.lost_since = time.time() - (LOST_GRACE_SEC - 1.0)
-    assert rig.step._remote_ppo_step(ctx) is not None
+    outcome = rig.step._remote_ppo_step(ctx)
+    assert outcome is not None
     assert rig.cancelled == []
 
     # 宽限过后：判 lost ⇒ 撤单 + 丢会话。
@@ -143,7 +144,8 @@ def test_lost_after_grace_republishes_the_same_jid(tmp_path: Path, monkeypatch) 
     assert ctx.remote is None
 
     # 下一拍：正常发布路径重发同一 jid（幂等键不含 code/时间）。
-    assert rig.step._remote_ppo_step(ctx) is not None
+    outcome = rig.step._remote_ppo_step(ctx)
+    assert outcome is not None
     assert [s.jid for s in rig.published] == [JID, JID]
     assert [s.it for s in rig.published] == [7, 7]
     assert rig.calls.count("publish") == 2
@@ -161,7 +163,8 @@ def test_alive_status_clears_the_observation_and_never_republishes(
     assert sess is not None
     _due(sess)
     sess.lost_since = time.time() - (LOST_GRACE_SEC + 100.0)
-    assert rig.step._remote_ppo_step(ctx) is not None
+    outcome = rig.step._remote_ppo_step(ctx)
+    assert outcome is not None
     assert rig.cancelled == []
     assert sess.lost_since == 0.0  # 恢复可见 ⇒ 撤表
 
@@ -176,7 +179,8 @@ def test_unreachable_status_never_republishes(tmp_path: Path, monkeypatch) -> No
     assert sess is not None
     _due(sess)
     sess.lost_since = time.time() - (LOST_GRACE_SEC + 100.0)
-    assert rig.step._remote_ppo_step(ctx) is not None
+    outcome = rig.step._remote_ppo_step(ctx)
+    assert outcome is not None
     assert rig.cancelled == []
     assert sess.lost_since > 0.0  # 不动表
     assert rig.calls.count("publish") == 1
@@ -217,7 +221,8 @@ def test_push_transport_is_untouched(tmp_path: Path, monkeypatch) -> None:
     sess.transport = "push"
     _due(sess)
     sess.lost_since = time.time() - (LOST_GRACE_SEC + 100.0)
-    assert rig.step._remote_ppo_step(ctx) is not None
+    outcome = rig.step._remote_ppo_step(ctx)
+    assert outcome is not None
     assert rig.cancelled == []
     assert queried == [JID]  # 只在 transport=="hub" 时问过一次
 
@@ -236,11 +241,14 @@ def test_bump_remote_fail_aborts_at_three_and_writes_verdict(tmp_path: Path) -> 
     obj._jsonl_path = jsonl
     obj._remote_fail = 0
     obj._leg_abort = False
-    assert obj._bump_remote_fail(7, "第一次丢失") is False
-    assert obj._bump_remote_fail(7, "第二次丢失") is False
-    assert obj._leg_abort is False
-    assert obj._bump_remote_fail(7, "第三次丢失") is True
-    assert obj._leg_abort is True
+    stopped = obj._bump_remote_fail(7, "第一次丢失")
+    assert stopped is False
+    stopped = obj._bump_remote_fail(7, "第二次丢失")
+    assert stopped is False
+    assert obj.remote_fail_state().leg_aborted is False
+    stopped = obj._bump_remote_fail(7, "第三次丢失")
+    assert stopped is True
+    assert obj.remote_fail_state().leg_aborted is True
     events = [json.loads(x) for x in jsonl.read_text(encoding="utf-8").strip().splitlines()]
     assert any(e.get("event") == "gate_verdict" and e.get("verdict") == "ABORT" for e in events)
 
@@ -384,7 +392,9 @@ def test_previous_run_cancel_in_the_local_ledger_self_heals(tmp_path: Path, monk
     assert len(rig.bumps) == 1
     assert ctx.remote is None  # 丢会话 ⇒ 下一拍走正常发布路径
 
-    assert rig.step._remote_ppo_step(ctx) is not None  # 重发同 jid
+    outcome = rig.step._remote_ppo_step(ctx)
+
+    assert outcome is not None  # 重发同 jid
     assert [s.jid for s in rig.published] == [JID]  # 重发的是**同一份活**（幂等键不含 code/时间）
     assert _events(jsonl) == ["job_pending", "job_cancelled", "job_pending"]
 
@@ -393,7 +403,8 @@ def test_previous_run_cancel_in_the_local_ledger_self_heals(tmp_path: Path, monk
     sess = ctx.remote
     assert sess is not None
     _due(sess)
-    assert rig.step._remote_ppo_step(ctx) is not None
+    outcome = rig.step._remote_ppo_step(ctx)
+    assert outcome is not None
     assert rig.cancelled == [JID]
     assert len(rig.bumps) == 1
     assert rig.calls.count("publish") == 1  # 净态回 pending ⇒ 不再重发
@@ -421,7 +432,8 @@ def test_operator_cancel_is_not_reverted_by_the_leg(tmp_path: Path, monkeypatch)
         rig = _Rig(hub_http.JOB_ALIVE, ledger=jsonl)
         _patch_liveness(monkeypatch, rig)
         ctx = RoundContext(it=7, resumable=True)
-        assert rig.step._remote_ppo_step(ctx) is not None
+        outcome = rig.step._remote_ppo_step(ctx)
+        assert outcome is not None
         assert rig.cancelled == [], reason
         assert rig.bumps == [], reason
         assert ctx.remote is not None, reason  # 会话保留：等待不静默变成重发

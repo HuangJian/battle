@@ -37,6 +37,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from common import runtime
 from remote.child_proc import join_all, pump_lines, reap_child, repo_root, spawn_module
 from remote.result_upload import (
     OUTCOME_PREFIX,
@@ -100,6 +101,9 @@ class UploaderProcess:
         self._q: queue.Queue[UploadTask | None] = queue.Queue(maxsize=max(1, int(depth)))
         self._inflight: dict[str, UploadTask] = {}
         self._proc: subprocess.Popen | None = None
+        #: 两条管道线程的属性（`upload-proc-in` / `upload-proc-out`）：名字、登记、收尾 join
+        #: 都在 `Runtime` 里；本类仍自己 join（谁等它们由 `close` 的预算定）。
+        self._rt = runtime.Runtime(scope="upload-proc")
         self._writer: threading.Thread | None = None
         self._reader: threading.Thread | None = None
         self._boot = threading.Event()
@@ -126,10 +130,9 @@ class UploaderProcess:
         if why:
             self._degrade(why)
             return
-        self._writer = threading.Thread(target=self._write_loop, name="upload-in", daemon=True)
-        self._reader = threading.Thread(target=self._read_loop, name="upload-out", daemon=True)
-        self._reader.start()
-        self._writer.start()
+        # 顺序不变：reader 先起（`boot ok` 只可能被它读到）。
+        self._reader = self._rt.thread(self._read_loop, name="out", daemon=True)
+        self._writer = self._rt.thread(self._write_loop, name="in", daemon=True)
         if not self._await_boot():
             return
         self._log(f"回传腿已独立（子进程 pid={self._proc.pid if self._proc else '?'}）")
@@ -177,6 +180,7 @@ class UploaderProcess:
             join_all((self._writer, self._reader))
             self._writer = None
             self._reader = None
+            self._rt.join_threads(2.0)
 
     def _degrade(self, why: str) -> None:
         """**sticky 降级**：子进程不可用 ⇒ 本段改用进程内线程（不再重试 spawn）。
@@ -228,6 +232,11 @@ class UploaderProcess:
     @property
     def off_critical_path(self) -> bool:
         return True
+
+    @property
+    def degraded(self) -> bool:
+        """是否已降级到进程内线程腿（sticky；`stats()["degrade_reason"]` 是同一事实的人读面）。"""
+        return self._fallback is not None
 
     def submit(self, task: UploadTask) -> None:
         """交一份结果：**只排票**（序列化与网络都在 writer 线程 / 子进程里）。"""
@@ -409,7 +418,7 @@ class UploaderProcess:
                 self._boot.set()
             self._log(s)
 
-        pump_lines(proc.stdout if proc is not None else None, _on_line)
+        pump_lines(proc.stdout if proc is not None else None, _on_line, log=self._log)
         # EOF：子进程没了。收线过程中（`_closed`）由 `close()` 负责残票，不在这里降级。
         if not self._closed and self._fallback is None:
             code = None if proc is None else proc.poll()
@@ -472,9 +481,7 @@ class UploaderProcess:
                 f"★ 结果回传失败 job {task.jid}（{time.time() - t0:.1f}s）：{error} — "
                 "本份结果**没有**送达 hub（主循环已往前跑；训练侧要等租约过期才看得出来）"
             )
-        self._settle(
-            task.jid, Outcome(status=status, error=error, seconds=time.time() - t0), task
-        )
+        self._settle(task.jid, Outcome(status=status, error=error, seconds=time.time() - t0), task)
         with self._cv:
             self._pending = max(0, self._pending - 1)
             self._cv.notify_all()

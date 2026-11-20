@@ -60,7 +60,8 @@ def load_shards(data_dir: str, outcome: str, max_games: int, log_f) -> list[dict
     for mp in sorted(glob.glob(os.path.join(data_dir, "**", "manifest.json"), recursive=True)):
         d = os.path.dirname(mp)
         try:
-            man = json.load(open(mp, encoding="utf-8"))
+            with open(mp, encoding="utf-8") as f:
+                man = json.load(f)
         except Exception as e:
             log(log_f, "  [skip] manifest 读不了:", mp, e)
             continue
@@ -107,7 +108,8 @@ def main() -> int:
 
     _logp = a.log or (a.out + ".log")
     os.makedirs(os.path.dirname(_logp) or ".", exist_ok=True)
-    log_f = open(_logp, "w", encoding="utf-8")
+    # 脚本级主日志：`main()` 持有到进程退出，由解释器收尾
+    log_f = open(_logp, "w", encoding="utf-8")  # noqa: SIM115
     random.seed(a.seed)
     np.random.seed(a.seed)
     torch.manual_seed(a.seed)

@@ -31,6 +31,7 @@ store_job_failure/_job_dir`；★M4b：`mode_of` 随模式退役）。
 
 from __future__ import annotations
 
+import http.client
 import json
 import secrets
 import threading
@@ -43,7 +44,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from common import net_http
+from common import net_http, runtime
+from common.errors import NET_ERRORS
 from common.logutil import course_tag, tag_logger, tagged
 from common.protocol import (
     AUTH_HEADER,
@@ -101,6 +103,17 @@ def _status_of(body: bytes) -> str:
     return str((doc or {}).get("status") or "") if isinstance(doc, dict) else ""
 
 
+#: 「这一发没答」的真失败形态（`_http` 的路面）：传输面 = `NET_ERRORS`（OSError 盖 URLError /
+#: 超时 / TLS），再加 `http.client.HTTPException`（状态行/体被截断）与 `ValueError`（URL 拼不对）。
+#: **4xx/5xx 不算**（那是「有答」，见 `_http` docstring）。把自家 bug 落进这个集，现场就是
+#: 「这台 worker 一会儿连得上一会儿连不上」，而调度据此把人换掉。
+_PUSH_HTTP_ERRORS: tuple[type[BaseException], ...] = (
+    *NET_ERRORS,
+    http.client.HTTPException,
+    ValueError,
+)
+
+
 def _http(
     url: str,
     key: str,
@@ -127,9 +140,10 @@ def _http(
     except urllib.error.HTTPError as e:
         try:
             return e.code, e.read()
-        except Exception:
+        except (OSError, http.client.HTTPException):
+            # 有答但体读不出来（截断/对端早关）：状态码已经是结论，体丢了就交空串
             return e.code, b""
-    except Exception:
+    except _PUSH_HTTP_ERRORS:
         return None
 
 
@@ -219,7 +233,9 @@ def accept_result(
     if not hub.result_token_ok(jid, lease_token):
         return 403, "lease mismatch — 非本 job 租约持有人"
     if not hub.store_result(jid, result):
-        _append_attribution(hub, jid, "job_rejected", worker, "result already stored (duplicate write-back)")
+        _append_attribution(
+            hub, jid, "job_rejected", worker, "result already stored (duplicate write-back)"
+        )
         return 409, "result already stored (duplicate write-back)"
     _append_attribution(hub, jid, "job_result_accepted", worker, "")
     # ★ 结果落地 ⇒ 这份活**已结束**，租约当场就该收（2026-10-11 用户报障：首页把一台机的
@@ -383,8 +399,10 @@ class PushWorkers:
             for wid, w in self._extra.items():
                 if wid in self._removed:
                     continue
-                merged[wid] = {**w, **{k: v for k, v in merged.get(wid, {}).items()
-                                       if k in _KEEP_ON_RELOAD}}
+                merged[wid] = {
+                    **w,
+                    **{k: v for k, v in merged.get(wid, {}).items() if k in _KEEP_ON_RELOAD},
+                }
         return list(merged.values())
 
     def last_ping_at(self) -> float:
@@ -554,7 +572,7 @@ def run_tick_loop(
     stop: threading.Event,
     wake: threading.Event,
     poll_sec: float,
-    tick: Callable[[], Any],
+    tick: Callable[..., dict],
     log: Callable[[str], None],
 ) -> None:
     """后台派发器的标准节拍（**唯一实现**：GPU 派发器与离线派发器共用）。
@@ -573,7 +591,59 @@ def run_tick_loop(
         wake.clear()
 
 
-class PushDispatcher:
+def start_tick_thread(
+    rt: runtime.Runtime,
+    *,
+    stop: threading.Event,
+    wake: threading.Event,
+    poll_sec: float,
+    tick: Callable[..., dict],
+    log: Callable[[str], None],
+) -> threading.Thread:
+    """起一条跑 `run_tick_loop` 的线程（**两家派发器共用**：名字恒为 `<scope>-tick`）。
+
+    GPU 派发器与离线派发器的「起线程」一字不差 —— 抄两份就是等着它们慢慢分叉
+    （一边 `daemon=True`、一边忘了传 `log`）。
+    """
+    return rt.thread(
+        run_tick_loop,
+        name="tick",
+        kwargs={"stop": stop, "wake": wake, "poll_sec": poll_sec, "tick": tick, "log": log},
+        daemon=True,
+    )
+
+
+class TickLoopHost:
+    """「一条 tick 线程」的宿主（GPU 派发器与离线派发器的 `start` **一字不差**）。
+
+    两份同样的 `start` 已经在重用账本里撞成对（2026-11-17，B6 第三批）：与其让它们各自
+    漂（一边忘 `daemon=True`、一边忘了登记），不如把那一份留在基类里。子类只需要提供
+    `_rt` / `_stop` / `_wake` / `poll_sec` / `tick` / `_log` 六个面（名字两边本来就一样）。
+    """
+
+    _rt: runtime.Runtime
+    _stop: threading.Event
+    _wake: threading.Event
+    _thread: threading.Thread | None
+    poll_sec: float
+    tick: Callable[..., dict]
+    _log: Callable[[str], None]
+
+    def start(self) -> None:
+        """起 tick 线程（幂等：已经在跑就什么都不做）。"""
+        if self._thread is not None:
+            return
+        self._thread = start_tick_thread(
+            self._rt,
+            stop=self._stop,
+            wake=self._wake,
+            poll_sec=self.poll_sec,
+            tick=self.tick,
+            log=self._log,
+        )
+
+
+class PushDispatcher(TickLoopHost):
     """hub 中介 push 派发器：按队列顺序推给空闲 worker，超时回落队首换 worker。        一拍（`tick`）做四件事：热重载登记表 → 到点探活 → 挑活挑人 → 起一条 job 线程。
         挑活挑人**全程只用 `_snapshot()` 那一份自有状态读数**（见那里的「为什么」）。
     **每课程 1 主 + N 备份**（§2.9）：课程内的轮次有硬序（轮 N+1 的 init 权重就是轮 N
@@ -639,6 +709,8 @@ class PushDispatcher:
         self._ready_at: dict[str, float] = {}
         self._stop = threading.Event()
         self._wake = threading.Event()
+        #: tick 线程与每份 job 的派发线程都归这里（`hub-push-tick` / `hub-push-<jid>`）。
+        self._rt = runtime.Runtime(scope="hub-push")
         self._thread: threading.Thread | None = None
         self.ticks = 0
         self.pushed = 0
@@ -650,27 +722,9 @@ class PushDispatcher:
         self.slow_result = 0
 
     # ---- 生命周期 ----
-    def start(self) -> None:
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(
-            target=run_tick_loop,
-            kwargs={
-                "stop": self._stop,
-                "wake": self._wake,
-                "poll_sec": self.poll_sec,
-                "tick": self.tick,
-                "log": self._log,
-            },
-            name="hub-push",
-            daemon=True,
-        )
-        self._thread.start()
-
     def stop(self) -> None:
         self._stop.set()
         self._wake.set()
-
 
     # ---- 单拍（可单测：不依赖线程） ----
     def tick(self, *, now: float | None = None, ping: bool | None = None) -> dict:
@@ -678,8 +732,10 @@ class PushDispatcher:
         now = self._now() if now is None else float(now)
         reloaded = self.workers.reload()
         pinged: dict[str, str] = {}
-        due = ping if ping is not None else (
-            now - self.workers.last_ping_at() >= self.workers.ping_sec
+        due = (
+            ping
+            if ping is not None
+            else (now - self.workers.last_ping_at() >= self.workers.ping_sec)
         )
         if due:
             pinged = self.workers.ping_all()
@@ -692,6 +748,15 @@ class PushDispatcher:
             "started": started,
             "inflight": sorted(self._inflight),
         }
+
+    def inflight_records(self) -> list[dict]:
+        """在飞记录的**副本**快照（`tick()["inflight"]` 只有槽位名；观测 / 用例用）。
+
+        与 `_snapshot()` 同一把锁：测试想停在「主副本已派、备份还没派」这一刻，读的必须是
+        派发器自己的同步状态，而不是异步上传的落地计数（满载时会把快慢当先后）。
+        """
+        with self._lock:
+            return [dict(rec) for rec in self._inflight.values()]
 
     def _snapshot(self) -> _TickView:
         """一拍内**唯一**一份派发器自有状态的读数（一次 `self._lock` 取出；`_dispatch` 的入口）。
@@ -762,10 +827,10 @@ class PushDispatcher:
         fn = getattr(self.hub, "job_priority_of", None)
         if fn is None:
             return PRIORITY_HIGHEST  # 老 hub / 测试替身：不知道就按「没人在做」
-        try:
-            return str(fn(jid))
-        except Exception:
-            return PRIORITY_HIGHEST
+        # 无 try：这是**进程内**的本地判据（纯内存，不调网络、不摸盘），它抛出只能是我们的 bug。
+        # 旧宽捕把 bug 读成 `PRIORITY_HIGHEST` = 「没人在做这一份」——于是备份**永不派发**，
+        # 现场表现为「这一课莫名不备份」。抛出由 `run_tick_loop` 的边界接（一行日志 + 下一拍）。
+        return str(fn(jid))
 
     def _backup_target_in(self, view: _TickView, course: str) -> str | None:
         """该课「值得再派一份备份」的那份活的 jid；无 → None（判据全部取自**快照**）。
@@ -877,13 +942,20 @@ class PushDispatcher:
             with self._lock:
                 self._inflight[slot] = rec
             counts[wid] = counts.get(wid, 0) + 1
-            t = threading.Thread(
-                target=self._run_one,
-                args=(course, jid, worker, lease, manifest, jd, rec),
-                name=f"hub-push-{jid[:10]}",
+            self._rt.thread(
+                self._run_one,
+                course,
+                jid,
+                worker,
+                lease,
+                manifest,
+                jd,
+                rec,
+                # 空 jid 不给名字 ⇒ 会被 `Runtime.thread` 拒收（旧代码只是叫 `hub-push-`，
+                # 那不是「有名字」）；这里退化成腿名而不是抛异常。
+                name=jid[:10] or "job",
                 daemon=True,
             )
-            t.start()
             started.append(jid)
         return started
 
@@ -1011,11 +1083,7 @@ class PushDispatcher:
             code_bytes = code_path.read_bytes() if code_path.exists() else None
             ts_path = jd / TS_CODE_NAME
             ts_bytes = ts_path.read_bytes() if ts_path.exists() else None
-            blobs = {
-                n: p.read_bytes()
-                for n in BLOB_NAMES
-                if (p := blob_path(jd, n)).exists()
-            }
+            blobs = {n: p.read_bytes() for n in BLOB_NAMES if (p := blob_path(jd, n)).exists()}
             from remote.push_client import submit_job
 
             rec["state"] = "upload"
@@ -1194,8 +1262,14 @@ class PushDispatcher:
                     log(f"{jid} 结果被拒 409（{why}）——别人已胜，本份丢弃")
                 elif code_ in (400, 403):
                     # 结果本身不合契约：换一台重跑是合理的（不把这份结果投毒进账本）。
-                    self._requeue(jid, lease, wid, f"结果入账被拒 HTTP {code_}: {why}",
-                                  avoid_worker=True, log=log)
+                    self._requeue(
+                        jid,
+                        lease,
+                        wid,
+                        f"结果入账被拒 HTTP {code_}: {why}",
+                        avoid_worker=True,
+                        log=log,
+                    )
                 else:
                     log(f"{jid} 结果入账返回 HTTP {code_}（{why}）——继续等")
                 return
@@ -1235,8 +1309,14 @@ class PushDispatcher:
                 log(f"{jid} 被 {wid} 判定终局失败：{fb.get('error')}")
                 return
             if status in (409, 428):
-                self._requeue(jid, lease, wid, f"worker 拒绝这份活（HTTP {status}）",
-                              avoid_worker=True, log=log)
+                self._requeue(
+                    jid,
+                    lease,
+                    wid,
+                    f"worker 拒绝这份活（HTTP {status}）",
+                    avoid_worker=True,
+                    log=log,
+                )
                 return
             if status >= 500:
                 self._wait_next_poll(jid)
@@ -1311,8 +1391,13 @@ class PushDispatcher:
         """
         try:
             self.hub.start_job(jid, worker_id=push_worker_id_of(wid))
-        except Exception:
-            pass
+        except Exception as e:
+            # 推模式里 GPU 机从不连 hub，这个大点**只有这里**会打：失败 = 这份 job 的
+            # `computing_at` 永远是空的 ⇒ hub 按「还没开算」判它掉队/再派一份。
+            self._log(
+                f"{jid} @ {push_worker_id_of(wid)}: 开算打点没打上（{e!r}）—— "
+                f"hub 侧 computing_at 为空，会按掉队处理"
+            )
 
     def _cancel_others(self, jid: str, winner: str, *, log: Any = None) -> None:
         """landed（结果已入账）⇒ 给同 job 的其它在途副本推取消帧（§2.4/§2.9）。

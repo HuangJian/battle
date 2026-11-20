@@ -40,6 +40,7 @@ import remote.download as DL
 import remote.http as http_mod
 import remote.job_lifecycle as JL
 import remote.job_round as JR
+import remote.job_shell as SHELL
 import remote.worker as W
 from remote.bulk_sched import BULK_P1_CRITICAL, BULK_P2_PREFETCH, BulkPreemptError
 from remote.prefetch import (
@@ -255,7 +256,8 @@ def test_prune_keeps_a_handed_off_stage_but_sweeps_the_orphans(tmp_path: Path) -
     assert store.prune() >= 2
     assert not (root / JID / "shards.tmp").exists(), "崩溃残留的 .tmp 没清"
     assert not (root / "deadbeefdeadbeef").exists(), "不在册的残壳没清"
-    assert Path(store._handoff[JID]).is_dir(), "交棒的那份被 prune 扫掉了（搬入会失败）"
+    handoff = store.handoff_path(JID)
+    assert handoff is not None and handoff.is_dir(), "交棒的那份被 prune 扫掉了（搬入会失败）"
 
 
 def test_unpack_failure_falls_back_to_bytes_without_raising(tmp_path: Path) -> None:
@@ -1042,7 +1044,10 @@ def test_a_handed_off_stage_never_eats_the_cached_result(
     (staged / "w0").mkdir(parents=True)
     (staged / "w0" / "manifest.json").write_text("{}", encoding="utf-8")
 
-    monkeypatch.setattr(W, "validate_result", lambda *_a, **_k: None)
+    # 2026-11-18（长函数第三十五刀）：`_result.json` 的复用判据搬进
+    # `remote.job_shell.precheck_job` ⇒ 拦截点随之搬到该模块（patch `W.validate_result`
+    # 自本刀起是**空操作**——判据仍是同一条：复用路径不下载、不吃缓存）。
+    monkeypatch.setattr(SHELL, "validate_result", lambda *_a, **_k: None)
     monkeypatch.setattr(DL, "download_payload", lambda *_a, **_k: pytest.fail("复用路径不该下载"))
     got = W.run_job(
         "http://hub",

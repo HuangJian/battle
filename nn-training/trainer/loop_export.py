@@ -46,16 +46,30 @@ from __future__ import annotations
 
 import hashlib
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import common.distribution
 from common.log import log
+from common.paths import REPO_ROOT
 from common.proc import run_capture
 from common.protocol import RUN_MAX_ITERS_HARD_CAP
 from remote import weights_standard
 from worker.archive import backup_weights
 from worker.modes import _MODE_BACKUP_PREFIX
+
+
+@dataclass(frozen=True)
+class TsCodeView:
+    """TS 运行时 zip 的**进程内缓存读数**（`_ensure_ts_code` 懒建的结果）。
+
+    `sha256 == ""` 就是「还没建」——那枚空串是 `_ensure_ts_code` 自己的「无需重建」标记，
+    所以读数不另造一个 `built: bool`（两个字段说是同一件事时，迟早会不一致）。
+    """
+
+    sha256: str
+    zip_path: Path | None
 
 
 class TrainingExport:
@@ -81,6 +95,14 @@ class TrainingExport:
     #: 兄弟混入的方法（混入常态：在组合实例上解析）——声明类型，理由同 `trainer/loop_volume.py`。
     _remote_ppo: Any
 
+    def ts_code_view(self) -> TsCodeView:
+        """本簇懒建缓存的公开读数（用例 / 诊断共用；不触发打包、不写任何东西）。"""
+        zp = getattr(self, "_ts_code_zip_path", None)
+        return TsCodeView(
+            sha256=str(getattr(self, "_ts_code_sha256", "") or ""),
+            zip_path=None if zp is None else Path(zp),
+        )
+
     def _ensure_ts_code(self, job_root: str, *, log: Any) -> None:
         """M3：打包 rollout 用的 TS 运行时 zip（一次，缓存在 self 上）。
 
@@ -98,7 +120,7 @@ class TrainingExport:
             return
         from remote.code_snapshot import published_ts_code_zip
 
-        repo_root = Path(__file__).resolve().parents[2]  # nn-training/trainer/x.py -> 仓根
+        repo_root = REPO_ROOT  # 仓根单源：`common/paths.py`
         zp, sha, _from_snapshot = published_ts_code_zip(
             job_root, repo_root=repo_root, log=lambda m: log(f"[run_rl] {m}")
         )
@@ -116,7 +138,7 @@ class TrainingExport:
         cached = str(getattr(self, "_replay_converter_path", "") or "")
         if cached and Path(cached).exists():
             return cached, str(getattr(self, "_replay_converter_sha256", "") or "")
-        repo_root = Path(__file__).resolve().parents[2]
+        repo_root = REPO_ROOT
         out_dir = Path(self._traj_root) / ".cache" / "replay_converter"
         out_dir.mkdir(parents=True, exist_ok=True)
         out = out_dir / "replay-to-shard.node.js"

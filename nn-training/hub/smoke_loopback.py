@@ -34,21 +34,29 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent  # nn-training/
 REPO = ROOT.parent  # git 根
 sys.path.insert(0, str(ROOT))
+import common.runtime
 from biz.reward_library import METRICS_VERSION
 from common.cli import house_parser, run_main
+from common.logutil import tag_logger
 from common.platform_utils import POPEN_NO_WINDOW, rmtree_best_effort
 from common.protocol import find_payload
 from common.schema import BOARD, OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM  # 合成语料形状随 schema
 from hub.server import _JobStore, make_server
 from remote.hub_client import (
+    PublishSpec,
     git_head,
     iter_shard_dirs,
+    mark_job_completed,
     pack_code_zip,
     publish_job,
     verify_and_land,
     wait_job,
 )
 from worker.config import load_course
+
+#: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。迁移前是手拼
+#: `[{time.strftime('%H:%M:%S')}] [smoke] {msg}` 的 `print(..., flush=True)`（输出不变）。
+_log = tag_logger("smoke", lambda: time)
 
 # ------------------------------------------------------------------ shard 合成
 
@@ -122,7 +130,8 @@ def _write_synthetic_shard(
 # ------------------------------------------------------------------ 主流程
 
 
-def main() -> int:
+def _smoke_parser():
+    """`main` 的 argv 定义表（自 `main` 原样搬出；描述 / 默认值 / help 逐字保留）。"""
     ap = house_parser(description="remote PPO loopback smoke (M0d/M1)")
     ap.add_argument("--work", default="tmp/remote-smoke", help="冒烟工作目录（仓库内，gitignore）")
     ap.add_argument("--token", default="smoke-token")
@@ -134,9 +143,92 @@ def main() -> int:
         default=2,
         help="迭代轮数（M2 需 ≥2：第 2 轮起 opt blob 应缓存命中，up_bytes 应显著下降）",
     )
-    args = ap.parse_args()
+    return ap
 
-    import numpy as np  # noqa: F401 — 确保 import 顺序稳定
+
+def _check_round_wire(
+    rd: int, m: dict, store, jid: str, result: dict, work: Path
+) -> int:
+    """轮级计量对账 + M2 blob 命中断言（自 `main` 原样搬出）；返回 hub.sent 字节。"""
+    payload_path = find_payload(work / "jobs" / jid)
+    published_bytes = payload_path.stat().st_size if payload_path else 0
+    hub_wire = store.wire_stats(jid)
+    _ww = result.get("wire")
+    worker_wire: dict = _ww if isinstance(_ww, dict) else {}
+    up_bytes = int(hub_wire.get("sent_bytes") or 0)
+    _log(
+        f"it{rd} wire: published={published_bytes} hub.sent={up_bytes} "
+        f"hub.recv={hub_wire.get('recv_bytes')} "
+        f"worker.payload={worker_wire.get('payload_bytes')} "
+        f"blob_hits={worker_wire.get('blob_hits')} "
+        f"blob_miss_bytes={worker_wire.get('blob_miss_bytes')} "
+        f"result_bytes={worker_wire.get('result_bytes')}"
+    )
+    assert published_bytes > 0, "发布 payload 不在盘上"
+    assert up_bytes == published_bytes, (
+        f"it{rd} hub sent_bytes={up_bytes} != 发布归档 {published_bytes}（计量不对账）"
+    )
+    assert worker_wire.get("payload_bytes") == published_bytes, (
+        f"it{rd} worker payload_bytes={worker_wire.get('payload_bytes')} != {published_bytes}"
+    )
+    assert (hub_wire.get("recv_bytes") or 0) > 0, "hub 未记录 result 收体字节"
+    if rd == 1:
+        assert not m.get("opt_sha"), "首轮无 ckpt_remote → 不该有 opt blob"
+    else:
+        assert m.get("opt_sha"), f"it{rd} 应带 opt_sha（M2 B3）"
+        # opt-blob-diet（§3.6-4 / §6.1-14）：稳态下 **opt 与 init 两个 blob 都得命中**，
+        # 且权重零下行。`weights_src == "cache"` 就是「产物段缓存了本轮产出的权重」
+        # 那一行的回归闸（评审 F1：缺它就每轮多下 379 KB = 净亏 110 KB/轮）。
+        assert int(worker_wire.get("blob_hits", 0)) >= 2, (
+            f"it{rd} opt+init blob 都应缓存命中（blob_hits={worker_wire.get('blob_hits')}）"
+        )
+        assert worker_wire.get("weights_src") == "cache", (
+            f"it{rd} 权重应走 blob_cache 命中（weights_src={worker_wire.get('weights_src')}）"
+        )
+        assert int(worker_wire.get("weights_bytes") or 0) == 0, (
+            f"it{rd} 稳态不该有权重下行字节（weights_bytes={worker_wire.get('weights_bytes')}）"
+        )
+        assert int(worker_wire.get("blob_miss_bytes") or 0) == 0, (
+            f"it{rd} 稳态不该有 blob 未命中字节（blob_miss_bytes={worker_wire.get('blob_miss_bytes')}）"
+        )
+    return up_bytes
+
+
+def _assert_smoke_final(
+    out_weights: Path,
+    last_wver: str,
+    init_weights_fp: str,
+    traj_dir: Path,
+    rounds: int,
+    work: Path,
+    jid: str,
+) -> None:
+    """末轮产物 + 账本双态断言（自 `main` 原样搬出）。"""
+    assert out_weights.read_bytes(), "落位权重为空"
+    assert last_wver != init_weights_fp, "云 PPO 未改变权重（训练未生效？）"
+    ckpt = traj_dir / f"it{rounds}" / "ppo_ckpt_remote"
+    # opt-blob-diet：`opt.pt` 必有（D5 的 Adam 动量本体）；`model.pt` 只属于**旧形状**
+    # tar——新形状下权重走 `init` blob，它的有无就是形状指纹（§6.1-10）。
+    assert (ckpt / "opt.pt").exists(), "ppo_ckpt_remote 缺 opt.pt（D5 opt 状态未往返）"
+    tar_sib = ckpt.parent / (ckpt.name + ".tar")
+    if tar_sib.exists():
+        import tarfile as _tf
+
+        with _tf.open(tar_sib, "r:*") as _t:
+            _members = set(_t.getnames())
+        assert "opt.pt" in _members, f"回传 tar 缺 opt.pt：{sorted(_members)}"
+        assert "model.pt" not in _members, (
+            f"opt-blob-diet：新形状 tar 不该再有 model.pt（members={sorted(_members)}）"
+        )
+    mark_job_completed(str(work / "training_log.jsonl"), jid)  # 幂等：不双写
+    ledger = (work / "training_log.jsonl").read_text(encoding="utf-8")
+    assert ledger.count("job_pending") == rounds and ledger.count("job_completed") == rounds, (
+        f"账本双态异常：pending={ledger.count('job_pending')} completed={ledger.count('job_completed')}"
+    )
+
+
+def main() -> int:
+    args = _smoke_parser().parse_args()
 
     work = REPO / args.work  # 2026-09-08 双 tmp 统一：锚定仓库根 tmp/，不用 ROOT(nn-training)/tmp
     if work.exists():
@@ -144,7 +236,7 @@ def main() -> int:
     work.mkdir(parents=True)
 
     def log(msg: str) -> None:
-        print(f"[{time.strftime('%H:%M:%S')}] [smoke] {msg}", flush=True)
+        _log(f"{msg}")
 
     # ---- 0) 课程 + course_fp（D14：sha256 of 课程文件字节） ----
     course_path = ROOT / "curricula" / "p4-onset.jsonc"
@@ -181,10 +273,10 @@ def main() -> int:
     store = _JobStore(work / "jobs", work / "training_log.jsonl")
     srv = make_server(store, 0, args.token, host="127.0.0.1")
     port = srv.server_address[1]
-    import threading
 
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
-    th.start()
+    th = common.runtime.Runtime(scope="smoke-hub").thread(
+        srv.serve_forever, name="server", daemon=True
+    )
     hub_url = f"http://127.0.0.1:{port}"
     log(f"hub-server (fake cloud) on {hub_url}")
 
@@ -196,7 +288,6 @@ def main() -> int:
     code_zip_path = work / "code.zip"
     code_sha256 = pack_code_zip(ROOT, code_zip_path, log=log)
     out_weights = work / "weights.json"
-    from remote.hub_client import mark_job_completed
 
     worker_env = dict(os.environ)
     worker_env["PYTHONPATH"] = str(ROOT) + os.pathsep + worker_env.get("PYTHONPATH", "")
@@ -233,34 +324,36 @@ def main() -> int:
         assert shard_dirs_r, f"it{rd} 无 shard"
         init_path = str(out_weights) if rd > 1 else str(init_w)
         m = publish_job(
-            job_root=work / "jobs",
-            jsonl_path=str(work / "training_log.jsonl"),
-            run_id="smoke-loopback",
-            it=rd,
-            traj_dir=str(traj_dir),
-            shard_dirs=shard_dirs_r,
-            init_weights_path=init_path,
-            ckpt_remote_dir=str(prev_ckpt) if prev_ckpt else None,
-            commit=commit,
-            code_sha256=code_sha256,
-            code_zip_path=code_zip_path,
-            course=course_bytes.decode("utf-8"),
-            course_fp=course_fp,
-            reward_formula=course.reward.formula,
-            formula_hash=course.reward_spec().identity(),
-            metrics_version=METRICS_VERSION,
-            gamma=float(course.gamma),
-            lam=float(course.lam),
-            mode="per-tick",
-            epochs=args.epochs,
-            mb=512,
-            lr=float(course.lr),
-            kl_coef=0.0,
-            kl_cap=None,
-            adv_norm="auto",
-            shuffle=True,
-            schedule_raw=course.ppo_schedule_dicts(),
-            slim=True,
+            PublishSpec(
+                job_root=work / "jobs",
+                jsonl_path=str(work / "training_log.jsonl"),
+                run_id="smoke-loopback",
+                it=rd,
+                traj_dir=str(traj_dir),
+                shard_dirs=shard_dirs_r,
+                init_weights_path=init_path,
+                ckpt_remote_dir=str(prev_ckpt) if prev_ckpt else None,
+                commit=commit,
+                code_sha256=code_sha256,
+                code_zip_path=code_zip_path,
+                course=course_bytes.decode("utf-8"),
+                course_fp=course_fp,
+                reward_formula=course.reward.formula,
+                formula_hash=course.reward_spec().identity(),
+                metrics_version=METRICS_VERSION,
+                gamma=float(course.gamma),
+                lam=float(course.lam),
+                mode="per-tick",
+                epochs=args.epochs,
+                mb=512,
+                lr=float(course.lr),
+                kl_coef=0.0,
+                kl_cap=None,
+                adv_norm="auto",
+                shuffle=True,
+                schedule_raw=course.ppo_schedule_dicts(),
+                slim=True,
+            ),
             log=log,
         )
         jid = m["job_id"]
@@ -292,72 +385,12 @@ def main() -> int:
         last_result = result
 
         # M0 计量对账 + M2 blob 命中（hub 实测 == 发布归档 == worker 实测）
-        payload_path = find_payload(work / "jobs" / jid)
-        published_bytes = payload_path.stat().st_size if payload_path else 0
-        hub_wire = store.wire_stats(jid)
-        _ww = result.get("wire")
-        worker_wire: dict = _ww if isinstance(_ww, dict) else {}
-        up_bytes = int(hub_wire.get("sent_bytes") or 0)
+        up_bytes = _check_round_wire(rd, m, store, jid, result, work)
         up_hist.append(up_bytes)
-        log(
-            f"it{rd} wire: published={published_bytes} hub.sent={up_bytes} "
-            f"hub.recv={hub_wire.get('recv_bytes')} "
-            f"worker.payload={worker_wire.get('payload_bytes')} "
-            f"blob_hits={worker_wire.get('blob_hits')} "
-            f"blob_miss_bytes={worker_wire.get('blob_miss_bytes')} "
-            f"result_bytes={worker_wire.get('result_bytes')}"
-        )
-        assert published_bytes > 0, "发布 payload 不在盘上"
-        assert up_bytes == published_bytes, (
-            f"it{rd} hub sent_bytes={up_bytes} != 发布归档 {published_bytes}（计量不对账）"
-        )
-        assert worker_wire.get("payload_bytes") == published_bytes, (
-            f"it{rd} worker payload_bytes={worker_wire.get('payload_bytes')} != {published_bytes}"
-        )
-        assert (hub_wire.get("recv_bytes") or 0) > 0, "hub 未记录 result 收体字节"
-        if rd == 1:
-            assert not m.get("opt_sha"), "首轮无 ckpt_remote → 不该有 opt blob"
-        else:
-            assert m.get("opt_sha"), f"it{rd} 应带 opt_sha（M2 B3）"
-            # opt-blob-diet（§3.6-4 / §6.1-14）：稳态下 **opt 与 init 两个 blob 都得命中**，
-            # 且权重零下行。`weights_src == "cache"` 就是「产物段缓存了本轮产出的权重」
-            # 那一行的回归闸（评审 F1：缺它就每轮多下 379 KB = 净亏 110 KB/轮）。
-            assert int(worker_wire.get("blob_hits", 0)) >= 2, (
-                f"it{rd} opt+init blob 都应缓存命中（blob_hits={worker_wire.get('blob_hits')}）"
-            )
-            assert worker_wire.get("weights_src") == "cache", (
-                f"it{rd} 权重应走 blob_cache 命中（weights_src={worker_wire.get('weights_src')}）"
-            )
-            assert int(worker_wire.get("weights_bytes") or 0) == 0, (
-                f"it{rd} 稳态不该有权重下行字节（weights_bytes={worker_wire.get('weights_bytes')}）"
-            )
-            assert int(worker_wire.get("blob_miss_bytes") or 0) == 0, (
-                f"it{rd} 稳态不该有 blob 未命中字节（blob_miss_bytes={worker_wire.get('blob_miss_bytes')}）"
-            )
         last_wver = hashlib.sha256(out_weights.read_bytes()).hexdigest()
 
     # ---- 7) 断言（末轮产物 + 账本双态）----
-    assert out_weights.read_bytes(), "落位权重为空"
-    assert last_wver != init_weights_fp, "云 PPO 未改变权重（训练未生效？）"
-    ckpt = traj_dir / f"it{rounds}" / "ppo_ckpt_remote"
-    # opt-blob-diet：`opt.pt` 必有（D5 的 Adam 动量本体）；`model.pt` 只属于**旧形状**
-    # tar——新形状下权重走 `init` blob，它的有无就是形状指纹（§6.1-10）。
-    assert (ckpt / "opt.pt").exists(), "ppo_ckpt_remote 缺 opt.pt（D5 opt 状态未往返）"
-    tar_sib = ckpt.parent / (ckpt.name + ".tar")
-    if tar_sib.exists():
-        import tarfile as _tf
-
-        with _tf.open(tar_sib, "r:*") as _t:
-            _members = set(_t.getnames())
-        assert "opt.pt" in _members, f"回传 tar 缺 opt.pt：{sorted(_members)}"
-        assert "model.pt" not in _members, (
-            f"opt-blob-diet：新形状 tar 不该再有 model.pt（members={sorted(_members)}）"
-        )
-    mark_job_completed(str(work / "training_log.jsonl"), jid)  # 幂等：不双写
-    ledger = (work / "training_log.jsonl").read_text(encoding="utf-8")
-    assert ledger.count("job_pending") == rounds and ledger.count("job_completed") == rounds, (
-        f"账本双态异常：pending={ledger.count('job_pending')} completed={ledger.count('job_completed')}"
-    )
+    _assert_smoke_final(out_weights, last_wver, init_weights_fp, traj_dir, rounds, work, jid)
 
     agg = last_result.get("agg", {})
     log(

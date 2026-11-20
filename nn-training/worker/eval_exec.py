@@ -17,6 +17,9 @@ from dataclasses import dataclass
 from typing import Any
 
 import common.distribution
+import common.task_client
+import common.weights_client
+from common import runtime
 from worker.eval_arbiter import LOCAL_NODE, EvalRound, Grant, eval_arbiter
 
 
@@ -44,6 +47,9 @@ class EvalExecutors:
         # 本机腿 `local:active=2/slots=2/ok=True` 却 30s 零局；单跑同实例所以恒绿）。
         self._arb_fixed = arbiter
         self._lock = threading.Lock()
+        #: 每个槽位的线程都归这里（`eval-exec-<key>-<i>`）：节点池会**伸缩**，登记表只留活着的
+        #: （`Runtime.thread` 起新线程时顺手丢掉已退出的）；谁等它们仍由 `close_pools` 的预算定。
+        self._rt = runtime.Runtime(scope="eval-exec")
         self._pools: dict[str, list[_Slot]] = {}
         # 每个 owner（一轮 eval）对节点的期望线程数；同节点取 max，轮收工时释放。
         self._wants: dict[str, dict[int | None, int]] = {}
@@ -88,8 +94,12 @@ class EvalExecutors:
             add = max(0, target_n - len(pool))
             for _ in range(add):
                 stop = threading.Event()
-                t = threading.Thread(
-                    target=target, args=(key, stop), daemon=True, name=name
+                # ⚠ 顺序是契约（`start=False`）：**先挂进池子再开跑**。反过来的话，一个已经能领牌
+                # 的 worker 在池里还看不见，`_resize_locked` 会当成「池子空」再孵一条同节点线程 ——
+                # 同一节点两条 worker，公平发牌（`test_two_eval_rounds_share_dispatch_round_robin`
+                # 的 A,B,A,B）在满载时会退化成 A,A,B,B（2026-11-17 实测 3/10 次）。
+                t = self._rt.thread(
+                    target, key, stop, daemon=True, name=f"{name}-{len(pool)}", start=False
                 )
                 pool.append(_Slot(t, stop))
                 t.start()
@@ -97,9 +107,7 @@ class EvalExecutors:
         finally:
             self._lock.release()
 
-    def ensure_node(
-        self, nd: dict[str, Any], want: int, owner: Any | None = None
-    ) -> int:
+    def ensure_node(self, nd: dict[str, Any], want: int, owner: Any | None = None) -> int:
         nid = str(nd["id"])
         return self._ensure(nid, want, self._node_loop, f"eval-{nid}", owner)
 
@@ -144,10 +152,7 @@ class EvalExecutors:
     def node_alive_for(self, rnd: EvalRound) -> bool:
         """本机改派判据：该轮还有**可路由**节点且它的池子还有能领牌的线程。"""
         now = time.time()
-        return any(
-            rnd.node_routable(nid, now) and self.active(nid) > 0
-            for nid in rnd.node_ids()
-        )
+        return any(rnd.node_routable(nid, now) and self.active(nid) > 0 for nid in rnd.node_ids())
 
     def close_pools(self) -> None:
         with self._lock:
@@ -157,6 +162,8 @@ class EvalExecutors:
                     slot.stop.set()
             self._pools.clear()
             self._wants.clear()
+        # 登记表跟着清（线程靠 `stop` 自己退；这里不等它们 —— 调用点可能在仲裁锁里）。
+        self._rt.join_threads(0.0)
 
     # —— 线程循环 ——
 
@@ -179,7 +186,9 @@ class EvalExecutors:
             try:
                 self._execute_node(grant)
             except Exception as e:  # 单局异常不得杀死整条腿（旧 worker 同样兜底）
-                self._log_round(grant.round, f"[eval] exec error (ignored): {type(e).__name__}: {e}")
+                self._log_round(
+                    grant.round, f"[eval] exec error (ignored): {type(e).__name__}: {e}"
+                )
                 grant.round.settle_task(
                     grant,
                     ok=False,
@@ -200,7 +209,9 @@ class EvalExecutors:
             try:
                 self._execute_local(grant)
             except Exception as e:
-                self._log_round(grant.round, f"[eval] local exec error (ignored): {type(e).__name__}: {e}")
+                self._log_round(
+                    grant.round, f"[eval] local exec error (ignored): {type(e).__name__}: {e}"
+                )
                 grant.round.settle_task(
                     grant,
                     ok=False,
@@ -239,31 +250,41 @@ class EvalExecutors:
             from worker.config import args_rollout_overrides, stage_json_for_args
 
             _ov = args_rollout_overrides(rnd.args)
-            manifest, _files = common.distribution.fetch_task(
-                nd["url"],
-                nd["key"],
-                iter_id=rnd.eval_iter_id,
-                wver=rnd.wver,
-                stage=task[0],
-                seed=task[1],
-                max_ticks=rnd.args.max_ticks,
-                difficulty=rnd.args.difficulty,
-                timeout=rnd.task_timeout,
-                mode="eval",
-                kind=rnd.weights_kind,
-                course_fp=rnd.course_fp,
-                stage_json=stage_json_for_args(rnd.args, task[0]) or "",
-                decision_events=bool(getattr(rnd.args, "decision_events", False)),
-                decision_k=int(getattr(rnd.args, "decision_k", 10)),
-                skip_steel_only_shots=bool(getattr(rnd.args, "skip_steel_only_shots", False)),
-                opening_connect=bool(getattr(rnd.args, "opening_connect", False)),
-                break_bricks_on_path=bool(getattr(rnd.args, "break_bricks_on_path", False)),
-                suppress_useless_fire=bool(getattr(rnd.args, "suppress_useless_fire", False)),
-                suppress_lead_miss_fire=bool(getattr(rnd.args, "suppress_lead_miss_fire", False)),
-                lives_override=int(_ov["lives_override"]) if "lives_override" in _ov else None,
-                player_level=int(_ov["player_level"]) if "player_level" in _ov else None,
+            manifest, _files = common.task_client.fetch_task(
+                common.task_client.FetchTaskSpec(
+                    url=nd["url"],
+                    auth_key=nd["key"],
+                    iter_id=rnd.eval_iter_id,
+                    wver=rnd.wver,
+                    stage=task[0],
+                    seed=task[1],
+                    max_ticks=rnd.args.max_ticks,
+                    difficulty=rnd.args.difficulty,
+                    timeout=rnd.task_timeout,
+                    mode="eval",
+                    kind=rnd.weights_kind,
+                    course_fp=rnd.course_fp,
+                    stage_json=stage_json_for_args(rnd.args, task[0]) or "",
+                    decision_events=bool(getattr(rnd.args, "decision_events", False)),
+                    decision_k=int(getattr(rnd.args, "decision_k", 10)),
+                    skip_steel_only_shots=bool(
+                        getattr(rnd.args, "skip_steel_only_shots", False)
+                    ),
+                    opening_connect=bool(getattr(rnd.args, "opening_connect", False)),
+                    break_bricks_on_path=bool(
+                        getattr(rnd.args, "break_bricks_on_path", False)
+                    ),
+                    suppress_useless_fire=bool(
+                        getattr(rnd.args, "suppress_useless_fire", False)
+                    ),
+                    suppress_lead_miss_fire=bool(
+                        getattr(rnd.args, "suppress_lead_miss_fire", False)
+                    ),
+                    lives_override=int(_ov["lives_override"]) if "lives_override" in _ov else None,
+                    player_level=int(_ov["player_level"]) if "player_level" in _ov else None,
+                )
             )
-            why = common.distribution.validate_eval_result(manifest, rnd.wver)
+            why = common.task_client.validate_eval_result(manifest, rnd.wver)
             if why:
                 raise common.distribution.DistError(0, why)
             ok = True
@@ -273,7 +294,7 @@ class EvalExecutors:
             if (
                 isinstance(e, common.distribution.DistError)
                 and e.status == 409
-                and common.distribution.refresh_weights(
+                and common.weights_client.refresh_weights(
                     nd,
                     iter_id=rnd.eval_iter_id,
                     wver=rnd.wver,
@@ -285,11 +306,9 @@ class EvalExecutors:
                 )
             ):
                 transient = True
-            task_lost = common.distribution.is_task_lost_error(e)
+            task_lost = common.task_client.is_task_lost_error(e)
             if task_lost:
-                common.distribution.forget_weights_node(
-                    nd["id"], kind=rnd.weights_kind
-                )
+                common.distribution.forget_weights_node(nd["id"], kind=rnd.weights_kind)
                 transient = True
         wall_sec = round(time.time() - grant.started, 3)
         accepted = rnd.settle_task(
@@ -340,7 +359,7 @@ class EvalExecutors:
                 suppress_useless_fire=bool(getattr(rnd.args, "suppress_useless_fire", False)),
                 suppress_lead_miss_fire=bool(getattr(rnd.args, "suppress_lead_miss_fire", False)),
             )
-            why = common.distribution.validate_eval_result(manifest, rnd.wver)
+            why = common.task_client.validate_eval_result(manifest, rnd.wver)
             if why:
                 raise common.distribution.DistError(0, why)
             ok = True

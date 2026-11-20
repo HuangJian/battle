@@ -48,6 +48,8 @@ from common.protocol import (
     is_content_sha,
 )
 from remote import download as download_mod
+from remote import job_shell as shell_mod
+from remote import train_common as train_common_mod
 from remote import train_core as train_core_mod
 from remote import worker as worker_mod
 from remote.worker_server import missing_blobs
@@ -229,11 +231,13 @@ def test_run_job_refusal_and_order_anchors() -> None:
     为什么用锚点而不是跑一遍：那两条路径要真 torch + 真 job（本文件刻意免 torch）。
     锚点钉住的是「口径」——错误消息必须能读出试过哪些源（事故现场靠它定位）。
     """
-    # 这条口径**跨两份源码**：作业壳（`worker`：顺序锚点 + kind=iter 的提前拒绝）与训练核
-    # （`train_core`：restore 段的 W4 分流 + 两处拒绝）。拼起来读，才是「一条口径」的全貌。
+    # 这条口径**跨三份源码**：宿主 `run_job`（顺序锚点）+ 作业壳 `remote/job_shell.py`
+    # （kind=iter 的提前拒绝；2026-11-18 第三十五刀从这里搬出）+ 训练核
+    # （restore 段的 W4 分流 + 两处拒绝）。拼起来读，才是「一条口径」的全貌。
     src = Path(worker_mod.__file__).read_text(encoding="utf-8")
+    shell = Path(shell_mod.__file__).read_text(encoding="utf-8")
     core = Path(train_core_mod.__file__).read_text(encoding="utf-8")
-    both = src + core
+    both = src + shell + core
     assert "四源皆尽" in both
     # 五处拒绝都带源清单：① kind=iter/run 的提前拒绝；② 有 tar 但无 model.pt；③ 无 tar 首轮
     # （②③ 在 torch 核与 paddle 核各一份——两条核共用同一口径，2026-10-27 Paddle 双生）
@@ -247,12 +251,13 @@ def test_run_job_refusal_and_order_anchors() -> None:
     # 顺序约束（§3.3）：解析必须在 rollout 调用点之前（2026-11-11 起这一轮由
     # `remote.offline_greedy.collect_round` 起头——内部就是 `run_iter_rollout` + greedy 波，
     # 所以锚点跟着移动，断言强度不变：解析仍必须早于本轮的起点）。
-    assert src.index("init_w, weights_src, weights_wire_bytes = _resolve_weights(") < src.index(
-        "iter_info = collect_round("
+    # 2026-11-18：三个调用点都成了 `run_job` 里的相位调用，锚点改对**调用顺序**（同一个文件）。
+    assert src.index("resolve_job_weights(st)") < src.index(
+        "run_iter_phase(st"
     ), "权重解析必须早于本轮 rollout（collect_round）"
     # 且必须落在 BC 的 early-return 之后（哨兵 "bc" 不许进五源解析）
-    assert src.index("return _run_bc_job(") < src.index(
-        "init_w, weights_src, weights_wire_bytes = _resolve_weights("
+    assert src.index("bc_or_none(st") < src.index(
+        "resolve_job_weights(st)"
     ), "权重解析必须晚于 BC 分叉"
 
 
@@ -307,7 +312,8 @@ def test_weights_produced_lands_in_blob_cache(tmp_path: Path) -> None:
     assert sha == _sha(raw)
     assert (blob_root / sha).read_bytes() == raw
     # 二次调用幂等（同 sha 已存在直接返回，不重写）
-    assert download_mod._cache_produced_weights(blob_root, raw, _log) == sha
+    again = download_mod._cache_produced_weights(blob_root, raw, _log)
+    assert again == sha
 
     # 下一轮：hub 用同一份字节的 sha 发 init blob ⇒ 命中、零字节
     jd = _job(tmp_path, "next_job")
@@ -323,6 +329,8 @@ def test_run_job_product_section_caches_weights() -> None:
     `worker.py` 会变成「读一份不再有这段的文件」，断言只会静默空过。
     """
     src = Path(train_core_mod.__file__).read_text(encoding="utf-8")
+    # 回传段（`_core_result`）已下沉到 train_common；一条口径跨两份源码，拼起来读。
+    src += Path(train_common_mod.__file__).read_text(encoding="utf-8")
     assert "_cache_produced_weights(blob_root, wj_raw, log)" in src
     # 且 opt tar 那一行仍在（两者同规、同一理由）
     assert "hashlib.sha256(opt_tar_raw).hexdigest()" in src

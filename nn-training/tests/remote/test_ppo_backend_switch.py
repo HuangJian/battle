@@ -29,6 +29,7 @@ import pytest
 from common.protocol import ProtocolError, normalize_manifest
 from remote import bc_job as bc
 from remote import download as DL
+from remote import job_shell as SHELL
 from remote import worker
 
 JID = "j" * 16
@@ -221,8 +222,10 @@ def _drive_ppo_to_core(
     """把 kind=ppo 推到训练核调用点（下载/落地/权重解析全部打桩），返回调用关键字。"""
     job_dir = tmp_path / JID
     job_dir.mkdir(parents=True, exist_ok=True)
+    # 2026-11-18（长函数第三十五刀）：物料落地 / 权重五源搬进 `remote.job_shell`
+    # ⇒ 三个拦截点随之搬到该模块（打在 `worker` 上自本刀起是空操作）。
     monkeypatch.setattr(
-        worker,
+        SHELL,
         "_ensure_payload",
         # 用**真的** `PayloadLanded`（不是手搓的替身）：真类型加了字段，这个替身不会跟着变
         # ⇒ 替身与真类型脱节是**静默**的漂移源（上一轮给 `PayloadLanded` 加 `pruned_dirs`
@@ -237,7 +240,7 @@ def _drive_ppo_to_core(
         ),
     )
     monkeypatch.setattr(
-        worker,
+        SHELL,
         "_ensure_code",
         lambda *_a, **_k: SimpleNamespace(
             code_root=job_dir / "code",
@@ -245,15 +248,15 @@ def _drive_ppo_to_core(
             blob_root=tmp_path / "blob",
         ),
     )
-    monkeypatch.setattr(worker, "_resolve_weights", lambda **_k: (None, "payload", 0))
+    monkeypatch.setattr(SHELL, "_resolve_weights", lambda **_k: (None, "payload", 0))
     monkeypatch.setattr(worker, "_ACTIVE_CODE_SHA", None)
     monkeypatch.setattr(worker, "paddle_cuda_available", probe)
     monkeypatch.setattr(worker, "validate_result", lambda *_a, **_k: None)
     monkeypatch.setattr(worker, "_persist_result", lambda *_a, **_k: None)
     seen: dict = {}
 
-    def _core(*_a: object, **kw: object) -> tuple[dict, None]:
-        seen.update(kw)
+    def _core(_base: object, _token: object, spec: object, **_kw: object) -> tuple[dict, None]:
+        seen.update(device=spec.device, backend=spec.backend)  # type: ignore[attr-defined]
         return {"job_id": JID}, None
 
     monkeypatch.setattr(worker, "run_training_core", _core)

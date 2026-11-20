@@ -39,11 +39,22 @@ rollout/eval 的主链路）· 用第三方隧道服务（把 1/3 算力押在�
 
 from __future__ import annotations
 
+import base64
 import threading
 import time
 import uuid
 from collections import deque
-from typing import Any
+from collections.abc import Callable, Mapping
+from typing import TypedDict
+
+
+#: 一条待办请求（`poll` 的应答；字段与节点侧 `RelayRequest` 同形）。
+class PollCall(TypedDict):
+    rid: str
+    method: str
+    path: str
+    headers: dict[str, str]
+    body_b64: str
 
 #: 待办队列上限：节点掉线时调用方仍会不断入队 —— 满了丢最老的（有界内存，不静默增长）。
 PENDING_MAX = 32
@@ -100,13 +111,15 @@ class _Call:
         path: str,
         headers: dict[str, str],
         body: bytes,
+        *,
+        at: float,
     ) -> None:
         self.rid = rid
         self.method = method
         self.path = path
         self.headers = headers
         self.body = body
-        self.at = time.time()
+        self.at = at
         self.event = threading.Event()
         self.status = 0
         self.rheaders: dict[str, str] = {}
@@ -131,7 +144,7 @@ class _Box:
         "timeouts",
     )
 
-    def __init__(self, lock: Any) -> None:
+    def __init__(self, lock: threading.Lock) -> None:
         self.pending: deque[_Call] = deque()
         self.calls: dict[str, _Call] = {}
         self.cond = threading.Condition(lock)
@@ -140,10 +153,10 @@ class _Box:
         self.dropped = 0
         self.timeouts = 0
         self.late = 0
-        #: 最近一次 `_poll` 的墙钟时刻（0 = 从没轮询过）—— 通道心跳的唯一真相。
+        #: 最近一次 `_poll` 的单调钟时刻（0 = 从没轮询过）—— 通道心跳的唯一真相。
         self.last_poll = 0.0
         #: 最近一次**成功**的 `/v1/ping` 载荷（供通道活着时直接顶答）。
-        self.ping: dict[str, Any] | None = None
+        self.ping: dict[str, object] | None = None
         self.ping_at = 0.0
         #: 后台刷新单飞行标记（同一台节点同时只允许一个，见 `claim_ping_refresh`）。
         self.ping_busy = False
@@ -156,11 +169,24 @@ class NodeRelay:
     （`Condition.wait`）；所有状态都过同一把 `_lock`，没有第二份真相。
     """
 
-    def __init__(self, *, pending_max: int = PENDING_MAX, ttl_sec: float = CALL_TTL_SEC) -> None:
+    def __init__(
+        self,
+        *,
+        pending_max: int = PENDING_MAX,
+        ttl_sec: float = CALL_TTL_SEC,
+        monotonic: Callable[[], float] | None = None,
+    ) -> None:
         self._lock = threading.Lock()
         self._boxes: dict[str, _Box] = {}
         self._pending_max = max(1, int(pending_max))
         self._ttl = max(1.0, float(ttl_sec))
+        #: 时长/过期的**唯一钟**（P1-6：可注入的单调钟）。缺省 = `time.monotonic`；
+        #: 用例注一个假钟即可精确操作 TTL，不必写私有字段，也不再受墙钟跳变影响。
+        self._monotonic = monotonic or time.monotonic
+
+    def now(self) -> float:
+        """当前单调钟读数（与 TTL/年龄判据同一来源；观测与用例读它）。"""
+        return self._monotonic()
 
     # ---------------------------------------------------------------- 内部
 
@@ -173,16 +199,17 @@ class NodeRelay:
 
     # ---------------------------------------------------------------- 节点侧
 
-    def poll(self, node: str, wait_sec: float = POLL_WAIT_DEFAULT) -> dict[str, Any] | None:
+    def poll(self, node: str, wait_sec: float = POLL_WAIT_DEFAULT) -> PollCall | None:
         """取一条待办；`wait_sec` 内没有就返回 None（节点据此继续下一轮长轮询）。"""
-        deadline = time.time() + max(0.0, float(wait_sec))
+        started = self._monotonic()
+        deadline = started + max(0.0, float(wait_sec))
         with self._lock:
             box = self._box_locked(node)
             box.polls += 1
-            box.last_poll = time.time()  # 通道心跳：探活/超时判定都读它
+            box.last_poll = started  # 通道心跳：探活/超时判定都读它
         while True:
+            now = self._monotonic()
             with self._lock:
-                now = time.time()
                 while box.pending:
                     call = box.pending.popleft()
                     if now - call.at > self._ttl:  # 调用方早走了：这条不再发
@@ -197,7 +224,7 @@ class NodeRelay:
                         "headers": dict(call.headers),
                         "body_b64": _b64(call.body),
                     }
-            remain = deadline - time.time()
+            remain = deadline - self._monotonic()
             if remain <= 0:
                 return None
             with box.cond:
@@ -240,7 +267,7 @@ class NodeRelay:
     ) -> tuple[int, dict[str, str], bytes]:
         """把一条请求挂给节点并等回执；超时抛 `RelayTimeoutError`。"""
         rid = uuid.uuid4().hex
-        call = _Call(rid, method, path, dict(headers or {}), body or b"")
+        call = _Call(rid, method, path, dict(headers or {}), body or b"", at=self._monotonic())
         with self._lock:
             box = self._box_locked(node)
             if len(box.pending) >= self._pending_max:
@@ -268,30 +295,33 @@ class NodeRelay:
         发起的 —— 所以「心跳新鲜」= 节点进程在跑且出网正常，与「这一拍能不能拿到往返」
         （受隧道抖动影响）是两件事。
         """
+        now = self._monotonic()
         with self._lock:
             box = self._boxes.get(node)
             if box is None or not box.last_poll:
                 return None
-            return max(0.0, time.time() - box.last_poll)
+            return max(0.0, now - box.last_poll)
 
-    def ping_snapshot(self, node: str) -> tuple[dict[str, Any] | None, float]:
+    def ping_snapshot(self, node: str) -> tuple[dict[str, object] | None, float]:
         """最近一次**成功**的 `/v1/ping` 载荷 + 它的年龄（秒）；没有载荷 ⇒ `(None, 0.0)`。"""
+        now = self._monotonic()
         with self._lock:
             box = self._boxes.get(node)
             if box is None or box.ping is None:
                 return None, 0.0
-            return dict(box.ping), max(0.0, time.time() - box.ping_at)
+            return dict(box.ping), max(0.0, now - box.ping_at)
 
-    def note_ping(self, node: str, body: dict[str, Any]) -> None:
+    def note_ping(self, node: str, body: Mapping[str, object]) -> None:
         """记一条成功的 ping 载荷（真调用与后台刷新都走这里）。
 
         **不动单飞行标记**：那个开关的所有权属于认领者（`claim_ping_refresh` 的返回者），
         由它自己在 `release_ping_refresh` 放回 —— 两条路都去放会互相把对方的重入权打开。
         """
+        now = self._monotonic()
         with self._lock:
             box = self._box_locked(node)
             box.ping = dict(body)
-            box.ping_at = time.time()
+            box.ping_at = now
 
     def claim_ping_refresh(self, node: str) -> bool:
         """单飞行：同一台节点同时只允许一个后台刷新（`True` = 你负责去刷）。
@@ -329,8 +359,6 @@ class NodeRelay:
 
 
 def _b64(raw: bytes) -> str:
-    import base64
-
     return base64.b64encode(raw or b"").decode("ascii")
 
 

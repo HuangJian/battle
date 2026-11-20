@@ -363,7 +363,9 @@ def test_p1_is_not_gated_by_p1_waiting():
     t.start()
     t.join(5)
     assert got, "P1 被 p1_waiting 门禁挡住了（这道门禁只能作用于 P2）"
-    assert s._p1_waiting == 1, "白盒置入的计数被吃掉了（增/减不对称）"
+    # 问观测面（`stats()`，控制台与长跑告警读的就是它），不伸手进计数器：
+    # 「置入 1 回来仍是 1」证明 P1 进出对称，不多不少（G5 第十四批）。
+    assert s.stats()["p1_waiting"] == 1, "白盒置入的计数被吃掉了（增/减不对称）"
 
 
 def test_p1_not_preempted_by_control():
@@ -413,15 +415,22 @@ def test_yield_stops_at_budget_even_if_control_stays():
     # 故删除：契约由 `spent`（循环记账）+ `yield_count`（步数）确定性钉住。
 
 
-def test_no_yield_when_no_control():
-    """没有控制面在途 ⇒ 让路点零成本（不能让每次分片都睡一格）。"""
+def test_no_yield_when_no_control(monkeypatch):
+    """没有控制面在途 ⇒ 让路点零成本（不能让每次分片都睡一格）。
+
+    判据是**一格都没睡**，不是耗时（2026-11-15）：`spent == 0.0` 是循环自己的记账，再把
+    `time.sleep` 换成炸弹 —— 真睡了就当场失败。`elapsed < 0.05s` 那种写法在满载机器上会红
+    （OS 把一次空调用跑成 60ms 是常事），而它想表达的语义与机器快慢无关。
+    """
+    import remote.bulk_sched as bs_mod
+
+    monkeypatch.setattr(
+        bs_mod.time, "sleep", lambda *_a, **_k: pytest.fail("无控制面时让路点不许睡")
+    )
     s = _sched()
     with s.slot(BULK_P1_CRITICAL, label="payload") as tok:
-        t0 = time.time()
         spent = s.pause_if_needed(tok)
     assert spent == 0.0
-    # timing-ok: 契约上界（无控制面 ⇒ 让路点零成本，上界即契约）
-    assert time.time() - t0 < 0.05
 
 
 # ─────────── 3b. 条件让路 / 按传输累计上限（2026-10-02，plan/transfer-residual W1/W1b） ───────────
@@ -473,7 +482,8 @@ def test_yield_once_control_has_waited_past_the_threshold():
 
 def test_always_mode_keeps_the_old_semantics():
     """`always` 档（after=0.0）逐字回旧语义：控制面一在途就让；映射在 `worker._bulk_yield_params`。"""
-    assert W._bulk_yield_params("always") == (0.0, None)
+    params = W._bulk_yield_params("always")
+    assert params == (0.0, None)
     clk = _FakeClock()
     s = _sched(yield_budget_sec=0.02, yield_step_sec=0.01, clock=clk)
     with s.slot(BULK_P1_CRITICAL, label="payload") as tok, s.control(label="/jobs/x/status"):
@@ -500,7 +510,8 @@ def test_never_mode_never_yields():
 
 def test_auto_mode_mapping_matches_the_plan():
     """`auto` = 条件让路 + 单条传输累计 5s（W1/W1b 的目标态）。"""
-    assert W._bulk_yield_params("auto") == (1.0, 5.0)
+    params = W._bulk_yield_params("auto")
+    assert params == (1.0, 5.0)
 
 
 def test_yield_total_is_capped_per_transfer():

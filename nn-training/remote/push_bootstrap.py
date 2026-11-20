@@ -61,14 +61,15 @@ def start_cloudflared(
     """启动 quick tunnel；返回 (proc, url|None)。"""
     import re
 
-    log_f = open(log_path, "w", encoding="utf-8")
+    # 子进程继承 stdout 句柄；父进程随后关闭自己那一份（cloudflared 可能跑很久）。
     # 127.0.0.1 字面量：`localhost` 会被 cloudflared（Go）解析成 `::1` 后只拨 IPv6 回环，
     # 而本机服务绑 IPv4 ⇒ origin 恒 connection refused ⇒ CF 回 502（2026-11-19 现场）。
-    proc = subprocess.Popen(
-        [cf_bin, "tunnel", "--url", f"http://127.0.0.1:{port}", "--logfile", str(log_path)],
-        stdout=log_f,
-        stderr=subprocess.STDOUT,
-    )
+    with open(log_path, "w", encoding="utf-8") as log_f:
+        proc = subprocess.Popen(
+            [cf_bin, "tunnel", "--url", f"http://127.0.0.1:{port}", "--logfile", str(log_path)],
+            stdout=log_f,
+            stderr=subprocess.STDOUT,
+        )
     t0 = time.time()
     url = None
     while time.time() - t0 < timeout_s:
@@ -174,7 +175,7 @@ def close_bootstrap_server(srv: ThreadingHTTPServer) -> None:
     （"端口 ... 已被占用——拒绝启动（禁止双监听）"）⇒ `wait_ping` 30s 超时 ⇒
     `SystemExit: -1` ⇒ cell 挂、隧道下线 ⇒ 控制台侧只看到「推送成功但状态查询 530」，
     而真因藏在 `<work>/serve.log` 里，极难定位。
-    本仓库其它处（`tests/common/test_upgrade.py`、`tests/common/test_port_guard.py`、
+    本仓库其它处（`tests/remote/test_node_upgrade.py`、`tests/common/test_port_guard.py`、
     `e2e/test_push_mode_integration.py`）都是 shutdown+server_close 成对写，此处曾遗漏。
     """
     srv.shutdown()
@@ -202,7 +203,6 @@ def spawn_full_worker_server(
     """
     env = dict(os.environ)
     env["PYTHONPATH"] = str(code_dir) + os.pathsep + env.get("PYTHONPATH", "")
-    log_f = open(log_path, "w", encoding="utf-8")
     argv = [
         sys.executable,
         "-u",
@@ -222,12 +222,13 @@ def spawn_full_worker_server(
     hub = str(hub_url or "").strip().rstrip("/")
     if hub:
         argv += ["--hub-url", hub]
-    return subprocess.Popen(
-        argv,
-        stdout=log_f,
-        stderr=subprocess.STDOUT,
-        env=env,
-    )
+    with open(log_path, "w", encoding="utf-8") as log_f:
+        return subprocess.Popen(
+            argv,
+            stdout=log_f,
+            stderr=subprocess.STDOUT,
+            env=env,
+        )
 
 
 def wait_ping(port: int, token: str, timeout_s: float = 30.0) -> bool:
@@ -244,6 +245,8 @@ def wait_ping(port: int, token: str, timeout_s: float = 30.0) -> bool:
                 if r.status == 200:
                     return True
         except Exception:
+            # 契约静默（G9 冻结，非旧债）：每 0.5s 一次的 /ping 探测 ——「这次不通」是
+            # 下一次迭代的输入，不是错误；结论由 wait_ping 的返回值表达。
             pass
         time.sleep(0.5)
     return False
@@ -330,7 +333,9 @@ def run_push_first(cfg: dict[str, Any], log: Callable[[str], None]) -> int:
     )
     import threading
 
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    threading.Thread(
+        target=srv.serve_forever, name="push-bootstrap", daemon=True
+    ).start()
     log(f"push bootstrap 就绪 :{port}（无 hub /code 依赖）")
     cf_bin = ensure_cloudflared(log, str(cfg.get("cloudflared_path") or ""))
     cf_proc, cf_url = start_cloudflared(cf_bin, port, work / "cloudflared.log")

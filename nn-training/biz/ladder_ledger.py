@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from common.cli import house_parser, run_main
+from common.logutil import log_line
 from common.platform_utils import force_utf8_stdio
 
 NN_ROOT = Path(__file__).resolve().parent.parent
@@ -54,7 +55,7 @@ class LadderLedger:
             data: dict[str, Any] = json.loads(self.path.read_text(encoding="utf-8"))
             return data
         except (OSError, ValueError) as e:
-            print(f"[{time.strftime('%H:%M:%S')}] [ladder-ledger] 读取失败（{e}）——返回空台账，写入前请先人工核对")
+            log_line("ladder-ledger", f"读取失败（{e}）——返回空台账，写入前请先人工核对")
             return {"version": 1, "levels": {}}
 
     def save(self, data: dict[str, Any]) -> None:
@@ -128,12 +129,12 @@ def main() -> None:
         if not args.text:
             raise SystemExit("hypothesis 需要 --text（无假说不开工，hy R2.3）")
         led.mark(args.level, hypothesis=args.text, status="ppo")
-        print(f"[{time.strftime('%H:%M:%S')}] [ladder-ledger] {args.level}: hypothesis 已登记")
+        log_line("ladder-ledger", f"{args.level}: hypothesis 已登记")
     elif args.cmd == "escalate":
         if not args.text:
             raise SystemExit("escalate 需要 --text（卡门原因，供用户复盘）")
         led.mark(args.level, status="stuck", escalate_reason=args.text)
-        print(f"[{time.strftime('%H:%M:%S')}] [ladder-ledger] {args.level}: stuck（{args.text}）——上报用户")
+        log_line("ladder-ledger", f"{args.level}: stuck（{args.text}）——上报用户")
     elif args.cmd == "graduate":
         # D11 人工放行护栏：tier 边界（c07/c14/c20）**必须**显式 --ack 才能毕业。
         # 旧实现按「level ∈ TIER_BOUNDARIES」自动置 True —— 恰好把唯一需要人工确认的
@@ -149,15 +150,16 @@ def main() -> None:
             graduate_weights=args.weights,
             tier_boundary_ack=bool(args.ack),
         )
-        print(
-            f"[ladder-ledger] {args.level}: graduated（weights={args.weights or '见 lastGate'}"
-            f"{'，tier 边界已人工放行' if args.ack else ''}）"
+        log_line(
+            "ladder-ledger",
+            f"{args.level}: graduated（weights={args.weights or '见 lastGate'}"
+            f"{'，tier 边界已人工放行' if args.ack else ''}）",
         )
     elif args.cmd == "disk":
         if not args.traj:
             raise SystemExit("disk 需要 --traj")
         total = led.disk_bytes(args.level, args.traj)
-        print(f"[{time.strftime('%H:%M:%S')}] [ladder-ledger] {args.level}: disk {total / 1e6:.1f} MB")
+        log_line("ladder-ledger", f"{args.level}: disk {total / 1e6:.1f} MB")
 
 
 if __name__ == "__main__":

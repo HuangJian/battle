@@ -1,7 +1,13 @@
 """batch_plan — 批语料规划 + 判据 / 门（B 层纯函数面）。
 
 2026-09-25（S25/B1）从 `trainer/batch_eval.py` **纯搬**出来（成员逐字节对账见
-`tests/trainer/test_batch_plan_split.py`）。它只回答两个问题：
+`tests/trainer/test_batch_plan_split.py`）。
+
+★ 2026-11-14：**从 `trainer/` 搬到 `biz/`**。它一直是纯逻辑（除 `common.*` 外零依赖），
+之前之所以能住在「只有编排」的 `trainer/` 里，靠的是 `from trainer.dispatch_queue import mm`
+这条 re-export 伪造出来的依赖边（详见 DECISIONS §2026-11-14-retire-dispatch-queue-reexport-surface
+与 §2026-11-14-batch-plan-belongs-to-biz）。搬完依赖链归零：`common.proc.version_mm` 直接取。
+它只回答两个问题：
 
   ① **这一批要跑哪些 unit** —— ladder 批读 `dashboard/src/evalboard/ladder.json`，
      verdict 批读课程关卡文件的 `stages[]`（`plan_units` / `plan_verdict_units` /
@@ -23,11 +29,11 @@ import json
 import os
 from pathlib import Path
 
+import common.codehash
 import common.distribution
 from common.jsonc import load as jsonc_load
-from trainer.dispatch_queue import mm
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from common.paths import REPO_ROOT
+from common.proc import version_mm as mm
 
 LADDER_JSON = REPO_ROOT / "dashboard" / "src" / "evalboard" / "ladder.json"
 #: 判决语料注册表（P2，2026-09-19「中方案」）：课程关卡文件 + 池外 seed 段 + 多 ckpt。
@@ -58,7 +64,7 @@ def node_gate_reason(ping: dict, local_bun: str, code_hash_local: str) -> str | 
     """节点门判据（纯函数，单测覆盖）：None = 可用，否则拒派原因。
 
     门 = evalSupport ∧ stageJsonSupport ∧ bun major.minor 一致 ∧ codeHash 一致
-    （codeHash 与 rollout 门同源，实现在 `common.distribution.check_code_hash`）。
+    （codeHash 与 rollout 门同源，实现在 `common.codehash.check_code_hash`）。
     """
     if not ping.get("evalSupport"):
         return "lacks evalSupport"
@@ -67,7 +73,7 @@ def node_gate_reason(ping: dict, local_bun: str, code_hash_local: str) -> str | 
     node_ver = str(ping.get("bunVersion", "?"))
     if mm(node_ver) != mm(local_bun):
         return f"bun version mismatch (node {node_ver} vs local {local_bun})"
-    return common.distribution.check_code_hash(ping, code_hash_local)
+    return common.codehash.check_code_hash(ping, code_hash_local)
 
 
 def node_supports_decision_events(ping: dict) -> bool:

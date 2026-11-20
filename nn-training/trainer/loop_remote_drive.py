@@ -237,7 +237,7 @@ class TrainingRemoteDrive(TrainingRemoteFail, TrainingRemoteJob):
     def _maybe_consume_redo(self, sess: RemotePpoJob, it: int) -> bool:
         """M3：消费「重发本轮 PPO」意图（幂等）。返回 True = 已撤单（调用方丢 `ctx.remote`）。
 
-        意图文件 `tmp/<course>/redo-ppo.json`（控制台写；形状/回执契约见 `trainer/loop_control.py`）：
+        意图文件 `tmp/<course>/redo-ppo.json`（控制台写；形状/回执契约见 `worker/loop_control.py`）：
         命中且 `it` 与当前轮一致（或未限定）⇒ 撤当前 sess、写回执；**按 `at` 去重**——同一份
         意图只执行一次（否则 `_remote_ppo_step` 每拍都会再撤一次刚重发的活，变成无限重发）。
         坏文件只喊一次（按错误文案去重），宁可不动作。
@@ -247,7 +247,7 @@ class TrainingRemoteDrive(TrainingRemoteFail, TrainingRemoteJob):
         traj = getattr(self, "_traj_root", None)
         if traj is None:
             return False
-        from trainer.loop_control import consume_redo, write_redo_applied
+        from worker.loop_control import consume_redo, write_redo_applied
 
         intent, err = consume_redo(traj, it)
         if err:

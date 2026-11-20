@@ -53,47 +53,35 @@ def _ledger_event(raw: bytes) -> dict | None:
     return None
 
 
-class LedgerMixin:
-    """域混入：见模块头部。"""
+class Ledger:
+    """账本协作者：job 目录 · jsonl 双态账本 · 池/在飞两视图（B7-P4b）。
 
-    # ---- 由组合类 / 兄弟簇提供（混入只见 `self`，实现不在本模块）----
-    #: 全 store **唯一**的那把锁（`_AuthGuard.__init__` 里建；见 `hub_server._JobStore` 头部）
-    _lock: Lock
-    #: 时钟（`now_fn` 注入点，住 `_AuthGuard`）
-    _now: Any
-    #: 构造身份：组合类 `__init__` 直接声明（`_HubQueue` 与测试都直接读它们）
-    job_root: Path
-    jsonl_path: Path
-    #: 兄弟簇 `store_leases` 拥有的状态（本簇的 `claimable_job_ids` 要用它判「别处在做」）
-    _leases: dict[str, float]
-    #: 租约**持有人身份**（同住 `store_leases`）：`inflight_job_ids(not_held_by=…)` 要按它
-    #: 排掉「请求者自己正在跑的那份」（只读，**不**走 `lease_worker()`——那个会顺手回收死租约，
-    #: 而 peek 面按 R1-4 是无副作用的）。
-    _lease_workers: dict[str, str]
-    _frozen: dict[str, dict]
-    #: 兄弟簇 `store_scheduling` 的「有人承诺在跑」痕迹：撤单（`cancel_unsettled_jobs`）
-    #: 要跳过它们（在飞的不撤），并顺手撕掉以让拿旧 epoch 来的认领被 `demoted` 拒。
-    _claimed: dict[str, dict]
-    _computing: dict[str, dict]
-    _drop_commitment_locked: Any
-    #: 兄弟簇 `store_leases` 的**唯一**死活判据的布尔视图（过期 ∨ 孤儿，§52）——池过滤与
-    #: 认领闸必须共用同一把尺子：只在过滤里加判据会做出「池里看得见、claim 说 held」
-    #: 那种更难查的形状。取布尔而不是状态字符串，是因为本簇拿不到那边的常量
-    #: （混入之间不许 import）。
-    _lease_held: Any
-    #: 归属缓存与它自己的锁（同住 `store_leases`）：`publish` 要随 manifest 一起失效它。
-    #: 用独立锁的理由见那里（`job_role` 会被持 `_lock` 的临界区调到，共锁会自锁）。
-    _roles: dict[str, str]
-    #: job → kind 缓存（★M1b：`publish` 要和 `_roles` 一起失效它 —— Q5 的 bc 豁免读它）。
-    _kinds: dict[str, str]
-    #: job → corpus_fmt 缓存（2026-11-16：`publish` 也要一起失效它 —— claim 能力闸读它）。
-    _fmts: dict[str, str]
-    _role_lock: Lock
-    #: ★M5：BC 进度锚（同住 `store_leases`）——重发 = 新一轮，`publish` 要把它一并作废
-    #: （旧一轮的 epoch 时间戳会把新租约当场判成「在推进」）。
-    _last_progress: dict[str, float]
+    从原 `LedgerMixin` 整簇切出。锁 / 时钟由组合根注入同一份；`sched` 与 `leases`
+    是两个邻居协作者（撤单要撕承诺、池过滤要问租约死活）。`leases` 在组合根的构造
+    顺序里晚于本类，所以先置 None、建好后回填——这是唯一的两相引用。
+    """
 
-    def _init_ledger(self) -> None:
+    def __init__(
+        self,
+        *,
+        lock: Lock,
+        clock: Any,
+        job_root: Path,
+        jsonl_path: Path,
+        sched: Any,
+    ) -> None:
+        #: 全 store **唯一**的那把锁（`_AuthGuard.__init__` 里建；组合根注入）
+        self._lock = lock
+        #: 时钟（`now_fn` 注入点；不读组合类的 `_now`）
+        self._clock = clock
+        #: 构造身份（与 `_JobStore` 同源；测试直接读 `_JobStore.job_root`）
+        self.job_root = job_root
+        self.jsonl_path = jsonl_path
+        #: 调度协作者（B7-P1）：撤单要跳过「有人承诺在跑」的两张表，并顺手撕掉痕迹。
+        self.sched = sched
+        #: 租约协作者（B7-P2）：池过滤 / 在飞集 / 熔断判据 / 归属缓存失效都经它。
+        #: 组合根在 LeaseBook 建好后回填（本类先构造：它没有反向依赖）。
+        self.leases: Any = None
         #: 账本增量读缓存（H6）：文件 size -> 已解析事件列表
         self._ledger_cache: tuple[int, list[dict]] = (0, [])
         #: ★ H6 的**另一半**（2026-10-17，plan/hub-server-memory-slim L3）：已解析到的**字节位**。
@@ -111,6 +99,14 @@ class LedgerMixin:
 
     def _job_dir(self, job_id: str) -> Path:
         return self.job_root / job_id
+
+    def ledger_offset(self) -> int:
+        """增量读跟进到账本的第几个字节（只读；诊断 / 用例用，不做任何 IO）。"""
+        return self._ledger_off
+
+    def ledger_rows(self) -> int:
+        """内存里缓存的账本行数（只读；`mem_readout` 的逐课读数）。"""
+        return len(self._ledger_cache[1])
 
     # ---- jsonl 账本（job_pending / job_completed 双态，§3.1/D8） ----
     def _read_ledger(self) -> list[dict]:
@@ -216,7 +212,7 @@ class LedgerMixin:
                 pending.pop(jid, None)
         eligible: list[tuple[str, float]] = []
         for jid, e in pending.items():
-            if jid in self._frozen:
+            if self.leases.is_frozen(jid):
                 # ★ 毒包熔断（§4.1）：认领后零回传满阈值 ⇒ 冻结，不再回池。
                 # 这是**独立于失败标记**的第二状态：重发同 job_id（publish_job）不清它，
                 # 解冻只走人工入口（`unfreeze`）——否则「重发即重试」会把冻结当场抹掉。
@@ -246,8 +242,8 @@ class LedgerMixin:
         超过宽限）也回池（死 worker 回收只管这一条，不管调大 TTL——it24 倒车禁令）。
         已有结果未验收的 job 从池中剔除——首写锁定兜底（hub 重启丢租约时用）。
         """
-        now = self._now()
-        return [jid for jid, _ts in self._unfinished_pending() if not self._lease_held(jid, now)]
+        now = self._clock()
+        return [jid for jid, _ts in self._unfinished_pending() if not self.leases._lease_held(jid, now)]
 
     def inflight_job_ids(self, *, not_held_by: str = "") -> list[str]:
         """**在飞集** = 「未完成」（同一个 `_unfinished_pending`）∧ **有活租约**，按发布序。
@@ -263,12 +259,12 @@ class LedgerMixin:
         `not_held_by`：把「**持有人就是请求者自己**」的那份排掉——空闲 worker 上一条 job 的结果
         可能还在异步回传（`ResultUploader`），把同一份活当备份再领一遍 = 同一张卡跑两遍。
         """
-        now = self._now()
+        now = self._clock()
         out: list[str] = []
         for jid, _ts in self._unfinished_pending():
-            if not self._lease_held(jid, now):
+            if not self.leases._lease_held(jid, now):
                 continue
-            if not_held_by and self._lease_workers.get(jid, "") == not_held_by:
+            if not_held_by and self.leases.lease_holder(jid) == not_held_by:
                 continue
             out.append(jid)
         return out
@@ -281,12 +277,21 @@ class LedgerMixin:
         判据（谁可撤）留在各自的入口，落账动作只有这一份（2026-10-11，W7）。
         """
         self._append_ledger(
-            {"event": "job_cancelled", "job_id": job_id, "reason": reason, "ts": self._now()}
+            {"event": "job_cancelled", "job_id": job_id, "reason": reason, "ts": self._clock()}
         )
         # 撕掉残留承诺并 bump epoch：拿着作废前 epoch 来的认领会被 `_claim_locked`
         # 判 `demoted` 拒掉，不必等它自己发现池子空了。
-        self._drop_commitment_locked(job_id)
+        self.sched._drop_commitment_locked(job_id)
         self._cancelled.add(job_id)
+
+    def is_cancelled(self, job_id: str) -> bool:
+        """该 job 现在**在进程内即时闸里**吗（`cancel_*` 写入、`claim` 对账后放行）。
+
+        只读查询：**不按账本对账**——真闸是 `claimable_job_ids()`（账本净态）加 `claim` 的
+        净态检查；这里回答的是「秒级窗口那道闸此刻还挡不挡它」（观测 / 用例用）。
+        """
+        with self._lock:
+            return job_id in self._cancelled
 
     def cancel_unsettled_jobs(self, *, reason: str = "mode-switch") -> list[str]:
         """把**未被认领**的可领取 job 作废（写 `job_cancelled` 账本事件）。返回被撤的 jid。
@@ -306,7 +311,7 @@ class LedgerMixin:
         升级为账本——`job_cancelled` 的读面本来就这么设计的，见 `_read_ledger`）。
         """
         with self._lock:
-            claimed = set(self._claimed) | set(self._computing)
+            claimed = set(self.sched._claimed) | set(self.sched._computing)
             drop = [jid for jid in self.claimable_job_ids() if jid not in claimed]
             for jid in drop:
                 self._cancel_job_locked(jid, reason=reason)
@@ -327,7 +332,7 @@ class LedgerMixin:
         「哪一个」的寻址，不是第二份口径（评审 F4）。
         """
         with self._lock:
-            claimed = set(self._claimed) | set(self._computing)
+            claimed = set(self.sched._claimed) | set(self.sched._computing)
             if job_id in claimed:
                 return {
                     "job_id": job_id,
@@ -352,16 +357,10 @@ class LedgerMixin:
         幂等：同 job_id 已发布 → 覆盖 payload 但**不重复**追加 job_pending
         （账本按 job_id 去重——重启后重发布不产生双 pending）。
         """
-        # 归属缓存随 manifest 一起失效（2026-09-25）：重发覆盖了 manifest ⇒ 缓存里的旧
-        # 归属就是**谎报**（`job_role` 用它判「这份活归谁」，而它是租约闸的输入）。发布路径
-        # 只此一处，放在这里就不需要「同 job_id 的 role 永不变」这条假设。
-        with self._role_lock:
-            self._roles.pop(job_id, None)
-            self._kinds.pop(job_id, None)  # 同理由：新的 manifest 可能换了 kind（Q5 的闸读它）
-            self._fmts.pop(job_id, None)  # 同理由：新的 manifest 可能换了 corpus_fmt
-        # ★M5：重发 = 新一轮跑（进度锚同属旧一轮）⇒ 一并作废，否则重发后一个旧 epoch
-        # 时间戳会把新租约当场判成「在推进」。
-        self._last_progress.pop(job_id, None)
+        # 归属缓存 / kind / 进度锚随 manifest 一起失效（2026-09-25；★M5 同因）：
+        # 重发覆盖了 manifest ⇒ 旧归属是**谎报**，旧进度锚会把新租约当场判成「在推进」。
+        # 失效动作的唯一实现住租约协作者（那些表的主人）；发布路径只此一处。
+        self.leases.forget_job(job_id)
         with self._lock:
             jd = self._job_dir(job_id)
             jd.mkdir(parents=True, exist_ok=True)
@@ -380,7 +379,7 @@ class LedgerMixin:
                         "job_id": job_id,
                         "runId": manifest.get("runId"),
                         "it": manifest.get("it"),
-                        "ts": self._now(),
+                        "ts": self._clock(),
                     }
                 )
                 self._cancelled.discard(job_id)

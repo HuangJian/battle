@@ -19,7 +19,7 @@
 
 from __future__ import annotations
 
-from hub.auth import _AuthGuard
+from hub.auth import AuthState, _AuthGuard
 from hub.queue_peer import QueuePeer
 from hub.store import _JobStore
 
@@ -65,4 +65,9 @@ class QueueAuthMixin(_AuthGuard, QueuePeer):
         if self._solo is not None:
             return self._solo.blocked_remaining(ip)
         return _AuthGuard.blocked_remaining(self, ip)
+
+    def auth_state(self) -> AuthState:
+        if self._solo is not None:
+            return self._solo.auth_state()
+        return _AuthGuard.auth_state(self)
 

@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import time
@@ -39,8 +40,38 @@ import zipfile
 from pathlib import Path
 from threading import Lock
 
+from common.hold_window import hold_progress_stale_sec
+from common.logutil import tag_logger
 from common.net_http import urlopen as _net_urlopen
 from common.protocol import PLAN_NAME
+
+#: 「这个包读不出来」的异常集（P0-7 第十七批，2026-11-18）。
+#:
+#: 这三个函数（`pack_index_part_sha` / `pack_index_meta` / `pack_seg_end_kind`）是**观测面**
+#: （清单 + 段末判据），坏包不许变成 500 —— 所以它们必须捕。但捕什么要写清楚：以前的
+#: `except Exception` 把本模块自己的 bug（`AttributeError`：索引 JSON 从对象变成列表、
+#: `TypeError`：字段改名）也读成「包不可读」，现场表现是「这个包没有计划 / 没有 sha」，
+#: 而包其实是好的 —— 云机拿到了空的段末判据，回退成旧行为。
+_PACK_UNREADABLE: tuple[type[BaseException], ...] = (
+    OSError,  # 不在 / 没权限
+    zipfile.BadZipFile,  # 截断 / 根本不是 zip
+    EOFError,  # 截断的 ZIP 流（zipfile 有时抛这个而不是 BadZipFile）
+    KeyError,  # 包里没有那个成员
+    NotImplementedError,  # 压缩方式不认识（外部工具打的包）
+    ValueError,  # 索引/计划 JSON 坏了，或非 UTF-8
+)
+
+#: 打控制台的传输失败集（与 `remote.http.NET_ERRORS` 同口径，但**不经由 remote** 取证
+#: —— hub→remote 是向上 import，层账不允许）；多一个 `ValueError`：坏 URL / 坏头。
+_CONSOLE_NET_ERRORS: tuple[type[BaseException], ...] = (
+    OSError,  # URLError / HTTPError / 连接被拒 / 超时
+    http.client.HTTPException,
+    ValueError,
+)
+
+#: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+_log = tag_logger("hub-server", lambda: time)
+
 
 # ── 任务包新鲜度门（plan/offline-rerun-local-first §8，2026-09-24）────────────────
 #
@@ -84,26 +115,13 @@ TASK_STATE_COMPLETED = "completed"
 # 本块只做第三件：**活性只认进度信号**，心跳（60s）只续租约 TTL —— 2026-10-05/06 的
 # 「假活」（心跳活、进度死）正是把心跳当活性算出来的（docs/nn/remote-transport.md §68）。
 #
-# 为什么与 `AUTO_HANDOFF_PENDING_SEC` 分开写：两者都是 900s 是**巧合**（一个是导包窗口、
-# 一个是接管活性），调一个会误伤另一个 —— plan §1.5.2-P0-1 明令**禁止合并常量**。
-#: 接管后连续静默（无任何进度信号）超过它 ⇒ 判「掉线」（惰性判据：谁读谁算，不养清理线程）。
-#: env 覆盖 `BCITY_HOLD_PROGRESS_STALE_SEC`（e2e/单测调秒级）。**唯一**的离线段静默阈值
-#: （★M4b：旧的 180s `OFFLINE_LEASE_STALE_SEC` 与 `lease_verdict` 的 beat_at 退回腿已删）。
-HOLD_PROGRESS_STALE_SEC = 900.0
+# 窗口本体与 env 旋钮 2026-11-16 下沉 `common/hold_window.py`：训练侧（`worker/loop_control`
+# 读控制文件的 `held` 缓存时自判活）用的是**同一把尺子**，它原先靠 `from hub.task_pack import`
+# 拿这个数 ⇒ 一个常量把纯逻辑模块钉成「碰网络的」。这里只留名字给既有调用点。
 #: hub 重启给**盘上恢复的 hold** 的宽限（秒）：把 `last_progress_at`/`touch_at` 抬到 `now - 它`。
 #: 为什么需要：重启时盘上的时间是旧的，而 worker 大概率还活着（它不知道自己「被重启」了）——
 #: 不抬就会把活着的盘判掉线，协作派发与本机 held 会一起解开（plan §1.5.4-P2-2）。
 HOLD_RESTORE_GRACE_SEC = 300.0
-
-
-def hold_progress_stale_sec() -> float:
-    """生效的接管静默阈值（env 覆盖；非法 / 非正数 ⇒ 缺省）。**调用时读 env**（可 monkeypatch）。"""
-    raw = os.environ.get("BCITY_HOLD_PROGRESS_STALE_SEC", "").strip()
-    try:
-        v = float(raw)
-    except ValueError:
-        return HOLD_PROGRESS_STALE_SEC
-    return v if v > 0 else HOLD_PROGRESS_STALE_SEC
 
 
 def hold_progress_at(hold: object) -> float:
@@ -241,8 +259,8 @@ _TASK_PACK_LOCK = Lock()
 
 
 def _hub_log(msg: str) -> None:
-    """hub 侧一行日志（带时刻；与文件里其它 `print` 同形）。"""
-    print(f"[{time.strftime('%H:%M:%S')}] [hub-server] {msg}", flush=True)
+    """hub 侧一行日志（带时刻；格式与时间戳走 `common/logutil`，与 hub 其余入口同源）。"""
+    _log(msg)
 
 
 def _file_sha256(path: Path) -> str:
@@ -296,7 +314,7 @@ def pack_index_part_sha(pack_path: Path, part: str) -> str:
     try:
         with zipfile.ZipFile(pack_path) as zf:
             idx = json.loads(zf.read(TASK_PACK_INDEX_NAME).decode("utf-8"))
-    except Exception:
+    except _PACK_UNREADABLE:
         return ""
     parts = idx.get("parts") if isinstance(idx, dict) else None
     rec = parts.get(part) if isinstance(parts, dict) else None
@@ -319,7 +337,7 @@ def pack_index_meta(pack_path: Path) -> dict:
                 plan = json.loads(zf.read(PLAN_NAME).decode("utf-8"))
             except (KeyError, ValueError):
                 plan = {}
-    except Exception:
+    except _PACK_UNREADABLE:
         return empty
     if not isinstance(idx, dict):
         return empty
@@ -374,7 +392,7 @@ def pack_seg_end_kind(pack_path: Path) -> str:
     try:
         with zipfile.ZipFile(pack_path) as zf:
             plan = json.loads(zf.read(PLAN_NAME).decode("utf-8"))
-    except Exception:
+    except _PACK_UNREADABLE:
         return ""
     if not isinstance(plan, dict):
         return ""
@@ -524,7 +542,7 @@ def trigger_task_bundle_export(course: str, log=_hub_log) -> tuple[bool, str]:
             return False, f"http {e.code}"
         log(f"task-pack {course}: 控制台触发失败 HTTP {e.code}——降级为手动导出")
         return False, f"http {e.code}"
-    except Exception as e:
+    except _CONSOLE_NET_ERRORS as e:
         log(f"task-pack {course}: 控制台不可达（{type(e).__name__}: {e}）——降级为手动导出")
         return False, f"{type(e).__name__}"
     log(f"task-pack {course}: 已触发控制台重导（旧包已作废，窗口期本端点会 404）")
@@ -579,7 +597,7 @@ def console_export_status(
     try:
         with _net_urlopen(req, timeout=timeout) as resp:
             parsed = json.loads(resp.read().decode("utf-8") or "{}")
-    except Exception as e:
+    except _CONSOLE_NET_ERRORS as e:
         log(f"export-status {course}: 控制台不可达/不接受（{type(e).__name__}）——视为不可知")
         return {"unknown": True}
     exporting: bool | None = None
@@ -728,7 +746,7 @@ def trigger_auto_handoff(course: str, log=_hub_log) -> tuple[bool, str]:
             return False, f"http {e.code}"
         log(f"auto-handoff {course}: 控制台触发失败 HTTP {e.code}——降级为手动")
         return False, f"http {e.code}"
-    except Exception as e:
+    except _CONSOLE_NET_ERRORS as e:
         log(f"auto-handoff {course}: 控制台不可达（{type(e).__name__}: {e}）——降级为手动")
         return False, f"{type(e).__name__}"
     log(f"auto-handoff {course}: 已触发控制台（写 rl-config + 导包；完成前云机会等新包）")

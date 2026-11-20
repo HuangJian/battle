@@ -43,6 +43,7 @@ if _ilu.find_spec("common") is None:
 
 import os
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -51,8 +52,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from common.cli import house_parser, run_main
+from common.contracts import ActionSpace, HeadLayout, head_layout
 from common.log_bundle import LogBundle
-from common.schema import FIRE3_DIM, FIRE_DIM, MOVE4_DIM, MOVE_DIM
+from common.schema import FIRE_DIM, MOVE_DIM
 from worker.data.weights_io import save_weights_json
 
 # 转发名：PPO 模型的 arch 驱动构建**只有一份实现**（`worker/models/arch_meta.py`，与 Paddle 双生共用）。
@@ -60,6 +62,7 @@ from worker.models.arch_meta import build_ppo as build_ppo_from_arch
 from worker.models.student import PPOStudent
 
 # 共享 PPO 基础设施（ppo_common.py；行为与旧内联实现逐字节一致，见其模块 doc）。
+from worker.ppo.backend import Backend, StepConfig, StepState, run_step
 from worker.ppo.common import (
     _ppo_load,
     _ppo_save,
@@ -67,13 +70,27 @@ from worker.ppo.common import (
     cat_entropy,
     cat_entropy_per,
     cat_logprob,
-    chunk_episodes,
     demo_index,
-    is_xla,
     log,
     masked_logsoftmax,
-    optimizer_step,
     sync_scalars,
+)
+from worker.ppo.demo import DemoBank
+
+#: `load_episode_from_shard` 是 `worker/backend.py::RolloutBackend` 的成员，由
+#: `trainer/stream.py` 运行期从「本模式的后端模块」上取；engine 自己**不调用**它。
+#: `x as x` = ruff 认的**再导出**形态（无需 `noqa: F401`），而静态契约扫描器只认
+#: `from X import y`（记为 `import:X`）—— `y = X.y` 赋值会变成 `<unresolved>`，
+#: `tests/worker/test_backend_contract_runtime.py` 的双向对账当场红。
+from worker.ppo.np_core import (
+    # 2026-11-16 清账：`compute_gae` / `discover_shards` / `discover_rl_shards` /
+    # `load_episodes_common` / `load_shard` / `load_shard_fields` / `_RL_SHARD_SPEC`
+    # 只剩两个 worker 测试在属性上取，已改成从 np_core 直取，影子删掉。
+    GAMMA,
+    LAM,
+    chunk_episodes,
+    is_xla,
+    optimizer_step,
     xla_delta_str,
     xla_device_speed_probe,
     xla_fingerprint,
@@ -81,28 +98,11 @@ from worker.ppo.common import (
     xla_metrics_delta,
     xla_metrics_snapshot,
 )
-
-# 2026-09-26：trajectory 装载的**家**在 `ppo/np_core.py`（顶栏注释）；此处仅再导出，
-# 访问点不变（`ppo.engine.load_episodes` / `load_shard` / `_rl_shard_spec`）。
-#
-# ★ `compute_gae` / `discover_shards` / `load_episodes_common` / `load_shard_fields`
-#   这四个也**必须留着**：engine 是对外的访问点——`tests/worker/test_ppo_goal.py` /
-#   `test_ppo_intent.py` 用 `import ppo.engine as ppo` 后把 `ppo.compute_gae(...)`
-#   当定长参照。搬走装载块后它们一度被 ruff F401 判成死代码而删掉，门禁当场红：
-#   **「没人 `import` 这个名字」≠「没人在属性上取」**。
-from worker.ppo.np_core import (  # noqa: F401  (re-export：既有调用点不变)
-    _RL_SHARD_SPEC,
-    GAMMA,
-    LAM,
-    compute_gae,
-    discover_rl_shards,
-    discover_shards,
-    load_episode_from_shard,
-    load_episodes,
-    load_episodes_common,
-    load_shard,
-    load_shard_fields,
+from worker.ppo.np_core import load_episode_from_shard as load_episode_from_shard
+from worker.ppo.np_core import (
+    load_episodes as load_episodes,  # 契约成员：backend 面的装载入口（这里不调用，测试按属性取）
 )
+from worker.ppo.rng import PPORng
 from worker.ppo.trainer import (
     aggregate_stats,
     chunk_count,
@@ -153,14 +153,15 @@ def build_ppo(weights_path: str | None) -> PPOStudent:
 
 
 # 2026-09-26：trajectory 装载（shard 发现 / metrics→reward / GAE / 配额；**免 torch**）
-# 已搬进 `ppo/np_core.py`（与 load_episodes_common 同家）——本模块只从那里再导出，
-# 调用点（trainer/stream.py / remote/train_core.py / ppo/bench.py / ppo/__init__ 的便捷名）一行不改。
+# 已搬进 `ppo/np_core.py`。本模块只保留自己调用到的三个名字 + 一条 `RolloutBackend`
+# 契约导出（见顶部 import 处的注释）；其余消费方（stream.py / train_core.py / bench.py /
+# ppo/__init__ 的便捷名）都从 np_core 或包根取。
 
 
 
 # ---------------- PPO update ----------------
-# checkpoint 原语（_pack_np_state/_unpack_np_state/_ppo_save/_ppo_load）与
-# chunk_episodes 由 ppo_common 提供（re-export 见顶部 import），行为逐字节一致。
+# checkpoint 原语（_ppo_save/_ppo_load）与 chunk_episodes 由 ppo_common 提供（re-export
+# 见顶部 import），行为逐字节一致；随机流状态自 2026-11-17 起由 `PPORng` 存（§P1-7）。
 
 
 def _demo_masked_ce(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -250,7 +251,7 @@ def policy_new_rms_of(model: Any) -> torch.Tensor:
         return torch.cat(parts).pow(2).mean().sqrt() if parts else _zero_scalar(model)
 
 
-def _profile_steps(device: Any) -> int:
+def profile_steps(device: Any) -> int:
     """`PPO_PROFILE=1` ⇒ 抓前 N 个梯度步的 CPU/CUDA 剖面；返回采样步数（0 = 关）。
 
     为什么（2026-10-21，真机步耗卡在 ~0.49s/step）：`PPO_CUDA_DIAG` 只给 median/p95，
@@ -279,132 +280,127 @@ def _profile_steps(device: Any) -> int:
     return max(1, min(50, n))
 
 
-def _ref_logprobs(ref_model, e: dict) -> tuple:
-    """冻结 ref 模型在当前 chunk 上的分头 log-softmax（kickstart KL 用）。
+def _torch_backend(device) -> Backend:
+    """torch 侧的算子表（每个钩子与 `engine_paddle` 的同名实现逐式对应）。
 
-    eager 在训练前按 chunk 预计算（`ref_cache`），lazy 在 chunk 首次被取到时现算——
-    两者数值逐位相同（ref 冻结且与训练模型状态无关）。抽成函数是为了让两条路径
-    共用同一份「头数 vs 数据动作空间」校验，避免 lazy 复制一份后漂移。
+    为什么是 lambda 而不是直接塞函数对象：`tests/worker/test_ppo_scalar_sync.py` 会把
+    `eng.sync_scalars` 换成逐项 `.item()` 的旧实现来对账 —— 绑定过早会让那次 A/B 变成
+    「新旧同一条路径」而照样绿（本仓已因「打桩静默失效」翻车三次）。lambda 在**调用时**
+    查模块全局，既有打桩面逐个保留。
+
+    设备句柄（`zeros` / `optimizer_step`）在这里闭包；构建一次、每步复用（§14.1）。
     """
-    _ro = ref_model(e["obs"], e["scalars"], e.get("extra"))
-    _m = e["mask"]
-    _ref_v6 = len(_ro) >= 4
-    _data_v6 = e.get("a_hold") is not None
-    if _ref_v6 != _data_v6:
-        raise ValueError(
-            f"[ppo] kickstart ref 与数据动作空间不同源：ref 返回 {len(_ro)} 个头"
-            f"（{'v6 4/3/2' if _ref_v6 else 'legacy 5/2'}），chunk "
-            f"{'带' if _data_v6 else '不带'} a_hold（"
-            f"{'v6' if _data_v6 else 'legacy'}）——掩码切片会静默错位，拒绝训练"
-            "（ref 权重与 rollout 语料不是同一代）"
-        )
-    if _ref_v6:
-        # v6 掩码布局 [move4 | fire3 | hold2]（student.py 同源）。
-        return (
-            masked_logsoftmax(_ro[0], _m[:, :MOVE4_DIM]),
-            masked_logsoftmax(_ro[1], _m[:, MOVE4_DIM : MOVE4_DIM + FIRE3_DIM]),
-            masked_logsoftmax(_ro[2], _m[:, MOVE4_DIM + FIRE3_DIM :]),
-        )
-    return (
-        masked_logsoftmax(_ro[0], _m[:, :MOVE_DIM]),
-        masked_logsoftmax(_ro[1], _m[:, MOVE_DIM : MOVE_DIM + FIRE_DIM]),
+    return Backend(
+        exp=lambda x: torch.exp(x),
+        clip=lambda x, lo, hi: torch.clamp(x, lo, hi),
+        minimum=lambda a, b: torch.minimum(a, b),
+        mse_loss=lambda a, b: F.mse_loss(a, b),
+        masked_logsoftmax=lambda logits, mask: masked_logsoftmax(logits, mask),
+        cat_logprob=lambda action, logp: cat_logprob(action, logp),
+        cat_entropy=lambda logp: cat_entropy(logp),
+        cat_entropy_per=lambda logp: cat_entropy_per(logp),
+        astype=lambda x, dt: x.to(dt),
+        kl_rows=lambda logp, ref: (logp.exp() * (logp - ref)).sum(dim=-1),
+        approx_kl=lambda lp_old, lp_new: approx_kl_est(lp_old, lp_new),
+        zeros=lambda: torch.zeros((), device=device),
+        demo_masked_ce=lambda logits, target, mask: _demo_masked_ce(logits, target, mask),
+        demo_index=lambda buf, idx: demo_index(buf, idx),
+        zero_grad=lambda opt: opt.zero_grad(),
+        backward=lambda loss: loss.backward(),
+        clip_grad_norm=lambda params, mx: nn.utils.clip_grad_norm_(params, mx),
+        optimizer_step=lambda opt: optimizer_step(opt, device),
+        no_grad=torch.no_grad,
+        sync=lambda values: sync_scalars(values),
+        anchor_pull=lambda model, rho: apply_value_anchor_pull(model, rho),
+        policy_rms=lambda model: policy_new_rms_of(model),
     )
 
 
-def ppo_update(
-    model,
-    opt,
-    chunks,
-    epochs,
-    device,
-    ckpt_path: str | None = None,
-    on_epoch_done=None,
-    kl_coef: float = 0.0,
-    ref_model=None,
-    kickstart_kl: float = 0.0,
-    ent_coef: float | None = None,
-    demo_bank: dict | None = None,
-    demo_bc_coef: float = 0.0,
-    demo_per_mb: int = 0,
-    progress: LogBundle | None = None,
-    progress_head: str = "[ppo] PPO",
-    value_anchor: float = 0.0,
-    lazy: bool = False,
-    target_kl: float = 0.0,
-):
-    """chunks: list of minibatch dicts (obs (B,14,26,26) / scalars (B,24) / ...).
+@dataclass
+class _Diag:
+    """XLA 步耗诊断的累计状态（原 ppo_update 的一组局部变量）。"""
 
-    ckpt_path: 非空则每 epoch 落盘 checkpoint（model/opt/epochs_done/numpy RNG），
-    并支持断点续跑（重启后从已完成 epoch 数继续，minibatch 乱序精确复现）。
-    on_epoch_done(ep_done, model): 每个 epoch 完成后同步回调（双缓冲提前预采的
-    触发点——stream 在 epoch3 完成时把 θ_{N,e3} 存盘 spawn 首波预采，PPO 继续
-    最后一个 epoch；模型在此处即当前 epoch 训练完的状态）。
+    bundle: LogBundle = field(default_factory=lambda: LogBundle(log))
+    prev: dict[str, float] = field(default_factory=dict)
+    by_b: dict[int, dict[str, float]] = field(default_factory=dict)
+    first: int = 12
+    every: int = 16
+    last_at: int = 0
+    wall: float = 0.0
+    compile: float = 0.0
+    uncached: float = 0.0
+    worst: dict[str, float] = field(default_factory=dict)
+    worst_delta: str = ""
+    sig: str = ""
+    compile_dom: int = 0
+    reset: int = 0
+    epoch_series: list[str] = field(default_factory=list)
+    on: bool = False
 
-    kl_coef（plan/rl-training-config.md §8，M1c）：update 期新增形参，默认 0.0
-    （向后兼容，缺省路径数学逐字节不变）。>0 时对每个 minibatch 施加对采样策略
-    （lp_old，即收集策略）的 KL 惩罚 `kl_coef · E[(r−1) − ln r]`——per-tick 的
-    「初始 KL 大、稳定后衰减」由 ppo_schedule 显式传值落地。
 
-    ent_coef（2026-09-11 接线，与 kl_coef 同一路子）：熵正则系数。None = 用模块常量
-    ENT_COEF（0.01，缺省路径数学逐字节不变）；显式给值则 `loss -= ent_coef · entropy`。
-    动机：per-tick 线熵坍缩（唯一学动的 c4-kb1 熵 0.71–0.74，其余四条卡 0.44–0.51）。
+@dataclass
+class _Demo:
+    """demo-bank 的物化结果（关闭时全零，逐字节旧行为）。"""
 
-    ref_model + kickstart_kl（R5§363，BC-anchored kickstart，mirror intent 数学）：
-    ref = BC 冻结快照（调用方 freeze＋eval）；两者就绪时 loss +=
-    kickstart_kl · KL(π_curr ‖ π_BC)，分头 exact-KL（move＋fire 求和，与 entropy
-    口径同构）。任一缺席即零开销恒等（默认路径数学逐字节不变）。
+    on: bool = False
+    t: dict[str, Any] = field(default_factory=dict)
+    n: int = 0
+    idx_dev: torch.Tensor | None = None
+    per_mb: int = 0
+    coef: float = 0.0
 
-    demo_bank + demo_bc_coef + demo_per_mb（demo 混 batch，x20 后续）：
-    demo_bank = {obs (N,16,26,26) u1 / scalars (N,40) f4 / actions (N,2) i64
-    [move,fire] / masks (N,7)}（v5 口径；scalars 维度以 common.schema.SCALAR_DIM 为准）；
-    每 PPO minibatch 步从 bank 均匀抽 demo_per_mb 个样本（np RNG ⇒ ckpt 断点续跑精确
-    复现），loss += demo_bc_coef · CE_move（**fire 头不做 demo BC**：fire 的 mask 语义是
-    「当前打得出去吗」，label 是「有没有按住」，冷却期两者互斥；43744 个可训练 fire
-    样本里 hold 只有 806（1.84%），fire CE 实际只教 release。2026-10-18 评审后的
-    move-only 消融；恢复方式见调用点）。三者任一缺席/非正即关闭，默认路径数学逐字节
-    不变（含额外 stat 键 demo_bc，关闭时恒 0.0）。
 
-    lazy（P3，plan/replay-corpus.plan.md D6）：`chunks` 是 `LazyChunks`（逐 chunk
-    物化 numpy）。此时**不**建 `tensored_chunks` 全量副本，每步 `tensored_batch`
-    现转当前 minibatch 并上卡；ref 缓存改为 chunk 首次使用时现算（ref 冻结，数值
-    逐位相同）。默认 False = 旧路径逐字节不变。
+@dataclass
+class PPOContext:
+    """一次 update 的配置与共享状态。"""
 
-    target_kl（D8，plan/replay-corpus.plan.md §7.2 第 8 条）：>0 时每个 epoch 末尾
-    检查本 epoch 的平均 approx KL，超过即打印并停止剩余 epoch（镜像 intent 后端）。
-    缺省 0 = 关闭，数学与步数逐字节不变；读数 `per_step_kl`/`clip_fraction` 恒开。
-    """
-    model.train()
-    clip = CLIP_EPS
-    # 熵正则系数：None → 模块缺省（数学与接线前逐字节一致）；显式给值 → 该项被覆盖。
-    ent_c = ENT_COEF if ent_coef is None else float(ent_coef)
-    stats: list[dict[str, float]] = []
-    # W0-b（plan/ppo-worker-wallclock §4.1）：每步墙钟**累加常开**（判据底座；W3/W3.5 的
-    # 「median 下降」就是拿它比的）。只 append 一个 float，不新增设备同步；**打印**另受
-    # PPO_CUDA_DIAG 控（默认 0）——稳态不多一行（日志节食）。
-    _step_walls: list[float] = []
-    # ---- 可选 profiler（`PPO_PROFILE=1`；判读见 `_profile_steps` 的 docstring）----
-    _prof_steps = _profile_steps(device)
-    _prof: Any = None
-    _prof_left = 0
-    if _prof_steps:
-        import torch.profiler as _tp
+    model: Any
+    opt: Any
+    chunks: list[dict]
+    epochs: int
+    device: Any
+    ckpt_path: str | None
+    on_epoch_done: Any
+    kl_coef: float
+    ref_model: Any
+    kickstart_kl: float
+    ent_c: float
+    demo_bank: DemoBank | None
+    demo_bc_coef: float
+    demo_per_mb: int
+    progress: LogBundle | None
+    progress_head: str
+    value_anchor: float
+    #: 三条显式随机流（§P1-7）：epoch 顺序 / demo 抽样都在这里，全局 np.random 不再参与。
+    rng: PPORng = field(default_factory=lambda: PPORng.from_seed(0))
+    clip: float = CLIP_EPS
+    #: P3 lazy：`chunks` 是 `LazyChunks`（逐 chunk 物化），此处不建全量 torch 副本。
+    lazy: bool = False
+    #: D8：>0 时每个 epoch 末尾检查平均 KL，超过即停剩余 epoch（缺省 0 = 关闭）。
+    target_kl: float = 0.0
+    #: D8：本轮是否因 target_kl 提前收工（进 `agg`，账本可归因）。
+    early_stopped: bool = False
+    #: chunk 数（lazy 下 `LazyChunks` 没有可靠的 `len` 语义时由 `chunk_count` 给）。
+    n_chunks: int = 0
+    tensored: Any = field(default_factory=list)
+    total_steps: int = 0
+    stats: list[dict[str, float]] = field(default_factory=list)
+    step_walls: list[float] = field(default_factory=list)
+    prof_steps: int = 0
+    prof: Any = None
+    prof_left: int = 0
+    diag: _Diag = field(default_factory=_Diag)
+    demo: _Demo = field(default_factory=_Demo)
+    ref_cache: list[tuple[torch.Tensor, ...] | None] = field(default_factory=list)
+    t0: float = 0.0
+    last_hb: float = 0.0
+    start_epoch: int = 0
+    space: ActionSpace = ActionSpace.LEGACY
+    layout: HeadLayout = field(default_factory=lambda: head_layout(ActionSpace.LEGACY))
 
-        _prof = _tp.profile(activities=[_tp.ProfilerActivity.CPU, _tp.ProfilerActivity.CUDA])
-        _prof.start()
-        _prof_left = _prof_steps
-    # Convert numpy -> torch ONCE per chunk (not once per epoch): identical
-    # values, ~epochs× less conversion overhead.
-    # P3 lazy：chunks 自己就是按需物化的序列，这里不物化全量（每步 tensored_batch）。
-    # eager 全量上卡前查显存：不足响亮拒绝（用户 2026-11-16）；探测不到则放行。
-    if not lazy:
-        require_corpus(chunks, torch_free_bytes(device))
-    tensored: Any = chunks if lazy else tensored_chunks(chunks, device)
-    n_chunks = chunk_count(chunks)
-    total_steps = n_chunks * epochs
-    # ---- XLA 步耗诊断（2026-09-22，纯观测；非 XLA 机器零开销）----
-    # 见 ppo/common.xla_metrics_snapshot 的说明：把「是不是每个 chunk 迭代都触发一次
-    # 新编译」从猜测变成日志里的读数。PPO_XLA_DIAG=0 可关；基线与自检都取在循环之前，
-    # 免得把设备自检那一发编译算到第一步头上。
+
+def _setup_diag(device: Any) -> _Diag:
+    """XLA 诊断的基线/设备自检（非 XLA 机器上快照返空 ⇒ on=False）。"""
     diag_prev: dict[str, float] = {}
     diag_by_b: dict[int, dict[str, float]] = {}
     diag_first = 12  # 前 N 步逐步取；之后每 EVERY 步取一次
@@ -436,7 +432,6 @@ def ppo_update(
         if os.environ.get("PPO_XLA_DIAG", "1") not in ("0", "false", "False")
         else {}
     )
-    early_stopped = False
     if _diag_base:
         diag_first = max(1, int(os.environ.get("PPO_XLA_DIAG_FIRST", "12")))
         diag_every = max(1, int(os.environ.get("PPO_XLA_DIAG_EVERY", "16")))
@@ -456,7 +451,30 @@ def ppo_update(
         # 基线与设备自检都取在循环之前——别把自检那一发编译算到第一步头上。
         diag_prev = xla_metrics_snapshot()
     diag_on = bool(diag_prev)
-    # ---- demo bank 物化（一次 numpy→torch；关闭时零开销） ----
+    return _Diag(
+        prev=diag_prev,
+        by_b=diag_by_b,
+        first=diag_first,
+        every=diag_every,
+        last_at=diag_last_at,
+        wall=diag_wall,
+        compile=diag_compile,
+        uncached=diag_uncached,
+        worst=diag_worst,
+        worst_delta=diag_worst_delta,
+        sig=diag_sig,
+        compile_dom=diag_compile_dom,
+        reset=diag_reset,
+        bundle=diag_b,
+        epoch_series=diag_epoch_series,
+        on=diag_on,
+    )
+
+
+def _setup_demo(ctx: PPOContext) -> _Demo:
+    """demo bank 一次 numpy→torch 物化；关闭时零开销。"""
+    demo_bank, demo_bc_coef, demo_per_mb = ctx.demo_bank, ctx.demo_bc_coef, ctx.demo_per_mb
+    device = ctx.device
     demo_on = (
         demo_bank is not None and float(demo_bc_coef) > 0.0 and int(demo_per_mb) > 0
     )
@@ -468,17 +486,20 @@ def ppo_update(
     if demo_on:
         assert demo_bank is not None  # 由 demo_on 保证，mypy 收窄用
         try:
-            demo_t = tensored_chunks(
-                [
-                    {
-                        "obs": np.asarray(demo_bank["obs"]),
-                        "scalars": np.asarray(demo_bank["scalars"]).astype(np.float32),
-                        "actions": np.asarray(demo_bank["actions"]).astype(np.int64),
-                        "masks": np.asarray(demo_bank["masks"]).astype(np.float32),
-                    }
-                ],
-                device,
-            )[0]
+            demo_src: dict[str, np.ndarray] = {
+                "obs": np.asarray(demo_bank["obs"]),
+                "scalars": np.asarray(demo_bank["scalars"]).astype(np.float32),
+                "actions": np.asarray(demo_bank["actions"]).astype(np.int64),
+                "masks": np.asarray(demo_bank["masks"]).astype(np.float32),
+            }
+            # bank 有 `extra` 就必须喂给模型：`policy_extra=True` 的 StudentNet 在
+            # `_require_extra` 处**拒绝** `extra=None`（拒绝静默用 0），而 paddle 侧
+            # 一直物化它（2026-11-16 前 torch 侧漏了这一步 ⇒ 同 bank 两侧输入不同，
+            # torch 的 demo 腿在 policy_extra 模型上直接炸）。缺 `extra` 的只可能是
+            # 没走安全阀的调用方，那种 bank 对 legacy 模型仍然有效（模型不看这一列）。
+            if "extra" in demo_bank:
+                demo_src["extra"] = np.asarray(demo_bank["extra"]).astype(np.float32)
+            demo_t = tensored_chunks([demo_src], device)[0]
             demo_n = int(demo_t["actions"].shape[0])
             demo_on = demo_n > 0
             if demo_on:
@@ -492,21 +513,51 @@ def ppo_update(
                 )
         except (KeyError, ValueError, TypeError) as err:
             raise ValueError(f"[ppo] demo_bank 字段缺失/形状非法——拒收（{err}）") from err
-    # `[ppo] update start: … chunks x … epochs` 行已退役（2026-10-06，用户指令「删除云机 worker
-    # 刷屏 log」）：chunk/epoch 数与课程配置同源、每 job 复述一次。`total_steps` 仍在用（步进
-    # 进度 / XLA 诊断 / ETA），不随这行一起删；`demo_on` 等状态同上。
-    t0 = time.time()
-    last_hb = t0
-    # ---- kickstart ref 前向预计算（2026-09-10，纯吞吐、数值逐位不变） ----
-    # ref_model 是冻结的（eval + requires_grad=False）且 StudentNet BN-free ⇒ 无状态；
-    # ref 输出只依赖 (obs, scalars, mask)，而这三者**逐 chunk 固定、跨 epoch 不变**
-    # （epoch 只重排 chunk 顺序，不改内容）。原实现在最内层每步重算一次完整前向 =
-    # epochs× 白烧：本机 CPU 实测 ref 前向占单步 ~44%（tmp/bench-ppo-throughput.py 的
-    # D-B 差：6.65 -> 9.59 s/step）。此处每个 chunk 只算一次并按索引复用，
-    # ref 成本降到 1/epochs，数值与原实现逐位相同。
-    # 内存代价：len(chunks) x B x 7（legacy）/ 9（v6）floats ≈ 37x512x9x4B ≈ 0.7MB（可忽略）。
-    ref_cache: list[tuple[torch.Tensor, ...] | None] = [None] * n_chunks
-    if ref_model is not None and kickstart_kl > 0 and not lazy:
+    return _Demo(
+        on=demo_on,
+        t=demo_t,
+        n=demo_n,
+        idx_dev=demo_idx_dev,
+        per_mb=int(demo_per_mb),
+        coef=float(demo_bc_coef),
+    )
+
+
+def _ref_heads(ctx: PPOContext, e: dict) -> tuple[torch.Tensor, ...]:
+    """冻结 ref 模型在当前 chunk 上的分头 log-softmax（eager 预计算 / lazy 首次现算共用）。
+
+    两条路径数值逐位相同（ref 冻结且与训练模型状态无关）；共用同一份「头数 vs 数据
+    动作空间」校验，避免 lazy 复制一份后漂移。
+    """
+    ref_model = ctx.ref_model
+    _ro = ref_model(e["obs"], e["scalars"], e.get("extra"))
+    _m = e["mask"]
+    _ref_space = ActionSpace.from_forward_arity(len(_ro))
+    if _ref_space is not ctx.space:
+        raise ValueError(
+            f"[ppo] kickstart ref 与数据动作空间不同源：ref 返回 {len(_ro)} 个头"
+            f"（{_ref_space.value}），chunk 是 {ctx.space.value}"
+            "——掩码切片会静默错位，拒绝训练（ref 权重与 rollout 语料不是同一代）"
+        )
+    _layout = head_layout(_ref_space)
+    _heads: tuple[torch.Tensor, ...] = (
+        masked_logsoftmax(_ro[0], _m[:, _layout.move_slice]),
+        masked_logsoftmax(_ro[1], _m[:, _layout.fire_slice]),
+    )
+    if _layout.hold_slice is not None:
+        _heads = (*_heads, masked_logsoftmax(_ro[2], _m[:, _layout.hold_slice]))
+    return _heads
+
+
+def _precompute_ref(ctx: PPOContext) -> list[tuple[torch.Tensor, ...] | None]:
+    """每个 chunk 只算一次 ref 前向（原每 epoch 重算；数值逐位不变）。"""
+    ref_model, kickstart_kl = ctx.ref_model, ctx.kickstart_kl
+    tensored, device = ctx.tensored, ctx.device
+    ref_cache: list[tuple[torch.Tensor, ...] | None] = [None] * ctx.n_chunks
+    if ctx.lazy:
+        # lazy：chunk 首次使用时现算（见 `_train_step`）；这里不物化任何 chunk。
+        return ref_cache
+    if ref_model is not None and kickstart_kl > 0:
         # 2026-09-11 慢 job（TPU 45~52 s/step，eta~5.9h）修复：落执行边界，否则
         # 这段惰性图一直挂着，会与首个训练步的图拼成巨型图（首步 ~24s 编译 +
         # 图签名漂移）。对齐探针 build_ref_cache 的既有行为（tools/tpu-probe.py E 段）。
@@ -525,12 +576,12 @@ def ppo_update(
         _t_ref = time.time()
         with torch.no_grad():
             for _i, _e in enumerate(tensored):
-                ref_cache[_i] = _ref_logprobs(ref_model, _e)
+                ref_cache[_i] = _ref_heads(ctx, _e)
                 xla_mark_step(device)
         # 注意：日志必须在 mark_step **之后**打——惰性 XLA 下循环里一次前向都没真跑，
         # 打在前面得到的是 0s 的假数字（这正是本次误判的由来）。
         log(
-            f"[ppo] kickstart ref 预计算完成：{n_chunks} chunks（原每 epoch 重算）"
+            f"[ppo] kickstart ref 预计算完成：{ctx.n_chunks} chunks（原每 epoch 重算）"
             f"，{time.time() - _t_ref:.1f}s（{device} 执行实耗，XLA 含编译）"
         )
     # ---- XLA 预物化（2026-09-22）：chunk/demo/索引张量必须在**进入循环前**落设备 ----
@@ -539,344 +590,319 @@ def ppo_update(
     # 单步 5.5s；epoch2 之后降到 0.9~2.4s/步——正是「变体集被填满」的形态）。
     # 一次 mark 把全部待转移张量落盘，后续每步都只是同一张图 ⇒ 编译只付一次。
     # 非 XLA 设备为 no-op（xla_mark_step 内部判断），CPU/CUDA 数值与行为逐位不变。
+    return ref_cache
+
+
+def _prepare(ctx: PPOContext) -> tuple[Backend, StepConfig, StepState]:
+    """建 update 的派生状态：profiler / tensored chunks / 诊断 / demo / ref / 续跑。"""
+    model, opt, device = ctx.model, ctx.opt, ctx.device
+    model.train()
+    # ---- 可选 profiler（`PPO_PROFILE=1`；判读见 `profile_steps` 的 docstring）----
+    ctx.prof_steps = profile_steps(device)
+    if ctx.prof_steps:
+        import torch.profiler as _tp
+
+        ctx.prof = _tp.profile(
+            activities=[_tp.ProfilerActivity.CPU, _tp.ProfilerActivity.CUDA]
+        )
+        ctx.prof.start()
+        ctx.prof_left = ctx.prof_steps
+    # Convert numpy -> torch ONCE per chunk (not once per epoch): identical
+    # values, ~epochs× less conversion overhead.
+    # P3 lazy：chunks 自己就是按需物化的序列，这里不物化全量（每步 tensored_batch）。
+    # eager 全量上卡前查显存：不足响亮拒绝（用户 2026-11-16）；探测不到则放行。
+    if not ctx.lazy:
+        require_corpus(ctx.chunks, torch_free_bytes(device))
+    ctx.tensored = ctx.chunks if ctx.lazy else tensored_chunks(ctx.chunks, device)
+    ctx.n_chunks = chunk_count(ctx.chunks)
+    ctx.total_steps = ctx.n_chunks * ctx.epochs
+    # 动作空间只在数据边界嗅一次；下面的 ref 与每个 minibatch 都读这份契约。
+    _first = ctx.tensored.get(0) if ctx.lazy else (ctx.tensored[0] if ctx.tensored else None)
+    ctx.space = ActionSpace.from_batch(_first) if _first is not None else ActionSpace.LEGACY
+    ctx.layout = head_layout(ctx.space)
+    ctx.diag = _setup_diag(device)
+    ctx.demo = _setup_demo(ctx)
+    ctx.t0 = time.time()
+    ctx.last_hb = ctx.t0
+    ctx.ref_cache = _precompute_ref(ctx)
+    # ---- XLA 预物化（2026-09-22）：chunk/demo/索引张量必须在**进入循环前**落设备 ----
+    # host→device 的惰性转移若发生在「首次使用」那一刻，就会随该步的图一起被内联成新签名
+    # ⇒ 每个 chunk 的首次使用各付一次全图编译（真机实录：epoch1 累计 41 次新编译、
+    # 单步 5.5s；epoch2 之后降到 0.9~2.4s/步——正是「变体集被填满」的形态）。
+    # 一次 mark 把全部待转移张量落盘，后续每步都只是同一张图 ⇒ 编译只付一次。
+    # 非 XLA 设备为 no-op（xla_mark_step 内部判断），CPU/CUDA 数值与行为逐位不变。
     if is_xla(device):
         xla_mark_step(device)
-        if diag_on and not lazy:
-            diag_b.add(
+        if ctx.diag.on and not ctx.lazy:
+            ctx.diag.bundle.add(
                 "预物化",
-                f"{n_chunks} 个 chunk + demo 张量已落设备"
+                f"{ctx.n_chunks} 个 chunk + demo 张量已落设备"
                 f"（循环前一次 mark；否则每个 chunk 首次使用各付一次全图编译）",
             )
-    start_epoch = _ppo_load(ckpt_path, model, opt)
-    if start_epoch:
+    ctx.start_epoch = _ppo_load(ctx.ckpt_path, model, opt, ctx.rng)
+    if ctx.start_epoch:
         log(
-            f"[ppo] resume PPO from checkpoint: epoch {start_epoch}/{epochs} done "
-            f"(continuing remaining {epochs - start_epoch})"
+            f"[ppo] resume PPO from checkpoint: epoch {ctx.start_epoch}/{ctx.epochs} done "
+            f"(continuing remaining {ctx.epochs - ctx.start_epoch})"
         )
-    for ep in range(start_epoch, epochs):
-        perm = np.random.permutation(n_chunks)
-        n_ep_start = len(stats)
-        for j, i in enumerate(perm):
-            _step_t0 = time.time()
-            e = tensored.get(int(i)) if lazy else tensored[int(i)]
-            if lazy:
-                # 只把当前 minibatch 上卡（mb=1024 的 obs u1 ≈ 11.8 MB），
-                # 全量 chunks 不再有 torch 副本 ⇒ 4–6 GB VRAM 可跑 35×20。
-                e = tensored_batch(e, device)
-            obs = e["obs"]
-            sc = e["scalars"]
-            a_move = e["a_move"]
-            a_fire = e["a_fire"]
-            lp_move = e["lp_move"]
-            lp_fire = e["lp_fire"]
-            adv = e["adv"]
-            ret = e["ret"]
-            mask = e["mask"]  # (T, 7) legacy / (T, 9) v6 —— 切片见下
+    # 步级系数与跨步状态各构建**一次**（§14.1：热路径不分配对象）；算子表同理。
+    cfg = StepConfig(
+        clip=ctx.clip,
+        ent_coef=ctx.ent_c,
+        vf_coef=VF_COEF,
+        kl_coef=ctx.kl_coef,
+        kickstart_kl=ctx.kickstart_kl,
+        value_anchor=ctx.value_anchor,
+        demo_bc_coef=ctx.demo_bc_coef,
+        demo_per_mb=ctx.demo_per_mb,
+        max_grad_norm=MAX_GRAD_NORM,
+    )
+    st = StepState(
+        layout=ctx.layout,
+        tensored=ctx.tensored,
+        ref_cache=ctx.ref_cache,
+        demo_on=ctx.demo.on,
+        demo_n=ctx.demo.n,
+        demo_t=ctx.demo.t,
+        demo_idx_buf=ctx.demo.idx_dev,
+    )
+    return _torch_backend(ctx.device), cfg, st
 
-            # B1 v6（2026-10-20）：`PPOStudent.forward` 在 `action_v6` 下返回 **4-tuple**
-            # `(move, fire, hold, value)`，legacy 是 3-tuple。判据 = shard 是否带 `a_hold`
-            # （数据事实），与 `load_shard` 的 v6 判据同一来源——不看模型，因为
-            # "模型是 v6 但数据是 5/2"正是必须炸掉的那种不同源。
-            out = model(obs, sc, e.get("extra"))
-            if e.get("a_hold") is not None:
-                mv, fr, hd, val = out
-            else:
-                mv, fr, val = out
-                hd = None
-            # 掩码布局随动作空间变（**不能复用同一组切片**）：
-            #   legacy [move5 | fire2]         ⇒ :5 / 5:7
-            #   v6     [move4 | fire3 | hold2] ⇒ :4 / 4:7 / 7:9
-            # 用 legacy 的 `MOVE_DIM=5` 去切 v6 掩码，会把 hold[0] 当成 fire 的第 3 类、
-            # 同时切掉 move 的第 4 类（right）——静默错位，loss 照降。
-            if hd is not None:
-                move_logp = masked_logsoftmax(mv, mask[:, :MOVE4_DIM])
-                fire_logp = masked_logsoftmax(fr, mask[:, MOVE4_DIM : MOVE4_DIM + FIRE3_DIM])
-                hold_logp = masked_logsoftmax(hd, mask[:, MOVE4_DIM + FIRE3_DIM :])
-            else:
-                move_logp = masked_logsoftmax(mv, mask[:, :MOVE_DIM])
-                fire_logp = masked_logsoftmax(fr, mask[:, MOVE_DIM : MOVE_DIM + FIRE_DIM])
-                hold_logp = None
 
-            lp_new = cat_logprob(a_move, move_logp) + cat_logprob(a_fire, fire_logp)
-            lp_old = lp_move + lp_fire
-            if hold_logp is not None:
-                lp_new = lp_new + cat_logprob(e["a_hold"], hold_logp)
-                lp_old = lp_old + e["lp_hold"]
-
-            ratio = torch.exp(lp_new - lp_old)
-            surr1 = ratio * adv
-            surr2 = torch.clamp(ratio, 1.0 - clip, 1.0 + clip) * adv
-            # 标准 PPO clip fraction（D8/D10 读数）：ratio 落在 [1-ε, 1+ε] 之外的样本占比。
-            # 只读、不参与 loss；有 policy_mask 时用同一份 w/denom 做掩码加权。
-            clipped = (ratio < 1.0 - clip) | (ratio > 1.0 + clip)
-            # Hybrid opening：policy_mask=0（controller 接管）的样本不产生
-            # policy/entropy/KL 梯度；value loss 仍用全 tick（价值目标有效）。
-            # 缺省（老 shard 无该字段）⇒ 走原 mean 分支，数值逐字节不变。
-            pm = e.get("policy_mask")
-            if pm is None:
-                policy_loss = -torch.min(surr1, surr2).mean()
-                value_loss = F.mse_loss(val.squeeze(-1), ret)
-                entropy = cat_entropy(move_logp) + cat_entropy(fire_logp)
-                clip_frac = clipped.to(surr1.dtype).mean()
-                if hold_logp is not None:
-                    entropy = entropy + cat_entropy(hold_logp)
-                loss = policy_loss + VF_COEF * value_loss - ent_c * entropy
-                if kl_coef > 0.0:
-                    # 对采样策略的 KL 惩罚（与 approx_kl_est 同估计量，可微项）
-                    loss = loss + kl_coef * ((ratio - 1.0) - (lp_new - lp_old)).mean()
-            else:
-                w = pm.reshape(-1).to(surr1.dtype)
-                denom = w.sum().clamp(min=1.0)
-                surr = -torch.min(surr1, surr2).reshape(-1)
-                policy_loss = (surr * w).sum() / denom
-                ent_per = cat_entropy_per(move_logp) + cat_entropy_per(fire_logp)
-                if hold_logp is not None:
-                    ent_per = ent_per + cat_entropy_per(hold_logp)
-                entropy = (ent_per.reshape(-1) * w).sum() / denom
-                value_loss = F.mse_loss(val.squeeze(-1), ret)
-                loss = policy_loss + VF_COEF * value_loss - ent_c * entropy
-                clip_frac = (clipped.to(surr1.dtype).reshape(-1) * w).sum() / denom
-                if kl_coef > 0.0:
-                    kl_per = ((ratio - 1.0) - (lp_new - lp_old)).reshape(-1)
-                    loss = loss + kl_coef * (kl_per * w).sum() / denom
-            kick_mean = torch.zeros((), device=device)
-            _ref = ref_cache[int(i)]
-            if _ref is None and lazy and ref_model is not None and kickstart_kl > 0:
-                # lazy：chunk 首次使用时现算（ref 冻结 ⇒ 与 eager 预计算逐位相同）。
-                # 落一次执行边界，避免把 ref 图与当前训练步拼成一张更大的图（TPU）。
-                with torch.no_grad():
-                    _ref = _ref_logprobs(ref_model, e)
-                ref_cache[int(i)] = _ref
-                xla_mark_step(device)
-            if _ref is not None:
-                # 预计算缓存（见上方 ref_cache）：数值与「此处现算 ref_model」逐位相同，
-                # 但每 chunk 只付一次前向而非每 epoch 一次。
-                # ★ v6：**三头都锚**。`hold` 是 v6 唯一新增的自由度，漏掉它等于
-                #   kickstart 对 hold 头完全不生效（策略可以第一时间把 hold 学坏，
-                #   而 move/fire 被钉住）——那就不是「BC-anchored」了。
-                kl_m = (move_logp.exp() * (move_logp - _ref[0])).sum(dim=-1)
-                kl_f = (fire_logp.exp() * (fire_logp - _ref[1])).sum(dim=-1)
-                kl_parts = kl_m + kl_f
-                if len(_ref) > 2 and hold_logp is not None:
-                    kl_parts = kl_parts + (hold_logp.exp() * (hold_logp - _ref[2])).sum(dim=-1)
-                kick_mean = kl_parts.mean()
-                loss = loss + kickstart_kl * kick_mean
-            demo_bc_mean = torch.zeros((), device=device)
-            if demo_on:
-                # np RNG ⇒ 与 chunk permutation 同一条 ckpt 流，断点续跑精确复现。
-                _didx = np.random.randint(0, demo_n, size=int(demo_per_mb))
-                # 索引必须先落到**复用的设备张量**上再索引（否则每步一张新图 ⇒ 每步重编译，
-                # 见 ppo/common.demo_index）；抽样本的数与序完全不变。
-                _didx_t = demo_index(demo_idx_dev, _didx)
-                # 只取 move 头（2026-10-23）：v6 模型的 forward 是 4-tuple，写死
-                # `_dm, _, _ = model(...)` 会在 demo_bc_coef>0 的 v6 腿上同样炸
-                # （与上面 ref 缓存同一处漏改；本条是潜伏的第二实例）。
-                _dm = model(
-                    demo_t["obs"][_didx_t],
-                    demo_t["scalars"][_didx_t],
-                    demo_t["extra"][_didx_t] if "extra" in demo_t else None,
-                )[0]
-                _dmm = demo_t["masks"][_didx_t]
-                _dact = demo_t["actions"][_didx_t]
-                # 只训 move（2026-10-18）：fire 的 mask 语义是「当前打得出去吗」，label 是
-                # 「有没有按住」；冷却期 hold 被 mask 判非法 ⇒ 可训练子集 43744 里 hold 只有
-                # 806（1.84%），fire CE 实际只教 release。恢复方式：加回
-                # `_demo_masked_ce(_df, _dact[:, 1], _dmm[:, MOVE_DIM:MOVE_DIM+FIRE_DIM])`
-                # （test_demo_fire_labels_do_not_reach_fire_head 会挡住静默复活）。
-                demo_bc_mean = _demo_masked_ce(_dm, _dact[:, 0], _dmm[:, :MOVE_DIM])
-                loss = loss + float(demo_bc_coef) * demo_bc_mean
-
-            opt.zero_grad()
-            loss.backward()
-            gn = nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
-            optimizer_step(opt, device)
-            # value 门控牵引（x26-obs it90 诊断）：冷 critic 在新列上拟合噪声 →
-            # advantage 污染。ρ>0 才收缩（=0 时只读数：对照腿数学恒等＋监控不盲）；
-            # 位置在 clip+step 之后 ⇒ 收缩不吃 clip 配额、不进 Adam 矩。
-            value_new_rms = apply_value_anchor_pull(model, value_anchor)
-            # policy 接线遥测（x27 冻结判决）：行为由 policy 双头解释——读数无条件
-            # （ρ 无关；policy 同拴已否决）。进同一份 sync_scalars 字典 ⇒ 不新增
-            # 设备同步（单测 test_ppo_scalar_sync 钉住"一次同步"+显式键集）。
-            policy_new_rms = policy_new_rms_of(model)
-
+def _train_step(
+    ctx: PPOContext, bk: Backend, cfg: StepConfig, st: StepState, ep: int, j: int, i: int
+) -> None:
+    """一个 minibatch 步：数学在 `backend.run_step`，这里只做 torch 侧遥测与执行边界。"""
+    device = ctx.device
+    _step_t0 = time.time()
+    if ctx.lazy:
+        # 只把当前 minibatch 上卡（mb=1024 的 obs u1 ≈ 11.8 MB），
+        # 全量 chunks 不再有 torch 副本 ⇒ 4–6 GB VRAM 可跑 35×20。
+        e = tensored_batch(st.tensored.get(int(i)), device)
+        if ctx.ref_model is not None and ctx.kickstart_kl > 0 and st.ref_cache[int(i)] is None:
+            # lazy：chunk 首次使用时现算（ref 冻结 ⇒ 与 eager 预计算逐位相同）。
+            # 落一次执行边界，避免把 ref 图与当前训练步拼成一张更大的图（TPU）。
             with torch.no_grad():
-                # 一次同步取全部标量。原实现逐项取 8 次 = CUDA 上 8 次全设备
-                # 同步（每次 drain 队列，把 CPU/GPU 流水线串起来）——详见
-                # ppo/common.sync_scalars 的说明。数值逐位不变。
-                # D8/D10：`per_step_kl` 与 `kl` 是同一个估计量（保留 `kl` 供既有熔断/日志）；
-                # `clip_fraction` 是 ratio 出界样本占比。二者都只读，不改变梯度。
-                kl_est = approx_kl_est(lp_old, lp_new)
-                stats.append(
-                    sync_scalars(
-                        {
-                            "policy": policy_loss,
-                            "value": value_loss,
-                            "entropy": entropy,
-                            "kl": kl_est,
-                            "per_step_kl": kl_est,
-                            "clip_fraction": clip_frac,
-                            "kickstart": kick_mean,
-                            "demo_bc": demo_bc_mean,
-                            "mean_ret": ret.mean(),
-                            "mean_adv": adv.mean(),
-                            "gnorm": gn,
-                            # W3：这两个是**设备侧张量**（不再每步 `float()` ⇒ 不再各付一次
-                            # 全设备同步），与其余 9 个标量同一次 `sync_scalars` 取回。
-                            "value_new_rms": value_new_rms,
-                            "policy_new_rms": policy_new_rms,
-                        }
-                    )
-                )
-            # 2026-09-11 根因修复（TPU）：每步强制图执行边界。torch_xla 惰性模式下
-            # materialize（.tolist()）只断言其依赖子图，backward/optimizer 环节的
-            # 在途节点不 drain，跨步骤累积 → 图线性膨胀 → 单步耗时随步数线性增长
-            # （实录：TPU 24→45→52s/step 递增；探针 E 段 1.7→13→23s；E2 10s）。
-            # 每步显式 mark 后 TPU 单步稳定 ~44ms（探针 E1+mark 实测收敛）。非 XLA
-            # 设备为 no-op，CPU/CUDA 数值与行为逐位不变。
+                st.ref_cache[int(i)] = _ref_heads(ctx, e)
             xla_mark_step(device)
-            now = time.time()
-            if _prof is not None:
-                # 采样窗口内不记墙钟：profiler 自身的开销会把 median 抬高（见 `_profile_steps`）。
-                _prof_left -= 1
-                if _prof_left <= 0:
-                    _prof.stop()
-                    log(
-                        f"[ppo] profile（前 {_prof_steps} 步，按 self CUDA 时间降序；"
-                        "CPU / CUDA 两列同表）:\n"
-                        + _prof.key_averages().table(
-                            sort_by="self_cuda_time_total", row_limit=15
-                        )
-                    )
-                    _prof = None
-            else:
-                _step_walls.append(now - _step_t0)
-            # XLA 步耗读数（必须在 mark_step 之后：编译/执行都已 drain，否则恒为 0）。
-            # 未取样的步只累计墙钟——delta 是累积的，中间发生的编译仍会落在下一次读数里。
-            if diag_on:
-                _done = ep * n_chunks + j + 1
-                _wall_s = now - _step_t0
-                diag_wall += _wall_s
-                _acc = diag_by_b.setdefault(int(obs.shape[0]), {"iters": 0.0, "wall": 0.0})
-                _acc["iters"] += 1
-                _acc["wall"] += _wall_s
-                if _done <= diag_first or _done % diag_every == 0 or _done == total_steps:
-                    _snap = xla_metrics_snapshot()
-                    _dlt = xla_metrics_delta(diag_prev, _snap)
-                    diag_prev = _snap
-                    _cmp = float(_dlt.get("t.CompileTime", 0.0))
-                    _unc = int(_dlt.get("c.UncachedCompile", 0.0))
-                    diag_compile += _cmp
-                    diag_uncached += float(_unc)
-                    _span = _done - diag_last_at
-                    diag_last_at = _done
-                    _span_wall = diag_wall
-                    diag_wall = 0.0
-                    # 星 2026-09-24（日志节食）：逐窗口**只累计**，不打行。判决必需的三样
-                    # 都留下：最慢窗口（带它的编译/新编译数）、编译主导窗口计数、图签名。
-                    _per = _span_wall / max(_span, 1)
-                    diag_sig = (
-                        f"B{int(obs.shape[0])}"
-                        f"/demo{int(demo_per_mb) if demo_on else 0}"
-                        f"/kl{int(kl_coef > 0.0)}/ref{int(_ref is not None)}"
-                        f"/demo{int(demo_on)}"
-                    )
-                    if _per > float(diag_worst.get("per", -1.0)):
-                        diag_worst_delta = xla_delta_str(_dlt)
-                        diag_worst = {
-                            "per": _per,
-                            "span": float(_span),
-                            "wall": _span_wall,
-                            "compile": _cmp,
-                            "uncached": float(_unc),
-                            "at": float(_done),
-                        }
-                    # 判定只在「编译占比落在 (50%, 100%] 这个物理上说得通的范围」时算。
-                    # XLA 的 metrics 会被重置（新 shape 出现/缓存事件）⇒ delta 可能为负或
-                    # 超过窗口墙钟（实录 编译=73.93s / 追踪=-52.57s）；那种窗口只信
-                    # 墙钟与「新编译次数」，不给百分比结论，免得误导。
-                    if 0.5 * _span_wall < _cmp <= _span_wall:
-                        diag_compile_dom += 1
-                    elif _cmp > _span_wall:
-                        diag_reset += 1
-            # Heartbeat: pure-print progress/health line; wall-clock only.
-            # ★ 2026-09-24（日志节食）：给了 progress bundle 就攒进去 + 按 60s 节流打一行
-            # （用户口径：「完成时打印，或者未完成时每 60s 打印一次」）；不给（旧调用方、
-            # `python -m ppo.engine` CLI）时逐字节保持原输出。
-            if now - last_hb >= HB_SEC:
-                last_hb = now
-                recent = stats[-32:]
-                n_r = len(recent)
-                done_steps = ep * n_chunks + j + 1
-                elapsed = now - t0
-                eta = elapsed / done_steps * (total_steps - done_steps)
-                _hb = (
-                    f"ep {ep + 1}/{epochs} chunk {j + 1}/{n_chunks} "
-                    f"step {done_steps}/{total_steps} "
-                    f"elapsed={elapsed:.0f}s eta~{eta:.0f}s "
-                    f"kl={sum(s['kl'] for s in recent) / n_r:.4f} "
-                    f"entropy={sum(s['entropy'] for s in recent) / n_r:.4f} "
-                    f"policy={sum(s['policy'] for s in recent) / n_r:.4f} "
-                    f"value={sum(s['value'] for s in recent) / n_r:.4f} "
-                    f"gnorm={sum(s['gnorm'] for s in recent) / n_r:.3f}"
+    else:
+        e = st.tensored[int(i)]
+    ctx.stats.append(run_step(bk, ctx.model, ctx.opt, st, cfg, ctx.rng, i, batch=e))
+    # 2026-09-11 根因修复（TPU）：每步强制图执行边界。torch_xla 惰性模式下
+    # materialize（.tolist()）只断言其依赖子图，backward/optimizer 环节的
+    # 在途节点不 drain，跨步骤累积 → 图线性膨胀 → 单步耗时随步数线性增长
+    # （实录：TPU 24→45→52s/step 递增；探针 E 段 1.7→13→23s；E2 10s）。
+    # 每步显式 mark 后 TPU 单步稳定 ~44ms（探针 E1+mark 实测收敛）。非 XLA
+    # 设备为 no-op，CPU/CUDA 数值与行为逐位不变。
+    xla_mark_step(device)
+    now = time.time()
+    _prof, _prof_steps, _prof_left = ctx.prof, ctx.prof_steps, ctx.prof_left
+    if _prof is not None:
+        # 采样窗口内不记墙钟：profiler 自身的开销会把 median 抬高（见 `profile_steps`）。
+        _prof_left -= 1
+        if _prof_left <= 0:
+            _prof.stop()
+            log(
+                f"[ppo] profile（前 {_prof_steps} 步，按 self CUDA 时间降序；"
+                "CPU / CUDA 两列同表）:\n"
+                + _prof.key_averages().table(
+                    sort_by="self_cuda_time_total", row_limit=15
                 )
-                if progress is not None:
-                    progress.add("进度", _hb)
-                    progress.beat(progress_head)
-                else:
-                    log(f"[ppo] {_hb}")
-        if ckpt_path:
-            _ppo_save(ckpt_path, model, opt, ep + 1)
-        if on_epoch_done is not None:
-            on_epoch_done(ep + 1, model)
-        ep_stats = stats[n_ep_start:]
-        n_e = max(1, len(ep_stats))
-        _ep_line = (
-            f"epoch {ep + 1}/{epochs} done ({time.time() - t0:.0f}s total, "
-            f"{len(ep_stats)} chunks)"
-            + (", ckpt saved" if ckpt_path else "")
-            + f": kl={sum(s['kl'] for s in ep_stats) / n_e:.4f} "
-            f"entropy={sum(s['entropy'] for s in ep_stats) / n_e:.4f} "
-            f"kickstart={sum(s['kickstart'] for s in ep_stats) / n_e:.4f} "
-            f"policy={sum(s['policy'] for s in ep_stats) / n_e:.4f} "
-            f"value={sum(s['value'] for s in ep_stats) / n_e:.4f} "
-            f"gnorm={sum(s['gnorm'] for s in ep_stats) / n_e:.3f}"
+            )
+            _prof = None
+    else:
+        ctx.step_walls.append(now - _step_t0)
+    ctx.prof, ctx.prof_left = _prof, _prof_left
+    _record_diag(
+        ctx,
+        ep,
+        j,
+        now,
+        now - _step_t0,
+        int(e["obs"].shape[0]),
+        st.ref_cache[int(i)] is not None,
+    )
+    _maybe_heartbeat(ctx, ep, j, now)
+
+
+def _record_diag(
+    ctx: PPOContext,
+    ep: int,
+    j: int,
+    now: float,
+    wall_s: float,
+    batch_size: int,
+    has_ref: bool,
+) -> None:
+    """XLA 步耗窗口累计（只累计，阶段完成才由 `_finish` 打一行）。"""
+    d = ctx.diag
+    diag_on = d.on
+    diag_prev, diag_by_b = d.prev, d.by_b
+    diag_first, diag_every, diag_last_at = d.first, d.every, d.last_at
+    diag_wall, diag_compile, diag_uncached = d.wall, d.compile, d.uncached
+    diag_worst, diag_worst_delta, diag_sig = d.worst, d.worst_delta, d.sig
+    diag_compile_dom, diag_reset = d.compile_dom, d.reset
+    demo_on, demo_per_mb = ctx.demo.on, ctx.demo.per_mb
+    kl_coef, n_chunks, total_steps = ctx.kl_coef, ctx.n_chunks, ctx.total_steps
+    # XLA 步耗读数（必须在 mark_step 之后：编译/执行都已 drain，否则恒为 0）。
+    # 未取样的步只累计墙钟——delta 是累积的，中间发生的编译仍会落在下一次读数里。
+    if diag_on:
+        _done = ep * n_chunks + j + 1
+        _wall_s = wall_s
+        diag_wall += _wall_s
+        _acc = diag_by_b.setdefault(int(batch_size), {"iters": 0.0, "wall": 0.0})
+        _acc["iters"] += 1
+        _acc["wall"] += _wall_s
+        if _done <= diag_first or _done % diag_every == 0 or _done == total_steps:
+            _snap = xla_metrics_snapshot()
+            _dlt = xla_metrics_delta(diag_prev, _snap)
+            diag_prev = _snap
+            _cmp = float(_dlt.get("t.CompileTime", 0.0))
+            _unc = int(_dlt.get("c.UncachedCompile", 0.0))
+            diag_compile += _cmp
+            diag_uncached += float(_unc)
+            _span = _done - diag_last_at
+            diag_last_at = _done
+            _span_wall = diag_wall
+            diag_wall = 0.0
+            # 星 2026-09-24（日志节食）：逐窗口**只累计**，不打行。判决必需的三样
+            # 都留下：最慢窗口（带它的编译/新编译数）、编译主导窗口计数、图签名。
+            _per = _span_wall / max(_span, 1)
+            diag_sig = (
+                f"B{int(batch_size)}"
+                f"/demo{int(demo_per_mb) if demo_on else 0}"
+                f"/kl{int(kl_coef > 0.0)}/ref{int(has_ref)}"
+                f"/demo{int(demo_on)}"
+            )
+            if _per > float(diag_worst.get("per", -1.0)):
+                diag_worst_delta = xla_delta_str(_dlt)
+                diag_worst = {
+                    "per": _per,
+                    "span": float(_span),
+                    "wall": _span_wall,
+                    "compile": _cmp,
+                    "uncached": float(_unc),
+                    "at": float(_done),
+                }
+            # 判定只在「编译占比落在 (50%, 100%] 这个物理上说得通的范围」时算。
+            # XLA 的 metrics 会被重置（新 shape 出现/缓存事件）⇒ delta 可能为负或
+            # 超过窗口墙钟（实录 编译=73.93s / 追踪=-52.57s）；那种窗口只信
+            # 墙钟与「新编译次数」，不给百分比结论，免得误导。
+            if 0.5 * _span_wall < _cmp <= _span_wall:
+                diag_compile_dom += 1
+            elif _cmp > _span_wall:
+                diag_reset += 1
+    d.prev, d.by_b = diag_prev, diag_by_b
+    d.first, d.every, d.last_at = diag_first, diag_every, diag_last_at
+    d.wall, d.compile, d.uncached = diag_wall, diag_compile, diag_uncached
+    d.worst, d.worst_delta, d.sig = diag_worst, diag_worst_delta, diag_sig
+    d.compile_dom, d.reset = diag_compile_dom, diag_reset
+
+
+def _maybe_heartbeat(ctx: PPOContext, ep: int, j: int, now: float) -> None:
+    """60s 心跳：给 progress bundle 就攒进去，否则逐字节旧输出。"""
+    last_hb = ctx.last_hb
+    stats, n_chunks = ctx.stats, ctx.n_chunks
+    epochs, total_steps, t0 = ctx.epochs, ctx.total_steps, ctx.t0
+    progress, progress_head = ctx.progress, ctx.progress_head
+    # Heartbeat: pure-print progress/health line; wall-clock only.
+    # ★ 2026-09-24（日志节食）：给了 progress bundle 就攒进去 + 按 60s 节流打一行
+    # （用户口径：「完成时打印，或者未完成时每 60s 打印一次」）；不给（旧调用方、
+    # `python -m ppo.engine` CLI）时逐字节保持原输出。
+    if now - last_hb >= HB_SEC:
+        last_hb = now
+        recent = stats[-32:]
+        n_r = len(recent)
+        done_steps = ep * n_chunks + j + 1
+        elapsed = now - t0
+        eta = elapsed / done_steps * (total_steps - done_steps)
+        _hb = (
+            f"ep {ep + 1}/{epochs} chunk {j + 1}/{n_chunks} "
+            f"step {done_steps}/{total_steps} "
+            f"elapsed={elapsed:.0f}s eta~{eta:.0f}s "
+            f"kl={sum(s['kl'] for s in recent) / n_r:.4f} "
+            f"entropy={sum(s['entropy'] for s in recent) / n_r:.4f} "
+            f"policy={sum(s['policy'] for s in recent) / n_r:.4f} "
+            f"value={sum(s['value'] for s in recent) / n_r:.4f} "
+            f"gnorm={sum(s['gnorm'] for s in recent) / n_r:.3f}"
         )
         if progress is not None:
-            # 组 3：epoch 行不再单独打 —— 攒进这一轮的**同一行**，并在此（真实事件：一个
-            # epoch 跑完）按 60s 节流心跳；收尾由调用方 emit（它还要补 steps/chunks/秒数）。
-            progress.add("进度", _ep_line)
-            # 逐 epoch 的 kl/entropy/… 只留**最后一个 epoch** 的读数：一行里塞 N 份同名字段
-            # 读起来是噪声；趋势由调用方账本（iter stats）承担。
-            progress.add("kl", f"{sum(s['kl'] for s in ep_stats) / n_e:.4f}")
-            progress.add("entropy", f"{sum(s['entropy'] for s in ep_stats) / n_e:.4f}")
-            progress.add("policy", f"{sum(s['policy'] for s in ep_stats) / n_e:.4f}")
-            progress.add("value", f"{sum(s['value'] for s in ep_stats) / n_e:.4f}")
-            progress.add("gnorm", f"{sum(s['gnorm'] for s in ep_stats) / n_e:.3f}")
+            progress.add("进度", _hb)
             progress.beat(progress_head)
         else:
-            log(f"[ppo] {_ep_line}")
-        if diag_on:
-            # 按 chunk batch 形状汇总（累计）：若 B 只有一个值却仍「每步新编译」⇒ 形状不是原因。
-            # ★ 2026-10-30：这条**不再逐 epoch 单独占一个字段**（N 个 epoch = N 段），
-            # 改成往**系列**里追加一句，收尾时合成**一个字段**（判决要素一个不少）。
-            _sum = " ".join(
-                f"B={_b}:{int(_a['iters'])}步/墙钟{_a['wall']:.0f}s"
-                for _b, _a in sorted(diag_by_b.items(), key=lambda kv: -kv[1]["wall"])
-            )
-            diag_epoch_series.append(
-                f"到 epoch {ep + 1}: {_sum} | 累计编译={diag_compile:.0f}s"
-                f"（新编译 {diag_uncached:.0f} 次）/ 总墙钟={time.time() - t0:.0f}s"
-            )
-        if target_kl > 0.0:
-            # D8 轮内中止阈值（镜像 intent 后端）：只在本 epoch 结束后判，缺省关闭。
-            _ep_kl = sum(s["kl"] for s in ep_stats) / n_e
-            if _ep_kl > target_kl:
-                log(
-                    f"[ppo] target_kl={target_kl:g} exceeded (epoch {ep + 1} "
-                    f"kl={_ep_kl:.4f}) — early stopping remaining epochs"
-                )
-                early_stopped = True
-                break
+            log(f"[ppo] {_hb}")
+    ctx.last_hb = last_hb
+
+
+def _finish_epoch(ctx: PPOContext, ep: int, n_ep_start: int) -> None:
+    """epoch 收尾：checkpoint / 回调 / epoch 行 / 诊断系列。"""
+    model, opt = ctx.model, ctx.opt
+    stats, ckpt_path, on_epoch_done = ctx.stats, ctx.ckpt_path, ctx.on_epoch_done
+    epochs, t0 = ctx.epochs, ctx.t0
+    progress, progress_head = ctx.progress, ctx.progress_head
+    diag_on = ctx.diag.on
+    diag_by_b, diag_compile, diag_uncached = (
+        ctx.diag.by_b,
+        ctx.diag.compile,
+        ctx.diag.uncached,
+    )
+    diag_epoch_series = ctx.diag.epoch_series
+    if ckpt_path:
+        _ppo_save(ckpt_path, model, opt, ep + 1, ctx.rng)
+    if on_epoch_done is not None:
+        on_epoch_done(ep + 1, model)
+    ep_stats = stats[n_ep_start:]
+    n_e = max(1, len(ep_stats))
+    _ep_line = (
+        f"epoch {ep + 1}/{epochs} done ({time.time() - t0:.0f}s total, "
+        f"{len(ep_stats)} chunks)"
+        + (", ckpt saved" if ckpt_path else "")
+        + f": kl={sum(s['kl'] for s in ep_stats) / n_e:.4f} "
+        f"entropy={sum(s['entropy'] for s in ep_stats) / n_e:.4f} "
+        f"kickstart={sum(s['kickstart'] for s in ep_stats) / n_e:.4f} "
+        f"policy={sum(s['policy'] for s in ep_stats) / n_e:.4f} "
+        f"value={sum(s['value'] for s in ep_stats) / n_e:.4f} "
+        f"gnorm={sum(s['gnorm'] for s in ep_stats) / n_e:.3f}"
+    )
+    if progress is not None:
+        # 组 3：epoch 行不再单独打 —— 攒进这一轮的**同一行**，并在此（真实事件：一个
+        # epoch 跑完）按 60s 节流心跳；收尾由调用方 emit（它还要补 steps/chunks/秒数）。
+        progress.add("进度", _ep_line)
+        # 逐 epoch 的 kl/entropy/… 只留**最后一个 epoch** 的读数：一行里塞 N 份同名字段
+        # 读起来是噪声；趋势由调用方账本（iter stats）承担。
+        progress.add("kl", f"{sum(s['kl'] for s in ep_stats) / n_e:.4f}")
+        progress.add("entropy", f"{sum(s['entropy'] for s in ep_stats) / n_e:.4f}")
+        progress.add("policy", f"{sum(s['policy'] for s in ep_stats) / n_e:.4f}")
+        progress.add("value", f"{sum(s['value'] for s in ep_stats) / n_e:.4f}")
+        progress.add("gnorm", f"{sum(s['gnorm'] for s in ep_stats) / n_e:.3f}")
+        progress.beat(progress_head)
+    else:
+        log(f"[ppo] {_ep_line}")
+    if diag_on:
+        # 按 chunk batch 形状汇总（累计）：若 B 只有一个值却仍「每步新编译」⇒ 形状不是原因。
+        # ★ 2026-10-30：这条**不再逐 epoch 单独占一个字段**（N 个 epoch = N 段），
+        # 改成往**系列**里追加一句，收尾时合成**一个字段**（判决要素一个不少）。
+        _sum = " ".join(
+            f"B={_b}:{int(_a['iters'])}步/墙钟{_a['wall']:.0f}s"
+            for _b, _a in sorted(diag_by_b.items(), key=lambda kv: -kv[1]["wall"])
+        )
+        diag_epoch_series.append(
+            f"到 epoch {ep + 1}: {_sum} | 累计编译={diag_compile:.0f}s"
+            f"（新编译 {diag_uncached:.0f} 次）/ 总墙钟={time.time() - t0:.0f}s"
+        )
+
+
+
+def _finish(ctx: PPOContext) -> None:
+    """update 收尾：诊断一行 / profiler 表 / steady-state 步墙钟。"""
+    d = ctx.diag
+    diag_on, diag_epoch_series = d.on, d.epoch_series
+    diag_worst, diag_worst_delta, diag_sig = d.worst, d.worst_delta, d.sig
+    diag_compile_dom, diag_reset = d.compile_dom, d.reset
+    diag_b = d.bundle
+    total_steps, t0 = ctx.total_steps, ctx.t0
+    _prof, _prof_steps, _prof_left = ctx.prof, ctx.prof_steps, ctx.prof_left
+    _step_walls = ctx.step_walls
     # ---- 组 2 收尾：诊断一行（完成为止的读数集合，等价替换原来的 ~25 行/轮）----
     if diag_on:
         if diag_epoch_series:
@@ -923,6 +949,12 @@ def ppo_update(
             f"[ppo] step wall median={_med * 1000:.1f}ms p95={_p95 * 1000:.1f}ms "
             f"n={len(_ws)}（已剔前 2 步 warmup，总 {len(_step_walls)} 步）"
         )
+
+
+
+def _aggregate(ctx: PPOContext) -> dict:
+    """把逐步 stats 聚合成调用方契约的 dict（0 步路径返回零）。"""
+    stats = ctx.stats
     # aggregate
     if not stats:
         # 断点续跑"剩余 0 epoch"路径（checkpoint 已完成）：无梯度步可跑，
@@ -944,8 +976,123 @@ def ppo_update(
             "early_stopped": False,
         }
     agg = aggregate_stats(stats, list(stats[0].keys()))
-    agg["early_stopped"] = early_stopped
+    agg["early_stopped"] = ctx.early_stopped
     return agg
+
+
+
+def ppo_update(
+    model,
+    opt,
+    chunks,
+    epochs,
+    device,
+    ckpt_path: str | None = None,
+    on_epoch_done=None,
+    kl_coef: float = 0.0,
+    ref_model=None,
+    kickstart_kl: float = 0.0,
+    ent_coef: float | None = None,
+    demo_bank: DemoBank | None = None,
+    demo_bc_coef: float = 0.0,
+    demo_per_mb: int = 0,
+    progress: LogBundle | None = None,
+    progress_head: str = "[ppo] PPO",
+    value_anchor: float = 0.0,
+    rng: PPORng | None = None,
+    lazy: bool = False,
+    target_kl: float = 0.0,
+):
+    """chunks: list of minibatch dicts (obs (B,14,26,26) / scalars (B,24) / ...).
+
+    ckpt_path: 非空则每 epoch 落盘 checkpoint（model/opt/epochs_done/三条随机流的
+    `bit_generator.state`），并支持断点续跑（重启后从已完成 epoch 数继续，minibatch
+    乱序精确复现 —— 精确的前提现在**只**是那份 ckpt，不再依赖「没人碰过全局
+    np.random」，见 `worker/ppo/rng.py`）。
+
+    rng（§P1-7，2026-11-17）：`PPORng` 三条显式流。None = 从种子 0 派生（**只为
+    兼容冒烟/工具**；训练入口一律显式传 `PPORng.from_seed(args.seed)`），此处不打日志
+    以免污染逐字节对照 —— 判据在 `tests/worker/test_ppo_rng_streams.py`。
+    on_epoch_done(ep_done, model): 每个 epoch 完成后同步回调（双缓冲提前预采的
+    触发点——stream 在 epoch3 完成时把 θ_{N,e3} 存盘 spawn 首波预采，PPO 继续
+    最后一个 epoch；模型在此处即当前 epoch 训练完的状态）。
+
+    kl_coef（plan/rl-training-config.md §8，M1c）：update 期新增形参，默认 0.0
+    （向后兼容，缺省路径数学逐字节不变）。>0 时对每个 minibatch 施加对采样策略
+    （lp_old，即收集策略）的 KL 惩罚 `kl_coef · E[(r−1) − ln r]`——per-tick 的
+    「初始 KL 大、稳定后衰减」由 ppo_schedule 显式传值落地。
+
+    ent_coef（2026-09-11 接线，与 kl_coef 同一路子）：熵正则系数。None = 用模块常量
+    ENT_COEF（0.01，缺省路径数学逐字节不变）；显式给值则 `loss -= ent_coef · entropy`。
+    动机：per-tick 线熵坍缩（唯一学动的 c4-kb1 熵 0.71–0.74，其余四条卡 0.44–0.51）。
+
+    ref_model + kickstart_kl（R5§363，BC-anchored kickstart，mirror intent 数学）：
+    ref = BC 冻结快照（调用方 freeze＋eval）；两者就绪时 loss +=
+    kickstart_kl · KL(π_curr ‖ π_BC)，分头 exact-KL（move＋fire 求和，与 entropy
+    口径同构）。任一缺席即零开销恒等（默认路径数学逐字节不变）。
+
+    demo_bank + demo_bc_coef + demo_per_mb（demo 混 batch，x20 后续）：
+    字段表见 `worker.ppo.demo.DemoBank`（obs / scalars / extra / actions / masks；形状与 dtype
+    以 `tools/build_demo_bank.py` 为准，scalars 维度以 `common.schema.SCALAR_DIM` 为准）；
+    每 PPO minibatch 步从 bank 均匀抽 demo_per_mb 个样本（np RNG ⇒ ckpt 断点续跑精确
+    复现），loss += demo_bc_coef · CE_move（**fire 头不做 demo BC**：fire 的 mask 语义是
+    「当前打得出去吗」，label 是「有没有按住」，冷却期两者互斥；43744 个可训练 fire
+    样本里 hold 只有 806（1.84%），fire CE 实际只教 release。2026-10-18 评审后的
+    move-only 消融；恢复方式见调用点）。三者任一缺席/非正即关闭，默认路径数学逐字节
+    不变（含额外 stat 键 demo_bc，关闭时恒 0.0）。
+
+    lazy（P3，plan/replay-corpus.plan.md D6）：`chunks` 是 `LazyChunks`（逐 chunk
+    物化 numpy）。此时**不**建 `tensored_chunks` 全量副本，每步 `tensored_batch`
+    现转当前 minibatch 并上卡；ref 缓存改为 chunk 首次使用时现算（ref 冻结，数值
+    逐位相同）。默认 False = 旧路径逐字节不变。
+
+    target_kl（D8，plan/replay-corpus.plan.md §7.2 第 8 条）：>0 时每个 epoch 末尾
+    检查本 epoch 的平均 approx KL，超过即打印并停止剩余 epoch（镜像 intent 后端）。
+    缺省 0 = 关闭，数学与步数逐字节不变；读数 `per_step_kl`/`clip_fraction` 恒开。
+    """
+    ctx = PPOContext(
+        model=model,
+        opt=opt,
+        chunks=chunks,
+        epochs=epochs,
+        device=device,
+        ckpt_path=ckpt_path,
+        on_epoch_done=on_epoch_done,
+        kl_coef=kl_coef,
+        ref_model=ref_model,
+        kickstart_kl=kickstart_kl,
+        ent_c=ENT_COEF if ent_coef is None else float(ent_coef),
+        demo_bank=demo_bank,
+        demo_bc_coef=demo_bc_coef,
+        demo_per_mb=demo_per_mb,
+        progress=progress,
+        progress_head=progress_head,
+        value_anchor=value_anchor,
+        rng=rng if rng is not None else PPORng.from_seed(0),
+        lazy=bool(lazy),
+        target_kl=float(target_kl or 0.0),
+    )
+    bk, cfg, st = _prepare(ctx)
+    for ep in range(ctx.start_epoch, ctx.epochs):
+        perm = ctx.rng.epoch.permutation(ctx.n_chunks)
+        n_ep_start = len(ctx.stats)
+        for j, i in enumerate(perm):
+            _train_step(ctx, bk, cfg, st, ep, j, int(i))
+        _finish_epoch(ctx, ep, n_ep_start)
+        if ctx.target_kl > 0.0:
+            # D8 轮内中止阈值（镜像 intent 后端）：只在本 epoch 结束后判，缺省关闭。
+            _ep_stats = ctx.stats[n_ep_start:]
+            if _ep_stats:
+                _ep_kl = sum(s["kl"] for s in _ep_stats) / len(_ep_stats)
+                if _ep_kl > ctx.target_kl:
+                    log(
+                        f"[ppo] target_kl={ctx.target_kl:g} exceeded (epoch {ep + 1} "
+                        f"kl={_ep_kl:.4f}) — early stopping remaining epochs"
+                    )
+                    ctx.early_stopped = True
+                    break
+    _finish(ctx)
+    return _aggregate(ctx)
 
 
 # trainer/stream.py 的 backend 契约要求模块暴露 update(...)（intent 的 ppo_intent 已有）；
@@ -1011,7 +1158,9 @@ def main():
     )
     args = ap.parse_args()
 
-    np.random.seed(args.seed)
+    # 全局播种已退役（§P1-7）：训练序列只由 `PPORng.from_seed(args.seed)` 的三条流决定
+    # ⇒ 进程里任何第三方抽随机数都不再改动训练轨迹。
+    ppo_rng = PPORng.from_seed(args.seed)
     if args.threads > 0:
         torch.set_num_threads(args.threads)
     try:
@@ -1058,7 +1207,7 @@ def main():
     total_steps = corpus_samples(episodes)
     log(f"[ppo] total transition steps={total_steps}")
 
-    chunks = chunk_episodes(episodes, args.mb)
+    chunks = chunk_episodes(episodes, args.mb, rng=ppo_rng.chunk)
     log(f"[ppo] {total_steps} rows -> {chunk_count(chunks)} minibatch chunks (mb={args.mb})")
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -1068,6 +1217,7 @@ def main():
         chunks,
         args.epochs,
         device,
+        rng=ppo_rng,
         lazy=args.ppo_loader == "lazy",
         target_kl=float(args.target_kl),
     )

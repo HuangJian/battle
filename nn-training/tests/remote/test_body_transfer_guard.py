@@ -35,6 +35,7 @@ from common.protocol import AUTH_HEADER, RetryableError
 from hub.server import _JobStore, make_server
 from remote import http as http_mod
 from remote import worker as worker_mod
+from tests.helpers.http_server import serve_fast
 
 
 class _FakeResp:
@@ -167,7 +168,7 @@ def _payload_server(tmp_path: Path, payload: bytes):
     store = _JobStore(tmp_path / "jobs", tmp_path / "training_log.jsonl")
     srv = make_server(store, 0, "sekret", host="127.0.0.1")
     port = srv.server_address[1]
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     jid = "f" * 16
     store.publish(
         jid,
@@ -258,7 +259,7 @@ def test_hub_small_send_has_no_completion_noise(tmp_path, capfd) -> None:
     store = _JobStore(tmp_path / "jobs", tmp_path / "training_log.jsonl")
     srv = make_server(store, 0, "sekret", host="127.0.0.1")
     port = srv.server_address[1]
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     try:
         req = urllib.request.Request(
             f"http://127.0.0.1:{port}/admin/queue", headers={AUTH_HEADER: "Bearer sekret"}
@@ -412,7 +413,7 @@ def _drip_http_server(count: int, gap: float):
 
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Drip)
     srv.daemon_threads = True
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     return srv, f"http://127.0.0.1:{srv.server_address[1]}/payload"
 
 
@@ -468,13 +469,15 @@ def _stub_decision(monkeypatch, verdicts: list[bool]) -> list[tuple]:
 
 def test_recv_some_prefers_read1_and_keeps_read_only_doubles_usable() -> None:
     """M1：真响应走 `read1`；只实现 `read` 的测试替身仍可用（回退不改字节流）。"""
-    assert http_mod._recv_some(_DripResp(chunks=1, size=8), 4096) == b"x" * 8
+    got = http_mod._recv_some(_DripResp(chunks=1, size=8), 4096)
+    assert got == b"x" * 8
 
     class _ReadOnly:
         def read(self, _n: int) -> bytes:
             return b"y" * 3
 
-    assert http_mod._recv_some(_ReadOnly(), 4096) == b"y" * 3
+    fallback = http_mod._recv_some(_ReadOnly(), 4096)
+    assert fallback == b"y" * 3
 
 
 def test_recv_some_does_not_wait_for_the_full_amount() -> None:

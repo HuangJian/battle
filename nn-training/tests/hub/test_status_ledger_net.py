@@ -32,7 +32,8 @@ if str(ROOT) not in sys.path:
 from common.protocol import AUTH_HEADER, normalize_manifest
 from hub.server import _JobStore, make_server
 from remote.hub_client import cancel_job
-from tests.remote.test_remote_ppo import _mini_manifest  # type: ignore
+from tests.helpers.http_server import serve_fast
+from tests.remote.test_remote_ppo import _mini_manifest
 
 TOKEN = "sekret"
 
@@ -43,7 +44,7 @@ def _boot(tmp_path: Path) -> tuple[str, _JobStore, ThreadingHTTPServer, threadin
     store = _JobStore(tmp_path / "jobs", ledger)
     srv = make_server(store, 0, TOKEN, host="127.0.0.1")
     port = srv.server_address[1]
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     return f"http://127.0.0.1:{port}", store, srv, th, ledger
 
@@ -122,7 +123,7 @@ def test_frozen_wins_over_a_ledger_cancel(tmp_path: Path) -> None:
     clock = _Clock()
     store = _JobStore(tmp_path / "jobs", ledger, now_fn=clock)
     srv = make_server(store, 0, TOKEN, host="127.0.0.1")
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = serve_fast(srv)
     th.start()
     try:
         jid = _publish(store)

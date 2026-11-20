@@ -128,13 +128,14 @@ def test_missing_or_bad_sink_never_breaks_logging(capsys: pytest.CaptureFixture[
         def flush(self) -> None:
             raise OSError("disk gone")
 
-    from common.log import _COURSE_SINKS
+    from common.log import default_router
 
-    _COURSE_SINKS["a"] = Boom()
+    sinks = default_router().sinks
+    sinks["a"] = Boom()
     with prefix_scope("a"):
         log("still visible")  # 镜像失败只吞
     assert "still visible" in capsys.readouterr().out
-    _COURSE_SINKS.pop("a", None)
+    sinks.pop("a", None)
 
 
 def test_reopen_same_course_replaces_handle(tmp_path: Path) -> None:
@@ -152,3 +153,62 @@ def test_reopen_same_course_replaces_handle(tmp_path: Path) -> None:
     assert "only-in-two" in second.read_text(encoding="utf-8")
     assert first.read_text(encoding="utf-8") == ""
     close_course_sink("a")  # 幂等
+
+
+def test_mirror_failure_is_reported_once(capsys: pytest.CaptureFixture[str]) -> None:
+    """镜像写失败**不再静默**：控制台照常，但同一门课只喊一次 WARN（不许每行刷）。
+
+    为什么钉住它：以前这里是裸 `pass` ⇒「该课日志在丢行」与「这课本来就没日志」长得一模一样，
+    只能事后比对才发现少了半天。喊多了又会把控制台刷成噪音，所以按 `mirror:<课>` 去重。
+    """
+    from common.log import LogRouter
+
+    class Boom:
+        def write(self, _s: str) -> None:
+            raise RuntimeError("disk full")
+
+        def flush(self) -> None:
+            raise RuntimeError("disk full")
+
+    router = LogRouter()
+    router.sinks["a"] = Boom()
+    with router.prefix_scope("a"):
+        router.log("line-1")
+        router.log("line-2")
+
+    out = capsys.readouterr().out.splitlines()
+    echoed = [ln for ln in out if ln.endswith(" line-1") or ln.endswith(" line-2")]
+    assert len(echoed) == 2, out
+    warns = [ln for ln in out if "[log] WARN" in ln]
+    assert len(warns) == 1, out
+    # 文案用切分对账（不是子串断言）：课程与失败原因各就各位。
+    head, _, cause = warns[0].partition("（")
+    assert head.endswith("课 a 的日志镜像写失败")
+    assert cause.startswith("RuntimeError: disk full")
+
+
+def test_close_failure_is_reported_once(capsys: pytest.CaptureFixture[str]) -> None:
+    """句柄关不上也喊一次（同一课只喊一次），且绝不把异常带到训练收尾路径。"""
+    from common.log import LogRouter
+
+    class BadClose:
+        def write(self, _s: str) -> None:
+            pass
+
+        def flush(self) -> None:
+            pass
+
+        def close(self) -> None:
+            raise OSError("already gone")
+
+    router = LogRouter()
+    router.sinks["c7"] = BadClose()
+    router.close_sink("c7")  # 不抛
+    router.sinks["c7"] = BadClose()
+    router.close_sink("c7")
+
+    warns = [ln for ln in capsys.readouterr().out.splitlines() if "[log] WARN" in ln]
+    assert len(warns) == 1, warns
+    head, _, cause = warns[0].partition("（")
+    assert head.endswith("课 c7 的日志句柄关闭失败")
+    assert cause.startswith("OSError: already gone")

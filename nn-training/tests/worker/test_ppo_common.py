@@ -34,16 +34,7 @@ from common.schema import OBS_CHANNELS, SCALAR_DIM
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import worker.ppo.common as ppo_common
-
-FAILS: list[str] = []
-
-
-def check(cond: bool, msg: str) -> None:
-    if not cond:
-        FAILS.append(msg)
-        print(f"FAIL: {msg}")
-    else:
-        print(f"ok: {msg}")
+from worker.ppo.rng import PPORng
 
 
 def test_masked_logsoftmax() -> None:
@@ -51,26 +42,23 @@ def test_masked_logsoftmax() -> None:
     mask = torch.tensor([[1, 1, 0], [0, 1, 1]])
     out = ppo_common.masked_logsoftmax(logits, mask)
     # 无效位被压到极负（原实现用 -1e9 近似 -inf，与 worker.ppo.py 历史行为一致）
-    check(bool((out[0, 2] < -1e6).item()), "无效类 logp ≈ -inf（极负）")
+    assert bool((out[0, 2] < -1e6).item()), "无效类 logp ≈ -inf（极负）"
     # 有效位 = 仅在有效子集上的 log_softmax
     exp_0 = torch.log_softmax(logits[0, :2], dim=-1)
-    check(torch.allclose(out[0, :2], exp_0, atol=1e-6), "有效位 logp = log_softmax(有效子集)")
+    assert torch.allclose(out[0, :2], exp_0, atol=1e-6), "有效位 logp = log_softmax(有效子集)"
     # 概率和（exp）在有效位上 = 1
     probs = out.exp()
-    check(
-        bool(torch.isclose(probs[0, :2].sum(), torch.tensor(1.0), atol=1e-5).item()),
-        "有效位概率和为 1",
-    )
+    assert bool(torch.isclose(probs[0, :2].sum(), torch.tensor(1.0), atol=1e-5).item()), "有效位概率和为 1"
 
 
 def test_cat_logprob_entropy() -> None:
     logp = torch.tensor([[0.1, 0.5, 0.4], [0.2, 0.3, 0.5]])
     a = torch.tensor([1, 2])
     got = ppo_common.cat_logprob(a, logp)
-    check(torch.allclose(got, torch.tensor([0.5, 0.5])), "cat_logprob gather 正确")
+    assert torch.allclose(got, torch.tensor([0.5, 0.5])), "cat_logprob gather 正确"
     ent = ppo_common.cat_entropy(logp)
     manual = -(logp.exp() * logp).sum(dim=-1).mean()
-    check(bool(torch.isclose(ent, manual).item()), "cat_entropy 与手算一致")
+    assert bool(torch.isclose(ent, manual).item()), "cat_entropy 与手算一致"
 
 
 def test_ppo_save_load(tmp_path: Path) -> None:
@@ -79,23 +67,27 @@ def test_ppo_save_load(tmp_path: Path) -> None:
     model = nn.Linear(4, 2)
     opt = torch.optim.Adam(model.parameters(), lr=0.1)
     td = tempfile.mkdtemp(dir=str(tmp_path))
-    ppo_common._ppo_save(td, model, opt, 3)
+    # §P1-7：随机流状态随 ckpt 落盘（旧全局 MT19937 那份已退役）。
+    rng = PPORng.from_seed(11)
+    _ = rng.epoch.permutation(8)  # 走一段，别停在原点
+    ppo_common._ppo_save(td, model, opt, 3, rng)
     # 文件齐备
     for f in ("model.pt", "opt.pt", "state.json"):
-        check(os.path.exists(os.path.join(td, f)), f"checkpoint 文件 {f} 存在")
+        assert os.path.exists(os.path.join(td, f)), f"checkpoint 文件 {f} 存在"
     # 加载返回 epochs_done
     m2 = nn.Linear(4, 2)
     o2 = torch.optim.Adam(m2.parameters(), lr=0.1)
-    done = ppo_common._ppo_load(td, m2, o2)
-    check(done == 3, f"_ppo_load 返回 epochs_done=3 (got {done})")
-    check(
-        np.array_equal(m2.weight.detach().numpy(), model.weight.detach().numpy()),
-        "checkpoint 加载后权重一致",
-    )
+    want_next = rng.epoch.permutation(8).tolist()
+    rng2 = PPORng.from_seed(11)
+    done = ppo_common._ppo_load(td, m2, o2, rng2)
+    assert done == 3, f"_ppo_load 返回 epochs_done=3 (got {done})"
+    assert np.array_equal(m2.weight.detach().numpy(), model.weight.detach().numpy()), "checkpoint 加载后权重一致"
     # 无 checkpoint 路径
     m3 = nn.Linear(4, 2)
     o3 = torch.optim.Adam(m3.parameters(), lr=0.1)
-    check(ppo_common._ppo_load(None, m3, o3) == 0, "ckpt_path=None → 0")
+    assert rng2.epoch.permutation(8).tolist() == want_next, "续跑的 epoch 顺序从 ckpt 里那一点接着抽（不是从种子重来）"
+    restored = ppo_common._ppo_load(None, m3, o3, PPORng.from_seed(0))
+    assert restored == 0, "ckpt_path=None → 0"
 
 
 def main() -> None:
@@ -105,9 +97,6 @@ def main() -> None:
     test_cat_logprob_entropy()
     test_backend_params_match_config()
     test_ppo_save_load(Path(_td))
-    if FAILS:
-        print(f"\n{len(FAILS)} FAILED")
-        sys.exit(1)
     print("\nAll tests passed.")
 
 
@@ -122,42 +111,62 @@ def test_backend_params_match_config() -> None:
     assert_backend_constants()
 
 
-def test_engine_and_common_still_re_export_the_np_core_names() -> None:
-    """搬家的代价守卫：搬进 np_core 后，旧访问点（engine / common）必须仍然可达。
+def test_np_core_is_the_only_home_for_gae_and_shard_loading() -> None:
+    """搬家守卫（2026-11-16 翻转）：这些名字现在**只**在 `ppo.np_core`，engine 不再转发。
 
-    2026-09-26 实测踩坑（本守卫的由来）：trajectory 装载块搬去 `ppo/np_core` 后，
-    engine 里那四个**只被属性取用**的再导出（`compute_gae` / `discover_shards` /
-    `load_episodes_common` / `load_shard_fields`）被 ruff F401 判成死代码删掉 ⇒
-    `tests/worker/test_ppo_goal.py`（`import worker.ppo.engine as ppo; worker.ppo.compute_gae(...)` 当定长
-    参照）当场 AttributeError。**「没人 `import` 这个名」≠「没人在属性上取它」**。
+    2026-09-26 的踩坑留下过一个「engine 必须继续再导出」的守卫：当时
+    `tests/worker/test_ppo_goal.py` 用 `import ppo.engine as ppo` 后靠属性取
+    `ppo.compute_gae(...)` 当定长参照，再导出被 ruff F401 判成死代码删掉 ⇒ 当场
+    AttributeError。**「没人 `import` 这个名」≠「没人在属性上取它」**——解药是让那两个
+    测试改从 np_core 直取，而不是永久保留一层没有任何生产消费方的转发面；今天两者都做了，
+    所以这里断言方向反过来：`engine` 上不该再有这些影子。
+
+    `GAMMA` / `LAM` / `load_episodes` / `chunk_episodes` **不在断言里**：engine 自己要用
+    它们（`--gamma` / `--lam` 缺省值、手算路径、minibatch 分块），那是真属性不是转发。
     """
-    import worker.ppo
+    import worker.ppo.common as ppo_common
     import worker.ppo.engine as engine
     import worker.ppo.np_core as np_core
 
-    # 两条再导出链各自的公开面：common 从最早那一刀起就有的四个，engine 还多带
-    # trajectory 装载那一组（2026-09-26 搬来，旧访问点 `worker.ppo.engine.load_episodes` 等要活）。
-    BOTH = ("compute_gae", "discover_shards", "load_episodes_common", "load_shard_fields")
-    ENGINE_ONLY = (
-        "discover_rl_shards",
-        "load_episode_from_shard",
-        "load_episodes",
-        "load_shard",
-        "GAMMA",
-        "LAM",
+    RETIRED_FROM_ENGINE = (
         "_RL_SHARD_SPEC",
+        "compute_gae",
+        "discover_rl_shards",
+        "discover_shards",
+        "load_episodes_common",
+        "load_shard",
+        "load_shard_fields",
     )
-    for name in BOTH + ENGINE_ONLY:
-        assert getattr(engine, name) is getattr(np_core, name), (
-            f"worker.ppo.engine.{name} 不再是 np_core 的同一个对象（再导出断了/被抄了一份）"
+    for name in RETIRED_FROM_ENGINE:
+        assert hasattr(np_core, name), f"np_core 丢了 {name}（它现在是唯一出处）"
+        assert not hasattr(engine, name), (
+            f"worker.ppo.engine.{name} 又长回来了：请把消费方改到 worker.ppo.np_core，"
+            f"而不是在 engine 上补一条转发/`# noqa: F401`"
         )
-    for name in BOTH:
-        assert getattr(ppo_common, name) is getattr(np_core, name), (
-            f"worker.ppo.common.{name} 不再是 np_core 的同一个对象（再导出断了/被抄了一份）"
-        )
-    # 根级便捷名也指向新家（`worker.ppo.compute_gae` 不得再拖 torch）。
-    assert worker.ppo.compute_gae is np_core.compute_gae
-    assert worker.ppo.load_episodes is np_core.load_episodes
+    # `load_episode_from_shard` **必须留着**：它是 `RolloutBackend` 的契约成员，
+    # `trainer/stream.py` 在运行期从「本模式的 backend 模块」上取它（engine 自己并不调用）。
+    assert engine.load_episode_from_shard is np_core.load_episode_from_shard, (
+        "worker.ppo.engine.load_episode_from_shard 断了：RolloutBackend 契约成员必须在后端模块上"
+    )
+    # `ppo.common` 不许再把 np_core 的名字挂在自己身上（2026-11-16）：那层再导出没人需要，
+    # 却让 np_core 有第二个门牌 —— 消费方写 `from ppo.common import chunk_episodes` 也能过，
+    # 于是撤 np_core 的某个名字时看不见第二个入口。判据不是白名单：`common` 里每条
+    # `from worker.ppo.np_core import X` 的 X 都必须在本模块体内真被引用，否则就是再导出。
+    import ast
+
+    src = Path(ppo_common.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "worker.ppo.np_core"
+        for alias in node.names
+    }
+    used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    assert imported <= used, (
+        "worker.ppo.common 又给 np_core 挂了门牌（这些名字本模块并不使用）："
+        f"{sorted(imported - used)} —— 请让消费方直接从 worker.ppo.np_core 取"
+    )
 
 
 def _kick_chunks() -> list[dict]:

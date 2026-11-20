@@ -24,7 +24,16 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from threading import Lock
+
+
+@dataclass(frozen=True)
+class AuthState:
+    """D9 闭锁的只读快照（计数与到期时刻都复制一份；调用方只读）。"""
+
+    failures: dict[str, int]
+    blocked_until: dict[str, float]
 
 
 def _is_loopback(ip: str) -> bool:
@@ -99,3 +108,11 @@ class _AuthGuard:
         """该 ip 剩余封禁秒数（未封禁 = 0）——供审计行提示「还要封多久」。"""
         with self._lock:
             return max(0.0, self._auth_blocked_until.get(ip, 0.0) - self._now())
+
+    def auth_state(self) -> AuthState:
+        """D9 闭锁的只读快照（锁内复制；不改变计数 / 封禁语义）。"""
+        with self._lock:
+            return AuthState(
+                failures=dict(self._auth_fail),
+                blocked_until=dict(self._auth_blocked_until),
+            )

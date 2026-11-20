@@ -3,8 +3,9 @@
 **为什么是 Python 而不是再写一套 TS 调度器**（用户 2026-09-19 质问，判定成立）：
 节点通信与重试机制早已在 Python 侧且经长期实战检验——
 
-  * 节点门 / codeHash 判据：`common.distribution.check_code_hash`（SSOT = codehash-files.txt）
-  * ping + 任务下发 + 退避重试 + 权重下发 + wver/409：`common.distribution.fetch_task` / `post_weights_parallel`
+  * 节点门 / codeHash 判据：`common.codehash.check_code_hash`（SSOT = codehash-files.txt）
+  * ping + 任务下发 + 退避重试 + 权重下发 + wver/409：`common.task_client.fetch_task` /
+    `common.weights_client.post_weights_parallel`
   * 失败连击停用（nodeFailStreak）、EVAL_TASK_ATTEMPTS 重排队：`BatchEvalRunner`
   * 本机份额：`policy.evalLocalSlots`（缺省 `eval_yield.EVAL_LOCAL_SLOTS_DEFAULT`）；
     机器级配置链（`rl.local_slots`）由调用方 TS 侧 `dist-node-gate.configLocalSlots`
@@ -81,6 +82,7 @@ def weight_key16(w: dict) -> str:
     同一次调用跑两个权重时两张表键完全相同 ⇒ 后一个权重把前者的 label/weightIdx 全盖掉，
     于是逐行 label 全错、`_row_id` 的 `wi * games` 也全错（多权重产物实际不可用）。
     """
+    import common.codehash
     import common.distribution
 
     # ⚠ 本文件是**文件入口**（`sys.path` 的 nn-training 项在上面那行之后才插）⇒ `remote.*`
@@ -90,7 +92,7 @@ def weight_key16(w: dict) -> str:
 
     path = str(w.get("path") or "")
     if not path:
-        return f"god-{common.distribution.compute_engine_epoch()[:12]}"
+        return f"god-{common.codehash.compute_engine_epoch()[:12]}"
     # ★ 2026-10-15：指纹必须算在**整份**上——离线腿回传的 delta 容器（hub 原样落位）会让这里
     #   的 key16 与 `batch_runner` 读侧落地后算出的 wver 分叉（行身份/元数据跟着错位）。
     weights_standard.ensure_standard_weights(path)
@@ -261,6 +263,7 @@ def main() -> int:
     # 临时批次：EvalBoard 数据根指向本次 runDir（心跳/台账都不进控制台既有数据）
     os.environ.setdefault("EVALBOARD_DATA", str(run_dir / "evalboard"))
 
+    import common.codehash
     import common.distribution
     from common.jsonc import load as jsonc_load
     from trainer.batch_eval import ONESHOT_EVAL_KIND, BatchEvalRunner, data_root
@@ -342,7 +345,7 @@ def main() -> int:
     # 走 eval_rule_kwargs 同时透传到本机 run_local_eval_game 与远端 fetch_task。
     args.opening_connect = bool(spec.get("openingConnect"))
     bun = shutil.which("bun") or "bun"
-    epoch = common.distribution.compute_engine_epoch()
+    epoch = common.codehash.compute_engine_epoch()
 
     units, meta = build_course_units(
         weights if policy != "god" else [{"label": "god", "path": ""}],

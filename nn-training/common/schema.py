@@ -119,7 +119,8 @@ POWERUP_ORDER = [
     "mine",
 ]
 POWERUP_ENUM = {name: i for i, name in enumerate(POWERUP_ORDER)}  # 0..14
-assert len(POWERUP_ORDER) == 15, "PowerUpType has exactly 15 members"
+if len(POWERUP_ORDER) != 15:
+    raise RuntimeError("PowerUpType has exactly 15 members")
 
 # ---- Enemy kind -> channel offset (relative to CH.enemy_basic) ----
 KIND_INDEX = {"basic": 0, "fast": 1, "power": 2, "armor": 3}
@@ -213,8 +214,16 @@ POLICY_EXTRA_LAYOUT = [
     (55, "leadHitLeft"),
     (56, "leadHitRight"),
 ]
-assert len(POLICY_EXTRA_LAYOUT) == POLICY_EXTRA_DIM
-assert sorted(i for i, _ in POLICY_EXTRA_LAYOUT) == list(range(POLICY_EXTRA_DIM))
+def _check_layout(name: str, layout: list[tuple[int, str]], dim: int) -> None:
+    """模块级布局不变量：`python -O` 下 `assert` 会消失，这里必须显式 raise。"""
+    if len(layout) != dim:
+        raise RuntimeError(f"{name}: expected {dim} entries, got {len(layout)}")
+    indices = sorted(i for i, _ in layout)
+    if indices != list(range(dim)):
+        raise RuntimeError(f"{name}: indices must be 0..{dim - 1}, got {indices}")
+
+
+_check_layout("POLICY_EXTRA_LAYOUT", POLICY_EXTRA_LAYOUT, POLICY_EXTRA_DIM)
 
 # mirrorX：左右语义维**互换**（计数/距离的镜像不是取负）。
 # ⚠ 命名：plan §4-S0b 所称 `EXTRA_X_INDICES` 即本表——因这些维语义是「左右互换」而非
@@ -291,8 +300,7 @@ SCALAR_LAYOUT = [
     (44, "ticksSinceHit"),  # 最近挨打距今 /300（从未 ⇒ 1.0）
     (45, "nearestEnemyBeyond"),  # (E−P)·facing / |E−P|；>0 = 我在它后方
 ]
-assert len(SCALAR_LAYOUT) == SCALAR_DIM
-assert sorted(i for i, _ in SCALAR_LAYOUT) == list(range(SCALAR_DIM))
+_check_layout("SCALAR_LAYOUT", SCALAR_LAYOUT, SCALAR_DIM)
 
 # ---- Decision-tick condition category (plan §1.3) ----
 COND_TURN = 0

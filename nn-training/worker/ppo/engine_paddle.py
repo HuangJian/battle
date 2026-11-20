@@ -26,8 +26,11 @@ from typing import Any
 import numpy as np
 import paddle
 
-from common.schema import FIRE3_DIM, FIRE_DIM, MOVE4_DIM, MOVE_DIM
+from common.contracts import ActionSpace, head_layout
+from worker.ppo.backend import Backend, StepConfig, StepState, run_step
 from worker.ppo.checkpoint_paddle import load_ckpt, save_ckpt
+from worker.ppo.demo import DemoBank
+from worker.ppo.rng import PPORng
 from worker.ppo.trainer import aggregate_stats, cat_entropy, cat_entropy_per, chunk_count
 from worker.ppo.vram import paddle_free_bytes, require_corpus
 
@@ -53,8 +56,7 @@ def tensored_batch(item: dict) -> dict:
     fancy index 结果本就可写，这里零成本。
     """
     return {
-        k: paddle.to_tensor(v if v.flags.writeable else np.array(v))
-        for k, v in item.items()
+        k: paddle.to_tensor(v if v.flags.writeable else np.array(v)) for k, v in item.items()
     }
 
 
@@ -67,24 +69,21 @@ def _ref_logprobs(ref_model: Any, e: dict) -> tuple[paddle.Tensor, ...]:
     """
     _ro = ref_model(e["obs"], e["scalars"], e.get("extra"))
     _m = e["mask"]
-    _ref_v6 = len(_ro) >= 4
-    _data_v6 = e.get("a_hold") is not None
-    if _ref_v6 != _data_v6:
+    _ref_space = ActionSpace.from_forward_arity(len(_ro))
+    _data_space = ActionSpace.from_batch(e)
+    if _ref_space is not _data_space:
         raise ValueError(
             f"[ppo-paddle] kickstart ref 与数据动作空间不同源：ref 返回 {len(_ro)} 个头"
-            f"（{'v6 4/3/2' if _ref_v6 else 'legacy 5/2'}），chunk "
-            f"{'带' if _data_v6 else '不带'} a_hold"
+            f"（{_ref_space.value}），chunk 是 {_data_space.value}"
         )
-    if _ref_v6:
-        return (
-            masked_logsoftmax(_ro[0], _m[:, :MOVE4_DIM]),
-            masked_logsoftmax(_ro[1], _m[:, MOVE4_DIM : MOVE4_DIM + FIRE3_DIM]),
-            masked_logsoftmax(_ro[2], _m[:, MOVE4_DIM + FIRE3_DIM :]),
-        )
-    return (
-        masked_logsoftmax(_ro[0], _m[:, :MOVE_DIM]),
-        masked_logsoftmax(_ro[1], _m[:, MOVE_DIM : MOVE_DIM + FIRE_DIM]),
+    _layout = head_layout(_ref_space)
+    _heads: tuple[paddle.Tensor, ...] = (
+        masked_logsoftmax(_ro[0], _m[:, _layout.move_slice]),
+        masked_logsoftmax(_ro[1], _m[:, _layout.fire_slice]),
     )
+    if _layout.hold_slice is not None:
+        _heads = (*_heads, masked_logsoftmax(_ro[2], _m[:, _layout.hold_slice]))
+    return _heads
 
 
 def masked_logsoftmax(logits: paddle.Tensor, mask: paddle.Tensor) -> paddle.Tensor:
@@ -191,6 +190,91 @@ def clip_grad_norm_(parameters, max_norm: float) -> paddle.Tensor:
     return total
 
 
+def _prepare_demo(
+    demo_bank: DemoBank | None, demo_bc_coef: float, demo_per_mb: int
+) -> tuple[dict[str, paddle.Tensor], int, bool]:
+    """demo bank → tensor 视图 + 局数 + 是否启用（自 `ppo_update` 原样搬出）。"""
+    demo_on = demo_bank is not None and float(demo_bc_coef) > 0.0 and int(demo_per_mb) > 0
+    demo_t: dict[str, paddle.Tensor] = {}
+    demo_n = 0
+    if demo_on:
+        assert demo_bank is not None
+        demo_t = {
+            "obs": paddle.to_tensor(np.asarray(demo_bank["obs"])),
+            "scalars": paddle.to_tensor(np.asarray(demo_bank["scalars"]).astype(np.float32)),
+            "actions": paddle.to_tensor(np.asarray(demo_bank["actions"]).astype(np.int64)),
+            "masks": paddle.to_tensor(np.asarray(demo_bank["masks"]).astype(np.float32)),
+        }
+        demo_n = int(demo_t["actions"].shape[0])
+        demo_on = demo_n > 0
+        if demo_on and "extra" in demo_bank:
+            demo_t["extra"] = paddle.to_tensor(np.asarray(demo_bank["extra"]).astype(np.float32))
+    return demo_t, demo_n, demo_on
+
+
+def _build_ref_cache(
+    tensored: list[dict], ref_model, kickstart_kl: float
+) -> list[tuple[paddle.Tensor, ...] | None]:
+    """kickstart ref 前向每 chunk 只算一次（与 torch 侧 ref_cache 同语义；数值相同）。"""
+    ref_cache: list[tuple[paddle.Tensor, ...] | None] = [None] * len(tensored)
+    if ref_model is not None and kickstart_kl > 0:
+        with paddle.no_grad():
+            for _i, _e in enumerate(tensored):
+                ref_cache[_i] = _ref_logprobs(ref_model, _e)
+    return ref_cache
+
+
+def _zero_stats() -> dict[str, float]:
+    """0 步时的零值表（键集合与正常 `stats` 一致）。"""
+    return {
+        k: 0.0
+        for k in (
+            "policy",
+            "value",
+            "entropy",
+            "kl",
+            "per_step_kl",
+            "clip_fraction",
+            "kickstart",
+            "demo_bc",
+            "mean_ret",
+            "mean_adv",
+            "gnorm",
+            "value_new_rms",
+            "policy_new_rms",
+            "early_stopped",
+        )
+    }
+
+
+def _paddle_backend() -> Backend:
+    """Paddle 侧的算子表（与 `engine._torch_backend` 逐字段对应，钩子调用时解引用）。"""
+    return Backend(
+        exp=lambda x: paddle.exp(x),
+        clip=lambda x, lo, hi: paddle.clip(x, lo, hi),
+        minimum=lambda a, b: paddle.minimum(a, b),
+        mse_loss=lambda a, b: F.mse_loss(a, b),
+        masked_logsoftmax=lambda logits, mask: masked_logsoftmax(logits, mask),
+        cat_logprob=lambda action, logp: cat_logprob(action, logp),
+        cat_entropy=lambda logp: cat_entropy(logp),
+        cat_entropy_per=lambda logp: cat_entropy_per(logp),
+        astype=lambda x, dt: x.astype(dt),
+        kl_rows=lambda logp, ref: (logp.exp() * (logp - ref)).sum(axis=-1),
+        approx_kl=lambda lp_old, lp_new: approx_kl_est(lp_old, lp_new),
+        zeros=_zero_scalar,
+        demo_masked_ce=lambda logits, target, mask: _demo_masked_ce(logits, target, mask),
+        demo_index=lambda _buf, idx: paddle.to_tensor(idx.astype(np.int64)),
+        zero_grad=lambda opt: opt.clear_grad(),
+        backward=lambda loss: loss.backward(),
+        clip_grad_norm=lambda params, mx: clip_grad_norm_(params, mx),
+        optimizer_step=lambda opt: opt.step(),
+        no_grad=paddle.no_grad,
+        sync=lambda values: sync_scalars(values),
+        anchor_pull=lambda model, rho: apply_value_anchor_pull(model, rho),
+        policy_rms=lambda model: policy_new_rms_of(model),
+    )
+
+
 def ppo_update(
     model,
     opt,
@@ -203,7 +287,7 @@ def ppo_update(
     ref_model=None,
     kickstart_kl: float = 0.0,
     ent_coef: float | None = None,
-    demo_bank: dict | None = None,
+    demo_bank: DemoBank | None = None,
     demo_bc_coef: float = 0.0,
     demo_per_mb: int = 0,
     progress: Any = None,
@@ -213,13 +297,15 @@ def ppo_update(
     #: `epochs × len(chunks)` 自己重算 —— 引擎一旦跳 chunk / 从 ckpt 中途起步，重算就会静默
     #: 漂移，而那个数要写进 `state.json` 与回传的 opt `step`（bias correction 的时基）。
     steps_out: dict[str, int] | None = None,
+    rng: PPORng | None = None,
     lazy: bool = False,
     log=lambda _msg: None,
 ):
     """Paddle PPO update. Same math as `worker.ppo.engine.ppo_update`; see module doc.
 
-    `ckpt_path` 语义与 torch 侧一致：开跑前载入（model/opt/epochs_done/RNG），
-    每个 epoch 尾落盘一次；torch 与 Paddle 写出的 checkpoint 互相可读。
+    `ckpt_path` 语义与 torch 侧一致：开跑前载入（model/opt/epochs_done/三条随机流的
+    `bit_generator.state`），每个 epoch 尾落盘一次；torch 与 Paddle 写出的 checkpoint
+    互相可读。`rng` 与 torch 侧同口径（None = 种子 0，仅冒烟/工具用）。
 
     `lazy`（P3）：`chunks` 是 `LazyChunks`（逐 chunk 物化 numpy）。此时不建全量
     paddle 副本，每步 `tensored_batch` 现转当前 minibatch；kickstart ref 改为
@@ -236,6 +322,7 @@ def ppo_update(
     clip = CLIP_EPS
     ent_c = ENT_COEF if ent_coef is None else float(ent_coef)
     stats: list[dict[str, float]] = []
+    ppo_rng = rng if rng is not None else PPORng.from_seed(0)
     # 与 torch 侧同规：eager 全量上卡前查显存（探测不到就放行，绝不误拦 CPU 训练）。
     # lazy 逐批上卡 ⇒ 没有「全量语料」可言，`corpus_bytes` 也不接受 LazyChunks。
     if not lazy:
@@ -243,163 +330,62 @@ def ppo_update(
     tensored: Any = chunks if lazy else tensored_chunks(chunks)
     n_chunks = chunk_count(chunks)
     total_steps = n_chunks * epochs
-    demo_on = demo_bank is not None and float(demo_bc_coef) > 0.0 and int(demo_per_mb) > 0
-    demo_t: dict[str, paddle.Tensor] = {}
-    demo_n = 0
-    if demo_on:
-        assert demo_bank is not None
-        demo_t = {
-            "obs": paddle.to_tensor(np.asarray(demo_bank["obs"])),
-            "scalars": paddle.to_tensor(np.asarray(demo_bank["scalars"]).astype(np.float32)),
-            "actions": paddle.to_tensor(np.asarray(demo_bank["actions"]).astype(np.int64)),
-            "masks": paddle.to_tensor(np.asarray(demo_bank["masks"]).astype(np.float32)),
-        }
-        demo_n = int(demo_t["actions"].shape[0])
-        demo_on = demo_n > 0
-        if demo_on and "extra" in demo_bank:
-            demo_t["extra"] = paddle.to_tensor(np.asarray(demo_bank["extra"]).astype(np.float32))
-    # kickstart ref 前向每 chunk 只算一次（与 torch 侧 ref_cache 同语义；数值相同）。
-    # lazy：不预计算（那是全量 chunks 的遍历），chunk 首次被取到时现算。
-    ref_cache: list[tuple[paddle.Tensor, ...] | None] = [None] * n_chunks
-    if ref_model is not None and kickstart_kl > 0 and not lazy:
-        with paddle.no_grad():
-            for _i, _e in enumerate(tensored):
-                ref_cache[_i] = _ref_logprobs(ref_model, _e)
+    # 动作空间只在数据边界嗅一次；ref 与每个 minibatch 都读这份契约。
+    _first = tensored.get(0) if lazy else (tensored[0] if tensored else None)
+    space = ActionSpace.from_batch(_first) if _first is not None else ActionSpace.LEGACY
+    layout = head_layout(space)
+    demo_t, demo_n, demo_on = _prepare_demo(demo_bank, demo_bc_coef, demo_per_mb)
+    # lazy：不预计算（那要遍历全量 chunks，破坏延迟物化），chunk 首次取用时现算。
+    ref_cache: list[tuple[Any, ...] | None] = (
+        [None] * n_chunks if lazy else _build_ref_cache(tensored, ref_model, kickstart_kl)
+    )
+    # 步级系数 / 跨步状态 / 算子表各构建一次（热路径不再分配）。
+    bk = _paddle_backend()
+    cfg = StepConfig(
+        clip=clip,
+        ent_coef=ent_c,
+        vf_coef=VF_COEF,
+        kl_coef=kl_coef,
+        kickstart_kl=kickstart_kl,
+        value_anchor=value_anchor,
+        demo_bc_coef=demo_bc_coef,
+        demo_per_mb=demo_per_mb,
+        max_grad_norm=MAX_GRAD_NORM,
+    )
+    st = StepState(
+        layout=layout,
+        tensored=tensored,
+        ref_cache=ref_cache,
+        demo_on=demo_on,
+        demo_n=demo_n,
+        demo_t=demo_t,
+    )
     t0 = time.time()
     last_hb = t0
-    start_epoch, steps_done = load_ckpt(model, opt, ckpt_path)
+    start_epoch, steps_done = load_ckpt(model, opt, ckpt_path, ppo_rng)
     if start_epoch:
         log(
             f"[ppo-paddle] resume PPO from checkpoint: epoch {start_epoch}/{epochs} done "
             f"(continuing remaining {epochs - start_epoch}, steps_done={steps_done})"
         )
     for ep in range(start_epoch, epochs):
-        perm = np.random.permutation(n_chunks)
+        perm = ppo_rng.epoch.permutation(n_chunks)
         for j, i in enumerate(perm):
-            e = tensored.get(int(i)) if lazy else tensored[int(i)]
             if lazy:
                 # 只把当前 minibatch 上卡；全量 chunks 不再有 paddle 副本。
-                e = tensored_batch(e)
-            obs = e["obs"]
-            sc = e["scalars"]
-            a_move = e["a_move"]
-            a_fire = e["a_fire"]
-            lp_move = e["lp_move"]
-            lp_fire = e["lp_fire"]
-            adv = e["adv"]
-            ret = e["ret"]
-            mask = e["mask"]
-
-            out = model(obs, sc, e.get("extra"))
-            if e.get("a_hold") is not None:
-                mv, fr, hd, val = out
+                e = tensored_batch(tensored.get(int(i)))
+                if (
+                    ref_model is not None
+                    and kickstart_kl > 0
+                    and st.ref_cache[int(i)] is None
+                ):
+                    # lazy：chunk 首次使用时现算（ref 冻结 ⇒ 与 eager 预计算逐位相同）。
+                    with paddle.no_grad():
+                        st.ref_cache[int(i)] = _ref_logprobs(ref_model, e)
+                stats.append(run_step(bk, model, opt, st, cfg, ppo_rng, int(i), batch=e))
             else:
-                mv, fr, val = out
-                hd = None
-            if hd is not None:
-                move_logp = masked_logsoftmax(mv, mask[:, :MOVE4_DIM])
-                fire_logp = masked_logsoftmax(fr, mask[:, MOVE4_DIM : MOVE4_DIM + FIRE3_DIM])
-                hold_logp = masked_logsoftmax(hd, mask[:, MOVE4_DIM + FIRE3_DIM :])
-            else:
-                move_logp = masked_logsoftmax(mv, mask[:, :MOVE_DIM])
-                fire_logp = masked_logsoftmax(fr, mask[:, MOVE_DIM : MOVE_DIM + FIRE_DIM])
-                hold_logp = None
-
-            lp_new = cat_logprob(a_move, move_logp) + cat_logprob(a_fire, fire_logp)
-            lp_old = lp_move + lp_fire
-            if hold_logp is not None:
-                lp_new = lp_new + cat_logprob(e["a_hold"], hold_logp)
-                lp_old = lp_old + e["lp_hold"]
-
-            ratio = paddle.exp(lp_new - lp_old)
-            surr1 = ratio * adv
-            surr2 = paddle.clip(ratio, 1.0 - clip, 1.0 + clip) * adv
-            # 与 torch 侧同口径的**只读**读数（D8/D10）：ratio 出界占比。
-            clipped = (ratio < 1.0 - clip) | (ratio > 1.0 + clip)
-            # Hybrid opening（torch 侧同源）：mask=0 的样本不算 policy/entropy/KL。
-            pm = e.get("policy_mask")
-            if pm is None:
-                policy_loss = -paddle.minimum(surr1, surr2).mean()
-                value_loss = F.mse_loss(val.squeeze(-1), ret)
-                clip_frac = paddle.cast(clipped, surr1.dtype).mean()
-                entropy = cat_entropy(move_logp) + cat_entropy(fire_logp)
-                if hold_logp is not None:
-                    entropy = entropy + cat_entropy(hold_logp)
-                loss = policy_loss + VF_COEF * value_loss - ent_c * entropy
-                if kl_coef > 0.0:
-                    loss = loss + kl_coef * ((ratio - 1.0) - (lp_new - lp_old)).mean()
-            else:
-                surr = -paddle.minimum(surr1, surr2).reshape((-1,))
-                w = paddle.cast(pm.reshape((-1,)), surr.dtype)
-                denom = paddle.clip(w.sum(), min=1.0)
-                policy_loss = (surr * w).sum() / denom
-                ent_per = cat_entropy_per(move_logp) + cat_entropy_per(fire_logp)
-                if hold_logp is not None:
-                    ent_per = ent_per + cat_entropy_per(hold_logp)
-                entropy = (ent_per.reshape((-1,)) * w).sum() / denom
-                value_loss = F.mse_loss(val.squeeze(-1), ret)
-                clip_frac = (paddle.cast(clipped, surr1.dtype).reshape((-1,)) * w).sum() / denom
-                loss = policy_loss + VF_COEF * value_loss - ent_c * entropy
-                if kl_coef > 0.0:
-                    kl_per = ((ratio - 1.0) - (lp_new - lp_old)).reshape((-1,))
-                    loss = loss + kl_coef * (kl_per * w).sum() / denom
-            kick_mean = _zero_scalar()
-            _ref = ref_cache[int(i)]
-            if _ref is None and lazy and ref_model is not None and kickstart_kl > 0:
-                # lazy：chunk 首次使用时现算（ref 冻结 ⇒ 与 eager 预计算逐位相同）。
-                with paddle.no_grad():
-                    _ref = _ref_logprobs(ref_model, e)
-                ref_cache[int(i)] = _ref
-            if _ref is not None:
-                kl_m = (move_logp.exp() * (move_logp - _ref[0])).sum(axis=-1)
-                kl_f = (fire_logp.exp() * (fire_logp - _ref[1])).sum(axis=-1)
-                kl_parts = kl_m + kl_f
-                if len(_ref) > 2 and hold_logp is not None:
-                    kl_parts = kl_parts + (hold_logp.exp() * (hold_logp - _ref[2])).sum(axis=-1)
-                kick_mean = kl_parts.mean()
-                loss = loss + kickstart_kl * kick_mean
-            demo_bc_mean = _zero_scalar()
-            if demo_on:
-                _didx = np.random.randint(0, demo_n, size=int(demo_per_mb))
-                _didx_t = paddle.to_tensor(_didx.astype(np.int64))
-                _dm = model(
-                    demo_t["obs"][_didx_t],
-                    demo_t["scalars"][_didx_t],
-                    demo_t["extra"][_didx_t] if "extra" in demo_t else None,
-                )[0]
-                _dmm = demo_t["masks"][_didx_t]
-                _dact = demo_t["actions"][_didx_t]
-                demo_bc_mean = _demo_masked_ce(_dm, _dact[:, 0], _dmm[:, :MOVE_DIM])
-                loss = loss + float(demo_bc_coef) * demo_bc_mean
-
-            opt.clear_grad()
-            loss.backward()
-            gn = clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
-            opt.step()
+                stats.append(run_step(bk, model, opt, st, cfg, ppo_rng, int(i)))
             steps_done += 1
-            value_new_rms = apply_value_anchor_pull(model, value_anchor)
-            policy_new_rms = policy_new_rms_of(model)
-
-            kl_est = approx_kl_est(lp_old, lp_new)
-            stats.append(
-                sync_scalars(
-                    {
-                        "policy": policy_loss,
-                        "value": value_loss,
-                        "entropy": entropy,
-                        "kl": kl_est,
-                        "per_step_kl": kl_est,
-                        "clip_fraction": clip_frac,
-                        "kickstart": kick_mean,
-                        "demo_bc": demo_bc_mean,
-                        "mean_ret": ret.mean(),
-                        "mean_adv": adv.mean(),
-                        "gnorm": gn,
-                        "value_new_rms": value_new_rms,
-                        "policy_new_rms": policy_new_rms,
-                    }
-                )
-            )
             if progress is not None:
                 now = time.time()
                 if now - last_hb >= HB_SEC:
@@ -416,7 +402,9 @@ def ppo_update(
                     # ——它之前没人用（静默失效的形参），现在与 torch 逐字对应。
                     progress.beat(progress_head)
         if ckpt_path:
-            save_ckpt(model, opt, ckpt_path, epochs_done=ep + 1, steps_done=steps_done)
+            save_ckpt(
+                model, opt, ckpt_path, epochs_done=ep + 1, steps_done=steps_done, rng=ppo_rng
+            )
         if on_epoch_done is not None:
             on_epoch_done(ep + 1, model)
     if steps_out is not None:
@@ -424,22 +412,7 @@ def ppo_update(
         steps_out["steps_done"] = int(steps_done)
     if not stats:
         log("[ppo-paddle] 0 grad steps — returning zero aggregate")
-        return {
-            k: 0.0
-            for k in (
-                "policy",
-                "value",
-                "entropy",
-                "kl",
-                "kickstart",
-                "demo_bc",
-                "mean_ret",
-                "mean_adv",
-                "gnorm",
-                "value_new_rms",
-                "policy_new_rms",
-            )
-        }
+        return _zero_stats()
     agg = aggregate_stats(stats, list(stats[0].keys()))
     # torch 侧 `ppo_update` 总会带这个键（early-stop 门是 torch 侧专属；paddle 无该门 ⇒ 恒 False）。
     # 返回键集必须与 torch 同形，否则 parity harness 报 KeyError 而不是数值差异。

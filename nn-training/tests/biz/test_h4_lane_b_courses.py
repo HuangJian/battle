@@ -23,7 +23,7 @@ ARMS = ("h4-lane-b0", "h4-lane-b1", "h4-lane-b2")
 WLANE = {"h4-lane-b0": None, "h4-lane-b1": 265.0, "h4-lane-b2": 529.0}
 
 
-def _course(name: str):  # type: ignore[no-untyped-def]
+def _course(name: str):
     return load_course(CURRICULA / f"{name}.jsonc")
 
 

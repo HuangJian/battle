@@ -19,8 +19,8 @@ Python forward pass (plan §NN-M1 determinism ②).
 2026-09-26（item 6d）：**JSON 清单那一半**（format/schema_major/params 强校验 +
 「最新版本化权重」发现 + 覆盖率门禁常量）搬到免 torch 的 `data/weights_meta.py`
 ——那边被「坏文件响亮拒绝」一族的用例盯着，却因同住本模块被 torch 拖进测试路径。
-本模块从那里再导出，既有 `from data.weights_io import COVERAGE_RAISE /
-latest_weights_path / …` 的调用点一行不改。
+本模块只取自己校验时要用的四个名字（2026-11-16：删掉那层再导出 ——
+`latest_weights_path` 的唯一外部读者改从 `data.weights_meta` 直取）。
 """
 
 
@@ -51,14 +51,7 @@ import numpy as np
 import torch
 
 from common.schema import OBS_SCHEMA_MAJOR
-from worker.data.weights_meta import (  # noqa: F401  (re-export：既有调用点不变)
-    COVERAGE_RAISE,
-    COVERAGE_WARN,
-    FORMAT,
-    latest_weights_path,
-    read_weights_meta,
-    validate_weights_meta,
-)
+from worker.data.weights_meta import COVERAGE_RAISE, COVERAGE_WARN, FORMAT, read_weights_meta
 
 
 def tensor_to_b64(t: torch.Tensor) -> str:

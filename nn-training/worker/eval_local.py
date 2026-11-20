@@ -19,11 +19,10 @@ from typing import Any
 # 测试 patch 了 game_watch 那份、调用点还在读旧绑定就是静默的错口径。
 from common import game_watch
 from common.log import log
+from common.paths import REPO_ROOT
 from common.platform_utils import KILL_REAP_SEC, keep_unreaped, kill_process_tree, popen_own_group
 from common.protocol import EVAL_SCRIPT as _EVAL_SCRIPT
 from common.protocol import UnreapableChildError
-
-REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 battle2（biz/ 上溯 3 层，修正 2026-09-03）
 
 # ---------------------------------------------------------------------------
 # 评估种子池 + summary 结算已下沉 `worker/eval_track.py`（S5 第三刀，2026-09-27）。

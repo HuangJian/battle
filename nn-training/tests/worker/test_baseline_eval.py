@@ -194,7 +194,7 @@ def test_dispatch_retries_baseline_when_gap_large(tmp_path, monkeypatch) -> None
     monkeypatch.setattr("trainer.eval_dispatch.dispatch_eval_bg", _fake_bg)
     loop._maybe_dispatch_baseline_eval(NODES)
     assert len(calls) == 1, "大缺口不得算落账（否则那 95 局永远补不回来）"
-    assert loop._baseline_landed_wver is None, "重派中的 wver 不许缓存成已落账"
+    assert loop.baseline_eval_state().landed_wver is None, "重派中的 wver 不许缓存成已落账"
 
     # 预算用尽（账本里第 4 条 it0 summary）⇒ 落账停派（旧语义的收敛保证仍在）
     rows = [_summ_row(0, wver, 105, 95) for _ in range(BASELINE_RETRY_MAX + 1)]
@@ -202,7 +202,7 @@ def test_dispatch_retries_baseline_when_gap_large(tmp_path, monkeypatch) -> None
     loop._baseline_eval_thread = None
     loop._maybe_dispatch_baseline_eval(NODES)
     assert len(calls) == 1
-    assert loop._baseline_landed_wver == wver
+    assert loop.baseline_eval_state().landed_wver == wver
 
 
 def test_baseline_does_not_build_a_local_gate(tmp_path, monkeypatch) -> None:
@@ -222,7 +222,7 @@ def test_baseline_does_not_build_a_local_gate(tmp_path, monkeypatch) -> None:
     assert len(calls) == 1
     assert calls[0]["local_gate"] is None
     assert calls[0]["local_fallback_only"] is True
-    assert loop._eval_gate is None, "基线不再自建并置位 local 份额门"
+    assert loop.eval_timing().gate is None, "基线不再自建并置位 local 份额门"
 
 
 def test_baseline_ignores_existing_gate(tmp_path, monkeypatch) -> None:
@@ -261,29 +261,34 @@ def test_baseline_weights_guards(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     bc = tmp_path / "bc.json"
     bc.write_text("{}", encoding="utf-8")
     ok = _loop(tmp_path, bc=str(bc))
-    assert ok._baseline_eval_weights(NODES) == str(bc)
+    got = ok._baseline_eval_weights(NODES)
+    assert got == str(bc)
 
     # 逐条反证：任一前置条件不满足 → None（不派基线，行为与旧版一致）
-    assert _loop(tmp_path, bc=str(bc), mode="intent")._baseline_eval_weights(NODES) is None
-    assert _loop(tmp_path, bc=str(bc), course_obj=None)._baseline_eval_weights(NODES) is None
-    assert (
-        _loop(tmp_path, bc=str(bc), eval_games_per_stage=0)._baseline_eval_weights(NODES) is None
-    )
+    got = _loop(tmp_path, bc=str(bc), mode="intent")._baseline_eval_weights(NODES)
+    assert got is None
+    got = _loop(tmp_path, bc=str(bc), course_obj=None)._baseline_eval_weights(NODES)
+    assert got is None
+    got = _loop(tmp_path, bc=str(bc), eval_games_per_stage=0)._baseline_eval_weights(NODES)
+    assert got is None
     no_eval = _loop(tmp_path, bc=str(bc))
     no_eval._eval_every = 0  # eval 关闭（--eval-every 0）
-    assert no_eval._baseline_eval_weights(NODES) is None
+    got = no_eval._baseline_eval_weights(NODES)
+    assert got is None
     # nodes=[] / 全 disabled → 纯本地路径本就不派 A-eval，也不派基线
-    assert _loop(tmp_path, bc=str(bc))._baseline_eval_weights(None) is None
-    assert _loop(tmp_path, bc=str(bc))._baseline_eval_weights({"nodes": []}) is None
-    assert (
-        _loop(tmp_path, bc=str(bc))._baseline_eval_weights(
-            {"nodes": [{"id": "n1", "enabled": False}]}
-        )
-        is None
+    got = _loop(tmp_path, bc=str(bc))._baseline_eval_weights(None)
+    assert got is None
+    got = _loop(tmp_path, bc=str(bc))._baseline_eval_weights({"nodes": []})
+    assert got is None
+    got = _loop(tmp_path, bc=str(bc))._baseline_eval_weights(
+        {"nodes": [{"id": "n1", "enabled": False}]}
     )
+    assert got is None
     # bc 路径不存在（换机器漏同步）→ 不派，绝不裸奔
-    assert _loop(tmp_path, bc=str(tmp_path / "missing.json"))._baseline_eval_weights(NODES) is None
-    assert _loop(tmp_path, bc="")._baseline_eval_weights(NODES) is None
+    got = _loop(tmp_path, bc=str(tmp_path / "missing.json"))._baseline_eval_weights(NODES)
+    assert got is None
+    got = _loop(tmp_path, bc="")._baseline_eval_weights(NODES)
+    assert got is None
 
 
 class _FakeThread(threading.Thread):
@@ -323,7 +328,7 @@ def test_dispatch_retries_until_landed(
     assert c["cfg"] == NODES
     assert c["local_gate"] is None  # 不再有份额门
     assert c["local_fallback_only"] is True  # 只在集群全不可用时本机兜底
-    assert loop._eval_gate is None
+    assert loop.eval_timing().gate is None
 
     loop._maybe_dispatch_baseline_eval(NODES)  # 尚未落账 → 重试（不再要求 it == start_it）
     assert len(calls) == 2
@@ -345,7 +350,7 @@ def test_dispatch_retries_until_landed(
     )
     loop._maybe_dispatch_baseline_eval(NODES)
     assert len(calls) == 2
-    assert loop._baseline_landed_wver == wver[:16]
+    assert loop.baseline_eval_state().landed_wver == wver[:16]
 
     # bc 换文件（重蒸馏）→ 新 wver 未落账 → 重派新基线
     bc2 = tmp_path / "bc2.json"
@@ -367,7 +372,7 @@ def test_dispatch_failure_never_raises(tmp_path: Path, monkeypatch: pytest.Monke
 
     monkeypatch.setattr("trainer.eval_dispatch.dispatch_eval_bg", _boom)
     loop._maybe_dispatch_baseline_eval(NODES)  # 不抛即过
-    assert loop._baseline_eval_thread is None
+    assert loop.baseline_eval_state().eval_thread is None
 
 
 def test_dispatch_baseline_writes_iter0_rows(

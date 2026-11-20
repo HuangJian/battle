@@ -57,8 +57,10 @@
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Callable
 
+from common.logutil import tag_logger
 from common.protocol import ProtocolError
 from worker.rollout_argv import retarget_argv
 from worker.volume_alloc import (
@@ -120,6 +122,10 @@ def _out_index(argv: list[str]) -> int:
     return -1
 
 
+#: 行日志：格式/时间戳只走 `common/logutil`。
+_log = tag_logger("stream", lambda: time)
+
+
 class StreamCollector:
     """逐局调度器：**每结算一局**就判「差额最大的关」，下一局派它。
 
@@ -135,7 +141,7 @@ class StreamCollector:
         spec: dict,
         vol: dict,
         *,
-        log: Callable[[str], None] = lambda msg: print(f"[stream] {msg}", flush=True),
+        log: Callable[[str], None] = _log,
         started_at: float | None = None,
     ) -> None:
         self.spec = spec
@@ -207,7 +213,7 @@ class StreamCollector:
         cls,
         spec: dict,
         *,
-        log: Callable[[str], None] = lambda msg: print(f"[stream] {msg}", flush=True),
+        log: Callable[[str], None] = _log,
         started_at: float | None = None,
     ) -> StreamCollector | None:
         """spec 带**启用的** `volume` 块 ⇒ 调度器；缺席/关闭 ⇒ `None`（老行为逐字不变）。
@@ -257,6 +263,12 @@ class StreamCollector:
         """本关**还没结算**的局数（派出去但没回来的）。"""
         return max(0, int(self.games.get(stage, 0)) - int(self.settled.get(stage, 0)))
 
+    def plan_cap(self, stage: int) -> int:
+        """快照里 `cap_games` 的来源（plan 模式 = 计划硬顶；alpha 模式 = α 批量上限）。只读。"""
+        return int(
+            self._alpha_cap(stage) if self.sched == "alpha" else self._plan_caps.get(stage, 0)
+        )
+
     def _cap(self, stage: int) -> int:
         """本关局数**硬顶**（防「一局零样本 ⇒ 无限补」把一轮拖死）。
 
@@ -282,6 +294,11 @@ class StreamCollector:
         return cap
 
     # ────────────────────────── α（P1）──────────────────────────
+
+    @property
+    def alpha_started(self) -> bool:
+        """α 模式是否已经开跑（进入点 = 第一次真正派发 α 批；只读）。"""
+        return self._alpha_started
 
     def _alpha_cap(self, stage: int, *, freeze: bool = True) -> int:
         """α 模式的独立硬顶：按**实测** samples/局反解，进入 α 时冻结。
@@ -565,9 +582,7 @@ class StreamCollector:
                     "games": int(self.games.get(s, 0)),
                     # `est_s` = 计划钉的本关估计（与训练侧分母同源）；`cap_games` = 同一份硬顶。
                     "est_s": int(self.ests.get(s, 0)),
-                    "cap_games": int(
-                        self._alpha_cap(s) if self.sched == "alpha" else self._plan_caps.get(s, 0)
-                    ),
+                    "cap_games": self.plan_cap(s),
                 }
                 for s in self.stages
             },

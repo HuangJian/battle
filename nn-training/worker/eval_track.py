@@ -26,7 +26,7 @@ import json
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from common.log import log
 
@@ -43,7 +43,14 @@ from common.log import log
 ROLLOUT_SEED_MAX = 2**30
 EVAL_SEEDS_BASE = 2_000_000_001
 EVAL_SEEDS = tuple(range(EVAL_SEEDS_BASE, EVAL_SEEDS_BASE + 200))
-assert EVAL_SEEDS_BASE > ROLLOUT_SEED_MAX, "评估池必须在 rollout 抽签区间之外"
+# 显式 `raise` 而不是 `assert`：这条不变量是「评估读数与训练局不相交」的地基，而 `python -O`
+# 会把 assert 整段删掉（G7 禁止生产包用模块级 assert 做运行时校验）。两侧都是常量，
+# import 期就炸，不会等到第一轮读数。
+if EVAL_SEEDS_BASE <= ROLLOUT_SEED_MAX:
+    raise RuntimeError(
+        f"评估池必须在 rollout 抽签区间之外：EVAL_SEEDS_BASE={EVAL_SEEDS_BASE} "
+        f"<= ROLLOUT_SEED_MAX={ROLLOUT_SEED_MAX}"
+    )
 
 #: 日常 A-eval 每关局数（用户口径 2026-10-22：「100，与今天双轨总量持平」）。
 #: 课程写 `eval_games_per_stage: 50` 是双轨时代「锚点那一半」的配置；双轨退场后**成本与
@@ -270,6 +277,102 @@ def reconcile_late_eval_rows(
     return gap
 
 
+class _LedgerTally(NamedTuple):
+    """`eval_log.jsonl` 里本 (iter,wver) 逐局行的聚合读数（自 `settle_eval_summary` 搬出）。"""
+
+    keys: set[tuple[int, int]]
+    wins: int
+    clears: int
+    outcomes: dict[str, int]
+    nodes: dict[str, int]
+    kills: list[float]
+    phits: list[float]
+    pu: list[float]
+    zero_kill: int
+    timeout: int
+
+
+def _scan_ledger(eval_jsonl: Path, key16: str, it: int) -> _LedgerTally:
+    """扫账本聚合该 (iter,wver) 的逐局行（自 `settle_eval_summary` 原样搬出）。
+
+    行过滤（event/wver/iter/source）、同 (stage,seed) 只认第一行、缺字段保守记 0 的
+    口径全部不变；文件不存在返回空读数。
+    """
+    #: 账本里已有的 (stage, seed)（与 n 同口径的行）——`missing` 的判据（G6）。
+    led_keys: set[tuple[int, int]] = set()
+    led_wins = 0
+    led_clears = 0
+    led_outcomes: dict[str, int] = {}
+    led_nodes: dict[str, int] = {}
+    # 技能子指标累加器（sum, count）——count 与分母 n 分离：旧行缺字段时该指标 None。
+    led_kills: list[float] = [0.0, 0.0]
+    led_phits: list[float] = [0.0, 0.0]
+    led_pu: list[float] = [0.0, 0.0]
+    led_zero_kill = 0
+    led_timeout = 0
+    try:
+        with open(eval_jsonl, encoding="utf-8") as jf:
+            for ln in jf:
+                try:
+                    r = json.loads(ln)
+                except Exception:
+                    continue
+                # 只认本调度器落的局：B/C evalboard 行（`trainer/batch_runner.py` 的
+                # `BatchEvalRunner._run.record` —— 引符号名不写行号，行号跨刀会漂）同为
+                # `event:"eval"`，且 iter=0 畸形批能撞上同 (iter,wver) —— 不滤 source
+                # 会把 B/C 的局混进本臂胜率与双轨拆段（P2-7，2026-09-15）。
+                if r.get("event") != "eval" or r.get("wver") != key16 or r.get("iter") != it:
+                    continue
+                if "source" in r:
+                    continue
+                # 同 (stage, seed) 只认第一行（2026-11-04）：上一轮收工后仍在飞的僵尸写者会在
+                # summary 落盘后补写一行，下一轮按 `done` 快照重派时又写一行 ⇒ 同轮行数超出
+                # 语料（历史最多 +N）。去重放在累加之前，胜率/全歼/技能指标与 `n` 同分母。
+                try:
+                    st: int | None = int(r.get("stage") or 0)
+                    sd: int | None = int(r.get("seed"))
+                except (TypeError, ValueError):
+                    st = sd = None
+                if sd is not None and st is not None:
+                    if (st, sd) in led_keys:
+                        continue
+                    led_keys.add((st, sd))
+                led_wins += 1 if r.get("win") else 0
+                # 全歼率（方案 A 口径）：旧行（cleared 缺省）视为未全歼——新 schema
+                # 上线前的行只有本地局有 cleared，此处保守记 0，聚合以新行口径为准。
+                led_clears += 1 if r.get("cleared") else 0
+                oc = str(r.get("outcome") or "?")
+                led_outcomes[oc] = led_outcomes.get(oc, 0) + 1
+                ndm = str(r.get("node") or "?")
+                led_nodes[ndm] = led_nodes.get(ndm, 0) + 1
+                _acc(led_kills, r.get("kills"))
+                if isinstance(r.get("kills"), (int, float)) and float(r["kills"]) <= 0:
+                    led_zero_kill += 1
+                _acc(led_phits, r.get("playerHits"))
+                _acc(led_pu, r.get("powerUpsCollected"))
+                # 2026-09-13 P0 止血：rollout/探针落盘的 outcome 值是 **`max_ticks`**，
+                # 不是 `timeout`（`timeout` 只存在于 reward 引擎的 `is_timeout` 虚拟符号里，
+                # 它才把两者都当超时）。旧判据 `oc == "timeout"` 恒 False ⇒ `timeout_frac`
+                # 永远是 0.0 ⇒ G7（course_valid）形同虚设（c6-bonus 实测真超时 11/100，
+                # summary 仍报 0.0）。口径同 `evalboard/stats.ts`：已清场的局不算超时。
+                if oc in ("timeout", "max_ticks") and not r.get("cleared"):
+                    led_timeout += 1
+    except FileNotFoundError:
+        pass
+    return _LedgerTally(
+        keys=led_keys,
+        wins=led_wins,
+        clears=led_clears,
+        outcomes=led_outcomes,
+        nodes=led_nodes,
+        kills=led_kills,
+        phits=led_phits,
+        pu=led_pu,
+        zero_kill=led_zero_kill,
+        timeout=led_timeout,
+    )
+
+
 def settle_eval_summary(
     eval_jsonl: Path,
     key16: str,
@@ -340,73 +443,13 @@ def settle_eval_summary(
     **同一个写者**——否则 summary 仍可能与别轮的行互相覆盖（2026-11-02 z4-polish.it60）。
     """
     dropped = total - len(landed)
-    #: 账本里已有的 (stage, seed)（与 n 同口径的行）——`missing` 的判据（G6）。
-    led_keys: set[tuple[int, int]] = set()
-    led_wins = 0
-    led_clears = 0
-    led_outcomes: dict[str, int] = {}
-    led_nodes: dict[str, int] = {}
-    # 技能子指标累加器（sum, count）——count 与分母 n 分离：旧行缺字段时该指标 None。
-    led_kills: list[float] = [0.0, 0.0]
-    led_phits: list[float] = [0.0, 0.0]
-    led_pu: list[float] = [0.0, 0.0]
-    led_zero_kill = 0
-    led_timeout = 0
-    try:
-        with open(eval_jsonl, encoding="utf-8") as jf:
-            for ln in jf:
-                try:
-                    r = json.loads(ln)
-                except Exception:
-                    continue
-                # 只认本调度器落的局：B/C evalboard 行（`trainer/batch_runner.py` 的
-                # `BatchEvalRunner._run.record` —— 引符号名不写行号，行号跨刀会漂）同为
-                # `event:"eval"`，且 iter=0 畸形批能撞上同 (iter,wver) —— 不滤 source
-                # 会把 B/C 的局混进本臂胜率与双轨拆段（P2-7，2026-09-15）。
-                if r.get("event") != "eval" or r.get("wver") != key16 or r.get("iter") != it:
-                    continue
-                if "source" in r:
-                    continue
-                # 同 (stage, seed) 只认第一行（2026-11-04）：上一轮收工后仍在飞的僵尸写者会在
-                # summary 落盘后补写一行，下一轮按 `done` 快照重派时又写一行 ⇒ 同轮行数超出
-                # 语料（历史最多 +N）。去重放在累加之前，胜率/全歼/技能指标与 `n` 同分母。
-                try:
-                    st: int | None = int(r.get("stage") or 0)
-                    sd: int | None = int(r.get("seed"))
-                except (TypeError, ValueError):
-                    st = sd = None
-                if sd is not None and st is not None:
-                    if (st, sd) in led_keys:
-                        continue
-                    led_keys.add((st, sd))
-                led_wins += 1 if r.get("win") else 0
-                # 全歼率（方案 A 口径）：旧行（cleared 缺省）视为未全歼——新 schema
-                # 上线前的行只有本地局有 cleared，此处保守记 0，聚合以新行口径为准。
-                led_clears += 1 if r.get("cleared") else 0
-                oc = str(r.get("outcome") or "?")
-                led_outcomes[oc] = led_outcomes.get(oc, 0) + 1
-                ndm = str(r.get("node") or "?")
-                led_nodes[ndm] = led_nodes.get(ndm, 0) + 1
-                _acc(led_kills, r.get("kills"))
-                if isinstance(r.get("kills"), (int, float)) and float(r["kills"]) <= 0:
-                    led_zero_kill += 1
-                _acc(led_phits, r.get("playerHits"))
-                _acc(led_pu, r.get("powerUpsCollected"))
-                # 2026-09-13 P0 止血：rollout/探针落盘的 outcome 值是 **`max_ticks`**，
-                # 不是 `timeout`（`timeout` 只存在于 reward 引擎的 `is_timeout` 虚拟符号里，
-                # 它才把两者都当超时）。旧判据 `oc == "timeout"` 恒 False ⇒ `timeout_frac`
-                # 永远是 0.0 ⇒ G7（course_valid）形同虚设（c6-bonus 实测真超时 11/100，
-                # summary 仍报 0.0）。口径同 `evalboard/stats.ts`：已清场的局不算超时。
-                if oc in ("timeout", "max_ticks") and not r.get("cleared"):
-                    led_timeout += 1
-    except FileNotFoundError:
-        pass
-    if led_outcomes:
-        n = sum(led_outcomes.values())
-        wins_v = led_wins
-        clears_v = led_clears
-        outcomes = led_outcomes
-        node_games = led_nodes
+    tally = _scan_ledger(eval_jsonl, key16, it)
+    if tally.outcomes:
+        n = sum(tally.outcomes.values())
+        wins_v = tally.wins
+        clears_v = tally.clears
+        outcomes = tally.outcomes
+        node_games = tally.nodes
     else:
         n = len(landed)
         wins_v = wins[0]
@@ -427,7 +470,7 @@ def settle_eval_summary(
     missing: list[dict[str, object]] = []
     if dropped > 0:
         meta_reasons = _missing_reasons(eval_jsonl.parent / "dist-agent-meta.jsonl", it)
-        gap_pairs = sorted((p for p in pairs if p not in led_keys), key=lambda p: (p[1], p[0]))
+        gap_pairs = sorted((p for p in pairs if p not in tally.keys), key=lambda p: (p[1], p[0]))
         missing = [
             {
                 "stage": s,
@@ -476,11 +519,13 @@ def settle_eval_summary(
         # ---- 门控技能子指标（§8；缺数据 None = unknown，门侧不当事）----
         # 分母 = 该指标有值的局数（旧 agent 缺 playerHits 时 phits_mean 为 None，
         # 不与 kills 混用一个分母——混用会把"没数据"伪装成"0 次被击中"）。
-        "kills_mean": _ratio(led_kills),
-        "zero_kill_frac": (round(led_zero_kill / led_kills[1], 4) if led_kills[1] else None),
-        "phits_mean": _ratio(led_phits),
-        "pickup_mean": _ratio(led_pu),
-        "timeout_frac": (round(led_timeout / n, 4) if n else None),
+        "kills_mean": _ratio(tally.kills),
+        "zero_kill_frac": (
+            round(tally.zero_kill / tally.kills[1], 4) if tally.kills[1] else None
+        ),
+        "phits_mean": _ratio(tally.phits),
+        "pickup_mean": _ratio(tally.pu),
+        "timeout_frac": (round(tally.timeout / n, 4) if n else None),
         # D14 课程血缘：门按 course_fp 过滤趋势行（改课程 = 新实验，不与旧课混读）。
         "course_fp": course_fp or "",
     }

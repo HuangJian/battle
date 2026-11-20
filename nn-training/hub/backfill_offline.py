@@ -31,15 +31,20 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import remote.delta_files as delta_files
 from common.cli import house_parser, run_main
+from common.logutil import tag_logger
 from hub.server import _JobStore
 
 # `_weights_archive_root` 随归档那段一起搬进了离线段混入（S4：`hub_server` 收口成门面后
 # 自己不再有实现）——它读的仍是同一个 env，而 `_JobStore` 从门面取（名字是契约）。
 from hub.store_offline import _round_is_complete, _weights_archive_root
+
+#: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+_log = tag_logger("backfill", lambda: time)
 
 
 def backfill_course(traj_root: Path, course: str, *, log=print) -> dict:
@@ -130,14 +135,14 @@ def main(argv: list[str] | None = None) -> int:
             if p.is_dir() and (p / "remote-jobs" / _JobStore.OFFLINE_DIR).is_dir()
         )
     if not courses:
-        print(f"[backfill] {root} 下没有带 remote-jobs/offline 的课程", flush=True)
+        _log(f"{root} 下没有带 remote-jobs/offline 的课程")
         return 0
     total = {"rounds": 0, "mirrored": 0, "archived": 0, "skipped": 0}
     for c in courses:
         got = backfill_course(root, c)
         for k in total:
             total[k] += got[k]
-    print(f"[backfill] 合计：{total}", flush=True)
+    _log(f"合计：{total}")
     return 0
 
 

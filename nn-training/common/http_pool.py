@@ -35,23 +35,44 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Any
+from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 from common import net_http
 
-#: 连接缓存键：(scheme, host, port, proxy)。
+#: 连接缓存的键：(scheme, host, port, proxy)。
 _Key = tuple[str, str, int, str]
+
+#: 关闭一条连接/响应时的**真实失败面**：socket 已坏 = `OSError`、状态机不对 = `ValueError`、
+#: HTTP 帧不完整 = `HTTPException`。程序员错（`AttributeError` / `TypeError`）不在此列，
+#: 它们要穿出去——`close()` 自己写坏了不该被读成「对端先走」。
+_CLOSE_ERRORS = (OSError, ValueError, http.client.HTTPException)
+
+#: 读 body 的失败面；`AttributeError` 是**并发关闭**的已知形态（`abort_scope` 在另一条
+#: 线程双关 `_close_conn`），不是调用方 bug。
+_READ_ERRORS = (OSError, ValueError, http.client.HTTPException, AttributeError)
 
 _LOCAL = threading.local()
 _ACTIVE_LOCK = threading.Lock()
-#: 在飞响应（按 scope 分作用域）：收工断连关的就是它们。
-_ACTIVE: set[tuple[str, Any]] = set()
-_ABORTED: set[str] = set()
 _STATS_LOCK = threading.Lock()
-#: 每个桶一份计数：`bucket -> {key: n}`。桶 = 上层给的标签（`<course>/<kind>`）；
-#: 空串 = 未打标（旧调用方与测试），`pool_stats()/take_stats()` 不带参时合并全桶。
-_STATS: dict[str, dict[str, int]] = {}
+
+
+@dataclass
+class _PoolState:
+    """进程级共享面（显式对象：`common/` 是 L0，模块顶层不许有可变容器字面量）。
+
+    · `active` —— 在飞响应（按 scope 分作用域）：收工断连关的就是它们；
+    · `aborted` —— 已收工的作用域；
+    · `stats` —— 每个桶一份计数：`bucket -> {key: n}`。桶 = 上层给的标签
+      （`<course>/<kind>`）；空串 = 未打标（旧调用方与测试），读面不带参时合并全桶。
+    """
+
+    active: set[tuple[str, http.client.HTTPResponse]] = field(default_factory=set)
+    aborted: set[str] = field(default_factory=set)
+    stats: dict[str, dict[str, int]] = field(default_factory=dict)
+
+
+_STATE = _PoolState()
 #: drop 的**原因**。`drop` 仍保留总数，明细只列非零项。
 _DROP_REASONS = ("will_close", "error", "abort", "redirect", "idle")
 #: 始终存在的键（读出来的口径永远是完整字典，调用方可直接索引）
@@ -71,7 +92,7 @@ def _with_base(st: dict[str, int]) -> dict[str, int]:
 
 def _merged() -> dict[str, int]:
     out: dict[str, int] = {}
-    for st in _STATS.values():
+    for st in _STATE.stats.values():
         for k, v in st.items():
             out[k] = out.get(k, 0) + v
     return _with_base(out)
@@ -82,17 +103,17 @@ def pool_stats(bucket: str | None = None) -> dict[str, int]:
     with _STATS_LOCK:
         if bucket is None:
             return _merged()
-        return _with_base(_STATS.get(bucket, {}))
+        return _with_base(_STATE.stats.get(bucket, {}))
 
 
 def take_stats(bucket: str | None = None) -> dict[str, int]:
     """读并清零：`[dist] round done` 要的是**本轮**口径（`bucket=None` = 全桶合并读走）。"""
     with _STATS_LOCK:
-        out = _merged() if bucket is None else _with_base(_STATS.get(bucket, {}))
+        out = _merged() if bucket is None else _with_base(_STATE.stats.get(bucket, {}))
         if bucket is None:
-            _STATS.clear()
+            _STATE.stats.clear()
         else:
-            _STATS.pop(bucket, None)
+            _STATE.stats.pop(bucket, None)
     return out
 
 
@@ -124,9 +145,9 @@ def stats_suffix(bucket: str | None = None) -> str:
 
 def _bump(bucket: str, key: str, n: int = 1) -> None:
     with _STATS_LOCK:
-        st = _STATS.get(bucket)
+        st = _STATE.stats.get(bucket)
         if st is None:
-            st = _STATS[bucket] = {}
+            st = _STATE.stats[bucket] = {}
         st[key] = st.get(key, 0) + n
 
 
@@ -135,7 +156,7 @@ def reset() -> None:
     _close_all()
     _used().clear()
     with _STATS_LOCK:
-        _STATS.clear()
+        _STATE.stats.clear()
 
 
 def close_thread() -> None:
@@ -149,7 +170,7 @@ def close_thread() -> None:
     _used().clear()
 
 
-def _conns() -> dict[_Key, Any]:
+def _conns() -> dict[_Key, http.client.HTTPConnection]:
     box = getattr(_LOCAL, "conns", None)
     if box is None:
         box = _LOCAL.conns = {}
@@ -184,10 +205,12 @@ def _close_all() -> None:
     box.clear()
 
 
-def _close_quiet(conn: Any) -> None:
+def _close_quiet(conn: http.client.HTTPConnection) -> None:
     try:
         conn.close()
-    except Exception:
+    except _CLOSE_ERRORS:
+        # 契约静默（窄捕，非旧债）：`close()` 失败没有处置分支（重试/上报只会再抛一次），
+        # 池只关心「这条连接再也不复用」；关闭动作本身在收工/换连接路径上。
         pass
 
 
@@ -207,7 +230,9 @@ def _proxy_for(scheme: str, host: str) -> str:
         if urllib.request.proxy_bypass(host):
             return ""
         proxies = urllib.request.getproxies()
-    except Exception:
+    except (OSError, ValueError, TypeError):
+        # 代理判定是**环境读面**（Windows 注册表 / env）：读不到就按直连走，
+        # 不把「本模块的解析 bug」伪装成「没有代理」。
         return ""
     return str(proxies.get(scheme) or proxies.get("all") or "").strip()
 
@@ -226,7 +251,7 @@ def _proxy_addr(proxy: str) -> tuple[str, str, int]:
 
 def _conn_for(
     bucket: str, scheme: str, host: str, port: int, proxy: str, timeout: float
-) -> tuple[Any, _Key]:
+) -> tuple[http.client.HTTPConnection, _Key]:
     """取（或建）本线程的该目标连接；返回 `(conn, 请求目标)`。
 
     `http` 走代理时请求行用绝对 URI（http.client 的要求），其余用 path?query。
@@ -278,7 +303,7 @@ def _drop_conn(bucket: str, key: _Key, reason: str = "error") -> None:
 # ---------------------------------------------------------------- abort（收工断连）
 
 
-def close_async(targets: list[Any], name: str) -> None:
+def close_async(targets: list[http.client.HTTPResponse], name: str) -> None:
     """交 daemon 线程逐个关响应（唯一一份：`distribution.abort_active_requests` 也用它）。
 
     **关连接必须异步**（2026-09-19 实测：`HTTPResponse.close()` 在别人读 body 时会阻塞，
@@ -291,7 +316,9 @@ def close_async(targets: list[Any], name: str) -> None:
         for r in targets:
             try:
                 r.close()
-            except Exception:
+            except _CLOSE_ERRORS:
+                # 契约静默（窄捕，非旧债）：收工断连的**异步**关闭——调用方已走，
+                # 这里再抛只会变成后台线程的未处理异常（与 10053 同一族，不是 hub 的错）。
                 pass
 
     threading.Thread(target=_closer, daemon=True, name=name).start()
@@ -300,8 +327,8 @@ def close_async(targets: list[Any], name: str) -> None:
 def abort_scope(scope: str) -> int:
     """停用该作用域并异步关掉它的在飞响应（返回待关条数；与 distribution 同一套语义）。"""
     with _ACTIVE_LOCK:
-        _ABORTED.add(scope)
-        targets = [r for s, r in _ACTIVE if s == scope]
+        _STATE.aborted.add(scope)
+        targets = [r for s, r in _STATE.active if s == scope]
     close_async(targets, "pool-abort-close")
     return len(targets)
 
@@ -309,20 +336,20 @@ def abort_scope(scope: str) -> int:
 def clear_abort(scope: str = "") -> None:
     with _ACTIVE_LOCK:
         if scope:
-            _ABORTED.discard(scope)
+            _STATE.aborted.discard(scope)
         else:
-            _ABORTED.clear()
+            _STATE.aborted.clear()
 
 
 def abort_scope_active(scope: str) -> bool:
     with _ACTIVE_LOCK:
-        return scope in _ABORTED
+        return scope in _STATE.aborted
 
 
 def active_count(scope: str = "") -> int:
     """该作用域的在飞响应数（观测/测试用；不暴露锁内结构）。"""
     with _ACTIVE_LOCK:
-        return sum(1 for s, _r in _ACTIVE if s == scope)
+        return sum(1 for s, _r in _STATE.active if s == scope)
 
 
 # ---------------------------------------------------------------- 请求
@@ -396,18 +423,19 @@ def request(
         try:
             # 与 distribution._request 同规：不分 scope 空/非空一律登记（全局收工要关得到）。
             with _ACTIVE_LOCK:
-                _ACTIVE.add((scope, resp))
+                _STATE.active.add((scope, resp))
             body = resp.read()
-        except Exception as e:  # 读到一半的任何失败都是传输失败
+        except _READ_ERRORS as e:  # 读到一半的传输失败（含并发关闭的已知 AttributeError）
             # 已经拿到响应头 ⇒ 不在白名单（重发会把一局重新跑一遍）；收工关闭也走这里。
-            # 为什么宽到 Exception：`abort_scope` 在**另一条线程**关响应，CPython 的
-            # `HTTPResponse._close_conn` 双关时会抛 AttributeError('NoneType' has no
-            # attribute 'close')——那不是调用方 bug，而是并发关闭的已知形态。
+            # `_READ_ERRORS` 里含 `AttributeError`：`abort_scope` 在**另一条线程**关响应，
+            # CPython 的 `HTTPResponse._close_conn` 双关时会抛
+            # AttributeError('NoneType' has no attribute 'close') —— 那不是调用方 bug，
+            # 而是并发关闭的已知形态（其余程序员错仍穿出去）。
             _drop_conn(bucket, key, "abort" if abort_scope_active(scope) else "error")
             raise urllib.error.URLError(e) from e
         finally:
             with _ACTIVE_LOCK:
-                _ACTIVE.discard((scope, resp))
+                _STATE.active.discard((scope, resp))
 
         # 读完才算「这条连接最近被用过」（idle 老化拿这个时间戳；不是请求开始时）
         _used()[key] = time.monotonic()

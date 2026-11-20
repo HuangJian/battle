@@ -60,6 +60,7 @@ from common.protocol import (
 )
 from hub.server import _HubQueue, _JobStore, make_server
 from tests.helpers import hub_seams
+from tests.helpers.http_server import serve_fast
 
 TOKEN = "sekret"
 JID = "j" * 16
@@ -107,7 +108,7 @@ def _publish(store: _JobStore, jid: str = JID) -> None:
     """在**给定 store** 上发布一份 pending job（store 层用例要让账本与租约同源：
     `claimable_job_ids` 读账本，写到另一份 store 上会得到空池——本文件初版就这么错过）。"""
     store.publish(jid, _mini_manifest(jid), b"PK\x03\x04fake")
-    assert (store._job_dir(jid) / PAYLOAD_NAME).exists()
+    assert (store.job_root / jid / PAYLOAD_NAME).exists()
 
 
 def _publish_online_course(root: Path, course: str = "c5-gae", jid: str = JID) -> None:
@@ -131,7 +132,7 @@ def _hub(tmp_path: Path):
     hub = _HubQueue({}, discover_root=tmp_path)
     hub.discover()
     srv: ThreadingHTTPServer = make_server(hub, 0, TOKEN, host="127.0.0.1")
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     try:
         yield f"http://127.0.0.1:{srv.server_address[1]}", hub
     finally:
@@ -215,18 +216,18 @@ def test_backup_claim_takes_no_lease_and_does_not_steal(tmp_path: Path) -> None:
     _publish(store)
     a_token = store.claim_outcome(JID, mode=CLAIM_MODE_EXCLUSIVE, worker_id="A").token
     assert a_token
-    expiry_before = store._leases[JID]
+    expiry_before = store.lease_expiry(JID)
 
     out = store.claim_outcome(JID, mode=CLAIM_MODE_BACKUP, worker_id="B")
     assert out.ok is True and out.status == "backup" and out.token == ""
-    assert store._leases[JID] == expiry_before, "原租约不得被动"
-    assert store._lease_owners[JID] == a_token, "原持有人不得被换掉"
+    assert store.lease_expiry(JID) == expiry_before, "原租约不得被动"
+    assert store.lease_worker(JID) == "A", "原持有人不得被换掉"
     # 双方都能回传：A 有租约 token；B 无租约但被显式授权 ⇒ 首写定胜负
     assert store.result_token_ok(JID, a_token) is True
     assert store.result_token_ok(JID, "") is True, "备份的回传不吃 403（R1-2）"
     # 未授权的第三方仍然 403（授权是**逐 job 显式**的，不是放开整条闸）
     assert store.result_token_ok("k" * 16, "") is True  # 未知 job：无租约照收（既有语义）
-    store._backup_authorized.discard(JID)
+    store.leases.clear_backup(JID)
     assert store.result_token_ok(JID, "") is False
 
 
@@ -237,7 +238,7 @@ def test_backup_claim_does_not_poison_or_reclaim(tmp_path: Path) -> None:
     _publish(store)
     store.claim_outcome(JID, worker_id="A")
     store.claim_outcome(JID, mode=CLAIM_MODE_BACKUP, worker_id="B")
-    assert store._stale_holders.get(JID, "") == ""
+    assert store.stale_holder(JID) == ""
     assert store.reclaims(JID) == 0
     clock.t += CLAIM_TTL_SEC + 1
     assert store.claimable_job_ids() == [JID], "原租约照旧会过期（备份没把它 pop 掉）"
@@ -295,7 +296,7 @@ def test_highest_single_holder_epoch_gate(tmp_path: Path) -> None:
     third = store.claim_outcome(JID, worker_id="C")
     assert third.ok is False and third.status == "held"
     # 唯一性仍成立：只有 A 留下承诺痕迹
-    assert (store._claimed.get(JID) or {}).get("worker") == "A"
+    assert store.scheduling_facts(JID)["lease_holder"] == "A"
 
 
 def test_claim_rejects_unknown_mode(tmp_path: Path) -> None:
@@ -303,9 +304,9 @@ def test_claim_rejects_unknown_mode(tmp_path: Path) -> None:
     clock = _Clock()
     store = _store(tmp_path, clock)
     _publish(store)
-    out = store.claim_outcome(JID, mode="race")  # type: ignore[arg-type]
+    out = store.claim_outcome(JID, mode="race")
     assert out.ok is False and out.status == "bad_mode"
-    assert store._leases.get(JID) is None, "写错的模式绝不能静默降级成独占"
+    assert store.lease_worker(JID) == "", "写错的模式绝不能静默降级成独占"
 
 
 # ═══════════════════════════ HTTP 面：peek / priority / claim ═══════════════════════════
@@ -315,7 +316,7 @@ def test_peek_is_side_effect_free(tmp_path: Path) -> None:
     """R1-4：peek 不置租约、不动 `_cursor`、不改可领取池、不动 epoch。"""
     _publish_online_course(tmp_path)
     with _hub(tmp_path) as (base, hub):
-        assert "c5-gae" in hub._stores  # 夹具已在建 hub 时 discover（见 `_hub`）
+        assert hub.courses() == ["c5-gae"], "夹具已在建 hub 时 discover（见 `_hub`）"
         before_pool = hub.claimable_job_ids("c5-gae")
         before_epoch = hub.epoch_of(JID)
         got = W.peek_jobs(base, TOKEN, worker_id="w1")
@@ -326,10 +327,10 @@ def test_peek_is_side_effect_free(tmp_path: Path) -> None:
         assert halt is False
         st = hub._store_of(JID)
         assert st is not None
-        assert JID not in st._leases, "peek 绝不置租约（软持有的前提）"
+        assert st.lease_worker(JID) == "", "peek 绝不置租约（软持有的前提）"
         assert hub.claimable_job_ids("c5-gae") == before_pool
         assert hub.epoch_of(JID) == before_epoch, "peek 不改调度面版本"
-        assert hub._cursor is None, "游标只由真正 claim 成功的一方推进（R2-C2）"
+        assert hub.queue_state()["cursor"] is None, "游标只由真正 claim 成功的一方推进（R2-C2）"
 
 
 def test_peek_registers_worker_for_avoidance_chain(tmp_path: Path) -> None:
@@ -770,9 +771,9 @@ def test_replica_candidates_keep_every_gate_the_pool_keeps(tmp_path: Path) -> No
     _publish(store)
     store.claim_outcome(JID, worker_id="A")
     assert store.inflight_job_ids() == [JID]
-    store._frozen[JID] = {"reclaims": 3, "worker": "A", "ts": clock.t, "announced": True}
+    store.leases._frozen[JID] = {"reclaims": 3, "worker": "A", "ts": clock.t, "announced": True}
     assert store.inflight_job_ids() == [] and store.claimable_job_ids() == []
-    store._frozen.clear()
+    store.leases._frozen.clear()
     (store._job_dir(JID) / "result").mkdir(parents=True, exist_ok=True)
     assert store.inflight_job_ids() == [], "首写已分胜负 ⇒ 不是「没完成」了"
 

@@ -26,6 +26,7 @@ import random
 import shutil
 import time
 from collections import Counter
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -48,6 +49,7 @@ from worker.train.bc_core import (
     SMOOTH_WINDOW,
     early_stop_epoch,
     fire_weight_log_lines,
+    is_improvement,
     resolve_fire_pos_weight,
     sanitize_json,
     smoothed_val_loss,
@@ -358,275 +360,325 @@ def train(args: Any) -> dict[str, Any]:
         weight_decay=1e-5,
     )
 
-    history: dict[str, list[float]] = {
-        "train_loss": [],
-        "val_loss": [],
-        "move_acc": [],
-        "fire_acc": [],
-        "value_loss": [],
-    }
-    #: 交付 epoch 的**原始** val_loss（文件名/账本口径）；选权重看 best_smoothed。
-    best_val = float("inf")
-    best_smoothed = float("inf")
-    best_epoch = 0
+    ctx = _Train(
+        data=data,
+        tr_idx=tr_idx,
+        val_idx=val_idx,
+        sizes=sizes,
+        model=model,
+        opt=opt,
+        scheduler=scheduler,
+        action_v6=action_v6,
+        use_value=use_value,
+        weight_exp=weight_exp,
+        fire_class_weight=fire_class_weight,
+        hold_class_weight=hold_class_weight,
+        fire_pos_weight=fire_pos_weight,
+        history={"train_loss": [], "val_loss": [], "move_acc": [], "fire_acc": [], "value_loss": []},
+        epoch_base=int(getattr(args, "epoch_offset", 0) or 0),
+        epoch_total=int(getattr(args, "epoch_offset", 0) or 0) + int(args.epochs),
+        patience=int(getattr(args, "patience", 0) or 0),
+        epochs_done=int(getattr(args, "epoch_offset", 0) or 0),
+        rng=np.random.default_rng(seed + 1),
+        t0=time.time(),
+        counts=counts,
+        mb=mb,
+        n_params=n_params,
+    )
+    ctx.run_epochs(args)
+    return ctx.finalize(args)
+
+
+@dataclass
+class _Train:
+    """Paddle BC 一轮训练的装配与收尾（epoch 循环与最终交付都从这里取状态）。"""
+
+    data: dict[str, ArrayField]
+    tr_idx: np.ndarray
+    val_idx: np.ndarray
+    sizes: dict[str, int]
+    model: paddle.nn.Layer
+    opt: paddle.optimizer.AdamW
+    scheduler: paddle.optimizer.lr.CosineAnnealingDecay
+    action_v6: bool
+    use_value: bool
+    weight_exp: float
+    fire_class_weight: paddle.Tensor | None
+    hold_class_weight: paddle.Tensor | None
+    fire_pos_weight: float
+    history: dict[str, list[float]]
+    epoch_base: int
+    epoch_total: int
+    patience: int
+    epochs_done: int
+    rng: np.random.Generator
+    t0: float
+    counts: dict[str, dict]
+    mb: dict[str, float]
+    n_params: int
+    best_val: float = float("inf")
+    best_smoothed: float = float("inf")
+    best_epoch: int = 0
     best_state: dict[str, paddle.Tensor] | None = None
-    epoch_base = int(getattr(args, "epoch_offset", 0) or 0)
-    epoch_total = epoch_base + int(args.epochs)
-    patience = int(getattr(args, "patience", 0) or 0)
-    epochs_done = epoch_base
-    rng = np.random.default_rng(seed + 1)
-    t0 = time.time()
 
-    for epoch in range(1, int(args.epochs) + 1):
-        gepoch = epoch_base + epoch
-        model.train()
-        order = rng.permutation(len(tr_idx))
-        run = {"loss": 0.0, "n": 0, "vloss": 0.0, "vn": 0}
-        for start in range(0, len(order), int(args.batch)):
-            sel = tr_idx[order[start : start + int(args.batch)]]
-            b = _make_batch(
-                data, sel, action_v6, rng, float(getattr(args, "mirror_p", 0.5))
-            )
-            opt.clear_grad()
-            out = model(b["obs"], b["scalars"], b["extra"])
-            if action_v6:
-                lm, lf, lh, vpred = out
-                loss = (
-                    _masked_ce(lm, b["move"], b["mask_move"])
-                    + _masked_ce(lf, b["fire"], b["mask_fire"], class_weight=fire_class_weight)
-                    + _masked_ce(lh, b["hold"], b["mask_hold"], class_weight=hold_class_weight)
+    def run_epochs(self, args) -> None:
+        """逐个 epoch：训练 / 验证 / 历史 / 早停 / 断点 / on_epoch 回调。"""
+        for epoch in range(1, int(args.epochs) + 1):
+            gepoch = self.epoch_base + epoch
+            self.model.train()
+            order = self.rng.permutation(len(self.tr_idx))
+            run = {"loss": 0.0, "n": 0, "vloss": 0.0, "vn": 0}
+            for start in range(0, len(order), int(args.batch)):
+                sel = self.tr_idx[order[start : start + int(args.batch)]]
+                b = _make_batch(
+                    self.data, sel, self.action_v6, self.rng, float(getattr(args, "mirror_p", 0.5))
                 )
-                valid = ~paddle.isnan(b["ret"])
-                if float(getattr(args, "value_coef", 0.0) or 0.0) > 0 and bool(
-                    valid.any().item()
-                ):
-                    vi = _kept(valid)
-                    vloss = F.mse_loss(
-                        paddle.gather(vpred.squeeze(-1), vi), paddle.gather(b["ret"], vi)
+                self.opt.clear_grad()
+                out = self.model(b["obs"], b["scalars"], b["extra"])
+                if self.action_v6:
+                    lm, lf, lh, vpred = out
+                    loss = (
+                        _masked_ce(lm, b["move"], b["mask_move"])
+                        + _masked_ce(lf, b["fire"], b["mask_fire"], class_weight=self.fire_class_weight)
+                        + _masked_ce(lh, b["hold"], b["mask_hold"], class_weight=self.hold_class_weight)
                     )
-                    loss = loss + float(args.value_coef) * vloss
-                    nv = int(_scalar(valid.astype("int64").sum()))
-                    run["vloss"] += _scalar(vloss) * nv
-                    run["vn"] += nv
-            elif use_value:
-                lm, lf, vpred = out
-                loss = _masked_ce(lm, b["move"], b["mask_move"]) + _masked_ce(
-                    lf, b["fire"], b["mask_fire"], class_weight=fire_class_weight
-                )
-                valid = ~paddle.isnan(b["ret"])
-                if bool(valid.any().item()):
-                    vi = _kept(valid)
-                    vloss = F.mse_loss(
-                        paddle.gather(vpred.squeeze(-1), vi), paddle.gather(b["ret"], vi)
-                    )
-                    loss = loss + float(args.value_coef) * vloss
-                    nv = int(_scalar(valid.astype("int64").sum()))
-                    run["vloss"] += _scalar(vloss) * nv
-                    run["vn"] += nv
-            else:
-                lm, lf = out
-                loss = _masked_ce(lm, b["move"], b["mask_move"]) + _masked_ce(
-                    lf, b["fire"], b["mask_fire"], class_weight=fire_class_weight
-                )
-            loss.backward()
-            _clip_grad_norm(model.parameters(), 1.0)
-            opt.step()
-            run["loss"] += _scalar(loss) * int(b["obs"].shape[0])
-            run["n"] += int(b["obs"].shape[0])
-        scheduler.step()
-        train_loss = run["loss"] / max(1, run["n"])
-
-        model.eval()
-        v = {
-            "loss": 0.0,
-            "n": 0,
-            "ma": 0.0,
-            "fa": 0.0,
-            "ha": 0.0,
-            "vloss": 0.0,
-            "vn": 0,
-            "wloss": 0.0,
-            "wn": 0,
-        }
-        with paddle.no_grad():
-            for start in range(0, len(val_idx), int(args.batch)):
-                sel = val_idx[start : start + int(args.batch)]
-                b = _make_batch(data, sel, action_v6, None, 0.0)
-                out_v = model(b["obs"], b["scalars"], b["extra"])
-                if action_v6:
-                    lm, lf, lh, vpred = out_v
-                elif use_value:
-                    lm, lf, vpred = out_v
-                else:
-                    lm, lf = out_v
-                loss = _masked_ce(lm, b["move"], b["mask_move"]) + _masked_ce(
-                    lf, b["fire"], b["mask_fire"]
-                )
-                if action_v6:
-                    loss = loss + _masked_ce(lh, b["hold"], b["mask_hold"])
-                    if weight_exp > 0 and (
-                        fire_class_weight is not None or hold_class_weight is not None
+                    valid = ~paddle.isnan(b["ret"])
+                    if float(getattr(args, "value_coef", 0.0) or 0.0) > 0 and bool(
+                        valid.any().item()
                     ):
-                        wloss = (
-                            _masked_ce(lm, b["move"], b["mask_move"])
-                            + _masked_ce(
-                                lf,
-                                b["fire"],
-                                b["mask_fire"],
-                                class_weight=fire_class_weight,
-                            )
-                            + _masked_ce(
-                                lh,
-                                b["hold"],
-                                b["mask_hold"],
-                                class_weight=hold_class_weight,
-                            )
+                        vi = _kept(valid)
+                        vloss = F.mse_loss(
+                            paddle.gather(vpred.squeeze(-1), vi), paddle.gather(b["ret"], vi)
                         )
-                        v["wloss"] += _scalar(wloss) * int(b["obs"].shape[0])
-                        v["wn"] += int(b["obs"].shape[0])
-                if use_value:
+                        loss = loss + float(args.value_coef) * vloss
+                        nv = int(_scalar(valid.astype("int64").sum()))
+                        run["vloss"] += _scalar(vloss) * nv
+                        run["vn"] += nv
+                elif self.use_value:
+                    lm, lf, vpred = out
+                    loss = _masked_ce(lm, b["move"], b["mask_move"]) + _masked_ce(
+                        lf, b["fire"], b["mask_fire"], class_weight=self.fire_class_weight
+                    )
                     valid = ~paddle.isnan(b["ret"])
                     if bool(valid.any().item()):
                         vi = _kept(valid)
                         vloss = F.mse_loss(
                             paddle.gather(vpred.squeeze(-1), vi), paddle.gather(b["ret"], vi)
                         )
+                        loss = loss + float(args.value_coef) * vloss
                         nv = int(_scalar(valid.astype("int64").sum()))
-                        v["vloss"] += _scalar(vloss) * nv
-                        v["vn"] += nv
-                n = int(b["obs"].shape[0])
-                v["loss"] += _scalar(loss) * n
-                v["n"] += n
-                v["ma"] += _masked_acc(lm, b["move"], b["mask_move"]) * n
-                v["fa"] += _masked_acc(lf, b["fire"], b["mask_fire"]) * n
-                if action_v6:
-                    v["ha"] += _masked_acc(lh, b["hold"], b["mask_hold"]) * n
-        val_loss = v["loss"] / max(1, v["n"])
-        ma = v["ma"] / max(1, v["n"])
-        fa = v["fa"] / max(1, v["n"])
-        ha = (v["ha"] / max(1, v["n"])) if action_v6 else None
-        vl = v["vloss"] / max(1, v["vn"]) if v["vn"] > 0 else float("nan")
-        history["train_loss"].append(round(train_loss, 4))
-        history["val_loss"].append(round(val_loss, 4))
-        if v["wn"] > 0:
-            history.setdefault("val_loss_weighted", []).append(
-                round(v["wloss"] / v["wn"], 4)
-            )
-        history["move_acc"].append(round(ma, 4))
-        history["fire_acc"].append(round(fa, 4))
-        if ha is not None:
-            history.setdefault("hold_acc", []).append(round(ha, 4))
-        history["value_loss"].append(float("nan") if vl != vl else round(vl, 4))
-        say(
-            f"[epoch {gepoch:3d}/{epoch_total}] "
-            f"train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
-            f"acc move={ma:.3f} fire={fa:.3f} "
-            + (f"hold={ha:.3f} " if ha is not None else "")
-            + (f"value={vl:.4f} " if vl == vl else "")
-            + f"lr={float(opt.get_lr()):.2e}"
-        )
-        epochs_done = gepoch
-        # B1：与 bc.py 同一判据——完整窗口的滑动平均 val_loss，单点新低不当选。
-        if len(history["val_loss"]) >= SMOOTH_WINDOW:
-            smoothed = smoothed_val_loss(history["val_loss"], window=SMOOTH_WINDOW)
-            if smoothed < best_smoothed:
-                best_smoothed = smoothed
-                best_val = val_loss
-                best_epoch = gepoch
-                best_state = {k: t.clone() for k, t in model.state_dict().items()}
-        stop_at = early_stop_epoch(history["val_loss"], patience)
-        if stop_at is not None and epoch >= stop_at:
-            say(
-                f"[train] early stop at epoch {gepoch}/{epoch_total}："
-                f"滑动平均 val_loss（window={SMOOTH_WINDOW}）连续 {patience} epoch 无改善"
-            )
-            break
-        ckpt_every = int(getattr(args, "ckpt_every", 0) or 0)
-        if ckpt_every > 0 and epoch % ckpt_every == 0:
-            ckpt_path = f"{args.out}.ckpt.{gepoch}"
-            save_weights_json(
-                model,
-                ckpt_path,
-                extra_meta={
-                    "epoch": gepoch,
-                    # 窗口未满时还没有候选权重：写 None，别让 Infinity 进 JSON。
-                    "best_val_loss": round(best_val, 4) if best_epoch else None,
-                    "ckpt": True,
-                },
-            )
-            say(f"[train] checkpoint epoch {gepoch}/{epoch_total} -> {ckpt_path}")
-        on_epoch = getattr(args, "on_epoch", None)
-        if on_epoch is not None:
-            on_epoch(
-                gepoch,
-                model,
-                {
-                    "train_loss": round(train_loss, 4),
-                    "val_loss": round(val_loss, 4),
-                    "move_acc": round(ma, 4),
-                    "fire_acc": round(fa, 4),
-                    **({"hold_acc": round(ha, 4)} if ha is not None else {}),
-                    **(
-                        {"val_loss_weighted": round(v["wloss"] / v["wn"], 4)}
-                        if v["wn"] > 0
-                        else {}
-                    ),
-                    "lr": float(opt.get_lr()),
-                },
-            )
+                        run["vloss"] += _scalar(vloss) * nv
+                        run["vn"] += nv
+                else:
+                    lm, lf = out
+                    loss = _masked_ce(lm, b["move"], b["mask_move"]) + _masked_ce(
+                        lf, b["fire"], b["mask_fire"], class_weight=self.fire_class_weight
+                    )
+                loss.backward()
+                _clip_grad_norm(self.model.parameters(), 1.0)
+                self.opt.step()
+                run["loss"] += _scalar(loss) * int(b["obs"].shape[0])
+                run["n"] += int(b["obs"].shape[0])
+            self.scheduler.step()
+            train_loss = run["loss"] / max(1, run["n"])
 
-    if best_state is None:
-        if not history["val_loss"]:
-            raise RuntimeError("BC 训练没有完成任何 epoch（--epochs 必须 >= 1）")
-        # 窗口未满（epochs < SMOOTH_WINDOW）：交最后一轮，而不是退回单点 min。
-        best_epoch = epochs_done
-        best_val = history["val_loss"][-1]
-        best_smoothed = smoothed_val_loss(history["val_loss"], window=SMOOTH_WINDOW)
-        best_state = {k: t.clone() for k, t in model.state_dict().items()}
-    model.set_state_dict(best_state)
-    trained_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-    meta = {
-        "trained_at": trained_at,
-        "schema_major": OBS_SCHEMA_MAJOR,
-        "args": {k: v for k, v in vars(args).items() if k != "on_epoch"},
-        "sizes": sizes,
-        "best_val_loss": round(float(best_val), 4),
-        "best_smoothed_val_loss": round(float(best_smoothed), 4),
-        "delivered_epoch": int(best_epoch),
-        "epochs_completed": int(epochs_done),
-        "early_stopped": bool(epochs_done < epoch_total),
-        "history": history,
-        "majority_ce": {k: sanitize_json(v) for k, v in mb.items()},
-        "fire_pos_weight": float(fire_pos_weight),
-        "backend": "paddle",
-    }
-    meta = sanitize_json(meta)
-    out_dir = os.path.dirname(os.path.abspath(args.out))
-    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    versioned = os.path.join(
-        out_dir, f"weights.{stamp}_ep{epochs_done}_val{float(best_val):.4f}.json"
-    )
-    save_weights_json(model, versioned, extra_meta=meta)
-    _activate(versioned, str(args.out))
-    say(
-        f"[train] done in {time.time() - t0:.1f}s -> archive: {versioned} "
-        f"(active: {args.out}) schema_major={OBS_SCHEMA_MAJOR} backend=paddle"
-    )
-    return {
-        "out": versioned,
-        "active": args.out,
-        "best_val_loss": best_val,
-        "best_smoothed_val_loss": best_smoothed,
-        "delivered_epoch": int(best_epoch),
-        "epochs_completed": int(epochs_done),
-        "early_stopped": bool(epochs_done < epoch_total),
-        "params": n_params,
-        "history": history,
-        "sizes": dict(sizes),
-        "majority_ce": {k: sanitize_json(v) for k, v in mb.items()},
-        "fire_pos_weight": float(fire_pos_weight),
-        "class_counts": {k: {int(kk): int(vv) for kk, vv in c.items()} for k, c in counts.items()},
-    }
+            self.model.eval()
+            v = {
+                "loss": 0.0,
+                "n": 0,
+                "ma": 0.0,
+                "fa": 0.0,
+                "ha": 0.0,
+                "vloss": 0.0,
+                "vn": 0,
+                "wloss": 0.0,
+                "wn": 0,
+            }
+            with paddle.no_grad():
+                for start in range(0, len(self.val_idx), int(args.batch)):
+                    sel = self.val_idx[start : start + int(args.batch)]
+                    b = _make_batch(self.data, sel, self.action_v6, None, 0.0)
+                    out_v = self.model(b["obs"], b["scalars"], b["extra"])
+                    if self.action_v6:
+                        lm, lf, lh, vpred = out_v
+                    elif self.use_value:
+                        lm, lf, vpred = out_v
+                    else:
+                        lm, lf = out_v
+                    loss = _masked_ce(lm, b["move"], b["mask_move"]) + _masked_ce(
+                        lf, b["fire"], b["mask_fire"]
+                    )
+                    if self.action_v6:
+                        loss = loss + _masked_ce(lh, b["hold"], b["mask_hold"])
+                        if self.weight_exp > 0 and (
+                            self.fire_class_weight is not None or self.hold_class_weight is not None
+                        ):
+                            wloss = (
+                                _masked_ce(lm, b["move"], b["mask_move"])
+                                + _masked_ce(
+                                    lf,
+                                    b["fire"],
+                                    b["mask_fire"],
+                                    class_weight=self.fire_class_weight,
+                                )
+                                + _masked_ce(
+                                    lh,
+                                    b["hold"],
+                                    b["mask_hold"],
+                                    class_weight=self.hold_class_weight,
+                                )
+                            )
+                            v["wloss"] += _scalar(wloss) * int(b["obs"].shape[0])
+                            v["wn"] += int(b["obs"].shape[0])
+                    if self.use_value:
+                        valid = ~paddle.isnan(b["ret"])
+                        if bool(valid.any().item()):
+                            vi = _kept(valid)
+                            vloss = F.mse_loss(
+                                paddle.gather(vpred.squeeze(-1), vi), paddle.gather(b["ret"], vi)
+                            )
+                            nv = int(_scalar(valid.astype("int64").sum()))
+                            v["vloss"] += _scalar(vloss) * nv
+                            v["vn"] += nv
+                    n = int(b["obs"].shape[0])
+                    v["loss"] += _scalar(loss) * n
+                    v["n"] += n
+                    v["ma"] += _masked_acc(lm, b["move"], b["mask_move"]) * n
+                    v["fa"] += _masked_acc(lf, b["fire"], b["mask_fire"]) * n
+                    if self.action_v6:
+                        v["ha"] += _masked_acc(lh, b["hold"], b["mask_hold"]) * n
+            val_loss = v["loss"] / max(1, v["n"])
+            ma = v["ma"] / max(1, v["n"])
+            fa = v["fa"] / max(1, v["n"])
+            ha = (v["ha"] / max(1, v["n"])) if self.action_v6 else None
+            vl = v["vloss"] / max(1, v["vn"]) if v["vn"] > 0 else float("nan")
+            self.history["train_loss"].append(round(train_loss, 4))
+            self.history["val_loss"].append(round(val_loss, 4))
+            if v["wn"] > 0:
+                self.history.setdefault("val_loss_weighted", []).append(
+                    round(v["wloss"] / v["wn"], 4)
+                )
+            self.history["move_acc"].append(round(ma, 4))
+            self.history["fire_acc"].append(round(fa, 4))
+            if ha is not None:
+                self.history.setdefault("hold_acc", []).append(round(ha, 4))
+            self.history["value_loss"].append(float("nan") if vl != vl else round(vl, 4))
+            say(
+                f"[epoch {gepoch:3d}/{self.epoch_total}] "
+                f"train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
+                f"acc move={ma:.3f} fire={fa:.3f} "
+                + (f"hold={ha:.3f} " if ha is not None else "")
+                + (f"value={vl:.4f} " if vl == vl else "")
+                + f"lr={float(self.opt.get_lr()):.2e}"
+            )
+            self.epochs_done = gepoch
+            # B1：与 bc.py 同一判据——完整窗口的滑动平均 val_loss，单点新低不当选。
+            # 2026-11-15：NaN 窗口不是候选（`is_improvement`，与 `select_best_epoch` 同一判据）。
+            if len(self.history["val_loss"]) >= SMOOTH_WINDOW:
+                smoothed = smoothed_val_loss(self.history["val_loss"], window=SMOOTH_WINDOW)
+                if is_improvement(smoothed, self.best_smoothed):
+                    self.best_smoothed = smoothed
+                    self.best_val = val_loss
+                    self.best_epoch = gepoch
+                    self.best_state = {k: t.clone() for k, t in self.model.state_dict().items()}
+            stop_at = early_stop_epoch(self.history["val_loss"], self.patience)
+            if stop_at is not None and epoch >= stop_at:
+                say(
+                    f"[train] early stop at epoch {gepoch}/{self.epoch_total}："
+                    f"滑动平均 val_loss（window={SMOOTH_WINDOW}）连续 {self.patience} epoch 无改善"
+                )
+                break
+            ckpt_every = int(getattr(args, "ckpt_every", 0) or 0)
+            if ckpt_every > 0 and epoch % ckpt_every == 0:
+                ckpt_path = f"{args.out}.ckpt.{gepoch}"
+                save_weights_json(
+                    self.model,
+                    ckpt_path,
+                    extra_meta={
+                        "epoch": gepoch,
+                        # 窗口未满时还没有候选权重：写 None，别让 Infinity 进 JSON。
+                        "best_val_loss": round(self.best_val, 4) if self.best_epoch else None,
+                        "ckpt": True,
+                    },
+                )
+                say(f"[train] checkpoint epoch {gepoch}/{self.epoch_total} -> {ckpt_path}")
+            on_epoch = getattr(args, "on_epoch", None)
+            if on_epoch is not None:
+                on_epoch(
+                    gepoch,
+                    self.model,
+                    {
+                        "train_loss": round(train_loss, 4),
+                        "val_loss": round(val_loss, 4),
+                        "move_acc": round(ma, 4),
+                        "fire_acc": round(fa, 4),
+                        **({"hold_acc": round(ha, 4)} if ha is not None else {}),
+                        **(
+                            {"val_loss_weighted": round(v["wloss"] / v["wn"], 4)}
+                            if v["wn"] > 0
+                            else {}
+                        ),
+                        "lr": float(self.opt.get_lr()),
+                    },
+                )
+
+    def finalize(self, args) -> dict:
+        """选权重 → 写版本化 JSON → 激活 → 返回训练账。"""
+        if self.best_state is None:
+            if not self.history["val_loss"]:
+                raise RuntimeError("BC 训练没有完成任何 epoch（--epochs 必须 >= 1）")
+            # 窗口未满（epochs < SMOOTH_WINDOW）：交最后一轮，而不是退回单点 min。
+            self.best_epoch = self.epochs_done
+            self.best_val = self.history["val_loss"][-1]
+            self.best_smoothed = smoothed_val_loss(self.history["val_loss"], window=SMOOTH_WINDOW)
+            self.best_state = {k: t.clone() for k, t in self.model.state_dict().items()}
+        self.model.set_state_dict(self.best_state)
+        trained_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        meta = {
+            "trained_at": trained_at,
+            "schema_major": OBS_SCHEMA_MAJOR,
+            "args": {k: v for k, v in vars(args).items() if k != "on_epoch"},
+            "sizes": self.sizes,
+            "best_val_loss": round(float(self.best_val), 4),
+            "best_smoothed_val_loss": round(float(self.best_smoothed), 4),
+            "delivered_epoch": int(self.best_epoch),
+            "epochs_completed": int(self.epochs_done),
+            "early_stopped": bool(self.epochs_done < self.epoch_total),
+            "history": self.history,
+            "majority_ce": {k: sanitize_json(v) for k, v in self.mb.items()},
+            "fire_pos_weight": float(self.fire_pos_weight),
+            "backend": "paddle",
+        }
+        meta = sanitize_json(meta)
+        out_dir = os.path.dirname(os.path.abspath(args.out))
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        versioned = os.path.join(
+            out_dir, f"weights.{stamp}_ep{self.epochs_done}_val{float(self.best_val):.4f}.json"
+        )
+        save_weights_json(self.model, versioned, extra_meta=meta)
+        _activate(versioned, str(args.out))
+        say(
+            f"[train] done in {time.time() - self.t0:.1f}s -> archive: {versioned} "
+            f"(active: {args.out}) schema_major={OBS_SCHEMA_MAJOR} backend=paddle"
+        )
+        return {
+            "out": versioned,
+            "active": args.out,
+            "best_val_loss": self.best_val,
+            "best_smoothed_val_loss": self.best_smoothed,
+            "delivered_epoch": int(self.best_epoch),
+            "epochs_completed": int(self.epochs_done),
+            "early_stopped": bool(self.epochs_done < self.epoch_total),
+            "params": self.n_params,
+            "history": self.history,
+            "sizes": dict(self.sizes),
+            "majority_ce": {k: sanitize_json(v) for k, v in self.mb.items()},
+            "fire_pos_weight": float(self.fire_pos_weight),
+            "class_counts": {k: {int(kk): int(vv) for kk, vv in c.items()} for k, c in self.counts.items()},
+        }
+
+
+
 
 
 # `bc_core.smoothed_val_loss` / `EARLY_STOP_MIN_DELTA` 是给对账脚本与测试的转发面；

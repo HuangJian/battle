@@ -13,7 +13,7 @@
  * 打日志/告警、持久化跨调用 memo。
  *
  * 已知边界：子进程是一次性的 ⇒ 守卫内部的跨代去重只在单次调用内生效；跨调用由本模块的
- * memo 文件兜底（key = nid + agent ping hash + 期望 hash，**语义与 common.distribution._RESTART_SEEN
+ * memo 文件兜底（key = nid + agent ping hash + 期望 hash，**语义与 common.distribution._RESTARTS.seen
  * 一致**，落 `tmp/node-upgrade-memo.json`，可用 NN_UPGRADE_MEMO 覆盖）：调用前按节点取
  * memo 里最新的一条经 spec.`seen` 预置回子进程，判据（含**去重冷却窗**）仍只有一处实现。
  *
@@ -33,7 +33,7 @@ export interface UpgradeSpecInput {
   branch: string
   /** 节点配置（`rl-config.json` 或 `--dist-nodes` 指定的文件）。 */
   cfgPath: string
-  /** 跨调用去重 memo（预置回 `common.distribution._RESTART_SEEN`；`atSec` = 该次下发时刻）。 */
+  /** 跨调用去重 memo（预置回 `common.distribution._RESTARTS.seen`；`atSec` = 该次下发时刻）。 */
   seen?: Array<{ id: string; pingHash: string; expectedHash: string; atSec?: number }>
   /** null/缺省 ⇒ 子进程用 `common.distribution.dirty_hash_files()` 字节级探测。 */
   dirty?: string[] | null
@@ -122,7 +122,7 @@ export function parseUpgradeOutput(stdout: string): {
   }
 }
 
-/** memo 键（与 common.distribution._RESTART_SEEN 的 (agent ping hash, 期望 hash) 同语义，全量 hex）。 */
+/** memo 键（与 common.distribution._RESTARTS.seen 的 (agent ping hash, 期望 hash) 同语义，全量 hex）。 */
 export function memoKey(nid: string, pingHash: string, expectedHash: string): string {
   return `${nid}|${pingHash}|${expectedHash}`
 }
@@ -156,7 +156,7 @@ export function saveMemo(memoPath: string, memo: UpgradeMemo): void {
 }
 
 /**
- * memo → 每节点**最新**一条 `seen` 条目。与常驻循环同构：`_RESTART_SEEN[nid]` 只留
+ * memo → 每节点**最新**一条 `seen` 条目。与常驻循环同构：`_RESTARTS.seen[nid]` 只留
  * 最近一次（重启后 agent hash 变化 ⇒ 键不匹配 ⇒ 允许再发，正是 F1 语义）。
  */
 export function latestSeenEntries(

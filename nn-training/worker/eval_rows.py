@@ -181,8 +181,8 @@ def eval_v10_fields(manifest: dict | None) -> dict:
     """从 eval 报告 manifest 抽出 v10 十九列（缺键 = 整键省略，不写 None）。
 
     与 `eval_v8_fields`/`eval_v9_fields` 逐字同形、同一个理由（0 是合法读数；
-    下游 `eval-course-ckpt` 以键缺席判未知）与同一条纪律：`eval_row`、
-    `rl/batch_eval.py::record`、`rl/batch_runner._UnitLanes` 三处行构造点必须
+    下游 `eval-course-ckpt` 以键缺席判未知）与同一条纪律：`eval_row` 与
+    `trainer/batch_runner.py::_UnitLanes.record` 两处行构造点必须
     **经本函数**取数（2026-09-24 v8 提交就是 Python 两处全漏 ⇒ 日常 eval 失明）。
     """
     out: dict = {}

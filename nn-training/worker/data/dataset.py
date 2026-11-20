@@ -48,14 +48,11 @@ if TYPE_CHECKING:
 
 # mirrorX 的**纯 numpy**实现已抽到 data/mirror.py（2026-09-26：让只测镜像自洽的用例
 # 不必把 torch 拖进测试路径——本模块因 NNDataset/_AugWrapper 继承 Dataset 必须顶层
-# import torch）。这里再导出；本模块内与外部 `from data.dataset import mirror_x` 一行不改。
-from worker.data.mirror import (  # noqa: F401  (re-export：既有调用点不变)
-    _MOVE_FLIP,
-    BULLET_MIRROR_LUT,
-    ENEMY_MIRROR_LUT,
-    _flip_direction,
-    mirror_x,
-)
+# import torch）。本模块只取自己画数据时要用的 `mirror_x`。
+# 2026-11-16：删掉那层再导出 —— `_MOVE_FLIP` / `BULLET_MIRROR_LUT` / `ENEMY_MIRROR_LUT` /
+# `_flip_direction` 全仓零读者（连一个 `from data.dataset import …` 都没有），却让镜像表
+# 有了第二个门牌。要查表就直取 `worker.data.mirror`。
+from worker.data.mirror import mirror_x
 
 # shard 级切分的**纯 numpy**实现（2026-09-26，item 6e）：本模块顶层必须 import torch，
 # 切分判据没必要连坐 —— 切分逻辑住 data/shard_split.py（免 torch），这里只调它。

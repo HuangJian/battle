@@ -30,7 +30,7 @@ from common.protocol import WORKER_ERROR_TTL_SEC
 from hub.admin import WORKER_ERROR_BODY_MAX, AdminRoutes
 from hub.queue import _HubQueue
 from hub.queue_observe import WORKER_ERROR_RING_MAX
-from tests.hub.test_worker_prefetch import _Clock, _hub_with_course  # type: ignore
+from tests.hub.test_worker_prefetch import _Clock, _hub_with_course
 
 REPORT = {
     "worker": "kaggle-c:1",

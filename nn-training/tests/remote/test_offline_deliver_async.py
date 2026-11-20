@@ -42,7 +42,7 @@ if str(ROOT) not in sys.path:
 from common.protocol import OFFLINE_ARTIFACT_PATH, OFFLINE_RESULT_PATH
 from remote.deliver_proc import DelivererProcess, make_deliverer
 from remote.offline_deliver import OfflineDeliverer
-from tests.remote.test_offline_deliver import RUN, _make_artifacts  # type: ignore
+from tests.remote.test_offline_deliver import RUN, _make_artifacts
 
 
 class _FakeProc:
@@ -191,7 +191,7 @@ def test_background_errors_never_reach_the_trainer_and_thread_survives(tmp_path:
     rec = _Recorder(fail_first=1)  # 第一次探活就炸（瞬断）——之后必须恢复
     d = _deliverer(root, rec)
     logs: list[str] = []
-    d.log = logs.append  # type: ignore[method-assign]
+    d.log = logs.append
     d.start()
     try:
         d.submit_round(1)
@@ -284,7 +284,7 @@ def test_drain_loop_never_spins_without_waiting_or_working(tmp_path: Path) -> No
         run_id=RUN,
         artifacts_dir=root,
         background=True,
-        opener=_dead_530,  # type: ignore[arg-type]
+        opener=_dead_530,
         log=lambda _m: None,
     )
     d.start()
@@ -292,8 +292,9 @@ def test_drain_loop_never_spins_without_waiting_or_working(tmp_path: Path) -> No
         d.submit_eval_round(1)  # 登记重投 + 唤醒（旧实现此后进自旋）
         # sleep-ok: 轮询步长（等的是「探针是否被触发」这个状态，超时只当挂起兜底）
         _wait_until(lambda: d._idle_spins > 0, timeout=0.6)
-        assert d._idle_spins == 0, (
-            f"补传线程空转了 {d._idle_spins} 圈（既不干活也不 wait）——"
+        idle = d.status()["idle_spins"]
+        assert idle == 0, (
+            f"补传线程空转了 {idle} 圈（既不干活也不 wait）——"
             "不变量：每一次唤醒，要么干活，要么 wait"
         )
         assert rec.calls == [], "530 时不该有任何请求被当成投递"
@@ -353,7 +354,7 @@ def test_unsent_repost_is_loud_and_persisted(tmp_path: Path) -> None:
         run_id=RUN,
         artifacts_dir=root,
         background=True,
-        opener=_dead_530,  # type: ignore[arg-type]
+        opener=_dead_530,
         log=logs.append,
     )
     d.start()
@@ -405,7 +406,7 @@ def test_process_mode_passes_the_token_by_env_never_by_argv(
     """
     seen: dict = {}
 
-    def fake_popen(argv, *a, **kw):  # type: ignore[no-untyped-def]
+    def fake_popen(argv, *a, **kw):
         seen["argv"] = [str(x) for x in argv]
         seen["env"] = dict(kw.get("env") or {})
         seen["cwd"] = str(kw.get("cwd") or "")
@@ -451,7 +452,7 @@ def test_process_mode_passes_the_worker_name_by_env_never_by_argv(
     """
     seen: dict = {}
 
-    def fake_popen(argv, *a, **kw):  # type: ignore[no-untyped-def]
+    def fake_popen(argv, *a, **kw):
         seen["argv"] = [str(x) for x in argv]
         seen["env"] = dict(kw.get("env") or {})
         return _FakeProc()
@@ -523,7 +524,7 @@ def test_sync_mode_is_still_synchronous(tmp_path: Path) -> None:
         token="tok",
         run_id=RUN,
         artifacts_dir=root,
-        opener=rec,  # type: ignore[arg-type]
+        opener=rec,
         log=lambda _m: None,
     )
     assert d.background is False
@@ -557,8 +558,9 @@ def test_restart_restating_the_final_does_not_self_lock(
     d.start()
     ctl = Path(str(d.status()["ctl"]))
     d.submit_final(it_end=1, state="complete", summary={}, end_it_reached=True)
-    assert d._proc is not None
-    d._proc.kill()  # 子进程「崩了」（OOM / 被平台杀）
+    proc = d.child()
+    assert proc is not None
+    proc.kill()  # 子进程「崩了」（OOM / 被平台杀）
     # `result_done` 还没落的窗口（hub 收到 POST ≠ 子进程已记账）⇒ 重启后要重述 final
     monkeypatch.setattr(d, "_result_done_from_disk", lambda: False)
     done = threading.Event()
@@ -605,6 +607,7 @@ def test_result_done_prefers_the_ledger_over_a_stale_status_snapshot(
     )
     # 状态面：**陈旧快照**（上一个 tick 写的，说没送）—— 0.5s 的窗口就在这
     monkeypatch.setattr(d, "_child_status", lambda: {"pid": 4321, "result_done": False})
-    assert d._result_done_from_disk() is True, (
+    from_disk = d._result_done_from_disk()
+    assert from_disk is True, (
         "账本说送了、快照还没刷新 ⇒ 必须信账本（否则重启白重述一次 ~1.9MB 的段末摘要）"
     )

@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from common.http_respond import respond_json
 from common.protocol import WIRE_JOB_MAGIC, normalize_manifest, unpack_job_v2
+from tests.helpers.http_server import serve_fast
 
 PAYLOAD = b"PK\x03\x04fake-payload-bytes"
 
@@ -64,7 +65,7 @@ class FakeWorker:
         srv = self._build()
         self.srv = srv
         self.url = f"http://127.0.0.1:{srv.server_address[1]}"
-        self.thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        self.thread = serve_fast(srv)
         self.thread.start()
 
     def close(self) -> None:

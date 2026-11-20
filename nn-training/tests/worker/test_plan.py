@@ -374,7 +374,7 @@ def test_validate_plan_rejects_malformed() -> None:
             validate_plan(bad)
         assert kw in str(ei.value), (kw, str(ei.value))
     with pytest.raises(ProtocolError):
-        validate_plan([1, 2, 3])  # type: ignore[arg-type]
+        validate_plan([1, 2, 3])
 
 
 # ────────────────────── 自主机首批铺满（2026-10-22 事故回归）──────────────────────

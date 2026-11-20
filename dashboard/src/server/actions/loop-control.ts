@@ -6,7 +6,7 @@
  *  多一处故障域，用户 2026-09-18 定案）。
  *
  *  通道 = 两侧本来就共享的工作区里的一份**意图文件**（`tmp/loop-control.json`）：
- *  控制台写、训练进程每拍读一次并施加到调度器（`nn-training/trainer/loop_control.py`）。
+ *  控制台写、训练进程每拍读一次并施加到调度器（`nn-training/worker/loop_control.py`）。
  *  hub 挂了也能用，进程重启后意图仍在（对比 hub 的 course-mode 是 volatile，那里要靠
  *  `restoreCourseModes` 回灌；这里**文件本身就是状态**，不需要回灌）。
  *
@@ -22,7 +22,7 @@
  *
  *  ★M2（plan/worker-type-dispatch-model §3-M2，F13）：这份文件现在**还承载一份 hub 事实的
  *  缓存**——`held: [{course, last_progress_at}]`（哪个课程正被自主 worker 接管）。训练侧
- *  （`nn-training/trainer/loop_control.py::parse_held`）在 hub 问不到时读它，并**就地按 900s
+ *  （`nn-training/worker/loop_control.py::parse_held`）在 hub 问不到时读它，并**就地按 900s
  *  自判活**（`last_progress_at` 超窗 = 不算接管）。三条前提必须写死（否则它是个假事实源）：
  *
  *    ① **版本/回执形状**：`held` 与 `paused` 同文件同版本号（`LOOP_CONTROL_VERSION`）；

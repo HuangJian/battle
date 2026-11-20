@@ -210,6 +210,8 @@ class BulkScheduler:
         try:
             obs(bool(waiting))
         except Exception:
+            # 契约静默（G9 冻结，非旧债）：docstring 已定死「观察者自己的异常一律吞掉」——
+            # 它是观测/协同面，P1 的真实状态由 PayloadProcess 响亮地说。
             pass
 
     def foreign_p1(self, waiting: bool) -> None:

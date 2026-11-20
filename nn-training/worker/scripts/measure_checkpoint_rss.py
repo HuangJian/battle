@@ -193,7 +193,7 @@ def rss_mb() -> float:
         with open("/proc/self/statm", encoding="ascii") as f:
             pages = int(f.read().split()[1])
         # os.sysconf is Unix-only; Windows stubs omit it (same as biz/forensics.py).
-        page_size = int(os.sysconf("SC_PAGE_SIZE"))  # type: ignore[attr-defined]
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
         return float(pages * page_size) / 1e6
     except (OSError, ValueError, IndexError, AttributeError):
         pass

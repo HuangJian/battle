@@ -238,7 +238,8 @@ def test_stage_grid_and_default_lives_contracts() -> None:
     assert spec_mod.StageSpec(grid=grid).forces == "cccccccccccccccccccc"
     with pytest.raises(ValueError, match="13 行"):
         spec_mod.StageSpec(grid=[[0] * 13])
-    assert spec_mod._default_lives("hard") == 3
+    hard_lives = spec_mod._default_lives("hard")
+    assert hard_lives == 3
 
 
 def test_reward_terminal_keys_are_the_outcome_vocabulary() -> None:

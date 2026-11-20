@@ -1,0 +1,13 @@
+{
+  "biz/__init__.py": 113,
+  "common/__init__.py": 99,
+  "common/instance_lock.py": 51,
+  "hub/http_face.py": 62,
+  "remote/code_snapshot.py": 64,
+  "remote/offline_boot.py": 53,
+  "remote/opt_delta.py": 60,
+  "trainer/__init__.py": 90,
+  "trainer/loop_lifecycle.py": 53,
+  "trainer/loop_volume.py": 53,
+  "worker/stream_collect.py": 55
+}

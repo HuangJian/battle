@@ -322,7 +322,7 @@ def test_ensure_code_refuses_a_pack_that_contradicts_the_index(
     calls: list[str] = []
 
     class _SpyZip(zipfile.ZipFile):
-        def extractall(self, *a, **k):  # type: ignore[no-untyped-def]
+        def extractall(self, *a, **k):
             calls.append("extractall")
             return super().extractall(*a, **k)
 
@@ -1080,7 +1080,8 @@ def test_http_error_parts_reads_the_body_exactly_once() -> None:
     text, doc = offline_boot._http_error_parts(err)
     assert text == "no pack"
     assert doc["path"].endswith("task-c.zip") and doc["known_courses"] == ["a"]
-    assert offline_boot._http_error_body(err) == "（空正文）"
+    empty_body = offline_boot._http_error_body(err)
+    assert empty_body == "（空正文）"
 
 
 def test_fetch_task_pack_logs_the_hub_diagnostics_on_404(

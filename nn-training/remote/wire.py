@@ -232,6 +232,11 @@ def _ref_rate() -> float:
     return _BEST_RATE if _BEST_RATE > 0.0 else 0.0
 
 
+def best_rate() -> float:
+    """参照速率的只读读数（衰减/抬升仍由 `_note_rate` 负责）。"""
+    return _BEST_RATE
+
+
 def _min_rate() -> float:
     """坏签判据 = max(`WIRE_MIN_RATE`, 参照速率 / 4)——只在「明显偏离**近期**水平」时动手。"""
     return max(WIRE_MIN_RATE, _ref_rate() / 4.0)

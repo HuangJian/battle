@@ -19,6 +19,11 @@ from __future__ import annotations
 import ast
 import sys
 from pathlib import Path
+from typing import Any
+
+import pytest
+
+from remote import job_fs
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -34,7 +39,6 @@ WORKER_FILE = ROOT / "remote" / "worker.py"
 MOVED_NAMES = {
     "JOB_DIR_KEEP",
     "REPO_ROOT",
-    "_git_head",
     "_persist_result",
     "pack_opt_tar",
     "prune_job_dirs",

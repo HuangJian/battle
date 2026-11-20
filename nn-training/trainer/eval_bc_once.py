@@ -29,9 +29,9 @@ sys.path.insert(0, str(_SCRIPT_DIR.parent))
 from common.cli import house_parser, run_main
 from common.distribution import load_dist_config
 from common.log import log
+from common.paths import REPO_ROOT
 from common.platform_utils import force_utf8_stdio
 from trainer.bc_ingest import run_epoch_eval
-from trainer.dispatch_queue import REPO_ROOT
 from worker.bc_config import BC_SUFFIX, load_bc_course, resolve_bc_course
 from worker.bc_ledger import JOB_PENDING_EVENT, read_events
 

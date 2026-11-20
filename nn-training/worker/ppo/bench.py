@@ -74,10 +74,12 @@ def main() -> None:
     load_state_into(model, args.weights)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
 
+    # §P1-7：bench 只看算力，流固定种子 0（切块顺序照旧是「有重排但可复现」）。
+    bench_rng = ppo_mod.PPORng.from_seed(0)
     t0 = time.time()
-    chunks = ppo_mod.chunk_episodes(eps, args.mb)
+    chunks = ppo_mod.chunk_episodes(eps, args.mb, rng=bench_rng.chunk)
     t_chunk = time.time() - t0
-    agg = ppo_mod.ppo_update(model, opt, chunks, args.epochs, args.device)
+    agg = ppo_mod.ppo_update(model, opt, chunks, args.epochs, args.device, rng=bench_rng)
     ppo_sec = round(time.time() - t0 - t_chunk, 1)  # 纯 PPO 计算（不含 chunk 组装）
     out = {
         "event": "ppo_bench",

@@ -6,7 +6,7 @@
 
 | 面 | 实现在哪 | 搬出日期 |
 |---|---|---|
-| 规划 / 判据 / 门（`plan_units` · `plan_verdict_units` · `units_for_batch` · `node_gate_reason` · `is_transient_error` · `kind_for_policy` + 桶常量） | `trainer/batch_plan.py` | 2026-09-25 S25/B1（纯搬） |
+| 规划 / 判据 / 门（`plan_units` · `plan_verdict_units` · `units_for_batch` · `node_gate_reason` · `is_transient_error` · `kind_for_policy` + 桶常量） | `biz/batch_plan.py` | 2026-09-25 S25/B1（纯搬） |
 | 台账 + 请求面（`BatchStore` 八个具名转移 · 锁 · 原子发布 · `data_root` / `utc_now_iso`） | `trainer/batch_store.py` | 2026-09-25 S26/B2（状态收进唯一所有者） |
 | 执行面（`BatchEvalRunner` · `dispatch_batch_bg` + 它们独占的常量与 `_heartbeat`） | `trainer/batch_runner.py` | 2026-09-25 S27/B3（纯搬） |
 | 接线 `maybe_dispatch_batch` + 常量 `ONESHOT_EVAL_KIND` | **本模块** | —— |
@@ -19,7 +19,7 @@
 关键契约（原文照搬 —— 别在门面里改语义）：
   - 节点门（§6.6）：enabled ∧ ping ∧ evalSupport ∧ stageJsonSupport ∧
     bunVersion 一致 ∧ **codeHash 一致**（= rollout 门同一判据；2026-09-17 起不再比
-    ping.engineEpoch——见 common.distribution.check_code_hash）——**严格拒派，不静默降级**（P2 DoD）。
+    ping.engineEpoch——见 common.codehash.check_code_hash）——**严格拒派，不静默降级**（P2 DoD）。
   - iterId 命名空间 `{runId}.b{batchShort}u{unit}`（runner.ts）：agent taskKey
     无 policy 分量，命名空间隔离是 god/nn 不串键的唯一保证。
   - 窗口（§6.5）：只在窗口开时派新局；在途局自然跑完（taskTimeoutSec 封顶）；
@@ -33,34 +33,34 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
+import common.codehash
 import common.distribution
-from common.log import log
 
 # 再导出约定：`from <home> import X as X` 自别名，逐条一行（ruff `combine-as-imports = false`）。
 # 这是「已有 import 点一行不改」与 `batch_eval.X is <home>.X` 的全部依据；
 # 面与面的分工见顶部 docstring 的表，闭集守卫见 tests/trainer/test_batch_eval_facade.py。
-# 规划 / 判据面 → `trainer/batch_plan.py`（S25/B1）
-from trainer.batch_plan import BATCH_STAGE_BASE as BATCH_STAGE_BASE
-from trainer.batch_plan import CORPORA_JSON as CORPORA_JSON
-from trainer.batch_plan import EVAL_SEED0 as EVAL_SEED0
-from trainer.batch_plan import KIND_FOR_POLICY as KIND_FOR_POLICY
-from trainer.batch_plan import LADDER_JSON as LADDER_JSON
-from trainer.batch_plan import LEVELS_DIR as LEVELS_DIR
-from trainer.batch_plan import REGRESSION_EVERY as REGRESSION_EVERY
-from trainer.batch_plan import REPO_ROOT as REPO_ROOT
-from trainer.batch_plan import SEGMENT_LEN as SEGMENT_LEN
-from trainer.batch_plan import batch_iter_id as batch_iter_id
-from trainer.batch_plan import corpora_path as corpora_path
-from trainer.batch_plan import corpus_doc as corpus_doc
-from trainer.batch_plan import is_transient_error as is_transient_error
-from trainer.batch_plan import kind_for_policy as kind_for_policy
-from trainer.batch_plan import load_corpora as load_corpora
-from trainer.batch_plan import load_ladder as load_ladder
-from trainer.batch_plan import node_gate_reason as node_gate_reason
-from trainer.batch_plan import plan_units as plan_units
-from trainer.batch_plan import plan_verdict_units as plan_verdict_units
-from trainer.batch_plan import select_next_unit as select_next_unit
-from trainer.batch_plan import units_for_batch as units_for_batch
+# 规划 / 判据面 → `biz/batch_plan.py`（S25/B1）
+from biz.batch_plan import BATCH_STAGE_BASE as BATCH_STAGE_BASE
+from biz.batch_plan import CORPORA_JSON as CORPORA_JSON
+from biz.batch_plan import EVAL_SEED0 as EVAL_SEED0
+from biz.batch_plan import KIND_FOR_POLICY as KIND_FOR_POLICY
+from biz.batch_plan import LADDER_JSON as LADDER_JSON
+from biz.batch_plan import LEVELS_DIR as LEVELS_DIR
+from biz.batch_plan import REGRESSION_EVERY as REGRESSION_EVERY
+from biz.batch_plan import SEGMENT_LEN as SEGMENT_LEN
+from biz.batch_plan import batch_iter_id as batch_iter_id
+from biz.batch_plan import corpora_path as corpora_path
+from biz.batch_plan import corpus_doc as corpus_doc
+from biz.batch_plan import is_transient_error as is_transient_error
+from biz.batch_plan import kind_for_policy as kind_for_policy
+from biz.batch_plan import load_corpora as load_corpora
+from biz.batch_plan import load_ladder as load_ladder
+from biz.batch_plan import node_gate_reason as node_gate_reason
+from biz.batch_plan import plan_units as plan_units
+from biz.batch_plan import plan_verdict_units as plan_verdict_units
+from biz.batch_plan import select_next_unit as select_next_unit
+from biz.batch_plan import units_for_batch as units_for_batch
+from common.log import log
 
 # 执行面 → `trainer/batch_runner.py`（S27/B3）
 from trainer.batch_runner import BatchEvalRunner as BatchEvalRunner
@@ -152,7 +152,7 @@ def maybe_dispatch_batch(
         log("[batcheval] nn unit without weights — 退回队列")
         store.requeue(str(batch.get("batch_id")))
         return None
-    epoch = common.distribution.compute_engine_epoch()
+    epoch = common.codehash.compute_engine_epoch()
     eval_log = traj_dir.parent / "eval_log.jsonl"
     # 定型只走 store 的具名转移。这里**不**再就地改 `batch`（旧实现「就地改台账再落盘」的残留：
     # store 交回的是**认领时的快照**，执行器只读它的 batch_id/iter（`unit_of` 走参数传入）

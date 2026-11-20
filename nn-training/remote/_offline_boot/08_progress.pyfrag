@@ -1,0 +1,281 @@
+# ═══ part 8/12: 08_progress — 打点：install_progress_pinger / install_local_progress_sink / 交还租约 ═══
+def install_progress_pinger(
+    hub: str,
+    token: str,
+    course: str,
+    lease: str,
+    log: Callable[[str], None],
+    *,
+    interval: float = PROGRESS_MIN_INTERVAL_SEC,
+    timeout: float = PROGRESS_TIMEOUT_SEC,
+    post: Callable[..., tuple[int, dict]] | None = None,
+    reclaim: Callable[[], str] | None = None,
+    clock: Callable[[], float] | None = None,
+) -> Callable[[], str]:
+    """把**打点层**挂进 `sys.modules[PROGRESS_HOOK_NAME]` → 返回 `detach()`（撤销注册）。
+
+    ★M3 / Q2 / F3：打点是「**完成事件**驱动的观测」，不是定时任务。快照侧
+    （`remote/plan_run.py` 的轮边界、`worker/iter_rollout.py` 的每 N 局完）通过
+    `common/progress_hook.report(...)` 上报事实；这里做三件事——**时间节流**（每
+    `interval` 秒最多一句）、POST、409 分流。
+
+    **绝不另起线程**：定时线程正是「心跳活、进度死」的成因（§68）——`heartbeat_loop` 那条
+    守护线程只续 TTL（那是租约的账），而 hold 的活性要的是「活干到哪了」，只能挂在真的干完
+    一点活的那一刻上。
+
+    返回的 `detach()` 撤销注册，并给出**本段的租约结局**（空串 = 一切正常）：
+
+      · `"revoked"`（409）：租约被撤销（人强制解除了接管）⇒ 调用方**别再领这一课**
+        （当前段照常跑完并打包）；
+      · `"expired"` / `"taken"`（409）：租约过期 / 已被别人接管 ⇒ 跑完当前段并打包，停打点
+        （继续 ping 只会每 `interval` 秒刷一行 409）；
+      · `"unreachable"`：连丢 `PROGRESS_FAIL_LIMIT` 拍发不出去 ⇒ **降频**（240s → 480s → 900s，
+        下一拍成功即复位）；段末结局仍是 `unreachable` 只表示「最后一次尝试没成」。
+
+    `reclaim`（评审 F1 / plan §4.2-2）：409 的 `expired`/`taken` 时重新领一次租约（返回新 lease，
+    拿不到给空串）⇒ 拿到就换 URL 继续报进度（旧口径是整段哑）。`revoked` 不适用（人的意志）。
+
+    打点的任何失败都**不影响训练**（观测腿，与心跳同一条纪律）；`post` 是测试注入点。
+    """
+    post_fn = post or _post_json
+    now_fn = clock or time.monotonic
+    url = progress_url(hub, course, lease)
+    state: dict[str, Any] = {
+        # `-inf` 而不是 `0.0`：首拍必须恒发，而 `now - 0.0 < interval` 只在
+        # `now`(=time.monotonic()) **大于 interval** 时才成立 —— monotonic 的起点是
+        # **系统启动**（Windows 尤其），所以「开机不到 1 小时」的机器上首拍会被
+        # 当成「刚发过」而吃掉（2026-10-20 实测 monotonic=3167s < interval=3600s
+        # ⇒ 打点首句静默丢失、`test_progress_ping_lands_on_the_wire_once_per_window`
+        # 红；同一份代码在开机 >1h 的机器上绿 ⇒ 忽红忽绿的唯一成因）。
+        # `-inf` 让 `now - at = +inf` 恒大于任何 interval，语义与上面那句注释对齐。
+        "at": float("-inf"),
+        "fails": 0,
+        "dead": "",
+        "outcome": "",
+        "cool": 0.0,
+        "level": 0,
+        #: 上一条**打过日志**的进度四元组 `(kind, it, done, total)`（节流口径见
+        #: `common.progress_text.should_log_progress`：25% 一桶 + 换阶段/换轮 + 完成 + retry）。
+        #: 2026-10-27 用户口径：`采集局 9/46 → 10/46 → …` 每局一行把网页日志面板撑爆。
+        "shown": None,
+        #: `iter` 那族上一次**打日志**的时刻（monotonic）；换轮时重置 —— 见 `_iter_log_due`。
+        "iter_shown_at": float("-inf"),
+        #: `iter` 那族上一次打日志时的轮号（换轮 ⇒ 重置窗口、且该轮第一条不打）。
+        "iter_it": 0,
+    }
+
+    def _ping(
+        kind: str = "", *, it: int = 0, done: int = 0, total: int = 0, force: bool = False
+    ) -> bool:
+        """一个完成事件 → 打点（时间节流；True = 这一拍真发出去了）。**永不抛**。
+
+        ★ 2026-10-16（评审 F1 / plan §2.2-2）：连不上**不再永久哑**——连丢 `PROGRESS_FAIL_LIMIT`
+        拍改进**降频窗**（240s → 480s → 900s 封顶），窗过自动再试；**下一个成功就把计数与
+        结局都复位**（本段不再是 `unreachable`）。只有 `revoked`（人强制解除）真停。
+        为什么：现场「抖动盖住 ~1 分钟就打死打点」⇒ hub 900s 后判 hold stale ⇒ 权重到了也不推
+        活动起点；而打点是**观测腿**，停它的代价（几条日志）远小于静默冻结进度的代价。
+        """
+        nonlocal url
+        if state["dead"]:
+            # 只有 409 一族会走到这里（`revoked` = 人的意志；`expired`/`taken` 且重新领租约
+            # 拿不到）——**连不上的「降频」不算死**，它走下面的 `cool` 窗。
+            return False
+        now = now_fn()
+        # ★ 2026-10-25（用户口径：pull / push 的 rollout/ppo/eval **日志**必须一致，只有传输不同）：
+        #   **日志行与发报解耦**。发报要节流（POST 有成本），日志不需要 —— 同一个事件在 pull 腿上
+        #   因为节流窗而不打，就等于「同一件事在两条腿上长什么样不一样」。所以：每次事件先打一行
+        #   （内容没变不打，防刷屏），节流只管「发不发出去」。
+        # 日志行**先节流再打**（2026-10-27）：`should_log_progress` 是两条腿 + hub 共用的
+        # 那一份判据（25% 一桶 / 换阶段 / 完成 / retry），发报不受它影响（下面照常走）。
+        # 走 `_should_log_progress`（延迟 import + 兜底）：`_ping` 承诺**永不抛**，而本文件
+        # 在引导形态下没有 `common/` ⇒ 裸 import 会让第一条进度事件就炸掉打点。
+        # 轮边界「本轮开始」只上发报、不单独打日志行（每轮一条、与 PPO/eval 阶段头重复，
+        # 属刷屏；hub 活性不受影响——发报在下面照常走）。
+        if str(kind or "") != "round-start" and _should_log_progress(
+            state.get("shown"),
+            kind=str(kind or ""),
+            it=int(it),
+            done=int(done),
+            total=int(total),
+        ) and _iter_log_due(state, str(kind or ""), now, int(it)):
+            state["shown"] = (str(kind or ""), int(it), int(done), int(total))
+            log(_progress_label(kind, it=int(it), done=int(done), total=int(total)))
+        if not force and float(state["cool"]) > now:
+            return False  # 降频窗内（不是死；到点自己回来）
+        # `at` 从 0 起 ⇒ **首拍恒发**（段开工那一句不会被时间窗吃掉）。
+        if not force and (now - float(state["at"])) < float(interval):
+            return False
+        state["at"] = now
+        code, doc = post_fn(url, token, log, timeout=timeout)
+        if code == 200:
+            if int(state["fails"]):
+                log(f"[打点] 恢复发报（连丢 {state['fails']} 拍之后）")
+            state["fails"] = 0
+            state["cool"] = 0.0
+            state["level"] = 0
+            state["outcome"] = ""  # 复活：本段结局不再是 unreachable
+            return True
+        if code == 409:
+            why = "revoked" if doc.get("revoked") else ("expired" if doc.get("expired") else "taken")
+            holder = doc.get("holder") if isinstance(doc.get("holder"), dict) else {}
+            # `expired`/`taken` 可以**重建会话**（plan §4.2-2）：重新 claim 拿到新 lease 再报进度；
+            # `revoked` 是人的意志，保持不动。
+            if why in ("expired", "taken") and reclaim is not None:
+                fresh = ""
+                try:
+                    fresh = str(reclaim() or "")
+                except Exception as e:  # 重新领租约的任何意外都不得影响训练
+                    log(f"[打点] 重新领租约异常（忽略）：{type(e).__name__}: {e}")
+                if fresh:
+                    url = progress_url(hub, course, fresh)
+                    state["fails"] = 0
+                    state["cool"] = 0.0
+                    state["level"] = 0
+                    log(f"[打点] {why} ⇒ 已重新领到租约——恢复报进度")
+                    return False
+            state["dead"] = why
+            state["outcome"] = why
+            log(
+                {
+                    "revoked": "⚠ 打点被拒：租约已被撤销（人强制解除了接管）——"
+                    "本段跑完即打包，本会话不再领这一课",
+                    "expired": "⚠ 打点被拒：租约已过期（重新领租约没成功）——本段继续跑完并打包"
+                    "（回传可能被判 duplicate 丢弃）",
+                }.get(
+                    why,
+                    f"⚠ 打点被拒：租约已被 {(holder or {}).get('worker_id') or '别人'} 接管——"
+                    "本段继续跑完并打包（回传可能被判 duplicate 丢弃）",
+                )
+            )
+            return False
+        # 连不上（0）/ 5xx / 404：下一拍再试；连丢 PROGRESS_FAIL_LIMIT 拍 ⇒ **降频**（不永久哑）。
+        state["fails"] = int(state["fails"]) + 1
+        if int(state["fails"]) >= PROGRESS_FAIL_LIMIT:
+            level = min(int(state["level"]), len(PROGRESS_COOLDOWN_SEC) - 1)
+            cool = float(PROGRESS_COOLDOWN_SEC[level])
+            state["level"] = int(state["level"]) + 1
+            state["cool"] = now + cool
+            # `fails` **不清零**：它是「这一阵子连丢了几拍」的连续读数，下一个成功才复位
+            # （所以恢复那一行能说出「连丢了多少拍」，且再进降频时会升到下一档）。
+            state["outcome"] = "unreachable"
+            log(
+                f"⚠ 打点连丢 {state['fails']} 拍没成功（HTTP {code or '连不上'}）——"
+                f"降频：{cool:.0f}s 后再试（不再永久停）；训练继续"
+            )
+        elif force:
+            log(
+                f"[打点] {_progress_label(kind, it=int(it), done=int(done), total=int(total))} "
+                f"没成功（HTTP {code or '连不上'}）——下一拍再试"
+            )
+        return False
+
+    # 写模块命名空间而不是 `mod.note_progress = …`：后者在 mypy 眼里是「Module 没有这个
+    # 属性」（契约是**运行时**的，见 `common/progress_hook.py`），而 ruff 不许为它加 setattr。
+    mod = types.ModuleType(PROGRESS_HOOK_NAME)
+    mod.__dict__["note_progress"] = _ping
+    prev = sys.modules.get(PROGRESS_HOOK_NAME)
+    sys.modules[PROGRESS_HOOK_NAME] = mod
+    log(
+        f"轮内打点就绪（{url.split('?')[0]}；每 {interval:.0f}s 最多一句，"
+        "完成事件驱动 —— 不另起线程）"
+    )
+
+    def detach() -> str:
+        """撤销注册（还原上一个注册者，若有）→ 本段的租约结局（空串 = 正常）。"""
+        if sys.modules.get(PROGRESS_HOOK_NAME) is mod:
+            if prev is not None:
+                sys.modules[PROGRESS_HOOK_NAME] = prev
+            else:
+                sys.modules.pop(PROGRESS_HOOK_NAME, None)
+        return str(state["outcome"])
+
+    return detach
+
+
+def install_local_progress_sink(
+    path: str | Path,
+    log: Callable[[str], None],
+    *,
+    clock: Callable[[], float] | None = None,
+) -> Callable[[], str]:
+    """push 腿的**本地**打点层：进度落 `<outbox>/progress.json`，等 hub 来拉。
+
+    与 `install_progress_pinger` **同一契约**（`common.progress_hook` 的
+    `note_progress(kind, it=, done=, total=, force=)`）——快照侧的上报口两边共用一份，
+    所以 `plan_run` / `iter_rollout` 不需要知道自己在哪条腿上。
+
+    两个刻意不跟 HTTP 腿一样的地方：
+
+      * **不节流**：写几百字节的原子覆盖比一次小 POST 便宜几个数量级，节流只会让 hub
+        看到更慢的进度（而 hold 活性只看进度）；
+      * **不重领租约**：push 腿的租约由 hub 的派发器持有与续期，worker 侧根本没有 claim 面。
+
+    `seq` 单调递增且**跨进程重启续上**（先读旧文件）：hub 用 `?since=N` 拉增量，重启把
+    seq 冲回 1 会让它永久错过那几拍。返回 `detach()`（push 腿没有「租约结局」，恒空串）。
+    """
+    p = Path(path)
+    now_fn = clock or time.time
+    state: dict[str, Any] = {"seq": 0}
+    try:
+        prev_doc = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(prev_doc, dict) and isinstance(prev_doc.get("seq"), int):
+            state["seq"] = int(prev_doc["seq"])
+    except (OSError, ValueError):
+        pass
+
+    def _note(
+        kind: str = "", *, it: int = 0, done: int = 0, total: int = 0, force: bool = False
+    ) -> bool:
+        state["seq"] = int(state["seq"]) + 1
+        doc = {
+            "seq": int(state["seq"]),
+            "at": float(now_fn()),
+            "kind": str(kind or ""),
+            "it": int(it),
+            "done": int(done),
+            "total": int(total),
+        }
+        tmp = p.with_name(p.name + ".tmp")
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, p)
+        except OSError as e:
+            log(f"[打点] 本地进度写失败（{type(e).__name__}: {e}）——训练继续")
+            return False
+        return True
+
+    mod = types.ModuleType(PROGRESS_HOOK_NAME)
+    mod.__dict__["note_progress"] = _note
+    prev = sys.modules.get(PROGRESS_HOOK_NAME)
+    sys.modules[PROGRESS_HOOK_NAME] = mod
+    log(f"轮内打点就绪（本地 {p}；hub 按 `{OFFLINE_PROGRESS_PATH}` 的读面来拉）")
+
+    def detach() -> str:
+        if sys.modules.get(PROGRESS_HOOK_NAME) is mod:
+            if prev is not None:
+                sys.modules[PROGRESS_HOOK_NAME] = prev
+            else:
+                sys.modules.pop(PROGRESS_HOOK_NAME, None)
+        return ""
+
+    return detach
+
+
+def release_course(
+    hub: str, token: str, course: str, lease: str, log: Callable[[str], None], *, timeout: float = PING_TIMEOUT
+) -> None:
+    """交还租约（best-effort；失败只记一行——这一课已经跑完了）。"""
+    if not lease:
+        return
+    url = (
+        f"{hub.rstrip('/')}{OFFLINE_RELEASE_PATH}?course={urllib.parse.quote(course)}"
+        f"&lease={urllib.parse.quote(lease)}"
+    )
+    code, doc = _post_json(url, token, log, timeout=timeout)
+    if code == 200:
+        log("租约已交还")
+    elif code == 409:
+        log(f"租约没交还成功（{doc.get('error') or '不是当前持有人'}）——不影响本课成果")
+
+

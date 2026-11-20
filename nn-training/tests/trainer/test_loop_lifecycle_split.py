@@ -55,7 +55,7 @@ CORE_PY = NN_ROOT / "trainer/loop_core.py"
 REMOTE_PY = NN_ROOT / "trainer/loop_remote.py"
 ROUND_STEPS_PY = NN_ROOT / "trainer/loop_round_steps.py"
 
-#: 这一簇的成员（闭集）：7 个方法 —— 新方法要么住在新家，要么改这张表。
+#: 这一簇的成员（闭集）：9 个方法 —— 新方法要么住在新家，要么改这张表。
 CLUSTER = (
     "run",
     "_setup",
@@ -63,6 +63,9 @@ CLUSTER = (
     "run_one_round",
     "_park_after_completion",
     "finish_course",
+    # 2026-11-18（G5）：收工读数两条 —— 停腿原因（只读、不清账）与在飞预采子进程。
+    "stop_reason",
+    "collect_child",
     "_evalboard_idle",
 )
 
@@ -115,6 +118,9 @@ TOP_IMPORTS = frozenset(
         "biz.course",
         "worker.events",
         "common.log",
+        # 2026-11-16：仓根单源（`common/paths.py`）。此前 `REPO_ROOT` 从 `trainer.dispatch_queue`
+        # 转发过来 —— 取一个路径常量却欠下整条传输面的依赖（`loop_control` 就栽在这条边上）。
+        "common.paths",
         "trainer.loop_guards",
         "worker.loop_round",
         "trainer.loop_steps",
@@ -126,7 +132,10 @@ TOP_IMPORTS = frozenset(
 )
 
 #: 允许的 stdlib 顶层 import（闭集的一部分；多一个也要显式登记）。
-STDLIB_IMPORTS = frozenset({"collections.abc", "sys", "time", "pathlib", "typing"})
+STDLIB_IMPORTS = frozenset(
+    # 2026-11-18（G5）：`subprocess` —— `collect_child()` 的返回类型（预采子进程句柄）。
+    {"collections.abc", "dataclasses", "subprocess", "sys", "time", "pathlib", "typing"}
+)
 
 #: 反向边（禁）：成环或把叶子拉回编排上游。
 FORBIDDEN_IMPORTS = frozenset(

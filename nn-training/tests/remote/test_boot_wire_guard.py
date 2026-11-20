@@ -114,11 +114,14 @@ def test_decision_honours_the_remaining_time_budget() -> None:
 
 def test_threshold_is_relative_to_the_session_best() -> None:
     """好签观测过 900 KB/s ⇒ 阈值抬到 225 KB/s（明显偏离才算坏）；小 body 不参与采样。"""
-    assert ts._min_rate() == ts.BOOT_MIN_RATE
+    floor = ts._min_rate()
+    assert floor == ts.BOOT_MIN_RATE
     ts._note_rate(900 * 1024, 4 * MB)
-    assert ts._min_rate() == pytest.approx(225 * 1024)
+    floor = ts._min_rate()
+    assert floor == pytest.approx(225 * 1024)
     ts._note_rate(10 * 1024 * 1024, 2 * 1024)  # 1 KB 的 JSON 不代表链路
-    assert ts._min_rate() == pytest.approx(225 * 1024)
+    floor = ts._min_rate()
+    assert floor == pytest.approx(225 * 1024)
 
 
 # ────────────────────── ② 停滞 / 超预算：带正文 ──────────────────────
@@ -310,7 +313,8 @@ def test_reroll_is_capped_and_the_last_attempt_always_transfers(monkeypatch) -> 
 def test_boot_read_body_uses_read1_not_the_fixed_length_read() -> None:
     """M1（引导侧孪生）：`read` 会当场抛 ⇒ 读到 body 就证明走的是 `read1`。"""
     resp = _WindowedResp(chunks=2, size=1024, total=2 * 1024)
-    assert ts._read_body(resp, idle_timeout=45.0, total_timeout=None) == b"x" * 2048
+    body = ts._read_body(resp, idle_timeout=45.0, total_timeout=None)
+    assert body == b"x" * 2048
 
 
 def test_guard_needs_two_consecutive_slow_windows(monkeypatch) -> None:

@@ -37,7 +37,7 @@ import math
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import remote.land_provider as land_provider
 import remote.opt_standard as opt_standard
@@ -303,53 +303,13 @@ def _volume_with_target(volume: Mapping[str, Any], target: int) -> dict:
     return out
 
 
-def _run_iteration(
-    ctx: RunContext, it: int, *, prev_it: int, on_ppo_start: Callable[[], None] | None = None
-) -> dict:
-    """跑第 `it` 轮：合成 kind=iter job → 喂回 `run_job`（生产链路的字面复用）。
+def _round_volume(ctx: RunContext, it: int):
+    """本轮采哪些关 + 放大/加宽（自 `_run_iteration` 原样搬出）。
 
-    `prev_it` = 上一轮（其产物权重就是本轮 init_weights）。返回本轮 result。
+    返回 `(vol_probe, window_override, rotation_override, _plan_in, profile)`；
+    `window_override` 非空 = 本轮是轮换降级轮（调用方让 `pairs_for` 不再按配方派生）；
+    `_plan_in` = 应用云端采样覆盖后的计划（`profile` 非空时与 `ctx.plan` 不同）。
     """
-    weights = ctx.store.weights_path(prev_it)
-    if not weights.exists():
-        raise ProtocolError(f"第 {it} 轮的 init 权重不在产物里: {weights}（产物被删/状态损坏？）")
-    # ★ 2026-10-15（离线 delta 事故的**本机链**面）：产物里那份就是**我们回传给 hub 的** delta
-    #   容器（hub 原样收发）。它既是「上一轮的结果」也是「本轮的 init」⇒ 装载与打包前先在本机
-    #   落地成整份；用**旁路缓存**（`standard_weights_copy`）而不是就地改 —— 产物本体保持 delta，
-    #   deliver 腿发送的字节、hub 侧 duplicate/conflict 判据、账本指纹***全都不变***，而本轮拿到的
-    #   是可直接装载的整份。基准从本机产物链里逐字节找（找不到即响亮拒，不猜）。
-    #   这条路径本身就是「不重传」：Init 用本机自己的字节重建，**零字节日下传输**。
-    # ★ 2026-10-22（`plan/offline-full-weights-backup` P0-1）：基准优先走**内容寻址缓存**
-    #   （`_cas_hit`，键就是 base_sha，O(1)）；不传它就退回「按名序扫 `.weights-standard`」——
-    #   链长了就是 O(n) 次 394KB 读。缓存里没有时 `_candidates` 那条老路照旧在（两态都对）。
-    weights = weights_standard.standard_weights_copy(
-        weights,
-        ctx.store.root,
-        blob_root=next((p for p in _blob_roots(ctx) if Path(p).is_dir()), None),
-        log=ctx.log,
-    )
-    init_fp = sha256_file(weights)
-    # ★ 2026-10-15（离线 opt delta 的读侧落地，与上面 weights 同一条口径）：产物里的
-    #   `it-N/opt.tar` 就是**我们回传出去的** BOD1 容器（现场 `tmp/y5-term` 的 it-237，300945B，
-    #   头 4 字节 = BOD1；消费者一解包就是 `ReadError: invalid header`）。它既是「上一轮的结果」
-    #   也是「本轮的 init」⇒ 整份落成旁路缓存（`.opt-standard/`，产物本体保持容器给 deliver 腿），
-    #   并**种子进内容寻址缓存**后再声明 `opt_sha` —— 声明什么就必须拿到什么（`train_core` 只认
-    #   `blob_cache/<sha>`，而离线段没有下载通道）。下一轮的落地基准也随之是这份整份（链上一步，
-    #   而它在缓存里 = O(1) 命中）。找不到基准 ⇒ 响亮记一行、本段按**无动量**跑（与
-    #   `plan_handoff._stored_opt_sha` 同口径：动量是可选件，首轮本来就没有 ⇒ 不让整段死在 init）。
-    #   ⚠ **不**退回 `ctx.last_opt_sha`（那是上一个调用在下面 `:279` 写下的「回传出去的那份
-    #   delta 自己的 sha」）—— 那正是一个**拿不到的地址**（容器解不开、离线段也没有下载通道），
-    #   声明它 = 把这次要修的形态又从后门放回来。
-    try:
-        ctx.last_opt_sha = opt_standard.landed_opt_sha(
-            ctx.store.opt_path(prev_it),
-            ctx.store.root,
-            blob_roots=_blob_roots(ctx),
-            log=ctx.log,
-        )
-    except ProtocolError as e:
-        ctx.log(f"WARN: it{prev_it} 的 opt 是 delta 容器且本机找不到基准（{e}）——本段按无动量跑")
-        ctx.last_opt_sha = ""
     # ★ 2026-10-22（用户口径「有几个 worker 铺多少局」）：自主机自己 rollout ⇒ 宽度就是
     #   `ctx.rollout_workers`（缺省 = 本机 `cpu_worker_slots()`，见 plan_handoff 的装配），
     #   **不 ping 任何人、不看 hub 的 plan 声明**。plan 里的 `games_per_stage_by_stage` 是
@@ -399,12 +359,19 @@ def _run_iteration(
                 vol_probe = dict(
                     vol_probe, games_per_stage_by_stage=_wide, widen_width=_width
                 )
+    return vol_probe, window_override, rotation_override, _plan_in, profile
+
+
+def _apply_greedy_budget(ctx: RunContext, it: int, vol_probe, full_per_stage: int):
+    """greedy 语料预算（自 `_run_iteration` 原样搬出）：普通采样减量，整轮总量不变。
+
+    返回 `(vol_probe, greedy)`；`greedy is None` = 本轮未激活。
+    """
     # ---- greedy 语料预算（2026-11-11，plan/greedy-offline-autonomous）----
     # 用户口径 B「挤进去」：普通采样少采 greedy 的那一份，**整轮总量不变**。
     # `per_stage_quota` 必须是**减量前**的整轮值 —— PPO 的逐关上限就是「整轮总量/关数」，
     # 换成减量后的值会把 greedy 那份一并截掉（训到的 greedy 样本 = 0，账本却好看）。
     _greedy: tuple[Any, int, dict] | None = None
-    _full_per_stage = int(vol_probe["per_stage_quota"]) if isinstance(vol_probe, dict) else 0
     if (
         isinstance(vol_probe, dict)
         and ctx.course is None
@@ -425,8 +392,123 @@ def _run_iteration(
             vol_probe = _volume_with_target(vol_probe, _ordinary_t)
             ctx.log(
                 f"it{it} greedy 预算：普通 {_ordinary_t} + greedy {int(_gplan.total_target)}"
-                f" = {_total_t} transitions（B 口径：整轮总量不变，逐关上限仍 {_full_per_stage}）"
+                f" = {_total_t} transitions（B 口径：整轮总量不变，逐关上限仍 {full_per_stage}）"
             )
+    return vol_probe, _greedy
+
+
+def _iter_manifest(
+    ctx: RunContext,
+    it: int,
+    spec: dict,
+    init_fp: str,
+    epochs_eff: int,
+    vol,
+    greedy,
+    full_per_stage: int,
+) -> dict:
+    """合成第 it 轮 manifest（自 `_run_iteration` 原样搬出）：与 hub 发布的 kind=iter 同构。"""
+    # ---- 合成第 it 轮 manifest：与 hub 发布的 kind=iter 逐字段同构 ----
+    m = dict(ctx.manifest)
+    m.update(
+        {
+            "kind": "iter",
+            "it": int(it),
+            "epochs": epochs_eff,
+            "rollout": spec,
+            "init_weights_fp": init_fp,
+            "data_fp": iter_expected_data_fp(spec),
+            # opt 走内容寻址：上一轮 PPO 已把原始 tar 写进 blob_cache ⇒ 命中即零传输
+            "opt_init": "",
+            "opt_sha": str(ctx.last_opt_sha or ""),
+            "opt_bytes": 0,
+            "seed": job_seed(str(m["runId"]), int(it), init_fp),
+        }
+    )
+    # 动态采集的**训练侧一半**：逐关严格样本量配额（`ceil(target/关数)`）必须逐轮随
+    # manifest 走。hub 发布的头一份 manifest 里通常已经有它（`loop_steps._remote_ppo` 发布时
+    # 算好），但计划才是自洽契约（包里/manual 导入的那份可能更旧）——按**计划**的值走。
+    # ★ 2026-10-30（用户口径「prep 行只留必要读数」）：漂移**不进 prep 那行**了
+    #   （那一行只留「这一轮发生了什么」）⇒ 改成**值变了才报一行**（首轮必报；同值不再报）。
+    #   为什么不静默：manifest 与计划对不上是**真异常**（节点按计划值跑，hub 按 manifest 值算），
+    #   全程静默就没人知道两边不一致 ⇒ 但也不能每轮报一行（值恒定 ⇒ 390 轮 390 条一样的话）。
+    drift = 0
+    want = 0
+    if isinstance(vol, dict):
+        # greedy 激活时用**减量前**的整轮值（见上面 B 口径那段：减量后的值会连 greedy 一起截掉）。
+        want = (
+            int(full_per_stage or vol["per_stage_quota"])
+            if greedy
+            else int(vol["per_stage_quota"])
+        )
+        have = int(m.get("per_stage_quota", 0) or 0)
+        drift = have if (have and have != want) else 0
+        m["per_stage_quota"] = want
+    if drift:
+        _drift_note = f"manifest {drift}/关 → 按计划 {want}/关"
+        if _drift_note != ctx.quota_drift_reported:
+            ctx.quota_drift_reported = _drift_note
+            ctx.log(f"WARN 配额漂移：{_drift_note}（本轮按计划值生效）")
+    # 回传形态按轮定（`plan/anchor-full-rounds` §4）：锚点轮弹 `w_fmt`（worker 回整份权重），
+    # 其余写 `W_DELTA_FMT`；`opt_fmt` 一律弹掉（opt 的形态在**写完盘之后**由 `after_write` 定，
+    # 那里才有「盘上最近一份整份」当基准）。`None` = 旧行为（manifest 原样）。
+    if ctx.round_forms is not None:
+        ctx.round_forms.prepare_manifest(m, it)
+    m["job_id"] = make_job_id(m)
+    m = normalize_manifest(m)
+    return m
+
+
+def _run_iteration(
+    ctx: RunContext, it: int, *, prev_it: int, on_ppo_start: Callable[[], None] | None = None
+) -> dict:
+    """跑第 `it` 轮：合成 kind=iter job → 喂回 `run_job`（生产链路的字面复用）。
+
+    `prev_it` = 上一轮（其产物权重就是本轮 init_weights）。返回本轮 result。
+    """
+    weights = ctx.store.weights_path(prev_it)
+    if not weights.exists():
+        raise ProtocolError(f"第 {it} 轮的 init 权重不在产物里: {weights}（产物被删/状态损坏？）")
+    # ★ 2026-10-15（离线 delta 事故的**本机链**面）：产物里那份就是**我们回传给 hub 的** delta
+    #   容器（hub 原样收发）。它既是「上一轮的结果」也是「本轮的 init」⇒ 装载与打包前先在本机
+    #   落地成整份；用**旁路缓存**（`standard_weights_copy`）而不是就地改 —— 产物本体保持 delta，
+    #   deliver 腿发送的字节、hub 侧 duplicate/conflict 判据、账本指纹***全都不变***，而本轮拿到的
+    #   是可直接装载的整份。基准从本机产物链里逐字节找（找不到即响亮拒，不猜）。
+    #   这条路径本身就是「不重传」：Init 用本机自己的字节重建，**零字节日下传输**。
+    # ★ 2026-10-22（`plan/offline-full-weights-backup` P0-1）：基准优先走**内容寻址缓存**
+    #   （`_cas_hit`，键就是 base_sha，O(1)）；不传它就退回「按名序扫 `.weights-standard`」——
+    #   链长了就是 O(n) 次 394KB 读。缓存里没有时 `_candidates` 那条老路照旧在（两态都对）。
+    weights = weights_standard.standard_weights_copy(
+        weights,
+        ctx.store.root,
+        blob_root=next((p for p in _blob_roots(ctx) if Path(p).is_dir()), None),
+        log=ctx.log,
+    )
+    init_fp = sha256_file(weights)
+    # ★ 2026-10-15（离线 opt delta 的读侧落地，与上面 weights 同一条口径）：产物里的
+    #   `it-N/opt.tar` 就是**我们回传出去的** BOD1 容器（现场 `tmp/y5-term` 的 it-237，300945B，
+    #   头 4 字节 = BOD1；消费者一解包就是 `ReadError: invalid header`）。它既是「上一轮的结果」
+    #   也是「本轮的 init」⇒ 整份落成旁路缓存（`.opt-standard/`，产物本体保持容器给 deliver 腿），
+    #   并**种子进内容寻址缓存**后再声明 `opt_sha` —— 声明什么就必须拿到什么（`train_core` 只认
+    #   `blob_cache/<sha>`，而离线段没有下载通道）。下一轮的落地基准也随之是这份整份（链上一步，
+    #   而它在缓存里 = O(1) 命中）。找不到基准 ⇒ 响亮记一行、本段按**无动量**跑（与
+    #   `plan_handoff._stored_opt_sha` 同口径：动量是可选件，首轮本来就没有 ⇒ 不让整段死在 init）。
+    #   ⚠ **不**退回 `ctx.last_opt_sha`（那是上一个调用在下面 `:279` 写下的「回传出去的那份
+    #   delta 自己的 sha」）—— 那正是一个**拿不到的地址**（容器解不开、离线段也没有下载通道），
+    #   声明它 = 把这次要修的形态又从后门放回来。
+    try:
+        ctx.last_opt_sha = opt_standard.landed_opt_sha(
+            ctx.store.opt_path(prev_it),
+            ctx.store.root,
+            blob_roots=_blob_roots(ctx),
+            log=ctx.log,
+        )
+    except ProtocolError as e:
+        ctx.log(f"WARN: it{prev_it} 的 opt 是 delta 容器且本机找不到基准（{e}）——本段按无动量跑")
+        ctx.last_opt_sha = ""
+    vol_probe, window_override, rotation_override, _plan_in, profile = _round_volume(ctx, it)
+    _full_per_stage = int(vol_probe["per_stage_quota"]) if isinstance(vol_probe, dict) else 0
+    vol_probe, _greedy = _apply_greedy_budget(ctx, it, vol_probe, _full_per_stage)
     _plan = dict(_plan_in, volume=vol_probe) if isinstance(vol_probe, dict) else _plan_in
     if window_override is not None or profile is not None:
         # 降级/选档轮：块已经按当轮窗口解好，**不要再**让 `pairs_for` 按配方派生一次
@@ -472,54 +554,7 @@ def _run_iteration(
         prep_b.add_raw(
             f"放大×{ctx.sample_mult:g} ⇒ {len(pairs)} 局；epochs×{ctx.epoch_mult:g} ⇒ {epochs_eff}"
         )
-    # ---- 合成第 it 轮 manifest：与 hub 发布的 kind=iter 逐字段同构 ----
-    m = dict(ctx.manifest)
-    m.update(
-        {
-            "kind": "iter",
-            "it": int(it),
-            "epochs": epochs_eff,
-            "rollout": spec,
-            "init_weights_fp": init_fp,
-            "data_fp": iter_expected_data_fp(spec),
-            # opt 走内容寻址：上一轮 PPO 已把原始 tar 写进 blob_cache ⇒ 命中即零传输
-            "opt_init": "",
-            "opt_sha": str(ctx.last_opt_sha or ""),
-            "opt_bytes": 0,
-            "seed": job_seed(str(m["runId"]), int(it), init_fp),
-        }
-    )
-    # 动态采集的**训练侧一半**：逐关严格样本量配额（`ceil(target/关数)`）必须逐轮随
-    # manifest 走。hub 发布的头一份 manifest 里通常已经有它（`loop_steps._remote_ppo` 发布时
-    # 算好），但计划才是自洽契约（包里/manual 导入的那份可能更旧）——按**计划**的值走。
-    # ★ 2026-10-30（用户口径「prep 行只留必要读数」）：漂移**不进 prep 那行**了
-    #   （那一行只留「这一轮发生了什么」）⇒ 改成**值变了才报一行**（首轮必报；同值不再报）。
-    #   为什么不静默：manifest 与计划对不上是**真异常**（节点按计划值跑，hub 按 manifest 值算），
-    #   全程静默就没人知道两边不一致 ⇒ 但也不能每轮报一行（值恒定 ⇒ 390 轮 390 条一样的话）。
-    drift = 0
-    want = 0
-    if isinstance(vol, dict):
-        # greedy 激活时用**减量前**的整轮值（见上面 B 口径那段：减量后的值会连 greedy 一起截掉）。
-        want = (
-            int(_full_per_stage or vol["per_stage_quota"])
-            if _greedy
-            else int(vol["per_stage_quota"])
-        )
-        have = int(m.get("per_stage_quota", 0) or 0)
-        drift = have if (have and have != want) else 0
-        m["per_stage_quota"] = want
-    if drift:
-        _drift_note = f"manifest {drift}/关 → 按计划 {want}/关"
-        if _drift_note != ctx.quota_drift_reported:
-            ctx.quota_drift_reported = _drift_note
-            ctx.log(f"WARN 配额漂移：{_drift_note}（本轮按计划值生效）")
-    # 回传形态按轮定（`plan/anchor-full-rounds` §4）：锚点轮弹 `w_fmt`（worker 回整份权重），
-    # 其余写 `W_DELTA_FMT`；`opt_fmt` 一律弹掉（opt 的形态在**写完盘之后**由 `after_write` 定，
-    # 那里才有「盘上最近一份整份」当基准）。`None` = 旧行为（manifest 原样）。
-    if ctx.round_forms is not None:
-        ctx.round_forms.prepare_manifest(m, it)
-    m["job_id"] = make_job_id(m)
-    m = normalize_manifest(m)
+    m = _iter_manifest(ctx, it, spec, init_fp, epochs_eff, vol, _greedy, _full_per_stage)
     # ---- 本轮 payload：只有 init_weights.json（shard 由节点现场产，与 kind=iter 一致）----
     it_dir = ctx.work_dir / m["job_id"]
     it_dir.mkdir(parents=True, exist_ok=True)
@@ -625,20 +660,20 @@ def _weight_bytes(result: dict) -> bytes:
     return bytes(decode_weights_json(str(result.get("weights_json") or "")))
 
 
-def _sampling_profile(ctx: RunContext) -> dict | None:
+def _sampling_profile(ctx: RunContext) -> cloud_sampling.CloudProfile | None:
     """本段生效的云端采样覆盖（device → 档；一次性解析并缓存）。
 
     块生效时把 `sample_mult` / `epoch_mult` 归 1（用户 2026-11-15 更正 ②：覆盖块与
     notebook 倍数不叠加）。缺档/坏计划在**第一轮开始前**转 `ProtocolError`，不静默回落。
     """
     if ctx.sampling_profile_checked:
-        return ctx.sampling_profile
+        return cast(cloud_sampling.CloudProfile | None, ctx.sampling_profile)
     try:
         profile = cloud_sampling.profile_for_course(ctx.course, ctx.device)
     except ValueError as e:
         raise ProtocolError(f"云端采样覆盖不可用：{e}") from e
     ctx.sampling_profile_checked = True
-    ctx.sampling_profile = profile
+    ctx.sampling_profile = dict(profile) if profile is not None else None
     if profile is not None:
         rot = profile["rotation"]
         if ctx.sample_mult != 1.0 or ctx.epoch_mult != 1.0:

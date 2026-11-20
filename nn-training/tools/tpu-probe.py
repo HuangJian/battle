@@ -663,7 +663,8 @@ def bench_case(
     return best / n, n
 
 
-def main() -> None:
+def _tpu_parser():
+    """`main` 的 argv 定义表（自 `main` 原样搬出；描述 / 默认值 / help 逐字保留）。"""
     ap = house_parser()
     ap.add_argument("--device", default="tpu", choices=["tpu", "cuda", "cuda-dp", "cpu"])
     ap.add_argument("--chunks", type=int, default=CHUNKS)
@@ -720,7 +721,11 @@ def main() -> None:
         help="E 段：E1 每步末尾强制一次图执行边界（bk.mark）。验证「每步在途节点未 drain → "
         "图累积 → 单步递增」修复假说（2026-09-11 Kaggle TPU 实测 E2 亦 10s/step 后加入）。",
     )
-    args = ap.parse_args()
+    return ap
+
+
+def main() -> None:
+    args = _tpu_parser().parse_args()
 
     if args.quick:
         args.chunks, args.epochs = 4, 1

@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from common.hold_window import HOLD_PROGRESS_STALE_SEC
 from common.protocol import COURSE_ENABLE_MARKER
 from hub.queue_offline import (
     AUTO_HANDOFF_PENDING_SEC,
@@ -35,7 +36,6 @@ from hub.queue_offline import (
 )
 from hub.server import _HubQueue
 from hub.task_pack import (
-    HOLD_PROGRESS_STALE_SEC,
     HOLD_RESTORE_GRACE_SEC,
     hold_expires_in,
     hold_progress_at,
@@ -341,17 +341,19 @@ def test_store_gate_windows_match_task_pack_constants(
 ) -> None:
     """`store_leases` 里那份窗常量是**抄本**（它不许 import 调度上层）⇒ 这份对账必须有。"""
     import hub.store_leases as sl
+    from common.hold_window import HOLD_PROGRESS_STALE_SEC as TP_STALE
     from hub.server import _JobStore
-    from hub.task_pack import HOLD_PROGRESS_STALE_SEC as TP_STALE
 
     assert sl.HOLD_STALE_SEC == TP_STALE == 900.0
     assert sl.HOLD_STALE_ENV == STALE_ENV
     # 缺省与 env 两条路都对得上（同一把尺子：窗在两边都必须能调）
     store = _JobStore(tmp_path / "jobs", tmp_path / "log.jsonl")
     monkeypatch.delenv(STALE_ENV, raising=False)
-    assert store._hold_stale_sec() == 900.0
+    default_sec = store._hold_stale_sec()
+    assert default_sec == 900.0
     monkeypatch.setenv(STALE_ENV, "7")
-    assert store._hold_stale_sec() == 7.0
+    env_sec = store._hold_stale_sec()
+    assert env_sec == 7.0
 
 
 def test_live_hold_blocks_every_kind_until_it_goes_stale(
@@ -455,7 +457,7 @@ def test_bc_liveness_is_progress_only_and_a_dead_lease_is_conceded(
 ) -> None:
     """★M5：bc 判活**只认 epoch**（心跳不算）；超窗 ⇒ 孤儿 ⇒ 让出（别人立刻能领）。"""
     import hub.store_leases as sl
-    from hub.task_pack import HOLD_PROGRESS_STALE_SEC
+    from common.hold_window import HOLD_PROGRESS_STALE_SEC
 
     #: 两个窗巧合同值、语义不同（P0-1 禁合并）——两个名字都得在，且都可由 env 调。
     assert sl.BC_PROGRESS_STALE_SEC == 900.0 == HOLD_PROGRESS_STALE_SEC
@@ -546,24 +548,24 @@ def test_hold_mirror_is_pushed_to_the_store_and_reads_without_the_token(
     hub = _hub(tmp_path, clock)
     _course(tmp_path, hub)
     st = hub._stores[COURSE]
-    assert st.hold_meta == {}
+    assert st.leases.hold_meta == {}
     hub.note_hold(COURSE, worker_id="cloud-1", token="tok-1")
-    assert st.hold_meta == {"worker_id": "cloud-1", "last_progress_at": 1000.0}, st.hold_meta
+    assert st.leases.hold_meta == {"worker_id": "cloud-1", "last_progress_at": 1000.0}, st.leases.hold_meta
     assert st.hold_blocked() == "held:cloud-1"
     # 打点把进度锚推着走（闸跟着续命）
     clock[0] = 1500.0
     assert hub.note_progress(COURSE, token="tok-1") is True
-    assert st.hold_meta["last_progress_at"] == 1500.0
+    assert st.leases.hold_meta["last_progress_at"] == 1500.0
     # 清单面（`/admin/queue`）看得到 hold、看不到 token
     row = hub.queue_state()["courses"][COURSE]
     assert row["hold"]["worker_id"] == "cloud-1" and row["hold"]["state"] == "live"
     assert "token" not in row["hold"], row["hold"]
     # release / revoke 清镜像（清完协作派发当天恢复）
     hub.note_release(COURSE)
-    assert st.hold_meta == {} and st.hold_blocked() == ""
+    assert st.leases.hold_meta == {} and st.hold_blocked() == ""
     hub.note_hold(COURSE, worker_id="cloud-1", token="tok-1")
     assert hub.revoke_offline_lease(COURSE, "test") is True
-    assert st.hold_meta == {} and hub.hold_of(COURSE) == {}
+    assert st.leases.hold_meta == {} and hub.hold_of(COURSE) == {}
 
 
 # ─────────── 2026-10-21（plan/offline-deliver-stall §2.3）：宽限一代只给一次 ───────────

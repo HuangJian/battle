@@ -1,55 +1,47 @@
 """hub/queue.py — `_HubQueue` 组合类：多课程单 hub 的调度面。
 
-S4 第十五刀把 1033 行 / 76 个方法的 `_HubQueue` 按**域**拆成七个混入（`hub/queue_*.py`），
-组合类只剩 docstring、一个类常量与 `__init__`：
+S4 第十五刀把 1033 行 / 76 个方法的 `_HubQueue` 按**域**拆成七个混入；B7 又把课程表 /
+归属路由 / 停机达令 / 自动发现（`queue_scope` + `queue_discover`）切成 `QueueScope`
+协作者，并把状态收进三个有状态对象。现在组合类只剩 docstring、三个类常量、
+`__init__`、26 个 scope 转发壳与 21 条状态转发属性：
 
 ```
-class _HubQueue(QueueScopeMixin, QueueDiscoverMixin, QueueAuthMixin, QueueClaimsMixin,
-                QueueResumeMixin, QueueObserveMixin, QueueStoreFaceMixin, _AuthGuard)
-  queue_scope       课程表 · 归属路由 · 停机达令 · worker 登记（状态的主人）
-  queue_discover    自动发现三相：扫盘 / 开课标记闸 / 「在训」判据
+class _HubQueue(QueueAuthMixin, QueueClaimsMixin, QueueResumeMixin,
+                QueueObserveMixin, QueueOfflineMixin, QueueStoreFaceMixin, _AuthGuard)
   queue_auth        鉴权面四覆写 + `halt_workers` 旧名的委派
   queue_claims      派发与认领：轮转挑选 · peek · 熔断告警 · 合法放弃
   queue_resume      续跑锚点 · 离线段补传产物 · 课程路径
   queue_observe     观测面（只读）· job 路径解析 · 哨兵根
-  queue_offline     离线任务清单 + 领取租约（第八个域，2026-09-25）
-  queue_store_face  job 作用域门面：18 个与 `_JobStore` 同名同签名的方法
+  queue_offline     离线任务清单 + 领取租约
+  queue_store_face  job 作用域门面：与 `_JobStore` 同名同签名的那批转发
+  .scope = QueueScope(...)   课程表 · 归属路由 · 停机达令 · worker 登记 · 自动发现
+  .course_table / .board     状态：课程表 6 字段 + worker 板 4 字段
+  .dispatch                  状态：6 张派发/观测表 + 5 把旁路锁
 ```
 
-## 为什么是「混入」而不是「协作对象」（与第十四刀同源，三条实测判据）
+## 为什么剩下的六个域仍是「混入」而不是「协作对象」（与第十四刀同源）
 
-1. **一把锁是类的不变式**：`_lock` 有 5 个直接读者（`_serves_course` / `active_worker_count` /
-   `claim_job` / `claim_next` / `note_worker`），而它就是 `_AuthGuard.__init__` 建的那一把。
-   协作对象各持一把锁 = **换语义**（并发行为不同），不满足「零行为变化」；
+1. **一把锁是类的不变式**：`_lock` 由 `_AuthGuard.__init__` 建，仍是派发热路径的直接读者
+   （`claim_job` / `claim_next` 经 scope 转发）。协作对象各持一把锁 = **换语义**
+   （并发行为不同），不满足「零行为变化」；
 2. **跨域互调是常态**：`claim_next` → `discover` / `_serves_course` /
    `active_worker_count` / `_announce_freeze`；`queue_state` → `halt_of` /
-   `active_courses` / `all_halted` / `active_worker_count`；
-   `resume_anchor` → `resume_sources`…混入把它们留在 `self.X` 上 ⇒ **零 seam**；
+   `active_courses` / `all_halted`；`resume_anchor` → `resume_sources`…留在 `self.X` 上
+   ⇒ **零 seam**；
 3. **tests 直接读私有状态**（`hub._stores` / `hub._order` / `hub._halts` /
-   `hub._locate_cache` / `hub._workers` / `hub._discover_last`，多处断言）——协作对象会让这些
-   **全部改路**；混入是同一个对象 ⇒ **一行测试都不用改**。
+   `hub._locate_cache` / `hub._workers` / `hub._discover_last`，多处断言）——状态转发属性
+   让这些读法**一行都不用改**。
 
-## 为什么 `__init__` 不拆成 `_init_<域>` 钩子（**本条与第十四刀刻意不同**）
-
-第十四刀把状态声明拆到四个 `_init_*` 钩子里，理由是那里的状态分布在 900 行里、四个域各自
-独立。这里**不拆**，两条理由：
-
-* `__init__` 只有 44 行，是一块**连续**的声明，读一遍就对得齐 —— 拆开反而要跳七个文件；
-* 几处状态**互相咬合**：`_solo` 决定 `_now`（`self._now = self._solo._now if self._solo is not
-  None else (now_fn or time.time)`，时钟必须与单课程 store 同源，否则 claimed 标记的时间戳
-  会混入真实墙钟）、`_discover_root` 存在与否决定 `_discover_last` 的初值、`_adopt_solo`
-  还要在运行期把 `_halt_default` / `_workers` / `_auth_fail` 从 store 搬到 `self` 上。
-  按域切这三处只会把一条直线扯成跳转。
-
-代价照旧明确记在案：七个混入各自的类体里，**状态一律是裸注解**（`_stores: dict[str, _JobStore]`，
-无值）—— 组合类的 `__init__` 是这些字段**唯一**的带值声明点。守卫
-`tests/hub/test_hub_queue_split.py` 钉住这条，并逐字段对账「谁写它」。
+组合类的 `__init__` 是状态字段**唯一**的带值声明点（`QueueScope` 里的状态一律经
+`self.hub._X` 读写）；守卫 `tests/hub/test_hub_queue_split.py` 钉住这条，并逐字段对账
+「谁写它」。
 
 ## 依赖方向
 
-`hub.queue → {hub.queue_* 七混入, hub.auth, hub.store}`（严格向下）。
-`hub/server.py` 是整个 hub 的组装 + HTTP 面，从上面拿 `_HubQueue` 并 re-export
-（`hs._HubQueue` 是约 10 个测试与 e2e 的取名字入口——**名字是契约，位置不是**）。
+`hub.queue → {hub.queue_* 混入, hub.queue_scope, hub.course_table, hub.worker_board,
+hub.dispatch_state, hub.auth, hub.store}`（严格向下）。`hub/server.py` 是整个 hub 的组装 +
+HTTP 面，从上面拿 `_HubQueue` 并 re-export（`hs._HubQueue` 是约 10 个测试与 e2e 的取名字
+入口——**名字是契约，位置不是**）。
 """
 
 from __future__ import annotations
@@ -60,27 +52,27 @@ from pathlib import Path
 from threading import Lock
 
 from hub.auth import _AuthGuard
+from hub.course_table import CourseTable
+from hub.dispatch_state import Dispatch, DispatchLocks, DispatchTables
 from hub.queue_auth import QueueAuthMixin
 from hub.queue_claims import QueueClaimsMixin
-from hub.queue_discover import QueueDiscoverMixin
 from hub.queue_observe import QueueObserveMixin
 from hub.queue_offline import QueueOfflineMixin
 from hub.queue_resume import QueueResumeMixin
-from hub.queue_scope import QueueScopeMixin
+from hub.queue_scope import QueueScope
 from hub.queue_store_face import QueueStoreFaceMixin
 from hub.store import _JobStore
+from hub.worker_board import WorkerBoard
 
-# `DISCOVER_FRESH_SEC` / `DISCOVER_SCAN_MIN_SEC` 两个类常量随发现簇搬进 `queue_discover`，
-# 本类经 MRO 继承（`hub.DISCOVER_SCAN_MIN_SEC` 这类实例访问照旧）。
-# ba注意 `DISCOVER_SCAN_SEC`（后台兜底线程的节拍，启动参数用）是**另一件事**，留在 hub_server。
+# `DISCOVER_FRESH_SEC` / `DISCOVER_SCAN_MIN_SEC` 两个类常量随发现簇住 `queue_scope`，
+# 本类在类体里取一次名字（`__init__` 的形参缺省值在类体作用域解析）。
+# 注意 `DISCOVER_SCAN_SEC`（后台兜底线程的节拍，启动参数用）是**另一件事**，留在 hub_server。
 
 
 # ------------------------------------------------------------------ 组合
 
 
 class _HubQueue(
-    QueueScopeMixin,
-    QueueDiscoverMixin,
     QueueAuthMixin,
     QueueClaimsMixin,
     QueueResumeMixin,
@@ -114,24 +106,27 @@ class _HubQueue(
     """
 
     #: epoch POST 体上限（与 `_JobStore` 同源，不留第二份魔数）
-    #: 自动发现时判定「课程目录是不是活的」的新鲜窗口（秒）。
     BC_EPOCH_BODY_MAX = _JobStore.BC_EPOCH_BODY_MAX
 
     # `__init__` 的形参缺省值要在**类体作用域**里解析，所以要在这里取一次名字
-    # （常量本身只有一份，住 `queue_discover`——与 `BC_EPOCH_BODY_MAX` 同一个做法）。
-    DISCOVER_FRESH_SEC = QueueDiscoverMixin.DISCOVER_FRESH_SEC
+    # （常量本身只有一份，住 `queue_scope`——与 `BC_EPOCH_BODY_MAX` 同一个做法）。
+    DISCOVER_FRESH_SEC = QueueScope.DISCOVER_FRESH_SEC
+    DISCOVER_SCAN_MIN_SEC = QueueScope.DISCOVER_SCAN_MIN_SEC
 
     def __init__(
         self,
-        stores,
-        order=None,
+        stores: dict[str, _JobStore],
+        order: list[str] | None = None,
         ignored_modes=None,
         now_fn=None,
         discover_root=None,
         discover_fresh_sec: float = DISCOVER_FRESH_SEC,
     ) -> None:
-        self._stores: dict[str, _JobStore] = dict(stores)
-        self._order: list[str] = [c for c in (order or list(self._stores)) if c in self._stores]
+        # B7-P3：课程表 / worker 登记与停机达令切成两个**有状态协作者**。组合类保留同名
+        # 属性（见本类末尾），既有 `self._stores[...]` 调用点与测试逐字不变。
+        # 名字用 `course_table` 而不是 `courses`：后者是既有的公开读法 `courses()`（方法）。
+        self.course_table: CourseTable[_JobStore] = CourseTable(stores, order)
+        self.board = WorkerBoard()
         #: 自动发现根（`--traj-root`）；None = 关（`--discover` 未给，零开销零行为变化）
         self._discover_root: Path | None = Path(discover_root) if discover_root else None
         self._discover_fresh = float(discover_fresh_sec)
@@ -145,79 +140,294 @@ class _HubQueue(
         self._mode_ignored: set[str] = {str(c) for c in (ignored_modes or ())}
         # hold 镜像同步到 store（★M1b：`__init__` 末段的 `_sync_hold` 循环——同步要时钟
         # （`hold_of`），必须在 `self._now` 赋值之后）。
-        #: 上次派发过的课程（轮转起点）；None = 从序首开始
-        self._cursor: str | None = None
-        #: job_id -> course（归属解析缓存；job_id 不可复用，故不会失效）
-        self._locate_cache: dict[str, str] = {}
-        #: 课程 -> 最近被 `peek_jobs` 返回候选的时刻（秒）。多课程预取窗口的**观测面**状态
-        #: （2026-10-02，plan/course-pill-precision §4.1）：只被 `/admin/queue` 读，不参与
-        #: 任何派发判据；重启即清（窗口本来就是过程量，与租约同口径）。
-        self._peeked: dict[str, float] = {}
-        #: jid -> 同时持有它的课程（≥2 = 身份歧义）。两个用途：`course_of` 的**去重打点**
-        #: （每个 job 作用域请求都会跑它，逐次打点会把日志刷爆），以及拒答时把
-        #: 「谁和谁撞了」带进 reason。观测面的**全量**清单另有 `ambiguous_jids()`（扫盘）。
-        self._ambiguous: dict[str, list[str]] = {}
-        #: 单课程 = 旧形状：进程级状态一律借那一份 store（见类 docstring ③）
-        self._solo: _JobStore | None = (
-            next(iter(self._stores.values())) if len(self._stores) == 1 else None
+        # B7-P4：离线派发 / 观测的 6 张表 + 5 把旁路锁收进 `Dispatch`。锁仍由组合根建、
+        # 构造时注入（L2 闭集不破）；锁集合与加锁顺序逐字不变，只换持有者。
+        self.dispatch = Dispatch(
+            DispatchTables(
+                peeked={},
+                dispatch={},
+                leases={},
+                offline_disks={},
+                worker_prefetch={},
+                worker_errors=deque(),
+            ),
+            DispatchLocks(
+                dispatch_lock=Lock(),
+                lease_lock=Lock(),
+                disk_lock=Lock(),
+                pf_lock=Lock(),
+                we_lock=Lock(),
+            ),
         )
         #: 自动发现的扫描闸（`_discover_last` 初值 0 ⇒ 首次调用必扫）
         if self._discover_root is not None:
             self._discover_last = float("-inf")
-        #: **离线租约**（课程 → `{token, worker_id, at, expires_at}`）：进程内、惰性过期。
-        #: 为什么住实例而不是模块（与 `_TASK_PACK_TRIGGERS` 不同）：生产一个进程一个 hub 两者等价，
-        #: 而单测里每个 hub 各自干净（共享就得分用例清账）。重启即清——与触发账本同口径：
-        #: 最坏情形由回传侧 `(run_id, it)` 首写幂等兜底（plan §3.2）。
-        self._leases: dict[str, dict] = {}
-        self._lease_lock = Lock()
-        #: **派发状态**（课程 → 记录；plan/auto-offline-handoff §3.2/§3.8，2026-10-03）：
-        #: `pinned` / claim 翻的 offline / 完成锚（包 sha）。与 `_leases` 相反——**落盘**
-        #: （`<课>/offline-dispatch.json`）：hub 重启回启动参数会把正在 TPU 上跑的课解封队列
-        #: （在线云机把它的 job 领走 = 同一份活两处跑，数据损坏级）。读写见 `queue_offline`。
-        self._dispatch: dict[str, dict] = {}
-        self._dispatch_lock = Lock()
-        #: 离线**盘**报名表：disk_id -> last_seen（秒）。★ 为什么单独一张表：跑
-        #: `battle.offline.ipynb` 的机器**不碰队列**（取包链全在 `/offline/*` 上），它的身份
-        #: 只能在那一面被看到；而「本环境有没有离线盘」这个读数此前恒为空（审计 §4-L3：
-        #: `CFG["offline_worker"]` 全仓只有测试设过）。与 `_leases` 同口径：进程内、只做观测
-        #: （重启即清，最坏情形由回传侧首写幂等兜底）。
-        self._offline_disks: dict[str, float] = {}
-        #: 独立锁：`offline_disk_readout` 会被 `/admin/queue` 调到，而那条路不持 `_lease_lock`
-        #: 也不该持 `_lock`（观测面不许和调度临界区互等）。
-        self._disk_lock = Lock()
-        #: **worker 预取状态上报**（worker_id → `{held, dl, at}`；plan/dashboard-ppo-live-rows）：
-        #: 「软持有里哪些下好了 / 哪些正在下」是 worker 本地事实，hub 只做**中转站**。
-        #: 与 `_offline_disks` 同口径：进程内、惰性 TTL、重启即清、**绝不进任何调度判据**。
-        self._worker_prefetch: dict[str, dict] = {}
-        #: 独立锁：`worker_prefetch_readout` 会被 `/admin/queue` 调到（同 `_disk_lock` 的理由——
-        #: 观测面不许和调度临界区互等）。
-        self._pf_lock = Lock()
-        #: **云机错误上报的 ring**（plan/component-error-registry §4.3-S3b，2026-10-16）：
-        #: 云机上「只在云机」的失败（pull 的机器级停滞/瞬时失败、离线段的失败）在这儿**中继**
-        #: 一拍，等控制台的 10s 节拍来拉。与 `_worker_prefetch` 同口径：进程内、TTL 剔除、
-        #: 重启即清、**绝不进任何派发判据**。为什么不做权威落盘：持久化只该有一个地方管
-        #: （控制台的错误账本），而 hub 的 import 面受纪律约束（顶层禁三方 import）。
-        self._worker_errors: deque[dict] = deque()
-        #: 独立锁（同 `_pf_lock` 的理由）。
-        self._we_lock = Lock()
         _AuthGuard.__init__(self, now_fn)
         # 时钟与单课程 store 同源（测试注入的假时钟必须一致，否则 claimed 标记的时间戳
         # 会混入真实墙钟）。
         self._now = self._solo._now if self._solo is not None else (now_fn or time.time)
+        # B7-S2：课程表 / 路由 / 停机 / 发现面切成 `QueueScope` 协作者。构造排在 `_now`
+        # 之后（`add_course` 要给新 store 同一个 now_fn），在 hold 同步循环之前（后者经
+        # `self._sync_hold` 转发进 scope）。
+        self.scope = QueueScope(self, lock=self._lock, clock=self._now)
         # 盘上的 hold 镜像同步（★M1b）：必须排在 `self._now` **之后** —— 盘上有 hold 时
         # `_dispatch_load` 要打恢复宽限（`hold-restored`），那需要时钟。旧顺序下「带 hold
         # 重启」= 构造期 AttributeError（hub 直接起不来）。
         # ★M4b：`_modes` 与 `dispatch_effective_mode` 已随「课程无模式」删除。
         for _c in self._order:
             self._sync_hold(_c)
-        #: 多课程时自己的 worker 登记表（worker_id -> last_seen）——避让链的唯一事实源。
-        self._workers: dict[str, float] = {}
-        # 停机达令**按课程**（2026-09-18 单 hub 化）：一个 hub 服务所有课程之后，若达令还是
-        # 进程级一个布尔，「A 课门禁 ABORT」会连坐 B 课的云机（B 的 worker 下一轮轮询就
-        # 拿到 halt 并自停）。故：无课程参数 = 全课程（旧调用方语义，落 `_halt_default`，
-        # 新发现的课也继承）；`?course=` = 只动那一门课的例外（`_halts`）。
-        self._halt_default = False
-        self._halts: dict[str, bool] = {}
-        # 「本轮干完再停」门闩（queue_scope.halt_if_idle 置位；空闲取活时重评）。
-        self._halt_when_idle = False
 
+    # ---- B7-S2：课程表 / 路由 / 停机 / 发现面的**转发壳**（26 个口） ----
+    # 实现与状态主人住 `self.scope`；跨域调用点（`self.course_of` 等）逐字不变。
+    # 壳不写 docstring（签名即全部信息），逐方法说明见 `hub/queue_scope.py`。
+    def halt_of(self, course: str) -> bool:
+        return self.scope.halt_of(course)
+
+    def all_halted(self) -> bool:
+        return self.scope.all_halted()
+
+    def _work_left(self, exclude: str = "") -> str | None:
+        return self.scope._work_left(exclude)
+
+    def halt_if_idle(self, course: str = "") -> tuple[bool, str]:
+        return self.scope.halt_if_idle(course)
+
+    def maybe_halt_when_idle(self) -> bool:
+        return self.scope.maybe_halt_when_idle()
+
+    def set_halt(self, halt: bool, course: str = "") -> bool:
+        return self.scope.set_halt(halt, course)
+
+    def add_course(self, name: str) -> bool:
+        return self.scope.add_course(name)
+
+    def drop_course(self, name: str) -> bool:
+        return self.scope.drop_course(name)
+
+    def _adopt_solo(self) -> None:
+        self.scope._adopt_solo()
+
+    def _registry(self) -> dict[str, float]:
+        return self.scope._registry()
+
+    def note_worker(self, worker_id: str) -> None:
+        self.scope.note_worker(worker_id)
+
+    def worker_registry(self) -> dict[str, float]:
+        return self.scope.worker_registry()
+
+    def active_worker_count(self) -> int:
+        return self.scope.active_worker_count()
+
+    def courses(self) -> list[str]:
+        return self.scope.courses()
+
+    def course_of(self, job_id: str) -> str | None:
+        return self.scope.course_of(job_id)
+
+    def course_store(self, course: str) -> _JobStore | None:
+        return self.scope.course_store(course)
+
+    def _store_of(self, job_id: str) -> _JobStore | None:
+        return self.scope._store_of(job_id)
+
+    def mode_ignored(self, course: str) -> bool:
+        return self.scope.mode_ignored(course)
+
+    def active_courses(self) -> int:
+        return self.scope.active_courses()
+
+    def _sync_hold(self, course: str) -> None:
+        self.scope._sync_hold(course)
+
+    def _note_ambiguous(self, job_id: str, holders: list[str]) -> None:
+        self.scope._note_ambiguous(job_id, holders)
+
+    def ambiguous_jids(self) -> dict[str, list[str]]:
+        return self.scope.ambiguous_jids()
+
+    def discover(self, force: bool = False) -> list[str]:
+        return self.scope.discover(force)
+
+    def _drop_dead_courses(self, root: Path) -> list[str]:
+        return self.scope._drop_dead_courses(root)
+
+    def _serves_course(self, course: str) -> bool:
+        return self.scope._serves_course(course)
+
+    def _course_dir_live(self, ent: Path, now: float) -> bool:
+        return self.scope._course_dir_live(ent, now)
+
+    # ---- B7-P3：课程表 / worker 板的**转发属性**（状态只在协作者上） ----
+    # 其余混入与 `QueueScope` 仍写 `self._stores[...]` / `self._cursor = ...`：这些属性的
+    # getter/setter 把每一次读写落到 `self.course_table` / `self.board`，组合类自己**不存
+    # 副本**。写口保留是为了 `_adopt_solo` / `drop_course` 的整表替换语义（与旧实现逐字
+    # 相同），不是给测试的缝。
+    @property
+    def _stores(self) -> dict[str, _JobStore]:
+        return self.course_table._stores
+
+    @_stores.setter
+    def _stores(self, value: dict[str, _JobStore]) -> None:
+        self.course_table._stores = value
+
+    @property
+    def _order(self) -> list[str]:
+        return self.course_table._order
+
+    @_order.setter
+    def _order(self, value: list[str]) -> None:
+        self.course_table._order = value
+
+    @property
+    def _solo(self) -> _JobStore | None:
+        return self.course_table._solo
+
+    @_solo.setter
+    def _solo(self, value: _JobStore | None) -> None:
+        self.course_table._solo = value
+
+    @property
+    def _cursor(self) -> str | None:
+        return self.course_table._cursor
+
+    @_cursor.setter
+    def _cursor(self, value: str | None) -> None:
+        self.course_table._cursor = value
+
+    @property
+    def _locate_cache(self) -> dict[str, str]:
+        return self.course_table._locate_cache
+
+    @_locate_cache.setter
+    def _locate_cache(self, value: dict[str, str]) -> None:
+        self.course_table._locate_cache = value
+
+    @property
+    def _ambiguous(self) -> dict[str, list[str]]:
+        return self.course_table._ambiguous
+
+    @_ambiguous.setter
+    def _ambiguous(self, value: dict[str, list[str]]) -> None:
+        self.course_table._ambiguous = value
+
+    @property
+    def _workers(self) -> dict[str, float]:
+        return self.board._workers
+
+    @_workers.setter
+    def _workers(self, value: dict[str, float]) -> None:
+        self.board._workers = value
+
+    @property
+    def _halt_default(self) -> bool:
+        return self.board._halt_default
+
+    @_halt_default.setter
+    def _halt_default(self, value: bool) -> None:
+        self.board._halt_default = value
+
+    @property
+    def _halts(self) -> dict[str, bool]:
+        return self.board._halts
+
+    @_halts.setter
+    def _halts(self, value: dict[str, bool]) -> None:
+        self.board._halts = value
+
+    @property
+    def _halt_when_idle(self) -> bool:
+        return self.board._halt_when_idle
+
+    @_halt_when_idle.setter
+    def _halt_when_idle(self, value: bool) -> None:
+        self.board._halt_when_idle = value
+
+    # ---- B7-P4：离线派发 / 观测状态的转发属性（持有者 = `self.dispatch`） ----
+    @property
+    def _peeked(self) -> dict[str, float]:
+        return self.dispatch._peeked
+
+    @_peeked.setter
+    def _peeked(self, value: dict[str, float]) -> None:
+        self.dispatch._peeked = value
+
+    @property
+    def _dispatch(self) -> dict[str, dict]:
+        return self.dispatch._dispatch
+
+    @_dispatch.setter
+    def _dispatch(self, value: dict[str, dict]) -> None:
+        self.dispatch._dispatch = value
+
+    @property
+    def _dispatch_lock(self) -> Lock:
+        return self.dispatch._dispatch_lock
+
+    @_dispatch_lock.setter
+    def _dispatch_lock(self, value: Lock) -> None:
+        self.dispatch._dispatch_lock = value
+
+    @property
+    def _leases(self) -> dict[str, dict]:
+        return self.dispatch._leases
+
+    @_leases.setter
+    def _leases(self, value: dict[str, dict]) -> None:
+        self.dispatch._leases = value
+
+    @property
+    def _lease_lock(self) -> Lock:
+        return self.dispatch._lease_lock
+
+    @_lease_lock.setter
+    def _lease_lock(self, value: Lock) -> None:
+        self.dispatch._lease_lock = value
+
+    @property
+    def _offline_disks(self) -> dict[str, float]:
+        return self.dispatch._offline_disks
+
+    @_offline_disks.setter
+    def _offline_disks(self, value: dict[str, float]) -> None:
+        self.dispatch._offline_disks = value
+
+    @property
+    def _disk_lock(self) -> Lock:
+        return self.dispatch._disk_lock
+
+    @_disk_lock.setter
+    def _disk_lock(self, value: Lock) -> None:
+        self.dispatch._disk_lock = value
+
+    @property
+    def _worker_prefetch(self) -> dict[str, dict]:
+        return self.dispatch._worker_prefetch
+
+    @_worker_prefetch.setter
+    def _worker_prefetch(self, value: dict[str, dict]) -> None:
+        self.dispatch._worker_prefetch = value
+
+    @property
+    def _pf_lock(self) -> Lock:
+        return self.dispatch._pf_lock
+
+    @_pf_lock.setter
+    def _pf_lock(self, value: Lock) -> None:
+        self.dispatch._pf_lock = value
+
+    @property
+    def _worker_errors(self) -> deque[dict]:
+        return self.dispatch._worker_errors
+
+    @_worker_errors.setter
+    def _worker_errors(self, value: deque[dict]) -> None:
+        self.dispatch._worker_errors = value
+
+    @property
+    def _we_lock(self) -> Lock:
+        return self.dispatch._we_lock
+
+    @_we_lock.setter
+    def _we_lock(self, value: Lock) -> None:
+        self.dispatch._we_lock = value

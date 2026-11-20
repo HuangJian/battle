@@ -27,14 +27,14 @@ import re
 import shutil
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "nn-training"))
 # 2026-10-11（S1）：原先这里要摘掉脚本目录项，防脚本目录里的 `queue.py` 遮蔽 stdlib `queue`；该模块
 # 已改名 `trainer/dispatch_queue.py`（plan/nn-training-reuse-and-deps.plan.md §S1），scrub 删除。
-from concurrent.futures import ThreadPoolExecutor
-
+import common.runtime
 from common.cli import house_parser, run_main
 
 _FILENAME_RE = re.compile(r"-s(\d+)-[a-z]+-l\d+-t\d+-seed(\d+)\.replay$")
@@ -170,20 +170,10 @@ def write_fail_manifest(
             )
 
 
-def _export(args: argparse.Namespace, manifest_path: Path) -> int:
-    from common.platform_utils import force_utf8_stdio
-
-    force_utf8_stdio()
-
-    from common.log import log
-    from worker.config import apply_course, load_course, stage_json_for_args
-    from worker.eval_local import run_local_eval_game
-
-    t0 = time.time()
-    out_dir = Path(args.out_dir)
-    if not out_dir.is_absolute():
-        out_dir = REPO / out_dir
-
+def _load_games(
+    args: argparse.Namespace, manifest_path: Path, log: Callable[[str], None]
+) -> list[dict] | None:
+    """读 `--games` 清单；不可用 ⇒ 写失败 manifest 并返回 None（调用方返回 2）。"""
     games_raw: list[dict] = []
     games_path = Path(args.games)
     if not games_path.is_absolute():
@@ -199,7 +189,7 @@ def _export(args: argparse.Namespace, manifest_path: Path) -> int:
             wver=args.wver,
             reason=f"games 文件不可读: {e}",
         )
-        return 2
+        return None
     games = [
         {"stage": int(g["stage"]), "seed": int(g["seed"])}
         for g in games_raw
@@ -214,6 +204,49 @@ def _export(args: argparse.Namespace, manifest_path: Path) -> int:
             wver=args.wver,
             reason="games 列表为空（无可重放的 (stage, seed)）",
         )
+        return None
+    return games
+
+
+def _read_replay_ledger(traj: Path, it: int, wver: str) -> dict[tuple[int, int], dict]:
+    """对账基准：`eval_log.jsonl` 里该 (iter, wver) 的逐局行（含远程节点局）。"""
+    ledger: dict[tuple[int, int], dict] = {}
+    try:
+        with open(traj / "eval_log.jsonl", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if (
+                    r.get("event") == "eval"
+                    and r.get("iter") == it
+                    and r.get("wver") == wver
+                ):
+                    ledger[(int(r["stage"]), int(r["seed"]))] = r
+    except OSError:
+        pass
+    return ledger
+
+
+def _export(args: argparse.Namespace, manifest_path: Path) -> int:
+    from common.platform_utils import force_utf8_stdio
+
+    force_utf8_stdio()
+
+    from common.log import log
+    from worker.config import apply_course, load_course, stage_json_for_args
+    from worker.eval_local import run_local_eval_game
+
+    t0 = time.time()
+    out_dir = Path(args.out_dir)
+    if not out_dir.is_absolute():
+        out_dir = REPO / out_dir
+
+    games = _load_games(args, manifest_path, log)
+    if games is None:
         return 2
 
     course_path = REPO / "nn-training" / "curricula" / f"{args.course}.jsonc"
@@ -293,24 +326,7 @@ def _export(args: argparse.Namespace, manifest_path: Path) -> int:
     tmp_reports.mkdir(parents=True, exist_ok=True)
 
     # 对账基准：eval_log 里该 (iter, wver) 的逐局行（含远程节点局）。
-    ledger: dict[tuple[int, int], dict] = {}
-    try:
-        with open(traj / "eval_log.jsonl", encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                try:
-                    r = json.loads(line)
-                except ValueError:
-                    continue
-                if (
-                    r.get("event") == "eval"
-                    and r.get("iter") == args.iter
-                    and r.get("wver") == args.wver
-                ):
-                    ledger[(int(r["stage"]), int(r["seed"]))] = r
-    except OSError:
-        pass
+    ledger = _read_replay_ledger(traj, args.iter, args.wver)
 
     workers = max(1, min(int(args.workers), 8))
     ok = 0
@@ -366,8 +382,8 @@ def _export(args: argparse.Namespace, manifest_path: Path) -> int:
             log(f"[replay-exp] progress {done}/{len(games)} ok={ok} fail={failed} "
                 f"elapsed={time.time() - t0:.0f}s")
 
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        list(ex.map(one, games))
+    with common.runtime.Runtime(scope="replay-export") as rt:
+        rt.map(one, games, workers=workers)
 
     files, errors = _manifest_for(games, out_dir)
     shutil.rmtree(tmp_reports, ignore_errors=True)

@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import common.runtime
 import trainer.batch_eval as be
 import trainer.batch_runner as br
 
@@ -69,6 +70,17 @@ RUNNER_IMPORTS = {
     "time",
     "typing",
     "common.distribution",
+    # 2026-11-17（§P1-6 第四批）：单元线程归 `Runtime`（`batcheval-u<idx>-*`），
+    # `common.runtime` 是 L0、stdlib-only 的并发所有者。
+    "common.runtime",
+    # 2026-11-16 登记（B8 第一刀）：codeHash 实现搬到 `common/codehash.py`，
+    # `compute_code_hash()` 的入边随之拆成两条；其余分发面仍走 `common.distribution`。
+    "common.codehash",
+    # 2026-11-19 登记（B8 第十一刀）：取任务 / 结果校验 → `common.task_client`，
+    # 权重下发 → `common.weights_client`；执行器按新家 import（`node_request` 漏斗与
+    # `load_dist_config` 仍在 `common.distribution`）。
+    "common.task_client",
+    "common.weights_client",
     # 2026-11-15 登记：节点门参考 hash 改以 self 自报为准（rollout/eval/batch/BC 四条腿
     # 共用），判据单独成模块 —— `common/distribution.py` 已到 LOC 预算。
     "common.codehash_ref",
@@ -86,7 +98,9 @@ RUNNER_IMPORTS = {
     # `BWD1`，hub 原样落位；容器会让本机指纹与节点 cache 键对不上、节点侧 `JSON.parse` 直接报
     # `Unexpected identifier "BWD1"`）。顶层名是**裸包 `remote`**。
     "remote",
-    "trainer.batch_plan",
+    # 2026-11-14：规划面（B 层纯函数）搬去 `biz/`（见 DECISIONS
+    # §2026-11-14-batch-plan-belongs-to-biz）—— 执行器照旧从**本模块**裸名取用。
+    "biz.batch_plan",
     "trainer.batch_store",
     "worker.eval_local",
     # 2026-09-27（S5 第十二刀）登记：本机份额缺省 `EVAL_LOCAL_SLOTS_DEFAULT` 随「让位/
@@ -94,7 +108,12 @@ RUNNER_IMPORTS = {
     # （运行器那行仍在：`run_local_eval_game` 是本机槽位的执行面）。
     "worker.eval_yield",
     "common.log",
-    "trainer.dispatch_queue",
+    # 2026-11-14 登记（`trainer.dispatch_queue` 的 re-export 面退役）：`bun_version` 回
+    # `common.proc`（缺省 fallback 就是 `"?"`），`_record_agent_meta` 回
+    # `worker.agent_meta.record_agent_meta`。历史名字留在**本模块**命名空间里 ——
+    # `monkeypatch.setattr(br, "bun_version" / "_record_agent_meta", …)` 打的就是这两处。
+    "common.proc",
+    "worker.agent_meta",
     "trainer.queue_local",
 }
 
@@ -306,6 +325,9 @@ def test_dispatch_batch_bg_starts_a_daemon_thread_from_the_new_home(monkeypatch)
     class FakeRunner:
         def __init__(self, *a, **k):
             calls["args"] = a
+            #: `dispatch_batch_bg` 现在用**单元自己的** Runtime 起线程（§P1-6 第四批）：
+            #: 名字 = `<scope>-run`，FakeRunner 也得有一份才像真的。
+            self._rt = common.runtime.Runtime(scope="batcheval-u0")
 
         def run(self) -> dict:
             calls["ran"] = True
@@ -328,7 +350,7 @@ def test_dispatch_batch_bg_starts_a_daemon_thread_from_the_new_home(monkeypatch)
     t.join(timeout=10)
     assert calls.get("ran") is True
     assert t.daemon is True
-    assert t.name == "batcheval-u0"
+    assert t.name == "batcheval-u0-run"
     assert calls["args"][0] == "bun" and calls["args"][6] == {"rung": "c4l1"}
 
 
@@ -349,6 +371,9 @@ def test_done_keys_reads_the_eval_log_from_the_new_home(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    assert br.BatchEvalRunner._done_keys(r, "aa") == {(3, 7)}
-    assert br.BatchEvalRunner._done_keys(r, "bb") == {(3, 8)}
-    assert br.BatchEvalRunner._done_keys(r, "cc") == set()
+    aa = br.BatchEvalRunner._done_keys(r, "aa")
+    bb = br.BatchEvalRunner._done_keys(r, "bb")
+    cc = br.BatchEvalRunner._done_keys(r, "cc")
+    assert aa == {(3, 7)}
+    assert bb == {(3, 8)}
+    assert cc == set()

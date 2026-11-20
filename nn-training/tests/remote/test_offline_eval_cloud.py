@@ -571,7 +571,7 @@ def test_submit_does_not_block_ppo(monkeypatch: pytest.MonkeyPatch) -> None:
     def slow(**job: object) -> dict:
         started.set()
         try:
-            release.wait(5)
+            release.wait(30)  # 兜底 30s：同步实现若跑在调用线程，这里会把 `done` 拖到超时
         finally:
             finished.set()  # 后台任务「跑完过」的唯一证据（与 submit 是否阻塞无关）
         return {"ran": True, "it": job.get("it")}
@@ -579,25 +579,32 @@ def test_submit_does_not_block_ppo(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(offline_eval, "run_cloud_eval", slow)
     logs, log = _logs()
     runner = CloudEvalRunner(lambda it: {"it": it}, log=log)
-    t0 = time.time()
-    assert runner.submit(3)
-    submit_sec = time.time() - t0
-    # timing-ok: 契约上界（submit 不许阻塞，上界即契约）
-    assert submit_sec < 0.5, f"submit 阻塞了 {submit_sec:.2f}s —— 它就变成了串行 eval"
+    # 判据是**状态**，不是耗时（2026-11-15 补：`submit_sec < 0.5s` 在并行门禁满载时会红，
+    # 而它红在「线程创建 + 调度」上）。同步实现会当场跑 `slow`（卡在 release/30s）⇒ `done`
+    # 到不了 ⇒ 10s 的挂起兜底把它变成可读的红。
+    ok: list[bool] = []
+    done = threading.Event()
+
+    def _submit() -> None:
+        ok.append(runner.submit(3))
+        done.set()
+
+    th = threading.Thread(target=_submit, daemon=True)
+    th.start()
+    assert done.wait(10.0), "submit 没回来 —— 那一局跑在调用线程里（串行 eval）"
+    assert ok == [True], ok
+    assert not finished.is_set(), "submit 返回时后台那一局已跑完 ⇒ 它等了"
     assert started.wait(5), "后台线程没有开始跑这一轮"
     assert runner.inflight_it() == 3
     # 在飞时提交下一轮：有界等一小会（这里 handoff 设得很短）后跳过，绝不自旋到死
     runner.handoff_wait_sec = 0.05
-    t1 = time.time()
     assert runner.submit(4) is False
     # ★ 权威判据是**状态**，不是延迟：返回时 it3 仍在飞（它要等满 release/5s 才结束），且后台
     # 任务一次都没跑完 ⇒ submit 走的确实是「有界等一小会就跳过」那条路。
     assert runner.inflight_it() == 3 and not finished.is_set(), (
-        f"submit 等到了在飞那一轮结束（{time.time() - t1:.2f}s）——那就变成串行 eval 了"
+        "submit 等到了在飞那一轮结束 —— 那就变成串行 eval 了"
     )
-    # 不拿它当延迟判据：并行门禁的调度噪声曾把这条 0.05s 的路径顶到 1.30s。
-    # timing-ok: 上界兜底——真会卡住的分支要等满 5s 的 fake job，3s 远离它（只挡挂起，不测延迟）。
-    assert time.time() - t1 < 3.0
+    # 上面那条 `not finished.is_set()` 已经是权威判据；这里只兜「drain 之前任务莫名结束」。
     assert any("跳过本轮" in m for m in logs)
     release.set()
     assert runner.drain(timeout=5.0) is True
@@ -615,10 +622,14 @@ def test_submit_defers_the_job_build_to_the_background_thread(
     """
     built = threading.Event()
     release = threading.Event()
+    built_done = threading.Event()
 
     def slow_build(it: int) -> dict:
         built.set()
-        release.wait(5)
+        try:
+            release.wait(30)  # 兜底 30s：装配若回到调用线程，`done` 到不了 ⇒ 判据变红
+        finally:
+            built_done.set()
         return {"it": it}
 
     monkeypatch.setattr(offline_eval, "run_cloud_eval", lambda **job: {"ran": True, **job})
@@ -641,8 +652,7 @@ def test_submit_defers_the_job_build_to_the_background_thread(
     release.set()
     assert built.wait(5), "后台线程没开始装配"
     assert build_thread and build_thread[0] is not caller, "装配又回到调用线程了"
-    release.set()
-    assert built.wait(5), "后台线程没开始装配"
+    assert built_done.wait(10.0), "放行后装配必须跑完"
     assert runner.drain(timeout=5.0) is True
     # 结果穿透 = 后台线程真的把 thunk 求了值（`_build` 抛的话这里不会有结果）
     assert runner.results == [{"ran": True, "it": 5}], logs
@@ -842,7 +852,8 @@ def test_backfeed_body_carries_only_this_rounds_eval_rows(tmp_path: Path) -> Non
     assert [r["event"] for r in got] == ["eval", "eval_summary", "eval_agg"], got
     assert got[0]["seed"] == 1, "逐局行只发自家的、本轮的（source 行不随行）"
     assert got[1]["games"] == 4
-    assert d._eval_rows_for(9) == []
+    missing = d._eval_rows_for(9)
+    assert missing == []
 
     # 上界（2026-11-03）：整轮读数放行；只有异常大才按关分层（宁少不错）。
     full = [

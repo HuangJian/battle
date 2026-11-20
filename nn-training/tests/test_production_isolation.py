@@ -103,17 +103,17 @@ def test_hub_dials_the_stub_not_the_live_console(monkeypatch: pytest.MonkeyPatch
 
 def _defaults() -> dict[str, Path]:
     """各状态面的**生产缺省**（从模块常量现读，不抄字面量）。"""
+    from common import settings as st
     from hub import store_offline as so
-    from trainer import loop_control as lc
-    from worker import eval_heartbeat as hb
     from worker import gate_halt as gh
+    from worker import loop_control as lc
 
     return {
         "NN_GATE_HALT": Path(gh.DEFAULT_INTENT_PATH),
         "NN_GATE_HALT_APPLIED": Path(gh.DEFAULT_APPLIED_PATH),
         "NN_LOOP_CONTROL": Path(lc.DEFAULT_CONTROL_PATH),
         "NN_LOOP_CONTROL_APPLIED": Path(lc.DEFAULT_APPLIED_PATH),
-        "EVALBOARD_DATA": hb._DEFAULT_ROOT,
+        "EVALBOARD_DATA": st.EVALBOARD_DATA_ROOT,
         "BCITY_WEIGHTS_ARCHIVE_ROOT": so.WEIGHTS_ARCHIVE_ROOT,
     }
 
@@ -148,9 +148,9 @@ def test_writers_land_in_tmp_and_never_touch_production(
     并给生产侧文件拍前后指纹（mtime_ns + size；不存在 = None）。`write_*` 都返回错误文案
     （空 = 成功），顺手钉住「真的写成了」而不是「静默没写」。
     """
-    from trainer import loop_control as lc
     from worker import eval_heartbeat as hb
     from worker import gate_halt as gh
+    from worker import loop_control as lc
 
     defaults = _defaults()
     watch = [defaults["NN_GATE_HALT"], defaults["NN_GATE_HALT_APPLIED"], defaults["NN_LOOP_CONTROL_APPLIED"]]

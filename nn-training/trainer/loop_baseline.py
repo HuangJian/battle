@@ -21,12 +21,21 @@ dispatch_eval_bg`）：搬家前它们在本模块**未**引入 ⇒ 测本簇实
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import common.distribution
 from common.log import log
 from trainer.dispatch_queue import RUN_ID
+
+
+@dataclass(frozen=True)
+class BaselineEvalView:
+    """it0 基线评估的执行面读数（派发判据本身不在这里）。"""
+
+    landed_wver: str | None
+    eval_thread: object | None
 
 
 class TrainingBaseline:
@@ -41,6 +50,14 @@ class TrainingBaseline:
     _eval_every: Any
     _baseline_eval_thread: Any
     _baseline_landed_wver: Any
+
+    def baseline_eval_state(self) -> BaselineEvalView:
+        """这一簇的公开读数（用例 / 诊断共用；不改变派发判据）。"""
+        landed = getattr(self, "_baseline_landed_wver", None)
+        return BaselineEvalView(
+            landed_wver=None if landed is None else str(landed),
+            eval_thread=getattr(self, "_baseline_eval_thread", None),
+        )
 
     def _baseline_eval_weights(self, dist_cfg: dict | None) -> str | None:
         """it0 基线可用的 bc 权重路径；前置条件不足返回 None（纯判断，零副作用）。

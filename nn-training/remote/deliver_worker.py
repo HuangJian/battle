@@ -40,7 +40,9 @@ import threading
 import time
 from pathlib import Path
 
+import common.runtime
 from common.cli import house_parser, run_main
+from common.settings import hub_token_from_env
 from remote import deliver_parts
 from remote.artifacts import atomic_write_json
 from remote.deliver_outbox import LocalOutboxDeliverer
@@ -129,6 +131,8 @@ def _watch_stdin(parent_gone: threading.Event) -> None:
             if not chunk:
                 break
     except Exception:
+        # 契约静默（G9 冻结，非旧债）：_watch_stdin 外层；读到 EOF / 坏管道即 break，
+        # 结论本身就是「父进程没了」（parent_gone.set()）。
         pass
     parent_gone.set()
 
@@ -264,7 +268,7 @@ def main(argv: list[str] | None = None) -> int:
     """每 tick：读控制行 → 按预算推积压 → 落状态。**永不把异常带出去**（退出码说话）。"""
     args = build_argparser().parse_args(argv)
     # token **只从环境变量读**（argv 里会出现 `/proc/<pid>/cmdline` 上，全机可读）。
-    token = (os.environ.get("BATTLE_HUB_TOKEN") or "").strip()
+    token = hub_token_from_env()
     # 租约 token 同走 env（★M1b/P1-1；父侧 `deliver_proc.HUB_LEASE_ENV` 塞的）。
     lease = (os.environ.get(HUB_LEASE_ENV) or "").strip()
     # 可读名同走 env（plan/offline-leg-ppo-attribution；父侧 `deliver_proc.WORKER_NAME_ENV` 塞的）。
@@ -310,9 +314,10 @@ def main(argv: list[str] | None = None) -> int:
     tick = max(0.05, float(args.tick_sec))
     idle = max(60.0, float(args.idle_timeout))
     parent_gone = threading.Event()
-    threading.Thread(
-        target=_watch_stdin, args=(parent_gone,), name="deliver-stdin", daemon=True
-    ).start()
+    #: 父进程消失的守望线程（`deliver-stdin-watch`）：只负责置位，没人等它。
+    common.runtime.Runtime(scope="deliver-stdin").thread(
+        _watch_stdin, parent_gone, name="watch", daemon=True
+    )
     last_ctl_at = time.monotonic()
     stop_deadline: float | None = None
     stop_budget = 0.0

@@ -96,11 +96,7 @@ def _defs(path: Path) -> set[str]:
 
 
 def _func(path: Path, name: str) -> ast.FunctionDef:
-    return next(
-        n
-        for n in _tree(path).body
-        if isinstance(n, ast.FunctionDef) and n.name == name
-    )
+    return next(n for n in _tree(path).body if isinstance(n, ast.FunctionDef) and n.name == name)
 
 
 def _all_imports(tree: ast.Module) -> set[str]:
@@ -164,9 +160,11 @@ def test_worker_only_reaches_the_core_through_one_import() -> None:
         if not (isinstance(n, ast.ImportFrom) and n.module == "remote.train_core"):
             continue
         for a in n.names:
-            assert a.asname is not None, f"{CORE_FN} 必须以 `X as X` 显式转发（ruff 认的 re-export）"
+            assert a.asname is not None, (
+                f"{CORE_FN} 必须以 `X as X` 显式转发（ruff 认的 re-export）"
+            )
             aliases.append(a.asname)
-    assert aliases == [CORE_FN], aliases
+    assert aliases == ["TrainSpec", CORE_FN], aliases
     assert worker_mod.run_training_core is core_mod.run_training_core
 
 
@@ -179,36 +177,73 @@ def _core_params() -> tuple[list[str], list[str]]:
     return pos, [a.arg for a in fn.args.kwonlyargs]
 
 
-def test_the_call_site_passes_exactly_the_core_interface() -> None:
-    """★ **接口双向一致**：调用点的位置实参个数与关键字集合，必须与训练核的签名逐名相符。
+def _train_spec_fields() -> list[str]:
+    cls = next(
+        n for n in _tree(CORE_FILE).body if isinstance(n, ast.ClassDef) and n.name == "TrainSpec"
+    )
+    return [
+        n.target.id
+        for n in cls.body
+        if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)
+    ]
 
-    这是本刀最可能的失误形态：搬完之后**漏传一个形参**。运行时不一定立刻炸（只有走到那条
-    分支才 NameError），而这条断言在**提交时**就红。反向也钉住：核里删了形参而调用点还传着。
+
+def test_the_call_site_passes_exactly_the_core_interface() -> None:
+    """★ **接口双向一致**：调用点只传 `(base_url, token, spec)`，`TrainSpec` 字段全覆盖。
+
+    这是本刀最可能的失误形态：搬完之后**漏传一个字段**。运行时不一定立刻炸（只有走到那条
+    分支才 NameError），而这条断言在**提交时**就红。反向也钉住：核里删了字段而调用点还传着。
     """
     pos, kwonly = _core_params()
-    assert pos == ["base_url", "token"], pos
+    job = _func(WORKER_FILE, "run_job")
     calls = [
         n
-        for n in ast.walk(_func(WORKER_FILE, "run_job"))
-        if isinstance(n, ast.Call)
-        and isinstance(n.func, ast.Name)
-        and n.func.id == CORE_FN
+        for n in ast.walk(job)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == CORE_FN
     ]
-    assert len(calls) == 1, f"作业壳里应只有一处 `{CORE_FN}(...)`，实得 {len(calls)}"
-    call = calls[0]
-    assert len(call.args) == len(pos), (
-        f"位置实参应 {len(pos)} 个（{pos}），实得 {len(call.args)}"
+    assigns = [
+        n
+        for n in ast.walk(job)
+        if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "spec" for t in n.targets)
+    ]
+    call = calls[0] if len(calls) == 1 else None
+    spec_arg = call.args[2] if call is not None and len(call.args) == 3 else None
+    spec_call = assigns[0].value if len(assigns) == 1 else None
+    got = (
+        sorted(k.arg for k in spec_call.keywords if k.arg is not None)
+        if isinstance(spec_call, ast.Call)
+        else []
     )
-    got: list[str] = []
-    for k in call.keywords:
-        assert k.arg is not None, "调用点用了 `**` 展开 —— 接口必须逐名显式（否则这条双向一致形同虚设）"
-        got.append(k.arg)
-    got.sort()
-    assert got == sorted(kwonly), (
-        "调用点的关键字与训练核形参不一致：\n"
-        f"  多传/名字写错：{sorted(set(got) - set(kwonly))}\n"
-        f"  漏传：{sorted(set(kwonly) - set(got))}"
+    fields = sorted(_train_spec_fields())
+    assert (
+        (pos, kwonly) == (["base_url", "token", "spec"], [])
+        and len(calls) == 1
+        and len(assigns) == 1
+        and call is not None
+        and len(call.args) == 3
+        and isinstance(spec_arg, ast.Name)
+        and spec_arg.id == "spec"
+        and isinstance(spec_call, ast.Call)
+        and isinstance(spec_call.func, ast.Name)
+        and spec_call.func.id == "TrainSpec"
+        and all(k.arg is not None for k in spec_call.keywords)
+        and got == fields
+    ), (
+        f"核形参 {(pos, kwonly)} / calls={len(calls)} / assigns={len(assigns)} / "
+        f"spec_arg={ast.unparse(spec_arg) if spec_arg is not None else None} / "
+        f"spec_call={ast.unparse(spec_call) if spec_call is not None else None} / "
+        f"got={got} / fields={fields}"
     )
+
+
+def test_paddle_twin_takes_the_same_spec() -> None:
+    fn = _func(CORE_FILE, "_run_training_core_paddle")
+    assert (
+        [a.arg for a in fn.args.posonlyargs + fn.args.args],
+        fn.args.kwonlyargs,
+        fn.args.kwarg,
+    ) == (["base_url", "token", "spec"], [], None)
 
 
 def test_no_keyword_is_swallowed_by_kwargs() -> None:
@@ -267,18 +302,37 @@ def test_torch_stays_a_deferred_import_inside_the_core() -> None:
     两面一起钉：顶层**没有**（防回归）+ 函数体**有**（防漏搬）。
     """
     top = _top_imports(CORE_FILE)
-    for mod in ("torch", "numpy", "ppo", "worker.ppo.engine", "worker.ppo.common", "torch_xla", "worker.data.weights_io"):
+    for mod in (
+        "torch",
+        "numpy",
+        "ppo",
+        "worker.ppo.engine",
+        "worker.ppo.common",
+        "torch_xla",
+        "worker.data.weights_io",
+    ):
         assert not any(m == mod or m.startswith(mod + ".") for m in top), (
             f"train_core 顶层 import 了 {mod}（本仓硬规：顶层零 torch）"
         )
-    fn = _func(CORE_FILE, CORE_FN)
+    fns = [
+        n
+        for n in _tree(CORE_FILE).body
+        if isinstance(n, ast.FunctionDef) and (n.name == CORE_FN or n.name.startswith("_torch_"))
+    ]
     inner: set[str] = set()
-    for node in ast.walk(fn):
-        if isinstance(node, ast.Import):
-            inner.update(a.name for a in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            inner.add(node.module)
-    for mod in ("torch", "numpy", "worker.ppo.engine", "worker.ppo.common", "worker.data.weights_io"):
+    for fn in fns:
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Import):
+                inner.update(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                inner.add(node.module)
+    for mod in (
+        "torch",
+        "numpy",
+        "worker.ppo.engine",
+        "worker.ppo.common",
+        "worker.data.weights_io",
+    ):
         assert any(m == mod or m.startswith(mod + ".") for m in inner), (
             f"{mod} 没在训练核体内出现 —— 要么漏搬，要么改成了顶层 import"
         )
@@ -310,7 +364,12 @@ def test_worker_proc_is_pure_stdlib() -> None:
 
 def test_worker_proc_names_are_forwarded_as_the_same_objects() -> None:
     """四个名字在 `worker` 侧是**同一对象**——既有注入点（`setattr(W, …)`）因此照旧有效。"""
-    for name in ("HOT_RELOAD_EXIT", "_release_cloud_machine", "_request_reload", "supervise_worker"):
+    for name in (
+        "HOT_RELOAD_EXIT",
+        "_release_cloud_machine",
+        "_request_reload",
+        "supervise_worker",
+    ):
         assert hasattr(worker_mod, name), f"remote.worker.{name} 不见了（既有注入点）"
         assert getattr(worker_mod, name) is getattr(proc_mod, name), (
             f"remote.worker.{name} 不是 remote.worker_proc.{name}（转发成了副本）"
@@ -335,8 +394,10 @@ def test_wire_block_has_exactly_one_implementation() -> None:
     assert "_wire_block" in _defs(WIRE_FILE)
     assert "_wire_block" not in _defs(WORKER_FILE)
     assert worker_mod._wire_block is wire_mod._wire_block
-    # 训练核也从 wire 取（不是自己抄一份）
-    assert core_mod._wire_block is wire_mod._wire_block
+    # 核的结果段已随 `_core_result` 下沉到 train_common，仍从 wire 取（不是自己抄一份）
+    from remote import train_common as common_mod
+
+    assert common_mod._wire_block is wire_mod._wire_block
 
 
 # ──────────────────── ⑦ 账本：层号就是拓扑秩 ────────────────────
@@ -446,7 +507,12 @@ def test_delta_form_branch_keeps_the_local_f32_copy() -> None:
     ③ `record_pending`（身份映射的 pending）也在同一段：M0 与 R1/R3 必须共处一个函数，否则
        「本机权威副本」与「回传形态」两天各说一套。
     """
-    called = _named_calls(_func(CORE_FILE, CORE_FN))
+    called: set[str] = set()
+    for name in ("_torch_artifacts", "_paddle_artifacts"):
+        try:
+            called |= _named_calls(_func(CORE_FILE, name))
+        except StopIteration:
+            continue
     assert {
         "opt_fmt_of",
         "w_fmt_of",
@@ -465,7 +531,11 @@ def test_paddle_core_uses_the_shared_corpus_dispatch() -> None:
     留 `check_ppo_loader` 则是把已经支持的 job 拒之门外。判据取函数真实引用的全局/属性名
     （`__code__.co_names`），不读源码文本。
     """
-    names = set(core_mod._run_training_core_paddle.__code__.co_names)
+    # 本仓把「读 shard + 切块」收进 `_load_ppo_data`（两条核共用），分派点住在它的函数体里
+    # ⇒ 判据同时看 Paddle 核的调用面与那个共用函数的引用面。
+    names = set(core_mod._paddle_ppo.__code__.co_names)
+    assert names >= {"_load_ppo_data"}, "Paddle 核没走共用装载入口"
+    names |= set(core_mod._load_ppo_data.__code__.co_names)
     assert names >= {"load_ppo_episodes"}, "Paddle 核没走共用分派点"
     assert names.isdisjoint({"load_episodes"}), "Paddle 核绕过了 ppo_loader（lazy 会静默退 eager）"
     assert names.isdisjoint({"check_ppo_loader"}), "lazy 已支持，不得再拒收"

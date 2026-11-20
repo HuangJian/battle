@@ -46,9 +46,9 @@ from typing import Any
 
 from common.cli import house_parser, run_main
 from common.hashing import sha256_bytes, sha256_file  # re-export：唯一实现在 common/hashing.py
+from common.paths import REPO_ROOT
 from common.platform_utils import rmtree_best_effort
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TRAJ_ROOT = REPO_ROOT / "tmp"
 DEFAULT_ARCHIVE_ROOT = REPO_ROOT / "archive" / "courses"
 CURRICULA_DIR = REPO_ROOT / "nn-training" / "curricula"
@@ -63,9 +63,9 @@ DEFAULT_OPT_KEY_EVERY = 25
 #: manifest 的 `keys.opt_key_iters` 与 `weights[]` 必须取**并集**——只认 C 族会让 A/B 课
 #: `weights[]` 恒空（2026-09-26 评审：G4-① 的起点入口对多数课拿不到东西）。
 _KEY_REASONS = ("L0'-opt-key", "L0-ckpt-key")
-#: 逐轮权重归档根（与 `biz/archive.py::WEIGHTS_BACKUP_DIR` 同路径；本模块**只读**它）。
+#: 逐轮权重归档根（与 `worker/archive.py::WEIGHTS_BACKUP_DIR` 同路径；本模块**只读**它）。
 WEIGHTS_ARCHIVE_DIR = REPO_ROOT / "nn-training" / "weights"
-#: 归档件名：`<prefix>.it<N>.<YYYYMMDD-HHMMSS>.json`（`biz/archive.py::backup_weights`）
+#: 归档件名：`<prefix>.it<N>.<YYYYMMDD-HHMMSS>.json`（`worker/archive.py::backup_weights`）
 _WEIGHT_ARCH_RE = re.compile(r"^.+\.it(\d+)\.\d{8}-\d{6}\.json$")
 
 # ────────────────────────── 路径判据（纯正则，无 IO） ──────────────────────────

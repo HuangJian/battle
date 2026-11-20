@@ -37,7 +37,9 @@ import remote.artifacts
 import remote.bundle
 import remote.hub_client
 import remote.run_loop
+import trainer.batch_runner
 import trainer.dispatch_queue
+import trainer.eval_dispatch
 import trainer.stream
 import worker.agent_meta
 import worker.bc_ledger
@@ -95,8 +97,15 @@ def _defs_of(name: str, *, roots: tuple[Path, ...] = (NN_ROOT,)) -> list[str]:
 # --------------------------------------------------------------------- 层契约
 
 
+#: L0 的第三方例外（**闭集**，2026-11-18，B5）：`common/manifest.py` 与 `common/protocol.py`
+#: 的 pydantic 模型（字段级校验）。为什么它可以而不破层契约①：pydantic 是项目已声明的运行
+#: 时依赖（`pyproject.dependencies`）、纯 Python、随 code.zip 一起装 —— 它不会像 torch/numpy
+#: 那样在云机上缺席。新加第二个第三方包之前先改 `common/__init__` 的层契约①。
+THIRD_PARTY_ALLOWED = {"pydantic"}
+
+
 def test_common_package_depends_on_stdlib_only() -> None:
-    """`common/*` 只能 import stdlib —— 它要随 code.zip 解到没有 torch 的云机上。"""
+    """`common/*` 只能 import stdlib（+ 唯一的 pydantic）—— 它要随 code.zip 解到没 torch 的云机上。"""
     allowed_first_party = {"common.platform_utils", "common"}
     # 2026-09-30（刀 4）：`biz` 是 L1 的纯逻辑包，**同样**不许被 L0 引用（`common → biz` 就是
     # 反向依赖）；漏掉它，`import biz.x` 会从此处静默通过（同本条上面那句「名单是用来接住
@@ -107,7 +116,11 @@ def test_common_package_depends_on_stdlib_only() -> None:
         for m in mods:
             top = m.split(".")[0]
             assert top not in banned, f"{p.name} 不得依赖 {m}（层契约见 common/__init__.py）"
-            if top in sys.stdlib_module_names or top in allowed_first_party:
+            if (
+                top in sys.stdlib_module_names
+                or top in allowed_first_party
+                or top in THIRD_PARTY_ALLOWED
+            ):
                 continue
             pytest.fail(f"{p.name} 的第三方/未知依赖: {m}")
 
@@ -159,7 +172,6 @@ def test_bun_version_and_exc_tail_and_atomic_write_have_single_definition() -> N
     # 从 `remote/` 搬到 `worker/` ⇒ 它从 `trainer/dispatch_queue.py` 的**前面**排到后面。
     assert _defs_of("bun_version") == [
         "common/proc.py",
-        "trainer/dispatch_queue.py",
         "worker/iter_rollout.py",
     ]
     assert _defs_of("exc_tail") == ["common/text.py"]
@@ -169,11 +181,15 @@ def test_bun_version_and_exc_tail_and_atomic_write_have_single_definition() -> N
 
 
 def test_delegating_call_sites_keep_their_public_names() -> None:
-    """收敛的是**定义**，不是名字：历史调用点与测试的 monkeypatch 接缝必须还在。"""
-    # trainer.dispatch_queue 是公共 re-export 面（batch_eval / eval_dispatch / e2e 从这里取）
-    assert trainer.dispatch_queue.bun_version("definitely-not-a-real-bun-binary") == "?"
-    assert trainer.dispatch_queue.mm("1.2.3") == "1.2"
-    assert trainer.dispatch_queue._record_agent_meta is worker.agent_meta.record_agent_meta
+    """收敛的是**定义**，不是名字：历史调用点与测试的 monkeypatch 接缝必须还在。
+
+    2026-11-14 起 `trainer.dispatch_queue` 不再是第二个 import 面（re-export 已删）：消费方
+    直接 import 真家，历史名字留在**消费方**的命名空间里（`batch_runner.bun_version` /
+    `eval_dispatch.mm`）—— 那正是 `monkeypatch.setattr(mod, "bun_version", ...)` 打桩的位置。
+    """
+    assert trainer.batch_runner.bun_version is common.proc.bun_version
+    assert trainer.eval_dispatch.bun_version is common.proc.bun_version
+    assert trainer.eval_dispatch.mm is common.proc.version_mm
     # 私有别名仍在各自模块命名空间里（monkeypatch.setattr(mod, "bun_version", ...) 依赖它）
     assert callable(worker.iter_rollout.bun_version)
     assert callable(remote.hub_client._sha256_file)

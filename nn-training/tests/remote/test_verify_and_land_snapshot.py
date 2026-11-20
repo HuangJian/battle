@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 
 from common.protocol import encode_opt_tar, encode_weights_json
-from remote.hub_client import HubClientError, publish_job, verify_and_land
+from remote.hub_client import HubClientError, PublishSpec, publish_job, verify_and_land
 
 STAGE = 2000
 
@@ -56,26 +56,28 @@ def _publish_local_round(tmp_path: Path) -> tuple[dict, Path, Path]:
     it_dir = course_dir / "it1"
     shards = [_shard(it_dir, 11, "w" * 12), _shard(it_dir, 22, "w" * 12)]
     m = publish_job(
-        job_root=job_root,
-        jsonl_path=jsonl,
-        run_id="r-snap",
-        it=1,
-        traj_dir=course_dir,
-        shard_dirs=shards,
-        commit="c" * 40,
-        code_sha256="z" * 64,
-        course='// course jsonc\n{"reward": {"formula": "score"}}',
-        course_fp="f" * 64,
-        init_weights_path=str(w),
-        reward_formula="score",
-        formula_hash="h" * 40,
-        metrics_version=1,
-        gamma=0.995,
-        lam=0.95,
-        mode="per-tick",
-        epochs=1,
-        mb=512,
-        lr=3e-4,
+        PublishSpec(
+            job_root=job_root,
+            jsonl_path=jsonl,
+            run_id="r-snap",
+            it=1,
+            traj_dir=course_dir,
+            shard_dirs=shards,
+            commit="c" * 40,
+            code_sha256="z" * 64,
+            course='// course jsonc\n{"reward": {"formula": "score"}}',
+            course_fp="f" * 64,
+            init_weights_path=str(w),
+            reward_formula="score",
+            formula_hash="h" * 40,
+            metrics_version=1,
+            gamma=0.995,
+            lam=0.95,
+            mode="per-tick",
+            epochs=1,
+            mb=512,
+            lr=3e-4,
+        ),
         log=lambda _m: None,
     )
     return m, w, it_dir

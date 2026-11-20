@@ -160,6 +160,11 @@ LAYERS: dict[str, int] = {
     # 鉴权原语（S4 第十五刀）：`_is_loopback` + `_AuthGuard`（D9 闭锁）从 `hub_server` 下沉到这里。
     # 只靠标准库 ⇒ L0；`hub.store`（组合类）与 `hub.queue_auth`（鉴权域混入）都站在它上面。
     "hub.auth": 0,
+    # B7-P3：`_HubQueue` 的两张状态表（课程表 / worker 板）——零仓内 import 的纯状态叶子。
+    "hub.course_table": 0,
+    "hub.worker_board": 0,
+    # B7-P4：离线派发 / 观测旁表（锁由组合根建好后注入）——同样零仓内 import。
+    "hub.dispatch_state": 0,
     # worker 静默哨兵（2026-10-31，`plan` 外的热修；见 `hub/worker_pulse.py` 头部）：只靠
     # stdlib（time/threading）⇒ **L0**。读者是 `hub.http_face`(L5) 的类属性与 `hub.boot`(L6)
     # 的后台线程——两条边都严格向上，秩不变。
@@ -228,6 +233,14 @@ LAYERS: dict[str, int] = {
     # `common.*`（`net_http` / `protocol`）+ stdlib ⇒ **L0**；读者是 `job_round`(L4) 与
     # `run_loop`(L6) 两个宿主（顶层边，严格向上够不着它 ⇒ 无需改层）。
     "remote.error_report": 0,
+    # 训练机对采样节点的**远控升级 / 重启护栏**（2026-11-19，B8 从 `common/distribution.py`
+    # 整簇搬来）：`POST /v1/restart` + 去重/冷却/脏树判据。依赖面 = stdlib + `common.*`
+    # （wire client 的 `node_request`/`node_ping` 与 `dirty_hash_files`，**不在本账本内、不计边**）
+    # ⇒ 拓扑秩 **L0**；读者是 `trainer.*` 与 `tools/dist_upgrade_cli.py`（都不入账本），
+    # 所以把出口留在 `common.distribution`、只搬控制动作，不会制造反向边。
+    # ⚠ 它**不**自备 HTTP 出口：`_request` 已改名为 `common.distribution.node_request`，
+    # `tests/test_distribution_io_budget.py` 的零额度断言盯着这条（搬一次不许长一份 IO）。
+    "remote.node_upgrade": 0,
     # worker 生命周期上发腿（2026-10-31，`remote/lifecycle.py`）：站在 `remote.error_report`(L0)
     # 上面（用它发、并且要用 `error_payload`/`post_error` 的同步档）⇒ **L1**。读者只有
     # `remote.worker`(L5) 一处（`Lifecycle` 四调用点），严格向上。
@@ -238,11 +251,18 @@ LAYERS: dict[str, int] = {
     # 全局层号里（层号 = 拓扑秩，跨包一致）。谁把它们当成「另一个包的账本」挪走，
     # 那些边就会静默消失 —— `test_layer_numbers_are_dense_and_meaningful` 会当场报空洞。
     "worker.serve_pool": 0,
+    # 轮级/批级状态（`RoundContext` / `IterRun`，2026-11-19 从 `iter_rollout` 搬出以守
+    # 单文件 LOC 预算）：只 import `common.*` ⇒ **L0**；`iter_rollout`(L1) 站在它上面。
+    "worker.iter_run": 0,
     "remote.tailscale_boot": 0,
     # 采样节点 quick tunnel 的日志/健康工具（2026-11-08，LOC 预算拆分）：依赖
     # `remote.tailscale_boot`(L0) 与 `remote.push_tunnel`(L0) ⇒ 拓扑秩 **L1**。
     # 读者只有 `rollout_node`。
     "remote.rollout_tunnel": 1,
+    # 采样节点要用的二进制工具链（2026-11-18，G5 建接缝）：bun / cloudflared 的查找、下载、
+    # 持久缓存只碰 `cfg` / `log` / 文件系统；依赖 `remote.tailscale_boot`(L0) 与账本外的
+    # `common.*` ⇒ 拓扑秩 **L1**。读者是 `rollout_node`(L2)。
+    "remote.node_toolchain": 1,
     # 采样节点运行时（2026-10-10，plan/rollout-node-auto-register v2）：cell 拆薄后逻辑住
     # 这里。依赖 `remote.tailscale_boot`(L0，经 clone 导入，**不是** standalone 引导文件)、
     # `remote.push_register`(L0)、`push_tunnel`(L0) 与 `rollout_tunnel`(L1)
@@ -267,6 +287,7 @@ LAYERS: dict[str, int] = {
     # 的类型 ⇒ **L0**；`hub_client` 站在它上面仍是 L1（若把它搞成 import `remote.payload_slim`，
     # 它的秩会升到 1 ⇒ hub_client 被迫升到 2 ⇒ code_snapshot 那串全要连坐重排）。
     "remote.payload_pack": 0,
+    "remote.publish_spec": 0,
     # wire-diet 的字节瘦身实现（同一 plan）：**只** import `common.*` + `numpy` +
     # `biz.reward_library` ⇒ **L0**。⚠ 它曾 import `worker.ppo.np_core` 拿文件名常量 —— 那会把
     # 它的秩抬到 2（np_core 是 L1），于是 hub_client(L1) 站在它上面就违规；常量因此下沉到
@@ -335,7 +356,6 @@ LAYERS: dict[str, int] = {
     # 于是八个都是 **L3**。
     "hub.queue_auth": 3,
     "hub.queue_claims": 3,
-    "hub.queue_discover": 3,
     "hub.queue_observe": 3,
     # 离线任务清单 + 租约域（合并 origin 时新拆的混入）：要 `hub.store`(L2) 与
     # `hub.task_pack`(L1) ⇒ 与其余七个同秩 **L3**。
@@ -360,6 +380,10 @@ LAYERS: dict[str, int] = {
     # 搬出（同一个 LOC 预算又把它顶到 1000 行）。依赖面 = `common.protocol`（不在本账本）+
     # `remote.artifacts`(L0) ⇒ 拓扑秩 **L1**；`offline_deliver` 站在它上面，仍是 L2。
     "remote.deliver_ledger": 1,
+    # 补传腿的**执行面只读快照**（2026-11-18，G5 接缝）：从 `offline_deliver` 搬出（同一个 LOC
+    # 预算：读数加进去就 1008 行）。依赖面 = stdlib + `deliver_mode`(L0，只用于类型)
+    # ⇒ 拓扑秩 **L1**；`offline_deliver` 站在它上面，仍是 L2。
+    "remote.deliver_state": 1,
     # 补传腿本体（投递/探活/降级）：最深依赖是 `backup_drawer`/`deliver_ledger`(L1) ⇒ 拓扑秩 **L2**。
     "remote.offline_deliver": 2,
     # 补传腿的进程模式（2026-10-07，`plan/offline-deliver-isolation.plan.md` P1）：
@@ -416,6 +440,17 @@ LAYERS: dict[str, int] = {
     #: 背掉「rollout + greedy 波 + 并账」，依赖 `worker.greedy_round`(L3) / `worker.iter_rollout`(L1)
     #: / `worker.reports`(L0) ⇒ **L4**（作业壳 L5 直接调它）。
     "remote.offline_greedy": 4,
+    # worker 轮询壳的**会话级外件**（2026-11-18，LOC 预算 1000）：多 hub/缓存根装配、acquire
+    # 退避、让路自适应复查、退出收线。依赖 `lifecycle`(L1) / `payload_proc`(L1) /
+    # `bulk_sched`·`cloud_pool`·`prefetch`·`result_upload`(L0) ⇒ 拓扑秩 **L2**；
+    # `remote.worker`(L5) 站在它上面，边严格向下。
+    "remote.worker_session": 2,
+    # `run_job` 的**作业壳相位**（2026-11-18，长函数存量第三十五刀）：下载前拒收 / 物料落地 /
+    # bc 分叉 / 权重五源 / iter rollout / 红线与 D14 / 回显。最深依赖 `remote.download`(L3)
+    # ⇒ 拓扑秩 **L4**；三个 L4 邻居靠宿主**注入**（`collect_round` / `resolve_ppo_backend` /
+    # `_run_bc_job`），不 import `offline_greedy`·`bc_job`，否则会顶到 L5。
+    # `remote.worker`(L5) 站在它上面，边严格向下。
+    "remote.job_shell": 4,
     "remote.worker": 5,
     # 引导链（S4 第十六刀）：`as_hub` / `make_server` / `main`。它站在 L5 的 `http_face` 上 ⇒ **L6**。
     # 读者是 `hub_server`（L7）—— 方向是「入口 → 引导链 → HTTP 面 → 路由混入」，不反向。
@@ -505,12 +540,20 @@ LAYERS: dict[str, int] = {
     "worker.kickstart_burn": 1,
     #: 本机评估失败的保真类型（plan/eval-gap-honesty D1）：只用 stdlib（re）⇒ L0。
     "worker.local_eval_error": 0,
+    #: 2026-11-16：控制台 ⇄ supervisor 的控制文件契约（从 `trainer/` 搬来）——
+    #: 依赖面 = stdlib + `common.{hold_window,log,paths}` ⇒ **L0**，与 `worker.gate_halt` 同型。
+    "worker.loop_control": 0,
     "worker.loop_tasks": 0,
     "worker.metrics_stats": 0,
     "worker.models.rl_model": 0,
     # 2026-10-27（Paddle 双生）：纯 numpy 的 torch⇄Paddle Adam 状态翻译 + 逐次 f32 幂重放
     # ——只 import numpy + `common.errors` ⇒ **L0**。
     "worker.ppo.ckpt_convert": 0,
+    "worker.ppo.demo": 0,  # 2026-11-16：demo bank 的字段表（`TypedDict` + frozenset，只 import numpy/typing）
+    #: 2026-11-17（§P1-7）：PPO 的三条显式随机流（`chunk`/`epoch`/`demo`）与 ckpt 状态——
+    #: 只 import numpy + `common.runtime`（不在本账本内）⇒ **L0**。四条训练线的随机面都从这里取，
+    #: 因此它必须待在 np_core(1)/common(2) 之下，不能反向。
+    "worker.ppo.rng": 0,
     "worker.modes": 0,
     "worker.node_identity": 0,
     "worker.paired_kill": 0,
@@ -604,12 +647,17 @@ LAYERS: dict[str, int] = {
     # import `common.schema` 与 `worker.data.weights_meta`(L0) ⇒ **L1**。
     "worker.models.student_paddle": 2,
     # Paddle worker 的 torch 格式 checkpoint I/O（model.pt/opt.pt/state.json）：靠 `common.torch_pickle`
-    # / `common.adam_sq`（都不在账本内）+ `worker.ppo.ckpt_convert`(L0) 与 `worker.ppo.np_core`(L1)
-    # ⇒ **L2**。零 `remote.*` 依赖（分层硬禁：worker → remote）。
-    "worker.ppo.checkpoint_paddle": 2,
+    # / `common.adam_sq`（都不在账本内）+ `worker.ppo.ckpt_convert`(L0) 与 `worker.ppo.rng`(L0)
+    # ⇒ **L1**（2026-11-17 §P1-7：RNG 状态改存 `PPORng`，不再取 np_core(L1)，故降一层）。
+    # 零 `remote.*` 依赖（分层硬禁：worker → remote）。
+    "worker.ppo.checkpoint_paddle": 1,
     # 2026-10-11（S3）：`load_episode_from_shard` 的骨架提到 `worker.ppo._episode`(L0)
     # （np-core 不再自含那两行）⇒ 从 L0 升为 **L1**。
     "worker.ppo.np_core": 1,
+    # 2026-11-19（B8 第十三刀）：torch / Paddle 共用的训练步与算子表。顶层只 import
+    # `common.contracts` / `common.schema`（= common 面，L0）⇒ **L1**；两个后端的引擎
+    # （`engine` L3 / `engine_paddle` L2）都向下指，反向为 0。
+    "worker.ppo.backend": 1,
     "worker.paired": 2,
     "worker.scripts.eval_bridge": 2,
     "worker.scripts.regen_reward_golden": 2,
@@ -640,9 +688,18 @@ LAYERS: dict[str, int] = {
     "worker.models.goal_net": 3,
     "worker.models.intent_net": 3,
     "worker.ppo.engine": 3,
+    # 2026-11-19（B8 ④）：goal / intent 共用的更新循环。顶层靠 `worker.ppo.common`(L2) /
+    # `worker.ppo.np_core`(L1) / `worker.ppo.rng`(L0) / `worker.ppo.trainer`(L0) ⇒ **L3**；
+    # 它不认识两个头（靠 `HeadSpec` / `LossTerms` 传入）⇒ 两个 L4 头的向下边成立。
+    "worker.ppo.loop": 3,
+    # 2026-11-19（B8 ④）：goal / intent 共用的 CLI 壳（parser 文案 + 顺序）。顶层只靠
+    # `worker.ppo.common`(L2) / `worker.ppo.np_core`(L1) / `worker.ppo.rng`(L0) + `common.cli`
+    # ⇒ **L3**；它不知道两个头的名字（五件事由 `CliSpec` 传进来）⇒ 两个 L4 头的向下边成立。
+    "worker.ppo.cli": 3,
     # 2026-10-27（Paddle 双生）：`engine` 的 Paddle 版（update 数学逐行对应）；顶层靠
-    # `worker.ppo.trainer`(L0) 与 `worker.ppo.checkpoint_paddle`(L2) ⇒ **L3**。
-    "worker.ppo.engine_paddle": 3,
+    # `worker.ppo.trainer`(L0) 与 `worker.ppo.checkpoint_paddle`(L1) ⇒ **L2**（随 checkpoint_paddle
+    # 同日降层；它不 import torch 侧 engine）。
+    "worker.ppo.engine_paddle": 2,
     # v4（plan/policy-spatial-head.plan.md S0-c）：腿 A/B 起点权重转换（一次性 CLI；
     # 函数内 import worker.models.student（L2）⇒ 拓扑秩 = L3）。
     "worker.scripts.init_spatial_leg": 3,

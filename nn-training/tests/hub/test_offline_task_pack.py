@@ -38,6 +38,7 @@ from hub import offline as offline_mod
 from hub import server as hub_server
 from hub import task_pack as task_pack_mod
 from hub.server import _HubQueue, _JobStore, as_hub, make_server
+from tests.helpers.http_server import serve_fast
 
 TOKEN = "sekret"
 
@@ -49,7 +50,7 @@ def _boot(tmp_path: Path) -> tuple[str, _HubQueue, ThreadingHTTPServer]:
     """发现模式的真 HTTP hub（课程表靠盘上发现，与共享 hub 同形）。"""
     hub = _HubQueue({}, discover_root=tmp_path)
     srv = make_server(hub, 0, TOKEN, host="127.0.0.1")
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     return f"http://127.0.0.1:{srv.server_address[1]}", hub, srv
 
 
@@ -624,3 +625,48 @@ def test_discover_counts_a_fresh_task_pack_as_liveness_evidence(tmp_path) -> Non
     (ent / "task-c5-gae.zip").write_bytes(b"PK\x03\x04fake-task")
     hub.discover(force=True)
     assert hub.courses() == ["c5-gae"], "新鲜的包就是活证据"
+
+
+# ── P0-7 第十七批：观测面的捕要写清楚捕什么（2026-11-18）──────────────────────
+
+
+def test_a_corrupt_pack_reads_as_unknown_not_as_a_crash(tmp_path: Path) -> None:
+    """真失败形态：不是 zip ⇒ 「不可知」（`""` / 空元信息），不抛。"""
+    bad = tmp_path / "bad-task.zip"
+    bad.write_bytes(b"not a zip at all")
+
+    assert task_pack_mod.pack_index_part_sha(bad, "weights") == ""
+    assert task_pack_mod.pack_index_meta(bad)["run_id"] == ""
+    assert task_pack_mod.pack_seg_end_kind(bad) == ""
+
+
+def test_a_programmer_error_in_the_pack_read_is_not_read_as_a_corrupt_pack(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """反向判据：`AttributeError` 不是「包坏了」。吞掉它 = 云机拿到空的段末判据。"""
+    pack = tmp_path / "task.zip"
+    pack.write_bytes(b"PK\x03\x04")
+
+    def boom(*_a, **_k):
+        raise AttributeError("index record changed shape")
+
+    monkeypatch.setattr(task_pack_mod.zipfile, "ZipFile", boom)
+    with pytest.raises(AttributeError):
+        task_pack_mod.pack_seg_end_kind(pack)
+
+
+def test_console_unreachable_is_unknown_but_our_own_bug_surfaces(monkeypatch) -> None:
+    """`console_export_status`：传输失败 ⇒ unknown（不可知不是失败）；本模块的 bug ⇒ 穿出去。"""
+
+    def refuse(*_a, **_k):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(task_pack_mod, "_net_urlopen", refuse)
+    assert task_pack_mod.console_export_status("mk-1") == {"unknown": True}
+
+    def boom(*_a, **_k):
+        raise AttributeError("request built wrong")
+
+    monkeypatch.setattr(task_pack_mod, "_net_urlopen", boom)
+    with pytest.raises(AttributeError):
+        task_pack_mod.console_export_status("mk-1")

@@ -23,11 +23,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hub.admin import rss_bytes
-from hub.http_face import HubHandler
+from hub.http_face import GET_ROUTES, HubHandler, match_route
 from hub.queue import _HubQueue
 from hub.store import _JobStore
-
-HTTP_FACE = ROOT / "hub" / "http_face.py"
 
 
 def _hub(tmp_path: Path, courses: list[str]) -> tuple[_HubQueue, dict[str, _JobStore]]:
@@ -54,6 +52,7 @@ def test_mem_readout_shape_is_fixed(tmp_path: Path) -> None:
         "leases_n",
         "workers_n",
         "dispatch_n",
+        "peeked_n",
         "prefetch_n",
         "offline_disks_n",
     }
@@ -81,14 +80,10 @@ def test_admin_mem_route_is_wired_and_auth_gated() -> None:
     ★ 鉴权：`_admin_mem` 里第一行就是 `_auth_ok()`——与其余 admin 端点同源（不验 token 的
     观测端点等于把进程内存/课程结构对公网公开）。
     """
-    tree = ast.parse(HTTP_FACE.read_text(encoding="utf-8"))
-    hit = [
-        n
-        for n in ast.walk(tree)
-        if isinstance(n, ast.Compare)
-        and any(isinstance(c, ast.Constant) and c.value == "/admin/mem" for c in n.comparators)
-    ]
-    assert hit, "do_GET 里没有 /admin/mem 这一支"
+    # 2026-11-19：`do_GET` 的 `elif` 链换成 `GET_ROUTES` 数据表（python.refactor.md 附录 B）⇒
+    # 判据从「AST 里找 `/admin/mem` 的比较」改成「问表：这条路径落到哪个方法」——同一个契约，
+    # 但不再依赖「路由写成一条 elif」这个形状。
+    assert match_route(GET_ROUTES, "/admin/mem") == "_admin_mem", "GET 路由表里 /admin/mem 落到了别的方法"
     # 鉴权：用 **AST** 钉「第一条语句就是 `_auth_ok()` 闸」，而不是在源码里找子串
     # （本仓第四次撞上「读源码文本的守卫」——前三次见 `tests/hub/test_hub_entry_split.py`
     # 与 `tests/tools/test_subproc_util.py`；预算由 `test_source_text_assert_budget` 守着）。
@@ -101,7 +96,7 @@ def test_admin_mem_route_is_wired_and_auth_gated() -> None:
         if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant))
     ]
     assert isinstance(stmts[0], ast.If), f"第一条语句必须是鉴权闸：{ast.unparse(stmts[0])}"
-    assert ast.unparse(stmts[0].test) == "not self._auth_ok()", ast.unparse(  # type: ignore[union-attr]
-        stmts[0].test  # type: ignore[union-attr]
+    assert ast.unparse(stmts[0].test) == "not self._auth_ok()", ast.unparse(
+        stmts[0].test
     )
     assert hasattr(HubHandler, "_admin_mem")

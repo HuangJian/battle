@@ -1,6 +1,7 @@
 """test_eval_heartbeat — EvalBoard runner 心跳（R4-G1）单测。
 
-覆盖：合并写 / updated_ts 戳 / 损坏文件恢复 / 原子替换不留 .tmp / root 覆盖。
+覆盖：合并写 / updated_ts 戳 / 损坏文件恢复 / 原子替换不留 .tmp / root 覆盖 /
+落盘失败**不抛但喊一次**（`warn_once` 去重）。
 """
 
 from __future__ import annotations
@@ -61,3 +62,23 @@ def test_none_values_clear_fields(tmp_path: Path) -> None:
     st = _read(tmp_path)
     assert st["rung"] is None
     assert st["remaining_units"] == 0
+
+
+def test_write_failure_is_reported_once_and_never_raises(
+    tmp_path: Path, capsys: Any
+) -> None:
+    """落点是文件（不是目录）⇒ mkdir 失败：不抛，但 console 那条链要能看见。
+
+    静默的旧写法把「心跳写不进去」变成「console 一直显示训练在忙」——训练侧一切正常，
+    屏幕上却像卡住；这个文件整体为之存在的就是「从 console 判断训练是否在忙」。按落点去重：
+    窗口开/关是每轮都写的，逐次喊会把日志刷成噪音。
+    """
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x", encoding="utf-8")
+
+    hb.write_state(blocker, window_open=True)  # 不抛即通过前半段契约
+    hb.write_state(blocker, window_open=False)
+
+    out = capsys.readouterr().out
+    assert out.count("心跳写不进去") == 1, f"同一落点只许喊一次，实际：{out!r}"
+    assert "runner_state 会停在旧值" in out

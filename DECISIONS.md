@@ -5689,6 +5689,1900 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-12-goalnn-bc-final-eval-backfill
 
+## §2026-11-13-nn-python-audit-round4-hardening（nn-training 第四轮审计：先清 lint 债与版本矩阵，再把函数形状 / L0 纯度做成门禁）
+
+- **决定**：`B023` / `SIM115` 从 ruff 全局 `ignore` 移除并清掉 40 处；`common/log.py` 的时间戳
+  改走 `common/logutil.stamp()`（删掉第二份格式化）；JSONL 写者加 `close_jsonl_writers()` +
+  `atexit` 有界收尾；CI 矩阵加 3.10 下界并用 `uv sync --python` 真用矩阵值；新增
+  `tests/test_python_shape_budget.py` 与 `tests/test_python_version_matrix.py`。
+- **被否决**：把 `requires-python` 收紧到 `>=3.12`（现役 venv 是 3.10，会让它变成「不受支持」；
+  且 `fs.extract_tar_bytes` 的 `<3.12` 分支从未被 CI 走过）；继续全局 ignore `B023`
+  （闭包捕获循环变量是真 bug 类，实测 25 处）；一次性重写 `dispatch._run` / `publish_job`
+  （无设计评审、无真跑验证的高风险改动）。
+- **后果**：ruff/mypy 零新增豁免；函数 >200 行 / >8 参数、`common/` 模块级可变容器、
+  `global` 语句全部「只许降不许升」；训练/评估行为不变（`pytest tests/ e2e/` 5986 例全绿，
+  3 例按平台跳过）。
+
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `python.refactor.md` §「处理状态（2026-11-13）」
+
+## §2026-11-13-nn-python-audit-round4-publishspec-and-l0-objects（发布签名收成 PublishSpec；L0 三处状态对象化）
+
+- **决定**：`publish_job` 的 55 个字段搬进 `PublishSpec`（frozen + kw_only），签名只剩
+  `spec` / `log` / 过渡 `**fields`（旧 kwargs 在入口构造对象，两条路二选一）；`common` 的
+  `_COURSE_SINKS` / `_JSONL_WRITERS` / `_WEIGHTS_PUSHED` 分别收进 `LogRouter`（ContextVar 前缀）
+  / `JsonlLedger` / `WeightsLedger`，模块函数保留为默认实例的薄包装并支持 `router=` / `ledger=`。
+- **被否决**：一次性改完 20 个调用点（测试与 e2e 里的 kwargs 形态仍合法，先保留过渡适配器，
+  避免同一笔改动同时动生产与 15 个用例文件）；把 `log` 也塞进 spec（它是出口不是发布内容，
+  塞进去会让 frozen dataclass 的比较语义带上函数对象）；给 `traj_dir` 造用途（原函数就没读过它）。
+- **后果**：新增发布字段只改 `PublishSpec` + 绑定块；`PublishSpec` 与字段 kwargs 同时给会
+  `TypeError`；L0 两实例互不串味有专项用例；`common/` 容器门禁名册从 6 条降到 3 条。
+
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `python.refactor.md` §「处理状态（2026-11-13）」
+
+## §2026-11-13-nn-python-audit-round4-publish-spec-callsites（publish_job 只收 PublishSpec：删过渡适配器，26 个调用点改传对象）
+
+- **决定**：`publish_job` 签名收紧为 `(spec: PublishSpec, *, log)` —— 删掉 `**fields` 过渡适配器；
+  生产 / e2e / 测试共 26 个调用点全部改为 `publish_job(PublishSpec(...)[, log=...])`。`**dict`
+  形态的测试辅助函数把 `log` 从 dict 构造里剥出、在调用处单独传。
+  `tests/remote/test_publish_spec.py` 改为断言签名只有 `["spec","log"]`、kwargs 形态直接
+  `TypeError`、同 spec 两次发布幂等。
+- **被否决**：保留过渡适配器继续双轨（两处真相，每次加字段要同步两条路）；把 `log` 放进
+  `PublishSpec`（出口回调不是发布内容）；为省行数改掉测试里的 `log` 默认值（会掩盖「谁在打日志」）。
+- **后果**：`publish_job` 不再接受字段 kwargs，传错立刻 `TypeError`；新增字段只改 `PublishSpec`
+  + 绑定块；`tests/trainer/test_bc_loop.py` 的 `fake_publish` 改收 `spec` 位置参数；
+  `trainer/bc_loop.py` 的调用改成紧凑形态，LOC 回到 998（预算 1000）。
+
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `python.refactor.md` §「处理状态（2026-11-13）」
+
+## §2026-11-13-nn-python-audit-round4-dispatch-phases（dispatch._run 按相位拆 5 方法 + DispatchState）
+
+- **决定**：`RolloutDispatcher._run`（1184 行）按既有 ①②③ 注释切成 `_ping_gate` /
+  `_prepare_weights` / `_run_queue` / `_settle_round`，`_run` 只做编排；相位配置别名与产物
+  收进 `DispatchState`；`DispatchState` 与节点准入循环一起搬进 `trainer/dispatch_state.py`
+  （`admit_rollout_nodes(st, probe_results, cfg_nodes, dedup_streak)`），`dispatch.py` LOC 回到预算内。
+- **被否决**：把 15 个局部别名作为参数逐个传递（相位间 30+ 参数）；一次性把 `worker` 闭包也
+  方法化（499 行 + 40 个闭包变量，需单独设计与真跑验证）；为通过形状门禁上调基线
+  （那是把新增长函数登记成存量）。
+- **后果**：`_run` ~30 行、`_ping_gate` ~120 行、`_prepare_weights` ~30 行、`_settle_round` ~85 行；
+  `_run_queue` 仍 893 行（含 worker 499 行），`trainer/dispatch.py` 的长函数计数仍为 2（未上调基线）。
+  dispatch 韧性用例 24/24 绿；`_ping_gate` 必须在调 helper 前把 codeHash/bootId 等写进 `st`
+  （否则 helper 读到空串会把所有节点判掉）。
+
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `python.refactor.md` §「处理状态（2026-11-13）」
+
+## §2026-11-13-nn-python-audit-round4-trainspec-and-cli-table（训练核收 TrainSpec；92 个 CLI flag 收进数据表）
+
+- **决定**：`remote/train_core.py` 新增 frozen + kw_only `TrainSpec`（27 字段）；`run_training_core` 与
+  `_run_training_core_paddle` 签名都收成 `(base_url, token, spec)`，Paddle 双生读同一对象（忽略
+  `backend`）；`worker.run_job` 只构造一次 `spec = TrainSpec(...)`。`worker/cli.py::build_argparser`
+  的 92 个 `ap.add_argument(...)` 改成 `_flag_rows()` 返回的 `(flags, kwargs)` 元组表 + 一个装配循环
+  （650 → 171 行）。
+- **被否决**：继续用 `**kwargs`/dict 传 27 个字段（守卫失去逐名字段对账）；为 CLI 表另立模块
+  （表闭包读 `mode` / `_d` / `game_watch`，搬出去只会多传三个参数）；上调形状或文本断言基线
+  （断言合并后净增 0）。
+- **后果**：`test_train_core_split.py` 钉住「核形参 = (base_url, token, spec)」「`spec` 关键字集合 ==
+  `TrainSpec` 字段集合」「Paddle 双生同签名」；旧/新 parser 在 3 种 mode × rl_args 覆盖值下逐 action
+  与 `parse_args` 全等；`worker.py` LOC 贴线，构造收成 `spec = ...` + 单行调用后才回到 <1000。
+  全量 5995 passed / 3 skipped，ruff / mypy 绿。
+
+- **后续（同日）**：`_flag_rows` 从 `build_argparser` 内提升到模块级（`(mode, rl_args)`），
+  `build_argparser` 只剩 7 行装配；`game_watch` 保持函数内 import，调用面不变。
+
+## §2026-11-13-nn-python-audit-round4-queue-workers（_run_queue 拆成 QueueState + 四段消费者）
+
+- **决定**：`_run_queue`（871 行）拆成 `_queue_plan`（79 行，续跑/复用/早退）、`_queue_setup`
+  （144 行，保留段/长驻池/共享容器）与 `trainer/queue_worker.py`；消费者按相位拆成
+  `_claim`（134）/ `_execute`（133）/ `_settle_success`（119）/ `_settle_failure`（144）/
+  `queue_worker`（26）/ `run_queue`（168），共享状态收进 `QueueState`，499 行 `worker` 闭包消失。
+- **被否决**：整段搬进新文件（871 行只是换家，形状门禁仍红）；把局部函数留在闭包里（AST 按外层
+  函数计长，`_run_queue` 不会变短）；上调 `LONG_FUNCS_BASELINE`（把新长函数登记成存量）。
+- **后果**：`dispatch.py` 长函数 2 → 0、LOC 958 → 473；`queue_worker.py` 所有函数 ≤168 行。
+  `log` / `run_local_rollout` / `record_agent_meta` 经 `QueueState` 注入，测试对 `trainer.dispatch`
+  的 monkeypatch 接缝不变。`test_dist_common_poll` 的 rollout 接线扫描面跟随到新家（按腿取并集 +
+  409/标记断言）。`_settle` 与 `remote/result_upload.py` / `remote/upload_proc.py` 同名 ≥3 触发复用
+  账本，改名 `_settle_attempt`。验证：ruff、mypy 913、全量 5995 收下（5992 passed / 3 skipped）。
+
+## §2026-11-13-nn-python-audit-round4-ppo-update（ppo_update 拆成 PPOContext + 七段函数）
+
+- **决定**：`worker/ppo/engine.py::ppo_update`（598 行 / 17 参）保留 17 参签名作为
+  `trainer/stream.py` backend 契约的薄适配器（~85 行），运行时状态收进 `PPOContext`，
+  阶段拆成 `_prepare`（profiler / tensored / XLA 诊断 / demo / ref cache / 续跑）、
+  `_train_step`（一次 minibatch 的 forward/loss/backward/step，177 行）、`_record_diag`、
+  `_maybe_heartbeat`、`_finish_epoch`、`_finish`、`_aggregate`。XLA `xla_mark_step` 边界、
+  诊断读数时机、`np.random.permutation` / demo 采样顺序、ref cache 每 chunk 一次、profiler
+  采样窗口与 `_step_walls` 记录条件都逐字搬移；`_Diag` / `_Demo` 只承载原局部变量。
+- **被否决**：抽 `PPOLoop` 类（只是把闭包换成 `self`，跨阶段共享的仍是同一批张量）；
+  `LossTerms` 注册表（kl / kickstart / demo / value_anchor 共享前向结果与 RNG，拆对象只会多传
+  上下文，且新增损失项仍需改 `_train_step`）；改 17 参公开签名及全部调用点（训练后端契约，
+  收益与风险不成比例）；上调形状/文本断言基线（本轮净增 0）。
+- **后果**：`ppo_update` 598 → ~85 行，`engine.py` 无新增 >200 行或 >8 参函数（最长
+  `_train_step` 177 行）；`_record_diag` 显式接收 `wall_s`，不再跨函数读 `_step_t0`。
+  `test_xla_step_diag.py` 的两条源码接线断言按新函数边界重锚（仍要求 mark 后立刻取时、
+  物化夹在转换与循环之间）。验证：ruff、mypy、全量 5992 passed / 3 skipped。
+
+## §2026-11-13-nn-python-audit-round4-iter-rollout（run_iter_rollout 拆成 _IterRun + 六段）
+
+- **决定**：`worker/iter_rollout.py::run_iter_rollout`（604 行 / 9 参）保留原签名，入口只做
+  `_IterRun` 构造与阶段调用；批级状态收进 `_IterRun`，阶段拆成 `_setup_run`（路径 / bun /
+  并发口径 / 日志）、`_setup_scratch`（轮级 scratch + 批镜像 + 产出根）、`_setup_pool`
+  （长驻池）、`_drive_games`（流式调度 + 带超时 wait + 机器级停滞重投）、`_run_games`
+  （pool 收尾 / 中断现场）、`_finish_run`（对账 / 聚合 / 返回）。`_samples_of` 改为
+  `(exec_jd, argv)` 的模块函数，`_clean_stuck` 独立承担卡局半截产出清理。
+- **被否决**：把整个函数改写成 `self` 类（`__init__` 会新增一个 9 参宽函数，且所有局部引用
+  都要重写）；把 `_drive_games` 再按「单次尝试 / 重投」拆开（每次重建 executor，并要额外搬运
+  `pending` / `settled_n` / `supply_open` 等跨尝试状态）；为凑 LOC 把 setup 搬去新模块
+  （拆分只是换家，且破坏本模块与 `worker.serve_pool` 的层内聚）。
+- **后果**：`run_iter_rollout` 604 → ~50 行；最长新函数 `_drive_games` 172 行；源 LOC 回到
+  1000 以下。`retry_cap` 原先是 `try` 前的纯局部量，拆分时必须进 `_IterRun`，否则
+  `NN_ROLLOUT_ROUND_RETRY_MAX` 的退出阀静默失效（`test_reap_stall_round_retry_is_unbounded_unless_operator_caps_it`
+  当场抓到）。`_setup_pool` 必须以 `rctx.pool` 为复用源（新建 `_IterRun.pool` 是 `None`）；
+  删掉这行会让补差批重建池，`test_round_ctx` 两例立刻红。流式调度、池生命周期、scratch 回退、
+  轮末逐位对账与日志顺序均未改。
+  验证：ruff、mypy、rollout 相关 187 例、全量 5992 passed / 3 skipped。
+
+## §2026-11-13-nn-python-audit-round4-eval-dispatch（EvalDispatcher.run 拆成 _EvalRun + 五段）
+
+- **决定**：`trainer/eval_dispatch.py::EvalDispatcher.run`（589 行）保留公开方法与恒 `False`
+  返回契约，`run` 只做 `_EvalRun` 构造与阶段调用；派生状态（语料/去重/复用/快照/阈值/节点
+  列表）收进 dataclass `_EvalRun`，阶段拆成 `_eval_prepare` / `_eval_register` /
+  `_eval_admit` / `_eval_start` / `_eval_close`。`_meta_ok` / `_record_failed_meta` 随
+  `EvalRound` 登记移进 `_eval_register`，`_on_weight_ready` 留在 `_eval_admit`；异常与
+  `finally` 的 unregister / release_owner 仍在 `run`。
+- **被否决**：把状态挂到 `self`（同一 dispatcher 实例会跨轮残留，且隐藏状态）；按节点拆
+  `_eval_admit`（ping 循环的顺序、日志与 `alive` 保序是判据的一部分）；把收工对账再拆成独立
+  文件（本模块已贴 LOC 预算，拆文件只是换家）；保留通用方法名 `_prepare/_register/_admit/
+  _start/_close`（同名散落账本 110→111）。
+- **后果**：`run` 589 → ~77 行；最长新方法 `_eval_admit` 193 行；方法名统一 `_eval_*`
+  前缀，复用账本回到 110。`EvalDispatcher.run` 的调用点、`ed.log` 的 monkeypatch 接缝、
+  节点门/权重 POST/收工 summary 顺序均未改。验证：ruff、mypy、eval 相关 272 例、全量
+  5992 passed / 3 skipped。
+
+## §2026-11-14-nn-python-audit-round4-train-core（run_training_core 与 Paddle 双生各拆成 _CoreRun + 五阶段）
+
+- **决定**：`remote/train_core.py` 的两条核都保留公开签名 `(base_url, token, spec)`，入口只做
+  `_CoreRun` 构造与阶段调用。torch 核拆成 `_torch_model` / `_torch_opt` / `_torch_ref` /
+  `_torch_ppo` / `_torch_artifacts`；Paddle 核拆成 `_paddle_model` / `_paddle_opt` /
+  `_paddle_ref` / `_paddle_ppo` / `_paddle_artifacts`。两条腿共用的框架无关状态与结果面
+  （`_CoreRun`、`_load_ppo_data`、`_core_result`、`_agg_block`）下沉到已有的
+  `remote/train_common.py`（L2）；`train_common` 不反向 import `train_core`，`_CoreRun.spec`
+  用 `Any` 切断类型环。Paddle 侧复用 `_load_demo_bank` 与 `_load_ppo_data`，不再复制 demo
+  装载与 shard 分块。
+- **被否决**：把 torch/paddle 阶段搬到新模块再抬 `train_core` 的层号（`worker` 等下游要连锁
+  抬层，只为 LOC 破坏拓扑秩）；把 Paddle 核留在 `run_training_core` 内做分支（第一段就
+  `import torch`，AI Studio 无 torch 镜像会直接死）；把 `_CoreRun` 拆成 torch/paddle 两份
+  dataclass（字段与生命周期几乎相同，只会制造第二份契约）；上调 LOC/形状/文本断言基线。
+- **后果**：`run_training_core`（原 torch 核）与 `_run_training_core_paddle`（387 行）→ 两个
+  入口各 24/30 行；最长新函数 `_torch_model` 126 行、`_torch_opt` 122 行；`train_core.py` 源 LOC
+  1098 → 929（预算 <1000），长/宽函数基线仍为 2/5。`paddle_env.apply` 仍在 `import numpy /
+  paddle` 之前，Paddle 的「Adam 无 step」记账仍只认引擎 `steps_out`，两条腿的结果字典与
+  wire 字段逐项未改。测试锚点从入口跟到阶段：设备 `_torch_model`、消毒 `_torch_opt`、四处
+  `job_body_error` 分别落在 `_torch_opt/_torch_ref/_load_demo_bank/_torch_ppo`，delta 七调用
+  扫 `_torch_artifacts` + `_paddle_artifacts`，`_wire_block` 唯一实现断言改读 `train_common`。
+  验证：ruff、ruff format、mypy、train_core 相关 84 例、全量 5992 passed / 3 skipped。
+
+## §2026-11-14-nn-python-audit-round4-action-space（动作空间收成 common/contracts 单一契约）
+
+- **决定**：新增 stdlib-only 的 `common/contracts.py`：`ActionSpace`（`LEGACY` / `V6`）与
+  `HeadLayout`（move/fire/hold 宽度 + 三个掩码切片）。PPO torch 核在 `_prepare` 用
+  `ActionSpace.from_batch` 对数据边界嗅一次，存进 `PPOContext.space/layout`；Paddle 核在
+  `tensored_chunks` 后同样定一次。ref 预计算用 `from_forward_arity` 校验模型头数，两条腿
+  的逐 chunk `a_hold` / `len(out)` 判据与手写 `:5 / 5:7 / :4 / 4:7 / 7:9` 切片全部改为读
+  契约。`common.schema` 仍是张量布局的唯一来源，contracts 只派生切片并在 import 时校验
+  7/9 宽度自洽。
+- **被否决**：把枚举塞进 `common/schema.py`（TS 共享 schema 不该承担 Python 运行时分支）；
+  继续用 `model.action_v6` 判 ref 头数（DataParallel 下属性代理不可靠，历史注释已记录）；
+  在 `common` 里加 `RlShard` TypedDict（L0 不得 import numpy，`np.ndarray` 会破坏
+  code.zip 的 stdlib-only 前提；shard 类型化留到 worker 侧再做）；保留引擎内的数字切片
+  （正是 P0-4 的静默错位源）。
+- **后果**：动作空间判据从数据侧 2 处 + 模型侧 1 处收敛到契约的 3 个入口；掩码切片不再由
+  每个引擎各自维护。legacy/v6 的头数、切片、demo move CE 与 wire 字段逐项未改；新增
+  `tests/common/test_action_space_contract.py` 钉住存在性判据、arity 严格性与切片覆盖。
+  验证：ruff、mypy 915 文件、PPO/契约相关 50 例。
+
+## §2026-11-14-nn-python-audit-round4-print-gate（G3：生产包 print 只减不增）
+
+- **决定**：新增 `tests/test_no_print_in_prod.py`，用 AST 统计 `common/biz/hub/remote/train/trainer/worker`
+  七个生产包的 `print(...)` 调用，按**文件计数**冻结在 `tests/golden/print_baseline.json`
+  （当前 289 处 / 77 文件）。只拦增长，不要求本轮清零；`tools/` 与 `worker/scripts/`
+  是一次性脚本，按文档豁免；`tests/` 不在扫描面内。
+- **被否决**：用 `grep "print("` 计数（注释/文档串里的 print 会造成假阳性）；一次把 289 处
+  全换掉（会同时改输出格式与测试断言，超出 G3 的“冻结新增”范围）；把 `worker/scripts/`
+  也纳入（它们是手工探针，没有 logger 运行前提）。
+- **后果**：P0-6 的日志迁移可以分批进行，但新代码不能再绕过 `common.log`/logger 增加
+  `print`；删除 print 不需要改基线（只拦增长）。自检用例钉住扫描入口确实命中
+  `hub/boot.py` / `common/log.py`，并确认豁免面没有混进基线。
+
+## §2026-11-14-nn-python-audit-round4-torch-load-safe（P1-10：torch.load 显式 weights_only）
+
+- **决定**：生产包 8 处 `torch.load(...)` 全部显式传 `weights_only=True`，不再依赖 torch 2.7
+  的版本默认值；新增 `tests/test_torch_load_safe.py` AST 门禁，拦 `torch.load(...)` 与
+  `from torch import load; load(...)` 两种写法，`tools/` 一次性脚本豁免。
+- **被否决**：只改注释/文档（降级 torch 即回到 pickle RCE）；一次性换成 `common.torch_pickle`
+  白名单（它解决的是“写出可被安全读取的字节”，读侧仍需 `weights_only` 这个开关，且会扩大
+  本次范围）；把 `tests/` 里的 `torch.load` 也强转（测试独立构造样本，且 2.7 默认已安全）。
+- **后果**：`weights_only=True` 会拒绝非张量/非基本类型的 pickle 对象；本仓这些路径读的都是
+  `state_dict` / optimizer 张量树，已由 `paddle_parity` 与 `tests/remote/test_opt_*` 覆盖。
+  以后新增读取点若确实需要完整 pickle，必须在门禁里显式开例外并说明攻击面，而不是删掉
+  `weights_only`。
+
+## §2026-11-14-nn-python-audit-round4-common-asserts（P1-9 / G7）
+
+- **决定**：`common/schema.py` 的 5 处模块级 `assert` 改成显式 `RuntimeError`；两套布局
+  不变量收进 `_check_layout(name, layout, dim)`。新增 `tests/test_common_module_asserts.py`
+  扫 `common/**` 函数/类作用域外的 assert，并直接调用 `_check_layout` 验证坏输入抛错。
+- **被否决**：只把 assert 换成 `if not ...: assert ...`（同样在 `-O` 下消失）；把校验挪进
+  import 时执行的测试（校验仍需在生产 import 时生效）；保留 assert 并禁止 `python -O`
+  （靠调用方纪律，不是代码级保证）。
+- **后果**：`common` 的布局错误在 `python -O` 下也会立即失败，而不是带着错布局继续训练。
+  函数体内的调试期 assert 不受 G7 影响（P1-9 允许保留但要求注明）。
+
+## §2026-11-14-nn-python-audit-round4-net-http-cache（P0-5：net_http 懒单例）
+
+- **决定**：`common/net_http.py` 的 `_NO_PROXY_OPENER` 与 `_RACING_OPENERS` 两个模块级
+  可变缓存改成 `@functools.cache`（函数本体只负责 `build_opener`）；`global` 语句随之删除。
+  `tests/test_python_shape_budget.py` 的 L0 可变名册与 `GLOBAL_BASELINE` 同步删掉 net_http 条目。
+- **被否决**：保留 dict + 加锁（opener 是无状态缓存，锁只会把读路径串行化）；把 opener 做成
+  显式注入对象（调用点遍布 `urlopen`/`urlopen` 相关热路径，收益不抵改动面；`cache` 已是
+  stdlib 的线程安全缓存）；继续留在 G2 名册（名册的 `test_l0_allowlist_is_still_needed`
+  会判过期）。
+- **后果**：`common/net_http.py` 不再有模块级可变容器或 `global`；缓存无法显式清空，但
+  `cached` 只有 2 个键、进程生命周期内 opener 本就应复用。G2 名册只剩 `distribution` /
+  `platform_utils` 两组存量。
+
+## §2026-11-14-nn-python-audit-round4-broad-except-gate（G4：宽泛异常处理增长）
+
+- **决定**：新增 `nn-training/tests/test_broad_except_budget.py`，AST 扫生产包
+  （`common/biz/hub/remote/train/trainer/worker`，`worker/scripts/` 豁免）里的
+  `except Exception` / `except BaseException` / 裸 `except:`，按文件计数冻结在
+  `tests/golden/except_baseline.json`（446 处 / 144 文件）。只拦增长；另加一条「基线只许调小」，
+  某文件减少后不改基线就红，额度不会回流。`except (OSError, ValueError)` 等具体异常不计数。
+- **被否决**：启用 ruff `BLE001` + per-file-ignores（446 处分布在 144 个文件 ⇒ 一份 144 行的
+  忽略表，且 ruff 不会因为某文件减少而报「基线过期」；改 ruff select 还会牵动全量门的既有告警面）；
+  直接把 G4 写成 `*_boundary` 白名单（现存 446 处里绝大多数不在边界上，白名单会先红成一片，
+  等于要求一次性清零，违背 §8「冻结存量 + 禁止新增」）；同时冻结静默 `except ...: pass`
+  （另一类问题，口径要区分「处理器类型」与「处理器体」，留到真正开始 P0-7 收敛时再加）。
+- **后果**：新代码在内部路径上只能捕具体异常；确实位于进程边界时需 `logger.exception` 留痕。
+  P0-7 的清理仍然没开始，但门禁把「越清越多」的旧循环切断了。
+
+## §2026-11-14-nn-python-audit-round4-suppression-gate（G6：抑制符只减不增）
+
+- **决定**：新增 `nn-training/tests/test_suppression_budget.py`，`tokenize` 只读 `COMMENT` token，
+  统计 `# noqa: F401` 与 `# type: ignore`（含 `[code]` 形态），按文件冻结在
+  `tests/golden/suppression_baseline.json`（25 处 / 11 文件；271 处 / 98 文件）。只拦增长，另加
+  「基线只许调小」；排除 `.venv`/`tmp`/`weights`/`ipynb`/`__pycache__`/`node_modules`。
+  扫全仓 `*.py`（生产 + 测试），因为两类抑制都在 tests 里最多。
+- **被否决**：用 grep 计 `# noqa`（`tests/test_source_text_assert_budget.py` 等门禁用例在**字符串**里
+  引用这些标记，grep 会把字样算成真抑制）；只统计生产包（98 个文件里 75 个在 `tests/`，
+  而 tests 正是 `type: ignore` 增长最快的地方）；一并统计裸 `# noqa`（口径只对 G6 点名的两类
+  负责，裸 noqa 的语义是全关，要单独一条规则）。
+- **后果**：新增抑制符必须先解释；`trainer/dispatch_queue.py`（7 处 re-export）之类存量仍在，
+  清理时基线随之调小。`mypy` 的 `warn_unused_ignores=false` 未动 —— 这仍意味着存量里可能有无用
+  ignore，但门禁至少保证了「不再变多」。
+
+## §2026-11-14-nn-python-audit-round4-private-assert-gate（G5：私有断言只减不增）
+
+- **决定**：新增 `nn-training/tests/test_private_assert_budget.py`，AST 扫 `tests/**` 的每条 `assert`，
+  判据表达式里出现私有属性（`x._private`，不含 `__dunder__`）或私有键下标（`d["_k"]`）即计数；
+  按文件冻结在 `tests/golden/private_assert_baseline.json`（703 条 / 126 文件）。只拦增长 +
+  「基线只许调小」。门禁自身的断言不读私有名 ⇒ 不占额度。
+- **被否决**：把私有属性**赋值**（385 处）与 `from x import _name`（146 处）一起冻结（P0-8 的
+  三种形态里，只有断言把实现细节钉成事实 API；赋值/导入的清理要连带改接缝，等 G5 存量真降下来
+  再开第二条）；用 `grep "\\._"` 计数（注释/字符串里的 `._` 会假阳性，且无法区分断言与其他语句）。
+- **后果**：新用例不能再靠读私有状态通过；`tests/remote/test_rollout_node.py`（43）与
+  `tests/worker/test_rollout_volume.py`（46）这类大户仍是存量，迁移到 `seams` 公开查询时基线随之调小。
+
+## §2026-11-14-nn-python-audit-round4-distribution-state（P0-5：distribution 的进程级状态对象化）
+
+- **决定**：`common/distribution.py` 的三份模块级可变状态搬进两个显式对象 ——
+  `RequestRegistry`（锁 / 在飞响应集合 / 收工标记集合，配 `begin_abort` / `clear_abort` /
+  `is_aborted` / `track` / `untrack`）与 `RestartMemo`（跨代去重 memo，`seen` + `reset`）。
+  方法名刻意避开 `register` / `unregister` / `clear`：`tests/test_reuse_ledger.py` 的「同名 ≥3 模块」
+  账本会把新名字算成欠账（实测 `unregister` / `clear` 各把一格从 2 推到 3 ⇒ 账本 110 → 112）。
+  模块顶层只留 `_REQUESTS` / `_RESTARTS` 两个默认实例；公开函数签名与语义逐字不变。
+  `tests/test_python_shape_budget.py::L0_MUTABLE_ALLOWED` 删除 `common/distribution.py` 条目
+  （名册只剩 `common/platform_utils.py::_UNREAPED`）。新增 `tests/common/test_dist_state.py`
+  证明两个实例互不可见（这才是对象化的收益：测试要隔离就 new 一个，不必清模块私有集合）。
+- **被否决**：给每个公开函数加 `state=` 参数（`abort_active_requests` / `_request` /
+  `request_upgrade_guarded` 等十余个调用点全要穿参，收益是纯测试便利，代价是生产签名变长——
+  与 `LogRouter` / `JsonlLedger` / `WeightsLedger` 的既有先例相反）；把 `UPGRADE_BRANCH` 与
+  `set_upgrade_branch` 的 `global` 一起搬进对象（`UPGRADE_BRANCH` 是**文档点名的进程级锁存**，
+  多处 `docs/` 与 TS 注释按该名叙述，本轮只收容器；`global` 仍在 G2 的 `GLOBAL_BASELINE` 里单项计账）。
+- **后果**：`common/` 的模块级可变容器只剩 `platform_utils._UNREAPED` 一个；测试不再触碰
+  `distribution._ACTIVE` / `_ABORTED_TAGS` / `_RESTART_SEEN`（现为 `_REQUESTS` / `_RESTARTS` 的公开属性）。
+  状态仍是进程级（收工断连与跨代去重本来就是进程级语义），但**所有权**从此写在类上而不是模块词典里。
+
+## §2026-11-14-nn-python-audit-round4-distribution-io-gate（G8：L0 出站副作用只减不增）
+
+- **决定**：新增 `nn-training/tests/test_distribution_io_budget.py`，AST 按**点分调用名**
+  数 `common/distribution.py` 的出站副作用：`net_http.racing_urlopen`（网络出口）、
+  `urllib.request.Request`、`run_capture`（git ls-files）、`subprocess.run`（git cat-file），
+  按原语名冻结（各 1，共 4）。只拦增长；某键减少未同步基线 = 红（额度不回流）。
+  `_request(...)` 这类**内部漏斗**不计：它是同一处出口的复用，数它会把「调用点多」误报成「出口多」。
+- **被否决**：只数总数（总 4 处不变但把 git 换成 HTTP 也算「没涨」——方向错了，B8 要搬就搬到 `remote/`）；
+  把裸 `run` / `Request` 一律计入（任何对象的 `.run()` 都会撞进来）；用 `.py` 路径字面量定位源码
+  （会撞 `tests/helpers/text_asserts.py` 口径 B 的已知限边，让源码文本断言基线无谓抬格——这里用
+  `importlib` + `__file__` 定位，判据是整数计数而不是文本）。
+- **后果**：`common/distribution.py` 的 IO 面从此有账（4 处），B8 把线路搬去 `remote/` 时逐项归零、
+  删键即可；此前「往 L0 加一处 urlopen」不受任何门禁阻拦。
+
+## §2026-11-14-nn-python-audit-round4-hub-boot-logging（P0-6 / B2 首批：hub 进程入口日志统一）
+
+- **决定**：`hub/boot.py` 的 26 处 `print(..., flush=True)` 全部改走 `common/logutil`
+  （`log_line` 的工厂 `tag_logger`）：`_log = tag_logger("hub-server", lambda: time)`、
+  `_PUSH_LOG` / `_OFFLINE_PUSH_LOG` 两个派发器 tag；消息里冗余的 `[hub-server] ` 前缀随之删掉
+  （tag 由 `log_line` 加）。`ensure_cluster_snapshot(log=…)` 那个 `lambda m: print(m, flush=True)`
+  直接改成 `log=_log`（快照模块产出的 `[code-snapshot] …` 现在也带上时间戳）。
+- **被否决**：只把 `time.strftime` 的字面量换成 `stamp()`（还有 21 处根本没有时间戳，混排不变，
+  门禁计数也不降）；保留 `[hub-server] ` 前缀让 `log_line` 再加一次 tag（`[ts] [hub-server] [hub-server] …`）；
+  顺手把 `hub/http_face.py` / `hub/admin.py` 一起迁（`http_face` 的 tag 是**按请求源 IP** 拼的
+  `[hub-server 127.0.0.1]`，`tests/hub/test_hub_auth_d9_order.py` 直接断言这段文本 ⇒ 那一批要按
+  「tag 里带变量」另设计，混在本次只会把两类语义搅在一起）。
+- **行为变更**（有意）：原来无时间戳的 21 行现在带 `[HH:MM:SS]`，原来手拼时间戳的 5 行格式
+  不变（`stamp()` 就是 `[HH:MM:SS]`）。读方全是 substring/regex（`tests/subproc_util`
+  的 `listening on .*?:(\d+)`、控制台日志 tail），tests/hub 590 例全绿。
+- **后果**：`tests/golden/print_baseline.json` 去掉 `hub/boot.py: 26` ⇒ 257 → 231 处、67 → 66 文件；
+  G3 自检改锚 `hub/store_offline.py`（原锚已归零）。
+
+## §2026-11-14-nn-python-audit-round4-store-offline-logging（P0-6 / B2 第二批：离线段回传日志）
+
+- **决定**：`hub/store_offline.py` 的 12 处 `print("[hub-server] …", flush=True)` 改走
+  `_log = tag_logger("hub-server", lambda: time)`（`common/logutil`），消息里手写的前缀删掉。
+  与上一批（`hub/boot.py`）同一族：`hub-server.out` 的时间轴只留一份实现。
+- **被否决**：复用 `hub/boot.py` 的 `_log`（跨模块 import 一个私有名会把两个入口绑在一起，
+  且 `hub/store_offline` 是混入层、要维持 `ALLOWED_IMPORTS` 里那条向下边的最小面）；
+  在混入里接一个 `log=` 形参（`OfflineRoundsMixin` 的调用面遍布 `hub/store` 与三个路由，
+  收益是纯测试便利，代价是所有构造点加参数）。
+- **连带改动**：`tests/hub/test_hub_job_store_split.py::ALLOWED_IMPORTS["hub.store_offline"]`
+  登记 `common.logutil`（stdlib-only 的 L0 格式模块 ⇒ 层号不变）；G3 门禁补一条
+  「基线只许调小」（与 G4/G5/G6/G8 同款），源码文本断言基线 1146 → 1147（+1）。
+- **后果**：print 存量 231 → 219 处、66 → 65 文件；`hub/` 只剩 `admin.py` / `http_face.py`
+  等按请求拼 tag 的面没迁（那一批要另设计「tag 带变量」的出口）。
+
+## §2026-11-14-nn-python-audit-round4-admin-logging（P0-6 / B2 第三批：/admin 人工操作行）
+
+- **决定**：`hub/admin.py` 的 8 处 `print(f"[{time.strftime('%H:%M:%S')}] [hub-server] …")` 改走
+  `_log = tag_logger("hub-server", lambda: time)`。这批**输出逐字节不变**（`stamp()` 的输出就是
+  `[HH:MM:SS]`），只是把「手拼时间戳」这份第二实现删掉——所以不需要改任何用例，也不需要像前两批
+  那样声明行为变更。
+- **被否决**：把 `hub/http_face.py` 一起做（它的 tag 带请求源 IP，`[hub-server 127.0.0.1]`，
+  要另设计「tag 带变量」的出口 + 改 `test_hub_auth_d9_order.py` 的文本断言；混进来会让这一刀
+  从「零行为变化」变成「有行为变化」）；把 `strftime` 全部清掉（`admin.py:1017` 那处是 **JSON 里的
+  ISO 时间戳**，不是日志行，`stamp()` 不适用）。
+- **后果**：print 存量 219 → 211 处、65 → 64 文件；`hub/` 的日志时间戳实现只剩 `common/logutil` 一处
+  （除 `http_face` 的按 IP 拼 tag 那条线）。
+
+## §2026-11-14-nn-python-audit-round4-hub-print-zero（P0-6 / B2 收口：`hub/` 整包日志单源）
+
+- **决定**：`hub/` 剩下的 25 处 `print` 全部收口，只留 **1** 处 —— `hub/tunnel_ab_probe.py` 的
+  `print(json.dumps(results))`：那是**一次性探针 CLI 的机器读交付物**，不是日志行，改走 `log_line`
+  会往 JSON 前面塞时间戳，等于破坏读方契约。
+  两种出口按「tag 是否带变量」分工：固定 tag 用 `_log = tag_logger("<tag>", lambda: time)`
+  （`hub-server` / `smoke` / `backfill` / `ab`）；tag 里带请求源的行（`hub-server <ip> src=… via=cf`）
+  直接调 `log_line(<tag>, msg)` —— 动态 tag 不包工厂，`logutil` 的 `[tag]` 位本来就够。
+- **行为变更（有意，逐条）**：`hub/queue_discover` / `queue_offline` / `queue_resume` / `queue_scope`
+  / `backfill_offline` / `tunnel_ab_probe` 里原本**没有时间戳**的行现在带 `[HH:MM:SS]`；
+  `hub/offline` / `queue_claims` / `schedule` / `task_pack` / `smoke_loopback` / `tunnel_ab_probe`
+  里手拼 `time.strftime` 的行格式**逐字节不变**（`stamp()` 就是 `[HH:MM:SS]`）。
+- **被否决**：给 `tag_logger` 加 `tag_fn=` 之类的动态 tag 参数（`log_line` 已经是那个 API，
+  再加一层只是名字不同）；把 JSON 那行也「顺手统一」（破坏机器读面）；只做「有手拼时间戳」
+  的那几处（7 处没时间戳的行会留在同一个文件里继续混排，门禁计数也不降）。
+- **连带改动**：`tests/hub/test_hub_queue_split.py` / `test_hub_routes_split.py` 的
+  `ALLOWED_IMPORTS` 为受影响混入登记 `common.logutil`（stdlib-only 的 L0 ⇒ 层号不变）；
+  `hub/tunnel_ab_probe.py` 原有的本地 `_log(msg)` 包装删除（否则与 tag logger 同名，mypy `no-redef`）。
+- **后果**：print 存量 211 → **179** 处、64 → 53 文件；`hub/` 的日志时间戳只剩 `common/logutil` 一处实现。
+
+## §2026-11-14-nn-python-audit-round5-remote-log-defaults（P0-6 / B2：`remote/` 的 `log=` 默认回调单源）
+
+- **决定**：`remote/` 里 13 个文件、43 处「自己拼 `[HH:MM:SS] [tag] msg`」的日志出口全部改走
+  `common/logutil`。两种形态分别处理：
+  * `log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True)` 这种**形参默认值**
+    → 模块级 `_log = tag_logger("<tag>", lambda: time)` + `log=_log`（默认值在 def 时求值，与原先每调用
+    新建 lambda 的时机差异不可观测：`tag_logger` 的 clock 是取值函数，不是绑定时刻）。
+  * `def _log(msg)` / `def _child_log(msg)` 这类包装 → body 换成 `log_line("<tag>", msg)`（不额外立工厂）。
+  tag 按模块语义固定：`worker` / `hub` / `worker-serve` / `push` / `bc` / `payload` / `upload` /
+  `offline-push`；`remote/worker.py` 需要两个（`worker` + `worker-supervisor`）。
+- **行为变更（有意）**：`payload` / `upload` / `offline-push` 三处原本**没有时间戳**，现在带 `[HH:MM:SS]`
+  （读方全是 substring 匹配，`tests/remote` 1881 例全绿）；其余 40 处输出**逐字节不变**（`stamp()` 就是
+  `[HH:MM:SS]`，`tests/remote/test_wire_report.py` 那套正则照常解析）。
+- **刻意不迁（写进基线、不是漏）**：
+  * `remote/worker_proc.py` 两个默认回调 —— 该模块是**纯 stdlib 的 L0**（`remote_dag` 秩 0），import
+    `common.*` 会当场破层号；
+  * `remote/deliver_zip.py` / `run_loop.py` / `offline_deliver.py` 的 `IMPORT_JSON_MARK` / 结果行 ——
+    机器读协议面，前面加时间戳等于改契约；`log=lambda m: print(m)` 这种**纯转发**（不加格式化）也保留，
+    因为那正是「父侧已定格式，子侧不许再包一层」的意思。
+- **连带改动**：三个 split 守卫的 `ALLOWED_IMPORTS`（`test_bc_job_split` / `test_hub_http_split` /
+  `test_job_lifecycle_split`）登记 `common.logutil`；G3 自检的「基线文件数 ≥ 50」活性下限降到 25
+  （那是扫描器坏没坏的判据，不是额度；文件数已从 63 掉到 44）。
+- **后果**：print 存量 179 → **138** 处、53 → 44 文件；`remote/` 88 → 47。手拼日志时间戳的出口
+  只剩 `remote/worker_proc.py`（L0 约束）与 `biz/` / `worker/` 的少量残留。
+
+## §2026-11-14-nn-python-audit-round6-log-router-visibility（日志层不许自己静默）
+
+- **决定**：`common/log.py::LogRouter` 里两处裸 `except Exception: pass` 改成「吞掉但喊一次」：
+  镜像写失败（`_mirror`）与课日志句柄关闭失败（`close_sink`）各按 `mirror:<课>` / `close:<课>`
+  去重喊一行 WARN。**异常类型不收紧**——日志路径的契约仍是「日志不得反向杀死训练」，收紧成
+  `(OSError, ValueError)` 会让一个 sink 的编程错误直接崩掉训练进程，代价远大于收益。
+- **为什么**：`pass` 让两种状态长得一模一样 —— 「这门课的日志文件正在丢行」和「这门课本来就没开
+  日志」。真实的现场是：控制台一切正常、课日志少了半天，只有事后比对才发现。丢信息的是**可观测性**，
+  不是功能。
+- **去重而非每行喊**：日志坏掉时每行一条 WARN 会把控制台刷成噪音，把真正的问题淹没；按「课 + 失败
+  种类」喊一次就够定位（重复出现说明没修）。
+- **出口**：WARN 走 `common/logutil.log_line("log", …)`（含 `[HH:MM:SS]`），不再直接 `print`；
+  `open_sink` 那条同族告警一并改走 `log_line` ⇒ `common/log.py` 的 print 由 3 降到 2（只剩
+  `log()` 与 `say()` 两个真正的出口）。
+- **顺带**：`worker/stream_collect.py` 的两处 `log=` 默认回调（`[stream]`）迁到
+  `common.logutil.tag_logger`。`worker/iter_rollout.py` 的 `[iter]` **刻意没迁**：该文件已 999/1000 行，
+  加一个 import + 一个模块级 `_log` 就撞 LOC 预算 —— 先拆再迁（§P0-2），不为了迁移而抬预算。
+
+## §2026-11-14-g9-silent-except-gate-and-loop-util-retirement（捕了不做，也是事故）
+
+- **决定 1（门禁 G9）**：新增 `tests/test_silent_except_budget.py` + `tests/golden/silent_except_baseline.json`，
+  按文件冻结「宽泛捕获 + 体内只有一个 `pass`」（`except Exception/BaseException/裸 except:`，64 处 / 38 文件）。
+  只拦增长 + 基线只许调小。**与 G4 分开**：G4 管「捕得宽」，G9 管「捕了不做」——`except Exception` 里
+  写一行 `log_line(...)` 是处理，写 `pass` 是假装没发生，两者的现场可观测性完全不同。
+- **决定 2（P1-11 死代码）**：删除 `worker/train/loop_util.py` 里随「本地 BC 连续训练入口」退役
+  （`plan/single-resident-trainer` §1.4，2026-10-17）而失效的全部循环工具：`_emit` / `_TrainTee` /
+  `heartbeat` / `auto_export_corpus` / `parse_val_loss_from_output`，以及只有它们用的 import 与常量
+  （321 → 109 行）。**保留** `acquire_lock` / `cleanup_lock` / `course_lock_path` / `course_key_from_path` /
+  `validate_course_name`（`trainer/` 与 `biz` 侧的课程锁仍全用它）与 `_pid_alive`（Windows 安全薄壳：
+  `tests/common/test_pid_probe_windows_safe.py` 按名枚举四份壳必须委托唯一实现）。
+- **为什么现在删**：文件头早就写着「去留归 S3 判」，而 S1 落地至今已一个月、`grep` 全仓零调用。
+  死代码的代价不只是行数：它自带 `subprocess` / `threading` / `shutil` 的 import 面（读者会以为还有
+  人跑子进程），还把 5 处 `except Exception: pass` 挂在生产面基线上，给 G4/G9 制造「本来就是这么多」
+  的错觉。
+- **代价与边界**：`docs/nn/remote-transport.md` / `engineering.md` 里关于 `loop_util` 心跳与 Tee 的
+  叙述是**事故与决策记录**，不改（记录写的是当时事实）；`common/pid_probe.py` 里「2026-09-17 隐患」的
+  引用同理。要考虑「现在还有没有这条路径」的人，应读 `python.refactor.md` 的状态表（已更新）。
+- **顺带**：G3 134 处 / 42 文件、G4 440 处 / 143 文件（删掉的 1 处 print、6 处宽捕获同步从基线移除）；
+  文本断言源码面基线 +7（新门禁用 AST 扫 `*.py`，整个文件的 assert 都落进口径 B —— 与 G3/G4/G5/G6
+  同一已知限边，已在 `tests/test_source_text_assert_budget.py` 的注释表里逐笔记账）。
+
+## §2026-11-14-job-control-notices-leave-a-trace（控制面失败：不致命 ≠ 不必说）
+
+- **决定**：`remote/job_lifecycle.py` 的五个控制面通知（`job_started` / `job_ready` / `abandon_job` /
+  `release_job` / `heartbeat`）与 `acquire_job` 的 `on_drop` 回调，从 `except Exception: pass` 改成
+  `except Exception as e:` + 一行 `_log(...)`。**失败仍然不抛**（租约过期是设计好的兜底，行为一字未改），
+  只是把「兜底正在被触发」说出来：行里带 job id、异常 repr、以及这条失败的**实际后果**。
+- **为什么不是一律喊 WARN**：这些路径的错误语义是「尽力而为」，把它们升级成致命会改行为；但静默的代价是
+  另一回事 —— `start` 没送到 ⇒ hub 侧 `computing_at` 不起算（掉队阈值晚起算）；`ready` 没送到 ⇒ 别的
+  worker 优先级不降（P0 小包的全部作用）；`release` 没送到 ⇒ 这份活干等 30min 才回池、别的 worker 领不走；
+  `heartbeat` 连续失败 ⇒ 租约走向过期，最坏是「活干完了 hub 派给了别人」。这些状态在控制台上此前**完全不可见**。
+- **频度**：心跳周期 60s（`common/protocol.HEARTBEAT_SEC`）⇒ 持续不可达时一条/分钟，可接受；其余四个是
+  每 job 至多一次的事件，不需要去重计数器（不给这条路径引入模块级状态）。
+- **判据（行为用例）**：`tests/remote/test_job_control_visibility.py` 逐条钉「调用不抛 + 恰好一行提到该 job
+  + 行里带得上异常类型」，文案用 `partition`/`startswith`/`endswith` 对账，不挂整句措辞。
+- **基线**：G9 静默面 64 → **58 处 / 37 文件**（`job_lifecycle` 的 6 条清零，条目已删）。
+
+## §2026-11-14-start-beacon-never-silently-misses（`computing_at` 打不上 = hub 会再派一份）
+
+- **决定**：打完上次的 `job_started` 之后，把**同一个打点**在别处的三份拷贝一并改成留痕：
+  `remote/train_core.py` 的 `_torch_ppo`（`on_ppo_start()`）与 `_paddle_ppo`
+  （`spec.on_ppo_start()`）、`remote/push_dispatch.py::_mark_started`（`self.hub.start_job`）。
+  **行为不变**（仍不抛）—— 只把「掉队阈值的时基没打上」说出来。
+- **为什么这三处必须一起改**：`computing_at` 是 `store_scheduling` 里 `computing_elsewhere_since`
+  的唯一时基。推模式下 GPU 机从不连 hub，`_mark_started` 是**唯一**会打这个点的地方；训练腿里
+  `on_ppo_start` 是 worker 侧的那一发。任何一处静默失败都等价于「hub 以为没人算」，下场是多开
+  一份备份 —— 而备份本身是合法策略，于是**现场唯一可见的症状是「备份数量莫名其妙变多」**，
+  归因链断在最需要的地方。
+- **判据**：`tests/remote/test_hub_push_dispatch.py::test_start_beacon_failure_is_logged`
+  （假 hub 抛 `OSError` ⇒ 恰好一行、`endswith`/`startswith` 对账，不挂整句措辞）。训练腿的两处
+  没有可调用的运行时入口（要真 torch / 真课程），由代码评审 + G9 基线兜（条目已删 ⇒ 退回静默即红）。
+- **基线**：G9 55 处 / 35 文件（本轮 `train_core` 2 处 + `push_dispatch` 1 处清零）。
+- **顺带**：`remote/job_round.py::_StartBeacon` 的注释原先写「`job_started` 本身是 `try/except pass`」，
+  已改成「自己不抛、失败打一行」—— 注释描述的行为变了就得跟着改，否则下一刀会按错的假设动手。
+
+## §2026-11-14-retire-dispatch-queue-reexport-surface（第二个 import 面砍掉，留一条并写明为什么）
+
+- **决定**：`trainer/dispatch_queue.py` 的公共 re-export 面从 7 条削到 1 条。删掉的六条
+  （`_record_agent_meta` · `pick_race_target` · `pick_tail_race` · `race_tier_ok` ·
+  `register_inflight` · `run_rollout`）与附带的 `bun_version` 薄包装，消费方一律 direct import
+  真家：`common.proc`（`bun_version` / `version_mm as mm`）· `worker.agent_meta`
+  （`record_agent_meta as _record_agent_meta`）· `trainer.queue_local`（`run_rollout` + 竞速四件套）。
+  历史名字留在**消费方**命名空间里（`batch_runner.bun_version`、`eval_dispatch.mm`），
+  `monkeypatch.setattr(mod, "bun_version", …)` 这类接缝一条没动。
+- **为什么 `bun_version` 包装可以删**：`common.proc.bun_version` 的缺省 `fallback` 本来就是 `"?"`，
+  包装只是把默认值再抄一遍；`fallback` / `require_zero` 的两种历史口径仍在 `common.proc` 里按原样保留。
+- **刻意留下的那一条**：`trainer/batch_plan.py` 用 `from trainer.dispatch_queue import mm`。它不是便利，
+  而是 `tests/test_layering.py`「trainer/ 只有编排」那条的**唯一依据** —— batch_plan 除了这条边只依赖
+  `common.*`。把它改成 `common.proc.version_mm` 会让门禁立刻红（且红得对：batch_plan 是纯逻辑，
+  住错了包）。**删它的前提**是先决定 batch_plan 的归属（搬 `biz/`，涉及 150+ 处引用与 5 个测试文件；
+  或留在 trainer/ 并显式豁免），不是顺手改一行。
+- **记录这次暴露的东西**：一个纯逻辑模块之所以能在编排包里待着，靠的是**re-export 面伪造出来的一条
+  依赖边**。这正是审计 §0.1「债务在边界不存在」的活样本；门禁本身没瞎，是它被一条转发养成了绿灯。
+- **G6 基线**：`noqa_f401` 25 → **19 处 / 11 文件**（`dispatch_queue` 7 → 1）；
+  `tests/common/test_common_layer.py` 的 `bun_version` 定义点从 3 处降到 2 处（私有断言基线 3 → 2）。
+- **顺带**：`tests/trainer/test_batch_{runner,plan}_split.py` 的顶层 import 闭集已登记变动
+  （`dispatch_queue` → `common.proc` + `worker.agent_meta`）。
+
+## §2026-11-14-batch-plan-belongs-to-biz（把「假装是编排」的纯逻辑送回 B 层）
+
+- **决定**：`trainer/batch_plan.py` → **`biz/batch_plan.py`**，`from trainer.dispatch_queue import mm`
+  改回 `from common.proc import version_mm as mm`。`trainer/dispatch_queue.py` 的最后一条 re-export
+  随之归零（G6 `noqa_f401` 18 处 / 10 文件）。
+- **为什么是 `biz/` 而不是留在 `trainer/` 加豁免**：它的输入就是游戏领域的东西 —— 课程关卡文件的
+  `stages[]`、`dashboard/src/evalboard/ladder.json`、语料目录；`biz/` 里已经住着 `course*` /
+  `ladder_ledger` / `corpus_fp` / `reward*` 同族。豁免是「让门禁学会闭眼」，搬家是「让门禁继续睁眼」，
+  而这正是审计 §0.1 说缺的那种改动。
+- **为什么不是 `worker/`**：`worker/` 的口径是「支持本地 torch 训练的全部代码」，它一行 torch 都不碰；
+  而且 `worker/` 的模块在 `tests/helpers/remote_dag.py` 有层号账本，搬进去要多登记一次「它为什么在
+  L2」，收益为零。
+- **代价与护栏**：`biz/` 那条「不得 import `remote|worker|hub|trainer`」现在直接盖住它（它只依赖
+  `common.*`，本来就该受这条管）；`TRAINER_ORCHESTRATION` 快照少一员 —— 那条门禁的「少一个也红」
+  正是本轮的第一推动力；消费方 8 个文件改 import 路径（`batch_eval` 的门面 `X as X` 保留，既有
+  `from trainer.batch_eval import plan_units` 调用点一行不改）。
+- **守卫留在原地的理由**：`tests/trainer/test_batch_plan_split.py` 不跟着搬 —— 它钉的两条边
+  （`batch_eval` 门面恒等、`batch_runner` 入边调用点）都在 `trainer/`，搬走会让「谁在消费它」读不出来。
+- **教训（写给下一次）**：三条门禁（G9、G6、G3）都栽在同一件事上 —— **自检锚点选了一个正要被治好的
+  文件**，于是「门禁被治好」被误判成「扫描入口坏了」。锚点要选**还没退役**的样本（G9 现锚
+  `common/log.py` + `worker/forensics.py`，G6 现锚 `remote/offline_boot.py`）。
+
+## §2026-11-14-pump-lines-splits-its-two-failures（行泵：EOF 的回声要静，自己的 bug 要响）
+
+- **决定**：`remote/child_proc.py::pump_lines` 拆成两条异常路径 —— **读流抛**（管道被子进程退出截断）
+  静默不变；**回调抛**逐行兜住（不再让整段 `except` 带走泵线程）、继续读、收尾报一行
+  「N 行被回调丢弃（第一次 <异常>）」。两个调用方（`upload_proc` / `payload_proc` 的 `_read_loop`）
+  把各自的 `self._log` 传进来；模块新增 `_log = tag_logger("child", lambda: time)` 作缺省。
+- **为什么值得改（不是洁癖）**：行泵是回传腿与下行腿**唯一**的输出读口，协议行（`@@upload@@` /
+  `@@pf@@`）就在同一条流上。旧写法下，回调里任何一处 bug（新字段解析、`KeyError`、记账分支）都会
+  让泵线程**静默停摆**：调用方既看不到后续日志、也收不到应答，只能干等到超时，而现场没有任何一行
+  说明「泵死了」。这类故障的形状是「腿卡住」，归因成本极高。
+- **行为变化的两处细节**：① 回调抛之后**继续读**（旧行为是彻底停）；② 收尾**一次性**报数（不逐行刷屏，
+  因为一个坏解析器会对每一行都抛）。坏行不进账 ⇒ 协议层看到的是「缺一行」，比「线程没了」可诊断得多。
+- **为什么读流那一侧仍然宽捕 + `pass`**：那条例外的成因（`ValueError: I/O operation on closed file` /
+  `OSError`）就是「子进程退了」的回声，真正的信号是 EOF 本身，调用方据此走降级 —— 这里留痕只会把
+  一次正常收线说成故障。两种异常的**成因**不同，所以口径也必须不同；这正是 G9 门禁（只数宽捕 + `pass`）
+  抓不到、但 `python.refactor.md` §P0-7 一直在说的那类「宽捕掩盖语义差异」。
+- **G4 抬格 1 笔**：回调边界只能宽捕（用户传入的解析代码抛什么类型这里不知道），记账写在
+  `tests/test_broad_except_budget.py` 文件头的表里：441 处 / 143 文件。G9 静默面不变（55 处 / 35 文件）：
+  同一函数里被留下的那条宽捕 + `pass` 是**对的**，不该为了好看而消失。
+- **判据**：`tests/remote/test_child_proc_pump.py` 两条 —— 回调对第 2/4 行抛时好行一条不丢、恰好一行
+  报数（`endswith` + `startswith` 对账）；读流截断时**零**日志（静默是对的，别把正常收线变成告警）。
+
+## §2026-11-14-warn-unused-ignores-and-pinned-platform（打开「无用 ignore」检查，并把平台钉死）
+
+- **决定**：mypy 配置 `warn_unused_ignores` 由 `false` 翻成 `true`，**同一笔**里加 `platform = "linux"`。
+  翻开关当场指出的 111 条无用 `# type: ignore`（54 个文件）一并删掉（含 3 条「整条删了会新红」的回修）。
+  G6 的 `type: ignore` 存量 271 处 / 98 文件 → **163 / 68**（`tests/golden/suppression_baseline.json`），
+  扫描健康度地板随之下调 200/80 → 150/60（是地板不是额度）。
+- **为什么值得改**：开着 `false` 时，`# type: ignore` 一落笔就再也不会被质疑 —— 它本来是「这里类型系统
+  管不到」的**证据**，过期之后却成了「这里类型系统管不到」的**假证**。实测 41% 的 ignore 已经什么都不压：
+  下一个人照着它跳过三行代码，改的人以为自己做了件安全的事。翻开关才有资格说「剩下 163 条都是承重的」。
+- **为什么必须成对钉平台**：`warn_unused_ignores` 判的是「按哪套 stubs 分析」。`os.sysconf` /
+  `os.fork` / `ctypes.windll` 在 Linux stubs 里不存在 ⇒ `[attr-defined]` 是**必需**；在 Windows stubs 里
+  存在 ⇒ 同一条注释被判**多余**。只翻开关 = 同一个仓库在两台机器上只能有一台绿（本仓开发机是 Windows，
+  门禁跑 Linux）。钉 `platform = "linux"` 让判定与门禁同源。
+- **被否决的备选**：① 维持 `false` 只做人工普查 —— 普查没有截止条件，就是不做；② 按平台写两套
+  `# type: ignore`（`sys.platform` 分支 + 各写一次）—— ignore 是行级的，两个平台的分支写在两行上，
+  各自只需一个码，但会把「跨平台」写进代码形状里，比钉配置贵得多。
+- **实操教训（写进 `python.refactor.md` §P1-4）**：多码 ignore（`[attr-defined, assignment]`）在 false
+  下是「无害的多余」，在 true 下被逼着二选一 —— 只留本平台真实触发的那个码；以及 mypy 报某条
+  ignore「unused」不等于**整条**可以删（`[import-not-found, import-untyped]` 里可能只有一半过期），
+  删完必须再跑一遍 mypy。
+
+## §2026-11-14-colab-unassign-must-say-when-it-fails（停机调用失败要留下「机器没停」）
+
+- **决定**：`remote/worker_proc._release_cloud_machine` 的 Colab 兼容路径拆成两段 —— **探测**
+  （`import google.colab.runtime` / `import IPython` + `get_ipython() is None`）仍静默；**调用**
+  `runtime.unassign()` 失败则留一行：异常 `repr` + 「机器未释放」+ 人能执行的动作（等 keepalive 读哨兵 /
+  手工断开宿主会话）。G9 该文件 2 → 1（55 → 54），G4 同笔 +1（442，记账在
+  `tests/test_broad_except_budget.py` 表头）。
+- **为什么（不是洁癖）**：旧写法把两件事罩在同一条宽捕 `pass` 下，而日志**先**打印
+  「检测到 Colab kernel 环境 → 直接调用 runtime.unassign()」。`unassign()` 抛了之后没有下文 ⇒ 读日志的人
+  得到的结论是「停机已经安排好了」，实例却还在计费 —— §386 的全部意义正是「worker 退出 ≠ 停机省钱」，
+  这条静默把该结论反过来写了一遍。
+- **为什么探测必须留静默**：非 Colab（Kaggle / CI / 本机）根本没有 `google.colab`；worker 跑在
+  supervisor 拉起的**子进程**里时 `get_ipython()` 永远是 `None`。这两件是**常态**，留痕等于每次停机都
+  喊一次狼来了，反而训练读者忽略真正的告警。
+- **判据**：`test_remote_hotswap.py` 两条 —— 失败路径必须恰有一次 `unassign` 调用 + 日志含 `unassign() 失败`
+  与异常文本（`503`）+ 给出动作；成功路径**不得**出现「失败」（留痕只跟失败走）。
+
+## §2026-11-14-eval-heartbeat-failures-are-visible（心跳写不进去要说一声）
+
+- **决定**：EvalBoard runner 心跳的三层都改成「失败仍不抛，但按 key 喊一次」——
+  ① `worker/eval_heartbeat.write_state` 的落盘 `OSError`（`warn_once(f"eval_heartbeat:{落点}", …)`）；
+  ② `trainer/loop_lifecycle._evalboard_idle` 开窗（key `eval_heartbeat:open`）；
+  ③ `trainer/loop_dispatch._evalboard_yield` 关窗（key `eval_heartbeat:close`）。
+  G9 54/35 → **52/33**（两个文件从基线消失）。
+- **为什么**：静默的后果不是「少写一个 JSON」。`dashboard/data/evalboard/runner_state.json` 是 console
+  判断「训练空闲 / 忙碌中已等 N 分钟」的**唯一**输入；写不进去 ⇒ 屏幕上永久停在旧值，而训练侧一切
+  正常。读者会去查训练、查 hub、查 GPU，唯一不会去查的是「那个文件根本没写」。这正是 G9 口径里
+  「失败即信息丢失」那一类，不是「该有替代路径」那一类。
+- **为什么必须去重**：开窗/关窗是**每轮**都写的，热路径逐次喊会把控制台刷成噪音；`LogRouter.warn_once`
+  按键只喊一次，落盘失败的 key 还带路径（不同课/不同落点各喊一次）。
+- **为什么保留「不抛」**：心跳是观测面，绝不能反过来打断训练主链 —— 这条契约不变，改的只是「留不留痕」。
+- **判据**：`tests/trainer/test_loop_heartbeat_visibility.py` 三条（正常路径记录到
+  `window_open=False` + 关窗时刻；两条失败路径各恰好一行、且认领/开窗照做）+ 
+  `test_eval_heartbeat.py::test_write_failure_is_reported_once_and_never_raises`（落点是文件 ⇒
+  mkdir 失败，两次写只喊一次，且不抛）。两条都**不读私有字段**（G5）：走延迟 import 的 DI seam 验入参。
+
+## §2026-11-14-deliver-forwarder-reuses-pump-lines（补传腿的转发线程不再自己写一遍行泵）
+
+- **决定**：`remote/deliver_proc.DelivererProcess._forward` 改为 `pump_lines(stream, on_line, log=self.log)`，
+  `on_line` 先判 `boot ok` 置 `_boot`、再 `self.log(msg)`（顺序与旧实现逐字一致）。同时补上
+  `pump_lines` 自己的一处漏：**报数那行也是往 stdout 写**，出口关了会抛，而它在 try 之外 ⇒
+  把整条行泵带走。现在 `except (OSError, ValueError)` 到此为止（与 `LogRouter.warn_once` 同一口径）。
+  G9 52/33 → **51/33**（`deliver_proc` 3 → 2），G4 442 → **441**（该文件 8 → 7）。
+- **为什么**：这段手写循环与 `pump_lines` 是同一件事的第二个实现，且复制的是**修之前**的那一版：
+  读流截断（EOF 的回声，该静）与回调自己抛（我们的 bug，该响）共罩一条 `pass`。后果具体：
+  `self.log` 最终往 stdout 写，父进程 stdout 被关/管道断掉时 `print` 抛 `ValueError` ⇒ 转发线程停摆，
+  而 `_boot` **只有这条线程会置位** ⇒ 子进程明明已经打了 `boot ok`，父侧仍然只看到
+  「等 `boot ok` 超时（5s）」并 sticky 降级到进程内线程模式。诊断成本极高：现场既没有那行 `boot ok`，
+  也没有任何一行说「转发线程死了」。
+- **为什么不各自修一遍**：行泵的口径（哪一侧静、哪一侧响、怎么报数）已经写进 `pump_lines` 的
+  docstring 与 `tests/remote/test_child_proc_pump.py`；第二份实现迟早再漂一次。搬过来 = 口径单源。
+- **判据**：`test_offline_deliver_proc.py::test_forward_keeps_watching_after_log_callback_raises`
+  （日志回调对每一行都抛，流里 `boot ok` 在第二行 ⇒ `_boot` 仍必须置位；旧实现在第一行就死了，先红后绿）
+  + `test_child_proc_pump.py::test_summary_log_that_itself_raises_does_not_escape`（喊话本身失败不逃出）。
+
+## §2026-11-15-ledger-values-compare-ledger-to-ledger（落账值对落账值，别拿相对容差碰原始 float）
+
+- **根因（2026-11-15，用户点名查的偶发红）**：`meta["best_smoothed_val_loss"]` 写的是
+  `round(best_smoothed, 4)`，而 `out["best_smoothed_val_loss"]` 是未舍入的原始 float；两条双生用例
+  （`test_bc_paddle` / `test_bc_epoch_resume`）用 `pytest.approx(原始值)` 对账 —— 默认容差是
+  **相对** 1e-6，在 25 量级只给 **2.6e-5** 余量，而 4dp 舍入的最大误差是 **5e-5**。于是「原始值的
+  尾巴是否恰好落在 4dp 网格外」决定这条断言红不红 —— 而 epoch 曲线逐进程不同（paddle 首次调用的
+  状态差异），所以它是**偶发**，不是环境问题。实测：12 个新进程各跑一次，旧写法 **3/12 红**
+  （现场值 `25.586440000000003 → 25.5864`），新写法 0/12。
+- **决定**：两边都取 4dp 再比 —— `meta[...] == round(out[...], 4)`。这是**精确相等**，不需要任何
+  容差，比原来的 `approx` 更严，也不再有触发条件。
+- **为什么不是「把容差放大到 abs=1e-4」**：那只是让边界更远（仍是拍一个够不够的数）；落账口径本来
+  就是 4dp，两边对齐后误差恒为 0 —— 对账的判据应该是「同一个量」，而不是「差不多」。
+- **另一侧同样修**：`meta["best_val_loss"] == round(out["best_val_loss"], 4)`（同一类量、同一类
+  舍入），`history[...]` 与原始 float 的对账继续用 `abs=1e-4`（那是数据面精度的既有约定）。
+- **判据**：`tests/worker/test_bc_epoch_resume.py::test_ledger_value_must_be_compared_at_ledger_precision`
+  —— 把现场值钉下来：`raw != round(raw, 4)`（前提）、`round(raw, 4) != approx(raw)`（这就是那个
+  flake）、`round(raw, 4) == round(raw, 4)`（新口径）。谁把对账改回 `approx(原始值)` 这条就红。
+- **附带发现**：`bc_core.select_best_epoch` 在「所有窗口都非有限」时返回 `0`（不是 `None`）——
+  `NaN < inf` 恒 False ⇒ `best_at` 留在初始值。本机 12+ 次训练没观察到 NaN（6 样本 shard 上
+  val_loss 会剧烈跳动但有限），所以**不是**这次 flake 的成因；已作为独立改动于同日修掉，见
+  §2026-11-15-nonfinite-window-is-not-a-candidate。
+
+## §2026-11-15-nonfinite-window-is-not-a-candidate（NaN 窗口不是候选，别让选取给出 epoch 0）
+
+- **决定**：`worker/train/bc_core.py` 新增 `is_improvement(candidate, best)`（有限且严格更小），
+  `select_best_epoch` 与两条训练循环（`bc.py` / `bc_paddle.py` 双生）都用它；`select_best_epoch`
+  在没有有限窗口时返回 **None**（= 「交最后一轮」），不再是 0。
+- **为什么**：`NaN < inf` 恒 False，于是旧实现里「所有完整窗口都含 NaN」会让 `best_at` 停在初值
+  **0** 并原样返回。0 不是合法 epoch（该函数 1-based），而调用方对 `None` 有一套既定语义
+  （「不足窗口轮次 ⇒ 交最后一轮」）。于是出现过这种分叉：训练循环那条 `if smoothed < best_smoothed`
+  同样不成立 ⇒ `best_state is None` ⇒ 走 fallback 交最后一轮（比如 6）；按 `history` 重算的
+  `select_best_epoch` 却给 0 ⇒ 交付 epoch 与账本对不上，且 `assert delivered >= SMOOTH_WINDOW`
+  直接红。
+- **为什么判据要单列一个函数**：选权重这条判据有两个消费者 —— 纯函数（可被测试/对账脚本按
+  history 重算）与训练循环（流式）。它们各写一遍比较，就会在 NaN / inf 这种边界上漂；
+  `is_improvement` 让「有没有改善」只有一个定义，双生两侧也只剩一个 import 差异。
+- **为什么不把 NaN 当成「很差」**：`float("inf")` 才是「很差」，NaN 是「这个数算不出来」——
+  把它排进候选顺序里等于给它编了一个名次；跳过才是诚实的（inf 也不该当选）。
+- **判据**：`tests/worker/test_bc_early_stop.py`
+  `test_select_best_epoch_skips_non_finite_windows`（前 5 个窗口吃 NaN、只有最后一个有限 ⇒ 选 10，
+  且**不是 0**；旧实现返回 0，先红后绿）与
+  `test_select_best_epoch_with_only_non_finite_windows_is_none`（全 NaN / 全 inf ⇒ None）。
+- **落盘面（同日补齐，见 §2026-11-15-non-finite-json-is-null）**：当时我写这里说「全 NaN 时 meta
+  会写出 `NaN`」——**这条判断是错的**：两条训练核都做了 `meta = sanitize_json(meta)`，`NaN` 早已落成
+  `null`。真正的洞是 **±Infinity**（旧 `sanitize_json` 只判 `isnan`），已修。
+
+## §2026-11-15-non-finite-json-is-null（weights.json 里不许有 NaN / Infinity 字面量）
+
+- **决定**：`worker/train/bc_core.sanitize_json` 由「NaN → None」扩成「**非有限**（NaN / +Inf /
+  -Inf）→ None」。两条训练核（`bc.py` / `bc_paddle.py`）本来就把整份 meta 过这个函数，所以
+  `best_val_loss` / `best_smoothed_val_loss` / `history.*` 一并变成标准 JSON 的 `null`。
+- **为什么**：`json.dump` 默认写出 `NaN` / `Infinity` / `-Infinity` 三个**非标准**字面量；TS 端
+  `JSON.parse` 遇到直接抛错 —— 失败形态是「文件打开就崩」，不是「数值不准」。`weights.json` 是
+  TS 运行时与 dashboard 都读的落盘面。
+- **先确认了「NaN 那条早就没有」**：`test_bc_epoch_resume.py::test_bc_train_writes_null_when_val_loss_is_not_finite`
+  用**真实切分**造 NaN 验证集（先 `make_loaders` 取 val 下标，只把那些行写成 NaN ⇒ 训练行梯度干净、
+  权重有限、文件照写），跑完后用 `json.loads(raw, parse_constant=...)` 拒绝非标准字面量：NaN 场景
+  在改动**之前**就是 `null`（`meta = sanitize_json(meta)` 的既有功劳），所以这半条是**补用例**、
+  不是补代码。
+- **为什么用 `parse_constant` 而不是 grep 文本**：权重是 base64，随便就会撞出 `"NaN"` 子串（第一版
+  断言就是这么假红的——它指着 base64 里的一段说「这里有个 NaN」）。判「标准 JSON」只能靠解析器。
+- **判据**：`tests/worker/test_bc_early_stop.py::test_sanitize_json_turns_every_non_finite_into_none`
+  （NaN/±inf 以及嵌套结构 → None；旧实现 inf 原样通过，先红后绿）+
+  上面那条端到端（NaN 验证集 → 文件里那两个字段是 `null`，且整份文件能被严格解析）。
+- **未动**：`out`（返回值，进程内）与归档文件名仍带原始 `nan`/`inf`（文件名形如 `..._valnan.json`）；
+  返回值不是落盘面，调用方（`trainer/bc_loop` / `remote/bc_job`）读 file 且对 `None` 有 `or 0.0`
+  兜底。文件名只是可读性瑕疵，没有消费者解析它。
+
+## §2026-11-15-json-writes-sanitize-nonfinite（非有限值在**写入口**收口，不在几十个调用点收）
+
+- **决定**：`sanitize_json`（非有限 float → `None`）从 `worker/train/bc_core.py` 提到
+  **`common/stats.py`**（与 `num_or_none` 同族：都是「观测字段的口径」），并在全仓两个 JSON
+  **写入口**上应用：`common/fs.atomic_write_json` 与 `JsonlLedger.append`。`bc_core` 留转发名
+  （`bc.py` / `bc_paddle.py` 的调用点一行不改）。
+- **为什么在写入口**：`json.dumps` 会把 NaN / ±Infinity 写成**非标准**字面量，TS 端 `JSON.parse`
+  直接抛错 —— 失败形态是「文件/账本打开就崩」。而 NaN/inf 在训练侧是**真实形状**（val_loss 发散、
+  gnorm 爆炸、A-eval 的 delta 算不出来）。逐个 `json.dump` 调用点加过滤是 O(调用点) 且新代码必漏；
+  两个 Chokepoint 是 O(1)，且新写者也自动继承。
+- **为什么不改 `num_or_none`**：它的语义是「数值化」，非有限值原样透传是**刻意的**
+  （`tests/common/test_stats.py::test_non_finite_is_still_a_number` 钉着），判定面（
+  `loop_guards_trip._is_nonfinite` → 熔断）要吃 NaN。落盘面与判定面口径不同，这正是本条的理由。
+- **代价（已知）**：行/文件的编码多走一次递归（metrics 行是小字典，实测全量 6060 用例无感）。
+  顺带把 tuple 变成 list（`json.dumps` 本来就输出 list，逐字节不变）。
+- **判据**：`tests/common/test_json_nonfinite.py` —— 两个写入口各一条（写 NaN/±inf 后**严格解析**
+  回来必须是 `null`；`parse_constant` 是 `json.loads` 对那三个字面量的唯一钩子，grep 文本会假红）、
+  一条口径单源（`bc_core.sanitize_json is common.stats.sanitize_json`）、两条纯函数边界。
+  前两条在改动前确认**红**（临时还原写入口跑的：2/7 failed）。
+- **未收口（另列）**：绕过这两个入口的直写仍在 —— `worker/data/weights_io.save_weights_json`
+  （调用方已自带 sanitize；且它对非有限**权重**是拒绝写出，语义不同）、`remote/deliver_wire.py`
+  的自定义编码（已自带 `math.isfinite` 过滤）、`remote/offline_boot.py` 的生成物拼接。它们各有
+  自己的口径，不属于「漏过滤」。
+
+## §2026-11-15-narrow-catch-is-the-third-disposition（窄捕是第三种处置，不是「留着 pass」）
+
+- **背景**：G9（宽捕 + 只 `pass`）在清理「控制面尽力而为」路径时的两种处置是 ①留痕 ②带理据留基线。
+  2026-11-15 第八批（`remote/lifecycle.py` 4 处 + `remote/colab_bc.py` 4 处）确认了**第三种**：捕获面
+  本来就只该是具体的 —— 遗言读数 `/proc`（OSError）/ NVML（RuntimeError）/ `statvfs`（OSError）、探测腿
+  `subprocess.run`（OSError / SubprocessError）。此时 `except (OSError, ValueError): pass` 不属「宽」
+  也不属「静默」：它让**本模块自己的 bug**（AttributeError / KeyError / 拼错的名字）照常抛出，这正是
+  门禁要的那半条命。判据从「语法形状」升级为「这次失败**能由哪种异常解释**」。
+- **代价（实测抓到）**：窄捕当场暴露了两个被宽捕掩盖的东西 ——
+  ① `tests/remote/test_lifecycle.py` 的 `LC.os` 假 `os` 少了 `stat`，`readings` 一直在**静默降级**
+  （磁盘项恒为空）而用例看不见；补 `stat=os.stat` 后读数恢复；
+  ② `_rss_gb` 的 `Path` 拆解、`shutil.disk_usage` 的各自失败面从此分得清。
+- **例外（不窄捕，改留痕）**：`remote/colab_bc.load_state` 读不了（现场只看到「进度莫名归零」，与
+  disk 满/半行 JSON 长得一样）与 `remote/lifecycle` 的 **SIGTERM 自投失败**（进程活着而 hub 当这台已
+  下线 = 重复计费）。这两处是「信息丢失」而不是「读不到」，宽的意义在于**异常族未知**，窄会漏掉真正的
+  成因；所以保留宽度、只加一行。第三方的 `mount_drive` 同样保留宽捕 + 日志（`drive.mount` 抛什么这里
+  不知道，且义务是「失败仍继续」）。
+- **读数**：G9 51/33 → **44/31**（扫描地板 50 → 40，算术 = 51−7）；G4 441/143 → **433/142**
+  （lifecycle 4→0、colab_bc 5→1；抬/降都记在 `tests/test_broad_except_budget.py` 表头）。
+- **判据**：`tests/remote/test_lifecycle.py` +3 条行为用例（缺 `/proc` 与读不到盘 ⇒ 读数仍成形且 `rss_gb`
+  为 None；NVML 抽风 ⇒ 只丢 `gpu`；自投失败 ⇒ 不抛 + 恰一行 + 上报仍先发）。文本形态断言 1500 → 1501
+  （理由记在 `tests/test_source_text_assert_budget.py` 的 `BASELINE_FORM` 上方）。
+
+## §2026-11-15-no-wall-clock-upper-bound-for-"does-not-block"
+
+- **判据**：「X 不阻塞调用方」这类契约**不能**写成「耗时 < 常数」。2026-11-15 的活例：
+  `tests/remote/test_error_report.py` 用 `elapsed < 0.25s`（慢 hub 1s）钉 `report_error` 不阻塞，
+  在 16 路 fork 满载时同一份代码量到 **2.019s** 而红 —— 红灯说的是「机器忙」，不是「代码同步
+  等了网络」。同一晚它又绿了两次，于是这条断言同时具备「假红」与「掩盖」两种毒性（人学会无视它）。
+- **替代判据（事件）**：把「发送」那一发换成可控桩（进去置位 → 测试放行 → 打完置位）。
+  ① 调用方**返回时**桩仍在里面（`finished` 未置位）⇒ 证明没等网络；② 放行后 `finished` 置位
+  ⇒ 证明「不阻塞」不是「什么都不发」；③ 调用方若同步实现，`done` 永不到达，`wait(10s)` 把它
+  变成一次可读的红。**唯一的墙钟是 10s 的挂起兜底（liveness），负载只改变先后、不改变对错。**
+- **验证**：临时把 `report_error` 的线程改成就地 `_send()`（同步实现）⇒ 新用例红（10s 后
+  `done` 未置位），还原后绿。即判据**仍抓得住**原来的回归，只是不再因机器忙而红。
+- **口径**：`tests/test_no_sleep_as_sync.py` 的 `# timing-ok` 标注随之删除（该文件现在没有墙钟
+  上界判据了），模块 docstring 里「墙钟判据只有一处上界」那句同步改写 —— 注释与判据不能各说各话。
+
+## §2026-11-15-wall-clock-contract-bounds-are-a-transition-marker
+
+- **决定**：`# timing-ok: 契约上界` 只允许**过渡**存在。阈值 ≤ 0.5s 且语义是「立即返回 / 不许阻塞」
+  的上界断言，一律改成与负载无关的判据；批量扫过一遍（8 处），并把这四种形状写进
+  `tests/test_no_sleep_as_sync.py` 文件头第三条规则。
+- **四种形状**（可复用）：
+  ① **事件门** —— 阻塞的那件事换成「进去置位 → 测试放行 → 打完置位」的桩，返回时桩仍在里面
+  = 没等它；② **调用计数** —— 「问一句就答」= 恰一次，轮询实现会 N 次；③ **炸弹** —— 把
+  `time.sleep` / 同步物化那条路换成 `pytest.fail`；④ **状态** —— `is_alive()` / `inflight_it()`
+  / `not finished` 这类事实。共同点：判据里没有「多久算快」。
+- **为什么**：`elapsed < N` 量的是「机器够不够快」，而契约说的是「调用方等没等」。2026-11-15
+  同一条 `elapsed < 0.25s` 在 16 路 fork 满载时量到 2.019s、单跑 0.08s —— 假红教人无视门禁，
+  比没有断言更糟。逐个替换后，真回归仍红：把 `report_error` / `CloudEvalRunner.submit` 的
+  后台腿临时改回同步，新用例都会红（10s liveness 兜底把它变成可读的失败，而不是挂死）。
+- **保留的三处 `契约上界`**：`test_rollout_scratch` ×2（阈值按被测自己的 `DRAIN_CEILING_SEC`
+  推导，实测 5× 余量）、`e2e/test_autonomous_round_flow_e2e`（桩每轮固定 0.07s，阈值 1s）。
+  审计过、不假红；新加的不走这条。
+
+## §2026-11-15-network-error-surface-is-a-named-tuple
+
+- **决定**：`remote/http.py` 导出 `NET_ERRORS`（`OSError` / `http.client.HTTPException` /
+  `WireSlowError` / `RetryableError` / 防御性 `RuntimeError`），`remote/job_lifecycle.py` 的十条
+  控制面通知改用它做窄捕（G4 11 → 1；剩下那处是 `on_drop` 回调边界，异常族由调用方决定）。
+- **为什么这不算放松**：宽捕把两类东西抹平了 —— 「连不上」（网络层，租约兜底是设计好的语义）与
+  「我们自己的 bug」（`AttributeError` 拼错字段 / `TypeError` 签名漂了 / `KeyError` 形状变了）。
+  后者的现场表现是「hub 不可达，本轮照跑」，于是真因永远进不了 hindsight。
+- **为什么 `RetryableError` 在内、`ProtocolError` 在外**：前者就是本仓对「瞬时网络失败」的分类
+  （5xx / 抖动 / 传输损坏），重试即可能修好；后者是 4xx/字段级**确定性拒绝**，调用方要能分辨它
+  去走「首写胜出 / 放弃」那条路 —— 吞掉它等于把确定性失败降级成网络抖动。
+- **判据**：`test_job_control_visibility.py::test_programmer_error_is_not_disguised_as_a_network_failure`
+  （五条通知逐条：`_request` 抛 `AttributeError` 必须穿出去）。实测把 `job_started` 改回
+  `except Exception` ⇒ 该参数化用例红，日志里写着「hub 不可达」，还原后绿。
+- **代价（已知）**：控制面通知里若有真正的编程错，worker 这一轮会崩而不是继续 —— 这是刻意的
+  （AGENTS §G4 的原始理由：宽捕顺带吞掉「真正的编码 bug」）。崩溃点带完整 traceback，而旧行为
+  只留一行「没送到」。
+
+## §2026-11-15-net-errors-tuple-lands-in-errors-leaf-composed-per-transport
+
+- **决定**：`NET_ERRORS` 的**基底**（`OSError` / `RetryableError` / 防御性 `RuntimeError`）落
+  `common/errors.py`，由 `common/protocol.py` 以 `NET_ERRORS as NET_ERRORS` 门面转发；传输层各自
+  追加自己会撞上的形状 —— `remote/http.py` 追加 `http.client.HTTPException` + `WireSlowError`，
+  `remote/hub_http.py` 追加 `http.client.HTTPException`（同批把薄壳 10 处 `except Exception` 全改窄，
+  G4 423 → 413、G9 44 → 42）。
+- **为什么不把 `HTTPException` 放进基底**：`common/errors.py` 的「**零 import** 叶子」是硬契约
+  （`test_protocol_split.py::test_errors_is_a_leaf_module`，两边都向下依赖它才不会成环）。给它加
+  `import http.client` 能把门禁改绿，但那是为省一行去拆一条结构不变式。`BadStatusLine` /
+  `IncompleteRead` 本来就是**传输**撞上的形状 ⇒ 该由传输壳点名。
+- **为什么经 `common.protocol` 门面**：`remote/hub_http.py` 的依赖闭集是刻意的（薄壳 = 「可注入的
+  单点」，导入期不攥住网络栈）。窄捕需要一条共享的错误面，就借已有的门面，而不是给薄壳开新依赖边
+  （`http.client` 一个 stdlib 名字例外，已在该测试的 `ALLOWED_IMPORTS` 旁记账）。
+- **判据**：`test_hub_http_split.py::test_probe_does_not_disguise_a_programmer_error_as_transient`
+  （`_request` 抛 `AttributeError` ⇒ `probe_job_result` 必须穿出去）。实测把那一处改回
+  `except Exception` ⇒ `DID NOT RAISE AttributeError` 红，还原后绿。
+- **代价（已知）**：同一条元组在两处组装，若将来新增成员要记得两处都追加。接受：两处各自负责的
+  层不同（`remote/http.py` 还有 `WireSlowError`），合并回基底就得先破叶子契约。
+
+## §2026-11-15-probe-return-values-are-conclusions-not-a-catch-all-boundary
+
+- **决定**：`common/distribution.py` 的探活 / 探测 / 取消出站点窄捕到 `NET_ERRORS`，探活类再并上
+  `ValueError`（`PING_ERRORS`）：`node_ping` / `push_node_ping` / `request_upgrade` / `cancel_task` /
+  `probe_weights_cached` / `weights_cached_on_node` / `_poll_result`。G4 413 → 404、G9 42 → 41。
+- **判据**：这些函数返回 `None` / `False` 不是「这里没什么可报」而是**结论**——「这台节点本轮不可用」，
+  下游据此把它排除出分发、份额落回本地。宽捕于是把「连不上」与「我们自己的 bug」变成同一个结论，
+  且后者不留痕（同族事故：`hub_http` 探针把 `AttributeError` 读成 `PROBE_TRANSIENT`，轮询环永远
+  「还没好」）。
+- **为什么探活类要多一个 `ValueError`**：`200` 但 body 不是 JSON（`JSONDecodeError` /
+  `UnicodeDecodeError` 都是 `ValueError`）确实属于「这台节点此刻不可用」，与连不上同档；而看字段的
+  错（`AttributeError` / `KeyError`）仍照抛 —— 多出来的那个成员只放过「读不出来」，不放过「形状变了」。
+- **留下的两处**（第三条边界，不是偷懒）：`abort_active_requests` 的 `_closer` 线程对**任意**
+  `HTTPResponse` 尽力 `close()`（异常族由对端实现决定，且它在 daemon 线程里，抛出去也没人接）；
+  `fetch_task` 对「非 `DistError` 的确定性失败」的兜底（解包错种类不定，且要保留真实 message，
+  注释里写着「不标 transient」）。
+- **判据落地**：`tests/common/test_dist_ping_errors.py`（垃圾回执 → `None`；`AttributeError` /
+  `KeyError` 穿出）与 `test_dist_common_poll.py::test_poll_result_lets_a_programmer_error_through`。
+  实测把对应处理器改回 `except Exception` ⇒ 前者 `DID NOT RAISE`、后者抛 `deadline exceeded`，还原绿。
+
+## §2026-11-15-notebook-cells-do-not-call-every-failure-an-unreachable-hub
+
+- **决定**：`remote/notebook_runtime.py` 的 7 处宽捕收窄（`NET_ERRORS` / `PROBE_ERRORS` /
+  `PackageNotFoundError` / `OSError`），并修掉 `_run_probe` 的 `except BaseException`（现在
+  `KeyboardInterrupt` 穿出去）。G4 404 → 397、G9 41 → 40。
+- **为什么**：这七处的旧文案是「FATAL: hub 不可达（X）——检查隧道 URL 是否过期」。它把**所有**失败
+  都说成网络问题 ⇒ 真因是本模块的 `AttributeError` / `KeyError` 时，最后一线索反而把人指向隧道
+  （一段言之凿凿的错方向，比带 traceback 的崩溃贵得多）。网络层才该说网络层。
+- **`_probe_cuda/_paddle` 的 Ctrl-C**：旧代码 `except BaseException` 把 `KeyboardInterrupt` 变成
+  「按未知处理」，而这两条探测最长 60s × 2 核 —— 按了 Ctrl-C 看着它继续跑，比崩掉更糟。
+  收窄成 `(OSError, subprocess.SubprocessError)`（起不来 / 超时）后两者语义分明。
+- **`md.version` 与 `chmod`**：前者只该吞 `PackageNotFoundError`（「版本未知」不许替本模块的 bug
+  说话）；后者只吞 `OSError`（Colab/Kaggle 的 FUSE 挂载点不一定支持 chmod，权限位是纵深防御）。
+- **判据**：`tests/remote/test_notebook_runtime.py` +4 —— 不可达仍 `-2`、程序员错穿出、探不起来回落
+  CPU、Ctrl-C 不被吞；逐条改回宽捕实测红（`DID NOT RAISE`）。
+
+## §2026-11-15-degrading-a-probe-is-not-the-same-as-staying-silent
+
+- **决定**：`worker/forensics.py` 的 5 处 `except Exception: pass` 改成 `_note(errors, …)`：
+  值仍然降级（`rss_mb()` 还是 `(0.0, 0.0)`、量不到的盘仍然不写键），但**成因进快照的
+  `probe_errors`**（`{字段: "异常类型: 文本"}`）。G9 该文件 5 → 0；同笔给 `rss_mb()` 补一个
+  进程边界兜底（G4 +1，记账在 `test_broad_except_budget.py` 表头）。
+- **为什么 G9 的第二条处置在这里成立**：这个模块的**唯一读者**是事故后的人（OOM / 写盘失败不留堆栈，
+  快照是临终状态）。而 `rss_mb: 0` 与「探针自己失败了」在 jsonl 里逐字相同 ⇒ 那份文件答不了它唯一
+  该答的问题（「上一轮到底有没有 OOM」）。留一行成因，成本是一个 dict 键，收益是判读从「猜」变「读」。
+- **为什么不顺手窄捕**：平台探针（`ctypes`/PSAPI、`/proc`、`shutil.disk_usage`、torch 驱动）的异常族
+  本来就由对方决定，而且本模块的硬契约是「绝不反杀训练」——宽捕在这里是对的，静默不是。
+- **判据**：`tests/worker/test_commit_journal.py` +4 —— 探针失败留成因、探针自己炸也不抛、量不到的盘
+  留名、全好时 schema 逐字不变（不出现 `probe_errors`）。把 `_note` 退回 `pass` 实测 2 条红。
+
+## §2026-11-15-probe-evidence-must-reach-the-line-people-actually-read
+
+- **决定**：`worker/forensics.log_snapshot` 的人读日志行在有降级字段时追加
+  `probe_errors=<字段名,…>`（只点名字，异常全文留在 jsonl）。`_log_line(tag, snap)` 独立成函数
+  以便用例直接钉这行（它是交付物，不是实现细节）。
+- **为什么**：前一条决定让快照**文件**说得清「这个 0 是量到的还是量不到的」，但现场最先被看到的
+  是控制台上那行 `[forensics] it103: rss=0MB ...`。只改 jsonl ⇒ 值班的人在事故发生当天仍然读不到
+  证据，要等事后有人想起来翻文件。
+- **代价**：干净路径的行短一个字都不多（无降级就不加后缀），坏路径多一段字段名列表。
+- **判据**：`tests/worker/test_commit_journal.py` +2 —— 降级时该后缀恰好出现一次、干净时不得出现。
+  把后缀那行改回 `pass` 实测红。
+
+## §2026-11-15-scan-entry-floors-are-derived-from-the-baseline
+
+- **决定**：存量基线类门禁（G4 宽捕 / G9 静默）的「扫描入口自检」地板不再写死绝对值，
+  改为 `tests/helpers/budget.sanity_floor(baseline)` = 基线总和的 **9 成**（向下取整）——
+  两个门禁共用这一份实现（此前各有一份、且各带一个手改数字）。
+- **为什么**：这条断言要回答的只有「AST 还数得到东西吗」，与「存量多少」无关。写死绝对值时，
+  每次**合法**清理基线都得顺手回填一个与之无关的数字（2026-11-15 一天里改了三回：423 → 397 →
+  398、51 → 44 → 40 → 35），三次都可能写错，而「这次该写多少」无判据可依。派生式随基线自动
+  收紧，人工回填这一步直接消失。
+- **为什么是 9 成而不是 5 成**：这条断言的代价是「一次误红」，收益是「扫描面坏掉立刻知道」。
+  10% 的余量只够容纳「一两个文件完全掉出扫描面」，再多就该红。
+- **判据**：`tests/test_budget_floor.py`（4 条：比例、永不是恒等式、随基线下降、空基线为 0）
+  + 实测把 `PROD_DIRS` 里的 `worker` 去掉（模拟「扫描面写错」）⇒ 两个门禁都红，还原后绿。
+
+## §2026-11-15-every-budget-gate-shares-one-derived-sanity-floor
+
+- **决定**：五条存量门禁的自检地板全部改用 `tests/helpers/budget`（基线九成）：
+  G4 宽捕、G9 静默、G5 私有断言（原 `>= 500`，基线 703）、G6 抑制符（原 `>= 150`，基线 163）、
+  文本断言（原 `(400, 200)`，基线 1501 / 1154）；G3 print 门禁此前**没有**条数地板（只有文件数与
+  锚点），现补一条。
+- **为什么不只是「少改几行」**：这些断言要回答的都是「扫描面还数得到东西吗」。写死绝对值时有两个
+  后果：① 每次合法清理基线都要回填一个无判据可依的数字（2026-11-15 一天里改了三回）；
+  ② 数字会随着清理一路走低，最后低到「扫描面只剩一半也过」。派生式同时修掉两条。
+- **细则**：`sanity_floor(table)` 给「{文件: 整数}」一张表的门禁；`sanity_floor_of(total)` 给按类别
+  分表（G6）或多个口径（文本断言）的门禁 —— 都是同一个比例，只有一份实现。
+  **文件数地板仍是绝对值**：拿「文件数」和它自己的九成比是恒等式，没有意义。
+- **一个顺手抓到的东西**：G6 原来那条地板比的是**基线跟自己**（恒真）⇒ 扫描面坏掉它也不会红；
+  现在比的是 `_scan()` 的结果。
+- **判据**：`tests/test_budget_floor.py` +1（两个入口同口径）；实测把 `worker` 从 G6 的扫描面排除
+  ⇒ 该门禁两条红；把 `worker` 从 G4 的 `PROD_DIRS` 去掉 ⇒ 两条红。还原后全绿。
+
+## §2026-11-15-visible-degradation-covers-the-wrapper-not-just-the-inner-call
+
+- **决定**：G9 第十四批收敛三处「先吞后说」——
+  ① `trainer/batch_runner._heartbeat`（批评估心跳）：`except Exception: pass` → `warn_once`
+  + 带成因；② `worker/loop_guards_sweep._rotate_cleanup` 的孤儿波次清理：
+  `except BaseException: pass` → `except Exception` + 一行 `skipped: <repr>`；
+  ③ `remote/hub_client.git_head`：先 `pass` 再抛固定文案 → `raise … from e`，退出码非 0 与
+  空输出各自具名。G9 35 → **32**。
+- **为什么 ①不是第六批的重复**：第六批修的是 `write_state` **内部**落盘失败（O(1) 那条也不抛）。
+  这一处包的是「写心跳」这件事的整块，包括 `from worker.eval_heartbeat import …` —— 打包/路径
+  问题会让整块变成静默，而它在 console 上的表现与「心跳根本没调」逐字相同。
+- **为什么 ②必须收窄而不只是加日志**：`BaseException` 把 **Ctrl-C** 一起吞掉，而批量 rmtree
+  是本轮最慢的动作之一 —— 按了中断却在下一轮接着跑，中断「看起来没生效」。这种形状在仓库里
+  已有先例（第十二批 `notebook_runtime._run_probe`）。
+- **为什么 ③算「信息丢失」而不算风格**：`git 没装 / cwd 没了 / 30s 超时 / 不是 git 仓库` 四种
+  成因的处置完全不同，压成一句「不在 git 工作区」等于把诊断成本全推给现场。
+- **判据**：三处各自改回旧行为 ⇒ 6 条新用例红（心跳 1 / 波次清理 2 / git_head 3）。全量
+  6096 passed / 2 skipped；mypy 933 文件。
+
+## §2026-11-15-uptime-signals-and-a-dead-git-head-twin
+
+- **决定**：G9 第十五批 —— ① `worker/terminal_stats.write_terminal_stats` 写盘失败改
+  `warn_once(WARN_KEY, …)`；② `worker/serve_pool.begin_round` 的 `w.kill()` 失败逐次留一行；
+  ③ **删掉** `remote/job_fs._git_head`（连同 `__all__` 条目与 `remote/worker.py` 的转发块）。
+  G9 32 → **29**，G4 398 → **397**。
+- **为什么 ③不是「同 ②一样加日志」**：它没有生产调用者 —— `remote/code_snapshot.py` 有自己的
+  `_git_head`（走 `run_capture` 防 Windows 闪窗，那条纪律见 details §20），job_fs 这份只是
+  `remote/worker.py` 转发名养着的死双生。给死代码加日志是给维护成本再加一层。
+- **为什么 ①要按 key 去重**：它每轮都会走到；坏了就是每轮都坏，逐轮喊会把日志刷成噪音。
+  ② 则在轮边界最多几次，逐次留痕更有用（能数出「这个轮死了几个 worker」）。
+- **顺带**：G9 门禁的绝对文件数下限（`>= 25`）删除。存量清到 22 个文件后，它就是又一处
+  「清理到哪手改到哪」的回填；扫描面活性已由派生根数地板（基线九成）覆盖。
+- **判据**：①② 还原成旧行为 ⇒ 2 条新用例红；③ 由既有 `test_moved_names_…` /
+  `test_worker_forwards_every_moved_name` 覆盖（名字从 `MOVED_NAMES` 移除后仍绿）。全量
+  6098 passed / 2 skipped；mypy 933 文件。
+
+## §2026-11-15-forwarded-names-must-stay-live
+
+- **决定**：新增门禁 `tests/test_worker_forward_names_are_live.py` —— `remote/worker.py` 里每个
+  `from remote.X import (name as name)` 转发名，在**除定义模块与它自己那行声明之外**的 `.py` 里
+  必须至少被提到一次；只活在转发声明里的名字 = 死别名，门禁判红（提示删掉，或加进 `ALLOWED`
+  并写理由 —— 今天 `ALLOWED` 为空）。
+- **为什么**：`remote/job_fs._git_head`（上一批）就是这样活了一年的 —— 全仓零调用，只因 worker
+  的转发名还在就没人删，直到有人差点给它加日志。一次人工 grep 能发现，但**没有东西阻止下一个**；
+  这条纪律与 G5/G9 同形：冻结不了就判据化。
+- **口径**：只认 `name as name`（改名转发不算）；`worker.py` 自己**算在扫描面里**（`PPO_BACKENDS`
+  喂 argparse、`YIELD_AFTER_SEC_DEFAULT` 喂让路判据都是活引用），但 `NAME as NAME,` 声明行会被
+  先剥掉 —— 否则每个名字都「在 import 里提到过自己」而永远判活。
+- **判据**：临时给 `remote/job_fs.py` 加 `ZZ_PROBE_SENTINEL` 并从 worker 转发 ⇒ 门禁红（并点名
+  该名字与定义模块）；还原后绿。另有一条口径自检（`JOB_DIR_KEEP` / `pack_opt_tar` 必须被判活）
+  与一条入口自检（转发名 ≥ 90，由派生地板给出）。
+- **现状**：103 个转发名，**零死名**（人工普查的结论与门禁一致）。
+
+## §2026-11-15-forward-gate-covers-every-facade
+
+- **决定**：上一节的门禁从「`remote/worker.py` 一张表」推广成**全仓门面**：
+  `tests/test_forward_names_are_live.py` 自动收录所有含 ≥3 个 `name as name` 转发的文件
+  （今天 15 个：`remote/worker` 103 名、`common/protocol` 84、`worker/config` 48 …），
+  逐名判活。
+- **为什么推广**：一张表只管得住那一个文件；同样的死别名在别的门面一样会长。推广后立刻抓到
+  真例：`common/protocol.GOAL_SCRIPT` / `INTENT_SCRIPT` —— 定义模块（`common/manifest.py`）自己
+  还在用，但**门面上这两个别名零读者**，已删。
+- **一个差点自证的坑**（值得记）：第一版判活用「全仓文本含该名字」，而门禁文件自己的说明里
+  点名了 `GOAL_SCRIPT` 作例子 ⇒ 它自己成了「还有人引用」的证据，两个死名被判活。修法：门禁
+  自身排除出扫描面（`SELF`）。**判据文件的示例文字不得成为判据的输入**。
+- **性能**：一次分词建 `{标识符: 文件集合}` 倒排索引（`@cache`），逐名字判活 O(1)；
+  三个用例合计 ~4s（不做索引时是 17s）。
+- **判据**：① 真例红→绿（`GOAL_SCRIPT`/`INTENT_SCRIPT` 删前红、删后绿）；② 合成探针
+  `ZZ_PROBE_SENTINEL` 从 `common/manifest` 转发进 **`trainer/batch_eval.py`**（另一个门面）⇒ 红
+  并点名；③ 口径自检（`JOB_DIR_KEEP` / `pack_opt_tar` / `ProtocolError` 必须被判活）+
+  入口地板（门面 ≥ 13、转发名 ≥ 270，均为派生地板）。
+
+## §2026-11-15-g9-remaining-29-classified-26-contractual-3-leaks
+
+- **决定**：G9 剩余 **29 处 / 22 文件**逐条定性完毕（全文见审计档 `python.refactor.md` 附录 C）：
+  **A 契约静默 26 处（不再动）· B 漏网 3 处（待窄捕）· C 已留痕 0 处**。
+  - **A**：日志层 `Tee` 的三处 sink（递归风险）、进程收尾级联的最后一层（`close→wait→terminate→
+    wait→kill`，`child_proc` / `deliver_proc` / `rollout_node` / `worker_proc`）、返回 dict 的
+    能力探测（`torch_xla` 三项）、观测回调（`bulk_sched._notify_p1`、`error_report._send`、
+    `offline_deliver._guard`、`cloud_pool._log_line`）、返回值即结论的探针（`push_bootstrap.wait_ping`、
+    `push_register` 读 error body、`deliver_worker._watch_stdin`、`child_proc` 读流截断）、
+    平台降级（`payload_worker` / `upload_worker` 的 `reconfigure`、Windows 控制台不接受≠错）、
+    以及**被既有契约用例钉死**的 `trainer/loop_transport._course_cf_tunnel`（配置读不到 ⇒ 缺省）。
+  - **B**：`remote/push_client._probe_sha`（200 但 body 非 JSON 被读成「问不到」⇒ 重复上传）、
+    `remote/worker.run_job` 的结果复用（校验器 bug 被读成「缓存损坏」⇒ 静默重算 PPO）、
+    `trainer/bc_loop.append_weights_md_row`（git 取不到 vs 命令拼错同形）。
+- **为什么 A 类“不再动”要写成决定**：这 26 处每一处都**看起来**像「降级即静默」的旧债，不写下来
+  下一个人会重审一遍，或更糟 —— 给收尾级联的最后一层加日志（在已经不受控的地方再加一次可能
+  失败的操作）、给日志层内部加日志（递归）。判据是「再加一层能不能更好」，不是「静默是否难听」。
+- **为什么不给 A 类加白名单/noqa**：G9 基线只许调小，A 类冻结即够；表达「这是契约」的正确位置
+  是**代码注释**（就近），不是一份需要同步维护的清单。
+- **现状与下一步**：B 三处都是「窄捕不改语义」的形状（`NET_ERRORS`+`ValueError` /
+  `(OSError, ValueError, ProtocolError)` / `(OSError, SubprocessError)`），各配一条「程序员错误
+  必须穿出」用例即可。
+
+## §2026-11-15-b-class-narrowed-probe-cache-and-sha
+
+- **决定**：把附录 C 里 B 类三处宽捕收窄（G9 29 → **26** 处 / 19 文件，G4 397 → **394**）：
+  ① `remote/push_client._probe_sha` → 模块级 `PROBE_ERRORS = (*NET_ERRORS, ValueError)`；
+  **200 但 body 不是 JSON 照抛**。② `remote/worker.run_job` 的结果复用 →
+  `except (OSError, ValueError, ProtocolError)`。③ `trainer/bc_loop.append_weights_md_row` 取 sha →
+  `except (OSError, subprocess.SubprocessError)`，取不到仍写 `"n/a"`。
+- **为什么 ①必须抛**：`_probe_sha` 的 `None` 被上层读成「问不到 ⇒ 沿用上次命中 / 保守上传」。
+  节点回执形状变了（200 + 非 JSON）是**确定性**问题，读成 `None` 的结果是每轮白传 `code.zip`
+  （1.69MB + opt 1MB），链路越慢越必然超时 —— 真因永不出现。与 `common/distribution` 探针、
+  `hub_http` 薄壳同一条判据。
+- **为什么 ②重要**：`validate_result` 自己的 bug（TypeError）原被读成「缓存坏了」⇒ **静默重算
+  一次 PPO**（几十分钟 + 权重与上次不同），日志里只有「缓存无效」。
+- **为什么 ③算漏网**：`"n/a"` 是显式降级（不是静默），但宽捕让「git 不在 PATH / 超时」与
+  「命令拼错」同形，而这一列是模型档案的**溯源列**。
+- **判据**：三处各自撤回 `except Exception: pass` ⇒ 4 条新用例红（非 JSON 被读成问不到 /
+  `TypeError` 被吞 / `TypeError` 记成 n/a / 校验器崩了被当缓存坏）；恢复后全绿。全量
+  6113 passed / 2 skipped；mypy 936 文件。
+- **附带发现（测试纪律）**：`LogRouter.warn_once` 去重是**进程级**的。断言「同一 key 只喊一次」
+  的用例必须注入**同一个** `LogRouter()` 实例 —— 每次 `lambda: LogRouter()` 都 new 一个等于把
+  去重关掉（断言退化成「喊了几次就是几次」）。这条是「全量 forkdist 分片一变就随机红」的成因。
+- **2026-11-15 补（A 类就地注明）**：附录 C 的 26 处 A 类逐条在**各自的 `pass` 上方**写了
+  `# 契约静默（G9 冻结，非旧债）：<理由>`，并由
+  `tests/test_silent_except_budget.py::test_frozen_silent_sites_say_why_in_place` 双向钉住
+  （缺理由 ⇒ 红；注释对不上静默宽捕 ⇒ 红）。**不新增 noqa / 清单文件 / 例外表**：清单离代码远，
+  改代码的人看不到它，这正是同一批 `except Exception: pass` 被反复重审的成因。
+  标记**不减轻** G9 计数 —— 它是「理由已就近表达」的证据，不是豁免凭证。
+- **2026-11-16（§9 注释指针门禁）**：新增 `tests/test_docstring_refs.py` —— 注释 / docstring /
+  字符串里「带目录的 `file.py::name`」必须落在真实文件上（`tokenize` 只读 COMMENT + STRING，
+  解析顺序：仓库根 → `nn-training/` → 引用者目录 → 包内后缀）。落地时 13 处指针仍指着 `biz/` →
+  `worker/` 搬家前的旧家，全部改成现在的家（含把「三处行构造点」修正成现在的两处）。
+  **被否决的两个口径**：① 连 `path.py:123` 行号一起查 —— 行号天然随代码漂移，而且它出现在被
+  引用的事故 traceback 里（那是历史证据，改写等于伪造现场），查它只会逼人删注释；
+  ② 连裸文件名（散文里的 `queue.py`）一起查 —— 同名模块在仓里常有多份，写信人只是提一句模块名，
+  查它会把 100+ 处叙事写成红。只查「带目录 + `::`」既覆盖「去那个文件看契约」的真实指针，
+  存量又是可清零的（13 → 0，无基线文件）。
+- **2026-11-16（§9 模块 docstring 上限门禁）**：新增 `tests/test_module_doc_budget.py` +
+  `tests/golden/module_doc_baseline.json` —— 模块 docstring 超过 50 行按文件冻结（13 文件），
+  只拦增长 + 基线只许调小。**被否决：一次清零（把三个 `__init__.py` 的 113/99/90 行搬进
+  `docs/nn/`）** —— 那几段是分层契约（谁能 import 谁、哪一层能改状态），必须能在 import 那一刻
+  读到；搬走等于把契约挪到读者不会去的地方，与 §9「注释离代码太远」自己矛盾。门禁只做止损：
+  新模块不许一出生就超 50 行，已超的不许更长；顺手删短就顺手把基线调小。
+  口径只数**模块**级 docstring（函数/类的不算：它们的长度由 G1 的函数形状与可读性另管）。
+- **2026-11-16（G2 名册清零：`UnreapedProcs`）**：`common/platform_utils.py` 的模块级
+  `_UNREAPED: list[Any]` 搬进 `UnreapedProcs`（`keep` / `sweep` / `__len__`），三个公开函数
+  `keep_unreaped` / `sweep_unreaped` / `unreaped_count` 签名不变、多一个 `store=` 注入位，
+  `L0_MUTABLE_ALLOWED` 清空。`common/` 至此零模块级可变容器（`common/__init__.py` 契约 #4）。
+  为什么不留 `list` + 锁：那是一本**进程级账本**，锁只是让并发写不打架，测试里仍然无法隔离；
+  对象的 `store=` 让用例自己造账本（新用例断言注入的那个不碰默认实例）。
+  名册本体不删：`test_l0_allowlist_is_still_needed` 靠它继续拦「过期豁免」，将来真有拆不动的
+  存量时加条目仍要在表头写日期与理由。
+- **2026-11-16（动作空间判据单源）**：`worker/ppo/np_core.py` 的两处 `"a_hold" in d`
+  （掩码宽校验、episode 字段集）改走 `ActionSpace.from_batch(d).is_v6`；新增门禁
+  `tests/common/test_action_space_contract.py::test_only_one_place_decides_v6` —— 生产面除
+  `common/contracts.py` 外不许再自己判 `a_hold`（`ast.Compare(In)` 与 `.get("a_hold")` 都算）。
+  为什么值得一条门禁：第二处判据拼错一个字母 ⇒ 静默走 legacy ⇒ 9 宽掩码按 7 宽切、hold 头
+  永不训练，loss 照降；这类错误没有任何运行时现象。`_RL_SHARD_SPEC` 里的 `"a_hold": (...)` 是
+  键名声明不是判据，所以门禁只认 `in` / `.get` 形态（不是「出现即红」）。
+- **2026-11-16（B8 第一刀：`common/codehash.py`）**：`common/distribution.py`（1622 → 1409 行）
+  的代码身份面整体搬到 `common/codehash.py`：`compute_code_hash` / `CODE_HASH_MANIFEST` /
+  `_collect_code_hash_files` / `_skip_codehash_{dir,file}` / `code_hash_report` /
+  `compute_engine_epoch` / `check_code_hash` / `dirty_hash_files` / `_parse_porcelain` /
+  `_git_{index,cat}_blobs`。仓库根锚点同时单源成 `common/paths.py::REPO_ROOT`（原先在
+  distribution 里自己上溯 3 层，`common/codehash.py` 若照抄就是第二份）。
+  **不留 `X as X` 门面**（与前几次搬家不同）：调用点 16 文件全部改成 `common.codehash.X`，
+  打桩面（`monkeypatch.setattr(common.codehash, ...)`）跟着走 —— 门面会让「codeHash 在哪」
+  永远有两个答案，而这次搬迁的动机正是「一个 1600 行的杂物间里没人找得到它」。
+  随之收紧的判据：`tests/test_distribution_io_budget.py` 的扫描面从「一个模块」扩成
+  `L0_IO_MODULES = (distribution, codehash)` 并按「模块 + 原语」记账 —— 搬家不能把副作用
+  从账本上搬没。
+- **2026-11-16（仓根锚点单源：`common/paths.py`）**：`REPO_ROOT` 原来有 13 份「自己数层数」的副本
+  （`biz/ hub/ remote/ trainer/ worker/` 各自 `Path(__file__).resolve().parents[2]`）。这不是重复代码，
+  是重复**算术**：`hub/store_offline.py` 从 `remote/hub/` 搬到 `hub/` 那次少了一层，代码不报错，只是
+  所有相对路径指到仓库父目录（靠一个工装用例才抓住）。所以口径定为「仓根只在 `common/paths.py`
+  算一次，类型是 `Path`」，13 个模块改 import；`trainer/batch_eval.py` 的 `from biz.batch_plan import
+  REPO_ROOT as REPO_ROOT` 自别名一并删（`X as X` 门面正是这轮 P1-11 在清的债）。
+  **入口脚本例外**：`train/train_bc_v6.py`、`trainer/eval_*_once.py`、`worker/eval_replays_once.py`、
+  `worker/ppo/bench.py`、`worker/models/*`、`worker/data/*` 要在 import `common` **之前**算出根来插
+  `sys.path`，那种自举只能在本地算（写错是 ImportError，不是静默类错误）—— 它们按文件冻进
+  `tests/test_repo_root_anchor.py` 的 BASELINE，只许调小。
+- **2026-11-16（hold 判活窗下沉 `common/hold_window.py`）**：「接管后多久没进度算掉线」是**两侧共用**的
+  判据（hub 判 hold 活性 / 训练侧读控制文件时就地自判活），原先只有 `hub/task_pack.py` 一份，训练侧靠
+  函数内 `from hub.task_pack import hold_progress_stale_sec` 取 —— 一个阈值就造出一条「纯逻辑模块碰网络」
+  的边。搬到 L0 后两侧都只依赖 `common/`。**没有**合并 `AUTO_HANDOFF_PENDING_SEC`（导包窗口，巧合同值）、
+  也没有合并 `hub/store_leases.py` 的 BC 进度租约窗：语义不同，plan §1.5.2-P0-1 明令禁合并。
+- **2026-11-16（`loop_control` 归属：`trainer/` → `worker/`）**：它只 import `common.*`（纯逻辑），此前被
+  算作「编排」全靠 `from trainer.dispatch_queue import REPO_ROOT` —— 为取一个路径常量而存在的一条边，
+  与 `biz/batch_plan.py` 那笔同一型。仓根收口删掉这条边后，`test_trainer_holds_only_orchestration_modules`
+  立刻红（这正是那条门禁的用途）。归属按既有口径定：纯控制面契约住 `worker/`（`worker/gate_halt.py` 同族），
+  搬家顺带正过来一条反向边（`worker/loop_hold` 曾 import `trainer.loop_control`）。同步改了
+  `TRAINER_ORCHESTRATION`、`remote_dag.LAYERS`（`worker.loop_control: 0`）、`test_production_isolation`
+  的路径钉与 dashboard/docs 里的指针。
+- **2026-11-16（`worker/ppo/engine.py` 的转发面：11 名 → 1 名）**：`RolloutBackend` 契约（`worker/backend.py`）
+  要求 `per-tick` 后端模块上有 `load_episode_from_shard`，`trainer/stream.py` 运行期取 —— 这条是契约，不是
+  旧名字。其余 7 个（`compute_gae` / `discover_*` / `load_shard*` / `load_episodes_common` /
+  `_RL_SHARD_SPEC`）的唯一消费方是两个 worker 测试的属性取用，改成 `from worker.ppo.np_core import …`
+  后删除，并把守护测试翻转（断言 engine 上**没有**这些影子）。**反面教训**：契约成员不能用
+  `y = X.y` 赋值发布 —— 静态契约扫描器只认 `from X import y`，赋值会判 `<unresolved>` 而
+  `test_backend_contract_runtime` 红；那一条 `noqa` 留着，并在 import 里写清来路。
+- **2026-11-16（`trainer/` 的 "re-exported for tests" 面归零）**：`trainer/{run_rl,eval_dispatch,loop,dispatch}.py`
+  上 12 条 `# noqa: F401` 的注释都写着「for tests / 兼容外部引用」，但那些读者只有 `e2e/test_run_rl.py` 与
+  两个单测。停机条件本来是「tests 全量改完后删除」，一直没兑现是因为没人量过谁在用。这批把 5 个
+  `worker.resume` 名 + `run_rollout_queue` + `find_archive_weights` / `report_winrate_safe` /
+  `select_delayed_eval_it` + `resolve_tail_join_sec` 的消费方改到真家，`trainer/loop.py` 的
+  `run_inspect` / `log_iter_error` 因全仓零消费直接删。G6 基线 18 处 / 10 文件 → 6 处 / 6 文件。
+  口径不变：**转发面只在有停机条件时成立**；测是读者，就该跟测试一起迁走。
+- **2026-11-16（P1-5 第一批：`common/settings.py` + G13「env 直读只减不增」）**：审计说「130 处 env
+  直读 ⇒ 建 `Settings` 层」。先量后动：AST 数出生产面 **94 处 / 44 个变量**，被 >1 个模块读的只有 5 个，
+  真「同一根旋钮两个默认值」的只有 2 个（`EVALBOARD_DATA`：`trainer/batch_store` 与
+  `worker/eval_heartbeat` 各解一次，而 `worker/` 不能 import `trainer/`；`BATTLE_HUB_TOKEN`：
+  `remote/run_loop` 与 `remote/deliver_worker` 各抄一遍 strip 归一化）。所以这批**不**建穿透签名的
+  `Settings` 对象（那是给 44 个旋钮加一层转发面），只建 `common/settings.py` 收多读者旋钮，形态沿用
+  `common/hold_window`：常量 + 调用时读 env 的纯函数 + `env=` 注入（不给测试塞 `monkeypatch.setenv`）。
+  **G13** `tests/test_env_reads_budget.py` 按文件冻结直读次数（63 / 32，只许调小）+ 旋钮单家判据；
+  豁免 `STANDALONE_BOOT_MODULES`（它们不许 import `common.*`，本地解是有意为之）。
+- **2026-11-16（P1-11 第三批：拆 `ppo/common` → `np_core` 的再导出门牌）**：`worker/ppo/common.py` 再导出
+  29 个 `np_core` 名字，其中 10 个全仓零读者；其余 19 个只有 5 个文件消费，而 `worker/ppo/__init__.py`
+  的便捷名表**已经声明**这些名字住 `np_core` ⇒ 这层是第三份门牌，撤名字时看不见第二入口。5 处
+  `from worker.ppo.common import …` 改直取 `np_core`（`remote/train_core` 那条是延迟 import，`np_core`
+  免 torch，顺带少拖一次）；`common` 只留自己真用的四个名字，`# noqa: F401` 消失 ⇒ G6 6 → 5 文件。
+  **判据换代**：`test_ppo_common.py` 原来断言「四个再导出面仍在、但必须是同一对象」——白名单会替壳背书；
+  改成结构判据「`common` 里 `from … np_core import X` 的 X 必须在本模块体内被引用」，整类壳被禁。
+- **2026-11-16（P1-11 第四批：`worker/data/{dataset,weights_io}.py` 的 split 残壳）**：两处都是
+  2026-09-26「把免 torch 的那一半搬出去、留层再导出以便调用点不改」的产物。量出：`dataset` 的 5 名里
+  4 名（`_MOVE_FLIP` / `BULLET_MIRROR_LUT` / `ENEMY_MIRROR_LUT` / `_flip_direction`）**全仓零读者**；
+  `weights_io` 的 6 名里唯一有外部读者的是 `latest_weights_path`（`eval_bridge`，改直取 `weights_meta`），
+  另有两个（`latest_weights_path` / `validate_weights_meta`）本就是文档里的字。收成真 import ⇒ G6 5 → 3 文件。
+- **2026-11-16（P1-12：`compute_gae` 向量化，逐字节不变）**：GPU/CPU 上 GAE 原本每个
+  transition 都做 4 次 `float()` 装箱 + 1 次 `pow`。改法只向量化**无递推的那半**（γ_step、δ、
+  carry），tick 循环里留一行 `last = δ[t] + carry[t]·last` —— 实测 2.2~4.3×（N=128→4096）。
+  审计档原建议「按 done 分段后 `np.cumsum` 折扣前缀积」**被否**：它要乘一遍再除一遍，舍入顺序
+  与逐项递推不同（`adv` 虽落 float32 但按 float64 累积），golden 签名会变；且 `P_t` 长局上下溢。
+  `γ^Δt` 也**不用 `np.power`**（整数指数走 numpy 自己的快路径，末位不保证一致）⇒ 按 distinct Δt
+  建 Python `pow` 查表。回归用例把旧循环逐字留作独立实现做逐位对账。
+- **2026-11-16（P1-12：`append_jsonl` 去掉写者线程）**：账本每行原走「队列 + 写者线程 +
+  `Future` ack」，实测 161 µs/行，其中写盘只占 28 µs、**99 µs 是跨线程 ack 的等锁延迟**
+  （cProfile 的第一大项就是 `_thread.lock.acquire`）。改成「每路径一把锁 + 就地追加」：
+  40 µs/行（4.0×），「返回即已写完」的契约不变，异常直接抛给调用方。否决两条：常开句柄
+  （7 µs/行，但破坏「写者不持有句柄」且 Windows 上会撞 `os.replace`，本机无法证伪）与
+  批量/异步（把「返回即可读」变成「稍后可见」）。顺带 `close()` 的排空/`timeout`、空闲
+  退场常量与那条跨线程回传用的宽捕一起消失（G4 `common/fs.py` 1 → 0）。
+- **2026-11-16（P1-4：`Any` 先上预算门禁，不批量换 `object`）**：审计原方案是「`Any` 换成
+  `object`（惰性）」。实测两轮：全量 236 处 `dict[str, Any]` → `dict[str, object]` 触发
+  **406 个 mypy 红点 / 93 文件**；缩到「单文件 ≤2 处」的 50 个文件仍是 **102 红 / 29 文件**，
+  回滚到还剩 42 个红点时它们全在调用方（`object` 不可下标、`dict` 的值型不变式）。
+  ⇒ 这些 dict 缺的是**字段表**（`TypedDict` / dataclass / 只读面 `Mapping[str, object]`），
+  收益只能按数据边界逐个拿。故本批只落 **G14**（`tests/test_any_budget.py`：1176 处 / 182 文件
+  按文件冻结、只减不增、`Any as A` 改名绕过单独拦），先把「只涨不跌」掐掉。
+- **2026-11-16（P1-4 第一处：`demo_bank` 上 `TypedDict`）**：`demo_bank` 原是全链裸 `dict` +
+  字符串键，`remote/train_common` 的字段安全阀自带一份手抄名单（`need = {...}`），与
+  `engine_paddle` 的 `if "extra" in demo_bank` 各说各话 —— 缺 `extra` 时它是**静默跳过**，
+  BC 项少一半而日志正常。新增 `worker/ppo/demo.py::DemoBank`（L0，只 import numpy/typing）：
+  五键具名；`DEMO_BANK_FIELDS` 由 `__required_keys__` 派生，安全阀与类型只有一份名单。
+  消费面四处改注（`decode_demo_bank` / `check_demo_bank` / `_CoreRun` / 两侧 `ppo_update`）。
+  判据 `tests/remote/test_demo_bank_contract.py`（字段表 == 导出端五个 / 安全阀同源 / 缺 extra 拒收）。
+- **2026-11-16（P1-6 第一刀：线程必须有名字 + G15）**：55 处 `Thread(` 里最后 10 处补上 `name=`
+  （`batch-worker:<node>-<i>` / `batch-supervise:<node>` / `batch-watch` / `queue-local:<node>` /
+  `queue-worker:<node>` / `stream-collector` / `push-bootstrap` / `smoke-hub-server` / `tunnel-ab-hub`），
+  新增**零容忍门禁** `tests/test_thread_names.py`（AST 要求 `Thread(...)` 带 `name=` 关键字；
+  位置参数不算）。`Runtime`（executor 生命周期 / 有界共享池）不在本批，属 B6，见 §P1-6。
+  顺带：`trainer/batch_runner.py` 顶在 1000 行 LOC 预算上，三处 spawn 收进 `_spawn_thread(...)`
+  ⇒ 1000 → 997，没有开新豁免。
+- **2026-11-16（bugfix：torch 侧 demo BC 缺 `extra`，两后端输入分叉）**：`demo_bank` 有五个字段，
+  `engine_paddle` 一直把 `extra` 物化进 `demo_t`，torch 侧 `_setup_demo` 只建 obs/scalars/actions/masks
+  ⇒ 同 bank 两侧喂给模型的输入不同。`policy_extra=True` 的 `StudentNet` 在 `_require_extra` 处
+  拒绝 `extra=None`（明确「不静默用 0」）⇒ torch「demo 开 + 带 extra 模型」腿每次更新直接炸；
+  legacy 模型看不出差别。修 `_setup_demo` 与 Paddle 同口径（存在即物化）；先红后修用例
+  `test_demo_bc_feeds_the_bank_extra_to_a_policy_extra_model`。详见 `docs/nn/training-stack.md` §77。
+- **2026-11-17（B8：`remote/offline_boot.py` 改生成物，12 段源码 `.pyfrag` + 拼接器）**：审计 §0.4-12 /
+  §7.6 要求「3554 行改成生成物：源码拆多文件、构建时拼成单文件发行」。动前的约束是硬的：
+  `offline_boot` 是 **standalone 运输单元**（notebook 引导格从 GitHub raw **按文件名**拉它，那时
+  `code.zip` 还没进 `sys.path`）⇒ 拆成可 import 的模块会直接破掉运输契约，所以拆的只能是**源码**：
+  `remote/_offline_boot/*.pyfrag` 12 段（按**顶层块边界**切，每段都能独立 `ast.parse`，最大 441 行），
+  `tools/build_offline_boot.py` 按 `PARTS` 逐字节拼回发行物（6 行「不要手改」文件头 + 12 行分段头 + 段间 11 个空行
+  ⇒ 与拆分前 **+29 行、其余逐字节相同**，一次性切分脚本先对账过 `"".join(parts) == 原文件`）。
+  **分片后缀刻意是 `.pyfrag` 不是 `.py`**：生产树的静态门禁（print / 宽捕获 / `Any` / 函数形状 / LOC /
+  层级账本 / 抑制符）全部按 `rglob("*.py")` 扫**发行物**，分片叫 `.py` 会把同一行字数两遍 ⇒ 只剩两条
+  坏路（抬基线，本仓禁；或给每个门禁加排除名单 = 让门禁看不见代码）。`.pyfrag` 让「被检查的东西」与
+  「被运输的东西」是同一个文件。代价写进明处：分片不被 mypy/ruff 解析，一致性与语法靠「重建 → mypy +
+  用例」兜住（分段头编号漂号也会被守卫当场抓住）。
+  **LOC 豁免因此改成有条件的**：`offline_boot.py` 之所以还豁免，不再是「拆不开」，只剩「运输契约要
+  单文件」 ⇒ `tests/test_python_loc_budget.py` 新增逐分片 LOC 判据（同一个 `loc_of`；实测往
+  `12_entry.pyfrag` 塞 1000 行 ⇒ 红），下一个「懒得拆」的巨段长不出来。
+  守卫 `tests/remote/test_offline_boot_is_generated.py` 四条（提交物 == `build()` · 分片目录无表外分片 /
+  无 `.py` · 分段头与位置一致 · 每段以换行收尾），四向证伪实测红（手改生成物 / 加表外分片 / 混进
+  `.py` / 分段头漂号）。`test_module_doc_budget`（53 行）与 G3/G4/G14 读数**一个都没动**。
+  全文 → `docs/nn/engineering.md` §118。
+- **2026-11-17（B6 第一刀：`Runtime` = 线程池的唯一所有者 + G16）**：全仓 10 处
+  `with ThreadPoolExecutor(...) as ex:` 就地建池（生产包 9 + `tools/e2a_readout` 1），四个缺口同时存在 —— 没有所有者（池的生死绑在
+  词法作用域上）、没有上限（`min(8, len(nodes))` ×2 / `len(items)` / `n_slots` 叠加无人报数）、
+  没有取消点（`halt_event` 到不了池边）、线程名各写各的（10 处只有 1 处带 `thread_name_prefix`）。
+  新增 `common/runtime.py`（L0，stdlib-only）的 `Runtime`，做成 **`ThreadPoolExecutor` 的同形替身**
+  （`with Runtime(scope=…, workers=N) as ex:` 后 `ex.submit/map` 照旧，转发默认池 `"main"`）：
+  池按名存在 Runtime 里、`close()` 一次收完；线程名 `<scope>-<pool>`（scope 必填）；取消点 =
+  `request_stop()` / `check()` / `sleep()` / `submit|map` 拒绝新活（已开跑的不打断 —— Python 线程
+  杀不掉）；`describe()` 首次让「开了几个线程、超没超」可见。
+  **三条有意不做**：① 不静默节流（`workers=N` 是操作员的决定，静默砍并发 = 拿吞吐换好看的数字，
+  而上限只约束隐式请求 `workers=None` 并只报数）；② 不读 env（G13 只许调小，且并发旋钮不许再
+  种一遍「同一根旋钮两个默认值」）；③ 不替调用方接 `halt_event`（6 个模块的 halt 语义一起改要真跑，
+  `stop=` 已吃 `Event`，接线是调用方一行）。`RuntimeCancelledError` 不并进 `common.errors`（失败分类
+  ≠ 取消）。门禁 **G16** `tests/test_executor_ownership.py`（零容忍无基线：生产包只许 `common/runtime.py`
+  构造池 + `Runtime(` 必须带 `scope=` + 迁移处数下限），落地时迁移前红（9 违规 / 0 处使用）、迁移后绿。
+  两笔基线有意抬并逐笔记账：SOURCE 1159→1160（G16 两向护栏被口径 B 计入，与 G3/G4/G13/G14 同一限边）、
+  同名散落 110→113（`__enter__`/`__exit__` 协议名 + `describe`；exact 14 / clone 17 未动 ⇒ 无实现被复制）。
+  全文 → `docs/nn/engineering.md` §119。
+- **2026-11-17（B6 第二刀：PPO 的三条显式随机流 `PPORng` + ckpt 存 bit generator）**：审计 §P1-7 /
+  §10-B6。原先切块重排 / 每 epoch 的 minibatch 顺序 / demo 抽样共吃**全局 `np.random`**，ckpt 存的是
+  全局 MT19937 状态 ⇒「同一 seed ⇒ 同一条轨迹」实际依赖「进程里没别人抽随机数」这条不可执行的前提。
+  现在：`common/runtime.py`（L0，stdlib-only）加 `substream(seed, name)`（blake2b·128bit，不引 numpy）
+  + `Runtime(seed=)`/`Runtime.substream()`；新 `worker/ppo/rng.py::PPORng` 持 **三条**流
+  （`chunk`/`epoch`/`demo`，加/删一处抽样不移动另外两条）；ckpt 改存 `state.json["rng_streams"]`
+  （每条流的 `bit_generator.state`），旧 ckpt 缺这段 ⇒ `restore()` 返回 False + 响亮 WARN（不半份续跑、
+  也不装成精确续跑）；`chunk_episodes(shuffle=True)` 缺 rng ⇒ `ValueError`（不留全局后门）；四条训练线
+  + `remote/train_core`（种子改用完整 hex）+ `trainer/stream`（`scope=f"stream-{iter_id}"`：同 iter 可复现、
+  跨轮独立）显式传流。**有意代价**：PCG64 ≠ MT19937 ⇒ 与历史轨迹数值断代（写进模块 docstring，不当 bug）；
+  `train_core` 那行全局 `np.random.seed` 保留给本进程其他历史抽样，PPO 已不读它。门禁
+  `tests/worker/test_ppo_rng_streams.py`（含 AST 零容忍：`worker/ppo/**` 不许消费全局 numpy 随机）+
+  `REQUIRED_UPDATE_KWARGS` 加 `rng`（四条线的签名自动对账）+ 账本 `worker.ppo.rng` L0、
+  `checkpoint_paddle` 2→1、`engine_paddle` 3→2。读数：6181 收下 / 2 skipped · mypy 956 · ruff 全绿；
+  本机无 paddle ⇒ `paddle_parity` 八用例仍未跑。全文 → `docs/nn/engineering.md` §120。
+- **2026-11-17（B6 收官：时钟进 `Runtime`，量 `clock()`/`monotonic()` 两读数）**：审计 §P1-6 / §7.4。
+  生产面 **95 文件 / 517 处** `time.time()/monotonic()/perf_counter()` 全就地读 —— 要固定「现在几点」
+  只能 monkeypatch 模块里的 `time`（改全局，同进程用例一起变），于是超时/过期/租约这些最该测的逻辑
+  基本不测。现在 `Runtime(clock=, monotonic=)` 收两个零参可调用（缺省 `time.time` / `time.monotonic`），
+  调用点 `rt.clock()` / `rt.monotonic()`，`describe()["clock"]` 报可调用名。**两个而非一个**：墙钟只做
+  时间戳（会被 NTP 拉回）、单调钟只做时长/超时（绝不回跳），收成一个 `now()` 就是邀请跨机器时差才显形
+  的错。**不建 `Clock` 类型**：既有约定已是 `clock: Callable[[], float] = time.time`（5 个模块在用），
+  再造同名 Protocol 会与 `common/logutil.Clock` 撞名。`sleep()` 仍是真等待（注入不改时间流逝）。
+  首个迁移点 `common/distribution.post_weights_parallel` 的 4 处计时走 `ex.monotonic()`，顺带被
+  `test_python_shape_budget` 逼出 **`PushHooks`**（`log`/`on_alive`/`monotonic` 三根可选参数收成一个
+  frozen dataclass ⇒ 签名 9→7，§P0-3「>7 参数 = 缺对象」），于是注入是**真能用**的：用例断言秒数
+  `[0.5, 2.5]` 而不是「日志里有 0.xs」。存量 482 处 / 92 文件按文件冻结进
+  `tests/golden/wall_clock_baseline.json`（只许调小；`common/runtime.py` 与 `remote/offline_boot.py` 豁免），
+  新门禁 **G17** `tests/test_wall_clock_budget.py`（冻结 + 只降 + 扫描自检 + **两向护栏**：seam 点分调用 ≥4）。
+  读数：6188 收下 / 2 skipped · mypy 957 · ruff 全绿；**paddle 3.3.1 实跑** `tools/paddle_parity.py`
+  六条命令全绿（8 个 PPO 用例含 `ckpt_resume` 的 `rng_streams` 往返 + BC 三段），此前「本机无 paddle」
+  的结论作废。全文 → `docs/nn/engineering.md` §121（paddle 读数在 §120 末）。
+
+- **2026-11-17（B6 真正的收尾：裸线程收进 `Runtime.thread()`，配 G18 存量闸）**：审计 §P1-6 另一半。
+  池那一半同日结了（G16 零容差），裸 `threading.Thread(...)` 还剩 **50 处 / 35 文件** —— 与池同源的问题
+  但没有 `shutdown` 可接管：名字各写各的（G15 只判「有没有 `name=`」）、**没人 join**（退出靠 daemon 硬切，
+  在飞的活静默没掉）、`describe()` 看不出某线程属于哪一轮。`Runtime.thread(target, *args, name=, …)`
+  是所有者：名字统一 `<scope>-<name>`、登记在本域、`describe()["threads"]` 报是否还活、
+  `join_threads()` 返回仍活着的名字、`close(wait=True)` 一并 join。**不替 target 包 `check()`**（往别人线程体里
+  塞可能抛异常的取消点会改写各家退出语义 —— 「跑完这轮再走」vs「立刻走」），取消点仍由当事人自己调。
+  **不建隐藏单例**：剩下 48 处多在模块级函数、手上没有 Runtime，要搬得把 runtime 从调用方传下来（§P1-4 接缝）;
+  为省一行而造模块级 Runtime 只是把「无主线程」换成「无主 Runtime」。首批迁移 `CloudEvalRunner` +
+  `LocalLane`（顺手把三条同名 `rollout-local` 改成 `worker-<slot>`）。门禁 **G18**
+  `tests/test_thread_ownership_budget.py` + `tests/golden/thread_construction_baseline.json`：按文件冻结、
+  只许调小、扫描自检 9 成地板、两向护栏（`rt.thread(...)` ≥1）；豁免只有 `common/runtime.py`（所有者本人）
+  与 `remote/*_boot.py`（引导期单文件）。全文 → `docs/nn/engineering.md` §122。
+- **2026-11-17（§122 第二批：五个类各自持 `Runtime`）**：`DelivererProcess`（`deliver-proc-out/-err`）·
+  `UploaderProcess`（`upload-proc-out` 先起、`-in` 后起 —— `boot ok` 只可能被 reader 读到，顺序是原注释
+  里的契约，迁移不许改）· `PushDispatcher`（`hub-push-tick` + `hub-push-<jid>`；空 jid 退化成 `-job`，
+  旧代码的 `hub-push-` 本来也不算名字，而 `thread()` 拒空名 —— 不为一个坏 jid 抛异常）·
+  `HeartbeatPublisher`（`trainer-heartbeat-write`）· `EvalExecutors`（`eval-exec-<key>-<i>`：节点池伸缩，
+  同名槽位在转储里等于没名字；`close_pools` 用 `join_threads(0.0)` 只清登记不等线程，因为调用点可能在
+  仲裁锁里）。**`Runtime.thread()` 起新线程时丢掉已退出的登记**：这两个长驻对象会一批批换线程，
+  不收的话 `describe()["threads"]` 只涨不落。存量 48 → **40 处 / 30 文件**（`rt.thread(...)` 11 处），
+  G18 基线同步调小。全文 → `docs/nn/engineering.md` §122。
+- **2026-11-17（§122 第三刀：`Runtime.thread(start=False)` —— 顺序也是契约）**：把 `EvalExecutors`
+  的槽位线程收进 `Runtime` 时，默认形态（起线程即登记）与它就是**先挂进池子、再开跑**的顺序冲突：
+  一个已经能领牌的 worker 在池里还看不见 ⇒ `_resize_locked` 当成「池子空」再孵一条同节点线程
+  ⇒ 同一节点两条 worker，公平发牌退化成 `A,A,B,B`（满载实测 3/10 次红；`start=False` 后 6/6 绿，
+  该判据是 2026-11-04 决策的验收面，**不许**放宽）。决定：`thread()` 加 `start: bool = True`，
+  `False` = 只登记不开跑，何时开跑由当事人定（所有者仍负责名字 / 登记 / 收尾）。**不**放宽
+  `test_two_eval_rounds_share_dispatch_round_robin` 的 A,B,A,B —— 那是用户口径 1 的验收判据。
+  迁移下一个类之前先读它的启动顺序有没有别处依赖。全文 → `docs/nn/engineering.md` §122。
+
+- **2026-11-17（§122 第三批：十一个类 + 两个派发器的 `start` 合成一份）**：收编 `hub/offline_push`
+  （`-tick` / `-pump-*`）· `remote/push_dispatch`（`-tick`）· `deliver_outbox`（`-loop`）· `job_round._StartBeacon`
+  （`-run`）· `offline_deliver`（`-drain-loop`）· `offline_push._Child`（`-tee-*` / `-wait-*`）· `payload_proc`
+  （`-out`）· `payload_worker._Engine`（`-fill`）· `result_upload`（`-run`）· `trainer/loop_eval`（`-it<轮>`）·
+  `worker/eval_gate`（`-<name|round>-<序号>`）· `worker/serve_pool._Worker`（`serve-worker-<pid>-read`）。三条判据：
+  ① **mixin 没有 `__init__` 就不许造类属性 Runtime**（`TrainingEval._eval_rt` 走实例属性懒建 —— 类属性 = 所有课程
+  共享一条 Runtime = 隐藏单例，正是 §122 拒绝的形态）；② **调用方给的 `name=` 是语义名不是唯一名**（`EvalGate`
+  并发多轮时加序号，否则转储里三条约同名线程读不出是哪一轮）；③ **两个派发器的 `start()` 逐字节相同** ⇒ 按重用
+  账本抽共用（`remote.push_dispatch.start_tick_thread()` + `TickLoopHost`），既让 `exact_groups` 回到 14，也把
+  `hub/offline_push.py` 从 1046 行压回 **997**（1000 行 LOC 预算）。顺带两条基线往小改：G15 地板 40 → 3（那条只防
+  扫描入口写歪，扫描器正确性由同文件的合成源码用例盯），`any_baseline` 的 `push_dispatch` 11 → 10（`Callable[[], Any]`
+  收成 `Callable[..., dict]`）。存量 40 → **27 处 / 21 文件**（`rt.thread(...)` 24 处）。读数 6194 收下 / 2 skipped ·
+  mypy 958 · ruff 全绿 · 全量 ×6（5 绿，第 4 次一条墙钟上界的计时 flake，单跑全绿）。全文 → `docs/nn/engineering.md` §123。
+
+- **2026-11-17（§P1-6 第四批：模块级扇出清零，G18 转零容忍）**：第三批剩下的 27 处全在模块级函数里，
+  §122 当初留账的理由是「手上没有 Runtime」。这一批证明每处都有自然的域：拥有一轮/一个单元/一个 job 的
+  函数里建**局部** `Runtime`（随函数收尾而散，不造模块级单例 —— 那只是把「无主线程」换成「无主 Runtime」），
+  有 `self` 的挂实例（`BatchEvalRunner._rt`），有 `q` 的挂本轮状态。三处「迁移改变语义」的坑写进
+  §124：① `rt.thread` 只收位置参数（`args=c` 的元组要 `*c`，否则 target 里抛 TypeError 且 `done` 永不置位）；
+  ② `start()` 已代调，原来的「先造列表再统一 start」必须删（否则 `threads can only be started once`）；
+  ③ `remote/push_bootstrap.py` 整份进 notebook cell、顶层零仓内 import ⇒ 进 G18 的 `EXEMPT`（连
+  `common.runtime` 都不能拿）。**G18 转零容忍**：基线清空、旧的 9 成地板换成「扫到 >200 文件 + 所有者本人那两处
+  还数得出」（存量归零后「数到多少处」证明不了扫描器活着）、两向护栏下限 1 → 40（实测 49 处）。存量
+  **51 → 0 处**（四批）。读数：6194 收下 / 2 skipped · mypy 958 · ruff 全绿 · 全量 ×3（1 次端口回收计时 flake，
+  单跑全绿）。全文 → `docs/nn/engineering.md` §124。
+
+- **2026-11-18（B5 第四块：manifest / result 校验改用 pydantic 模型，`common/` 放行 pydantic 一个包）**：
+  `python.refactor.md` §P0-4 / §7.1 要的是「字段级错误 + 类型进 mypy 视野」，手写 `isinstance` 链给不了。
+  `Manifest` 与 `CloudResult` 就此成为字段级校验的**唯一实现**，`normalize_manifest` / `validate_result`
+  降为薄包装（默认值补齐 + 保留未知键；三方对账与逐 kind 形状仍留在 `validate_result`——它要 manifest、
+  还要写回 `r`）。三条「不许改变收/拒集合」的口径：`extra="allow"`（未知键保留，`model_dump()` 会吃掉它们）·
+  严格标量（`True` 不冒充 int、`"5"` 不冒充 number，但 `int` 仍是 `float` 的合法替身**且类型不变**——
+  manifest 进 jsonl，`1` 与 `1.0` 是不同文本）· 错误文案关键词逐字保留（`proto=` / `kind=` / `mode='bc'` /
+  `role=` / `缺失必填字段` / `result 缺失字段 x`）。
+  **代价（本条才是决策）**：`Manifest` 只能住 `common/`（搬去 `biz/` = L0 反向 import），于是 L0 的
+  「stdlib-only」契约①第一次有例外。裁定放行**且仅放行** `pydantic`：它本就是 `pyproject.dependencies`
+  里的声明依赖、纯 Python、随 `code.zip` 装 ⇒ 与那条契约要防的「云机没有 torch/numpy/trainer」不同类。
+  闭集落在三处：`common/__init__` 契约①（指向 §128）· `test_common_layer::THIRD_PARTY_ALLOWED` ·
+  `test_manifest_split::ALLOWED_IMPORTS`——加第二个第三方包必须先改这三处，不能顺手。
+  读数：6210 收下 / 2 skipped · mypy 959 · ruff 绿 · G14/G5 不动 · 模块 docstring 与文本断言基线**都没抬**。
+  全文 → `docs/nn/engineering.md` §128。
+
+- **2026-11-18（P1-9 第二刀：G7 扩到全生产面，函数级 assert 转冻结存量）**：模块级 assert 是
+  「`python -O` 一关就消失的正确性根基」，但 G7 自 2026-11-14 起只扫 `common/**`。扩面后抓到仅剩
+  两处 —— `trainer/loop_round_steps.py` 的步骤表同步、`worker/eval_track.py` 的「评估池必须落在
+  rollout 抽签区间之外」—— 都改成 import 期显式 `raise RuntimeError`（消息里带上两侧集合/常量）。
+  函数体里那 62 处**不清零**：P1-9 原裁定是「热路径的 assert 保留但注明」，清零等于把它们改成
+  永远执行的 `if … raise`（热路径代价 + 语义从调试期变成生产期）⇒ 按文件冻结进
+  `tests/golden/assert_baseline.json`，只许调小、归零删条目（豁免 `worker/scripts/` 与
+  `hub/smoke_loopback.py` —— 冒烟脚本的 assert 就是结论）。同文件补第三条门禁：可执行命令面
+  （`tools/githook/*.sh` / `Makefile` / CI / `package.json` scripts）不得出现 `python -O`。
+  G7 文件随之改名 `tests/test_common_module_asserts.py` → `tests/test_module_asserts.py`（它已不只
+  管 `common/`）。全文 → `docs/nn/engineering.md` §129。
+
+- **2026-11-18（B8 第二刀：调度策略离开线协议，`common/scheduling.py`）**：`python.refactor.md` §5.1
+  点名 `protocol.py` 把「线协议常量」与「调度策略」混在一起——策略会变、协议不该变，改一个掉队阈值
+  不该让评审去读线格式。做法是**逐字节搬家**（不重写）：32 名（优先级五档 + `job_priority` + 两个
+  阈值 + `CLAIM_MODE_*` / push 节奏·冷却·告警 + `push_worker_id_of` / 节点能力 `CAP_*`·`NODE_*` +
+  三个形状函数 + `pick_push_worker` / `push_job_wants_hub_push`）整段剪进 `common/scheduling.py`，
+  `protocol.py` 只留 `X as X` 门面（房规 `force-single-line`，与 `common.manifest` 门面同形）⇒
+  所有历史 import 一行不改、hub 与 `remote/push_dispatch` 的调用点无需动。新模块依赖面 = stdlib，
+  **不** import `common.protocol`（依赖方向是「协议不解释策略」）。`protocol.py` 1120 → 969 行。
+  守卫 `tests/common/test_scheduling_split.py` 把四问（定义唯一 / 依赖闭集无环 / 转发同一对象 /
+  不抄线协议常量）收进一条用例、逐问带标签——合并的直接好处是文本断言预算口径 B 只 +1 而不是 +4，
+  实测 SOURCE 预算**未动**（1165）。全文 → `docs/nn/engineering.md` §130。
+
+- **2026-11-18（P1-5 第二批：`REMOTE_PUSH_NODE` 收进 `common/settings.py`）**：按 AST 重扫全生产面后，
+  「≥2 个模块各解一次」的旋钮只剩这一个（`PATH` 不算：两处读的是系统变量）。三处读法里有一处还包了
+  `str(... or "")`，也就是同一根旋钮的归一化写了三份。收成一个 `push_node_from_env()`（读 + 去空白；
+  未设/空 ⇒ 空串 = 显式无覆盖），并登记进 `MIGRATED_ENV` 让 G13 的单家判据开始盯它。**刻意不做**
+  `rstrip("/")`：那是拼 URL 的调用方的细节，旋钮只负责「读出来的字符串 같不一致」。存量
+  63/32 → **60/30**，两个文件条目归零即删。全文 → `docs/nn/engineering.md` §131。
+
+- **2026-11-18（P0-7 第十六批：`loop_transport` 的五处宽捕是五处自欺）**：`trainer/loop_transport.py`
+  五个读 rl-config 课级覆盖的函数各罩一条 `except Exception: <用缺省>`。它们从来没在捕「配置读不到」
+  ——`load_dist_config` 的契约就是永不抛（文件缺失 / 坏 JSON / BOM 都返回 `None` 并在内部喊一行）
+  ——捕的是本模块自己的 bug（配置块从对象变列表 ⇒ `AttributeError`、键改名 ⇒ `TypeError`），处置
+  却是「静默用缺省」：配置改了却没生效，而日志里一个字都没有。修法是**形状总函数**而不是更窄的
+  except：`_config_block` / `_course_stem` / `_course_value` 三个纯读取助手（形状不对 `warn_once`），
+  于是整段没有可捕的东西；`run_iters` 的非数字值仍窄捕 `(TypeError, ValueError)`（真配置错误 ⇒
+  按 0 + 一行）。**顺带改口径**：三条用例原来用 `side_effect = RuntimeError/OSError` 测「静默」，
+  那是把宽捕当契约 —— 改成真实失败形态（`load_dist_config → None`）+ 两条「程序员错穿出去」的
+  反向判据（把 `return_value` 改回 `side_effect` 即红）。G4 397 → **385**（该文件 9 → 1，剩那处是
+  `_with_node_failover` 的单节点边界）、G9 26 → **25**。全文 → `docs/nn/engineering.md` §132。
+
+- **2026-11-18（P0-7 第十七批：`hub/task_pack.py` 的观测面捕什么要写清楚）**：三个读包助手
+  （`pack_index_part_sha` / `pack_index_meta` / `pack_seg_end_kind`）与三个打控制台的调用点
+  （触发重导 ×2、问导出状态 ×1）原为 `except Exception`。前者是**观测面**（离线清单 + 段末判据），
+  必须捕；但宽捕把本模块的 `AttributeError`（索引 JSON 从对象变列表）读成「这包没有计划」⇒
+  云机拿到空段末判据、静默回退旧行为，而包其实是好的；后者把本模块的 bug 记成「控制台不可达 →
+  降级为手动导出」（有人会去查隧道）。改成两个**具名异常集**：`_PACK_UNREADABLE`（OSError /
+  BadZipFile / EOFError / KeyError / NotImplementedError / ValueError = 真读不出来）与
+  `_CONSOLE_NET_ERRORS`（OSError / HTTPException / ValueError = 传输失败）；`AttributeError` /
+  `TypeError` 穿出。判据 `tests/hub/test_offline_task_pack.py` +3。G4 385 → **379**（138 文件）。
+  全文 → `docs/nn/engineering.md` §133。
+
+- **2026-11-18（P0-7 第十八批：`hub/offline_push.py` 的读面边界 + 「查询升公开」而非抬 G5 基线）**：
+  该文件 10 处 `except Exception` 混了四种东西：① 三个**契约永不抛**的读面（`traj_root()` 返回
+  `Path | None`、`pack_index_meta()` 已是总函数、`_release`/`_anchor` 按 key 直取）⇒ 直接删 `try`，
+  按契约的返回值写；② 「盘上那份派发记录读不出来」⇒ 新具名集 `_STORE_READ_ERRORS`
+  （OSError / ValueError / KeyError）；③ `still_mine` 的 **fail-open**（读不到 ⇒ 「还是我的」）；
+  ④ 真边界 2 处（pump 主循环的单轮兜底、`_claim` 的网络腿）留宽捕并留痕。删 `try` 的关键收益：
+  `Path.cwd()` 原本是 `except Exception` 的**危险缺省** —— hub 读面一坏就静默往启动目录落包。
+  返工记账（G5）：新增的三条判据原打 `_default_root` / `_still_mine` / `_resume_ok`，撞
+  `private_assert_baseline.json`「只许降」。修法是**把只读查询升成公开名**（`still_mine` /
+  `resume_ok`：不调网络、不改状态），`_default_root` 改从公开构造路径验（`root=None` 能构造 ⇒
+  落到 cwd；`traj_root` 抛 `AttributeError` ⇒ 构造失败）—— 抬基线会把这批的诚实换掉。判据
+  `tests/hub/test_offline_push_dispatch.py` +3。G4 379 → **371**（138 文件）、G9 25 不变。
+  全文 → `docs/nn/engineering.md` §134。
+
+- **2026-11-18（P0-7 第十九批：四条 fail-open 读面的具名集）**：`hub/http_face.py` 4→2、
+  `hub/store_offline.py` 3→0、`worker/sibling_reuse.py` 3→1、`remote/bc_job.py` 4→2（G4 371→**362**）。
+  共同判据一句话：**这个变量坏了，能不能被读成那个结论？** ① 请求体读：`rfile` 形状变了
+  （`AttributeError`）原来答成 400「read body failed」= 把我们的 bug 说成客户端发错了 ⇒
+  `_BODY_READ_ERRORS = (OSError, ValueError)`（`ValueError` 必留：两个助手都把
+  `int(Content-Length)` 包在同一条 try 里）。② 回传 wire 解码：实测路面是
+  `binascii.Error`(ValueError) / `EOFError`（截断 gzip，**不是** `BadGzipFile`）/ `zlib.error`
+  （魔数对但 deflate 坏，`gzip.decompress` 不包装）/ `BadGzipFile`(OSError) ⇒ `_WIRE_DECODE_ERRORS`；
+  两条「观测面不拖垮回传」改成 `_LAND_ERRORS`（盘错 + 行形状错）。③ 兄弟课程：`load_course` 只捕
+  文件面 `(OSError, ValueError, KeyError)`；`episode_identity_fp(other)` 对**过了 pydantic 的**
+  `CourseConfig` 是全函数 ⇒ try 整段删（旧的 `except Exception: continue` 让训练照跑、复用默默死掉）。
+  ④ BC 两条回传腿：`_BC_HTTP_ERRORS = (OSError, RetryableError, ProtocolError)` = `_request` 的全部
+  路面 ⇒ `AttributeError` 不再被记成「网络不通」而白等两轮退避。留下的 5 处都就地注释了为什么只能宽
+  （handler 顶层分 400/500、torch 探针、调用方给的任意课程对象）。判据 4 处全部从公开入口/可观察结果
+  验，四组反向判据改回宽捕各实测红。全文 → `docs/nn/engineering.md` §135。
+
+- **2026-11-18（P0-7 第二十批：补传腿的「不可达 / 没送达」不许当垃圾桶）**：
+  `remote/offline_deliver.py` 12 → **6**（G4 362 → **356**）。这一批的错法是一句话被合写成两句：
+  **「hub 连不上」是传输事实**（补传必须忍，跳过本轮即可），**「这一发没成」是我们自己的判断**
+  （不能忍）。① `probe()` / `_post()` 改捕 `_DELIVER_NET_ERRORS = (OSError, http.client.HTTPException,
+  RetryableError)` = `_opener` 的全部路面 —— 旧宽捕把 `_headers()` 的 `KeyError`（配置键改名）与
+  `_timeout_for` 的 `TypeError` 记成「hub 不可达 ⇒ 下轮再试」，于是坏配置伪装成网络抖动、永远重试；
+  ② 构造器里 `sanitize_run_id` 只捕 `ProtocolError`（它唯一的契约失败）—— 旧宽捕把它的 bug 读成
+  「run_id 空 ⇒ 补传静默关闭」；③ `backup_pending` 的 `pending()` 与 `_prune_drawer` 的
+  `_ledger_its()` 收窄成 `(OSError, ValueError, KeyError)`（盘 + 账行形状）；④ `_err_text` 删 try
+  （`decode("utf-8","replace")` 按定义不抛）；⑤ `_guard` 的 `BaseException` → `Exception`（后台线程
+  不该吞 `SystemExit` / `KeyboardInterrupt`；内层 `pass` 是 G9 冻结的「日志写不出去 ≠ 线程该死」）。
+  留下的 6 处全部就地写明只能宽的理由。判据 `tests/remote/test_offline_deliver.py` +3（全走公开面：
+  断连仍不可达 / 本模块 bug 穿出 / 非法 run_id 是唯一构造失败 + 备份判据面）。
+  全文 → `docs/nn/engineering.md` §136。
+
+- **2026-11-18（P0-7 第二十一批：探活面的结论最贵）**：`remote/rollout_node.py` 8 → **4**
+  （G4 356 → **352**）。判据从「捕得宽不宽」换成「结论有多贵」：`_ping` 的回答是「节点死了 ⇒
+  重启 agent」，旧宽捕让一个回执形状的 `AttributeError` 也答成不健康 ⇒ **重启环**；`_status` 同集
+  （后果轻些：摘要变「不可知」）；`_probe_https` 用同一集（姿势选择落到错候选）。三处共用
+  `_NODE_PROBE_ERRORS = (*NET_ERRORS, http.client.HTTPException, ValueError)`（`ValueError` = 200 但
+  body 不是 JSON）。`_install_bun_mirror` 的返回值是「镜像装没装上」，所以只吞「网/盘/坏 zip」
+  （`_BUN_INSTALL_ERRORS` = OSError / RuntimeError / BadZipFile / EOFError）——把自家 bug 记成
+  「镜像不行」等于让镜像路径永久静默失效。留下的 4 处：`_terminate` 的两级 kill（G9 冻结的收尾
+  边界）、`_slot_count` 的 platform_utils 兜底（异常类型已写进 `note`）、`_open_tailscale`（异常族
+  由 `tailscale_boot.ensure` 定义）。判据 `tests/remote/test_rollout_node.py` +2；反向把集改回
+  `(Exception,)` 实测 `DID NOT RAISE`。全文 → `docs/nn/engineering.md` §137。
+
+- **2026-11-18（P0-7 第二十二批：进程内判据不许宽捕）**：`remote/push_dispatch.py` 6 → **3**
+  （G4 352 → **349**）。这一批立了一条分界线：**这个 try 包住的代码能不能自己坏？** 能（网络 /
+  盘 / 对端进程 / 第三方 API）⇒ 宽捕是边界；不能（纯内存、同进程的两个我们自己的对象）⇒ 宽捕
+  只能是垃圾桶。① `_job_priority_of` 读 hub 本地判据表：`PRIORITY_HIGHEST` 的语义是「没人在做
+  这一份」⇒ 备份不派；旧宽捕把判据表换形状的 `AttributeError` 读成那件事 ⇒ **备份永不派发且
+  无日志**，现在整段删 try（边界在 `run_tick_loop`）。「老 hub / 替身没有该方法」那条兼容分支
+  保留，判据同时钉住两条。② `_http` 收窄成 `_PUSH_HTTP_ERRORS`（`NET_ERRORS` +
+  `http.client.HTTPException` + `ValueError`），4xx/5xx 仍算「有答」；HTTPError 里读体失败收窄成
+  `(OSError, http.client.HTTPException)`（状态码已经是结论）。判据
+  `tests/remote/test_hub_push_dispatch.py` +1。全文 → `docs/nn/engineering.md` §138。
+
+- **2026-11-18（P0-7 第二十三批：引导形态的两类边界）**：`remote/offline_boot.py` 19 → **16**
+  （G4 349 → **346**；**生成物** ⇒ 改 `remote/_offline_boot/07_queue.pyfrag` 后跑
+  `tools/build_offline_boot.py` 重建，`test_offline_boot_is_generated` 守字节一致）。standalone
+  契约（notebook 从 raw 单拉、那时 `code.zip` 还没解开）让 `_progress_label` /
+  `_should_log_progress` 的 `except Exception` 里混了两类**真边界**与一类垃圾桶：① **没这个包**
+  ⇒ `ImportError`（常态，退回最小标签 / 恒打）；② **跨版本** —— 解开的 `code.zip` 可能是老快照，
+  老 `should_log_progress` 签名不同 ⇒ `TypeError` / `ValueError`（宁可恒打，也不吞进度行）；
+  ③ 我们自己读错（`AttributeError` / `KeyError`）现在穿出去 —— 否则「进度行全消失」永远被读成
+  「引导形态本来就这样」，真因一次也不会进日志。判据 `tests/remote/test_offline_boot.py` +1；
+  改回 `except Exception` 实测 `DID NOT RAISE`。全文 → `docs/nn/engineering.md` §139。
+
+- **2026-11-18（P0-7 第二十四批：引导态的控制面读面）**：`remote/offline_boot.py` 16 → **13**
+  （G4 346 → **343**；生成物，改分片后 `tools/build_offline_boot.py` 重建）。新点：本文件
+  **不得 import 本仓代码**（standalone 运输单元）⇒ 不能复用 `common.errors.NET_ERRORS`，就地组装
+  standalone 版 `_BOOT_NET_ERRORS = (OSError, http.client.HTTPException, ValueError)`，供
+  `_post_json`（连不上仍 `(0, {})` + 一行日志）与 `_http_error_parts`（HTTPError 正文读不出来仍
+  「（无正文）」、状态码优先）。`hub_candidates` 收窄成 `(ImportError, ValueError, TypeError)`
+  （兄弟文件没拉下来 / `hub_port` 脏值）：`resolve_hub_url` 是**纯字符串**函数（没地址返空串、不抛），
+  旧宽捕把它读成「没有 tailnet 候选」⇒ 云机改走公网 URL 并**白起隧道**且日志看不出少了什么。
+  判据 `tests/remote/test_offline_boot.py` +2。全文 → `docs/nn/engineering.md` §140。
+  累计第十六~二十四批：G4 **397 → 343**（139 → 137 文件）。
+
+- **2026-11-18（P0-7 第二十五批：拉起子进程的那条边）**：`remote/deliver_proc.py` 7 → **4**、
+  `remote/child_proc.py` 7 → **6**（G4 343 → **339**）。这两个文件都在回答「子进程起不来时该怪谁」：
+  ① `_spawn` / `spawn_module` 收窄到 Popen 的真失败面 `(OSError, ValueError,
+  subprocess.SubprocessError)` —— 我把 `env`/`sys.path` 拼错（`AttributeError`）报成「Popen 失败」，
+  现场就会去查权限/路径/资源，而真因永远不露头；② `_new_state_path` 只捕 `sanitize_run_id` 唯一
+  的契约失败 `ProtocolError`；③ `backup_pending` 收窄成盘 + 账行形状 `(OSError, ValueError,
+  KeyError)`（与 §136 的 `OfflineDeliverer.backup_pending` 同一个集）。留下的 3 处是 `_stop_child`
+  的两级收尾（G9 冻结）与读面，均就地注明。
+  反面记录：`trainer/stream._load_wave` 同型（「坏 shard」混了我们的 `AttributeError`），但它住在
+  `run_rollout_stream` 的闭包里、没有公开接缝 ⇒ **按 §7「先有判据再改」的口径暂不动**（宁可留着宽捕，
+  也不留一个没人能验证的收窄）。判据 `tests/remote/test_offline_deliver_proc.py` +1、
+  `tests/remote/test_child_proc_pump.py` +1。全文 → `docs/nn/engineering.md` §141。
+
+- **2026-11-18（G5 第一批：先用已有公开面，再谈新建 seams）**：`tests/hub/test_hub_queue_split.py`
+  私有断言 16 → **11**（G5 702 → **697**）。修之前先查了「公开查询是否真的不存在」—— `_HubQueue`
+  早有 `queue_state()` / `active_worker_count()` / `course_of()`，用例只是习惯了伸手：`_stores` 表 →
+  `queue_state()["courses"]`、`_workers` 登记 → `active_worker_count()`；`_locate_cache` / `_cursor` /
+  `_leases` 三处白盒读已被公开面覆盖（`course_of` / `qs["cursor"]` / `result_token_ok` + `epoch_of`），
+  删掉重复断言而不是另造接缝。
+  留下的 11 处**不迁**并在就地写明：它们是**被测对象本体**（`__mro__` / `__bases__` 分簇结构对账、
+  `STATE_WRITERS` 跨域写入面、`_adopt_solo` 搬状态、`_job_dir` 哨兵契约），改成公开面等于把被验证的
+  东西挖掉。口径：G5 只降「耦合」，不降「被测对象」。全文 → `docs/nn/engineering.md` §142。
+- **2026-11-18（G5 第二批）**：`tests/hub/test_hub_job_store_split.py` 15 → **9**（G5 697 → **691**）。
+  与第一批同一口径：`lease_worker` / `result_token_ok` / `inflight` / `scheduling_facts` /
+  `scheduling_epoch` / `wire_stats` 都是现成公开读数，覆盖了 `_leases` / `_lease_owners` /
+  `_last_heartbeat` / `_claimed` / `_epoch` / `_wire` 六处白盒读。`inflight()` 顺带替代「有没有心跳」
+  ——活租约 = 心跳晚于 claim，比读字典键更贴原意。留下的 9 处是本体（`__mro__` / 常量 / `LAYERS` /
+  增量读缓存）。全文 → `docs/nn/engineering.md` §142。
+- **2026-11-18（P0-6 第三批：日志行格式的第三、第四份副本）**：`biz/course.py` 的三条课程日志与
+  `biz/ladder_ledger.py` 的五条 CLI 消息改走 `common/logutil.log_line`（G3 `print` 134 → **126**，
+  42 → 41 文件）。`ladder_ledger` 的第五条（`graduated`）**原本没有时间戳** —— 同一次输出的行格式
+  不一致正是「两份实现」的活标本，顺势补齐（本次唯一的可见行为变化）。
+  `ladder_ledger.updated_at` 的 `%Y-%m-%d %H:%M:%S` 是**数据字段**不是日志行，换成本模块的
+  `%H:%M:%S` 会破坏台账消费方 ⇒ 不动。全文 → `docs/nn/engineering.md` §143。
+- **2026-11-18（B6 第一刀：BC 的 epoch 打乱不再用全局 numpy 流）**：`worker/train/goal_bc.py` 的
+  `np.random.seed(args.seed)` + `np.random.permutation(...)` 改成
+  `np.random.default_rng(list(common.runtime.substream(seed, "goal-bc-epoch")))`。原因：全局播种的
+  「可复现」只在进程里没别人动 `np.random` 时成立 —— 对 BC 意味着同一命令重跑 episode 顺序就变，
+  loss 曲线对不上。`torch.manual_seed` 保留（种子权重初始化是另一条流）。
+  判据 `tests/worker/test_goal_bc_epoch_rng.py` 3 条（同 seed 同序 / 不吃全局流 / 外部抽样不干扰），
+  其中「不吃全局流」在旧实现上实测为红。B6 残留 6 处 `np.random.seed` 已逐个记下理由（云核 /
+  dataloader 全局态）。全文 → `docs/nn/engineering.md` §144。
+- **2026-11-18（G5 第三批）**：`tests/hub/test_hub_discover_eviction.py` 9 → **3**（G5 691 → **685**）。
+  摘课判据改问 `courses()` / `halt_of()` / `queue_state()["cursor"]`；留下的 3 处是**纯提速缓存**
+  （`_peeked` / `_locate_cache`，无处可问但清了只是下次探测多花几毫秒）与 `_dispatch`/`_leases`
+  的「落盘两个不动」对账。口径同前两批：只降耦合，不降被测对象。全文 → `docs/nn/engineering.md` §145。
+- **2026-11-18（G5 第四批）**：`tests/hub/test_priority_schedule.py` 9 → **3**（G5 685 → **679**）。
+  `job_root` / `stale_holder` / `lease_worker` / `courses` / `queue_state()["cursor"]` 全是既有公开面。
+  留下的 3 处读的是**别的查询不覆盖的字段**（租约截止时刻、token→owner 映射、承诺痕迹归属人），
+  不是同义改写 —— 口径仍是「只降耦合，不降被测对象」。全文 → `docs/nn/engineering.md` §146。
+- **2026-11-18（度量脚本入库：`tmp/` → `nn-training/tools/audit/`）**：`py_audit.py` / `py_clones.py`
+  从 gitignored 的 `tmp/` 移进仓库（`python.refactor.md` 附录 A 的明确要求）。理由：文档里每个
+  基线读数都靠它们，而它们**不可复跑**（换机器/清 tmp 就只剩数字）。路径改 `Path(__file__)`
+  推导，不依赖 cwd；顺手清 ruff（未用 import、空转循环、未使用循环变量）。
+  口径：这一步只保证「可复跑」，**没有**把它们接成门禁 —— 每个读数都变成断言会把「看一眼」
+  变成「跑一遍 CI」，需要时另开一刀并给判据。全文 → `docs/nn/engineering.md` §147。
+- **2026-11-18（G5 第五批）**：`tests/hub/test_hub_leases.py` 6 → **2**（G5 679 → **675**）。
+  `job_root` / `result_token_ok` / `claimable_job_ids()`（领取后立刻可领 = 没租约）/ 紧跟的
+  `heartbeat(...) is True` 覆盖了 owner、到期与心跳三件事。留下的 2 处是**否定断言**（错 token
+  心跳后截止时刻与心跳时刻「一动没动」）—— 公开面只说「现在能不能领」，说不出「一刻没动」。
+  全文 → `docs/nn/engineering.md` §148。
+- **2026-11-18（G5 第六批：采集链的公开读数）**：`tests/worker/test_rollout_volume.py`
+  私有断言 46 → **2**（G5 675 → **631**）。这条用例的 46 条断言里绝大多数只是**读进度**
+  （配额目标/已采、波次、初波局数、熔断、分关账、greedy、报告合并），却逐条伸进
+  `_volume_*` / `_greedy_*` / `_report`。新增 `VolumeView`（frozen dataclass）+
+  `TrainingVolume.volume_view()` 作为这一簇唯一的只读观测面：字段名取 `worker.events`
+  iteration 行的语义（不是内部布局镜像），`report`/`stage_stats`/`greedy_stats` 是活引用
+  （只读契约，不复制 dict）。留下的 2 处是 `CommitJournal.pending()`（独立的 WAL 对象，
+  它自己已有公开查询；要迁得先给训练循环一个「未闭合提交」读面，另开一刀）。
+  三条私有**方法调用**（`_iteration_pairs` / `_volume_stages` / `_volume_stage_ests_map`）
+  移出断言表达式：驱动被测入口不是「读私有状态」。成员闭集守卫同步 +1。全文 →
+  `docs/nn/engineering.md` §149。
+- **2026-11-18（G5 第七批：节点工具链分家）**：`tests/remote/test_rollout_node.py` 私有断言
+  43 → **8**、`test_rollout_node_notebook.py` 5 → **4**（G5 631 → **595**）。那 43 条里有 38 条
+  其实在测「bun / cloudflared 从哪来」—— 镜像候选、测速排序、下载重试、持久缓存、
+  `--version` 校验。它们只碰 `cfg`/`log`/文件系统，于是整段搬进 `remote/node_toolchain.py`
+  （L1），45 个用例改对公开函数断言。搬家逐字：18 个函数 AST 归一化后只剩 docstring 与
+  下划线前缀的差异。横幅的 `bun_version` 不再搬一份实现，改调 `common.proc.bun_version`
+  （`test_reuse_ledger` 当场抓到同名 ≥3 会从 113 涨到 114；复用后不变，并顺手给了 10s 超时）。
+  隧道用例同步搬去 `test_rollout_tunnel.py`（被测对象早就在那里）。
+  留下的 8 处都是驱动 `_status`/`_slot_count`/`_start_cloudflared`/`_open_tailscale` 的调用。
+  全文 → `docs/nn/engineering.md` §150。
+- **2026-11-18（G5 第八批：in-loop 评估链的公开读数）**：`tests/worker/test_eval_timing.py`
+  私有断言 32 → **0**（G5 595 → **563**，125 文件）。32 条里绝大多数只是读派发状态
+  （在飞线程 / local gate / 已交棒的尾巴 / 补账队列 / 顺延位 / 在跑轮集合），却逐条伸进
+  `trainer/loop_eval.py` 的五个私有槽位。新增 `EvalTimingView`（frozen dataclass）+
+  `TrainingEval.eval_timing()`：`round_thread` / `gate` / `tail` / `join_sec` /
+  `backfill`（元组快照，队列会被 pop）/ `pending_m` / `open_threads`。顺手给
+  `_eval_thread` / `_eval_gate` 补类级 `None` 默认值（裸构造脚手架在「还没派发」时能读）。
+  成员闭集守卫同步 14 → 15、import 闭集 + `dataclasses`。全文 → `docs/nn/engineering.md` §151。
+- **2026-11-18（G5 第九批：推模式派发用例走公开结果面）**：`tests/remote/test_hub_push_dispatch.py`
+  私有断言 17 → **0**（G5 563 → **546**，124 文件）。`hub._stores[c].get_result/store_result/
+  wire_stats/scheduling_facts` 全部换成队列已有的公开门面（`hub.get_result` / `store_result` /
+  `wire_stats` / `job_status(...)["computing_at"]`），派发器在飞账改读 `disp.tick()["inflight"]`
+  （本来就是 `/admin/push-workers` 的快照）。不是为测试新开口；造场景的 `_publish` 与
+  `_inflight[...] =` 不在 G5 口径内，保持原样。全文 → `docs/nn/engineering.md` §152。
+- **2026-11-18（G5 第十批：干烧熔断执行面的读数）**：`tests/worker/test_kickstart_burn_guard.py`
+  私有断言 20 → **0**（G5 546 → **526**，123 文件）。新增 `BurnGuardView`（frozen dataclass）+
+  `TrainingGuardsLeg.burn_view()`：`streak` / `stop_cause` / `stop_detail` / `notified` /
+  `fallback_logged`；判据本体没动。测试替身的 `_halt_calls` 改成公开 `halt_calls`（替身自己的
+  记录表，不是生产状态）；`assert leg._kickstart_burn(...)` 这类驱动被测入口的私有方法调用
+  移出 assert 表达式。守卫的 stdlib 闭集 + `dataclasses`。全文 → `docs/nn/engineering.md` §153。
+- **2026-11-18（G5 第十一批：门禁执行面的读数）**：`tests/trainer/test_loop_gate_soft_remediate.py`
+  私有断言 19 → **0**（G5 526 → **507**，122 文件）。新增 `GuardStateView`（frozen dataclass）+
+  `TrainingGuards.guard_state()`：`cloud_halted` / `leg_abort` / `soft_remediate_count`。
+  `_apply_verdict` / `_gate_halt_mode` 这类驱动被测入口的私有方法调用移出 assert 表达式。
+  守卫三处同步：`STAYS` + `guard_state`、顶层名字闭集 + `GuardStateView`、stdlib + `dataclasses`。
+  全文 → `docs/nn/engineering.md` §154。
+- **2026-11-18（G5 第十二~十五批：四处执行面读数）**：G5 507 → **449**（119 文件）。
+  四笔同口径——执行面状态给公开读数，驱动被测入口的私有方法调用移出 assert：
+  ① `test_ppo_profile_gate.py` 12 → 0：`_profile_steps` 转正为 `profile_steps`（纯判定是契约，
+  不是内部件）；② `test_remote_failure_policy.py` 15 → 1：`RemoteFailState` +
+  `TrainingRemoteFail.remote_fail_state()`（连败数 / 停腿），留 1 处轮级 `_consec_fail` 另开一刀；
+  ③ `test_baseline_eval.py` 16 → 0：`BaselineEvalView` + `baseline_eval_state()`（落账 wver / 在飞线程），
+  份额门复用 `eval_timing().gate`；④ `test_train_ledger_wiring.py` 16 → 0：`ResumeState` +
+  `TrainingLifecycle.resume_state()`（启动继承十二项 + 账本摘要），停腿复用 `guard_state()`。
+  三个拆分守卫同步成员闭集 / stdlib 闭集。全文 → `docs/nn/engineering.md` §155。
+- **2026-11-18（G5 第十六~十七批：调用移出 assert 与两处传输/补传读数）**：G5 449 → **400**（116 文件）。
+  ① `test_kickstart_plan.py` 15 → 0、`test_ppo_watchdog.py` 13 → 0：命中的私有名都只是驱动入口
+  （`_kickstart_burn` / `_remote_ppo_step` / `_bump_remote_fail`），调用赋给局部变量再断言；
+  `_leg_abort` 改读 `remote_fail_state().leg_aborted`。② `test_wire_reroll.py` 12 → 2：
+  `remote/wire.py` 新增 `best_rate()`（读与写分离；注入点仍必须是 `wire._BEST_RATE`），
+  留 2 处 `_WIRE` / `_BULK` 拆分契约的结构断言。③ `test_deliver_mode.py` 11 → 0：
+  `DeliverState` + `DeliverStateMixin.deliver_state()`（`delivered` / `metrics_sent` /
+  `metrics_stat` / `metrics_unsupported` / `mode`），`status()` 的 operator 字典面不变；
+  读数按 LOC 预算（腿本体 1008 行）下沉成 `remote/deliver_state.py`（L1，拓扑账本同步）。
+  全文 → `docs/nn/engineering.md` §156。
+- **2026-11-18（G5 第十八批：worker 名册的读数）**：`tests/worker/test_remote_serve_pool.py`
+  私有断言 10 → **0**（G5 400 → **390**，115 文件）。5 条建池前置断言把
+  `iter_rollout._make_pool(...)` 的调用移出 assert；另外 5 条读 `_workers` 的断言改读新增的
+  `ServePool.workers()` —— 返回**活引用元组**（锁内快照），因为「跨轮复用不重建」与
+  「未就绪不杀」两条契约要看同一个 worker 的身份和它的 `proc.poll()`，计数读数不够。
+  全文 → `docs/nn/engineering.md` §157。
+- **2026-11-18（G5 第十九批：自检判据与测试助手的名字）**：G5 390 → **376**（113 文件）。
+  ① `test_payload_selfcheck.py` 7 → 0：`_old_heuristic_misjudges` / `_payload_reader_selfcheck`
+  是重打循环内部的两条判据（生产自己调），不是契约 ⇒ 不为用例造公开 API，只把调用移出 assert。
+  ② `test_warmup_criterion.py` 7 → 0：`tests/helpers/warmup._needed` 是测试助手自己的判据，
+  整份用例测的就是它 ⇒ 改成公开 `needed`（助手 API，不涉生产）。全文 → `docs/nn/engineering.md` §158。
+- **2026-11-18（G5 第二十批：派发器的线程读数）**：`tests/hub/test_offline_push_dispatch.py`
+  私有断言 7 → **0**（G5 376 → **369**，112 文件）。替身字段 `_late_body` → `late_body`；
+  `_adopt_existing` / `_settle_assignment` / `_settle_retry` 的调用移出 assert；新增
+  `OfflinePushDispatcher.pump_count()` 回答「拉取线程退干净没有」（账本先空、线程后退出，
+  与 `tick()["assignments"]` 不是同一时刻的同一件事）。全文 → `docs/nn/engineering.md` §159。
+- **2026-11-18（G5 第二十一批：notebook 运行时的探测入口）**：`tests/remote/test_notebook_runtime.py`
+  私有断言 8 → **0**（G5 369 → **361**，111 文件）。`_resolve_backend` / `_run_probe` /
+  `_tpu_holders` / `_hub_base_of` 都是被测入口本身（前两个还是夹具注入点 / 被 monkeypatch），
+  改名带不来契约收益 ⇒ 一律把调用移出 assert，判据本体不动。
+  全文 → `docs/nn/engineering.md` §160。
+- **2026-11-18（G5 第二十二批：greedy 槽位的读数）**：`test_paired_kill.py` 6 → 0、
+  `test_greedy_rollout_chain.py` 6 → 0（G5 361 → **349**，109 文件）。paired kill 全是驱动入口
+  （调用移出 assert）；greedy 链的「跨轮清零」改读新增的 `GreedyView` +
+  `TrainingVolume.greedy_view()`（`plan` / `stats` / `report` / `waves`），用例脚手架换成继承
+  `TrainingVolume` 的最小 `_NodeLoop`；volume 拆分守卫成员闭集 12 → 13。
+  全文 → `docs/nn/engineering.md` §161。
+- **2026-11-18（G5 第二十三批：补传视图补上拒收面）**：`tests/remote/test_offline_deliver.py`
+  私有断言 6 → **0**（G5 349 → **343**，108 文件）。`DeliverState` 增加
+  `rejected`（升序轮次）与 `ledger_readable`（抽屉删除的硬门槛，DoD-3c），
+  D6 的 TTL/人工重置用例改读它；`_reject_round(...)` 的调用移出 assert。
+  全文 → `docs/nn/engineering.md` §162。
+- **2026-11-18（G5 第二十四批：D9 闭锁的读数）**：`tests/hub/test_hub_auth_d9_order.py`
+  私有断言 8 → **0**（G5 343 → **335**，107 文件）。新增 `AuthState`（frozen dataclass）+
+  `_AuthGuard.auth_state()`：`failures` / `blocked_until`，两份 dict 锁内复制（请求线程持续改写，
+  测试要的是某一刻的一致快照）；`_JobStore` 继承 `_AuthGuard`，既有入口可直接读；
+  `hub/queue_auth.py` 按鉴权四则同一条「单课程借 store」路径转发。`test_hub_queue_split.py`
+  同步四处账本（门面闭集 34 → 35 / declared 38 → 39、DOMAINS、DOMAIN_METHODS 135 → 136、
+  实现名 137 → 138）。全文 → `docs/nn/engineering.md` §163。
+- **2026-11-18（G5 第二十五批：课程 store 与即时闸的公开读面）**：
+  `tests/hub/test_auto_handoff.py` 私有断言 8 → **0**（G5 335 → **327**，106 文件）。
+  新增 `QueueScopeMixin.course_store(course)`（课程 → store 的只读查询，未知课程 None）与
+  `LedgerMixin.is_cancelled(job_id)`（进程内即时闸的当前成员，不按账本对账）；可领池断言
+  改用既有门面 `hub.claimable_job_ids(course)`，租约断言改用 `lease_worker(jid) == ""`。
+  守卫同步：`DOMAIN_METHODS` 136 → 137、实现名 138 → 139、store `MIXIN_METHODS` 71 → 72。
+  全文 → `docs/nn/engineering.md` §164。
+- **2026-11-18（G5 第二十六批：收工读数）**：`tests/trainer/test_loop_park.py` 6 → **1**
+  （G5 327 → **322**，106 文件）。新增 `TrainingLifecycle.stop_reason()`（只读、不清账）与
+  `collect_child()`（活引用），`finish_course` 内部同步改用；`_budget_hard_cut` 的调用移出
+  assert。留 1 处 `_node_rollout` 初值断言 —— 它是**构造契约**（AttributeError 事故），
+  不是执行面读数。lifecycle 拆分守卫成员闭集 7 → 9。全文 → `docs/nn/engineering.md` §165。
+- **2026-11-18（G5 第二十七批：复用既有接缝）**：`test_loop_gate_nopark.py` 5 → 0、
+  `test_remote_ppo_phases.py` 5 → 0（G5 322 → **312**，104 文件）。零生产改动：停机旗标读
+  `guard_state().cloud_halted`、连败/停腿读 `remote_fail_state()`，两处驱动调用移出 assert。
+  收编旧用例是接缝建设的一部分 —— 否则「视图没人用」与「视图没建」在基线上无法区分。
+  全文 → `docs/nn/engineering.md` §166。
+- **2026-11-18（G5 第二十八批：驱动入口）**：`test_boot_wire_guard.py` 4 → 0、
+  `test_offline_eval_wiring.py` 5 → 0（G5 312 → **303**，102 文件）。零生产改动：
+  `offline_boot` 是生成物（改名要重建发行物，收益为零），`_sync()` / `_post_artifact()` 的
+  返回值就是判据 ⇒ 调用赋给局部变量后再断言。全文 → `docs/nn/engineering.md` §167。
+- **2026-11-18（G5 第二十九批：租约表的两个读数）**：`test_dead_lease_sweep.py` 5 → 0、
+  `test_remote_iter.py` 4 → 1（G5 303 → **295**，101 文件）。新增 `has_lease()`（有记录、
+  不回收）与 `lease_state()`（四态判据的公开读数）；调度承诺三表改读既有
+  `scheduling_facts()`；`_leg_abort` 读 `remote_fail_state()`，`_kill_and_reap` 调用移出
+  assert。留 1 处 `_zero_shard_streak`（测试替身承载、生产直接读写的槽位）。
+  store 拆分守卫 `MIXIN_METHODS` 72 → 74。全文 → `docs/nn/engineering.md` §168。
+- **2026-11-18（G5 第三十批：节点监护的驱动入口）**：`test_rollout_node.py` 8 → **1**
+  （G5 295 → **288**，101 文件）。`_status` / `_slot_count` / `_start_cloudflared` /
+  `_open_tailscale` 的调用全部移出 assert；刻意留 1 处 `_slot_count` 作为
+  `test_scan_sees_the_known_surface` 的扫描面活性锚（该自检要求本文件基线 > 0）。
+  全文 → `docs/nn/engineering.md` §169。
+- **2026-11-18（G5 第三十一批：纯判据与多课程 hub）**：`test_multi_course_hub.py` 5 → 1，
+  `test_eval_a_once.py` 4 → 0、`test_eval_course_once.py` 3 → 0、
+  `test_eval_dispatch_resilience.py` 4 → 0、`test_stage_rotation_wiring.py` 3 → 0
+  （G5 288 → **270**，97 文件）。鉴权计数读 `auth_state()`、旧 store 旗标经 `course_store()`
+  读 `halt_workers`；其余全是纯判据/驱动入口 ⇒ 先赋值再断言。留 1 处 `hub._job_dir`
+  （队列门面里它就是 `_job_dir`，无另一份公开名）。同批修正门禁自身地板：
+  `test_scan_sees_the_known_surface` 的 `len(baseline) >= 100` 改为按扫到的测试文件数
+  （`>= 150`，实测 554）——旧地板在清到 97 个文件后从「防扫描坏了」变成「不许清干净」。
+  全文 → `docs/nn/engineering.md` §170。
+- **2026-11-18（G5 第三十二批：notebook 与信号面的小尾巴）**：`test_ppo_redo.py` 3 → 0、
+  `test_seg_end_kind.py` 4 → 0、`test_rollout_node_notebook.py` 4 → 0、
+  `test_lifecycle.py` 3 → 0（G5 270 → **256**，93 文件）。驱动调用移出 assert；
+  notebook 命名空间里的 `_fetch_archive` 先取结果；bound method 先赋 `handler`；
+  测试替身的 `"_block"` 键改公开 `"block"`。全文 → `docs/nn/engineering.md` §171。
+- **2026-11-18（G5 第三十三批：三处状态读数）**：`test_bc_dp.py` 4 → 0、`test_reward_golden.py`
+  3 → 0、`test_stream_alpha.py` 3 → 0、`test_admin_cancel_job.py` 3 → 0、
+  `test_offline_deliver_async.py` 3 → 0、`test_offline_task_queue.py` 3 → 1、
+  `test_bulk_sched.py` 3 → 1（G5 256 → **236**，88 文件）。新增 `RewardFn.backend`
+  （`formula` / `builtin`）、`DelivererProcess.child()`、`StreamCollector.alpha_started`；
+  其余为公开门面替换与纯判据调用移出 assert。留 `_TASK_PACK_TRIGGERS`（清单即契约）与
+  `_p1_waiting`（计数器对称性白盒）各 1。全文 → `docs/nn/engineering.md` §172。
+- **2026-11-18（G5 第三十四批：轮级连击与假引擎死腿态）**：`test_loop_round.py` 5 → 0、
+  `test_serve_aborted_revival.py` 5 → 3（G5 236 → **229**，87 文件）。轮级 `_consec_fail`
+  复用已有的 `resume_state().consec_fail`；假引擎加 `leg_aborted` 公开读数（`_leg_abort`
+  保留给 `_revive_hygiene` 按槽位清账）；`_revive_hygiene` 的 `SimpleNamespace` 槽位契约
+  3 条刻意保留。全文 → `docs/nn/engineering.md` §173。
+- **2026-11-18（G5 第三十五批：租约到期读数与三处纯判据）**：`test_priority_schedule.py`
+  3 → 0、`test_batch_runner_split.py` 3 → 0、`test_tools/test_forkdist.py` 3 → 0、
+  `test_biz/test_course_spec_split.py` 3 → 2（G5 229 → **219**，84 文件）。新增
+  `LeaseMixin.lease_expiry()`（纯读：这次操作有没有动过租约表）；持有人/承诺痕迹改读
+  `lease_worker()` / `scheduling_facts()`；纯判据调用移出 assert。store 拆分守卫
+  `MIXIN_METHODS` 74 → 75。`_block_dict` 两处身份契约刻意保留。全文 →
+  `docs/nn/engineering.md` §174。
+- **2026-11-18（G5 第三十六批：心跳读数、哨兵快照与十处纯判据）**：12 个文件各 2 → 0
+  （G5 219 → **195**，72 文件）。新增 `LeaseMixin.heartbeat_at()`（错 token 心跳不许动
+  心跳锚）与 `HubHandler.pulse_readout()`（哨兵只读快照；`pulse_events` 会推进状态）；
+  其余为纯判据调用移出 assert。store 守卫 `MIXIN_METHODS` 75 → 76。转发名 / 身份 /
+  兼容参数 / 归属缓存本体等 6 个文件刻意保留。全文 → `docs/nn/engineering.md` §175。
+- **2026-11-18（G5 第三十七批：生命周期读数与增量读面）**：16 个文件各 1 → 0，
+  `test_rollout_volume.py` 2 → 1（G5 195 → **178**，56 文件）。新增
+  `common.runtime.ThreadOwner.running`（三条后台线程腿共用一份实现——三处各抄会被
+  逐字节重复审计记成新增债）、`UploaderProcess.degraded`、`PrefetchStore.handoff_path`、
+  `StreamCollector.plan_cap`、`_JobStore.ledger_offset`；其余为纯判据调用移出 assert 与
+  既有读数替换。store 守卫 `MIXIN_METHODS` 76 → 77。`test_rollout_volume` 保留 1 处
+  `_commit_journal()`（生产同名钩子 + 扫描面活性锚）。全文 → `docs/nn/engineering.md` §176。
+- **2026-11-18（G5 第三十八批：派发器在飞快照）**：`test_rollout_end_event.py` /
+  `test_offline_deliver_proc.py` / `test_push_priority_dispatch.py` 各 1 → 0
+  （G5 178 → **175**，53 文件）。新增 `PushDispatcher.inflight_records()`（同步状态副本，
+  防止把快慢读成先后）；`ctl_offset` 改读 `status()`（它本就并入子进程状态面）；断言里的
+  `_traj_dir` 改读脚手架路径。全文 → `docs/nn/engineering.md` §177。
+- **2026-11-18（G5 第三十九批：三处既有状态的公开读数）**：`test_rollout_dispatch_resilience.py` /
+  `test_prefetch_proc.py` / `test_push_register.py` 各 1 → 0（G5 175 → **172**，50 文件）。
+  新增 `common.distribution.aborted_tags()`（全表收工态副本）、`PayloadProcess.local_store`
+  （降级后的进程内实现）、`PushRegister.retry_step`（退避档位）。全文 →
+  `docs/nn/engineering.md` §178。
+- **2026-11-18（长函数存量第一刀：replay 导出）**：`worker/eval_replays_once.py::_export`
+  202 → **157** 行（拆出 `_load_games` / `_read_replay_ledger`，失败语义与返回码逐字不变），
+  长函数存量 **37 → 36**，形状基线删除该文件条目——`python.refactor.md` 附录 B
+  「真·下一批」第 1 项开始还债。全文 → `docs/nn/engineering.md` §179。
+- **2026-11-18（长函数存量第二刀：rollout 派发）**：`trainer/rollout_phase.py::dispatch_rollout_phase`
+  207 → **191** 行（拆出 `_stream_extra_kwargs`：stream 腿的 backend/update_kwargs
+  注入，纯取值、不碰闭包），长函数存量 **36 → 35**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §180。
+- **2026-11-18（长函数存量第三刀：离线租约领取）**：`hub/offline.py::_post_offline_lease`
+  211 → **168** 行（拆出 `_offline_claim_refusal`：claim 被拒的三条 409 回执，
+  文案/返回码逐字不变），长函数存量 **35 → 34**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §181。
+- **2026-11-18（长函数存量第四刀：worker 服务端）**：`remote/worker_server.py::make_worker_server`
+  213 → **182** 行（拆出 `_decode_job_body`：`POST /job` 体解析与 428 补传判定，
+  错误文案/状态码逐字不变），长函数存量 **34 → 33**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §182。
+- **2026-11-18（长函数存量第五刀：补传器构造）**：`remote/offline_deliver.py::OfflineDeliverer.__init__`
+  218 → **191** 行（拆出 `_init_background_state` / `_init_probe_state` 两组状态位，
+  赋值次序不变），长函数存量 **33 → 32**，形状基线删除该文件的长函数条目
+  （宽参数条目保留）。全文 → `docs/nn/engineering.md` §183。
+- **2026-11-18（长函数存量第六刀：Paddle PPO 更新）**：`worker/ppo/engine_paddle.py::ppo_update`
+  230 → **181** 行（拆出 `_prepare_demo` / `_build_ref_cache` / `_zero_stats`，
+  数值口径与循环体不变），长函数存量 **32 → 31**，形状基线删除该文件的长函数条目
+  （宽参数条目保留）。全文 → `docs/nn/engineering.md` §184。
+- **2026-11-18（长函数存量第七刀：run_loop CLI）**：`remote/run_loop.py::main`
+  233 → **86** 行（拆出 `_build_parser()`：整张 argv 定义表，描述/默认值/help 逐字保留），
+  长函数存量 **31 → 30**，形状基线删除该文件条目。全文 → `docs/nn/engineering.md` §185。
+- **2026-11-18（长函数存量第八刀：评估结算）**：`worker/eval_track.py::settle_eval_summary`
+  238 → **180** 行（拆出 `_scan_ledger` + `_LedgerTally` 读数对象，行过滤/去重口径
+  逐字不变），长函数存量 **30 → 29**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §186。
+- **2026-11-18（长函数存量第九刀：动态节点回场）**：`trainer/queue_local.py::rescan_nodes`
+  242 → **184** 行（拆出 `_rescan_stale_code` / `_rescan_push_weights`，codeHash 门与
+  权重重握手口径逐字不变），长函数存量 **29 → 28**，形状基线删除该文件的长函数条目
+  （宽参数条目保留）。全文 → `docs/nn/engineering.md` §187。
+- **2026-11-18（长函数存量第十刀：离线产物落账）**：`hub/store_offline.py::store_offline_artifact`
+  243 → **181** 行（拆出 `_decode_offline_artifact` / `_write_offline_round` /
+  `_artifact_land_note`），长函数存量 **28 → 27**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §188。
+- **2026-11-18（长函数存量第十一刀：BC 周期评估）**：`worker/bc_eval.py::dispatch_bc_eval`
+  244 → **163** 行（拆出 `_build_eval_sources` / `_run_bc_eval_one`，busy 退避与聚合
+  口径逐字不变），长函数存量 **27 → 26**，形状基线删除该文件的长函数条目
+  （宽参数条目保留）；新 helper 不新增 `Any`，该文件 `Any` 存量 14 → 12
+  （G14 基线同步调小）。全文 → `docs/nn/engineering.md` §189。
+- **2026-11-18（长函数存量第十二刀：回环冒烟）**：`hub/smoke_loopback.py::main`
+  249 → **177** 行（拆出 `_smoke_parser` / `_check_round_wire` / `_assert_smoke_final`，
+  计量与断言文案逐字不变），长函数存量 **26 → 25**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §190。
+- **2026-11-18（长函数存量第十三刀：intent 探针）**：`worker/train/intent_probe.py::main`
+  261 → **171** 行（拆出 `_probe_parser` / `_build_report`，口径与输出逐字不变），
+  长函数存量 **25 → 24**，形状基线删除该文件的长函数条目（宽参数条目保留）。
+  全文 → `docs/nn/engineering.md` §191。
+- **2026-11-18（长函数存量第十四刀：BC 云端作业）**：`remote/bc_job.py::_run_bc_job`
+  263 → **184** 行（拆出 `_check_corpus_lineage` / `_run_bc_echo` / `_load_bc_trainer` /
+  `_bc_train_namespace`），长函数存量 **24 → 23**，形状基线删除该文件的长函数条目
+  （宽参数条目保留）；`test_bc_job_split` 的延迟 import 断言改锚 `_load_bc_trainer`。
+  全文 → `docs/nn/engineering.md` §192。
+- **2026-11-18（长函数存量第十五刀：多课程服务循环）**：`trainer/loop_serve.py::serve`
+  275 → **186** 行（拆出 `_discover_tick` / `_publish_heartbeat` / `_finish_serve`），
+  长函数存量 **23 → 22**，形状基线删除该文件的长函数条目（宽参数条目保留）。
+  全文 → `docs/nn/engineering.md` §193。
+- **2026-11-18（长函数存量第十六刀：单轮执行）**：`remote/plan_run.py::_run_iteration`
+  276 → **162** 行（拆出 `_round_volume` / `_apply_greedy_budget` / `_iter_manifest`），
+  长函数存量 **22 → 21**，形状基线删除该文件的长函数条目（宽参数条目保留）。
+  全文 → `docs/nn/engineering.md` §194。
+- **2026-11-18（长函数存量第十七刀：greedy 采集）**：`trainer/loop_volume.py::_volume_collect_greedy`
+  286 → **187** 行（拆出 `_dispatch_greedy_wave` / `_greedy_collected` / `_greedy_plan_games` /
+  `_greedy_scan`），长函数存量 **21 → 20**；`LONG_FUNCS_BASELINE` 的 `trainer/loop_volume.py`
+  2 → 1（`_volume_collect_continuous` 327 仍在余量里），`CLUSTER` 守卫 13 → 15，
+  `_StubLoop` 补两个同源转发。
+  全文 → `docs/nn/engineering.md` §195。
+- **2026-11-18（长函数存量第十八刀：hub 入口）**：`hub/boot.py::main` 327 → **148** 行
+  （拆出 `_hub_parser` / `_build_hub_queue`），长函数存量 **20 → 19**，形状基线删除
+  该文件条目。同日记录三处**结构跳过**（`rollout_node.run` / `bc_dispatch.dispatch_bc_corpus` /
+  `loop_volume._volume_collect_continuous`）：均为需先造上下文对象的闭包式编排，
+  理由见 §196，不是欠账消失。全文 → `docs/nn/engineering.md` §196。
+- **2026-11-18（长函数存量第十九刀：杠杆扫描 tools）**：`tools/lever_scan.py::main`
+  204 → **164** 行（拆出 `_print_panel`：§1 面板体检 + §2 税基尺寸表），长函数存量
+  **19 → 18**，形状基线删除该文件条目。生产侧余量均为闭包式编排，先收工具面。
+  全文 → `docs/nn/engineering.md` §197。
+- **2026-11-18（长函数存量第二十刀：TPU 探针 tools）**：`tools/tpu-probe.py::main`
+  207 → **151** 行（拆出 `_tpu_parser`：整张 argv 表），长函数存量 **18 → 17**，
+  形状基线删除该文件条目；notebook 脚本 cell 由 `sync_tpu_probe_nb.py` 重新生成。
+  全文 → `docs/nn/engineering.md` §198。
+- **2026-11-18（长函数存量第二十一刀：空间探针 tools）**：`tools/spatial-probe.py::main`
+  232 → **152** 行（拆出 `_probe_linear_bufa` / `_probe_region16`），长函数存量
+  **17 → 16**，形状基线删除该文件的长函数条目（宽参数条目保留）。
+  全文 → `docs/nn/engineering.md` §199。
+- **2026-11-18（长函数存量第二十二刀：Wave2 判据 tools）**：`tools/wave2_judge.py::main`
+  270 → **189** 行（拆出 `_load_judge_rows` / `_print_health` / `_print_point_deltas` /
+  `_print_tail`），长函数存量 **16 → 15**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §200。
+- **2026-11-18（长函数存量本轮收口：37 → 15）**：共 22 刀纯搬移，每刀独立提交并过
+  全量门禁。余 15 个均为闭包/局部状态编排或超长报表（`rollout_node.run` 312、
+  `bc_dispatch.dispatch_bc_corpus` 316、`offline_boot.run_one_course` 323、
+  `loop_volume._volume_collect_continuous` 327、`worker.worker_loop` 334、
+  `notebook_runtime.run_push_worker` 336、`bc_paddle.train` 372、`job_round.run_one_round`
+  396、`offline_eval.run_cloud_eval` 401、`hub_client.publish_job` 418、`worker.run_job`
+  439、`stream.run_rollout_stream` 442、`loop_remote_job._remote_ppo_publish` 444、
+  `bc.train` 456、`paired_power.main` 625），纯搬移无干净切面；逐条理由与下一步接法
+  → `docs/nn/engineering.md` §201。**不是欠账消失**：门禁读数仍是 15。
+- **2026-11-18（长函数存量第二十三刀：配对功效报表 tools）**：`tools/paired_power.py::main`
+  625 → **35** 行（按 §1–§11 报表段拆出 11 个 `_print_*` helper，打印与判据逐字不变），
+  长函数存量 **15 → 14**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §202。
+- **2026-11-18（长函数存量第二十四刀：采样节点会话对象 remote）**：`remote/rollout_node.py::run`
+  312 → **175** 行（新增 `_Tunnel` / `_Session` 两个上下文对象，原 `_get_postures` /
+  `_open_cloudflared` 闭包与注册 / 重启 / 隧道自愈块搬进方法；`run` 保留监护循环骨架与
+  try/finally 收线），长函数存量 **14 → 13**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §203。
+- **2026-11-18（长函数存量第二十五刀：BC 派发槽位上下文 worker）**：
+  `worker/bc_dispatch.py::dispatch_bc_corpus` 316 → **185** 行（152 行的 `slot_worker`
+  闭包搬成 `_Corpus.run_slot`，计数改 `_Stats` 字段表，`_is_busy_hint` 提为模块级），
+  长函数存量 **13 → 12**，形状基线删除该文件的长函数条目（宽参数条目保留）。
+  全文 → `docs/nn/engineering.md` §204。
+- **2026-11-18（长函数存量第二十六刀：连续配额循环 / 收官 trainer）**：
+  `trainer/loop_volume.py::_volume_collect_continuous` 327 → **48** 行（新增 `_Continuous`
+  常量快照，循环与收官分别搬进 `_volume_continuous_loop` / `_volume_continuous_settle`），
+  长函数存量 **12 → 11**，形状基线删除该文件条目；测试侧 `_StubLoop` 与
+  `test_loop_volume_split.CLUSTER` 同步登记。
+  全文 → `docs/nn/engineering.md` §205。
+- **2026-11-18（长函数存量第二十七刀：推送守候两条分支 remote）**：
+  `remote/notebook_runtime.py::run_push_worker` 336 → **99** 行（already_serving 分支与
+  主分支的守候循环搬成 `_wait_existing_serving` / `_wait_started_serving`），
+  长函数存量 **11 → 10**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §206。
+- **2026-11-18（长函数存量第二十八刀：云评估逐局与轮内重投 remote）**：
+  `remote/offline_eval.py::run_cloud_eval` 401 → **182** 行（新增 `_eval_preflight` /
+  `_EvalPrep` / `_EvalRound`，逐局闭包搬成 `run_one`，轮内重投与结算搬成
+  `run_rounds` / `finish_round`），长函数存量 **10 → 9**，形状基线删除该文件条目；
+  命名避开同名散落账本（`run_round` → `run_rounds`、`settle` → `finish_round`）。
+  全文 → `docs/nn/engineering.md` §207。
+- **2026-11-18（长函数存量第二十九刀：每 job 一轮的会话对象 remote）**：
+  `remote/job_round.py::run_one_round` 396 → **75** 行（新增 `_Round`，旁路装配 / 执行 /
+  四档异常与收尾分别为 `start` / `_execute` / `run`），长函数存量 **9 → 8**，
+  形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §208。
+- **2026-11-18（长函数存量第三十刀：Paddle BC 训练循环 worker）**：
+  `worker/train/bc_paddle.py::train` 372 → **138** 行（新增 `_Train`，
+  `run_epochs` / `finalize` 两段搬出；`args` 作方法参数以免新增 `Any` 字段），
+  长函数存量 **8 → 7**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §209。
+- **2026-11-18（长函数存量第三十一刀：Torch BC 训练循环 worker）**：
+  `worker/train/bc.py::train` 456 → **145** 行（`_resolve_class_weights` + `_Train`：
+  `run_epochs` / `_emit_epoch` / `finalize_bc`），长函数存量 **7 → 6**；
+  形状基线删除该文件条目，并清掉三条已归零的历史条目（`train_core` / `dispatch` /
+  `eval_dispatch`）。全文 → `docs/nn/engineering.md` §210。
+- **2026-11-18（长函数存量第三十二刀：离线单课编排 remote）**：
+  `remote/offline_boot.py::run_one_course` 323 → **183** 行（改生成源
+  `_offline_boot/06_run.pyfrag`，拆出 `_prepare_roots` / `_choose_pack` /
+  `_probe_hub` / `_deliver`；ctx 用 `SimpleNamespace` 以保持独立导入），
+  长函数存量 **6 → 5**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §211。
+- **2026-11-18（长函数存量第三十三刀：发布编排 remote）**：
+  `remote/hub_client.py::publish_job` 418 → **23** 行（按原 `# 4)`/`# 5)` 段切三相：
+  `_publish_facts` / `_publish_stage` / `_publish_commit`；中间形状 `PublishFacts` /
+  `PublishStaged` 下沉 `remote/publish_spec.py`，本地 55 行绑定块删除），
+  长函数存量 **5 → 4**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §212。
+- **2026-11-18（长函数存量第三十四刀：worker 轮询壳 remote）**：
+  `remote/worker.py::worker_loop` 334 → **196** 行（while 体一行未动；壳外四段搬进新模块
+  `remote/worker_session.py`：`hub_plan` / `acquire_retry` / `yield_self_check` /
+  `close_worker`；接缝件 `_setup_bulk_yield` / `_ensure_pf_store` / `_start_services` /
+  `_poll_halt` 与 `make_uploader` 调用点因 `W.*` patch 点留在宿主），长函数存量 **4 → 3**，
+  形状基线 `remote/worker.py` 2 → 1。
+  全文 → `docs/nn/engineering.md` §213。
+- **2026-11-18（长函数存量第三十五刀：作业壳 remote）**：
+  `remote/worker.py::run_job` 439 → **134** 行（七段相位搬进新模块
+  `remote/job_shell.py`：`precheck_job` / `land_materials` / `bc_or_none` /
+  `resolve_job_weights` / `run_iter_phase` / `check_mode_and_d14` / `echo_smoke_result`，
+  状态住 `JobState`；热替换护栏与训练核调用留在宿主），长函数存量 **3 → 2**，
+  形状基线删除 `remote/worker.py` 条目。同批把 `_bulk_yield_params` /
+  `_setup_bulk_yield` / `epoch_mult_of` 下沉 `worker_session.py`（worker LOC 996 → 807）。
+  全文 → `docs/nn/engineering.md` §214。
+- **2026-11-18（长函数存量第三十六刀：流式迭代 trainer）**：
+  `trainer/stream.py::run_rollout_stream` 442 → **112** 行（嵌套闭包搬进同文件的
+  `_StreamRun`：collector 回调 / wave 装载 / drain / eval 闸 / 预采播种 / 收尾；
+  输入与运行时状态收进 `_StreamCtx`；PPO RNG 派生留在宿主函数体，模块顶层仍零 torch），
+  长函数存量 **2 → 1**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §215。
+- **2026-11-19（长函数存量第三十七刀：发布相位 trainer）**：
+  `trainer/loop_remote_job.py::TrainingRemoteJob._remote_ppo_publish` 444 → **192** 行
+  （七段相位拆成本类 `_remote_*` 助手：guard_plan / transport / course_and_shards /
+  code_snapshot / kickstart_demo / pack_inputs / after_publish / export_bundle），
+  长函数存量 **1 → 0**——`LONG_FUNCS_BASELINE` **清空**（存量清零，此后一律按新增判）。
+  全文 → `docs/nn/engineering.md` §216。
 ## §2026-11-13-goalnn-bc-corpus-lazy-mmap（BC 大语料逐 shard mmap + 训练前内存预检）
 
 - **决定**：训练装载改 `lazy=True`（obs/scalars/extra 走 ShardArray，每 shard mmap），

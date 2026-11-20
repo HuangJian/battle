@@ -160,8 +160,11 @@ UPPER_PACKAGES = ("remote", "hub", "worker", "trainer")
 #: 「trainer 里每个模块都必须是编排」立刻看见这六个。
 TRAINER_ORCHESTRATION = frozenset(
     {
+        "dispatch_state",
         "batch_eval",
-        "batch_plan",
+        # 2026-11-14：`batch_plan` 搬去 `biz/`（纯逻辑，真回 B 层）。它此前住这里，靠的是
+        # `from trainer.dispatch_queue import mm` 这条 re-export 边 —— 一条转发就能让
+        # 「trainer/ 只有编排」这条门禁对纯逻辑视而不见，本集合的「少一个也红」正好接住。
         "batch_runner",
         "batch_store",
         "bc_ingest",
@@ -186,7 +189,9 @@ TRAINER_ORCHESTRATION = frozenset(
         "eval_m1_once",
         "loop",
         "loop_baseline",
-        "loop_control",
+        # 2026-11-16：`loop_control` 搬到 `worker/`（纯逻辑，只 import `common.*`）。它此前算编排，
+        # 靠的是 `from trainer.dispatch_queue import REPO_ROOT` —— 为了取一个路径常量而存在的一条边，
+        # 与 `batch_plan` 那笔同一型。搬家同时正过来 `worker/loop_hold → trainer.loop_control`。
         "loop_core",
         "loop_dispatch",
         "loop_eval",
@@ -194,7 +199,8 @@ TRAINER_ORCHESTRATION = frozenset(
         "loop_guards",
         #: ★M2（2026-10-07，plan/worker-type-dispatch-model §3-M2）：`loop_hold`（「这门课被接管
         #: 了吗」的双通道判据）—— 它直接拿 `worker.train.loop_util`（课程键归一到账本那把）
-        #: 与 `trainer.loop_control`（控制文件）⇒ 直接/传递达 worker 面。同前：先红、再登记。
+        #: ⇒ 直接/传递达 worker 面（控制文件那半 2026-11-16 搬进 `worker/loop_control.py`，
+        #: 那条跨包边随之消失）。同前：先红、再登记。
         "loop_hold",
         "loop_iter_dir",
         "loop_lifecycle",
@@ -215,6 +221,7 @@ TRAINER_ORCHESTRATION = frozenset(
         #: / `remote.hub_client`（快照 + 清停机态）⇒ **直接**编排成员（同前先红、再登记）。
         "once_shot",
         "queue_local",
+        "queue_worker",
         "rollout_phase",
         "run_bc",
         "run_rl",

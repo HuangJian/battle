@@ -50,17 +50,19 @@ EVAL_PY = NN_ROOT / "trainer" / "loop_eval.py"
 STEPS_PY = NN_ROOT / "trainer" / "loop_steps.py"
 CORE_PY = NN_ROOT / "trainer" / "loop_core.py"
 
-#: 这一簇的成员（闭集）：14 个方法 —— 新方法要么住在 `TrainingSteps`，要么改这张表。
+#: 这一簇的成员（闭集）：15 个方法 —— 新方法要么住在 `TrainingSteps`，要么改这张表。
 #: 2026-11-04（F1 重启补账）：`_dispatch_eval_round`（单轮派发体，从 `_dispatch_delayed_eval`
 #: 提出）+ `_uncovered_eval_rounds`（drain 与补账共用的缺口发现）+ `_backfill_eval_gaps`。
 #: 2026-11-04（停课闸）：`_course_stopped`（控制台停课 ⇒ 不再补任何 eval 空缺）。
 #: 2026-11-04（§113 单开轮上限）：`_eval_open_threads`（本课在跑轮线程清活）+
 #: `_eval_course_fp`（课指纹，查仲裁器里本课是否已有登记轮）。
+#: 2026-11-18（G5）：`eval_timing`（公开只读快照，用例不再伸进私有槽位）。
 CLUSTER = (
     "_eval_on_round",
     "_eval_policy_cfg",
     "_course_stopped",
     "_eval_open_threads",
+    "eval_timing",
     "_eval_course_fp",
     "_eval_join_soft_sec",
     "_sweep_eval_tail",
@@ -91,6 +93,7 @@ CROSS_MODULE_HANDS = (
 #: 顶层 import 面的闭集（模块名）。
 TOP_LEVEL_ALLOWED = {
     "__future__",
+    "dataclasses",
     "json",
     "threading",
     "time",
@@ -98,6 +101,9 @@ TOP_LEVEL_ALLOWED = {
     "typing",
     "trainer.eval_m1",
     "common.log",
+    # 收尾 drain 线程归 `Runtime` 名下（§P1-6 第三批）：`common.runtime` 是 L0、stdlib-only
+    # 的并发所有者；定时器/重依赖仍留在调用方或延迟 import。
+    "common.runtime",
 }
 
 #: DI 目标：只许**方法体内**延迟 import（测试 patch 的是这些实现模块）。
@@ -171,7 +177,7 @@ def _in_function_imports(path: Path) -> set[str]:
 
 
 def test_cluster_is_defined_in_loop_eval_only() -> None:
-    """本簇（14 个成员）定义在 `TrainingEval`；`TrainingSteps` 里**不得**再有同名定义。
+    """本簇（15 个成员）定义在 `TrainingEval`；`TrainingSteps` 里**不得**再有同名定义。
 
     这条挡的是「就地补一个同名方法」——那会让 `TrainingEval` 里那份变成死代码，而测试
     （跑在组合实例上，MRO 取到旧类那份）照样绿。
@@ -262,8 +268,10 @@ def test_slots_resolve_through_inheritance_on_a_bare_instance() -> None:
     for slot in CLUSTER_SLOTS:
         assert slot in TrainingEval.__annotations__, slot
     assert TrainingEval in TrainingSteps.__mro__
-    assert TrainingSteps()._eval_join_sec == 0.0
-    assert TrainingSteps()._eval_tail is None
+    # 用公开读数问，而不是伸手进槽位：读数能取到就说明继承解析通了（G5 第十二批）。
+    bare = TrainingSteps().eval_timing()
+    assert bare.join_sec == 0.0
+    assert bare.tail is None
 
 
 def test_cross_module_hands_are_the_two_declared_ones() -> None:
@@ -357,13 +365,14 @@ def test_stream_report_thread_hands_off_across_the_module_boundary() -> None:
     ts._eval_gate = None
 
     ts._log_report(5, time.time())  # 写：trainer/loop_steps.py::_log_report
-    assert ts._eval_thread is thread, "stream 报告的线程句柄没落进 _eval_thread"
+    assert ts.eval_timing().round_thread is thread, "stream 报告的线程句柄没进在飞轮"
     ts._join_eval(5)  # 读：trainer/loop_eval.py::_join_eval
 
-    assert ts._eval_tail is not None, "没跑完的尾巴应交棒给下一轮 rollout 边界"
-    assert ts._eval_tail[0] is thread
+    view = ts.eval_timing()
+    assert view.tail is not None, "没跑完的尾巴应交棒给下一轮 rollout 边界"
+    assert view.tail[0] is thread
     assert thread.joins == [], f"缺省不该站等：{thread.joins}"
-    assert ts._eval_tail_start is None, "交棒后时间基准复位"
+    assert view.tail_start is None, "交棒后时间基准复位"
 
 
 def test_eval_on_round_placeholder_fails_loudly() -> None:

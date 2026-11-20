@@ -67,7 +67,12 @@ ALLOWED_IMPORTS = {
     # `common.env_probe`（plan/worker-name-readable）：worker_tag 的环境/link 判据——
     # 纯函数（同参同值、零状态），符合本簇「纯函数面」的定位。
     "common.env_probe",
+    # 2026-11-14（python.refactor.md §P0-6）：行日志时间戳改走 `common.logutil`。
+    "common.logutil",
     "common.protocol",
+    # 2026-11-17（§P1-6 第四批）：取消观察线程归 `Runtime`（`cancel-<jid前8>-watch`）；
+    # `common.runtime` 是 L0、stdlib-only 的并发所有者。
+    "common.runtime",
     "common.text",
     "remote.bulk_sched",
     "remote.http",

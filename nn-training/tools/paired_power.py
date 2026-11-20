@@ -327,31 +327,14 @@ def endpoint_pair_stats(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 主流程（进 plan / 判据的数字都出自这里；`main()` 只在 __main__ 里跑）
+# 报表段（main 的逐段搬移：打印顺序 / 文案 / 判据逐字不变）
 # ─────────────────────────────────────────────────────────────────────────────
-def main() -> int:
-    # ── 0. 语料前提：三腿逐局账本是 tmp/ 证据（未入库）——缺了就响亮说明并正常退出 ──
-    missing = [a for a, p in PATHS.items() if not p.exists()]
-    if missing:
-        print(
-            "语料不在（tmp/h4-lane-{a}/eval_log.jsonl 缺 {m}）——本工具复算的是那次三腿实测，\n"
-            "账本属 tmp/ 证据、未入库。要复现需先从证据保留处恢复该目录；\n"
-            "本次不判、退出（非失败）。".format(a="{a}", m=", ".join(missing))
-        )
-        return 0
-
-    rows = {a: load_rows(p) for a, p in PATHS.items()}
-    games = {a: {k: ra2(r) for k, r in rows[a].items()} for a in ARMS}
-    all_its = sorted({i for g in games.values() for i, _s in g})
-
-    def count_at(arm: str, it: int) -> int:
-        return sum(1 for i, _s in games[arm] if i == it)
-
-    # 两臂都有逐局行的 iter（且 it>0）：it0 是共同起点（同一份权重 ⇒ Δ 恒 0，方差无信息），
-    # it40 只有 a1（a0 止于 it35）⇒ 都不进配对统计。
-    paired_its = [it for it in all_its if it > 0 and count_at(CONTROL, it) >= 2 and count_at("a1", it) >= 2]
-
-    # ── 1. 体检：点数、seed 集合互等（配对前提）──────────────────────────────
+def _print_health(
+    games: dict[str, dict[tuple[int, int], float]],
+    all_its: list[int],
+    paired_its: list[int],
+) -> bool:
+    """§1 体检：逐点局数与 seed 集合互等；返回「配对前提被破坏」标志。"""
     print("=" * 92)
     print("§1 逐局账本体检（配对前提：同 iter 同 seed 各臂都有）")
     print("=" * 92)
@@ -381,7 +364,13 @@ def main() -> int:
         "it>20 只有 a0/a1；it40 只有 a1"
     )
 
-    # ── 2. 每局 sd / 配对差 sd / 相关：配对设计买到了什么 ──────────────────────
+    return bad
+
+
+def _print_pairing_gain(
+    games: dict[str, dict[tuple[int, int], float]], paired_its: list[int]
+) -> None:
+    """§2 每局 sd / 配对差 sd / 两臂相关（配对设计买到了什么）。"""
     print()
     print("=" * 92)
     print("§2 每局 sd、配对差 sd 与两臂相关（配对设计到底买到了什么）")
@@ -418,7 +407,11 @@ def main() -> int:
         f"**{ratio_m:.3f}×**（相对不配对省 **{1 - ratio_m / math.sqrt(2):.1%}**）"
     )
 
-    # ── 3. 复算归档：Δrel / SE(Δrel) / t / p₁ / MDE ─────────────────────────
+
+def _print_archive_recheck(
+    games: dict[str, dict[tuple[int, int], float]], paired_its: list[int]
+) -> tuple[bool, dict[int, float], tuple[tuple[str, float], ...], bool]:
+    """§3 复算归档表；返回 `(Δrel/p₁ 对账, 逐点 SE(Δrel)%, 三种基准, MDE 对账)`。"""
     print()
     print("=" * 92)
     print("§3 复算 §65 归档表（基准 = 同 iter 对照臂 a0 的 rA2 均值）")
@@ -483,7 +476,13 @@ def main() -> int:
         f"其余两档给出带宽（{mde_rel(se_med):.1f}%–{mde_rel(se_worst):.1f}%@200）"
     )
 
-    # ── 4. Wave 2 的 N：绿线 16% 与完全闭合 31% 各需要多少局 ──────────────────
+    return agree, se_by_it, bases, mde_ok
+
+
+def _print_wave2_n(
+    bases: tuple[tuple[str, float], ...], se_it20: float, se_worst: float
+) -> None:
+    """§4 Wave 2 的 N（绿线 / 满闭合各需多少局）。"""
     print()
     print("=" * 92)
     print("§4 Wave 2 的 N（MDE ∝ 1/√N；判据段用**池外新 seed0**，§15.1）")
@@ -524,7 +523,11 @@ def main() -> int:
     print("  ⚠ 本工具只算**抽样功效**：不含量化/种子级非平稳、不含评估网格 cadence 误差，")
     print("     也不含「两臂漂移不共模」的额外方差。N 取上取整，别取下。")
 
-    # ── 5. 次要终点 / 守卫表的配对功效（一条判据线一行）──────────────────────
+
+def _print_secondary_endpoints(
+    rows: dict[str, dict[tuple[int, int], dict[str, Any]]], paired_its: list[int]
+) -> tuple[dict[str, str], dict[str, tuple[float, float, float]]]:
+    """§5 次要终点 / 守卫表；返回 `(阈值所需 N, 各线 (a0 水平, sd_Δ, SE_Δ))`。"""
     print()
     print("=" * 104)
     print("§5 次要终点与守卫表的配对功效（逐局、同 iter 同 seed；取各点中位；MDE 是 200 局口径）")
@@ -568,7 +571,16 @@ def main() -> int:
     print("     ③ 「不升」「timeout」结构性不可判（margin=0 ⇒ 需无限局；sd=0 ⇒ 事件太稀）——")
     print("        前者必须改写成「不升过 Xpp」的有限阈值，后者报频次、不当功效项。")
 
-    # ── 6. 尾巴合并：K 个评估点取均值能省多少局 ────────────────────────────────
+    return needs, ep_st
+
+
+def _print_tail_merge(
+    rows: dict[str, dict[tuple[int, int], dict[str, Any]]],
+    paired_its: list[int],
+    se_by_it: dict[int, float],
+    se_it20: float,
+) -> tuple[list[float], float, float]:
+    """§6 尾巴合并；返回 `(逐点 SE(Δrel)%, 跨点超出抽样的方差, 单点抽样 SE 均值)`。"""
     print()
     print("=" * 104)
     print("§6 尾巴合并（先验「尾部真效应平稳」，再算 K 点合并的 SE / MDE / 所需局数）")
@@ -602,7 +614,17 @@ def main() -> int:
     print("  ⇒ 总局数 N×K 基本不变（功效只看两者的乘积）⇒ 合并不是免费午餐，但它**不用新开评估**：")
     print("     日常段本来就是每 5 轮评一次，尾巴三点已经在盘上；而单点需要额外补一段大评估。")
 
-    # ── 7. 更长时程：逐点 SE 的趋势 + 自漂诊断 + 总局数账 ─────────────────────
+    return ses_rel, between2, sampling
+
+
+def _print_longer_horizon(
+    games: dict[str, dict[tuple[int, int], float]],
+    paired_its: list[int],
+    se_by_it: dict[int, float],
+    ses_rel: list[float],
+    sampling: float,
+) -> float:
+    """§7 更长时程 + 自漂诊断 + 总局数账；返回 it0 的 a0 基线（无则该点为 0）。"""
     print()
     print("=" * 104)
     print("§7 更长时程（it40/60/80 能不能沿用这张 N 表）与漂移诊断")
@@ -620,7 +642,7 @@ def main() -> int:
     print("     ⚠ 超出 it35 是外推：语料只到 it35，且尾部仍在训（漂移未收敛）。")
     print()
     print("  自漂诊断（每个评估点必报；配对差把它的**均值**消掉，不消它的方差）：")
-    base0 = arm_level(games[CONTROL], 0) if count_at(CONTROL, 0) else 0.0
+    base0 = arm_level(games[CONTROL], 0) if any(i == 0 for i, _s in games[CONTROL]) else 0.0
     print(f"    {'it':>5} {'a0 rA2%':>9} {'a0 自漂%':>9} {'a1 rA2%':>9} {'a1 自漂%':>9} {'配对 Δrel%':>11}")
     for it in paired_its:
         l0, l1 = arm_level(games[CONTROL], it), arm_level(games["a1"], it)
@@ -637,7 +659,17 @@ def main() -> int:
     print(f"    日常段 = {eval_pts} 个评估点（it0 起每 5 轮）× 200 局 = {eval_pts * 200} 局在盘上；")
     print(f"    判据只需尾巴 K=3 的 {3 * 200} 局 ⇒ **够**（需 {math.ceil(n_for_pooled(mde_rel(sampling), 200, GREEN_REL, 3)) * 3} 局）。")
 
-    # ── 8. Wave 2 完整判据表（装配）──────────────────────────────────────────
+    return base0
+
+
+def _print_criteria_table(
+    se_by_it: dict[int, float],
+    paired_its: list[int],
+    between2: float,
+    needs: dict[str, str],
+    ep_st: dict[str, tuple[float, float, float]],
+) -> None:
+    """§8 Wave 2 完整判据表（装配）。"""
     print()
     print("=" * 104)
     print("§8 Wave 2 判据表（装配：每条线一行；推荐方案 = 尾巴 3 点均值 × 200 局/点）")
@@ -669,7 +701,11 @@ def main() -> int:
             f"{mde_rel(se_eff):>10.4g} {ok:>15}"
         )
 
-    # ── 11. Wave 2（b 腿）预注册阈值表：阈值就取「该线自己的 MDE」────────────────
+
+def _print_preregister_thresholds(
+    ep_st: dict[str, tuple[float, float, float]], needs: dict[str, str]
+) -> None:
+    """§11 Wave 2 预注册阈值表（阈值 = 该线自己的 MDE）。"""
     print()
     print("=" * 104)
     print(f"§11 Wave 2 预注册阈值表（尾巴 3 点均值 × {N_WAVE2} 局/点；阈值建议 = 该线自己的 MDE）")
@@ -707,7 +743,14 @@ def main() -> int:
     print("  ⚠ 「可判」只看**该条线自己**的抽样功效，不含多重比较：把 13 条线一起当判据就必须分")
     print("     主/次（主终点单侧 α=0.05；次终点 Holm）——否则假阳性率随线条数线性膨胀。")
 
-    # ── 9. Wave 1 回填：按**新判据**重算三腿，看结论变不变 ────────────────────
+
+def _print_wave1_backfill(
+    rows: dict[str, dict[tuple[int, int], dict[str, Any]]],
+    games: dict[str, dict[tuple[int, int], float]],
+    paired_its: list[int],
+    base0: float,
+) -> None:
+    """§9 Wave 1 回填：按新判据重算三腿，看结论变不变。"""
     print()
     print("=" * 104)
     print("§9 Wave 1 回填（按新判据重算；旧判据 = it20 单点，MDE 25.0%）")
@@ -815,7 +858,11 @@ def main() -> int:
         "正面论证（「−11% 在 3.6% 剂量下就是预期工作点」）站住，不能再用「测不出来」。"
     )
 
-    # ── 10. §67 补评估块：旧 200 局/点 + 新 300 局/点同点合并后重算（只评估、不重训）──
+
+def _print_extended_pool(
+    rows: dict[str, dict[tuple[int, int], dict[str, Any]]], paired_its: list[int]
+) -> bool:
+    """§10 §67 补评估块同点合并重算；返回「补评估检查通过」（缺块 = 跳过、仍通过）。"""
     print()
     print("=" * 104)
     print("§10 补评估后的重算（旧 200 局/点 + 新块；预注册 → docs/nn/experiments.md §67）")
@@ -953,6 +1000,46 @@ def main() -> int:
         print()
         print("  读法：合并尺度 = 尾巴 3 点（预注册主判据）；全点均值只在上面「同质」时才可外推。")
 
+    return ext_ok
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 主流程（进 plan / 判据的数字都出自这里；`main()` 只在 __main__ 里跑）
+# ─────────────────────────────────────────────────────────────────────────────
+def main() -> int:
+    # ── 0. 语料前提：三腿逐局账本是 tmp/ 证据（未入库）——缺了就响亮说明并正常退出 ──
+    missing = [a for a, p in PATHS.items() if not p.exists()]
+    if missing:
+        print(
+            "语料不在（tmp/h4-lane-{a}/eval_log.jsonl 缺 {m}）——本工具复算的是那次三腿实测，\n"
+            "账本属 tmp/ 证据、未入库。要复现需先从证据保留处恢复该目录；\n"
+            "本次不判、退出（非失败）。".format(a="{a}", m=", ".join(missing))
+        )
+        return 0
+
+    rows = {a: load_rows(p) for a, p in PATHS.items()}
+    games = {a: {k: ra2(r) for k, r in rows[a].items()} for a in ARMS}
+    all_its = sorted({i for g in games.values() for i, _s in g})
+
+    def count_at(arm: str, it: int) -> int:
+        return sum(1 for i, _s in games[arm] if i == it)
+
+    # 两臂都有逐局行的 iter（且 it>0）：it0 是共同起点（同一份权重 ⇒ Δ 恒 0，方差无信息），
+    # it40 只有 a1（a0 止于 it35）⇒ 都不进配对统计。
+    paired_its = [it for it in all_its if it > 0 and count_at(CONTROL, it) >= 2 and count_at("a1", it) >= 2]
+
+    bad = _print_health(games, all_its, paired_its)
+    _print_pairing_gain(games, paired_its)
+    agree, se_by_it, bases, mde_ok = _print_archive_recheck(games, paired_its)
+    se_it20, se_worst = se_by_it[20], max(se_by_it.values())
+    _print_wave2_n(bases, se_it20, se_worst)
+    needs, ep_st = _print_secondary_endpoints(rows, paired_its)
+    ses_rel, between2, sampling = _print_tail_merge(rows, paired_its, se_by_it, se_it20)
+    base0 = _print_longer_horizon(games, paired_its, se_by_it, ses_rel, sampling)
+    _print_criteria_table(se_by_it, paired_its, between2, needs, ep_st)
+    _print_preregister_thresholds(ep_st, needs)
+    _print_wave1_backfill(rows, games, paired_its, base0)
+    ext_ok = _print_extended_pool(rows, paired_its)
     return 0 if (agree and mde_ok and not bad and ext_ok) else 1
 
 

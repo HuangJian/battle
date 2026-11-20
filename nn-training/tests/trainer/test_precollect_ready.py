@@ -103,12 +103,20 @@ def test_exited_child_is_ready_even_with_zero_shards(tmp_path: Path, monkeypatch
 
 
 def test_predicate_is_non_blocking(tmp_path: Path, monkeypatch) -> None:
-    """★ 让位判据必须**立刻**回答：未就绪时也不能自己在那里轮询。"""
-    monkeypatch.setattr(rp, "completed_pairs", lambda *a, **kw: set())
-    t0 = time.monotonic()
+    """★ 让位判据必须**立刻**回答：未就绪时也不能自己在那里轮询。
+
+    判据是**读盘次数**，不是耗时（2026-11-15）：轮询实现在这里会连续读盘 N 次，而「问一句
+    就回答」只读一次。`elapsed < 0.5s` 那种写法在并行门禁满载时会红，红的理由却与代码无关。
+    """
+    reads: list[int] = []
+
+    def _count_once(*a, **kw):
+        reads.append(1)
+        return set()
+
+    monkeypatch.setattr(rp, "completed_pairs", _count_once)
     assert rp.precollect_ready(_as_popen(_Child(None)), tmp_path, 3, _args(tmp_path)) is False
-    # timing-ok: 契约上界（让位判据必须立刻回答，上界即契约）
-    assert time.monotonic() - t0 < 0.5
+    assert len(reads) == 1, f"让位判据读盘 {len(reads)} 次 ⇒ 它在自己轮询（契约是问一句就答）"
 
 
 def test_join_terminates_ready_child_before_parent_takeover(
@@ -116,11 +124,12 @@ def test_join_terminates_ready_child_before_parent_takeover(
 ) -> None:
     """同源证据：就绪后当场收掉子进程再返回，避免父子同轮共用 traj/w{idx}。"""
     monkeypatch.setattr(rp, "completed_pairs", lambda *a, **kw: _shards(5))
+    # 判据是「一格都没睡」，不是耗时（2026-11-15）：就绪后若还在按拍轮询，必然走到 `sleep(2)`。
+    monkeypatch.setattr(
+        rp.time, "sleep", lambda *_a, **_k: pytest.fail("就绪后还在按拍等 —— 当场收兵")
+    )
     child = _Child(None)
-    t0 = time.monotonic()
     assert rp.join_precollect_child(_as_popen(child), tmp_path, 3, _args(tmp_path)) is None
-    # timing-ok: 契约上界（就绪必须当场返回，上界即契约）
-    assert time.monotonic() - t0 < 0.5
     assert child.poll() == -15  # 就绪开训前先 terminate，防止父子同写
 
 

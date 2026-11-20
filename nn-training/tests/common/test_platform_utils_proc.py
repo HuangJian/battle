@@ -231,7 +231,9 @@ def test_kill_reap_sec_is_one_small_positive_number() -> None:
         return {n.id for n in ast.walk(ast.parse(text)) if isinstance(n, ast.Name)}
 
     # 判据是「定义/引用这个常量」（AST），不是文件里有没有 `KILL_REAP_SEC = ` 这串字。
-    assert _assigned((ROOT / "common/platform_utils.py").read_text(encoding="utf-8")) >= {"KILL_REAP_SEC"}
+    assert _assigned((ROOT / "common/platform_utils.py").read_text(encoding="utf-8")) >= {
+        "KILL_REAP_SEC"
+    }
     for leg in ("worker/iter_rollout.py", "worker/eval_local.py"):
         assert _names((ROOT / leg).read_text(encoding="utf-8")) >= {"KILL_REAP_SEC"}, leg
 
@@ -253,3 +255,21 @@ def test_the_helpers_are_documented_in_the_module_map() -> None:
         "call_bounded",
     ):
         assert name in doc, name
+
+
+class _Reaped:
+    """已退出的子进程替身：`poll()` 有返回值 ⇒ 收尸这一趟该把它收掉。"""
+
+    def poll(self) -> int:
+        return 0
+
+
+def test_unreaped_store_is_injectable() -> None:
+    """账本可注入（`UnreapedProcs` 是对象，不再是模块级 list）：注入的那个不许碰默认实例。"""
+    before = plat.unreaped_count()
+    mine = plat.UnreapedProcs()
+    plat.keep_unreaped(_Reaped(), store=mine)
+    assert plat.unreaped_count(store=mine) == 1
+    assert plat.unreaped_count() == before, "注入的账本不许污染进程级默认实例"
+    assert plat.sweep_unreaped(store=mine) == 1
+    assert plat.unreaped_count(store=mine) == 0

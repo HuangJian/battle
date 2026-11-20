@@ -193,7 +193,9 @@ def _push(cfg: dict, log, secret, keepalive_stop, ip: str, tok: str) -> int:
             return self._j({"status": "accepted", "upgrading": True}, 202)
 
     srv = ThreadingHTTPServer(("0.0.0.0", port), _H)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    threading.Thread(
+        target=srv.serve_forever, name="push-bootstrap", daemon=True
+    ).start()
     log(f"push bootstrap :{port}")
     log(f"★ rl-config 节点 url -> http://{ip}:{port}  (authKey=PUSH_TOKEN)")
     log("!! userspace 模式入站不通：push 需要 kernel 模式，Colab 上基本没戏——优先用 pull")

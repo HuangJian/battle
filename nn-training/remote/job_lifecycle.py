@@ -45,6 +45,8 @@ from collections.abc import Callable
 from typing import Any
 
 import common.env_probe as env_probe
+import common.runtime
+from common.logutil import tag_logger
 from common.protocol import (
     ADMIN_WORKER_PREFETCH_PATH,
     CAP_REPLAY_CORPUS,
@@ -65,6 +67,7 @@ from common.text import exc_tail
 from remote.bulk_sched import BULK_P1_CRITICAL
 from remote.http import (
     CONTROL_ATTEMPTS,
+    NET_ERRORS,
     _request,
     _sched_headers,
     _warn_non_200,
@@ -76,6 +79,9 @@ from remote.wire import (
     _wire_note_failed,
     _wire_note_wait,
 )
+
+#: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+_log = tag_logger("worker", lambda: time)
 
 __all__ = [
     "_failure_detail",
@@ -192,7 +198,7 @@ def report_prefetch(
             method="POST",
             headers={"Content-Type": "application/json"},
         )
-    except Exception as e:  # 连不上/超时/URL 写错：观测腿永不把主循环拖下水
+    except NET_ERRORS as e:  # 连不上/超时/URL 写错：观测腿永不把主循环拖下水
         log(f"prefetch 上报失败（{type(e).__name__}: {exc_tail(e)}）——本轮跳过，下轮再来")
         return False
     if status != 200:
@@ -244,7 +250,7 @@ def request_priority(
                 **_sched_headers(worker_id),
             },
         )
-    except Exception as e:  # 不可达：按 highest 下垂（见 docstring）
+    except NET_ERRORS as e:  # 不可达：按 highest 下垂（见 docstring）
         if log is not None:
             log(
                 f"priority 问询失败（{type(e).__name__}）——已重试 "
@@ -334,8 +340,10 @@ def job_started(base_url: str, token: str, jid: str, *, worker_id: str = "", tim
             method="POST",
             headers={"Content-Type": "application/json"},
         )
-    except Exception:
-        pass
+    except NET_ERRORS as e:
+        # 不可达不致命，但**必须留痕**：`computing_at` 是掉队阈值的唯一时基，没送到就意味着
+        # 这份 job 的阈值晚起算（hub 侧看不到「已在算」）。
+        _log(f"job {jid}: start 通知没送到（{e!r}）—— 掉队阈值晚起算，本轮照跑")
 
 
 def job_ready(base_url: str, token: str, jid: str, *, worker_id: str = "", timeout: float = 15.0) -> None:
@@ -350,8 +358,9 @@ def job_ready(base_url: str, token: str, jid: str, *, worker_id: str = "", timeo
             method="POST",
             headers={"Content-Type": "application/json"},
         )
-    except Exception:
-        pass
+    except NET_ERRORS as e:
+        # 没送到 ⇒ 别人的优先级不降（P0 小包的全部作用就是降别人优先级），租约兜底。
+        _log(f"job {jid}: ready 通知没送到（{e!r}）—— 其他 worker 的优先级不会降，等租约")
 
 
 def abandon_job(
@@ -378,8 +387,10 @@ def abandon_job(
             method="POST",
             headers={"Content-Type": "application/json"},
         )
-    except Exception:
-        pass  # 不可达：租约过期兜底（与 release_job 同策略）
+    except NET_ERRORS as e:
+        # 不可达：租约过期兜底（与 release_job 同策略）—— 但 hub 侧的 claimed/computing/ready
+        # 可见性会一直挂着，所以这行是操作员看见「放弃没生效」的唯一迹象。
+        _log(f"job {jid}: abandon 没送到（{e!r}）—— 租约过期兜底，hub 侧可见性会滞后")
 
 
 def job_status(
@@ -388,7 +399,7 @@ def job_status(
     """`GET /jobs/{id}/status` → 摘要 dict；不可达/未知名 → None（调用方不据此取消）。"""
     try:
         status, body = _request(base_url, token, f"/jobs/{jid}/status", timeout=timeout)
-    except Exception:
+    except NET_ERRORS:
         return None
     if status != 200:
         return None
@@ -431,9 +442,8 @@ def start_cancel_watcher(
                 cancelled.set()
                 return
 
-    th = threading.Thread(target=_loop, daemon=True, name=f"cancel-{jid[:8]}")
-    th.start()
-    return th
+    #: 取消观察线程归这里（`cancel-<jid前8>-watch`）：调用方拿句柄决定等不等。
+    return common.runtime.Runtime(scope=f"cancel-{jid[:8]}").thread(_loop, name="watch", daemon=True)
 
 
 def _priority_rank(prio: str) -> int:
@@ -521,8 +531,9 @@ def acquire_job(
             if on_drop is not None:
                 try:
                     on_drop(jid)
-                except Exception:  # 丢副本失败绝不影响选活
-                    pass
+                except Exception as e:  # 丢副本失败绝不影响选活
+                    # 不致命，但副本留在盘上 = 下次 peek 还会看到它（存储慢泄漏），得留痕。
+                    _log(f"job {jid}: 丢弃本地副本失败（{e!r}）—— 不影响选活，副本会留在盘上")
             continue
         alive.append(cand)
     if not alive:
@@ -608,7 +619,7 @@ def post_result(
     attempts: int = 5,
     mode: str = "ok",
     worker_id: str = "",
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> int:
     """POST 结果：瞬时失败（网络/5xx）指数退避重试（最贵产物不允许最后一米丢失）；
     4xx = 确定性拒绝立即抛 ProtocolError；409 = hub 已有同 job 结果（幂等，按成功）。
@@ -659,7 +670,7 @@ def post_result(
                 finally:
                     # S3d：回传段的排队也归本 jid 的账（不接就把 §51 那半「排队 17.6s」丢掉）。
                     _wire_note_wait(jid, "result", _BULK.take_wait(_tok))
-        except Exception as e:
+        except NET_ERRORS as e:
             status, body = None, repr(e).encode()
         if status in (200, 201):
             # `result POST ok: … bytes in …s (attempt k) [JSON 体为 …]` 行已退役（2026-10-06，
@@ -703,7 +714,7 @@ def release_job(
     token: str,
     jid: str,
     lease_token: str = "",
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> None:
     """瞬时失败后主动还租约（POST /jobs/{id}/release）：job 立即回池可重领，
     不再干等 30min 租约过期。尽力而为：release 本身不可达时由租约过期兜底。"""
@@ -716,8 +727,10 @@ def release_job(
             method="POST",
             headers={**({} if not lease_token else {"X-Lease-Token": lease_token})},
         )
-    except Exception:
-        pass  # release 不可达：租约过期兜底（30min），与旧行为一致
+    except NET_ERRORS as e:
+        # 租约过期兜底（30min），与旧行为一致——但这条 job 会在这半小时里**看起来还在跑**，
+        # 别的 worker 领不走，所以这行是操作员唯一的解释。
+        _log(f"job {jid}: release 没送到（{e!r}）—— 这份活要等租约过期（30min）才回池")
 
 
 def worker_tag(offline: bool = False, hub_url: str = "") -> str:
@@ -792,7 +805,7 @@ def report_job_failure(
     detail: str = "",
     lease_token: str = "",
     worker_id: str = "",
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> bool:
     """回报**确定性**失败原因（`POST /jobs/{id}/fail`）。
 
@@ -827,7 +840,7 @@ def report_job_failure(
                 **({"X-Lease-Token": lease_token} if lease_token else {}),
             },
         )
-    except Exception as e:
+    except NET_ERRORS as e:
         log(f"job {jid} 失败回报未送达（{type(e).__name__}）——训练侧将走超时兜底")
         return False
     if status == 200:
@@ -853,5 +866,7 @@ def heartbeat(base_url: str, token: str, jid: str, lease_token: str = "") -> Non
             method="POST",
             headers={**({} if not lease_token else {"X-Lease-Token": lease_token})},
         )
-    except Exception:
-        pass  # 心跳失败不致命：下一次轮询/心跳再续
+    except NET_ERRORS as e:
+        # 心跳失败不致命（下一次再续），但连续失败 = 租约在走向过期：那是「活干完了 hub 却
+        # 把活派给别人」的前兆，必须看得见。周期 60s，一条/分钟，不构成刷屏。
+        _log(f"job {jid}: 续租心跳失败（{e!r}）—— 租约仍在倒计时，下一个心跳再试")

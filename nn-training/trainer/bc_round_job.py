@@ -29,9 +29,9 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from common.log import log
+from common.paths import REPO_ROOT
 from remote.hub_client import verify_and_land_bc
 from remote.hub_http import JOB_CLOSED, JOB_UNKNOWN, JOB_UNREACHABLE, job_reconcile_state
-from trainer.dispatch_queue import REPO_ROOT
 from worker.bc_config import BcCourseConfig
 from worker.bc_ledger import ROUND_LAND_REJECTED_EVENT, append_ledger
 

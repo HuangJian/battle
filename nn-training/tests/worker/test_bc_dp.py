@@ -44,11 +44,13 @@ def test_bc_raw_unwraps_dataparallel_and_strips_prefix() -> None:
     逐字节消费对象，落盘必须走 raw。本测试直接构造真 DataParallel 断言。"""
     model = NNPolicy()
     dp = torch.nn.DataParallel(model)
-    assert bc_mod._bc_raw(dp) is model
+    raw = bc_mod._bc_raw(dp)
+    assert raw is model
     assert any(k.startswith("module.") for k in dp.state_dict())  # 前缀真实存在（危害是真的）
-    assert not any(k.startswith("module.") for k in bc_mod._bc_raw(dp).state_dict())
+    assert not any(k.startswith("module.") for k in raw.state_dict())
     # 非包装模型原样返回
-    assert bc_mod._bc_raw(model) is model
+    plain = bc_mod._bc_raw(model)
+    assert plain is model
 
 
 def test_bc_raw_preserves_parameter_identity() -> None:
@@ -57,7 +59,8 @@ def test_bc_raw_preserves_parameter_identity() -> None:
     dp = torch.nn.DataParallel(model)
     pid_before = id(next(iter(model.parameters())))
     assert id(next(iter(dp.parameters()))) == pid_before  # 共享参数
-    assert bc_mod._bc_raw(dp) is model
+    raw = bc_mod._bc_raw(dp)
+    assert raw is model
 
 
 # worker._bc_device 的透传与 tpu/xla 拒绝已移到 tests/worker/test_bc_device.py（免 torch）：

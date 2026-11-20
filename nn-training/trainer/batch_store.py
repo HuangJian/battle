@@ -31,7 +31,7 @@
 `units.of == 0 == 未定型`。
 
 **本模块的来历**：`trainer/batch_eval.py` 拆分第二步 B2（§5.5.4）。B1 已把纯规划/判据搬到
-`trainer/batch_plan.py`；B2 收走台账（本模块）；B3 把执行器搬到 `trainer/batch_runner.py`。
+`biz/batch_plan.py`；B2 收走台账（本模块）；B3 把执行器搬到 `trainer/batch_runner.py`。
 `trainer/batch_eval.py` 逐个再导出本模块的公开名（`X as X`）⇒ 既有调用点与测试一行不改。
 """
 
@@ -48,11 +48,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from common.log import log
-from trainer.batch_plan import REPO_ROOT
+from common.settings import EVALBOARD_DATA_ROOT, evalboard_data_root
 from worker.train.loop_util import acquire_lock, cleanup_lock
 
-#: EvalStore 数据根（`EVALBOARD_DATA` 覆盖）。`data_root()` 同口径。
-DEFAULT_DATA_ROOT = REPO_ROOT / "dashboard" / "data" / "evalboard"
+#: EvalStore 数据根（`EVALBOARD_DATA` 覆盖）。真家是 `common/settings.py`：`worker/eval_heartbeat`
+#: 也读同一根旋钮，而 `worker/` 不能 import `trainer/` ⇒ 单一实现只能落 L0。本名是
+#: `trainer/batch_eval` 门面与 console 侧的历史名。
+DEFAULT_DATA_ROOT = EVALBOARD_DATA_ROOT
 
 BATCHES_FILE = "batches.jsonl"
 #: 原子发布的临时名。**固定**（不随机）：上一次崩溃残留的 `.tmp` 会被本次直接覆盖
@@ -84,8 +86,11 @@ def utc_now_iso() -> str:
 
 
 def data_root() -> Path:
-    """EvalStore 数据根（EVALBOARD_DATA 覆盖；默认 dashboard/data/evalboard）。"""
-    return Path(os.environ.get("EVALBOARD_DATA", str(DEFAULT_DATA_ROOT)))
+    """EvalStore 数据根（`EVALBOARD_DATA` 覆盖；默认 dashboard/data/evalboard）。
+
+    解读住 `common.settings.evalboard_data_root` —— 心跳侧读的是同一根旋钮。
+    """
+    return evalboard_data_root()
 
 
 # ─────────────────────────────── 纯文件读面（无锁、无副作用）───────────────────────────────

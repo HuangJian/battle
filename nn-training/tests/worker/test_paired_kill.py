@@ -182,7 +182,8 @@ def test_single_leg_is_inert(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(paired_mod, "CURRICULA_DIR", _write_curricula(tmp_path, V), raising=True)
     _write_eval(tmp_path / "own", _own(0.40, 0.10, 0.10))
     g = _guards(tmp_path, declared=None)
-    assert g._paired_kill(3) is False
+    killed = g._paired_kill(3)
+    assert killed is False
     assert _ledger_events(tmp_path) == []
 
 
@@ -197,7 +198,8 @@ def test_mispaired_peer_is_not_compared(tmp_path: Path, monkeypatch: pytest.Monk
     _write_peer_run_start(tmp_path, V + 82)  # 事故现场：差 82 秒的抖动量级
     g = _guards(tmp_path)
     g.args.paired_kill = {"enabled": True}  # 开火才走得到前提闸（否则默认关火直接退）
-    assert g._paired_kill(3) is False
+    killed = g._paired_kill(3)
+    assert killed is False
     assert _ledger_events(tmp_path) == []
 
 
@@ -221,7 +223,8 @@ def test_guard_stops_the_leg_and_writes_a_replayable_event(
     g._cloud_halted = False
     g.args.paired_kill = {"enabled": True}  # args 物化快照 = 课程文件块
 
-    assert g._paired_kill(3) is True, "连续两点落后 ⇒ 该杀臂"
+    killed = g._paired_kill(3)
+    assert killed is True, "连续两点落后 ⇒ 该杀臂"
     events = _ledger_events(tmp_path)
     kill = [e for e in events if e["event"] == "paired_kill"][-1]
     assert kill["streak"] == PAIRED_KILL_POINTS and kill["peer"] == "t-peer"
@@ -232,7 +235,8 @@ def test_guard_stops_the_leg_and_writes_a_replayable_event(
     assert paired_kill_verdict(_own(0.40, 0.35, 0.32), _own(0.40, 0.40, 0.40)).streak == kill["streak"]
     # 状态转移才落账：同值再判一次不重复写**计数事件**（gate_verdict 会再写一条——
     # 生产侧命中即整腿终点（`step_gate` 当轮 finish），这里连调两次是为了钉住计数口径）。
-    assert g._paired_kill(3) is True
+    killed = g._paired_kill(3)
+    assert killed is True
     again = _ledger_events(tmp_path)
     assert len([e for e in again if e["event"] == "paired_kill"]) == 1
     assert len(again) == len(events) + 1
@@ -276,7 +280,8 @@ def test_control_leg_trips_but_does_not_stop(
     g._cloud_halted = False
     g.args.paired_kill = {"enabled": True, "self_kill": False}
 
-    assert g._paired_kill(3) is False, "对照臂命中也不停车"
+    killed = g._paired_kill(3)
+    assert killed is False, "对照臂命中也不停车"
     events = _ledger_events(tmp_path)
     assert any(e["event"] == "paired_kill" and e["streak"] == 2 for e in events), "计数不断线"
     assert not any(
@@ -311,5 +316,6 @@ def test_disabled_guard_writes_nothing(
     _write_peer_run_start(tmp_path, V)
     g = _guards(tmp_path)
 
-    assert g._paired_kill(3) is False
+    killed = g._paired_kill(3)
+    assert killed is False
     assert _ledger_events(tmp_path) == []

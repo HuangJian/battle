@@ -59,12 +59,15 @@ STEPS_PY = NN_ROOT / "trainer/loop_steps.py"
 ROUND_STEPS_PY = NN_ROOT / "trainer/loop_round_steps.py"
 
 CLASS = "TrainingExport"
+#: 本簇成员（含 2026-11-19 新增的公开读数 `ts_code_view`：G5 第十四批 —— 缓存槽位以前
+#: 只有用例伸手进去问，现在有一个不触发打包的只读面；成员集故意逐格列举，加一个就得改这里）。
 MEMBERS = (
     "_ensure_ts_code",
     "_ensure_replay_converter",
     "_volume_plan_block",
     "_export_offline_bundle",
     "_export_weights",
+    "ts_code_view",
 )
 
 #: 留在 `loop_steps` 的 9 个成员（本刀一个不动）。
@@ -127,6 +130,9 @@ TOP_IMPORTS = frozenset(
         "common.distribution",
         "worker.archive",
         "common.log",
+        # 2026-11-16：仓根单源（`common/paths.py`）—— 此前这里写 `Path(__file__).parents[2]`,
+        # 数层数与 `hub/store_offline.py` 是同一类静默故障。
+        "common.paths",
         "worker.modes",
         "common.protocol",
         # P2：replay 转换器 bundle 的构建（显式 UTF-8 + Windows 无黑窗）。
@@ -134,7 +140,9 @@ TOP_IMPORTS = frozenset(
         "remote",
     }
 )
-STDLIB_IMPORTS = frozenset({"hashlib", "os", "pathlib", "typing"})
+#: `dataclasses` 随 `TsCodeView` 进来（2026-11-19）；`hashlib` 随 replay 转换器（2026-11-15）；
+#: `pathlib` 原文就有（`Path`），只是在头部注里没被点名。
+STDLIB_IMPORTS = frozenset({"hashlib", "os", "pathlib", "typing", "dataclasses"})
 
 #: 反向边（禁）：成环或把叶子拉回编排上游。
 FORBIDDEN_IMPORTS = frozenset(
@@ -448,7 +456,7 @@ def test_ensure_ts_code_cache_semantics(monkeypatch, tmp_path) -> None:
     只与那一个函数打交道：快照优先 / 缺失回落都封在它里面）。
     """
     import remote.code_snapshot as code_snapshot
-    from trainer.loop_export import TrainingExport
+    from trainer.loop_export import TrainingExport, TsCodeView
 
     calls: list[str] = []
 
@@ -457,11 +465,14 @@ def test_ensure_ts_code_cache_semantics(monkeypatch, tmp_path) -> None:
         return Path(job_root) / "ts_code.zip", "deadbeef", False
 
     monkeypatch.setattr(code_snapshot, "published_ts_code_zip", fake_published)
-    obj = _stub()
-    obj._ts_code_sha256 = ""
+    # 真实例（不是 `_stub()` 的 SimpleNamespace）：缓存要经公开读数 `ts_code_view()` 问
+    # （G5 第十四批） —— 裸 `__new__` 的实例没有 `__init__` 赋值，正好等于「还没建」。
+    obj = TrainingExport.__new__(TrainingExport)
+    assert obj.ts_code_view() == TsCodeView(sha256="", zip_path=None), "初态 = 未建"
     cast(Any, TrainingExport._ensure_ts_code)(obj, str(tmp_path), log=lambda m: None)
-    assert obj._ts_code_sha256 == "deadbeef"
-    assert obj._ts_code_zip_path == Path(tmp_path) / "ts_code.zip"
+    view = obj.ts_code_view()
+    assert view.sha256 == "deadbeef"
+    assert view.zip_path == Path(tmp_path) / "ts_code.zip"
     cast(Any, TrainingExport._ensure_ts_code)(obj, str(tmp_path), log=lambda m: None)  # 第二次
     assert len(calls) == 1, "缓存没生效——第二次又走了一遍发布路径"
 
@@ -487,12 +498,12 @@ def test_ensure_ts_code_falls_back_through_the_snapshot_seam(monkeypatch, tmp_pa
 
     monkeypatch.setattr(code_snapshot, "pack_ts_code_zip", fake_pack_ts)
     job_root = tmp_path / "traj" / "course" / "remote-jobs"
-    obj = _stub()
-    obj._ts_code_sha256 = ""
+    obj = TrainingExport.__new__(TrainingExport)
     cast(Any, TrainingExport._ensure_ts_code)(obj, str(job_root), log=lines.append)
-    assert obj._ts_code_sha256 == "cafebabe"
-    assert obj._ts_code_zip_path == job_root / "ts_code.zip"
-    assert obj._ts_code_zip_path.is_file()
+    view = obj.ts_code_view()
+    assert view.sha256 == "cafebabe"
+    assert view.zip_path == job_root / "ts_code.zip"
+    assert view.zip_path is not None and view.zip_path.is_file()
     # 回落必须**响亮**（形态判据：只看 WARN 前缀，不钉整句话——文本断言预算只许降），且绝不建锚
     assert any(m.startswith("[run_rl] WARN: 集群代码快照") for m in lines), lines
     assert not (snap_dir / code_snapshot.META_NAME).exists()

@@ -37,7 +37,7 @@ from common.protocol import (
     job_id as make_job_id,
 )
 from hub.server import _HubQueue, _JobStore
-from remote.hub_client import HubClientError, publish_job
+from remote.hub_client import HubClientError, PublishSpec, publish_job
 
 #: 两门课共用的四分量（事故现场的「全同」部分）。
 _SHARED = {
@@ -194,7 +194,6 @@ def _publish_args(tmp_path: Path, course: str) -> dict:
         "epochs": 2,
         "mb": 512,
         "lr": 3e-4,
-        "log": (lambda _m: None),
     }
 
 
@@ -205,12 +204,12 @@ def _ledger(path: Path) -> list[dict]:
 def test_publish_refuses_cross_store_identity(tmp_path: Path) -> None:
     """同一份活（同完整键）已在**别的课程**发布过 ⇒ 第二次必须响亮拒发且不落任何文件。"""
     a = _publish_args(tmp_path, "c-l3")
-    m1 = publish_job(**a, course_fp="33" * 32)
+    m1 = publish_job(PublishSpec(**a, course_fp="33" * 32), log=lambda _m: None)
     assert (Path(a["job_root"]) / m1["job_id"] / "manifest.json").exists()
 
     b = _publish_args(tmp_path, "c-l1")
     with pytest.raises(HubClientError) as ei:
-        publish_job(**b, course_fp="33" * 32)
+        publish_job(PublishSpec(**b, course_fp="33" * 32), log=lambda _m: None)
     msg = str(ei.value)
     assert "c-l3" in msg and "c-l1" in msg, f"拒发消息必须点名双方课程：{msg}"
     # 不落任何文件、不记账本（半份 job 比没有 job 更危险）
@@ -222,9 +221,9 @@ def test_publish_refuses_cross_store_identity(tmp_path: Path) -> None:
 def test_publish_allows_same_components_different_course_fp(tmp_path: Path) -> None:
     """**事故配置必须放行**：四分量全同但课程身份不同 ⇒ 两份合法的活（守卫不得误伤）。"""
     a = _publish_args(tmp_path, "c-l1")
-    m1 = publish_job(**a, course_fp="86" * 32)
+    m1 = publish_job(PublishSpec(**a, course_fp="86" * 32), log=lambda _m: None)
     b = _publish_args(tmp_path, "c-l3")
-    m3 = publish_job(**b, course_fp="33" * 32)
+    m3 = publish_job(PublishSpec(**b, course_fp="33" * 32), log=lambda _m: None)
     assert m1["job_id"] != m3["job_id"]
     assert _old_key(m1) == _old_key(m3), "前提：四分量确实全同（否则这条用例没压到东西）"
 
@@ -232,8 +231,8 @@ def test_publish_allows_same_components_different_course_fp(tmp_path: Path) -> N
 def test_publish_twice_in_same_store_is_still_idempotent(tmp_path: Path) -> None:
     """同课程重发布同一份活：幂等（同 id、覆盖 payload），**不得**被守卫拦下。"""
     a = _publish_args(tmp_path, "c-l1")
-    m1 = publish_job(**a, course_fp="86" * 32)
-    m2 = publish_job(**a, course_fp="86" * 32)
+    m1 = publish_job(PublishSpec(**a, course_fp="86" * 32), log=lambda _m: None)
+    m2 = publish_job(PublishSpec(**a, course_fp="86" * 32), log=lambda _m: None)
     assert m1["job_id"] == m2["job_id"]
 
 
@@ -262,8 +261,9 @@ def test_ambiguous_job_id_is_refused_not_guessed(tmp_path: Path) -> None:
     _publish_store(hub, "a", jid)
     _publish_store(hub, "b", jid)
 
-    assert hub.course_of(jid) is None, "歧义必须拒答（None），不许猜第一个"
-    assert hub._locate_cache.get(jid) is None, "歧义不得进归属缓存（一次歧义会变成永久归属）"
+    # 拒答与「不进归属缓存」是同一件事的两面：`course_of` 就是那张缓存的读面
+    # （`mem_readout()["locate_n"]` 只给规模），所以一条断言吃两个消息。
+    assert hub.course_of(jid) is None, "歧义必须拒答（None），不许猜第一个，也绝不能进归属缓存"
     # 拒答 ⇒ 所有 job 作用域入口都落在「不归本 hub 管」的那条路上
     assert hub.result_token_ok(jid, "") is False
     assert hub.store_result(jid, {"x": 1}) is False

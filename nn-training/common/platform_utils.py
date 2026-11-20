@@ -44,6 +44,8 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
+from common import runtime
+
 # Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口弹出抢焦点。
 POPEN_NO_WINDOW: dict[str, Any] = {}
 if sys.platform == "win32":
@@ -460,9 +462,42 @@ def popen_kwargs(**extra: Any) -> dict[str, Any]:
 #: 「rollout 卡死机器半天」的现场就是一条线程永远停在 `waitpid` 上（一条线程卡住 = 整轮收不齐）。
 KILL_REAP_SEC = 5.0
 
-#: 杀不掉也收不了尸的子进程（SIGKILL 之后仍卡在不可中断的 IO 里）——留着，之后非阻塞地
-#: 再碰一次（它们可能已经退出了）。见 `reap_bounded` 的 docstring 与 `keep_unreaped`。
-_UNREAPED: list[Any] = []
+
+class UnreapedProcs:
+    """杀不掉也收不了尸的子进程（SIGKILL 之后仍卡在不可中断的 IO 里）的**账本**。
+
+    为什么是个对象而不是模块级 `list`：`common/` 是 L0，模块级可变容器一律不许（
+    `common/__init__.py` 契约 #4，G2 门禁 `test_common_has_no_new_mutable_module_state`）——
+    进程级共享的可变态要么有归属（这里），要么在测试里无法隔离。带 `store=` 参数那三个
+    函数就是为了后者：用例可以自己造一个账本，不碰默认实例。
+    """
+
+    __slots__ = ("_procs",)
+
+    def __init__(self) -> None:
+        self._procs: list[Any] = []
+
+    def keep(self, proc: Any) -> None:
+        self._procs.append(proc)
+
+    def sweep(self) -> int:
+        """非阻塞地再碰一次：只问 `poll()`（零等待），返回这趟**真的收掉**的个数。"""
+        done = 0
+        for p in list(self._procs):
+            try:
+                if p.poll() is not None:
+                    self._procs.remove(p)
+                    done += 1
+            except Exception:  # 收尸是尽力而为：绝不能因此让调用方失败
+                self._procs.remove(p)
+        return done
+
+    def __len__(self) -> int:
+        return len(self._procs)
+
+
+#: 进程级默认账本（见 `UnreapedProcs`：状态在对象里，模块顶层只剩这个实例）。
+_DEFAULT_UNREAPED = UnreapedProcs()
 
 
 def popen_own_group(**extra: Any) -> dict[str, Any]:
@@ -495,12 +530,7 @@ def kill_process_tree(proc: Any) -> None:
     # **TypeError**（不是 OSError）⇒ 那个异常会直接冲出本助手。Windows 上这条分支根本不走
     # （`os.name != "posix"`），所以只在 POSIX 显形 —— 见 `tests/common/test_platform_utils_proc.py`
     # 的「没自带进程组时退回单进程 kill」。
-    if (
-        os.name == "posix"
-        and killpg is not None
-        and sigkill is not None
-        and proc.pid is not None
-    ):
+    if os.name == "posix" and killpg is not None and sigkill is not None and proc.pid is not None:
         try:
             killpg(proc.pid, sigkill)
             return
@@ -529,36 +559,26 @@ def reap_bounded(proc: Any, timeout: float) -> bool:
         return False
 
 
-def keep_unreaped(proc: Any) -> None:
+def keep_unreaped(proc: Any, *, store: UnreapedProcs | None = None) -> None:
     """记下一个「杀不掉也收不了尸」的子进程（之后由 `sweep_unreaped` 再试一次）。"""
-    _UNREAPED.append(proc)
+    (store if store is not None else _DEFAULT_UNREAPED).keep(proc)
 
 
-def sweep_unreaped() -> int:
+def sweep_unreaped(*, store: UnreapedProcs | None = None) -> int:
     """非阻塞地再碰一次之前收不了尸的子进程：返回这一趟**真的收掉**的个数。
 
     只问 `poll()`（零等待）：它们可能早就退出了，只是当时没等到；这里顺手收尸，避免僵尸进程
     长期占着 pid/句柄（机器本来就已经被一堆进程压着）。
     """
-    done = 0
-    for p in list(_UNREAPED):
-        try:
-            if p.poll() is not None:
-                _UNREAPED.remove(p)
-                done += 1
-        except Exception:  # 收尸是尽力而为：绝不能因此让调用方失败
-            _UNREAPED.remove(p)
-    return done
+    return (store if store is not None else _DEFAULT_UNREAPED).sweep()
 
 
-def unreaped_count() -> int:
+def unreaped_count(*, store: UnreapedProcs | None = None) -> int:
     """还没收掉的「僵尸候选」个数（诊断与用例用）。"""
-    return len(_UNREAPED)
+    return len(store if store is not None else _DEFAULT_UNREAPED)
 
 
-def call_bounded(
-    fn: Callable[[], Any], timeout: float, *, name: str = ""
-) -> tuple[bool, Any]:
+def call_bounded(fn: Callable[[], Any], timeout: float, *, name: str = "") -> tuple[bool, Any]:
     """**可放弃**地调用 `fn`：在一条 daemon 线程里跑，本线程最多等 `timeout` 秒。
 
     返回 `(True, fn 的返回值)`（预算内跑完）或 `(False, None)`（**超界**）。`fn` 抛的异常
@@ -590,8 +610,8 @@ def call_bounded(
         finally:
             done.set()
 
-    t = threading.Thread(target=_run, name=name or "bounded-call", daemon=True)
-    t.start()
+    #: 有界调用线程归这里（`bounded-<名字>`）：超时就把它丢在后台（daemon）。
+    runtime.Runtime(scope="bounded").thread(_run, name=name or "call", daemon=True)
     if not done.wait(max(0.0, float(timeout))):
         return False, None
     err = box.get("error")

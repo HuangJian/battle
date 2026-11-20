@@ -47,6 +47,7 @@ flush（默认 `DRAIN_FLUSH_SEC`，超时就放手——产物已在本地，不
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import threading
@@ -62,7 +63,7 @@ from pathlib import Path
 # ⚠ 抽屉目录名（`backup`）不在本模块拼 —— 它由调用方（`open_run_context`）解析后递进来，
 # 免得这里再抄一份；命名硬约束见 `remote/artifacts.BACKUP_DIR_NAME`。
 import remote.delta_files as delta_files
-from common import net_http
+from common import net_http, runtime
 from common.cli import house_parser, run_main
 from common.logutil import tag_logger
 from common.protocol import (
@@ -71,6 +72,8 @@ from common.protocol import (
     OFFLINE_ARTIFACT_PATH,
     OFFLINE_DELIVERED_NAME,
     OFFLINE_RESULT_PATH,
+    ProtocolError,
+    RetryableError,
     sanitize_run_id,
 )
 from remote import deliver_mode, deliver_parts, deliver_wire
@@ -89,6 +92,7 @@ from remote.deliver_ledger import (
 )
 from remote.deliver_mode import eta_text, need_bps
 from remote.deliver_parts import DeliverMetricsMixin
+from remote.deliver_state import DeliverStateMixin
 from remote.deliver_wire import pick_anchors, read_eval_iters
 
 #: 探活结果的缓存秒数（训练一轮动辄几分钟，没必要每轮都探两次：`sync()` 前探一次即可，
@@ -189,7 +193,7 @@ def _urllib_opener(url: str, data: bytes, headers: dict, timeout: float) -> tupl
         return int(e.code), e.read()
 
 
-class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
+class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin, DeliverStateMixin):
     """一段自主训练的产物补传器（best-effort；每个公开方法都**不会抛**）。
 
     只读产物目录、只写一个 `delivered.json`——它不参与训练的任何判定（不是调度器的一部分），
@@ -243,13 +247,17 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         now_fn: Callable[[], float] | None = None,
         log: Callable[[str], None] = _log_default,
     ) -> None:
+        #: 后台补传线程归这里（`offline-deliver-drain-loop`）。
+        self._rt = runtime.Runtime(scope="offline-deliver")
         self.base_url = str(base_url or "").rstrip("/")
         self.token = str(token or "")
         #: run_id 同时是 hub 侧目录名：**在本端就先校验**（错在这里 = 一行明确日志，
         #: 而不是每轮一个 400）。
         try:
             self.run_id = sanitize_run_id(run_id)
-        except Exception:
+        except ProtocolError:
+            # 契约就这一种失败（规则见 `sanitize_run_id`）：非法 run_id ⇒ 这条腿不投产物。
+            # 宽捕会把这个函数的 bug（`_RUN_ID_OK` 改名 / 返回类型变了）也读成「没 run_id」。
             self.run_id = ""
         self.root = Path(artifacts_dir)
         #: 本份产物属于 hub 的**哪门课**（多课程 hub 的归位键）。
@@ -371,6 +379,21 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         #: 两个数一起看才是读数——只有一个数时无法区分「没评」与「瘦到 0」。
         self._eval_rows_raw_bytes = 0
         self._eval_rows_wire_bytes = 0
+        self._init_background_state(background)
+        self._init_probe_state()
+        self._load_ledger()
+        if not self.enabled and not self.disabled_reason:
+            missing = []
+            if not self.base_url:
+                missing.append("hub_url")
+            if not self.token:
+                missing.append("token")
+            if not self.run_id:
+                missing.append(f"合法 run_id（收到 {str(run_id)[:40]!r}）")
+            self.log(f"补传未启用（缺 {' / '.join(missing)}）——产物只落本地产物目录")
+
+    def _init_background_state(self, background: bool) -> None:
+        """后台并行（单写者线程）的状态位；自 `__init__` 原样搬出，赋值次序不变。"""
         # ---- 后台并行（单写者线程；除 submit_*/close 外所有状态读写都在它里面）----
         self.background = bool(background)
         self._cv = threading.Condition()
@@ -386,6 +409,9 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         self._thread: threading.Thread | None = None
         #: `submit_final` 来过没有（段末核对的输入之一：final 提交了而 `result_done` 仍假 = 摘要丢了）。
         self._final_submitted = False
+
+    def _init_probe_state(self) -> None:
+        """埋点与不变量探针（§2.4 / §2.3）；自 `__init__` 原样搬出，赋值次序不变。"""
         # ---- 埋点与不变量探针（§2.4 / §2.3；零成本：两个 int + 一次 `os.times`）----
         #: 外层循环**真正走到循环体**的圈数（内层 `wait` 超时不算）——忙等时每秒涨几万次。
         #: 云上它是 H6a 的读数；本地它只是埋点（**判据**是下面的 `_idle_spins`）。
@@ -400,16 +426,6 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         self._rejected_fp: dict[int, str] = {}
         #: 同一 `it` 连续投递异常的次数（毒丸项识别；见 `_post_artifact` 的调用点）。
         self._post_failures: dict[int, int] = {}
-        self._load_ledger()
-        if not self.enabled and not self.disabled_reason:
-            missing = []
-            if not self.base_url:
-                missing.append("hub_url")
-            if not self.token:
-                missing.append("token")
-            if not self.run_id:
-                missing.append(f"合法 run_id（收到 {str(run_id)[:40]!r}）")
-            self.log(f"补传未启用（缺 {' / '.join(missing)}）——产物只落本地产物目录")
 
     # ------------------------------------------------------------ 后台并行（submit / close）
 
@@ -420,10 +436,7 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         """
         if not self.background or not self.enabled or self._thread is not None:
             return
-        self._thread = threading.Thread(
-            target=self._drain_loop, name="offline-deliver", daemon=True
-        )
-        self._thread.start()
+        self._thread = self._rt.thread(self._drain_loop, name="drain-loop", daemon=True)
 
     def submit_round(self, it: int) -> None:
         """一轮落盘后请求补传（**非阻塞**）：后台模式下只置位，立刻返回给训练循环。"""
@@ -625,10 +638,12 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         """后台线程里执行一件补传工作：任何异常只记一笔（线程必须活到下次提交）。"""
         try:
             fn(*a, **kw)
-        except BaseException as e:  # 后台腿不得因任何异常静默死掉（含 KeyboardInterrupt 类）
+        except Exception as e:  # 后台腿不得因任何异常静默死掉（但不含 SystemExit / KeyboardInterrupt）
             try:
                 self.log(f"补传后台异常（忽略，线程继续）：{type(e).__name__}: {e}")
             except Exception:
+                # 契约静默（G9 冻结，非旧债）：_guard 的契约 = 后台腿不得因任何异常死掉；
+                # 日志写不出去 ≠ 线程该死。
                 pass
 
     # ------------------------------------------------------------ 探活
@@ -656,7 +671,7 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
             status, _body = self._opener(
                 f"{self.base_url}/ping", b"", self._headers(), min(self.timeout, 20.0)
             )
-        except Exception as e:  # 网络层任何异常（DNS/连接被拒/超时/TLS）= 不可达
+        except _DELIVER_NET_ERRORS as e:  # 网络层（DNS/连接被拒/超时/TLS/体被截断）= 不可达
             self._reachable = False
             self._throttled_log(
                 "unreachable", f"hub 不可达（{type(e).__name__}: {e}）——本轮跳过补传"
@@ -890,7 +905,7 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
             return 0
         try:
             rounds = self.pending()
-        except Exception as e:  # 判据面坏了也只记一笔
+        except (OSError, ValueError, KeyError) as e:  # 判据面（盘 + 账行形状）坏了只记一笔
             self._throttled_log("backup-pending", f"备份跳过：算不出待投轮次（{e}）")
             return 0
         if not force:
@@ -926,7 +941,7 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
             return
         try:
             rounds = set(self._ledger_its())  # 本地**真轮次**（内容对账用；不读网络盘）
-        except Exception:
+        except (OSError, ValueError, KeyError):
             rounds = set()
         p = drawer.prune_delivered(
             confirmed=set(self._delivered),
@@ -1437,7 +1452,7 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
             status, body = self._opener(
                 f"{self.base_url}{path}", raw, self._headers(), timeout
             )
-        except Exception as e:
+        except _DELIVER_NET_ERRORS as e:
             self._last_elapsed = max(0.0, time.monotonic() - t0)
             # ★ 只作废**探活成功缓存**：数据面失败与「hub 不可达」是两件事（评审 P1-1）。
             # 下一拍会立刻重探一次（≤20s），探通了就接着推；`_reachable` 的语义与负缓存不变。
@@ -1574,13 +1589,22 @@ WORKER_NAME_ENV = "NN_WORKER_NAME"
 #: 老快照子进程两个都不认 ⇒ hub 侧从包里的 `plan.json` 反推（`pack_seg_end_kind`）。
 SEG_END_KIND_ENV = "NN_SEG_END_KIND"
 
+#: 「这一发没送达」的真失败形态 —— `_opener`（生产 = `_urllib_opener`）的路面：
+#: `URLError` / `HTTPError` / socket 超时全是 `OSError`；体读到一半被截断是
+#: `http.client.IncompleteRead`（`HTTPException`）；大 body 首块太慢由 `remote.http` 抛
+#: `WireSlowError`（`RetryableError` 子类）。**程序员错不落这个集**：`_headers()` 的
+#: `KeyError`、`_timeout_for` 的 `TypeError` 是配置/形状坏了，把它记成「没送达 ⇒ 下轮再试」
+#: 会让一条永不成功的坏配置伪装成网络抖动（`_post` 与 `probe` 共用同一个口径）。
+_DELIVER_NET_ERRORS = (OSError, http.client.HTTPException, RetryableError)
+
 
 def _err_text(resp: bytes, max_chars: int = 300) -> str:
-    """把 hub 的错误体压成一行（远端文本不可信：截断 + 去换行）。"""
-    try:
-        s = resp.decode("utf-8", "replace")
-    except Exception:
-        return ""
+    """把 hub 的错误体压成一行（远端文本不可信：截断 + 去换行）。
+
+    不解 try：`bytes.decode("utf-8", "replace")` 按定义不抛（任意字节都有替换字符），
+    所以旧的那条 `except Exception: return ""` 只能吞掉我们自己的 bug（`resp` 不是 bytes）。
+    """
+    s = resp.decode("utf-8", "replace")
     try:
         obj = json.loads(s)
         if isinstance(obj, dict) and obj.get("error"):
