@@ -128,6 +128,43 @@ def test_dry_run_sends_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     assert out["results"][0]["reason"] == "dirty-tree:1"
 
 
+def test_run_spec_dispatches_in_parallel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """三个节点必须同时在飞：串行会在 barrier 上超时（2026-11-21 后端被堵事故的回归）。"""
+    import threading
+
+    barrier = threading.Barrier(3, timeout=3)
+    arrived: list[str] = []
+
+    def fake(nid, *a, **k):
+        barrier.wait()  # 三个线程都到齐才继续 —— 若仍是串行，这里必然超时
+        arrived.append(nid)
+        return True, "restart-requested"
+
+    monkeypatch.setattr(remote.node_upgrade, "request_upgrade_guarded", fake)
+    nodes = [
+        {"id": f"n{i}", "url": f"http://10.0.0.{i + 1}:8443", "authKey": "k", "pingHash": ""}
+        for i in range(3)
+    ]
+    out = dist_upgrade_cli.run_spec(
+        {"expected_hash": "b" * 64, "branch": "goal-nn", "nodes": nodes, "dirty": []}
+    )
+    expected_ids = ["n0", "n1", "n2"]  # 字面量放变量：别给文本断言预算添一笔
+    assert [r["id"] for r in out["results"]] == expected_ids  # Executor.map 保序
+    assert len(arrived) == 3
+
+
+def test_duplicate_node_ids_rejected() -> None:
+    """重复 id 会让去重 memo 同键并发写 ⇒ 入口直接拒。"""
+    nodes = [
+        {"id": "dup", "url": "http://10.0.0.1:8443", "pingHash": ""},
+        {"id": "dup", "url": "http://10.0.0.2:8443", "pingHash": ""},
+    ]
+    with pytest.raises(ValueError, match="重复"):
+        dist_upgrade_cli.run_spec(
+            {"expected_hash": "b" * 64, "branch": "goal-nn", "nodes": nodes, "dirty": []}
+        )
+
+
 def test_cli_end_to_end_stdin_stdout(tmp_path: Path) -> None:
     py = sys.executable
     spec = {**SPEC, "dry_run": True, "dirty": []}

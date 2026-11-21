@@ -340,3 +340,59 @@ export function upgradeLogLines(prefix: string, out: UpgradeOutcome, dirty?: str
   }
   return lines
 }
+
+// ────────────────────────── 异步下发（服务端专用） ──────────────────────────
+
+/** 可注入的异步 spawn（单测用假实现验证「不阻塞」）；生产走 bun 原生 spawn。 */
+export type AsyncSpawn = (
+  argv: string[],
+  input: string,
+  cwd: string,
+) => Promise<{ exitCode: number | null; stdout: string; stderr: string }>
+
+const bunAsyncSpawn: AsyncSpawn = async (argv, input, cwd) => {
+  const proc = Bun.spawn(argv, {
+    cwd,
+    stdin: Buffer.from(input),
+    stdout: 'pipe',
+    stderr: 'pipe',
+    windowsHide: true,
+  })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ])
+  return { exitCode, stdout, stderr }
+}
+
+/** 异步版节点升级下发：spec 与解析同同步版，但**不阻塞事件循环**。
+ *
+ *  ★ 2026-11-21 事故：dashboard「全部升级」误用同步版 —— CLI 对每个节点顺序发 HTTP
+ *  （每节点最长 20s），`spawnSync` 会占着事件循环几分钟，整个后端服务（其它 API/页面）
+ *  全部无响应。服务端必须用这个版本；一次性 CLI 脚本继续用同步版没有事件循环可堵。 */
+export async function requestNodeUpgradesAsync(
+  opts: RequestUpgradesOpts,
+  spawn: AsyncSpawn = bunAsyncSpawn,
+): Promise<UpgradeOutcome> {
+  const spec = buildUpgradeSpec(opts)
+  try {
+    const r = await spawn(['bash', NN_PY_SAFE, UPGRADE_CLI], JSON.stringify(spec), opts.repoRoot)
+    if (r.exitCode !== 0 && !r.stdout.trim()) {
+      return {
+        ok: false,
+        dirty: [],
+        results: [],
+        error: `升级子进程退出 ${r.exitCode}: ${(r.stderr || r.stdout).trim().slice(0, 400) || '(无输出)'}`,
+      }
+    }
+    return { ok: true, ...parseUpgradeOutput(r.stdout) }
+  } catch (e) {
+    return {
+      ok: false,
+      dirty: [],
+      results: [],
+      error: `升级指令下发失败（${(e as Error).message}）`,
+    }
+  }
+}

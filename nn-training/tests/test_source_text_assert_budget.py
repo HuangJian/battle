@@ -555,7 +555,12 @@ BASELINE_FORM = 1535
 #:   `_UnitLanes.ledger()` 的装配点守卫）、`test_batch_runner_split.py` +5（两家对照的闭集 /
 #:   常量归属 / 无反向边），`test_batch_lanes_split.py` 净 0（删掉的那条文本判据已改成
 #:   AST 定义表判据，计数不变）。口径 A 仍 1534（新判据无一挂文本）。
-BASELINE_SRC = 1221
+#: 2026-11-21 抬 1 格（1221 → 1222）：`tests/tools/test_dist_upgrade_cli.py` 新增并行下发
+#: 回归夹具（threading.Barrier 钉住三个节点同时在飞）与重复 id 拒绝用例，四条断言只比
+#: 运行期收集到的 id / reason / 长度，没有任何源码措辞；口径 B 的已知限边是「文件里出现
+#: .py 字面量 ⇒ 该文件所有 assert 计入」，该文件本来就有 CLI 端到端用例的 .py 路径，
+#: 于是新断言被连坐算 +1。属于误计，不是新增文本判据。
+BASELINE_SRC = 1222
 #: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。派生式（基线九成，见
 #: `tests/helpers/budget.py`）：两个计数器各自随自己的基线收紧，清理基线时不必回填数字。
 def _floor_of_form() -> int:

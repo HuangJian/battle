@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 # 2026-09-30（刀 7）：本脚本从 nn-training/ 顶层搬进 tools/（它 `import
@@ -190,36 +191,41 @@ def run_spec(spec: dict) -> dict:
     if dirty is not None and not isinstance(dirty, list):
         raise ValueError("dirty 必须是数组或 null")
 
-    results: list[dict] = []
+    # 逐节点校验 + id 唯一：_RESTARTS.seen 是进程级 dict，同一 nid 并发读写会竞争，
+    # 因此在入口就挡掉重复 id（TS 侧 selectUpgradeTargets 已用 Set 去重，双保险）。
+    ids_seen: set[str] = set()
     for n in raw_nodes:
         if not isinstance(n, dict) or not str(n.get("url") or ""):
             raise ValueError("nodes[] 每项须含 url")
         nid = str(n.get("id") or n.get("url"))
+        if nid in ids_seen:
+            raise ValueError(f"nodes 里 id 重复: {nid}（同键并发写去重 memo 不安全）")
+        ids_seen.add(nid)
+
+    # 并行下发：N 个节点各自最多等 timeout 秒；串行会变成 N×timeout（2026-11-21
+    # 「全部升级」把 dashboard 后端堵住几分钟的事故）。dirty 只探测一次，别让每个
+    # 线程各扫一遍工作区。
+    reported_dirty = (_report_dirty() if not dry else None) if dirty is None else list(dirty)
+
+    def dispatch_one(n: dict) -> dict:
+        nid = str(n.get("id") or n.get("url"))
         ping_hash = str(n.get("pingHash") or "")
+        self_node = remote.node_upgrade.is_self_node(str(n["url"]), nid)
         if ping_hash and ping_hash == expected:
-            results.append({"id": nid, "ok": False, "reason": "current"})
-            continue
+            return {"id": nid, "ok": False, "reason": "current"}
         if dry:
             # dry 只看 dirty 与身份，不发 POST：给调用方一次「先说清楚再动手」的机会。
-            eff_dirty = dirty
+            eff_dirty = reported_dirty
             if eff_dirty is None:
-                eff_dirty = (
-                    []
-                    if remote.node_upgrade.is_self_node(str(n["url"]), nid)
-                    else common.codehash.dirty_hash_files()
-                )
+                eff_dirty = [] if self_node else common.codehash.dirty_hash_files()
             why = (
                 f"dirty-tree:{len(eff_dirty)}"
-                if eff_dirty and not remote.node_upgrade.is_self_node(str(n["url"]), nid)
+                if eff_dirty and not self_node
                 else "planned"
             )
-            results.append({"id": nid, "ok": False, "reason": why})
-            continue
+            return {"id": nid, "ok": False, "reason": why}
         # dirty=None ⇒ 守卫内部自己探测（远端才探；self 直接跳过探测，同 remote.node_upgrade 语义）。
-        if dirty is None:
-            eff_dirty = [] if remote.node_upgrade.is_self_node(str(n["url"]), nid) else None
-        else:
-            eff_dirty = dirty
+        eff_dirty = [] if self_node else reported_dirty
         ok, reason = remote.node_upgrade.request_upgrade_guarded(
             nid,
             str(n["url"]),
@@ -231,11 +237,12 @@ def run_spec(spec: dict) -> dict:
             expected_hash=expected,
             cooldown_sec=cooldown,
         )
-        results.append({"id": nid, "ok": bool(ok), "reason": str(reason)})
+        return {"id": nid, "ok": bool(ok), "reason": str(reason)}
 
-    # dirty 报告：self-only 的调用方不探测远端 dirty（与守卫同口径），但调用方要能
-    # 在日志里说明「为什么远端被拒」——dry 分支已算过，这里再取一次对非 dry 也一致。
-    reported_dirty = dirty if dirty is not None else _report_dirty()
+    # Executor.map 保序：结果顺序 == 输入顺序，前端逐节点读数不会因并发而错位。
+    with ThreadPoolExecutor(max_workers=min(len(raw_nodes), 16)) as pool:
+        results = list(pool.map(dispatch_one, raw_nodes))
+
     return {"dirty": list(reported_dirty or []), "results": results}
 
 

@@ -40,6 +40,12 @@ describe('服务端不许同步子进程（事件循环是共享资源）', () =
     expect(offenders.map((f) => f.slice(DASHBOARD_ROOT.length + 1))).toEqual([])
   })
 
+  it('节点批量升级只能走异步版（同步版 spawnSync 会堵死整个事件循环）', () => {
+    const src = readFileSync(join(DASHBOARD_ROOT, 'src', 'server', 'actions', 'nodes.ts'), 'utf8')
+    expect(src).not.toContain('requestNodeUpgrades(')
+    expect(src).toContain('requestNodeUpgradesAsync(')
+  })
+
   it('python 一次性脚本两条路都在（detach / 异步捕获），且没有同步孪生', () => {
     const src = readFileSync(join(DASHBOARD_ROOT, 'src', 'server', 'run-python.ts'), 'utf8')
     expect(src).toContain('export function spawnRunPython')

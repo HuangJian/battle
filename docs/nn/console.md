@@ -13,6 +13,29 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §58 「全部升级」堵死后端事故的收尾：服务端异步 + CLI 并行（2026-11-21）
+
+**报障**：点按钮后整个 dashboard 后端卡住几分钟——所有 API / 页面无响应。
+
+**根因两条**：
+
+1. `actions/nodes.ts` 调了同步版 `requestNodeUpgrades`（内里 `Bun.spawnSync`），而 CLI 逐节点发
+   HTTP（每节点最长 20s）⇒ 占着事件循环 N×20s。原架构门禁只查 `src/server/**` 里有没有
+   `spawnSync`，同步 spawn 藏在 `tools/lib` 就绕过了**字面**检查——精神上仍是同一条纪律。
+2. 即便改成异步，CLI 内部仍是顺序 `for` 循环，总耗时还是 N×20s。
+
+**修复**：
+
+- `tools/lib/node-upgrade.ts` 新增 `requestNodeUpgradesAsync`（`Bun.spawn` + await，可注入
+  `AsyncSpawn` 做单测）；action 改调它；架构门禁加一条**直接禁止 action 引用同步版**。
+- `dist_upgrade_cli.py::run_spec` 改 `ThreadPoolExecutor(max_workers=min(N, 16))` + `map` 保序：
+  总耗时降到最慢节点的超时；dirty 只探一次；入口拒重复 id（`_RESTARTS.seen` 同键并发写不安全）。
+- 文本断言预算 1221 → 1222：新夹具是纯行为断言，但被口径 B 的「文件含 .py 字面量 ⇒ 全文件
+  assert 计入」连坐，理由已写在基线旁。
+
+**验证**：barrier 夹具钉住三个节点同时在飞（串行必超时）；异步测试验证 spawn 未 settle 时
+Promise 仍 pending；dashboard 2211 pass、根 2984 pass、Python 全量 6630 pass / 0 fail。
+
 ## §57 nodes 页「全部升级」：一键让在线采样节点拉代码并重启（2026-11-21）
 
 **需求**：节点统计表工具栏「返回顶部」左侧加「全部升级」按钮，点击后所有**在线采样节点**更新代码并重启。

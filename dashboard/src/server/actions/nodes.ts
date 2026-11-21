@@ -5,7 +5,7 @@ import { loadConfig, saveConfig } from '../../core/config'
 import { REPO_ROOT } from '../../core/paths'
 import { rlConfigSmoke } from '../../stack/smoke'
 import { computeCodeHash } from '../../../../tools/agent/codehash-files'
-import { requestNodeUpgrades, upgradeLogLines } from '../../../../tools/lib/node-upgrade'
+import { requestNodeUpgradesAsync, upgradeLogLines } from '../../../../tools/lib/node-upgrade'
 import { ActionError, ActionResult, done, guard, release } from './result'
 
 /** 远控 pull 要用的分支 = 当前工作分支（取不到 ⇒ 空，agent 侧只重启不拉代码）。
@@ -43,7 +43,8 @@ export async function upgradeOnlineNodes(ids: string[]): Promise<ActionResult> {
     if (targets.length === 0) throw new ActionError('选中的节点已停用或是 push 节点，不能批量升级')
 
     const branch = currentGitBranch()
-    const out = requestNodeUpgrades({
+    // 异步下发：CLI 逐节点发请求可能要几分钟，同步版会堵死整个 dashboard 事件循环。
+    const out = await requestNodeUpgradesAsync({
       repoRoot: REPO_ROOT,
       expectedHash: computeCodeHash(),
       branch,
