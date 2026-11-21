@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -95,23 +96,38 @@ def quota_sample(
     return (xo[sel], xs[sel], xi[sel], xb[sel], xinj[sel] if xinj is not None else None), sel
 
 
-def quota_sample_priority(
-    xi: np.ndarray,
-    xo: np.ndarray,
-    xs: np.ndarray,
-    xb: np.ndarray,
-    xr: np.ndarray,
-    xinj: np.ndarray | None,
-    quota: int,
-    rng: np.random.RandomState,
-    priority_root: int,
-):
+@dataclass(frozen=True)
+class QuotaSampleSpec:
+    """`quota_sample_priority` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    xi: np.ndarray
+    xo: np.ndarray
+    xs: np.ndarray
+    xb: np.ndarray
+    xr: np.ndarray
+    xinj: np.ndarray | None
+    quota: int
+    rng: np.random.RandomState
+    priority_root: int
+
+
+def quota_sample_priority(spec: QuotaSampleSpec):
     """B 臂配额采样（预注册 #20）：priority_root 帧优先保留，God-AI 帧补足每类配额。
 
     目的：人像黄金样本（人类守家分布）不因"每类配额随机采样"被按比例稀释——比例采样下
     人类帧只占各类的自然份额（合并语料人类仅 4.4%，quota 后 ~13%），达不到 #20 的
     ≥30% 训练混合比。本采样：每类先取全部 priority 帧（>quota 则随机下采样），
     God-AI 帧补足至 quota（不足则全取）→ 人类混合比显著抬升、人像分布保真。"""
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    xi = spec.xi
+    xo = spec.xo
+    xs = spec.xs
+    xb = spec.xb
+    xr = spec.xr
+    xinj = spec.xinj
+    quota = spec.quota
+    rng = spec.rng
+    priority_root = spec.priority_root
     idx = []
     for c in range(8):
         ci = np.where(xi == c)[0]
@@ -333,7 +349,17 @@ def main() -> None:
     if args.quota > 0:
         if args.priority_root >= 0:
             xo, xs, xi, xb, xinj, sel = quota_sample_priority(
-                xi, xo, xs, xb, xr, xinj, args.quota, rng, args.priority_root
+                QuotaSampleSpec(
+                    xi=xi,
+                    xo=xo,
+                    xs=xs,
+                    xb=xb,
+                    xr=xr,
+                    xinj=xinj,
+                    quota=args.quota,
+                    rng=rng,
+                    priority_root=args.priority_root,
+                )
             )
         else:
             xo, xs, xi, xb, xinj, sel = quota_sample(xi, xo, xs, xb, xinj, args.quota, rng)

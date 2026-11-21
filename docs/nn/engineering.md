@@ -25,6 +25,15 @@
 
 ---
 
+## §268 P0-3 第十五刀：`quota_sample_priority` 收成 `QuotaSampleSpec`（宽签名 101 → 100）（2026-11-21）
+
+* `worker/train/intent_probe.py::quota_sample_priority` 的 9 个位置参数 → frozen
+  `QuotaSampleSpec`（字段顺序 = 旧签名）。函数体开头一次展开，配额采样 / 随机抽签 /
+  返回的 `picked` 下标逐字未动。
+* 唯一调用点：同文件 `main` 的 priority 分支（`quota_sample_priority(QuotaSampleSpec(...))`）。
+* 形状门禁基线删除 `worker/train/intent_probe.py` 行（1 → 0）；`Any` 基线不动。
+* 回归：形状预算 + import 冒烟 + mypy 改动文件无错。
+
 ## §267 P0-3 第十四刀：`plan_topup` 收成 `TopUpSpec`（宽签名 102 → 101）（2026-11-21）
 
 * `worker/volume_waves.py::plan_topup` 的 9 个关键字参数 → frozen `TopUpSpec`（非 kw_only：

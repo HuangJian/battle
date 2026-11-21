@@ -138,7 +138,8 @@ WIDE_FUNCS_BASELINE = {
     "worker/ppo/loop.py": 1,
     "worker/ppo/np_core.py": 1,
     "worker/resume.py": 2,
-    "worker/train/intent_probe.py": 1,
+    # 2026-11-21：`quota_sample_priority` 的 9 个位置参数收成 `QuotaSampleSpec`
+    # ⇒ 本文件宽签名归零，条目删除。
     "worker/volume_quota.py": 1,
     # 2026-11-21：`plan_topup` 的 9 个关键字参数收成 `TopUpSpec`
     # ⇒ 本文件宽签名归零，条目删除。

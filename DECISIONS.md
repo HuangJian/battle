@@ -8818,6 +8818,14 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-quota-sample-spec
+
+P0-3 第十五刀：`worker/train/intent_probe.py::quota_sample_priority`（9 个位置参数：
+xi / xo / xs / xb / xr / xinj / quota / rng / priority_root）→ frozen `QuotaSampleSpec`
+（字段顺序 = 旧签名）。函数体开头一次展开旧局部名，配额采样与随机抽签逐字未动；唯一调用点
+（同文件 `main` 的 `args.priority_root >= 0` 分支）包对象。`worker/train/intent_probe.py`
+的宽签名 1 → 0，全仓 101 → 100（70 → 69 文件）。
+
 ## §2026-11-21-topup-spec
 
 P0-3 第十四刀：`worker/volume_waves.py::plan_topup`（9 个关键字参数：stages / collected /
