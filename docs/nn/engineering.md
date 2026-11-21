@@ -25,6 +25,47 @@
 
 ---
 
+## §240 P0-5 存量第三处：三份「一次性告警」集合 → `common.warn_once.WarnOnce`（2026-11-21）
+
+仓里三处同形状的模块级 `set`：`trainer/loop_transport._RETIRED_SOURCE_NOTED`（旧 `run` 配置
+的容忍读告警）、`_RESTORE_UNSUPPORTED_NOTED`（显式 `--rollout-src` 下「离线自动复原」不成立）、
+`worker/gate_halt._WARNED`（课程级 `gate-halt-mode.txt` 已退役）。
+
+它们本身不是坏东西（纯日志去重、不参与判定、不跨进程），问题在**形状**：调用点写着
+
+```
+if key in _SEEN: return
+_SEEN.add(key)
+log(...)
+```
+
+「查过一定会加」只能靠人读确认，漏掉 `add` 就等于每轮刷一行（而这三处恰恰都是**每轮或每次
+读配置都会问一次**的位置）。收成对象后只剩一句 `if not bucket.mark(key): return`。
+
+**API**：`mark(key) -> bool`（第一次真）、`seen(key) -> bool`（只查不记）、`__len__`。
+`seen()` 与 `mark()` 分开是 `worker/gate_halt` 要的：**先查文件存在、再 mark**——文件不存在时
+不能烧掉 key，否则这门课以后真出现该文件也不会再告警（本轮顺手把这条顺序写进 docstring 与用例）。
+
+**决定：没有 `clear()`**。要重来就换一份新桶（`WarnOnce()`），与 `HubState` / `LogRouter` 的用例
+隔离同规——「整份换新」比「逐个清表」少一种「漏清一张、用例之间偷偷串味」的失败形态。
+顺带避开 `test_reuse_ledger` 的同名 ≥3 模块判据：`clear` 原本已在 2 个模块里，多一份 `WarnOnce`
+就会把它推过线（实测 143 → 144）。第一版带着 `clear()` 正是这么红的。
+
+**决定：不加锁**（与 §239 的 `LiveLinks` 不同）。那张表要 `remove`，「查了再删」会互相抢先抛
+`ValueError` ⇒ 必须加锁；这里只 `add`，最坏结果是两条线程同时通过判定、多打**一行**日志
+（`set.add` 在 CPython 下原子）。为一句重复日志去持锁，还要回答「锁内能不能调日志」，不划算——
+契约写在 `mark()` 的 docstring 里。
+
+**守卫**：新增 `tests/common/test_warn_once.py`（3 条：`mark` 只首次为真 / `seen` 只查不记 /
+两份桶互不相见且能换新重来）；`tests/worker/test_gate_halt.py` 的 `seen` 参数从 `set` 改成
+`WarnOnce`，并补一条「不存在的路径不得烧 key」（`len(seen) == 1`）。
+
+**行为差异**：无。三个调用点的判据与文案逐字未变；`warn_once_on_legacy_txt(traj_root, seen=…)`
+的第二个参数类型从 `set[str]` 收窄成 `WarnOnce`（唯一调用方是它自己的用例）。
+
+**用例侧**：`tests/trainer/test_offline_leg_retired.py` 原先把这两个模块集合换成 `set()`，现换成
+`lt.WarnOnce()`（私有打桩的条数不变，`test_monkeypatch_targets_budget` 基线未动）。
+
 ## §239 P0-5 存量第二处：`_LIVE_LINKS` → `LiveLinks`（活连接的登记与自注销，2026-11-21）
 
 `remote/rollout_relay.py` 的 `_LIVE_LINKS: list[RelayLink] = []` 记的是**本进程还活着的 relay

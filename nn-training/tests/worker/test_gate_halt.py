@@ -194,12 +194,15 @@ def test_legacy_txt_warns_once(paths: tuple[Path, Path], tmp_path: Path) -> None
     traj = tmp_path / "c5-tick"
     traj.mkdir()
     (traj / "gate-halt-mode.txt").write_text("notify\n", encoding="utf-8")
-    seen: set[str] = set()
+    seen = gh.WarnOnce()
     line = gh.warn_once_on_legacy_txt(traj, seen)
     assert "gate-halt-mode.txt" in line and "可删" in line
     assert gh.warn_once_on_legacy_txt(traj, seen) == ""  # 进程内去重
     assert gh.warn_once_on_legacy_txt(tmp_path / "no-such-traj", seen) == ""
     assert gh.warn_once_on_legacy_txt(None, seen) == ""
+    # 不存在的路径**不得**烧掉 key：这门课以后真出现该文件时仍要告警。
+    assert gh.warn_once_on_legacy_txt(tmp_path / "no-such-traj", seen) == ""
+    assert len(seen) == 1, "只有真存在过的那一次该被记下"
 
 
 def test_effective_mode_is_pure() -> None:

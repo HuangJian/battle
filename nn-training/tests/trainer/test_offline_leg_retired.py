@@ -418,7 +418,7 @@ def test_retired_run_source_is_tolerated_not_bricked(monkeypatch: pytest.MonkeyP
     from trainer import loop_transport as lt
 
     lines: list[str] = []
-    monkeypatch.setattr(lt, "_RETIRED_SOURCE_NOTED", set())
+    monkeypatch.setattr(lt, "_RETIRED_SOURCE", lt.WarnOnce())  # 每个用例一份干净的去重桶
     monkeypatch.setattr(common_log, "log", lines.append)
 
     # CLI 与 rl-config 两条入口都要容忍（一条拒启就够 brick 一门课）
@@ -455,7 +455,7 @@ def test_explicit_rollout_src_declares_restore_unsupported(
     from trainer import loop_transport as lt
 
     lines: list[str] = []
-    monkeypatch.setattr(lt, "_RESTORE_UNSUPPORTED_NOTED", set())
+    monkeypatch.setattr(lt, "_RESTORE_UNSUPPORTED", lt.WarnOnce())
     monkeypatch.setattr(common_log, "log", lines.append)
 
     args = SimpleNamespace(rollout_src="node", run_iters=0, course_path="curricula/c5-gae.jsonc")

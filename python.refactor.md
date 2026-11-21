@@ -394,18 +394,18 @@ P0-5 的判据只覆盖 `common/**`（G2：`L0_MUTABLE_ALLOWED = {}`），而「
 | `remote/http.py:341` | `_POLL_WARN_AT` | 轮询告警节流表 |
 | `remote/worker.py:473` | `_ACTIVE_CODE_SHA`（`global`） | 当前代码 sha 的锁存 |
 | `hub/admin.py:138` | `_PROBE_BLOCK`（`global`） | 探活封禁窗口 |
-| `trainer/loop_transport.py:159,229` | `_RETIRED_SOURCE_NOTED` / `_RESTORE_UNSUPPORTED_NOTED` | 一次性告警集合 |
+| ~~`trainer/loop_transport.py:159,229`~~ **已修 2026-11-21（§240）** | ~~两个 `*_NOTED` 集合~~ → `WarnOnce`（`mark()` 查与加同一个动作） | 一次性告警集合 |
 | `trainer/queue_local.py:322,323` | `_REUSE_INDEX` / `_REUSE_SIG` | rollout 源复用索引（签名变了才重建） |
 | `worker/cmd.py:11` | `_CODE_SHA_MEMO` | code-hash 记忆 |
 | `worker/resume.py:92` | `_SCAN_CACHE` | resume 扫描缓存 |
 | `worker/node_identity.py:40` | `_LEDGER` | 节点身份账本 |
 | `worker/ppo/np_core.py:448` | `_XLA_CACHE_STATE` | XLA 编译缓存状态探针 |
 | `worker/ppo/np_core.py:287` | `_SPEED_PROBE` | 吞吐探针 |
-| `worker/gate_halt.py:270` | `_WARNED` | 停机告警的 warn-once 集合 |
+| ~~`worker/gate_halt.py:270`~~ **已修 2026-11-21（§240）** | ~~`_WARNED`~~ → `WarnOnce`（`seen()` 先查、文件存在才 `mark()`，不存在的路径不烧 key） | warn-once 集合 |
 | `remote/wire.py:218`、`remote/tailscale_boot.py:527` | `_BEST_RATE` / `_stale_samples`（`global`） | 测速最佳值（boot 模块那份**不可动**，零依赖约束） |
 
-**进度**：`remote/control_pool`（§238）与 `remote/rollout_relay`（§239）已收（2026-11-21）。
-其余 13 处仍是「缓存 / 节流表 / 活连接登记」，收成对象要先回答「谁拥有、何时清、跨进程怎么复现」
+**进度**：`remote/control_pool`（§238）· `remote/rollout_relay`（§239）· 三处 warn-once 集合（§240）
+已收（2026-11-21）。其余 11 处仍是「缓存 / 节流表 / 活连接登记」，收成对象要先回答「谁拥有、何时清、跨进程怎么复现」
 ——和 §236 同量级的一轮工作，不能顺手做。清单的作用是让下一轮**从这里开始**，而不是再回审计表里
 发现一行陈旧记录。
 
@@ -1759,8 +1759,9 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      `distribution` 的升级/重启簇搬去 `remote/node_upgrade.py` 且锁存改成 `BranchLatch`（§235）。
      L2 的两个单例也收进 `Cell`（§236），`hub/http_face` 的四个类属性 2026-11-19 已进 `HubState`。
      **P0-5 表内已无剩余**：按裁定保留的只有 `biz/reward_context._current`（每 iter 整体替换的
-     加载期上下文 + 2 条 `global`）。`common/**` 之外的 15 处同类缓存/节流表里，连接池（§238）
-     与活 link 登记（§239）已收，其余 13 处清单见 §P0-5 末小节（G2 不覆盖 L2/L3，属独立一轮）。
+     加载期上下文 + 2 条 `global`）。`common/**` 之外的 15 处同类缓存/节流表里，连接池（§238）、
+     活 link 登记（§239）、warn-once 集合（§240）已收，其余 11 处清单见 §P0-5 末小节
+     （G2 不覆盖 L2/L3，属独立一轮）。
    * **B5 可选项**：`cfg`/`course` 的 schema（`biz/course_spec.py` 已是 pydantic；
      `load_dist_config` 仍返回裸 dict）。`P1-5` 的 notebook 侧 26 处裸 dict CFG 同理
      （读者在 cell 里，门禁扫不到）。

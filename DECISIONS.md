@@ -8915,3 +8915,18 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   DSW 事故的结论）。
 - **守卫**：登记表幂等与实例隔离 / `start()` 自登记 + `stop()` 自注销；既有 cell 重跑用例改为注入
   `LiveLinks([stale, fresh])`，判据不变。
+
+## §2026-11-21-warn-once（三份「一次性告警」集合 → `WarnOnce`；刻意不给 `clear()`、不加锁）
+
+- **背景**：`trainer/loop_transport._RETIRED_SOURCE_NOTED` / `_RESTORE_UNSUPPORTED_NOTED` 与
+  `worker/gate_halt._WARNED` 是三份同形状的模块级 set，调用点把「查」与「加」拆成两步。
+- **决定一**：`common/warn_once.py::WarnOnce`，`mark(key) -> bool`（首次真）+ `seen(key)`（只查）
+  + `__len__`；三个调用点各留一个实例，判据与文案逐字不变。
+- **决定二**：**不给 `clear()`** —— 重来就换新桶（同 `HubState` / `LogRouter` 的用例隔离规约）；
+  也避免 `clear` 跨过 `test_reuse_ledger` 的同名 ≥3 模块线（实测会 143 → 144）。
+- **决定三**：**不加锁**（对比 §239 的 `LiveLinks`）：只 `add` 不 `remove`，最坏多打一行日志；
+  加锁反而要回答「锁内能否调日志」。
+- **顺序语义**：`gate_halt` 必须「先查文件存在、再 `mark`」——不存在的路径不得烧 key（已写进
+  docstring + 用例 `len(seen) == 1`）。
+- **守卫**：`tests/common/test_warn_once.py` 3 条；`tests/worker/test_gate_halt.py` 的 `seen`
+  参数类型从 `set[str]` 改为 `WarnOnce`。
