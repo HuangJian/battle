@@ -39,7 +39,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from hub import relay as relay_mod
+from hub import http_face
 from hub.relay import CHANNEL_STALE_SEC, PING_SERVE_MAX_SEC, PING_TTL_SEC, NodeRelay
 from hub.server import _HubQueue, make_server
 
@@ -47,11 +47,25 @@ TOKEN = "sekret"
 
 
 @pytest.fixture()
-def node() -> Iterator[str]:
-    """独占的节点名：`RELAY` 是进程级单例，用同一名字会串味（用完拔掉 box）。"""
+def relay(monkeypatch: pytest.MonkeyPatch) -> Iterator[NodeRelay]:
+    """每测试一份 relay —— 别用进程级 `RELAY` 单例。
+
+    2026-11-21 全量门禁偶发 `len(seen)==2`（单跑 60 轮 / 单进程全绿）：
+    `ThreadingHTTPServer` 的后台刷新线程是 daemon，测试返回后仍可能挂在
+    `release.wait`；它与后续测试共用同一个模块级 `NODE_RELAY`，于是
+    `ping_busy` / box 会串味。注入独立实例后断言只量本测试自己的状态。
+    """
+    local = NodeRelay()
+    monkeypatch.setattr(http_face, "NODE_RELAY", local)
+    yield local
+
+
+@pytest.fixture()
+def node(relay: NodeRelay) -> Iterator[str]:
+    """独占的节点名（实例已被上一 fixture 隔离，用完拔掉 box 即可）。"""
     name = f"pingcache-{id(object()) & 0xFFFF:04x}-{time.perf_counter_ns() % 9973:04d}"
     yield name
-    relay_mod.RELAY._boxes.pop(name, None)
+    relay._boxes.pop(name, None)
 
 
 @pytest.fixture()
@@ -86,9 +100,8 @@ def _fresh(relay: NodeRelay, node: str) -> None:
 
 
 def test_fresh_payload_answers_with_no_roundtrip(
-    node: str, hub_port: int, monkeypatch: pytest.MonkeyPatch
+    node: str, hub_port: int, relay: NodeRelay, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    relay = relay_mod.RELAY
     _fresh(relay, node)
     relay.note_ping(node, {"alive": True, "queued": 3})
     monkeypatch.setattr(relay, "call", _boom)  # 任何一次真调用都会当场炸
@@ -103,10 +116,9 @@ def test_fresh_payload_answers_with_no_roundtrip(
 
 
 def test_stale_heartbeat_fails_fast_without_roundtrip(
-    node: str, hub_port: int, monkeypatch: pytest.MonkeyPatch
+    node: str, hub_port: int, relay: NodeRelay, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """节点不再轮询 ⇒ 503 立刻回；**不许**再发一次注定要等 15s 的调用。"""
-    relay = relay_mod.RELAY
     _fresh(relay, node)
     relay.note_ping(node, {"alive": True})
     relay._boxes[node].last_poll = relay.now() - (CHANNEL_STALE_SEC + 5.0)
@@ -123,10 +135,9 @@ def test_stale_heartbeat_fails_fast_without_roundtrip(
 
 
 def test_expired_payload_is_served_then_refreshed_single_flight(
-    node: str, hub_port: int, monkeypatch: pytest.MonkeyPatch
+    node: str, hub_port: int, relay: NodeRelay, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """过期载荷**先答**（调用方零等待），后台只许起一个刷新；刷新落地后载荷变新值。"""
-    relay = relay_mod.RELAY
     _fresh(relay, node)
     relay.note_ping(node, {"v": 1})
     relay._boxes[node].ping_at = relay.now() - (PING_TTL_SEC + 5.0)
@@ -162,11 +173,11 @@ def test_expired_payload_is_served_then_refreshed_single_flight(
     for _ in range(3):
         status, body = _get(hub_port, f"/relay/{node}/v1/ping")
         assert status == 200 and json.loads(body)["v"] == 1, body
-    assert len(seen) == 1, seen
+    assert len(seen) == 1, (seen, id(relay), id(relay._boxes.get(node)), relay._boxes[node].ping_busy)
 
     release.set()
     assert _wait_payload(relay, node, 2), relay.ping_snapshot(node)
-    assert len(seen) == 1, seen
+    assert len(seen) == 1, (seen, id(relay), id(relay._boxes.get(node)), relay._boxes[node].ping_busy)
     # 刷新用的等待上限比调用方预算（3s）宽得多 —— 它不挡任何人，给足一个长轮询周期
     assert seen[0][0] == "GET" and seen[0][1] == "/v1/ping" and seen[0][2] > 20.0, seen[0]
 
@@ -183,10 +194,9 @@ def _wait_payload(relay: NodeRelay, node: str, want: object, *, timeout: float =
 
 
 def test_missing_payload_falls_back_and_then_caches(
-    node: str, hub_port: int, monkeypatch: pytest.MonkeyPatch
+    node: str, hub_port: int, relay: NodeRelay, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """没有载荷 ⇒ 走真调用；**这次拿到的载荷要存下来**，下一条就不必再等往返。"""
-    relay = relay_mod.RELAY
     _fresh(relay, node)
     calls: list[str] = []
 
@@ -215,10 +225,9 @@ def test_missing_payload_falls_back_and_then_caches(
 
 
 def test_fossil_payload_is_not_used(
-    node: str, hub_port: int, monkeypatch: pytest.MonkeyPatch
+    node: str, hub_port: int, relay: NodeRelay, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """比 `PING_SERVE_MAX_SEC` 还旧的载荷一律不认 —— 别拿化石台账骗派发器。"""
-    relay = relay_mod.RELAY
     _fresh(relay, node)
     relay.note_ping(node, {"v": 1})
     relay._boxes[node].ping_at = relay.now() - (PING_SERVE_MAX_SEC + 5.0)

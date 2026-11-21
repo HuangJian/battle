@@ -1177,3 +1177,35 @@ def test_run_one_course_code_changed_says_restart_session(
     assert "Restart session" in msg, msg
     assert "aaaaaaaaaaaa" in msg and "bbbbbbbbbbbb" in msg, "两个 sha 都要露出来（能直接对账）"
     assert "重跑本 cell **不会**" in msg, "要写清「重跑这一格」不是 remedy"
+
+
+def test_rmtree_confirmed_retries_then_fails_loud(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2026-11-21 Windows flake 回归：rmtree 被占用吞掉后必须重试到目录真没了。
+
+    旧写法 `rmtree(..., ignore_errors=True)` 紧接着 `cand.rename(code_root)`：
+    残留目录未删掉 ⇒ PermissionError（全量 xdist 偶发）。重试仍失败则响亮报错，
+    不把「删不掉」伪装成换候选。
+    """
+    real_rmtree = offline_boot.shutil.rmtree
+    calls = {"n": 0}
+
+    def flaky(path: Path | str, *, ignore_errors: bool = False) -> None:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return  # 模拟前两次被文件锁挡住：什么都没删
+        real_rmtree(path, ignore_errors=ignore_errors)
+
+    target = tmp_path / "code"
+    target.mkdir()
+    (target / "stale.py").write_text("stale", encoding="utf-8")
+    monkeypatch.setattr(offline_boot.shutil, "rmtree", flaky)
+    offline_boot._rmtree_confirmed(target)
+    assert calls["n"] == 3 and not target.exists()
+
+    stuck = tmp_path / "stuck"
+    stuck.mkdir()
+    monkeypatch.setattr(offline_boot.shutil, "rmtree", lambda *_a, **_k: None)
+    with pytest.raises(OSError, match="删不掉"):
+        offline_boot._rmtree_confirmed(stuck)

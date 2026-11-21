@@ -122,6 +122,22 @@ def _last_json_object(stdout: str) -> dict:
     return {}
 
 
+def _rmtree_confirmed(path: Path) -> None:
+    """删到目标**确实不在**为止 —— `ignore_errors=True` 会吞掉 Windows 的文件锁失败。
+
+    2026-11-21 全量门禁偶发 `_probe_candidate` 的 `cand.rename(code_root)` 抛
+    `PermissionError`：前一行 `rmtree(code_root, ignore_errors=True)` 被杀毒/索引
+    短暂占用吞掉，残留目录还站着，rename 就撞上去。这里短重试；重试仍删不掉就
+    响亮报错，别把「删不掉」伪装成「换候选」。
+    """
+    for _ in range(5):
+        shutil.rmtree(path, ignore_errors=True)
+        if not path.exists():
+            return
+        time.sleep(0.02)
+    raise OSError(f"[offline] 目录删不掉（被占用？）：{path}")
+
+
 def _probe_candidate(code_root: Path, data: bytes) -> tuple[bool, str, str]:
     """把候选解到 `code_root`（**先解到旁路 `.cand` 再换名**：半截树不冒充代码树）并过哨兵。
 
@@ -129,8 +145,8 @@ def _probe_candidate(code_root: Path, data: bytes) -> tuple[bool, str, str]:
     「哨兵不过」同一条路：换下一个候选，而不是把 traceback 摔在用户脸上。
     """
     cand = code_root.with_name(code_root.name + ".cand")
-    shutil.rmtree(cand, ignore_errors=True)
-    shutil.rmtree(code_root, ignore_errors=True)
+    _rmtree_confirmed(cand)
+    _rmtree_confirmed(code_root)
     cand.mkdir(parents=True, exist_ok=True)
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as z:
