@@ -23,13 +23,43 @@ import { Badge, Pill } from '../../components/Pill'
 import { DataTable, type Col } from '../../components/DataTable'
 import { SegmentedControl } from '../../components/SegmentedControl'
 import { usePolling } from '../lib/usePolling'
-import { fetchPool } from '../lib/api-client'
+import { fetchPool, type ActionResult } from '../lib/api-client'
 import { WorkerContribution } from './WorkerContribution'
+
+/** 「全部升级」按钮本体（从面板里抽出来，SSR 无池数据时也能单独测渲染）。 */
+export function UpgradeAllButton({
+  count,
+  disabled,
+  upgrading,
+  onClick,
+}: {
+  count: number
+  disabled: boolean
+  upgrading: boolean
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      className="tc-btn tc-btn--sm tc-btn--danger"
+      aria-label="全部升级"
+      title="更新代码并重启所有在线采样节点（会中断正在跑的任务）"
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {upgrading ? '升级中…' : `全部升级（${count}）`}
+    </button>
+  )
+}
 
 export interface NodeStatsProps {
   /** 抽屉开着才轮询（DS-U5 语义；展开补拉一次）。 */
   enabled: boolean
   poolFreshNonce: number
+  /** 当前 ping 在线的采样节点 id（来自 /api/state 投影；push 节点不在内）。 */
+  onlineSamplerIds: string[]
+  onAction?: (act: string, body?: Record<string, unknown>) => Promise<ActionResult>
+  readOnly: boolean
 }
 
 /** 本机磁盘徽标（plan/self-node-disk-alert G6）：口径在 `view/console-types.ts::selfDiskBadge`。
@@ -226,12 +256,36 @@ function rowExpand(r: NodeHistoryRow) {
   )
 }
 
-export function NodeStats({ enabled, poolFreshNonce }: NodeStatsProps) {
+export function NodeStats({
+  enabled,
+  poolFreshNonce,
+  onlineSamplerIds,
+  onAction,
+  readOnly,
+}: NodeStatsProps) {
   const [pool, setPool] = useState<PoolView | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [showOnlyBad, setShowOnlyBad] = useState(false)
   /** 统计窗口（本地日）：今天 / 昨天 / 7 天 / 全部。切天只改它 + 重取（服务端零重算）。 */
   const [days, setDays] = useState<PoolWindowKey>('today')
+  const [upgrading, setUpgrading] = useState(false)
+
+  /** 「全部升级」是一次会打断所有在线采样节点的危险动作 ⇒ 先确认，执行期间禁重入。 */
+  const onUpgradeAll = useCallback(async () => {
+    if (!onAction || upgrading || onlineSamplerIds.length === 0) return
+    if (
+      !window.confirm(
+        `将让 ${onlineSamplerIds.length} 个在线采样节点更新代码并重启；正在跑的任务会中断。确认继续？`,
+      )
+    )
+      return
+    setUpgrading(true)
+    try {
+      await onAction('upgradeOnlineNodes', { ids: onlineSamplerIds })
+    } finally {
+      setUpgrading(false)
+    }
+  }, [onAction, onlineSamplerIds, upgrading])
 
   /** 拉一次池视图。`fresh` = 显式「现在就给我新的」（服务端**硬清 + 等一次重算**，2.5s 级）；
    *  其余一律软拉（服务端在动作后已软作废：立刻给旧值 + 后台重算）。返回本次视图供再校验比对。 */
@@ -376,6 +430,14 @@ export function NodeStats({ enabled, poolFreshNonce }: NodeStatsProps) {
         expandRender={rowExpand}
         emptyText="无节点历史数据"
         ariaLabel="节点统计"
+        toolbarBeforeTop={
+          <UpgradeAllButton
+            count={onlineSamplerIds.length}
+            disabled={readOnly || upgrading || !onAction || onlineSamplerIds.length === 0}
+            upgrading={upgrading}
+            onClick={onUpgradeAll}
+          />
+        }
       />
       <p className="tc-caption tc-caption--flush">
         窗口「{pool.window.label}」内统计（本地日，含所有训练流合并）：成功率 = 窗口内最近 ≤10

@@ -70,6 +70,8 @@ export interface DataTableProps<T> {
   ariaLabel?: string
   /** 渲染在工具栏最左段（主过滤/状态区，其他表格面板可并入自己对表格的控制）。 */
   toolbarLeft?: ComponentChildren
+  /** 渲染在「返回顶部」左侧（贴工具栏右缘的动作区，如节点页的「全部升级」）。 */
+  toolbarBeforeTop?: ComponentChildren
   /** 可选勾选列（行复选框 + 表头全选）：勾选态由调用方持有，本组件只转发事件。 */
   selection?: DataTableSelection<T>
 }
@@ -131,6 +133,7 @@ export function DataTable<T>(props: DataTableProps<T>) {
     toolbarLeft,
     selection,
   } = props
+  const toolbarBeforeTop = props.toolbarBeforeTop
 
   const [sortKey, setSortKey] = useState<string>(props.initialSortKey ?? '')
   const [sortDir, setSortDir] = useState<SortDir>(props.initialSortDir ?? 'desc')
@@ -333,6 +336,7 @@ export function DataTable<T>(props: DataTableProps<T>) {
             表头可拖动
           </span>
         ) : null}
+        {toolbarBeforeTop}
         <button
           type="button"
           className="tc-btn tc-btn--sm tc-toolbar__totop"

@@ -36,6 +36,7 @@ on:
       - 'tools/agent/codehash-files.ts'
       - 'tools/eval/mcnemar.ts'
       - 'tools/lib/cores.ts'
+      - 'tools/lib/node-upgrade.ts'
       - 'tools/sim/pack-container.ts'
   pull_request:
     paths:
@@ -51,6 +52,7 @@ on:
       - 'tools/agent/codehash-files.ts'
       - 'tools/eval/mcnemar.ts'
       - 'tools/lib/cores.ts'
+      - 'tools/lib/node-upgrade.ts'
       - 'tools/sim/pack-container.ts'
 
 concurrency:

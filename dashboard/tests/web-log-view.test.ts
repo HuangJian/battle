@@ -57,6 +57,19 @@ describe('日志页展示层（§367：结构化解析 + 事件卡）', () => {
     expect(parseLogLine('{"event":"iter","error":null}').level).toBe('info')
   })
 
+  it('★ failedTasks.size=0 是零失败读数，不是错误（2026-11-21 MISS 行误报）', () => {
+    // /v1/result MISS 是缓存未命中的例行信息行；行尾 failedTasks.size=0 说的是「零失败任务」，
+    // 却被关键词扫描的 fail 命中判成 error ⇒ 4 条假事件长期占着首页横幅。
+    const miss = parseLogLine(
+      '[08:35:24] [sampler-agent] /v1/result MISS key=1d8b.379:rollout:2004 iterId=1d8b.379 ' +
+        'stage=2004 seed=450705168 resultCache.size=32 failedTasks.size=0 inflight.size=1 ' +
+        'suppressed=16',
+    )
+    expect(miss.level).toBe('info')
+    // 非零的失败Tasks 仍是错误（闸不能开太大）。
+    expect(parseLogLine('[08:35:24] [sampler-agent] MISS failedTasks.size=3').level).toBe('error')
+  })
+
   it('★ 显式级别优先于关键词（结构化日志自带 level ⇒ 以它为准）', () => {
     // cloudflared 的信息行里带 FAIL/failed 字样（实测 6 个假事件）
     expect(

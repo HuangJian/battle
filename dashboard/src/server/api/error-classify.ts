@@ -8,7 +8,8 @@
  *
  *  规则顺序 = 优先级（首命中）：`dependency` 必须先于 `transient-network`（`numpy` 不在
  *  网络词表里，但 `libcublas … not found` 的 `not found` 不能被 DNS 规则吃掉），
- *  `capacity` 必须先于 `remote-failure`（503 busy 不是 500）。新增规则 = 加一行 + 一条夹具。
+ *  `capacity` 必须先于 `remote-failure`（503 busy 不是 500）；504 网关超时同样必须先于
+ *  `remote-failure` 的通用 `5\d{2}`（自愈型网络抖动，不是代码故障）。新增规则 = 加一行 + 一条夹具。
  */
 
 import type { ErrorClassification, ErrorSource } from '../../web/view'
@@ -37,8 +38,16 @@ const RULES: readonly Rule[] = [
     classification: 'multi-process',
   },
   {
-    re: /\b(?:http|status(?:Code)?)[ =:]*503\b|HTTP\/\d\.\d"\s+503\b|\b503\b[^\n]{0,24}(?:busy|unavailable|overload)|\bbusy\b|overload|queue full|no (?:available )?worker|all workers busy/i,
+    // `busy=false` 是「不忙」的零值读数（sampler-agent 关停行），不能当成容量告警；
+    // 排除后它会落到下面的 process-lifecycle（SIGTERM）——两拍自动撤销，不再弹横幅。
+    re: /\b(?:http|status(?:Code)?)[ =:]*503\b|HTTP\/\d\.\d"\s+503\b|\b503\b[^\n]{0,24}(?:busy|unavailable|overload)|\bbusy\b(?!\s*[=:]\s*(?:false|0\b))|overload|queue full|no (?:available )?worker|all workers busy/i,
     classification: 'capacity',
+  },
+  {
+    // 504 = relay 等下游应答超时，worker 下一拍重领即自愈 —— 与 521/522/524 同属网络抖动。
+    // 必须排在 remote-failure 的通用 `5\d{2}` 之前，否则被一锅端成「真问题」持续弹横幅。
+    re: /HTTP\/\d\.\d"\s+504\b|\b504\s+Gateway\s+Timeout\b|\bstatus(?:Code)?[ =:]*504\b/i,
+    classification: 'transient-network',
   },
   {
     re: /internal server error|request body truncated|response send stalled|payload[^\n]{0,40}truncat|unexpected end of (?:stream|json)|HTTP\/\d\.\d"\s+5\d{2}\b|status(?:Code)?[ =:]*5\d{2}\b/i,

@@ -31,8 +31,11 @@ export interface UpgradeSpecInput {
   /** 期望 codeHash；缺省由 Python 侧 `common.distribution.compute_code_hash()` 现算。 */
   expectedHash?: string
   branch: string
-  /** 节点配置（`rl-config.json` 或 `--dist-nodes` 指定的文件）。 */
-  cfgPath: string
+  /** 节点配置（`rl-config.json` 或 `--dist-nodes` 指定的文件）；**显式节点模式下省略**
+   *  —— CLI 以 `cfg_path` 是否为空选扫描模式，传了就会忽略 `nodes`。 */
+  cfgPath?: string
+  /** 显式节点模式（调用方已 ping 过；与 `cfgPath` 二选一）。 */
+  nodes?: Array<{ id: string; url: string; authKey: string; pingHash?: string }>
   /** 跨调用去重 memo（预置回 `common.distribution._RESTARTS.seen`；`atSec` = 该次下发时刻）。 */
   seen?: Array<{ id: string; pingHash: string; expectedHash: string; atSec?: number }>
   /** null/缺省 ⇒ 子进程用 `common.distribution.dirty_hash_files()` 字节级探测。 */
@@ -80,11 +83,13 @@ export const UPGRADE_CLI = 'nn-training/tools/dist_upgrade_cli.py'
 
 export function buildUpgradeSpec(input: UpgradeSpecInput): Record<string, unknown> {
   const spec: Record<string, unknown> = {
-    cfg_path: input.cfgPath,
     branch: input.branch,
     dry_run: input.dryRun === true,
     timeout: input.timeout ?? 20,
   }
+  // 两种模式二选一：CLI 以 cfg_path 非空选扫描模式，显式 nodes 必须不写这个键。
+  if (input.cfgPath) spec.cfg_path = input.cfgPath
+  if (input.nodes) spec.nodes = input.nodes
   if (input.expectedHash) spec.expected_hash = input.expectedHash
   if (input.seen && input.seen.length > 0) spec.seen = input.seen
   if (input.statusTimeout !== undefined) spec.status_timeout = input.statusTimeout

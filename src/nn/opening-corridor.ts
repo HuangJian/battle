@@ -163,6 +163,29 @@ export function windowAllowsCell(row: number, windowRow: number | null): boolean
   return windowRow !== null && (row === windowRow || row === windowRow + 1)
 }
 
+/** 开局体检用：**只数教练真拆的**中央砖（2026-11-21）。
+ *
+ *  原体检无脑数「所有消失的中央砖」，把两类不算教练违规的也算进去：
+ *   ① 锁定 2×2 窗口内的（控制器 `centralBreached` 同样放行）；
+ *   ② 敌人流弹打掉的（控制器 `planned=false`，只 trace 不 abort；实测 5/5 超量都是这个）。
+ *  ⇒ 误报长期占着控制台横幅。这里按控制器同口径剔除，让真违规仍能报警。 */
+export function countCoachCentralBreach(
+  initialBrickKeys: Iterable<string>,
+  goneKeys: ReadonlySet<string>,
+  enemyBrokenKeys: ReadonlySet<string>,
+  windowRow: number | null,
+): number {
+  let n = 0
+  for (const key of initialBrickKeys) {
+    if (!goneKeys.has(key)) continue
+    if (enemyBrokenKeys.has(key)) continue
+    const row = Number(key.slice(key.indexOf(',') + 1))
+    if (windowAllowsCell(row, windowRow)) continue
+    n++
+  }
+  return n
+}
+
 /** Geometry of a path walked from `from` (start cell included). */
 export function pathGeometry(from: Cell, path: readonly Direction[]): PathGeometry {
   let col = from.col

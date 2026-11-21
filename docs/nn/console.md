@@ -13,6 +13,69 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §57 nodes 页「全部升级」：一键让在线采样节点拉代码并重启（2026-11-21）
+
+**需求**：节点统计表工具栏「返回顶部」左侧加「全部升级」按钮，点击后所有**在线采样节点**更新代码并重启。
+
+**实现**：
+
+- `DataTable` 加可选 `toolbarBeforeTop` 插槽（只 nodes 页传，其他表格零变化）；`NodeStats` 的
+  `UpgradeAllButton` 挂这里，显示在线采样节点数，只读 / 探测未落地 / 执行中禁用；`window.confirm`
+  二次确认——它明确告知「会中断正在跑的任务」。
+- `app.tsx` 从 `/api/state` 的 `nodes[]` 筛 `online === true` 且非 push 的 id 传给面板。
+- 后端 `actions/nodes.ts::upgradeOnlineNodes(ids)`：纯函数 `selectUpgradeTargets` 再校验
+  （存在 / 启用 / 非 push），以**显式节点模式**调现成 `tools/lib/node-upgrade.ts::requestNodeUpgrades`——
+  不传 `cfgPath`，否则 CLI 走全量扫描模式并忽略 `nodes`；`pingHash` 留空跳过 `current` 短路
+  （已是目标版本的节点也重启）；`dirty: []` 跳过本地脏守卫（codehash 已以 self 部署版本为准），
+  远端 agent 自己的脏树 / grace / 冷却护栏仍保留。
+- 分支直接读 `.git/HEAD`（服务端禁同步子进程）；取不到就空 ⇒ 节点只重启不拉代码，消息里明说。
+- `.github/workflows/dashboard.yml` 的 paths 补 `tools/lib/node-upgrade.ts`（ci-scope 门禁要求）。
+
+**验证**：新增目标筛选 / 按钮状态 / 插槽位置夹具；dashboard typecheck 498 文件、全量
+2210 pass / 0 fail，根 check 2981 pass / 7 skip / 0 fail，四份 bundle 重建。
+
+## §56 `OPENING HARD CONSTRAINT FAIL` 改在源头修：体检把敌人流弹算成了教练违规（2026-11-21）
+
+**纠错**：§55 把这条判为「唯一真问题、保留横幅」，下结论太快。查 `opening-controller.ts::centralBreached`：
+控制器只把**计划要打的砖**（`planned=true`）消失算违规，敌人流弹 `planned=false` 只 trace 不 abort
+（注释记着实测 5/5 超量都是流弹）；而 `export-eval-game.ts` 的体检无脑数**所有**消失的中央砖，
+还把锁定 2×2 窗口（`windowAllowsCell`，放行 row 与 row+1）内的算进去。多报的是敌人和环境，不是教练。
+
+**约定变更**：用户明确 codehash 现以 **self 节点部署版本**为准，本地改集内文件不再触发集群升级
+（`.workbuddy/memory/MEMORY.md` 已更新，旧「本机脏则全员红」口径作废）⇒ 直接改源头，不必在 dashboard
+加分类把真违规也一起藏掉；一度加过的 `scaffold` 分类已回退。
+
+**修复**：
+
+- `src/nn/opening-corridor.ts` 新增纯函数 `countCoachCentralBreach`：从消失的中央砖里剔除敌人拆的
+  （`onTrace` 中 `planned=false` 收集）与锁定窗口内的两类；
+- `tools/sim/export-eval-game.ts` 体检改调该函数，`onTrace` 始终挂上（原仅 `OPENING_TRACE=1` 才挂），
+  trace 打印仍只在开关开启时输出；基地环 `ring` 判据不变。
+- 真违规（教练计划拆的、窗口外的砖）仍然报警、仍然弹横幅——降的是误报，不是告警本身。
+
+**验证**：新夹具先红后绿（2×2 窗口放行 row 与 row+1，别按单行算）；根项目 `bun run check`
+2981 pass / 7 skip / 0 fail。
+
+## §55 errors 页降噪补丁：504 / `busy=false` / `failedTasks.size=0` 不再冒充真问题（2026-11-21）
+
+**报障**：首页告警坞反复弹「组件报错：N 条未处理」，逐条看却是自愈型事件。
+
+**读数**（`GET /api/errors`，11:25）：24 条中 18 条 cloudflared 噪声已被折叠，剩下 6 条非噪声里 5 条是误报：
+
+- 4 条 `[sampler-agent] /v1/result MISS … failedTasks.size=0`（count 2–81）——例行缓存未命中，行尾「零失败任务」里的 `fail` 被关键词扫描判成 error；
+- 1 条 `persist worker closed … SIGTERM (was busy=false)`——`\bbusy\b` 命中 `busy=false`，从进程生命周期噪声误升级成 `capacity`；
+- 账本里另有 6912 条 hub-server `504`（11:26:23 仍在发生），被通用 `5\d{2}` 规则归成 `remote-failure`，一旦进日志尾窗就弹横幅。
+- 唯一真问题：`OPENING HARD CONSTRAINT FAIL`（关卡开场硬约束不满足），保留横幅不动。
+
+**修复**（三处纯函数 + 各自夹具）：
+
+- `src/server/api/error-classify.ts`：504 专用规则插在 `remote-failure` 通用 5xx **之前** → `transient-network`；`\bbusy\b` 加 `(?!\s*[=:]\s*(?:false|0\b))` → `busy=false` 落回 `process-lifecycle`。
+- `src/web/view/log-view.ts`：零值涂改正则加 `[A-Za-z_]*` + `(?:\.[A-Za-z_]+)?`，覆盖 `failedTasks.size=0` 这类「字段名 + 零值」读数；非零读数仍照常报错。
+
+**为什么这样修**：两类 noise classification（`transient-network` / `process-lifecycle`）本就有「默认折叠 + 不进告警坞 + 连续两拍缺席自动撤销」（`error-registry.applySweep`）。误报根因是分类/级别判错，不是撤销机制失效——不碰阈值、不动 ack、不给 UI 加静音开关。
+
+**验证**：新夹具先红后绿（504→remote-failure、busy=false→capacity、MISS→error）；dashboard typecheck 496 文件无错、全量 2206 pass / 0 fail，根项目 `bun run check` 2979 pass / 7 skip / 0 fail，`build.ts` 四份 bundle 全过。
+
 ## §54 BC eval 也写机器健康账：节点页「今日贡献」不再漏掉手动 evalA（2026-11-13）
 
 **报障**：`/nodes` 的采样节点「今天」窗口全为 0，但操作员手动点了几次 BC epoch 表的 `evalA`（`tmp/g2-classic35/evalBc.log`
