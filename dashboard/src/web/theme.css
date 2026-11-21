@@ -922,7 +922,8 @@ a.tc-btn {
   display: block;
   width: 100%;
   height: 100%;
-  overflow: visible;
+  /* 兜底：任何异常读数都不得画出 viewBox 去遮住下方指标表（提示框是独立 HTML 浮层，不靠这里溢出）。 */
+  overflow: hidden;
 }
 /* hover 里的 formula 名（用户 2026-11-10）：与数值同一块提示，等宽字体便于对照课程公式 */
 .tc-trend__tip-formula {

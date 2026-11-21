@@ -163,7 +163,13 @@ export function MultiTrendChart({
   const bounds = yBounds ?? (metric ? compareYBounds(metric, seriesList) : {})
   const dataMin = Math.min(...nums)
   const dataMax = Math.max(...nums)
-  let lo = bounds.yMin ?? (bounds.yFloor != null ? Math.min(dataMin, bounds.yFloor) : dataMin)
+  // 与 TrendChart 同一口径修正：全量算出的 yMin 不得高于本图可见点，否则整条线掉出绘图区。
+  let lo =
+    bounds.yMin !== undefined
+      ? Math.min(bounds.yMin, dataMin)
+      : bounds.yFloor != null
+        ? Math.min(dataMin, bounds.yFloor)
+        : dataMin
   let hi = Math.max(dataMax, lo)
   if (!(hi > lo)) {
     // 单点 / 全等值：给一个对称窗口，否则整条线会贴在轴上（看起来像空图）。

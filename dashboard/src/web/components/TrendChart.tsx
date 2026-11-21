@@ -186,7 +186,15 @@ export function TrendChart({
   const all = [...valid, ...valid2]
   const dataMin = all.length ? Math.min(...all) : 0
   const dataMax = all.length ? Math.max(...all) : 1
-  const min = yMin !== undefined ? yMin : yFloor !== undefined ? Math.min(dataMin, yFloor) : dataMin
+  // yMin 是按**全量**序列算出的量级建议下界（胜局耗时用），但本图按 range 截取后可见点
+  // 可能整体更低（2026-11-21 g9-def eval 曲线越界事故：全量下界 16177、eval 点低至 9457）。
+  // 下界只能压低到本图最小点，不能把点顶出绘图区；yMin 正常时仍保持原有量级缩放效果。
+  const min =
+    yMin !== undefined
+      ? Math.min(yMin, dataMin)
+      : yFloor !== undefined
+        ? Math.min(dataMin, yFloor)
+        : dataMin
   const max = dataMax > min ? dataMax : min + Math.max(1, Math.abs(min) * 0.05)
   const span = max - min
 

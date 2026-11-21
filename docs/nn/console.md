@@ -13,6 +13,26 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §59 首页走势图越界：y 下界按全量算、上界按截取后算（2026-11-21）
+
+**报障**：g9-def 的 eval 胜局耗时曲线冲出图形区，遮住下方指标表。
+
+**根因**：`Hero.tsx::winTicksYMin` 按**全量** rollout 序列算下界（g9-def 实测 mn=5814 /
+mx=32355 ⇒ 下界≈16177），而 `TrendChart` 内部按 `range` 截取后的可见点算上界（eval 实测
+9457~16780 ⇒ 上界≈16780）。下界比大多数 eval 点还高 ⇒ `py(v)` 算出约 322px（绘图区只有
+34px），加上 `.tc-trend__svg` 的 `overflow: visible`，曲线直接画到图外。
+
+**修复**：
+
+- `TrendChart` / `MultiTrendChart` 的 `yMin` 改为 `min(yMin, dataMin)`：按全量算出的量级建议
+  下界只能压低到本图最小点，不得把点顶出绘图区；`yMin` 正常时原有的量级缩放效果不变。
+- `.tc-trend__svg` 的 `overflow` 由 `visible` 改 `hidden` 兜底（hover 提示框是独立 HTML 浮层，
+  不依赖 SVG 溢出）。
+
+**验证**：新夹具用实测数字（yMin=16177 / 可见 9457~12000）先红后绿——修前 y=322.5，修后落在
+[6, 40]；两个图表组件都覆盖，原有「yMin 正常时量级缩放」用例保持绿。dashboard 2214 pass、
+根项目 2867 pass、四份 bundle 重建。
+
 ## §58 「全部升级」堵死后端事故的收尾：服务端异步 + CLI 并行（2026-11-21）
 
 **报障**：点按钮后整个 dashboard 后端卡住几分钟——所有 API / 页面无响应。
