@@ -25,6 +25,795 @@
 
 ---
 
+## §260 P0-8 续：训练机侧 `bun_version` 收进 `common.proc.Toolchain` 端口（裸名契约随之改；文本断言 1535→1536 / 1224→1226）（2026-11-21）
+
+§258 的余账里有一行：「`bun_version` 逐名 patch：`trainer/eval_dispatch` 2 · `trainer/rollout_dispatch` 1 ·
+`trainer/batch_runner` 3 · `remote/rollout_node` 1；收它们要连 `tests/trainer/test_batch_runner_split.py` 的
+『`bun_version` 必须在本模块被**裸名**读』契约一起改」。本笔收前 6 处；`remote/rollout_node` 那 1 处属于
+节点侧，留待后续。
+
+**做法是再铺一个端口，不是把三家塞进 `NodeExec`**：三家都在训练机侧、只读工具链版本，共用
+`common/proc.py` 的 frozen `Toolchain`（当前一个字段 `bun_version: Callable[[str], str]`）与唯一默认实例
+`TOOLCHAIN`。三个调用点（`BatchEvalRunner._open_unit` / `EvalDispatcher._eval_eligible` /
+`RolloutDispatcher._ping_gate`）从 `bun_version(bun)` 改成 `TOOLCHAIN.bun_version(bun)`；模块全局
+`TOOLCHAIN` 就是新的 patch 锚点：三家 import 的是同一个默认实例，但
+`monkeypatch.setattr(mod, "TOOLCHAIN", …)` 只重绑那一家（无状态 ⇒ 共享安全）。
+
+**测试侧**新增 `tests/helpers/toolchain.py::stub_toolchain(monkeypatch, module, version)`，内部
+`dataclasses.replace(module.TOOLCHAIN, bun_version=lambda _bun: version)`；4 个测试文件的 6 处
+`monkeypatch.setattr(mod, "bun_version", …)` 全换成它（形状与 `stub_exec` 同款）。
+
+**裸名契约一起改**（`tests/trainer/test_batch_runner_split.py`）：`RUNNER_DI` 删 `bun_version`、新增
+`test_bun_version_is_read_through_the_port` 钉两条——① `br.TOOLCHAIN is common.proc.TOOLCHAIN`
+（模块全局 ⇒ patch 生效）；② `RUNNER_SRC` 里裸名 `Load` 含 `TOOLCHAIN`、不含 `bun_version`
+（不许有第二套接缝）。同时把「两家不许互转」与注入点 docstring 里的名字同步成 `TOOLCHAIN`，
+`batch_lanes` 的头注也跟着改。
+
+**门禁读数**：这 6 处是**公开名**，不占 G19（392 处 / 95 文件不动）。新增的源码结构判据让文本断言
+基线 **1535 → 1536**（形态 A）与 **1224 → 1226**（生产源码面 B）—— 两条都只能看源码：「旧名不再在
+模块里裸名读」没有运行时出口；`hasattr` / `is` 判据不计形态。没有改行为：三家读的还是
+`common.proc.bun_version`（缺省 `?` / 10s / 不看退出码）。
+
+**被否决**：给三个模块各绑一份 `bun_version = TOOLCHAIN.bun_version` 兼容名 —— 那等于保留旧
+patch 路径，改端口字段时另一条路静默失效（正是 §P0-8 要消灭的形态）。
+
+**验证**：相关 5 个测试文件 133 例 + 4 道预算/门禁 11 例全绿；nn 全量 **6697 passed / 3 skipped**
+（74s，ruff check + mypy 1051 文件绿）；根 `bun run check` 绿。
+
+## §259 P0-8 续：流式采集 e2e 的 4 处 `_run_one_game_bounded` 替身也搬上端口（G19 396 → 392）（2026-11-21）
+
+§258 把执行面收成 `NodeExec` 之后，`e2e/test_stream_collect_e2e.py` 里还剩 4 处
+`monkeypatch.setattr(iter_rollout, "_run_one_game_bounded", _fake_game(trace))` —— 它们是**私有执行路名**
+（占 G19 额度），而且桩打的层比生产注入点**高一层**：上界 / 重试 / 落点那几层全被跳过，只有「调度
+循环」被真测。
+
+改法：替身搬进端口字段（`stub_exec(monkeypatch, run_game=_fake_game(trace))`），`_fake_game` 的签名
+从 bounded 档的 `(…, explicit, pool, *, ceiling_sec, job_dir) -> (wall, attempts)` 改成 `run_game` 档的
+`(…, log=None, *, attempt=1, abandoned=None) -> wall`（外部边界只剩「起 bun 跑一局」），真 `_run_one_game
+_bounded`（`call_bounded` + `_run_one_game_with_retries` + 池尝试 / 重试 / 上界）整层回到真代码。
+
+**语义没变**：用例的判据全部来自 `_Trace` 的**事件序号**（「第三局开跑早于慢局收工」），与桩打在哪一层
+无关；按住慢局的 `HOLD_MAX_SEC = 15s` 仍小于缺省上界（`GAME_MAX_ATTEMPTS × (2 × 最宽尝试 + 回收) + slack`
+≈ 30s+），所以「按住直到放行」不会被上界误杀。四个用例全绿（与 `e2e/test_run_rl.py` + `test_remote_iter.py`
+同批 **119 passed**），文件耗时无可见变化。
+
+**读数**：G19 基线 **396 → 392 处 / 95 文件**（该文件的 4 处条目删空）。本行之外，`iter_rollout` 的六个执行面
+接缝在 `tests/**` + `e2e/**` 里已**零处逐名 patch**。
+
+## §258 P0-8 主例：`worker/iter_rollout` 的 42 处私有/半私有 `monkeypatch` 收进执行面端口 `NodeExec`（G19 406 → 396）（2026-11-21）
+
+§P0-8 说「全量 monkeypatch 迁移要先铺端口对象」，但一直没给出一个**可抄的样板**。本节就是样板：
+把 `iter_rollout` 碰外部世界的六处接缝（`resolve_bun` / `bun_version` / `_run_one_game` /
+`_make_pool` / `_clean_attempt` / `_clean_partial`）收进一个 frozen dataclass `NodeExec`，模块级
+只留一个公共名字 `EXEC = NodeExec(六个真实现)`；五个调用点全部改走 `EXEC.x()`。
+
+**为什么是对象而不是六个参数**：`run_iter_rollout` 已有 9 个参数，再穿 `exec=` 还得过
+`_run_one_game_with_retries`（10 参）与 `_IterRun`（`iter_run.py` 的 `Any` 预算 3/3 已满）——
+那会把「注入」变成第七种穿参风格。端口对象的好处是**替换粒度 = 整面**（`EXEC` 一个名字），
+同时按字段只覆盖关心的一项（`dataclasses.replace`），注入面与穿参面彻底解耦。
+
+**测试侧**：新增 `tests/helpers/iter_exec.py::stub_exec(monkeypatch, bun=…, ver=…, **over)`，
+内部 `replace(iter_rollout.EXEC, **fields)` ⇒ 多次调用**叠乘**（一个用例里先替换清理者、
+再包装单局运行，互不抹掉）。五个测试文件（`tests/remote/test_remote_iter.py` 等）的 42 处
+`monkeypatch.setattr(iter_rollout, …)` 全部换成 26 条 `stub_exec(...)`。
+
+**顺带被用例抓到的真缺陷**：`_clean_partial`（partial 工厂，回退档两参 / 换根档多一个
+`exec_root=`）原先把清理本体**按模块名**取（`partial(_clean_attempt, …)`）。端口化之后，
+「让清理挂住」这种注入只对 `clean_attempt` 生效、对工厂不生效 ⇒ `test_clean_overrun_is_machine
+_stall_not_in_place_retry` 立刻红（日志里没有「半截产出清不掉」）。修法是把工厂改成
+`partial(EXEC.clean_attempt, …)`：**端口字段之间不许互相绕过**，否则注入只覆盖半条路。
+
+**读数**：G19 基线由 96 文件 / 406 处收到 **96 文件 / 396 处**（`test_remote_iter` 3 → 0、
+`test_round_ctx` 6 → 0 条目删除；`e2e/test_stream_collect_e2e` 5 → 4）；`iter_rollout.py` 967 行
+（LOC 预算内）；`ruff` / `mypy` 单文件绿。**行为零差异**：五个测试文件 193 例全绿，nn 全量
+**6699 passed / 3 skipped**，根 `bun run check` **2856 pass / 16 skip / 0 fail**。
+
+**公开名那 32 处也一起收了**（2026-11-21 复核）：`resolve_bun` / `bun_version` 是**公开名**，不占
+G19 额度，本笔之前一直是逐名 patch —— 它们和私有三处同属执行面，已全部改走 `stub_exec`。
+实测：**`iter_rollout` 的六个执行面接缝在 `tests/**` + `e2e/**` 里现在零处逐名 patch**
+（唯一改动点就是 `EXEC` 本身；AST 扫 `setattr(<名>, "resolve_bun"|"bun_version"|…)` = 0）。
+
+**还剩的同族（都不在 `iter_rollout` 里，别误记额度）**：
+
+| 面 | 位置 | 数量 | 备注 |
+|----|------|-----:|------|
+| `bun_version` 逐名 patch | `trainer/eval_dispatch` 2 · `trainer/rollout_dispatch` 1 · `trainer/batch_runner` 3 · `remote/rollout_node`（`common_proc.bun_version`）1 | 7 | 收它们要连 `tests/trainer/test_batch_runner_split.py` 的「`bun_version` 必须在本模块被**裸名**读」契约一起改 |
+| `iter_rollout` 容量/杀树/校验（公开名） | `cpu_worker_slots` 4 · `workers_cap` 3 · `kill_process_tree` 2 · `verify_shards` 1 | 10 | **另三条**接缝（不是执行面六缝），要收得先决定它们值不值得进 `NodeExec` |
+| `_run_one_game_bounded`（私有执行路名） | `e2e/test_stream_collect_e2e.py` | 4 | ~~仍占 G19 额度~~ **已收（§259）**：换 `run_game=` 替身后真上界/重试那层回到真代码，四条用例的判据（事件序号）不变 |
+
+## §257 P0-6 收尾：BC 两条腿的缺省 `log` 也改走 `tag_logger`（G3 123 / 38 文件）（2026-11-21）
+
+§255 把 `run_iter_rollout` 的 `[iter]` 回调收进全仓出口后，同一族（**公共函数的缺省 `log` 是一个
+裸 `print` lambda**）在 `worker/` 里还剩两处：`bc_dispatch.dispatch_bc_corpus` 与
+`bc_eval.eval_bc_on_nodes`。它们比 `[iter]` 更差一点 —— 连前缀都没有（`print(msg)`），多个腿混在
+一个 stdout 时根本分不出是谁打的。
+
+两个文件各加一个模块级出口：`_log = tag_logger("bc", lambda: time)` /
+`_log = tag_logger("bc-eval", lambda: time)`，缺省参数改 `log=_log`。
+
+**行为差异**：只影响**不传 `log`** 的调用（两处生产调用方 `worker/bc_collect` 等都显式传）—— 那些
+路径从「一行裸 msg」变成 `[HH:MM:SS] [bc] msg`。
+
+`tests/golden/print_baseline.json` 删两个条目 ⇒ **123 处 / 38 文件**。剩下的 `print` 全部已定性：
+CLI 交付面（`deliver_zip` 15 / `gate_check` 6 / `ppo/bench` 5 / `run_rl_cluster` 9 / `run_loop` 8）、
+`__main__` 形状自检（`worker/models/*`）与 L0 秩（`worker_proc`）—— 它们不是「日志」，不应该有前缀。
+
+**门禁**：nn 全量绿（116s）· ruff / mypy 绿。
+
+---
+
+## §256 P0-3 第七刀：全仓最宽的 `run_local_eval_game`（25 参）→ `EvalGameSpec`（2026-11-21）
+
+`worker/eval_local.run_local_eval_game` 是审计时全仓参数最多的函数：9 个位置语义参数
+（`bun / weights_snapshot / stage / seed / out_dir / max_ticks / difficulty / timeout_sec / wver`）
++ 16 个带缺省的关键字。前 9 个里任何一个抄错一格（比如把 `stage` 换成 `seed`）都**不会报错**，
+只会安安静静评估另一局 —— 而这条腿本来就是拿来与账本对账的（§P0-3 原话：这条失效面比宽签名本身贵得多）。
+
+| 新的家 | 内容 |
+|---|---|
+| `worker/eval_local.EvalGameSpec` | `@dataclass(frozen=True, kw_only=True)`，25 个字段，原参数注释逐条搬成字段注释 |
+| `run_local_eval_game` | 只剩 `(spec: EvalGameSpec) -> dict`；函数体里 42 个参数引用全改成 `spec.X`（**一行逻辑没改**） |
+
+**为什么 `kw_only`**：字段数没变，但“按名字给”把「第 5 个位置是 out_dir 还是 difficulty」这一
+类错法从语法上消掉了；同形先例 `PublishSpec` / `RoundSpec` / `RunSetup` / `RescanSpec` / `JobExecSpec`。
+
+**调用点**（共 5 处生产 + 10 处测试替身，全部改传对象）：
+`remote/offline_eval.run_cloud_eval`（`partial(run_local_eval_game, EvalGameSpec(...))`，
+`call_bounded` 的取消语义不变）· `worker/eval_exec`（本机腿，走 `rnd.local_fn`）·
+`trainer/batch_lanes`（手动 judge 的本机槽位）· `worker/eval_replays_once`（重放导出）·
+`e2e/test_run_rl.py` 的真 `main()` 驱动。
+
+**两条门禁反馈**（都是真提醒，不是噪声）：
+
+1. `worker/eval_exec` 里 `rnd.snapshot_path` 是 `str | None` —— 旧代码走 `rnd.local_fn(*args)`
+   的 `Callable[..., dict]`，类型检查根本看不到；换成对象后 mypy 立即抓到。处置：
+   `snapshot_path or ""`（grant 只在快照存在时发，arbiter 侧已挡 `None`，这里只收窄类型）。
+2. 删掉 e2e 替身上一句 `# type: ignore[assignment]` 后 `test_baselines_only_shrink` 红 ——
+   抑制符额度只许调小，`tests/golden/suppression_baseline.json` 的 `e2e/test_run_rl.py` 3 → 2。
+
+**顺带收紧**（同一条「只许调小」规则）：`WIDE_FUNCS_BASELINE` 删 `worker/eval_local.py` 条目，
+并把两处**早已没有对应宽函数**的余量清掉（`remote/hub_client` 3 → 2、`remote/train_core` 5 → 3）。
+全仓宽签名 **123 → 122**、基线总额 126 → **123**（与实测相等）。
+
+**行为差异：无**（argv 拼装、池优先/回退、告警行、返回 manifest 的字段全逐字不变）。
+
+**门禁**：nn `6699 passed / 3 skipped`（92s，含 e2e）· ruff / mypy 绿。
+
+---
+
+## §255 P0-6 收口：`worker/iter_rollout` 的 `[iter]` 回调改走全仓日志出口（G3 125 / 40 文件）（2026-11-21）
+
+`run_iter_rollout` 的缺省 `log` 是 `lambda msg: print(f"[iter] {msg}", flush=True)` —— 全仓最后
+一份**自己拼前缀、且不带时间戳**的日志出口。它不在“刻意保留”名单里（那是 `deliver_zip` 的机器
+读末行 / `worker_proc` 的 L0 秩 / `run_loop` 的协议面），也不是 `__main__` 自检，而是**公共函数
+的缺省值**：任何不传 `log` 的调用（一次性排障、notebook 外的手跑）都会用上它。
+
+改法只动一行：模块级 `_log = tag_logger("iter", lambda: time)`（与 `remote/*` 的 4 份
+`_log_default` 同一个工厂），缺省参数改 `log=_log`。输出变成 `[HH:MM:SS] [iter] msg`。
+
+**为何现在才能改**：审计文档把这一项挂在「该文件 LOC 已 999/1000，迁它要先拆」上——先拆确有
+其因（`iter_run` 那一步把两个状态类搬走），现在实测 **948 → 950**，仍在 1000 线以下。
+
+**行为差异**：只影响**不传 `log`** 的调用，且只有「多一个时间戳」。两处生产调用
+（`remote/offline_greedy` 的两个 `run_iter_rollout`）都显式传 `log`，不受影响。
+
+判据 `tests/worker/test_log_diet.py::test_default_iter_log_uses_the_shared_line_format`
+（只钉格式 `\[HH:MM:SS\] \[iter\] msg`，不钉实现）。`tests/golden/print_baseline.json` 删
+`worker/iter_rollout.py` 条目 ⇒ **125 处 / 40 文件**（`deliver_zip` 15、`run_rl_cluster` 9、
+`run_loop` 8、`rl_model` 7 均仍为契约/CLI 面，不再当欠账）。
+
+**门禁**：nn 全量绿（见下）；ruff / mypy 绿。
+
+---
+
+## §254 P0-2 存量最后一处：`remote/rollout_node.run`（249 → 162 + 50 + 80），`LONG_FUNCS_BASELINE` 清零（2026-11-21）
+
+`run` 的 249 行里其实只住了**两类不同触发条件**的东西：一次性的「装配 + 通道决策」，和
+「进程在就每 10s 一拍」的监护 while。上一轮把前者判成「要先定所有者再动」，这一轮定下来了：
+
+| 函数 | 行数 | 所有者 / 触发条件 |
+|---|---|---|
+| `run` | 162 | 装配（凭据 / bun / agent / 首注册 / 横幅）+ 三段编排 —— 只跑一遍 |
+| `_open_channel` | 50 | 通道决策（`auto`：tailscale → cloudflared → relay）；`tunnel` 是它的入参，**返回生效的 `hub_url`** |
+| `_supervise` | 80 | 监护 while（agent 死重启 / 隧道自愈重注册 / 产出摘要 / 到点收线）+ `finally` 收线；所有者 = `_Session` |
+
+**所有者**：`_Session` 本来就持有「注册 / 重启 / 隧道自愈」的状态与方法，监护循环只是它们的
+节拍器 ⇒ `_supervise(session, …)` 是这个对象的唯一驱动者，`run` 不再直接碰 `session.agent`。
+
+**三个不能靠「搬代码」解决的耦合**（都只在函数边界上过一手，无逻辑改写）：
+
+1. `_follow_relay_port` 原本是 `run` 里的闭包，靠 `nonlocal hub_url` 把「relay 实际用的端口」
+   写回注册地址。拆出去以后改成**返回值**：`_open_channel(...) -> (hub_url, next_tunnel_try)`。
+   单一真相没变（`_Session.hub_url` / 横幅 / 注销仍读同一个值），反而少了隐式写。
+2. `disk_state`（磁盘档位的告警去重）是装配阶段造的，监护循环每拍写它 ⇒ 显式当参数传，
+   不把它塞进 `_Session`（它属于 `node_report` 的告警面，不属于会话）。
+3. `finally` 里注销要用**进入时的** `hub_url`（与首注册同一地址），所以 `_supervise` 收一个
+   `hub_url` 参数而不是读 `session.hub_url` —— 后者可能在循环里被隧道自愈改过。
+
+**两条源码契约测试跟着换锚点**（不是放宽）：`test_credentials_are_read_before_tailscale_ensure`
+从 `src.index(...)` 字符串定位改成 AST 行号（读 `secret("TS_AUTHKEY")` 早于 `_open_channel(`），
+再补一条「`_open_channel` 里真的有 `_open_tailscale`」；`test_run_owns_unregister_on_exit` 的
+`try/finally` 判据指向 `_supervise`，并要求 `run` 的调用表里必须有它（否则绕过收线）。
+文本断言口径 B 保持 **1224**（先写成 `assert "_supervise" in run_calls` 会 +1，改成
+`run_calls >= {"_supervise"}` 后与 `finals` 合并成一条断言）。
+
+`LONG_FUNCS_BASELINE` 删掉最后一条 ⇒ **清零**（`remote/rollout_node.py`）。全仓 >200 行函数 0 个。
+
+**门禁**：nn `6694 passed / 3 skipped`（75s）· ruff / mypy 绿。**行为差异：无**（`run` 的语句顺序、
+日志、退出码、收线顺序逐条不变）。
+
+---
+
+## §253 P0-2 存量第二处：`trainer/eval_dispatch._eval_admit`（248 → 21 + 176 + 47 + 33）（2026-11-21）
+
+`_eval_admit` 是「节点门 → 权重下发 → 本机兜底」三件事串在一个方法里，而它本来就有一条空行级
+的接缝。按接缝切成四个方法（**没有一行逻辑被重写**，只搬位置）：
+
+| 新方法 | 行数 | 职责 / 关键判据 |
+|---|---|---|
+| `_eval_admit` | 21 | 编排：三个相位依次调用，三处「本轮放弃」收在这里（`snapshot_path is None` ⇒ False，否则降级本机） |
+| `_eval_eligible` | 176 | 并行 ping + 能力位 fail-closed 门（`evalSupport` / `stageJsonSupport` / hybrid opening / 事件课程 / K≠10 / 顶钢空枪门 / 拆砖 / B8 / B10）+ bun 版本 + codeHash + 本轮 bootId 钉 + 让位 `eval_slot_cap`；合格节点写进 `r.alive` |
+| `_eval_publish_weights` | 47 | 冻结门（两次 `wait_for_thaw`，第二次在读完权重后、POST 前）→ `ensure_standard_weights` → `post_weights_parallel`（`_on_weight_ready` 流水线）→ `arm_window` / `set_remote_ready`；`None` = 冻结窗里放弃本轮 |
+| `_eval_local_fallback` | 33 | 兜底模式的唯一本机入口（`local_fallback_only` 且 `nodes_ok` 非空 ⇒ 本机不参与） |
+
+**返回值语义的变化只在内部**：`_eval_publish_weights` 用 `None` 表示「冻结窗里放弃」，与
+「POST 全失败但本机可接盘（`[]`）」区分开 —— 旧代码用 `return False` 直接从 `_eval_admit` 出去，
+新形状把两种失败放在编排层判，行为逐字一致（`test_eval_dispatch_*` 55 条绿）。
+
+**踩到的门禁**：把三处 `assert r.rnd is not None` 搬进每个相位方法会让
+`test_module_asserts` 的函数级存量 3 → 5（生产包禁新增 assert）⇒ 改成
+`_eval_admit` 里唯一一处断言 + 三个相位方法显式收 `rnd: EvalRound` 参数；
+用 `Any` 收类型则会让该文件的 `Any` 预算回升（§229 才把它从 21 压到 16）。
+
+`LONG_FUNCS_BASELINE` 删 `trainer/eval_dispatch.py` 条目（2 → **1**）：只剩 `remote/rollout_node.run`
+（249，采样节点顶层 while，拆它得先定所有者）。
+
+**门禁**：nn `6695 passed / 3 skipped`（111s，本轮机器负载偏高）。**行为差异：无**。
+
+---
+
+## §252 P0-2 存量第三处：`worker/train/bc._Train.run_epochs`（201 → 63 + 79 + 65）（2026-11-21）
+
+合入上游 goal-nn 之后，形状门禁（>200 行）从零又长回三处：`remote/rollout_node.run` 249、
+`trainer/eval_dispatch._eval_admit` 248、`worker/train/bc._Train.run_epochs` **201**。第三处只超线
+一行，但它恰好是「一个方法里塞了三件事」，所以先收它。
+
+**切法（按 run_epochs 里本来就存在的三段空行切，不重排任何语句）**
+
+| 新方法 | 行数 | 职责 |
+|---|---|---|
+| `run_epochs` | 63 | epoch 循环编排：历史写入、日志行、平滑 val 选优、早停、`--ckpt-every`、`_emit_epoch` |
+| `_train_epoch(args)` | 79 | 训练内循环（v6 三头 / value / legacy 三种损失形态 + 梯度裁剪 + 设备感知步进）+ `scheduler.step()`，返回样本加权 `train_loss` |
+| `_validate()` | 65 | 无增强验证（含 `val_loss_weighted`、三个准确率、`value_loss`），返回 `(val_loss, ma, fa, ha, vl, 累加器)` |
+
+判据：**语句顺序一字未动**（模型 `train()` → 循环 → `scheduler.step()` → `eval()` → 验证循环 →
+历史/日志/选优/早停/断点/回调），RNG 与 XLA mark 的位置同前 ⇒ 同 seed 逐位一致。`ha` 的
+「legacy 语料不写 `hold_acc` 键」判据随计算搬进 `_validate`，`run_epochs` 只留 `if ha is not None`。
+
+`LONG_FUNCS_BASELINE` 删掉 `worker/train/bc.py` 条目（3 → **2**），注释写明余下两处为什么还没拆：
+采样节点主流程与评估节点门要按「独立所有者 + 独立触发条件」切，不是同一次编辑能完成的。
+
+**门禁**：nn `6695 passed / 3 skipped`（62.9s）。**行为差异：无**。
+
+---
+
+## §251 P0-5 复核后的两簇：`PackTriggers`（hub 触发账）与 `OutboxGates`（补传写闸）（2026-11-21）
+
+2026-11-21 的全树复核（`python.refactor.md` §P0-5 的「复核」小节）在清单清零之后又量出两处
+**真状态**：它们都不是「模块级字典」这个形状第一次出现，而是「同一份状态被两个模块写」与
+「状态里握着 fd」这两种旧毛病。两处一起收。
+
+**1. `hub/task_pack.py` 的三本触发账 → `PackTriggers`**
+
+旧形状：`_TASK_PACK_TRIGGERS`（过期腿）/ `_TASK_PACK_MISS_TRIGGERS`（缺包腿）/
+`_TASK_AUTO_HANDOFF_TRIGGERS`（自动交接腿）三个模块级 dict + 一把模块级 `_TASK_PACK_LOCK`。
+判据侧（`hub/task_pack.py`）与两道门（`hub/offline.py` 的 `_task_pack_gate` /
+`_task_pack_miss_gate`）**都在写**，`hub/server.py` 还把 `_TASK_PACK_TRIGGERS` 当门面再导出，
+用例直接读 `hub_server._TASK_PACK_TRIGGERS` —— 正是 P0-5 要消的「同一份状态散在模块作用域、
+谁都能写」。而两道门的临界区里还各自抄了一遍 `decide_task_pack(...)` 的四个实参。
+
+现在：`PackTriggers` 一个对象持有三本账 + 自己的锁，写入口按腿分开
+（`stale_gate` / `miss_gate` / `note_failure` / `failure` / `poll_window` / `decision` /
+`note_trigger` / `clear_stale` / `clear_miss` / `clear_handoff`），公开访问器 `pack_triggers()`。
+两条重导腿的判据 + 记账 + 到顶告警收进私有 `_leg_gate`（**锁在对象里**，调用方不再自己拿锁）；
+`snapshot()` 交浅拷贝，观测/用例都不必再摸内部字典。
+
+* `hub/offline.py` 的两道门从「拿别人家的锁 + setdefault」变成一句
+  `pack_triggers().stale_gate(...)` / `miss_gate(...)`，`_TASK_PACK_LOCK` 等四个私有名的 import
+  全部消失。
+* `note_auto_handoff_failure` 这条只有内部读者的壳删除（调用点直接 `pack_triggers().note_failure`，
+  两份用例同步改）—— 它原本与新 `ShaCacheHits.forget` 的薄包装同形，复用账本当场把它记成结构克隆。
+* 门面减员：`hub/server.py` 不再 re-export `_TASK_PACK_TRIGGERS`（`__all__` 27 → 26，
+  `test_hub_entry_split` 的 `MOVED` 21 → 20），理由写在那条用例的 docstring 里 —— 门面承诺的
+  应该是「名字」，不是「一份可变状态的引用」。
+* 阈值现在只有一份（住 `hub/task_pack.py`）：三条用例的 `monkeypatch.setattr` 从
+  `hub.offline` 改指 `hub.task_pack`（旧点其实在改一份 import 快照）。
+
+**2. `remote/deliver_outbox.py` 的 `_GATES` → `OutboxGates`**
+
+旧形状：`_GATES: dict[str, dict[str, Any]]`（每 outbox 的 `RLock` + 持有深度 + 跨进程 `flock` 的 fd）
++ `_GATES_LOCK`（建表的锁），`_outbox_gate` 是一个模块级 `@contextmanager` 直接读写这两份状态。
+「谁持有 fd、谁负责关」只能从使用处反推，而 fd 是这个模块唯一的不可再生资源。
+
+现在：`_Gate`（`@dataclass`：`lock` / `depth` / `fd`，`enter` / `leave` 一对）持有单个 outbox 的
+全部闸状态，`OutboxGates` 是懒建表（`defaultdict(_Gate)`，建表锁只罩取/建那一瞬），
+`_outbox_gate` 是它对外的唯一入口。**fd 不在闸表里过夜**：临界区结束即 `leave()` 放掉，
+所以没有「进程收尾要不要 `close_all`」这一问（复核笔记里那条待办据此改成「只在一处关」）。
+
+**复算与副作用（都记在门禁基线里）**
+
+* `Any`：`remote/deliver_outbox.py` 2 → **0**（`tests/golden/any_baseline.json` 删条目）。
+* 私有断言：`tests/common/test_offline_task_queue.py` 1 → **0**（改用 `pack_triggers().snapshot()`）。
+* 文本断言口径 B：1221 → **1224**（+3：两条结构守卫只能读 `.py` ——「可变状态住在哪」
+  没有运行时出口）；口径 A 同笔 −1（1535 → 1534，`x in dict` 的集合判据改成 `set(...) == {...}`）。
+* 结构克隆：`PackTriggers.__init__` 与 `ShaCacheHits.__init__` 同形曾让 clone 17 → 19
+  （另一对是 `_Gate.__init__` 与 `common/fs.py::JsonlLedger.__init__`）—— 两处都按「形状不同」
+  改写（删壳 / `@dataclass` + `defaultdict`），clone 回到 **17**。
+* 同名散落：`_gate` 一度跨 3 模块（`hub/task_pack` / `remote/deliver_outbox` /
+  `worker/loop_guards_gate`）让同名 ≥3 的计数 143 → 144，`PackTriggers._gate` 改名 `_leg_gate`
+  后回到 **143**。
+
+**守卫**：`tests/hub/test_pack_triggers.py`（9 条：三条腿互不串味 / 到顶告警只喊一次 / 两条腿各自的
+上界 / `failed` 优先于计数 / 轮询限频槽 / 逐本逐课清场 / 快照是拷贝 / 模块顶层无可变容器字面量 /
+`hub/offline.py` 不再 import 私有账名）；`tests/remote/test_deliver_outbox.py` +3 条
+（按 resolve 后的路径归并 + 同线程重入不自锁 / 两个 outbox 两把独立闸 / 闸表必须是
+`OutboxGates()` 实例且不再有 `_GATES_LOCK`）。
+
+**门禁**：nn `6695 passed / 3 skipped`（65.6s）· ruff / mypy 绿 · 结构克隆 17 · 同名 ≥3 143 ·
+`Any` / 私有断言 / 文本断言三条基线同向收紧。**行为差异：无**。
+
+---
+
+## §250 P0-5 存量第十三/十四处（收尾）：`np_core` 的 `_SPEED_PROBE` / `_XLA_CACHE_STATE`（2026-11-21）
+
+这是 P0-5 模块级状态清单的**最后两处**，都在免 torch 的 `worker/ppo/np_core.py`：
+
+**① `_SPEED_PROBE: dict[str, float]` → `SpeedProbeCache`**（`cached` / `store` / `clear_secs` / `__len__`）。
+设备自检的 2048² matmul 含一次 XLA 编译，按 job 跑会白付 300 次 ⇒ 同进程每设备只测一次。旧形状的
+三个写点（`if key in` / `[key]` / `[key] =`）散在 `xla_device_speed_probe` 里。读面刻意用
+**`None` 表示「没测过」**：`0.0` 是合法墙钟，不能被真值判断吞掉（旧 `key in` 语义等价，这里用
+`cached() is not None` 保住）。
+
+**② `_XLA_CACHE_STATE: dict[str, str]` → `CompileCacheState`**（`dir` 属性 / `mark_enabled` / `clear_dir`）。
+torch_xla 的硬约束：同进程重复 `initialize_cache` 会抛，所以「已初始化」必须记住。旧形状是一格 dict
+（只有 `"dir"` 一个键）——读的人猜不出还有没有别的键。**失败不记账**（不写 = 下次重试；缓存是加速
+手段，不能因一次失败把本进程永久关掉），这条写进类头。
+
+**坑（值得记）：`self._secs: dict[str, float] = {}` 会被复用账本判成结构克隆**——AST 骨架上与
+`hub/store_wire._init_wire` 的「注解空字典赋值」同形（常量/类型全被擦除），clone 17 → 18 直接红。
+改成 `dict()` 后形状不同、账本回落。这不是绕门禁：**结构克隆判据看的就是 AST 骨架**，语义等价的另一种
+字面量写法本就是合法解，注释里写清了原因。
+
+**守卫**：`tests/worker/test_tpu_backend_guard.py` +1（`0.0` 是合法读数、`clear_secs` 后重算）、
+`tests/worker/test_xla_step_diag.py` +1（只记成功；失败后 `dir` 仍为 `None`），两份各 1 条断言改成
+公开访问器（`speed_probe_cache()` / `compile_cache_state()`），不再 import 私有名。
+
+**行为差异**：无。测一次/幂等/失败返回 None/失败不抛/日志文案全未变。
+
+## §249 P0-5 存量第十二处：`trainer/queue_local._REUSE_INDEX` + `_REUSE_SIG` → `ReuseIndex`（2026-11-21）
+
+同族课程「盘上现成局」索引是一份**目录快照**（只活一轮、不落盘、不跨轮），旧形状是两个模块级
+容器：`_REUSE_INDEX`（dict）与 `_REUSE_SIG`（**一格 list** 当可变槽），重建逻辑写成三条独立语句
+（`clear` / `update` / 改 `_REUSE_SIG[0]`）——读的人要自己对账「两个容器谁先改」，而漏改签名或
+漏清内容都会让上一版权重的 shard 被当现成局拷进来。
+
+**新形状**：`ReuseIndex.rows(wver, args)` 把「签名没变 ⇒ 原样返回；变了 ⇒ 清空 + 重扫 + 记签名」
+放在同一个方法里（不可能出现「签名新了、内容旧」），`clear_rows()` 是清场。模块只留
+`_REUSE = ReuseIndex()`，`reuse_index()` 变成一行转发（两个调用点不改）。
+
+**顺手修掉的退化路径**：旧的初始签名是 `("", "")`，若第一轮恰好「空课程名 + 空 `wver`」就会跳过
+首扫返回空索引；现在用 `None` 哨兵表示「还没建过」。`wver` 是权重指纹、正常不为空，所以这条不改变
+既有行为，只堵住一个不会报错的空转。
+
+**守卫**：新增 `tests/trainer/test_reuse_index.py`（5 条）—— 同 `wver` 只扫一次且返回**同一份**
+dict；换 `wver` 或换课程都重建且旧条目消失；空签名首轮照样扫；`clear_rows()` 后同 `wver` 也重扫；
+模块里只有 `_REUSE` 一个持有者、`_REUSE_SIG` 已不存在。
+
+**行为差异**：除上面那条退化路径外无。扫描时机、返回 dict 的引用同一性、`MAX_INDEX` 上限（在
+`rollout_sources` 里）全未变。
+
+## §248 P0-5 存量第十一处：`remote/worker._ACTIVE_CODE_SHA` → `CodeSession`（2026-11-21）
+
+热替换护栏的唯一状态：**本会话第一个 job 的 `code_sha256` 就是会话的代码版本，之后不一致就拒跑**
+（`sys.path.insert` 只影响尚未导入的模块 ⇒ 已 import 的 ppo/rl 不会重读，旧代码会安静地跑出新结果）。
+旧形状是模块级 `str | None` + `_guard_code_and_device` 里的 `global` 重绑：函数里只有一行 `global`，
+「谁先钉、第二个 job 会不会覆盖」要靠读 `if / elif` 自己拼。
+
+**新形状**：`CodeSession`（`pin` / `active` / `clear_sha`）。`pin` **只允许一次**，重复钉直接抛
+`RuntimeError`——「第二次不许覆盖」从 `elif` 的顺序约定变成方法自身的约束；`active` 是唯一读面。
+模块只留 `_CODE = CodeSession()`，`_guard_code_and_device` 不再有 `global`，比对逻辑是
+「先取 `active`，`None` ⇒ 钉，不等 ⇒ 抛 `CodeChangedError`」。
+
+**它仍是进程级、不是每 job 一份**：类头把这条与 `offline_boot` 的 `CodeChangedError` 转译写在一起——
+同一个 kernel 里换代码版本只能换进程（2026-10-29 现场：重跑 cell 时裸抛像崩溃）。
+
+**守卫**：`tests/remote/test_worker_state_contract.py` —— 状态表与三个宿主清单随迁
+（`OWNER_GLOBAL_REBOUND["worker"]` 清空、`OWNER_INSTANCES["worker"] = {"_CODE"}`），漏登记会红；
+夹具改为换掉 `_CODE` 实例；新增 `test_code_session_pins_once_and_refuses_a_second_pin`
+（第二次钉抛、钉子不改写、`clear_sha` 归零）。`test_ppo_backend_switch` 的注入点改成新的
+`CodeSession()`。`GLOBAL_BASELINE` 删 `remote/worker.py: 1`（该文件 `global` 归零）。
+
+**行为差异**：无。钉一次 / 不一致抛 `CodeChangedError` / `prep_b` 那行读数 / 失败即退出全未变；
+新增的 `RuntimeError` 只在「护栏被绕过、同一会话要钉第二个 sha」时出现——那是调用方 bug。
+
+## §247 P0-5 存量第十处：`worker/node_identity._LEDGER` → `BootLedger`（2026-11-21）
+
+a98 判据的账本（`round key → node id → {"bootId", "pid"}`，只留最近 8 轮）原来是模块级裸 dict，
+三个写点分散在 `clear` / `_rounds` / `note_ping` 里：读的人要同时看「谁建段」「谁挤最旧那轮」
+「谁钉、谁改写」，而「钉子只钉一次」这条**唯一重要**的语义只活在模块 docstring 第 4 条。
+
+**新形状**：`BootLedger.pin(rkey, node_id, boot, pid)` —— 建段、挤轮、钉、报不一致在同一个方法里，
+「不改写」是它的一条 `if` 而不是一句注释；`pinned_boot()` 是观测面（用例断言「没被改写」用），
+`clear_rounds()` 是清场。模块只留 `_LEDGER` 一个持有者，`note_ping` 只负责解析 `/v1/ping` 的 dict
+（哪里是「没探到」/「旧 agent 无 bootId」的 fail-open 仍在模块层，对象不碰 `ping` 的字段名）。
+
+**容量成了构造参数**（`BootLedger(max_rounds=… )`，默认仍是 `LEDGER_MAX_ROUNDS`）：边界用例拿
+`max_rounds=2` 直接压挤轮，不必去改生产旋钮——本轮门禁里顺手删掉了 `GLOBAL_BASELINE` 残留的
+`hub/admin.py: 1`（§246 已把该文件 `global` 清零，棘轮及时收紧）。
+
+**守卫**（`tests/worker/test_node_identity.py` +3）：① 模块里只有 `_LEDGER` 一个持有者、没有裸
+list/dict/set；② `max_rounds=2` 时挤掉最旧那轮、被挤掉的重新钉、仍记得的那轮照样报；③ 不一致后
+钉子仍是第一代 + 重复 ping 返回同一行原因（幂等）。
+
+**行为差异**：无。轮数上限、钉一次、fail-open、原因文案逐字未变。
+
+## §246 P0-5 存量第九处：`hub/admin._PROBE_BLOCK` → `ProbeBlock`（2026-11-21）
+
+`/admin/net-probe` 的 64KiB 确定性填充块（固定种子 `0x5EED`）是 2026-09-29 改成**惰性构造**的：
+在模块顶层跑 65536 次 `getrandbits` 实测 0.53 s/进程，而 `hub.admin` 被
+`hub_server → hub.boot → http_face → admin` 拖进每个 import hub 的进程（真 hub、每个 rollout
+worker、12 个 pytest worker）。延迟是对的，但形状是 `bytes | None` + `global`：
+
+```
+_PROBE_BLOCK: bytes | None = None
+
+def _probe_block() -> bytes:
+    global _PROBE_BLOCK
+    if _PROBE_BLOCK is None:
+        _PROBE_BLOCK = ...
+    return _PROBE_BLOCK
+```
+
+**新形状**：`ProbeBlock`（`bytes()` 首次调用构造、之后复用），模块只留一个持有者 `_BLOCK`，
+`_probe_block()` 变成一行转发。类头写下线程语义（**不加锁**：两个线程同时首次调用会各建一份，
+固定种子 ⇒ 内容逐字节相同，最坏多付一次 0.53 s；`/admin/net-probe` 不是热路径，而加锁要回答
+「在临界区里跑 65536 次 getrandbits」这种没必要的问题）。
+
+**为什么不是 `common.cell.Cell`**：`Cell` 构造时就有值（§236 刻意不做惰性路径），套上来会把
+0.53 s 搬回 import——与 2026-09-29 那条结论直接冲突。
+
+**守卫**：`tests/hub/test_hub_admin_split.py` 两条 ——
+① 原有「模块级无裸 list/dict/set」用例扩成「**没有裸容器 + 填充块持有者只有一个**」
+（`holders == {"_BLOCK"}`）；
+② 新增「只建一次（同一 bytes 对象）+ 内容由固定种子决定 + `_deterministic_fill` 就是它的重复」
+（去掉 `_block` 缓存即红；内容用测试侧独立重算的种子前缀对账，不读生产常量）。
+
+**行为差异**：无。种子、长度、惰性时机、逐字节内容与 `/admin/net-probe` 的回执全未变。
+
+## §245 P0-5 存量第八处：`worker/cmd._CODE_SHA_MEMO` → `functools.cache`（2026-11-21）
+
+`local_code_sha()` 是每局 `--code-sha` 的取值，`compute_code_hash()` ≈ 0.03 s / 次、35 局/轮，
+所以按进程记一次。旧形状是**用一个 0/1 元素的 `list` 当 memo**：
+
+```
+if not _CODE_SHA_MEMO:
+    _CODE_SHA_MEMO.append(compute_code_hash())
+return _CODE_SHA_MEMO[0]
+```
+
+`list` 在这里只借用「可变容器」这一件事：读的人要自己回答「为什么是 list」「谁清的」「第二次
+append 会怎样」，而答案（永远是 0/1 个元素）只活在注释里。
+
+**新形状**：`@functools.cache` 直接加在 `local_code_sha()` 上（延迟 import 仍在函数体内：
+`worker.cmd` 的 import 不该把 `common.codehash` 拖进来）。记忆变成函数自己的属性，
+清场 `local_code_sha.cache_clear()` 是 stdlib 口径——用例终于**能**清（旧 list 没有清场入口）。
+没有模块级可变容器，也没有 `global`。
+
+**为什么不是 `common.cell.Cell`**：`Cell` 要求**构造时就有值**（刻意不做惰性路径，见 §236），
+这里要的恰恰是「首次调用才算 0.03 s」；硬套 `Cell` 会把启动成本搬回 import。
+
+**守卫**：`tests/worker/test_rl_cmd.py::test_local_code_sha_is_computed_once_per_process` ——
+第二次调用零重算 / `cache_clear()` 之后真的重算（把 `@functools.cache` 去掉即红）。
+
+**行为差异**：无。返回值、延迟 import 时机、会话内不变性逐字未变；唯一新增是**可以清场**。
+
+## §244 P0-5 存量第七处：`remote/push_client._CACHE_HITS` → `ShaCacheHits`（2026-11-21）
+
+推送前的内容寻址探针有一份「这台节点上次探到有这份 (kind, sha)」的记忆。它是 2026-10-30 修
+正反馈事故时加的（慢链路 15s 超时 ⇒ 判 miss ⇒ 多传 2.7MB ⇒ 更慢 ⇒ 更必然超时），语义是对的，
+但写点散在三个地方、上限是调用点里的两行 `if`：
+
+* `_cached_or_last_hit`：命中 ⇒ 记；明确 miss ⇒ `pop`；
+* `forget_cache_hit`：节点 428 说缺 ⇒ `pop`（不翻面 ⇒ 下一次又跳过补传，428 来回打转）；
+* 上限：`if len(_CACHE_HITS) > CAP: _CACHE_HITS.clear()`。
+
+**新形状**：`ShaCacheHits(cap=...)` —— `record()` / `known()` / `forget()` / `__len__`，key 归一到
+`(base_url, kind, sha)`（四个 `str(... or "")` 收进 `_key`）。类头把「两条翻面理由」并排列出
+（明确 miss、节点 428），并说明上限为什么是**整片清空而不是 LRU**：这份账只在探针失败时被读，
+清空的代价是下一轮保守上传一次；混入淘汰策略只会让「哪条记得住」变成需要解释的东西。
+
+`_HITS` 是默认实例，读面 `cache_hits()`；`forget_cache_hit()` 保留为公开薄包装（`remote/push_dispatch`
+的三条 428 分支与用例都调它）。探针路径也改走访问器（读面单源，用例可替换公开名字）。
+
+**守卫**：新增 `tests/remote/test_sha_cache_hits.py` 6 条 —— 记/查/翻面 / 三把 key 各自独立 /
+空段归一同口径 / **上限整片清空（旧条目一起消失，不是 LRU）** / `forget` 幂等 / 默认记忆一份且
+公开 `forget_cache_hit` 能到达它。既有的 `test_hub_push_dispatch` 那条「探针失败沿用上次命中 +
+428 翻面」用例一字未动、照旧绿（语义未变的行为判据）。
+
+**行为差异**：无。key 形状、上限值（512）、清空时机、失败兜底与 428 翻面逐字未变。
+
+## §243 P0-5 存量第六处：`remote/wire` 的 `_BEST_RATE` + `_stale_samples` → `RateReference`（2026-11-21）
+
+坏签判据的参照速率原本是**两个 `global` 重绑的模块标量**：`_BEST_RATE`（参照，bytes/s）与
+`_stale_samples`（连续非更好样本的计数）。语义本身是设计过的（「近期水平」而不是会话高水位：
+更好即抬、连续慢按 `WIRE_RATE_DECAY` 衰减、恢复瞬时），病在形状：
+
+* 两个值**同生共死**却分开存放：旧夹具只重绑 `_BEST_RATE = 0.0`，`_stale_samples` 留在原地 ⇒
+  下一个用例可能带着「已经慢了几个」开局（一个慢样本就触发衰减）。「清场必须两个一起清」这件事
+  在旧代码里没有名字，只能靠读 `_note_rate` 的四行实现确认。
+* 重绑 ⇒ `worker._BEST_RATE` 是 import 那一刻的快照 ⇒ `test_wire_reroll` 的 autouse 夹具与
+  `test_wire_split` 的「注入点」用例都是为记住这个陷阱而存在的。
+
+**新形状**：`RateReference`（`sample(rate, nbytes)` / `level()` / `floor()` / `clear_samples()`），
+`_RATE` 是默认实例，读面 `rate_reference()`；`_note_rate` / `_ref_rate` / `best_rate` / `_min_rate`
+变成薄包装（名字保留：它们被 `remote/http.py` 与 `remote/worker.py` 转发/直用）。
+`stale_samples` / `decay` 是**构造参数**（缺省 = 模块常量），于是「每个慢样本都衰减」「永不衰减」
+都是数据，不必去糊常量。`floor()` 把「判据地板 = max(WIRE_MIN_RATE, 参照/4)」这个名字也还给了对象
+——`_min_rate` 里那行 `/4.0` 原来只活在一个函数体里。
+
+**方法名刻意避开高频名**（实测）：首版 `note` / `forget_all` 让同名 ≥3 模块计数 143 → 145
+（`note` 撞 `common/log_bundle` 与 `remote/weights_standard`，`forget_all` 撞 `remote/http` 与
+`worker/resume`）——现在是 `sample` / `clear_samples`，两者全仓唯一。
+
+**转发面的变化**：`worker.py` 删掉 `_BEST_RATE` / `_stale_samples` 两条转发，改转发
+`RateReference` / `rate_reference`；`GLOBAL_BASELINE` 的 `remote/wire.py: 1` 归零
+（`remote/wire.py` 现在零 `global`），`test_wire_split` 的「注入点」用例改成
+`worker_mod.rate_reference() is wire_mod.rate_reference()` + 用公开 `sample()` 抬高参照。
+
+**守卫**：新增 `tests/remote/test_rate_reference.py` 7 条 —— 小 body 不采样（连迟滞计数都不动）/
+单个慢样本不覆盖更好值 / 衰减连乘但下限是本次样本 / 恢复瞬时且迟滞清零 / 地板 = 参照四分之一且
+不低于绝对地板 / 清场把计数一起清 / 两个旋钮是构造参数（1 个慢样本就衰减、decay=1 永不衰减）。
+
+**行为差异**：无。阈值、衰减系数、迟滞步数、地板公式与 `_min_rate` 的返回值逐字未变。
+
+## §242 P0-5 存量第五处：`remote/http` 的 `_POLL_WARN_AT` + `_opener` → `WarnThrottle` / `ProxyOpeners`（2026-11-21）
+
+`remote/http.py` 里有两份**进程级状态**，形状都答不出「谁拥有、何时清」：
+
+| 旧形状 | 语义 | 病 |
+|---|---|---|
+| `_POLL_WARN_AT: dict[str, float]` | 非 200 告警按 `url:status` 每 60s 一条 | 窗口是调用点里的 `<= 60.0` 字面量，`clear()` 与「谁该清」都没有名字 |
+| `_opener`（`global _opener` 懒建） | 显式代理的 `OpenerDirector`，进程内建一次 | 重绑式模块标量 ⇒ `worker._opener` 是 import 那一刻的**快照**（转发表里挂了 `REBOUND_NAMES` 这个例外） |
+
+**新形状**（同一个模块，两个小类 + 两个访问器）：
+
+* `WarnThrottle(window_sec=WARN_THROTTLE_SEC)` —— `allow(key, now)` 放行即记账、`forget_all()`、
+  `__len__`。窗口成了**构造参数**（用例可以要 0 秒 = 每条都放行，也可以要 60 秒），
+  「查过就一定会记」也不再靠人读两行代码：`allow` 是原子的一步。
+  线程语义与旧的 dict 一致：**不加锁**（读改写不是原子的，最坏是两条线程各打一条日志，
+  比在日志路径上持锁便宜）。
+* `ProxyOpeners` —— `get()` 懒建一次、之后一直复用；`reset()` 是「下次重建」的**唯一**入口。
+  env 只在首次 `get()` 定型这条旧语义**逐字保留**（Colab 现场 2026-09-16：进程内改
+  `HTTP_PROXY` 不影响已建好的 opener），重建必须显式 `reset()`。
+* 访问器 `warn_throttle()` / `openers()`；模块内部也走访问器（`_warn_non_200` →
+  `warn_throttle().allow`，`_get_opener` → `openers().get()`）——**取用路径只有一条**，
+  用例替换公开名字就能接管，不必对私有名打桩。
+
+**转发面的变化**：`remote/worker.py` 删掉 `_POLL_WARN_AT` / `_opener` 两条转发，改成转发
+`WARN_THROTTLE_SEC` / `WarnThrottle` / `ProxyOpeners` / `openers` / `warn_throttle`。
+于是 `GLOBAL_BASELINE` 里的 `remote/http.py: 1` 归零、「转发名是快照」这个例外消失
+（`test_worker_forwards_every_moved_name` 恢复对**全部** `MOVED_NAMES` 的 `is` 恒等断言）。
+
+**守卫**：
+* 新增 `tests/remote/test_http_state.py` 6 条 —— 懒建只建一次 / `reset()` 重建且重新认 env
+  （读 `ProxyHandler.proxies` 的**行为**判据，不用源码措辞）/ 默认持有者一份且 `reset` 后仍只懒建一次 /
+  窗口内只放行一次、跨窗口再放行、不同 key 互不影响 / 0 秒窗口 = 下一条就放行 + `forget_all` /
+  缺省窗口 60s（59s 内吞掉、61s 放行）。
+* `tests/remote/test_http_split.py`：`MOVED_NAMES` 换新名字、删掉 `REBOUND_NAMES` 与它的
+  「快照语义」用例，新增「`http.py` 里零 `global`」与「顶层零可变容器字面量」（比旧的
+  「只有 `_POLL_WARN_AT`」更严）。
+* `tests/remote/test_worker_state_contract.py`：`http` 宿主的三个清单
+  （容器 / `global` 重绑 / 实例）随之改口径——`_POLL_WARN_AT` 与 `_opener` 出表，
+  `_OPENERS` / `_WARNS` 进实例表并标为 `INTERNAL_ONLY`（只经访问器，不进 worker 命名空间）。
+* `tests/remote/test_job_identity_collision.py`：两处 `monkeypatch.setattr(worker_mod, "_POLL_WARN_AT", {})`
+  改成替换公开读面 `http.warn_throttle`（私有打桩基线 3 → 1）。
+
+**行为差异**：无。节流键、60s 窗口、告警文案、opener 的 env 定型时机逐字未变；
+唯一的语义**收紧**是「改 `worker` 侧的旧转发名不会再影响行为」——那本来就是快照的病，不是契约。
+
+## §241 P0-5 存量第四处：`_SCAN_CACHE` → `worker.resume.ScanCache`（失效时机写进类头，2026-11-21）
+
+`worker/resume.completed_pairs()` 是 run_rl 的轮询热路径（每 2 秒一次）。旧实现在模块级 dict 里
+缓存「目录签名 → 命中的 shard 列表」，条数上限 512，调用点写着：
+
+```
+if len(_SCAN_CACHE) >= _SCAN_CACHE_MAX:
+    _SCAN_CACHE.clear()
+_SCAN_CACHE[key] = res
+```
+
+问题不是「有缓存」（这里必须有），是**失效策略没有名字**：key 里带 `_dir_signature()` 这半
+（「签名变了就自然不命中」）只有读 `completed_pairs` 的完整实现才知道，而「满了整表清空」这半
+写在调用点的 if 里，两半合起来才叫「这份缓存的语义」。
+
+**新形状**：`ScanCache`（`lookup` / `remember` / `forget_all` / `__len__`，上限构造参数
+`max_entries=SCAN_CACHE_MAX`），类头把**两条失效时机**并排列出：
+
+1. **签名变 ⇒ 新 key**（新增 shard / shard 写完 manifest 都会改 mtime 签名）——旧条目留着不碍事；
+2. **条目满 ⇒ 整表清空**，**不是 LRU**：命中率只由「最近 2 秒里问过的同一组 key」决定，
+   淘汰策略越简单越可预测，而清空的代价只是下一次重扫（毫秒级）。
+
+线程语义与旧实现一致（不加锁：只 `lookup` / `remember`，dict 单次读写原子，两个线程写同一 key
+的值也相同）。生产写者仍只有 `completed_pairs`，读面是新增的 `scan_cache()`。
+
+**方法名刻意不叫 `get` / `put` / `clear`**：`lookup` 说明这是**记忆化查询**（命中 = 磁盘这 2 秒
+没变）；`remember` 与 `forget_all` 也各自说明了语义。副作用是避开 `test_reuse_ledger` 的同名
+≥3 模块判据——第一版用 `put` / `clear` 时这两个名字各多散进一个模块（实测 143 → 145），
+改回领域名后计数不动。
+
+**守卫**：新增 `tests/worker/test_scan_cache.py` 4 条 —— 未记住前 `lookup` 落空 / 满了整表清空
+（旧 key 全落空，不是 LRU）/ `forget_all` 与上限为正 / 两份缓存互不相见。
+`e2e/test_run_rl.py` 的「签名缓存」用例从 `_SCAN_CACHE.clear()` 改成 `scan_cache().forget_all()`
+（判据一字未动，还少打了一处私有名打桩的口径）。
+
+**行为差异**：无。缓存键、上限、整表清空的时机、命中判据逐字未变。
+
+## §240 P0-5 存量第三处：三份「一次性告警」集合 → `common.warn_once.WarnOnce`（2026-11-21）
+
+仓里三处同形状的模块级 `set`：`trainer/loop_transport._RETIRED_SOURCE_NOTED`（旧 `run` 配置
+的容忍读告警）、`_RESTORE_UNSUPPORTED_NOTED`（显式 `--rollout-src` 下「离线自动复原」不成立）、
+`worker/gate_halt._WARNED`（课程级 `gate-halt-mode.txt` 已退役）。
+
+它们本身不是坏东西（纯日志去重、不参与判定、不跨进程），问题在**形状**：调用点写着
+
+```
+if key in _SEEN: return
+_SEEN.add(key)
+log(...)
+```
+
+「查过一定会加」只能靠人读确认，漏掉 `add` 就等于每轮刷一行（而这三处恰恰都是**每轮或每次
+读配置都会问一次**的位置）。收成对象后只剩一句 `if not bucket.mark(key): return`。
+
+**API**：`mark(key) -> bool`（第一次真）、`seen(key) -> bool`（只查不记）、`__len__`。
+`seen()` 与 `mark()` 分开是 `worker/gate_halt` 要的：**先查文件存在、再 mark**——文件不存在时
+不能烧掉 key，否则这门课以后真出现该文件也不会再告警（本轮顺手把这条顺序写进 docstring 与用例）。
+
+**决定：没有 `clear()`**。要重来就换一份新桶（`WarnOnce()`），与 `HubState` / `LogRouter` 的用例
+隔离同规——「整份换新」比「逐个清表」少一种「漏清一张、用例之间偷偷串味」的失败形态。
+顺带避开 `test_reuse_ledger` 的同名 ≥3 模块判据：`clear` 原本已在 2 个模块里，多一份 `WarnOnce`
+就会把它推过线（实测 143 → 144）。第一版带着 `clear()` 正是这么红的。
+
+**决定：不加锁**（与 §239 的 `LiveLinks` 不同）。那张表要 `remove`，「查了再删」会互相抢先抛
+`ValueError` ⇒ 必须加锁；这里只 `add`，最坏结果是两条线程同时通过判定、多打**一行**日志
+（`set.add` 在 CPython 下原子）。为一句重复日志去持锁，还要回答「锁内能不能调日志」，不划算——
+契约写在 `mark()` 的 docstring 里。
+
+**守卫**：新增 `tests/common/test_warn_once.py`（3 条：`mark` 只首次为真 / `seen` 只查不记 /
+两份桶互不相见且能换新重来）；`tests/worker/test_gate_halt.py` 的 `seen` 参数从 `set` 改成
+`WarnOnce`，并补一条「不存在的路径不得烧 key」（`len(seen) == 1`）。
+
+**行为差异**：无。三个调用点的判据与文案逐字未变；`warn_once_on_legacy_txt(traj_root, seen=…)`
+的第二个参数类型从 `set[str]` 收窄成 `WarnOnce`（唯一调用方是它自己的用例）。
+
+**用例侧**：`tests/trainer/test_offline_leg_retired.py` 原先把这两个模块集合换成 `set()`，现换成
+`lt.WarnOnce()`（私有打桩的条数不变，`test_monkeypatch_targets_budget` 基线未动）。
+
+## §239 P0-5 存量第二处：`_LIVE_LINKS` → `LiveLinks`（活连接的登记与自注销，2026-11-21）
+
+`remote/rollout_relay.py` 的 `_LIVE_LINKS: list[RelayLink] = []` 记的是**本进程还活着的 relay
+轮询链**：cell 重跑时 `RelayLink.start()` 先 `stop_stale_links()` 叫停上一轮遗留的 daemon
+线程（它们够不着跨进程那半，只能靠这张表）。旧形状有两个真问题，都被「换成对象」顺手修掉：
+
+1. **双重注销会抛**：`if self in _LIVE_LINKS: _LIVE_LINKS.remove(self)` 在两条线程同时收同一
+   链接时，检查与删除之间会被抢先 ⇒ `ValueError`（而且只在收尾竞态里出现，最难查的一类）。
+   `LiveLinks.discard()` 是幂等语义。
+2. **锁的可达性**：给这张表加锁时，若 `stop_stale_links` 持锁调 `link.stop()`，而 `stop()` 回头
+   `discard(self)` —— 就是非可重入锁的自锁（`tests/test_lock_reentrancy.py` 的形状）。
+   现在的写法是**先 `snapshot()`、在锁外调 `stop`**，把这条铁律写进 docstring。
+
+**形状**：`LiveLinks`（`add` / `discard` / `snapshot` / `count`，一把锁只护登记本身）持
+`list[_LiveLink]`；`_LiveLink` 是 Protocol（`alive()` + `stop()`），因此用例的替身只要长成这样
+就能入表，不必再替换一个模块变量。`RelayLink.start()` / `stop()` 与 `stop_stale_links()` 一律走
+**公开读面** `live_links()`（不直接摸 `_LIVE`）：用例替换公开入口即可隔离，`__all__` 加
+`LiveLinks` / `live_links`。
+
+**为什么用 `list` 而不是 `set`**：登记顺序即 `snapshot()` 顺序，`stop_stale_links` 的日志与
+用例断言都按登记顺序读；去重由 `add` 里的 `not in` 保证（条数是个位数，线性查找不是问题）。
+
+**守卫**：`tests/remote/test_rollout_relay.py` 新增两条 —— 登记表幂等与实例隔离（重复登记 /
+未登记就注销 / 双重注销 / snapshot 保序）· `start()` 自登记、`stop()` 自注销的接线（用
+`_QuietLink` 子类让线程一拍即退，不打桩私有 `_worker`）。既有的
+`test_start_stops_leftover_links_from_previous_cell` 从「换模块列表」改成「替换公开入口
+`live_links()`」，判据一字未动 ⇒ `tests/golden/monkeypatch_private_baseline.json` 里本文件
+**15 → 14**（本仓唯一允许的方向）。
+
+**没动的**：`RelayLink.alive()` 的判据（线程全活 + 停止位未设）、`stop()` 的**整体**超时预算、
+`start()` 里「先清场再起线程」的顺序 —— 这三条都是 2026-11-18 DSW 事故的结论，本轮只换容器。
+
+## §238 P0-5 存量第一处：控制面连接池收成 `ControlPool`（2026-11-21）
+
+`remote/control_pool.py` 原来是模块级 `_CONTROL_CONNS: dict[...] = {}` + 四个模块函数
+（`request` / `drop` / `reset` / `conn_count`）。它是 §237 盘点出的 15 处里**后果最重**的一处：
+连接是**有 fd 的资源**，而「谁负责关」在旧形状里根本答不出来（见下）。
+
+**新形状**：`class ControlPool` 持 `_conns`，`request` / `drop` / `close` / `count` 挂在对象上；
+模块只留一个默认实例 `_POOL`，四个模块级函数变成薄包装（`remote/http.py` 的
+`request as _control_pool_request` 调用点**零改动**）。
+
+**三档关闭时机（这次动真格的地方，各有用例）**：
+
+| 档 | 触发 | 动作 | 线程安全考量 |
+|----|------|------|--------------|
+| 失败即作废 | `request` 里 `except` → `drop(key)` | 摘掉 + 尽力 `close()` | 坏连接只可能属于刚失败的这次请求 |
+| 整池关闭 | `close()`（对外 `reset()`，用例/热替换） | 逐条 `close()` 后清空 | **只在没有在飞请求时调**：池跨线程共享，关别人正在读的连接会把正常请求变成异常 |
+| 进程退出 | 不挂 `atexit` | OS 回收 fd | `atexit` 里关跨线程连接会打断正在退出的在飞请求 |
+
+旧实现 `drop`/`reset` 只从 dict 里摘（或 `clear()`），fd 靠 `pop` 之后的 refcount 隐式回收——
+**等价但不可见**；`_close_quietly` 让「作废 = 真的关上」显式，且对没有 `close()` 的对象
+（用例替身）静默跳过。`close()` 的失败**只捕 `OSError`**（半关/已断的 socket 只有这一种），
+不是宽泛 `except Exception`：`test_broad_except_budget` 按文件记账（本文件基线 1），
+而这里确实只有 OSError 是可预期的。
+
+**用例隔离**：`ControlPool()` 可以自建（`test_pools_are_independent` 钉两个池互不相见）。
+走真链路（`http._request` 内部那个默认池）的用例仍要 `reset()`，这是唯一能碰到默认池的缝，
+保留它比给 `http._request` 加 `pool=` 参数便宜。
+
+**两个门禁逼出来的细节**（都记在这里，省下一次同样的尝试）：
+
+1. 类体写 `self._conns: dict[PoolKey, Any] = {}` 会与 `hub/store_wire._init_wire`
+   （同形状的单行注解赋值）撞成结构克隆 17 → 18。改成「类型声明在类体（与 `WireMeterMixin`
+   的 `_lock: Lock` 同规）+ `__init__` 里 `self._conns = {}`」后消失：`AnnAssign` 与
+   `Assign` 是不同节点。
+2. 旧用例的替身连接**没有** `close()`（能过是因为旧实现从不调它）。新的关闭路径必须对
+   `getattr(conn, "close", None) is None` 宽容，否则一半既有用例会以 `AttributeError` 红。
+3. 关闭路径第一版写 `except Exception` ⇒ `test_broad_except_budget` 当场报「本文件 2 处，基线 1」。
+   收窄成 `except OSError` 后归零新增——这也是那条门禁想要的答案，不是记一笔基线。
+
+**行为差异**：只有一处 —— 失败/重置时多一次 `close()` 调用（旧实现由 refcount 做同一件事）。
+重试次数、池键、代理判据、异常上抛语义逐字未变（`tests/remote/test_control_pool.py` 18 条全绿）。
+
+**守卫**：`tests/remote/test_control_pool.py` 新增 4 条 —— 池实例隔离 / 模块入口只碰默认池 /
+`drop` 真的关连接 / `close` 关全部且优待没有 `close` 的替身。
+
+## §237 P0-5 结账：`hub/http_face` 早已是 `HubState`，`common/**` 之外另有一份存量清单（2026-11-20）
+
+**这一轮没有改代码**。要求是「把 `hub/http_face` 的三个类属性搬进显式对象」——它们 2026-11-19
+（B7 前半，§217/§218）就搬完了：`HubHandler.state: HubState = HubState()`，六个字段
+（`blocked_logged` / `seen_sources` / `source_warned` / `reject_warn_at` / `client_gone` / `pulse`），
+守卫 `tests/hub/test_hub_state.py` 钉两件事：① `HubHandler` 类体里不许出现可变容器类属性（AST 判据）；
+② 两个 `HubState` 互不相干、跨请求的 handler 实例看到同一份。
+
+连审计表本身都记着这件事（第 47 行「B7 前半」写着 `HubState`），只有 §P0-5 的表行还停在旧状态——
+**同一章的两处互相矛盾，读者只会看到错的那处**。这已经是第三轮撞上陈旧行（`_RACING_OPENERS`、
+`UPGRADE_BRANCH` 之后），所以这轮做的是结账而不是再搬一次：把表行、章首状态列、§7 剩余清单三处
+一起改对，并加一条「以后从这里开始」的清单。
+
+**顺手纠正的两个数字**（都是原文写错、靠实测发现的）：
+
+* 类属性是**五份**不是四份：守卫 2026-11-19 当场抓到 `_REJECT_WARN_AT`（拒绝日志的 60s 节流表），
+  附录行只点了四份。审计表这一行由此补正。
+* `global` 语句全仓现在是 **11 处**（原文记 14）：`common/**` 0 处；`biz/reward_context` ×2（裁定保留：
+  每 iter 整体替换的加载期上下文）、`hub/admin` 1、`remote/{wire,http,payload_slim,worker,tailscale_boot}`
+  各 1、`tools/{task,forkdist}` 3。原文那 14 处里的 `worker/eval_exec` ×2 与 `worker/eval_arbiter` ×1
+  在 §236 归零。
+
+**新增的事实：`common/**` 之外还有同类存量（15 处，未动手）**。P0-5 的判据只覆盖 `common/**`
+（G2：`L0_MUTABLE_ALLOWED = {}`），而模块级可变容器在 L2/L3 一样有。这轮用 AST 盘点了一遍
+（模块级 / 非 dataclass 类体的可变容器字面量与 `dict()`/`list()`/`set()` 构造，排除 `__all__`
+与全大写查表常量，再逐个确认有写入点），清单一并写进 `python.refactor.md` §P0-5 末小节：
+连接池 `remote/control_pool._CONTROL_CONNS`、活 link 表 `remote/rollout_relay._LIVE_LINKS`、
+推送命中缓存、轮询/停机/传输的一次性告警集合、resume 扫描缓存、code-hash 记忆、节点身份账本、
+XLA/吞吐探针、`trainer/queue_local` 的 rollout 源复用索引等。
+
+**为什么不动它们**：每一个都要先回答「谁拥有、何时清、跨进程怎么复现」——与 §236 同量级，
+且各自有真实的所有权边界（连接池的关闭时机 ≠ 告警集合的清空时机）。顺手收会让「谁负责收尾」
+变成一句注释，比现在的模块级 dict 更难查。清单的作用是让下一轮从准确的位置开始。
+
+**要不要把 G2 扩到 L2/L3**：值得单独一轮讨论，因为它会引入一份**只许变小**的 15 条基线，
+而其中几处（`_BEST_RATE` 在 `remote/tailscale_boot`，零依赖 boot 模块）按现有约束根本不能动。
+这属于新决策，不在结账这一轮里顺手定。
+
 ## §236 P0-5 L2 两个单例：`_EXECUTORS` / `_ARBITER` 收进 `common.cell.Cell`（2026-11-20）
 
 **改的是什么（不是「去状态」）**：进程里确实只有一份 eval 线程池和一份仲裁器——要动的不是

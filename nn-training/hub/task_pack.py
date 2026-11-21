@@ -23,8 +23,8 @@
 
 ## 依赖方向
 
-`hub.task_pack → {common.protocol, common.net_http}`（严格向下；记账字典住本模块，
-用锁 —— `reset_*` 与触发路径会被并发请求打到）。
+`hub.task_pack → {common.protocol, common.net_http}`（严格向下；三本触发账收在
+`PackTriggers` 里 —— 对象的锁罩住自己的写入口，`reset_*` 与触发路径会被并发请求打到）。
 """
 
 from __future__ import annotations
@@ -217,19 +217,6 @@ TASK_STATE_RANK = {
     TASK_STATE_NOT_OFFLINE: 4,
     TASK_STATE_COMPLETED: 5,
 }
-#: 同课程的触发账本（进程内；hub 重启即清——与租约同风格，重启后重触发一次无害）。
-_TASK_PACK_TRIGGERS: dict[str, dict[str, float]] = {}
-#: **缺包**用另一本账（与过期那条腿分开）：两本账在同一个重导窗口里各自记账，
-#: 所以同一门课在窗口内最多被推 2 次（过期 1 + 缺包 1）——这是刻意的，不是 bug。
-_TASK_PACK_MISS_TRIGGERS: dict[str, dict[str, float]] = {}
-#: **自动交接**（claim 无包 ⇒ 翻 mode + 请控制台写 rl-config + 导包）用第三本账
-#: （2026-10-03，plan/auto-offline-handoff §3.1a/§3.1c）：云机的每次 claim 重试都会再问一次
-#: ⇒ 用节流 + 上界给云机一个明确的 `give_up`，避免「导出失败 → 无限 15s 轮询」。
-#:
-#: ★ 2026-10-15（J3）：**值域从纯 float 扩到 `float | str`** —— 这本账现在还要缓存
-#: 「已知的导出失败原因」（`failed_reason`，给读面用）。它**不是**判据（判据是那份
-#: `export-status.json` 与它的 `at`）；只是免得每次 claim 都去问一遍控制台。
-_TASK_AUTO_HANDOFF_TRIGGERS: dict[str, dict[str, float | str]] = {}
 #: 两次自动交接触发的最小间隔（秒）。
 TASK_AUTO_HANDOFF_THROTTLE_SEC = 600.0
 #: 自动课 claim 遇缺包时、云机下一次重试的建议间隔（秒）——导出是分钟级，60s 量级查一次即可。
@@ -255,7 +242,194 @@ TASK_BUNDLE_STATUS_POLL_SEC = 60.0
 EXPORT_START_GRACE_SEC = 90.0
 #: 连续触发上界：到顶仍无包 ⇒ 409 带 `give_up=true`（云机放弃该课，继续下一门）。
 TASK_AUTO_HANDOFF_TRIGGER_LIMIT = 3
-_TASK_PACK_LOCK = Lock()
+#: 一本触发账的形状：`课程 → {"count" / "last" / "warned" / "polled_at" / "failed_at" / …}`。
+#: 值域 `float | str` 只服务自动交接腿的「已知导出失败原因」（见 `PackTriggers`）。
+_Book = dict[str, dict[str, float | str]]
+
+
+class PackTriggers:
+    """三本触发账（过期 / 缺包 / 自动交接）—— 一把锁、同一份进程内生命周期。
+
+    P0-5（2026-11-21）：原来是三个模块级 dict + 模块级 `_TASK_PACK_LOCK`，而**两个模块**都在写
+    （本模块的判据侧与 `hub/offline.py` 的两道门），`hub/server.py` 还把 `_TASK_PACK_TRIGGERS`
+    当门面再导出 ⇒ 「同一份状态散在模块作用域、谁都能写」。现在三本账各有一组写入口，锁不再是
+    调用方的义务（`hub/offline.py` 也不必再 import 一把别人家的锁）。
+
+    * **过期腿** `stale`：包起点 sha ≠ 课程当前权重时的重导节流 + 上界；
+    * **缺包腿** `miss`：包根本不存在时的重导节流 + 上界。与过期腿**分开记账**是有意的：
+      同一门课在同一个重导窗口里最多被推 2 次（过期 1 + 缺包 1）——「过期的包」与「没有包」
+      是两种现场，合并记账会让其中一条腿在另一条腿的窗口里静默；
+    * **自动交接腿** `handoff`（2026-10-03，plan/auto-offline-handoff §3.1a/§3.1c）：claim 无包
+      ⇒ 翻 mode + 请控制台写 rl-config + 导包。除了节流与上界，还缓存「已知的导出失败原因」
+      （★ 2026-10-15 J3：值域从纯 float 扩到 `float | str`）。它**不是**判据 —— 判据是控制台
+      那份 `export-status.json` 与它的 `at`，这里只是免得每次 claim 都去问一遍。
+
+    三本账都是**进程内记忆**（hub 重启即清）—— 与租约同风格，重启后重触发一次无害。
+    """
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._stale: _Book = {}
+        self._miss: _Book = {}
+        self._handoff: _Book = {}
+
+    # ---- 过期腿 ----
+
+    def stale_gate(self, course: str, *, now: float, stale: str) -> tuple[str, bool]:
+        """判一次 + 记账：返回 `(verdict, 是否该打 give_up 告警)`。
+
+        `warned` 只翻一次面：同一窗口里的第二次 `give_up` 不重复喊。
+        """
+        return self._leg_gate(
+            self._stale,
+            course,
+            now=now,
+            reason=stale,
+            limit=TASK_PACK_STALE_TRIGGER_LIMIT,
+            warn_on_give_up=True,
+        )
+
+    def clear_stale(self, course: str = "") -> None:
+        """清过期账（判据回到「新鲜」时 / 测试用）：`course=""` 清全部。"""
+        self._clear(self._stale, course)
+
+    # ---- 缺包腿 ----
+
+    def miss_gate(self, course: str, *, now: float, reason: str) -> str:
+        """判一次 + 记账（**缺包**用另一本账：与过期腿各自记账，同一窗里最多推 2 次）。"""
+        verdict, _warn = self._leg_gate(
+            self._miss,
+            course,
+            now=now,
+            reason=reason,
+            limit=TASK_PACK_MISS_TRIGGER_LIMIT,
+        )
+        return verdict
+
+    def clear_miss(self, course: str = "") -> None:
+        """清缺包账（包重新出现时调；`course=""` 清全部）。理由见 `reset_task_pack_miss_triggers`。"""
+        self._clear(self._miss, course)
+
+    # ---- 自动交接腿 ----
+
+    def note_failure(self, course: str, reason: str, at: float) -> None:
+        """记一次**已知的**导出失败（原因 + 那份状态的写入时刻）。"""
+        with self._lock:
+            st = self._handoff.setdefault(course, {"count": 0.0, "last": 0.0})
+            st["failed_at"] = float(at)
+            st["failed_reason"] = str(reason)[:400]
+
+    def failure(self, course: str) -> tuple[str, float]:
+        """读「已知的导出失败」`(原因, 写入时刻)`；没有 ⇒ `("", 0.0)`。"""
+        with self._lock:
+            st = self._handoff.get(course) or {}
+        return str(st.get("failed_reason", "")), float(st.get("failed_at", 0.0))
+
+    def poll_window(self, course: str, *, now: float) -> tuple[bool, float]:
+        """问控制台的**限频槽**：`(是否该问, 上次触发时刻)`。
+
+        没触发过（读接口不该凭空向外发请求）或窗内刚问过 ⇒ `(False, 0.0)`。
+        """
+        with self._lock:
+            st = self._handoff.get(course)
+            if st is None:
+                return False, 0.0
+            last = float(st.get("last", 0.0))
+            polled = float(st.get("polled_at", 0.0))
+            if polled and now - polled < TASK_BUNDLE_STATUS_POLL_SEC:
+                return False, 0.0
+            st["polled_at"] = now
+        return True, last
+
+    def decision(self, course: str, *, now: float) -> str:
+        """自动交接该不该再触发（纯判据）：`trigger` / `throttled` / `give_up` / `failed`。"""
+        with self._lock:
+            st = self._handoff.get(course)
+            count = int(float(st.get("count", 0.0))) if st else 0
+            last = float(st.get("last", 0.0)) if st else 0.0
+            failed_at = float(st.get("failed_at", 0.0)) if st else 0.0
+        # ★ 2026-10-15（J3）：**已知失败**优先于计数 —— 再触发一万次也还是同一个静态拒因
+        #   （iters / 上界 / 无起点权重），而每次触发都会烧一次 code-snapshot 与一次 git push。
+        #   窗口锚是那份状态的写入时刻（持久），不是进程内计数（重启即清零）。
+        if failed_at and now - failed_at < TASK_BUNDLE_FAILURE_WINDOW_SEC:
+            return "failed"
+        if count >= TASK_AUTO_HANDOFF_TRIGGER_LIMIT:
+            return "give_up"
+        if last and now - last < TASK_AUTO_HANDOFF_THROTTLE_SEC:
+            return "throttled"
+        return "trigger"
+
+    def note_trigger(self, course: str, *, now: float) -> None:
+        """记一次自动交接触发（进程内；hub 重启即清——与缺包账本同风格）。"""
+        with self._lock:
+            st = self._handoff.setdefault(course, {"count": 0.0, "last": 0.0})
+            st["count"] = float(st.get("count", 0.0)) + 1.0
+            st["last"] = now
+
+    def clear_handoff(self, course: str = "") -> None:
+        """清自动交接账（包出现 / 领取成功时调）。"""
+        self._clear(self._handoff, course)
+
+    def snapshot(self) -> dict[str, _Book]:
+        """三本账的浅拷贝快照（观测 / 用例用：不改状态、不把内部字典交出去）。"""
+        with self._lock:
+            return {
+                "stale": {k: dict(v) for k, v in self._stale.items()},
+                "miss": {k: dict(v) for k, v in self._miss.items()},
+                "handoff": {k: dict(v) for k, v in self._handoff.items()},
+            }
+
+    def _leg_gate(
+        self,
+        book: _Book,
+        course: str,
+        *,
+        now: float,
+        reason: str,
+        limit: int,
+        warn_on_give_up: bool = False,
+    ) -> tuple[str, bool]:
+        """两条重导腿的公共体：判据 + 记账 + （只在过期腿上）到顶告警。
+
+        **先记账再让调用方去触发**：并发请求里只有第一个真去触发（窗内其余看到 `throttled`）。
+        两条腿只在「用哪本账 / 上界多少 / 要不要喊 give_up」上不同 —— 判据与记账必须同源，
+        否则「过期推两次、缺包推三次」这类差异会变成两份需要对齐的代码。
+        """
+        with self._lock:
+            st = book.setdefault(course, {})
+            verdict = decide_task_pack(
+                stale=reason,
+                secs_since_trigger=(now - float(st.get("last", 0.0))) if st.get("last") else 1e9,
+                triggers=int(st.get("count", 0)),
+                throttle_sec=TASK_PACK_STALE_THROTTLE_SEC,
+                limit=limit,
+            )
+            if verdict == "trigger":
+                st["last"] = now
+                st["count"] = int(st.get("count", 0)) + 1
+            warn = warn_on_give_up and verdict == "give_up" and not st.get("warned")
+            if warn:
+                st["warned"] = 1.0
+        return verdict, warn
+
+    def _clear(self, book: _Book, course: str) -> None:
+        with self._lock:
+            if course:
+                book.pop(course, None)
+            else:
+                book.clear()
+
+
+#: 本进程的三本触发账（过期/缺包门与自动交接腿的唯一写入口）。
+_TRIGGERS = PackTriggers()
+
+
+def pack_triggers() -> PackTriggers:
+    """本进程的触发账；顺序 / 判据全在对象里，调用方只拿这一个人口。
+
+    hub 重启即清 —— 与租约同风格（重启后重触发一次无害）；跨进程不共享。
+    """
+    return _TRIGGERS
 
 
 def _hub_log(msg: str) -> None:
@@ -495,11 +669,7 @@ def lease_verdict(now: float, rec: dict | None, worker_id: str) -> str:
 
 def reset_task_pack_triggers(course: str = "") -> None:
     """清触发账本（判据回到"新鲜"时/测试用）：`course=""` 清全部。"""
-    with _TASK_PACK_LOCK:
-        if course:
-            _TASK_PACK_TRIGGERS.pop(course, None)
-        else:
-            _TASK_PACK_TRIGGERS.clear()
+    pack_triggers().clear_stale(course)
 
 
 def reset_task_pack_miss_triggers(course: str = "") -> None:
@@ -508,11 +678,7 @@ def reset_task_pack_miss_triggers(course: str = "") -> None:
     为什么必须在「包又在了」时清：不清就等于**一次上界用一辈子**——运维修完再删包
     （或干脆重导失败）时，hub 再也不会替云机推一次（plan §3.6-10）。
     """
-    with _TASK_PACK_LOCK:
-        if course:
-            _TASK_PACK_MISS_TRIGGERS.pop(course, None)
-        else:
-            _TASK_PACK_MISS_TRIGGERS.clear()
+    pack_triggers().clear_miss(course)
 
 
 def trigger_task_bundle_export(course: str, log=_hub_log) -> tuple[bool, str]:
@@ -549,23 +715,9 @@ def trigger_task_bundle_export(course: str, log=_hub_log) -> tuple[bool, str]:
     return True, "ok"
 
 
-def note_auto_handoff_failure(course: str, reason: str, at: float) -> None:
-    """记一次**已知的**导出失败（原因 + 那份状态的写入时刻）。
-
-    进程内只是缓存，**判据的权威在控制台那份 `export-status.json`**（它跨 hub 重启）；
-    这里存下来只是为了不必每次 claim 都去问一遍。
-    """
-    with _TASK_PACK_LOCK:
-        st = _TASK_AUTO_HANDOFF_TRIGGERS.setdefault(course, {"count": 0.0, "last": 0.0})
-        st["failed_at"] = float(at)
-        st["failed_reason"] = str(reason)[:400]
-
-
 def auto_handoff_failure(course: str) -> tuple[str, float]:
     """读「已知的导出失败」`(原因, 写入时刻)`；没有 ⇒ `("", 0.0)`。"""
-    with _TASK_PACK_LOCK:
-        st = _TASK_AUTO_HANDOFF_TRIGGERS.get(course) or {}
-    return str(st.get("failed_reason", "")), float(st.get("failed_at", 0.0))
+    return pack_triggers().failure(course)
 
 
 def console_export_status(
@@ -609,7 +761,7 @@ def console_export_status(
         # 但「没写文件」与「没起进程」是两件事：后者由 `exporting` 回答，见 `poll_console_export_status`。
         return {"unknown": True, "present": False, "exporting": exporting}
     # ★ 2026-10-21（plan/export-bundle-stall §3.3）：`running`/`stale`/`expired` 都是**不可知**。
-    #   把 `running` 当 `ok:false` 会让 hub 在导出进行中就 `note_auto_handoff_failure`、
+    #   把 `running` 当 `ok:false` 会让 hub 在导出进行中就记一笔失败、
     #   停试 900s（v1 的新 bug）；把 stale 当 ok:true 则会演一个陈旧的成功。
     if st.get("running") or st.get("stale") or st.get("expired"):
         return {"unknown": True, "present": True, "exporting": exporting}
@@ -638,15 +790,10 @@ def poll_console_export_status(
     ⇒ 「本窗口触发过」被当成了「正在导包」的同义词。
     """
     now = time.time() if now is None else float(now)
-    with _TASK_PACK_LOCK:
-        st = _TASK_AUTO_HANDOFF_TRIGGERS.get(course)
-        if st is None:
-            return {}  # 没触发过就没这条腿（读接口不该凭空向外发请求）
-        last = float(st.get("last", 0.0))
-        polled = float(st.get("polled_at", 0.0))
-        if polled and now - polled < TASK_BUNDLE_STATUS_POLL_SEC:
-            return {}
-        st["polled_at"] = now
+    # 没触发过就没这条腿（读接口不该凭空向外发请求）；窗内已问过也跳过。
+    allow, last = pack_triggers().poll_window(course, now=now)
+    if not allow:
+        return {}
     got = console_export_status(course, log=log)
     exporting = got.get("exporting")
     if got.get("unknown"):
@@ -670,7 +817,9 @@ def poll_console_export_status(
     if got.get("ok"):
         return {"ok": True}
     reason = str(got.get("reason") or "导出进程失败（控制台日志末行有原因）")
-    note_auto_handoff_failure(course, reason, at)
+    # 进程内只是缓存（判据的权威在控制台那份 `export-status.json`，它跨 hub 重启）；
+    # 存下来只是为了不必每次 claim 都去问一遍。
+    pack_triggers().note_failure(course, reason, at)
     log(f"export-status {course}: 控制台报**导出失败**：{reason}")
     return {"failure": reason}
 
@@ -679,39 +828,18 @@ def auto_handoff_decision(course: str, *, now: float | None = None) -> str:
     """自动交接该不该再触发控制台（**纯函数**）：
     `trigger` / `throttled` / `give_up` / `failed`（已知导出失败，窗口内不再重试）。"""
     now = time.time() if now is None else float(now)
-    with _TASK_PACK_LOCK:
-        st = _TASK_AUTO_HANDOFF_TRIGGERS.get(course)
-        count = int(float(st.get("count", 0.0))) if st else 0
-        last = float(st.get("last", 0.0)) if st else 0.0
-        failed_at = float(st.get("failed_at", 0.0)) if st else 0.0
-    # ★ 2026-10-15（J3）：**已知失败**优先于计数 —— 再触发一万次也还是同一个静态拒因
-    #   （iters / 上界 / 无起点权重），而每次触发都会烧一次 code-snapshot 与一次 git push。
-    #   窗口锚是那份状态的写入时刻（持久），不是进程内计数（重启即清零）。
-    if failed_at and now - failed_at < TASK_BUNDLE_FAILURE_WINDOW_SEC:
-        return "failed"
-    if count >= TASK_AUTO_HANDOFF_TRIGGER_LIMIT:
-        return "give_up"
-    if last and now - last < TASK_AUTO_HANDOFF_THROTTLE_SEC:
-        return "throttled"
-    return "trigger"
+    return pack_triggers().decision(course, now=now)
 
 
 def note_auto_handoff_trigger(course: str, *, now: float | None = None) -> None:
     """记一次自动交接触发（进程内；hub 重启即清——与缺包账本同风格）。"""
     now = time.time() if now is None else float(now)
-    with _TASK_PACK_LOCK:
-        st = _TASK_AUTO_HANDOFF_TRIGGERS.setdefault(course, {"count": 0.0, "last": 0.0})
-        st["count"] = float(st.get("count", 0.0)) + 1.0
-        st["last"] = now
+    pack_triggers().note_trigger(course, now=now)
 
 
 def reset_auto_handoff_triggers(course: str = "") -> None:
     """清自动交接账本（包出现 / 领取成功时调）。"""
-    with _TASK_PACK_LOCK:
-        if course:
-            _TASK_AUTO_HANDOFF_TRIGGERS.pop(course, None)
-        else:
-            _TASK_AUTO_HANDOFF_TRIGGERS.clear()
+    pack_triggers().clear_handoff(course)
 
 
 def trigger_auto_handoff(course: str, log=_hub_log) -> tuple[bool, str]:

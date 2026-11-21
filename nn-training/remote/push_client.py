@@ -39,10 +39,58 @@ def _default_log(msg: str) -> None:
     log_line("push", msg)
 
 
-#: (base_url, kind, sha) -> True 的**只记命中**记忆（2026-10-30）：探针失败时沿用它。
-#: 用 dict 而非 set：`cap` 到了整片清掉（这份记账永不无界增长，且命中最坏只是重传一次）。
-_CACHE_HITS: dict[tuple[str, str, str], bool] = {}
+#: 「这台节点上次探到有这个 (kind, sha)」的记忆上限。
 _CACHE_HITS_CAP = 512
+
+
+class ShaCacheHits:
+    """**只记命中**的探针记忆（2026-10-30）：探针失败时沿用上一次的结论（P0-5，2026-11-21）。
+
+    为什么要有这份记忆：慢链路上 `/code-sha` 15s 超时是常态，把失败当「没缓存」会变成正反馈
+    （超时 ⇒ 判 miss ⇒ 多传 2.7MB ⇒ 更慢 ⇒ 更必然超时，真机 it45–49 实测）。所以探针**问不到**
+    时沿用「上次探到命中」，从没命中过才按 miss（保守上传）。
+
+    `record` / `forget` 是仅有的两个写入口，**都必须能翻面**：
+    * 探针明确回 miss ⇒ `forget`（明确结论永远覆盖记忆，不粘住）；
+    * 节点 428 说缺 ⇒ `forget`（否则下一次推送又会跳过补传，428 来回打转）。
+
+    上限是**整片清空**而不是 LRU：这份账只在探针失败时被读，清空的代价是下一轮保守上传一次；
+    混入淘汰策略只会让「哪条记得住」变成需要解释的东西。
+    """
+
+    def __init__(self, cap: int = _CACHE_HITS_CAP) -> None:
+        self._hits: dict[tuple[str, str, str], bool] = {}
+        self._cap = max(1, int(cap))
+
+    @staticmethod
+    def _key(base_url: str, kind: str, sha: str) -> tuple[str, str, str]:
+        return (str(base_url or ""), str(kind or ""), str(sha or ""))
+
+    def record(self, base_url: str, kind: str, sha: str) -> None:
+        """记下「这台节点有这份 sha」（探针刚答了 200 + cached）。"""
+        if len(self._hits) > self._cap:
+            self._hits.clear()
+        self._hits[self._key(base_url, kind, sha)] = True
+
+    def known(self, base_url: str, kind: str, sha: str) -> bool:
+        """上次是否探到命中（探针问不到时的兜底答案）。"""
+        return bool(self._hits.get(self._key(base_url, kind, sha)))
+
+    def forget(self, base_url: str, kind: str, sha: str) -> None:
+        """翻面（明确 miss / 节点 428 说缺）——幂等。"""
+        self._hits.pop(self._key(base_url, kind, sha), None)
+
+    def __len__(self) -> int:
+        return len(self._hits)
+
+
+#: 本进程那份记忆（生产写者是 `_cached_or_last_hit` 与 `forget_cache_hit`）。
+_HITS = ShaCacheHits()
+
+
+def cache_hits() -> ShaCacheHits:
+    """默认记忆（观测/用例读面；替换公开名字即可接管，不必碰私有实例）。"""
+    return _HITS
 
 
 def forget_cache_hit(base_url: str, kind: str, sha: str) -> None:
@@ -51,7 +99,7 @@ def forget_cache_hit(base_url: str, kind: str, sha: str) -> None:
     **节点 428 说缺之后必须调**（`submit_job` 的三条 428 分支各调一次）：记忆不翻面的话，
     下一次推送又会认为缓存命中而跳过补传，428 来回打转。
     """
-    _CACHE_HITS.pop((str(base_url or ""), str(kind or ""), str(sha or "")), None)
+    cache_hits().forget(base_url, kind, sha)
 
 
 def _probe_sha(base_url: str, token: str, path: str, timeout: float) -> bool | None:
@@ -85,16 +133,14 @@ def _cached_or_last_hit(
     `submit_job` 当场把字节补上并把记忆清掉（`forget_cache_hit`）—— 漏传退化成一次
     可重试的往返，而不是静默失败。`False`（明确的 miss）永远覆盖记忆，不会粘住。
     """
-    key = (str(base_url or ""), str(kind or ""), str(sha or ""))
+    hits = cache_hits()
     hit = _probe_sha(base_url, token, path, timeout)
     if hit is None:
-        return bool(_CACHE_HITS.get(key))
+        return hits.known(base_url, kind, sha)
     if hit:
-        if len(_CACHE_HITS) > _CACHE_HITS_CAP:
-            _CACHE_HITS.clear()
-        _CACHE_HITS[key] = True
+        hits.record(base_url, kind, sha)
     else:
-        _CACHE_HITS.pop(key, None)
+        hits.forget(base_url, kind, sha)
     return hit
 
 

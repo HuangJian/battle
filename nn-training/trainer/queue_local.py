@@ -319,18 +319,44 @@ def make_local_pool(
 #
 # 扫描索引**只活一轮**（`wver` 变即重建）：它是「盘上现在有什么」的目录快照，不是产物缓存
 # ——不落盘、不跨轮、上限 `MAX_INDEX`；同型先例 = `worker/resume._SCAN_CACHE`。
-_REUSE_INDEX: dict[tuple[int, int], tuple[Path, Path, str]] = {}
-_REUSE_SIG: list[tuple[str, str]] = [("", "")]
+class ReuseIndex:
+    """同族课程「盘上现成局」的**目录快照**（只活一轮；P0-5，2026-11-21）。
+
+    旧形状是两个模块级容器：`_REUSE_INDEX`（dict）与 `_REUSE_SIG`（**一格 list** 当可变槽），
+    「签名没变就复用、变了就清空重扫」散成三条语句 —— 读的人得自己对账「这两个容器谁先改」。
+    收进对象后，签名与内容在同一个 `rows()` 里一起换：不可能出现「签名更新了、内容还是旧的」。
+
+    `_sig is None` = 还没建过。旧实现用 `("", "")` 当初始签名，若第一轮恰好是
+    「空课程名 + 空 `wver`」就会**跳过**首次扫描返回空索引；`None` 哨兵把这条退化路径也堵住了
+    （`wver` 是权重指纹、正常不为空，所以这不改变既有行为）。
+    """
+
+    def __init__(self) -> None:
+        self._sig: tuple[str, str] | None = None
+        self._rows: dict[tuple[int, int], tuple[Path, Path, str]] = {}
+
+    def rows(self, wver: str, args) -> dict[tuple[int, int], tuple[Path, Path, str]]:
+        """本轮（同课程同 `wver`）的索引；换权重/换课就重建。返回的是**同一份** dict。"""
+        sig = (str(getattr(args, "course_name", "") or ""), wver)
+        if self._sig != sig:
+            self._rows.clear()
+            self._rows.update(rollout_sources(None, wver, args))
+            self._sig = sig
+        return self._rows
+
+    def clear_rows(self) -> None:
+        """清场（单测用）：内容与签名一起归零 ⇒ 下一次 `rows()` 必重建。"""
+        self._rows.clear()
+        self._sig = None
+
+
+#: 本进程那份索引（`reuse_index` 唯一读者；只活一轮，不落盘、不跨轮）。
+_REUSE = ReuseIndex()
 
 
 def reuse_index(wver: str, args) -> dict[tuple[int, int], tuple[Path, Path, str]]:
     """本轮（同课程同 `wver`）的兄弟课现成局索引；换权重/换课就重建。"""
-    sig = (str(getattr(args, "course_name", "") or ""), wver)
-    if _REUSE_SIG[0] != sig:
-        _REUSE_INDEX.clear()
-        _REUSE_SIG[0] = sig
-        _REUSE_INDEX.update(rollout_sources(None, wver, args))
-    return _REUSE_INDEX
+    return _REUSE.rows(wver, args)
 
 
 def _reuse_stamps(args) -> tuple[str, str]:

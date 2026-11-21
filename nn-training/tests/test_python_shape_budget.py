@@ -38,9 +38,16 @@ LONG_FUNCS_BASELINE: dict[str, int] = {
     # 拆它们要按「独立所有者 + 独立触发条件」做，见 python.refactor.md §P0-2。
     # （`common/task_client.fetch_task` 已按 P0-2/P0-3 拆成 `FetchTaskSpec` + `_task_params`，
     # `fetch_task` 只剩传输编排 ⇒ 条目删除。）
-    "remote/rollout_node.py": 1,
-    "trainer/eval_dispatch.py": 1,
-    "worker/train/bc.py": 1,
+    # 2026-11-21：`worker/train/bc.py::_Train.run_epochs`（201 行）拆成
+    # `run_epochs`（63，只留 epoch 编排 / 历史 / 早停 / 断点 / 回调）+
+    # `_train_epoch`（79，训练内循环 + scheduler）+ `_validate`（65，验证与三个准确率）；
+    # `trainer/eval_dispatch._eval_admit`（248）拆成 `_eval_admit`（21，编排）+
+    # `_eval_eligible`（176，节点门那一大段能力位/fail-closed 判据）+
+    # `_eval_publish_weights`（47，冻结门 + 下发 + 窗口起算）+
+    # `_eval_local_fallback`（33，兜底唯一入口）；`remote/rollout_node.run`（249）拆成
+    # `run`（162，装配 + 三段编排）+ `_open_channel`（50，通道决策，返回生效的 hub_url）+
+    # `_supervise`（80，监护 while + 收线）。
+    # ⇒ **清零**：此后任何 >200 行函数都是新增，直接红。
 }
 
 #: 存量：包含 >8 参数函数的文件 → 个数。
@@ -70,7 +77,7 @@ WIDE_FUNCS_BASELINE = {
     "remote/download.py": 3,
     "remote/error_report.py": 1,
     "remote/http.py": 2,
-    "remote/hub_client.py": 3,
+    "remote/hub_client.py": 2,
     "remote/hub_http.py": 2,
     # 2026-11-19 合入上游的 relay/replay 参数（原 3 处 → 4 处）。
     "remote/job_lifecycle.py": 4,
@@ -89,7 +96,7 @@ WIDE_FUNCS_BASELINE = {
     # 2026-11-19 合入上游：`run` 的交易参数 + relay 通道参数（原 1 处 → 2 处）。
     "remote/rollout_node.py": 2,
     "remote/tailscale_boot.py": 1,
-    "remote/train_core.py": 5,
+    "remote/train_core.py": 3,
     "remote/upload_proc.py": 2,
     "remote/worker.py": 2,
     "tools/c9_critic_calibration.py": 1,
@@ -120,7 +127,8 @@ WIDE_FUNCS_BASELINE = {
     # 参数收进 `RoundSpec`（装配点 = `trainer/eval_dispatch._round_spec`），`settle_task`
     # 的 9 个结果位（含一个从没人读的 `wall_sec`）收进 `SettleOutcome` ⇒ **条目删除，
     # 本文件宽签名归零**。守 `tests/worker/test_eval_round_spec.py`。
-    "worker/eval_local.py": 1,
+    # 2026-11-21（P0-3 第七刀）：`run_local_eval_game`（25 参，全仓最宽）收成
+    # `EvalGameSpec` ⇒ 条目删除，本文件宽签名归零。
     "worker/eval_track.py": 1,
     "worker/events.py": 2,
     "worker/gate_check.py": 1,
@@ -158,12 +166,8 @@ L0_MUTABLE_ALLOWED: dict[str, frozenset[str]] = {}
 #: `global` 语句的存量（按文件计数；出现在新文件 = 红）。
 GLOBAL_BASELINE = {
     "biz/reward_context.py": 2,
-    "hub/admin.py": 1,
-    "remote/http.py": 1,
     "remote/payload_slim.py": 1,
     "remote/tailscale_boot.py": 1,
-    "remote/wire.py": 1,
-    "remote/worker.py": 1,
     "tools/forkdist.py": 2,
     "tools/task.py": 1,
 }

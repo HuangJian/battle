@@ -601,145 +601,8 @@ class _Train:
         """逐个 epoch：训练 / 验证 / 历史 / 早停 / 断点 / 每 epoch 回调。"""
         for epoch in range(1, args.epochs + 1):
             gepoch = self.epoch_base + epoch
-            self.model.train()
-            run = {"loss": 0.0, "n": 0, "vloss": 0.0, "vn": 0}
-            for batch in self.train_dl:
-                dev_batch = [b.to(self.dev) for b in batch]
-                if self.mesh is not None:
-                    dev_batch = [_shard_batch(b, self.mesh) for b in dev_batch]
-                if self.action_v6:
-                    obs, sc, ex, mv, fr, hd, mm, mf, mh, ret = dev_batch
-                else:
-                    hd = mh = None
-                    obs, sc, ex, mv, fr, mm, mf, ret = dev_batch
-                self.opt.zero_grad()
-                out = self.model(obs, sc, ex)
-                if self.action_v6:
-                    # v6 三头：move4 + fire3 + hold2（掩码各段见 dataset.NNDataset）
-                    lm, lf, lh, vpred = out
-                    if self.policy_coef == 0.0:
-                        loss = torch.zeros((), device=self.dev)
-                    else:
-                        policy_loss = (
-                            _masked_ce(lm, mv, mm)
-                            + _masked_ce(lf, fr, mf, class_weight=self.fire_class_weight)
-                            + _masked_ce(lh, hd, mh, class_weight=self.hold_class_weight)
-                        )
-                        loss = policy_loss if self.policy_coef == 1.0 else self.policy_coef * policy_loss
-                    valid = ~torch.isnan(ret)
-                    if args.value_coef > 0 and valid.any():
-                        vloss = _value_mse(vpred, ret, valid)
-                        loss = loss + args.value_coef * vloss
-                        run["vloss"] += float(vloss.item()) * int(valid.sum())
-                        run["vn"] += int(valid.sum())
-                    elif self.policy_coef == 0.0:
-                        raise ValueError(
-                            "value-only: batch 内没有有效 return（returns.npy 缺失/全 NaN）"
-                        )
-                elif self.use_value:
-                    lm, lf, vpred = out
-                    if self.policy_coef == 0.0:
-                        loss = torch.zeros((), device=self.dev)
-                    else:
-                        policy_loss = _masked_ce(lm, mv, mm) + _masked_ce(
-                            lf, fr, mf, class_weight=self.fire_class_weight
-                        )
-                        loss = policy_loss if self.policy_coef == 1.0 else self.policy_coef * policy_loss
-                    valid = ~torch.isnan(ret)
-                    if valid.any():
-                        vloss = _value_mse(vpred, ret, valid)
-                        loss = loss + args.value_coef * vloss
-                        run["vloss"] += float(vloss.item()) * int(valid.sum())
-                        run["vn"] += int(valid.sum())
-                    elif self.policy_coef == 0.0:
-                        raise ValueError(
-                            "value-only: batch 内没有有效 return（returns.npy 缺失/全 NaN）"
-                        )
-                else:
-                    lm, lf = out
-                    policy_loss = _masked_ce(lm, mv, mm) + _masked_ce(
-                        lf, fr, mf, class_weight=self.fire_class_weight
-                    )
-                    loss = policy_loss if self.policy_coef == 1.0 else self.policy_coef * policy_loss
-                loss.backward()
-                # P2-6f：梯度裁剪（与 ppo/engine.py、goal_bc.py 一致，max_norm=1.0）——
-                # 此前 bc 无裁剪，坏批次（标注噪声）可一步炸权重。
-                torch.nn.utils.clip_grad_norm_(self.trainable, 1.0)
-                # 设备感知步进：XLA 单设备走 `xm.optimizer_step`；SPMD 下复制参数上的梯度已由
-                # XLA 自动 all-reduce，**必须**裸 `opt.step()`（再调 optimizer_step 会二次归约，
-                # 把梯度放大 world_size 倍）。图执行边界单独落（PPO engine 同款）。
-                if self.mesh is None:
-                    optimizer_step(self.opt, self.dev)
-                else:
-                    self.opt.step()
-                xla_mark_step(self.dev)
-                run["loss"] += loss.item() * obs.shape[0]
-                run["n"] += obs.shape[0]
-            self.scheduler.step()
-            train_loss = run["loss"] / max(1, run["n"])
-
-            # Validation (no augmentation).
-            self.model.eval()
-            v = {
-                "loss": 0.0,
-                "n": 0,
-                "ma": 0.0,
-                "fa": 0.0,
-                "vloss": 0.0,
-                "vn": 0,
-                # B2：加权 val 的累加器（v6 才有；与训练目标同口径，仅作诊断）。
-                "wloss": 0.0,
-                "wn": 0,
-            }
-            with torch.no_grad():
-                for batch in self.val_dl:
-                    dev_batch = [b.to(self.dev) for b in batch]
-                    if self.mesh is not None:
-                        dev_batch = [_shard_batch(b, self.mesh) for b in dev_batch]
-                    if self.action_v6:
-                        obs, sc, ex, mv, fr, hd, mm, mf, mh, ret = dev_batch
-                    else:
-                        hd = mh = None
-                        obs, sc, ex, mv, fr, mm, mf, ret = dev_batch
-                    out_v = self.model(obs, sc, ex)
-                    if self.action_v6:
-                        lm, lf, lh, vpred = out_v
-                    elif self.use_value:
-                        lm, lf, vpred = out_v
-                    else:
-                        lm, lf = out_v
-                    loss = _masked_ce(lm, mv, mm) + _masked_ce(lf, fr, mf)
-                    if self.action_v6:
-                        # val_loss 本体**不**施加 class weight（与 `_majority_baseline` 同尺度）；
-                        # 加权口径另存 `val_loss_weighted`（B2），避免两条曲线被混读成一个数。
-                        loss = loss + _masked_ce(lh, hd, mh)
-                        if self.weight_exp > 0 and (
-                            self.fire_class_weight is not None or self.hold_class_weight is not None
-                        ):
-                            wloss = (
-                                _masked_ce(lm, mv, mm)
-                                + _masked_ce(lf, fr, mf, class_weight=self.fire_class_weight)
-                                + _masked_ce(lh, hd, mh, class_weight=self.hold_class_weight)
-                            )
-                            v["wloss"] += wloss.item() * obs.shape[0]
-                            v["wn"] += obs.shape[0]
-                    # val 刻意**不计** fire 正例权重：val_loss 是"真实分布下的 CE"，
-                    # 要能与 `_majority_baseline`（未加权）同尺度比较；加权只作用于优化目标。
-                    if self.use_value:
-                        valid = ~torch.isnan(ret)
-                        if valid.any():
-                            vloss_t = _value_mse(vpred, ret, valid)
-                            v["vloss"] += float(vloss_t.item()) * int(valid.sum())
-                            v["vn"] += int(valid.sum())
-                    v["loss"] += loss.item() * obs.shape[0]
-                    v["n"] += obs.shape[0]
-                    v["ma"] += _masked_acc(lm, mv, mm) * obs.shape[0]
-                    v["fa"] += _masked_acc(lf, fr, mf) * obs.shape[0]
-                    if self.action_v6:
-                        v["ha"] = v.get("ha", 0.0) + _masked_acc(lh, hd, mh) * obs.shape[0]
-            val_loss = v["loss"] / max(1, v["n"])
-            ma, fa = v["ma"] / max(1, v["n"]), v["fa"] / max(1, v["n"])  # P2-3：--val-split 0 时 v["n"]==0
-            vl = v["vloss"] / max(1, v["vn"]) if v["vn"] > 0 else float("nan")
+            train_loss = self._train_epoch(args)
+            val_loss, ma, fa, ha, vl, v = self._validate()
             self.history["train_loss"].append(round(train_loss, 4))
             self.history["val_loss"].append(round(val_loss, 4))
             if v["wn"] > 0:
@@ -749,7 +612,6 @@ class _Train:
             self.history["move_acc"].append(round(ma, 4))
             self.history["fire_acc"].append(round(fa, 4))
             #: v6 第三头（2026-11-04）：hold 的 val 准确率。legacy 语料没有该头 ⇒ 不写这条键。
-            ha = (v.get("ha", 0.0) / max(1, v["n"])) if self.action_v6 else None
             if ha is not None:
                 self.history.setdefault("hold_acc", []).append(round(ha, 4))
             self.history["value_loss"].append(float("nan") if math.isnan(vl) else round(vl, 4))
@@ -799,6 +661,151 @@ class _Train:
             # 每 epoch 权重与指标——中断接续训练的落点。传 raw_model（裸键 state_dict）。
             self._emit_epoch(args, gepoch, (train_loss, val_loss, ma, fa, ha), v)
 
+    def _train_epoch(self, args) -> float:
+        """单 epoch 的训练内循环（含 scheduler 步进）；返回样本加权平均 train_loss。"""
+        self.model.train()
+        run = {"loss": 0.0, "n": 0, "vloss": 0.0, "vn": 0}
+        for batch in self.train_dl:
+            dev_batch = [b.to(self.dev) for b in batch]
+            if self.mesh is not None:
+                dev_batch = [_shard_batch(b, self.mesh) for b in dev_batch]
+            if self.action_v6:
+                obs, sc, ex, mv, fr, hd, mm, mf, mh, ret = dev_batch
+            else:
+                hd = mh = None
+                obs, sc, ex, mv, fr, mm, mf, ret = dev_batch
+            self.opt.zero_grad()
+            out = self.model(obs, sc, ex)
+            if self.action_v6:
+                # v6 三头：move4 + fire3 + hold2（掩码各段见 dataset.NNDataset）
+                lm, lf, lh, vpred = out
+                if self.policy_coef == 0.0:
+                    loss = torch.zeros((), device=self.dev)
+                else:
+                    policy_loss = (
+                        _masked_ce(lm, mv, mm)
+                        + _masked_ce(lf, fr, mf, class_weight=self.fire_class_weight)
+                        + _masked_ce(lh, hd, mh, class_weight=self.hold_class_weight)
+                    )
+                    loss = policy_loss if self.policy_coef == 1.0 else self.policy_coef * policy_loss
+                valid = ~torch.isnan(ret)
+                if args.value_coef > 0 and valid.any():
+                    vloss = _value_mse(vpred, ret, valid)
+                    loss = loss + args.value_coef * vloss
+                    run["vloss"] += float(vloss.item()) * int(valid.sum())
+                    run["vn"] += int(valid.sum())
+                elif self.policy_coef == 0.0:
+                    raise ValueError(
+                        "value-only: batch 内没有有效 return（returns.npy 缺失/全 NaN）"
+                    )
+            elif self.use_value:
+                lm, lf, vpred = out
+                if self.policy_coef == 0.0:
+                    loss = torch.zeros((), device=self.dev)
+                else:
+                    policy_loss = _masked_ce(lm, mv, mm) + _masked_ce(
+                        lf, fr, mf, class_weight=self.fire_class_weight
+                    )
+                    loss = policy_loss if self.policy_coef == 1.0 else self.policy_coef * policy_loss
+                valid = ~torch.isnan(ret)
+                if valid.any():
+                    vloss = _value_mse(vpred, ret, valid)
+                    loss = loss + args.value_coef * vloss
+                    run["vloss"] += float(vloss.item()) * int(valid.sum())
+                    run["vn"] += int(valid.sum())
+                elif self.policy_coef == 0.0:
+                    raise ValueError(
+                        "value-only: batch 内没有有效 return（returns.npy 缺失/全 NaN）"
+                    )
+            else:
+                lm, lf = out
+                policy_loss = _masked_ce(lm, mv, mm) + _masked_ce(
+                    lf, fr, mf, class_weight=self.fire_class_weight
+                )
+                loss = policy_loss if self.policy_coef == 1.0 else self.policy_coef * policy_loss
+            loss.backward()
+            # P2-6f：梯度裁剪（与 ppo/engine.py、goal_bc.py 一致，max_norm=1.0）——
+            # 此前 bc 无裁剪，坏批次（标注噪声）可一步炸权重。
+            torch.nn.utils.clip_grad_norm_(self.trainable, 1.0)
+            # 设备感知步进：XLA 单设备走 `xm.optimizer_step`；SPMD 下复制参数上的梯度已由
+            # XLA 自动 all-reduce，**必须**裸 `opt.step()`（再调 optimizer_step 会二次归约，
+            # 把梯度放大 world_size 倍）。图执行边界单独落（PPO engine 同款）。
+            if self.mesh is None:
+                optimizer_step(self.opt, self.dev)
+            else:
+                self.opt.step()
+            xla_mark_step(self.dev)
+            run["loss"] += loss.item() * obs.shape[0]
+            run["n"] += obs.shape[0]
+        self.scheduler.step()
+        train_loss = run["loss"] / max(1, run["n"])
+        return train_loss
+
+    def _validate(self) -> tuple[float, float, float, float | None, float, dict]:
+        """单 epoch 的验证（无增强）；返回 `(val_loss, move_acc, fire_acc, hold_acc, value_loss, 累加器)`。"""
+        self.model.eval()
+        v = {
+            "loss": 0.0,
+            "n": 0,
+            "ma": 0.0,
+            "fa": 0.0,
+            "vloss": 0.0,
+            "vn": 0,
+            # B2：加权 val 的累加器（v6 才有；与训练目标同口径，仅作诊断）。
+            "wloss": 0.0,
+            "wn": 0,
+        }
+        with torch.no_grad():
+            for batch in self.val_dl:
+                dev_batch = [b.to(self.dev) for b in batch]
+                if self.mesh is not None:
+                    dev_batch = [_shard_batch(b, self.mesh) for b in dev_batch]
+                if self.action_v6:
+                    obs, sc, ex, mv, fr, hd, mm, mf, mh, ret = dev_batch
+                else:
+                    hd = mh = None
+                    obs, sc, ex, mv, fr, mm, mf, ret = dev_batch
+                out_v = self.model(obs, sc, ex)
+                if self.action_v6:
+                    lm, lf, lh, vpred = out_v
+                elif self.use_value:
+                    lm, lf, vpred = out_v
+                else:
+                    lm, lf = out_v
+                loss = _masked_ce(lm, mv, mm) + _masked_ce(lf, fr, mf)
+                if self.action_v6:
+                    # val_loss 本体**不**施加 class weight（与 `_majority_baseline` 同尺度）；
+                    # 加权口径另存 `val_loss_weighted`（B2），避免两条曲线被混读成一个数。
+                    loss = loss + _masked_ce(lh, hd, mh)
+                    if self.weight_exp > 0 and (
+                        self.fire_class_weight is not None or self.hold_class_weight is not None
+                    ):
+                        wloss = (
+                            _masked_ce(lm, mv, mm)
+                            + _masked_ce(lf, fr, mf, class_weight=self.fire_class_weight)
+                            + _masked_ce(lh, hd, mh, class_weight=self.hold_class_weight)
+                        )
+                        v["wloss"] += wloss.item() * obs.shape[0]
+                        v["wn"] += obs.shape[0]
+                # val 刻意**不计** fire 正例权重：val_loss 是"真实分布下的 CE"，
+                # 要能与 `_majority_baseline`（未加权）同尺度比较；加权只作用于优化目标。
+                if self.use_value:
+                    valid = ~torch.isnan(ret)
+                    if valid.any():
+                        vloss_t = _value_mse(vpred, ret, valid)
+                        v["vloss"] += float(vloss_t.item()) * int(valid.sum())
+                        v["vn"] += int(valid.sum())
+                v["loss"] += loss.item() * obs.shape[0]
+                v["n"] += obs.shape[0]
+                v["ma"] += _masked_acc(lm, mv, mm) * obs.shape[0]
+                v["fa"] += _masked_acc(lf, fr, mf) * obs.shape[0]
+                if self.action_v6:
+                    v["ha"] = v.get("ha", 0.0) + _masked_acc(lh, hd, mh) * obs.shape[0]
+        val_loss = v["loss"] / max(1, v["n"])
+        ma, fa = v["ma"] / max(1, v["n"]), v["fa"] / max(1, v["n"])  # P2-3：--val-split 0 时 v["n"]==0
+        vl = v["vloss"] / max(1, v["vn"]) if v["vn"] > 0 else float("nan")
+        ha = (v.get("ha", 0.0) / max(1, v["n"])) if self.action_v6 else None
+        return val_loss, ma, fa, ha, vl, v
     def _emit_epoch(
         self, args, gepoch: int, loss: tuple[float, float, float, float, float | None], v: dict
     ) -> None:

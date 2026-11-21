@@ -183,7 +183,7 @@ def _opener_proxies(monkeypatch) -> dict[str, str]:
     平台全局代理只有 urllib 侧认，池侧只认 env——池的契约就是 env 名表。）
     """
     monkeypatch.setattr(urllib.request, "getproxies", lambda: {})
-    monkeypatch.setattr(http_mod, "_opener", None)  # 进程内懒建单例，强制重建
+    http_mod.openers().reset()  # 迟建 opener 住对象里，重建走 `reset()`（不改模块变量）
     # `handlers` 是 OpenerDirector 的**运行时**属性（typeshed 里没声明）⇒ getattr 取，
     # 不用 `# type: ignore` 消音（编译器是评审，AGENTS §5）。
     for h in getattr(http_mod._get_opener(), "handlers", ()):
@@ -382,3 +382,102 @@ def test_the_pool_module_carries_no_repo_dependency() -> None:
 
     dag.assert_remote_module("remote.control_pool")
     assert dag.LAYERS["remote.control_pool"] == 0, "它应当是零仓内依赖的叶子"
+
+
+# ───────────────── ⑥ 池是一个对象：所有权 / 关闭时机 / 用例隔离（P0-5，2026-11-21）─────────
+
+
+def _install_close_tracking_conns(monkeypatch) -> tuple[list[tuple[str, int | None]], list[object]]:
+    """装一个**记 close 的**替身连接，返回 `(建连记录, 被关掉的连接对象)`。
+
+    与 `_install_fake_conns` 的区别只在 `close()`：那份替身没有 `close`（旧实现从不关连接），
+    这份用来钉「作废/整池关闭时到底有没有真的还 fd」。
+    """
+    made: list[tuple[str, int | None]] = []
+    closed: list[object] = []
+
+    class _Closable:
+        def __init__(self, host: str, port: int | None = None, **_kw) -> None:
+            made.append((host, port))
+            self.tunnel: tuple[str, int] | None = None
+
+        def set_tunnel(self, host: str, port: int) -> None:
+            self.tunnel = (host, port)
+
+        def request(self, method: str, target: str, body=None, headers=None) -> None:
+            return None
+
+        def getresponse(self) -> _Resp:
+            return _Resp(200, b"{}")
+
+        def close(self) -> None:
+            closed.append(self)
+
+    monkeypatch.setattr(cp.http.client, "HTTPConnection", _Closable)
+    monkeypatch.setattr(cp.http.client, "HTTPSConnection", _Closable)
+    return made, closed
+
+
+def test_pools_are_independent(monkeypatch) -> None:
+    """两个 `ControlPool` 互不相见：用例自建一份就不必再靠全局 `reset()` 这条缝。"""
+    _no_proxy(monkeypatch)
+    made, _closed = _install_close_tracking_conns(monkeypatch)
+    a, b = cp.ControlPool(), cp.ControlPool()
+    a.request("http://a.invalid:500/x", method="GET", headers={}, timeout=1.0)
+    assert a.count() == 1 and b.count() == 0, "另一个池看见了不该属于它的连接"
+    b.request("http://b.invalid:500/x", method="GET", headers={}, timeout=1.0)
+    assert a.count() == 1 and b.count() == 1
+    assert made == [("a.invalid", 500), ("b.invalid", 500)]
+
+
+def test_module_entry_points_use_the_default_pool(monkeypatch) -> None:
+    """模块级 `request` / `conn_count` / `reset` 是**默认池**的薄包装（生产调用点不变）。"""
+    _clean_pool()
+    _no_proxy(monkeypatch)
+    _install_close_tracking_conns(monkeypatch)
+    own = cp.ControlPool()
+    cp.request("http://hub.invalid:500/jobs/peek", method="GET", headers={}, timeout=1.0)
+    assert cp.conn_count() == 1, "模块级 request 没写进默认池"
+    assert own.count() == 0, "模块级 request 写进了别人的池"
+    cp.reset()
+    assert cp.conn_count() == 0
+
+
+def test_drop_closes_the_connection(monkeypatch) -> None:
+    """作废即还 fd：`drop` 不只是从 dict 里摘掉（旧实现靠 refcount 隐式回收）。"""
+    _no_proxy(monkeypatch)
+    made, closed = _install_close_tracking_conns(monkeypatch)
+    pool = cp.ControlPool()
+    pool.request("http://hub.invalid:500/jobs/peek", method="GET", headers={}, timeout=1.0)
+    assert len(made) == 1 and pool.count() == 1
+    pool.drop(("http", "hub.invalid", 500))
+    assert pool.count() == 0
+    assert len(closed) == 1, "drop 之后连接没被关掉（fd 要等 GC）"
+
+
+def test_close_closes_every_connection_and_tolerates_the_rest(monkeypatch) -> None:
+    """整池关闭：每条都关；替身没有 `close` 时也不许炸（老替身/半关 socket 都见过）。"""
+    _no_proxy(monkeypatch)
+    _install_close_tracking_conns(monkeypatch)
+    pool = cp.ControlPool()
+    for host in ("a.invalid", "b.invalid"):
+        pool.request(f"http://{host}:500/x", method="GET", headers={}, timeout=1.0)
+    assert pool.count() == 2
+    pool.close()
+    assert pool.count() == 0
+    # 没有 close 方法的替身（旧 `_FakeConn` 就是这个形状）：drop 只作废、不抛。
+    class _NoClose:
+        def __init__(self, host: str, port: int | None = None, **_kw) -> None:
+            pass
+
+        def request(self, method: str, target: str, body=None, headers=None) -> None:
+            return None
+
+        def getresponse(self) -> _Resp:
+            return _Resp(200, b"{}")
+
+    monkeypatch.setattr(cp.http.client, "HTTPConnection", _NoClose)
+    plain = cp.ControlPool()
+    plain.request("http://c.invalid:500/x", method="GET", headers={}, timeout=1.0)
+    plain.drop(("http", "c.invalid", 500))
+    assert plain.count() == 0

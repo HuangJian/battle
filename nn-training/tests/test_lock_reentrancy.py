@@ -16,11 +16,10 @@
 
 * **只查非可重入构造**：`Lock` / `Semaphore` / `BoundedSemaphore`；`RLock` 与 `Condition`
   （缺省内建的就是 RLock）的同线程重入是**合法语义** ⇒ 跳过。
-* **同一把锁**按名字归并：`self._lock` 记 `("attr", "_lock")`、模块级/导入的 `_TASK_PACK_LOCK`
-  记 `("global", "_TASK_PACK_LOCK")`、函数局部锁记 `("local", 文件, 函数, 名字)`。
-  名字归并是为了认得出「定义处 + `from ... import` 处」是同一把（hub/offline.py 就是这么用
-  `_TASK_PACK_LOCK` 的）与「mixin 注入的 `self._lock`」（hub/store.py 的 `_lock` 由
-  `_AuthGuard.__init__` 建）。代价：同模块内两个**不同**锁若恰好同名会被当成一把 —— 判据只在
+* **同一把锁**按名字归并：`self._lock` 记 `("attr", "_lock")`、模块级/导入的 `<名字>_LOCK`
+  记 `("global", "<名字>_LOCK")`、函数局部锁记 `("local", 文件, 函数, 名字)`。
+  名字归并是为了认得出「定义处 + `from ... import` 处」是同一把（`from hub.x import _X_LOCK`
+  的形态）与「mixin 注入的 `self._lock`」（hub/store.py 的 `_lock` 由 `_AuthGuard.__init__` 建）。代价：同模块内两个**不同**锁若恰好同名会被当成一把 —— 判据只在
   模块内做（见下），所以那只可能造成**多报**，而这正是本仓位宁愿的方向（多报当场可见，漏报是静默的）。
 * **调用图是模块内的**（加上闭包链与组合组）：`self.f()`（本模块继承链 → **组合组内跨文件
   同名方法**）· `Klass.f()` · 裸名 `f()`（本模块的模块级函数与**嵌套/闭包函数**）·
@@ -278,7 +277,7 @@ class _Indexer(ast.NodeVisitor):
         for a in node.names:
             name = a.asname or a.name
             if a.name != "*" and _lockish(name):
-                # 跨模块同一把锁：导入处与定义处按**名字**归并（hub/offline.py 的 _TASK_PACK_LOCK）。
+                # 跨模块同一把锁：导入处与定义处按**名字**归并（`from hub.x import _X_LOCK` 的形态）。
                 self.mod.imported_locks.add(name)
         self.generic_visit(node)
 

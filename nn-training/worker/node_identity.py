@@ -36,8 +36,68 @@ __all__ = ["LEDGER_MAX_ROUNDS", "clear", "note_ping", "round_key"]
 #: 账本最多记住几轮（只留最近的；采集单元一轮一个 key，防长跑内存无界）。
 LEDGER_MAX_ROUNDS = 8
 
-#: round key → node id → {"bootId": str, "pid": int | None}
-_LEDGER: dict[str, dict[str, dict[str, object]]] = {}
+class BootLedger:
+    """本轮 bootId 钉子账本（P0-5，2026-11-21：原来是模块级 `_LEDGER` 裸 dict）。
+
+    形状：`round key → node id → {"bootId": str, "pid": int | None}`，只留最近
+    `LEDGER_MAX_ROUNDS` 轮。**钉子只钉一次**（不一致后不改写）：写与「报不一致」在同一个方法里，
+    读的人不必再去追「谁在别处覆盖了字典」。
+
+    容量是构造参数而不是读模块常量：用例要能拿 `BootLedger(max_rounds=2)` 直接压边界，
+    而不必去动 `LEDGER_MAX_ROUNDS`（那是生产旋钮）。
+    """
+
+    def __init__(self, max_rounds: int = LEDGER_MAX_ROUNDS) -> None:
+        self._rounds: dict[str, dict[str, dict[str, object]]] = {}
+        self._max_rounds = max_rounds
+
+    def __len__(self) -> int:
+        """记住的轮数（≤ `max_rounds`；给边界用例与观测用）。"""
+        return len(self._rounds)
+
+    def _rounds_for(self, key: str) -> dict[str, dict[str, object]]:
+        """取该轮的账本段（按需建，且只留最近 `max_rounds` 轮）。"""
+        rounds = self._rounds.get(key)
+        if rounds is None:
+            rounds = {}
+            self._rounds[key] = rounds
+            while len(self._rounds) > self._max_rounds:
+                self._rounds.pop(next(iter(self._rounds)))
+        return rounds
+
+    def pin(self, rkey: str, node_id: str, boot: str, pid: object = None) -> str | None:
+        """钉/查一次 bootId。返回 `None` = 一致或无意见，否则 = 人读的排除原因。"""
+        rounds = self._rounds_for(rkey)
+        pinned = rounds.get(node_id)
+        if pinned is None:
+            rounds[node_id] = {"bootId": boot, "pid": pid}
+            return None
+        if pinned["bootId"] == boot:
+            return None
+        return (
+            f"同一轮里 bootId 变了（bootId {str(pinned['bootId'])[:8]}… → {boot[:8]}…，"
+            f"pid {pinned.get('pid')} → {pid}）—— 这个端口上换过进程"
+            "（两个 agent 同时在听？先查 /proc/net/tcp 的 st=0A 行）"
+        )
+
+    def pinned_boot(self, rkey: str, node_id: str) -> str | None:
+        """该轮该节点当前钉住的 bootId（`None` = 还没钉）。观测面：用例要靠它断言「没被改写」。"""
+        rounds = self._rounds.get(rkey)
+        if rounds is None:
+            return None
+        pinned = rounds.get(node_id)
+        if pinned is None:
+            return None
+        boot = pinned["bootId"]
+        return boot if isinstance(boot, str) else None
+
+    def clear_rounds(self) -> None:
+        """清空（单测用；生产不调用——清空等于「重新钉」，会放过一次不一致）。"""
+        self._rounds.clear()
+
+
+#: 本进程那份账本（`note_ping` 唯一读者；判据见模块 docstring）。
+_LEDGER = BootLedger()
 
 
 def round_key(leg: str, ident: str) -> str:
@@ -52,18 +112,7 @@ def round_key(leg: str, ident: str) -> str:
 
 def clear() -> None:
     """清空账本（单测用；生产不调用——清空等于「重新钉」，会放过一次不一致）。"""
-    _LEDGER.clear()
-
-
-def _rounds(key: str) -> dict[str, dict[str, object]]:
-    """取该轮的账本段（按需建，且只留最近 `LEDGER_MAX_ROUNDS` 轮）。"""
-    rounds = _LEDGER.get(key)
-    if rounds is None:
-        rounds = {}
-        _LEDGER[key] = rounds
-        while len(_LEDGER) > LEDGER_MAX_ROUNDS:
-            _LEDGER.pop(next(iter(_LEDGER)))
-    return rounds
+    _LEDGER.clear_rounds()
 
 
 def note_ping(rkey: str, node_id: str, ping: dict | None) -> str | None:
@@ -77,16 +126,4 @@ def note_ping(rkey: str, node_id: str, ping: dict | None) -> str | None:
     boot = ping.get("bootId")
     if not isinstance(boot, str) or not boot:
         return None  # 旧 agent（升级波未覆盖）/ 字段缺失：fail-open，见模块 docstring 第 3 条
-    pid = ping.get("pid")
-    rounds = _rounds(rkey)
-    pinned = rounds.get(node_id)
-    if pinned is None:
-        rounds[node_id] = {"bootId": boot, "pid": pid}
-        return None
-    if pinned["bootId"] == boot:
-        return None
-    return (
-        f"同一轮里 bootId 变了（bootId {str(pinned['bootId'])[:8]}… → {boot[:8]}…，"
-        f"pid {pinned.get('pid')} → {pid}）—— 这个端口上换过进程"
-        "（两个 agent 同时在听？先查 /proc/net/tcp 的 st=0A 行）"
-    )
+    return _LEDGER.pin(rkey, node_id, boot, ping.get("pid"))

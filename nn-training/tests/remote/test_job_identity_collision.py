@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import remote.http as http_mod
 import remote.job_lifecycle as jl_mod
 import remote.worker as worker_mod
 from common.protocol import (
@@ -308,7 +309,9 @@ def test_claim_reject_reason_is_logged(monkeypatch: pytest.MonkeyPatch) -> None:
     现场就是被这句兜底文案骗了：worker 打「hub 异常，请检查 hub 进程与隧道」，
     而真因是 `held`（身份歧义导致的跨课程路由）。
     """
-    monkeypatch.setattr(worker_mod, "_POLL_WARN_AT", {})  # 关掉 (url,status) 节流
+    # 关掉 (url,status) 节流：每条都拿到一份空表（`WarnThrottle` 收进对象后，替换**公开读面**
+    # 即可——`_warn_non_200` 自己就走 `warn_throttle()`）。
+    monkeypatch.setattr(http_mod, "warn_throttle", http_mod.WarnThrottle)
 
     def _fake_request(*_a, **_kw):
         return 409, json.dumps({"error": "claim 被拒: held (already claimed)"}).encode("utf-8")
@@ -328,7 +331,7 @@ def test_claim_reject_reason_is_logged(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_warn_non_200_still_calls_5xx_a_hub_fault(monkeypatch: pytest.MonkeyPatch) -> None:
     """5xx 仍是 hub 异常（文案分派不许把真故障也说成调度拒绝）。"""
-    monkeypatch.setattr(worker_mod, "_POLL_WARN_AT", {})
+    monkeypatch.setattr(http_mod, "warn_throttle", http_mod.WarnThrottle)
     lines: list[str] = []
     worker_mod._warn_non_200("http://hub", 502, lines.append, body=b"", jid="j" * 16)
     assert "hub 异常" in "\n".join(lines)

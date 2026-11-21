@@ -283,8 +283,46 @@ def xla_mark_step(device) -> None:
             log(f"[art] xla sync {dt:.1f}s")
 
 
-#: 设备自检的缓存（同一进程只测一次——它含一次 XLA 编译，按 job 跑会白付 300 次）。
-_SPEED_PROBE: dict[str, float] = {}
+class SpeedProbeCache:
+    """设备自检 matmul 的墙钟缓存（**同进程每设备只测一次**；P0-5，2026-11-21）。
+
+    为什么必须缓存：这项自检含一次 XLA 编译，按 job 跑会白付 300 次（真机实测）。
+    旧形状是模块级 `dict[str, float]`：读的地方（`if key in` / `[key]` / `[key] =`）散在
+    `xla_device_speed_probe` 里，读者得自己回答「什么时候写、谁清」。
+
+    `cached()` 用 `None` 表示「没测过」，而存进来的 `0.0` 仍会如实返回（0.0 是合法读数，
+    不能当「没缓存」）——调用方判 `is not None` 而不是真值。
+    """
+
+    def __init__(self) -> None:
+        # `dict()` 而非 `{}`：后者与 `hub/store_wire._init_wire` 的「注解空字典赋值」AST 同形，
+        # 会被复用账本记成结构克隆（2026-11-21 实测 clone 17→18）。
+        self._secs: dict[str, float] = dict()
+
+    def __len__(self) -> int:
+        """缓存了几个设备（观测用）。"""
+        return len(self._secs)
+
+    def cached(self, key: str) -> float | None:
+        """该设备已测得的秒数（`None` = 还没测）。"""
+        return self._secs.get(key)
+
+    def store(self, key: str, sec: float) -> None:
+        """记下该设备的墙钟（只由 `xla_device_speed_probe` 在测成功后调用）。"""
+        self._secs[key] = sec
+
+    def clear_secs(self) -> None:
+        """清场（单测用）。"""
+        self._secs.clear()
+
+
+#: 本进程那份自检缓存（`xla_device_speed_probe` 唯一读者）。
+_SPEED = SpeedProbeCache()
+
+
+def speed_probe_cache() -> SpeedProbeCache:
+    """本进程的自检缓存（公开读面：不必碰私有的 `_SPEED`）。"""
+    return _SPEED
 
 
 def xla_fingerprint(device: object = None) -> dict:
@@ -355,8 +393,9 @@ def xla_device_speed_probe(device: object, *, n: int = 2048) -> float | None:
     （`xla_device()` 两种后端都返回 `xla:0`，指纹之外只剩速度能区分）。
     """
     key = str(device)
-    if key in _SPEED_PROBE:
-        return _SPEED_PROBE[key]
+    cached = _SPEED.cached(key)
+    if cached is not None:
+        return cached
     try:
         import torch
 
@@ -370,7 +409,7 @@ def xla_device_speed_probe(device: object, *, n: int = 2048) -> float | None:
         sec = time.perf_counter() - t0
     except Exception:
         return None
-    _SPEED_PROBE[key] = sec
+    _SPEED.store(key, sec)
     return sec
 
 
@@ -444,8 +483,41 @@ def xla_metrics_snapshot() -> dict[str, float]:
             out[f"c.{name}"] = float(m.group(1))
     return out
 
-#: 持久化编译缓存是否已初始化（同进程重复初始化会抛；记一笔做幂等，也供日志查询）。
-_XLA_CACHE_STATE: dict[str, str] = {}
+class CompileCacheState:
+    """持久化编译缓存的**初始化记账**（P0-5，2026-11-21）。
+
+    torch_xla 的硬约束：同进程重复 `initialize_cache` 会抛，所以「已初始化」必须记得住。
+    旧形状是一格 `dict[str, str]`（只有 `"dir"` 一个键）——读的人猜不出还有没有别的键；
+    收进对象后状态只有一个属性 `dir`，`mark_enabled()` 是唯一写入口。
+
+    **不存「失败」**：初始化失败时什么都不记，下一次调用会重试（缓存是加速手段，
+    不能因为一次失败就把本进程的加速永久关掉）。
+    """
+
+    def __init__(self) -> None:
+        self._dir: str | None = None
+
+    @property
+    def dir(self) -> str | None:
+        """已初始化的缓存目录（`None` = 还没成功过）。"""
+        return self._dir
+
+    def mark_enabled(self, path: str) -> None:
+        """记下成功初始化的目录（只在 `initialize_cache` 返回后调用）。"""
+        self._dir = path
+
+    def clear_dir(self) -> None:
+        """清场（单测用）。"""
+        self._dir = None
+
+
+#: 本进程那份记账（`xla_enable_compile_cache` 唯一读者）。
+_CACHE = CompileCacheState()
+
+
+def compile_cache_state() -> CompileCacheState:
+    """本进程的编译缓存记账（公开读面）。"""
+    return _CACHE
 
 def xla_enable_compile_cache(path: object, *, enabled: bool | None = None) -> str:
     """开启 torch_xla 的**持久化编译缓存**；返回一行状态（**绝不抛**）。
@@ -464,7 +536,7 @@ def xla_enable_compile_cache(path: object, *, enabled: bool | None = None) -> st
         enabled = os.environ.get("XLA_PERSISTENT_CACHE", "1") not in ("0", "false", "False")
     if not enabled:
         return "已停用（XLA_PERSISTENT_CACHE=0）"
-    prev = _XLA_CACHE_STATE.get("dir")
+    prev = _CACHE.dir
     if prev is not None:
         # ★ 2026-10-30（用户口径「准备完成行只留必要读数」）：路径是**本机**细节，
         #   每轮打一遍纯噪声；「已开启 + 幂等」两个事实才是读数要回答的。
@@ -486,7 +558,7 @@ def xla_enable_compile_cache(path: object, *, enabled: bool | None = None) -> st
         fn(path_s)
     except Exception as err:
         return f"初始化失败（{type(err).__name__}: {err}）"
-    _XLA_CACHE_STATE["dir"] = path_s
+    _CACHE.mark_enabled(path_s)
     # 首启用：路径同样不进日志（每进程只报一次，但仍不是「准备完成」那行要回答的问题）。
     return "已开启（缓存被挤出时读盘而非重编，不改变数值）"
 

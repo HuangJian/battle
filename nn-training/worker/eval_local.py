@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -304,61 +305,64 @@ def run_eval_runner_capture(
     return subprocess.CompletedProcess(cmd, int(proc.returncode or 0), out, err)
 
 
-def run_local_eval_game(
-    bun: str,
-    weights_snapshot: str,
-    stage: int,
-    seed: int,
-    out_dir: Path,
-    max_ticks: int,
-    difficulty: str,
-    timeout_sec: float,
-    wver: str,
-    stage_json: str = "",
-    lives_override: int | None = None,
-    player_level: int | None = None,
-    # T1.2 policy 透传（EvalBench C 层 God 基线；'god' → export-eval-game 真 God-AI，
-    # 权重快照不需存在但调用方仍传——本地直跑与节点同报告 schema）。
-    policy: str = "nn",
-    # 控制台「导出 replay」（biz/eval_replays_once.py）：非空 = 整局输入录成 .replay
-    # 写入该目录（export-eval-game --replay；评估语义零变化）。
-    replay_dir: str = "",
-    # 导出器的执行根（缺省 = 仓库根，即本机/控制台的路径）。云机离线评估传 TS 运行时树
-    # 的根（`ts_code_cache/<sha>/`）——云上没有「仓库」，`tools/sim/export-eval-game.ts`
-    # 只在随包下发的 TS 树里。`tools/...` 相对路径与 bun 在 PATH 上都因此成立。
-    cwd: str | None = None,
-    # 慢局告警的落点（缺省 = `biz.log` 的 log）。云机离线评估传 run_loop 自己的 log，
-    # 让「哪一局慢」与那段训练的日志同册（否则告警在另一条流里）。
-    log_fn: Any = None,
-    # 这是第几次尝试（重试由调用方负责，见 `remote/offline_eval`）——只进告警行。
-    attempt: int = 1,
-    # 长驻 worker 池（云端离线评估传，见 `remote/offline_eval.run_cloud_eval`）：非空时**先试池**，
-    # 池没能服务这一局就回退下面的一次性 `bun`（行为与池不存在时相同）。本机/控制台路径传 None，
-    # 它们走节点集群/本机自己的派发（池是节点侧执行面的事）。
-    pool: Any = None,
-    # R2 事件 rung（plan/new-era-stop.plan.md §6）：True ⇒ 本局走事件门
-    # （均匀 K ∪ threat-ONSET + Δt≥3）；缺省 False = 老行为。池路径与一次性路径
-    # 共用同一份 cmd（上条注释），故两侧天然一致；远端 bundle 陈旧由既有 code_hash
-    # 门排除（与 --policy 等既有透传同待遇，不另设门）。
-    decision_events: bool = False,
-    # 决策周期 K（plan/k5-rhythm.plan.md）：课程 decision_k（默认 10）——评估与训练同节奏
-    # （train/deploy 不一致同属 plan 点名的静默分裂）；仅 ≠10 才透传，缺省命令逐字节不变。
-    decision_k: int = 10,
-    # 评估/部署链的推理侧规则（课程 `inference_rules.skip_steel_only_shots`）：
-    # True ⇒ 本局追加 `--skip-steel-only-shots`（顶钢空枪门）。缺省 False = 老行为；
-    # 训练 rollout 不认此参数（`worker.cmd` 无该开关）。
-    skip_steel_only_shots: bool = False,
-    # 评估/部署链推理规则（课程 `inference_rules.break_bricks_on_path`）：
-    # True ⇒ 追加 `--break-bricks-on-path`（拆砖免绕路）。缺省 False = 老行为。
-    break_bricks_on_path: bool = False,
-    # B8 通用废射门：True ⇒ 追加 `--suppress-useless-fire`。缺省 False = 老行为。
-    suppress_useless_fire: bool = False,
-    # B10 预测门：True ⇒ 追加 `--suppress-lead-miss-fire`。缺省 False = 老行为。
-    suppress_lead_miss_fire: bool = False,
-    # Hybrid opening（一次性课程评估 `--opening-connect`）：True ⇒ 本机 eval
-    # 命令追加 `--opening-connect`；与节点 agent 同口径。缺省 False = 老行为。
-    opening_connect: bool = False,
-) -> dict:
+@dataclass(frozen=True, kw_only=True)
+class EvalGameSpec:
+    """本机直跑一局的全部旋钮（原 `run_local_eval_game` 的 25 个参数，P0-3）。
+
+    **为什么是对象**（2026-11-21，`python.refactor.md` §P0-3）：25 个参数里 9 个是位置语义
+    （`bun/weights/stage/seed/out_dir/max_ticks/difficulty/timeout_sec/wver`），抄错一格就是
+    「评估了别的关/别的权重」而没有任何报错 —— 这是评估对账最贵的错法。同形先例：
+    `remote/publish_spec.PublishSpec`（§229/§230 那一族的 PublishSpec / RoundSpec /
+    RunSetup / RescanSpec / JobExecSpec）。
+
+    `kw_only` 是刻意的：字段再多也只能按名字给，杜绝「靠顺序记 9 个位置参数」。
+    """
+
+    #: bun 可执行文件（节点侧由工具链解析，本机走 PATH）。
+    bun: str
+    #: 权重**冻结快照**（不是 `rl_path`：主循环 PPO 会原地覆盖它）。
+    weights_snapshot: str
+    stage: int
+    seed: int
+    out_dir: Path
+    max_ticks: int
+    difficulty: str
+    timeout_sec: float
+    wver: str
+    #: 课程自定义关（`stageParams` 的 `stageJson`）。
+    stage_json: str = ""
+    lives_override: int | None = None
+    player_level: int | None = None
+    #: T1.2 policy 透传（EvalBench C 层 God 基线；'god' → export-eval-game 真 God-AI，
+    #: 权重快照不需存在但调用方仍传 —— 本地直跑与节点同报告 schema）。
+    policy: str = "nn"
+    #: 控制台「导出 replay」（`biz/eval_replays_once.py`）：非空 = 整局输入录成 .replay
+    #: 写入该目录（`export-eval-game --replay`；评估语义零变化）。
+    replay_dir: str = ""
+    #: 导出器的执行根（缺省 = 仓库根）。云机离线评估传 TS 运行时树的根 —— 云上没有「仓库」。
+    cwd: str | None = None
+    #: 慢局告警的落点（缺省 = `biz.log` 的 log）。云机传 run_loop 自己的 log，让「哪一局慢」
+    #: 与那段训练的日志同册。
+    log_fn: Any = None
+    #: 第几次尝试（重试由调用方负责，见 `remote/offline_eval`）——只进告警行。
+    attempt: int = 1
+    #: 长驻 worker 池：非空时**先试池**，池没能服务这一局就回退一次性 `bun`。
+    pool: Any = None
+    #: R2 事件 rung（`plan/new-era-stop.plan.md` §6）：True ⇒ 均匀 K ∪ threat-ONSET + Δt≥3。
+    decision_events: bool = False
+    #: 决策周期 K（`plan/k5-rhythm.plan.md`）：仅 ≠10 才透传，缺省命令逐字节不变。
+    decision_k: int = 10
+    #: 评估/部署链推理规则（课程 `inference_rules.*`）：仅在激活时透传。
+    skip_steel_only_shots: bool = False
+    break_bricks_on_path: bool = False
+    suppress_useless_fire: bool = False
+    suppress_lead_miss_fire: bool = False
+    #: Hybrid opening（一次性课程评估 `--opening-connect`）：与节点 agent 同口径；
+    #: 激活时**绕开长驻池**（池 worker 的旗标在启动时就固定了）。
+    opening_connect: bool = False
+
+
+def run_local_eval_game(spec: EvalGameSpec) -> dict:
     """本机直跑一局贪心评估（与节点 agent 同一 runner / 同一报告 schema）。
 
     权重必须传**派发时刻的冻结快照**而非 rl_path——主循环 PPO 写回会原地覆盖
@@ -366,60 +370,60 @@ def run_local_eval_game(
     成功返回补齐 wver/mode 回显的 manifest（mode 戳在 agent 路径由 agent 盖，
     本地路径由这里盖——validate_eval_result 的对账项）。
     """
-    out_dir.mkdir(parents=True, exist_ok=True)
+    spec.out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
-        bun,
+        spec.bun,
         # 单一来源（`common/protocol.EVAL_SCRIPT`）：池按脚本名建，两侧写两份就等着谁先漂
         _EVAL_SCRIPT,
         "--weights",
-        weights_snapshot,
+        spec.weights_snapshot,
         "--out",
-        str(out_dir),
+        str(spec.out_dir),
         "--stage",
-        str(stage),
+        str(spec.stage),
         "--seed",
-        str(seed),
+        str(spec.seed),
         "--difficulty",
-        difficulty,
+        spec.difficulty,
         "--max-ticks",
-        str(max_ticks),
+        str(spec.max_ticks),
         "--wver",
-        wver,
+        spec.wver,
         "--node-label",
         "local",
     ]
     # M1d 双侧同规：课程自定义关 stageJson + lives/level 覆盖（plan §6/§5.2）
-    if stage_json:
-        cmd += ["--stage-json", stage_json]
-    if lives_override is not None:
-        cmd += ["--lives-override", str(lives_override)]
-    if player_level is not None:
-        cmd += ["--player-level", str(player_level)]
+    if spec.stage_json:
+        cmd += ["--stage-json", spec.stage_json]
+    if spec.lives_override is not None:
+        cmd += ["--lives-override", str(spec.lives_override)]
+    if spec.player_level is not None:
+        cmd += ["--player-level", str(spec.player_level)]
     # T1.2：非 nn 策略透传（god 局权重文件不需要，export 侧忽略 --weights）。
-    if policy and policy != "nn":
-        cmd += ["--policy", policy]
+    if spec.policy and spec.policy != "nn":
+        cmd += ["--policy", spec.policy]
     # R2 事件 rung：课程 decision_events=True ⇒ 评估与训练同语义（train/deploy 不一致
     # 是 plan 点名的静默分裂；缺席 = 老行为，export 侧缺省 false）。
-    if decision_events:
+    if spec.decision_events:
         cmd += ["--decision-events"]
     # 决策周期 K：课程 decision_k ≠10 ⇒ 评估与训练同节奏（仅激活时透传，缺省逐字节不变）。
-    if int(decision_k) != 10:
-        cmd += ["--decision-k", str(int(decision_k))]
+    if int(spec.decision_k) != 10:
+        cmd += ["--decision-k", str(int(spec.decision_k))]
     # 评估/部署链推理规则：仅激活时透传（缺席 = 老行为，命令逐字节不变）。
-    if skip_steel_only_shots:
+    if spec.skip_steel_only_shots:
         cmd += ["--skip-steel-only-shots"]
-    if break_bricks_on_path:
+    if spec.break_bricks_on_path:
         cmd += ["--break-bricks-on-path"]
-    if suppress_useless_fire:
+    if spec.suppress_useless_fire:
         cmd += ["--suppress-useless-fire"]
-    if suppress_lead_miss_fire:
+    if spec.suppress_lead_miss_fire:
         cmd += ["--suppress-lead-miss-fire"]
-    if opening_connect:
+    if spec.opening_connect:
         cmd += ["--opening-connect"]
-    if replay_dir:
-        cmd += ["--replay", replay_dir]
+    if spec.replay_dir:
+        cmd += ["--replay", spec.replay_dir]
     t0 = time.time()
-    lab = game_watch.game_label(stage, seed)
+    lab = game_watch.game_label(spec.stage, spec.seed)
     # 长驻池优先（§22.7）：与一次性同行径的 argv、同样的硬顶与告警口径；池没能服务（超时/
     # ERR/worker 死掉/没槽位…）就**当场回退**下面的 `run_eval_runner_capture` —— 只慢不错。
     pooled = None
@@ -431,16 +435,16 @@ def run_local_eval_game(
     #   处置：只要本局带 opening_connect，就走下面的一次性 `run_eval_runner_capture`。
     # 另：`EVAL_POOL_DISABLE=1` 由一次性评估工具（tools/sim/eval-course-ckpt.ts）设置 ——
     # 那条链路是"逐任务语义"的（不同臂靠 flag 区分），**不能**复用任何常驻 worker。
-    if pool is not None and not opening_connect and os.environ.get("EVAL_POOL_DISABLE") != "1":
+    if spec.pool is not None and not spec.opening_connect and os.environ.get("EVAL_POOL_DISABLE") != "1":
         # `cmd[1:]`（去掉 bun 本身）：池的任务口径与 iter 腿逐字相同 —— 送进去的 argv 都以
         # **导出器脚本**开头（`[script, …args]`），池内部再去掉脚本路径把 args 写进 stdin。
-        pooled = pool.try_capture(
+        pooled = spec.pool.try_capture(
             cmd[1:],
-            timeout_sec,
+            spec.timeout_sec,
             label=lab,
-            attempt=attempt,
+            attempt=spec.attempt,
             kind="eval",
-            where=str(out_dir),
+            where=str(spec.out_dir),
         )
     if pooled is not None:
         _sec, lines = pooled
@@ -450,12 +454,12 @@ def run_local_eval_game(
     else:
         proc = run_eval_runner_capture(
             cmd,
-            timeout_sec,
-            cwd=cwd,
+            spec.timeout_sec,
+            cwd=spec.cwd,
             label=lab,
-            log_fn=log_fn,
+            log_fn=spec.log_fn,
             kind="eval",
-            attempt=attempt,
+            attempt=spec.attempt,
         )
     if proc.returncode != 0:
         # 保真（plan/eval-gap-honesty D1）：头尾两段 + errno。旧的 `[-160:]` 只留栈尾，
@@ -465,9 +469,9 @@ def run_local_eval_game(
         )
     # json.loads 返回 Any；_eval_report.json 契约固定为 dict。
     manifest: dict[str, Any] = json.loads(
-        (Path(out_dir) / "_eval_report.json").read_text(encoding="utf-8")
+        (Path(spec.out_dir) / "_eval_report.json").read_text(encoding="utf-8")
     )
-    manifest.setdefault("wver", wver)
+    manifest.setdefault("wver", spec.wver)
     manifest["mode"] = "eval"
     manifest["elapsedSec"] = round(time.time() - t0, 1)
     return manifest

@@ -24,9 +24,13 @@ import common.distribution
 import common.runtime
 from common import codehash_ref
 from common.distribution import node_ping
+from common.logutil import tag_logger
 from common.task_client import FetchTaskSpec, fetch_task, validate_eval_result
 from common.weights_client import post_weights_cached
 from worker.agent_meta import record_agent_meta, record_eval_failed
+
+#: 本腿的日志出口（缺省 `log`）：全仓同一条 `[HH:MM:SS] [tag] msg` 口径。
+_log = tag_logger("bc-eval", lambda: time)
 
 #: 与 biz/config.GATE_PLATEAU_METRICS 同词表（RL eval 展示口径）
 EVAL_METRIC_KEYS = ("win_rate", "kills_mean", "phits_mean", "pickup_mean", "timeout_frac")
@@ -322,7 +326,7 @@ def dispatch_bc_eval(
     course: Any | None = None,
     course_env: bool = False,
     meta_path: str | Path | None = None,
-    log=lambda msg: print(msg, flush=True),
+    log=_log,
 ) -> dict:
     """把一份 BC 权重在 eval 图上跑干净评估并聚合。
 

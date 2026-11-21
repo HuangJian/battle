@@ -397,7 +397,7 @@ def test_task_pack_gives_up_and_serves_after_the_trigger_limit(tmp_path, monkeyp
     没有上界时云机会被 409 卡到 deadline（30 分钟）然后 SystemExit。
     """
     # 节流窗是**读取点**在 `hub/offline.py` 的模块全局（门面的同名副本不参与判据）。
-    monkeypatch.setattr(offline_mod, "TASK_PACK_STALE_THROTTLE_SEC", 0.0)  # 让每次请求都可触发
+    monkeypatch.setattr(task_pack_mod, "TASK_PACK_STALE_THROTTLE_SEC", 0.0)  # 让每次请求都可触发
     calls = _stub_trigger(monkeypatch)
     pack = _export_real_pack(tmp_path, "c5-gae", INIT, monkeypatch)
     (tmp_path / "c5-gae" / "weights.json").write_bytes(INIT + b"-moved-on")
@@ -510,7 +510,7 @@ def test_missing_pack_triggers_one_rebuild_and_says_so(tmp_path, monkeypatch) ->
 
 def test_missing_pack_gives_up_after_the_miss_limit(tmp_path, monkeypatch) -> None:
     """上界：连推到顶仍没包 ⇒ 不再触发、只在正文里指路手动（**不制造新的等待理由**）。"""
-    monkeypatch.setattr(offline_mod, "TASK_PACK_STALE_THROTTLE_SEC", 0.0)
+    monkeypatch.setattr(task_pack_mod, "TASK_PACK_STALE_THROTTLE_SEC", 0.0)
     calls = _stub_trigger(monkeypatch)
     base, hub, _srv = _boot(tmp_path)
     _training_course(tmp_path, hub)
@@ -531,7 +531,7 @@ def test_missing_pack_ledger_resets_when_the_pack_appears(tmp_path, monkeypatch)
     为什么非清不可：不清就等于**一次上界用一辈子**——运维修好再删包（或干脆重导失败）时，
     hub 再也不会替云机推一次（plan §3.6-10）。
     """
-    monkeypatch.setattr(offline_mod, "TASK_PACK_STALE_THROTTLE_SEC", 0.0)
+    monkeypatch.setattr(task_pack_mod, "TASK_PACK_STALE_THROTTLE_SEC", 0.0)
     calls = _stub_trigger(monkeypatch)
     base, hub, _srv = _boot(tmp_path)
     _training_course(tmp_path, hub)

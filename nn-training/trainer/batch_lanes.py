@@ -12,7 +12,7 @@
 **读它的那个模块**上：
   * 本模块：`log`（通道日志）· `_record_agent_meta`（机器健康行）· `run_local_eval_game`
     （本机槽位）· `STUCK_GRACE_SEC` / `BUSY_BACKOFF_CAP_SEC`（机器独占常量）。
-  * 仍住 `trainer.batch_runner`：`bun_version` / `RECOVER_PING_SEC` / `NO_CONSUMER_GRACE_SEC` /
+  * 仍住 `trainer.batch_runner`：`TOOLCHAIN`（版本门端口）/ `RECOVER_PING_SEC` / `NO_CONSUMER_GRACE_SEC` /
     `NODE_RECOVERY_TRIES` / `BatchStore`（执行器那一侧）。
   打在错的家 = **静默空操作**（名字还在、没人读）⇒ `tests/trainer/test_batch_runner_split.py`
   按「谁裸名读、谁必须绑定」逐名判。
@@ -53,6 +53,7 @@ from worker import node_identity
 from worker.agent_meta import record_agent_meta as _record_agent_meta
 from worker.eval_local import (
     EVAL_TASK_ATTEMPTS,
+    EvalGameSpec,
     eval_census_fields,
     eval_loot_fields,
     eval_metric_fields,
@@ -579,29 +580,33 @@ class _UnitLanes:
         if nd["id"] == "local":
             assert self.local_weights is not None
             m = run_local_eval_game(
-                self.owner.bun,
-                self.local_weights,
-                task[0],
-                task[1],
-                self.owner.eval_log.parent
-                / "local-batcheval"
-                / f'u{self.owner.unit_idx}_s{task[0]}_seed{task[1]}',
-                max_ticks=up["maxTicks"],
-                difficulty=up["difficulty"],
-                timeout_sec=self.task_timeout,
-                # 全量 wver：agent 按完整 sha 存桶；且本局 manifest.wver 就是它
-                #（validate 用同一个值对账）。key16 只作行字段。
-                wver=self.wver,
-                stage_json=up["stageJson"],
-                lives_override=up["lives"],
-                player_level=up["level"],
-                policy=self.owner.policy,
-                # R2 事件 rung：手动 judge 由 spec.decisionEvents 驱动（缺席 = 老行为）。
-                decision_events=bool(getattr(getattr(self.owner, "args", None), "decision_events", False)),
-                # 决策周期 K：手动 judge 由 spec.decisionK 驱动（缺席/10 = 老行为）。
-                decision_k=int(getattr(getattr(self.owner, "args", None), "decision_k", 10)),
-                # 顶钢空枪门/拆砖（课程 inference_rules；缺席 = 老行为）。
-                **eval_rule_kwargs(getattr(self.owner, "args", None)),
+                EvalGameSpec(
+                    bun=self.owner.bun,
+                    weights_snapshot=self.local_weights,
+                    stage=task[0],
+                    seed=task[1],
+                    out_dir=self.owner.eval_log.parent
+                    / "local-batcheval"
+                    / f'u{self.owner.unit_idx}_s{task[0]}_seed{task[1]}',
+                    max_ticks=up["maxTicks"],
+                    difficulty=up["difficulty"],
+                    timeout_sec=self.task_timeout,
+                    # 全量 wver：agent 按完整 sha 存桶；且本局 manifest.wver 就是它
+                    #（validate 用同一个值对账）。key16 只作行字段。
+                    wver=self.wver,
+                    stage_json=up["stageJson"],
+                    lives_override=up["lives"],
+                    player_level=up["level"],
+                    policy=self.owner.policy,
+                    # R2 事件 rung：手动 judge 由 spec.decisionEvents 驱动（缺席 = 老行为）。
+                    decision_events=bool(
+                        getattr(getattr(self.owner, "args", None), "decision_events", False)
+                    ),
+                    # 决策周期 K：手动 judge 由 spec.decisionK 驱动（缺席/10 = 老行为）。
+                    decision_k=int(getattr(getattr(self.owner, "args", None), "decision_k", 10)),
+                    # 顶钢空枪门/拆砖（课程 inference_rules；缺席 = 老行为）。
+                    **eval_rule_kwargs(getattr(self.owner, "args", None)),
+                )
             )
         else:
             m, _files = common.task_client.fetch_task(common.task_client.FetchTaskSpec(

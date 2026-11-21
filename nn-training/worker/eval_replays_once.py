@@ -238,7 +238,7 @@ def _export(args: argparse.Namespace, manifest_path: Path) -> int:
 
     from common.log import log
     from worker.config import apply_course, load_course, stage_json_for_args
-    from worker.eval_local import run_local_eval_game
+    from worker.eval_local import EvalGameSpec, run_local_eval_game
 
     t0 = time.time()
     out_dir = Path(args.out_dir)
@@ -340,28 +340,30 @@ def _export(args: argparse.Namespace, manifest_path: Path) -> int:
         game_dir = tmp_reports / f"s{stage}_sd{seed}"
         try:
             man = run_local_eval_game(
-                args.bun,
-                str(weights),
-                stage,
-                seed,
-                game_dir,
-                max_ticks,
-                difficulty,
-                timeout_sec=float(args.timeout),
-                wver=args.wver,
-                stage_json=stage_json_for_args(ns, stage) or "",
-                lives_override=lives if lives is not None else None,
-                player_level=level if level is not None else None,
-                # 决策节奏与账本那一局同口径（缺省 False/10 只对 decision_k==10 的课成立）。
-                decision_events=decision_events,
-                decision_k=decision_k,
-                skip_steel_only_shots=skip_steel_only_shots,
-                break_bricks_on_path=break_bricks_on_path,
-                suppress_useless_fire=suppress_useless_fire,
-                suppress_lead_miss_fire=suppress_lead_miss_fire,
-                opening_connect=opening_connect,
-                policy="nn",
-                replay_dir=str(out_dir),
+                EvalGameSpec(
+                    bun=args.bun,
+                    weights_snapshot=str(weights),
+                    stage=stage,
+                    seed=seed,
+                    out_dir=game_dir,
+                    max_ticks=max_ticks,
+                    difficulty=difficulty,
+                    timeout_sec=float(args.timeout),
+                    wver=args.wver,
+                    stage_json=stage_json_for_args(ns, stage) or "",
+                    lives_override=lives if lives is not None else None,
+                    player_level=level if level is not None else None,
+                    # 决策节奏与账本那一局同口径（缺省 False/10 只对 decision_k==10 的课成立）。
+                    decision_events=decision_events,
+                    decision_k=decision_k,
+                    skip_steel_only_shots=skip_steel_only_shots,
+                    break_bricks_on_path=break_bricks_on_path,
+                    suppress_useless_fire=suppress_useless_fire,
+                    suppress_lead_miss_fire=suppress_lead_miss_fire,
+                    opening_connect=opening_connect,
+                    policy="nn",
+                    replay_dir=str(out_dir),
+                )
             )
         except Exception as e:  # 单局失败不拖垮整批
             failed += 1

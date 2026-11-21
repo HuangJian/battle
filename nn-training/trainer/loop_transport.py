@@ -31,6 +31,7 @@ from common.protocol import (
     coef_active,
 )
 from common.settings import push_node_from_env
+from common.warn_once import WarnOnce
 from remote.push_client import submit_job as _push_submit
 from remote.push_client import wait_result as _push_wait_result
 from worker.schedule import kickstart_coef as _kickstart_coef
@@ -142,10 +143,8 @@ ROLLOUT_SRCS_RETIRED: tuple[str, ...] = ("run",)
 
 def _note_retired_source(stem: str, val: str) -> None:
     """旧 `run` 配置的容忍读告警（按课去重：`_rollout_source` 每轮都被问一次）。"""
-    key = (stem or "?", val)
-    if key in _RETIRED_SOURCE_NOTED:
+    if not _RETIRED_SOURCE.mark((stem or "?", val)):
         return
-    _RETIRED_SOURCE_NOTED.add(key)
     from common.log import log
 
     log(
@@ -155,8 +154,8 @@ def _note_retired_source(stem: str, val: str) -> None:
     )
 
 
-#: 已喊过的旧取值（课, 值）去重。
-_RETIRED_SOURCE_NOTED: set[tuple[str, str]] = set()
+#: 已喊过的旧取值（课, 值）去重（P0-5：查与加是同一个动作，见 `common/warn_once.py`）。
+_RETIRED_SOURCE = WarnOnce()
 
 
 def _rollout_source(args: Any) -> str:
@@ -226,7 +225,7 @@ def node_volume_conflict(args: Any, *, source: str | None = None) -> str:
 
 #: 「离线自动复原」在显式 `--rollout-src` 下**不成立**——已喊过的（课, 实测值）去重：
 #: `_rollout_source` 每轮都会被问一次，不去重就是每轮刷一行。
-_RESTORE_UNSUPPORTED_NOTED: set[tuple[str, str]] = set()
+_RESTORE_UNSUPPORTED = WarnOnce()
 
 
 def _warn_explicit_source_blocks_restore(args: Any, mode: str) -> None:
@@ -238,10 +237,8 @@ def _warn_explicit_source_blocks_restore(args: Any, mode: str) -> None:
     if mode != "node":
         return
     stem = _course_stem(args)
-    key = (stem or "?", mode)
-    if key in _RESTORE_UNSUPPORTED_NOTED:
+    if not _RESTORE_UNSUPPORTED.mark((stem or "?", mode)):
         return
-    _RESTORE_UNSUPPORTED_NOTED.add(key)
     from common.log import log
 
     log(

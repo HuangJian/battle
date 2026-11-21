@@ -418,13 +418,11 @@ def test_dispatch_baseline_writes_iter0_rows(
     cfg = {"nodes": [], "policy": {"evalLocalSlots": 1}}
     ran: list[tuple[int, int]] = []
 
-    def fake_runner(
-        bun, snap, stage, seed, out_dir, max_ticks, difficulty, timeout_sec, wver, **kw
-    ):
-        ran.append((stage, seed))
+    def fake_runner(spec, **kw):
+        ran.append((spec.stage, spec.seed))
         return {
-            "stage": stage,
-            "seed": seed,
+            "stage": spec.stage,
+            "seed": spec.seed,
             "outcome": "timeout",
             "ticks": 10,
             "win": 0,
@@ -432,7 +430,7 @@ def test_dispatch_baseline_writes_iter0_rows(
             "quality": 0.2,
             "dims": {},
             "elapsedSec": 0.001,
-            "wver": wver,
+            "wver": spec.wver,
             "mode": "eval",
         }
 

@@ -157,19 +157,19 @@ def test_run_cloud_eval_records_rows_and_settles_the_summary(
 ) -> None:
     calls: list[tuple[int, int]] = []
 
-    def fake_runner(bun, weights, stage, seed, out_dir, max_ticks, difficulty, timeout, wver, **kw):
-        calls.append((stage, seed))
-        assert kw["cwd"] == str(_ts_root(tmp_path)), "云机评估必须跑在 TS 树根上"
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
+    def fake_runner(spec, **_kw):
+        calls.append((spec.stage, spec.seed))
+        assert spec.cwd == str(_ts_root(tmp_path)), "云机评估必须跑在 TS 树根上"
+        Path(spec.out_dir).mkdir(parents=True, exist_ok=True)
         return {
-            "win": stage == 0,
+            "win": spec.stage == 0,
             "cleared": True,
-            "outcome": "win" if stage == 0 else "loss",
+            "outcome": "win" if spec.stage == 0 else "loss",
             "kills": 2,
             "ticks": 100,
             "elapsedSec": 0.01,
-            "stage": stage,
-            "seed": seed,
+            "stage": spec.stage,
+            "seed": spec.seed,
         }
 
     monkeypatch.setattr(offline_eval, "run_local_eval_game", fake_runner)
@@ -209,7 +209,7 @@ def test_run_cloud_eval_records_rows_and_settles_the_summary(
     assert summary[0]["lost"] == 0 and summary[0]["carried"] == 0
     assert summary[0]["left_pending"] == 0 and summary[0]["close_reason"] is None
 
-    # 幂等：同一 wver 再来一次 ⇒ 一局不重跑（账本去重）
+    # 幂等：同一 spec.wver 再来一次 ⇒ 一局不重跑（账本去重）
     again = run_cloud_eval(
         plan=plan,
         it=1,
@@ -230,8 +230,8 @@ def test_run_cloud_eval_survives_single_game_failures(
 ) -> None:
     """单局失败只放弃那一局（响亮记一笔），其余照落账——评估是旁路，绝不拖垮训练。"""
 
-    def flaky(bun, weights, stage, seed, out_dir, max_ticks, difficulty, timeout, wver, **kw):
-        if stage == 1:
+    def flaky(spec, **_kw):
+        if spec.stage == 1:
             raise RuntimeError("rc=1 (boom)")
         return {"win": True, "cleared": True, "outcome": "win", "elapsedSec": 0.01}
 
@@ -270,13 +270,13 @@ def test_run_cloud_eval_watchdog_caps_and_retries_in_place(
     timeouts: list[float] = []
     attempts: dict[tuple[int, int], int] = {}
 
-    def flaky(bun, weights, stage, seed, out_dir, max_ticks, difficulty, timeout, wver, **kw):
-        timeouts.append(float(timeout))
-        key = (stage, seed)
+    def flaky(spec, **_kw):
+        timeouts.append(float(spec.timeout_sec))
+        key = (spec.stage, spec.seed)
         attempts[key] = attempts.get(key, 0) + 1
         if attempts[key] == 1:  # 第一把卡死（被看门狗杀了）⇒ 原地重跑
-            raise subprocess.TimeoutExpired(["bun", "export-eval-game.ts"], timeout)
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
+            raise subprocess.TimeoutExpired(["bun", "export-eval-game.ts"], spec.timeout_sec)
+        Path(spec.out_dir).mkdir(parents=True, exist_ok=True)
         return {"win": True, "cleared": True, "outcome": "win", "elapsedSec": 0.01}
 
     monkeypatch.setattr(offline_eval, "run_local_eval_game", flaky)
@@ -347,20 +347,20 @@ def test_unreapable_eval_game_is_resubmitted_in_round_never_failing(
     toy = eval_pairs(plan, 1)  # 语料里的一个真 (stage,seed)（种子是 860001+，不是 1）
     target = toy[-1]
 
-    def flaky(bun, weights, stage, seed, out_dir, max_ticks, difficulty, timeout, wver, **kw):
-        calls.append((stage, seed))
-        if (stage, seed) == target and calls.count(target) == 1:
+    def flaky(spec, **_kw):
+        calls.append((spec.stage, spec.seed))
+        if (spec.stage, spec.seed) == target and calls.count(target) == 1:
             raise UnreapableChildError(
-                f"eval 单局超时（5.0s > 硬顶 5s）：s{stage}/d{seed}；且 SIGKILL 之后 5s 内回收不了"
+                f"eval 单局超时（5.0s > 硬顶 5s）：s{spec.stage}/d{spec.seed}；且 SIGKILL 之后 5s 内回收不了"
             )
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        Path(spec.out_dir).mkdir(parents=True, exist_ok=True)
         return {
-            "win": stage == 0,
+            "win": spec.stage == 0,
             "cleared": True,
-            "outcome": "win" if stage == 0 else "loss",
+            "outcome": "win" if spec.stage == 0 else "loss",
             "elapsedSec": 0.01,
-            "stage": stage,
-            "seed": seed,
+            "stage": spec.stage,
+            "seed": spec.seed,
         }
 
     monkeypatch.setattr(offline_eval, "run_local_eval_game", flaky)
@@ -419,20 +419,20 @@ def test_eval_game_stuck_in_uncancellable_io_is_resubmitted_in_round(
     toy = eval_pairs(plan, 1)  # 语料里的一个真 (stage,seed)（种子是 860001+，不是 1）
     target = toy[-1]
 
-    def stuck(bun, weights, stage, seed, out_dir, max_ticks, difficulty, timeout, wver, **kw):
-        calls.append((stage, seed))
-        if (stage, seed) == target and not blocked:
-            blocked.append((stage, seed))
+    def stuck(spec, **_kw):
+        calls.append((spec.stage, spec.seed))
+        if (spec.stage, spec.seed) == target and not blocked:
+            blocked.append((spec.stage, spec.seed))
             release.wait()  # 不可取消：永不返回
             raise AssertionError("不可取消的阻塞不该返回（本用例靠超界收场）")
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        Path(spec.out_dir).mkdir(parents=True, exist_ok=True)
         return {
-            "win": stage == 0,
+            "win": spec.stage == 0,
             "cleared": True,
-            "outcome": "win" if stage == 0 else "loss",
+            "outcome": "win" if spec.stage == 0 else "loss",
             "elapsedSec": 0.01,
-            "stage": stage,
-            "seed": seed,
+            "stage": spec.stage,
+            "seed": spec.seed,
         }
 
     monkeypatch.setattr(offline_eval, "run_local_eval_game", stuck)
@@ -485,10 +485,10 @@ def test_eval_round_retry_cap_is_the_operators_exit_valve(
     """
     monkeypatch.setenv(offline_eval.ENV_EVAL_ROUND_RETRY_MAX, "2")
 
-    def always_stuck(bun, weights, stage, seed, out_dir, max_ticks, difficulty, timeout, wver, **kw):
-        if (stage, seed) == target:
+    def always_stuck(spec, **_kw):
+        if (spec.stage, spec.seed) == target:
             raise UnreapableChildError("eval 单局超时；SIGKILL 之后 5s 内回收不了")
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        Path(spec.out_dir).mkdir(parents=True, exist_ok=True)
         return {"win": True, "cleared": True, "outcome": "win", "elapsedSec": 0.01}
 
     monkeypatch.setattr(offline_eval, "run_local_eval_game", always_stuck)

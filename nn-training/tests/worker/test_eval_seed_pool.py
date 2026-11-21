@@ -423,26 +423,12 @@ def test_dispatcher_daily_corpus_100_fixed_offpool(tmp_path: Path, monkeypatch) 
 
     calls: list[tuple[int, int]] = []
 
-    def fake_runner(
-        bun,
-        snap,
-        stage,
-        seed,
-        out_dir,
-        max_ticks,
-        difficulty,
-        timeout_sec,
-        wver,
-        stage_json="",
-        lives_override=None,
-        player_level=None,
-        **kw,
-    ):
-        calls.append((stage, seed))
-        win = 1 if seed in EVAL_SEEDS[:50] else 0
+    def fake_runner(spec, **_kw):
+        calls.append((spec.stage, spec.seed))
+        win = 1 if spec.seed in EVAL_SEEDS[:50] else 0
         return {
-            "stage": stage,
-            "seed": seed,
+            "stage": spec.stage,
+            "seed": spec.seed,
             "outcome": "stage_clear" if win else "timeout",
             "ticks": 10,
             "win": win,
@@ -450,7 +436,7 @@ def test_dispatcher_daily_corpus_100_fixed_offpool(tmp_path: Path, monkeypatch) 
             "quality": 0.2,
             "dims": {},
             "elapsedSec": 0.001,
-            "wver": wver,
+            "wver": spec.wver,
             "mode": "eval",
         }
 
@@ -581,11 +567,11 @@ def test_dispatcher_prefix_when_not_daily_n(tmp_path: Path, monkeypatch) -> None
     rl.write_text('{"arch":{"n":2}}', encoding="utf-8")
     calls: list[tuple[int, int]] = []
 
-    def fake_runner(bun, snap, stage, seed, out_dir, max_ticks, difficulty, timeout_sec, wver, **kw):
-        calls.append((stage, seed))
+    def fake_runner(spec, **_kw):
+        calls.append((spec.stage, spec.seed))
         return {
-            "stage": stage,
-            "seed": seed,
+            "stage": spec.stage,
+            "seed": spec.seed,
             "outcome": "timeout",
             "ticks": 1,
             "win": 0,
@@ -593,7 +579,7 @@ def test_dispatcher_prefix_when_not_daily_n(tmp_path: Path, monkeypatch) -> None
             "quality": 0,
             "dims": {},
             "elapsedSec": 0.001,
-            "wver": wver,
+            "wver": spec.wver,
             "mode": "eval",
         }
 

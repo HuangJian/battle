@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import sys
@@ -32,6 +33,7 @@ from remote.deliver_outbox import (
     FINAL_NAME,
     STATE_NAME,
     LocalOutboxDeliverer,
+    OutboxGates,
     ack_outbox,
     metrics_path,
     read_state,
@@ -425,3 +427,40 @@ def test_close_reports_unsent_work_loudly(
     ob.close(0.0)
     assert any("还有 1 轮没物化" in m for m in logs), logs
     assert not round_path(tmp_path / "outbox", 1).exists(), "打桩失败就不该有 body"
+
+
+# ───────────────── 写闸的所有权（P0-5，2026-11-21） ─────────────────
+#
+# 旧形状：`_GATES`（表）+ `_GATES_LOCK`（建表的锁）两个模块级 dict/对象，fd 与持有深度散在
+# 一个裸 dict 里 —— 「谁持有 fd、谁负责关」只能从使用处反推。现在三样东西同住 `_Gate`，
+# 闸表本身是 `OutboxGates` 实例。下面四条钉住新形状的语义与边界。
+
+
+def test_the_gate_is_keyed_by_the_resolved_path_and_is_reentrant(tmp_path: Path) -> None:
+    gates = OutboxGates()
+    # 同线程重入：旧形状靠 depth>0 跳过 flock（同进程对同一文件再 flock 会自锁）。
+    with gates.gate(tmp_path), gates.gate(str(tmp_path) + "/"):
+        pass
+    assert len(gates) == 1, "同一个 outbox 的不同写法必须共一把闸"
+
+
+def test_two_outboxes_get_two_independent_gates(tmp_path: Path) -> None:
+    gates = OutboxGates()
+    with gates.gate(tmp_path / "a"), gates.gate(tmp_path / "b"):
+        pass
+    assert len(gates) == 2
+
+
+def test_the_default_gate_table_is_an_object_not_a_module_globals_pair() -> None:
+    """闸表必须是 `OutboxGates()` 实例，且建表的锁归它所有（不再有 `_GATES_LOCK`）。"""
+    tree = ast.parse((ROOT / "remote/deliver_outbox.py").read_text(encoding="utf-8"))
+    assigns = {
+        t.id: n.value
+        for n in tree.body
+        if isinstance(n, ast.Assign)
+        for t in n.targets
+        if isinstance(t, ast.Name)
+    }
+    value = assigns["_GATES"]
+    assert isinstance(value, ast.Call) and getattr(value.func, "id", "") == "OutboxGates"
+    assert set(assigns).isdisjoint({"_GATES_LOCK"})

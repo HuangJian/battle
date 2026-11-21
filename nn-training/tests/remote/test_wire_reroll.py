@@ -50,17 +50,16 @@ MB = 1024 * 1024
 
 @pytest.fixture(autouse=True)
 def _clean_wire_state():
-    """本文件的用例都动模块级状态（传输账 + 会话最好速率）——每例前后清干净。
+    """本文件的用例都动模块级状态（传输账 + 判据参照）——每例前后清干净。
 
-    `_WIRE` 是原地可变（`.clear()`），从 `worker` 或 `wire` 进都是同一份账；
-    而 `_BEST_RATE` 是**重绑式**会话标量，实现与注入点都在 `remote.wire`——
-    从 `worker` 重绑只会改名而不改值（S4 第四步拆分的 seam，见 `remote/wire.py`）。
+    两者都是**对象**（`.clear()` / `.clear_samples()`），`worker` 的转发名与 `wire` 指向
+    同一个实例，从哪个入口进都一样（S4 第四步拆分的 seam，见 `remote/wire.py`）。
     """
     worker_mod._WIRE.clear()
-    wire_mod._BEST_RATE = 0.0
+    wire_mod.rate_reference().clear_samples()
     yield
     worker_mod._WIRE.clear()
-    wire_mod._BEST_RATE = 0.0
+    wire_mod.rate_reference().clear_samples()
 
 
 class _FakeResp:
@@ -331,7 +330,7 @@ def test_reference_rate_decays_after_repeated_slow_samples() -> None:
     单个慢样本仍不覆盖更好值（既有契约，见 `test_note_rate_is_session_stateful_and_reproducible`）。
     """
     mb = 1024 * 1024
-    wire_mod._BEST_RATE = 0.0
+    wire_mod.rate_reference().clear_samples()
     worker_mod._note_rate(3 * mb, 4 * mb)
     assert abs(wire_mod.best_rate() - 3 * mb) < 1.0
 

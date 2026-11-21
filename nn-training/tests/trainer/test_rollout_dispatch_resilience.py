@@ -31,6 +31,7 @@ import common.shard
 import common.task_client
 import trainer.dispatch as disp
 import trainer.queue_local as ql
+from tests.helpers.toolchain import stub_toolchain
 
 GOOD_PING: dict[str, Any] = {
     "codeHash": "deadbeef",
@@ -104,7 +105,7 @@ class _Harness:
         # 本机腿的测试统一打桩：不启真 bun、不建长驻池。
         monkeypatch.setattr(disp, "make_local_pool", lambda *a, **k: None)
         monkeypatch.setattr(common.codehash, "compute_code_hash", lambda: "deadbeef")
-        monkeypatch.setattr(disp, "bun_version", lambda _bun: "1.1.0")
+        stub_toolchain(monkeypatch, disp, "1.1.0")
         monkeypatch.setattr(
             common.distribution,
             "node_ping",

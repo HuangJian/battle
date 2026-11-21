@@ -47,6 +47,7 @@ from pathlib import Path
 
 from common.log import log
 from common.paths import REPO_ROOT
+from common.warn_once import WarnOnce
 
 #: 仓库根（唯一实现在 `common/paths.py`）。
 
@@ -265,29 +266,32 @@ def write_applied_if_changed(
         return f"{type(e).__name__}: {e}"
 
 
-#: 进程内「旧 txt 已告警」去重集合（**纯日志去重**：不参与判定、不跨进程、无可复现语义
+#: 进程内「旧 txt 已告警」去重桶（**纯日志去重**：不参与判定、不跨进程、无可复现语义
 #: —— 不是隐藏的训练状态；`seen` 参数只是给用例一个干净的桶）。
-_WARNED: set[str] = set()
+_WARNED = WarnOnce()
 
 
-def warn_once_on_legacy_txt(traj_root: object, seen: set[str] | None = None) -> str:
-    """课程级 `<traj>/gate-halt-mode.txt` 已退役：存在就告警一次（缺省按模块级集合去重）。
+def warn_once_on_legacy_txt(traj_root: object, seen: WarnOnce | None = None) -> str:
+    """课程级 `<traj>/gate-halt-mode.txt` 已退役：存在就告警一次（缺省按模块级桶去重）。
 
     返回**人读的告警行**（空 = 无需告警）；不抛、**不读内容**（内容无论如何都不生效）。
+
+    顺序是判据的一部分：**先查存在、再 `mark`**——文件不存在时不能烧掉这个 key，否则这门课
+    以后真出现该文件也不会再告警（`WarnOnce.seen()` / `mark()` 分开就是为这种调用点留的）。
     """
     if traj_root is None:
         return ""
     p = Path(str(traj_root)) / "gate-halt-mode.txt"
     key = str(p)
     bucket = _WARNED if seen is None else seen
-    if key in bucket:
+    if bucket.seen(key):
         return ""
     try:
         if not p.exists():
             return ""
     except OSError:
         return ""
-    bucket.add(key)
+    bucket.mark(key)
     return f"[gate] 忽略课程级 gate-halt-mode.txt（门禁已是平台级）：{p}，可删"
 
 

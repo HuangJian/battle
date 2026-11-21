@@ -130,15 +130,37 @@ def rss_bytes() -> int:
 #: （真 hub 进程、每个 rollout worker、以及 12 个 pytest worker）⇒ 白付 0.53s×N。
 #: 构造只服务 `/admin/net-probe`（`_deterministic_fill`），延迟不改任何语义；
 #: 内容逐字节不变（同一种子、同一生成式、同一长度）。
-_PROBE_BLOCK: bytes | None = None
+class ProbeBlock:
+    """惰性构造的 64KiB 确定性填充块（P0-5，2026-11-21）。
+
+    为什么是个对象而不是「模块级 `bytes | None` + `global`」：那份形状的写点在
+    `_probe_block()` 里，读的人只看得到 `global _PROBE_BLOCK` 一行，答不出「谁建的、建了一半
+    会怎样」。收进对象后「建一次」是 `bytes()` 自己的行为，模块只留一个持有者。
+
+    线程语义与旧实现一致：**不加锁**。两个线程同时首次调用会各建一份、后者覆盖前者——
+    内容由固定种子决定，逐字节相同，最坏是多花 0.53 s 一次的构造时间（`/admin/net-probe`
+    不是热路径，而加锁要回答「在临界区里跑 65536 次 getrandbits」这种没必要的问题）。
+    """
+
+    def __init__(self) -> None:
+        self._block: bytes | None = None
+
+    def bytes(self) -> bytes:
+        """取（首次调用时构造的）64KiB 块。"""
+        block = self._block
+        if block is None:
+            block = bytes(random.Random(0x5EED).getrandbits(8) for _ in range(65536))
+            self._block = block
+        return block
+
+
+#: 本进程那份填充块（`/admin/net-probe` 唯一读者，见上面的 0.53s 延迟理由）。
+_BLOCK = ProbeBlock()
 
 
 def _probe_block() -> bytes:
     """取（惰性构造的）64KiB 确定性填充块。"""
-    global _PROBE_BLOCK
-    if _PROBE_BLOCK is None:
-        _PROBE_BLOCK = bytes(random.Random(0x5EED).getrandbits(8) for _ in range(65536))
-    return _PROBE_BLOCK
+    return _BLOCK.bytes()
 
 
 def _deterministic_fill(n: int) -> bytes:

@@ -13,7 +13,8 @@ weights_client / runtime / log / proc）· `biz.batch_plan` · `remote.weights_s
 
 **★ 注入点（patch 目标）**：依赖注入靠**模块全局**，测试 `monkeypatch.setattr` 打的是**读它的
 那个模块**。2026-11-20 通道机器整块搬去 `trainer/batch_lanes.py` 后，锚点分两家：
-  * 本模块（执行器那一侧）：`log`（单元开始/收尾行）· `bun_version`（节点版本门的本机值）·
+  * 本模块（执行器那一侧）：`log`（单元开始/收尾行）· `TOOLCHAIN`（节点版本门的本机值，
+    经 `common.proc.Toolchain` 端口）·
     `BatchStore`（台账写点）· `RECOVER_PING_SEC` / `NO_CONSUMER_GRACE_SEC` / `NODE_RECOVERY_TRIES`。
   * `trainer.batch_lanes`（机器那一侧）：`log` · `_record_agent_meta` · `run_local_eval_game` ·
     `BUSY_BACKOFF_CAP_SEC` / `STUCK_GRACE_SEC`。
@@ -48,7 +49,7 @@ import common.task_client
 import common.weights_client
 from biz.batch_plan import batch_iter_id, kind_for_policy
 from common.log import default_router, log
-from common.proc import bun_version
+from common.proc import TOOLCHAIN
 from remote import weights_standard
 from trainer.batch_lanes import UnitLedger, _UnitLanes, _UnitPlan
 from trainer.batch_store import BatchStore, data_root
@@ -261,7 +262,7 @@ class BatchEvalRunner:
         # （从不读取）；nn 局必须读派发时刻冻结快照。
         local_weights = snapshot_path or ((self.rl_path or "no-weights-god") if god else None)
 
-        local_bun = bun_version(self.bun)
+        local_bun = TOOLCHAIN.bun_version(self.bun)
         # 节点门指纹（2026-09-17 统一）：与 rollout 门同源 = SSOT 清单的 codeHash。
         # ---- 派发通道：**每节点各自就绪、各自派单**（用户 2026-09-19 五条裁定）----
         # 旧实现是三个**串行阶段**：ping 全部节点 → 全部节点收权重 → 才开派。慢节点把整批

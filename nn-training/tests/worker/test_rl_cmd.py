@@ -106,3 +106,31 @@ def test_teacher_argmax_reaches_node_side_argv() -> None:
         wver="abc", node_label="iter", node_side=True,
     )
     assert plain.count("--teacher-argmax") == 0
+
+
+def test_local_code_sha_is_computed_once_per_process(monkeypatch) -> None:
+    """代码身份**进程内只算一次**（`functools.cache`）：35 局/轮的每局 0.03s 不该重复付。
+
+    清场口径是 `local_code_sha.cache_clear()`——旧形状是「0/1 元素 list 当 memo」，
+    除了清不掉，也答不出「谁清的」（P0-5，2026-11-21）。
+    """
+    import common.codehash as codehash
+    from worker.cmd import local_code_sha
+
+    calls: list[int] = []
+
+    def fake() -> str:
+        calls.append(1)
+        return f"sha-{len(calls)}"
+
+    monkeypatch.setattr(codehash, "compute_code_hash", fake)
+    local_code_sha.cache_clear()
+    try:
+        first = local_code_sha()
+        assert local_code_sha() == first
+        assert len(calls) == 1, "第二次调用必须命中记忆（否则每局都重算 0.03s）"
+        local_code_sha.cache_clear()
+        assert local_code_sha() != first, "cache_clear 之后必须重算"
+        assert len(calls) == 2
+    finally:
+        local_code_sha.cache_clear()

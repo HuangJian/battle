@@ -119,18 +119,20 @@ def test_wire_module_has_no_additional_mutable_module_state() -> None:
     assert mutable == {"_WIRE"}, f"wire.py 顶层多了可变容器：{sorted(mutable - {'_WIRE'})}"
 
 
-def test_note_rate_rebinding_happens_on_the_wire_module() -> None:
-    """注入点口径：只有重绑 `wire._BEST_RATE` 才改变 `_min_rate`——`worker` 的名字是转发。"""
-    saved = wire_mod._BEST_RATE
+def test_rate_reference_is_one_object_behind_both_names() -> None:
+    """注入点口径（P0-5 之后）：参照是**对象**，两个入口是同一个实例，不再有快照名。
+
+    旧形状里 `_BEST_RATE` 是重绑式标量，于是「改 `worker._BEST_RATE` 不影响判据」——
+    那条用例存在的唯一理由就是记住这个陷阱。收成对象后它消失了：写 `note()` /
+    清 `clear_samples()` 从哪个入口进都作用在同一份参照上。
+    """
+    assert worker_mod.rate_reference() is wire_mod.rate_reference()
+    # 清到基线：同一 xdist worker 里先跑过的真实传输会抬高参照（实测 62 万 KB/s ⇒
+    # `_min_rate()` = 4× 那个值），「== WIRE_MIN_RATE」的前提就没了。
+    wire_mod.rate_reference().clear_samples()
     try:
-        # 先清到基线：`_BEST_RATE` 是**进程级**全局，同一 xdist worker 里先跑过的真实传输
-        # 会把它抬高（实测把「极小 body + 极小耗时」量成 62 万 KB/s ⇒ `_min_rate()` = 4×
-        # 那个值）=> 下面「== WIRE_MIN_RATE」的前提失效（2026-09-26 burner 扫尾抓到的假红）。
-        wire_mod._BEST_RATE = 0.0
-        worker_mod._BEST_RATE = 999_999.0  # 只改转发名：不该影响判据
         assert wire_mod._min_rate() == wire_mod.WIRE_MIN_RATE
-        wire_mod._BEST_RATE = 999_999.0
+        worker_mod.rate_reference().sample(999_999.0, wire_mod.WIRE_RATE_SAMPLE_MIN_BYTES)
         assert wire_mod._min_rate() > wire_mod.WIRE_MIN_RATE
     finally:
-        wire_mod._BEST_RATE = saved
-        worker_mod._BEST_RATE = saved
+        wire_mod.rate_reference().clear_samples()

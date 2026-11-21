@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -261,3 +262,22 @@ def test_ts_code_cache_hit_reports_into_the_bundle(tmp_path: Path) -> None:
     assert hit is True and n == 0
     assert logs == [], "命中那行也该进 bundle"
     assert "ts_code=cache 命中" in b.text(), b.text()
+
+
+# ------------------------------------------- ⑤ 缺省 log 走全仓那一条出口
+
+def test_default_iter_log_uses_the_shared_line_format(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`run_iter_rollout` 的缺省 `log` = `[HH:MM:SS] [iter] msg`（P0-6 最后一条真债）。
+
+    它原来是唯一一份自己拼 `[iter] {msg}`、**不带时间戳**的出口 —— 与全仓
+    `common.logutil.log_line` 的两份实现之一（2026-11-21 收口）。只钉格式，不钉实现：
+    换成别的等价出口只要还是这个格式，这里就该绿。
+    """
+    from worker import iter_rollout
+
+    emit = iter_rollout._log
+    emit("probe-line")
+    out = capsys.readouterr().out
+    assert re.fullmatch(r"\[\d\d:\d\d:\d\d\] \[iter\] probe-line\n", out), out

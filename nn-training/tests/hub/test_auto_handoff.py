@@ -683,7 +683,7 @@ def test_console_status_running_stale_or_expired_is_unknown(monkeypatch) -> None
     """`running`/`stale`/`expired` 一律映射 `unknown`：不把「进行中」当失败、不把陈旧当成功。
 
     v1 的新 bug：启动写 `ok:false, running:true` ⇒ 这里若只看 `ok`，hub 会立刻
-    `note_auto_handoff_failure` 并停试 900s（导出还在跑）。
+    记一笔失败（`pack_triggers().note_failure`）并停试 900s（导出还在跑）。
     """
 
     class _Resp:
@@ -747,8 +747,8 @@ def test_auto_handoff_decision_failed_window_expires() -> None:
     from hub.task_pack import (
         TASK_BUNDLE_FAILURE_WINDOW_SEC,
         auto_handoff_decision,
-        note_auto_handoff_failure,
         note_auto_handoff_trigger,
+        pack_triggers,
         reset_auto_handoff_triggers,
     )
 
@@ -756,7 +756,7 @@ def test_auto_handoff_decision_failed_window_expires() -> None:
     try:
         now = time.time()
         note_auto_handoff_trigger("c5-x", now=now)
-        note_auto_handoff_failure("c5-x", "boom", now)
+        pack_triggers().note_failure("c5-x", "boom", now)
         assert auto_handoff_decision("c5-x", now=now + 1) == "failed"
         assert auto_handoff_decision("c5-x", now=now + TASK_BUNDLE_FAILURE_WINDOW_SEC + 1) == "trigger"
         # 包出现 / 换主清零 ⇒ 失败记录一并清掉（新事实优先）
@@ -1382,7 +1382,7 @@ def test_a_known_export_failure_blocks_the_next_segment_trigger(
         {"start_it": 0, "end_it": 500, "iters_total": 0, "open_ended": True},
     )
     calls = _stub_auto_handoff(monkeypatch)
-    task_pack_mod.note_auto_handoff_failure("c5-gae", "静态拒因：轮数 > 硬上界", time.time())
+    task_pack_mod.pack_triggers().note_failure("c5-gae", "静态拒因：轮数 > 硬上界", time.time())
     st, doc = _post_segment_end(base, "c5-gae", run_id="seg-open-2", it_end=500, kind="open")
     assert st == 200 and doc["completed_sealed"] is True, doc
     assert calls == [], "已知导出失败还在窗口内 ⇒ 不重复触发"

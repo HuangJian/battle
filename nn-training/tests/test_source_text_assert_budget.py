@@ -452,7 +452,14 @@ ROOT = Path(__file__).resolve().parents[1]
 #:   时才减 worker / 探不到时 fail-open” 除了读文本没有第二个出口（同文件里其它 `test_gate_*`
 #:   也是这么钉结构）。行为面已由 `common/platform_utils.memory_budget_workers` 的纯函数用例
 #:   覆盖，这里只钉接线（四个断言计进一格，其余不是文本形态）。
-BASELINE_FORM = 1535
+#: 2026-11-21 抬到 **1536**（+1，实测）：P0-8 把训练机侧三家的 `bun_version` 收进
+#:   `common.proc.Toolchain` 端口后，`tests/trainer/test_batch_runner_split.py` 的「裸名注入点」
+#:   契约从 `bun_version` 改成 `TOOLCHAIN`，并新增一条守卫「模块里只有端口这一套接缝」。
+#:   新守卫 4 条断言里只有 2 条是形态判据（`TOOLCHAIN in loads` / `bun_version not in loads`
+#:   ——「名字被裸名读、旧名不再绑」没有运行时出口，只能看源码结构）；另 2 条（`hasattr` /
+#:   `is`）两个口径都不计。该文件口径 A 4 → 6；上一格基线 1535 比 HEAD 实测 1534 宽 1
+#:   ⇒ 本笔实测 1536（名义 +1）。
+BASELINE_FORM = 1536
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
 #: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092；
 #: 2026-10-18 course-metrics 备份库用例抬到 **1096**（+4，实测值；理由见模块头末段）；
@@ -555,12 +562,22 @@ BASELINE_FORM = 1535
 #:   `_UnitLanes.ledger()` 的装配点守卫）、`test_batch_runner_split.py` +5（两家对照的闭集 /
 #:   常量归属 / 无反向边），`test_batch_lanes_split.py` 净 0（删掉的那条文本判据已改成
 #:   AST 定义表判据，计数不变）。口径 A 仍 1534（新判据无一挂文本）。
-#: 2026-11-21 抬 1 格（1221 → 1222）：`tests/tools/test_dist_upgrade_cli.py` 新增并行下发
+#: 2026-11-21 抬到 **1224**（+3，实测）：P0-5 的两簇状态对象化各带一条**结构**守卫 ——
+#:   `tests/hub/test_pack_triggers.py` +1（`hub/task_pack.py` 顶层不许再有可变容器字面量）与
+#:   `tests/remote/test_deliver_outbox.py` +2（闸表必须是 `OutboxGates()` 实例 / 不再有
+#:   `_GATES_LOCK`）。两条都只能读 `.py` 源码：被测的是「可变状态住在哪」，没有任何运行时出口
+#:   （对象存在 ≠ 对象拥有状态）。口径 A 同笔 −1（1535 → 1534）：两条 `x in <dict>` 的集合判据
+#:   改成 `set(...) == {...}`（§口径 C 的写法，语义不变）。
+#: 2026-11-21 抬到 **1226**（+2，实测）：同一笔 P0-8 端口化在
+#:   `tests/trainer/test_batch_runner_split.py` 新增的裸名守卫里，2 条断言读的是 AST 解析出的
+#:   `RUNNER_SRC`（`_load_names_in`）—— 判据是「模块以裸名读端口、不再绑旧名」，只能看源码；
+#:   口径 A 同为 +2，属同笔改动（文件 16 → 18）。
+#: 2026-11-21 再 +1（1226 → 1227，实测）：`tests/tools/test_dist_upgrade_cli.py` 新增并行下发
 #: 回归夹具（threading.Barrier 钉住三个节点同时在飞）与重复 id 拒绝用例，四条断言只比
 #: 运行期收集到的 id / reason / 长度，没有任何源码措辞；口径 B 的已知限边是「文件里出现
 #: .py 字面量 ⇒ 该文件所有 assert 计入」，该文件本来就有 CLI 端到端用例的 .py 路径，
 #: 于是新断言被连坐算 +1。属于误计，不是新增文本判据。
-BASELINE_SRC = 1222
+BASELINE_SRC = 1227
 #: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。派生式（基线九成，见
 #: `tests/helpers/budget.py`）：两个计数器各自随自己的基线收紧，清理基线时不必回填数字。
 def _floor_of_form() -> int:

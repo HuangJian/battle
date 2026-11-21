@@ -572,7 +572,7 @@ def test_start_stops_leftover_links_from_previous_cell(monkeypatch: pytest.Monke
 
     两条链同时轮询同一个 node ⇒ hub 的任务随机分给两边、回执各走各自的 rid，表面「成功」，
     一半结果其实来自旧代码 —— 这正是 DSW 现场「旧日志格式又出现了」的根源。daemon 线程
-    只能在同进程内收，够不着它就只能靠 `_LIVE_LINKS` 这张表。
+    只能在同进程内收，够不着它就只能靠 `LiveLinks` 这张登记表（P0-5，2026-11-21 对象化）。
     """
     stopped: list[float] = []
 
@@ -588,7 +588,8 @@ def test_start_stops_leftover_links_from_previous_cell(monkeypatch: pytest.Monke
 
     stale, fresh = _Stale(), _Stale()
     fresh.alive_now = False
-    monkeypatch.setattr(rr, "_LIVE_LINKS", [stale, fresh])
+    # 替换的是**公开读面** `live_links()`（不是模块私有变量）：登记表本身就是可注入的对象。
+    monkeypatch.setattr(rr, "live_links", lambda: rr.LiveLinks([stale, fresh]))
     logs: list[str] = []
     assert rr.stop_stale_links(logs.append) == 1, "只收还活着的那条"
     assert stopped and stale.alive_now is False
@@ -1091,3 +1092,56 @@ def test_channel_hub_url_follows_the_port_switch(monkeypatch: pytest.MonkeyPatch
         assert ch.link is not None and ch.link.route == "direct", "扫描只走过直连，就该钉直连"
     finally:
         ch.stop()
+
+
+def test_live_links_registry_is_idempotent_and_isolated() -> None:
+    """登记表是一个对象：重复登记 / 重复注销都幂等，两份登记互不相见。
+
+    旧写法是模块级 `list`：`if self in _LIVE_LINKS: _LIVE_LINKS.remove(self)` 在两条线程同时
+    收同一链接时会在检查与删除之间被抢先 ⇒ `ValueError`；用例也只能 `monkeypatch.setattr`
+    换掉一个模块变量（类型都对不上）。
+    """
+
+    class _Fake:
+        def __init__(self) -> None:
+            self.stops: list[float] = []
+
+        def alive(self) -> bool:
+            return True
+
+        def stop(self, timeout: float = 5.0) -> None:
+            self.stops.append(timeout)
+
+    a, b = _Fake(), _Fake()
+    reg, other = rr.LiveLinks(), rr.LiveLinks()
+    reg.add(a)
+    reg.add(a)
+    assert reg.count() == 1, "重复登记必须幂等"
+    assert other.count() == 0, "两份登记互不相见"
+    reg.discard(b)  # 没登记过：不是错误
+    reg.discard(a)
+    reg.discard(a)  # 双重注销：幂等（旧写法在这里 ValueError）
+    assert reg.count() == 0
+    reg.add(a)
+    assert reg.snapshot() == [a], "snapshot 返回按登记顺序的副本"
+
+
+def test_start_registers_and_stop_discards(monkeypatch: pytest.MonkeyPatch) -> None:
+    """接线：`start()` 把自己登进表、`stop()` 自己注销（走公开读面 `live_links()`）。"""
+
+    class _QuietLink(rr.RelayLink):
+        """跑一轮就退的链接（不碰网络，也不必打桩私有 `_worker`）。"""
+
+        def _worker(self) -> None:
+            return None
+
+    monkeypatch.setattr(rr, "stop_stale_links", lambda *_a, **_k: 0)
+    reg = rr.LiveLinks()
+    monkeypatch.setattr(rr, "live_links", lambda: reg)
+    link = _QuietLink(
+        hub_url="http://127.0.0.1:9", token="t", node_id="n1", agent_port=9, log=lambda _m: None
+    )
+    link.start()
+    assert reg.snapshot() == [link], "start() 之后必须在登记表里"
+    link.stop()
+    assert reg.count() == 0, "stop() 必须自己注销"

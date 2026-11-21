@@ -1,9 +1,9 @@
 """remote/wire.py — worker 的**传输账 / 低速重抽 / bulk 节流**（S4 拆分，2026-09-23）。
 
 从 `remote/worker.py` 整簇搬出来的**无类**关注点：`WIRE_*` 阈值 · 每 job 传输账（`_WIRE`）·
-判据的参照速率（`_BEST_RATE`，**近期水平**语义：更好即抬、连续慢按 `WIRE_RATE_DECAY` 衰减，
-见 `_note_rate` / `_ref_rate`）· bulk 单通道调度器（`_BULK`），以及 `_wire_*` / `_note_rate` /
-`_min_rate` / `_ref_rate` / `_reroll_decision` / `set_bulk_log` / `_bulk_pace`。
+判据的参照速率（`RateReference`，**近期水平**语义：更好即抬、连续慢按 `WIRE_RATE_DECAY` 衰减，
+见 `RateReference.sample` / `_min_rate`）· bulk 单通道调度器（`_BULK`），以及 `_wire_*` /
+`_note_rate` / `_min_rate` / `_ref_rate` / `_reroll_decision` / `set_bulk_log` / `_bulk_pace`。
 
 ## 为什么**状态随簇搬迁**（而不是留宿主让本模块 import）
 
@@ -15,9 +15,9 @@
 
 ## 注入点（拆分会**静默**坏掉的东西）
 
-* `_BEST_RATE` 是**会话级标量**——`_note_rate` 用 `global` **重绑**它。测试若
-  `worker._BEST_RATE = 0.0`，重绑的只是转发名，`_min_rate` 读到的仍是本模块那份
-  ⇒ 注入点必须指向**本模块**（`remote.wire._BEST_RATE`）。
+* `_RATE`（参照速率 + 迟滞计数）是**对象**（P0-5，2026-11-21）：读面 `rate_reference()`，
+  清场 `rate_reference().clear_samples()`。它原来是两个 `global` 重绑的模块标量，转发名会停在
+  import 那一刻——现在值住对象里，从 `worker` 还是 `wire` 进都是**同一个实例**。
 * `_WIRE` / `_BULK` 是**原地可变**（`.clear()` / `.reset()`）：转发名指向同一个对象，
   从哪个入口进都一样。
 * `_BULK` 同时被 `worker.py` 的传输核心（`_request` / `_get_with_retry` / `post_result`）
@@ -44,16 +44,15 @@ __all__ = [
     "WIRE_REROLL_GAIN",
     "WIRE_REROLL_MAX",
     "WIRE_REROLL_PROBES",
-    "_BEST_RATE",
     "_BULK",
     "_WIRE",
+    "RateReference",
     "WireSlowError",
     "_bulk_pace",
     "_min_rate",
     "_note_rate",
     "_ref_rate",
     "_reroll_decision",
-    "_stale_samples",
     "_wire_add",
     "_wire_block",
     "_wire_bucket",
@@ -68,6 +67,7 @@ __all__ = [
     "_wire_take",
     "_wire_time",
     "_wire_totals",
+    "rate_reference",
     "set_bulk_log",
 ]
 
@@ -162,14 +162,73 @@ WIRE_RATE_STALE_SAMPLES = 2
 #: 组合在真机那种「3MB/s ⇒ 50–150KB/s」的台阶上，约 1 分钟回到地板。
 WIRE_RATE_DECAY = 0.5
 
-#: 判据的参照速率（bytes/s）。**只升不降**由 `_note_rate` 保证；下降由衰减规则负责。
-#: 注入点 = 本模块的 `_BEST_RATE`（`remote.worker._BEST_RATE` 只是转发名，重绑它无效）。
-_BEST_RATE = 0.0
 
-#: 连续「非更好」样本的计数（`_note_rate` 用 `global` 重绑；`_BEST_RATE` 归零后它无害——
-#: 标量为 0 时第一个样本必然算「更好」，计数当场归零）。@ 见 `test_worker_state_contract` 的
-#: 模块级状态清点表。
-_stale_samples = 0
+class RateReference:
+    """坏签判据的参照速率：**近期水平**（更好即抬、连续慢按 `decay` 衰减）。
+
+    为什么是对象（P0-5，2026-11-21）：原先是两个 `global` 重绑的模块标量
+    （`_BEST_RATE` 参照 + `_stale_samples` 迟滞计数）。两个标量同生共死却分开存放，
+    于是转发名会停在 import 那一刻，用例只能靠「记住注入点是 wire 那一份」——
+    `test_wire_reroll` 的 autouse 夹具就写着这条警告。收进对象后值与计数永远同处，
+    `sample()` 一次写完，读面与清场也都是对象上的方法。
+
+    `stale_samples` / `decay` 是**构造参数**（判据的取值判断题，见上面两个常量的注释）：
+    用例可以要「每个慢样本都衰减」也可以要「永不衰减」，不必去糊模块常量。
+
+    线程语义：不加锁。生产者是传输线程自己的下载路径（同一 job 串行），
+    读方 `_min_rate()` 容忍差一拍；最坏是判据用上一档的参照，下一块就修正。
+    """
+
+    def __init__(
+        self,
+        *,
+        stale_samples: int = WIRE_RATE_STALE_SAMPLES,
+        decay: float = WIRE_RATE_DECAY,
+    ) -> None:
+        self._level = 0.0
+        self._stale = 0
+        self._stale_limit = max(1, int(stale_samples))
+        self._decay = min(1.0, max(0.0, float(decay)))
+
+    def sample(self, rate: float, nbytes: int) -> None:
+        """记下大 body 速率：更好 ⇒ 抬到新高（瞬时恢复）；连续慢 ⇒ 按 `decay` 衰减。
+
+        契约（原 `_note_rate`，用例逐条钉死）：小 body 不采样；**单个**更慢的样本不覆盖
+        更好值（由 `stale_samples` 的迟滞保住）；连续第 `stale_samples` 个非更好样本起，
+        每多一个乘一次 `decay`（下限是本次样本速率本身，所以跌不回负值）。
+        """
+        if nbytes < WIRE_RATE_SAMPLE_MIN_BYTES:
+            return
+        if rate > self._level:
+            self._level = float(rate)
+            self._stale = 0
+            return
+        self._stale += 1
+        if self._stale >= self._stale_limit:
+            self._level = max(float(rate), self._level * self._decay)
+
+    def level(self) -> float:
+        """当前参照（bytes/s）；还没采过大样本时是 0。"""
+        return self._level if self._level > 0.0 else 0.0
+
+    def floor(self) -> float:
+        """坏签判据 = max(`WIRE_MIN_RATE`, 参照 / 4)——只在「明显偏离**近期**水平」时动手。"""
+        return max(WIRE_MIN_RATE, self.level() / 4.0)
+
+    def clear_samples(self) -> None:
+        """清场（会话重开 / 用例夹具）：参照与迟滞计数一起归零，两者不许分开清。"""
+        self._level = 0.0
+        self._stale = 0
+
+
+#: 本进程那份参照（生产写者只有 `_note_rate`，读面 `rate_reference()`）。
+_RATE = RateReference()
+
+
+def rate_reference() -> RateReference:
+    """默认参照（观测/用例读面；替换公开名字即可接管，不必碰私有实例）。"""
+    return _RATE
+
 
 #: 重抽前要**连续判满几个慢点**（迟滞，2026-10-12）。原先只判首块一次：抖动下单个 3 秒窗口
 #: 的瞬时速率必然误判（真机：第一块 79KB/s ⇒ 断连重抽 ⇒ 换连接后 51KB/s，白扔 256KB）。
@@ -209,37 +268,23 @@ def _bulk_pace(token: int, prio: str) -> Any:
 
 
 def _note_rate(rate: float, nbytes: int) -> None:
-    """记下大 body 速率；更好 ⇒ 抬参照（瞬时恢复）；连续慢 ⇒ 按 `WIRE_RATE_DECAY` **衰减**参照。
-
-    契约（有用例钉死）：小 body 不采样；**单个**更慢的样本不覆盖更好值（由
-    `WIRE_RATE_STALE_SAMPLES` 的迟滞保住）——所以 `test_note_rate_is_session_stateful_and_reproducible`
-    那种「500 然后 100」的序列仍然读到 500。衰减只在**连续**慢样本之后发生，见 `WIRE_RATE_DECAY`。
-    """
-    global _BEST_RATE, _stale_samples
-    if nbytes < WIRE_RATE_SAMPLE_MIN_BYTES:
-        return
-    if rate > _BEST_RATE:
-        _BEST_RATE = float(rate)
-        _stale_samples = 0
-        return
-    _stale_samples += 1
-    if _stale_samples >= WIRE_RATE_STALE_SAMPLES:
-        _BEST_RATE = max(float(rate), _BEST_RATE * WIRE_RATE_DECAY)
+    """传输路径的写入口（语义全在 `RateReference.sample`；保留本名因为它被多处转发）。"""
+    rate_reference().sample(rate, nbytes)
 
 
 def _ref_rate() -> float:
-    """判据的参照速率 = `_BEST_RATE`（现在的语义是「近期水平」，不是会话高水位）。"""
-    return _BEST_RATE if _BEST_RATE > 0.0 else 0.0
+    """判据的参照速率（「近期水平」，不是会话高水位）。"""
+    return rate_reference().level()
 
 
 def best_rate() -> float:
     """参照速率的只读读数（衰减/抬升仍由 `_note_rate` 负责）。"""
-    return _BEST_RATE
+    return rate_reference().level()
 
 
 def _min_rate() -> float:
-    """坏签判据 = max(`WIRE_MIN_RATE`, 参照速率 / 4)——只在「明显偏离**近期**水平」时动手。"""
-    return max(WIRE_MIN_RATE, _ref_rate() / 4.0)
+    """坏签判据地板（= `RateReference.floor`；保留本名因为它被多处转发）。"""
+    return rate_reference().floor()
 
 
 def _reroll_decision(

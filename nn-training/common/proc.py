@@ -26,18 +26,23 @@ Windows = cp936），而子进程吐的是 UTF-8 字节 ⇒ 解码在 `subproces
 训练机侧（`trainer/batch_runner.py`、`trainer/eval_dispatch.py`、`trainer/dispatch.py`）要的是
 「拿不到就 `?`」，节点侧（`worker/iter_rollout.py`）要的是「拿不到就空串」（自检行里空串 = 没装上）。
 两种口径都合法，但**实现**只该有一份 ⇒ 这里收 `fallback` 参数；训练机侧直接用缺省 `?`，
-节点侧保留自己的 1 参薄包装（同时保住测试的 `monkeypatch.setattr(mod, "bun_version", ...)` 接缝）。
+节点侧保留自己的 1 参薄包装（它装进 `worker/iter_rollout.NodeExec`）。
+
+训练机侧三个消费方（`trainer/{batch_runner,eval_dispatch,dispatch}.py`）读的是**端口**
+`TOOLCHAIN.bun_version`（见下方 `Toolchain`）：测试替换模块的 `TOOLCHAIN`，不再是
+`monkeypatch.setattr(mod, "bun_version", ...)` —— 后者把模块名变成了事实 API（§P0-8）。
 """
 
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from common.platform_utils import POPEN_NO_WINDOW
 
-__all__ = ["POPEN_NO_WINDOW", "bun_version", "run_capture", "version_mm"]
+__all__ = ["POPEN_NO_WINDOW", "TOOLCHAIN", "Toolchain", "bun_version", "run_capture", "version_mm"]
 
 #: `bun --version` 的缺省超时（历史口径：训练机侧 10s）。节点侧自检另传 30s。
 _BUN_VERSION_TIMEOUT = 10.0
@@ -109,6 +114,28 @@ def bun_version(
     if not out:
         return fallback
     return out.splitlines()[0].strip() or fallback
+
+
+@dataclass(frozen=True)
+class Toolchain:
+    """**执行面端口**：训练机侧要问工具链的那几件事（当前只有版本探测）。
+
+    为什么有它（`python.refactor.md` §P0-8）：三个训练机模块原先各自
+    `from common.proc import bun_version`，测试只能 `monkeypatch.setattr(trainer.batch_runner,
+    "bun_version", …)` —— 模块名因此变成事实 API，改实现就静默失效。端口之后，调用点读
+    **模块全局的 `TOOLCHAIN`**（裸名，仍是 patch 锚点），测试只替换端口字段；与
+    `worker/iter_rollout.NodeExec` 是同一个形状。
+
+    无状态（一个纯函数引用）⇒ 可安全共享：三家拿到的是同一个默认实例，但
+    `monkeypatch.setattr(mod, "TOOLCHAIN", …)` 只重绑那一家。
+    """
+
+    #: `bun --version`（训练机侧口径：拿不到就 `?`，不看退出码）。
+    bun_version: Callable[[str], str]
+
+
+#: 唯一默认端口（训练机侧口径）。
+TOOLCHAIN = Toolchain(bun_version=bun_version)
 
 
 def version_mm(version: str) -> str:

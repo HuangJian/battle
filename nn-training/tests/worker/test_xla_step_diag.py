@@ -28,11 +28,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 # 这五个都是纯文本/字典解析，住在免 torch 的 ppo.np_core（2026-09-26 拆分）。
-# 2026-09-26（item 6b）：本文件**整文件免 torch** —— `_XLA_CACHE_STATE` 的家就在 np_core，
+# 2026-09-26（item 6b）：本文件**整文件免 torch** —— 编译缓存记账（`CompileCacheState`）的家就在 np_core，
 # 此前从 ppo.common 取（导入再导出）会把 torch 拖进运行期；demo_index 的三个张量用例已搬到
 # `tests/worker/test_ppo_common.py`（ppo/common.py 才是它的家）。
 from worker.ppo.np_core import (
+    CompileCacheState,
     _parse_xla_duration,
+    compile_cache_state,
     xla_delta_str,
     xla_enable_compile_cache,
     xla_metrics_delta,
@@ -181,15 +183,14 @@ class TestPersistentCompileCache:
         import sys
         import types
 
-        from worker.ppo.np_core import _XLA_CACHE_STATE
-
         calls: list[str] = []
+        state = compile_cache_state()
         fake_rt = types.ModuleType("torch_xla.runtime")
         fake_rt.initialize_cache = lambda p: calls.append(str(p))  # type: ignore[attr-defined]
         saved = {k: sys.modules.get(k) for k in ("torch_xla", "torch_xla.runtime")}
         sys.modules["torch_xla"] = types.ModuleType("torch_xla")
         sys.modules["torch_xla.runtime"] = fake_rt
-        _XLA_CACHE_STATE.clear()
+        state.clear_dir()
         try:
             cache_dir = str(tmp_path / "xla-cache")
             first = xla_enable_compile_cache(cache_dir)
@@ -201,7 +202,7 @@ class TestPersistentCompileCache:
                     sys.modules.pop(key, None)
                 else:
                     sys.modules[key] = val
-            _XLA_CACHE_STATE.clear()
+            state.clear_dir()
         assert calls == [cache_dir], "同进程第二次不得再调 initialize_cache"
         assert "已开启" in first
         assert "幂等" in second
@@ -211,22 +212,33 @@ class TestPersistentCompileCache:
         import sys
         import types
 
-        from worker.ppo.np_core import _XLA_CACHE_STATE
-
+        state = compile_cache_state()
         saved = {k: sys.modules.get(k) for k in ("torch_xla", "torch_xla.runtime")}
         sys.modules["torch_xla"] = types.ModuleType("torch_xla")
         sys.modules["torch_xla.runtime"] = types.ModuleType("torch_xla.runtime")
-        _XLA_CACHE_STATE.clear()
+        state.clear_dir()
         try:
             msg = xla_enable_compile_cache("/nonexistent/ignored")
+            # 失败不记账（下一次还能重试；缓存不能因一次失败永久关掉）
+            assert state.dir is None
         finally:
             for key, val in saved.items():
                 if val is None:
                     sys.modules.pop(key, None)
                 else:
                     sys.modules[key] = val
-            _XLA_CACHE_STATE.clear()
+            state.clear_dir()
         assert "不可用" in msg and "initialize_cache" in msg
+
+
+    def test_state_remembers_only_successful_initialization(self) -> None:
+        """记账只有一个事实：**成功**初始化的目录（`mark_enabled` 是唯一写入口）。"""
+        st = CompileCacheState()
+        assert st.dir is None
+        st.mark_enabled("/tmp/xla-cache")
+        assert st.dir == "/tmp/xla-cache"
+        st.clear_dir()
+        assert st.dir is None
 
 
 class TestEngineWiring:

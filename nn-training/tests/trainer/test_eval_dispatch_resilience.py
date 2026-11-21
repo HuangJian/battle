@@ -30,6 +30,7 @@ import common.task_client
 import trainer.eval_dispatch as ed
 import worker.eval_exec as ee
 import worker.eval_yield as eval_yield
+from tests.helpers.toolchain import stub_toolchain
 
 #: 慢节点的模拟单局耗时（秒）——用例断言一律与它比，不写死别的绝对数。
 SLOW_NODE_SEC = 3.0
@@ -122,7 +123,7 @@ class _Harness:
                 for n in nodes
             ],
         )
-        monkeypatch.setattr(ed, "bun_version", lambda _bun: "1.1.0")
+        stub_toolchain(monkeypatch, ed, "1.1.0")
         monkeypatch.setattr(ed, "log", self.logs.append)
 
         def fake_refresh(node: dict, **kw: Any) -> bool:
@@ -564,18 +565,15 @@ class _LaneHarness:
         monkeypatch.setattr(common.distribution, "node_ping", ping)
         monkeypatch.setattr(common.weights_client, "post_weights_parallel", post)
         monkeypatch.setattr(common.weights_client, "refresh_weights", lambda *a, **k: True)
-        monkeypatch.setattr(ed, "bun_version", lambda _bun: "1.1.0")
+        stub_toolchain(monkeypatch, ed, "1.1.0")
         monkeypatch.setattr(ed, "log", self.logs.append)
 
-        def runner(
-            _bun, _snap, stage, seed, _out, max_ticks, difficulty, timeout_sec, wver, **kw
-        ) -> dict:
-            # 本机直跑签名与生产一致（位置 5 + 关键字）：名字必须对齐，否则只会
+        def runner(spec, **kw) -> dict:
+            # 本机直跑签名与生产一致（一个 `EvalGameSpec`）：字段名必须对齐，否则只会
             # 静默变成「本机局全失败」，门/收工的断言就测不到真东西。
-            del max_ticks, difficulty, timeout_sec
-            self.local_games.append(seed)
+            self.local_games.append(spec.seed)
             self.local_seen_at.append(time.monotonic())
-            return self.manifest(stage, seed)
+            return self.manifest(spec.stage, spec.seed)
 
         monkeypatch.setattr(ed, "run_local_eval_game", runner)
 
@@ -967,11 +965,11 @@ def test_result_returning_after_close_is_dropped(tmp_path, monkeypatch, lane) ->
         assert release.wait(timeout=30.0), "回包未被放行（用例内部死锁）"
         return h.manifest(kw["stage"], kw["seed"]), {}
 
-    def _blocking_runner(_bun, _snap, stage, seed, _out, *_a, **_k):
+    def _blocking_runner(spec, *_a, **_k):
         writer["t"] = threading.current_thread()
         started.set()
         assert release.wait(timeout=30.0), "本机局未被放行（用例内部死锁）"
-        return h.manifest(stage, seed)
+        return h.manifest(spec.stage, spec.seed)
 
     monkeypatch.setattr(ed, "run_local_eval_game", _blocking_runner)
     box: dict = {}
@@ -1477,8 +1475,8 @@ def test_local_transient_retries_are_bounded(tmp_path, monkeypatch) -> None:
     h = _LocalHarness(tmp_path, monkeypatch, games=1)
     calls: list[tuple[int, int]] = []
 
-    def fake(_bun, _snap, stage, seed, *_a, **_kw):
-        calls.append((stage, seed))
+    def fake(spec, *_a, **_kw):
+        calls.append((spec.stage, spec.seed))
         raise LocalEvalProcessError(1, "error: EBUSY: resource busy or locked, open 'w.json'")
 
     rows = h.run_local(fake)
@@ -1504,8 +1502,8 @@ def test_local_soft_breaker_stops_all_local_threads(tmp_path, monkeypatch) -> No
     h = _LocalHarness(tmp_path, monkeypatch, games=3, local_slots=2, soft_streak=2)
     calls: list[tuple[int, int]] = []
 
-    def fake(_bun, _snap, stage, seed, *_a, **_kw):
-        calls.append((stage, seed))
+    def fake(spec, *_a, **_kw):
+        calls.append((spec.stage, spec.seed))
         raise LocalEvalProcessError(1, "error: EMFILE: too many open files")
 
     rows = h.run_local(fake)
@@ -1524,10 +1522,10 @@ def test_local_failure_is_redispatched_to_a_live_node(tmp_path, monkeypatch) -> 
     h = _LocalHarness(tmp_path, monkeypatch, games=4, nodes=True, window=20.0)
     local_calls: list[tuple[int, int]] = []
 
-    def fake(_bun, _snap, stage, seed, *_a, **_kw):
+    def fake(spec, *_a, **_kw):
         # sleep-ok: 夹具模拟的工作量：真机一局 ~1s；不等一下本机会在节点线程起来前烧完整队
         time.sleep(0.2)
-        local_calls.append((stage, seed))
+        local_calls.append((spec.stage, spec.seed))
         raise LocalEvalProcessError(
             1, "error: ENOENT: no such file or directory, open 'w.json'"
         )
@@ -1564,7 +1562,7 @@ def test_redispatched_game_is_never_dispatched_twice(tmp_path, monkeypatch) -> N
 
     h = _LocalHarness(tmp_path, monkeypatch, games=4, nodes=True, window=10.0)
 
-    def fake(_bun, _snap, stage, seed, *_a, **_kw):
+    def fake(spec, *_a, **_kw):
         # sleep-ok: 夹具模拟的工作量：真机一局 ~1s（本机比节点快，才会先撞上失败）
         time.sleep(0.2)
         raise LocalEvalProcessError(1, "error: ENOENT: no such file or directory")
@@ -1596,7 +1594,7 @@ def test_machine_fault_close_reason_end_to_end(tmp_path, monkeypatch) -> None:
 
     h = _LocalHarness(tmp_path, monkeypatch, games=8, window=20.0)
 
-    def fake(_bun, _snap, stage, seed, *_a, **_kw):
+    def fake(spec, *_a, **_kw):
         raise LocalEvalProcessError(
             1,
             "error: ENOENT: no such file or directory, open 'it5/_eval_frozen_weights.json'",
@@ -1617,7 +1615,7 @@ def test_small_loss_does_not_claim_machine_fault(tmp_path, monkeypatch) -> None:
 
     h = _LocalHarness(tmp_path, monkeypatch, games=4, window=20.0)
 
-    def fake(_bun, _snap, stage, seed, *_a, **_kw):
+    def fake(spec, *_a, **_kw):
         raise LocalEvalProcessError(1, "error: ENOENT: no such file or directory")
 
     rows = h.run_local(fake)
@@ -1629,8 +1627,8 @@ def test_eval_scratch_lives_outside_the_iter_dir(tmp_path, monkeypatch) -> None:
     h = _LocalHarness(tmp_path, monkeypatch, games=1)
     seen: list[Path] = []
 
-    def fake(_bun, snap, stage, seed, out_dir, *_a, **_kw):
-        seen.append(Path(snap))
+    def fake(spec, *_a, **_kw):
+        seen.append(Path(spec.weights_snapshot))
         raise RuntimeError("scratch probe")  # 普通异常（BaseException 会穿出 worker 线程）
 
     h.run_local(fake)

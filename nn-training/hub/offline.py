@@ -50,9 +50,6 @@ from hub.offline_ingest import (
 )
 from hub.store import _JobStore
 from hub.task_pack import (
-    _TASK_PACK_LOCK,
-    _TASK_PACK_MISS_TRIGGERS,
-    _TASK_PACK_TRIGGERS,
     TASK_AUTO_HANDOFF_RETRY_SEC,
     TASK_PACK_MISS_TRIGGER_LIMIT,
     TASK_PACK_STALE_THROTTLE_SEC,
@@ -61,9 +58,9 @@ from hub.task_pack import (
     _hub_log,
     auto_handoff_decision,
     auto_handoff_failure,
-    decide_task_pack,
     note_auto_handoff_trigger,
     pack_index_part_sha,
+    pack_triggers,
     poll_console_export_status,
     reset_auto_handoff_triggers,
     reset_task_pack_miss_triggers,
@@ -918,19 +915,7 @@ class OfflineRoutes:
         ok, why = self._task_pack_miss_candidate(course)
         if not ok:
             return {"triggered": False, "trigger_note": f"未触发重导：{why}", "give_up": False}
-        now = time.time()
-        with _TASK_PACK_LOCK:
-            st = _TASK_PACK_MISS_TRIGGERS.setdefault(course, {})
-            verdict = decide_task_pack(
-                stale=f"缺包 {p.name}",
-                secs_since_trigger=(now - float(st.get("last", 0.0))) if st.get("last") else 1e9,
-                triggers=int(st.get("count", 0)),
-                throttle_sec=TASK_PACK_STALE_THROTTLE_SEC,
-                limit=TASK_PACK_MISS_TRIGGER_LIMIT,
-            )
-            if verdict == "trigger":
-                st["last"] = now
-                st["count"] = int(st.get("count", 0)) + 1
+        verdict = pack_triggers().miss_gate(course, now=time.time(), reason=f"缺包 {p.name}")
         if verdict == "trigger":
             ok2, why2 = trigger_task_bundle_export(course)
             if ok2:
@@ -982,26 +967,9 @@ class OfflineRoutes:
         active_sha = _file_sha256(p.parent / _JobStore.ACTIVE_WEIGHTS_NAME)
         stale = task_pack_stale_reason(pack_init_sha=pack_init, active_sha=active_sha)
         if not stale:
-            reset_task_pack_triggers(course)  # 判据回到"新鲜" ⇒ 计数清零
+            reset_task_pack_triggers(course)
             return None
-        now = time.time()
-        with _TASK_PACK_LOCK:
-            st = _TASK_PACK_TRIGGERS.setdefault(course, {})
-            # 显式传两个旋钮（不靠默认参数）：默认值在 import 时绑定，改不了、也不该被改。
-            verdict = decide_task_pack(
-                stale=stale,
-                secs_since_trigger=(now - float(st.get("last", 0.0))) if st.get("last") else 1e9,
-                triggers=int(st.get("count", 0)),
-                throttle_sec=TASK_PACK_STALE_THROTTLE_SEC,
-                limit=TASK_PACK_STALE_TRIGGER_LIMIT,
-            )
-            if verdict == "trigger":
-                # 先记账再发请求：并发请求里只有第一个真去触发（窗内其余看到 throttled）。
-                st["last"] = now
-                st["count"] = int(st.get("count", 0)) + 1
-            warn_once = verdict == "give_up" and not st.get("warned")
-            if warn_once:
-                st["warned"] = 1.0
+        verdict, warn_once = pack_triggers().stale_gate(course, now=time.time(), stale=stale)
         if verdict == "trigger":
             ok, why = trigger_task_bundle_export(course)
             detail = (

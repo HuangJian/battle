@@ -10,16 +10,18 @@
      AttributeError，而不是「名字还在、没人读」的静默空操作）· 无反向边 · import 闭集 ·
      台账零手写（写面只有 `BatchStore`）。
   ② **★ 注入点契约（B3 的真理由）**：执行器的依赖注入靠**模块全局**，所以 `log` /
-     `bun_version` / `run_local_eval_game` 与五个常量必须在**本模块**里被**裸名**读取 ——
+     `TOOLCHAIN` / `run_local_eval_game` 与五个常量必须在**本模块**里被**裸名**读取 ——
      测试 `monkeypatch.setattr("trainer.batch_runner.X")` 才生效；打在旧家 = 静默空操作。
      本文件按 AST 钉「裸名调用/读取」，这比「跑一遍看有没有效果」更早、更准。
+     `bun_version` 自 2026-11-21（§P0-8）起走 `common.proc.Toolchain` 端口：裸名读的是
+     `TOOLCHAIN`，版本探测是它的字段（`TOOLCHAIN.bun_version(...)`）。
   ③ **功能性**：从**新家**直接调（不经门面）—— 心跳写点 + 失败静默 · `dispatch_batch_bg`
      起的线程 · `_done_keys` 的读盘口径。
 
 **2026-11-20 第二次换家**：通道机器（`_UnitLanes` / `_UnitPlan`）连同它独占的两个常量整块搬去
 `trainer/batch_lanes.py`（本模块 LOC 顶在 999/1000，收尾的 `UnitLedger` 没地方落）。契约随之变
 **两家对照**：定义唯一、注入点裸名、常量读取都按「谁裸名读、谁必须绑定」逐家判，且**交叉转发
-也算红**（`br.STUCK_GRACE_SEC` / `bl.bun_version` 那种转发 = patch 打哪家都可能静默空操作）。
+也算红**（`br.STUCK_GRACE_SEC` / `bl.TOOLCHAIN` 那种转发 = patch 打哪家都可能静默空操作）。
 
 放在 `tests/` 而不是 `e2e/`：纯逻辑、无头、无网络、无真节点。
 """
@@ -35,6 +37,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import common.proc
 import common.runtime
 import trainer.batch_eval as be
 import trainer.batch_lanes as bl
@@ -71,7 +74,7 @@ LANES_OWNED = ("_UnitLanes", "_UnitPlan", "UnitLedger", *LANES_CONSTS)
 NOT_FORWARDED = (*MOVED_PRIVATE, *MOVED_CONSTS)
 
 #: 依赖注入点（模块全局），按**读它的模块**分家。裸名读 = patch 生效；限定名读 = 静默失效。
-RUNNER_DI = ("log", "bun_version")
+RUNNER_DI = ("log",)
 LANES_DI = ("log", "_record_agent_meta", "run_local_eval_game")
 DI_NAMES = (*RUNNER_DI, *LANES_DI)
 
@@ -246,10 +249,10 @@ def test_runner_only_symbols_are_not_forwarded_by_the_facade() -> None:
         home = br if name in RUNNER_CONSTS + MOVED_PRIVATE else bl
         assert hasattr(home, name), f"{name} 应住 {home.__name__}"
         assert not hasattr(be, name), f"{name} 不该经门面转发（patch 会静默失效）"
-    # 两家之间也不许互转：`br.STUCK_GRACE_SEC` / `bl.bun_version` 这种名字在、没人读的转发
+    # 两家之间也不许互转：`br.STUCK_GRACE_SEC` / `bl.TOOLCHAIN` 这种名字在、没人读的转发
     # 是同一个坑的变体（patch 打哪家都可能静默空操作）。
     assert not hasattr(br, "STUCK_GRACE_SEC"), "机器常量不许在执行器再绑一份"
-    assert not hasattr(bl, "bun_version"), "`bun_version` 只被开单元读 ⇒ 只绑执行器"
+    assert not hasattr(bl, "TOOLCHAIN"), "版本门端口只被开单元读 ⇒ 只绑执行器"
 
 
 def test_no_back_edge_to_the_old_home() -> None:
@@ -311,8 +314,8 @@ def test_ledger_is_never_written_by_hand() -> None:
 def test_di_names_are_bound_and_called_bare_per_home() -> None:
     """注入点必须是**读它的那个模块**的全局、且以**裸名**调用。
 
-    `monkeypatch.setattr("trainer.batch_runner.bun_version", …)` 只改那一个模块的全局；调用点若写成
-    `common.distribution.bun_version(...)` 一类限定名，patch 就**静默失效**。逐家数两种形态。
+    `monkeypatch.setattr("trainer.batch_runner.log", …)` 只改那一个模块的全局；调用点若写成
+    `common.log.log(...)` 一类限定名，patch 就**静默失效**。逐家数两种形态。
     """
     for src, names, mod in ((RUNNER_SRC, RUNNER_DI, br), (LANES_SRC, LANES_DI, bl)):
         bare, qualified = _callee_forms(src, names)
@@ -320,6 +323,19 @@ def test_di_names_are_bound_and_called_bare_per_home() -> None:
         assert all(n == 0 for n in qualified.values()), (mod.__name__, qualified)
         for name in names:
             assert hasattr(mod, name), f"{name} 没绑进 {mod.__name__}（patch 会静默失效）"
+
+
+def test_bun_version_is_read_through_the_port() -> None:
+    """版本门探测走 `common.proc.Toolchain` 端口，不再绑模块级 `bun_version`（§P0-8，2026-11-21）。
+
+    两个量：① 端口是**模块全局**（裸名 load ⇒ `monkeypatch.setattr(br, "TOOLCHAIN", …)` 生效）；
+    ② 模块里**没有**第二套接缝（再绑一个 `bun_version` 裸名 = 两条 patch 路径，改一处另一处静默）。
+    """
+    assert not hasattr(br, "bun_version"), "版本探测已收进端口；模块里再绑裸名 = 两套接缝"
+    assert br.TOOLCHAIN is common.proc.TOOLCHAIN
+    loads = _load_names_in(RUNNER_SRC)
+    assert "TOOLCHAIN" in loads
+    assert "bun_version" not in loads
 
 
 def test_constants_are_read_bare_in_the_class_that_uses_them() -> None:
