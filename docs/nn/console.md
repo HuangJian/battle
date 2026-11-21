@@ -13,6 +13,26 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §55 errors 页降噪补丁：504 / `busy=false` / `failedTasks.size=0` 不再冒充真问题（2026-11-21）
+
+**报障**：首页告警坞反复弹「组件报错：N 条未处理」，逐条看却是自愈型事件。
+
+**读数**（`GET /api/errors`，11:25）：24 条中 18 条 cloudflared 噪声已被折叠，剩下 6 条非噪声里 5 条是误报：
+
+- 4 条 `[sampler-agent] /v1/result MISS … failedTasks.size=0`（count 2–81）——例行缓存未命中，行尾「零失败任务」里的 `fail` 被关键词扫描判成 error；
+- 1 条 `persist worker closed … SIGTERM (was busy=false)`——`\bbusy\b` 命中 `busy=false`，从进程生命周期噪声误升级成 `capacity`；
+- 账本里另有 6912 条 hub-server `504`（11:26:23 仍在发生），被通用 `5\d{2}` 规则归成 `remote-failure`，一旦进日志尾窗就弹横幅。
+- 唯一真问题：`OPENING HARD CONSTRAINT FAIL`（关卡开场硬约束不满足），保留横幅不动。
+
+**修复**（三处纯函数 + 各自夹具）：
+
+- `src/server/api/error-classify.ts`：504 专用规则插在 `remote-failure` 通用 5xx **之前** → `transient-network`；`\bbusy\b` 加 `(?!\s*[=:]\s*(?:false|0\b))` → `busy=false` 落回 `process-lifecycle`。
+- `src/web/view/log-view.ts`：零值涂改正则加 `[A-Za-z_]*` + `(?:\.[A-Za-z_]+)?`，覆盖 `failedTasks.size=0` 这类「字段名 + 零值」读数；非零读数仍照常报错。
+
+**为什么这样修**：两类 noise classification（`transient-network` / `process-lifecycle`）本就有「默认折叠 + 不进告警坞 + 连续两拍缺席自动撤销」（`error-registry.applySweep`）。误报根因是分类/级别判错，不是撤销机制失效——不碰阈值、不动 ack、不给 UI 加静音开关。
+
+**验证**：新夹具先红后绿（504→remote-failure、busy=false→capacity、MISS→error）；dashboard typecheck 496 文件无错、全量 2206 pass / 0 fail，根项目 `bun run check` 2979 pass / 7 skip / 0 fail，`build.ts` 四份 bundle 全过。
+
 ## §54 BC eval 也写机器健康账：节点页「今日贡献」不再漏掉手动 evalA（2026-11-13）
 
 **报障**：`/nodes` 的采样节点「今天」窗口全为 0，但操作员手动点了几次 BC epoch 表的 `evalA`（`tmp/g2-classic35/evalBc.log`

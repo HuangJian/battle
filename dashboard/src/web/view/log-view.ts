@@ -49,8 +49,11 @@ const LOG_WARN_RE = /(warn|warning|⚠|timeout|retry|重试|降级)/i
  *  **待取失败=0** · 累计=21814」被扫成 error ⇒ 控制台横幅把它当错误报出来（实测两条假
  *  事件、count 10）。`失败=0` 说的是「零失败」，恰恰是**好消息**。
  *  ⇒ 判级别前把「关键词在左、值是零/空」的那一截涂掉（只涂关键词，保留 `=0` 便于阅读）。 */
+// `(?:\.[A-Za-z_]+)?` 覆盖 `failedTasks.size=0` / `errors.count=0` 这类「字段名 + 零值」读数：
+// 2026-11-21 的 `/v1/result MISS` 例行行正是被 `failedTasks.size=0` 里的 fail 判成 error，
+// 4 条假事件长期占着首页横幅。涂掉关键词保留 `=0`，非零读数仍照常报错。
 const ZERO_VALUED_ERROR_KW_TEXT_RE =
-  /(失败|fail(?:ed|s|ure)?|errors?|异常|崩溃|panic|fatal|exception)\s*[=:：]\s*0+(?:\.0+)?(?![0-9.])/gi
+  /(失败|fail(?:ed|s|ure)?|errors?|异常|崩溃|panic|fatal|exception)[A-Za-z_]*(?:\.[A-Za-z_]+)?\s*[=:：]\s*0+(?:\.0+)?(?![0-9.])/gi
 /** JSON 形态：键是错误关键词、值是空/零（`{"error":null}` / `{"error":""}`）。 */
 const EMPTY_ERROR_KEY_JSON_RE = /"(error|errors|failure|failures|err)"\s*:\s*(?:null|0\b|"|\{\})/gi
 

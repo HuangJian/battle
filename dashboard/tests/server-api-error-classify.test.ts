@@ -44,6 +44,30 @@ describe('classifyError — 规则表（plan v2 §3.2）', () => {
     expect(c('signal: terminated')).toBe('process-lifecycle')
   })
 
+  it('★ 504 网关超时 = 网络抖动，不被 5xx 一锅端成 remote-failure（2026-11-21）', () => {
+    // relay 等 worker 应答超时：worker 下一拍重领即可自愈，不需要人工处置。
+    expect(c('[11:26:23] [hub-server 127.0.0.1] "POST /relay/dsw/v1/weights HTTP/1.1" 504 -')).toBe(
+      'transient-network',
+    )
+    expect(c('GET /relay/dsw/v1/task HTTP/1.1" 504 -')).toBe('transient-network')
+    expect(c('504 Gateway Timeout from upstream')).toBe('transient-network')
+    // 真故障的 5xx 仍归原位（闸不能开太大）。
+    expect(c('HTTP/1.1" 500 -')).toBe('remote-failure')
+    expect(c('HTTP/1.1" 503 -')).toBe('capacity')
+  })
+
+  it('★ busy=false 不是「繁忙」：SIGTERM 关停落回 process-lifecycle（2026-11-21）', () => {
+    expect(
+      c(
+        '[10:27:57] [sampler-agent] persist worker closed code=null signal=SIGTERM ' +
+          '(was busy=false)',
+      ),
+    ).toBe('process-lifecycle')
+    // 真繁忙仍是容量问题。
+    expect(c('503 Service Unavailable: busy')).toBe('capacity')
+    expect(c('all workers busy')).toBe('capacity')
+  })
+
   it('transient-network：隧道/DNS/TCP/http2/边缘码', () => {
     expect(c('dial tcp 127.0.0.1:8899: connectex: No connection could be made')).toBe(
       'transient-network',
