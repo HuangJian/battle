@@ -112,18 +112,20 @@ def load_ppo_episodes(shards_root: str, manifest: dict, prep_b: Any) -> Any:
     eager 逐字节走旧 `np_core.load_episodes`；lazy 走 obs mmap + 逐 minibatch 物化。
     协议缺省仍是 eager（旧 manifest 不带键），lazy 始终由发布端显式声明。
     """
-    from worker.ppo.lazy_corpus import load_ppo_corpus
+    from worker.ppo.lazy_corpus import PPOCorpusSpec, load_ppo_corpus
 
     return load_ppo_corpus(
-        shards_root,
-        loader=str(manifest.get("ppo_loader", "eager") or "eager"),
-        gamma=float(manifest["gamma"]),
-        lam=float(manifest["lam"]),
-        normalize_adv=str(manifest["adv_norm"]) != "none",
-        normalize_ret=bool(manifest.get("normalize_ret", False)),
-        per_stage_quota=int(manifest.get("per_stage_quota", 0) or 0),
-        mb=int(manifest["mb"]),
-        bundle=prep_b,
+        PPOCorpusSpec(
+            shards_root,
+            loader=str(manifest.get("ppo_loader", "eager") or "eager"),
+            gamma=float(manifest["gamma"]),
+            lam=float(manifest["lam"]),
+            normalize_adv=str(manifest["adv_norm"]) != "none",
+            normalize_ret=bool(manifest.get("normalize_ret", False)),
+            per_stage_quota=int(manifest.get("per_stage_quota", 0) or 0),
+            mb=int(manifest["mb"]),
+            bundle=prep_b,
+        )
     )
 
 

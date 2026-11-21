@@ -1019,15 +1019,17 @@ class TrainingVolume:
         # 配额已满重启 ⇒ batches=0，若只 adopt(combined=None) 会把除零保护的 winRate=0
         # 写进账本（x20-steady it76 / §107）——必须从 shard 回填 outcomes。
         from worker.reports import merge_volume_report
-        from worker.resume import resumed_manifests
+        from worker.resume import ResumedSpec, resumed_manifests
 
         disk_reports = resumed_manifests(
-            self._traj_dir,
-            wver,
-            extra_wver=state.extra_wver,
-            course_fp=state.course_fp,
-            state_init=self._state_init,
-            mem=self._round_mem_shards(it),
+            ResumedSpec(
+                self._traj_dir,
+                wver,
+                extra_wver=state.extra_wver,
+                course_fp=state.course_fp,
+                state_init=self._state_init,
+                mem=self._round_mem_shards(it),
+            )
         )
         if state.stages:
             stage_set = {int(s) for s in state.stages}

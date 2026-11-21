@@ -40,6 +40,7 @@ from common.protocol import (
 # 它有两个读者（本模块的取包端点 + `queue_offline` 的清单），所以**不**挂在本模块上（否则
 # 队列那一侧要向上 import，账本当场报反向边）。本模块因此从 L0 升为 L1。
 from hub.offline_ingest import (
+    IngestArtifactSpec,
     end_seal_ok,
     ingest_offline_artifact,
     ingest_offline_result,
@@ -334,13 +335,15 @@ class OfflineRoutes:
                     f"本 hub 的课程：{self.hub.courses()}"
                 )
             status, res = ingest_offline_artifact(
-                self.hub,
-                course,
-                body,
-                # ★ `?parts=metrics` = **只带统计**的补传（没有权重那一半）：抖动期只有这条路
-                # 能把胜率/击杀送到控制台，且它**不推进活动起点、不创建 `it-N/`**。
-                parts=self._query_str("parts"),
-                size=len(raw),
+                IngestArtifactSpec(
+                    self.hub,
+                    course,
+                    body,
+                    # ★ `?parts=metrics` = **只带统计**的补传（没有权重那一半）：抖动期只有这条路
+                    # 能把胜率/击杀送到控制台，且它**不推进活动起点、不创建 `it-N/`**。
+                    parts=self._query_str("parts"),
+                    size=len(raw),
+                )
             )
         except (ProtocolError, ValueError, UnicodeDecodeError) as e:
             self._json({"error": f"补传被拒: {e}"}, 400)

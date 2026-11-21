@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import time
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -178,23 +179,37 @@ class LazyChunks:
         return self._corpus.gather(self._order[s : s + self.sizes[i]])
 
 
-def load_ppo_corpus(
-    data_root: str,
-    *,
-    loader: str = "eager",
-    gamma: float = np_core.GAMMA,
-    lam: float = np_core.LAM,
-    normalize_adv: bool = True,
-    normalize_ret: bool = False,
-    per_stage_quota: int = 0,
-    mb: int = 512,
-    bundle: LogBundle | None = None,
-):
+@dataclass(frozen=True)
+class PPOCorpusSpec:
+    """`load_ppo_corpus` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    data_root: str
+    loader: str = "eager"
+    gamma: float = np_core.GAMMA
+    lam: float = np_core.LAM
+    normalize_adv: bool = True
+    normalize_ret: bool = False
+    per_stage_quota: int = 0
+    mb: int = 512
+    bundle: LogBundle | None = None
+
+
+def load_ppo_corpus(spec: PPOCorpusSpec):
     """`--ppo-loader` 的唯一分派点：eager = 旧 `np_core.load_episodes`（逐字节不变）。
 
     调用方（`remote/train_core`、`worker/ppo/engine` CLI）只认这个函数，不要各自
     复制 if/else——否则「manifest 说 lazy、代码走 eager」会是一处静默的错账。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    data_root = spec.data_root
+    loader = spec.loader
+    gamma = spec.gamma
+    lam = spec.lam
+    normalize_adv = spec.normalize_adv
+    normalize_ret = spec.normalize_ret
+    per_stage_quota = spec.per_stage_quota
+    mb = spec.mb
+    bundle = spec.bundle
     if loader == "eager":
         return np_core.load_episodes(
             data_root,

@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from worker.resume import (
+    ResumedSpec,
     _scan_shards,
     completed_pairs,
     resumed_manifests,
@@ -98,8 +99,8 @@ def test_settled_totals_and_resumed_manifests_use_the_same_rule(tmp_path: Path) 
     assert settled_stage_totals(tmp_path, WVER, course_fp=NEW_BYTES, corpus_fp=CORPUS) == {
         0: (1, 40)
     }
-    assert resumed_manifests(tmp_path, WVER, course_fp=NEW_BYTES, corpus_fp=CORPUS) != []
-    assert resumed_manifests(tmp_path, WVER, course_fp=NEW_BYTES) == []
+    assert resumed_manifests(ResumedSpec(tmp_path, WVER, course_fp=NEW_BYTES, corpus_fp=CORPUS)) != []
+    assert resumed_manifests(ResumedSpec(tmp_path, WVER, course_fp=NEW_BYTES)) == []
 
 
 def test_corpus_fp_comes_from_the_same_source_as_the_remote_publish() -> None:

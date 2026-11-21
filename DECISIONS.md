@@ -8818,6 +8818,16 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-resume-lazy-ingest-specs
+
+P0-3 第二十一刀（批量）：三个 9 参函数 → frozen 旋钮袋：
+`worker/ppo/lazy_corpus.py::load_ppo_corpus` → `PPOCorpusSpec`（生产 2 + 测试 fake 1）、
+`hub/offline_ingest.py::ingest_offline_artifact` → `IngestArtifactSpec`（生产 2 + 测试 3；`log` 留作第二缺省参数，免得 spec 里再写一个
+`Any` 字段（Any 预算按文件冻结））、
+`worker/resume.py::resumed_manifests` → `ResumedSpec`（`trainer/dispatch` 2 +
+`trainer/loop_volume` 1 + e2e 3 + 测试 4）。字段顺序与缺省值逐字沿用旧签名。
+宽签名 **89 → 87**，文件 **62 → 60**（lazy_corpus / offline_ingest 归零，resume 2 → 1）。
+
 ## §2026-11-21-batch-bc-dataset-specs
 
 P0-3 第二十刀（批量）：一次收 6 个 9 参函数 → frozen 旋钮袋，调用点全量跟改：

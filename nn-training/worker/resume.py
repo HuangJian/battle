@@ -6,6 +6,7 @@ import fnmatch
 import json
 import os
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from common.log import log
@@ -613,17 +614,22 @@ def _manifest_report(mm: dict, stage: int, seed: int) -> dict:
     }
 
 
-def resumed_manifests(
-    traj_dir: Path,
-    wver: str,
-    exclude: set[tuple[int, int]] | None = None,
-    only: set[tuple[int, int]] | None = None,
-    extra_wver: str | None = None,
-    course_fp: str | None = None,
-    corpus_fp: str | None = None,
-    state_init: bool = False,
-    mem: Mapping[str, dict] | None = None,
-) -> list[dict]:
+@dataclass(frozen=True)
+class ResumedSpec:
+    """`resumed_manifests` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    traj_dir: Path
+    wver: str
+    exclude: set[tuple[int, int]] | None = None
+    only: set[tuple[int, int]] | None = None
+    extra_wver: str | None = None
+    course_fp: str | None = None
+    corpus_fp: str | None = None
+    state_init: bool = False
+    mem: Mapping[str, dict] | None = None
+
+
+def resumed_manifests(spec: ResumedSpec) -> list[dict]:
     """收集本轮未采样（不在 exclude）且已 done（wver 匹配）shard 的单局摘要，
     重启续跑时并入聚合，使报告 games/outcomes 仍覆盖完整一轮。
 
@@ -641,6 +647,16 @@ def resumed_manifests(
     走这条并入报告（否则本轮报告少掉整批局，samples/outcomes 全偏低）。过滤口径与磁盘腿
     逐条同源（wver / D14 / state_init / only / exclude），同一 (stage,seed) 只收一次。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    traj_dir = spec.traj_dir
+    wver = spec.wver
+    exclude = spec.exclude
+    only = spec.only
+    extra_wver = spec.extra_wver
+    course_fp = spec.course_fp
+    corpus_fp = spec.corpus_fp
+    state_init = spec.state_init
+    mem = spec.mem
     out: list[dict] = []
     seen: set[tuple[int, int]] = set()
     skip = exclude or set()

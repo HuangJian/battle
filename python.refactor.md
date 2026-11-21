@@ -1776,9 +1776,10 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      剩下的仍是逐模块工程，照该形状先铺端口再收测试。
    * **P1-4 类型化**：`Any` 1178 处 / 181 文件（G14 冻结）；mypy 仍是非 strict。
      批量换 `object` 已实测否决（406 个红点），只能逐个数据边界换成 TypedDict / 协议。
-   * **P0-3 参数爆炸**：仍有 **89 个函数 >8 参数 / 62 文件**（2026-11-21 实测；形状门禁按文件
+   * **P0-3 参数爆炸**：仍有 **87 个函数 >8 参数 / 60 文件**（2026-11-21 实测；形状门禁按文件
      冻结）。`make_loaders` / `archive_course` / `collect_corpus` 与 `bc_ingest` 三兄弟
-     已收成 spec（§273）。审计的「124」是 2026-11-19 上游合入前的读数，合入带进了新的宽签名）。
+     已收成 spec（§273）；`load_ppo_corpus` / `ingest_offline_artifact` /
+     `resumed_manifests` 紧随其后（§274）。审计的「124」是 2026-11-19 上游合入前的读数，合入带进了新的宽签名）。
      认领族已收成 `LeaseSpec`（§261，122 → 117）；下载三兄弟 + 补传三装配已收成
      `BlobAsk` / `WeightsAsk` / `CodeAsk` / `RoundBody` / `ResultBody` / `ArtifactBody`
      （§262，117 → 109）；outbox 构造器 → `OutboxSpec`（§263，109 → 108）；

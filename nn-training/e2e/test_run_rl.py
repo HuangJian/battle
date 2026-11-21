@@ -66,6 +66,7 @@ from trainer.stream import (
     run_rollout_stream as _run_rollout_stream,  # B7：run_rl 模块级不再 re-export
 )
 from worker.resume import (
+    ResumedSpec,
     completed_pairs,
     last_completed_iter,
     last_rotate_seed,
@@ -156,13 +157,13 @@ def test_resume_scope(tmp: Path) -> None:
     assert done_all == {(0, 111), (3, 222), (9, 999)}, "done filters by wver only"
     done_plan = done_all & plan
     assert done_plan == {(0, 111), (3, 222)}, "plan intersection"
-    rm = resumed_manifests(traj, wver, only=plan)
+    rm = resumed_manifests(ResumedSpec(traj, wver, only=plan))
     assert {(m["stage"], m["seed"]) for m in rm} == {(0, 111), (3, 222)}, "resumed honors only=plan (drops off-plan)"
     agg = [m for m in rm if m.get("games") == 1 and m.get("node") == "fake"]
     assert len(agg) == 1, "aggregate-schema manifest passed through"
     legacy = [m for m in rm if m.get("node") != "fake"]
     assert len(legacy) == 1 and legacy[0]["games"] == 1 and legacy[0]["totalSamples"] == 30, "legacy schema converted to aggregate shape"
-    rm_ex = resumed_manifests(traj, wver, only=plan, exclude={(0, 111)})
+    rm_ex = resumed_manifests(ResumedSpec(traj, wver, only=plan, exclude={(0, 111)}))
     assert {(m["stage"], m["seed"]) for m in rm_ex} == {(3, 222)}, "exclude=seen honored"
 
     # 吞吐 T4 提前预采：double-wver 对账——本轮 θ_N(wver) 之外还需认上一轮 epoch3
@@ -170,7 +171,7 @@ def test_resume_scope(tmp: Path) -> None:
     _mk_shard(traj, 7, 777, "e" * 64)  # 模拟预采首波：wver=快照指纹（extra）
     e_done = completed_pairs(traj, wver, extra_wver="e" * 64)
     assert (7, 777) in e_done, "extra-wver precollected shard counted as done"
-    rm_e = resumed_manifests(traj, wver, only={(7, 777)}, extra_wver="e" * 64)
+    rm_e = resumed_manifests(ResumedSpec(traj, wver, only={(7, 777)}, extra_wver="e" * 64))
     assert len(rm_e) == 1 and rm_e[0]["stage"] == 7, "resumed honors extra-wver shard"
     assert (7, 777) not in completed_pairs(traj, wver), "without extra_wver precollected shard NOT treated as current-θ shard"
 

@@ -273,14 +273,16 @@ def test_reuse_rollouts_filters_dispatch_queue_and_lands_on_disk(
     mm = json.loads((landed / "manifest.json").read_text(encoding="utf-8"))
     assert mm["corpus_fp"] and mm["course_fp"], "D14 改戳必须落地（否则续跑/聚合都判异血缘）"
     assert not (traj / "rw1").exists(), "没命中就不许造空目录（零额外存储）"
-    from worker.resume import resumed_manifests
+    from worker.resume import ResumedSpec, resumed_manifests
 
     got = resumed_manifests(
-        traj,
-        WVER,
-        only={(2000, 7), (2000, 8)},
-        course_fp=mm["course_fp"],
-        corpus_fp=mm["corpus_fp"],
+        ResumedSpec(
+            traj,
+            WVER,
+            only={(2000, 7), (2000, 8)},
+            course_fp=mm["course_fp"],
+            corpus_fp=mm["corpus_fp"],
+        )
     )
     assert [int(m["stage"]) for m in got] == [2000], "借来的局必须进本轮聚合"
 

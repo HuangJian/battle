@@ -1204,16 +1204,18 @@ def main():
     load_state_into(model, args.resume)
     model.to(device)
 
-    from worker.ppo.lazy_corpus import load_ppo_corpus
+    from worker.ppo.lazy_corpus import PPOCorpusSpec, load_ppo_corpus
 
     episodes = load_ppo_corpus(
-        args.data,
-        loader=args.ppo_loader,
-        gamma=args.gamma,
-        lam=args.lam,
-        normalize_ret=bool(args.normalize_ret),
-        per_stage_quota=int(args.per_stage_quota),
-        mb=args.mb,
+        PPOCorpusSpec(
+            args.data,
+            loader=args.ppo_loader,
+            gamma=args.gamma,
+            lam=args.lam,
+            normalize_ret=bool(args.normalize_ret),
+            per_stage_quota=int(args.per_stage_quota),
+            mb=args.mb,
+        )
     )
     # lazy 语料只有 .samples（不物化 episodes）；eager 列表走原求和。
     total_steps = corpus_samples(episodes)

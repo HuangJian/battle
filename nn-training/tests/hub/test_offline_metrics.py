@@ -138,10 +138,10 @@ def test_metrics_only_rows_do_not_freeze_the_active_pointer(tmp_path: Path) -> N
 
 def test_unknown_parts_is_rejected_loudly() -> None:
     """★ 评审 P2：未实现的 `?parts=weights/opt` 不能静默落进整轮分支。"""
-    from hub.offline_ingest import ingest_offline_artifact
+    from hub.offline_ingest import IngestArtifactSpec, ingest_offline_artifact
 
     status, res = ingest_offline_artifact(
-        None, "", {"run_id": RUN, "rows": [_row(1)]}, parts="weights"
+        IngestArtifactSpec(None, "", {"run_id": RUN, "rows": [_row(1)]}, parts="weights")
     )
     assert status == 400
     # 精确形状（不用子串判据：`tests/test_source_text_assert_budget.py` 在数这个）

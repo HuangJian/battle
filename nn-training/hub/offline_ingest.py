@@ -21,6 +21,7 @@ push 路径上 course / run_id 都是 hub 派的，一个 worker 侧 bug（或 b
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from common.protocol import PLAN_NAME, ProtocolError
@@ -77,18 +78,21 @@ def _authority_body(body: dict, *, course: str, run_id: str, source: str) -> dic
     return out
 
 
-def ingest_offline_artifact(
-    hub: Any,
-    course: str,
-    body: dict,
-    *,
-    parts: str = "",
-    run_id: str = "",
-    lease_token: str | None = None,
-    size: int = 0,
-    source: str = "worker",
-    log: Any = _log,
-) -> tuple[int, dict]:
+@dataclass(frozen=True)
+class IngestArtifactSpec:
+    """`ingest_offline_artifact` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    hub: Any
+    course: str
+    body: dict
+    parts: str = ""
+    run_id: str = ""
+    lease_token: str | None = None
+    size: int = 0
+    source: str = "worker"
+
+
+def ingest_offline_artifact(spec: IngestArtifactSpec, log: Any = _log) -> tuple[int, dict]:
     """一轮产物入账 → `(状态码, 响应体)`。
 
     `lease_token=None` 表示「按体里的 token 判 advance」（HTTP 腿）；push 腿传 assignment 的
@@ -97,6 +101,15 @@ def ingest_offline_artifact(
     抛 `ProtocolError`/`ValueError` 表示**体本身不合法**（HTTP 腿 400）；`AuthorityConflictError`
     是同一族（handler 也 400，派发器标 conflict）。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    hub = spec.hub
+    course = spec.course
+    body = spec.body
+    parts = spec.parts
+    run_id = spec.run_id
+    lease_token = spec.lease_token
+    size = spec.size
+    source = spec.source
     try:
         body = _authority_body(body, course=course, run_id=run_id, source=source)
     except AuthorityConflictError as e:

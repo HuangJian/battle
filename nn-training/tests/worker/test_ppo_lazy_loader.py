@@ -363,8 +363,9 @@ def test_load_ppo_episodes_passes_manifest_loader(monkeypatch) -> None:
     seen: dict[str, Any] = {}
     sentinel = object()
 
-    def _fake(root, **kwargs):
-        seen.update({"root": root, **kwargs})
+    def _fake(spec: lc.PPOCorpusSpec):
+        seen.update({"root": spec.data_root, "loader": spec.loader, "mb": spec.mb,
+                     "per_stage_quota": spec.per_stage_quota, "bundle": spec.bundle})
         return sentinel
 
     monkeypatch.setattr(lc, "load_ppo_corpus", _fake)

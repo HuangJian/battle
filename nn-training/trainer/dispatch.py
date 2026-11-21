@@ -46,7 +46,7 @@ from trainer.queue_worker import (
 from worker import serve_pool
 from worker.agent_meta import record_agent_meta as _record_agent_meta_impl
 from worker.reports import combine_reports
-from worker.resume import completed_pairs, resumed_manifests, state_init_enabled
+from worker.resume import ResumedSpec, completed_pairs, resumed_manifests, state_init_enabled
 from worker.sibling_reuse import reuse_rollouts
 
 # 分布式采样（plan/distributed-rollout.md v3.3）：runId 使 iterId={runId}.{it} 全局唯一，
@@ -362,13 +362,15 @@ class RolloutDispatcher:
             # 补齐 missing/expectedGames/dist：与全流程路径同 schema，下游免分支。
             combined = combine_reports(
                 resumed_manifests(
-                    traj_dir,
-                    wver,
-                    only=plan_set,
-                    extra_wver=extra_wver,
-                    course_fp=course_fp,
-                    corpus_fp=corpus_fp,
-                    state_init=state_init_enabled(args),
+                    ResumedSpec(
+                        traj_dir,
+                        wver,
+                        only=plan_set,
+                        extra_wver=extra_wver,
+                        course_fp=course_fp,
+                        corpus_fp=corpus_fp,
+                        state_init=state_init_enabled(args),
+                    )
                 )
             )
             combined["missing"] = []
@@ -603,14 +605,16 @@ class RolloutDispatcher:
         combined = combine_reports(
             [_ensure_games(r) for r in results]
             + resumed_manifests(
-                traj_dir,
-                wver,
-                exclude=seen,
-                only=plan_set,
-                extra_wver=extra_wver,
-                course_fp=course_fp,
-                corpus_fp=corpus_fp,
-                state_init=state_init_enabled(args),
+                ResumedSpec(
+                    traj_dir,
+                    wver,
+                    exclude=seen,
+                    only=plan_set,
+                    extra_wver=extra_wver,
+                    course_fp=course_fp,
+                    corpus_fp=corpus_fp,
+                    state_init=state_init_enabled(args),
+                )
             )
         )
         combined["missing"] = [list(k) for k in missing]

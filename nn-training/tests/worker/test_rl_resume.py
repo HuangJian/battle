@@ -30,6 +30,7 @@ import pytest
 
 from worker.resume import (
     MANIFEST_NAME,
+    ResumedSpec,
     _dir_signature,
     _scan_shards,
     completed_pairs,
@@ -178,7 +179,9 @@ def test_resumed_manifests_tolerates_concurrent_retire(
     victim = _write_shard(traj, "w2", 2, 333)
     _racy_scandir(monkeypatch, victim)
 
-    out = resumed_manifests(traj, WVER, exclude={(9, 9)}, only={(0, 111), (1, 222), (2, 333)})
+    out = resumed_manifests(
+        ResumedSpec(traj, WVER, exclude={(9, 9)}, only={(0, 111), (1, 222), (2, 333)})
+    )
     got = {(int(r["stage"]), int(r["seed"])) for r in out}
     assert got == {(0, 111), (1, 222)}, f"输家副本不该进报告，其余照常（got {got}）"
     assert keep_a.is_dir() and keep_b.is_dir()

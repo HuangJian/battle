@@ -38,7 +38,7 @@ from common.protocol import (
     OFFLINE_PUSH_TASK_NAME,
 )
 from hub import offline_push as disp_mod
-from hub.offline_ingest import ingest_offline_artifact
+from hub.offline_ingest import IngestArtifactSpec, ingest_offline_artifact
 from hub.offline_push import OfflinePushDispatcher, OfflinePushWorkers
 from hub.server import _HubQueue, _JobStore, make_server
 from remote.offline_push_face import PushFaceState, make_face_server
@@ -1179,7 +1179,7 @@ def test_ingest_injects_the_assignment_run_id_when_the_body_omits_it(tmp_path: P
     body = _artifact_body(run_id="", it=2)
     body.pop("run_id")
     status, res = ingest_offline_artifact(
-        hub, COURSE, body, run_id="assignment-run", log=lambda _m: None
+        IngestArtifactSpec(hub, COURSE, body, run_id="assignment-run"), log=lambda _m: None
     )
     assert status == 200 and res["status"] == "accepted"
     assert (_offline_root(hub) / "assignment-run" / "it-002").is_dir()
@@ -1189,7 +1189,7 @@ def test_ingest_rejects_a_body_for_another_course_without_writing(tmp_path: Path
     hub, _pack = _mk_hub(tmp_path)
     body = _artifact_body(run_id="run-1", it=1, course="other-course")
     status, res = ingest_offline_artifact(
-        hub, COURSE, body, run_id="run-1", log=lambda _m: None
+        IngestArtifactSpec(hub, COURSE, body, run_id="run-1"), log=lambda _m: None
     )
     assert status == 409 and "course" in str(res.get("error") or "")
     assert not (_offline_root(hub) / "run-1").exists()

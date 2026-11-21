@@ -54,7 +54,6 @@ LONG_FUNCS_BASELINE: dict[str, int] = {
 WIDE_FUNCS_BASELINE = {
     "common/race_metrics.py": 1,
     "common/task_key.py": 1,
-    "hub/offline_ingest.py": 1,
     "hub/offline_push.py": 2,
     # 2026-11-21：`build_task_zip` 的 9 个关键字参数收成 `TaskZipSpec`
     # ⇒ 本文件宽签名归零，条目删除。
@@ -63,7 +62,6 @@ WIDE_FUNCS_BASELINE = {
     # ⇒ `hub/queue_claims.py` · `hub/queue_peer.py` · `hub/store.py` ·
     # `hub/store_leases.py` 四个文件各 1/1/1/2 条宽签名归零，条目删除。
     # P3 lazy loader 的装载参数（loader/gamma/lam/normalize/配额/mb/bundle）本就 >8。
-    "worker/ppo/lazy_corpus.py": 1,
     # 上游合入的宽签名（BC 数据集）——同批登记，待收对象。
     "remote/bc_job.py": 1,
     "remote/bundle.py": 2,
@@ -139,7 +137,7 @@ WIDE_FUNCS_BASELINE = {
     # （ckpt/target_kl/seed/warmup/ref/kl/on_epoch_done/rng），包成对象只会把它隐形。
     "worker/ppo/loop.py": 1,
     "worker/ppo/np_core.py": 1,
-    "worker/resume.py": 2,
+    "worker/resume.py": 1,
     # 2026-11-21：`quota_sample_priority` 的 9 个位置参数收成 `QuotaSampleSpec`
     # ⇒ 本文件宽签名归零，条目删除。
     "worker/volume_quota.py": 1,

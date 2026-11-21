@@ -25,6 +25,16 @@
 
 ---
 
+## §274 P0-3 第二十一刀（批量）：resume / lazy 语料 / 补传入口收成 spec（宽签名 89 → 87）（2026-11-21）
+
+* `worker/ppo/lazy_corpus.py::load_ppo_corpus` → `PPOCorpusSpec`；`hub/offline_ingest.py::
+  ingest_offline_artifact` → `IngestArtifactSpec`（`log` 降为第二缺省参数）；
+  `worker/resume.py::resumed_manifests` → `ResumedSpec`。字段顺序/缺省值逐字沿用。
+* 调用点：lazy 2 生产 + 测试 fake；ingest 2 生产 + 3 测试；resumed 3 生产 + e2e 3 + 4 测试。
+* 形状基线删 `hub/offline_ingest.py` / `worker/ppo/lazy_corpus.py`，`worker/resume.py` 2 → 1；
+  全仓 **89 → 87**，文件 **62 → 60**。
+* 回归：lazy / offline_metrics / resume 三族 + dispatch ingest 用例 48 条全绿；mypy/ruff 改动文件全绿。
+
 ## §273 P0-3 第二十刀（批量）：6 个 9 参函数收成 spec（宽签名 95 → 89）（2026-11-21）
 
 * `worker/data/dataset.py::make_loaders` → `LoaderSpec`；`biz/course_archive.py::archive_course`

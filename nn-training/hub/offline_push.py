@@ -59,6 +59,7 @@ from common.protocol import (
 )
 from hub.offline_ingest import (
     AuthorityConflictError,
+    IngestArtifactSpec,
     ingest_offline_artifact,
     ingest_offline_result,
     trigger_pack_export,
@@ -1075,13 +1076,15 @@ class OfflinePushDispatcher(TickLoopHost):
     ) -> tuple[int, dict]:
         try:
             return ingest_offline_artifact(
-                self.hub,
-                course,
-                body,
-                parts=parts,
-                run_id=str(rec.get("run_id") or ""),
-                lease_token=str(rec.get("lease_token") or ""),
-                source="push",
+                IngestArtifactSpec(
+                    self.hub,
+                    course,
+                    body,
+                    parts=parts,
+                    run_id=str(rec.get("run_id") or ""),
+                    lease_token=str(rec.get("lease_token") or ""),
+                    source="push",
+                ),
                 log=self._log,
             )
         except AuthorityConflictError as e:
