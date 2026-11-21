@@ -42,7 +42,7 @@
 * 唯一调用点：`hub/offline_push.py` 的派发器方法（`_build_task_zip(TaskZipSpec(...))`）；
   测试经派发器公开方法调用，签名不变。
 * 形状门禁基线删除 `hub/offline_push_pack.py` 行（1 → 0）；`Any` 基线不动。
-* 回归：`tests/hub/test_offline_push_dispatch.py` + 形状预算 + LOC 预算（offline_push 986/1000）
+* 回归：`tests/hub/test_offline_push_dispatch.py` + 形状预算 + LOC 预算（offline_push 985/1000）
   + mypy 改动文件无错。
 
 ## §270 P0-3 第十七刀：`pack_payload_zip` 收成 `PackSpec`（宽签名 98 → 97）（2026-11-21）
