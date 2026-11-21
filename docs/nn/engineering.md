@@ -25,6 +25,31 @@
 
 ---
 
+## §252 P0-2 存量第三处：`worker/train/bc._Train.run_epochs`（201 → 63 + 79 + 65）（2026-11-21）
+
+合入上游 goal-nn 之后，形状门禁（>200 行）从零又长回三处：`remote/rollout_node.run` 249、
+`trainer/eval_dispatch._eval_admit` 248、`worker/train/bc._Train.run_epochs` **201**。第三处只超线
+一行，但它恰好是「一个方法里塞了三件事」，所以先收它。
+
+**切法（按 run_epochs 里本来就存在的三段空行切，不重排任何语句）**
+
+| 新方法 | 行数 | 职责 |
+|---|---|---|
+| `run_epochs` | 63 | epoch 循环编排：历史写入、日志行、平滑 val 选优、早停、`--ckpt-every`、`_emit_epoch` |
+| `_train_epoch(args)` | 79 | 训练内循环（v6 三头 / value / legacy 三种损失形态 + 梯度裁剪 + 设备感知步进）+ `scheduler.step()`，返回样本加权 `train_loss` |
+| `_validate()` | 65 | 无增强验证（含 `val_loss_weighted`、三个准确率、`value_loss`），返回 `(val_loss, ma, fa, ha, vl, 累加器)` |
+
+判据：**语句顺序一字未动**（模型 `train()` → 循环 → `scheduler.step()` → `eval()` → 验证循环 →
+历史/日志/选优/早停/断点/回调），RNG 与 XLA mark 的位置同前 ⇒ 同 seed 逐位一致。`ha` 的
+「legacy 语料不写 `hold_acc` 键」判据随计算搬进 `_validate`，`run_epochs` 只留 `if ha is not None`。
+
+`LONG_FUNCS_BASELINE` 删掉 `worker/train/bc.py` 条目（3 → **2**），注释写明余下两处为什么还没拆：
+采样节点主流程与评估节点门要按「独立所有者 + 独立触发条件」切，不是同一次编辑能完成的。
+
+**门禁**：nn `6695 passed / 3 skipped`（62.9s）。**行为差异：无**。
+
+---
+
 ## §251 P0-5 复核后的两簇：`PackTriggers`（hub 触发账）与 `OutboxGates`（补传写闸）（2026-11-21）
 
 2026-11-21 的全树复核（`python.refactor.md` §P0-5 的「复核」小节）在清单清零之后又量出两处

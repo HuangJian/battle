@@ -9105,3 +9105,16 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **守卫**：`tests/hub/test_pack_triggers.py`（9 条）+ `tests/remote/test_deliver_outbox.py` +3。
 - **意义 / 行为**：P0-5 复核提出的两簇清零；**行为差异无**（判据、节流窗、上界、fd 语义逐字保留）。
   全文 → `docs/nn/engineering.md` §251。
+
+## §2026-11-21-bc-run-epochs-split（`worker/train/bc._Train.run_epochs` 201 行 → 63 + 79 + 65）
+
+- **背景**：合入上游 goal-nn 后形状门禁（>200 行）从零长回三处；`run_epochs` 恰 201 行，
+  且内部本就是「训练内循环 / 验证 / epoch 编排」三段，只是挤在一个方法里。
+- **决定**：按原有三段空白切 —— `run_epochs`（63，编排 + 历史 + 平滑选优 + 早停 + 断点 + 回调）、
+  `_train_epoch(args)`（79，训练 + `scheduler.step()`）、`_validate()`（65，验证与三个准确率）；
+  `ha` 的「legacy 不写 `hold_acc`」判据随计算搬进 `_validate`。**语句顺序一字未动**（RNG 与
+  `xla_mark_step` 位置同前）⇒ 同 seed 逐位一致。`LONG_FUNCS_BASELINE` 删该文件条目（3 → 2），
+  余下 `rollout_node.run` / `eval_dispatch._eval_admit` 要按「独立所有者 + 独立触发条件」拆。
+- **被否决**：按「训练/验证」把两个内循环提成模块级纯函数（要传 20+ 字段的 `_Train` 状态，
+  等于把参数爆炸换个地方）；只把验证段抽走（那只能降到 140 行左右，仍在 200 线上下浮动）。
+- **行为**：无差异。全文 → `docs/nn/engineering.md` §252。
