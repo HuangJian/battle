@@ -8818,6 +8818,15 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-reap-spec
+
+P0-3 第十九刀：`trainer/queue_local.py::reap_alloc_timeouts`（9 个关键字参数：inflight /
+inflight_ts / inflight_nodes / inflight_tags / inflight_targets / task_timeout_blocks /
+pending / timeout_sec / log）→ frozen `ReapSpec`（字段顺序 = 旧签名，全必填）。函数体开头
+一次展开旧局部名，超时重排、节点冷却与 abort 逐字未动。唯一调用点
+`trainer/queue_worker.py` 包对象；`trainer/queue_local.py` 的宽签名 2 → 1（剩 `__init__`），
+全仓 96 → 95（66 文件不变）。
+
 ## §2026-11-21-taskzip-spec
 
 P0-3 第十八刀：`hub/offline_push_pack.py::build_task_zip`（9 个关键字参数：course / pack /

@@ -19,6 +19,7 @@ from common.platform_utils import rmtree_best_effort
 from trainer.queue_local import (
     LocalLane,
     QueueEdgeGate,
+    ReapSpec,
     RescanSpec,
     abort_other_tags,
     drop_attempt,
@@ -194,11 +195,17 @@ def _claim(q: QueueState, nd: dict | None, local_slot: int | None) -> _Claim | N
         # 超时任务的持有节点加入冷却黑名单（task_timeout_blocks），冷却期内
         # 该节点不得再次抢到同一任务，防 a96 超时→回队→又被 a96 抢走的死循环。
         q.stats["alloc_timeout_requeued"] += reap_alloc_timeouts(
-            inflight=q.inflight, inflight_ts=q.inflight_ts,
-            inflight_nodes=q.inflight_nodes, inflight_tags=q.inflight_tags,
-            inflight_targets=q.inflight_targets,
-            task_timeout_blocks=q.task_timeout_blocks, pending=q.pending,
-            timeout_sec=q.task_fetch_timeout, log=q.log,
+            ReapSpec(
+                inflight=q.inflight,
+                inflight_ts=q.inflight_ts,
+                inflight_nodes=q.inflight_nodes,
+                inflight_tags=q.inflight_tags,
+                inflight_targets=q.inflight_targets,
+                task_timeout_blocks=q.task_timeout_blocks,
+                pending=q.pending,
+                timeout_sec=q.task_fetch_timeout,
+                log=q.log,
+            )
         )
         prune_timeout_blocks(q.task_timeout_blocks, q.inflight, q.pending)
         if nd is None:

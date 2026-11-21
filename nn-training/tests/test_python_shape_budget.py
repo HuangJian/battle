@@ -111,7 +111,9 @@ WIDE_FUNCS_BASELINE = {
     "trainer/loop_plan.py": 1,
     "trainer/loop_serve.py": 1,
     "trainer/loop_transport.py": 1,
-    "trainer/queue_local.py": 2,
+    # 2026-11-21：`reap_alloc_timeouts` 的 9 个关键字参数收成 `ReapSpec`
+    # ⇒ 本文件宽签名 2 → 1（剩 `__init__`），基线只许继续调小。
+    "trainer/queue_local.py": 1,
     "trainer/rollout_phase.py": 1,
     "trainer/stream.py": 1,
     "worker/bc_collect.py": 1,

@@ -1027,18 +1027,22 @@ def _cancel_remote_targets(targets: list[dict], log: Any) -> None:
         log(f"[dist] alloc-timeout: cancelled {ok}/{tried} remote task(s)")
 
 
-def reap_alloc_timeouts(
-    *,
-    inflight: dict[tuple[int, int], int],
-    inflight_ts: dict[tuple[int, int], float],
-    inflight_nodes: dict[tuple[int, int], set[str]],
-    inflight_tags: dict[tuple[int, int], set[str]],
-    inflight_targets: dict[tuple[int, int], dict[str, dict]],
-    task_timeout_blocks: dict[tuple[int, int], set[str]],
-    pending: deque[tuple[int, int]],
-    timeout_sec: float,
-    log: Any,
-) -> int:
+@dataclass(frozen=True)
+class ReapSpec:
+    """`reap_alloc_timeouts` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    inflight: dict[tuple[int, int], int]
+    inflight_ts: dict[tuple[int, int], float]
+    inflight_nodes: dict[tuple[int, int], set[str]]
+    inflight_tags: dict[tuple[int, int], set[str]]
+    inflight_targets: dict[tuple[int, int], dict[str, dict]]
+    task_timeout_blocks: dict[tuple[int, int], set[str]]
+    pending: deque[tuple[int, int]]
+    timeout_sec: float
+    log: Any
+
+
+def reap_alloc_timeouts(spec: ReapSpec) -> int:
     """把超时任务放回 `pending` 并取消原请求；返回本次重排的任务数。
 
     `inflight_ts` 是**首次派发**的墙钟锚点，竞速副本不刷新它；超时任务回队前
@@ -1048,6 +1052,16 @@ def reap_alloc_timeouts(
     已知局限：卡在 `urlopen`（响应头还没回来）的连接不在注册表里，关不到；
     那部分只能等原请求自己的 timeout（见 `common.distribution.abort_active_requests`）。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    inflight = spec.inflight
+    inflight_ts = spec.inflight_ts
+    inflight_nodes = spec.inflight_nodes
+    inflight_tags = spec.inflight_tags
+    inflight_targets = spec.inflight_targets
+    task_timeout_blocks = spec.task_timeout_blocks
+    pending = spec.pending
+    timeout_sec = spec.timeout_sec
+    log = spec.log
     now = time.time()
     reaped = [task for task, ts in list(inflight_ts.items()) if now - ts > timeout_sec]
     if not reaped:

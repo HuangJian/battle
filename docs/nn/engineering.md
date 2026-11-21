@@ -25,6 +25,15 @@
 
 ---
 
+## §272 P0-3 第十九刀：`reap_alloc_timeouts` 收成 `ReapSpec`（宽签名 96 → 95）（2026-11-21）
+
+* `trainer/queue_local.py::reap_alloc_timeouts` 的 9 个关键字参数 → frozen `ReapSpec`
+  （字段顺序 = 旧签名，全必填）。函数体开头一次展开，超时重排 / 冷却节点 / abort 逐字未动。
+* 唯一调用点：`trainer/queue_worker.py` 的分配超时分支（`reap_alloc_timeouts(ReapSpec(...))`）。
+* 形状门禁基线 `trainer/queue_local.py` 2 → 1（剩 `__init__`）；`Any` 基线不动。
+* 回归：queue_worker / queue_local 相关用例 + 形状预算 + LOC 预算（queue_local 792/1000）
+  + mypy 改动文件无错。
+
 ## §271 P0-3 第十八刀：`build_task_zip` 收成 `TaskZipSpec`（宽签名 97 → 96）（2026-11-21）
 
 * `hub/offline_push_pack.py::build_task_zip` 的 9 个关键字参数 → frozen `TaskZipSpec`
