@@ -63,7 +63,19 @@ try:
         # BC 课必须用 BcCourseConfig（与 trainer/run_bc.py 同一条校验链）；
         # 用 RL 的 CourseConfig 会把 kind/corpus/train/eval 全判成 extra_forbidden。
         from worker.bc_config import load_bc_course
-        load_bc_course(course_path)
+        bc = load_bc_course(course_path)
+        # 2026-11-21 g8-god-bc 现场：课程只写 games_per_stage=0（注释说"不采语料"）
+        # 却漏写 source=fixed ⇒ 默认 collect ⇒ round_seeds() 返回 [] ⇒ todo 空 ⇒
+        # 误判"语料已齐（0 shards）"⇒ 发布端 pattern bc_s*_seed* 扫不到 shard ⇒
+        # 一个 job 都发不出去，worker 空转、serve 重试 5 次 abort 本课。
+        # schema 合法但语义致命 ⇒ 必须在开课这一拍响亮拦住，别等运行时静默失败。
+        if bc.corpus.source == "collect" and bc.corpus.games_per_stage <= 0:
+            fail(
+                "BC 课 corpus.games_per_stage=0 但 source=collect（默认）：运行时会把"
+                "“0 个待采”误判成语料已齐，无法发布任何 job（worker 空转 + 课程 abort）。"
+                "要读现成语料请在 corpus 显式写 source=fixed 并配 fixed_dir；"
+                "要现采请把 games_per_stage 设为 >0。"
+            )
     else:
         from biz.course_resolve import load_course
         load_course(course_path)

@@ -10,7 +10,9 @@ print(shutil.rmtree.__module__)"` 正常模式输出 `sitecustomize`）。`-S` �
 删除确认（交互式弹窗 / 无交互失败）。这是**绕过沙箱删除保护**的手段——用户知情
 并批准，且**严格限界**：
 
-  * 只删除 `tmp/pytest-tmp/` 下的**直接子目录**（测试临时目录）；
+  * 只删除 `tmp/pytest-tmp/` 下的**直接子目录**（测试临时目录），但跳过
+    `pre-commit/`——那是 pre-commit hook 自己的持久工作目录（复用 + 截断，
+    从不删除），被清掉会让 hook 的 nn.log 重定向失败（2026-11-21 现场）；
   * 按目录 mtime 保留最近 KEEP_DAYS 天（默认 1，环境变量 NN_TMP_KEEP_DAYS 可调）；
   * 绝不触碰目录本身、其他路径、或非子目录内容。
 
@@ -120,6 +122,12 @@ def main(argv: list[str] | None = None) -> int:
     t0 = time.monotonic()
     for child in TARGET.iterdir():
         if not child.is_dir():
+            continue
+        # pre-commit hook 在仓库根的 tmp/pytest-tmp/pre-commit/ 下放归因清单与
+        # nn.log；它由 hook 自己 `mkdir -p` + EXIT 截断复用，不是测试临时目录。
+        # 旧逻辑按 mtime 把它当过期目录 rmtree ⇒ hook 写 nn.log 时目录已没 ⇒
+        # `cat: .../nn.log: No such file or directory`，提交被假失败拦下。
+        if child.name == "pre-commit":
             continue
         try:
             mtime = child.stat().st_mtime

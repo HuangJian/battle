@@ -8818,3 +8818,54 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-goalnn-five-shapings-flat（五次塑形全部零位移：敌方状态定价这条路关闭，只剩教师或新指标）
+
+- **判决**：`g7-def`（四轴阶梯，Φ 判别 +590）与 `g7-def-ent`（同奖励 + ent_coef 0.03）各跑到 it340：
+  **机制项按速率看是平的** —— 毁局 `DirectAimed`/千拍 4.35 → 4.04~4.35、早轴/千拍 15.15 → 15.0~15.2
+  （总量上升全是"毁局变长 3926→4300 拍"的伪影）。预注册 ≤10 在 35 个 checkpoint 上一次没到（最低 15.3）。
+- **两面新证据**：① **判别力 ≠ 可学**：四轴阶梯把"奖励对结局的判别力"抬到 +590（历史最高），机制照旧不动
+  ⇒ 判别力是判读量，不是可学性；② **探索不是卡点**：`def-ent` 熵 0.53→**0.82**（旋钮生效），
+  机制不动、胜率还略低（配对 Δ def−def-ent **+1.90pp**，26/35 点为正）⇒ 加成噪声。
+- **44.29% 的弧线怎么读**：`def` it120 比起点高 7pp，且**逐关普遍**（22/35、净 +49 局、p=0.016）⇒ 不是几关的抖动；
+  但① 同刻机制零位移、② it340 反向普遍退化（8/35、净 −30、p=0.036）、③ 无基地项的 ctrl2 自己摆过 35.6–43.7%
+  ⇒ 判为**权重轨迹慢振荡**，不是学到的守家能力。判读纪律：机制不动时，胜率弧线只作潜力旁证。
+- **副作用**：cellsVisited 121.4 → 105.7 / 111.8（毁局 96.8 → 82.9 / 77.3）、`def` 末点 k/千 2.17 破线
+  ⇒ 惩罚让策略变保守，不是回防。
+- **决定**：停两课。"给敌方状态定价"关闭，剩两条路 —— **God-AI 教师 BC**（AGENTS §0.2 允许教师帮起步，
+  不动 codehash）或 **新增「玩家离基地距离 × 基地受威胁」每拍指标**（动 metrics 版本 + codehash + 重启 hub）。
+- **全文**：`docs/nn/experiments.md §152`。
+## §2026-11-21-goalnn-god-bc-v1（教师 BC 起步课 g8-god-bc：init=it120、三路 DAgger、60 epoch 每 5 轮择优）
+
+- **背景**：五次奖励塑形全部零位移（§2026-11-21-goalnn-five-shapings-flat）⇒ 转"把行为灌进去"。
+  教师实测（0★）：God 78.57% / kills 17.96 vs NN 13.15 / 四轴暴露 63–96% / **到鹰中位 13.0 格（更远）**、
+  威胁帧 20.8 vs 40.5 帧/局 ⇒ 教师教的是**更早更快清场**，不是"回防"（§153）。
+- **决定**：开 `g8-god-bc`（`kind: bc`）：
+  · **init = `g7-def.it120`**（每一条面板指标都 ≥ it740：44.29% vs 37.29%、基毁 347 vs 385、kills 14.35 vs 13.15；
+    而 it740 是钢基面板产物，§148 证明它把"远离基地"训成了习惯）
+  · **语料三路**（全 `export-dagger-labels --action-v6`）：dagger-120（学生=it120）/ dagger-740（更弱 ⇒ 危机帧更密）/
+    dagger-hot（Δ(God−NN) 最大十关 × seed 6-21）
+  · `epochs 60 / lr 1e-4 / batch 256 / value_coef 0 / mirror_p 0.5`；`eval.every_epochs 5 × games_per_stage 6`
+    （种子 1..6，**不用正式面板挑 ckpt**，避免选择偏差）
+- **为什么不是四路**：教师自跑那一路（`collect-godai.ts` / `export-godai-labels.ts`）只写 legacy 2 头
+  （move5+fire2），与 `action_v6` 不同构；要用得先给 `export-godai-labels.ts` 补 `--action-v6`（留 v2）。
+- **附带修复**：`collect-godai.ts` 补 `--player-level`（`hard.playerStartLevel = 1` ⇒ 之前只能采 1★，
+  与 0★ 面板不一致；同 God 局评估踩过的坑）。
+- **预注册**：(i) 全池 60 seed ≥ **44.29%**（超过 init；跌破 37.29% 判崩）；(ii) **kills/千拍 ≥3.0**（init 2.65 / 教师 3.29）；
+  (iii) 毁局 `DirectAimed`/千 < **4.35**（历史最低 3.93）。判死后先降 lr 到 5e-5 / 加 dagger-740 比例，**别先加语料**。
+- **全文**：`nn-training/curricula/g8-god-bc.bc.jsonc` 头部与尾部。
+## §2026-11-21-goalnn-bc-shard-name-collision（BC shard 目录名必须带路前缀：发布端按目录名去重，580→370）
+
+- **事故**：`g8-god-bc` 的三路语料都用采集器默认目录名 `dagger_s{N}_seed{M}` ⇒ 发布端
+  `iter_bc_shard_dirs` 按 **目录名** 去重（同名保留 manifest 最早一份）⇒ **580 局被砍成 370**
+  （dagger-120 剩 71 / dagger-740 剩 139 / dagger-hot 160）。"用弱学生补危机帧"的意图被削掉大半。
+- **修法**：三路各加前缀 —— `dag120_` / `dag740_` / `dagh_`（`sub.name` 改名，幂等，已做 580 个）。
+  校验：`iter_bc_shard_dirs(..., data_root=..., name_pattern="*_s*_seed*")` 现在返回 **580**（210/210/160），
+  样本 453,671，`data_fp = 01e33b899190f97b…`（改名会改 fp，**改完必须重新校验再开课**）。
+  `tmp/g8-god-bc-collect.sh` 末尾已固化这一步，未来重采不会再踩。
+- **附带的两条现场事实**（用户排查）：
+  ① 课程只写 `corpus.games_per_stage: 0` 而漏 `source: "fixed"` ⇒ 走默认 collect：`round_seeds()` 空 ⇒ todo 空
+     ⇒ `bc_collect.py:110` 误判"语料已齐"⇒ `bc_loop.py:300` 用 `bc_s*_seed*` 扫不到 `dagger_s0_seed*` ⇒
+     抛「无完整 BC shard」⇒ 重试 5 次 abort，hub 队列里一个 job 都没有。**fixed 源必须显式写 `source`**。
+  ② serve 在检测到课程文件变化后会"自动复活"，但**复用原 runtime/引擎**（内存里的旧配置）⇒ 改了 JSON 必须
+     **停课 → 重新开课**强制重建 runtime，否则照旧报 0 shard。
+- **全文**：`nn-training/curricula/g8-god-bc.bc.jsonc` 头部（三路 shard 前缀约束 + data_fp）。

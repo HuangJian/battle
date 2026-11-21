@@ -89,6 +89,16 @@ describe('接线：判据只在 python（TS 不重写课程 schema）', () => {
     expect(src).toMatch(/kind == "bc"/)
   })
 
+  it('开课就拦「games_per_stage=0 + 默认 collect」（g8-god-bc 静默 abort 事故）', () => {
+    // 2026-11-21：这类配置 schema 合法但运行时 job 永远发不出去（worker 空转）。
+    // 判据必须落在开课体检（用户开课那一刻响亮失败），不能只靠运行时。
+    const src = read('src/stack/course-open-check.ts')
+    expect(src).toContain('bc.corpus.source == "collect"')
+    expect(src).toContain('bc.corpus.games_per_stage <= 0')
+    expect(src).toContain('source=fixed')
+    expect(src).toContain('worker 空转')
+  })
+
   it('开课在**写面之前**体检，拒绝时明说零副作用', () => {
     const src = read('src/server/actions/course-lifecycle.ts')
     const probeAt = src.indexOf('const probe = deps.probe ?? defaultProbe')

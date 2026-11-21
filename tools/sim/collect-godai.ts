@@ -67,6 +67,7 @@ function runOne(
   seed: number,
   difficulty: string,
   maxTicks: number,
+  playerLevelOverride?: number,
 ): {
   acc: Acc
   outcome: Outcome
@@ -78,6 +79,9 @@ function runOne(
   world.difficulty = DIFFICULTIES[difficulty] ?? DIFFICULTIES['classic']
   world.rules = RULES[difficulty] ?? DEFAULT_RULES
   world.playerLevel = world.difficulty?.playerStartLevel ?? 0
+  // ⚠ 2026-11-21：`hard.playerStartLevel = 1` ⇒ 教师语料默认是 **1★**，而部署/NN 面板是 0★。
+  //   语料星级不一致会让 BC 学成"有星打法定式"（同 God 局评估踩过的坑）。
+  if (playerLevelOverride !== undefined) world.playerLevel = playerLevelOverride
   world.lives = world.difficulty?.startLives ?? START_LIVES
 
   const godRng = new RNG((seed ^ 0x9e3779b9) >>> 0)
@@ -188,12 +192,14 @@ function main(): void {
   let stagesStr = '0-4'
   let seedsStr = '0-9'
   let maxTicks = MAX_TICKS
+  let playerLevelOverride: number | undefined
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--out') outDir = args[++i]
     else if (args[i] === '--difficulty') difficulty = args[++i]
     else if (args[i] === '--stages') stagesStr = args[++i]
     else if (args[i] === '--seeds') seedsStr = args[++i]
     else if (args[i] === '--max-ticks') maxTicks = parseInt(args[++i], 10)
+    else if (args[i] === '--player-level') playerLevelOverride = parseInt(args[++i], 10)
   }
   const stages = parseRange(stagesStr)
   const seeds = parseRange(seedsStr)
@@ -211,7 +217,14 @@ function main(): void {
       continue
     }
     for (const seed of seeds) {
-      const { acc, outcome, ticks } = runOne(si, stage, seed, difficulty, maxTicks)
+      const { acc, outcome, ticks } = runOne(
+        si,
+        stage,
+        seed,
+        difficulty,
+        maxTicks,
+        playerLevelOverride,
+      )
       outcomes[outcome] = (outcomes[outcome] ?? 0) + 1
       const shardName = `godai_s${si}_seed${seed}`
       const manifest = {

@@ -107,6 +107,17 @@ def collect_corpus(
     else:
         todo = sorted(want - have)
     if not todo:
+        if not have:
+            # 2026-11-21 g8-god-bc 现场：collect + games_per_stage=0 ⇒ want 空 ⇒
+            # todo 空且 have 空。旧行为打"语料已齐（0 shards）"后继续发布，
+            # 发布端扫不到 shard ⇒ 课被 abort 而日志全文看不出真因。这里是配置
+            # 错误的第一现场，必须在进入发布链之前响亮拒，绝不静默放行。
+            raise BcDispatchError(
+                f"it{it}: collect 模式既无待采（games_per_stage="
+                f"{course.corpus.games_per_stage}）又无落盘 shard（{data_round_dir}）"
+                "——不可能的合法状态；读现成语料请配 corpus.source=fixed + fixed_dir，"
+                "别留默认 collect"
+            )
         log(f"[run_bc] it{it}: 语料已齐（{len(have)} shards on disk）— 跳过采集")
         if not wins_only:
             event = apply_corpus_policy(

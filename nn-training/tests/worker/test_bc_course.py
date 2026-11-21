@@ -129,6 +129,37 @@ def test_landed_pairs_reads_manifest(tmp_path: Path) -> None:
     assert landed_pairs(d) == {(2000, 7)}
 
 
+def test_bc_collect_rejects_empty_collect_corpus(tmp_path: Path) -> None:
+    """2026-11-21 g8-god-bc 事故回归：collect + games_per_stage=0 必须响亮拒。
+
+    旧行为打"语料已齐（0 shards on disk）"后继续发布 ⇒ 发布端扫不到 shard ⇒
+    serve 重试 5 次 abort 本课，日志里看不出真因，云机 worker 只能一直空转。
+    这是配置错误的第一现场，绝不能放行到发布链。
+    """
+    from worker.bc_collect import collect_corpus
+    from worker.bc_dispatch import BcDispatchError
+
+    c = load_bc_course("bc-c4")
+    c = c.model_copy(
+        update={
+            "corpus": c.corpus.model_copy(
+                update={"source": "collect", "games_per_stage": 0}
+            )
+        }
+    )
+    with pytest.raises(BcDispatchError, match="不可能的合法状态"):
+        collect_corpus(
+            c,
+            "course-fp",
+            "corpus-fp",
+            1,
+            tmp_path / "it1",
+            smoke=False,
+            cfg=None,
+            log=lambda _m: None,
+        )
+
+
 def test_bc_ledger_completed_rounds(tmp_path: Path) -> None:
     import sys
 

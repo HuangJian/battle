@@ -1,0 +1,119 @@
+// 课程 g8-god-bc —— **教师 BC 起步课**：从 g7-def.it120 起，用 God-AI 在**学生自己走到的状态**上的标号做蒸馏
+// （2026-11-21 08:2x，用户口径："起名 g8-god-bc；epochs 设大一些，每 5 epochs eval 一次，然后择优选用"）
+// ═══════════════════════════════════════════════════════════════════════════
+// 为什么要教师 BC（前情一句话）：五次奖励塑形（3 项 / 4 项 / λ0.985 / 11 关密度 / 四轴阶梯 + 熵 3×）全部
+//   零位移 —— 机制项按速率看一动不动（§152）。逐拍追查又证明"回防"这个动作在 rollout 里几乎没出现（§148）。
+//   PPO 只能放大已出现的行为 ⇒ 换路子：**把行为直接灌进去**。
+//
+// ★ 教师是谁、强在哪（§153，0★ 口径，210 局实测）：
+//     God 0★ 胜率 78.57% / 四轴暴露率 63–96% of NN / **kills 17.96 vs NN 13.15（+37%）** / cells 130.4 vs 121.4。
+//     **它不是"守家的人"**：到鹰中位 13.0 格（NN 9.5）、≤5 格时间 14%（NN 29%）、威胁帧 20.8/局（NN 40.5）。
+//   ⇒ 它能教的不是"回防"，而是**更早更快地清场**（威胁根本少一半），防守是副产品。
+//   ⇒ 所以验收里必须有 kills/千拍，只盯"回防"会看错方向。
+//
+// ★ 语料（`data_dir` 下三个子目录，全部由 `export-dagger-labels.ts --action-v6` 产出）：
+//     ① `dagger-120`  ：学生 = g7-def.it120（**本课 init**），35 关 × seed 0-5 = 210 局
+//     ② `dagger-740`  ：学生 = g6-speed-c1.it740（更弱、基毁局更多 ⇒ 危机帧更密），35 关 × seed 0-5 = 210 局
+//     ③ `dagger-hot`  ：学生 = it120，Δ(God−NN) 最大的 10 关 × seed 6-21 = 160 局（等价于给这些关的帧加权）
+//   合计 ~580 局。**采两份学生的原因**：it120 的基毁局比 it740 少 38 局，单用它会少掉最该学的危机帧。
+//   ★ **三路 shard 目录名必须带前缀**（dag120_/dag740_/dagh_）：采集器默认都叫 `dagger_s{N}_seed{M}`，
+//     而发布端 `iter_bc_shard_dirs` 按**目录名**去重（保留 manifest 最早一份）⇒ 580 局会被砍成 370
+//     （2026-11-21 现场：120 剩 71 / 740 剩 139 / hot 160）。改名由 `tmp/g8-god-bc-collect.sh` 末尾自动做。
+//     改名会改 `data_fp`（fixed 源按 shard 集合算）⇒ 改完必须重新校验再开课。
+//   当前 `data_fp = 01e33b899190f97b…`（580 shard / 453,671 样本）。
+//   ⚠ 教师自跑那一路（`collect-godai.ts`）**没进 v1**：它只写 legacy 2 头（move5+fire2），与本课的
+//     v6 三头（`action_v6: true`）不同构；要用得先给 `export-godai-labels.ts` 补 `--action-v6`（待 v2）。
+//
+// ★ 起点为什么是 it120（不是 it740）：it120 在**每一条面板指标**上都 ≥ it740（胜 44.29% vs 37.29%、
+//   基毁 347 vs 385、kills 14.35 vs 13.15、k/千 2.65 vs 2.52、伤 356 vs 361），且优势逐关普遍
+//   （22/35、净 +49 局、p=0.016）；it740 还是**钢基面板**的产物（§148 证明它把"远离基地"训成了习惯）。
+//   风险：it120 是"随后 220 轮跌回 33%"的那个高点（§152）⇒ 验收线钉死"必须 ≥44.29%，即超过 init 自己"。
+//
+// ★ 超参为什么这样（对齐 `bc-v6-train` 的骨架，只动三处）：
+//     · `epochs 60`（模板 80 是 cold-start；本课是**热起**，60 够，且每 5 轮一个 ckpt 供择优）
+//     · `lr 1e-4`（模板 3e-4；热起 + 不许洗掉已有 44.29% 的能力）
+//     · `value_coef 0`（BC 不动 critic —— 之后接 PPO 时 critic 不该被蒸馏洗掉）
+//     · `mirror_p 0.5` 在 v6 下**不生效**（镜像表是 legacy 5 类；与模板同形保留）
+// ═══════════════════════════════════════════════════════════════════════════
+{
+  "version": 1,
+  "name": "g8-god-bc",
+  "kind": "bc",
+  // 砖基面板（不是 safe-base）：语料与验收都在 classic35 上。
+  "level": "classic35",
+  "max_ticks": 36000,
+
+  "corpus": {
+    // ★ 必须显式 fixed（2026-11-21 现场事故）：只写 games_per_stage=0 而留默认 source=collect 时，
+    //   round_seeds() 返回空 ⇒ todo 空 ⇒ 误判「语料已齐（0 shards）」跳过采集；而 collect 分支的
+    //   发布 pattern 是 bc_s*_seed*，扫不到 data_dir 下的 dagger_s0_seed* ⇒ 一个 job 都发不出去
+    //   ⇒ serve 连续失败 5 次直接 abort 本课（云机 worker 只能一直 no job yet）。
+    //   fixed 走 validate_fixed_corpus + pattern *_s*_seed*，D14 血缘过滤跳过，语料原样使用。
+    "source": "fixed",
+    "fixed_dir": "tmp/g8-god-bc/bc-data",
+    "games_per_stage": 0,
+    "wins_only": false,
+    "near_miss_times": 0,
+    "seed_rotate": 0,
+  },
+
+  "train": {
+    "arch": "student",
+    "epochs": 60,
+    // 早停关：择优靠 eval 的胜率/kills，不靠 val_loss（§47：val 健康但行为塌）
+    "patience": 0,
+    "batch": 256,
+    "lr": 0.0001,
+    "mirror_p": 0.5,
+    "val_split": 0.1,
+    "value_coef": 0.0,
+    "seed": 1234,
+    // eval 开着时 bc_loop 会把 ckpt_every 覆盖成 eval.every_epochs（每 5 轮一个 ckpt）—— 这里保持一致
+    "ckpt_every": 5,
+    "fire_pos_weight": "auto",
+    "init_from": "nn-training/weights/g7-def/g7-def.it120.20261121-021554.json",
+    "action_v6": true,
+    "policy_extra": true,
+  },
+
+  "eval": {
+    // 每 5 epoch 评一次；**种子是 1..games_per_stage**（不是 2000000001 起的正式面板），
+    // 只用于「择优」，避免用面板本身挑 ckpt 造成选择偏差。正式判读另跑 60 seed 全池。
+    "every_epochs": 5,
+    "games_per_stage": 20,
+    "levels": ["classic35"],
+  },
+
+  "iters": 1,
+  "workers": 8,
+  "data_dir": "tmp/g8-god-bc/bc-data",
+  "out": "nn-training/weights/g8-god-bc/weights.json",
+  "traj": "tmp/g8-god-bc",
+  "backup_dir": "nn-training/weights/g8-god-bc",
+  "backup_prefix": "g8-god-bc",
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 结课判据（预注册，**先写死再看数**）
+// ═══════════════════════════════════════════════════════════════════════════
+//   起点 = g7-def.it120（744 局面板，seed 2000000001-20）：胜 **44.29%** · 基毁 347 · kills/局 14.35
+//     · k/千 2.65 · 毁局 `DirectAimed` 17.3 · cells 121.3
+//   教师 = God 0★（210 局）：胜 **78.57%** · kills/局 **17.96** · k/千 **3.29** · 毁局 DA/千 1.32 · cells 130.4
+//
+//   主判（等价于「BC 有没有把教师的本事搬过来」）：
+//     (i)  **不崩**：全池 60 seed 胜率 ≥ **44.29%**（超过 init 自己；跌破 37.29% 判崩）
+//     (ii) **学到教师的轴**：**kills/千拍 ≥ 3.0**（init 2.65 / 教师 3.29）
+//     (iii) **机制**：毁局 `DirectAimed`/千拍 < **4.35**（历史最低 3.93 —— 五次塑形都没做到）
+//   副判：cellsVisited ≥ 121（init 121.3，不许龟缩）；`baseWallIntact` 均值 > 4.6（init 4.97）
+//   判死：
+//     · (i) 崩 + (ii) 不涨 ⇒ 语料/超参问题（先加 `dagger-740` 比例、降 lr 到 5e-5 重跑）
+//     · (i) 稳 + (ii)(iii) 都不动 ⇒ 教师的行为没被搬过来（查 shard 的 action 直方图与 fire 头）
+//     · 若 BC 后仍 <44.29% 且 kills 不涨 ⇒ 回退 it740 起一轮对照（**先别加语料**）
+//
+// ── 启动（**agent 不启动训练**，用户手工）────────────────────────────────
+//   1) 先采语料：`bash tmp/g8-god-bc-collect.sh`（约 30-40 分钟，580 局）
+//   2) 控制台按课程名开课：g8-god-bc（BC 走 `run_bc`，不经 PPO）
+//   3) 择优：`tmp/g8-god-bc/training_log.jsonl` 里 `{"event":"bc_eval"}` 每 5 轮一行
+//      （字段：win_rate / kills_mean / phits_mean / pickup_mean / timeout_frac / epoch）；
+//      ckpt 落在 `nn-training/weights/g8-god-bc/weights.json.ckpt.<epoch>`，按 win_rate→kills 排序挑；
+//      正式判读另用 `eval-course-ckpt.ts` 跑 60 seed 全池（seed 2000000001-20）。
