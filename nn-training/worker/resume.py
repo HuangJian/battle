@@ -84,13 +84,66 @@ def walk_shard_dirs(root: Path, *, with_manifest: bool = False) -> list[Path]:
     return out
 
 
-# P2-2（2026-09-02）：_scan_shards 目录签名缓存。run_rl 的轮询热路径每 2 秒调一次
+# P2-2（2026-09-02）：completed_pairs 的目录签名缓存。run_rl 的轮询热路径每 2 秒调一次
 # completed_pairs——旧实现每次都 rglob 全树 + 逐个 JSON 解析（140 局 ≈ 25 万次
 # 文件读）。目录签名 = 全部 rl_s*_seed* 目录的 (相对路径, mtime) 元组：新增 shard
 # 目录、或 shard 内写完 manifest（目录 mtime 更新）都会改变签名 → 缓存失效重扫；
 # 签名未变时零 IO 直接复用。mtime 秒级精度足够（轮询间隔 2s）。
-_SCAN_CACHE: dict[tuple, list[tuple[tuple[int, int], Path]]] = {}
-_SCAN_CACHE_MAX = 512
+#: 缓存条目上限（满了整表清空，见 `ScanCache.put`）。
+SCAN_CACHE_MAX = 512
+
+
+class ScanCache:
+    """目录签名缓存（P0-5，2026-11-21 从模块级 dict 收成对象）。
+
+    **失效时机只有两条**，都写在这里而不是散在调用点：
+
+    1. **签名变了**：key 里就带着 `_dir_signature()`（每个 shard 目录的 `(相对路径, mtime)`），
+       新增 shard / shard 写完 manifest 都改签名 ⇒ 自然落到新 key、重扫一遍。旧条目留着不碍事
+       （同一目录的旧签名不会再被问到，除非把 shard 删了把 mtime 改回去——那已经是另一个场景）。
+    2. **条目满了**（`>= SCAN_CACHE_MAX`）：**整表清空**，不是 LRU。这是原实现的语义，也是
+       本模块的取舍：命中率只由「最近 2 秒里问过的同一组 key」决定，淘汰策略越简单越可预测；
+       而且整表清空的代价 = 下一次重扫一遍目录（毫秒级），不值得为它引入 LRU 状态。
+
+    **线程语义**：不加锁。读者只 `get`、写者只 `put`（dict 单次读/写在 CPython 下原子），
+    两条线程同时 `put` 同一 key 的结果也等价（值相同）。
+
+    **用例隔离**：自建 `ScanCache()` 即可；全局那份走 `scan_cache()`。
+    """
+
+    def __init__(self, max_entries: int = SCAN_CACHE_MAX) -> None:
+        self._entries: dict[tuple, list[tuple[tuple[int, int], Path]]] = {}
+        self._max = max(1, int(max_entries))
+
+    def lookup(self, key: tuple) -> list[tuple[tuple[int, int], Path]] | None:
+        """命中就返回那份结果（`None` = 没缓存过）。
+
+        名字刻意不叫 `get`：这是**记忆化查询**（key 里含着目录签名，命中就意味着「磁盘这 2 秒
+        没变」），不是映射取值。
+        """
+        return self._entries.get(key)
+
+    def remember(self, key: tuple, value: list[tuple[tuple[int, int], Path]]) -> None:
+        """记一条；满了先整表清空（见类头「失效时机」第 2 条）。"""
+        if len(self._entries) >= self._max:
+            self._entries.clear()
+        self._entries[key] = value
+
+    def forget_all(self) -> None:
+        """整个清掉（用例 / 强制重扫）。"""
+        self._entries.clear()
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+
+#: 进程级那份缓存（生产唯一使用者 = `completed_pairs`）。要隔离的用例自建 `ScanCache()`。
+_SCAN = ScanCache()
+
+
+def scan_cache() -> ScanCache:
+    """默认缓存（观测/用例读面；写者只有 `completed_pairs`）。"""
+    return _SCAN
 
 
 def _dir_signature(traj_dir: Path) -> tuple:
@@ -171,7 +224,7 @@ def _scan_shards(
         return []
     sig = _dir_signature(traj_dir)
     key = (str(traj_dir), wver, extra_wver, course_fp, corpus_fp, state_init, sig)
-    cached = _SCAN_CACHE.get(key)
+    cached = _SCAN.lookup(key)
     if cached is not None:
         return cached
     res: list[tuple[tuple[int, int], Path]] = []
@@ -199,9 +252,7 @@ def _scan_shards(
             f"[resume] state_init: 剔除 {len(dropped)} 个缺 initTick 的 shard（标准开局产物，"
             f"不是本轮的起始分布；首例 {dropped[0]}）——不回退成标准开局，去补采"
         )
-    if len(_SCAN_CACHE) >= _SCAN_CACHE_MAX:
-        _SCAN_CACHE.clear()
-    _SCAN_CACHE[key] = res
+    _SCAN.remember(key, res)
     return res
 
 

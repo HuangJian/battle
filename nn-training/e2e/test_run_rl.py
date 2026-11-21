@@ -1845,9 +1845,9 @@ def test_scan_shards_mtime_cache(tmp: Path) -> None:
     traj.mkdir(parents=True)
     wver = "abc123"
     # 空目录：无 shard
-    rl_resume._SCAN_CACHE.clear()
+    rl_resume.scan_cache().forget_all()
     assert rl_resume.completed_pairs(traj, wver) == set(), "空目录无 done"
-    assert len(rl_resume._SCAN_CACHE) == 1, "首次扫描写入缓存"
+    assert len(rl_resume.scan_cache()) == 1, "首次扫描写入缓存"
     assert rl_resume.completed_pairs(traj, wver) == set(), "缓存命中结果一致"
 
     # 写入一个完整 shard（manifest 含 stage/seed/wver）→ 签名变 → 重扫应命中

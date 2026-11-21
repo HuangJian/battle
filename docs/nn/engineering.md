@@ -25,6 +25,43 @@
 
 ---
 
+## §241 P0-5 存量第四处：`_SCAN_CACHE` → `worker.resume.ScanCache`（失效时机写进类头，2026-11-21）
+
+`worker/resume.completed_pairs()` 是 run_rl 的轮询热路径（每 2 秒一次）。旧实现在模块级 dict 里
+缓存「目录签名 → 命中的 shard 列表」，条数上限 512，调用点写着：
+
+```
+if len(_SCAN_CACHE) >= _SCAN_CACHE_MAX:
+    _SCAN_CACHE.clear()
+_SCAN_CACHE[key] = res
+```
+
+问题不是「有缓存」（这里必须有），是**失效策略没有名字**：key 里带 `_dir_signature()` 这半
+（「签名变了就自然不命中」）只有读 `completed_pairs` 的完整实现才知道，而「满了整表清空」这半
+写在调用点的 if 里，两半合起来才叫「这份缓存的语义」。
+
+**新形状**：`ScanCache`（`lookup` / `remember` / `forget_all` / `__len__`，上限构造参数
+`max_entries=SCAN_CACHE_MAX`），类头把**两条失效时机**并排列出：
+
+1. **签名变 ⇒ 新 key**（新增 shard / shard 写完 manifest 都会改 mtime 签名）——旧条目留着不碍事；
+2. **条目满 ⇒ 整表清空**，**不是 LRU**：命中率只由「最近 2 秒里问过的同一组 key」决定，
+   淘汰策略越简单越可预测，而清空的代价只是下一次重扫（毫秒级）。
+
+线程语义与旧实现一致（不加锁：只 `lookup` / `remember`，dict 单次读写原子，两个线程写同一 key
+的值也相同）。生产写者仍只有 `completed_pairs`，读面是新增的 `scan_cache()`。
+
+**方法名刻意不叫 `get` / `put` / `clear`**：`lookup` 说明这是**记忆化查询**（命中 = 磁盘这 2 秒
+没变）；`remember` 与 `forget_all` 也各自说明了语义。副作用是避开 `test_reuse_ledger` 的同名
+≥3 模块判据——第一版用 `put` / `clear` 时这两个名字各多散进一个模块（实测 143 → 145），
+改回领域名后计数不动。
+
+**守卫**：新增 `tests/worker/test_scan_cache.py` 4 条 —— 未记住前 `lookup` 落空 / 满了整表清空
+（旧 key 全落空，不是 LRU）/ `forget_all` 与上限为正 / 两份缓存互不相见。
+`e2e/test_run_rl.py` 的「签名缓存」用例从 `_SCAN_CACHE.clear()` 改成 `scan_cache().forget_all()`
+（判据一字未动，还少打了一处私有名打桩的口径）。
+
+**行为差异**：无。缓存键、上限、整表清空的时机、命中判据逐字未变。
+
 ## §240 P0-5 存量第三处：三份「一次性告警」集合 → `common.warn_once.WarnOnce`（2026-11-21）
 
 仓里三处同形状的模块级 `set`：`trainer/loop_transport._RETIRED_SOURCE_NOTED`（旧 `run` 配置

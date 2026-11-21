@@ -8930,3 +8930,16 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   docstring + 用例 `len(seen) == 1`）。
 - **守卫**：`tests/common/test_warn_once.py` 3 条；`tests/worker/test_gate_halt.py` 的 `seen`
   参数类型从 `set[str]` 改为 `WarnOnce`。
+
+## §2026-11-21-resume-scan-cache（`_SCAN_CACHE` → `ScanCache`；失效时机两条并排列出）
+
+- **背景**：`worker/resume.completed_pairs` 的热路径缓存住模块级 dict 里，失效策略一半在 key
+  （目录签名）一半在调用点的 `if len(...) >= MAX: clear()`。
+- **决定一**：`ScanCache`（`lookup` / `remember` / `forget_all` / `__len__`，`max_entries=`），
+  类头写明**两条失效时机**：签名变 ⇒ 新 key；条目满 ⇒ **整表清空**（不是 LRU——命中率只由最近
+  2 秒问过的同组 key 决定，淘汰越简单越可预测）。生产写者仍只有 `completed_pairs`，读面 `scan_cache()`。
+- **决定二**：方法名不叫 `get` / `put` / `clear`：`lookup` 说明是记忆化查询、`remember` /
+  `forget_all` 各自说明语义；顺带避开同名 ≥3 模块判据（首版 `put`/`clear` 会把 143 推到 145）。
+- **决定三**：不加锁（与旧实现一致）：只 lookup/remember，dict 单次读写原子，同 key 并发写的值相同。
+- **守卫**：`tests/worker/test_scan_cache.py` 4 条（未记住落空 / 满则整表清空 / forget_all 与上限 /
+  实例互不相见）；`e2e/test_run_rl.py` 改用 `scan_cache().forget_all()`，判据不变。
