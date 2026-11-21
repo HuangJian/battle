@@ -9183,3 +9183,14 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   再拆成「游戏身份 / 权重 / 推理开关」三组（三处装配点要各取三个对象，收益为负）。
 - **行为**：无差异（argv、池优先/回退、告警行、manifest 字段全逐字不变）。
   全文 → `docs/nn/engineering.md` §256。
+
+## §2026-11-21-bc-default-log-shared-exit（`bc_dispatch` / `bc_eval` 的缺省 `log` 收进 `tag_logger`）
+
+- **背景**：§255 定的规则（公共函数的缺省 `log` 必须走 `common.logutil.log_line`）在 `worker/`
+  还有两处同族残留，而且更差 —— `print(msg)` 连前缀都没有，多个腿共用一个 stdout 时分不出是谁。
+- **决定**：`_log = tag_logger("bc", lambda: time)` / `_log = tag_logger("bc-eval", lambda: time)`，
+  缺省参数改 `log=_log`。只影响不传 `log` 的调用（生产调用方都显式传），差异仅为前缀 + 时间戳。
+- **被否决**：给这两处配一个「无前缀」的出口（那就等于承认第二种日志格式存在 —— P0-6 的全部意义
+  就是砍掉第二种）。
+- **读数**：G3 **123 处 / 38 文件**；剩下的是 CLI 交付面 / `__main__` 形状自检 / L0 秩，不是日志。
+- **行为**：仅缺省路径的格式。全文 → `docs/nn/engineering.md` §257。

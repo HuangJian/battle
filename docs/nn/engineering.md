@@ -25,6 +25,27 @@
 
 ---
 
+## §257 P0-6 收尾：BC 两条腿的缺省 `log` 也改走 `tag_logger`（G3 123 / 38 文件）（2026-11-21）
+
+§255 把 `run_iter_rollout` 的 `[iter]` 回调收进全仓出口后，同一族（**公共函数的缺省 `log` 是一个
+裸 `print` lambda**）在 `worker/` 里还剩两处：`bc_dispatch.dispatch_bc_corpus` 与
+`bc_eval.eval_bc_on_nodes`。它们比 `[iter]` 更差一点 —— 连前缀都没有（`print(msg)`），多个腿混在
+一个 stdout 时根本分不出是谁打的。
+
+两个文件各加一个模块级出口：`_log = tag_logger("bc", lambda: time)` /
+`_log = tag_logger("bc-eval", lambda: time)`，缺省参数改 `log=_log`。
+
+**行为差异**：只影响**不传 `log`** 的调用（两处生产调用方 `worker/bc_collect` 等都显式传）—— 那些
+路径从「一行裸 msg」变成 `[HH:MM:SS] [bc] msg`。
+
+`tests/golden/print_baseline.json` 删两个条目 ⇒ **123 处 / 38 文件**。剩下的 `print` 全部已定性：
+CLI 交付面（`deliver_zip` 15 / `gate_check` 6 / `ppo/bench` 5 / `run_rl_cluster` 9 / `run_loop` 8）、
+`__main__` 形状自检（`worker/models/*`）与 L0 秩（`worker_proc`）—— 它们不是「日志」，不应该有前缀。
+
+**门禁**：nn 全量绿（116s）· ruff / mypy 绿。
+
+---
+
 ## §256 P0-3 第七刀：全仓最宽的 `run_local_eval_game`（25 参）→ `EvalGameSpec`（2026-11-21）
 
 `worker/eval_local.run_local_eval_game` 是审计时全仓参数最多的函数：9 个位置语义参数

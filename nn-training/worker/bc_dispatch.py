@@ -39,9 +39,14 @@ from common.distribution import (
     write_shard,
 )
 from common.hashing import sha256_file
+from common.logutil import tag_logger
 from common.task_client import FetchTaskSpec, fetch_task
 from common.weights_client import PushHooks, post_weights_parallel
 from worker.bc_outcome import classify_outcome
+
+#: 本腿的日志出口（`dispatch_bc_corpus` 的缺省 `log`）：与全仓同一条 `[HH:MM:SS] [tag] msg`
+#: 口径（2026-11-21，与 `worker/iter_rollout` 的同一刀）。缺省调用方只多一个时间戳前缀。
+_log = tag_logger("bc", lambda: time)
 
 #: 熔断后队列暂空时的让位轮询步长（秒）——与 `tripped_idle_polls` 相乘 = 等待总预算。
 TRIPPED_IDLE_STEP_SEC = 0.05
@@ -362,7 +367,7 @@ def dispatch_bc_corpus(
     #: = 0.05s，缺省 40 轮 = 2s）：给健康节点留出接手被放回任务的时间窗。只在有熔断时生效
     #: （正常轮次直接 return，零开销）。测试侧拧小（§14 先例：把配速旋钮提为参数，生产缺省不变）。
     tripped_idle_polls: int = 40,
-    log=lambda msg: print(msg, flush=True),
+    log=_log,
 ) -> dict:
     """并发派发 BC 语料任务到节点，落盘 shard 目录。返回统计 dict。
 

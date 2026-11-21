@@ -24,8 +24,6 @@
   "train/train_bc_v6.py": 2,
   "trainer/loop_lifecycle.py": 1,
   "trainer/run_rl_cluster.py": 9,
-  "worker/bc_dispatch.py": 1,
-  "worker/bc_eval.py": 1,
   "worker/data/weights_io.py": 3,
   "worker/data/weights_meta.py": 1,
   "worker/eval_replays_once.py": 1,
