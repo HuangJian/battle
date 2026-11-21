@@ -21,6 +21,7 @@ import tempfile
 import time
 import zipfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -38,19 +39,33 @@ TMP_PREFIX = "offline-push-"
 __all__ = ["TMP_PREFIX", "build_task_zip", "write_resume"]
 
 
-def build_task_zip(
-    *,
-    course: str,
-    pack: Path,
-    run_id: str,
-    resume_it: int,
-    task_id: str,
-    pack_sha256: str,
-    anchor: dict | None,
-    now: float,
-    log: Callable[[str], None],
-) -> tuple[Path, dict]:
+@dataclass(frozen=True)
+class TaskZipSpec:
+    """`build_task_zip` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    course: str
+    pack: Path
+    run_id: str
+    resume_it: int
+    task_id: str
+    pack_sha256: str
+    anchor: dict | None
+    now: float
+    log: Callable[[str], None]
+
+
+def build_task_zip(spec: TaskZipSpec) -> tuple[Path, dict]:
     """组外层 zip → `(临时路径, 元信息)`。入参见模块头；`pack` 本身是 zip ⇒ `ZIP_STORED` 直写。"""
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    course = spec.course
+    pack = spec.pack
+    run_id = spec.run_id
+    resume_it = spec.resume_it
+    task_id = spec.task_id
+    pack_sha256 = spec.pack_sha256
+    anchor = spec.anchor
+    now = spec.now
+    log = spec.log
     meta = pack_index_meta(pack)
     pack_it = int(meta.get("it") or 0)
     tmp = Path(tempfile.mkdtemp(prefix=TMP_PREFIX))

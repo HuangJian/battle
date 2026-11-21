@@ -8818,6 +8818,14 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-taskzip-spec
+
+P0-3 第十八刀：`hub/offline_push_pack.py::build_task_zip`（9 个关键字参数：course / pack /
+run_id / resume_it / task_id / pack_sha256 / anchor / now / log）→ frozen `TaskZipSpec`
+（字段顺序 = 旧签名，全必填）。函数体开头一次展开旧局部名，任务包 zip 组装、确定性 task_id
+与续跑锚点铺入逐字未动。唯一调用点 `hub/offline_push.py::build_task_zip`（派发器方法）包对象；
+`hub/offline_push_pack.py` 的宽签名 1 → 0，全仓 97 → 96（67 → 66 文件）。
+
 ## §2026-11-21-payload-pack-spec
 
 P0-3 第十七刀：`remote/payload_pack.py::pack_payload_zip`（9 参：shard_dirs / extra_files /

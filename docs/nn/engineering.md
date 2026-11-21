@@ -25,6 +25,17 @@
 
 ---
 
+## §271 P0-3 第十八刀：`build_task_zip` 收成 `TaskZipSpec`（宽签名 97 → 96）（2026-11-21）
+
+* `hub/offline_push_pack.py::build_task_zip` 的 9 个关键字参数 → frozen `TaskZipSpec`
+  （字段顺序 = 旧签名，全必填）。函数体开头一次展开，外层 zip 组装、确定性 `task_id`
+  与续跑锚点铺入逐字未动。
+* 唯一调用点：`hub/offline_push.py` 的派发器方法（`_build_task_zip(TaskZipSpec(...))`）；
+  测试经派发器公开方法调用，签名不变。
+* 形状门禁基线删除 `hub/offline_push_pack.py` 行（1 → 0）；`Any` 基线不动。
+* 回归：`tests/hub/test_offline_push_dispatch.py` + 形状预算 + LOC 预算（offline_push 986/1000）
+  + mypy 改动文件无错。
+
 ## §270 P0-3 第十七刀：`pack_payload_zip` 收成 `PackSpec`（宽签名 98 → 97）（2026-11-21）
 
 * `remote/payload_pack.py::pack_payload_zip` 的 9 个参数 → frozen `PackSpec`（字段顺序与

@@ -57,7 +57,8 @@ WIDE_FUNCS_BASELINE = {
     "common/task_key.py": 1,
     "hub/offline_ingest.py": 1,
     "hub/offline_push.py": 2,
-    "hub/offline_push_pack.py": 1,
+    # 2026-11-21：`build_task_zip` 的 9 个关键字参数收成 `TaskZipSpec`
+    # ⇒ 本文件宽签名归零，条目删除。
     # 2026-11-21：认领族（`claim` / `claim_outcome` / `_claim_locked`）的
     # (job_id, ttl, worker, mode, epoch, role, capabilities) 收成一个 `LeaseSpec`
     # ⇒ `hub/queue_claims.py` · `hub/queue_peer.py` · `hub/store.py` ·

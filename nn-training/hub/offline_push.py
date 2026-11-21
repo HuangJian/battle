@@ -65,7 +65,7 @@ from hub.offline_ingest import (
 )
 from hub.offline_pack_fresh import pack_still_fresh
 from hub.offline_push_assign import OfflinePushAssignments
-from hub.offline_push_pack import TMP_PREFIX
+from hub.offline_push_pack import TMP_PREFIX, TaskZipSpec
 from hub.offline_push_pack import build_task_zip as _build_task_zip
 
 #: 「hub 的本地读面失败了」的异常集（P0-7 第十八批，2026-11-18）。
@@ -491,15 +491,17 @@ class OfflinePushDispatcher(TickLoopHost):
             )
             anchor = None
         return _build_task_zip(
-            course=course,
-            pack=pack,
-            run_id=str(run_id or meta.get("run_id") or ""),
-            resume_it=int(floor),
-            task_id=self._task_id(course, pack_sha, floor),
-            pack_sha256=pack_sha,
-            anchor=anchor,
-            now=self._now(),
-            log=self._log,
+            TaskZipSpec(
+                course=course,
+                pack=pack,
+                run_id=str(run_id or meta.get("run_id") or ""),
+                resume_it=int(floor),
+                task_id=self._task_id(course, pack_sha, floor),
+                pack_sha256=pack_sha,
+                anchor=anchor,
+                now=self._now(),
+                log=self._log,
+            )
         )
 
     def _anchor(self, course: str, pack_it: int) -> dict | None:
