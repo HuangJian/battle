@@ -396,7 +396,7 @@ P0-5 的判据只覆盖 `common/**`（G2：`L0_MUTABLE_ALLOWED = {}`），而「
 | `hub/admin.py:138` | `_PROBE_BLOCK`（`global`） | 探活封禁窗口 |
 | ~~`trainer/loop_transport.py:159,229`~~ **已修 2026-11-21（§240）** | ~~两个 `*_NOTED` 集合~~ → `WarnOnce`（`mark()` 查与加同一个动作） | 一次性告警集合 |
 | `trainer/queue_local.py:322,323` | `_REUSE_INDEX` / `_REUSE_SIG` | rollout 源复用索引（签名变了才重建） |
-| `worker/cmd.py:11` | `_CODE_SHA_MEMO` | code-hash 记忆 |
+| ~~`worker/cmd.py:11`~~ **已修 2026-11-21（§245）** | ~~`_CODE_SHA_MEMO`~~ → `@functools.cache`（记忆变成函数属性，清场 `cache_clear()`；不用 `Cell` 是因为它刻意不惰性构造） | code-hash 记忆 |
 | ~~`worker/resume.py:92`~~ **已修 2026-11-21（§241）** | ~~`_SCAN_CACHE`~~ → `ScanCache`（`lookup`/`remember`/`forget_all`；两条失效时机写进类头：签名变 / 满则整表清空） | resume 扫描缓存 |
 | `worker/node_identity.py:40` | `_LEDGER` | 节点身份账本 |
 | `worker/ppo/np_core.py:448` | `_XLA_CACHE_STATE` | XLA 编译缓存状态探针 |
@@ -405,7 +405,7 @@ P0-5 的判据只覆盖 `common/**`（G2：`L0_MUTABLE_ALLOWED = {}`），而「
 | ~~`remote/wire.py:218`~~ **已修 2026-11-21（§243）** | ~~`_BEST_RATE` / `_stale_samples`~~ → `RateReference`（`sample`/`level`/`floor`/`clear_samples`；迟滞与衰减是构造参数，清场一次清两个）；`remote/tailscale_boot.py` 那份**不可动**（独立引导模块，零依赖约束） | 测速参照速率 |
 
 **进度**：`remote/control_pool`（§238）· `remote/rollout_relay`（§239）· 三处 warn-once 集合（§240）·
-resume 扫描缓存（§241）· `remote/http` 的两份（§242）· `remote/wire` 的参照速率（§243）· `remote/push_client` 的命中记忆（§244）已收（2026-11-21）。其余 7 处仍是「缓存 / 节流表 / 活连接登记」，收成对象要先回答「谁拥有、何时清、跨进程怎么复现」
+resume 扫描缓存（§241）· `remote/http` 的两份（§242）· `remote/wire` 的参照速率（§243）· `remote/push_client` 的命中记忆（§244）· `worker/cmd` 的 code-hash 记忆（§245）已收（2026-11-21）。其余 6 处仍是「缓存 / 节流表 / 活连接登记」，收成对象要先回答「谁拥有、何时清、跨进程怎么复现」
 ——和 §236 同量级的一轮工作，不能顺手做。清单的作用是让下一轮**从这里开始**，而不是再回审计表里
 发现一行陈旧记录。
 

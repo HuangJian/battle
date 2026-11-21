@@ -9003,3 +9003,15 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   上限整片清空 · forget 幂等 · 默认记忆一份且公开 `forget_cache_hit` 到达它）。既有
   `test_hub_push_dispatch` 的「失败沿用命中 + 428 翻面」行为用例未动、照旧绿。
 - **行为差异**：无。详见 `docs/nn/engineering.md` §244。
+
+## §2026-11-21-code-sha-cache（`worker/cmd._CODE_SHA_MEMO` → `@functools.cache`；不用 `Cell` 的理由）
+
+- **背景**：`local_code_sha()` 用「0/1 元素的 list」当进程内 memo（每局 `--code-sha` 取值，
+  `compute_code_hash()` ≈ 0.03 s）。读的人要自己回答「为什么是 list、谁清、第二次 append 会怎样」，
+  而且没有清场入口。
+- **决定**：`@functools.cache` 直接加在 `local_code_sha()` 上，延迟 import 仍在函数体内；记忆变成
+  函数属性，清场 `local_code_sha.cache_clear()`。**不套 `common.cell.Cell`**：`Cell` 刻意不做惰性
+  构造（§236），套上来会把 0.03 s 的启动成本搬回 import。
+- **守卫**：`tests/worker/test_rl_cmd.py::test_local_code_sha_is_computed_once_per_process`（第二次
+  调用零重算 / `cache_clear()` 后重算）。行为差异：无，唯一新增是**可以清场**。
+  详见 `docs/nn/engineering.md` §245。

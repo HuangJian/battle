@@ -7,8 +7,7 @@ queue_local 的 run_rollout / run_local_rollout 曾各自手工拼装
 
 from __future__ import annotations
 
-#: `local_code_sha()` 的进程内记忆（空 = 还没算）。
-_CODE_SHA_MEMO: list[str] = []
+import functools
 
 
 def build_rollout_cmd(
@@ -166,21 +165,25 @@ def build_rollout_cmd(
     return cmd
 
 
+@functools.cache
 def local_code_sha() -> str:
     """本机 TS 代码身份（`--code-sha` 的取值）：**进程内只算一次**。
 
     成本口径：`common.codehash.compute_code_hash()` ≈ 0.03 s（同 180 个文件，Python 侧比 TS
     略慢）；逐局重算（35 局/轮）比导出器自己算还贵，故按进程记忆。
 
+    记忆用 `functools.cache` 而不是模块级 `list`（P0-5，2026-11-21）：旧写法是「0/1 元素的 list
+    当 memo」，读的人要自己回答「谁清的、为什么是 list」；`cache` 把「这份值只算一次」变成函数
+    自己的属性，清场 `local_code_sha.cache_clear()`（用例需要重算时）也是最大路货的口径。
+    延迟 import 留在函数体里：`worker.cmd` 的 import 不该把 `common.codehash` 一起拖进来。
+
     与 `sampler-agent.ts::memoizedCodeHash` 同一假设："运行中的代码" = 进程启动时那份，要换
     hash 只有重启。运行中 git pull 的窗口里 `replay_meta.codeSha` 可能标旧码——这是审计字段，
     与节点门无关（门比的是 ping 自报值），且该窗口本来就无人在跑新代码。
     """
-    if not _CODE_SHA_MEMO:
-        from common.codehash import compute_code_hash
+    from common.codehash import compute_code_hash
 
-        _CODE_SHA_MEMO.append(compute_code_hash())
-    return _CODE_SHA_MEMO[0]
+    return compute_code_hash()
 
 
 def course_fp_for_args(args) -> str:

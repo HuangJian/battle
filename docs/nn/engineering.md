@@ -25,6 +25,33 @@
 
 ---
 
+## §245 P0-5 存量第八处：`worker/cmd._CODE_SHA_MEMO` → `functools.cache`（2026-11-21）
+
+`local_code_sha()` 是每局 `--code-sha` 的取值，`compute_code_hash()` ≈ 0.03 s / 次、35 局/轮，
+所以按进程记一次。旧形状是**用一个 0/1 元素的 `list` 当 memo**：
+
+```
+if not _CODE_SHA_MEMO:
+    _CODE_SHA_MEMO.append(compute_code_hash())
+return _CODE_SHA_MEMO[0]
+```
+
+`list` 在这里只借用「可变容器」这一件事：读的人要自己回答「为什么是 list」「谁清的」「第二次
+append 会怎样」，而答案（永远是 0/1 个元素）只活在注释里。
+
+**新形状**：`@functools.cache` 直接加在 `local_code_sha()` 上（延迟 import 仍在函数体内：
+`worker.cmd` 的 import 不该把 `common.codehash` 拖进来）。记忆变成函数自己的属性，
+清场 `local_code_sha.cache_clear()` 是 stdlib 口径——用例终于**能**清（旧 list 没有清场入口）。
+没有模块级可变容器，也没有 `global`。
+
+**为什么不是 `common.cell.Cell`**：`Cell` 要求**构造时就有值**（刻意不做惰性路径，见 §236），
+这里要的恰恰是「首次调用才算 0.03 s」；硬套 `Cell` 会把启动成本搬回 import。
+
+**守卫**：`tests/worker/test_rl_cmd.py::test_local_code_sha_is_computed_once_per_process` ——
+第二次调用零重算 / `cache_clear()` 之后真的重算（把 `@functools.cache` 去掉即红）。
+
+**行为差异**：无。返回值、延迟 import 时机、会话内不变性逐字未变；唯一新增是**可以清场**。
+
 ## §244 P0-5 存量第七处：`remote/push_client._CACHE_HITS` → `ShaCacheHits`（2026-11-21）
 
 推送前的内容寻址探针有一份「这台节点上次探到有这份 (kind, sha)」的记忆。它是 2026-10-30 修
