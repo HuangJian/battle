@@ -411,6 +411,40 @@ resume 扫描缓存（§241）· `remote/http` 的两份（§242）· `remote/wi
 先答「谁拥有 / 何时清 / 跨进程怎么复现」三问，再选形状（对象 / `@functools.cache` / 保持独立引导模块豁免），
 并把棘轮（`GLOBAL_BASELINE` / `OWNER_*` 清单 / `L0_MUTABLE_ALLOWED`）同向收紧——不收就等于留在账上。
 
+#### 2026-11-21 复核（清单清零后的一次全树重扫）
+
+**口径**（AST，生产包 `common/biz/worker/remote/hub/trainer/tools`）：模块级 `Assign`/`AnnAssign`
+的值是可变的**容器**（`{}`/`[]`/`set()` 字面量与推导式，以及 `dict()`/`list()`/`set()`/
+`defaultdict()`/`deque()`/`Counter()`/`OrderedDict()` 构造），去掉 `__all__` 等 dunder、全大写查表
+常量、以及**没有任何写入点**的只读表（下标赋值 / 变更方法 / rebind 都不命中）；另查
+① 类体里的可变容器类属性（`ThreadingHTTPServer` handler 那族）· ② 全部 `global` 语句 ·
+③ 全大写常量的**反向检查**（大写 ≠ 永久只读：凡大写容器**有**写入点的都要单列）。
+复跑方式：`bash tools/githook/nn-py-safe.sh tools/audit/py_audit.py` 的 `mod_globals` 段 + 上述三条过滤。
+
+**结果**
+
+* 上面 15 项**零残留**（15/15 全部已成对象 / `functools.cache`）；
+* `global` 语句 **7 处 / 5 文件**，与 `GLOBAL_BASELINE` 一条不差：`biz/reward_context` ×2（裁定保留）、
+  `remote/payload_slim`、`remote/tailscale_boot`（独立引导）各 1、`tools/{forkdist:2,task:1}`；
+* `common/**` 的可写容器 **0**（`L0_MUTABLE_ALLOWED` 仍空）；全大写查表常量里**有写入点**的 **0 条**；
+* 类体可变容器 16 条：15 条是 **pydantic `BaseModel` 字段默认值**（`enemy_spawns: list[Spawn] = []` 那族，
+  pydantic 逐实例深拷贝，**不是**共享状态）+ 1 条 `tools/console_window._ProcessEntry32._fields_`（ctypes 约定名）。
+
+**清单之外仍有 2 簇（2026-11-20 盘点漏掉，2026-11-21 复核补上）**
+
+| 文件 | 名字 | 形态 | 为什么算（写入点 / 归属问题） |
+|------|------|------|------|
+| `hub/task_pack.py:221,224,232` | `_TASK_PACK_TRIGGERS` / `_TASK_PACK_MISS_TRIGGERS` / `_TASK_AUTO_HANDOFF_TRIGGERS` | 三本 `dict[str, dict[...]]` 触发账（节流窗 + 失败原因 + 计数上界） | **两个模块都在写**：`hub/task_pack.py` 与 `hub/offline.py`（`setdefault`）；清场靠 `reset_auto_handoff_triggers()` 单点；`hub/server.py` 还把三个名字当门面再导出，用例直接读 `hub_server._TASK_PACK_TRIGGERS`——正是 P0-5 要消的「同一份状态散在模块作用域、谁都能写」。收法：`PackTriggers`（`touch(course, now)` / `miss(course)` / `handoff(course)` / `reset(course|"")` / `snapshot()`），三个读面统一走它 |
+| `remote/deliver_outbox.py:93` | `_GATES` | `dict[str, dict[str, Any]]`：每个 outbox 一把进程内 `RLock` + 持有深度 + **文件 fd**（跨进程 flock） | 写在同文件但**持有 fd 与线程锁**：旧形状答不出「谁负责关」；另有独立的 `_GATES_LOCK` 保护建表。收法：`OutboxGates`（`gate(path)` 懒建、`close_all()` 关 fd），并把「同线程重入不重新 flock」这条语义放进方法里 |
+
+**不算的（附理由，免得下一轮再翻一遍）**：`remote/wire._WIRE`（每 job 传输账，已在
+`tests/remote/test_worker_state_contract.py` 的 `OWNER_CONTAINERS` 钉住且有封顶用例）·
+`remote/tailscale_boot._ORIG_PROXY_ENV`（独立引导模块，`STANDALONE_BOOT_EXEMPT`，零依赖约束下不可动）·
+`biz/reward_builtin._REGISTRY`（**import 期**装饰器注册表，运行期零写入；若将来要运行期注册再对象化）·
+`tools/{audit/py_audit,audit/py_clones,backtest-burn-rule}`（CLI 脚本，模块顶层即 `main`）·
+`tools/forkdist._ITEMS`/`_REPORTS`（pytest 插件状态，已在 `GLOBAL_BASELINE` 的同一文件里）。
+
+
 **为什么这是问题**
 
 * 违反本仓自己写下的契约（比违反通用最佳实践更严重）。
