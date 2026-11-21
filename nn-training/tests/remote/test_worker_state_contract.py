@@ -14,8 +14,7 @@
 | 名字 | 形态 | 宿主 | 谁改 | 测试可见 |
 |---|---|---|---|---|
 | `_ACTIVE_CODE_SHA` | `str \\\\| None`（会话代码指纹） | `worker` | `run_job`（`global`） | 间接（`test_remote_hotswap` 测异常语义） |
-| `_BEST_RATE` | float（`global _BEST_RATE`） | `wire` | `_note_rate` | **是**（`test_wire_reroll` 重置它） |
-| `_stale_samples` | int（`global _stale_samples`，与上者同一次 `_note_rate` 写） | `wire` | `_note_rate` | 间接（`_BEST_RATE` 归零后它不可能误触发：见 `wire._note_rate`） |
+| `_RATE` | `RateReference()` 实例（参照 + 迟滞计数，2026-11-21 对象化） | `wire` | `rate_reference().sample` / `clear_samples` | **是**（`test_wire_reroll` / `test_rate_reference`） |
 | `_WIRE` | `dict[str, dict]`（每 job 传输账） | `wire` | `_wire_bucket` / `_wire_flush` | **是**（多文件直接 `.clear()` 并断言封顶） |
 | `_BULK` | `BulkScheduler()` **实例** | `wire` | `set_bulk_log` / `pace` / `slot` / `control` / `reset` | **是**（直接 `.reset()` / `.inflight()`） |
 | `_OPENERS` | `ProxyOpeners()` 实例（懒建 opener，`reset()` 重建） | `http` | `openers()` 的 `get` / `reset` | 是（`test_http_state`） |
@@ -25,15 +24,15 @@
 
 * 转发名与宿主是**同一个对象**（本文件 `test_worker_reexports_are_the_same_objects` 钉住）；
 * `_WIRE` / `_BULK` 是**原地可变** ⇒ `.clear()` / `.reset()` 从哪个入口进都一样；
-* `_BEST_RATE` 是**重绑式**标量（float 不可变）⇒ 转发的名字会停在旧值，注入点**必须**是宿主模块
-  （`remote.wire._BEST_RATE`）；
-* `http` 的两份进程级状态（P0-5，2026-11-21）住显式对象 `_OPENERS` / `_WARNS`，公开读面
-  `openers()` / `warn_throttle()` 是**唯一**入口：没有 `global`，也就没有「停在旧值的快照名」。
+* 判据参照（`wire._RATE`）与 `http` 的两份状态（`_OPENERS` / `_WARNS`）都是 P0-5 收成的**对象**，
+  公开读面 `rate_reference()` / `openers()` / `warn_throttle()` 是**唯一**入口：没有 `global`，
+  也就没有「停在旧值的快照名」；
+* `worker` 里只剩 `_ACTIVE_CODE_SHA` 一处 `global`（会话代码指纹，见上表）。
 
 三类断言各司其职：**① 清点不许漂移**（拆走 / 新增状态都必须过这里）· **② 别处不许有自己的副本**
 （防「两个 worker 各记一份账」）· **③ 状态行为可复现**（同一序列跑两遍逐字段相同 + 此前无覆盖的节流）。
 
-注意 `remote/tailscale_boot.py` 里也有个 `_BEST_RATE`：那是**独立引导模块**（从 GitHub raw
+注意 `remote/tailscale_boot.py` 里也有个 `_BEST_RATE`（那边的会话标量，未对象化）：那是**独立引导模块**（从 GitHub raw
 单独拉取，见 `common/__init__.py` 的结构性豁免），与 worker 的这份**不是同一个变量**，
 各有各的会话——别顺手合并。
 """
@@ -66,33 +65,39 @@ OWNER_CONTAINERS = {"worker": set(), "wire": {"_WIRE"}, "http": set()}
 #: 函数内以 `global` **重绑**的脚本单例（懒建 / 会话级标量）。
 OWNER_GLOBAL_REBOUND = {
     "worker": {"_ACTIVE_CODE_SHA"},
-    "wire": {"_BEST_RATE", "_stale_samples"},
+    "wire": set(),
     "http": set(),
 }
 #: 顶层构造的**有状态对象**实例（传输调度器 + http 的两份进程级状态）。
-OWNER_INSTANCES = {"worker": set(), "wire": {"_BULK"}, "http": {"_OPENERS", "_WARNS"}}
+OWNER_INSTANCES = {
+    "worker": set(),
+    "wire": {"_BULK", "_RATE"},
+    "http": {"_OPENERS", "_WARNS"},
+}
 #: 只经**访问器**暴露的内部实例：它们不进 `worker` 的命名空间（注入点是 `openers()` /
 #: `warn_throttle()`，改转发名不改变行为、只会造出第二个名字）。
-INTERNAL_ONLY = {"_OPENERS", "_WARNS"}
+INTERNAL_ONLY = {"_OPENERS", "_WARNS", "_RATE"}
 #: 结构性豁免：独立引导模块里**同名但不同物**的变量。
 STANDALONE_BOOT_EXEMPT = {"remote/tailscale_boot.py": {"_BEST_RATE"}}
 
 _ALL_WATCHED = (
     set().union(*OWNER_CONTAINERS.values(), *OWNER_GLOBAL_REBOUND.values(), *OWNER_INSTANCES.values())
 )
-#: 转发名必须是**同一对象**的（原地可变）状态。`http` 那份走访问器，见 `test_http_split`。
+#: 转发名必须是**同一对象**的（原地可变）状态。别的状态走访问器（见 `test_http_split` /
+#: `test_wire_split`），不靠转发名。
 IDENTITY_STATES = {"worker": {"_WIRE", "_BULK"}}
 
 
 @pytest.fixture(autouse=True)
 def _restore_worker_state():
     """本文件动的是**跨用例共享**的模块状态——前后都恢复，别污染同一 xdist worker 的其它用例。"""
-    best, sha = wire_mod._BEST_RATE, W._ACTIVE_CODE_SHA
+    sha = W._ACTIVE_CODE_SHA
     wire = dict(wire_mod._WIRE)
     wire_mod._BULK.reset()
+    wire_mod.rate_reference().clear_samples()
     http_mod.warn_throttle().forget_all()
     yield
-    wire_mod._BEST_RATE, W._ACTIVE_CODE_SHA = best, sha
+    W._ACTIVE_CODE_SHA = sha
     wire_mod._WIRE.clear()
     wire_mod._WIRE.update(wire)
     http_mod.warn_throttle().forget_all()
@@ -184,10 +189,9 @@ def test_pinned_state_names_are_all_really_loaded_by_their_host_code() -> None:
 def test_worker_reexports_are_the_same_objects() -> None:
     """**原地可变**的转发必须是同一对象（不是各建一份）——「两份账」故障的正面判据。
 
-    只对 `_WIRE` / `_BULK` 成立（`id()` 恒等）。`_BEST_RATE` **故意不在其列**：它会被宿主
-    `global` **重绑**（float），转发名会停在旧值 —— 这正是它注入点必须是宿主模块的原因
-    （见 `tests/remote/test_wire_split.py`）。`http` 的两份状态已收成对象（`_OPENERS` /
-    `_WARNS`），走 `openers()` / `warn_throttle()` 访问器，不再有转发名这个中间层。
+    只对 `_WIRE` / `_BULK` 成立（`id()` 恒等）。别的状态都已收成对象（`_RATE` / `_OPENERS` /
+    `_WARNS`），走 `rate_reference()` / `openers()` / `warn_throttle()` 访问器，不再有
+    「转发名停在 import 那一刻」这个中间层（见 `tests/remote/test_wire_split.py`）。
     """
     for name in IDENTITY_STATES["worker"]:
         host = wire_mod if hasattr(wire_mod, name) else http_mod
@@ -287,12 +291,12 @@ def test_note_rate_is_session_stateful_and_reproducible() -> None:
     """同一序列跑两遍逐字段相同；小 body 不参与采样；更慢的速率不覆盖本会话最好值。"""
 
     def once() -> tuple[float, float]:
-        wire_mod._BEST_RATE = 0.0
+        wire_mod.rate_reference().clear_samples()
         wire_mod._note_rate(rate=500.0, nbytes=wire_mod.WIRE_RATE_SAMPLE_MIN_BYTES - 1)
-        assert wire_mod._BEST_RATE == 0.0  # 小 body：不采样
+        assert wire_mod.best_rate() == 0.0  # 小 body：不采样
         wire_mod._note_rate(rate=500.0, nbytes=wire_mod.WIRE_RATE_SAMPLE_MIN_BYTES)
         wire_mod._note_rate(rate=100.0, nbytes=wire_mod.WIRE_RATE_SAMPLE_MIN_BYTES)  # 更慢：不覆盖
-        return wire_mod._BEST_RATE, wire_mod._min_rate()
+        return wire_mod.best_rate(), wire_mod._min_rate()
 
     first, second = once(), once()
     assert first == second == (500.0, max(wire_mod.WIRE_MIN_RATE, 125.0))
@@ -330,7 +334,7 @@ def test_state_shapes_are_pinned() -> None:
     """运行期形状（拆分后逐字段对账的口径）：类型 + opener/节流住显式对象的不变量。"""
     assert isinstance(wire_mod._WIRE, dict)
     assert isinstance(http_mod.warn_throttle(), http_mod.WarnThrottle)
-    assert isinstance(wire_mod._BEST_RATE, float) and wire_mod._BEST_RATE >= 0.0
+    assert isinstance(wire_mod.best_rate(), float) and wire_mod.best_rate() >= 0.0
     assert W._ACTIVE_CODE_SHA is None or isinstance(W._ACTIVE_CODE_SHA, str)
     assert isinstance(wire_mod._BULK, BulkScheduler)
     assert wire_mod._BULK.inflight() == 0

@@ -25,6 +25,40 @@
 
 ---
 
+## §243 P0-5 存量第六处：`remote/wire` 的 `_BEST_RATE` + `_stale_samples` → `RateReference`（2026-11-21）
+
+坏签判据的参照速率原本是**两个 `global` 重绑的模块标量**：`_BEST_RATE`（参照，bytes/s）与
+`_stale_samples`（连续非更好样本的计数）。语义本身是设计过的（「近期水平」而不是会话高水位：
+更好即抬、连续慢按 `WIRE_RATE_DECAY` 衰减、恢复瞬时），病在形状：
+
+* 两个值**同生共死**却分开存放：旧夹具只重绑 `_BEST_RATE = 0.0`，`_stale_samples` 留在原地 ⇒
+  下一个用例可能带着「已经慢了几个」开局（一个慢样本就触发衰减）。「清场必须两个一起清」这件事
+  在旧代码里没有名字，只能靠读 `_note_rate` 的四行实现确认。
+* 重绑 ⇒ `worker._BEST_RATE` 是 import 那一刻的快照 ⇒ `test_wire_reroll` 的 autouse 夹具与
+  `test_wire_split` 的「注入点」用例都是为记住这个陷阱而存在的。
+
+**新形状**：`RateReference`（`sample(rate, nbytes)` / `level()` / `floor()` / `clear_samples()`），
+`_RATE` 是默认实例，读面 `rate_reference()`；`_note_rate` / `_ref_rate` / `best_rate` / `_min_rate`
+变成薄包装（名字保留：它们被 `remote/http.py` 与 `remote/worker.py` 转发/直用）。
+`stale_samples` / `decay` 是**构造参数**（缺省 = 模块常量），于是「每个慢样本都衰减」「永不衰减」
+都是数据，不必去糊常量。`floor()` 把「判据地板 = max(WIRE_MIN_RATE, 参照/4)」这个名字也还给了对象
+——`_min_rate` 里那行 `/4.0` 原来只活在一个函数体里。
+
+**方法名刻意避开高频名**（实测）：首版 `note` / `forget_all` 让同名 ≥3 模块计数 143 → 145
+（`note` 撞 `common/log_bundle` 与 `remote/weights_standard`，`forget_all` 撞 `remote/http` 与
+`worker/resume`）——现在是 `sample` / `clear_samples`，两者全仓唯一。
+
+**转发面的变化**：`worker.py` 删掉 `_BEST_RATE` / `_stale_samples` 两条转发，改转发
+`RateReference` / `rate_reference`；`GLOBAL_BASELINE` 的 `remote/wire.py: 1` 归零
+（`remote/wire.py` 现在零 `global`），`test_wire_split` 的「注入点」用例改成
+`worker_mod.rate_reference() is wire_mod.rate_reference()` + 用公开 `sample()` 抬高参照。
+
+**守卫**：新增 `tests/remote/test_rate_reference.py` 7 条 —— 小 body 不采样（连迟滞计数都不动）/
+单个慢样本不覆盖更好值 / 衰减连乘但下限是本次样本 / 恢复瞬时且迟滞清零 / 地板 = 参照四分之一且
+不低于绝对地板 / 清场把计数一起清 / 两个旋钮是构造参数（1 个慢样本就衰减、decay=1 永不衰减）。
+
+**行为差异**：无。阈值、衰减系数、迟滞步数、地板公式与 `_min_rate` 的返回值逐字未变。
+
 ## §242 P0-5 存量第五处：`remote/http` 的 `_POLL_WARN_AT` + `_opener` → `WarnThrottle` / `ProxyOpeners`（2026-11-21）
 
 `remote/http.py` 里有两份**进程级状态**，形状都答不出「谁拥有、何时清」：

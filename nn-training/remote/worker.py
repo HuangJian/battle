@@ -336,16 +336,6 @@ from remote.train_core import (
     run_training_core as run_training_core,
 )
 from remote.upload_proc import make_uploader
-
-# 传输账 / 低速重抽 / bulk 节流（S4 拆分 → `remote/wire.py`）。这里是**显式转发**：
-# 状态与实现同住 `wire`，避免模块全局在拆分后变成两份账（见 `remote/wire.py` 头部）。
-# `_BEST_RATE` / `_stale_samples` 是重绑式的会话标量（判据参照 + 它的迟滞计数）——
-# **注入点是 `remote.wire` 的那两个名字**；这里的转发名只保证 `vars(worker)` 里查得到
-# （`test_worker_state_contract::test_state_names_are_addressable_on_the_worker_module`），
-# 重绑它无效（int 不可变）。
-from remote.wire import (
-    _BEST_RATE as _BEST_RATE,
-)
 from remote.wire import (
     _BULK as _BULK,
 )
@@ -379,6 +369,14 @@ from remote.wire import (
 from remote.wire import (
     WIRE_REROLL_PROBES as WIRE_REROLL_PROBES,
 )
+
+# 传输账 / 低速重抽 / bulk 节流（S4 拆分 → `remote/wire.py`）。这里是**显式转发**：
+# 状态与实现同住 `wire`，避免模块全局在拆分后变成两份账（见 `remote/wire.py` 头部）。
+# 判据参照（`RateReference`，含迟滞计数）是**对象**：这里的转发名指向同一个实例，
+# 清场走 `rate_reference().clear_samples()`——不再有「重绑转发名无效」的注入点陷阱。
+from remote.wire import (
+    RateReference as RateReference,
+)
 from remote.wire import (
     WireSlowError as WireSlowError,
 )
@@ -393,9 +391,6 @@ from remote.wire import (
 )
 from remote.wire import (
     _reroll_decision as _reroll_decision,
-)
-from remote.wire import (
-    _stale_samples as _stale_samples,
 )
 from remote.wire import (
     _wire_add as _wire_add,
@@ -435,6 +430,9 @@ from remote.wire import (
 )
 from remote.wire import (
     _wire_totals as _wire_totals,
+)
+from remote.wire import (
+    rate_reference as rate_reference,
 )
 from remote.wire import (
     set_bulk_log as set_bulk_log,

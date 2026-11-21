@@ -8969,3 +8969,21 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   0 秒窗口 + `forget_all` / 缺省 60s）；`test_http_split.py` 新增「零 `global`」「顶层零可变容器字面量」；
   `test_worker_state_contract.py` 的三个宿主清单改口径（`_OPENERS`/`_WARNS` 进实例表并标 `INTERNAL_ONLY`）。
 - **行为差异**：无（键、窗口、文案、env 定型时机逐字未变）。详见 `docs/nn/engineering.md` §242。
+
+## §2026-11-21-rate-reference（`remote/wire` 的参照速率 + 迟滞计数收成一个 `RateReference`；清场必须两半一起清）
+
+- **背景**：坏签判据的参照是 `_BEST_RATE` 与 `_stale_samples` 两个 `global` 重绑的模块标量。两者
+  同生共死却分开存放：旧夹具只重绑 `_BEST_RATE = 0.0`，迟滞计数留在原地 ⇒ 下一个用例可能带着
+  「已经慢了几个」开局；重绑也让 `worker._BEST_RATE` 成为 import 那一刻的快照。
+- **决定一**：`RateReference`（`sample(rate, nbytes)` / `level()` / `floor()` / `clear_samples()`），
+  默认实例 `_RATE` + 读面 `rate_reference()`；`_note_rate` / `_ref_rate` / `best_rate` / `_min_rate`
+  保留为薄包装（被 `remote/http` 与 `remote/worker` 直用/转发）。语义（阈值、衰减、迟滞、地板）
+  逐字未变；`floor()` 把 `max(WIRE_MIN_RATE, 参照/4)` 的名字从函数体里提出来。
+- **决定二**：`stale_samples` / `decay` 是构造参数，缺省取模块常量 ⇒ 「每个慢样本都衰减」与
+  「永不衰减」都是数据而不是去改常量。
+- **决定三**：方法名避开高频名。首版 `note` / `forget_all` 把同名 ≥3 模块计数推到 145（基线 143），
+  改成 `sample` / `clear_samples`（全仓唯一）。
+- **守卫**：新增 `tests/remote/test_rate_reference.py` 7 条（小 body 不采样 / 单个慢样本不覆盖 /
+  连乘但下限是本次样本 / 恢复瞬时且迟滞清零 / 地板 / 清场两半一起清 / 旋钮是构造参数）；
+  `test_wire_split` 的注入点用例改为对象恒等 + 公开 `sample()`；`GLOBAL_BASELINE` 的
+  `remote/wire.py` 归零。详见 `docs/nn/engineering.md` §243。

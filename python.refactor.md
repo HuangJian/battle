@@ -402,10 +402,10 @@ P0-5 的判据只覆盖 `common/**`（G2：`L0_MUTABLE_ALLOWED = {}`），而「
 | `worker/ppo/np_core.py:448` | `_XLA_CACHE_STATE` | XLA 编译缓存状态探针 |
 | `worker/ppo/np_core.py:287` | `_SPEED_PROBE` | 吞吐探针 |
 | ~~`worker/gate_halt.py:270`~~ **已修 2026-11-21（§240）** | ~~`_WARNED`~~ → `WarnOnce`（`seen()` 先查、文件存在才 `mark()`，不存在的路径不烧 key） | warn-once 集合 |
-| `remote/wire.py:218`、`remote/tailscale_boot.py:527` | `_BEST_RATE` / `_stale_samples`（`global`） | 测速最佳值（boot 模块那份**不可动**，零依赖约束） |
+| ~~`remote/wire.py:218`~~ **已修 2026-11-21（§243）** | ~~`_BEST_RATE` / `_stale_samples`~~ → `RateReference`（`sample`/`level`/`floor`/`clear_samples`；迟滞与衰减是构造参数，清场一次清两个）；`remote/tailscale_boot.py` 那份**不可动**（独立引导模块，零依赖约束） | 测速参照速率 |
 
 **进度**：`remote/control_pool`（§238）· `remote/rollout_relay`（§239）· 三处 warn-once 集合（§240）·
-resume 扫描缓存（§241）· `remote/http` 的两份（§242）已收（2026-11-21）。其余 9 处仍是「缓存 / 节流表 / 活连接登记」，收成对象要先回答「谁拥有、何时清、跨进程怎么复现」
+resume 扫描缓存（§241）· `remote/http` 的两份（§242）· `remote/wire` 的参照速率（§243）已收（2026-11-21）。其余 8 处仍是「缓存 / 节流表 / 活连接登记」，收成对象要先回答「谁拥有、何时清、跨进程怎么复现」
 ——和 §236 同量级的一轮工作，不能顺手做。清单的作用是让下一轮**从这里开始**，而不是再回审计表里
 发现一行陈旧记录。
 
