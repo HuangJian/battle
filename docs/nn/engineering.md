@@ -25,6 +25,26 @@
 
 ---
 
+## §259 P0-8 续：流式采集 e2e 的 4 处 `_run_one_game_bounded` 替身也搬上端口（G19 396 → 392）（2026-11-21）
+
+§258 把执行面收成 `NodeExec` 之后，`e2e/test_stream_collect_e2e.py` 里还剩 4 处
+`monkeypatch.setattr(iter_rollout, "_run_one_game_bounded", _fake_game(trace))` —— 它们是**私有执行路名**
+（占 G19 额度），而且桩打的层比生产注入点**高一层**：上界 / 重试 / 落点那几层全被跳过，只有「调度
+循环」被真测。
+
+改法：替身搬进端口字段（`stub_exec(monkeypatch, run_game=_fake_game(trace))`），`_fake_game` 的签名
+从 bounded 档的 `(…, explicit, pool, *, ceiling_sec, job_dir) -> (wall, attempts)` 改成 `run_game` 档的
+`(…, log=None, *, attempt=1, abandoned=None) -> wall`（外部边界只剩「起 bun 跑一局」），真 `_run_one_game
+_bounded`（`call_bounded` + `_run_one_game_with_retries` + 池尝试 / 重试 / 上界）整层回到真代码。
+
+**语义没变**：用例的判据全部来自 `_Trace` 的**事件序号**（「第三局开跑早于慢局收工」），与桩打在哪一层
+无关；按住慢局的 `HOLD_MAX_SEC = 15s` 仍小于缺省上界（`GAME_MAX_ATTEMPTS × (2 × 最宽尝试 + 回收) + slack`
+≈ 30s+），所以「按住直到放行」不会被上界误杀。四个用例全绿（与 `e2e/test_run_rl.py` + `test_remote_iter.py`
+同批 **119 passed**），文件耗时无可见变化。
+
+**读数**：G19 基线 **396 → 392 处 / 95 文件**（该文件的 4 处条目删空）。本行之外，`iter_rollout` 的六个执行面
+接缝在 `tests/**` + `e2e/**` 里已**零处逐名 patch**。
+
 ## §258 P0-8 主例：`worker/iter_rollout` 的 42 处私有/半私有 `monkeypatch` 收进执行面端口 `NodeExec`（G19 406 → 396）（2026-11-21）
 
 §P0-8 说「全量 monkeypatch 迁移要先铺端口对象」，但一直没给出一个**可抄的样板**。本节就是样板：
@@ -64,7 +84,7 @@ G19 额度，本笔之前一直是逐名 patch —— 它们和私有三处同�
 |----|------|-----:|------|
 | `bun_version` 逐名 patch | `trainer/eval_dispatch` 2 · `trainer/rollout_dispatch` 1 · `trainer/batch_runner` 3 · `remote/rollout_node`（`common_proc.bun_version`）1 | 7 | 收它们要连 `tests/trainer/test_batch_runner_split.py` 的「`bun_version` 必须在本模块被**裸名**读」契约一起改 |
 | `iter_rollout` 容量/杀树/校验（公开名） | `cpu_worker_slots` 4 · `workers_cap` 3 · `kill_process_tree` 2 · `verify_shards` 1 | 10 | **另三条**接缝（不是执行面六缝），要收得先决定它们值不值得进 `NodeExec` |
-| `_run_one_game_bounded`（私有执行路名） | `e2e/test_stream_collect_e2e.py` | 4 | 仍占 G19 额度；它包的是 `EXEC.run_game` + `call_bounded`，换 `run_game=` 替身会**顺带打开**真实的上界语义，得逐条看用例假设 |
+| `_run_one_game_bounded`（私有执行路名） | `e2e/test_stream_collect_e2e.py` | 4 | ~~仍占 G19 额度~~ **已收（§259）**：换 `run_game=` 替身后真上界/重试那层回到真代码，四条用例的判据（事件序号）不变 |
 
 ## §257 P0-6 收尾：BC 两条腿的缺省 `log` 也改走 `tag_logger`（G3 123 / 38 文件）（2026-11-21）
 

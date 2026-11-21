@@ -2,7 +2,6 @@
   "e2e/test_autonomous_round_flow_e2e.py": 1,
   "e2e/test_loop_supervisor_integration.py": 3,
   "e2e/test_push_mode_integration.py": 15,
-  "e2e/test_stream_collect_e2e.py": 4,
   "tests/common/test_instance_lock.py": 1,
   "tests/common/test_offline_task_queue.py": 16,
   "tests/common/test_platform_utils_cores.py": 1,

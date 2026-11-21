@@ -9212,3 +9212,17 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **读数**：G19 基线 406 → **396 处 / 96 文件**（两个文件条目删空、e2e 5 → 4）；`iter_rollout.py` 967 行。
 - **行为**：无差异（五个测试文件 193 例、nn 全量 6699 passed / 3 skipped、根 `bun run check` 2856 pass）。
   全文 → `docs/nn/engineering.md` §258。
+
+## §2026-11-21-stream-collect-run-game-port（流式采集 e2e 的假局搬进 `EXEC.run_game`）
+
+- **背景**：§258 铺了执行面端口，但 `e2e/test_stream_collect_e2e.py` 仍用 4 处
+  `monkeypatch.setattr(iter_rollout, "_run_one_game_bounded", …)` 造假局 —— 私有执行路名（占 G19），
+  且桩打得比生产注入点高一层：上界 / 重试 / 池尝试全被跳过。
+- **决定**：替身改为 `stub_exec(monkeypatch, run_game=…)`，`_fake_game` 的签名从 bounded 档
+  `-> (wall, attempts)` 改成 `run_game` 档 `-> wall`（`attempt` / `abandoned` 关键字）。真
+  `_run_one_game_bounded` + `_run_one_game_with_retries` 回到真代码。
+- **语义为何不变**：四条用例的判据全来自 `_Trace` 的**事件序号**（第三局开跑 < 慢局收工），与桩层无关；
+  `HOLD_MAX_SEC = 15s` 仍小于缺省上界（≈30s+），按住不会撞上界。
+- **读数**：G19 基线 **392 处 / 95 文件**；`iter_rollout` 六个执行面接缝在 tests/e2e 里零处逐名 patch。
+- **验证**：`e2e/test_stream_collect_e2e.py` + `e2e/test_run_rl.py` + `tests/remote/test_remote_iter.py`
+  **119 passed**；全量 nn 门禁与根 `bun run check` 见提交。全文 → `docs/nn/engineering.md` §259。

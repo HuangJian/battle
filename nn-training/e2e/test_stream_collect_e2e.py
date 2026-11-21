@@ -10,7 +10,7 @@
     worker.stream_collect.StreamCollector          # 调度：谁最缺 ⇒ 下一局给它什么 argv
       ↓ next_game() / observe(argv, nSamples)
     worker.iter_rollout.run_iter_rollout           # 真调度循环 / 真 verify_shards /
-      ├─ 假 `_run_one_game_bounded`（不起 bun、不跑 sim）  #   真 collect_reports / 真聚合
+      ├─ 假 `EXEC.run_game`（不起 bun、不跑 sim）  #   真 collect_reports / 真聚合
       │    └─ 按 argv 写 `w{i}/rl_sX_seedY/manifest.json` + `_rl_report.json`
       ├─ 真 `verify_shards`（实产集 == **实际派出去**的声明集）
       └─ 真 `report["perGame"] / perGameSecs / shards`
@@ -148,7 +148,12 @@ def _fmt(events: list[tuple[str, int, int, float]]) -> str:
 
 
 def _fake_game(trace: _Trace) -> Any:
-    """`_run_one_game_bounded` 的替身：按 argv 写导出器同形产物，样本数由 trace 指定。"""
+    """执行面端口里 `run_game` 的替身：按 argv 写导出器同形产物，样本数由 trace 指定。
+
+    替身住在端口字段上（`EXEC.run_game`）而不是包在外面的 `_run_one_game_bounded`：上界 /
+    重试 / 落点那几层全是真代码，唯一假的是「起 bun 跑一局」这个外部边界 —— 与生产
+    注入点一致（§P0-8 主例 `docs/nn/engineering.md` §258）。
+    """
 
     def _run(
         bun: str,
@@ -158,12 +163,10 @@ def _fake_game(trace: _Trace) -> Any:
         out_dir: str,
         timeout_sec: float,
         log: Any = None,
-        explicit: bool = False,
-        pool: Any = None,
         *,
-        ceiling_sec: float | None = None,
-        job_dir: Path | None = None,
-    ) -> tuple[float, int]:
+        attempt: int = 1,
+        abandoned: Any = None,
+    ) -> float:
         stage = stage_of(argv)
         seed = seed_of(argv)
         trace.start(stage, seed)
@@ -208,7 +211,7 @@ def _fake_game(trace: _Trace) -> Any:
             encoding="utf-8",
         )
         trace.end(stage, seed)
-        return delay, 1
+        return delay
 
     return _run
 
@@ -279,7 +282,7 @@ def test_a_freed_slot_is_refilled_before_the_other_game_lands(
     trace.sleep = {2000: 0.005}
     trace.held_stages = {2001}
     trace.release_after_starts = 3
-    monkeypatch.setattr(iter_rollout, "_run_one_game_bounded", _fake_game(trace))
+    stub_exec(monkeypatch, run_game=_fake_game(trace))
     info, _logs, collector = _run_round(tmp_path, trace, vol=vol, workers=2)
 
     starts = trace.starts()
@@ -316,7 +319,7 @@ def test_round_mints_per_game_until_every_stage_is_full(
 
     trace = _Trace()
     trace.samples = {2000: 100, 2001: 25, 2002: 50}
-    monkeypatch.setattr(iter_rollout, "_run_one_game_bounded", _fake_game(trace))
+    stub_exec(monkeypatch, run_game=_fake_game(trace))
     info, _logs, collector = _run_round(tmp_path, trace, vol=vol, workers=1)
 
     dispatched = [(s, d) for s, d, _t in trace.starts()]
@@ -370,7 +373,7 @@ def test_declaration_is_the_dispatched_set_even_when_the_count_matches_the_plan(
 
     trace = _Trace()
     trace.samples = {s: 300 for s in STAGES}
-    monkeypatch.setattr(iter_rollout, "_run_one_game_bounded", _fake_game(trace))
+    stub_exec(monkeypatch, run_game=_fake_game(trace))
     info, _logs, collector = _run_round(tmp_path, trace, vol=vol, workers=2)
 
     assert len(trace.starts()) == len(STAGES), f"每关一局就满额：{trace.starts()}"
@@ -392,7 +395,7 @@ def test_zero_sample_stage_is_capped_and_reported_not_silently_short(
     trace = _Trace()
     trace.samples = {2000: 300, 2001: 100, 2002: 300}
     trace.zero_sample_stages = {2001}
-    monkeypatch.setattr(iter_rollout, "_run_one_game_bounded", _fake_game(trace))
+    stub_exec(monkeypatch, run_game=_fake_game(trace))
     _info, _logs, collector = _run_round(tmp_path, trace, vol=vol, workers=4)
     vr = collector.volume()
     assert vr["capped_stages"] == [2001]
