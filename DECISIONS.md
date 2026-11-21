@@ -9028,3 +9028,14 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **守卫**：`tests/hub/test_hub_admin_split.py` —— 原有「无裸 list/dict/set」扩成「无裸容器 +
   持有者只有一个」；新增「只建一次 + 固定种子内容（测试侧独立重算）+ `_deterministic_fill` 是它
   的重复」。行为差异：无。详见 `docs/nn/engineering.md` §246。
+
+## §2026-11-21-boot-ledger（`worker/node_identity._LEDGER` → `BootLedger`）
+
+- **背景**：a98 判据的账本是一个模块级裸 dict，建段 / 挤轮 / 钉 / 报不一致分散在三处，
+  而「钉子只钉一次」这条决定性语义只写在模块 docstring 里。
+- **决定**：`BootLedger.pin(rkey, node_id, boot, pid)` 把四件事收在一处（「不改写」成了一条 `if`），
+  `pinned_boot()` 作观测面、`clear_rounds()` 作清场，容量成构造参数（默认 `LEDGER_MAX_ROUNDS`）。
+  模块层仍负责解析 `/v1/ping`（「没探到」/旧 agent 无 bootId 的 fail-open 属网络语义，不进账本）。
+- **棘轮**：`GLOBAL_BASELINE` 顺手删掉 `hub/admin.py: 1`（§246 已把该文件 `global` 清零）。
+- **守卫**：`tests/worker/test_node_identity.py` +3（唯一持有者 + 无裸容器 / 容量与挤轮 / 钉一次且
+  重复 ping 幂等）。行为差异：无。详见 `docs/nn/engineering.md` §247。

@@ -28,7 +28,7 @@ from worker import node_identity as ni
 
 @pytest.fixture(autouse=True)
 def _isolated_ledger():
-    """每个用例一份干净账本（进程内全局 ⇒ 必须显式隔离）。"""
+    """每个用例一份干净账本（`worker.node_identity._LEDGER` 是进程级持有者 ⇒ 必须显式隔离）。"""
     ni.clear()
     yield
     ni.clear()
@@ -133,3 +133,51 @@ def test_rollout_pin_and_check_share_one_round_key_expression() -> None:
     assert set(pin) == set(check), (
         f"pin/check 的 ident 不一致：{pin} vs {check} —— 共用账本键是这条判据成立的前提"
     )
+
+
+# ── 账本自身（P0-5，2026-11-21：`_LEDGER` 裸 dict → `BootLedger`）────────────────
+
+def test_ledger_is_one_named_holder_and_module_keeps_no_bare_dict() -> None:
+    """模块级只有 `_LEDGER` 这个显式持有者，没有裸 dict（判据的状态必须有一个名字）。"""
+    holders = {
+        name for name, value in vars(ni).items() if isinstance(value, ni.BootLedger)
+    }
+    assert holders == {"_LEDGER"}, f"账本持有者应当只有一个：{sorted(holders)}"
+    bare = {
+        name
+        for name, value in vars(ni).items()
+        if not name.startswith("__")
+        and isinstance(value, (list, dict, set))
+        and getattr(value, "__module__", None) == "worker.node_identity"
+    }
+    assert bare == set(), f"模块里出现了裸可变容器：{sorted(bare)}"
+
+
+def test_ledger_capacity_is_a_constructor_argument() -> None:
+    """容量是构造参数：`BootLedger(max_rounds=2)` 直接压边界，不必动生产旋钮 `LEDGER_MAX_ROUNDS`。"""
+    led = ni.BootLedger(max_rounds=2)
+    assert led.pin("it1", "a98", "g1", 1) is None
+    assert led.pin("it2", "a98", "g2", 2) is None
+    assert len(led) == 2
+    assert led.pin("it3", "a98", "g3", 3) is None
+    assert len(led) == 2, "超出容量必须挤掉最旧那轮（内存有界）"
+    # 最旧的 it1 已被挤掉 ⇒ 重新钉（None），而不是报「变了」
+    assert led.pin("it1", "a98", "g4", 4) is None
+    # it3 仍记得：同一轮换 bootId 照样报，且钉住的还是第一代
+    why = led.pin("it3", "a98", "other", 99)
+    assert why is not None
+    assert led.pinned_boot("it3", "a98") == "g3"
+    assert led.pinned_boot("it1", "a98") == "g4", "被挤掉的那轮重新钉新值"
+
+
+def test_ledger_pin_does_not_rewrite_after_a_mismatch() -> None:
+    """钉子只钉一次：报过一次不一致之后，再换了第三个 bootId 仍报同一个「第一代 → 新一代」。"""
+    led = ni.BootLedger()
+    assert led.pin("it1", "a98", "gen1", 1) is None
+    first = led.pin("it1", "a98", "gen2", 2)
+    second = led.pin("it1", "a98", "gen3", 3)
+    assert first is not None and second is not None
+    # 钉住的永远是第一代：不一致后不改写（改了 ⇒ 下一轮的「变了」会拿第二代当基准，原因会漂）
+    assert led.pinned_boot("it1", "a98") == "gen1"
+    # 重复 ping 得到同一行原因（调用方日志/账本幂等）
+    assert led.pin("it1", "a98", "gen2", 2) == first

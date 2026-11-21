@@ -25,6 +25,27 @@
 
 ---
 
+## §247 P0-5 存量第十处：`worker/node_identity._LEDGER` → `BootLedger`（2026-11-21）
+
+a98 判据的账本（`round key → node id → {"bootId", "pid"}`，只留最近 8 轮）原来是模块级裸 dict，
+三个写点分散在 `clear` / `_rounds` / `note_ping` 里：读的人要同时看「谁建段」「谁挤最旧那轮」
+「谁钉、谁改写」，而「钉子只钉一次」这条**唯一重要**的语义只活在模块 docstring 第 4 条。
+
+**新形状**：`BootLedger.pin(rkey, node_id, boot, pid)` —— 建段、挤轮、钉、报不一致在同一个方法里，
+「不改写」是它的一条 `if` 而不是一句注释；`pinned_boot()` 是观测面（用例断言「没被改写」用），
+`clear_rounds()` 是清场。模块只留 `_LEDGER` 一个持有者，`note_ping` 只负责解析 `/v1/ping` 的 dict
+（哪里是「没探到」/「旧 agent 无 bootId」的 fail-open 仍在模块层，对象不碰 `ping` 的字段名）。
+
+**容量成了构造参数**（`BootLedger(max_rounds=… )`，默认仍是 `LEDGER_MAX_ROUNDS`）：边界用例拿
+`max_rounds=2` 直接压挤轮，不必去改生产旋钮——本轮门禁里顺手删掉了 `GLOBAL_BASELINE` 残留的
+`hub/admin.py: 1`（§246 已把该文件 `global` 清零，棘轮及时收紧）。
+
+**守卫**（`tests/worker/test_node_identity.py` +3）：① 模块里只有 `_LEDGER` 一个持有者、没有裸
+list/dict/set；② `max_rounds=2` 时挤掉最旧那轮、被挤掉的重新钉、仍记得的那轮照样报；③ 不一致后
+钉子仍是第一代 + 重复 ping 返回同一行原因（幂等）。
+
+**行为差异**：无。轮数上限、钉一次、fail-open、原因文案逐字未变。
+
 ## §246 P0-5 存量第九处：`hub/admin._PROBE_BLOCK` → `ProbeBlock`（2026-11-21）
 
 `/admin/net-probe` 的 64KiB 确定性填充块（固定种子 `0x5EED`）是 2026-09-29 改成**惰性构造**的：

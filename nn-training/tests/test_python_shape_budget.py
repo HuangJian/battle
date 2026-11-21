@@ -158,7 +158,6 @@ L0_MUTABLE_ALLOWED: dict[str, frozenset[str]] = {}
 #: `global` 语句的存量（按文件计数；出现在新文件 = 红）。
 GLOBAL_BASELINE = {
     "biz/reward_context.py": 2,
-    "hub/admin.py": 1,
     "remote/payload_slim.py": 1,
     "remote/tailscale_boot.py": 1,
     "remote/worker.py": 1,
