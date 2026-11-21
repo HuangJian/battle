@@ -1158,7 +1158,10 @@ class CourseConfig(BaseModel, CustomStagesMixin):
     #: 与 kickstart_init 同待遇：**不进** `corpus_identity_fp`（loss 侧数据 ≠ 「rollout
     #: 样本是什么」；course_fp 照常覆盖整文件字节，行为变了就该是新实验）。
     demo_bank: str = ""
-    #: demo BC 辅 loss 系数（loss += coef · (CE_move + CE_fire)）；0.0 = 关闭。
+    #: demo BC 辅 loss 系数（loss += coef · CE_move，**只训 move 头**）；0.0 = 关闭。
+    #: ⚠ 2026-11-21 更正：旧注释写的是 `CE_move + CE_fire`，与实现不符。fire 的 mask 语义是
+    #: 「当前打得出去吗」、label 是「有没有按住」，冷却期两者互斥 ⇒ fire CE 实际只教 release
+    #: （2026-10-18 消融；g8 两轮实证：教师 90.5% 不开火，灌进 fire 头会教出哑炮）。
     #: 量级锚：CE 均值 ~1.0，PPO 侧 value 项 ~0.25 ⇒ 0.02 ≈ 8% 梯度占比起步。
     demo_bc_coef: float = 0.0
     #: 每 PPO minibatch 步抽的 demo 样本数（np RNG，ckpt 精确复现）；0 = 关闭。

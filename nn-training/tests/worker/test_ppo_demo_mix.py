@@ -18,7 +18,7 @@ from typing import Any, cast
 import numpy as np
 import torch
 
-from common.schema import OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM
+from common.schema import MASK_V6_DIM, OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -64,6 +64,52 @@ def _bank(n: int = 64, seed: int = 1, single_mask: bool = False) -> dict:
         ).astype(np.int64),
         "masks": masks,
     }
+
+
+def _chunks_v6(n_chunks: int = 2, b: int = 8, seed: int = 0) -> list[dict]:
+    """v6 三头的 train chunk（`a_hold` / `lp_hold` 存在 ⇒ `ActionSpace.V6`）。"""
+    rng = np.random.default_rng(seed)
+    out: list[dict] = []
+    for _ in range(n_chunks):
+        out.append(
+            {
+                "obs": rng.integers(0, 256, (b, OBS_CHANNELS, 26, 26), dtype=np.uint8),
+                "scalars": rng.standard_normal((b, SCALAR_DIM)).astype(np.float32),
+                # 真 v6 语料恒带 extra(57)（policy_extra 模型的训练 chunk 少了会当场 ValueError）
+                "extra": rng.standard_normal((b, POLICY_EXTRA_DIM)).astype(np.float32),
+                "a_move": rng.integers(0, 4, (b,), dtype=np.int64),
+                "a_fire": rng.integers(0, 3, (b,), dtype=np.int64),
+                "a_hold": rng.integers(0, 2, (b,), dtype=np.int64),
+                "lp_move": rng.standard_normal(b).astype(np.float32),
+                "lp_fire": rng.standard_normal(b).astype(np.float32),
+                "lp_hold": rng.standard_normal(b).astype(np.float32),
+                "adv": rng.standard_normal(b).astype(np.float32),
+                "ret": rng.standard_normal(b).astype(np.float32),
+                "mask": np.ones((b, MASK_V6_DIM), dtype=np.float32),
+            }
+        )
+    return out
+
+
+def _bank_v6(n: int = 64, seed: int = 1) -> dict:
+    """v6 bank：actions 仍是 (N,2)=[a_move(0..3), a_fire(0..2)]，masks 是 9 列。"""
+    rng = np.random.default_rng(seed)
+    return {
+        "obs": rng.integers(0, 256, (n, OBS_CHANNELS, 26, 26), dtype=np.uint8),
+        "scalars": rng.standard_normal((n, SCALAR_DIM)).astype(np.float32),
+        "extra": rng.standard_normal((n, POLICY_EXTRA_DIM)).astype(np.float32),
+        "actions": np.stack(
+            [rng.integers(0, 4, (n,)), rng.integers(0, 3, (n,))], axis=1
+        ).astype(np.int64),
+        "masks": np.ones((n, MASK_V6_DIM), dtype=np.uint8),
+    }
+
+
+def _fresh_v6(seed: int = 1234):
+    torch.manual_seed(seed)
+    model = PPOStudent(h=8, d=1, policy_extra=True, action_v6=True)
+    opt = torch.optim.Adam(model.parameters(), lr=1.5e-4)
+    return model, opt
 
 
 def _fresh(seed: int = 1234):
@@ -226,3 +272,61 @@ def test_demo_index_reuses_one_device_buffer(monkeypatch) -> None:
     assert buffers and None not in buffers, f"缓冲不能缺席（实得 {buffers}）"
     assert len(buffers) == 1, f"缓冲必须跨步复用同一个对象，实得 {len(buffers)} 个"
     assert all(shape == (8,) for _, shape in seen), seen
+
+
+# ---------------- v6（move4/fire3/hold2）----------------
+# 2026-11-21：demo 段的 move 掩码切片从写死的 `:MOVE_DIM`(=5) 改成 `layout.move_slice`。
+# v6 的 move 头只有 4 类，用 5 去切要么形状不匹配当场炸、要么（更糟）把 legacy 标签语义
+# （0=STOP）当成 v6（0=up）静默错位。下面两条钉住「能跑」与「错宽必须拒收」。
+
+
+def _run_v6(epochs: int = 1, seed: int = 7, **kw: Any):
+    np.random.seed(seed)
+    model, opt = _fresh_v6()
+    agg = ppo_update(
+        model, opt, _chunks_v6(), epochs, torch.device("cpu"), kl_coef=0.0, **kw
+    )
+    return agg, {k: v.clone() for k, v in model.state_dict().items()}
+
+
+def test_demo_v6_uses_move_slice_not_legacy_width() -> None:
+    """v6 模型 + 9 列 bank：demo BC 正常生效（切片走 layout.move_slice=0:4）。
+
+    若切片退回 `:MOVE_DIM`（5 列），`masked_fill` 的形状与 4 宽的 move logits 不匹配，
+    这里会直接抛 RuntimeError —— 这条用例就是那个错误的哨兵。
+    """
+    agg, state = _run_v6(demo_bank=_bank_v6(), demo_bc_coef=0.05, demo_per_mb=8)
+    assert np.isfinite(agg["demo_bc"])
+    assert agg["demo_bc"] > 0.0, f"demo_bc={agg['demo_bc']}，v6 的 demo 项疑似未生效"
+    # hold 头不在 demo loss 里（本次只训 move），但它必须被**PPO**更新过：
+    # 用「不等于初始权重」证明整条 ppo_update 真的跑了。
+    torch.manual_seed(1234)
+    init = PPOStudent(h=8, d=1, policy_extra=True, action_v6=True).state_dict()
+    assert not torch.equal(state["hold_head.weight"], init["hold_head.weight"])
+    assert not torch.equal(state["move_head.weight"], init["move_head.weight"])
+
+
+def test_demo_off_v6_is_bitwise_pure_ppo() -> None:
+    """v6 下 demo 关闭路径逐位等于纯 PPO（改切片不得影响关闭路径）。"""
+    a, sa = _run_v6(demo_bank=_bank_v6(), demo_bc_coef=0.0, demo_per_mb=4)
+    b, sb = _run_v6()
+    assert a["demo_bc"] == 0.0
+    for k in sorted(a):
+        assert a[k] == b[k], f"{k}: {a[k]!r} != {b[k]!r}"
+    for k in sa:
+        assert torch.equal(sa[k], sb[k]), f"权重 {k} 漂移（v6 demo 关闭路径非恒等）"
+
+
+def test_demo_v6_rejects_legacy_width_bank() -> None:
+    """7 列（legacy）bank 喂 v6 课 ⇒ **当场拒收**，不许静默按前 4 列切。
+
+    这是「静默错位」那一类 bug 的唯一防线：形状碰巧能广播时就没人会发现语义反了。
+    """
+    with __import__("pytest").raises(ValueError, match="掩码宽"):
+        _run_v6(demo_bank=_bank(), demo_bc_coef=0.05, demo_per_mb=8)
+
+
+def test_demo_legacy_rejects_v6_width_bank() -> None:
+    """反向同理：9 列 bank 喂 legacy 课 ⇒ 拒收（防有人拿 v6 bank 跑老课）。"""
+    with __import__("pytest").raises(ValueError, match="掩码宽"):
+        _run(demo_bank=_bank_v6(), demo_bc_coef=0.05, demo_per_mb=8)

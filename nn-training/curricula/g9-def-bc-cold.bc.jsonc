@@ -1,0 +1,107 @@
+// 课程 g9-def-bc-cold —— **冷启动教师 BC**：随机 init + God 自跑语料（2026-11-21 10:4x）
+// ═══════════════════════════════════════════════════════════════════════════
+// 为什么冷启动（而不是继续热起微调）：
+//   · `g8-god-bc`（lr 1e-4 热起）ep1 就 0.14% 胜；`g8-god-bc2`（lr 1e-5）ep1 也只有 9.14%，
+//     而权重只动了 **0.58%** ⇒ BC 的梯度方向与"保持 it120 策略"近乎正交，任何非零步长都在毁它；
+//   · 冷启动没有可破坏的策略 —— 这正是仓库里已经验证过的路子（`bc-v6-train` 随机起，
+//     80 epoch 后 1950 局 **win 53.85%**，卡住的是长停行为门，不是物种）。
+//
+// 为什么语料要重采（不是复用 g8 那 580 局 DAgger）：
+//   · 冷启动时语料**就是初始策略本身**；DAgger 那批 51% 的帧来自输局，且标签打在学生状态上
+//     （God 只能复现 60.5%）⇒ 拿它定义初始策略，等于天生会"被逼到墙角"；
+//   · 本课用的是 **God 自跑轨迹**（`export-godai-labels.ts --action-v6 --wins 0`）：
+//     35 关 × seed **1-48** = **1680 局 / 1,020,123 帧 / 12 GB**，教师胜率 **68.2%**
+//     （1145 胜 / 452 基毁 / 83 命尽），`data_fp = 15f9bf6a1ec16b77…`。
+//     ⚠ **内存**：1M 帧的数组 ≈ **12.1 GB**（obs 11.7 + scal 0.4），按 bc-v6-train 实测峰值
+//       ≈2.4× 原始 obs 估 ⇒ **峰值 25–28 GB**。BC 节点必须 ≥32 GB；Kaggle（16 GB）会 OOM。
+//       若只能上 16 GB 节点，把语料裁到 seed 1-28（约 600k 帧 / 7 GB 数组）再开课。
+//
+// 语料的三条取舍（都可复查）：
+//   ① `--wins 0`：**保留 God 的输局**（约 1/3）—— 那是"真的被逼防守"的分布，比人造加权真；
+//   ② `--near-miss-times 1`：**关掉默认的 2**。判据是「环墙掉一格 OR 敌人距基地 4 格内」，
+//      实测 God 局里 **50.6%** 的帧都算 near-miss（stage 1-3），2× 就是一半语料翻倍；
+//   ③ 标签分布：move **36/24/20/20%**、fire class2 **8.8%**、hold=1 **13.6%** ——
+//      比学生自己的（move0 66% / move1 7%、fire 只用 class0）平衡得多。
+//
+// **`weight_exponent: 0.3`（不是 0，也不是 1）**：
+//   · 0 ⇒ 冷启动学成"永不开火"（fire class0 占 91.2%）；
+//   · 1.0 ⇒ fire class1 **零样本**，`max(1,count)` 让它拿到 (N/3)^1 ≈ **240×** 权重、
+//     并与 move 头共享主干 —— 这就是 `g8-god-bc` 第一轮崩掉的根因；
+//   · 0.3 ⇒ 零样本类权重约 5×，hold 正例约 1.7×，是"能学动作、不炸主干"的档。
+// ═══════════════════════════════════════════════════════════════════════════
+{
+  "version": 1,
+  "name": "g9-def-bc-cold",
+  "kind": "bc",
+  "level": "classic35",
+  "max_ticks": 36000,
+
+  "corpus": {
+    // 固定语料（教师自跑 1680 局 / seed 1-48），不采语料
+    "source": "fixed",
+    "fixed_dir": "tmp/g9-bc-cold/corpus",
+    "games_per_stage": 0,
+    "wins_only": false,
+    "near_miss_times": 0,
+    "seed_rotate": 0,
+  },
+
+  "train": {
+    "arch": "student",
+    // 1.02M 帧 × 30 epoch = 30.6M 样本通过量（bc-v6-train 是 447k×80=35.8M）
+    "epochs": 60,
+    // 早停关：择优靠 eval 的胜率 + 行为门，不靠 val_loss（§47：val 健康但行为塌）
+    "patience": 0,
+    "batch": 256,
+    // 冷启动档（对齐 bc-v6-train 的 3e-4；没有可破坏的策略，可以激进）
+    "lr": 0.0003,
+    "mirror_p": 0.5,
+    "val_split": 0.1,
+    "value_coef": 0.0,
+    "seed": 1234,
+    "ckpt_every": 1,
+    "fire_pos_weight": "auto",
+    // ★ 空 = 从随机起（bc_round_job.resolve_bc_init_weights 的约定）
+    "init_from": "",
+    "action_v6": true,
+    "policy_extra": true,
+    // ★ 见文件头：0 会学成永不开火，1.0 会让零样本类炸主干
+    "weight_exponent": 0.3,
+  },
+
+  "eval": {
+    // 每 5 轮 700 局（种子 1..20；与训练语料的 seed 1-12 **重叠**，这里的读数只看趋势，
+    // 正式判读另跑 seed 2000000001+ 的 60 seed 面板）
+    "every_epochs": 1,
+    "games_per_stage": 20,
+    "levels": ["classic35"],
+  },
+
+  "iters": 1,
+  "workers": 8,
+  "data_dir": "tmp/g9-bc-cold/corpus",
+  "out": "nn-training/weights/g9-def-bc-cold/weights.json",
+  "traj": "tmp/g9-def-bc-cold",
+  "backup_dir": "nn-training/weights/g9-def-bc-cold",
+  "backup_prefix": "g9-def-bc-cold",
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 结课判据（BC 阶段，**只看能不能接 PPO**；胜负交给 RL）
+// ═══════════════════════════════════════════════════════════════════════════
+//   参照：`bc-v6-train` 冷启动（人类赢局语料、safe-base 面板）1950 局 win **53.85%**，
+//        但因 **160/200 局有 ≥100 决策长停段** 被判"不接 PPO" ⇒ 长停是这条路的真正杀手。
+//
+//   过门（三条全过才接 PPO）：
+//     (i)   win ≥ **35%**（brick 面板 700 局；教师语料内 68.2% / 0★ 探针 78.6% / 旧 c1 37.3%）
+//     (ii)  cells_mean ≥ **90**（bc-v6-train 是 118；<90 基本就是冻住了）
+//     (iii) 无"整局级长停"：抽查 20 局，≥100 决策不动的局 < 5
+//   判死：
+//     · win < 30% 或 cells < 80 ⇒ 教师语料的天花板不够（单帧只能复现 ~61%），
+//       转 **PPO + `demo_bc_coef`**（策略主干交给 RL，教师只做辅助项）；
+//     · 若 win 高但长停多 ⇒ 接 PPO 时先把 z8-noidle 的长停罚带上。
+//
+// ── 启动（**agent 不启动训练**）──────────────────────────────────────────
+//   控制台按课程名开课：g9-def-bc-cold
+//   择优：`tmp/g9-def-bc-cold/training_log.jsonl` 的 `bc_eval` 行（每 5 轮一条）
+//        ckpt 在 `nn-training/weights/g9-def-bc-cold/weights.json.ckpt.<epoch>`

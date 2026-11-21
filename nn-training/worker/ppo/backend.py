@@ -33,7 +33,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from common.contracts import HeadLayout
-from common.schema import MOVE_DIM
+
+# `MOVE_DIM` 曾在这里被 demo 段用来切掩码（`:MOVE_DIM` 写死 5 列）。2026-11-21 起改走
+# `layout.move_slice`（v6 是 4 列），常量不再需要 —— 别再把它加回来写死宽度。
 
 
 @dataclass(frozen=True)
@@ -222,7 +224,12 @@ def run_step(
         # 只训 move（2026-10-18）：fire 的 mask 语义是「当前打得出去吗」，label 是
         # 「有没有按住」，冷却期两者互斥 ⇒ 可训练子集里 hold 只有 1.84%，fire CE 实际
         # 只教 release。恢复方式见 `tests/worker/test_ppo_demo_mix.py` 的守灵用例。
-        demo_bc_mean = bk.demo_masked_ce(dm, dact[:, 0], dmm[:, :MOVE_DIM])
+        # ⚠ 2026-11-21：掩码切片**必须走 `layout.move_slice`**，不能写 `:MOVE_DIM`。
+        #   同一个常量去切 v6 的 9 列掩码 = 取 move4 + fire[0]（多一列）⇒ masked_fill 形状
+        #   不匹配当场炸还算好的；若有人把 v6 标签塞进 7 列 bank，`:5` 会静默错位（0=STOP
+        #   的 legacy 语义 vs 0=up 的 v6 语义），loss 照降、行为全错。
+        #   v6 的 move 头是 4 类、legacy 是 5 类 —— 宽度只能由 layout 给。
+        demo_bc_mean = bk.demo_masked_ce(dm, dact[:, 0], dmm[:, layout.move_slice])
         loss = loss + float(cfg.demo_bc_coef) * demo_bc_mean
 
     bk.zero_grad(opt)

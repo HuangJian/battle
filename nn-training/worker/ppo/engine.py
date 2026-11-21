@@ -501,6 +501,18 @@ def _setup_demo(ctx: PPOContext) -> _Demo:
                 demo_src["extra"] = np.asarray(demo_bank["extra"]).astype(np.float32)
             demo_t = tensored_chunks([demo_src], device)[0]
             demo_n = int(demo_t["actions"].shape[0])
+            # ★ 掩码宽度必须与**本课的动作空间**同宽（2026-11-21）。
+            #   demo 只训 move 头，而 move 头在 legacy 是 5 类、v6 是 4 类；`layout.move_slice`
+            #   在两种空间里都正确，但**前提是 bank 的掩码就是这一套空间**。
+            #   7 列 bank 喂 v6 模型 = 静默把 legacy 标签（0=STOP）当成 v6（0=up）——loss 照降、
+            #   行为全错，且事后无从分辨。所以这里当场拒收，别靠下游形状碰巧报错。
+            bank_masks = int(demo_t["masks"].shape[-1])
+            if bank_masks != ctx.layout.mask_dim:
+                raise ValueError(
+                    f"[ppo] demo_bank 掩码宽 {bank_masks} ≠ 本课动作空间 {ctx.layout.mask_dim}"
+                    f"（space={ctx.layout.space}）——拒收。v6 语料必须用 mask.npy(9) 建 bank，"
+                    "legacy 语料用 masks.npy(7)，两者不能混。"
+                )
             demo_on = demo_n > 0
             if demo_on:
                 demo_idx_dev = torch.zeros(

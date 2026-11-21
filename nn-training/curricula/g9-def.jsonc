@@ -1,0 +1,302 @@
+// 课程 g9-def —— **g7-def 逐字复用，只把起点换成 God-AI 冷启动 BC 权重**（2026-11-21 16:0x）
+// ═══════════════════════════════════════════════════════════════════════════
+// 立课问题（用户原话）：「god ai 做 bc 训练的权重，可以用 rl 磨出胜率吗」
+//
+// 这是一门**单变量判死课**：奖励 28 项 / 预算 / 形状 / 面板全部与 g7-def 逐字相同，
+// 只改 `bc` 起点。于是任何与 g7-def 历史曲线的差异都只能归到"起点"上。
+//
+// ── 起点是什么（先看证据，别先看叙事）────────────────────────────────────
+// g9-def-bc-cold（1680 局 / 1,020,123 决策帧 / 56 epoch，`value_coef=0.0`）
+//   面板 = 与本课同一个 classic35 × seed 1-20 = **700 局**
+//   ep4   0.71%（5/700）kills 2.46 cells 33.7   ← 全程最高
+//   ep12  0.71%（5/700）kills 2.15 cells 36.0
+//   ep55  0.43%（3/700）kills 1.63 cells 29.0
+//   ep56  0.14%（1/700）kills 1.64 cells 28.8 ticks 3847 move_frac 0.199  ← 末态
+//   对照锚（同 700 局池，本次现场重跑）：g7-def.it120 **40.57%（284/700）** cells 113.9
+//   ⇒ **纯 BC 从头到尾没越过 1%**，与 g8 两轮同命。
+//
+// ⚠ **但它的失败不是"退化成常数"**（这条错判我上一轮犯过，已用探针纠正）：
+//   探针口径 = 3 个 shard（s01_seed001 / s18_seed007 / s35_seed003）共 **1911 帧**，
+//   套真实 `mask.npy`，**必须 `load_state_into` 装载权重**（`arch_meta.build_ppo` 只按
+//   arch 建模、**不装载**！漏这步测的是随机初始化模型，GAP 后 hidden 对任何输入都近似
+//   同一条 ⇒ argmax 恒定、假的"退化解"）。
+//                     move 一致率   fire 一致率   hold 一致率
+//     只看先验的常数基线   0.4364      0.9048      0.8493
+//     g9bc.ep56         **0.8430**    0.9137      0.9623
+//     g9bc.ep4            0.8129      0.9058      0.9560
+//     def.it120（40.57%） **0.5573**  0.8163      0.9095
+//     c1.it740            0.5493      0.8394      0.9126
+//   ⇒ ① ep56 显著高于先验基线 ⇒ 它**真的**学到了"状态→方向"（+40.7pp）；
+//     ② 它的 argmax 边缘 ≈ 标签边缘（move 0.44/0.26/0.14/0.16 vs 0.436/0.249/0.148/0.166）；
+//     ③ 方向翻转率 0.231/帧 ≈ 教师 0.207/帧（不是"原地抖动"——这个假设也被否了）。
+//   ⇒ 它是个**局部像、全局不像**的模仿器：逐帧像，闭环 cells 只有 28.8。
+//
+// ★★ **逐帧教师一致率不是胜率的代理，甚至反号**：def.it120 胜 40.57% 而一致率只有
+//   0.557/0.816/0.910，比 0.43% 的 ep56 低 27pp。⇒ 以后禁拿 acc/val_loss 择优 BC
+//   （与 g8 两轮"val 掉 38%/53% 而胜率归零"同一结论，这里补上反向证据）。
+//
+// ── 判据基线：一个"好起点"在 it1 长什么样 ────────────────────────────────
+//   g7-def（起点 c1@it740 = 钢墙关最末）rollout 胜率：**it1 0.268** · it2 0.230 · it5 0.413
+//   ⇒ 好起点**第一轮就有 25%+**。ep55 起点预期 it1 < 2%。这是本课最省钱的读数：
+//     it1 的 rollout 胜率一出来，"BC 权重值不值钱"已经答了一半。
+//
+// ── 本课必须改的两个键，以及为什么（"起点"是成对的，不是单个路径）────────
+//   ① `bc` → ep55。
+//   ② `kickstart_ref: false`。它是把策略 KL **拴在 `bc` 参考快照**上
+//      （`kk(it) = kickstart_init × decay^(it-1)` = 0.1×0.5^(it-1)）。
+//      g7-def 的 ref 是 c1.it740（好策略）⇒ 拴住有益（防早期把好行为拆了）；
+//      本课 ref = ep55（0.43%）⇒ 拴住 = **每轮主动把策略往坏解拽**。必须关。
+//      副作用：与 g7-def 的 A/B 因此是"起点 + 缰绳"一对变量。若要看纯起点差，
+//      另开一条 `kickstart_ref: true` 的腿做消融 —— 预期更差，不做也能判（见判据）。
+//
+// ── 风险预告（写在这里，避免事后编故事）──────────────────────────────────
+//   · g7-def 的**四轴防御阶梯已被判死**（it380 毁局 DA 17.6 / 预注册 ≤10 一次没到），
+//     而且它的副作用是让策略**更保守**（cells 121.4→106.4）。本课起点本来就保守
+//     （cells 28.8）⇒ 奖励会把它**继续按在被动吸引子上**。
+//     ⇒ 所以判读顺序必须**先行为、后胜率**：cells / kills 先动，胜率才可能动。
+//     若 it100 时 cells 仍 <40 而胜率 <3%，归因是"起点+奖励共同锁死被动吸引子"，
+//     **不能**写成"RL 学不会"。
+//   · `value_coef=0.0` ⇒ BC 的 value 头从没训过（44 个键 100% 装载，但 value_head
+//     是 kaiming 随机初值）⇒ 价值面等价于从零起，`value_anchor 0.001` 照原样保留。
+
+{
+  "version": 5,
+  "name": "g9-def",
+  "mode": "per-tick",
+  // 任务侧一个字不动：35 关 / 20 敌 / 36000 拍 / hard / 3 命，基地环钢化。
+  "level": "classic35",
+
+  // ── 语料轮换（与 g7-def 逐字相同）──────────────────────────────────────
+  "rotation_mode": "even",
+  "rotation_per_it": 7,
+
+  // ── 奖励：**g7-def 逐字复用（28 行）**——唯一的实验变量是起点，奖励一个字节不动 ──
+  "reward": {
+    "formula": [
+      // 主收入：+15/杀 × 20 杀 = 满额 300 —— 所有其它项的满量程都以它为标尺
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wAcc*aimHits/(playerShots+1)",
+      "+ wWinHit*min(hitsInFreezeShieldWindow, winHitCap)",
+      "+ wBrick*min(aimBricks, brickCap)",
+      // 拾取道具，满额 24。⚠ 这是"状态→动作"链路自检项，**不是产品目标**
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "+ wSpeed*where(clearTick>=0, max(0, min(1, (speedEnd-clearTick)/speedSpan)), 0)",
+      "+ wPace*kills*max(0, min(1, (paceEnd-ticks)/paceSpan))",
+      "+ wWallKeep*baseWallIntact",
+      "- wPressInt*min(pressExcessCap, max(0, basePressureSum - pressFree*basePressureSamples))",
+      "- wThShot*min(thShotCap, max(0, thShotsAtBaseCum - thShotFree))",
+      // ★ 四轴阶梯（g7-def 的实验项；已判死，本课逐字保留只为"单变量"）
+      "- wDefBreach*min(defBreachCap, max(0, thCostBreach - defBreachFree*ticks))",
+      "- wDefBreachAimed*min(defBreachAimedCap, max(0, thCostBreachAimed - defBreachAimedFree*ticks))",
+      "- wDefDirect*min(defDirectCap, max(0, thCostDirect - defDirectFree*ticks))",
+      "- wDefDirectAimed*min(defDirectAimedCap, max(0, thCostDirectAimed - defDirectAimedFree*ticks))",
+      "- wMissRate*min(1, playerShots/20)*max(0, aimMisses/(playerShots+1) - missRateFree)",
+      "- min(missHardCap, wMissHard*max(0, aimMisses - missHard)**2)",
+      "+ wFarHit*min(farCap, max(0, aimHitDistSum - farDistFree*aimHits))",
+      "+ wExplore*min(exploreCap, cellsVisited)",
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- wIdle*idleTicks/(ticks+1)",
+      "- wStuck*min(max(0, stuckTicks - stuckFree), stuckCap)",
+      "- wWall*min(max(0, wallPressTicks - wallFree), wallCap)",
+      "- wThreat*min(threatRateCap, threatTicks/(ticks+1))",
+      "- wHurt*min(hurtCap, hurtWeight)",
+      "- wPostHit*min(postHitRateCap, postHitLaneTicks/(ticks+1))",
+      "- wBurst*min(burstCap, damageBursts)",
+      "- wMaxDmg*min(maxDmgCap, max(0, maxDamage120 - maxDmgFree))",
+      "- wLowDmg*min(lowDmgCap, damageWhileLow)",
+      "- wNearSq*min(nearSqCap, nearSqSum)",
+      "- wEncl*min(enclRateCap, enclWeightTicks/(ticks+1))",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 2.5,
+      "wAcc": 5.0,
+      "wWinHit": 1.2,
+      "winHitCap": 12.0,
+      "wBrick": 1.0,
+      "brickCap": 12.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wWin": 80.0,
+      "wSpeed": 24.0,
+      "speedEnd": 9000.0,
+      "speedSpan": 3000.0,
+      "wPace": 12.0,
+      "paceEnd": 18000.0,
+      "paceSpan": 18000.0,
+      "wMissRate": 200.0,
+      "missRateFree": 0.3,
+      "wMissHard": 0.01,
+      "missHard": 80.0,
+      "missHardCap": 24.0,
+      "wFarHit": 1.5,
+      "farDistFree": 4.0,
+      "farCap": 120.0,
+      "wExplore": 0.05,
+      "exploreCap": 220.0,
+      "wDmg": 0.12,
+      "wDeath": 24.0,
+      "wIdle": 100.0,
+      "wStuck": 0.08,
+      "stuckFree": 200.0,
+      "stuckCap": 900.0,
+      "wWall": 0.08,
+      "wallFree": 350.0,
+      "wallCap": 300.0,
+      "wThreat": 180.0,
+      "threatRateCap": 0.2,
+      "wHurt": 0.12,
+      "hurtCap": 400.0,
+      "wPostHit": 1500.0,
+      "postHitRateCap": 0.03,
+      "wBurst": 8.0,
+      "burstCap": 8.0,
+      "wMaxDmg": 0.18,
+      "maxDmgFree": 120.0,
+      "maxDmgCap": 300.0,
+      "wLowDmg": 0.05,
+      "lowDmgCap": 600.0,
+      "wNearSq": 0.006,
+      "nearSqCap": 3000.0,
+      "wEncl": 60.0,
+      "enclRateCap": 0.4,
+      "wWallKeep": 26.0,
+      "wPressInt": 1.2,
+      "pressFree": 0.1,
+      "pressExcessCap": 180.0,
+      "wThShot": 50.0,
+      "thShotFree": 3.5,
+      "thShotCap": 5.0,
+      "wDefBreach": 0.93,
+      "defBreachFree": 0.008,
+      "defBreachCap": 43.0,
+      "wDefBreachAimed": 2.0,
+      "defBreachAimedFree": 0.003,
+      "defBreachAimedCap": 25.0,
+      "wDefDirect": 2.6,
+      "defDirectFree": 0.0015,
+      "defDirectCap": 35.0,
+      "wDefDirectAimed": 4.5,
+      "defDirectAimedFree": 0.0005,
+      "defDirectAimedCap": 26.0,
+    },
+    "terminal": {
+      "timeout": -60.0,
+      "lives_exhausted": -45.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+
+  // ── 起点：本课**唯一的实验变量** ─────────────────────────────────────────
+  "dodge": "",
+  // God-AI 冷启动 BC，56 epoch 的末段权重（用户指定 ep55；ep56 是最后一次落盘，同性质）。
+  // 装载自检：arch 与 c1.it740 / def.it120 逐字段相同
+  //   (in_ch 17 / board 26 / scalar_dim 46 / h 64 / d 8 / head_hidden 128 /
+  //    policyExtra true / actionV6 true)，44 个参数键 100% 覆盖，无 missing。
+  // ⚠ 但 `value_coef=0.0` ⇒ value_head 从未训练（kaiming 随机初值）。
+  "bc": "nn-training/weights/g9-def-bc-cold/g9-def-bc-cold.ep55.20261121-154632.json",
+  // ★ 与 g7-def 的**第二个差异**（成对变量，见文件头「必须改的两个键」）：
+  //   ref = ep55 ⇒ 缰绳会把策略往 0.43% 的解拽，必须关。
+  //   ⚠ 下面 init/decay 因此失效，保留只为与 g7-def 的 diff 最小、可读。
+  "kickstart_ref": false,
+  "kickstart_init": 0,
+  "kickstart_decay": 0.5,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+
+  // ── 预算（**与 g7-def 不同**：判死点在 it100，500 轮白烧 400 轮）──────────
+  //   25–28 it/小时量级 ⇒ 200 轮 ≈ 8 h。若要与另一门课并行填管，改回 500 两课同步
+  //   （MEMORY.md「多课并行的算力经济学」：预算/形状不一致 ⇒ 相位错开、轮替失效）。
+  //   优化器/形状与 g7-def **逐字相同**（1.2e-4 / 4 epoch / mb 1024 / 24576），
+  //   保证与 g7-def 历史曲线可比。
+  "iters": 500,
+  "max_hours": 48.0,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [{ "kl_coef": 0.02, "lr": 0.00012, "kl_cap": 0.1 }],
+
+  // ── 采样量（与 g7-def 逐字相同）─────────────────────────────────────────
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261118,
+
+  // ── 决策门（与 g7-def 逐字相同）─────────────────────────────────────────
+  "decision_events": false,
+  "decision_k": 10,
+
+  // ── 开局接管（与 g7-def 逐字相同）──────────────────────────────────────
+  "opening_connect": true,
+
+  // ── 产物路径（新实验 ⇒ 新目录，禁与 g7-def 续跑）────────────────────────
+  "out": "tmp/g9-def/weights.json",
+  "traj": "tmp/g9-def",
+  "backup_dir": "nn-training/weights/g9-def",
+  "backup_prefix": "g9-def",
+
+  // ── 过程熔断：**必须全关** ───────────────────────────────────────────────
+  //   起点来自**另一个训练管线**（BC 而非 PPO）⇒ 首轮 KL 天然爆表（course_spec
+  //   `breakers_off` 的注释原话就是为这种"换环境迁移"准备的）。另外熵会先崩后起
+  //   （ep55 的 fire/hold 头很尖），开正常阈值必在 it1–4 熔断，而那时什么都还没发生。
+  "breakers_off": true,
+  "ent_break": 0.25,
+  "ent_break_consec": 8,
+  "ent_break_max_winrate": 0.0,
+
+  // ── 评估网格：**必须与起点/锚同池**（2000-2034 × seed 1-20 = 700 局）─────
+  "eval_stages": "2000-2034",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 结课判据（预注册，2026-11-21 16:0x；决策点 = **it100**，提前止损点 = it20）
+// ═══════════════════════════════════════════════════════════════════════════
+//   同池参照（全部 700 局 / seed 1-20 / classic35 / hard / 3 命 / 0★）：
+//     起点 ep55                       0.43%（3/700）
+//     BC 全程最高（ep4 / ep12）        0.71%
+//     g7-def.it120（好起点，40 轮）     40.57%
+//     g7-def it0 / it190 / it380       37.29 / 39.14 / 36.86%
+//
+//   主判（决定"能不能磨出来"）：
+//     (i)  it100 时 700 局池胜率 ≥ **10%**（起点 0.43% 的 23 倍；BC 本身最好 0.71%）
+//     (ii) it100 时 cellsVisited ≥ **60**（起点 28.8）—— **前置条件**：先看行为有没有
+//          离开"蹲着"的吸引子；cells 不动而胜率动 = 不可信的偶然
+//   提前止损（省算力）：
+//     · it20 rollout 胜率仍 < 1% 且 cells < 40 ⇒ **"BC 起点不值得磨"当日可判**，
+//       不必跑到 it100（g7-def 好起点 it1 就有 0.268、it5 0.413，对照极硬）
+//   判死（任一成立）：
+//     · it100 主判 (i) 或 (ii) FAIL
+//     · it100 时 `base_destroyed` 占比仍 > 90% 且 k/千 < 1.5（连"换命"都没学会）
+//   副判（只作归因，**不作门**，避免又一次"判别力≠可学性"）：
+//     · k/千 ≥ 2.0（anchor 2.46）；`hold` 头"先转向"占比（探针口径，起点 0.139）
+//     · 熵：起点 ep55 很尖，若 it50 前 entropy < 0.30 且不回升 ⇒ 探索失败，直接停
+//
+//   ⚠ 面板纪律：只能与本文件列出的 700 局读数相减。**禁**拿 744 局池
+//     （seed 2000000001-20）的 44.29% 之类数字来比 —— 不同池，差值是假的。
+//   ⚠ 逐帧一致率 / val_loss **不得**用于择优（本课开课前的反向证据：40.57% 的
+//     def.it120 一致率 0.557 反而低于 0.43% 的 ep56 的 0.843）。
+//
+// ── 满量程（每项 < wKill 满额 300，与 g7-def 相同）─────────────────────
+//   ① 208   ② 216   ③ 250   ④-a 40 · ④-b 50 · ④-c 91 · ④-d 117（四轴块合计 298）
+//
+// ── 启动命令（**agent 不启动训练**，用户手工）──────────────────────────
+//   ① 先在控制台**停课 g9-def-bc-cold**（`tmp/g9-def-bc-cold/training-enabled.txt`
+//      还写着 2026-11-21T03:04:50 开课；BC 已跑完 56 epoch，但开课位没关）。
+//   ② 控制台按课程名开课：g9-def
+//   ③ 自检：日志首行必须是 `resume weights <- <上面那个 ep55 路径>`
+//      （若显示 tmp/g9-def/weights.json 则是续跑，立刻停）。
+//
+// ── 如果本课判死，下一步不是再磨，而是（按证据排序）──────────────
+//   1. BC 语料换成**教师闭环轨迹的 DAgger 版**（学生自己跑、教师纠偏）——
+//      本课之前的所有 BC 都是 off-policy 逐帧模仿，学生永远没见过自己的错误状态；
+//   2. 冷启动路线回到已验证的那条：**随机 init + RL**（钢墙关 g6-speed-c1 就是这么
+//      跑到 >90% 的），不要在 classic35 上从 BC 权重起；
+//   3. 若只想验证"BC 权重有没有信息"，可以只跑 **20 轮**做探针腿，不要 200 轮。

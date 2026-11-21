@@ -191,9 +191,17 @@ def clip_grad_norm_(parameters, max_norm: float) -> paddle.Tensor:
 
 
 def _prepare_demo(
-    demo_bank: DemoBank | None, demo_bc_coef: float, demo_per_mb: int
+    demo_bank: DemoBank | None,
+    demo_bc_coef: float,
+    demo_per_mb: int,
+    mask_dim: int | None = None,
 ) -> tuple[dict[str, paddle.Tensor], int, bool]:
-    """demo bank → tensor 视图 + 局数 + 是否启用（自 `ppo_update` 原样搬出）。"""
+    """demo bank → tensor 视图 + 局数 + 是否启用（自 `ppo_update` 原样搬出）。
+
+    `mask_dim`（2026-11-21，与 torch 侧 `engine._setup_demo` 同一道闸）：本课动作空间的掩码
+    宽度。给了就要求 bank 同宽 —— 7 列 bank 喂 v6（9 列）模型会把 legacy 标签（0=STOP）当成
+    v6（0=up），loss 照降、行为全错，所以当场拒收而不是靠下游形状碰巧报错。
+    """
     demo_on = demo_bank is not None and float(demo_bc_coef) > 0.0 and int(demo_per_mb) > 0
     demo_t: dict[str, paddle.Tensor] = {}
     demo_n = 0
@@ -206,6 +214,12 @@ def _prepare_demo(
             "masks": paddle.to_tensor(np.asarray(demo_bank["masks"]).astype(np.float32)),
         }
         demo_n = int(demo_t["actions"].shape[0])
+        bank_masks = int(demo_t["masks"].shape[-1])
+        if mask_dim is not None and bank_masks != int(mask_dim):
+            raise ValueError(
+                f"[ppo] demo_bank 掩码宽 {bank_masks} ≠ 本课动作空间 {int(mask_dim)}——拒收。"
+                "v6 语料必须用 mask.npy(9) 建 bank，legacy 语料用 masks.npy(7)，两者不能混。"
+            )
         demo_on = demo_n > 0
         if demo_on and "extra" in demo_bank:
             demo_t["extra"] = paddle.to_tensor(np.asarray(demo_bank["extra"]).astype(np.float32))
@@ -334,7 +348,9 @@ def ppo_update(
     _first = tensored.get(0) if lazy else (tensored[0] if tensored else None)
     space = ActionSpace.from_batch(_first) if _first is not None else ActionSpace.LEGACY
     layout = head_layout(space)
-    demo_t, demo_n, demo_on = _prepare_demo(demo_bank, demo_bc_coef, demo_per_mb)
+    demo_t, demo_n, demo_on = _prepare_demo(
+        demo_bank, demo_bc_coef, demo_per_mb, mask_dim=layout.mask_dim
+    )
     # lazy：不预计算（那要遍历全量 chunks，破坏延迟物化），chunk 首次取用时现算。
     ref_cache: list[tuple[Any, ...] | None] = (
         [None] * n_chunks if lazy else _build_ref_cache(tensored, ref_model, kickstart_kl)

@@ -1,0 +1,432 @@
+// 课程 g9-demo —— **PPO 主导 + 教师 BC 只做偏置**（2026-11-21 17:3x）
+// ═══════════════════════════════════════════════════════════════════════════
+// 为什么有这一课（用户口径）：
+//   「想用这批语料，改走 PPO + demo BC 辅助项。策略连贯性由 RL 优势保住，教师只做偏置，
+//    不会出现'抄一半把动作序列搞乱'。」
+//   ⇒ 与 g9-def（BC 冷启动 ⇒ RL）是**同一份语料的两条用法**：g9-def 把教师当"起点"，
+//     本课把教师当"loss 里的一项"。起点相同（都是 it120）但干预不同，各自对着自己的锚判。
+//
+// ── 起点与锚（这是本课能判读的全部依据）──────────────────────────────────
+//   `bc` = g7-def.it120，**700 局面板（classic35 × seed 1-20）胜 40.57%（284/700）**
+//   ⇒ 本课 it0 就等于 g7-def 的 it120。于是有两条现成参照：
+//     · 固定起点 40.57%（同池实测）
+//     · **g7-def 自己从 it120 往后跑的历史**：it190 39.14% → it380 36.86%（同奖励/同形状）
+//       ⇒ 不加任何东西的那条路是**平的、且轻微下行**。本课要赢的就是这个"平"。
+//
+// ── bank 是**纯防守块**，没有普通块（2026-11-21 用户裁定）──────────────────
+//   用户：「为什么需要 70k 普通块？普通块的场景和语料，每一轮自己 rollout 就有了呀。」
+//   ⇒ 对。普通状态有三个更称职的承担者，教师样本不该再花在那里：
+//     ① 自 rollout 就是 on-policy 的普通状态，advantage 已在那些状态上做完信用分配；
+//     ② `kickstart_ref: true` 的 KL 缰绳已经把"别忘掉 it120 的行为"包了；
+//     ③ 在普通状态上加 CE，等于让教师项与 advantage 抢梯度。
+//   教师样本只该花在 **rollout 采不到的地方**：学生很少走到"基地被压而它在近处"，
+//   走到了也守不住 ⇒ 那里 advantage 全是负的、没有正样本。教师在那里的动作是**唯一**的
+//   正样本来源（不是"更好的策略"，是"唯一有信号的地方"）。
+//
+//   筛选口径（全部取自 obs 编码器既有定义，不新造信号）：
+//     `s38`（基地压力 `sampleBasePressure(enemiesOnly=True)`）≥ **0.20**
+//     `s17·39`（到基地格数，`FIELD_DIAG = 26·CELL·1.5`）≤ **12 格**
+//     `manifest.outcome == "stage_clear"` —— 只要**教师守住了**的局
+//   ⇒ 候选 **175,113 帧**（96 seeds 全量，不抽样）：npz **84.7 MB** / 上设备 obs **2.01 GB**
+//      （+scalars 0.03 +extra 0.04 ⇒ **≈2.09 GB**）。sha `711cc269da4886a5…`，
+//      路径 `nn-training/data/g9-godai-demo/demo_bank.npz`（gitignore）。
+//      ★ 为什么用 96 seeds 全取、而不是抽回 86k（2026-11-21 18:4x）：同一局内的帧是强时序
+//        相关的，**有效样本量 ≈ 局数**（帧数会把它虚高一个数量级）。扩 seed 把贡献局数
+//        1008 → **2010**，这才是真正降低教师项聚类方差的那一步；顺带把 200 it 的重放从
+//        28.4 遍压到 **14.0 遍**。买单只有设备 1 GB（GPU 侧 uint8 常驻，见 §轮替）。
+//      ★ 扩种子后 move 边缘 [0.1894,0.3744,0.1938,0.2424] → [0.1913,0.3752,0.1929,0.2406]
+//        （逐项差 <0.4pp）⇒ 池子翻倍**没有改变筛选口径的分布**，只是同一分布抽得更密。
+//   ★ **为什么不按动作筛**（只留"朝基地"的帧）：实测教师在这些状态里朝基地 53.5% /
+//     背离 46.5%，近抛硬币。按动作筛出来的只是"教师一半时候的选择"，不是更优策略，
+//     还会把 CE 变成教师身上不存在的确定性任务、与 RL 优势打架。要"只教回防"那是
+//     **偏好注入**（该改奖励/动作约束），不在这里改。
+//   ★ **为什么排除 base_destroyed 局**：压力子集里 27–30% 的帧来自教师自己丢基地的局
+//     （与阈值几乎无关，见 experiments §158），那些正是"防守失败的过程帧"。
+//
+// ── 这一课真正要修的东西（数据，不是猜测）────────────────────────────────
+//   同一批帧上把 move 头的 argmax 分布摆出来（v6 = up/down/left/right；基地在 row 24
+//   ⇒ **down = 朝基地**、up = 背离）：
+//     · `g7-def.it120`（学生）   up **51%** / down **17%** / left 19% / right 13%
+//     · 教师（bank 标签边缘）    up 19% / down **37%** / left 19% / right 24%
+//   ⇒ 基地被压且它在近处时，**学生超过一半时间在往远离基地的方向推**，教师则相反。
+//     这就是 g7-def 那条"NN 被练成远离基地追杀敌人"的假设第一次有了直接读数。
+//
+// ── 机制（三段代码，全部已落地并冒烟）──────────────────────────────────
+//   ① `tools/build_demo_bank.py --v6 --skip-general --defense-frames ...`（2026-11-21 新增
+//      防守块与 `--skip-general`）⇒ 上面的 175,113 帧。
+//   ② 每 PPO minibatch 步从 bank 均匀抽 `demo_per_mb` 个样本，
+//      `loss += demo_bc_coef · CE_move(π(s), a_move)` —— **只训 move 头**。
+//      ★ "只训 move"不是偷懒：g8 两轮证明把教师开火边际（90.5% 不开火）灌进 fire 头会
+//        直接把策略教成哑炮。教师**走位**值得抄、**开火节奏**不值得（有状态瞄准，单帧学不到）。
+//   ③ 掩码宽度随 `layout.move_slice`（v6 4 类 / legacy 5 类）。**今天之前这条链只支持
+//      legacy**：bank 契约写死 `masks (N,7)`、loss 里 `dmm[:, :MOVE_DIM]` 写死 5 列 ⇒
+//      9 列掩码取前 5 列会让 `masked_fill` 形状不匹配、或静默错位（0=STOP vs 0=up）。
+//      已改：`backend.py` 走 layout 切片；`engine._setup_demo` / `engine_paddle._prepare_demo`
+//      加"bank 掩码宽必须等于本课 `layout.mask_dim`"的双向拒收闸；builder 加 `--v6`。
+//      回归 `tests/worker/test_ppo_demo_mix.py`（12 条，含 4 条 v6 用例）。
+//
+// ── 系数 0.005（★ 不是用户给的 0.05–0.1，差 10–20 倍，理由如下）────────────
+//   用户给的区间来自 `course_spec` 的老注释「CE~1.0 对 value~0.25 ⇒ 0.02 ≈ 8%」——
+//   那套尺假定 **CE ≈ 1**，也就是假定学生是个 BC 策略（跟教师接近）。本课的起点是
+//   **RL 策略**，它本来就该和教师不一样 ⇒ CE 大得多，而且它的 logits 严重过置信：
+//     实测（`tmp/probe-demo-ce.py`，8.66 万帧全量）：`demo_bc` 均值 **7.93**
+//     （p50 2.05 / p90 26.5，最差 5% 的帧吃掉 27.8% 的总 CE）
+//   ⇒ 拿 loss 值比（7.93×0.08 = 0.63 = value 的 127%）已经说明 0.08 太大，但**loss 值本身
+//     也不可靠**：CE 对 logits 的梯度有界（softmax−onehot），值大不等于梯度大。
+//   所以改用**梯度范数**直接量（`tmp/probe-demo-grad.py`，真 bank + 真语料 + ratio≡1）：
+//     ‖g_demo‖ = 3.72e+03（128 帧） vs ‖g_ppo‖ = 2.09e+02（1024 帧）
+//     ⇒ 每样本梯度 demo 是 PPO 的 **143×**；coef 0.08 时教师项占 **142.7%**（完全夺权）
+//     ⇒ 目标 5–10% ⇒ coef ∈ **[0.003, 0.006]**；取 **0.005**（≈8.9%）。
+//   ★ 这个占比会**随时间自然衰减**（策略校准后 CE 下降）——这正是想要的形状：先纠
+//     过置信的错方向，再让 RL 接管。
+//   ★ 预注册的 it10 自检：日志 `demo_bc` 与损失分解反算占比，若 < 3% 允许**一次性**提到
+//     0.01（不许边跑边调）；若首轮出现策略崩坏（胜率 < 35%）立即停。
+//
+// ── 与 g9-def 并行（算力经济学）──────────────────────────────────────────
+//   同形状同预算：`iters 200 / max_hours 24 / lr 1.2e-4 / epochs 4 / mb 1024 /
+//   target_transitions 24576`（g9-def 也是这一组）⇒ 两课交替吃 rollout/PPO，填满管线。
+
+{
+  "version": 5,
+  "name": "g9-demo",
+  "mode": "per-tick",
+  // 任务侧一个字不动：35 关 / 20 敌 / 36000 拍 / hard / 3 命（关卡自带），基地环钢化。
+  "level": "classic35",
+
+  // ── 语料轮换（与 g5-safe2 同配方）──────────────────────────────────────
+  "rotation_mode": "even",
+  "rotation_per_it": 7,
+
+  // ── 奖励：**g6-speed-d1 逐字复用 + 新增 1 项**（27 → 28 行）───────────
+  //   血缘：g5-safe2（原始来源）→ d1（wSpeed 24 对照）→ **本课 c1**。
+  //   本腿唯一新增 = 稠密逐杀配速 `+ wPace*kills*share(ticks)`；其余 27 项与 d1 逐字相同。
+  "reward": {
+    "formula": [
+      // 主收入：+15/杀 × 20 杀 = 满额 300 —— **所有其它项的满量程都以它为标尺**
+      "wKill*kills",
+      // 瞄准命中 +2.5/发（把"瞄准打中"与"乱射蹭到"分开）
+      "+ wHit*aimHits",
+      // 命中率项，上限约 5；分母是 shots+1 ⇒ 开多少枪都不封顶
+      "+ wAcc*aimHits/(playerShots+1)",
+      // 冻结/护盾窗口内的命中，满额 14.4（鼓励在无敌期输出）
+      "+ wWinHit*min(hitsInFreezeShieldWindow, winHitCap)",
+      // 打砖拆路，满额 12
+      "+ wBrick*min(aimBricks, brickCap)",
+      // 拾取道具，满额 24。⚠ 这是"状态→动作"链路自检项，**不是产品目标**——别拿拾取率当主门
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      // 通关 +80。**纯终端脉冲**：只在最后一拍出现 ⇒ 19 拍优势视界下不可学，只能靠击杀链间接传导
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 速度奖，满额 24，**同样是终端脉冲**；g6 阶梯（×1/×3/×6）已证 19 拍视界下全部无效
+      "+ wSpeed*where(clearTick>=0, max(0, min(1, (speedEnd-clearTick)/speedSpan)), 0)",
+      // **稠密逐杀配速**（c1 唯一的正结果，7 点趋势 −11.4 拍/轮）。kills/ticks 都是逐行累计列 ⇒ np.diff 后 = 每杀当场按当时 pace 兑现 + 每拍按已完成杀数抽税；必须杀才拿钱 ⇒ 免疫送死套利
+      "+ wPace*kills*max(0, min(1, (paceEnd-ticks)/paceSpan))",
+      // ★ g7-base2 ①：**基地墙存量**（沿用 g7，未改）。逐行状态列 ⇒ np.diff 只在砖破那一拍兑现 −26；telescoping 后 = 终局差值。满量程 26×8 = 208
+      "+ wWallKeep*baseWallIntact",
+      // ★ g7-base2 ②：**压力积分**（g7 的滑动均值 ⇒ 改成绝对积分）。免罚带 = 0.10×samples（随局长度自动放大，无时长偏置）；
+      //   每多一拍"超中位压力"就多付 wPressInt×Δ。g7 用 Sum/(Samples+1) 是**滑动均值**：Φ 每步 delta ∝ 1/t ⇒ 后期梯度消失（这正是 v13 给 thCost* 写"必须累计"的原因）。满量程 1.2×180 = 216
+      "- wPressInt*min(pressExcessCap, max(0, basePressureSum - pressFree*basePressureSamples))",
+      // ★ g7-base2 ③：**对基地开火**（g7 的 14/发 → 50/发，免罚 3→3.5，封顶 14→5）。它是最贴"基地真被打"的事件计数；满量程 50×5 = 250
+      "- wThShot*min(thShotCap, max(0, thShotsAtBaseCum - thShotFree))",
+      // ★ g7-base2 ④：**直击射界累计**（本课主项）。thCostDirect(+Aimed) = 每决策步"正压在鹰的两轴上、弹道无遮挡"的敌车数（≤2/步），
+      //   metrics v13 已落盘、**从未进过任何公式**。免罚带 0.006/拍（胜局中位 5 units / p90 46；毁局中位 38）；满量程 8×37.5 = 300
+      // ★ g7-def ④-a：**破墙射界**（早轴）。每决策步"有敌车能打穿环墙"的计数（≤2/步，累计）。
+      //   实测：胜局 p50 32 / 毁局 p50 29 —— **几乎不判别**（SNR +0.03），只在"早"这一维有价值，故权重最低。满额 0.93×43 = 40
+      "- wDefBreach*min(defBreachCap, max(0, thCostBreach - defBreachFree*ticks))",
+      // ★ g7-def ④-b：**破墙射界·已对准**。比 ④-a 晚一点、判别好一点（胜 11 / 毁 16，SNR −0.15）。满额 2.0×25 = 50
+      "- wDefBreachAimed*min(defBreachAimedCap, max(0, thCostBreachAimed - defBreachAimedFree*ticks))",
+      // ★ g7-def ④-c：**直击射界**（能打鹰，炮口未必对准）。胜 3 / 毁 22（SNR −0.62）。满额 2.6×35 = 91
+      "- wDefDirect*min(defDirectCap, max(0, thCostDirect - defDirectFree*ticks))",
+      // ★ g7-def ④-d：**直击射界·已对准**（本课最强单轴）：胜局中位 **0**、毁局中位 17（SNR **−1.41**）。
+      //   旧课把它和 ④-c 加在一起（thCostDirect+DirectAimed）⇒ 被弱轴稀释；这里单独上价。满额 4.5×26 = 117
+      "- wDefDirectAimed*min(defDirectAimedCap, max(0, thCostDirectAimed - defDirectAimedFree*ticks))",
+      // 空放率罚：超过 0.3 才计费，满额 200。`min(1, shots/20)` 是"开够 20 枪才全额生效"的软启动
+      "- wMissRate*min(1, playerShots/20)*max(0, aimMisses/(playerShots+1) - missRateFree)",
+      // 硬空放二次罚，**封顶只有 24**。⚠ 它在 aimMisses≈130 处就撞顶，再放 400 枪也只付 24 —— g6-uncap1 把它抬到 110 实测**无效**，别再动它
+      "- min(missHardCap, wMissHard*max(0, aimMisses - missHard)**2)",
+      // 远距离命中（超过每命中 4 格的部分），满额 180
+      "+ wFarHit*min(farCap, max(0, aimHitDistSum - farDistFree*aimHits))",
+      // 探索新格，满额只有 11（0.05×220）—— 压不住"缩着不动" ⇒ g7 的副判专门用 cellsVisited 盯这件事
+      "+ wExplore*min(exploreCap, cellsVisited)",
+      // 挨打 0.12/HP。实战里这是最大的防守项（一局 250–420 HP ⇒ 30–50 分）
+      "- wDmg*playerDamageTaken",
+      // 掉命 24/条。**这条的定价等号就是"1 命 = 3000 拍"**（wSpeed 24 覆盖 3000 拍跨度）
+      "- wDeath*playerDeaths",
+      // 空转占比，满额 100；比率式 ⇒ 随 ticks 增长而衰减
+      "- wIdle*idleTicks/(ticks+1)",
+      // 卡住罚：超出 200 拍才计，封顶 72。⚠ 2.4 万拍的病态局也只付 72 —— 已知缺陷，不是调参能治的
+      "- wStuck*min(max(0, stuckTicks - stuckFree), stuckCap)",
+      // 玩家顶墙罚：超出 350 才计，封顶 24
+      "- wWall*min(max(0, wallPressTicks - wallFree), wallCap)",
+      // 在敌人火线上的时间占比，封顶 36（占比 0.2）。它是"暴露"的总闸，但很便宜
+      "- wThreat*min(threatRateCap, threatTicks/(ticks+1))",
+      // hurtWeight 加权伤，封顶 48
+      "- wHurt*min(hurtCap, hurtWeight)",
+      // 被打之后仍留在火线上的占比，封顶 45
+      "- wPostHit*min(postHitRateCap, postHitLaneTicks/(ticks+1))",
+      // 连击罚：damageBursts 封顶 8 ⇒ 64。**胜局均值 0.97 / 基地被毁局 2.45**，最强败局判别子之一
+      "- wBurst*min(burstCap, damageBursts)",
+      // 单次 120 拍窗口内的最大伤害，超出 120 才计，封顶 54
+      "- wMaxDmg*min(maxDmgCap, max(0, maxDamage120 - maxDmgFree))",
+      // 低血时承受的伤害，封顶 30（600×0.05）
+      "- wLowDmg*min(lowDmgCap, damageWhileLow)",
+      // 贴脸平方和，封顶 18（0.006×3000）—— 太小，压不住交战距离
+      "- wNearSq*min(nearSqCap, nearSqSum)",
+      // 被围占比，封顶 24（0.4×60）
+      "- wEncl*min(enclRateCap, enclWeightTicks/(ticks+1))",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 2.5,
+      "wAcc": 5.0,
+      "wWinHit": 1.2,
+      "winHitCap": 12.0,
+      "wBrick": 1.0,
+      "brickCap": 12.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wWin": 80.0,
+      // ★ 实验变量：24 = 对照。
+      "wSpeed": 24.0,
+      "speedEnd": 9000.0,
+      "speedSpan": 3000.0,
+      "wPace": 12.0,
+      "paceEnd": 18000.0,
+      "paceSpan": 18000.0,
+      "wMissRate": 200.0,
+      "missRateFree": 0.3,
+      "wMissHard": 0.01,
+      "missHard": 80.0,
+      "missHardCap": 24.0,
+      "wFarHit": 1.5,
+      "farDistFree": 4.0,
+      "farCap": 120.0,
+      "wExplore": 0.05,
+      "exploreCap": 220.0,
+      "wDmg": 0.12,
+      "wDeath": 24.0,
+      "wIdle": 100.0,
+      "wStuck": 0.08,
+      "stuckFree": 200.0,
+      "stuckCap": 900.0,
+      "wWall": 0.08,
+      "wallFree": 350.0,
+      "wallCap": 300.0,
+      "wThreat": 180.0,
+      "threatRateCap": 0.2,
+      "wHurt": 0.12,
+      "hurtCap": 400.0,
+      "wPostHit": 1500.0,
+      "postHitRateCap": 0.03,
+      "wBurst": 8.0,
+      "burstCap": 8.0,
+      "wMaxDmg": 0.18,
+      "maxDmgFree": 120.0,
+      "maxDmgCap": 300.0,
+      "wLowDmg": 0.05,
+      "lowDmgCap": 600.0,
+      "wNearSq": 0.006,
+      "nearSqCap": 3000.0,
+      "wEncl": 60.0,
+      "enclRateCap": 0.4,
+      // ── g7-base2 四项基地项（分位与支付见文件头实测表）──────────────────────
+      //   ① 墙存量：不动（208）
+      "wWallKeep": 26.0,
+      //   ② 压力**积分**（不是速率）：免罚带 0.10/sample ≈ 中位 0.108；封顶 180 units = 216
+      "wPressInt": 1.2,
+      "pressFree": 0.1,
+      "pressExcessCap": 180.0,
+      //   ③ 对基地开火：50/发，免罚 3.5，封顶 5 发 = 250
+      "wThShot": 50.0,
+      "thShotFree": 3.5,
+      "thShotCap": 5.0,
+      //   ④ 直击射界累计：8/unit，免罚 0.006/拍，封顶 37.5 units = 300
+      //   ④ 四轴阶梯（免罚带 = 各轴胜局 p50 的 ~1.6 倍速；cap = 毁局 p90）
+      "wDefBreach": 0.93,
+      "defBreachFree": 0.008,
+      "defBreachCap": 43.0,
+      "wDefBreachAimed": 2.0,
+      "defBreachAimedFree": 0.003,
+      "defBreachAimedCap": 25.0,
+      "wDefDirect": 2.6,
+      "defDirectFree": 0.0015,
+      "defDirectCap": 35.0,
+      "wDefDirectAimed": 4.5,
+      "defDirectAimedFree": 0.0005,
+      "defDirectAimedCap": 26.0,
+    },
+    "terminal": {
+      "timeout": -60.0,
+      "lives_exhausted": -45.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+
+  // ── 起点与缰绳（三档相同）────────────────────────────────────────────────
+  "dodge": "",
+  "bc": "nn-training/weights/g7-def/g7-def.it120.20261121-021554.json",
+  // 缰绳**保持 true**（与 g7-def 逐字相同）：本课要测的是"多加一个 demo 偏置项"，
+  // 其它一切不动 ⇒ 任何差异只能归到 demo 项上。ref 就是 it120 本身（好策略，拴住有益）。
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "kickstart_decay": 0.5,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+
+  // ── ★ 本课唯一新增：demo 混 batch（三键必须同开，半开会被 loop_remote_job 拒发）──
+  //   path 是本地路径 —— 字节走**内容寻址 blob**（`demo_sha`），同 run 内每轮同字节 ⇒
+  //   只上传一次、节点侧缓存；`demo bank 要求 slim=1`（非 slim 无内联退路，会响亮拒发）。
+  "demo_bank": "nn-training/data/g9-godai-demo/demo_bank.npz",
+  //   只训 move 头（见文件头 ②）。★ 0.005 不是 0.05–0.1：本课 bank 是**纯防守块**、起点是
+  //   **RL 策略**（不是 BC 策略）⇒ demo_bc 实测 7.93（不是 0.35），logits 过置信 + 批只有
+  //   128 帧 ⇒ 每样本梯度是 PPO 的 143×。coef 0.08 实测占梯度 **142.7%**（夺权）；
+  //   0.005 ≈ 8.9%（偏置）。推导见文件头「系数 0.005」节 + tmp/probe-demo-grad.py。
+  "demo_bc_coef": 0.005,
+  //   每 PPO minibatch 步抽几个 demo 样本（mb=1024 ⇒ 12.5% 的批，前向开销 ~12%）。
+  "demo_per_mb": 128,
+
+  // ── 预算与优化器（与在跑的 g6-speed-c1 **逐字相同**：1.2e-4 / 4 epoch / mb 1024）──
+  //   ⚠ 这是**新腿**（起点 = c1@it740 权重的副本，自己的账本从 it1 开始），
+  //     所以这里没有"改大 iters 续跑"那套历史 —— iters 500 就是本课的全部预算。
+  //   ⚠ 与 g7 系列另一课**必须同步**：两课靠轮替 rollout/PPO 填满算力（MEMORY.md 硬规则），
+  //     预算/形状不一致 ⇒ 相位错开、轮替失效。
+  "iters": 500,
+  "max_hours": 48.0,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [{ "kl_coef": 0.02, "lr": 0.00012, "kl_cap": 0.1 }],
+
+  // ── 采样量 ───────────────────────────────────────────────────────────────
+  // 24576 = 与在跑课同形状（双课并行要相位互补，见 MEMORY.md「多课并行的算力经济学」）。
+  // ⚠ **`autonomous_cloud_overrides` 已删**（2026-11-19 21:1x 用户口径）⇒ GPU / TPU 云机上
+  //   **不再自动放大采样量**（原来 gpu 档 49152 / tpu 档 215040），全档一律按本行 24576 跑。
+  //   要恢复分档必须**两课同改**，否则形状不一致、轮替失效。
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261118,
+
+  // ── 决策门 ───────────────────────────────────────────────────────────────
+  "decision_events": false,
+  "decision_k": 10,
+
+  // ── 开局接管（撤回早前的"空操作"结论）────────────────────────────────────
+  // 2026-11-19 21:3x 实测纠正：
+  //   ① **它不是空操作**。`evaluateCorridor` 判定 classic35 有 **13/35 关是口袋阵**
+  //      （2001/2003/2004/2007/2012/2014/**2020 Checkers**/2021/2024/2025/2028/2029/2033），
+  //      这些关 `connected=false` ⇒ 按设计**会**触发 OpeningController 接管。另 22 关是 hug/lower 连通，
+  //      那 22 关确实不接管（条件接管臂）—— 这是"逐关看才准"的事，不是全局开关。
+  //   ② 单局直调（`export-eval-game.ts --opening-connect`）在 S2020 上差异巨大：
+  //      seed 2000000001 首杀 2069→**965** 拍、ticks 4287→**3473**、cellsVisited 104→127。
+  //   ③ **但 `eval-course-ckpt` 分布式路径实测无差异**：S2020 单关 20 种子 0/20 不同，
+  //      全盘 700 局 0/700 不同。**根因两条（2026-11-19 21:5x 定位并已修）**：
+  //        · 本机长驻池：`serve_pool` 的 worker 旗标在**启动时**固定，后续任务的
+  //          `--opening-connect` 被吞 ⇒ 同批串味（17/20 不同、3 局一模一样）。
+  //          修：`worker/eval_local.py` 在 `opening_connect` 或 `EVAL_POOL_DISABLE=1` 时绕过池。
+  //        · 远端 agent **无条件**套 controller（源码看着正确，疑似节点跑旧构建）。
+  //          修：`tools/sim/eval-course-ckpt.ts` 对带 flag 的批次**禁派远端**（noNodes、
+  //          不给 localSlots），并对"不带 flag 却用远端"发显式告警。
+  //      ⇒ 修复后本机双臂 **20/20 逐局不同**（bare 4287 / oc 3473，与单局直调吻合）。
+  //   ④ ⚠ 训练 rollout **是**带这个 flag 的（`trainer/dispatch.py:776` 透传、
+  //      课程 `opening_connect` 在 `flat_overrides` 里）⇒ **训练与我这套评估口径不一致**。
+  //      含义：本课的历史基线（37.00%）是在 13 个口袋关上"无辅助"跑出来的，偏悲观。
+  //   本课两侧同口径（都带 true），所以**两课之间的比较不受影响**；受影响的是与部署口径的绝对对比。
+  "opening_connect": true,
+
+  // ── 产物路径（新实验 ⇒ 新目录，禁与 g5 系续跑）──────────────────────────
+  "out": "tmp/g9-demo/weights.json",
+  "traj": "tmp/g9-demo",
+  "backup_dir": "nn-training/weights/g9-demo",
+  "backup_prefix": "g9-demo",
+
+  // ── 过程熔断 ─────────────────────────────────────────────────────────────
+  "breakers_off": true,
+  "ent_break": 0.25,
+  "ent_break_consec": 8,
+  "ent_break_max_winrate": 0.0,
+
+  // ── 评估网格（与 g5 系同 seed ⇒ 可逐局配对）──────────────────────────────
+  "eval_stages": "2000-2034",
+  "eval_games_per_stage": 20,
+  "eval_every": 10,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 结课判据（预注册，2026-11-21 17:3x；决策点 = **it190**，中途裁决点 = **it70**）
+// ═══════════════════════════════════════════════════════════════════════════
+//   ⚠⚠ 面板纪律（2026-11-21 21 时自查纠正）：**runner 内的 eval 用的是 seed 2000000001-20**，
+//     不是 seed 1-20。两池都对（都是 35 关 × 20 = 700 局），但**不可相减**。
+//     实测 `tmp/g7-def/eval_log.jsonl` 的 seeds = 2000000001..2000000020；
+//     而 40.57% 那个数是 `seed0=1` 的池测出来的（BC 侧 `bc_eval.levels[0].panel.seed0==1`）。
+//     ⇒ 同池（2000000001-20）真相：
+//         g7-def it100 35.43% / **it120 44.43%** / it190 **39.14%** / it380 **36.86%**
+//         （it120 cells 121.3 · kills 33.09 · 丢基地 49.6%）
+//     上一版文件头写的"it0 = 40.57%"是**跨池数值**，已改正：本课 it0 在这条池上是 **44.43%**。
+//     （39.14% / 36.86% 本来就出自这条池，主判阈值不受影响。）
+//
+//   it0   = 44.43%（= it120 本体，同池）
+//   it70  ≈ g7-def it190（39.14%）  ← 中途裁决
+//   it190 ≈ g7-def it310           ← 主决策点
+//
+//   主判（唯一门槛）：**it190 胜率 ≥ 45%**。
+//     理由：不加东西的同一段路是 39.14% → 36.86%（平且下行）。≥45% 才算"教师偏置
+//     真的换来了胜率"，而不是又一次噪声。
+//   副判（作归因，不作门 —— 别重犯"判别力≠可学性"）：
+//     (a) k/千 ≥ **2.65**（it120 同池实测；it190 2.40 / it380 2.18 —— 这条本身就是本课
+//         要逆转的趋势）—— demo 只偏 move，**不该**降低开火能力；若降 = 偏置把策略教保守了
+//         （这正是 g8 的死法，必须先看这条）
+//     (b) 胜局拍数不应上升超 8%（it0 **6479** 拍；同池 it190 6838 / it380 7358）：
+//         若胜率涨在"拖时间"上，说明它在蹭奖励而不是变强
+//     (c) 教师项**梯度**占比 ∈ [3%, 15%]（不是 loss 值占比 —— 见文件头「系数 0.005」：
+//         本课 CE 的 loss 值占比天然在 40% 级，用 loss 值判会把 8.9% 的梯度读成"夺权"）
+//   判死：it70 时胜率 < 38% **且** k/千 < 2.40 ⇒ 教师偏置没换来任何东西，停课
+//     （2.40 = 同池 it190 的读数，不是拍脑袋的 2.3）。
+//   反例保护：it10 若胜率 < 35%（掉出起点 6pp 以上）⇒ 系数过大（CE 在夺权），立即停，
+//     不要"再跑跑看"（g8-bc2 就是这么白烧 24 轮的）。
+//
+// ── 满量程：与 g7-def 逐字相同（每项 < wKill 满额 300）──────────────────
+//   ① 208   ② 216   ③ 250   ④-a 40 · ④-b 50 · ④-c 91 · ④-d 117
+//
+// ── 启动（**agent 不启动训练**，用户手工）───────────────────────────────
+//   ① 控制台开课：g9-demo（与 g9-def 同时开，同形状同预算 ⇒ 交替吃算力）
+//   ② 自检三行：
+//      · `resume weights <- nn-training/weights/g7-def/g7-def.it120.…json`（不是 tmp/g9-demo）
+//      · `demo bank 已装载：…/demo_bank.npz 84.7MB`（真机文案）+ 紧随其后的
+//        `demo 索引复用缓冲已启用（per_mb=128, int64, …）`。N 应是 **175113**、coef **0.005**、
+//        per_mb **128**
+//      · 首轮 `demo_bc` 非 0
+//      缺第二行 = demo 三键没进 manifest（半开会被拒发，静默为 0 才危险）。
+//      ⚠ 云端 worker 吃 hub 启动时锚定的 `code.zip`：若包里还是 08:55 那份（无 v6 切片、
+//        无宽闸），9 列掩码会被 `dmm[:, :5]` 取前 5 列 ⇒ 与 4 类 logits 形状不符，
+//        在 `masked_fill` 上**当场报错**（不会静默跑歪，但这一轮直接废）。开课前确认包是新的。
+//
+// ── 语料够不够轮替（2026-11-21 18:4x 实测，`tmp/probe-def-pool.py`，96 seeds）──────────
+//   bank = **175,113 帧**，来自 **2010 局**（96 seeds × 35 关里教师守住且出现压力帧的局），
+//   35 关全覆盖。每 iter 抽 `96 步 × 128 = 12,288` 帧 = bank 的 **7.0%**：
+//     200 it ⇒ 累计 **14.0 遍**（每帧平均被抽 14 次；从未被抽到的帧 ≈ 8e-7）
+//     300 it ⇒ 21.1 遍        500 it ⇒ **35.1 遍**      1000 it ⇒ 70.2 遍
+//   ⇒ **覆盖永远不是问题**（200 it 就基本全池覆盖）。真正的问题是**重复**：静态 bank 被重放
+//     14→35 遍后，CE 容易"背这批具体帧的答案"（只在这些帧上像教师），而行为不回传。
+//   ★ **200 it 不需要任何调整**：`demo_per_mb` 保持 **128**、coef 保持 **0.005**。
+//     上一版建议「扩到 500 it 就把 per_mb 砍到 64」是为了把 71 遍压回 28 遍——池子翻倍后
+//     500 it 只有 **35.1 遍**（比上一版 200 it 的 28.4 遍只多 24%），那条建议**作废**。
+//     砍 per_mb 反而要重新标定 coef（教师项梯度是按 per_mb 帧求均值 ⇒ 砍半 = 梯度占比减半，
+//     要保持同一剂量得把 coef 抬到 0.010）——为了省 6% 前向去动一个已经标定好的系数不划算。
+//   ★ 重放的**真实成本**不在帧数、在**局数**：2010 局 ÷ 14 遍 ⇒ 每局在 200 it 里被"回头看"
+//     14 次，同局帧又强相关 ⇒ 独立信息远小于 175k。再想加信息只能**再加 seeds**
+//     （`tmp/g9-demo-collect2.sh` 已模板化：改 `--seeds` 区间即可，96 seeds 实测 94 秒）。
+//   ★ 每关分布刻意**不均衡**（按教师实际遇到压力的次数分配，不是按关均分）：
+//     s26 8.66% / s32 8.04% / s24 6.50% 最厚，s34 **0.23%**（仅 23 局）/ s07 0.54% 最薄。
+//     这是对的：在教师几乎不挨压的关上人为加权重，教出来的就是"教师身上不存在的先验"。
+//   ★ 中段要看 `demo_bc` 是否**饱和**：若降到 <0.5 说明学生在这批帧上已很像教师，此时教师项
+//     提供的不再是"方向"而是"维持"，再加 iters 等于 KL 缰绳 + 教师项双重按住策略。
+
+// ── 本课判死后（按证据排序）────────────────────────────────────────────
+//   1. coef 提到 0.01（梯度占比 ~18%）再跑一次**只到 it70** 的短腿（判断"偏置不够" vs "偏置无效"）；
+//   2. demo 从"逐帧均匀抽"换成**按教师的 plan 段抽**（同一段连续 10 帧只取 1 个，减少
+//      同一状态的重复投票）—— 这是本课唯一没试过的数据面变量；
+//   3. 若连 (a) k/千 都掉了 ⇒ 说明 move 偏置与"开火纪律"在共享主干上打架 ⇒ 转 **LoRA /
+//      分头解耦**（move 头单独一个小塔），而不是继续加系数。
