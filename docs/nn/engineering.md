@@ -53,8 +53,18 @@ _stall_not_in_place_retry` 立刻红（日志里没有「半截产出清不掉�
 （LOC 预算内）；`ruff` / `mypy` 单文件绿。**行为零差异**：五个测试文件 193 例全绿，nn 全量
 **6699 passed / 3 skipped**，根 `bun run check` **2856 pass / 16 skip / 0 fail**。
 
-**下一步（同族）**：`resolve_bun` / `bun_version` 这两个**公开名**的 patch 还剩 14 处（本仓不占
-G19 额度，但同样是「模块名即 API」）；照本节形状先铺端口，再一文件一文件收。
+**公开名那 32 处也一起收了**（2026-11-21 复核）：`resolve_bun` / `bun_version` 是**公开名**，不占
+G19 额度，本笔之前一直是逐名 patch —— 它们和私有三处同属执行面，已全部改走 `stub_exec`。
+实测：**`iter_rollout` 的六个执行面接缝在 `tests/**` + `e2e/**` 里现在零处逐名 patch**
+（唯一改动点就是 `EXEC` 本身；AST 扫 `setattr(<名>, "resolve_bun"|"bun_version"|…)` = 0）。
+
+**还剩的同族（都不在 `iter_rollout` 里，别误记额度）**：
+
+| 面 | 位置 | 数量 | 备注 |
+|----|------|-----:|------|
+| `bun_version` 逐名 patch | `trainer/eval_dispatch` 2 · `trainer/rollout_dispatch` 1 · `trainer/batch_runner` 3 · `remote/rollout_node`（`common_proc.bun_version`）1 | 7 | 收它们要连 `tests/trainer/test_batch_runner_split.py` 的「`bun_version` 必须在本模块被**裸名**读」契约一起改 |
+| `iter_rollout` 容量/杀树/校验（公开名） | `cpu_worker_slots` 4 · `workers_cap` 3 · `kill_process_tree` 2 · `verify_shards` 1 | 10 | **另三条**接缝（不是执行面六缝），要收得先决定它们值不值得进 `NodeExec` |
+| `_run_one_game_bounded`（私有执行路名） | `e2e/test_stream_collect_e2e.py` | 4 | 仍占 G19 额度；它包的是 `EXEC.run_game` + `call_bounded`，换 `run_game=` 替身会**顺带打开**真实的上界语义，得逐条看用例假设 |
 
 ## §257 P0-6 收尾：BC 两条腿的缺省 `log` 也改走 `tag_logger`（G3 123 / 38 文件）（2026-11-21）
 
