@@ -48,6 +48,7 @@ import worker.iter_rollout as iter_rollout
 from common import game_watch
 from common.platform_utils import sandbox_delete_blocked
 from common.protocol import INIT_WEIGHTS_NAME, ProtocolError
+from tests.helpers.iter_exec import stub_exec
 from worker.iter_rollout import run_iter_rollout, scan_shard_dirs
 
 # ------------------------------------------------------------------ 桩与夹具
@@ -90,8 +91,7 @@ def _local_root(tmp_path: Path) -> Path:
 def _watchdog(monkeypatch: pytest.MonkeyPatch) -> None:
     """假 bun（本进程 python）+ 快轮询（生产 0.5s）。"""
     monkeypatch.setattr(game_watch, "GAME_POLL_SEC", 0.05)
-    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
-    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "")
+    stub_exec(monkeypatch, bun=sys.executable, ver="")
 
 
 def _stub_spec(

@@ -9194,3 +9194,21 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   就是砍掉第二种）。
 - **读数**：G3 **123 处 / 38 文件**；剩下的是 CLI 交付面 / `__main__` 形状自检 / L0 秩，不是日志。
 - **行为**：仅缺省路径的格式。全文 → `docs/nn/engineering.md` §257。
+
+## §2026-11-21-iter-exec-port（`worker/iter_rollout` 的执行面收成一个端口对象 `NodeExec`）
+
+- **背景**：§P0-8 说「全量 monkeypatch 迁移要先铺端口对象」，但一直没有样板。`iter_rollout` 的六处
+  外部接缝各是一个模块级名字，五个测试文件为此写了 42 处 `monkeypatch.setattr(iter_rollout, …)`
+  —— 其中 `_make_pool` / `_run_one_game` / `_clean_attempt` 是私有名（占 G19 额度），改实现就静默失效。
+- **决定**：`@dataclass(frozen=True) class NodeExec`（六个 `Callable` 字段）+ 模块级
+  `EXEC = NodeExec(六个真实现)`；五个调用点全走 `EXEC.x()`。测试用
+  `tests/helpers/iter_exec.py::stub_exec(monkeypatch, bun=…, ver=…, **over)`，内部
+  `dataclasses.replace(EXEC, …)` ⇒ 同一用例里多处替换**叠乘**。
+- **顺带修的缺陷**：`_clean_partial`（两参/换根两档的 partial 工厂）原先按模块名取清理本体，
+  端口化后「让清理挂住」只覆盖其中一档 ⇒ 改成 `partial(EXEC.clean_attempt, …)`（端口字段之间
+  不许互相绕过）。这条是由 `test_clean_overrun_is_machine_stall_not_in_place_retry` 变红抓出来的。
+- **被否决**：给 `run_iter_rollout` 加 `exec=` 参数（第 10 个参数，且要穿 `_run_one_game_with_retries`
+  与 `iter_run.py` —— 后者的 `Any` 预算 3/3 已满）。
+- **读数**：G19 基线 406 → **396 处 / 96 文件**（两个文件条目删空、e2e 5 → 4）；`iter_rollout.py` 967 行。
+- **行为**：无差异（五个测试文件 193 例、nn 全量 6699 passed / 3 skipped、根 `bun run check` 2856 pass）。
+  全文 → `docs/nn/engineering.md` §258。

@@ -32,6 +32,7 @@ import worker.iter_rollout as iter_rollout
 import worker.serve_pool as serve_pool
 from common import game_watch
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from tests.helpers.iter_exec import stub_exec
 from worker.serve_pool import ServePool
 
 # ------------------------------------------------------------------ 桩
@@ -939,8 +940,7 @@ def test_run_iter_rollout_goes_through_the_pool(
     `served=2/killed=1/fallback=1`。所以这里先断言**被环境杀的那一轮产物齐全**（契约现场），
     再用一轮干净的重跑钉「接线走池」。系统性回归不会因此漏网：真坏了每一轮计数都一样。
     """
-    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
-    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "9.9.9-stub")
+    stub_exec(monkeypatch, bun=sys.executable, ver="9.9.9-stub")
     count = tmp_path / "count.d"
     script = _write_stub(tmp_path, _STUB_SERVE, count=str(count), fail_seed="")
     msgs: list[str] = []
@@ -996,8 +996,7 @@ def test_zero_real_ready_keeps_the_pool_instead_of_closing_it(
     那批 worker 正在冷启动 —— 关池 = 把它们全扔掉 + 余下每一局重付一次冷启动（放大器）；
     留下则就绪一个省一次冷启动。本用例的桩「serve 模式迟迟不报就绪、一次性模式照常产局」。
     """
-    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
-    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "")
+    stub_exec(monkeypatch, bun=sys.executable, ver="")
     # 池的就绪上限调小（60s 是生产口径；本用例只钉「零就绪分支」的处置，与绝对长度无关）。
     real_make = serve_pool.make_pool
 
@@ -1033,8 +1032,7 @@ def test_concurrent_pool_games_never_hit_the_counter_race(
     一次性 ⇒ 端到端计数变成 `killed=1/fallback=1`（三局产物其实齐全，所以只是**假红**）。
     4 worker × 12 局的碰撞概率远高于端到端用例的 2×3 ⇒ 旧写法下能稳定抓住这个回归。
     """
-    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
-    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "")
+    stub_exec(monkeypatch, bun=sys.executable, ver="")
     count = tmp_path / "count.d"
     script = _write_stub(tmp_path, _STUB_SERVE, count=str(count), fail_seed="")
     msgs: list[str] = []
@@ -1055,8 +1053,7 @@ def test_run_iter_rollout_pool_failure_still_produces_the_round(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """池判失败的那一局（ERR）⇒ 回退一次性 spawn，**整轮仍然成功**（池不吞局）。"""
-    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
-    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "")
+    stub_exec(monkeypatch, bun=sys.executable, ver="")
     count = tmp_path / "count.d"
     script = _write_stub(tmp_path, _STUB_SERVE, count=str(count), fail_seed="7")
     msgs: list[str] = []
@@ -1078,8 +1075,7 @@ def test_run_iter_rollout_env_switch_returns_to_per_game_spawn(
 ) -> None:
     """`NN_SERVE_POOL=0` ⇒ 不建池（`serve_pool` 为 None），行为回到上云前。"""
     monkeypatch.setenv(serve_pool.ENV_SWITCH, "0")
-    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
-    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "")
+    stub_exec(monkeypatch, bun=sys.executable, ver="")
     count = tmp_path / "count.d"
     script = _write_stub(tmp_path, _STUB_SERVE, count=str(count), fail_seed="")
     job_dir = tmp_path / "job"
@@ -1096,8 +1092,7 @@ def test_run_iter_rollout_mixed_scripts_never_builds_a_pool(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """同一轮里出现两个脚本（协议层会拦住，但池这边也要保守）：不建池，全部一次性。"""
-    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
-    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "")
+    stub_exec(monkeypatch, bun=sys.executable, ver="")
     a = _write_stub(tmp_path, _STUB_SERVE, count=str(tmp_path / "c"), fail_seed="",
                     name="stub_serve_a.py")
     b = _write_stub(tmp_path, _STUB_SERVE, count=str(tmp_path / "c"), fail_seed="",

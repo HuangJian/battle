@@ -47,6 +47,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import worker.iter_rollout as iter_rollout
+from tests.helpers.iter_exec import stub_exec
 from tests.helpers.stream_spec import (
     IT,
     ROTATE,
@@ -215,9 +216,8 @@ def _fake_game(trace: _Trace) -> Any:
 @pytest.fixture
 def hermetic_node(monkeypatch: pytest.MonkeyPatch) -> None:
     """节点侧「不起 bun / 不换根 / 不建池」的三处打桩（e2e 层的既有口径）。"""
-    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": "bun-stub")
-    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "stub")
-    monkeypatch.setattr(iter_rollout, "_make_pool", lambda *a, **k: None)
+    stub_exec(monkeypatch, bun="bun-stub", ver="stub")
+    stub_exec(monkeypatch, make_pool=lambda *a, **k: None)
     # 落点：一律走「回退原地」（产出住真 job 目录）——本用例要断言的就是目录里的实产。
     monkeypatch.setattr(iter_rollout.scratch, "open_scratch", lambda *a, **k: None)
 

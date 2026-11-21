@@ -29,6 +29,7 @@ if str(ROOT) not in sys.path:
 import common.scratch as scratch
 import worker.iter_rollout as iter_rollout
 from common.protocol import INIT_WEIGHTS_NAME, ProtocolError
+from tests.helpers.iter_exec import stub_exec
 from tests.remote.test_rollout_scratch import (
     _job_dir,
     _local_root,
@@ -114,7 +115,7 @@ def test_round_ctx_reuses_pick_tree_and_pool_across_batches(
         pools.append(_FakePool())
         return pools[-1]
 
-    monkeypatch.setattr(iter_rollout, "_make_pool", make_pool)
+    stub_exec(monkeypatch, make_pool=make_pool)
     job = _job_dir(tmp_path)
     rctx = RoundContext()
     msgs: list[str] = []
@@ -150,12 +151,12 @@ def test_pool_ownership_moves_to_the_ctx(tmp_path: Path, monkeypatch: pytest.Mon
     job = _job_dir(tmp_path)
 
     own = _FakePool()
-    monkeypatch.setattr(iter_rollout, "_make_pool", lambda *a, **kw: own)
+    stub_exec(monkeypatch, make_pool=lambda *a, **kw: own)
     run_iter_rollout(job, _stub_spec(tmp_path, [(0, 0)]), log=lambda _m: None)
     assert (own.started, own.closed) == (1, 1), "老调用（无 ctx）必须自建自收"
 
     shared = _FakePool()
-    monkeypatch.setattr(iter_rollout, "_make_pool", lambda *a, **kw: shared)
+    stub_exec(monkeypatch, make_pool=lambda *a, **kw: shared)
     rctx = RoundContext()
     job2 = tmp_path / "job2"
     job2.mkdir()
@@ -181,7 +182,7 @@ def test_a_failing_batch_leaves_the_pool_for_the_owner(
     _watchdog(monkeypatch)
     _only_candidate(monkeypatch, _local_root(tmp_path))
     pool = _FakePool()
-    monkeypatch.setattr(iter_rollout, "_make_pool", lambda *a, **kw: pool)
+    stub_exec(monkeypatch, make_pool=lambda *a, **kw: pool)
     job = _job_dir(tmp_path)
     # 空局（rc=0 但什么都没写）⇒ verify_shards 响亮（抛点在池建立**之后**）
     empty = tmp_path / "empty_exporter.py"
@@ -217,7 +218,7 @@ def test_pool_is_built_at_the_round_slot_width_for_topup_rounds(
         widths.append(int(workers))
         return _FakePool(width=int(workers))
 
-    monkeypatch.setattr(iter_rollout, "_make_pool", make_pool)
+    stub_exec(monkeypatch, make_pool=make_pool)
     spec = _stub_spec(tmp_path, [(0, 0)])  # 首批 1 局
     spec["workers"] = 0  # 节点自定 ⇒ 槽位 = cpu_worker_slots() = 4
     spec["volume"] = {"topup": {"max_batches": 3}}
@@ -243,7 +244,7 @@ def test_narrow_pool_is_rebuilt_to_the_round_slot(
         built.append(wide)
         return wide
 
-    monkeypatch.setattr(iter_rollout, "_make_pool", make_pool)
+    stub_exec(monkeypatch, make_pool=make_pool)
     job = _job_dir(tmp_path)
     rctx = RoundContext()
     rctx.resolved = True  # 轮级资源已解析（本例只关心池）

@@ -55,6 +55,7 @@ from common.protocol import (
     validate_result,
     validate_rollout_spec,
 )
+from tests.helpers.iter_exec import stub_exec
 from trainer.loop_steps import TrainingSteps
 from worker.iter_job import build_iter_spec
 from worker.iter_rollout import run_iter_rollout, scan_shard_dirs, verify_shards
@@ -979,8 +980,7 @@ def _stub_spec(tmp_path: Path, games: list[tuple[int, int]], **over) -> dict:
 
 
 def test_run_iter_rollout_with_stub_bun(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
-    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "9.9.9-stub")
+    stub_exec(monkeypatch, bun=sys.executable, ver="9.9.9-stub")
     spec = _stub_spec(tmp_path, [(3, 7), (4, 1)])
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -1016,8 +1016,7 @@ def test_rollout_workers_are_clamped_to_the_local_core_budget(
     为什么不能只靠 `MAX_WORKERS=256`：8~16 核节点上 200+ 并发 ⇒ 每局都被挤过 5s 硬顶 ⇒
     成批超时 → 池回退放大 → 整轮停摆。夹取只改并行度：argv/wver/data_fp 一个字不动。
     """
-    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
-    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "")
+    stub_exec(monkeypatch, bun=sys.executable, ver="")
     monkeypatch.setenv(iter_rollout.ENV_WORKERS_CAP, "2")
     msgs: list[str] = []
     job_dir = tmp_path / "job"
@@ -1053,8 +1052,7 @@ def test_auto_workers_use_the_local_core_budget(tmp_path, monkeypatch) -> None:
     MAX_WORKERS/局数 ⇒ 得 5；只有取核数基数才得 3。96⇒94 的公式本身由
     `tests/remote/test_offline_eval_wiring.py` 钉（同一个 `cpu_worker_slots`）。
     """
-    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
-    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "9.9.9-stub")
+    stub_exec(monkeypatch, bun=sys.executable, ver="9.9.9-stub")
     monkeypatch.setattr(iter_rollout, "cpu_worker_slots", lambda cores=None: 3)
     monkeypatch.delenv(iter_rollout.ENV_WORKERS_CAP, raising=False)
     # ① 发布侧（hub 必经）：白名单 argv 的 spec，0 必须原样保留（不得被归一化成 1）。
@@ -1127,8 +1125,7 @@ def test_workers_cap_reads_the_container_quota_not_the_host(monkeypatch: pytest.
 
 
 def test_run_iter_rollout_rejects_undeclared_shard(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
-    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "")
+    stub_exec(monkeypatch, bun=sys.executable, ver="")
     spec = _stub_spec(tmp_path, [(3, 7), (4, 1)])
     spec["argv"] = spec["argv"][:1]  # 声明一局，但桩会按 argv 跑——先删声明集外的
     job_dir = tmp_path / "job"
@@ -1140,8 +1137,7 @@ def test_run_iter_rollout_rejects_undeclared_shard(tmp_path: Path, monkeypatch) 
 
 
 def test_run_iter_rollout_reports_rc_failure(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
-    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "")
+    stub_exec(monkeypatch, bun=sys.executable, ver="")
     bad = tmp_path / "bad.py"
     bad.write_text("import sys\nsys.exit(3)\n", encoding="utf-8")
     spec = {
@@ -1221,8 +1217,7 @@ def _fast_watchdog(monkeypatch: pytest.MonkeyPatch) -> None:
     所以改这一份就处处生效（import 成局部名会抄出第二份绑定，patch 不到）。
     """
     monkeypatch.setattr(game_watch, "GAME_POLL_SEC", 0.05)
-    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
-    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "")
+    stub_exec(monkeypatch, bun=sys.executable, ver="")
 
 
 def test_hung_game_is_retried_then_fails_loud(tmp_path: Path, monkeypatch) -> None:
@@ -1292,7 +1287,7 @@ def test_clean_overrun_is_machine_stall_not_in_place_retry(
             return
         real_clean(jd, argv)
 
-    monkeypatch.setattr(iter_rollout, "_clean_attempt", clean)
+    stub_exec(monkeypatch, clean_attempt=clean)
     monkeypatch.setattr(game_watch, "CLEAN_CEILING_SEC", 0.1)
     games: list[list[str]] = []
     real_one = iter_rollout._run_one_game
@@ -1301,7 +1296,7 @@ def test_clean_overrun_is_machine_stall_not_in_place_retry(
         games.append(list(a[1]))
         return real_one(*a, **kw)
 
-    monkeypatch.setattr(iter_rollout, "_run_one_game", counted)
+    stub_exec(monkeypatch, run_game=counted)
     try:
         out = run_iter_rollout(job_dir, _one_game_spec(tmp_path, script), log=msgs.append)
     finally:
@@ -1835,7 +1830,7 @@ def test_a_game_stuck_in_uncancellable_io_cannot_hold_the_round_hostage(
     script = tmp_path / "ok.py"
     script.write_text(_STUB_SLOW.replace("@SECS@", "0"), encoding="utf-8")
     stub = _UncancellableStub(iter_rollout._run_one_game)
-    monkeypatch.setattr(iter_rollout, "_run_one_game", stub)
+    stub_exec(monkeypatch, run_game=stub)
 
     # 墙钟上界：只裁**替身那一次**（毫秒级）；替身之后的真跑给足 —— 否则会把「真 python 启动
     # 慢于 0.3s」误当成机器卡住，整轮在那里空转重投（判据是「超界有没有收场」，与绝对长度无关）。
@@ -2209,8 +2204,7 @@ def test_rollout_reports_every_settled_game_to_the_progress_hook(
     mod = ModuleType(progress_hook.HOOK_NAME)
     mod.__dict__["note_progress"] = note_progress
     monkeypatch.setitem(sys.modules, progress_hook.HOOK_NAME, mod)
-    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
-    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "9.9.9-stub")
+    stub_exec(monkeypatch, bun=sys.executable, ver="9.9.9-stub")
     spec = _stub_spec(tmp_path, [(3, 7), (4, 1), (5, 2)])
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -2231,8 +2225,7 @@ def test_volume_line_merges_into_the_rollout_line(tmp_path: Path, monkeypatch) -
     现场：一轮里 `流式采集：动态加采 239 局｜逐关配额 …` 自己一行，而 `kind=iter rollout done`
     那行本来就带着 `进度=239/239 games settled` —— 同一件事说两遍。
     """
-    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
-    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "")
+    stub_exec(monkeypatch, bun=sys.executable, ver="")
     msgs: list[str] = []
     job_dir = tmp_path / "job"
     job_dir.mkdir()

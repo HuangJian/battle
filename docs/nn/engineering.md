@@ -25,6 +25,37 @@
 
 ---
 
+## §258 P0-8 主例：`worker/iter_rollout` 的 42 处私有/半私有 `monkeypatch` 收进执行面端口 `NodeExec`（G19 406 → 396）（2026-11-21）
+
+§P0-8 说「全量 monkeypatch 迁移要先铺端口对象」，但一直没给出一个**可抄的样板**。本节就是样板：
+把 `iter_rollout` 碰外部世界的六处接缝（`resolve_bun` / `bun_version` / `_run_one_game` /
+`_make_pool` / `_clean_attempt` / `_clean_partial`）收进一个 frozen dataclass `NodeExec`，模块级
+只留一个公共名字 `EXEC = NodeExec(六个真实现)`；五个调用点全部改走 `EXEC.x()`。
+
+**为什么是对象而不是六个参数**：`run_iter_rollout` 已有 9 个参数，再穿 `exec=` 还得过
+`_run_one_game_with_retries`（10 参）与 `_IterRun`（`iter_run.py` 的 `Any` 预算 3/3 已满）——
+那会把「注入」变成第七种穿参风格。端口对象的好处是**替换粒度 = 整面**（`EXEC` 一个名字），
+同时按字段只覆盖关心的一项（`dataclasses.replace`），注入面与穿参面彻底解耦。
+
+**测试侧**：新增 `tests/helpers/iter_exec.py::stub_exec(monkeypatch, bun=…, ver=…, **over)`，
+内部 `replace(iter_rollout.EXEC, **fields)` ⇒ 多次调用**叠乘**（一个用例里先替换清理者、
+再包装单局运行，互不抹掉）。五个测试文件（`tests/remote/test_remote_iter.py` 等）的 42 处
+`monkeypatch.setattr(iter_rollout, …)` 全部换成 26 条 `stub_exec(...)`。
+
+**顺带被用例抓到的真缺陷**：`_clean_partial`（partial 工厂，回退档两参 / 换根档多一个
+`exec_root=`）原先把清理本体**按模块名**取（`partial(_clean_attempt, …)`）。端口化之后，
+「让清理挂住」这种注入只对 `clean_attempt` 生效、对工厂不生效 ⇒ `test_clean_overrun_is_machine
+_stall_not_in_place_retry` 立刻红（日志里没有「半截产出清不掉」）。修法是把工厂改成
+`partial(EXEC.clean_attempt, …)`：**端口字段之间不许互相绕过**，否则注入只覆盖半条路。
+
+**读数**：G19 基线由 96 文件 / 406 处收到 **96 文件 / 396 处**（`test_remote_iter` 3 → 0、
+`test_round_ctx` 6 → 0 条目删除；`e2e/test_stream_collect_e2e` 5 → 4）；`iter_rollout.py` 967 行
+（LOC 预算内）；`ruff` / `mypy` 单文件绿。**行为零差异**：五个测试文件 193 例全绿，nn 全量
+**6699 passed / 3 skipped**，根 `bun run check` **2856 pass / 16 skip / 0 fail**。
+
+**下一步（同族）**：`resolve_bun` / `bun_version` 这两个**公开名**的 patch 还剩 14 处（本仓不占
+G19 额度，但同样是「模块名即 API」）；照本节形状先铺端口，再一文件一文件收。
+
 ## §257 P0-6 收尾：BC 两条腿的缺省 `log` 也改走 `tag_logger`（G3 123 / 38 文件）（2026-11-21）
 
 §255 把 `run_iter_rollout` 的 `[iter]` 回调收进全仓出口后，同一族（**公共函数的缺省 `log` 是一个

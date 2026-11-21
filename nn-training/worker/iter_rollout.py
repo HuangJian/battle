@@ -38,6 +38,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_COMPLETED, wait
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
@@ -189,8 +190,7 @@ def bun_version(bun: str) -> str:
 
     唯一实现见 `common.proc.bun_version`（显式 UTF-8 解码的坑见其模块 docstring，
     正是本处原先注释引的 §30）。本处只钉**节点侧口径**：超时 30s、失败空串、
-    非零退出码一律当失败。1 参签名保留——测试与服池用
-    `monkeypatch.setattr(iter_rollout, "bun_version", …)` 打桩。
+    非零退出码一律当失败。1 参签名保留 —— 它经 `EXEC.bun_version` 被调用（见 `NodeExec`）。
     """
     return _bun_version(bun, timeout=30.0, fallback="", require_zero=True)
 
@@ -274,10 +274,13 @@ def _clean_partial(job_dir: Path, exec_dir: Path, argv: list[str]) -> Any:
 
     为什么这点重要：换根是新增档 ⇒ 回退档的调用形状不能变（既有用例里那些两参替身
     `def clean(jd, argv)` 就是它的守卫）。换根档才多传 `exec_root=`。
+
+    清理本体一律经 `EXEC.clean_attempt` 取（**不是**模块名）：换掉端口里的清理者 ⇒ 两条档都换，
+    否则「让清理挂住」这种注入只对其中一个档生效，用例会静默测错东西。
     """
     if Path(exec_dir) == Path(job_dir):
-        return partial(_clean_attempt, job_dir, argv)
-    return partial(_clean_attempt, job_dir, argv, exec_root=Path(exec_dir))
+        return partial(EXEC.clean_attempt, job_dir, argv)
+    return partial(EXEC.clean_attempt, job_dir, argv, exec_root=Path(exec_dir))
 
 
 def _clean_attempt(job_dir: Path, argv: list[str], *, exec_root: Path | None = None) -> None:
@@ -505,7 +508,7 @@ def _run_one_game_with_retries(
             log(game_watch.retry_line("rollout", label, attempt, last, cap))
             # 上一次可能留了半截 shard（见 _clean_attempt）——清理**有上界**（评审 P0-1）。
             cleaned, _ = call_bounded(
-                _clean_partial(real_job, exec_dir, argv),
+                EXEC.clean_partial(real_job, exec_dir, argv),
                 game_watch.CLEAN_CEILING_SEC,
                 name=f"clean-{label}",
             )
@@ -541,7 +544,7 @@ def _run_one_game_with_retries(
                 return served, attempt
         try:
             return (
-                _run_one_game(
+                EXEC.run_game(
                     bun,
                     argv,
                     exec_dir,
@@ -869,6 +872,48 @@ def _make_pool(
     return serve_pool.make_pool(bun, ts_dir, workers, log, for_script=argvs[0][0])
 
 
+
+@dataclass(frozen=True)
+class NodeExec:
+    """**执行面端口**：本腿碰外部世界的六处接缝（工具链 / 单局子进程 / 池 / 半截产出）。
+
+    为什么是一个对象（`python.refactor.md` §P0-8 的主例）：这些接缝原先各是一个模块级名字，
+    测试只能逐名 `monkeypatch.setattr(iter_rollout, "resolve_bun", …)`、`… "_make_pool"`、
+    `… "_run_one_game"` —— 一年下来这些名字变成了事实上的公开 API，而且**改实现就静默失效**
+    （桩还挂在旧名字上，用例照绿）。收成一个端口之后，「这一轮用哪个 bun / 池能不能建 /
+    单局怎么跑 / 半截产出怎么清」是**注入**：
+
+        monkeypatch.setattr(iter_rollout, "EXEC", NodeExec(resolve_bun=…, …))
+
+    `EXEC` 是**无状态**的（六个纯函数引用），所以可以安全共享、也可以整体替换；被替换的
+    只有外部边界，轮内状态仍住 `_IterRun`（§2.2 不受影响）。
+    """
+
+    #: 找 bun 可执行文件（找不到就抛 `ProtocolError`：这条腿必须有 bun）。
+    resolve_bun: Callable[..., str]
+    #: `bun --version`（失败空串，不致命）。
+    bun_version: Callable[[str], str]
+    #: 跑一局：`bun <argv...>`，返回墙钟秒（失败语义见 `_run_one_game`）。
+    run_game: Callable[..., float]
+    #: 按轮内 argv 决定建不建长驻池；建不了返回 `None`（整轮退回逐局 spawn）。
+    make_pool: Callable[..., object]
+    #: 清掉一次失败尝试的半截产出（就地重跑前必须做）。
+    clean_attempt: Callable[..., None]
+    #: `clean_attempt` 的 partial 工厂（回退档只传两参，换根档多一个 `exec_root=`）。
+    clean_partial: Callable[..., Callable[[], object]]
+
+
+#: 唯一默认端口（六个真实现按名字装进来）。测试用它当基线、只覆盖关心的那一两项。
+EXEC = NodeExec(
+    resolve_bun=resolve_bun,
+    bun_version=bun_version,
+    run_game=_run_one_game,
+    make_pool=_make_pool,
+    clean_attempt=_clean_attempt,
+    clean_partial=_clean_partial,
+)
+
+
 def _pool_width(spec: dict, workers: int, slots: int) -> int:
     """建池宽度（A2）：有补差 ⇒ **轮级槽位**；无补差 ⇒ 本批并发（逐字旧行为）。
 
@@ -895,8 +940,8 @@ def _setup_run(r: _IterRun) -> None:
     if not tsd.is_dir():
         raise ProtocolError(f"TS 代码根不存在: {tsd}（ts_code.zip 解包失败？）")
     t0 = time.time()
-    bun = resolve_bun(str(spec.get("bun") or ""))
-    ver = bun_version(bun)
+    bun = EXEC.resolve_bun(str(spec.get("bun") or ""))
+    ver = EXEC.bun_version(bun)
     # 模板 vs 声明：流式档的 argv 只是「每关一条模板」（池的准入/续号/容量预算读它），
     # 真正跑的局由调度器一局一局派（见 `next_game` 段）。非流式档两者逐字相同。
     templates: list[list[str]] = list(spec["argv"])
@@ -1148,7 +1193,7 @@ def _setup_pool(r: _IterRun) -> None:
         pool = None
     _pool_fresh = pool is None
     if _pool_fresh:
-        pool = _make_pool(bun, tsd, templates, pool_width, log)
+        pool = EXEC.make_pool(bun, tsd, templates, pool_width, log)
         rctx.pool = pool
     if _pool_fresh and pool is not None:
         ready_n = pool.start()
@@ -1213,7 +1258,7 @@ def _clean_stuck(r: _IterRun, stuck: list[int], ceiling_sec: float) -> None:
     jd, exec_jd, argvs, log = r.jd, r.exec_jd, r.argvs, r.log
     for i in stuck:
         cleaned, _ = call_bounded(
-            _clean_partial(jd, exec_jd, argvs[i]),
+            EXEC.clean_partial(jd, exec_jd, argvs[i]),
             ceiling_sec,
             name=f"clean-{_game_label(argvs[i])}",
         )
