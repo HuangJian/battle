@@ -18,7 +18,7 @@ checkpoint(RNG) / shard 发现与加载 / episode 骨架 样板。本模块把�
     ppo_intent 原内联的 checkpoint 段改为调用本实现（逐字节相同）。
 
 2026-09-26（续扫「免 torch 半边」）：**XLA 设备 / 诊断助手**（xla_device / optimizer_step /
-  xla_mark_step / _SPEED_PROBE / xla_fingerprint / xla_device_speed_probe / xla_world_size）
+  xla_mark_step / SpeedProbeCache / xla_fingerprint / xla_device_speed_probe / xla_world_size）
   也搬到 ppo/np_core——它们本就顶层零 torch（全部延迟 import），却与 torch 张量助手同住这里，
   逼得「测判据」的用例连坐 torch。这里再导出，既有调用点（engine / intent / goal / train_core）
   一行不改。

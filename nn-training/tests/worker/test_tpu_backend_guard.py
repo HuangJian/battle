@@ -35,9 +35,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from worker.ppo.np_core import (
-    _SPEED_PROBE,
     TPU_ATTR_KEYS,
+    SpeedProbeCache,
     _ensure_sympy_printing,
+    speed_probe_cache,
     tpu_backend_missing_reason,
     xla_device_speed_probe,
     xla_fingerprint,
@@ -119,11 +120,21 @@ class TestSpeedProbe:
         first = xla_device_speed_probe(dev, n=64)
         assert first is None or first > 0.0
         if first is not None:
-            assert _SPEED_PROBE[dev] == first
+            assert speed_probe_cache().cached(dev) == first
             assert xla_device_speed_probe(dev, n=64) == first, "第二次必须走缓存"
 
     def test_probe_failure_is_none_not_raise(self) -> None:
         assert xla_device_speed_probe(object(), n=64) is None
+
+    def test_cache_treats_zero_as_a_real_reading(self) -> None:
+        """`0.0` 是合法墙钟：不能被当成「没测过」而重测（旧 dict 用 `key in` 判，这里判 `is not None`）。"""
+        cache = SpeedProbeCache()
+        assert cache.cached("dev") is None
+        cache.store("dev", 0.0)
+        assert cache.cached("dev") == 0.0
+        assert len(cache) == 1
+        cache.clear_secs()
+        assert cache.cached("dev") is None
 
 
 class TestWorkerWiring:

@@ -25,6 +25,32 @@
 
 ---
 
+## §250 P0-5 存量第十三/十四处（收尾）：`np_core` 的 `_SPEED_PROBE` / `_XLA_CACHE_STATE`（2026-11-21）
+
+这是 P0-5 模块级状态清单的**最后两处**，都在免 torch 的 `worker/ppo/np_core.py`：
+
+**① `_SPEED_PROBE: dict[str, float]` → `SpeedProbeCache`**（`cached` / `store` / `clear_secs` / `__len__`）。
+设备自检的 2048² matmul 含一次 XLA 编译，按 job 跑会白付 300 次 ⇒ 同进程每设备只测一次。旧形状的
+三个写点（`if key in` / `[key]` / `[key] =`）散在 `xla_device_speed_probe` 里。读面刻意用
+**`None` 表示「没测过」**：`0.0` 是合法墙钟，不能被真值判断吞掉（旧 `key in` 语义等价，这里用
+`cached() is not None` 保住）。
+
+**② `_XLA_CACHE_STATE: dict[str, str]` → `CompileCacheState`**（`dir` 属性 / `mark_enabled` / `clear_dir`）。
+torch_xla 的硬约束：同进程重复 `initialize_cache` 会抛，所以「已初始化」必须记住。旧形状是一格 dict
+（只有 `"dir"` 一个键）——读的人猜不出还有没有别的键。**失败不记账**（不写 = 下次重试；缓存是加速
+手段，不能因一次失败把本进程永久关掉），这条写进类头。
+
+**坑（值得记）：`self._secs: dict[str, float] = {}` 会被复用账本判成结构克隆**——AST 骨架上与
+`hub/store_wire._init_wire` 的「注解空字典赋值」同形（常量/类型全被擦除），clone 17 → 18 直接红。
+改成 `dict()` 后形状不同、账本回落。这不是绕门禁：**结构克隆判据看的就是 AST 骨架**，语义等价的另一种
+字面量写法本就是合法解，注释里写清了原因。
+
+**守卫**：`tests/worker/test_tpu_backend_guard.py` +1（`0.0` 是合法读数、`clear_secs` 后重算）、
+`tests/worker/test_xla_step_diag.py` +1（只记成功；失败后 `dir` 仍为 `None`），两份各 1 条断言改成
+公开访问器（`speed_probe_cache()` / `compile_cache_state()`），不再 import 私有名。
+
+**行为差异**：无。测一次/幂等/失败返回 None/失败不抛/日志文案全未变。
+
 ## §249 P0-5 存量第十二处：`trainer/queue_local._REUSE_INDEX` + `_REUSE_SIG` → `ReuseIndex`（2026-11-21）
 
 同族课程「盘上现成局」索引是一份**目录快照**（只活一轮、不落盘、不跨轮），旧形状是两个模块级

@@ -9062,3 +9062,18 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **守卫**：新增 `tests/trainer/test_reuse_index.py` 5 条（只扫一次 + 同一份 dict / 换 wver 与换课程
   都重建且旧条目消失 / 空签名首扫 / 清场后重扫 / 唯一持有者）。行为差异：仅上述退化路径。
   详见 `docs/nn/engineering.md` §249。
+
+## §2026-11-21-np-core-state（`np_core` 的两份探针状态 → `SpeedProbeCache` / `CompileCacheState`；P0-5 清单清零）
+
+- **背景**：`worker/ppo/np_core.py` 里两份诊断状态的形状都是「模块级 dict + 裸键访问」：
+  `_SPEED_PROBE`（自检 matmul 墙钟，按设备缓存）与 `_XLA_CACHE_STATE`（一格 `"dir"`，编译缓存初始化记账）。
+- **决定**：
+  1. `SpeedProbeCache`（`cached`/`store`/`clear_secs`/`__len__`，公开访问器 `speed_probe_cache()`）；
+     `cached()` 用 `None` 表示没测过，`0.0` 仍是合法读数（旧 `key in` 语义）。
+  2. `CompileCacheState`（`dir` 属性 / `mark_enabled` / `clear_dir`，公开访问器 `compile_cache_state()`）；
+     **失败不记账** ⇒ 下次可重试，不因一次失败永久关掉缓存。
+  3. `SpeedProbeCache.__init__` 用 `dict()` 而不是 `{}`：注解空字典赋值在 AST 上与
+     `hub/store_wire._init_wire` 同形，会被复用账本记成结构克隆（实测 clone 17→18）。
+- **意义**：P0-5「模块级可变状态 → 显式对象」清单**清零（15/15）**。
+- **守卫**：`test_tpu_backend_guard` +1、`test_xla_step_diag` +1，两份用例改走公开访问器不再 import 私有名。
+  行为差异：无。详见 `docs/nn/engineering.md` §250。
