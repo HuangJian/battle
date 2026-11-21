@@ -50,6 +50,7 @@ from typing import Any, cast
 # 绑定，测试 patch 了 `game_watch` 的那一份、调用点却还在读旧绑定（两处不一致就是静默的错口径）。
 from common import game_watch, progress_hook, runtime, scratch
 from common.log_bundle import LogBundle
+from common.logutil import tag_logger
 from common.platform_utils import (
     KILL_REAP_SEC,
     call_bounded,
@@ -79,6 +80,10 @@ from common.protocol import (
 from worker import serve_pool
 from worker.iter_run import IterRun as _IterRun
 from worker.iter_run import RoundContext as RoundContext
+
+#: 本腿的日志出口（`run_iter_rollout` 的缺省 `log`）：与全仓同一条 `[HH:MM:SS] [tag] msg`
+#: 口径（`common.logutil.tag_logger`），不再是唯一一份自己拼 `[iter]`、不带时间戳的出口。
+_log = tag_logger("iter", lambda: time)
 
 #: 每局日志（诊断用；与本地 `run_rollout` 的 `w{i}/rollout.log` 同名同形）。
 ROLLOUT_LOG_NAME = "rollout.log"
@@ -1521,7 +1526,7 @@ def run_iter_rollout(
     spec: dict,
     *,
     ts_dir: str | Path | None = None,
-    log=lambda msg: print(f"[iter] {msg}", flush=True),
+    log=_log,
     ctx: RoundContext | None = None,
     it: int = 0,
     next_game: Callable[[], list[str] | None] | None = None,

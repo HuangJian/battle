@@ -9152,3 +9152,17 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **被否决**：把 `_Tunnel`/`_Session` 再拆成 `Boot` + `Monitor` 两个 dataclass（状态几乎全域重叠，
   等于把一份状态抄两遍）；`_supervise` 返回状态码由 `run` 判（`finally` 里的收线不在返回路径上）。
 - **行为**：无差异。全文 → `docs/nn/engineering.md` §254。
+
+## §2026-11-21-iter-log-shared-exit（`worker/iter_rollout` 的缺省 `[iter]` 回调用全仓日志出口）
+
+- **背景**：P0-6 收口时点名的「唯一还剩的真债」。它是**公共函数的缺省值**（不是 CLI 契约、
+  不是 L0 秩、不是 `__main__` 自检），却自己拼前缀且没有时间戳 —— 全仓最后一份这样的出口。
+- **决定**：模块级 `_log = tag_logger("iter", lambda: time)`，`run_iter_rollout` 缺省参数改
+  `log=_log`。输出从 `[iter] msg` 变成 `[HH:MM:SS] [iter] msg`（与 `remote/*` 的 4 份同厂）。
+- **被否决**：把 `log` 改成必填参数（两处 e2e / 一次性手跑都会失去缺省，公开签名收益为零）；
+  保留 lambda 但加时间戳（等于把 `stamp()` 抄成第二份，正是 P0-6 本身）。
+- **影响面**：只有不传 `log` 的调用，差异仅为多一个时间戳；两处生产调用都显式传 `log`。
+- **门禁对策**：`tests/golden/print_baseline.json` 删条目 ⇒ 125 处 / 40 文件（其余大项
+  `deliver_zip` 15 / `run_rl_cluster` 9 / `run_loop` 8 / `rl_model` 7 是契约与 CLI 报告面）；
+  新增格式判据（只钉格式不钉实现）。
+- **行为**：见上。全文 → `docs/nn/engineering.md` §255。

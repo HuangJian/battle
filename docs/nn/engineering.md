@@ -25,6 +25,31 @@
 
 ---
 
+## §255 P0-6 收口：`worker/iter_rollout` 的 `[iter]` 回调改走全仓日志出口（G3 125 / 40 文件）（2026-11-21）
+
+`run_iter_rollout` 的缺省 `log` 是 `lambda msg: print(f"[iter] {msg}", flush=True)` —— 全仓最后
+一份**自己拼前缀、且不带时间戳**的日志出口。它不在“刻意保留”名单里（那是 `deliver_zip` 的机器
+读末行 / `worker_proc` 的 L0 秩 / `run_loop` 的协议面），也不是 `__main__` 自检，而是**公共函数
+的缺省值**：任何不传 `log` 的调用（一次性排障、notebook 外的手跑）都会用上它。
+
+改法只动一行：模块级 `_log = tag_logger("iter", lambda: time)`（与 `remote/*` 的 4 份
+`_log_default` 同一个工厂），缺省参数改 `log=_log`。输出变成 `[HH:MM:SS] [iter] msg`。
+
+**为何现在才能改**：审计文档把这一项挂在「该文件 LOC 已 999/1000，迁它要先拆」上——先拆确有
+其因（`iter_run` 那一步把两个状态类搬走），现在实测 **948 → 950**，仍在 1000 线以下。
+
+**行为差异**：只影响**不传 `log`** 的调用，且只有「多一个时间戳」。两处生产调用
+（`remote/offline_greedy` 的两个 `run_iter_rollout`）都显式传 `log`，不受影响。
+
+判据 `tests/worker/test_log_diet.py::test_default_iter_log_uses_the_shared_line_format`
+（只钉格式 `\[HH:MM:SS\] \[iter\] msg`，不钉实现）。`tests/golden/print_baseline.json` 删
+`worker/iter_rollout.py` 条目 ⇒ **125 处 / 40 文件**（`deliver_zip` 15、`run_rl_cluster` 9、
+`run_loop` 8、`rl_model` 7 均仍为契约/CLI 面，不再当欠账）。
+
+**门禁**：nn 全量绿（见下）；ruff / mypy 绿。
+
+---
+
 ## §254 P0-2 存量最后一处：`remote/rollout_node.run`（249 → 162 + 50 + 80），`LONG_FUNCS_BASELINE` 清零（2026-11-21）
 
 `run` 的 249 行里其实只住了**两类不同触发条件**的东西：一次性的「装配 + 通道决策」，和

@@ -30,7 +30,6 @@
   "worker/data/weights_meta.py": 1,
   "worker/eval_replays_once.py": 1,
   "worker/gate_check.py": 6,
-  "worker/iter_rollout.py": 1,
   "worker/model_build.py": 3,
   "worker/models/core.py": 2,
   "worker/models/goal_net.py": 4,
