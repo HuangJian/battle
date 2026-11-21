@@ -33,7 +33,7 @@ if str(ROOT) not in sys.path:
 import pytest
 
 from remote.artifacts import ArtifactStore
-from remote.deliver_proc import DelivererProcess
+from remote.deliver_proc import DelivererProcess, DelivererSpec
 from remote.offline_deliver import BACKUP_GRACE_SEC, OfflineDeliverer
 from tests.helpers.http_server import serve_fast
 
@@ -228,12 +228,14 @@ def test_process_mode_submit_round_does_not_touch_the_drawer(tmp_path: Path) -> 
     old = time.time() - (BACKUP_GRACE_SEC + 60.0)
     os.utime(root / "it-001" / "weights.json", (old, old))
     dp = _ProbeProcess(
-        base_url="http://127.0.0.1:9",  # 连不上：本用例只看「有没有碰抽屉」
-        token="tok",
-        run_id="run-1",
-        artifacts_dir=root,
-        backup_root=drawer,
-        log=lambda _m: None,
+        DelivererSpec(
+            base_url="http://127.0.0.1:9",  # 连不上：本用例只看「有没有碰抽屉」
+            token="tok",
+            run_id="run-1",
+            artifacts_dir=root,
+            backup_root=drawer,
+            log=lambda _m: None,
+        )
     )
     dp.submit_round(1)
     assert _drawer_bytes(drawer) == 0, "父侧 submit_round 不许写网络盘（它跑在训练线程上）"
