@@ -207,8 +207,8 @@ def world(bc_course: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Si
     )
 
     # ---- BC 侧：真引擎，全部重活换假件 ----
-    def collect_corpus(course: Any, course_fp: str, corpus_fp: str, it: int, *a: Any, **kw: Any):
-        collected.append(int(it))
+    def collect_corpus(spec: Any):
+        collected.append(int(spec.it))
 
     def publish_bc_job(**kw: Any) -> dict:
         it = int(kw["it"])

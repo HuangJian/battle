@@ -25,6 +25,14 @@
 
 ---
 
+## §275 P0-3 第二十二刀：`bc_loop.collect_corpus` 门面收 `CollectSpec`（宽签名 87 → 86）（2026-11-21）
+
+* 门面签名 9 参 → `collect_corpus(spec: CollectSpec)`，直接复用实现层的旋钮袋
+  （不再为门面复制一份字段）；编排面名字与 monkeypatch 点不变。
+* 调用点：`BcLoop._start_round` 1 处 + `test_bc_corpus_ratio` 2 处；shape 基线
+  `trainer/bc_loop.py` 2 → 1（剩 `publish_bc_job`），全仓 87 → 86。
+* 回归：bc_corpus_ratio / bc_course / BC e2e + 形状/LOC/Any 预算 69 条全绿。
+
 ## §274 P0-3 第二十一刀（批量）：resume / lazy 语料 / 补传入口收成 spec（宽签名 89 → 87）（2026-11-21）
 
 * `worker/ppo/lazy_corpus.py::load_ppo_corpus` → `PPOCorpusSpec`；`hub/offline_ingest.py::

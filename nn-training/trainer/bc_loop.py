@@ -84,7 +84,7 @@ from trainer.bc_round_job import (
     resolve_bc_init_weights as resolve_bc_init_weights,
 )
 from worker.archive import backup_weights
-from worker.bc_collect import CollectSpec as _CollectSpec
+from worker.bc_collect import CollectSpec
 from worker.bc_collect import collect_corpus as _collect_corpus
 from worker.bc_collect import smoke_overrides as smoke_overrides
 from worker.bc_config import (
@@ -230,27 +230,13 @@ def prune_bc_data(traj: Path, it: int, keep: int = BC_DATA_KEEP) -> None:
 # ---- 语料采集 --------------------------------------------------------------
 
 
-def collect_corpus(
-    course: BcCourseConfig,
-    course_fp: str,
-    corpus_fp: str,
-    it: int,
-    data_round_dir: Path,
-    *,
-    smoke: bool,
-    cfg: dict | None,
-    jsonl_path: Path | None = None,
-    log=log,
-) -> Path:
+def collect_corpus(spec: CollectSpec) -> Path:
     """保留 `bc_loop` 编排面：实现已下沉 `worker/bc_collect.py`，此处只转发。
 
     `test_bc_ingest_split` 把 collect_corpus 钉在 bc_loop 的编排面上；实现拆分后
     用薄门面保留该契约，同时 `monkeypatch bc_loop.collect_corpus` 仍可替换整段。
     """
-    return _collect_corpus(
-        _CollectSpec(course, course_fp, corpus_fp, it, data_round_dir, smoke=smoke,
-                     cfg=cfg, jsonl_path=jsonl_path, log=log)
-    )
+    return _collect_corpus(spec)
 
 
 # ---- 任务发布 --------------------------------------------------------------
@@ -1241,15 +1227,8 @@ class BcLoop:
         rt = self.runtime
         data_round_dir = rt.data_root / ("smoke" if rt.smoke else f"it{it}")
         collected = collect_corpus(
-            rt.course,
-            rt.course_fp,
-            rt.corpus_fp,
-            it,
-            data_round_dir,
-            smoke=rt.smoke,
-            cfg=rt.cfg,
-            jsonl_path=rt.jsonl_path,
-            log=self.log,
+            CollectSpec(rt.course, rt.course_fp, rt.corpus_fp, it, data_round_dir,
+                        smoke=rt.smoke, cfg=rt.cfg, jsonl_path=rt.jsonl_path, log=self.log)
         )
         if collected is not None:
             data_round_dir = Path(collected)

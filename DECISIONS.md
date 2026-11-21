@@ -8818,6 +8818,13 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-bc-loop-collect-spec
+
+P0-3 第二十二刀：`trainer/bc_loop.py::collect_corpus` 门面（9 参）直接收
+`worker.bc_collect.CollectSpec`（与实现层同一个旋钮袋，不再拆第二份字段）。
+编排面契约（`test_bc_ingest_split` 钉的名字）与 monkeypatch 点不变；内部
+`BcLoop._start_round` 与测试 2 处调用点包对象。宽签名 **87 → 86**，`bc_loop` 2 → 1。
+
 ## §2026-11-21-resume-lazy-ingest-specs
 
 P0-3 第二十一刀（批量）：三个 9 参函数 → frozen 旋钮袋：

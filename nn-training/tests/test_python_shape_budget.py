@@ -100,7 +100,7 @@ WIDE_FUNCS_BASELINE = {
     #: `trainer/batch_lanes.py` ⇒ 本文件 3 → **2**（新家没有新增宽签名）。
     "trainer/batch_runner.py": 2,
     "trainer/bc_ingest.py": 0,
-    "trainer/bc_loop.py": 2,
+    "trainer/bc_loop.py": 1,
     "trainer/dispatch.py": 1,
     "trainer/dispatch_queue.py": 1,
     "trainer/eval_dispatch.py": 3,

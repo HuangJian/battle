@@ -254,6 +254,7 @@ def test_collect_corpus_applies_ratio_after_dispatch(
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from trainer import bc_loop
     from worker import bc_collect
+    from worker.bc_collect import CollectSpec
 
     course = _course(
         _ratio(
@@ -275,15 +276,8 @@ def test_collect_corpus_applies_ratio_after_dispatch(
     monkeypatch.setattr(bc_collect, "dispatch_bc_corpus", fake_dispatch)
     ledger = tmp_path / "log.jsonl"
     got = bc_loop.collect_corpus(
-        course,
-        "cfp",
-        "cfp",
-        1,
-        out,
-        smoke=False,
-        cfg=None,
-        jsonl_path=ledger,
-        log=lambda _m: None,
+        CollectSpec(course, "cfp", "cfp", 1, out, smoke=False, cfg=None,
+                    jsonl_path=ledger, log=lambda _m: None)
     )
     assert got == out
     assert seen and seen[0]["wins_only"] is False
@@ -332,6 +326,7 @@ def test_fixed_config_skips_dispatch_and_records_data_fp(
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from trainer import bc_loop
     from worker import bc_collect
+    from worker.bc_collect import CollectSpec
 
     root = tmp_path / "fixed"
     _v6_shard(root, "bc_s0_seed1")
@@ -350,15 +345,8 @@ def test_fixed_config_skips_dispatch_and_records_data_fp(
     )
     ledger = tmp_path / "log.jsonl"
     got = bc_loop.collect_corpus(
-        course,
-        "cfp",
-        "cfp",
-        1,
-        tmp_path / "bc-data" / "it1",
-        smoke=False,
-        cfg=None,
-        jsonl_path=ledger,
-        log=lambda _m: None,
+        CollectSpec(course, "cfp", "cfp", 1, tmp_path / "bc-data" / "it1",
+                    smoke=False, cfg=None, jsonl_path=ledger, log=lambda _m: None)
     )
     assert got == root
     event = json.loads(ledger.read_text(encoding="utf-8").splitlines()[0])

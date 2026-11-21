@@ -107,8 +107,8 @@ def hub(monkeypatch: pytest.MonkeyPatch) -> FakeHub:
 def rec(monkeypatch: pytest.MonkeyPatch) -> Recorder:
     r = Recorder()
 
-    def collect_corpus(course: Any, course_fp: str, corpus_fp: str, it: int, *a: Any, **kw: Any):
-        r.collected.append(it)
+    def collect_corpus(spec: Any):
+        r.collected.append(spec.it)
 
     def publish_bc_job(**kw: Any) -> dict:
         it = int(kw["it"])
