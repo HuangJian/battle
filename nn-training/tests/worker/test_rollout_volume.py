@@ -31,6 +31,7 @@ from worker.volume_waves import (
     STOP_WAVE_CAP,
     VOLUME_RULE_V1,
     TopUpPlan,
+    TopUpSpec,
     default_game_cap,
     initial_games,
     plan_topup,
@@ -279,7 +280,7 @@ def _plan(**kw: object) -> TopUpPlan:
         initial_g0=155,
     )
     base.update(kw)
-    return plan_topup(**base)  # type: ignore[arg-type]
+    return plan_topup(TopUpSpec(**base))  # type: ignore[arg-type]
 
 
 def test_plan_topup_shortfall_math() -> None:

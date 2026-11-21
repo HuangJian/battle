@@ -1776,7 +1776,7 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      剩下的仍是逐模块工程，照该形状先铺端口再收测试。
    * **P1-4 类型化**：`Any` 1178 处 / 181 文件（G14 冻结）；mypy 仍是非 strict。
      批量换 `object` 已实测否决（406 个红点），只能逐个数据边界换成 TypedDict / 协议。
-   * **P0-3 参数爆炸**：仍有 **102 个函数 >8 参数 / 71 文件**（2026-11-21 实测；形状门禁按文件
+   * **P0-3 参数爆炸**：仍有 **101 个函数 >8 参数 / 70 文件**（2026-11-21 实测；形状门禁按文件
      冻结）。审计的「124」是 2026-11-19 上游合入前的读数，合入带进了新的宽签名）。
      认领族已收成 `LeaseSpec`（§261，122 → 117）；下载三兄弟 + 补传三装配已收成
      `BlobAsk` / `WeightsAsk` / `CodeAsk` / `RoundBody` / `ResultBody` / `ArtifactBody`
@@ -1784,7 +1784,7 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      `deliver_proc` 的构造器与工厂 → `DelivererSpec` / `FactorySpec`（§264，108 → 106）；
      `http._request` / `_get_with_retry` → `WireRequest` / `WireGet`（§265，106 → 104，
      传输族收口）；`worker/events` 的两个落账入口 → `KickstartBurn` / `GateVerdict`
-     （§266，104 → 102）。下一批按形状门禁基线挑下一个模块。
+     （§266，104 → 102）；`plan_topup` → `TopUpSpec`（§267，102 → 101）。下一批按形状门禁基线挑下一个模块。
      ~~最大的 `worker/eval_arbiter.EvalRound.__init__` 41 参~~ **已收（2026-11-20，§229）**：
      40 个关键字参数 → `RoundSpec`（装配点 `trainer/eval_dispatch._round_spec`），
      顺手把同文件的 `EvalRound.settle_task`（11 参，含死参 `wall_sec`）→ `SettleOutcome`

@@ -25,6 +25,15 @@
 
 ---
 
+## §267 P0-3 第十四刀：`plan_topup` 收成 `TopUpSpec`（宽签名 102 → 101）（2026-11-21）
+
+* `worker/volume_waves.py::plan_topup` 的 9 个关键字参数 → frozen `TopUpSpec`（非 kw_only：
+  字段顺序与缺省值逐字沿用旧签名）。函数体开头一次展开，补波计划数学与 `TopUpPlan` 字段逐字未动。
+* 调用点 2 处：生产 `trainer/loop_volume._volume_topup`（延迟 import 内包对象）、
+  测试装配点 `tests/worker/test_rollout_volume._plan`（`TopUpSpec(**base)`）。
+* 形状门禁基线删除 `worker/volume_waves.py` 行（1 → 0）；`Any` 基线不动。
+* 回归 81 例（rollout_volume + volume_quota + 形状预算），mypy 改动文件无错。
+
 ## §266 P0-3 第十三刀：events 落账入口收成 spec（宽签名 104 → 102）（2026-11-21）
 
 * `write_kickstart_burn` / `write_gate_verdict` 的 9 个参数 → `KickstartBurn` / `GateVerdict`

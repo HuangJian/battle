@@ -570,6 +570,7 @@ class TrainingVolume:
         from worker.volume_waves import (
             DEFAULT_MAX_WAVES,
             WAVE_PHASE,
+            TopUpSpec,
             plan_topup,
             wave_pairs,
             wave_round_key,
@@ -607,15 +608,17 @@ class TrainingVolume:
             games_done = {s: totals.get(s, (0, 0))[0] for s in stages}
             collected_total = sum(collected.values())
             plan = plan_topup(
-                stages=stages,
-                collected=collected,
-                target_transitions=target,
-                est_samples_per_game=est,
-                waves_done=self._volume_waves,
-                games_done=games_done,
-                max_waves=DEFAULT_MAX_WAVES,
-                max_games_per_stage=cap,
-                initial_g0=self._volume_g0,
+                TopUpSpec(
+                    stages=stages,
+                    collected=collected,
+                    target_transitions=target,
+                    est_samples_per_game=est,
+                    waves_done=self._volume_waves,
+                    games_done=games_done,
+                    max_waves=DEFAULT_MAX_WAVES,
+                    max_games_per_stage=cap,
+                    initial_g0=self._volume_g0,
+                )
             )
             if not plan.games_by_stage:
                 met = [s for s, why in plan.stopped.items() if why == "quota_met"]

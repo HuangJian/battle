@@ -232,18 +232,22 @@ class TopUpPlan(GamesByStageMixin):
     capped: bool = False
 
 
-def plan_topup(
-    *,
-    stages: Sequence[int],
-    collected: Mapping[int, int],
-    target_transitions: int,
-    est_samples_per_game: int,
-    waves_done: int,
-    games_done: Mapping[int, int],
-    max_waves: int = DEFAULT_MAX_WAVES,
-    max_games_per_stage: int = 0,
-    initial_g0: int = 0,
-) -> TopUpPlan:
+@dataclass(frozen=True)
+class TopUpSpec:
+    """`plan_topup` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    stages: Sequence[int]
+    collected: Mapping[int, int]
+    target_transitions: int
+    est_samples_per_game: int
+    waves_done: int
+    games_done: Mapping[int, int]
+    max_waves: int = DEFAULT_MAX_WAVES
+    max_games_per_stage: int = 0
+    initial_g0: int = 0
+
+
+def plan_topup(spec: TopUpSpec) -> TopUpPlan:
     """按各关已结算 transitions 决定下一波（§2.2.3/2.2.4）。
 
     逐关独立：`shortfall = target_per_stage - collected`；已达标的关进 `stopped`
@@ -252,6 +256,16 @@ def plan_topup(
     → 用 `default_game_cap(initial_g0)`。
     `collected`（账本 nSamples 之和）与 `est_samples_per_game` 同单位（见文件头量纲节）。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    stages = spec.stages
+    collected = spec.collected
+    target_transitions = spec.target_transitions
+    est_samples_per_game = spec.est_samples_per_game
+    waves_done = spec.waves_done
+    games_done = spec.games_done
+    max_waves = spec.max_waves
+    max_games_per_stage = spec.max_games_per_stage
+    initial_g0 = spec.initial_g0
     stage_list = [int(s) for s in stages]
     if not stage_list:
         raise ValueError("plan_topup 需要至少一个 stage")

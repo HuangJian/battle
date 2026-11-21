@@ -8818,6 +8818,15 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-topup-spec
+
+P0-3 第十四刀：`worker/volume_waves.py::plan_topup`（9 个关键字参数：stages / collected /
+target_transitions / est_samples_per_game / waves_done / games_done / max_waves /
+max_games_per_stage / initial_g0）→ frozen `TopUpSpec`（字段顺序与缺省值 = 旧签名）。
+函数体开头一次展开旧局部名，补波计划数学与 `TopUpPlan` 字段逐字未动。生产唯一调用点
+`trainer/loop_volume._volume_topup` 与测试装配点 `tests/worker/test_rollout_volume._plan`
+包对象；`worker/volume_waves.py` 的宽签名 1 → 0，全仓 102 → 101（71 → 70 文件）。
+
 ## §2026-11-21-events-specs
 
 P0-3 第十三刀：`worker/events.py` 的两个落账入口 `write_kickstart_burn` / `write_gate_verdict`

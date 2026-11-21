@@ -140,7 +140,8 @@ WIDE_FUNCS_BASELINE = {
     "worker/resume.py": 2,
     "worker/train/intent_probe.py": 1,
     "worker/volume_quota.py": 1,
-    "worker/volume_waves.py": 1,
+    # 2026-11-21：`plan_topup` 的 9 个关键字参数收成 `TopUpSpec`
+    # ⇒ 本文件宽签名归零，条目删除。
 }
 
 #: `common/` 里**允许**在运行期被改写的模块级容器（P0-5 的存量，拆完即删）。
