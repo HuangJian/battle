@@ -25,6 +25,44 @@
 
 ---
 
+## §254 P0-2 存量最后一处：`remote/rollout_node.run`（249 → 162 + 50 + 80），`LONG_FUNCS_BASELINE` 清零（2026-11-21）
+
+`run` 的 249 行里其实只住了**两类不同触发条件**的东西：一次性的「装配 + 通道决策」，和
+「进程在就每 10s 一拍」的监护 while。上一轮把前者判成「要先定所有者再动」，这一轮定下来了：
+
+| 函数 | 行数 | 所有者 / 触发条件 |
+|---|---|---|
+| `run` | 162 | 装配（凭据 / bun / agent / 首注册 / 横幅）+ 三段编排 —— 只跑一遍 |
+| `_open_channel` | 50 | 通道决策（`auto`：tailscale → cloudflared → relay）；`tunnel` 是它的入参，**返回生效的 `hub_url`** |
+| `_supervise` | 80 | 监护 while（agent 死重启 / 隧道自愈重注册 / 产出摘要 / 到点收线）+ `finally` 收线；所有者 = `_Session` |
+
+**所有者**：`_Session` 本来就持有「注册 / 重启 / 隧道自愈」的状态与方法，监护循环只是它们的
+节拍器 ⇒ `_supervise(session, …)` 是这个对象的唯一驱动者，`run` 不再直接碰 `session.agent`。
+
+**三个不能靠「搬代码」解决的耦合**（都只在函数边界上过一手，无逻辑改写）：
+
+1. `_follow_relay_port` 原本是 `run` 里的闭包，靠 `nonlocal hub_url` 把「relay 实际用的端口」
+   写回注册地址。拆出去以后改成**返回值**：`_open_channel(...) -> (hub_url, next_tunnel_try)`。
+   单一真相没变（`_Session.hub_url` / 横幅 / 注销仍读同一个值），反而少了隐式写。
+2. `disk_state`（磁盘档位的告警去重）是装配阶段造的，监护循环每拍写它 ⇒ 显式当参数传，
+   不把它塞进 `_Session`（它属于 `node_report` 的告警面，不属于会话）。
+3. `finally` 里注销要用**进入时的** `hub_url`（与首注册同一地址），所以 `_supervise` 收一个
+   `hub_url` 参数而不是读 `session.hub_url` —— 后者可能在循环里被隧道自愈改过。
+
+**两条源码契约测试跟着换锚点**（不是放宽）：`test_credentials_are_read_before_tailscale_ensure`
+从 `src.index(...)` 字符串定位改成 AST 行号（读 `secret("TS_AUTHKEY")` 早于 `_open_channel(`），
+再补一条「`_open_channel` 里真的有 `_open_tailscale`」；`test_run_owns_unregister_on_exit` 的
+`try/finally` 判据指向 `_supervise`，并要求 `run` 的调用表里必须有它（否则绕过收线）。
+文本断言口径 B 保持 **1224**（先写成 `assert "_supervise" in run_calls` 会 +1，改成
+`run_calls >= {"_supervise"}` 后与 `finals` 合并成一条断言）。
+
+`LONG_FUNCS_BASELINE` 删掉最后一条 ⇒ **清零**（`remote/rollout_node.py`）。全仓 >200 行函数 0 个。
+
+**门禁**：nn `6694 passed / 3 skipped`（75s）· ruff / mypy 绿。**行为差异：无**（`run` 的语句顺序、
+日志、退出码、收线顺序逐条不变）。
+
+---
+
 ## §253 P0-2 存量第二处：`trainer/eval_dispatch._eval_admit`（248 → 21 + 176 + 47 + 33）（2026-11-21）
 
 `_eval_admit` 是「节点门 → 权重下发 → 本机兜底」三件事串在一个方法里，而它本来就有一条空行级

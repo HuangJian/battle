@@ -9133,3 +9133,22 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **被否决**：把能力位检查表驱动化（8 个 `if` → 一张表）——日志措辞必须逐字不变，本轮只做
   搬迁；表驱动留到需要加第十个能力位时再做。
 - **行为**：无差异（`test_eval_dispatch_*` 55 条绿）。全文 → `docs/nn/engineering.md` §253。
+
+## §2026-11-21-rollout-node-supervise-split（`remote/rollout_node.run` 249 行 → 162 + 50 + 80，形状基线清零）
+
+- **背景**：合并上游后形状门禁的最后一处存量。上一轮判定「拆它得先定老板」，这一轮定了：
+  `_Session` 早就是注册 / 重启 / 隧道自愈的所有者，监护 while 只是它的节拍器。
+- **决定**：按触发条件切两刀 —— 一次性装配+通道决策留 `run`；通道决策抽成
+  `_open_channel(tunnel, …) -> (hub_url, next_tunnel_try)`；监护 while + `finally` 抽成
+  `_supervise(session, …)`。语句顺序、日志、退出码、收线顺序逐条不变。
+- **三个跨边界的耦合显式化**：① `_follow_relay_port` 的 `nonlocal hub_url` 改成返回值（单一真相
+  仍是同一个值）；② `disk_state` 属 `node_report` 告警面，不当 `_Session` 字段，显式入参；
+  ③ `finally` 的注销用**进入时**的 `hub_url`（与首注册一致），不读可能被隧道自愈改过的
+  `session.hub_url`。
+- **门禁对策**：两条源码契约用例换锚点而非放宽 —— 凭据顺序从 `src.index(...)` 改 AST 行号
+  （`secret("TS_AUTHKEY")` 早于 `_open_channel(`）+「`_open_channel` 里真有 `_open_tailscale`」；
+  收线用例指向 `_supervise` 并要求 `run` 调用它。文本断言口径 B 加一先红（`assert "_x" in set`），
+  改 `set >= {...}` 并合并到同一条断言后回到 1224。
+- **被否决**：把 `_Tunnel`/`_Session` 再拆成 `Boot` + `Monitor` 两个 dataclass（状态几乎全域重叠，
+  等于把一份状态抄两遍）；`_supervise` 返回状态码由 `run` 判（`finally` 里的收线不在返回路径上）。
+- **行为**：无差异。全文 → `docs/nn/engineering.md` §254。

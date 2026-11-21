@@ -148,13 +148,34 @@ def test_cell_logs_to_a_file_too() -> None:
 def test_credentials_are_read_before_tailscale_ensure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """★ 顺序契约：`ensure()` 会注入代理 ⇒ 平台 Secrets（公网 HTTPS）必须先读完。"""
-    src = inspect.getsource(rn.run)
-    cred = src.index('secret("TS_AUTHKEY"')
-    open_ts = src.index("_open_tailscale(")
+    """★ 顺序契约：`ensure()` 会注入代理 ⇒ 平台 Secrets（公网 HTTPS）必须先读完。
+
+    AST 判定（不挂函数体措辞）：`run` 里读 `secret("TS_AUTHKEY")` 的那次调用行号必须早于
+    `_open_channel(...)`；通道 helper 再往下才 `_open_tailscale`（而 ensure 住在它里面）。
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(rn.run)))
+
+    def _first_line(match: Callable[[ast.Call], bool]) -> int | None:
+        lines = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Call) and match(n)]
+        return min(lines) if lines else None
+
+    cred = _first_line(
+        lambda c: getattr(c.func, "id", "") == "secret"
+        and bool(c.args)
+        and isinstance(c.args[0], ast.Constant)
+        and c.args[0].value == "TS_AUTHKEY"
+    )
+    open_ts = _first_line(lambda c: getattr(c.func, "id", "") == "_open_channel")
+    assert cred is not None and open_ts is not None, "run 不再读 TS_AUTHKEY / 不再开通道（守卫锚点该更新了）"
     assert cred < open_ts, (
         "凭据读取被挪到 tailscale 引导之后 —— 复现 2026-09-17 事故（代理注入后取不到 secret）"
     )
+    # 先读凭据、后开通道还不够：开通道那条路径里必须**真的有** tailscale 引导（ensure 在它内部）。
+    chan = ast.parse(textwrap.dedent(inspect.getsource(rn._open_channel)))
+    assert any(
+        isinstance(n, ast.Call) and getattr(n.func, "id", "") == "_open_tailscale"
+        for n in ast.walk(chan)
+    ), "_open_channel 里找不到 tailscale 引导"
     # ensure() 本身搬进 `_open_tailscale`（plan/rollout-tunnel-url-retry B2），
     # 顺序契约因此拆成两段：run 先读凭据，helper 里才 ensure。
     seen: list[dict] = []
@@ -236,12 +257,20 @@ def test_public_downloads_are_wrapped_in_platform_net_env() -> None:
 def test_run_owns_unregister_on_exit() -> None:
     """收线语义（F1）：`finally` 里 best-effort unregister —— hub 据此写 `unregistered_at`。
 
-    AST 判定：`run` 里存在 `try/finally`，其 `finally` 体调了 `unregister` 与 `_terminate`，
-    且 `_terminate` 的两个实参恰是 `agent` / `cfp`（子进程都要收）。
+    AST 判定：监护腿 `_supervise` 里存在 `try/finally`，其 `finally` 体调了 `unregister` 与
+    `_terminate`，且 `_terminate` 的两个实参恰是 `agent` / `cfp`（子进程都要收）；并且 `run`
+    **必须**把收线交给它（自己另起一个 while 就绕过了收线）。
     """
-    tree = ast.parse(textwrap.dedent(inspect.getsource(rn.run)))
+    run_calls = {
+        getattr(c.func, "id", "")
+        for c in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(rn.run))))
+        if isinstance(c, ast.Call)
+    }
+    tree = ast.parse(textwrap.dedent(inspect.getsource(rn._supervise)))
     finals = [n for n in ast.walk(tree) if isinstance(n, ast.Try) and n.finalbody]
-    assert finals, "run 没有 try/finally —— 会话收线（unregister + 清子进程）会漏"
+    assert finals and run_calls >= {"_supervise"}, (
+        "run 没把监护/收线交给带 try/finally 的 `_supervise` —— 会话收线（unregister + 清子进程）会漏"
+    )
     calls = [c for t in finals for stmt in t.finalbody for c in ast.walk(stmt) if isinstance(c, ast.Call)]
     names = {getattr(c.func, "id", "") for c in calls}
     assert names >= {"unregister", "_terminate"}, f"finally 里少了收线步骤：{sorted(names)}"

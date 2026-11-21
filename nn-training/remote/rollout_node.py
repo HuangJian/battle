@@ -834,6 +834,140 @@ class _Session:
                 self.log(f"重注册失败（{out['kind']}）——{int(self.backoff)}s 后重试")
 
 
+def _open_channel(
+    tunnel: _Tunnel,
+    *,
+    cfg: dict,
+    log: Callable[[str], None],
+    hub_url: str,
+    ts_authkey: str,
+    has_ts: bool,
+    forced_cf: bool,
+) -> tuple[str, float]:
+    """通道决策（`auto` 顺序：tailscale → cloudflared → relay）；返回 `(生效的 hub_url, 下次重试时刻)`。
+
+    返回值里带 `hub_url` 是因为**注册地址必须跟着通道实际用的端口走**：443 的 TLS 被中间层按 SNI
+    掐掉时 `probe_hub` 会把 relay 改到 `:2083/:2096`，注册若仍打原 `:443` 就恒 handshake 超时
+    （2026-11-19 DSW 现场「relay 就绪」与「★ 未注册」同屏的真因）。改这一个返回值 ⇒ 首注册、
+    240s 重注册、横幅、注销全部自动跟随（单一真相）。
+    """
+
+    def _follow_relay_port() -> str:
+        if tunnel.relay is not None:
+            return tunnel.relay.hub_url or hub_url
+        return hub_url
+
+    if tunnel.link == LINK_RELAY:
+        tunnel.open_relay("通道决策=relay")
+        hub_url = _follow_relay_port()
+    if tunnel.link == LINK_TAILSCALE:
+        tunnel.url, ok = _open_tailscale(cfg, ts_authkey, tunnel.port, log)
+        if not ok:
+            log("—— 回落 cloudflared")
+            tunnel.link = LINK_CLOUDFLARED
+    if tunnel.link != LINK_TAILSCALE and tunnel.link != LINK_RELAY:
+        tunnel.open_cloudflared("通道决策=cloudflared")
+    if not tunnel.url and not forced_cf and tunnel.link != LINK_RELAY and has_ts:
+        log("cloudflared 未就绪 —— 回落 tailscale")
+        tunnel.url, ok = _open_tailscale(cfg, ts_authkey, tunnel.port, log)
+        if ok:
+            tunnel.link = LINK_TAILSCALE
+    elif not tunnel.url and forced_cf:
+        log("强制通道=cloudflared，跳过 tailscale/relay 回落")
+    elif not tunnel.url and tunnel.link != LINK_RELAY and not has_ts:
+        log("无 ts_authkey ⇒ 本会话无法回落 tailscale")
+    # ── relay 回落（`auto` 的最后一档，2026-11-18）────────────────────────
+    # 真机（ModelScope）：`api.trycloudflare.com:443` 与边缘 7844 都不通 ⇒ cloudflared 16s 后
+    # rc=1，三次阶梯全败。这时**唯一**还能工作的就是「节点主动会合」：只要它连得上 hub 的
+    # 公网地址，就能被派活。显式 `CFG.link=cloudflared` 不回落（明确的意图不该被改写）。
+    if not tunnel.url and not forced_cf and tunnel.link != LINK_RELAY:
+        tunnel.open_relay("隧道不可用（本机建不出 quick tunnel）")
+        hub_url = _follow_relay_port()
+    return hub_url, (time.time() + TUNNEL_RETRY_SEC if not tunnel.url else 0.0)
+
+
+def _supervise(
+    session: _Session,
+    *,
+    cfg: dict,
+    log: Callable[[str], None],
+    hub_url: str,
+    ping_base_ms: int,
+    disk_state: dict,
+) -> None:
+    """监护循环：agent 死重启 / 隧道换名重注册 / 产出摘要 / 会话到点收线；退出时注销并收子进程。
+
+    注销用**进入时的** `hub_url`（与首注册同一个地址）；隧道与 agent 的收尾都在 `finally` 里 ——
+    中途抛异常也不留孤儿 `bun` / `cloudflared`。
+    """
+    tunnel = session.tunnel
+    port, auth = session.port, session.auth
+    agent_log = session.agent_log
+    deadline = time.time() + max(0.0, float(cfg.get("max_session_hours") or 0)) * 3600
+    restart_limit = int(cfg.get("restart_limit") or 5)
+    restarts, tick, miss = 0, 0, 0
+    # 「近 30 分钟产出」摘要：按**墙钟**而不是 tick 计数（sleep 漂移不会把 10 分钟变成 11 分钟）
+    next_output_at = time.time() + OUTPUT_STATUS_EVERY_SEC
+    try:
+        while True:
+            if time.time() > deadline:
+                log("会话上限到点 —— 收线")
+                break
+            dead, why = False, ""
+            if session.agent.poll() is not None:
+                dead, why = True, f"rc={session.agent.returncode}"
+            else:
+                tick += 1
+                if tick % 6 == 0:
+                    _t_probe = time.time()
+                    _probe = _ping(port, auth)
+                    _probe_ms = max(1, int((time.time() - _t_probe) * 1000))
+                    if _probe is None:
+                        miss += 1
+                        if miss >= 3:
+                            dead, why = True, "HTTP 探活连续 3 次失败"
+                    else:
+                        miss = 0
+                        # 磁盘档位切换即时行 + 超额认购监控（都复用这一拍 ping，零额外请求）。
+                        node_report.monitor_tick(_probe, _probe_ms, ping_base_ms, disk_state, log)
+            if dead:
+                planned = session.agent.returncode == AGENT_RESTART_EXIT_CODE
+                if planned:
+                    # 远控 /v1/restart：agent 已 pull 完并按受监护模式退出。重新拉起即加载新代码；
+                    # 这是计划内重启，不能吃崩溃预算（否则几次正常升级就把节点停了）。
+                    log("agent 按远控重启请求退出（受监护）—— 重新拉起加载新代码")
+                else:
+                    if restarts >= restart_limit:
+                        log(f"agent 已重启 {restarts} 次仍不健康 —— 停止（看 {agent_log}）")
+                        break
+                    restarts += 1
+                    log(f"agent 判定死亡（{why}）—— 第 {restarts} 次重启")
+                session.restart_agent()
+                miss = 0
+            now = time.time()
+            session.check_tunnel(now)
+            session.maybe_register(now)
+            # 产出摘要（每 10 分钟一行）：先于 sleep 判定，保证第一行不会因重启/重注册被推迟。
+            # 取不到就如实说不可知（不等于「没产出」）——观测面坏不得让监护循环抛异常。
+            if time.time() >= next_output_at:
+                emit_output_summary(port, session.auth, log)
+                if session.tunnel.relay is not None:
+                    log(session.tunnel.relay.stats_line())
+                next_output_at = time.time() + OUTPUT_STATUS_EVERY_SEC
+            time.sleep(10)
+    except KeyboardInterrupt:
+        log("收到中断")
+    finally:
+        agent, cfp = session.agent, tunnel.cfp
+        if session.hub_configured and session.reg_state["url"]:
+            out = unregister(urllib.request.urlopen, hub_url, session.hub_token, session.node_id, log)
+            log(f"unregister id={session.node_id}: {'ok' if out['ok'] else out['error']}")
+        if tunnel.relay is not None:
+            tunnel.relay.stop()
+        _terminate(agent)
+        _terminate(cfp)
+
+
 def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]) -> int:
     """采样节点主流程。返回进程退出码（0 = 正常收线）。
 
@@ -908,46 +1042,15 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
         else None
     )
     tunnel = _Tunnel(cfg=cfg, log=log, port=port, cf_log=cf_log, link=link, relay=relay)
-
-    def _follow_relay_port() -> None:
-        """注册地址跟着**通道实际用的那个端口**走。
-
-        443 的 TLS 被中间层按 SNI 掐掉时，`probe_hub` 判 `port-blocked` 并当场把通道改到
-        `:2083/:2096`；注册若仍打 `CFG.hub_url` 的 `:443` 就恒 handshake 超时（2026-11-19
-        DSW 现场「relay 就绪」与「★ 未注册」同屏的真因）。改这一个变量 ⇒ 首注册、240s
-        重注册、横幅、注销全部自动跟随（单一真相）。
-        """
-        nonlocal hub_url
-        if tunnel.relay is not None:
-            hub_url = tunnel.relay.hub_url or hub_url
-
-    if tunnel.link == LINK_RELAY:
-        tunnel.open_relay("通道决策=relay")
-        _follow_relay_port()
-    if tunnel.link == LINK_TAILSCALE:
-        tunnel.url, ok = _open_tailscale(cfg, ts_authkey, port, log)
-        if not ok:
-            log("—— 回落 cloudflared")
-            tunnel.link = LINK_CLOUDFLARED
-    if tunnel.link != LINK_TAILSCALE and tunnel.link != LINK_RELAY:
-        tunnel.open_cloudflared("通道决策=cloudflared")
-    if not tunnel.url and not forced_cf and tunnel.link != LINK_RELAY and has_ts:
-        log("cloudflared 未就绪 —— 回落 tailscale")
-        tunnel.url, ok = _open_tailscale(cfg, ts_authkey, port, log)
-        if ok:
-            tunnel.link = LINK_TAILSCALE
-    elif not tunnel.url and forced_cf:
-        log("强制通道=cloudflared，跳过 tailscale/relay 回落")
-    elif not tunnel.url and tunnel.link != LINK_RELAY and not has_ts:
-        log("无 ts_authkey ⇒ 本会话无法回落 tailscale")
-    # ── relay 回落（`auto` 的最后一档，2026-11-18）────────────────────────
-    # 真机（ModelScope）：`api.trycloudflare.com:443` 与边缘 7844 都不通 ⇒ cloudflared 16s 后
-    # rc=1，三次阶梯全败。这时**唯一**还能工作的就是「节点主动会合」：只要它连得上 hub 的
-    # 公网地址，就能被派活。显式 `CFG.link=cloudflared` 不回落（明确的意图不该被改写）。
-    if not tunnel.url and not forced_cf and tunnel.link != LINK_RELAY:
-        tunnel.open_relay("隧道不可用（本机建不出 quick tunnel）")
-        _follow_relay_port()
-    next_tunnel_try = time.time() + TUNNEL_RETRY_SEC if not tunnel.url else 0.0
+    hub_url, next_tunnel_try = _open_channel(
+        tunnel,
+        cfg=cfg,
+        log=log,
+        hub_url=hub_url,
+        ts_authkey=ts_authkey,
+        has_ts=has_ts,
+        forced_cf=forced_cf,
+    )
 
     # ── 4. sampler-agent ─────────────────────────────────────────────────
     entry = _agent_entry(code_dir)
@@ -1016,70 +1119,14 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
     disk_state: dict = {"level": None, "rejecting": False, "warned_at": 0.0}
     log(node_report.workers_selfcheck_line(workers, slot_note, ping_base_ms))
 
-    # ── 7. 监护：agent 死重启 / 隧道换名重注册 / 会话到点收线 ─────────────
-    deadline = time.time() + max(0.0, float(cfg.get("max_session_hours") or 0)) * 3600
-    restart_limit = int(cfg.get("restart_limit") or 5)
-    restarts, tick, miss = 0, 0, 0
-    # 「近 30 分钟产出」摘要：按**墙钟**而不是 tick 计数（sleep 漂移不会把 10 分钟变成 11 分钟）
-    next_output_at = time.time() + OUTPUT_STATUS_EVERY_SEC
-    try:
-        while True:
-            if time.time() > deadline:
-                log("会话上限到点 —— 收线")
-                break
-            dead, why = False, ""
-            if session.agent.poll() is not None:
-                dead, why = True, f"rc={session.agent.returncode}"
-            else:
-                tick += 1
-                if tick % 6 == 0:
-                    _t_probe = time.time()
-                    _probe = _ping(port, auth)
-                    _probe_ms = max(1, int((time.time() - _t_probe) * 1000))
-                    if _probe is None:
-                        miss += 1
-                        if miss >= 3:
-                            dead, why = True, "HTTP 探活连续 3 次失败"
-                    else:
-                        miss = 0
-                        # 磁盘档位切换即时行 + 超额认购监控（都复用这一拍 ping，零额外请求）。
-                        node_report.monitor_tick(_probe, _probe_ms, ping_base_ms, disk_state, log)
-            if dead:
-                planned = session.agent.returncode == AGENT_RESTART_EXIT_CODE
-                if planned:
-                    # 远控 /v1/restart：agent 已 pull 完并按受监护模式退出。重新拉起即加载新代码；
-                    # 这是计划内重启，不能吃崩溃预算（否则几次正常升级就把节点停了）。
-                    log("agent 按远控重启请求退出（受监护）—— 重新拉起加载新代码")
-                else:
-                    if restarts >= restart_limit:
-                        log(f"agent 已重启 {restarts} 次仍不健康 —— 停止（看 {agent_log}）")
-                        break
-                    restarts += 1
-                    log(f"agent 判定死亡（{why}）—— 第 {restarts} 次重启")
-                session.restart_agent()
-                miss = 0
-            now = time.time()
-            session.check_tunnel(now)
-            session.maybe_register(now)
-            # 产出摘要（每 10 分钟一行）：先于 sleep 判定，保证第一行不会因重启/重注册被推迟。
-            # 取不到就如实说不可知（不等于「没产出」）——观测面坏不得让监护循环抛异常。
-            if time.time() >= next_output_at:
-                emit_output_summary(port, session.auth, log)
-                if session.tunnel.relay is not None:
-                    log(session.tunnel.relay.stats_line())
-                next_output_at = time.time() + OUTPUT_STATUS_EVERY_SEC
-            time.sleep(10)
-    except KeyboardInterrupt:
-        log("收到中断")
-    finally:
-        agent = session.agent
-        cfp = tunnel.cfp
-        if session.hub_configured and session.reg_state["url"]:
-            out = unregister(urllib.request.urlopen, hub_url, hub_token, node_id, log)
-            log(f"unregister id={node_id}: {'ok' if out['ok'] else out['error']}")
-        if tunnel.relay is not None:
-            tunnel.relay.stop()
-        _terminate(agent)
-        _terminate(cfp)
+    _supervise(
+        session,
+        cfg=cfg,
+        log=log,
+        hub_url=hub_url,
+        ping_base_ms=ping_base_ms,
+        disk_state=disk_state,
+    )
+
     log("采样节点结束")
     return 0

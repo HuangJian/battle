@@ -44,10 +44,10 @@ LONG_FUNCS_BASELINE: dict[str, int] = {
     # `trainer/eval_dispatch._eval_admit`（248）拆成 `_eval_admit`（21，编排）+
     # `_eval_eligible`（176，节点门那一大段能力位/fail-closed 判据）+
     # `_eval_publish_weights`（47，冻结门 + 下发 + 窗口起算）+
-    # `_eval_local_fallback`（33，兜底唯一入口）。
-    # 余下一处：采样节点主流程（`remote/rollout_node.run`，249）要按「独立所有者 +
-    # 独立触发条件」拆 —— 它是采样节点的顶层 while，得先定所有者再动。
-    "remote/rollout_node.py": 1,
+    # `_eval_local_fallback`（33，兜底唯一入口）；`remote/rollout_node.run`（249）拆成
+    # `run`（162，装配 + 三段编排）+ `_open_channel`（50，通道决策，返回生效的 hub_url）+
+    # `_supervise`（80，监护 while + 收线）。
+    # ⇒ **清零**：此后任何 >200 行函数都是新增，直接红。
 }
 
 #: 存量：包含 >8 参数函数的文件 → 个数。
