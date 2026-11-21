@@ -8884,3 +8884,19 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   §P0-5 末小节列清单，不顺手改。
 - **决定三（留给下一轮）**：是否把 G2（`L0_MUTABLE_ALLOWED`）扩到 L2/L3，需要单独决策——会引入
   15 条只许变小的基线，其中 `remote/tailscale_boot._BEST_RATE` 受零依赖约束不可动。
+
+## §2026-11-21-control-pool-object（`_CONTROL_CONNS` → `ControlPool`；三档关闭时机是本轮的正题）
+
+- **背景**：`remote/control_pool.py` 的 `_CONTROL_CONNS` 是 §237 盘点的 15 处模块级可变容器里
+  后果最重的一处 —— 连接是有 fd 的资源，而旧形状（模块 dict + 四个模块函数）答不出「谁负责关」。
+- **决定一**：`ControlPool` 持池，`request` / `drop` / `close` / `count` 挂对象；模块只留默认实例
+  `_POOL` + 四个薄包装 ⇒ `remote/http.py` 的调用点零改动。
+- **决定二（关闭时机，三档刻意不同）**：① 失败即作废并 `close()`（fd 立刻还回去，旧实现靠 refcount
+  隐式回收）；② `close()`/`reset()` 整池关闭，**只在没有在飞请求时调**（池跨线程共享，关别人的连接
+  会把正常请求变成异常）；③ 进程退出不挂 `atexit`（会打断正在退出的在飞请求，fd 交 OS）。
+  `close()` 失败静默跳过（作废本身不该变成新异常）。
+- **决定三**：生产路径不调 `reset()`；用例隔离优先自建 `ControlPool()`，走真链路的用例仍用
+  `reset()`（唯一能碰到默认池的缝，比给 `http._request` 加 `pool=` 参数便宜）。
+- **门禁教训**：类体单行注解赋值 `self._conns: dict[...] = {}` 会与 `hub/store_wire._init_wire`
+  撞结构克隆（17→18）⇒ 类型声明放类体（同 `WireMeterMixin._lock`）、`__init__` 里只赋值。
+  旧替身 `_FakeConn` 没有 `close()` ⇒ 关闭路径必须对缺 `close` 的对象宽容。

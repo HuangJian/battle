@@ -25,6 +25,51 @@
 
 ---
 
+## §238 P0-5 存量第一处：控制面连接池收成 `ControlPool`（2026-11-21）
+
+`remote/control_pool.py` 原来是模块级 `_CONTROL_CONNS: dict[...] = {}` + 四个模块函数
+（`request` / `drop` / `reset` / `conn_count`）。它是 §237 盘点出的 15 处里**后果最重**的一处：
+连接是**有 fd 的资源**，而「谁负责关」在旧形状里根本答不出来（见下）。
+
+**新形状**：`class ControlPool` 持 `_conns`，`request` / `drop` / `close` / `count` 挂在对象上；
+模块只留一个默认实例 `_POOL`，四个模块级函数变成薄包装（`remote/http.py` 的
+`request as _control_pool_request` 调用点**零改动**）。
+
+**三档关闭时机（这次动真格的地方，各有用例）**：
+
+| 档 | 触发 | 动作 | 线程安全考量 |
+|----|------|------|--------------|
+| 失败即作废 | `request` 里 `except` → `drop(key)` | 摘掉 + 尽力 `close()` | 坏连接只可能属于刚失败的这次请求 |
+| 整池关闭 | `close()`（对外 `reset()`，用例/热替换） | 逐条 `close()` 后清空 | **只在没有在飞请求时调**：池跨线程共享，关别人正在读的连接会把正常请求变成异常 |
+| 进程退出 | 不挂 `atexit` | OS 回收 fd | `atexit` 里关跨线程连接会打断正在退出的在飞请求 |
+
+旧实现 `drop`/`reset` 只从 dict 里摘（或 `clear()`），fd 靠 `pop` 之后的 refcount 隐式回收——
+**等价但不可见**；`_close_quietly` 让「作废 = 真的关上」显式，且对没有 `close()` 的对象
+（用例替身）静默跳过。`close()` 的失败**只捕 `OSError`**（半关/已断的 socket 只有这一种），
+不是宽泛 `except Exception`：`test_broad_except_budget` 按文件记账（本文件基线 1），
+而这里确实只有 OSError 是可预期的。
+
+**用例隔离**：`ControlPool()` 可以自建（`test_pools_are_independent` 钉两个池互不相见）。
+走真链路（`http._request` 内部那个默认池）的用例仍要 `reset()`，这是唯一能碰到默认池的缝，
+保留它比给 `http._request` 加 `pool=` 参数便宜。
+
+**两个门禁逼出来的细节**（都记在这里，省下一次同样的尝试）：
+
+1. 类体写 `self._conns: dict[PoolKey, Any] = {}` 会与 `hub/store_wire._init_wire`
+   （同形状的单行注解赋值）撞成结构克隆 17 → 18。改成「类型声明在类体（与 `WireMeterMixin`
+   的 `_lock: Lock` 同规）+ `__init__` 里 `self._conns = {}`」后消失：`AnnAssign` 与
+   `Assign` 是不同节点。
+2. 旧用例的替身连接**没有** `close()`（能过是因为旧实现从不调它）。新的关闭路径必须对
+   `getattr(conn, "close", None) is None` 宽容，否则一半既有用例会以 `AttributeError` 红。
+3. 关闭路径第一版写 `except Exception` ⇒ `test_broad_except_budget` 当场报「本文件 2 处，基线 1」。
+   收窄成 `except OSError` 后归零新增——这也是那条门禁想要的答案，不是记一笔基线。
+
+**行为差异**：只有一处 —— 失败/重置时多一次 `close()` 调用（旧实现由 refcount 做同一件事）。
+重试次数、池键、代理判据、异常上抛语义逐字未变（`tests/remote/test_control_pool.py` 18 条全绿）。
+
+**守卫**：`tests/remote/test_control_pool.py` 新增 4 条 —— 池实例隔离 / 模块入口只碰默认池 /
+`drop` 真的关连接 / `close` 关全部且优待没有 `close` 的替身。
+
 ## §237 P0-5 结账：`hub/http_face` 早已是 `HubState`，`common/**` 之外另有一份存量清单（2026-11-20）
 
 **这一轮没有改代码**。要求是「把 `hub/http_face` 的三个类属性搬进显式对象」——它们 2026-11-19
