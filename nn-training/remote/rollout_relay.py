@@ -38,7 +38,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from typing import Any, TypedDict, cast
+from typing import Any, Protocol, TypedDict, cast
 
 from common import http_pool, net_http
 
@@ -813,7 +813,9 @@ class RelayLink:
             t = threading.Thread(target=self._worker, name=f"relay-{i}", daemon=True)
             t.start()
             self._threads.append(t)
-        _LIVE_LINKS.append(self)
+        # 走 `live_links()` 这个**公开读面**而不是直接摸 `_LIVE`：用例要隔离时替换的是公开入口
+        # （`tests/test_monkeypatch_targets_budget.py` 的口径：别打私有名）。
+        live_links().add(self)
 
     def stop(self, timeout: float = 5.0) -> None:
         """叫停全部轮询线程；`timeout` 是**整体**上限，不是每条线程一份。
@@ -826,8 +828,7 @@ class RelayLink:
         for t in self._threads:
             t.join(timeout=max(0.0, deadline - time.time()))
         self._threads.clear()
-        if self in _LIVE_LINKS:
-            _LIVE_LINKS.remove(self)
+        live_links().discard(self)
 
     def alive(self) -> bool:
         """至少一个轮询线程还活着（全停 = 通道已死，supervisor 据此重建）。"""
@@ -1080,11 +1081,68 @@ class RelayLink:
             self._counters[name] = int(self._counters.get(name, 0)) + 1
 
 
-#: 本进程里**起过**的链接（`start()` 进、`stop()` 出）。cell 重跑时必须先清场：上一次若被
-#: 第二个 Ctrl-C 打在 `finally` 上，`stop()` 就没跑完，轮询线程作为 daemon 继续替同一个 node
-#: 干活 —— 两份日志混流、任务被旧代码吃掉一半。daemon 线程**只能在同进程内**收，够不着它
-#: 就只能靠这张表；跨进程那半在 `common.node_report.reclaim_node_id`。
-_LIVE_LINKS: list[RelayLink] = []
+class _LiveLink(Protocol):
+    """登记表需要的那两个方法（`RelayLink` 满足它；用例的替身也只需长成这样）。"""
+
+    def alive(self) -> bool: ...
+
+    def stop(self, timeout: float = 5.0) -> None: ...
+
+
+class LiveLinks:
+    """本进程里**活着的** relay 链接登记：`start()` 进、`stop()` 出（P0-5，2026-11-21）。
+
+    cell 重跑时必须先清场：上一次若被第二个 Ctrl-C 打在 `finally` 上，`stop()` 就没跑完，
+    轮询线程作为 daemon 继续替同一个 node 干活 —— 两份日志混流、任务被旧代码吃掉一半。
+    daemon 线程**只能在同进程内**收，够不着它就只能靠这份登记；跨进程那半在
+    `common.node_report.reclaim_node_id`。
+
+    为什么是个对象（而不是模块级 `list` + 就地 `append`/`remove`）：
+
+    * **写点封闭**：进出都只有 `add` / `discard` 两个口，`stop()` 自己注销是显式的一句；
+    * **双重 `stop()` 不再是隐患**：旧写法 `if self in _LIVE_LINKS: remove` 在两条线程同时
+      收同一链接时会 `ValueError`（检查与删除之间被抢先），`discard` 语义天然幂等；
+    * **可隔离**：用例直接 `LiveLinks([fake])`，不必再靠 `monkeypatch.setattr(rr, "_LIVE_LINKS", […])`
+      替换一个模块变量（那种写法连类型都对不上）。
+
+    锁只护登记本身：`stop_stale_links` 先 `snapshot()`、**在锁外**调 `link.stop()` ——
+    `stop()` 会回头 `discard(self)`，持锁调它就是非可重入锁的自锁
+    （`tests/test_lock_reentrancy.py` 的形状）。
+    """
+
+    def __init__(self, links: list[_LiveLink] | None = None) -> None:
+        self._lock = threading.Lock()
+        self._links: list[_LiveLink] = list(links or [])
+
+    def add(self, link: _LiveLink) -> None:
+        """登记一条活链接（重复登记是幂等的：同一条链只算一次）。"""
+        with self._lock:
+            if link not in self._links:
+                self._links.append(link)
+
+    def discard(self, link: _LiveLink) -> None:
+        """注销一条链接（**幂等**：没登记过或已被收走都不是错误）。"""
+        with self._lock:
+            if link in self._links:
+                self._links.remove(link)
+
+    def snapshot(self) -> list[_LiveLink]:
+        """当前登记的**副本**（遍历/叫停用它，别在锁外直接读 `_links`）。"""
+        with self._lock:
+            return list(self._links)
+
+    def count(self) -> int:
+        """登记条数（观测/用例读面）。"""
+        return len(self.snapshot())
+
+
+#: 进程级那份登记（生产唯一读者 = `stop_stale_links`）。要隔离的用例自建 `LiveLinks([...])`。
+_LIVE = LiveLinks()
+
+
+def live_links() -> LiveLinks:
+    """默认登记表（观测/用例读面；`RelayLink.start()` / `stop()` 是它唯一的写者）。"""
+    return _LIVE
 
 
 def stop_stale_links(log: Callable[[str], None], timeout: float = 1.0) -> int:
@@ -1093,7 +1151,7 @@ def stop_stale_links(log: Callable[[str], None], timeout: float = 1.0) -> int:
     只设停止位、不硬等：`timeout` 是每条链接 join 的上限 —— 线程正卡在 20s 长轮询里时，
     它会等这一拍回来才退，硬等下去只会把新通道的启动一起拖住。
     """
-    stale = [lk for lk in list(_LIVE_LINKS) if lk.alive()]
+    stale = [lk for lk in live_links().snapshot() if lk.alive()]
     for lk in stale:
         lk.stop(timeout=timeout)
     if stale:
@@ -1255,9 +1313,11 @@ __all__ = [
     "PROBE_TIMEOUT_SEC",
     "TCP_PROBE_SEC",
     "TLS_PROBE_SEC",
+    "LiveLinks",
     "RelayChannel",
     "RelayLink",
     "RelayUnreachable",
+    "live_links",
     "probe_hub",
     "stop_stale_links",
     "with_port",

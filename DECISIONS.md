@@ -8900,3 +8900,18 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **门禁教训**：类体单行注解赋值 `self._conns: dict[...] = {}` 会与 `hub/store_wire._init_wire`
   撞结构克隆（17→18）⇒ 类型声明放类体（同 `WireMeterMixin._lock`）、`__init__` 里只赋值。
   旧替身 `_FakeConn` 没有 `close()` ⇒ 关闭路径必须对缺 `close` 的对象宽容。
+
+## §2026-11-21-live-links-registry（`_LIVE_LINKS` → `LiveLinks`；锁外调 `stop()` 是硬约束）
+
+- **背景**：`remote/rollout_relay._LIVE_LINKS` 记本进程活着的 relay 轮询链（cell 重跑清场靠它）。
+  旧 `if self in _LIVE_LINKS: remove` 在并发送尾时会 `ValueError`，且用例只能替换模块变量。
+- **决定一**：`LiveLinks`（`add` / `discard` / `snapshot` / `count`，一把锁只护登记）+ 默认实例
+  `_LIVE` + `live_links()` 读面；`RelayLink.start()` 自登记、`stop()` 自注销。`discard` 幂等。
+- **决定二（锁纪律）**：`stop_stale_links` **先 `snapshot()`、在锁外调 `link.stop()`**——`stop()`
+  会回头 `discard(self)`，持锁调它就是非可重入锁自锁（`test_lock_reentrancy` 的形状）。写进 docstring。
+- **决定三**：登记项类型用 Protocol（`_LiveLink`: `alive()` / `stop()`），用例替身无需是 `RelayLink`；
+  容器仍用 `list`（`snapshot()` 保序，日志/断言都按登记顺序读）。
+- **不动**：`alive()` 判据、`stop()` 的整体超时预算、`start()`「先清场再起线程」的顺序（2026-11-18
+  DSW 事故的结论）。
+- **守卫**：登记表幂等与实例隔离 / `start()` 自登记 + `stop()` 自注销；既有 cell 重跑用例改为注入
+  `LiveLinks([stale, fresh])`，判据不变。

@@ -25,6 +25,38 @@
 
 ---
 
+## §239 P0-5 存量第二处：`_LIVE_LINKS` → `LiveLinks`（活连接的登记与自注销，2026-11-21）
+
+`remote/rollout_relay.py` 的 `_LIVE_LINKS: list[RelayLink] = []` 记的是**本进程还活着的 relay
+轮询链**：cell 重跑时 `RelayLink.start()` 先 `stop_stale_links()` 叫停上一轮遗留的 daemon
+线程（它们够不着跨进程那半，只能靠这张表）。旧形状有两个真问题，都被「换成对象」顺手修掉：
+
+1. **双重注销会抛**：`if self in _LIVE_LINKS: _LIVE_LINKS.remove(self)` 在两条线程同时收同一
+   链接时，检查与删除之间会被抢先 ⇒ `ValueError`（而且只在收尾竞态里出现，最难查的一类）。
+   `LiveLinks.discard()` 是幂等语义。
+2. **锁的可达性**：给这张表加锁时，若 `stop_stale_links` 持锁调 `link.stop()`，而 `stop()` 回头
+   `discard(self)` —— 就是非可重入锁的自锁（`tests/test_lock_reentrancy.py` 的形状）。
+   现在的写法是**先 `snapshot()`、在锁外调 `stop`**，把这条铁律写进 docstring。
+
+**形状**：`LiveLinks`（`add` / `discard` / `snapshot` / `count`，一把锁只护登记本身）持
+`list[_LiveLink]`；`_LiveLink` 是 Protocol（`alive()` + `stop()`），因此用例的替身只要长成这样
+就能入表，不必再替换一个模块变量。`RelayLink.start()` / `stop()` 与 `stop_stale_links()` 一律走
+**公开读面** `live_links()`（不直接摸 `_LIVE`）：用例替换公开入口即可隔离，`__all__` 加
+`LiveLinks` / `live_links`。
+
+**为什么用 `list` 而不是 `set`**：登记顺序即 `snapshot()` 顺序，`stop_stale_links` 的日志与
+用例断言都按登记顺序读；去重由 `add` 里的 `not in` 保证（条数是个位数，线性查找不是问题）。
+
+**守卫**：`tests/remote/test_rollout_relay.py` 新增两条 —— 登记表幂等与实例隔离（重复登记 /
+未登记就注销 / 双重注销 / snapshot 保序）· `start()` 自登记、`stop()` 自注销的接线（用
+`_QuietLink` 子类让线程一拍即退，不打桩私有 `_worker`）。既有的
+`test_start_stops_leftover_links_from_previous_cell` 从「换模块列表」改成「替换公开入口
+`live_links()`」，判据一字未动 ⇒ `tests/golden/monkeypatch_private_baseline.json` 里本文件
+**15 → 14**（本仓唯一允许的方向）。
+
+**没动的**：`RelayLink.alive()` 的判据（线程全活 + 停止位未设）、`stop()` 的**整体**超时预算、
+`start()` 里「先清场再起线程」的顺序 —— 这三条都是 2026-11-18 DSW 事故的结论，本轮只换容器。
+
 ## §238 P0-5 存量第一处：控制面连接池收成 `ControlPool`（2026-11-21）
 
 `remote/control_pool.py` 原来是模块级 `_CONTROL_CONNS: dict[...] = {}` + 四个模块函数

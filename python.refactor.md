@@ -389,7 +389,7 @@ P0-5 的判据只覆盖 `common/**`（G2：`L0_MUTABLE_ALLOWED = {}`），而「
 | 文件 | 名字 | 形态 |
 |------|------|------|
 | ~~`remote/control_pool.py:44`~~ **已修 2026-11-21（§238）** | ~~`_CONTROL_CONNS`~~ → `ControlPool`（默认实例 `_POOL`；三档关闭时机：失败即作废 `close()` / 整池 `close()` / 不挂 `atexit`） | 隧道连接池 —— 本轮唯一动手的一处（连接是有 fd 的资源，旧形状答不出「谁负责关」） |
-| `remote/rollout_relay.py:1087` | `_LIVE_LINKS` | 活着的 relay link 列表（`append`，靠自注销） |
+| ~~`remote/rollout_relay.py:1087`~~ **已修 2026-11-21（§239）** | ~~`_LIVE_LINKS`~~ → `LiveLinks`（`add`/`discard`/`snapshot`/`count`；`discard` 幂等，`stop_stale_links` 锁外调 `stop()`） | 活着的 relay link 列表 —— 旧写法双重注销会 `ValueError`，且用例只能替换模块变量 |
 | `remote/push_client.py:44` | `_CACHE_HITS` | 推送命中缓存（有 `clear()`） |
 | `remote/http.py:341` | `_POLL_WARN_AT` | 轮询告警节流表 |
 | `remote/worker.py:473` | `_ACTIVE_CODE_SHA`（`global`） | 当前代码 sha 的锁存 |
@@ -404,8 +404,8 @@ P0-5 的判据只覆盖 `common/**`（G2：`L0_MUTABLE_ALLOWED = {}`），而「
 | `worker/gate_halt.py:270` | `_WARNED` | 停机告警的 warn-once 集合 |
 | `remote/wire.py:218`、`remote/tailscale_boot.py:527` | `_BEST_RATE` / `_stale_samples`（`global`） | 测速最佳值（boot 模块那份**不可动**，零依赖约束） |
 
-**进度**：`remote/control_pool` 已收（§238，2026-11-21，连带定义了「关闭时机三档」的模板）。
-其余 14 处仍是「缓存 / 节流表 / 活连接登记」，收成对象要先回答「谁拥有、何时清、跨进程怎么复现」
+**进度**：`remote/control_pool`（§238）与 `remote/rollout_relay`（§239）已收（2026-11-21）。
+其余 13 处仍是「缓存 / 节流表 / 活连接登记」，收成对象要先回答「谁拥有、何时清、跨进程怎么复现」
 ——和 §236 同量级的一轮工作，不能顺手做。清单的作用是让下一轮**从这里开始**，而不是再回审计表里
 发现一行陈旧记录。
 
@@ -1759,8 +1759,8 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      `distribution` 的升级/重启簇搬去 `remote/node_upgrade.py` 且锁存改成 `BranchLatch`（§235）。
      L2 的两个单例也收进 `Cell`（§236），`hub/http_face` 的四个类属性 2026-11-19 已进 `HubState`。
      **P0-5 表内已无剩余**：按裁定保留的只有 `biz/reward_context._current`（每 iter 整体替换的
-     加载期上下文 + 2 条 `global`）。`common/**` 之外的 15 处同类缓存/节流表里，连接池已收进
-     `ControlPool`（§238），其余 14 处清单见 §P0-5 末小节（G2 不覆盖 L2/L3，属独立一轮）。
+     加载期上下文 + 2 条 `global`）。`common/**` 之外的 15 处同类缓存/节流表里，连接池（§238）
+     与活 link 登记（§239）已收，其余 13 处清单见 §P0-5 末小节（G2 不覆盖 L2/L3，属独立一轮）。
    * **B5 可选项**：`cfg`/`course` 的 schema（`biz/course_spec.py` 已是 pydantic；
      `load_dist_config` 仍返回裸 dict）。`P1-5` 的 notebook 侧 26 处裸 dict CFG 同理
      （读者在 cell 里，门禁扫不到）。
