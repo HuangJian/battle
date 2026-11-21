@@ -46,6 +46,7 @@ import json
 import os
 from collections import namedtuple
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -84,6 +85,27 @@ HOLD_STALE_ENV = "BCITY_HOLD_PROGRESS_STALE_SEC"
 #: "landed"}`（后两个是备份腿的两种「不发」：BC 不发 / 已结算不发，2026-10-11）——worker 侧
 #: 只关心「拿到了吗」+「没拿到是降级还是真轮不到」：前者丢副本、后者按 low 处理。
 ClaimOutcome = namedtuple("ClaimOutcome", "ok token status reason")
+
+
+@dataclass(frozen=True)
+class LeaseSpec:
+    """一次认领请求的全部旋钮（P0-3：`claim` / `claim_outcome` / `_claim_locked` 的唯一形状）。
+
+    为什么收成一个对象：这组七个关键字原先在三层（队列门面 / `_JobStore` 转发 / `LeaseBook`
+    临界区）各自摊开一遍，而**顺序并不一致** —— `_claim_locked` 把 `mode` 放在 `ttl` 之后，
+    `claim` 把它放在第 5 位 ⇒ 「抄错一格」不是笔误而是「领了别的活 / 用了别人的租约」这种
+    静默事故。字段顺序沿用 `claim` 的参数顺序（`job_id` 必填，其余带缺省），`mode=None`
+    仍按旧语义折叠成 `exclusive`（见 `_claim_locked` 的展开段）。
+    """
+
+    job_id: str
+    ttl: float = CLAIM_TTL_SEC
+    worker_id: str = ""
+    avoid_stale_holder: bool = False
+    mode: str | None = None
+    expected_epoch: int | None = None
+    role: str = ROLE_ONLINE
+    capabilities: list[str] | None = None
 
 #: 毒包熔断阈值（plan/accident.plan.md §4.1，2026-09-21）：同一 job 被**认领后零回传**满这么多次
 #: ⇒ hub 冻结它并响亮告警。为什么是「零回传」而不是「失败」：worker 报得上来的失败早就有
@@ -530,17 +552,7 @@ class LeaseBook:
         return role
 
     # ---- 租约（P3b 独占加超时：领取即设租约，心跳续租，过期回池） ----
-    def claim(
-        self,
-        job_id: str,
-        ttl: float = CLAIM_TTL_SEC,
-        worker_id: str = "",
-        avoid_stale_holder: bool = False,
-        mode: str | None = None,
-        expected_epoch: int | None = None,
-        role: str = ROLE_ONLINE,
-        capabilities: list[str] | None = None,
-    ) -> str | None:
+    def claim(self, spec: LeaseSpec) -> str | None:
         """领取（独占 = 设租约 + owner + last_heartbeat 三件套**同时置**）。
 
         B3 必杀细节：只写 `_leases` 不写 `_lease_owners` 会导致 heartbeat 恒 False，
@@ -557,47 +569,23 @@ class LeaseBook:
         `expected_epoch`（§2.3 highest 唯一性闸）：版本不匹配**不是错误**，是「有人比我快」
         的正常信号；本函数在**同一个临界区**内重新判定该 job 的优先级，仍为最高才放行。
         要区分「降级」与「领不到」用 `claim_outcome()`（同一出口，两个返回形状）。
+
+        `spec`（2026-11-21，P0-3）：认领旋钮的唯一形状 —— `claim` / `claim_outcome` /
+        `_claim_locked` 与队列层的同名转发都只收它（旧签名的顺序在层间不一致）。
         """
-        ok, token, _why = self._claim_locked(
-            job_id,
-            ttl=ttl,
-            mode=mode or CLAIM_MODE_EXCLUSIVE,
-            worker_id=worker_id,
-            avoid_stale_holder=avoid_stale_holder,
-            expected_epoch=expected_epoch,
-            role=role,
-            capabilities=capabilities,
-        )
+        ok, token, _why = self._claim_locked(spec)
         return token if ok else None
 
-    def claim_outcome(
-        self,
-        job_id: str,
-        *,
-        mode: str = CLAIM_MODE_EXCLUSIVE,
-        worker_id: str = "",
-        avoid_stale_holder: bool = False,
-        expected_epoch: int | None = None,
-        role: str = ROLE_ONLINE,
-        capabilities: list[str] | None = None,
-    ) -> ClaimOutcome:
+    def claim_outcome(self, spec: LeaseSpec) -> ClaimOutcome:
         """带原因的领取（新 HTTP 面的唯一入口）：区分「降级」与「领不到」。
 
         为什么不给 `claim()` 换返回类型：`str | None` 被既有调用方（`claim_next`、push
         派发、多份用例）依赖；而「降级 → 按 low 处理」只有新 worker 需要。两者共用同一个
         `_claim_locked` ⇒ 不会出现「两处各自校验 epoch」的第二个事实源（§3.1 末段）。
         """
-        ok, token, why = self._claim_locked(
-            job_id,
-            ttl=CLAIM_TTL_SEC,
-            mode=mode,
-            worker_id=worker_id,
-            avoid_stale_holder=avoid_stale_holder,
-            expected_epoch=expected_epoch,
-            role=role,
-            capabilities=capabilities,
-        )
+        ok, token, why = self._claim_locked(spec)
         if ok:
+            mode = spec.mode or CLAIM_MODE_EXCLUSIVE
             status = "backup" if mode == CLAIM_MODE_BACKUP else "ok"
             return ClaimOutcome(True, token, status, why)
         return ClaimOutcome(False, "", why, why)
@@ -671,24 +659,23 @@ class LeaseBook:
         """
         return self._lease_state(job_id, now) == LEASE_ALIVE
 
-    def _claim_locked(
-        self,
-        job_id: str,
-        *,
-        ttl: float,
-        mode: str,
-        worker_id: str,
-        avoid_stale_holder: bool,
-        expected_epoch: int | None,
-        role: str = ROLE_ONLINE,
-        capabilities: list[str] | None = None,
-    ) -> tuple[bool, str, str]:
+    def _claim_locked(self, spec: LeaseSpec) -> tuple[bool, str, str]:
         """claim 的**唯一**临界区（返回 `(ok, token, 原因)`）。
 
         ★ 别在别处手写租约写入：B3 的坑（只写 `_leases` 不写 `_lease_owners` ⇒ heartbeat
         恒 False ⇒ 长 job 300s 后被重派）就靠「唯一入口」防住。
         """
         import secrets
+
+        # 旧签名是 9 个同名关键字参数；这里一次性展开，函数体逐字不动（零行为变化）。
+        job_id = spec.job_id
+        ttl = spec.ttl
+        worker_id = spec.worker_id
+        avoid_stale_holder = spec.avoid_stale_holder
+        mode = spec.mode or CLAIM_MODE_EXCLUSIVE
+        expected_epoch = spec.expected_epoch
+        role = spec.role
+        capabilities = spec.capabilities
 
         if mode not in CLAIM_MODES:
             # 纵深防御：队列层 handler 已按白名单拒收，但 store 才是**唯一**的租约写入

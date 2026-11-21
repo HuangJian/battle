@@ -31,6 +31,7 @@ if str(ROOT) not in sys.path:
 
 from common.protocol import AUTH_HEADER, normalize_manifest
 from hub.server import _JobStore, make_server
+from hub.store_leases import LeaseSpec
 from remote.hub_client import cancel_job
 from tests.helpers.http_server import serve_fast
 from tests.remote.test_remote_ppo import _mini_manifest
@@ -99,7 +100,7 @@ def test_live_lease_still_wins_over_a_ledger_cancel(tmp_path: Path) -> None:
     base, store, srv, th, ledger = _boot(tmp_path)
     try:
         jid = _publish(store)
-        assert store.claim(jid, worker_id="w1")
+        assert store.claim(LeaseSpec(jid, worker_id="w1"))
         assert cancel_job(ledger, jid, reason="上一 runId x… 遗留（腿启动清理）")
         st, body = _status(base, jid)
         assert st == 200 and body["state"] == "leased", body
@@ -129,9 +130,9 @@ def test_frozen_wins_over_a_ledger_cancel(tmp_path: Path) -> None:
         jid = _publish(store)
         # 「认领后零回传」跑满阈值 ⇒ 熔断（策略层的行为在 `test_poison_freeze.py` 里钉）。
         for n in range(1, FREEZE_AFTER_RECLAIMS + 1):
-            assert store.claim(jid, worker_id=f"w{n}") is not None
+            assert store.claim(LeaseSpec(jid, worker_id=f"w{n}")) is not None
             _expire(clock)
-        assert store.claim(jid, worker_id="w-last") is None, "已冻结：不再下发"
+        assert store.claim(LeaseSpec(jid, worker_id="w-last")) is None, "已冻结：不再下发"
         assert cancel_job(ledger, jid, reason="上一 runId 77a9a90a… 遗留（腿启动清理）")
         st, body = _status(f"http://127.0.0.1:{srv.server_address[1]}", jid)
         assert st == 200 and body["state"] == "frozen", body

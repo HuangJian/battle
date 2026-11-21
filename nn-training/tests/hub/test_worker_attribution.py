@@ -38,6 +38,7 @@ from common.protocol import (
     push_worker_id_of,
 )
 from hub.server import _HubQueue, _JobStore, make_server
+from hub.store_leases import LeaseSpec
 from remote.push_dispatch import accept_result
 from tests.helpers.http_server import serve_fast
 from tests.helpers.push_worker import result_of
@@ -191,11 +192,11 @@ def test_push_leg_accept_records_push_holder(tmp_path: Path) -> None:
     with _hub(tmp_path) as (_base, hub):
         holder = push_worker_id_of("gpu1")
         lease = hub.claim(
-            JID,
+            LeaseSpec(JID,
             ttl=CLAIM_TTL_SEC,
             worker_id=holder,
             mode=CLAIM_MODE_EXCLUSIVE,
-            role=ROLE_ONLINE,
+            role=ROLE_ONLINE),
         )
         assert lease
         code, _why = accept_result(hub, JID, result_of(manifest), lease, worker=holder)
@@ -214,11 +215,11 @@ def test_missing_worker_identity_falls_back_to_lease_holder(tmp_path: Path) -> N
     manifest = _read_manifest(tmp_path)
     with _hub(tmp_path) as (_base, hub):
         lease = hub.claim(
-            JID,
+            LeaseSpec(JID,
             ttl=CLAIM_TTL_SEC,
             worker_id="cloudOld",
             mode=CLAIM_MODE_EXCLUSIVE,
-            role=ROLE_ONLINE,
+            role=ROLE_ONLINE),
         )
         assert lease
         code, _why = accept_result(hub, JID, result_of(manifest), lease, worker="")
@@ -244,11 +245,11 @@ def test_accepted_result_releases_lease_at_once(tmp_path: Path) -> None:
     with _hub(tmp_path) as (_base, hub):
         holder = push_worker_id_of("gpu1")
         lease = hub.claim(
-            JID,
+            LeaseSpec(JID,
             ttl=CLAIM_TTL_SEC,
             worker_id=holder,
             mode=CLAIM_MODE_EXCLUSIVE,
-            role=ROLE_ONLINE,
+            role=ROLE_ONLINE),
         )
         assert lease
         # 观测面（= 首页正读的那一份）：承接前它在这门课的 inflight 里，且已开算。

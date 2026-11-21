@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
 
 from hub.queue import _HubQueue
 from hub.queue_observe import PEEKED_WINDOW_SEC
+from hub.store_leases import LeaseSpec
 
 
 class _Clock:
@@ -55,7 +56,7 @@ def test_inflight_rows_expose_claim_and_compute_ages(tmp_path: Path) -> None:
     clock = _Clock()
     hub, jid = _hub_with_course(tmp_path, clock)
     _publish(hub, "c1", jid)
-    assert hub.claim(jid, worker_id="w1"), "认领没成功（夹具问题）"
+    assert hub.claim(LeaseSpec(jid, worker_id="w1")), "认领没成功（夹具问题）"
 
     clock.t += 30.0
     row = hub.queue_state()["courses"]["c1"]["inflight"][0]
@@ -75,7 +76,7 @@ def test_bc_progress_shows_up_as_progress_ago(tmp_path: Path) -> None:
     clock = _Clock()
     hub, jid = _hub_with_course(tmp_path, clock)
     _publish(hub, "c1", jid)
-    token = hub.claim(jid, worker_id="w1")
+    token = hub.claim(LeaseSpec(jid, worker_id="w1"))
     assert token
     store = hub._stores["c1"]
 

@@ -19,9 +19,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from common.protocol import CLAIM_MODE_EXCLUSIVE, CLAIM_TTL_SEC, ROLE_ONLINE
 from hub.auth import _AuthGuard
-from hub.store_leases import ClaimOutcome, LeaseBook
+from hub.store_leases import ClaimOutcome, LeaseBook, LeaseSpec
 from hub.store_ledger import Ledger
 from hub.store_offline import OfflineRoundsMixin
 from hub.store_results import ResultsMixin
@@ -309,22 +308,13 @@ class _JobStore(
         """转发到 `LeaseBook.job_corpus_fmt`（D10：claim 的能力闸与账本口径同源）。"""
         return self.leases.job_corpus_fmt(job_id)
 
-    def claim(self, job_id: str, ttl: float = CLAIM_TTL_SEC, worker_id: str = '', avoid_stale_holder: bool = False, mode: str | None = None, expected_epoch: int | None = None, role: str = ROLE_ONLINE, capabilities: list[str] | None = None) -> str | None:
+    def claim(self, spec: LeaseSpec) -> str | None:
         """转发到 `LeaseBook.claim`（B7-P2）。"""
-        return self.leases.claim(
-            job_id,
-            ttl=ttl,
-            worker_id=worker_id,
-            avoid_stale_holder=avoid_stale_holder,
-            mode=mode,
-            expected_epoch=expected_epoch,
-            role=role,
-            capabilities=capabilities,
-        )
+        return self.leases.claim(spec)
 
-    def claim_outcome(self, job_id: str, *, mode: str = CLAIM_MODE_EXCLUSIVE, worker_id: str = '', avoid_stale_holder: bool = False, expected_epoch: int | None = None, role: str = ROLE_ONLINE, capabilities: list[str] | None = None) -> ClaimOutcome:
+    def claim_outcome(self, spec: LeaseSpec) -> ClaimOutcome:
         """转发到 `LeaseBook.claim_outcome`（B7-P2）。"""
-        return self.leases.claim_outcome(job_id, mode=mode, worker_id=worker_id, avoid_stale_holder=avoid_stale_holder, expected_epoch=expected_epoch, role=role, capabilities=capabilities)
+        return self.leases.claim_outcome(spec)
 
     def _lease_state(self, job_id: str, now: float) -> str:
         """转发到 `LeaseBook._lease_state`（B7-P2）。"""
@@ -338,9 +328,9 @@ class _JobStore(
         """转发到 `LeaseBook._lease_held`（B7-P2）。"""
         return self.leases._lease_held(job_id, now)
 
-    def _claim_locked(self, job_id: str, *, ttl: float, mode: str, worker_id: str, avoid_stale_holder: bool, expected_epoch: int | None, role: str = ROLE_ONLINE) -> tuple[bool, str, str]:
+    def _claim_locked(self, spec: LeaseSpec) -> tuple[bool, str, str]:
         """转发到 `LeaseBook._claim_locked`（B7-P2）。"""
-        return self.leases._claim_locked(job_id, ttl=ttl, mode=mode, worker_id=worker_id, avoid_stale_holder=avoid_stale_holder, expected_epoch=expected_epoch, role=role)
+        return self.leases._claim_locked(spec)
 
     def abandon_job(self, job_id: str, worker_id: str = '') -> bool:
         """转发到 `LeaseBook.abandon_job`（B7-P2）。"""

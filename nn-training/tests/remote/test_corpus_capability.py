@@ -28,6 +28,7 @@ from common.protocol import (
     pick_push_worker,
 )
 from hub.server import _HubQueue, _JobStore, make_server
+from hub.store_leases import LeaseSpec
 from remote import push_dispatch
 
 TOKEN = "sekret"
@@ -72,16 +73,16 @@ def _store(tmp_path: Path, *, corpus_fmt: str = "replay", jid: str = JID) -> _Jo
 
 def test_replay_job_rejects_claimer_without_capability(tmp_path: Path) -> None:
     st = _store(tmp_path)
-    out = st.claim_outcome(JID, worker_id="old-worker")
+    out = st.claim_outcome(LeaseSpec(JID, worker_id="old-worker"))
     assert out.ok is False
     assert out.reason == "no_replay_corpus", out.reason
-    assert st.claim(JID, worker_id="old-worker") is None
+    assert st.claim(LeaseSpec(JID, worker_id="old-worker")) is None
 
 
 def test_replay_job_accepts_capable_claimer(tmp_path: Path) -> None:
     st = _store(tmp_path)
     out = st.claim_outcome(
-        JID, worker_id="new-worker", capabilities=[CAP_REPLAY_CORPUS]
+        LeaseSpec(JID, worker_id="new-worker", capabilities=[CAP_REPLAY_CORPUS])
     )
     assert out.ok is True
     assert out.token
@@ -89,7 +90,7 @@ def test_replay_job_accepts_capable_claimer(tmp_path: Path) -> None:
 
 def test_full_job_claim_unchanged_without_capability(tmp_path: Path) -> None:
     st = _store(tmp_path, corpus_fmt="full")
-    out = st.claim_outcome(JID, worker_id="old-worker")
+    out = st.claim_outcome(LeaseSpec(JID, worker_id="old-worker"))
     assert out.ok is True, "full job 不得被能力闸挡住（旧 worker 逐字节兼容）"
 
 
@@ -99,7 +100,7 @@ def test_replay_gate_uses_manifest_cache_and_invalidates_on_republish(tmp_path: 
     # 重发成 full ⇒ 缓存必须失效，旧 replay 判定不得残留。
     st.publish(JID, _manifest(JID, corpus_fmt="full"), b"PK\x03\x04fake")
     assert st.job_corpus_fmt(JID) == "full"
-    assert st.claim(JID, worker_id="old-worker") is not None
+    assert st.claim(LeaseSpec(JID, worker_id="old-worker")) is not None
 
 
 def test_claim_body_carries_capabilities_only_when_given(monkeypatch) -> None:

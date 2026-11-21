@@ -44,6 +44,7 @@ from common.protocol import (
 )
 from hub.admin import AdminRoutes
 from hub.server import _HubQueue, _JobStore, make_server
+from hub.store_leases import LeaseSpec
 from remote.push_dispatch import PushDispatcher, PushWorkers
 from remote.worker_server import WorkerServerState, make_worker_server
 from tests.helpers import net_seams
@@ -480,8 +481,9 @@ def test_bc_job_is_never_backed_up_by_the_push_leg(
     _publish(hub, "ppo-c", "p" * 16)
     tried: list[tuple[str, str]] = []
 
-    def spy(jid: str, **kw: Any) -> str | None:
-        tried.append((jid, str(kw.get("mode"))))
+    def spy(spec: LeaseSpec) -> str | None:
+        # 2026-11-21（P0-3）：认领旋钮收进 `LeaseSpec` —— 间谍改读对象字段。
+        tried.append((spec.job_id, str(spec.mode)))
         return None  # 一律不发租约：本用例只看「试没试哪一份」
 
     monkeypatch.setattr(hub, "claim", spy)
@@ -592,7 +594,7 @@ def test_dispatch_reads_its_own_state_once_per_tick(
         return PRIORITY_LOW
 
     monkeypatch.setattr(disp, "_job_priority_of", _priority_and_pop)
-    monkeypatch.setattr(hub, "claim", lambda jid, **kw: "")  # 让开 store 闸：只证快照
+    monkeypatch.setattr(hub, "claim", lambda spec: "")  # 让开 store 闸：只证快照
 
     tick = disp.tick()
     assert popped["n"] == 1, "夹具没走到「备份值不值得开」那一步"

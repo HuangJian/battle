@@ -25,6 +25,36 @@
 
 ---
 
+## §261 P0-3 第八刀：认领族 `claim` / `claim_outcome` / `_claim_locked` 收成一个 `LeaseSpec`（宽签名 122 → 117）（2026-11-21）
+
+`WIDE_FUNCS_BASELINE` 里 `hub/queue_claims.py` / `hub/queue_peer.py` / `hub/store.py` /
+`hub/store_leases.py` 四行都带同一条注释：「`capabilities` 让这四个签名跨过 8 参；下一刀应把
+(job_id, ttl, worker, mode, epoch, role, capabilities) 收成一个 `LeaseSpec`」。本刀兑现它。
+
+**形状**：`hub/store_leases.py` 新增 frozen `LeaseSpec`（`job_id` 必填，其余七个字段带缺省，
+顺序 = 旧 `claim` 的参数顺序），三个入口统一收它：
+
+* `LeaseBook.claim(spec)` / `LeaseBook.claim_outcome(spec)` / `LeaseBook._claim_locked(spec)`
+  —— `_claim_locked` 在函数头把 spec **一次展开**成旧局部名，临界区函数体逐字不动；
+* `_JobStore` 的三个转发与队列门面 `QueueClaimsMixin.claim(spec)` / `QueuePeer.claim(spec)`
+  同步收窄；`claim_job`（6 参，未越线）签名不动，内部构造 `LeaseSpec` 交给 `claim_outcome`；
+* `claim_next` 与 `remote/push_dispatch` 两个生产构造点改成 `LeaseSpec(...)`。
+
+**为什么不做可选参数兼容**：新旧两种形状并存 = 同一个临界区有两条入口，两条都会漂（本仓记过
+「两套会漂的判据」多次）。旧 `mode=None` 的语义折进 `_claim_locked` 的展开段
+（`spec.mode or exclusive`），返回值与拒因文案不变。
+
+**测试侧**：123 处 `.claim(...)` / `.claim_outcome(...)` 的实参整包进 `LeaseSpec(...)`（一次性
+codemod，AST 定位；`BatchStore.claim()` 无参，不属租约族，未动）。归属闸的枚举式守卫
+（`test_role_routing`）从一个形状扩成两种：「`role=` / `LeaseSpec(...)` / 已在手的 `spec`」都算
+把 role 送进临界区 —— 判据仍是「这一跳带没带」，不是措辞。`test_python_shape_budget` 删四行
+基线（1/1/1/2），注释改成「已收」。
+
+**读数**：宽签名实测 **122 → 117**（函数）/ **82 → 77**（文件）；`LeaseSpec` 自身不新增宽签名；
+复用账本与文本断言基线未动（新增/改写判据都不比措辞）。
+
+**验证**：聚焦 433 例 + 复用/文本/形状/分层 30 例全绿；nn 全量门禁与根 `bun run check` 见提交。
+
 ## §260 P0-8 续：训练机侧 `bun_version` 收进 `common.proc.Toolchain` 端口（裸名契约随之改；文本断言 1535→1536 / 1224→1226）（2026-11-21）
 
 §258 的余账里有一行：「`bun_version` 逐名 patch：`trainer/eval_dispatch` 2 · `trainer/rollout_dispatch` 1 ·

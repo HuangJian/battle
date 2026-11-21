@@ -58,12 +58,10 @@ WIDE_FUNCS_BASELINE = {
     "hub/offline_ingest.py": 1,
     "hub/offline_push.py": 2,
     "hub/offline_push_pack.py": 1,
-    # 2026-11-19 合入上游：claim 的能力位参数（capabilities）让这四个签名跨过 8 参；
-    # 下一刀应把 (job_id, ttl, worker, mode, epoch, role, capabilities) 收成一个 LeaseSpec。
-    "hub/queue_claims.py": 1,
-    "hub/queue_peer.py": 1,
-    "hub/store.py": 1,
-    "hub/store_leases.py": 2,
+    # 2026-11-21：认领族（`claim` / `claim_outcome` / `_claim_locked`）的
+    # (job_id, ttl, worker, mode, epoch, role, capabilities) 收成一个 `LeaseSpec`
+    # ⇒ `hub/queue_claims.py` · `hub/queue_peer.py` · `hub/store.py` ·
+    # `hub/store_leases.py` 四个文件各 1/1/1/2 条宽签名归零，条目删除。
     # P3 lazy loader 的装载参数（loader/gamma/lam/normalize/配额/mb/bundle）本就 >8。
     "worker/ppo/lazy_corpus.py": 1,
     # 上游合入的宽签名（BC 数据集）——同批登记，待收对象。

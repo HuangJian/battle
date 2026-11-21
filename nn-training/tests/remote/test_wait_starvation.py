@@ -28,6 +28,7 @@ import pytest
 
 import remote.hub_http as hub_http
 from common.protocol import JobFailedError, normalize_manifest
+from hub.store_leases import LeaseSpec
 from remote.hub_client import HubClientError, JobCancelledError, cancel_job, wait_job
 from tests.remote.test_remote_ppo import _boot_server, _mini_manifest
 
@@ -92,7 +93,7 @@ def test_wait_reports_leased_not_starvation_when_claimed(tmp_path: Path) -> None
     lines: list[str] = []
     err: list[BaseException] = []
     try:
-        assert store.claim(jid)  # worker 认领（真租约 ⇒ /status 报 leased）
+        assert store.claim(LeaseSpec(jid))  # worker 认领（真租约 ⇒ /status 报 leased）
 
         def _wait() -> None:
             try:

@@ -44,6 +44,7 @@ from common.protocol import (
     JobFailedError,
 )
 from hub.server import FREEZE_AFTER_RECLAIMS, _JobStore, make_server
+from hub.store_leases import LeaseSpec
 from remote.hub_client import wait_job
 from tests.helpers.http_server import serve_fast
 from tests.helpers.hub_poll import hub_poll
@@ -111,7 +112,7 @@ def _zero_return_cycle(store: _JobStore, clock: _Clock, worker: str) -> str | No
     这不是实现细节的巧合，而是熔断语义本身：**“第 N 次没有人回来交活”** 这件事要等到
     下一个来领的人出现（或观测面扫到）才能确认。
     """
-    tok = store.claim(JID, worker_id=worker)
+    tok = store.claim(LeaseSpec(JID, worker_id=worker))
     if tok is None:
         return None
     _expire(clock)
@@ -132,7 +133,7 @@ def test_reclaim_expiry_counts_up_to_threshold_then_freezes(tmp_path: Path) -> N
         assert store.frozen_info(JID) is None
         assert store.claimable_job_ids() == [JID], "过期即回池（回池本身不是毒包证据）"
     # 第 4 次来领的人回收掉第 3 份过期租约 ⇒ 计数达阈 ⇒ 熔断，且**不给他**
-    assert store.claim(JID, worker_id="w-last") is None
+    assert store.claim(LeaseSpec(JID, worker_id="w-last")) is None
     assert store.reclaims(JID) == FREEZE_AFTER_RECLAIMS
     info = store.frozen_info(JID)
     assert info is not None
@@ -140,7 +141,7 @@ def test_reclaim_expiry_counts_up_to_threshold_then_freezes(tmp_path: Path) -> N
     assert info["worker"] == f"w{FREEZE_AFTER_RECLAIMS}"  # 最后一次零回传的认领者
     assert store.claimable_job_ids() == []  # 已冻结：不再回池
     # 任何入口都不再下发（含直接 claim）
-    assert store.claim(JID, worker_id="w-any") is None
+    assert store.claim(LeaseSpec(JID, worker_id="w-any")) is None
     clock.t += CLAIM_TTL_SEC * 10
     assert store.claimable_job_ids() == []
 
@@ -151,7 +152,7 @@ def test_voluntary_release_is_not_a_zero_return(tmp_path: Path) -> None:
     store = _store(tmp_path, clock)
     _publish(store)
     for _ in range(FREEZE_AFTER_RECLAIMS + 2):
-        tok = store.claim(JID)
+        tok = store.claim(LeaseSpec(JID))
         assert tok
         assert store.release(JID, tok) is True
         assert store.claimable_job_ids() == [JID]
@@ -164,7 +165,7 @@ def test_resolved_job_expiry_is_not_counted(tmp_path: Path) -> None:
     clock = _Clock()
     store = _store(tmp_path, clock)
     _publish(store)
-    assert store.claim(JID)
+    assert store.claim(LeaseSpec(JID))
     assert store.store_result(JID, {"ok": True}) is True
     _expire(clock)
     assert store.reclaims(JID) == 0  # 有结果 ⇒ 不是毒包
@@ -172,7 +173,7 @@ def test_resolved_job_expiry_is_not_counted(tmp_path: Path) -> None:
 
     jid2 = "k" * 16
     _publish(store, jid2)
-    assert store.claim(jid2)
+    assert store.claim(LeaseSpec(jid2))
     assert store.store_job_failure(jid2, {"reason": "bun 未安装", "kind": "ProtocolError"}) is True
     _expire(clock)
     assert store.reclaims(jid2) == 0  # 有失败标记（已回传）⇒ 不是毒包
@@ -188,13 +189,13 @@ def test_admin_queue_observation_path_also_counts(tmp_path: Path) -> None:
     store = _store(tmp_path, clock)
     _publish(store)
     for n in range(1, FREEZE_AFTER_RECLAIMS + 1):
-        assert store.claim(JID, worker_id=f"w{n}")
+        assert store.claim(LeaseSpec(JID, worker_id=f"w{n}"))
         _expire(clock)
         assert store.lease_worker(JID) == ""  # 观测路径：回收过期租约
         assert store.reclaims(JID) == n
     assert store.frozen_info(JID) is not None
     assert store.claimable_job_ids() == []
-    assert store.claim(JID, worker_id="w-any") is None
+    assert store.claim(LeaseSpec(JID, worker_id="w-any")) is None
 
 
 def test_freeze_announcement_fires_once(tmp_path: Path) -> None:
@@ -205,7 +206,7 @@ def test_freeze_announcement_fires_once(tmp_path: Path) -> None:
     for n in range(1, FREEZE_AFTER_RECLAIMS + 1):
         assert _zero_return_cycle(store, clock, f"w{n}") is not None
         assert store.consume_freeze_announcement(JID) is None  # 尚未达阈：无告警
-    assert store.claim(JID, worker_id="w-last") is None  # 达阈
+    assert store.claim(LeaseSpec(JID, worker_id="w-last")) is None  # 达阈
     got = store.consume_freeze_announcement(JID)
     assert got is not None and got["reclaims"] == FREEZE_AFTER_RECLAIMS
     assert store.consume_freeze_announcement(JID) is None  # 只喊一次
@@ -218,14 +219,14 @@ def test_republish_does_not_clear_freeze_and_unfreeze_wakes_it(tmp_path: Path) -
     _publish(store)
     for n in range(1, FREEZE_AFTER_RECLAIMS + 1):
         assert _zero_return_cycle(store, clock, f"w{n}") is not None
-    assert store.claim(JID, worker_id="w-last") is None  # 第 N 份过期租约被回收 ⇒ 熔断
+    assert store.claim(LeaseSpec(JID, worker_id="w-last")) is None  # 第 N 份过期租约被回收 ⇒ 熔断
     assert store.frozen_info(JID) is not None
 
     # 重发（同 job_id，哪怕是新字节）——冻结必须在
     _publish(store, payload=b"repacked-bytes")
     assert store.frozen_info(JID) is not None, "重发不得清冻结（否则熔断当场失效）"
     assert store.claimable_job_ids() == []
-    assert store.claim(JID) is None
+    assert store.claim(LeaseSpec(JID)) is None
 
     # 与「重发即重试」**并存**：失败标记（fail.json）确实被重发清掉（清标记的口在训练侧
     # `hub_client.publish_job`，它只 unlink FAIL_NAME），而冻结在同一份字节上活下来。

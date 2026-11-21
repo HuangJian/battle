@@ -105,6 +105,7 @@ import hub.store as store_mod
 from hub import server as hs
 from hub.queue import _HubQueue
 from hub.store import _JobStore
+from hub.store_leases import LeaseSpec
 from tests.helpers import remote_dag as dag
 
 NN_ROOT = ROOT
@@ -1006,7 +1007,7 @@ def test_the_missing_store_default_is_the_declared_one_per_method(tmp_path: Path
     # `_job_dir` 走**哨兵路径**（返回类型不同，单独断言）：路径存在与否就是「有没有这个 job」。
     assert not (hub._job_dir(unknown) / "manifest.json").exists()
     # `claim` 未知 job → None（与 `claimable_job_ids` 空表同一语义）
-    assert hub.claim(unknown) is None
+    assert hub.claim(LeaseSpec(unknown)) is None
     assert hub.claimable_job_ids("") == []
 
 
@@ -1463,7 +1464,7 @@ def test_the_facade_reaches_a_real_store(tmp_path: Path) -> None:
     st = hub._stores[""]
     jid = "b" * 16
     st.publish(jid, {"payload_sha256": "0" * 64}, b"PK\x03\x04fake")
-    tok = hub.claim(jid, worker_id="w1")
+    tok = hub.claim(LeaseSpec(jid, worker_id="w1"))
     assert tok, "门面 claim 没拿到租约"
     assert hub.heartbeat(jid, tok) is True
     assert hub.start_job(jid, "w1") is True

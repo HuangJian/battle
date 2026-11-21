@@ -59,6 +59,7 @@ from common.protocol import (
     job_priority,
 )
 from hub.server import _HubQueue, _JobStore, make_server
+from hub.store_leases import LeaseSpec
 from tests.helpers import hub_seams
 from tests.helpers.http_server import serve_fast
 
@@ -178,7 +179,7 @@ def test_straggler_timebase_is_computing_at_not_claim(tmp_path: Path) -> None:
     store = _store(tmp_path, clock)
     _publish(store)
     # 别人 exclusive claim 了这份 job（= 承诺在跑，可能还在下载）
-    assert store.claim_outcome(JID, worker_id="other").ok is True
+    assert store.claim_outcome(LeaseSpec(JID, worker_id="other")).ok is True
     clock.t += 10 * STRAGGLER_SEC  # 下载/解包慢到离谱
     assert store.priority_for(JID, exclude_worker="me")[0] == PRIORITY_MEDIUM, (
         "claim 起算 ⇒ 会把慢链路误判成慢计算（多开备份把链路压得更死）"
@@ -195,7 +196,7 @@ def test_priority_excludes_asking_workers_own_marks(tmp_path: Path) -> None:
     clock = _Clock()
     store = _store(tmp_path, clock)
     _publish(store)
-    store.claim_outcome(JID, worker_id="me")
+    store.claim_outcome(LeaseSpec(JID, worker_id="me"))
     store.start_job(JID, "me")
     assert store.priority_for(JID, exclude_worker="me")[0] == PRIORITY_HIGHEST
     assert store.priority_for(JID, exclude_worker="other")[0] == PRIORITY_MEDIUM
@@ -214,11 +215,11 @@ def test_backup_claim_takes_no_lease_and_does_not_steal(tmp_path: Path) -> None:
     clock = _Clock()
     store = _store(tmp_path, clock)
     _publish(store)
-    a_token = store.claim_outcome(JID, mode=CLAIM_MODE_EXCLUSIVE, worker_id="A").token
+    a_token = store.claim_outcome(LeaseSpec(JID, mode=CLAIM_MODE_EXCLUSIVE, worker_id="A")).token
     assert a_token
     expiry_before = store.lease_expiry(JID)
 
-    out = store.claim_outcome(JID, mode=CLAIM_MODE_BACKUP, worker_id="B")
+    out = store.claim_outcome(LeaseSpec(JID, mode=CLAIM_MODE_BACKUP, worker_id="B"))
     assert out.ok is True and out.status == "backup" and out.token == ""
     assert store.lease_expiry(JID) == expiry_before, "原租约不得被动"
     assert store.lease_worker(JID) == "A", "原持有人不得被换掉"
@@ -236,8 +237,8 @@ def test_backup_claim_does_not_poison_or_reclaim(tmp_path: Path) -> None:
     clock = _Clock()
     store = _store(tmp_path, clock)
     _publish(store)
-    store.claim_outcome(JID, worker_id="A")
-    store.claim_outcome(JID, mode=CLAIM_MODE_BACKUP, worker_id="B")
+    store.claim_outcome(LeaseSpec(JID, worker_id="A"))
+    store.claim_outcome(LeaseSpec(JID, mode=CLAIM_MODE_BACKUP, worker_id="B"))
     assert store.stale_holder(JID) == ""
     assert store.reclaims(JID) == 0
     clock.t += CLAIM_TTL_SEC + 1
@@ -246,7 +247,7 @@ def test_backup_claim_does_not_poison_or_reclaim(tmp_path: Path) -> None:
     # 下一个真领取者顶上来 → 原持有者那一次「零回传」照旧计毒。
     # （这就是 R2-3 否掉 `pop 原租约` 的原因：pop 掉之后原 worker 硬死无租约可过期
     #  ⇒ 熔断永久失明——这条断言就是那个失明的探针。）
-    assert store.claim_outcome(JID, worker_id="C").ok is True
+    assert store.claim_outcome(LeaseSpec(JID, worker_id="C")).ok is True
     assert store.reclaims(JID) == 1, "只该记原持有者那一次（备份没认领，不得追加）"
 
 
@@ -260,7 +261,7 @@ def test_abandon_releases_lease_and_zero_reclaim(tmp_path: Path) -> None:
     clock = _Clock()
     store = _store(tmp_path, clock)
     _publish(store)
-    store.claim_outcome(JID, worker_id="A")
+    store.claim_outcome(LeaseSpec(JID, worker_id="A"))
     store.start_job(JID, "A")
     assert store.claimable_job_ids() == []
 
@@ -287,13 +288,13 @@ def test_highest_single_holder_epoch_gate(tmp_path: Path) -> None:
     assert store.priority_for(JID, exclude_worker="A")[0] == PRIORITY_HIGHEST
     assert store.priority_for(JID, exclude_worker="B")[0] == PRIORITY_HIGHEST
 
-    first = store.claim_outcome(JID, worker_id="A", expected_epoch=epoch)
+    first = store.claim_outcome(LeaseSpec(JID, worker_id="A", expected_epoch=epoch))
     assert first.ok is True and first.status == "ok"
-    second = store.claim_outcome(JID, worker_id="B", expected_epoch=epoch)
+    second = store.claim_outcome(LeaseSpec(JID, worker_id="B", expected_epoch=epoch))
     assert second.ok is False and second.status == "demoted", "第二个必须降级为 low，不得抢"
 
     # 不带 expected_epoch 的老口径：也不是错误，只是「真的轮不到」（409）
-    third = store.claim_outcome(JID, worker_id="C")
+    third = store.claim_outcome(LeaseSpec(JID, worker_id="C"))
     assert third.ok is False and third.status == "held"
     # 唯一性仍成立：只有 A 留下承诺痕迹
     assert store.scheduling_facts(JID)["lease_holder"] == "A"
@@ -304,7 +305,7 @@ def test_claim_rejects_unknown_mode(tmp_path: Path) -> None:
     clock = _Clock()
     store = _store(tmp_path, clock)
     _publish(store)
-    out = store.claim_outcome(JID, mode="race")
+    out = store.claim_outcome(LeaseSpec(JID, mode="race"))
     assert out.ok is False and out.status == "bad_mode"
     assert store.lease_worker(JID) == "", "写错的模式绝不能静默降级成独占"
 
@@ -753,7 +754,7 @@ def test_inflight_view_is_the_other_side_of_the_pool(tmp_path: Path) -> None:
     store = _store(tmp_path, clock)
     _publish(store)
     assert store.claimable_job_ids() == [JID] and store.inflight_job_ids() == []
-    assert store.claim_outcome(JID, worker_id="A").ok is True
+    assert store.claim_outcome(LeaseSpec(JID, worker_id="A")).ok is True
     assert store.claimable_job_ids() == [], "活租约期内不在池中（P3b 独占）"
     assert store.inflight_job_ids() == [JID], "但它在飞——空闲 worker 该能领它的备份副本"
     assert store.inflight_job_ids(not_held_by="A") == [], (
@@ -769,7 +770,7 @@ def test_replica_candidates_keep_every_gate_the_pool_keeps(tmp_path: Path) -> No
     clock = _Clock()
     store = _store(tmp_path, clock)
     _publish(store)
-    store.claim_outcome(JID, worker_id="A")
+    store.claim_outcome(LeaseSpec(JID, worker_id="A"))
     assert store.inflight_job_ids() == [JID]
     store.leases._frozen[JID] = {"reclaims": 3, "worker": "A", "ts": clock.t, "announced": True}
     assert store.inflight_job_ids() == [] and store.claimable_job_ids() == []

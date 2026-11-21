@@ -26,7 +26,7 @@ if str(ROOT) not in sys.path:
 
 from common.protocol import CLAIM_MODE_BACKUP, CLAIM_TTL_SEC, PAYLOAD_NAME, push_worker_id_of
 from hub.server import _JobStore
-from hub.store_leases import ORPHAN_GRACE_SEC
+from hub.store_leases import ORPHAN_GRACE_SEC, LeaseSpec
 
 
 def _mini_manifest(jid: str = "j" * 16) -> dict:
@@ -102,11 +102,11 @@ def test_claim_excludes_from_pool_until_expiry(tmp_path: Path) -> None:
     store = _store(tmp_path, clock)
     _publish(store)
     assert store.claimable_job_ids() == ["j" * 16]
-    token = store.claim("j" * 16)
+    token = store.claim(LeaseSpec("j" * 16))
     assert token  # 下发 lease_token
     assert isinstance(token, str)
     assert store.claimable_job_ids() == []  # 独占：超时前不重发
-    assert store.claim("j" * 16) is None  # 并发领取竞负
+    assert store.claim(LeaseSpec("j" * 16)) is None  # 并发领取竞负
     clock.t += 1
     assert store.heartbeat("j" * 16, token) is True  # 活 worker：有心跳
     expiry = store.lease_expiry("j" * 16)
@@ -122,7 +122,7 @@ def test_claim_sets_owner_and_expiry_together(tmp_path: Path) -> None:
     clock = _Clock()
     store = _store(tmp_path, clock)
     _publish(store)
-    token = store.claim("j" * 16)
+    token = store.claim(LeaseSpec("j" * 16))
     assert isinstance(token, str)
     # owner：token 对得上（公开口径是「这个 token 能代表持有人」，不是字典里有这行）
     assert store.result_token_ok("j" * 16, token) is True
@@ -138,7 +138,7 @@ def test_heartbeat_renews_with_claim_ttl(tmp_path: Path) -> None:
     clock = _Clock()
     store = _store(tmp_path, clock)
     _publish(store)
-    token = store.claim("j" * 16)
+    token = store.claim(LeaseSpec("j" * 16))
     assert isinstance(token, str)
     for _ in range(5):  # 5 × 60s 心跳，跨过初始 TTL
         clock.t += 60
@@ -153,7 +153,7 @@ def test_failed_heartbeat_does_not_extend(tmp_path: Path) -> None:
     clock = _Clock()
     store = _store(tmp_path, clock)
     _publish(store)
-    token = store.claim("j" * 16)
+    token = store.claim(LeaseSpec("j" * 16))
     assert isinstance(token, str)
     expiry_before = store.lease_expiry("j" * 16)
     assert store.heartbeat("j" * 16, "wrong-token") is False
@@ -167,7 +167,7 @@ def test_release_returns_to_pool_immediately(tmp_path: Path) -> None:
     clock = _Clock()
     store = _store(tmp_path, clock)
     _publish(store)
-    token = store.claim("j" * 16)
+    token = store.claim(LeaseSpec("j" * 16))
     assert isinstance(token, str)
     assert store.release("j" * 16, "wrong") is False
     assert store.claimable_job_ids() == []
@@ -192,17 +192,17 @@ def test_claim_silence_past_grace_reaps_and_logs(tmp_path: Path) -> None:
     clock = _Clock()
     store = _store(tmp_path, clock)
     _publish(store)
-    token = store.claim("j" * 16, worker_id="w-v100")
+    token = store.claim(LeaseSpec("j" * 16, worker_id="w-v100"))
     assert token
     clock.t += 179
     assert store.claimable_job_ids() == []
-    assert store.claim("j" * 16) is None
+    assert store.claim(LeaseSpec("j" * 16)) is None
     assert store.inflight() == ["j" * 16]
     assert _orphan_events(store) == []
     clock.t += 2  # 181s：早于 TTL(300) 的孤儿判定点
     assert store.claimable_job_ids() == ["j" * 16]  # 回池
     assert store.inflight() == []  # 观测面不再报「在飞」
-    token2 = store.claim("j" * 16)  # ★ 池可见 ⇒ 领得到（回收走 claim 同一入口）
+    token2 = store.claim(LeaseSpec("j" * 16))  # ★ 池可见 ⇒ 领得到（回收走 claim 同一入口）
     assert token2 and token2 != token
     evs = _orphan_events(store)
     assert len(evs) == 1, evs
@@ -221,20 +221,20 @@ def test_heartbeat_once_never_reaped(tmp_path: Path) -> None:
     clock = _Clock()
     store = _store(tmp_path, clock)
     _publish(store)
-    token = store.claim("j" * 16)
+    token = store.claim(LeaseSpec("j" * 16))
     assert token
     clock.t += 1
     assert store.heartbeat("j" * 16, token) is True
     clock.t += ORPHAN_GRACE_SEC  # 181s：零心跳的租约早在这一刻前就被收了
     assert store.claimable_job_ids() == []
-    assert store.claim("j" * 16) is None
+    assert store.claim(LeaseSpec("j" * 16)) is None
     assert store.inflight() == ["j" * 16]
     assert _orphan_events(store) == []
     expiry = store.lease_expiry("j" * 16)
     assert expiry is not None
     clock.t = expiry + 1  # 跨过这次的 TTL 到期点
     assert store.claimable_job_ids() == ["j" * 16]  # 既有过期路径回池
-    assert store.claim("j" * 16)
+    assert store.claim(LeaseSpec("j" * 16))
     assert _orphan_events(store) == []  # 过期 ≠ 孤儿，不写那个事件
 
 
@@ -247,18 +247,18 @@ def test_push_lease_is_never_orphan_reaped(tmp_path: Path) -> None:
     clock = _Clock()
     store = _store(tmp_path, clock)
     _publish(store)
-    lease = store.claim("j" * 16, worker_id=push_worker_id_of("gpu1"))
+    lease = store.claim(LeaseSpec("j" * 16, worker_id=push_worker_id_of("gpu1")))
     assert lease
     clock.t += ORPHAN_GRACE_SEC + 1
     assert store.claimable_job_ids() == []  # 早收不碰它
-    assert store.claim("j" * 16) is None
+    assert store.claim(LeaseSpec("j" * 16)) is None
     assert store.inflight() == ["j" * 16]
     assert _orphan_events(store) == []
     expiry = store.lease_expiry("j" * 16)
     assert expiry is not None
     clock.t = expiry + 1  # 跨过 TTL ⇒ 按**过期**回收
     assert store.claimable_job_ids() == ["j" * 16]
-    assert store.claim("j" * 16)
+    assert store.claim(LeaseSpec("j" * 16))
     assert _orphan_events(store) == []
 
 
@@ -267,7 +267,7 @@ def test_backup_never_reaped(tmp_path: Path) -> None:
     clock = _Clock()
     store = _store(tmp_path, clock)
     _publish(store)
-    assert store.claim("j" * 16, mode=CLAIM_MODE_BACKUP) == ""
+    assert store.claim(LeaseSpec("j" * 16, mode=CLAIM_MODE_BACKUP)) == ""
     clock.t += ORPHAN_GRACE_SEC * 3  # 远超宽限
     assert store.claimable_job_ids() == ["j" * 16]  # 副本不占池（既有语义）
     assert _orphan_events(store) == []
@@ -292,19 +292,19 @@ def test_backup_claim_refused_once_the_job_is_settled(tmp_path: Path) -> None:
     store = _store(tmp_path, clock)
     jid = "j" * 16
     _publish(store, jid)
-    assert store.claim(jid), "主副本在飞"
-    assert store.claim(jid, mode=CLAIM_MODE_BACKUP) == "", "未结算：备份副本照发（既有语义）"
+    assert store.claim(LeaseSpec(jid)), "主副本在飞"
+    assert store.claim(LeaseSpec(jid, mode=CLAIM_MODE_BACKUP)) == "", "未结算：备份副本照发（既有语义）"
 
     # 主副本赢下首写（result/ 落盘）——此刻它可能还没 pop 在飞记录
     assert store.store_result(jid, {"job_id": jid, "agg": {}}) is True
-    assert store.claim(jid, mode=CLAIM_MODE_BACKUP) is None, "已结算的活不得再发备份（白烧一轮 GPU）"
+    assert store.claim(LeaseSpec(jid, mode=CLAIM_MODE_BACKUP)) is None, "已结算的活不得再发备份（白烧一轮 GPU）"
 
     # 节点报的**确定性失败**同理：再跑一遍只是把同一个失败重演（`_unfinished_pending` 也这么筛）
     jid2 = "k" * 16
     _publish(store, jid2)
-    assert store.claim(jid2), "主副本在飞"
+    assert store.claim(LeaseSpec(jid2)), "主副本在飞"
     assert store.store_job_failure(jid2, {"reason": "能力缺失", "kind": "capability"}) is True
-    assert store.claim(jid2, mode=CLAIM_MODE_BACKUP) is None, "已报失败的活不得再发备份"
+    assert store.claim(LeaseSpec(jid2, mode=CLAIM_MODE_BACKUP)) is None, "已报失败的活不得再发备份"
 
 
 # ────────────────────────── 回传鉴权 / 首写 ──────────────────────────
@@ -316,7 +316,7 @@ def test_result_token_ok_matrix(tmp_path: Path) -> None:
     store = _store(tmp_path, clock)
     _publish(store)
     assert store.result_token_ok("j" * 16, "") is True  # 从未领取 → 照收
-    token = store.claim("j" * 16)
+    token = store.claim(LeaseSpec("j" * 16))
     assert isinstance(token, str)
     assert store.result_token_ok("j" * 16, token) is True
     assert store.result_token_ok("j" * 16, "wrong") is False
@@ -345,7 +345,7 @@ def test_halt_does_not_block_leases(tmp_path: Path) -> None:
     store = _store(tmp_path, clock)
     _publish(store)
     store.halt_workers = True
-    token = store.claim("j" * 16)
+    token = store.claim(LeaseSpec("j" * 16))
     assert token
     assert store.claimable_job_ids() == []
     assert store.heartbeat("j" * 16, token) is True

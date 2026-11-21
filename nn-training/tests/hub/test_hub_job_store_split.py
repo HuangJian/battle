@@ -67,6 +67,7 @@ import hub.store_results as results_mod
 import hub.store_scheduling as sched_mod
 import hub.store_wire as wire_mod
 from hub import server as hs
+from hub.store_leases import LeaseSpec
 from tests.helpers import remote_dag as dag
 
 NN_ROOT = ROOT
@@ -798,7 +799,7 @@ def test_cross_domain_call_chain_works_on_one_object(tmp_path: Path) -> None:
     assert (store.job_root / jid).is_dir(), "publish 没落 job 目录"
     assert store.ledger_offset() > 0, "账本缓存没跟进到字节（H6 增量读）"
 
-    out = store.claim_outcome(jid, mode="exclusive", worker_id="w1")
+    out = store.claim_outcome(LeaseSpec(jid, mode="exclusive", worker_id="w1"))
     assert out.ok, out
     # 租约簇自己那份 —— 全是公开读数：`lease_worker` / `result_token_ok` / `inflight`
     # （`inflight` 只收「活」租约，而活 = 心跳晚于 claim 时刻，所以它也反向证了心跳落过）

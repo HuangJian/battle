@@ -35,6 +35,7 @@ from hub.queue_offline import (
     pending_export_record_merge,
 )
 from hub.server import _HubQueue
+from hub.store_leases import LeaseSpec
 from hub.task_pack import (
     HOLD_RESTORE_GRACE_SEC,
     hold_expires_in,
@@ -367,14 +368,14 @@ def test_live_hold_blocks_every_kind_until_it_goes_stale(
     st = hub._stores[COURSE]
     st.publish("j" * 16, _manifest("j" * 16), b"PK\x03\x04fake")
     hub.note_hold(COURSE, worker_id="cloud-1", token="tok-1")
-    out = st.claim_outcome("j" * 16, worker_id="online-1", role="online")
+    out = st.claim_outcome(LeaseSpec("j" * 16, worker_id="online-1", role="online"))
     assert out.ok is False and out.reason == "held:cloud-1", out
     # 接管者自己也不许领（它此刻在跑离线段）——闸不看请求方是谁
-    out = st.claim_outcome("j" * 16, worker_id="cloud-1", role="online")
+    out = st.claim_outcome(LeaseSpec("j" * 16, worker_id="cloud-1", role="online"))
     assert out.ok is False and out.reason == "held:cloud-1", out
     # 进度静默超阈 ⇒ stale ⇒ 闸自己开（不必等人来解）
     clock[0] += 20.0
-    out = st.claim_outcome("j" * 16, worker_id="online-1", role="online")
+    out = st.claim_outcome(LeaseSpec("j" * 16, worker_id="online-1", role="online"))
     assert out.ok is True, out
 
 
@@ -388,16 +389,16 @@ def test_bc_job_is_exempt_from_the_role_gate_only(
     st = hub._stores[COURSE]
     st.publish("k" * 16, _manifest("k" * 16, kind="bc"), b"PK\x03\x04fake")
     # bc 的 kind 归属是 online（`KIND_ROLES`），但离线盘也能领 —— 这正是一刀「双角色」。
-    out = st.claim_outcome("k" * 16, worker_id="off-1", role="offline")
+    out = st.claim_outcome(LeaseSpec("k" * 16, worker_id="off-1", role="offline"))
     assert out.ok is True, out
     st.abandon_job("k" * 16)
     # 非 bc 的对照：同一份活换成 ppo ⇒ 角色闸拒绝（豁免是 bc 专属）
     st.publish("m" * 16, _manifest("m" * 16, kind="ppo"), b"PK\x03\x04fake")
-    out = st.claim_outcome("m" * 16, worker_id="off-1", role="offline")
+    out = st.claim_outcome(LeaseSpec("m" * 16, worker_id="off-1", role="offline"))
     assert out.ok is False and out.reason == "role", out
     # 接管闸吃 bc：有个活 hold 时同一个 bc 作业也领不走
     hub.note_hold(COURSE, worker_id="cloud-1", token="tok-1")
-    out = st.claim_outcome("k" * 16, worker_id="off-1", role="offline")
+    out = st.claim_outcome(LeaseSpec("k" * 16, worker_id="off-1", role="offline"))
     assert out.ok is False and out.reason == "held:cloud-1", out
 
 
@@ -413,7 +414,7 @@ def test_publish_invalidates_the_kind_cache(tmp_path: Path) -> None:
     # 同一个 job_id 重发成 ppo ⇒ 离线盘立刻被角色闸拦住（旧缓存必须已清）
     st.publish("k" * 16, _manifest("k" * 16, kind="ppo"), b"PK\x03\x04fake")
     assert st.job_kind("k" * 16) == "ppo"
-    out = st.claim_outcome("k" * 16, worker_id="off-1", role="offline")
+    out = st.claim_outcome(LeaseSpec("k" * 16, worker_id="off-1", role="offline"))
     assert out.ok is False and out.reason == "role", out
 
 
@@ -429,16 +430,16 @@ def test_bc_never_gets_a_backup_replica(tmp_path: Path, monkeypatch: pytest.Monk
     _course(tmp_path, hub)
     st = hub._stores[COURSE]
     st.publish("k" * 16, _manifest("k" * 16, kind="bc"), b"PK\x03\x04fake")
-    assert st.claim_outcome("k" * 16, worker_id="online-1", role="online").ok is True
+    assert st.claim_outcome(LeaseSpec("k" * 16, worker_id="online-1", role="online")).ok is True
     out = st.claim_outcome(
-        "k" * 16, mode=CLAIM_MODE_BACKUP, worker_id="online-9", role="online"
+        LeaseSpec("k" * 16, mode=CLAIM_MODE_BACKUP, worker_id="online-9", role="online")
     )
     assert out.ok is False and out.reason == "no_backup", out
     # 对照：同样的路子给 ppo 发备份是成立的（R2-3 的显式授权腿不许被误伤）
     st.publish("m" * 16, _manifest("m" * 16, kind="ppo"), b"PK\x03\x04fake")
-    assert st.claim_outcome("m" * 16, worker_id="online-1", role="online").ok is True
+    assert st.claim_outcome(LeaseSpec("m" * 16, worker_id="online-1", role="online")).ok is True
     out = st.claim_outcome(
-        "m" * 16, mode=CLAIM_MODE_BACKUP, worker_id="online-9", role="online"
+        LeaseSpec("m" * 16, mode=CLAIM_MODE_BACKUP, worker_id="online-9", role="online")
     )
     assert out.ok is True and out.status == "backup", out
     # 前置：bc 确实在飞（否则下面那条什么都没验到）；而在飞面里它**不进**备份候选
@@ -468,7 +469,7 @@ def test_bc_liveness_is_progress_only_and_a_dead_lease_is_conceded(
     st = hub._stores[COURSE]
     jid = "k" * 16
     st.publish(jid, _manifest(jid, kind="bc"), b"PK\x03\x04fake")
-    out = st.claim_outcome(jid, worker_id="off-1", role="offline")
+    out = st.claim_outcome(LeaseSpec(jid, worker_id="off-1", role="offline"))
     assert out.ok is True and out.token, out
     assert st.lease_worker(jid) == "off-1"
     # 心跳把 TTL 推着走（每 5s 一跳），但**一次 epoch 都不打**
@@ -488,7 +489,7 @@ def test_bc_liveness_is_progress_only_and_a_dead_lease_is_conceded(
     )
     # 让出后可被别人领；新主拿到的是**新**租约（进度锚重写）
     clock[0] = 1031.0
-    out2 = st.claim_outcome(jid, worker_id="off-2", role="offline")
+    out2 = st.claim_outcome(LeaseSpec(jid, worker_id="off-2", role="offline"))
     assert out2.ok is True, out2
     assert st.lease_worker(jid) == "off-2"
     assert st.job_progress_at(jid) == 1031.0

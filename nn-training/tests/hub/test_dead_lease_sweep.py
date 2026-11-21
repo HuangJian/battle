@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 
 from common.protocol import CLAIM_TTL_SEC, PRIORITY_HIGHEST, PRIORITY_LOW
 from hub.server import _HubQueue, _JobStore
-from hub.store_leases import BC_PROGRESS_STALE_SEC, LEASE_ORPHAN
+from hub.store_leases import BC_PROGRESS_STALE_SEC, LEASE_ORPHAN, LeaseSpec
 
 COURSE = "c5-gae"
 JID = "j" * 16
@@ -82,7 +82,7 @@ def test_sweep_reaps_expired_lease_without_claim(tmp_path: Path) -> None:
     hub = _hub(tmp_path, clock)
     st = hub._stores[COURSE]
 
-    token = st.claim(JID, worker_id="A")
+    token = st.claim(LeaseSpec(JID, worker_id="A"))
     assert token
     assert st.start_job(JID, "A") is True
     assert st.set_ready(JID, "A") is True
@@ -108,7 +108,7 @@ def test_peek_jobs_triggers_sweep(tmp_path: Path) -> None:
     clock = _Clock()
     hub = _hub(tmp_path, clock)
     st = hub._stores[COURSE]
-    assert st.claim(JID, worker_id="A")
+    assert st.claim(LeaseSpec(JID, worker_id="A"))
     clock.t += CLAIM_TTL_SEC + 1
 
     hub.peek_jobs(worker_id="W")
@@ -125,7 +125,7 @@ def test_sweep_leaves_live_lease_alone(tmp_path: Path) -> None:
     clock = _Clock()
     hub = _hub(tmp_path, clock)
     st = hub._stores[COURSE]
-    token = st.claim(JID, worker_id="A")
+    token = st.claim(LeaseSpec(JID, worker_id="A"))
     assert token
     clock.t += 60
     assert st.heartbeat(JID, token) is True
@@ -143,7 +143,7 @@ def test_sweep_freezes_after_three_zero_return_reclaims(tmp_path: Path) -> None:
     st = hub._stores[COURSE]
 
     for n in range(1, 4):
-        assert st.claim(JID, worker_id="A") is not None
+        assert st.claim(LeaseSpec(JID, worker_id="A")) is not None
         clock.t += CLAIM_TTL_SEC + 1
         assert hub.sweep_dead_leases() == 1
         assert st.reclaims(JID) == n
@@ -153,7 +153,7 @@ def test_sweep_freezes_after_three_zero_return_reclaims(tmp_path: Path) -> None:
     # ★ 清扫在回收那一刻就喊过（否则没人再来 claim 就永远不喊）——一次性事件已消费。
     assert info["announced"] is True
     assert JID in st.frozen_job_ids()
-    assert st.claim(JID, worker_id="A") is None
+    assert st.claim(LeaseSpec(JID, worker_id="A")) is None
     assert st.consume_freeze_announcement(JID) is None
 
 
@@ -162,7 +162,7 @@ def test_sweep_skips_settled_job(tmp_path: Path) -> None:
     clock = _Clock()
     hub = _hub(tmp_path, clock)
     st = hub._stores[COURSE]
-    assert st.claim(JID, worker_id="A")
+    assert st.claim(LeaseSpec(JID, worker_id="A"))
     (st._job_dir(JID) / "result").mkdir(parents=True, exist_ok=True)
     clock.t += CLAIM_TTL_SEC + 1
 
@@ -177,13 +177,13 @@ def test_sweep_is_throttled(tmp_path: Path) -> None:
     hub = _hub(tmp_path, clock)
     st = hub._stores[COURSE]
 
-    assert st.claim(JID, worker_id="A", ttl=0.2) is not None
+    assert st.claim(LeaseSpec(JID, worker_id="A", ttl=0.2)) is not None
     clock.t += 0.3
     assert hub.sweep_dead_leases() == 1
     assert st.reclaims(JID) == 1
 
     # 窗口内再造一份死的：租约过期但清扫节流还没放行。
-    assert st.claim(JID, worker_id="A", ttl=0.2) is not None
+    assert st.claim(LeaseSpec(JID, worker_id="A", ttl=0.2)) is not None
     clock.t += 0.3
     assert hub.sweep_dead_leases() == 0
     assert st.reclaims(JID) == 1
@@ -199,7 +199,7 @@ def test_sweep_yields_bc_job_on_stale_progress(tmp_path: Path) -> None:
     clock = _Clock()
     hub = _hub(tmp_path, clock, kind="bc")
     st = hub._stores[COURSE]
-    token = st.claim(JID, worker_id="A")
+    token = st.claim(LeaseSpec(JID, worker_id="A"))
     assert token
     # 每 60s 续租，租约一直活；进度锚停在 claim 时刻。
     for _ in range(int(BC_PROGRESS_STALE_SEC // 60)):

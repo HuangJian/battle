@@ -38,7 +38,6 @@ from common.protocol import (
     CLAIM_MODE_BACKUP,
     CLAIM_MODE_EXCLUSIVE,
     CLAIM_MODES,
-    CLAIM_TTL_SEC,
     PEEK_MAX,
     PRIORITY_NONE,
     ROLE_ONLINE,
@@ -48,7 +47,7 @@ from common.protocol import (
 )
 from hub.queue_peer import QueuePeer
 from hub.store import _JobStore
-from hub.store_leases import ClaimOutcome
+from hub.store_leases import ClaimOutcome, LeaseSpec
 
 #: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
 _log = tag_logger("hub-server", lambda: time)
@@ -128,7 +127,9 @@ class QueueClaimsMixin(QueuePeer):
                 # stale 记录，在这里判会踩时序——见 `may_avoid_stale_holder` docstring）。
                 avoid = may_avoid_stale_holder(worker_id, active_workers)
                 tok = st.claim(
-                    jid, worker_id=worker_id, avoid_stale_holder=avoid, role=role
+                    LeaseSpec(
+                        jid, worker_id=worker_id, avoid_stale_holder=avoid, role=role
+                    )
                 )
                 if tok is None:
                     self._announce_freeze(course, jid)
@@ -272,38 +273,20 @@ class QueueClaimsMixin(QueuePeer):
             raise ValueError(f"未知课程 {course!r}")
         return {"course": course, **st.release_bc_exclusive()}
 
-    def claim(
-        self,
-        job_id: str,
-        ttl: float = CLAIM_TTL_SEC,
-        worker_id: str = "",
-        avoid_stale_holder: bool = False,
-        mode: str | None = None,
-        expected_epoch: int | None = None,
-        role: str = ROLE_ONLINE,
-        capabilities: list[str] | None = None,
-    ) -> str | None:
+    def claim(self, spec: LeaseSpec) -> str | None:
         """（单份领取；多课程的挑选入口是 `claim_next`——归属/停摆闸在 store 里，两处共用。）
 
         这条路的调用者包括 **push 派发**（`push_dispatch._dispatch`）——它**不是**由
         `claim_job` 转过来的，所以闸必须住在 `_claim_locked` 里而不是各调用点。
 
-        `capabilities`（2026-11-16）：claim 方声明的功能能力位；None/空 = 旧调用形状。
-        replay job 需要 `replay_corpus`，缺能力在 store 的唯一租约入口被拒。
+        `spec`（2026-11-21，P0-3）：认领旋钮的唯一形状（见 `hub.store_leases.LeaseSpec`）；
+        `capabilities`（2026-11-16）仍是其中一字段 —— replay job 需要 `replay_corpus`，
+        缺能力在 store 的唯一租约入口被拒。
         """
-        st = self._store_of(job_id)
+        st = self._store_of(spec.job_id)
         if st is None:
             return None
-        return st.claim(
-            job_id,
-            ttl=ttl,
-            worker_id=worker_id,
-            avoid_stale_holder=avoid_stale_holder,
-            mode=mode,
-            expected_epoch=expected_epoch,
-            role=role,
-            capabilities=capabilities,
-        )
+        return st.claim(spec)
 
     def sweep_dead_leases(self) -> int:
         """把死租约送进既有回收入口（plan/dead-lease-sweep），返回本轮回收数。
@@ -499,13 +482,15 @@ class QueueClaimsMixin(QueuePeer):
             return ClaimOutcome(False, "", drain, drain)
         avoid = may_avoid_stale_holder(worker_id, self.active_worker_count())
         out = st.claim_outcome(
-            job_id,
-            mode=mode,
-            worker_id=worker_id,
-            avoid_stale_holder=avoid,
-            expected_epoch=expected_epoch,
-            role=role,
-            capabilities=capabilities,
+            LeaseSpec(
+                job_id,
+                mode=mode,
+                worker_id=worker_id,
+                avoid_stale_holder=avoid,
+                expected_epoch=expected_epoch,
+                role=role,
+                capabilities=capabilities,
+            )
         )
         if out.ok:
             course = self.course_of(job_id) or ""

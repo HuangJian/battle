@@ -50,11 +50,10 @@ from typing import Any, Protocol
 
 from common.protocol import (
     CLAIM_MODE_EXCLUSIVE,
-    CLAIM_TTL_SEC,
     PEEK_MAX,
     ROLE_ONLINE,
 )
-from hub.store_leases import ClaimOutcome
+from hub.store_leases import ClaimOutcome, LeaseSpec
 
 
 class QueuePeer(Protocol):
@@ -102,17 +101,7 @@ class QueuePeer(Protocol):
     def shared_code_zip(self, course: str = "") -> Path | None: ...
     def _announce_freeze(self, course: str, jid: str) -> None: ...
     def claimable_job_ids(self, course: str) -> list[str]: ...
-    def claim(
-        self,
-        job_id: str,
-        ttl: float = CLAIM_TTL_SEC,
-        worker_id: str = "",
-        avoid_stale_holder: bool = False,
-        mode: str | None = None,
-        expected_epoch: int | None = None,
-        role: str = ROLE_ONLINE,
-        capabilities: list[str] | None = None,
-    ) -> str | None: ...
+    def claim(self, spec: LeaseSpec) -> str | None: ...
     def peek_jobs(
         self,
         *,

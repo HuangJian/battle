@@ -1530,6 +1530,7 @@ import remote.http as http_mod
 import remote.job_lifecycle as JL
 import remote.worker as worker_mod
 from common.protocol import RetryableError
+from hub.store_leases import LeaseSpec
 from tests.helpers.http_server import serve_fast
 
 
@@ -1631,7 +1632,7 @@ def test_store_release_returns_to_pool(tmp_path: Path) -> None:
     release 立即回池；过期回池（CLAIM_TTL_SEC）。"""
     store = _JobStore(tmp_path / "jobs", tmp_path / "ledger.jsonl")
     store.publish("jid-r", {"job_id": "jid-r"}, b"payload")
-    token = store.claim("jid-r")
+    token = store.claim(LeaseSpec("jid-r"))
     assert token is not None
     assert store.claimable_job_ids() == []  # 独占：超时前不重发
     # release：H2 非持有人拒释放 / 幂等拒绝；持有人释放立即回池

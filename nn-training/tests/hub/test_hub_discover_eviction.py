@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
 
 from common.protocol import COURSE_ENABLE_MARKER, PAYLOAD_NAME
 from hub.queue import _HubQueue
+from hub.store_leases import LeaseSpec
 
 
 def _hub(root: Path, courses: list[str]) -> _HubQueue:
@@ -69,7 +70,7 @@ def test_a_course_with_an_inflight_job_is_not_dropped(tmp_path: Path) -> None:
     (jd / PAYLOAD_NAME).write_bytes(b"payload")
     (jd / "manifest.json").write_text("{}", encoding="utf-8")
     st.publish(jid, {"it": 1}, b"payload")
-    out = st.claim_outcome(jid, mode="exclusive", worker_id="w1")
+    out = st.claim_outcome(LeaseSpec(jid, mode="exclusive", worker_id="w1"))
     assert out.ok, out
     assert st.inflight_job_ids(), "前置：这份活得真的在飞"
 

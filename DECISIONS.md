@@ -9417,3 +9417,18 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **验证**：相关 5 个测试文件 133 例 + 4 道预算/门禁 11 例全绿；nn 全量门禁
   **6697 passed / 3 skipped**（74s，ruff check + mypy 1051 文件全绿）；根 `bun run check` 绿（18s）。
   全文 → `docs/nn/engineering.md` §260。
+
+## §2026-11-21-lease-spec（认领族收成一个 `LeaseSpec`：`claim` / `claim_outcome` / `_claim_locked` 全收窄）
+
+- **背景**：`hub/queue_claims.py` / `hub/queue_peer.py` / `hub/store.py` / `hub/store_leases.py`
+  的四条宽签名是同一组旋钮的四个副本，且参数**顺序在层间不一致**（`_claim_locked` 的 `mode`
+  在 `ttl` 之后、`claim` 在第 5 位）—— 抄错一格就是「领了别的活 / 用了别人的租约」。
+- **决定**：新增 frozen `LeaseSpec`（`job_id` + 7 个带缺省字段，顺序沿用旧 `claim`）；
+  `claim` / `claim_outcome` / `_claim_locked` 与两个转发层都只收它；`claim_job`（6 参，未越线）
+  签名不动，内部构造 spec。`mode=None` 仍在 `_claim_locked` 的展开段折叠成 `exclusive`。
+- **被否决**：保一条旧关键字签名做兼容壳 —— 同一临界区两条入口，改字段时另一条会静默失效
+  （与 G19「端口收编」同一条理由）。
+- **读数**：宽签名 122 → **117** / 82 → **77** 文件（`WIDE_FUNCS_BASELINE` 删 4 条）；
+  文本断言与复用账本未动；归属闸守卫（`test_role_routing`）扩成「role= / LeaseSpec( / spec」
+  三种载法，判据不变。
+- **验证**：聚焦 433 例 + 预算/分层 30 例全绿；nn 全量门禁见提交。全文 → `docs/nn/engineering.md` §261。

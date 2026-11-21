@@ -35,6 +35,7 @@ import common.codehash
 import common.distribution
 from common.protocol import AUTH_HEADER, decode_weights_json, encode_weights_json
 from hub.server import _JobStore, make_server
+from hub.store_leases import LeaseSpec
 from remote import worker as worker_mod
 from tests.helpers.http_server import serve_fast
 from tests.helpers.hub_poll import hub_poll
@@ -418,7 +419,7 @@ def test_e2e_wait_bc_round_ledger_ingest_and_eval(
     node_base, node_srv = _boot_fake_eval_node()
     jid = "c" * 16
     _publish_bc_job(tmp_path, store, epochs=4, jid=jid)
-    tok = store.claim(jid)
+    tok = store.claim(LeaseSpec(jid))
     assert tok is not None
     ledger = tmp_path / "train-ledger.jsonl"
     course = load_bc_course("bc-e2e").model_copy(

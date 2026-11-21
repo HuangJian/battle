@@ -82,6 +82,7 @@ from common.protocol import (
     rotation_order,
     validate_result,
 )
+from hub.store_leases import LeaseSpec
 
 #: 缺省登记来源：仓库的 `nn-training/rl-config.json`（控制台 worker 登记入口回写的那个文件）。
 DEFAULT_PUSH_CONFIG = Path(__file__).resolve().parents[1] / "rl-config.json"
@@ -917,12 +918,14 @@ class PushDispatcher(TickLoopHost):
                 continue  # 没有空闲 worker / 接单位 —— 等下一拍
             wid = str(worker["id"])
             lease = hub.claim(
-                jid,
-                ttl=CLAIM_TTL_SEC,
-                worker_id=push_worker_id_of(wid),
-                mode=mode,
-                role=ROLE_ONLINE,  # push 腿只有在线盘（登记表无角色字段）
-                capabilities=[CAP_REPLAY_CORPUS] if need_replay else None,
+                LeaseSpec(
+                    jid,
+                    ttl=CLAIM_TTL_SEC,
+                    worker_id=push_worker_id_of(wid),
+                    mode=mode,
+                    role=ROLE_ONLINE,  # push 腿只有在线盘（登记表无角色字段）
+                    capabilities=[CAP_REPLAY_CORPUS] if need_replay else None,
+                )
             )
             if lease is None:
                 continue  # 活租约在持 / 并发领取竞负 / 熔断冻结

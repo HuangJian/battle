@@ -33,6 +33,7 @@ from common.protocol import (
     COURSE_ENABLE_MARKER,
 )
 from hub.server import _HubQueue, make_server
+from hub.store_leases import LeaseSpec
 from tests.helpers.http_server import serve_fast
 
 TOKEN = "sekret"
@@ -143,7 +144,7 @@ def test_cancel_job_endpoint_refuses_inflight(tmp_path: Path) -> None:
         _course(tmp_path, hub)
         _publish(hub, "busy-1")
         store = hub._stores[COURSE]
-        assert store.claim("busy-1", worker_id="w1") is not None  # 认领 ⇒ 在飞
+        assert store.claim(LeaseSpec("busy-1", worker_id="w1")) is not None  # 认领 ⇒ 在飞
 
         st, raw = _req(base, f"{ADMIN_CANCEL_JOB_PATH}?job_id=busy-1", method="POST")
         body = _json(raw)

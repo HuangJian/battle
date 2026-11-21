@@ -16,6 +16,7 @@ import pytest
 from common.protocol import COURSE_ENABLE_MARKER
 from hub.server import _HubQueue
 from hub.store import _JobStore
+from hub.store_leases import LeaseSpec
 
 JID = "d" * 16
 
@@ -69,12 +70,12 @@ def test_bc_claim_is_exclusive_past_the_plain_claim_ttl(tmp_path: Path) -> None:
     clock = _Clock()
     st = _store(tmp_path, clock)
     st.publish(JID, _manifest(), b"PK\x03\x04fake")
-    assert st.claim(JID, worker_id="cloud-1")
+    assert st.claim(LeaseSpec(JID, worker_id="cloud-1"))
     clock.tick(400.0)  # > 300s
-    assert st.claim(JID, worker_id="cloud-2") is None
+    assert st.claim(LeaseSpec(JID, worker_id="cloud-2")) is None
     assert st.lease_worker(JID) == "cloud-1"
     clock.tick(450.0)  # 认领后 850s，仍在 900s 窗内
-    assert st.claim(JID, worker_id="cloud-2") is None
+    assert st.claim(LeaseSpec(JID, worker_id="cloud-2")) is None
 
 
 def test_bc_epoch_progress_renews_the_window_then_stale_yields(tmp_path: Path) -> None:
@@ -82,13 +83,13 @@ def test_bc_epoch_progress_renews_the_window_then_stale_yields(tmp_path: Path) -
     clock = _Clock()
     st = _store(tmp_path, clock)
     st.publish(JID, _manifest(), b"PK\x03\x04fake")
-    assert st.claim(JID, worker_id="cloud-1")
+    assert st.claim(LeaseSpec(JID, worker_id="cloud-1"))
     clock.tick(600.0)
     st.note_job_progress(JID, clock())  # 一次 epoch 回传
     clock.tick(600.0)  # 距认领 1200s，但距进度 600s < 900s
-    assert st.claim(JID, worker_id="cloud-2") is None
+    assert st.claim(LeaseSpec(JID, worker_id="cloud-2")) is None
     clock.tick(400.0)  # 进度静默 1000s > 900s ⇒ 让出
-    assert st.claim(JID, worker_id="cloud-2")
+    assert st.claim(LeaseSpec(JID, worker_id="cloud-2"))
 
 
 def test_course_lock_survives_hub_and_trainer_restart(tmp_path: Path) -> None:
@@ -96,22 +97,22 @@ def test_course_lock_survives_hub_and_trainer_restart(tmp_path: Path) -> None:
     clock = _Clock()
     st = _store(tmp_path, clock)
     st.publish(JID, _manifest(), b"PK\x03\x04fake")
-    assert st.claim(JID, worker_id="cloud-1")
+    assert st.claim(LeaseSpec(JID, worker_id="cloud-1"))
     # hub 重启：新 store，内存租约全空，但课程级独占记录在盘上
     st2 = _store(tmp_path, clock)
     assert st2.bc_exclusive_owner() == ("cloud-1", JID)
-    assert st2.claim(JID, worker_id="cloud-2") is None
+    assert st2.claim(LeaseSpec(JID, worker_id="cloud-2")) is None
     # trainer 重启：同课换了新 job_id，别的云机一样领不走
     jid2 = "e" * 16
     st2.publish(jid2, _manifest(jid2, it=2), b"PK\x03\x04fake")
-    assert st2.claim(jid2, worker_id="cloud-2") is None
+    assert st2.claim(LeaseSpec(jid2, worker_id="cloud-2")) is None
     # 原 worker 的 epoch 进度仍能续窗（落盘）
     clock.tick(600.0)
     st2.note_job_progress(JID, clock())
     clock.tick(600.0)  # 距认领 1200s，但距进度 600s < 900s
-    assert st2.claim(jid2, worker_id="cloud-2") is None
+    assert st2.claim(LeaseSpec(jid2, worker_id="cloud-2")) is None
     clock.tick(400.0)  # 进度静默 > 900s ⇒ 让出
-    assert st2.claim(jid2, worker_id="cloud-2")
+    assert st2.claim(LeaseSpec(jid2, worker_id="cloud-2"))
 
 
 def test_same_worker_tag_cannot_steal(tmp_path: Path) -> None:
@@ -119,15 +120,15 @@ def test_same_worker_tag_cannot_steal(tmp_path: Path) -> None:
     clock = _Clock()
     st = _store(tmp_path, clock)
     st.publish(JID, _manifest(), b"PK\x03\x04fake")
-    assert st.claim(JID, worker_id="kaggle-t")
+    assert st.claim(LeaseSpec(JID, worker_id="kaggle-t"))
     st2 = _store(tmp_path, clock)  # hub 重启：内存租约全丢，锁文件还在
     jid2 = "f" * 16
     st2.publish(jid2, _manifest(jid2, it=2), b"PK\x03\x04fake")
     # 同一 worker 名（另一台机器）不能把同一门课的第二份 job 领走
-    assert st2.claim(jid2, worker_id="kaggle-t") is None
-    assert st2.claim(JID, worker_id="kaggle-t") is None
+    assert st2.claim(LeaseSpec(jid2, worker_id="kaggle-t")) is None
+    assert st2.claim(LeaseSpec(JID, worker_id="kaggle-t")) is None
     clock.tick(901.0)
-    assert st2.claim(jid2, worker_id="kaggle-t")
+    assert st2.claim(LeaseSpec(jid2, worker_id="kaggle-t"))
 
 
 def test_epoch_rebuilds_lock_when_file_missing(tmp_path: Path) -> None:
@@ -135,16 +136,16 @@ def test_epoch_rebuilds_lock_when_file_missing(tmp_path: Path) -> None:
     clock = _Clock()
     st = _store(tmp_path, clock)
     st.publish(JID, _manifest(), b"PK\x03\x04fake")
-    assert st.claim(JID, worker_id="kaggle-t")
+    assert st.claim(LeaseSpec(JID, worker_id="kaggle-t"))
     st._bc_lock_clear(JID)  # 模拟旧代码认领：内存租约在、锁文件不在
     st2 = _store(tmp_path, clock)  # hub 重启
     assert st2.bc_exclusive_owner() == ("", "")
     st2.note_job_progress(JID)  # 原 worker 的 epoch 到达（无租约也收）
     assert st2.bc_exclusive_owner() == ("", JID)  # 持有者未知，但锁已重建
-    assert st2.claim(JID, worker_id="kaggle-t") is None
-    assert st2.claim(JID, worker_id="cloud-2") is None
+    assert st2.claim(LeaseSpec(JID, worker_id="kaggle-t")) is None
+    assert st2.claim(LeaseSpec(JID, worker_id="cloud-2")) is None
     clock.tick(901.0)
-    assert st2.claim(JID, worker_id="cloud-2")
+    assert st2.claim(LeaseSpec(JID, worker_id="cloud-2"))
 
 
 def _hub(tmp_path: Path, clock: _Clock) -> _HubQueue:
@@ -167,7 +168,7 @@ def test_locked_bc_course_is_not_offered_to_other_workers(tmp_path: Path) -> Non
     ppo_jid = "e" * 16
     bc.publish(JID, _manifest(JID, kind="bc"), b"PK\x03\x04fake")
     ppo.publish(ppo_jid, _manifest(ppo_jid, kind="ppo"), b"PK\x03\x04fake")
-    assert bc.claim(JID, worker_id="cloud-1")
+    assert bc.claim(LeaseSpec(JID, worker_id="cloud-1"))
     hub2 = _hub(tmp_path, clock)  # hub 重启：内存租约全丢，独占记录在盘上
     ids = {c["job_id"] for c in hub2.peek_jobs(worker_id="cloud-2")}
     assert JID not in ids, "别人独占的 BC 课不许出现在 peek（预取腿同源）"

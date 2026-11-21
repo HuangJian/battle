@@ -61,6 +61,7 @@ from hub.queue_offline import (
     stall_verdict,
 )
 from hub.server import _HubQueue, make_server
+from hub.store_leases import LeaseSpec
 from hub.task_pack import lease_verdict
 from tests.helpers.http_server import serve_fast
 
@@ -1493,7 +1494,7 @@ def test_cancelled_job_is_rejected_even_with_stale_peek(tmp_path: Path) -> None:
         assert store is not None
         assert store.cancel_unsettled_jobs(reason="test") == ["gone-1"]
         assert store.claimable_job_ids() == []  # 账本真闸：池子里没有它了
-        assert store.claim("gone-1", worker_id="w1") is None  # 即时闸：硬领也被拒
+        assert store.claim(LeaseSpec("gone-1", worker_id="w1")) is None  # 即时闸：硬领也被拒
         assert store.lease_worker("gone-1") == "", "被拒的认领不该留下租约"
     finally:
         srv.shutdown()
@@ -1510,7 +1511,7 @@ def test_republish_after_cancel_revives_job(tmp_path: Path) -> None:
         st = hub.course_store("c5-gae")
         assert st is not None
         assert st.cancel_unsettled_jobs(reason="test") == ["rev-1"]
-        assert st.claim("rev-1", worker_id="w1") is None  # 未复活：净态仍是撤单
+        assert st.claim(LeaseSpec("rev-1", worker_id="w1")) is None  # 未复活：净态仍是撤单
         # 逐字复刻生产写者的那一行（同一 jsonl、同一事件形状）
         with open(st.jsonl_path, "a", encoding="utf-8") as f:
             f.write(
@@ -1520,7 +1521,7 @@ def test_republish_after_cancel_revives_job(tmp_path: Path) -> None:
                 + "\n"
             )
         assert "rev-1" in st.claimable_job_ids()  # 池可见
-        token = st.claim("rev-1", worker_id="w1")  # 即时闸对账 ⇒ 放行
+        token = st.claim(LeaseSpec("rev-1", worker_id="w1"))  # 即时闸对账 ⇒ 放行
         assert token is not None
         assert st.is_cancelled("rev-1") is False
     finally:

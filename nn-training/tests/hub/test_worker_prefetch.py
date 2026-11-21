@@ -29,6 +29,7 @@ if str(ROOT) not in sys.path:
 from common.protocol import WORKER_PREFETCH_TTL_SEC
 from hub.admin import WORKER_PREFETCH_BODY_MAX, AdminRoutes
 from hub.queue import _HubQueue
+from hub.store_leases import LeaseSpec
 
 JID = "j" * 16
 OTHER = "k" * 16
@@ -127,7 +128,7 @@ def test_inflight_rows_carry_course_and_it(tmp_path: Path) -> None:
     clock = _Clock()
     hub = _hub_with_course(tmp_path, clock)
     _publish(hub, "c1", JID, it=121)
-    assert hub.claim(JID, worker_id="kaggle-c")
+    assert hub.claim(LeaseSpec(JID, worker_id="kaggle-c"))
 
     row = hub.queue_state()["courses"]["c1"]["inflight"][0]
     assert row["job_id"] == JID

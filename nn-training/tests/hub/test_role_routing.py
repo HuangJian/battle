@@ -45,6 +45,7 @@ from common.protocol import (
     role_of,
 )
 from hub.server import _HubQueue, _JobStore
+from hub.store_leases import LeaseSpec
 from remote.push_dispatch import PushDispatcher
 from tests.helpers.hub_poll import ROLE_HEADER as HELPER_ROLE_HEADER
 
@@ -277,11 +278,11 @@ def test_store_gate_rejects_role_mismatch_without_touching_the_lease(tmp_path: P
     """拒绝必须是**确定性**的（不是 409 busy）且**零副作用**：不写租约、不占 owner。"""
     store = _store(tmp_path)
     store.publish(OFF_JID, _manifest(OFF_JID, kind="run"), b"PK\x03\x04fake")
-    out = store.claim_outcome(OFF_JID, worker_id="online-disk", role=ROLE_ONLINE)
+    out = store.claim_outcome(LeaseSpec(OFF_JID, worker_id="online-disk", role=ROLE_ONLINE))
     assert out.ok is False and out.status == "role"
     assert store.inflight() == [] and not store.has_lease(OFF_JID), "拒了就不许留痕"
     assert store.claimable_job_ids() == [OFF_JID], "还回池里等对的人"
-    ok = store.claim_outcome(OFF_JID, worker_id="offline-disk", role=ROLE_OFFLINE)
+    ok = store.claim_outcome(LeaseSpec(OFF_JID, worker_id="offline-disk", role=ROLE_OFFLINE))
     assert ok.ok is True and ok.status == "ok"
 
 
@@ -358,9 +359,13 @@ def test_claim_paths_are_enumerated_and_all_carry_role() -> None:
         f"认领调用点集合变了：得到 {sorted(got.items())}，期望 {sorted(_EXPECTED_CALL_SITES.items())}"
         "——新路径必须自己把 role 送进 `_claim_locked`（见本文件头的 ③）"
     )
+    # 2026-11-21（P0-3）：租约族收成 `LeaseSpec` 之后，role 有两种带法 —— 直接 `role=`，
+    # 或整包传 `LeaseSpec(...)` / 已在手的 `spec`（role 是它的字段，随包一起走）。
+    # 判据仍是「这一跳有没有把 role 送进临界区」，只是形状从一个变成了两种。
     for key, texts in found.items():
         for t in texts:
-            assert "role=" in t, f"{key[0]}:{key[1]} 这一跳没带 role ⇒ 绕过归属闸：{t}"
+            carries = "role=" in t or "LeaseSpec(" in t or re.search(r"\bspec\b", t)
+            assert carries, f"{key[0]}:{key[1]} 这一跳没带 role ⇒ 绕过归属闸：{t}"
 
 
 def test_claim_next_partitions_courses_by_job_role(tmp_path: Path) -> None:

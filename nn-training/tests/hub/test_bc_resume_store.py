@@ -22,6 +22,7 @@ import shutil
 from pathlib import Path
 
 from hub.server import _JobStore
+from hub.store_leases import LeaseSpec
 
 
 def _clock(t: float = 1000.0):
@@ -147,7 +148,7 @@ def test_bc_epoch_lease_gate(tmp_path: Path) -> None:
     jd = tmp_path / "jobs" / jid
     jd.mkdir(parents=True)
     (jd / "manifest.json").write_text("{}", encoding="utf-8")
-    tok = store.claim(jid, ttl=300)
+    tok = store.claim(LeaseSpec(jid, ttl=300))
     assert tok is not None
     assert store.result_token_ok(jid, "wrong-token") is False
     assert store.result_token_ok(jid, tok) is True

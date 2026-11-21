@@ -38,6 +38,7 @@ if str(ROOT) not in sys.path:
 
 from common.protocol import FAIL_NAME, JobFailedError, normalize_manifest
 from hub.server import _JobStore
+from hub.store_leases import LeaseSpec
 from remote.hub_client import PublishSpec, publish_job, report_job_failure, wait_job
 from tests.helpers.http_server import serve_fast
 from tests.remote.test_remote_ppo import (
@@ -79,7 +80,7 @@ def test_post_fail_records_reason_and_makes_result_terminal(tmp_path: Path) -> N
     base, store, srv, th, jid = _publish_min(tmp_path)
     try:
         assert store.claimable_job_ids() == [jid]
-        token = store.claim(jid)
+        token = store.claim(LeaseSpec(jid))
         assert token
 
         st, body = _post_fail(
@@ -154,7 +155,7 @@ def test_post_fail_rejects_bad_body_and_foreign_lease(tmp_path: Path) -> None:
     """缺 reason / 坏 JSON / 非租约持有人 / 未发布 job —— 一律响亮拒绝，不落假失败。"""
     base, store, srv, th, jid = _publish_min(tmp_path)
     try:
-        token = store.claim(jid)
+        token = store.claim(LeaseSpec(jid))
         assert token
         assert _post_fail(base, jid, {}, lease=token)[0] == 400  # reason 必填
         assert _post_fail(base, jid, {"reason": ""}, lease=token)[0] == 400
@@ -183,7 +184,7 @@ def test_wait_job_fails_fast_with_reason_instead_of_timeout(tmp_path: Path) -> N
     """25 分钟预算内**立刻**抛 JobFailedError（原因/类名/现场随行）——本文件的核心断言。"""
     base, store, srv, th, jid = _publish_min(tmp_path)
     try:
-        token = store.claim(jid)
+        token = store.claim(LeaseSpec(jid))
         assert token
         ok = report_job_failure(
             base,
@@ -217,7 +218,7 @@ def test_wait_job_timeout_confirm_recognizes_failure(tmp_path: Path) -> None:
     """收尾二次确认（H3）也要认失败：超时那一刻若已 failed → 抛 JobFailedError 而非超时。"""
     base, store, srv, th, jid = _publish_min(tmp_path)
     try:
-        token = store.claim(jid)
+        token = store.claim(LeaseSpec(jid))
         assert token
         assert _post_fail(base, jid, {"reason": "TS 运行时取不到（ts_code 404）"}, lease=token)[0] == 200
         with pytest.raises(JobFailedError) as ei:
@@ -236,7 +237,7 @@ def test_worker_report_job_failure_reaches_hub(tmp_path: Path) -> None:
 
     base, store, srv, th, jid = _publish_min(tmp_path)
     try:
-        token = store.claim(jid)
+        token = store.claim(LeaseSpec(jid))
         assert token
         ok = worker_report(
             base,
