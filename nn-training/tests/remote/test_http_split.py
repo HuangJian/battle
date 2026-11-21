@@ -115,7 +115,7 @@ def test_http_module_has_no_global_statement_any_more() -> None:
     """
     globals_ = [node.names for node in ast.walk(_tree(HTTP_FILE)) if isinstance(node, ast.Global)]
     assert globals_ == [], f"http.py 又出现了 `global`：{globals_}"
-    # `worker.py` 自己还有一条 `global _ACTIVE_CODE_SHA`（`GLOBAL_BASELINE` 在册），但它不该
+    # `worker.py` 自己那处会话指纹（`_CODE`）也已对象化，但它不该
     # 重绑**本模块转发的**那两份状态（否则又会造出一个停在旧值的快照）。
     forwarded = {"_opener", "_POLL_WARN_AT", "_OPENERS", "_WARNS"}
     worker_globals = [

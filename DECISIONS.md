@@ -9039,3 +9039,15 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **棘轮**：`GLOBAL_BASELINE` 顺手删掉 `hub/admin.py: 1`（§246 已把该文件 `global` 清零）。
 - **守卫**：`tests/worker/test_node_identity.py` +3（唯一持有者 + 无裸容器 / 容量与挤轮 / 钉一次且
   重复 ping 幂等）。行为差异：无。详见 `docs/nn/engineering.md` §247。
+
+## §2026-11-21-code-session（`remote/worker._ACTIVE_CODE_SHA` → `CodeSession`）
+
+- **背景**：热替换护栏的状态是模块级 `str | None`，只在 `_guard_code_and_device` 里靠 `global` 重绑；
+  「第二个 job 不许覆盖」靠 `if / elif` 的书写顺序，而不是方法自身的约束。
+- **决定**：`CodeSession.pin()` 只允许钉一次（重复钉抛 `RuntimeError`，属调用方 bug），`active` 是唯一
+  读面，`clear_sha()` 作单测清场；模块只留 `_CODE = CodeSession()`，`_guard_code_and_device` 去 `global`。
+  它仍是**进程级**状态（换代码版本只能换进程），这条写进类头并链到 `offline_boot` 的转译现场。
+- **棘轮**：`GLOBAL_BASELINE` 删 `remote/worker.py: 1`。
+- **守卫**：状态契约三张清单随迁 + 新增 `test_code_session_pins_once_and_refuses_a_second_pin`；
+  `test_ppo_backend_switch` 的注入点改为 `CodeSession()`。行为差异：无。
+  详见 `docs/nn/engineering.md` §248。

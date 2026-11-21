@@ -160,7 +160,6 @@ GLOBAL_BASELINE = {
     "biz/reward_context.py": 2,
     "remote/payload_slim.py": 1,
     "remote/tailscale_boot.py": 1,
-    "remote/worker.py": 1,
     "tools/forkdist.py": 2,
     "tools/task.py": 1,
 }

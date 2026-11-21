@@ -25,6 +25,30 @@
 
 ---
 
+## §248 P0-5 存量第十一处：`remote/worker._ACTIVE_CODE_SHA` → `CodeSession`（2026-11-21）
+
+热替换护栏的唯一状态：**本会话第一个 job 的 `code_sha256` 就是会话的代码版本，之后不一致就拒跑**
+（`sys.path.insert` 只影响尚未导入的模块 ⇒ 已 import 的 ppo/rl 不会重读，旧代码会安静地跑出新结果）。
+旧形状是模块级 `str | None` + `_guard_code_and_device` 里的 `global` 重绑：函数里只有一行 `global`，
+「谁先钉、第二个 job 会不会覆盖」要靠读 `if / elif` 自己拼。
+
+**新形状**：`CodeSession`（`pin` / `active` / `clear_sha`）。`pin` **只允许一次**，重复钉直接抛
+`RuntimeError`——「第二次不许覆盖」从 `elif` 的顺序约定变成方法自身的约束；`active` 是唯一读面。
+模块只留 `_CODE = CodeSession()`，`_guard_code_and_device` 不再有 `global`，比对逻辑是
+「先取 `active`，`None` ⇒ 钉，不等 ⇒ 抛 `CodeChangedError`」。
+
+**它仍是进程级、不是每 job 一份**：类头把这条与 `offline_boot` 的 `CodeChangedError` 转译写在一起——
+同一个 kernel 里换代码版本只能换进程（2026-10-29 现场：重跑 cell 时裸抛像崩溃）。
+
+**守卫**：`tests/remote/test_worker_state_contract.py` —— 状态表与三个宿主清单随迁
+（`OWNER_GLOBAL_REBOUND["worker"]` 清空、`OWNER_INSTANCES["worker"] = {"_CODE"}`），漏登记会红；
+夹具改为换掉 `_CODE` 实例；新增 `test_code_session_pins_once_and_refuses_a_second_pin`
+（第二次钉抛、钉子不改写、`clear_sha` 归零）。`test_ppo_backend_switch` 的注入点改成新的
+`CodeSession()`。`GLOBAL_BASELINE` 删 `remote/worker.py: 1`（该文件 `global` 归零）。
+
+**行为差异**：无。钉一次 / 不一致抛 `CodeChangedError` / `prep_b` 那行读数 / 失败即退出全未变；
+新增的 `RuntimeError` 只在「护栏被绕过、同一会话要钉第二个 sha」时出现——那是调用方 bug。
+
 ## §247 P0-5 存量第十处：`worker/node_identity._LEDGER` → `BootLedger`（2026-11-21）
 
 a98 判据的账本（`round key → node id → {"bootId", "pid"}`，只留最近 8 轮）原来是模块级裸 dict，

@@ -13,7 +13,7 @@
 
 | 名字 | 形态 | 宿主 | 谁改 | 测试可见 |
 |---|---|---|---|---|
-| `_ACTIVE_CODE_SHA` | `str \\\\| None`（会话代码指纹） | `worker` | `run_job`（`global`） | 间接（`test_remote_hotswap` 测异常语义） |
+| `_CODE` | `CodeSession()` 实例（会话代码指纹，2026-11-21 对象化） | `worker` | `_guard_code_and_device`（`pin` / `clear_sha`） | 间接（`test_remote_hotswap` 测异常语义） |
 | `_RATE` | `RateReference()` 实例（参照 + 迟滞计数，2026-11-21 对象化） | `wire` | `rate_reference().sample` / `clear_samples` | **是**（`test_wire_reroll` / `test_rate_reference`） |
 | `_WIRE` | `dict[str, dict]`（每 job 传输账） | `wire` | `_wire_bucket` / `_wire_flush` | **是**（多文件直接 `.clear()` 并断言封顶） |
 | `_BULK` | `BulkScheduler()` **实例** | `wire` | `set_bulk_log` / `pace` / `slot` / `control` / `reset` | **是**（直接 `.reset()` / `.inflight()`） |
@@ -27,7 +27,8 @@
 * 判据参照（`wire._RATE`）与 `http` 的两份状态（`_OPENERS` / `_WARNS`）都是 P0-5 收成的**对象**，
   公开读面 `rate_reference()` / `openers()` / `warn_throttle()` 是**唯一**入口：没有 `global`，
   也就没有「停在旧值的快照名」；
-* `worker` 里只剩 `_ACTIVE_CODE_SHA` 一处 `global`（会话代码指纹，见上表）。
+* `worker` 里**没有** `global` 了：会话代码指纹是 `_CODE`（`CodeSession`）实例，`pin` 只钉一次
+  （重复钉会抛），读面是 `active`——没有「函数里 `global` 重绑一个 `str | None`」那个形状。
 
 三类断言各司其职：**① 清点不许漂移**（拆走 / 新增状态都必须过这里）· **② 别处不许有自己的副本**
 （防「两个 worker 各记一份账」）· **③ 状态行为可复现**（同一序列跑两遍逐字段相同 + 此前无覆盖的节流）。
@@ -63,14 +64,14 @@ OWNER_FILES = {"worker": WORKER, "wire": WIRE, "http": HTTP}
 #: 顶层**可变容器字面量**绑定（拆走或新增都必须改这里——这是有意的手工清单）。
 OWNER_CONTAINERS = {"worker": set(), "wire": {"_WIRE"}, "http": set()}
 #: 函数内以 `global` **重绑**的脚本单例（懒建 / 会话级标量）。
-OWNER_GLOBAL_REBOUND = {
-    "worker": {"_ACTIVE_CODE_SHA"},
+OWNER_GLOBAL_REBOUND: dict[str, set[str]] = {
+    "worker": set(),
     "wire": set(),
     "http": set(),
 }
 #: 顶层构造的**有状态对象**实例（传输调度器 + http 的两份进程级状态）。
 OWNER_INSTANCES = {
-    "worker": set(),
+    "worker": {"_CODE"},
     "wire": {"_BULK", "_RATE"},
     "http": {"_OPENERS", "_WARNS"},
 }
@@ -91,13 +92,14 @@ IDENTITY_STATES = {"worker": {"_WIRE", "_BULK"}}
 @pytest.fixture(autouse=True)
 def _restore_worker_state():
     """本文件动的是**跨用例共享**的模块状态——前后都恢复，别污染同一 xdist worker 的其它用例。"""
-    sha = W._ACTIVE_CODE_SHA
+    code = W._CODE
+    W._CODE = W.CodeSession()
     wire = dict(wire_mod._WIRE)
     wire_mod._BULK.reset()
     wire_mod.rate_reference().clear_samples()
     http_mod.warn_throttle().forget_all()
     yield
-    W._ACTIVE_CODE_SHA = sha
+    W._CODE = code
     wire_mod._WIRE.clear()
     wire_mod._WIRE.update(wire)
     http_mod.warn_throttle().forget_all()
@@ -335,8 +337,25 @@ def test_state_shapes_are_pinned() -> None:
     assert isinstance(wire_mod._WIRE, dict)
     assert isinstance(http_mod.warn_throttle(), http_mod.WarnThrottle)
     assert isinstance(wire_mod.best_rate(), float) and wire_mod.best_rate() >= 0.0
-    assert W._ACTIVE_CODE_SHA is None or isinstance(W._ACTIVE_CODE_SHA, str)
+    assert W._CODE.active is None or isinstance(W._CODE.active, str)
     assert isinstance(wire_mod._BULK, BulkScheduler)
     assert wire_mod._BULK.inflight() == 0
     opener = http_mod.openers().get()
     assert hasattr(opener, "open")
+
+
+def test_code_session_pins_once_and_refuses_a_second_pin() -> None:
+    """会话指纹只钉一次：第二个不同 sha 必须**抛**（静默覆盖 = 用旧代码跑出新结果）。
+
+    旧形状是模块级 `_ACTIVE_CODE_SHA` + `global` 重绑：第二次 job 的 sha 在代码里没有「拒绝」这一步，
+    全靠 `_guard_code_and_device` 的 `elif` 分支先比后抛——两处形状各写一遍就会漂。
+    """
+    sess = W.CodeSession()
+    assert sess.active is None
+    sess.pin("a" * 64)
+    assert sess.active == "a" * 64
+    with pytest.raises(RuntimeError):
+        sess.pin("b" * 64)
+    assert sess.active == "a" * 64, "被拒绝的重钉不得改写钉子"
+    sess.clear_sha()
+    assert sess.active is None

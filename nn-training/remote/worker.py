@@ -19,8 +19,8 @@
 空闲退出 / 回传收尾）· `main`（CLI 入口：argparse → 子进程或监督器模式），外加
 `_alive_log` / `_guard_code_and_device` / `_start_services` 等小件与**整页**显式转发门面。
 
-`_ACTIVE_CODE_SHA` 与 `make_uploader(upload=post_result)` 的调用点**刻意留在这里**：
-它们是会话级单例 / patch 接缝（`test_worker_state_contract` 与
+`_CODE`（`CodeSession`，会话级代码指纹）与 `make_uploader(upload=post_result)` 的调用点
+**刻意留在这里**：它们是会话级单例 / patch 接缝（`test_worker_state_contract` 与
 `test_job_lifecycle_split` 钉住宿主），搬走会让既有注入静默失效。
 """
 
@@ -476,19 +476,19 @@ d14_corpus_match = protocol_d14_corpus_match
 
 
 def _guard_code_and_device(st: JobState) -> None:
-    """热替换护栏（`_ACTIVE_CODE_SHA`）+ 设备归一化（**必须在 kind 分叉之前**）。"""
-    global _ACTIVE_CODE_SHA
+    """热替换护栏（`_CODE`）+ 设备归一化（**必须在 kind 分叉之前**）。"""
     jid, manifest, log = st.jid, st.manifest, st.log
 
     # ---- 热替换护栏（2026-09-11）：本进程已 import 的代码版本必须 == 本 job 要求 ----
     # sys.path.insert 只影响**尚未导入**的模块；已进 sys.modules 的 ppo/rl 不会重读。
     # 不查就会用旧代码跑出新结果：零报错、commit_echo 也照样回显，只有 sha 能揭穿。
     _job_sha = str(manifest["code_sha256"])
-    if _ACTIVE_CODE_SHA is None:
-        _ACTIVE_CODE_SHA = _job_sha
+    _pinned = _CODE.active
+    if _pinned is None:
+        _CODE.pin(_job_sha)
         st.prep_b.add("进程代码 sha", f"{_job_sha[:12]}…")
-    elif _job_sha != _ACTIVE_CODE_SHA:
-        raise CodeChangedError(_ACTIVE_CODE_SHA, _job_sha)
+    elif _job_sha != _pinned:
+        raise CodeChangedError(_pinned, _job_sha)
 
     # ---- 设备归一化（**必须在 kind 分叉之前**）----
     # BC 与 PPO 两条链都要用 device，且都要能接住未经解析的 "auto"：push-first 引导在
@@ -564,7 +564,7 @@ def run_job(
 
     相位（2026-11-18，长函数存量第三十五刀）：下载前判据 / 物料落地 / bc 分叉 /
     权重五源 / iter rollout / 红线与 D14 / 回显七段住 `remote/job_shell.py`；
-    本函数只保留**顺序编排** + 热替换护栏（`_ACTIVE_CODE_SHA` 是 worker 的模块单例）
+    本函数只保留**顺序编排** + 热替换护栏（`_CODE` 是 worker 的进程级单例）
     + 训练核调用（`remote.train_core` 是 L4，搬进 job_shell 会把它顶到 L5）。
     """
     t_prep = time.time()
@@ -649,8 +649,43 @@ def run_job(
 # ------------------------------------------------------------------ 主循环
 
 
-#: 本进程**已 import 的**代码 sha（对比 manifest["code_sha256"] 揭穿热替换）
-_ACTIVE_CODE_SHA: str | None = None
+class CodeSession:
+    """本进程**已 import 的**代码 sha —— 热替换护栏的唯一状态（P0-5，2026-11-21）。
+
+    护栏的语义只有一句：**本会话的第一个 job 决定会话的代码版本，之后不一致就拒跑**。
+    旧形状是模块级 `_ACTIVE_CODE_SHA` + 在 `_guard_code_and_device` 里 `global` 重绑 —— 读的人
+    在函数里只看到 `global`，得自己推「谁先钉、第二次会不会覆盖」。收进对象后「只钉一次」是一条
+    会抛的 `if`（重复钉 = 调用方 bug，不是静默覆盖）。
+
+    **它是进程级的，不是每 job 一份**：`sys.path.insert` 只影响尚未导入的模块，已进
+    `sys.modules` 的 ppo/rl 不会重读 ⇒ 同一个 kernel 里换 job 的代码版本，只能用「换进程」解决
+    （`remote/offline_boot.py` 的 `CodeChangedError` 转译就是为这个现场写的）。
+    """
+
+    def __init__(self) -> None:
+        self._sha: str | None = None
+
+    @property
+    def active(self) -> str | None:
+        """本会话已钉住的 sha（`None` = 还没跑过 job）。"""
+        return self._sha
+
+    def pin(self, job_sha: str) -> None:
+        """钉住本会话的代码 sha。**只允许钉一次**（重复钉说明护栏被绕过了）。"""
+        if self._sha is not None:
+            raise RuntimeError(
+                f"代码指纹已经钉住（{self._sha[:12]}…），不能再钉 {job_sha[:12]}… "
+                "—— 换代码版本必须换进程"
+            )
+        self._sha = job_sha
+
+    def clear_sha(self) -> None:
+        """清场（单测用；生产不调用——清了等于放过一次热替换）。"""
+        self._sha = None
+
+
+#: 本进程那份会话指纹（`_guard_code_and_device` 唯一读者；`CodeChangedError` 见 `remote/hotswap`）。
+_CODE = CodeSession()
 
 #: 空闲期存活日志的间隔（秒）。**两处**调用（无 job / 纯停机达令）必须同频：
 #: 它们是同一条读数的两个相位，各写一份就会各自漂（2026-09-11 现场：停机期日志静默被误读成
@@ -805,7 +840,7 @@ def worker_loop(
     hub_urls：多 hub 轮询（P3b §3.8：`--poll` 可重复/逗号分隔，同 token）。
       None/空 → [base_url]（默认行为零变化）。多 hub 时 round-robin 串行 run_job
       （单 GPU 互挤否决项），work_dir 按 hub 索引分区（`hub0/<jid>`…），code_cache
-      留共享根。异 commit job 由既有 _ACTIVE_CODE_SHA 守卫转 86 + 监督器重拉。
+      留共享根。异 commit job 由既有 `_CODE` 守卫转 86 + 监督器重拉。
     """
     done = 0
     _prev_yield, _prev_p1_observer, pf_stores = _setup_bulk_yield(bulk_yield, log)

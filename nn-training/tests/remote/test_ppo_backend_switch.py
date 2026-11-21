@@ -249,7 +249,7 @@ def _drive_ppo_to_core(
         ),
     )
     monkeypatch.setattr(SHELL, "_resolve_weights", lambda **_k: (None, "payload", 0))
-    monkeypatch.setattr(worker, "_ACTIVE_CODE_SHA", None)
+    monkeypatch.setattr(worker, "_CODE", worker.CodeSession())
     monkeypatch.setattr(worker, "paddle_cuda_available", probe)
     monkeypatch.setattr(worker, "validate_result", lambda *_a, **_k: None)
     monkeypatch.setattr(worker, "_persist_result", lambda *_a, **_k: None)

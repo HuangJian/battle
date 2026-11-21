@@ -1055,7 +1055,7 @@ def _ensure_code(
     ## 为什么 `sys.path.insert` 在这里
 
     落地与「可 import」是这一步的同一件事：`sys.path` 只影响**尚未导入**的模块，所以插完
-    还要宿主那道热替换护栏（`_ACTIVE_CODE_SHA`）去挡「已 import 的旧代码」——那是**进程**
+    还要宿主那道热替换护栏（`_CODE` / `CodeSession`）去挡「已 import 的旧代码」——那是**进程**
     的状态，因此留宿主，不搬。
     """
     # ---- commit 校验：下载 code.zip 解压到 sys.path（替代 git 同步，D6） ----

@@ -18,7 +18,7 @@ echo_smoke_result --echo：不跑 PPO，原样回显 init 权重
 所以本模块不 import `remote.offline_greedy`(L4)——拓扑秩因此是 **L4**（最深依赖
 `remote.download` / `remote.bc_job`，均 L3），`worker`(L5) 站在上面。
 
-⚠ 两段刻意**不搬**：热替换护栏（`_ACTIVE_CODE_SHA` 是 worker 的模块级单例，
+⚠ 两段刻意**不搬**：热替换护栏（`_CODE` 是 worker 的进程级单例，
 `test_worker_state_contract` 钉住宿主）与训练核调用（`remote.train_core` 是 L4，
 搬来会把本模块顶到 L5）。
 """
