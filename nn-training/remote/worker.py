@@ -160,9 +160,6 @@ from remote.download import (
 from remote.download import (
     download_ts_code as download_ts_code,
 )
-from remote.http import (
-    _POLL_WARN_AT as _POLL_WARN_AT,
-)
 
 # HTTP 传输核心（S4 第五步 → `remote/http.py`）：**显式转发**，见该模块头部。
 # 注入点分档：patch 后调宿主函数的仍 patch `remote.worker`；patch 后调
@@ -180,13 +177,19 @@ from remote.http import (
     BODY_TOTAL_TIMEOUT_SEC as BODY_TOTAL_TIMEOUT_SEC,
 )
 from remote.http import (
+    WARN_THROTTLE_SEC as WARN_THROTTLE_SEC,
+)
+from remote.http import (
+    ProxyOpeners as ProxyOpeners,
+)
+from remote.http import (
+    WarnThrottle as WarnThrottle,
+)
+from remote.http import (
     _get_opener as _get_opener,
 )
 from remote.http import (
     _get_with_retry as _get_with_retry,
-)
-from remote.http import (
-    _opener as _opener,
 )
 from remote.http import (
     _read_body as _read_body,
@@ -199,6 +202,12 @@ from remote.http import (
 )
 from remote.http import (
     _warn_non_200 as _warn_non_200,
+)
+from remote.http import (
+    openers as openers,
+)
+from remote.http import (
+    warn_throttle as warn_throttle,
 )
 
 # 作业工作区 / 产物落盘 / TAR / git 物化（S4 第六步 → `remote/job_fs.py`）：**显式转发**。

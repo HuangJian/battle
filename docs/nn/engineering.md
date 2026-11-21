@@ -25,6 +25,51 @@
 
 ---
 
+## §242 P0-5 存量第五处：`remote/http` 的 `_POLL_WARN_AT` + `_opener` → `WarnThrottle` / `ProxyOpeners`（2026-11-21）
+
+`remote/http.py` 里有两份**进程级状态**，形状都答不出「谁拥有、何时清」：
+
+| 旧形状 | 语义 | 病 |
+|---|---|---|
+| `_POLL_WARN_AT: dict[str, float]` | 非 200 告警按 `url:status` 每 60s 一条 | 窗口是调用点里的 `<= 60.0` 字面量，`clear()` 与「谁该清」都没有名字 |
+| `_opener`（`global _opener` 懒建） | 显式代理的 `OpenerDirector`，进程内建一次 | 重绑式模块标量 ⇒ `worker._opener` 是 import 那一刻的**快照**（转发表里挂了 `REBOUND_NAMES` 这个例外） |
+
+**新形状**（同一个模块，两个小类 + 两个访问器）：
+
+* `WarnThrottle(window_sec=WARN_THROTTLE_SEC)` —— `allow(key, now)` 放行即记账、`forget_all()`、
+  `__len__`。窗口成了**构造参数**（用例可以要 0 秒 = 每条都放行，也可以要 60 秒），
+  「查过就一定会记」也不再靠人读两行代码：`allow` 是原子的一步。
+  线程语义与旧的 dict 一致：**不加锁**（读改写不是原子的，最坏是两条线程各打一条日志，
+  比在日志路径上持锁便宜）。
+* `ProxyOpeners` —— `get()` 懒建一次、之后一直复用；`reset()` 是「下次重建」的**唯一**入口。
+  env 只在首次 `get()` 定型这条旧语义**逐字保留**（Colab 现场 2026-09-16：进程内改
+  `HTTP_PROXY` 不影响已建好的 opener），重建必须显式 `reset()`。
+* 访问器 `warn_throttle()` / `openers()`；模块内部也走访问器（`_warn_non_200` →
+  `warn_throttle().allow`，`_get_opener` → `openers().get()`）——**取用路径只有一条**，
+  用例替换公开名字就能接管，不必对私有名打桩。
+
+**转发面的变化**：`remote/worker.py` 删掉 `_POLL_WARN_AT` / `_opener` 两条转发，改成转发
+`WARN_THROTTLE_SEC` / `WarnThrottle` / `ProxyOpeners` / `openers` / `warn_throttle`。
+于是 `GLOBAL_BASELINE` 里的 `remote/http.py: 1` 归零、「转发名是快照」这个例外消失
+（`test_worker_forwards_every_moved_name` 恢复对**全部** `MOVED_NAMES` 的 `is` 恒等断言）。
+
+**守卫**：
+* 新增 `tests/remote/test_http_state.py` 6 条 —— 懒建只建一次 / `reset()` 重建且重新认 env
+  （读 `ProxyHandler.proxies` 的**行为**判据，不用源码措辞）/ 默认持有者一份且 `reset` 后仍只懒建一次 /
+  窗口内只放行一次、跨窗口再放行、不同 key 互不影响 / 0 秒窗口 = 下一条就放行 + `forget_all` /
+  缺省窗口 60s（59s 内吞掉、61s 放行）。
+* `tests/remote/test_http_split.py`：`MOVED_NAMES` 换新名字、删掉 `REBOUND_NAMES` 与它的
+  「快照语义」用例，新增「`http.py` 里零 `global`」与「顶层零可变容器字面量」（比旧的
+  「只有 `_POLL_WARN_AT`」更严）。
+* `tests/remote/test_worker_state_contract.py`：`http` 宿主的三个清单
+  （容器 / `global` 重绑 / 实例）随之改口径——`_POLL_WARN_AT` 与 `_opener` 出表，
+  `_OPENERS` / `_WARNS` 进实例表并标为 `INTERNAL_ONLY`（只经访问器，不进 worker 命名空间）。
+* `tests/remote/test_job_identity_collision.py`：两处 `monkeypatch.setattr(worker_mod, "_POLL_WARN_AT", {})`
+  改成替换公开读面 `http.warn_throttle`（私有打桩基线 3 → 1）。
+
+**行为差异**：无。节流键、60s 窗口、告警文案、opener 的 env 定型时机逐字未变；
+唯一的语义**收紧**是「改 `worker` 侧的旧转发名不会再影响行为」——那本来就是快照的病，不是契约。
+
 ## §241 P0-5 存量第四处：`_SCAN_CACHE` → `worker.resume.ScanCache`（失效时机写进类头，2026-11-21）
 
 `worker/resume.completed_pairs()` 是 run_rl 的轮询热路径（每 2 秒一次）。旧实现在模块级 dict 里

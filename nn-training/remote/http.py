@@ -1,9 +1,9 @@
 """remote/http.py — worker 的 **HTTP 传输核心**（S4 拆分，2026-09-23）。
 
 从 `remote/worker.py` 整簇搬出来的「怎么把一次请求发出去、读回来、失败了怎么重试」：
-`_opener`（显式 ProxyHandler 的懒建单例）· `BODY_*` 阈值 · `_read_body`（分块读 + 停滞/超预算
-判停）· `_request` · `_sched_headers` · `_get_with_retry`（退避重试 + 低速重抽）· `_POLL_WARN_AT`
-+ `_warn_non_200`（非 200 节流告警）。
+`ProxyOpeners`（显式 ProxyHandler 的懒建持有者）· `BODY_*` 阈值 · `_read_body`（分块读 + 停滞/
+超预算判停）· `_request` · `_sched_headers` · `_get_with_retry`（退避重试 + 低速重抽）·
+`WarnThrottle` + `_warn_non_200`（非 200 节流告警）。
 
 ## 为什么先拆它（而不是先拆业务簇）
 
@@ -20,9 +20,9 @@ heartbeat/release/fail）· 下载（payload/code/ts_code/blob）· 结果回传
 
 ## 注入点（拆分会**静默**坏掉的东西）
 
-* `_opener` / `_POLL_WARN_AT` 是**重绑 / 原地可变**的模块级状态，只在本模块被读写；
-  `worker._POLL_WARN_AT` 是同一 dict 的转发（`.clear()` 有效），`worker._opener` 则会停在
-  转发那一刻的旧值——测试要读懒建结果就得进本模块。
+* 两份进程级状态都住**显式对象**（P0-5，2026-11-21）：`openers()`（懒建 opener，`reset()`
+  重建）与 `warn_throttle()`（按 key 的 60s 节流）。`worker` 侧不再转发这两份状态——需要它们
+  的用例进本模块拿对象，而不是改一个会停在 import 那一刻的转发名。
 * `_request` 被大量测试 monkeypatch。**按调用点定档**：patch 后调宿主函数（`claim_job` /
   `heartbeat` / `post_result` / `download_*`）的，解析在 `worker` 命名空间 ⇒ 继续 patch
   `worker`；patch 后调 `_get_with_retry` / `_read_body`（在本模块）的 ⇒ 必须 patch `remote.http`。
@@ -111,17 +111,20 @@ __all__ = [
     "BODY_TOTAL_TIMEOUT_SEC",
     "CONTROL_TIMEOUT_BULK_FACTOR",
     "NET_ERRORS",
-    "_POLL_WARN_AT",
+    "WARN_THROTTLE_SEC",
     "BodyTimeoutError",
+    "ProxyOpeners",
+    "WarnThrottle",
     "_get_opener",
     "_get_with_retry",
-    "_opener",
     "_paced_body",
     "_read_body",
     "_recv_some",
     "_request",
     "_sched_headers",
     "_warn_non_200",
+    "openers",
+    "warn_throttle",
 ]
 
 # ------------------------------------------------------------------ HTTP 客户端
@@ -132,30 +135,67 @@ __all__ = [
 #: ⚠ 放宽的那一次**不进 P0 延迟分位表**（`bulk_sched.control(sample=False)`），理由见那里。
 CONTROL_TIMEOUT_BULK_FACTOR = 2.0
 
-#: 显式 ProxyHandler（Colab userspace 模式下 urlopen() 不读 HTTP_PROXY 环境变量，2026-09-16 实测）
-_opener: urllib.request.OpenerDirector | None = None
+class ProxyOpeners:
+    """显式 ProxyHandler 的 opener：**懒建一次，之后一直复用**（P0-5，2026-11-21）。
+
+    为什么要显式 ProxyHandler：Colab userspace 模式下 `urlopen()` 不读 `HTTP_PROXY` 环境变量
+    （2026-09-16 实测），不自己装代理就等于把非回环请求发成直连。
+
+    为什么是个对象（而不是模块级 `_opener` + `global`）：
+
+    * **重建有名字**：`reset()` 是唯一让「下次重建」的入口（用例换代理 env 后要用）；
+    * **不会有第二份**：懒建状态和读它的方法住在同一个对象里，`worker` 侧的转发名也不会再
+      「停在 import 那一刻的旧值」（旧形状的 `_opener` 就是这么变成快照的，见
+      `tests/remote/test_http_split.py` 的 `REBOUND_NAMES` 历史）；
+    * **env 只在首次 `get()` 定型**：这与旧语义逐字一致——进程内改了 `http_proxy` 不会影响
+      已经建好的 opener，要生效得 `reset()`。
+    """
+
+    def __init__(self) -> None:
+        self._opener: urllib.request.OpenerDirector | None = None
+
+    def get(self) -> urllib.request.OpenerDirector:
+        """懒建并复用（首次调用时读一次 env）。"""
+        if self._opener is None:
+            proxies: dict[str, str] = {}
+            for k in ("http_proxy", "HTTP_PROXY"):
+                v = os.environ.get(k)
+                if v:
+                    proxies["http"] = v
+                    break
+            for k in ("https_proxy", "HTTPS_PROXY"):
+                v = os.environ.get(k)
+                if v:
+                    proxies["https"] = v
+                    break
+            self._opener = (
+                urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
+                if proxies
+                else urllib.request.build_opener()
+            )
+        return self._opener
+
+    def reset(self) -> None:
+        """丢掉已建的 opener（下次 `get()` 重新读 env）——用例/热替换用。"""
+        self._opener = None
+
+
+#: 进程级那份 opener（生产唯一读者 = `_get_opener()`）。要隔离的用例自建 `ProxyOpeners()`。
+_OPENERS = ProxyOpeners()
+
+
+def openers() -> ProxyOpeners:
+    """默认 opener 持有者（观测/用例读面）。"""
+    return _OPENERS
 
 
 def _get_opener() -> urllib.request.OpenerDirector:
-    global _opener
-    if _opener is None:
-        proxies: dict[str, str] = {}
-        for k in ("http_proxy", "HTTP_PROXY"):
-            v = os.environ.get(k)
-            if v:
-                proxies["http"] = v
-                break
-        for k in ("https_proxy", "HTTPS_PROXY"):
-            v = os.environ.get(k)
-            if v:
-                proxies["https"] = v
-                break
-        _opener = (
-            urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
-            if proxies
-            else urllib.request.build_opener()
-        )
-    return _opener
+    """本进程那份显式代理 opener（历史入口，`worker` 侧仍转发它）。
+
+    走访问器而不是直接读 `_OPENERS`：模块内部也**只有一条**取用路径，用例替换公开入口
+    （`http.openers`）就能接管，不必对私有名打桩。
+    """
+    return openers().get()
 
 
 #: 大 body 下载的**空闲超时**（秒）：这么久没有新字节 = 判停滞，立刻放弃并重试。
@@ -337,8 +377,48 @@ def _read_body(
             progress(offset + len(buf), total, now - t0)
 
 
-#: "base_url:status" -> 上次告警墙钟（节流：非 200 时每分钟最多一条，别刷屏）
-_POLL_WARN_AT: dict[str, float] = {}
+#: 非 200 告警的节流窗口（秒）：同一「base_url:status」在窗口内只喊一条，别刷屏。
+WARN_THROTTLE_SEC = 60.0
+
+
+class WarnThrottle:
+    """按 key 的节流表：同一 key 在 `window_sec` 内只放行一次（P0-5，2026-11-21）。
+
+    与 `common.warn_once.WarnOnce` 的区别只在**能不能再来**：那个是「一辈子一次」（退役配置、
+    旧文件告警），这里是「每分钟一条」（hub 回 409 时 worker 的轮询会每 2 秒撞一次，一辈子一次
+    会把第二次真的故障也吞掉）。
+
+    线程语义：不加锁。读者 `allow()` 里的「读上次时刻 + 写本次时刻」不是原子的 ⇒ 两条线程同时
+    撞同一个 key 时**可能各打一条**。这是刻意的取舍：多一行日志，比在日志路径上持有锁便宜。
+    """
+
+    def __init__(self, window_sec: float = WARN_THROTTLE_SEC) -> None:
+        self._last: dict[str, float] = {}
+        self._window = max(0.0, float(window_sec))
+
+    def allow(self, key: str, now: float) -> bool:
+        """`now` 距上次放行超过窗口 ⇒ 记下并返回 `True`；否则 `False`（调用方直接 return）。"""
+        last = self._last.get(key)
+        if last is not None and now - last <= self._window:
+            return False
+        self._last[key] = now
+        return True
+
+    def forget_all(self) -> None:
+        """清空节流记忆（用例隔离 / 重新开始一轮）。"""
+        self._last.clear()
+
+    def __len__(self) -> int:
+        return len(self._last)
+
+
+#: 进程级那份节流表（生产唯一写者 = `_warn_non_200`）。
+_WARNS = WarnThrottle()
+
+
+def warn_throttle() -> WarnThrottle:
+    """默认节流表（观测/用例读面）。"""
+    return _WARNS
 
 
 def _reject_reason(body: bytes) -> str:
@@ -378,11 +458,8 @@ def _warn_non_200(
     """
     if log is None:
         return
-    now = time.time()
-    key = f"{base_url}:{status}"
-    if now - _POLL_WARN_AT.get(key, 0.0) <= 60:
+    if not warn_throttle().allow(f"{base_url}:{status}", time.time()):
         return
-    _POLL_WARN_AT[key] = now
     if status in (401, 403):
         hint = "鉴权失败或该 IP 已被 hub 封禁——检查 --token 与 hub 日志 AUTH FAIL/BLOCKED"
     elif status == 409:

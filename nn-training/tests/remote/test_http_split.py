@@ -8,7 +8,8 @@
 
 1. **定义唯一**——这些名字不许在 `worker.py` 里再实现一遍；
 2. **无环**——`http.py` 不得 import `worker.py`（`worker` 已经 import `http` 做转发）；
-3. **转发同一对象** + **状态一份**（`worker._POLL_WARN_AT` 与 `http._POLL_WARN_AT` 同一个 dict）；
+3. **状态住显式对象**（P0-5，2026-11-21）：`http.openers()`（懒建 opener）与
+   `http.warn_throttle()`（60s 节流）各自唯一一份，`worker` 侧不再转发这两份状态；
 4. **注入点分档**（这一步最容易静默坏）：`_get_with_retry` / `_read_body` 在 `http` 命名空间
    解析 `_request` / `_reroll_decision` / `BODY_PROGRESS_MIN_SEC` ⇒ 必须 patch `remote.http`；
    而直调 `_request` 的**作业面**（`post_result` 等）在**各自定义模块**的命名空间解析 ⇒ patch
@@ -43,14 +44,17 @@ MOVED_NAMES = {
     "BODY_IDLE_TIMEOUT_SEC",
     "BODY_PROGRESS_MIN_SEC",
     "BODY_TOTAL_TIMEOUT_SEC",
-    "_POLL_WARN_AT",
+    "WARN_THROTTLE_SEC",
+    "ProxyOpeners",
+    "WarnThrottle",
     "_get_opener",
     "_get_with_retry",
-    "_opener",
     "_read_body",
     "_request",
     "_sched_headers",
     "_warn_non_200",
+    "openers",
+    "warn_throttle",
 }
 
 
@@ -88,69 +92,57 @@ def test_http_sits_below_its_remote_dependencies() -> None:
     dag.assert_remote_module("remote.http")
 
 
-#: 转发名会**停在旧值**的宿主状态（`global` 重绑）：`_get_opener()` 里 `global _opener` 懒建，
-#: 于是 `worker._opener` 永远是 import 那一刻的快照。对它们只能断言「名字在」，
-#: 不能断言 `is` —— 那会随**文件顺序**红绿翻转（见下面那条语义用例）。
-REBOUND_NAMES = {"_opener"}
-
-
 def test_worker_forwards_every_moved_name() -> None:
-    """`worker` 的命名空间里每个搬走的名字都在，且**函数/常量**是同一个对象。
+    """`worker` 的命名空间里每个搬走的名字都在，且**是同一个对象**。
 
-    `REBOUND_NAMES`（重绑式标量）只查「名字还在」：它们的注入点是所有者模块（`remote.http`），
-    转发名只是兼容壳。
+    P0-5（2026-11-21）之后这里不再有「重绑式标量」这个例外：两份进程级状态都住对象
+    （`openers()` / `warn_throttle()`），懒建与重建都在对象内部，转发名不会再停在 import
+    那一刻的快照，所以 `is` 恒等断言重新成立（旧 `_opener` 的快照问题见本文件 2026-09-23 那条
+    用例的注释历史）。
     """
-    for name in sorted(MOVED_NAMES - REBOUND_NAMES):
+    for name in sorted(MOVED_NAMES):
         assert hasattr(worker_mod, name), f"remote.worker 丢了 {name}"
         assert getattr(worker_mod, name) is getattr(http_mod, name), (
             f"remote.worker.{name} 不是 remote.http.{name}（转发成了副本）"
         )
-    for name in sorted(REBOUND_NAMES):
-        assert hasattr(worker_mod, name), f"remote.worker 丢了转发名 {name}"
 
 
-def test_opener_forwarding_name_is_a_snapshot_by_design_not_an_identity() -> None:
-    """★ `_opener` 是**重绑式**宿主状态（`http._get_opener` 里 `global _opener` 懒建）⇒
-    转发名 `worker._opener` 会停在 import 时的值。
+def test_http_module_has_no_global_statement_any_more() -> None:
+    """★ 懒建状态收进对象后，`http.py` 里**没有 `global`**（`GLOBAL_BASELINE` 里本文件那条已删）。
 
-    这条原先写成了 `is` 恒等断言，于是红绿取决于**文件顺序**（先跑的测试有没有触发懒建）：
-    `pytest tests/hub/test_priority_schedule.py tests/remote/test_http_split.py` 红、单跑本文件绿
-    ——于 2026-09-23 第八刀时实测到（HEAD 上同样可复现，与本刀无关）。
-    现在钉住的是与顺序无关的**语义**：重绑只发生在 `http`（唯一所有者），`worker` 侧只有转发
-    ⇒ `_opener` 的注入点只能是 `remote.http`（`remote.worker._opener` 改了不改变任何行为）。
+    这是 P0-5 的判据本体：`global` 意味着「模块里可以有第二处写点」；`ProxyOpeners.reset()`
+    与 `WarnThrottle.forget_all()` 是仅有的两个写入口，都在对象上。
     """
-    get_opener = next(
-        node
-        for node in _tree(HTTP_FILE).body
-        if isinstance(node, ast.FunctionDef) and node.name == "_get_opener"
-    )
-    rebinds = [
-        node.names
-        for node in ast.walk(get_opener)
-        if isinstance(node, ast.Global) and "_opener" in node.names
-    ]
-    assert rebinds, "`_get_opener` 不再重绑 `_opener` ⇒ 懒建语义变了，注入点需重判"
+    globals_ = [node.names for node in ast.walk(_tree(HTTP_FILE)) if isinstance(node, ast.Global)]
+    assert globals_ == [], f"http.py 又出现了 `global`：{globals_}"
+    # `worker.py` 自己还有一条 `global _ACTIVE_CODE_SHA`（`GLOBAL_BASELINE` 在册），但它不该
+    # 重绑**本模块转发的**那两份状态（否则又会造出一个停在旧值的快照）。
+    forwarded = {"_opener", "_POLL_WARN_AT", "_OPENERS", "_WARNS"}
     worker_globals = [
-        node.names
+        names
         for node in ast.walk(_tree(WORKER_FILE))
-        if isinstance(node, ast.Global) and "_opener" in node.names
+        if isinstance(node, ast.Global)
+        for names in [node.names]
+        if forwarded & set(names)
     ]
-    assert worker_globals == [], f"worker.py 里重绑了 `_opener`（所有者只能是 http）：{worker_globals}"
-    assert "_opener as _opener" in WORKER_FILE.read_text(encoding="utf-8"), (
-        "worker 侧 `_opener` 不再是转发名（有测试/宿主 import 它）"
-    )
+    assert worker_globals == [], f"worker.py 重绑了 http 的状态：{worker_globals}"
 
 
-def test_poll_warn_state_stays_a_single_account_across_both_entry_points() -> None:
-    """状态仍是一份账：`_POLL_WARN_AT` 跨两个入口是同一个 dict（原地可变）。"""
-    http_mod._POLL_WARN_AT.clear()
-    worker_mod._POLL_WARN_AT["http://hub:500"] = 1.0
-    assert http_mod._POLL_WARN_AT == {"http://hub:500": 1.0}
-    http_mod._POLL_WARN_AT.clear()
+def test_state_objects_are_single_accounts_not_forwarded_copies() -> None:
+    """状态一份：`openers()` / `warn_throttle()` 每次返回**同一个实例**，且 `worker` 侧没有副本。"""
+    assert http_mod.openers() is http_mod.openers()
+    assert http_mod.warn_throttle() is http_mod.warn_throttle()
+    # `worker` 仍在转发这两个入口（与其它搬走的名字同规），但转发的**是同一个对象**——
+    # 不再有「改 worker 那边不改变行为」的快照名，所以注入点没有任何歧义。
+    assert worker_mod.openers() is http_mod.openers()
+    assert worker_mod.warn_throttle() is http_mod.warn_throttle()
+    # 懒建只发生一次：`_get_opener()` 与 `openers().get()` 是同一个对象（reset 之前）。
+    http_mod.openers().reset()
+    assert http_mod._get_opener() is http_mod.openers().get()
 
 
-def test_http_top_level_mutable_container_is_only_the_warn_throttle() -> None:
-    """`http.py` 的顶层可变容器只有 `_POLL_WARN_AT`——不该顺手多带一份共享状态。"""
+def test_http_top_level_has_no_mutable_container_literal_at_all() -> None:
+    """`http.py` 顶层**零**可变容器字面量（P0-5 之后比旧判据更严：连节流表也进了对象）。"""
     mutable: set[str] = set()
     for node in _tree(HTTP_FILE).body:
         pairs: list[tuple[str, ast.expr | None]] = []
@@ -161,7 +153,7 @@ def test_http_top_level_mutable_container_is_only_the_warn_throttle() -> None:
         for name, value in pairs:
             if not name.startswith("__") and isinstance(value, (ast.Dict, ast.List, ast.Set)):
                 mutable.add(name)
-    assert mutable == {"_POLL_WARN_AT"}, f"http.py 顶层多了可变容器：{sorted(mutable)}"
+    assert mutable == set(), f"http.py 顶层多了可变容器：{sorted(mutable)}"
 
 
 def test_request_seam_for_the_moved_callers_is_the_http_module(

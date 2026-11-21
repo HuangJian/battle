@@ -24,7 +24,7 @@
   "tests/remote/test_train_core_split.py": 2,
   "tests/remote/test_wire_reroll.py": 2,
   "tests/remote/test_wire_split.py": 4,
-  "tests/remote/test_worker_state_contract.py": 18,
+  "tests/remote/test_worker_state_contract.py": 14,
   "tests/trainer/test_batch_runner_phases.py": 1,
   "tests/trainer/test_bc_loop.py": 1,
   "tests/trainer/test_loop_core_tail_split.py": 5,

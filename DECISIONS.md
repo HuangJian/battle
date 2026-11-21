@@ -8943,3 +8943,29 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **决定三**：不加锁（与旧实现一致）：只 lookup/remember，dict 单次读写原子，同 key 并发写的值相同。
 - **守卫**：`tests/worker/test_scan_cache.py` 4 条（未记住落空 / 满则整表清空 / forget_all 与上限 /
   实例互不相见）；`e2e/test_run_rl.py` 改用 `scan_cache().forget_all()`，判据不变。
+
+## §2026-11-21-http-state-objects（`remote/http` 的节流表与懒建 opener 收成对象；「转发名是快照」的例外随之消失）
+
+- **背景**：`remote/http.py` 有两份进程级状态：`_POLL_WARN_AT`（非 200 告警节流 dict，窗口是调用点
+  里的 `<= 60.0` 字面量）与 `_opener`（`global _opener` 懒建单例）。后者的形状逼出一个妥协：
+  `tests/remote/test_http_split.py` 的 `REBOUND_NAMES` 让 `_opener` 只查「名字在」不断言 `is`
+  ——转发名会停在 import 那一刻。
+- **决定一**：`WarnThrottle(window_sec=WARN_THROTTLE_SEC)`（`allow(key, now)` / `forget_all` / `__len__`）。
+  窗口变**构造参数**，于是「每条都放行」（0 秒）与「一分钟一条」都是数据而不是调用点字面量；
+  `allow` 一步完成「查 + 记」，不再靠两行代码的自觉。不加锁（与旧 dict 一致：最坏两条线程各打一行，
+  比在日志路径持锁便宜）。
+- **决定二**：`ProxyOpeners`（`get()` 懒建一次 / `reset()` 是「下次重建」的唯一入口）。env 只在
+  首次 `get()` 定型这条旧语义**逐字保留**（Colab 2026-09-16 实测），因此重建必须显式 `reset()`，
+  不做「env 变了自动重建」。
+- **决定三**：模块内部也走访问器（`warn_throttle()` / `openers()`），取用路径只有一条 ——
+  用例替换公开名字即可接管，新增用例不必对私有名打桩（`test_job_identity_collision` 的两处
+  `monkeypatch.setattr(worker_mod, "_POLL_WARN_AT", {})` 因此改成替换 `http.warn_throttle`，
+  私有打桩基线 3 → 1）。
+- **决定四**：`worker.py` 删掉两条旧转发，改转发 `WARN_THROTTLE_SEC` / `WarnThrottle` /
+  `ProxyOpeners` / `openers` / `warn_throttle`；`GLOBAL_BASELINE` 的 `remote/http.py: 1` 归零，
+  `MOVED_NAMES` 恢复对全部名字的 `is` 恒等断言（`REBOUND_NAMES` 删除）。
+- **守卫**：`tests/remote/test_http_state.py` 6 条（懒建一次 / `reset()` 重认 env（读
+  `ProxyHandler.proxies` 的行为判据）/ 默认持有者一份 / 窗口内一次 + 跨窗放行 + 不同 key 互不影响 /
+  0 秒窗口 + `forget_all` / 缺省 60s）；`test_http_split.py` 新增「零 `global`」「顶层零可变容器字面量」；
+  `test_worker_state_contract.py` 的三个宿主清单改口径（`_OPENERS`/`_WARNS` 进实例表并标 `INTERNAL_ONLY`）。
+- **行为差异**：无（键、窗口、文案、env 定型时机逐字未变）。详见 `docs/nn/engineering.md` §242。

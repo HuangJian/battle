@@ -183,7 +183,7 @@ def _opener_proxies(monkeypatch) -> dict[str, str]:
     平台全局代理只有 urllib 侧认，池侧只认 env——池的契约就是 env 名表。）
     """
     monkeypatch.setattr(urllib.request, "getproxies", lambda: {})
-    monkeypatch.setattr(http_mod, "_opener", None)  # 进程内懒建单例，强制重建
+    http_mod.openers().reset()  # 迟建 opener 住对象里，重建走 `reset()`（不改模块变量）
     # `handlers` 是 OpenerDirector 的**运行时**属性（typeshed 里没声明）⇒ getattr 取，
     # 不用 `# type: ignore` 消音（编译器是评审，AGENTS §5）。
     for h in getattr(http_mod._get_opener(), "handlers", ()):
