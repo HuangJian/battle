@@ -13,6 +13,7 @@ import {
   pathGeometry,
   corridorBands,
   centralBrickCells,
+  countCoachCentralBreach,
   footprintClear,
   validateCorridorPath,
   corridorCarved,
@@ -22,6 +23,24 @@ import {
   LOWER_THIRD_ROW,
   RING_HARD_CELLS,
 } from '../../src/nn/opening-corridor'
+
+describe('开局体检：只数教练真拆的中央砖（2026-11-21 降噪）', () => {
+  it('敌人流弹（planned=false）与锁定 2×2 窗口内的消失都不算违规', () => {
+    const keys = ['12,4', '12,5', '12,6', '13,4', '13,5']
+    const gone = new Set(keys)
+    const enemy = new Set(['12,4']) // 敌人流弹拆的，控制器按 planned=false 只 trace 不 abort
+    // 2×2 窗口放行 row=5 与 row=6（12,5 / 12,6 / 13,5）；12,4 是敌人拆的 ⇒ 只剩 13,4 = 1
+    expect(countCoachCentralBreach(keys, gone, enemy, 5)).toBe(1)
+    // 没有锁定窗口 ⇒ 只剔敌人那块 = 4
+    expect(countCoachCentralBreach(keys, gone, enemy, null)).toBe(4)
+  })
+
+  it('没消失的不算；窗口外教练真拆的超量照常计入（闸不能开太大）', () => {
+    const keys = ['12,4', '12,7', '13,7', '13,9']
+    expect(countCoachCentralBreach(keys, new Set(['12,7']), new Set(), 5)).toBe(1)
+    expect(countCoachCentralBreach(keys, new Set(['12,7', '13,7', '13,9']), new Set(), 5)).toBe(3)
+  })
+})
 
 function endpoints(world: World): { from: Cell; to: Cell } {
   const s = world.playerSpawnPoint

@@ -67,7 +67,11 @@ import { decodeMove } from '../../src/nn/action-space'
 import { decodeMove4, MOVE4_DECODE } from '../../src/nn/action-space-v6'
 import { OpeningController, type OpeningTraceEvent } from '../../src/nn/opening-controller'
 import { encodeOpeningAction } from '../../src/nn/opening-input'
-import { centralBrickCells, evaluateCorridor } from '../../src/nn/opening-corridor'
+import {
+  centralBrickCells,
+  countCoachCentralBreach,
+  evaluateCorridor,
+} from '../../src/nn/opening-corridor'
 import { RING_CELLS } from '../../src/utils/base-ring'
 import { computePlayer2SpawnCol } from '../../src/utils/helpers'
 import { corridorCells, nearestPickupCenter } from '../../src/nn/danger-metrics'
@@ -974,17 +978,20 @@ export function runEvalOne(
     const p2 = { col: computePlayer2SpawnCol(sp.col), row: sp.row }
     openingWanted = !evaluateCorridor(world.tileMap, p1, p2).connected
   }
+  // 体检按控制器的同口径剔除敌人流弹（planned=false）：它只 trace 不 abort，不算教练违规。
+  // onTrace 始终挂上（只在砖消失时触发，开销可忽略）；OPENING_TRACE=1 才额外打印。
+  const enemyCentralKeys = new Set<string>()
   const openingCtrl = openingWanted
     ? new OpeningController({
         exitPocket: !openingNoExit,
-        ...(process.env.OPENING_TRACE === '1'
-          ? {
-              onTrace: (e: OpeningTraceEvent) =>
-                console.error(
-                  `[opening-trace] central_gone col=${e.col} row=${e.row} planned=${e.planned}`,
-                ),
-            }
-          : {}),
+        onTrace: (e: OpeningTraceEvent) => {
+          if (e.kind === 'central_gone' && !e.planned) enemyCentralKeys.add(`${e.col},${e.row}`)
+          if (process.env.OPENING_TRACE === '1') {
+            console.error(
+              `[opening-trace] central_gone col=${e.col} row=${e.row} planned=${e.planned}`,
+            )
+          }
+        },
       })
     : null
   let openingDone = false
@@ -1552,10 +1559,18 @@ export function runEvalOne(
           if (!openingRingSolid0[i]) return n
           return n + (world.tileMap.get(c.col, c.row) === 'empty' ? 1 : 0)
         }, 0)
-        openingReport.centralBreachCells = [...openingCentralKeys0].reduce((n, k) => {
-          const [c, r] = k.split(',').map(Number)
-          return n + (world.tileMap.get(c, r) === 'brick' ? 0 : 1)
-        }, 0)
+        const goneCentralKeys = new Set(
+          [...openingCentralKeys0].filter((k) => {
+            const [c, r] = k.split(',').map(Number)
+            return world.tileMap.get(c, r) !== 'brick'
+          }),
+        )
+        openingReport.centralBreachCells = countCoachCentralBreach(
+          openingCentralKeys0,
+          goneCentralKeys,
+          enemyCentralKeys,
+          snap.centralWindowRow,
+        )
         openingReport.hardConstraintOk =
           openingReport.baseRingBreach === 0 && openingReport.centralBreachCells <= 4
         if (!openingReport.hardConstraintOk) {

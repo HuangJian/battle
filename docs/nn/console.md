@@ -13,6 +13,28 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §56 `OPENING HARD CONSTRAINT FAIL` 改在源头修：体检把敌人流弹算成了教练违规（2026-11-21）
+
+**纠错**：§55 把这条判为「唯一真问题、保留横幅」，下结论太快。查 `opening-controller.ts::centralBreached`：
+控制器只把**计划要打的砖**（`planned=true`）消失算违规，敌人流弹 `planned=false` 只 trace 不 abort
+（注释记着实测 5/5 超量都是流弹）；而 `export-eval-game.ts` 的体检无脑数**所有**消失的中央砖，
+还把锁定 2×2 窗口（`windowAllowsCell`，放行 row 与 row+1）内的算进去。多报的是敌人和环境，不是教练。
+
+**约定变更**：用户明确 codehash 现以 **self 节点部署版本**为准，本地改集内文件不再触发集群升级
+（`.workbuddy/memory/MEMORY.md` 已更新，旧「本机脏则全员红」口径作废）⇒ 直接改源头，不必在 dashboard
+加分类把真违规也一起藏掉；一度加过的 `scaffold` 分类已回退。
+
+**修复**：
+
+- `src/nn/opening-corridor.ts` 新增纯函数 `countCoachCentralBreach`：从消失的中央砖里剔除敌人拆的
+  （`onTrace` 中 `planned=false` 收集）与锁定窗口内的两类；
+- `tools/sim/export-eval-game.ts` 体检改调该函数，`onTrace` 始终挂上（原仅 `OPENING_TRACE=1` 才挂），
+  trace 打印仍只在开关开启时输出；基地环 `ring` 判据不变。
+- 真违规（教练计划拆的、窗口外的砖）仍然报警、仍然弹横幅——降的是误报，不是告警本身。
+
+**验证**：新夹具先红后绿（2×2 窗口放行 row 与 row+1，别按单行算）；根项目 `bun run check`
+2981 pass / 7 skip / 0 fail。
+
 ## §55 errors 页降噪补丁：504 / `busy=false` / `failedTasks.size=0` 不再冒充真问题（2026-11-21）
 
 **报障**：首页告警坞反复弹「组件报错：N 条未处理」，逐条看却是自愈型事件。
