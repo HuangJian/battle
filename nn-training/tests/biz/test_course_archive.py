@@ -170,11 +170,13 @@ class Course:
         # 需要验新鲜的那种用例自己显式传 `now`。
         kw.setdefault("now", time.time() + 10**6)
         return CA.archive_course(
-            self.name,
-            traj_root=self.traj.parent,
-            archive_root=self.archive,
-            keys=kw.pop("keys", {}),
-            **kw,
+            CA.ArchiveSpec(
+                self.name,
+                traj_root=self.traj.parent,
+                archive_root=self.archive,
+                keys=kw.pop("keys", {}),
+                **kw,
+            )
         )
 
 
@@ -232,12 +234,14 @@ def test_dry_run_zero_write_zero_delete(tmp_path):
     before = sorted(p.relative_to(c.traj).as_posix() for p in c.traj.rglob("*"))
 
     rep = CA.archive_course(
-        c.name,
-        traj_root=c.traj.parent,
-        archive_root=c.archive,
-        dry_run=True,
-        keys={},
-        now=time.time() + 10**6,
+        CA.ArchiveSpec(
+            c.name,
+            traj_root=c.traj.parent,
+            archive_root=c.archive,
+            dry_run=True,
+            keys={},
+            now=time.time() + 10**6,
+        )
     )
     assert rep.ok and rep.dry_run
     assert rep.bytes_freed > 0

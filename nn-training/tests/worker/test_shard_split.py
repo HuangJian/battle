@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from worker.data.dataset import make_loaders
+from worker.data.dataset import LoaderSpec, make_loaders
 from worker.data.npyio import save_shard
 
 
@@ -62,7 +62,7 @@ def test_make_loaders_no_cross_shard_leak(tmp_path: Path) -> None:
     data = load_dataset(str(_make_corpus(tmp_path)))
     shard_ids = data["shard_ids"]
     train_dl, val_dl, sizes = make_loaders(
-        str(tmp_path), batch_size=8, val_split=0.25, mirror_p=0.0, seed=7
+        LoaderSpec(str(tmp_path), batch_size=8, val_split=0.25, mirror_p=0.0, seed=7)
     )
     assert sizes["train"] > 0 and sizes["val"] > 0
     # 切分规模的 shard 整数性：整 shard 切分下 train/val 都是 40 的倍数，
@@ -92,7 +92,7 @@ def test_make_loaders_old_corpus_falls_back(tmp_path: Path) -> None:
     # 直接构造 make_loaders 的 fallback 分支：绕过 load_dataset（它会重新加 shard_ids），
     # 用 monkeypatch 验证 —— 这里简单起见只验证 make_loaders 整体可跑且规模正确。
     train_dl, val_dl, sizes = make_loaders(
-        str(tmp_path), batch_size=8, val_split=0.25, mirror_p=0.0, seed=7
+        LoaderSpec(str(tmp_path), batch_size=8, val_split=0.25, mirror_p=0.0, seed=7)
     )
     assert sizes["total"] == 240
     assert sizes["train"] + sizes["val"] == 240
@@ -103,7 +103,9 @@ def test_single_shard_corpus_falls_back_to_sample_split(tmp_path: Path) -> None:
     num_samples=0 崩溃，2026-09-13 bc 云端冒烟实测）——必须回退样本级切分，
     train/val 两边都非空。"""
     corpus = _make_corpus(tmp_path, n_shards=1, frames_per_shard=181)
-    train_dl, val_dl, sizes = make_loaders(str(corpus), batch_size=64, val_split=0.1, seed=1234)
+    train_dl, val_dl, sizes = make_loaders(
+        LoaderSpec(str(corpus), batch_size=64, val_split=0.1, seed=1234)
+    )
     assert sizes["total"] == 181
     assert sizes["train"] > 0, "单 shard 语料 train 不得为空"
     assert sizes["val"] > 0, "单 shard 语料 val 不得为空"

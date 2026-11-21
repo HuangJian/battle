@@ -84,6 +84,7 @@ from trainer.bc_round_job import (
     resolve_bc_init_weights as resolve_bc_init_weights,
 )
 from worker.archive import backup_weights
+from worker.bc_collect import CollectSpec as _CollectSpec
 from worker.bc_collect import collect_corpus as _collect_corpus
 from worker.bc_collect import smoke_overrides as smoke_overrides
 from worker.bc_config import (
@@ -143,9 +144,8 @@ from trainer.bc_ingest import (
 from trainer.bc_ingest import (
     TRANSIENT as TRANSIENT,
 )
-from trainer.bc_ingest import (
-    BcWait as BcWait,
-)
+from trainer.bc_ingest import BcWait as BcWait
+from trainer.bc_ingest import WaitBcSpec as WaitBcSpec
 from trainer.bc_ingest import (
     ingest_bc_metrics as ingest_bc_metrics,
 )
@@ -248,15 +248,8 @@ def collect_corpus(
     用薄门面保留该契约，同时 `monkeypatch bc_loop.collect_corpus` 仍可替换整段。
     """
     return _collect_corpus(
-        course,
-        course_fp,
-        corpus_fp,
-        it,
-        data_round_dir,
-        smoke=smoke,
-        cfg=cfg,
-        jsonl_path=jsonl_path,
-        log=log,
+        _CollectSpec(course, course_fp, corpus_fp, it, data_round_dir, smoke=smoke,
+                     cfg=cfg, jsonl_path=jsonl_path, log=log)
     )
 
 

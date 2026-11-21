@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from common.log import log
@@ -35,18 +37,22 @@ def smoke_overrides(course: BcCourseConfig) -> dict:
     }
 
 
-def collect_corpus(
-    course: BcCourseConfig,
-    course_fp: str,
-    corpus_fp: str,
-    it: int,
-    data_round_dir: Path,
-    *,
-    smoke: bool,
-    cfg: dict | None,
-    jsonl_path: Path | None = None,
-    log=log,
-) -> Path:
+@dataclass(frozen=True)
+class CollectSpec:
+    """`collect_corpus` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    course: BcCourseConfig
+    course_fp: str
+    corpus_fp: str
+    it: int
+    data_round_dir: Path
+    smoke: bool
+    cfg: dict | None
+    jsonl_path: Path | None = None
+    log: Callable[[str], None] = log
+
+
+def collect_corpus(spec: CollectSpec) -> Path:
     """补齐本轮语料并返回训练根（collect = 轮目录；fixed = 现成语料根）。
 
     smoke 轮**不做断点续跑**（todo = 全量重采）——smoke 覆盖（wins_only/max_ticks）
@@ -56,6 +62,16 @@ def collect_corpus(
     `fixed` 不派发、不改写语料；只校验 v6 形状并记 `data_fp`。ratio 在派发完成后
     统一裁剪（必须看到整轮 outcome 才能算配额），未选中的 shard 留 manifest 作
     skip marker。"""
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    course = spec.course
+    course_fp = spec.course_fp
+    corpus_fp = spec.corpus_fp
+    it = spec.it
+    data_round_dir = spec.data_round_dir
+    smoke = spec.smoke
+    cfg = spec.cfg
+    jsonl_path = spec.jsonl_path
+    log = spec.log
     if course.corpus.source == "fixed":
         raw = str(course.corpus.fixed_dir or "").strip()
         fixed_dir = Path(raw) if raw else data_round_dir.parent

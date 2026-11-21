@@ -17,7 +17,7 @@ import pytest
 
 import remote.hub_http as hub_http
 import trainer.bc_ingest as bc_ingest
-from trainer.bc_ingest import READY, BcWait, ingest_bc_metrics
+from trainer.bc_ingest import READY, BcWait, EpochEvalSpec, ingest_bc_metrics
 from worker.bc_config import BcCourseConfig, BcEvalBlock, BcTrainBlock
 
 
@@ -57,18 +57,8 @@ def test_late_backfill_row_is_ledgered_without_eval(
     ledger = tmp_path / "training_log.jsonl"
     evaluated: list[int] = []
 
-    def fake_eval(
-        hub_url: str,
-        token: str,
-        jid: str,
-        jsonl_path: Path,
-        it: int,
-        epoch: int,
-        course: BcCourseConfig,
-        cfg: dict | None,
-        log: object,
-    ) -> None:
-        evaluated.append(epoch)
+    def fake_eval(spec: EpochEvalSpec, _log: object = None) -> None:
+        evaluated.append(spec.epoch)
 
     monkeypatch.setattr(bc_ingest, "run_epoch_eval", fake_eval)
     monkeypatch.setattr(
@@ -102,18 +92,8 @@ def test_duplicate_row_does_not_cancel_same_batch_boundary_eval(
     ledger = tmp_path / "training_log.jsonl"
     evaluated: list[int] = []
 
-    def fake_eval(
-        hub_url: str,
-        token: str,
-        jid: str,
-        jsonl_path: Path,
-        it: int,
-        epoch: int,
-        course: BcCourseConfig,
-        cfg: dict | None,
-        log: object,
-    ) -> None:
-        evaluated.append(epoch)
+    def fake_eval(spec: EpochEvalSpec, _log: object = None) -> None:
+        evaluated.append(spec.epoch)
 
     monkeypatch.setattr(bc_ingest, "run_epoch_eval", fake_eval)
     monkeypatch.setattr(
@@ -184,18 +164,8 @@ def test_ready_evaluates_final_epoch_when_metric_row_missing(
     ledger = tmp_path / "training_log.jsonl"
     evaluated: list[int] = []
 
-    def fake_eval(
-        hub_url: str,
-        token: str,
-        jid: str,
-        jsonl_path: Path,
-        it: int,
-        epoch: int,
-        course: BcCourseConfig,
-        cfg: dict | None,
-        log: object,
-    ) -> None:
-        evaluated.append(epoch)
+    def fake_eval(spec: EpochEvalSpec, _log: object = None) -> None:
+        evaluated.append(spec.epoch)
 
     def request(base: str, token: str, path: str, timeout: float = 0.0):
         if path.endswith("/result"):
@@ -232,18 +202,8 @@ def test_in_order_rows_keep_evaluating_at_boundaries(
     ledger = tmp_path / "training_log.jsonl"
     evaluated: list[int] = []
 
-    def fake_eval(
-        hub_url: str,
-        token: str,
-        jid: str,
-        jsonl_path: Path,
-        it: int,
-        epoch: int,
-        course: BcCourseConfig,
-        cfg: dict | None,
-        log: object,
-    ) -> None:
-        evaluated.append(epoch)
+    def fake_eval(spec: EpochEvalSpec, _log: object = None) -> None:
+        evaluated.append(spec.epoch)
 
     monkeypatch.setattr(bc_ingest, "run_epoch_eval", fake_eval)
     monkeypatch.setattr(

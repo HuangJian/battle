@@ -19,7 +19,7 @@ import pytest
 
 import remote.hub_http as hub_http
 import trainer.bc_ingest as bc_ingest
-from trainer.bc_ingest import BcWait, ingest_bc_metrics
+from trainer.bc_ingest import BcWait, EpochEvalSpec, ingest_bc_metrics
 from worker.bc_config import BcCourseConfig, BcEvalBlock, BcTrainBlock
 
 JID = "f375867375c1da8f"
@@ -86,18 +86,8 @@ def test_restart_does_not_reingest_or_reeval_known_epochs(
     )
     evaluated: list[int] = []
 
-    def fake_eval(
-        hub_url: str,
-        token: str,
-        jid: str,
-        jsonl_path: Path,
-        it: int,
-        epoch: int,
-        course: BcCourseConfig,
-        cfg: dict | None,
-        log: object,
-    ) -> None:
-        evaluated.append(epoch)
+    def fake_eval(spec: EpochEvalSpec, _log: object = None) -> None:
+        evaluated.append(spec.epoch)
 
     monkeypatch.setattr(bc_ingest, "run_epoch_eval", fake_eval)
     monkeypatch.setattr(
@@ -143,18 +133,8 @@ def test_restart_evaluates_boundary_with_metric_row_but_no_eval(
     )
     evaluated: list[int] = []
 
-    def fake_eval(
-        hub_url: str,
-        token: str,
-        jid: str,
-        jsonl_path: Path,
-        it: int,
-        epoch: int,
-        course: BcCourseConfig,
-        cfg: dict | None,
-        log: object,
-    ) -> None:
-        evaluated.append(epoch)
+    def fake_eval(spec: EpochEvalSpec, _log: object = None) -> None:
+        evaluated.append(spec.epoch)
 
     monkeypatch.setattr(bc_ingest, "run_epoch_eval", fake_eval)
     monkeypatch.setattr(
@@ -193,18 +173,8 @@ def test_new_job_starts_from_scratch(tmp_path: Path, monkeypatch: pytest.MonkeyP
     )
     evaluated: list[int] = []
 
-    def fake_eval(
-        hub_url: str,
-        token: str,
-        jid: str,
-        jsonl_path: Path,
-        it: int,
-        epoch: int,
-        course: BcCourseConfig,
-        cfg: dict | None,
-        log: object,
-    ) -> None:
-        evaluated.append(epoch)
+    def fake_eval(spec: EpochEvalSpec, _log: object = None) -> None:
+        evaluated.append(spec.epoch)
 
     monkeypatch.setattr(bc_ingest, "run_epoch_eval", fake_eval)
     monkeypatch.setattr(

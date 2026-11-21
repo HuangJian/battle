@@ -521,19 +521,33 @@ def _delete_path(path: Path, *, ignore_errors: bool = True) -> bool:
         raise
 
 
-def archive_course(
-    course: str,
-    *,
-    traj_root: Path | str = DEFAULT_TRAJ_ROOT,
-    archive_root: Path | str = DEFAULT_ARCHIVE_ROOT,
-    force: bool = False,
-    dry_run: bool = True,
-    codec: str = "gzip",
-    now: float | None = None,
-    log: Callable[[str], None] | None = None,
-    keys: dict[str, Any] | None = None,
-) -> ArchiveReport:
+@dataclass(frozen=True)
+class ArchiveSpec:
+    """`archive_course` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    course: str
+    traj_root: Path | str = DEFAULT_TRAJ_ROOT
+    archive_root: Path | str = DEFAULT_ARCHIVE_ROOT
+    force: bool = False
+    dry_run: bool = True
+    codec: str = "gzip"
+    now: float | None = None
+    log: Callable[[str], None] | None = None
+    keys: dict[str, Any] | None = None
+
+
+def archive_course(spec: ArchiveSpec) -> ArchiveReport:
     """封存一门课（§3.3 七步）。**默认 dry_run**（最贵的错误是「删了才发现没搬成」）。"""
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    course = spec.course
+    traj_root = spec.traj_root
+    archive_root = spec.archive_root
+    force = spec.force
+    dry_run = spec.dry_run
+    codec = spec.codec
+    now = spec.now
+    log = spec.log
+    keys = spec.keys
     say = log or (lambda _m: None)
     traj = Path(traj_root) / course
     dest = Path(archive_root) / course
@@ -866,13 +880,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     dry_run = not args.apply
     rep = archive_course(
-        args.course,
-        traj_root=args.traj_root,
-        archive_root=args.root,
-        force=args.force,
-        dry_run=dry_run,
-        codec=args.codec,
-        log=lambda m: print(m, flush=True),
+        ArchiveSpec(
+            args.course,
+            traj_root=args.traj_root,
+            archive_root=args.root,
+            force=args.force,
+            dry_run=dry_run,
+            codec=args.codec,
+            log=lambda m: print(m, flush=True),
+        )
     )
     if args.json:
         print(

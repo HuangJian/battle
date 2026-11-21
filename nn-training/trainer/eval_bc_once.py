@@ -31,7 +31,7 @@ from common.distribution import load_dist_config
 from common.log import log
 from common.paths import REPO_ROOT
 from common.platform_utils import force_utf8_stdio
-from trainer.bc_ingest import run_epoch_eval
+from trainer.bc_ingest import EpochEvalSpec, run_epoch_eval
 from worker.bc_config import BC_SUFFIX, load_bc_course, resolve_bc_course
 from worker.bc_ledger import JOB_PENDING_EVENT, read_events
 
@@ -130,7 +130,9 @@ def main() -> int:
 
     for jid in job_ids:
         log(f"[evalBc] it{it} ep{epoch}: 取 hub job {jid[:12]} 的 epoch 权重并派发多地图 eval")
-        run_epoch_eval(hub_url, token, jid, ledger, it, epoch, course, cfg, log=log)
+        run_epoch_eval(
+            EpochEvalSpec(hub_url, token, jid, ledger, it, epoch, course, cfg), log=log
+        )
         if _eval_done(read_events(ledger), it, epoch):
             log(f"[evalBc] it{it} ep{epoch}: eval 完成并已入账")
             return 0

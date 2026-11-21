@@ -10,7 +10,7 @@ import pytest
 import remote.hub_http as hub_http
 import trainer.bc_ingest as bc_ingest
 from common.protocol import encode_weights_json
-from trainer.bc_ingest import BcWait, ingest_bc_metrics, run_epoch_eval
+from trainer.bc_ingest import BcWait, EpochEvalSpec, ingest_bc_metrics, run_epoch_eval
 from worker.bc_config import BcCourseConfig, BcEvalBlock
 
 JID = "j" * 16
@@ -138,14 +138,16 @@ def test_epoch_eval_reads_that_epoch_not_latest_resume(tmp_path: Path, monkeypat
     monkeypatch.setattr(bc_ingest, "dispatch_bc_eval", fake_eval)
 
     run_epoch_eval(
-        "http://hub",
-        "t",
-        JID,
-        tmp_path / "log.jsonl",
-        1,
-        4,
-        _course(tmp_path),
-        None,
+        EpochEvalSpec(
+            "http://hub",
+            "t",
+            JID,
+            tmp_path / "log.jsonl",
+            1,
+            4,
+            _course(tmp_path),
+            None,
+        ),
         lambda _m: None,
     )
 

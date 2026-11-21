@@ -478,14 +478,16 @@ def test_e2e_wait_bc_round_ledger_ingest_and_eval(
         thw = threading.Thread(target=fake_worker, daemon=True)
         thw.start()
         result = bc_loop.wait_bc_round(
-            hub_url=base,
-            token=TOKEN,
-            jid=jid,
-            jsonl_path=ledger,
-            it=0,
-            course=course,
-            cfg=cfg,
-            wait_sec=60,
+            bc_loop.WaitBcSpec(
+                hub_url=base,
+                token=TOKEN,
+                jid=jid,
+                jsonl_path=ledger,
+                it=0,
+                course=course,
+                cfg=cfg,
+                wait_sec=60,
+            ),
             log=_quiet,
         )
         thw.join(10)

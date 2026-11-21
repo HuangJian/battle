@@ -136,7 +136,7 @@ def test_bc_collect_rejects_empty_collect_corpus(tmp_path: Path) -> None:
     serve 重试 5 次 abort 本课，日志里看不出真因，云机 worker 只能一直空转。
     这是配置错误的第一现场，绝不能放行到发布链。
     """
-    from worker.bc_collect import collect_corpus
+    from worker.bc_collect import CollectSpec, collect_corpus
     from worker.bc_dispatch import BcDispatchError
 
     c = load_bc_course("bc-c4")
@@ -149,14 +149,16 @@ def test_bc_collect_rejects_empty_collect_corpus(tmp_path: Path) -> None:
     )
     with pytest.raises(BcDispatchError, match="不可能的合法状态"):
         collect_corpus(
-            c,
-            "course-fp",
-            "corpus-fp",
-            1,
-            tmp_path / "it1",
-            smoke=False,
-            cfg=None,
-            log=lambda _m: None,
+            CollectSpec(
+                c,
+                "course-fp",
+                "corpus-fp",
+                1,
+                tmp_path / "it1",
+                smoke=False,
+                cfg=None,
+                log=lambda _m: None,
+            )
         )
 
 
@@ -435,14 +437,16 @@ def test_wait_bc_round_zero_wait_sec_means_unlimited(tmp_path: Path, monkeypatch
     monkeypatch.setattr(bc_loop.time, "sleep", lambda _s: None)  # 免真等 poll_sec
 
     out = bc_loop.wait_bc_round(
-        hub_url="http://hub",
-        token="t",
-        jid="j1",
-        jsonl_path=tmp_path / "training_log.jsonl",
-        it=1,
-        course=load_bc_course("bc-c4-v3"),
-        cfg=None,
-        wait_sec=0.0,
+        bc_loop.WaitBcSpec(
+            hub_url="http://hub",
+            token="t",
+            jid="j1",
+            jsonl_path=tmp_path / "training_log.jsonl",
+            it=1,
+            course=load_bc_course("bc-c4-v3"),
+            cfg=None,
+            wait_sec=0.0,
+        ),
         log=lambda _m: None,
     )
     assert out["job_id"] == "j1"

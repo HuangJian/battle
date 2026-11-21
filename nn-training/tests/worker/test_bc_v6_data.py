@@ -19,7 +19,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from worker.data.dataset import NNDataset, make_loaders
+from worker.data.dataset import LoaderSpec, NNDataset, make_loaders
 from worker.data.npyio import load_dataset
 
 N = 64  # 每 shard 样本数（够切 train/val）
@@ -84,7 +84,7 @@ def test_make_loaders_v6_and_three_head_ce(corpus: Path) -> None:
     # 同时跑 ⇒ 直接叠到峰值上）。同一口径的先例见 `test_bc_epoch_resume.py` 的「样本减到
     # 1 个 batch，语义断言不变」。
     train_dl, val_dl, sizes = make_loaders(
-        str(corpus), batch_size=8, val_split=0.25, action_v6=True
+        LoaderSpec(str(corpus), batch_size=8, val_split=0.25, action_v6=True)
     )
     assert sizes["total"] == N * 4
     # 2026-11-13：训练装载默认 lazy（逐 shard mmap），NNDataset 不得把它整份复制。

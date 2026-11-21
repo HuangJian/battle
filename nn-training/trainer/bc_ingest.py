@@ -223,21 +223,34 @@ def _seed_from_ledger(wait: BcWait, jsonl_path: Path) -> None:
     wait.last_epoch = last
 
 
-def run_epoch_eval(
-    hub_url: str,
-    token: str,
-    jid: str,
-    jsonl_path: Path,
-    it: int,
-    epoch: int,
-    course: BcCourseConfig,
-    cfg: dict | None,
-    log=log,
-) -> None:
+@dataclass(frozen=True)
+class EpochEvalSpec:
+    """`run_epoch_eval` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    hub_url: str
+    token: str
+    jid: str
+    jsonl_path: Path
+    it: int
+    epoch: int
+    course: BcCourseConfig
+    cfg: dict | None
+
+
+def run_epoch_eval(spec: EpochEvalSpec, log=log) -> None:
     """从 hub 取**该 epoch** 的不可变快照 → 多地图干净评估 → bc_eval 事件。
 
     B6：不能用 `/resume`（它可能已经是更晚的权重）——迟到补发行按行序贴标签会得到假指标。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    hub_url = spec.hub_url
+    token = spec.token
+    jid = spec.jid
+    jsonl_path = spec.jsonl_path
+    it = spec.it
+    epoch = spec.epoch
+    course = spec.course
+    cfg = spec.cfg
     import json as _json
 
     from remote.hub_http import _request
@@ -277,24 +290,36 @@ def run_epoch_eval(
         log(f"[run_bc] it{it} ep{epoch}: eval 异常 {type(e).__name__}: {e}")
 
 
-def _eval_epoch_if_due(
-    wait: BcWait,
-    *,
-    hub_url: str,
-    token: str,
-    jsonl_path: Path,
-    it: int,
-    epoch: int,
-    course: BcCourseConfig,
-    cfg: dict | None,
-    logger=log,
-) -> None:
+@dataclass(frozen=True)
+class EvalIfDueSpec:
+    """`_eval_epoch_if_due` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    wait: BcWait
+    hub_url: str
+    token: str
+    jsonl_path: Path
+    it: int
+    epoch: int
+    course: BcCourseConfig
+    cfg: dict | None
+
+
+def _eval_epoch_if_due(spec: EvalIfDueSpec, logger=log) -> None:
     """命中 `eval.every_epochs` 且该边界未写过 `bc_eval` 时才派 eval。
 
     ★2026-11-12：触发点不能只认「本拍新入账的 bc_epoch 行」。末 epoch 的指标行可能
     被隧道丢掉，但 result 已带 `epochs_completed`；重启后也可能只差 `bc_eval`。
     两个入口（指标增量 / READY 末轮）共用本函数，`evaluated_epochs` 只由 `bc_eval` 种。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    wait = spec.wait
+    hub_url = spec.hub_url
+    token = spec.token
+    jsonl_path = spec.jsonl_path
+    it = spec.it
+    epoch = spec.epoch
+    course = spec.course
+    cfg = spec.cfg
     eval_cfg = course.eval
     if not eval_cfg.enabled:
         return
@@ -306,7 +331,10 @@ def _eval_epoch_if_due(
         return
     # 先记账再调用：同一批里重复的指标行不会把同一边界派两次。
     wait.evaluated_epochs.append(ep)
-    run_epoch_eval(hub_url, token, wait.jid, jsonl_path, it, ep, course, cfg, logger)
+    run_epoch_eval(
+        EpochEvalSpec(hub_url, token, wait.jid, jsonl_path, it, ep, course, cfg),
+        logger,
+    )
 
 
 # ---- 等待（非阻塞探针 + 阻塞包装） -----------------------------------------
@@ -414,15 +442,17 @@ class BcWait:
                             and final_epoch > 0
                         ):
                             _eval_epoch_if_due(
-                                self,
-                                hub_url=hub_url,
-                                token=token,
-                                jsonl_path=jsonl_path,
-                                it=it,
-                                epoch=final_epoch,
-                                course=course,
-                                cfg=cfg,
-                                logger=logger,
+                                EvalIfDueSpec(
+                                    self,
+                                    hub_url=hub_url,
+                                    token=token,
+                                    jsonl_path=jsonl_path,
+                                    it=it,
+                                    epoch=final_epoch,
+                                    course=course,
+                                    cfg=cfg,
+                                ),
+                                logger,
                             )
                     try:
                         audit = audit_bc_ledger(self.ledger_epochs, int(course.train.epochs))
@@ -541,15 +571,17 @@ def ingest_bc_metrics(
                         if not ep or ep in late:
                             continue
                         _eval_epoch_if_due(
-                            wait,
-                            hub_url=hub_url,
-                            token=token,
-                            jsonl_path=jsonl_path,
-                            it=it,
-                            epoch=ep,
-                            course=course,
-                            cfg=cfg,
-                            logger=logger,
+                            EvalIfDueSpec(
+                                wait,
+                                hub_url=hub_url,
+                                token=token,
+                                jsonl_path=jsonl_path,
+                                it=it,
+                                epoch=ep,
+                                course=course,
+                                cfg=cfg,
+                            ),
+                            logger,
                         )
     except Exception as e:
         logger(f"[run_bc] WARN 指标轮询失败（不致命）: {type(e).__name__}: {e}")
@@ -565,18 +597,21 @@ def ingest_bc_metrics(
     return wait.seen_metrics
 
 
-def wait_bc_round(
-    *,
-    hub_url: str,
-    token: str,
-    jid: str,
-    jsonl_path: Path,
-    it: int,
-    course: BcCourseConfig,
-    cfg: dict | None,
-    wait_sec: float,
-    log=log,
-) -> dict:
+@dataclass(frozen=True)
+class WaitBcSpec:
+    """`wait_bc_round` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    hub_url: str
+    token: str
+    jid: str
+    jsonl_path: Path
+    it: int
+    course: BcCourseConfig
+    cfg: dict | None
+    wait_sec: float
+
+
+def wait_bc_round(spec: WaitBcSpec, log=log) -> dict:
     """BC 专用结果等待环（**阻塞包装**：内部是 `BcWait.poll_once` + 退避；让位版见 `BcLoop`）。
 
     404 = 正常等待；5xx/网络错误按 2 的幂退避（wait_job 同款）；轮询间隙拉
@@ -589,6 +624,15 @@ def wait_bc_round(
     单进程 supervisor 驱动的 BC 课**不走本函数**（它一次只问一句就把执行权让出去）——
     两者共用 `BcWait`/`poll_once`，所以轮询语义只有一份。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    hub_url = spec.hub_url
+    token = spec.token
+    jid = spec.jid
+    jsonl_path = spec.jsonl_path
+    it = spec.it
+    course = spec.course
+    cfg = spec.cfg
+    wait_sec = spec.wait_sec
     wait = BcWait(jid=jid)
     deadline = None if wait_sec <= 0 else time.time() + wait_sec
     while deadline is None or time.time() < deadline:

@@ -25,6 +25,19 @@
 
 ---
 
+## §273 P0-3 第二十刀（批量）：6 个 9 参函数收成 spec（宽签名 95 → 89）（2026-11-21）
+
+* `worker/data/dataset.py::make_loaders` → `LoaderSpec`；`biz/course_archive.py::archive_course`
+  → `ArchiveSpec`；`worker/bc_collect.py::collect_corpus` → `CollectSpec`；
+  `trainer/bc_ingest.py` 的 `run_epoch_eval` / `_eval_epoch_if_due` / `wait_bc_round` →
+  `EpochEvalSpec` / `EvalIfDueSpec` / `WaitBcSpec`。字段顺序 = 旧签名，缺省值逐字保留。
+* 调用点全量跟改：`worker/train/bc.py`、`trainer/bc_loop.py`（门面转发）、
+  `trainer/eval_bc_once.py`、e2e + 6 个测试文件的直接调用；`bc_loop` 只新增
+  `WaitBcSpec as WaitBcSpec` 的再导出，门面 `collect_corpus` 签名未动。
+* 形状基线删除 `biz/course_archive.py` / `worker/data/dataset.py` / `worker/bc_collect.py`，
+  `trainer/bc_ingest.py` 3 → 0；全仓 **95 → 89**，文件 **66 → 62**。
+* 回归：上述 6 个测试文件 + BC e2e + 形状/LOC 预算 119 用例全绿；改动文件 ruff 与 mypy 全绿。
+
 ## §272 P0-3 第十九刀：`reap_alloc_timeouts` 收成 `ReapSpec`（宽签名 96 → 95）（2026-11-21）
 
 * `trainer/queue_local.py::reap_alloc_timeouts` 的 9 个关键字参数 → frozen `ReapSpec`

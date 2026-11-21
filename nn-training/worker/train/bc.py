@@ -58,7 +58,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common.cli import house_parser, run_main
 from common.log import say
 from common.schema import OBS_SCHEMA_MAJOR
-from worker.data.dataset import make_loaders
+from worker.data.dataset import LoaderSpec, make_loaders
 from worker.data.weights_io import load_state_into, save_weights_json
 from worker.models.core import NNPolicy, param_count
 from worker.models.student import PPOStudent, StudentNet
@@ -925,14 +925,16 @@ def train(args) -> dict:
     else:
         dev = _bc_torch_device(dev_name, use_dp)
     train_dl, val_dl, sizes = make_loaders(
-        args.data_dir,
-        args.batch,
-        args.val_split,
-        args.mirror_p,
-        args.seed,
-        args.num_workers,
-        action_v6=action_v6,
-        drop_last=mesh is not None,
+        LoaderSpec(
+            args.data_dir,
+            args.batch,
+            args.val_split,
+            args.mirror_p,
+            args.seed,
+            args.num_workers,
+            action_v6=action_v6,
+            drop_last=mesh is not None,
+        )
     )
     say(f"[train] samples total={sizes['total']} train={sizes['train']} val={sizes['val']}")
 

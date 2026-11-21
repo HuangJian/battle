@@ -181,13 +181,13 @@ def test_bc_train_writes_null_when_val_loss_is_not_finite(tmp_path: Path) -> Non
     `OSError [Errno 22] Invalid argument`，看着像路径/沙箱问题，其实是文件锁）。
     ⇒ 在**副本**语料上落 NaN：切分只由 seed 与 shard 形状决定，下标逐字节一致。
     """
-    from worker.data.dataset import make_loaders
+    from worker.data.dataset import LoaderSpec, make_loaders
 
     # ⚠ `_bc_args` 自己会调 `_make_corpus`（覆盖写）；先把 args 建好，再准备副本。
     ns = _bc_args(tmp_path, epochs=2)
     corpus = Path(ns.data_dir)
     _, val_dl, _ = make_loaders(
-        str(corpus), batch_size=8, val_split=0.2, mirror_p=0.0, seed=1234
+        LoaderSpec(str(corpus), batch_size=8, val_split=0.2, mirror_p=0.0, seed=1234)
     )
     val_idx = sorted(int(i) for i in val_dl.dataset.indices)
     assert val_idx, "val_split=0.2 必须有验证样本，否则这条用例什么都没测"

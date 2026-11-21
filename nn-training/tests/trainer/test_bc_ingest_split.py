@@ -43,6 +43,7 @@ MOVED_NAMES = {
     "PENDING",
     "TRANSIENT",
     "BcWait",
+    "WaitBcSpec",
     "ingest_bc_metrics",
     "ledger_bc_epoch",
     "run_epoch_eval",

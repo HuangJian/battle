@@ -8818,6 +8818,18 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-batch-bc-dataset-specs
+
+P0-3 第二十刀（批量）：一次收 6 个 9 参函数 → frozen 旋钮袋，调用点全量跟改：
+`worker/data/dataset.py::make_loaders` → `LoaderSpec`（生产 1 + 测试 5）、
+`biz/course_archive.py::archive_course` → `ArchiveSpec`（CLI 1 + 测试 2）、
+`worker/bc_collect.py::collect_corpus` → `CollectSpec`（`trainer/bc_loop.py` 门面 1 + 测试 1）、
+`trainer/bc_ingest.py::run_epoch_eval` / `_eval_epoch_if_due` / `wait_bc_round` →
+`EpochEvalSpec` / `EvalIfDueSpec` / `WaitBcSpec`（内部 3 + `eval_bc_once` 1 + e2e 2 + 测试 1）。
+字段顺序 = 旧签名，缺省值逐字保留；函数体开头一次展开旧局部名，行为未动。
+宽签名 **95 → 89**，文件 **66 → 62**（上述四文件归零）。`bc_loop` 的门面
+`collect_corpus`（9 参）与 `publish_bc_job`（12 参）不在本刀内，仍冻在基线。
+
 ## §2026-11-21-reap-spec
 
 P0-3 第十九刀：`trainer/queue_local.py::reap_alloc_timeouts`（9 个关键字参数：inflight /

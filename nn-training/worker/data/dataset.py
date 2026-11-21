@@ -33,6 +33,7 @@ if _ilu.find_spec("common") is None:
     _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent.parent))
 
 import random
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -173,17 +174,22 @@ class NNDataset(Dataset):
         )
 
 
-def make_loaders(
-    data_dir: str,
-    batch_size: int = 256,
-    val_split: float = 0.1,
-    mirror_p: float = 0.5,
-    seed: int = 1234,
-    num_workers: int = 0,
-    action_v6: bool = False,
-    lazy: bool = True,
-    drop_last: bool = False,
-):
+@dataclass(frozen=True)
+class LoaderSpec:
+    """`make_loaders` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    data_dir: str
+    batch_size: int = 256
+    val_split: float = 0.1
+    mirror_p: float = 0.5
+    seed: int = 1234
+    num_workers: int = 0
+    action_v6: bool = False
+    lazy: bool = True
+    drop_last: bool = False
+
+
+def make_loaders(spec: LoaderSpec):
     """Build train/val DataLoaders from a directory of npy shards.
 
     可复现性（P2-3，2026-09-02）：train DataLoader 的 shuffle 使用**独立
@@ -195,6 +201,16 @@ def make_loaders(
     train/val（同局相邻帧不再跨集 → val 不再虚高）。无 shard_ids 的旧语料回退
     样本级 random_split。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    data_dir = spec.data_dir
+    batch_size = spec.batch_size
+    val_split = spec.val_split
+    mirror_p = spec.mirror_p
+    seed = spec.seed
+    num_workers = spec.num_workers
+    action_v6 = spec.action_v6
+    lazy = spec.lazy
+    drop_last = spec.drop_last
     from worker.data.npyio import load_dataset
 
     def _worker_init(wid: int) -> None:

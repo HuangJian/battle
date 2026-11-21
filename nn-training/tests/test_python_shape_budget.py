@@ -52,7 +52,6 @@ LONG_FUNCS_BASELINE: dict[str, int] = {
 
 #: 存量：包含 >8 参数函数的文件 → 个数。
 WIDE_FUNCS_BASELINE = {
-    "biz/course_archive.py": 1,
     "common/race_metrics.py": 1,
     "common/task_key.py": 1,
     "hub/offline_ingest.py": 1,
@@ -66,7 +65,6 @@ WIDE_FUNCS_BASELINE = {
     # P3 lazy loader 的装载参数（loader/gamma/lam/normalize/配额/mb/bundle）本就 >8。
     "worker/ppo/lazy_corpus.py": 1,
     # 上游合入的宽签名（BC 数据集）——同批登记，待收对象。
-    "worker/data/dataset.py": 1,
     "remote/bc_job.py": 1,
     "remote/bundle.py": 2,
     "remote/colab_bc.py": 1,
@@ -103,7 +101,7 @@ WIDE_FUNCS_BASELINE = {
     #: 2026-11-20：`_settle_unit` 的 15 参收成 `(self, ledger)`，通道机器搬去
     #: `trainer/batch_lanes.py` ⇒ 本文件 3 → **2**（新家没有新增宽签名）。
     "trainer/batch_runner.py": 2,
-    "trainer/bc_ingest.py": 3,
+    "trainer/bc_ingest.py": 0,
     "trainer/bc_loop.py": 2,
     "trainer/dispatch.py": 1,
     "trainer/dispatch_queue.py": 1,
@@ -116,7 +114,6 @@ WIDE_FUNCS_BASELINE = {
     "trainer/queue_local.py": 1,
     "trainer/rollout_phase.py": 1,
     "trainer/stream.py": 1,
-    "worker/bc_collect.py": 1,
     "worker/bc_dispatch.py": 1,
     "worker/bc_eval.py": 2,
     "worker/breaker.py": 1,
