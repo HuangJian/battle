@@ -16,7 +16,7 @@ import inspect
 import random
 
 from remote import deliver_outbox
-from remote.deliver_outbox import LocalOutboxDeliverer
+from remote.deliver_outbox import LocalOutboxDeliverer, OutboxSpec
 from remote.deliver_parts import EVAL_ROWS_BASE, eval_rows_cap, select_eval_rows
 from remote.deliver_wire import EVAL_ROWS_HARD
 
@@ -80,6 +80,6 @@ def test_duplicate_stage_seed_keeps_last() -> None:
 
 def test_outbox_uses_the_single_hard_cap() -> None:
     """outbox 不再各存一份 400：默认值就是 `deliver_wire.EVAL_ROWS_HARD`。"""
-    default = inspect.signature(LocalOutboxDeliverer.__init__).parameters["eval_cap"].default
+    default = OutboxSpec.__dataclass_fields__["eval_cap"].default
     assert default == EVAL_ROWS_HARD
     assert not hasattr(deliver_outbox, "EVAL_ROWS_CAP")

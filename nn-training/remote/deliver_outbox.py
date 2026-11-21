@@ -394,6 +394,26 @@ def _ack_outbox_locked(
     }
 
 
+@dataclass(frozen=True, kw_only=True)
+class OutboxSpec:
+    """`LocalOutboxDeliverer` 的旋钮袋（P0-3：15 参 → 一个对象）。"""
+
+    outbox_dir: str | Path
+    artifacts_dir: str | Path
+    run_id: str
+    parts: OutboxParts
+    course: str = ""
+    hub_lease: str = ""
+    worker_name: str = ""
+    eval_cap: int = EVAL_ROWS_HARD
+    cap_bytes: int = OFFLINE_ARTIFACT_BODY_MAX
+    background: bool = False
+    tick_sec: float = OUTBOX_TICK_SEC
+    floor_it: int = 0
+    now: Callable[[], float] = time.time
+    log: Callable[[str], None] = _log_default
+
+
 class LocalOutboxDeliverer(runtime.ThreadOwner):
     """把补传产物**落成本地文件**的腿（`DelivererLike` 的同形面，不连任何网络）。
 
@@ -403,28 +423,22 @@ class LocalOutboxDeliverer(runtime.ThreadOwner):
     空」正是 P1-10 要钉住的形态）。
     """
 
-    def __init__(
-        self,
-        *,
-        outbox_dir: str | Path,
-        artifacts_dir: str | Path,
-        run_id: str,
-        parts: OutboxParts,
-        course: str = "",
-        hub_lease: str = "",
-        worker_name: str = "",
-        eval_cap: int = EVAL_ROWS_HARD,
-        cap_bytes: int = OFFLINE_ARTIFACT_BODY_MAX,
-        background: bool = False,
-        tick_sec: float = OUTBOX_TICK_SEC,
-        #: ★ **地板**（`it <= floor_it` 的轮次一律不物化）：push 任务包里已经**在 hub 上**的那些轮。
-        #: 值由任务元数据给（hub 的 cursor = 派发时的 resume 锚点），**缺省 0 = 全部物化**。
-        #: 为什么默认是「不省」：`floor_it` 给错（高于 hub 真正的 cursor）就是**永久丢那几轮**，
-        #: 而给 0 的代价只是多发几份 hub 会按内容去重的重复体——错的方向必须选不丢数据的那个。
-        floor_it: int = 0,
-        now: Callable[[], float] = time.time,
-        log: Callable[[str], None] = _log_default,
-    ) -> None:
+    def __init__(self, spec: OutboxSpec) -> None:
+        # 旧签名 15 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+        outbox_dir = spec.outbox_dir
+        artifacts_dir = spec.artifacts_dir
+        run_id = spec.run_id
+        parts = spec.parts
+        course = spec.course
+        hub_lease = spec.hub_lease
+        worker_name = spec.worker_name
+        eval_cap = spec.eval_cap
+        cap_bytes = spec.cap_bytes
+        background = spec.background
+        tick_sec = spec.tick_sec
+        floor_it = spec.floor_it
+        now = spec.now
+        log = spec.log
         #: 后台同步线程归这里（`deliver-outbox-loop`）：名字 / 登记 / 收尾 join 一处管。
         self._rt = runtime.Runtime(scope="deliver-outbox")
         self.outbox = Path(outbox_dir)

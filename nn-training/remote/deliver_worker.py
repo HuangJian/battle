@@ -45,7 +45,7 @@ from common.cli import house_parser, run_main
 from common.settings import hub_token_from_env
 from remote import deliver_parts
 from remote.artifacts import atomic_write_json
-from remote.deliver_outbox import LocalOutboxDeliverer
+from remote.deliver_outbox import LocalOutboxDeliverer, OutboxSpec
 from remote.offline_deliver import (
     DRAIN_FLUSH_SEC,
     DRAIN_TICK_SEC,
@@ -280,7 +280,7 @@ def main(argv: list[str] | None = None) -> int:
         # ★ 2026-10-23（plan/push-mode-notebooks §6.4a / P0-1）：push 腿的**同一份实现**跑在子进程里
         #（复用父侧的隔离/重启/收线机制）；这里一个 HTTP 客户端都不会被构造。
         d: OfflineDeliverer | LocalOutboxDeliverer = LocalOutboxDeliverer(
-            outbox_dir=args.outbox,
+            OutboxSpec(outbox_dir=args.outbox,
             artifacts_dir=args.artifacts,
             run_id=args.run_id,
             parts=deliver_parts,
@@ -289,7 +289,7 @@ def main(argv: list[str] | None = None) -> int:
             worker_name=worker_name,
             floor_it=int(args.floor_it or 0),
             background=False,
-            log=_log,
+            log=_log),
         )
     else:
         if not args.hub_url:

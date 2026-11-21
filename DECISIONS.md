@@ -8818,6 +8818,15 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-outbox-spec
+
+P0-3 第十刀：`remote/deliver_outbox.LocalOutboxDeliverer.__init__`（15 参）→ frozen
+`OutboxSpec`（14 字段，kw_only；`outbox_dir` / `artifacts_dir` / `run_id` / `parts` 必填）。
+7 处构造点（`deliver_proc` 3 · `deliver_worker` 1 · 两个测试文件 3）一次包对象；测试的
+`**kw` 覆盖仍原样可用（`OutboxSpec(**kw)`）。`deliver_outbox` 文件的宽签名归零（1 → 0），
+全仓 109 → 108（75 → 74 文件）。下一刀：`deliver_proc` 的 22 参构造 + 17 参工厂，以及
+`http._request` / `_get_with_retry`（替身须同步读 spec）。
+
 ## §2026-11-21-transport-specs-deliver-download
 
 P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参 / `_resolve_weights` 11 /

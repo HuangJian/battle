@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from remote.deliver_outbox import OutboxSpec
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -70,13 +72,13 @@ class _Recorder:
 def _outbox(tmp_path: Path, root: Path, **kw: object) -> LocalOutboxDeliverer:
     """构造被测对象（缺省：同步模式、固定时钟、日志静音）。"""
     return LocalOutboxDeliverer(
-        outbox_dir=tmp_path / "outbox",
+        OutboxSpec(outbox_dir=tmp_path / "outbox",
         artifacts_dir=root,
         run_id=RUN,
         parts=deliver_parts,
         now=lambda: NOW,
         log=_quiet,
-        **kw,  # type: ignore[arg-type]
+        **kw),  # type: ignore[arg-type]
     )
 
 
@@ -416,12 +418,12 @@ def test_close_reports_unsent_work_loudly(
     root = _make_artifacts(tmp_path / "art", iters=(1,))
     logs: list[str] = []
     ob = LocalOutboxDeliverer(
-        outbox_dir=tmp_path / "outbox",
+        OutboxSpec(outbox_dir=tmp_path / "outbox",
         artifacts_dir=root,
         run_id=RUN,
         parts=deliver_parts,
         now=lambda: NOW,
-        log=logs.append,
+        log=logs.append),
     )
     monkeypatch.setattr(ob, "_write_round", lambda _it: False)
     ob.close(0.0)

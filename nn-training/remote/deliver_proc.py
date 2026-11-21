@@ -30,7 +30,7 @@ from common.platform_utils import POPEN_NO_WINDOW
 from common.protocol import ProtocolError, sanitize_run_id
 from remote import deliver_parts
 from remote.child_proc import pump_lines
-from remote.deliver_outbox import LocalOutboxDeliverer
+from remote.deliver_outbox import LocalOutboxDeliverer, OutboxSpec
 from remote.offline_deliver import (
     DRAIN_FLUSH_SEC,
     DRAIN_TICK_SEC,
@@ -456,7 +456,7 @@ class DelivererProcess:
             # ★ P1-10：进程内降级是 push 腿的**常态**（旧 `code.zip` 不认 `--outbox`）。同一种
             #   实现、同一个目录 ⇒ 降级后 outbox 照常产出；不测就会看到「降级成功、outbox 空」。
             self._fallback = LocalOutboxDeliverer(
-                outbox_dir=self.outbox,
+                OutboxSpec(outbox_dir=self.outbox,
                 artifacts_dir=self.root,
                 run_id=self._run_id_raw,
                 parts=deliver_parts,
@@ -465,7 +465,7 @@ class DelivererProcess:
                 worker_name=self.worker_name,
                 floor_it=self._floor_it,
                 background=True,
-                log=self.log,
+                log=self.log),
             )
         else:
             self._fallback = OfflineDeliverer(
@@ -612,7 +612,7 @@ class DelivererProcess:
             return self._mirror_obj
         if self.outbox is not None:
             self._mirror_obj = LocalOutboxDeliverer(
-                outbox_dir=self.outbox,
+                OutboxSpec(outbox_dir=self.outbox,
                 artifacts_dir=self.root,
                 run_id=self._run_id_raw,
                 parts=deliver_parts,
@@ -621,7 +621,7 @@ class DelivererProcess:
                 worker_name=self.worker_name,
                 floor_it=self._floor_it,
                 background=False,
-                log=lambda _m: None,
+                log=lambda _m: None),
             )
             return self._mirror_obj
         self._mirror_obj = OfflineDeliverer(
@@ -836,7 +836,7 @@ def make_deliverer(
     if outbox is not None and kind != "process":
         # 线程/同步两种模式下没有隔离面可言：直接物化到同一个 outbox（与 HTTP 腿同形）。
         return LocalOutboxDeliverer(
-            outbox_dir=outbox,
+            OutboxSpec(outbox_dir=outbox,
             artifacts_dir=artifacts_dir,
             run_id=run_id,
             parts=deliver_parts,
@@ -845,7 +845,7 @@ def make_deliverer(
             worker_name=worker_name,
             floor_it=int(floor_it or 0),
             background=kind == "thread",
-            log=log,
+            log=log),
         )
     if kind == "process":
         return DelivererProcess(

@@ -20,6 +20,8 @@ from typing import Any
 
 import pytest
 
+from remote.deliver_outbox import OutboxSpec
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -174,11 +176,11 @@ def test_outbox_leg_reaches_the_body_through_the_parts_module(tmp_path: Path) ->
 
     root = _make_artifacts(tmp_path / "art", iters=(1,))
     leg = LocalOutboxDeliverer(
-        outbox_dir=tmp_path / "outbox",
+        OutboxSpec(outbox_dir=tmp_path / "outbox",
         artifacts_dir=root,
         run_id=RUN,
         parts=_Noop(),
-        log=_quiet,
+        log=_quiet),
     )
     assert leg.sync() == 0
     assert not round_path(tmp_path / "outbox", 1).exists()

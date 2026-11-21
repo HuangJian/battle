@@ -25,6 +25,16 @@
 
 ---
 
+## §263 P0-3 第十刀：outbox 构造器收成 `OutboxSpec`（宽签名 109 → 108）（2026-11-21）
+
+* `LocalOutboxDeliverer.__init__` 的 14 个关键字参数 → frozen + kw_only `OutboxSpec`；
+  签名只剩 `(spec)`，函数体开头一次展开旧局部名，临界区逐字未动。
+* 7 处构造点包对象：`deliver_proc` 3（降级腿 / 镜像腿 / 工厂）· `deliver_worker` 1 ·
+  `test_deliver_outbox` 2 · `test_run_loop_outbox` 1；后者的 `**kw` 照旧透传（spec 接受同名字段）。
+* 形状门禁基线删除 `remote/deliver_outbox.py` 行（该文件宽签名 1 → 0）；Any 基线不动
+  （`parts` 用既有 `OutboxParts` Protocol，`now` / `log` 用 Callable）。
+* 回归 33 例（outbox / run_loop_outbox / 形状 / Any 预算）+ mypy 5 文件绿。
+
 ## §262 P0-3 第九刀：download 三个解析器 + deliver_parts 三个装配器收成 spec（宽签名 117 → 109）（2026-11-21）
 
 * `remote/download.py`：`_resolve_blob` / `_resolve_weights` / `_ensure_code` 各留 `(spec)`，
