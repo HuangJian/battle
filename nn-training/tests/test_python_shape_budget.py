@@ -93,8 +93,6 @@ WIDE_FUNCS_BASELINE = {
     "remote/worker.py": 2,
     "tools/c9_critic_calibration.py": 1,
     "tools/p0_auc_probe.py": 1,
-    "tools/spatial-probe-flatcv.py": 1,
-    "tools/spatial-probe.py": 2,
     "tools/tpu-probe.py": 1,
     #: 2026-11-20：`_settle_unit` 的 15 参收成 `(self, ledger)`，通道机器搬去
     #: `trainer/batch_lanes.py` ⇒ 本文件 3 → **2**（新家没有新增宽签名）。
@@ -140,7 +138,6 @@ WIDE_FUNCS_BASELINE = {
     "worker/resume.py": 1,
     # 2026-11-21：`quota_sample_priority` 的 9 个位置参数收成 `QuotaSampleSpec`
     # ⇒ 本文件宽签名归零，条目删除。
-    "worker/volume_quota.py": 1,
     # 2026-11-21：`plan_topup` 的 9 个关键字参数收成 `TopUpSpec`
     # ⇒ 本文件宽签名归零，条目删除。
 }

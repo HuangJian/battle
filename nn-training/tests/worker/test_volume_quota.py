@@ -5,6 +5,7 @@ from __future__ import annotations
 from worker.volume_quota import (
     DEFAULT_MAX_BATCHES,
     VOLUME_RULE_V2,
+    ContinuousPlanSpec,
     allocate_stage_games,
     continuous_pairs,
     continuous_seed_stream,
@@ -56,14 +57,16 @@ def test_allocate_soft_stop_and_hard_cap() -> None:
 
 def test_plan_continuous_batch_prefers_short_stage() -> None:
     plan = plan_continuous_batch(
-        stages=[2000, 2001, 2002, 2003],
+        ContinuousPlanSpec(
+            stages=[2000, 2001, 2002, 2003],
         collected={2000: 6000, 2001: 2000, 2002: 5800, 2003: 5800},
         inflight={2000: 0, 2001: 0, 2002: 1, 2003: 0},
         target_transitions=24000,
         ests={2000: 200, 2001: 150, 2002: 200, 2003: 200},
         games_done={2000: 30, 2001: 15, 2002: 29, 2003: 29},
-        game_cap=124,
-        fallback_est=200,
+            game_cap=124,
+            fallback_est=200,
+        )
     )
     assert 2000 not in plan.games_by_stage  # 已达标
     # 2002: 5800+1*200=6000 → 软停
@@ -76,13 +79,15 @@ def test_plan_continuous_batch_prefers_short_stage() -> None:
 
 def test_plan_empty_when_all_met() -> None:
     plan = plan_continuous_batch(
-        stages=[1, 2],
+        ContinuousPlanSpec(
+            stages=[1, 2],
         collected={1: 100, 2: 100},
         inflight={1: 0, 2: 0},
         target_transitions=200,
         ests={1: 50, 2: 50},
         games_done={1: 2, 2: 2},
-        game_cap=10,
+            game_cap=10,
+        )
     )
     assert plan.games_by_stage == {}
     assert plan.capped is False

@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -127,19 +128,33 @@ class LinearProbe(nn.Module):
         return out
 
 
-def train_linear(
-    x_train: np.ndarray,
-    y_train: np.ndarray,
-    x_val: np.ndarray,
-    y_val: np.ndarray,
-    *,
-    epochs: int = 30,
-    batch: int = 512,
-    lr: float = 1e-3,
-    wd: float = 1e-2,
-    seed: int = 0,
-) -> tuple[LinearProbe, float]:
+@dataclass(frozen=True)
+class LinearTrainSpec:
+    """`train_linear` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    x_train: np.ndarray
+    y_train: np.ndarray
+    x_val: np.ndarray
+    y_val: np.ndarray
+    epochs: int = 30
+    batch: int = 512
+    lr: float = 1e-3
+    wd: float = 1e-2
+    seed: int = 0
+
+
+def train_linear(spec: LinearTrainSpec) -> tuple[LinearProbe, float]:
     """训练线性探针；返回 (最优 val AUC 时的模型, val AUC)。"""
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    x_train = spec.x_train
+    y_train = spec.y_train
+    x_val = spec.x_val
+    y_val = spec.y_val
+    epochs = spec.epochs
+    batch = spec.batch
+    lr = spec.lr
+    wd = spec.wd
+    seed = spec.seed
     torch.manual_seed(seed)
     model = LinearProbe(x_train.shape[1])
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
@@ -180,19 +195,33 @@ class TowerProbe(nn.Module):
         return self.fc(p).squeeze(-1), z
 
 
-def train_tower(
-    bufa_train: np.ndarray,
-    y_train: np.ndarray,
-    bufa_val: np.ndarray,
-    y_val: np.ndarray,
-    *,
-    epochs: int = 30,
-    batch: int = 128,
-    lr: float = 1e-3,
-    wd: float = 1e-3,
-    seed: int = 0,
-) -> tuple[TowerProbe, float, float]:
+@dataclass(frozen=True)
+class TowerTrainSpec:
+    """`train_tower` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    bufa_train: np.ndarray
+    y_train: np.ndarray
+    bufa_val: np.ndarray
+    y_val: np.ndarray
+    epochs: int = 30
+    batch: int = 128
+    lr: float = 1e-3
+    wd: float = 1e-3
+    seed: int = 0
+
+
+def train_tower(spec: TowerTrainSpec) -> tuple[TowerProbe, float, float]:
     """bufA 传 f16 数组（每 batch 现转 f32，控内存）。"""
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    bufa_train = spec.bufa_train
+    y_train = spec.y_train
+    bufa_val = spec.bufa_val
+    y_val = spec.y_val
+    epochs = spec.epochs
+    batch = spec.batch
+    lr = spec.lr
+    wd = spec.wd
+    seed = spec.seed
     torch.manual_seed(seed)
     model = TowerProbe()
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
@@ -267,11 +296,13 @@ def _probe_linear_bufa(
     ):
         for d in range(4):
             clf, vauc = train_linear(
-                feat_tr,
-                labels[is_train, d],
-                feat_va,
-                labels[is_val, d],
-                seed=seed + d,
+                LinearTrainSpec(
+                    feat_tr,
+                    labels[is_train, d],
+                    feat_va,
+                    labels[is_val, d],
+                    seed=seed + d,
+                )
             )
             te = auc_score(clf(torch.from_numpy(feat_te)).detach().numpy(), labels[is_test, d])
             s1[f"{family}_auc"][lab_names[d]] = {"test_auc": te, "val_auc": vauc}
@@ -286,11 +317,13 @@ def _probe_linear_bufa(
         s1["confusion"][family] = mat.tolist()
     # pincer（诊断附加）
     clf_p, _ = train_linear(
-        x_flat_train,
-        pincer[is_train],
-        x_flat_val,
-        pincer[is_val],
-        seed=seed + 17,
+        LinearTrainSpec(
+            x_flat_train,
+            pincer[is_train],
+            x_flat_val,
+            pincer[is_val],
+            seed=seed + 17,
+        )
     )
     s1["pincer_auc"] = auc_score(clf_p(torch.from_numpy(x_flat_test)).detach().numpy(), pincer[is_test])
     log(f"    pincer: testAUC={s1['pincer_auc']:.3f}")
@@ -430,11 +463,13 @@ def main() -> None:
     for family, labels in (("threat", threat), ("hit", hit)):
         for d in range(4):
             clf, vauc = train_linear(
-                old_feat[is_train],
-                labels[is_train, d],
-                old_feat[is_val],
-                labels[is_val, d],
-                seed=args.seed + d,
+                LinearTrainSpec(
+                    old_feat[is_train],
+                    labels[is_train, d],
+                    old_feat[is_val],
+                    labels[is_val, d],
+                    seed=args.seed + d,
+                )
             )
             te = auc_score(clf(torch.from_numpy(old_feat[is_test])).detach().numpy(), labels[is_test, d])
             s1b[f"{family}_auc"][lab_names[d]] = {"test_auc": te, "val_auc": vauc}
@@ -450,11 +485,13 @@ def main() -> None:
     for family, labels in (("threat", threat), ("hit", hit)):
         for d in range(4):
             tp, vauc, nz = train_tower(
-                bufa_train,
-                labels[is_train, d],
-                bufa_val,
-                labels[is_val, d],
-                seed=args.seed + d,
+                TowerTrainSpec(
+                    bufa_train,
+                    labels[is_train, d],
+                    bufa_val,
+                    labels[is_val, d],
+                    seed=args.seed + d,
+                )
             )
             with torch.no_grad():
                 out, _ = tp(torch.from_numpy(bufa_test).float())
@@ -466,12 +503,14 @@ def main() -> None:
             f_va = tower_features(tp, bufa_val)
             f_te = tower_features(tp, bufa_test)
             clf2, _ = train_linear(
-                f_tr,
-                labels[is_train, d],
-                f_va,
-                labels[is_val, d],
-                epochs=60,
-                seed=args.seed + d,
+                LinearTrainSpec(
+                    f_tr,
+                    labels[is_train, d],
+                    f_va,
+                    labels[is_val, d],
+                    epochs=60,
+                    seed=args.seed + d,
+                )
             )
             sc = clf2(torch.from_numpy(f_te)).detach().numpy()
             auc2 = auc_score(sc, labels[is_test, d])

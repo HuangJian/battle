@@ -25,6 +25,14 @@
 
 ---
 
+## §276 P0-3 第二十三刀（批量）：探针/配额四函数收成 spec（宽签名 86 → 83）（2026-11-21）
+
+* `cv_probe` → `CVProbeSpec`；`train_linear` / `train_tower` → `LinearTrainSpec` /
+  `TowerTrainSpec`；`plan_continuous_batch` → `ContinuousPlanSpec`（kw_only）。
+* 调用点：flatcv 2、spatial-probe 4+1、volume_quota 测试 2；形状基线三文件归零，
+  全仓 **86 → 83**，文件 **60 → 57**。
+* 回归：volume_quota 用例 + 形状/LOC/Any 预算 24 条全绿；mypy/ruff 三文件全绿。
+
 ## §275 P0-3 第二十二刀：`bc_loop.collect_corpus` 门面收 `CollectSpec`（宽签名 87 → 86）（2026-11-21）
 
 * 门面签名 9 参 → `collect_corpus(spec: CollectSpec)`，直接复用实现层的旋钮袋

@@ -17,6 +17,7 @@ import importlib.util
 import json
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -61,23 +62,37 @@ def stats_f32(x: np.ndarray, is_tr: np.ndarray, chunk: int = 256) -> tuple[np.nd
     return mean.astype(np.float32), (std + 1e-3).astype(np.float32)
 
 
-def cv_probe(
-    x: np.ndarray,
-    labels: np.ndarray,
-    game_ids: np.ndarray,
-    n_folds: int,
-    *,
-    epochs: int = 20,
-    batch: int = 1024,
-    lr: float = 1e-3,
-    wd: float = 1e-2,
-    seed: int = 0,
-) -> dict:
+@dataclass(frozen=True)
+class CVProbeSpec:
+    """`cv_probe` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    x: np.ndarray
+    labels: np.ndarray
+    game_ids: np.ndarray
+    n_folds: int
+    epochs: int = 20
+    batch: int = 1024
+    lr: float = 1e-3
+    wd: float = 1e-2
+    seed: int = 0
+
+
+def cv_probe(spec: CVProbeSpec) -> dict:
     """局级 CV：返回 {auc_pooled, fold_aucs}（labels 可多任务一次跑）。
 
     x 可为 f16 存储（bufA 全分辨率 43k 维）；统计量与标准化在 f32 下按块完成，
     训练batch 现取现转 —— 不物化整折 f32 矩阵。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    x = spec.x
+    labels = spec.labels
+    game_ids = spec.game_ids
+    n_folds = spec.n_folds
+    epochs = spec.epochs
+    batch = spec.batch
+    lr = spec.lr
+    wd = spec.wd
+    seed = spec.seed
     rng = np.random.default_rng(seed)
     games = np.unique(game_ids)
     perm = rng.permutation(len(games))
@@ -166,14 +181,14 @@ def main() -> None:
 
     out: dict = {"protocol": f"game-level {args.folds}-fold CV, fixed 20ep wd1e-2, standardized"}
     for family, labels in (("threat", threat), ("hit", hit)):
-        res = cv_probe(x_flat, labels, game_ids, args.folds, seed=args.seed)
+        res = cv_probe(CVProbeSpec(x_flat, labels, game_ids, args.folds, seed=args.seed))
         out[f"bufA_{family}"] = {
             lab_names[d]: {"auc_pooled": res["auc_pooled"][d], "folds": res["fold_aucs"][d]} for d in range(4)
         }
         log(f"    bufA {family}: " + " ".join(f"{lab_names[d]}={res['auc_pooled'][d]:.3f}" for d in range(4)))
     # old-input 对照（同一折，但需重算折）——直接跑一份
     for family, labels in (("threat", threat), ("hit", hit)):
-        res = cv_probe(old_feat, labels, game_ids, args.folds, seed=args.seed)
+        res = cv_probe(CVProbeSpec(old_feat, labels, game_ids, args.folds, seed=args.seed))
         out[f"old_{family}"] = {
             lab_names[d]: {"auc_pooled": res["auc_pooled"][d], "folds": res["fold_aucs"][d]} for d in range(4)
         }

@@ -137,18 +137,22 @@ class ContinuousPlan(GamesByStageMixin):
     capped: bool = False
 
 
-def plan_continuous_batch(
-    *,
-    stages: Sequence[int],
-    collected: Mapping[int, int],
-    inflight: Mapping[int, int],
-    target_transitions: int,
-    ests: Mapping[int, int],
-    games_done: Mapping[int, int],
-    game_cap: int = 0,
-    fallback_est: int = 1,
-    game_cap_by_stage: Mapping[int, int] | None = None,
-) -> ContinuousPlan:
+@dataclass(frozen=True, kw_only=True)
+class ContinuousPlanSpec:
+    """`plan_continuous_batch` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    stages: Sequence[int]
+    collected: Mapping[int, int]
+    inflight: Mapping[int, int]
+    target_transitions: int
+    ests: Mapping[int, int]
+    games_done: Mapping[int, int]
+    game_cap: int = 0
+    fallback_est: int = 1
+    game_cap_by_stage: Mapping[int, int] | None = None
+
+
+def plan_continuous_batch(spec: ContinuousPlanSpec) -> ContinuousPlan:
     """按**当前账本 + 在飞**决定下一批各关局数（差额大者多派；足额则 0）。
 
     `game_cap_by_stage`（2026-10-07，plan/rollout-stage-balance §4.2）：分关硬顶，优先于
@@ -156,6 +160,16 @@ def plan_continuous_batch(
     用全局 est 反解会让它「配额未满就触顶」，而 DoD 又把「触 game_cap」当合格路径
     ⇒ 硬顶成了静默短采的借口（评审 P1-5）。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    stages = spec.stages
+    collected = spec.collected
+    inflight = spec.inflight
+    target_transitions = spec.target_transitions
+    ests = spec.ests
+    games_done = spec.games_done
+    game_cap = spec.game_cap
+    fallback_est = spec.fallback_est
+    game_cap_by_stage = spec.game_cap_by_stage
     stage_list = [int(s) for s in stages]
     if not stage_list:
         raise ValueError("plan_continuous_batch 需要至少一个 stage")
