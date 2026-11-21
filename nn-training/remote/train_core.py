@@ -95,25 +95,34 @@ def _load_opt_state(path: str | Path) -> tuple[Any, int]:
     return state, raised
 
 
-def _resolved(
-    *,
-    jid: str,
-    name: str,
-    sha: str,
-    inline_b64: str,
-    base_url: str,
-    token: str,
-    blob_root: Path,
-    preloaded: dict | None,
-    batch: dict | None,
-    log,
-) -> tuple[bytes, bool, str]:
+@dataclass(frozen=True, kw_only=True)
+class ResolvedSpec:
+    """`_resolved` 的旋钮袋（P0-3：10 参 → 一个对象）。"""
+
+    jid: str
+    name: str
+    sha: str
+    inline_b64: str
+    base_url: str
+    token: str
+    blob_root: Path
+    preloaded: dict | None
+    batch: dict | None
+    log: Callable[[str], None]
+
+
+def _resolved(spec: ResolvedSpec) -> tuple[bytes, bool, str]:
     """先查本轮批量解析的结果（`resolve_blobs_batch`），查不到再逐字退回 `_resolve_blob`。
 
     为什么要有这一层而不是直接改 `_resolve_blob`：批量只覆盖「sha 非空 **且** 本轮真需要」
     的件；其余形状（sha 空 + inline、旧 hub 回退、kick 关闭）必须走老路径。**退回而不是
     重写**，才不会把 `_resolve_blob` 那套安全阀分叉成两份（那是静默 warm-start 的入口）。
     """
+    # 旧签名 10 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    jid, name, sha = spec.jid, spec.name, spec.sha
+    inline_b64, base_url, token = spec.inline_b64, spec.base_url, spec.token
+    blob_root, preloaded, batch = spec.blob_root, spec.preloaded, spec.batch
+    log = spec.log
     got: tuple[bytes, bool, str] | None = (batch or {}).get(name)
     if got is not None:
         return got
@@ -130,18 +139,22 @@ def _resolved(
     )
 
 
-def _resolve_opt_init(
-    *,
-    jid: str,
-    manifest: dict,
-    job_dir: Path,
-    blob_root: Path,
-    base_url: str,
-    token: str,
-    preloaded: dict | None,
-    log: Callable[[str], None],
-    rebuild: Callable[..., bytes] | None = None,
-) -> tuple[bytes, str, float, dict[str, str], dict, int, int]:
+@dataclass(frozen=True, kw_only=True)
+class OptInitSpec:
+    """`_resolve_opt_init` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    jid: str
+    manifest: dict
+    job_dir: Path
+    blob_root: Path
+    base_url: str
+    token: str
+    preloaded: dict | None
+    log: Callable[[str], None]
+    rebuild: Callable[..., bytes] | None = None
+
+
+def _resolve_opt_init(spec: OptInitSpec) -> tuple[bytes, str, float, dict[str, str], dict, int, int]:
     """opt 初始状态的**字节解析**（身份命中 / 批量 GET / 单取 / BOD1 落地）——两条核共用。
 
     返回 `(raw, src, kick_kl, wanted, batch, hits, miss)`。★ 它同时是 **B1 那次合成 GET 的
@@ -152,6 +165,10 @@ def _resolve_opt_init(
     ——`resolve_blobs_batch` 不是惰性的（剩下的当场下载落盘），判晚了即使命中，opt 的下行
     也已经付掉。`rebuild` 只给 Paddle 核：那台机器没有 torch，BOD1 容器要用 numpy 落地。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    jid, manifest, job_dir = spec.jid, spec.manifest, spec.job_dir
+    blob_root, base_url, token = spec.blob_root, spec.base_url, spec.token
+    preloaded, log, rebuild = spec.preloaded, spec.log, spec.rebuild
     opt_sha = str(manifest.get("opt_sha", "") or "")
     # ---- B1：kick 开关是**纯 manifest 读** ⇒ 可以在取字节之前判（ref 进不进本批）----
     raw_kick = float(manifest.get("kickstart_kl", 0.0) or 0.0)
@@ -196,16 +213,18 @@ def _resolve_opt_init(
         hits += 1
     else:
         opt_raw, opt_hit, src = _resolved(
-            jid=jid,
-            name=BLOB_OPT,
-            sha=opt_sha,
-            inline_b64=str(manifest.get("opt_init", "") or ""),
-            base_url=base_url,
-            token=token,
-            blob_root=blob_root,
-            preloaded=preloaded,
-            batch=batch,
-            log=log,
+            ResolvedSpec(
+                jid=jid,
+                name=BLOB_OPT,
+                sha=opt_sha,
+                inline_b64=str(manifest.get("opt_init", "") or ""),
+                base_url=base_url,
+                token=token,
+                blob_root=blob_root,
+                preloaded=preloaded,
+                batch=batch,
+                log=log,
+            )
         )
         if opt_hit and src == "cache":
             hits += 1
@@ -235,39 +254,50 @@ def _resolve_opt_init(
     return opt_raw, src, kick_kl, wanted, batch, hits, miss
 
 
-def _fetch_ref(
-    *,
-    jid: str,
-    manifest: dict,
-    job_dir: Path,
-    blob_root: Path,
-    base_url: str,
-    token: str,
-    preloaded: dict | None,
-    batch: dict,
-    wanted: dict[str, str],
-    kick_kl: float,
-    log: Callable[[str], None],
-) -> tuple[Path, int, int] | None:
+@dataclass(frozen=True, kw_only=True)
+class FetchRefSpec:
+    """`_fetch_ref` 的旋钮袋（P0-3：11 参 → 一个对象）。"""
+
+    jid: str
+    manifest: dict
+    job_dir: Path
+    blob_root: Path
+    base_url: str
+    token: str
+    preloaded: dict | None
+    batch: dict
+    wanted: dict[str, str]
+    kick_kl: float
+    log: Callable[[str], None]
+
+
+def _fetch_ref(spec: FetchRefSpec) -> tuple[Path, int, int] | None:
     """kickstart ref 的**字节**获取 + 两道校验（系数 0 ⇒ `None`，零开销）。
 
     模型构建留在两条核里（各用各的 `build_ppo`）：本函数只保证「同一份字节、同一套安全阀」
     ——有系数没尺子＝静默裸奔，缺字节/指纹不符都**响亮拒**。`sha` 的唯一来源是本轮装批的
     结果（`wanted`），不再读一次 manifest（两份读法 = 未来会分叉）。
     """
+    # 旧签名 11 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    jid, manifest, job_dir = spec.jid, spec.manifest, spec.job_dir
+    blob_root, base_url, token = spec.blob_root, spec.base_url, spec.token
+    preloaded, batch = spec.preloaded, spec.batch
+    wanted, kick_kl, log = spec.wanted, spec.kick_kl, spec.log
     if kick_kl <= 0:
         return None
     ref_raw, ref_hit, ref_src = _resolved(
-        jid=jid,
-        name=BLOB_REF,
-        sha=wanted.get(BLOB_REF, ""),
-        inline_b64=str(manifest.get("ref_weights_b64", "") or ""),
-        base_url=base_url,
-        token=token,
-        blob_root=blob_root,
-        preloaded=preloaded,
-        batch=batch,
-        log=log,
+        ResolvedSpec(
+            jid=jid,
+            name=BLOB_REF,
+            sha=wanted.get(BLOB_REF, ""),
+            inline_b64=str(manifest.get("ref_weights_b64", "") or ""),
+            base_url=base_url,
+            token=token,
+            blob_root=blob_root,
+            preloaded=preloaded,
+            batch=batch,
+            log=log,
+        )
     )
     if not ref_raw:
         raise ProtocolError(f"job {jid}: kickstart_kl={kick_kl} 但无 ref_weights——拒收")
@@ -572,14 +602,16 @@ def _torch_opt(st: _CoreRun) -> None:
     # `blob_hits` / `blob_miss_bytes` 的 init 那一手账在作业壳的权重解析处建；本模块只在它
     # 上面累加 opt/ref/demo，最后一次性交给 `_wire_block`。
     opt_raw, opt_src, _kick_kl, _wanted, _batch, _h, _m = _resolve_opt_init(
-        jid=jid,
-        manifest=manifest,
-        job_dir=job_dir,
-        blob_root=blob_root,
-        base_url=base_url,
-        token=token,
-        preloaded=preloaded,
-        log=log,
+        OptInitSpec(
+            jid=jid,
+            manifest=manifest,
+            job_dir=job_dir,
+            blob_root=blob_root,
+            base_url=base_url,
+            token=token,
+            preloaded=preloaded,
+            log=log,
+        )
     )
     blob_hits += _h
     blob_miss_bytes += _m
@@ -700,17 +732,19 @@ def _torch_ref(st: _CoreRun) -> None:
     kick_kl = st.kick_kl
     ref_model: torch.nn.Module | None = None
     _ref = _fetch_ref(
-        jid=jid,
-        manifest=manifest,
-        job_dir=job_dir,
-        blob_root=blob_root,
-        base_url=base_url,
-        token=token,
-        preloaded=preloaded,
-        batch=_batch,
-        wanted=_wanted,
-        kick_kl=kick_kl,
-        log=log,
+        FetchRefSpec(
+            jid=jid,
+            manifest=manifest,
+            job_dir=job_dir,
+            blob_root=blob_root,
+            base_url=base_url,
+            token=token,
+            preloaded=preloaded,
+            batch=_batch,
+            wanted=_wanted,
+            kick_kl=kick_kl,
+            log=log,
+        )
     )
     if _ref is not None:
         ref_path, _h, _m = _ref
@@ -1043,15 +1077,17 @@ def _paddle_opt(st: _CoreRun) -> None:
 
     # ---- opt 解析（与 torch 版共用 `_resolve_opt_init`；只是 BOD1 落地换成 numpy 实现）----
     opt_raw, opt_src, _kick_kl, _wanted, _batch, _h, _m = _resolve_opt_init(
-        jid=jid,
-        manifest=manifest,
-        job_dir=job_dir,
-        blob_root=blob_root,
-        base_url=st.base_url,
-        token=st.token,
-        preloaded=spec.preloaded,
-        log=log,
-        rebuild=opt_standard.rebuild_opt_tar_np,
+        OptInitSpec(
+            jid=jid,
+            manifest=manifest,
+            job_dir=job_dir,
+            blob_root=blob_root,
+            base_url=st.base_url,
+            token=st.token,
+            preloaded=spec.preloaded,
+            log=log,
+            rebuild=opt_standard.rebuild_opt_tar_np,
+        )
     )
     st.blob_hits += _h
     st.blob_miss_bytes += _m
@@ -1119,17 +1155,19 @@ def _paddle_ref(st: _CoreRun) -> None:
 
     ref_model = None
     _ref = _fetch_ref(
-        jid=jid,
-        manifest=spec.manifest,
-        job_dir=spec.job_dir,
-        blob_root=spec.blob_root,
-        base_url=st.base_url,
-        token=st.token,
-        preloaded=spec.preloaded,
-        batch=st.batch,
-        wanted=st.wanted,
-        kick_kl=st.kick_kl,
-        log=spec.log,
+        FetchRefSpec(
+            jid=jid,
+            manifest=spec.manifest,
+            job_dir=spec.job_dir,
+            blob_root=spec.blob_root,
+            base_url=st.base_url,
+            token=st.token,
+            preloaded=spec.preloaded,
+            batch=st.batch,
+            wanted=st.wanted,
+            kick_kl=st.kick_kl,
+            log=spec.log,
+        )
     )
     if _ref is not None:
         ref_path, _h, _m = _ref

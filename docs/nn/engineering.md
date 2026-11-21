@@ -25,6 +25,14 @@
 
 ---
 
+## §277 P0-3 第二十四刀：train_core 三个字节解析助手收 spec（宽签名 83 → 80）（2026-11-21）
+
+* `_resolved` → `ResolvedSpec`、`_resolve_opt_init` → `OptInitSpec`、`_fetch_ref` →
+  `FetchRefSpec`（kw_only；`batch`/`wanted`/`kick_kl` 原样进袋）。
+* 调用点：torch/paddle 两条核 6 处 + `test_train_core_split` 2 处；`train_core.py` 3 → 0，
+  全仓 **83 → 80**，文件 **57 → 56**；LOC 979/1000。
+* 回归：train_core_split + 形状预算 28 条全绿；ruff/mypy 无错。
+
 ## §276 P0-3 第二十三刀（批量）：探针/配额四函数收成 spec（宽签名 86 → 83）（2026-11-21）
 
 * `cv_probe` → `CVProbeSpec`；`train_linear` / `train_tower` → `LinearTrainSpec` /

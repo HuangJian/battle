@@ -88,7 +88,6 @@ WIDE_FUNCS_BASELINE = {
     # 2026-11-19 合入上游：`run` 的交易参数 + relay 通道参数（原 1 处 → 2 处）。
     "remote/rollout_node.py": 2,
     "remote/tailscale_boot.py": 1,
-    "remote/train_core.py": 3,
     "remote/upload_proc.py": 2,
     "remote/worker.py": 2,
     "tools/c9_critic_calibration.py": 1,

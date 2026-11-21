@@ -8818,6 +8818,13 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-train-core-specs
+
+P0-3 第二十四刀：`remote/train_core.py` 三个字节解析函数收成 frozen 旋钮袋：
+`_resolved`(10) → `ResolvedSpec`、`_resolve_opt_init`(9) → `OptInitSpec`、
+`_fetch_ref`(11) → `FetchRefSpec`（全 kw_only，字段缺省值逐字沿用）。
+生产调用点 6 + 测试 2 全改；宽签名 **83 → 80**，文件 **57 → 56**。
+
 ## §2026-11-21-probe-specs
 
 P0-3 第二十三刀（批量）：探针脚本与配额纯逻辑的四个 9 参函数 →

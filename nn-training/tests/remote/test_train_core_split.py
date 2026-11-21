@@ -428,16 +428,18 @@ def test_resolved_prefers_the_batch_result(monkeypatch) -> None:
     )
     raw = b"opt-bytes"
     got = core_mod._resolved(
-        jid="j1",
-        name="opt",
-        sha="a" * 64,
-        inline_b64="",
-        base_url="http://hub",
-        token="t",
-        blob_root=Path("."),
-        preloaded=None,
-        batch={"opt": (raw, True, "cache")},
-        log=lambda _m: None,
+        core_mod.ResolvedSpec(
+            jid="j1",
+            name="opt",
+            sha="a" * 64,
+            inline_b64="",
+            base_url="http://hub",
+            token="t",
+            blob_root=Path("."),
+            preloaded=None,
+            batch={"opt": (raw, True, "cache")},
+            log=lambda _m: None,
+        )
     )
     assert got == (raw, True, "cache")
 
@@ -450,16 +452,18 @@ def test_resolved_delegates_when_the_batch_has_no_such_piece(monkeypatch) -> Non
     sentinel = (b"inline-bytes", True, "inline")
     monkeypatch.setattr(core_mod, "_resolve_blob", lambda _spec: sentinel)
     got = core_mod._resolved(
-        jid="j1",
-        name="ref",
-        sha="",
-        inline_b64="aaaa",
-        base_url="http://hub",
-        token="t",
-        blob_root=Path("."),
-        preloaded=None,
-        batch={},
-        log=lambda _m: None,
+        core_mod.ResolvedSpec(
+            jid="j1",
+            name="ref",
+            sha="",
+            inline_b64="aaaa",
+            base_url="http://hub",
+            token="t",
+            blob_root=Path("."),
+            preloaded=None,
+            batch={},
+            log=lambda _m: None,
+        )
     )
     assert got is sentinel
 
