@@ -390,7 +390,7 @@ P0-5 的判据只覆盖 `common/**`（G2：`L0_MUTABLE_ALLOWED = {}`），而「
 |------|------|------|
 | ~~`remote/control_pool.py:44`~~ **已修 2026-11-21（§238）** | ~~`_CONTROL_CONNS`~~ → `ControlPool`（默认实例 `_POOL`；三档关闭时机：失败即作废 `close()` / 整池 `close()` / 不挂 `atexit`） | 隧道连接池 —— 本轮唯一动手的一处（连接是有 fd 的资源，旧形状答不出「谁负责关」） |
 | ~~`remote/rollout_relay.py:1087`~~ **已修 2026-11-21（§239）** | ~~`_LIVE_LINKS`~~ → `LiveLinks`（`add`/`discard`/`snapshot`/`count`；`discard` 幂等，`stop_stale_links` 锁外调 `stop()`） | 活着的 relay link 列表 —— 旧写法双重注销会 `ValueError`，且用例只能替换模块变量 |
-| `remote/push_client.py:44` | `_CACHE_HITS` | 推送命中缓存（有 `clear()`） |
+| ~~`remote/push_client.py:44`~~ **已修 2026-11-21（§244）** | ~~`_CACHE_HITS`~~ → `ShaCacheHits`（`record`/`known`/`forget`；两条翻面理由写进类头，上限仍是整片清空） | 推送命中缓存 |
 | ~~`remote/http.py:341`~~ **已修 2026-11-21（§242）** | ~~`_POLL_WARN_AT`~~ → `WarnThrottle`（`allow(key, now)` / `forget_all`；窗口是构造参数，`WARN_THROTTLE_SEC=60` 是缺省）；同文件的懒建单例 `_opener`（`global`）一并收成 `ProxyOpeners`（`get()` 懒建、`reset()` 重建） | 轮询告警节流表 + 代理 opener |
 | `remote/worker.py:473` | `_ACTIVE_CODE_SHA`（`global`） | 当前代码 sha 的锁存 |
 | `hub/admin.py:138` | `_PROBE_BLOCK`（`global`） | 探活封禁窗口 |
@@ -405,7 +405,7 @@ P0-5 的判据只覆盖 `common/**`（G2：`L0_MUTABLE_ALLOWED = {}`），而「
 | ~~`remote/wire.py:218`~~ **已修 2026-11-21（§243）** | ~~`_BEST_RATE` / `_stale_samples`~~ → `RateReference`（`sample`/`level`/`floor`/`clear_samples`；迟滞与衰减是构造参数，清场一次清两个）；`remote/tailscale_boot.py` 那份**不可动**（独立引导模块，零依赖约束） | 测速参照速率 |
 
 **进度**：`remote/control_pool`（§238）· `remote/rollout_relay`（§239）· 三处 warn-once 集合（§240）·
-resume 扫描缓存（§241）· `remote/http` 的两份（§242）· `remote/wire` 的参照速率（§243）已收（2026-11-21）。其余 8 处仍是「缓存 / 节流表 / 活连接登记」，收成对象要先回答「谁拥有、何时清、跨进程怎么复现」
+resume 扫描缓存（§241）· `remote/http` 的两份（§242）· `remote/wire` 的参照速率（§243）· `remote/push_client` 的命中记忆（§244）已收（2026-11-21）。其余 7 处仍是「缓存 / 节流表 / 活连接登记」，收成对象要先回答「谁拥有、何时清、跨进程怎么复现」
 ——和 §236 同量级的一轮工作，不能顺手做。清单的作用是让下一轮**从这里开始**，而不是再回审计表里
 发现一行陈旧记录。
 

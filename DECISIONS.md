@@ -8987,3 +8987,19 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   连乘但下限是本次样本 / 恢复瞬时且迟滞清零 / 地板 / 清场两半一起清 / 旋钮是构造参数）；
   `test_wire_split` 的注入点用例改为对象恒等 + 公开 `sample()`；`GLOBAL_BASELINE` 的
   `remote/wire.py` 归零。详见 `docs/nn/engineering.md` §243。
+
+## §2026-11-21-sha-cache-hits（`remote/push_client._CACHE_HITS` → `ShaCacheHits`；两条翻面理由进类头）
+
+- **背景**：推送前的内容寻址探针有一份「这台节点上次探到有这份 (kind, sha)」的记忆（2026-10-30
+  修正反馈事故时加的）。写点散在三处：命中记、明确 miss 翻面、节点 428 翻面；上限是调用点里的
+  `if len > CAP: clear()`。
+- **决定一**：`ShaCacheHits(cap=)`（`record` / `known` / `forget` / `__len__`），key 归一到
+  `(base_url, kind, sha)`；默认实例 `_HITS` + 读面 `cache_hits()`，`forget_cache_hit()` 保留为公开薄
+  包装（`remote/push_dispatch` 与用例都调它）。
+- **决定二**：类头并排列出**两条翻面理由**（探针明确 miss / 节点 428 说缺）与「上限为什么是整片
+  清空而不是 LRU」——这份账只在探针失败时被读，淘汰策略越简单越可预测。
+- **决定三**：探针路径也走访问器（`cache_hits()`），读面单源；用例替换公开名字即可接管。
+- **守卫**：新增 `tests/remote/test_sha_cache_hits.py` 6 条（记/查/翻面 · 三把 key 独立 · 空段归一 ·
+  上限整片清空 · forget 幂等 · 默认记忆一份且公开 `forget_cache_hit` 到达它）。既有
+  `test_hub_push_dispatch` 的「失败沿用命中 + 428 翻面」行为用例未动、照旧绿。
+- **行为差异**：无。详见 `docs/nn/engineering.md` §244。

@@ -25,6 +25,31 @@
 
 ---
 
+## §244 P0-5 存量第七处：`remote/push_client._CACHE_HITS` → `ShaCacheHits`（2026-11-21）
+
+推送前的内容寻址探针有一份「这台节点上次探到有这份 (kind, sha)」的记忆。它是 2026-10-30 修
+正反馈事故时加的（慢链路 15s 超时 ⇒ 判 miss ⇒ 多传 2.7MB ⇒ 更慢 ⇒ 更必然超时），语义是对的，
+但写点散在三个地方、上限是调用点里的两行 `if`：
+
+* `_cached_or_last_hit`：命中 ⇒ 记；明确 miss ⇒ `pop`；
+* `forget_cache_hit`：节点 428 说缺 ⇒ `pop`（不翻面 ⇒ 下一次又跳过补传，428 来回打转）；
+* 上限：`if len(_CACHE_HITS) > CAP: _CACHE_HITS.clear()`。
+
+**新形状**：`ShaCacheHits(cap=...)` —— `record()` / `known()` / `forget()` / `__len__`，key 归一到
+`(base_url, kind, sha)`（四个 `str(... or "")` 收进 `_key`）。类头把「两条翻面理由」并排列出
+（明确 miss、节点 428），并说明上限为什么是**整片清空而不是 LRU**：这份账只在探针失败时被读，
+清空的代价是下一轮保守上传一次；混入淘汰策略只会让「哪条记得住」变成需要解释的东西。
+
+`_HITS` 是默认实例，读面 `cache_hits()`；`forget_cache_hit()` 保留为公开薄包装（`remote/push_dispatch`
+的三条 428 分支与用例都调它）。探针路径也改走访问器（读面单源，用例可替换公开名字）。
+
+**守卫**：新增 `tests/remote/test_sha_cache_hits.py` 6 条 —— 记/查/翻面 / 三把 key 各自独立 /
+空段归一同口径 / **上限整片清空（旧条目一起消失，不是 LRU）** / `forget` 幂等 / 默认记忆一份且
+公开 `forget_cache_hit` 能到达它。既有的 `test_hub_push_dispatch` 那条「探针失败沿用上次命中 +
+428 翻面」用例一字未动、照旧绿（语义未变的行为判据）。
+
+**行为差异**：无。key 形状、上限值（512）、清空时机、失败兜底与 428 翻面逐字未变。
+
 ## §243 P0-5 存量第六处：`remote/wire` 的 `_BEST_RATE` + `_stale_samples` → `RateReference`（2026-11-21）
 
 坏签判据的参照速率原本是**两个 `global` 重绑的模块标量**：`_BEST_RATE`（参照，bytes/s）与
