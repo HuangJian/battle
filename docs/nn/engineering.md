@@ -25,6 +25,44 @@
 
 ---
 
+## §237 P0-5 结账：`hub/http_face` 早已是 `HubState`，`common/**` 之外另有一份存量清单（2026-11-20）
+
+**这一轮没有改代码**。要求是「把 `hub/http_face` 的三个类属性搬进显式对象」——它们 2026-11-19
+（B7 前半，§217/§218）就搬完了：`HubHandler.state: HubState = HubState()`，六个字段
+（`blocked_logged` / `seen_sources` / `source_warned` / `reject_warn_at` / `client_gone` / `pulse`），
+守卫 `tests/hub/test_hub_state.py` 钉两件事：① `HubHandler` 类体里不许出现可变容器类属性（AST 判据）；
+② 两个 `HubState` 互不相干、跨请求的 handler 实例看到同一份。
+
+连审计表本身都记着这件事（第 47 行「B7 前半」写着 `HubState`），只有 §P0-5 的表行还停在旧状态——
+**同一章的两处互相矛盾，读者只会看到错的那处**。这已经是第三轮撞上陈旧行（`_RACING_OPENERS`、
+`UPGRADE_BRANCH` 之后），所以这轮做的是结账而不是再搬一次：把表行、章首状态列、§7 剩余清单三处
+一起改对，并加一条「以后从这里开始」的清单。
+
+**顺手纠正的两个数字**（都是原文写错、靠实测发现的）：
+
+* 类属性是**五份**不是四份：守卫 2026-11-19 当场抓到 `_REJECT_WARN_AT`（拒绝日志的 60s 节流表），
+  附录行只点了四份。审计表这一行由此补正。
+* `global` 语句全仓现在是 **11 处**（原文记 14）：`common/**` 0 处；`biz/reward_context` ×2（裁定保留：
+  每 iter 整体替换的加载期上下文）、`hub/admin` 1、`remote/{wire,http,payload_slim,worker,tailscale_boot}`
+  各 1、`tools/{task,forkdist}` 3。原文那 14 处里的 `worker/eval_exec` ×2 与 `worker/eval_arbiter` ×1
+  在 §236 归零。
+
+**新增的事实：`common/**` 之外还有同类存量（15 处，未动手）**。P0-5 的判据只覆盖 `common/**`
+（G2：`L0_MUTABLE_ALLOWED = {}`），而模块级可变容器在 L2/L3 一样有。这轮用 AST 盘点了一遍
+（模块级 / 非 dataclass 类体的可变容器字面量与 `dict()`/`list()`/`set()` 构造，排除 `__all__`
+与全大写查表常量，再逐个确认有写入点），清单一并写进 `python.refactor.md` §P0-5 末小节：
+连接池 `remote/control_pool._CONTROL_CONNS`、活 link 表 `remote/rollout_relay._LIVE_LINKS`、
+推送命中缓存、轮询/停机/传输的一次性告警集合、resume 扫描缓存、code-hash 记忆、节点身份账本、
+XLA/吞吐探针、`trainer/queue_local` 的 rollout 源复用索引等。
+
+**为什么不动它们**：每一个都要先回答「谁拥有、何时清、跨进程怎么复现」——与 §236 同量级，
+且各自有真实的所有权边界（连接池的关闭时机 ≠ 告警集合的清空时机）。顺手收会让「谁负责收尾」
+变成一句注释，比现在的模块级 dict 更难查。清单的作用是让下一轮从准确的位置开始。
+
+**要不要把 G2 扩到 L2/L3**：值得单独一轮讨论，因为它会引入一份**只许变小**的 15 条基线，
+而其中几处（`_BEST_RATE` 在 `remote/tailscale_boot`，零依赖 boot 模块）按现有约束根本不能动。
+这属于新决策，不在结账这一轮里顺手定。
+
 ## §236 P0-5 L2 两个单例：`_EXECUTORS` / `_ARBITER` 收进 `common.cell.Cell`（2026-11-20）
 
 **改的是什么（不是「去状态」）**：进程里确实只有一份 eval 线程池和一份仲裁器——要动的不是
