@@ -73,9 +73,6 @@ from hub.store_leases import (
 from hub.store_leases import (
     ClaimOutcome as ClaimOutcome,  # 同上：测试拿 `hs.ClaimOutcome` 与 store_leases 对账
 )
-from hub.task_pack import (
-    _TASK_PACK_TRIGGERS as _TASK_PACK_TRIGGERS,
-)
 
 # 任务包新鲜度门 / 缺包自愈门 / 清单读数（2026-09-24~25 的取包链）：实现住 `hub/task_pack.py`
 # （叶子模块，因为路由混入与队列混入两侧都要它）。这里**逐个自别名 re-export** —— 它们是
@@ -123,7 +120,6 @@ __all__ = [
     "TASK_PACK_MISS_TRIGGER_LIMIT",
     "TASK_PACK_STALE_THROTTLE_SEC",
     "TASK_PACK_STALE_TRIGGER_LIMIT",
-    "_TASK_PACK_TRIGGERS",
     "ClaimOutcome",
     "HubHandler",
     "_AuthGuard",

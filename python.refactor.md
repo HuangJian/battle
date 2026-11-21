@@ -430,12 +430,12 @@ resume 扫描缓存（§241）· `remote/http` 的两份（§242）· `remote/wi
 * 类体可变容器 16 条：15 条是 **pydantic `BaseModel` 字段默认值**（`enemy_spawns: list[Spawn] = []` 那族，
   pydantic 逐实例深拷贝，**不是**共享状态）+ 1 条 `tools/console_window._ProcessEntry32._fields_`（ctypes 约定名）。
 
-**清单之外仍有 2 簇（2026-11-20 盘点漏掉，2026-11-21 复核补上）**
+**清单之外仍有 2 簇（2026-11-20 盘点漏掉，2026-11-21 复核补上；同日同批收掉，见 §251）**
 
 | 文件 | 名字 | 形态 | 为什么算（写入点 / 归属问题） |
 |------|------|------|------|
-| `hub/task_pack.py:221,224,232` | `_TASK_PACK_TRIGGERS` / `_TASK_PACK_MISS_TRIGGERS` / `_TASK_AUTO_HANDOFF_TRIGGERS` | 三本 `dict[str, dict[...]]` 触发账（节流窗 + 失败原因 + 计数上界） | **两个模块都在写**：`hub/task_pack.py` 与 `hub/offline.py`（`setdefault`）；清场靠 `reset_auto_handoff_triggers()` 单点；`hub/server.py` 还把三个名字当门面再导出，用例直接读 `hub_server._TASK_PACK_TRIGGERS`——正是 P0-5 要消的「同一份状态散在模块作用域、谁都能写」。收法：`PackTriggers`（`touch(course, now)` / `miss(course)` / `handoff(course)` / `reset(course|"")` / `snapshot()`），三个读面统一走它 |
-| `remote/deliver_outbox.py:93` | `_GATES` | `dict[str, dict[str, Any]]`：每个 outbox 一把进程内 `RLock` + 持有深度 + **文件 fd**（跨进程 flock） | 写在同文件但**持有 fd 与线程锁**：旧形状答不出「谁负责关」；另有独立的 `_GATES_LOCK` 保护建表。收法：`OutboxGates`（`gate(path)` 懒建、`close_all()` 关 fd），并把「同线程重入不重新 flock」这条语义放进方法里 |
+| `hub/task_pack.py:221,224,232` | `_TASK_PACK_TRIGGERS` / `_TASK_PACK_MISS_TRIGGERS` / `_TASK_AUTO_HANDOFF_TRIGGERS` | 三本 `dict[str, dict[...]]` 触发账（节流窗 + 失败原因 + 计数上界） | **两个模块都在写**：`hub/task_pack.py` 与 `hub/offline.py`（`setdefault`）；清场靠 `reset_auto_handoff_triggers()` 单点；`hub/server.py` 还把三个名字当门面再导出，用例直接读 `hub_server._TASK_PACK_TRIGGERS`——正是 P0-5 要消的「同一份状态散在模块作用域、谁都能写」。~~收法：`PackTriggers`~~ **已修（§251）**：`PackTriggers`（`stale_gate` / `miss_gate` / `note_failure` / `failure` / `poll_window` / `decision` / `note_trigger` / `clear_*` / `snapshot`，锁在对象里；两条重导腿共用一个私有 `_leg_gate`），门面不再 re-export 可变状态 |
+| `remote/deliver_outbox.py:93` | `_GATES` | `dict[str, dict[str, Any]]`：每个 outbox 一把进程内 `RLock` + 持有深度 + **文件 fd**（跨进程 flock） | 写在同文件但**持有 fd 与线程锁**：旧形状答不出「谁负责关」；另有独立的 `_GATES_LOCK` 保护建表。~~收法：`OutboxGates`（`gate(path)` 懒建、`close_all()` 关 fd）~~ **已修（§251）**：`OutboxGates` + `@dataclass _Gate`，fd 只在临界区里存在（`leave()` 即放）⇒ 不需要 `close_all()` |
 
 **不算的（附理由，免得下一轮再翻一遍）**：`remote/wire._WIRE`（每 job 传输账，已在
 `tests/remote/test_worker_state_contract.py` 的 `OWNER_CONTAINERS` 钉住且有封顶用例）·

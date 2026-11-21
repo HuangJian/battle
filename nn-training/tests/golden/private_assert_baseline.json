@@ -3,7 +3,6 @@
   "tests/common/test_common_layer.py": 2,
   "tests/common/test_dist_shard_split.py": 6,
   "tests/common/test_dist_weights_ledger_split.py": 2,
-  "tests/common/test_offline_task_queue.py": 1,
   "tests/common/test_protocol_split.py": 1,
   "tests/common/test_stats.py": 2,
   "tests/hub/test_hub_discover_eviction.py": 1,

@@ -33,10 +33,13 @@ import json
 import os
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections import defaultdict
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 
 import remote.delta_files as delta_files
 from common import runtime
@@ -88,10 +91,6 @@ OUTBOX_TICK_SEC = 2.0
 #: outbox 账本的**跨进程**闸文件（`ack_outbox` 与训练子进程各开一个 fd 抢它）。
 STATE_LOCK_NAME = ".state.lock"
 
-#: 每个 outbox 一把进程内可重入锁（跨线程）+ 持有深度/文件 fd（跨进程）。
-#: 深度 >0 时同线程再进闸不再 flock —— 同进程对同一文件再 flock 一个新 fd 会自锁。
-_GATES: dict[str, dict[str, Any]] = {}
-_GATES_LOCK = threading.Lock()
 
 
 def _lock_state_file(path: Path) -> int | None:
@@ -132,36 +131,88 @@ def _unlock_state_file(fd: int) -> None:
             pass
 
 
-@contextmanager
-def _outbox_gate(root: str | Path) -> Any:
-    """outbox 账本/body 的写闸（进程内可重入 + 跨进程 `flock`）。
+@dataclass
+class _Gate:
+    """一个 outbox 的闸：进程内可重入锁 + 持有深度 + 跨进程 `flock` 的 fd。
 
-    为什么必须有它（评审 F8）：训练子进程（`LocalOutboxDeliverer`）与 worker 的 HTTP 面
+    深度 >0 时同线程再进闸不再 flock —— 同进程对同一文件再 flock 一个新 fd 会自锁。
+    三个字段就是它的全部状态（用 `@dataclass` 是为了让「状态只有这三个」长在类型上）。
+    """
+
+    lock: threading.RLock = dataclass_field(default_factory=threading.RLock)
+    depth: int = 0
+    fd: int | None = None
+
+    def enter(self, root: str | Path) -> None:
+        """进闸：最外层才拿跨进程 fd（重入只加深度）。"""
+        if self.depth == 0:
+            self.fd = _lock_state_file(Path(root) / STATE_LOCK_NAME)
+        self.depth += 1
+
+    def leave(self) -> None:
+        """出闸：深度归零时放 fd（拿不到 fd 也照常出闸 —— 降级不抛）。"""
+        self.depth -= 1
+        if self.depth == 0 and self.fd is not None:
+            fd = self.fd
+            self.fd = None
+            _unlock_state_file(fd)
+
+
+class OutboxGates:
+    """每个 outbox 一把写闸（P0-5，2026-11-21：原来是 `_GATES` + `_GATES_LOCK`）。
+
+    为什么必须有闸（评审 F8）：训练子进程（`LocalOutboxDeliverer`）与 worker 的 HTTP 面
     （`/offline/push/ack`）是**两个进程**，都在写 `state.json`、都在删 body：
 
     * 子进程整份覆盖写会**复活** ack 刚删掉的 body（hub 永远 404 ⇒ 那一轮永远拉不到 ⇒ 永不收尾）；
     * ack 可能在「body 已换成新 rev、账本还是旧 rev」之间把**新** body 删掉。
 
+    旧形状是两个模块级 dict（表 + 锁），「谁持有 fd、谁负责关」只能从使用处反推；现在
+    fd 与其持有深度同住一个 `_Gate`，而关它的地方只有一个：`_Gate.leave()`（临界区结束即放，
+    闸表里**不留**空闲 fd）。
+
+    键是 `Path(root).resolve()`（同一个 outbox 的不同写法共一把闸），表本身只在 `_gate()`
+    里增长 —— 一个进程的 outbox 个数就是任务包个数，不需要淘汰。
+    """
+
+    def __init__(self) -> None:
+        # 建表锁只罩「取/建一个闸」；临界区在 `_Gate.lock` 里（两把锁不能合并：
+        # 前者是几微秒的表操作，后者要罩住整个 outbox 写窗口）。
+        self._lock = threading.Lock()
+        self._entries: dict[str, _Gate] = defaultdict(_Gate)
+
+    def __len__(self) -> int:
+        """懒建过的闸个数（观测 / 用例用）。"""
+        with self._lock:
+            return len(self._entries)
+
+    def _gate(self, root: str | Path) -> _Gate:
+        with self._lock:
+            return self._entries[str(Path(root).resolve())]
+
+    @contextmanager
+    def gate(self, root: str | Path) -> Iterator[None]:
+        """一句 `with gates.gate(root):`：进程内互斥 + 跨进程文件锁都在里面。"""
+        gate = self._gate(root)
+        with gate.lock:
+            gate.enter(root)
+            try:
+                yield
+            finally:
+                gate.leave()
+
+#: 本进程的闸表（`_outbox_gate` 是它的唯一入口）。
+_GATES = OutboxGates()
+
+
+@contextmanager
+def _outbox_gate(root: str | Path) -> Iterator[None]:
+    """outbox 账本/body 的写闸（进程内可重入 + 跨进程 `flock`；实现在 `OutboxGates`）。
+
     所以「换入 body + 写账本」与「读账本 + 删 body + 写账本」必须进同一把闸。
     """
-    key = str(Path(root).resolve())
-    with _GATES_LOCK:
-        gate = _GATES.get(key)
-        if gate is None:
-            gate = {"lock": threading.RLock(), "depth": 0, "fd": None}
-            _GATES[key] = gate
-    with gate["lock"]:
-        if gate["depth"] == 0:
-            gate["fd"] = _lock_state_file(Path(root) / STATE_LOCK_NAME)
-        gate["depth"] += 1
-        try:
-            yield
-        finally:
-            gate["depth"] -= 1
-            if gate["depth"] == 0 and gate["fd"] is not None:
-                fd = gate["fd"]
-                gate["fd"] = None
-                _unlock_state_file(int(fd))
+    with _GATES.gate(root):
+        yield
 
 #: 缺省日志（与 `remote/*` 其余模块同一个工厂：`tag_logger` + 本模块自己的 `time` 引用，假钟才拦得到）。
 #: 刻意**不**再写一份 `print` —— `tests/test_reuse_ledger.py` 会把逐字节重复的实现当场标红。

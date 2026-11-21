@@ -555,7 +555,13 @@ BASELINE_FORM = 1535
 #:   `_UnitLanes.ledger()` 的装配点守卫）、`test_batch_runner_split.py` +5（两家对照的闭集 /
 #:   常量归属 / 无反向边），`test_batch_lanes_split.py` 净 0（删掉的那条文本判据已改成
 #:   AST 定义表判据，计数不变）。口径 A 仍 1534（新判据无一挂文本）。
-BASELINE_SRC = 1221
+#: 2026-11-21 抬到 **1224**（+3，实测）：P0-5 的两簇状态对象化各带一条**结构**守卫 ——
+#:   `tests/hub/test_pack_triggers.py` +1（`hub/task_pack.py` 顶层不许再有可变容器字面量）与
+#:   `tests/remote/test_deliver_outbox.py` +2（闸表必须是 `OutboxGates()` 实例 / 不再有
+#:   `_GATES_LOCK`）。两条都只能读 `.py` 源码：被测的是「可变状态住在哪」，没有任何运行时出口
+#:   （对象存在 ≠ 对象拥有状态）。口径 A 同笔 −1（1535 → 1534）：两条 `x in <dict>` 的集合判据
+#:   改成 `set(...) == {...}`（§口径 C 的写法，语义不变）。
+BASELINE_SRC = 1224
 #: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。派生式（基线九成，见
 #: `tests/helpers/budget.py`）：两个计数器各自随自己的基线收紧，清理基线时不必回填数字。
 def _floor_of_form() -> int:

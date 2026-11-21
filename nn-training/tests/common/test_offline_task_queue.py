@@ -47,6 +47,7 @@ from common.protocol import (
 )
 from hub import server as hub_server
 from hub.server import _HubQueue, make_server
+from hub.task_pack import pack_triggers
 from remote import offline_boot
 from tests.helpers.http_server import serve_fast
 
@@ -197,11 +198,11 @@ def test_tasks_is_readonly_and_stable(tmp_path: Path) -> None:
     """两次调用逐字段相同，且**不碰**触发账本（清单不触发重导；plan §1.4-2）。"""
     base, _hub, _srv = _offline_hub(tmp_path)
     _write_pack(tmp_path)
-    before = dict(hub_server._TASK_PACK_TRIGGERS)
+    before = pack_triggers().snapshot()
     first = _json(_req(base, OFFLINE_TASKS_PATH)[1])["tasks"]
     second = _json(_req(base, OFFLINE_TASKS_PATH)[1])["tasks"]
     assert first == second
-    assert dict(hub_server._TASK_PACK_TRIGGERS) == before, "清单不得写触发账本"
+    assert pack_triggers().snapshot() == before, "清单不得写触发账本"
 
 
 def test_tasks_lists_in_training_course_and_stop_is_the_only_opt_out(tmp_path: Path) -> None:

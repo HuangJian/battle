@@ -93,7 +93,6 @@ MOVED: dict[str, str] = {
     "TASK_PACK_MISS_TRIGGER_LIMIT": "hub/task_pack.py",
     "TASK_PACK_STALE_THROTTLE_SEC": "hub/task_pack.py",
     "TASK_PACK_STALE_TRIGGER_LIMIT": "hub/task_pack.py",
-    "_TASK_PACK_TRIGGERS": "hub/task_pack.py",
     "decide_task_pack": "hub/task_pack.py",
     "reset_task_pack_miss_triggers": "hub/task_pack.py",
     "reset_task_pack_triggers": "hub/task_pack.py",
@@ -118,7 +117,6 @@ FACADE = (
     "_AuthGuard",
     "_HubQueue",
     "_JobStore",
-    "_TASK_PACK_TRIGGERS",
     "_is_ip_literal",
     "_is_loopback",
     "as_hub",
@@ -175,8 +173,12 @@ def _own_defs(rel: str) -> set[str]:
 
 
 def test_every_moved_member_lives_in_exactly_one_new_home() -> None:
-    """★ 21 个成员各住一家：定义在声明的家里，另几家**一个也不许有**（双向）。"""
-    assert len(MOVED) == 21, len(MOVED)
+    """★ 20 个成员各住一家：定义在声明的家里，另几家**一个也不许有**（双向）。
+
+    `_TASK_PACK_TRIGGERS` 不在里面了（2026-11-21 P0-5）：三本触发账收进 `PackTriggers` 之后，
+    「一个模块级字典」这个形状本身消失了 —— 门面不再承诺一份可变状态的引用。
+    """
+    assert len(MOVED) == 20, len(MOVED)
     for name, home in MOVED.items():
         assert name in _own_defs(home), f"{home} 少了 {name}"
         for other in ("hub/server.py", *HOMES):
@@ -227,7 +229,7 @@ def test_the_facade_surface_is_exactly_the_declared_closed_set() -> None:
     """★ 门面是**闭集**：`__all__` 恰好等于名单（比集合不比顺序 —— ruff 的 RUF022 会自己排
     `__all__`），无重复，且每个名字都真的解析得出来（写了一个不存在的名字 = 门面在骗人）。"""
     assert sorted(hs.__all__) == sorted(FACADE), (sorted(set(hs.__all__) ^ set(FACADE)),)
-    assert len(hs.__all__) == len(set(hs.__all__)) == 27, hs.__all__
+    assert len(hs.__all__) == len(set(hs.__all__)) == 26, hs.__all__
     for name in FACADE:
         assert getattr(hs, name, None) is not None, f"门面缺 {name}"
 

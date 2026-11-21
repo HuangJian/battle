@@ -25,6 +25,73 @@
 
 ---
 
+## §251 P0-5 复核后的两簇：`PackTriggers`（hub 触发账）与 `OutboxGates`（补传写闸）（2026-11-21）
+
+2026-11-21 的全树复核（`python.refactor.md` §P0-5 的「复核」小节）在清单清零之后又量出两处
+**真状态**：它们都不是「模块级字典」这个形状第一次出现，而是「同一份状态被两个模块写」与
+「状态里握着 fd」这两种旧毛病。两处一起收。
+
+**1. `hub/task_pack.py` 的三本触发账 → `PackTriggers`**
+
+旧形状：`_TASK_PACK_TRIGGERS`（过期腿）/ `_TASK_PACK_MISS_TRIGGERS`（缺包腿）/
+`_TASK_AUTO_HANDOFF_TRIGGERS`（自动交接腿）三个模块级 dict + 一把模块级 `_TASK_PACK_LOCK`。
+判据侧（`hub/task_pack.py`）与两道门（`hub/offline.py` 的 `_task_pack_gate` /
+`_task_pack_miss_gate`）**都在写**，`hub/server.py` 还把 `_TASK_PACK_TRIGGERS` 当门面再导出，
+用例直接读 `hub_server._TASK_PACK_TRIGGERS` —— 正是 P0-5 要消的「同一份状态散在模块作用域、
+谁都能写」。而两道门的临界区里还各自抄了一遍 `decide_task_pack(...)` 的四个实参。
+
+现在：`PackTriggers` 一个对象持有三本账 + 自己的锁，写入口按腿分开
+（`stale_gate` / `miss_gate` / `note_failure` / `failure` / `poll_window` / `decision` /
+`note_trigger` / `clear_stale` / `clear_miss` / `clear_handoff`），公开访问器 `pack_triggers()`。
+两条重导腿的判据 + 记账 + 到顶告警收进私有 `_leg_gate`（**锁在对象里**，调用方不再自己拿锁）；
+`snapshot()` 交浅拷贝，观测/用例都不必再摸内部字典。
+
+* `hub/offline.py` 的两道门从「拿别人家的锁 + setdefault」变成一句
+  `pack_triggers().stale_gate(...)` / `miss_gate(...)`，`_TASK_PACK_LOCK` 等四个私有名的 import
+  全部消失。
+* `note_auto_handoff_failure` 这条只有内部读者的壳删除（调用点直接 `pack_triggers().note_failure`，
+  两份用例同步改）—— 它原本与新 `ShaCacheHits.forget` 的薄包装同形，复用账本当场把它记成结构克隆。
+* 门面减员：`hub/server.py` 不再 re-export `_TASK_PACK_TRIGGERS`（`__all__` 27 → 26，
+  `test_hub_entry_split` 的 `MOVED` 21 → 20），理由写在那条用例的 docstring 里 —— 门面承诺的
+  应该是「名字」，不是「一份可变状态的引用」。
+* 阈值现在只有一份（住 `hub/task_pack.py`）：三条用例的 `monkeypatch.setattr` 从
+  `hub.offline` 改指 `hub.task_pack`（旧点其实在改一份 import 快照）。
+
+**2. `remote/deliver_outbox.py` 的 `_GATES` → `OutboxGates`**
+
+旧形状：`_GATES: dict[str, dict[str, Any]]`（每 outbox 的 `RLock` + 持有深度 + 跨进程 `flock` 的 fd）
++ `_GATES_LOCK`（建表的锁），`_outbox_gate` 是一个模块级 `@contextmanager` 直接读写这两份状态。
+「谁持有 fd、谁负责关」只能从使用处反推，而 fd 是这个模块唯一的不可再生资源。
+
+现在：`_Gate`（`@dataclass`：`lock` / `depth` / `fd`，`enter` / `leave` 一对）持有单个 outbox 的
+全部闸状态，`OutboxGates` 是懒建表（`defaultdict(_Gate)`，建表锁只罩取/建那一瞬），
+`_outbox_gate` 是它对外的唯一入口。**fd 不在闸表里过夜**：临界区结束即 `leave()` 放掉，
+所以没有「进程收尾要不要 `close_all`」这一问（复核笔记里那条待办据此改成「只在一处关」）。
+
+**复算与副作用（都记在门禁基线里）**
+
+* `Any`：`remote/deliver_outbox.py` 2 → **0**（`tests/golden/any_baseline.json` 删条目）。
+* 私有断言：`tests/common/test_offline_task_queue.py` 1 → **0**（改用 `pack_triggers().snapshot()`）。
+* 文本断言口径 B：1221 → **1224**（+3：两条结构守卫只能读 `.py` ——「可变状态住在哪」
+  没有运行时出口）；口径 A 同笔 −1（1535 → 1534，`x in dict` 的集合判据改成 `set(...) == {...}`）。
+* 结构克隆：`PackTriggers.__init__` 与 `ShaCacheHits.__init__` 同形曾让 clone 17 → 19
+  （另一对是 `_Gate.__init__` 与 `common/fs.py::JsonlLedger.__init__`）—— 两处都按「形状不同」
+  改写（删壳 / `@dataclass` + `defaultdict`），clone 回到 **17**。
+* 同名散落：`_gate` 一度跨 3 模块（`hub/task_pack` / `remote/deliver_outbox` /
+  `worker/loop_guards_gate`）让同名 ≥3 的计数 143 → 144，`PackTriggers._gate` 改名 `_leg_gate`
+  后回到 **143**。
+
+**守卫**：`tests/hub/test_pack_triggers.py`（9 条：三条腿互不串味 / 到顶告警只喊一次 / 两条腿各自的
+上界 / `failed` 优先于计数 / 轮询限频槽 / 逐本逐课清场 / 快照是拷贝 / 模块顶层无可变容器字面量 /
+`hub/offline.py` 不再 import 私有账名）；`tests/remote/test_deliver_outbox.py` +3 条
+（按 resolve 后的路径归并 + 同线程重入不自锁 / 两个 outbox 两把独立闸 / 闸表必须是
+`OutboxGates()` 实例且不再有 `_GATES_LOCK`）。
+
+**门禁**：nn `6695 passed / 3 skipped`（65.6s）· ruff / mypy 绿 · 结构克隆 17 · 同名 ≥3 143 ·
+`Any` / 私有断言 / 文本断言三条基线同向收紧。**行为差异：无**。
+
+---
+
 ## §250 P0-5 存量第十三/十四处（收尾）：`np_core` 的 `_SPEED_PROBE` / `_XLA_CACHE_STATE`（2026-11-21）
 
 这是 P0-5 模块级状态清单的**最后两处**，都在免 torch 的 `worker/ppo/np_core.py`：
