@@ -52,8 +52,8 @@ def test_peek_sends_role_header_when_offline(monkeypatch: pytest.MonkeyPatch) ->
     """`role=offline` ⇒ 带上归属头（值取协议常量，不在 worker 里再写一份字面量）。"""
     seen: list[dict] = []
 
-    def _fake_request(base, token, path, timeout=30.0, data=None, method=None, headers=None):
-        seen.append({"path": path, "headers": dict(headers or {})})
+    def _fake_request(spec, **_kw):
+        seen.append({"path": spec.path, "headers": dict(spec.headers or {})})
         return 200, b'{"jobs": [], "halt": false}'
 
     monkeypatch.setattr(JL, "_request", _fake_request)
@@ -66,8 +66,8 @@ def test_peek_sends_no_role_header_by_default(monkeypatch: pytest.MonkeyPatch) -
     """缺省 role=online ⇒ 不发头 —— hub 侧按在线盘处理，行为逐字节不变。"""
     seen: list[dict] = []
 
-    def _fake_request(base, token, path, timeout=30.0, data=None, method=None, headers=None):
-        seen.append(dict(headers or {}))
+    def _fake_request(spec, **_kw):
+        seen.append(dict(spec.headers or {}))
         return 200, b'{"jobs": [], "halt": false}'
 
     monkeypatch.setattr(JL, "_request", _fake_request)
@@ -83,8 +83,8 @@ def test_claim_sends_role_header_too(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     seen: list[dict] = []
 
-    def _fake_request(base, token, path, timeout=30.0, data=None, method=None, headers=None):
-        seen.append({"path": path, "headers": dict(headers or {})})
+    def _fake_request(spec, **_kw):
+        seen.append({"path": spec.path, "headers": dict(spec.headers or {})})
         return 200, b'{"job_id": "j", "status": "ok", "lease_token": "t"}'
 
     monkeypatch.setattr(JL, "_request", _fake_request)

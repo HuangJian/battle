@@ -25,6 +25,19 @@
 
 ---
 
+## §265 P0-3 第十二刀：http 传输收成 `WireRequest` / `WireGet`（宽签名 106 → 104，传输族收口）（2026-11-21）
+
+* `_request` 的 13 个参数 → `WireRequest`（frozen，非 kw_only：`base_url`/`token`/`path`
+  三个位置位保留）；`_get_with_retry` 的 13 个 → `WireGet`（`timeout` 必填在前）。
+  两者都在函数体开头一次展开旧局部名，重试/重抽/分块读逻辑逐字未动。
+* 72 处调用点包对象；codemod 显式排除三个「同名但不是它」的定义（`hub_http._request`、
+  `payload_proc` 的 `self._request`、测试本地 `_request`）。关键字起包保留 `k=` 标签在 spec 内。
+* 5 个测试文件的替身从读 `kw["timeout"]` / `path` 改为读 `spec.timeout` / `spec.path`；
+  `seen.update(kw)` → `seen.update(vars(spec))`，断言键不变。
+* 形状门禁基线删除 `remote/http.py` 行（2 → 0）；`Any` 基线不动（`WireGet.log` 用 Callable）。
+* 回归 211 例（http/wire/control/body-guard/download/bundle/cache/形状/Any 预算）；
+  mypy 5 文件绿。
+
 ## §264 P0-3 第十一刀：deliver_proc 的构造器与工厂收成 spec（宽签名 108 → 106）（2026-11-21）
 
 * `DelivererProcess.__init__` 的 21 个关键字参数 → `DelivererSpec`；`make_deliverer` 的

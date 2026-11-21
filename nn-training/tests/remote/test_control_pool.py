@@ -36,6 +36,7 @@ import remote.control_pool as cp
 import remote.http as http_mod
 import remote.job_lifecycle as jl
 from common.protocol import HEARTBEAT_SEC
+from remote.http import WireRequest
 from remote.job_lifecycle import CONTROL_TIMEOUT_SEC
 
 
@@ -229,7 +230,7 @@ def test_non_loopback_control_call_goes_through_the_pool(monkeypatch) -> None:
         return 200, b"{}"
 
     monkeypatch.setattr(http_mod, "_control_pool_request", _pool)
-    st, body = http_mod._request("http://hub.invalid:500", "tok", "/jobs/peek?n=1", timeout=5.0)
+    st, body = http_mod._request(WireRequest("http://hub.invalid:500", "tok", "/jobs/peek?n=1", timeout=5.0))
     assert (st, body) == (200, b"{}")
     assert len(seen) == 1, f"控制面没走池：{seen}"
 
@@ -257,7 +258,7 @@ def test_loopback_control_call_does_not_go_through_the_pool(monkeypatch) -> None
             return False
 
     monkeypatch.setattr(http_mod.net_http, "urlopen", lambda *_a, **_k: _FakeSock())
-    st, body = http_mod._request("http://127.0.0.1:500", "tok", "/jobs/peek?n=1", timeout=5.0)
+    st, body = http_mod._request(WireRequest("http://127.0.0.1:500", "tok", "/jobs/peek?n=1", timeout=5.0))
     assert (st, body) == (200, b"{}")
     assert seen == []
 
@@ -289,7 +290,7 @@ def test_bulk_never_goes_through_the_pool(monkeypatch) -> None:
             return _FakeSock()
 
     monkeypatch.setattr(http_mod, "_get_opener", lambda: _FakeOpener())
-    st, body = http_mod._request("http://hub.invalid:500", "tok", "/jobs/j1/payload", timeout=5.0)
+    st, body = http_mod._request(WireRequest("http://hub.invalid:500", "tok", "/jobs/j1/payload", timeout=5.0))
     assert (st, body) == (200, b"payload")
     assert seen == []
 
@@ -308,7 +309,7 @@ def test_control_call_is_retried_once_and_bulk_is_not(monkeypatch) -> None:
         return 200, b"{}"
 
     monkeypatch.setattr(http_mod, "_control_pool_request", _flaky)
-    st, body = http_mod._request("http://hub.invalid:500", "tok", "/jobs/peek?n=1", timeout=5.0)
+    st, body = http_mod._request(WireRequest("http://hub.invalid:500", "tok", "/jobs/peek?n=1", timeout=5.0))
     assert (st, body) == (200, b"{}")
     assert len(calls) == cp.CONTROL_ATTEMPTS, f"控制面应尝试 {cp.CONTROL_ATTEMPTS} 次：{calls}"
 
@@ -321,7 +322,7 @@ def test_control_call_is_retried_once_and_bulk_is_not(monkeypatch) -> None:
 
     monkeypatch.setattr(http_mod, "_get_opener", lambda: _DeadOpener())
     try:
-        http_mod._request("http://hub.invalid:500", "tok", "/jobs/j1/payload", timeout=5.0)
+        http_mod._request(WireRequest("http://hub.invalid:500", "tok", "/jobs/j1/payload", timeout=5.0))
     except OSError:
         pass
     assert len(opens) == 1, f"bulk 不该在传输层自重试（重抽是 `_get_with_retry` 的事）：{opens}"
@@ -339,8 +340,8 @@ def test_the_calls_without_a_timeout_parameter_use_the_same_budget(monkeypatch) 
     看 `_request` 拿到了什么（散成字面量就会各自漂，这条把它们钉回同一个常量）。"""
     seen: list[float] = []
 
-    def _fake_request(*_a, **kw):
-        seen.append(float(kw["timeout"]))
+    def _fake_request(spec, **_kw):
+        seen.append(float(spec.timeout))
         return (200, b"{}")
 
     monkeypatch.setattr(jl, "_request", _fake_request)

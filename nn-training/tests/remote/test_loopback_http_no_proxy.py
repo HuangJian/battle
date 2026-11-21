@@ -25,6 +25,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 from common import net_http
+from remote.http import WireRequest
 from remote.hub_client import _request as hub_request
 from remote.push_dispatch import _http as push_http
 from remote.worker import _request as worker_request
@@ -120,7 +121,9 @@ def test_push_dispatch_loopback_bypasses_dead_proxy(local_server: str, dead_prox
 
 def test_worker_loopback_bypasses_dead_proxy(local_server: str, dead_proxy: str) -> None:
     """worker↔hub：本机 worker 轮询本机 hub 不该被代理截走（显式 ProxyHandler 只管非回环）。"""
-    status, body = worker_request(local_server, "tok", "/jobs/peek", timeout=5.0)
+    status, body = worker_request(
+        WireRequest(local_server, "tok", "/jobs/peek", timeout=5.0)
+    )
     assert status == 200 and json.loads(body)["ok"] is True
 
 

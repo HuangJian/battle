@@ -651,7 +651,7 @@ def test_prefetch_survives_the_cancel_watcher_control_ring(tmp_path: Path, monke
     monkeypatch.setattr(W._BULK, "_yield_budget", 0.01)
     monkeypatch.setattr(W._BULK, "_yield_step", 0.005)
 
-    def _fake_request(base_url: str, token: str, path: str, *, pace=None, **kw):
+    def _fake_request(spec, **_kw):
         """真 `_request` 的替身：只换 HTTP；控制面标记 + `_read_body(pace=…)` 全是真的。"""
         with W._BULK.control(label="/jobs/x/status"):  # ★ 取消环那个小包的等价物
             chunks = [payload[i : i + 512] for i in range(0, len(payload), 512)]
@@ -659,8 +659,8 @@ def test_prefetch_survives_the_cancel_watcher_control_ring(tmp_path: Path, monke
                 _FakeResp(chunks, len(payload)),
                 idle_timeout=45.0,
                 total_timeout=300.0,
-                allow_reroll=bool(kw.get("allow_reroll", False)),
-                pace=pace,
+                allow_reroll=bool(getattr(spec, 'allow_reroll', False)),
+                pace=getattr(spec, "pace", None),
             )
 
     monkeypatch.setattr(http_mod, "_request", _fake_request)
@@ -927,8 +927,8 @@ def test_report_prefetch_is_best_effort_and_never_raises(monkeypatch) -> None:
     """上报腿的契约：200 ⇒ True；非 200 / 任何异常 ⇒ False 且**不抛**（训练一字不受影响）。"""
     seen: list[tuple[str, dict]] = []
 
-    def _ok(base_url, token, path, **kw):
-        seen.append((path, json.loads(kw["data"].decode("utf-8"))))
+    def _ok(spec, **_kw):
+        seen.append((spec.path, json.loads(spec.data.decode("utf-8"))))
         return 200, b'{"ok": true}'
 
     monkeypatch.setattr(JL, "_request", _ok)

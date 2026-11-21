@@ -37,7 +37,9 @@ import os
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import Any
 
 from common import net_http
@@ -495,21 +497,26 @@ def _paced_body(data: bytes, pace: Any) -> Any:
             pace()
 
 
-def _request(
-    base_url: str,
-    token: str,
-    path: str,
-    timeout: float = 30.0,
-    data: bytes | None = None,
-    method: str | None = None,
-    headers: dict[str, str] | None = None,
-    progress: Any = None,
-    idle_timeout: float | None = None,
-    total_timeout: float | None = None,
-    allow_reroll: bool = False,
-    pace: Any = None,
-    range_start: int = 0,
-) -> tuple[int, bytes]:
+@dataclass(frozen=True)
+class WireRequest:
+    """`_request` 的旋钮袋（P0-3）：字段顺序 = 旧参数顺序（可继续按位置给）。"""
+
+    base_url: str
+    token: str
+    path: str
+    timeout: float = 30.0
+    data: bytes | None = None
+    method: str | None = None
+    headers: dict[str, str] | None = None
+    progress: Any = None
+    idle_timeout: float | None = None
+    total_timeout: float | None = None
+    allow_reroll: bool = False
+    pace: Any = None
+    range_start: int = 0
+
+
+def _request(spec: WireRequest) -> tuple[int, bytes]:
     """单发 GET/POST。缺省（不给 `idle_timeout`/`progress`）行为与改造前逐字节相同。
 
     控制面旁路（2026-09-22，P0）：`control_path(path)` 命中的路径（peek/priority/claim/
@@ -528,6 +535,20 @@ def _request(
     （它忽略了 Range ⇒ 这一份是从头传的整份）。**上传也让路**：`data` 大且给了 `pace` 就交成
     分片迭代器（`_paced_body`）。
     """
+    # 旧签名 13 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    base_url = spec.base_url
+    token = spec.token
+    path = spec.path
+    timeout = spec.timeout
+    data = spec.data
+    method = spec.method
+    headers = spec.headers
+    progress = spec.progress
+    idle_timeout = spec.idle_timeout
+    total_timeout = spec.total_timeout
+    allow_reroll = spec.allow_reroll
+    pace = spec.pace
+    range_start = spec.range_start
     hdr_extra = dict(headers or {})
     if range_start > 0:
         hdr_extra["Range"] = f"bytes={int(range_start)}-"
@@ -636,22 +657,26 @@ def _sched_headers(worker_id: str, *, role: str = ROLE_ONLINE) -> dict[str, str]
     return h
 
 
-def _get_with_retry(
-    base_url: str,
-    token: str,
-    path: str,
-    *,
-    timeout: float,
-    attempts: int = 3,
-    log=_log,
-    progress: Any = None,
-    idle_timeout: float | None = BODY_IDLE_TIMEOUT_SEC,
-    total_timeout: float | None = None,
-    wire_jid: str = "",
-    wire_seg: str = "",
-    reroll: bool = False,
-    bulk_prio: str = BULK_P1_CRITICAL,
-) -> bytes:
+@dataclass(frozen=True)
+class WireGet:
+    """`_get_with_retry` 的旋钮袋（P0-3）：字段顺序 = 旧参数顺序。"""
+
+    base_url: str
+    token: str
+    path: str
+    timeout: float
+    attempts: int = 3
+    log: Callable[[str], None] = _log
+    progress: Any = None
+    idle_timeout: float | None = BODY_IDLE_TIMEOUT_SEC
+    total_timeout: float | None = None
+    wire_jid: str = ""
+    wire_seg: str = ""
+    reroll: bool = False
+    bulk_prio: str = BULK_P1_CRITICAL
+
+
+def _get_with_retry(spec: WireGet) -> bytes:
     """GET + 瞬时失败退避重试：网络异常/5xx → 指数退避重试；4xx → ProtocolError。
 
     传输级抖动（连接重置/读超时/边缘 5xx）在租约窗口内就地消化，不再付
@@ -671,6 +696,20 @@ def _get_with_retry(
     上限用完仍抛 `BulkPreemptError`，因为挤走不是失败）。槽位**不含**退避睡眠：绝不抱着唯一
     通道睡觉。
     """
+    # 旧签名 13 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    base_url = spec.base_url
+    token = spec.token
+    path = spec.path
+    timeout = spec.timeout
+    attempts = spec.attempts
+    log = spec.log
+    progress = spec.progress
+    idle_timeout = spec.idle_timeout
+    total_timeout = spec.total_timeout
+    wire_jid = spec.wire_jid
+    wire_seg = spec.wire_seg
+    reroll = spec.reroll
+    bulk_prio = spec.bulk_prio
     last: str = ""
     rerolls = 0
     preempts = 0  # 被 P1 挤走的次数（P2 专属）：独立预算，不消耗 attempts
@@ -710,7 +749,7 @@ def _get_with_retry(
                 status, body = None, b""
                 try:
                     status, body = _request(
-                        base_url,
+                        WireRequest(base_url,
                         token,
                         path,
                         timeout=timeout,
@@ -719,7 +758,7 @@ def _get_with_retry(
                         total_timeout=total_timeout,
                         allow_reroll=allow_reroll,
                         pace=_bulk_pace(_tok, bulk_prio),
-                        range_start=len(parts),
+                        range_start=len(parts)),
                     )
                 finally:
                     # S3d：本次排队归到**本 jid** 的账（失败/被挤走的排队也要记——那是真花掉的时间）。

@@ -8818,6 +8818,17 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-http-specs
+
+P0-3 第十二刀：`remote/http.py` 的两个传输入口收成 spec —
+`_request`（13 参）→ frozen `WireRequest`（字段顺序 = 旧参数顺序，前三个仍可按位置给），
+`_get_with_retry`（13 参）→ `WireGet`（`timeout` 必填在前，其余带缺省）。函数体开头一次
+展开旧局部名。72 处调用点一次包对象；同名本地函数（`hub_http._request`、`payload_proc`
+的 `self._request`、测试里的本地 `_request`）显式排除。测试替身同步改成读 `spec` 字段
+（`test_wire_reroll` 9 个 · `test_remote_ppo` 4 个 · `test_body_transfer_guard` 2 个 ·
+`test_control_pool` 1 个）。`http.py` 宽签名 2 → 0，全仓 106 → 104（73 → 72 文件），
+P0-3 传输族至此收口。下一批：P0-3 剩余的其它宽签名（按形状门禁基线继续）。
+
 ## §2026-11-21-deliver-proc-specs
 
 P0-3 第十一刀：`remote/deliver_proc.py` 的两个最宽入口收成 spec —

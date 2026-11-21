@@ -280,8 +280,8 @@ def test_post_result_sends_worker_header(monkeypatch: pytest.MonkeyPatch) -> Non
     """`post_result` 的请求头必须带身份——没有它，输家的 409 归不到人。"""
     seen: dict[str, str] = {}
 
-    def fake_request(_base_url: str, _token: str, _path: str, **kw: object):
-        headers = kw.get("headers") or {}
+    def fake_request(spec, **_kw):
+        headers = spec.headers or {}
         if isinstance(headers, dict):
             seen.update(headers)
         return 200, b"{}"

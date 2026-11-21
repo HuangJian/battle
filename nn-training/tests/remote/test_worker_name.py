@@ -65,8 +65,8 @@ def test_worker_tag_never_raises_on_garbage_url() -> None:
 def test_post_result_threads_worker_id(monkeypatch) -> None:
     seen: dict = {}
 
-    def fake_request(_base_url: str, _token: str, _path: str, **kw: object):
-        headers = kw.get("headers") or {}
+    def fake_request(spec, **_kw):
+        headers = spec.headers or {}
         if isinstance(headers, dict):
             seen.update(headers)
         return 200, b"{}"
@@ -86,8 +86,8 @@ def test_post_result_threads_worker_id(monkeypatch) -> None:
 def test_report_job_failure_threads_worker_id(monkeypatch) -> None:
     captured: dict = {}
 
-    def fake_request(_base_url: str, _token: str, _path: str, **kw: object):
-        data = kw.get("data")
+    def fake_request(spec, **_kw):
+        data = spec.data
         if isinstance(data, bytes):
             captured["body"] = json.loads(data.decode("utf-8"))
         return 200, b"{}"

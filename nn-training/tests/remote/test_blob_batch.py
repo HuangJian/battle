@@ -100,8 +100,8 @@ def test_batch_issues_exactly_one_get(monkeypatch) -> None:
     """两件 ⇒ 一次 GET（`?name=opt,ref`），省的是建连不是字节。"""
     calls: list[str] = []
 
-    def _get(_b, _t, path, **_k) -> bytes:
-        calls.append(path)
+    def _get(spec, **_k) -> bytes:
+        calls.append(spec.path)
         return _frame(BLOB_OPT, OPT_RAW) + _frame(BLOB_REF, REF_RAW)
 
     monkeypatch.setattr(dl, "_get_with_retry", _get)

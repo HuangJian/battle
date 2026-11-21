@@ -70,7 +70,6 @@ WIDE_FUNCS_BASELINE = {
     "remote/bundle.py": 2,
     "remote/colab_bc.py": 1,
     "remote/error_report.py": 1,
-    "remote/http.py": 2,
     "remote/hub_client.py": 2,
     "remote/hub_http.py": 2,
     # 2026-11-19 合入上游的 relay/replay 参数（原 3 处 → 4 处）。

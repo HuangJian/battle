@@ -45,7 +45,7 @@ from common.protocol import (
     job_seed,
     validate_result,
 )
-from remote.http import _request
+from remote.http import WireRequest, _request
 from remote.job_fs import _persist_result
 
 #: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
@@ -90,7 +90,7 @@ def _bc_fetch_resume(
     last = ""
     for attempt in range(1, 4):
         try:
-            status, body = _request(base_url, token, f"/jobs/{jid}/resume", timeout=30.0)
+            status, body = _request(WireRequest(base_url, token, f"/jobs/{jid}/resume", timeout=30.0))
         except _BC_HTTP_ERRORS as e:
             status, body = None, repr(e).encode()
         if status == 200:
@@ -175,7 +175,7 @@ def _bc_post_epoch(
     for attempt in range(1, 3):
         try:
             status, resp = _request(
-                base_url,
+                WireRequest(base_url,
                 token,
                 f"/jobs/{jid}/epoch",
                 timeout=60.0,
@@ -184,7 +184,7 @@ def _bc_post_epoch(
                 headers={
                     "Content-Type": "application/json",
                     **({"X-Lease-Token": lease_token} if lease_token else {}),
-                },
+                }),
             )
         except _BC_HTTP_ERRORS as e:
             status, resp = None, repr(e).encode()

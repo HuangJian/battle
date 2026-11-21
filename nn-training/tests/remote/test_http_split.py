@@ -33,6 +33,7 @@ if str(ROOT) not in sys.path:
 import remote.http as http_mod
 import remote.job_lifecycle as jl_mod
 import remote.worker as worker_mod
+from remote.http import WireGet
 from tests.helpers import remote_dag as dag
 
 HTTP_FILE = ROOT / "remote" / "http.py"
@@ -169,7 +170,7 @@ def test_request_seam_for_the_moved_callers_is_the_http_module(
     )
     monkeypatch.setattr(http_mod, "_request", lambda *a, **k: (200, b"payload-bytes"))
     out = worker_mod._get_with_retry(
-        "http://hub", "t", "/jobs/j1/payload", timeout=1.0, attempts=1, log=lambda _m: None
+        WireGet("http://hub", "t", "/jobs/j1/payload", timeout=1.0, attempts=1, log=lambda _m: None)
     )
     assert out == b"payload-bytes"
 

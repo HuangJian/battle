@@ -28,7 +28,6 @@
     "tests/hub/test_offline_resume_anchor.py": 1,
     "tests/hub/test_offline_task_pack.py": 1,
     "tests/hub/test_payload_range.py": 1,
-    "tests/remote/test_bc_epoch_backfill.py": 1,
     "tests/remote/test_blob_batch.py": 1,
     "tests/remote/test_deliver_outbox.py": 2,
     "tests/remote/test_error_report.py": 7,

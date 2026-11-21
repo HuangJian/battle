@@ -106,8 +106,8 @@ def test_replay_gate_uses_manifest_cache_and_invalidates_on_republish(tmp_path: 
 def test_claim_body_carries_capabilities_only_when_given(monkeypatch) -> None:
     bodies: list[dict] = []
 
-    def _fake_request(_base, _token, _path, **kw):
-        bodies.append(json.loads(kw["data"]))
+    def _fake_request(spec, **_kw):
+        bodies.append(json.loads(spec.data))
         return 200, b'{"status":"ok","lease_token":"t","job_id":"j"}'
 
     monkeypatch.setattr(JL, "_request", _fake_request)

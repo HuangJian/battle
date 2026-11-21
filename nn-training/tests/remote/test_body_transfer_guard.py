@@ -35,6 +35,7 @@ from common.protocol import AUTH_HEADER, RetryableError
 from hub.server import _JobStore, make_server
 from remote import http as http_mod
 from remote import worker as worker_mod
+from remote.http import WireRequest
 from tests.helpers.http_server import serve_fast
 
 
@@ -117,9 +118,8 @@ def test_download_payload_passes_idle_guard(monkeypatch) -> None:
     """下载路径必须真的把空闲超时与进度回调交给 `_request`（接线即契约）。"""
     seen: dict[str, object] = {}
 
-    def fake_request(base_url, token, path, timeout=30.0, **kw):
-        seen.update(kw)
-        seen["timeout"] = timeout
+    def fake_request(spec, **_kw):
+        seen.update(vars(spec))
         return 200, b"payload"
 
     monkeypatch.setattr(http_mod, "_request", fake_request)
@@ -135,8 +135,8 @@ def test_stalled_download_is_loud_and_retried(monkeypatch) -> None:
     logs: list[str] = []
     calls: list[str] = []
 
-    def fake_request(base_url, token, path, timeout=30.0, **kw):
-        calls.append(path)
+    def fake_request(spec, **_kw):
+        calls.append(spec.path)
         if len(calls) == 1:
             raise TimeoutError("body 停滞：45s 内没有新字节（已收 131072 bytes / 共 4848536）")
         return 200, b"payload-bytes"
@@ -323,13 +323,13 @@ def test_big_upload_carries_an_explicit_content_length(monkeypatch) -> None:
     monkeypatch.setattr(http_mod, "_get_opener", lambda: _Opener())
     data = b"y" * (http_mod.BODY_CHUNK + 1)
     status, _body = http_mod._request(
-        "http://hub.invalid",
+        WireRequest("http://hub.invalid",
         "tok",
         "/jobs/x/result",
         timeout=5.0,
         data=data,
         method="POST",
-        pace=lambda: 0.0,
+        pace=lambda: 0.0),
     )
     assert status == 200
     assert seen["cl"] == str(len(data)), f"没显式给 Content-Length：{seen['cl']}"
@@ -360,13 +360,13 @@ def test_small_upload_keeps_the_byte_body(monkeypatch) -> None:
     monkeypatch.setattr(http_mod, "_get_opener", lambda: _Opener())
     data = b"y" * 128
     http_mod._request(
-        "http://hub.invalid",
+        WireRequest("http://hub.invalid",
         "tok",
         "/jobs/x/result",
         timeout=5.0,
         data=data,
         method="POST",
-        pace=lambda: 0.0,
+        pace=lambda: 0.0),
     )
     assert isinstance(seen["body"], (bytes, bytearray)) and bytes(seen["body"]) == data
 

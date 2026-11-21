@@ -73,6 +73,7 @@ from remote.bulk_sched import BULK_P1_CRITICAL
 from remote.http import (
     BODY_IDLE_TIMEOUT_SEC,
     BODY_TOTAL_TIMEOUT_SEC,
+    WireGet,
     _get_with_retry,
 )
 from remote.job_fs import JOB_DIR_KEEP, prune_job_dirs, unpack_payload_or_fail
@@ -142,7 +143,7 @@ def download_payload(
     `BULK_P2_PREFETCH`——它必须能在 **P1 关键传输**到达时丢掉半截（`BulkPreemptError`）。
     """
     return _get_with_retry(
-        base_url,
+        WireGet(base_url,
         token,
         f"/jobs/{jid}/payload",
         timeout=BODY_TOTAL_TIMEOUT_SEC,
@@ -154,7 +155,7 @@ def download_payload(
         wire_jid=wire_jid or jid,
         wire_seg="payload",
         reroll=True,
-        bulk_prio=bulk_prio,
+        bulk_prio=bulk_prio),
     )
 
 
@@ -168,7 +169,7 @@ def download_code(
 ) -> bytes:
     # code.zip 同样走隧道（1-3MB）：与 payload 同规的停滞判据与进度行。
     return _get_with_retry(
-        base_url,
+        WireGet(base_url,
         token,
         f"/jobs/{jid}/code",
         timeout=120.0,
@@ -179,7 +180,7 @@ def download_code(
         progress=_progress_logger(f"job {jid}: code", log),
         wire_jid=jid,
         wire_seg="code",
-        reroll=True,
+        reroll=True),
     )
 
 
@@ -196,7 +197,7 @@ def download_ts_code(
     代价只付一次：内容寻址缓存（`ts_code_cache/<sha>`）命中后同 sha 永不重下。
     """
     return _get_with_retry(
-        base_url,
+        WireGet(base_url,
         token,
         f"/jobs/{jid}/ts_code",
         timeout=BODY_TOTAL_TIMEOUT_SEC,
@@ -207,7 +208,7 @@ def download_ts_code(
         progress=_progress_logger(f"job {jid}: ts_code", log),
         wire_jid=jid,
         wire_seg="ts_code",
-        reroll=True,
+        reroll=True),
     )
 
 
@@ -222,7 +223,7 @@ def download_blob(
 ) -> bytes:
     """M2 B3：取内容寻址 blob（raw opt/ref）。404 = 确定性缺失（响亮失败，非静默降级）。"""
     return _get_with_retry(
-        base_url,
+        WireGet(base_url,
         token,
         f"/jobs/{jid}/blob?name={name}",
         timeout=BODY_TOTAL_TIMEOUT_SEC,
@@ -233,7 +234,7 @@ def download_blob(
         progress=_progress_logger(f"job {jid}: blob {name}", log),
         wire_jid=jid,
         wire_seg=f"blob:{name}",
-        reroll=True,
+        reroll=True),
     )
 
 
@@ -293,7 +294,7 @@ def download_blobs(
         return {names[0]: download_blob(base_url, token, jid, names[0], log=log)}
     try:
         body = _get_with_retry(
-            base_url,
+            WireGet(base_url,
             token,
             f"/jobs/{jid}/blob?name={','.join(names)}",
             timeout=BODY_TOTAL_TIMEOUT_SEC,
@@ -304,7 +305,7 @@ def download_blobs(
             progress=_progress_logger(f"job {jid}: blob {len(names)} 件", log),
             wire_jid=jid,
             wire_seg=f"blob:{'+'.join(names)}",
-            reroll=True,
+            reroll=True),
         )
         return parse_blob_batch(body)
     except Exception as e:

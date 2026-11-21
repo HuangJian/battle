@@ -41,8 +41,8 @@ def test_post_epoch_reports_failure_on_tunnel_530(monkeypatch) -> None:
     _never_sleep(monkeypatch)
     paths: list[str] = []
 
-    def fake_request(base_url: str, token: str, path: str, **kw: object) -> tuple[int, bytes]:
-        paths.append(path)
+    def fake_request(spec, **_kw):
+        paths.append(spec.path)
         return 530, b"<html>cloudflare: origin unreachable</html>"
 
     monkeypatch.setattr(bc_job, "_request", fake_request)
@@ -57,8 +57,8 @@ def test_backlog_replay_posts_every_missing_epoch_then_clears(monkeypatch) -> No
     _never_sleep(monkeypatch)
     posted: list[dict] = []
 
-    def fake_request(base_url: str, token: str, path: str, **kw: object) -> tuple[int, bytes]:
-        posted.append(json.loads(kw["data"]))  # type: ignore[arg-type]
+    def fake_request(spec, **_kw):
+        posted.append(json.loads(spec.data))
         return 200, b"{}"
 
     monkeypatch.setattr(bc_job, "_request", fake_request)
@@ -76,8 +76,8 @@ def test_backlog_replay_keeps_rows_when_tunnel_still_down(monkeypatch) -> None:
     _never_sleep(monkeypatch)
     calls: list[str] = []
 
-    def fake_request(base_url: str, token: str, path: str, **kw: object) -> tuple[int, bytes]:
-        calls.append(path)
+    def fake_request(spec, **_kw):
+        calls.append(spec.path)
         return 530, b""
 
     monkeypatch.setattr(bc_job, "_request", fake_request)

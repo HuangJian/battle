@@ -1544,8 +1544,8 @@ def _no_sleep(monkeypatch):
 def test_download_retry_transient_then_success(monkeypatch, _no_sleep) -> None:
     calls = []
 
-    def fake_request(base_url, token, path, timeout=30.0, **kw):
-        calls.append(path)
+    def fake_request(spec, **_kw):
+        calls.append(spec.path)
         if len(calls) == 1:
             return 503, b"edge error"
         return 200, b"payload-bytes"
@@ -1560,8 +1560,8 @@ def test_download_retry_transient_then_success(monkeypatch, _no_sleep) -> None:
 def test_download_4xx_is_deterministic(monkeypatch, _no_sleep) -> None:
     calls = []
 
-    def fake_request(base_url, token, path, timeout=30.0, **kw):
-        calls.append(path)
+    def fake_request(spec, **_kw):
+        calls.append(spec.path)
         return 404, b"not found"
 
     monkeypatch.setattr(http_mod, "_request", fake_request)
@@ -1579,7 +1579,7 @@ def test_download_exhausted_raises_retryable(monkeypatch, _no_sleep) -> None:
 def test_post_result_retry_then_success(monkeypatch, _no_sleep) -> None:
     statuses = iter([502, 503, 200])
 
-    def fake_request(base_url, token, path, timeout=30.0, **kw):
+    def fake_request(spec, **_kw):
         return next(statuses), b"{}"
 
     monkeypatch.setattr(JL, "_request", fake_request)
@@ -1616,8 +1616,8 @@ def test_post_result_4xx_rejected_no_retry(monkeypatch, _no_sleep) -> None:
     """
     posted: list = []
 
-    def fake_request(base_url, token, path, timeout=30.0, **kw):
-        posted.append(kw.get("data") or b"")
+    def fake_request(spec, **_kw):
+        posted.append(spec.data or b"")
         return 400, b"result rejected: bad fingerprints"
 
     monkeypatch.setattr(JL, "_request", fake_request)
