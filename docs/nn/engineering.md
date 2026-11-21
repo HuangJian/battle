@@ -25,6 +25,28 @@
 
 ---
 
+## §249 P0-5 存量第十二处：`trainer/queue_local._REUSE_INDEX` + `_REUSE_SIG` → `ReuseIndex`（2026-11-21）
+
+同族课程「盘上现成局」索引是一份**目录快照**（只活一轮、不落盘、不跨轮），旧形状是两个模块级
+容器：`_REUSE_INDEX`（dict）与 `_REUSE_SIG`（**一格 list** 当可变槽），重建逻辑写成三条独立语句
+（`clear` / `update` / 改 `_REUSE_SIG[0]`）——读的人要自己对账「两个容器谁先改」，而漏改签名或
+漏清内容都会让上一版权重的 shard 被当现成局拷进来。
+
+**新形状**：`ReuseIndex.rows(wver, args)` 把「签名没变 ⇒ 原样返回；变了 ⇒ 清空 + 重扫 + 记签名」
+放在同一个方法里（不可能出现「签名新了、内容旧」），`clear_rows()` 是清场。模块只留
+`_REUSE = ReuseIndex()`，`reuse_index()` 变成一行转发（两个调用点不改）。
+
+**顺手修掉的退化路径**：旧的初始签名是 `("", "")`，若第一轮恰好「空课程名 + 空 `wver`」就会跳过
+首扫返回空索引；现在用 `None` 哨兵表示「还没建过」。`wver` 是权重指纹、正常不为空，所以这条不改变
+既有行为，只堵住一个不会报错的空转。
+
+**守卫**：新增 `tests/trainer/test_reuse_index.py`（5 条）—— 同 `wver` 只扫一次且返回**同一份**
+dict；换 `wver` 或换课程都重建且旧条目消失；空签名首轮照样扫；`clear_rows()` 后同 `wver` 也重扫；
+模块里只有 `_REUSE` 一个持有者、`_REUSE_SIG` 已不存在。
+
+**行为差异**：除上面那条退化路径外无。扫描时机、返回 dict 的引用同一性、`MAX_INDEX` 上限（在
+`rollout_sources` 里）全未变。
+
 ## §248 P0-5 存量第十一处：`remote/worker._ACTIVE_CODE_SHA` → `CodeSession`（2026-11-21）
 
 热替换护栏的唯一状态：**本会话第一个 job 的 `code_sha256` 就是会话的代码版本，之后不一致就拒跑**

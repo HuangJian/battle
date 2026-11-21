@@ -9051,3 +9051,14 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **守卫**：状态契约三张清单随迁 + 新增 `test_code_session_pins_once_and_refuses_a_second_pin`；
   `test_ppo_backend_switch` 的注入点改为 `CodeSession()`。行为差异：无。
   详见 `docs/nn/engineering.md` §248。
+
+## §2026-11-21-reuse-index（`trainer/queue_local._REUSE_INDEX` + `_REUSE_SIG` → `ReuseIndex`）
+
+- **背景**：目录快照的重建写成三条独立语句（清 dict / 更新 / 改一格 list 的签名），漏改任何一条都会让
+  上一版权重的 shard 被当现成局拷贝；`_REUSE_SIG` 还是「一格 list 当可变槽」。
+- **决定**：`ReuseIndex.rows(wver, args)` 在同一个方法里「签名变 ⇒ 清空 + 重扫 + 记签名」，
+  `clear_rows()` 清场，模块只留 `_REUSE` 持有者；`reuse_index()` 保持公开、一行转发。
+  初始签名用 `None` 哨兵（旧 `("", "")` 会跳过「空课程名 + 空 wver」的首扫，静默返回空索引）。
+- **守卫**：新增 `tests/trainer/test_reuse_index.py` 5 条（只扫一次 + 同一份 dict / 换 wver 与换课程
+  都重建且旧条目消失 / 空签名首扫 / 清场后重扫 / 唯一持有者）。行为差异：仅上述退化路径。
+  详见 `docs/nn/engineering.md` §249。
