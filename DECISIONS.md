@@ -8818,6 +8818,15 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-payload-pack-spec
+
+P0-3 第十七刀：`remote/payload_pack.py::pack_payload_zip`（9 参：shard_dirs / extra_files /
+zip_path / manifest + member_bytes / shard_extra / chunks / presegmented / log）→ frozen
+`PackSpec`（字段顺序与缺省值逐字沿用旧签名；默认 log 的 no-op 语义搬成 `_silent_log`）。
+函数体开头一次展开旧局部名，tar.xz 打包、自检与显式扰动重打逐字未动。10 处调用点
+（生产 `hub_client` 1 处 + 三个 payload 测试文件 9 处）包对象；`remote/payload_pack.py`
+的宽签名 1 → 0，全仓 98 → 97（68 → 67 文件）。
+
 ## §2026-11-21-opt-standard-specs
 
 P0-3 第十六刀：`remote/opt_standard.py` 的递归对 `_base_tar_bytes` / `_landed_bytes_for`

@@ -34,7 +34,7 @@ if str(ROOT) not in sys.path:
 from biz.reward_library import METRICS_DIM, RewardSpec
 from common.payload import shard_segment
 from common.shard import SHARD_FILES, manifest_bytes, write_shard
-from remote.payload_pack import ShardSegments, pack_payload_zip
+from remote.payload_pack import PackSpec, ShardSegments, pack_payload_zip
 from remote.payload_slim import build_slim
 
 STAGE = 2000
@@ -110,7 +110,7 @@ def test_presegmented_wins_over_disk(tmp_path: Path) -> None:
         (d / "obs.npy").write_bytes(b"\xff" * 7)
 
     out = tmp_path / "payload.tar.xz"
-    pack_payload_zip(dirs, [], out, {}, chunks=8, presegmented=took[0])
+    pack_payload_zip(PackSpec(dirs, [], out, {}, chunks=8, presegmented=took[0]))
     got = _members(out)
     want: dict[str, bytes] = {}
     for n in names:
@@ -137,7 +137,7 @@ def test_missing_segment_falls_back_to_disk(tmp_path: Path) -> None:
     assert took is not None
 
     out = tmp_path / "payload.tar.xz"
-    pack_payload_zip([da, db], [], out, {}, chunks=8, presegmented=took[0])
+    pack_payload_zip(PackSpec([da, db], [], out, {}, chunks=8, presegmented=took[0]))
     got = _members(out)
     assert got[f"{a}/obs.npy"] == files_a["obs.npy"], "有段 ⇒ 原样用段（不读盘）"
     assert got[f"{b}/obs.npy"] == b"disk-only-b", "没段 ⇒ 必须读盘"

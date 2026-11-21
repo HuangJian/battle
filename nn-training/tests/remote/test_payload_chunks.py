@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.payload import shard_segment
-from remote.payload_pack import pack_payload_zip
+from remote.payload_pack import PackSpec, pack_payload_zip
 
 
 def _make_shards(root: Path, n: int = 4) -> list[Path]:
@@ -46,8 +46,8 @@ def test_chunks_path_equals_legacy(tmp_path: Path) -> None:
 
     legacy = tmp_path / "legacy.tar.xz"
     fast = tmp_path / "fast.tar.xz"
-    pack_payload_zip(shards, [extra], legacy, {}, chunks=1)
-    pack_payload_zip(shards, [extra], fast, {}, chunks=8)
+    pack_payload_zip(PackSpec(shards, [extra], legacy, {}, chunks=1))
+    pack_payload_zip(PackSpec(shards, [extra], fast, {}, chunks=8))
 
     a, b = _members(legacy), _members(fast)
     assert set(a) == set(b), (sorted(a), sorted(b))
@@ -69,5 +69,5 @@ def test_presegmented_is_used_verbatim(tmp_path: Path) -> None:
         (d / "obs.npy").write_bytes(b"\xff" * 999)
 
     out = tmp_path / "pre.tar.xz"
-    pack_payload_zip(shards, [], out, {}, chunks=8, presegmented=pre)
+    pack_payload_zip(PackSpec(shards, [], out, {}, chunks=8, presegmented=pre))
     assert _members(out) == expect, "预分段必须原样采用（零落盘）"

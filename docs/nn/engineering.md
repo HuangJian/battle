@@ -25,6 +25,16 @@
 
 ---
 
+## §270 P0-3 第十七刀：`pack_payload_zip` 收成 `PackSpec`（宽签名 98 → 97）（2026-11-21）
+
+* `remote/payload_pack.py::pack_payload_zip` 的 9 个参数 → frozen `PackSpec`（字段顺序与
+  缺省值逐字沿用旧签名；默认 `log` 的 no-op 语义搬成模块级 `_silent_log`）。
+  函数体开头一次展开，打包 / 两条自检 / 扰动重打 / 次数上限逐字未动。
+* 10 处调用点包对象：生产 `remote/hub_client` 1 处；测试 `test_payload_selfcheck` 4 处、
+  `test_payload_parts` 2 处、`test_payload_chunks` 3 处。
+* 形状门禁基线删除 `remote/payload_pack.py` 行（1 → 0）；`Any` 基线不动。
+* 回归：三个 payload 测试文件 + 形状预算绿；mypy 改动文件无错。
+
 ## §269 P0-3 第十六刀：opt 落地递归对收成 `BaseTarSpec` / `LandedBytesSpec`（宽签名 100 → 98）（2026-11-21）
 
 * `remote/opt_standard.py::_base_tar_bytes` / `_landed_bytes_for` 各 9 个关键字参数 →

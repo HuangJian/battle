@@ -29,6 +29,7 @@ import hashlib
 import threading
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -352,18 +353,26 @@ def _pack_segmented(
     tmp.replace(zip_path)
     return h.hexdigest()
 
-def pack_payload_zip(
-    shard_dirs: list[Path],
-    extra_files: list[Path],
-    zip_path: Path,
-    manifest: dict,
-    *,
-    member_bytes: Callable[[Path, str], MemberBytes] | None = None,
-    shard_extra: Callable[[Path], Mapping[str, bytes]] | None = None,
-    chunks: int = PAYLOAD_XZ_CHUNKS,
-    presegmented: Mapping[str, bytes] | None = None,
-    log=lambda msg: None,
-) -> str:
+def _silent_log(_msg: str) -> None:
+    """默认 no-op（保持旧签名 `lambda msg: None` 的逐字语义）。"""
+
+
+@dataclass(frozen=True)
+class PackSpec:
+    """`pack_payload_zip` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    shard_dirs: list[Path]
+    extra_files: list[Path]
+    zip_path: Path
+    manifest: dict
+    member_bytes: Callable[[Path, str], MemberBytes] | None = None
+    shard_extra: Callable[[Path], Mapping[str, bytes]] | None = None
+    chunks: int = PAYLOAD_XZ_CHUNKS
+    presegmented: Mapping[str, bytes] | None = None
+    log: Callable[[str], None] = _silent_log
+
+
+def pack_payload_zip(spec: PackSpec) -> str:
     """把 shard 目录 + 额外文件（有 opt blob 时仅 shard；否则含 init_weights.json）
     打成 payload 归档（**tar.xz**，2026-09-10 起；实测体积 −48.7% 而打包耗时持平），
     **并走发布端自检**（§4.5 reader 全链 + §4.6 旧判别反向探测），不通过就显式扰动重打。
@@ -388,8 +397,18 @@ def pack_payload_zip(
 
     `member_bytes` / `shard_extra`（wire-diet，2026-10-14）：直接透传给
     `common.payload.pack_payload`（逐成员替换/丢弃 + 每 shard 新成员）。自检走的是**同一条**
-    打包路径，所以它验的正是变换后的字节（不是变换前的）。缺省 None = 逐字节旧行为。
+    打包路径，所以它验的正是变换后的字节（不是变换前的）。    缺省 None = 逐字节旧行为。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    shard_dirs = spec.shard_dirs
+    extra_files = spec.extra_files
+    zip_path = spec.zip_path
+    manifest = spec.manifest
+    member_bytes = spec.member_bytes
+    shard_extra = spec.shard_extra
+    chunks = spec.chunks
+    presegmented = spec.presegmented
+    log = spec.log
     last_why = ""
     for attempt in range(1, PAYLOAD_SELFCHECK_ATTEMPTS + 1):
         perturb = None if attempt == 1 else f"repack-{attempt}".encode("ascii")

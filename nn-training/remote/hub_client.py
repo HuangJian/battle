@@ -77,6 +77,7 @@ from common.protocol import (
 # 调用点一律走函数内局部 import；测试也从容器模块直接 import（与 `pack_payload_zip` 的 `X as X`
 # 门面不同：后者只依赖 stdlib + `common.*`，留在顶层对 hub 的闭包无害）。
 # 发布端 payload 封装已下沉 `remote.payload_pack`（2026-10-14）：实现搬家、名字留门面。
+from remote.payload_pack import PackSpec
 from remote.payload_pack import pack_payload_zip as pack_payload_zip
 from remote.publish_spec import PublishFacts, PublishSpec, PublishStaged
 from worker.resume import merge_memory_shards, shard_state_init_ok, walk_shard_dirs
@@ -999,14 +1000,13 @@ def _publish_commit(
                 log=log,
             )
     sha = pack_payload_zip(
-        spec.shard_dirs,
-        staged.extra_files,
-        zip_path,
-        m,
-        member_bytes=(_slim.member_bytes if _slim is not None else None),
-        shard_extra=(_slim.shard_extra if _slim is not None else None),
-        presegmented=spec.presegmented,
-        log=log,
+        PackSpec(
+            spec.shard_dirs, staged.extra_files, zip_path, m,
+            member_bytes=(_slim.member_bytes if _slim is not None else None),
+            shard_extra=(_slim.shard_extra if _slim is not None else None),
+            presegmented=spec.presegmented,
+            log=log,
+        )
     )
     m["payload_sha256"] = sha
     if spec.presegmented:
