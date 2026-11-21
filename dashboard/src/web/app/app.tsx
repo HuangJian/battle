@@ -438,6 +438,10 @@ export function App({ initial }: AppProps) {
   // 算力摘要（Topbar chip）：本机直跑槽位计入「在线」（它没有 ping 语义，有槽位即在用）。
   const nodes = stateView?.nodes ?? []
   const localNode = stateView?.localNode ?? null
+  // 「全部升级」只动 ping 在线的采样节点：push 节点走自己的登记/重载链路，本机不在 nodes[]。
+  const onlineSamplerIds = nodes
+    .filter((n) => n.online === true && !n.gpuPush && !n.offlinePush)
+    .map((n) => n.id)
   const nodeTotal = nodes.length + (localNode ? 1 : 0)
   const nodeSummary =
     nodeTotal > 0
@@ -685,7 +689,13 @@ export function App({ initial }: AppProps) {
         {page === 'nodes' ? (
           <>
             <PanelErrorBoundary>
-              <NodeStats enabled={documentVisible} poolFreshNonce={poolFreshNonce} />
+              <NodeStats
+                enabled={documentVisible}
+                poolFreshNonce={poolFreshNonce}
+                onlineSamplerIds={onlineSamplerIds}
+                onAction={readOnly ? undefined : doAction}
+                readOnly={readOnly}
+              />
             </PanelErrorBoundary>
             <PanelErrorBoundary>
               <WorkerRegistry

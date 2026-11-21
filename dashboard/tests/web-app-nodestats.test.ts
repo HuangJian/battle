@@ -13,7 +13,8 @@
 import { describe, expect, it } from 'bun:test'
 import { h } from 'preact'
 import { renderToString } from 'preact-render-to-string'
-import { SelfDiskBadge } from '../src/web/app/panels/NodeStats'
+import { UpgradeAllButton, SelfDiskBadge } from '../src/web/app/panels/NodeStats'
+import { DataTable } from '../src/web/components/DataTable'
 import { selfDiskBadge, type SelfStatus } from '../src/web/view'
 
 const st = (over: Partial<SelfStatus> = {}): SelfStatus => ({
@@ -30,6 +31,34 @@ const st = (over: Partial<SelfStatus> = {}): SelfStatus => ({
   resultCacheBytes: 0,
   recentFailed: 0,
   ...over,
+})
+
+describe('「全部升级」按钮与工具栏位置', () => {
+  const renderBtn = (count: number, disabled: boolean, upgrading = false): string =>
+    renderToString(h(UpgradeAllButton, { count, disabled, upgrading, onClick: () => {} }))
+
+  it('报出在线采样节点数；只读/空目标禁用，执行中显示升级中', () => {
+    expect(renderBtn(2, false)).toContain('aria-label="全部升级"')
+    expect(renderBtn(2, false)).toContain('全部升级（2）')
+    expect(renderBtn(2, true)).toMatch(/aria-label="全部升级"[^>]*disabled/)
+    expect(renderBtn(0, true)).toContain('全部升级（0）')
+    expect(renderBtn(2, false, true)).toContain('升级中…')
+  })
+
+  it('在「返回顶部」左边：DataTable 的 toolbarBeforeTop 插槽', () => {
+    type Row = { id: string }
+    const html = renderToString(
+      h(DataTable<Row>, {
+        columns: [{ key: 'id', label: 'ID', cell: (r) => r.id }],
+        rows: [{ id: 'a1' }],
+        rowKey: (r) => r.id,
+        searchKeys: ['id'],
+        toolbarBeforeTop: h('button', { 'aria-label': '全部升级' }, '全部升级'),
+      }),
+    )
+    expect(html).toContain('aria-label="返回顶部"')
+    expect(html.indexOf('全部升级')).toBeLessThan(html.indexOf('返回顶部'))
+  })
 })
 
 describe('selfDiskBadge 口径（纯函数）', () => {

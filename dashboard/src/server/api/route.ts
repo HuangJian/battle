@@ -36,6 +36,7 @@ import {
   stopCourse,
   triggerCloudHalt,
   unfreezeJob,
+  upgradeOnlineNodes,
 } from '../actions'
 import {
   abortEvalBatch,
@@ -434,6 +435,13 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         const n = Number(body.concurrency)
         if (!Number.isFinite(n)) return errResp(`并发数非法: ${body.concurrency}`, 400)
         return okResp(await setNodeConcurrency(id, Math.round(n)))
+      }
+      // ---- 「全部升级」：在线采样节点统一 pull + restart（id 由前端按 ping 筛，后端再校验配置）----
+      case 'upgradeOnlineNodes': {
+        const ids = Array.isArray(body.ids)
+          ? body.ids.filter((x): x is string => typeof x === 'string')
+          : []
+        return okResp(await upgradeOnlineNodes(ids))
       }
       // ---- GPU push worker 登记（2026-09-18）：回写 rl-config nodes[] + 叫醒 hub ----
       // （hub 观测面缓存的置空不在本层：动作后统一在 server.ts 与慢快照同时失效）

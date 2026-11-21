@@ -13,6 +13,27 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §57 nodes 页「全部升级」：一键让在线采样节点拉代码并重启（2026-11-21）
+
+**需求**：节点统计表工具栏「返回顶部」左侧加「全部升级」按钮，点击后所有**在线采样节点**更新代码并重启。
+
+**实现**：
+
+- `DataTable` 加可选 `toolbarBeforeTop` 插槽（只 nodes 页传，其他表格零变化）；`NodeStats` 的
+  `UpgradeAllButton` 挂这里，显示在线采样节点数，只读 / 探测未落地 / 执行中禁用；`window.confirm`
+  二次确认——它明确告知「会中断正在跑的任务」。
+- `app.tsx` 从 `/api/state` 的 `nodes[]` 筛 `online === true` 且非 push 的 id 传给面板。
+- 后端 `actions/nodes.ts::upgradeOnlineNodes(ids)`：纯函数 `selectUpgradeTargets` 再校验
+  （存在 / 启用 / 非 push），以**显式节点模式**调现成 `tools/lib/node-upgrade.ts::requestNodeUpgrades`——
+  不传 `cfgPath`，否则 CLI 走全量扫描模式并忽略 `nodes`；`pingHash` 留空跳过 `current` 短路
+  （已是目标版本的节点也重启）；`dirty: []` 跳过本地脏守卫（codehash 已以 self 部署版本为准），
+  远端 agent 自己的脏树 / grace / 冷却护栏仍保留。
+- 分支直接读 `.git/HEAD`（服务端禁同步子进程）；取不到就空 ⇒ 节点只重启不拉代码，消息里明说。
+- `.github/workflows/dashboard.yml` 的 paths 补 `tools/lib/node-upgrade.ts`（ci-scope 门禁要求）。
+
+**验证**：新增目标筛选 / 按钮状态 / 插槽位置夹具；dashboard typecheck 498 文件、全量
+2210 pass / 0 fail，根 check 2981 pass / 7 skip / 0 fail，四份 bundle 重建。
+
 ## §56 `OPENING HARD CONSTRAINT FAIL` 改在源头修：体检把敌人流弹算成了教练违规（2026-11-21）
 
 **纠错**：§55 把这条判为「唯一真问题、保留横幅」，下结论太快。查 `opening-controller.ts::centralBreached`：
