@@ -25,6 +25,17 @@
 
 ---
 
+## §266 P0-3 第十三刀：events 落账入口收成 spec（宽签名 104 → 102）（2026-11-21）
+
+* `write_kickstart_burn` / `write_gate_verdict` 的 9 个参数 → `KickstartBurn` / `GateVerdict`
+  （frozen，非 kw_only：`jsonl_path` 起的前几个字段保留位置语义）。函数体开头一次展开，
+  事件字典的键/值来源逐字未动。
+* 14 处调用点包对象：`trainer/loop_remote_drive` 1 · `loop_remote_fail` 3 ·
+  `worker/loop_guards_gate` 3 · `loop_guards_leg` 4 · `loop_guards_trip` 1 ·
+  `tests/worker/test_gate_check` 1。关键字实参保留 `k=` 标签在 spec 内。
+* 形状门禁基线删除 `worker/events.py` 行（2 → 0）；`Any` 基线不动。
+* 回归 55 例（gate_check + 形状 + Any 预算），mypy 4 文件绿。
+
 ## §265 P0-3 第十二刀：http 传输收成 `WireRequest` / `WireGet`（宽签名 106 → 104，传输族收口）（2026-11-21）
 
 * `_request` 的 13 个参数 → `WireRequest`（frozen，非 kw_only：`base_url`/`token`/`path`

@@ -19,7 +19,13 @@ from typing import Any
 
 from common.log import log
 from common.protocol import coef_active
-from worker.events import write_gate_verdict, write_kickstart_burn, write_paired_kill
+from worker.events import (
+    GateVerdict,
+    KickstartBurn,
+    write_gate_verdict,
+    write_kickstart_burn,
+    write_paired_kill,
+)
 from worker.gate_check import read_trend_rows
 from worker.kickstart_burn import (
     MODE_BASELINE,
@@ -239,7 +245,7 @@ class TrainingGuardsLeg:
                 )
             self._ledger_apply(
                 write_kickstart_burn(
-                    self._jsonl_path,
+                    KickstartBurn(self._jsonl_path,
                     it,
                     v.streak,
                     v.baseline,
@@ -247,7 +253,7 @@ class TrainingGuardsLeg:
                     margin_pp,
                     mode=v.mode,
                     delta_pp=v.delta_pp,
-                    peer=v.peer,
+                    peer=v.peer),
                 )
             )
         self._burn_streak = v.streak
@@ -269,11 +275,11 @@ class TrainingGuardsLeg:
             self._sync_cloud_halt(it, "ABORT")
             self._ledger_apply(
                 write_gate_verdict(
-                    self._jsonl_path,
+                    GateVerdict(self._jsonl_path,
                     it,
                     "ABORT",
                     f"kickstart-burn(notify, 不停腿): {v.reason}",
-                    decider="loop",
+                    decider="loop"),
                 )
             )
             return False
@@ -293,11 +299,11 @@ class TrainingGuardsLeg:
         # kickstart_burn 事件已在上面「状态转移」处写过（不重复写）：这里只补判决。
         self._ledger_apply(
             write_gate_verdict(
-                self._jsonl_path,
+                GateVerdict(self._jsonl_path,
                 it,
                 "ABORT",
                 f"kickstart-burn: {v.reason}",
-                decider="loop",
+                decider="loop"),
             )
         )
         self._stop_cause, self._stop_detail = "kickstart_burn", f"干烧回锚：{v.reason}"
@@ -400,7 +406,7 @@ class TrainingGuardsLeg:
         self._sync_cloud_halt(it, "ABORT")
         self._ledger_apply(
             write_gate_verdict(
-                self._jsonl_path, it, "ABORT", f"paired-kill: {reason}", decider="loop"
+                GateVerdict(self._jsonl_path, it, "ABORT", f"paired-kill: {reason}", decider="loop")
             )
         )
         self._stop_cause, self._stop_detail = "paired_kill", f"配对中点杀臂：{reason}"

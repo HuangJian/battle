@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -83,17 +84,37 @@ def write_paired_kill(
     )
 
 
-def write_kickstart_burn(
-    jsonl_path: Path,
-    it: int,
-    streak: int,
-    baseline: float | None = None,
-    last: float | None = None,
-    margin_pp: float = 0.0,
-    mode: str = "baseline",
-    delta_pp: float | None = None,
-    peer: float | None = None,
-) -> dict:
+@dataclass(frozen=True)
+class KickstartBurn:
+    """`write_kickstart_burn` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    jsonl_path: Path
+    it: int
+    streak: int
+    baseline: float | None = None
+    last: float | None = None
+    margin_pp: float = 0.0
+    mode: str = "baseline"
+    delta_pp: float | None = None
+    peer: float | None = None
+
+
+@dataclass(frozen=True)
+class GateVerdict:
+    """`write_gate_verdict` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    jsonl_path: Path
+    it: int
+    verdict: str
+    reason: str
+    route: str | None = None
+    readings: list[dict] | None = None
+    override: dict | None = None
+    seeds: str = "unknown"
+    decider: str = "loop"
+
+
+def write_kickstart_burn(spec: KickstartBurn) -> dict:
     """kickstart_burn 事件：干烧熔断的**计数与判定依据**落账（§5.2，2026-09-21）。
 
     为什么必须落账：与 `stop_loss` 同一个道理——「连续 N 点低于基线」若只活在内存里，
@@ -107,6 +128,16 @@ def write_kickstart_burn(
     `baseline`/`last` 两格**语义未变**（本腿 it0 / 本腿尾部），所以控制台按旧口径对账照旧
     成立；`delta_pp` = 尾部对齐点的 Δ（百分点），`peer` = 对端在那点的读数。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    jsonl_path = spec.jsonl_path
+    it = spec.it
+    streak = spec.streak
+    baseline = spec.baseline
+    last = spec.last
+    margin_pp = spec.margin_pp
+    mode = spec.mode
+    delta_pp = spec.delta_pp
+    peer = spec.peer
     return write_event(
         jsonl_path,
         {
@@ -386,18 +417,7 @@ def write_rollout_end(
     )
 
 
-def write_gate_verdict(
-    jsonl_path: Path,
-    it: int,
-    verdict: str,
-    reason: str,
-    *,
-    route: str | None = None,
-    readings: list[dict] | None = None,
-    override: dict | None = None,
-    seeds: str = "unknown",
-    decider: str = "loop",
-) -> dict:
+def write_gate_verdict(spec: GateVerdict) -> dict:
     """gate_verdict 事件：课程结束门判决落地（plan §4.3）。
 
     两条来源（lattice 的 ABORT 项不能只有人工 override 一条路）：
@@ -405,6 +425,16 @@ def write_gate_verdict(
       2. `_breaker` 熔断——ABORT（ds-P1-1：否则执行面在真正的 ABORT 场景读不到判决）。
     读盘面（notebook/hub 运维）只读末个 gate_verdict，不自己算门。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    jsonl_path = spec.jsonl_path
+    it = spec.it
+    verdict = spec.verdict
+    reason = spec.reason
+    route = spec.route
+    readings = spec.readings
+    override = spec.override
+    seeds = spec.seeds
+    decider = spec.decider
     return write_event(
         jsonl_path,
         {

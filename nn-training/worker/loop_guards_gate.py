@@ -19,7 +19,7 @@ from typing import Any
 
 from common.log import log
 from worker.eval_track import a_eval_seed_list
-from worker.events import write_gate_verdict
+from worker.events import GateVerdict, write_gate_verdict
 from worker.gate_check import (
     BudgetInfo,
     count_iteration_events,
@@ -226,7 +226,7 @@ class TrainingGuardsGate:
         try:
             self._ledger_apply(
                 write_gate_verdict(
-                    self._jsonl_path,
+                    GateVerdict(self._jsonl_path,
                     it,
                     res.verdict,
                     res.reason,
@@ -234,7 +234,7 @@ class TrainingGuardsGate:
                     readings=[r.to_dict() for r in res.readings],
                     override=dict(res.override) if res.override else None,
                     seeds=res.seeds,
-                    decider="loop",
+                    decider="loop"),
                 )
             )
         except OSError as e:
@@ -254,12 +254,12 @@ class TrainingGuardsGate:
                 try:
                     self._ledger_apply(
                         write_gate_verdict(
-                            self._jsonl_path,
+                            GateVerdict(self._jsonl_path,
                             it,
                             "ABORT",
                             f"提示类门 REMEDIATE 已 {self._soft_remediate_count} 次（≥{limit}）"
                             "——边际收益枯竭确认，停腿（I2）",
-                            decider="loop",
+                            decider="loop"),
                         )
                     )
                 except OSError as e:
@@ -305,11 +305,11 @@ class TrainingGuardsGate:
         )
         try:
             write_gate_verdict(
-                self._jsonl_path,
+                GateVerdict(self._jsonl_path,
                 it,
                 "STOP",
                 f"max_hours {args.max_hours}h 到顶（轮级硬断）",
-                decider="loop",
+                decider="loop"),
             )
         except OSError as e:
             log(f"[run_rl] gate_verdict 落盘失败（{e}）— 仍按 max_hours 停车")

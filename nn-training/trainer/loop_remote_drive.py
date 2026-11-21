@@ -27,7 +27,7 @@ from common.protocol import JobFailedError
 from trainer.loop_remote_fail import TrainingRemoteFail
 from trainer.loop_remote_job import TrainingRemoteJob
 from trainer.loop_transport import fatal_remote_http, remote_retryable_exceptions
-from worker.events import write_gate_verdict
+from worker.events import GateVerdict, write_gate_verdict
 from worker.loop_round import ROUND_SKIP, RemotePpoJob, RoundContext, StepResult, wait_for
 
 #: ★M1（plan/ppo-job-lifecycle-ownership §2）看门狗：两次 `/jobs/{id}/status` 探询的最小
@@ -361,12 +361,12 @@ class TrainingRemoteDrive(TrainingRemoteFail, TrainingRemoteJob):
             fatal = fatal_remote_http(e)
             if fatal:
                 write_gate_verdict(
-                    self._jsonl_path,
+                    GateVerdict(self._jsonl_path,
                     it,
                     "ABORT",
                     f"rollout_src=node 不可重试失败 HTTP {fatal}——检查 --remote-token "
                     f"与节点隧道：{str(e)[:200]}",
-                    decider="loop",
+                    decider="loop"),
                 )
                 log(
                     f"[run_rl] GATE ABORT it{it}: 上云 node 轮远端 HTTP {fatal}"

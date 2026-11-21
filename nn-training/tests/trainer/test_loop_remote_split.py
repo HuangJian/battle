@@ -560,8 +560,8 @@ def test_fail_abort_writes_the_verdict_through_this_modules_seam(monkeypatch: py
 
     assert host.remote_fail_state().leg_aborted is True
     assert len(verdicts) == 1
-    args, kwargs = verdicts[0]
-    assert args[1] == 7 and args[2] == "ABORT" and kwargs.get("decider") == "loop"
+    (spec,), _kwargs = verdicts[0]
+    assert spec.it == 7 and spec.verdict == "ABORT" and spec.decider == "loop"
     assert logs and "GATE ABORT" in logs[0]
     assert root_seen == [], f"补丁打在旧家却仍有输出：{root_seen}"
 

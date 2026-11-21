@@ -8818,6 +8818,14 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-events-specs
+
+P0-3 第十三刀：`worker/events.py` 的两个落账入口 `write_kickstart_burn` / `write_gate_verdict`
+（各 9 参）→ frozen `KickstartBurn` / `GateVerdict`（字段顺序 = 旧签名；`jsonl_path` / `it` /
+`streak` 等必填在前）。函数体开头一次展开旧局部名，事件字典逐字未动。14 处调用点
+（`loop_remote_*`、`loop_guards_*`、`test_gate_check`）包对象；`worker/events.py` 的宽签名
+2 → 0，全仓 104 → 102（72 → 71 文件）。下一批继续按形状门禁基线挑下一个模块。
+
 ## §2026-11-21-http-specs
 
 P0-3 第十二刀：`remote/http.py` 的两个传输入口收成 spec —

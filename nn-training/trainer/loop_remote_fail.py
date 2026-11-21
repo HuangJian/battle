@@ -20,7 +20,7 @@ from typing import Any
 from common.log import log
 from common.protocol import JobFailedError
 from trainer.loop_transport import fatal_remote_http
-from worker.events import write_gate_verdict
+from worker.events import GateVerdict, write_gate_verdict
 
 
 @dataclass(frozen=True)
@@ -62,11 +62,11 @@ class TrainingRemoteFail:
         """
         reason = str(e)[:300]
         write_gate_verdict(
-            self._jsonl_path,
+            GateVerdict(self._jsonl_path,
             it,
             "ABORT",
             f"{where} 节点确定性失败（原因已随 /jobs/{{id}}/fail 回传）：{reason}",
-            decider="loop",
+            decider="loop"),
         )
         log(f"[run_rl] GATE ABORT it{it}: {where} 节点报确定性失败——不重试，立即停腿：{reason}")
         self._leg_abort = True
@@ -93,12 +93,12 @@ class TrainingRemoteFail:
         fatal = fatal_remote_http(e)
         if fatal:
             write_gate_verdict(
-                self._jsonl_path,
+                GateVerdict(self._jsonl_path,
                 it,
                 "ABORT",
                 f"远端 PPO 不可重试失败 HTTP {fatal}——检查 --remote-token 与 hub 日志 "
                 f"AUTH FAIL / BLOCKED 行：{str(e)[:200]}",
-                decider="loop",
+                decider="loop"),
             )
             log(
                 f"[run_rl] GATE ABORT it{it}: 远端 HTTP {fatal}（鉴权/闭锁类，非网络抖动）"
@@ -124,11 +124,11 @@ class TrainingRemoteFail:
         # 协议），而不是训练进程偷偷把 job 算在自己身上（C 腿事故的根）。
         if self._remote_fail >= 3:
             write_gate_verdict(
-                self._jsonl_path,
+                GateVerdict(self._jsonl_path,
                 it,
                 "ABORT",
                 f"远端 PPO 连续失败 {self._remote_fail} 次（单一 PPO 路径：无本机降级）",
-                decider="loop",
+                decider="loop"),
             )
             log(f"[run_rl] GATE ABORT it{it}: 远端不可用（无本机降级）——停腿")
             self._leg_abort = True

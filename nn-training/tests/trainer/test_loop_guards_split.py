@@ -708,7 +708,13 @@ def test_trip_breaker_really_trips_on_nonfinite(tmp_path: Path) -> None:
         _prev_entropy=None,
         _ledger=None,
     )
-    trip.write_gate_verdict = lambda *a, **kw: seen.append(a[2])  # type: ignore[assignment]
+    from worker.events import GateVerdict
+
+    def _capture_verdict(spec: GateVerdict) -> dict:
+        seen.append(spec.verdict)
+        return {}
+
+    trip.write_gate_verdict = _capture_verdict
     try:
         assert trip.TrainingGuardsTrip._breaker(obj, 7) is True  # type: ignore[arg-type]
     finally:

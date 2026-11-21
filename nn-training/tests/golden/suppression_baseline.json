@@ -45,7 +45,7 @@
     "tests/test_python_shape_budget.py": 1,
     "tests/test_reuse_ledger.py": 1,
     "tests/trainer/test_eval_dispatch_resilience.py": 6,
-    "tests/trainer/test_loop_guards_split.py": 19,
+    "tests/trainer/test_loop_guards_split.py": 18,
     "tests/trainer/test_loop_park.py": 1,
     "tests/trainer/test_loop_plan_waiting.py": 3,
     "tests/trainer/test_loop_runner_budget.py": 7,

@@ -16,7 +16,7 @@ import pytest
 
 from tests.subproc_util import run_utf8
 from worker.config import GatesSpec
-from worker.events import write_gate_verdict
+from worker.events import GateVerdict, write_gate_verdict
 from worker.gate_check import (
     EXIT_CODES,
     BudgetInfo,
@@ -788,7 +788,7 @@ def test_read_trend_rows_and_first_run_start(tmp_path: Path) -> None:
 def test_write_gate_verdict_event_schema(tmp_path: Path) -> None:
     """§4.3：gate_verdict 事件进 training_log.jsonl（读盘面只读末个该事件）。"""
     p = tmp_path / "training_log.jsonl"
-    write_gate_verdict(p, 7, "STOP", "预算到顶", route="REMEDIATE", decider="loop")
+    write_gate_verdict(GateVerdict(p, 7, "STOP", "预算到顶", route="REMEDIATE", decider="loop"))
     row = json.loads(p.read_text(encoding="utf-8").strip())
     assert row["event"] == "gate_verdict"
     assert row["iter"] == 7

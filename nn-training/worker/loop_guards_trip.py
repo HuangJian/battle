@@ -30,7 +30,7 @@ from worker.breaker import (
     KL_WARN,
     breaker_update,
 )
-from worker.events import write_circuit_break, write_gate_verdict, write_stop_loss
+from worker.events import GateVerdict, write_circuit_break, write_gate_verdict, write_stop_loss
 from worker.stop_loss import eval_sigma, stop_loss_hit
 
 
@@ -114,11 +114,11 @@ class TrainingGuardsTrip:
             # override 一条路，否则 notebook/执行面在真正的崩塌场景读不到判决。
             self._ledger_apply(
                 write_gate_verdict(
-                    self._jsonl_path,
+                    GateVerdict(self._jsonl_path,
                     it,
                     "ABORT",
                     f"circuit-break: {self._tripped}",
-                    decider="loop",
+                    decider="loop"),
                 )
             )
             log(f"[run_rl] CRITICAL CIRCUIT-BREAK it{it}: {self._tripped}")

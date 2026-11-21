@@ -123,7 +123,6 @@ WIDE_FUNCS_BASELINE = {
     # 2026-11-21（P0-3 第七刀）：`run_local_eval_game`（25 参，全仓最宽）收成
     # `EvalGameSpec` ⇒ 条目删除，本文件宽签名归零。
     "worker/eval_track.py": 1,
-    "worker/events.py": 2,
     "worker/gate_check.py": 1,
     "worker/greedy_round.py": 1,
     "worker/iter_rollout.py": 4,
