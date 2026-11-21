@@ -25,6 +25,15 @@
 
 ---
 
+## §269 P0-3 第十六刀：opt 落地递归对收成 `BaseTarSpec` / `LandedBytesSpec`（宽签名 100 → 98）（2026-11-21）
+
+* `remote/opt_standard.py::_base_tar_bytes` / `_landed_bytes_for` 各 9 个关键字参数 →
+  frozen + kw_only 的 `BaseTarSpec` / `LandedBytesSpec`（字段顺序与缺省值逐字沿用旧签名）。
+  函数体开头一次展开，基准搜索、防环 `depth`/`seen` 与重建链逐字未动。
+* 6 处调用点包对象：两个递归互调 + `land_opt_bytes` / `ensure_standard_opt` / `standard_opt_copy`。
+* 形状门禁基线删除 `remote/opt_standard.py` 行（2 → 0）；`Any` 基线不动。
+* 回归：`tests/remote/test_opt_standard.py`（含成环响亮拒绝）+ 形状预算 + mypy 改动文件无错。
+
 ## §268 P0-3 第十五刀：`quota_sample_priority` 收成 `QuotaSampleSpec`（宽签名 101 → 100）（2026-11-21）
 
 * `worker/train/intent_probe.py::quota_sample_priority` 的 9 个位置参数 → frozen

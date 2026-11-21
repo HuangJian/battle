@@ -80,7 +80,8 @@ WIDE_FUNCS_BASELINE = {
     "remote/offline_boot.py": 4,
     "remote/offline_deliver.py": 1,
     "remote/offline_eval.py": 1,
-    "remote/opt_standard.py": 2,
+    # 2026-11-21：`_base_tar_bytes` / `_landed_bytes_for` 各 9 参 →
+    # `BaseTarSpec` / `LandedBytesSpec` ⇒ 本文件宽签名归零，条目删除。
     "remote/payload_pack.py": 1,
     "remote/payload_proc.py": 1,
     "remote/push_client.py": 1,

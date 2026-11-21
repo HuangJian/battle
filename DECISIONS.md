@@ -8818,6 +8818,16 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-opt-standard-specs
+
+P0-3 第十六刀：`remote/opt_standard.py` 的递归对 `_base_tar_bytes` / `_landed_bytes_for`
+（各 9 个关键字参数：container / path / blob_roots / extra_roots / traj_root / work_dir /
+depth / seen / log / rebuild）→ frozen + kw_only `BaseTarSpec` / `LandedBytesSpec`
+（字段顺序 = 旧签名，缺省值逐字保留）。函数体开头一次展开旧局部名，基准搜索 / 防环计数 /
+重建链逐字未动。6 处调用点（同文件的递归对 + `land_opt_bytes` / `ensure_standard_opt` /
+`standard_opt_copy`）包对象；`remote/opt_standard.py` 的宽签名 2 → 0，全仓 100 → 98
+（69 → 68 文件）。
+
 ## §2026-11-21-quota-sample-spec
 
 P0-3 第十五刀：`worker/train/intent_probe.py::quota_sample_priority`（9 个位置参数：

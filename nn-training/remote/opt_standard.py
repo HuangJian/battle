@@ -41,6 +41,7 @@ import hashlib
 import shutil
 import tempfile
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 
@@ -107,25 +108,40 @@ def _candidate_files(
     return delta_files.candidate_files(path, roots, _SEARCH_PATTERNS)
 
 
-def _base_tar_bytes(
-    container: bytes,
-    *,
-    path: Path | None,
-    blob_roots: tuple[str | Path, ...],
-    extra_roots: tuple[str | Path, ...],
-    traj_root: str | Path | None = None,
-    work_dir: str | Path | None = None,
-    depth: int = 0,
-    seen: frozenset[str] = frozenset(),
-    log,
-    rebuild: Callable[..., bytes] | None = None,
-) -> bytes:
+@dataclass(frozen=True, kw_only=True)
+class BaseTarSpec:
+    """`_base_tar_bytes` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    container: bytes
+    path: Path | None
+    blob_roots: tuple[str | Path, ...]
+    extra_roots: tuple[str | Path, ...]
+    traj_root: str | Path | None = None
+    work_dir: str | Path | None = None
+    depth: int = 0
+    seen: frozenset[str] = frozenset()
+    log: Callable[[str], None]
+    rebuild: Callable[..., bytes] | None = None
+
+
+def _base_tar_bytes(spec: BaseTarSpec) -> bytes:
     """容器要的**基准整份 tar 字节**（`base_sha` 逐字节对上才算数；找不到 ⇒ `ProtocolError`）。
 
     顺序：① 内容寻址缓存 `blob_cache/<base_sha>`（键就是 sha，O(1) 命中并当场校验 —— 本机那份
     整份 tar 与上一轮的落地件都在那儿）；② 候选文件（同目录兄弟、产物链、traj 树、调用方给的
     额外根）；候选**自己**是容器时先递归落地再比 sha（一条段从第 2 轮起就只有 delta）。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    container = spec.container
+    path = spec.path
+    blob_roots = spec.blob_roots
+    extra_roots = spec.extra_roots
+    traj_root = spec.traj_root
+    work_dir = spec.work_dir
+    depth = spec.depth
+    seen = spec.seen
+    log = spec.log
+    rebuild = spec.rebuild
     base_sha = opt_delta.base_sha_of(container)
     if not base_sha:
         raise ProtocolError(f"opt delta 容器头读不出 base_sha（{path or '<bytes>'}）——拒收")
@@ -168,15 +184,17 @@ def _base_tar_bytes(
             # 递归：候选**自己**是容器 ⇒ 先把它落地（用**它自己的**目录当候选根：链上的基准
             # 就在上一轮那个目录里），再比 sha。
             landed = _landed_bytes_for(
-                raw,
-                cand,
-                blob_roots=blob_roots,
-                extra_roots=extra_roots,
-                work_dir=work_dir,
-                depth=depth + 1,
-                seen=seen,
-                log=log,
-                rebuild=rebuild,
+                LandedBytesSpec(
+                    container=raw,
+                    path=cand,
+                    blob_roots=blob_roots,
+                    extra_roots=extra_roots,
+                    work_dir=work_dir,
+                    depth=depth + 1,
+                    seen=seen,
+                    log=log,
+                    rebuild=rebuild,
+                )
             )
         except ProtocolError as e:
             searched.append(f"{cand}（{e}）")
@@ -235,39 +253,55 @@ def rebuild_opt_tar_np(
     return opt_delta.pack_tar_from_dir(d, ["opt.pt"])
 
 
-def _landed_bytes_for(
-    container: bytes,
-    path: Path | None,
-    *,
-    blob_roots: tuple[str | Path, ...],
-    extra_roots: tuple[str | Path, ...],
-    work_dir: str | Path | None,
-    depth: int = 0,
-    seen: frozenset[str] = frozenset(),
-    log,
-    rebuild: Callable[..., bytes] | None = None,
-) -> bytes:
+@dataclass(frozen=True, kw_only=True)
+class LandedBytesSpec:
+    """`_landed_bytes_for` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    container: bytes
+    path: Path | None
+    blob_roots: tuple[str | Path, ...]
+    extra_roots: tuple[str | Path, ...]
+    work_dir: str | Path | None
+    depth: int = 0
+    seen: frozenset[str] = frozenset()
+    log: Callable[[str], None]
+    rebuild: Callable[..., bytes] | None = None
+
+
+def _landed_bytes_for(spec: LandedBytesSpec) -> bytes:
     """容器 ⇒ 整份 tar 字节（`path` 给定时用它所在目录当候选根；只读，不落盘）。
 
     `depth`/`seen` 是**链上防环**那两个计数器（`_base_tar_bytes` 的老问题：它们原先没被传下去，
     成环就是 RecursionError）—— 递归入口一律 `depth+1` + 把当前文件并进 `seen`。
     `rebuild` 是「基准 opt.pt 怎么读、delta 怎么加回」的接缝：默认 torch，Paddle worker 传
-    `rebuild_opt_tar_np`（同一段链上递归也要用同一个，故它一路透传）。
+    `rebuild_opt_tar_np`（同一段链上递归也要用同一个，    故它一路透传）。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    container = spec.container
+    path = spec.path
+    blob_roots = spec.blob_roots
+    extra_roots = spec.extra_roots
+    work_dir = spec.work_dir
+    depth = spec.depth
+    seen = spec.seen
+    log = spec.log
+    rebuild = spec.rebuild
     rebuild = rebuild or _rebuild_opt_tar_torch
     scratch = Path(work_dir) if work_dir is not None else Path(tempfile.mkdtemp(prefix="opt-land-"))
     made = work_dir is None
     try:
         base_tar = _base_tar_bytes(
-            container,
-            path=path,
-            blob_roots=blob_roots,
-            extra_roots=extra_roots,
-            work_dir=scratch,
-            depth=depth,
-            seen=seen,
-            log=log,
-            rebuild=rebuild,
+            BaseTarSpec(
+                container=container,
+                path=path,
+                blob_roots=blob_roots,
+                extra_roots=extra_roots,
+                work_dir=scratch,
+                depth=depth,
+                seen=seen,
+                log=log,
+                rebuild=rebuild,
+            )
         )
         base_dir = scratch / "base"
         base_dir.mkdir(parents=True, exist_ok=True)
@@ -303,13 +337,15 @@ def land_opt_bytes(
         return raw
     extra = (*extra_roots, *((traj_root,) if traj_root else ()))
     return _landed_bytes_for(
-        raw,
-        Path(path) if path is not None else None,
-        blob_roots=tuple(blob_roots),
-        extra_roots=extra,
-        work_dir=work_dir,
-        log=log,
-        rebuild=rebuild,
+        LandedBytesSpec(
+            container=raw,
+            path=Path(path) if path is not None else None,
+            blob_roots=tuple(blob_roots),
+            extra_roots=extra,
+            work_dir=work_dir,
+            log=log,
+            rebuild=rebuild,
+        )
     )
 
 
@@ -371,12 +407,14 @@ def ensure_standard_opt(
     raw = p.read_bytes()
     extra = (*extra_roots, *((traj_root,) if traj_root else ()))
     standard = _landed_bytes_for(
-        raw,
-        p,
-        blob_roots=tuple(blob_roots),
-        extra_roots=extra,
-        work_dir=work_dir,
-        log=log,
+        LandedBytesSpec(
+            container=raw,
+            path=p,
+            blob_roots=tuple(blob_roots),
+            extra_roots=extra,
+            work_dir=work_dir,
+            log=log,
+        )
     )
     if p.suffix == OPT_DELTA_SUFFIX:
         target, aside = delta_files.sibling(p, OPT_STANDARD_SUFFIX), p  # `.delta` 是正身：只写整份那份
@@ -418,12 +456,14 @@ def standard_opt_copy(
     if cached.is_file() and cached.stat().st_size > 0:
         return cached
     standard = _landed_bytes_for(
-        raw,
-        p,
-        blob_roots=tuple(blob_roots),
-        extra_roots=(*extra_roots, *((traj_root,) if traj_root else ())),
-        work_dir=work_dir,
-        log=log,
+        LandedBytesSpec(
+            container=raw,
+            path=p,
+            blob_roots=tuple(blob_roots),
+            extra_roots=(*extra_roots, *((traj_root,) if traj_root else ())),
+            work_dir=work_dir,
+            log=log,
+        )
     )
     cache_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_bytes(cached, standard)
