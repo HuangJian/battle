@@ -476,12 +476,12 @@ def test_remote_zero_participation_is_loud(tmp_path: Path, monkeypatch) -> None:
             raise common.distribution.DistError(0, "boom")
         raise common.distribution.DistError(0, "task fetch failed: connection reset", transient=True)
 
-    # 本机槽位签名：run_local_eval_game(bun, weights, stage, seed, dir, wver=…) —— manifest
-    # 必须回显 wver（validate_eval_result 按 wver 对账）。
+    # 本机槽位签名（2026-11-21 起是对象）：`run_local_eval_game(EvalGameSpec(…))` ——
+    # manifest 必须回显 wver（validate_eval_result 按 wver 对账）。
     monkeypatch.setattr(
         # 2026-11-20：本机槽位由机器（`trainer.batch_lanes`）调 ⇒ 注入口随机器改址。
         "trainer.batch_lanes.run_local_eval_game",
-        lambda *a, **k: _ok_manifest(int(a[2]), int(a[3]), str(k.get("wver", ""))),
+        lambda spec, *a, **k: _ok_manifest(int(spec.stage), int(spec.seed), spec.wver),
         raising=False,
     )
     out, logs, _ = _run_unit(

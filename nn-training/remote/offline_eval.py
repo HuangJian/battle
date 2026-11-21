@@ -45,6 +45,7 @@ from common.protocol import UnreapableChildError
 from remote.cloud_pool import CLOUD_EVAL_POOL, set_eval_busy
 from worker import serve_pool
 from worker.eval_local import (
+    EvalGameSpec,
     a_eval_seed_list,
     eval_done_keys,
     run_local_eval_game,
@@ -480,29 +481,33 @@ class _EvalRound:
                 finished, manifest = call_bounded(
                     partial(
                         run_local_eval_game,
-                        self.bun_bin,
-                        str(self.wpath),
-                        int(stage),
-                        int(seed),
-                        game_dir,
-                        int(self.plan.max_ticks),
-                        self.plan.difficulty,
-                        float(cap),
-                        self.key16,
-                        stage_json=(course.stage_json(int(stage)) if course is not None else "")
-                        or "",
-                        lives_override=self.plan.lives,
-                        player_level=self.plan.level,
-                        cwd=str(self.ts),
-                        log_fn=log,
-                        attempt=attempt,
-                        pool=pool,
-                        # R2 事件 rung：云机跑 ts_code 新鲜 bundle（sha 版），与本机同语义；
-                        # 缺席 = 老行为。课程无该键（旧课）⇒ getattr 缺省 False。
-                        decision_events=bool(getattr(course, "decision_events", False)),
-                        # 决策周期 K（plan/k5-rhythm.plan.md）：云机与本机同节奏；
-                        # 缺席/10 = 老行为（getattr 缺省 10）。
-                        decision_k=int(getattr(course, "decision_k", 10)),
+                        EvalGameSpec(
+                            bun=self.bun_bin,
+                            weights_snapshot=str(self.wpath),
+                            stage=int(stage),
+                            seed=int(seed),
+                            out_dir=game_dir,
+                            max_ticks=int(self.plan.max_ticks),
+                            difficulty=self.plan.difficulty,
+                            timeout_sec=float(cap),
+                            wver=self.key16,
+                            stage_json=(
+                                course.stage_json(int(stage)) if course is not None else ""
+                            )
+                            or "",
+                            lives_override=self.plan.lives,
+                            player_level=self.plan.level,
+                            cwd=str(self.ts),
+                            log_fn=log,
+                            attempt=attempt,
+                            pool=pool,
+                            # R2 事件 rung：云机跑 ts_code 新鲜 bundle（sha 版），与本机同语义；
+                            # 缺席 = 老行为。课程无该键（旧课）⇒ getattr 缺省 False。
+                            decision_events=bool(getattr(course, "decision_events", False)),
+                            # 决策周期 K（plan/k5-rhythm.plan.md）：云机与本机同节奏；
+                            # 缺席/10 = 老行为（getattr 缺省 10）。
+                            decision_k=int(getattr(course, "decision_k", 10)),
+                        ),
                     ),
                     ceiling_sec,
                     name=f"eval-{lab}",

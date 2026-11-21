@@ -77,7 +77,7 @@ WIDE_FUNCS_BASELINE = {
     "remote/download.py": 3,
     "remote/error_report.py": 1,
     "remote/http.py": 2,
-    "remote/hub_client.py": 3,
+    "remote/hub_client.py": 2,
     "remote/hub_http.py": 2,
     # 2026-11-19 合入上游的 relay/replay 参数（原 3 处 → 4 处）。
     "remote/job_lifecycle.py": 4,
@@ -96,7 +96,7 @@ WIDE_FUNCS_BASELINE = {
     # 2026-11-19 合入上游：`run` 的交易参数 + relay 通道参数（原 1 处 → 2 处）。
     "remote/rollout_node.py": 2,
     "remote/tailscale_boot.py": 1,
-    "remote/train_core.py": 5,
+    "remote/train_core.py": 3,
     "remote/upload_proc.py": 2,
     "remote/worker.py": 2,
     "tools/c9_critic_calibration.py": 1,
@@ -127,7 +127,8 @@ WIDE_FUNCS_BASELINE = {
     # 参数收进 `RoundSpec`（装配点 = `trainer/eval_dispatch._round_spec`），`settle_task`
     # 的 9 个结果位（含一个从没人读的 `wall_sec`）收进 `SettleOutcome` ⇒ **条目删除，
     # 本文件宽签名归零**。守 `tests/worker/test_eval_round_spec.py`。
-    "worker/eval_local.py": 1,
+    # 2026-11-21（P0-3 第七刀）：`run_local_eval_game`（25 参，全仓最宽）收成
+    # `EvalGameSpec` ⇒ 条目删除，本文件宽签名归零。
     "worker/eval_track.py": 1,
     "worker/events.py": 2,
     "worker/gate_check.py": 1,

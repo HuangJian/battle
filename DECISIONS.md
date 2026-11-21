@@ -9166,3 +9166,20 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `deliver_zip` 15 / `run_rl_cluster` 9 / `run_loop` 8 / `rl_model` 7 是契约与 CLI 报告面）；
   新增格式判据（只钉格式不钉实现）。
 - **行为**：见上。全文 → `docs/nn/engineering.md` §255。
+
+## §2026-11-21-eval-game-spec（`run_local_eval_game` 25 参 → 一个 `EvalGameSpec`）
+
+- **背景**：审计时全仓最宽的签名。前 9 个参数是位置语义（`bun/weights/stage/seed/out_dir/
+  max_ticks/difficulty/timeout_sec/wver`），抄错一格就是「评估了别的关/别的权重」而**零报错**——
+  而这条腿的全部意义就是与账本逐局对账。
+- **决定**：`EvalGameSpec`（`@dataclass(frozen=True, kw_only=True)`，25 字段）住 `worker/eval_local.py`；
+  `run_local_eval_game(spec)` 只剩编排，函数体内 42 个引用改成 `spec.X`，逻辑一行未改。
+- **调用点**：`remote/offline_eval`（`partial(..., EvalGameSpec(...))`，`call_bounded` 语义不变）·
+  `worker/eval_exec` · `trainer/batch_lanes` · `worker/eval_replays_once` · e2e 替身。
+- **门禁反馈**：`rnd.snapshot_path: str | None` 在旧 `Callable[..., dict]` 下看不见，换对象后 mypy
+  抓到 ⇒ 收窄成 `or ""`（grant 只在快照存在时发，arbiter 已挡 `None`）；删掉一句过期的
+  `type: ignore` ⇒ 抑制符基线 `e2e/test_run_rl.py` 3 → 2（只许调小）。
+- **被否决**：保留 9 个位置参数 + 一个「其余」胶囊（位置语义那一半才是失效面）；把 25 个字段
+  再拆成「游戏身份 / 权重 / 推理开关」三组（三处装配点要各取三个对象，收益为负）。
+- **行为**：无差异（argv、池优先/回退、告警行、manifest 字段全逐字不变）。
+  全文 → `docs/nn/engineering.md` §256。

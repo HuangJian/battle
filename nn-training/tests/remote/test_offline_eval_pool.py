@@ -125,11 +125,11 @@ def test_cloud_eval_builds_one_pool_and_hands_it_to_every_game(
     monkeypatch.setattr(offline_eval, "find_bun", lambda *_a, **_k: "bun")
     seen: list[object] = []
 
-    def fake_runner(_bun, _w, stage, seed, out_dir, *_a, **kw):
-        seen.append(kw.get("pool"))
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
+    def fake_runner(spec, *_a, **_kw):
+        seen.append(spec.pool)
+        Path(spec.out_dir).mkdir(parents=True, exist_ok=True)
         return {"win": True, "cleared": True, "outcome": "win", "elapsedSec": 0.01,
-                "stage": stage, "seed": seed}
+                "stage": spec.stage, "seed": spec.seed}
 
     monkeypatch.setattr(offline_eval, "run_local_eval_game", fake_runner)
     course = _course(n_seeds=2)
@@ -202,9 +202,9 @@ def test_cloud_eval_skips_pooling_when_the_pool_cannot_start(
     monkeypatch.setattr(offline_eval, "find_bun", lambda *_a, **_k: "bun")
     seen: list[object] = []
 
-    def fake_runner(_bun, _w, stage, seed, out_dir, *_a, **kw):
-        seen.append(kw.get("pool"))
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
+    def fake_runner(spec, *_a, **_kw):
+        seen.append(spec.pool)
+        Path(spec.out_dir).mkdir(parents=True, exist_ok=True)
         return {"win": True, "cleared": True, "outcome": "win", "elapsedSec": 0.0}
 
     monkeypatch.setattr(offline_eval, "run_local_eval_game", fake_runner)
@@ -242,11 +242,11 @@ def test_cloud_eval_reuses_the_keeper_pool_for_the_same_ts_sha(
     monkeypatch.setattr(offline_eval.serve_pool, "make_pool", fake_make)
     monkeypatch.setattr(offline_eval, "find_bun", lambda *_a, **_k: "bun")
 
-    def fake_runner(_bun, _w, stage, seed, out_dir, *_a, **_kw):
-        p = _kw.get("pool")
+    def fake_runner(spec, *_a, **_kw):
+        p = spec.pool
         if p is not None:
             p.try_capture([], 1.0)  # 模拟执行面真的用了池（served 才不是 0）
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        Path(spec.out_dir).mkdir(parents=True, exist_ok=True)
         return {"win": True, "cleared": True, "outcome": "win", "elapsedSec": 0.0}
 
     monkeypatch.setattr(offline_eval, "run_local_eval_game", fake_runner)
@@ -298,9 +298,9 @@ def test_cloud_eval_env_switch_disables_pooling(
     monkeypatch.setattr(offline_eval, "find_bun", lambda *_a, **_k: "bun")
     seen: list[object] = []
 
-    def fake_runner(_bun, _w, stage, seed, out_dir, *_a, **kw):
-        seen.append(kw.get("pool"))
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
+    def fake_runner(spec, *_a, **_kw):
+        seen.append(spec.pool)
+        Path(spec.out_dir).mkdir(parents=True, exist_ok=True)
         return {"win": True, "cleared": True, "outcome": "win", "elapsedSec": 0.0}
 
     monkeypatch.setattr(offline_eval, "run_local_eval_game", fake_runner)
@@ -354,16 +354,18 @@ def test_run_local_eval_game_prefers_the_pool(tmp_path: Path, monkeypatch) -> No
 
     monkeypatch.setattr(eval_local, "run_eval_runner_capture", explode)
     man = eval_local.run_local_eval_game(
-        sys.executable,
-        str(tmp_path / "weights.json"),
-        0,
-        0,
-        out_dir,
-        1200,
-        "hard",
-        5.0,
-        "W" * 16,
-        pool=pool,
+        eval_local.EvalGameSpec(
+            bun=sys.executable,
+            weights_snapshot=str(tmp_path / "weights.json"),
+            stage=0,
+            seed=0,
+            out_dir=out_dir,
+            max_ticks=1200,
+            difficulty="hard",
+            timeout_sec=5.0,
+            wver="W" * 16,
+            pool=pool,
+        )
     )
     assert man["outcome"] == "win" and man["mode"] == "eval"
     assert man["wver"] == "W" * 16
@@ -392,16 +394,18 @@ def test_run_local_eval_game_falls_back_when_the_pool_declines(
 
     monkeypatch.setattr(eval_local, "run_eval_runner_capture", fake_capture)
     man = eval_local.run_local_eval_game(
-        sys.executable,
-        str(tmp_path / "weights.json"),
-        0,
-        1,
-        out_dir,
-        1200,
-        "hard",
-        5.0,
-        "W" * 16,
-        pool=pool,
+        eval_local.EvalGameSpec(
+            bun=sys.executable,
+            weights_snapshot=str(tmp_path / "weights.json"),
+            stage=0,
+            seed=1,
+            out_dir=out_dir,
+            max_ticks=1200,
+            difficulty="hard",
+            timeout_sec=5.0,
+            wver="W" * 16,
+            pool=pool,
+        )
     )
     assert man["win"] is True and man["mode"] == "eval"
     assert pool.calls and len(used) == 1, "池试过一次 + 一次性兜底一次"
@@ -424,7 +428,17 @@ def test_run_local_eval_game_without_pool_never_touches_it(
 
     monkeypatch.setattr(eval_local, "run_eval_runner_capture", fake_capture)
     man = eval_local.run_local_eval_game(
-        sys.executable, str(tmp_path / "weights.json"), 0, 2, out_dir, 1200, "hard", 5.0, "W" * 16
+        eval_local.EvalGameSpec(
+            bun=sys.executable,
+            weights_snapshot=str(tmp_path / "weights.json"),
+            stage=0,
+            seed=2,
+            out_dir=out_dir,
+            max_ticks=1200,
+            difficulty="hard",
+            timeout_sec=5.0,
+            wver="W" * 16,
+        )
     )
     assert len(called) == 1 and man["mode"] == "eval"
 
@@ -445,8 +459,18 @@ def test_eval_manifest_wver_is_the_weights_sha(tmp_path: Path) -> None:
             rep["wver"] = key16
             (out_dir / "_eval_report.json").write_text(json.dumps(rep), encoding="utf-8")
         man = eval_local.run_local_eval_game(
-            sys.executable, str(w), 0, seed, out_dir, 1200, "hard", 5.0, key16,
-            pool=CapturingPool((0.01, [])),
+            eval_local.EvalGameSpec(
+                bun=sys.executable,
+                weights_snapshot=str(w),
+                stage=0,
+                seed=seed,
+                out_dir=out_dir,
+                max_ticks=1200,
+                difficulty="hard",
+                timeout_sec=5.0,
+                wver=key16,
+                pool=CapturingPool((0.01, [])),
+            )
         )
         assert man["wver"] == key16
     assert CLOUD_NODE == "cloud"  # 云机局在账本里的 node 名（口径锁）

@@ -25,7 +25,7 @@ from biz.batch_plan import (
 from biz.course_spec import InferenceRulesBlock
 from worker.cmd import build_rollout_cmd
 from worker.config import CourseConfig, apply_course, corpus_identity_fp
-from worker.eval_local import run_local_eval_game
+from worker.eval_local import EvalGameSpec, run_local_eval_game
 
 #: 部署面名字的唯一来源（测试内常量：断言用变量，不把措辞散在每条判据里）。
 SKIP_FLAG = "--skip-steel-only-shots"
@@ -205,46 +205,52 @@ def test_local_eval_cmd_flag_only_when_enabled(monkeypatch, tmp_path: Path) -> N
 
     monkeypatch.setattr(eval_local_mod, "run_eval_runner_capture", fake_capture)
     run_local_eval_game(
-        "bun",
-        "tmp/w.json",
-        2000,
-        7,
-        tmp_path / "off",
-        100,
-        "hard",
-        5.0,
-        "abc",
-        skip_steel_only_shots=False,
-        break_bricks_on_path=False,
-        suppress_useless_fire=False,
-        suppress_lead_miss_fire=False,
+        EvalGameSpec(
+            bun="bun",
+            weights_snapshot="tmp/w.json",
+            stage=2000,
+            seed=7,
+            out_dir=tmp_path / "off",
+            max_ticks=100,
+            difficulty="hard",
+            timeout_sec=5.0,
+            wver="abc",
+            skip_steel_only_shots=False,
+            break_bricks_on_path=False,
+            suppress_useless_fire=False,
+            suppress_lead_miss_fire=False,
+        )
     )
     run_local_eval_game(
-        "bun",
-        "tmp/w.json",
-        2000,
-        7,
-        tmp_path / "on",
-        100,
-        "hard",
-        5.0,
-        "abc",
-        skip_steel_only_shots=True,
-        break_bricks_on_path=True,
-        suppress_useless_fire=True,
-        suppress_lead_miss_fire=False,
+        EvalGameSpec(
+            bun="bun",
+            weights_snapshot="tmp/w.json",
+            stage=2000,
+            seed=7,
+            out_dir=tmp_path / "on",
+            max_ticks=100,
+            difficulty="hard",
+            timeout_sec=5.0,
+            wver="abc",
+            skip_steel_only_shots=True,
+            break_bricks_on_path=True,
+            suppress_useless_fire=True,
+            suppress_lead_miss_fire=False,
+        )
     )
     run_local_eval_game(
-        "bun",
-        "tmp/w.json",
-        2000,
-        7,
-        tmp_path / "lead",
-        100,
-        "hard",
-        5.0,
-        "abc",
-        suppress_lead_miss_fire=True,
+        EvalGameSpec(
+            bun="bun",
+            weights_snapshot="tmp/w.json",
+            stage=2000,
+            seed=7,
+            out_dir=tmp_path / "lead",
+            max_ticks=100,
+            difficulty="hard",
+            timeout_sec=5.0,
+            wver="abc",
+            suppress_lead_miss_fire=True,
+        )
     )
     assert not _has_flag(seen[0])
     assert not _has_brick_flag(seen[0])

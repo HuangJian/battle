@@ -333,28 +333,38 @@ class EvalExecutors:
         manifest: dict[str, Any] = {}
         try:
             from worker.config import args_rollout_overrides, stage_json_for_args
+            from worker.eval_local import EvalGameSpec
 
             _ov = args_rollout_overrides(rnd.args)
             manifest = rnd.local_fn(
-                rnd.bun,
-                rnd.snapshot_path,
-                task[0],
-                task[1],
-                rnd.eval_dir / "local-eval" / f"rl_s{task[0]}_seed{task[1]}",
-                max_ticks=rnd.args.max_ticks,
-                difficulty=rnd.args.difficulty,
-                timeout_sec=rnd.task_timeout,
-                wver=rnd.wver,
-                stage_json=stage_json_for_args(rnd.args, task[0]) or "",
-                lives_override=int(_ov["lives_override"]) if "lives_override" in _ov else None,
-                player_level=int(_ov["player_level"]) if "player_level" in _ov else None,
-                decision_events=bool(getattr(rnd.args, "decision_events", False)),
-                decision_k=int(getattr(rnd.args, "decision_k", 10)),
-                skip_steel_only_shots=bool(getattr(rnd.args, "skip_steel_only_shots", False)),
-                opening_connect=bool(getattr(rnd.args, "opening_connect", False)),
-                break_bricks_on_path=bool(getattr(rnd.args, "break_bricks_on_path", False)),
-                suppress_useless_fire=bool(getattr(rnd.args, "suppress_useless_fire", False)),
-                suppress_lead_miss_fire=bool(getattr(rnd.args, "suppress_lead_miss_fire", False)),
+                EvalGameSpec(
+                    bun=rnd.bun,
+                    # 一条 grant 只有在快照存在时才发（arbiter 侧已挡 `None`）；这里只收窄类型。
+                    weights_snapshot=rnd.snapshot_path or "",
+                    stage=task[0],
+                    seed=task[1],
+                    out_dir=rnd.eval_dir / "local-eval" / f"rl_s{task[0]}_seed{task[1]}",
+                    max_ticks=rnd.args.max_ticks,
+                    difficulty=rnd.args.difficulty,
+                    timeout_sec=rnd.task_timeout,
+                    wver=rnd.wver,
+                    stage_json=stage_json_for_args(rnd.args, task[0]) or "",
+                    lives_override=(
+                        int(_ov["lives_override"]) if "lives_override" in _ov else None
+                    ),
+                    player_level=int(_ov["player_level"]) if "player_level" in _ov else None,
+                    decision_events=bool(getattr(rnd.args, "decision_events", False)),
+                    decision_k=int(getattr(rnd.args, "decision_k", 10)),
+                    skip_steel_only_shots=bool(
+                        getattr(rnd.args, "skip_steel_only_shots", False)
+                    ),
+                    opening_connect=bool(getattr(rnd.args, "opening_connect", False)),
+                    break_bricks_on_path=bool(getattr(rnd.args, "break_bricks_on_path", False)),
+                    suppress_useless_fire=bool(getattr(rnd.args, "suppress_useless_fire", False)),
+                    suppress_lead_miss_fire=bool(
+                        getattr(rnd.args, "suppress_lead_miss_fire", False)
+                    ),
+                )
             )
             why = common.task_client.validate_eval_result(manifest, rnd.wver)
             if why:

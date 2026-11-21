@@ -25,6 +25,45 @@
 
 ---
 
+## §256 P0-3 第七刀：全仓最宽的 `run_local_eval_game`（25 参）→ `EvalGameSpec`（2026-11-21）
+
+`worker/eval_local.run_local_eval_game` 是审计时全仓参数最多的函数：9 个位置语义参数
+（`bun / weights_snapshot / stage / seed / out_dir / max_ticks / difficulty / timeout_sec / wver`）
++ 16 个带缺省的关键字。前 9 个里任何一个抄错一格（比如把 `stage` 换成 `seed`）都**不会报错**，
+只会安安静静评估另一局 —— 而这条腿本来就是拿来与账本对账的（§P0-3 原话：这条失效面比宽签名本身贵得多）。
+
+| 新的家 | 内容 |
+|---|---|
+| `worker/eval_local.EvalGameSpec` | `@dataclass(frozen=True, kw_only=True)`，25 个字段，原参数注释逐条搬成字段注释 |
+| `run_local_eval_game` | 只剩 `(spec: EvalGameSpec) -> dict`；函数体里 42 个参数引用全改成 `spec.X`（**一行逻辑没改**） |
+
+**为什么 `kw_only`**：字段数没变，但“按名字给”把「第 5 个位置是 out_dir 还是 difficulty」这一
+类错法从语法上消掉了；同形先例 `PublishSpec` / `RoundSpec` / `RunSetup` / `RescanSpec` / `JobExecSpec`。
+
+**调用点**（共 5 处生产 + 10 处测试替身，全部改传对象）：
+`remote/offline_eval.run_cloud_eval`（`partial(run_local_eval_game, EvalGameSpec(...))`，
+`call_bounded` 的取消语义不变）· `worker/eval_exec`（本机腿，走 `rnd.local_fn`）·
+`trainer/batch_lanes`（手动 judge 的本机槽位）· `worker/eval_replays_once`（重放导出）·
+`e2e/test_run_rl.py` 的真 `main()` 驱动。
+
+**两条门禁反馈**（都是真提醒，不是噪声）：
+
+1. `worker/eval_exec` 里 `rnd.snapshot_path` 是 `str | None` —— 旧代码走 `rnd.local_fn(*args)`
+   的 `Callable[..., dict]`，类型检查根本看不到；换成对象后 mypy 立即抓到。处置：
+   `snapshot_path or ""`（grant 只在快照存在时发，arbiter 侧已挡 `None`，这里只收窄类型）。
+2. 删掉 e2e 替身上一句 `# type: ignore[assignment]` 后 `test_baselines_only_shrink` 红 ——
+   抑制符额度只许调小，`tests/golden/suppression_baseline.json` 的 `e2e/test_run_rl.py` 3 → 2。
+
+**顺带收紧**（同一条「只许调小」规则）：`WIDE_FUNCS_BASELINE` 删 `worker/eval_local.py` 条目，
+并把两处**早已没有对应宽函数**的余量清掉（`remote/hub_client` 3 → 2、`remote/train_core` 5 → 3）。
+全仓宽签名 **123 → 122**、基线总额 126 → **123**（与实测相等）。
+
+**行为差异：无**（argv 拼装、池优先/回退、告警行、返回 manifest 的字段全逐字不变）。
+
+**门禁**：nn `6699 passed / 3 skipped`（92s，含 e2e）· ruff / mypy 绿。
+
+---
+
 ## §255 P0-6 收口：`worker/iter_rollout` 的 `[iter]` 回调改走全仓日志出口（G3 125 / 40 文件）（2026-11-21）
 
 `run_iter_rollout` 的缺省 `log` 是 `lambda msg: print(f"[iter] {msg}", flush=True)` —— 全仓最后

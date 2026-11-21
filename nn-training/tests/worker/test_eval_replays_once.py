@@ -196,7 +196,7 @@ def _run_main(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> int:
 def _capture_replay_kwargs(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, course_overrides: dict
 ) -> dict:
-    """跑一次真 `main()`，把 `run_local_eval_game` 收到的 kwargs 抓下来。
+    """跑一次真 `main()`，把 `run_local_eval_game` 收到的 `EvalGameSpec` 字段抓下来。
 
     权重解析与逐局仿真都打桩（不起 bun）——本用例只钉「课程的 decision_k /
     decision_events 有没有透传到重放」这一件事。课程配置由 tracked 夹具
@@ -216,8 +216,9 @@ def _capture_replay_kwargs(
 
     captured: dict = {}
 
-    def fake_run(*_a, **kw):
-        captured.update(kw)
+    def fake_run(spec, *_a, **_kw):
+        # 生产签名是一个 `EvalGameSpec`（2026-11-21）⇒ 抓它就是抓全部透传字段。
+        captured.update(vars(spec))
         return {"outcome": "gameover", "ticks": 1, "kills": 0}
 
     monkeypatch.setattr("worker.eval_local.run_local_eval_game", fake_run)

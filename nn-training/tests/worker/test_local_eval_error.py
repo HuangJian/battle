@@ -94,15 +94,17 @@ def test_run_local_eval_game_raises_the_typed_error(tmp_path, monkeypatch) -> No
     )
     with pytest.raises(LocalEvalProcessError) as ei:
         ev.run_local_eval_game(
-            "bun",
-            "w.json",
-            2000,
-            860001,
-            tmp_path / "out",
-            10,
-            "hard",
-            5.0,
-            "deadbeef",
+            ev.EvalGameSpec(
+                bun="bun",
+                weights_snapshot="w.json",
+                stage=2000,
+                seed=860001,
+                out_dir=tmp_path / "out",
+                max_ticks=10,
+                difficulty="hard",
+                timeout_sec=5.0,
+                wver="deadbeef",
+            )
         )
     assert ei.value.returncode == 1
     assert ei.value.errno_code == "ENOENT"

@@ -1546,28 +1546,13 @@ def test_eval_local_gate(tmp: Path) -> None:
     cfg = {"nodes": [], "policy": {"evalLocalSlots": 2}}
     calls: list[tuple[int, int]] = []
 
-    def fake_runner(
-        bun,
-        snap,
-        stage,
-        seed,
-        out_dir,
-        max_ticks,
-        difficulty,
-        timeout_sec,
-        wver,
-        stage_json="",
-        lives_override=None,
-        player_level=None,
-        # 生产侧新增 kwarg（如 R2 decision_events）不得炸替身：注释写死"用 Any 收口"，
-        # 这里兑现（生产签名逐参对齐是无限维护，Any 才是契约）。
-        **_kw: object,
-    ):
-        calls.append((stage, seed))
-        assert Path(snap).read_text(encoding="utf-8") == '{"arch":{}}'
+    def fake_runner(spec, *_a: object, **_kw: object):
+        # 生产签名是「一个 `EvalGameSpec`」⇒ 替身只认那一个对象；新增字段不会炸替身。
+        calls.append((spec.stage, spec.seed))
+        assert Path(spec.weights_snapshot).read_text(encoding="utf-8") == '{"arch":{}}'
         return {
-            "stage": stage,
-            "seed": seed,
+            "stage": spec.stage,
+            "seed": spec.seed,
             "outcome": "timeout",
             "ticks": 10,
             "win": 0,
@@ -1575,13 +1560,13 @@ def test_eval_local_gate(tmp: Path) -> None:
             "quality": 0.2,
             "dims": {},
             "elapsedSec": 0.001,
-            "wver": wver,
+            "wver": spec.wver,
             "mode": "eval",
         }
 
     orig = ed.run_local_eval_game
-    # 测试替身：参数用 Any 收口，不必与生产签名逐参对齐。
-    ed.run_local_eval_game = fake_runner  # type: ignore[assignment]
+    # 测试替身：只认生产那一个 `EvalGameSpec` 对象。
+    ed.run_local_eval_game = fake_runner
     try:
         # 预留判定纯函数（判据住 worker/eval_yield；线程级消费在 eval_arbiter）：
         # gate/宽限期放行、余量边界、零预留回退旧路径
@@ -1677,8 +1662,8 @@ def test_eval_fallback_only_healthy_remote(
     srv, weights, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
     local_calls: list[tuple[int, int]] = []
 
-    def fake_local(*_a, stage: int, seed: int, **_kw):
-        local_calls.append((stage, seed))
+    def fake_local(spec, *_a: object, **_kw: object):
+        local_calls.append((spec.stage, spec.seed))
         raise AssertionError("健康集群不该启动本机 eval")
 
     monkeypatch.setattr(ed, "run_local_eval_game", fake_local)
