@@ -25,6 +25,39 @@
 
 ---
 
+## §246 P0-5 存量第九处：`hub/admin._PROBE_BLOCK` → `ProbeBlock`（2026-11-21）
+
+`/admin/net-probe` 的 64KiB 确定性填充块（固定种子 `0x5EED`）是 2026-09-29 改成**惰性构造**的：
+在模块顶层跑 65536 次 `getrandbits` 实测 0.53 s/进程，而 `hub.admin` 被
+`hub_server → hub.boot → http_face → admin` 拖进每个 import hub 的进程（真 hub、每个 rollout
+worker、12 个 pytest worker）。延迟是对的，但形状是 `bytes | None` + `global`：
+
+```
+_PROBE_BLOCK: bytes | None = None
+
+def _probe_block() -> bytes:
+    global _PROBE_BLOCK
+    if _PROBE_BLOCK is None:
+        _PROBE_BLOCK = ...
+    return _PROBE_BLOCK
+```
+
+**新形状**：`ProbeBlock`（`bytes()` 首次调用构造、之后复用），模块只留一个持有者 `_BLOCK`，
+`_probe_block()` 变成一行转发。类头写下线程语义（**不加锁**：两个线程同时首次调用会各建一份，
+固定种子 ⇒ 内容逐字节相同，最坏多付一次 0.53 s；`/admin/net-probe` 不是热路径，而加锁要回答
+「在临界区里跑 65536 次 getrandbits」这种没必要的问题）。
+
+**为什么不是 `common.cell.Cell`**：`Cell` 构造时就有值（§236 刻意不做惰性路径），套上来会把
+0.53 s 搬回 import——与 2026-09-29 那条结论直接冲突。
+
+**守卫**：`tests/hub/test_hub_admin_split.py` 两条 ——
+① 原有「模块级无裸 list/dict/set」用例扩成「**没有裸容器 + 填充块持有者只有一个**」
+（`holders == {"_BLOCK"}`）；
+② 新增「只建一次（同一 bytes 对象）+ 内容由固定种子决定 + `_deterministic_fill` 就是它的重复」
+（去掉 `_block` 缓存即红；内容用测试侧独立重算的种子前缀对账，不读生产常量）。
+
+**行为差异**：无。种子、长度、惰性时机、逐字节内容与 `/admin/net-probe` 的回执全未变。
+
 ## §245 P0-5 存量第八处：`worker/cmd._CODE_SHA_MEMO` → `functools.cache`（2026-11-21）
 
 `local_code_sha()` 是每局 `--code-sha` 的取值，`compute_code_hash()` ≈ 0.03 s / 次、35 局/轮，

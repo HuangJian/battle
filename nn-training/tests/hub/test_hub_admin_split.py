@@ -25,6 +25,7 @@ admin 控制面方法（停机恢复 / 课程热切 / 队列与状态 / push-wor
 from __future__ import annotations
 
 import ast
+import random as _random
 from email.message import Message
 from io import BytesIO
 from pathlib import Path
@@ -218,8 +219,12 @@ def test_net_probe_uplink_bounds_413_and_drains_body() -> None:
     assert st.sent == [("json", {"bytes": 2048}, 200)]
 
 
-def test_admin_module_has_no_module_level_mutable_state() -> None:
-    """搬过来的模块级状态只有不可变的 `_PROBE_BLOCK`（避免「拆出隐藏状态」这类事故）。"""
+def test_admin_module_state_is_one_named_holder_and_no_bare_containers() -> None:
+    """模块级状态只有 `_BLOCK`（显式持有者）——没有裸 list/dict/set（「拆出隐藏状态」的事故面）。
+
+    P0-5（2026-11-21）之后 `_PROBE_BLOCK`（`bytes | None` + `global`）已收成 `ProbeBlock` 实例：
+    这里同时钉住「实例只有一个」与「没有裸容器冒出来」，后者是拆分时最容易被顺手带进来的形状。
+    """
     mutable = {
         name
         for name, value in vars(admin_mod).items()
@@ -227,4 +232,28 @@ def test_admin_module_has_no_module_level_mutable_state() -> None:
         and isinstance(value, (list, dict, set))
         and getattr(value, "__module__", None) == "hub.admin"
     }
-    assert mutable == set(), f"admin 模块出现了模块级可变状态：{sorted(mutable)}"
+    assert mutable == set(), f"admin 模块出现了裸可变容器：{sorted(mutable)}"
+    holders = {
+        name
+        for name, value in vars(admin_mod).items()
+        if isinstance(value, admin_mod.ProbeBlock)
+    }
+    assert holders == {"_BLOCK"}, f"填充块的持有者应当只有一个：{sorted(holders)}"
+
+
+def test_probe_block_is_built_once_and_stays_byte_identical() -> None:
+    """填充块**只建一次**（同一 bytes 对象）且由固定种子决定（隧道 A/B 只该差在协议上）。
+
+    旧形状是「`bytes | None` + `global` 惰性建」：`global` 让「建了几次」只能靠读函数体回答。
+    收成 `ProbeBlock` 后「建一次」是对象自己的行为，这里钉住它（把 `_block` 缓存去掉即红）。
+    """
+    first = admin_mod._probe_block()
+    second = admin_mod._probe_block()
+    assert second is first, "第二次取必须复用同一份块（0.53s 构造不该重付）"
+    assert len(first) == 65536
+    # 内容由固定种子决定（独立重算：不读生产实现里的常量）
+    expected = bytes(_random.Random(0x5EED).getrandbits(8) for _ in range(8))
+    assert first[:8] == expected
+    fill = admin_mod._deterministic_fill(65536 + 10)
+    assert fill[:65536] == first, "填充必须是那份块的重复（切片是新对象，只能比值）"
+    assert len(fill) == 65536 + 10

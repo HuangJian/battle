@@ -9015,3 +9015,16 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **守卫**：`tests/worker/test_rl_cmd.py::test_local_code_sha_is_computed_once_per_process`（第二次
   调用零重算 / `cache_clear()` 后重算）。行为差异：无，唯一新增是**可以清场**。
   详见 `docs/nn/engineering.md` §245。
+
+## §2026-11-21-probe-block（`hub/admin._PROBE_BLOCK` → `ProbeBlock`；惰性必须有名字，不能用 `Cell`）
+
+- **背景**：`/admin/net-probe` 的 64KiB 确定性填充块是 2026-09-29 改成的惰性构造（顶层构造实测
+  0.53 s/进程，而 `hub.admin` 被拖进每个 import hub 的进程），形状是 `bytes | None` + `global`：
+  写点只在 `_probe_block()` 里，读的人答不出「谁建的、建了一半会怎样」。
+- **决定**：`ProbeBlock`（`bytes()` 首次调用构造、之后复用）+ 模块级持有者 `_BLOCK`，`_probe_block()`
+  一行转发。不加锁（固定种子 ⇒ 并发双建内容逐字节相同，最坏多付一次 0.53 s；该端点不是热路径）。
+- **不套 `common.cell.Cell`**：`Cell` 构造时就有值（§236 刻意不做惰性路径），套上来会把 0.53 s
+  搬回 import，与 2026-09-29 的结论冲突。
+- **守卫**：`tests/hub/test_hub_admin_split.py` —— 原有「无裸 list/dict/set」扩成「无裸容器 +
+  持有者只有一个」；新增「只建一次 + 固定种子内容（测试侧独立重算）+ `_deterministic_fill` 是它
+  的重复」。行为差异：无。详见 `docs/nn/engineering.md` §246。
