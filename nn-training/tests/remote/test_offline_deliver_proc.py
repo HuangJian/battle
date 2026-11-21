@@ -30,6 +30,8 @@ from pathlib import Path
 
 import pytest
 
+from remote.deliver_proc import DelivererSpec
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -168,13 +170,13 @@ class _State:
         # 测试显式调到下限（`deliver_worker` 会钳到 >= 0.05），投递判据与生产缺省无关。
         kw.setdefault("tick_sec", 0.05)
         self.d = DelivererProcess(
-            base_url=hub.url,
+            DelivererSpec(base_url=hub.url,
             token=TOKEN,
             run_id=RUN,
             artifacts_dir=self.root,
             work_dir=self.work,
             log=self.logs.append,
-            **kw,  # type: ignore[arg-type]
+            **kw),  # type: ignore[arg-type]
         )
 
     def ledger(self) -> dict:
@@ -473,13 +475,13 @@ def test_process_parent_sweeps_the_backup_drawer(tmp_path: Path) -> None:
     root = _make_artifacts(tmp_path / "art", iters=(1, 2))
     drawer = tmp_path / "net" / "backup"
     d = DelivererProcess(
-        base_url="http://127.0.0.1:9/",
+        DelivererSpec(base_url="http://127.0.0.1:9/",
         token=TOKEN,
         run_id=RUN,
         artifacts_dir=root,
         work_dir=tmp_path / "work",
         backup_root=drawer,
-        log=lambda _m: None,
+        log=lambda _m: None),
     )
     # ★ 2026-10-29（用户口径「只在回传失败时才写网络盘」）：**正常的每轮那条路不写**——
     #   轮次还新，宽限期内一个字节都不许碰（旧实现每轮写 1.5MB，投递成功后再删）。
@@ -491,12 +493,12 @@ def test_process_parent_sweeps_the_backup_drawer(tmp_path: Path) -> None:
     assert d.backup_pending(force=True) == 0, "幂等：已备的轮次不重写"
     # 没配抽屉（纯离线腿 / 老调用方）⇒ 空操作
     plain = DelivererProcess(
-        base_url="http://127.0.0.1:9/",
+        DelivererSpec(base_url="http://127.0.0.1:9/",
         token=TOKEN,
         run_id=RUN,
         artifacts_dir=root,
         work_dir=tmp_path / "work2",
-        log=lambda _m: None,
+        log=lambda _m: None),
     )
     assert plain.backup_pending() == 0
 
@@ -552,14 +554,14 @@ def test_outbox_mode_child_writes_the_files_and_needs_no_hub(tmp_path: Path) -> 
     out = tmp_path / "outbox"
     logs: list[str] = []
     d = DelivererProcess(
-        base_url="",
+        DelivererSpec(base_url="",
         token="",
         run_id=RUN,
         artifacts_dir=root,
         outbox_dir=out,
         work_dir=tmp_path / "work",
         tick_sec=0.05,  # 同 `_State`：只收窄测试壁钟，生产缺省不动
-        log=logs.append,
+        log=logs.append),
     )
     try:
         d.start()
@@ -585,14 +587,14 @@ def test_thread_fallback_keeps_the_new_flags(tmp_path: Path) -> None:
     「只发锚点、不发统计」的旧行为。这里直接调 `_degrade`，不真起子进程。
     """
     d = DelivererProcess(
-        base_url="",  # 空 ⇒ fallback 不启线程，单测不碰网络
+        DelivererSpec(base_url="",  # 空 ⇒ fallback 不启线程，单测不碰网络
         token="",
         run_id=RUN,
         artifacts_dir=tmp_path / "art",
         adaptive=True,
         metrics_parts=True,
         eval_every=7,
-        log=lambda _m: None,
+        log=lambda _m: None),
     )
     d._degrade("unit-test")
     fb = d._fallback
@@ -611,14 +613,14 @@ def test_outbox_boot_failure_degrades_to_in_process_and_still_writes(tmp_path: P
     out = tmp_path / "outbox"
     logs: list[str] = []
     d = DelivererProcess(
-        base_url="",
+        DelivererSpec(base_url="",
         token="",
         run_id=RUN,
         artifacts_dir=root,
         outbox_dir=out,
         work_dir=tmp_path / "work",
         worker_module="remote.deliver_worker_missing_on_purpose",
-        log=logs.append,
+        log=logs.append),
     )
     try:
         d.start()
@@ -671,12 +673,12 @@ def test_spawn_failure_is_systemic_only(tmp_path: Path, monkeypatch: pytest.Monk
 
     def _proc(tmp_path: Path) -> dp.DelivererProcess:
         return dp.DelivererProcess(
-            base_url="http://127.0.0.1:9/",
+            DelivererSpec(base_url="http://127.0.0.1:9/",
             token=TOKEN,
             run_id=RUN,
             artifacts_dir=_make_artifacts(tmp_path / "art"),
             work_dir=tmp_path / "work",
-            log=lambda _m: None,
+            log=lambda _m: None),
         )
 
     def denied(*_a: object, **_k: object) -> object:

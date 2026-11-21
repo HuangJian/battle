@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 from remote.deliver_outbox import OutboxSpec
+from remote.deliver_proc import FactorySpec
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -126,13 +127,13 @@ def test_make_deliverer_builds_an_outbox_leg_without_any_hub_credentials(tmp_pat
     root = _make_artifacts(tmp_path / "art", iters=(1,))
     out = tmp_path / "outbox"
     leg = make_deliverer(
-        hub_url="",
+        FactorySpec(hub_url="",
         hub_token="",
         run_id=RUN,
         artifacts_dir=root,
         outbox_dir=out,
         mode="thread",
-        log=_quiet,
+        log=_quiet),
     )
     assert isinstance(leg, LocalOutboxDeliverer)
     leg.start()
@@ -146,7 +147,7 @@ def test_make_deliverer_builds_an_outbox_leg_without_any_hub_credentials(tmp_pat
 
     assert (
         make_deliverer(
-            hub_url="", hub_token="", run_id=RUN, artifacts_dir=root, log=_quiet
+            FactorySpec(hub_url="", hub_token="", run_id=RUN, artifacts_dir=root, log=_quiet)
         )
         is None
     ), "没有 outbox 也没有 hub ⇒ 这条腿不存在（旧语义不变）"

@@ -35,6 +35,8 @@ from pathlib import Path
 
 import pytest
 
+from remote.deliver_proc import DelivererSpec, FactorySpec
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -414,12 +416,12 @@ def test_process_mode_passes_the_token_by_env_never_by_argv(
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     d = DelivererProcess(
-        base_url="http://127.0.0.1:1",
+        DelivererSpec(base_url="http://127.0.0.1:1",
         token="sekret-tok",
         run_id=RUN,
         artifacts_dir=tmp_path / "art",
         work_dir=tmp_path / "work",
-        log=lambda _m: None,
+        log=lambda _m: None),
     )
     d.start()
     try:
@@ -459,13 +461,13 @@ def test_process_mode_passes_the_worker_name_by_env_never_by_argv(
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     d = DelivererProcess(
-        base_url="http://127.0.0.1:1",
+        DelivererSpec(base_url="http://127.0.0.1:1",
         token="tok",
         run_id=RUN,
         artifacts_dir=tmp_path / "art",
         work_dir=tmp_path / "work",
         worker_name="kaggle-o",
-        log=lambda _m: None,
+        log=lambda _m: None),
     )
     d.start()
     try:
@@ -477,12 +479,12 @@ def test_process_mode_passes_the_worker_name_by_env_never_by_argv(
     # 没给名 ⇒ 连那个 env 都不该塞（空串会把「没身份」伪装成「有身份 = 空」）
     seen.clear()
     plain = DelivererProcess(
-        base_url="http://127.0.0.1:1",
+        DelivererSpec(base_url="http://127.0.0.1:1",
         token="tok",
         run_id=RUN,
         artifacts_dir=tmp_path / "art2",
         work_dir=tmp_path / "work2",
-        log=lambda _m: None,
+        log=lambda _m: None),
     )
     plain.start()
     try:
@@ -502,12 +504,12 @@ def test_make_deliverer_defaults_to_process_mode(
     monkeypatch.delenv("NN_DELIVER_MODE", raising=False)
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _FakeProc())
     d = make_deliverer(
-        hub_url="http://127.0.0.1:1",
+        FactorySpec(hub_url="http://127.0.0.1:1",
         hub_token="tok",
         run_id=RUN,
         artifacts_dir=_make_artifacts(tmp_path / "a"),
         work_dir=tmp_path / "work",
-        log=lambda _m: None,
+        log=lambda _m: None),
     )
     assert d is not None and isinstance(d, DelivererProcess), "离线路径的缺省必须是进程模式"
     d.start()
@@ -548,12 +550,12 @@ def test_restart_restating_the_final_does_not_self_lock(
     """
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _FakeProc())
     d = DelivererProcess(
-        base_url="http://127.0.0.1:1",
+        DelivererSpec(base_url="http://127.0.0.1:1",
         token="tok",
         run_id=RUN,
         artifacts_dir=tmp_path / "art",
         work_dir=tmp_path / "work",
-        log=lambda _m: None,
+        log=lambda _m: None),
     )
     d.start()
     ctl = Path(str(d.status()["ctl"]))
@@ -598,12 +600,12 @@ def test_result_done_prefers_the_ledger_over_a_stale_status_snapshot(
     root = _make_artifacts(tmp_path / "art")
     _seed_ledger(root, artifacts=(1,), result_done=True)  # 子进程拿到 200 后当即写的
     d = DelivererProcess(
-        base_url="http://127.0.0.1:1",
+        DelivererSpec(base_url="http://127.0.0.1:1",
         token="tok",
         run_id=RUN,
         artifacts_dir=root,
         work_dir=tmp_path / "work",
-        log=lambda _m: None,
+        log=lambda _m: None),
     )
     # 状态面：**陈旧快照**（上一个 tick 写的，说没送）—— 0.5s 的窗口就在这
     monkeypatch.setattr(d, "_child_status", lambda: {"pid": 4321, "result_done": False})

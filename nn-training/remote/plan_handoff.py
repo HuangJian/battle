@@ -75,7 +75,7 @@ from remote.artifacts import (
     sha256_file,
 )
 from remote.bundle import CODE_NAME as BUNDLE_CODE_NAME
-from remote.deliver_proc import DelivererLike, make_deliverer
+from remote.deliver_proc import DelivererLike, FactorySpec, make_deliverer
 from remote.job_lifecycle import worker_tag
 from remote.offline_deliver import DRAIN_FLUSH_SEC
 from worker.plan import plan_pairs_fp, planned_iters, validate_plan
@@ -546,7 +546,7 @@ def open_run_context(setup: RunSetup) -> RunContext:
             if deliverer is not None
             else (
                 make_deliverer(
-                    hub_url=hub_url,
+                    FactorySpec(hub_url=hub_url,
                     hub_token=hub_token,
                     run_id=store.run_id,
                     artifacts_dir=store.root,
@@ -575,7 +575,7 @@ def open_run_context(setup: RunSetup) -> RunContext:
                     # ★ 2026-10-24（评审 P1-4）：`anchors` 档的兜底步长必须是**本课程的**
                     #   `eval_every`，不能吃工厂缺省 5——`eval_every=1` 的课会因此只发 1/5 的轮。
                     eval_every=int(getattr(course, "eval_every", 5) or 5),
-                    log=log,
+                    log=log),
                 )
                 if (deliver or str(outbox_dir or "").strip())
                 else None

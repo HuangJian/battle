@@ -25,6 +25,17 @@
 
 ---
 
+## §264 P0-3 第十一刀：deliver_proc 的构造器与工厂收成 spec（宽签名 108 → 106）（2026-11-21）
+
+* `DelivererProcess.__init__` 的 21 个关键字参数 → `DelivererSpec`；`make_deliverer` 的
+  17 个 → `FactorySpec`。两个都是 frozen + kw_only，字段顺序沿用旧签名，函数体逐字未动。
+* 19 处构造点（生产 2 · 测试 17）一次包对象；`test_offline_deliver_proc` 里 `DelivererProcess(**kw)`
+  的透传形态仍可用（spec 接受同名字段）。`make_deliverer` 内部构造进程时也用 `DelivererSpec`，
+  不再保留一份逐字段的装配。
+* 形状门禁基线删除 `remote/deliver_proc.py` 行（2 → 0）；`Any` 基线不动（`log` 用
+  `Callable`，其余字段都是具体类型）。
+* 回归 122 例（四份补传/outbox 用例 + 形状 + Any 预算），mypy 4 文件绿。
+
 ## §263 P0-3 第十刀：outbox 构造器收成 `OutboxSpec`（宽签名 109 → 108）（2026-11-21）
 
 * `LocalOutboxDeliverer.__init__` 的 14 个关键字参数 → frozen + kw_only `OutboxSpec`；

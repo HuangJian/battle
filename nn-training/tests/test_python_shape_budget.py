@@ -69,7 +69,6 @@ WIDE_FUNCS_BASELINE = {
     "remote/bc_job.py": 1,
     "remote/bundle.py": 2,
     "remote/colab_bc.py": 1,
-    "remote/deliver_proc.py": 2,
     "remote/error_report.py": 1,
     "remote/http.py": 2,
     "remote/hub_client.py": 2,

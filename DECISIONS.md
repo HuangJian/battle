@@ -8818,6 +8818,16 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-deliver-proc-specs
+
+P0-3 第十一刀：`remote/deliver_proc.py` 的两个最宽入口收成 spec —
+`DelivererProcess.__init__`（22 参）→ frozen + kw_only `DelivererSpec`（21 字段），
+`make_deliverer`（17 参）→ `FactorySpec`（17 字段）。字段顺序 = 旧参数顺序，函数体开头
+一次展开旧局部名。19 处构造点包对象（工厂内部 1 · `plan_handoff` 1 · 4 个测试文件 17）；
+工厂内部的 `DelivererProcess(...)` 也走同一 codemod，避免留下两套装配。`deliver_proc`
+宽签名 2 → 0，全仓 108 → 106（74 → 73 文件）。下一刀：`http._request` /
+`_get_with_retry`（72 处调用，测试替身须同步读 spec）。
+
 ## §2026-11-21-outbox-spec
 
 P0-3 第十刀：`remote/deliver_outbox.LocalOutboxDeliverer.__init__`（15 参）→ frozen

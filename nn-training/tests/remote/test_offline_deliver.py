@@ -30,6 +30,8 @@ from pathlib import Path
 
 import pytest
 
+from remote.deliver_proc import FactorySpec
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -1061,7 +1063,7 @@ def test_make_deliverer_passes_the_course_through() -> None:
     from remote.deliver_proc import make_deliverer
 
     d = make_deliverer(
-        hub_url="http://hub", hub_token="t", run_id=RUN, artifacts_dir="x", course="c4"
+        FactorySpec(hub_url="http://hub", hub_token="t", run_id=RUN, artifacts_dir="x", course="c4")
     )
     assert d is not None and d.course == "c4"
 
@@ -1104,12 +1106,12 @@ def test_make_deliverer_passes_the_worker_name_through() -> None:
 
     for mode in ("thread", "sync"):
         d = make_deliverer(
-            hub_url="http://hub",
+            FactorySpec(hub_url="http://hub",
             hub_token="t",
             run_id=RUN,
             artifacts_dir="x",
             worker_name="kaggle-o",
-            mode=mode,
+            mode=mode),
         )
         assert d is not None and d.worker_name == "kaggle-o", mode
 

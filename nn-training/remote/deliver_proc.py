@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Protocol
 
@@ -101,6 +102,33 @@ class DelivererLike(Protocol):
     def backup_pending(self, *, force: bool = False) -> int: ...
 
 
+@dataclass(frozen=True, kw_only=True)
+class DelivererSpec:
+    """`DelivererProcess` 的旋钮袋（P0-3：22 参 → 一个对象）。"""
+
+    base_url: str
+    token: str
+    run_id: str
+    artifacts_dir: str | Path
+    course: str = ""
+    hub_lease: str = ""
+    worker_name: str = ""
+    backup_root: str | Path | None = None
+    work_dir: str | Path | None = None
+    ctl_path: str | Path | None = None
+    status_path: str | Path | None = None
+    log: Callable[[str], None] = _log_default
+    python: str | None = None
+    worker_module: str = DELIVER_WORKER_MODULE
+    idle_timeout: float = PROC_IDLE_TIMEOUT_SEC
+    tick_sec: float = DRAIN_TICK_SEC
+    adaptive: bool = False
+    eval_every: int = 0
+    metrics_parts: bool = False
+    outbox_dir: str | Path | None = None
+    floor_it: int = 0
+
+
 class DelivererProcess:
     """补传腿的**独立进程**代理（父侧；与 `OfflineDeliverer` 同接口，见 `DelivererLike`）。
 
@@ -118,50 +146,29 @@ class DelivererProcess:
     响亮一行，且**不再重试** `Popen`。训练绝不因此停。
     """
 
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        token: str,
-        run_id: str,
-        artifacts_dir: str | Path,
-        course: str = "",
-        #: 本课租约 token（★M1b/P1-1：随补传体上报，推进 hub 侧的活动起点）。走 env
-        #: 传给子进程（`HUB_LEASE_ENV`），**不进 argv**。空 = 不带。
-        hub_lease: str = "",
-        #: 可读 worker 名（`kaggle-o`）= dashboard PPO 组的列名（plan/offline-leg-ppo-attribution）。
-        #: 同理**只走 env**（`WORKER_NAME_ENV`）传给真正 POST 的那个子进程 —— 缺这一跳，
-        #: 名字就只活在父侧（而父侧一个体都不发）= 与没实现同效。空 = 体里不带那个键。
-        worker_name: str = "",
-        #: 网络侧**备份抽屉**的落点（拍板-3）：**父侧**扫（用只读镜像算 pending）。
-        #: 刻意**不走 env 交给子进程**：在飞的 `code.zip` 是导出那一刻的快照，老子进程不认这个键
-        #: 会静默不备（而父侧自己扫就与子进程新旧无关）；缺点是这一笔 IO 回到训练进程所在的机器
-        #: —— 它在有界里（`DRAIN_CEILING_SEC`/件）、幂等、且只在**有轮次没送出去**时发生。
-        backup_root: str | Path | None = None,
-        #: 控制/状态文件的落点（缺省 = 产物目录下的 `work/`，与 `run_loop` 的老缺省一致）。
-        work_dir: str | Path | None = None,
-        ctl_path: str | Path | None = None,
-        status_path: str | Path | None = None,
-        log: Callable[[str], None] = _log_default,
-        python: str | None = None,
-        worker_module: str = DELIVER_WORKER_MODULE,
-        idle_timeout: float = PROC_IDLE_TIMEOUT_SEC,
-        tick_sec: float = DRAIN_TICK_SEC,
-        #: ★ 2026-10-23（`plan/offline-deliver-full-and-gaps` §3.0）：档位自适应开关
-        #: （只在 argv 里传 `--adaptive`，子进程才启用；缺省 = 旧行为）。
-        adaptive: bool = False,
-        #: ★ 2026-10-23（`plan/offline-deliver-full-and-gaps` §3.5/§3.3）：父侧把课程的
-        #: `eval_every` 与统计批开关显式传进子进程 argv；缺省 = 旧行为（不传 = 老语义）。
-        eval_every: int = 0,
-        metrics_parts: bool = False,
-        #: ★ 2026-10-23（plan/push-mode-notebooks §6.4a / P0-1）：非空 = **push 腿的本地
-        #: outbox 模式** —— 子进程只往 `<outbox>/` 写 body，一个字节也不往 hub 发（hub 自己来拉）。
-        #: 这时 `base_url`/`token` 可以为空（`_enabled` 的判据换成本字段）。
-        outbox_dir: str | Path | None = None,
-        #: ★ 2026-10-24（F7）：outbox 地板 —— `it <= floor_it` 的轮不物化（hub 已经有）。
-        #: 只在 outbox 模式有意义；非缺省才进 argv（老 `deliver_worker` 不认它 ⇒ 会降级）。
-        floor_it: int = 0,
-    ) -> None:
+    def __init__(self, spec: DelivererSpec) -> None:
+        # 旧签名 22 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+        base_url = spec.base_url
+        token = spec.token
+        run_id = spec.run_id
+        artifacts_dir = spec.artifacts_dir
+        course = spec.course
+        hub_lease = spec.hub_lease
+        worker_name = spec.worker_name
+        backup_root = spec.backup_root
+        work_dir = spec.work_dir
+        ctl_path = spec.ctl_path
+        status_path = spec.status_path
+        log = spec.log
+        python = spec.python
+        worker_module = spec.worker_module
+        idle_timeout = spec.idle_timeout
+        tick_sec = spec.tick_sec
+        adaptive = spec.adaptive
+        eval_every = spec.eval_every
+        metrics_parts = spec.metrics_parts
+        outbox_dir = spec.outbox_dir
+        floor_it = spec.floor_it
         self.outbox = Path(outbox_dir) if outbox_dir else None
         self._floor_it = int(floor_it or 0)
         self.base_url = str(base_url or "").rstrip("/")
@@ -769,48 +776,47 @@ class DelivererProcess:
         return st
 
 
-def make_deliverer(
-    *,
-    hub_url: str,
-    hub_token: str,
-    run_id: str,
-    artifacts_dir: str | Path,
-    course: str = "",
-    #: 本课租约 token（★M1b/P1-1：可缺——缺了补传照落，只是不推进活动起点）。
-    hub_lease: str = "",
-    #: 可读 worker 名（`kaggle-o`）—— 面板列名（plan/offline-leg-ppo-attribution）；空 = 不带那个键。
-    worker_name: str = "",
-    #: 网络侧**备份抽屉**的落点（`<网络产物根>/backup`；空 = 不做备份）。两种模式都收。
-    backup_root: str | Path | None = None,
-    #: 控制/状态文件的落点（只有进程模式用；缺省 = 产物目录下的 `work/`）。
-    work_dir: str | Path | None = None,
-    #: `""` = 自动（`$NN_DELIVER_MODE` > `"process"`，见模块常量）；
-    #: 显式值 `"process" | "thread" | "sync"` 优先（测试/单步调试给后两个）。
-    mode: str = "",
-    #: 后台并行（只有 `thread`/`sync` 模式用；`process` 时代理由 `DelivererProcess.status()` 报）。
-    background: bool = True,
-    #: ★ 2026-10-23（`plan/offline-deliver-full-and-gaps`）：课程的 `eval_every`（`anchors` 档
-    #: 兜底步长；0 = 旧行为）与统计批开关（`?parts=metrics`，漏轮 row 单独上行）。
-    #: **真机腿应显式给**（课程的 `eval_every` + True）——缺省保持旧行为。
-    #: ★ 2026-10-23（`plan/offline-deliver-full-and-gaps`）：课程的 `eval_every`（`anchors` 档
-    #: 兜底步长）、统计批开关（`?parts=metrics`）、档位自适应。
-    #: **真机腿三个都默开**（用户口径：顺畅就每轮回传 + 漏轮统计也要上行）；直接构造
-    #: `OfflineDeliverer` 的旧调用点仍是关（它们不走这个工厂）。
-    #: ⚠ 三个都只在**非缺省**时进子进程 argv ⇒ 云机上**旧的 code.zip**（不认这些参数）会
-    #: `unrecognized arguments` ⇒ `DelivererProcess` 走既有 sticky 降级到进程内线程模式
-    #: （功能不退，只是慢一档 + 一行 WARN）。新导出的任务包用新代码就没这一步。
-    eval_every: int = 5,
-    metrics_parts: bool = True,
-    adaptive: bool = True,
-    #: ★ 2026-10-23（plan/push-mode-notebooks §6.4a / P0-1）：非空 = **本地 outbox 模式**。
-    #: 这个分支**先于** hub_url/token 早退判定 —— 否则 `--outbox` + `--no-deliver`（两个参数
-    #: 恰好让 hub_url/token 都缺）会静默什么也不做：训练照跑、outbox 永远空、最后被判掉线。
-    outbox_dir: str | Path | None = None,
-    #: ★ 2026-10-24（F7）：outbox 地板（`it <= floor_it` 的轮不物化；hub 已经有它们）。
-    #: 只在 outbox 模式生效；缺省 0 = 全部物化（错的方向必须是不丢数据）。
-    floor_it: int = 0,
-    log: Callable[[str], None] = _log_default,
-) -> DelivererLike | None:
+@dataclass(frozen=True, kw_only=True)
+class FactorySpec:
+    """`make_deliverer` 的旋钮袋（P0-3：17 参 → 一个对象）。"""
+
+    hub_url: str
+    hub_token: str
+    run_id: str
+    artifacts_dir: str | Path
+    course: str = ""
+    hub_lease: str = ""
+    worker_name: str = ""
+    backup_root: str | Path | None = None
+    work_dir: str | Path | None = None
+    mode: str = ""
+    background: bool = True
+    eval_every: int = 5
+    metrics_parts: bool = True
+    adaptive: bool = True
+    outbox_dir: str | Path | None = None
+    floor_it: int = 0
+    log: Callable[[str], None] = _log_default
+
+
+def make_deliverer(spec: FactorySpec) -> DelivererLike | None:
+    hub_url = spec.hub_url
+    hub_token = spec.hub_token
+    run_id = spec.run_id
+    artifacts_dir = spec.artifacts_dir
+    course = spec.course
+    hub_lease = spec.hub_lease
+    worker_name = spec.worker_name
+    backup_root = spec.backup_root
+    work_dir = spec.work_dir
+    mode = spec.mode
+    background = spec.background
+    eval_every = spec.eval_every
+    metrics_parts = spec.metrics_parts
+    adaptive = spec.adaptive
+    outbox_dir = spec.outbox_dir
+    floor_it = spec.floor_it
+    log = spec.log
     """构造补传器：**缺 hub_url 或 token 就返回 None**（= 这条腿没有补传，不是错误）。
 
     调用方（`run_loop`）因此只需 `if d is not None`，不必自己判断「参数齐不齐」。
@@ -849,7 +855,7 @@ def make_deliverer(
         )
     if kind == "process":
         return DelivererProcess(
-            outbox_dir=outbox,
+            DelivererSpec(outbox_dir=outbox,
             base_url=hub_url,
             token=hub_token,
             run_id=run_id,
@@ -863,7 +869,7 @@ def make_deliverer(
             eval_every=int(eval_every or 0),
             metrics_parts=bool(metrics_parts),
             adaptive=bool(adaptive),
-            floor_it=int(floor_it or 0),
+            floor_it=int(floor_it or 0)),
         )
     return OfflineDeliverer(
         base_url=hub_url,
