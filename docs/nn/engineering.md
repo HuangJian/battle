@@ -25,6 +25,34 @@
 
 ---
 
+## §253 P0-2 存量第二处：`trainer/eval_dispatch._eval_admit`（248 → 21 + 176 + 47 + 33）（2026-11-21）
+
+`_eval_admit` 是「节点门 → 权重下发 → 本机兜底」三件事串在一个方法里，而它本来就有一条空行级
+的接缝。按接缝切成四个方法（**没有一行逻辑被重写**，只搬位置）：
+
+| 新方法 | 行数 | 职责 / 关键判据 |
+|---|---|---|
+| `_eval_admit` | 21 | 编排：三个相位依次调用，三处「本轮放弃」收在这里（`snapshot_path is None` ⇒ False，否则降级本机） |
+| `_eval_eligible` | 176 | 并行 ping + 能力位 fail-closed 门（`evalSupport` / `stageJsonSupport` / hybrid opening / 事件课程 / K≠10 / 顶钢空枪门 / 拆砖 / B8 / B10）+ bun 版本 + codeHash + 本轮 bootId 钉 + 让位 `eval_slot_cap`；合格节点写进 `r.alive` |
+| `_eval_publish_weights` | 47 | 冻结门（两次 `wait_for_thaw`，第二次在读完权重后、POST 前）→ `ensure_standard_weights` → `post_weights_parallel`（`_on_weight_ready` 流水线）→ `arm_window` / `set_remote_ready`；`None` = 冻结窗里放弃本轮 |
+| `_eval_local_fallback` | 33 | 兜底模式的唯一本机入口（`local_fallback_only` 且 `nodes_ok` 非空 ⇒ 本机不参与） |
+
+**返回值语义的变化只在内部**：`_eval_publish_weights` 用 `None` 表示「冻结窗里放弃」，与
+「POST 全失败但本机可接盘（`[]`）」区分开 —— 旧代码用 `return False` 直接从 `_eval_admit` 出去，
+新形状把两种失败放在编排层判，行为逐字一致（`test_eval_dispatch_*` 55 条绿）。
+
+**踩到的门禁**：把三处 `assert r.rnd is not None` 搬进每个相位方法会让
+`test_module_asserts` 的函数级存量 3 → 5（生产包禁新增 assert）⇒ 改成
+`_eval_admit` 里唯一一处断言 + 三个相位方法显式收 `rnd: EvalRound` 参数；
+用 `Any` 收类型则会让该文件的 `Any` 预算回升（§229 才把它从 21 压到 16）。
+
+`LONG_FUNCS_BASELINE` 删 `trainer/eval_dispatch.py` 条目（2 → **1**）：只剩 `remote/rollout_node.run`
+（249，采样节点顶层 while，拆它得先定所有者）。
+
+**门禁**：nn `6695 passed / 3 skipped`（111s，本轮机器负载偏高）。**行为差异：无**。
+
+---
+
 ## §252 P0-2 存量第三处：`worker/train/bc._Train.run_epochs`（201 → 63 + 79 + 65）（2026-11-21）
 
 合入上游 goal-nn 之后，形状门禁（>200 行）从零又长回三处：`remote/rollout_node.run` 249、

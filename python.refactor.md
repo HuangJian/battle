@@ -1661,8 +1661,9 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
    **形状门禁已无存量读数**：>200 行函数从此一律按新增判（**2026-11-21 续**：合入上游后又量出
    三处存量 —— `remote/rollout_node.run` 249 / `trainer/eval_dispatch._eval_admit` 248 /
    `worker/train/bc._Train.run_epochs` 201。第三处已拆成 `run_epochs` 63 + `_train_epoch` 79 +
-   `_validate` 65（基线条目删除，见 `docs/nn/engineering.md` §252）；余两处要按「独立所有者 +
-   独立触发条件」拆，仍登记在 `LONG_FUNCS_BASELINE`）。
+   `_validate` 65（基线条目删除，见 `docs/nn/engineering.md` §252）；`trainer/eval_dispatch._eval_admit`
+   248 也拆成 21 + 176 + 47 + 33 四个相位方法（§253）。只剩 `remote/rollout_node.run` 一处
+   —— 采样节点的顶层 while，要按「独立所有者 + 独立触发条件」拆，仍登记在 `LONG_FUNCS_BASELINE`）。
 2. **G5 剩余 140 条 / 46 文件**（2026-11-19 第十二~十六批拧了 26 条，B7 P1–P4b 再 −1、S3 −5）已全部是结构守卫、状态/构造契约与两处扫描活性锚（详见
    `docs/nn/engineering.md` §172–§178 与本文 G5 行）；**真正没动的另一半是 4 160 处
    `monkeypatch`**（判据没进门禁，G19 只冻结「打私有名」那 379 处）与 **429 处私有属性赋值**

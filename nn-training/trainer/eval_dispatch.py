@@ -382,13 +382,38 @@ class EvalDispatcher:
 
     def _eval_admit(self, r: _EvalRun) -> bool:
         """节点门 / 权重下发 / 本机兜底；False = 本轮放弃派发。"""
-        args, cfg, rl_path, it = self.args, self.cfg, self.rl_path, self.it
-        bun, arb, execs, rnd = self.bun, r.arb, r.execs, r.rnd
+        _log, rnd = r.log, r.rnd
         assert rnd is not None
-        todo, eval_iter_id, course_fp = r.todo, r.eval_iter_id, r.course_fp
-        snapshot_path, local_slots = r.snapshot_path, r.local_slots
+        self._eval_eligible(r, rnd)
+        # 本机槽位可用 ⇔ snapshot_path 已建（见快照段）⇒ 门失败不再整轮空转。
+        if not r.alive:
+            if r.snapshot_path is None:
+                _log("[eval] no eval-capable node — skipped this round")
+                return False
+            _log("[eval] no eval-capable node — local-only eval this round")
+        nodes_ok = self._eval_publish_weights(r, rnd)
+        if nodes_ok is None:  # 冻结窗里放弃本轮（窗口钟停着，推了也白推）
+            return False
+        r.nodes_ok = nodes_ok
+        if r.alive and not nodes_ok:
+            # 旧实现此处无条件 return：本机槽位明明可用却整轮 0 局（审计 B5）。
+            if r.snapshot_path is None:
+                _log("[eval] all weight POSTs failed — skipped this round")
+                return False
+            _log("[eval] all weight POSTs failed — local-only eval this round")
+        return self._eval_local_fallback(r, rnd, nodes_ok)
+
+    def _eval_eligible(self, r: _EvalRun, rnd: EvalRound) -> None:
+        """节点门（能力位 / bun / codeHash / bootId / 让位）：把合格节点写进 `r.alive`。
+
+        判据与 rollout 腿同源（codeHash 是唯一事实来源）；push 节点没有 `/v1/ping`
+        所以不进来。每个 `continue` 之前都必须留一行日志 —— 旧实现静默丢节点，
+        现场看不出是谁、也看不出为什么（2026-09-19 审计 B4）。
+        """
+        args, cfg, bun = self.args, self.cfg, self.bun
+        todo, eval_iter_id = r.todo, r.eval_iter_id
         meta_path, status_timeout = r.meta_path, r.status_timeout
-        iter_id, wver, post_budget = self.iter_id, r.wver, r.post_budget
+        it = self.it
         _log = r.log
         local_bun = bun_version(bun)
         # 2026-09-03 修正（mac 实测 stage.tiles null）：eval_stages 含自定义关
@@ -550,17 +575,18 @@ class EvalDispatcher:
                     "baseC": base_c,  # 扩容判据（间隙里 ping 空出的槽）
                 }
             )
-        # 本机槽位可用 ⇔ snapshot_path 已建（见上方快照段）⇒ 门失败不再整轮空转。
-        if not alive:
-            if snapshot_path is None:
-                _log("[eval] no eval-capable node — skipped this round")
-                return False
-            _log("[eval] no eval-capable node — local-only eval this round")
+        r.alive, r.local_bun, r.need_sj = alive, local_bun, need_sj
 
+    def _eval_publish_weights(self, r: _EvalRun, rnd: EvalRound) -> list[dict] | None:
+        """冻结门 + 幂等下发权重 + 窗口起算；`None` = 冻结窗里放弃本轮。"""
+        arb, execs, rl_path = r.arb, r.execs, self.rl_path
+        course_fp = r.course_fp
+        alive, iter_id, wver, post_budget = r.alive, self.iter_id, r.wver, r.post_budget
+        _log = r.log
         # B2（2026-11-10）：冻结期不推权重。窗口钟已暂停，等本课解冻后再 POST；
         # 进程 shutdown 时放弃本轮。冻结可能发生在 ping 之后，故门放在读权重之前。
         if not arb.wait_for_thaw(course_fp):
-            return False
+            return None
 
         # 幂等下发（节点通常已持有 → kept 短路径；agent 重启过则补发）——并行
         # ★ 2026-10-15：与 rollout 腿同一口径——推之前先把 delta 容器落地成整份
@@ -581,7 +607,7 @@ class EvalDispatcher:
 
         # 读权重期间可能又进入冻结：POST 前再确认一次（窗口钟仍停）。
         if not arb.wait_for_thaw(course_fp):
-            return False
+            return None
 
         nodes_ok = (
             common.weights_client.post_weights_parallel(
@@ -596,13 +622,17 @@ class EvalDispatcher:
         # 本课冻结中（rollout 活跃）则窗口钟一开始就停走；别的课采集不停本课的钟（§113）。
         rnd.arm_window(time.time(), paused=arb.frozen_for(course_fp))
         rnd.set_remote_ready(nodes_ok)
-        if alive and not nodes_ok:
-            # 旧实现此处无条件 return：本机槽位明明可用却整轮 0 局（审计 B5）。
-            if snapshot_path is None:
-                _log("[eval] all weight POSTs failed — skipped this round")
-                return False
-            _log("[eval] all weight POSTs failed — local-only eval this round")
+        return nodes_ok
 
+    def _eval_local_fallback(self, r: _EvalRun, rnd: EvalRound, nodes_ok: list[dict]) -> bool:
+        """兜底模式的唯一本机入口；False = 本轮放弃派发。
+
+        只有 `nodes_ok` 为空才孵化；健康集群本机 0 线程、reserved=0，summary 不会出现 local。
+        """
+        execs = r.execs
+        it = self.it
+        _log = r.log
+        snapshot_path, local_slots = r.snapshot_path, r.local_slots
         # 兜底模式的唯一本机入口：只有 `nodes_ok` 为空才孵化；健康集群本机 0 线程、
         # reserved=0，summary 不会出现 local。
         if self.local_fallback_only and nodes_ok:
@@ -625,8 +655,6 @@ class EvalDispatcher:
                 "（no usable remote eval node，本机接盘）"
             )
 
-        r.alive, r.nodes_ok = alive, nodes_ok
-        r.local_bun, r.need_sj = local_bun, need_sj
         return True
 
 

@@ -9118,3 +9118,18 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **被否决**：按「训练/验证」把两个内循环提成模块级纯函数（要传 20+ 字段的 `_Train` 状态，
   等于把参数爆炸换个地方）；只把验证段抽走（那只能降到 140 行左右，仍在 200 线上下浮动）。
 - **行为**：无差异。全文 → `docs/nn/engineering.md` §252。
+
+## §2026-11-21-eval-admit-phases（`trainer/eval_dispatch._eval_admit` 248 行 → 21 + 176 + 47 + 33）
+
+- **背景**：形状门禁的存量第二处；`_eval_admit` 串了三件事（节点门 / 权重下发 / 本机兜底），
+  而代码里本来就有空行级接缝。
+- **决定**：按接缝切四个方法 —— `_eval_admit`（21，编排 + 三处「本轮放弃」）、
+  `_eval_eligible`（176，ping + 能力位 fail-closed 门 + bun/codeHash/bootId + 让位）、
+  `_eval_publish_weights`（47，两次冻结门 + 下发 + 窗口起算）、`_eval_local_fallback`（33，兜底唯一入口）。
+  逻辑一行未改；唯一内部语义变化是 `_eval_publish_weights` 用 `None`（冻结窗放弃）与 `[]`
+  （POST 全失败但本机可接盘）区分两种失败，交由编排层判。
+- **门禁对策**：相位方法收 `rnd: EvalRound` 显式参数而不是各自 `assert r.rnd is not None`
+  （生产包禁新增 assert：3 → 5 会红）也不用 `Any`（该文件 Any 预算 §229 刚压到 16）。
+- **被否决**：把能力位检查表驱动化（8 个 `if` → 一张表）——日志措辞必须逐字不变，本轮只做
+  搬迁；表驱动留到需要加第十个能力位时再做。
+- **行为**：无差异（`test_eval_dispatch_*` 55 条绿）。全文 → `docs/nn/engineering.md` §253。

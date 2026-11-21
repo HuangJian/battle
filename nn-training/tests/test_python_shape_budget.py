@@ -40,10 +40,14 @@ LONG_FUNCS_BASELINE: dict[str, int] = {
     # `fetch_task` 只剩传输编排 ⇒ 条目删除。）
     # 2026-11-21：`worker/train/bc.py::_Train.run_epochs`（201 行）拆成
     # `run_epochs`（63，只留 epoch 编排 / 历史 / 早停 / 断点 / 回调）+
-    # `_train_epoch`（79，训练内循环 + scheduler）+ `_validate`（65，验证与三个准确率），
-    # 条目删除 ⇒ 余下两处（采样节点主流程 / 评估节点门）仍待按「独立所有者」拆。
+    # `_train_epoch`（79，训练内循环 + scheduler）+ `_validate`（65，验证与三个准确率）；
+    # `trainer/eval_dispatch._eval_admit`（248）拆成 `_eval_admit`（21，编排）+
+    # `_eval_eligible`（176，节点门那一大段能力位/fail-closed 判据）+
+    # `_eval_publish_weights`（47，冻结门 + 下发 + 窗口起算）+
+    # `_eval_local_fallback`（33，兜底唯一入口）。
+    # 余下一处：采样节点主流程（`remote/rollout_node.run`，249）要按「独立所有者 +
+    # 独立触发条件」拆 —— 它是采样节点的顶层 while，得先定所有者再动。
     "remote/rollout_node.py": 1,
-    "trainer/eval_dispatch.py": 1,
 }
 
 #: 存量：包含 >8 参数函数的文件 → 个数。
