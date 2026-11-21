@@ -40,6 +40,7 @@ if str(ROOT) not in sys.path:
 from remote import download as download_mod
 from remote import weights_delta as wd
 from remote import weights_standard as ws
+from remote.download import WeightsAsk
 
 SHAPES = {"conv.w": (4, 3, 3, 3), "fc.b": (16,), "head.w": (16, 165)}
 #: 坏 hub：任何真发出去的请求都会连接失败（用例据此证明「零传输」不是空话）。
@@ -105,14 +106,14 @@ def _forbid_download(monkeypatch: pytest.MonkeyPatch, called: list[str]) -> None
 def _resolve(job_dir: Path, fp: str, *, blob_root: Path, preloaded=None):
     """`_resolve_weights` 的测试包装（与 `test_opt_blob_shape._resolve` 同口径）。"""
     return download_mod._resolve_weights(
-        job_dir=job_dir,
+        WeightsAsk(job_dir=job_dir,
         init_weights_fp=fp,
         blob_root=blob_root,
         jid="j1",
         base_url=DEAD_HUB,
         token="t",
         preloaded=preloaded,
-        log=_quiet,
+        log=_quiet),
     )
 
 

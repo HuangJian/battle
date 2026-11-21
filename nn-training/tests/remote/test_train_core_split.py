@@ -448,7 +448,7 @@ def test_resolved_delegates_when_the_batch_has_no_such_piece(monkeypatch) -> Non
     退回而不是重写，才不会把 `_resolve_blob` 那套安全阀分叉成两份（那是静默 warm-start 的入口）。
     """
     sentinel = (b"inline-bytes", True, "inline")
-    monkeypatch.setattr(core_mod, "_resolve_blob", lambda **_k: sentinel)
+    monkeypatch.setattr(core_mod, "_resolve_blob", lambda _spec: sentinel)
     got = core_mod._resolved(
         jid="j1",
         name="ref",

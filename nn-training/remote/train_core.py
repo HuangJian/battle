@@ -57,6 +57,7 @@ from common.protocol import (
 )
 from remote.download import (
     WEIGHT_SOURCES,
+    BlobAsk,
     _cache_blob,
     _cache_produced_weights,
     _resolve_blob,
@@ -117,7 +118,7 @@ def _resolved(
     if got is not None:
         return got
     return _resolve_blob(
-        blob_root=blob_root,
+        BlobAsk(blob_root=blob_root,
         name=name,
         sha=sha,
         inline_b64=inline_b64,
@@ -125,7 +126,7 @@ def _resolved(
         base_url=base_url,
         token=token,
         preloaded=preloaded,
-        log=log,
+        log=log),
     )
 
 
@@ -303,7 +304,7 @@ def _fetch_demo(
     if not demo_sha:
         raise ProtocolError(f"job {jid}: demo_bc_coef>0 但无 demo_sha——拒收")
     demo_raw, demo_hit, demo_src = _resolve_blob(
-        blob_root=blob_root,
+        BlobAsk(blob_root=blob_root,
         name=BLOB_DEMO,
         sha=demo_sha,
         inline_b64="",
@@ -311,7 +312,7 @@ def _fetch_demo(
         base_url=base_url,
         token=token,
         preloaded=preloaded,
-        log=log,
+        log=log),
     )
     if not demo_raw:
         raise ProtocolError(f"job {jid}: demo_sha 存在但 blob 不可得——拒收")

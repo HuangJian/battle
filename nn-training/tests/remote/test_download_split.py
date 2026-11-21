@@ -45,6 +45,7 @@ if str(ROOT) not in sys.path:
 import remote.download as download_mod
 import remote.worker as worker_mod
 from common.protocol import BLOB_OPT, ProtocolError, RetryableError
+from remote.download import BlobAsk, CodeAsk
 from tests.helpers import remote_dag as dag
 from tests.helpers import source_scan
 
@@ -156,7 +157,7 @@ def test_intra_module_seam_is_the_download_module(monkeypatch, tmp_path: Path) -
     )
     monkeypatch.setattr(download_mod, "download_blob", lambda *a, **k: raw)
     got, hit, src = download_mod._resolve_blob(
-        blob_root=tmp_path / "blob_cache",
+        BlobAsk(blob_root=tmp_path / "blob_cache",
         name=BLOB_OPT,
         sha=sha,
         inline_b64="",
@@ -164,7 +165,7 @@ def test_intra_module_seam_is_the_download_module(monkeypatch, tmp_path: Path) -
         base_url="http://hub",
         token="t",
         preloaded=None,
-        log=lambda _m: None,
+        log=lambda _m: None),
     )
     assert got == raw and hit is False and src == "download"
 
@@ -336,7 +337,7 @@ def test_payload_and_code_downloads_resolve_in_this_module(monkeypatch, tmp_path
         )
     with pytest.raises(RetryableError):
         download_mod._ensure_code(
-            "http://hub",
+            CodeAsk("http://hub",
             "t",
             "j1",
             manifest,
@@ -344,7 +345,7 @@ def test_payload_and_code_downloads_resolve_in_this_module(monkeypatch, tmp_path
             tmp_path,
             code_cache_root=None,
             preloaded=None,
-            log=lambda _m: None,
+            log=lambda _m: None),
         )
     assert called == ["payload", "code"], called
     # 没留下任何半截目录（sha 校验在写盘之前）

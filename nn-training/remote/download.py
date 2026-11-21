@@ -51,9 +51,10 @@ import hashlib
 import os
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Protocol
 
 import remote.course_cache as course_cache
 import remote.weights_standard as weights_standard
@@ -568,18 +569,22 @@ def prune_caches(
     return dropped
 
 
-def _resolve_blob(
-    *,
-    blob_root: Path,
-    name: str,
-    sha: str,
-    inline_b64: str,
-    jid: str,
-    base_url: str,
-    token: str,
-    preloaded: dict | None,
-    log,
-) -> tuple[bytes, bool, str]:
+@dataclass(frozen=True, kw_only=True)
+class BlobAsk:
+    """`_resolve_blob` 的旋钮袋（P0-3：九参 → 一个对象）。"""
+
+    blob_root: Path
+    name: str
+    sha: str
+    inline_b64: str
+    jid: str
+    base_url: str
+    token: str
+    preloaded: dict | None
+    log: Callable[[str], None]
+
+
+def _resolve_blob(spec: BlobAsk) -> tuple[bytes, bool, str]:
     """解析一个 M2 blob → (raw, hit, src)；src ∈ cache|preloaded|download|inline|none。
 
     安全阀（plan §4.3）：`sha` 非空时**只认内容寻址路径** —— 缓存命中 / preloaded /
@@ -587,6 +592,16 @@ def _resolve_blob(
     内联或 warm-start（那会静默把 D5 的 Adam 动量丢掉）。`sha` 为空 = 未开瘦身/
     旧 hub，走内联（内联也空则返回 none，由调用方决定策略）。
     """
+    # 旧签名九个关键字 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    blob_root = spec.blob_root
+    name = spec.name
+    sha = spec.sha
+    inline_b64 = spec.inline_b64
+    jid = spec.jid
+    base_url = spec.base_url
+    token = spec.token
+    preloaded = spec.preloaded
+    log = spec.log
     import hashlib as _hl
 
     if sha:
@@ -651,22 +666,25 @@ def _is_landed_twin(path: Path, fp: str) -> bool:
         return False
 
 
-def _resolve_weights(
-    *,
-    job_dir: Path,
-    init_weights_fp: str,
-    blob_root: Path,
-    jid: str,
-    base_url: str,
-    token: str,
-    preloaded: dict | None,
-    #: R0（M0）身份面：本 job 的 `course_fp` 与 `manifest.opt_from`（缺省空 ⇒ 不试身份命中，
-    #: 逐字节旧行为——旧调用方/旧 hub 无此两键）。
-    course_fp: str = "",
-    opt_from: str = "",
-    it: int | None = None,
-    log,
-) -> tuple[Path | None, str, int]:
+@dataclass(frozen=True, kw_only=True)
+class WeightsAsk:
+    """`_resolve_weights` 的旋钮袋（P0-3：11 参 → 一个对象）。"""
+
+    job_dir: Path
+    init_weights_fp: str
+    blob_root: Path
+    jid: str
+    base_url: str
+    token: str
+    preloaded: dict | None
+    #: R0（M0）身份面：本 job 的 `course_fp` 与 `manifest.opt_from`（缺省空 ⇒ 不试身份命中）。
+    course_fp: str = ""
+    opt_from: str = ""
+    it: int | None = None
+    log: Callable[[str], None]
+
+
+def _resolve_weights(spec: WeightsAsk) -> tuple[Path | None, str, int]:
     """解析本轮的初始权重 → `(path | None, src, wire_bytes)`。
 
     `src ∈ payload|cache|preloaded|download|none`（`legacy_tar` 由调用方在 restore 段判定）；
@@ -707,6 +725,18 @@ def _resolve_weights(
         整份）——那不是坏字节，是**我们自己落的**（判据 `_is_landed_twin`：旁存 `.delta` 的 sha
         == fp）。没有这一条就会误报「损坏」并把一份可用整份删掉重取。
     """
+    # 旧签名 11 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    job_dir = spec.job_dir
+    init_weights_fp = spec.init_weights_fp
+    blob_root = spec.blob_root
+    jid = spec.jid
+    base_url = spec.base_url
+    token = spec.token
+    preloaded = spec.preloaded
+    course_fp = spec.course_fp
+    opt_from = spec.opt_from
+    it = spec.it
+    log = spec.log
     path = job_dir / "init_weights.json"
     fp = str(init_weights_fp or "")
 
@@ -753,7 +783,7 @@ def _resolve_weights(
     # ---- W1/W2/W3：一律走 `_resolve_blob`（内容寻址 + sha 校验 + 命中即写 cache）----
     try:
         raw, hit, src = _resolve_blob(
-            blob_root=blob_root,
+            BlobAsk(blob_root=blob_root,
             name=BLOB_INIT,
             sha=fp,
             inline_b64="",
@@ -761,7 +791,7 @@ def _resolve_weights(
             base_url=base_url,
             token=token,
             preloaded=preloaded,
-            log=log,
+            log=log),
         )
     except RetryableError:
         raise  # 瞬时：重领重下能修（§3.2 的失败分类红线）
@@ -1024,19 +1054,29 @@ def _ensure_payload_raw(
     )
 
 
-def _ensure_code(
-    base_url: str,
-    token: str,
-    jid: str,
-    manifest: dict,
-    job_dir: Path,
-    work_dir: Path,
-    *,
-    code_cache_root: Path | None = None,
-    preloaded: dict | None = None,
-    log=lambda msg: None,
-    bundle: Any = None,
-) -> CodeLanded:
+class _CodeBundle(Protocol):
+    """`LogBundle` 的结构面（只用到 `add`）：不 import 具体类，`download` 的依赖白名单不动。"""
+
+    def add(self, key: str, line: str) -> None: ...
+
+
+@dataclass(frozen=True)
+class CodeAsk:
+    """`_ensure_code` 的旋钮袋（P0-3：10 参 → 一个对象）。"""
+
+    base_url: str
+    token: str
+    jid: str
+    manifest: dict
+    job_dir: Path
+    work_dir: Path
+    code_cache_root: Path | None = None
+    preloaded: dict | None = None
+    log: Callable[[str], None] | None = None
+    bundle: _CodeBundle | None = None
+
+
+def _ensure_code(spec: CodeAsk) -> CodeLanded:
     """把 code.zip 摆到本地并**让它可 import**：内容寻址缓存 → 解包 → `sys.path[0]`。
 
     替代 git 同步（D6）：云端 worker 不再 `git checkout`，而是用 hub 启动时打包的代码快照。
@@ -1058,6 +1098,17 @@ def _ensure_code(
     还要宿主那道热替换护栏（`_CODE` / `CodeSession`）去挡「已 import 的旧代码」——那是**进程**
     的状态，因此留宿主，不搬。
     """
+    # 旧签名 10 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    base_url = spec.base_url
+    token = spec.token
+    jid = spec.jid
+    manifest = spec.manifest
+    job_dir = spec.job_dir
+    work_dir = spec.work_dir
+    code_cache_root = spec.code_cache_root
+    preloaded = spec.preloaded
+    log = spec.log if spec.log is not None else (lambda msg: None)
+    bundle = spec.bundle
     # ---- commit 校验：下载 code.zip 解压到 sys.path（替代 git 同步，D6） ----
     # 云端 worker 不再依赖 git checkout，而是使用 hub 启动时打包的代码快照。
     # ---- code.zip 内容寻址缓存（2026-09-05）：同 sha 只下载/解压一次 ----

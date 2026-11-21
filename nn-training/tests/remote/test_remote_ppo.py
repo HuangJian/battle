@@ -1240,7 +1240,7 @@ def test_resolve_blob_safety_valve_and_inline_fallback(tmp_path: Path, monkeypat
     monkeypatch.setattr(download_mod, "download_blob", _missing)
     with pytest.raises(ProtocolError):
         worker_mod._resolve_blob(
-            blob_root=root,
+            BlobAsk(blob_root=root,
             name=BLOB_OPT,
             sha="a" * 64,
             inline_b64="",
@@ -1248,11 +1248,11 @@ def test_resolve_blob_safety_valve_and_inline_fallback(tmp_path: Path, monkeypat
             base_url="http://hub",
             token="t",
             preloaded=None,
-            log=lambda _m: None,
+            log=lambda _m: None),
         )
     # 无 sha = 未开瘦身 → 内联解析（旧行为不变）
     raw, hit, src = worker_mod._resolve_blob(
-        blob_root=root,
+        BlobAsk(blob_root=root,
         name=BLOB_OPT,
         sha="",
         inline_b64=encode_opt_tar(b"raw-payload"),
@@ -1260,7 +1260,7 @@ def test_resolve_blob_safety_valve_and_inline_fallback(tmp_path: Path, monkeypat
         base_url="http://hub",
         token="t",
         preloaded=None,
-        log=lambda _m: None,
+        log=lambda _m: None),
     )
     assert src == "inline" and raw == b"raw-payload"
 
@@ -1270,7 +1270,7 @@ def test_resolve_blob_sha_mismatch_is_retryable(tmp_path: Path, monkeypatch) -> 
     monkeypatch.setattr(download_mod, "download_blob", lambda *_a, **_k: b"wrong-bytes")
     with pytest.raises(RetryableError):
         worker_mod._resolve_blob(
-            blob_root=tmp_path / "blob_cache",
+            BlobAsk(blob_root=tmp_path / "blob_cache",
             name=BLOB_REF,
             sha="b" * 64,
             inline_b64="",
@@ -1278,7 +1278,7 @@ def test_resolve_blob_sha_mismatch_is_retryable(tmp_path: Path, monkeypatch) -> 
             base_url="http://hub",
             token="t",
             preloaded=None,
-            log=lambda _m: None,
+            log=lambda _m: None),
         )
 
 
@@ -1531,6 +1531,7 @@ import remote.job_lifecycle as JL
 import remote.worker as worker_mod
 from common.protocol import RetryableError
 from hub.store_leases import LeaseSpec
+from remote.download import BlobAsk
 from tests.helpers.http_server import serve_fast
 
 

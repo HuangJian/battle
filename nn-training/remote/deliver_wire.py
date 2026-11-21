@@ -22,7 +22,63 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
+
+
+@dataclass(frozen=True)
+class RoundBody:
+    """`deliver_parts.build_round_body` 的旋钮袋（P0-3）。"""
+
+    root: str | Path
+    run_id: str
+    it: int
+    course: str = ""
+    hub_lease: str = ""
+    worker_name: str = ""
+    eval_rows: list[dict] | None = None
+    row_for: Callable[[int, str], dict | None] | None = None
+    lineage: Mapping | None = None
+    pergame: bool = True
+    now: float = 0.0
+    log: Callable[[str], None] | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class ResultBody:
+    """`deliver_parts.build_result_body` 的旋钮袋（P0-3）。"""
+
+    run_id: str
+    it_end: int
+    state: str
+    summary: dict | None = None
+    end_it_reached: bool = False
+    seg_end_kind: str = ""
+    delivered: int = 0
+    lineage: Mapping | None = None
+    source_dir: str = ""
+    course: str = ""
+    now: float = 0.0
+
+
+@dataclass(frozen=True, kw_only=True)
+class ArtifactBody:
+    """`deliver_parts.build_artifact_body` 的旋钮袋（P0-3）。"""
+
+    run_id: str
+    it: int
+    weights_json: bytes
+    opt_tar: bytes
+    row: dict | None
+    eval_rows: list[dict]
+    lineage: Mapping
+    source_dir: str
+    course: str = ""
+    hub_lease: str = ""
+    worker_name: str = ""
+    now: float = 0.0
+
 
 #: 实时体里**逐局评估行**保留的键（白名单；评审 P0-5 / Q2）。
 #:

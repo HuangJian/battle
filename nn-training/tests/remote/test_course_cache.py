@@ -30,6 +30,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from remote import course_cache as cc
+from remote.download import WeightsAsk
 
 COURSE_FP = "c" * 64
 JOB_ID = "job-1"
@@ -339,7 +340,7 @@ def test_resolve_weights_prefers_identity_hit(tmp_path: Path) -> None:
     job_dir = tmp_path / "job"
     job_dir.mkdir()
     path, src, nbytes = _resolve_weights(
-        job_dir=job_dir,
+        WeightsAsk(job_dir=job_dir,
         init_weights_fp="0" * 64,
         blob_root=blob_root,
         jid="j1",
@@ -350,7 +351,7 @@ def test_resolve_weights_prefers_identity_hit(tmp_path: Path) -> None:
         opt_from=JOB_ID,
         # 消费方是 it=N 的那一轮，`opt_from` 指向 it−1 的产物（`_record` 记的正是 it=2）
         it=3,
-        log=_quiet,
+        log=_quiet),
     )
     assert (src, nbytes) == ("course_cache", 0)
     assert path is not None and path.read_bytes() == b"w" * 8
@@ -365,7 +366,7 @@ def test_resolve_weights_falls_back_when_identity_misses(tmp_path: Path) -> None
     job_dir.mkdir()
     (job_dir / "init_weights.json").write_bytes(b"payload-bytes")
     path, src, nbytes = _resolve_weights(
-        job_dir=job_dir,
+        WeightsAsk(job_dir=job_dir,
         init_weights_fp="",  # 非内容 sha ⇒ 走 payload 分支（旧口径）
         blob_root=blob_root,
         jid="j2",
@@ -375,7 +376,7 @@ def test_resolve_weights_falls_back_when_identity_misses(tmp_path: Path) -> None
         course_fp=COURSE_FP,
         opt_from="job-nowhere",
         it=2,
-        log=_quiet,
+        log=_quiet),
     )
     assert (src, nbytes) == ("payload", 0)
     assert path is not None and path.read_bytes() == b"payload-bytes"

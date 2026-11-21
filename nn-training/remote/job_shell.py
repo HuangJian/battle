@@ -46,6 +46,8 @@ from common.protocol import (
 from remote.cloud_pool import acquire_rollout, release_rollout
 from remote.download import (
     WEIGHT_SOURCES,
+    CodeAsk,
+    WeightsAsk,
     _ensure_code,
     _ensure_payload,
     _ensure_ts_code,
@@ -200,7 +202,7 @@ def land_materials(st: JobState) -> None:
     )
     # `code_cache_dir` 是 run_job 的**入参**（共享根提示），落地后换成 per-sha 目录。
     code = _ensure_code(
-        st.base_url,
+        CodeAsk(st.base_url,
         st.token,
         jid,
         manifest,
@@ -209,7 +211,7 @@ def land_materials(st: JobState) -> None:
         code_cache_root=st.code_cache_dir,
         preloaded=st.preloaded,
         log=log,
-        bundle=prep_b,
+        bundle=prep_b),
     )
     st.code_root = code.code_root
     st.blob_root = code.blob_root
@@ -257,7 +259,7 @@ def resolve_job_weights(st: JobState) -> None:
     blob_miss_bytes = 0
     t_blob = time.time()
     init_w, weights_src, weights_wire_bytes = _resolve_weights(
-        job_dir=st.job_dir,
+        WeightsAsk(job_dir=st.job_dir,
         init_weights_fp=str(manifest["init_weights_fp"]),
         # R0（M0）：本机 f32 副本的身份命中面（旧 hub 无 `opt_from` ⇒ 空串 ⇒ 不试）
         course_fp=str(manifest.get("course_fp", "") or ""),
@@ -268,7 +270,7 @@ def resolve_job_weights(st: JobState) -> None:
         base_url=st.base_url,
         token=st.token,
         preloaded=st.preloaded,
-        log=log,
+        log=log),
     )
     st.prep_b.add("blob 解析", f"{secs(time.time() - t_blob)}s src={weights_src}")
     if weights_src in ("cache", "course_cache"):

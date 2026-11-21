@@ -41,6 +41,7 @@ from remote.bundle import (
     import_bundle,
     read_bundle_index,
 )
+from remote.download import BlobAsk
 from remote.plan_handoff import RunSetup
 from remote.run_loop import run_standalone
 from worker.plan import build_plan, dump_plan, planned_iters
@@ -680,7 +681,7 @@ def test_offline_start_opt_reaches_blob_cache(tmp_path: Path) -> None:
     # 与合成轮**同一次调用形态**：空 base_url + 缓存命中 ⇒ 零网络
     # （旧代码走到 download_blob ⇒ unknown url type ⇒ 整段失败）
     got, hit, src = _resolve_blob(
-        blob_root=dest / "work" / "blob_cache",
+        BlobAsk(blob_root=dest / "work" / "blob_cache",
         name=BLOB_OPT,
         sha=opt_sha,
         inline_b64="",
@@ -688,7 +689,7 @@ def test_offline_start_opt_reaches_blob_cache(tmp_path: Path) -> None:
         base_url="",
         token="t",
         preloaded=None,
-        log=_quiet,
+        log=_quiet),
     )
     assert (got, hit, src) == (opt_raw, True, "cache")
 

@@ -166,7 +166,7 @@ def test_outbox_leg_reaches_the_body_through_the_parts_module(tmp_path: Path) ->
         def build_round_body(self, *_a: Any, **_kw: Any) -> Any:
             raise AssertionError("不该被调用（`rounds_with_rows` 是空的）")
 
-        def build_result_body(self, **_kw: Any) -> tuple[dict, bytes]:
+        def build_result_body(self, spec: Any) -> tuple[dict, bytes]:
             raise AssertionError("不该被调用")
 
         def build_metrics_body(self, *_a: Any, **_kw: Any) -> tuple[dict, int]:

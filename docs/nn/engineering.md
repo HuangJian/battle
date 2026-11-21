@@ -25,6 +25,23 @@
 
 ---
 
+## §262 P0-3 第九刀：download 三个解析器 + deliver_parts 三个装配器收成 spec（宽签名 117 → 109）（2026-11-21）
+
+* `remote/download.py`：`_resolve_blob` / `_resolve_weights` / `_ensure_code` 各留 `(spec)`，
+  冻结 dataclass 字段顺序 = 旧参数顺序；函数体开头一次展开旧局部名，临界区逐字未动。
+  `log` 缺省 `None` 在 `CodeAsk` 里显式落回 `lambda msg: None`（旧缺省是同款）。
+* `remote/deliver_parts.py`：`build_round_body` / `build_result_body` / `build_artifact_body`
+  各留 `(spec)`；`RoundBody` 前三个字段仍可按位置给（旧调用 `(root, run_id, it)`），
+  `ResultBody` / `ArtifactBody` 为 kw_only（旧签名本就全关键字）。
+* spec 定义住 `remote/deliver_wire.py`（L0，纯数据 + stdlib）：`deliver_parts` 与
+  `deliver_outbox.DelivererLike` 共用同一组类型，协议的两个 `build_*` 同步收成 `(spec)`，
+  outbox 文件的宽签名 3 → 1（只剩 `__init__`）。
+* 调用点 18 处（`offline_deliver` / `job_shell` / `train_core` + 8 个测试文件）一次包对象；
+  回归 224 例绿（download / cache / course_cache / offline_deliver / outbox / shape 门禁）。
+* 剩余（下一刀）：`remote/http.py` 的 `_request`(13) 与 `_get_with_retry`(13)——调用点 72 处且
+  测试替身按旧形参读 `kw["timeout"]`，必须同步改成读 spec；`deliver_outbox.__init__`(15) 与
+  `deliver_proc` 的 22 参构造 / 17 参工厂（调用点集中在 `plan_handoff` + 5 个测试）。
+
 ## §261 P0-3 第八刀：认领族 `claim` / `claim_outcome` / `_claim_locked` 收成一个 `LeaseSpec`（宽签名 122 → 117）（2026-11-21）
 
 `WIDE_FUNCS_BASELINE` 里 `hub/queue_claims.py` / `hub/queue_peer.py` / `hub/store.py` /

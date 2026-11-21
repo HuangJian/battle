@@ -52,6 +52,7 @@ from remote import job_shell as shell_mod
 from remote import train_common as train_common_mod
 from remote import train_core as train_core_mod
 from remote import worker as worker_mod
+from remote.download import WeightsAsk
 from remote.worker_server import missing_blobs
 
 
@@ -66,14 +67,14 @@ def _sha(raw: bytes) -> str:
 def _resolve(job_dir: Path, fp: str, *, blob_root: Path | None = None, preloaded=None):
     """`_resolve_weights` 的测试包装（缺省 blob_root = job_dir 的兄弟目录）。"""
     return worker_mod._resolve_weights(
-        job_dir=job_dir,
+        WeightsAsk(job_dir=job_dir,
         init_weights_fp=fp,
         blob_root=blob_root if blob_root is not None else job_dir.parent / "blob_cache",
         jid="j1",
         base_url="http://hub.local",
         token="t",
         preloaded=preloaded,
-        log=_log,
+        log=_log),
     )
 
 

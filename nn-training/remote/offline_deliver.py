@@ -93,7 +93,7 @@ from remote.deliver_ledger import (
 from remote.deliver_mode import eta_text, need_bps
 from remote.deliver_parts import DeliverMetricsMixin
 from remote.deliver_state import DeliverStateMixin
-from remote.deliver_wire import pick_anchors, read_eval_iters
+from remote.deliver_wire import ResultBody, RoundBody, pick_anchors, read_eval_iters
 
 #: 探活结果的缓存秒数（训练一轮动辄几分钟，没必要每轮都探两次：`sync()` 前探一次即可，
 #: 只读的 `/ping` 也便宜——但 hub 不可达时每次 `urlopen` 都要等超时，才是真成本）。
@@ -1274,7 +1274,7 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin, DeliverStateMixi
         #   都调 `deliver_parts.build_round_body`，字节一致是构造性质而不是测出来的巧合。
         #   读权重失败/空文件 ⇒ `None`：扫描时还在、读时没了是瞬时状态，**不标记已投递**。
         built = deliver_parts.build_round_body(
-            self.root,
+            RoundBody(self.root,
             self.run_id,
             int(it),
             course=self.course,
@@ -1285,7 +1285,7 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin, DeliverStateMixi
             lineage=self._manifest(),
             pergame=True,
             now=self._now(),
-            log=self.log,
+            log=self.log),
         )
         if built is None:
             return "stop"
@@ -1394,7 +1394,7 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin, DeliverStateMixi
             # ★ 2026-10-23（W3）：体装配搬到 `deliver_parts.build_result_body`（唯一实现）——
             #   本地 outbox 的「进程内降级」要用**同一条**装配才能保证与 HTTP 腿同字节。
             _body, raw = deliver_parts.build_result_body(
-                run_id=self.run_id,
+                ResultBody(run_id=self.run_id,
                 it_end=int(it_end),
                 state=state,
                 summary=summary,
@@ -1404,7 +1404,7 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin, DeliverStateMixi
                 lineage=self._manifest(),
                 source_dir=str(self.root),
                 course=self.course,
-                now=self._now(),
+                now=self._now()),
             )
             status, _resp = self._post(OFFLINE_RESULT_PATH, raw)
             if not status:

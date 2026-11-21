@@ -22,7 +22,14 @@ from pathlib import Path
 import remote.delta_files as delta_files
 from common.protocol import OFFLINE_ARTIFACT_PATH, OFFLINE_RESULT_BODY_MAX
 from remote.artifacts import ArtifactStore
-from remote.deliver_wire import EVAL_ROWS_HARD, aggregate_eval_rows, wire_row
+from remote.deliver_wire import (
+    EVAL_ROWS_HARD,
+    ArtifactBody,
+    ResultBody,
+    RoundBody,
+    aggregate_eval_rows,
+    wire_row,
+)
 
 #: 整份展开器（调用方注入）：`(容器路径) -> 整份路径`。
 Expander = Callable[[Path], Path]
@@ -171,21 +178,7 @@ def row_for(
     return None
 
 
-def build_round_body(
-    root: str | Path,
-    run_id: str,
-    it: int,
-    *,
-    course: str = "",
-    hub_lease: str = "",
-    worker_name: str = "",
-    eval_rows: list[dict] | None = None,
-    row_for: Callable[[int, str], dict | None] | None = None,
-    lineage: Mapping | None = None,
-    pergame: bool = True,
-    now: float = 0.0,
-    log: Callable[[str], None] | None = None,
-) -> tuple[dict, bytes, str, str, int] | None:
+def build_round_body(spec: RoundBody) -> tuple[dict, bytes, str, str, int] | None:
     """产物目录 → 一轮的完整 wire body：`(body, raw, weights_fp, opt_form, pergame_deferred)`。
 
     **唯一装配实现**（2026-10-23，plan/push-mode-notebooks §6.5 / 评审 P1-1）：HTTP 腿
@@ -196,6 +189,19 @@ def build_round_body(
     `row_for(it, weights_fp)` 由调用方给（配不上本轮字节就宁可不带行）；`eval_rows` 已由
     调用方算好（需不需要评估读数、上界多少都是调用方的策略）。
     """
+    # 旧签名 12 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    root = spec.root
+    run_id = spec.run_id
+    it = spec.it
+    course = spec.course
+    hub_lease = spec.hub_lease
+    worker_name = spec.worker_name
+    eval_rows = spec.eval_rows
+    row_for = spec.row_for
+    lineage = spec.lineage
+    pergame = spec.pergame
+    now = spec.now
+    log = spec.log
     d = ArtifactStore(Path(root), run_id=run_id)
     wp = d.weights_path(int(it))
     try:
@@ -220,7 +226,7 @@ def build_round_body(
         row_for(int(it), wfp) if row_for is not None else None, keep_per_game=bool(pergame)
     )
     body = build_artifact_body(
-        run_id=run_id,
+        ArtifactBody(run_id=run_id,
         it=int(it),
         weights_json=wj,
         opt_tar=opt,
@@ -231,32 +237,31 @@ def build_round_body(
         course=course,
         hub_lease=hub_lease,
         worker_name=worker_name,
-        now=now,
+        now=now),
     )
     raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return body, raw, wfp, delta_files.form_of(opt), pergame_n
 
 
-def build_result_body(
-    *,
-    run_id: str,
-    it_end: int,
-    state: str,
-    summary: dict | None = None,
-    end_it_reached: bool = False,
-    seg_end_kind: str = "",
-    delivered: int = 0,
-    lineage: Mapping | None = None,
-    source_dir: str = "",
-    course: str = "",
-    now: float = 0.0,
-) -> tuple[dict, bytes]:
+def build_result_body(spec: ResultBody) -> tuple[dict, bytes]:
     """段末摘要的体：`(body, raw)`——从 `offline_deliver.deliver_result` 原样搬来的**唯一实现**。
 
     与逐轮产物的差别：摘要是**会变的**（同一 run 续跑后 `it_end` 更大），hub 覆盖写；它不是
     不可变快照，而是「这条腿现在到哪了」的最新答案。超限时只换 `summary`（标 `truncated`），
     其余字段原样——那正是旧实现的行为。
     """
+    # 旧签名 11 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    run_id = spec.run_id
+    it_end = spec.it_end
+    state = spec.state
+    summary = spec.summary
+    end_it_reached = spec.end_it_reached
+    seg_end_kind = spec.seg_end_kind
+    delivered = spec.delivered
+    lineage = spec.lineage
+    source_dir = spec.source_dir
+    course = spec.course
+    now = spec.now
     m = lineage or {}
     body: dict = {
         "run_id": run_id,
@@ -407,26 +412,25 @@ def eval_rows_for(
     return rows + summary + agg_rows, raw_bytes, wire_bytes
 
 
-def build_artifact_body(
-    *,
-    run_id: str,
-    it: int,
-    weights_json: bytes,
-    opt_tar: bytes,
-    row: dict | None,
-    eval_rows: list[dict],
-    lineage: Mapping,
-    source_dir: str,
-    course: str = "",
-    hub_lease: str = "",
-    worker_name: str = "",
-    now: float = 0.0,
-) -> dict:
+def build_artifact_body(spec: ArtifactBody) -> dict:
     """一轮补传的体（`/offline/artifact`）——从 `offline_deliver._post_artifact` 原样搬来。
 
     键的取舍是**契约**（hub 侧 `store_offline_artifact` 认它们）：缺省不带 `course` /
     `lease_token` / `worker_name`（与「带空串」不等价，更贴近旧字节行为）。
     """
+    # 旧签名 12 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    run_id = spec.run_id
+    it = spec.it
+    weights_json = spec.weights_json
+    opt_tar = spec.opt_tar
+    row = spec.row
+    eval_rows = spec.eval_rows
+    lineage = spec.lineage
+    source_dir = spec.source_dir
+    course = spec.course
+    hub_lease = spec.hub_lease
+    worker_name = spec.worker_name
+    now = spec.now
     from common.protocol import encode_opt_tar, encode_weights_json
 
     body: dict = {

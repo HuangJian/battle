@@ -47,7 +47,7 @@ from common.fs import atomic_write_bytes, atomic_write_json
 from common.logutil import tag_logger
 from common.protocol import OFFLINE_ARTIFACT_BODY_MAX, OFFLINE_PUSH_OUTBOX_WARN_BYTES
 from remote.artifacts import ArtifactStore
-from remote.deliver_wire import EVAL_ROWS_HARD
+from remote.deliver_wire import EVAL_ROWS_HARD, ResultBody, RoundBody
 
 try:  # pragma: no cover - 平台分支
     import fcntl
@@ -249,38 +249,9 @@ class OutboxParts(Protocol):
         log: Callable[[str], None] | None = None,
     ) -> dict | None: ...
 
-    def build_round_body(
-        self,
-        root: str | Path,
-        run_id: str,
-        it: int,
-        *,
-        course: str = "",
-        hub_lease: str = "",
-        worker_name: str = "",
-        eval_rows: list[dict] | None = None,
-        row_for: Callable[[int, str], dict | None] | None = None,
-        lineage: Mapping | None = None,
-        pergame: bool = True,
-        now: float = 0.0,
-        log: Callable[[str], None] | None = None,
-    ) -> tuple[dict, bytes, str, str, int] | None: ...
+    def build_round_body(self, spec: RoundBody) -> tuple[dict, bytes, str, str, int] | None: ...
 
-    def build_result_body(
-        self,
-        *,
-        run_id: str,
-        it_end: int,
-        state: str,
-        summary: dict | None = None,
-        end_it_reached: bool = False,
-        seg_end_kind: str = "",
-        delivered: int = 0,
-        lineage: Mapping | None = None,
-        source_dir: str = "",
-        course: str = "",
-        now: float = 0.0,
-    ) -> tuple[dict, bytes]: ...
+    def build_result_body(self, spec: ResultBody) -> tuple[dict, bytes]: ...
 
     def build_metrics_body(
         self,
@@ -709,7 +680,7 @@ class LocalOutboxDeliverer(runtime.ThreadOwner):
             throttled_log=self._throttled_log,
         )
         built = self._parts.build_round_body(
-            self.root,
+            RoundBody(self.root,
             self.run_id,
             int(it),
             course=self.course,
@@ -721,7 +692,7 @@ class LocalOutboxDeliverer(runtime.ThreadOwner):
             # ★ 与 HTTP 腿同一个值（`plan/anchor-full-rounds` S6）：body 不摘逐局明细。
             pergame=True,
             now=float(self._now()),
-            log=self.log,
+            log=self.log),
         )
         if built is None:
             return False  # 权重读不到/空：瞬时状态，不记账（下一拍再试）
@@ -779,7 +750,7 @@ class LocalOutboxDeliverer(runtime.ThreadOwner):
         if obj is None:
             return False
         _body, raw = self._parts.build_result_body(
-            run_id=self.run_id,
+            ResultBody(run_id=self.run_id,
             it_end=int(obj.get("it_end", 0) or 0),
             state=str(obj.get("state", "") or ""),
             summary=obj.get("summary"),
@@ -789,7 +760,7 @@ class LocalOutboxDeliverer(runtime.ThreadOwner):
             lineage=self._manifest(),
             source_dir=str(self.root),
             course=self.course,
-            now=float(self._now()),
+            now=float(self._now())),
         )
         # 与 `_write_round` 同理（评审 F8）：body 与「ready」必须在同一把闸里，否则 ack 会
         # 在两者之间删掉刚写的 final，而账本仍说它 ready —— hub 永远拉不到，永不收尾。

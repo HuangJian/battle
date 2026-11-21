@@ -49,7 +49,7 @@
     "remote/child_proc.py": 1,
     "remote/cloud_pool.py": 10,
     "remote/control_pool.py": 2,
-    "remote/download.py": 7,
+    "remote/download.py": 6,
     "remote/error_report.py": 4,
     "remote/http.py": 11,
     "remote/job_lifecycle.py": 7,

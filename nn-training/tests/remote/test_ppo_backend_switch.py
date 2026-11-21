@@ -248,7 +248,7 @@ def _drive_ppo_to_core(
             blob_root=tmp_path / "blob",
         ),
     )
-    monkeypatch.setattr(SHELL, "_resolve_weights", lambda **_k: (None, "payload", 0))
+    monkeypatch.setattr(SHELL, "_resolve_weights", lambda _spec: (None, "payload", 0))
     monkeypatch.setattr(worker, "_CODE", worker.CodeSession())
     monkeypatch.setattr(worker, "paddle_cuda_available", probe)
     monkeypatch.setattr(worker, "validate_result", lambda *_a, **_k: None)

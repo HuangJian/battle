@@ -8818,6 +8818,17 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-transport-specs-deliver-download
+
+P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参 / `_resolve_weights` 11 /
+`_ensure_code` 10）→ frozen `BlobAsk` / `WeightsAsk` / `CodeAsk`；`remote/deliver_parts.py` 的三个
+装配器（12 / 11 / 12）→ `RoundBody` / `ResultBody` / `ArtifactBody`。三个装配 spec 住 L0 的
+`remote/deliver_wire.py`：`deliver_parts`（L1）与 outbox 协议（L1）**共用同一组类型**，协议不必
+反向 import `deliver_parts`。调用点 18 处一次包对象（关键字起包的 spec 保留 `k=` 标签在 spec 内）。
+宽签名 117 → 109（77 → 75 文件）。下一刀：`remote/http._request`(13) / `_get_with_retry`(13)
+（测试替身多，须同步改成读 spec）与 `deliver_outbox.__init__`(15) / `deliver_proc`
+（22 参构造 + 17 参工厂）。
+
 ## §2026-11-21-goalnn-five-shapings-flat（五次塑形全部零位移：敌方状态定价这条路关闭，只剩教师或新指标）
 
 - **判决**：`g7-def`（四轴阶梯，Φ 判别 +590）与 `g7-def-ent`（同奖励 + ent_coef 0.03）各跑到 it340：

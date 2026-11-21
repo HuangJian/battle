@@ -33,6 +33,7 @@ import remote.download as dl
 import remote.job_round as round_mod
 import remote.plan_handoff as ph
 import remote.worker as W
+from remote.download import BlobAsk, CodeAsk
 
 MB = 1024 * 1024
 
@@ -137,7 +138,7 @@ def test_a_blob_cache_read_hit_touches_mtime(tmp_path: Path) -> None:
     os.utime(p, (time.time() - 10_000, time.time() - 10_000))
     before = p.stat().st_mtime
     got, hit, src = dl._resolve_blob(
-        blob_root=root,
+        BlobAsk(blob_root=root,
         name=dl.BLOB_REF,
         sha=sha,
         inline_b64="",
@@ -145,7 +146,7 @@ def test_a_blob_cache_read_hit_touches_mtime(tmp_path: Path) -> None:
         base_url="",
         token="",
         preloaded=None,
-        log=lambda _m: None,
+        log=lambda _m: None),
     )
     assert got == raw and hit and src == "cache"
     assert p.stat().st_mtime > before, "读命中没 touch ⇒ prune 会把锚点当最旧删掉"
@@ -235,7 +236,7 @@ def test_reseed_anchors_refills_a_missing_ref_without_any_network(tmp_path: Path
     assert (work / "blob_cache" / sha).read_bytes() == raw
     # 链下游真的能拿到：空 base_url 也命中缓存（= 这一轮不会去打网）
     got, hit, src = dl._resolve_blob(
-        blob_root=work / "blob_cache",
+        BlobAsk(blob_root=work / "blob_cache",
         name=dl.BLOB_REF,
         sha=sha,
         inline_b64="",
@@ -243,7 +244,7 @@ def test_reseed_anchors_refills_a_missing_ref_without_any_network(tmp_path: Path
         base_url="",
         token="",
         preloaded=None,
-        log=lambda _m: None,
+        log=lambda _m: None),
     )
     assert got == raw and hit and src == "cache"
 
@@ -288,14 +289,14 @@ def test_a_code_cache_hit_touches_mtime(tmp_path: Path) -> None:
     sys_path0 = list(sys.path)
     try:
         dl._ensure_code(
-            "http://hub",
+            CodeAsk("http://hub",
             "tok",
             "j1",
             {"code_sha256": sha},
             tmp_path / "job",
             tmp_path / "work",
             code_cache_root=root / "code_cache",
-            log=lambda _m: None,
+            log=lambda _m: None),
         )
     finally:
         sys.path[:] = sys_path0
