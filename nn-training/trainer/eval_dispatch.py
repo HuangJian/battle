@@ -33,7 +33,7 @@ import common.protocol
 import common.weights_client
 from common.fs import append_jsonl
 from common.log import log
-from common.proc import bun_version
+from common.proc import TOOLCHAIN
 from common.proc import version_mm as mm
 from remote import weights_standard
 from worker import node_identity
@@ -415,7 +415,7 @@ class EvalDispatcher:
         meta_path, status_timeout = r.meta_path, r.status_timeout
         it = self.it
         _log = r.log
-        local_bun = bun_version(bun)
+        local_bun = TOOLCHAIN.bun_version(bun)
         # 2026-09-03 修正（mac 实测 stage.tiles null）：eval_stages 含自定义关
         # （>=2000）时，节点必须有能力位 stageJsonSupport——旧 agent（无该位）
         # 收到 stage=2000 会走 arena/真实关解析 → stage null → 崩溃。无能力节点

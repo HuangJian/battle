@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import trainer.batch_runner as br
+from tests.helpers.toolchain import stub_toolchain
 from trainer.batch_eval import (
     batch_iter_id,
     claim_pending,
@@ -223,7 +225,7 @@ def test_window_close_no_new_games(tmp_path: Path, monkeypatch) -> None:
     }
     monkeypatch.setattr(common.distribution, "node_ping", lambda *a, **k: dict(ping))
     monkeypatch.setattr(common.weights_client, "post_weights", lambda *a, **k: "kept")
-    monkeypatch.setattr("trainer.batch_runner.bun_version", lambda *a, **k: "9.9.9")
+    stub_toolchain(monkeypatch, br, "9.9.9")
 
     def fake_fetch(spec, *args, **kw):
         kw = dict(spec.__dict__)
@@ -339,7 +341,7 @@ def _run_unit(
     }
     monkeypatch.setattr(common.distribution, "node_ping", lambda *a, **k: dict(ping))
     monkeypatch.setattr(common.weights_client, "post_weights", lambda *a, **k: "kept")
-    monkeypatch.setattr("trainer.batch_runner.bun_version", lambda *a, **k: "9.9.9")
+    stub_toolchain(monkeypatch, br, "9.9.9")
     monkeypatch.setattr(common.task_client, "fetch_task", fake_fetch)
     args = types.SimpleNamespace(eval_window_sec=window)
     cfg = {
@@ -676,7 +678,7 @@ def _channels_runner(
     weights = tmp_path / "w.json"
     weights.write_text("{}", encoding="utf-8")
     eval_log = tmp_path / "eval_log.jsonl"
-    monkeypatch.setattr("trainer.batch_runner.bun_version", lambda *a, **k: "9.9.9")
+    stub_toolchain(monkeypatch, br, "9.9.9")
     args = types.SimpleNamespace(eval_window_sec=window)
     cfg = {
         "policy": {

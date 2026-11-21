@@ -184,11 +184,11 @@ def test_delegating_call_sites_keep_their_public_names() -> None:
     """收敛的是**定义**，不是名字：历史调用点与测试的 monkeypatch 接缝必须还在。
 
     2026-11-14 起 `trainer.dispatch_queue` 不再是第二个 import 面（re-export 已删）：消费方
-    直接 import 真家，历史名字留在**消费方**的命名空间里（`batch_runner.bun_version` /
-    `eval_dispatch.mm`）—— 那正是 `monkeypatch.setattr(mod, "bun_version", ...)` 打桩的位置。
+    直接 import 真家。版本探测自 2026-11-21（§P0-8）起走 `common.proc.TOOLCHAIN` 端口：
+    三家绑的是**同一个默认实例**，测试替换 `monkeypatch.setattr(mod, "TOOLCHAIN", …)`。
     """
-    assert trainer.batch_runner.bun_version is common.proc.bun_version
-    assert trainer.eval_dispatch.bun_version is common.proc.bun_version
+    assert trainer.batch_runner.TOOLCHAIN is common.proc.TOOLCHAIN
+    assert trainer.eval_dispatch.TOOLCHAIN is common.proc.TOOLCHAIN
     assert trainer.eval_dispatch.mm is common.proc.version_mm
     # 私有别名仍在各自模块命名空间里（monkeypatch.setattr(mod, "bun_version", ...) 依赖它）
     assert callable(worker.iter_rollout.bun_version)

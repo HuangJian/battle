@@ -21,7 +21,7 @@ from common import node_speed
 from common.log import log
 
 # 本地对局子进程的无窗口 spawn 由 `trainer.queue_local` 负责（Windows 下不弹黑色 cmd 抢焦点）。
-from common.proc import bun_version as _bun_version
+from common.proc import TOOLCHAIN
 from common.proc import version_mm as _mm
 from remote import weights_standard
 from trainer.dispatch_state import DispatchState, admit_rollout_nodes
@@ -64,10 +64,10 @@ DEDUP_STREAK: dict[str, int] = {}
 
 
 # 版本探测 / major.minor 比对 / 节点采样账本 —— 唯一实现见 `common.proc` 与
-# `biz.agent_meta`（本处 re-export：本模块内的调用点与测试的 monkeypatch 接缝都不变）。
+# `biz.agent_meta`。版本探测走 `common.proc.TOOLCHAIN` 端口（§P0-8）：测试替换本模块的
+# `TOOLCHAIN`，不再是 `setattr(disp, "bun_version", …)`。
 # 历史：本模块与 `trainer/dispatch_queue.py` 各有一份字形相同的三件套（bun_version / mm /
 # _record_agent_meta），差别只在哪一份先被谁 import——两份注释都在解释同一件事。
-bun_version = _bun_version
 mm = _mm
 _record_agent_meta = _record_agent_meta_impl
 
@@ -189,7 +189,7 @@ class RolloutDispatcher:
         # （`current_upgrade_branch()`）⇒ 坑在**签名层面**不再可能复现。
         upgrade_branch = remote.node_upgrade.current_upgrade_branch()
         wver = common.distribution.weights_fingerprint(rl_path)
-        local_bun = bun_version(bun)
+        local_bun = TOOLCHAIN.bun_version(bun)
         iter_no = int(iter_id.rsplit(".", 1)[-1])
         meta_path = (
             traj_dir.parent / "dist-agent-meta.jsonl"

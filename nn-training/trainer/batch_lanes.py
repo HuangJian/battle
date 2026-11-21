@@ -12,7 +12,7 @@
 **读它的那个模块**上：
   * 本模块：`log`（通道日志）· `_record_agent_meta`（机器健康行）· `run_local_eval_game`
     （本机槽位）· `STUCK_GRACE_SEC` / `BUSY_BACKOFF_CAP_SEC`（机器独占常量）。
-  * 仍住 `trainer.batch_runner`：`bun_version` / `RECOVER_PING_SEC` / `NO_CONSUMER_GRACE_SEC` /
+  * 仍住 `trainer.batch_runner`：`TOOLCHAIN`（版本门端口）/ `RECOVER_PING_SEC` / `NO_CONSUMER_GRACE_SEC` /
     `NODE_RECOVERY_TRIES` / `BatchStore`（执行器那一侧）。
   打在错的家 = **静默空操作**（名字还在、没人读）⇒ `tests/trainer/test_batch_runner_split.py`
   按「谁裸名读、谁必须绑定」逐名判。

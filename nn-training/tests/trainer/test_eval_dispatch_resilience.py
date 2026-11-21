@@ -30,6 +30,7 @@ import common.task_client
 import trainer.eval_dispatch as ed
 import worker.eval_exec as ee
 import worker.eval_yield as eval_yield
+from tests.helpers.toolchain import stub_toolchain
 
 #: 慢节点的模拟单局耗时（秒）——用例断言一律与它比，不写死别的绝对数。
 SLOW_NODE_SEC = 3.0
@@ -122,7 +123,7 @@ class _Harness:
                 for n in nodes
             ],
         )
-        monkeypatch.setattr(ed, "bun_version", lambda _bun: "1.1.0")
+        stub_toolchain(monkeypatch, ed, "1.1.0")
         monkeypatch.setattr(ed, "log", self.logs.append)
 
         def fake_refresh(node: dict, **kw: Any) -> bool:
@@ -564,7 +565,7 @@ class _LaneHarness:
         monkeypatch.setattr(common.distribution, "node_ping", ping)
         monkeypatch.setattr(common.weights_client, "post_weights_parallel", post)
         monkeypatch.setattr(common.weights_client, "refresh_weights", lambda *a, **k: True)
-        monkeypatch.setattr(ed, "bun_version", lambda _bun: "1.1.0")
+        stub_toolchain(monkeypatch, ed, "1.1.0")
         monkeypatch.setattr(ed, "log", self.logs.append)
 
         def runner(spec, **kw) -> dict:

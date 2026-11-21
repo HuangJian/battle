@@ -9226,3 +9226,22 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **读数**：G19 基线 **392 处 / 95 文件**；`iter_rollout` 六个执行面接缝在 tests/e2e 里零处逐名 patch。
 - **验证**：`e2e/test_stream_collect_e2e.py` + `e2e/test_run_rl.py` + `tests/remote/test_remote_iter.py`
   **119 passed**；全量 nn 门禁与根 `bun run check` 见提交。全文 → `docs/nn/engineering.md` §259。
+
+## §2026-11-21-trainer-toolchain-port（训练机侧 `bun_version` 收进 `common.proc.Toolchain` 端口）
+
+- **背景**：§258 余账列了 7 处逐名 patch `bun_version`（eval_dispatch 2 / rollout_dispatch 1 /
+  batch_runner 3 / rollout_node 1），并点名「要连 `test_batch_runner_split` 的裸名契约一起改」。
+- **决定**：`common/proc.py` 新增 frozen `Toolchain`（一个 `bun_version: Callable[[str], str]` 字段）
+  + 唯一默认实例 `TOOLCHAIN`；训练机三家从 `from common.proc import bun_version` 改成
+  `from common.proc import TOOLCHAIN`，三个调用点走 `TOOLCHAIN.bun_version(bun)`。测试用
+  `tests/helpers/toolchain.py::stub_toolchain(monkeypatch, module, version)`（`dataclasses.replace`
+  只换该模块的那一份）。`remote/rollout_node` 那 1 处属节点侧，本笔不动。
+- **裸名契约**：`RUNNER_DI` 删 `bun_version`；新守卫钉 `br.TOOLCHAIN is common.proc.TOOLCHAIN` 与
+  「`RUNNER_SRC` 裸名读 `TOOLCHAIN`、不读 `bun_version`」；两家不许互转的头注同步改。
+- **被否决**：三家各绑一份 `bun_version = TOOLCHAIN.bun_version` 兼容名（旧 patch 路径留着 =
+  改端口字段时另一条路静默失效）。
+- **读数**：G19 **不动**（这 6 处是公开名，392 / 95 文件）；文本断言基线形态 **1535 → 1536**、
+  生产源码面 **1224 → 1226**（新守卫 2 条只有读源码才能验）。行为零差异。
+- **验证**：相关 5 个测试文件 133 例 + 4 道预算/门禁 11 例全绿；nn 全量门禁
+  **6697 passed / 3 skipped**（74s，ruff check + mypy 1051 文件全绿）；根 `bun run check` 绿（18s）。
+  全文 → `docs/nn/engineering.md` §260。

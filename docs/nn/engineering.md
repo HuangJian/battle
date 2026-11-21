@@ -25,6 +25,41 @@
 
 ---
 
+## §260 P0-8 续：训练机侧 `bun_version` 收进 `common.proc.Toolchain` 端口（裸名契约随之改；文本断言 1535→1536 / 1224→1226）（2026-11-21）
+
+§258 的余账里有一行：「`bun_version` 逐名 patch：`trainer/eval_dispatch` 2 · `trainer/rollout_dispatch` 1 ·
+`trainer/batch_runner` 3 · `remote/rollout_node` 1；收它们要连 `tests/trainer/test_batch_runner_split.py` 的
+『`bun_version` 必须在本模块被**裸名**读』契约一起改」。本笔收前 6 处；`remote/rollout_node` 那 1 处属于
+节点侧，留待后续。
+
+**做法是再铺一个端口，不是把三家塞进 `NodeExec`**：三家都在训练机侧、只读工具链版本，共用
+`common/proc.py` 的 frozen `Toolchain`（当前一个字段 `bun_version: Callable[[str], str]`）与唯一默认实例
+`TOOLCHAIN`。三个调用点（`BatchEvalRunner._open_unit` / `EvalDispatcher._eval_eligible` /
+`RolloutDispatcher._ping_gate`）从 `bun_version(bun)` 改成 `TOOLCHAIN.bun_version(bun)`；模块全局
+`TOOLCHAIN` 就是新的 patch 锚点：三家 import 的是同一个默认实例，但
+`monkeypatch.setattr(mod, "TOOLCHAIN", …)` 只重绑那一家（无状态 ⇒ 共享安全）。
+
+**测试侧**新增 `tests/helpers/toolchain.py::stub_toolchain(monkeypatch, module, version)`，内部
+`dataclasses.replace(module.TOOLCHAIN, bun_version=lambda _bun: version)`；4 个测试文件的 6 处
+`monkeypatch.setattr(mod, "bun_version", …)` 全换成它（形状与 `stub_exec` 同款）。
+
+**裸名契约一起改**（`tests/trainer/test_batch_runner_split.py`）：`RUNNER_DI` 删 `bun_version`、新增
+`test_bun_version_is_read_through_the_port` 钉两条——① `br.TOOLCHAIN is common.proc.TOOLCHAIN`
+（模块全局 ⇒ patch 生效）；② `RUNNER_SRC` 里裸名 `Load` 含 `TOOLCHAIN`、不含 `bun_version`
+（不许有第二套接缝）。同时把「两家不许互转」与注入点 docstring 里的名字同步成 `TOOLCHAIN`，
+`batch_lanes` 的头注也跟着改。
+
+**门禁读数**：这 6 处是**公开名**，不占 G19（392 处 / 95 文件不动）。新增的源码结构判据让文本断言
+基线 **1535 → 1536**（形态 A）与 **1224 → 1226**（生产源码面 B）—— 两条都只能看源码：「旧名不再在
+模块里裸名读」没有运行时出口；`hasattr` / `is` 判据不计形态。没有改行为：三家读的还是
+`common.proc.bun_version`（缺省 `?` / 10s / 不看退出码）。
+
+**被否决**：给三个模块各绑一份 `bun_version = TOOLCHAIN.bun_version` 兼容名 —— 那等于保留旧
+patch 路径，改端口字段时另一条路静默失效（正是 §P0-8 要消灭的形态）。
+
+**验证**：相关 5 个测试文件 133 例 + 4 道预算/门禁 11 例全绿；nn 全量 **6697 passed / 3 skipped**
+（74s，ruff check + mypy 1051 文件绿）；根 `bun run check` 绿。
+
 ## §259 P0-8 续：流式采集 e2e 的 4 处 `_run_one_game_bounded` 替身也搬上端口（G19 396 → 392）（2026-11-21）
 
 §258 把执行面收成 `NodeExec` 之后，`e2e/test_stream_collect_e2e.py` 里还剩 4 处
