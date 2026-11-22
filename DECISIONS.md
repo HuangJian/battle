@@ -8818,6 +8818,14 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-acquire-spec
+
+P0-3 第二十七刀：`remote/job_lifecycle.py::acquire_job`（9 参，`peek → priority → claim`
+取活三件套）→ frozen `AcquireSpec`（字段顺序/缺省值逐字沿用，`capabilities=None` 仍是
+「本 worker 声明 replay_corpus」的入口）。生产调用点 `remote/worker.py` 1 处 + 测试 13 处
+（含 `jl.acquire_job` 两处多行）全部包对象；`claim_job` 保持原签名，簇内互调未动。
+宽签名 **75 → 74**，`job_lifecycle.py` 4 → 3。
+
 ## §2026-11-21-iter-race-specs
 
 P0-3 第二十六刀（批量）：`worker/iter_rollout.py` 的 `_run_one_game`(9) /

@@ -42,6 +42,7 @@ import json
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import common.env_probe as env_probe
@@ -455,20 +456,22 @@ def _priority_rank(prio: str) -> int:
         return len(PRIORITY_ORDER)
 
 
-def acquire_job(
-    base_url: str,
-    token: str,
-    *,
-    worker_id: str = "",
-    role: str = ROLE_ONLINE,
-    #: 本地候选过滤（**不发给 hub**）：课程归属只来自 peek 响应，过滤只是「在这批候选里选」。
-    #: BC 课程级 drain 用；缺省 None = 旧行为（不筛）。
-    accept: Callable[[dict], bool] | None = None,
-    depth: int = 3,
-    on_drop: Any = None,
-    capabilities: list[str] | None = None,
-    log: Any = None,
-) -> dict | None:
+@dataclass(frozen=True)
+class AcquireSpec:
+    """`acquire_job` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    base_url: str
+    token: str
+    worker_id: str = ""
+    role: str = ROLE_ONLINE
+    accept: Callable[[dict], bool] | None = None
+    depth: int = 3
+    on_drop: Any = None
+    capabilities: list[str] | None = None
+    log: Any = None
+
+
+def acquire_job(spec: AcquireSpec) -> dict | None:
     """job 边界的取活三件套：`peek → priority → claim`（§2.3 / §2.6）。
 
     `on_drop(jid)`：`none` 级的通知面（P2 用它丢本地预取副本——「别人已落盘」的 job
@@ -492,6 +495,10 @@ def acquire_job(
     `capabilities`（2026-11-16）：缺省（None）= 本 worker 代码声明 `replay_corpus`
     （调用方是含 replay pre-pass 的 worker 进程）；显式空表 = 不声明（旧 worker 形状）。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    base_url, token, worker_id = spec.base_url, spec.token, spec.worker_id
+    role, accept, depth = spec.role, spec.accept, spec.depth
+    on_drop, capabilities, log = spec.on_drop, spec.capabilities, spec.log
     if capabilities is None:
         capabilities = [CAP_REPLAY_CORPUS]
     peeked = peek_jobs(

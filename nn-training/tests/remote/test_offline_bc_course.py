@@ -283,11 +283,13 @@ def test_acquire_job_filters_candidates_to_the_requested_course(
 
     monkeypatch.setattr(jl, "claim_job", fake_claim)
     got = jl.acquire_job(
-        "http://hub",
-        "t",
-        worker_id="w1",
-        role="offline",
-        accept=lambda c: str(c.get("course") or "") == "bc1",
+        jl.AcquireSpec(
+            "http://hub",
+            "t",
+            worker_id="w1",
+            role="offline",
+            accept=lambda c: str(c.get("course") or "") == "bc1",
+        )
     )
     assert seen["jid"] == "b", "别的课的候选必须先被筛掉，否则会领串门"
     assert got is not None and got["job_id"] == "b"
@@ -305,10 +307,12 @@ def test_acquire_job_does_not_claim_when_no_candidate_matches(
         jl, "claim_job", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("不该 claim"))
     )
     got = jl.acquire_job(
-        "http://hub",
-        "t",
-        worker_id="w1",
-        role="offline",
-        accept=lambda c: str(c.get("course") or "") == "bc1",
+        jl.AcquireSpec(
+            "http://hub",
+            "t",
+            worker_id="w1",
+            role="offline",
+            accept=lambda c: str(c.get("course") or "") == "bc1",
+        )
     )
     assert got == {"halt": True}

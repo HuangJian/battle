@@ -27,6 +27,7 @@ from pathlib import Path
 
 from common.protocol import COURSE_ENABLE_MARKER, normalize_manifest
 from hub.server import _HubQueue, _JobStore, make_server
+from remote.job_lifecycle import AcquireSpec
 from remote.worker import acquire_job
 from tests.helpers.http_server import serve_fast
 
@@ -121,7 +122,7 @@ def test_one_worker_takes_jobs_from_every_course(tmp_path: Path) -> None:
     try:
         seen: list[tuple[str, str]] = []
         for _ in courses:
-            got = acquire_job(base, TOKEN, worker_id=WORKER_ID)
+            got = acquire_job(AcquireSpec(base, TOKEN, worker_id=WORKER_ID))
             assert got is not None, "应当有可领的 job（没有就是轮转/派发断了）"
             assert got.get("job_id"), f"空轮询：{got}"
             seen.append((str(got.get("course")), str(got["job_id"])))
@@ -130,7 +131,7 @@ def test_one_worker_takes_jobs_from_every_course(tmp_path: Path) -> None:
             hub._stores[str(got["course"])].mark_completed(str(got["job_id"]))
         assert [c for c, _ in seen] == list(courses), f"单 worker 未跨课领活：{seen}"
         # 两门课都领完 ⇒ 再轮询是空（不是把某一门重复领一遍）
-        assert acquire_job(base, TOKEN, worker_id=WORKER_ID) is None
+        assert acquire_job(AcquireSpec(base, TOKEN, worker_id=WORKER_ID)) is None
     finally:
         srv.shutdown()
         srv.server_close()
@@ -146,7 +147,7 @@ def test_one_worker_serves_a_late_third_course(tmp_path: Path) -> None:
     _publish(hub, "c5-gae", "a" * 16)
     base, srv, th = _boot(tmp_path, hub)
     try:
-        first = acquire_job(base, TOKEN, worker_id=WORKER_ID)
+        first = acquire_job(AcquireSpec(base, TOKEN, worker_id=WORKER_ID))
         assert first is not None and first["course"] == "c5-gae"
         hub._stores["c5-gae"].mark_completed(str(first["job_id"]))
 
@@ -157,7 +158,7 @@ def test_one_worker_serves_a_late_third_course(tmp_path: Path) -> None:
         (tmp_path / "c7-new").mkdir(parents=True, exist_ok=True)
         (tmp_path / "c7-new" / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
         _publish(hub, "c7-new", "b" * 16)
-        nxt = acquire_job(base, TOKEN, worker_id=WORKER_ID)
+        nxt = acquire_job(AcquireSpec(base, TOKEN, worker_id=WORKER_ID))
         assert nxt is not None, "新课的 job 必须被同一份 worker 领走"
         assert nxt["course"] == "c7-new"
     finally:

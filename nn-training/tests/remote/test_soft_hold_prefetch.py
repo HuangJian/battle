@@ -551,7 +551,7 @@ def test_worker_loop_uses_prefetched_payload_without_downloading(tmp_path: Path,
     preloaded_seen: list[str] = []
     calls = {"n": 0}
 
-    def _acquire(base_url, token, **kw):
+    def _acquire(_spec):
         calls["n"] += 1
         if calls["n"] > 2:  # 两个 job 都跑完：让循环靠 max_idle_sec 自己收尾
             return None
@@ -743,7 +743,7 @@ def test_prefetch_hit_is_visible_in_the_wire_line(tmp_path: Path, monkeypatch) -
     }
     calls = {"n": 0}
 
-    def _acquire(base_url, token, **kw):
+    def _acquire(_spec):
         calls["n"] += 1
         if calls["n"] > 2:  # 两个 job 都跑完：让循环靠 max_idle_sec 自己收尾
             return None
@@ -976,7 +976,7 @@ def test_worker_loop_hands_over_a_stage_and_cleans_it_at_job_end(
     seen: list[dict] = []
     calls = {"n": 0}
 
-    def _acquire(base_url, token, **kw):
+    def _acquire(_spec):
         calls["n"] += 1
         if calls["n"] > 2:  # 两个 job 都跑完：让循环靠 max_idle_sec 自己收尾
             return None

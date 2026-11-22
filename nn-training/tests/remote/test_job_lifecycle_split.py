@@ -39,6 +39,7 @@ if str(ROOT) not in sys.path:
 
 import remote.job_lifecycle as jl_mod
 import remote.worker as worker_mod
+from remote.job_lifecycle import AcquireSpec
 from tests.helpers import remote_dag as dag
 
 JL_FILE = ROOT / "remote" / "job_lifecycle.py"
@@ -200,7 +201,7 @@ def test_cluster_internal_seam_is_the_job_lifecycle_module(monkeypatch) -> None:
         lambda *a, **k: {"job_id": "j1", "manifest": {"m": 1}, "status": "ok"},
     )
 
-    got = worker_mod.acquire_job("http://hub", "tok", worker_id="host:1")
+    got = worker_mod.acquire_job(AcquireSpec("http://hub", "tok", worker_id="host:1"))
     assert got is not None and got["job_id"] == "j1", got
     assert got["course"] == "c1", "claim 响应里缺的 course 由候选补上（该字段来自簇内互调）"
 

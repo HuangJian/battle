@@ -25,6 +25,15 @@
 
 ---
 
+## §280 P0-3 第二十七刀：`acquire_job` 收 `AcquireSpec`（宽签名 75 → 74）（2026-11-21）
+
+* 取活三件套入口 9 参 → frozen `AcquireSpec`；`peek/priority/claim` 内部逻辑与
+  `claim_job` 签名逐字未动（簇内互调不受影响）。
+* 调用点：`remote/worker.py` 1 + 四个测试文件 13；`job_lifecycle.py` 4 → 3，
+  全仓 **75 → 74**（文件数 54 不变）。
+* 回归：priority_schedule / lifecycle_split / local_worker_multi_course / offline_bc_course
+  57 条 + 形状/LOC/Any 17 条全绿；mypy/ruff 无错。
+
 ## §279 P0-3 第二十六刀（批量）：跑局/分布/等待面收 spec（宽签名 79 → 75）（2026-11-21）
 
 * `_run_one_game` / `_run_one_game_with_retries` → `OneGameSpec` / `RetryGameSpec`；

@@ -230,6 +230,7 @@ from remote.job_fs import (
 from remote.job_fs import (
     unpack_payload_or_fail as unpack_payload_or_fail,
 )
+from remote.job_lifecycle import AcquireSpec as AcquireSpec
 
 # 作业取活 / 生命周期 / 回传面（S4 第八刀 → `remote/job_lifecycle.py`）：**显式转发**。
 # 宿主（`run_job` / `worker_loop` / `_prefetch_fill`，仍在本模块）经这些转发名调用 ⇒
@@ -884,14 +885,16 @@ def worker_loop(
                 # 问询）→ claim（独占）。旧轮询面已退役（R1-9：不兼容旧 worker 是用户
                 # 授权的**一次性**切换）——旧 worker 会拿到 404 而不是静默错跑。
                 job = acquire_job(
-                    base_url,
-                    token,
-                    worker_id=worker_id,
-                    role=role,  # 归属自报：本会话只领本盘的活
-                    accept=job_filter,  # 本地筛选（不发给 hub；BC 课程级 drain）
-                    # P2：已被别人落盘的 job（none 级）就地丢掉本地预取副本——再预取就白花带宽。
-                    on_drop=(pf_store.drop if pf_store is not None else None),
-                    log=log,
+                    AcquireSpec(
+                        base_url,
+                        token,
+                        worker_id=worker_id,
+                        role=role,  # 归属自报：本会话只领本盘的活
+                        accept=job_filter,  # 本地筛选（不发给 hub；BC 课程级 drain）
+                        # P2：已被别人落盘的 job（none 级）就地丢掉本地预取副本——再预取就白花带宽。
+                        on_drop=(pf_store.drop if pf_store is not None else None),
+                        log=log,
+                    )
                 )
             except Exception as e:
                 _acquire_fails, wait_s = acquire_retry(_acquire_fails, e, poll_sec, log)

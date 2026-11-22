@@ -482,7 +482,7 @@ def test_worker_loop_fills_through_the_child_not_a_local_thread(
     jid = "7" * 16
     calls = {"acquire": 0}
 
-    def _acquire(_base, _token, **_kw):
+    def _acquire(_spec):
         calls["acquire"] += 1
         if calls["acquire"] > 1:
             return None

@@ -60,6 +60,7 @@ from common.protocol import (
 )
 from hub.server import _HubQueue, _JobStore, make_server
 from hub.store_leases import LeaseSpec
+from remote.job_lifecycle import AcquireSpec
 from tests.helpers import hub_seams
 from tests.helpers.http_server import serve_fast
 
@@ -544,7 +545,7 @@ def test_acquire_job_prefers_highest_and_skips_none(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(JL, "claim_job", _claim, raising=True)
     logs: list[str] = []
-    got = W.acquire_job("http://hub", "tok", worker_id="A", log=logs.append)
+    got = W.acquire_job(AcquireSpec("http://hub", "tok", worker_id="A", log=logs.append))
     assert got is not None and got["job_id"] == "free1"
     assert claimed == [("free1", 7)], "none 直接丢、medium 排在 highest 之后"
     assert any("none" in m and "done1" in m for m in logs), "丢弃已 landed 的本地副本要留痕"
@@ -571,18 +572,18 @@ def test_acquire_job_demoted_moves_to_next_candidate(monkeypatch: pytest.MonkeyP
         return {"job_id": jid, "manifest": {"job_id": jid}, "status": "ok", "lease_token": "t"}
 
     monkeypatch.setattr(JL, "claim_job", _claim, raising=True)
-    got = W.acquire_job("http://hub", "tok", worker_id="A", log=lambda m: None)
+    got = W.acquire_job(AcquireSpec("http://hub", "tok", worker_id="A", log=lambda m: None))
     assert got is not None and got["job_id"] == "b1"
 
 
 def test_acquire_job_halt_and_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
     """停机达令上浮；hub 不可达（peek 返回 None）⇒ None（外层按「无 job」退避重试）。"""
     monkeypatch.setattr(JL, "peek_jobs", lambda *a, **k: ([], True), raising=True)
-    assert W.acquire_job("http://hub", "tok", worker_id="A", log=lambda m: None) == {"halt": True}
+    assert W.acquire_job(AcquireSpec("http://hub", "tok", worker_id="A", log=lambda m: None)) == {"halt": True}
     monkeypatch.setattr(JL, "peek_jobs", lambda *a, **k: None, raising=True)
-    assert W.acquire_job("http://hub", "tok", worker_id="A", log=lambda m: None) is None
+    assert W.acquire_job(AcquireSpec("http://hub", "tok", worker_id="A", log=lambda m: None)) is None
     monkeypatch.setattr(JL, "peek_jobs", lambda *a, **k: ([], False), raising=True)
-    assert W.acquire_job("http://hub", "tok", worker_id="A", log=lambda m: None) is None
+    assert W.acquire_job(AcquireSpec("http://hub", "tok", worker_id="A", log=lambda m: None)) is None
 
 
 def test_acquire_job_falls_back_to_highest_when_priority_unreachable(
@@ -609,7 +610,7 @@ def test_acquire_job_falls_back_to_highest_when_priority_unreachable(
         },
         raising=True,
     )
-    got = W.acquire_job("http://hub", "tok", worker_id="A", log=lambda m: None)
+    got = W.acquire_job(AcquireSpec("http://hub", "tok", worker_id="A", log=lambda m: None))
     assert got is not None and got["job_id"] == "solo"
 
 
@@ -848,7 +849,7 @@ def test_acquire_job_claims_with_the_mode_the_candidate_carries(
         return {"job_id": jid, "manifest": {"job_id": jid}, "status": "backup", "lease_token": ""}
 
     monkeypatch.setattr(JL, "claim_job", _claim, raising=True)
-    got = W.acquire_job("http://hub", "tok", worker_id="B")
+    got = W.acquire_job(AcquireSpec("http://hub", "tok", worker_id="B"))
     assert seen == [CLAIM_MODE_BACKUP], "空闲 worker 领在飞的活 = 备份副本，不是独占"
     assert got is not None and got["status"] == "backup" and got["lease_token"] == ""
 
@@ -876,7 +877,7 @@ def test_acquire_job_unknown_mode_falls_back_to_exclusive(
         return {"job_id": jid, "manifest": {"job_id": jid}, "status": "ok", "lease_token": "t"}
 
     monkeypatch.setattr(JL, "claim_job", _claim, raising=True)
-    assert W.acquire_job("http://hub", "tok", worker_id="B") is not None
+    assert W.acquire_job(AcquireSpec("http://hub", "tok", worker_id="B")) is not None
     assert seen == [CLAIM_MODE_EXCLUSIVE]
 
 

@@ -260,8 +260,8 @@ def test_multi_hub_round_robin_and_partition(tmp_path: Path) -> None:
     polls: list = []
     seen: dict = {}
 
-    def fake_poll(url, token, **_kwargs):
-        polls.append(url)
+    def fake_poll(spec):
+        polls.append(spec.base_url)
         if len(polls) == 2:
             return {"job_id": "j1", "manifest": {}}
         return None

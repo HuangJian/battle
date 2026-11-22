@@ -117,8 +117,8 @@ def test_worker_loop_forwards_role(
     """
     seen: list[dict] = []
 
-    def _fake_poll(*a, **k):
-        seen.append(k)
+    def _fake_poll(spec):
+        seen.append({"role": spec.role})
         return None  # once=True ⇒ 立刻干净退出
 
     monkeypatch.setattr(W, "acquire_job", _fake_poll, raising=True)
