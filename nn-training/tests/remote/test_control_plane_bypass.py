@@ -30,6 +30,7 @@ if str(ROOT) not in sys.path:
 
 import remote.worker as W
 from remote.bulk_sched import BULK_P1_CRITICAL, BULK_P2_PREFETCH
+from remote.job_lifecycle import PostResultSpec
 from tests.helpers.http_server import serve_fast
 
 TOKEN = "sekret"
@@ -293,7 +294,7 @@ def test_result_upload_holds_single_channel(hub: str):
 
     def upload() -> None:
         try:
-            result_status.append(W.post_result(hub, TOKEN, JID, {"a": 1}, log=lambda _m: None))
+            result_status.append(W.post_result(PostResultSpec(hub, TOKEN, JID, {"a": 1}, log=lambda _m: None)))
         except BaseException as e:
             errs.append(e)
 

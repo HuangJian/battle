@@ -37,6 +37,7 @@ from typing import Any
 #: 落定行的前缀（父侧 `upload_proc` 的解析口径；两边同源 = `result_upload.OUTCOME_PREFIX`，
 #: L0 契约模块 —— 子进程与父侧进程都只从它 import，不互相 import）。
 from common.logutil import log_line
+from remote.job_lifecycle import PostResultSpec
 from remote.result_upload import OUTCOME_PREFIX
 
 
@@ -54,14 +55,16 @@ def _post_one(task: dict[str, Any], post_result) -> dict[str, Any]:
     error = ""
     try:
         status = post_result(
-            str(task.get("base_url") or ""),
-            str(task.get("token") or ""),
-            jid,
-            task.get("result") or {},
-            lease_token=str(task.get("lease_token") or ""),
-            mode=str(task.get("claim_mode") or "ok"),
-            worker_id=str(task.get("worker_id") or ""),
-            log=_log,
+            PostResultSpec(
+                str(task.get("base_url") or ""),
+                str(task.get("token") or ""),
+                jid,
+                task.get("result") or {},
+                lease_token=str(task.get("lease_token") or ""),
+                mode=str(task.get("claim_mode") or "ok"),
+                worker_id=str(task.get("worker_id") or ""),
+                log=_log,
+            )
         )
     except BaseException as e:  # 重试耗尽 / 确定性拒绝 / 传输崩：一律算失败
         error = f"{type(e).__name__}: {e}"

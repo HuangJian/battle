@@ -34,6 +34,7 @@ import remote.http as http_mod
 import remote.job_lifecycle as jl_mod
 import remote.worker as worker_mod
 from remote.http import WireGet
+from remote.job_lifecycle import PostResultSpec
 from tests.helpers import remote_dag as dag
 
 HTTP_FILE = ROOT / "remote" / "http.py"
@@ -186,7 +187,7 @@ def test_request_seam_for_the_job_face_is_the_job_lifecycle_module(monkeypatch) 
         http_mod, "_request", lambda *a, **k: (_ for _ in ()).throw(AssertionError("打偏"))
     )
     monkeypatch.setattr(jl_mod, "_request", lambda *a, **k: (200, b"{}"))
-    rc = jl_mod.post_result("http://hub", "t", "jid1", {"job_id": "jid1"}, log=lambda _m: None)
+    rc = jl_mod.post_result(PostResultSpec("http://hub", "t", "jid1", {"job_id": "jid1"}, log=lambda _m: None))
     assert rc == 200
 
 

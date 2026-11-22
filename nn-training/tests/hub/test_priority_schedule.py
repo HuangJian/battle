@@ -60,7 +60,7 @@ from common.protocol import (
 )
 from hub.server import _HubQueue, _JobStore, make_server
 from hub.store_leases import LeaseSpec
-from remote.job_lifecycle import AcquireSpec
+from remote.job_lifecycle import AcquireSpec, PostResultSpec
 from tests.helpers import hub_seams
 from tests.helpers.http_server import serve_fast
 
@@ -487,9 +487,9 @@ def test_post_result_403_backup_is_discard_not_failure(
     _patch_request(monkeypatch, 403, b'{"error":"lease mismatch"}')
     monkeypatch.setattr(JL, "_wire_add", lambda *a, **k: None, raising=True)
     result = {"job_id": JID, "weights_json": "", "opt_tar_b64": ""}
-    assert W.post_result("http://hub", "tok", JID, result, mode=CLAIM_MODE_BACKUP) == 403
+    assert W.post_result(PostResultSpec("http://hub", "tok", JID, result, mode=CLAIM_MODE_BACKUP)) == 403
     with pytest.raises(ProtocolError):
-        W.post_result("http://hub", "tok", JID, result, mode="ok")
+        W.post_result(PostResultSpec("http://hub", "tok", JID, result, mode="ok"))
 
 
 def test_post_result_409_is_success_for_both_modes(
@@ -499,8 +499,8 @@ def test_post_result_409_is_success_for_both_modes(
     _patch_request(monkeypatch, 409, b'{"error":"already stored"}')
     monkeypatch.setattr(JL, "_wire_add", lambda *a, **k: None, raising=True)
     result = {"job_id": JID, "weights_json": "", "opt_tar_b64": ""}
-    assert W.post_result("http://hub", "tok", JID, result) == 409
-    assert W.post_result("http://hub", "tok", JID, result, mode=CLAIM_MODE_BACKUP) == 409
+    assert W.post_result(PostResultSpec("http://hub", "tok", JID, result)) == 409
+    assert W.post_result(PostResultSpec("http://hub", "tok", JID, result, mode=CLAIM_MODE_BACKUP)) == 409
 
 
 def test_job_cancelled_is_not_a_failure_class() -> None:

@@ -1532,6 +1532,7 @@ import remote.worker as worker_mod
 from common.protocol import RetryableError
 from hub.store_leases import LeaseSpec
 from remote.download import BlobAsk
+from remote.job_lifecycle import PostResultSpec
 from tests.helpers.http_server import serve_fast
 
 
@@ -1584,12 +1585,14 @@ def test_post_result_retry_then_success(monkeypatch, _no_sleep) -> None:
 
     monkeypatch.setattr(JL, "_request", fake_request)
     rc = worker_mod.post_result(
-        "http://hub",
-        "t",
-        "jid1",
-        {"job_id": "jid1"},
-        lease_token="L",
-        log=lambda _m: None,
+        PostResultSpec(
+            "http://hub",
+            "t",
+            "jid1",
+            {"job_id": "jid1"},
+            lease_token="L",
+            log=lambda _m: None,
+        )
     )
     assert rc == 200
 
@@ -1597,11 +1600,13 @@ def test_post_result_retry_then_success(monkeypatch, _no_sleep) -> None:
 def test_post_result_409_is_idempotent_success(monkeypatch, _no_sleep) -> None:
     monkeypatch.setattr(JL, "_request", lambda *_a, **_k: (409, b"duplicate"))
     rc = worker_mod.post_result(
-        "http://hub",
-        "t",
-        "jid1",
-        {"job_id": "jid1"},
-        log=lambda _m: None,
+        PostResultSpec(
+            "http://hub",
+            "t",
+            "jid1",
+            {"job_id": "jid1"},
+            log=lambda _m: None,
+        )
     )
     assert rc == 409
 
@@ -1622,7 +1627,7 @@ def test_post_result_4xx_rejected_no_retry(monkeypatch, _no_sleep) -> None:
 
     monkeypatch.setattr(JL, "_request", fake_request)
     with pytest.raises(ProtocolError, match="400"):
-        worker_mod.post_result("http://hub", "t", "jid1", {"x": 1}, log=lambda _m: None)
+        worker_mod.post_result(PostResultSpec("http://hub", "t", "jid1", {"x": 1}, log=lambda _m: None))
     assert len(posted) == 2, f"v2 -> 一次 JSON 退路 -> 抛错（实得 {len(posted)} 次）"
     assert posted[0].startswith(b"BRV2"), "首次必须是 v2 体"
     assert not posted[1].startswith(b"BRV2"), "退路必须是 JSON 体（否则就是空转）"

@@ -233,3 +233,131 @@ def test_defense_block_no_candidates_is_loud(monkeypatch: pytest.MonkeyPatch, tm
             "--defense-p",
             "0.99",
         )
+
+
+# ---- 拦截块（2026-11-22）------------------------------------------------------
+# 旧防守口径（`s38≥0.2 ∧ ≤12 格`）实测 72.9% 的帧是「玩家在敌人外面、教师往家退」，
+# CE 教出来是"往 down 走"（g9-demo 结课报告 ③）。新口径改成几何量：**玩家夹在威胁与基地
+# 之间**（`d_pb < d_tb`），几何全部从 obs 现算（ch5 基地 / ch6 自己 / ch7..10 敌人）。
+# 这组用例钉住：只在夹击帧取、三种越界各自被剔、两种口径不能同用、无候选要响亮。
+
+
+def _write_intercept_shard(
+    root: Path, name: str, frames: list[tuple[tuple[int, int], tuple[int, int], tuple[int, int] | None]], **kw: Any
+) -> Path:
+    """按 (玩家格, 基地方格, 敌格) 逐帧画 obs 的三个几何通道；scalars 只用来过预筛。"""
+    d = _write_shard(root, name, n=len(frames), v6=True, **kw)
+    obs = np.zeros((len(frames), OBS_CHANNELS, BOARD, BOARD), dtype=np.uint8)
+    for i, (p, b, e) in enumerate(frames):
+        obs[i, 6, p[0], p[1]] = 1
+        obs[i, 5, b[0], b[1]] = 2
+        if e is not None:
+            obs[i, 7, e[0], e[1]] = 1
+    np.save(d / "obs.npy", obs)
+    sc = np.load(d / "scalars.npy")
+    sc[:, 38] = 0.9  # 过预筛（预筛只是省 obs 读，不参与最终判定）
+    sc[:, 17] = 8.0 / CELLS_PER_S17
+    np.save(d / "scalars.npy", sc)
+    return d
+
+
+BASE = (24, 12)
+
+
+def test_intercept_takes_only_interposing_frames(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    corpus = tmp_path / "corpus"
+    _write_intercept_shard(
+        corpus,
+        "shard_s01_seed1",
+        [
+            ((20, 12), BASE, (14, 12)),  # d_tb 10 / d_pb 4 ⇒ 夹击 ✓
+            ((20, 12), BASE, (16, 12)),  # d_tb 8  / d_pb 4 ⇒ 夹击 ✓
+            ((10, 12), BASE, (14, 12)),  # 玩家比威胁更靠外 ⇒ ✗
+            ((20, 12), BASE, (23, 12)),  # 威胁贴脸（d_tb 1）⇒ ✗
+            ((24, 13), BASE, (14, 12)),  # 玩家就在基地上（d_pb 1）⇒ ✗
+            ((20, 12), BASE, None),      # 场上没敌 ⇒ ✗
+        ],
+        stage=0,
+    )
+    out = tmp_path / "bank.npz"
+    _run_args(
+        monkeypatch,
+        "--corpus",
+        str(corpus),
+        "--out",
+        str(out),
+        "--v6",
+        "--skip-general",
+        "--intercept-frames",
+        "999999",
+        "--intercept-nearest",
+    )
+    with np.load(out) as z:
+        assert z["obs"].shape[0] == 2
+        assert z["masks"].shape == (2, 9)
+
+
+def test_intercept_nearest_rejects_other_enemy_closer_to_player(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """两线作战帧：威胁（离基地最近的敌）不是离玩家最近的敌 ⇒ `--intercept-nearest` 剔掉。
+
+    几何（row,col）：基地 (24,12)、玩家 (20,16) d_pb=5.7；威胁 A (15,13) d_tb=9.1、离玩家 5.8；
+    另一敌 B (17,20) d_tb=10.6（更远 ⇒ A 仍是威胁）、离玩家 5.0（**更近**）。
+    ⇒ 不带 flag 该帧入选；带 flag 必须被剔（否则就是"两线作战"被当成单目标教学）。
+    """
+    corpus = tmp_path / "corpus"
+    d = _write_intercept_shard(corpus, "shard_s01_seed1", [((20, 16), BASE, (15, 13))], stage=0)
+    obs = np.load(d / "obs.npy")
+    obs[0, 9, 17, 20] = 1  # B：power 敌，离玩家更近但离基地更远
+    np.save(d / "obs.npy", obs)
+
+    base_argv = [
+        "--corpus", str(corpus), "--out", str(tmp_path / "bank.npz"),
+        "--v6", "--skip-general", "--intercept-frames", "999999",
+    ]
+    _run_args(monkeypatch, *base_argv)  # 不带 flag ⇒ 入选
+    with np.load(tmp_path / "bank.npz") as z:
+        assert z["obs"].shape[0] == 1
+    with pytest.raises(SystemExit, match="无候选"):
+        _run_args(monkeypatch, *base_argv, "--intercept-nearest")
+
+
+def test_intercept_and_defense_are_mutually_exclusive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    corpus = tmp_path / "corpus"
+    _write_intercept_shard(corpus, "shard_s01_seed1", [((20, 12), BASE, (14, 12))], stage=0)
+    with pytest.raises(SystemExit, match="不能同用"):
+        _run_args(
+            monkeypatch,
+            "--corpus",
+            str(corpus),
+            "--out",
+            str(tmp_path / "bank.npz"),
+            "--v6",
+            "--skip-general",
+            "--intercept-frames",
+            "10",
+            "--defense-frames",
+            "10",
+        )
+
+
+def test_intercept_no_candidates_is_loud(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    corpus = tmp_path / "corpus"
+    _write_intercept_shard(corpus, "shard_s01_seed1", [((10, 12), BASE, (14, 12))], stage=0)
+    with pytest.raises(SystemExit, match="无候选"):
+        _run_args(
+            monkeypatch,
+            "--corpus",
+            str(corpus),
+            "--out",
+            str(tmp_path / "bank.npz"),
+            "--v6",
+            "--skip-general",
+            "--intercept-frames",
+            "10",
+        )

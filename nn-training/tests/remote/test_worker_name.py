@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
 
 import remote.job_lifecycle as JL
 from common.protocol import WORKER_ID_HEADER
+from remote.job_lifecycle import PostResultSpec
 
 JID = "j" * 16
 
@@ -74,7 +75,9 @@ def test_post_result_threads_worker_id(monkeypatch) -> None:
     monkeypatch.setattr(JL, "_request", fake_request)
     monkeypatch.setattr(JL, "_wire_add", lambda *_a, **_k: None)
     rc = JL.post_result(
-        "http://hub", "tok", JID, {"a": 1}, worker_id="kaggle-c", log=lambda _m: None
+        PostResultSpec(
+            "http://hub", "tok", JID, {"a": 1}, worker_id="kaggle-c", log=lambda _m: None
+        )
     )
     assert rc == 200
     assert seen.get(WORKER_ID_HEADER) == "kaggle-c"

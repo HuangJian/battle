@@ -25,6 +25,14 @@
 
 ---
 
+## §282 P0-3 第二十九刀：`post_result` 收 `PostResultSpec`（宽签名 73 → 72）（2026-11-21）
+
+* 10 参 → frozen `PostResultSpec`（`result` 仍是第 4 位；`mode`/`worker_id`/`log` 逐字沿用）。
+* 调用点：`upload_worker._post_one` 1 + e2e/hub/remote 测试 17；`job_lifecycle.py` 2 → 1，
+  全仓 **73 → 72**（文件数 54 不变）。
+* 回归：attribution / priority_schedule / http_split / wire_reroll / worker_name /
+  control_plane_bypass / upload 两族 + BC e2e 全绿；ruff/mypy 无错。
+
 ## §281 P0-3 第二十八刀：`report_job_failure` 收 `FailReportSpec`（宽签名 74 → 73）（2026-11-21）
 
 * 9 参 → frozen `FailReportSpec`；`worker` 字段仍是 `worker_id or worker_tag()` 的服务端口径。

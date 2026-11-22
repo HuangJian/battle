@@ -37,6 +37,7 @@ from common.protocol import AUTH_HEADER, decode_weights_json, encode_weights_jso
 from hub.server import _JobStore, make_server
 from hub.store_leases import LeaseSpec
 from remote import worker as worker_mod
+from remote.job_lifecycle import PostResultSpec
 from tests.helpers.http_server import serve_fast
 from tests.helpers.hub_poll import hub_poll
 from trainer import bc_loop
@@ -373,7 +374,7 @@ def test_e2e_bc_interrupt_resume_continue_and_zeroretrain(
         assert (jd.parent / "bc-resume" / f"{jid}.json").exists()  # push 模式兜底落地
 
         # result 回传（真 HTTP post_result，v2 wire）
-        code = worker_mod.post_result(base, TOKEN, jid, result, lease_token=tok_b, log=_quiet)
+        code = worker_mod.post_result(PostResultSpec(base, TOKEN, jid, result, lease_token=tok_b, log=_quiet))
         assert code == 200
         st, body = _http_json(base, f"/jobs/{jid}/result")
         assert st == 200 and body["job_id"] == jid
@@ -473,7 +474,7 @@ def test_e2e_wait_bc_round_ledger_ingest_and_eval(
                 "commit_echo": COMMIT,
                 "bc_sec": 1.0,
             }
-            worker_mod.post_result(base, TOKEN, jid, result, lease_token=tok, log=_quiet)
+            worker_mod.post_result(PostResultSpec(base, TOKEN, jid, result, lease_token=tok, log=_quiet))
 
         thw = threading.Thread(target=fake_worker, daemon=True)
         thw.start()

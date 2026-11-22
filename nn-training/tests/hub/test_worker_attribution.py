@@ -39,6 +39,7 @@ from common.protocol import (
 )
 from hub.server import _HubQueue, _JobStore, make_server
 from hub.store_leases import LeaseSpec
+from remote.job_lifecycle import PostResultSpec
 from remote.push_dispatch import accept_result
 from tests.helpers.http_server import serve_fast
 from tests.helpers.push_worker import result_of
@@ -127,12 +128,14 @@ def test_result_accepted_records_worker_at_settle_time(tmp_path: Path) -> None:
         claimed = W.claim_job(base, TOKEN, JID, worker_id=wid)
         assert claimed is not None and claimed["lease_token"]
         rc = W.post_result(
-            base,
-            TOKEN,
-            JID,
-            result_of(_read_manifest(tmp_path)),
-            lease_token=claimed["lease_token"],
-            log=lambda _m: None,
+            PostResultSpec(
+                base,
+                TOKEN,
+                JID,
+                result_of(_read_manifest(tmp_path)),
+                lease_token=claimed["lease_token"],
+                log=lambda _m: None,
+            )
         )
         assert rc == 200
     acc = _events(ledger, "job_result_accepted")
@@ -154,17 +157,19 @@ def test_duplicate_result_is_recorded_as_rejected_with_worker(tmp_path: Path) ->
         assert claimed is not None and claimed["lease_token"]
         assert (
             W.post_result(
-                base,
-                TOKEN,
-                JID,
-                result_of(manifest),
-                lease_token=claimed["lease_token"],
-                log=lambda _m: None,
+                PostResultSpec(
+                    base,
+                    TOKEN,
+                    JID,
+                    result_of(manifest),
+                    lease_token=claimed["lease_token"],
+                    log=lambda _m: None,
+                )
             )
             == 200
         )
         # 晚到者：同 job 的第二份结果（像竞速输家，无租约 token）——结果已存在 ⇒ 早退 409
-        assert W.post_result(base, TOKEN, JID, result_of(manifest), log=lambda _m: None) == 409
+        assert W.post_result(PostResultSpec(base, TOKEN, JID, result_of(manifest), log=lambda _m: None)) == 409
     rej = _events(ledger, "job_rejected")
     assert len(rej) == 1, rej
     assert rej[0]["worker"] == wid
@@ -288,6 +293,6 @@ def test_post_result_sends_worker_header(monkeypatch: pytest.MonkeyPatch) -> Non
 
     monkeypatch.setattr(JL, "_request", fake_request)
     monkeypatch.setattr(JL, "_wire_add", lambda *a, **k: None)
-    rc = JL.post_result("http://hub", "tok", JID, {"a": 1}, log=lambda _m: None)
+    rc = JL.post_result(PostResultSpec("http://hub", "tok", JID, {"a": 1}, log=lambda _m: None))
     assert rc == 200
     assert seen.get(WORKER_ID_HEADER) == JL.worker_tag()

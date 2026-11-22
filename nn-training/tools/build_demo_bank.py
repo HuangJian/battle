@@ -236,6 +236,123 @@ def _defense_selection(
     return def_idx
 
 
+def _centroid(
+    mask: np.ndarray, rows_ax: np.ndarray, cols_ax: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(n,H,W) bool → 每帧质心 (row, col, 像素数)；空帧的坐标给 nan（调用方自己剔）。"""
+    cnt = mask.sum(axis=(1, 2))
+    safe = np.maximum(cnt, 1)
+    r = np.where(cnt > 0, (mask * rows_ax).sum(axis=(1, 2)) / safe, np.nan)
+    c = np.where(cnt > 0, (mask * cols_ax).sum(axis=(1, 2)) / safe, np.nan)
+    return r, c, cnt
+
+
+def _intercept_selection(
+    args: argparse.Namespace, meta: list[tuple[Path, int, int]], rng: np.random.Generator
+) -> dict[Path, np.ndarray]:
+    """拦截块：只取「玩家夹在威胁与基地之间」的帧 —— 那里唯一解是迎上去，不是回家。
+
+    为什么不用上一版 `s38 ≥ 0.2 ∧ ≤12 格`：实测那一套里 **72.9% 的帧玩家在敌人外面**
+    （教师在那些帧里 60.2% 朝基地 = 往家退），于是 CE 教出来的是"往 down 走"
+    （`g9-demo.jsonc` 结课报告 ③：down 份额 +6.7pp、地盘交出去、基地被拆 +11.6pp）。
+
+    几何量全部从 obs 现算（**不改导出器**）：ch5 基地 / ch6 自己 / ch7..10 四类敌。
+    2×2 坦克内 4 格的差异 ≤1.4 格 ⇒ 取「使 d(敌,基地) 最小」的单格当威胁格即可，不需要连通域。
+
+    条件（默认值见 `--intercept-*`）：
+      · `d(威胁,基地) ≤ dtb`：敌人正在接近；
+      · `d(威胁,基地) ≥ dtb_min`：不是贴脸（贴脸时"拦"没有意义）；
+      · `d(玩家,基地) ≥ dpb`：玩家不在家里（有位移空间）；
+      · `d(玩家,基地) < d(威胁,基地)`：玩家**夹在中间** ⇒ 迎上去才叫拦截；
+      · [`--intercept-nearest`] 威胁同时也是离玩家最近的敌 ⇒ 单目标状态，标签最干净。
+    """
+    pick: dict[Path, np.ndarray] = {}
+    if args.intercept_frames <= 0:
+        return pick
+    rows_ax = np.arange(BOARD, dtype=np.float32)[:, None]
+    cols_ax = np.arange(BOARD, dtype=np.float32)[None, :]
+    total = cand_n = toward_t = toward_b = 0
+    cap = int(args.intercept_frames)
+    for d, _st, _n in meta:
+        md = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
+        if args.intercept_outcome and str(md.get("outcome", "")) != args.intercept_outcome:
+            continue
+        sc = np.load(d / "scalars.npy")
+        if sc.shape[0] == 0:
+            continue
+        s38 = np.clip(sc[:, 38].astype(np.float32), 0.0, 1.0)
+        cells_pb = sc[:, 17].astype(np.float32) * CELLS_PER_S17
+        idx = np.flatnonzero(
+            (s38 >= args.intercept_pre_p) & (cells_pb <= args.intercept_pre_cells)
+        )
+        if idx.size == 0:
+            continue
+        obs = np.load(d / "obs.npy", mmap_mode="r")[idx]
+        pr, pc, pcnt = _centroid(obs[:, 6] > 0, rows_ax, cols_ax)
+        br, bc, bcnt = _centroid(obs[:, 5] > 0, rows_ax, cols_ax)
+        any_e = (obs[:, 7:11] > 0).any(axis=1)
+        if not any_e.any():
+            continue
+        d2b = (rows_ax[None] - br[:, None, None]) ** 2 + (cols_ax[None] - bc[:, None, None]) ** 2
+        d2p = (rows_ax[None] - pr[:, None, None]) ** 2 + (cols_ax[None] - pc[:, None, None]) ** 2
+        fb = np.where(any_e, d2b, np.inf).reshape(idx.size, -1)
+        fp = np.where(any_e, d2p, np.inf).reshape(idx.size, -1)
+        ar = np.arange(idx.size)
+        ab, ap = fb.argmin(axis=1), fp.argmin(axis=1)
+        tr = (ab // BOARD).astype(np.float32)
+        tc = (ab % BOARD).astype(np.float32)
+        nr = (ap // BOARD).astype(np.float32)
+        nc = (ap % BOARD).astype(np.float32)
+        d_tb = np.hypot(tr - br, tc - bc)
+        d_pb = np.hypot(pr - br, pc - bc)
+        ok = np.isfinite(fb[ar, ab]) & np.isfinite(pr) & np.isfinite(br)
+        m = (
+            ok
+            & (d_tb <= args.intercept_dtb)
+            & (d_tb >= args.intercept_dtb_min)
+            & (d_pb >= args.intercept_dpb)
+            & (d_pb < d_tb)
+        )
+        if args.intercept_nearest:
+            m &= np.hypot(nr - tr, nc - tc) < 1.0
+        if not m.any():
+            continue
+        cand_n += int(m.sum())
+        # 画像（只报告，不参与筛选）：教师的 move 是否朝威胁 / 朝基地。
+        # 在**抽样前**的整个候选集上算 —— 抽样后再算会随 cap 抖动。
+        mv = np.clip(np.load(d / "a_move.npy")[idx[m]].astype(np.int64), 0, 3)
+        v_t = np.stack([tc[m] - pc[m], tr[m] - pr[m]], axis=1)
+        v_b = np.stack([bc[m] - pc[m], br[m] - pr[m]], axis=1)
+        md_ = _DIRV[mv]
+        cos_t = (md_ * v_t / np.maximum(np.linalg.norm(v_t, axis=1, keepdims=True), 1e-6)).sum(1)
+        cos_b = (md_ * v_b / np.maximum(np.linalg.norm(v_b, axis=1, keepdims=True), 1e-6)).sum(1)
+        toward_t += int((cos_t > 0.3).sum())
+        toward_b += int((cos_b > 0.3).sum())
+        sel = idx[m]
+        if total + sel.size > cap:
+            room = max(0, cap - total)
+            sel = np.sort(rng.permutation(sel)[:room])
+        if sel.size == 0:
+            continue
+        pick[d] = sel
+        total += int(sel.size)
+        if total >= cap:
+            break
+    if cand_n == 0:
+        near = " ∧ 威胁=最近敌" if args.intercept_nearest else ""
+        raise SystemExit(
+            f"[demo-bank] 拦截块无候选（d_tb<={args.intercept_dtb:g} ∧ >={args.intercept_dtb_min:g}"
+            f" ∧ d_pb>={args.intercept_dpb:g} ∧ d_pb<d_tb{near}）——口径太严"
+        )
+    print(
+        f"[demo-bank] 拦截块候选 {cand_n} → 取 {total}；"
+        f"教师朝威胁 {toward_t / max(1, total):.1%} / 朝基地 {toward_b / max(1, total):.1%}"
+        f"（d_tb<={args.intercept_dtb:g} ∧ >= {args.intercept_dtb_min:g} ∧ d_pb>={args.intercept_dpb:g}"
+        f"{' ∧ 威胁=最近敌' if args.intercept_nearest else ''}）"
+    )
+    return pick
+
+
 def main() -> None:
     ap = house_parser()
     ap.add_argument("--corpus", default=str(NN_ROOT / "data" / "human-x20-corpus"))
@@ -250,6 +367,41 @@ def main() -> None:
         type=int,
         default=0,
         help="0=全收；>0 = 按关分层等量抽样到该帧数（bank 会整份上设备，别给太大）",
+    )
+    ap.add_argument(
+        "--intercept-frames",
+        type=int,
+        default=0,
+        help=(
+            "0=不切拦截块；>0 = 只取「玩家夹在威胁与基地之间」的帧（**取代 --defense-frames**，"
+            "两者不能同用）。这是 2026-11-22 g9-demo 判死后换的口径：旧口径 72.9% 的帧是"
+            "「玩家在敌人外面、教师往家退」，教出来就是「往 down 走」。"
+        ),
+    )
+    ap.add_argument("--intercept-dtb", type=float, default=10.0, help="威胁到基地的格数上界")
+    ap.add_argument("--intercept-dtb-min", type=float, default=2.0, help="威胁到基地的格数下界")
+    ap.add_argument("--intercept-dpb", type=float, default=2.0, help="玩家到基地的格数下界")
+    ap.add_argument(
+        "--intercept-nearest",
+        action="store_true",
+        help="要求威胁**同时**是离玩家最近的敌（单目标状态，标签最干净：朝威胁 67.8%% / 朝基地 26.5%%）",
+    )
+    ap.add_argument(
+        "--intercept-outcome",
+        default="stage_clear",
+        help="拦截块只从该 outcome 的 shard 取（空串 = 不筛）；默认排除教师自己丢基地的局",
+    )
+    ap.add_argument(
+        "--intercept-pre-p",
+        type=float,
+        default=0.05,
+        help="scalars 预筛的 s38 下限（只是为了让 obs 只读 ~15%% 的行，不参与最终判定）",
+    )
+    ap.add_argument(
+        "--intercept-pre-cells",
+        type=float,
+        default=18.0,
+        help="scalars 预筛的到基地格数上界（同上，不参与最终判定）",
     )
     ap.add_argument("--seed", type=int, default=20261121, help="抽样用的 RNG 种子")
     ap.add_argument(
@@ -301,8 +453,14 @@ def main() -> None:
 
     rng = np.random.default_rng(args.seed)
 
-    # ── 防守块（可选）：逐 shard 扫 scalars 找候选帧，再按候选数比例分配配额 ──────────
-    def_idx = _defense_selection(args, meta, rng)
+    # ── 稀有块（可选）：防守块（旧口径，已判死）或拦截块（2026-11-22 新口径）──────────
+    # 两者互斥：同一次构建里混两种口径会让"这份 bank 教的是什么"无法回答。
+    if args.intercept_frames > 0 and args.defense_frames > 0:
+        raise SystemExit("[demo-bank] --intercept-frames 与 --defense-frames 不能同用（口径互斥）")
+    if args.intercept_frames > 0:
+        def_idx = _intercept_selection(args, meta, rng)
+    else:
+        def_idx = _defense_selection(args, meta, rng)
 
     obs_l, sc_l, ex_l, ac_l, m_l = [], [], [], [], []
     total = 0
@@ -385,15 +543,16 @@ def main() -> None:
     # 标签边缘（判断"这份 bank 教的是不是'永不开火'"+ move 先验）
     mv = np.bincount(ac[:, 0], minlength=5 if not args.v6 else 4) / max(1, total)
     print(f"[demo-bank] move 边缘 {np.round(mv, 4).tolist()}（legacy 5 类 / v6 4 类）")
-    if args.defense_frames > 0:
+    if args.defense_frames > 0 or args.intercept_frames > 0:
         # 别叫 `n`：上面循环里的 `n` 是 shard 帧数（int），mypy 会按第一处赋值钉住类型。
         dn = int(def_stats["n"]) or 1
+        label = "拦截块" if args.intercept_frames > 0 else "防守块"
         print(
-            f"[demo-bank] 防守块实测 n={def_stats['n']}（占 bank {def_stats['n'] / max(1, total):.1%}）"
+            f"[demo-bank] {label}实测 n={def_stats['n']}（占 bank {def_stats['n'] / max(1, total):.1%}）"
             f" 普通块 n={kept_gen}（去重丢弃 {dropped_dup}）"
         )
         print(
-            f"[demo-bank] 防守块画像 s38 均值 {def_stats['s38'] / dn:.3f} · 到基地均值 "
+            f"[demo-bank] {label}画像 s38 均值 {def_stats['s38'] / dn:.3f} · 到基地均值 "
             f"{def_stats['cells'] / dn:.1f} 格 · 朝基地 {def_stats['toward'] / dn:.1%} · "
             f"fire!=0 {def_stats['fire'] / dn:.1%}（后两项是**报告**，不参与筛选）"
         )

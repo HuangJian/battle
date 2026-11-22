@@ -617,18 +617,23 @@ def record_upload_wire(jid: str, wire: dict) -> None:
             pass
 
 
-def post_result(
-    base_url: str,
-    token: str,
-    jid: str,
-    result: dict,
-    lease_token: str = "",
-    timeout: float = 120.0,
-    attempts: int = 5,
-    mode: str = "ok",
-    worker_id: str = "",
-    log=_log,
-) -> int:
+@dataclass(frozen=True)
+class PostResultSpec:
+    """`post_result` 的旋钮袋（P0-3：10 参 → 一个对象）。"""
+
+    base_url: str
+    token: str
+    jid: str
+    result: dict
+    lease_token: str = ""
+    timeout: float = 120.0
+    attempts: int = 5
+    mode: str = "ok"
+    worker_id: str = ""
+    log: Callable[..., None] = _log
+
+
+def post_result(spec: PostResultSpec) -> int:
     """POST 结果：瞬时失败（网络/5xx）指数退避重试（最贵产物不允许最后一米丢失）；
     4xx = 确定性拒绝立即抛 ProtocolError；409 = hub 已有同 job 结果（幂等，按成功）。
 
@@ -638,6 +643,10 @@ def post_result(
     `ProtocolError` ⇒ `report_job_failure` ⇒ **训练停腿**（一个赢家把输家炸成事故）。
     非 backup 的 403 仍走原路径（那才是真的协议违规）。
     """
+    # 旧签名 10 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    base_url, token, jid, result = spec.base_url, spec.token, spec.jid, spec.result
+    lease_token, timeout, attempts = spec.lease_token, spec.timeout, spec.attempts
+    mode, worker_id, log = spec.mode, spec.worker_id, spec.log
     last: str = ""
     # 方案B（2026-09-10）：v2 体 = gzip 裸二进制段（省掉 base64 的 33% 膨胀）。
     # 实测线上 1,150,292 -> 862,717 B（相对未压缩的 1,634,596 省 47.2%），上行 ~5.2 -> ~3.9 s。
