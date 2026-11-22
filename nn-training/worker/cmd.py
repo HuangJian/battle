@@ -8,22 +8,37 @@ queue_local 的 run_rollout / run_local_rollout 曾各自手工拼装
 from __future__ import annotations
 
 import functools
+from dataclasses import dataclass
+from typing import Any
 
 
-def build_rollout_cmd(
-    bun: str,
-    args,
-    *,
-    weights: str,
-    out_dir: str,
-    stage: int,
-    seed: int,
-    wver: str = "",
-    node_label: str = "",
-    node_side: bool = False,
-    code_sha: str = "",
-) -> list[str]:
+@dataclass(frozen=True, kw_only=True)
+class RolloutCmdSpec:
+    """一局 rollout 子进程命令的全部输入（P0-3 批 D2b：2 位置 + 8 关键字 → 一个对象）。
+
+    失效面：`stage` / `seed` 是两个相邻 int —— 互换后命令的 `--stages` 拿到种子、`--seeds`
+    拿到关卡号：导出器只报「这组对局没有可用关卡」或静默产出一批不对局的轨迹；
+    `weights` / `out_dir` 是两个相邻路径 str（权重 vs 落盘目录），互换后 `--out` 指进权重文件；
+    `wver` / `node_label` / `code_sha` 是三个身份串 —— 互换后节点互斥/血缘归属静默错位。
+    """
+
+    bun: str
+    args: Any
+    weights: str
+    out_dir: str
+    stage: int
+    seed: int
+    wver: str = ""
+    node_label: str = ""
+    #: `True` = 这份命令由**别的机器**执行（逐轮上云 / 半离线整段）。
+    node_side: bool = False
+    code_sha: str = ""
+
+
+def build_rollout_cmd(spec: RolloutCmdSpec) -> list[str]:
     """按 args.goal_rollout / intent_rollout 选 exporter 并拼装 bun 命令。
+
+    入参 = 一个 `RolloutCmdSpec`（P0-3 批 D2b）；下面一次展开，函数体逐字不动。
 
     三模式差异（plan/distributed-rollout.md）：
       goal   → export-goal-rollout.ts（心跳承诺期，--heartbeat [--coarse]）
@@ -34,6 +49,11 @@ def build_rollout_cmd(
     目录内的相对路径、且节点上必须有那份数据。起始分布（state_init）的快照**还没**走这条通道
     （plan §P2.5）⇒ 在 `argv_init_for` 里**响亮拒**（宁可拒发，不可静默跑成标准开局）。
     """
+    bun, args = spec.bun, spec.args
+    weights, out_dir = spec.weights, spec.out_dir
+    stage, seed = spec.stage, spec.seed
+    wver, node_label = spec.wver, spec.node_label
+    node_side, code_sha = spec.node_side, spec.code_sha
     if getattr(args, "goal_rollout", False):
         cmd = [
             bun,

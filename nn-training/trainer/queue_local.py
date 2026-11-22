@@ -36,7 +36,12 @@ from remote import weights_standard
 # 进度行节流口径与节点侧 rollout 共用一份（`progress_due`，见 `common.game_watch`）；
 # serve_pool = 节点侧同一份长驻池（`worker/serve_pool.py`）。
 from worker import node_identity, serve_pool
-from worker.cmd import build_rollout_cmd, corpus_fp_for_args, course_fp_for_args
+from worker.cmd import (
+    RolloutCmdSpec,
+    build_rollout_cmd,
+    corpus_fp_for_args,
+    course_fp_for_args,
+)
 from worker.reports import combine_reports
 from worker.sibling_reuse import reuse_rollout, rollout_sources
 
@@ -289,14 +294,17 @@ def make_local_pool(
     if pair is None or workers <= 0:
         return None
     cmd = build_rollout_cmd(
-        bun,
-        args,
-        weights=rl_path,
-        out_dir=str(traj_dir / "w0"),  # 只为取脚本名，不落盘
-        stage=int(pair[0]),
-        seed=int(pair[1]),
-        wver=wver,
-        node_label="local",
+        RolloutCmdSpec(
+            bun=bun,
+            args=args,
+            weights=rl_path,
+            out_dir=str(traj_dir / "w0"),
+            # 只为取脚本名，不落盘
+            stage=int(pair[0]),
+            seed=int(pair[1]),
+            wver=wver,
+            node_label="local",
+        )
     )
     if len(cmd) < 2:
         return None
@@ -413,14 +421,16 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
         wdir.mkdir(parents=True, exist_ok=True)
         log_path = wdir / "rollout.log"
         cmd = build_rollout_cmd(
-            bun,
-            args,
-            weights=rl_path,
-            out_dir=str(wdir),
-            stage=si,
-            seed=seed,
-            wver=wver,
-            node_label="local",
+            RolloutCmdSpec(
+                bun=bun,
+                args=args,
+                weights=rl_path,
+                out_dir=str(wdir),
+                stage=si,
+                seed=seed,
+                wver=wver,
+                node_label="local",
+            )
         )
         # 同族课程的现成局：命中就不 spawn（连子进程启动都不付）。
         src = sources.get((si, seed))
@@ -508,14 +518,16 @@ def run_local_rollout(
     wdir = traj_dir / f"w{idx}"
     wdir.mkdir(parents=True, exist_ok=True)
     cmd = build_rollout_cmd(
-        bun,
-        args,
-        weights=rl_path,
-        out_dir=str(wdir),
-        stage=si,
-        seed=sd,
-        wver=wver,
-        node_label="local",
+        RolloutCmdSpec(
+            bun=bun,
+            args=args,
+            weights=rl_path,
+            out_dir=str(wdir),
+            stage=si,
+            seed=sd,
+            wver=wver,
+            node_label="local",
+        )
     )
     log_path = wdir / "rollout.log"
     # 兄弟课的现成局（同 run_rollout.run_one 同一份函数）：命中即返回其报告 + 拷入的 shard，

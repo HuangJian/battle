@@ -29,6 +29,29 @@
 
 ---
 
+## §314 P0-3 批 D2b：`build_rollout_cmd`(10) → `RolloutCmdSpec`（19 → 18）（2026-11-22）
+
+* **一把刀一处，15 个调用点**：`worker/cmd.build_rollout_cmd`(2 位置 + 8 关键字) → 一个
+  `RolloutCmdSpec`。调用面：`queue_local` 3 · `plan` 1（云侧模板）· `iter_job` 1（kind=iter 模板）
+  · 用例 10。读数：宽签名 **19 → 18**、15 → **14** 文件。
+* **坏点 = 三个相邻对**：`stage` / `seed` 是两个 int（互换后 `--stages` 拿到种子号、`--seeds`
+  拿到关卡号：导出器要么报「没有可用关卡」，要么更坏 —— 静默产出一批「关卡对、种子错」的轨迹，
+  重放成另一份随机序列）；`weights` / `out_dir` 是两个路径 str（互换后 `--out` 指进权重文件）；
+  `wver` / `node_label` / `code_sha` 是三个身份串（节点互斥与血缘归属静默错位）。
+* **机械改写的三个新坑**（都在这一刀踩到）：
+  1. `# ...` **行内注释会被并进下一个关键字**：我按「把实参压成单行」改写，于是
+     `# 只为取脚本名，不落盘` 把紧跟的 `stage=int(pair[0])` 吞成了注释 —— 语句直接消失、ruff 只报
+     `B007 idx not used`。修法：改写后**逐文件 grep `#[^"']*(kw)=`** 找「注释后面还有代码」的行。
+  2. `_args(corpus_fmt="replay")` 这种**位置实参里带 `=`** 被误判成关键字 ⇒ 找 `=` 必须按深度 0。
+  3. 同名子串：方法名/注释里出现 `build_rollout_cmd(`（`trainer/dispatch.py` 的说明性注释）会被
+     扫到 ⇒ 加左边界与「行首是 `#` / 引号」的双重跳过。
+* **两条门禁拦下的写法**：守卫里 `# type: ignore[call-arg]`（要断言旧位置面 TypeError）撞
+  `test_suppression_budget` ⇒ 改成 `Callable[..., object]` 视图调用；`assert "--code-sha" in cmd`
+  属口径 A 文本断言 ⇒ 改 `assert not {"--code-sha"}.isdisjoint(cmd)`（集合判据，与同族用例一致）。
+* **`args: Any` 的必要性（`any_baseline` +1，唯一一处）**：spec 的字段必须有注解，而 `args` 是
+  `argparse.Namespace` / 测试里的 `SimpleNamespace`（动态属性），`object` 连 `.max_ticks` 都取不到。
+  全仓同族先例：`worker/iter_job.py` · `worker/plan.py` · `loop_guards_*` 的 `args: Any` 早已在册。
+
 ## §313 P0-3 批 D2（二）：`breaker_update`(12) → `BreakerSpec`（20 → 19）（2026-11-22）
 
 * **全仓最险的一条**：`worker/breaker.breaker_update`(2 位置 + 10 关键字) 的输入里排着

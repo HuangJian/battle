@@ -38,7 +38,7 @@ from common.protocol import (
     RUN_SEGMENT_DEFAULT_ITERS,
     ProtocolError,
 )
-from worker.cmd import build_rollout_cmd
+from worker.cmd import RolloutCmdSpec, build_rollout_cmd
 
 #: argv 重定向原语：2026-10-07 **下沉**到 L0 叶子 `worker/rollout_argv.py` ——
 #: 节点侧的采集调度器（`worker.stream_collect`，L3）也要用它，而本模块是 L4（靠 `worker.cmd`），
@@ -308,17 +308,19 @@ def template_argv(
     argv: list[list[str]] = []
     for idx, (stage, seed) in enumerate(pairs):
         cmd = build_rollout_cmd(
-            "bun",
-            args,
-            weights=weights,
-            out_dir=f"w{idx}",
-            stage=int(stage),
-            seed=int(seed),
-            wver=str(wver or ""),
-            node_label=node_label,
-            # 模板由**节点**重放（job 目录 cwd）：起始分布的快照还没走云侧通道 ⇒ 课程开了
-            # state_init 时在发布前响亮拒（plan/x20-state-init.plan.md §P2.5）。
-            node_side=True,
+            RolloutCmdSpec(
+                bun="bun",
+                args=args,
+                weights=weights,
+                out_dir=f"w{idx}",
+                stage=int(stage),
+                seed=int(seed),
+                wver=str(wver or ""),
+                node_label=node_label,
+                # 模板由**节点**重放（job 目录 cwd）：起始分布的快照还没走云侧通道 ⇒ 课程开了
+                # state_init 时在发布前响亮拒（plan/x20-state-init.plan.md §P2.5）。
+                node_side=True,
+            )
         )
         argv.append([str(x) for x in cmd[1:]])
     return argv

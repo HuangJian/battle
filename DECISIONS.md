@@ -10176,3 +10176,25 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   `tests/worker/test_breaker_spec.py`（字段表 / 形状 / 两族阈值互不挪用 / `enabled=False` 短路 /
   `ent_peak=None` 退回绝对电平）。
   全文 → `docs/nn/engineering.md` §312（LaneSpec）· §313（BreakerSpec）。
+
+## §2026-11-22-rollout-cmd-spec
+
+**P0-3 批 D2b：`worker/cmd.build_rollout_cmd`(10 参) → `RolloutCmdSpec`（宽签名 19 → 18，15 → 14 文件）。**
+
+- **背景**：命令模板的输入里排着三个相邻对 —— `stage`/`seed`（互换后 `--stages` 吃种子号、
+  `--seeds` 吃关卡号，静默产出一批「关卡对、种子错」的轨迹）、`weights`/`out_dir`（互换后 `--out`
+  指进权重文件）、`wver`/`node_label`/`code_sha`（节点互斥与血缘归属静默错位）。
+- **决定**：`RolloutCmdSpec`（10 字段，frozen + kw_only，住 `worker/cmd.py`）；入口一次展开，函数体
+  逐字不动；15 个调用点（`queue_local` 3 · `plan` 1 · `iter_job` 1 · 用例 10）全部改按名字传。
+- **被否决**：① 把 `args` 拆成「显式旋钮袋」（`max_ticks`/`difficulty`/`heartbeat`/`goal_rollout`…）
+  —— 那是 `PlanSpec` 那一族的事，且 `args` 在这里只被读取几次，拆开会把「谁决定模式」从
+  `args` 搬到两个地方；② 只收 `stage`/`seed`（最险的两个）留其余散参 —— 半对象半散参正是本批要消
+  的形状；③ 给旧位置面留 `*legacy` 兼容层 —— 15 处全是本仓代码。
+- **读数**：宽签名 19 → **18**、15 → **14** 文件（`worker/cmd.py` 归零）。
+- **`Any` 基线 +1（`worker/cmd.py`）**：`args: Any` —— 字段必须有注解，而 `args` 是
+  `argparse.Namespace`/`SimpleNamespace`（动态属性），`object` 取不到 `.max_ticks`。同族先例
+  `worker/iter_job.py` · `worker/plan.py` · `loop_guards_*` 早已在册。
+- **验证**：`bun run pygate` 绿（94s，log clean）；`ruff` + `mypy`(1086 文件) 绿。守
+  `tests/worker/test_rollout_cmd_spec.py`（字段表 / 形状 / `--stages`·`--seeds` 各吃自己那个数 /
+  `node_side` 丢掉本机独有 `--code-sha` / 三个身份串缺省为空）。
+  全文 → `docs/nn/engineering.md` §314。

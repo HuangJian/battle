@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import types
 
-from worker.cmd import build_rollout_cmd
+from worker.cmd import RolloutCmdSpec, build_rollout_cmd
 
 
 def _args(**kw) -> types.SimpleNamespace:
@@ -32,9 +32,16 @@ def _args(**kw) -> types.SimpleNamespace:
 
 def _cmd(**kw) -> list[str]:
     return build_rollout_cmd(
-        "bun", _args(**kw),
-        weights="tmp/w.json", out_dir="tmp/out", stage=2000, seed=7,
-        wver="abc", node_label="local",
+        RolloutCmdSpec(
+            bun="bun",
+            args=_args(**kw),
+            weights="tmp/w.json",
+            out_dir="tmp/out",
+            stage=2000,
+            seed=7,
+            wver="abc",
+            node_label="local",
+        )
     )
 
 
@@ -77,9 +84,17 @@ def test_replay_corpus_passes_local_code_sha() -> None:
     assert len(got) == 64 and set(got) <= set("0123456789abcdef")
 
     node = build_rollout_cmd(
-        "bun", _args(corpus_fmt="replay"),
-        weights="w.json", out_dir="w0", stage=2000, seed=7,
-        wver="abc", node_label="iter", node_side=True,
+        RolloutCmdSpec(
+            bun="bun",
+            args=_args(corpus_fmt="replay"),
+            weights="w.json",
+            out_dir="w0",
+            stage=2000,
+            seed=7,
+            wver="abc",
+            node_label="iter",
+            node_side=True,
+        )
     )
     # 集合判据（非文本断言，口径 C）：本机腿才带 `--code-sha`；`node_side` 恒 full ⇒ 两个 flag 都不该出现。
     assert {"--code-sha", "--corpus-fmt"}.isdisjoint(node)
@@ -95,15 +110,31 @@ def test_teacher_argmax_only_when_requested() -> None:
 def test_teacher_argmax_reaches_node_side_argv() -> None:
     """2026-11-10：kind=iter / 半离线的 argv 由节点执行，也必须带 greedy flag。"""
     cmd = build_rollout_cmd(
-        "bun", _args(rollout_argmax=True),
-        weights="w.json", out_dir="w0", stage=2000, seed=7,
-        wver="abc", node_label="iter", node_side=True,
+        RolloutCmdSpec(
+            bun="bun",
+            args=_args(rollout_argmax=True),
+            weights="w.json",
+            out_dir="w0",
+            stage=2000,
+            seed=7,
+            wver="abc",
+            node_label="iter",
+            node_side=True,
+        )
     )
     assert cmd.count("--teacher-argmax") == 1
     plain = build_rollout_cmd(
-        "bun", _args(),
-        weights="w.json", out_dir="w0", stage=2000, seed=7,
-        wver="abc", node_label="iter", node_side=True,
+        RolloutCmdSpec(
+            bun="bun",
+            args=_args(),
+            weights="w.json",
+            out_dir="w0",
+            stage=2000,
+            seed=7,
+            wver="abc",
+            node_label="iter",
+            node_side=True,
+        )
     )
     assert plain.count("--teacher-argmax") == 0
 

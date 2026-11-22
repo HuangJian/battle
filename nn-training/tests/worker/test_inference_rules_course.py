@@ -23,7 +23,7 @@ from biz.batch_plan import (
     node_supports_suppress_useless_fire,
 )
 from biz.course_spec import InferenceRulesBlock
-from worker.cmd import build_rollout_cmd
+from worker.cmd import RolloutCmdSpec, build_rollout_cmd
 from worker.config import CourseConfig, apply_course, corpus_identity_fp
 from worker.eval_local import EvalGameSpec, run_local_eval_game
 
@@ -162,14 +162,16 @@ def test_apply_course_sets_eval_flag() -> None:
 
 def _rollout_cmd(**kw) -> list[str]:
     return build_rollout_cmd(
-        "bun",
-        _args(**kw),
-        weights="tmp/w.json",
-        out_dir="tmp/out",
-        stage=2000,
-        seed=7,
-        wver="abc",
-        node_label="local",
+        RolloutCmdSpec(
+            bun="bun",
+            args=_args(**kw),
+            weights="tmp/w.json",
+            out_dir="tmp/out",
+            stage=2000,
+            seed=7,
+            wver="abc",
+            node_label="local",
+        )
     )
 
 

@@ -11,7 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from biz.batch_plan import node_supports_decision_k
-from worker.cmd import build_rollout_cmd
+from worker.cmd import RolloutCmdSpec, build_rollout_cmd
 from worker.config import CourseConfig, corpus_identity_fp
 
 
@@ -58,14 +58,16 @@ def test_corpus_fp_changes_only_when_non_default() -> None:
 
 def _cmd(**kw) -> list[str]:
     return build_rollout_cmd(
-        "bun",
-        _args(**kw),
-        weights="tmp/w.json",
-        out_dir="tmp/out",
-        stage=2000,
-        seed=7,
-        wver="abc",
-        node_label="local",
+        RolloutCmdSpec(
+            bun="bun",
+            args=_args(**kw),
+            weights="tmp/w.json",
+            out_dir="tmp/out",
+            stage=2000,
+            seed=7,
+            wver="abc",
+            node_label="local",
+        )
     )
 
 

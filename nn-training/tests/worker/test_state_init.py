@@ -323,50 +323,56 @@ def test_argv_init_for_refuses_a_stage_without_bank_games(tmp_path: Path) -> Non
 
 def test_build_rollout_cmd_appends_the_snapshot_flag(tmp_path: Path) -> None:
     """命令拼装唯一点：开了 state_init 才追加 `--init-snapshot`（其余 flag 不受影响）。"""
-    from worker.cmd import build_rollout_cmd
+    from worker.cmd import RolloutCmdSpec, build_rollout_cmd
 
     bank = _bank(tmp_path)
     with_flag = build_rollout_cmd(
-        "bun",
-        _si_args(bank, max_ticks=12900, difficulty="hard", dodge=""),
-        weights="tmp/w.json",
-        out_dir="tmp/o",
-        stage=2000,
-        seed=7,
-        wver="v",
-        node_label="local",
+        RolloutCmdSpec(
+            bun="bun",
+            args=_si_args(bank, max_ticks=12900, difficulty="hard", dodge=""),
+            weights="tmp/w.json",
+            out_dir="tmp/o",
+            stage=2000,
+            seed=7,
+            wver="v",
+            node_label="local",
+        )
     )
     assert "--init-snapshot" in with_flag
     snap_arg = with_flag[with_flag.index("--init-snapshot") + 1]
     assert snap_arg.endswith("t300.json") or snap_arg.endswith("t600.json"), snap_arg
     plain = build_rollout_cmd(
-        "bun",
-        _args(max_ticks=12900, difficulty="hard", dodge=""),
-        weights="tmp/w.json",
-        out_dir="tmp/o",
-        stage=2000,
-        seed=7,
-        wver="v",
-        node_label="local",
+        RolloutCmdSpec(
+            bun="bun",
+            args=_args(max_ticks=12900, difficulty="hard", dodge=""),
+            weights="tmp/w.json",
+            out_dir="tmp/o",
+            stage=2000,
+            seed=7,
+            wver="v",
+            node_label="local",
+        )
     )
     assert "--init-snapshot" not in plain, "没开 state_init 时逐字节旧行为"
 
 
 def test_build_rollout_cmd_refuses_node_side_runs(tmp_path: Path) -> None:
     """同一门课由**节点**执行（逐轮上云 / 半离线整段）⇒ 发布前就拒，不留半份 job。"""
-    from worker.cmd import build_rollout_cmd
+    from worker.cmd import RolloutCmdSpec, build_rollout_cmd
 
     with pytest.raises(SystemExit, match="云侧"):
         build_rollout_cmd(
-            "bun",
-            _si_args(_bank(tmp_path), max_ticks=12900, difficulty="hard", dodge=""),
-            weights="tmp/w.json",
-            out_dir="tmp/o",
-            stage=2000,
-            seed=7,
-            wver="v",
-            node_label="node",
-            node_side=True,
+            RolloutCmdSpec(
+                bun="bun",
+                args=_si_args(_bank(tmp_path), max_ticks=12900, difficulty="hard", dodge=""),
+                weights="tmp/w.json",
+                out_dir="tmp/o",
+                stage=2000,
+                seed=7,
+                wver="v",
+                node_label="node",
+                node_side=True,
+            )
         )
 
 
