@@ -347,7 +347,9 @@ def test_the_calls_without_a_timeout_parameter_use_the_same_budget(monkeypatch) 
     monkeypatch.setattr(jl, "_request", _fake_request)
     jl.heartbeat("http://hub.invalid:500", "tok", "j1")
     jl.release_job("http://hub.invalid:500", "tok", "j1")
-    jl.report_job_failure("http://hub.invalid:500", "tok", "j1", "boom", log=lambda _m: None)
+    jl.report_job_failure(
+        jl.FailReportSpec("http://hub.invalid:500", "tok", "j1", "boom", log=lambda _m: None)
+    )
     assert seen == [CONTROL_TIMEOUT_SEC] * 3, f"三条腿的预算不一致：{seen}"
     # 安全性：2 次 6s 全败之后，60s 心跳周期内还剩得下重试；300s 租约更不用说。
     assert CONTROL_TIMEOUT_SEC * cp.CONTROL_ATTEMPTS < HEARTBEAT_SEC, (

@@ -94,7 +94,7 @@ def test_report_job_failure_threads_worker_id(monkeypatch) -> None:
 
     monkeypatch.setattr(JL, "_request", fake_request)
     ok = JL.report_job_failure(
-        "http://hub", "tok", JID, "boom", worker_id="colab-t", log=lambda _m: None
+        JL.FailReportSpec("http://hub", "tok", JID, "boom", worker_id="colab-t", log=lambda _m: None)
     )
     assert ok is True
     assert captured["body"]["worker"] == "colab-t"

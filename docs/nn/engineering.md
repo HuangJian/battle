@@ -25,6 +25,13 @@
 
 ---
 
+## §281 P0-3 第二十八刀：`report_job_failure` 收 `FailReportSpec`（宽签名 74 → 73）（2026-11-21）
+
+* 9 参 → frozen `FailReportSpec`；`worker` 字段仍是 `worker_id or worker_tag()` 的服务端口径。
+* 调用点：`job_round` 的 Exception / SystemExit 两分支 + control_pool / worker_name 测试；
+  `job_lifecycle.py` 3 → 2，全仓 **74 → 73**（文件数 54 不变）。
+* 回归：job_round_split / control_pool / worker_name 等 52 条 + 形状/LOC/Any 全绿；ruff/mypy 无错。
+
 ## §280 P0-3 第二十七刀：`acquire_job` 收 `AcquireSpec`（宽签名 75 → 74）（2026-11-21）
 
 * 取活三件套入口 9 参 → frozen `AcquireSpec`；`peek/priority/claim` 内部逻辑与

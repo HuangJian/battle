@@ -803,18 +803,22 @@ def job_body_error(phase: str, e: BaseException) -> BaseException:
     )
 
 
-def report_job_failure(
-    base_url: str,
-    token: str,
-    jid: str,
-    reason: str,
-    *,
-    kind: str = "",
-    detail: str = "",
-    lease_token: str = "",
-    worker_id: str = "",
-    log=_log,
-) -> bool:
+@dataclass(frozen=True)
+class FailReportSpec:
+    """`report_job_failure` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    base_url: str
+    token: str
+    jid: str
+    reason: str
+    kind: str = ""
+    detail: str = ""
+    lease_token: str = ""
+    worker_id: str = ""
+    log: Callable[..., None] = _log
+
+
+def report_job_failure(spec: FailReportSpec) -> bool:
     """回报**确定性**失败原因（`POST /jobs/{id}/fail`）。
 
     2026-09-17（plan/remote-wire-remediation §5.3 缺口）：worker_loop 的
@@ -824,6 +828,10 @@ def report_job_failure(
 
     尽力而为：回报不可达时返回 False，由超时兜底（与 release_job 同策略）。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    base_url, token, jid = spec.base_url, spec.token, spec.jid
+    reason, kind, detail = spec.reason, spec.kind, spec.detail
+    lease_token, worker_id, log = spec.lease_token, spec.worker_id, spec.log
     if not base_url or not jid or not reason:
         return False
     body = json.dumps(

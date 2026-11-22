@@ -8818,6 +8818,13 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-fail-report-spec
+
+P0-3 第二十八刀：`remote/job_lifecycle.py::report_job_failure`（9 参）→ frozen
+`FailReportSpec`（字段顺序/缺省值逐字沿用）。调用点：`remote/job_round.py` 2 处
+（Exception / SystemExit 两个分支）+ 测试 2 处。宽签名 **74 → 73**，
+`job_lifecycle.py` 3 → 2（剩 `claim_job` / `post_result`）。
+
 ## §2026-11-21-acquire-spec
 
 P0-3 第二十七刀：`remote/job_lifecycle.py::acquire_job`（9 参，`peek → priority → claim`

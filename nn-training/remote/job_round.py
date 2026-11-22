@@ -65,6 +65,7 @@ from remote.download import download_payload
 from remote.error_report import report_error
 from remote.job_fs import backup_failed_result
 from remote.job_lifecycle import (
+    FailReportSpec,
     _failure_detail,
     abandon_job,
     heartbeat,
@@ -809,15 +810,17 @@ class _Round:
             # 靠 release 回池，报了就等于把可恢复的 job 钉死）；hub 侧把它落成终局后
             # 该 job 不再回池，重发同 job（同幂等键）会清标记。
             report_job_failure(
-                self.base_url,
-                self.token,
-                self.jid,
-                str(e) or type(e).__name__,
-                kind=type(e).__name__,
-                detail=_failure_detail(e),
-                lease_token=self.lease_token,
-                worker_id=self.worker_id,
-                log=self.log,
+                FailReportSpec(
+                    self.base_url,
+                    self.token,
+                    self.jid,
+                    str(e) or type(e).__name__,
+                    kind=type(e).__name__,
+                    detail=_failure_detail(e),
+                    lease_token=self.lease_token,
+                    worker_id=self.worker_id,
+                    log=self.log,
+                )
             )
         except SystemExit as e:
             # ★ 2026-11-20（kaggle 真机，用户口径「坏 job 只该报失败」）：`SystemExit` 是
@@ -835,15 +838,17 @@ class _Round:
             _reason = str(e) or type(e).__name__
             self.log(f"job {self.jid} FAILED: SystemExit: {_reason} — 报失败后继续轮询（worker 不退）")
             report_job_failure(
-                self.base_url,
-                self.token,
-                self.jid,
-                _reason,
-                kind=type(e).__name__,
-                detail=_failure_detail(e),
-                lease_token=self.lease_token,
-                worker_id=self.worker_id,
-                log=self.log,
+                FailReportSpec(
+                    self.base_url,
+                    self.token,
+                    self.jid,
+                    _reason,
+                    kind=type(e).__name__,
+                    detail=_failure_detail(e),
+                    lease_token=self.lease_token,
+                    worker_id=self.worker_id,
+                    log=self.log,
+                )
             )
         except Exception as e:
             self.log(f"job {self.jid} FAILED: {type(e).__name__}: {e} — will re-poll (idempotent)")
