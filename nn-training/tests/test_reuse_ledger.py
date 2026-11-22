@@ -202,8 +202,12 @@ BASELINE_CLONE = 17
 #: 两个引擎的 `update = ppo_update` 别名变成真正的**端口适配器**（5 位置 + `**kwargs` → spec），
 #: `update` 这个名字因此在 `worker/ppo/engine.py` / `engine_paddle.py` 里各出现一次，与
 #: `worker/backend.py` 的协议方法名（契约名）及 `biz/reward_context.py` 凑成 ≥3 —— 断言消息里
-#: 点名的「handler 约定名」那一类，不是新实现（两处适配器形状不同：clone 仍 17，exact 16）。
-BASELINE_SAME_NAME_GE3 = 144
+#: **2026-11-22 抬同名 1 格（144 → 145）的账**：P0-3 第四十六刀把 `run_ppo` 的 15 个形参
+#: 收成 `PPOSpec`，`model` 从「无注解形参」变成 `_PPOModel` 协议 ⇒ 模块里多了一句
+#: `def train(self)` 的**声明**（`worker/ppo/loop.py`），与 `worker/train/bc.py` /
+#: `bc_paddle.py` 的同名凑成 ≥3。与上面 `ConvertPool.summary()` / `RunSetup` 同款：协议镜像，
+#: 不是实现（`def train` 的体只有 `...`；exact 16 / clone 17 都没动）。
+BASELINE_SAME_NAME_GE3 = 145
 
 
 def _stems(modules: frozenset[str]) -> frozenset[str]:

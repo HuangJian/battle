@@ -130,9 +130,9 @@ WIDE_FUNCS_BASELINE = {
     # 守 `tests/worker/test_ppo_update_spec.py`。
     "worker/ppo/goal.py": 1,
     "worker/ppo/intent.py": 1,
-    # 2026-11-19（B8 ④）：`run_ppo` 的 13 个形参就是两个入口的契约本身
-    # （ckpt/target_kl/seed/warmup/ref/kl/on_epoch_done/rng），包成对象只会把它隐形。
-    "worker/ppo/loop.py": 1,
+    # 2026-11-22（P0-3 第四十六刀）：`run_ppo` 的 15 个形参收成 `PPOSpec`，本文件宽签名归零，
+    # 条目删除。B8 ④（2026-11-19）曾特意摊开签名，但两个入口本来就各自手抄同一张旋钮表
+    # （漏抄一个不报错）—— 契约改钉在 `tests/worker/test_ppo_loop_spec.py` 的字段表上。
     "worker/ppo/np_core.py": 1,
     "worker/resume.py": 1,
     # 2026-11-21：`quota_sample_priority` 的 9 个位置参数收成 `QuotaSampleSpec`

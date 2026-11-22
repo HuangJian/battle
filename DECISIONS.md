@@ -9839,3 +9839,25 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   顺序即契约，集合会把这个信息丢掉，且 TS 侧对拍要重写）。
 - **读数**：宽签名 47 → **46**、39 → **38** 文件（`WIDE_FUNCS_BASELINE` 删 `common/task_key.py`）。
 - **验证**：`bun run pygate` 绿（6759 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §298。
+
+## §2026-11-22-ppo-spec（`run_ppo` 的 15 个参数收成 `PPOSpec`；推翻 B8 ④ 的「签名即契约」）
+
+- **背景**：`worker/ppo/loop.run_ppo` = 5 身份位 + 2 份配置（`HeadSpec` / `LossTerms`）+ 8 个
+  训练旋钮。B8 ④（2026-11-19）曾**特意**保留摊开签名，理由写在 `WIDE_FUNCS_BASELINE` 注释里：
+  「形参表就是两个入口的契约，包成对象只会把它隐形」。
+- **改判依据**：契约在**入口**（`ppo_update_goal` / `ppo_update_intent`，已由
+  `test_ppo_loop_core::test_entry_signatures_are_frozen` 钉死），不在签名的形态上；而摊开签名
+  给了第二条隐形通道 —— 两个入口各自手抄同一张 8 项旋钮表，漏抄一个不报错：`value_warmup_epochs`
+  落丢 = value 头随机直接 PPO（实测策略塌缩）、`ref_model`+`kl_coef` 落丢 = kickstarting 静默关、
+  `target_kl` 落丢 = 早停失效、`rng` 落丢 = 每波 minibatch 顺序逐字节相同。
+- **决定**：同模块 frozen + kw_only `PPOSpec`（15 字段，缺省逐字一致；`HeadSpec` 那份配置在 spec 里
+  叫 `head`，避免与 `run_ppo(spec)` 的 `spec` 同名相盖），`run_ppo(spec)` 展开成同名局部量、
+  循环体一字未改；两个入口仍是单条 `return run_ppo(PPOSpec(...))`。守
+  `tests/worker/test_ppo_loop_spec.py`（末条用 AST 校验两个入口**逐个**交齐 15 个关键字）。
+- **类型面**：`model` → `_PPOModel` 协议、`opt` → `_GradOpt` 协议（不用 `object` + 就地 `cast`：
+  协议把循环真正用到的 `train` / `parameters` / `named_parameters` / `zero_grad` 写成契约）。
+  协议方法 `train` 与 `worker/train/bc*.py` 同名 ⇒ 同名账 144 → 145（**协议声明不是实现**，
+  已按账本纪律写明；exact 16 / clone 17 未动）。
+- **顺带纠错**：`WIDE_FUNCS_BASELINE` 该条目注释写「13 个形参」，实测 15（8 个旋钮，非 6）。
+- **读数**：宽签名 46 → **45**、38 → **37** 文件（`WIDE_FUNCS_BASELINE` 删 `worker/ppo/loop.py`）。
+- **验证**：`bun run pygate` 绿（6764 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §299。

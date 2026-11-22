@@ -1776,7 +1776,7 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      剩下的仍是逐模块工程，照该形状先铺端口再收测试。
    * **P1-4 类型化**：`Any` 1178 处 / 181 文件（G14 冻结）；mypy 仍是非 strict。
      批量换 `object` 已实测否决（406 个红点），只能逐个数据边界换成 TypedDict / 协议。
-   * **P0-3 参数爆炸**：仍有 **46 个函数 >8 参数 / 38 文件**（2026-11-22 实测；形状门禁按文件
+   * **P0-3 参数爆炸**：仍有 **45 个函数 >8 参数 / 37 文件**（2026-11-22 实测；形状门禁按文件
      冻结）。`dispatch_bc_corpus`(25) → `BcDispatchSpec`（§286，62 → 61）；
      `dispatch_rollout_phase`(25) → `RolloutPhaseSpec`（§287，61 → 60）；
      `run_rollout_stream`(22) → `StreamRunSpec`（§288，60 → 59）；
@@ -1797,8 +1797,10 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      import `remote.worker`）（§297，48 → 47，40 → 39）；
      `common/task_key.task_key`(16) → `TaskKeySpec`（同模块；9 个同型开关由位置位改按名）（§298，
      47 → 46，39 → 38）；
-     **下一批候选（按宽度）**：`worker/ppo/loop.run_ppo`(15) · `worker/plan.build_plan`(14) /
-     `remote/offline_eval.run_cloud_eval`(14)。
+     `worker/ppo/loop.run_ppo`(15) → `PPOSpec`（推翻 B8 ④「签名即契约」：契约在入口 +
+     新守卫的字段表上；`model`/`opt` 改 Protocol 消除 `object` 就地 cast）（§299，46 → 45，38 → 37）；
+     **下一批候选（按宽度）**：`worker/plan.build_plan`(14) / `remote/offline_eval.run_cloud_eval`(14) ·
+     `worker/ppo/np_core.load_episodes_common`(13)。
      `make_loaders` / `archive_course` / `collect_corpus` 与 `bc_ingest` 三兄弟
      已收成 spec（§273）；`load_ppo_corpus` / `ingest_offline_artifact` /
      `resumed_manifests` 紧随其后（§274）。审计的「124」是 2026-11-19 上游合入前的读数，合入带进了新的宽签名）。

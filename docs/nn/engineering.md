@@ -25,6 +25,33 @@
 
 ---
 
+## §299 P0-3 第四十六刀：`run_ppo` 收 `PPOSpec`（46 → 45）（2026-11-22）
+
+* `worker/ppo/loop.run_ppo` 原来 15 个形参：5 个身份位（`model` / `opt` / `chunks` / `epochs` /
+  `device`）+ 2 份配置（`spec: HeadSpec` / `terms: LossTerms`）+ 8 个训练旋钮（`ckpt_path` /
+  `target_kl` / `seed` / `value_warmup_epochs` / `ref_model` / `kl_coef` / `on_epoch_done` /
+  `rng`）。现在只收一份 frozen + kw_only `PPOSpec`（同模块）。宽签名 46 → **45**，文件 38 → **37**。
+* **B8 ④（2026-11-19）的旧决定被改判**：当时特意把 15 个形参摊在签名上，理由是「形参表就是
+  两个入口的契约，包成对象只会把它隐形」。改判依据：契约其实在**入口**（`ppo_update_goal` /
+  `ppo_update_intent`，由 `test_entry_signatures_are_frozen` 钉死）；而摊开的签名给了第二条
+  隐形通道 —— 两个入口各自把同一张 8 项旋钮表**手抄一遍**，漏抄一个不报错，代价是
+  warmup 静默退化（value 头随机 ⇒ 策略塔缩）、kickstarting 静默关掉、早停/断点续跑静默失效。
+  `PPOSpec` 的字段表钉在 `tests/worker/test_ppo_loop_spec.py`，隐形度不高于位置参数。
+* **字段改名**：`HeadSpec` 那份配置在 spec 里叫 `head`（否则 `run_ppo(spec)` 里的 `spec.head`
+  与内层 `_step(... spec: HeadSpec)` 同名相互盖住）—— 连带 `_empty` / `_step` / `_log_epoch`
+  的形参 `spec` → `head`；`run_ppo` 体内 15 行同名局部量展开，循环体一字未改。
+* **类型面**：`model` 从无注解变成 `_PPOModel` 协议（`train` / `parameters` / `named_parameters`
+  三件事），`opt` → `_GradOpt`（`zero_grad`）。不用 `object`：`object` 下 `model.train()` 是
+  mypy 错误，只能就地 `cast`（把验错藏进函数体）；协议把这三件事写成契约，框架类型仍不进签名。
+  协议方法 `train` 与 `worker/train/bc*.py` 同名 ⇒ 同名账 144 → 145（协议声明，不是实现，账已在
+  `tests/test_reuse_ledger.py` 写明；exact / clone 两条未动）。
+* **数量口径顺带捞到一个旧错**：`WIDE_FUNCS_BASELINE` 的注释写「`run_ppo` 的 13 个形参」，
+  实测是 15（8 个关键字旋钮，不是 6）—— 本刀把注释与条目一并删掉，改指向新守卫。
+* 两个入口仍是**单条** `return run_ppo(PPOSpec(...))`（`test_ppo_loop_core.py` 的守门不变）。
+* 新守卫 `tests/worker/test_ppo_loop_spec.py`（5 条：frozen + 全字段 kw_only / 15 字段与缺省逐项表 /
+  `run_ppo` 只剩 `spec` / **两个入口逐个交齐 15 个关键字**（AST 看 `PPOSpec(...)` 的 keywords，
+  且不许位置实参）—— 最后一条直接钉住本刀最可能的失误形态）。
+
 ## §298 P0-3 第四十五刀：`task_key` 收 `TaskKeySpec`（47 → 46）（2026-11-22）
 
 * `common/task_key.task_key` 原来 16 个参数：5 个身份位（`iter_id` / `mode` / `kind` / `stage` /

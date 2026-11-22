@@ -61,7 +61,7 @@ from worker.ppo.cli import run as run_cli
 # 但这个名字必须留在模块命名空间里。
 from worker.ppo.common import _ppo_load as _ppo_load  # RolloutBackend 契约（见上）
 from worker.ppo.common import log, masked_logsoftmax
-from worker.ppo.loop import HeadSpec, LossTerms, run_ppo
+from worker.ppo.loop import HeadSpec, LossTerms, PPOSpec, run_ppo
 from worker.ppo.np_core import (
     # `chunk_episodes` 是 `worker/backend.py::RolloutBackend` 的成员（`trainer/stream.py` 调 `backend.chunk_episodes`）；
     # 本模块不再直接调用它，但这个名字必须留在模块命名空间里。
@@ -284,21 +284,23 @@ def ppo_update_goal(
     target_kl 早停同 ppo_intent。
     """
     return run_ppo(
-        model,
-        opt,
-        chunks,
-        epochs,
-        device,
-        spec=_SPEC,
-        terms=LossTerms(forward=policy_logprobs, ent_coef=ENT_COEF, aux=_engage_ce),
-        ckpt_path=ckpt_path,
-        target_kl=target_kl,
-        seed=seed,
-        value_warmup_epochs=value_warmup_epochs,
-        ref_model=ref_model,
-        kl_coef=kl_coef,
-        on_epoch_done=on_epoch_done,
-        rng=rng,
+        PPOSpec(
+            model=model,
+            opt=opt,
+            chunks=chunks,
+            epochs=epochs,
+            device=device,
+            head=_SPEC,
+            terms=LossTerms(forward=policy_logprobs, ent_coef=ENT_COEF, aux=_engage_ce),
+            ckpt_path=ckpt_path,
+            target_kl=target_kl,
+            seed=seed,
+            value_warmup_epochs=value_warmup_epochs,
+            ref_model=ref_model,
+            kl_coef=kl_coef,
+            on_epoch_done=on_epoch_done,
+            rng=rng,
+        )
     )
 
 # ---- stream backend 接口别名（trainer/stream.py 的 backend.update / load_episodes / _ppo_load）----
