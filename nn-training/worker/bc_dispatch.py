@@ -329,46 +329,54 @@ def _is_busy_hint(reason: str) -> bool:
     """节点回 503 busy（并发槽满）不算节点故障——不能据此熔断。"""
     return "busy" in reason[:64].lower()
 
-def dispatch_bc_corpus(
-    *,
-    tasks: list[tuple[int, int]],
-    out_dir: str | Path,
-    it: int,
-    corpus_fp: str,
-    course_fp: str,
-    difficulty: str,
-    max_ticks: int,
-    stage_json_for=lambda stage: None,
-    lives_override: int | None = None,
-    player_level: int | None = None,
-    wins_only: bool = True,
-    near_miss_times: int = 3,
-    cfg: dict | None = None,
-    nodes: list[dict] | None = None,
-    max_slots: int = 64,
-    task_timeout_sec: float = 600.0,
-    iter_suffix: str = "",
+@dataclass(frozen=True, kw_only=True)
+class BcDispatchSpec:
+    """`dispatch_bc_corpus` 的旋钮袋（P0-3：25 参 → 一个对象）。
+
+    全部 kw_only：这 25 个里有 18 个带缺省值，位置传参曾让「测试提速旋钮」与
+    「生产节流旋钮」只差一位 —— 抄错一格不会报错，只会静默换配速。
+    """
+
+    tasks: list[tuple[int, int]]
+    out_dir: str | Path
+    it: int
+    corpus_fp: str
+    course_fp: str
+    difficulty: str
+    max_ticks: int
+    stage_json_for: Callable[[int], str | None] = lambda stage: None
+    lives_override: int | None = None
+    player_level: int | None = None
+    wins_only: bool = True
+    near_miss_times: int = 3
+    cfg: dict | None = None
+    nodes: list[dict] | None = None
+    max_slots: int = 64
+    task_timeout_sec: float = 600.0
+    iter_suffix: str = ""
     #: v6 三头采集：节点跑 `export-rl-rollout`（策略权重 + 可选 --teacher-argmax）。
-    action_v6: bool = False,
+    action_v6: bool = False
     #: v6 标签策略权重路径（仓库根相对或绝对）；v6 采集必填，sha 进 manifest/缓存键。
-    label_policy_path: str = "",
+    label_policy_path: str = ""
     #: v6 标签来源（argmax/sampled）；只影响节点参数与 taskKey，已进 corpus_fp。
-    label_mode: str = "argmax",
+    label_mode: str = "argmax"
     #: 节点熔断阈值（同一节点连续 N 次「真失败」后本轮摘掉它，任务改派其它节点）。
     #: 0 = 关闭。2026-09-14 事故：mac 节点胜局一律崩（17 局全废），训练直接
     #: BcDispatchError 挂掉——有熔断则 3 次就摘掉它，剩余任务重排给健康节点。
-    node_fail_limit: int = 3,
+    node_fail_limit: int = 3
     #: busy（节点并发槽满，503）背压重排上限与退避步长（2026-09-14：40 局瞬推时
     #: 溢出任务两次撞 busy 即被判失败，整轮训练退出）。busy 不是故障：不计 streak、
     #: 不消耗 attempt 配额，只放回队列 + 线性退避；超上限才认失败。
-    busy_retry_limit: int = 6,
-    busy_backoff_sec: float = 0.25,
+    busy_retry_limit: int = 6
+    busy_backoff_sec: float = 0.25
     #: 熔断后「队列暂空但可能还有任务在飞」时的让位等待**轮数**（每轮 `TRIPPED_IDLE_STEP_SEC`
     #: = 0.05s，缺省 40 轮 = 2s）：给健康节点留出接手被放回任务的时间窗。只在有熔断时生效
     #: （正常轮次直接 return，零开销）。测试侧拧小（§14 先例：把配速旋钮提为参数，生产缺省不变）。
-    tripped_idle_polls: int = 40,
-    log=_log,
-) -> dict:
+    tripped_idle_polls: int = 40
+    log: Callable[[str], None] = _log
+
+
+def dispatch_bc_corpus(spec: BcDispatchSpec) -> dict:
     """并发派发 BC 语料任务到节点，落盘 shard 目录。返回统计 dict。
 
     tasks：本轮还缺的 (stage, seed) 对（调用方已做断点续跑过滤）。
@@ -377,6 +385,19 @@ def dispatch_bc_corpus(
     smoke 覆盖（wins_only 等）不改 corpus_fp，必须换命名空间才不会命中上一轮缓存
     （2026-09-13 实测：smoke 两次跑同 iterId，第二次直接回放上一次的 loss-skipped）。
     """
+    # 旧签名 25 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    tasks, out_dir, it = spec.tasks, spec.out_dir, spec.it
+    corpus_fp, course_fp = spec.corpus_fp, spec.course_fp
+    difficulty, max_ticks = spec.difficulty, spec.max_ticks
+    stage_json_for, lives_override = spec.stage_json_for, spec.lives_override
+    player_level, wins_only = spec.player_level, spec.wins_only
+    near_miss_times, cfg = spec.near_miss_times, spec.cfg
+    nodes, max_slots = spec.nodes, spec.max_slots
+    task_timeout_sec, iter_suffix = spec.task_timeout_sec, spec.iter_suffix
+    action_v6, label_policy_path = spec.action_v6, spec.label_policy_path
+    label_mode, node_fail_limit = spec.label_mode, spec.node_fail_limit
+    busy_retry_limit, busy_backoff_sec = spec.busy_retry_limit, spec.busy_backoff_sec
+    tripped_idle_polls, log = spec.tripped_idle_polls, spec.log
     if not tasks:
         return {
             "games": 0,

@@ -255,6 +255,7 @@ def test_collect_corpus_applies_ratio_after_dispatch(
     from trainer import bc_loop
     from worker import bc_collect
     from worker.bc_collect import CollectSpec
+    from worker.bc_dispatch import BcDispatchSpec
 
     course = _course(
         _ratio(
@@ -266,11 +267,12 @@ def test_collect_corpus_applies_ratio_after_dispatch(
     out = tmp_path / "bc-data" / "it1"
     seen: list[dict] = []
 
-    def fake_dispatch(**kw):
-        seen.append(kw)
-        _shard(Path(kw["out_dir"]), 0, 1, "stage_clear")
-        _shard(Path(kw["out_dir"]), 0, 2, "lives_exhausted")
-        _shard(Path(kw["out_dir"]), 0, 3, "lives_exhausted")
+    def fake_dispatch(spec: BcDispatchSpec):
+        assert isinstance(spec, BcDispatchSpec), "生产调用点必须传 spec（P0-3）"
+        seen.append({"wins_only": spec.wins_only, "out_dir": spec.out_dir})
+        _shard(Path(spec.out_dir), 0, 1, "stage_clear")
+        _shard(Path(spec.out_dir), 0, 2, "lives_exhausted")
+        _shard(Path(spec.out_dir), 0, 3, "lives_exhausted")
         return {"failed": 0, "failed_nodes": []}
 
     monkeypatch.setattr(bc_collect, "dispatch_bc_corpus", fake_dispatch)

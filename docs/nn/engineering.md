@@ -25,6 +25,23 @@
 
 ---
 
+## §286 P0-3 第三十三刀：`dispatch_bc_corpus` 收 `BcDispatchSpec`（62 → 61）（2026-11-22）
+
+* `worker/bc_dispatch.py`：25 个关键字参数 → frozen + kw_only 的 `BcDispatchSpec`，
+  `dispatch_bc_corpus(spec)` 只做一次展开，函数体逐字不动（字段名 / 缺省值全部沿用，
+  含 `node_fail_limit` / `busy_retry_limit` / `busy_backoff_sec` / `tripped_idle_polls`
+  四个配速旋钮）。本文件宽签名 1 → **0**，全仓 62 → **61**、51 → **50** 文件
+  （口径 = `tests/test_python_shape_budget.py`）。
+* 调用点：生产 1（`worker/bc_collect.collect_corpus`）+ 测试 6
+  （`tests/worker/test_bc_course.py`），全部改成 `BcDispatchSpec(...)`。
+* 守 `tests/worker/test_bc_dispatch_spec.py`（3 条：frozen + kw_only / 字段表冻结 /
+  入口只收 `spec`）。生产调用点传的是 spec —— `test_bc_corpus_ratio` 的替身签名收 spec
+  并断言类型（行为覆盖，不读源码：读 `getsource` 会把每条 assert 计入口径 B 的文本断言）。
+  为什么这么在意 kw_only：18 个缺省值里一半是配速旋钮，位置传参抄错一格只会**静默换配速**
+  （用例仍绿，只是变慢）。
+* 回归：`test_bc_course`(47) + 新守卫(3) + `test_bc_corpus_ratio`(10) +
+  `test_python_shape_budget`(4) 全绿；ruff / mypy（1052 文件）无错。
+
 ## §285 P0-3 第三十二刀：eval 派发三签名收 `EvalDispatchSpec`（67 → 64）（2026-11-21）
 
 * `EvalDispatcher.__init__` / `dispatch_eval_round` / `dispatch_eval_bg` 共用一份 spec；

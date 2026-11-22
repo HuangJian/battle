@@ -8818,6 +8818,17 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-22-bc-dispatch-spec
+
+P0-3 第三十三刀（`worker/bc_dispatch.py`）：`dispatch_bc_corpus` 的 25 个关键字参数 →
+frozen + kw_only 的 `BcDispatchSpec`，入口只收 `spec`、展开后函数体逐字不动。
+为什么不是「少几个参数」：18 个缺省值里一半是配速旋钮（熔断阈值 / busy 重排上限与步长 /
+熔断让位轮数），位置传参抄错一格不会报错，只会静默换配速——测试用例照样绿，只是变慢。
+调用点：生产 1（`worker/bc_collect.collect_corpus`）+ 测试 6（`test_bc_course`）。
+宽签名 **62 → 61**（51 → 50 文件），`worker/bc_dispatch.py` 1 → **0**。
+守 `tests/worker/test_bc_dispatch_spec.py`（3 条）+ `test_bc_corpus_ratio` 的替身（行为面
+确认调用点传的是 spec），细节 → `docs/nn/engineering.md §286`。
+
 ## §2026-11-21-eval-dispatch-spec
 
 P0-3 第三十二刀（`trainer/eval_dispatch.py` 一整个族）：`EvalDispatcher.__init__`、

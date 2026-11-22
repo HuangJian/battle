@@ -18,7 +18,7 @@ from worker.bc_corpus import (
     load_shards,
     validate_fixed_corpus,
 )
-from worker.bc_dispatch import BcDispatchError, dispatch_bc_corpus, landed_pairs
+from worker.bc_dispatch import BcDispatchError, BcDispatchSpec, dispatch_bc_corpus, landed_pairs
 from worker.bc_ledger import append_ledger
 
 
@@ -164,25 +164,27 @@ def collect_corpus(spec: CollectSpec) -> Path:
     )
     sj_for = {s: course.custom_stage_payload(s) for s in stages}
     stats = dispatch_bc_corpus(
-        tasks=todo,
-        out_dir=data_round_dir,
-        it=it,
-        corpus_fp=corpus_fp,
-        course_fp=course_fp,
-        difficulty=course.difficulty,
-        max_ticks=max_ticks,
-        stage_json_for=lambda s: sj_for.get(s),
-        lives_override=course.player.lives,
-        player_level=course.player.level,
-        wins_only=wins_only,
-        near_miss_times=near_miss,
-        cfg=cfg,
-        task_timeout_sec=max(120.0, float(max_ticks) * 0.5 + 120.0),
-        iter_suffix="-smoke" if smoke else "",
-        action_v6=bool(course.resolved_action_v6),
-        label_policy_path=str(label_policy) if label_policy is not None else "",
-        label_mode=str(course.corpus.label_mode),
-        log=log,
+        BcDispatchSpec(
+            tasks=todo,
+            out_dir=data_round_dir,
+            it=it,
+            corpus_fp=corpus_fp,
+            course_fp=course_fp,
+            difficulty=course.difficulty,
+            max_ticks=max_ticks,
+            stage_json_for=lambda s: sj_for.get(s),
+            lives_override=course.player.lives,
+            player_level=course.player.level,
+            wins_only=wins_only,
+            near_miss_times=near_miss,
+            cfg=cfg,
+            task_timeout_sec=max(120.0, float(max_ticks) * 0.5 + 120.0),
+            iter_suffix="-smoke" if smoke else "",
+            action_v6=bool(course.resolved_action_v6),
+            label_policy_path=str(label_policy) if label_policy is not None else "",
+            label_mode=str(course.corpus.label_mode),
+            log=log,
+        )
     )
     if stats["failed"] > 0:
         tripped = stats.get("failed_nodes") or []

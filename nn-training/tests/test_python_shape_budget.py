@@ -104,7 +104,8 @@ WIDE_FUNCS_BASELINE = {
     "trainer/queue_local.py": 1,
     "trainer/rollout_phase.py": 1,
     "trainer/stream.py": 1,
-    "worker/bc_dispatch.py": 1,
+    # 2026-11-22（P0-3 第三十三刀）：`dispatch_bc_corpus` 的 25 个关键字参数收成
+    # `BcDispatchSpec` ⇒ 本文件宽签名归零，条目删除。
     "worker/bc_eval.py": 1,
     "worker/breaker.py": 1,
     "worker/cmd.py": 1,

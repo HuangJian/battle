@@ -242,21 +242,23 @@ def test_bc_dispatch_trips_broken_node_and_requeues(tmp_path: Path, monkeypatch)
         {"id": "good", "url": "http://good", "concurrency": 2, "enabled": True},
     ]
     stats = D.dispatch_bc_corpus(
-        tasks=tasks,
-        out_dir=tmp_path,
-        it=1,
-        corpus_fp="cfp",
-        course_fp="xfp",
-        difficulty="hard",
-        max_ticks=100,
-        nodes=nodes,
-        node_fail_limit=3,
-        # 熔断后的让位等待缺省 2s（生产配速）；本用例的节点是打桩的，没有任何真延迟，
-        # 放回队列是轮开始后几毫秒内的事——8 轮（0.4s）已有百倍余量（实测 set 4/8/16/40
-        # 四档的 games/failed/改派行完全一致）。§14 先例：测试侧拧小配速旋钮、生产缺省不变
-        # （不拧的话每个健康节点槽都要空等满 2s = 本用例的全部耗时）。
-        tripped_idle_polls=8,
-        log=msgs.append,
+        D.BcDispatchSpec(
+            tasks=tasks,
+            out_dir=tmp_path,
+            it=1,
+            corpus_fp="cfp",
+            course_fp="xfp",
+            difficulty="hard",
+            max_ticks=100,
+            nodes=nodes,
+            node_fail_limit=3,
+            # 熔断后的让位等待缺省 2s（生产配速）；本用例的节点是打桩的，没有任何真延迟，
+            # 放回队列是轮开始后几毫秒内的事——8 轮（0.4s）已有百倍余量（实测 set 4/8/16/40
+            # 四档的 games/failed/改派行完全一致）。§14 先例：测试侧拧小配速旋钮、生产缺省不变
+            # （不拧的话每个健康节点槽都要空等满 2s = 本用例的全部耗时）。
+            tripped_idle_polls=8,
+            log=msgs.append,
+        )
     )
     # 熔断：坏节点被摘掉并在统计里点名
     assert stats["failed_nodes"] == ["bad"]
@@ -292,16 +294,18 @@ def test_bc_dispatch_failfast_disabled_keeps_old_behavior(tmp_path: Path, monkey
 
     monkeypatch.setattr(D, "fetch_task", fake_fetch)
     stats = D.dispatch_bc_corpus(
-        tasks=[(2000, 1)],
-        out_dir=tmp_path,
-        it=1,
-        corpus_fp="cfp",
-        course_fp="xfp",
-        difficulty="hard",
-        max_ticks=100,
-        nodes=[{"id": "bad", "url": "http://bad", "concurrency": 1, "enabled": True}],
-        node_fail_limit=0,
-        log=lambda _m: None,
+        D.BcDispatchSpec(
+            tasks=[(2000, 1)],
+            out_dir=tmp_path,
+            it=1,
+            corpus_fp="cfp",
+            course_fp="xfp",
+            difficulty="hard",
+            max_ticks=100,
+            nodes=[{"id": "bad", "url": "http://bad", "concurrency": 1, "enabled": True}],
+            node_fail_limit=0,
+            log=lambda _m: None,
+        )
     )
     assert stats["failed"] == 1
     assert stats["failed_nodes"] == []
@@ -323,18 +327,20 @@ def test_bc_dispatch_busy_is_not_a_node_fault(tmp_path: Path, monkeypatch) -> No
 
     monkeypatch.setattr(D, "fetch_task", fake_fetch)
     stats = D.dispatch_bc_corpus(
-        tasks=[(2000, 1), (2000, 2), (2000, 3)],
-        out_dir=tmp_path,
-        it=1,
-        corpus_fp="cfp",
-        course_fp="xfp",
-        difficulty="hard",
-        max_ticks=100,
-        nodes=[{"id": "n1", "url": "http://n1", "concurrency": 1, "enabled": True}],
-        node_fail_limit=2,
-        busy_retry_limit=2,  # 背压上限（测试提速）
-        busy_backoff_sec=0.01,
-        log=lambda _m: None,
+        D.BcDispatchSpec(
+            tasks=[(2000, 1), (2000, 2), (2000, 3)],
+            out_dir=tmp_path,
+            it=1,
+            corpus_fp="cfp",
+            course_fp="xfp",
+            difficulty="hard",
+            max_ticks=100,
+            nodes=[{"id": "n1", "url": "http://n1", "concurrency": 1, "enabled": True}],
+            node_fail_limit=2,
+            busy_retry_limit=2,  # 背压上限（测试提速）
+            busy_backoff_sec=0.01,
+            log=lambda _m: None,
+        )
     )
     # busy 不计入节点故障 ⇒ 不熔断（否则并发槽满的健康节点会被误摘）
     assert stats["failed_nodes"] == []
@@ -362,18 +368,20 @@ def test_bc_dispatch_busy_backpressure_then_success(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(D, "fetch_task", fake_fetch)
     msgs: list[str] = []
     stats = D.dispatch_bc_corpus(
-        tasks=[(2000, 1), (2000, 2)],
-        out_dir=tmp_path,
-        it=1,
-        corpus_fp="cfp",
-        course_fp="xfp",
-        difficulty="hard",
-        max_ticks=100,
-        nodes=[{"id": "n1", "url": "http://n1", "concurrency": 1, "enabled": True}],
-        node_fail_limit=2,
-        busy_retry_limit=6,
-        busy_backoff_sec=0.01,
-        log=msgs.append,
+        D.BcDispatchSpec(
+            tasks=[(2000, 1), (2000, 2)],
+            out_dir=tmp_path,
+            it=1,
+            corpus_fp="cfp",
+            course_fp="xfp",
+            difficulty="hard",
+            max_ticks=100,
+            nodes=[{"id": "n1", "url": "http://n1", "concurrency": 1, "enabled": True}],
+            node_fail_limit=2,
+            busy_retry_limit=6,
+            busy_backoff_sec=0.01,
+            log=msgs.append,
+        )
     )
     assert stats["failed"] == 0
     assert stats["games"] == 2
@@ -987,19 +995,21 @@ def test_bc_dispatch_v6_uploads_label_weights_and_filters_wins(
     monkeypatch.setattr(D, "post_weights_parallel", fake_post)
     monkeypatch.setattr(D, "fetch_task", fake_fetch)
     stats = D.dispatch_bc_corpus(
-        tasks=[(2000, 1), (2000, 2)],
-        out_dir=tmp_path / "data",
-        it=1,
-        corpus_fp="cfp-v6",
-        course_fp="xfp-v6",
-        difficulty="hard",
-        max_ticks=100,
-        wins_only=True,
-        nodes=[{"id": "n1", "url": "http://n1", "concurrency": 1, "enabled": True}],
-        action_v6=True,
-        label_policy_path=str(w),
-        label_mode="sampled",
-        log=lambda _m: None,
+        D.BcDispatchSpec(
+            tasks=[(2000, 1), (2000, 2)],
+            out_dir=tmp_path / "data",
+            it=1,
+            corpus_fp="cfp-v6",
+            course_fp="xfp-v6",
+            difficulty="hard",
+            max_ticks=100,
+            wins_only=True,
+            nodes=[{"id": "n1", "url": "http://n1", "concurrency": 1, "enabled": True}],
+            action_v6=True,
+            label_policy_path=str(w),
+            label_mode="sampled",
+            log=lambda _m: None,
+        )
     )
     assert stats["kept"] == 1
     assert stats["loss_skipped"] == 1
@@ -1038,15 +1048,17 @@ def test_bc_dispatch_v6_rejects_legacy_label_weights(tmp_path: Path) -> None:
     )
     with pytest.raises(D.BcDispatchError, match="legacy 5/2"):
         D.dispatch_bc_corpus(
-            tasks=[(2000, 1)],
-            out_dir=tmp_path,
-            it=1,
-            corpus_fp="cfp",
-            course_fp="xfp",
-            difficulty="hard",
-            max_ticks=100,
-            nodes=[{"id": "n1", "url": "http://n1", "enabled": True}],
-            action_v6=True,
-            label_policy_path=str(w),
-            log=lambda _m: None,
+            D.BcDispatchSpec(
+                tasks=[(2000, 1)],
+                out_dir=tmp_path,
+                it=1,
+                corpus_fp="cfp",
+                course_fp="xfp",
+                difficulty="hard",
+                max_ticks=100,
+                nodes=[{"id": "n1", "url": "http://n1", "enabled": True}],
+                action_v6=True,
+                label_policy_path=str(w),
+                log=lambda _m: None,
+            )
         )
