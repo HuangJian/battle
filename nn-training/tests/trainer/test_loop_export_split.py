@@ -117,7 +117,7 @@ SLOT_HANDS: dict[str, tuple[str, ...]] = {
 
 #: 顶层 import 闭集（非 stdlib；本模块不许长出重依赖）。
 #: ★ 2026-10-15 登记一格 `common.protocol`（`plan/offline-open-ended-iters-and-loud-export` §3.1 J1）：
-#: 无限课那道的响亮行要报**硬上界**到底是多少，而那个数只能从**同一个常量**读——再抄一份
+#: 无限课那道的响亮行要报**缺省段长**到底是多少，而那个数只能从**同一个常量**读——再抄一份
 #: 到本模块就等于把「预判与真闸不许漂」的那一条（同 plan §3.4「同口径对账」）自己拆了。
 #: `common.*` 是 L0，不构成反向边（`FORBIDDEN_IMPORTS` 一个不沾）。
 #: ★ 2026-10-15 登记一格 `remote`（离线 delta 事故）：包的**起点权重**取自 `args.out`，而

@@ -51,6 +51,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -550,10 +551,17 @@ EPOCH_TAG = 0xA11CE
 ROTATION_MODES = ("even", "pinned")
 
 
-def _window_positions(rotate_seed: int, epoch_idx: int, n: int) -> list[int]:
-    """`0..n-1` 的一个确定性排列（epoch 键控：同一 epoch 内的所有窗口共用一个排列）。"""
+@lru_cache(maxsize=8)
+def _window_positions(rotate_seed: int, epoch_idx: int, n: int) -> tuple[int, ...]:
+    """`0..n-1` 的一个确定性排列（epoch 键控：同一 epoch 内的所有窗口共用一个排列）。
+
+    有界缓存（2026-11-22）：它只随 `(rotate_seed, epoch_idx, n)` 变，而**每一轮**都要它
+    （`_rotate_window` → `volume_for_round` → `pairs_for`）。旧实现每轮重抽一次
+    `permutation(n)`（35 关 ≈ 45µs/轮），在「重放整段算指纹」时是纯重复计算。
+    返回 tuple（不可变，缓存的调用方切片不会写回）；缓存值逐字节等于现算值。
+    """
     rng = np.random.default_rng([int(rotate_seed), EPOCH_TAG, int(epoch_idx)])
-    return [int(i) for i in rng.permutation(int(n))]
+    return tuple(int(i) for i in rng.permutation(int(n)))
 
 
 def _rotate_window(

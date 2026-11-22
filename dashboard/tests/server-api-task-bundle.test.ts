@@ -8,7 +8,7 @@
  *   * python 一侧的三道门（zip-slip / 拿错包 / 轮次发现）由
  *     `nn-training/tests/remote/test_deliver_zip.py` 钉死；
  *   * 这里钉**控制台这一侧**：argv 形状、产出文件信息、拒启理由、上传体的门、
- *     与 python 共享的跨语言常量（直接读 python 源码对账——改一边忘另一边会红）、
+ *     与 python 共享的跨语言契约（如 `pack_code_zip` 的排除目录，直接读 python 源码对账）、
  *     以及「导入成功后要不要接着起评估」。
  *
  * 一律不真跑 python / 不真起 evalA（前者慢且依赖 venv，后者会真跑几十局游戏）。
@@ -54,7 +54,6 @@ import {
   exportGuardReason,
   exportPidState,
   exportStatusLine,
-  RUN_MAX_ITERS_HARD_CAP,
   invalidateTaskBundle,
   latestStalePack,
   launchTaskBundleExport,
@@ -134,13 +133,10 @@ describe('任务包导出', () => {
 
   // ────────────────────── J4（D1）：静态拒因在 spawn 之前判 ──────────────────────
 
-  it('J4 静态预判：无剩余轮次 / 轮数 > 硬上界 都**在点击那一刻**被拒（不 spawn、不烧快照）', () => {
+  it('J4 静态预判：无剩余轮次**在点击那一刻**被拒（不 spawn、不烧快照）', () => {
     // 现场（2026-10-14 用户报障）：`iters=2000` 点下去 → spawn → 烧一次 code-snapshot +
     // 一次 git push + 约 150s 的轮内重试，最后才在日志里报「拒发」。静态判据把这三笔代价
     // 换成即时拒绝（真闸仍在 python 侧，预判只能多拦、不得放行一份必然失败的任务）。
-    expect(
-      exportGuardReason({ weightsExists: true, declaredIters: 2000, lastCompletedIt: 0 }),
-    ).toContain('硬上界')
     expect(
       exportGuardReason({ weightsExists: true, declaredIters: 10, lastCompletedIt: 10 }),
     ).toContain('没有剩余轮次')
@@ -151,11 +147,23 @@ describe('任务包导出', () => {
     expect(
       exportGuardReason({ weightsExists: true, declaredIters: 10, lastCompletedIt: 9 }),
     ).toBeNull()
+  })
+
+  it('★ 2026-11-22：轮数**没有上界**——课程说多少就能导多少（g9-def 现场 1000−497=503）', () => {
+    // 现场：g9-def 课程 `iters=1000`、本机已跑 it497 ⇒ 剩 503 轮，被「> 硬上界 500」当场拒导，
+    // 只能去改课程文件迁就程序里的一个数字。用户口径：一切以课程定义为准，程序里不要设上界。
+    expect(
+      exportGuardReason({ weightsExists: true, declaredIters: 1000, lastCompletedIt: 497 }),
+    ).toBeNull()
+    // 原用例的反面：501 轮、2000 轮、十万轮都不拒
     expect(
       exportGuardReason({ weightsExists: true, declaredIters: 501, lastCompletedIt: 0 }),
-    ).toContain('硬上界')
+    ).toBeNull()
     expect(
-      exportGuardReason({ weightsExists: true, declaredIters: 501, lastCompletedIt: 1 }),
+      exportGuardReason({ weightsExists: true, declaredIters: 2000, lastCompletedIt: 0 }),
+    ).toBeNull()
+    expect(
+      exportGuardReason({ weightsExists: true, declaredIters: 100000, lastCompletedIt: 9 }),
     ).toBeNull()
   })
 
@@ -173,11 +181,14 @@ describe('任务包导出', () => {
     expect(exportGuardReason({ weightsExists: true })).toBeNull()
   })
 
-  it('跨语言常量对账：TS 的段长上界 == python 的 RUN_MAX_ITERS_HARD_CAP', () => {
-    // 两边漂开 = 「控制台说能导、真闸拒发」（或者反过来：预放行一份必然失败的任务）。
-    // 与 CODE_EXCLUDE_DIRS 对账 pack_code_zip 同一手法：读 python 源逐字对。
+  it('跨语言常量对账已退休：段长上界删掉后，两边不再共享「能跑多少轮」的常量', () => {
+    // 2026-11-22：`RUN_MAX_ITERS_HARD_CAP` 从 TS 与 python 同时删除（课程 iters 是唯一终点）。
+    // 这条用例留个哨兵：谁再把一个「上界」写成常量（行首赋值）塞回任一侧，这里就会红。
+    // 用行首锚匹配，历史注释里提到这个名字不算。
     const py = readFileSync(path.join(REPO_ROOT, 'nn-training/common/manifest.py'), 'utf8')
-    expect(py).toContain(`RUN_MAX_ITERS_HARD_CAP = ${RUN_MAX_ITERS_HARD_CAP}`)
+    expect(py).not.toMatch(/^RUN_MAX_ITERS_HARD_CAP\s*=/m)
+    const ts = readFileSync(path.join(REPO_ROOT, 'dashboard/src/server/bundles/export.ts'), 'utf8')
+    expect(ts).not.toMatch(/^export const RUN_MAX_ITERS_HARD_CAP/m)
   })
 
   it('旧任务包作废：挪进 stale-packs（不是删除），盘上原路径不再有包可递', () => {

@@ -25,6 +25,46 @@
 
 ---
 
+## §288 `plan_pairs_fp` 的重放不再白等：静音 + epoch 缓存 + 三遍合一（2026-11-22）
+
+- **现象**：`build_plan` 对轮数是**线性**的——20000 轮的段要 8.1s，且每轮打两行
+  `[run_rl] rotate: batch …`（5000 轮 = 一万行）。对 503 轮的段无感（1.3s），但它是纯白等。
+- **三处纯浪费**（口径一个字没动）：
+  1. **三遍重放**：`plan_pairs_fp` 一遍 + `check_plan_against_args` 的两条腿各一遍。两条职责的
+     循环体本来就是同一个 `pairs_for(plan, it)` ⇒ 合成 `_replay_segment(plan, args=None)`；
+     `build_plan` 调**一遍**同时出指纹与自检。
+  2. **逐轮日志**：重放期 `pairs_for(..., quiet=True)`（`build_pairs` 的 `quiet` 只关日志，
+     返回值逐字节不变——有用例钉住）。
+  3. **epoch 排列每轮重抽**：`biz.course._epoch_perm` / `volume_waves._window_positions` 改成
+     有界 `lru_cache(8)`（纯函数，值逐位等于现算值；有用例拿 `default_rng` 现算对账）。
+- **读数**（同一台机、同一份计划）：真实计划（35 关 / 7 关一窗 / volume）单轮重放
+  **854 → 430 µs**（2.0×），`pairs_fp` 摘要逐字节相同（`e574f2f9…`）；`build_plan`
+  20000 轮 **8130 → 2448 ms**（3.3×）。
+- **剩余成本是地板**：每轮 7 关 × `np.random.SeedSequence` 24µs ≈ 170µs，改它 = 换语料。
+  再要快只有两条路，都**没做**：① 自检改采样（弱化发布期闸）；② 摘要改「键身份」而非
+  实际种子（弱化"逐字节一致"）。两条都是契约层面的取舍，留给人拍板。
+
+## §287 导出段长不再有上界：`RUN_MAX_ITERS_HARD_CAP` → `RUN_SEGMENT_DEFAULT_ITERS`（2026-11-22）
+
+- **现场**：g9-def 课程 `iters=1000`、本机已跑 it497 ⇒ 本段 503 轮。控制台点导出当场被拒：
+  「本段要跑 503 轮（课程 iters=1000 − 已跑 it497）> 硬上界 500——拒导」。要导出只能去改
+  课程文件降 `iters`，即**让任务定义迁就程序里的一个常数**。
+- **决定**（用户口径：一切以课程定义为准，程序里不要设置任何上界）：删掉这个上界的三处读者，
+  常量改名 `RUN_SEGMENT_DEFAULT_ITERS = 500`，语义收窄为**唯一一件事**——课程 `iters<=0`
+  （无限）时那个开区间段的**缺省段长**（课程没给长度，总得给一个；`--run-max-iters` 可覆盖）。
+  * `nn-training/worker/plan.build_plan`：删 `end_it - it > cap ⇒ ProtocolError`；有限课程
+    `end_it = iters_total`（`max_iters`/`--run-max-iters` 只做 `min`，**只缩短、永不拒**）。
+  * `worker/plan.validate_plan`：删同名的 `> cap ⇒ 拒收`。
+  * `dashboard/src/server/bundles/export.ts::exportGuardReason`：删 `remaining > cap` 分支，
+    静态预判只剩「缺起点权重」「无剩余轮次」两条（外加已退役的跨语言常量对账用例）。
+- **被否决**：保留 500 作为「防一份手写/损坏的计划把节点按一整天」的闸。理由：那道闸的另一半
+  （节点预算 `budget_sec` / 课程 `max_hours` / 控制台的 hold 与 stall 告警）本来就存在，
+  而它的实际代价是**每次课程预算 > 剩余 500 轮就导不出来**——闸打在正常路径上。
+- **验证**：`nn-python-gate` 全绿（6707 passed / 13 skipped，ruff+mypy 无新增）；dashboard
+  2215 例 + 根 `bun run check` 2867 例全绿。回归钉在 `tests/worker/test_plan.py::
+  test_finite_course_follows_course_iters_without_any_upper_bound`（it497→iters1000 = 503 轮）
+  与 `dashboard/tests/server-api-task-bundle.test.ts` 的「503 轮必须可导」两条。
+
 ## §286 P0-3 第三十三刀：`dispatch_bc_corpus` 收 `BcDispatchSpec`（62 → 61）（2026-11-22）
 
 * `worker/bc_dispatch.py`：25 个关键字参数 → frozen + kw_only 的 `BcDispatchSpec`，

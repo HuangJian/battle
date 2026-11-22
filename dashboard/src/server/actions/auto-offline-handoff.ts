@@ -62,8 +62,7 @@ export interface AutoBundleFacts {
  *    「宁可白重导一次，也不放一份旧代码去云端」。
  */
 export type CodeFreshness =
-  | { kind: 'snapshot'; same: boolean; sha: string }
-  | { kind: 'mtime'; mtimeMs: number }
+  { kind: 'snapshot'; same: boolean; sha: string } | { kind: 'mtime'; mtimeMs: number }
 
 /** 代码维度是否比包「新」（纯函数：两套口径各自的判据）。 */
 export function codeDimensionStale(code: CodeFreshness, packMtimeMs: number): boolean {
@@ -259,7 +258,7 @@ export async function autoOfflineHandoff(
     return { ok: true, message: [head, backfill.note, launched.message].filter(Boolean).join('；') }
   }
   // 没导：规则表说不用导（已有包 / 上一次导出还在跑 / 逃生阀）——都是正常结局；
-  // `guardReason` 非空则是「导不了」（静态拒因：缺起点权重 / 无剩余轮次 / 轮数 > 硬上界）：
+  // `guardReason` 非空则是「导不了」（静态拒因：缺起点权重 / 无剩余轮次）：
   // 那半状态靠 hub 的 stalled 告警与 `export-status.json` 兜。
   return {
     ok: valve || guardReason === null,

@@ -9654,3 +9654,16 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   文本断言与复用账本未动；归属闸守卫（`test_role_routing`）扩成「role= / LeaseSpec( / spec」
   三种载法，判据不变。
 - **验证**：聚焦 433 例 + 预算/分层 30 例全绿；nn 全量门禁见提交。全文 → `docs/nn/engineering.md` §261。
+
+## §2026-11-22-export-no-iters-cap（导出段长不再有上界：课程 `iters` 是唯一终点）
+
+- **背景**：g9-def（课程 `iters=1000`、已跑 it497 ⇒ 剩 503 轮）点导出被当场拒：
+  「> 硬上界 500」。要导只能去改课程文件降 `iters` —— 任务定义迁就程序里的一个常数。
+- **决定**（用户口径：一切以课程定义为准，程序里不要设置任何上界）：`RUN_MAX_ITERS_HARD_CAP`
+  改名 `RUN_SEGMENT_DEFAULT_ITERS`，语义收窄为「课程无限（`iters<=0`）时的缺省段长」；
+  删掉 `build_plan` / `validate_plan` / `exportGuardReason` 三处 `> cap` 拒绝；有限课程
+  `end_it = iters_total`，`max_iters` 与 `--run-max-iters` **只缩短、永不拒**。
+- **被否决**：保留 500 当「防手写/损坏计划把节点按一整天」的闸——节点预算 `budget_sec`、
+  课程 `max_hours`、控制台 hold/stall 告警已经在守那一半，而它打在正常路径上。
+- **验证**：nn 全量门禁 6707 passed / dashboard 2215 / 根 2867 全绿；回归用例钉住
+  it497→iters1000=503 轮可导。全文 → `docs/nn/engineering.md` §287。

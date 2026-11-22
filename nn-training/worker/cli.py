@@ -13,7 +13,7 @@ from typing import Any
 
 # 核数口径的唯一实现（容器配额/亲和掩码 > `os.cpu_count()`）：`--workers` 的缺省值就靠它。
 from common.cli import house_parser
-from common.manifest import RUN_MAX_ITERS_HARD_CAP
+from common.manifest import RUN_SEGMENT_DEFAULT_ITERS
 from common.platform_utils import effective_cores
 from worker.breaker import (
     ENT_BREAK,
@@ -182,11 +182,11 @@ def _flag_rows(mode: str, rl_args: dict) -> tuple[tuple[tuple[str, ...], dict[st
         # 段长（2026-09-17 引入的半离线「一整段」已于 2026-09-25 退役；★M2 又去掉一个用途）：
         #    `--export-bundle` 的终点（控制台导出用 `-1`；<0 = 跑到课程末尾）。0 = 关。
         (("--run-iters",), {"type": int, "default": _d("run_iters", 0), "help": "导出任务包的段长（--export-bundle 的终点；<0 = 跑到课程末尾）；" "0 = 关（本机自己采样，历史行为）"}),
-        # 段长上界的**再降档**（2026-10-16，plan/offline-open-ended-iters-and-loud-export §3.1 D1）：
-        # `common/manifest.py` 的注释一直在说「命令行可用 --run-max-iters 再降」，而全仓没有这个
-        # argparse（只有注释与历史 docstring）⇒ 要么补参数、要么改注释。补参数：把节点按在机上
-        # 多久是导出时的人的决定，而硬上界 500 只是防手写/损坏计划的那道闸（**不能抬**）。
-        (("--run-max-iters",), {"type": int, "default": _d("run_max_iters", 0), "help": f"导出任务包的段长上界再降档（0 = 用硬上界 {RUN_MAX_ITERS_HARD_CAP}；" ">0 取更小的那个；**只能降不能抬**——硬上界是防手写/损坏计划的闸）；" "同时是控制台静态预判读的那个常量（两边对账，见 dashboard 的同名常量）"}),
+        # 段长（2026-10-16 引入；2026-11-22 拆掉「上界」语义）：`--run-max-iters` 现在的
+        # 唯一含义 = **课程无限（iters<=0）时的段长**，缺省 `RUN_SEGMENT_DEFAULT_ITERS`；
+        # 有限课程上它只能把段缩短（`min`），永远不会让计划被拒（用户口径：一切以课程定义
+        # 为准，程序里不要设置任何上界）。
+        (("--run-max-iters",), {"type": int, "default": _d("run_max_iters", 0), "help": f"导出段的段长（只对课程无限 iters<=0 有意义：0 = 用缺省 {RUN_SEGMENT_DEFAULT_ITERS}；" ">0 = 就用它）。有限课程上一律以课程 iters 为准，本参数只能把段缩短、**永不拒导**——" "程序里没有上界。控制台静态预判不读它（那条只剩「缺起点权重 / 无剩余轮次」）"}),
         (("--export-bundle",), {"default": "", "help": "全离线：把 --run-iters 那一段打成可上传 Kaggle/Colab 的任务包（zip）后退出；" "本轮不训练。云机侧：remote.bundle import 后 remote.run_loop 自主跑完"}),
         (("--remote-iter-game-timeout",), {"type": float, "default": _d("remote_iter_game_timeout", 0.0), "help": "M3 rollout 上云：节点侧单局墙钟上限（秒）。0 = 用节点兜底硬顶" f"（{game_watch.DEFAULT_GAME_TIMEOUT_SEC:g}s，用户口径：单局 >{game_watch.SLOW_GAME_WARN_SEC:g}s" "肯定不正常）；>0 时完全按它。超时的局被 kill 并**原地重跑**同一 argv" f"（最多 {game_watch.GAME_MAX_ATTEMPTS} 次，未显式配置时重试上限放宽" f" ×{game_watch.RETRY_TIMEOUT_FACTOR:g}），仍失败才算整轮失败"}),
         (("--remote-iter-workers",), {"type": int, "default": _d("remote_iter_workers", 0), "help": "M3 rollout 上云：节点侧 rollout 并发（0 = **节点按本机核数自定**，缺省；" ">0 = 钉住该值，节点侧仍按核数上限钳制；课程文件里的 workers 已无读者）"}),

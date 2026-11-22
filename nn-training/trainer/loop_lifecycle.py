@@ -271,7 +271,9 @@ def export_refusal(*, export_path: str, iters_total: int, start_it: int) -> str:
     `planned_iters` 为空）。空计划的任务包比没有更坏：云机会把它当活领走、跑 0 轮。
     ★ 2026-10-15（J1，plan/offline-open-ended-iters-and-loud-export §3.1）：`iters<=0`
     （课程**无限**）**不再是拒因**——包里改发**开区间段**，终点由段长（`--run-iters` /
-    `run_iters`，缺省 = 硬上界）定，见 `worker/plan.build_plan`。
+    `run_iters`，缺省 = `RUN_SEGMENT_DEFAULT_ITERS`）定，见 `worker/plan.build_plan`。
+    ★ 2026-11-22：本函数**只**拒「没有剩余轮次」这一条；有限课程的剩余轮数多少都不拒
+    （原先 `worker/plan` 与 `validate_plan` 另有一条 500 轮上界，已删）。
 
     不拒的三种情况照旧：非导出路（`export_path` 空）、课程无限（`iters<=0`，J1 起）、
     以及还有轮次可跑。

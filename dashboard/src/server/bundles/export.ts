@@ -499,15 +499,6 @@ export function taskBundleInfo(course: string): TaskBundleInfo {
   }
 }
 
-/** 段长的**硬上界**（python 侧 `common/manifest.py::RUN_MAX_ITERS_HARD_CAP` 的同名常量）。
- *
- *  跨语言契约：`dashboard/tests/server-api-task-bundle.test.ts` 读 python 源逐字对账
- *  —— 两边漂开就是「预判说能导、真闸拒绝」（或者反过来：预放行一份必然失败的任务）。
- *  它从「拒导闸」变成「段长」（J1）后仍有两处读者：`worker/plan.build_plan`（真闸）
- *  与这里的静态预判（J4）。
- */
-export const RUN_MAX_ITERS_HARD_CAP = 500
-
 /** 导出前的门（纯函数；返回非空 = 拒启原因）。
  *
  *  ★ 2026-09-22（课程错误隔离 + 随时导出）：**不再以「训练在跑（run_rl 锁被占）」拒导**——
@@ -515,11 +506,12 @@ export const RUN_MAX_ITERS_HARD_CAP = 500
  *  开课后随时可导出/重导（离线整段由此可反复以最新进度为起点出包）。
  *  保留的拒绝理由：**没有起点权重**（包里必须有个起点，python 侧同判据）。
  *
- *  ★ 2026-10-16（J4，plan/offline-open-ended-iters-and-loud-export §3.4）：补一类
- *  **不需要真导出就能判**的静态拒因——「无剩余轮次」与「轮数 > 硬上界」。它们原本只在
- *  python 的启动期/轮内栅里拒（`loop_lifecycle.export_refusal` / `worker/plan.build_plan`），
- *  而那意味着：点下去 → spawn → 烧一次 code-snapshot + 一次 `git push` + 约 150s 的轮内重试，
- *  最后才在日志里报一句「拒发」（现场：y5-hit2 三次尝试两次白烧）。
+ *  ★ 2026-11-22（用户口径「一切以课程定义为准，程序里不要设置任何上界」）：删掉
+ *  「轮数 > 硬上界 500」这条静态拒因（原 `RUN_MAX_ITERS_HARD_CAP`，常量连同对账用例一并
+ *  退休）。现场：g9-def 课程 `iters=1000`、已跑 it497 ⇒ 剩 503 轮，被这条当场拒导，只能去改
+ *  课程文件迁就程序里的一个数字。
+ *  现在：课程 `iters` 是唯一终点，程序不钳、不拒；python 侧 `worker/plan.build_plan` 的
+ *  `end_it - it > cap` 与 `validate_plan` 的同名闸**同步删除**，两边不再有需要逐字对账的常量。
  *
  *  判据与 python **同一锚**（评审 P1-4 点名的差一）：
  *    · 启动期用 `self._start_it`（= `last_completed + 1`，`loop_lifecycle.py:361-367`）；
@@ -554,13 +546,8 @@ export function exportGuardReason(arg: ExportGuardFacts): string | null {
       '，或改用在线；只想把当前权重交出去，请走「导出权重/产物」'
     )
   }
-  if (remaining > RUN_MAX_ITERS_HARD_CAP) {
-    return (
-      `本段要跑 ${remaining} 轮（课程 iters=${iters} − 已跑 it${last}）> 硬上界 ` +
-      `${RUN_MAX_ITERS_HARD_CAP}——拒导（一份手写/损坏的计划不许把云机按一整天）。` +
-      `把课程的 iters 降到 ≤${last + RUN_MAX_ITERS_HARD_CAP}（或给节点降段长）再导`
-    )
-  }
+  // ★ 2026-11-22：这里原先拒「remaining > 硬上界 500」。已删——课程 `iters` 是唯一终点，
+  // 程序里不再有第二个「能跑多少轮」的定义（用户口径：一切以课程定义为准）。
   return null
 }
 

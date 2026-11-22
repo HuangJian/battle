@@ -28,7 +28,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from biz.course import build_pairs
-from common.protocol import RUN_MAX_ITERS_HARD_CAP, ProtocolError
+from common.protocol import RUN_SEGMENT_DEFAULT_ITERS, ProtocolError
 from worker.plan import (
     argv_fp,
     build_plan,
@@ -98,6 +98,48 @@ def test_pairs_replay_matches_real_build_pairs_seed_rotate() -> None:
     plan = build_plan(args, it=2, iters_total=4, rotate_seed=7, log=lambda _m: None)
     for it in planned_iters(plan):
         assert pairs_for(plan, it) == build_pairs(args, it, 7)
+
+
+def test_quiet_replay_returns_same_pairs_and_prints_nothing(capsys) -> None:
+    """★ 2026-11-22：`quiet=True` 只关日志，**对集逐字节不变**（重放整段不再每轮两行噪声）。
+
+    `plan_pairs_fp` 逐轮重放几千轮时，`build_pairs` 原本每轮打 `[run_rl] rotate: batch …`
+    ——那是"某一轮采什么"的运行时信息，不是"正在算指纹"；5000 轮就是一万行。静音必须
+    **只**减去这几行，否则「指纹 ≠ 训练真用的语料」，比噪声糟得多。
+    """
+    args = _args()
+    plan = build_plan(args, it=0, iters_total=6, rotate_seed=5, log=lambda _m: None)
+    capsys.readouterr()  # 丢掉 build_plan 自己那一轮的日志
+    loud = [pairs_for(plan, it) for it in planned_iters(plan)]
+    assert capsys.readouterr().out.strip() != ""  # 不静音时确实在打
+    quiet = [pairs_for(plan, it, quiet=True) for it in planned_iters(plan)]
+    assert capsys.readouterr().out == ""  # 静音后一条不剩
+    assert quiet == loud
+
+
+def test_epoch_perm_caches_are_pure_values() -> None:
+    """★ 2026-11-22：两个有界缓存（`biz.course._epoch_perm` / `volume_waves._window_positions`）
+    必须逐位等于现算值——缓存抄错一格 = 全段语料换一套，而它只在"重放"里出现，训练看不出来。
+
+    参照实现就是两处各自的那一行 `default_rng([...]).permutation(n)`（独立重算，不复用缓存）。
+    """
+    import numpy as np
+
+    from biz.course import _ROTATE_EPOCH_TAG, _epoch_perm
+    from worker.volume_waves import EPOCH_TAG, _window_positions
+
+    for rs, epoch, n in ((1, 0, 5), (7, 3, 35), (20261118, 11, 4)):
+        want = tuple(
+            int(i)
+            for i in np.random.default_rng([rs, _ROTATE_EPOCH_TAG, epoch]).permutation(n)
+        )
+        assert _epoch_perm(rs, epoch, n) == want, (rs, epoch, n)
+        want_w = tuple(
+            int(i) for i in np.random.default_rng([rs, EPOCH_TAG, epoch]).permutation(n)
+        )
+        assert _window_positions(rs, epoch, n) == want_w, (rs, epoch, n)
+    # 两个标签是同一个常量（同一个 (rotateSeed, epoch) 在两处抽出同一个排列，血缘可对账）
+    assert _ROTATE_EPOCH_TAG == EPOCH_TAG
 
 
 def test_plan_self_check_catches_missing_pair_field() -> None:
@@ -224,7 +266,7 @@ def test_argv_template_covers_every_game_and_fp_matches() -> None:
 
 
 def test_plan_shape_and_clamps() -> None:
-    """区间/上限：`max_iters` 与课程预算取交集，硬上界钳制，无轮次可跑则拒发。"""
+    """区间：`max_iters` 与课程预算取交集（课程 `iters` 是唯一终点），无轮次可跑则拒发。"""
     args = _args()
     plan = build_plan(args, it=2, iters_total=10, rotate_seed=1, max_iters=3, log=lambda _m: None)
     assert (plan["start_it"], plan["end_it"]) == (2, 5)
@@ -250,73 +292,94 @@ def test_infinite_course_plan_is_an_open_ended_segment() -> None:
     plan = build_plan(args, it=0, iters_total=0, rotate_seed=1, log=lambda _m: None)
     assert plan["open_ended"] is True
     assert plan["iters_total"] == 0
-    assert plan["end_it"] == RUN_MAX_ITERS_HARD_CAP
-    assert len(planned_iters(plan)) == RUN_MAX_ITERS_HARD_CAP
+    assert plan["end_it"] == RUN_SEGMENT_DEFAULT_ITERS
+    assert len(planned_iters(plan)) == RUN_SEGMENT_DEFAULT_ITERS
     assert validate_plan(json.loads(json.dumps(plan)))["open_ended"] is True
     # 段长可降（`--run-iters 10`）：仍是开区间，终点 = it + 10
     short = build_plan(args, it=7, iters_total=0, rotate_seed=1, max_iters=10, log=lambda _m: None)
     assert (short["start_it"], short["end_it"], short["open_ended"]) == (7, 17, True)
-    # 段长 > 硬上界仍拒（这条闸两个分支共用：抬阀值不是表达无限轮的手法）
-    with pytest.raises(ProtocolError, match="硬上界"):
-        build_plan(
-            args,
-            it=0,
-            iters_total=0,
-            rotate_seed=1,
-            max_iters=RUN_MAX_ITERS_HARD_CAP + 1,
-            log=lambda _m: None,
-        )
-    # 负数预算与 0 同义（“无限”的另一种写法）
-    neg = build_plan(args, it=3, iters_total=-5, rotate_seed=1, log=lambda _m: None)
-    assert (neg["open_ended"], neg["end_it"], neg["iters_total"]) == (True, 3 + RUN_MAX_ITERS_HARD_CAP, -5)
-
-
-def test_run_max_iters_lowers_the_segment_cap_only() -> None:
-    """D1（plan §3.1/§3.4）：`--run-max-iters` = 段长上界的**再降档**（只能降不能抬）。
-
-    为什么必须真能降：硬上界 500 ≈ 3 小时 / 96 核 —— 而「这一趟只跑 50 轮就交回来」是导出
-    时的人的决定（节点会话预算是有限的）。它同时是控制台静态预判读的那个常量：两边
-    漂开就是「预判说能导、真闸拒发」。
-    """
-    args = _args()
-    # 开区间段的缺省段长跟着降档走（否则「降了档」只是拒发线更低，而段还是一样的长）
-    plan = build_plan(
-        args, it=4, iters_total=0, rotate_seed=1, max_segment_iters=50, log=lambda _m: None
-    )
-    assert (plan["end_it"], plan["open_ended"]) == (54, True)
-    # 真闸也读同一个生效值：51 轮在降档后拒（在硬上界下本可以过）
-    with pytest.raises(ProtocolError, match="--run-max-iters 已降档"):
-        build_plan(
-            args,
-            it=4,
-            iters_total=0,
-            rotate_seed=1,
-            max_iters=51,
-            max_segment_iters=50,
-            log=lambda _m: None,
-        )
-    # **抬不动**：盯上界的旋钮给一个更大的值也只会被硬上界钳住（抬 = 拆闸，已否决）
-    clipped = build_plan(
+    # ★ 2026-11-22：段长**想多长就多长**（没有上界——旧行为在这里 raise「硬上界」）
+    long = build_plan(
         args,
         it=0,
         iters_total=0,
         rotate_seed=1,
-        max_segment_iters=RUN_MAX_ITERS_HARD_CAP + 500,
+        max_iters=RUN_SEGMENT_DEFAULT_ITERS + 1,
         log=lambda _m: None,
     )
-    assert clipped["end_it"] == RUN_MAX_ITERS_HARD_CAP
-    # 有限分支同样跟降档走：算术仍按 `max_iters` 与预算取交集（降档只管「上界」，不重定向
-    # 终点），而 `it + 8 = 9` 越过了降档后的 3 ⇒ 拒（旧行为：8 ≤ 500 本可以过）
-    with pytest.raises(ProtocolError, match="--run-max-iters 已降档"):
-        build_plan(
-            args,
-            it=1,
-            iters_total=10,
-            rotate_seed=1,
-            max_iters=8,
-            max_segment_iters=3,
-            log=lambda _m: None,
-        )
+    assert (long["end_it"], long["open_ended"]) == (RUN_SEGMENT_DEFAULT_ITERS + 1, True)
+    assert validate_plan(json.loads(json.dumps(long)))["end_it"] == RUN_SEGMENT_DEFAULT_ITERS + 1
+    # 负数预算与 0 同义（“无限”的另一种写法）
+    neg = build_plan(args, it=3, iters_total=-5, rotate_seed=1, log=lambda _m: None)
+    assert (neg["open_ended"], neg["end_it"], neg["iters_total"]) == (True, 3 + RUN_SEGMENT_DEFAULT_ITERS, -5)
+
+
+def test_run_max_iters_sets_segment_or_shortens_but_never_rejects() -> None:
+    """★ 2026-11-22（用户口径）：`--run-max-iters` 只剩两个作用，**都不含拒绝**。
+
+    ① 课程无限（iters<=0）时它是段长（缺省 `RUN_SEGMENT_DEFAULT_ITERS`）；
+    ② 有限课程上它只能把段**缩短**（`min`）——课程 `iters` 仍是终点，程序不设上界。
+
+    历史：原名 `..._lowers_the_segment_cap_only`，语义是「只能降不能抬」，抬了会被
+    硬上界 500 钳住或直接拒发。g9-def（课程 iters=1000、已跑 it497 ⇒ 503 轮）就是被那条
+    拒导的——所以这条用例现在钉的是**反面**：任何值都不许 raise。
+    """
+    args = _args()
+    # ① 开区间段的缺省段长跟着降档走
+    plan = build_plan(
+        args, it=4, iters_total=0, rotate_seed=1, max_segment_iters=50, log=lambda _m: None
+    )
+    assert (plan["end_it"], plan["open_ended"]) == (54, True)
+    # `max_iters` 与 `--run-max-iters` 同时给 ⇒ 取更短的那个，而不是拒
+    both = build_plan(
+        args,
+        it=4,
+        iters_total=0,
+        rotate_seed=1,
+        max_iters=51,
+        max_segment_iters=50,
+        log=lambda _m: None,
+    )
+    assert (both["end_it"], both["open_ended"]) == (54, True)
+    # **抬得动**：盯上界的旋钮给一个更大的值就是那个值（旧行为：被钳回 500）
+    bigger = build_plan(
+        args,
+        it=0,
+        iters_total=0,
+        rotate_seed=1,
+        max_segment_iters=RUN_SEGMENT_DEFAULT_ITERS + 500,
+        log=lambda _m: None,
+    )
+    assert bigger["end_it"] == RUN_SEGMENT_DEFAULT_ITERS + 500
+    # ② 有限分支：只缩短，不拒（旧行为：`it+8` 越过降档值 3 ⇒ 拒）
+    shortened = build_plan(
+        args,
+        it=1,
+        iters_total=10,
+        rotate_seed=1,
+        max_iters=8,
+        max_segment_iters=3,
+        log=lambda _m: None,
+    )
+    assert (shortened["end_it"], shortened["open_ended"]) == (4, False)
+
+
+def test_finite_course_follows_course_iters_without_any_upper_bound() -> None:
+    """★ 回归（2026-11-22 g9-def 拒导）：课程 `iters=1000`、已跑 it497 ⇒ 本段 503 轮必须能导。
+
+    旧行为：`build_plan` 的 `end_it - it > RUN_MAX_ITERS_HARD_CAP(500)` 直接 ProtocolError
+    （控制台静态预判更早一步拒），于是只能改课程文件去迁就程序里的一个数字。
+    """
+    args = _args()
+    plan = build_plan(args, it=497, iters_total=1000, rotate_seed=1, log=lambda _m: None)
+    assert (plan["start_it"], plan["end_it"], plan["open_ended"]) == (497, 1000, False)
+    assert len(planned_iters(plan)) == 503
+    assert validate_plan(json.loads(json.dumps(plan)))["end_it"] == 1000
+    # 更长的一段也不拒（没有第二个「能跑多少轮」的定义）。2000 足够证明 >500 不再是闸；
+    # 不用十万那种量级：`build_plan` 对 iters 是线性的（每轮都要解 argv 模板），会白烧墙钟。
+    huge = build_plan(args, it=0, iters_total=2000, rotate_seed=1, log=lambda _m: None)
+    assert huge["end_it"] == 2000
+    assert validate_plan(json.loads(json.dumps(huge)))["end_it"] == 2000
 
 
 def test_finite_course_plan_is_unchanged_and_not_open_ended() -> None:
@@ -350,11 +413,13 @@ def test_validate_plan_open_ended_exemption_is_tight() -> None:
     # 类型错也拒（未知字段是忽略，已声明字段就得合法）
     with pytest.raises(ProtocolError, match="open_ended 必须是布尔"):
         validate_plan({**finite, "open_ended": "yes"})
-    # 真开区间段（无限课）照旧过，且预算仍不得被越过（段长那条闸另管）
+    # 真开区间段（无限课）照旧过，且预算仍不得被越过
     inf = build_plan(args, it=0, iters_total=0, rotate_seed=1, log=lambda _m: None)
     validate_plan({**inf, "end_it": 100})
-    with pytest.raises(ProtocolError, match="硬上界"):
-        validate_plan({**inf, "end_it": RUN_MAX_ITERS_HARD_CAP + 1})
+    # ★ 2026-11-22：段长**不再有上界**（旧行为在这里 raise「硬上界」）
+    assert validate_plan({**inf, "end_it": RUN_SEGMENT_DEFAULT_ITERS * 100})["end_it"] == (
+        RUN_SEGMENT_DEFAULT_ITERS * 100
+    )
 
 
 def test_validate_plan_rejects_malformed() -> None:
