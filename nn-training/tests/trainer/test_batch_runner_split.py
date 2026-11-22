@@ -81,6 +81,9 @@ DI_NAMES = (*RUNNER_DI, *LANES_DI)
 #: 新家的顶层 import 闭集（多一个也红：新依赖必须显式登记在这里）。
 RUNNER_IMPORTS = {
     "__future__",
+    # 2026-11-22（P0-3 第四十三刀）：`RunnerSpec` 是 frozen + kw_only 的参数对象
+    # （stdlib `dataclasses`，零新依赖边）。
+    "dataclasses",
     "hashlib",
     "json",
     "pathlib",
@@ -394,8 +397,8 @@ def test_dispatch_batch_bg_starts_a_daemon_thread_from_the_new_home(monkeypatch)
     calls: dict = {}
 
     class FakeRunner:
-        def __init__(self, *a, **k):
-            calls["args"] = a
+        def __init__(self, spec):
+            calls["spec"] = spec
             #: `dispatch_batch_bg` 现在用**单元自己的** Runtime 起线程（§P1-6 第四批）：
             #: 名字 = `<scope>-run`，FakeRunner 也得有一份才像真的。
             self._rt = common.runtime.Runtime(scope="batcheval-u0")
@@ -406,23 +409,27 @@ def test_dispatch_batch_bg_starts_a_daemon_thread_from_the_new_home(monkeypatch)
 
     monkeypatch.setattr(br, "BatchEvalRunner", FakeRunner)
     t = br.dispatch_batch_bg(
-        "bun",
-        None,
-        Path("/nonexistent/eval_log.jsonl"),
-        object(),
-        {},
-        {"batch_id": "b1"},
-        {"rung": "c4l1"},
-        0,
-        1,
-        "run-1",
-        "epoch-1",
+        br.RunnerSpec(
+            bun="bun",
+            rl_path=None,
+            eval_log=Path("/nonexistent/eval_log.jsonl"),
+            args=object(),
+            cfg={},
+            batch={"batch_id": "b1"},
+            unit={"rung": "c4l1"},
+            unit_idx=0,
+            unit_of=1,
+            run_id="run-1",
+            engine_epoch="epoch-1",
+        )
     )
     t.join(timeout=10)
     assert calls.get("ran") is True
     assert t.daemon is True
     assert t.name == "batcheval-u0-run"
-    assert calls["args"][0] == "bun" and calls["args"][6] == {"rung": "c4l1"}
+    # 端口按**同一份 spec** 转手（旧写法是 13 个位置参数；这里钉住它不再退回位置手传）
+    spec = calls["spec"]
+    assert spec.bun == "bun" and spec.unit == {"rung": "c4l1"} and spec.unit_of == 1
 
 
 def test_done_keys_reads_the_eval_log_from_the_new_home(tmp_path: Path) -> None:

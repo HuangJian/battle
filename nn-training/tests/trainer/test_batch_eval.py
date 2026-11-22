@@ -264,20 +264,22 @@ def test_window_close_no_new_games(tmp_path: Path, monkeypatch) -> None:
     # 关窗：unset 事件 + 假 deadline 已过——用 window_event 未置位且 eval_window 很小
     closed = threading.Event()
     r = be.BatchEvalRunner(
-        "bun",
-        str(weights),
-        eval_log,
-        args,
-        cfg,
-        batch,
-        units[0],
-        0,
-        1,
-        "run1",
-        epoch,
-        "nn",
-        closed,
-        "",
+        be.RunnerSpec(
+            bun="bun",
+            rl_path=str(weights),
+            eval_log=eval_log,
+            args=args,
+            cfg=cfg,
+            batch=batch,
+            unit=units[0],
+            unit_idx=0,
+            unit_of=1,
+            run_id="run1",
+            engine_epoch=epoch,
+            policy="nn",
+            window_event=closed,
+            init_sha16="",
+        )
     )
     out = r.run()
     assert out["settled"] == 0 and out["dropped"] == 100
@@ -290,20 +292,22 @@ def test_window_close_no_new_games(tmp_path: Path, monkeypatch) -> None:
     opened.set()
     batch2 = {"batch_id": "bw2", "iter": 1, "units": {"of": 1, "done": []}}
     r2 = be.BatchEvalRunner(
-        "bun",
-        str(weights),
-        eval_log,
-        args_open,
-        cfg,
-        batch2,
-        units[0],
-        0,
-        1,
-        "run1",
-        epoch,
-        "nn",
-        opened,
-        "",
+        be.RunnerSpec(
+            bun="bun",
+            rl_path=str(weights),
+            eval_log=eval_log,
+            args=args_open,
+            cfg=cfg,
+            batch=batch2,
+            unit=units[0],
+            unit_idx=0,
+            unit_of=1,
+            run_id="run1",
+            engine_epoch=epoch,
+            policy="nn",
+            window_event=opened,
+            init_sha16="",
+        )
     )
     out2 = r2.run()
     assert out2["settled"] == 100 and out2["dropped"] == 0
@@ -367,7 +371,22 @@ def _run_unit(
     # 否则「单元打了什么」只剩执行器一半（打在旧家 = 静默空操作）。
     monkeypatch.setattr("trainer.batch_lanes.log", lambda m: logs.append(str(m)))
     r = be.BatchEvalRunner(
-        "bun", str(weights), eval_log, args, cfg, batch, unit, 0, 1, "run1", epoch, "nn", None, ""
+        be.RunnerSpec(
+            bun="bun",
+            rl_path=str(weights),
+            eval_log=eval_log,
+            args=args,
+            cfg=cfg,
+            batch=batch,
+            unit=unit,
+            unit_idx=0,
+            unit_of=1,
+            run_id="run1",
+            engine_epoch=epoch,
+            policy="nn",
+            window_event=None,
+            init_sha16="",
+        )
     )
     out = r.run()
     return out, logs, eval_log
@@ -698,20 +717,22 @@ def _channels_runner(
     # 否则「单元打了什么」只剩执行器一半（打在旧家 = 静默空操作）。
     monkeypatch.setattr("trainer.batch_lanes.log", lambda m: logs.append(str(m)))
     r = be.BatchEvalRunner(
-        "bun",
-        str(weights),
-        eval_log,
-        args,
-        cfg,
-        batch,
-        u,
-        0,
-        1,
-        "run1",
-        common.codehash.compute_engine_epoch(),
-        "nn",
-        None,
-        "",
+        be.RunnerSpec(
+            bun="bun",
+            rl_path=str(weights),
+            eval_log=eval_log,
+            args=args,
+            cfg=cfg,
+            batch=batch,
+            unit=u,
+            unit_idx=0,
+            unit_of=1,
+            run_id="run1",
+            engine_epoch=common.codehash.compute_engine_epoch(),
+            policy="nn",
+            window_event=None,
+            init_sha16="",
+        )
     )
     return r, logs, eval_log
 

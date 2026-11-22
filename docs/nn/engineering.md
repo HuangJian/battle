@@ -25,6 +25,32 @@
 
 ---
 
+## §296 P0-3 第四十三刀：B 层派发两入口共收 `RunnerSpec`（50 → 48）（2026-11-22）
+
+* `trainer/batch_runner.py`：`BatchEvalRunner.__init__`（16 参）与 `dispatch_batch_bg`
+  （13 参）**共用一张字段表**（frozen + kw_only `RunnerSpec`，16 字段 = 11 个身份位 +
+  5 个带缺省的旋钮）。本文件宽签名 2 → **0**，全仓 50 → **48**，文件 41 → **40**。
+* **为什么两处一刀**：旧版是同一张 13 参表的**两份**，`dispatch_batch_bg` 按**位置**把 13 个
+  实参转手给 `BatchEvalRunner(...)`。相邻的 `unit_idx` / `unit_of` 都是 `int`、`init_sha16`
+  与 `run_id` 都是 `str` —— 传错一位不报错：`unit_of` 进了 `unit_idx` 只会让 iterId 的
+  命名空间变样（`{runId}.b{batchShort}u{unit}` 是 god/nn 不串键的唯一保证），要等到台账里
+  出现「本单元之外」的键才发现。关键字拼错同理：`policy` 落错 = 节点门按错 kind 判，
+  `include_scorable` 落丢 = A/B/C 行悄悄少列。
+* 调用点 8 处（生产 3：`batch_eval` / `eval_course_once` / `eval_m1_once`；测试 5：
+  `test_batch_eval` ×4 + `test_eval_course_once` ×1）+ `test_batch_runner_split` 的派发口。
+  测试侧机械包装（把 13 个位置实参逐个改回关键字）；生产 3 处手改（`kind=` 旁的注释要跟着
+  搬家，`eval_m1_once` 还多一个 `include_scorable=True`）。
+* 这 16 个字段里 `kind` / `include_scorable` 本来就是 keyword-only —— 真正会静默错位的是
+  `dispatch_batch_bg` 那一层位置转手；这刀同时把它删了（`dispatch_batch_bg(spec)` 直接把
+  同一份 spec 交给 `BatchEvalRunner`）。
+* 带消息连带改的账本：`test_batch_runner_split` 的 `RUNNER_IMPORTS` 加 stdlib `dataclasses`
+  （零新依赖边）；`test_batch_eval_facade` 的 `RUNNER_EXPORTS` 加 `RunnerSpec`（门面按既有
+  自别名规矩转出，`test_reexport_table_is_closed` 要求表与源码双向相等）。
+* 新守卫 `tests/trainer/test_runner_spec.py`（4 条：frozen + 全字段 kw_only / 16 字段与缺省
+  逐项表 / 5 个缺省值的旧语义（`kind is None` 由 policy 推、`include_scorable` 关）/ 两个
+  入口的签名只剩 spec）。`worker/plan.build_plan` 等下一批候选见 `python.refactor.md`。
+* 读数：`trainer/batch_runner.py` LOC 513 → **519**（< 1000）。
+
 ## §295 P0-3 第四十二刀：`ppo_update` 成对收 spec（52 → 50）（2026-11-22）
 
 * `worker/ppo/engine.ppo_update`（20 参）与 `worker/ppo/engine_paddle.ppo_update`（21 参）

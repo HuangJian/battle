@@ -83,7 +83,7 @@ STORE_EXPORTS = (
     "utc_now_iso",
     "write_batches",
 )
-RUNNER_EXPORTS = ("BatchEvalRunner", "dispatch_batch_bg")
+RUNNER_EXPORTS = ("BatchEvalRunner", "RunnerSpec", "dispatch_batch_bg")
 
 HOMES = {"biz.batch_plan": PLAN_EXPORTS, "trainer.batch_store": STORE_EXPORTS, "trainer.batch_runner": RUNNER_EXPORTS}
 HOME_MODULES = {"biz.batch_plan": bp, "trainer.batch_store": bs, "trainer.batch_runner": br}
@@ -253,13 +253,13 @@ def test_dispatch_claims_plans_sizes_and_starts_one_unit(tmp_path, monkeypatch) 
 
     t = _call(tmp_path, rl_path=w)
     assert t is not None and len(calls) == 1
-    bun, rl_path, eval_log, _args, _cfg, passed, unit, unit_idx, unit_of, run_id, _epoch, policy, *_ = calls[0]
-    assert bun == "9.9.9"
-    assert rl_path == w
-    assert eval_log == tmp_path / "eval_log.jsonl"
-    assert passed["batch_id"] == batch["batch_id"]
-    assert unit["rung"] == "c4l1" and unit_idx == 0 and unit_of == 3
-    assert run_id == "run1" and policy == "nn"
+    (spec,) = calls[0]  # 2026-11-22：派发口收**一份** RunnerSpec（不再按位置转手 13 个）
+    assert spec.bun == "9.9.9"
+    assert spec.rl_path == w
+    assert spec.eval_log == tmp_path / "eval_log.jsonl"
+    assert spec.batch["batch_id"] == batch["batch_id"]
+    assert spec.unit["rung"] == "c4l1" and spec.unit_idx == 0 and spec.unit_of == 3
+    assert spec.run_id == "run1" and spec.policy == "nn"
     # 定型落台账（of 2 → 3）+ 认领已置 running
     (row,) = _ledger(tmp_path)
     assert row["status"] == "running" and row["units"]["of"] == 3
@@ -351,8 +351,11 @@ def test_verdict_batch_takes_weights_from_the_unit_not_rl_path(tmp_path, monkeyp
 
     t = _call(tmp_path, rl_path=str(other), mode="goal")
     assert t is not None and len(calls) == 1
-    _bun, rl_path, _eval_log, _args, _cfg, _b, unit, unit_idx, unit_of, *_ = calls[0]
-    assert unit["ckpt"] == w and rl_path == w != str(other) and unit_idx == 0
-    assert unit_of == len(bp.plan_verdict_units(bp.corpus_doc("v-ladder-c03-p400600"), [{"path": w, "label": "A"}]))
+    (spec,) = calls[0]
+    unit, unit_idx = spec.unit, spec.unit_idx
+    assert unit["ckpt"] == w and spec.rl_path == w != str(other) and unit_idx == 0
+    assert spec.unit_of == len(
+        bp.plan_verdict_units(bp.corpus_doc("v-ladder-c03-p400600"), [{"path": w, "label": "A"}])
+    )
     (row,) = _ledger(tmp_path)
     assert row["status"] == "running"

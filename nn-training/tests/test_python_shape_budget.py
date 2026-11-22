@@ -92,7 +92,8 @@ WIDE_FUNCS_BASELINE = {
     "tools/tpu-probe.py": 1,
     #: 2026-11-20：`_settle_unit` 的 15 参收成 `(self, ledger)`，通道机器搬去
     #: `trainer/batch_lanes.py` ⇒ 本文件 3 → **2**（新家没有新增宽签名）。
-    "trainer/batch_runner.py": 2,
+    #: 2026-11-22（P0-3 第四十三刀）：`BatchEvalRunner.__init__`(16) 与 `dispatch_batch_bg`(13)
+    #: 共收 `RunnerSpec` ⇒ 本文件清零，条目删除；守 `tests/trainer/test_runner_spec.py`。
     "trainer/bc_ingest.py": 0,
     "trainer/bc_loop.py": 1,
     # `trainer/dispatch.py` 已清零（P0-3 第三十九刀：`DispatchSpec`）。

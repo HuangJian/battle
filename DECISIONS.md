@@ -9782,3 +9782,22 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   `update_spec.py` 99 行（拓扑秩 L1，已登记 `tests/helpers/remote_dag.py`）。
 - **验证**：`tests/worker/test_ppo_update_spec.py`（7 条）· PPO 族 68 条 · `bun run pygate` 绿
   （6745 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §295。
+
+## §2026-11-22-runner-spec（B 层派发两入口共收 `RunnerSpec`）
+
+- **背景**：`trainer/batch_runner.py` 里 `BatchEvalRunner.__init__`（16 参）与 `dispatch_batch_bg`
+  （13 参）是**同一张表的两份**，后者按**位置**把 13 个实参转手给前者。相邻的 `unit_idx` /
+  `unit_of` 都是 `int`、`init_sha16` / `run_id` 都是 `str`：传错一位不报错，只让 iterId 的
+  命名空间变样（那是 god/nn 不串键的唯一保证），要等台账里出现「本单元之外」的键才发现。
+- **决定**：新增 frozen + kw_only `RunnerSpec`（16 字段 = 11 个身份位 + `policy` / `window_event` /
+  `init_sha16` / `kind` / `include_scorable` 五个带缺省的旋钮，缺省与旧签名逐字一致）；
+  `BatchEvalRunner(spec)` 展开成同名局部量、`dispatch_batch_bg(spec)` 直接把同一份 spec 转手。
+  8 个构造点（生产 3 + 测试 5）全改传对象，派发口不再有位置手传层。守
+  `tests/trainer/test_runner_spec.py`（frozen + kw_only / 字段表 / 缺省语义 / 两入口只剩 spec）。
+- **被否决**：① 只收 `__init__`（派发口仍是 13 个位置实参 —— 错位的主失效面原封不动）；
+  ② 让 `dispatch_batch_bg` 收显式参数再自己拼 spec（等于把同一张表再抄一份，只是换成关键字）。
+- **读数**：宽签名 50 → **48**、41 → **40** 文件（`WIDE_FUNCS_BASELINE` 删 `trainer/batch_runner.py`）；
+  `batch_runner.py` LOC 513 → 519。连带：`test_batch_runner_split` 的 import 闭集加 stdlib
+  `dataclasses`，`test_batch_eval_facade` 的 `RUNNER_EXPORTS` 加 `RunnerSpec`（门面自别名规矩）。
+- **验证**：batch 族 + 门面 72 例绿；`bun run pygate` 绿（6749 passed / 3 skipped）。
+  全文 → `docs/nn/engineering.md` §296。

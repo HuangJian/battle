@@ -39,6 +39,7 @@ import json
 import shutil
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import common.codehash
@@ -87,6 +88,49 @@ def _heartbeat(**patch: object) -> None:
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class RunnerSpec:
+    """一个单元的全部输入（`BatchEvalRunner` 与 `dispatch_batch_bg` 共用一张字段表）。
+
+    ## 为什么要有它
+
+    这两处原来是**同一张 13 参表的两份**：`dispatch_batch_bg` 按**位置**转手给
+    `BatchEvalRunner(...)`。相邻的 `unit_idx` / `unit_of` 都是 `int`、`init_sha16` 与
+    `run_id` 都是 `str` —— 传错一位不报错：`unit_of` 进了 `unit_idx` 只会让 iterId 的
+    命名空间变样（`{runId}.b{batchShort}u{unit}` 是 god/nn 不串键的唯一保证），要等到台账
+    里出现「本单元之外」的键才发现。关键字拼错同理：静默落回缺省（`policy="nn"` 落错 =
+    节点门按错 kind 判，`include_scorable=True` 落丢 = A/B/C 行悄悄少列）。
+
+    ## 字段分组
+
+    前 11 个是身份/上下文（缺一个就不知道在跑谁），后 5 个是带缺省的旋钮（`kind` 缺省由
+    policy 推，见 `KIND_FOR_POLICY`）。`args` 只被 `getattr(args, "eval_window_sec", …)`
+    读过 ⇒ 保持不透明句柄 `object`（不为它造协议）。
+    """
+
+    bun: str
+    rl_path: str | None
+    eval_log: Path
+    args: object
+    cfg: dict
+    batch: dict
+    unit: dict
+    unit_idx: int
+    unit_of: int
+    run_id: str
+    engine_epoch: str
+    #: `nn` / `god`；决定节点门与 kind 推法。
+    policy: str = "nn"
+    #: 开窗事件；None = 一直开（一次性评估）。
+    window_event: threading.Event | None = None
+    #: 权重指纹（逐局行的 `wver`）。
+    init_sha16: str = ""
+    #: None = 由 policy 推（`kind_for_policy`）；显式给值只为一处例外（一次性评估复用桶名）。
+    kind: str | None = None
+    #: 把 agent 的原始 `scorable` 原样落到逐局行（缺省关 ⇒ A/B/C 层行逐字节不变）。
+    include_scorable: bool = False
+
+
 class BatchEvalRunner:
     """一批次中一个 100 局单元的派发器（阻塞版，调用方放后台线程跑）。
 
@@ -94,25 +138,13 @@ class BatchEvalRunner:
     新局，在途局自然收完；剩余 seed 下窗续跑（units.done 已落台账）。
     """
 
-    def __init__(
-        self,
-        bun: str,
-        rl_path: str | None,
-        eval_log: Path,
-        args,
-        cfg: dict,
-        batch: dict,
-        unit: dict,
-        unit_idx: int,
-        unit_of: int,
-        run_id: str,
-        engine_epoch: str,
-        policy: str = "nn",
-        window_event: threading.Event | None = None,
-        init_sha16: str = "",
-        kind: str | None = None,
-        include_scorable: bool = False,
-    ) -> None:
+    def __init__(self, spec: RunnerSpec) -> None:
+        bun, rl_path, eval_log = spec.bun, spec.rl_path, spec.eval_log
+        args, cfg, batch, unit = spec.args, spec.cfg, spec.batch, spec.unit
+        unit_idx, unit_of = spec.unit_idx, spec.unit_of
+        run_id, engine_epoch, policy = spec.run_id, spec.engine_epoch, spec.policy
+        window_event, init_sha16 = spec.window_event, spec.init_sha16
+        kind, include_scorable = spec.kind, spec.include_scorable
         self.bun = bun
         self.rl_path = rl_path
         self.eval_log = eval_log
@@ -476,38 +508,12 @@ class BatchEvalRunner:
         return out
 
 
-def dispatch_batch_bg(
-    bun: str,
-    rl_path: str | None,
-    eval_log: Path,
-    args,
-    cfg: dict,
-    batch: dict,
-    unit: dict,
-    unit_idx: int,
-    unit_of: int,
-    run_id: str,
-    engine_epoch: str,
-    policy: str = "nn",
-    window_event: threading.Event | None = None,
-    init_sha16: str = "",
-) -> threading.Thread:
-    """后台起一个单元（调用方 join，语义同 dispatch_eval_bg）。"""
-    runner = BatchEvalRunner(
-        bun,
-        rl_path,
-        eval_log,
-        args,
-        cfg,
-        batch,
-        unit,
-        unit_idx,
-        unit_of,
-        run_id,
-        engine_epoch,
-        policy,
-        window_event,
-        init_sha16,
-    )
+def dispatch_batch_bg(spec: RunnerSpec) -> threading.Thread:
+    """后台起一个单元（调用方 join，语义同 dispatch_eval_bg）。
+
+    与 `BatchEvalRunner` 共用同一份 `RunnerSpec` ⇒ 这里不再有「按位置转手 13 个参数」的
+    那一层（原写法传错一位只会在台账里显形）。
+    """
+    runner = BatchEvalRunner(spec)
     return runner._rt.thread(runner.run, name="run", daemon=True)
 
