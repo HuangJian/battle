@@ -155,18 +155,10 @@ def _fake_game(trace: _Trace) -> Any:
     注入点一致（§P0-8 主例 `docs/nn/engineering.md` §258）。
     """
 
-    def _run(
-        bun: str,
-        argv: list[str],
-        exec_dir: Path,
-        ts_dir: Path,
-        out_dir: str,
-        timeout_sec: float,
-        log: Any = None,
-        *,
-        attempt: int = 1,
-        abandoned: Any = None,
-    ) -> float:
+    def _run(spec: Any) -> float:
+        argv = spec.argv
+        exec_dir = spec.exec_dir
+        out_dir = spec.out_dir
         stage = stage_of(argv)
         seed = seed_of(argv)
         trace.start(stage, seed)

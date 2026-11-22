@@ -1293,7 +1293,7 @@ def test_clean_overrun_is_machine_stall_not_in_place_retry(
     real_one = iter_rollout._run_one_game
 
     def counted(*a, **kw):  # 替身：只记「哪几局真的开跑过」
-        games.append(list(a[1]))
+        games.append(list(a[0].argv))
         return real_one(*a, **kw)
 
     stub_exec(monkeypatch, run_game=counted)
@@ -1355,8 +1355,10 @@ def test_run_one_game_self_kills_when_the_attempt_was_abandoned(
     argv = _one_game_spec(tmp_path, script)["argv"][0]
     with pytest.raises(UnreapableChildError) as ei:
         iter_rollout._run_one_game(
-            sys.executable, argv, job_dir, tmp_path, "w0", 5.0,
-            log=msgs.append, abandoned=abandoned,
+            iter_rollout.OneGameSpec(
+                sys.executable, argv, job_dir, tmp_path, "w0", 5.0,
+                log=msgs.append, abandoned=abandoned,
+            )
         )
     assert "超界后自清" in str(ei.value) and "s0/d0" in str(ei.value)
     assert killed, "被放弃的尝试必须就地处决自己刚起的子进程"
@@ -1383,8 +1385,10 @@ def test_run_one_game_refuses_to_start_when_already_abandoned(
     argv = _one_game_spec(tmp_path, script)["argv"][0]
     with pytest.raises(UnreapableChildError) as ei:
         iter_rollout._run_one_game(
-            sys.executable, argv, job_dir, tmp_path, "w0", 5.0,
-            log=msgs.append, abandoned=abandoned,
+            iter_rollout.OneGameSpec(
+                sys.executable, argv, job_dir, tmp_path, "w0", 5.0,
+                log=msgs.append, abandoned=abandoned,
+            )
         )
     assert "不再开写" in str(ei.value)
     assert not (job_dir / "w0").exists(), "连 mkdir 都不该做"

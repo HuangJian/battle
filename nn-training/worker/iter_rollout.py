@@ -342,17 +342,22 @@ def _clean_attempt(job_dir: Path, argv: list[str], *, exec_root: Path | None = N
             pass
 
 
-def _run_one_game(
-    bun: str,
-    argv: list[str],
-    exec_dir: Path,
-    ts_dir: Path,
-    out_dir: str,
-    timeout_sec: float,
-    log=lambda msg: None,
-    attempt: int = 1,
-    abandoned: threading.Event | None = None,
-) -> float:
+@dataclass(frozen=True)
+class OneGameSpec:
+    """`_run_one_game` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    bun: str
+    argv: list[str]
+    exec_dir: Path
+    ts_dir: Path
+    out_dir: str
+    timeout_sec: float
+    log: Callable[..., None] = lambda msg: None
+    attempt: int = 1
+    abandoned: threading.Event | None = None
+
+
+def _run_one_game(spec: OneGameSpec) -> float:
     """跑一局：`bun <argv...>`（cwd = TS 代码根），日志落 `exec_dir/out_dir/rollout.log`。
 
     `exec_dir` = **本轮的 exec 根**（回退档 = job 目录，换根档 = scratch 的 `r/`）：`--out`/
@@ -380,6 +385,10 @@ def _run_one_game(
     线程照样会把整局跑完并往 `w{i}/` 写 —— 那正是「同一目录上可能还有活写者」（同一份 shard
     两个写者 = 静默错数据）的唯一可闭缺口；评审点名的 exec 握手窗口就是第二次检查。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    bun, argv, exec_dir = spec.bun, spec.argv, spec.exec_dir
+    ts_dir, out_dir, timeout_sec = spec.ts_dir, spec.out_dir, spec.timeout_sec
+    log, attempt, abandoned = spec.log, spec.attempt, spec.abandoned
     label = _game_label(argv)
     if abandoned is not None and abandoned.is_set():
         raise UnreapableChildError(
@@ -456,20 +465,24 @@ def _run_one_game(
     return round(time.time() - t0, 3)
 
 
-def _run_one_game_with_retries(
-    bun: str,
-    argv: list[str],
-    exec_dir: Path,
-    ts_dir: Path,
-    out_dir: str,
-    timeout_sec: float,
-    log=lambda msg: None,
-    explicit: bool = False,
-    pool: serve_pool.ServePool | None = None,
-    abandoned: threading.Event | None = None,
-    *,
-    job_dir: Path | None = None,
-) -> tuple[float, int]:
+@dataclass(frozen=True)
+class RetryGameSpec:
+    """`_run_one_game_with_retries` 的旋钮袋（P0-3：11 参 → 一个对象）。"""
+
+    bun: str
+    argv: list[str]
+    exec_dir: Path
+    ts_dir: Path
+    out_dir: str
+    timeout_sec: float
+    log: Callable[..., None] = lambda msg: None
+    explicit: bool = False
+    pool: serve_pool.ServePool | None = None
+    abandoned: threading.Event | None = None
+    job_dir: Path | None = None
+
+
+def _run_one_game_with_retries(spec: RetryGameSpec) -> tuple[float, int]:
     """一局最多跑 `GAME_MAX_ATTEMPTS` 次（超时/rc≠0 都原地重跑），返回 `(墙钟秒, 尝试次数)`。
 
     `pool` 非空时**先试长驻 worker**（`§20/§21` 的 1.59×）：池里跑成 = 直接返回，否则立刻回退
@@ -491,6 +504,11 @@ def _run_one_game_with_retries(
     `job_dir` 只在**换根档**才需要（= 真 job 目录）：清理要两个根都扫（R1），而跑局一律在 `exec_dir`。
     缺席 ⇒ 与 `exec_dir` 同一个（回退档：调用形状与今天逐字相同）。
     """
+    # 旧签名 11 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    bun, argv, exec_dir = spec.bun, spec.argv, spec.exec_dir
+    ts_dir, out_dir, timeout_sec = spec.ts_dir, spec.out_dir, spec.timeout_sec
+    log, explicit, pool = spec.log, spec.explicit, spec.pool
+    abandoned, job_dir = spec.abandoned, spec.job_dir
     real_job = Path(exec_dir) if job_dir is None else Path(job_dir)
     label = _game_label(argv)
     last: Exception | None = None
@@ -545,15 +563,17 @@ def _run_one_game_with_retries(
         try:
             return (
                 EXEC.run_game(
-                    bun,
-                    argv,
-                    exec_dir,
-                    ts_dir,
-                    out_dir,
-                    cap,
-                    log=log,
-                    attempt=attempt,
-                    abandoned=abandoned,
+                    OneGameSpec(
+                        bun,
+                        argv,
+                        exec_dir,
+                        ts_dir,
+                        out_dir,
+                        cap,
+                        log=log,
+                        attempt=attempt,
+                        abandoned=abandoned,
+                    )
                 ),
                 attempt,
             )
@@ -614,17 +634,19 @@ def _run_one_game_bounded(
     abandoned = threading.Event()
     ok, res = call_bounded(
         lambda: _run_one_game_with_retries(
-            bun,
-            argv,
-            exec_dir,
-            ts_dir,
-            out_dir,
-            timeout_sec,
-            log,
-            explicit,
-            pool,
-            abandoned,
-            job_dir=job_dir,
+            RetryGameSpec(
+                bun,
+                argv,
+                exec_dir,
+                ts_dir,
+                out_dir,
+                timeout_sec,
+                log,
+                explicit,
+                pool,
+                abandoned,
+                job_dir=job_dir,
+            )
         ),
         ceiling,
         name=f"rollout-{label}",

@@ -33,6 +33,7 @@ from trainer.loop_plan import (
     WAIT_IDLE,
     WAIT_INFLIGHT,
     WAIT_READY,
+    WaitingSpec,
     course_is_held,
     enabled_courses,
     plan_course,
@@ -56,7 +57,7 @@ def _state(**kw: object) -> tuple[str, str]:
         "blocked": "",
     }
     base.update(kw)
-    return waiting_state(**base)  # type: ignore[arg-type]
+    return waiting_state(WaitingSpec(**base))  # type: ignore[arg-type]
 
 
 # ────────────────────────────── 在飞（进程外等待） ──────────────────────────────

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -283,19 +284,23 @@ def course_is_held(args: Any) -> bool:
         return False
 
 
-def waiting_state(
-    *,
-    inflight: list[dict],
-    games_settled: int,
-    games_planned: int,
-    pending: int,
-    current: str,
-    finished: bool = False,
-    it: int = 0,
-    iters: int = 0,
-    blocked: str = "",
-    held: bool = False,
-) -> tuple[str, str]:
+@dataclass(frozen=True, kw_only=True)
+class WaitingSpec:
+    """`waiting_state` 的旋钮袋（P0-3：10 参 → 一个对象）。"""
+
+    inflight: list[dict]
+    games_settled: int
+    games_planned: int
+    pending: int
+    current: str
+    finished: bool = False
+    it: int = 0
+    iters: int = 0
+    blocked: str = ""
+    held: bool = False
+
+
+def waiting_state(spec: WaitingSpec) -> tuple[str, str]:
     """按**盘上事实**回答「这门课在等什么」→ `(kind, 文案)`。
 
     控制台调度器卡片的「在等什么」列与控制台外的 CLI 表用的是**同一个函数**（不在 TS 重算：
@@ -323,6 +328,11 @@ def waiting_state(
     被接管的课是**在等云机**，不是收官——旧的离线早退把它当 `done(final=True)`，于是这一列
     显示成「已收官」（R1-e）。
     """
+    # 旧签名 10 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    inflight, games_settled = spec.inflight, spec.games_settled
+    games_planned, pending, current = spec.games_planned, spec.pending, spec.current
+    finished, it, iters = spec.finished, spec.it, spec.iters
+    blocked, held = spec.blocked, spec.held
     if finished:
         return WAIT_IDLE, f"已跑满 it{it - 1}/{iters}（改大 iters 后需 停→开 重新入队）"
     if held:

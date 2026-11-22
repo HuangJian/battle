@@ -620,16 +620,18 @@ class RolloutDispatcher:
         combined["missing"] = [list(k) for k in missing]
         combined["expectedGames"] = len(pairs)
         combined["dist"] = common.distribution.dist_block(
-            iter_id=iter_id,
-            by_node=by_node,
-            nodes=nodes,
-            retried=stats["retried"],
-            resumed=len(done),
-            off_plan=max(0, len(done_all) - len(done)),
-            race_drops=race_drops,
-            games=len(results),
-            sum_game_sec=sum_game_sec[0],
-            sum_game_sec_by_node=sum_game_sec_by_node,
+            common.distribution.RaceDistSpec(
+                iter_id=iter_id,
+                by_node=by_node,
+                nodes=nodes,
+                retried=stats["retried"],
+                resumed=len(done),
+                off_plan=max(0, len(done_all) - len(done)),
+                race_drops=race_drops,
+                games=len(results),
+                sum_game_sec=sum_game_sec[0],
+                sum_game_sec_by_node=sum_game_sec_by_node,
+            )
         )
         combined["dist"]["waste"] = waste_block(stats, local_lane.idle_sec)
         combined["dist_phase_sec"] = round((t_dist_done_box[0] or time.time()) - t_queue_enter, 1)

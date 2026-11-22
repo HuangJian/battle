@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -92,19 +93,23 @@ def by_node_of(results: Sequence[Mapping[str, Any]]) -> dict[str, int]:
     return out
 
 
-def dist_block(
-    *,
-    iter_id: str,
-    by_node: Mapping[str, int],
-    nodes: Sequence[Mapping[str, Any]],
-    retried: int,
-    resumed: int,
-    off_plan: int,
-    race_drops: Mapping[str, int],
-    games: int,
-    sum_game_sec: float,
-    sum_game_sec_by_node: Mapping[str, float],
-) -> dict:
+@dataclass(frozen=True, kw_only=True)
+class RaceDistSpec:
+    """`dist_block` 的旋钮袋（P0-3：10 参 → 一个对象）。"""
+
+    iter_id: str
+    by_node: Mapping[str, int]
+    nodes: Sequence[Mapping[str, Any]]
+    retried: int
+    resumed: int
+    off_plan: int
+    race_drops: Mapping[str, int]
+    games: int
+    sum_game_sec: float
+    sum_game_sec_by_node: Mapping[str, float]
+
+
+def dist_block(spec: RaceDistSpec) -> dict:
     """一轮收齐后的 `combined["dist"]` 块（`effSlots` 由调用方在算完采集墙钟后补写）。
 
     口径（plan/rollout-corpus-supply §3.4）：
@@ -112,6 +117,11 @@ def dist_block(
       * `sumGameSecByNode` 是「远端慢」与「队列先到先得抢走队首」的**唯一判别式**：
         `利用率[n] = sumGameSecByNode[n] / (nodes[n].c × 采集墙钟)`，只给总量时两者分不开。
     """
+    # 旧签名 10 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    iter_id, by_node, nodes = spec.iter_id, spec.by_node, spec.nodes
+    retried, resumed, off_plan = spec.retried, spec.resumed, spec.off_plan
+    race_drops, games = spec.race_drops, spec.games
+    sum_game_sec, sum_game_sec_by_node = spec.sum_game_sec, spec.sum_game_sec_by_node
     executed, rejected, rate = race_stats(race_drops, games)
     return {
         "iterId": iter_id,

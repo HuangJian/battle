@@ -61,6 +61,7 @@ from common.distribution_limits import status_timeout_of as status_timeout_of
 from common.errors import NET_ERRORS as _BASE_NET_ERRORS
 from common.hashing import sha256_file
 from common.paths import REPO_ROOT
+from common.race_metrics import RaceDistSpec as RaceDistSpec
 
 # 竞速账 / 采集口径 → `common/race_metrics.py`（2026-11-11 LOC 预算）。纯函数、无状态，
 # 日志行与 `dist` 块共用同一处算术；本模块只留门面，`common.distribution.race_stats` 等

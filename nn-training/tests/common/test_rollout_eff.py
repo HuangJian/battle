@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.distribution import (
+    RaceDistSpec,
     by_node_of,
     dist_block,
     dup_rate,
@@ -92,16 +93,18 @@ def test_by_node_of_prefers_config_id() -> None:
 
 def test_dist_block_splits_rejects_from_dups() -> None:
     block = dist_block(
-        iter_id="run.63",
-        by_node={"self": 29, "mac": 6},
-        nodes=[{"id": "self", "c": 8}, {"id": "mac", "c": 2}],
-        retried=2,
-        resumed=0,
-        off_plan=3,
-        race_drops=_RACE,
-        games=42,
-        sum_game_sec=100.8,
-        sum_game_sec_by_node={"self": 69.6, "mac": 31.2},
+        RaceDistSpec(
+            iter_id="run.63",
+            by_node={"self": 29, "mac": 6},
+            nodes=[{"id": "self", "c": 8}, {"id": "mac", "c": 2}],
+            retried=2,
+            resumed=0,
+            off_plan=3,
+            race_drops=_RACE,
+            games=42,
+            sum_game_sec=100.8,
+            sum_game_sec_by_node={"self": 69.6, "mac": 31.2},
+        )
     )
     assert block["slotsOnline"] == 10  # 分母来自 nodes[].c，不是局数
     assert (block["dupExecuted"], block["dupRejected"]) == (13, 7)

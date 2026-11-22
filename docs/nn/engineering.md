@@ -25,6 +25,16 @@
 
 ---
 
+## §279 P0-3 第二十六刀（批量）：跑局/分布/等待面收 spec（宽签名 79 → 75）（2026-11-21）
+
+* `_run_one_game` / `_run_one_game_with_retries` → `OneGameSpec` / `RetryGameSpec`；
+  `dist_block` → `RaceDistSpec`；`waiting_state` → `WaitingSpec`。
+* 端口面：`EXEC.run_game` 现在收 `OneGameSpec`，`stub_exec(run_game=...)` 替身改读
+  `spec.argv`；`common.distribution` 补 `RaceDistSpec` 再导出。
+* 调用点：iter_rollout 内部 2 + 测试 2；dist 2；waiting 2。形状基线 `race_metrics` /
+  `loop_plan` 归零、`iter_rollout` 4 → 2；全仓 **79 → 75**，文件 **56 → 54**。
+* 回归：remote_iter 87 + rollout_eff / plan_waiting / 形状/LOC/Any 53 条全绿；mypy 5 文件无错。
+
 ## §278 P0-3 第二十五刀：`build_eval_panel` 收 `BcPanelSpec`（宽签名 80 → 79）（2026-11-21）
 
 * 10 个关键字参数 → frozen kw-only `BcPanelSpec`；面板字典逐字未动。

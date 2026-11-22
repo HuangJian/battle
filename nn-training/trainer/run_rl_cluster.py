@@ -44,6 +44,7 @@ if HERE not in sys.path:
 
 from common.cli import house_parser, run_main
 from trainer.loop_plan import (
+    WaitingSpec,
     course_is_held,
     course_kind,
     course_openable,
@@ -104,7 +105,8 @@ def build_rows(courses: list[str], traj_root: str, sup: Supervisor) -> list[dict
         # 零副作用：不建锁/不写账本/不碰 runtimes（实现 = `worker.course_args.course_openable`）。
         ok, reason = course_openable(course)
         wait_kind, text = waiting_state(
-            inflight=inflight,
+            WaitingSpec(
+                inflight=inflight,
             games_settled=int(facts["games_settled"]),
             games_planned=int(facts["games_planned"]),
             pending=len(tasks),
@@ -118,7 +120,8 @@ def build_rows(courses: list[str], traj_root: str, sup: Supervisor) -> list[dict
             # **够用的**最小对象：`course=<课名>`（hub 直问与控制文件缓存都要这把键）。
             # 没有 token/hub 地址 ⇒ hub 直问退回 None；**文件通道仍有效**（同机 `tmp/`），
             # 而它正是控制台写的那份缓存（F13）。
-            held=course_is_held(SimpleNamespace(course=course)),
+                held=course_is_held(SimpleNamespace(course=course)),
+            )
         )
         # 队列状态取自调度器本身（`add_course` 的 ready/done 判定），不在这里再写一遍
         # 「有任务 = ready」——两处各写一遍就是第一个分叉点。

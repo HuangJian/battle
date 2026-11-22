@@ -52,7 +52,6 @@ LONG_FUNCS_BASELINE: dict[str, int] = {
 
 #: 存量：包含 >8 参数函数的文件 → 个数。
 WIDE_FUNCS_BASELINE = {
-    "common/race_metrics.py": 1,
     "common/task_key.py": 1,
     "hub/offline_push.py": 2,
     # 2026-11-21：`build_task_zip` 的 9 个关键字参数收成 `TaskZipSpec`
@@ -101,7 +100,6 @@ WIDE_FUNCS_BASELINE = {
     "trainer/dispatch.py": 1,
     "trainer/dispatch_queue.py": 1,
     "trainer/eval_dispatch.py": 3,
-    "trainer/loop_plan.py": 1,
     "trainer/loop_serve.py": 1,
     "trainer/loop_transport.py": 1,
     # 2026-11-21：`reap_alloc_timeouts` 的 9 个关键字参数收成 `ReapSpec`
@@ -122,7 +120,7 @@ WIDE_FUNCS_BASELINE = {
     "worker/eval_track.py": 1,
     "worker/gate_check.py": 1,
     "worker/greedy_round.py": 1,
-    "worker/iter_rollout.py": 4,
+    "worker/iter_rollout.py": 2,
     "worker/models/student.py": 1,
     "worker/models/student_paddle.py": 1,
     "worker/plan.py": 1,

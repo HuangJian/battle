@@ -8818,6 +8818,14 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-iter-race-specs
+
+P0-3 第二十六刀（批量）：`worker/iter_rollout.py` 的 `_run_one_game`(9) /
+`_run_one_game_with_retries`(11) → `OneGameSpec` / `RetryGameSpec`（`EXEC.run_game` 端口
+替身同步改收 spec，`stub_exec` 语义不变）；`common/race_metrics.dist_block`(10) →
+`RaceDistSpec`（kw_only，`common.distribution` 再导出）；`trainer/loop_plan.waiting_state`(10)
+→ `WaitingSpec`。宽签名 **79 → 75**，文件 **56 → 54**（iter_rollout 4 → 2）。
+
 ## §2026-11-21-bc-panel-spec
 
 P0-3 第二十五刀：`worker/bc_eval.py::build_eval_panel`（10 参，全关键字）→ frozen
