@@ -94,8 +94,9 @@ WIDE_FUNCS_BASELINE = {
     # 共用一份 `UploadSpec`）；守 `tests/remote/test_upload_spec.py`。
     # `remote/worker.py` 已清零（P0-3 第四十四刀：`worker_loop` 收 `WorkerLoopSpec`、
     # `run_job`(17) 收 `RunJobSpec`）；守 `tests/remote/test_run_job_spec.py`。
-    "tools/c9_critic_calibration.py": 1,
-    "tools/p0_auc_probe.py": 1,
+    # `tools/c9_critic_calibration.py` 已清零（P0-3 批 H：`build_report` → `CriticReportSpec`）；
+    # 与 `p0_auc_probe` 同一个守卫 `tests/tools/test_report_specs.py`。
+    # `tools/p0_auc_probe.py` 已清零（P0-3 批 H：`build_report` → `AucReportSpec`）。
     "tools/tpu-probe.py": 1,
     #: 2026-11-20：`_settle_unit` 的 15 参收成 `(self, ledger)`，通道机器搬去
     #: `trainer/batch_lanes.py` ⇒ 本文件 3 → **2**（新家没有新增宽签名）。

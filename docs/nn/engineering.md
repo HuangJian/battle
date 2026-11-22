@@ -29,6 +29,37 @@
 
 ---
 
+## §309 P0-3 批 H1：两个双生 `build_report` 各收一份 spec（26 → 24）（2026-11-22）
+
+* **一把刀两处，但各给一份**：`tools/c9_critic_calibration.build_report`(1 位置 + 9 关键字 →
+  `CriticReportSpec`) 与 `tools/p0_auc_probe.build_report`(2 位置 + 9 关键字 → `AucReportSpec`)。
+  读数：宽签名 **26 → 24**、21 → **19** 文件。守 `tests/tools/test_report_specs.py`；两个工具都不被
+  生产 import（工具面 = 升级风险最低的一批），所以拿它验「两个同名双生能不能共用一份 spec」。
+* **被否决：共用一份 `ReportSpec`**。两个函数长得像，字段名却**故意不同**：一个是 `seed` /
+  `boot`（bootstrap 次数），另一个是 `boot_seed` / `n_boot`；`games` 一个是 `list[GameRows]`
+  （AUC 探针的行表）另一个是 `list[Game]`（标定局的 V/G 序列）。硬合并只有两条路 ——
+  加 `if` 分支（spec 里出现「这个字段在某些工具里无意义」的缺血），或者把两边的名字改成一方
+  （真实收益为零、`Args` 文档与 json 血缘字段全得跟着改）。**同名不代表同形**：并 spec 的判据是
+  「字段表逐字相同」（§308 的 `UploadSpec`），不是「函数同名」。
+* **真正的坏点 = 三个 int 挨着**：c9 的 `it` / `n_boot` / `boot_seed`，AUC 的 `n_folds` / `boot` /
+  `seed`。把 `boot` 与 `seed` 互换**不会崩**：bootstrap 换一颗种子，数值全变而报告形状不变 ——
+  两份「同一份语料不同结论」的 json 长得一模一样，且都过 schema 校验。`stages_expected` 传错则
+  `missing_expected_stages` 永远为空（缺关看不出来）。两处写进 spec 的类 docstring（失效面）。
+* **函数体逐字不动**：入口只做一次展开（`games, folds = spec.games, spec.folds` …），下面几十行
+  一行没改 —— 这刀的价值全在调用面，「顺手改算法」会让读数无法归因。
+* **守卫怎么钉**：`MISSING` 哨兵让字段表能表达「无缺省」（`dataclasses.fields` 的
+  `default` 是 `MISSING`，直接进表打印不出东西）；另外三条钉**旧调用面必须响亮地死**（
+  `build_report([], course_name=…)` → `TypeError`）、**拼错的旋钮名不许静默落缺省**
+  （`boot_seed` 写成 `seed` 会让 CI 悄悄换种子）。
+* **工具模块的装载法**：`tools/*.py` 不是包（且有 `tpu-probe.py` 这种带破折号的），守卫走
+  `importlib.util.spec_from_file_location` + `assert spec and spec.loader`，与同目录既有用例同款；
+  mypy 对 `module_from_spec(spec)` 的 `| None` 也是靠这条 `assert` 才过（裸调用会报 4 个 `union-attr`）。
+* **ruff 的两处误伤**：`class _Minimal: @staticmethod def C9(...)` 撞 `N802`（规则管的是「方法名」，
+  静态工厂也算）⇒ 改成模块级 `_minimal_critic()` / `_minimal_auc()`。教训：**夹具类越薄越好**，
+  为了分组而建的类会把命名规则引进测试。
+* **剩下的 `tools/tpu-probe.bench_case`(9) 单开一刀**：文件名带破折号（装载/守卫都得特殊处理）且
+  7 处调用全是**位置实参**（`bench_case(bk, chunks, epochs, sync_mode=…)`），改法要逐处核。
+
 ## §308 P0-3 批 G：回传腿的两个入口共用一份 `UploadSpec`（28 → 26）（2026-11-22）
 
 * **一把刀两处，共用一份 spec**：`remote/upload_proc.UploaderProcess.__init__`(11，含 self) 与

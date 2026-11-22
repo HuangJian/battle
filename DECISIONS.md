@@ -10079,3 +10079,29 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   `tests/remote/test_upload_spec.py`（字段表 / 冻结 / 两入口形状 / `mode=""` 的两种解释 /
   旧关键字面 TypeError）。全文 → `docs/nn/engineering.md` §308。
 
+
+## §2026-11-22-tool-report-specs
+
+**P0-3 批 H1：两个同名双生 `build_report` 各收一份 spec（宽签名 26 → 24，21 → 19 文件）。**
+
+- **背景**：`tools/c9_critic_calibration.build_report`(1 位置 + 9 关键字) 与
+  `tools/p0_auc_probe.build_report`(2 位置 + 9 关键字) 名字相同、形状相似，坏点也同型 ——
+  三个 int 挨着（`it`/`n_boot`/`boot_seed`；`n_folds`/`boot`/`seed`）。互换 `boot` 与 `seed`
+  **不会崩**：bootstrap 换一颗种子，报告数值全变而形状不变（两份「同一份语料不同结论」的 json
+  长得一模一样，且都过 schema 校验）。`stages_expected` 传错则 `missing_expected_stages`
+  永远为空（缺关看不出来）。
+- **决定**：`CriticReportSpec`（10 字段）/ `AucReportSpec`（11 字段），frozen + kw_only，
+  各住自己的工具文件（工具面不被生产 import，spec 无跨包可见性要求）；入口只做一次展开，函数体
+  逐字不动。失效面写进类 docstring。
+- **被否决**：① **共用一份 `ReportSpec`** —— 两个函数的字段名故意不同（`seed`/`boot` vs
+  `boot_seed`/`n_boot`）、`games` 类型也不同（`list[GameRows]` vs `list[Game]`），硬合并只能靠
+  `if` 分支或全仓改名，收益为零。并 spec 的判据是「字段表逐字相同」（§308 的 `UploadSpec`），
+  **不是「函数同名」**；② 只收 `p0_auc_probe`（11 参最宽）留 c9 不管 —— 同族两件放两批，
+  下一次还得重新读一遍这两张表；③ 把字段改名统一以复用 —— 会改 json 血缘字段与 `Args` 文档，
+  与本刀「只动调用面」相悖。
+- **读数**：宽签名 26 → **24**、21 → **19** 文件（`tools/` 两条基线归零）。
+- **验证**：`bun run pygate` 绿（98s，log clean）；`ruff` + `mypy`(1080 文件) 绿。守
+  `tests/tools/test_report_specs.py`（字段表 / frozen+kw_only / 入口只吃一个 spec /
+  旧关键字面 TypeError / 拼错字段名 TypeError）。
+- **遗留**：`tools/tpu-probe.bench_case`(9) 单开一刀（文件名带破折号 + 7 处位置实参）。
+  全文 → `docs/nn/engineering.md` §309。

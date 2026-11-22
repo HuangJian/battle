@@ -286,19 +286,38 @@ def values_from_weights(dirpath: str, model: Any, batch: int = 256) -> np.ndarra
     return out.astype(np.float64)
 
 
-def build_report(
-    games: list[Game],
-    *,
-    course_name: str,
-    it: int,
-    gamma: float,
-    reward_identity: str,
-    stages_expected: tuple[int, ...],
-    n_boot: int,
-    boot_seed: int,
-    value_source: str = "value.npy",
-    value_weights_sha16: str = "",
-) -> dict[str, Any]:
+@dataclass(frozen=True, kw_only=True)
+class CriticReportSpec:
+    """一次 critic 标定的全部输入（P0-3 批 H：9 个关键字 → 一个对象）。
+
+    失效面：`it` / `n_boot` / `boot_seed` 是三个 int 挨着（把 `it` 当 `boot_seed` ⇒ 置信区间
+    按轮号播种：同一轮的任何两次运行都给出同一条 CI，看着「很稳」其实是同一颗种子）；
+    `gamma` 与 `value_source` 是「折现率 vs 文件名」两个 str/float，互换只在读盘时炸；
+    `stages_expected` 错 ⇒ 报告里 `missing_expected_stages` 永远为空（缺关看不出来）。
+    """
+
+    games: list[Game]
+    course_name: str
+    it: int
+    gamma: float
+    reward_identity: str
+    stages_expected: tuple[int, ...]
+    n_boot: int
+    boot_seed: int
+    value_source: str = "value.npy"
+    value_weights_sha16: str = ""
+
+
+def build_report(spec: CriticReportSpec) -> dict[str, Any]:
+    """把已装载的局聚合成 pooled / per-stage / 缺失关三块报告。
+
+    入参 = 一个 `CriticReportSpec`（P0-3 批 H）；下面一次展开，函数体逐字不动。
+    """
+    games = spec.games
+    course_name, it, gamma = spec.course_name, spec.it, spec.gamma
+    reward_identity, stages_expected = spec.reward_identity, spec.stages_expected
+    n_boot, boot_seed = spec.n_boot, spec.boot_seed
+    value_source, value_weights_sha16 = spec.value_source, spec.value_weights_sha16
     if not games:
         raise ValueError("没有可用 shard")
     stages = sorted({g.stage for g in games})
@@ -464,16 +483,18 @@ def main() -> int:
     if len(set(keys)) != len(keys):
         raise SystemExit("✗ 重复的 (stage, seed) shard")
     res = build_report(
-        games,
-        course_name=course.name,
-        it=args.it,
-        gamma=gamma,
-        reward_identity=spec.identity(),
-        stages_expected=stages_expected,
-        n_boot=args.boot,
-        boot_seed=args.boot_seed,
-        value_source=args.value_weights or "value.npy",
-        value_weights_sha16=sha16(args.value_weights) if args.value_weights else "",
+        CriticReportSpec(
+            games=games,
+            course_name=course.name,
+            it=args.it,
+            gamma=gamma,
+            reward_identity=spec.identity(),
+            stages_expected=stages_expected,
+            n_boot=args.boot,
+            boot_seed=args.boot_seed,
+            value_source=args.value_weights or "value.npy",
+            value_weights_sha16=sha16(args.value_weights) if args.value_weights else "",
+        )
     )
     out, md = Path(args.out), Path(args.md)
     out.parent.mkdir(parents=True, exist_ok=True)

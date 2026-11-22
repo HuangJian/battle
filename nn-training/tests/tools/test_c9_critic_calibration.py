@@ -119,14 +119,16 @@ def test_build_report_pooled_and_per_stage() -> None:
         C.Game(22, 0, np.array([3.0, 4.0]), np.array([3.0, 4.0])),
     ]
     res = C.build_report(
-        games,
-        course_name="z10-maze",
-        it=233,
-        gamma=0.998,
-        reward_identity="deadbeef",
-        stages_expected=(16, 22, 3, 6),
-        n_boot=50,
-        boot_seed=7,
+        C.CriticReportSpec(
+            games=games,
+            course_name="z10-maze",
+            it=233,
+            gamma=0.998,
+            reward_identity="deadbeef",
+            stages_expected=(16, 22, 3, 6),
+            n_boot=50,
+            boot_seed=7,
+        )
     )
     assert res["pooled"]["n_games"] == 3
     assert res["pooled"]["n_decisions"] == 6
@@ -189,14 +191,16 @@ def test_find_shards_requires_value_metrics_done(tmp_path: Path) -> None:
 def test_render_markdown_contains_tables() -> None:
     games = [C.Game(16, 0, np.array([1.0, 2.0]), np.array([2.0, 4.0]))]
     res = C.build_report(
-        games,
-        course_name="z10-maze",
-        it=233,
-        gamma=0.998,
-        reward_identity="deadbeef",
-        stages_expected=(16,),
-        n_boot=10,
-        boot_seed=7,
+        C.CriticReportSpec(
+            games=games,
+            course_name="z10-maze",
+            it=233,
+            gamma=0.998,
+            reward_identity="deadbeef",
+            stages_expected=(16,),
+            n_boot=10,
+            boot_seed=7,
+        )
     )
     md = C.render_markdown(res)
     assert "# C9" in md

@@ -485,20 +485,41 @@ def critic_verdict(full_auc: float, critic_auc: float) -> str:
     return "inconclusive"
 
 
-def build_report(
-    games: list[GameRows],
-    folds: np.ndarray,
-    *,
-    shards_root: str,
-    n_shards_total: int,
-    weights_path: str,
-    pf_dim: int,
-    ablate: slice,
-    neg_frac: float,
-    n_folds: int,
-    boot: int,
-    seed: int,
-) -> dict[str, Any]:
+@dataclass(frozen=True, kw_only=True)
+class AucReportSpec:
+    """一次 critic AUC 探针报告的全部输入（P0-3 批 H：2 位置 + 9 关键字 → 一个对象）。
+
+    失效面：`n_folds` / `boot` / `seed` 是三个 int 挨着（`seed` 与 `boot` 互换 ⇒ bootstrap 的
+    数值全变而报告形状不变，两个「同一份语料不同结论」的 json 长得一模一样）；`ablate`（slice）
+    与 `pf_dim`（int）是「切哪几列 vs 期望宽度」，互换只在索引时炸；`shards_root` 与
+    `weights_path` 是两个路径 str 相邻（报告里的血缘字段会指错文件）。
+    """
+
+    games: list[GameRows]
+    #: K 折划分（`make_folds`；与 `n_folds` 必须一致）。
+    folds: np.ndarray
+    shards_root: str
+    n_shards_total: int
+    weights_path: str
+    pf_dim: int
+    #: 消融的列区间（`WINDOWS` 之一）。
+    ablate: slice
+    neg_frac: float
+    n_folds: int
+    boot: int
+    seed: int
+
+
+def build_report(spec: AucReportSpec) -> dict[str, Any]:
+    """跑窗口探针 + 汇成 pooled / per-window 报告。
+
+    入参 = 一个 `AucReportSpec`（P0-3 批 H）；下面一次展开，函数体逐字不动。
+    """
+    games, folds = spec.games, spec.folds
+    shards_root, n_shards_total = spec.shards_root, spec.n_shards_total
+    weights_path, pf_dim = spec.weights_path, spec.pf_dim
+    ablate, neg_frac = spec.ablate, spec.neg_frac
+    n_folds, boot, seed = spec.n_folds, spec.boot, spec.seed
     if not games:
         raise ValueError("没有可用 shard")
     keys = [g.key for g in games]
@@ -752,17 +773,19 @@ def main() -> int:
     try:
         folds = make_folds(games, n_folds, int(args.seed))
         res = build_report(
-            games,
-            folds,
-            shards_root=args.shards,
-            n_shards_total=len(shards),
-            weights_path=args.weights,
-            pf_dim=pf_dim,
-            ablate=ablate,
-            neg_frac=float(args.neg_frac),
-            n_folds=n_folds,
-            boot=int(args.boot),
-            seed=int(args.seed),
+            AucReportSpec(
+                games=games,
+                folds=folds,
+                shards_root=args.shards,
+                n_shards_total=len(shards),
+                weights_path=args.weights,
+                pf_dim=pf_dim,
+                ablate=ablate,
+                neg_frac=float(args.neg_frac),
+                n_folds=n_folds,
+                boot=int(args.boot),
+                seed=int(args.seed),
+            )
         )
     except (OSError, ValueError, KeyError, RuntimeError) as e:
         print(f"✗ 运行探针: {e}", file=sys.stderr)
