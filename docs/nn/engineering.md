@@ -29,6 +29,34 @@
 
 ---
 
+## §310 P0-3 批 H2：`tools/tpu-probe.bench_case`(9) → `BenchCaseSpec`（24 → 23）（2026-11-22）
+
+* **工具面最后一条**：`bench_case(bk, chunks, epochs, *, sync_mode, ref_cache, ref_model,
+  warmup, repeat, seed)` = 3 位置 + 6 关键字 → 一个 `BenchCaseSpec`。读数：宽签名 **24 → 23**、
+  19 → **18** 文件。守 `tests/tools/test_tpu_probe_bench_case.py`。
+* **坏点不是「参数多」**：`ref_model` 与 `ref_cache` 是 **D1/D2 段的两条互斥路径**（每步重算 vs
+  每 chunk 一次），按位置传时互换，「ref 优化收益」正好测出负号、而报告照样打印得出来；
+  `warmup` / `repeat` / `seed` 三个 int 挨着：`warmup`↔`repeat` 把 XLA 编译时间算进稳态（读数
+  系统性偏高），`seed` 当 `warmup` 则首步大山峰留在计时里。
+* **两个文件一起改**：`ipynb/tpu-probe.ipynb` 的 `%%writefile tpu_probe.py` cell 是脚本的**逐字节**
+  副本（`tests/tools/test_tpu_probe_notebook.py` 常驻拦 drift）⇒ 改完必须跑
+  `python tools/sync_tpu_probe_nb.py`（再 `--check` 自查）。这是本仓唯一「改一个 `.py` 要同步
+  生成物」的脚本。
+* **7 处调用全是位置实参**：`_engine_mode` 一处（E2）+ `main` 六处（A / B_old / B_new / C / D1 /
+  D2）。机械化改写的坑：① `s.find("bench_case(")` 会先撞到 `def bench_case(`（换成 spec 后仍有
+  `def`），要按行首 `def ` 跳过，且**显式片段拼接**（`pieces/last` 游标），别用「跳过就 continue」
+  的写法——那会把跳过的区间从输出里吞掉；② 断言里的 `not kws[:1]` 是死条件（第一个关键字本来就在
+  三个位置参数之后）；③ 运行脚手架要用**仓内 venv 的绝对路径**
+  （`./.venv/Scripts/python.exe`），裸 `python` 在这台机器上是 3.9，`zip(..., strict=True)` 直接 TypeError。
+* **`probe_loader` 是被门禁逼出来的**：口径 B（`tests/helpers/text_asserts`）把「函数体里读 `.py`
+  源码」的函数判成**生产者**，同文件里引用 `spec`（← `spec_from_file_location(..., "x.py")`）
+  的**任何** assert 都记成源码文本断言 —— 连「dataclass 字段表」这种纯数据断言也算。三个新守卫
+  因此各带 1–3 条假命中（1227 基线 → 1229）。处置：装载搬进 `tests/tools/probe_loader.py`
+  （无 assert ⇒ 0 命中），用例文件里不再有 `.py` 字面量绑定，计数回到 **1227 / 144 文件**。
+  **不抬基线**：这几条断的本来就不是文本。
+* **pin 住缺省**：`test_defaults_keep_the_probe_baseline` 钉「`batched` / `warmup=1` / `repeat=2` /
+  `seed=0` / 无 ref」—— 这五个缺省就是历史读数可比的基线，spec 化最容易顺手改错它们。
+
 ## §309 P0-3 批 H1：两个双生 `build_report` 各收一份 spec（26 → 24）（2026-11-22）
 
 * **一把刀两处，但各给一份**：`tools/c9_critic_calibration.build_report`(1 位置 + 9 关键字 →

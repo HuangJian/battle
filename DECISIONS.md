@@ -10105,3 +10105,27 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   旧关键字面 TypeError / 拼错字段名 TypeError）。
 - **遗留**：`tools/tpu-probe.bench_case`(9) 单开一刀（文件名带破折号 + 7 处位置实参）。
   全文 → `docs/nn/engineering.md` §309。
+
+## §2026-11-22-tpu-probe-bench-case
+
+**P0-3 批 H2：`tools/tpu-probe.bench_case`(9 参) → `BenchCaseSpec`（宽签名 24 → 23，19 → 18 文件）。**
+
+- **背景**：这台探针的 A/B/C/D1/D2 五段靠 `bench_case` 出读数，而它的旋钮里藏着一对**互斥路径**：
+  `ref_model`（每步重算 = D1）与 `ref_cache`（每 chunk 一次 = D2）。按位置传时互换，
+  「ref 优化收益」正好测出负号，报告照样打印；`warmup`/`repeat`/`seed` 三个 int 相邻，
+  `warmup`↔`repeat` 把 XLA 编译算进稳态。
+- **决定**：`BenchCaseSpec`（frozen + kw_only，9 字段）住 `tools/tpu-probe.py`；入口一次展开，
+  函数体逐字不动；7 处调用（`_engine_mode` 1 + `main` 6）全部改按名字传。同批把 notebook 的
+  `%%writefile` 副本用 `tools/sync_tpu_probe_nb.py` 重新生成（逐字节 drift 由既有用例拦）。
+- **被否决**：① 拆成两个入口（`bench_case` / `bench_case_ref`）来消掉互斥对 —— 五段共用同一
+  循环与计时逻辑，拆开等于把 `warmup/repeat/best` 抄两份；② 只在 spec 里做「给了 `ref_cache`
+  就忽略 `ref_model`」的互斥校验 —— `run_steps` 已经按这个优先级实现（照旧交给它），spec 里再判
+  一遍会让探针行为在「两个都给」时改变；③ 直接改名为 `tpu_probe.py` 让它可导入 —— 触碰
+  notebook 内核里 `import tpu_probe` 的路径与 `pyproject` 的 N999 豁免，与本刀无关。
+- **读数**：宽签名 24 → **23**、19 → **18** 文件（`tools/` 三条基线全部归零）。
+- **验证**：`bun run pygate` 绿（98s，log clean）；`ruff` + `mypy`(1082 文件) 绿。守
+  `tests/tools/test_tpu_probe_bench_case.py`（字段表 / frozen+kw_only / 入口只吃一个 spec /
+  旧位置实参 TypeError / 拼错字段名 TypeError / 五个缺省钉基线）。
+- **顺带修掉的假读数**：`tests/tools/probe_loader.py` 收走「按路径装载工具脚本」的动作，让三个
+  新守卫不再被口径 B 误判成源码文本断言（1229 → 1227 = 基线），基线**没有**抬高。
+  全文 → `docs/nn/engineering.md` §310。

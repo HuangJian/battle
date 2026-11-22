@@ -1854,7 +1854,7 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      「`UnitLedger` 的字段集 + 只收一个对象」重锚（`LEDGER_FIELDS` + `_settle()`
      构造 `UnitLedger`），没有删任何一条判据；顺带发现**同族陷阱第 4 种形态 = 换模块**（patch 锚点、
      入边归属者表、行构造守卫、`GATE_SITES` 都要跟着换家，否则静默空转）。
-   * **P0-3 剩余宽签名：分文件分批待办（2026-11-22 实测 24 个 / 19 文件；A 批 ⇒ §304、B 批 ⇒ §305、C 批 ⇒ §306、D1 ⇒ §307、G 批 ⇒ §308、H1 ⇒ §309）**
+   * **P0-3 剩余宽签名：分文件分批待办（2026-11-22 实测 23 个 / 18 文件；A 批 ⇒ §304、B 批 ⇒ §305、C 批 ⇒ §306、D1 ⇒ §307、G 批 ⇒ §308、H1 ⇒ §309、H2 ⇒ §310）**
 
      按**同一装配面 + 同一层**分批，每批 = 一把刀（spec 住同模块或就近轻模块 + 删
      `WIDE_FUNCS_BASELINE` 条目 + 一份字段表守卫 + `engineering.md` 一节 + `DECISIONS` 一条）。
@@ -1873,7 +1873,7 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      | ~~**G1 · 回传腿两个入口**~~ **已完成（§308，28 → 26）** | ~~`remote/upload_proc.__init__`(11) · `remote/upload_proc.make_uploader`(10)~~ | 实测：两个入口参数表**逐字相同** ⇒ 共用一份 `UploadSpec`（不像 §264 那样给两份）；`mode=""` 的两种解释保留（进程入口 = `process`、工厂 = 缺省 async）；守 `tests/remote/test_upload_spec.py` |
      | **G2 · 导出面** | `remote/bundle.export_bundle`(10) · `remote/bundle.write_export_status`(10) | 两个同名族函数共用「导出/状态」的同一张输入表；`bundle` LOC 419（有余量），但 `write_export_status` 被 e2e 与 hub 共用，改前先数调用点 |
      | ~~**H1 · 工具面报告双生**~~ **已完成（§309，26 → 24）** | ~~`tools/p0_auc_probe.build_report`(11) · `tools/c9_critic_calibration.build_report`(10)~~ | 实测：**同名不代表同形** —— 字段名故意不同（`seed`/`boot` vs `boot_seed`/`n_boot`）、`games` 类型也不同 ⇒ **各给一份** spec，共用一份 `ReportSpec` 已否决；守 `tests/tools/test_report_specs.py` |
-     | **H2 · 工具面剩一处** | `tools/tpu-probe.bench_case`(9) | 文件名带破折号（守卫要走 `importlib` + 特殊模块名），且 7 处调用全是**位置实参** ⇒ 逐处核；与 H1 同族但装载法不同，单开一刀 |
+     | ~~**H2 · 工具面剩一处**~~ **已完成（§310，24 → 23）** | ~~`tools/tpu-probe.bench_case`(9)~~ | 实测：坏点是 `ref_model`/`ref_cache` **互斥对**（互换 ⇒「ref 收益」测出负号）+ 三个 int 相邻；改完要跑 `tools/sync_tpu_probe_nb.py` 重生成 notebook 内嵌副本；守卫装载搬进 `tests/tools/probe_loader.py`（口径 B 会把「读 `.py` 的函数」里所有 assert 记成源码断言）；守 `tests/tools/test_tpu_probe_bench_case.py` |
 
      记账/收尾同一套：`docs/nn/engineering.md` 新节 + `DECISIONS.md` 新条目（含被否决项）+ 
      `docs/nn.progress.md` 计数 +1 + 本节读数降格 + `.workbuddy/memory` 一行。

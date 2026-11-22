@@ -97,7 +97,7 @@ WIDE_FUNCS_BASELINE = {
     # `tools/c9_critic_calibration.py` 已清零（P0-3 批 H：`build_report` → `CriticReportSpec`）；
     # 与 `p0_auc_probe` 同一个守卫 `tests/tools/test_report_specs.py`。
     # `tools/p0_auc_probe.py` 已清零（P0-3 批 H：`build_report` → `AucReportSpec`）。
-    "tools/tpu-probe.py": 1,
+    # `tools/tpu-probe.py` 已清零（P0-3 批 H2：`bench_case` → `BenchCaseSpec`）。
     #: 2026-11-20：`_settle_unit` 的 15 参收成 `(self, ledger)`，通道机器搬去
     #: `trainer/batch_lanes.py` ⇒ 本文件 3 → **2**（新家没有新增宽签名）。
     #: 2026-11-22（P0-3 第四十三刀）：`BatchEvalRunner.__init__`(16) 与 `dispatch_batch_bg`(13)

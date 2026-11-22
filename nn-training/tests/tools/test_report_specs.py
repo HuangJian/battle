@@ -18,33 +18,18 @@ json 长得一模一样。`stages_expected` 传错则 `missing_expected_stages` 
 from __future__ import annotations
 
 import dataclasses
-import importlib.util
 import inspect
-import sys
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
-NN_ROOT = Path(__file__).resolve().parents[2]
-if str(NN_ROOT) not in sys.path:
-    sys.path.insert(0, str(NN_ROOT))
+from tests.tools.probe_loader import load_probe
 
 MISSING = dataclasses.MISSING
 
-
-def _load(name: str) -> Any:
-    spec = importlib.util.spec_from_file_location(name, NN_ROOT / "tools" / f"{name}.py")
-    assert spec and spec.loader
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-C9 = _load("c9_critic_calibration")
-AUC = _load("p0_auc_probe")
+C9 = load_probe("c9_critic_calibration")
+AUC = load_probe("p0_auc_probe")
 
 
 def _table(cls: type) -> list[tuple[str, object]]:

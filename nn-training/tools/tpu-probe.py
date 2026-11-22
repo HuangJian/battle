@@ -50,6 +50,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -565,7 +566,15 @@ def _engine_mode(bk: Backend, args) -> None:
     # E2：干净基准（顺序、无 ref、无 perm）—— bench_case batched 稳态
     print("  … E2 干净基准（bench_case batched）…", flush=True)
     e2_s, _n2 = bench_case(
-        bk, chunks, args.epochs, sync_mode="batched", warmup=1, repeat=1, seed=0
+        BenchCaseSpec(
+            bk=bk,
+            chunks=chunks,
+            epochs=args.epochs,
+            sync_mode="batched",
+            warmup=1,
+            repeat=1,
+            seed=0,
+        )
     )
 
     def _sum(x: list[float]) -> float:
@@ -617,19 +626,38 @@ def _engine_mode(bk: Backend, args) -> None:
                 print("    指向 in-flight 节点累积或设备/PJRT（H2）—— 试 --step-mark 再判。")
 
 
-def bench_case(
-    bk,
-    chunks,
-    epochs,
-    *,
-    sync_mode="batched",
-    ref_cache=None,
-    ref_model=None,
-    warmup=1,
-    repeat=2,
-    seed=0,
-):
-    """warmup 掉 XLA 编译，再取 repeat 次最小值。"""
+@dataclass(frozen=True, kw_only=True)
+class BenchCaseSpec:
+    """一次 `bench_case` 的全部输入（P0-3 批 H2：3 位置 + 6 关键字 → 一个对象）。
+
+    失效面：`ref_model` 与 `ref_cache` 是 **D1/D2 段的两条互斥路径**（每步重算 vs 每 chunk
+    一次）—— 两个按位置传时互换，「ref 优化收益」正好测出负号；`warmup` / `repeat` / `seed`
+    是三个 int 挨着（`warmup` 与 `repeat` 互换 ⇒ 把 XLA 编译时间算进稳态，读数系统性偏高；
+    `seed` 当 `warmup` ⇒ 编译没预热干净，首步大山峰留在计时里）。
+    """
+
+    bk: Any
+    chunks: Any
+    epochs: Any
+    sync_mode: str = "batched"
+    #: D2 段：预计算的 ref 缓存（与 `ref_model` 互斥）。
+    ref_cache: Any = None
+    #: D1 段：每步重算的 ref 模型（与 `ref_cache` 互斥）。
+    ref_model: Any = None
+    warmup: int = 1
+    repeat: int = 2
+    seed: int = 0
+
+
+def bench_case(case: BenchCaseSpec) -> tuple[float, int]:
+    """warmup 掉 XLA 编译，再取 repeat 次最小值。
+
+    入参 = 一个 `BenchCaseSpec`（P0-3 批 H2）；下面一次展开，函数体逐字不动。
+    """
+    bk, chunks, epochs = case.bk, case.chunks, case.epochs
+    ref_cache, ref_model = case.ref_cache, case.ref_model
+    sync_mode = case.sync_mode
+    warmup, repeat, seed = case.warmup, case.repeat, case.seed
     torch.manual_seed(seed)
     np.random.seed(seed)
     model = bk.wrap(bk.to(PPOStudent()))
@@ -760,7 +788,14 @@ def main() -> None:
 
     announce("A", "纯 fwd+bwd+step（固定 shape, 无同步）")
     s, n = bench_case(
-        bk, fixed, args.epochs, sync_mode="none", warmup=args.warmup, repeat=args.repeat
+        BenchCaseSpec(
+            bk=bk,
+            chunks=fixed,
+            epochs=args.epochs,
+            sync_mode="none",
+            warmup=args.warmup,
+            repeat=args.repeat,
+        )
     )
     cases.append(("A 纯 fwd+bwd+step（固定 shape, 无同步）", s))
     print(f"  A: {s * 1000:7.0f} ms/step", flush=True)
@@ -768,14 +803,28 @@ def main() -> None:
     if not args.skip_sync_tax:
         announce("B_old", "8x .item()/step —— TPU 上每步 8 次整图 materialize，可能分钟级")
         s, n = bench_case(
-            bk, fixed, args.epochs, sync_mode="per-item", warmup=args.warmup, repeat=args.repeat
+            BenchCaseSpec(
+                bk=bk,
+                chunks=fixed,
+                epochs=args.epochs,
+                sync_mode="per-item",
+                warmup=args.warmup,
+                repeat=args.repeat,
+            )
         )
         cases.append(("B_old = A + 8x .item()/step（旧引擎）", s))
         print(f"  B_old: {s * 1000:7.0f} ms/step", flush=True)
 
     announce("B_new", "1x stack().tolist()（新引擎）")
     s, n = bench_case(
-        bk, fixed, args.epochs, sync_mode="batched", warmup=args.warmup, repeat=args.repeat
+        BenchCaseSpec(
+            bk=bk,
+            chunks=fixed,
+            epochs=args.epochs,
+            sync_mode="batched",
+            warmup=args.warmup,
+            repeat=args.repeat,
+        )
     )
     cases.append(("B_new = A + 1x stack().tolist()（新引擎）", s))
     print(f"  B_new: {s * 1000:7.0f} ms/step", flush=True)
@@ -788,7 +837,14 @@ def main() -> None:
             ]
             announce("C", f"变化尾块 tail={tail}（新 shape -> XLA 重编译，慢）")
             s, n = bench_case(
-                bk, ch, args.epochs, sync_mode="batched", warmup=args.warmup, repeat=1
+                BenchCaseSpec(
+                    bk=bk,
+                    chunks=ch,
+                    epochs=args.epochs,
+                    sync_mode="batched",
+                    warmup=args.warmup,
+                    repeat=1,
+                )
             )
             worst = max(worst, s)
             print(f"  C tail={tail:4d}: {s * 1000:7.0f} ms/step", flush=True)
@@ -805,26 +861,30 @@ def main() -> None:
 
         announce("D1", "ref 每步重算（旧 engine）")
         d1, n = bench_case(
-            bk,
-            fixed,
-            args.epochs,
-            sync_mode="batched",
-            ref_model=ref,
-            warmup=args.warmup,
-            repeat=args.repeat,
+            BenchCaseSpec(
+                bk=bk,
+                chunks=fixed,
+                epochs=args.epochs,
+                sync_mode="batched",
+                ref_model=ref,
+                warmup=args.warmup,
+                repeat=args.repeat,
+            )
         )
         cases.append(("D1 = B + ref 每步重算（旧 engine）", d1))
         print(f"  D1: {d1 * 1000:7.0f} ms/step  (ref 每步现算)", flush=True)
 
         announce("D2", "ref 预计算缓存（新 engine）")
         d2, n = bench_case(
-            bk,
-            fixed,
-            args.epochs,
-            sync_mode="batched",
-            ref_cache=cache,
-            warmup=args.warmup,
-            repeat=args.repeat,
+            BenchCaseSpec(
+                bk=bk,
+                chunks=fixed,
+                epochs=args.epochs,
+                sync_mode="batched",
+                ref_cache=cache,
+                warmup=args.warmup,
+                repeat=args.repeat,
+            )
         )
         cases.append(("D2 = B + ref 预计算缓存（新 engine）", d2))
         print(f"  D2: {d2 * 1000:7.0f} ms/step  (ref 每 chunk 一次)", flush=True)
