@@ -30,6 +30,7 @@ import os
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -789,47 +790,62 @@ def _once_result(uploader: UploaderLike, round_: RoundOutcome, done: int) -> int
     return -1 if not job_ok else done
 
 
-def worker_loop(
-    base_url: str,
-    token: str,
-    *,
-    work_dir: Path,
-    device: str = "cpu",
-    torch_threads: int = 0,
-    epoch_mult: float = 1.0,
-    poll_sec: float = 5.0,
-    once: bool = False,
-    echo: bool = False,
-    max_idle_sec: float = 0.0,
-    restart_argv: list[str] | None = None,
-    hub_urls: list[str] | None = None,
+@dataclass(frozen=True, kw_only=True)
+class WorkerLoopSpec:
+    """`worker_loop` 的旋钮袋（P0-3：22 参 → 一个对象）。
+
+    前 3 个是身份位（hub / token / 工作目录），其余 19 个是会话旋钮：设备与线程、
+    轮询节拍与停机（`poll_sec` / `once` / `max_idle_sec` / `restart_argv`）、归属与筛选
+    （`role` / `job_filter`）、预取三档（`prefetch_depth` / `prefetch_mode` /
+    `prefetch_unpack`）、让路与回传（`bulk_yield` / `result_upload`）与缓存根。
+    这些旋钮在旧位置表里相邻且同型（三个 `str`、三个 `int`）——多传一位不报错，
+    只会让 worker 以错的角色/预取档/回传模式静默跑一整轮。
+
+    云机与笔记本走**同一个**入口（`main` 与 `offline_boot` 的 BC 腿），本类只是把
+    30 多个测试调用点的位置表变成具名读数。
+    """
+
+    base_url: str
+    token: str
+    work_dir: Path
+    device: str = "cpu"
+    torch_threads: int = 0
+    epoch_mult: float = 1.0
+    poll_sec: float = 5.0
+    once: bool = False
+    echo: bool = False
+    max_idle_sec: float = 0.0
+    restart_argv: list[str] | None = None
+    hub_urls: list[str] | None = None
     # 离线训练模式（2026-09-19，2026-09-25 语义升为**归属**）：本会话属于离线盘 ⇒
     # 只在 peek/claim 面带角色头，且只能领 `manifest.role="offline"` 的 job。
     # 缺省 `online` = 旧 worker 行为（`--offline` 的 CLI 名与头的字面量都不变）。
-    role: str = ROLE_ONLINE,
+    role: str = ROLE_ONLINE
     #: 本地 job 选择谓词（**不发给 hub**；BC 课程级 drain 用）。缺省 None = 不筛。
-    job_filter: Callable[[dict], bool] | None = None,
+    job_filter: Callable[[dict], bool] | None = None
     #: ★ 2026-10-27（评审）：PPO 训练框架（`""`/auto/torch/paddle），原样交给宿主 `run_job`
     #: （本模块不认识它的语义，与 `epoch_mult` 同一条路）。空串 = auto。
-    backend: str = "",
+    backend: str = ""
     # 软持有预取深度（P2，2026-09-22）：0 = 关预取（只调度不预取，§7 的回退档）
-    prefetch_depth: int = PREFETCH_DEPTH_DEFAULT,
+    prefetch_depth: int = PREFETCH_DEPTH_DEFAULT
     # 下行腿跑在哪里（2026-10-20，plan/ppo-worker-transfer-isolation 的下行半场）：
     # `process` = 独立子进程（缺省，见 `PREFETCH_MODE_DEFAULT`）/ `thread` = 进程内填充线程
     # （= 改造前的旧行为，逃生口）。空串 = 按 `$NN_PREFETCH_MODE` > 缺省解析。
-    prefetch_mode: str = "",
+    prefetch_mode: str = ""
     # 预取解包份数（plan/prefetch-stage-unpack §2.3）：peek 前 N 份顺手解好；0 = 只存字节
     # （= 改造前的旧行为，回退档）。与 `prefetch_depth` 独立：深度管「预取几份」，这个管「解几份」。
-    prefetch_unpack: int = PREFETCH_UNPACK_DEFAULT,
+    prefetch_unpack: int = PREFETCH_UNPACK_DEFAULT
     # bulk 让路策略（plan/transfer-residual W1）：auto（缺省）/ always（旧语义逃生口）/ never。
-    bulk_yield: str = "auto",
+    bulk_yield: str = "auto"
     # 结果回传模式（P2.5，2026-09-22）：async = 回传**不占关键路径**（缺省）；sync = 旧行为
-    result_upload: str = RESULT_UPLOAD_MODE_DEFAULT,
+    result_upload: str = RESULT_UPLOAD_MODE_DEFAULT
     # A3 持久缓存根（plan/aistudio-transfer-hardening §3.3）：None = 旧行为（缓存住 work_dir）。
     # 给了就只把**内容寻址缓存**挪过去（code/ts_code/blob），job 目录不动。
-    cache_dir: Path | None = None,
-    log=_log,
-) -> int:
+    cache_dir: Path | None = None
+    log: Callable[[str], None] = _log
+
+
+def worker_loop(spec: WorkerLoopSpec) -> int:
     """无状态轮询主循环。返回处理的 job 数。
 
     once=True：处理一个 job 后退出（M1 假云回环冒烟用）。
@@ -843,6 +859,17 @@ def worker_loop(
       （单 GPU 互挤否决项），work_dir 按 hub 索引分区（`hub0/<jid>`…），code_cache
       留共享根。异 commit job 由既有 `_CODE` 守卫转 86 + 监督器重拉。
     """
+    # 旧签名 22 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    base_url, token, work_dir = spec.base_url, spec.token, spec.work_dir
+    device, torch_threads = spec.device, spec.torch_threads
+    epoch_mult, poll_sec = spec.epoch_mult, spec.poll_sec
+    once, echo, max_idle_sec = spec.once, spec.echo, spec.max_idle_sec
+    restart_argv, hub_urls = spec.restart_argv, spec.hub_urls
+    role, job_filter = spec.role, spec.job_filter
+    backend, prefetch_depth = spec.backend, spec.prefetch_depth
+    prefetch_mode, prefetch_unpack = spec.prefetch_mode, spec.prefetch_unpack
+    bulk_yield, result_upload = spec.bulk_yield, spec.result_upload
+    cache_dir, log = spec.cache_dir, spec.log
     done = 0
     _prev_yield, _prev_p1_observer, pf_stores = _setup_bulk_yield(bulk_yield, log)
     #: 会话级让路自适应（A2）：`--bulk-yield never` 起步就不需要它；其余档位每轮收尾复查
@@ -1122,26 +1149,28 @@ def main() -> None:
         # restart_argv「非空 = 有监督器」判定走退出码（空 = 无监督器返回）。
         # 这里传本进程的参数列表（与监督器那侧同源）即可，子进程不自己重拉。
         n = worker_loop(
-            hub_urls[0],
-            token,
-            work_dir=out,
-            device=args.device,
-            torch_threads=args.threads,
-            epoch_mult=args.epoch_mult,
-            backend=args.backend,
-            poll_sec=args.poll_sec,
-            once=args.once,
-            echo=args.echo,
-            max_idle_sec=args.max_idle_sec,
-            restart_argv=sys.argv[1:],
-            hub_urls=hub_urls,
-            prefetch_mode=args.prefetch_mode,
-            role=ROLE_OFFLINE if args.offline else ROLE_ONLINE,
-            prefetch_depth=args.prefetch_depth,
-            prefetch_unpack=args.prefetch_unpack,
-            bulk_yield=args.bulk_yield,
-            result_upload=args.result_upload,
-            cache_dir=Path(args.cache_dir) if args.cache_dir else None,
+            WorkerLoopSpec(
+                base_url=hub_urls[0],
+                token=token,
+                work_dir=out,
+                device=args.device,
+                torch_threads=args.threads,
+                epoch_mult=args.epoch_mult,
+                backend=args.backend,
+                poll_sec=args.poll_sec,
+                once=args.once,
+                echo=args.echo,
+                max_idle_sec=args.max_idle_sec,
+                restart_argv=sys.argv[1:],
+                hub_urls=hub_urls,
+                prefetch_mode=args.prefetch_mode,
+                role=ROLE_OFFLINE if args.offline else ROLE_ONLINE,
+                prefetch_depth=args.prefetch_depth,
+                prefetch_unpack=args.prefetch_unpack,
+                bulk_yield=args.bulk_yield,
+                result_upload=args.result_upload,
+                cache_dir=Path(args.cache_dir) if args.cache_dir else None,
+            )
         )
         _log(f"done: {n} job(s) processed")
         # H8：--once 失败（返回 -1）→ 非零退出码

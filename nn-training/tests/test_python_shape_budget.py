@@ -86,7 +86,7 @@ WIDE_FUNCS_BASELINE = {
     "remote/rollout_node.py": 2,
     "remote/tailscale_boot.py": 1,
     "remote/upload_proc.py": 2,
-    "remote/worker.py": 2,
+    "remote/worker.py": 1,  # worker_loop 已收 WorkerLoopSpec；剩 run_job(17)
     "tools/c9_critic_calibration.py": 1,
     "tools/p0_auc_probe.py": 1,
     "tools/tpu-probe.py": 1,

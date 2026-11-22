@@ -40,6 +40,7 @@ from common.protocol import (
 )
 from hub.server import _HubQueue, make_server
 from remote.job_lifecycle import ClaimSpec
+from remote.worker import WorkerLoopSpec
 from tests.helpers.http_server import serve_fast
 from tests.helpers.hub_poll import hub_poll
 
@@ -124,7 +125,9 @@ def test_worker_loop_forwards_role(
 
     monkeypatch.setattr(W, "acquire_job", _fake_poll, raising=True)
     n = W.worker_loop(
-        "http://hub", "tok", work_dir=_wd(tmp_path), poll_sec=0.0, once=True, role=ROLE_OFFLINE
+        WorkerLoopSpec(
+            base_url="http://hub", token="tok", work_dir=_wd(tmp_path), poll_sec=0.0, once=True, role=ROLE_OFFLINE
+        )
     )
     assert n == 0
     assert seen[0]["role"] == ROLE_OFFLINE
@@ -143,7 +146,11 @@ def test_worker_loop_forwards_role(
     ), "预取线程的 kwargs 没带 role"
 
     seen.clear()
-    W.worker_loop("http://hub", "tok", work_dir=_wd(tmp_path), poll_sec=0.0, once=True)
+    W.worker_loop(
+        WorkerLoopSpec(
+            base_url="http://hub", token="tok", work_dir=_wd(tmp_path), poll_sec=0.0, once=True
+        )
+    )
     assert seen[0]["role"] == ROLE_ONLINE, "缺省必须是在线盘（保守方向）"
 
 
@@ -156,8 +163,8 @@ def test_main_offline_flag_reaches_worker_loop(
     """
     seen: dict[str, object] = {}
 
-    def _fake_loop(*a, **k):
-        seen.update(k)
+    def _fake_loop(spec: WorkerLoopSpec) -> int:
+        seen.update(vars(spec))
         raise SystemExit(0)
 
     monkeypatch.setattr(W, "worker_loop", _fake_loop, raising=True)

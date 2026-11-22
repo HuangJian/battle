@@ -28,6 +28,7 @@ if str(ROOT) not in sys.path:
 
 import remote.job_round as JR
 import remote.lifecycle as LC
+from remote.worker import WorkerLoopSpec
 from remote.worker_server import WORKER_QUEUE_MAX, WorkerServerState, make_worker_server
 from tests.helpers.http_server import serve_fast
 
@@ -246,7 +247,9 @@ def test_single_hub_unchanged_layout(tmp_path: Path) -> None:
         patch.object(LC, "post_error", return_value=True),
     ):
         n = W.worker_loop(
-            "http://h0", "tok", work_dir=tmp_path, once=True, poll_sec=0.01, echo=True
+            WorkerLoopSpec(
+                base_url="http://h0", token="tok", work_dir=tmp_path, once=True, poll_sec=0.01, echo=True
+            )
         )
     assert n == 1
     assert seen["work_dir"] == tmp_path  # 无 hub0 子目录
@@ -276,13 +279,15 @@ def test_multi_hub_round_robin_and_partition(tmp_path: Path) -> None:
         patch.object(LC, "post_error", return_value=True),
     ):
         n = W.worker_loop(
-            "http://h0",
-            "tok",
-            work_dir=tmp_path,
-            hub_urls=["http://h0", "http://h1"],
-            max_idle_sec=0.3,
-            poll_sec=0.01,
-            echo=True,
+            WorkerLoopSpec(
+                base_url="http://h0",
+                token="tok",
+                work_dir=tmp_path,
+                hub_urls=["http://h0", "http://h1"],
+                max_idle_sec=0.3,
+                poll_sec=0.01,
+                echo=True,
+            )
         )
     assert n == 1
     assert polls[0] == "http://h0" and polls[1] == "http://h1"  # round-robin

@@ -34,6 +34,7 @@ from remote.bulk_sched import (
     YIELD_GIVEUP_P95_MS,
     yield_worth_it,
 )
+from remote.worker import WorkerLoopSpec
 
 # ───────────────── ① 判据表（纯函数）─────────────────
 
@@ -115,7 +116,9 @@ def _run_two_rounds(
     monkeypatch.setattr(W, "_release_cloud_machine", lambda *_a, **_k: None)
     logs: list[str] = []
     W.worker_loop(
-        "http://hub", "tok", work_dir=tmp_path, poll_sec=0.01, bulk_yield=bulk_yield, log=logs.append
+        WorkerLoopSpec(
+            base_url="http://hub", token="tok", work_dir=tmp_path, poll_sec=0.01, bulk_yield=bulk_yield, log=logs.append
+        )
     )
     return logs, calls, prevs
 

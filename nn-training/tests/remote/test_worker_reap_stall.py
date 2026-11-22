@@ -31,6 +31,7 @@ if str(ROOT) not in sys.path:
 
 from remote import job_round as JR
 from remote import worker as W
+from remote.worker import WorkerLoopSpec
 from worker import iter_rollout as _iter_rollout
 
 #: 一轮之内与 hub 打交道的那批名字，**实现与调用点都在 `remote/job_round.py`**（S4 第十刀把
@@ -82,13 +83,15 @@ def _run_loop(
     monkeypatch.setattr(W, "run_job", _run_job, raising=True)
     t0 = time.time()
     W.worker_loop(
-        "http://hub",
-        "tok",
-        work_dir=tmp_path,
-        poll_sec=0.0,
-        max_idle_sec=0.2,
-        prefetch_depth=0,  # 预取线程与本用例无关（省一条线程）
-        log=(logs if logs is not None else []).append,
+        WorkerLoopSpec(
+            base_url="http://hub",
+            token="tok",
+            work_dir=tmp_path,
+            poll_sec=0.0,
+            max_idle_sec=0.2,
+            prefetch_depth=0,  # 预取线程与本用例无关（省一条线程）
+            log=(logs if logs is not None else []).append,
+        )
     )
     return time.time() - t0
 
@@ -167,13 +170,15 @@ def test_repeated_stalls_keep_being_reclaimed(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(W, "run_job", _run_job, raising=True)
     t0 = time.time()
     W.worker_loop(
-        "http://hub",
-        "tok",
-        work_dir=tmp_path,
-        poll_sec=0.0,
-        max_idle_sec=0.2,
-        prefetch_depth=0,
-        log=lambda _m: None,
+        WorkerLoopSpec(
+            base_url="http://hub",
+            token="tok",
+            work_dir=tmp_path,
+            poll_sec=0.0,
+            max_idle_sec=0.2,
+            prefetch_depth=0,
+            log=lambda _m: None,
+        )
     )
     wall = time.time() - t0
     assert [j for j, _ in records] == ["j1", "j1", "j1", "j1", "j2"], (

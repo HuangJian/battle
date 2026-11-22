@@ -61,6 +61,7 @@ from common.protocol import (
 from hub.server import _HubQueue, _JobStore, make_server
 from hub.store_leases import LeaseSpec
 from remote.job_lifecycle import AcquireSpec, ClaimSpec, PostResultSpec
+from remote.worker import WorkerLoopSpec
 from tests.helpers import hub_seams
 from tests.helpers.http_server import serve_fast
 
@@ -643,7 +644,9 @@ def test_worker_loop_cancel_abandons_and_never_reports_failure(
     )
     logs: list[str] = []
     W.worker_loop(
-        "http://hub", "tok", work_dir=tmp_path, poll_sec=0.0, once=True, log=logs.append
+        WorkerLoopSpec(
+            base_url="http://hub", token="tok", work_dir=tmp_path, poll_sec=0.0, once=True, log=logs.append
+        )
     )
     assert abandoned == [JID], "取消必须 abandon（含 release 租约，R1-3）"
     assert posted == [] and reported == [], "停算丢弃：零回传、零失败上报"
@@ -918,7 +921,9 @@ def test_backup_round_does_not_touch_computing_at(
     monkeypatch.setattr(W, "post_result", lambda *a, **k: 200, raising=True)
     for _ in range(2):
         W.worker_loop(
-            "http://hub", "tok", work_dir=tmp_path, poll_sec=0.0, once=True, log=lambda m: None
+            WorkerLoopSpec(
+                base_url="http://hub", token="tok", work_dir=tmp_path, poll_sec=0.0, once=True, log=lambda m: None
+            )
         )
     assert len(runs) >= 2, f"两轮都要真的跑到（backup / ok）：{len(runs)}"
     assert runs[0]["on_ppo_start"] is None, "备份不打 computing_at（主人掉队时钟不许被重置）"

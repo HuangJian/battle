@@ -58,6 +58,7 @@ if str(ROOT) not in sys.path:
 import remote.job_round as round_mod
 import remote.worker as worker_mod
 from remote.prefetch import PrefetchStore
+from remote.worker import WorkerLoopSpec
 from tests.helpers import remote_dag as dag
 
 ROUND_FILE = ROOT / "remote" / "job_round.py"
@@ -472,7 +473,11 @@ def test_host_bookkeeping_reads_the_round_outcome(monkeypatch, tmp_path: Path) -
     monkeypatch.setattr(worker_mod, "acquire_job", _acquire)
     monkeypatch.setattr(worker_mod, "_release_cloud_machine", lambda *a, **k: None)
 
-    n = worker_mod.worker_loop("http://hub", "tok", work_dir=tmp_path, poll_sec=0.01, log=lambda _m: None)
+    n = worker_mod.worker_loop(
+        WorkerLoopSpec(
+            base_url="http://hub", token="tok", work_dir=tmp_path, poll_sec=0.01, log=lambda _m: None
+        )
+    )
     assert len(seen) == 2, f"应当跑两轮（第二轮 stop 整条退出）：{len(seen)}"
     assert n == 1, f"只有第一轮 uploaded ⇒ done == 1；`stop=True` 必须整条退出（实得 {n}）"
 

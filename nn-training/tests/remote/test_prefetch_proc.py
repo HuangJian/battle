@@ -40,6 +40,7 @@ from remote.prefetch import (
     PREFETCH_MODE_ENV,
     PrefetchStore,
 )
+from remote.worker import WorkerLoopSpec
 
 JID1 = "a1" * 8
 JID2 = "b2" * 8
@@ -511,13 +512,15 @@ def test_worker_loop_fills_through_the_child_not_a_local_thread(
 
     logs: list[str] = []
     n = W.worker_loop(
-        "http://hub",
-        "tok",
-        work_dir=tmp_path / "w",
-        poll_sec=0.05,
-        max_idle_sec=0.3,
-        prefetch_depth=2,
-        log=logs.append,
+        WorkerLoopSpec(
+            base_url="http://hub",
+            token="tok",
+            work_dir=tmp_path / "w",
+            poll_sec=0.05,
+            max_idle_sec=0.3,
+            prefetch_depth=2,
+            log=logs.append,
+        )
     )
     assert n == 1, logs
     assert local_fills == [], "进程模式下仍在进程内起了填充线程（下行腿没真搬出去）"

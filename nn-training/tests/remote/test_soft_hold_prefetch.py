@@ -48,6 +48,7 @@ from remote.prefetch import (
     PrefetchStore,
     pick_candidates,
 )
+from remote.worker import WorkerLoopSpec
 
 JID = "j" * 16
 
@@ -599,12 +600,14 @@ def test_worker_loop_uses_prefetched_payload_without_downloading(tmp_path: Path,
     # `once=True` 只跑一个 job 就退出（它是「单发」语义），所以用 max_idle_sec 收尾：
     # 两个 job 跑完后 acquire 返回 None，空闲 0.3s 即退出。
     n = W.worker_loop(
-        "http://hub",
-        "tok",
-        work_dir=tmp_path,
-        poll_sec=0.05,
-        max_idle_sec=0.3,
-        log=logs.append,
+        WorkerLoopSpec(
+            base_url="http://hub",
+            token="tok",
+            work_dir=tmp_path,
+            poll_sec=0.05,
+            max_idle_sec=0.3,
+            log=logs.append,
+        )
     )
     assert n == 2, f"应当跑完两个 job：n={n} {logs}"
     assert preloaded_seen == [j2], f"第二个 job 没有走零下载开算（预取命中面没接上）：{logs}"
@@ -701,13 +704,15 @@ def test_worker_loop_restores_the_library_yield_defaults(tmp_path: Path, monkeyp
     before = W._BULK.configure_yield(after_sec=0.5, total_budget_sec=1.0)
     try:
         n = W.worker_loop(
-            "http://hub",
-            "tok",
-            work_dir=tmp_path,
-            poll_sec=0.0,
-            once=True,
-            bulk_yield="never",
-            log=lambda _m: None,
+            WorkerLoopSpec(
+                base_url="http://hub",
+                token="tok",
+                work_dir=tmp_path,
+                poll_sec=0.0,
+                once=True,
+                bulk_yield="never",
+                log=lambda _m: None,
+            )
         )
         assert n == 0
         # `configure_yield` 返回**旧值** ⇒ 拿它当读数：loop 后应当仍是进 loop 前的策略。
@@ -774,12 +779,14 @@ def test_prefetch_hit_is_visible_in_the_wire_line(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(PrefetchStore, "__init__", _init)
     logs: list[str] = []
     n = W.worker_loop(
-        "http://hub",
-        "tok",
-        work_dir=tmp_path,
-        poll_sec=0.05,
-        max_idle_sec=0.3,
-        log=logs.append,
+        WorkerLoopSpec(
+            base_url="http://hub",
+            token="tok",
+            work_dir=tmp_path,
+            poll_sec=0.05,
+            max_idle_sec=0.3,
+            log=logs.append,
+        )
     )
     assert n == 2, f"应当跑完两个 job：n={n} {logs}"
     hit_lines = [ln for ln in logs if j2 in ln and "payload=prefetch-hit" in ln]
@@ -1012,13 +1019,15 @@ def test_worker_loop_hands_over_a_stage_and_cleans_it_at_job_end(
     monkeypatch.setattr(PrefetchStore, "__init__", _init)
     logs: list[str] = []
     n = W.worker_loop(
-        "http://hub",
-        "tok",
-        work_dir=tmp_path,
-        poll_sec=0.05,
-        max_idle_sec=0.3,
-        prefetch_unpack=1,
-        log=logs.append,
+        WorkerLoopSpec(
+            base_url="http://hub",
+            token="tok",
+            work_dir=tmp_path,
+            poll_sec=0.05,
+            max_idle_sec=0.3,
+            prefetch_unpack=1,
+            log=logs.append,
+        )
     )
     assert n == 2, f"应当跑完两个 job：n={n} {logs}"
     assert seen and seen[0].get("staged_dir"), f"staged 形状没交给 run_job：{seen}"

@@ -8818,6 +8818,19 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-22-worker-loop-spec
+
+P0-3 第三十七刀（`remote/worker.py`）：`worker_loop` 的 22 个参数 → frozen + kw_only 的
+`WorkerLoopSpec`，入口只收 `spec`、展开后函数体逐字不动。
+为什么不是「少几个参数」：后 19 个会话旋钮在位置表里相邻且同型（预取三档都是 `int`/
+`str`、让路/回传/后端都是 `str`），云机与笔记本又走同一个入口 —— 多传一位不报错，只会
+让 worker 以错的角色/预取档/回传模式静默跑一整轮。
+调用点 27 处（`main` + 云机 BC 腿生成物 + 11 个测试文件）全部改传 spec；`job_filter` /
+`log` 仍用 `Callable` 类型，不抬 `Any` 预算（本文件 4 处不变）。
+冻語生成物：改 `remote/_offline_boot/11_bc.pyfrag` 后重建 `offline_boot.py`。
+宽签名 **58 → 57**；本文件 2 → 1（剩 `run_job`），故文件数仍 47。
+守 `tests/remote/test_worker_loop_spec.py`（3 条），细节 → `docs/nn/engineering.md §290`。
+
 ## §2026-11-22-eval-settle-spec
 
 P0-3 第三十六刀（`worker/eval_track.py`）：`settle_eval_summary` 的 21 个参数 →

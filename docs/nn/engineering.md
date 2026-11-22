@@ -25,6 +25,26 @@
 
 ---
 
+## §290 P0-3 第三十七刀：`worker_loop` 收 `WorkerLoopSpec`（58 → 57）（2026-11-22）
+
+* `remote/worker.py`：22 参 → frozen + kw_only `WorkerLoopSpec`（3 个身份位 + 19 个
+  会话旋钮：设备/线程、轮询与停机、归属与筛选、预取三档、让路与回传、缓存根与 `log`）；
+  入口只收 `spec`，展开后函数体逐字不动。本文件宽签名 2 → **1**（剩 `run_job(17)`），
+  全仓 58 → **57**（文件数 47 不变，本文件未清零）。
+* 旧位置表里旋钮相邻且同型（三个 `str`、三个 `int`）⇒ 多传一位不报错，只会让 worker
+  以错的角色 / 预取档 / 回传模式静默跑一整轮；这也是本刀取「一个对象」而不是「少几个
+  参数」的理由。
+* 调用点：27 处（生产 `main` + 云机 BC 腿 `offline_boot` 生成物 + 11 个测试文件）全部
+  改传 spec；性质不变，只把位置表变成具名读数。脚本按 AST 定位、逐块包 `WorkerLoopSpec(`
+  并给前两个位置参数补 `base_url=` / `token=`（AGENTS §17.1）。
+* 冻語生成物：改 `remote/_offline_boot/11_bc.pyfrag` → `tools/build_offline_boot.py`
+  重建（3895 行，`--check` 一致）。
+* 守 `tests/remote/test_worker_loop_spec.py`（3 条）；`WIDE_FUNCS_BASELINE` 的
+  `remote/worker.py` 2 → 1（剩 `run_job`）。
+* 回归：新守卫(3) + worker 族/契约 211 条（含 e2e `test_worker_queue`、
+  `test_priority_schedule`、`test_remote_hotswap`、`test_offline_bc_course`）绿；
+  ruff / mypy（1056 文件）无错；全量 `bun run pygate` 绿（6726 passed）。
+
 ## §289 P0-3 第三十六刀：`settle_eval_summary` 收 `EvalSettleSpec`（59 → 58）（2026-11-22）
 
 * `worker/eval_track.py`：21 参 → frozen + kw_only `EvalSettleSpec`（13 个身份位 +

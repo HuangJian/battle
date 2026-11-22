@@ -34,6 +34,7 @@ import remote.job_round as round_mod
 import remote.plan_handoff as ph
 import remote.worker as W
 from remote.download import BlobAsk, CodeAsk
+from remote.worker import WorkerLoopSpec
 
 MB = 1024 * 1024
 
@@ -329,12 +330,14 @@ def _run_one_round_capture(monkeypatch, tmp_path: Path, **kw) -> dict:
     monkeypatch.setattr(W, "acquire_job", _acquire)
     monkeypatch.setattr(W, "_release_cloud_machine", lambda *_a, **_k: None)
     W.worker_loop(
-        "http://hub",
-        "tok",
-        work_dir=tmp_path,
-        poll_sec=0.01,
-        log=lambda _m: None,
-        **kw,
+        WorkerLoopSpec(
+            base_url="http://hub",
+            token="tok",
+            work_dir=tmp_path,
+            poll_sec=0.01,
+            log=lambda _m: None,
+            **kw,
+        )
     )
     return captured
 

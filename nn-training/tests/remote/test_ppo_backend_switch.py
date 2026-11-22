@@ -322,8 +322,8 @@ def test_cli_backend_flag_reaches_the_worker_loop(
     """
     seen: dict[str, object] = {}
 
-    def _fake_loop(*_a: object, **k: object) -> int:
-        seen.update(k)
+    def _fake_loop(spec: object) -> int:
+        seen.update(vars(spec))
         raise SystemExit(0)
 
     monkeypatch.setattr(worker, "worker_loop", _fake_loop, raising=True)
