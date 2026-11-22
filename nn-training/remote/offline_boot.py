@@ -904,7 +904,14 @@ def _fetch_guarded(
         with _build_opener().open(req, timeout=total_timeout) as resp:
             return resp.read()  # type: ignore[no-any-return]
     got: bytes = ts.fetch_guarded(
-        url, headers=headers, log=log, label=label, total_timeout=total_timeout, attempts=3
+        ts.FetchSpec(
+            url=url,
+            headers=headers,
+            log=log,
+            label=label,
+            total_timeout=total_timeout,
+            attempts=3,
+        )
     )
     return got
 

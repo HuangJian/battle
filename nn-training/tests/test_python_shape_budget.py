@@ -90,7 +90,8 @@ WIDE_FUNCS_BASELINE = {
     # 2026-11-19 合入上游：`run` 的交易参数 + relay 通道参数（原 1 处 → 2 处）。
     # `remote/rollout_node.py` 只剩 `_try_register_once`（P0-3 批 F1：`_banner_lines` → `BannerSpec`）。
     "remote/rollout_node.py": 1,
-    "remote/tailscale_boot.py": 1,
+    # `remote/tailscale_boot.py` 已清零（P0-3 批 F2：`fetch_guarded` → `FetchSpec`）；
+    # 注意 `GLOBAL_BASELINE` 里另有该文件的 1 条 `global` 存量（与本表无关，本次未动）。
     # `remote/upload_proc.py` 已清零（P0-3 批 G：`UploaderProcess.__init__` 与 `make_uploader`
     # 共用一份 `UploadSpec`）；守 `tests/remote/test_upload_spec.py`。
     # `remote/worker.py` 已清零（P0-3 第四十四刀：`worker_loop` 收 `WorkerLoopSpec`、

@@ -194,11 +194,13 @@ def test_truncated_draw_is_retried_in_the_same_fetch(monkeypatch) -> None:
     opener = _FakeOpener([bad, good])
     lines: list[str] = []
     body = ts.fetch_guarded(
-        "http://hub/offline/task-pack",
-        log=lines.append,
-        label="task-pack",
-        opener=opener,
-        attempts=2,
+        ts.FetchSpec(
+            url="http://hub/offline/task-pack",
+            log=lines.append,
+            label="task-pack",
+            opener=opener,
+            attempts=2,
+        )
     )
     assert body == full
     assert any("提前结束" in ln for ln in lines)
@@ -269,7 +271,13 @@ def test_slow_draw_is_rerolled_then_succeeds(monkeypatch) -> None:
     lines: list[str] = []
 
     body = ts.fetch_guarded(
-        "http://hub/code", log=lines.append, label="code.zip", opener=opener, attempts=3
+        ts.FetchSpec(
+            url="http://hub/code",
+            log=lines.append,
+            label="code.zip",
+            opener=opener,
+            attempts=3,
+        )
     )
 
     assert body == b"x" * (512 * 1024)
@@ -299,7 +307,13 @@ def test_reroll_is_capped_and_the_last_attempt_always_transfers(monkeypatch) -> 
     lines: list[str] = []
 
     body = ts.fetch_guarded(
-        "http://hub/code", log=lines.append, label="code.zip", opener=opener, attempts=4
+        ts.FetchSpec(
+            url="http://hub/code",
+            log=lines.append,
+            label="code.zip",
+            opener=opener,
+            attempts=4,
+        )
     )
 
     assert body == good
@@ -350,7 +364,13 @@ def test_stall_is_retried_within_the_same_fetch(monkeypatch: pytest.MonkeyPatch)
     opener = _FakeOpener([_Stalling([], total=1 * MB), good])
     lines: list[str] = []
     body = ts.fetch_guarded(
-        "http://hub/code", log=lines.append, label="code.zip", opener=opener, attempts=2
+        ts.FetchSpec(
+            url="http://hub/code",
+            log=lines.append,
+            label="code.zip",
+            opener=opener,
+            attempts=2,
+        )
     )
     assert body == b"z" * 4096
     assert any("传输失败（" in ln and "停滞" in ln for ln in lines)
@@ -368,11 +388,13 @@ def test_exhausted_attempts_raise_the_informative_error(monkeypatch: pytest.Monk
     opener = _FakeOpener([_Stalling([], total=1 * MB) for _ in range(2)])
     with pytest.raises(ts.BootBodyError) as ei:
         ts.fetch_guarded(
-            "http://hub/code",
-            log=lambda _m: None,
-            label="code.zip",
-            opener=opener,
-            attempts=2,
+            ts.FetchSpec(
+                url="http://hub/code",
+                log=lambda _m: None,
+                label="code.zip",
+                opener=opener,
+                attempts=2,
+            )
         )
     assert "停滞" in str(ei.value) and "已收" in str(ei.value)
 
@@ -383,7 +405,14 @@ def test_reroll_can_be_disabled() -> None:
     slow = _FakeResp([b"x" * (128 * 1024), b"y" * 128], total=128 * 1024 + 128)
     opener = _FakeOpener([slow])
     body = ts.fetch_guarded(
-        "http://hub/code", log=lambda _m: None, label="x", opener=opener, attempts=1, reroll=False
+        ts.FetchSpec(
+            url="http://hub/code",
+            log=lambda _m: None,
+            label="x",
+            opener=opener,
+            attempts=1,
+            reroll=False,
+        )
     )
     assert len(body) == 128 * 1024 + 128
     assert opener.calls == 1
@@ -396,8 +425,8 @@ def test_boot_pull_uses_the_guarded_fetch(monkeypatch) -> None:
     """`notebook_boot._pull` 的 code 段必须走护栏（大 body + 幂等 GET），且带着墙钟预算。"""
     seen: dict = {}
 
-    def fake_fetch(url: str, **kw):
-        seen.update(url=url, **kw)
+    def fake_fetch(spec: ts.FetchSpec):
+        seen.update(vars(spec))
         raise SystemExit("stop-here")
 
     monkeypatch.setattr(ts, "fetch_guarded", fake_fetch)
@@ -418,8 +447,8 @@ def test_offline_task_pack_uses_the_guarded_fetch(monkeypatch, tmp_path: Path) -
 
     seen: dict = {}
 
-    def fake_fetch(url: str, **kw):
-        seen.update(url=url, **kw)
+    def fake_fetch(spec: ts.FetchSpec):
+        seen.update(vars(spec))
         return b"PK\x03\x04 fake"
 
     monkeypatch.setattr(ts, "fetch_guarded", fake_fetch)

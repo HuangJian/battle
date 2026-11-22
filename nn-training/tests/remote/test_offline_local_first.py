@@ -30,6 +30,7 @@ import pytest
 
 import remote.offline_deliverable as deliverable_mod
 from remote import offline_boot
+from remote import tailscale_boot as ts
 from remote.offline_boot import CourseRunSpec, RunArgvSpec
 
 
@@ -1189,12 +1190,19 @@ def _http_error(code: int, body: bytes) -> urllib.error.HTTPError:
 
 
 class _RaisingFetcher:
-    """`_load_tailscale_boot()` 的替身：`fetch_guarded` 直接抛（把护栏换成一次固定应答）。"""
+    """`_load_tailscale_boot()` 的替身：`fetch_guarded` 直接抛（把护栏换成一次固定应答）。
+
+    替身**照抄真模块的公开面**（`FetchSpec` + `fetch_guarded(spec)`）：`_fetch_guarded` 会先构造
+    `ts.FetchSpec(...)` 再调用，替身缺了它只会得到 `AttributeError` —— 那会把「护栏抛什么」
+    这条判据替换成「替身形状不对」，用例绿得毫无意义（P0-3 批 F2）。
+    """
+
+    FetchSpec = ts.FetchSpec
 
     def __init__(self, err: BaseException) -> None:
         self._err = err
 
-    def fetch_guarded(self, *_a: object, **_kw: object) -> bytes:
+    def fetch_guarded(self, _spec: ts.FetchSpec) -> bytes:
         raise self._err
 
 

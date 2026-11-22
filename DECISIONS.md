@@ -10218,3 +10218,28 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   `tests/remote/test_banner_spec.py`（字段表 / 形状 / 已自动注册那一行 / 空 URL 不印 nodes[] /
   relay 模式不提 cloudflared）。
   全文 → `docs/nn/engineering.md` §315。
+
+## §2026-11-22-fetch-spec
+
+- **背景**：`python.refactor.md` §P0-3 批 F2。`remote/tailscale_boot.fetch_guarded` 是**引导期唯一的传输
+  护栏**（三个 notebook 都在 `code.zip` 之前拉它），原签名 1 个位置参数 + 8 个关键字参数。
+- **坏点（全部「互换后照样跑」）**：`idle_timeout`（停滞多久算死）与 `total_timeout`（整份预算）是两个
+  相邻的 `float | None` —— 互换后要么坏签永远挂着（停滞判据退化成整份预算 = 没有判据），要么正常下载
+  几秒被总预算砍断，两次都只表现为「取包失败」；`attempts`（int）与 `reroll`（bool，`True` 读成 1）相邻；
+  `log`（回调）与 `label`（传输账里的名字）相邻 —— 互换后进度行打的是函数对象，账本不可 grep。
+- **决定**：`FetchSpec`（9 字段，frozen + kw_only，住 `remote/tailscale_boot.py`）；入口一次展开、函数体
+  逐字不动；8 处调用点（`notebook_boot._pull` 1 · 离线盘分片 `04_fetch` 1 · 护栏用例 6）改按名字传。
+  `log=None` 的兜底改成**具名** `_discard_progress`（不是每次现造的 lambda）。
+- **被否决**：① 只收两个超时、其余散着 —— 半对象正是本批要消的形状；② 给 `idle_timeout` 改名叫
+  `stall_timeout` 就算完 —— 名字改不了「两个相邻 float 互换不抛」这条失效面；③ 让 `FetchSpec` 带
+  `__post_init__` 做互斥校验 —— 这两个参数本来就允许同时给（停滞判据与总预算正交），校验是伪安全。
+- **两条工程事故（写进 §316）**：① `remote/offline_boot.py` 是 `_offline_boot/*.pyfrag` 的**生成物**，
+  手改发行物 ⇒ 对账用例红；改分片 → 重建 → `--check`，且分片必须 LF。② 用例替身 `_RaisingFetcher`
+  缺 `FetchSpec` ⇒ 真代码 `AttributeError` 被宽 `except Exception` 吞成「取包异常」再睡 30s；同型陷阱是
+  `dataclasses.asdict` 会 deepcopy `OpenerDirector`（带锁）当场抛。替身要照抄真模块的公开面。
+- **读数**：宽签名 17 → **16**、14 → **13** 文件（`remote/tailscale_boot.py` 清零；同文件的
+  `GLOBAL_BASELINE` 那条 `global` 与本表无关，未动）。
+- **验证**：`bun run pygate` 绿（117s，log clean）；`ruff` + `mypy`(1088 文件) 绿。守
+  `tests/remote/test_fetch_spec.py`（字段表 / frozen+kw_only / 入口只吃一个 spec / 旧位置面 TypeError /
+  停滞与预算各自在位 / 缺省回调是具名函数）。
+  全文 → `docs/nn/engineering.md` §316。

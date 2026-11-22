@@ -9,7 +9,7 @@
 三个入口：
   ensure(cfg, log) -> dict   起 tailscale 并登录，返回 {ip, mode, sock, proxy}
   diagnose(cfg, log) -> None 分层体检（daemon/引擎/登录/peer/hub 连通），只打日志不改状态（除确保 daemon 在跑）
-  fetch_guarded(url, ...) -> bytes  ⤵
+  fetch_guarded(FetchSpec) -> bytes  ⤵
 
 **为什么护栏也住这里**（2026-09-20，plan/minimize-payload.plan.md §4.0）：引导期两个**大 body**
 GET（hub `/code` 的 code.zip、离线盘的 `task-pack`）都发生在 **code.zip 之前**，那时
@@ -39,6 +39,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -701,18 +702,36 @@ def _read_body(
             progress(len(buf), total, now - t0)
 
 
-def fetch_guarded(
-    url: str,
-    *,
-    headers: dict[str, str] | None = None,
-    log: Any = None,
-    label: str = "",
-    idle_timeout: float = BOOT_IDLE_TIMEOUT_SEC,
-    total_timeout: float | None = None,
-    attempts: int = 3,
-    reroll: bool = True,
-    opener: Any = None,
-) -> bytes:
+@dataclass(frozen=True, kw_only=True)
+class FetchSpec:
+    """一次「大 body 受护栏 GET」的全部输入（P0-3 批 F2：1 位置 + 8 关键字 → 一个对象）。
+
+    失效面：`idle_timeout`（停滞多久算死）与 `total_timeout`（整份预算）是两个相邻 float ——
+    互换后停滞判据变成整份预算、整份预算变成停滞判据：要么一个 6 KB/s 的坏签永远挂着（没有
+    停滞判据），要么正常下载在几秒后被总预算砍断。`attempts`（重抽次数）与 `reroll`（开关）
+    相邻且一个 int 一个 bool（`True` 能被读成 1）。`log` 与 `label` 相邻（回调 vs 名字）——
+    互换后进度行里打的是函数对象，而 `label` 没了（传输账不可 grep）。
+    """
+
+    url: str
+    headers: dict[str, str] | None = None
+    log: Any = None
+    label: str = ""
+    #: 停滞判据：多久没有新字节就判死（`_read_body` 的 idle 面）。
+    idle_timeout: float = BOOT_IDLE_TIMEOUT_SEC
+    #: 整份预算（`None` = 不设上限，只靠停滞判据）。
+    total_timeout: float | None = None
+    attempts: int = 3
+    reroll: bool = True
+    opener: Any = None
+
+
+#: 缺省回调（具名，便于断言身份；匿名 `lambda` 会让「谁在写进度行」不可判）。
+def _discard_progress(_msg: str) -> None:
+    """静音。"""
+
+
+def fetch_guarded(spec: FetchSpec) -> bytes:
     """GET 一个**大 body**：分块读 + 进度行 + 停滞/超预算即断 + 低速**有界重抽**。
 
     幂等 GET 专用（引导期取 code.zip / 任务包都是「再取一次不改变服务端状态」）。
@@ -725,8 +744,15 @@ def fetch_guarded(
     成功时打一行可 grep、可对账的传输账（与 worker 侧 `job X: wire …` 同族形状）：
 
         wire: code.zip 1.37MB/106.0s(13KB/s) attempts=1 rerolls=0
+
+    入参 = 一个 `FetchSpec`（P0-3 批 F2）；下面一次展开，函数体逐字不动。
     """
-    do_log = log or (lambda _m: None)
+    url, headers = spec.url, spec.headers
+    log, label = spec.log, spec.label
+    idle_timeout, total_timeout = spec.idle_timeout, spec.total_timeout
+    attempts, reroll = spec.attempts, spec.reroll
+    opener = spec.opener
+    do_log = log or _discard_progress
     open_fn = opener or urllib.request.build_opener()
     name = label or url
     rerolls = 0

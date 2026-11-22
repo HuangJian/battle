@@ -95,13 +95,15 @@ def _pull(cfg: dict, log, keepalive_stop, hub: str, hub_tok: str, push_tok: str)
             # plan/minimize-payload.plan.md §4.0）：code.zip 正是「code.zip 之前就要下」
             # 的那个东西，所以护栏住 tailscale_boot（三个 notebook 都拉它），不在这里再抄一份。
             raw = tailscale_boot.fetch_guarded(
-                hub.rstrip("/") + "/code",
-                headers={"Authorization": "Bearer " + hub_tok},
-                log=log,
-                label="code.zip",
-                total_timeout=CODE_TOTAL_TIMEOUT_SEC,
-                attempts=3,
-                opener=opener,
+                tailscale_boot.FetchSpec(
+                    url=hub.rstrip("/") + "/code",
+                    headers={"Authorization": "Bearer " + hub_tok},
+                    log=log,
+                    label="code.zip",
+                    total_timeout=CODE_TOTAL_TIMEOUT_SEC,
+                    attempts=3,
+                    opener=opener,
+                )
             )
             log(f"code.zip 就绪: {len(raw)} bytes sha12={hashlib.sha256(raw).hexdigest()[:12]}")
             break

@@ -29,6 +29,32 @@
 
 ---
 
+## §316 P0-3 批 F2：`tailscale_boot.fetch_guarded`(9) → `FetchSpec`（17 → 16）（2026-11-22）
+
+* **一把刀一处，含一条生成物**：`remote/tailscale_boot.fetch_guarded`(1 位置 + 8 关键字) → 一个
+  `FetchSpec`。调用面 8 处（`notebook_boot._pull` 1 · 离线盘 `_fetch_guarded` 1 · 护栏用例 6）。
+  读数：宽签名 **17 → 16**、14 → **13** 文件（`remote/tailscale_boot.py` 清零）。
+* **为什么值得动**：这一层是**引导期唯一的传输护栏**，而它的四个坏点全是「互换后照样跑」：
+  `idle_timeout`（停滞多久算死）与 `total_timeout`（整份预算）是两个相邻的 `float|None` —— 互换后
+  要么坏签永远挂着（停滞判据 = 整份预算 = 没有判据），要么正常下载几秒就被总预算砍断，两次都只
+  表现为「取包失败」；`attempts`（重抽次数，int）与 `reroll`（开关，bool，`True` 能读成 1）相邻；
+  `log`（回调）与 `label`（传输账里的名字）相邻 —— 互换后进度行打的是函数对象，账本不可 grep。
+* **生成物纪律（这次踩了）**：`remote/offline_boot.py` 是 `remote/_offline_boot/*.pyfrag` 拼出来的
+  **生成物**（`tools/build_offline_boot.py`）。手改发行物 ⇒ `test_committed_artifact_is_what_the_fragments_build`
+  与 `test_each_fragment_starts_with_its_own_ordered_part_header` 双红。正确顺序：改分片 → 重建 →
+  `--check` 对账；**分片一律 LF**（`write_text` 不带 `newline=` 会按平台写成 CRLF，把分段头的 `$` 锚点顶掉）。
+* **守卫钉什么**（`tests/remote/test_fetch_spec.py`）：字段表逐字（9 行，含三个缺省：停滞预算 =
+  `BOOT_IDLE_TIMEOUT_SEC`、整份不设上限、`attempts=3`/`reroll` 开）· frozen + 全 kw_only · 入口只收
+  一个 `spec`（旧位置面 `TypeError`）· 停滞与预算**各自在位**（谁都不能冒充另一个）。
+* **缺省回调要具名**：`log=None` 的兵叫 `_discard_progress`（不是每次现造的 `lambda`）——「谁在写
+  进度行」由一处可判；名字先叫 `_quiet`，撞上 `reuse_audit` 的「同名 ≥3 模块」基线（146 > 145）
+  才改：**新增一个通用小名先 grep 全仓同名**。
+* **用例替身要照抄真模块的公开面**：离线盘用例的 `_RaisingFetcher` 只有 `fetch_guarded`，缺 `FetchSpec`
+  ⇒ `_fetch_guarded` 抛 `AttributeError` 被宽 `except Exception` 吞成「取包异常」再睡 30s（单跑直接
+  挂在 60s 超时）。修法不是绕过，是让替身带 `FetchSpec = ts.FetchSpec` 且签名写成 `fetch_guarded(spec)`。
+* **别用 `dataclasses.asdict` 做测试快照**：它 `deepcopy`，`opener`（`OpenerDirector`，带锁）深拷贝直接
+  炸 —— 同样落进「宽 except → 睡 30s」。要扁平读用 `vars(spec)`。
+
 ## §315 P0-3 批 F1：`rollout_node._banner_lines`(10) → `BannerSpec`（18 → 17）（2026-11-22）
 
 * **一把刀一处**：`remote/rollout_node._banner_lines`(10 个 kw-only 参数) → 一个 `BannerSpec`。
