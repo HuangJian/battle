@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import worker.ppo.common as ppo_common
 from worker.ppo.rng import PPORng
+from worker.ppo.update_spec import TorchUpdateSpec
 
 
 def test_masked_logsoftmax() -> None:
@@ -48,7 +49,9 @@ def test_masked_logsoftmax() -> None:
     assert torch.allclose(out[0, :2], exp_0, atol=1e-6), "有效位 logp = log_softmax(有效子集)"
     # 概率和（exp）在有效位上 = 1
     probs = out.exp()
-    assert bool(torch.isclose(probs[0, :2].sum(), torch.tensor(1.0), atol=1e-5).item()), "有效位概率和为 1"
+    assert bool(torch.isclose(probs[0, :2].sum(), torch.tensor(1.0), atol=1e-5).item()), (
+        "有效位概率和为 1"
+    )
 
 
 def test_cat_logprob_entropy() -> None:
@@ -81,18 +84,22 @@ def test_ppo_save_load(tmp_path: Path) -> None:
     rng2 = PPORng.from_seed(11)
     done = ppo_common._ppo_load(td, m2, o2, rng2)
     assert done == 3, f"_ppo_load 返回 epochs_done=3 (got {done})"
-    assert np.array_equal(m2.weight.detach().numpy(), model.weight.detach().numpy()), "checkpoint 加载后权重一致"
+    assert np.array_equal(m2.weight.detach().numpy(), model.weight.detach().numpy()), (
+        "checkpoint 加载后权重一致"
+    )
     # 无 checkpoint 路径
     m3 = nn.Linear(4, 2)
     o3 = torch.optim.Adam(m3.parameters(), lr=0.1)
-    assert rng2.epoch.permutation(8).tolist() == want_next, "续跑的 epoch 顺序从 ckpt 里那一点接着抽（不是从种子重来）"
+    assert rng2.epoch.permutation(8).tolist() == want_next, (
+        "续跑的 epoch 顺序从 ckpt 里那一点接着抽（不是从种子重来）"
+    )
     restored = ppo_common._ppo_load(None, m3, o3, PPORng.from_seed(0))
     assert restored == 0, "ckpt_path=None → 0"
 
 
 def main() -> None:
     # 手动运行入口：临时目录放项目内 tmp/（与 pytest basetemp 同区，避免碰系统 %TEMP% 触发沙箱权限）
-    _td = tempfile.mkdtemp(dir=str(Path(__file__).resolve().parents[2] / 'tmp' / 'manual-tests'))
+    _td = tempfile.mkdtemp(dir=str(Path(__file__).resolve().parents[2] / "tmp" / "manual-tests"))
     test_masked_logsoftmax()
     test_cat_logprob_entropy()
     test_backend_params_match_config()
@@ -219,10 +226,20 @@ def test_ppo_update_kickstart_off_is_identity() -> None:
     o1 = torch.optim.Adam(m1.parameters(), lr=1e-4)
     o2 = torch.optim.Adam(m2.parameters(), lr=1e-4)
     np.random.seed(7)
-    a1 = engine.ppo_update(m1, o1, chunks, 1, torch.device("cpu"))
+    a1 = engine.ppo_update(
+        TorchUpdateSpec(model=m1, opt=o1, chunks=chunks, epochs=1, device=torch.device("cpu"))
+    )
     np.random.seed(7)
     a2 = engine.ppo_update(
-        m2, o2, chunks, 1, torch.device("cpu"), ref_model=ref, kickstart_kl=0.0
+        TorchUpdateSpec(
+            model=m2,
+            opt=o2,
+            chunks=chunks,
+            epochs=1,
+            device=torch.device("cpu"),
+            ref_model=ref,
+            kickstart_kl=0.0,
+        )
     )
     assert a1["kickstart"] == 0.0 and a2["kickstart"] == 0.0
     for p, q in zip(_kick_state(m1), _kick_state(m2), strict=True):
@@ -238,10 +255,20 @@ def test_ppo_update_kickstart_bites_when_armed() -> None:
     o1 = torch.optim.Adam(m1.parameters(), lr=1e-4)
     o2 = torch.optim.Adam(m2.parameters(), lr=1e-4)
     np.random.seed(7)
-    engine.ppo_update(m1, o1, chunks, 1, torch.device("cpu"))
+    engine.ppo_update(
+        TorchUpdateSpec(model=m1, opt=o1, chunks=chunks, epochs=1, device=torch.device("cpu"))
+    )
     np.random.seed(7)
     agg = engine.ppo_update(
-        m2, o2, chunks, 1, torch.device("cpu"), ref_model=ref, kickstart_kl=1.0
+        TorchUpdateSpec(
+            model=m2,
+            opt=o2,
+            chunks=chunks,
+            epochs=1,
+            device=torch.device("cpu"),
+            ref_model=ref,
+            kickstart_kl=1.0,
+        )
     )
     assert agg["kickstart"] > 0, "不同初始化的 ref 应有正 KL"
     assert any(

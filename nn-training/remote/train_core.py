@@ -79,6 +79,7 @@ from remote.train_common import (
 from remote.wire import _wire_time, note_ppo_tail
 from worker.ppo.demo import DemoBank
 from worker.ppo.rng import PPORng
+from worker.ppo.update_spec import PaddleUpdateSpec, TorchUpdateSpec
 
 
 def _load_opt_state(path: str | Path) -> tuple[Any, int]:
@@ -127,15 +128,17 @@ def _resolved(spec: ResolvedSpec) -> tuple[bytes, bool, str]:
     if got is not None:
         return got
     return _resolve_blob(
-        BlobAsk(blob_root=blob_root,
-        name=name,
-        sha=sha,
-        inline_b64=inline_b64,
-        jid=jid,
-        base_url=base_url,
-        token=token,
-        preloaded=preloaded,
-        log=log),
+        BlobAsk(
+            blob_root=blob_root,
+            name=name,
+            sha=sha,
+            inline_b64=inline_b64,
+            jid=jid,
+            base_url=base_url,
+            token=token,
+            preloaded=preloaded,
+            log=log,
+        ),
     )
 
 
@@ -154,7 +157,9 @@ class OptInitSpec:
     rebuild: Callable[..., bytes] | None = None
 
 
-def _resolve_opt_init(spec: OptInitSpec) -> tuple[bytes, str, float, dict[str, str], dict, int, int]:
+def _resolve_opt_init(
+    spec: OptInitSpec,
+) -> tuple[bytes, str, float, dict[str, str], dict, int, int]:
     """opt 初始状态的**字节解析**（身份命中 / 批量 GET / 单取 / BOD1 落地）——两条核共用。
 
     返回 `(raw, src, kick_kl, wanted, batch, hits, miss)`。★ 它同时是 **B1 那次合成 GET 的
@@ -334,15 +339,17 @@ def _fetch_demo(
     if not demo_sha:
         raise ProtocolError(f"job {jid}: demo_bc_coef>0 但无 demo_sha——拒收")
     demo_raw, demo_hit, demo_src = _resolve_blob(
-        BlobAsk(blob_root=blob_root,
-        name=BLOB_DEMO,
-        sha=demo_sha,
-        inline_b64="",
-        jid=jid,
-        base_url=base_url,
-        token=token,
-        preloaded=preloaded,
-        log=log),
+        BlobAsk(
+            blob_root=blob_root,
+            name=BLOB_DEMO,
+            sha=demo_sha,
+            inline_b64="",
+            jid=jid,
+            base_url=base_url,
+            token=token,
+            preloaded=preloaded,
+            log=log,
+        ),
     )
     if not demo_raw:
         raise ProtocolError(f"job {jid}: demo_sha 存在但 blob 不可得——拒收")
@@ -836,30 +843,34 @@ def _torch_ppo(st: _CoreRun) -> None:
         _load_ppo_data(st, ppo_engine)
         total_steps, chunks = st.total_steps, st.chunks
         agg = ppo_engine.ppo_update(
-            model,
-            opt,
-            chunks,
-            epochs_eff,
-            device_t,
-            kl_coef=float(manifest["kl_coef"]),
-            # ent_coef：None（旧 hub / 未配）→ 引擎常量 ENT_COEF；0.0 是合法值，不能 `or` 兜底。
-            ent_coef=(None if manifest.get("ent_coef") is None else float(manifest["ent_coef"])),
-            ref_model=ref_model,
-            kickstart_kl=kick_kl,
-            demo_bank=demo_bank,
-            demo_bc_coef=demo_coef,
-            demo_per_mb=demo_per_mb,
-            # value 门控牵引（x26-obs it90 诊断；缺席 = 0.0 = 关，老行为逐字节不变）。
-            value_anchor=float(manifest.get("value_anchor", 0.0) or 0.0),
-            rng=st.rng,
-            # ★ 取消接线（R2-5）：今天这条调用**没有**传它——不传则取消延迟永远是
-            # 「跑完才响应」。训练侧那条（`trainer/stream.py`）传的是双缓冲预采回调，
-            # 与这里不是同一个调用点，别去动那一条。
-            on_epoch_done=_cancel_at_epoch_boundary if should_cancel is not None else None,
-            # 组 3（日志节食）：epoch 行 + PPO 完成行攒成一行，未完成时每 60s 心跳一次。
-            progress=train_b,
-            progress_head=f"job {jid}: PPO 训练中",
-            lazy=ppo_loader == "lazy",
+            TorchUpdateSpec(
+                model=model,
+                opt=opt,
+                chunks=chunks,
+                epochs=epochs_eff,
+                device=device_t,
+                kl_coef=float(manifest["kl_coef"]),
+                # ent_coef：None（旧 hub / 未配）→ 引擎常量 ENT_COEF；0.0 是合法值，不能 `or` 兜底。
+                ent_coef=(
+                    None if manifest.get("ent_coef") is None else float(manifest["ent_coef"])
+                ),
+                ref_model=ref_model,
+                kickstart_kl=kick_kl,
+                demo_bank=demo_bank,
+                demo_bc_coef=demo_coef,
+                demo_per_mb=demo_per_mb,
+                # value 门控牵引（x26-obs it90 诊断；缺席 = 0.0 = 关，老行为逐字节不变）。
+                value_anchor=float(manifest.get("value_anchor", 0.0) or 0.0),
+                rng=st.rng,
+                # ★ 取消接线（R2-5）：今天这条调用**没有**传它——不传则取消延迟永远是
+                # 「跑完才响应」。训练侧那条（`trainer/stream.py`）传的是双缓冲预采回调，
+                # 与这里不是同一个调用点，别去动那一条。
+                on_epoch_done=_cancel_at_epoch_boundary if should_cancel is not None else None,
+                # 组 3（日志节食）：epoch 行 + PPO 完成行攒成一行，未完成时每 60s 心跳一次。
+                progress=train_b,
+                progress_head=f"job {jid}: PPO 训练中",
+                lazy=ppo_loader == "lazy",
+            )
         )
     except ProtocolError:
         raise
@@ -1231,30 +1242,36 @@ def _paddle_ppo(st: _CoreRun) -> None:
     try:
         _load_ppo_data(st, ppo_np)
         agg = engine_paddle.ppo_update(
-            model,
-            opt,
-            st.chunks,
-            st.epochs_eff,
-            # `ckpt_path=None`：model/opt 已在本函数上半场按「hub 的 opt tar」恢复过；
-            # 再传一遍会让引擎按 state.json 二次 resume（那是离线盘的续跑口径）。
-            ckpt_path=None,
-            kl_coef=float(manifest["kl_coef"]),
-            ent_coef=(None if manifest.get("ent_coef") is None else float(manifest["ent_coef"])),
-            ref_model=st.ref_model,
-            kickstart_kl=st.kick_kl,
-            demo_bank=st.demo_bank,
-            demo_bc_coef=st.demo_coef,
-            demo_per_mb=st.demo_per_mb,
-            value_anchor=float(manifest.get("value_anchor", 0.0) or 0.0),
-            rng=st.rng,
-            on_epoch_done=(_cancel_at_epoch_boundary if spec.should_cancel is not None else None),
-            progress=train_b,
-            progress_head=f"job {jid}: PPO 训练中",
-            steps_out=steps_box,
-            # 判据来自装载器本身（`LazyChunks.lazy`），不重读 manifest —— 避免「说 lazy
-            # 实际 eager」的错账；eager list 没有这个属性 ⇒ False。
-            lazy=bool(getattr(st.chunks, "lazy", False)),
-            log=spec.log,
+            PaddleUpdateSpec(
+                model=model,
+                opt=opt,
+                chunks=st.chunks,
+                epochs=st.epochs_eff,
+                # `ckpt_path=None`：model/opt 已在本函数上半场按「hub 的 opt tar」恢复过；
+                # 再传一遍会让引擎按 state.json 二次 resume（那是离线盘的续跑口径）。
+                ckpt_path=None,
+                kl_coef=float(manifest["kl_coef"]),
+                ent_coef=(
+                    None if manifest.get("ent_coef") is None else float(manifest["ent_coef"])
+                ),
+                ref_model=st.ref_model,
+                kickstart_kl=st.kick_kl,
+                demo_bank=st.demo_bank,
+                demo_bc_coef=st.demo_coef,
+                demo_per_mb=st.demo_per_mb,
+                value_anchor=float(manifest.get("value_anchor", 0.0) or 0.0),
+                rng=st.rng,
+                on_epoch_done=(
+                    _cancel_at_epoch_boundary if spec.should_cancel is not None else None
+                ),
+                progress=train_b,
+                progress_head=f"job {jid}: PPO 训练中",
+                steps_out=steps_box,
+                # 判据来自装载器本身（`LazyChunks.lazy`），不重读 manifest —— 避免「说 lazy
+                # 实际 eager」的错账；eager list 没有这个属性 ⇒ False。
+                lazy=bool(getattr(st.chunks, "lazy", False)),
+                log=spec.log,
+            )
         )
     except ProtocolError:
         raise

@@ -198,7 +198,12 @@ BASELINE_CLONE = 17
 #: `plan_run` 收它做形参并按门面约定 `as RunSetup` 转出）。这与上面反复点名的「门面转发 /
 #: 入口同款形参」是同一类合法形态 —— 恰恰是这一刀**消掉**了三份重复的旋钮声明；
 #: exact / clone 两条都没动（16 / 17），真重复仍会被它们抓。
-BASELINE_SAME_NAME_GE3 = 143
+#: **2026-11-22 抬同名 1 格（143 → 144）的账**：P0-3 第四十二刀把 `ppo_update` 收成参数对象后，
+#: 两个引擎的 `update = ppo_update` 别名变成真正的**端口适配器**（5 位置 + `**kwargs` → spec），
+#: `update` 这个名字因此在 `worker/ppo/engine.py` / `engine_paddle.py` 里各出现一次，与
+#: `worker/backend.py` 的协议方法名（契约名）及 `biz/reward_context.py` 凑成 ≥3 —— 断言消息里
+#: 点名的「handler 约定名」那一类，不是新实现（两处适配器形状不同：clone 仍 17，exact 16）。
+BASELINE_SAME_NAME_GE3 = 144
 
 
 def _stems(modules: frozenset[str]) -> frozenset[str]:

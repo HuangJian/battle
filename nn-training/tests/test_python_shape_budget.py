@@ -122,8 +122,9 @@ WIDE_FUNCS_BASELINE = {
     "worker/models/student.py": 1,
     "worker/models/student_paddle.py": 1,
     "worker/plan.py": 1,
-    "worker/ppo/engine.py": 1,
-    "worker/ppo/engine_paddle.py": 1,
+    # 2026-11-22（P0-3 第四十二刀）：`ppo_update` 的 20 个参数（Paddle 21）收成
+    # `TorchUpdateSpec` / `PaddleUpdateSpec`（共用 `BaseUpdateSpec`）⇒ 两个条目删除；
+    # 守 `tests/worker/test_ppo_update_spec.py`。
     "worker/ppo/goal.py": 1,
     "worker/ppo/intent.py": 1,
     # 2026-11-19（B8 ④）：`run_ppo` 的 13 个形参就是两个入口的契约本身

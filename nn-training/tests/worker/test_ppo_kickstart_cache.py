@@ -41,6 +41,7 @@ if str(ROOT) not in sys.path:
 
 from worker.models.student import PPOStudent
 from worker.ppo.engine import ppo_update
+from worker.ppo.update_spec import TorchUpdateSpec
 
 AGG_KEYS = {"policy", "value", "entropy", "kl", "kickstart", "mean_ret", "gnorm"}
 
@@ -119,14 +120,16 @@ def _run(
     np.random.seed(seed)
     model, opt = _fresh(v6=v6)
     return ppo_update(
-        model,
-        opt,
-        _v6_chunks() if v6 else _chunks(),
-        epochs,
-        torch.device("cpu"),
-        kl_coef=0.0,
-        ref_model=ref,
-        kickstart_kl=kickstart_kl,
+        TorchUpdateSpec(
+            model=model,
+            opt=opt,
+            chunks=_v6_chunks() if v6 else _chunks(),
+            epochs=epochs,
+            device=torch.device("cpu"),
+            kl_coef=0.0,
+            ref_model=ref,
+            kickstart_kl=kickstart_kl,
+        )
     )
 
 

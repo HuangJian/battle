@@ -165,7 +165,7 @@
     "worker/ppo/cli.py": 3,
     "worker/ppo/common.py": 1,
     "worker/ppo/engine.py": 14,
-    "worker/ppo/engine_paddle.py": 6,
+    "worker/ppo/engine_paddle.py": 5,
     "worker/ppo/np_core.py": 3,
     "worker/ppo/trainer.py": 9,
     "worker/reports.py": 18,

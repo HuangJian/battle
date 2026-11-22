@@ -27,6 +27,7 @@ import pytest
 # 打在 ppo.common 上会是**静默空操作**（名字还在、没人在读）。
 import worker.ppo.np_core as C
 from common.log_bundle import LogBundle
+from worker.ppo.update_spec import TorchUpdateSpec
 
 
 def _rig() -> tuple[LogBundle, list[str]]:
@@ -49,8 +50,14 @@ def _fake_shard(n: int, stage: int) -> dict:
     }
 
 
-def _load(monkeypatch: pytest.MonkeyPatch, shards: list[tuple[int, int]], *, quota: int,
-          bundle: LogBundle | None, logs: list[str]) -> list[dict]:
+def _load(
+    monkeypatch: pytest.MonkeyPatch,
+    shards: list[tuple[int, int]],
+    *,
+    quota: int,
+    bundle: LogBundle | None,
+    logs: list[str],
+) -> list[dict]:
     """用假 shard 表驱动 `load_episodes_common`（与 `test_ppo_quota._collect` 同口径）。"""
     # 形参与本模块的 `discover_shards` **逐名对齐**（`need_any` = wire-diet 的奖励面「或」判据）：
     # 少收一个形参 = 测试假绿，而生产侧已经在走那条分支。
@@ -69,8 +76,10 @@ def _load(monkeypatch: pytest.MonkeyPatch, shards: list[tuple[int, int]], *, quo
         shard_kind="RL",
         need_files=("metrics.npy", "obs.npy"),
         shard_loader=loader,
-        gae=lambda d: (np.zeros(d["obs"].shape[0], dtype=np.float32),
-                       np.zeros(d["obs"].shape[0], dtype=np.float32)),
+        gae=lambda d: (
+            np.zeros(d["obs"].shape[0], dtype=np.float32),
+            np.zeros(d["obs"].shape[0], dtype=np.float32),
+        ),
         gae_name="GAE",
         normalize_ret=False,
         per_stage_quota=quota,
@@ -131,13 +140,15 @@ def test_engine_folds_epochs_into_the_progress_bundle(monkeypatch: pytest.Monkey
     b = LogBundle(msgs.append)
     np.random.seed(7)
     engine.ppo_update(
-        model,
-        opt,
-        chunks,
-        2,
-        torch.device("cpu"),
-        progress=b,
-        progress_head="job j1: PPO 训练中",
+        TorchUpdateSpec(
+            model=model,
+            opt=opt,
+            chunks=chunks,
+            epochs=2,
+            device=torch.device("cpu"),
+            progress=b,
+            progress_head="job j1: PPO 训练中",
+        )
     )
     assert not any("epoch 1/2 done" in m for m in msgs), msgs
     assert not any("[ppo] epoch" in m for m in msgs), msgs
@@ -154,7 +165,9 @@ def test_engine_without_bundle_still_logs_per_epoch(monkeypatch: pytest.MonkeyPa
     """回退路径（CLI / 旧调用方）：不传 progress 时逐 epoch 一行，逐字不变。"""
     engine, torch, model, opt, chunks, msgs = _engine_rig(monkeypatch)
     np.random.seed(7)
-    engine.ppo_update(model, opt, chunks, 1, torch.device("cpu"))
+    engine.ppo_update(
+        TorchUpdateSpec(model=model, opt=opt, chunks=chunks, epochs=1, device=torch.device("cpu"))
+    )
     assert any(m.startswith("[ppo] epoch 1/1 done") for m in msgs), msgs
 
 
@@ -163,7 +176,9 @@ def test_engine_diag_is_one_line_not_one_per_window(monkeypatch: pytest.MonkeyPa
     `tests/worker/test_xla_step_diag.py::test_diag_is_one_line_at_the_end` 钉住。"""
     engine, torch, model, opt, chunks, msgs = _engine_rig(monkeypatch)
     np.random.seed(7)
-    engine.ppo_update(model, opt, chunks, 1, torch.device("cpu"))
+    engine.ppo_update(
+        TorchUpdateSpec(model=model, opt=opt, chunks=chunks, epochs=1, device=torch.device("cpu"))
+    )
     assert not any("diag s=" in m for m in msgs), msgs
 
 
@@ -187,8 +202,15 @@ def test_iter_round_is_one_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     done = [m for m in msgs if m.startswith("kind=iter rollout done")]
     assert len(done) == 1, msgs
     line = done[0]
-    for part in ("games=1", "workers=1", "bun=", "ts_root=", "进度=1/1 games settled",
-                 "winRate=", "单局耗时"):
+    for part in (
+        "games=1",
+        "workers=1",
+        "bun=",
+        "ts_root=",
+        "进度=1/1 games settled",
+        "winRate=",
+        "单局耗时",
+    ):
         assert part in line, (part, line)
     # 逐行刷屏的那几族不许再出现
     assert not any(m.startswith("kind=iter rollout: ") for m in msgs), msgs
@@ -250,14 +272,25 @@ def test_ts_code_cache_hit_reports_into_the_bundle(tmp_path: Path) -> None:
     manifest = {"ts_code_sha256": hashlib.sha256(raw).hexdigest()}
     ts_root = tmp_path / "ts_code_cache"
     _ensure_ts_code(
-        "http://unused", "tok", "j1", manifest,
-        ts_root=ts_root, preloaded={"ts_code_zip": raw}, log=lambda _m: None,
+        "http://unused",
+        "tok",
+        "j1",
+        manifest,
+        ts_root=ts_root,
+        preloaded={"ts_code_zip": raw},
+        log=lambda _m: None,
     )
     b, lines = _rig()
     logs: list[str] = []
     _cache, n, hit = _ensure_ts_code(
-        "http://unused", "tok", "j2", manifest,
-        ts_root=ts_root, preloaded=None, log=logs.append, bundle=b,
+        "http://unused",
+        "tok",
+        "j2",
+        manifest,
+        ts_root=ts_root,
+        preloaded=None,
+        log=logs.append,
+        bundle=b,
     )
     assert hit is True and n == 0
     assert logs == [], "命中那行也该进 bundle"
@@ -265,6 +298,7 @@ def test_ts_code_cache_hit_reports_into_the_bundle(tmp_path: Path) -> None:
 
 
 # ------------------------------------------- ⑤ 缺省 log 走全仓那一条出口
+
 
 def test_default_iter_log_uses_the_shared_line_format(
     capsys: pytest.CaptureFixture[str],

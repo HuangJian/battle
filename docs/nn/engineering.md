@@ -25,6 +25,42 @@
 
 ---
 
+## §295 P0-3 第四十二刀：`ppo_update` 成对收 spec（52 → 50）（2026-11-22）
+
+* `worker/ppo/engine.ppo_update`（20 参）与 `worker/ppo/engine_paddle.ppo_update`（21 参）
+  一起收成参数对象：共用 `BaseUpdateSpec`（19 个同名旋钮），torch 侧 `TorchUpdateSpec`
+  （`+target_kl`）、Paddle 侧 `PaddleUpdateSpec`（`+steps_out` / `+log`），新模块
+  `worker/ppo/update_spec.py`（99 行，拓扑秩 **L1**，已登记 `tests/helpers/remote_dag.py`）。
+  两个条目从 `WIDE_FUNCS_BASELINE` 删除：全仓 52 → **50**，文件 43 → **41**。
+* **为什么必须成对**：两个引擎是**同一个调用面**的两个实现（本机训练核 `train_core`、
+  parity 工具 `tools/paddle_parity.py` 并排调用、测试同名断言）。只改一侧 ⇒ 同一份关键字
+  在两条路上含义分叉，而分叉的代价是「Paddle 侧少收一个 `kl_coef` 却照常跑完」。
+* **为什么不是一个超集 spec**：torch 不认 `steps_out`/`log`，Paddle 不认 `target_kl`。合成
+  超集就得在入口里判「你传了这个但我不管」—— 那是把静默失效从签名搬进入口，正是本刀要
+  杀的东西。差异留在两个子类，`tests/worker/test_ppo_update_spec.py` 断言两侧独有字段互不渗透。
+* **为什么端口 `update(...)` 仍是关键字**（本刀唯一「没收」的地方）：`trainer/stream.py`
+  用一个调用面驱动**四个**后端（`c.backend.update(model, opt, chs, epochs, device,
+  **update_kwargs)`），而 goal / intent 的 `update_kwargs` 与 PPO 侧不同（`seed` /
+  `value_warmup_epochs`）⇒ 端口不能押在一份 spec 上。两个引擎因此保留 5 位置 + `**kwargs`
+  的 `update` 适配器，其余原样进 spec：**未知键在构造 spec 时立刻 `TypeError`**（旧写法是
+  静默落回缺省）。`REQUIRED_UPDATE_KWARGS`（`ckpt_path` / `rng` / `on_epoch_done`）由守卫
+  断言 ⊆ `BaseUpdateSpec` 字段 —— 少了它流式那条腿整条断掉。
+* 调用点 35 处：生产 8（`train_core` 2 · `paddle_parity` 4 · `bench` 1 · `engine.main` 1）
+  + 测试 25 + 两个适配器自身 2；除 `tests/worker/test_ppo_lazy_loader.py:522`（该文件同时
+  验 torch/Paddle 两侧，手动改）外全由 AST 脚本 `tmp/wrap_ppo_update_calls.py --apply` 包装。
+* **踩到的坑（记下来免得下次重踩）**：第一版把两端口的适配器抽成共用 helper
+  `port_update(spec_cls, impl, …)`，两个 `update` 于是成了**逐字节等价的一行** —— `test_reuse_ledger`
+  的结构克隆 17 → 18 立刻红。最终形状：torch 侧一行 `return ppo_update(TorchUpdateSpec(…))`、
+  Paddle 侧先构造局部 `spec` 再 `return ppo_update(spec)`（Paddle 侧本来就多一步）。克隆回到 17，
+  **没有抬基线**。
+* 新守卫 `tests/worker/test_ppo_update_spec.py`（7 条：三类的 frozen + 全字段 kw_only /
+  字段表与两侧独有字段互斥 / 未知关键字 `TypeError` / 两个 `ppo_update` 只收 `spec` /
+  两个适配器的 6 形参形状 / `REQUIRED_UPDATE_KWARGS ⊆` spec 字段）。
+* 回归：PPO 族 68 条 + 守卫 7 条绿；`bun run pygate` 绿（6745 passed / 3 skipped）。
+  账本侧另有两笔小额登记：`reuse` 的同名组 143 → 144（`update` 从别名变成真适配器，与协议方法名
+  凑成 ≥3；clone 仍 17、exact 16，注释写在 `BASELINE_SAME_NAME_GE3` 上方）；`Any` 基线
+  `worker/ppo/engine_paddle.py` 6 → 5（`progress: Any` 形参没了）。
+
 ## §294 P0-3 第四十一刀：`trainer/loop_serve.serve` 收 `ServeSpec`（53 → 52）（2026-11-22）
 
 * `trainer/loop_serve.serve` 原来 18 个参数（1 个位置 `courses` + 17 个关键字），现在只收

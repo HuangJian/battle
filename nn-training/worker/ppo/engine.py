@@ -44,7 +44,7 @@ if _ilu.find_spec("common") is None:
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -110,6 +110,7 @@ from worker.ppo.trainer import (
     tensored_batch,
     tensored_chunks,
 )
+from worker.ppo.update_spec import TorchUpdateSpec
 from worker.ppo.vram import require_corpus, torch_free_bytes
 
 # ---------------- hyper-params (CLI-overridable) ----------------
@@ -992,30 +993,13 @@ def _aggregate(ctx: PPOContext) -> dict:
     return agg
 
 
+def ppo_update(spec: TorchUpdateSpec):
+    """参数见 `worker.ppo.update_spec.TorchUpdateSpec`（本函数只收它）。
 
-def ppo_update(
-    model,
-    opt,
-    chunks,
-    epochs,
-    device,
-    ckpt_path: str | None = None,
-    on_epoch_done=None,
-    kl_coef: float = 0.0,
-    ref_model=None,
-    kickstart_kl: float = 0.0,
-    ent_coef: float | None = None,
-    demo_bank: DemoBank | None = None,
-    demo_bc_coef: float = 0.0,
-    demo_per_mb: int = 0,
-    progress: LogBundle | None = None,
-    progress_head: str = "[ppo] PPO",
-    value_anchor: float = 0.0,
-    rng: PPORng | None = None,
-    lazy: bool = False,
-    target_kl: float = 0.0,
-):
-    """chunks: list of minibatch dicts (obs (B,14,26,26) / scalars (B,24) / ...).
+    入口只收参数对象：20 个关键字里每一个拼错都会**静默落回缺省**（`lazzy=True` =
+    显存翻倍、`kl_coef` 少一位小数 = 没有 KL 惩罚），而它们决定的是「数学是否还一样」。
+
+    chunks: list of minibatch dicts (obs (B,14,26,26) / scalars (B,24) / ...).
 
     ckpt_path: 非空则每 epoch 落盘 checkpoint（model/opt/epochs_done/三条随机流的
     `bit_generator.state`），并支持断点续跑（重启后从已完成 epoch 数继续，minibatch
@@ -1063,26 +1047,26 @@ def ppo_update(
     缺省 0 = 关闭，数学与步数逐字节不变；读数 `per_step_kl`/`clip_fraction` 恒开。
     """
     ctx = PPOContext(
-        model=model,
-        opt=opt,
-        chunks=chunks,
-        epochs=epochs,
-        device=device,
-        ckpt_path=ckpt_path,
-        on_epoch_done=on_epoch_done,
-        kl_coef=kl_coef,
-        ref_model=ref_model,
-        kickstart_kl=kickstart_kl,
-        ent_c=ENT_COEF if ent_coef is None else float(ent_coef),
-        demo_bank=demo_bank,
-        demo_bc_coef=demo_bc_coef,
-        demo_per_mb=demo_per_mb,
-        progress=progress,
-        progress_head=progress_head,
-        value_anchor=value_anchor,
-        rng=rng if rng is not None else PPORng.from_seed(0),
-        lazy=bool(lazy),
-        target_kl=float(target_kl or 0.0),
+        model=spec.model,
+        opt=spec.opt,
+        chunks=cast("list[dict]", spec.chunks),
+        epochs=spec.epochs,
+        device=spec.device,
+        ckpt_path=spec.ckpt_path,
+        on_epoch_done=spec.on_epoch_done,
+        kl_coef=spec.kl_coef,
+        ref_model=spec.ref_model,
+        kickstart_kl=spec.kickstart_kl,
+        ent_c=ENT_COEF if spec.ent_coef is None else float(spec.ent_coef),
+        demo_bank=spec.demo_bank,
+        demo_bc_coef=spec.demo_bc_coef,
+        demo_per_mb=spec.demo_per_mb,
+        progress=spec.progress,
+        progress_head=spec.progress_head,
+        value_anchor=spec.value_anchor,
+        rng=spec.rng if spec.rng is not None else PPORng.from_seed(0),
+        lazy=bool(spec.lazy),
+        target_kl=float(spec.target_kl or 0.0),
     )
     bk, cfg, st = _prepare(ctx)
     for ep in range(ctx.start_epoch, ctx.epochs):
@@ -1108,9 +1092,25 @@ def ppo_update(
 
 
 # trainer/stream.py 的 backend 契约要求模块暴露 update(...)（intent 的 ppo_intent 已有）；
-# 普通训练器的流式路径（trainer/run_rl.py --stream 1）此前从未被拉通——补此别名。
-# 签名与 ppo_update 完全一致（ckpt_path 经 update_kwargs 透传）。
-update = ppo_update
+# 普通训练器的流式路径（trainer/run_rl.py --stream 1）此前从未被拉通——补此入口。
+#
+# ★ 它是**端口适配器**，不是 `ppo_update` 的别名：端口用同一个调用面驱动四个后端
+#   （`update(model, opt, chunks, epochs, device, **update_kwargs)`），而 goal / intent 的
+#   `update_kwargs`（`seed` / `value_warmup_epochs`）与 PPO 侧不同 ⇒ 端口不能押在一份 spec 上。
+#   前 5 个是固定的位置语义（错一格 = 训了别的模型/别的语料），其余全部按名字进 spec；
+#   未知键在构造 spec 时立刻 TypeError（旧写法是静默落回缺省）。
+def update(model, opt, chunks, epochs, device, **update_kwargs):
+    """backend 端口（`worker/backend.py::update`）：关键字 → `TorchUpdateSpec`。"""
+    return ppo_update(
+        TorchUpdateSpec(
+            model=model,
+            opt=opt,
+            chunks=chunks,
+            epochs=epochs,
+            device=device,
+            **update_kwargs,
+        )
+    )
 
 
 def main():
@@ -1226,14 +1226,16 @@ def main():
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     agg = ppo_update(
-        model,
-        opt,
-        chunks,
-        args.epochs,
-        device,
-        rng=ppo_rng,
-        lazy=args.ppo_loader == "lazy",
-        target_kl=float(args.target_kl),
+        TorchUpdateSpec(
+            model=model,
+            opt=opt,
+            chunks=chunks,
+            epochs=args.epochs,
+            device=device,
+            rng=ppo_rng,
+            lazy=args.ppo_loader == "lazy",
+            target_kl=float(args.target_kl),
+        )
     )
 
     model.to("cpu")

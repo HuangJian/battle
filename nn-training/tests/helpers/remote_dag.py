@@ -557,6 +557,10 @@ LAYERS: dict[str, int] = {
     #: 只 import numpy + `common.runtime`（不在本账本内）⇒ **L0**。四条训练线的随机面都从这里取，
     #: 因此它必须待在 np_core(1)/common(2) 之下，不能反向。
     "worker.ppo.rng": 0,
+    # 2026-11-22（P0-3 第四十二刀）：`ppo_update` 的参数对象（torch / Paddle 两份子类 + 端口
+    # 适配器）。只靠 `worker.ppo.demo`(L0) / `worker.ppo.rng`(L0) / `common.log_bundle` ⇒ **L1**；
+    # `engine`(L3) 与 `engine_paddle` 站在它上面，秩不变。
+    "worker.ppo.update_spec": 1,
     "worker.modes": 0,
     "worker.node_identity": 0,
     "worker.paired_kill": 0,

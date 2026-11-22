@@ -9759,3 +9759,26 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **读数**：宽签名 53 → **52**、44 → **43** 文件（`WIDE_FUNCS_BASELINE` 删 `trainer/loop_serve.py`）；
   `loop_serve.py` LOC 802 → 810。
 - **验证**：`tests/trainer/` 876 例全绿；预算/门禁用例绿。全文 → `docs/nn/engineering.md` §294。
+
+## §2026-11-22-ppo-update-spec（`ppo_update` 成对收 spec）
+
+- **背景**：`worker/ppo/engine.ppo_update`（20 参）与 `engine_paddle.ppo_update`（21 参）是同一个
+  调用面的两份实现，被 `remote/train_core`、`tools/paddle_parity`、`bench` 与 25 处测试并排调用。
+  关键字拼错不报错，只是静默落回缺省：`kl_coef` 少一位小数 = 这轮没 KL 惩罚（日志只剩「kl 偏大」）、
+  `target_kl` / `steps_out` 拼错 = 提前停与步数回传静默失效、`lazy` 拼成 `lazzy` = 整轮全量上卡。
+- **决定**：新模块 `worker/ppo/update_spec.py`：frozen + kw_only 的 `BaseUpdateSpec`（19 个同名
+  旋钮）+ `TorchUpdateSpec`（`+target_kl`）/ `PaddleUpdateSpec`（`+steps_out` / `+log`）；两个
+  `ppo_update` 只收 `spec`。35 处构造点（生产 8 + 测试 25 + 适配器 2）机械改传对象。
+- **端口面保留关键字（唯一没收的地方）**：`trainer/stream.py` 用同一调用面
+  `update(model, opt, chunks, epochs, device, **update_kwargs)` 驱动四个后端，而 goal / intent 的
+  `update_kwargs`（`seed` / `value_warmup_epochs`）与 PPO 不同 ⇒ 端口不能押在一份 spec 上。两个
+  引擎保留 5 位置 + `**kwargs` 的 `update` 适配器，其余按名进 spec，未知键在构造时 `TypeError`。
+- **被否决**：① 只改一侧（同一关键字在两条路上含义分叉，Paddle 少收一个 `kl_coef` 也照跑完）；
+  ② 一个超集 spec（torch 不认 `steps_out`/`log`、Paddle 不认 `target_kl` ⇒ 入口里判「传了但不管」
+  = 把静默失效从签名搬进入口）；③ 两端口的适配器抽成共用 `port_update(spec_cls, impl, …)` helper
+  —— 两个 `update` 成了逐字节等价的一行，结构克隆 17 → 18 当场红；最终两边形状各留一步（torch 一行
+  `return`、Paddle 先构局部 `spec`），**没有抬 `BASELINE_CLONE`**。
+- **读数**：宽签名 52 → **50**、43 → **41** 文件（`WIDE_FUNCS_BASELINE` 删两文件条目）；
+  `update_spec.py` 99 行（拓扑秩 L1，已登记 `tests/helpers/remote_dag.py`）。
+- **验证**：`tests/worker/test_ppo_update_spec.py`（7 条）· PPO 族 68 条 · `bun run pygate` 绿
+  （6745 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §295。
