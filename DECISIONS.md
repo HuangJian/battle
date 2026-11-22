@@ -10151,3 +10151,28 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   `tests/remote/test_bundle_spec.py`（两张字段表 / frozen+kw_only / 入口只吃一个 spec /
   旧调用面 TypeError / 相邻字段名拼错 TypeError / 状态缺省不表达成功）。
   全文 → `docs/nn/engineering.md` §311。
+
+## §2026-11-22-lane-breaker-specs
+
+**P0-3 批 D2 前两刀：`LaneSpec`（`LocalLane.__init__` 12 参）与 `BreakerSpec`（`breaker_update` 12 参）
+（宽签名 21 → 19，17 → 15 文件）。**
+
+- **背景**：两处的坏点都是**相邻同类位**。`LocalLane` 是两份共享单元素账
+  （`local_cap` `list[int]` / `last_remote_ok` `list[float]`）外加两个 Event（`all_settled` /
+  `halt_event`，后者可为 `None`）；`breaker_update` 是**五条相邻阈值分属两族**
+  （KL 族 / ENT 族）。互换都不抛，只让「补孵判据恒真/恒假」「该停的没停 / 健康轮误熔断」
+  静默发生 —— 后者是 2026-09-06 p4-onset it8 误熔断（§339）的形状。
+- **决定**：`LaneSpec`（11 字段，住 `trainer/queue_local.py`）与 `BreakerSpec`（12 字段，住
+  `worker/breaker.py`），frozen + kw_only；两个入口各做一次展开（`LocalLane` 是逐字段
+  `self.x = spec.x`，`breaker_update` 是局部展开），函数体逐字不动。调用面：`LocalLane` 1 处，
+  `breaker_update` 19 处（生产 2 + 用例 17）。
+- **被否决**：① 只收 `breaker_update` 的 KL 族、ENT 三阈值留散参 —— 两族互换正是要防的事，
+  留一半等于留一半风险；② 把 `LaneSpec` 的 `local_cap` / `last_remote_ok` 改成「返回值 + setter」
+  （去掉共享可变账）—— 那是 P0-5 的题目（谁拥有状态），与签名收敛混做会让读数无法归因；
+  ③ 给 `breaker_update` 保留 `**kwargs` 兼容旧调用面 —— 旧面只有 19 处且全是本仓代码。
+- **读数**：宽签名 21 → **19**、17 → **15** 文件（`trainer/queue_local.py` / `worker/breaker.py` 归零）。
+- **验证**：`bun run pygate` 绿（97s，log clean）；`ruff` + `mypy`(1085 文件) 绿。守
+  `tests/trainer/test_lane_spec.py`（字段表 / 形状 / `slot_allowed` 两条语义）与
+  `tests/worker/test_breaker_spec.py`（字段表 / 形状 / 两族阈值互不挪用 / `enabled=False` 短路 /
+  `ent_peak=None` 退回绝对电平）。
+  全文 → `docs/nn/engineering.md` §312（LaneSpec）· §313（BreakerSpec）。

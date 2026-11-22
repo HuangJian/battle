@@ -41,6 +41,7 @@ from worker.breaker import (
     ENT_BREAK_MAX_WINRATE,
     KL_BREAK,
     KL_BREAK_CONSEC,
+    BreakerSpec,
     breaker_update,
 )
 
@@ -277,18 +278,20 @@ class LedgerView:
         if kl is None or entropy is None:
             return
         self.kl_streak, self.ent_streak, _tripped = breaker_update(
-            self.kl_streak,
-            self.ent_streak,
-            kl=kl,
-            entropy=entropy,
-            win_rate=0.0 if win_rate is None else win_rate,
-            kl_break=self.spec.kl_break,
-            kl_consec=self.spec.kl_consec,
-            ent_break=self.spec.ent_break,
-            ent_consec=self.spec.ent_consec,
-            ent_max_winrate=self.spec.ent_max_winrate,
-            ent_peak=self.ent_peak,
-            enabled=not self.spec.breakers_off,
+            BreakerSpec(
+                kl_streak=self.kl_streak,
+                ent_streak=self.ent_streak,
+                kl=kl,
+                entropy=entropy,
+                win_rate=0.0 if win_rate is None else win_rate,
+                kl_break=self.spec.kl_break,
+                kl_consec=self.spec.kl_consec,
+                ent_break=self.spec.ent_break,
+                ent_consec=self.spec.ent_consec,
+                ent_max_winrate=self.spec.ent_max_winrate,
+                ent_peak=self.ent_peak,
+                enabled=not self.spec.breakers_off,
+            )
         )
         self.ent_peak = entropy if self.ent_peak is None else max(self.ent_peak, entropy)
 

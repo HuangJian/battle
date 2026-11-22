@@ -33,6 +33,8 @@ it100 才触发——KL 是滞后指标，entropy 才是先导。
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 KL_WARN = 0.04  # 2026-09-02 P0-3 口径换算 ×0.5（Schulman 无偏估计量，旧 2× 口径 0.08）；
 # 健康稳态即"0.045-0.054"为旧口径历史值 → 新口径 0.0225-0.027，见下文换算表。
 ENT_COLLAPSE_DROP = 0.10  # single-iteration entropy drop that warrants a warning
@@ -48,21 +50,35 @@ ENT_BREAK_MAX_WINRATE = 0.5
 CIRCUIT_EXIT_CODE = 3
 
 
-def breaker_update(
-    kl_streak: int,
-    ent_streak: int,
-    *,
-    kl: float,
-    entropy: float,
-    win_rate: float,
-    kl_break: float = KL_BREAK,
-    kl_consec: int = KL_BREAK_CONSEC,
-    ent_break: float = ENT_BREAK,
-    ent_consec: int = ENT_BREAK_CONSEC,
-    ent_max_winrate: float = ENT_BREAK_MAX_WINRATE,
-    ent_peak: float | None = None,
-    enabled: bool = True,
-) -> tuple[int, int, str | None]:
+@dataclass(frozen=True, kw_only=True)
+class BreakerSpec:
+    """一轮熔断判定的全部输入（P0-3 批 D2：2 位置 + 10 关键字 → 一个对象）。
+
+    失效面：`kl_break` / `kl_consec` 与 `ent_break` / `ent_consec` / `ent_max_winrate` 是
+    **五条相邻阈值**（KL 族 vs ENT 族）。互换不会抛：KL 规则拿熵阈值判、ENT 规则拿 KL 阈值判，
+    结果是「该停的没停」或「健康轮被误熔断」—— 两条在日志里都只是同一句「熔断」，
+    而 2026-09-06 那次 p4-onset it8 误熔断正是这条形状（§339）。
+    `kl_streak` / `ent_streak` 是两个同型计数器挨着，互换后两条规则的连击互相垫账。
+    """
+
+    #: 上两轮结算下来的连击数（调用方持有；判定后由返回值写回）。
+    kl_streak: int
+    ent_streak: int
+    kl: float
+    entropy: float
+    win_rate: float
+    kl_break: float = KL_BREAK
+    kl_consec: int = KL_BREAK_CONSEC
+    ent_break: float = ENT_BREAK
+    ent_consec: int = ENT_BREAK_CONSEC
+    ent_max_winrate: float = ENT_BREAK_MAX_WINRATE
+    #: 本轮之前的最大熵（`None` = 冷启动首轮，退回绝对电平判定）。
+    ent_peak: float | None = None
+    #: `False` ⇒ 整个判定短路（课程 `breakers_off: true`）：连击归零、永不 tripped。
+    enabled: bool = True
+
+
+def breaker_update(spec: BreakerSpec) -> tuple[int, int, str | None]:
     """推进连击计数并判定是否熔断。
 
     返回 (kl_streak, ent_streak, tripped)：tripped 为 None 表示继续训练，
@@ -81,7 +97,15 @@ def breaker_update(
     ent_break / ent_consec / ent_max_winrate 同为可选覆盖（课程级可配，见模块 docstring
     的 2026-09-06 修正）。ent_peak = 本轮之前见过的最大熵，None = 无历史基线 → 退回
     绝对电平判定（旧行为）。调用方负责在每轮判定后把 peak 更新为 max(peak, entropy)。
+
+    入参 = 一个 `BreakerSpec`（P0-3 批 D2）；下面一次展开，函数体逐字不动。
     """
+    kl_streak, ent_streak = spec.kl_streak, spec.ent_streak
+    kl, entropy, win_rate = spec.kl, spec.entropy, spec.win_rate
+    kl_break, kl_consec = spec.kl_break, spec.kl_consec
+    ent_break, ent_consec = spec.ent_break, spec.ent_consec
+    ent_max_winrate, ent_peak = spec.ent_max_winrate, spec.ent_peak
+    enabled = spec.enabled
     if not enabled:
         return 0, 0, None
     kl_streak = kl_streak + 1 if kl >= kl_break else 0

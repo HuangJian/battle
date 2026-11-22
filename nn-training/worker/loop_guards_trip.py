@@ -28,6 +28,7 @@ from worker.breaker import (
     KL_BREAK,
     KL_BREAK_CONSEC,
     KL_WARN,
+    BreakerSpec,
     breaker_update,
 )
 from worker.events import GateVerdict, write_circuit_break, write_gate_verdict, write_stop_loss
@@ -84,18 +85,20 @@ class TrainingGuardsTrip:
         # ENT 三阈值全课程可配（热启动课程下调 ent_break 收紧保护）；ent_peak 为
         # 本轮之前的历史最大熵——相对崩塌判定的基线（None = 冷启动首轮，退回绝对判定）。
         kl_streak, ent_streak, tripped_now = breaker_update(
-            self._kl_streak,
-            self._ent_streak,
-            kl=agg["kl"],
-            entropy=agg["entropy"],
-            win_rate=self._report["winRate"],
-            kl_break=_kl_break,
-            kl_consec=_kl_consec,
-            ent_break=getattr(args, "ent_break", ENT_BREAK),
-            ent_consec=getattr(args, "ent_break_consec", ENT_BREAK_CONSEC),
-            ent_max_winrate=getattr(args, "ent_break_max_winrate", ENT_BREAK_MAX_WINRATE),
-            ent_peak=self._ent_peak,
-            enabled=not breakers_off,
+            BreakerSpec(
+                kl_streak=self._kl_streak,
+                ent_streak=self._ent_streak,
+                kl=agg["kl"],
+                entropy=agg["entropy"],
+                win_rate=self._report["winRate"],
+                kl_break=_kl_break,
+                kl_consec=_kl_consec,
+                ent_break=getattr(args, "ent_break", ENT_BREAK),
+                ent_consec=getattr(args, "ent_break_consec", ENT_BREAK_CONSEC),
+                ent_max_winrate=getattr(args, "ent_break_max_winrate", ENT_BREAK_MAX_WINRATE),
+                ent_peak=self._ent_peak,
+                enabled=not breakers_off,
+            )
         )
         self._kl_streak = kl_streak
         self._ent_streak = ent_streak

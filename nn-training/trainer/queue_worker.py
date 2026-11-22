@@ -17,6 +17,7 @@ import common.task_client
 import common.weights_client
 from common.platform_utils import rmtree_best_effort
 from trainer.queue_local import (
+    LaneSpec,
     LocalLane,
     QueueEdgeGate,
     ReapSpec,
@@ -787,17 +788,19 @@ def run_queue(q: QueueState) -> None:
     # 本地线程先孵化：本地权重已在磁盘（rl_path），不依赖远端 POST。
     # B3：初始只开 local_slots 条（0 = 不开）；失联补孵由 LocalLane 守护。
     q.local_lane = LocalLane(
-        worker,
-        local_slots=q.local_slots,
-        cap_full=q.cap_full,
-        local_cap=q.local_cap,
-        last_remote_ok=q.last_remote_ok,
-        remote_dead_sec=q.remote_dead_sec,
-        all_settled=q.all_settled,
-        halt_event=q.halt_event,
-        deadline=q.deadline,
-        lock=q.lock,
-        threads=q.threads,
+        LaneSpec(
+            worker=worker,
+            local_slots=q.local_slots,
+            cap_full=q.cap_full,
+            local_cap=q.local_cap,
+            last_remote_ok=q.last_remote_ok,
+            remote_dead_sec=q.remote_dead_sec,
+            all_settled=q.all_settled,
+            halt_event=q.halt_event,
+            deadline=q.deadline,
+            lock=q.lock,
+            threads=q.threads,
+        )
     )
     q.t_dist_start_box[0] = time.time()
     q.local_lane.start()

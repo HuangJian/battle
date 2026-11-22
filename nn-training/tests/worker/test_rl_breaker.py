@@ -1,27 +1,67 @@
 """biz/breaker.py — F4 circuit-breaker pure-logic tests."""
 from __future__ import annotations
 
-from worker.breaker import breaker_update
+from worker.breaker import BreakerSpec, breaker_update
 
 
 def test_breaker_healthy_does_not_trip() -> None:
-    kl_s, ent_s, trip = breaker_update(0, 0, kl=0.05, entropy=1.5, win_rate=0.3)
+    kl_s, ent_s, trip = breaker_update(
+        BreakerSpec(
+            kl_streak=0,
+            ent_streak=0,
+            kl=0.05,
+            entropy=1.5,
+            win_rate=0.3,
+        )
+    )
     assert trip is None
 
 
 def test_breaker_kl_trips_after_consecutive() -> None:
     # KL >= 0.15 must persist 3 consecutive iterations before tripping.
-    kl_s, ent_s, trip = breaker_update(0, 0, kl=0.20, entropy=1.5, win_rate=0.3)
+    kl_s, ent_s, trip = breaker_update(
+        BreakerSpec(
+            kl_streak=0,
+            ent_streak=0,
+            kl=0.20,
+            entropy=1.5,
+            win_rate=0.3,
+        )
+    )
     assert trip is None
-    kl_s, ent_s, trip = breaker_update(kl_s, 0, kl=0.20, entropy=1.5, win_rate=0.3)
+    kl_s, ent_s, trip = breaker_update(
+        BreakerSpec(
+            kl_streak=kl_s,
+            ent_streak=0,
+            kl=0.20,
+            entropy=1.5,
+            win_rate=0.3,
+        )
+    )
     assert trip is None
-    kl_s, ent_s, trip = breaker_update(kl_s, 0, kl=0.20, entropy=1.5, win_rate=0.3)
+    kl_s, ent_s, trip = breaker_update(
+        BreakerSpec(
+            kl_streak=kl_s,
+            ent_streak=0,
+            kl=0.20,
+            entropy=1.5,
+            win_rate=0.3,
+        )
+    )
     assert trip is not None
     assert "kl>=" in trip
 
 
 def test_breaker_kl_streak_resets() -> None:
-    kl_s, _, _ = breaker_update(2, 0, kl=0.05, entropy=1.5, win_rate=0.3)
+    kl_s, _, _ = breaker_update(
+        BreakerSpec(
+            kl_streak=2,
+            ent_streak=0,
+            kl=0.05,
+            entropy=1.5,
+            win_rate=0.3,
+        )
+    )
     assert kl_s == 0  # below threshold resets
 
 
@@ -29,9 +69,25 @@ def test_breaker_entropy_trips_low_winrate() -> None:
     # entropy <= 0.60 for 8 consecutive iters, win_rate < 0.50 -> trip.
     kl_s, ent_s, trip = 0, 0, None
     for _ in range(7):
-        kl_s, ent_s, trip = breaker_update(kl_s, ent_s, kl=0.05, entropy=0.55, win_rate=0.3)
+        kl_s, ent_s, trip = breaker_update(
+            BreakerSpec(
+                kl_streak=kl_s,
+                ent_streak=ent_s,
+                kl=0.05,
+                entropy=0.55,
+                win_rate=0.3,
+            )
+        )
         assert trip is None
-    kl_s, ent_s, trip = breaker_update(kl_s, ent_s, kl=0.05, entropy=0.55, win_rate=0.3)
+    kl_s, ent_s, trip = breaker_update(
+        BreakerSpec(
+            kl_streak=kl_s,
+            ent_streak=ent_s,
+            kl=0.05,
+            entropy=0.55,
+            win_rate=0.3,
+        )
+    )
     assert trip is not None
     assert "entropy<=" in trip
 
@@ -40,7 +96,15 @@ def test_breaker_entropy_high_winrate_no_trip() -> None:
     # entropy collapse with high winrate should NOT trip (winrate guard).
     kl_s, ent_s, trip = 0, 0, None
     for _ in range(10):
-        kl_s, ent_s, trip = breaker_update(kl_s, ent_s, kl=0.05, entropy=0.50, win_rate=0.7)
+        kl_s, ent_s, trip = breaker_update(
+            BreakerSpec(
+                kl_streak=kl_s,
+                ent_streak=ent_s,
+                kl=0.05,
+                entropy=0.50,
+                win_rate=0.7,
+            )
+        )
     assert trip is None
 
 
@@ -58,7 +122,14 @@ def test_breaker_warm_start_low_entropy_no_streak() -> None:
     peak: float | None = None
     for ent in seq:
         kl_s, ent_s, trip = breaker_update(
-            kl_s, ent_s, kl=0.015, entropy=ent, win_rate=0.08, ent_peak=peak
+            BreakerSpec(
+                kl_streak=kl_s,
+                ent_streak=ent_s,
+                kl=0.015,
+                entropy=ent,
+                win_rate=0.08,
+                ent_peak=peak,
+            )
         )
         peak = ent if peak is None else max(peak, ent)
         assert trip is None
@@ -73,11 +144,25 @@ def test_breaker_relative_collapse_still_trips() -> None:
     peak: float | None = 0.90
     for _ in range(7):
         kl_s, ent_s, trip = breaker_update(
-            kl_s, ent_s, kl=0.05, entropy=0.40, win_rate=0.2, ent_peak=peak
+            BreakerSpec(
+                kl_streak=kl_s,
+                ent_streak=ent_s,
+                kl=0.05,
+                entropy=0.40,
+                win_rate=0.2,
+                ent_peak=peak,
+            )
         )
         assert trip is None
     kl_s, ent_s, trip = breaker_update(
-        kl_s, ent_s, kl=0.05, entropy=0.40, win_rate=0.2, ent_peak=peak
+        BreakerSpec(
+            kl_streak=kl_s,
+            ent_streak=ent_s,
+            kl=0.05,
+            entropy=0.40,
+            win_rate=0.2,
+            ent_peak=peak,
+        )
     )
     assert trip is not None
     assert "entropy<=" in trip
@@ -87,12 +172,28 @@ def test_breaker_course_ent_break_tightens_guard() -> None:
     """课程下调 ent_break=0.25：跌破 0.25（相对峰值跌幅 ≥0.10）才计连击。"""
     # 0.30 高于课程阈值 → 不计连击
     _, ent_s, trip = breaker_update(
-        0, 0, kl=0.01, entropy=0.30, win_rate=0.1, ent_break=0.25, ent_peak=0.377
+        BreakerSpec(
+            kl_streak=0,
+            ent_streak=0,
+            kl=0.01,
+            entropy=0.30,
+            win_rate=0.1,
+            ent_break=0.25,
+            ent_peak=0.377,
+        )
     )
     assert (ent_s, trip) == (0, None)
     # 崩到 0.20（峰值 0.377，跌幅 0.177）→ 计连击
     _, ent_s, trip = breaker_update(
-        0, 0, kl=0.01, entropy=0.20, win_rate=0.1, ent_break=0.25, ent_peak=0.377
+        BreakerSpec(
+            kl_streak=0,
+            ent_streak=0,
+            kl=0.01,
+            entropy=0.20,
+            win_rate=0.1,
+            ent_break=0.25,
+            ent_peak=0.377,
+        )
     )
     assert ent_s == 1
     assert trip is None
@@ -101,11 +202,27 @@ def test_breaker_course_ent_break_tightens_guard() -> None:
 def test_breaker_entropy_consec_configurable() -> None:
     """ent_break_consec 可配：连击阈值从 8 降到 2 后第 2 轮即熔断。"""
     kl_s, ent_s, trip = breaker_update(
-        0, 0, kl=0.05, entropy=0.20, win_rate=0.2, ent_peak=0.9, ent_consec=2
+        BreakerSpec(
+            kl_streak=0,
+            ent_streak=0,
+            kl=0.05,
+            entropy=0.20,
+            win_rate=0.2,
+            ent_peak=0.9,
+            ent_consec=2,
+        )
     )
     assert trip is None
     _, _, trip = breaker_update(
-        kl_s, ent_s, kl=0.05, entropy=0.20, win_rate=0.2, ent_peak=0.9, ent_consec=2
+        BreakerSpec(
+            kl_streak=kl_s,
+            ent_streak=ent_s,
+            kl=0.05,
+            entropy=0.20,
+            win_rate=0.2,
+            ent_peak=0.9,
+            ent_consec=2,
+        )
     )
     assert trip is not None
 
@@ -119,10 +236,26 @@ def test_breakers_off_short_circuits() -> None:
     kl_s, ent_s, trip = 0, 0, None
     for _ in range(5):
         kl_s, ent_s, trip = breaker_update(
-            kl_s, ent_s, kl=0.9, entropy=0.0, win_rate=0.0, enabled=False
+            BreakerSpec(
+                kl_streak=kl_s,
+                ent_streak=ent_s,
+                kl=0.9,
+                entropy=0.0,
+                win_rate=0.0,
+                enabled=False,
+            )
         )
     assert (kl_s, ent_s, trip) == (0, 0, None), "关闭期间既不该累计连击也不该熔断"
 
     # 关掉再打开：连击从 0 重新起算，不继承关闭期间的高 KL（否则一开就秒熔断）
-    kl_s, _, trip = breaker_update(0, 0, kl=0.9, entropy=1.2, win_rate=0.4, enabled=True)
+    kl_s, _, trip = breaker_update(
+        BreakerSpec(
+            kl_streak=0,
+            ent_streak=0,
+            kl=0.9,
+            entropy=1.2,
+            win_rate=0.4,
+            enabled=True,
+        )
+    )
     assert trip is None and kl_s == 1

@@ -171,6 +171,33 @@ def waste_block(stats: dict[str, int], local_idle_sec: float) -> dict[str, float
     }
 
 
+@dataclass(frozen=True, kw_only=True)
+class LaneSpec:
+    """`LocalLane` 的全部输入（P0-3 批 D2：1 位置 + 11 关键字 → 一个对象）。
+
+    失效面：`local_slots`（初始孵几条）与 `cap_full`（失联补孵的上限）是两个 int 挨着 ——
+    互换后要么永远只开满额、要么永远补不上去，日志都只说「本机槽 = N」；`local_cap` 与
+    `last_remote_ok` 是两份**对外可见的账**（本机槽余量 `list[int]` / 最近一次远端结算时刻
+    `list[float]`）—— 互换后 `slot_allowed` 的判据恒真或恒假；`all_settled` 与 `halt_event`
+    是两个 Event（后者可为 `None`）—— 互换后 `watch` 等的信号与停机的信号倒过来。
+    """
+
+    worker: Callable[[dict | None, int | None], None]
+    local_slots: int
+    cap_full: int
+    #: 本机槽余量（dispatcher 写入，`slot_allowed` 读）—— 共享账，不拷贝。
+    local_cap: list[int]
+    #: 最近一次远端结算的时刻（同一份共享账）。
+    last_remote_ok: list[float]
+    remote_dead_sec: float
+    all_settled: threading.Event
+    halt_event: threading.Event | None
+    deadline: float
+    lock: Any
+    #: 本机槽线程的登记表（由调用方 join；`LocalLane` 不替人 join）。
+    threads: list[threading.Thread]
+
+
 class LocalLane:
     """本机 worker 的孵化与远端失联补孵（B3）。
 
@@ -179,32 +206,18 @@ class LocalLane:
     `worker` 闭包提供，本类只持有槽位账。
     """
 
-    def __init__(
-        self,
-        worker: Callable[[dict | None, int | None], None],
-        *,
-        local_slots: int,
-        cap_full: int,
-        local_cap: list[int],
-        last_remote_ok: list[float],
-        remote_dead_sec: float,
-        all_settled: threading.Event,
-        halt_event: threading.Event | None,
-        deadline: float,
-        lock: Any,
-        threads: list[threading.Thread],
-    ) -> None:
-        self.worker = worker
-        self.local_slots = local_slots
-        self.cap_full = cap_full
-        self.local_cap = local_cap
-        self.last_remote_ok = last_remote_ok
-        self.remote_dead_sec = remote_dead_sec
-        self.all_settled = all_settled
-        self.halt_event = halt_event
-        self.deadline = deadline
-        self.lock = lock
-        self.threads = threads
+    def __init__(self, spec: LaneSpec) -> None:
+        self.worker = spec.worker
+        self.local_slots = spec.local_slots
+        self.cap_full = spec.cap_full
+        self.local_cap = spec.local_cap
+        self.last_remote_ok = spec.last_remote_ok
+        self.remote_dead_sec = spec.remote_dead_sec
+        self.all_settled = spec.all_settled
+        self.halt_event = spec.halt_event
+        self.deadline = spec.deadline
+        self.lock = spec.lock
+        self.threads = spec.threads
         #: 本机槽线程的属性在这里（§P1-6 裸线程那一半）：名字 `rollout-local-<槽位>`、
         #: 登记在本域。谁等它们仍由调用方的 `threads` 表决定（`LocalLane` 不替人 join）。
         self._rt = common.runtime.Runtime(scope="rollout-local")

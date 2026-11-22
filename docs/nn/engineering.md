@@ -29,6 +29,41 @@
 
 ---
 
+## §313 P0-3 批 D2（二）：`breaker_update`(12) → `BreakerSpec`（20 → 19）（2026-11-22）
+
+* **全仓最险的一条**：`worker/breaker.breaker_update`(2 位置 + 10 关键字) 的输入里排着
+  **五条相邻阈值**、分属两族 —— KL 族 `kl_break` / `kl_consec`，ENT 族 `ent_break` /
+  `ent_consec` / `ent_max_winrate`。互换**不会抛**：KL 规则拿熵阈值判、ENT 规则拿 KL 阈值判，
+  结果是「该停的没停」或「健康轮被误熔断」，而两者在日志里都只是同一句「熔断」——
+  2026-09-06 p4-onset it8 误熔断（DECISIONS §339）就是这个形状的事故。
+  `kl_streak` / `ent_streak` 两个计数器挨着，互换后两条规则的连击互相垫账。
+* **读数**：宽签名 20 → **19**、16 → **15** 文件（这一刀与 `LaneSpec` 同批，批次读数见 §312）。
+  守 `tests/worker/test_breaker_spec.py`；调用面 19 处（`loop_guards_trip` 1 ·
+  `train_ledger` 1 · 熔断用例 17）全部改按名字传。
+* **守卫不只钉形状**：另外三条钉语义 —— ① 两族阈值**互不挪用**（KL 阈值调到 0 也不许让 ENT
+  规则停）；② `enabled=False` 整条短路（`kl=99` / `entropy=0` 也不 tripped）；③ `ent_peak=None`
+  退回绝对电平（冷启动首轮的旧行为）。这三条正是「把 10 个关键字塞进一个对象」之后最容易
+  在 `spec.x` 里写错名字的地方。
+* **一个被门禁抓住的写法**：`assert trip is not None and "entropy" in trip` 属于口径 A 的文本断言
+  （子串判据挂在措辞上）⇒ 改成 `assert trip.startswith("entropy<=")`（形态判据，且更精确）。
+
+## §312 P0-3 批 D2（一）：`LocalLane.__init__`(12) → `LaneSpec`（21 → 20）（2026-11-22）
+
+* **一把刀一处**：`trainer/queue_local.LocalLane.__init__`(1 位置 + 11 关键字) → 一个 `LaneSpec`。
+  调用面只有一处（`trainer/queue_worker` 的孵化段），所以形状与语义可以一起钉死。
+* **坏点 = 两份共享账 + 两个 Event**：`local_cap`（本机槽余量 `list[int]`）与
+  `last_remote_ok`（最近一次远端结算时刻 `list[float]`）是 dispatcher 与 `LocalLane` 共享的
+  两份**单元素账**，互换后 `slot_allowed` 的判据恒真或恒假 —— 表现是「本机永远补孵」或
+  「远端全死了也不补」；`local_slots` / `cap_full` 是两个相邻 int（初始孵几条 vs 补到几条，
+  互换 ⇒ 一开始就满额或永远补不上）；`all_settled` 与 `halt_event` 是两个 Event，互换则
+  `watch` 等错了信号（后者可为 `None`，互换后直接 AttributeError 或永久空转）。
+* **spec 里保留了 `#:` 注释**（哪份账是共享的、`threads` 由谁 join），因为 `LocalLane` 的类头
+  只讲「本类不替人 join」，读者第一次看 spec 也需要这条。
+* **守卫 `tests/trainer/test_lane_spec.py`** 除字段表/形状外，钉住 `slot_allowed` 的两条语义：
+  本机还有余量就放行；余量用尽时**只有远端超时**才放行补孵槽。写这条用例的坑：`slot_allowed`
+  读的是 `time.time()`（墙钟），假账里必须用**当前时刻**减偏移，写死 `1000.0` 会被判成
+  「远端已死 40 年」⇒ 用例假绿/假红。
+
 ## §311 P0-3 批 G2：`bundle` 的导出面两处收 spec（23 → 21）（2026-11-22）
 
 * **同文件两个导出面**：`remote/bundle.export_bundle`(1 位置 + 9 关键字 → `BundleSpec`) 与

@@ -119,7 +119,7 @@ WIDE_FUNCS_BASELINE = {
     # `BcDispatchSpec` ⇒ 本文件宽签名归零，条目删除。
     # `worker/bc_eval.py` 已清零（P0-3 批 C：`dispatch_bc_eval` 的 12 个关键字 →
     # `BcEvalSpec`）；守 `tests/worker/test_bc_eval_spec.py`。
-    "worker/breaker.py": 1,
+    # `worker/breaker.py` 已清零（P0-3 批 D2：`breaker_update` → `BreakerSpec`）。
     "worker/cmd.py": 1,
     # 2026-11-20（python.refactor.md P0-3 第一/二刀）：`EvalRound.__init__` 的 40 个关键字
     # 参数收进 `RoundSpec`（装配点 = `trainer/eval_dispatch._round_spec`），`settle_task`
