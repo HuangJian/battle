@@ -11,6 +11,8 @@ from __future__ import annotations
 import base64
 import json
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 
 #: 节点侧结果端点（hub 侧是 `/jobs/{jid}/result`，只差一个 s）——探针靠注入它复用同一份
 #: 状态码分类实现（见 `hub_http.probe_job_result`）。
@@ -165,20 +167,38 @@ def ts_code_cached_on_node(base_url: str, token: str, sha: str, timeout: float =
     return _cached_or_last_hit("ts", base_url, token, sha, f"/ts-code-sha?sha={sha}", timeout)
 
 
-def submit_job(
-    base_url: str,
-    token: str,
-    manifest: dict,
-    payload_zip: bytes,
-    code_zip: bytes | None,
-    *,
-    blobs: dict | None = None,
-    ts_code_zip: bytes | None = None,
-    echo: bool = False,
-    timeout: float = 600.0,
-    attempts: int = 3,
-    log=_default_log,
-) -> dict:
+@dataclass(frozen=True, kw_only=True)
+class JobUpload:
+    """一次 `POST /job` 要发的**东西**与它的传输旋钮（P0-3：8 个形参 → 一个对象）。
+
+    为什么 `base_url`/`token` 不进来：它们是「发给谁」，与 `cancel_job` / `wait_result` /
+    `poll_result` 同一对参数（同一条腿的四处端点用同一个 `(url, token)`），并进对象反而
+    要拆两次。
+
+    为什么其余要收：旧签名里 `manifest` / `payload_zip` / `code_zip` 是三个相邻的
+    「看起来都像 body」的位置参数，而 `blobs` / `ts_code_zip` 是两类按 sha 寻址的可选段 ——
+    传错一格不会被任何类型拦住，后果是节点解不开包（且只在云端才看得到）。
+
+    `code_zip=None` **不等于**「没带 code」：它表示「本次不带」，节点缓存未命中时本函数
+    会当场 `RetryableError`（见 `need_code` 分支），不会发出一个注定失败的包。
+    """
+
+    manifest: dict
+    payload_zip: bytes
+    #: 整库 code.zip（内容寻址；命中节点缓存时不上传）。`None` = 本次不带。
+    code_zip: bytes | None
+    #: 内容寻址 blob（opt / ref / init raw）；只传节点未命中的那几项。
+    blobs: dict | None = None
+    #: M3：TS 运行时 zip（`kind=iter` 才非 None；同样判节点缓存）。
+    ts_code_zip: bytes | None = None
+    #: 本节点冒烟档：让节点把回执 `echo` 回来（手动验证用）。
+    echo: bool = False
+    timeout: float = 600.0
+    attempts: int = 3
+    log: Callable[[str], None] = _default_log
+
+
+def submit_job(base_url: str, token: str, upload: JobUpload) -> dict:
     """POST /job 上传 manifest + payload（+ 按需 code / TS 运行时）。瞬时失败退避重试；
     409 busy / 428 code-missing / 428 ts-code-missing 亦按可重试处理（hub 侧换节点或
     补传后重试）。
@@ -190,6 +210,11 @@ def submit_job(
     M3：kind=iter 的 TS 运行时同 code.zip 同规按 sha 内容寻址，命中就不传
     （manifest 无 ts_code_sha256 的 job 恒不涉及）。
     """
+    # 旧签名 8 参 → 一个 `upload` 对象（P0-3）；下面一次展开，函数体逐字不动。
+    manifest, payload_zip = upload.manifest, upload.payload_zip
+    code_zip, blobs, ts_code_zip = upload.code_zip, upload.blobs, upload.ts_code_zip
+    echo, timeout, attempts = upload.echo, upload.timeout, upload.attempts
+    log = upload.log
     need_code = not code_cached_on_node(base_url, token, manifest["code_sha256"])
     if need_code and code_zip is None:
         raise RetryableError("节点无 code 缓存且本次未携带 code.zip")

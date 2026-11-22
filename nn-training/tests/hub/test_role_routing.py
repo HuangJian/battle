@@ -46,7 +46,7 @@ from common.protocol import (
 )
 from hub.server import _HubQueue, _JobStore
 from hub.store_leases import LeaseSpec
-from remote.push_dispatch import PushDispatcher
+from remote.push_dispatch import PushDispatcher, PushDispatchSpec
 from tests.helpers.hub_poll import ROLE_HEADER as HELPER_ROLE_HEADER
 
 JID = "j" * 16
@@ -401,7 +401,11 @@ def test_queue_state_reports_pending_roles(tmp_path: Path) -> None:
 
 
 def _disp(hub: _HubQueue, ws) -> PushDispatcher:
-    return PushDispatcher(hub, ws, "sekret", poll_sec=0.02, timeout_sec=30.0, log=lambda _m: None)
+    return PushDispatcher(
+        PushDispatchSpec(
+            hub=hub, workers=ws, token="sekret", poll_sec=0.02, timeout_sec=30.0, log=lambda _m: None
+        )
+    )
 
 
 def test_push_leg_never_pushes_an_offline_role_job(tmp_path: Path, worker_factory) -> None:

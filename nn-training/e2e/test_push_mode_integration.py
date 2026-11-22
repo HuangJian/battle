@@ -36,7 +36,7 @@ from common.protocol import (
     pack_job_v2,
     unpack_job_v2,
 )
-from remote.push_client import submit_job, wait_result
+from remote.push_client import JobUpload, submit_job, wait_result
 from remote.worker_server import WorkerServerState, make_worker_server
 from tests.helpers.http_server import serve_fast
 from trainer.loop_steps import _push_job_round, require_remote_transport
@@ -100,7 +100,11 @@ def test_submit_code_cache_hit_skips_code_upload(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr("remote.push_client.time.sleep", lambda _s: None)
     payload, code = b"pay", b"code"
     man = _mini_manifest("j1", payload, _sha(code))
-    out = submit_job("http://n", "tok", man, payload, code, log=lambda m: None)
+    out = submit_job(
+        "http://n",
+        "tok",
+        JobUpload(manifest=man, payload_zip=payload, code_zip=code, log=lambda m: None),
+    )
     assert len(seen) == 1
     assert "code_b64" not in seen[0]
     assert seen[0]["payload_b64"] == base64.b64encode(payload).decode()
@@ -128,7 +132,13 @@ def test_submit_428_retries_with_code(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("remote.push_client.time.sleep", lambda _s: None)
     payload, code = b"pay", b"code"
     man = _mini_manifest("j1", payload, _sha(code))
-    submit_job("http://n", "tok", man, payload, code, attempts=3, log=lambda m: None)
+    submit_job(
+        "http://n",
+        "tok",
+        JobUpload(
+            manifest=man, payload_zip=payload, code_zip=code, attempts=3, log=lambda m: None
+        ),
+    )
     assert calls["n"] == 2
     assert "code_b64" not in bodies[0]  # 首次按缓存探测结果不带
     assert bodies[1]["code_b64"] == base64.b64encode(code).decode()
@@ -160,7 +170,15 @@ def test_submit_ts_code_cache_hit_skips_ts_upload(monkeypatch: pytest.MonkeyPatc
     man = _mini_manifest("m3-j1", payload, _sha(code))
     man["ts_code_sha256"] = _sha(ts_zip)
     out = submit_job(
-        "http://n", "tok", man, payload, code, ts_code_zip=ts_zip, log=lambda m: None
+        "http://n",
+        "tok",
+        JobUpload(
+            manifest=man,
+            payload_zip=payload,
+            code_zip=code,
+            ts_code_zip=ts_zip,
+            log=lambda m: None,
+        ),
     )
     assert len(seen) == 1
     assert "ts_code_b64" not in seen[0]
@@ -187,7 +205,15 @@ def test_submit_ts_code_uploaded_on_cache_miss(monkeypatch: pytest.MonkeyPatch) 
     man = _mini_manifest("m3-j2", payload, _sha(code))
     man["ts_code_sha256"] = _sha(ts_zip)
     out = submit_job(
-        "http://n", "tok", man, payload, code, ts_code_zip=ts_zip, log=lambda m: None
+        "http://n",
+        "tok",
+        JobUpload(
+            manifest=man,
+            payload_zip=payload,
+            code_zip=code,
+            ts_code_zip=ts_zip,
+            log=lambda m: None,
+        ),
     )
     assert seen[0]["ts_code_b64"] == base64.b64encode(ts_zip).decode()
     assert out["ts_code_bytes"] == len(ts_zip)
@@ -223,7 +249,16 @@ def test_submit_428_ts_code_missing_retries_with_ts(monkeypatch: pytest.MonkeyPa
     man = _mini_manifest("m3-j3", payload, _sha(code))
     man["ts_code_sha256"] = _sha(ts_zip)
     out = submit_job(
-        "http://n", "tok", man, payload, code, ts_code_zip=ts_zip, attempts=3, log=lambda m: None
+        "http://n",
+        "tok",
+        JobUpload(
+            manifest=man,
+            payload_zip=payload,
+            code_zip=code,
+            ts_code_zip=ts_zip,
+            attempts=3,
+            log=lambda m: None,
+        ),
     )
     assert calls["n"] == 2
     assert "ts_code_b64" not in bodies[0]  # 首次按探针结果不带
@@ -244,7 +279,11 @@ def test_submit_missing_ts_code_is_loud(monkeypatch: pytest.MonkeyPatch) -> None
     man = _mini_manifest("m3-j4", payload, _sha(code))
     man["ts_code_sha256"] = "t" * 64
     with pytest.raises(RetryableError, match="ts_code"):
-        submit_job("http://n", "tok", man, payload, code, log=lambda m: None)
+        submit_job(
+            "http://n",
+            "tok",
+            JobUpload(manifest=man, payload_zip=payload, code_zip=code, log=lambda m: None),
+        )
 
 
 def test_submit_4xx_is_protocol_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -265,7 +304,11 @@ def test_submit_4xx_is_protocol_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("remote.push_client.time.sleep", lambda _s: None)
     man = _mini_manifest("j1", b"p", "0" * 64)
     with pytest.raises(ProtocolError, match="400"):
-        submit_job("http://n", "tok", man, b"p", b"c", log=lambda m: None)
+        submit_job(
+            "http://n",
+            "tok",
+            JobUpload(manifest=man, payload_zip=b"p", code_zip=b"c", log=lambda m: None),
+        )
     # 第 1 次 v2、第 2 次 JSON 退路；没有第 3 次
     assert [is_v2 for _ct, is_v2 in posts] == [True, False]
     assert posts[1][0] == "application/json"
@@ -290,7 +333,11 @@ def test_submit_v2_falls_back_to_json_on_legacy_node(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr("remote.push_client.time.sleep", lambda _s: None)
     payload, code = b"pay", b"code"
     man = _mini_manifest("j1", payload, _sha(code))
-    out = submit_job("http://n", "tok", man, payload, code, log=lambda m: None)
+    out = submit_job(
+        "http://n",
+        "tok",
+        JobUpload(manifest=man, payload_zip=payload, code_zip=code, log=lambda m: None),
+    )
     assert len(posts) == 2 and posts[0].startswith(WIRE_JOB_MAGIC)
     # 退路体是 JSON，且逐字段与 v2 体等价（同一 payload/code）
     fallback = json.loads(posts[1].decode())
@@ -346,7 +393,7 @@ def test_push_job_round_failover_to_second_node(monkeypatch: pytest.MonkeyPatch)
     submitted: list[str] = []
     waited: list[str] = []
 
-    def fake_submit(url, key, manifest, payload, code, *, echo=False, log=None, **kw):
+    def fake_submit(url, key, upload, *, log=None, **kw):
         submitted.append(url)
         if "bad" in url:
             raise ProtocolError("HTTP 400: rejected")
@@ -371,7 +418,7 @@ def test_push_job_round_failover_to_second_node(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_push_job_round_all_nodes_fail(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_submit(url, key, manifest, payload, code, *, echo=False, log=None, **kw):
+    def fake_submit(url, key, upload, *, log=None, **kw):
         raise RetryableError(f"node {url} down")
 
     monkeypatch.setattr("trainer.loop_transport._push_submit", fake_submit)
@@ -447,9 +494,9 @@ def test_push_publish_phase_submits_and_wait_phase_switches_node(
     submitted: list[str] = []
     waited: list[str] = []
 
-    def fake_submit(url, key, manifest, payload, code, *, echo=False, log=None, **kw):
+    def fake_submit(url, key, upload, *, log=None, **kw):
         submitted.append(url)
-        assert payload == b"payload-bytes"  # 真从 job 目录重读的（不是内存缓存）
+        assert upload.payload_zip == b"payload-bytes"  # 真从 job 目录重读的（不是内存缓存）
         return {"body_bytes": 1}
 
     def fake_wait(url, key, jid, *, timeout_sec=30.0, log=None, **kw):
@@ -546,7 +593,13 @@ def test_e2e_push_client_against_worker_server(tmp_path: Path) -> None:
         _wait_ready(w.url, w.token)
         payload, code = b"payload-bytes", b"code-bytes"
         man = _mini_manifest("e2e-j1", payload, _sha(code))
-        submit_job(w.url, w.token, man, payload, code, echo=False, log=lambda m: None)
+        submit_job(
+            w.url,
+            w.token,
+            JobUpload(
+                manifest=man, payload_zip=payload, code_zip=code, echo=False, log=lambda m: None
+            ),
+        )
         assert w.started == ["e2e-j1"]
         out = wait_result(w.url, w.token, "e2e-j1", timeout_sec=10, poll_sec=0.05, log=lambda m: None)
         assert out["job_id"] == "e2e-j1"
@@ -567,7 +620,13 @@ def test_e2e_push_body_v2_byte_accounting_and_25pct_saving(tmp_path: Path) -> No
         blobs = {"opt": bytes((i * 13 + 7) & 0xFF for i in range(500_000))}
         man = _mini_manifest("e2e-bytes", payload, _sha(code))
         man["opt_sha"] = _sha(blobs["opt"])
-        out = submit_job(w.url, w.token, man, payload, code, blobs=blobs, log=lambda m: None)
+        out = submit_job(
+            w.url,
+            w.token,
+            JobUpload(
+                manifest=man, payload_zip=payload, code_zip=code, blobs=blobs, log=lambda m: None
+            ),
+        )
         assert w.started == ["e2e-bytes"]
         json_body = json.dumps(
             {
@@ -594,7 +653,13 @@ def test_e2e_push_smoke_echo_flag_reaches_server(tmp_path: Path) -> None:
         _wait_ready(w.url, w.token)
         payload, code = b"p", b"c"
         man = _mini_manifest("e2e-smoke", payload, _sha(code))
-        submit_job(w.url, w.token, man, payload, code, echo=True, log=lambda m: None)
+        submit_job(
+            w.url,
+            w.token,
+            JobUpload(
+                manifest=man, payload_zip=payload, code_zip=code, echo=True, log=lambda m: None
+            ),
+        )
         out = wait_result(w.url, w.token, "e2e-smoke", timeout_sec=10, poll_sec=0.05, log=lambda m: None)
         assert out.get("echo") is True
     finally:
@@ -609,7 +674,11 @@ def test_e2e_upload_code_when_cache_miss(tmp_path: Path) -> None:
         payload, code = b"pay", b"code-zip"
         man = _mini_manifest("e2e-code", payload, _sha(code))
         assert w.state.code_cached(_sha(code)) is False
-        submit_job(w.url, w.token, man, payload, code, log=lambda m: None)
+        submit_job(
+            w.url,
+            w.token,
+            JobUpload(manifest=man, payload_zip=payload, code_zip=code, log=lambda m: None),
+        )
         assert w.started == ["e2e-code"]
         out = wait_result(w.url, w.token, "e2e-code", timeout_sec=10, poll_sec=0.05, log=lambda m: None)
         assert out["job_id"] == "e2e-code"
@@ -625,7 +694,13 @@ def test_e2e_missing_code_rejected_before_queue(tmp_path: Path) -> None:
         payload = b"pay"
         man = _mini_manifest("e2e-nocode", payload, "b" * 64)
         with pytest.raises(RetryableError, match="code"):
-            submit_job(w.url, w.token, man, payload, None, attempts=1, log=lambda m: None)
+            submit_job(
+                w.url,
+                w.token,
+                JobUpload(
+                    manifest=man, payload_zip=payload, code_zip=None, attempts=1, log=lambda m: None
+                ),
+            )
         assert w.started == []
     finally:
         w.close()
@@ -646,7 +721,17 @@ def test_e2e_ts_code_uploaded_and_gated_by_node_cache(tmp_path: Path) -> None:
         man = _mini_manifest("e2e-ts1", payload, _sha(code))
         man["ts_code_sha256"] = ts_sha
         assert w.state.ts_code_cached(ts_sha) is False
-        out = submit_job(w.url, w.token, man, payload, code, ts_code_zip=ts_zip, log=lambda m: None)
+        out = submit_job(
+            w.url,
+            w.token,
+            JobUpload(
+                manifest=man,
+                payload_zip=payload,
+                code_zip=code,
+                ts_code_zip=ts_zip,
+                log=lambda m: None,
+            ),
+        )
         assert w.started == ["e2e-ts1"]
         assert out["ts_code_bytes"] == len(ts_zip)
         # 真 server 解出的 ts 段字节 == 原字节（不是被静默丢掉的一段）
@@ -656,7 +741,11 @@ def test_e2e_ts_code_uploaded_and_gated_by_node_cache(tmp_path: Path) -> None:
         payload2 = b"pay2"
         man2 = _mini_manifest("e2e-ts2", payload2, _sha(code))
         man2["ts_code_sha256"] = ts_sha
-        out2 = submit_job(w.url, w.token, man2, payload2, code, log=lambda m: None)
+        out2 = submit_job(
+            w.url,
+            w.token,
+            JobUpload(manifest=man2, payload_zip=payload2, code_zip=code, log=lambda m: None),
+        )
         assert out2["ts_code_bytes"] == 0
     finally:
         w.close()

@@ -45,6 +45,7 @@ from common.progress_text import progress_text, should_log_progress
 from remote.offline_push_face import PushFaceState, make_face_server
 from remote.push_register import (
     Registry,
+    RegistrySpec,
     default_node_id,
     dispatch_mount_note,
     probe_offline_dispatch,
@@ -227,13 +228,15 @@ def run_push(
     state = face_state or PushFaceState(work_dir=work / "face", log=log)
     hub_base = str(cfg.get("registry_url") or cfg.get("hub_url") or "").strip()
     reg = registry or Registry(
-        hub=hub_base,
-        hub_token=str(cfg.get("hub_token") or "").strip(),
-        node_id=str(cfg.get("node_id") or "").strip()
-        or default_node_id("offline_push", probe_cloud_env()),
-        kind="offline_push",
-        label=str(cfg.get("label") or "offline-push"),
-        log=log,
+        RegistrySpec(
+            hub=hub_base,
+            hub_token=str(cfg.get("hub_token") or "").strip(),
+            node_id=str(cfg.get("node_id") or "").strip()
+            or default_node_id("offline_push", probe_cloud_env()),
+            kind="offline_push",
+            label=str(cfg.get("label") or "offline-push"),
+            log=log,
+        )
     )
     log(f"节点身份：id={reg.node_id} kind=offline_push（hub 按能力键派发）")
 

@@ -29,6 +29,57 @@
 
 ---
 
+## §305 P0-3 批 B：hub 推送/派发六处宽签名收 spec（40 → 34）（2026-11-22）
+
+* **一把刀六处**，全在「hub 推送 / 派发」这一条腿上：`hub/offline_push.OfflinePushDispatcher.__init__`(12)
+  · 同文件 `_settle_assignment`(8) · `remote/push_dispatch.PushDispatcher.__init__`(11) · 同文件
+  `_await_result`(8 位置 + 3) · `remote/push_client.submit_job`(8) · `remote/push_register.Registry.__init__`(9)。
+  读数：宽签名 **40 → 34**、文件 32 → **28**。
+* **为什么这六处排在 B 批**（判据不是「名字长」）：它们的参数都是**同类可互换的位置位**。
+  `_await_result` 的 `jid`/`wid` 都是 16 位哈希，互换 = 结果回灌给别的 job（`accept_result` 的
+  首写锁定会把一份真结果当 409 丢掉）；`(course, url, key, rec)` 里 `url`/`key` 互换 = 问到别的
+  节点或拿错 token；`submit_job` 的 `manifest`/`payload_zip`/`code_zip` 三个相邻位置错一格，
+  本地全绿、云端解不开包；`_settle_assignment` 的 `cancel`/`free_worker` 都是 `bool`，传反 =
+  删了该留的证据（`free_worker=True` 的 ack 会让 worker 删 final、清 busy）。
+  **没有一处是被类型系统拦得住的**——旧签名下唯一的拦网是「读代码的人记得顺序」。
+* **形状**（每处都按「调用方手上有什么」选，不是一律整对象）：
+  * 两个构造器 + `Registry`：`OfflinePushSpec`(12) / `PushDispatchSpec`(11) / `RegistrySpec`(9)，
+    全部 `frozen + kw_only`，缺省逐字保留（`now_fn`/`log`/`client_mod`/`urlopen` 的缺省语义
+    ——尤其 `urlopen` 必须**调用时**再取 `urllib.request.urlopen`，见 §P1-11 的用例约定）。
+  * `submit_job(base_url, token, upload: JobUpload)`：**端点不收**。`cancel_job` / `wait_result` /
+    `poll_result` / `_request` 全都按 `(url, token)` 开头 —— 同一条腿的四个端点不该有两种形状。
+  * `_await_result(leg: JobLeg, *, started, t_pushed, log)`：八个位置位收成「这一条腿」（七字段）。
+    顺手删掉死参 `rec`：函数体里一次都没读过（逐行核过），而它排在 `t0` 前面，正是「数到第
+    七个才发现传错」的形状。
+  * `_settle_assignment(course, url, key, rec, plan: SettlePlan)`：收的是那**四个同名开关**
+    （`reason` / `cancel` / `free_worker` / `failed`），不是前四项 —— 前四项调用方本来就逐个
+    持有，包一层只是把 4 个位置换成 1 个构造。
+* **顺手修掉的第二类债：写读同源**。这四个开关在账本上有个往返：`_park_settling` 写
+  `settle_reason`/`settle_cancel`/`settle_free`/`settle_failed`，`_settle_retry` 再读回来重放。
+  在这之前两个方向各手写一遍键名——写错一侧不报错，只会让重放**按缺省值**收摊（`cancel` 丢失
+  ⇒ 这单在 worker 上永远留着；`free_worker` 丢失 ⇒ 它的 outbox 永不删、busy 永不清）。
+  现在 `SettlePlan.ledger_fields()` / `from_ledger()` 是唯一实现，重放处用
+  `dataclasses.replace(plan, cancel=…)`（§231 的 `replace` 先例）。`settle_at` 不进对象：
+  它是「什么时候重放」的时刻，与这四件「做什么」不同型。
+* **守卫** `tests/hub/test_push_spec.py`（25 条）：六张字段表逐项对齐旧形参（漏抄/多抄即红）·
+  冻结 · `kw_only` · 三个构造器只收 `spec` · `_settle_assignment` 收一个 plan 且**旧四布尔
+  现在当场 `TypeError`** · `settle_*` 四个键名只许住在 `SettlePlan` 的两个方法里（AST：按最内层
+  函数归属，多一处即红）· `_await_result` 恰好一个调用点且实参是一个名字、关键字里没有 `rec`。
+  两向证伪实测红：加一个 `_await_result` 调用点 ⇒ 「调用点 2 处」；在 `_settle_assignment` 里
+  写一句 `rec.get("settle_cancel")` ⇒ 键名归属多出 `_settle_assignment`。
+* **口径陷阱（记一笔）**：新守卫里「签名 == 期望表」不能把 `OfflinePushDispatcher._settle_assignment`
+  直接写进 `assert` 表达式 —— G5 数的是「`assert` 里出现私有属性」，而这里被测的恰恰是私有助手。
+  写法改成先把 `inspect.signature(...)` 绑到局部再断言（与 `_await_result` 那条同形），并补一条
+  **行为面**判据（旧四布尔 `TypeError`）——这才是「旧形状不许回来」的真判据，签名表只是附注。
+  同理 `assert {k.arg for k in call.keywords}.isdisjoint({"rec"})` 而不是 `"rec" not in {...}`：
+  后者会被 `test_source_text_assert_budget` 计成新增文本断言（RHS 是 SetComp，不是字面量容器）。
+* **门禁**：6814 passed / 13 skipped；`ruff` + `mypy` 绿（1073 文件）。
+* **顺手修的夹具竞态**（不是本刀的债，是本刀第一次跑全量门禁时红的）：`tests/hub/test_offline_push_dispatch.py`
+  的 `_Worker._starter` 先置 `self.task` 再写 `outbox/state.json`，而 `_starter` 跑在 HTTP 处理线程里
+  ⇒ 并行负载下 `_wait(lambda: worker.task is not None)` 之后紧跟的 `worker.finish()` 偶发
+  `FileNotFoundError: .../outbox/state.json`（实测 1/2 次全量门禁）。就绪信号挪到末行
+  （此时 state/metrics/final 都已落盘），单跑 3 次 + 全量门禁均绿。
+
 ## §304 P0-3 第四十九刀 A 批：两个头入口 + 装载骨架收 spec（43 → 40）（2026-11-22）
 
 * **一万一刀三处**（都在 `worker/ppo/`）：`goal.ppo_update_goal`(13) · `intent.ppo_update_intent`(13)

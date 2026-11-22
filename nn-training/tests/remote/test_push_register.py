@@ -19,6 +19,7 @@ from typing import Any
 from remote.push_register import (
     RETRY_LADDER,
     Registry,
+    RegistrySpec,
     build_register_payload,
     default_node_id,
     dispatch_mount_note,
@@ -212,13 +213,15 @@ def test_registry_dedupes_and_reregisters_on_url_change() -> None:
     calls: list = []
     clock = _Clock()
     reg = Registry(
-        hub="http://hub",
-        hub_token="tok",
-        node_id="gpu-colab",
-        kind="gpu_push",
-        log=lambda _m: None,
-        urlopen=_opener(_Resp({"action": "created", "capabilities": ["gpu_push"]}), calls=calls),
-        now_fn=clock,
+        RegistrySpec(
+            hub="http://hub",
+            hub_token="tok",
+            node_id="gpu-colab",
+            kind="gpu_push",
+            log=lambda _m: None,
+            urlopen=_opener(_Resp({"action": "created", "capabilities": ["gpu_push"]}), calls=calls),
+            now_fn=clock,
+        )
     )
     assert reg.ensure("https://a", "sek") is True
     assert reg.capabilities == ["gpu_push"] and reg.info()["registered"] is True
@@ -235,13 +238,15 @@ def test_registry_backoff_gates_retries() -> None:
     calls: list = []
     clock = _Clock()
     reg = Registry(
-        hub="http://hub",
-        hub_token="tok",
-        node_id="gpu-colab",
-        kind="gpu_push",
-        log=lambda _m: None,
-        urlopen=_opener(exc=urllib.error.URLError("down"), calls=calls),
-        now_fn=clock,
+        RegistrySpec(
+            hub="http://hub",
+            hub_token="tok",
+            node_id="gpu-colab",
+            kind="gpu_push",
+            log=lambda _m: None,
+            urlopen=_opener(exc=urllib.error.URLError("down"), calls=calls),
+            now_fn=clock,
+        )
     )
     assert reg.ensure("https://a", "sek") is False
     assert len(calls) == 1 and reg.next_at == clock.t + RETRY_LADDER[0]
@@ -256,13 +261,15 @@ def test_registry_backoff_gates_retries() -> None:
 def test_registry_gives_up_on_auth_error() -> None:
     calls: list = []
     reg = Registry(
-        hub="http://hub",
-        hub_token="bad",
-        node_id="gpu-colab",
-        kind="gpu_push",
-        log=lambda _m: None,
-        urlopen=_opener(exc=_http_error(403), calls=calls),
-        now_fn=_Clock(),
+        RegistrySpec(
+            hub="http://hub",
+            hub_token="bad",
+            node_id="gpu-colab",
+            kind="gpu_push",
+            log=lambda _m: None,
+            urlopen=_opener(exc=_http_error(403), calls=calls),
+            now_fn=_Clock(),
+        )
     )
     assert reg.ensure("https://a", "sek") is False
     assert reg.give_up is True
@@ -274,13 +281,15 @@ def test_registry_flags_old_hub_once() -> None:
     """老 hub 的 200 没有 capabilities ⇒ old_hub + 一行 WARN（只一次）。"""
     msgs: list[str] = []
     reg = Registry(
-        hub="http://hub",
-        hub_token="tok",
-        node_id="gpu-colab",
-        kind="gpu_push",
-        log=msgs.append,
-        urlopen=_opener(_Resp({"action": "created"})),
-        now_fn=_Clock(),
+        RegistrySpec(
+            hub="http://hub",
+            hub_token="tok",
+            node_id="gpu-colab",
+            kind="gpu_push",
+            log=msgs.append,
+            urlopen=_opener(_Resp({"action": "created"})),
+            now_fn=_Clock(),
+        )
     )
     assert reg.ensure("https://a", "sek") is True
     assert reg.old_hub is True
@@ -301,23 +310,25 @@ def test_registry_says_when_the_hub_will_not_dispatch() -> None:
     """
     msgs: list[str] = []
     reg = Registry(
-        hub="http://hub",
-        hub_token="tok",
-        node_id="offline-colab",
-        kind="offline_push",
-        log=msgs.append,
-        urlopen=_opener(
-            _Resp(
-                {
-                    "action": "updated",
-                    "kind": "offline_push",
-                    "capabilities": ["offline_push"],
-                    "enabled": False,
-                    "dispatchable": False,
-                }
-            )
-        ),
-        now_fn=_Clock(),
+        RegistrySpec(
+            hub="http://hub",
+            hub_token="tok",
+            node_id="offline-colab",
+            kind="offline_push",
+            log=msgs.append,
+            urlopen=_opener(
+                _Resp(
+                    {
+                        "action": "updated",
+                        "kind": "offline_push",
+                        "capabilities": ["offline_push"],
+                        "enabled": False,
+                        "dispatchable": False,
+                    }
+                )
+            ),
+            now_fn=_Clock(),
+        )
     )
     assert reg.ensure("https://a", "sek") is True
     hits = [m for m in msgs if "不会派单" in m]
@@ -330,13 +341,15 @@ def test_registry_says_when_the_hub_will_not_dispatch() -> None:
 def test_registry_unregister_is_best_effort() -> None:
     calls: list = []
     reg = Registry(
-        hub="http://hub",
-        hub_token="tok",
-        node_id="gpu-colab",
-        kind="gpu_push",
-        log=lambda _m: None,
-        urlopen=_opener(_Resp({"ok": True, "action": "unregistered"}), calls=calls),
-        now_fn=_Clock(),
+        RegistrySpec(
+            hub="http://hub",
+            hub_token="tok",
+            node_id="gpu-colab",
+            kind="gpu_push",
+            log=lambda _m: None,
+            urlopen=_opener(_Resp({"ok": True, "action": "unregistered"}), calls=calls),
+            now_fn=_Clock(),
+        )
     )
     assert reg.unregister() is False, "没注册过 ⇒ 不发请求"
     assert calls == []
@@ -373,11 +386,13 @@ def test_registry_registers_against_a_real_hub(tmp_path, monkeypatch) -> None:
     try:
         base = f"http://127.0.0.1:{srv.server_address[1]}"
         reg = Registry(
-            hub=base,
-            hub_token="sekret",
-            node_id="gpu-colab",
-            kind="gpu_push",
-            log=lambda _m: None,
+            RegistrySpec(
+                hub=base,
+                hub_token="sekret",
+                node_id="gpu-colab",
+                kind="gpu_push",
+                log=lambda _m: None,
+            )
         )
         assert reg.ensure("https://tunnel.example", "push-secret") is True
         node = json.loads(cfg.read_text(encoding="utf-8"))["nodes"][0]
@@ -402,13 +417,15 @@ def test_registry_without_hub_token_warns_and_does_not_send() -> None:
     calls: list = []
     msgs: list[str] = []
     reg = Registry(
-        hub="",
-        hub_token="",
-        node_id="gpu-colab",
-        kind="gpu_push",
-        log=msgs.append,
-        urlopen=_opener(_Resp({}), calls=calls),
-        now_fn=_Clock(),
+        RegistrySpec(
+            hub="",
+            hub_token="",
+            node_id="gpu-colab",
+            kind="gpu_push",
+            log=msgs.append,
+            urlopen=_opener(_Resp({}), calls=calls),
+            now_fn=_Clock(),
+        )
     )
     assert reg.ensure("https://a", "sek") is False
     assert calls == []
@@ -446,13 +463,15 @@ class _ClockWithSleep(_Clock):
 
 def _reg(opener, clock: _Clock, msgs: list[str], kind: str = "offline_push") -> Registry:
     return Registry(
-        hub="https://hub.example",
-        hub_token="hub-secret",
-        node_id="offline-colab",
-        kind=kind,
-        log=msgs.append,
-        urlopen=opener,
-        now_fn=clock,
+        RegistrySpec(
+            hub="https://hub.example",
+            hub_token="hub-secret",
+            node_id="offline-colab",
+            kind=kind,
+            log=msgs.append,
+            urlopen=opener,
+            now_fn=clock,
+        )
     )
 
 
@@ -511,13 +530,15 @@ def test_register_or_warn_says_nothing_about_hubs_when_it_is_not_configured() ->
     calls: list = []
     msgs: list[str] = []
     reg = Registry(
-        hub="",
-        hub_token="",
-        node_id="offline-colab",
-        kind="offline_push",
-        log=msgs.append,
-        urlopen=_opener(_Resp({}), calls=calls),
-        now_fn=clock,
+        RegistrySpec(
+            hub="",
+            hub_token="",
+            node_id="offline-colab",
+            kind="offline_push",
+            log=msgs.append,
+            urlopen=_opener(_Resp({}), calls=calls),
+            now_fn=clock,
+        )
     )
     assert register_or_warn(reg, "https://t.trycloudflare.com", "sek", msgs.append) is False
     assert calls == [], "配置不全时一次请求都不该发"

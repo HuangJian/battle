@@ -42,7 +42,7 @@ import shutil
 import tempfile
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -129,6 +129,66 @@ class _PumpState:
     shown: tuple[str, int, int, int] | None = None
 
 
+@dataclass(frozen=True, kw_only=True)
+class SettlePlan:
+    """一次收摊要做的四件事（也决定「没答」时落进账本的那四个 `settle_*` 字段）。
+
+    为什么是一个对象（P0-3）：这四个值在账本上有两条路径 —— `_park_settling` **写**、
+    `_settle_retry` **读**。在这之前两边各手写一遍键名，写错一侧不会报错，只会让重放
+    按缺省值收摊（`cancel` 丢失 ⇒ 这单在 worker 上永远留着，`free_worker` 丢失 ⇒ 它的
+    outbox 永远不删、busy 永远不清）。现在读写共用 `ledger_fields()` / `from_ledger()`。
+    """
+
+    reason: str = ""
+    #: 收摊前先发一帧 cancel（worker 在轮边界停算）。
+    cancel: bool = False
+    #: ack 带 `result=True` ⇒ worker 删 final、清 busy。
+    free_worker: bool = False
+    #: 记进派发器的 `failed` 计数（冲突 / worker 报 failed 那一类）。
+    failed: bool = False
+
+    def ledger_fields(self) -> dict:
+        """落账本的四列（`_park_settling` 的写入面）。"""
+        return {
+            "settle_reason": str(self.reason or ""),
+            "settle_cancel": bool(self.cancel),
+            "settle_free": bool(self.free_worker),
+            "settle_failed": bool(self.failed),
+        }
+
+    @classmethod
+    def from_ledger(cls, rec: dict, *, fallback: str = "settling") -> SettlePlan:
+        """从账本读回（`_settle_retry` 的读取面）——与 `ledger_fields` 同一张字段表。"""
+        return cls(
+            reason=str(rec.get("settle_reason") or fallback),
+            cancel=bool(rec.get("settle_cancel")),
+            free_worker=bool(rec.get("settle_free")),
+            failed=bool(rec.get("settle_failed")),
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class OfflinePushSpec:
+    """`OfflinePushDispatcher` 的构造旋钮（P0-3：12 个形参 → 一个对象）。
+
+    前三项是身份（谁派单 / 派给谁 / 用哪把 token），其余全是带缺省的旋钮：生产装配点
+    （`hub/boot.py`）只交身份与 `root`/`port`，测试按需覆盖时钟 / 日志 / 客户端面。
+    """
+
+    hub: Any
+    workers: OfflinePushWorkers
+    token: str
+    root: str | Path | None = None
+    port: int = 0
+    poll_sec: float = OFFLINE_PUSH_POLL_SEC
+    pump_sec: float = OFFLINE_PUSH_PUMP_SEC
+    heartbeat_sec: float = OFFLINE_PUSH_HEARTBEAT_SEC
+    cooldown_sec: float = OFFLINE_PUSH_COOLDOWN_SEC
+    now_fn: Any = time.time
+    log: Any = _log_default
+    client_mod: Any = client
+
+
 class OfflinePushDispatcher(TickLoopHost):
     """hub 侧的离线 push 派发器（调度拍 + 每单一条 pump 线程）。
 
@@ -136,22 +196,13 @@ class OfflinePushDispatcher(TickLoopHost):
     缺省 = `hub.traj_root()`（与 `task_pack` 同一份 traj 根），测试可显式给 `tmp_path`。
     """
 
-    def __init__(
-        self,
-        hub: Any,
-        workers: OfflinePushWorkers,
-        token: str,
-        *,
-        root: str | Path | None = None,
-        port: int = 0,
-        poll_sec: float = OFFLINE_PUSH_POLL_SEC,
-        pump_sec: float = OFFLINE_PUSH_PUMP_SEC,
-        heartbeat_sec: float = OFFLINE_PUSH_HEARTBEAT_SEC,
-        cooldown_sec: float = OFFLINE_PUSH_COOLDOWN_SEC,
-        now_fn: Any = time.time,
-        log: Any = _log_default,
-        client_mod: Any = client,
-    ) -> None:
+    def __init__(self, spec: OfflinePushSpec) -> None:
+        # 旧签名 12 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+        hub, workers, token = spec.hub, spec.workers, spec.token
+        root, port = spec.root, spec.port
+        poll_sec, pump_sec = spec.poll_sec, spec.pump_sec
+        heartbeat_sec, cooldown_sec = spec.heartbeat_sec, spec.cooldown_sec
+        now_fn, log, client_mod = spec.now_fn, spec.log, spec.client_mod
         #: tick 线程与每课 pump 的属性（`hub-offline-push-tick` / `-pump-<course>`）。
         #: hub 侧派发器与 worker 侧同构，线程名也同一套（转储里一眼分清是谁在推）。
         self._rt = runtime.Runtime(scope="hub-offline-push")
@@ -615,7 +666,7 @@ class OfflinePushDispatcher(TickLoopHost):
                     out = trigger_pack_export(self.hub, course)
                     self._log(f"{course}: 已请控制台重新导包（{out['state']}）：{out['note']}")
                     self._settle_assignment(
-                        course, url, key, rec, cancel=True, free_worker=False, reason="pack-stale"
+                        course, url, key, rec, SettlePlan(reason="pack-stale", cancel=True)
                     )
                     self._cool(course)
                     return
@@ -628,7 +679,7 @@ class OfflinePushDispatcher(TickLoopHost):
                     # `free_worker=False`：**不**替云机删 outbox —— 它的子进程可能已经在跑，
                     # result=True 的 ack 会在它脚下把 outbox 删掉。cancel 让它自己停在轮边界。
                     self._settle_assignment(
-                        course, url, key, rec, cancel=True, free_worker=False, reason="claim-lost"
+                        course, url, key, rec, SettlePlan(reason="claim-lost", cancel=True)
                     )
                     return
                 rec = self.assignments.set_fields(
@@ -824,14 +875,14 @@ class OfflinePushDispatcher(TickLoopHost):
                     "停止拉取结果并释放这门课（不 cancel；云机上的 outbox 留作证据）"
                 )
                 self._settle_assignment(
-                    course, url, key, rec, cancel=False, free_worker=False, reason="worker-disabled"
+                    course, url, key, rec, SettlePlan(reason="worker-disabled")
                 )
                 return
             if not self.still_mine(course, rec):
                 self._log(
                     f"{course}: 租约已不属于我们（换主/停课）——收下已入账的轮后退出，不 cancel"
                 )
-                self._settle_assignment(course, url, key, rec, cancel=False, free_worker=False, reason="lease-lost")
+                self._settle_assignment(course, url, key, rec, SettlePlan(reason="lease-lost"))
                 return
             state = self._client.get_state(url, key)
             if state is None:
@@ -853,7 +904,7 @@ class OfflinePushDispatcher(TickLoopHost):
                     f"{course}: worker 协议不符（{proto!r} ≠ {OFFLINE_PUSH_PROTO}）"
                     "——取消这一单并等它升级"
                 )
-                self._settle_assignment(course, url, key, rec, cancel=True, free_worker=True, reason="proto-mismatch")
+                self._settle_assignment(course, url, key, rec, SettlePlan(reason="proto-mismatch", cancel=True, free_worker=True))
                 return
             rec, backlog = self._ingest_rounds(course, url, key, rec, state)
             if rec is None:
@@ -864,7 +915,7 @@ class OfflinePushDispatcher(TickLoopHost):
                 _ttl, why = self.hub.heartbeat_offline(course, str(rec.get("lease_token") or ""))
                 if why in ("expired", "revoked", "taken"):
                     self._log(f"{course}: 心跳被拒（{why}）——hub 侧已换主，停止拉取")
-                    self._settle_assignment(course, url, key, rec, cancel=False, free_worker=False, reason="lease-lost")
+                    self._settle_assignment(course, url, key, rec, SettlePlan(reason="lease-lost"))
                     return
                 self._note_progress(course, url, key, rec, st)
             # ★ 收尾必须等积压拉完（评审 F1）：final 一 ack，worker 就删 outbox —— 还没拉的
@@ -1068,7 +1119,7 @@ class OfflinePushDispatcher(TickLoopHost):
         self.conflicts += 1
         self._log(f"{course}: {text} —— 取消这一单，等人裁决")
         self._settle_assignment(
-            course, url, key, rec, cancel=True, free_worker=True, reason="conflict", failed=True
+            course, url, key, rec, SettlePlan(reason="conflict", cancel=True, free_worker=True, failed=True)
         )
 
     def _ingest_artifact(
@@ -1121,11 +1172,7 @@ class OfflinePushDispatcher(TickLoopHost):
         url: str,
         key: str,
         rec: dict,
-        *,
-        cancel: bool,
-        free_worker: bool,
-        reason: str,
-        failed: bool = False,
+        plan: SettlePlan,
     ) -> bool:
         """收摊：可选 cancel → 按 rev ack → release → 丢账本；没答的那一步记成 `settling` 重试。
 
@@ -1135,35 +1182,29 @@ class OfflinePushDispatcher(TickLoopHost):
         * 5xx / 连不上 = 没答，**不丢单**：记 `settling`（`settle_at` 起跳），由
           `_resume_pumps` 在 `SETTLE_RETRY_SEC` 后原样重放（cancel/ack 都幂等）。
 
-        `free_worker` 决定 ack 带不带 `result`：只有它会让 worker 删 final、清 busy。租约丢了
+        `plan.free_worker` 决定 ack 带不带 `result`：只有它会让 worker 删 final、清 busy。租约丢了
         / hub 收线（下一任还要接着拉）时传 False —— 那单的 outbox 是证据，不能替别人删。
         """
-        if cancel:
+        if plan.cancel:
             out = self._client.cancel_task(url, key, task_id=str(rec.get("task_id") or ""))
             if out is None or int(out[0]) >= 500:
-                return self._park_settling(
-                    course, reason, cancel=True, free=free_worker, failed=failed
-                )
+                return self._park_settling(course, replace(plan, cancel=True))
             if int(out[0]) not in (200, 202):
                 self._log(
                     f"{course}: cancel 返回 HTTP {out[0]}（{out[1].get('error') or '-'}）"
                     "——worker 已不在这一单上，不再重试"
                 )
-                self._close(course, rec, reason=reason, failed=failed)
+                self._close(course, rec, reason=plan.reason, failed=plan.failed)
                 return True
-        status = self._ack(course, url, key, rec, result=bool(free_worker))
+        status = self._ack(course, url, key, rec, result=bool(plan.free_worker))
         if status in (404, 409):
             self._log(f"{course}: ack 返回 HTTP {status}（worker 已换单/无此单）——不再重试")
         elif status != 200:
-            return self._park_settling(
-                course, reason, cancel=False, free=free_worker, failed=failed
-            )
-        self._close(course, rec, reason=reason, failed=failed)
+            return self._park_settling(course, replace(plan, cancel=False))
+        self._close(course, rec, reason=plan.reason, failed=plan.failed)
         return True
 
-    def _park_settling(
-        self, course: str, reason: str, *, cancel: bool, free: bool, failed: bool = False
-    ) -> bool:
+    def _park_settling(self, course: str, plan: SettlePlan) -> bool:
         """收摊没答 ⇒ 把**重放所需**的四件事落到 assignment，返回 False（= 还没收完）。
 
         返回 True 只发生在「账本已经没了」这一种情形（没什么可重试的，调用方可以停）。
@@ -1171,31 +1212,21 @@ class OfflinePushDispatcher(TickLoopHost):
         rec = self.assignments.set_fields(
             course,
             phase="settling",
-            settle_reason=str(reason or ""),
-            settle_cancel=bool(cancel),
-            settle_free=bool(free),
-            settle_failed=bool(failed),
             settle_at=float(self._now()),
+            **plan.ledger_fields(),
         )
         if rec is None:
             return True
         self._log(
-            f"{course}: 收摊没答（{reason}）——记成 settling，"
-            f"{int(SETTLE_RETRY_SEC)}s 后重放（cancel={bool(cancel)} free={bool(free)}）"
+            f"{course}: 收摊没答（{plan.reason}）——记成 settling，"
+            f"{int(SETTLE_RETRY_SEC)}s 后重放（cancel={plan.cancel} free={plan.free_worker}）"
         )
         return False
 
     def _settle_retry(self, course: str, url: str, key: str, rec: dict) -> bool:
         """`settling` 的重放（`_pump` 与 `_resume_pumps` 共用）；收完返回 True。"""
         return self._settle_assignment(
-            course,
-            url,
-            key,
-            rec,
-            cancel=bool(rec.get("settle_cancel")),
-            free_worker=bool(rec.get("settle_free")),
-            reason=str(rec.get("settle_reason") or "settling"),
-            failed=bool(rec.get("settle_failed")),
+            course, url, key, rec, SettlePlan.from_ledger(rec)
         )
 
     def _finish_if_ready(
@@ -1229,8 +1260,8 @@ class OfflinePushDispatcher(TickLoopHost):
             self.conflicts += 1
             self._log(f"{course}: 结果体权威不符——取消这一单（final 只能丢弃），等人裁决")
             self._settle_assignment(
-                course, url, key, rec, cancel=True, free_worker=True,
-                reason="conflict-result", failed=True,
+                course, url, key, rec,
+                SettlePlan(reason="conflict-result", cancel=True, free_worker=True, failed=True),
             )
             return True
         if status != 200:
@@ -1240,7 +1271,7 @@ class OfflinePushDispatcher(TickLoopHost):
             f"{course}: 段末已入账（run={rec.get('run_id') or '-'}，"
             f"state={body.get('state') or '-'}）——release + ack，任务结束"
         )
-        self._settle_assignment(course, url, key, rec, cancel=False, free_worker=True, reason="done")
+        self._settle_assignment(course, url, key, rec, SettlePlan(reason="done", free_worker=True))
         return True
 
     def _ingest_result(self, course: str, body: dict, rec: dict) -> tuple[int, dict]:
@@ -1273,7 +1304,7 @@ class OfflinePushDispatcher(TickLoopHost):
         )
         self._settle_assignment(
             course, url, key, rec,
-            cancel=False, free_worker=True, reason=phase, failed=(phase == "failed"),
+            SettlePlan(reason=phase, free_worker=True, failed=(phase == "failed")),
         )
 
     # ------------------------------------------------------------ 观测

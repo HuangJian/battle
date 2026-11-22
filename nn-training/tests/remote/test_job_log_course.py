@@ -200,7 +200,9 @@ def _dispatcher(tmp_path: Path, msgs: list[str], *, online: str = "") -> push_di
         workers.add({"id": online, "url": "http://worker.invalid"})
         workers.note_fields(online, online=True)
     return push_dispatch.PushDispatcher(
-        cast(Any, _FakeHub()), workers, "tok", now_fn=lambda: 0.0, log=msgs.append
+        push_dispatch.PushDispatchSpec(
+            hub=cast(Any, _FakeHub()), workers=workers, token="tok", now_fn=lambda: 0.0, log=msgs.append
+        )
     )
 
 
@@ -234,14 +236,15 @@ def test_hub_result_intake_lines_carry_the_course_name(
     monkeypatch.setattr(push_dispatch, "_http", lambda *_a, **_k: (410, b'{"error": "no bun"}'))
 
     d._await_result(
-        COURSE,
-        JID,
-        "w1",
-        "http://worker.invalid",
-        "key",
-        "lease-1",
-        {"mode": "exclusive"},
-        0.0,
+        push_dispatch.JobLeg(
+            course=COURSE,
+            jid=JID,
+            wid="w1",
+            url="http://worker.invalid",
+            key="key",
+            lease="lease-1",
+            t0=0.0,
+        )
     )
     _assert_all_tagged(msgs)
     assert any(m.endswith("判定终局失败：no bun") for m in msgs), msgs

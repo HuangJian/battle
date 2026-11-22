@@ -54,6 +54,7 @@ from hub.http_face import HubHandler
 from hub.offline_push import (
     OFFLINE_PUSH_POLL_SEC,
     OfflinePushDispatcher,
+    OfflinePushSpec,
     OfflinePushWorkers,
 )
 from hub.queue import _HubQueue
@@ -63,6 +64,7 @@ from remote.code_snapshot import ensure_cluster_snapshot
 from remote.push_dispatch import (
     DEFAULT_PUSH_CONFIG,
     PushDispatcher,
+    PushDispatchSpec,
     PushWorkers,
 )
 
@@ -407,13 +409,15 @@ def main() -> None:
         )
         push_workers.reload(force=True)  # 先读一次（缺文件/空表不致命，只是没人可推）
         push_disp = PushDispatcher(
-            hub,
-            push_workers,
-            token,
-            poll_sec=args.push_poll_sec,
-            timeout_sec=args.push_timeout_sec,
-            push_ahead=args.push_ahead,
-            log=_PUSH_LOG,
+            PushDispatchSpec(
+                hub=hub,
+                workers=push_workers,
+                token=token,
+                poll_sec=args.push_poll_sec,
+                timeout_sec=args.push_timeout_sec,
+                push_ahead=args.push_ahead,
+                log=_PUSH_LOG,
+            )
         )
         _log(
             f"push 派发已启用：登记表={push_workers.path} "
@@ -431,12 +435,14 @@ def main() -> None:
         )
         offline_workers.reload(force=True)  # 缺文件/空表不致命：只是没人可派
         offline_disp = OfflinePushDispatcher(
-            hub,
-            offline_workers,
-            token,
-            port=args.port,
-            poll_sec=float(args.offline_push_poll_sec),
-            log=_OFFLINE_PUSH_LOG,
+            OfflinePushSpec(
+                hub=hub,
+                workers=offline_workers,
+                token=token,
+                port=args.port,
+                poll_sec=float(args.offline_push_poll_sec),
+                log=_OFFLINE_PUSH_LOG,
+            )
         )
         _log(
             f"离线 push 派发已启用：登记表={offline_workers.path} "

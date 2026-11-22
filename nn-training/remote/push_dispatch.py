@@ -644,6 +644,49 @@ class TickLoopHost:
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class PushDispatchSpec:
+    """`PushDispatcher` 的构造旋钮（P0-3：11 个形参 → 一个对象）。
+
+    前三项是身份（谁派单 / 派给谁 / 缺省 token），其余全是带缺省的旋钮：生产装配点
+    （`hub/boot.py`）只交身份 + 三四个调度旋钮，测试按需覆盖时钟 / 日志。
+    """
+
+    hub: Any
+    workers: PushWorkers
+    token: str
+    poll_sec: float = PUSH_POLL_SEC
+    timeout_sec: float = PUSH_TIMEOUT_SEC
+    push_attempts: int = 3
+    backups_per_course: int = 1
+    push_ahead: int = PUSH_AHEAD_DEFAULT
+    cooldown_sec: float = PUSH_COOLDOWN_SEC
+    now_fn: Any = time.time
+    log: Any = _log_default
+
+
+@dataclass(frozen=True)
+class JobLeg:
+    """一份 job 在**某一台** worker 上的这一条腿（`_run_one` 装配，`_await_result` 消费）。
+
+    为什么要一个对象（P0-3）：这七项各自都是「抄错一格就是另一个东西」的身份位 ——
+    `jid`/`wid` 错 = 盯错了活或甚至把别人的结果当成自己的；`url`/`key` 错 = 问到了别的
+    节点（或拿错 token）；`lease` 错 = 续错租约（同一份活两处跑）；`t0` 错 = 耗时告警
+    与超时预算起算点错位。在旧签名里它们是 7 个可互换的位置参数。
+
+    `course` 只用于日志前缀（`log_` 缺省时自己带课名）——本腿的每一行都要能反查是哪门课。
+    """
+
+    course: str
+    jid: str
+    wid: str
+    url: str
+    key: str
+    lease: str
+    #: 这条腿的起点（推送**前**）：`_warn_slow_result` 与超时预算都以它为坐标。
+    t0: float
+
+
 class PushDispatcher(TickLoopHost):
     """hub 中介 push 派发器：按队列顺序推给空闲 worker，超时回落队首换 worker。        一拍（`tick`）做四件事：热重载登记表 → 到点探活 → 挑活挑人 → 起一条 job 线程。
         挑活挑人**全程只用 `_snapshot()` 那一份自有状态读数**（见那里的「为什么」）。
@@ -658,21 +701,13 @@ class PushDispatcher(TickLoopHost):
     #: 「因避让冷却没推出去」那行的节流窗（秒）：一拍 10s，同一份 job 一分钟喊一次足够。
     STARVE_REPORT_SEC = 60.0
 
-    def __init__(
-        self,
-        hub: Any,
-        workers: PushWorkers,
-        token: str,
-        *,
-        poll_sec: float = PUSH_POLL_SEC,
-        timeout_sec: float = PUSH_TIMEOUT_SEC,
-        push_attempts: int = 3,
-        backups_per_course: int = 1,
-        push_ahead: int = PUSH_AHEAD_DEFAULT,
-        cooldown_sec: float = PUSH_COOLDOWN_SEC,
-        now_fn: Any = time.time,
-        log: Any = _log_default,
-    ) -> None:
+    def __init__(self, spec: PushDispatchSpec) -> None:
+        # 旧签名 11 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+        hub, workers, token = spec.hub, spec.workers, spec.token
+        poll_sec, timeout_sec = spec.poll_sec, spec.timeout_sec
+        push_attempts, backups_per_course = spec.push_attempts, spec.backups_per_course
+        push_ahead, cooldown_sec = spec.push_ahead, spec.cooldown_sec
+        now_fn, log = spec.now_fn, spec.log
         self.hub = hub
         self.workers = workers
         self.token = token  # 保留（worker authKey 优先；缺 authKey 的节点用它）
@@ -1087,19 +1122,21 @@ class PushDispatcher(TickLoopHost):
             ts_path = jd / TS_CODE_NAME
             ts_bytes = ts_path.read_bytes() if ts_path.exists() else None
             blobs = {n: p.read_bytes() for n in BLOB_NAMES if (p := blob_path(jd, n)).exists()}
-            from remote.push_client import submit_job
+            from remote.push_client import JobUpload, submit_job
 
             rec["state"] = "upload"
             send = submit_job(
                 url,
                 key,
-                manifest,
-                payload_bytes,
-                code_bytes,
-                blobs=blobs,
-                ts_code_zip=ts_bytes,
-                attempts=self.push_attempts,
-                log=lambda m: jlog(f"{jid} -> {wid}: {m}"),
+                JobUpload(
+                    manifest=manifest,
+                    payload_zip=payload_bytes,
+                    code_zip=code_bytes,
+                    blobs=blobs,
+                    ts_code_zip=ts_bytes,
+                    attempts=self.push_attempts,
+                    log=lambda m: jlog(f"{jid} -> {wid}: {m}"),
+                ),
             )
             self.pushed += 1
             self.workers.note_push(wid, True)
@@ -1129,15 +1166,17 @@ class PushDispatcher(TickLoopHost):
                 jlog(f"{jid} -> {wid}: 已入队（在跑的 job 结束后即顶上，传输已先做）")
             else:
                 rec["state"] = "waiting"
+            leg = JobLeg(
+                course=course,
+                jid=jid,
+                wid=wid,
+                url=url,
+                key=key,
+                lease=lease,
+                t0=t0,
+            )
             self._await_result(
-                course,
-                jid,
-                wid,
-                url,
-                key,
-                lease,
-                rec,
-                t0,
+                leg,
                 # `started` = 「computing_at 已打（或不需要打）」；备份永不打点。
                 started=(not queued) or rec.get("mode") == CLAIM_MODE_BACKUP,
                 t_pushed=self._now(),
@@ -1160,14 +1199,7 @@ class PushDispatcher(TickLoopHost):
 
     def _await_result(
         self,
-        course: str,
-        jid: str,
-        wid: str,
-        url: str,
-        key: str,
-        lease: str,
-        rec: dict,
-        t0: float,
+        leg: JobLeg,
         *,
         started: bool = True,
         t_pushed: float | None = None,
@@ -1185,6 +1217,9 @@ class PushDispatcher(TickLoopHost):
         `computing_at` 是 `job_priority` 的掉队阈时基，拿「在队里」当「在算」会给排队单
         开出一份多余的备份；同理，排队时间也不该吃掉「推送后多久没结果」。
         """
+        # 七个身份位一次展开（P0-3：旧签名是 8 个位置参数）；函数体逐字不动。
+        course, jid, wid = leg.course, leg.jid, leg.wid
+        url, key, lease, t0 = leg.url, leg.key, leg.lease, leg.t0
         # 缺省出口自己带课名（本函数手上就有 `course`）——直接调它的调用方（用例 / 将来的第二条腿）
         # 不会因为忘了传 `jlog` 而掉回「只有 jid」的旧形状。
         log = tagged(self._log, course_tag(course)) if log is None else log

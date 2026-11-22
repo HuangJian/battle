@@ -164,9 +164,7 @@ def test_moved_push_path_reads_the_loop_transport_seams(
     """
     submitted: list[str] = []
 
-    def fake_submit(
-        url: str, key: str, manifest: object, payload: object, code: object, **kw: object
-    ) -> dict:
+    def fake_submit(url: str, key: str, upload: object, **kw: object) -> dict:
         submitted.append(url)
         return {"ok": True}
 

@@ -1278,7 +1278,7 @@ class BcLoop:
         「再提交一次」的代价远小于「以为提交过、其实没有 ⇒ 永远等不到回传」。
         """
         rt = self.runtime
-        from remote.push_client import submit_job
+        from remote.push_client import JobUpload, submit_job
 
         payload_path = rt.job_root / jid / "payload.tar.xz"
         # 与 publish 同源（快照优先）：不硬读 job_root 级的那份——快照模式下它根本不存在。
@@ -1287,10 +1287,12 @@ class BcLoop:
         submit_job(
             rt.push_url,
             rt.token,
-            manifest,
-            payload_path.read_bytes(),
-            code_zip.read_bytes(),
-            log=lambda m: self.log(f"[push] {m}"),
+            JobUpload(
+                manifest=manifest,
+                payload_zip=payload_path.read_bytes(),
+                code_zip=code_zip.read_bytes(),
+                log=lambda m: self.log(f"[push] {m}"),
+            ),
         )
         self._submitted.add(it)
 

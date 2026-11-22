@@ -151,10 +151,9 @@ def rec(monkeypatch: pytest.MonkeyPatch) -> Recorder:
 
     class FakeSubmit:
         @staticmethod
-        def submit_job(
-            url: str, token: str, manifest: dict, payload: bytes, code: bytes, **kw: Any
-        ):
-            r.submitted.append(str(manifest["job_id"]))
+        def submit_job(url: str, token: str, upload: Any, **kw: Any):
+            # `upload` 是 `remote.push_client.JobUpload`（P0-3）；这里只看 manifest。
+            r.submitted.append(str(upload.manifest["job_id"]))
 
     import remote.push_client as push_client
 

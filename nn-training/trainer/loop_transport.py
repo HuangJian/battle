@@ -32,6 +32,7 @@ from common.protocol import (
 )
 from common.settings import push_node_from_env
 from common.warn_once import WarnOnce
+from remote.push_client import JobUpload
 from remote.push_client import submit_job as _push_submit
 from remote.push_client import wait_result as _push_wait_result
 from worker.schedule import kickstart_coef as _kickstart_coef
@@ -529,13 +530,15 @@ def _push_job_round(
         submit_wire = _push_submit(
             url,
             key,
-            manifest,
-            payload_bytes,
-            code_bytes,
-            blobs=blobs,
-            ts_code_zip=ts_code_bytes,
-            echo=bool(getattr(args, "smoke", False)),
-            log=log,
+            JobUpload(
+                manifest=manifest,
+                payload_zip=payload_bytes,
+                code_zip=code_bytes,
+                blobs=blobs,
+                ts_code_zip=ts_code_bytes,
+                echo=bool(getattr(args, "smoke", False)),
+                log=log,
+            ),
         )
         log(f"[run_rl] push: job {jid} 已提交 -> {url}（等待 GPU 完成）")
         result = _push_wait_result(url, key, jid, timeout_sec=timeout_sec, log=log)

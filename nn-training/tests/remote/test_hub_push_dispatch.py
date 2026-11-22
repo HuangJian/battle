@@ -45,7 +45,7 @@ from common.protocol import (
 from hub.admin import AdminRoutes
 from hub.server import _HubQueue, _JobStore, make_server
 from hub.store_leases import LeaseSpec
-from remote.push_dispatch import PushDispatcher, PushWorkers
+from remote.push_dispatch import PushDispatcher, PushDispatchSpec, PushWorkers
 from remote.worker_server import WorkerServerState, make_worker_server
 from tests.helpers import net_seams
 from tests.helpers.http_server import serve_fast
@@ -370,13 +370,15 @@ def _dispatcher(
     push_attempts: int = 3,
 ) -> PushDispatcher:
     return PushDispatcher(
-        hub,
-        ws,
-        "sekret",
-        poll_sec=poll_sec,
-        timeout_sec=timeout_sec,
-        push_attempts=push_attempts,
-        log=_quiet,
+        PushDispatchSpec(
+            hub=hub,
+            workers=ws,
+            token="sekret",
+            poll_sec=poll_sec,
+            timeout_sec=timeout_sec,
+            push_attempts=push_attempts,
+            log=_quiet,
+        )
     )
 
 
@@ -687,15 +689,17 @@ def test_single_worker_cooldown_expires_and_job_is_retried(
     ws = _workers_with(tmp_path, worker_factory, (flaky, {"id": "g1"}), now_fn=lambda: clock["t"])
     logs: list[str] = []
     disp = PushDispatcher(
-        hub,
-        ws,
-        "sekret",
-        poll_sec=0.02,
-        timeout_sec=5.0,
-        push_attempts=1,
-        cooldown_sec=600.0,
-        now_fn=lambda: clock["t"],
-        log=logs.append,
+        PushDispatchSpec(
+            hub=hub,
+            workers=ws,
+            token="sekret",
+            poll_sec=0.02,
+            timeout_sec=5.0,
+            push_attempts=1,
+            cooldown_sec=600.0,
+            now_fn=lambda: clock["t"],
+            log=logs.append,
+        )
     )
 
     disp.tick()  # 推给唯一那台 → 409 拒收 → 回落 + 避让
@@ -730,7 +734,11 @@ def test_slow_upload_logs_a_loud_line(tmp_path: Path, worker_factory, monkeypatc
     _publish(hub, "x2", "j" * 16)
     ws = _workers_with(tmp_path, worker_factory, (w1, {"id": "g1"}))
     logs: list[str] = []
-    disp = PushDispatcher(hub, ws, "sekret", poll_sec=0.02, timeout_sec=5.0, log=logs.append)
+    disp = PushDispatcher(
+        PushDispatchSpec(
+            hub=hub, workers=ws, token="sekret", poll_sec=0.02, timeout_sec=5.0, log=logs.append
+        )
+    )
     real_submit = pc.submit_job
 
     def slow_submit(*a, **kw):
@@ -763,13 +771,15 @@ def test_slow_result_fetch_logs_a_loud_line(tmp_path: Path, worker_factory, monk
     ws = _workers_with(tmp_path, worker_factory, (w1, {"id": "g1"}), now_fn=lambda: clock["t"])
     logs: list[str] = []
     disp = PushDispatcher(
-        hub,
-        ws,
-        "sekret",
-        poll_sec=0.02,
-        timeout_sec=600.0,  # 不跟假钟的 deadline 抢戏：本用例只看告警
-        now_fn=lambda: clock["t"],
-        log=logs.append,
+        PushDispatchSpec(
+            hub=hub,
+            workers=ws,
+            token="sekret",
+            poll_sec=0.02,
+            timeout_sec=600.0,  # 不跟假钟的 deadline 抢戏：本用例只看告警
+            now_fn=lambda: clock["t"],
+            log=logs.append,
+        )
     )
     real_http = pd._http
     state = {"slow": 2}
@@ -863,7 +873,11 @@ def test_submit_job_transient_retry_ladder(monkeypatch) -> None:
     manifest = {"job_id": "j" * 16, "code_sha256": "c" * 8}
     with pytest.raises(pc.RetryableError):
         pc.submit_job(
-            "http://node.local", "tok", manifest, b"payload", None, attempts=3, log=lambda _m: None
+            "http://node.local",
+            "tok",
+            pc.JobUpload(
+                manifest=manifest, payload_zip=b"payload", code_zip=None, attempts=3, log=lambda _m: None
+            ),
         )
     assert calls["n"] == 3, calls
     assert slept == [2, 4], f"退避梯子应为 2s/4s（实测 {slept}）"
@@ -970,14 +984,16 @@ def test_push_ahead_queues_the_next_job_and_defers_start_marker(tmp_path: Path) 
     srv, state, th = _queue_worker(tmp_path, started)
     hub, ms = _two_course_hub(tmp_path)
     disp = PushDispatcher(
-        hub,
-        _worker_registry(tmp_path, f"http://127.0.0.1:{srv.server_address[1]}"),
-        "sekret",
-        poll_sec=0.01,
-        timeout_sec=10.0,
-        push_ahead=1,
-        now_fn=lambda: clock[0],
-        log=_quiet,
+        PushDispatchSpec(
+            hub=hub,
+            workers=_worker_registry(tmp_path, f"http://127.0.0.1:{srv.server_address[1]}"),
+            token="sekret",
+            poll_sec=0.01,
+            timeout_sec=10.0,
+            push_ahead=1,
+            now_fn=lambda: clock[0],
+            log=_quiet,
+        )
     )
     try:
         # `ping=True`：假时钟是**冻结**的，靠它判「到点探活」永远不 due（那需要墙钟推进）。
@@ -1025,13 +1041,15 @@ def test_push_ahead_zero_keeps_the_busy_worker_untouched(tmp_path: Path) -> None
     srv, state, th = _queue_worker(tmp_path, started)
     hub, _ms = _two_course_hub(tmp_path)
     disp = PushDispatcher(
-        hub,
-        _worker_registry(tmp_path, f"http://127.0.0.1:{srv.server_address[1]}"),
-        "sekret",
-        poll_sec=0.01,
-        timeout_sec=10.0,
-        push_ahead=0,
-        log=_quiet,
+        PushDispatchSpec(
+            hub=hub,
+            workers=_worker_registry(tmp_path, f"http://127.0.0.1:{srv.server_address[1]}"),
+            token="sekret",
+            poll_sec=0.01,
+            timeout_sec=10.0,
+            push_ahead=0,
+            log=_quiet,
+        )
     )
     try:
         disp.tick()
@@ -1352,7 +1370,7 @@ def test_start_beacon_failure_is_logged(tmp_path: Path) -> None:
 
     # 登记表在本用例里没人读（`_mark_started` 只碰 hub + 日志），给一份空表即可。
     ws = PushWorkers(tmp_path / "push.json", log=_quiet)
-    disp = PushDispatcher(_BrokenHub(), ws, "sekret", log=logs.append)
+    disp = PushDispatcher(PushDispatchSpec(hub=_BrokenHub(), workers=ws, token="sekret", log=logs.append))
     disp._mark_started("jid-beacon-1", "w1")
 
     assert len(logs) == 1, logs

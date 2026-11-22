@@ -39,7 +39,12 @@ from common.protocol import (
 )
 from hub import offline_push as disp_mod
 from hub.offline_ingest import IngestArtifactSpec, ingest_offline_artifact
-from hub.offline_push import OfflinePushDispatcher, OfflinePushWorkers
+from hub.offline_push import (
+    OfflinePushDispatcher,
+    OfflinePushSpec,
+    OfflinePushWorkers,
+    SettlePlan,
+)
 from hub.server import _HubQueue, _JobStore, make_server
 from remote.offline_push_face import PushFaceState, make_face_server
 from tests.helpers.http_server import serve_fast
@@ -143,7 +148,11 @@ class _Worker:
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
 
     def _starter(self, task: dict, task_dir: Path, outbox: Path) -> None:
-        self.task = dict(task)
+        # 就绪信号 `self.task` 在**末行**才置上（见 `_starter_done`）：它是用例等「这台机器
+        # 接到单、产物已落盘」的唯一旋钮，而 `_starter` 是在 HTTP 处理线程里跑的——先置信号
+        # 再写 `outbox/state.json` 就会让 `_wait(lambda: worker.task is not None)` 之后紧跟的
+        # `worker.finish()` 读到不存在的 state.json（2026-11-22 门禁实测：并行负载下偶红在
+        # `FileNotFoundError: .../outbox/state.json`）。
         if self.follow_task_identity:
             # 权威面（`store_offline_artifact`）按 assignment 的 (course, run_id) 校验体自报值：
             # 假训练必须按**收到的那一单**盖章，否则会被判成「冲突」而不是「入账」。
@@ -227,6 +236,8 @@ class _Worker:
             )
         if self.finish_now:
             self.state.note_child_exit(0)
+        # 就绪信号（末行；见 `_starter` 头的理由）——此时 state/metrics/final 都已落盘。
+        self.task = dict(task)
 
     def _write_metrics(self, outbox: Path, it: int) -> None:
         """写这一轮的统计体（`/offline/push/metrics` 的读面；F5）。"""
@@ -313,16 +324,18 @@ def _dispatcher(
     workers = OfflinePushWorkers(tmp_path / "rl-config.json", log=lambda _m: None)
     kw: dict = {} if client_mod is None else {"client_mod": client_mod}
     disp = OfflinePushDispatcher(
-        hub,
-        workers,
-        TOKEN,
-        root=tmp_path / "push-state",
-        port=0,
-        pump_sec=0.02,
-        heartbeat_sec=0.02,
-        cooldown_sec=cooldown_sec,
-        log=log or (lambda _m: None),
-        **kw,
+        OfflinePushSpec(
+            hub=hub,
+            workers=workers,
+            token=TOKEN,
+            root=tmp_path / "push-state",
+            port=0,
+            pump_sec=0.02,
+            heartbeat_sec=0.02,
+            cooldown_sec=cooldown_sec,
+            log=log or (lambda _m: None),
+            **kw,
+        )
     )
     return disp, workers
 
@@ -1045,10 +1058,7 @@ def test_settle_without_an_answer_is_parked_then_replayed(
             "http://w",
             "k",
             rec,
-            cancel=True,
-            free_worker=True,
-            reason="conflict",
-            failed=True,
+            SettlePlan(reason="conflict", cancel=True, free_worker=True, failed=True),
         )
         assert settled is False
         parked = disp.assignments.get(COURSE)
@@ -1269,7 +1279,9 @@ def test_a_dispatcher_with_no_root_asks_the_hub_instead_of_guessing(tmp_path: Pa
     workers = OfflinePushWorkers(tmp_path / "rl-config.json", log=lambda _m: None)
 
     monkeypatch.setattr(hub, "traj_root", lambda: None)
-    disp = OfflinePushDispatcher(hub, workers, TOKEN, port=0, log=lambda _m: None)
+    disp = OfflinePushDispatcher(
+        OfflinePushSpec(hub=hub, workers=workers, token=TOKEN, port=0, log=lambda _m: None)
+    )
     assert disp.assignments is not None  # 构造成功 = 落到了 cwd，没有拿 bug 去换缺省
 
     def boom():
@@ -1277,7 +1289,9 @@ def test_a_dispatcher_with_no_root_asks_the_hub_instead_of_guessing(tmp_path: Pa
 
     monkeypatch.setattr(hub, "traj_root", boom)
     with pytest.raises(AttributeError):
-        OfflinePushDispatcher(hub, workers, TOKEN, port=0, log=lambda _m: None)
+        OfflinePushDispatcher(
+            OfflinePushSpec(hub=hub, workers=workers, token=TOKEN, port=0, log=lambda _m: None)
+        )
 
 
 def test_still_mine_treats_no_hold_as_mine_and_lets_our_bug_through(

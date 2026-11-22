@@ -9948,3 +9948,43 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   eval 行加两条同义别名（`ringKilledCum←ringKills`），不重复采集。
 - **验证**：nn 全量 6715 passed / 根 2873 passed；隔离探针证明每步增量 = `+12·Δkill − 0.066·Δ过免费带拍`。
   全文 → `docs/nn/experiments.md` §163；课程 → `nn-training/curricula/g11-ringkill.jsonc`。
+
+## §2026-11-22-push-spec（批 B：hub 推送/派发六处宽签名收成 spec / 腿对象）
+
+- **背景**：`python.refactor.md` §P0-3 剩余清单的 B 批（hub 推送/派发），六处全都是「一串同类
+  位置参数」：`OfflinePushDispatcher.__init__`(12) · `_settle_assignment`(8，4 位置 + 4 个同名
+  布尔) · `PushDispatcher.__init__`(11) · `_await_result`(8 位置 + 3) · `push_client.submit_job`(8) ·
+  `push_register.Registry.__init__`(9)。失效面是静默的：`_await_result` 的 `jid`/`wid` 互换会把
+  结果回灌给别的 job；`(course, url, key, rec)` 里 `url`/`key` 换位 = 问到别的节点/拿错 token；
+  `submit_job` 的三个「看起来都像 body」的相邻位置参数错一格只有云端才炸（节点解不开包）；
+  `_settle_assignment` 的两个布尔（`cancel` / `free_worker`）传反 = 「该留的证据删了 / 该删的
+  留着」——两者都不报错。
+- **决定**：六处各收一个对象（frozen；构造器类 `kw_only`），缺省值逐字保留：
+  `hub.offline_push.OfflinePushSpec`(12) / `SettlePlan`(4) · `remote.push_dispatch.PushDispatchSpec`(11) /
+  `JobLeg`(7) · `remote.push_client.JobUpload`(8) · `remote.push_register.RegistrySpec`(9)。
+  两处**不收成整对象**：`submit_job(base_url, token, upload)` 保留端点两个位置位（与
+  `cancel_job` / `wait_result` / `poll_result` 同一对参数，同一条腿的四处端点不该有两种形状）；
+  `_settle_assignment(course, url, key, rec, plan)` 保留四个「这条派发记录」的位置（调用方手上
+  就有它们，包起来只是换个地方拆）。
+- **顺手删掉一个死参**：`_await_result` 的 `rec`（8 个位置里的第 7 个）在函数体里**一次都没被
+  读过**——`grep` 逐行核过。它不是「留着将来用」：旧签名里它排在 `t0` 前面，正好是「数到第 7
+  个才发现传错了」的那种形状。
+- **写读同源**：`SettlePlan.ledger_fields()` / `from_ledger()` 是账本上 `settle_reason` /
+  `settle_cancel` / `settle_free` / `settle_failed` 四列的**唯一**实现。在这之前
+  `_park_settling`（写）与 `_settle_retry`（读）各手写一遍键名：写错一侧不报错，只会让重放
+  按缺省值收摊（`cancel` 丢失 ⇒ 这单在 worker 上永远留着；`free_worker` 丢失 ⇒ 它的 outbox
+  永不删、busy 永不清）。重放那两处用 `dataclasses.replace(plan, cancel=…)`（§231 的先例）。
+- **被否决**：① 只收 `OfflinePushDispatcher.__init__` 这类最大的（剩下五处仍是位置参数，同一
+  条腿两种形状，读的人要先看两个文件）；② `submit_job` 连端点一起收（`_request` / `cancel_job` /
+  `wait_result` 都按 `(url, token)` 开头，收进去等于给同一条腿造第二套调用形状）；③ 用
+  `RegistryHooks(log, urlopen, now_fn)` 只收注入面（9 → 7 过闸，但另外 6 个身份/旋钮仍在
+  位置上，且「注入面」这个名字在别处指别的东西）；④ 给 `_settle_assignment` 包一个
+  `SettleRun(course, url, key, rec)`（调用方本来就逐个持有这四项，包一层只是把 4 个位置换成
+  1 个构造；`SettlePlan` 收的才是「同一件事的四种说法」）。
+- **读数**：宽签名 40 → **34**、32 → **28** 文件（`WIDE_FUNCS_BASELINE` 删
+  `hub/offline_push.py`(2) / `remote/push_dispatch.py`(2) / `remote/push_client.py` /
+  `remote/push_register.py`）；复用账本、`Any` 基线、文本断言**全部未动**；G5 私有断言未动
+  （新守卫把签名先绑到局部再断言，并用「旧四布尔现在当场 `TypeError`」从行为面封死）。
+- **验证**：`bun run pygate` 绿（6814 passed / 13 skipped）；守 `tests/hub/test_push_spec.py`
+  （25 条：六张字段表 / 冻结 / `kw_only` / 入口形状 / 收摊键名单源 / 腿对象唯一调用点）。
+  全文 → `docs/nn/engineering.md` §305。

@@ -20,6 +20,7 @@ from typing import Any, cast
 
 from common.log import log
 from common.protocol import ProtocolError, find_payload
+from remote.push_client import JobUpload
 from remote.push_client import submit_job as _push_submit
 from remote.push_client import wait_result as _push_wait_result
 from trainer.loop_transport import _push_over_nodes
@@ -60,15 +61,17 @@ class TrainingRemotePush:
         sess.submit_wire = _push_submit(
             str(node["url"]),
             str(node.get("authKey", "")),
-            sess.manifest,
-            _pl.read_bytes(),
-            self._code_zip_path.read_bytes(),
-            blobs=blobs,
-            ts_code_zip=(
-                Path(self._ts_code_zip_path).read_bytes() if sess.rollout_spec else None
+            JobUpload(
+                manifest=sess.manifest,
+                payload_zip=_pl.read_bytes(),
+                code_zip=self._code_zip_path.read_bytes(),
+                blobs=blobs,
+                ts_code_zip=(
+                    Path(self._ts_code_zip_path).read_bytes() if sess.rollout_spec else None
+                ),
+                echo=bool(getattr(self.args, "smoke", False)),
+                log=log,
             ),
-            echo=bool(getattr(self.args, "smoke", False)),
-            log=log,
         )
         sess.node_i = i
         log(f"[run_rl] push: job {sess.jid} 已提交 -> {node['url']}（等待 GPU 完成）")

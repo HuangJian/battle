@@ -22,7 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import remote.push_client as PC
-from remote.push_dispatch import PushDispatcher
+from remote.push_dispatch import PushDispatcher, PushDispatchSpec
 from remote.worker_server import WorkerServerState
 from tests.remote.test_hub_push_dispatch import (
     _hub,
@@ -38,13 +38,15 @@ from tests.remote.test_hub_push_dispatch import (
 
 def _disp(hub, ws, **kw) -> PushDispatcher:
     return PushDispatcher(
-        hub,
-        ws,
-        "sekret",
-        poll_sec=0.02,
-        timeout_sec=30.0,
-        log=_quiet,
-        **kw,
+        PushDispatchSpec(
+            hub=hub,
+            workers=ws,
+            token="sekret",
+            poll_sec=0.02,
+            timeout_sec=30.0,
+            log=_quiet,
+            **kw,
+        )
     )
 
 

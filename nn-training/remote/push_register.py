@@ -37,6 +37,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 #: 注册退避梯子（秒）：push 节点「注册成功才可能接到活」，所以起点比采样快（2s），
@@ -305,6 +306,30 @@ def unregister(
 # ---------------------------------------------------------------- Registry（push 节点用）
 
 
+@dataclass(frozen=True, kw_only=True)
+class RegistrySpec:
+    """`Registry` 的构造旋钮（P0-3：9 个形参 → 一个对象）。
+
+    前三个是身份（往哪注册 / 用哪把 admin token / 叫什么 id），其余全是带缺省的旋钮：
+    GPU 与离线两条腿只差 `kind` 与 `node_id`/`label`，注入面（`log`/`urlopen`/`now_fn`）
+    只在用例里出现。
+
+    `urlopen` 缺省 = **调用时**再取 `urllib.request.urlopen`（**不是** def 时的绑定）。
+    2026-10-25：写成默认参数值会把函数对象在 import 时就钉死 ⇒ 用例里
+    `monkeypatch.setattr("urllib.request.urlopen", …)`（push 腿早有此约定）整条失效。
+    """
+
+    hub: str
+    hub_token: str
+    node_id: str
+    kind: str = "gpu_push"
+    workers: int | str | None = 0
+    label: str = ""
+    log: Callable[[str], None] = lambda _m: None
+    urlopen: RegisterFn | None = None
+    now_fn: Callable[[], float] = time.time
+
+
 class Registry:
     """push 节点自注册状态机（GPU / 离线共用一份实现）。
 
@@ -318,23 +343,11 @@ class Registry:
     * **绝不抛**：注册是旁路，不能让训练/服务陪葬。
     """
 
-    def __init__(
-        self,
-        *,
-        hub: str,
-        hub_token: str,
-        node_id: str,
-        kind: str = "gpu_push",
-        workers: int | str | None = 0,
-        label: str = "",
-        log: Callable[[str], None] = lambda _m: None,
-        #: 缺省 = 调用时再取 `urllib.request.urlopen`（**不是** def 时的绑定）。
-        #: 2026-10-25：写成默认参数值会把函数对象在 import 时就钉死 ⇒ 用例里
-        #: `monkeypatch.setattr("urllib.request.urlopen", …)`（push 腿早有此约定）整条失效，
-        #: 于是「注册」真发 HTTP 到 `127.0.0.1:1`、每条用例白等 2s×N。
-        urlopen: RegisterFn | None = None,
-        now_fn: Callable[[], float] = time.time,
-    ) -> None:
+    def __init__(self, spec: RegistrySpec) -> None:
+        # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+        hub, hub_token, node_id = spec.hub, spec.hub_token, spec.node_id
+        kind, workers, label = spec.kind, spec.workers, spec.label
+        log, urlopen, now_fn = spec.log, spec.urlopen, spec.now_fn
         self.hub = _hub_base(hub)
         self.hub_token = str(hub_token or "")
         self.node_id = str(node_id or "")

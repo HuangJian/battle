@@ -54,7 +54,9 @@ LONG_FUNCS_BASELINE: dict[str, int] = {
 WIDE_FUNCS_BASELINE = {
     # 2026-11-22：`task_key` 的 5 个身份位 + 11 个同型开关收成 `TaskKeySpec`
     # ⇒ 本文件宽签名归零，条目删除（守 `tests/common/test_task_key_spec.py`）。
-    "hub/offline_push.py": 2,
+    # 2026-11-22（P0-3 批 B）：`OfflinePushDispatcher.__init__`(12) 与
+    # `_settle_assignment`(8) 分别收成 `OfflinePushSpec` / `SettlePlan` ⇒ 本文件宽签名归零，
+    # 条目删除；守 `tests/hub/test_push_spec.py`。
     # 2026-11-21：`build_task_zip` 的 9 个关键字参数收成 `TaskZipSpec`
     # ⇒ 本文件宽签名归零，条目删除。
     # 2026-11-21：认领族（`claim` / `claim_outcome` / `_claim_locked`）的
@@ -81,9 +83,9 @@ WIDE_FUNCS_BASELINE = {
     # 2026-11-21：`pack_payload_zip` 的 9 个参数收成 `PackSpec`
     # ⇒ 本文件宽签名归零，条目删除。
     "remote/payload_proc.py": 1,
-    "remote/push_client.py": 1,
-    "remote/push_dispatch.py": 2,
-    "remote/push_register.py": 1,
+    # 2026-11-22（P0-3 批 B）：`submit_job` 的 8 参收成 `(base_url, token, JobUpload)`；
+    # `PushDispatcher.__init__`(11) / `_await_result`(8) 收成 `PushDispatchSpec` / `JobLeg`；
+    # `Registry.__init__`(9) 收成 `RegistrySpec` ⇒ 三个条目删除；守 `tests/hub/test_push_spec.py`。
     # 2026-11-19 合入上游：`run` 的交易参数 + relay 通道参数（原 1 处 → 2 处）。
     "remote/rollout_node.py": 2,
     "remote/tailscale_boot.py": 1,
