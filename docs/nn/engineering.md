@@ -29,6 +29,31 @@
 
 ---
 
+## §315 P0-3 批 F1：`rollout_node._banner_lines`(10) → `BannerSpec`（18 → 17）（2026-11-22）
+
+* **一把刀一处**：`remote/rollout_node._banner_lines`(10 个 kw-only 参数) → 一个 `BannerSpec`。
+  调用面 4 处（`run` 里 1 + 用例 3）。读数：宽签名 **18 → 17**、14 → **14** 文件
+  （`remote/rollout_node.py` 2 → 1，只剩 `_try_register_once`）。
+* **为什么值得动**：横幅是**操作员判断「这台机器跑的是哪份代码、注册上没有」的唯一现场读数**。
+  `bun_version` 与 `code_hash` 是两个相邻身份串 —— 互换后横幅照样打印，只是**大声宣布错的版本**；
+  `url` / `auth` / `hub_url` 三个相邻串互换会让人把 authKey 粘进错的地址；`hub_configured` 与
+  `reg_state` 互换则把「已自动注册」和「还得手工写 nodes[]」说反（2026-11-18 DSW 现场被送去翻
+  cloudflared 日志那次就是这个方向）。
+* **守卫钉的是横幅的三条语义**（形状之外）：① `hub_configured` + `reg_state["url"]` ⇒ 打
+  「★ 已自动注册 : id=<node>」；② 空 URL **不**打印那句必 400 的 `nodes[]` 片段；③ relay 模式
+  一个 `cloudflared` 字也不提（那种模式下根本没有这个进程）。
+* **三个门禁教训（都写进写法里）**：
+  1. `inspect.signature(rn._banner_lines)` 写在 assert 里 → G5「断言里读私有量」+1 ⇒ **私有名先绑
+     局部**（`entry = rn._banner_lines`）再断言；
+  2. `assert "cloudflared" not in joined.lower()` 是口径 A 文本断言 ⇒ 改 `joined.lower().count(...) == 0`；
+     同族还有 `ln.lstrip().startswith('{"nodes"')` / `ln.startswith("★ 已自动注册 : id=n1")`
+     —— 全都换成**前缀/计数判据**，不挂「措辞里有没有某段子串」；
+  3. 断言实测形态而不是猜：第一版 `chunk.split("（")[0] == "id=n1"` 直接把格式猜错（真格式是
+     `★ 已自动注册 : id=<node>（…）`），用例红了一次才发现 —— 横幅这种「人读文本」的判据，
+     先用真输出核一遍再落断言。
+* **模块导入式调用点**（`rn = rollout_node`）要连 spec 名前缀一起加（`rn.BannerSpec(...)`），
+  否则 F821 —— 与 §311 的 `bundle_mod.` 同一条。
+
 ## §314 P0-3 批 D2b：`build_rollout_cmd`(10) → `RolloutCmdSpec`（19 → 18）（2026-11-22）
 
 * **一把刀一处，15 个调用点**：`worker/cmd.build_rollout_cmd`(2 位置 + 8 关键字) → 一个

@@ -561,14 +561,16 @@ def test_try_register_once_posts_with_the_injected_opener() -> None:
 
 def test_banner_skips_manual_snippet_when_url_empty() -> None:
     lines = rn._banner_lines(
-        node_id="n",
-        url="",
-        auth="ak",
-        workers=2,
-        bun_version="1.4.4",
-        code_hash="0123456789abcdef",
-        hub_configured=True,
-        reg_state={"url": "", "authKey": ""},
+        rn.BannerSpec(
+            node_id="n",
+            url="",
+            auth="ak",
+            workers=2,
+            bun_version="1.4.4",
+            code_hash="0123456789abcdef",
+            hub_configured=True,
+            reg_state={"url": "", "authKey": ""},
+        )
     )
     assert lines == [
         "=" * 68,
@@ -583,14 +585,16 @@ def test_banner_skips_manual_snippet_when_url_empty() -> None:
 
 def test_banner_prints_manual_snippet_when_url_present() -> None:
     lines = rn._banner_lines(
-        node_id="n",
-        url="https://a.trycloudflare.com",
-        auth="ak",
-        workers=2,
-        bun_version="1.4.4",
-        code_hash="0123456789abcdef",
-        hub_configured=True,
-        reg_state={"url": "", "authKey": ""},
+        rn.BannerSpec(
+            node_id="n",
+            url="https://a.trycloudflare.com",
+            auth="ak",
+            workers=2,
+            bun_version="1.4.4",
+            code_hash="0123456789abcdef",
+            hub_configured=True,
+            reg_state={"url": "", "authKey": ""},
+        )
     )
     assert lines[2] == (
         '  {"nodes":[{"id":"n","url":"https://a.trycloudflare.com","authKey":"ak"}]}'
@@ -1146,16 +1150,18 @@ def test_banner_blames_relay_not_cloudflared_when_channel_is_relay() -> None:
     而真正的死因（hub 地址不可达）一行没提。
     """
     lines = rn._banner_lines(
-        node_id="dsw",
-        url="",
-        auth="ak",
-        workers=8,
-        bun_version="1.4.4",
-        code_hash="",
-        hub_configured=True,
-        reg_state={"url": "", "authKey": ""},
-        channel=rn.LINK_RELAY,
-        hub_url="https://x.trycloudflare.com",
+        rn.BannerSpec(
+            node_id="dsw",
+            url="",
+            auth="ak",
+            workers=8,
+            bun_version="1.4.4",
+            code_hash="",
+            hub_configured=True,
+            reg_state={"url": "", "authKey": ""},
+            channel=rn.LINK_RELAY,
+            hub_url="https://x.trycloudflare.com",
+        )
     )
     joined = "\n".join(lines)
     assert "relay 预检" in joined and "cloudflared 日志" not in joined, joined

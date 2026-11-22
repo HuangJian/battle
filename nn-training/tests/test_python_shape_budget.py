@@ -88,7 +88,8 @@ WIDE_FUNCS_BASELINE = {
     # `PushDispatcher.__init__`(11) / `_await_result`(8) 收成 `PushDispatchSpec` / `JobLeg`；
     # `Registry.__init__`(9) 收成 `RegistrySpec` ⇒ 三个条目删除；守 `tests/hub/test_push_spec.py`。
     # 2026-11-19 合入上游：`run` 的交易参数 + relay 通道参数（原 1 处 → 2 处）。
-    "remote/rollout_node.py": 2,
+    # `remote/rollout_node.py` 只剩 `_try_register_once`（P0-3 批 F1：`_banner_lines` → `BannerSpec`）。
+    "remote/rollout_node.py": 1,
     "remote/tailscale_boot.py": 1,
     # `remote/upload_proc.py` 已清零（P0-3 批 G：`UploaderProcess.__init__` 与 `make_uploader`
     # 共用一份 `UploadSpec`）；守 `tests/remote/test_upload_spec.py`。

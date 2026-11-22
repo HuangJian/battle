@@ -10198,3 +10198,23 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   `tests/worker/test_rollout_cmd_spec.py`（字段表 / 形状 / `--stages`·`--seeds` 各吃自己那个数 /
   `node_side` 丢掉本机独有 `--code-sha` / 三个身份串缺省为空）。
   全文 → `docs/nn/engineering.md` §314。
+
+## §2026-11-22-banner-spec
+
+**P0-3 批 F1：`remote/rollout_node._banner_lines`(10 参) → `BannerSpec`（宽签名 18 → 17）。**
+
+- **背景**：横幅是操作员判断「这台机器跑的是哪份代码、注册上没有」的唯一现场读数，而它的输入里
+  排着 `bun_version`/`code_hash`（两个身份串，互换后**大声宣布错的版本**）、`url`/`auth`/`hub_url`
+  （三个相邻串）、`hub_configured`/`reg_state`（「配没配」与「注册结果」，互换把「已自动注册」与
+  「还得手工写 nodes[]」说反）。
+- **决定**：`BannerSpec`（10 字段，frozen + kw_only，住 `remote/rollout_node.py`）；入口一次展开，
+  函数体逐字不动；4 处调用点（`run` 1 + 用例 3）改按名字传。
+- **被否决**：① 把 `reg_state` 摊成几个 bool（`registered`/`has_url`）—— `reg_state` 是注册器持有的
+  共享 dict，摊平要在两处维护同一份真值；② 只收身份串那两条留 `url`/`auth` 散着 —— 半对象正是
+  本批要消的形状；③ 把横幅改成「返回结构化 dict 再渲染」—— 那是表现层重构（P0-x 另一档），
+  与本刀（调用面）混做会让读数无法归因。
+- **读数**：宽签名 18 → **17**、14 文件（`remote/rollout_node.py` 2 → 1）。
+- **验证**：`bun run pygate` 绿（122s，log clean）；`ruff` + `mypy`(1087 文件) 绿。守
+  `tests/remote/test_banner_spec.py`（字段表 / 形状 / 已自动注册那一行 / 空 URL 不印 nodes[] /
+  relay 模式不提 cloudflared）。
+  全文 → `docs/nn/engineering.md` §315。

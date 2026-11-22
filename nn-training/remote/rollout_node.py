@@ -513,24 +513,43 @@ def _try_register_once(
     return register(urlopen or urllib.request.urlopen, hub_url, hub_token, payload, log)
 
 
-def _banner_lines(
-    *,
-    node_id: str,
-    url: str,
-    auth: str,
-    workers: int,
-    bun_version: str,
-    code_hash: str,
-    hub_configured: bool,
-    reg_state: dict[str, str],
-    channel: str = "",
-    hub_url: str = "",
-) -> list[str]:
+@dataclass(frozen=True, kw_only=True)
+class BannerSpec:
+    """启动横幅的全部输入（P0-3 批 F1：10 个关键字 → 一个对象）。
+
+    失效面：`bun_version` 与 `code_hash` 是两个相邻身份串 —— 互换后横幅会**大声宣布错的代码
+    版本/哈希**（这是操作员判断「这台机器到底跑的是哪份代码」的唯一现场读数）；
+    `url` / `auth` / `hub_url` 是三个相邻 URL/凭据串（横幅会让人把 authKey 粘进错的地址）；
+    `hub_configured` 与 `reg_state` 是「配没配」与「注册结果」两件事，互换则把「已自动注册」
+    和「还得手工写 nodes[]」说反。
+    """
+
+    node_id: str
+    url: str
+    auth: str
+    workers: int
+    bun_version: str
+    code_hash: str
+    hub_configured: bool
+    reg_state: dict[str, str]
+    #: `LINK_RELAY` / `LINK_CLOUDFLARED`：决定「没有 URL」该怪谁（2026-11-18 DSW 现场）。
+    channel: str = ""
+    hub_url: str = ""
+
+
+def _banner_lines(spec: BannerSpec) -> list[str]:
     """启动横幅的纯函数：空 URL 时**不**打印粘进去必 400 的 `nodes[]` 片段。
 
     `channel` 决定「没有 URL」该怪谁：relay 模式根本没有 cloudflared 进程，
     还去指「看 cloudflared 日志尾部」是把人往错方向送（2026-11-18 DSW 现场）。
+
+    入参 = 一个 `BannerSpec`（P0-3 批 F1）；下面一次展开，函数体逐字不动。
     """
+    node_id, url, auth = spec.node_id, spec.url, spec.auth
+    workers, bun_version = spec.workers, spec.bun_version
+    code_hash, hub_configured = spec.code_hash, spec.hub_configured
+    reg_state, channel = spec.reg_state, spec.channel
+    hub_url = spec.hub_url
     lines = ["=" * 68]
     if hub_configured and reg_state.get("url"):
         lines.append(f"★ 已自动注册 : id={node_id}（rl-config.nodes[] 每轮热读，已生效）")
@@ -1101,16 +1120,18 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
 
     # ── 6. 横幅（注册成功 = 自动；否则保留手工路径）───────────────────────
     for line in _banner_lines(
-        node_id=node_id,
-        url=tunnel.url,
-        auth=session.auth,
-        workers=workers,
-        bun_version=_proc_bun_version(bun, fallback=""),
-        code_hash=str((ping or {}).get("codeHash", "")),
-        hub_configured=session.hub_configured,
-        reg_state=session.reg_state,
-        channel=tunnel.link,
-        hub_url=hub_url,
+        BannerSpec(
+            node_id=node_id,
+            url=tunnel.url,
+            auth=session.auth,
+            workers=workers,
+            bun_version=_proc_bun_version(bun, fallback=""),
+            code_hash=str((ping or {}).get("codeHash", "")),
+            hub_configured=session.hub_configured,
+            reg_state=session.reg_state,
+            channel=tunnel.link,
+            hub_url=hub_url,
+        )
     ):
         log(line)
 
