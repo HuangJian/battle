@@ -72,8 +72,8 @@ describe('口径源码哨兵：训练导出器（P3）', () => {
     expect(apply).toBeLessThan(score) // 打包/打分前一次应用
   })
 
-  it('METRICS_VERSION = 17（v15 wallPressTicks + v16 pickupDist BFS + v17 baseIntruderTicks）', () => {
-    expect(roll).toContain('export const METRICS_VERSION = 17')
+  it('METRICS_VERSION = 18（v15 wallPressTicks + v16 pickupDist BFS + v17 baseIntruderTicks + v18 环内事件流）', () => {
+    expect(roll).toContain('export const METRICS_VERSION = 18')
   })
 
   it('metrics v11：bulletOwnerId 接线（3 处 push，且写在 bulletId 之后）', () => {

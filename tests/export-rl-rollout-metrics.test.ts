@@ -99,6 +99,9 @@ function makeTelemetry(over: Partial<Telemetry> = {}): Telemetry {
     stuckTicksCum: 0,
     wallPressTicks: 0,
     baseIntruderTicks: 0,
+    // metrics v18（idx91–92）：环内事件流。
+    ringKilledCum: 0,
+    ringIntrudedCum: 0,
     cooldownRejectTicks: 0,
     thShotsAtBaseCum: 0,
     thCostBreach: 0,
@@ -204,9 +207,13 @@ describe('export-rl-rollout metrics 行宽', () => {
     expect(names[87]).toBe('thCostDirect')
     expect(names[88]).toBe('thCostDirectAimed')
     // v15：wallPressTicks 追加在尾部（idx89）；v16：pickupDist 换口径（列宽不变）；
-    // v17：baseIntruderTicks 追加在尾部（idx90）。
+    // v17：baseIntruderTicks 追加在尾部（idx90）；v18：环内事件流两列（idx91–92）。
     expect(names[89]).toBe('wallPressTicks')
-    expect(py).toContain('METRICS_VERSION = 17')
+    expect(names[90]).toBe('baseIntruderTicks')
+    expect(names[91]).toBe('ringKilledCum')
+    expect(names[92]).toBe('ringIntrudedCum')
+    expect(py).toContain('METRICS_VERSION = 18')
+    expect(METRICS_DIM).toBe(93)
   })
 
   it('v15 wallPressTicks：累计值原样落在 idx89', () => {

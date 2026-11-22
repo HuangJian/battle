@@ -36,6 +36,9 @@ DEFAULT_RANGES: dict[str, tuple[float, float]] = {
     # metrics v17（2026-11-22）：基地环内有敌的 tick 数（0..ticks）。公式侧一律用
     # `/(ticks+1)` 归一后再乘权重（满量程 = 权重），所以这里只需要 tick 的上界。
     "baseIntruderTicks": (0.0, 36000.0),
+    # v18：环内事件流。击杀 ≤ 20（一关 20 台敌车）；进环是同车可重复计数 ⇒ 只设宽上界。
+    "ringKilledCum": (0.0, 20.0),
+    "ringIntrudedCum": (0.0, 400.0),
     "kills": (0.0, 40.0),
     "lives": (0.0, 9.0),
     "playerHits": (0.0, 200.0),

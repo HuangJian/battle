@@ -90,7 +90,10 @@ def main() -> None:
         "cases": cases,
     }
     GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
-    GOLDEN_PATH.write_text(json.dumps(doc, indent=1), encoding="utf-8")
+    # 显式 LF（2026-11-22）：golden 是入库产物，Windows 上 `write_text` 会写 CRLF ⇒
+    # 一次重生成把整个文件变成"全行改动"（18 万行 diff），真实的列宽变更被淹没。
+    with open(GOLDEN_PATH, "w", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps(doc, indent=1))
     print(f"golden regenerated: {GOLDEN_PATH} ({len(cases)} cases)")
 
 

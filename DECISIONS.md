@@ -9667,3 +9667,19 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   课程 `max_hours`、控制台 hold/stall 告警已经在守那一半，而它打在正常路径上。
 - **验证**：nn 全量门禁 6707 passed / dashboard 2215 / 根 2867 全绿；回归用例钉住
   it497→iters1000=503 轮可导。全文 → `docs/nn/engineering.md` §287。
+
+## §2026-11-22-ringkill-event-stream（环内目标改成"事件流"，只奖击杀、不罚进环次数）
+
+- **背景**：g10-press 证伪了 v17 的写法 `- wIntr*baseIntruderTicks/(ticks+1)`：比率式让 Φ 每拍
+  增量 ∝ 1/t（260 轮 `ip` 一点没动），而比率的分母（局长）才是判别力来源（满池 AUC：绝对环内
+  拍数 0.474 / 局长 0.807 / 比率 0.319）⇒ 罚它等于奖励"把局拖长"。
+- **决定**：metrics v18 加两列**单调事件计数** `ringKilledCum` / `ringIntrudedCum`（行宽 93）；
+  新课 `g11-ringkill` 的环内项改成 ①驻留累计式 `- wIntr*min(cap, max(0, B − free·T))`
+  ②击杀奖 `+ wRingKill*min(cap, ringKilledCum)`，**进环次数只读、不上价**
+  （罚"来"会推向"追出去打"，而 §160 补三 实测 NN 放进来的压力本就比 God 少）。
+- **被否决**：把比率写成"赤字账" `ringKilledCum − 0.30·ringIntrudedCum` —— 每个(放进来, 杀掉)
+  净赚 +0.7·w，**奖励"放进来再杀"**，与诊断方向相反；也否决了"继续抬 wIntr"（无梯度项乘 2）。
+- **代价**：v18 = shard 格式变更 ⇒ 旧 91 列 shard 读不了（形状断言响亮失败），**采样节点必须换包**；
+  eval 行加两条同义别名（`ringKilledCum←ringKills`），不重复采集。
+- **验证**：nn 全量 6715 passed / 根 2873 passed；隔离探针证明每步增量 = `+12·Δkill − 0.066·Δ过免费带拍`。
+  全文 → `docs/nn/experiments.md` §163；课程 → `nn-training/curricula/g11-ringkill.jsonc`。

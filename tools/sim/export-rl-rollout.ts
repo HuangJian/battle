@@ -101,6 +101,7 @@ import {
   enemyBulletLaneWeightTick,
   exposureExempt,
   countBaseIntruders,
+  syncRingMembers,
   inThreatLane,
   nearestEnemyDistPx,
   playerHpRatio,
@@ -315,7 +316,7 @@ export const RL_SHARD_FILES_V6_OPENING = [...RL_SHARD_FILES_V6, 'policy_mask.npy
 // **本常量必须与 `buildMetricsRow` 的行宽一致** —— 2026-09-12 的 P0：只改了行、没改
 // 这里，`metrics.set(row, i * METRICS_DIM)` 每局越界抛 RangeError，整条采集腿零产出。
 // 导出仅供测试断言行宽（tests/export-rl-rollout-metrics.test.ts）。
-export const METRICS_DIM = 91
+export const METRICS_DIM = 93
 /**
  * metrics **v12**：v11 的热线族 2 列（idx74–75，plan/metrics-v11-hotlane.plan.md §2；第三列被
  * §4bis 杀线拦下）+ v12 的 freeze ∪ 道具盾窗口 3 列（idx76–78，
@@ -329,7 +330,7 @@ export const METRICS_DIM = 91
  * ⇒ `[run_rl] remote it1: 无完整 shard（traj ... 空）——无法发布 job` ⇒ 三门课全部
  * `aborted ppo`，而 shard 明明已经落在 `it1/dist/self/` 里。
  */
-export const METRICS_VERSION = 17
+export const METRICS_VERSION = 18
 /**
  * 列名（顺序 = `buildMetricsRow` 的实现顺序，SSOT）。Python `reward_library.METRICS`
  * 必须与本数组**逐位相等**（跨语言列序 oracle，sb P2-D；tests/export-rl-rollout-metrics.test.ts）。
@@ -440,6 +441,16 @@ export const METRICS_COLUMN_NAMES: readonly string[] = [
   // v17：基地环内有敌的 tick 数（0..ticks）。用途见 docs/nn/experiments.md §161：
   // 「进来之后打不死」是 NN 与 God 差距的大头，奖励侧需要一个逐拍入侵读数。
   'baseIntruderTicks',
+  // ---- metrics v18（2026-11-22，g10-press 结课 / §163）：环内**事件流**两列 ----
+  // v17 的 `baseIntruderTicks/(ticks+1)` 是**比率式** ⇒ Φ 每拍增量 ∝ 1/t，罚不到后期；
+  // 而比率的分母让「拖长局」也能降读数。这两列是**单调累计的计数**（每拍增量 0/1），
+  // 公式侧用差分 ⇒ 每个事件恒定金额：`ringKilledCum` = 打掉一个**已经进环**的敌人的次数。
+  'ringKilledCum',
+  // 进环次数（同一辆车出环再进算两次；与 eval 侧 `ringIntruders` 同口径）。
+  // ⚠ **只读、不上价**：给 `ring_kill_rate` 做分母（训练侧也能直接算比率），
+  //   但**不要**按它扣钱——§160 补三 实测 NN 放进去的压力本来就比 God 少，罚"来"
+  //   只会把它推向"追出去打"，那是 g7-def 的老毛病。
+  'ringIntrudedCum',
 ]
 /**
  * pickupDist 哨兵：无**可达**存活拾取（或玩家不在场）时填此值 —— 与 firstKillTick/clearTick
@@ -721,6 +732,10 @@ export interface Telemetry {
   wallPressTicks: number
   /** v17：基地环内（≤`BASE_INTRUDER_CELLS` 格）有存活敌的 tick 数（0..ticks）。 */
   baseIntruderTicks: number
+  /** v18：打掉「已进环的敌人」的次数（单调；进环过的车才计，出环后再杀不计）。 */
+  ringKilledCum: number
+  /** v18：进环次数（同一辆车出环再进算两次；只读，不上价）。 */
+  ringIntrudedCum: number
   /** 请求方向 ≠ 已提交朝向（转向被冷却按回）的拍数。 */
   cooldownRejectTicks: number
   /** 累计「敌弹朝鹰/环墙发射」次数（按弹 id 去重，见 `seenBaseBulletIds`）。 */
@@ -919,6 +934,8 @@ export function buildMetricsRow(t: number, world: World, tel: Telemetry): number
     tel.thCostDirectAimed, // 88
     tel.wallPressTicks, // 89（v15：逐 tick 累计，公式侧用差分/速率）
     tel.baseIntruderTicks, // 90（v17：基地环内有敌的 tick 数；与 eval 侧 ringIntruders 同环）
+    tel.ringKilledCum, // 91（v18：环内击杀次数；累计计数，公式侧差分 = 每杀恒定金额）
+    tel.ringIntrudedCum, // 92（v18：进环次数；只读，做 ring_kill_rate 的分母）
   ]
 }
 
@@ -1540,6 +1557,8 @@ function runOne(
     stuckTicksCum: 0,
     wallPressTicks: 0,
     baseIntruderTicks: 0,
+    ringKilledCum: 0,
+    ringIntrudedCum: 0,
     cooldownRejectTicks: 0,
     thShotsAtBaseCum: 0,
     thCostBreach: 0,
@@ -1548,6 +1567,8 @@ function runOne(
     thCostDirectAimed: 0,
   }
   const seenPuIds = new Set<number>()
+  // metrics v18：当前**在环内**的敌车 id（进/出环维护；击杀归因读它）
+  const ringIds = new Set<number>()
   let prevLivePuIds = new Set<number>()
   let prevCell = { col: -1, row: -1 }
   /** metrics v9：bulletId → **开火时刻** shooter 中心格键（`bullet_fired` 事件登记）。
@@ -1817,6 +1838,15 @@ function runOne(
     else if (winKind === 'respawnShield' || winKind === 'starShieldGrace')
       tel.deathDerivedShieldTicks++
 
+    // ---- metrics v18：环内事件流（进环 / 环内击杀）----
+    // 与 eval 侧 `export-eval-game.ts` 的 ring 账**同口径**（Chebyshev ≤ `BASE_INTRUDER_CELLS`，
+    // 出生保护中的车不计；出环即摘）。位置必须**在 `consumeEvents()` 之前**（同 eval 侧）：
+    // 本 tick 阵亡的车在 tick 末已从 `world.tanks` 摘掉 ⇒ 只有**上一步留下的集合**才能在
+    // `tank_destroyed` 里认出「它进过环」，也才不会有「车没了但 id 留在集合里」的假计数。
+    // 已知缺口（与 `killsByKind` 同一条，别在这儿补）：bomb 清屏走 `recordEnemyKill`、
+    // **不推** `tank_destroyed` ⇒ 那一批环内击杀计不到。
+    tel.ringIntrudedCum += syncRingMembers(world.allTanks, ringIds)
+
     // ---- telemetry（语义对齐 simulation-runner）----
     let collectedThisTick = 0
     let hitThisTick = false
@@ -1835,6 +1865,9 @@ function runOne(
           // 侧试图"补齐"成相等——那会让口径与 `recordEnemyKill` 的真实计数分叉。
           const ki = enemyKindIndex((e as any).tank.kind)
           if (ki >= 0) tel.killsByKind[ki]++
+          // metrics v18：这一杀算不算「环内拦截」= 死者**此刻**在环内（`delete` 返回它是否在
+          // 集合里，顺带把 id 摘掉）。出环后再杀的**不算**——那已经不是"打掉进来的敌人"。
+          if (ringIds.delete((e as any).tank.id)) tel.ringKilledCum++
         }
       } else if (e.type === 'player_hit') {
         tel.playerHits++

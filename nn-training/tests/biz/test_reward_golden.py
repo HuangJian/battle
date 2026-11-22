@@ -836,6 +836,9 @@ def test_item_metrics_layout_locked() -> None:
         "wallPressTicks",  # idx89（v15：v13 撞墙判据的唯一列；累计 tick，公式侧用差分）
         # ---- metrics v17（2026-11-22，experiments §161）----
         "baseIntruderTicks",  # idx90（基地环内≤6格有存活敌的 tick 数；与 eval 侧 ring 同环）
+        # ---- metrics v18（2026-11-22，experiments §163 / g10-press 结课）----
+        "ringKilledCum",  # idx91（打掉"已进环的敌人"的次数；单调，公式侧差分）
+        "ringIntrudedCum",  # idx92（进环次数；只读，做 ring_kill_rate 分母）
     ]
     assert METRIC_INDEX["puGotBomb"] == 25
     assert METRIC_INDEX["puSpawnShield"] == 24
@@ -971,7 +974,7 @@ def test_credit_p6_formula_and_course() -> None:
     # v17（2026-11-22）：换列 `baseIntruderTicks`（idx90，行宽 90→91）。**版本断言随每次
     # 语义/列数变更一起改**，它是"旧语料读不了"的硬提醒（rollout shard 由各课现场生成，
     # 90 列的旧 shard 会在 `np_core.py` 形状断言处响亮失败）。
-    assert METRICS_VERSION == 17
+    assert METRICS_VERSION == 18
 
     # 公式按列加权：杀 1 basic 再杀 1 power 的两步势差 = +3 / +6（wHit/wWin 本例为 0）
     spec = RewardSpec(

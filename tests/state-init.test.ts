@@ -259,7 +259,7 @@ describe('P1 注入语义（applyInitSnapshot / runOneBench 端到端）', () =>
     expect(a.initCounters).toBeNull()
     expect(a.initSnapshot).toBe('')
     expect(a.shard.metrics[0][0]).toBe(0)
-    expect(METRICS_VERSION).toBe(17) // v17：+ baseIntruderTicks（行宽 91）；v15：+ wallPressTicks；v16：pickupDist 换 BFS
+    expect(METRICS_VERSION).toBe(18) // v18：+ ringKilledCum/ringIntrudedCum（行宽 93）；v17：+ baseIntruderTicks；v15：+ wallPressTicks
     expect(a.shard.n).toBe(b.shard.n)
     expect(a.ticks).toBe(b.ticks)
     expect(a.kills).toBe(b.kills)

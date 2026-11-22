@@ -703,19 +703,79 @@ export function hotLaneTick(win: HotLaneWindow, world: World, exempt: boolean): 
  * 零分配、只用 `world.allTanks`（AGENTS §14.6）。
  */
 export function countBaseIntruders(world: World): number {
-  const cx = (BASE_POS.col + 1) * CELL
-  const cy = (BASE_POS.row + 1) * CELL
-  const band = BASE_INTRUDER_CELLS * CELL
   let n = 0
   const tanks = world.allTanks
   for (let i = 0; i < tanks.length; i++) {
     const t = tanks[i]
     if (!t.alive || t.allegiance !== 'enemy' || t.spawnTimer > 0) continue
-    const dx = Math.abs(t.x + t.w / 2 - cx)
-    const dy = Math.abs(t.y + t.h / 2 - cy)
-    if (dx <= band && dy <= band) n++
+    if (inBaseIntruderRing(t)) n++
   }
   return n
+}
+
+/** 基地中心 x（px）= `BASE_POS` 2×2 的中心；与 eval 侧 `ringCx` 同式。 */
+export function baseRingCenterX(): number {
+  return (BASE_POS.col + 1) * CELL
+}
+
+/** 基地中心 y（px）；见 {@link baseRingCenterX}。 */
+export function baseRingCenterY(): number {
+  return (BASE_POS.row + 1) * CELL
+}
+
+/**
+ * 该车中心是否落在**基地入侵环**内（Chebyshev ≤ `BASE_INTRUDER_CELLS` 格）。
+ *
+ * 与 `countBaseIntruders` / eval 侧 `export-eval-game.ts` 的 `inRing` **逐字同式**
+ * （自 2026-11-22 metrics v18：三个读者只剩这一份几何）。
+ * **不判死活/出生保护**——那是调用方的事（`countBaseIntruders` 跳过未接战的车，
+ * v18 的事件流按同一门槛只认已接战的车）。
+ */
+export function inBaseIntruderRing(t: { x: number; y: number; w: number; h: number }): boolean {
+  const band = BASE_INTRUDER_CELLS * CELL
+  const dx = Math.abs(t.x + t.w / 2 - baseRingCenterX())
+  const dy = Math.abs(t.y + t.h / 2 - baseRingCenterY())
+  return dx <= band && dy <= band
+}
+
+/** `syncRingMembers` 需要的最小车身面（`World.allTanks` 的元素满足它；测试可造合成车）。 */
+export interface RingTrackable {
+  id: number
+  x: number
+  y: number
+  w: number
+  h: number
+  alive: boolean
+  allegiance: string
+  spawnTimer: number
+}
+
+/**
+ * 维护「当前在环内的敌车 id 集合」，返回本次**新进环**的车辆数（metrics v18 的
+ * `ringIntrudedCum` 增量）。
+ *
+ * 语义与 eval 侧 `export-eval-game.ts` 的 ring 账**逐条同口径**：
+ *   · 只认 `alive && enemy && spawnTimer<=0`（出生保护中的车不算"已入侵"）；
+ *   · 进环记一次（同一辆车**出环再进算第二次**——那是又一次入侵）；
+ *   · 出环即摘（出环后再杀**不算**环内击杀，由调用方在 `tank_destroyed` 里 `delete` 判定）。
+ *
+ * 零分配（集合由调用方持有，AGENTS §14）；`Set.add/delete/has` 是热路径上最便宜的那种。
+ */
+export function syncRingMembers(tanks: readonly RingTrackable[], inRing: Set<number>): number {
+  let entered = 0
+  for (let i = 0; i < tanks.length; i++) {
+    const tk = tanks[i]
+    if (!tk.alive || tk.allegiance !== 'enemy' || tk.spawnTimer > 0) continue
+    const now = inBaseIntruderRing(tk)
+    const had = inRing.has(tk.id)
+    if (now && !had) {
+      inRing.add(tk.id)
+      entered++
+    } else if (!now && had) {
+      inRing.delete(tk.id)
+    }
+  }
+  return entered
 }
 
 /** 「基地入侵」环半径（格）：与 eval 侧 `INTRUDER_RING_CELLS` **必须同值**。 */

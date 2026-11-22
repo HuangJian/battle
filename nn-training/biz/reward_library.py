@@ -256,6 +256,16 @@ METRICS: tuple[str, ...] = (
     # （§160 补三），压力量纲与"进来之后打不死"不是一回事；本列是 dwell（在场时间）。
     # 累计 tick（0..ticks），公式侧用 `share(ticks)` 归一，满量程 = 1。
     "baseIntruderTicks",  # 90
+    # ---- metrics v18（2026-11-22，g10-press 结课 / experiments §163；idx91–92）----
+    # v17 那条罚写成了 `baseIntruderTicks/(ticks+1)` —— **比率式** ⇒ Φ 每拍增量 ∝ 1/t
+    # （后期梯度 ~1e-5，实测 260 轮完全没动行为），而且分母让"拖长局"也能降读数
+    # （满池 AUC(局长 T)=0.807 vs AUC(绝对环内拍 B)=0.474）。这两列把"环内"拆成
+    # **单调事件计数**（每拍增量 0/1）⇒ 差分后每个事件恒定金额，不随 t 衰减。
+    # `ringKilledCum`：打掉一个**已经进环**的敌人的次数（这就是 §161 的「进来之后打不掉」）。
+    # `ringIntrudedCum`：进环次数（同车出环再进算两次）。**只读、不上价**——罚"来"会把
+    # 策略推向"追出去打"（g7-def 的老毛病），而 §160 补三 实测 NN 放进去的压力本就比 God 少。
+    "ringKilledCum",  # 91
+    "ringIntrudedCum",  # 92
 )
 
 METRIC_INDEX: dict[str, int] = {name: i for i, name in enumerate(METRICS)}
@@ -284,7 +294,10 @@ METRICS_DIM = len(METRICS)
 #: v15（2026-11-03，同计划腿 B）：追加 wallPressTicks（idx89），行宽 90。
 #: v16（2026-11-03）：pickupDist(40) 口径由曼哈顿直距改为 BFS 路径距离（列宽不变，
 #: 旧 v15 语料的同名列是另一个量 ⇒ 不可混训）。
-METRICS_VERSION = 17
+#: v18（2026-11-22，g10-press 结课 / experiments §163）：追加 idx91–92 环内事件流
+#: （`ringKilledCum` / `ringIntrudedCum`），行宽 91→**93**。**采样节点必须换 v18 的包**
+#: （旧包产 91 列 shard ⇒ `np_core` 读时响亮失败，不静默）。
+METRICS_VERSION = 18
 
 #: 终局 outcome 名（与 TS `manifest.outcome` 同源）；未列出的 terminal 键 = 0。
 OUTCOMES: tuple[str, ...] = ("stage_clear", "lives_exhausted", "timeout", "base_destroyed")
@@ -1031,7 +1044,8 @@ def _self_check() -> None:
     # v14：mask 语义变更（列宽不变）
     # v15：追加 idx89 wallPressTicks
     # v17：追加 idx90 baseIntruderTicks（v16 是 x2 事件 rung，列宽不变）
-    assert len(METRICS) == METRICS_DIM == 91, METRICS_DIM
+    # v18：追加 idx91–92 环内事件流（ringKilledCum / ringIntrudedCum）
+    assert len(METRICS) == METRICS_DIM == 93, METRICS_DIM
     assert len(set(METRICS)) == METRICS_DIM
 
 

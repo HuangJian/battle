@@ -171,6 +171,9 @@ function mkTel(): Telemetry {
     stuckTicksCum: 0,
     wallPressTicks: 0,
     baseIntruderTicks: 0,
+    // metrics v18（idx91–92）：环内事件流。
+    ringKilledCum: 0,
+    ringIntrudedCum: 0,
     cooldownRejectTicks: 0,
     thShotsAtBaseCum: 0,
     thCostBreach: 0,

@@ -100,8 +100,19 @@ EVAL_RING_KEYS = (
 
 
 def eval_ring_fields(manifest: dict | None) -> dict:
-    """从 eval 报告 manifest 抽出环内拦截七列（缺键 = None）。"""
-    return {k: (manifest.get(k) if isinstance(manifest, dict) else None) for k in EVAL_RING_KEYS}
+    """从 eval 报告 manifest 抽出环内拦截族（缺键 = None）。
+
+    ★ 2026-11-22（metrics v18）：额外给出 `ringKilledCum` / `ringIntrudedCum` 两个**同义别名**。
+    为什么要别名而不是加两列采集：`biz.reward_library.METRICS` 里这两个名字是**奖励输入**
+    （rollout shard 的列），而 eval 侧同一事件本来就叫 `ringKills` / `ringIntruders`
+    （`export-eval-game.ts` 的 ring 账，同一环 `BASE_INTRUDER_CELLS`、同一事件）
+    ⇒ 换名字不换数。`test_eval_metric_columns` 的覆盖守卫要求 METRICS 每个名字都在行里，
+    这条别名是它唯一的来源（不重复计算、也不伪造：报告缺键 ⇒ 两者都是 None）。
+    """
+    out = {k: (manifest.get(k) if isinstance(manifest, dict) else None) for k in EVAL_RING_KEYS}
+    out["ringKilledCum"] = out["ringKills"]
+    out["ringIntrudedCum"] = out["ringIntruders"]
+    return out
 
 
 #: metrics v8 危险暴露四列（plan/x20-dodge-avoidance §2；`src/nn/danger-metrics.ts`

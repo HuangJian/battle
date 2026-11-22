@@ -7980,3 +7980,44 @@ s28 14% vs 43%（−29）、s32 26% vs 54%（−29）；进环数 s32(179 vs 200
 列数 oracle）· `eval-game-parity` **6/6** · `test_reward_golden` **64/64** · `test_eval_ring_summary` **2/2** ·
 `test_offline_eval_cloud` 等 summary 族 **63/63** · 端到端：35 局 eval 行里 `baseIntruderTicks` =
 0/1008/1179/1151/1641（对应 ticks 4725/1816/…，输的那局 1008/1816 = 55% 时间环内有敌）。
+
+## §163 metrics v18：环内**事件流**两列 + g11-ringkill 立课 —— 把"进来打不掉"换成可学习的梯度（2026-11-22 18:1x）
+
+**背景**：§162 的 g10-press 判死（结课报告写在 `curricula/g10-press.jsonc` 尾部）。病根不是系数，
+是**那一项没有梯度**：`- wIntr*baseIntruderTicks/(ticks+1)` 是比率式 ⇒ Φ 每拍增量 ∝ 1/t
+（3000 拍时 ≈1e-5），实测 260 轮 `ip` 从 0.1627 到 0.1751（还涨了）。更糟的是比率本身：
+满池 700 局 AUC(绝对环内拍数 B)=**0.474**（毁局反而更少，同关内中位 −51 拍）、AUC(局长 T)=0.807、
+AUC(B/T)=0.319 ⇒ `ip` 的判别力**全来自分母**，罚它还顺带奖励"把局拖长"（胜局拍 p50 +8.2%）。
+
+**这一版改了什么**
+
+1. **metrics v18（行宽 91 → 93）**：加两列**单调事件计数**（每拍增量 0/1，差分后每事件恒定金额）
+   * `ringKilledCum`（idx91）= 打掉"**已进环**的敌人"的次数 —— §161 的病根就是这个事件；
+   * `ringIntrudedCum`（idx92）= 进环次数（同车出环再进算两次），**只读、不上价**。
+   环形几何唯一实现：`src/nn/danger-metrics.ts::inBaseIntruderRing`（rollout 侧）+ 记账
+   `syncRingMembers`（进/出环/had 三态）；eval 侧 `export-eval-game.ts` 的 inline 同式。
+2. **新课程 `g11-ringkill`**（起点仍是 `g7-def.it120`，其余奖励逐字继承 g10-press）：
+   * 驻留罚换**累计式** `- wIntr*min(600, max(0, B − 0.08·T))`，wIntr=0.066/拍 ⇒ 满量程 **39.6**；
+   * 新增**环内击杀奖** `+ wRingKill*min(3, ringKilledCum)`，12/次 ⇒ 满量程 **36**；
+   * **不罚进环次数**：§160 补三 实测 NN 放进去的压力本就比 God 少，罚"来"= 推向"追出去打"。
+   * 被否决的写法：`killed − 0.30·intruded`（"赤字账"）。它把比率写成线性式，但每个
+     (放进来, 杀掉) 净赚 +0.7·w ⇒ **奖励"放进来再杀"**，与诊断方向相反。
+3. **eval 行别名**：`eval_ring_fields` 额外给 `ringKilledCum/ringIntrudedCum = ringKills/ringIntruders`
+   ——同一事件、同一环，只是 METRICS 族要这个名字（`test_eval_metric_columns` 的覆盖守卫）。
+
+**预注册（决策点 it190）**：主判行为 `ring_kill_rate ≥ 25%`（起点 19.6%、God 36.7%）且
+`ringIntrudedCum/局` 不比起点高 >10%；主判胜负 胜率 ≥ 起点（−1pp 内算平）且基毁 ≤ 起点 −3pp；
+护栏 k/千 ≥ 2.4、胜局拍 ≤ +8%；**it70 提前判**：两个环内读数都没高于起点 ⇒ 停。
+⚠ **起点必须在新包下重测**：v18 换行宽，g10-press 那次 it0 是借 v17 前的 `reuse` 面板
+（连 `baseIntruderTicks` 都没有）。判成功必须**行为量与胜负同时**过门——两条腿都在
+−1pp/100it 下坡（§162 ④），单看胜率会被那条坡吞掉。
+
+**验证**：`nn-python-gate` **6715 passed / 13 skipped**（ruff+mypy 净；golden 64 例按 v18 重生成，
+`regen_reward_golden.py` 顺手改成显式 LF——Windows 上 `write_text` 写 CRLF 会把一次重生成
+放大成 18 万行 diff）· 根 `bun run check` **2873 passed** · 新用例
+`tests/sim/ring-track.test.ts` 6 条（6 格边界 / Chebyshev 对角 / 出生保护不计 / 出环再进算两次 /
+出环后杀不算环内击杀）· 隔离探针：两项的每步增量恒为 `+12·Δkill − 0.066·Δ过免费带拍数`。
+
+**边界**：`ringKilledCum` 有与 `killsByKind` 同一个缺口（bomb 清屏走 `recordEnemyKill`、
+**不推** `tank_destroyed` ⇒ 那一批环内击杀计不到），别在 metrics 侧补。
+**所有采样节点必须换 v18 的包**（旧包 91 列 ⇒ `np_core` 形状断言响亮失败；修法是换包不是重采）。
