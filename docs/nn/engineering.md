@@ -29,6 +29,32 @@
 
 ---
 
+## §311 P0-3 批 G2：`bundle` 的导出面两处收 spec（23 → 21）（2026-11-22）
+
+* **同文件两个导出面**：`remote/bundle.export_bundle`(1 位置 + 9 关键字 → `BundleSpec`) 与
+  `write_export_status`(1 位置 + 9 关键字 → `ExportStatusSpec`)。读数：宽签名 **23 → 21**、
+  18 → **17** 文件（`remote/bundle.py` 基线归零，仍是 LOC 419 未动的那个文件）。守
+  `tests/remote/test_bundle_spec.py`。
+* **`export_bundle` 的坏点 = 三条相邻路径**：`code_zip_path` / `ts_code_zip_path` /
+  `opt_tar_path`（代码包 / TS 运行时树 / Adam 动量）。互换后**包照样打得出来**，代价在云机上：
+  「代码不是这个 commit」（重放对不上）与「缺动量 ⇒ 续训从零惯性」（静默归零）。
+  `job_dir` 是第三种来源（「从 job 目录里取」），与那三条是「取 vs 给」的关系。
+* **`write_export_status` 的坏点 = 进度对**：`iters`（本段目标）/ `run_iters`（整跑累计）互换后
+  状态文件仍然合法，控制台进度只是静默地多算一截；`ok` 与 `running` 是两个 bool —— 顺序一错，
+  「进行中」被读成成功，正是 2026-10-21「13:53 只看到上一次 ok:true」那起的形态（spec 的类头
+  因此把 `running` 的语义抄了一遍）。
+* **入口只展开一次**（`out_zip, manifest = spec.out_zip, spec.manifest` …），两个函数体逐字不动。
+* **11 处调用点机械化改写**的坑：① 扫描 `export_bundle(` 会先命中 `_remote_export_bundle(`
+  ——方法名后缀同形，必须加**标识符左边界**判断（`s[j-1].isalnum() or "_"`）；② e2e 那处实参里有
+  内联 manifest **字典**，只数圆括号的切分会把它按逗号劈开（`"kind": "run"` 被认成关键字）⇒
+  深度必须同时数 `()[]{}`；③ 模块导入式调用点（`bundle_mod.export_bundle`）要连 spec 名一起加
+  前缀（`bundle_mod.BundleSpec`），否则 F821；④ 指针走的是**逐文件写盘**，中途断言失败只留下
+  已改完的文件 ⇒ 重跑脚本前先给每个文件加「这个 spec 名是否已出现」的幂等闸。
+* **守卫里不许出现抑制符**：`# type: ignore[attr-defined]` 会让 `test_suppression_budget` 直接红
+  （基线 0）。`__dataclass_params__` 这类下划线属性用**变量化的 `getattr`**（`params = "…"`）
+  同时避开 mypy 与 ruff B009；重复关键字写两遍（F601）也不行 ⇒ 改断「拼错的相邻字段名
+  ⇒ TypeError」，断的仍是同一件事（不许静默落缺省）。
+
 ## §310 P0-3 批 H2：`tools/tpu-probe.bench_case`(9) → `BenchCaseSpec`（24 → 23）（2026-11-22）
 
 * **工具面最后一条**：`bench_case(bk, chunks, epochs, *, sync_mode, ref_cache, ref_model,

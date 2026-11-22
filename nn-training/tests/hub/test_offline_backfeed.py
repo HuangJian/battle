@@ -366,18 +366,14 @@ def _export_pack(tmp_path: Path, *, run_id: str, plan: bytes, monkeypatch) -> Pa
         z.writestr("tools/sim/x.ts", "// ts\n")
     out = tmp_path / COURSE / f"task-{COURSE}.zip"
     bundle_mod.export_bundle(
-        out,
-        manifest={
-            "kind": "run",
-            "runId": run_id,
-            "it": 1,
-            "plan_sha256": sha256_bytes(plan),
-            "commit": "c" * 40,
-        },
-        plan_bytes=plan,
-        init_weights_path=src / "init_weights.json",
-        code_zip_path=src / "code.zip",
-        ts_code_zip_path=src / "ts_code.zip",
+        bundle_mod.BundleSpec(
+            out_zip=out,
+            manifest={ "kind": "run", "runId": run_id, "it": 1, "plan_sha256": sha256_bytes(plan), "commit": "c" * 40, },
+            plan_bytes=plan,
+            init_weights_path=src / "init_weights.json",
+            code_zip_path=src / "code.zip",
+            ts_code_zip_path=src / "ts_code.zip",
+        )
     )
     return out
 

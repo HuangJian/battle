@@ -147,12 +147,14 @@ def test_read_pack_index_accepts_a_pack_written_by_the_exporter(
         z.writestr("tools/sim/x.ts", "// ts\n")
     out = tmp_path / "task-c5-gae.zip"
     bundle_mod.export_bundle(
-        out,
-        manifest=manifest,
-        plan_bytes=plan,
-        init_weights_path=w / "init_weights.json",
-        code_zip_path=w / "code.zip",
-        ts_code_zip_path=w / "ts_code.zip",
+        bundle_mod.BundleSpec(
+            out_zip=out,
+            manifest=manifest,
+            plan_bytes=plan,
+            init_weights_path=w / "init_weights.json",
+            code_zip_path=w / "code.zip",
+            ts_code_zip_path=w / "ts_code.zip",
+        )
     )
     idx = offline_boot.read_pack_index(out)
     assert idx["magic"] == bundle_mod.BUNDLE_MAGIC

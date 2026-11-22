@@ -29,6 +29,7 @@ from remote.bundle import (
     EXPORT_STATUS_MAGIC,
     EXPORT_STATUS_NAME,
     EXPORT_STATUS_PROTO,
+    ExportStatusSpec,
     export_status_guard,
     export_status_path,
     write_export_status,
@@ -146,7 +147,13 @@ def test_write_never_raises_and_degrades_to_none(tmp_path: Path) -> None:
     """旁挂件**不配把主腿拖红**：写不下（父路径是个文件）⇒ 返回 `None`、不抛。"""
     blocker = tmp_path / "not-a-dir"
     blocker.write_text("x", encoding="utf-8")
-    assert write_export_status(blocker, ok=True, exit_code=0) is None
+    assert write_export_status(
+        ExportStatusSpec(
+            pack_dir=blocker,
+            ok=True,
+            exit_code=0,
+        )
+    ) is None
     # 导出腿本身照旧走完（守卫只降级，不改控制流）
     with export_status_guard(_args(blocker)):
         pass

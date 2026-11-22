@@ -516,18 +516,14 @@ def _real_pack(
     out = tmp_path / "packs" / f"task-{course}.zip"
     out.parent.mkdir(parents=True, exist_ok=True)
     bundle_mod.export_bundle(
-        out,
-        manifest={
-            "kind": "run",
-            "runId": "run-e2e",
-            "it": 1,
-            "plan_sha256": hashlib.sha256(plan).hexdigest(),
-            "commit": "c" * 40,
-        },
-        plan_bytes=plan,
-        init_weights_path=src / INIT_WEIGHTS_NAME,
-        code_zip_path=code_zip,
-        ts_code_zip_path=src / TS_CODE_NAME,
+        bundle_mod.BundleSpec(
+            out_zip=out,
+            manifest={ "kind": "run", "runId": "run-e2e", "it": 1, "plan_sha256": hashlib.sha256(plan).hexdigest(), "commit": "c" * 40, },
+            plan_bytes=plan,
+            init_weights_path=src / INIT_WEIGHTS_NAME,
+            code_zip_path=code_zip,
+            ts_code_zip_path=src / TS_CODE_NAME,
+        )
     )
     return out
 

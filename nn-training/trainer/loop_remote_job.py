@@ -422,19 +422,20 @@ class TrainingRemoteJob(TrainingRemotePush):
         self, export_path, manifest, plan_bytes, args, job_root, jid, hub_url
     ) -> None:
         """全离线：不等待、不发 job——把这一段任务打成能上传 Kaggle/Colab 的任务包。"""
-        from remote.bundle import export_bundle
+        from remote.bundle import BundleSpec, export_bundle
 
         assert plan_bytes is not None  # 调用方保证（kind=run）
         index = export_bundle(
-            export_path,
-            manifest=manifest,
-            plan_bytes=plan_bytes,
-            init_weights_path=args.out,
-            code_zip_path=self._code_zip_path,
-            job_dir=Path(job_root) / jid,
-            hub_url=hub_url,
-            note=f"run_rl --export-bundle（it{manifest['it']} 之后整段；"
-            f"course={getattr(args, 'course_name', '') or '-'}）",
+            BundleSpec(
+                out_zip=export_path,
+                manifest=manifest,
+                plan_bytes=plan_bytes,
+                init_weights_path=args.out,
+                code_zip_path=self._code_zip_path,
+                job_dir=Path(job_root) / jid,
+                hub_url=hub_url,
+                note=f"run_rl --export-bundle（it{manifest['it']} 之后整段；" f"course={getattr(args, 'course_name', '') or '-'}）",
+            )
         )
         log(
             f"[run_rl] 全离线任务包已导出：{export_path}"

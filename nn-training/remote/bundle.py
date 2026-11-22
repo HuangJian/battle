@@ -34,6 +34,7 @@ import sys
 import time
 import zipfile
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -134,25 +135,45 @@ def _replace_when_released(tmp: Path, out: Path, *, timeout: float = _REPLACE_WA
             time.sleep(_REPLACE_POLL_SEC)
 
 
-def export_bundle(
-    out_zip: str | Path,
-    *,
-    manifest: dict,
-    plan_bytes: bytes,
-    init_weights_path: str | Path,
-    code_zip_path: str | Path,
-    job_dir: str | Path | None = None,
-    ts_code_zip_path: str | Path | None = None,
-    opt_tar_path: str | Path | None = None,
-    hub_url: str = "",
-    note: str = "",
-) -> dict:
+@dataclass(frozen=True, kw_only=True)
+class BundleSpec:
+    """打一个离线任务包的全部输入（P0-3 批 G2：1 位置 + 9 关键字 → 一个对象）。
+
+    失效面：`code_zip_path` / `ts_code_zip_path` / `opt_tar_path` 是**三条挨着的路径**（代码包 /
+    TS 运行时树 / Adam 动量）—— 互换后包照样打得出来，只是云机上「代码不对版本」「缺动量续训
+    静默归零」；`job_dir` 与上面三条是「从这里取」与「直接用这个」两种来源（同时给时以显式路径
+    为准），按位置传时最容易把 `job_dir` 挤到路径位上；`hub_url` 与 `note` 是两个 str 且都进索引。
+    """
+
+    out_zip: str | Path
+    manifest: dict
+    plan_bytes: bytes
+    init_weights_path: str | Path
+    code_zip_path: str | Path
+    #: hub 上那份 job 目录：非空时从中取 `code.zip` / `ts_code.zip` / opt blob（显式路径优先）。
+    job_dir: str | Path | None = None
+    ts_code_zip_path: str | Path | None = None
+    opt_tar_path: str | Path | None = None
+    #: 只记地址、**不记 token**（token 走 secret / `--hub-token-file`）。
+    hub_url: str = ""
+    note: str = ""
+
+
+def export_bundle(spec: BundleSpec) -> dict:
     """把一段任务打成 zip，返回索引（`task.json` 的内容）。
 
     `job_dir` 非空时从中取 `code.zip` / `ts_code.zip` / opt blob（`publish_job` 已经把这三样
     按内容寻址摆好了）——调用方因此不需要自己找文件。`hub_url` **只记地址不记 token**：
     token 是凭据，走 Kaggle secret / `--hub-token-file`，不进这个会被四处搬运的 zip。
+
+    入参 = 一个 `BundleSpec`（P0-3 批 G2）；下面一次展开，函数体逐字不动。
     """
+    out_zip, manifest = spec.out_zip, spec.manifest
+    plan_bytes, init_weights_path = spec.plan_bytes, spec.init_weights_path
+    code_zip_path = spec.code_zip_path
+    job_dir, ts_code_zip_path = spec.job_dir, spec.ts_code_zip_path
+    opt_tar_path, hub_url = spec.opt_tar_path, spec.hub_url
+    note = spec.note
     m = normalize_manifest(manifest)
     if str(m.get("kind")) != "run":
         raise ProtocolError(f"任务包的 manifest 必须是 kind='run'，收到 {m.get('kind')!r}")
@@ -292,22 +313,38 @@ def export_status_path(pack_dir: str | Path) -> Path:
     return Path(pack_dir) / EXPORT_STATUS_NAME
 
 
-def write_export_status(
-    pack_dir: str | Path,
-    *,
-    ok: bool,
-    exit_code: int,
-    reason: str = "",
-    running: bool = False,
-    course: str = "",
-    iters: int = 0,
-    run_iters: int = 0,
-    pid: int = 0,
-    pack: str = "",
-) -> Path | None:
+@dataclass(frozen=True, kw_only=True)
+class ExportStatusSpec:
+    """一次导出状态落盘的全部输入（P0-3 批 G2：1 位置 + 9 关键字 → 一个对象）。
+
+    失效面：`iters` / `run_iters` / `pid` 是三个 int 挨着 —— `iters`（本段目标）与 `run_iters`
+    （整跑累计）互换后**状态文件照样合法**，控制台进度条只是静默地少/多算一截；`ok` 与 `running`
+    是两个 bool（「成功/失败」与「进行中」）—— 顺序一错，「进行中」被读成「成功」，正是
+    §3.3 那起「13:53 只看到上一次 ok:true」的形态。
+    """
+
+    pack_dir: str | Path
+    ok: bool
+    exit_code: int
+    reason: str = ""
+    #: 启动时写的「进行中」态：控制台与 hub 必须当**不可知**，不是成功也不是失败。
+    running: bool = False
+    course: str = ""
+    iters: int = 0
+    run_iters: int = 0
+    pid: int = 0
+    pack: str = ""
+
+
+def write_export_status(spec: ExportStatusSpec) -> Path | None:
     """原子写导出状态（临时文件 + `replace`）。**绝不抛**（同 `_write_bundle_meta`）：
     写不下只降级（「文件不在」= 不可知，不是成功）。
+
+    入参 = 一个 `ExportStatusSpec`（P0-3 批 G2）；下面一次展开，函数体逐字不动。
     """
+    pack_dir, ok, exit_code = spec.pack_dir, spec.ok, spec.exit_code
+    reason, running, course = spec.reason, spec.running, spec.course
+    iters, run_iters, pid, pack = spec.iters, spec.run_iters, spec.pid, spec.pack
     status = {
         "magic": EXPORT_STATUS_MAGIC,
         "proto": EXPORT_STATUS_PROTO,
@@ -374,16 +411,18 @@ def export_status_guard(args: Any, *, pack_path: str | Path | None = None):
     #   在盘上与「还没跑完」「被 kill」不可分——控制台只能看到上一次的 ok:true（现场 13:53）。
     #   写入失败只降级（旁挂件不配把主腿拖红），终态仍由下面的 finally 负责。
     write_export_status(
-        Path(out).parent,
-        ok=False,
-        exit_code=0,
-        reason="导出进行中",
-        running=True,
-        course=str(getattr(args, "course_name", "") or ""),
-        iters=int(getattr(args, "iters", 0) or 0),
-        run_iters=int(getattr(args, "run_iters", 0) or 0),
-        pid=os.getpid(),
-        pack=out,
+        ExportStatusSpec(
+            pack_dir=Path(out).parent,
+            ok=False,
+            exit_code=0,
+            reason="导出进行中",
+            running=True,
+            course=str(getattr(args, "course_name", "") or ""),
+            iters=int(getattr(args, "iters", 0) or 0),
+            run_iters=int(getattr(args, "run_iters", 0) or 0),
+            pid=os.getpid(),
+            pack=out,
+        )
     )
     exc: BaseException | None = None
     try:
@@ -393,16 +432,18 @@ def export_status_guard(args: Any, *, pack_path: str | Path | None = None):
         raise
     finally:
         write_export_status(
-            Path(out).parent,
-            ok=exc is None,
-            exit_code=_exit_code_of(exc),
-            reason="" if exc is None else f"{type(exc).__name__}: {exc}",
-            running=False,
-            course=str(getattr(args, "course_name", "") or ""),
-            iters=int(getattr(args, "iters", 0) or 0),
-            run_iters=int(getattr(args, "run_iters", 0) or 0),
-            pid=os.getpid(),
-            pack=out,
+            ExportStatusSpec(
+                pack_dir=Path(out).parent,
+                ok=exc is None,
+                exit_code=_exit_code_of(exc),
+                reason="" if exc is None else f"{type(exc).__name__}: {exc}",
+                running=False,
+                course=str(getattr(args, "course_name", "") or ""),
+                iters=int(getattr(args, "iters", 0) or 0),
+                run_iters=int(getattr(args, "run_iters", 0) or 0),
+                pid=os.getpid(),
+                pack=out,
+            )
         )
 
 

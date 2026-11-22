@@ -10129,3 +10129,25 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **顺带修掉的假读数**：`tests/tools/probe_loader.py` 收走「按路径装载工具脚本」的动作，让三个
   新守卫不再被口径 B 误判成源码文本断言（1229 → 1227 = 基线），基线**没有**抬高。
   全文 → `docs/nn/engineering.md` §310。
+
+## §2026-11-22-bundle-export-specs
+
+**P0-3 批 G2：`remote/bundle` 两个导出面各收一份 spec（宽签名 23 → 21，18 → 17 文件）。**
+
+- **背景**：`export_bundle`(1+9) 与 `write_export_status`(1+9) 是同文件的两个导出面。前者的
+  `code_zip_path` / `ts_code_zip_path` / `opt_tar_path` 是三条相邻路径，互换不会让打包失败
+  （云机上才表现为「代码不是这个 commit」「缺动量续训静默归零」）；后者的 `iters` / `run_iters`
+  互换让进度静默多算，`ok` / `running` 互换把「进行中」读成成功（2026-10-21 那起事故的形态）。
+- **决定**：`BundleSpec`（10 字段）/ `ExportStatusSpec`（10 字段），frozen + kw_only，均住
+  `remote/bundle.py`；两个入口各做一次展开，函数体逐字不动；11 处调用点（trainer 1 · e2e 1 ·
+  hub 用例 2 · bundle/offline_boot/export_status 用例 7）全部改按名字传。
+- **被否决**：① 把 `job_dir` 与三条显式路径合成「来源对象」——`job_dir` 是**部分回退**（显式路径
+  优先、缺的才从目录取），合并会把这条优先级藏进 `if`；② `write_export_status` 只收一半（
+  `ok`/`exit_code`/`reason`）留其余当关键字 —— 那样「一半对象一半散参」，正是本批要消的形状；
+  ③ 拆 `bundle.py`（把导出面挪去新模块）—— LOC 419 没超线，且 `test_python_loc_budget` 的标准是
+  单文件 < 1000，没有拆的理由。
+- **读数**：宽签名 23 → **21**、18 → **17** 文件（`remote/bundle.py` 归零）。
+- **验证**：`bun run pygate` 绿（100s，log clean）；`ruff` + `mypy`(1083 文件) 绿。守
+  `tests/remote/test_bundle_spec.py`（两张字段表 / frozen+kw_only / 入口只吃一个 spec /
+  旧调用面 TypeError / 相邻字段名拼错 TypeError / 状态缺省不表达成功）。
+  全文 → `docs/nn/engineering.md` §311。

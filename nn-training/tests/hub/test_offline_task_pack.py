@@ -290,18 +290,14 @@ def _export_real_pack(tmp_path: Path, course: str, init: bytes, monkeypatch) -> 
     plan = json.dumps({"start_it": 1, "end_it": 5}).encode("utf-8")
     out = tmp_path / course / f"task-{course}.zip"
     bundle_mod.export_bundle(
-        out,
-        manifest={
-            "kind": "run",
-            "runId": "run-off",
-            "it": 1,
-            "plan_sha256": sha256_bytes(plan),
-            "commit": "c" * 40,
-        },
-        plan_bytes=plan,
-        init_weights_path=src / "init_weights.json",
-        code_zip_path=src / "code.zip",
-        ts_code_zip_path=src / "ts_code.zip",
+        bundle_mod.BundleSpec(
+            out_zip=out,
+            manifest={ "kind": "run", "runId": "run-off", "it": 1, "plan_sha256": sha256_bytes(plan), "commit": "c" * 40, },
+            plan_bytes=plan,
+            init_weights_path=src / "init_weights.json",
+            code_zip_path=src / "code.zip",
+            ts_code_zip_path=src / "ts_code.zip",
+        )
     )
     return out
 

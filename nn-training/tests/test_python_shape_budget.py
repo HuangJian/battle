@@ -67,7 +67,7 @@ WIDE_FUNCS_BASELINE = {
     # 2026-11-22（P0-3 批 C）：`_run_bc_job` 的 12 个关键字参数收成 `BcJobSpec`
     # （L1 的 `remote/job_spec`；`job_shell` 装配，不许 import `bc_job`）
     # ⇒ `remote/bc_job.py` 归零，条目删除；守 `tests/remote/test_bc_job_spec.py`。
-    "remote/bundle.py": 2,
+    # `remote/bundle.py` 已清零（P0-3 批 G2：`BundleSpec` / `ExportStatusSpec`）。
     # `remote/colab_bc.py` 已清零（P0-3 批 C：`run_training` 的 10 个位置参数 → `TrainRun`）。
     "remote/error_report.py": 1,
     "remote/hub_client.py": 2,

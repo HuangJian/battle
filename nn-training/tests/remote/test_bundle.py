@@ -36,6 +36,7 @@ from remote.artifacts import ArtifactStore, sha256_bytes
 from remote.bundle import (
     BUNDLE_INDEX,
     BUNDLE_MAGIC,
+    BundleSpec,
     _replace_when_released,
     export_bundle,
     import_bundle,
@@ -194,15 +195,17 @@ def _export(tmp_path: Path, *, it: int = 3, n: int = 3) -> tuple[Path, dict, dic
     (src / "opt.tar").write_bytes(b"opt-" + b"x" * 32)
     out = tmp_path / "tools.task.zip"
     index = export_bundle(
-        out,
-        manifest=m,
-        plan_bytes=dump_plan(plan),
-        init_weights_path=src / "init_weights.json",
-        code_zip_path=src / "code.zip",
-        ts_code_zip_path=src / "ts_code.zip",
-        opt_tar_path=src / "opt.tar",
-        hub_url="https://hub.example",
-        note="test export",
+        BundleSpec(
+            out_zip=out,
+            manifest=m,
+            plan_bytes=dump_plan(plan),
+            init_weights_path=src / "init_weights.json",
+            code_zip_path=src / "code.zip",
+            ts_code_zip_path=src / "ts_code.zip",
+            opt_tar_path=src / "opt.tar",
+            hub_url="https://hub.example",
+            note="test export",
+        )
     )
     return out, index, plan
 
@@ -282,32 +285,38 @@ def test_export_refuses_mismatched_plan_and_missing_pieces(tmp_path: Path) -> No
     m = _manifest(plan, it=3, code_sha=sha256_bytes(CODE_ZIP))
     with pytest.raises(ProtocolError) as e1:
         export_bundle(
-            tmp_path / "x1.zip",
-            manifest=m,
-            plan_bytes=dump_plan(plan) + b" ",
-            init_weights_path=src / "init_weights.json",
-            code_zip_path=src / "code.zip",
-            ts_code_zip_path=src / "ts_code.zip",
+            BundleSpec(
+                out_zip=tmp_path / "x1.zip",
+                manifest=m,
+                plan_bytes=dump_plan(plan) + b" ",
+                init_weights_path=src / "init_weights.json",
+                code_zip_path=src / "code.zip",
+                ts_code_zip_path=src / "ts_code.zip",
+            )
         )
     assert "plan_bytes" in str(e1.value)
     with pytest.raises(ProtocolError) as e2:
         export_bundle(
-            tmp_path / "x2.zip",
-            manifest=m,
-            plan_bytes=dump_plan(plan),
-            init_weights_path=src / "init_weights.json",
-            code_zip_path=tmp_path / "nope.zip",
-            ts_code_zip_path=src / "ts_code.zip",
+            BundleSpec(
+                out_zip=tmp_path / "x2.zip",
+                manifest=m,
+                plan_bytes=dump_plan(plan),
+                init_weights_path=src / "init_weights.json",
+                code_zip_path=tmp_path / "nope.zip",
+                ts_code_zip_path=src / "ts_code.zip",
+            )
         )
     assert "code.zip" in str(e2.value)
     with pytest.raises(ProtocolError) as e3:
         export_bundle(
-            tmp_path / "x3.zip",
-            manifest=m,
-            plan_bytes=dump_plan(plan),
-            init_weights_path=src / "init_weights.json",
-            code_zip_path=src / "code.zip",
-            ts_code_zip_path=tmp_path / "nope-ts.zip",
+            BundleSpec(
+                out_zip=tmp_path / "x3.zip",
+                manifest=m,
+                plan_bytes=dump_plan(plan),
+                init_weights_path=src / "init_weights.json",
+                code_zip_path=src / "code.zip",
+                ts_code_zip_path=tmp_path / "nope-ts.zip",
+            )
         )
     assert "ts_code.zip" in str(e3.value)
     assert zip_path.exists()  # 原包不受失败影响
@@ -465,15 +474,17 @@ def test_export_import_carries_demo_blob(tmp_path: Path) -> None:
     blob_path(jd, "demo").write_bytes(DEMO_RAW)
     out = tmp_path / "task-demo.zip"
     index = export_bundle(
-        out,
-        manifest=m,
-        plan_bytes=dump_plan(plan),
-        init_weights_path=src / "init_weights.json",
-        code_zip_path=src / "code.zip",
-        ts_code_zip_path=src / "ts_code.zip",
-        job_dir=jd,
-        hub_url="https://hub.example",
-        note="test demo export",
+        BundleSpec(
+            out_zip=out,
+            manifest=m,
+            plan_bytes=dump_plan(plan),
+            init_weights_path=src / "init_weights.json",
+            code_zip_path=src / "code.zip",
+            ts_code_zip_path=src / "ts_code.zip",
+            job_dir=jd,
+            hub_url="https://hub.example",
+            note="test demo export",
+        )
     )
     assert "demo.npz" in index["parts"], index["parts"].keys()
     dest = tmp_path / "artd"
@@ -556,15 +567,17 @@ def _export_ref_pack(tmp_path: Path, *, with_blob: bool) -> tuple[Path, dict, di
         blob_path(jd, "ref").write_bytes(REF_RAW)
     out = tmp_path / f"task-ref-{int(with_blob)}.zip"
     index = export_bundle(
-        out,
-        manifest=m,
-        plan_bytes=dump_plan(plan),
-        init_weights_path=src / "init_weights.json",
-        code_zip_path=src / "code.zip",
-        ts_code_zip_path=src / "ts_code.zip",
-        job_dir=jd,
-        hub_url="https://hub.example",
-        note="test ref export",
+        BundleSpec(
+            out_zip=out,
+            manifest=m,
+            plan_bytes=dump_plan(plan),
+            init_weights_path=src / "init_weights.json",
+            code_zip_path=src / "code.zip",
+            ts_code_zip_path=src / "ts_code.zip",
+            job_dir=jd,
+            hub_url="https://hub.example",
+            note="test ref export",
+        )
     )
     return out, index, m
 
