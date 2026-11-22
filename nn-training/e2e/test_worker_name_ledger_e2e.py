@@ -27,7 +27,7 @@ if str(ROOT) not in sys.path:
 import remote.worker as W
 from common.protocol import COURSE_ENABLE_MARKER
 from hub.server import _HubQueue, _JobStore, make_server
-from remote.job_lifecycle import PostResultSpec
+from remote.job_lifecycle import ClaimSpec, PostResultSpec
 from tests.helpers.http_server import serve_fast
 from tests.helpers.push_worker import result_of
 
@@ -109,7 +109,7 @@ def test_two_worker_names_land_verbatim_in_ledger(tmp_path: Path) -> None:
     ledgers = {course: _publish_course(tmp_path, jid=jid, course=course) for course, jid in (alpha, beta)}
     with _hub(tmp_path) as base:
         for (course, jid), worker in ((alpha, "kaggle-c"), (beta, "colab-t")):
-            claimed = W.claim_job(base, TOKEN, jid, worker_id=worker)
+            claimed = W.claim_job(ClaimSpec(base, TOKEN, jid, worker_id=worker))
             assert claimed is not None and claimed["lease_token"], (course, worker)
             rc = W.post_result(
                 PostResultSpec(

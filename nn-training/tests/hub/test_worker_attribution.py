@@ -39,7 +39,7 @@ from common.protocol import (
 )
 from hub.server import _HubQueue, _JobStore, make_server
 from hub.store_leases import LeaseSpec
-from remote.job_lifecycle import PostResultSpec
+from remote.job_lifecycle import ClaimSpec, PostResultSpec
 from remote.push_dispatch import accept_result
 from tests.helpers.http_server import serve_fast
 from tests.helpers.push_worker import result_of
@@ -125,7 +125,7 @@ def test_result_accepted_records_worker_at_settle_time(tmp_path: Path) -> None:
     ledger = _publish_course(tmp_path)
     with _hub(tmp_path) as (base, _hubq):
         wid = JL.worker_tag()
-        claimed = W.claim_job(base, TOKEN, JID, worker_id=wid)
+        claimed = W.claim_job(ClaimSpec(base, TOKEN, JID, worker_id=wid))
         assert claimed is not None and claimed["lease_token"]
         rc = W.post_result(
             PostResultSpec(
@@ -153,7 +153,7 @@ def test_duplicate_result_is_recorded_as_rejected_with_worker(tmp_path: Path) ->
     manifest = _read_manifest(tmp_path)
     with _hub(tmp_path) as (base, _hubq):
         wid = JL.worker_tag()
-        claimed = W.claim_job(base, TOKEN, JID, worker_id=wid)
+        claimed = W.claim_job(ClaimSpec(base, TOKEN, JID, worker_id=wid))
         assert claimed is not None and claimed["lease_token"]
         assert (
             W.post_result(

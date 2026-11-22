@@ -273,19 +273,23 @@ def request_priority(
     return data
 
 
-def claim_job(
-    base_url: str,
-    token: str,
-    jid: str,
-    *,
-    mode: str = CLAIM_MODE_EXCLUSIVE,
-    worker_id: str = "",
-    role: str = ROLE_ONLINE,
-    expected_epoch: int | None = None,
-    capabilities: list[str] | None = None,
-    timeout: float = 30.0,
-    log: Any = None,
-) -> dict | None:
+@dataclass(frozen=True)
+class ClaimSpec:
+    """`claim_job` 的旋钮袋（P0-3：10 参 → 一个对象）。"""
+
+    base_url: str
+    token: str
+    jid: str
+    mode: str = CLAIM_MODE_EXCLUSIVE
+    worker_id: str = ""
+    role: str = ROLE_ONLINE
+    expected_epoch: int | None = None
+    capabilities: list[str] | None = None
+    timeout: float = 30.0
+    log: Any = None
+
+
+def claim_job(spec: ClaimSpec) -> dict | None:
     """`POST /jobs/{id}/claim` → 响应 dict（`status ∈ ok|backup|demoted`）；拒收 → None。
 
     语义要点：
@@ -297,6 +301,11 @@ def claim_job(
         （body 不含该键，逐字节不变）；非 None 时随 body 声明本 worker 的能力位，hub 据此
         fail-closed 拒发 replay job 给旧 worker。
     """
+    # 旧签名 10 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    base_url, token, jid = spec.base_url, spec.token, spec.jid
+    mode, worker_id, role = spec.mode, spec.worker_id, spec.role
+    expected_epoch, capabilities = spec.expected_epoch, spec.capabilities
+    timeout, log = spec.timeout, spec.log
     req_body: dict = {
         "mode": mode,
         "worker_id": worker_id,
@@ -555,15 +564,17 @@ def acquire_job(spec: AcquireSpec) -> dict | None:
         if mode not in CLAIM_MODES:
             mode = CLAIM_MODE_EXCLUSIVE  # 旧/未知值：保守回到独占（不静默背下别人给的档）
         got = claim_job(
-            base_url,
-            token,
-            jid,
-            mode=mode,
-            worker_id=worker_id,
-            role=role,  # ★ 与 peek 同一份归属（漏了它 = 带标 worker 自锁）
-            expected_epoch=epoch,
-            capabilities=capabilities,
-            log=log,
+            ClaimSpec(
+                base_url,
+                token,
+                jid,
+                mode=mode,
+                worker_id=worker_id,
+                role=role,  # ★ 与 peek 同一份归属（漏了它 = 带标 worker 自锁）
+                expected_epoch=epoch,
+                capabilities=capabilities,
+                log=log,
+            )
         )
         if got is None:
             continue

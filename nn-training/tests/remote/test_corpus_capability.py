@@ -30,6 +30,7 @@ from common.protocol import (
 from hub.server import _HubQueue, _JobStore, make_server
 from hub.store_leases import LeaseSpec
 from remote import push_dispatch
+from remote.job_lifecycle import ClaimSpec
 
 TOKEN = "sekret"
 JID = "j" * 16
@@ -111,8 +112,8 @@ def test_claim_body_carries_capabilities_only_when_given(monkeypatch) -> None:
         return 200, b'{"status":"ok","lease_token":"t","job_id":"j"}'
 
     monkeypatch.setattr(JL, "_request", _fake_request)
-    JL.claim_job("http://hub", TOKEN, JID, capabilities=[CAP_REPLAY_CORPUS])
-    JL.claim_job("http://hub", TOKEN, JID)
+    JL.claim_job(ClaimSpec("http://hub", TOKEN, JID, capabilities=[CAP_REPLAY_CORPUS]))
+    JL.claim_job(ClaimSpec("http://hub", TOKEN, JID))
     assert bodies[0]["capabilities"] == [CAP_REPLAY_CORPUS]
     assert set(bodies[1]) == {"mode", "worker_id", "expected_epoch"}, "旧调用形状必须逐字节不变"
 
@@ -170,18 +171,20 @@ def _hub(tmp_path: Path, *, corpus_fmt: str = "replay"):
 
 def test_http_claim_replay_requires_capability(tmp_path: Path) -> None:
     with _hub(tmp_path) as base:
-        assert JL.claim_job(base, TOKEN, JID, worker_id="old") is None
+        assert JL.claim_job(ClaimSpec(base, TOKEN, JID, worker_id="old")) is None
         got = JL.claim_job(
-            base,
-            TOKEN,
-            JID,
-            worker_id="new",
-            capabilities=[CAP_REPLAY_CORPUS],
+            ClaimSpec(
+                base,
+                TOKEN,
+                JID,
+                worker_id="new",
+                capabilities=[CAP_REPLAY_CORPUS],
+            )
         )
         assert got is not None and got.get("lease_token"), got
 
 
 def test_http_claim_full_ignores_capability(tmp_path: Path) -> None:
     with _hub(tmp_path, corpus_fmt="full") as base:
-        got = JL.claim_job(base, TOKEN, JID, worker_id="old")
+        got = JL.claim_job(ClaimSpec(base, TOKEN, JID, worker_id="old"))
         assert got is not None and got.get("lease_token"), got

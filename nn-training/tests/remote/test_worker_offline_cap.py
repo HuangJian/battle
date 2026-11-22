@@ -39,6 +39,7 @@ from common.protocol import (
     WORKER_ID_HEADER,
 )
 from hub.server import _HubQueue, make_server
+from remote.job_lifecycle import ClaimSpec
 from tests.helpers.http_server import serve_fast
 from tests.helpers.hub_poll import hub_poll
 
@@ -88,13 +89,13 @@ def test_claim_sends_role_header_too(monkeypatch: pytest.MonkeyPatch) -> None:
         return 200, b'{"job_id": "j", "status": "ok", "lease_token": "t"}'
 
     monkeypatch.setattr(JL, "_request", _fake_request)
-    assert W.claim_job("http://hub", "t", "j" * 16, worker_id="host:1", role=ROLE_OFFLINE)
+    assert W.claim_job(ClaimSpec("http://hub", "t", "j" * 16, worker_id="host:1", role=ROLE_OFFLINE))
     assert seen[0]["path"].endswith("/claim")
     assert seen[0]["headers"][ROLE_HEADER] == ROLE_HEADER_VALUE
     assert seen[0]["headers"][WORKER_ID_HEADER] == "host:1"
     # 在线盘请求不带这条头（旧 worker 行为逐字不变）
     seen.clear()
-    assert W.claim_job("http://hub", "t", "j" * 16, worker_id="host:1")
+    assert W.claim_job(ClaimSpec("http://hub", "t", "j" * 16, worker_id="host:1"))
     assert ROLE_HEADER not in seen[0]["headers"]
 
 

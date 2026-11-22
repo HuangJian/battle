@@ -60,7 +60,7 @@ from common.protocol import (
 )
 from hub.server import _HubQueue, _JobStore, make_server
 from hub.store_leases import LeaseSpec
-from remote.job_lifecycle import AcquireSpec, PostResultSpec
+from remote.job_lifecycle import AcquireSpec, ClaimSpec, PostResultSpec
 from tests.helpers import hub_seams
 from tests.helpers.http_server import serve_fast
 
@@ -376,7 +376,7 @@ def test_peek_carries_halt_and_role_gate(tmp_path: Path) -> None:
             "离线盘只看到离线盘的活（一个盘一种任务）"
         )
         # ★ 按 id 直领同样受闸（F5：「只挡 peek」是漏的，claim 才是租约写入点）
-        assert W.claim_job(base, TOKEN, OFF, worker_id="plain") is None
+        assert W.claim_job(ClaimSpec(base, TOKEN, OFF, worker_id="plain")) is None
         # 接管闸（课程级，★M1c：判据从「模式」换成「hold」）：这门课被云机接管 ⇒ 在线盘连
         # **在线归属**的 JID 也看不到（旧用例钉的是 `set_mode(offline)`，随 parked 一起退役）
         hub.note_hold("c5-gae", worker_id="cloud-1", token="tok-1")
@@ -389,7 +389,7 @@ def test_peek_carries_halt_and_role_gate(tmp_path: Path) -> None:
         hub.note_release("c5-gae")
         again = W.peek_jobs(base, TOKEN, worker_id="plain")
         assert again is not None and [c["job_id"] for c in again[0]] == [JID]
-        assert W.claim_job(base, TOKEN, OFF, worker_id="marked", role=ROLE_OFFLINE) is not None
+        assert W.claim_job(ClaimSpec(base, TOKEN, OFF, worker_id="marked", role=ROLE_OFFLINE)) is not None
         hub.set_halt(True)  # 停机达令（空 course = 全课程默认）
         halted = W.peek_jobs(base, TOKEN, worker_id="w1")
         assert halted is not None and halted[1] is True
@@ -407,7 +407,7 @@ def test_http_priority_claim_start_ready_flow(tmp_path: Path) -> None:
         assert pr["priorities"][JID] == PRIORITY_HIGHEST
         assert isinstance(pr["epoch"], int) and pr["reasons"][JID]
 
-        got = W.claim_job(base, TOKEN, JID, worker_id="A", expected_epoch=pr["epoch"])
+        got = W.claim_job(ClaimSpec(base, TOKEN, JID, worker_id="A", expected_epoch=pr["epoch"]))
         assert got is not None and got["status"] == "ok" and got["lease_token"]
         assert got["manifest"]["job_id"] == JID
         assert got["halt"] is False
@@ -415,7 +415,7 @@ def test_http_priority_claim_start_ready_flow(tmp_path: Path) -> None:
         busy = W.request_priority(base, TOKEN, worker_id="B", held=[JID])
         assert busy["priorities"][JID] == PRIORITY_MEDIUM
         # 第二名拿同一个 epoch 来领 ⇒ demoted（不是错误、不是 409）
-        second = W.claim_job(base, TOKEN, JID, worker_id="B", expected_epoch=pr["epoch"])
+        second = W.claim_job(ClaimSpec(base, TOKEN, JID, worker_id="B", expected_epoch=pr["epoch"]))
         assert second is not None and second["status"] == "demoted"
         assert second["priority"] == PRIORITY_LOW
 
@@ -440,7 +440,7 @@ def test_http_abandon_returns_job_to_pool(tmp_path: Path) -> None:
     """HTTP 面 abandon：池内可领 + reclaims==0（与 store 层双断言）。"""
     _publish_online_course(tmp_path)
     with _hub(tmp_path) as (base, hub):
-        claimed = W.claim_job(base, TOKEN, JID, worker_id="A")
+        claimed = W.claim_job(ClaimSpec(base, TOKEN, JID, worker_id="A"))
         assert claimed is not None and claimed["status"] == "ok"
         assert hub.claimable_job_ids("c5-gae") == []
         W.abandon_job(base, TOKEN, JID, worker_id="A", reason="landed")
@@ -452,9 +452,9 @@ def test_http_backup_claim_returns_no_token_and_authorizes_post(tmp_path: Path) 
     """HTTP 面：备份 claim 返回空 token + 双方回传都放行（首写定胜负）。"""
     _publish_online_course(tmp_path)
     with _hub(tmp_path) as (base, hub):
-        a = W.claim_job(base, TOKEN, JID, worker_id="A")
+        a = W.claim_job(ClaimSpec(base, TOKEN, JID, worker_id="A"))
         assert a is not None and a["lease_token"]
-        b = W.claim_job(base, TOKEN, JID, mode=CLAIM_MODE_BACKUP, worker_id="B")
+        b = W.claim_job(ClaimSpec(base, TOKEN, JID, mode=CLAIM_MODE_BACKUP, worker_id="B"))
         assert b is not None and b["status"] == "backup" and b["lease_token"] == ""
         st = hub._store_of(JID)
         assert st is not None
@@ -466,7 +466,7 @@ def test_claim_unknown_job_409(tmp_path: Path) -> None:
     """未知 job ⇒ 409（调用方丢副本），**不是** demoted（那是「有人比我快」）。"""
     _publish_online_course(tmp_path)
     with _hub(tmp_path) as (base, _hubq):
-        assert W.claim_job(base, TOKEN, "z" * 16, worker_id="A") is None
+        assert W.claim_job(ClaimSpec(base, TOKEN, "z" * 16, worker_id="A")) is None
 
 
 # ═══════════════════════════ worker 侧：403 丢弃 / 取活三件套 ═══════════════════════════
@@ -537,10 +537,10 @@ def test_acquire_job_prefers_highest_and_skips_none(monkeypatch: pytest.MonkeyPa
     )
     claimed: list[tuple[str, object]] = []
 
-    def _claim(base, token, jid, *, mode="exclusive", worker_id="", expected_epoch=None, **k):
-        claimed.append((jid, expected_epoch))
-        if jid == "free1":
-            return {"job_id": jid, "manifest": {"job_id": jid}, "status": "ok", "lease_token": "t"}
+    def _claim(spec, **k):
+        claimed.append((spec.jid, spec.expected_epoch))
+        if spec.jid == "free1":
+            return {"job_id": spec.jid, "manifest": {"job_id": spec.jid}, "status": "ok", "lease_token": "t"}
         return None
 
     monkeypatch.setattr(JL, "claim_job", _claim, raising=True)
@@ -566,10 +566,10 @@ def test_acquire_job_demoted_moves_to_next_candidate(monkeypatch: pytest.MonkeyP
         raising=True,
     )
 
-    def _claim(base, token, jid, **k):
-        if jid == "a1":
-            return {"job_id": jid, "status": "demoted", "priority": PRIORITY_LOW}
-        return {"job_id": jid, "manifest": {"job_id": jid}, "status": "ok", "lease_token": "t"}
+    def _claim(spec, **k):
+        if spec.jid == "a1":
+            return {"job_id": spec.jid, "status": "demoted", "priority": PRIORITY_LOW}
+        return {"job_id": spec.jid, "manifest": {"job_id": spec.jid}, "status": "ok", "lease_token": "t"}
 
     monkeypatch.setattr(JL, "claim_job", _claim, raising=True)
     got = W.acquire_job(AcquireSpec("http://hub", "tok", worker_id="A", log=lambda m: None))
@@ -602,9 +602,9 @@ def test_acquire_job_falls_back_to_highest_when_priority_unreachable(
     monkeypatch.setattr(
         JL,
         "claim_job",
-        lambda base, token, jid, **k: {
-            "job_id": jid,
-            "manifest": {"job_id": jid},
+        lambda spec, **k: {
+            "job_id": spec.jid,
+            "manifest": {"job_id": spec.jid},
             "status": "ok",
             "lease_token": "t",
         },
@@ -788,7 +788,7 @@ def test_peek_offers_a_replica_for_an_inflight_job(tmp_path: Path) -> None:
     """
     _publish_online_course(tmp_path)
     with _hub(tmp_path) as (base, hub):
-        a = W.claim_job(base, TOKEN, JID, worker_id="A")
+        a = W.claim_job(ClaimSpec(base, TOKEN, JID, worker_id="A"))
         assert a is not None and a["status"] == "ok"
         got = W.peek_jobs(base, TOKEN, worker_id="B")
         assert got is not None
@@ -799,7 +799,7 @@ def test_peek_offers_a_replica_for_an_inflight_job(tmp_path: Path) -> None:
         pr = W.request_priority(base, TOKEN, worker_id="B", held=[JID])
         assert pr["priorities"][JID] == PRIORITY_MEDIUM
         # 拿着这个候选去认领 = 备份（无 token、双方回传都放行、首写定胜负）
-        b = W.claim_job(base, TOKEN, JID, mode=CLAIM_MODE_BACKUP, worker_id="B")
+        b = W.claim_job(ClaimSpec(base, TOKEN, JID, mode=CLAIM_MODE_BACKUP, worker_id="B"))
         assert b is not None and b["status"] == "backup" and b["lease_token"] == ""
         st = hub._store_of(JID)
         assert st is not None and st.result_token_ok(JID, a["lease_token"]) is True
@@ -817,7 +817,7 @@ def test_peek_prefers_the_claimable_head_over_a_replica(tmp_path: Path) -> None:
         st = hub._store_of(JID)
         assert st is not None
         st.publish(jid2, _mini_manifest(jid2), b"PK\x03\x04fake")
-        a = W.claim_job(base, TOKEN, JID, worker_id="A")  # 先领走旧的那份
+        a = W.claim_job(ClaimSpec(base, TOKEN, JID, worker_id="A"))  # 先领走旧的那份
         assert a is not None and a["status"] == "ok"
         got = W.peek_jobs(base, TOKEN, worker_id="B")
         assert got is not None
@@ -844,9 +844,9 @@ def test_acquire_job_claims_with_the_mode_the_candidate_carries(
     )
     seen: list[str] = []
 
-    def _claim(base, token, jid, *, mode="exclusive", **k):
-        seen.append(mode)
-        return {"job_id": jid, "manifest": {"job_id": jid}, "status": "backup", "lease_token": ""}
+    def _claim(spec, **k):
+        seen.append(spec.mode)
+        return {"job_id": spec.jid, "manifest": {"job_id": spec.jid}, "status": "backup", "lease_token": ""}
 
     monkeypatch.setattr(JL, "claim_job", _claim, raising=True)
     got = W.acquire_job(AcquireSpec("http://hub", "tok", worker_id="B"))
@@ -872,9 +872,9 @@ def test_acquire_job_unknown_mode_falls_back_to_exclusive(
     )
     seen: list[str] = []
 
-    def _claim(base, token, jid, *, mode="exclusive", **k):
-        seen.append(mode)
-        return {"job_id": jid, "manifest": {"job_id": jid}, "status": "ok", "lease_token": "t"}
+    def _claim(spec, **k):
+        seen.append(spec.mode)
+        return {"job_id": spec.jid, "manifest": {"job_id": spec.jid}, "status": "ok", "lease_token": "t"}
 
     monkeypatch.setattr(JL, "claim_job", _claim, raising=True)
     assert W.acquire_job(AcquireSpec("http://hub", "tok", worker_id="B")) is not None

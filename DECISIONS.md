@@ -8818,6 +8818,14 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-claim-job-spec
+
+P0-3 第三十刀（`job_lifecycle.py` 收官）：`claim_job`（10 参）→ frozen `ClaimSpec`
+（`base_url/token/jid` 仍可位置传，其余关键字逐字沿用）。`acquire_job` 内部调用点包对象；
+测试里 6 处 `monkeypatch.setattr(JL, "claim_job", fake)` 的替身签名一律从
+`(base, token, jid, **k)` 改成 `(spec, **k)`，读 `spec.jid/spec.mode/spec.expected_epoch`。
+宽签名 **72 → 71**，`job_lifecycle.py` 1 → **0**（该模块宽签名清零）。
+
 ## §2026-11-21-post-result-spec
 
 P0-3 第二十九刀：`remote/job_lifecycle.py::post_result`（10 参）→ frozen

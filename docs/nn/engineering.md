@@ -25,6 +25,14 @@
 
 ---
 
+## §283 P0-3 第三十刀：`claim_job` 收 `ClaimSpec`（宽签名 72 → 71）（2026-11-21）
+
+* 10 参 → frozen `ClaimSpec`；`base_url/token/jid` 保持可位置传，避免大面积改测试可读性。
+* 内部调用点 1（`acquire_job`）+ 测试调用点 ~25 + 替身 6 个（签名改收 spec）。
+* `remote/job_lifecycle.py` 宽签名 1 → **0**；全仓 **72 → 71**（文件数 54 → 53）。
+* 回归：priority_schedule / worker_attribution / corpus_capability / offline_cap /
+  offline_bc_course / job_identity_collision / auto_handoff e2e 全绿；ruff/mypy 无错。
+
 ## §282 P0-3 第二十九刀：`post_result` 收 `PostResultSpec`（宽签名 73 → 72）（2026-11-21）
 
 * 10 参 → frozen `PostResultSpec`（`result` 仍是第 4 位；`mode`/`worker_id`/`log` 逐字沿用）。

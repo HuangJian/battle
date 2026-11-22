@@ -725,7 +725,7 @@ from common.protocol import (
     ROLE_ONLINE,
 )
 from remote.hub_client import PublishSpec, publish_job
-from remote.job_lifecycle import claim_job, peek_jobs
+from remote.job_lifecycle import ClaimSpec, claim_job, peek_jobs
 from tests.helpers.http_server import serve_fast
 
 
@@ -849,7 +849,7 @@ def test_release_hold_revokes_lease_and_republished_job_is_claimable(
         m2 = _prod_publish(traj, C_AUTO, it=1, run_id="t1-run")
         assert m2["job_id"] == jid, "同一幂等键必须给同一 job_id（幂等键 = 课程+it+runId）"
         assert jid in _peek_ids(hub), f"重发布后 peek 里没有 {jid}"
-        got = claim_job(hub.base, TOKEN, jid, worker_id="w-us", role=ROLE_ONLINE)
+        got = claim_job(ClaimSpec(hub.base, TOKEN, jid, worker_id="w-us", role=ROLE_ONLINE))
         assert got is not None and got["status"] == "ok", got
     finally:
         hub.close()

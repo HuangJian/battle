@@ -39,6 +39,7 @@ from common.protocol import (
 )
 from hub.server import _HubQueue, _JobStore
 from remote.hub_client import HubClientError, PublishSpec, publish_job
+from remote.job_lifecycle import ClaimSpec
 
 #: 两门课共用的四分量（事故现场的「全同」部分）。
 _SHARED = {
@@ -321,7 +322,7 @@ def test_claim_reject_reason_is_logged(monkeypatch: pytest.MonkeyPatch) -> None:
     # 变成 502，正是本条用例第一次跑出来的形态）。分档见 `tests/remote/test_job_lifecycle_split.py`。
     monkeypatch.setattr(jl_mod, "_request", _fake_request)
     lines: list[str] = []
-    got = worker_mod.claim_job("http://hub", "t", "e" * 16, log=lines.append)
+    got = worker_mod.claim_job(ClaimSpec("http://hub", "t", "e" * 16, log=lines.append))
     assert got is None
     text = "\n".join(lines)
     assert "held" in text, f"日志必须带 hub 给的 reason：{text}"

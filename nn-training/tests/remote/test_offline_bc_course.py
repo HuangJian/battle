@@ -272,11 +272,11 @@ def test_acquire_job_filters_candidates_to_the_requested_course(
     monkeypatch.setattr(jl, "request_priority", lambda *a, **kw: {"priorities": {}})
     seen: dict[str, Any] = {}
 
-    def fake_claim(base: str, token: str, jid: str, **kw: Any) -> dict:
-        seen["jid"] = jid
+    def fake_claim(spec: Any, **kw: Any) -> dict:
+        seen["jid"] = spec.jid
         return {
-            "job_id": jid,
-            "manifest": {"job_id": jid},
+            "job_id": spec.jid,
+            "manifest": {"job_id": spec.jid},
             "lease_token": "l",
             "course": "bc1",
         }
