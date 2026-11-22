@@ -9,7 +9,9 @@ warmup 静默退化成「直接 PPO」（value 头随机 ⇒ 策略塌缩）、k
 早停与断点续跑静默失效。
 
 这里钉住：spec 是 frozen + kw_only · 15 个字段与缺省逐项对齐旧形参 · `run_ppo` 只收一份
-spec · 两个入口确实把 15 个旋钮**逐个**交齐（用 AST 看 `PPOSpec(...)` 的关键字，不是文本）。
+spec · `HeadUpdateSpec.to_ppo` 确实把 15 个旋钮**逐个**交齐（用 AST 看 `PPOSpec(...)` 的关键字，
+不是文本），且两个入口都只经这一条路（第四十九刀：13 个训练输入收进 `HeadUpdateSpec` 后，
+逐个搬运只剩**一份**实现）。
 """
 
 from __future__ import annotations
@@ -25,6 +27,11 @@ import torch
 from worker.ppo.loop import HeadSpec, LossTerms, PPOSpec, run_ppo
 
 PPO_DIR = Path(__file__).resolve().parents[2] / "worker" / "ppo"
+
+
+def _tree(file_name: str) -> ast.AST:
+    """`worker/ppo/<file_name>` → AST（两处 AST 判据共用；与 `test_ppo_loop_core.py` 同写法）。"""
+    return ast.parse((PPO_DIR / file_name).read_text(encoding="utf-8"))
 
 #: `(字段名, 缺省标记)` —— 与收进 spec 之前的 15 个形参逐一对齐（前 7 个无缺省）。
 MISSING = dataclasses.MISSING
@@ -115,17 +122,19 @@ def test_run_ppo_takes_exactly_one_spec() -> None:
 REQUIRED_KWARGS = sorted(name for name, _ in EXPECTED_FIELDS)
 
 
-@pytest.mark.parametrize(("file_name", "entry"), [("goal.py", "ppo_update_goal"), ("intent.py", "ppo_update_intent")])
-def test_entries_pass_every_knob(file_name: str, entry: str) -> None:
-    """★ 本刀最可能的失误形态：两个入口里各写一遍 15 个关键字，漏一个不报错。
+@pytest.mark.parametrize("file_name", ["loop.py"])
+def test_to_ppo_passes_every_knob(file_name: str) -> None:
+    """★ 本类失误形态：逐个搬运时漏一个关键字 —— 不报错，静默落回缺省。
 
-    AST 而不是文本：只看 `PPOSpec(...)` 这次调用的关键字名集合。
+    AST 而不是文本：只看 `PPOSpec(...)` 这次调用的关键字名集合；`head` / `terms` 也在内
+    （漏掉就是两个头并成一个）。搬运只允许有一份实现（`HeadUpdateSpec.to_ppo`），否则
+    又是两处手抄同一张表 —— 那正是本刀要杀的形状。
     """
-    tree = ast.parse((PPO_DIR / file_name).read_text(encoding="utf-8"))
+    tree = _tree(file_name)
     fn = next(
         n
         for n in ast.walk(tree)
-        if isinstance(n, ast.FunctionDef) and n.name == entry
+        if isinstance(n, ast.FunctionDef) and n.name == "to_ppo"
     )
     calls = [
         n
@@ -134,7 +143,25 @@ def test_entries_pass_every_knob(file_name: str, entry: str) -> None:
         and isinstance(n.func, ast.Name)
         and n.func.id == "PPOSpec"
     ]
-    assert len(calls) == 1, f"{file_name} 里 `PPOSpec(...)` 出现 {len(calls)} 次（应恰好 1 次）"
+    assert len(calls) == 1, f"to_ppo 里 `PPOSpec(...)` 出现 {len(calls)} 次（应恰好 1 次）"
     got = sorted(k.arg for k in calls[0].keywords if k.arg is not None)
-    assert got == REQUIRED_KWARGS, f"{file_name} 漏交 {sorted(set(REQUIRED_KWARGS) - set(got))}"
-    assert not calls[0].args, f"{file_name} 仍用位置实参构造 spec（kw_only 就是为了不许这样）"
+    assert got == REQUIRED_KWARGS, f"to_ppo 漏交 {sorted(set(REQUIRED_KWARGS) - set(got))}"
+    assert not calls[0].args, "to_ppo 仍用位置实参构造 spec（kw_only 就是为了不许这样）"
+
+
+@pytest.mark.parametrize(("file_name", "entry"), [("goal.py", "ppo_update_goal"), ("intent.py", "ppo_update_intent")])
+def test_entries_go_through_to_ppo(file_name: str, entry: str) -> None:
+    """入口只许 `run_ppo(spec.to_ppo(_SPEC, LossTerms(...)))` —— 不迁回就地手拼 spec。"""
+    tree = _tree(file_name)
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == entry)
+    callees = {n.func.id for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    adapted = {
+        n.func.attr
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+    }
+    assert callees <= {"run_ppo", "LossTerms"}, f"{entry} 直接调了 {sorted(callees - {'run_ppo', 'LossTerms'})}"
+    assert {"run_ppo"} <= callees, f"{entry} 不再转发给 run_ppo"
+    assert adapted == {"to_ppo"}, f"{entry} 的转发面变了：{sorted(adapted)}"
+    direct = {getattr(n.func, "id", "") for n in ast.walk(fn) if isinstance(n, ast.Call)}
+    assert direct.isdisjoint({"PPOSpec"}), f"{entry} 又就地手拼 PPOSpec（应交给 to_ppo）"

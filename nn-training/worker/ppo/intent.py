@@ -57,19 +57,19 @@ from worker.ppo.cli import run as run_cli
 # 但这个名字必须留在模块命名空间里。
 from worker.ppo.common import _ppo_load as _ppo_load  # RolloutBackend 契约（见上）
 from worker.ppo.common import log, masked_logsoftmax
-from worker.ppo.loop import HeadSpec, LossTerms, PPOSpec, run_ppo
+from worker.ppo.loop import HeadSpec, HeadUpdateSpec, LossTerms, run_ppo
 from worker.ppo.np_core import (
-    # `chunk_episodes` 是 `worker/backend.py::RolloutBackend` 的成员（`trainer/stream.py` 调 `backend.chunk_episodes`）；
-    # 本模块不再直接调用它，但这个名字必须留在模块命名空间里。
-    chunk_episodes as chunk_episodes,
-)
-from worker.ppo.np_core import (
+    LoadEpisodesSpec,
     compute_gae,
     discover_shards,
     load_episodes_common,
     load_shard_fields,
 )
-from worker.ppo.rng import PPORng
+from worker.ppo.np_core import (
+    # `chunk_episodes` 是 `worker/backend.py::RolloutBackend` 的成员（`trainer/stream.py` 调 `backend.chunk_episodes`）；
+    # 本模块不再直接调用它，但这个名字必须留在模块命名空间里。
+    chunk_episodes as chunk_episodes,
+)
 
 # ---- hyper-params（与 ppo.py 同源；γ 换算口径 P1-5③）----
 GAMMA_TICK = 0.995  # per-tick 折扣（与 ppo.py GAMMA 一致）
@@ -185,17 +185,19 @@ def load_episodes_intent(
 ) -> list[dict]:
     """全盘回退装载（stream.py 无新结算时调它，**同样带** gamma/lam）。"""
     return load_episodes_common(
-        data_root,
-        label="ppo_intent",
-        shard_kind="intent RL",
-        need_files=("reward.npy", "obs.npy", "dt.npy"),
-        shard_loader=load_intent_shard,
-        gae=lambda d: compute_gae_variable(
-            d["reward"], d["value"], d["done"], d["dt"], gamma_tick=gamma, lam=lam
-        ),
-        gae_name="variable-step GAE",
-        normalize_adv=normalize_adv,
-        normalize_ret=True,  # intent：adv 与 ret 都全局归一（I13 逐关规范化）
+        LoadEpisodesSpec(
+            data_root=data_root,
+            label="ppo_intent",
+            shard_kind="intent RL",
+            need_files=("reward.npy", "obs.npy", "dt.npy"),
+            shard_loader=load_intent_shard,
+            gae=lambda d: compute_gae_variable(
+                d["reward"], d["value"], d["done"], d["dt"], gamma_tick=gamma, lam=lam
+            ),
+            gae_name="variable-step GAE",
+            normalize_ret=True,  # intent：adv 与 ret 都全局归一（I13 逐关规范化）
+            normalize_adv=normalize_adv,
+        )
     )
 
 
@@ -210,66 +212,45 @@ def _forward_intent(model, obs, sc, inj, mask):
     return masked_logsoftmax(i_log, mask), None, val
 
 
-def ppo_update_intent(
-    model,
-    opt,
-    chunks,
-    epochs,
-    device,
-    ckpt_path: str | None = None,
-    target_kl: float = TARGET_KL,
-    seed: int = 7,
-    value_warmup_epochs: int = 0,
-    ref_model: IntentNet | None = None,
-    kl_coef: float = 0.0,
-    on_epoch_done=None,
-    rng: PPORng | None = None,
-):
-    """chunks: intent 步 minibatch dicts（obs/scalars/inject/a_intent/lp_intent/adv/ret/mask）。
+def ppo_update_intent(spec: HeadUpdateSpec) -> dict[str, float | bool]:
+    """intent 头的一轮 PPO：`spec.chunks` = 意图步 minibatch dicts
+    （obs/scalars/inject/a_intent/lp_intent/adv/ret/mask）。
 
     **顺序在 `worker/ppo/loop.py::run_ppo`**（B8 ④：与 goal 曾各写一份同一顺序）；这里只
     给两份配置：`_SPEC`（列名/日志前缀）+ `LossTerms`（前向 = 三头 + 掩码 softmax，
     无辅助项）。数值逐位不变。
 
-    value_warmup_epochs（M8 冷启动，plan "kickstarting 辅助项递减"）：前 N 个 epoch 只训
-    value 头（policy loss/entropy 置零——策略权重零梯度）。B′ 冷启动 value 头为随机，
-    直接 PPO 会让优势被 value 噪声主导、策略单 epoch 塌缩（实测 KL 爆炸 262）。先让
-    value 学出 B′ 的回报基线，再从稳定基线上优化策略。warmup 阶段策略不动 → KL=0。
-    预热期**冻结主干+三头**：经共享主干训 value 会扰动策略特征→意图分布（实测熵
-    0.90→0.33，等于 RL 前先毁掉 B′）；value 头在冻结的 B′ 特征上学基线。
+    13 个输入全在 `HeadUpdateSpec`（P0-3 第四十九刀）：value_warmup_epochs（M8 冷启动，
+    plan "kickstarting 辅助项递减"）前 N 个 epoch 只训 value 头（policy loss/entropy 置零
+    ——策略权重零梯度）。B′ 冷启动 value 头为随机，直接 PPO 会让优势被 value 噪声主导、
+    策略单 epoch 塌缩（实测 KL 爆炸 262）。先让 value 学出 B′ 的回报基线，再从稳定基线上
+    优化策略。warmup 阶段策略不动 → KL=0。预热期**冻结主干+三头**：经共享主干训 value 会
+    扰动策略特征→意图分布（实测熵 0.90→0.33，等于 RL 前先毁掉 B′）；value 头在冻结的 B′
+    特征上学基线。
 
-    kickstarting（plan "kickstarting 辅助项递减"，预注册 #5 衰减 0.5/iter）：
-    ref_model = B′ 策略冻结快照；非 warmup 时在 loss 加 kl_coef·KL(π_curr ‖ π_ref)。
-    强策略微调（B′ 逐状态峰值）单 PPO 轮可塌缩（实测熵 1.33→0.06），KL 惩罚把它
-    钉在 B′ 附近，系数随迭代衰减 → 后期放开探索。ref_model 必须在调用方 freeze。
+    kickstarting（plan "kickstarting 辅助项递减"，预注册 #5 衰减 0.5/iter）：ref_model =
+    B′ 策略冻结快照；非 warmup 时在 loss 加 kl_coef·KL(π_curr ‖ π_ref)。强策略微调（B′ 逐
+    状态峰值）单 PPO 轮可塌缩（实测熵 1.33→0.06），KL 惩罚把它钉在 B′ 附近，系数随迭代
+    衰减 → 后期放开探索。ref_model 必须在调用方 freeze。
 
     target_kl 早停：单 epoch 平均近似 KL > target_kl → 停止剩余 epoch（P1-1k3 pace 护栏）。
     ckpt_path: 非空则每 epoch 落盘（model/opt/epochs_done/numpy RNG），支持断点续跑。
     """
-    return run_ppo(
-        PPOSpec(
-            model=model,
-            opt=opt,
-            chunks=chunks,
-            epochs=epochs,
-            device=device,
-            head=_SPEC,
-            terms=LossTerms(forward=_forward_intent, ent_coef=ENT_COEF),
-            ckpt_path=ckpt_path,
-            target_kl=target_kl,
-            seed=seed,
-            value_warmup_epochs=value_warmup_epochs,
-            ref_model=ref_model,
-            kl_coef=kl_coef,
-            on_epoch_done=on_epoch_done,
-            rng=rng,
-        )
-    )
+    return run_ppo(spec.to_ppo(_SPEC, LossTerms(forward=_forward_intent, ent_coef=ENT_COEF)))
+
+
+def update(model, opt, chunks, epochs, device, **update_kwargs):
+    """backend 端口（`worker/backend.py::update`）：stream 的 5 位置 + 旋钮关键字 → spec。
+
+    不注解形参 = 与 `worker/ppo/engine.update` 同一种透传端口；旋钮名是 backend 私有的
+    （`trainer/run_rl.update_kwargs`），写错在 `from_port` 构造 spec 时立刻 TypeError。
+    """
+    return ppo_update_intent(HeadUpdateSpec.from_port(model, opt, chunks, epochs, device, **update_kwargs))
+
 
 # ---- stream backend 接口别名（trainer/stream.py 的 backend.update / load_episodes）----
 # 意图 RL 与 per-tick RL 共用同一套流式基础设施；checkpoint 原语由 ppo_common
 # 提供（顶部 import _ppo_save/_ppo_load）。ppo 不依赖本模块，无环。
-update = ppo_update_intent
 load_episodes = load_episodes_intent
 
 

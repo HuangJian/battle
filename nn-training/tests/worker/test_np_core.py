@@ -231,14 +231,16 @@ def _ret_norm_call(
         return {k: v.copy() for k, v in payloads[Path(dirpath).name].items()}
 
     return np_core.load_episodes_common(
-        str(tmp_path),
-        label="ppo",
-        shard_kind="RL",
-        need_files=("metrics.npy", "obs.npy"),
-        shard_loader=loader,
-        gae=lambda d: (d["adv"], d["ret"]),
-        gae_name="GAE",
-        normalize_ret=normalize_ret,
+        np_core.LoadEpisodesSpec(
+            data_root=str(tmp_path),
+            label="ppo",
+            shard_kind="RL",
+            need_files=("metrics.npy", "obs.npy"),
+            shard_loader=loader,
+            gae=lambda d: (d["adv"], d["ret"]),
+            gae_name="GAE",
+            normalize_ret=normalize_ret,
+        )
     )
 
 def test_load_episodes_common_ret_untouched_by_default(tmp_path: Path) -> None:

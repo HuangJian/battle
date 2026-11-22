@@ -125,6 +125,76 @@ class PPOSpec:
     rng: PPORng | None = None
 
 
+@dataclass(frozen=True, kw_only=True)
+class HeadUpdateSpec:
+    """一个头入口（`ppo_update_goal` / `ppo_update_intent`）的全部输入。
+
+    = `PPOSpec` 减去 `head` / `terms`：那两项是入口自己的**常量**配置（名字面 + 算式面），
+    其余 13 项（句柄 5 + 训练旋钮 8）全靠调用方交。两个入口的形参表逐字相同（旧
+    `test_entry_signatures_are_frozen` 钉的就是这 13 个名字），所以一份 spec 覆盖两条腿：
+    入口只剩 `run_ppo(spec.to_ppo(_SPEC, LossTerms(...)))` —— 每个头都要手抄一遍 8 个旋钮
+    的那条隐形通道（漏抄 = warmup / kickstarting / 早停 / RNG 静默失效）就此关掉。
+
+    端口（`worker/backend.py::update`）仍是 5 位置 + `**update_kwargs`：前 5 个是**每波**
+    都换的句柄（model / opt / chunks / epochs / device），旋钮才是每轮变的东西。后者由
+    `from_port` 收成一份 spec —— 未知键在构造时立刻 `TypeError`（旧写法一路透传到
+    `run_ppo(PPOSpec(...))` 之前都没有一处认得名字表）。
+    """
+
+    #: 2. 句柄面。
+    model: _PPOModel
+    opt: _GradOpt
+    chunks: list[dict]
+    epochs: int
+    device: torch.device | str
+    # 4. 训练旋钮（与 `PPOSpec` 同名同缺省；`head` / `terms` 由入口补）。
+    ckpt_path: str | None = None
+    target_kl: float = TARGET_KL
+    seed: int = 7
+    value_warmup_epochs: int = 0
+    ref_model: object | None = None
+    kl_coef: float = 0.0
+    on_epoch_done: Callable[[int, object], None] | None = None
+    rng: PPORng | None = None
+
+    @classmethod
+    def from_port(cls, model, opt, chunks, epochs, device, **update_kwargs):
+        """`worker/backend.py::update` 的调用形状 → 一份 spec。
+
+        形参刻意不注解：`**update_kwargs` 是 backend 私有的旋钮名（来源
+        `trainer/run_rl.py::update_kwargs` / `trainer/stream.py` 的注入），与
+        `worker/ppo/engine.update` 的同名端口同一种透传写法；旋钮名写错在这里就炸。
+        """
+        return cls(
+            model=model,
+            opt=opt,
+            chunks=chunks,
+            epochs=epochs,
+            device=device,
+            **update_kwargs,
+        )
+
+    def to_ppo(self, head: HeadSpec, terms: LossTerms) -> PPOSpec:
+        """补上本头的名字面/算式面 → `run_ppo` 的入参（逐字段搬运，不重排、不落缺省）。"""
+        return PPOSpec(
+            model=self.model,
+            opt=self.opt,
+            chunks=self.chunks,
+            epochs=self.epochs,
+            device=self.device,
+            head=head,
+            terms=terms,
+            ckpt_path=self.ckpt_path,
+            target_kl=self.target_kl,
+            seed=self.seed,
+            value_warmup_epochs=self.value_warmup_epochs,
+            ref_model=self.ref_model,
+            kl_coef=self.kl_coef,
+            on_epoch_done=self.on_epoch_done,
+            rng=self.rng,
+        )
+
+
 def _empty(head: HeadSpec) -> dict[str, float | bool]:
     """空 chunks 的返回值（键集与真跑一遍后的聚合完全一致）。"""
     out: dict[str, float | bool] = {"policy": 0.0, "value": 0.0, "entropy": 0.0, "kl": 0.0}

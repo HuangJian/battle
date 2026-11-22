@@ -71,19 +71,21 @@ def _load(
         return _fake_shard(n, stage)
 
     return C.load_episodes_common(
-        "R",
-        label="ppo",
-        shard_kind="RL",
-        need_files=("metrics.npy", "obs.npy"),
-        shard_loader=loader,
-        gae=lambda d: (
-            np.zeros(d["obs"].shape[0], dtype=np.float32),
-            np.zeros(d["obs"].shape[0], dtype=np.float32),
-        ),
-        gae_name="GAE",
-        normalize_ret=False,
-        per_stage_quota=quota,
-        bundle=bundle,
+        C.LoadEpisodesSpec(
+            data_root="R",
+            label="ppo",
+            shard_kind="RL",
+            need_files=("metrics.npy", "obs.npy"),
+            shard_loader=loader,
+            gae=lambda d: (
+                np.zeros(d["obs"].shape[0], dtype=np.float32),
+                np.zeros(d["obs"].shape[0], dtype=np.float32),
+            ),
+            gae_name="GAE",
+            normalize_ret=False,
+            per_stage_quota=quota,
+            bundle=bundle,
+        )
     )
 
 

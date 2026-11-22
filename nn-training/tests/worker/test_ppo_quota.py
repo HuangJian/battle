@@ -70,16 +70,18 @@ def _collect(monkeypatch, shards: list[tuple[int, int]], quota: int):
         return np.zeros(n, dtype=np.float32), np.zeros(n, dtype=np.float32)
 
     eps = C.load_episodes_common(
-        "root",
-        label="t",
-        shard_kind="RL",
-        need_files=(),
-        shard_loader=loader,
-        gae=gae,
-        gae_name="GAE",
-        normalize_ret=False,
-        normalize_adv=False,
-        per_stage_quota=quota,
+        C.LoadEpisodesSpec(
+            data_root="root",
+            label="t",
+            shard_kind="RL",
+            need_files=(),
+            shard_loader=loader,
+            gae=gae,
+            gae_name="GAE",
+            normalize_ret=False,
+            normalize_adv=False,
+            per_stage_quota=quota,
+        )
     )
     return eps, seen, meta
 

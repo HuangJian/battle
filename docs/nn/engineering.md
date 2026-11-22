@@ -25,6 +25,42 @@
 
 ---
 
+## §302 P0-3 第四十九刀 A 批：两个头入口 + 装载骨架收 spec（43 → 40）（2026-11-22）
+
+* **一万一刀三处**（都在 `worker/ppo/`）：`goal.ppo_update_goal`(13) · `intent.ppo_update_intent`(13)
+  · `np_core.load_episodes_common`(13)。宽签名 43 → **40**，文件 35 → **32**（三个文件各自归零）。
+* **两个头入口用同一份 spec**：它们的 13 个形参逐字相同（旧 `test_entry_signatures_are_frozen`
+  钉的就是这 13 个名字），差别只在 `head` / `terms` 那两项**本模块的常量**。所以
+  `loop.HeadUpdateSpec` = `PPOSpec` 减去 `head`/`terms`，入口只剩
+  `run_ppo(spec.to_ppo(_SPEC, LossTerms(...)))`。`to_ppo` 是**唯一**一份「13 个字段逐个搬进
+  PPOSpec」的实现 —— 这项搬运原本是两个入口各手抄一遍 15 个关键字，漏一个不报错（warmup
+  静默退化成直接 PPO、kickstarting 静默关掉、早停 / 断点续跑静默失效，见 §299 的失效面清单）。
+* **端口没动，动的是端口里的东西**：`trainer/stream.py` 仍 `backend.update(model, opt, chs,
+  epochs, device, **c.update_kwargs)` —— 前 5 个是每波都换的句柄，旋钮才是每轮变的。所以端口
+  形状保留 5 位置 + `**update_kwargs`（`tests/worker/test_backend_contract.py` 的
+  `REQUIRED_UPDATE_KWARGS` 与 `test_update_is_exposed` 都建在它上面），但 `update` 从「别名到
+  入口」变成一层**真正认名字**的适配器：`HeadUpdateSpec.from_port(...)` 构造 spec，拼错的旋钮
+  当场 `TypeError`（旧写法一路 `**kwargs` 砍到 `run_ppo` 之前都没有一处知道名字表）。
+  适配器形参刻意不注解 —— 与 `worker/ppo/engine.update` 同一种透传端口写法，不引 `Any`。
+* **装载骨架**：`np_core.LoadEpisodesSpec`（同模块）把 13 个参数拆成「方言面 8」+「行为旋钮 5」，
+  三份常量表（`np_core.load_episodes` / `goal.load_episodes_goal` / `intent.load_episodes_intent`）
+  从「手抄关键字」变成「按名交一张表」；入口体内 13 行展开成同名局部量，主流程一字未改。
+* **调用点**：生产 5 处（两个入口的 `update` 适配器 ×2、三份装载表）+ 测试 7 个文件
+  （`test_ppo_goal` 3 · `test_ppo_intent` 3 · `test_ppo_scalar_sync` 2 改调 `mod.update(...)`，
+  与 stream 同一条形状；`test_log_diet` / `test_np_core` / `test_ppo_quota` 改构造 spec）。
+* **契约守卫重锚**：`test_ppo_loop_core` 的 `EXPECTED_PARAMS`（13 个名字）从「入口形参表」改钉
+  `HeadUpdateSpec` 的**字段表**（顺序 + 缺省从第 6 项起），另加「入口只收一份 `spec`」与
+  「端口接住 5 位置 + 任意旋钮关键字、未知键 `TypeError`」；`test_ppo_loop_spec` 的
+  「两个入口逐个交齐 15 个关键字」改成「`to_ppo` 逐个交齐 15 个」+「两个入口只走 `to_ppo`」。
+  没有删任何一条判据。
+* 新守卫 `tests/worker/test_load_episodes_spec.py`（7 条：frozen + 全字段 kw_only / 13 字段与缺省
+  逐项表 / 入口只剩 `spec` / 未知旋钮 `TypeError` / 三份生产表按名交齐方言位且不带位置实参
+  （AST）/ 转发形状）。
+* **两条计数账**：① 复用账本 `BASELINE_CLONE` 17 → **18**（两个 `update` 端口各是一行转发的字面
+  `def`，骨架相同；理由写进 `tests/test_reuse_ledger.py` 的基线注释 —— 消掉它只能把 13 个名字
+  埋回 `**kwargs`）。② 文本断言两条（形态 1536 / 源码面 1227）**未动**：新判据全走 AST 结构
+  断言，读盘与 `test_ppo_loop_core.py` 同写法（文件名为入参），不落进「源码文本」口径。
+
 ## §301 P0-3 第四十八刀：`run_cloud_eval` 收 `CloudEvalSpec`（44 → 43）（2026-11-22）
 
 * `remote/offline_eval.run_cloud_eval` 原来 6 个必填 + 8 个带缺省的 14 个关键字。现在只收一份

@@ -186,8 +186,18 @@ _EXPECTED_EXEMPT_STEMS = frozenset(
 #: （exact）；本轮按 G4/G9 把两处收窄成各自的真实异常集（连接对象 vs 响应对象、失败语义不同），
 #: 差异只在那行 `except`，其余仍是同一段关闭体 ⇒ 记为**结构克隆（1 组），没有新增实现**。
 #: 同一处缺陷仍须两侧同改（关闭失败都不许冒泡）。
+#: **2026-11-22 抬 clone 1 格（17 → 18）的账**（P0-3 第四十九刀 A 批，`engineering.md` §302；
+#: exact 仍 16）: 两个头入口收成 `HeadUpdateSpec` 后，`goal.update` / `intent.update` 各自是
+#: 一条**一行的端口转发**（`return ppo_update_goal(HeadUpdateSpec.from_port(...))`），AST 骨架
+#: 相同 ⇒ 记成一组结构克隆。这一格同样是**目标状态本身**而不是又抄一份实现：那两条
+#: `def update` 必须是各模块里的**字面 `def`**（`tests/worker/test_backend_contract.py::
+#: test_update_is_exposed` 静态解析 `update` 的来路，lambda / 工厂返回值都会记成 UNRESOLVED），
+#: 而形状（5 位置 + `**update_kwargs`）是 `worker/backend.py::REQUIRED_UPDATE_KWARGS` 的契约。
+#: 消掉这组只能改成「入口自己带 `**kwargs`」（会把 13 个名字重新埋回 `**kwargs`，正是本刀要杀的）
+#: 或写法子去骗检测器。防线没松：真重复仍由 `BASELINE_EXACT` 抓，端口形状由 backend 契约两条
+#: 用例抓，13 个输入名由 `tests/worker/test_ppo_loop_core.py` 的字段表抓。
 BASELINE_EXACT = 16
-BASELINE_CLONE = 17
+BASELINE_CLONE = 18
 #: 2026-11-19 合入上游（74 提交）实测 141（+2：relay / replay 的参数名与读取函数散落）。
 #: **2026-11-20 抬同名 1 格（141 → 142）的账**：`remote/replay_corpus.ConvertPool` 协议声明
 #: `summary()`（长驻转换池的唯一读面，生产实现 = `worker.serve_pool`），与 `course_archive` /

@@ -130,12 +130,15 @@ WIDE_FUNCS_BASELINE = {
     # 2026-11-22（P0-3 第四十二刀）：`ppo_update` 的 20 个参数（Paddle 21）收成
     # `TorchUpdateSpec` / `PaddleUpdateSpec`（共用 `BaseUpdateSpec`）⇒ 两个条目删除；
     # 守 `tests/worker/test_ppo_update_spec.py`。
-    "worker/ppo/goal.py": 1,
-    "worker/ppo/intent.py": 1,
+    # 2026-11-22（P0-3 第四十九刀 A 批）：两个头入口的 13 个形参收成 `HeadUpdateSpec`
+    # （入口只收一份 spec，`update` 端口仍是 5 位置 + `**update_kwargs`）⇒ 两个条目删除；
+    # 守 `tests/worker/test_ppo_loop_core.py`（字段表 + 端口可绑定性）与
+    # `tests/worker/test_ppo_loop_spec.py`（`to_ppo` 逐个搬运 15 个旋钮）。
     # 2026-11-22（P0-3 第四十六刀）：`run_ppo` 的 15 个形参收成 `PPOSpec`，本文件宽签名归零，
     # 条目删除。B8 ④（2026-11-19）曾特意摊开签名，但两个入口本来就各自手抄同一张旋钮表
     # （漏抄一个不报错）—— 契约改钉在 `tests/worker/test_ppo_loop_spec.py` 的字段表上。
-    "worker/ppo/np_core.py": 1,
+    # 2026-11-22（P0-3 第四十九刀 A 批）：`load_episodes_common` 的 13 个参数收成
+    # `LoadEpisodesSpec` ⇒ 本文件宽签名归零，条目删除；守 `tests/worker/test_load_episodes_spec.py`。
     "worker/resume.py": 1,
     # 2026-11-21：`quota_sample_priority` 的 9 个位置参数收成 `QuotaSampleSpec`
     # ⇒ 本文件宽签名归零，条目删除。

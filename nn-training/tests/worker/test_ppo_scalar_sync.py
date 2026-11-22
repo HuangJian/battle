@@ -263,7 +263,7 @@ def test_intent_stats_keys_and_warmup_kl_exact_zero() -> None:
     ppo_intent, chunks = _intent_fixture()
     model = ppo_intent.IntentRLNet(h=32, d=2)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-    agg = ppo_intent.ppo_update_intent(
+    agg = ppo_intent.update(
         model,
         opt,
         chunks,
@@ -357,7 +357,7 @@ def test_goal_stats_keys_include_bc() -> None:
 
     model = ppo_goal.GoalRLNet(h=32, d=2)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-    agg = ppo_goal.ppo_update_goal(
+    agg = ppo_goal.update(
         model,
         opt,
         chunks,

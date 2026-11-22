@@ -160,7 +160,7 @@ def test_ppo_update_smoke() -> None:
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     # 合成随机数据下 lp_old 与随机模型初始 logp 严重失配 → KL 必然爆炸；
     # 用极大阈值只测"不早停"路径（真实数据 lp_old 来自同一模型，KL 正常）。
-    agg = ppo_intent.ppo_update_intent(
+    agg = ppo_intent.update(
         model, opt, chunks, epochs=3, device=torch.device("cpu"), target_kl=1e9, seed=1
     )  # 极大阈值：不早停
     assert np.isfinite(agg["policy"]) and np.isfinite(agg["value"]), f"ppo update finite (policy={agg['policy']:.3f} value={agg['value']:.3f})"
@@ -169,7 +169,7 @@ def test_ppo_update_smoke() -> None:
     # 极小阈值 → 早停触发。
     model2 = ppo_intent.IntentRLNet(h=32, d=2)
     opt2 = torch.optim.Adam(model2.parameters(), lr=1e-3)
-    agg2 = ppo_intent.ppo_update_intent(
+    agg2 = ppo_intent.update(
         model2, opt2, chunks, epochs=3, device=torch.device("cpu"), target_kl=1e-9, seed=1
     )
     assert agg2["early_stopped"], "target_kl 极小 → early stop 触发"
@@ -182,7 +182,7 @@ def test_ppo_update_smoke() -> None:
     # IntentRLNet 默认 with_value=True（基类 value_head 声明为 Linear|None，此处收窄）。
     assert model3.value_head is not None
     vhead_before = model3.value_head.weight.detach().clone()
-    agg3 = ppo_intent.ppo_update_intent(
+    agg3 = ppo_intent.update(
         model3,
         opt3,
         chunks,

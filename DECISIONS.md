@@ -9879,6 +9879,31 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **读数**：宽签名 45 → **44**、37 → **36** 文件（`WIDE_FUNCS_BASELINE` 删 `worker/plan.py`）。
 - **验证**：`bun run pygate` 绿（6770 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §300。
 
+## §2026-11-22-head-update-spec（两个头入口 + 装载骨架收 spec；端口 `update` 改认名字）
+
+- **背景**：`worker/ppo/goal.ppo_update_goal` 与 `intent.ppo_update_intent` 各有 13 个形参且**逐字相同**
+  （句柄 5 + 旋钮 8），差别只在 `head` / `terms` 两项本模块常量；`np_core.load_episodes_common` 的 13 个
+  参数同样被三份常量表（`np_core.load_episodes` / `goal.load_episodes_goal` / `intent.load_episodes_intent`）
+  各手抄一遍。失效面不是「难读」而是静默：漏抄 `value_warmup_epochs` = warmup 退化成直接 PPO（value 头
+  随机 ⇒ 策略塌缩），漏抄 `kl_coef` = kickstarting 关掉，漏抄 `ckpt_path` / `target_kl` = 续跑与早停失效。
+- **决定**：`loop.HeadUpdateSpec`（frozen + kw_only，13 字段 = `PPOSpec` 减 `head`/`terms`）+ `to_ppo(head,
+  terms)` 作为「13 字段逐个搬进 PPOSpec」的**唯一**实现；两个入口只收一份 spec。`np_core.LoadEpisodesSpec`
+  同模块（方言面 8 + 行为旋钮 5，缺省逐字一致），三份表改成按名交一张表。
+- **端口保留 5 位置 + `**update_kwargs`，但它现在认名字**：前 5 个是每波都换的句柄，旋钮才是每轮变的；
+  `worker/backend.py::REQUIRED_UPDATE_KWARGS` 与 `tests/worker/test_backend_contract.py` 都建在这个形状上。
+  所以 `update` 从「别名到入口」改成薄适配器 → `HeadUpdateSpec.from_port(...)`，**未知旋钮构造时
+  TypeError**（旧写法一路 `**kwargs` 砍到 `run_ppo` 之前都没有一处认得名字表）。适配器形参不注解
+  （与 `worker/ppo/engine.update` 同款透传端口，不引 `Any`）。
+- **被否决**：① 收成「5 位置 + 一个旋钮袋」再改 stream 的两处调用（要动 `REQUIRED_UPDATE_KWARGS` 的
+  契约与 4 个 backend 的端口形状，且 per-tick 腿的旋钮集不同 —— `value_anchor` 不是 run_ppo 的旋钮）；
+  ② 两个头各留一份 spec（同形两份 = 同一张表写两遍，正是本刀要杀的形状）；③ 让 `PPOSpec` 内嵌
+  `HeadUpdateSpec`（会让 §299 那刀刚钉好的 15 字段表再翻一遍，收益只在命名，不在失效面）。
+- **读数**：宽签名 43 → **40**、35 → **32** 文件（`WIDE_FUNCS_BASELINE` 删 `worker/ppo/goal.py` /
+  `intent.py` / `np_core.py`）；复用账本 `BASELINE_CLONE` 17 → **18**（两个 `update` 端口都是
+  一行转发的字面 `def`，骨架相同；`test_update_is_exposed` 要求它是真 `def`，消掉只能把 13 个
+  名字埋回 `**kwargs`）；文本断言两条**未动**。
+- **验证**：`bun run pygate` 绿。全文 → `docs/nn/engineering.md` §302。
+
 ## §2026-11-22-cloud-eval-spec（`run_cloud_eval` 的 14 个参数收成 `CloudEvalSpec`）
 
 - **背景**：`remote/offline_eval.run_cloud_eval` = 6 必填 + 8 带缺省关键字。生产侧不直接调它：
