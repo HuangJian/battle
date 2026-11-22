@@ -33,6 +33,9 @@ from biz.reward_library import (
 #: 来源：maxTicks 36000 / 敌人总数 ≤20(默认) / 26×26=676 格 / 承压每 6 tick 采样。
 DEFAULT_RANGES: dict[str, tuple[float, float]] = {
     "ticks": (0.0, 36000.0),
+    # metrics v17（2026-11-22）：基地环内有敌的 tick 数（0..ticks）。公式侧一律用
+    # `/(ticks+1)` 归一后再乘权重（满量程 = 权重），所以这里只需要 tick 的上界。
+    "baseIntruderTicks": (0.0, 36000.0),
     "kills": (0.0, 40.0),
     "lives": (0.0, 9.0),
     "playerHits": (0.0, 200.0),

@@ -8829,7 +8829,7 @@ P0-3 第四十刀（`remote/offline_deliver.py`）：`OfflineDeliverer.__init__`
 `base_url` / `token` / `run_id` / `artifacts_dir` 是身份位，其余 16 个是网络/抽屉/模式/注入点
 旋钮 —— 旧表里三个 `float` 超时相邻，`probe_ttl` 写错不会报错，只会把抖动恢复窗口改小。
 调用点 27 处（全部关键字调用）全改传 spec。宽签名 **54 → 53**，本文件清零（文件 45 → 44）。
-守 `tests/remote/test_offline_deliver_spec.py`（3 条），细节 → `docs/nn/engineering.md §293`。
+守 `tests/remote/test_offline_deliver_spec.py`（3 条），细节 → `docs/nn/engineering.md §295`。
 
 ## §2026-11-22-dispatch-spec
 
@@ -8841,7 +8841,7 @@ P0-3 第三十九刀：`run_rollout_queue`（薄包装）与 `RolloutDispatcher.
 `on_shard` 同时从鸭子型 `object` 收窄为 `Callable[[str, dict[str, bytes], dict], None] | None`
 （`common.shard.write_shard` 的 `on_receive` 契约），`trainer/stream` 同步。
 调用点 15 处全改传 spec。宽签名 **56 → 54**，两个文件均清零（文件 47 → 45）。
-守 `tests/trainer/test_dispatch_spec.py`（3 条），细节 → `docs/nn/engineering.md §292`。
+守 `tests/trainer/test_dispatch_spec.py`（3 条），细节 → `docs/nn/engineering.md §294`。
 
 ## §2026-11-22-job-round-spec
 
@@ -8855,7 +8855,7 @@ P0-3 第三十八刀（`remote/job_round.py`）：`run_one_round` 的 21 个参�
 调用点：生产 1（`worker_loop`）+ 单测 4；`test_job_round_split` 的双向一致断言改为
 「必填字段 ⊆ 实参关键字 ⊆ 字段表」（位置面只剩 `spec`）。
 宽签名 **57 → 56**；本文件 2 → 1（剩 `_prefetch_fill`），文件数仍 47。
-守 `tests/remote/test_job_round_spec.py`（3 条），细节 → `docs/nn/engineering.md §291`。
+守 `tests/remote/test_job_round_spec.py`（3 条），细节 → `docs/nn/engineering.md §293`。
 
 ## §2026-11-22-worker-loop-spec
 
@@ -8868,7 +8868,7 @@ P0-3 第三十七刀（`remote/worker.py`）：`worker_loop` 的 22 个参数 �
 `log` 仍用 `Callable` 类型，不抬 `Any` 预算（本文件 4 处不变）。
 冻語生成物：改 `remote/_offline_boot/11_bc.pyfrag` 后重建 `offline_boot.py`。
 宽签名 **58 → 57**；本文件 2 → 1（剩 `run_job`），故文件数仍 47。
-守 `tests/remote/test_worker_loop_spec.py`（3 条），细节 → `docs/nn/engineering.md §290`。
+守 `tests/remote/test_worker_loop_spec.py`（3 条），细节 → `docs/nn/engineering.md §292`。
 
 ## §2026-11-22-eval-settle-spec
 
@@ -8881,7 +8881,7 @@ summary 的分母/胜场会静默错位。改 spec 后全部走关键字。
 `common.log_bundle`），Any 计数 3 处不变；`dataclasses` 进 `ALLOWED_IMPORTS`（stdlib）。
 调用点：生产 3（收工 / 迟到行补账 / 云机）+ 单测 4。
 宽签名 **59 → 58**（48 → 47 文件），本文件 1 → **0**。
-守 `tests/worker/test_eval_settle_spec.py`（3 条），细节 → `docs/nn/engineering.md §289`。
+守 `tests/worker/test_eval_settle_spec.py`（3 条），细节 → `docs/nn/engineering.md §291`。
 
 ## §2026-11-22-stream-run-spec
 
@@ -8893,7 +8893,7 @@ frozen + kw_only 的 `StreamRunSpec`，入口只收 `spec`、展开后函数体�
 `args` / `model` / `opt` 沿用上游 spec 的窄口径（不抬 G14 的 `Any` 基线）。
 调用点：生产 1（`rollout_phase` 的 stream 分支）+ e2e 4 + 单测 2。
 宽签名 **60 → 59**（49 → 48 文件），本文件 1 → **0**。
-守 `tests/trainer/test_stream_run_spec.py`（3 条），细节 → `docs/nn/engineering.md §288`。
+守 `tests/trainer/test_stream_run_spec.py`（3 条），细节 → `docs/nn/engineering.md §290`。
 
 ## §2026-11-22-rollout-phase-spec
 
@@ -8905,7 +8905,7 @@ frozen + kw_only 的 `RolloutPhaseSpec`，入口只收 `spec`、展开后函数�
 类型面：`args` 用 `argparse.Namespace | SimpleNamespace`，不透明的 `model` / `opt` /
 `ppo_backend` / `ref_model` 用 `object`（只做透传）⇒ 不抬 G14 的 `Any` 基线。
 调用点：生产 2（首波 + 补波）。宽签名 **61 → 60**（50 → 49 文件），本文件 1 → **0**。
-守 `tests/trainer/test_rollout_phase_spec.py`（3 条），细节 → `docs/nn/engineering.md §287`。
+守 `tests/trainer/test_rollout_phase_spec.py`（3 条），细节 → `docs/nn/engineering.md §289`。
 
 ## §2026-11-22-bc-dispatch-spec
 
@@ -9758,7 +9758,7 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   要消灭的那种「拼错就落缺省」）。
 - **读数**：宽签名 53 → **52**、44 → **43** 文件（`WIDE_FUNCS_BASELINE` 删 `trainer/loop_serve.py`）；
   `loop_serve.py` LOC 802 → 810。
-- **验证**：`tests/trainer/` 876 例全绿；预算/门禁用例绿。全文 → `docs/nn/engineering.md` §294。
+- **验证**：`tests/trainer/` 876 例全绿；预算/门禁用例绿。全文 → `docs/nn/engineering.md` §296。
 
 ## §2026-11-22-ppo-update-spec（`ppo_update` 成对收 spec）
 
@@ -9781,7 +9781,7 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **读数**：宽签名 52 → **50**、43 → **41** 文件（`WIDE_FUNCS_BASELINE` 删两文件条目）；
   `update_spec.py` 99 行（拓扑秩 L1，已登记 `tests/helpers/remote_dag.py`）。
 - **验证**：`tests/worker/test_ppo_update_spec.py`（7 条）· PPO 族 68 条 · `bun run pygate` 绿
-  （6745 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §295。
+  （6745 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §297。
 
 ## §2026-11-22-runner-spec（B 层派发两入口共收 `RunnerSpec`）
 
@@ -9800,7 +9800,7 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   `batch_runner.py` LOC 513 → 519。连带：`test_batch_runner_split` 的 import 闭集加 stdlib
   `dataclasses`，`test_batch_eval_facade` 的 `RUNNER_EXPORTS` 加 `RunnerSpec`（门面自别名规矩）。
 - **验证**：batch 族 + 门面 72 例绿；`bun run pygate` 绿（6749 passed / 3 skipped）。
-  全文 → `docs/nn/engineering.md` §296。
+  全文 → `docs/nn/engineering.md` §298。
 
 ## §2026-11-22-run-job-spec（`run_job` 的 17 个参数收成 `RunJobSpec`）
 
@@ -9822,7 +9822,7 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **读数**：宽签名 48 → **47**、40 → **39** 文件（`WIDE_FUNCS_BASELINE` 删 `remote/worker.py`）；
   `Any` 基线 `remote/worker.py` 4 → 1、`remote/run_loop.py` 2 → 0（条目删）。
 - **验证**：remote / hub / e2e 相关族全绿；`bun run pygate` 绿（6754 passed / 3 skipped）。
-  全文 → `docs/nn/engineering.md` §297。
+  全文 → `docs/nn/engineering.md` §299。
 
 ## §2026-11-22-task-key-spec（`task_key` 的 16 个参数收成 `TaskKeySpec`）
 
@@ -9838,7 +9838,7 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   调用形状里，正是位置位错位的来源）；② 把开关改成 `frozenset[str]`（键配方是**有序**拼接，
   顺序即契约，集合会把这个信息丢掉，且 TS 侧对拍要重写）。
 - **读数**：宽签名 47 → **46**、39 → **38** 文件（`WIDE_FUNCS_BASELINE` 删 `common/task_key.py`）。
-- **验证**：`bun run pygate` 绿（6759 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §298。
+- **验证**：`bun run pygate` 绿（6759 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §300。
 
 ## §2026-11-22-ppo-spec（`run_ppo` 的 15 个参数收成 `PPOSpec`；推翻 B8 ④ 的「签名即契约」）
 
@@ -9860,7 +9860,7 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   已按账本纪律写明；exact 16 / clone 17 未动）。
 - **顺带纠错**：`WIDE_FUNCS_BASELINE` 该条目注释写「13 个形参」，实测 15（8 个旋钮，非 6）。
 - **读数**：宽签名 46 → **45**、38 → **37** 文件（`WIDE_FUNCS_BASELINE` 删 `worker/ppo/loop.py`）。
-- **验证**：`bun run pygate` 绿（6764 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §299。
+- **验证**：`bun run pygate` 绿（6764 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §301。
 
 ## §2026-11-22-plan-spec（`build_plan` 的 14 个参数收成 `PlanSpec`）
 
@@ -9877,7 +9877,7 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   旋钮混在同一形状里，正是错位源）；② 把自检从「对集相等」改成「旋钮相等」（那等于把计划与
   args 的对比换成对实现细节的断言，`volume` 路线根本没有可比的旋钮值）。
 - **读数**：宽签名 45 → **44**、37 → **36** 文件（`WIDE_FUNCS_BASELINE` 删 `worker/plan.py`）。
-- **验证**：`bun run pygate` 绿（6770 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §300。
+- **验证**：`bun run pygate` 绿（6770 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §302。
 
 ## §2026-11-22-head-update-spec（两个头入口 + 装载骨架收 spec；端口 `update` 改认名字）
 
@@ -9897,12 +9897,12 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **被否决**：① 收成「5 位置 + 一个旋钮袋」再改 stream 的两处调用（要动 `REQUIRED_UPDATE_KWARGS` 的
   契约与 4 个 backend 的端口形状，且 per-tick 腿的旋钮集不同 —— `value_anchor` 不是 run_ppo 的旋钮）；
   ② 两个头各留一份 spec（同形两份 = 同一张表写两遍，正是本刀要杀的形状）；③ 让 `PPOSpec` 内嵌
-  `HeadUpdateSpec`（会让 §299 那刀刚钉好的 15 字段表再翻一遍，收益只在命名，不在失效面）。
+  `HeadUpdateSpec`（会让 §301 那刀刚钉好的 15 字段表再翻一遍，收益只在命名，不在失效面）。
 - **读数**：宽签名 43 → **40**、35 → **32** 文件（`WIDE_FUNCS_BASELINE` 删 `worker/ppo/goal.py` /
   `intent.py` / `np_core.py`）；复用账本 `BASELINE_CLONE` 17 → **18**（两个 `update` 端口都是
   一行转发的字面 `def`，骨架相同；`test_update_is_exposed` 要求它是真 `def`，消掉只能把 13 个
   名字埋回 `**kwargs`）；文本断言两条**未动**。
-- **验证**：`bun run pygate` 绿。全文 → `docs/nn/engineering.md` §302。
+- **验证**：`bun run pygate` 绿。全文 → `docs/nn/engineering.md` §304。
 
 ## §2026-11-22-cloud-eval-spec（`run_cloud_eval` 的 14 个参数收成 `CloudEvalSpec`）
 
@@ -9919,4 +9919,16 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   位置位」可言）；② spec 单独成 `remote/cloud_eval_spec.py`（这里不存在 `run_job` 那个成环压力：
   `plan_handoff` 本来就要 `offline_eval`，且它是可选依赖，延迟 import 已够）。
 - **读数**：宽签名 44 → **43**、36 → **35** 文件（`WIDE_FUNCS_BASELINE` 删 `remote/offline_eval.py`）。
-- **验证**：`bun run pygate` 绿（6777 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §301。
+- **验证**：`bun run pygate` 绿（6777 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §303。
+## §2026-11-22-export-no-iters-cap（导出段长不再有上界：课程 `iters` 是唯一终点）
+
+- **背景**：g9-def（课程 `iters=1000`、已跑 it497 ⇒ 剩 503 轮）点导出被当场拒：
+  「> 硬上界 500」。要导只能去改课程文件降 `iters` —— 任务定义迁就程序里的一个常数。
+- **决定**（用户口径：一切以课程定义为准，程序里不要设置任何上界）：`RUN_MAX_ITERS_HARD_CAP`
+  改名 `RUN_SEGMENT_DEFAULT_ITERS`，语义收窄为「课程无限（`iters<=0`）时的缺省段长」；
+  删掉 `build_plan` / `validate_plan` / `exportGuardReason` 三处 `> cap` 拒绝；有限课程
+  `end_it = iters_total`，`max_iters` 与 `--run-max-iters` **只缩短、永不拒**。
+- **被否决**：保留 500 当「防手写/损坏计划把节点按一整天」的闸——节点预算 `budget_sec`、
+  课程 `max_hours`、控制台 hold/stall 告警已经在守那一半，而它打在正常路径上。
+- **验证**：nn 全量门禁 6707 passed / dashboard 2215 / 根 2867 全绿；回归用例钉住
+  it497→iters1000=503 轮可导。全文 → `docs/nn/engineering.md` §287。

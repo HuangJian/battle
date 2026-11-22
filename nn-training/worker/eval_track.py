@@ -293,6 +293,11 @@ class _LedgerTally(NamedTuple):
     pu: list[float]
     zero_kill: int
     timeout: int
+    # 环内拦截（2026-11-22，experiments §161）：[sum, count]，count = 有该字段的局数。
+    ring_intr: list[float]
+    ring_kills: list[float]
+    ring_ttk: list[float]
+    inner_frac: list[float]
 
 
 def _scan_ledger(eval_jsonl: Path, key16: str, it: int) -> _LedgerTally:
@@ -313,6 +318,11 @@ def _scan_ledger(eval_jsonl: Path, key16: str, it: int) -> _LedgerTally:
     led_pu: list[float] = [0.0, 0.0]
     led_zero_kill = 0
     led_timeout = 0
+    # 环内拦截：与技能子指标同规（缺字段的局不入分母，不把 unknown 读成 0）。
+    led_ring_intr: list[float] = [0.0, 0.0]
+    led_ring_kills: list[float] = [0.0, 0.0]
+    led_ring_ttk: list[float] = [0.0, 0.0]
+    led_inner_frac: list[float] = [0.0, 0.0]
     try:
         with open(eval_jsonl, encoding="utf-8") as jf:
             for ln in jf:
@@ -360,6 +370,15 @@ def _scan_ledger(eval_jsonl: Path, key16: str, it: int) -> _LedgerTally:
                 # summary 仍报 0.0）。口径同 `evalboard/stats.ts`：已清场的局不算超时。
                 if oc in ("timeout", "max_ticks") and not r.get("cleared"):
                     led_timeout += 1
+                # 环内拦截（旧行整键缺席 ⇒ 不入分母）。
+                _acc(led_ring_intr, r.get("ringIntruders"))
+                _acc(led_ring_kills, r.get("ringKills"))
+                ttk = r.get("ringTtkMean")
+                if isinstance(ttk, (int, float)) and float(ttk) >= 0:
+                    _acc(led_ring_ttk, ttk)
+                bit, tk = r.get("baseIntruderTicks"), r.get("ticks")
+                if isinstance(bit, (int, float)) and isinstance(tk, (int, float)) and float(tk) > 0:
+                    _acc(led_inner_frac, float(bit) / float(tk))
     except FileNotFoundError:
         pass
     return _LedgerTally(
@@ -373,6 +392,10 @@ def _scan_ledger(eval_jsonl: Path, key16: str, it: int) -> _LedgerTally:
         pu=led_pu,
         zero_kill=led_zero_kill,
         timeout=led_timeout,
+        ring_intr=led_ring_intr,
+        ring_kills=led_ring_kills,
+        ring_ttk=led_ring_ttk,
+        inner_frac=led_inner_frac,
     )
 
 
@@ -544,6 +567,18 @@ def settle_eval_summary(spec: EvalSettleSpec) -> None:
         # ---- 门控技能子指标（§8；缺数据 None = unknown，门侧不当事）----
         # 分母 = 该指标有值的局数（旧 agent 缺 playerHits 时 phits_mean 为 None，
         # 不与 kills 混用一个分母——混用会把"没数据"伪装成"0 次被击中"）。
+        # ---- 环内拦截（2026-11-22，experiments §161）----
+        # 四个读数一组：进环次数/局、拦截率（**总和比**，不是均值比）、进环→死亡拍数、
+        # 环内有敌的 tick 占比（与训练侧奖励列 `baseIntruderTicks/ticks` 同口径）。
+        # 旧行整键缺席 ⇒ None（unknown），门侧按 unknown 处理。
+        "ring_intr_mean": _ratio(tally.ring_intr),
+        "ring_kill_rate": (
+            round(tally.ring_kills[0] / tally.ring_intr[0], 4)
+            if tally.ring_intr[0] > 0
+            else None
+        ),
+        "ring_ttk_mean": _ratio(tally.ring_ttk),
+        "inner_press_frac": _ratio(tally.inner_frac),
         "kills_mean": _ratio(tally.kills),
         "zero_kill_frac": (
             round(tally.zero_kill / tally.kills[1], 4) if tally.kills[1] else None

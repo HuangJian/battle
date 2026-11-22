@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any
 
 from common.logutil import log_line
@@ -47,8 +48,32 @@ def curriculum_active_count(order_len: int, it: int, start: int, every: int, gro
     return min(order_len, n)
 
 
-def build_pairs(args: Any, it: int, rotate_seed: int) -> list[tuple[int, int]]:
+#: `--rotate-stages` 的 epoch 排列流标签（与 `worker/volume_waves.EPOCH_TAG` 同值：同一个
+#: `(rotateSeed, epoch_idx)` 在两处抽出同一个排列）。
+_ROTATE_EPOCH_TAG = 0xA11CE
+
+
+@lru_cache(maxsize=8)
+def _epoch_perm(rotate_seed: int, epoch_idx: int, n: int) -> tuple[int, ...]:
+    """`(rotateSeed, epoch_idx, n)` → 该 epoch 的关卡排列（纯函数；有界缓存）。
+
+    为什么要缓存：`build_pairs` 每轮都要这个排列，而它只随 epoch 变（一轮一个 `epoch_idx`
+    会连续复用 `per_epoch` 次）。旧实现每调一次就 `default_rng(...).permutation(n)` ——
+    占该分支单轮耗时的 ~1/3，纯重复计算。缓存值**逐字节等于**现算值（同种子同算法），
+    上限 8 = 相邻几个 epoch（回放整段/断点续跑都够，越界只是重算）。
+    """
+    import numpy as np
+
+    rng = np.random.default_rng([int(rotate_seed), _ROTATE_EPOCH_TAG, int(epoch_idx)])
+    return tuple(int(i) for i in rng.permutation(int(n)))
+
+
+def build_pairs(args: Any, it: int, rotate_seed: int, *, quiet: bool = False) -> list[tuple[int, int]]:
     """Game pairs for iteration `it` — 纯函数 of (rotateSeed, it)，与调用顺序无关。
+
+    `quiet=True` 只关掉**逐轮采集日志**（不清任何计算，返回值逐字节不变）。调用方是
+    「重放整段」的那类（`worker.plan.plan_pairs_fp` 逐轮重放算指纹）：那时"这一轮采哪些关"
+    不是正在发生的事，5000 轮打一万行只是噪声，且要付 flush 的钱。
 
     2026-08-24 it5 重跑事故根因：旧实现从单一连续流按调用顺序抽签，重启后 it5
     复用了流头（= 旧 it3 的签）→ 与已落盘 shard 完全不相交 → 断点续跑剔除失效、
@@ -80,12 +105,13 @@ def build_pairs(args: Any, it: int, rotate_seed: int) -> list[tuple[int, int]]:
             for i, stage in enumerate(active)
             for j in range(args.seeds_per_stage)
         ]
-        log_line(
-            "run_rl",
-            f"curriculum: it{it} active "
-            f"{n_active}/{len(order_list)} stages={active} "
-            f"(seeds {min(p[1] for p in pairs)}..{max(p[1] for p in pairs)})",
-        )
+        if not quiet:
+            log_line(
+                "run_rl",
+                f"curriculum: it{it} active "
+                f"{n_active}/{len(order_list)} stages={active} "
+                f"(seeds {min(p[1] for p in pairs)}..{max(p[1] for p in pairs)})",
+            )
         return pairs
     if args.rotate_stages <= 0:
         base = parse_range(args.stages)
@@ -110,12 +136,11 @@ def build_pairs(args: Any, it: int, rotate_seed: int) -> list[tuple[int, int]]:
     per_epoch = -(-args.total_stages // k)
     pos = (it - 1) % per_epoch
     epoch_idx = (it - 1) // per_epoch
-    rng_perm = np.random.default_rng([rotate_seed, 0xA11CE, epoch_idx])
-    perm = [int(s) for s in rng_perm.permutation(args.total_stages)]
-    if pos == 0:
+    perm = _epoch_perm(int(rotate_seed), int(epoch_idx), int(args.total_stages))
+    if pos == 0 and not quiet:
         log_line(
             "run_rl",
-            f"rotate: new epoch — permutation {perm} split into {per_epoch} batches",
+            f"rotate: new epoch — permutation {list(perm)} split into {per_epoch} batches",
         )
     window = perm[pos * k : (pos + 1) * k]
     rng_draw = np.random.default_rng([rotate_seed, 0xB0B, it])
@@ -125,9 +150,10 @@ def build_pairs(args: Any, it: int, rotate_seed: int) -> list[tuple[int, int]]:
         for i, stage in enumerate(window)
         for j in range(args.seeds_per_stage)
     ]
-    log_line(
-        "run_rl",
-        f"rotate: batch {pos + 1}/{per_epoch} "
-        f"stages={window} (seeds {min(p[1] for p in pairs)}..{max(p[1] for p in pairs)})",
-    )
+    if not quiet:
+        log_line(
+            "run_rl",
+            f"rotate: batch {pos + 1}/{per_epoch} "
+            f"stages={list(window)} (seeds {min(p[1] for p in pairs)}..{max(p[1] for p in pairs)})",
+        )
     return pairs

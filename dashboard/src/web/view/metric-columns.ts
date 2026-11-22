@@ -42,6 +42,8 @@ export type RolloutRowColKey =
   | 'kills'
   | 'dmgPerKill'
   | 'residualHp'
+  | 'ringKillRate'
+  | 'innerPress'
   | 'loot'
   | 'phaseSecs'
   | 'scoreMean'
@@ -150,6 +152,23 @@ export const METRIC_COLS: Readonly<Record<MetricColKey, MetricCol>> = {
   // ── 技能读数（rollout 实际值；缺盘上数据时按估算标注） ──
   avgWinTicks: { key: 'avgWinTicks', label: '胜局耗时', title: '胜局平均耗时（ticks）', num: true },
   kills: { key: 'kills', label: '击杀', title: '歼灭率 = Σ击杀 / Σ关卡敌数', num: true },
+  ringKillRate: {
+    key: 'ringKillRate',
+    label: '环内拦截',
+    title:
+      '基地 6 格内进环的敌人里，被玩家打掉的比例（ΣringKills / ΣringIntruders）。' +
+      ' 实测 NN 只有 God 的一半（19.6% vs 36.7%），且 ttk 只差 10% ⇒ 病在"打不掉"，不是"来得慢"' +
+      '（docs/nn/experiments.md §161）。',
+    num: true,
+  },
+  innerPress: {
+    key: 'innerPress',
+    label: '环内受压',
+    title:
+      '基地 6 格内**有存活敌**的 tick 占比（ΣbaseIntruderTicks / Σticks）。' +
+      ' 这是训练侧奖励项 `baseIntruderTicks/ticks` 的同口径读数：越低越好。',
+    num: true,
+  },
   dmgPerKill: {
     key: 'dmgPerKill',
     label: '承伤/杀',

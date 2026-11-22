@@ -9,7 +9,7 @@
   `MANIFEST_BC_EXEMPT`/`MANIFEST_BC_EXTRA` · `MANIFEST_ITER_EXTRA`/`MANIFEST_RUN_EXTRA`
   + `normalize_manifest`（校验 + 归一化）；
 * **产物契约**：`ROLLOUT_SCRIPT`/`EVAL_SCRIPT`/`ROLLOUT_SCRIPTS`（TS 导出器路径 = TS↔Python 的产物契约）·
-  `ITER_OUT_REL`/`ITER_NODE_LABEL` · `PLAN_NAME`/`PLAN_PROTO` · `RUN_NODE_LABEL`/`RUN_MAX_ITERS_HARD_CAP`；
+  `ITER_OUT_REL`/`ITER_NODE_LABEL` · `PLAN_NAME`/`PLAN_PROTO` · `RUN_NODE_LABEL`/`RUN_SEGMENT_DEFAULT_ITERS`；
 * **rollout 规格与语料指纹**：`validate_rollout_spec`（argv 白名单 / 相对路径不越界）·
   `shard_name`/`parse_shard_name` · `data_fp_entries`/`data_fp`/`d14_corpus_match`（数据集身份）·
   `iter_declared_entries`/`iter_expected_data_fp`。
@@ -250,14 +250,19 @@ MANIFEST_RUN_EXTRA: tuple[str, ...] = (*MANIFEST_ITER_EXTRA, "plan_sha256")
 #: 半离线轮写进 shard manifest 的 `node` 标签（与 `node`/`local` 区分：可溯源到
 #: 「这一批局是云端自主段跑的」）。
 RUN_NODE_LABEL = "run"
-#: 计划的**硬上界**（防一份手写/损坏的计划把节点按在机上一整天）。
-#: ★ 2026-10-15/16（J1/J4，plan/offline-open-ended-iters-and-loud-export）：它的角色从
-#: 「拒导闸」变成「**段长**」——课程无限（`iters<=0`）时 `end_it = it + 段长`，而段长
-#: 缺省就是这个值。命令行可用 `--run-max-iters` **再降**（此前本注释说的那个旗标全仓
-#: 没有 argparse，D1 补上了；它**只能降不能抬**）；计划的 end_it 一律按其与 iters_total
-#: 的交集钳制。同值常量必须与控制台静态预判那份一致（`dashboard/src/server/bundles/
-#: export.ts::RUN_MAX_ITERS_HARD_CAP`，两边各有对账用例）。
-RUN_MAX_ITERS_HARD_CAP = 500
+#: **课程无限**（`iters <= 0`）时一个离线段的**缺省段长**。
+#: ⚠ **它不是上界，也不是任何闸**（2026-11-22 用户口径：「一切以课程定义为准，程序里不要
+#: 设置任何上界」）。历史：本常量原名 `RUN_MAX_ITERS_HARD_CAP = 500`，同时扮演「拒导闸」/
+#: 「段长钳制」/「静态预判线」三个角色，结果是 g9-def（课程 `iters=1000`、已跑 497 ⇒ 剩
+#: 503 轮）在控制台被**当场拒导**，只能去改课程文件迁就程序里的一个数字——本末倒置。
+#: 现行口径：
+#:   * **有限课程**（`iters > 0`）⇒ 终点**恒等于课程 `iters`**，程序不再钳、不再拒；
+#:   * **无限课程**（`iters <= 0`）⇒ 课程没给终点，段长由 `--run-max-iters` 指定，缺省就是
+#:     这个值（它只是「给一个没有长度的东西一个长度」，不是限制别人）；
+#:   * `--run-max-iters` 只会把段**缩短**，永远不会让任何东西被拒。
+#: 与 `dashboard/src/server/bundles/export.ts` 的静态预判不再有同名常量（那条预判只保留
+#: 「缺起点权重」与「无剩余轮次」两条，见 `exportGuardReason`）。
+RUN_SEGMENT_DEFAULT_ITERS = 500
 
 # ------------------------------------------------------------------ 校验模型（B5）
 #

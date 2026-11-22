@@ -54,7 +54,7 @@ import common.distribution
 from common.log import log
 from common.paths import REPO_ROOT
 from common.proc import run_capture
-from common.protocol import RUN_MAX_ITERS_HARD_CAP
+from common.protocol import RUN_SEGMENT_DEFAULT_ITERS
 from remote import weights_standard
 from worker.archive import backup_weights
 from worker.modes import _MODE_BACKUP_PREFIX
@@ -317,7 +317,8 @@ class TrainingExport:
             #   响亮打一行（放行但改变默认段长，不能静默）。
             log(
                 "[run_rl] 课程声明 iters<=0（无限）——导出**开区间段**：终点由段长定"
-                f"（--run-iters >0 = N 轮；缺省 = 硬上界 {RUN_MAX_ITERS_HARD_CAP} 轮）"
+                f"（--run-iters >0 = N 轮；缺省 = 段长 {RUN_SEGMENT_DEFAULT_ITERS} 轮，"
+                "可用 --run-max-iters 改；**没有上界**）"
             )
         # ★ 2026-10-15：包的起点（`init_weights.json`）与 `wver` 都取自 `args.out` —— 云机要把它
         #   当权重装载（`JSON.parse`），delta 容器会让整段在 PPO 之前死；读侧先落地（幂等）。
@@ -361,8 +362,8 @@ class TrainingExport:
                 volume=self._volume_plan_block(it),
                 # 配方缺席（`rotation_mode` 空）⇒ None ⇒ 计划不长这个键（老包逐字节不变）。
                 rotation=recipe_from_args(args),
-                # 段长上界的再降档（`--run-max-iters`；0 = 硬上界）——与 `common/manifest.py`
-                # 的注释、控制台的静态预判读的是同一件事（D1：两边不得漂）。
+                # 开区间段的段长（`--run-max-iters`；0 = 用缺省段长）——有限课程上只缩短、
+                # 永不拒（2026-11-22 起程序不设上界）；与 `common/manifest.py` 的注释同一件事。
                 max_segment_iters=int(getattr(args, "run_max_iters", 0) or 0),
                 log=log,
             )

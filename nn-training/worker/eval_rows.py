@@ -83,6 +83,27 @@ def eval_census_fields(manifest: dict | None) -> dict:
     return out
 
 
+#: 环内拦截（2026-11-22）：把 `kills` 拆成环内/环外 + 「进环→死亡」拍数。
+#: 用途见 `docs/nn/experiments.md` §160 补三：NN 放进去的基地压力比 God 少，却每档都被
+#: 拆得更多 ⇒ 要分清「没拦住」（ringIntruders 大）与「拦得慢」（ringTtkMean 长）。
+#: 旧报告/未同步节点缺键 = None（不伪造 0，否则会被读成"一个都没漏进来"）。
+EVAL_RING_KEYS = (
+    "killsOuter",
+    "baseIntruderTicks",
+    "ringCells",
+    "ringIntruders",
+    "ringKills",
+    "ringEscaped",
+    "ringAlive",
+    "ringTtkMean",
+)
+
+
+def eval_ring_fields(manifest: dict | None) -> dict:
+    """从 eval 报告 manifest 抽出环内拦截七列（缺键 = None）。"""
+    return {k: (manifest.get(k) if isinstance(manifest, dict) else None) for k in EVAL_RING_KEYS}
+
+
 #: metrics v8 危险暴露四列（plan/x20-dodge-avoidance §2；`src/nn/danger-metrics.ts`
 #: 同名同义）。`export-eval-game.ts` 顶层直出（2026-09-24）；旧报告/未同步节点缺键 = None。
 EVAL_V8_KEYS = (
@@ -486,6 +507,8 @@ def eval_row(
         "quality": manifest.get("quality"),
         "dims": dim_vals,
         "kills": manifest.get("kills"),
+        # 环内拦截（2026-11-22）：环内/环外击杀拆分 + 「进环→死亡」拍数（缺键 = None）。
+        **eval_ring_fields(manifest),
         "enemyHits": manifest.get("enemyHits"),
         "hitRate": manifest.get("hitRate"),
         "powerUpsCollected": manifest.get("powerUpsCollected"),

@@ -123,6 +123,15 @@ export interface EvalCourseRow {
   stopRuns?: number[]
   /** EV 标定用（B3）：本局访问格数；旧行缺席即无。 */
   cellsVisited?: number
+  /** 环内拦截（2026-11-22）：环半径（格）/ 进环次数 / 环内击杀 / 活着离开 / 终局仍在环内 /
+   *  「进环→死亡」均值（无击杀 = -1）/ 环外击杀。旧 bundle 的行缺席 = 无信号。 */
+  ringCells?: number
+  ringIntruders?: number
+  ringKills?: number
+  ringEscaped?: number
+  ringAlive?: number
+  ringTtkMean?: number
+  killsOuter?: number
   /** metrics v14（plan/o1-eval-metrics-remediation §6 S1）：与 rollout `METRICS` 同名的
    *  16 列。此前只在 eval 报告顶层 / Python 账本里，本行契约缺席。旧 bundle 的行缺席 =
    *  无信号（与 v8–v13 同约：不伪造 0）。`clearTick` 统一为 `-1` 哨兵。 */
@@ -198,6 +207,13 @@ self.onmessage = (ev: MessageEvent<EvalCourseWorkerPayload>): void => {
         cleared: res.cleared,
         ticks: res.ticks,
         kills: res.kills,
+        killsOuter: res.killsOuter,
+        ringCells: res.ringCells,
+        ringIntruders: res.ringIntruders,
+        ringKills: res.ringKills,
+        ringEscaped: res.ringEscaped,
+        ringAlive: res.ringAlive,
+        ringTtkMean: res.ringTtkMean,
         enemyHits: res.enemyHits,
         playerHits: res.playerHits,
         playerDamageTaken: res.playerDamageTaken,

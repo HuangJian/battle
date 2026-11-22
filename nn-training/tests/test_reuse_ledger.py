@@ -186,7 +186,7 @@ _EXPECTED_EXEMPT_STEMS = frozenset(
 #: （exact）；本轮按 G4/G9 把两处收窄成各自的真实异常集（连接对象 vs 响应对象、失败语义不同），
 #: 差异只在那行 `except`，其余仍是同一段关闭体 ⇒ 记为**结构克隆（1 组），没有新增实现**。
 #: 同一处缺陷仍须两侧同改（关闭失败都不许冒泡）。
-#: **2026-11-22 抬 clone 1 格（17 → 18）的账**（P0-3 第四十九刀 A 批，`engineering.md` §302；
+#: **2026-11-22 抬 clone 1 格（17 → 18）的账**（P0-3 第四十九刀 A 批，`engineering.md` §304；
 #: exact 仍 16）: 两个头入口收成 `HeadUpdateSpec` 后，`goal.update` / `intent.update` 各自是
 #: 一条**一行的端口转发**（`return ppo_update_goal(HeadUpdateSpec.from_port(...))`），AST 骨架
 #: 相同 ⇒ 记成一组结构克隆。这一格同样是**目标状态本身**而不是又抄一份实现：那两条

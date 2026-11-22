@@ -169,6 +169,9 @@ from worker.eval_rows import (
     eval_metric_fields as eval_metric_fields,
 )
 from worker.eval_rows import (
+    eval_ring_fields as eval_ring_fields,
+)
+from worker.eval_rows import (
     eval_row as eval_row,
 )
 from worker.eval_rows import (

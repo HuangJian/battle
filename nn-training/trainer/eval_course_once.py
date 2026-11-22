@@ -224,6 +224,15 @@ def _to_tool_row(row: dict, meta: dict, n_stages: int, seed0: int, games: int) -
         "wallPressTicks": row.get("wallPressTicks"),
         "aliveTicks": row.get("aliveTicks"),
         "kills": row.get("kills") or 0,
+        # 环内拦截（2026-11-22）：把 kills 拆成环内/环外 + 「进环→死亡」拍数。
+        # None 保持 None（旧 bundle 没有这些列 ⇒ 无信号，不垫 0，否则会被读成"没漏进来"）。
+        "killsOuter": row.get("killsOuter"),
+        "ringCells": row.get("ringCells"),
+        "ringIntruders": row.get("ringIntruders"),
+        "ringKills": row.get("ringKills"),
+        "ringEscaped": row.get("ringEscaped"),
+        "ringAlive": row.get("ringAlive"),
+        "ringTtkMean": row.get("ringTtkMean"),
         "enemyHits": row.get("enemyHits") or 0,
         "playerHits": row.get("playerHits") or 0,
         "playerDamageTaken": row.get("playerDamageTaken") or 0,

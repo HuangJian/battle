@@ -159,6 +159,10 @@ def local_root_path(cfg: dict, course: str, *, multi: bool) -> Path:
 
     显式给了就不再加课程层（单课）——多课时**必须**加，否则两门课共用一个产物根（第二门课的
     `run_loop` 会把第一门的产物当自己的续跑点，权重接错课且看起来完全正常——与 `course_work_dir` 同一条）。
+
+    ⚠ 单课显式根**故意**不加层（老机器上的在跑段靠它续跑）：换课的风险由
+    `offline_boot.local_belongs_to_course` 兜（产物根记 `.course-name`；不是本课 ⇒ 本课产物改落
+    `<根>/<课>`，老产物一个字不动）。见 `docs/nn/remote-transport.md §169`。
     """
     explicit = str(cfg.get("local_root") or "").strip() or os.environ.get(LOCAL_ROOT_ENV, "").strip()
     base = Path(explicit).expanduser() if explicit else Path(DEFAULT_LOCAL_PARENT) / LOCAL_ROOT_NAME

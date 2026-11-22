@@ -249,7 +249,7 @@ def _warn_explicit_source_blocks_restore(args: Any, mode: str) -> None:
 
 
 def _run_segment_iters(args: Any) -> int:
-    """导出包的段长声明（0 = 关；<0 = 到课程末尾，课程无限时 = 一段，≤ `RUN_MAX_ITERS_HARD_CAP`）。
+    """导出包的段长声明（0 = 关；<0 = 到课程末尾，课程无限时 = 一段（缺省 `RUN_SEGMENT_DEFAULT_ITERS`，**无上界**））。
 
     优先级与 `_rollout_source` 同口径：CLI `--run-iters` > `courses.<stem>.run_iters` >
     `rl.run_iters` > 0。**缺省 0 = 关**（历史行为逐字节不变；要导包才显式开）。
@@ -261,7 +261,7 @@ def _run_segment_iters(args: Any) -> int:
     的 hold）⇒ 本值只剩**一个**用途：`--export-bundle` 的终点（控制台导出用 `-1`）。
     ★ 2026-10-15（J1，plan/offline-open-ended-iters-and-loud-export §3.1）：「到课程末尾」
     只对**有限**课程成立；`iters<=0`（无限）时课程没有末尾，`<0` 的含义收窄为
-    「**一段**」（段长缺省 = 硬上界，见 `worker/plan.build_plan` 的开区间分支）。
+    「**一段**」（段长缺省 = `RUN_SEGMENT_DEFAULT_ITERS`，见 `worker/plan.build_plan` 的开区间分支）。
     """
     n = int(getattr(args, "run_iters", 0) or 0)
     if n:

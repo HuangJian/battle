@@ -250,6 +250,12 @@ METRICS: tuple[str, ...] = (
     # v13 `isWallPressTick` 的唯一判据；**累计 tick**（每 tick ≤1），公式侧用差分/速率，
     # 不能把累计值当瞬时值直接乘权重。与 eval 账本同源。
     "wallPressTicks",  # 89
+    # ---- metrics v17（2026-11-22，docs/nn/experiments.md §161；idx90）----
+    # 基地环内（`BASE_INTRUDER_CELLS`=6 格，与 eval 的 ring 同环）**有存活敌的 tick 数**。
+    # 为什么不复用 `basePressureSum`：实测 NN 的平均基地压力**比 God 低**却丢基地多得多
+    # （§160 补三），压力量纲与"进来之后打不死"不是一回事；本列是 dwell（在场时间）。
+    # 累计 tick（0..ticks），公式侧用 `share(ticks)` 归一，满量程 = 1。
+    "baseIntruderTicks",  # 90
 )
 
 METRIC_INDEX: dict[str, int] = {name: i for i, name in enumerate(METRICS)}
@@ -278,7 +284,7 @@ METRICS_DIM = len(METRICS)
 #: v15（2026-11-03，同计划腿 B）：追加 wallPressTicks（idx89），行宽 90。
 #: v16（2026-11-03）：pickupDist(40) 口径由曼哈顿直距改为 BFS 路径距离（列宽不变，
 #: 旧 v15 语料的同名列是另一个量 ⇒ 不可混训）。
-METRICS_VERSION = 16
+METRICS_VERSION = 17
 
 #: 终局 outcome 名（与 TS `manifest.outcome` 同源）；未列出的 terminal 键 = 0。
 OUTCOMES: tuple[str, ...] = ("stage_clear", "lives_exhausted", "timeout", "base_destroyed")
@@ -1024,7 +1030,8 @@ def _self_check() -> None:
     # v13：追加 idx79–88 基地威胁/成本流
     # v14：mask 语义变更（列宽不变）
     # v15：追加 idx89 wallPressTicks
-    assert len(METRICS) == METRICS_DIM == 90, METRICS_DIM
+    # v17：追加 idx90 baseIntruderTicks（v16 是 x2 事件 rung，列宽不变）
+    assert len(METRICS) == METRICS_DIM == 91, METRICS_DIM
     assert len(set(METRICS)) == METRICS_DIM
 
 

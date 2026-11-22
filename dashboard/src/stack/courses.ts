@@ -72,7 +72,7 @@ export function isBcCourse(course: string): boolean {
  *
  *  为什么重建它（2026-10-16，plan/offline-open-ended-iters-and-loud-export §3.4 D1）：
  *  `declaredCourseIters()` 在 ★M4 被删（它当时唯一的使用者 = 「离线开课要求 iters>0」那道
- *  预校验），而 J4 的静态预判（「无剩余轮次 / 轮数 > 硬上界 500」**在点击那一刻**就被拒，
+ *  预校验），而 J4 的静态预判（「无剩余轮次」**在点击那一刻**就被拒，
  *  不 spawn、不烧快照、不 push）必须重新读它。
  *
  *  事实来源只能是课程文件（**D14**：机器侧旋钮永不进 curricula、`iters` 永不进 rl-config）

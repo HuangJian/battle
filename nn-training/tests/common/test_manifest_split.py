@@ -3,7 +3,7 @@
 `common/protocol.py` **1238 → 848 行**；搬走**四段跨度共 38 名（逐字节不动）**：`PROTO` · 角色词汇
 （`ROLE_OFFLINE`/`ROLE_ONLINE`/`ROLES`/`ROLE_FIELD`）· `MANIFEST_*` schema + `MANIFEST_KINDS` +
 `KIND_ROLES` + `role_of` · TS/plan 产物契约（`ROLLOUT_SCRIPT`/`EVAL_SCRIPT`/`ROLLOUT_SCRIPTS`/
-`ITER_OUT_REL`/`ITER_NODE_LABEL`/`PLAN_NAME`/`PLAN_PROTO`/`RUN_NODE_LABEL`/`RUN_MAX_ITERS_HARD_CAP`）·
+`ITER_OUT_REL`/`ITER_NODE_LABEL`/`PLAN_NAME`/`PLAN_PROTO`/`RUN_NODE_LABEL`/`RUN_SEGMENT_DEFAULT_ITERS`）·
 `normalize_manifest` + rollout 规格校验 + shard 命名 + `data_fp` 指纹。
 
 本文件钉五件事：
@@ -62,7 +62,7 @@ MOVED_NAMES = {
     "PLAN_PROTO",
     "ROLLOUT_SCRIPT",
     "ROLLOUT_SCRIPTS",
-    "RUN_MAX_ITERS_HARD_CAP",
+    "RUN_SEGMENT_DEFAULT_ITERS",
     "RUN_NODE_LABEL",
     # 校验 / 指纹
     "DataFpEntries",

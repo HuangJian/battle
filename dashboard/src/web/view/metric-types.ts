@@ -65,6 +65,12 @@ export interface EvalSummary {
   dmgPerKill: number | null
   /** 歼灭率 0–1 = Σkills / ΣenemyTotal。 */
   killRate?: number | null
+  /** 环内拦截（2026-11-22，experiments §161）：进环次数/局、拦截率、进环→死亡拍数、
+   *  环内有敌的 tick 占比。旧账本整键缺席 ⇒ undefined（不是 0）。 */
+  ringIntrMean?: number | null
+  ringKillRate?: number | null
+  ringTtkMean?: number | null
+  innerPressFrac?: number | null
   /** 每杀承伤 / (startLives×maxHp) 0–1。 */
   dmgPerKillPct?: number | null
   /** 胜局残血 / **单命满血** 的平均比例（三命关可 >1；缺终局血条时为下限）。 */

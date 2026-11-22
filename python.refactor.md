@@ -1778,36 +1778,36 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      批量换 `object` 已实测否决（406 个红点），只能逐个数据边界换成 TypedDict / 协议。
    * **P0-3 参数爆炸**：仍有 **40 个函数 >8 参数 / 32 文件**（2026-11-22 实测；形状门禁按文件
      冻结）。`dispatch_bc_corpus`(25) → `BcDispatchSpec`（§286，62 → 61）；
-     `dispatch_rollout_phase`(25) → `RolloutPhaseSpec`（§287，61 → 60）；
-     `run_rollout_stream`(22) → `StreamRunSpec`（§288，60 → 59）；
-     `settle_eval_summary`(21) → `EvalSettleSpec`（§289，59 → 58）；
-     `worker_loop`(22) → `WorkerLoopSpec`（§290，58 → 57）；
-     `run_one_round`(21) → `JobRoundSpec`（§291，57 → 56）；
-     `run_rollout_queue` / `RolloutDispatcher` → `DispatchSpec`（§292，56 → 54）；
-     `OfflineDeliverer.__init__`(20) → `OfflineDelivererSpec`（§293，54 → 53）；
-     `trainer/loop_serve.serve`(18) → `ServeSpec`（§294，53 → 52）；
+     `dispatch_rollout_phase`(25) → `RolloutPhaseSpec`（§289，61 → 60）；
+     `run_rollout_stream`(22) → `StreamRunSpec`（§290，60 → 59）；
+     `settle_eval_summary`(21) → `EvalSettleSpec`（§291，59 → 58）；
+     `worker_loop`(22) → `WorkerLoopSpec`（§292，58 → 57）；
+     `run_one_round`(21) → `JobRoundSpec`（§293，57 → 56）；
+     `run_rollout_queue` / `RolloutDispatcher` → `DispatchSpec`（§294，56 → 54）；
+     `OfflineDeliverer.__init__`(20) → `OfflineDelivererSpec`（§295，54 → 53）；
+     `trainer/loop_serve.serve`(18) → `ServeSpec`（§296，53 → 52）；
      `worker/ppo/engine_paddle.ppo_update`(21) + `worker/ppo/engine.ppo_update`(20) →
      `PaddleUpdateSpec` / `TorchUpdateSpec`（共用 `BaseUpdateSpec`，**同刀**：两侧是同一调用面，
      `train_core` 用同一组 kwargs 分派 —— 只收一侧就是给分派点造一个分支；端口 `update(...)`
-     因 goal / intent 的 `update_kwargs` 不同仍保留 5 位置 + `**kwargs`）（§295，52 → 50，
+     因 goal / intent 的 `update_kwargs` 不同仍保留 5 位置 + `**kwargs`）（§297，52 → 50，
      43 → 41）；
      `BatchEvalRunner.__init__`(16) + `dispatch_batch_bg`(13) → 共收 `RunnerSpec`（**同刀**：
-     派发口原按**位置**把 13 个实参转手给 `__init__`）（§296，50 → 48，41 → 40）；
+     派发口原按**位置**把 13 个实参转手给 `__init__`）（§298，50 → 48，41 → 40）；
      `remote/worker.run_job`(17) → `RunJobSpec`（spec 下沉 `remote/job_spec.py`：`job_round` 不许
-     import `remote.worker`）（§297，48 → 47，40 → 39）；
-     `common/task_key.task_key`(16) → `TaskKeySpec`（同模块；9 个同型开关由位置位改按名）（§298，
+     import `remote.worker`）（§299，48 → 47，40 → 39）；
+     `common/task_key.task_key`(16) → `TaskKeySpec`（同模块；9 个同型开关由位置位改按名）（§300，
      47 → 46，39 → 38）；
      `worker/ppo/loop.run_ppo`(15) → `PPOSpec`（推翻 B8 ④「签名即契约」：契约在入口 +
-     新守卫的字段表上；`model`/`opt` 改 Protocol 消除 `object` 就地 cast）（§299，46 → 45，38 → 37）；
+     新守卫的字段表上；`model`/`opt` 改 Protocol 消除 `object` 就地 cast）（§301，46 → 45，38 → 37）；
      `worker/plan.build_plan`(14) → `PlanSpec`（同模块；导出期手抄的 13 个旋钮改按名，
-     自检掩护不了「计划本身按错旋钮组装」）（§300，45 → 44，37 → 36）；
+     自检掩护不了「计划本身按错旋钮组装」）（§302，45 → 44，37 → 36）；
      `remote/offline_eval.run_cloud_eval`(14) → `CloudEvalSpec`（同模块；顺带杀掉生产那条
-     「装配点造关键字 `dict` → `run_cloud_eval(**params)`」的路，`Any` 8 → 6）（§301，44 → 43，36 → 35）；
+     「装配点造关键字 `dict` → `run_cloud_eval(**params)`」的路，`Any` 8 → 6）（§303，44 → 43，36 → 35）；
      **A 批（三处同刀）**：`worker/ppo/goal.ppo_update_goal`(13) · `intent.ppo_update_intent`(13) →
      `HeadUpdateSpec`（两个入口的 13 个形参逐字相同，差别只在 `head`/`terms` ⇒ 一份 spec；
      `to_ppo` 成为「15 关键字逐个搬」的唯一实现）、`worker/ppo/np_core.load_episodes_common`(13) →
      `LoadEpisodesSpec`。两头入口的**端口**仍是 5 位置 + `**update_kwargs`（stream / `REQUIRED_UPDATE_KWARGS`
-     建在它上面），但 `update` 改成一层薄适配器：未知旋钮**构造 spec 时**当场 TypeError（§302，43 → 40，35 → 32）。
+     建在它上面），但 `update` 改成一层薄适配器：未知旋钮**构造 spec 时**当场 TypeError（§304，43 → 40，35 → 32）。
      **下一批见下面「P0-3 剩余宽签名：分文件分批待办」（B–H）**。
      `make_loaders` / `archive_course` / `collect_corpus` 与 `bc_ingest` 三兄弟
      已收成 spec（§273）；`load_ppo_corpus` / `ingest_offline_artifact` /
@@ -1840,7 +1840,7 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      「`UnitLedger` 的字段集 + 只收一个对象」重锚（`LEDGER_FIELDS` + `_settle()`
      构造 `UnitLedger`），没有删任何一条判据；顺带发现**同族陷阱第 4 种形态 = 换模块**（patch 锚点、
      入边归属者表、行构造守卫、`GATE_SITES` 都要跟着换家，否则静默空转）。
-   * **P0-3 剩余宽签名：分文件分批待办（2026-11-22 实测 40 个 / 32 文件；A 批已完成 ⇒ §302）**
+   * **P0-3 剩余宽签名：分文件分批待办（2026-11-22 实测 40 个 / 32 文件；A 批已完成 ⇒ §304）**
 
      按**同一装配面 + 同一层**分批，每批 = 一把刀（spec 住同模块或就近轻模块 + 删
      `WIDE_FUNCS_BASELINE` 条目 + 一份字段表守卫 + `engineering.md` 一节 + `DECISIONS` 一条）。
@@ -1848,7 +1848,7 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 
      | 批次 | 文件 : 函数（参） | 闸前先看 |
      |---|---|---|
-     | ~~**A · PPO 两入口**~~ **已完成（§302，43 → 40）** | ~~`ppo_update_goal` / `ppo_update_intent` / `load_episodes_common`~~ | 实测：入口形参表被 `test_ppo_loop_core` 钉着 ⇒ 契约改钉 `HeadUpdateSpec` 字段表；端口保留 `**update_kwargs`，错键在 `from_port` 构造时爆 |
+     | ~~**A · PPO 两入口**~~ **已完成（§304，43 → 40）** | ~~`ppo_update_goal` / `ppo_update_intent` / `load_episodes_common`~~ | 实测：入口形参表被 `test_ppo_loop_core` 钉着 ⇒ 契约改钉 `HeadUpdateSpec` 字段表；端口保留 `**update_kwargs`，错键在 `from_port` 构造时爆 |
      | **B · hub 推送/派发** | `hub/offline_push.__init__`(13) · `hub/offline_push._settle_assignment`(9) · `remote/push_dispatch.__init__`(12) · `remote/push_dispatch._await_result`(12) · `remote/push_client.submit_job`(11) · `remote/push_register.__init__`(10) | `hub/offline_push` 已有两处批次改造史（G4 第十八批、G5 第二十批），`_settle_assignment` 12 个生产调用点 |
      | **C · BC 面** | `remote/bc_job._run_bc_job`(12) · `trainer/bc_loop.publish_bc_job`(12) · `worker/bc_eval.dispatch_bc_eval`(12) · `remote/colab_bc.run_training`(10) · `worker/models/student.__init__`(10) · `worker/models/student_paddle.__init__`(10) | 两个 `student.__init__` 是**同形双生**（torch / paddle）⇒ 同刀共收一份 spec；`run_training` 与 notebook 引导同族 |
      | **D · 训练循环杂项** | `trainer/queue_local.__init__`(12) · `trainer/loop_transport._push_job_round`(10) · `worker/breaker.breaker_update`(12) · `worker/greedy_round.run_greedy_round`(12) · `worker/cmd.build_rollout_cmd`(10) · `worker/gate_check.evaluate`(9) · `worker/resume.merge_memory_shards`(9) | `build_rollout_cmd` 被 plan / rollout 两腿共用（`RUN_NODE_LABEL` 一脉），改前先查 `template_argv`；`breaker_update` 20 处调用 |

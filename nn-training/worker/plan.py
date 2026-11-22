@@ -34,8 +34,8 @@ from typing import Any
 from biz.course import build_pairs
 from common.protocol import (
     PLAN_PROTO,
-    RUN_MAX_ITERS_HARD_CAP,
     RUN_NODE_LABEL,
+    RUN_SEGMENT_DEFAULT_ITERS,
     ProtocolError,
 )
 from worker.cmd import build_rollout_cmd
@@ -193,8 +193,11 @@ def rotation_event(
     )
 
 
-def pairs_for(plan: dict, it: int) -> list[tuple[int, int]]:
+def pairs_for(plan: dict, it: int, *, quiet: bool = False) -> list[tuple[int, int]]:
     """重放第 `it` 轮的对集（计划是唯一的输入）。
+
+    `quiet=True` = 不逐轮打采集日志（只给**重放整段**的调用方用，如 `plan_pairs_fp`：
+    那时"某一轮采哪些关"不是正在发生的事，打出来就是噪声）。对集本身逐字节不变。
 
     四条口径（同一个计划里互斥，由 `volume` 块的有无/形状 + `rotation` 配方的有无决定）：
 
@@ -228,7 +231,7 @@ def pairs_for(plan: dict, it: int) -> list[tuple[int, int]]:
             games_per_stage=int(block["games_per_stage"]),
         )
     ns = SimpleNamespace(**plan["pair_args"])
-    return build_pairs(ns, int(it), int(plan["rotate_seed"]))
+    return build_pairs(ns, int(it), int(plan["rotate_seed"]), quiet=quiet)
 
 
 def pairs_fp(pairs: list[tuple[int, int]]) -> str:
@@ -237,17 +240,40 @@ def pairs_fp(pairs: list[tuple[int, int]]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _replay_segment(plan: dict, args: object | None = None) -> str:
+    """**一遍**重放计划的全部轮次：算 `pairs_fp`，给了 `args` 时顺手做发布期对集自检。
+
+    为什么合成一遍（2026-11-22）：`build_plan` 原来把同一段对集重放**三遍**
+    （`plan_pairs_fp` 一遍 + `check_plan_against_args` 两遍），几千轮的段就是纯白等。
+    两条职责的循环体本来就是同一个 `pairs_for(plan, it)`，合并**不改任何语义**：
+    指纹逐字节相同，自检仍是**逐轮全量**（不采样，见 `check_plan_against_args` 的说明）。
+
+    `quiet=True`：重放期不打 `build_pairs` 的逐轮采集日志（那是"某一轮采什么"，
+    不是"正在算指纹"）。
+    """
+    h = hashlib.sha256()
+    vol = plan.get("volume")
+    rotation = rotation_recipe(plan)
+    for it in range(int(plan["start_it"]) + 1, int(plan["end_it"]) + 1):
+        pairs = pairs_for(plan, it, quiet=True)
+        h.update(pairs_fp(pairs).encode("ascii"))
+        if args is not None:
+            _verify_round_pairs(args, plan, it, pairs, vol=vol, rotation=rotation)
+    return h.hexdigest()
+
+
 def plan_pairs_fp(plan: dict) -> str:
     """计划覆盖的**全部轮次**对集指纹（逐轮 fp 顺序拼接后再 hash）。
 
     只覆盖计划的 it 区间（`start_it+1 .. end_it`），顺序敏感。交接时节点先一次性重放
     所有轮次再比对：**任一**轮的对集漂移都在跑第一局之前暴露，而不是跑到半途才发现
     语料与计划不符（那时已经产生了一批不可信 shard）。
+
+    ★ 2026-11-22（性能）：重放本身是 O(轮数)，但单轮成本被砍了一半多——① 逐轮日志静音；
+    ② epoch 排列改有界缓存（`biz.course._epoch_perm` / `volume_waves._window_positions`）；
+    ③ `build_plan` 的三遍重放合成一遍（`_replay_segment`）。摘要口径不变。
     """
-    h = hashlib.sha256()
-    for it in planned_iters(plan):
-        h.update(pairs_fp(pairs_for(plan, it)).encode("ascii"))
-    return h.hexdigest()
+    return _replay_segment(plan)
 
 
 def planned_iters(plan: dict) -> list[int]:
@@ -316,7 +342,7 @@ class PlanSpec:
 
       * `it` / `iters_total` 错一轮 = 节点少跑或多跑一段（发出去的 argv 模板也差一轮）；
       * `max_iters` / `max_segment_iters` 落丢 = 计划覆盖整段课程而不是本 job 的段；
-        后者还是「只能降不能抬」的硬上界的**再降档**，丢回 0 就是取最宽的那个值；
+        后者丢回 0 = 「不缩短、不限长」（课程无限时退回缺省段长，见下一条注释）；
       * `volume` / `rotation` 落丢 = 静默退成「固定局数」的老口径（云端采样量与本地
         集群不一致，而计划自检仍然全绿——它比的是同一份计划）；
       * `template_wver` / `node_label` 落丢 = 模板 argv 指向错的权重版本名 / 错节点标签。
@@ -340,10 +366,11 @@ class PlanSpec:
     node_label: str = RUN_NODE_LABEL
     template_wver: str = ""
     volume: dict | None = None
-    #: 段长上界的**再降档**（0 = 用 `RUN_MAX_ITERS_HARD_CAP`；>0 = 取更小的那个）。
-    #: 命令行 `--run-max-iters`（`common/manifest.py` 的注释一直在说这个旋钮，而它此前
-    #: 只有注释没有 argparse——D1 把它补上）。语义是**只能降不能抬**：硬上界是防「手写/
-    #: 损坏的计划把节点按一整天」的那道闸，抬它等于拆闸（本计划 §6 已否决）。
+    #: 开区间段的**段长**（命令行 `--run-max-iters`，D1 补上的那个旋钮）。只对「课程无限」
+    #: （`iters_total<=0`）是缺省值来源：给了就用它，没给用 `RUN_SEGMENT_DEFAULT_ITERS`。
+    #: 有限课程上它**只能把段缩短**（`min`），永远不会让任何计划被拒——2026-11-22 用户口径：
+    #: 一切以课程定义为准，程序不设上界（原「只能降不能抬」的硬上界语义已删，见
+    #: `manifest.py` 同常量注释）。
     max_segment_iters: int = 0
     #: ★ 轮换配方（2026-10-28，plan/it-stage-ratation §9.5）：`stage_rotation.recipe_from_args`
     #: 的产出（`mode`/`per_it`/`pinned`）或 None。带上它 ⇒ 计划覆盖的**每一轮**都由
@@ -362,7 +389,14 @@ def build_plan(spec: PlanSpec) -> dict:
     两种读法混用起来刚好差一，是 x24-stack5 那起「起点被当成 it1」事故的语境之一。
 
     `max_iters`：本次最多自主跑几轮（0 = 跑到课程预算 `iters_total`）。`end_it` 取二者
-    交集，并受 `RUN_MAX_ITERS_HARD_CAP` 钳制（手写/损坏的计划不许把节点按在机上一整天）。
+    交集——**没有其它上界**。
+
+    ★ 2026-11-22（用户口径「一切以课程定义为准，程序里不要设置任何上界」）：删掉
+    `RUN_MAX_ITERS_HARD_CAP=500` 的三处钳制。g9-def 现场：课程 `iters=1000`、已跑 it497
+    ⇒ 本段 503 轮，旧的 `end_it - it > cap` 直接拒发，逼人去改课程文件迁就程序里的数字。
+    现行：有限课程 `end_it` 恒等于课程 `iters`（`max_iters` 给了就取 min）；只有**课程无限**
+    才需要一个人为段长，缺省 = `RUN_SEGMENT_DEFAULT_ITERS`（那是给没有长度的东西一个长度，
+    不是限制课程）。`--run-max-iters` 只会缩短段，永不拒。
 
     ★ 2026-10-15（plan/offline-open-ended-iters-and-loud-export §3.1，J1）：`iters_total <= 0`
     = **课程无限**（不是「没终点」）——`worker/cli.py` 的 `--iters` help 原文就是
@@ -370,9 +404,8 @@ def build_plan(spec: PlanSpec) -> dict:
     `while args.iters <= 0 or it < args.iters` 同一口径；旧代码却把它当「预算=0」拒发
     （`end_it=0` ⇒ “没有可自主跑的轮次”），于是「无限」在离线包里**不可表达**。
     这一支改为发**开区间段**：`end_it = it + 段长`（段长 = `max_iters>0` ? `max_iters` :
-    硬上界），`open_ended=True`，而 `iters_total` **保持 0 原值**（= 无终点）。
-    段长仍受硬上界钳制（拒导那条 `end_it - it > cap` 两个分支共用）；
-    有限模式的算术**逐字节不变**（`open_ended=False`）。
+    `max_segment_iters` 或它的缺省），`open_ended=True`，而 `iters_total` **保持 0 原值**
+    （= 无终点）。有限模式的算术**逐字节不变**（`open_ended=False`）。
 
     `volume`：动态采集块（`biz/volume_waves.volume_block(args)` 的产出；None = 老口径）。
     带上它以后，节点重放出的对集不再是 `build_pairs` 的固定局数，而是**按
@@ -402,28 +435,28 @@ def build_plan(spec: PlanSpec) -> dict:
     it = int(it)
     iters_total = int(iters_total)
     span = int(max_iters or 0)
-    # 段长上界：硬上界与 `--run-max-iters` 的交集（**只减不增**——后者只能把段变短）。
-    raw_cap = int(max_segment_iters or 0)
-    cap = raw_cap if 0 < raw_cap < RUN_MAX_ITERS_HARD_CAP else RUN_MAX_ITERS_HARD_CAP
+    # 段长（**只对「课程无限」有意义，不是上界**）：显式给了就只用显式的，没给才落到缺省段长。
+    # `raw_seg` 保留「0 = 没给」，否则缺省 500 会在无限课程上偷偷把 `--run-iters 800` 砍回 500
+    # ——那正是本刀要删掉的那类隐形上界。
+    raw_seg = int(max_segment_iters or 0)
     open_ended = iters_total <= 0
     if open_ended:
-        # 开区间段（J1）：终点由**段长**定，不是课程预算（0 = 无限，没有预算可交集）。
-        # 缺省段长 = 段长上界本身；给了正 max_iters 就是它，噪声由下面那条
-        # `end_it - it > cap` 拦（与有限模式同一条）。
-        end_it = it + (span if span > 0 else cap)
+        # 开区间段（J1）：课程没给终点 ⇒ 用段长；`max_iters`（本次显式意愿）优先。
+        if span > 0:
+            end_it = it + (min(span, raw_seg) if raw_seg > 0 else span)
+        else:
+            end_it = it + (raw_seg if raw_seg > 0 else RUN_SEGMENT_DEFAULT_ITERS)
     else:
-        end_it = iters_total if span <= 0 else min(iters_total, it + span)
+        # 有限课程：课程 `iters` 是**唯一终点**。`max_iters` / `--run-max-iters` 只能把它缩短
+        # （2026-11-22：这里原先还有一条 `end_it - it > cap ⇒ 拒发`，已删——程序不设上界）。
+        end_it = iters_total
+        for s in (span, raw_seg):
+            if s > 0:
+                end_it = min(end_it, it + s)
     if end_it <= it:
         raise ProtocolError(
             f"build_plan: it={it} 之后没有可自主跑的轮次（iters_total={iters_total}，"
             f"max_iters={max_iters}）——这种情况应发 kind=iter（单轮）而不是 kind=run"
-        )
-    if end_it - it > cap:
-        # 文案里的「硬上界」是既有用例的锚（既有断言逐字匹配它）；`cap` 是被
-        # `--run-max-iters` 降过档后的**生效值**，两者不同时在后面补一句。
-        raise ProtocolError(
-            f"build_plan: 计划覆盖 {end_it - it} 轮 > 硬上界 {cap}——拒发"
-            + ("（--run-max-iters 已降档）" if cap != RUN_MAX_ITERS_HARD_CAP else "")
         )
     plan = {
         "proto": PLAN_PROTO,
@@ -463,8 +496,11 @@ def build_plan(spec: PlanSpec) -> dict:
     )
     plan["argv_template"] = argv_template
     plan["argv_fp"] = argv_fp(argv_template)
-    plan["pairs_fp"] = plan_pairs_fp(plan)
-    check_plan_against_args(args, plan)
+    # ★ 2026-11-22：**一遍**重放同时出对集指纹与发布期自检。原先这里是三遍
+    # （`plan_pairs_fp` 一遍 + `check_plan_against_args` 的两条腿各一遍），段一长就是纯白等；
+    # 语义没变：指纹逐字节相同，自检仍是逐轮全量。
+    plan["pairs_fp"] = _replay_segment(plan, args)
+    _check_argv_template(plan)
     log(
         f"[plan] kind=run it{it} → 自主段 it{it + 1}..it{end_it}"
         f"（{len(planned_iters(plan))} 轮 × {len(tmpl_pairs)} 局，模板 argv {len(argv_template)} 条）"
@@ -490,7 +526,7 @@ def dump_plan(plan: dict) -> bytes:
 
 
 def load_plan(path: str | Path) -> dict:
-    """读计划文件并校验（形状 + 区间 + 硬上界）。畸形计划一律 ProtocolError。"""
+    """读计划文件并校验（形状 + 区间 + 预算一致）。畸形计划一律 ProtocolError。"""
     p = Path(path)
     if not p.exists():
         raise ProtocolError(f"计划文件不存在: {p}")
@@ -537,10 +573,8 @@ def validate_plan(plan: object) -> dict:
         raise ProtocolError(
             f"计划 end_it={plan['end_it']} 超出课程预算 iters_total={plan['iters_total']}"
         )
-    if plan["end_it"] - plan["start_it"] > RUN_MAX_ITERS_HARD_CAP:
-        raise ProtocolError(
-            f"计划覆盖 {plan['end_it'] - plan['start_it']} 轮 > 硬上界 {RUN_MAX_ITERS_HARD_CAP}"
-        )
+    # ★ 2026-11-22：这里原先还有一条 `end_it - start_it > RUN_MAX_ITERS_HARD_CAP ⇒ 拒收`。
+    #   已删——课程 `iters` 说多少就是多少，程序不再有第二种「能跑多少轮」的定义。
     if not isinstance(plan["pair_args"], dict):
         raise ProtocolError("计划 pair_args 必须是对象")
     vol = plan.get("volume")
@@ -587,69 +621,73 @@ def validate_plan(plan: object) -> dict:
     return plan
 
 
-def check_plan_against_args(args: Any, plan: dict) -> None:
-    """发布期自检：计划重放 == 真 args（的对集）；重定向对模板恒等。
-
-    这是「云上是重放而不是重新发明」的守卫：`PAIR_ARG_FIELDS` 漏了字段、`build_pairs`
-    新增了随机源、`retarget_argv` 改坏了替换语义——三种漂移都在**发出去之前**失败，
-    而不是等节点跑完一半、拿一堆与 hub 不同的语料回来。
+def _verify_round_pairs(
+    args: object,
+    plan: dict,
+    it: int,
+    mine: list[tuple[int, int]],
+    *,
+    vol: object,
+    rotation: dict | None,
+) -> None:
+    """自检的**单轮**：计划重放的对集 vs 按 `args` 重解的对集（不等 ⇒ 拒发）。
 
     对集口径按计划有没有 `volume` 块分两条（与 `pairs_for` 同源）：volume 路线的对照物是
     `volume_pairs_from_args`（按计划里钉住的 est 重解一遍）——它抓的是「块里写的
     stages/target/G0 与 args 说的不一致」这类错（例如导出时用了别的课程的 --stages）。
     """
-    vol = plan.get("volume")
-    rotation = rotation_recipe(plan)
-    for it in planned_iters(plan):
-        mine = pairs_for(plan, it)
-        if isinstance(vol, dict):
-            from worker.volume_waves import volume_pairs_from_args
+    if isinstance(vol, dict):
+        from worker.volume_waves import volume_pairs_from_args
 
-            # 分关 G 是「est 决定的局数」这类运行参数：args 侧无法独立复算 ⇒ 把块里的
-            # 分关数字**注入**重解（自检此时守 stages/target/模板恒等；块自身的同源校验
-            # 在 validate_volume_block 里已经拦过一次）。
-            #
-            # ★ 2026-10-28（云机轮换）：开了轮换时**每一轮注入的都是当轮那一份** ——
-            #   关集 = 当轮窗口（否则按导出轮的窗口重解 ⇒ 第 2 轮起每份计划在发布期被拒），
-            #   分关 est 从全关表里取当轮窗口那几关（`volume_block` 的 `or est` 回退同规）。
-            round_block = volume_for_round(plan, it) if rotation is not None else vol
-            assert isinstance(round_block, dict)
-            ests = round_block.get("est_s_by_stage")
-            try:
-                real = volume_pairs_from_args(
-                    args,
-                    it,
-                    int(plan["rotate_seed"]),
-                    est_samples_per_game=int(round_block["est_samples_per_game"]),
-                    ests_by_stage=ests,
-                    est_hi_factor=round_block.get("est_hi_factor"),
-                    # 重解必须用**当轮块里的关集**（= 本轮窗口）。不传 ⇒ 按 `args.stages`
-                    # 全集重解 ⇒ 窗口轮次被判成「重放与 args 不一致」（实测：12 关窗口 vs
-                    # 35 关全集 ⇒ 每份计划在发布期被拒）。子集关系由 `volume_block` 自己
-                    # 校验（打错关号在这里也响亮）。
-                    stages_override=round_block.get("stages"),
-                )
-            except ValueError as e:
-                raise ProtocolError(f"计划自检失败：volume 块与 args 不自洽（{e}）") from e
-            if real is None:
-                raise ProtocolError(
-                    "计划自检失败：计划带 volume 块，但 args 的 target_transitions ≤ 0"
-                    "（导出时用的课程与计划不是同一门？）"
-                )
-        else:
-            real = build_pairs(args, it, int(plan["rotate_seed"]))
-        if mine != real:
-            raise ProtocolError(
-                f"计划自检失败：it{it} 重放对集与 args 重解不一致"
-                f"（计划 {len(mine)} 局 / 实际 {len(real)} 局；"
-                + (
-                    f"volume={{stages={vol['stages']}, G0={vol['games_per_stage']}, "
-                    f"target={vol['target_transitions']}, est={vol['est_samples_per_game']}}}"
-                    if isinstance(vol, dict)
-                    else f"pair_args={sorted(plan['pair_args'])}）——PAIR_ARG_FIELDS 是否漏字段？"
-                )
+        # 分关 G 是「est 决定的局数」这类运行参数：args 侧无法独立复算 ⇒ 把块里的
+        # 分关数字**注入**重解（自检此时守 stages/target/模板恒等；块自身的同源校验
+        # 在 validate_volume_block 里已经拦过一次）。
+        #
+        # ★ 2026-10-28（云机轮换）：开了轮换时**每一轮注入的都是当轮那一份** ——
+        #   关集 = 当轮窗口（否则按导出轮的窗口重解 ⇒ 第 2 轮起每份计划在发布期被拒），
+        #   分关 est 从全关表里取当轮窗口那几关（`volume_block` 的 `or est` 回退同规）。
+        round_block = volume_for_round(plan, it) if rotation is not None else vol
+        assert isinstance(round_block, dict)
+        ests = round_block.get("est_s_by_stage")
+        try:
+            real = volume_pairs_from_args(
+                args,
+                it,
+                int(plan["rotate_seed"]),
+                est_samples_per_game=int(round_block["est_samples_per_game"]),
+                ests_by_stage=ests,
+                est_hi_factor=round_block.get("est_hi_factor"),
+                # 重解必须用**当轮块里的关集**（= 本轮窗口）。不传 ⇒ 按 `args.stages`
+                # 全集重解 ⇒ 窗口轮次被判成「重放与 args 不一致」（实测：12 关窗口 vs
+                # 35 关全集 ⇒ 每份计划在发布期被拒）。子集关系由 `volume_block` 自己
+                # 校验（打错关号在这里也响亮）。
+                stages_override=round_block.get("stages"),
             )
-    tmpl_pairs = pairs_for(plan, int(plan["start_it"]) + 1)
+        except ValueError as e:
+            raise ProtocolError(f"计划自检失败：volume 块与 args 不自洽（{e}）") from e
+        if real is None:
+            raise ProtocolError(
+                "计划自检失败：计划带 volume 块，但 args 的 target_transitions ≤ 0"
+                "（导出时用的课程与计划不是同一门？）"
+            )
+    else:
+        real = build_pairs(args, it, int(plan["rotate_seed"]), quiet=True)
+    if mine != real:
+        raise ProtocolError(
+            f"计划自检失败：it{it} 重放对集与 args 重解不一致"
+            f"（计划 {len(mine)} 局 / 实际 {len(real)} 局；"
+            + (
+                f"volume={{stages={vol['stages']}, G0={vol['games_per_stage']}, "
+                f"target={vol['target_transitions']}, est={vol['est_samples_per_game']}}}"
+                if isinstance(vol, dict)
+                else f"pair_args={sorted(plan['pair_args'])}）——PAIR_ARG_FIELDS 是否漏字段？"
+            )
+        )
+
+
+def _check_argv_template(plan: dict) -> None:
+    """argv 模板自检：条数 == 目标轮对集局数，且模板对 `retarget_argv` 恒等。"""
+    tmpl_pairs = pairs_for(plan, int(plan["start_it"]) + 1, quiet=True)
     tmpl = plan["argv_template"]
     if len(tmpl) != len(tmpl_pairs):
         raise ProtocolError(
@@ -671,6 +709,20 @@ def check_plan_against_args(args: Any, plan: dict) -> None:
                 f"计划自检失败：argv_template[{i}] 经 retarget_argv 后不再等于自身"
                 f"（重定向语义改了？{' '.join(row[:6])}…）"
             )
+
+
+def check_plan_against_args(args: Any, plan: dict) -> None:
+    """发布期自检：计划重放 == 真 args（的对集）；重定向对模板恒等。
+
+    这是「云上是重放而不是重新发明」的守卫：`PAIR_ARG_FIELDS` 漏了字段、`build_pairs`
+    新增了随机源、`retarget_argv` 改坏了替换语义——三种漂移都在**发出去之前**失败，
+    而不是等节点跑完一半、拿一堆与 hub 不同的语料回来。
+
+    ★ 2026-11-22：逐轮对比**不采样**（仍然每轮都验），但整段的 `pairs_for` 重放从
+    两遍合成一遍（`_replay_segment`；`build_plan` 那条路更是一次重放同时出指纹+自检）。
+    """
+    _replay_segment(plan, args)
+    _check_argv_template(plan)
 
 
 def stage_json_of(course: Any, stage: int) -> str:

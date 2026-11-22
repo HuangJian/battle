@@ -100,6 +100,7 @@ import {
   nearSqWeightTick,
   enemyBulletLaneWeightTick,
   exposureExempt,
+  countBaseIntruders,
   inThreatLane,
   nearestEnemyDistPx,
   playerHpRatio,
@@ -314,7 +315,7 @@ export const RL_SHARD_FILES_V6_OPENING = [...RL_SHARD_FILES_V6, 'policy_mask.npy
 // **本常量必须与 `buildMetricsRow` 的行宽一致** —— 2026-09-12 的 P0：只改了行、没改
 // 这里，`metrics.set(row, i * METRICS_DIM)` 每局越界抛 RangeError，整条采集腿零产出。
 // 导出仅供测试断言行宽（tests/export-rl-rollout-metrics.test.ts）。
-export const METRICS_DIM = 90
+export const METRICS_DIM = 91
 /**
  * metrics **v12**：v11 的热线族 2 列（idx74–75，plan/metrics-v11-hotlane.plan.md §2；第三列被
  * §4bis 杀线拦下）+ v12 的 freeze ∪ 道具盾窗口 3 列（idx76–78，
@@ -328,7 +329,7 @@ export const METRICS_DIM = 90
  * ⇒ `[run_rl] remote it1: 无完整 shard（traj ... 空）——无法发布 job` ⇒ 三门课全部
  * `aborted ppo`，而 shard 明明已经落在 `it1/dist/self/` 里。
  */
-export const METRICS_VERSION = 16
+export const METRICS_VERSION = 17
 /**
  * 列名（顺序 = `buildMetricsRow` 的实现顺序，SSOT）。Python `reward_library.METRICS`
  * 必须与本数组**逐位相等**（跨语言列序 oracle，sb P2-D；tests/export-rl-rollout-metrics.test.ts）。
@@ -436,6 +437,9 @@ export const METRICS_COLUMN_NAMES: readonly string[] = [
   'thCostDirectAimed',
   // v15：wallPressTicks（v13 判据的唯一列；累计 tick，公式侧用差分）
   'wallPressTicks',
+  // v17：基地环内有敌的 tick 数（0..ticks）。用途见 docs/nn/experiments.md §161：
+  // 「进来之后打不死」是 NN 与 God 差距的大头，奖励侧需要一个逐拍入侵读数。
+  'baseIntruderTicks',
 ]
 /**
  * pickupDist 哨兵：无**可达**存活拾取（或玩家不在场）时填此值 —— 与 firstKillTick/clearTick
@@ -715,6 +719,8 @@ export interface Telemetry {
   stuckTicksCum: number
   /** 非 hold、想走、本 tick 零位移、且已提交朝向的前脸被地形挡的拍数。 */
   wallPressTicks: number
+  /** v17：基地环内（≤`BASE_INTRUDER_CELLS` 格）有存活敌的 tick 数（0..ticks）。 */
+  baseIntruderTicks: number
   /** 请求方向 ≠ 已提交朝向（转向被冷却按回）的拍数。 */
   cooldownRejectTicks: number
   /** 累计「敌弹朝鹰/环墙发射」次数（按弹 id 去重，见 `seenBaseBulletIds`）。 */
@@ -912,6 +918,7 @@ export function buildMetricsRow(t: number, world: World, tel: Telemetry): number
     tel.thCostDirect, // 87
     tel.thCostDirectAimed, // 88
     tel.wallPressTicks, // 89（v15：逐 tick 累计，公式侧用差分/速率）
+    tel.baseIntruderTicks, // 90（v17：基地环内有敌的 tick 数；与 eval 侧 ringIntruders 同环）
   ]
 }
 
@@ -1532,6 +1539,7 @@ function runOne(
     // metrics v13（idx79–84）。
     stuckTicksCum: 0,
     wallPressTicks: 0,
+    baseIntruderTicks: 0,
     cooldownRejectTicks: 0,
     thShotsAtBaseCum: 0,
     thCostBreach: 0,
@@ -1986,6 +1994,11 @@ function runOne(
       tel.stuckTicks = 0
     }
     prevCell = cur ?? { col: -1, row: -1 }
+
+    // ---- metrics v17：基地环内入侵（docs/nn/experiments.md §161）----
+    // 与玩家死活**无关**（基地挨不挨压不取决于玩家是否在场），所以放在 alive 门控之外。
+    // 判据 = `countBaseIntruders`（与 eval 侧同一实现、同一环半径 `BASE_INTRUDER_CELLS`）。
+    if (countBaseIntruders(world) > 0) tel.baseIntruderTicks++
 
     // ---- metrics v13（2026-11-01，plan/r5-next §5-P0-4）----
     // 两条都是"玩家的输入 vs 引擎的实际结果"的差，且都只在玩家活着时计。

@@ -244,7 +244,7 @@ CODE_DIR = "/tmp/worker-code"
 #: （磁盘已是新版、`sys.modules` 里还是 08:09 那版，于是「看着新的、跑着旧的」）。
 #: notebook 打 `getattr(offline_boot, "BOOT_SELF", "<missing>")`，旧模块会显示 `<missing>`。
 #: **改本文件时把末位 +1**（纯人读约定，没有代码读它做判断）。
-BOOT_SELF = "boot-2026-11-12a"
+BOOT_SELF = "boot-2026-11-22a"
 
 #: 产物目录的三件「续跑真值」（与 `remote/artifacts.py::ArtifactStore` 逐字相同；测试守）。
 #: 三件齐全 = 本机有可续跑的产物（plan/offline-rerun-local-first §3 的判据）。
@@ -287,6 +287,16 @@ OFFLINE_CLAIM_PROTO = 2
 #: 本机 worker 身份的落点（`<work>/.worker-id`）：**持久化** ⇒ cell 中断后重跑不会被**自己**
 #: 留下的租约挡在门外（hub 判 `mine` 直接续上；评审 G1）。
 WORKER_ID_NAME = ".worker-id"
+#: 产物根的**课程身份**标记（`<dest>/.course-name`，一行课程名）。
+#:
+#: 为什么需要它（2026-11-22 现场）：产物根是**机器级**的（`CFG.local_root` 单课不加课程层），
+#: 而 `CFG.course` 留空时「跑哪门课」是 hub 每次重启后才派的。g10-press 跑到 it331 被停课，
+#: 云机重启后 hub 派 g9-def ——「本机优先」只看三件齐不齐 ⇒ 拿 g10-press 的 plan/manifest
+#: 续训，`--hub-course g9-def` 把别人的轮次报到了 g9-def 账上。**「本机优先」的前提是同一门课**，
+#: 这个标记就是那个前提的正身（不受课程文件编辑影响；没有它的老产物根退回 `course_fp` 对账）。
+LOCAL_COURSE_NAME = ".course-name"
+#: 任务包里的课程全文（与 `remote.bundle.COURSE_NAME` 逐字相同）——`course_fp` 缺失时的身份兜底。
+COURSE_NAME = "course.jsonc"
 #: ★M5（需求 7）：空档领 BC 作业的轮询节拍（秒）——包内 `worker_loop` 的 peek 间隔。
 BC_POLL_SEC = 5.0
 #: ★M5：没有 BC 可领时最多转多久就回来（秒）。有活时它跑完为限（`once=True`）：
@@ -619,6 +629,37 @@ def restore_from_backup(dest: str | Path, backup_root: str | Path, log: Callable
     return after
 
 
+def read_local_course_name(dest: str | Path) -> str:
+    """产物根的课程标记（`<dest>/.course-name`）；缺失 / 坏值 ⇒ `""`（= 不知道，不猜）。"""
+    try:
+        text = (Path(dest) / LOCAL_COURSE_NAME).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    name = text.strip()
+    return name if name and "\n" not in name and len(name) <= 64 else ""
+
+
+def claim_local_course(dest: str | Path, course: str, log: Callable[[str], None]) -> None:
+    """把产物根标记成**本课**的（best-effort：写不下只降级，绝不因此停跑）。
+
+    只在这确实是产物根（三件齐）且**还没有标记**时写：已有标记属于别的课 ⇒ 一个字都不动
+    —— 那是「别的课在这儿跑过」的证据，覆盖它等于把事故现场洗掉。
+    """
+    if not course or local_artifacts(dest) is None:
+        return
+    root = Path(dest)
+    have = read_local_course_name(root)
+    if have == course:
+        return
+    if have:
+        log(f"WARN 产物根已有别的课的标记（{have}）—— 不覆盖：{root / LOCAL_COURSE_NAME}")
+        return
+    try:
+        (root / LOCAL_COURSE_NAME).write_text(course + "\n", encoding="utf-8")
+    except OSError as e:
+        log(f"WARN 课程标记写不下（{type(e).__name__}: {e}）—— 下次仍按 course_fp 对账")
+
+
 def local_artifacts(dest: str | Path) -> dict | None:
     """本机产物目录的「续跑真值」（三件齐全才认，否则 None）。
 
@@ -644,7 +685,68 @@ def local_artifacts(dest: str | Path) -> dict | None:
         "run_id": str(st.get("run_id", "") or ""),
         "code_sha256": str(man.get("code_sha256", "") or ""),
         "ts_code_sha256": str(man.get("ts_code_sha256", "") or ""),
+        # 课程身份的两条来源：本课自己写的标记（准），老产物根没有 ⇒ 只有 manifest 的指纹。
+        "course_name": read_local_course_name(root),
+        "course_fp": str(man.get("course_fp", "") or ""),
     }
+
+
+def read_pack_manifest(zip_path: str | Path) -> dict:
+    """读任务包里的 `manifest.json`（读不到 / 不是 dict ⇒ `{}`，**永不抛**）。
+
+    包内的 `manifest.json` 与 `run_loop` 将要用的那份是**同一份字节**：它的 `course_fp`
+    是「这个包属于哪门课」的权威判据（缺了才退回 `course.jsonc` 的字节哈希）。
+    """
+    try:
+        with zipfile.ZipFile(Path(zip_path)) as zf:
+            man = json.loads(zf.read(MANIFEST_NAME).decode("utf-8"))
+    except (KeyError, OSError, ValueError, zipfile.BadZipFile):
+        return {}
+    return man if isinstance(man, dict) else {}
+
+
+def pack_course_fp(zip_path: str | Path) -> str:
+    """任务包的课程身份：manifest 的 `course_fp`，缺了退回 `course.jsonc` 的字节 sha256。"""
+    fp = str(read_pack_manifest(zip_path).get("course_fp", "") or "")
+    if fp:
+        return fp
+    try:
+        with zipfile.ZipFile(Path(zip_path)) as zf:
+            return hashlib.sha256(zf.read(COURSE_NAME)).hexdigest()
+    except (KeyError, OSError, zipfile.BadZipFile):
+        return ""
+
+
+def local_belongs_to_course(
+    local: dict, course: str, pack: str | Path | None
+) -> tuple[bool | None, str]:
+    """本机产物是不是**这门课**的 ⇒ `(True / False / None, 判据一句话)`。
+
+    为什么必须有这一问（★ 2026-11-22 现场）：产物根是**机器级**的（`CFG.local_root` 单课不
+    加课程层），而 `CFG.course` 留空时课由 hub 在每次重启后派。「本机优先」只看三件齐不齐
+    ⇒ g10-press（跑到 it331 被停课）的 plan/manifest 被拿来续训 hub 派的 g9-def，
+    `--hub-course g9-def` 只是把别人的轮次报到 g9-def 账上。**本机优先的前提是同一门课。**
+
+    判据序（越靠前越准）：
+      ① 产物根的 `.course-name` 标记（本课开段时自己写的）——不受课程文件编辑影响；
+      ② 老产物根没有标记 ⇒ 本的 `manifest.course_fp` 对包内 `manifest.course_fp`：
+         同 = 同一份课程文件；不同 = 不是同一门课**或**课程文件被改过（后者按 D14 血缘也是
+         新实验，不该悄悄续在老账本上）；
+      ③ 都判不出 ⇒ `None`（按老行为本机优先——**不用猜值去拦人**，只在有证据时才换根）。
+    """
+    marked = str(local.get("course_name") or "")
+    if marked:
+        return (marked == course, f"产物根标记 course={marked}")
+    if pack is None:
+        return (None, "没有课程标记，也没有包可比对")
+    pack_fp = pack_course_fp(pack)
+    local_fp = str(local.get("course_fp") or "")
+    if not pack_fp or not local_fp:
+        return (None, "包或本机产物没有 course_fp")
+    return (
+        pack_fp == local_fp,
+        f"course_fp 本机 {_sha12(local_fp)} vs 包 {_sha12(pack_fp)}",
+    )
 
 
 def pack_extends_local(local: dict, plan: dict) -> bool:
@@ -1773,8 +1875,12 @@ def _prepare_roots(
     return deliverable, ccfg, work, net, dest
 
 
-def _choose_pack(ctx: types.SimpleNamespace) -> tuple[Path | None, bool, bool, dict]:
-    """本机优先 vs 收包的判定；返回 `(pack, adopt, local_first, idx)`。"""
+def _choose_pack(ctx: types.SimpleNamespace) -> tuple[Path | None, bool, bool, dict, Path]:
+    """本机优先 vs 收包的判定；返回 `(pack, adopt, local_first, idx, 产物根)`。
+
+    `产物根` 可能与 `ctx.dest` 不同：产物根里是**别的课**的进度时（课程身份判据见
+    `local_belongs_to_course`），本课产物改落 `<dest>/<课>`，老产物一个字不动。
+    """
     local = local_artifacts(ctx.dest)
     explicit_zip = str(ctx.ccfg.get("task_zip") or "").strip()
     force_pack = bool(ctx.ccfg.get("force_pack", False)) or bool(explicit_zip)
@@ -1787,12 +1893,6 @@ def _choose_pack(ctx: types.SimpleNamespace) -> tuple[Path | None, bool, bool, d
             "  ① 想接着本机进度跑：把缺的件找回来（上一轮的产物/备份）；\n"
             f"  ② 想用包从头跑：清空 {ctx.dest}（或换 CFG.work_dir）后重跑本 cell。"
         )
-    if local is not None and force_pack:
-        ctx.log(
-            f"CFG.{'task_zip' if explicit_zip else 'force_pack'} 显式指定 ⇒ 用包覆盖本机计划/清单"
-            f"（本机 it{local['last_it']}，计划 it{local['start_it']}→it{local['end_it']}）"
-        )
-
     # 本机有产物（且人没显式点名包）⇒ 取包**不等待**：它是判据的输入，不是起点。
     has_local = local is not None and not force_pack
     # ★ 类型上显式可为空：push 分支给的是 `Path`，pull 分支给的是 `obtain_pack()`（可能 None）。
@@ -1829,8 +1929,44 @@ def _choose_pack(ctx: types.SimpleNamespace) -> tuple[Path | None, bool, bool, d
             ctx.log(f"本机没有可续跑的产物（{ctx.dest}）——按老规矩取包起跑")
         pack = obtain_pack(ctx.ccfg, ctx.creds, ctx.log, ctx.work, stop=ctx.keepalive_stop, lease=ctx.lease)
 
+    # ── 产物根的课程身份（★ 2026-11-22 现场：g10-press 停课后被 g9-def 续训）────────────
+    # 「本机优先」的隐含前提是**同一门课**：产物根是机器级的，而 hub 每次重启都可能派另一门课
+    # （停课的那门仍在盘上）。判据不符 ⇒ 不以它为续跑点，并把本课产物落到课程子目录
+    # （老产物一个字不动：它属于另一门课，覆盖它等于把别人的账本抹掉）。
+    dest = Path(ctx.dest)
+    if local is not None:
+        belongs, why = local_belongs_to_course(local, ctx.course, pack)
+        if belongs is False:
+            ctx.log(
+                f"★ 本机产物**不是这门课**的（{why}）—— 不拿它当续跑点："
+                f"hub 派的在训课程 = {ctx.course}"
+            )
+            if pack is None:
+                raise SystemExit(
+                    f"[offline] 产物根 {ctx.dest} 里是**别的课**的进度（{why}），"
+                    f"而这次要跑 {ctx.course} 又取不到它的任务包。\n"
+                    f"  ① 想跑这门课：等 hub 可达后重跑（包到了会自动改落 {dest / ctx.course}）；\n"
+                    f"  ② 想接着那门课跑：把 CFG.course 改回它；\n"
+                    f"  ③ 想清掉旧产物：自行清空 {ctx.dest}（本 cell 绝不代删）。"
+                )
+            dest = Path(ctx.dest) / ctx.course
+            ctx.log(f"⇒ 本课产物改落课程子目录：{dest}（老产物一个字不动）")
+            # 该课自己的网络盘抽屉照旧是恢复源：本地空 ⇒ 把没回传的轮次接回来
+            restore_from_backup(dest, Path(ctx.net) / ctx.deliverable.BACKUP_DIR_NAME, ctx.log)
+            local = local_artifacts(dest)
+            has_local = local is not None and not force_pack
+            if local is not None:
+                ctx.log(
+                    f"⇒ 该课自己的产物在（it{local['last_it']}，"
+                    f"计划 it{local['start_it']} → it{local['end_it']}）—— 照常本机优先"
+                )
+    if local is not None and force_pack:
+        ctx.log(
+            f"CFG.{'task_zip' if explicit_zip else 'force_pack'} 显式指定 ⇒ 用包覆盖本机计划/清单"
+            f"（本机 it{local['last_it']}，计划 it{local['start_it']}→it{local['end_it']}）"
+        )
     if ctx.push_mode:
-        pass  # `local_first` 已在上面的分支定下（本机优先的判据不同：包是**任务**不是候选）
+        local_first = local is not None  # 判据同上：包是**任务**不是候选
     else:
         if has_local and pack is not None and local is not None:
             adopt = pack_extends_local(local, read_pack_plan(pack))
@@ -1863,7 +1999,7 @@ def _choose_pack(ctx: types.SimpleNamespace) -> tuple[Path | None, bool, bool, d
             "run_loop 会立刻收尾（不再跑轮次）；要用新段请清空产物目录、等新包，或置 "
             "CFG.force_pack=true"
         )
-    return pack, adopt, local_first, idx
+    return pack, adopt, local_first, idx, dest
 
 
 def _probe_hub(ccfg: dict, creds: dict, token: str, log: Callable[[str], None], push_mode: bool) -> str:
@@ -1979,7 +2115,7 @@ def run_one_course(spec: CourseRunSpec) -> int:
     # 为什么决策住在这里（而不是 `run_loop`/`bundle`）：notebook 每次会话都从 GitHub raw
     # 刷新本文件，而 `remote.run_loop`/`remote.bundle` 来自**代码快照**（= 本机优先要保护的
     # 那份，可能很旧）——把新参数传给旧快照只会 argparse 崩或静默退化（评审 F1）。
-    pack, adopt, local_first, idx = _choose_pack(
+    pack, adopt, local_first, idx, dest = _choose_pack(
         types.SimpleNamespace(
             ccfg=ccfg,
             creds=creds,
@@ -1991,8 +2127,14 @@ def run_one_course(spec: CourseRunSpec) -> int:
             lease=lease,
             push_mode=push_mode,
             assigned_pack=assigned_pack,
+            # 课程身份判据不符时要把本课产物改落 `<dest>/<课>`：那一步要「恢复源」的两个根。
+            deliverable=deliverable,
+            net=net,
         )
     )
+    # 产物根记上本课的名字：下次重启（可能派了别的课）判「这批产物是谁的」就靠它。
+    # 只在本机已有本课产物时写得上（三件齐才写）——新起的段由 run_loop 写完后补记。
+    claim_local_course(dest, course, log)
 
     token = str(creds.get("HUB_TOKEN") or "")
     hub = _probe_hub(ccfg, creds, token, log, push_mode)
@@ -2103,6 +2245,8 @@ def run_one_course(spec: CourseRunSpec) -> int:
                 ) from e
             raise
         log(f"run_loop 退出 rc={rc}；产物目录 {dest}")
+        # 段末补记课程身份（新起的段到这里才有三件；写不下只降级，不影响 rc）。
+        claim_local_course(dest, course, log)
     finally:
         if detach_progress is not None:
             outcome = detach_progress()

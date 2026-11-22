@@ -298,6 +298,35 @@ function skillCols(): Col<MetricRow>[] {
         ),
     },
     {
+      ...colDef('ringKillRate'),
+      // 环内拦截只对 eval 行有意义（rollout 侧没有干净面板）。缺字段 = —（旧账本）。
+      cell: (r) =>
+        r.kind === 'eval' ? (
+          r.eval.ringKillRate != null ? (
+            <span title="基地 6 格内进环的敌人被打掉的比例">{fmtPct(r.eval.ringKillRate)}</span>
+          ) : (
+            <span className="tc-muted">—</span>
+          )
+        ) : (
+          <span className="tc-muted">—</span>
+        ),
+    },
+    {
+      ...colDef('innerPress'),
+      cell: (r) =>
+        r.kind === 'eval' ? (
+          r.eval.innerPressFrac != null ? (
+            <span title="基地 6 格内有存活敌的 tick 占比（= 奖励项 baseIntruderTicks/ticks 同口径）">
+              {fmtPct(r.eval.innerPressFrac)}
+            </span>
+          ) : (
+            <span className="tc-muted">—</span>
+          )
+        ) : (
+          <span className="tc-muted">—</span>
+        ),
+    },
+    {
       ...colDef('dmgPerKill'),
       cell: (r) => {
         const pct = r.kind === 'main' ? r.main.actuals?.dmgPerKillPct : r.eval.dmgPerKillPct

@@ -171,7 +171,7 @@ def verify_plan_file(job_dir: str | Path, manifest: dict, *, log: Callable[[str]
 
     三道门，任何一道不过都**在跑第一局之前**响：
       ① sha256(plan.json) == manifest.plan_sha256（payload 损坏/串包）；
-      ② `validate_plan` 形状（区间/硬上界/字段类型）；
+      ② `validate_plan` 形状（区间/字段类型；2026-11-22 起不再有轮数上界）；
       ③ `pairs_fp`：用 `build_pairs` 重放计划覆盖的**每一轮**对集，与 hub 发布时算的
          指纹逐位对账——`pair_args` 少一个字段、`build_pairs` 新增随机源，都在这里暴露。
          绝不在跑到半途才发现语料与计划不符（那时已经产生一批不可信 shard）。

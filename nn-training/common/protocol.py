@@ -135,10 +135,10 @@ from common.manifest import (
     ROLLOUT_SPEC_DEFAULTS as ROLLOUT_SPEC_DEFAULTS,
 )
 from common.manifest import (
-    RUN_MAX_ITERS_HARD_CAP as RUN_MAX_ITERS_HARD_CAP,
+    RUN_NODE_LABEL as RUN_NODE_LABEL,
 )
 from common.manifest import (
-    RUN_NODE_LABEL as RUN_NODE_LABEL,
+    RUN_SEGMENT_DEFAULT_ITERS as RUN_SEGMENT_DEFAULT_ITERS,
 )
 from common.manifest import (
     SERVE_ANY_SCRIPT as SERVE_ANY_SCRIPT,

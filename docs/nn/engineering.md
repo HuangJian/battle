@@ -22,10 +22,14 @@
 > **2026-10-02 合并说明（二）**：origin 侧新增的 §59（止损块进课程文件）/§60（止损块第二刀）按先例
 > **保号**；本地同号的「收官轮 eval 缺失 + dropped 局静默丢失」节改号为 **§61**，全文与
 > `DECISIONS.md`、`docs/nn.progress.md` 里的引用同步跟改。
+>
+> **2026-11-22 合并说明**：origin 侧新增的 §287（导出段长不再有上界）/§288（plan 重放不再白等）
+> 按先例**保号**；本地同号的十六节（P0-3 第三十四~四十九刀）改号为 **§289–§304**，全文与
+> `DECISIONS.md`、`docs/nn.progress.md`、`plan/`、`python.refactor.md` 里的引用同步跟改。
 
 ---
 
-## §302 P0-3 第四十九刀 A 批：两个头入口 + 装载骨架收 spec（43 → 40）（2026-11-22）
+## §304 P0-3 第四十九刀 A 批：两个头入口 + 装载骨架收 spec（43 → 40）（2026-11-22）
 
 * **一万一刀三处**（都在 `worker/ppo/`）：`goal.ppo_update_goal`(13) · `intent.ppo_update_intent`(13)
   · `np_core.load_episodes_common`(13)。宽签名 43 → **40**，文件 35 → **32**（三个文件各自归零）。
@@ -34,7 +38,7 @@
   `loop.HeadUpdateSpec` = `PPOSpec` 减去 `head`/`terms`，入口只剩
   `run_ppo(spec.to_ppo(_SPEC, LossTerms(...)))`。`to_ppo` 是**唯一**一份「13 个字段逐个搬进
   PPOSpec」的实现 —— 这项搬运原本是两个入口各手抄一遍 15 个关键字，漏一个不报错（warmup
-  静默退化成直接 PPO、kickstarting 静默关掉、早停 / 断点续跑静默失效，见 §299 的失效面清单）。
+  静默退化成直接 PPO、kickstarting 静默关掉、早停 / 断点续跑静默失效，见 §301 的失效面清单）。
 * **端口没动，动的是端口里的东西**：`trainer/stream.py` 仍 `backend.update(model, opt, chs,
   epochs, device, **c.update_kwargs)` —— 前 5 个是每波都换的句柄，旋钮才是每轮变的。所以端口
   形状保留 5 位置 + `**update_kwargs`（`tests/worker/test_backend_contract.py` 的
@@ -61,7 +65,7 @@
   埋回 `**kwargs`）。② 文本断言两条（形态 1536 / 源码面 1227）**未动**：新判据全走 AST 结构
   断言，读盘与 `test_ppo_loop_core.py` 同写法（文件名为入参），不落进「源码文本」口径。
 
-## §301 P0-3 第四十八刀：`run_cloud_eval` 收 `CloudEvalSpec`（44 → 43）（2026-11-22）
+## §303 P0-3 第四十八刀：`run_cloud_eval` 收 `CloudEvalSpec`（44 → 43）（2026-11-22）
 
 * `remote/offline_eval.run_cloud_eval` 原来 6 个必填 + 8 个带缺省的 14 个关键字。现在只收一份
   frozen + kw_only `CloudEvalSpec`（同模块）。宽签名 44 → **43**，文件 36 → **35**。
@@ -85,7 +89,7 @@
   （AST 看那个唯一的调用点）/ 生产装配点按名交齐（允许落缺省：`bun` · `rollout_winrate`）/
   `CloudEvalRunner` 的装配端口类型（`get_type_hints`，不做文本断）。
 
-## §300 P0-3 第四十七刀：`build_plan` 收 `PlanSpec`（45 → 44）（2026-11-22）
+## §302 P0-3 第四十七刀：`build_plan` 收 `PlanSpec`（45 → 44）（2026-11-22）
 
 * `worker/plan.build_plan` 原来 1 个位置位（`args`）+ 13 个关键字。现在只收一份 frozen +
   kw_only `PlanSpec`（同模块）。宽签名 45 → **44**，文件 37 → **36**。
@@ -109,7 +113,7 @@
 * 教训（工具面）：一次性 AST 改写脚本必须自带**幂等检查**（`args` 里已有 `PlanSpec(...)` 就跳过），
   否则跑两遍就是双重包装 —— 本次确实发生过一次，用 `git checkout` + 幂等重跑修回。
 
-## §299 P0-3 第四十六刀：`run_ppo` 收 `PPOSpec`（46 → 45）（2026-11-22）
+## §301 P0-3 第四十六刀：`run_ppo` 收 `PPOSpec`（46 → 45）（2026-11-22）
 
 * `worker/ppo/loop.run_ppo` 原来 15 个形参：5 个身份位（`model` / `opt` / `chunks` / `epochs` /
   `device`）+ 2 份配置（`spec: HeadSpec` / `terms: LossTerms`）+ 8 个训练旋钮（`ckpt_path` /
@@ -136,7 +140,7 @@
   `run_ppo` 只剩 `spec` / **两个入口逐个交齐 15 个关键字**（AST 看 `PPOSpec(...)` 的 keywords，
   且不许位置实参）—— 最后一条直接钉住本刀最可能的失误形态）。
 
-## §298 P0-3 第四十五刀：`task_key` 收 `TaskKeySpec`（47 → 46）（2026-11-22）
+## §300 P0-3 第四十五刀：`task_key` 收 `TaskKeySpec`（47 → 46）（2026-11-22）
 
 * `common/task_key.task_key` 原来 16 个参数：5 个身份位（`iter_id` / `mode` / `kind` / `stage` /
   `seed`）+ 11 个带缺省的开关。现在只收一份 frozen + kw_only `TaskKeySpec`（同模块，L0 零新依赖）。
@@ -156,7 +160,7 @@
   固定向量（`test_task_cancel.py`）保留并**补上 6 个开关的逐个激活**：每个开关单独打开都必须在
   键尾多出且只多出自己那一段。
 
-## §297 P0-3 第四十四刀：`run_job` 收 `RunJobSpec`（48 → 47）（2026-11-22）
+## §299 P0-3 第四十四刀：`run_job` 收 `RunJobSpec`（48 → 47）（2026-11-22）
 
 * `remote/worker.run_job` 原来 3 个身份位（`base_url` / `token` / `job`）+ 14 个按名旋钮，
   现在只收一份 frozen + kw_only `RunJobSpec`（住新模块 `remote/job_spec.py`，99 行，拓扑秩 **L1**，
@@ -187,7 +191,7 @@
 * 新守卫 `tests/remote/test_run_job_spec.py`（5 条：frozen + 全字段 kw_only / 17 字段与缺省逐项表 /
   缺省旧语义 / `run_job` 只剩 `spec` / 未知关键字 `TypeError`）。
 
-## §296 P0-3 第四十三刀：B 层派发两入口共收 `RunnerSpec`（50 → 48）（2026-11-22）
+## §298 P0-3 第四十三刀：B 层派发两入口共收 `RunnerSpec`（50 → 48）（2026-11-22）
 
 * `trainer/batch_runner.py`：`BatchEvalRunner.__init__`（16 参）与 `dispatch_batch_bg`
   （13 参）**共用一张字段表**（frozen + kw_only `RunnerSpec`，16 字段 = 11 个身份位 +
@@ -213,7 +217,7 @@
   入口的签名只剩 spec）。`worker/plan.build_plan` 等下一批候选见 `python.refactor.md`。
 * 读数：`trainer/batch_runner.py` LOC 513 → **519**（< 1000）。
 
-## §295 P0-3 第四十二刀：`ppo_update` 成对收 spec（52 → 50）（2026-11-22）
+## §297 P0-3 第四十二刀：`ppo_update` 成对收 spec（52 → 50）（2026-11-22）
 
 * `worker/ppo/engine.ppo_update`（20 参）与 `worker/ppo/engine_paddle.ppo_update`（21 参）
   一起收成参数对象：共用 `BaseUpdateSpec`（19 个同名旋钮），torch 侧 `TorchUpdateSpec`
@@ -249,7 +253,7 @@
   凑成 ≥3；clone 仍 17、exact 16，注释写在 `BASELINE_SAME_NAME_GE3` 上方）；`Any` 基线
   `worker/ppo/engine_paddle.py` 6 → 5（`progress: Any` 形参没了）。
 
-## §294 P0-3 第四十一刀：`trainer/loop_serve.serve` 收 `ServeSpec`（53 → 52）（2026-11-22）
+## §296 P0-3 第四十一刀：`trainer/loop_serve.serve` 收 `ServeSpec`（53 → 52）（2026-11-22）
 
 * `trainer/loop_serve.serve` 原来 18 个参数（1 个位置 `courses` + 17 个关键字），现在只收
   一份 frozen + kw_only 的 `ServeSpec`；函数体在入口处把 18 个字段展开成同名局部量，再逐字
@@ -269,7 +273,7 @@
 
 ---
 
-## §293 P0-3 第四十刀：`OfflineDeliverer` 收 `OfflineDelivererSpec`（54 → 53）（2026-11-22）
+## §295 P0-3 第四十刀：`OfflineDeliverer` 收 `OfflineDelivererSpec`（54 → 53）（2026-11-22）
 
 * `remote/offline_deliver.py`：20 个关键字参数 → frozen + kw_only
   `OfflineDelivererSpec`（7 个身份位 + 3 个网络/探测 + 2 个抽屉 + 4 个模式开关 +
@@ -288,7 +292,7 @@
 * 回归：新守卫 + `offline_deliver` 族 244 条绿；`test_remote_dag` / 转发名护栏绿；
   全量 `bun run pygate` 绿（6735 passed）。
 
-## §292 P0-3 第三十九刀：派发两入口共收 `DispatchSpec`（56 → 54）（2026-11-22）
+## §294 P0-3 第三十九刀：派发两入口共收 `DispatchSpec`（56 → 54）（2026-11-22）
 
 * `trainer/dispatch_state.py` 新增 frozen + kw_only `DispatchSpec`（7 个身份位 + 12 个可选
   接线/旋钮），`run_rollout_queue`（薄包装）与 `RolloutDispatcher.__init__`（OO 本体）
@@ -306,7 +310,7 @@
   两入口都只收 spec）。
 * 回归：新守卫(3) + 派发族 55 条绿；全量 `bun run pygate` 绿（6732 passed）。
 
-## §291 P0-3 第三十八刀：`run_one_round` 收 `JobRoundSpec`（57 → 56）（2026-11-22）
+## §293 P0-3 第三十八刀：`run_one_round` 收 `JobRoundSpec`（57 → 56）（2026-11-22）
 
 * `remote/job_round.py`：21 参 → frozen + kw_only `JobRoundSpec`（16 个必填位 +
   5 个可选旋钮：`cache_root` / `epoch_mult` / `backend` / `role` / `prefetch_unpack`）；
@@ -324,7 +328,7 @@
   `remote/job_round.py` 2 → 1。
 * 回归：新守卫(3) + job_round 族 70 条绿；全量 `bun run pygate` 绿（6729 passed）。
 
-## §290 P0-3 第三十七刀：`worker_loop` 收 `WorkerLoopSpec`（58 → 57）（2026-11-22）
+## §292 P0-3 第三十七刀：`worker_loop` 收 `WorkerLoopSpec`（58 → 57）（2026-11-22）
 
 * `remote/worker.py`：22 参 → frozen + kw_only `WorkerLoopSpec`（3 个身份位 + 19 个
   会话旋钮：设备/线程、轮询与停机、归属与筛选、预取三档、让路与回传、缓存根与 `log`）；
@@ -344,7 +348,7 @@
   `test_priority_schedule`、`test_remote_hotswap`、`test_offline_bc_course`）绿；
   ruff / mypy（1056 文件）无错；全量 `bun run pygate` 绿（6726 passed）。
 
-## §289 P0-3 第三十六刀：`settle_eval_summary` 收 `EvalSettleSpec`（59 → 58）（2026-11-22）
+## §291 P0-3 第三十六刀：`settle_eval_summary` 收 `EvalSettleSpec`（59 → 58）（2026-11-22）
 
 * `worker/eval_track.py`：21 参 → frozen + kw_only `EvalSettleSpec`（13 个身份位 +
   8 个可缺省读数：`course_fp` / `left_pending` / `left_pairs` / `close_reason` /
@@ -363,7 +367,7 @@
 * 回归：新守卫(3) + `test_eval_seed_pool`(28) + `test_eval_track_split` + `test_eval_rows_split`
   + 形状预算绿；eval/offline 族 129 条绿；全量 `bun run pygate` 绿（6723 passed）。
 
-## §288 P0-3 第三十五刀：`run_rollout_stream` 收 `StreamRunSpec`（60 → 59）（2026-11-22）
+## §290 P0-3 第三十五刀：`run_rollout_stream` 收 `StreamRunSpec`（60 → 59）（2026-11-22）
 
 * `trainer/stream.py`：22 参 → frozen + kw_only `StreamRunSpec`（10 个身份位 +
   12 个可选接线：评估触发 `on_collect_done` / `on_ppo_started`、`on_epoch_done`、
@@ -380,7 +384,7 @@
   `test_loop_volume_split`(13) + `test_python_shape_budget`(5) 绿；e2e `test_run_rl` 随
   全量门禁绿；ruff / mypy（1054 文件）无错。
 
-## §287 P0-3 第三十四刀：`dispatch_rollout_phase` 收 `RolloutPhaseSpec`（61 → 60）（2026-11-22）
+## §289 P0-3 第三十四刀：`dispatch_rollout_phase` 收 `RolloutPhaseSpec`（61 → 60）（2026-11-22）
 
 * `trainer/rollout_phase.py`：25 参 → frozen + kw_only `RolloutPhaseSpec`（16 个身份位 +
   9 个可选接线：`course_fp` / `corpus_fp` / `halt_event` / `on_result` / `pool_halt` /
@@ -396,6 +400,46 @@
   入口只收 `spec`）。
 * 回归：新守卫(3) + `test_loop_volume_split`(13) + `test_python_shape_budget`(4) 绿；
   ruff / mypy（1053 文件）无错。
+
+## §288 `plan_pairs_fp` 的重放不再白等：静音 + epoch 缓存 + 三遍合一（2026-11-22）
+
+- **现象**：`build_plan` 对轮数是**线性**的——20000 轮的段要 8.1s，且每轮打两行
+  `[run_rl] rotate: batch …`（5000 轮 = 一万行）。对 503 轮的段无感（1.3s），但它是纯白等。
+- **三处纯浪费**（口径一个字没动）：
+  1. **三遍重放**：`plan_pairs_fp` 一遍 + `check_plan_against_args` 的两条腿各一遍。两条职责的
+     循环体本来就是同一个 `pairs_for(plan, it)` ⇒ 合成 `_replay_segment(plan, args=None)`；
+     `build_plan` 调**一遍**同时出指纹与自检。
+  2. **逐轮日志**：重放期 `pairs_for(..., quiet=True)`（`build_pairs` 的 `quiet` 只关日志，
+     返回值逐字节不变——有用例钉住）。
+  3. **epoch 排列每轮重抽**：`biz.course._epoch_perm` / `volume_waves._window_positions` 改成
+     有界 `lru_cache(8)`（纯函数，值逐位等于现算值；有用例拿 `default_rng` 现算对账）。
+- **读数**（同一台机、同一份计划）：真实计划（35 关 / 7 关一窗 / volume）单轮重放
+  **854 → 430 µs**（2.0×），`pairs_fp` 摘要逐字节相同（`e574f2f9…`）；`build_plan`
+  20000 轮 **8130 → 2448 ms**（3.3×）。
+- **剩余成本是地板**：每轮 7 关 × `np.random.SeedSequence` 24µs ≈ 170µs，改它 = 换语料。
+  再要快只有两条路，都**没做**：① 自检改采样（弱化发布期闸）；② 摘要改「键身份」而非
+  实际种子（弱化"逐字节一致"）。两条都是契约层面的取舍，留给人拍板。
+
+## §287 导出段长不再有上界：`RUN_MAX_ITERS_HARD_CAP` → `RUN_SEGMENT_DEFAULT_ITERS`（2026-11-22）
+
+- **现场**：g9-def 课程 `iters=1000`、本机已跑 it497 ⇒ 本段 503 轮。控制台点导出当场被拒：
+  「本段要跑 503 轮（课程 iters=1000 − 已跑 it497）> 硬上界 500——拒导」。要导出只能去改
+  课程文件降 `iters`，即**让任务定义迁就程序里的一个常数**。
+- **决定**（用户口径：一切以课程定义为准，程序里不要设置任何上界）：删掉这个上界的三处读者，
+  常量改名 `RUN_SEGMENT_DEFAULT_ITERS = 500`，语义收窄为**唯一一件事**——课程 `iters<=0`
+  （无限）时那个开区间段的**缺省段长**（课程没给长度，总得给一个；`--run-max-iters` 可覆盖）。
+  * `nn-training/worker/plan.build_plan`：删 `end_it - it > cap ⇒ ProtocolError`；有限课程
+    `end_it = iters_total`（`max_iters`/`--run-max-iters` 只做 `min`，**只缩短、永不拒**）。
+  * `worker/plan.validate_plan`：删同名的 `> cap ⇒ 拒收`。
+  * `dashboard/src/server/bundles/export.ts::exportGuardReason`：删 `remaining > cap` 分支，
+    静态预判只剩「缺起点权重」「无剩余轮次」两条（外加已退役的跨语言常量对账用例）。
+- **被否决**：保留 500 作为「防一份手写/损坏的计划把节点按一整天」的闸。理由：那道闸的另一半
+  （节点预算 `budget_sec` / 课程 `max_hours` / 控制台的 hold 与 stall 告警）本来就存在，
+  而它的实际代价是**每次课程预算 > 剩余 500 轮就导不出来**——闸打在正常路径上。
+- **验证**：`nn-python-gate` 全绿（6707 passed / 13 skipped，ruff+mypy 无新增）；dashboard
+  2215 例 + 根 `bun run check` 2867 例全绿。回归钉在 `tests/worker/test_plan.py::
+  test_finite_course_follows_course_iters_without_any_upper_bound`（it497→iters1000 = 503 轮）
+  与 `dashboard/tests/server-api-task-bundle.test.ts` 的「503 轮必须可导」两条。
 
 ## §286 P0-3 第三十三刀：`dispatch_bc_corpus` 收 `BcDispatchSpec`（62 → 61）（2026-11-22）
 
