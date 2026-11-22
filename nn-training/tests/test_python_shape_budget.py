@@ -74,7 +74,8 @@ WIDE_FUNCS_BASELINE = {
     "remote/lifecycle.py": 1,
     "remote/node_upgrade.py": 1,
     # `remote/offline_deliver.py` 已清零（P0-3 第四十刀：`OfflineDelivererSpec`）。
-    "remote/offline_eval.py": 1,
+    # 2026-11-22（P0-3 第四十八刀）：`run_cloud_eval` 的 14 个关键字收成 `CloudEvalSpec`
+    # ⇒ 本文件宽签名归零，条目删除（守 `tests/remote/test_cloud_eval_spec.py`）。
     # 2026-11-21：`_base_tar_bytes` / `_landed_bytes_for` 各 9 参 →
     # `BaseTarSpec` / `LandedBytesSpec` ⇒ 本文件宽签名归零，条目删除。
     # 2026-11-21：`pack_payload_zip` 的 9 个参数收成 `PackSpec`

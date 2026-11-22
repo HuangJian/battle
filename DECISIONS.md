@@ -9878,3 +9878,20 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   args 的对比换成对实现细节的断言，`volume` 路线根本没有可比的旋钮值）。
 - **读数**：宽签名 45 → **44**、37 → **36** 文件（`WIDE_FUNCS_BASELINE` 删 `worker/plan.py`）。
 - **验证**：`bun run pygate` 绿（6770 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §300。
+
+## §2026-11-22-cloud-eval-spec（`run_cloud_eval` 的 14 个参数收成 `CloudEvalSpec`）
+
+- **背景**：`remote/offline_eval.run_cloud_eval` = 6 必填 + 8 带缺省关键字。生产侧不直接调它：
+  `plan_handoff._eval_job_builder` 造一张关键字**字典**，`CloudEvalRunner._loop` 再
+  `run_cloud_eval(**params)` 展开。键名错只是延到后台线程才炸，而取错值完全静默：
+  `ts_code_sha256` 错 = 跨轮暖池 key 对不上（每轮重 spawn 一池）、`game_timeout_sec` 错 = 丢掉
+  「显式 vs 兜底」的区别（后者决定重试要不要放大）、`course_fp` 错 = 逐局行与课程配不上对。
+- **决定**：同模块 frozen + kw_only `CloudEvalSpec`（14 字段，缺省逐字一致）；`run_cloud_eval(spec)`
+  展开成同名局部量；`_eval_job_builder.build(it)` 直接返回 spec，`CloudEvalRunner._loop` 调
+  `run_cloud_eval(spec)`（`**` 展开消失）；`_pending` 与 `build_job` 端口同时收窄（该文件 `Any`
+  基线 8 → 6）。守 `tests/remote/test_cloud_eval_spec.py`（7 条，含 AST 钉「不许回潮成 `**` 展开」）。
+- **被否决**：① 只收 8 个可选旋钮、前 6 个继续裸传（生产侧走的本来就是全关键字，没有「好看的
+  位置位」可言）；② spec 单独成 `remote/cloud_eval_spec.py`（这里不存在 `run_job` 那个成环压力：
+  `plan_handoff` 本来就要 `offline_eval`，且它是可选依赖，延迟 import 已够）。
+- **读数**：宽签名 44 → **43**、36 → **35** 文件（`WIDE_FUNCS_BASELINE` 删 `remote/offline_eval.py`）。
+- **验证**：`bun run pygate` 绿（6777 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §301。

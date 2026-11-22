@@ -46,6 +46,7 @@ from remote.offline_deliver import OfflineDeliverer
 from remote.offline_eval import (
     CLOUD_NODE,
     CloudEvalRunner,
+    CloudEvalSpec,
     eval_pairs,
     eval_plan_of,
     run_cloud_eval,
@@ -92,6 +93,18 @@ def _course(**over: object) -> SimpleNamespace:
 
 # ─────────────────────────── 口径：与 in-loop 同源 ───────────────────────────
 
+
+
+def _spec(it: int) -> CloudEvalSpec:
+    """最小合法 spec（runner 的线程/收线用例只关心 `it`，plan 内容不参与）。"""
+    return CloudEvalSpec(
+        plan=eval_plan_of(_course()),
+        it=int(it),
+        weights_path=Path("w.json"),
+        eval_jsonl=Path("eval.jsonl"),
+        ts_root="ts",
+        work_dir="work",
+    )
 
 def test_default_slots_is_the_same_formula_as_rollout(monkeypatch: pytest.MonkeyPatch) -> None:
     """缺省并发就是 rollout 的口径 `max(cores − 2, cores × 0.8)`——**不为 rollout 预留**。
@@ -180,16 +193,18 @@ def test_run_cloud_eval_records_rows_and_settles_the_summary(
     w = _weights(tmp_path)
     logs, log = _logs()
     out = run_cloud_eval(
-        plan=plan,
-        it=1,
-        weights_path=w,
-        eval_jsonl=eval_jsonl,
-        ts_root=_ts_root(tmp_path),
-        work_dir=tmp_path / "work",
-        course=_course(eval_stages="0-1", eval_games_per_stage=3, eval_every=1),
-        bun="bun",
-        slots=4,
-        log=log,
+        CloudEvalSpec(
+            plan=plan,
+            it=1,
+            weights_path=w,
+            eval_jsonl=eval_jsonl,
+            ts_root=_ts_root(tmp_path),
+            work_dir=tmp_path / "work",
+            course=_course(eval_stages="0-1", eval_games_per_stage=3, eval_every=1),
+            bun="bun",
+            slots=4,
+            log=log,
+        )
     )
     assert out["ran"] and out["games"] == 6 and out["settled"] == 6 and out["failed"] == 0
     assert len(calls) == 6 and len(set(calls)) == 6
@@ -212,16 +227,18 @@ def test_run_cloud_eval_records_rows_and_settles_the_summary(
 
     # 幂等：同一 spec.wver 再来一次 ⇒ 一局不重跑（账本去重）
     again = run_cloud_eval(
-        plan=plan,
-        it=1,
-        weights_path=w,
-        eval_jsonl=eval_jsonl,
-        ts_root=_ts_root(tmp_path),
-        work_dir=tmp_path / "work",
-        course=_course(eval_stages="0-1", eval_games_per_stage=3, eval_every=1),
-        bun="bun",
-        slots=4,
-        log=log,
+        CloudEvalSpec(
+            plan=plan,
+            it=1,
+            weights_path=w,
+            eval_jsonl=eval_jsonl,
+            ts_root=_ts_root(tmp_path),
+            work_dir=tmp_path / "work",
+            course=_course(eval_stages="0-1", eval_games_per_stage=3, eval_every=1),
+            bun="bun",
+            slots=4,
+            log=log,
+        )
     )
     assert again["games"] == 6 and again["settled"] == 0 and again["skipped"] == 6
 
@@ -242,16 +259,18 @@ def test_run_cloud_eval_survives_single_game_failures(
     eval_jsonl = tmp_path / "eval_log.jsonl"
     logs, log = _logs()
     out = run_cloud_eval(
-        plan=eval_plan_of(course),
-        it=1,
-        weights_path=_weights(tmp_path),
-        eval_jsonl=eval_jsonl,
-        ts_root=_ts_root(tmp_path),
-        work_dir=tmp_path / "work",
-        course=course,
-        bun="bun",
-        slots=3,
-        log=log,
+        CloudEvalSpec(
+            plan=eval_plan_of(course),
+            it=1,
+            weights_path=_weights(tmp_path),
+            eval_jsonl=eval_jsonl,
+            ts_root=_ts_root(tmp_path),
+            work_dir=tmp_path / "work",
+            course=course,
+            bun="bun",
+            slots=3,
+            log=log,
+        )
     )
     assert out["failed"] == 2 and out["settled"] == 2
     assert any("失败" in m for m in logs)
@@ -285,17 +304,19 @@ def test_run_cloud_eval_watchdog_caps_and_retries_in_place(
     course = _course(eval_stages="0", eval_games_per_stage=1, eval_every=1)
     logs, log = _logs()
     out = run_cloud_eval(
-        plan=eval_plan_of(course),
-        it=1,
-        weights_path=_weights(tmp_path),
-        eval_jsonl=tmp_path / "eval_log.jsonl",
-        ts_root=_ts_root(tmp_path),
-        work_dir=tmp_path / "work",
-        course=course,
-        bun="bun",
-        slots=1,
-        game_timeout_sec=0.0,
-        log=log,
+        CloudEvalSpec(
+            plan=eval_plan_of(course),
+            it=1,
+            weights_path=_weights(tmp_path),
+            eval_jsonl=tmp_path / "eval_log.jsonl",
+            ts_root=_ts_root(tmp_path),
+            work_dir=tmp_path / "work",
+            course=course,
+            bun="bun",
+            slots=1,
+            game_timeout_sec=0.0,
+            log=log,
+        )
     )
     assert out["settled"] == 1 and out["failed"] == 0, "重跑成功 ⇒ 这局算落账，不是失败"
     # 首次 = 兜底硬顶；重试 = ×RETRY_TIMEOUT_FACTOR（2026-10-26 硬顶 5→30 ⇒ 重试 20→120s。
@@ -311,17 +332,19 @@ def test_run_cloud_eval_watchdog_caps_and_retries_in_place(
     timeouts.clear()
     attempts.clear()
     run_cloud_eval(
-        plan=eval_plan_of(course),
-        it=2,
-        weights_path=_weights(tmp_path, b'{"w":2}'),
-        eval_jsonl=tmp_path / "eval_log2.jsonl",
-        ts_root=_ts_root(tmp_path),
-        work_dir=tmp_path / "work2",
-        course=course,
-        bun="bun",
-        slots=1,
-        game_timeout_sec=120.0,
-        log=log,
+        CloudEvalSpec(
+            plan=eval_plan_of(course),
+            it=2,
+            weights_path=_weights(tmp_path, b'{"w":2}'),
+            eval_jsonl=tmp_path / "eval_log2.jsonl",
+            ts_root=_ts_root(tmp_path),
+            work_dir=tmp_path / "work2",
+            course=course,
+            bun="bun",
+            slots=1,
+            game_timeout_sec=120.0,
+            log=log,
+        )
     )
     # 2026-10-25：显式档的**重试**也放宽（`EXPLICIT_RETRY_FACTOR`）——一条卡住的评估局
     # 在云机 4 核上被同一个 120s 连杀三次，与 rollout 那条腿是同一个坑。
@@ -370,16 +393,18 @@ def test_unreapable_eval_game_is_resubmitted_in_round_never_failing(
     logs, log = _logs()
     t0 = time.time()
     out = run_cloud_eval(
-        plan=plan,
-        it=1,
-        weights_path=_weights(tmp_path),
-        eval_jsonl=eval_jsonl,
-        ts_root=_ts_root(tmp_path),
-        work_dir=tmp_path / "work",
-        course=course,
-        bun="bun",
-        slots=3,
-        log=log,
+        CloudEvalSpec(
+            plan=plan,
+            it=1,
+            weights_path=_weights(tmp_path),
+            eval_jsonl=eval_jsonl,
+            ts_root=_ts_root(tmp_path),
+            work_dir=tmp_path / "work",
+            course=course,
+            bun="bun",
+            slots=3,
+            log=log,
+        )
     )
     # timing-ok: 上界兜底（重投只需有界，30s 只挡挂起）
     assert time.time() - t0 < 30.0, "重投必须先有界、再谈次数（不许把线程按在等上面）"
@@ -449,16 +474,18 @@ def test_eval_game_stuck_in_uncancellable_io_is_resubmitted_in_round(
     t0 = time.time()
     try:
         out = run_cloud_eval(
-            plan=plan,
-            it=1,
-            weights_path=_weights(tmp_path),
-            eval_jsonl=tmp_path / "eval_log.jsonl",
-            ts_root=_ts_root(tmp_path),
-            work_dir=tmp_path / "work",
-            course=course,
-            bun="bun",
-            slots=3,
-            log=log,
+            CloudEvalSpec(
+                plan=plan,
+                it=1,
+                weights_path=_weights(tmp_path),
+                eval_jsonl=tmp_path / "eval_log.jsonl",
+                ts_root=_ts_root(tmp_path),
+                work_dir=tmp_path / "work",
+                course=course,
+                bun="bun",
+                slots=3,
+                log=log,
+            )
         )
         wall = time.time() - t0
     finally:
@@ -499,16 +526,18 @@ def test_eval_round_retry_cap_is_the_operators_exit_valve(
     target = eval_pairs(plan, 1)[0]
     logs, log = _logs()
     out = run_cloud_eval(
-        plan=plan,
-        it=1,
-        weights_path=_weights(tmp_path),
-        eval_jsonl=tmp_path / "eval_log.jsonl",
-        ts_root=_ts_root(tmp_path),
-        work_dir=tmp_path / "work",
-        course=course,
-        bun="bun",
-        slots=3,
-        log=log,
+        CloudEvalSpec(
+            plan=plan,
+            it=1,
+            weights_path=_weights(tmp_path),
+            eval_jsonl=tmp_path / "eval_log.jsonl",
+            ts_root=_ts_root(tmp_path),
+            work_dir=tmp_path / "work",
+            course=course,
+            bun="bun",
+            slots=3,
+            log=log,
+        )
     )
     assert out["ran"] and out["roundRetries"] == 2 and out["failed"] == 1, out
     assert out["settled"] == 3, "别的局照落账（不因为一局卡住整轮作废）"
@@ -530,26 +559,30 @@ def test_run_cloud_eval_skips_loudly_when_prerequisites_are_missing(
     monkeypatch.setattr(offline_eval, "find_bun", lambda *_a, **_k: "")
     logs, log = _logs()
     out = run_cloud_eval(
-        plan=plan,
-        it=1,
-        weights_path=_weights(tmp_path),
-        eval_jsonl=tmp_path / "eval_log.jsonl",
-        ts_root=_ts_root(tmp_path),
-        work_dir=tmp_path / "work",
-        course=course,
-        log=log,
+        CloudEvalSpec(
+            plan=plan,
+            it=1,
+            weights_path=_weights(tmp_path),
+            eval_jsonl=tmp_path / "eval_log.jsonl",
+            ts_root=_ts_root(tmp_path),
+            work_dir=tmp_path / "work",
+            course=course,
+            log=log,
+        )
     )
     assert not out["ran"] and any("bun" in m for m in logs)
     missing_w = run_cloud_eval(
-        plan=plan,
-        it=1,
-        weights_path=tmp_path / "nope.json",
-        eval_jsonl=tmp_path / "eval_log.jsonl",
-        ts_root=_ts_root(tmp_path),
-        work_dir=tmp_path / "work",
-        course=course,
-        bun="bun",
-        log=log,
+        CloudEvalSpec(
+            plan=plan,
+            it=1,
+            weights_path=tmp_path / "nope.json",
+            eval_jsonl=tmp_path / "eval_log.jsonl",
+            ts_root=_ts_root(tmp_path),
+            work_dir=tmp_path / "work",
+            course=course,
+            bun="bun",
+            log=log,
+        )
     )
     assert not missing_w["ran"] and any("权重不在盘上" in m for m in logs)
 
@@ -569,17 +602,17 @@ def test_submit_does_not_block_ppo(monkeypatch: pytest.MonkeyPatch) -> None:
     release = threading.Event()
     finished = threading.Event()
 
-    def slow(**job: object) -> dict:
+    def slow(spec: CloudEvalSpec) -> dict:
         started.set()
         try:
             release.wait(30)  # 兜底 30s：同步实现若跑在调用线程，这里会把 `done` 拖到超时
         finally:
             finished.set()  # 后台任务「跑完过」的唯一证据（与 submit 是否阻塞无关）
-        return {"ran": True, "it": job.get("it")}
+        return {"ran": True, "it": spec.it}
 
     monkeypatch.setattr(offline_eval, "run_cloud_eval", slow)
     logs, log = _logs()
-    runner = CloudEvalRunner(lambda it: {"it": it}, log=log)
+    runner = CloudEvalRunner(_spec, log=log)
     # 判据是**状态**，不是耗时（2026-11-15 补：`submit_sec < 0.5s` 在并行门禁满载时会红，
     # 而它红在「线程创建 + 调度」上）。同步实现会当场跑 `slow`（卡在 release/30s）⇒ `done`
     # 到不了 ⇒ 10s 的挂起兜底把它变成可读的红。
@@ -625,20 +658,22 @@ def test_submit_defers_the_job_build_to_the_background_thread(
     release = threading.Event()
     built_done = threading.Event()
 
-    def slow_build(it: int) -> dict:
+    def slow_build(it: int) -> CloudEvalSpec:
         built.set()
         try:
             release.wait(30)  # 兜底 30s：装配若回到调用线程，`done` 到不了 ⇒ 判据变红
         finally:
             built_done.set()
-        return {"it": it}
+        return _spec(it)
 
-    monkeypatch.setattr(offline_eval, "run_cloud_eval", lambda **job: {"ran": True, **job})
+    monkeypatch.setattr(
+        offline_eval, "run_cloud_eval", lambda spec: {"ran": True, "it": spec.it}
+    )
     logs, log = _logs()
     caller = threading.current_thread()
     build_thread: list[threading.Thread] = []
 
-    def recording_build(it: int) -> dict:
+    def recording_build(it: int) -> CloudEvalSpec:
         build_thread.append(threading.current_thread())
         return slow_build(it)
 
@@ -664,14 +699,14 @@ def test_drain_is_bounded_and_reports_overrun(monkeypatch: pytest.MonkeyPatch) -
     started = threading.Event()
     release = threading.Event()
 
-    def slow(**_job: object) -> dict:
+    def slow(_spec: object) -> dict:
         started.set()
         release.wait(5)
         return {"ran": True}
 
     monkeypatch.setattr(offline_eval, "run_cloud_eval", slow)
     logs, log = _logs()
-    runner = CloudEvalRunner(lambda it: {"it": it}, log=log)
+    runner = CloudEvalRunner(_spec, log=log)
     assert runner.submit(7)
     assert started.wait(5), "后台任务没开始跑"
     assert runner.drain(timeout=0.2) is False

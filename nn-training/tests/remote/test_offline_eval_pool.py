@@ -31,7 +31,7 @@ import worker.eval_local as eval_local
 import worker.serve_pool as serve_pool
 from remote.artifacts import sha256_file
 from remote.cloud_pool import CLOUD_EVAL_POOL
-from remote.offline_eval import CLOUD_NODE, eval_plan_of, run_cloud_eval
+from remote.offline_eval import CLOUD_NODE, CloudEvalSpec, eval_plan_of, run_cloud_eval
 
 
 def _course(eval_stages: str = "0", n_seeds: int = 2) -> SimpleNamespace:
@@ -136,16 +136,18 @@ def test_cloud_eval_builds_one_pool_and_hands_it_to_every_game(
     ts = _ts_root(tmp_path)
     msgs, log = _logs()
     out = run_cloud_eval(
-        plan=eval_plan_of(course),
-        it=1,
-        weights_path=_weights(tmp_path),
-        eval_jsonl=tmp_path / "eval_log.jsonl",
-        ts_root=ts,
-        work_dir=tmp_path / "work",
-        course=course,
-        bun="bun",
-        slots=3,
-        log=log,
+        CloudEvalSpec(
+            plan=eval_plan_of(course),
+            it=1,
+            weights_path=_weights(tmp_path),
+            eval_jsonl=tmp_path / "eval_log.jsonl",
+            ts_root=ts,
+            work_dir=tmp_path / "work",
+            course=course,
+            bun="bun",
+            slots=3,
+            log=log,
+        )
     )
     assert out["ran"] and out["settled"] == 2
     # 建池一次，参数是（bun, TS 树, min(slots, 本轮局数)）—— 多的槽位不预热；
@@ -177,16 +179,18 @@ def test_cloud_eval_closes_the_pool_even_when_a_game_explodes(
     monkeypatch.setattr(offline_eval, "run_local_eval_game", boom)
     course = _course(n_seeds=1)
     out = run_cloud_eval(
-        plan=eval_plan_of(course),
-        it=1,
-        weights_path=_weights(tmp_path),
-        eval_jsonl=tmp_path / "eval_log.jsonl",
-        ts_root=_ts_root(tmp_path),
-        work_dir=tmp_path / "work",
-        course=course,
-        bun="bun",
-        slots=2,
-        log=lambda _m: None,
+        CloudEvalSpec(
+            plan=eval_plan_of(course),
+            it=1,
+            weights_path=_weights(tmp_path),
+            eval_jsonl=tmp_path / "eval_log.jsonl",
+            ts_root=_ts_root(tmp_path),
+            work_dir=tmp_path / "work",
+            course=course,
+            bun="bun",
+            slots=2,
+            log=lambda _m: None,
+        )
     )
     # 池现在由内层 finally 关一次（不存 keeper：本用例没给 ts_code_sha256）；外层 pool 已置 None。
     assert out["failed"] == 1 and pool.closed == 1, "异常路径也必须关池（且只关一次）"
@@ -211,16 +215,18 @@ def test_cloud_eval_skips_pooling_when_the_pool_cannot_start(
     course = _course(n_seeds=1)
     msgs, log = _logs()
     out = run_cloud_eval(
-        plan=eval_plan_of(course),
-        it=1,
-        weights_path=_weights(tmp_path),
-        eval_jsonl=tmp_path / "eval_log.jsonl",
-        ts_root=_ts_root(tmp_path),
-        work_dir=tmp_path / "work",
-        course=course,
-        bun="bun",
-        slots=2,
-        log=log,
+        CloudEvalSpec(
+            plan=eval_plan_of(course),
+            it=1,
+            weights_path=_weights(tmp_path),
+            eval_jsonl=tmp_path / "eval_log.jsonl",
+            ts_root=_ts_root(tmp_path),
+            work_dir=tmp_path / "work",
+            course=course,
+            bun="bun",
+            slots=2,
+            log=log,
+        )
     )
     assert out["settled"] == 1, "池起不来不耽误读数"
     assert seen == [None], "没就绪就不该把池交出去"
@@ -267,20 +273,22 @@ def test_cloud_eval_reuses_the_keeper_pool_for_the_same_ts_sha(
     )
     CLOUD_EVAL_POOL.close_all()
     try:
-        first = run_cloud_eval(**kw)
+        first = run_cloud_eval(CloudEvalSpec(**kw))
         assert built == [1] and first["servePool"]["spawned"] == 2
         # 同一份权重会让第二点被 `eval_done_keys` 全跳过（连池都不建）；换一份权重
         # 只为让第二点有 todo，TS sha 仍然是同一个（keeper key 不变）。
         w2 = tmp_path / "weights2.json"
         w2.write_bytes(b'{"w":2}')
         second = run_cloud_eval(
-            **{
-                **kw,
-                "it": 2,
-                "weights_path": w2,
-                # 独立账本：否则同 (stage,seed) 的已评行会让第二点提前返回（连池都不建）。
-                "eval_jsonl": tmp_path / "eval_log2.jsonl",
-            }
+            CloudEvalSpec(
+                **{
+                    **kw,
+                    "it": 2,
+                    "weights_path": w2,
+                    # 独立账本：否则同 (stage,seed) 的已评行会让第二点提前返回（连池都不建）。
+                    "eval_jsonl": tmp_path / "eval_log2.jsonl",
+                }
+            )
         )
         assert built == [1], "第二个同 sha eval 不该再 make_pool"
         assert second["servePool"]["spawned"] == 0
@@ -306,16 +314,18 @@ def test_cloud_eval_env_switch_disables_pooling(
     monkeypatch.setattr(offline_eval, "run_local_eval_game", fake_runner)
     course = _course(n_seeds=1)
     out = run_cloud_eval(
-        plan=eval_plan_of(course),
-        it=1,
-        weights_path=_weights(tmp_path),
-        eval_jsonl=tmp_path / "eval_log.jsonl",
-        ts_root=_ts_root(tmp_path),
-        work_dir=tmp_path / "work",
-        course=course,
-        bun="bun",
-        slots=2,
-        log=lambda _m: None,
+        CloudEvalSpec(
+            plan=eval_plan_of(course),
+            it=1,
+            weights_path=_weights(tmp_path),
+            eval_jsonl=tmp_path / "eval_log.jsonl",
+            ts_root=_ts_root(tmp_path),
+            work_dir=tmp_path / "work",
+            course=course,
+            bun="bun",
+            slots=2,
+            log=lambda _m: None,
+        )
     )
     assert out["settled"] == 1 and out["servePool"] is None and seen == [None]
 

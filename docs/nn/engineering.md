@@ -25,6 +25,30 @@
 
 ---
 
+## §301 P0-3 第四十八刀：`run_cloud_eval` 收 `CloudEvalSpec`（44 → 43）（2026-11-22）
+
+* `remote/offline_eval.run_cloud_eval` 原来 6 个必填 + 8 个带缺省的 14 个关键字。现在只收一份
+  frozen + kw_only `CloudEvalSpec`（同模块）。宽签名 44 → **43**，文件 36 → **35**。
+* **这一刀真正的收益不在签名上，而在生产那条路**：生产侧**从不直接调**它 ——
+  `plan_handoff._eval_job_builder.build(it)` 造一张**关键字字典**，`CloudEvalRunner._loop` 再
+  `run_cloud_eval(**params)` 展开。键名拼错只是延到后台线程才可能炸，而**取错值**完全静默：
+  `ts_code_sha256` 错 ⇒ 跨轮暖池 key 对不上（每轮重新 spawn 一池，冷启动白付一遍）；
+  `game_timeout_sec` 错 ⇒ 蹦掉「显式给了数」与「没指定（0 = 选兜底 + 重试放大）」的区别；
+  `course_fp` 错 ⇒ 逐局行与课程配不上对。
+  收 spec 后那条路上跑的是一个对象，字段名在装配点就被 mypy + 守卫检查；`**params` 展开消失，
+  `CloudEvalRunner._pending` 从 `tuple[int, Any]` 收到 `tuple[int, Callable[[], CloudEvalSpec]]`，
+  `build_job` 端口从 `Any` 收到 `Callable[[int], CloudEvalSpec]`（该文件 `Any` 基线 8 → **6**）。
+* **调用点**：生产 1（`plan_handoff._eval_job_builder`）+ 测试 4 文件 16 处（`test_offline_eval_cloud` 10 ·
+  `test_offline_eval_pool` 6）+ 7 个 `run_cloud_eval` / `CloudEvalRunner` 替身（`test_offline_eval_wiring` 5 ·
+  `test_rollout_scratch` 2）从 `**job` / `job["x"]` 改成 `spec` / `spec.x`。
+* `remote.offline_eval` 是**可选依赖**（截断的快照里可能整个不在）⇒ `plan_handoff` 只在
+  `TYPE_CHECKING` 下 import 类型，运行时仍在 `_eval_job_builder` 体内延迟 import（与
+  `_setup_cloud_eval` 同口径；它早已在本模块依赖闭集白名单里）。
+* 新守卫 `tests/remote/test_cloud_eval_spec.py`（7 条：frozen + 全字段 kw_only / 14 字段与缺省逐项表 /
+  `run_cloud_eval` 只剩 `spec` / 未知字段 `TypeError` / **`CloudEvalSpec` 属性访问不许回潮成 `**` 展开**
+  （AST 看那个唯一的调用点）/ 生产装配点按名交齐（允许落缺省：`bun` · `rollout_winrate`）/
+  `CloudEvalRunner` 的装配端口类型（`get_type_hints`，不做文本断）。
+
 ## §300 P0-3 第四十七刀：`build_plan` 收 `PlanSpec`（45 → 44）（2026-11-22）
 
 * `worker/plan.build_plan` 原来 1 个位置位（`args`）+ 13 个关键字。现在只收一份 frozen +
