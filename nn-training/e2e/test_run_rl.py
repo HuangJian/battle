@@ -62,6 +62,7 @@ from tests.helpers.http_server import serve_fast
 from tests.subproc_util import run_utf8
 from trainer import run_rl
 from trainer.dispatch_queue import run_rollout_queue  # 真家（旧经 trainer.run_rl 再导出）
+from trainer.eval_dispatch import EvalDispatchSpec
 from trainer.stream import (
     run_rollout_stream as _run_rollout_stream,  # B7：run_rl 模块级不再 re-export
 )
@@ -916,9 +917,9 @@ def test_it_eval_deferred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
             **{**vars(args), "eval_games_per_stage": 2, "eval_stages": "0-2"}
         )
         eval_th = threading.Thread(
-            target=lambda: ed.dispatch_eval_round(
+            target=lambda: ed.dispatch_eval_round(EvalDispatchSpec(
                 bun, str(WEIGHTS), traj, args_eval, cfg, "i7.e", 10
-            ),
+            )),
             daemon=True,
             name="eval-it10",
         )
@@ -1127,18 +1128,18 @@ def test_it_mixed_cluster_rollout_only_freezes_own_course_eval(
     th_b: threading.Thread | None = None
     try:
         # A 课 eval 先登记（冻结中）：轮会活着等，但一局都不该派出去。
-        th_a = ed.dispatch_eval_bg(
+        th_a = ed.dispatch_eval_bg(EvalDispatchSpec(
             bun, str(w_a), traj_a, args_a, cfg, "mix.a", 7, local_fallback_only=True
-        )
+        ))
         assert _wait_until(
             lambda: eval_arbiter().active_for(fp_a) > 0
         ), "A 课的 eval 轮没有登记（等不到 active_for > 0）"
 
         # B 课 eval：同集群同节点，3 局全部**按在飞**（handler 压在 `srv.eval_gate` 上）。
         srv.eval_gate = threading.Event()
-        th_b = ed.dispatch_eval_bg(
+        th_b = ed.dispatch_eval_bg(EvalDispatchSpec(
             bun, str(w_b), traj_b, args_b, cfg, "mix.b", 8, local_fallback_only=True
-        )
+        ))
         assert _wait_until(lambda: len(_eval_fetches(srv, "mix.b")) == 3), (
             f"B 课 3 局没有全部派出：{srv.eval_fetches}"
         )
@@ -1233,9 +1234,9 @@ def test_it_mixed_cluster_rollout_pauses_new_eval_grants_but_keeps_inflight(
         # 先让 2 局**真在飞**（handler 压在 `srv.eval_gate` 上），再起冻结 —— 本用例测的是
         # 冻结**中途**落下的语义，冻结若发生在派发前，轮会直接 arm 成 paused（上一条已覆盖）。
         srv.eval_gate = threading.Event()
-        th = ed.dispatch_eval_bg(
+        th = ed.dispatch_eval_bg(EvalDispatchSpec(
             bun, str(w_a), traj_a, args_a, cfg, "mix2.a", 7, local_fallback_only=True
-        )
+        ))
         assert _wait_until(lambda: len(_eval_fetches(srv, "mix2.a")) == 2), (
             f"2 槽应有 2 局在飞：{srv.eval_fetches}"
         )
@@ -1581,7 +1582,7 @@ def test_eval_local_gate(tmp: Path) -> None:
         assert not hold_for_local(6, 0, False, False), "reserve: 0 slots → legacy behavior"
         # A：兜底模式 + 无可用节点 → 3 关 ×2 种子全部由 local 结算并聚合进 summary
         traj_a = work / "trajA"
-        ed.dispatch_eval_round(
+        ed.dispatch_eval_round(EvalDispatchSpec(
             "bun",
             str(rl),
             traj_a,
@@ -1591,7 +1592,7 @@ def test_eval_local_gate(tmp: Path) -> None:
             1,
             local_gate=None,
             local_fallback_only=True,
-        )
+        ))
         rows = [
             json.loads(line)
             for line in (work / "eval_log.jsonl").read_text(encoding="utf-8").splitlines()
@@ -1628,9 +1629,9 @@ def test_eval_local_gate(tmp: Path) -> None:
         rl_b.write_text('{"arch":{"h":32}}', encoding="utf-8")
         gate_open_never = threading.Event()
         t0 = time.time()
-        ed.dispatch_eval_round(
+        ed.dispatch_eval_round(EvalDispatchSpec(
             "bun", str(rl_b), traj_b, mk_args(1), cfg, "rid.2", 2, local_gate=gate_open_never
-        )
+        ))
         took = time.time() - t0
         # 2026-09-20：原断言是「gate 关闭 ⇒ runner 零调用」。自 2026-09-15 「无节点则轮末
         # 主动开闸」后它**不再成立**：本地 worker 与那次开闸是竞态 —— 单跑时 worker 已在
@@ -1674,7 +1675,7 @@ def test_eval_fallback_only_healthy_remote(
         **{**vars(args), "eval_games_per_stage": 2, "eval_stages": "0-0", "eval_window_sec": 30}
     )
     try:
-        ed.dispatch_eval_round(
+        ed.dispatch_eval_round(EvalDispatchSpec(
             bun,
             str(weights),
             traj,
@@ -1683,7 +1684,7 @@ def test_eval_fallback_only_healthy_remote(
             "fb.e",
             1,
             local_fallback_only=True,
-        )
+        ))
     finally:
         srv.shutdown()
     rows = [

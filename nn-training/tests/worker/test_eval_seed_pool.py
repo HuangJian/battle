@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.fs import append_jsonl
+from trainer.eval_dispatch import EvalDispatchSpec
 from worker.eval_local import (
     EVAL_SEEDS,
     a_eval_seed_list,
@@ -453,7 +454,7 @@ def test_dispatcher_daily_corpus_100_fixed_offpool(tmp_path: Path, monkeypatch) 
     gate = threading.Event()
     gate.set()
     traj_a = work / "trajA"
-    ed.dispatch_eval_round("bun", str(rl), traj_a, args, cfg, "rid.dt", 1, local_gate=gate)
+    ed.dispatch_eval_round(EvalDispatchSpec("bun", str(rl), traj_a, args, cfg, "rid.dt", 1, local_gate=gate))
     assert len(calls) == 100, f"日常档 50 配置 → 100 局/关 (got {len(calls)})"
     expect = {(2000, s) for s in EVAL_SEEDS[:100]}
     assert set(calls) == expect
@@ -468,13 +469,13 @@ def test_dispatcher_daily_corpus_100_fixed_offpool(tmp_path: Path, monkeypatch) 
     assert "anchor_wr" not in summ
     # 续跑：同 wver 再派 → already evaluated
     n_before = len(calls)
-    ed.dispatch_eval_round("bun", str(rl), traj_a, args, cfg, "rid.dt", 1, local_gate=gate)
+    ed.dispatch_eval_round(EvalDispatchSpec("bun", str(rl), traj_a, args, cfg, "rid.dt", 1, local_gate=gate))
     assert len(calls) == n_before
     # 新权重（新 wver）→ 重评同一批 100 局（不再有轮转段轮换）
     rl.write_text('{"arch":{"v":2}}', encoding="utf-8")
-    ed.dispatch_eval_round(
+    ed.dispatch_eval_round(EvalDispatchSpec(
         "bun", str(rl), work / "trajB", args, cfg, "rid.dt2", 2, local_gate=gate
-    )
+    ))
     assert len(calls) == n_before + 100
     assert {c[1] for c in calls[n_before:]} == {s for _, s in expect}
 
@@ -532,7 +533,7 @@ def test_resume_after_late_rows_rewrites_the_gap_summary(tmp_path: Path) -> None
         max_ticks=10,
         difficulty="hard",
     )
-    ed.dispatch_eval_round("bun", str(rl), work / "trajA", args, {"nodes": []}, "rid.late", 1)
+    ed.dispatch_eval_round(EvalDispatchSpec("bun", str(rl), work / "trajA", args, {"nodes": []}, "rid.late", 1))
     rows = [
         json.loads(ln)
         for ln in elog.read_text(encoding="utf-8").splitlines()
@@ -546,7 +547,7 @@ def test_resume_after_late_rows_rewrites_the_gap_summary(tmp_path: Path) -> None
     assert last["missing"] == []
     assert last["games"] == 2
     # 幂等：对账已 clean，再续跑一次不重复补账
-    ed.dispatch_eval_round("bun", str(rl), work / "trajA", args, {"nodes": []}, "rid.late", 1)
+    ed.dispatch_eval_round(EvalDispatchSpec("bun", str(rl), work / "trajA", args, {"nodes": []}, "rid.late", 1))
     rows2 = [
         json.loads(ln)
         for ln in elog.read_text(encoding="utf-8").splitlines()
@@ -595,9 +596,9 @@ def test_dispatcher_prefix_when_not_daily_n(tmp_path: Path, monkeypatch) -> None
     cfg = {"nodes": [], "policy": {"evalLocalSlots": 2}}
     gate = threading.Event()
     gate.set()
-    ed.dispatch_eval_round(
+    ed.dispatch_eval_round(EvalDispatchSpec(
         "bun", str(rl), work / "traj", args, cfg, "rid.pre", 3, local_gate=gate
-    )
+    ))
     assert set(calls) == {(2000, EVAL_SEEDS[0]), (2000, EVAL_SEEDS[1])}
 
 

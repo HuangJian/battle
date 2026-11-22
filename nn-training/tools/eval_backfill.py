@@ -248,7 +248,7 @@ class CoursePlanner:
 
     def run_round(self, plan: RoundPlan, *, bun: str) -> RoundResult:
         """派发一轮并等收工，返回账本里的读数。"""
-        from trainer.eval_dispatch import dispatch_eval_round
+        from trainer.eval_dispatch import EvalDispatchSpec, dispatch_eval_round
 
         res = RoundResult(course=plan.course, it=plan.it, ok=False)
         it_dir = self.traj / f"it{plan.it}"
@@ -260,7 +260,7 @@ class CoursePlanner:
         # 拿启动时的快照会让整轮永远 ping 一个死域名。
         cfg = self._fresh_cfg()
         try:
-            dispatch_eval_round(
+            dispatch_eval_round(EvalDispatchSpec(
                 bun,
                 plan.ckpt,
                 it_dir,
@@ -273,7 +273,7 @@ class CoursePlanner:
                 baseline=False,
                 # 本机份额 0 ⇒ 兜底模式且无快照 ⇒ 纯节点（不会偷偷占本机核）。
                 local_fallback_only=self.local_slots <= 0,
-            )
+            ))
         except Exception as e:  # 派发器自身吞异常，这里是最后一道保险
             res.err = f"{type(e).__name__}: {str(e)[:200]}"
             log(f"[backfill] {plan.course} it{plan.it}: 派发异常 {res.err}")

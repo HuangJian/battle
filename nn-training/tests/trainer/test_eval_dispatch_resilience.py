@@ -31,6 +31,7 @@ import trainer.eval_dispatch as ed
 import worker.eval_exec as ee
 import worker.eval_yield as eval_yield
 from tests.helpers.toolchain import stub_toolchain
+from trainer.eval_dispatch import EvalDispatchSpec
 
 #: 慢节点的模拟单局耗时（秒）——用例断言一律与它比，不写死别的绝对数。
 SLOW_NODE_SEC = 3.0
@@ -136,7 +137,7 @@ class _Harness:
         """装好假节点（不碰网络）后跑一轮，返回 eval_log.jsonl 全部行。"""
         common.distribution.weights_push_cache_reset()
         self.mp.setattr(common.task_client, "fetch_task", fetch)
-        ed.dispatch_eval_round("bun", str(self.weights), self.traj, self.args, self.cfg, "rid.c", 5)
+        ed.dispatch_eval_round(EvalDispatchSpec("bun", str(self.weights), self.traj, self.args, self.cfg, "rid.c", 5))
         rows = [
             json.loads(line)
             for line in (self.work / "eval_log.jsonl")
@@ -605,7 +606,7 @@ class _LaneHarness:
         self.mp.setattr(common.task_client, "fetch_task", fetch)
         t0 = self.time.monotonic()
         self.play_t0 = t0
-        ed.dispatch_eval_round(
+        ed.dispatch_eval_round(EvalDispatchSpec(
             "bun",
             str(self.weights),
             self.traj,
@@ -615,7 +616,7 @@ class _LaneHarness:
             it,
             local_gate=self.gate,
             local_fallback_only=self.fallback_only,
-        )
+        ))
         elapsed = self.time.monotonic() - t0
         ledger = self.work / "eval_log.jsonl"
         # 整轮跳过（无节点也无本机）时不建账本文件——退回空行集。
@@ -1437,7 +1438,7 @@ class _LocalHarness(_Harness):
                 timer = threading.Timer(gate_delay, gate.set)
                 timer.start()
         try:
-            ed.dispatch_eval_round(
+            ed.dispatch_eval_round(EvalDispatchSpec(
                 "bun",
                 str(self.weights),
                 self.traj,
@@ -1446,7 +1447,7 @@ class _LocalHarness(_Harness):
                 "rid.c",
                 5,
                 local_gate=gate,
-            )
+            ))
         finally:
             if timer is not None:
                 timer.cancel()
@@ -2169,7 +2170,7 @@ def test_post_weights_is_deferred_until_thaw(tmp_path, monkeypatch) -> None:
     arb.freeze(None)
     t = threading.Thread(
         target=ed.dispatch_eval_round,
-        args=("bun", str(h.weights), h.traj, h.args, h.cfg, "rid.c", 5),
+        args=(EvalDispatchSpec("bun", str(h.weights), h.traj, h.args, h.cfg, "rid.c", 5),),
         daemon=True,
     )
     t.start()

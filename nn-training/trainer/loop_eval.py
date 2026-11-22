@@ -385,7 +385,7 @@ class TrainingEval:
     def _dispatch_eval_round(self, m: int, it: int, dist_cfg: dict | None) -> None:
         """为一轮已完成权重 W(m) 派发（读归档；归档缺席回落活指针 + WARN）。"""
         from trainer.dispatch_queue import RUN_ID
-        from trainer.eval_dispatch import dispatch_eval_bg
+        from trainer.eval_dispatch import EvalDispatchSpec, dispatch_eval_bg
         from worker.archive import find_archive_weights
 
         args = self.args
@@ -406,7 +406,7 @@ class TrainingEval:
         # in-loop eval 的本机只做兜底（2026-10-26）：不建 local_gate、不预孵化、不留队尾。
         # `EvalDispatcher` 只在 `nodes_ok` 为空时才启动本机线程；健康集群纯远端。
         self._eval_gate = None
-        self._eval_thread = dispatch_eval_bg(
+        self._eval_thread = dispatch_eval_bg(EvalDispatchSpec(
             self.bun,
             src_path,
             self._traj_dir,
@@ -417,7 +417,7 @@ class TrainingEval:
             (self._report or {}).get("winRate"),
             local_gate=None,
             local_fallback_only=True,
-        )
+        ))
         self._eval_open = (*self._eval_open, self._eval_thread)
         log(
             f"[eval] it{m} dispatched from "
@@ -508,10 +508,10 @@ class TrainingEval:
         if not self._eval_backfill:
             return
         from trainer.dispatch_queue import RUN_ID
-        from trainer.eval_dispatch import dispatch_eval_bg
+        from trainer.eval_dispatch import EvalDispatchSpec, dispatch_eval_bg
 
         m, path = self._eval_backfill.pop(0)
-        thread = dispatch_eval_bg(
+        thread = dispatch_eval_bg(EvalDispatchSpec(
             self.bun,
             path,
             self._traj_dir,
@@ -522,7 +522,7 @@ class TrainingEval:
             None,
             local_gate=None,
             local_fallback_only=True,
-        )
+        ))
         self._eval_open = (*self._eval_open, thread)
         log(f"[eval] 补账: it{m} 已排队（剩 {len(self._eval_backfill)} 轮旧缺口）")
 
@@ -541,7 +541,7 @@ class TrainingEval:
         补；每轮的 join 预算只兜住这次等待，超时那轮**仍在队里**，不被取消。
         """
         from trainer.dispatch_queue import RUN_ID
-        from trainer.eval_dispatch import dispatch_eval_bg
+        from trainer.eval_dispatch import EvalDispatchSpec, dispatch_eval_bg
 
         args = self.args
         # 收官前先把在飞尾巴清账（同理：只观测/清账，不站等）。
@@ -593,7 +593,7 @@ class TrainingEval:
                         # 收官 drain 同样走兜底模式：没有本机 gate；节点全不可用时
                         # EvalDispatcher 才启动本机线程。
                         self._eval_gate = None
-                        self._eval_thread = dispatch_eval_bg(
+                        self._eval_thread = dispatch_eval_bg(EvalDispatchSpec(
                             self.bun,
                             arch_m[m],
                             self._traj_dir,
@@ -604,7 +604,7 @@ class TrainingEval:
                             None,
                             local_gate=None,
                             local_fallback_only=True,
-                        )
+                        ))
                         self._eval_open = (*self._eval_open, self._eval_thread)
                         budget = min(
                             float(getattr(args, "eval_window_sec", 1800) or 1800) + 60.0,

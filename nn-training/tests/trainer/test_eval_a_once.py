@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from trainer import eval_a_once
+from trainer.eval_dispatch import EvalDispatchSpec
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -65,8 +66,13 @@ def test_eval_a_once_dispatches_through_in_loop_dispatcher() -> None:
     from tests.helpers import source_scan
 
     holders = {
-        p.stem: p for p in source_scan.logic_py_files(str(ROOT))
-        if "eval_dispatch import dispatch_eval_bg" in p.read_text(encoding="utf-8")
+        p.stem: p
+        for p in source_scan.logic_py_files(str(ROOT))
+        if any(
+            ln.strip().startswith("from trainer.eval_dispatch import")
+            and "dispatch_eval_bg" in ln
+            for ln in p.read_text(encoding="utf-8").splitlines()
+        )
     }
     assert "loop_eval" in holders, sorted(holders)
     assert "_dispatch_delayed_eval" in holders["loop_eval"].read_text(encoding="utf-8")
@@ -201,16 +207,24 @@ def test_main_baseline_defaults_ckpt_to_course_out(
 
     seen: dict = {}
 
-    def _fake_dispatch(bun, rl_path, traj_dir, args, cfg, iter_id, it, **kw):
-        seen.update(rl_path=rl_path, it_dir=Path(traj_dir), it=it, iter_id=iter_id, **kw)
+    def _fake_dispatch(spec):
+        seen.update(
+            rl_path=spec.rl_path,
+            it_dir=Path(spec.traj_dir),
+            it=spec.it,
+            iter_id=spec.iter_id,
+            baseline=spec.baseline,
+            local_gate=spec.local_gate,
+            local_fallback_only=spec.local_fallback_only,
+        )
         # 落一条逐局行（与真派发器同册同 schema）——把 main 的读回/回填路径真的走一遍。
-        fp = common.distribution.weights_fingerprint(rl_path)[:16]
-        with open(Path(traj_dir).parent / "eval_log.jsonl", "a", encoding="utf-8") as f:
+        fp = common.distribution.weights_fingerprint(spec.rl_path)[:16]
+        with open(Path(spec.traj_dir).parent / "eval_log.jsonl", "a", encoding="utf-8") as f:
             f.write(
                 json.dumps(
                     {
                         "event": "eval",
-                        "iter": it,
+                        "iter": spec.it,
                         "wver": fp,
                         "stage": 2000,
                         "seed": 1,
@@ -321,15 +335,20 @@ def _fake_dispatch_recorder(monkeypatch: pytest.MonkeyPatch):
 
     seen: dict = {}
 
-    def _fake_dispatch(bun, rl_path, traj_dir, args, cfg, iter_id, it, **kw):
-        seen.update(rl_path=rl_path, it=it, **kw)
-        fp = common.distribution.weights_fingerprint(rl_path)[:16]
-        with open(Path(traj_dir).parent / "eval_log.jsonl", "a", encoding="utf-8") as f:
+    def _fake_dispatch(spec):
+        seen.update(
+            rl_path=spec.rl_path,
+            it=spec.it,
+            baseline=spec.baseline,
+            local_fallback_only=spec.local_fallback_only,
+        )
+        fp = common.distribution.weights_fingerprint(spec.rl_path)[:16]
+        with open(Path(spec.traj_dir).parent / "eval_log.jsonl", "a", encoding="utf-8") as f:
             f.write(
                 json.dumps(
                     {
                         "event": "eval",
-                        "iter": it,
+                        "iter": spec.it,
                         "wver": fp,
                         "stage": 2000,
                         "seed": 1,

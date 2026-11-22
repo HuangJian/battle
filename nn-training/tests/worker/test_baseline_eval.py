@@ -29,6 +29,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import common.distribution
+from trainer.eval_dispatch import EvalDispatchSpec
 from trainer.loop_core import TrainingLoop
 from worker.eval_local import (
     BASELINE_EVAL_ITER,
@@ -187,8 +188,8 @@ def test_dispatch_retries_baseline_when_gap_large(tmp_path, monkeypatch) -> None
     (tmp_path / "eval_log.jsonl").write_text(_summ_row(0, wver, 105, 95) + "\n", encoding="utf-8")
     calls: list[dict] = []
 
-    def _fake_bg(*_a, **kw):
-        calls.append(kw)
+    def _fake_bg(spec):
+        calls.append({"local_gate": spec.local_gate, "local_fallback_only": spec.local_fallback_only})
         return _FakeThread(False)
 
     monkeypatch.setattr("trainer.eval_dispatch.dispatch_eval_bg", _fake_bg)
@@ -213,8 +214,8 @@ def test_baseline_does_not_build_a_local_gate(tmp_path, monkeypatch) -> None:
     loop._eval_gate = None
     calls: list[dict] = []
 
-    def _fake_bg(*_a, **kw):
-        calls.append(kw)
+    def _fake_bg(spec):
+        calls.append({"local_gate": spec.local_gate, "local_fallback_only": spec.local_fallback_only})
         return _FakeThread(False)
 
     monkeypatch.setattr("trainer.eval_dispatch.dispatch_eval_bg", _fake_bg)
@@ -234,8 +235,8 @@ def test_baseline_ignores_existing_gate(tmp_path, monkeypatch) -> None:
     loop._eval_gate = gate
     calls: list[dict] = []
 
-    def _fake_bg(*_a, **kw):
-        calls.append(kw)
+    def _fake_bg(spec):
+        calls.append({"local_gate": spec.local_gate, "local_fallback_only": spec.local_fallback_only})
         return _FakeThread(False)
 
     monkeypatch.setattr("trainer.eval_dispatch.dispatch_eval_bg", _fake_bg)
@@ -312,8 +313,20 @@ def test_dispatch_retries_until_landed(
     loop._start_it = 1
     calls: list[dict] = []
 
-    def _fake_bg(bun, rl_path, traj_dir, args, cfg, **kw):
-        calls.append({"bun": bun, "rl_path": rl_path, "traj_dir": traj_dir, "cfg": cfg, **kw})
+    def _fake_bg(spec):
+        calls.append(
+            {
+                "bun": spec.bun,
+                "rl_path": spec.rl_path,
+                "traj_dir": spec.traj_dir,
+                "cfg": spec.cfg,
+                "it": spec.it,
+                "iter_id": spec.iter_id,
+                "baseline": spec.baseline,
+                "local_gate": spec.local_gate,
+                "local_fallback_only": spec.local_fallback_only,
+            }
+        )
         return _FakeThread(False)  # 线程立刻结束 → 下一轮可重试
 
     monkeypatch.setattr("trainer.eval_dispatch.dispatch_eval_bg", _fake_bg)
@@ -437,9 +450,9 @@ def test_dispatch_baseline_writes_iter0_rows(
     monkeypatch.setattr(ed, "run_local_eval_game", fake_runner)
     gate = threading.Event()
     gate.set()
-    ed.dispatch_eval_round(
+    ed.dispatch_eval_round(EvalDispatchSpec(
         "bun", str(bc), traj, args, cfg, "rid.0", 0, local_gate=gate, baseline=True
-    )
+    ))
     assert ran == [(2000, EVAL_SEEDS_BASE)]  # 同 wver 的 it1 行没把它吞掉
 
     def rows() -> list[dict]:
@@ -455,7 +468,7 @@ def test_dispatch_baseline_writes_iter0_rows(
     assert summ and summ[-1]["games"] == 1 and summ[-1]["wins"] == 0
 
     # 幂等：再派一次 → it0 键已评估 → 不再多出逐局行（重启/重试轮安全）
-    ed.dispatch_eval_round(
+    ed.dispatch_eval_round(EvalDispatchSpec(
         "bun", str(bc), traj, args, cfg, "rid.0", 0, local_gate=gate, baseline=True
-    )
+    ))
     assert len([r for r in rows() if r.get("event") == "eval" and r.get("iter") == 0]) == 1

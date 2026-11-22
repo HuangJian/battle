@@ -4,7 +4,8 @@
 健康集群必须纯远端。这里钉住四个 in-loop 派发点（per-tick A-eval / it0 基线 /
 收官 drain / stream 旧路径）的接线，防止以后又退回「固定本机份额」：
 
-- 每次 `dispatch_eval_bg(...)` 都必须带 `local_fallback_only=True`；
+- 每次 `dispatch_eval_bg(EvalDispatchSpec(...))` 都必须带 `local_fallback_only=True`
+  （2026-11-21：11 参收成 `EvalDispatchSpec` ⇒ 守卫改为读 spec 构造器的关键字）；
 - 不得再传 `local_gate=self._eval_gate`（不得自建/复用份额门）；
 - 不得在 in-loop 文件里 import 或调用 `local_gate_release_plan` / `eval_local_early_epochs`。
 
@@ -35,6 +36,17 @@ def _tree(path: Path) -> ast.Module:
     return ast.parse(path.read_text(encoding="utf-8"))
 
 
+def _knob_call(call: ast.Call) -> ast.Call:
+    """`dispatch_eval_bg(spec)` 里真正的旋钮在 `EvalDispatchSpec(...)` 那个构造调用上。"""
+    for arg in call.args:
+        if isinstance(arg, ast.Call):
+            fn = arg.func
+            name = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", "")
+            if name == "EvalDispatchSpec":
+                return arg
+    return call
+
+
 def _dispatch_calls(tree: ast.Module) -> list[ast.Call]:
     calls: list[ast.Call] = []
     for node in ast.walk(tree):
@@ -55,7 +67,7 @@ def test_every_in_loop_dispatch_is_fallback_only() -> None:
         if not calls:
             problems.append(f"{path.name} 里应有 in-loop eval 派发点")
         for call in calls:
-            kw = {k.arg: k.value for k in call.keywords}
+            kw = {k.arg: k.value for k in _knob_call(call).keywords}
             has_fallback = "local_fallback_only" in kw
             if not has_fallback:
                 problems.append(f"{path.name} 的 dispatch_eval_bg 没传 fallback 模式")
@@ -74,7 +86,7 @@ def test_in_loop_dispatch_has_no_local_gate() -> None:
     problems: list[str] = []
     for path in IN_LOOP_FILES:
         for call in _dispatch_calls(_tree(path)):
-            kw = {k.arg: k.value for k in call.keywords}
+            kw = {k.arg: k.value for k in _knob_call(call).keywords}
             gate = kw.get("local_gate")
             if gate is not None and not (
                 isinstance(gate, ast.Constant) and gate.value is None

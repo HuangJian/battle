@@ -88,6 +88,23 @@ from worker.sibling_reuse import REUSE_NODE, reuse_eval_round
 EVAL_WEIGHTS_KIND = "eval"
 
 
+@dataclass(frozen=True)
+class EvalDispatchSpec:
+    """一轮评估的旋钮袋（P0-3：11 参 → 一个对象）。"""
+
+    bun: str
+    rl_path: str
+    traj_dir: Path
+    args: Any
+    cfg: dict
+    iter_id: str
+    it: int
+    rollout_winrate: float | None = None
+    local_gate: threading.Event | None = None
+    baseline: bool = False
+    local_fallback_only: bool = False
+
+
 class EvalDispatcher:
     """固定语料干净评估的单轮派发器（阻塞版，调用方放后台线程跑）。
 
@@ -107,20 +124,12 @@ class EvalDispatcher:
     所以两轮 eval 可以同时在这批节点上跑（`worker/eval_arbiter.py`）。
     """
 
-    def __init__(
-        self,
-        bun: str,
-        rl_path: str,
-        traj_dir: Path,
-        args,
-        cfg: dict,
-        iter_id: str,
-        it: int,
-        rollout_winrate: float | None = None,
-        local_gate: threading.Event | None = None,
-        baseline: bool = False,
-        local_fallback_only: bool = False,
-    ) -> None:
+    def __init__(self, spec: EvalDispatchSpec) -> None:
+        # 旧签名 11 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+        bun, rl_path, traj_dir = spec.bun, spec.rl_path, spec.traj_dir
+        args, cfg, iter_id, it = spec.args, spec.cfg, spec.iter_id, spec.it
+        rollout_winrate, local_gate = spec.rollout_winrate, spec.local_gate
+        baseline, local_fallback_only = spec.baseline, spec.local_fallback_only
         self.bun = bun
         self.rl_path = rl_path
         self.traj_dir = traj_dir
@@ -939,65 +948,26 @@ def _pools_alive(rnd: EvalRound, execs) -> bool:
     return bool(execs.live("local"))
 
 
-def dispatch_eval_round(
-    bun: str,
-    rl_path: str,
-    traj_dir: Path,
-    args,
-    cfg: dict,
-    iter_id: str,
-    it: int,
-    rollout_winrate: float | None = None,
-    local_gate: threading.Event | None = None,
-    baseline: bool = False,
-    local_fallback_only: bool = False,
-) -> bool:
+def dispatch_eval_round(spec: EvalDispatchSpec) -> bool:
     """固定语料干净评估（阻塞版，调用方放后台线程跑）。任何失败只记日志，绝不抛出。
 
     薄包装：OO 实现在 EvalDispatcher（trainer/eval_dispatch.py 同模块——本地直跑
     runner 的 monkeypatch 需落在本模块全局名上，见 e2e/test_run_rl.py）。
     返回值保留旧形状（恒 False：任务级仲裁下整轮不再被 rollout 插队收手）。
     """
-    return EvalDispatcher(
-        bun, rl_path, traj_dir, args, cfg, iter_id, it,
-        rollout_winrate, local_gate, baseline, local_fallback_only,
-    ).run()
+    return EvalDispatcher(spec).run()
 
 
-def dispatch_eval_bg(
-    bun: str,
-    rl_path: str,
-    traj_dir: Path,
-    args,
-    cfg: dict,
-    iter_id: str,
-    it: int,
-    rollout_winrate: float | None = None,
-    local_gate: threading.Event | None = None,
-    baseline: bool = False,
-    local_fallback_only: bool = False,
-) -> threading.Thread:
+def dispatch_eval_bg(spec: EvalDispatchSpec) -> threading.Thread:
     """后台派发一轮：线程**立即开跑**（轮间不再排队），rollout 只冻结它的新投递。
 
     返回的线程 join = 等到这一轮真正收工（`worker/eval_gate.py`）。
     """
     from worker.eval_gate import eval_gate
 
-    name = f"eval-it{it}" + ("-baseline" if baseline else "")
+    name = f"eval-it{spec.it}" + ("-baseline" if spec.baseline else "")
 
     def _job() -> None:
-        dispatch_eval_round(
-            bun,
-            rl_path,
-            traj_dir,
-            args,
-            cfg,
-            iter_id,
-            it,
-            rollout_winrate,
-            local_gate,
-            baseline,
-            local_fallback_only,
-        )
+        dispatch_eval_round(spec)
 
     return eval_gate().submit(_job, name=name)

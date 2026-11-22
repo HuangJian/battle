@@ -22,7 +22,7 @@ from typing import Any
 from common.log import log
 from trainer.collect_only import precollect_snapshot_wver, spawn_collect_next
 from trainer.dispatch_queue import RUN_ID, local_slots_max_of, run_rollout_queue
-from trainer.eval_dispatch import dispatch_eval_bg
+from trainer.eval_dispatch import EvalDispatchSpec, dispatch_eval_bg
 from trainer.eval_m1 import dispatch_eval_bg_m1
 from trainer.queue_local import run_rollout
 from trainer.stream import run_rollout_stream
@@ -330,7 +330,7 @@ def dispatch_rollout_phase(
                 if not eval_on_round:
                     return None
                 if args.mode == "per-tick":
-                    return dispatch_eval_bg(
+                    return dispatch_eval_bg(EvalDispatchSpec(
                         bun,
                         args.out,
                         traj_dir,
@@ -340,7 +340,7 @@ def dispatch_rollout_phase(
                         it,
                         local_gate=None,
                         local_fallback_only=True,
-                    )
+                    ))
                 # intent/goal：m1-eval 固定语料整批路线（trainer/eval_m1.py）。
                 return dispatch_eval_bg_m1(bun, args.out, args, it, jsonl_path, args.baseline)
 

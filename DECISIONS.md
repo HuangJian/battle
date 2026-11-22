@@ -8818,6 +8818,17 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-eval-dispatch-spec
+
+P0-3 第三十二刀（`trainer/eval_dispatch.py` 一整个族）：`EvalDispatcher.__init__`、
+`dispatch_eval_round`、`dispatch_eval_bg`（11 参 × 3）→ 同一个 frozen `EvalDispatchSpec`。
+三处共用一份旋钮表，`__init__`/`dispatch_eval_round` 各展开一次后函数体逐字不动。
+连带改：in-loop 四个派发点（`loop_eval` / `loop_baseline` / `rollout_phase`）、`eval_a_once`、
+`tools/eval_backfill`、`test_run_rl` 与五个测试文件的替身。
+源码守卫 `test_eval_local_fallback_guard` 的判据改成读 **spec 构造器**的关键字
+（`_knob_call`），否则「必须字面 `local_fallback_only=True`」会随参数搬家静默失明。
+宽签名 **67 → 64**，`eval_dispatch.py` 3 → **0**。
+
 ## §2026-11-21-offline-boot-specs
 
 P0-3 第三十一刀（`remote/offline_boot.py` 一整个族）：`build_run_argv`(12)、

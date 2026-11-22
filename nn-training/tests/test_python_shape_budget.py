@@ -97,7 +97,6 @@ WIDE_FUNCS_BASELINE = {
     "trainer/bc_loop.py": 1,
     "trainer/dispatch.py": 1,
     "trainer/dispatch_queue.py": 1,
-    "trainer/eval_dispatch.py": 3,
     "trainer/loop_serve.py": 1,
     "trainer/loop_transport.py": 1,
     # 2026-11-21：`reap_alloc_timeouts` 的 9 个关键字参数收成 `ReapSpec`

@@ -25,6 +25,16 @@
 
 ---
 
+## §285 P0-3 第三十二刀：eval 派发三签名收 `EvalDispatchSpec`（67 → 64）（2026-11-21）
+
+* `EvalDispatcher.__init__` / `dispatch_eval_round` / `dispatch_eval_bg` 共用一份 spec；
+  `trainer/eval_dispatch.py` 宽签名 3 → **0**。
+* 守卫测试同步：`test_eval_local_fallback_guard` 从「call 的关键字」改读 spec 构造器的
+  关键字（`_knob_call`）；`test_eval_a_once` 的持有者扫描从子串匹配改成「import 行里有
+  `dispatch_eval_bg`」（import 多了 spec 名字后子串不再命中）。
+* 回归：eval_a_once(11) / eval_dispatch_resilience / eval_local_fallback_guard /
+  baseline_eval / eval_seed_pool / eval_timing 共 149 绿；ruff/mypy 无错。
+
 ## §284 P0-3 第三十一刀：`offline_boot` 四个宽签名收 spec（71 → 67）（2026-11-21）
 
 * `build_run_argv`→`RunArgvSpec`、`run_one_course`→`CourseRunSpec`、`_run_batch`→`BatchRunSpec`、

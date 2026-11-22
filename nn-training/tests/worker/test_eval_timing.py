@@ -106,13 +106,13 @@ def test_dispatch_delayed_eval_wiring(tmp_path: Path, monkeypatch: pytest.Monkey
 
     calls: list[dict] = []
 
-    def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
+    def _fake_bg(spec):
         calls.append(
             {
-                "rl_path": rl_path,
-                "it": it,
-                "local_gate": k.get("local_gate"),
-                "local_fallback_only": k.get("local_fallback_only"),
+                "rl_path": spec.rl_path,
+                "it": spec.it,
+                "local_gate": spec.local_gate,
+                "local_fallback_only": spec.local_fallback_only,
             }
         )
         th = threading.Thread()
@@ -138,10 +138,10 @@ def test_dispatch_delayed_eval_skips(tmp_path: Path, monkeypatch: pytest.MonkeyP
     """非评估权重轮不派发；intent 模式不碰 m1 线；归档缺席回落活指针。"""
     import trainer.eval_dispatch as ed
 
-    calls: list[tuple] = []
+    calls: list = []
 
-    def _fake_bg(*a, **k):
-        calls.append(a)
+    def _fake_bg(spec):
+        calls.append(spec)
         return threading.Thread()
 
     monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
@@ -158,7 +158,7 @@ def test_dispatch_delayed_eval_skips(tmp_path: Path, monkeypatch: pytest.MonkeyP
     ts3 = _steps(tmp_path, _tag="l")  # 独立目录无归档 → 回落活指针
     Path(str(ts3.args.out)).write_text("{}", encoding="utf-8")
     ts3._dispatch_delayed_eval(6, {})
-    assert len(calls) == 1 and calls[0][1] == str(ts3.args.out) and calls[0][6] == 5
+    assert len(calls) == 1 and calls[0].rl_path == str(ts3.args.out) and calls[0].it == 5
 
 
 # ---- in-loop eval 墙钟（2026-09-17）：软等可配 + 本机份额提前放行 ----------------
@@ -242,8 +242,8 @@ def test_dispatch_delayed_eval_never_builds_a_local_gate(
 
     seen: list[dict] = []
 
-    def _fake_bg(*_a, **kw):
-        seen.append(kw)
+    def _fake_bg(spec):
+        seen.append({"local_gate": spec.local_gate, "local_fallback_only": spec.local_fallback_only})
         return threading.Thread()
 
     monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
@@ -429,8 +429,9 @@ def test_drain_pending_eval(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     calls: list[dict] = []
     joins: list = []
 
-    def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
-        calls.append({"rl_path": rl_path, "it": it})
+
+    def _fake_bg(spec):
+        calls.append({"rl_path": spec.rl_path, "it": spec.it})
         return _DummyThread(joins)
 
     monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
@@ -535,9 +536,10 @@ def test_dispatch_backfills_old_gaps_one_per_round(
 
     calls: list[tuple[int, str]] = []
 
-    def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
-        calls.append((it, rl_path))
-        _summary(Path(traj_dir).parent / "eval_log.jsonl", it, 0)  # 整轮完整收工
+
+    def _fake_bg(spec):
+        calls.append((spec.it, spec.rl_path))
+        _summary(Path(spec.traj_dir).parent / "eval_log.jsonl", spec.it, 0)  # 整轮完整收工
         return threading.Thread()
 
     monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
@@ -576,9 +578,10 @@ def test_backfill_skips_smoke_and_is_a_noop_without_gaps(
 
     calls: list[int] = []
 
-    def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
-        calls.append(it)
-        _summary(Path(traj_dir).parent / "eval_log.jsonl", it, 0)  # 整轮完整收工
+
+    def _fake_bg(spec):
+        calls.append(spec.it)
+        _summary(Path(spec.traj_dir).parent / "eval_log.jsonl", spec.it, 0)  # 整轮完整收工
         return threading.Thread()
 
     monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
@@ -612,8 +615,9 @@ def test_backfill_yields_when_arbiter_has_same_course_round(
 
     calls: list[int] = []
 
-    def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
-        calls.append(it)
+
+    def _fake_bg(spec):
+        calls.append(spec.it)
         return threading.Thread()
 
     monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
@@ -651,8 +655,9 @@ def test_dispatch_caps_open_rounds_and_keeps_latest_pending(
     calls: list[int] = []
     hold = threading.Event()
 
-    def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
-        calls.append(it)
+
+    def _fake_bg(spec):
+        calls.append(spec.it)
 
         def _job() -> None:
             hold.wait(30.0)
@@ -695,8 +700,9 @@ def test_dispatch_defers_when_same_course_round_is_registered(
 
     calls: list[int] = []
 
-    def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
-        calls.append(it)
+
+    def _fake_bg(spec):
+        calls.append(spec.it)
         return threading.Thread()
 
     monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
@@ -727,8 +733,9 @@ def test_stopped_course_dispatches_no_eval(tmp_path: Path, monkeypatch: pytest.M
 
     calls: list[int] = []
 
-    def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
-        calls.append(it)
+
+    def _fake_bg(spec):
+        calls.append(spec.it)
         return threading.Thread()
 
     monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
@@ -753,8 +760,9 @@ def test_stopped_course_skips_drain(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     calls: list[int] = []
 
-    def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
-        calls.append(it)
+
+    def _fake_bg(spec):
+        calls.append(spec.it)
         return _DummyThread([])
 
     monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
@@ -776,8 +784,9 @@ def test_drain_stops_between_rounds(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     calls: list[int] = []
 
-    def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
-        calls.append(it)
+
+    def _fake_bg(spec):
+        calls.append(spec.it)
         marker.unlink(missing_ok=True)  # 第一轮派出去之后用户点了停课
         return _DummyThread([])
 
@@ -799,8 +808,9 @@ def test_legacy_non_course_run_keeps_dispatching(
 
     calls: list[int] = []
 
-    def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
-        calls.append(it)
+
+    def _fake_bg(spec):
+        calls.append(spec.it)
         return threading.Thread()
 
     monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)

@@ -142,10 +142,10 @@ class TrainingBaseline:
                     f"[eval] it0 基线 summary 在但缺口 > {BASELINE_DROP_FRAC_MAX:.0%} "
                     f"（重派预算 {BASELINE_RETRY_MAX} 轮，计数按 wver 记在账本里）——重派补缺口"
                 )
-            from trainer.eval_dispatch import dispatch_eval_bg
+            from trainer.eval_dispatch import EvalDispatchSpec, dispatch_eval_bg
             from worker.eval_local import BASELINE_EVAL_ITER
 
-            self._baseline_eval_thread = dispatch_eval_bg(
+            self._baseline_eval_thread = dispatch_eval_bg(EvalDispatchSpec(
                 self.bun,
                 bc,
                 self._traj_dir,
@@ -156,7 +156,7 @@ class TrainingBaseline:
                 local_gate=None,
                 baseline=True,
                 local_fallback_only=True,
-            )
+            ))
             log(
                 f"[eval] it0 baseline dispatched（bc 权重：{bc}）——"
                 "落账前每轮重试，结果见后续 [eval] 行"
