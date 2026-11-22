@@ -201,15 +201,25 @@ def test_the_call_site_passes_exactly_the_core_interface() -> None:
         for n in ast.walk(job)
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == CORE_FN
     ]
+    # 局部名不再写死：本函数自己的形参自 2026-11-22（P0-3 第四十四刀）起是 `spec: RunJobSpec`，
+    # `TrainSpec` 的局部名随之改成 `train_spec`。判据从「名字等于 spec」换成
+    # 「调用点第 3 个实参就是构造 `TrainSpec` 的那个名字」—— 更稳，也不会因为改名假红。
     assigns = [
         n
         for n in ast.walk(job)
         if isinstance(n, ast.Assign)
-        and any(isinstance(t, ast.Name) and t.id == "spec" for t in n.targets)
+        and isinstance(n.value, ast.Call)
+        and isinstance(n.value.func, ast.Name)
+        and n.value.func.id == "TrainSpec"
     ]
     call = calls[0] if len(calls) == 1 else None
     spec_arg = call.args[2] if call is not None and len(call.args) == 3 else None
     spec_call = assigns[0].value if len(assigns) == 1 else None
+    spec_name = (
+        assigns[0].targets[0].id
+        if len(assigns) == 1 and isinstance(assigns[0].targets[0], ast.Name)
+        else None
+    )
     got = (
         sorted(k.arg for k in spec_call.keywords if k.arg is not None)
         if isinstance(spec_call, ast.Call)
@@ -223,7 +233,7 @@ def test_the_call_site_passes_exactly_the_core_interface() -> None:
         and call is not None
         and len(call.args) == 3
         and isinstance(spec_arg, ast.Name)
-        and spec_arg.id == "spec"
+        and spec_arg.id == spec_name
         and isinstance(spec_call, ast.Call)
         and isinstance(spec_call.func, ast.Name)
         and spec_call.func.id == "TrainSpec"

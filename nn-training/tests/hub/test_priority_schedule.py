@@ -61,6 +61,7 @@ from common.protocol import (
 from hub.server import _HubQueue, _JobStore, make_server
 from hub.store_leases import LeaseSpec
 from remote.job_lifecycle import AcquireSpec, ClaimSpec, PostResultSpec
+from remote.job_spec import RunJobSpec
 from remote.worker import WorkerLoopSpec
 from tests.helpers import hub_seams
 from tests.helpers.http_server import serve_fast
@@ -911,10 +912,10 @@ def test_backup_round_does_not_touch_computing_at(
     monkeypatch.setattr(JR, "job_started", lambda *a, **k: started.append(str(k)), raising=True)
     ready: list[str] = []
     monkeypatch.setattr(JR, "job_ready", lambda *a, **k: ready.append(str(k.get("worker_id"))), raising=True)
-    runs: list[dict] = []
+    runs: list[RunJobSpec] = []
 
-    def _run_job(*a, **kw):
-        runs.append(kw)
+    def _run_job(spec):
+        runs.append(spec)
         return {"job_id": JID, "weights_json": "", "opt_tar_b64": ""}
 
     monkeypatch.setattr(W, "run_job", _run_job, raising=True)
@@ -926,8 +927,8 @@ def test_backup_round_does_not_touch_computing_at(
             )
         )
     assert len(runs) >= 2, f"两轮都要真的跑到（backup / ok）：{len(runs)}"
-    assert runs[0]["on_ppo_start"] is None, "备份不打 computing_at（主人掉队时钟不许被重置）"
-    assert runs[1]["on_ppo_start"] is not None, "主副本照旧：PPO 真启动前一刻打点（R2-C1）"
+    assert runs[0].on_ppo_start is None, "备份不打 computing_at（主人掉队时钟不许被重置）"
+    assert runs[1].on_ppo_start is not None, "主副本照旧：PPO 真启动前一刻打点（R2-C1）"
     assert started == [], "一次也不许替主人打点"
     assert ready[0] == "", "备份不报身份（不写主人的 _last_heartbeat）"
     assert ready[1] != "", "主副本照旧报自己的名号"

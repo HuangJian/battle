@@ -27,6 +27,7 @@ import remote.worker_server as worker_server
 from common.logutil import course_tag, tagged
 from common.protocol import ROLE_ONLINE
 from remote import push_dispatch
+from remote.job_spec import RunJobSpec
 
 JID = "0123456789abcdef"
 COURSE = "g2-classic35"
@@ -77,8 +78,9 @@ def _pull_round(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, job: dict, msgs
     monkeypatch.setattr(job_round, "_wire_start", lambda *a, **k: None)
     monkeypatch.setattr(job_round, "_wire_flush", lambda *a, **k: None)
 
-    def _run_job(_base: str, _token: str, _job: dict, **kw: Any) -> dict:
-        kw["log"](f"job {JID}: PPO 训练中｜epochs=1/2")  # 训练核的原样行（下游）
+    def _run_job(spec: RunJobSpec) -> dict:
+        assert spec.log is not None
+        spec.log(f"job {JID}: PPO 训练中｜epochs=1/2")  # 训练核的原样行（下游）
         return {}
 
     job_round.run_one_round(

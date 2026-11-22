@@ -1677,12 +1677,14 @@ def test_run_job_result_cache_reuse(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(download_mod, "download_payload", _boom)
     monkeypatch.setattr(download_mod, "download_code", _boom)
     out = worker_mod.run_job(
-        "http://hub",
-        "t",
-        {"job_id": jid, "manifest": m},
-        work_dir=tmp_path,
-        echo=False,
-        log=lambda _m: None,
+        worker_mod.RunJobSpec(
+            base_url="http://hub",
+            token="t",
+            job={"job_id": jid, "manifest": m},
+            work_dir=tmp_path,
+            echo=False,
+            log=lambda _m: None,
+        )
     )
     assert out == cached
 

@@ -71,8 +71,8 @@ def _run_loop(
 ) -> float:
     """跑一遍 worker_loop；`records` 记 `(jid, 开算时刻)`，`fail_with` 里的 jid 抛给定异常。"""
 
-    def _run_job(base, tok, job, **k):
-        jid = job["job_id"]
+    def _run_job(spec):
+        jid = spec.job["job_id"]
         with lock:
             records.append((jid, time.time()))
         boom = fail_with.get(jid)
@@ -157,8 +157,8 @@ def test_repeated_stalls_keep_being_reclaimed(tmp_path: Path, monkeypatch: pytes
     records: list[tuple[str, float]] = []
     lock = threading.Lock()
 
-    def _run_job(base, tok, job, **k):
-        jid = job["job_id"]
+    def _run_job(spec):
+        jid = spec.job["job_id"]
         with lock:
             records.append((jid, time.time()))
             state["n"] += 1

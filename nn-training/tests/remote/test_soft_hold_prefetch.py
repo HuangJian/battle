@@ -559,9 +559,9 @@ def test_worker_loop_uses_prefetched_payload_without_downloading(tmp_path: Path,
         jid = j1 if calls["n"] == 1 else j2
         return {"job_id": jid, "manifest": manifests[jid], "status": "ok", "lease_token": ""}
 
-    def _run_job(base_url, token, job, **kw):
-        jid = job["job_id"]
-        pl = (kw.get("preloaded") or {}).get("payload_zip")
+    def _run_job(spec):
+        jid = spec.job["job_id"]
+        pl = (spec.preloaded or {}).get("payload_zip")
         if pl is not None:
             preloaded_seen.append(jid)
             assert pl == payloads[jid], "preloaded 不是这份 job 的 payload"
@@ -755,10 +755,10 @@ def test_prefetch_hit_is_visible_in_the_wire_line(tmp_path: Path, monkeypatch) -
         jid = j1 if calls["n"] == 1 else j2
         return {"job_id": jid, "manifest": manifests[jid], "status": "ok", "lease_token": ""}
 
-    def _run_job(base_url, token, job, **kw):
-        if job["job_id"] == j1:  # 第一个 job 跑的时候，第二个 job 已被预取进来
+    def _run_job(spec):
+        if spec.job["job_id"] == j1:  # 第一个 job 跑的时候，第二个 job 已被预取进来
             store.store(j2, payloads[j2], _summary(payloads[j2], j2))
-        return {"job_id": job["job_id"]}
+        return {"job_id": spec.job["job_id"]}
 
     monkeypatch.setattr(W, "acquire_job", _acquire)
     monkeypatch.setattr(W, "run_job", _run_job)
@@ -990,15 +990,15 @@ def test_worker_loop_hands_over_a_stage_and_cleans_it_at_job_end(
         jid = j1 if calls["n"] == 1 else j2
         return {"job_id": jid, "manifest": manifests[jid], "status": "ok", "lease_token": ""}
 
-    def _run_job(base_url, token, job, **kw):
-        if job["job_id"] == j2:
-            pl = dict(kw.get("preloaded") or {})
+    def _run_job(spec):
+        if spec.job["job_id"] == j2:
+            pl = dict(spec.preloaded or {})
             seen.append(pl)
             assert set(pl) == {"staged_dir", "payload_nbytes", "unpack_sec"}, f"形状不对：{pl}"
             assert Path(pl["staged_dir"]).is_dir(), f"交棒的暂存不在盘上：{pl}"
-        if job["job_id"] == j1:  # 第一个 job 跑的时候，把第二个 job 解包预取进来
+        if spec.job["job_id"] == j1:  # 第一个 job 跑的时候，把第二个 job 解包预取进来
             store.store(j2, packed, _summary(packed, j2), unpack=True)
-        return {"job_id": job["job_id"]}
+        return {"job_id": spec.job["job_id"]}
 
     monkeypatch.setattr(W, "acquire_job", _acquire)
     monkeypatch.setattr(W, "run_job", _run_job)
@@ -1059,11 +1059,13 @@ def test_a_handed_off_stage_never_eats_the_cached_result(
     monkeypatch.setattr(SHELL, "validate_result", lambda *_a, **_k: None)
     monkeypatch.setattr(DL, "download_payload", lambda *_a, **_k: pytest.fail("复用路径不该下载"))
     got = W.run_job(
-        "http://hub",
-        "tok",
-        {"job_id": JID, "manifest": _ppo_manifest()},
-        work_dir=tmp_path,
-        preloaded={"staged_dir": str(staged), "payload_nbytes": 123, "unpack_sec": 0.4},
+        W.RunJobSpec(
+            base_url="http://hub",
+            token="tok",
+            job={"job_id": JID, "manifest": _ppo_manifest()},
+            work_dir=tmp_path,
+            preloaded={"staged_dir": str(staged), "payload_nbytes": 123, "unpack_sec": 0.4},
+        )
     )
     assert got == cached
     assert (job_dir / "_result.json").exists(), "搬入把 `_result.json` 吃掉了（复用路径失效）"

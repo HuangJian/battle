@@ -25,6 +25,37 @@
 
 ---
 
+## §297 P0-3 第四十四刀：`run_job` 收 `RunJobSpec`（48 → 47）（2026-11-22）
+
+* `remote/worker.run_job` 原来 3 个身份位（`base_url` / `token` / `job`）+ 14 个按名旋钮，
+  现在只收一份 frozen + kw_only `RunJobSpec`（住新模块 `remote/job_spec.py`，99 行，拓扑秩 **L1**，
+  已登记 `tests/helpers/remote_dag.py`）。`remote/worker.py` 宽签名 1 → **0**，全仓 48 → **47**，
+  文件 40 → **39**。
+* **为什么 spec 不能就地住 `remote/worker.py`**：`remote/job_round.py` 是四条腿里最常调的那条，
+  它顶层零 torch，也**不许** import `remote.worker`（成环 + 把 torch 链拉进顶层）。它要构造请求
+  就得有个轻模块可依赖 —— 于是 17 个字段与它们的缺省住 `remote/job_spec.py`（依赖面 = stdlib +
+  `common.log_bundle`）。同一理由让 `run_loop._real_run_job` 只依赖那个轻模块。
+* **失效面**：这组关键字在「宿主 → 注入点」之间手抄两遍（`job_round` 的 `_execute` 与各地调用），
+  拼错不报错而是静默落缺省：`device` 落成 `cpu` = 云机白拿 GPU（慢 10×）、`epoch_mult` 落成 1.0
+  = 训练侧放大失效、`preloaded` 落丢 = 全离线节点回头向空 `base_url` 发 GET
+  （`unknown url type`）、`should_cancel` / `on_ppo_start` 落丢 = 取消帧与 `computing_at` 打点
+  双双静默（前者白烧卡，后者让掉队阈值永远不启动）。
+* **调用点 22 处**：生产 5（`job_round._execute` · `plan_run` 合成轮 · `worker_server._execute_job`
+  · `run_loop._real_run_job` · `worker_loop` 的注入值）+ 测试 17（含 6 个 `run_job` 替身：
+  `test_run_loop._FakeRunJob` / `test_bundle._FakeRunJob`+`_spy` / `test_soft_hold_prefetch` ×3 /
+  `test_async_result_upload` / `test_error_report`+`test_worker_reap_stall` / `test_round_forms` /
+  `e2e/test_autonomous_round_flow` / `e2e/test_worker_queue`）。
+* 类型面顺带收窄：`prep: Any` → `LogBundle | None`、`should_cancel` / `on_ppo_start` →
+  `Callable[[], bool] | None` / `Callable[[], None] | None` ⇒ `Any` 基线 `remote/worker.py` 4 → **1**、
+  `remote/run_loop.py` 2 → **0**（条目删除）。
+* 缺省日志出口保持**延迟解析**：`spec.log is None ⇒ 宿主模块的 _log`（不写成 spec 缺省值，
+  否则「patch 打在哪家」的读法会变）。
+* 连带改的守卫：`test_job_round_split.RUNNER_IMPORTS` 加 `remote.job_spec`（顶层依赖闭集）；
+  `test_train_core_split` 的「调用点双向一致」判据从「局部名必须叫 `spec`」改成
+  「第 3 个实参 = 构造 `TrainSpec` 的那个名字」（本刀把形参叫了 `spec`，局部随之改名 `train_spec`）。
+* 新守卫 `tests/remote/test_run_job_spec.py`（5 条：frozen + 全字段 kw_only / 17 字段与缺省逐项表 /
+  缺省旧语义 / `run_job` 只剩 `spec` / 未知关键字 `TypeError`）。
+
 ## §296 P0-3 第四十三刀：B 层派发两入口共收 `RunnerSpec`（50 → 48）（2026-11-22）
 
 * `trainer/batch_runner.py`：`BatchEvalRunner.__init__`（16 参）与 `dispatch_batch_bg`

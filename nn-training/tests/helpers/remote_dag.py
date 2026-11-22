@@ -129,6 +129,11 @@ LAYERS: dict[str, int] = {
     # `OfflineDeliverer` 的构造旋钮与缺省（2026-11-22，同一个 LOC 预算）：依赖面 = stdlib +
     # `common.logutil`（缺省 logger）⇒ **L1**；`offline_deliver`(L2) 站在它上面，秩不变。
     "remote.deliver_spec": 1,
+    # `run_job` 的 17 个入参（2026-11-22，P0-3 第四十四刀）：`job_round` 顶层零 torch 且不许
+    # import `remote.worker`（成环）—— 它要构造请求就只能依赖这个轻模块。依赖面 = stdlib +
+    # `common.log_bundle` ⇒ **L1**；`worker`(L5) / `job_round` / `plan_run` / `run_loop` /
+    # `worker_server` 都站在它上面，各自秩不变。
+    "remote.job_spec": 1,
     # 补传**档位机**（2026-10-23，`plan/offline-deliver-full-and-gaps` §3.0）：三档判定 /
     # `need_bps` / `eta` 三块纯函数。依赖面 = stdlib + `collections.abc`
     # ⇒ **L0**；读者只有 `offline_deliver`(L2)，秩不变。

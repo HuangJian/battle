@@ -30,7 +30,6 @@ import sys
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
 
 import remote.delta_files as delta_files
 from common.cli import house_parser, run_main
@@ -40,6 +39,7 @@ from common.text import exc_tail
 from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
 from remote.cloud_pool import CLOUD_EVAL_POOL, CLOUD_ROLLOUT_POOL
 from remote.error_report import report_error
+from remote.job_spec import RunJobSpec
 from remote.plan_handoff import ROTATION_POLICIES as ROTATION_POLICIES
 from remote.plan_handoff import RunSetup
 from remote.plan_run import (
@@ -94,11 +94,15 @@ from remote.plan_run import (
 from worker.plan import validate_plan
 
 
-def _real_run_job(*args: Any, **kw: Any) -> dict:
-    """延迟导入 `worker.run_job`（worker 依赖 torch 链，本模块顶层保持轻）。"""
+def _real_run_job(spec: RunJobSpec) -> dict:
+    """延迟导入 `worker.run_job`（worker 依赖 torch 链，本模块顶层保持轻）。
+
+    端口收**一份** `RunJobSpec`（`remote/job_spec.py`，L1）——本模块只需那个轻模块，
+    不必为了拼参数把 torch 链拉进顶层。
+    """
     from remote.worker import run_job
 
-    return run_job(*args, **kw)
+    return run_job(spec)
 
 
 def load_planned_manifest(path: str | Path) -> tuple[dict, dict]:

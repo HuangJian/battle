@@ -111,6 +111,9 @@ ALLOWED_PROJECT_IMPORTS = {
     "remote.error_report",
     "remote.job_fs",
     "remote.job_lifecycle",
+    # `run_job_fn` 的入参对象（2026-11-22，P0-3 第四十四刀）：本模块不许 import `remote.worker`
+    # （成环 + 顶层拉 torch），所以请求对象必须住一个轻模块 —— L1，stdlib + `common.log_bundle`。
+    "remote.job_spec",
     # 下行腿的**进程模式**代理（2026-10-20，plan/ppo-worker-transfer-isolation 的下行半场）：
     # 本轮只拿它做 isinstance 分派与 `take`/`start_fill`/`stop_fill` 三处调用 —— 预取的
     # 「在哪跑」是宿主级的决定（`worker_loop` 造 `PayloadProcess` 或 `PrefetchStore`），

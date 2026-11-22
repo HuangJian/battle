@@ -175,7 +175,14 @@ def test_worker_refuses_a_run_kind_job_before_any_download(
 
     monkeypatch.setattr(W, "download_payload", _spy)
     with pytest.raises(ProtocolError) as ei:
-        W.run_job("http://hub", "tok", _worker_job("run"), work_dir=tmp_path)
+        W.run_job(
+            W.RunJobSpec(
+                base_url="http://hub",
+                token="tok",
+                job=_worker_job("run"),
+                work_dir=tmp_path,
+            )
+        )
     assert download_calls == []
     assert "battle.offline.ipynb" in str(ei.value), str(ei.value)
 

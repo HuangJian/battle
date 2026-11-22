@@ -77,6 +77,7 @@ from remote.job_lifecycle import (
     report_prefetch,
     start_cancel_watcher,
 )
+from remote.job_spec import RunJobSpec
 
 # 下行腿的**进程模式**代理（2026-10-20）：本模块只拿它做 isinstance 分派（「填充在子进程
 # 里？」）与三处调用（`take` / `start_fill` / `stop_fill`）；暂存账、填充循环都在对方那边
@@ -405,7 +406,7 @@ class JobRoundSpec:
     restart_argv: list[str] | None
     prefetch_depth: int
     uploader: UploaderLike
-    run_job_fn: Callable[..., dict]
+    run_job_fn: Callable[[RunJobSpec], dict]
     log: Callable[[str], None]
     #: R0（M0）身份映射的根（= `--cache-dir` 或 work_dir，与 `blob_root.parent` 同源）。
     #: None ⇒ 不确认/不作废（只跑测试/旧调用方的形状），逐字节旧行为。
@@ -512,7 +513,7 @@ class _Round:
     prefetch_depth: int
     prefetch_unpack: int
     uploader: UploaderLike
-    run_job_fn: Callable[..., dict]
+    run_job_fn: Callable[[RunJobSpec], dict]
     log: Callable[[str], None]
     #: 预取腿的日志出口（**不带**本 job 的课程前缀：它下的是下一份活，可能属于另一门课）。
     pf_log: Callable[[str], None]
@@ -664,26 +665,28 @@ class _Round:
     def _execute(self) -> None:
         """跑活 → 就绪 → 交回传（成功路径；失败由 `run` 的四档处置接管）。"""
         self.result = self.run_job_fn(
-            self.base_url,
-            self.token,
-            self.job,
-            work_dir=self.part_dir,
-            device=self.device,
-            torch_threads=self.torch_threads,
-            epoch_mult=self.epoch_mult,
-            backend=self.backend,
-            echo=self.echo,
-            code_cache_dir=self.code_cache_dir,
-            lease_token=self.lease_token,
-            preloaded=self.preloaded,  # P2 命中面：有它则 payload 段零网络
-            log=self.log,
-            should_cancel=self.cancel.is_set,
-            # ★ 备份副本（`mode=backup`，无租约）**不打** computing_at：那份「PPO 真启动」的
-            # 时基是**主副本**的（掉队阈值认它），备份打一下就把主人的掉队时钟重置成自己的
-            # 开算时刻（`/start` 会覆写 `_computing` 与 `_claimed` 的 worker）——那正是
-            # 2026-10-06 要逃的那种「掉队救援被自己人压住」的形状。旧行为（有租约）逐字不变。
-            # W2：通道改成线程（`_beacon.start`），落地在下面的 `job_ready()` 之前。
-            on_ppo_start=None if self.beacon is None else self.beacon.start,
+            RunJobSpec(
+                base_url=self.base_url,
+                token=self.token,
+                job=self.job,
+                work_dir=self.part_dir,
+                device=self.device,
+                torch_threads=self.torch_threads,
+                epoch_mult=self.epoch_mult,
+                backend=self.backend,
+                echo=self.echo,
+                code_cache_dir=self.code_cache_dir,
+                lease_token=self.lease_token,
+                preloaded=self.preloaded,  # P2 命中面：有它则 payload 段零网络
+                log=self.log,
+                should_cancel=self.cancel.is_set,
+                # ★ 备份副本（`mode=backup`，无租约）**不打** computing_at：那份「PPO 真启动」的
+                # 时基是**主副本**的（掉队阈值认它），备份打一下就把主人的掉队时钟重置成自己的
+                # 开算时刻（`/start` 会覆写 `_computing` 与 `_claimed` 的 worker）——那正是
+                # 2026-10-06 要逃的那种「掉队救援被自己人压住」的形状。旧行为（有租约）逐字不变。
+                # W2：通道改成线程（`_beacon.start`），落地在下面的 `job_ready()` 之前。
+                on_ppo_start=None if self.beacon is None else self.beacon.start,
+            )
         )
         # 算完待回传（P0 小包）：只降别人的优先级（低档备份保险），**永不**触发取消。
         # 备份副本不报身份：`set_ready` 会顺手写这份 job 的 `_last_heartbeat`，而那个字段是

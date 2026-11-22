@@ -489,8 +489,8 @@ def test_worker_loop_fills_through_the_child_not_a_local_thread(
             return None
         return {"job_id": jid, "manifest": {"job_id": jid}, "status": "ok", "lease_token": ""}
 
-    def _run_job(_base, _token, job, **_kw):
-        return {"job_id": job["job_id"]}
+    def _run_job(spec):
+        return {"job_id": spec.job["job_id"]}
 
     local_fills: list[str] = []
 

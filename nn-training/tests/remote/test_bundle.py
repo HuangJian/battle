@@ -42,6 +42,7 @@ from remote.bundle import (
     read_bundle_index,
 )
 from remote.download import BlobAsk
+from remote.job_spec import RunJobSpec
 from remote.plan_handoff import RunSetup
 from remote.run_loop import run_standalone
 from worker.plan import build_plan, dump_plan, planned_iters
@@ -319,13 +320,13 @@ class _FakeRunJob:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    def __call__(self, base_url: str, token: str, job: dict, **kw: object) -> dict:
-        m = normalize_manifest(job["manifest"])
-        pl = kw["preloaded"]
+    def __call__(self, spec: RunJobSpec) -> dict:
+        m = normalize_manifest(spec.job["manifest"])
+        pl = spec.preloaded
         assert isinstance(pl, dict)
         assert pl.get("code_zip"), "全离线必须随 payload 带 code.zip 字节（节点没仓库）"
         assert pl.get("ts_code_zip"), "全离线必须随 payload 带 ts_code.zip 字节（节点没仓库）"
-        assert base_url == "" and token == "", "全离线不许有网络依赖"
+        assert spec.base_url == "" and spec.token == "", "全离线不许有网络依赖"
         self.calls.append({"it": int(m["it"]), "init_fp": m["init_weights_fp"]})
         weights = json.dumps({"it": m["it"], "n": len(self.calls)}).encode()
         return {
@@ -410,8 +411,8 @@ def test_payload_of_offline_round_carries_init_weights(tmp_path: Path) -> None:
 
     seen: list[bytes] = []
 
-    def _spy(base_url: str, token: str, job: dict, **kw: object) -> dict:
-        pl = kw["preloaded"]
+    def _spy(spec: RunJobSpec) -> dict:
+        pl = spec.preloaded
         assert isinstance(pl, dict)
         z = tmp_path / "payload.tar.xz"
         z.write_bytes(pl["payload_zip"])
@@ -419,7 +420,7 @@ def test_payload_of_offline_round_carries_init_weights(tmp_path: Path) -> None:
         out.mkdir(parents=True, exist_ok=True)
         unpack_payload(z, out)
         seen.append((out / "init_weights.json").read_bytes())
-        return _FakeRunJob()(base_url, token, job, **kw)
+        return _FakeRunJob()(spec)
 
     run_standalone(
         RunSetup(

@@ -251,8 +251,8 @@ def test_worker_loop_starts_the_next_job_before_the_upload_ends(
             _stamp(f"up_end:{jid}")
             return 200
 
-        def _run_job(base, token, job, **k):
-            jid = job["job_id"]
+        def _run_job(spec):
+            jid = spec.job["job_id"]
             if jid == JID2:
                 _stamp("run2")
                 second_started.set()
@@ -325,7 +325,9 @@ def test_worker_loop_marks_out_as_overlapped_in_the_phases_line(
         return 200
 
     monkeypatch.setattr(W, "post_result", _upload, raising=True)
-    monkeypatch.setattr(W, "run_job", lambda b, t, job, **k: {"job_id": job["job_id"]}, raising=True)
+    monkeypatch.setattr(
+        W, "run_job", lambda spec: {"job_id": spec.job["job_id"]}, raising=True
+    )
     _patch_hub(monkeypatch, [_job(JID1)])
 
     W._WIRE.clear()
@@ -360,7 +362,9 @@ def test_once_waits_for_the_result_and_nonzero_exit_on_failure(
     async 下「成败」在提交那一刻还不知道 —— 必须先 drain 再判，否则失败会被
     静默当成成功（退出码 0），而 smoke 只判 returncode。
     """
-    monkeypatch.setattr(W, "run_job", lambda b, t, job, **k: {"job_id": job["job_id"]}, raising=True)
+    monkeypatch.setattr(
+        W, "run_job", lambda spec: {"job_id": spec.job["job_id"]}, raising=True
+    )
 
     posted: list[str] = []
 

@@ -47,6 +47,7 @@ from common.protocol import (
 )
 from remote import plan_run as plan_run_mod
 from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
+from remote.job_spec import RunJobSpec
 from remote.plan_handoff import RunSetup
 from remote.run_loop import (
     _combined,
@@ -179,9 +180,9 @@ class _FakeRunJob:
         self.fail_at = fail_at
         self.calls: list[dict] = []
 
-    def __call__(self, base_url: str, token: str, job: dict, **kw: object) -> dict:
-        m = normalize_manifest(job["manifest"])
-        payload = kw["preloaded"]
+    def __call__(self, spec: RunJobSpec) -> dict:
+        m = normalize_manifest(spec.job["manifest"])
+        payload = spec.preloaded
         assert isinstance(payload, dict)
         raw = payload["payload_zip"]
         assert isinstance(raw, bytes)

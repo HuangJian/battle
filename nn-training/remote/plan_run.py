@@ -73,11 +73,12 @@ from remote.artifacts import (
     sha256_file,
 )
 from remote.cloud_pool import CLOUD_EVAL_POOL, CLOUD_ROLLOUT_POOL
-from remote.offline_deliver import DRAIN_FLUSH_SEC
 
 # ---- 计划交接面（校验 / 取包播种 / 上下文 / 评估装配）已下沉 `remote/plan_handoff.py`（S5 第十三刀，2026-09-27）-----
 # 实现搬家、名字留门面：`run_loop` 的 13 个 import 块与全仓调用点一行不改（「名字是契约，位置不是」）。
 # 交接面读的模块全局解析在 `remote.plan_handoff.*`——要 patch 请去新家（patch 门面不会生效）。
+from remote.job_spec import RunJobSpec
+from remote.offline_deliver import DRAIN_FLUSH_SEC
 from remote.plan_handoff import (
     EVAL_ALTERNATE_WAIT_SEC as EVAL_ALTERNATE_WAIT_SEC,
 )
@@ -567,7 +568,7 @@ def _run_iteration(
     payload_init.write_bytes(weights.read_bytes())
     m["payload_sha256"] = pack_payload([], m, zip_path, extra_files=[payload_init])
     m = normalize_manifest(m)
-    run_job = ctx.run_job_fn
+    run_job = ctx.run_job_fn  # 端口：收一份 `RunJobSpec`
     if run_job is None:  # 引擎不替调用方决定用谁跑一轮（原先这里兜底 worker.run_job）
         raise RuntimeError(
             "run_job_fn 未注入：半离线引擎必须由调用方给出 job 执行器"
@@ -595,21 +596,23 @@ def _run_iteration(
     if ctx.ts_code_zip_bytes:
         preloaded["ts_code_zip"] = ctx.ts_code_zip_bytes
     result = run_job(
-        "",
-        "",
-        {"job_id": m["job_id"], "manifest": m},
-        work_dir=ctx.work_dir,
-        device=ctx.device,
-        torch_threads=ctx.torch_threads,
-        preloaded=preloaded,
-        code_cache_dir=ctx.code_cache_dir,
-        ts_code_cache_dir=ctx.ts_code_cache_dir,
-        prep=prep_b,
-        # ★ 2026-10-29（用户口径「eval 藏进 PPO 墙钟」）：PPO **开跑那一刻**是提交上一轮评估的
-        #   唯一好时机——rollout 已经收工（不与它抢 94 个 CPU 槽），PPO 在 TPU 上跑 26s，
-        #   评估（~2.5s）整个藏在里面。`on_ppo_start` 由 `train_core` 在 PPO 之前一刻回调。
-        on_ppo_start=on_ppo_start,
-        log=ctx.log,
+        RunJobSpec(
+            base_url="",
+            token="",
+            job={"job_id": m["job_id"], "manifest": m},
+            work_dir=ctx.work_dir,
+            device=ctx.device,
+            torch_threads=ctx.torch_threads,
+            preloaded=preloaded,
+            code_cache_dir=ctx.code_cache_dir,
+            ts_code_cache_dir=ctx.ts_code_cache_dir,
+            prep=prep_b,
+            # ★ 2026-10-29（用户口径「eval 藏进 PPO 墙钟」）：PPO **开跑那一刻**是提交上一轮评估的
+            #   唯一好时机——rollout 已经收工（不与它抢 94 个 CPU 槽），PPO 在 TPU 上跑 26s，
+            #   评估（~2.5s）整个藏在里面。`on_ppo_start` 由 `train_core` 在 PPO 之前一刻回调。
+            on_ppo_start=on_ppo_start,
+            log=ctx.log,
+        )
     )
     validate_result(result, m, commit_echo_must_match=False)
     if profile is not None:

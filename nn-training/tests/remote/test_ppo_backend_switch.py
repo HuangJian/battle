@@ -175,28 +175,60 @@ def test_paddle_backend_rejects_iter_before_any_download(
 ) -> None:
     """节点侧 rollout 仍是 torch/bun 语义 ⇒ 在 Paddle 后端上**零字节**拒收。"""
     with pytest.raises(ProtocolError, match="只跑 kind=ppo/bc"):
-        worker.run_job("http://hub", "tok", _job("iter"), work_dir=tmp_path, backend="paddle")
+        worker.run_job(
+            worker.RunJobSpec(
+                base_url="http://hub",
+                token="tok",
+                job=_job("iter"),
+                work_dir=tmp_path,
+                backend="paddle",
+            )
+        )
     assert downloads == []
 
 
 def test_paddle_backend_lets_bc_through(tmp_path: Path, downloads: list[str]) -> None:
     """BC #10：Paddle 后端不再拒收 BC（真正跑到取 payload 那一步）。"""
     with pytest.raises(_DownloadedError):
-        worker.run_job("http://hub", "tok", _job("bc"), work_dir=tmp_path, backend="paddle")
+        worker.run_job(
+            worker.RunJobSpec(
+                base_url="http://hub",
+                token="tok",
+                job=_job("bc"),
+                work_dir=tmp_path,
+                backend="paddle",
+            )
+        )
     assert downloads == [JID]
 
 
 def test_paddle_backend_lets_ppo_through(tmp_path: Path, downloads: list[str]) -> None:
     """正向对照：kind=ppo 照常走下载（拒收的是 kind，不是 paddle 本身）。"""
     with pytest.raises(_DownloadedError):
-        worker.run_job("http://hub", "tok", _job("ppo"), work_dir=tmp_path, backend="paddle")
+        worker.run_job(
+            worker.RunJobSpec(
+                base_url="http://hub",
+                token="tok",
+                job=_job("ppo"),
+                work_dir=tmp_path,
+                backend="paddle",
+            )
+        )
     assert downloads == [JID]
 
 
 def test_torch_backend_keeps_bc(tmp_path: Path, downloads: list[str]) -> None:
     """torch 后端不受影响：bc 照旧往下走（行为零变化）。"""
     with pytest.raises(_DownloadedError):
-        worker.run_job("http://hub", "tok", _job("bc"), work_dir=tmp_path, backend="torch")
+        worker.run_job(
+            worker.RunJobSpec(
+                base_url="http://hub",
+                token="tok",
+                job=_job("bc"),
+                work_dir=tmp_path,
+                backend="torch",
+            )
+        )
     assert downloads == [JID]
 
 
@@ -204,7 +236,13 @@ def test_unknown_backend_is_rejected(tmp_path: Path, downloads: list[str]) -> No
     """取值域外的 `--backend` 响亮拒收，且**任何下载之前**（与 `resolve_ppo_backend` 同判据）。"""
     with pytest.raises(ProtocolError, match="未知 PPO backend"):
         worker.run_job(
-            "http://hub", "tok", _job("ppo"), work_dir=tmp_path, backend="tensorflow"
+            worker.RunJobSpec(
+                base_url="http://hub",
+                token="tok",
+                job=_job("ppo"),
+                work_dir=tmp_path,
+                backend="tensorflow",
+            )
         )
     assert downloads == []
 
@@ -261,7 +299,14 @@ def _drive_ppo_to_core(
 
     monkeypatch.setattr(worker, "run_training_core", _core)
     worker.run_job(
-        "http://hub", "tok", _job("ppo"), work_dir=tmp_path, device=device, backend="paddle"
+        worker.RunJobSpec(
+            base_url="http://hub",
+            token="tok",
+            job=_job("ppo"),
+            work_dir=tmp_path,
+            device=device,
+            backend="paddle",
+        )
     )
     return seen
 
@@ -308,7 +353,14 @@ def test_backend_env_has_no_effect(
     """
     monkeypatch.setenv("NN_PPO_BACKEND", "paddle")
     with pytest.raises(_DownloadedError):
-        worker.run_job("http://hub", "tok", _job("bc"), work_dir=tmp_path)
+        worker.run_job(
+            worker.RunJobSpec(
+                base_url="http://hub",
+                token="tok",
+                job=_job("bc"),
+                work_dir=tmp_path,
+            )
+        )
     assert downloads == [JID]
 
 

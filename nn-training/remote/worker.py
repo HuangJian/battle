@@ -313,6 +313,7 @@ from remote.job_shell import (
     resolve_job_weights,
     run_iter_phase,
 )
+from remote.job_spec import RunJobSpec
 from remote.lifecycle import Lifecycle
 from remote.offline_greedy import collect_round
 from remote.payload_proc import PayloadProcess, make_prefetcher
@@ -511,46 +512,11 @@ def _guard_code_and_device(st: JobState) -> None:
         )
 
 
-def run_job(
-    base_url: str,
-    token: str,
-    job: dict,
-    *,
-    work_dir: Path,
-    device: str = "cpu",
-    torch_threads: int = 0,
-    #: ★ 2026-10-27（评审）：本节点用哪个框架跑 PPO（`""`/`auto` = 看本机，torch 优先）。
-    #: **显式参数**，与 `--device`/`--epoch-mult` 同路（`--backend` → `worker_loop` →
-    #: `run_one_round` → 这里）；不放 env —— 「没人传也生效」的隐形开关正是 2026-09-21
-    #: 事故的形状（`tests/worker/test_single_ppo_path.py` 的守卫）。
-    backend: str = "",
-    #: ★ 2026-10-26（用户口径）：训练侧放大 —— PPO 每轮更新遍数 × N（缺省 1.0 = manifest
-    #: 原样）。与离线盘的 `CFG.epoch_mult` 同义：只改更新遍数，不改 rollout 采样/评估语料，
-    #: 也不改 manifest 身份（hub 对账仍按发布时那份）。
-    epoch_mult: float = 1.0,
-    echo: bool = False,
-    preloaded: dict | None = None,
-    code_cache_dir: Path | None = None,
-    ts_code_cache_dir: Path | None = None,
-    lease_token: str = "",
-    # 日志节食（2026-09-24）：本 job 的「入口 + 启动 + 装载」读数攒进这个 bundle。
-    # 调用方（`trainer/` 的常驻轮 loop）先往里放它自己那几行（`it<N>: N 局 wver=…`），本函数
-    # 再把入口/设备读数放进去，训练核把装载读数补上，装载完成时打**一行**
-    # （`nn-training/common/log_bundle.py`）；不传就自建（只在行数上有差别，信息量不变）。
-    prep: Any = None,
-    # 注：半离线（kind=run）那条腿的 `artifacts_dir` / `run_max_iters` / `run_budget_sec`
-    # 三个入参随 2026-09-25 的退休一起没了（`plan/online-offline-role-routing.plan.md` §7）。
-    # ---- 调度面（2026-09-22，plan/transfer-scheduling R2-5）----
-    # `should_cancel()`：每 **epoch 边界** 问一次「结果是不是已经 landed」——是则抛
-    # `JobCancelledError`（停算丢弃，零回传/零 fail）。不在 chunk 内层加回调（用户拍板：
-    # 不值得为 15s→1s 去动 `ppo_update` 内层结构）。
-    # `on_ppo_start()`：PPO 真正启动前一刻打点（hub 把它记成 `computing_at` = 掉队阈值
-    # 的**唯一**时基；下载/解包/权重装载都已完成的那个瞬间）。
-    should_cancel: Any = None,
-    on_ppo_start: Any = None,
-    log=_log,
-) -> dict:
+def run_job(spec: RunJobSpec) -> dict:
     """执行单个 job：下载 → 校验 → PPO → 产出 weights_json + opt tar → POST。
+
+    参数全在 `RunJobSpec`（`remote/job_spec.py`）：17 个入参按名传，拼错就是 `TypeError`
+    （旧形状下 `device` / `epoch_mult` / `preloaded` / `should_cancel` 落缺省都是**静默**的）。
 
     preloaded（push 模式，2026-09-05）：{"payload_zip": bytes, "code_zip"?: bytes,
     "ts_code_zip"?: bytes}——HUB 把 payload/code 随 POST /job 直接上传（worker_server），
@@ -569,6 +535,16 @@ def run_job(
     本函数只保留**顺序编排** + 热替换护栏（`_CODE` 是 worker 的进程级单例）
     + 训练核调用（`remote.train_core` 是 L4，搬进 job_shell 会把它顶到 L5）。
     """
+    base_url, token, job = spec.base_url, spec.token, spec.job
+    work_dir = spec.work_dir
+    device, torch_threads, backend = spec.device, spec.torch_threads, spec.backend
+    epoch_mult, echo, preloaded = spec.epoch_mult, spec.echo, spec.preloaded
+    code_cache_dir, ts_code_cache_dir = spec.code_cache_dir, spec.ts_code_cache_dir
+    lease_token, prep = spec.lease_token, spec.prep
+    should_cancel, on_ppo_start = spec.should_cancel, spec.on_ppo_start
+    # 缺省日志出口**延迟解析**（不是 `spec.log = _log` 的字面绑定）：`_log` 留在宿主模块，
+    # 既有「patch 打在哪家」的读法不变。
+    log = spec.log if spec.log is not None else _log
     t_prep = time.time()
     st = JobState(
         base_url=base_url,
@@ -605,7 +581,7 @@ def run_job(
     # 本模块只剩「作业壳」：网络 / 校验 / 分叉 / 上报。核不认识 hub 的作业面，也不 import
     # 本模块（守卫钉住）；它读的模块全局都是**它自己命名空间**的（seam-free，见那边头部）。
     try:
-        spec = TrainSpec(
+        train_spec = TrainSpec(
             jid=st.jid,
             job_dir=st.job_dir,
             work_dir=work_dir,
@@ -636,7 +612,7 @@ def run_job(
             on_ppo_start=on_ppo_start,
             log=log,
         )
-        result, course = run_training_core(base_url, token, spec)
+        result, course = run_training_core(base_url, token, train_spec)
     finally:
         # ★ 2026-10-11（§3.5）：产出不搬回 ⇒ 本地盘回收从「每批 finally」移到**全 job 收尾、PPO 之后**
         #（PPO 读的就是这份产出）。清本轮 scratch 目录（ts 家不在里面、永不清）；失败也尽力清、

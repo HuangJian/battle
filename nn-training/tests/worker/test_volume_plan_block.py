@@ -431,8 +431,8 @@ def test_iteration_manifest_carries_per_stage_quota(tmp_path: Path) -> None:
             "wire": {"rollout_sec": 1.0, "rollout_bytes": 0},
         }
 
-    def _fake_run_job(base_url: str, token: str, job: dict, **kw: object) -> dict:
-        m = normalize_manifest(job["manifest"])
+    def _fake_run_job(spec) -> dict:
+        m = normalize_manifest(spec.job["manifest"])
         calls.append(m)
         n = len(calls)
         weights = json.dumps({"it": m["it"], "w": n}).encode("utf-8")

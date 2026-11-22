@@ -9801,3 +9801,25 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   `dataclasses`，`test_batch_eval_facade` 的 `RUNNER_EXPORTS` 加 `RunnerSpec`（门面自别名规矩）。
 - **验证**：batch 族 + 门面 72 例绿；`bun run pygate` 绿（6749 passed / 3 skipped）。
   全文 → `docs/nn/engineering.md` §296。
+
+## §2026-11-22-run-job-spec（`run_job` 的 17 个参数收成 `RunJobSpec`）
+
+- **背景**：`remote/worker.run_job` 是 worker 的作业执行入口（3 个身份位 + 14 个按名旋钮），
+  被四条腿调用。`remote/job_round` 只见注入点 `run_job_fn`（它不能 import `remote.worker`：
+  成环 + 顶层拉 torch），于是同一组 13 个关键字实参在「宿主 → 注入点」之间手抄两遍。拼错不报错、
+  只静默落缺省：`device` 落成 `cpu`（云机白拿 GPU）、`epoch_mult` 落成 1.0（训练侧放大失效）、
+  `preloaded` 落丢（全离线节点回头向空 `base_url` 发 GET）、`should_cancel` / `on_ppo_start`
+  落丢（取消帧与 `computing_at` 打点双双静默）。
+- **决定**：新模块 `remote/job_spec.py`（依赖面 = stdlib + `common.log_bundle`，拓扑秩 L1）住
+  frozen + kw_only `RunJobSpec`（17 字段，缺省与旧签名逐字一致）；`run_job(spec)` 展开成同名局部量
+  后函数体不动；`job_round._execute` / `plan_run` 合成轮 / `worker_server._execute_job` 改为构造
+  spec，`run_loop._real_run_job` 签名改 `(spec)`，`run_job_fn` 端口类型收窄成
+  `Callable[[RunJobSpec], dict]`。22 处调用点（生产 5 + 测试 17，含 6 个替身）全改。守
+  `tests/remote/test_run_job_spec.py`（5 条）。
+- **被否决**：① spec 就地住 `remote/worker.py`（`job_round` 一 import 就成环）；② `run_job_fn`
+  继续 `*args, **kw`（那就是本刀要杀的那种「拼错就落缺省、替身签名漂移也没人发现」）；
+  ③ 把 `log` 缺省写成 spec 字段的 `_log`（会把「patch 打在哪家」的读法从宿主搬进 spec）。
+- **读数**：宽签名 48 → **47**、40 → **39** 文件（`WIDE_FUNCS_BASELINE` 删 `remote/worker.py`）；
+  `Any` 基线 `remote/worker.py` 4 → 1、`remote/run_loop.py` 2 → 0（条目删）。
+- **验证**：remote / hub / e2e 相关族全绿；`bun run pygate` 绿（6754 passed / 3 skipped）。
+  全文 → `docs/nn/engineering.md` §297。
