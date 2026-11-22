@@ -23,7 +23,12 @@ from pathlib import Path
 from typing import Any
 
 from common.protocol import ProtocolError, parse_shard_name
-from worker.greedy_round import GREEDY_DIR_NAME, greedy_spec, run_greedy_round
+from worker.greedy_round import (
+    GREEDY_DIR_NAME,
+    GreedyRoundSpec,
+    greedy_spec,
+    run_greedy_round,
+)
 from worker.iter_rollout import run_iter_rollout
 from worker.reports import combine_reports
 
@@ -129,17 +134,19 @@ def greedy_stage(
         return {"report": info.get("report") or {}, "shard_dirs": dirs}
 
     return run_greedy_round(
-        raw_quota=raw,
-        round_target=int(rollout.get("greedy_round_target") or 0),
-        stages=stages,
-        it=it,
-        rotate_seed=int(volume.get("rotate_seed") or 0),
-        ordinary=pairs_seen,
-        run_wave=_run_wave,
-        sampling_brief=sampling_brief,
-        ests=ests,
-        width=int(getattr(rctx, "workers", 0) or 0),
-        log=log,
+        GreedyRoundSpec(
+            raw_quota=raw,
+            round_target=int(rollout.get("greedy_round_target") or 0),
+            stages=stages,
+            it=it,
+            rotate_seed=int(volume.get("rotate_seed") or 0),
+            ordinary=pairs_seen,
+            run_wave=_run_wave,
+            sampling_brief=sampling_brief,
+            ests=ests,
+            width=int(getattr(rctx, "workers", 0) or 0),
+            log=log,
+        )
     )
 
 

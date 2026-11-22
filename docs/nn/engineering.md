@@ -29,6 +29,37 @@
 
 ---
 
+## §307 P0-3 批 D1：云机轮内 greedy + push 发一轮（30 → 28）（2026-11-22）
+
+* **一把刀两处**，都是「一轮活」的入口：`worker/greedy_round.run_greedy_round`(12 关键字) →
+  `GreedyRoundSpec`、`trainer/loop_transport._push_job_round`(10 形参，前 8 个位置) →
+  `PushJobRoundSpec`。读数：宽签名 **30 → 28**、24 → **22** 文件。
+* **坏点不是「参数多」，是相邻同类位**：
+  * `run_greedy_round` 有三个 int 挨着（`it` / `rotate_seed` / `round_target`）。`rotate_seed`
+    错 ⇒ 种子血缘断：`ordinary` 排除表按 `(stage, seed)` 比，撞上就是**同一条 episode 采两遍**
+    （win-rate 虚高，账本上完全看不出）；`round_target` 拿成轮号 ⇒ 预算按 it 算，前一小时白采。
+  * `_push_job_round` 前八个位置里排着 `manifest`(dict) 与 `jid`(str)，以及
+    `payload_bytes` / `code_bytes` **两个 bytes 相邻**。前者互换 = `JobUpload` 把 job id 当
+    manifest 发出去；后者只有对端解压时才看得见。`args` 与 `log` 是「对象 vs 函数」，同理。
+* **顺手清掉一个匿名缺省**：`run_greedy_round` 的 `log=lambda _m: None` 换成具名 `_quiet`。
+  匿名默认值既不可断言身份，也无法在不改签名的情况下替换 —— 守卫现在直接断 `spec.log is _quiet`。
+* **守卫**：`tests/worker/test_greedy_round_spec.py`（字段表 · 冻结 · `kw_only` · 入口形状 ·
+  具名缺省 · 错键/旧关键字面 `TypeError`）· `tests/trainer/test_push_round_spec.py`
+  （10 字段表 · 冻结 · 入口形状 · 旧八位置调用面 `TypeError`）。
+* **撞到 LOC 墙的那一处（记一笔）**：同一批本想把 `worker/resume.merge_memory_shards`
+  （3 位置 + 6 关键字，其中 `counters` 是**五个一组的累加器**）也收成 `ShardMergeSpec`，
+  改法写通、单测绿，但**调用方 `remote/hub_client.py` 恰好 999/1000**：单对象构造至少多一行，
+  门禁当场红（`test_python_loc_budget`）。按 §230 的先例，这类「签名被调用方的行数卡住」的正确
+  下一步是**先把那块拆出去**（`hub_client` 的发布侧合并段），再回来收签名。已回滚并在
+  `WIDE_FUNCS_BASELINE` 就地记了原因，不留半成品。
+* **被否决**：① 两个入口各收一半（`greedy` 只收 int 三兄弟、push 只收两个 bytes）——收一半等于
+  让读的人猜「哪个还在位置上」，同一条链两种形状；② 为了塞进 `hub_client` 的 999 行把 spec
+  构造压成 6 行（`ShardMergeSpec(a, b, c,` 折行）——省下的两行是拿可读性换的，而 §230 已经
+  给出正解（先拆后收）。
+* **验证**：`bun run pygate` 绿（6855 passed / 13 skipped）；`ruff` + `mypy`（1078 文件）绿；
+  `WIDE_FUNCS_BASELINE` 删两条（`worker/greedy_round.py` / `trainer/loop_transport.py`），
+  文本断言 / G5 私有断言 / `Any` 基线未动。
+
 ## §306 P0-3 批 C：BC 链四入口收 spec（34 → 30）（2026-11-22）
 
 * **一把刀四处**，全在「一件 BC 活」的四个入口上：`remote/bc_job._run_bc_job`(12) ·

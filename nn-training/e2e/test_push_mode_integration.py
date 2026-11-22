@@ -40,6 +40,7 @@ from remote.push_client import JobUpload, submit_job, wait_result
 from remote.worker_server import WorkerServerState, make_worker_server
 from tests.helpers.http_server import serve_fast
 from trainer.loop_steps import _push_job_round, require_remote_transport
+from trainer.loop_transport import PushJobRoundSpec
 
 
 def _sha(data: bytes) -> str:
@@ -410,7 +411,16 @@ def test_push_job_round_failover_to_second_node(monkeypatch: pytest.MonkeyPatch)
         {"url": "http://good.example", "authKey": "k"},
     ]
     result = _push_job_round(
-        nodes, {"job_id": "j9"}, "j9", b"p", b"c", SimpleNamespace(smoke=False), 30.0, lambda m: None
+        PushJobRoundSpec(
+            nodes=nodes,
+            manifest={"job_id": "j9"},
+            jid="j9",
+            payload_bytes=b"p",
+            code_bytes=b"c",
+            args=SimpleNamespace(smoke=False),
+            timeout_sec=30.0,
+            log=lambda m: None,
+        )
     )
     assert submitted == ["http://bad.example", "http://good.example"]
     assert waited == ["http://good.example"]
@@ -424,14 +434,19 @@ def test_push_job_round_all_nodes_fail(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("trainer.loop_transport._push_submit", fake_submit)
     with pytest.raises(RetryableError, match="全部节点失败"):
         _push_job_round(
-            [{"url": "http://a", "authKey": "k"}, {"url": "http://b", "authKey": "k"}],
-            {"job_id": "j1"},
-            "j1",
-            b"p",
-            b"c",
-            SimpleNamespace(smoke=False),
-            5.0,
-            lambda m: None,
+            PushJobRoundSpec(
+                nodes=[
+                    {"url": "http://a", "authKey": "k"},
+                    {"url": "http://b", "authKey": "k"},
+                ],
+                manifest={"job_id": "j1"},
+                jid="j1",
+                payload_bytes=b"p",
+                code_bytes=b"c",
+                args=SimpleNamespace(smoke=False),
+                timeout_sec=5.0,
+                log=lambda m: None,
+            )
         )
 
 

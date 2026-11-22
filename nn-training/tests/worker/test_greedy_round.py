@@ -11,7 +11,12 @@ from pathlib import Path
 
 import pytest
 
-from worker.greedy_round import greedy_argv_rows, greedy_spec, run_greedy_round
+from worker.greedy_round import (
+    GreedyRoundSpec,
+    greedy_argv_rows,
+    greedy_spec,
+    run_greedy_round,
+)
 
 
 def _spec(pairs: list[tuple[int, int]], wver: str = "w1") -> dict:
@@ -120,25 +125,29 @@ def test_inactive_quota_writes_nothing(tmp_path: Path) -> None:
     run = _runner(root, outcome="stage_clear", n=100)
     assert (
         run_greedy_round(
-            raw_quota=None,
-            round_target=1000,
-            stages=[0, 1],
-            it=3,
-            rotate_seed=0,
-            ordinary=[],
-            run_wave=run,
+            GreedyRoundSpec(
+                raw_quota=None,
+                round_target=1000,
+                stages=[0, 1],
+                it=3,
+                rotate_seed=0,
+                ordinary=[],
+                run_wave=run,
+            )
         )
         == {}
     )
     assert (
         run_greedy_round(
-            raw_quota={"win": 0.0, "loss": 0.0, "timeout": 0.0},
-            round_target=1000,
-            stages=[0, 1],
-            it=3,
-            rotate_seed=0,
-            ordinary=[],
-            run_wave=run,
+            GreedyRoundSpec(
+                raw_quota={"win": 0.0, "loss": 0.0, "timeout": 0.0},
+                round_target=1000,
+                stages=[0, 1],
+                it=3,
+                rotate_seed=0,
+                ordinary=[],
+                run_wave=run,
+            )
         )
         == {}
     )
@@ -151,14 +160,16 @@ def test_budget_is_total_target_not_oversample_cap(tmp_path: Path) -> None:
     root = tmp_path / "greedy"
     run = _runner(root, outcome="stage_clear", n=600)
     out = run_greedy_round(
-        raw_quota={"win": 0.06, "loss": 0.0, "timeout": 0.06, "oversample_cap": 2.0},
-        round_target=1000,
-        stages=[0, 1],
-        it=3,
-        rotate_seed=11,
-        ordinary=[],
-        run_wave=run,
-        width=2,
+        GreedyRoundSpec(
+            raw_quota={"win": 0.06, "loss": 0.0, "timeout": 0.06, "oversample_cap": 2.0},
+            round_target=1000,
+            stages=[0, 1],
+            it=3,
+            rotate_seed=11,
+            ordinary=[],
+            run_wave=run,
+            width=2,
+        )
     )
     stats = out["greedy_quota_stats"]
     assert stats["target"] == 120
@@ -173,15 +184,17 @@ def test_waves_exclude_ordinary_and_report_bins(tmp_path: Path) -> None:
     run = _runner(root, outcome="stage_clear", n=10)
     ordinary = [(0, 1000), (1, 2000)]
     out = run_greedy_round(
-        raw_quota={"win": 0.12},
-        round_target=1000,
-        stages=[0, 1],
-        it=4,
-        rotate_seed=7,
-        ordinary=ordinary,
-        run_wave=run,
-        ests={0: 10, 1: 10},
-        width=2,
+        GreedyRoundSpec(
+            raw_quota={"win": 0.12},
+            round_target=1000,
+            stages=[0, 1],
+            it=4,
+            rotate_seed=7,
+            ordinary=ordinary,
+            run_wave=run,
+            ests={0: 10, 1: 10},
+            width=2,
+        )
     )
     for wave in run.seen:
         assert set(wave).isdisjoint(set(ordinary)), "greedy 与普通采样撞了 (stage, seed)"
@@ -196,15 +209,17 @@ def test_waves_exclude_ordinary_and_report_bins(tmp_path: Path) -> None:
 def test_stats_shape_matches_trainer_contract(tmp_path: Path) -> None:
     root = tmp_path / "greedy"
     out = run_greedy_round(
-        raw_quota={"win": 0.12},
-        round_target=1000,
-        stages=[0],
-        it=1,
-        rotate_seed=3,
-        ordinary=[],
-        run_wave=_runner(root, outcome="stage_clear", n=50),
-        sampling_brief={"games": 7, "winRate": 0.5, "outcomes": {}, "samples": 700},
-        width=1,
+        GreedyRoundSpec(
+            raw_quota={"win": 0.12},
+            round_target=1000,
+            stages=[0],
+            it=1,
+            rotate_seed=3,
+            ordinary=[],
+            run_wave=_runner(root, outcome="stage_clear", n=50),
+            sampling_brief={"games": 7, "winRate": 0.5, "outcomes": {}, "samples": 700},
+            width=1,
+        )
     )
     stats = out["greedy_quota_stats"]
     assert set(stats) == {
@@ -232,14 +247,16 @@ def test_hard_quota_raises_when_bins_unmet(tmp_path: Path) -> None:
     root = tmp_path / "greedy"
     with pytest.raises(RuntimeError, match="greedy_quota 硬目标未达成"):
         run_greedy_round(
-            raw_quota={"win": 0.12, "soft": False},
-            round_target=1000,
-            stages=[0],
-            it=2,
-            rotate_seed=0,
-            ordinary=[],
-            run_wave=_runner(root, outcome="lives_exhausted", n=200),
-            width=1,
+            GreedyRoundSpec(
+                raw_quota={"win": 0.12, "soft": False},
+                round_target=1000,
+                stages=[0],
+                it=2,
+                rotate_seed=0,
+                ordinary=[],
+                run_wave=_runner(root, outcome="lives_exhausted", n=200),
+                width=1,
+            )
         )
 
 
@@ -247,15 +264,17 @@ def test_stops_without_games_when_stage_is_capped(tmp_path: Path) -> None:
     """est 极小 ⇒ 逐关硬顶先到；派不出局时 `stopped_no_games` 必须响亮（不是静默空转）。"""
     root = tmp_path / "greedy"
     out = run_greedy_round(
-        raw_quota={"win": 0.5},
-        round_target=10000,
-        stages=[0],
-        it=9,
-        rotate_seed=5,
-        ordinary=[],
-        run_wave=_runner(root, outcome="stage_clear", n=1),
-        ests={0: 10**9},
-        width=1,
+        GreedyRoundSpec(
+            raw_quota={"win": 0.5},
+            round_target=10000,
+            stages=[0],
+            it=9,
+            rotate_seed=5,
+            ordinary=[],
+            run_wave=_runner(root, outcome="stage_clear", n=1),
+            ests={0: 10**9},
+            width=1,
+        )
     )
     stats = out["greedy_quota_stats"]
     assert stats["degraded"] is True

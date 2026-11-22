@@ -105,7 +105,8 @@ WIDE_FUNCS_BASELINE = {
     # `PublishBcSpec`）；守 `tests/trainer/test_publish_bc_spec.py`。
     # `trainer/dispatch.py` 已清零（P0-3 第三十九刀：`DispatchSpec`）。
     # `trainer/dispatch_queue.py` 已清零（P0-3 第三十九刀：`DispatchSpec`）。
-    "trainer/loop_transport.py": 1,
+    # `trainer/loop_transport.py` 已清零（P0-3 批 D：`_push_job_round` 的 10 个形参 →
+    # `PushJobRoundSpec`）；守 `tests/trainer/test_push_round_spec.py`。
     # 2026-11-21：`reap_alloc_timeouts` 的 9 个关键字参数收成 `ReapSpec`
     # ⇒ 本文件宽签名 2 → 1（剩 `__init__`），基线只许继续调小。
     "trainer/queue_local.py": 1,
@@ -126,7 +127,8 @@ WIDE_FUNCS_BASELINE = {
     # `EvalGameSpec` ⇒ 条目删除，本文件宽签名归零。
     # `worker/eval_track.py` 已清零（P0-3 第三十六刀：`EvalSettleSpec`）。
     "worker/gate_check.py": 1,
-    "worker/greedy_round.py": 1,
+    # `worker/greedy_round.py` 已清零（P0-3 批 D：`run_greedy_round` 的 12 个关键字 →
+    # `GreedyRoundSpec`）；守 `tests/worker/test_greedy_round_spec.py`。
     "worker/iter_rollout.py": 2,
     "worker/models/student.py": 1,
     "worker/models/student_paddle.py": 1,
@@ -144,6 +146,9 @@ WIDE_FUNCS_BASELINE = {
     # （漏抄一个不报错）—— 契约改钉在 `tests/worker/test_ppo_loop_spec.py` 的字段表上。
     # 2026-11-22（P0-3 第四十九刀 A 批）：`load_episodes_common` 的 13 个参数收成
     # `LoadEpisodesSpec` ⇒ 本文件宽签名归零，条目删除；守 `tests/worker/test_load_episodes_spec.py`。
+    # 2026-11-22（P0-3 批 D 待办）：`merge_memory_shards`(3 位置 + 6 关键字) 收 `ShardMergeSpec`
+    # 的改法已写通，但**卡在调用方的 LOC 墙**：`remote/hub_client.py` 恰好 999/1000，
+    # 单对象构造最少 +1 行（§230 同款先例 = 先拆模块，再收签名）。拆完再动，本节不动。
     "worker/resume.py": 1,
     # 2026-11-21：`quota_sample_priority` 的 9 个位置参数收成 `QuotaSampleSpec`
     # ⇒ 本文件宽签名归零，条目删除。

@@ -312,6 +312,7 @@ def test_push_round_promotes_node_failure_over_retryable() -> None:
 
     # `_push_job_round` 与其 DI seam 都住在 trainer/loop_transport.py（S4 拆出）。
     import trainer.loop_transport as lt
+    from trainer.loop_transport import PushJobRoundSpec
 
     def _boom(*_a: object, **_k: object) -> dict:
         raise JobFailedError("job j 失败: bun 未安装 [kind=ProtocolError]", kind="ProtocolError")
@@ -323,14 +324,16 @@ def test_push_round_promotes_node_failure_over_retryable() -> None:
         nodes = [{"url": "http://a", "authKey": ""}, {"url": "http://b", "authKey": ""}]
         with pytest.raises(JobFailedError) as ei:
             lt._push_job_round(
-                nodes,
-                {},
-                "j",
-                b"",
-                b"",
-                SimpleNamespace(smoke=False),
-                60.0,
-                _QUIET,
+                PushJobRoundSpec(
+                    nodes=nodes,
+                    manifest={},
+                    jid="j",
+                    payload_bytes=b"",
+                    code_bytes=b"",
+                    args=SimpleNamespace(smoke=False),
+                    timeout_sec=60.0,
+                    log=_QUIET,
+                )
             )
         assert "bun" in str(ei.value)  # 原因原样上浮，不被 RetryableError 吃掉
     finally:

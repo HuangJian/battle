@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -136,21 +137,42 @@ def _stage_totals(manifests: Mapping[str, Mapping[str, Any]]) -> tuple[dict[int,
     return collected, games
 
 
-def run_greedy_round(
-    *,
-    raw_quota: object,
-    round_target: int,
-    stages: Sequence[int],
-    it: int,
-    rotate_seed: int,
-    ordinary: Sequence[tuple[int, int]],
-    run_wave: Callable[[list[tuple[int, int]]], Mapping[str, Any]],
-    sampling_brief: Mapping[str, Any] | None = None,
-    ests: Mapping[int, int] | None = None,
-    width: int = 0,
-    max_batches: int | None = None,
-    log: Callable[[str], None] = lambda _m: None,
-) -> dict:
+def _quiet(_m: str) -> None:
+    """`GreedyRoundSpec.log` 的缺省（旧签名的 `lambda _m: None`，改成具名以便守卫断言身份）。"""
+
+
+@dataclass(frozen=True, kw_only=True)
+class GreedyRoundSpec:
+    """云机轮内一次 greedy 采集的全部输入（P0-3 批 D：12 个关键字 → 一个对象）。
+
+    失效面：`rotate_seed` 与 `it` 互换 ⇒ 种子血缘断（同一轮重抽同批 seed，或与普通采样
+    撞车——`ordinary` 排除表是拿 `(stage, seed)` 比的，撞上就是**同一条 episode 两遍**，
+    指标虚高）；`round_target` 与 `it`（int 与 int）互换 ⇒ 预算按轮号算，前一小时白采；
+    `width` / `max_batches` 互换 ⇒ 波次上限当并发宽度（或者反过来），跑成 1 局/波。
+    """
+
+    #: 课程 `greedy_quota` 原文（`parse_greedy_quota` 读；None = 不激活）。
+    raw_quota: object
+    round_target: int
+    stages: Sequence[int]
+    it: int
+    rotate_seed: int
+    #: 普通采样已占的 `(stage, seed)`（greedy 必须避开，否则同一局采两遍）。
+    ordinary: Sequence[tuple[int, int]]
+    #: 一波的执行器（`remote/worker` 注入 `run_iter_rollout`）。
+    run_wave: Callable[[list[tuple[int, int]]], Mapping[str, Any]]
+    #: 采样口径的读数（原样进 `greedy_quota_stats.sampling_report`）。
+    sampling_brief: Mapping[str, Any] | None = None
+    #: 每关每局样本数估计（冷启动没有 ⇒ 不设默认顶）。
+    ests: Mapping[int, int] | None = None
+    #: 并发宽度（0 = 按关卡数）。
+    width: int = 0
+    #: 波次上限（None = `DEFAULT_MAX_BATCHES`）。
+    max_batches: int | None = None
+    log: Callable[[str], None] = _quiet
+
+
+def run_greedy_round(spec: GreedyRoundSpec) -> dict:
     """在云机轮内跑完 greedy 采集，返回 `{shard_dirs, report, greedy_quota_stats, by_stage, waves}`。
 
     空 dict = 未激活（`quota_active` 为假或三档全 0）⇒ 调用方**一个键都不写**（旧包逐字节不变）。
@@ -160,7 +182,14 @@ def run_greedy_round(
 
     **进度只认 `shard_dirs`，不扫盘**：换根档下 shard 住节点本地 scratch 的镜像目录，
     而调用方拿到的 job 目录里什么都没有（扫盘会看到 0 局 ⇒ 一路空转到波次上限）。
+
+    入参 = 一个 `GreedyRoundSpec`（P0-3 批 D）；下面一次展开，函数体逐字不动。
     """
+    raw_quota, round_target = spec.raw_quota, spec.round_target
+    stages, it, rotate_seed = spec.stages, spec.it, spec.rotate_seed
+    ordinary, run_wave = spec.ordinary, spec.run_wave
+    sampling_brief, ests = spec.sampling_brief, spec.ests
+    width, max_batches, log = spec.width, spec.max_batches, spec.log
     plan = parse_greedy_quota(raw_quota, target_transitions=int(round_target), stages=list(stages))
     if plan is None:
         return {}

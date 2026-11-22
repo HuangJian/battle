@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -496,18 +497,32 @@ def _push_over_nodes(
     raise RetryableError(f"push 全部节点失败: {last}")
 
 
-def _push_job_round(
-    nodes: list[dict],
-    manifest: dict,
-    jid: str,
-    payload_bytes: bytes,
-    code_bytes: bytes,
-    args: Any,
-    timeout_sec: float,
-    log: Any,
-    blobs: dict | None = None,
-    ts_code_bytes: bytes | None = None,
-) -> dict:
+@dataclass(frozen=True, kw_only=True)
+class PushJobRoundSpec:
+    """向 push 节点发一轮活的全部输入（P0-3 批 D：10 个形参 → 一个对象）。
+
+    失效面：三个「这一轮是什么」的字段全是 str，且前七个位置里排着 `jid` / `manifest` /
+    `payload_bytes` / `code_bytes` —— `manifest` 与 `jid` 互换会让 `JobUpload` 把 job id
+    当 manifest 发出去（云端 400 才炸）；`payload_bytes` / `code_bytes` 互换是**两个 bytes
+    相邻**，只有对端解压时才看得见；`args` 与 `log` 互换是「对象 vs 函数」，同样只在运行期。
+    """
+
+    nodes: list[dict]
+    manifest: dict
+    jid: str
+    payload_bytes: bytes
+    code_bytes: bytes
+    #: trainer 的 CLI 名字空间（只读 `smoke`，决定冒烟回显头）。
+    args: Any
+    timeout_sec: float
+    log: Any
+    #: opt/ref raw 字节（读自 job 目录；push_client 判节点缓存命中，只传未命中的）。
+    blobs: dict | None = None
+    #: TS 运行时 zip（kind=iter 才非 None；同样判缓存）。
+    ts_code_bytes: bytes | None = None
+
+
+def _push_job_round(spec: PushJobRoundSpec) -> dict:
     """（组合入口）按序向 push 节点提交 job 并等待结果；单节点失败换下一个，全部失败抛
     RetryableError（loop 原地重试同迭代）。--smoke 经 X-Smoke-Echo 头触发节点侧
     冒烟回显（不跑 PPO，结果带 smoke 标记 → 共享尾部作废本轮）。
@@ -522,7 +537,13 @@ def _push_job_round(
     是 `_push_submit` / `_push_wait_result`——与三相路径（`_push_submit_node` + `_push_fetch`）
     同源，于是「换节点」的行为只有一处定义。本函数的入参是**内存里的字节**（调用方已经
     读好），三相路径则是从 job 目录重读——这是两者唯一的区别。
+
+    入参 = 一个 `PushJobRoundSpec`（P0-3 批 D）；下面一次展开，函数体逐字不动。
     """
+    nodes, manifest, jid = spec.nodes, spec.manifest, spec.jid
+    payload_bytes, code_bytes = spec.payload_bytes, spec.code_bytes
+    args, timeout_sec, log = spec.args, spec.timeout_sec, spec.log
+    blobs, ts_code_bytes = spec.blobs, spec.ts_code_bytes
 
     def step(_i: int, node: dict) -> dict:
         url, key = node["url"], node.get("authKey", "")

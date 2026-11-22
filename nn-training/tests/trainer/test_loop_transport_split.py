@@ -48,6 +48,7 @@ import pytest
 
 import trainer.loop_steps as steps
 import trainer.loop_transport as transport
+from trainer.loop_transport import PushJobRoundSpec
 
 NN_ROOT = Path(__file__).resolve().parents[2]
 
@@ -184,14 +185,16 @@ def test_moved_push_path_reads_the_loop_transport_seams(
     monkeypatch.setattr(transport, "_push_wait_result", fake_wait)
 
     out = transport._push_job_round(
-        [{"url": "http://a.example", "authKey": "k"}],
-        {"job_id": "j"},
-        "j",
-        b"payload",
-        b"code",
-        SimpleNamespace(smoke=False),
-        5.0,
-        lambda _m: None,
+        PushJobRoundSpec(
+            nodes=[{"url": "http://a.example", "authKey": "k"}],
+            manifest={"job_id": "j"},
+            jid="j",
+            payload_bytes=b"payload",
+            code_bytes=b"code",
+            args=SimpleNamespace(smoke=False),
+            timeout_sec=5.0,
+            log=lambda _m: None,
+        )
     )
 
     assert submitted == ["http://a.example"]
