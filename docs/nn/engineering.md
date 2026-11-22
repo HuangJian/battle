@@ -25,6 +25,24 @@
 
 ---
 
+## §291 P0-3 第三十八刀：`run_one_round` 收 `JobRoundSpec`（57 → 56）（2026-11-22）
+
+* `remote/job_round.py`：21 参 → frozen + kw_only `JobRoundSpec`（16 个必填位 +
+  5 个可选旋钮：`cache_root` / `epoch_mult` / `backend` / `role` / `prefetch_unpack`）；
+  入口只收 `spec`，展开后函数体逐字不动。本文件宽签名 2 → **1**（剩
+  `_prefetch_fill(10)`），全仓 57 → **56**（文件数仍 47）。
+* 收益点：旧表只有前 3 个位置位，18 个关键字靠逐名对齐 —— 漏传只在走到那条分支才
+  `NameError`，名字写错则静默落默认值（`role` 错成 online、`prefetch_unpack` 错成缺省档）。
+* 命名避让：`worker/eval_arbiter` 已有 `RoundSpec`（40 参 eval 轮），且
+  `tests/worker/test_eval_round_spec.py` 拿它做「生产装配点唯一」的全仓 AST 断言 ⇒ 本类叫
+  `JobRoundSpec`，不改那条护栏。
+* 调用点：生产 1（`worker_loop` 的 `round_ = run_one_round(...)`）+ 单测 4；
+  `test_job_round_split` 的双向一致断言改为「`JobRoundSpec` 必填字段 ⊆ 实参关键字 ⊆ 字段表」
+  （位置面只剩 `spec`），且三条合成一条以守住 §文本断言预算（每题一条 assert 都计口径 B）。
+* 守 `tests/remote/test_job_round_spec.py`（3 条）；`WIDE_FUNCS_BASELINE` 的
+  `remote/job_round.py` 2 → 1。
+* 回归：新守卫(3) + job_round 族 70 条绿；全量 `bun run pygate` 绿（6729 passed）。
+
 ## §290 P0-3 第三十七刀：`worker_loop` 收 `WorkerLoopSpec`（58 → 57）（2026-11-22）
 
 * `remote/worker.py`：22 参 → frozen + kw_only `WorkerLoopSpec`（3 个身份位 + 19 个

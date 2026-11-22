@@ -8818,6 +8818,20 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-22-job-round-spec
+
+P0-3 第三十八刀（`remote/job_round.py`）：`run_one_round` 的 21 个参数 → frozen + kw_only
+的 `JobRoundSpec`，入口只收 `spec`、展开后函数体逐字不动。
+为什么不是「少几个参数」：旧表只有前 3 个位置位，18 个关键字靠逐名对齐 —— 漏传只在走到
+那条分支才 `NameError`，名字写错则静默落默认值（`role` 错成 online、`prefetch_unpack` 错成
+缺省档）。spec 让「漏传必填」在构造时就报。
+命名取 `JobRoundSpec` 而非 `RoundSpec`：`worker/eval_arbiter.RoundSpec` 已被 eval 轮占用，
+且 `tests/worker/test_eval_round_spec.py` 拿它做「生产装配点唯一」的全仓 AST 断言。
+调用点：生产 1（`worker_loop`）+ 单测 4；`test_job_round_split` 的双向一致断言改为
+「必填字段 ⊆ 实参关键字 ⊆ 字段表」（位置面只剩 `spec`）。
+宽签名 **57 → 56**；本文件 2 → 1（剩 `_prefetch_fill`），文件数仍 47。
+守 `tests/remote/test_job_round_spec.py`（3 条），细节 → `docs/nn/engineering.md §291`。
+
 ## §2026-11-22-worker-loop-spec
 
 P0-3 第三十七刀（`remote/worker.py`）：`worker_loop` 的 22 个参数 → frozen + kw_only 的

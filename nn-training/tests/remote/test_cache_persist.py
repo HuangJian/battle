@@ -312,13 +312,13 @@ def _run_one_round_capture(monkeypatch, tmp_path: Path, **kw) -> dict:
     seen: list[int] = []
     captured: dict = {}
 
-    def _fake_round(base_url, token, job, **kwargs):
+    def _fake_round(spec):
         seen.append(1)
         if not captured:
-            captured.update(kwargs)
+            captured.update(vars(spec))
         if len(seen) == 1:
-            return round_mod.RoundOutcome(jid=job["job_id"], ok=True, uploaded=True, stop=False)
-        return round_mod.RoundOutcome(jid=job["job_id"], ok=False, uploaded=False, stop=True)
+            return round_mod.RoundOutcome(jid=spec.job["job_id"], ok=True, uploaded=True, stop=False)
+        return round_mod.RoundOutcome(jid=spec.job["job_id"], ok=False, uploaded=False, stop=True)
 
     n = {"i": 0}
 

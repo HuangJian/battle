@@ -302,7 +302,7 @@ from remote.job_lifecycle import (
 # `start_cancel_watcher` / `peek_jobs` / `download_payload` / `PREFETCH_ROUND_SEC`）的解析
 # 已随块搬到 `remote.job_round` ⇒ 拦截它们要 patch **该模块**（见其头部与
 # `tests/remote/test_job_round_split.py`）。
-from remote.job_round import RoundOutcome, run_one_round
+from remote.job_round import JobRoundSpec, RoundOutcome, run_one_round
 from remote.job_shell import (
     JobState,
     bc_or_none,
@@ -964,35 +964,37 @@ def worker_loop(spec: WorkerLoopSpec) -> int:
             idle_since = time.time()
             _polls_since_log = 0  # claim 即上报：alive 行下次只数 claim 之后的轮询，不与本行重复
             round_ = run_one_round(
-                base_url,
-                token,
-                job,
-                part_dir=part_dir,
-                # 多 hub 才分区 code_cache；`multi` 是宿主概念，本模块不收（见 job_round 文档）
-                code_cache_dir=_code_cache_arg,
-                # R0（M0）：身份映射根（`--cache-dir` 或 work_dir，与 `blob_root.parent` 同源）
-                cache_root=_cache_root,
-                pf_store=pf_store,
-                polls_since_accept=_polls_since_accept,
-                worker_id=worker_id,
-                device=device,
-                torch_threads=torch_threads,
-                epoch_mult=epoch_mult,
-                backend=backend,
-                echo=echo,
-                restart_argv=restart_argv,
-                # 注：半离线（kind=run）腿的 `artifacts_dir` / `run_max_iters` / `run_budget_sec`
-                # 随 2026-09-25 的退休一起没了，`round` 签名里也不再有它们（见 `run_job` 注释）。
-                # 归属自报（2026-09-25）：本会话属于哪块盘 —— peek 与 claim 两条面都带它，
-                # 否则带标 worker 会在归属闸（`_JobStore._claim_locked`）上自锁。
-                role=role,
-                prefetch_depth=prefetch_depth,
-                prefetch_unpack=prefetch_unpack,
-                uploader=uploader,
-                # ★ 注入点：宿主在**调用点**读 `run_job` 这个值 ⇒ patch `remote.worker.run_job`
-                #   仍生效（引用即接缝）；漏传 = 调用当场 TypeError，无兜底。
-                run_job_fn=run_job,
-                log=log,
+                JobRoundSpec(
+                    base_url=base_url,
+                    token=token,
+                    job=job,
+                    part_dir=part_dir,
+                    # 多 hub 才分区 code_cache；`multi` 是宿主概念，本模块不收（见 job_round 文档）
+                    code_cache_dir=_code_cache_arg,
+                    # R0（M0）：身份映射根（`--cache-dir` 或 work_dir，与 `blob_root.parent` 同源）
+                    cache_root=_cache_root,
+                    pf_store=pf_store,
+                    polls_since_accept=_polls_since_accept,
+                    worker_id=worker_id,
+                    device=device,
+                    torch_threads=torch_threads,
+                    epoch_mult=epoch_mult,
+                    backend=backend,
+                    echo=echo,
+                    restart_argv=restart_argv,
+                    # 注：半离线（kind=run）腿的 `artifacts_dir` / `run_max_iters` / `run_budget_sec`
+                    # 随 2026-09-25 的退休一起没了，`round` 签名里也不再有它们（见 `run_job` 注释）。
+                    # 归属自报（2026-09-25）：本会话属于哪块盘 —— peek 与 claim 两条面都带它，
+                    # 否则带标 worker 会在归属闸（`_JobStore._claim_locked`）上自锁。
+                    role=role,
+                    prefetch_depth=prefetch_depth,
+                    prefetch_unpack=prefetch_unpack,
+                    uploader=uploader,
+                    # ★ 注入点：宿主在**调用点**读 `run_job` 这个值 ⇒ patch `remote.worker.run_job`
+                    #   仍生效（引用即接缝）；漏传 = 调用当场 TypeError，无兜底。
+                    run_job_fn=run_job,
+                    log=log,
+                )
             )
             if round_.uploaded:
                 done += 1

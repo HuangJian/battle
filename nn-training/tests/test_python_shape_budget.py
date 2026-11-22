@@ -69,7 +69,7 @@ WIDE_FUNCS_BASELINE = {
     "remote/hub_client.py": 2,
     "remote/hub_http.py": 2,
     # 2026-11-19 合入上游的 relay/replay 参数（原 3 处 → 4 处）。
-    "remote/job_round.py": 2,
+    "remote/job_round.py": 1,  # run_one_round 已收 RoundSpec；剩 _prefetch_fill(10)
     "remote/lifecycle.py": 1,
     "remote/node_upgrade.py": 1,
     "remote/offline_deliver.py": 1,

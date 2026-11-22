@@ -82,23 +82,25 @@ def _pull_round(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, job: dict, msgs
         return {}
 
     job_round.run_one_round(
-        "http://hub.invalid",
-        "tok",
-        job,
-        part_dir=tmp_path,
-        code_cache_dir=None,
-        pf_store=None,
-        polls_since_accept=0,
-        worker_id="w-1",
-        device="cpu",
-        torch_threads=0,
-        echo=False,
-        restart_argv=None,
-        role=ROLE_ONLINE,
-        prefetch_depth=1,
-        uploader=cast(Any, _Uploader()),
-        run_job_fn=_run_job,
-        log=msgs.append,
+        job_round.JobRoundSpec(
+            base_url="http://hub.invalid",
+            token="tok",
+            job=job,
+            part_dir=tmp_path,
+            code_cache_dir=None,
+            pf_store=None,
+            polls_since_accept=0,
+            worker_id="w-1",
+            device="cpu",
+            torch_threads=0,
+            echo=False,
+            restart_argv=None,
+            role=ROLE_ONLINE,
+            prefetch_depth=1,
+            uploader=cast(Any, _Uploader()),
+            run_job_fn=_run_job,
+            log=msgs.append,
+        )
     )
 
 

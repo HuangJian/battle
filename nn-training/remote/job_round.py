@@ -376,39 +376,54 @@ class _StartBeacon:
         return self.ok
 
 
-def run_one_round(
-    base_url: str,
-    token: str,
-    job: dict,
-    *,
-    part_dir: Path,
-    code_cache_dir: Path | None,
-    pf_store: PrefetchStore | PayloadProcess | None,
-    polls_since_accept: int,
-    worker_id: str,
+@dataclass(frozen=True, kw_only=True)
+class JobRoundSpec:
+    """`run_one_round` 的旋钮袋（P0-3：21 参 → 一个对象）。
+
+    入参按角色分档（与函数文档同口径）：作业身份（`job` / `part_dir` / `code_cache_dir` /
+    `pf_store` / `polls_since_accept`）· 传输身份（`base_url` / `token` / `worker_id`）·
+    训练旋钮（`device` / `torch_threads` / `epoch_mult` / `echo` / `role` /
+    `prefetch_depth` / `prefetch_unpack`）· 上报与生命周期（`restart_argv` / `uploader` /
+    `log`）· 注入点（`run_job_fn`）。
+
+    旧位置表里 `base_url` / `token` / `job` 之后全是关键字，但调用点有 20 个关键字要逐名
+    对齐：漏一个只在走到那条分支才 `NameError`，名字写错更是静默落到默认值（如 `role`
+    错成 online）。spec 让“漏传必填”在构造时就报。
+    """
+
+    base_url: str
+    token: str
+    job: dict
+    part_dir: Path
+    code_cache_dir: Path | None
+    pf_store: PrefetchStore | PayloadProcess | None
+    polls_since_accept: int
+    worker_id: str
+    device: str
+    torch_threads: int
+    echo: bool
+    restart_argv: list[str] | None
+    prefetch_depth: int
+    uploader: UploaderLike
+    run_job_fn: Callable[..., dict]
+    log: Callable[[str], None]
     #: R0（M0）身份映射的根（= `--cache-dir` 或 work_dir，与 `blob_root.parent` 同源）。
     #: None ⇒ 不确认/不作废（只跑测试/旧调用方的形状），逐字节旧行为。
-    cache_root: Path | None = None,
-    device: str,
-    torch_threads: int,
+    cache_root: Path | None = None
     #: ★ 2026-10-26：训练侧放大 —— PPO 每轮更新遍数 × N（缺省 1.0 = manifest 原样）。
     #: 纯执行面旋钮，原样交给宿主的 `run_job_fn`（本模块不认识它的语义）。
-    epoch_mult: float = 1.0,
+    epoch_mult: float = 1.0
     #: ★ 2026-10-27（评审）：PPO 训练框架（`""`/auto/torch/paddle，空串 = auto）。与
     #: `epoch_mult` 同一条路：纯执行面旋钮，原样转交给 `run_job_fn`。
-    backend: str = "",
-    echo: bool,
-    restart_argv: list[str] | None,
-    role: str = ROLE_ONLINE,
-    prefetch_depth: int,
-    prefetch_unpack: int = PREFETCH_UNPACK_DEFAULT,
-    uploader: UploaderLike,
-    run_job_fn: Callable[..., dict],
-    log: Callable[[str], None],
-) -> RoundOutcome:
+    backend: str = ""
+    role: str = ROLE_ONLINE
+    prefetch_unpack: int = PREFETCH_UNPACK_DEFAULT
+
+
+def run_one_round(spec: JobRoundSpec) -> RoundOutcome:
     """取活后的一整轮：旁路线程组 → `run_job_fn` → 交回传 → 收尾。
 
-    **入参分档**（17 个太多？它们全是「宿主已经定好的事实与旋钮」，按角色读）：
+    **入参分档**（`JobRoundSpec` 的 21 个字段全是「宿主已经定好的事实与旋钮」，按角色读）：
 
       · 作业身份 —— `job` · `part_dir` · `code_cache_dir` · `pf_store` · `polls_since_accept`；
       · 传输/身份 —— `base_url` · `token` · `worker_id`；
@@ -425,6 +440,17 @@ def run_one_round(
     那一档必须能从日志里看出来）；确定性拒绝 = `report_job_failure`（终局）；其它 = 只 log
     （幂等重拉）。
     """
+    # 旧签名 21 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    base_url, token, job = spec.base_url, spec.token, spec.job
+    part_dir, code_cache_dir = spec.part_dir, spec.code_cache_dir
+    pf_store, polls_since_accept = spec.pf_store, spec.polls_since_accept
+    worker_id, device = spec.worker_id, spec.device
+    torch_threads, echo = spec.torch_threads, spec.echo
+    restart_argv, prefetch_depth = spec.restart_argv, spec.prefetch_depth
+    uploader, run_job_fn = spec.uploader, spec.run_job_fn
+    log, cache_root = spec.log, spec.cache_root
+    epoch_mult, backend, role = spec.epoch_mult, spec.backend, spec.role
+    prefetch_unpack = spec.prefetch_unpack
 
     manifest = job.get("manifest") or {}
     # ★2026-11-13（用户口径）：云端 GPU worker 一机多课，而 jid 是幂等键的哈希 ⇒ 只看 jid
