@@ -63,9 +63,10 @@ from tests.subproc_util import run_utf8
 from trainer import run_rl
 from trainer.dispatch_queue import run_rollout_queue  # 真家（旧经 trainer.run_rl 再导出）
 from trainer.eval_dispatch import EvalDispatchSpec
-from trainer.stream import (
-    run_rollout_stream as _run_rollout_stream,  # B7：run_rl 模块级不再 re-export
-)
+
+# B7：run_rl 模块级不再 re-export `run_rollout_stream`
+from trainer.stream import StreamRunSpec
+from trainer.stream import run_rollout_stream as _run_rollout_stream
 from worker.resume import (
     ResumedSpec,
     completed_pairs,
@@ -688,18 +689,20 @@ def test_it_stream_local_loser_retire(tmp_path: Path, monkeypatch: pytest.Monkey
 
         try:
             rep3b = _run_rollout_stream(
-                bun,
-                str(WEIGHTS),
-                traj,
-                [(0, 111), (0, 222), (1, 333), (1, 444)],
-                types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
-                cfg3b,
-                "i3b.3",
-                None,
-                None,
-                "cpu",
-                on_collect_done=_on_collect_done,
-                backend=stub3b,
+                StreamRunSpec(
+                    bun=bun,
+                    rl_path=str(WEIGHTS),
+                    traj_dir=traj,
+                    pairs=[(0, 111), (0, 222), (1, 333), (1, 444)],
+                    args=types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
+                    cfg=cfg3b,
+                    iter_id="i3b.3",
+                    model=None,
+                    opt=None,
+                    device="cpu",
+                    on_collect_done=_on_collect_done,
+                    backend=stub3b,
+                )
             )
         except BaseException as e:  # 回归证据：任何异常（含 BaseException）都要留成断言失败
             rep3b = None
@@ -741,18 +744,20 @@ def test_it_stream_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
             return th
 
         rep3 = _run_rollout_stream(
-            bun,
-            str(WEIGHTS),
-            traj,
-            [(0, 111), (0, 222), (1, 333), (1, 444)],
-            types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
-            cfg3,
-            "i3.3",
-            None,
-            None,
-            "cpu",
-            on_collect_done=on_collect_done,
-            backend=stub3,
+            StreamRunSpec(
+                bun=bun,
+                rl_path=str(WEIGHTS),
+                traj_dir=traj,
+                pairs=[(0, 111), (0, 222), (1, 333), (1, 444)],
+                args=types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
+                cfg=cfg3,
+                iter_id="i3.3",
+                model=None,
+                opt=None,
+                device="cpu",
+                on_collect_done=on_collect_done,
+                backend=stub3,
+            )
         )
         sm = rep3.pop("_stream")
         assert rep3["games"] == 4 and sm["waves"] >= 1, "I3 streamed round trained"
@@ -788,18 +793,20 @@ def test_it_stream_halt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         cfg4["policy"]["streamWaveGames"] = 2
         cfg4["policy"]["streamKlCap"] = 1e-6
         rep4 = _run_rollout_stream(
-            bun,
-            str(WEIGHTS),
-            traj,
-            [(0, 111), (0, 222), (1, 333), (1, 444)],
-            types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
-            cfg4,
-            "i4.4",
-            None,
-            None,
-            "cpu",
-            on_collect_done=None,
-            backend=stub4,
+            StreamRunSpec(
+                bun=bun,
+                rl_path=str(WEIGHTS),
+                traj_dir=traj,
+                pairs=[(0, 111), (0, 222), (1, 333), (1, 444)],
+                args=types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
+                cfg=cfg4,
+                iter_id="i4.4",
+                model=None,
+                opt=None,
+                device="cpu",
+                on_collect_done=None,
+                backend=stub4,
+            )
         )
         sm4 = rep4.pop("_stream")
         assert sm4["halted"] is True, f"I4 halted (cum_kl={sm4['kl_cum']:.1f})"
@@ -1299,18 +1306,20 @@ def test_it_precollect_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         cfg8["policy"]["streamWaveGames"] = 1
         stub8 = _StubPpo(kl=1e-12)
         rep8 = _run_rollout_stream(
-            bun,
-            str(WEIGHTS),
-            traj,
-            plan8,
-            args8,
-            cfg8,
-            "i8.8",
-            None,
-            None,
-            None,
-            backend=stub8,
-            extra_wver="e" * 64,
+            StreamRunSpec(
+                bun=bun,
+                rl_path=str(WEIGHTS),
+                traj_dir=traj,
+                pairs=plan8,
+                args=args8,
+                cfg=cfg8,
+                iter_id="i8.8",
+                model=None,
+                opt=None,
+                device="cpu",
+                backend=stub8,
+                extra_wver="e" * 64,
+            )
         )
         disp8 = [p for kind, _t, p in srv.events if kind == "dispatch"]
         assert stub8.updates >= 2, f"I8 precollected shard trained as first wave + rest collected (updates={stub8.updates})"

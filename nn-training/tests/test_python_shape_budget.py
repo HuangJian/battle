@@ -104,7 +104,7 @@ WIDE_FUNCS_BASELINE = {
     "trainer/queue_local.py": 1,
     # 2026-11-22（P0-3 第三十四刀）：`dispatch_rollout_phase` 的 25 个参数收成
     # `RolloutPhaseSpec` ⇒ 本文件宽签名归零，条目删除。
-    "trainer/stream.py": 1,
+    # `trainer/stream.py` 已清零（P0-3 第三十五刀：`StreamRunSpec`）。
     # 2026-11-22（P0-3 第三十三刀）：`dispatch_bc_corpus` 的 25 个关键字参数收成
     # `BcDispatchSpec` ⇒ 本文件宽签名归零，条目删除。
     "worker/bc_eval.py": 1,

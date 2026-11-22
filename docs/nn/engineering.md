@@ -25,6 +25,23 @@
 
 ---
 
+## §288 P0-3 第三十五刀：`run_rollout_stream` 收 `StreamRunSpec`（60 → 59）（2026-11-22）
+
+* `trainer/stream.py`：22 参 → frozen + kw_only `StreamRunSpec`（10 个身份位 +
+  12 个可选接线：评估触发 `on_collect_done` / `on_ppo_started`、`on_epoch_done`、
+  `backend` / `update_kwargs` / `extra_wver` / 双 fp、`on_shard` / `on_collect_end` /
+  `on_dispatch_drained` / `on_dispatch_active`）；入口只收 `spec`，展开后函数体逐字不动。
+  本文件宽签名 1 → **0**，全仓 60 → **59**、49 → **48** 文件。
+* 字段类型直接对齐既有 `_StreamCtx`（`on_collect_done: Callable[[], object] | None` 等），
+  装配处零断言、不抬 G14（本文件 `Any` 基线 2 处不变）。
+* 调用点：生产 1（`trainer/rollout_phase` 的 stream 分支，`**_stream_kwargs` 展开仍
+  只能命中 `backend` / `update_kwargs`——字段名即旧关键字参数名）；e2e 4 处 + 单测 2 处。
+* 守 `tests/trainer/test_stream_run_spec.py`（3 条：frozen + kw_only / 字段表 /
+  入口只收 `spec`）。
+* 回归：新守卫(3) + `test_stream_collect_end`(2) + `test_rollout_phase_spec`(3) +
+  `test_loop_volume_split`(13) + `test_python_shape_budget`(5) 绿；e2e `test_run_rl` 随
+  全量门禁绿；ruff / mypy（1054 文件）无错。
+
 ## §287 P0-3 第三十四刀：`dispatch_rollout_phase` 收 `RolloutPhaseSpec`（61 → 60）（2026-11-22）
 
 * `trainer/rollout_phase.py`：25 参 → frozen + kw_only `RolloutPhaseSpec`（16 个身份位 +

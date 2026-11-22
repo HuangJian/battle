@@ -29,7 +29,7 @@ from trainer.dispatch_queue import RUN_ID, local_slots_max_of, run_rollout_queue
 from trainer.eval_dispatch import EvalDispatchSpec, dispatch_eval_bg
 from trainer.eval_m1 import dispatch_eval_bg_m1
 from trainer.queue_local import run_rollout
-from trainer.stream import run_rollout_stream
+from trainer.stream import StreamRunSpec, run_rollout_stream
 from worker.resume import completed_pairs, state_init_enabled
 
 #: 预采子进程「无新增 shard」的容忍上限（秒）。到点即 terminate + 回退自己采。
@@ -413,26 +413,28 @@ def dispatch_rollout_phase(spec: RolloutPhaseSpec) -> tuple[
                 args, ppo_backend, update_kwargs, it, start_it, ref_model
             )
             report = run_rollout_stream(
-                bun,
-                args.out,
-                traj_dir,
-                pairs,
-                args,
-                dist_cfg,
-                iter_id,
-                model,
-                opt,
-                device,
-                on_collect_done=_fire_eval,
-                on_epoch_done=_on_epoch_done,
-                extra_wver=extra_wver,
-                course_fp=course_fp,
-                corpus_fp=corpus_fp,
-                on_shard=on_shard,
-                on_collect_end=on_collect_end,
-                on_dispatch_drained=on_dispatch_drained,
-                on_dispatch_active=on_dispatch_active,
-                **_stream_kwargs,
+                StreamRunSpec(
+                    bun=bun,
+                    rl_path=args.out,
+                    traj_dir=traj_dir,
+                    pairs=pairs,
+                    args=args,
+                    cfg=dist_cfg,
+                    iter_id=iter_id,
+                    model=model,
+                    opt=opt,
+                    device=device,
+                    on_collect_done=_fire_eval,
+                    on_epoch_done=_on_epoch_done,
+                    extra_wver=extra_wver,
+                    course_fp=course_fp,
+                    corpus_fp=corpus_fp,
+                    on_shard=on_shard,
+                    on_collect_end=on_collect_end,
+                    on_dispatch_drained=on_dispatch_drained,
+                    on_dispatch_active=on_dispatch_active,
+                    **_stream_kwargs,
+                )
             )
             stream_meta = report
         else:

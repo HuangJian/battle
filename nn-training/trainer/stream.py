@@ -533,34 +533,45 @@ class _StreamRun:
         return report
 
 
-def run_rollout_stream(
-    bun: str,
-    rl_path: str,
-    traj_dir,
-    pairs: list[tuple[int, int]],
-    args,
-    cfg: dict,
-    iter_id: str,
-    model,
-    opt,
-    device,
-    on_collect_done=None,
-    on_ppo_started=None,
-    on_epoch_done=None,
-    backend: RolloutBackend | None = None,
-    update_kwargs: dict | None = None,
-    extra_wver: str | None = None,
-    course_fp: str | None = None,
-    corpus_fp: str | None = None,
-    on_shard=None,
+@dataclass(frozen=True, kw_only=True)
+class StreamRunSpec:
+    """`run_rollout_stream` 的旋钮袋（P0-3：22 参 → 一个对象）。
+
+    前 10 个是身份位，后 12 个是可选接线：评估触发（`on_collect_done` / `on_ppo_started`）、
+    波次回调（`on_epoch_done`）、零落盘（`on_shard`）、收尾解冻（`on_collect_end`）、
+    eval 动态闸（`on_dispatch_drained` / `on_dispatch_active`）。旧位置表里这些回调
+    与 `backend` / `update_kwargs` 只差一位 —— 串了不会报错，只会让评估不触发或语料不记账。
+    """
+
+    bun: str
+    rl_path: str
+    traj_dir: Path
+    pairs: list[tuple[int, int]]
+    args: argparse.Namespace | SimpleNamespace
+    cfg: dict
+    iter_id: str
+    model: object
+    opt: object
+    device: str
+    on_collect_done: Callable[[], object] | None = None
+    on_ppo_started: Callable[[], object] | None = None
+    on_epoch_done: Callable[..., object] | None = None
+    backend: RolloutBackend | None = None
+    update_kwargs: dict | None = None
+    extra_wver: str | None = None
+    course_fp: str | None = None
+    corpus_fp: str | None = None
+    on_shard: object = None
     # 采集真正收官（collector 线程退出）时回调一次；调用方用它解冻 eval 闸。
     # 必须在尾部 drain **之前**调用：尾部 PPO 是本地算力，节点已经空闲，eval 该进场。
-    on_collect_end=None,
+    on_collect_end: Callable[[], None] | None = None
     # 队列清空/回队（stream 的 eval 动态闸）：全部任务已派出 ⇒ 解冻本课 eval；
     # 超时任务回队 ⇒ 重新冻结，保证 rollout 仍优先。
-    on_dispatch_drained=None,
-    on_dispatch_active=None,
-) -> dict:
+    on_dispatch_drained: Callable[[], None] | None = None
+    on_dispatch_active: Callable[[], None] | None = None
+
+
+def run_rollout_stream(spec: StreamRunSpec) -> dict:
     """流式迭代（--stream 1）：采集与 PPO 重叠。
 
     backend（工程化共享）：per-tick RL 用 ppo（默认），意图 RL 用 ppo_intent——
@@ -593,6 +604,17 @@ def run_rollout_stream(
     相位（2026-11-18，长函数存量第三十六刀）：执行面（collector 回调 / wave 装载 /
     drain / 收尾）住 `_StreamRun`，输入与运行时状态住 `_StreamCtx`；本函数只做装配。
     """
+    # 旧签名 22 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    bun, rl_path, traj_dir = spec.bun, spec.rl_path, spec.traj_dir
+    pairs, args, cfg = spec.pairs, spec.args, spec.cfg
+    iter_id, model, opt = spec.iter_id, spec.model, spec.opt
+    device = spec.device
+    on_collect_done, on_ppo_started = spec.on_collect_done, spec.on_ppo_started
+    on_epoch_done, backend = spec.on_epoch_done, spec.backend
+    update_kwargs, extra_wver = spec.update_kwargs, spec.extra_wver
+    course_fp, corpus_fp = spec.course_fp, spec.corpus_fp
+    on_shard, on_collect_end = spec.on_shard, spec.on_collect_end
+    on_dispatch_drained, on_dispatch_active = spec.on_dispatch_drained, spec.on_dispatch_active
     # ★ A2（2026-11-17）fail-closed：本机 PPO 的两条装载路（`_drain` 的
     # `load_episode_from_shard` 与收官兜底的 `load_episodes`）都要 obs/scalars/extra。
     # 语料一旦是 replay 形态（这三张不在盘上，worker 侧靠转换器重建），它们会炸在

@@ -8818,6 +8818,18 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-22-stream-run-spec
+
+P0-3 第三十五刀（`trainer/stream.py`）：`run_rollout_stream` 的 22 个参数 →
+frozen + kw_only 的 `StreamRunSpec`，入口只收 `spec`、展开后函数体逐字不动。
+为什么不是「少几个参数」：中段夹着 `backend` / `update_kwargs`，尾部是 eval 动态闸 +
+零落盘 + 收官解冻的回调簇 —— 位置表串一位不报错，只会让评估不触发或语料不记账。
+字段类型直接对齐既有 `_StreamCtx`（`Callable[[], object] | None` 等），装配处零断言；
+`args` / `model` / `opt` 沿用上游 spec 的窄口径（不抬 G14 的 `Any` 基线）。
+调用点：生产 1（`rollout_phase` 的 stream 分支）+ e2e 4 + 单测 2。
+宽签名 **60 → 59**（49 → 48 文件），本文件 1 → **0**。
+守 `tests/trainer/test_stream_run_spec.py`（3 条），细节 → `docs/nn/engineering.md §288`。
+
 ## §2026-11-22-rollout-phase-spec
 
 P0-3 第三十四刀（`trainer/rollout_phase.py`）：`dispatch_rollout_phase` 的 25 个参数 →
