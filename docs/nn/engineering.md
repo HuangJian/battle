@@ -25,6 +25,24 @@
 
 ---
 
+## §292 P0-3 第三十九刀：派发两入口共收 `DispatchSpec`（56 → 54）（2026-11-22）
+
+* `trainer/dispatch_state.py` 新增 frozen + kw_only `DispatchSpec`（7 个身份位 + 12 个可选
+  接线/旋钮），`run_rollout_queue`（薄包装）与 `RolloutDispatcher.__init__`（OO 本体）
+  **共用同一张字段表**。旧版是两张同样的 20 参表，包装层按**位置**转手 19 个参数
+  （只有 `on_shard` 靠关键字）—— 传错一位不报错：`cfg` 进了 `args`、`on_result` 进了
+  `local_slots_max`，要跑到对应相位才炸。
+* `trainer/dispatch.py` 宽签名 1 → **0**、`trainer/dispatch_queue.py` 1 → **0**；
+  全仓 56 → **54**，文件 47 → **45**。
+* 类型面：`on_shard` 从鸭子型 `object` 收窄为
+  `Callable[[str, dict[str, bytes], dict], None] | None`（`common.shard.write_shard` 的
+  `on_receive` 契约），`trainer/stream` 的 `_StreamCtx` / `StreamRunSpec` 同步。
+* 调用点 15 处（生产 4：`stream` / `rollout_phase` / `collect_only`×2；测试 11）全改传
+  spec；`test_stream_collect_end` 的假队列改读 `spec.on_queue_drained`。
+* 守 `tests/trainer/test_dispatch_spec.py`（3 条：frozen + kw_only / 19 字段 /
+  两入口都只收 spec）。
+* 回归：新守卫(3) + 派发族 55 条绿；全量 `bun run pygate` 绿（6732 passed）。
+
 ## §291 P0-3 第三十八刀：`run_one_round` 收 `JobRoundSpec`（57 → 56）（2026-11-22）
 
 * `remote/job_round.py`：21 参 → frozen + kw_only `JobRoundSpec`（16 个必填位 +

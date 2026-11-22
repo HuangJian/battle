@@ -108,12 +108,12 @@ def test_dispatch_gate_opens_on_drain_and_refreezes_on_refill(tmp_path, monkeypa
     """P0-2 的 stream 动态闸：队列清空 → 解冻；回队 → 重冻；收官再兜底解冻。"""
     order: list[str] = []
 
-    def fake_queue(*_a, on_queue_drained=None, on_queue_active=None, **_kw):
-        on_queue_drained()
+    def fake_queue(spec):
+        spec.on_queue_drained()
         order.append("drained")
-        on_queue_active()
+        spec.on_queue_active()
         order.append("active")
-        on_queue_drained()
+        spec.on_queue_drained()
         order.append("drained")
         return {"games": 0}
 

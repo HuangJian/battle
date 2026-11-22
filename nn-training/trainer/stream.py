@@ -21,6 +21,7 @@ from common.contracts import EpisodeLike
 from common.log import log
 from common.text import exc_tail
 from trainer.dispatch_queue import local_slots_max_of, run_rollout_queue
+from trainer.dispatch_state import DispatchSpec
 from worker.backend import RolloutBackend
 from worker.resume import _scan_shards, completed_pairs, state_init_enabled
 
@@ -120,7 +121,7 @@ class _StreamCtx:
     on_collect_done: Callable[[], object] | None
     on_ppo_started: Callable[[], object] | None
     on_epoch_done: Callable[..., object] | None
-    on_shard: object
+    on_shard: Callable[[str, dict[str, bytes], dict], None] | None
     on_collect_end: Callable[[], None] | None
     on_dispatch_drained: Callable[[], None] | None
     on_dispatch_active: Callable[[], None] | None
@@ -210,26 +211,28 @@ class _StreamRun:
         c = self.c
         try:
             c.box["report"] = run_rollout_queue(
-                c.bun,
-                c.rl_path,
-                c.traj_dir,
-                c.pairs,
-                c.args,
-                c.cfg,
-                c.iter_id,
-                on_result=self._on_result,
-                local_slots_max=c.local_slots,
-                tail_dispatch=False,
-                halt_event=c.halt_ev,
-                local_suspend=c.ppo_started_ev,
-                on_queue_drained=self._on_queue_drained,
-                on_queue_active=self._on_queue_active,
-                extra_wver=c.extra_wver,
-                course_fp=c.course_fp,
-                corpus_fp=c.corpus_fp,
-                # 零落盘（plan/payload-zero-disk）：串行/流式两条腿的注入点**同一个**
-                # （都走 run_rollout_queue → RolloutDispatcher），这里只负责透传。
-                on_shard=c.on_shard,
+                DispatchSpec(
+                    bun=c.bun,
+                    rl_path=c.rl_path,
+                    traj_dir=c.traj_dir,
+                    pairs=c.pairs,
+                    args=c.args,
+                    cfg=c.cfg,
+                    iter_id=c.iter_id,
+                    on_result=self._on_result,
+                    local_slots_max=c.local_slots,
+                    tail_dispatch=False,
+                    halt_event=c.halt_ev,
+                    local_suspend=c.ppo_started_ev,
+                    on_queue_drained=self._on_queue_drained,
+                    on_queue_active=self._on_queue_active,
+                    extra_wver=c.extra_wver,
+                    course_fp=c.course_fp,
+                    corpus_fp=c.corpus_fp,
+                    # 零落盘（plan/payload-zero-disk）：串行/流式两条腿的注入点**同一个**
+                    # （都走 run_rollout_queue → RolloutDispatcher），这里只负责透传。
+                    on_shard=c.on_shard,
+                )
             )
             # 兜底：本地回退路径不会触发队列清空回调，收官时补触发（护栏幂等）。
             self._fire_eval_once("collector done")
@@ -561,7 +564,7 @@ class StreamRunSpec:
     extra_wver: str | None = None
     course_fp: str | None = None
     corpus_fp: str | None = None
-    on_shard: object = None
+    on_shard: Callable[[str, dict[str, bytes], dict], None] | None = None
     # 采集真正收官（collector 线程退出）时回调一次；调用方用它解冻 eval 闸。
     # 必须在尾部 drain **之前**调用：尾部 PPO 是本地算力，节点已经空闲，eval 该进场。
     on_collect_end: Callable[[], None] | None = None

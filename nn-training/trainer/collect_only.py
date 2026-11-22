@@ -20,6 +20,7 @@ from trainer.dispatch_queue import (
     local_slots_max_of,
     run_rollout_queue,
 )
+from trainer.dispatch_state import DispatchSpec
 from trainer.queue_local import run_rollout
 
 
@@ -77,34 +78,38 @@ def run_collect_only(args, traj_root, rotate_seed, bun) -> None:
 
         if dist_cfg and any(n.get("enabled", True) for n in dist_cfg.get("nodes", [])):
             report = run_rollout_queue(
-                bun,
-                args.bc,
-                traj_dir,
-                pairs,
-                args,
-                dist_cfg,
-                iter_id,
-                on_result=_on_result,
-                halt_event=halt_event,
-                # 本机直跑槽位（2026-09-09 补齐：此前漏传 ⇒ rl.local_slots 失效、
-                # local 恒按 workers 满额并发）。0 = 关闭本机直跑（远端兜底保留）。
-                local_slots_max=local_slots_max_of(args),
-                course_fp=_course_file_fp(args),
+                DispatchSpec(
+                    bun=bun,
+                    rl_path=args.bc,
+                    traj_dir=traj_dir,
+                    pairs=pairs,
+                    args=args,
+                    cfg=dist_cfg,
+                    iter_id=iter_id,
+                    on_result=_on_result,
+                    halt_event=halt_event,
+                    # 本机直跑槽位（2026-09-09 补齐：此前漏传 ⇒ rl.local_slots 失效、
+                    # local 恒按 workers 满额并发）。0 = 关闭本机直跑（远端兜底保留）。
+                    local_slots_max=local_slots_max_of(args),
+                    course_fp=_course_file_fp(args),
+                )
             )
         else:
             report = run_rollout(bun, args.bc, traj_dir, pairs, args)
     else:
         if dist_cfg and any(n.get("enabled", True) for n in dist_cfg.get("nodes", [])):
             report = run_rollout_queue(
-                bun,
-                args.bc,
-                traj_dir,
-                pairs,
-                args,
-                dist_cfg,
-                iter_id,
-                local_slots_max=local_slots_max_of(args),
-                course_fp=_course_file_fp(args),
+                DispatchSpec(
+                    bun=bun,
+                    rl_path=args.bc,
+                    traj_dir=traj_dir,
+                    pairs=pairs,
+                    args=args,
+                    cfg=dist_cfg,
+                    iter_id=iter_id,
+                    local_slots_max=local_slots_max_of(args),
+                    course_fp=_course_file_fp(args),
+                )
             )
         else:
             report = run_rollout(bun, args.bc, traj_dir, pairs, args)

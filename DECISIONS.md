@@ -8818,6 +8818,18 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-22-dispatch-spec
+
+P0-3 第三十九刀：`run_rollout_queue`（薄包装）与 `RolloutDispatcher.__init__`（OO 本体）
+共用一张 frozen + kw_only 的 `DispatchSpec`（定义在 `trainer/dispatch_state.py`）。
+两处旧版是**两张同样的 20 参表**，包装层把 19 个参数按位置原样转手 —— 传错一位不报错：
+`cfg` 进了 `args`、`on_result` 进了 `local_slots_max`，要跑到对应相位才炸。
+入参分类：7 个身份位（bun / 权重 / 语料 / 迭代）+ 12 个可选接线与旋钮。
+`on_shard` 同时从鸭子型 `object` 收窄为 `Callable[[str, dict[str, bytes], dict], None] | None`
+（`common.shard.write_shard` 的 `on_receive` 契约），`trainer/stream` 同步。
+调用点 15 处全改传 spec。宽签名 **56 → 54**，两个文件均清零（文件 47 → 45）。
+守 `tests/trainer/test_dispatch_spec.py`（3 条），细节 → `docs/nn/engineering.md §292`。
+
 ## §2026-11-22-job-round-spec
 
 P0-3 第三十八刀（`remote/job_round.py`）：`run_one_round` 的 21 个参数 → frozen + kw_only

@@ -26,6 +26,7 @@ from typing import Any
 from common.log import log
 from trainer.collect_only import precollect_snapshot_wver, spawn_collect_next
 from trainer.dispatch_queue import RUN_ID, local_slots_max_of, run_rollout_queue
+from trainer.dispatch_state import DispatchSpec
 from trainer.eval_dispatch import EvalDispatchSpec, dispatch_eval_bg
 from trainer.eval_m1 import dispatch_eval_bg_m1
 from trainer.queue_local import run_rollout
@@ -439,28 +440,30 @@ def dispatch_rollout_phase(spec: RolloutPhaseSpec) -> tuple[
             stream_meta = report
         else:
             report = run_rollout_queue(
-                bun,
-                args.out,
-                traj_dir,
-                pairs,
-                args,
-                dist_cfg,
-                iter_id,
-                # 本机直跑槽位（2026-09-06 引入 / 2026-09-09 统一语义）：
-                # 0 = 关闭本机直跑（全交给远端），负数/None = auto 退回 workers 封顶。
-                # 旧写法 `args.local_slots or None` 把 0 也吞成 None（关不掉）。
-                local_slots_max=local_slots_max_of(args),
-                course_fp=course_fp,
-                corpus_fp=corpus_fp,
-                # ★ 2026-10-21（用户口径「铺满 + 满额即停」）：调用方可以
-                #   ① `on_result` 每结算一局就更新逐关账本；② 满额后 `halt_event`
-                #   置位 ⇒ worker 立即停止取新任务，池里没派出去的候选从不运行。
-                #   `run_rollout`（无节点/纯本机）没有这两个口 ⇒ 只在队列路径传。
-                halt_event=halt_event,
-                on_result=on_result,
-                # 候选池语义：`halt` = 逐关满额 ⇒ 没派的候选不算缺口（外部熔断不带这个标记）
-                pool_halt=pool_halt,
-                on_shard=on_shard,
+                DispatchSpec(
+                    bun=bun,
+                    rl_path=args.out,
+                    traj_dir=traj_dir,
+                    pairs=pairs,
+                    args=args,
+                    cfg=dist_cfg,
+                    iter_id=iter_id,
+                    # 本机直跑槽位（2026-09-06 引入 / 2026-09-09 统一语义）：
+                    # 0 = 关闭本机直跑（全交给远端），负数/None = auto 退回 workers 封顶。
+                    # 旧写法 `args.local_slots or None` 把 0 也吞成 None（关不掉）。
+                    local_slots_max=local_slots_max_of(args),
+                    course_fp=course_fp,
+                    corpus_fp=corpus_fp,
+                    # ★ 2026-10-21（用户口径「铺满 + 满额即停」）：调用方可以
+                    #   ① `on_result` 每结算一局就更新逐关账本；② 满额后 `halt_event`
+                    #   置位 ⇒ worker 立即停止取新任务，池里没派出去的候选从不运行。
+                    #   `run_rollout`（无节点/纯本机）没有这两个口 ⇒ 只在队列路径传。
+                    halt_event=halt_event,
+                    on_result=on_result,
+                    # 候选池语义：`halt` = 逐关满额 ⇒ 没派的候选不算缺口（外部熔断不带这个标记）
+                    pool_halt=pool_halt,
+                    on_shard=on_shard,
+                )
             )
             # 串行：rollout 返回即 collector 收官。per-tick A-eval 不在此派发——
             # P0 修复：此处派发读到的活指针还是 W(it-1)（本轮 PPO 未跑）却标 itN。

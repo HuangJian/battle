@@ -32,6 +32,7 @@ import common.task_client
 import trainer.dispatch as disp
 import trainer.queue_local as ql
 from tests.helpers.toolchain import stub_toolchain
+from trainer.dispatch_state import DispatchSpec
 
 GOOD_PING: dict[str, Any] = {
     "codeHash": "deadbeef",
@@ -154,19 +155,21 @@ class _Harness:
         self.mp.setattr(common.task_client, "fetch_task", fetch)
         pairs = [(2000, i + 1) for i in range(self.games)]
         return disp.RolloutDispatcher(
-            "bun",
-            str(self.weights),
-            self.traj,
-            pairs,
-            self.args,
-            self.cfg,
-            "rid.7",
-            local_slots_max=self.local_slots,
-            halt_event=halt_event,
-            on_queue_drained=on_queue_drained,
-            on_queue_active=on_queue_active,
-            on_shard=on_shard,
-            pool_halt=pool_halt,
+            DispatchSpec(
+                bun="bun",
+                rl_path=str(self.weights),
+                traj_dir=self.traj,
+                pairs=pairs,
+                args=self.args,
+                cfg=self.cfg,
+                iter_id="rid.7",
+                local_slots_max=self.local_slots,
+                halt_event=halt_event,
+                on_queue_drained=on_queue_drained,
+                on_queue_active=on_queue_active,
+                on_shard=on_shard,
+                pool_halt=pool_halt,
+            )
         ).run()
 
     def stop_when_rearm_exhausted(self, monkeypatch) -> threading.Event:

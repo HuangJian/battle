@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import os
 import secrets
-import threading
-from pathlib import Path
+
+from trainer.dispatch_state import DispatchSpec
 
 # 本模块是**编排层**（`run_rollout_queue` 等），不是第二个 import 面：re-export 面已于
 # 2026-11-14 全部退役（版本探测 / agent meta / 轮级竞速 / `run_rollout` 都回到各自家里：
@@ -51,50 +51,8 @@ def local_slots_max_of(args) -> int | None:
     return v if v >= 0 else None
 
 
-def run_rollout_queue(
-    bun: str,
-    rl_path: str,
-    traj_dir: Path,
-    pairs: list[tuple[int, int]],
-    args,
-    cfg: dict,
-    iter_id: str,
-    on_result=None,
-    local_slots_max: int | None = None,
-    tail_dispatch: bool = True,
-    halt_event: threading.Event | None = None,
-    on_queue_drained=None,
-    on_queue_active=None,
-    local_suspend: threading.Event | None = None,
-    extra_wver: str | None = None,
-    course_fp: str | None = None,
-    corpus_fp: str | None = None,
-    pool_halt: bool = False,
-    # 零落盘（plan/payload-zero-disk §3）：dispatch 腿收到 shard 字节时按名回调
-    # （trainer 侧 `ShardSegments.add` 当场打段+压好）。缺省 None = 旧行为。
-    on_shard=None,
-) -> dict:
+def run_rollout_queue(spec: DispatchSpec) -> dict:
     """中央队列调度（薄包装：RolloutDispatcher 构造 + run，OO 实现在 trainer/dispatch.py）。"""
     from trainer.dispatch import RolloutDispatcher
 
-    return RolloutDispatcher(
-        bun,
-        rl_path,
-        traj_dir,
-        pairs,
-        args,
-        cfg,
-        iter_id,
-        on_result,
-        local_slots_max,
-        tail_dispatch,
-        halt_event,
-        on_queue_drained,
-        on_queue_active,
-        local_suspend,
-        extra_wver,
-        course_fp,
-        corpus_fp,
-        pool_halt,
-        on_shard=on_shard,
-    ).run()
+    return RolloutDispatcher(spec).run()
