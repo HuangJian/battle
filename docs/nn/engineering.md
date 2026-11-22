@@ -25,6 +25,30 @@
 
 ---
 
+## §300 P0-3 第四十七刀：`build_plan` 收 `PlanSpec`（45 → 44）（2026-11-22）
+
+* `worker/plan.build_plan` 原来 1 个位置位（`args`）+ 13 个关键字。现在只收一份 frozen +
+  kw_only `PlanSpec`（同模块）。宽签名 45 → **44**，文件 37 → **36**。
+* **失效面**：13 个关键字**全部由 hub 导出时手写**（`trainer/loop_export.py` 一处），漏一个不报错：
+  `max_iters` / `max_segment_iters` 落丢 = 计划覆盖整段课程（后者是硬上界的**再降档**，丢回 0
+  就是取最宽那个值）；`volume` / `rotation` 落丢 = **静默退成固定局数的老口径**（云端采样量
+  与本地集群不一致）；`template_wver` / `node_label` 落丢 = 模板 argv 指向错权重版本名/错节点标签。
+  而且那道「自检」掩护不了它：`check_plan_against_args` 比的是**同一份计划**重放的对集，
+  计划本身按错的旋钮组装时它照样全绿。
+* **调用点**：生产 1 处（`trainer/loop_export` 的导出路径）+ 测试 10 个文件 / 49 处（`test_plan` 24 ·
+  `test_volume_plan_block` 6 · `test_plan_rotation_multiround` 4 · `test_run_loop` 4 · `test_run_segment` 3 ·
+  `test_bundle` 3 · `test_plan_rotation_cloud` 2 · `test_plan_handoff_split` 1 · `e2e/test_offline_training_e2e` 1 ·
+  `test_offline_leg_retired` 的 `build_plan` 替身改读 `spec.iters_total`）。批量改写用一次性 AST 脚本
+  （首个位置实参 `args` → `args=` 并套一层 `PlanSpec(`），改完逐个跑。
+* `log` 的缺省从 `lambda msg: None` 换成模块级 `_noop_log`（dataclass 缺省不承接闭包；
+  `worker/ppo/update_spec._noop_log` 同款）。
+* 新守卫 `tests/worker/test_plan_spec.py`（5 条：frozen + 全字段 kw_only / 14 字段与缺省逐项表 /
+  `build_plan` 只剩 `spec` / 最小 spec 可构造 / 未知字段 `TypeError`，外加一条
+  **生产调用点 AST 守卫**：`PlanSpec(...)` 的关键字集合 == 字段集合减两项故意落缺省的
+  `node_label` / `template_wver`，且不许位置实参）。
+* 教训（工具面）：一次性 AST 改写脚本必须自带**幂等检查**（`args` 里已有 `PlanSpec(...)` 就跳过），
+  否则跑两遍就是双重包装 —— 本次确实发生过一次，用 `git checkout` + 幂等重跑修回。
+
 ## §299 P0-3 第四十六刀：`run_ppo` 收 `PPOSpec`（46 → 45）（2026-11-22）
 
 * `worker/ppo/loop.run_ppo` 原来 15 个形参：5 个身份位（`model` / `opt` / `chunks` / `epochs` /

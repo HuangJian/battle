@@ -65,7 +65,7 @@ from tests.helpers.console_stub import NoHandoffConsole
 from tests.helpers.hub_poll import hub_poll
 from tests.subproc_util import spawn_bound_port
 from worker.iter_job import build_iter_spec
-from worker.plan import build_plan, dump_plan
+from worker.plan import PlanSpec, build_plan, dump_plan
 
 
 @pytest.fixture(autouse=True)
@@ -185,7 +185,9 @@ def _publish_run_job(
     """
     args = _plan_args()
     plan = build_plan(
-        args, it=it, iters_total=it + n, rotate_seed=99, max_iters=n - 1, log=_quiet
+        PlanSpec(
+            args=args, it=it, iters_total=it + n, rotate_seed=99, max_iters=n - 1, log=_quiet
+        )
     )
     plan_bytes = dump_plan(plan)
     w = tmp_path / "init_weights.json"

@@ -56,7 +56,7 @@ from remote.run_loop import (
     run_standalone,
     verify_plan_file,
 )
-from worker.plan import build_plan, dump_plan, pairs_for, planned_iters
+from worker.plan import PlanSpec, build_plan, dump_plan, pairs_for, planned_iters
 
 
 def _quiet(_msg: str) -> None:  # 测试日志静音
@@ -218,7 +218,9 @@ def _prepare(tmp_path: Path, *, iters: int = 4, start_it: int = 1):
     错误的世界模型」，真包里的差一永远照不出来。`build_plan(it=start_it)` 给出的就是 `start_it`。
     """
     plan = build_plan(
-        _args(), it=start_it, iters_total=iters - 1 + start_it, rotate_seed=4242, log=_quiet
+        PlanSpec(
+            args=_args(), it=start_it, iters_total=iters - 1 + start_it, rotate_seed=4242, log=_quiet
+        )
     )
     m = _manifest(it=start_it + 1)
     m["plan_sha256"] = sha256_bytes(dump_plan(plan))
@@ -434,13 +436,13 @@ def test_combined_rejects_result_without_any_report(tmp_path: Path) -> None:
     _plan, m, job_dir, _first = _prepare(tmp_path, iters=2)
     store = ArtifactStore(tmp_path / "art2", run_id="run-runloop")
     store.start(
-        build_plan(_args(), it=1, iters_total=2, rotate_seed=1, log=_quiet),
+        build_plan(PlanSpec(args=_args(), it=1, iters_total=2, rotate_seed=1, log=_quiet)),
         m,
         plan_sha256=m["plan_sha256"],
     )
     ctx = open_run_context(
               RunSetup(
-                  plan=build_plan(_args(), it=1, iters_total=2, rotate_seed=1, log=_quiet),
+                  plan=build_plan(PlanSpec(args=_args(), it=1, iters_total=2, rotate_seed=1, log=_quiet)),
                   plan_sha256=m["plan_sha256"],
                   manifest=m,
                   job_dir=job_dir,
@@ -754,7 +756,7 @@ def test_iteration_failure_finalizes_artifacts_and_stays_resumable(tmp_path: Pat
 
 def test_verify_plan_file_rejects_tampered_or_mismatched(tmp_path: Path) -> None:
     """sha / pairs_fp / start_it 三道具名成立：任一不符都在**跑第一局之前**响。"""
-    plan = build_plan(_args(), it=2, iters_total=5, rotate_seed=77, log=_quiet)
+    plan = build_plan(PlanSpec(args=_args(), it=2, iters_total=5, rotate_seed=77, log=_quiet))
     job_dir = tmp_path / "job"
     job_dir.mkdir(parents=True, exist_ok=True)
     raw = dump_plan(plan)

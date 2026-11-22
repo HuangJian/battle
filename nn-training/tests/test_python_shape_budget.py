@@ -124,7 +124,8 @@ WIDE_FUNCS_BASELINE = {
     "worker/iter_rollout.py": 2,
     "worker/models/student.py": 1,
     "worker/models/student_paddle.py": 1,
-    "worker/plan.py": 1,
+    # 2026-11-22（P0-3 第四十七刀）：`build_plan` 的 1 位置 + 13 关键字收成 `PlanSpec`
+    # ⇒ 本文件宽签名归零，条目删除（守 `tests/worker/test_plan_spec.py`）。
     # 2026-11-22（P0-3 第四十二刀）：`ppo_update` 的 20 个参数（Paddle 21）收成
     # `TorchUpdateSpec` / `PaddleUpdateSpec`（共用 `BaseUpdateSpec`）⇒ 两个条目删除；
     # 守 `tests/worker/test_ppo_update_spec.py`。

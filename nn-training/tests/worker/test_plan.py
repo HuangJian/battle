@@ -30,6 +30,7 @@ if str(ROOT) not in sys.path:
 from biz.course import build_pairs
 from common.protocol import RUN_MAX_ITERS_HARD_CAP, ProtocolError
 from worker.plan import (
+    PlanSpec,
     argv_fp,
     build_plan,
     check_plan_against_args,
@@ -76,7 +77,7 @@ def _args(**over: object) -> SimpleNamespace:
 def test_pairs_replay_matches_real_build_pairs_rotate() -> None:
     """rotate 模式：计划重放 == 真 args 的 build_pairs（逐位）。"""
     args = _args()
-    plan = build_plan(args, it=3, iters_total=9, rotate_seed=4242, log=lambda _m: None)
+    plan = build_plan(PlanSpec(args=args, it=3, iters_total=9, rotate_seed=4242, log=lambda _m: None))
     for it in planned_iters(plan):
         assert pairs_for(plan, it) == build_pairs(args, it, 4242)
 
@@ -84,7 +85,7 @@ def test_pairs_replay_matches_real_build_pairs_rotate() -> None:
 def test_pairs_replay_matches_real_build_pairs_curriculum() -> None:
     """课程模式：激活窗口随 it 扩展 —— `curriculum_*` 少一个字段就会被抓（这是最险的模式）。"""
     args = _args(curriculum_stages="0-5", rotate_stages=0, seeds_per_stage=1, curriculum_every=2)
-    plan = build_plan(args, it=1, iters_total=7, rotate_seed=99, log=lambda _m: None)
+    plan = build_plan(PlanSpec(args=args, it=1, iters_total=7, rotate_seed=99, log=lambda _m: None))
     assert [len(pairs_for(plan, it)) for it in planned_iters(plan)] == [
         len(build_pairs(args, it, 99)) for it in planned_iters(plan)
     ]
@@ -95,7 +96,7 @@ def test_pairs_replay_matches_real_build_pairs_curriculum() -> None:
 def test_pairs_replay_matches_real_build_pairs_seed_rotate() -> None:
     """seed 轮转模式（`--seed-rotate N`）同样必须逐位重放。"""
     args = _args(seed_rotate=3, rotate_stages=0)
-    plan = build_plan(args, it=2, iters_total=4, rotate_seed=7, log=lambda _m: None)
+    plan = build_plan(PlanSpec(args=args, it=2, iters_total=4, rotate_seed=7, log=lambda _m: None))
     for it in planned_iters(plan):
         assert pairs_for(plan, it) == build_pairs(args, it, 7)
 
@@ -103,7 +104,7 @@ def test_pairs_replay_matches_real_build_pairs_seed_rotate() -> None:
 def test_plan_self_check_catches_missing_pair_field() -> None:
     """`PAIR_ARG_FIELDS` 漏字段 = 云机算出的语料与 hub 不同——必须在**发布期**红。"""
     args = _args(curriculum_stages="0-5", rotate_stages=0)
-    plan = build_plan(args, it=1, iters_total=5, rotate_seed=3, log=lambda _m: None)
+    plan = build_plan(PlanSpec(args=args, it=1, iters_total=5, rotate_seed=3, log=lambda _m: None))
     plan["pair_args"].pop("curriculum_stages", None)  # 模拟漏字段 / 计划被改
     with pytest.raises(ProtocolError) as ei:
         check_plan_against_args(args, plan)
@@ -113,7 +114,7 @@ def test_plan_self_check_catches_missing_pair_field() -> None:
 def test_plan_fp_is_stable_and_order_sensitive() -> None:
     """`pairs_fp`：同计划两次调用同值；轮次顺序不同则不同（不许把轮序当无序集合）。"""
     args = _args()
-    plan = build_plan(args, it=1, iters_total=4, rotate_seed=11, log=lambda _m: None)
+    plan = build_plan(PlanSpec(args=args, it=1, iters_total=4, rotate_seed=11, log=lambda _m: None))
     assert plan_pairs_fp(plan) == plan_pairs_fp(dict(plan))
     assert plan["pairs_fp"] == plan_pairs_fp(plan)
     shuffled = dict(plan)
@@ -199,7 +200,7 @@ def test_retarget_stage_json_add_replace_remove() -> None:
 def test_argv_template_covers_every_game_and_fp_matches() -> None:
     """模板逐局一条 + `argv_fp` 与两侧算法一致；`iter_spec` 复用模板（局数/关卡/种子对得上）。"""
     args = _args()
-    plan = build_plan(args, it=1, iters_total=3, rotate_seed=5, log=lambda _m: None)
+    plan = build_plan(PlanSpec(args=args, it=1, iters_total=3, rotate_seed=5, log=lambda _m: None))
     tmpl = plan["argv_template"]
     tmpl_it = plan["start_it"] + 1
     pairs = pairs_for(plan, tmpl_it)
@@ -226,15 +227,15 @@ def test_argv_template_covers_every_game_and_fp_matches() -> None:
 def test_plan_shape_and_clamps() -> None:
     """区间/上限：`max_iters` 与课程预算取交集，硬上界钳制，无轮次可跑则拒发。"""
     args = _args()
-    plan = build_plan(args, it=2, iters_total=10, rotate_seed=1, max_iters=3, log=lambda _m: None)
+    plan = build_plan(PlanSpec(args=args, it=2, iters_total=10, rotate_seed=1, max_iters=3, log=lambda _m: None))
     assert (plan["start_it"], plan["end_it"]) == (2, 5)
     assert planned_iters(plan) == [3, 4, 5]
-    full = build_plan(args, it=2, iters_total=10, rotate_seed=1, log=lambda _m: None)
+    full = build_plan(PlanSpec(args=args, it=2, iters_total=10, rotate_seed=1, log=lambda _m: None))
     assert full["end_it"] == 10
-    over = build_plan(args, it=2, iters_total=10, rotate_seed=1, max_iters=999, log=lambda _m: None)
+    over = build_plan(PlanSpec(args=args, it=2, iters_total=10, rotate_seed=1, max_iters=999, log=lambda _m: None))
     assert over["end_it"] == 10  # 课程预算是天花板
     with pytest.raises(ProtocolError) as ei:
-        build_plan(args, it=10, iters_total=10, rotate_seed=1, log=lambda _m: None)
+        build_plan(PlanSpec(args=args, it=10, iters_total=10, rotate_seed=1, log=lambda _m: None))
     assert "没有可自主跑的轮次" in str(ei.value)
 
 
@@ -247,27 +248,29 @@ def test_infinite_course_plan_is_an_open_ended_segment() -> None:
     `iters_total` 保持 `0` 原值（否则云机会把段末当成课末）。
     """
     args = _args()
-    plan = build_plan(args, it=0, iters_total=0, rotate_seed=1, log=lambda _m: None)
+    plan = build_plan(PlanSpec(args=args, it=0, iters_total=0, rotate_seed=1, log=lambda _m: None))
     assert plan["open_ended"] is True
     assert plan["iters_total"] == 0
     assert plan["end_it"] == RUN_MAX_ITERS_HARD_CAP
     assert len(planned_iters(plan)) == RUN_MAX_ITERS_HARD_CAP
     assert validate_plan(json.loads(json.dumps(plan)))["open_ended"] is True
     # 段长可降（`--run-iters 10`）：仍是开区间，终点 = it + 10
-    short = build_plan(args, it=7, iters_total=0, rotate_seed=1, max_iters=10, log=lambda _m: None)
+    short = build_plan(PlanSpec(args=args, it=7, iters_total=0, rotate_seed=1, max_iters=10, log=lambda _m: None))
     assert (short["start_it"], short["end_it"], short["open_ended"]) == (7, 17, True)
     # 段长 > 硬上界仍拒（这条闸两个分支共用：抬阀值不是表达无限轮的手法）
     with pytest.raises(ProtocolError, match="硬上界"):
         build_plan(
-            args,
-            it=0,
-            iters_total=0,
-            rotate_seed=1,
-            max_iters=RUN_MAX_ITERS_HARD_CAP + 1,
-            log=lambda _m: None,
+            PlanSpec(
+                args=args,
+                it=0,
+                iters_total=0,
+                rotate_seed=1,
+                max_iters=RUN_MAX_ITERS_HARD_CAP + 1,
+                log=lambda _m: None,
+            )
         )
     # 负数预算与 0 同义（“无限”的另一种写法）
-    neg = build_plan(args, it=3, iters_total=-5, rotate_seed=1, log=lambda _m: None)
+    neg = build_plan(PlanSpec(args=args, it=3, iters_total=-5, rotate_seed=1, log=lambda _m: None))
     assert (neg["open_ended"], neg["end_it"], neg["iters_total"]) == (True, 3 + RUN_MAX_ITERS_HARD_CAP, -5)
 
 
@@ -281,54 +284,62 @@ def test_run_max_iters_lowers_the_segment_cap_only() -> None:
     args = _args()
     # 开区间段的缺省段长跟着降档走（否则「降了档」只是拒发线更低，而段还是一样的长）
     plan = build_plan(
-        args, it=4, iters_total=0, rotate_seed=1, max_segment_iters=50, log=lambda _m: None
+        PlanSpec(
+            args=args, it=4, iters_total=0, rotate_seed=1, max_segment_iters=50, log=lambda _m: None
+        )
     )
     assert (plan["end_it"], plan["open_ended"]) == (54, True)
     # 真闸也读同一个生效值：51 轮在降档后拒（在硬上界下本可以过）
     with pytest.raises(ProtocolError, match="--run-max-iters 已降档"):
         build_plan(
-            args,
-            it=4,
-            iters_total=0,
-            rotate_seed=1,
-            max_iters=51,
-            max_segment_iters=50,
-            log=lambda _m: None,
+            PlanSpec(
+                args=args,
+                it=4,
+                iters_total=0,
+                rotate_seed=1,
+                max_iters=51,
+                max_segment_iters=50,
+                log=lambda _m: None,
+            )
         )
     # **抬不动**：盯上界的旋钮给一个更大的值也只会被硬上界钳住（抬 = 拆闸，已否决）
     clipped = build_plan(
-        args,
-        it=0,
-        iters_total=0,
-        rotate_seed=1,
-        max_segment_iters=RUN_MAX_ITERS_HARD_CAP + 500,
-        log=lambda _m: None,
+        PlanSpec(
+            args=args,
+            it=0,
+            iters_total=0,
+            rotate_seed=1,
+            max_segment_iters=RUN_MAX_ITERS_HARD_CAP + 500,
+            log=lambda _m: None,
+        )
     )
     assert clipped["end_it"] == RUN_MAX_ITERS_HARD_CAP
     # 有限分支同样跟降档走：算术仍按 `max_iters` 与预算取交集（降档只管「上界」，不重定向
     # 终点），而 `it + 8 = 9` 越过了降档后的 3 ⇒ 拒（旧行为：8 ≤ 500 本可以过）
     with pytest.raises(ProtocolError, match="--run-max-iters 已降档"):
         build_plan(
-            args,
-            it=1,
-            iters_total=10,
-            rotate_seed=1,
-            max_iters=8,
-            max_segment_iters=3,
-            log=lambda _m: None,
+            PlanSpec(
+                args=args,
+                it=1,
+                iters_total=10,
+                rotate_seed=1,
+                max_iters=8,
+                max_segment_iters=3,
+                log=lambda _m: None,
+            )
         )
 
 
 def test_finite_course_plan_is_unchanged_and_not_open_ended() -> None:
     """有限模式**逐字节不变**（J1 是分支加宽，不是重写）：同参两遍同字节 + 新键恒 `False`。"""
     args = _args()
-    a = build_plan(args, it=2, iters_total=10, rotate_seed=1, max_iters=3, log=lambda _m: None)
-    b = build_plan(args, it=2, iters_total=10, rotate_seed=1, max_iters=3, log=lambda _m: None)
+    a = build_plan(PlanSpec(args=args, it=2, iters_total=10, rotate_seed=1, max_iters=3, log=lambda _m: None))
+    b = build_plan(PlanSpec(args=args, it=2, iters_total=10, rotate_seed=1, max_iters=3, log=lambda _m: None))
     assert dump_plan(a) == dump_plan(b)
     assert a["open_ended"] is False
     assert (a["start_it"], a["end_it"], a["iters_total"]) == (2, 5, 10)
     # `max_iters=0` 在有限课仍然是「跑到课程末尾」
-    whole = build_plan(args, it=2, iters_total=10, rotate_seed=1, log=lambda _m: None)
+    whole = build_plan(PlanSpec(args=args, it=2, iters_total=10, rotate_seed=1, log=lambda _m: None))
     assert (whole["end_it"], whole["open_ended"]) == (10, False)
 
 
@@ -339,7 +350,7 @@ def test_validate_plan_open_ended_exemption_is_tight() -> None:
     end_it=2500` 的（写错/伪造）计划能越过课程预算——而那正是这条校验存在的理由。
     """
     args = _args()
-    finite = build_plan(args, it=1, iters_total=4, rotate_seed=1, log=lambda _m: None)
+    finite = build_plan(PlanSpec(args=args, it=1, iters_total=4, rotate_seed=1, log=lambda _m: None))
     # 旧计划（无 `open_ended`）照旧拒 —— 向后兼容的那一半
     legacy = {k: v for k, v in finite.items() if k != "open_ended"}
     with pytest.raises(ProtocolError, match="超出课程预算"):
@@ -351,7 +362,7 @@ def test_validate_plan_open_ended_exemption_is_tight() -> None:
     with pytest.raises(ProtocolError, match="open_ended 必须是布尔"):
         validate_plan({**finite, "open_ended": "yes"})
     # 真开区间段（无限课）照旧过，且预算仍不得被越过（段长那条闸另管）
-    inf = build_plan(args, it=0, iters_total=0, rotate_seed=1, log=lambda _m: None)
+    inf = build_plan(PlanSpec(args=args, it=0, iters_total=0, rotate_seed=1, log=lambda _m: None))
     validate_plan({**inf, "end_it": 100})
     with pytest.raises(ProtocolError, match="硬上界"):
         validate_plan({**inf, "end_it": RUN_MAX_ITERS_HARD_CAP + 1})
@@ -360,7 +371,7 @@ def test_validate_plan_open_ended_exemption_is_tight() -> None:
 def test_validate_plan_rejects_malformed() -> None:
     """畸形计划一律拒收（不半信半疑地跑）：proto/区间/预算越界/argv 形状。"""
     args = _args()
-    plan = build_plan(args, it=1, iters_total=4, rotate_seed=1, log=lambda _m: None)
+    plan = build_plan(PlanSpec(args=args, it=1, iters_total=4, rotate_seed=1, log=lambda _m: None))
     assert validate_plan(json.loads(json.dumps(plan)))["end_it"] == 4
     for patch, kw in (
         ({"proto": 99}, "proto"),

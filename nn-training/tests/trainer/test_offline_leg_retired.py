@@ -53,6 +53,7 @@ from worker.loop_round import (
     ROUND_SKIP,
     RoundContext,
 )
+from worker.plan import PlanSpec
 
 TOKEN = "sekret"
 # 2026-09-30（刀 4）：`biz/` 是 `rl/` 的纯逻辑半（搬家前就在扫描面里）⇒ 必须补上，
@@ -340,10 +341,10 @@ def test_infinite_course_exports_an_open_ended_segment(
 
     lines: list[str] = []
     monkeypatch.setattr(lx, "log", lines.append)
-    seen: list[dict] = []
+    seen: list[PlanSpec] = []
 
-    def _fake_build_plan(*_a: object, **kw: object) -> dict:
-        seen.append(kw)
+    def _fake_build_plan(spec: PlanSpec) -> dict:
+        seen.append(spec)
         raise _ReachedPlanError
 
     monkeypatch.setattr("worker.plan.build_plan", _fake_build_plan)
@@ -359,7 +360,7 @@ def test_infinite_course_exports_an_open_ended_segment(
     # `TrainingExport` ⇒ 按未绑定函数调（组合根才是生产形态）。
     with pytest.raises(_ReachedPlanError):
         TrainingExport._export_offline_bundle(steps_x, 1, [], -1)
-    assert [kw["iters_total"] for kw in seen] == [0], seen
+    assert [spec.iters_total for spec in seen] == [0], seen
     # 放行不等于静默：段长默认值与含义变了，必须留一行给操作员
     assert any("开区间段" in ln for ln in lines), lines
     # ③ 第三个闸（`step_course_iter` 里的 `ctx.seg == 0`）只对**没声明段长**的拒：

@@ -9861,3 +9861,20 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **顺带纠错**：`WIDE_FUNCS_BASELINE` 该条目注释写「13 个形参」，实测 15（8 个旋钮，非 6）。
 - **读数**：宽签名 46 → **45**、38 → **37** 文件（`WIDE_FUNCS_BASELINE` 删 `worker/ppo/loop.py`）。
 - **验证**：`bun run pygate` 绿（6764 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §299。
+
+## §2026-11-22-plan-spec（`build_plan` 的 14 个参数收成 `PlanSpec`）
+
+- **背景**：`worker/plan.build_plan` = 1 个位置位（`args`）+ 13 个关键字，全部由 hub 导出时
+  手写（`trainer/loop_export.py`）。漏一个不报错，只落缺省：`max_iters` / `max_segment_iters` 丢 =
+  计划覆盖整段课程（后者是硬上界的再降档）、`volume` / `rotation` 丢 = 静默退成固定局数老口径
+  （云端采样量与本地集群不一致）、`template_wver` / `node_label` 丢 = 模板 argv 指向错版本名/标签。
+  发布期自检（`check_plan_against_args`）掩护不了它 —— 它比的是**同一份计划**的重放。
+- **决定**：同模块 frozen + kw_only `PlanSpec`（14 字段，缺省逐字一致；`log` 的 no-op 缺省提成
+  模块级 `_noop_log`），`build_plan(spec)` 展开成同名局部量、主体不动。生产 1 处 + 测试 49 处
+  调用点全改（一次性 AST 脚本，带幂等检查）。守 `tests/worker/test_plan_spec.py`（含生产调用点
+  的关键字集合守卫）。
+- **被否决**：① 只收 8 个可选旋钮、`args`/`it`/`iters_total`/`rotate_seed` 继续裸传（身份位与
+  旋钮混在同一形状里，正是错位源）；② 把自检从「对集相等」改成「旋钮相等」（那等于把计划与
+  args 的对比换成对实现细节的断言，`volume` 路线根本没有可比的旋钮值）。
+- **读数**：宽签名 45 → **44**、37 → **36** 文件（`WIDE_FUNCS_BASELINE` 删 `worker/plan.py`）。
+- **验证**：`bun run pygate` 绿（6770 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §300。

@@ -45,7 +45,7 @@ from remote.download import BlobAsk
 from remote.job_spec import RunJobSpec
 from remote.plan_handoff import RunSetup
 from remote.run_loop import run_standalone
-from worker.plan import build_plan, dump_plan, planned_iters
+from worker.plan import PlanSpec, build_plan, dump_plan, planned_iters
 
 INIT_W = b'{"format":"nn-weights-json","params":{"w":0}}'
 CODE_ZIP = b"PK\x03\x04" + b"py-code" * 50
@@ -180,7 +180,9 @@ def test_replace_wait_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 def _export(tmp_path: Path, *, it: int = 3, n: int = 3) -> tuple[Path, dict, dict]:
     """造一个任务包（含 opt/code/ts 三件可选与必需件），返回 (zip, index, plan)。"""
     plan = build_plan(
-        _args(), it=it - 1, iters_total=it - 1 + n, rotate_seed=5, max_iters=n, log=_quiet
+        PlanSpec(
+            args=_args(), it=it - 1, iters_total=it - 1 + n, rotate_seed=5, max_iters=n, log=_quiet
+        )
     )
     m = _manifest(plan, it=it, code_sha=sha256_bytes(CODE_ZIP))
     src = tmp_path / "src"
@@ -443,7 +445,9 @@ def test_export_import_carries_demo_blob(tmp_path: Path) -> None:
     from common.protocol import blob_path
 
     plan = build_plan(
-        _args(), it=2, iters_total=4, rotate_seed=5, max_iters=3, log=_quiet
+        PlanSpec(
+            args=_args(), it=2, iters_total=4, rotate_seed=5, max_iters=3, log=_quiet
+        )
     )
     m = _manifest(plan, it=3, code_sha=sha256_bytes(CODE_ZIP))
     m["demo_sha"] = sha256_bytes(DEMO_RAW)
@@ -531,7 +535,9 @@ def _export_ref_pack(tmp_path: Path, *, with_blob: bool) -> tuple[Path, dict, di
     from common.protocol import blob_path
 
     plan = build_plan(
-        _args(), it=2, iters_total=4, rotate_seed=5, max_iters=3, log=_quiet
+        PlanSpec(
+            args=_args(), it=2, iters_total=4, rotate_seed=5, max_iters=3, log=_quiet
+        )
     )
     m = _manifest(plan, it=3, code_sha=sha256_bytes(CODE_ZIP))
     m["ref_sha"] = sha256_bytes(REF_RAW)

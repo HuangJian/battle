@@ -28,7 +28,7 @@ import remote.plan_handoff as handoff_mod
 import remote.plan_run as plan_run_mod
 from common.protocol import ProtocolError
 from remote.artifacts import sha256_bytes
-from worker.plan import build_plan, dump_plan
+from worker.plan import PlanSpec, build_plan, dump_plan
 
 HANDOFF_FILE = ROOT / "remote" / "plan_handoff.py"
 ENGINE_FILE = ROOT / "remote" / "plan_run.py"
@@ -256,7 +256,7 @@ def test_engine_facade_forwards_the_same_objects() -> None:
 
 def test_verify_plan_file_three_gates(tmp_path: Path) -> None:
     """`verify_plan_file` 四面（sha / pairs_fp / start_it / 缺文件）——搬走不改语义。"""
-    plan = build_plan(_args(), it=2, iters_total=5, rotate_seed=77, log=_quiet)
+    plan = build_plan(PlanSpec(args=_args(), it=2, iters_total=5, rotate_seed=77, log=_quiet))
     job_dir = tmp_path / "job"
     job_dir.mkdir(parents=True, exist_ok=True)
     raw = dump_plan(plan)

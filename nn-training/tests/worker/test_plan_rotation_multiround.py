@@ -29,6 +29,7 @@ if str(ROOT) not in sys.path:
 
 from common.protocol import ProtocolError
 from worker.plan import (
+    PlanSpec,
     build_plan,
     check_plan_against_args,
     dump_plan,
@@ -107,13 +108,15 @@ def _plan(
     assert block is not None
     block["est_s_all"] = dict(ESTS_ALL)
     return build_plan(
-        args,
-        it=it,
-        iters_total=iters_total,
-        rotate_seed=rotate_seed,
-        volume=block,
-        rotation=recipe,
-        log=lambda _m: None,
+        PlanSpec(
+            args=args,
+            it=it,
+            iters_total=iters_total,
+            rotate_seed=rotate_seed,
+            volume=block,
+            rotation=recipe,
+            log=lambda _m: None,
+        )
     )
 
 
@@ -205,7 +208,7 @@ def test_plan_without_recipe_is_byte_identical() -> None:
     args = _args()
     block = volume_block(args, est_samples_per_game=EST, ests_by_stage=_window_ests(ALL_STAGES))
     assert block is not None
-    plan = build_plan(args, it=0, iters_total=4, rotate_seed=4242, volume=block, log=lambda _m: None)
+    plan = build_plan(PlanSpec(args=args, it=0, iters_total=4, rotate_seed=4242, volume=block, log=lambda _m: None))
     assert plan.get("rotation") is None
     assert plan["volume"].get("est_s_all") is None
     # 每轮同一个关集（全集）
@@ -217,13 +220,15 @@ def test_rotation_without_volume_block_is_refused() -> None:
     """配了轮换却没有 `volume` 块 ⇒ 拒发（轮换只在按样本量的配额下生效）。"""
     with pytest.raises(ProtocolError, match="volume"):
         build_plan(
-            _args(),
-            it=0,
-            iters_total=4,
-            rotate_seed=4242,
-            volume=None,
-            rotation=_recipe(),
-            log=lambda _m: None,
+            PlanSpec(
+                args=_args(),
+                it=0,
+                iters_total=4,
+                rotate_seed=4242,
+                volume=None,
+                rotation=_recipe(),
+                log=lambda _m: None,
+            )
         )
 
 
@@ -254,8 +259,10 @@ def test_bad_recipe_values_are_loud() -> None:
     ):
         with pytest.raises(ProtocolError):
             build_plan(
-                args, it=0, iters_total=4, rotate_seed=4242, volume=block,
-                rotation=bad, log=lambda _m: None,
+                PlanSpec(
+                    args=args, it=0, iters_total=4, rotate_seed=4242, volume=block,
+                    rotation=bad, log=lambda _m: None,
+                )
             )
 
 
