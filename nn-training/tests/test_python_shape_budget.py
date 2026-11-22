@@ -110,7 +110,7 @@ WIDE_FUNCS_BASELINE = {
     "trainer/rollout_phase.py": 1,
     "trainer/stream.py": 1,
     "worker/bc_dispatch.py": 1,
-    "worker/bc_eval.py": 2,
+    "worker/bc_eval.py": 1,
     "worker/breaker.py": 1,
     "worker/cmd.py": 1,
     # 2026-11-20（python.refactor.md P0-3 第一/二刀）：`EvalRound.__init__` 的 40 个关键字

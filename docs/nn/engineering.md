@@ -25,6 +25,13 @@
 
 ---
 
+## §278 P0-3 第二十五刀：`build_eval_panel` 收 `BcPanelSpec`（宽签名 80 → 79）（2026-11-21）
+
+* 10 个关键字参数 → frozen kw-only `BcPanelSpec`；面板字典逐字未动。
+* 调用点：`bc_eval` 聚合处 1 + `test_bc_eval_fields` 2；`bc_eval.py` 2 → 1，
+  全仓 **80 → 79**（文件数 56 不变）。
+* 回归：bc_eval_fields + 形状/LOC/Any 预算 23 条全绿。
+
 ## §277 P0-3 第二十四刀：train_core 三个字节解析助手收 spec（宽签名 83 → 80）（2026-11-21）
 
 * `_resolved` → `ResolvedSpec`、`_resolve_opt_init` → `OptInitSpec`、`_fetch_ref` →

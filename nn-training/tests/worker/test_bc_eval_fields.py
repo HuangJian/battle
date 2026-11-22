@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from worker.bc_eval import aggregate_eval_rows, build_eval_panel
+from worker.bc_eval import BcPanelSpec, aggregate_eval_rows, build_eval_panel
 
 
 def _row(**over: object) -> dict:
@@ -67,13 +67,15 @@ def test_missing_optional_fields_degrade_to_none() -> None:
 def test_panel_records_both_ticks_declarations() -> None:
     """B4：关卡值 + 课程声明都进 panel——漂移可见，读数不跨面板相减。"""
     p = build_eval_panel(
-        level_name="arena6",
-        max_ticks=36000,
-        difficulty="hard",
-        lives=3,
-        games_per_stage=30,
-        stages=4,
-        course_max_ticks=20000,
+        BcPanelSpec(
+            level_name="arena6",
+            max_ticks=36000,
+            difficulty="hard",
+            lives=3,
+            games_per_stage=30,
+            stages=4,
+            course_max_ticks=20000,
+        )
     )
     assert p == {
         "level": "arena6",
@@ -89,12 +91,14 @@ def test_panel_records_both_ticks_declarations() -> None:
     }
     # 未声明课程值时也不编造
     p2 = build_eval_panel(
-        level_name="arena4",
-        max_ticks=12000,
-        difficulty="hard",
-        lives=None,
-        games_per_stage=10,
-        stages=1,
+        BcPanelSpec(
+            level_name="arena4",
+            max_ticks=12000,
+            difficulty="hard",
+            lives=None,
+            games_per_stage=10,
+            stages=1,
+        )
     )
     assert p2["course_max_ticks"] is None and p2["lives"] is None
 

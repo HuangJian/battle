@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -67,19 +68,23 @@ def eval_capable_nodes(cfg: dict | None, log=lambda msg: None) -> list[dict]:
     return out
 
 
-def build_eval_panel(
-    *,
-    level_name: str,
-    max_ticks: int,
-    difficulty: str,
-    lives: int | None,
-    games_per_stage: int,
-    stages: int,
-    course_max_ticks: int | None = None,
-    source: str = "levels",
-    stage_ids: list[int] | None = None,
-    enemies: list[int] | None = None,
-) -> dict[str, Any]:
+@dataclass(frozen=True, kw_only=True)
+class BcPanelSpec:
+    """`build_eval_panel` 的旋钮袋（P0-3：10 参 → 一个对象）。"""
+
+    level_name: str
+    max_ticks: int
+    difficulty: str
+    lives: int | None
+    games_per_stage: int
+    stages: int
+    course_max_ticks: int | None = None
+    source: str = "levels"
+    stage_ids: list[int] | None = None
+    enemies: list[int] | None = None
+
+
+def build_eval_panel(spec: BcPanelSpec) -> dict[str, Any]:
     """eval 行/面板的**面板口径**（B4，2026-11-05）：max_ticks / lives / games / seed0。
 
     课程顶层 `max_ticks` 不进这条链（每图用自己关卡文件的值），所以读数**禁止跨面板相减**；
@@ -89,6 +94,11 @@ def build_eval_panel(
     `stage_ids`（实际被评的关；eval 的 2000+i 与训练的 2000+i 可能同号不同关）、
     `enemies`（课程 stages 的 count 集合）。跨面板分析先看这三个键。
     """
+    # 旧签名 10 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    level_name, max_ticks, difficulty = spec.level_name, spec.max_ticks, spec.difficulty
+    lives, games_per_stage, stages = spec.lives, spec.games_per_stage, spec.stages
+    course_max_ticks, source = spec.course_max_ticks, spec.source
+    stage_ids, enemies = spec.stage_ids, spec.enemies
     panel = {
         "level": level_name,
         "source": str(source),
@@ -475,16 +485,18 @@ def dispatch_bc_eval(
                 "level": level_name,
                 "failed": failed,
                 "panel": build_eval_panel(
-                    level_name=level_name,
-                    max_ticks=int(src["max_ticks"]),
-                    difficulty=str(src["difficulty"]),
-                    lives=src["lives"],
-                    games_per_stage=int(games_per_stage),
-                    stages=len(src["stage_ids"]),
-                    course_max_ticks=course_max_ticks,
-                    source=str(src["kind"]),
-                    stage_ids=list(src["stage_ids"]),
-                    enemies=src.get("enemies"),
+                    BcPanelSpec(
+                        level_name=level_name,
+                        max_ticks=int(src["max_ticks"]),
+                        difficulty=str(src["difficulty"]),
+                        lives=src["lives"],
+                        games_per_stage=int(games_per_stage),
+                        stages=len(src["stage_ids"]),
+                        course_max_ticks=course_max_ticks,
+                        source=str(src["kind"]),
+                        stage_ids=list(src["stage_ids"]),
+                        enemies=src.get("enemies"),
+                    )
                 ),
             }
         )

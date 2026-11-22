@@ -8818,6 +8818,12 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-bc-panel-spec
+
+P0-3 第二十五刀：`worker/bc_eval.py::build_eval_panel`（10 参，全关键字）→ frozen
+`BcPanelSpec`（kw_only，缺省值逐字沿用）。调用点 1 生产 + 2 测试包对象；宽签名
+**80 → 79**，`bc_eval.py` 2 → 1（剩 `dispatch_bc_eval`）。
+
 ## §2026-11-21-train-core-specs
 
 P0-3 第二十四刀：`remote/train_core.py` 三个字节解析函数收成 frozen 旋钮袋：
