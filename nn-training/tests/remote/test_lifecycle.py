@@ -51,10 +51,22 @@ def sent(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
         box.append({**payload, "block": True})
         return True
 
-    def _report(base: str, token: str, **kw: Any) -> None:
-        kw.pop("log", None)
-        wid = kw.pop("worker_id", "")
-        box.append({**LC.error_payload(worker=wid, **kw), "block": False})
+    def _report(spec: LC.ErrorReportSpec) -> None:
+        box.append(
+            {
+                **LC.error_payload(
+                    worker=spec.worker_id,
+                    reason=spec.reason,
+                    component=spec.component,
+                    detail=spec.detail,
+                    course=spec.course,
+                    job_id=spec.job_id,
+                    it=spec.it,
+                    severity=spec.severity,
+                ),
+                "block": False,
+            }
+        )
 
     monkeypatch.setattr(LC, "post_error", _post)
     monkeypatch.setattr(LC, "report_error", _report)

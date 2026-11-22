@@ -10243,3 +10243,26 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   `tests/remote/test_fetch_spec.py`（字段表 / frozen+kw_only / 入口只吃一个 spec / 旧位置面 TypeError /
   停滞与预算各自在位 / 缺省回调是具名函数）。
   全文 → `docs/nn/engineering.md` §316。
+
+## §2026-11-22-error-report-spec
+
+- **背景**：`python.refactor.md` §P0-3 批 F3。`remote/error_report.report_error` 是云机错误回家的唯一
+  一条腿（pull 轮三个瞬态分支 + 离线段失败），原签名 2 个位置参数 + 9 个关键字参数。
+- **坏点（全是「互换后照样发出去、只是内容错位」）**：`course` / `job_id` / `worker_id` 三个相邻身份串
+  —— 写错一位就把这条错误记在另一门课 / 另一份活 / 另一台机器头上，而观测腿的读者正是靠它对账；
+  `reason` / `detail` 两个自由文本 —— 互换后 4 KB traceback 进控制台标题（再被 2000 字封顶截断）、
+  一行摘要进详情；`it`（`int | None`）与 `severity`（两档串）相邻 —— 互换后一条 `err` 因「其余归
+  warn」而静默降级。
+- **决定**：`ErrorReportSpec`（11 字段，frozen + kw_only，住 `remote/error_report.py`，字段顺序 = 旧
+  形参顺序，`log` 殿后）；入口一次展开、函数体逐字不动；8 处调用点改按名字传。`log` 的类型从 `Any`
+  收紧成 `Callable[[str], None] | None`（它是 `try/except: pass` 包住的唯一出口）。
+- **被否决**：① 连 `error_payload`（8 参，不宽）一起收 spec —— 那是第二个函数，且它有 12 处用例按关键字
+  直接喂，改动面与本刀无关；两者分工保留「`error_payload` = 纯函数 + 唯一字段表，`report_error` = 搬运」。
+  ② `base_url`/`token` 留在位置面 —— 它们与身份三串同样是「两个相邻 str」，留在外面等于留下半数失效面。
+  ③ 给 spec 加 `__post_init__` 校验 `severity` 只收两档 —— hub 侧已经「其余归 warn」，编码侧再挡一次是伪安全。
+- **读数**：宽签名 16 → **15**、13 → **12** 文件（`remote/error_report.py` 清零）；该文件 `Any` 4 → 3，
+  `tests/golden/any_baseline.json` 同步下调。
+- **验证**：`bun run pygate` 绿；`ruff` + `mypy`(1088 文件) 绿。守
+  `tests/remote/test_error_report_spec.py`（字段表 / frozen+kw_only / 入口只吃一个 spec / 旧位置面
+  TypeError / 三个身份位不互串 / `it` 与 `severity` 各自保型 / 没 hub 时连线程都不起）。
+  全文 → `docs/nn/engineering.md` §317。

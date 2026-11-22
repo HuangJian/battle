@@ -38,7 +38,7 @@ from common.settings import hub_token_from_env
 from common.text import exc_tail
 from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
 from remote.cloud_pool import CLOUD_EVAL_POOL, CLOUD_ROLLOUT_POOL
-from remote.error_report import report_error
+from remote.error_report import ErrorReportSpec, report_error
 from remote.job_spec import RunJobSpec
 from remote.plan_handoff import ROTATION_POLICIES as ROTATION_POLICIES
 from remote.plan_handoff import RunSetup
@@ -631,14 +631,16 @@ def main(argv: list[str] | None = None) -> int:
         # 彻底丢失（控制台的离线停摆告警只看「有没有新产物」，不看为什么）⇒ 纯观测上报一条。
         # 失败即丢（daemon 线程 + 2s 超时），不影响退出码与任何训练时序。
         report_error(
-            args.hub_url,
-            hub_token,
-            reason=f"{type(e).__name__}: {e}",
-            detail=exc_tail(e),
-            component="offline-worker",
-            course=str(args.hub_course or ""),
-            severity="err",
-            log=lambda m: print(f"[run] {m}", file=sys.stderr, flush=True),
+            ErrorReportSpec(
+                base_url=args.hub_url,
+                token=hub_token,
+                reason=f"{type(e).__name__}: {e}",
+                detail=exc_tail(e),
+                component="offline-worker",
+                course=str(args.hub_course or ""),
+                severity="err",
+                log=lambda m: print(f"[run] {m}", file=sys.stderr, flush=True),
+            )
         )
         return 1
     print(

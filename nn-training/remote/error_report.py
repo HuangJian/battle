@@ -33,6 +33,8 @@ import os
 import socket
 import time
 import urllib.request
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from common import net_http, runtime
@@ -121,27 +123,46 @@ def post_error(
         return False
 
 
-def report_error(
-    base_url: str,
-    token: str,
-    *,
-    reason: str,
-    detail: str = "",
-    component: str = "ppo-worker",
-    course: str = "",
-    job_id: str = "",
-    it: int | None = None,
-    severity: str = "warn",
-    worker_id: str = "",
-    log: Any = None,
-) -> None:
+@dataclass(frozen=True, kw_only=True)
+class ErrorReportSpec:
+    """一条云机错误上报的**全部**输入（`report_error` 的唯一形参）。
+
+    为什么收成一份（而不是继续 9 个关键字）：这 9 位里有三对「互换后照样发出去」的同类位 ——
+    `course` / `job_id` / `worker_id` 是三个相邻的身份串（写错一位就把这条错误记在**另一门课 /
+    另一份活 / 另一台机器**头上，而观测腿的读者正是靠它对账）；`reason` / `detail` 是两个相邻
+    的自由文本（`reason` 是控制台那一行标题，`detail` 是 traceback 正文 —— 互换后 4 KB 堆栈进
+    标题、一行摘要进详情，控制台侧还要按长度截断，现场只会看到「标题被截掉了」）；
+    `it`（`int | None`）与 `severity`（两档字符串）相邻，互换后轮次读成字符串、告警级别读成数字
+    归 `warn`（hub 侧「其余归 warn」），一条 `err` 就这么静默降级。
+
+    字段顺序 = 旧签名的形参顺序，`log` 在最后（它是给**云机日志**的最后一站，不是上报内容）。
+    """
+
+    base_url: str
+    token: str
+    reason: str
+    detail: str = ""
+    component: str = "ppo-worker"
+    course: str = ""
+    job_id: str = ""
+    it: int | None = None
+    severity: str = "warn"
+    worker_id: str = ""
+    log: Callable[[str], None] | None = None
+
+
+def report_error(spec: ErrorReportSpec) -> None:
     """上报一条云机错误；**立即返回**（发送在 daemon 线程里）。
 
     `base_url`/`token` 缺一 ⇒ 静默丢弃：没有 hub 地址就没有这条腿（旧调用方、离线无 hub 的
     本地预演、单测），而**这不是错误**（观测面没有不存在的义务）。
     """
+    base_url, token = spec.base_url, spec.token
     if not base_url or not token:
         return
+    reason, detail = spec.reason, spec.detail
+    component, course, job_id = spec.component, spec.course, spec.job_id
+    it, severity, worker_id, log = spec.it, spec.severity, spec.worker_id, spec.log
     payload = error_payload(
         worker=worker_id or default_worker_id(),
         reason=reason,

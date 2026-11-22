@@ -54,6 +54,7 @@ from remote import worker as W
 from remote.error_report import (
     WORKER_ERROR_DETAIL_MAX,
     WORKER_ERROR_REASON_MAX,
+    ErrorReportSpec,
     default_worker_id,
     error_payload,
     post_error,
@@ -246,14 +247,16 @@ def test_report_error_lands_in_a_real_hub_ring(tmp_path: Path) -> None:
     serve_fast(srv).start()
     try:
         report_error(
-            f"http://127.0.0.1:{srv.server_address[1]}",
-            TOKEN,
-            reason=REASON,
-            detail="Traceback …",
-            component="offline-worker",
-            course="c1-gae",
-            severity="err",
-            worker_id="kaggle-c:1",
+            ErrorReportSpec(
+                base_url=f"http://127.0.0.1:{srv.server_address[1]}",
+                token=TOKEN,
+                reason=REASON,
+                detail="Traceback …",
+                component="offline-worker",
+                course="c1-gae",
+                severity="err",
+                worker_id="kaggle-c:1",
+            )
         )
         assert _wait_for(lambda: hubq.worker_errors(0.0)["errors"]), "上报必须落进 hub 的 ring"
     finally:
@@ -309,7 +312,14 @@ def test_report_error_returns_before_the_send_finishes(
     done = threading.Event()
 
     def _call() -> None:
-        report_error("http://hub.invalid:8787", TOKEN, reason=REASON, detail="Traceback …")
+        report_error(
+            ErrorReportSpec(
+                base_url="http://hub.invalid:8787",
+                token=TOKEN,
+                reason=REASON,
+                detail="Traceback …",
+            )
+        )
         done.set()
 
     th = threading.Thread(target=_call, daemon=True)
@@ -330,11 +340,11 @@ def test_report_error_returns_before_the_send_finishes(
 def test_report_error_is_silent_without_a_hub_and_leaves_one_line_when_dropped() -> None:
     """没地址/没 token ⇒ 静默丢弃（不是错误：观测面没有不存在的义务）；发失败 ⇒ 云机日志一行。"""
     logs: list[str] = []
-    report_error("", "", reason=REASON, log=logs.append)
+    report_error(ErrorReportSpec(base_url="", token="", reason=REASON, log=logs.append))
     assert logs == [], "没有 hub 就没有这条腿——不写日志（否则离线预演全是噪音）"
 
     with _FakeHub(status=503) as hub:
-        report_error(hub.base, TOKEN, reason=REASON, log=logs.append)
+        report_error(ErrorReportSpec(base_url=hub.base, token=TOKEN, reason=REASON, log=logs.append))
         assert _wait_for(lambda: bool(logs), timeout=5.0), "失败即丢也要在云机日志留一行（最后一站）"
     assert len(logs) == 1
     assert REASON[:120] in logs[0]
@@ -354,8 +364,10 @@ def _round_with(
     job = {**_job(jid), "course": "c1-gae", "manifest": {"job_id": jid, "it": 7}}
     _patch_hub(monkeypatch, [job])
     reports: list[dict] = []
+    # 替身接的是 spec（不是散参）：`vars(spec)` 就是调用点传进来的那张字段表 ——
+    # 「这条上报带没带现场/归属」仍按同一组键断言，不必猜关键字顺序。
     monkeypatch.setattr(
-        JR, "report_error", lambda *a, **k: reports.append({"args": a, **k}), raising=True
+        JR, "report_error", lambda spec: reports.append(dict(vars(spec))), raising=True
     )
     monkeypatch.setattr(JR, "release_job", lambda *a, **k: None, raising=True)
     monkeypatch.setattr(JR, "abandon_job", lambda *a, **k: None, raising=True)
@@ -409,7 +421,7 @@ def test_the_three_transient_branches_report_with_scene_and_attribution(
     head, _, msg = lines[-1].partition(": ")
     assert head.split(".")[-1] == name and msg == str(exc)
     # 一个 hub/一条 token 走全程（`_run_loop` 的位置参数，见 test_worker_reap_stall.py）
-    assert rep["args"] == ("http://hub", "tok")
+    assert (rep["base_url"], rep["token"]) == ("http://hub", "tok")
 
 
 def test_lifecycle_outcomes_are_not_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -441,7 +453,10 @@ def test_offline_leg_failure_reports_an_err_with_the_segment_context(
     """
     reports: list[dict] = []
     monkeypatch.setattr(
-        run_loop_mod, "report_error", lambda *a, **k: reports.append({"args": a, **k}), raising=True
+        run_loop_mod,
+        "report_error",
+        lambda spec: reports.append(dict(vars(spec))),
+        raising=True,
     )
     rc = run_loop_mod.main(
         [
@@ -458,7 +473,7 @@ def test_offline_leg_failure_reports_an_err_with_the_segment_context(
     assert rc == 1, "失败路径必须仍然是退出码 1（观测腿不许改任何训练时序）"
     assert len(reports) == 1
     rep = reports[0]
-    assert rep["args"] == ("http://hub", "tok")
+    assert (rep["base_url"], rep["token"]) == ("http://hub", "tok")
     assert rep["severity"] == "err" and rep["component"] == "offline-worker"
     assert rep["reason"].startswith("ProtocolError: ")
     assert rep["course"] == "c1-gae"

@@ -69,7 +69,7 @@ WIDE_FUNCS_BASELINE = {
     # ⇒ `remote/bc_job.py` 归零，条目删除；守 `tests/remote/test_bc_job_spec.py`。
     # `remote/bundle.py` 已清零（P0-3 批 G2：`BundleSpec` / `ExportStatusSpec`）。
     # `remote/colab_bc.py` 已清零（P0-3 批 C：`run_training` 的 10 个位置参数 → `TrainRun`）。
-    "remote/error_report.py": 1,
+    # `remote/error_report.py` 已清零（P0-3 批 F3：`report_error` → `ErrorReportSpec`）。
     "remote/hub_client.py": 2,
     "remote/hub_http.py": 2,
     # 2026-11-19 合入上游的 relay/replay 参数（原 3 处 → 4 处）。

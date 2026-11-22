@@ -38,7 +38,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from remote.error_report import error_payload, post_error, report_error
+from remote.error_report import (
+    ErrorReportSpec,
+    error_payload,
+    post_error,
+    report_error,
+)
 
 #: 上报体里的 `component`：控制台按它把「云机自报的生命周期」与 `ppo-worker` 的失败分开归类。
 LIFECYCLE_COMPONENT = "worker-lifecycle"
@@ -184,14 +189,16 @@ class Lifecycle:
                 self._log(f"生命周期上报未送达（观测腿，失败即丢）：{reason[:80]}")
             return ok
         report_error(
-            self._base,
-            self._token,
-            worker_id=self._wid,
-            reason=reason,
-            component=LIFECYCLE_COMPONENT,
-            detail=detail,
-            severity=severity,
-            log=self._log,
+            ErrorReportSpec(
+                base_url=self._base,
+                token=self._token,
+                worker_id=self._wid,
+                reason=reason,
+                component=LIFECYCLE_COMPONENT,
+                detail=detail,
+                severity=severity,
+                log=self._log,
+            )
         )
         return True
 

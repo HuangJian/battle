@@ -62,7 +62,7 @@ from common.protocol import (
 from common.text import exc_tail
 from remote.bulk_sched import BULK_P2_PREFETCH, BulkPreemptError
 from remote.download import download_payload
-from remote.error_report import report_error
+from remote.error_report import ErrorReportSpec, report_error
 from remote.job_fs import backup_failed_result
 from remote.job_lifecycle import (
     FailReportSpec,
@@ -785,17 +785,19 @@ class _Round:
             # 机器的问题记在内容头上 ⇒ hub 落终局 failed ⇒ 训练停腿），但也不能什么都不说——这档
             # 此前只见于云机日志（2026-09-25 事故最难查的地方）。纯观测、失败即丢、不进任何判据。
             report_error(
-                self.base_url,
-                self.token,
-                reason=f"{type(e).__name__}: {e}",
-                detail=exc_tail(e),
-                component="ppo-worker",
-                course=_course_of(self.job),
-                job_id=self.jid,
-                it=self.job_it,
-                severity="warn",
-                worker_id=self.worker_id,
-                log=self.log,
+                ErrorReportSpec(
+                    base_url=self.base_url,
+                    token=self.token,
+                    reason=f"{type(e).__name__}: {e}",
+                    detail=exc_tail(e),
+                    component="ppo-worker",
+                    course=_course_of(self.job),
+                    job_id=self.jid,
+                    it=self.job_it,
+                    severity="warn",
+                    worker_id=self.worker_id,
+                    log=self.log,
+                )
             )
             release_job(self.base_url, self.token, self.jid, self.lease_token, log=self.log)
         except RetryableError as e:
@@ -803,17 +805,19 @@ class _Round:
             self.log(f"job {self.jid} 瞬时失败: {e} — release 租约回池，立即可重领")
             # 观测腿（同上）：连发时它是「这台机器有问题」的唯一信号（本机侧只能看到「活一直在回池」）。
             report_error(
-                self.base_url,
-                self.token,
-                reason=f"{type(e).__name__}: {e}",
-                detail=exc_tail(e),
-                component="ppo-worker",
-                course=_course_of(self.job),
-                job_id=self.jid,
-                it=self.job_it,
-                severity="warn",
-                worker_id=self.worker_id,
-                log=self.log,
+                ErrorReportSpec(
+                    base_url=self.base_url,
+                    token=self.token,
+                    reason=f"{type(e).__name__}: {e}",
+                    detail=exc_tail(e),
+                    component="ppo-worker",
+                    course=_course_of(self.job),
+                    job_id=self.jid,
+                    it=self.job_it,
+                    severity="warn",
+                    worker_id=self.worker_id,
+                    log=self.log,
+                )
             )
             release_job(self.base_url, self.token, self.jid, self.lease_token, log=self.log)
         except CodeChangedError as e:
@@ -887,17 +891,19 @@ class _Round:
             #   manifest 校验、bun 检测），否则同一份字节会无限重领（事故：40 次 / 3.5h 空转）。
             # 观测腿（同上）：兜底瞬态此前**零出口**——只有云机日志，而日志随机器一起消失。
             report_error(
-                self.base_url,
-                self.token,
-                reason=f"{type(e).__name__}: {e}",
-                detail=exc_tail(e),
-                component="ppo-worker",
-                course=_course_of(self.job),
-                job_id=self.jid,
-                it=self.job_it,
-                severity="warn",
-                worker_id=self.worker_id,
-                log=self.log,
+                ErrorReportSpec(
+                    base_url=self.base_url,
+                    token=self.token,
+                    reason=f"{type(e).__name__}: {e}",
+                    detail=exc_tail(e),
+                    component="ppo-worker",
+                    course=_course_of(self.job),
+                    job_id=self.jid,
+                    it=self.job_it,
+                    severity="warn",
+                    worker_id=self.worker_id,
+                    log=self.log,
+                )
             )
         finally:
             # 每 job 一行传输账：payload/code/blob/result 的 (bytes, sec) + 零字节命中 + 重抽。

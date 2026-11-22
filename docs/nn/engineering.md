@@ -29,6 +29,31 @@
 
 ---
 
+## §317 P0-3 批 F3：`error_report.report_error`(11) → `ErrorReportSpec`（16 → 15）（2026-11-22）
+
+* **一把刀一处**：`remote/error_report.report_error`(2 位置 + 9 关键字) → 一个 `ErrorReportSpec`。
+  调用面 8 处（`job_round` 3 · `lifecycle` 1 · `run_loop` 1 · 用例 3 + 1 个 `lifecycle` 替身）。
+  读数：宽签名 **16 → 15**、13 → **12** 文件（`remote/error_report.py` 清零）。
+* **为什么值得动**：这是**云机错误回家的唯一一条腿**（pull 轮的三个瞬态分支 + 离线段失败），
+  而它的坏点全是「互换后照样发出去、只是内容错位」：`course` / `job_id` / `worker_id` 是三个
+  相邻身份串 —— 写错一位就把这条错误记在**另一门课 / 另一份活 / 另一台机器**头上，而观测腿的
+  读者正是靠它对账；`reason` / `detail` 是两个自由文本 —— 互换后 4 KB traceback 进控制台标题（再
+  被 2000 字封顶截断）、一行摘要进详情；`it`（`int | None`）与 `severity`（两档串）相邻 ——
+  互换后一条 `err` 因「其余归 warn」而**静默降级**。
+* **顺手收紧一个 `Any`**：`log` 原为 `Any`（只为不写 import），改成 `Callable[[str], None] | None` ——
+  它是被 `try/except Exception: pass` 包侜的唯一出口，「传错东西」不应该到运行时才发现；该文件
+  `Any` 4 → 3，`tests/golden/any_baseline.json` 同步下调（额度只能降）。
+* **与 `error_payload` 的分工不变**：`error_payload`（8 参，不宽）仍是**纯函数 + 唯一字段表**，
+  `report_error` 只是把 spec 的 8 位搬过去；两边的键集由 `tests/remote/test_error_report.py` 的
+  既有断言钉着（`it` 缺席 = 不可知、`severity` 只发两档）。
+* **两个替身陷阱（与 §316 同族）**：① 用例里 `lambda *a, **k: reports.append({"args": a, **k})`
+  必须改成 `lambda spec: reports.append(dict(vars(spec)))` —— 旧写法让「带没带现场」的断言
+  直接 `KeyError: 'reason'`；② `vars()` 在 mypy 眼里是 `MappingProxyType`，`list[dict]` 收不下
+  ⇒ `dict(vars(spec))`（`dataclasses.asdict` 仍然不能用：它 deepcopy 传入的 `log` 回调和整个票据）。
+* **验收**：守卫住 `tests/remote/test_error_report_spec.py`（字段表 11 行 / frozen+kw_only / 入口只
+  吃一个 spec / 旧位置面 TypeError / 三个身份位不互串 / `it`+`severity` 各自保型 / 没 hub 时连线程
+  都不起）；判据全用**键集与类型**，不写「字串在不在」。
+
 ## §316 P0-3 批 F2：`tailscale_boot.fetch_guarded`(9) → `FetchSpec`（17 → 16）（2026-11-22）
 
 * **一把刀一处，含一条生成物**：`remote/tailscale_boot.fetch_guarded`(1 位置 + 8 关键字) → 一个
