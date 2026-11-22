@@ -187,8 +187,8 @@ def test_run_bc_once_passes_the_course_to_worker_loop(
 ) -> None:
     seen: dict[str, Any] = {}
 
-    def fake_loop(*a: Any, **kw: Any) -> int:
-        seen.update(kw)
+    def fake_loop(spec: object) -> int:
+        seen.update(vars(spec))
         return 1
 
     monkeypatch.setattr(worker_mod, "worker_loop", fake_loop)
@@ -214,8 +214,8 @@ def test_run_bc_once_resolves_auto_device_before_the_worker(
     """
     seen: dict[str, Any] = {}
 
-    def fake_loop(*a: Any, **kw: Any) -> int:
-        seen.update(kw)
+    def fake_loop(spec: object) -> int:
+        seen.update(vars(spec))
         return 1
 
     monkeypatch.setattr(worker_mod, "worker_loop", fake_loop)
@@ -243,8 +243,8 @@ def test_run_bc_once_keeps_an_explicit_tpu_device(
     """显式 `CFG.device='tpu'` 不再经过探测/归一化（TPU 是用户点名要的）。"""
     seen: dict[str, Any] = {}
 
-    def fake_loop(*a: Any, **kw: Any) -> int:
-        seen.update(kw)
+    def fake_loop(spec: object) -> int:
+        seen.update(vars(spec))
         return 1
 
     monkeypatch.setattr(worker_mod, "worker_loop", fake_loop)

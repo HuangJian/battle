@@ -813,14 +813,14 @@ def test_eval_builder_moves_ts_weights_and_games_to_scratch(
     job = _eval_job_builder(cast(Any, ctx), _eval_plan())(3)
     layout = scratch.layout_for(local, ctx.store.root)
 
-    assert Path(job["ts_root"]) == layout.ts_for(ctx.ts_tree_dir.name)
-    assert Path(job["work_dir"]) == layout.eval_dir
-    assert Path(job["weights_path"]) != ctx.store.weights_path(3)
-    assert Path(job["weights_path"]).read_bytes() == ctx.store.weights_path(3).read_bytes(), (
+    assert Path(job.ts_root) == layout.ts_for(ctx.ts_tree_dir.name)
+    assert Path(job.work_dir) == layout.eval_dir
+    assert Path(job.weights_path) != ctx.store.weights_path(3)
+    assert Path(job.weights_path).read_bytes() == ctx.store.weights_path(3).read_bytes(), (
         "逐字节拷贝 ⇒ 账本里的 wver（key16）与今天相同（两腿读数可配对）"
     )
     # F2：**账本不动**（`settle_eval_summary` 的聚合读面是文件，且那是 cell 死后续跑的凭据）
-    assert Path(job["eval_jsonl"]) == ctx.store.root / ArtifactStore.EVAL_LOG_NAME
+    assert Path(job.eval_jsonl) == ctx.store.root / ArtifactStore.EVAL_LOG_NAME
     # A4 的读数（取代旧的「云机评估热路径换到本地盘」那一行）：落点 + 建布局耗时
     landed = [m for m in msgs if "落点=" in m]
     assert landed and all("落点=本地:" in m and "建布局" in m for m in landed), msgs
@@ -876,15 +876,15 @@ def test_eval_builder_falls_back_when_a_step_exceeds_its_ceiling(
         first = time.time() - t0
         assert not finished, "超界的那一笔必须被放弃（等到它返回 = 上界没生效）"
         assert first < 5.0, f"超界必须在上界内返回（实测 {first:.2f}s）"  # timing-ok: 上界兜底（3 步 × 0.3s = 1.5s，5.0 只挡挂起）
-        assert Path(job["weights_path"]) == ctx.store.weights_path(3), "超界 ⇒ 逐字回退档（不换根）"
-        assert Path(job["work_dir"]) == ctx.work_dir / "eval-work"
-        assert Path(job["ts_root"]) == ctx.ts_tree_dir
+        assert Path(job.weights_path) == ctx.store.weights_path(3), "超界 ⇒ 逐字回退档（不换根）"
+        assert Path(job.work_dir) == ctx.work_dir / "eval-work"
+        assert Path(job.ts_root) == ctx.ts_tree_dir
         assert any("超界或失败" in m for m in msgs), msgs
         entered = len(bounded)
         # 第二次：本段已降档 ⇒ 不再进落点段（判据 = 上界调用的**次数**，与快慢无关）
         job4 = build(4)
         assert len(bounded) == entered, f"降档后不许每轮再等：又进了 {bounded[entered:]} 这一步"
-        assert Path(job4["weights_path"]) == ctx.store.weights_path(4)
+        assert Path(job4.weights_path) == ctx.store.weights_path(4)
     finally:
         release.set()  # 放走那条被放弃的 daemon 线程（否则它要等满 30s）
 
@@ -899,10 +899,10 @@ def test_eval_builder_falls_back_and_keeps_the_ledger(
     monkeypatch.setattr(scratch, "SCRATCH_CANDIDATES", ())
     ctx = _eval_ctx(tmp_path)
     job = _eval_job_builder(cast(Any, ctx), _eval_plan())(3)
-    assert Path(job["ts_root"]) == ctx.ts_tree_dir
-    assert Path(job["work_dir"]) == ctx.work_dir / "eval-work"
-    assert Path(job["weights_path"]) == ctx.store.weights_path(3)
-    assert Path(job["eval_jsonl"]) == ctx.store.root / ArtifactStore.EVAL_LOG_NAME
+    assert Path(job.ts_root) == ctx.ts_tree_dir
+    assert Path(job.work_dir) == ctx.work_dir / "eval-work"
+    assert Path(job.weights_path) == ctx.store.weights_path(3)
+    assert Path(job.eval_jsonl) == ctx.store.root / ArtifactStore.EVAL_LOG_NAME
 
 
 def test_eval_builder_clears_the_previous_round(

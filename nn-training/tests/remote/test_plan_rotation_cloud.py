@@ -33,7 +33,7 @@ from tests.worker.test_plan_rotation_multiround import (
     _recipe,
     _window_ests,
 )
-from worker.plan import build_plan
+from worker.plan import PlanSpec, build_plan
 from worker.volume_waves import volume_block
 
 ROTATION = {"mode": "even", "per_it": 2, "pinned": []}
@@ -51,19 +51,21 @@ def _plan_with_rotation() -> dict:
     assert block is not None
     block["est_s_all"] = dict(ESTS_ALL)
     return build_plan(
-        args,
-        it=0,
-        iters_total=4,
-        rotate_seed=4242,
-        volume=block,
-        rotation=dict(ROTATION),
-        log=lambda _m: None,
+        PlanSpec(
+            args=args,
+            it=0,
+            iters_total=4,
+            rotate_seed=4242,
+            volume=block,
+            rotation=dict(ROTATION),
+            log=lambda _m: None,
+        )
     )
 
 
 def _plan_without_rotation() -> dict:
     args = _args(target_transitions=0)
-    return build_plan(args, it=0, iters_total=4, rotate_seed=4242, log=lambda _m: None)
+    return build_plan(PlanSpec(args=args, it=0, iters_total=4, rotate_seed=4242, log=lambda _m: None))
 
 
 # ────────────────────────── ① 三态开关 ──────────────────────────

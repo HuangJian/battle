@@ -39,7 +39,7 @@ import remote.job_round as JR
 from common.platform_utils import sandbox_delete_blocked
 from common.protocol import CodeChangedError, ProtocolError
 from remote import worker as W
-from remote.worker import prune_job_dirs
+from remote.worker import WorkerLoopSpec, prune_job_dirs
 from tests.helpers import hub_seams
 
 
@@ -98,13 +98,15 @@ def test_worker_loop_hotswap_exits_for_supervisor_respawn(
     logs: list[str] = []
     with pytest.raises(SystemExit) as ei:
         W.worker_loop(
-            "http://hub",
-            "tok",
-            work_dir=_wd(tmp_path),
-            poll_sec=0.0,
-            once=True,
-            restart_argv=["--poll", "http://hub", "--token", "tok"],
-            log=logs.append,
+            WorkerLoopSpec(
+                base_url="http://hub",
+                token="tok",
+                work_dir=_wd(tmp_path),
+                poll_sec=0.0,
+                once=True,
+                restart_argv=["--poll", "http://hub", "--token", "tok"],
+                log=logs.append,
+            )
         )
     assert ei.value.code == W.HOT_RELOAD_EXIT
     assert released == ["j-hot"]  # 先还租约，别让 hub 干等
@@ -131,13 +133,15 @@ def test_worker_loop_hotswap_no_supervisor_returns(
 
     logs: list[str] = []
     n = W.worker_loop(
-        "http://hub",
-        "tok",
-        work_dir=_wd(tmp_path),
-        poll_sec=0.0,
-        once=True,
-        restart_argv=None,
-        log=logs.append,
+        WorkerLoopSpec(
+            base_url="http://hub",
+            token="tok",
+            work_dir=_wd(tmp_path),
+            poll_sec=0.0,
+            once=True,
+            restart_argv=None,
+            log=logs.append,
+        )
     )
     assert n == 0  # 没处理成任何 job
     assert released == ["j-hot"]
@@ -212,8 +216,8 @@ def test_main_child_mode_forwards_restart_argv(monkeypatch: pytest.MonkeyPatch) 
     """
     seen: dict[str, object] = {}
 
-    def _fake_worker_loop(*a, restart_argv, **k):
-        seen["restart_argv"] = restart_argv
+    def _fake_worker_loop(spec: WorkerLoopSpec) -> int:
+        seen["restart_argv"] = spec.restart_argv
         raise SystemExit(0)
 
     monkeypatch.setattr(W, "worker_loop", _fake_worker_loop, raising=True)
@@ -245,7 +249,9 @@ def test_worker_halt_attempts_stop_then_keeps_working(
     monkeypatch.setattr(W, "post_result", lambda *a, **k: None, raising=True)
     logs: list[str] = []
     n = W.worker_loop(
-        "http://hub", "tok", work_dir=_wd(tmp_path), poll_sec=0.0, once=True, log=logs.append
+        WorkerLoopSpec(
+            base_url="http://hub", token="tok", work_dir=_wd(tmp_path), poll_sec=0.0, once=True, log=logs.append
+        )
     )
     assert ran == ["PRE"]  # 停不掉 → 任务照常执行（云机不闲置）
     assert n == 1
@@ -278,12 +284,14 @@ def test_worker_halt_attempt_once_then_reset_on_clear(
     monkeypatch.setattr(W, "run_job", lambda *a, **k: {"rc": 0}, raising=True)
     monkeypatch.setattr(W, "post_result", lambda *a, **k: None, raising=True)
     W.worker_loop(
-        "http://hub",
-        "tok",
-        work_dir=_wd(tmp_path),
-        poll_sec=5.0,
-        max_idle_sec=1.0,
-        log=lambda m: None,
+        WorkerLoopSpec(
+            base_url="http://hub",
+            token="tok",
+            work_dir=_wd(tmp_path),
+            poll_sec=5.0,
+            max_idle_sec=1.0,
+            log=lambda m: None,
+        )
     )
     assert calls["n"] == 2  # 段 1 一次 + 段 2 一次；停机持续期不重复
 
@@ -301,7 +309,9 @@ def test_worker_halt_branch_still_logs_alive(
     )
     logs: list[str] = []
     W.worker_loop(
-        "http://hub", "tok", work_dir=_wd(tmp_path), poll_sec=10.0, once=True, log=logs.append
+        WorkerLoopSpec(
+            base_url="http://hub", token="tok", work_dir=_wd(tmp_path), poll_sec=10.0, once=True, log=logs.append
+        )
     )
     joined = "\n".join(logs)
     assert "云端停机达令已送达" in joined

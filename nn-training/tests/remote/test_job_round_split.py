@@ -46,6 +46,7 @@ worker_loop（留 worker.py）  轮询 / claim / halt / idle / --once / 回传�
 from __future__ import annotations
 
 import ast
+import dataclasses
 import sys
 import threading
 import time
@@ -57,7 +58,9 @@ if str(ROOT) not in sys.path:
 
 import remote.job_round as round_mod
 import remote.worker as worker_mod
+from remote.job_round import JobRoundSpec
 from remote.prefetch import PrefetchStore
+from remote.worker import WorkerLoopSpec
 from tests.helpers import remote_dag as dag
 
 ROUND_FILE = ROOT / "remote" / "job_round.py"
@@ -108,6 +111,9 @@ ALLOWED_PROJECT_IMPORTS = {
     "remote.error_report",
     "remote.job_fs",
     "remote.job_lifecycle",
+    # `run_job_fn` 的入参对象（2026-11-22，P0-3 第四十四刀）：本模块不许 import `remote.worker`
+    # （成环 + 顶层拉 torch），所以请求对象必须住一个轻模块 —— L1，stdlib + `common.log_bundle`。
+    "remote.job_spec",
     # 下行腿的**进程模式**代理（2026-10-20，plan/ppo-worker-transfer-isolation 的下行半场）：
     # 本轮只拿它做 isinstance 分派与 `take`/`start_fill`/`stop_fill` 三处调用 —— 预取的
     # 「在哪跑」是宿主级的决定（`worker_loop` 造 `PayloadProcess` 或 `PrefetchStore`），
@@ -279,30 +285,37 @@ def _round_params() -> tuple[list[str], list[str]]:
 
 
 def test_the_call_site_passes_exactly_the_round_interface() -> None:
-    """★ **接口双向一致**：`worker_loop` 调用点的位置实参个数与关键字集合，必须与 `run_one_round`
-    的签名逐名相符。
+    """★ **接口双向一致**：`worker_loop` 调用点的 `JobRoundSpec(...)` 必须把 `JobRoundSpec` 的
+    **全部必填字段**逐名传齐。
 
-    20 个入参的搬运，**漏传一个**是这一刀最可能的失误形态：运行时不一定立刻炸（只有走到那条
-    分支才 NameError），而这条断言在**提交时**就红。反向也钉住（原里删了形参而调用点还传着）。
+    21 个入参的搬运，**漏传一个**是这一刀最可能的失误形态：运行时不一定立刻炸（只有走到那条
+    分支才 NameError），而这条断言在**提交时**就红。反向也钉住（spec 里删了必填字段而调用点
+    还在传）。位置面只剩一个：`run_one_round(spec)`。
     """
-    pos, kwonly = _round_params()
-    assert pos == ["base_url", "token", "job"], pos
+    assert _round_params() == (["spec"], []), _round_params()
     calls = [
         n
         for n in ast.walk(_func(WORKER_FILE, "worker_loop"))
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == ROUND_FN
     ]
     assert len(calls) == 1, f"`worker_loop` 里应只有一处 `{ROUND_FN}(...)`，实得 {len(calls)}"
-    call = calls[0]
-    assert len(call.args) == len(pos), f"位置实参应 {len(pos)} 个（{pos}），实得 {len(call.args)}"
-    got: list[str] = []
-    for k in call.keywords:
-        assert k.arg is not None, "调用点用了 `**` 展开 —— 接口必须逐名显式（否则双向一致形同虚设）"
-        got.append(k.arg)
-    assert sorted(got) == sorted(kwonly), (
-        "调用点的关键字与 `run_one_round` 形参不一致：\n"
-        f"  多传/名字写错：{sorted(set(got) - set(kwonly))}\n"
-        f"  漏传：{sorted(set(kwonly) - set(got))}"
+    spec_call = calls[0].args[0] if len(calls[0].args) == 1 and not calls[0].keywords else None
+    detail = ast.dump(spec_call)[:80] if isinstance(spec_call, ast.Call) else repr(spec_call)
+    assert isinstance(spec_call, ast.Call) and getattr(spec_call.func, "id", "") == "JobRoundSpec", (
+        f"实参不是唯一的 `JobRoundSpec(...)`：{detail}"
+    )
+    # 逐名一致（三条合成一条：本文件每条 assert 都计口径 B，不许拆着写）。
+    names = [k.arg for k in spec_call.keywords]
+    known = {f.name for f in dataclasses.fields(JobRoundSpec)}
+    required = {
+        f.name
+        for f in dataclasses.fields(JobRoundSpec)
+        if f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING
+    }
+    assert None not in names and required <= set(names) <= known, (
+        "调用点与 `JobRoundSpec` 的字段不一致（`None` = 用了 `**` 展开，接口必须逐名显式）：\n"
+        f"  多传/名字写错：{sorted(set(names) - known, key=str)}\n"
+        f"  漏传必填：{sorted(required - set(n for n in names if n is not None))}"
     )
 
 
@@ -371,9 +384,13 @@ def test_run_job_is_read_as_a_value_at_the_call_site() -> None:
         for n in ast.walk(_func(WORKER_FILE, "worker_loop"))
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == ROUND_FN
     ]
-    kw = {k.arg: k.value for k in calls[0].keywords}
-    assert "run_job_fn" in kw, "调用点没传 run_job_fn"
-    assert isinstance(kw["run_job_fn"], ast.Name) and kw["run_job_fn"].id == "run_job", (
+    spec_call = calls[0].args[0]
+    kw = {k.arg: k.value for k in getattr(spec_call, "keywords", [])}
+    assert (
+        "run_job_fn" in kw
+        and isinstance(kw["run_job_fn"], ast.Name)
+        and kw["run_job_fn"].id == "run_job"
+    ), (
         "`run_job_fn` 必须是**裸名字** `run_job`（读 worker 的模块全局）——"
         "写成 `worker.run_job` / 包一层 lambda 都会让那 10 处 patch 变成空操作"
     )
@@ -456,11 +473,11 @@ def test_host_bookkeeping_reads_the_round_outcome(monkeypatch, tmp_path: Path) -
     """
     seen: list[int] = []
 
-    def _fake_round(base_url, token, job, **kw):
+    def _fake_round(spec):
         seen.append(1)
         if len(seen) == 1:
-            return round_mod.RoundOutcome(jid=job["job_id"], ok=True, uploaded=True, stop=False)
-        return round_mod.RoundOutcome(jid=job["job_id"], ok=False, uploaded=False, stop=True)
+            return round_mod.RoundOutcome(jid=spec.job["job_id"], ok=True, uploaded=True, stop=False)
+        return round_mod.RoundOutcome(jid=spec.job["job_id"], ok=False, uploaded=False, stop=True)
 
     n_acquired = {"n": 0}
 
@@ -472,7 +489,11 @@ def test_host_bookkeeping_reads_the_round_outcome(monkeypatch, tmp_path: Path) -
     monkeypatch.setattr(worker_mod, "acquire_job", _acquire)
     monkeypatch.setattr(worker_mod, "_release_cloud_machine", lambda *a, **k: None)
 
-    n = worker_mod.worker_loop("http://hub", "tok", work_dir=tmp_path, poll_sec=0.01, log=lambda _m: None)
+    n = worker_mod.worker_loop(
+        WorkerLoopSpec(
+            base_url="http://hub", token="tok", work_dir=tmp_path, poll_sec=0.01, log=lambda _m: None
+        )
+    )
     assert len(seen) == 2, f"应当跑两轮（第二轮 stop 整条退出）：{len(seen)}"
     assert n == 1, f"只有第一轮 uploaded ⇒ done == 1；`stop=True` 必须整条退出（实得 {n}）"
 
@@ -518,24 +539,26 @@ def test_bc_round_starts_no_prefetch_but_ppo_round_does(monkeypatch, tmp_path: P
             "lease_token": "",
         }
         round_mod.run_one_round(
-            "http://hub",
-            "tok",
-            job,
-            part_dir=tmp_path,
-            code_cache_dir=None,
-            pf_store=cast(Any, _PF()),  # 鸭子类型假件：只为断言「有没有起填充」
-            polls_since_accept=0,
-            worker_id="w-1",
-            device="cpu",
-            torch_threads=0,
-            echo=False,
-            restart_argv=None,
-            role=ROLE_ONLINE,
-            prefetch_depth=1,
-            prefetch_unpack=0,
-            uploader=cast(Any, _Uploader()),
-            run_job_fn=_cancel,
-            log=lambda _m: None,
+            round_mod.JobRoundSpec(
+                base_url="http://hub",
+                token="tok",
+                job=job,
+                part_dir=tmp_path,
+                code_cache_dir=None,
+                pf_store=cast(Any, _PF()),  # 鸭子类型假件：只为断言「有没有起填充」
+                polls_since_accept=0,
+                worker_id="w-1",
+                device="cpu",
+                torch_threads=0,
+                echo=False,
+                restart_argv=None,
+                role=ROLE_ONLINE,
+                prefetch_depth=1,
+                prefetch_unpack=0,
+                uploader=cast(Any, _Uploader()),
+                run_job_fn=_cancel,
+                log=lambda _m: None,
+            )
         )
         return started.is_set()
 

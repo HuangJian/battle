@@ -34,6 +34,7 @@ import remote.job_round as round_mod
 import remote.plan_handoff as ph
 import remote.worker as W
 from remote.download import BlobAsk, CodeAsk
+from remote.worker import WorkerLoopSpec
 
 MB = 1024 * 1024
 
@@ -311,13 +312,13 @@ def _run_one_round_capture(monkeypatch, tmp_path: Path, **kw) -> dict:
     seen: list[int] = []
     captured: dict = {}
 
-    def _fake_round(base_url, token, job, **kwargs):
+    def _fake_round(spec):
         seen.append(1)
         if not captured:
-            captured.update(kwargs)
+            captured.update(vars(spec))
         if len(seen) == 1:
-            return round_mod.RoundOutcome(jid=job["job_id"], ok=True, uploaded=True, stop=False)
-        return round_mod.RoundOutcome(jid=job["job_id"], ok=False, uploaded=False, stop=True)
+            return round_mod.RoundOutcome(jid=spec.job["job_id"], ok=True, uploaded=True, stop=False)
+        return round_mod.RoundOutcome(jid=spec.job["job_id"], ok=False, uploaded=False, stop=True)
 
     n = {"i": 0}
 
@@ -329,12 +330,14 @@ def _run_one_round_capture(monkeypatch, tmp_path: Path, **kw) -> dict:
     monkeypatch.setattr(W, "acquire_job", _acquire)
     monkeypatch.setattr(W, "_release_cloud_machine", lambda *_a, **_k: None)
     W.worker_loop(
-        "http://hub",
-        "tok",
-        work_dir=tmp_path,
-        poll_sec=0.01,
-        log=lambda _m: None,
-        **kw,
+        WorkerLoopSpec(
+            base_url="http://hub",
+            token="tok",
+            work_dir=tmp_path,
+            poll_sec=0.01,
+            log=lambda _m: None,
+            **kw,
+        )
     )
     return captured
 

@@ -141,25 +141,25 @@ def test_oneshot_runner_uses_dedicated_weight_kind() -> None:
     from types import SimpleNamespace
 
     sys.path.insert(0, str(ROOT / "nn-training"))
-    from trainer.batch_eval import ONESHOT_EVAL_KIND, BatchEvalRunner
+    from trainer.batch_eval import ONESHOT_EVAL_KIND, BatchEvalRunner, RunnerSpec
 
     def mk(**kw) -> BatchEvalRunner:
         return BatchEvalRunner(
-            "bun",
-            None,
-            Path("tmp/kind-probe.log"),
-            SimpleNamespace(mode="per-tick", out=""),
-            {},
-            {"iter": 0, "batch_id": "b"},
-            {"rung": "x"},
-            0,
-            1,
-            "run",
-            "epoch",
-            "nn",
-            None,
-            "",
-            **kw,
+            RunnerSpec(
+                bun="bun",
+                rl_path=None,
+                eval_log=Path("tmp/kind-probe.log"),
+                args=SimpleNamespace(mode="per-tick", out=""),
+                cfg={},
+                batch={"iter": 0, "batch_id": "b"},
+                unit={"rung": "x"},
+                unit_idx=0,
+                unit_of=1,
+                run_id="run",
+                engine_epoch="epoch",
+                policy="nn",
+                **kw,
+            )
         )
 
     assert ONESHOT_EVAL_KIND == "eval"

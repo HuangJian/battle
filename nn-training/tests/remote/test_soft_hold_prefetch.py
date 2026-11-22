@@ -48,6 +48,7 @@ from remote.prefetch import (
     PrefetchStore,
     pick_candidates,
 )
+from remote.worker import WorkerLoopSpec
 
 JID = "j" * 16
 
@@ -558,9 +559,9 @@ def test_worker_loop_uses_prefetched_payload_without_downloading(tmp_path: Path,
         jid = j1 if calls["n"] == 1 else j2
         return {"job_id": jid, "manifest": manifests[jid], "status": "ok", "lease_token": ""}
 
-    def _run_job(base_url, token, job, **kw):
-        jid = job["job_id"]
-        pl = (kw.get("preloaded") or {}).get("payload_zip")
+    def _run_job(spec):
+        jid = spec.job["job_id"]
+        pl = (spec.preloaded or {}).get("payload_zip")
         if pl is not None:
             preloaded_seen.append(jid)
             assert pl == payloads[jid], "preloaded 不是这份 job 的 payload"
@@ -599,12 +600,14 @@ def test_worker_loop_uses_prefetched_payload_without_downloading(tmp_path: Path,
     # `once=True` 只跑一个 job 就退出（它是「单发」语义），所以用 max_idle_sec 收尾：
     # 两个 job 跑完后 acquire 返回 None，空闲 0.3s 即退出。
     n = W.worker_loop(
-        "http://hub",
-        "tok",
-        work_dir=tmp_path,
-        poll_sec=0.05,
-        max_idle_sec=0.3,
-        log=logs.append,
+        WorkerLoopSpec(
+            base_url="http://hub",
+            token="tok",
+            work_dir=tmp_path,
+            poll_sec=0.05,
+            max_idle_sec=0.3,
+            log=logs.append,
+        )
     )
     assert n == 2, f"应当跑完两个 job：n={n} {logs}"
     assert preloaded_seen == [j2], f"第二个 job 没有走零下载开算（预取命中面没接上）：{logs}"
@@ -701,13 +704,15 @@ def test_worker_loop_restores_the_library_yield_defaults(tmp_path: Path, monkeyp
     before = W._BULK.configure_yield(after_sec=0.5, total_budget_sec=1.0)
     try:
         n = W.worker_loop(
-            "http://hub",
-            "tok",
-            work_dir=tmp_path,
-            poll_sec=0.0,
-            once=True,
-            bulk_yield="never",
-            log=lambda _m: None,
+            WorkerLoopSpec(
+                base_url="http://hub",
+                token="tok",
+                work_dir=tmp_path,
+                poll_sec=0.0,
+                once=True,
+                bulk_yield="never",
+                log=lambda _m: None,
+            )
         )
         assert n == 0
         # `configure_yield` 返回**旧值** ⇒ 拿它当读数：loop 后应当仍是进 loop 前的策略。
@@ -750,10 +755,10 @@ def test_prefetch_hit_is_visible_in_the_wire_line(tmp_path: Path, monkeypatch) -
         jid = j1 if calls["n"] == 1 else j2
         return {"job_id": jid, "manifest": manifests[jid], "status": "ok", "lease_token": ""}
 
-    def _run_job(base_url, token, job, **kw):
-        if job["job_id"] == j1:  # 第一个 job 跑的时候，第二个 job 已被预取进来
+    def _run_job(spec):
+        if spec.job["job_id"] == j1:  # 第一个 job 跑的时候，第二个 job 已被预取进来
             store.store(j2, payloads[j2], _summary(payloads[j2], j2))
-        return {"job_id": job["job_id"]}
+        return {"job_id": spec.job["job_id"]}
 
     monkeypatch.setattr(W, "acquire_job", _acquire)
     monkeypatch.setattr(W, "run_job", _run_job)
@@ -774,12 +779,14 @@ def test_prefetch_hit_is_visible_in_the_wire_line(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(PrefetchStore, "__init__", _init)
     logs: list[str] = []
     n = W.worker_loop(
-        "http://hub",
-        "tok",
-        work_dir=tmp_path,
-        poll_sec=0.05,
-        max_idle_sec=0.3,
-        log=logs.append,
+        WorkerLoopSpec(
+            base_url="http://hub",
+            token="tok",
+            work_dir=tmp_path,
+            poll_sec=0.05,
+            max_idle_sec=0.3,
+            log=logs.append,
+        )
     )
     assert n == 2, f"应当跑完两个 job：n={n} {logs}"
     hit_lines = [ln for ln in logs if j2 in ln and "payload=prefetch-hit" in ln]
@@ -983,15 +990,15 @@ def test_worker_loop_hands_over_a_stage_and_cleans_it_at_job_end(
         jid = j1 if calls["n"] == 1 else j2
         return {"job_id": jid, "manifest": manifests[jid], "status": "ok", "lease_token": ""}
 
-    def _run_job(base_url, token, job, **kw):
-        if job["job_id"] == j2:
-            pl = dict(kw.get("preloaded") or {})
+    def _run_job(spec):
+        if spec.job["job_id"] == j2:
+            pl = dict(spec.preloaded or {})
             seen.append(pl)
             assert set(pl) == {"staged_dir", "payload_nbytes", "unpack_sec"}, f"形状不对：{pl}"
             assert Path(pl["staged_dir"]).is_dir(), f"交棒的暂存不在盘上：{pl}"
-        if job["job_id"] == j1:  # 第一个 job 跑的时候，把第二个 job 解包预取进来
+        if spec.job["job_id"] == j1:  # 第一个 job 跑的时候，把第二个 job 解包预取进来
             store.store(j2, packed, _summary(packed, j2), unpack=True)
-        return {"job_id": job["job_id"]}
+        return {"job_id": spec.job["job_id"]}
 
     monkeypatch.setattr(W, "acquire_job", _acquire)
     monkeypatch.setattr(W, "run_job", _run_job)
@@ -1012,13 +1019,15 @@ def test_worker_loop_hands_over_a_stage_and_cleans_it_at_job_end(
     monkeypatch.setattr(PrefetchStore, "__init__", _init)
     logs: list[str] = []
     n = W.worker_loop(
-        "http://hub",
-        "tok",
-        work_dir=tmp_path,
-        poll_sec=0.05,
-        max_idle_sec=0.3,
-        prefetch_unpack=1,
-        log=logs.append,
+        WorkerLoopSpec(
+            base_url="http://hub",
+            token="tok",
+            work_dir=tmp_path,
+            poll_sec=0.05,
+            max_idle_sec=0.3,
+            prefetch_unpack=1,
+            log=logs.append,
+        )
     )
     assert n == 2, f"应当跑完两个 job：n={n} {logs}"
     assert seen and seen[0].get("staged_dir"), f"staged 形状没交给 run_job：{seen}"
@@ -1050,11 +1059,13 @@ def test_a_handed_off_stage_never_eats_the_cached_result(
     monkeypatch.setattr(SHELL, "validate_result", lambda *_a, **_k: None)
     monkeypatch.setattr(DL, "download_payload", lambda *_a, **_k: pytest.fail("复用路径不该下载"))
     got = W.run_job(
-        "http://hub",
-        "tok",
-        {"job_id": JID, "manifest": _ppo_manifest()},
-        work_dir=tmp_path,
-        preloaded={"staged_dir": str(staged), "payload_nbytes": 123, "unpack_sec": 0.4},
+        W.RunJobSpec(
+            base_url="http://hub",
+            token="tok",
+            job={"job_id": JID, "manifest": _ppo_manifest()},
+            work_dir=tmp_path,
+            preloaded={"staged_dir": str(staged), "payload_nbytes": 123, "unpack_sec": 0.4},
+        )
     )
     assert got == cached
     assert (job_dir / "_result.json").exists(), "搬入把 `_result.json` 吃掉了（复用路径失效）"

@@ -29,6 +29,7 @@ import os
 import shutil
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -52,6 +53,7 @@ from worker.eval_local import (
     settle_eval_summary,
 )
 from worker.eval_rows import eval_row
+from worker.eval_track import EvalSettleSpec
 
 # 单局评估的硬顶：**与 rollout 共用一份口径**（`common/game_watch.py`）。
 # 旧值 900s（= policy.taskTimeoutSec）：一个卡住的评估局会占着一个 slot 15 分钟，而本轮
@@ -208,7 +210,7 @@ class CloudEvalRunner:
 
     def __init__(
         self,
-        build_job: Any,
+        build_job: Callable[[int], CloudEvalSpec],
         *,
         log: Any = None,
         on_round_done: Any = None,
@@ -227,7 +229,8 @@ class CloudEvalRunner:
         #: 待跑的那一轮 = `(it, thunk)`。⚠ 第二个元素是**零参可调用**（求值推迟到后台线程）
         #: —— 2026-10-14 D1（`plan/offline-local-disk-first` §3.3）：装配（`self._build`）
         #: 原本在**调用线程**（= 训练主循环）上现算，挂死就等于把训练循环按死。
-        self._pending: tuple[int, Any] | None = None
+        #: thunk 产出 `CloudEvalSpec`（2026-11-22 P0-3：以前产出一张关键字表再 `**` 展开）。
+        self._pending: tuple[int, Callable[[], CloudEvalSpec]] | None = None
         self._current: int | None = None
         self._wake = threading.Event()
         self._idle = threading.Event()
@@ -284,7 +287,7 @@ class CloudEvalRunner:
             # 安全性：调用点是 `plan_run._maybe_cloud_eval`（在 `_checkpoint` **之后**）⇒ 那一刻
             # `it-NNN/weights.json` 已原子落盘，延后取路径读到的仍是同一份不可变字节（`wver` 不变）。
             _it = int(it)
-            self._pending = (_it, lambda: dict(self._build(_it)))
+            self._pending = (_it, lambda: self._build(_it))
             self._idle.clear()
         self._ensure_thread()
         self._wake.set()
@@ -338,8 +341,9 @@ class CloudEvalRunner:
             if job is not None:
                 try:
                     # 装配也在**本线程**求值（D1）；`_build` 抛的异常与 `run_cloud_eval` 同一档处理。
-                    params = job[1]() if callable(job[1]) else job[1]
-                    result = run_cloud_eval(**params)
+                    # 入参是一个对象（`CloudEvalSpec`），不再是一张要 `**` 展开的关键字表。
+                    spec = job[1]() if callable(job[1]) else job[1]
+                    result = run_cloud_eval(spec)
                     self.results.append(result)
                     if self._on_round_done is not None:
                         try:
@@ -674,45 +678,68 @@ class _EvalRound:
             log(f"[eval-cloud] it{self.it}: 另有 {len(self.failed) - 5} 局失败（同上口径）")
         # summary 走 in-loop 的同一份结算（含双轨/技能子指标/掉落口径）
         settle_eval_summary(
-            self.eval_jsonl,
-            self.key16,
-            int(self.it),
-            self.pairs,
-            len(self.pairs),
-            self.seen,
-            self.wins,
-            self.cleared_total,
-            self.outcomes,
-            self.node_games,
-            lambda row: append_jsonl(self.eval_jsonl, row),
-            t0,
-            rollout_winrate,
-            course_fp=course_fp or "",
-            eval_bundle=eb,
+            EvalSettleSpec(
+                eval_jsonl=self.eval_jsonl,
+                key16=self.key16,
+                it=int(self.it),
+                pairs=self.pairs,
+                total=len(self.pairs),
+                landed=self.seen,
+                wins=self.wins,
+                cleared_total=self.cleared_total,
+                outcomes=self.outcomes,
+                node_games=self.node_games,
+                append_row=lambda row: append_jsonl(self.eval_jsonl, row),
+                t_eval_start=t0,
+                rollout_winrate=rollout_winrate,
+                course_fp=course_fp or "",
+                eval_bundle=eb,
+            )
         )
         out["ran"] = True
 
 
-def run_cloud_eval(
-    *,
-    plan: CloudEvalPlan,
-    it: int,
-    weights_path: Path,
-    eval_jsonl: Path,
-    ts_root: str | Path,
-    work_dir: str | Path,
-    course: Any = None,
-    course_fp: str = "",
+@dataclass(frozen=True, kw_only=True)
+class CloudEvalSpec:
+    """一轮云机 A 层评估的全部输入（`run_cloud_eval` 只收它）。
+
+    ## 为什么收参数对象（P0-3）
+
+    原来 6 个必填 + 8 个带缺省的 14 个关键字。而生产侧**不是**直接调它：
+    `remote/plan_handoff._eval_job_builder` 造一个 `dict` 当关键字表，`CloudEvalRunner._loop`
+    再 `run_cloud_eval(**params)` 展开。字典键拼错**不会**在构造处报错 —— 它要么变成
+    `unexpected keyword argument`（好在响），要么（更坏）键名写对了但值取错：
+    `ts_code_sha256` 错 ⇒ 跨轮暖池 key 对不上（每轮重新 spawn 一池，冷启动白付一遍）；
+    `game_timeout_sec` 错 ⇒ 「显式给了数」与「没指定」的区别被弄丢，而它决定重试要不要放大；
+    `course_fp` 错 ⇒ 逐局行配对不上课程（读数静默错位）。改成 spec 后，那条路是一个**对象**，
+    字段名在 `_eval_job_builder` 里就被检查（mypy + `tests/remote/test_cloud_eval_spec.py`）。
+
+    `course` / `log` 仍用 `Any`：前者是 pydantic 课程模型与测试 `SimpleNamespace` 的并（同
+    `worker/bc_resume.BcResumeRuntime.course` 的理由，搬进来会让替身对不上），后者与旧形参一致。
+    """
+
+    plan: CloudEvalPlan
+    it: int
+    weights_path: Path
+    eval_jsonl: Path
+    ts_root: str | Path
+    work_dir: str | Path
+    course: Any = None
+    course_fp: str = ""
     #: TS 代码 sha256（跨轮 eval 池的 key）。**不要**从 `ts_root` 路径反推：scratch 下
     #: basename 是 `nn-rollout-ts-<48hex>`，不是 sha。长度不对 ⇒ 本次不保池，不 assert。
-    ts_code_sha256: str = "",
-    bun: str = "",
-    slots: int = 0,
-    game_timeout_sec: float = 0.0,
-    rollout_winrate: float | None = None,
-    log: Any = None,
-) -> dict:
-    """在云机跑第 `it` 轮的 A 层评估：逐局落账 + `settle_eval_summary`。**永不抛**。
+    ts_code_sha256: str = ""
+    bun: str = ""
+    slots: int = 0
+    game_timeout_sec: float = 0.0
+    rollout_winrate: float | None = None
+    log: Any = None
+
+
+def run_cloud_eval(spec: CloudEvalSpec) -> dict:
+    """在云机跑第 `spec.it` 轮的 A 层评估：逐局落账 + `settle_eval_summary`。**永不抛**。
+
+    入参全在 `CloudEvalSpec`（字段语义见该类 docstring）。
 
     返回 `{ran, games, settled, failed, skipped, wver, sec, servePool, roundRetries, error?}`
     （给调用方记日志用）。
@@ -728,7 +755,20 @@ def run_cloud_eval(
     是操作员的上限），每次尝试自己都有界，不占用任何外层重试预算。内容面失败（rc≠0 / 确定性
     报错）仍归 `failed`（响亮记一笔，读数少一局）——那是这一轮该留的出路。
     """
-    log = log or _rl_log
+    plan = spec.plan
+    it = spec.it
+    weights_path = spec.weights_path
+    eval_jsonl = spec.eval_jsonl
+    ts_root = spec.ts_root
+    work_dir = spec.work_dir
+    course = spec.course
+    course_fp = spec.course_fp
+    ts_code_sha256 = spec.ts_code_sha256
+    bun = spec.bun
+    slots = spec.slots
+    game_timeout_sec = spec.game_timeout_sec
+    rollout_winrate = spec.rollout_winrate
+    log = spec.log or _rl_log
     # 本轮 eval 的所有阶段读数攒成**一行**（Cat 3 日志节食）：开评 / 长驻 worker 池 /
     # serve_pool 计数 / 单局耗时 / summary winRate / 落账，轮末 `eb.emit` 一次打完。
     eb = LogBundle(log)

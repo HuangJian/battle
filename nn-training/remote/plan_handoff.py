@@ -40,7 +40,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 # 按**模块**粒度 import（而不是 `from common import scratch`）：本文件的依赖面是闭集守卫
 # （`tests/remote/test_plan_handoff_split.py` 白名单逐条对账），写成点分名才能让白名单说清
@@ -56,6 +56,9 @@ import remote.opt_standard as opt_standard
 import remote.round_forms as round_forms
 import remote.weights_standard as weights_standard
 from common.logutil import tag_logger
+
+if TYPE_CHECKING:  # 只为类型：云机 A 层评估是**可选**依赖，运行时按需延迟 import（同旧口径）
+    from remote.offline_eval import CloudEvalSpec
 from common.platform_utils import call_bounded, cpu_worker_slots
 from common.protocol import (
     BLOB_DEMO,
@@ -168,7 +171,7 @@ def verify_plan_file(job_dir: str | Path, manifest: dict, *, log: Callable[[str]
 
     三道门，任何一道不过都**在跑第一局之前**响：
       ① sha256(plan.json) == manifest.plan_sha256（payload 损坏/串包）；
-      ② `validate_plan` 形状（区间/硬上界/字段类型）；
+      ② `validate_plan` 形状（区间/字段类型；2026-11-22 起不再有轮数上界）；
       ③ `pairs_fp`：用 `build_pairs` 重放计划覆盖的**每一轮**对集，与 hub 发布时算的
          指纹逐位对账——`pair_args` 少一个字段、`build_pairs` 新增随机源，都在这里暴露。
          绝不在跑到半途才发现语料与计划不符（那时已经产生一批不可信 shard）。
@@ -1092,8 +1095,8 @@ def _eval_round_done(ctx: RunContext) -> Callable[[int, dict], None]:
     return on_done
 
 
-def _eval_job_builder(ctx: RunContext, ep: Any) -> Callable[[int], dict]:
-    """`it` → `run_cloud_eval` 的关键字参数（**提交时才求值**：权重路径按当轮算）。
+def _eval_job_builder(ctx: RunContext, ep: Any) -> Callable[[int], CloudEvalSpec]:
+    """`it` → `run_cloud_eval` 的入参对象（**提交时才求值**：权重路径按当轮算）。
 
     权重用 `it-NNN/weights.json` 而不是任何「活指针」：那是这一轮不可变且已在盘上的
     W(it)，`wver` 因此与本地/节点评同一份权重时逐位相同（账本可配对）——**前提是它先被
@@ -1108,6 +1111,9 @@ def _eval_job_builder(ctx: RunContext, ep: Any) -> Callable[[int], dict]:
     """
     #: 每轮 build 都重建一次（runner 串行评轮）⇒ 上一轮的 game 目录/权重当场回收，占用有界。
     state: dict[str, Any] = {}
+    # 可选依赖：`remote.offline_eval` 在截断的代码快照里可能整个不在（`rl` 包缺席）。
+    # 这里与 `_setup_cloud_eval` 同口径延迟 import；它已在本模块的依赖闭集白名单里（L2 ⇐ L5）。
+    from remote.offline_eval import CloudEvalSpec
 
     def _layout() -> Any:
         """解析 + 安装本腿的 scratch（一次）；`None` = 回退原地。
@@ -1197,7 +1203,7 @@ def _eval_job_builder(ctx: RunContext, ep: Any) -> Callable[[int], dict]:
             ctx.log(f"WARN 云机评估 it{it} 的权重是 delta 容器且基准不在本机（{e}）——本轮不评")
             return Path("")
 
-    def build(it: int) -> dict:
+    def build(it: int) -> CloudEvalSpec:
         layout = _layout()
         weights = _land_weights(int(it))
         ts_root = ctx.ts_tree_dir or ""
@@ -1235,25 +1241,30 @@ def _eval_job_builder(ctx: RunContext, ep: Any) -> Callable[[int], dict]:
                     f"——本段评估回落原地（权重 {weights}）"
                 )
                 state["layout"] = None
-        return {
-            "plan": ep,
-            "it": int(it),
-            "weights_path": weights,
+        # 参数对象（2026-11-22 P0-3）：以前这里是一张关键字表，`CloudEvalRunner._loop` 再
+        # `run_cloud_eval(**params)` 展开 —— 键名拼错要等到后台线程执行才可能被发现，取错值
+        # 更是静默（`ts_code_sha256` 错 = 跨轮暖池 key 对不上、`game_timeout_sec` 错 = 丢掉
+        # 「显式 vs 兜底」的区别）。现在字段名在这里就被 mypy/守卫检查。
+        return CloudEvalSpec(
+            plan=ep,
+            it=int(it),
+            weights_path=weights,
             # ⚠ 账本**不动**：逐局行走真产物目录的 eval_log.jsonl（plan §2 P0-5 第 4 条已删）。
-            "eval_jsonl": ctx.store.root / ArtifactStore.EVAL_LOG_NAME,
-            "ts_root": ts_root,
-            "work_dir": work_dir,
-            "course": ctx.course,
-            "course_fp": str(ctx.manifest.get("course_fp", "") or ""),
+            eval_jsonl=ctx.store.root / ArtifactStore.EVAL_LOG_NAME,
+            ts_root=ts_root,
+            work_dir=work_dir,
+            course=ctx.course,
+            course_fp=str(ctx.manifest.get("course_fp", "") or ""),
             # eval 跨轮池的 key：来自 manifest，不从 ts_root 路径反推（scratch 下不是 sha）。
-            "ts_code_sha256": str(ctx.manifest.get("ts_code_sha256", "") or ""),
-            "slots": ctx.eval_slots,
+            ts_code_sha256=str(ctx.manifest.get("ts_code_sha256", "") or ""),
+            slots=ctx.eval_slots,
             # **原样传 0（= 没指定）**：由 `run_cloud_eval` 按 `common/game_watch.py` 解析成
             # 「首次尝试 = 5s（用户口径：单局 >5s 肯定不正常）、重试 ×4」；显式给了正数就完全
             # 按用户给的数且不对重试放大（配置说了算）。不在这里提前解析，是因为「显式 vs
             # 兜底」这个区别决定了重试要不要放宽，解析一次就丢了这个信息。
-            "game_timeout_sec": float(ctx.eval_game_timeout_sec or 0.0),
-            "log": ctx.log,
-        }
+            game_timeout_sec=float(ctx.eval_game_timeout_sec or 0.0),
+            log=ctx.log,
+        )
+
 
     return build

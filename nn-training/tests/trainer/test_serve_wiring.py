@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import subprocess
@@ -32,7 +33,7 @@ import trainer.loop_plan as loop_plan
 import trainer.loop_serve as loop_serve
 import worker.train_ledger as train_ledger
 from common.protocol import COURSE_ENABLE_MARKER
-from trainer.loop_serve import CourseRuntime, serve
+from trainer.loop_serve import CourseRuntime, ServeSpec, serve
 from worker.loop_round import STEP_METHOD
 from worker.loop_tasks import ROUND_TASKS
 
@@ -48,6 +49,7 @@ def _enable_course(root: Path, name: str) -> None:
     d.mkdir(parents=True, exist_ok=True)
     (d / "training_log.jsonl").write_text("", encoding="utf-8")
     (d / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
+
 
 # --------------------------------------------------------------- 假件
 
@@ -205,7 +207,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
 
 def test_two_courses_alternate_and_both_finish(env: SimpleNamespace) -> None:
-    rep = serve(["a", "b"], prepare=False, bun="bun", iters=2, step_mode=False)
+    rep = serve(ServeSpec(courses=["a", "b"], prepare=False, bun="bun", iters=2, step_mode=False))
 
     assert rep.stop_reason == "all_settled"
     assert rep.steps == 4  # 每课 2 轮
@@ -263,7 +265,7 @@ def test_held_course_reaching_done_is_not_settled(
         return CourseRuntime(course=course, args=args)
 
     monkeypatch.setattr(loop_serve, "open_course", fake_open_course)
-    rep = serve(["a"], prepare=False, bun="bun", iters=2, step_mode=False)
+    rep = serve(ServeSpec(courses=["a"], prepare=False, bun="bun", iters=2, step_mode=False))
     assert rep.courses["a"]["state"] == "done"
     loop = FakeLoop.instances[0]
     assert loop.finished == []  # 没有假收官（不写 run_complete / 不发云机 PAUSE）
@@ -271,7 +273,7 @@ def test_held_course_reaching_done_is_not_settled(
 
 
 def test_step_mode_runs_the_full_13_step_table(env: SimpleNamespace) -> None:
-    rep = serve(["a"], prepare=False, bun="bun", iters=1, step_mode=True)
+    rep = serve(ServeSpec(courses=["a"], prepare=False, bun="bun", iters=1, step_mode=True))
 
     assert rep.stop_reason == "all_settled"
     assert rep.steps == len(ROUND_TASKS) == 13
@@ -294,14 +296,16 @@ def test_wait_hands_execution_to_the_other_course(env: SimpleNamespace) -> None:
 
     clock.on_sleep = flip
     rep = serve(
-        ["a", "b"],
-        prepare=False,
-        bun="bun",
-        iters=2,
-        step_mode=False,
-        now=clock.now,
-        sleep=clock.sleep,
-        max_steps=100,
+        ServeSpec(
+            courses=["a", "b"],
+            prepare=False,
+            bun="bun",
+            iters=2,
+            step_mode=False,
+            now=clock.now,
+            sleep=clock.sleep,
+            max_steps=100,
+        )
     )
 
     assert rep.stop_reason == "all_settled"
@@ -320,13 +324,15 @@ def test_pool_eviction_rebuilds_engine_like_a_restart(env: SimpleNamespace) -> N
     认出「对象换了 ⇒ 要走 `_setup()`」，而不是误以为「这门课已经 setup 过」。
     """
     rep = serve(
-        ["a", "b"],
-        prepare=False,
-        bun="bun",
-        iters=2,
-        step_mode=False,
-        cache_courses=1,
-        cache_mb=10**9,
+        ServeSpec(
+            courses=["a", "b"],
+            prepare=False,
+            bun="bun",
+            iters=2,
+            step_mode=False,
+            cache_courses=1,
+            cache_mb=10**9,
+        )
     )
 
     assert rep.stop_reason == "all_settled"
@@ -345,7 +351,7 @@ def test_settled_ledger_never_raises_an_engine(env: SimpleNamespace) -> None:
     """账本说这一轮已结算 ⇒ 队列直接 `done`（不建引擎、不做收官副作用）。"""
     env.ledger["rows"] = [SimpleNamespace(it=1)]
 
-    rep = serve(["a"], prepare=False, bun="bun", iters=0, step_mode=True)
+    rep = serve(ServeSpec(courses=["a"], prepare=False, bun="bun", iters=0, step_mode=True))
 
     assert rep.stop_reason == "all_settled"
     assert rep.steps == 0
@@ -364,13 +370,13 @@ def test_broken_course_is_isolated(env: SimpleNamespace, monkeypatch: pytest.Mon
         return good(course, **kw)
 
     monkeypatch.setattr(loop_serve, "open_course", open_course)
-    rep = serve(["bad", "a"], prepare=False, bun="bun", iters=1, step_mode=False)
+    rep = serve(ServeSpec(courses=["bad", "a"], prepare=False, bun="bun", iters=1, step_mode=False))
 
     assert list(rep.skipped) == ["bad"] and "不存在" in rep.skipped["bad"]
     assert rep.courses["a"]["rounds_done"] == 1
     assert rep.stop_reason == "all_settled"
 
-    rep2 = serve(["bad"], prepare=False, bun="bun", max_steps=5)
+    rep2 = serve(ServeSpec(courses=["bad"], prepare=False, bun="bun", max_steps=5))
     assert rep2.stop_reason == "no_courses" and rep2.steps == 0
 
 
@@ -390,11 +396,14 @@ def test_step_level_system_exit_takes_down_only_that_course(
         return loop_core.RoundOutcome(loop_core.ROUND_NEXT, int(it))
 
     monkeypatch.setattr(FakeLoop, "run_one_round", boom)
-    rep = serve(["bad", "a"], prepare=False, bun="bun", iters=1, step_mode=False)
+    rep = serve(ServeSpec(courses=["bad", "a"], prepare=False, bun="bun", iters=1, step_mode=False))
 
     assert rep.stop_reason == "all_settled"
     assert rep.courses["bad"]["state"] == "aborted"  # 只脏本课：下线，不是进程崩溃
-    assert rep.courses["bad"]["reason"] == "[run_rl] --run-iters<0 需要课程声明 iters——没有终点就不叫整段"
+    assert (
+        rep.courses["bad"]["reason"]
+        == "[run_rl] --run-iters<0 需要课程声明 iters——没有终点就不叫整段"
+    )
     assert "bad" in rep.skipped and "iters" in rep.skipped["bad"]
     assert rep.failures["bad"] == "[run_rl] --run-iters<0 需要课程声明 iters——没有终点就不叫整段"
     # a 全程没被 bad 拖住：跑完它的轮
@@ -430,15 +439,17 @@ def test_mid_round_courses_are_never_evicted(
 
     clock.on_sleep = flip
     rep = serve(
-        ["a", "b"],
-        prepare=False,
-        bun="bun",
-        iters=1,
-        step_mode=False,  # 轮粒度：让位钩子在轮边界（`remote_job_ready`），a 才真的停在轮内
-        cache_courses=1,
-        now=clock.now,
-        sleep=clock.sleep,
-        max_steps=50,
+        ServeSpec(
+            courses=["a", "b"],
+            prepare=False,
+            bun="bun",
+            iters=1,
+            step_mode=False,  # 轮粒度：让位钩子在轮边界（`remote_job_ready`），a 才真的停在轮内
+            cache_courses=1,
+            now=clock.now,
+            sleep=clock.sleep,
+            max_steps=50,
+        )
     )
     out = capsys.readouterr().out
 
@@ -459,7 +470,7 @@ def test_default_cache_cap_follows_open_courses(
     操作面事实，越过死值就必然互逐。
     """
     names = [f"c{i}" for i in range(1, 8)]  # 7 门 > 旧死值 5
-    rep = serve(names, prepare=False, bun="bun", iters=1, step_mode=False)
+    rep = serve(ServeSpec(courses=names, prepare=False, bun="bun", iters=1, step_mode=False))
     out = capsys.readouterr().out
 
     assert rep.stop_reason == "all_settled"
@@ -476,15 +487,17 @@ def test_discover_mode_runs_with_zero_courses(env: SimpleNamespace) -> None:
     """**一门课都没有也照常跑**（队列空着等）——空队列不是结束条件（用户 2026-09-18 口径）。"""
     clock = FakeClock()
     rep = serve(
-        None,
-        prepare=False,
-        bun="bun",
-        iters=1,
-        step_mode=False,
-        traj_root=str(env.tmp),
-        now=clock.now,
-        sleep=clock.sleep,
-        max_seconds=60.0,
+        ServeSpec(
+            courses=None,
+            prepare=False,
+            bun="bun",
+            iters=1,
+            step_mode=False,
+            traj_root=str(env.tmp),
+            now=clock.now,
+            sleep=clock.sleep,
+            max_seconds=60.0,
+        )
     )
 
     assert rep.stop_reason == "max_seconds"  # 不是 all_settled：发现模式没有「全收官」这个终点
@@ -502,16 +515,18 @@ def test_discover_mode_picks_up_a_course_that_appears_mid_run(env: SimpleNamespa
 
     clock.on_sleep = spawn
     rep = serve(
-        None,
-        prepare=False,
-        bun="bun",
-        iters=1,
-        step_mode=False,
-        traj_root=str(env.tmp),
-        now=clock.now,
-        sleep=clock.sleep,
-        poll_sec=1.0,
-        max_seconds=10.0,
+        ServeSpec(
+            courses=None,
+            prepare=False,
+            bun="bun",
+            iters=1,
+            step_mode=False,
+            traj_root=str(env.tmp),
+            now=clock.now,
+            sleep=clock.sleep,
+            poll_sec=1.0,
+            max_seconds=10.0,
+        )
     )
 
     assert env.opened == ["a"]
@@ -527,16 +542,18 @@ def test_discover_mode_opens_what_is_already_on_disk(env: SimpleNamespace) -> No
     clock = FakeClock()
 
     rep = serve(
-        None,
-        prepare=False,
-        bun="bun",
-        iters=1,
-        step_mode=False,
-        traj_root=str(env.tmp),
-        now=clock.now,
-        sleep=clock.sleep,
-        poll_sec=1.0,
-        max_seconds=5.0,
+        ServeSpec(
+            courses=None,
+            prepare=False,
+            bun="bun",
+            iters=1,
+            step_mode=False,
+            traj_root=str(env.tmp),
+            now=clock.now,
+            sleep=clock.sleep,
+            poll_sec=1.0,
+            max_seconds=5.0,
+        )
     )
 
     assert env.opened == ["a", "b"]  # 各开一次（后续空转不再重复开）
@@ -559,7 +576,7 @@ def test_a_course_whose_ledger_blows_up_does_not_take_down_the_process(
         return real_facts(traj, *a, **kw)
 
     monkeypatch.setattr(loop_serve, "course_facts", course_facts)
-    rep = serve(["bad", "a"], prepare=False, bun="bun", iters=1, step_mode=False)
+    rep = serve(ServeSpec(courses=["bad", "a"], prepare=False, bun="bun", iters=1, step_mode=False))
 
     assert rep.stop_reason == "all_settled"
     assert "bad" in rep.skipped and "账本读不了" in rep.skipped["bad"]
@@ -581,15 +598,17 @@ def test_discover_mode_does_not_retry_a_broken_course(
     monkeypatch.setattr(loop_serve, "open_course", open_course)
     clock = FakeClock()
     rep = serve(
-        None,
-        prepare=False,
-        bun="bun",
-        step_mode=False,
-        traj_root=str(env.tmp),
-        now=clock.now,
-        sleep=clock.sleep,
-        poll_sec=1.0,
-        max_seconds=5.0,
+        ServeSpec(
+            courses=None,
+            prepare=False,
+            bun="bun",
+            step_mode=False,
+            traj_root=str(env.tmp),
+            now=clock.now,
+            sleep=clock.sleep,
+            poll_sec=1.0,
+            max_seconds=5.0,
+        )
     )
 
     assert attempts == ["bad"]  # 一次，不是每次空转一次
@@ -613,16 +632,18 @@ def test_discover_mode_does_not_reopen_a_step_exit_course(
         _enable_course(env.tmp, name)
     clock = FakeClock()
     rep = serve(
-        None,
-        prepare=False,
-        bun="bun",
-        iters=1,
-        step_mode=False,
-        traj_root=str(env.tmp),
-        now=clock.now,
-        sleep=clock.sleep,
-        poll_sec=1.0,
-        max_seconds=8.0,
+        ServeSpec(
+            courses=None,
+            prepare=False,
+            bun="bun",
+            iters=1,
+            step_mode=False,
+            traj_root=str(env.tmp),
+            now=clock.now,
+            sleep=clock.sleep,
+            poll_sec=1.0,
+            max_seconds=8.0,
+        )
     )
 
     # 各只开一次——被 SystemExit 打掉的课不会被反复重开（顺序无关：发现扫描不保证字典序）
@@ -634,9 +655,7 @@ def test_discover_mode_does_not_reopen_a_step_exit_course(
 # --------------------------------------------------------------- 控制面（暂停/恢复）
 
 
-def test_control_file_pauses_only_the_named_course(
-    env: SimpleNamespace, tmp_path: Path
-) -> None:
+def test_control_file_pauses_only_the_named_course(env: SimpleNamespace, tmp_path: Path) -> None:
     """控制台写暂停意图 ⇒ 被暂停的课**一步都不推**，别的课照常跑完。"""
     control = tmp_path / "loop-control.json"
     control.write_text(json.dumps({"paused": ["b"]}), encoding="utf-8")
@@ -644,16 +663,18 @@ def test_control_file_pauses_only_the_named_course(
 
     # 显式课程模式 + 全程暂停 b：b 不推进，a 跑完后进程停在「等恢复」（max_seconds 兜底退出）
     rep = serve(
-        ["a", "b"],
-        prepare=False,
-        bun="bun",
-        iters=2,
-        step_mode=False,
-        control_file=str(control),
-        now=clock.now,
-        sleep=clock.sleep,
-        poll_sec=1.0,
-        max_seconds=30.0,
+        ServeSpec(
+            courses=["a", "b"],
+            prepare=False,
+            bun="bun",
+            iters=2,
+            step_mode=False,
+            control_file=str(control),
+            now=clock.now,
+            sleep=clock.sleep,
+            poll_sec=1.0,
+            max_seconds=30.0,
+        )
     )
 
     assert rep.stop_reason == "max_seconds"  # 暂停不算收官 ⇒ 不退
@@ -663,9 +684,7 @@ def test_control_file_pauses_only_the_named_course(
     assert [c for c, _ in FakeLoop.order] == ["a", "a"]  # b 一步都没跑
 
 
-def test_control_file_resume_lets_the_course_continue(
-    env: SimpleNamespace, tmp_path: Path
-) -> None:
+def test_control_file_resume_lets_the_course_continue(env: SimpleNamespace, tmp_path: Path) -> None:
     """暂停 → 恢复：队列与账本一个字没动，从原处接着跑（**不重做已完成轮**）。"""
     control = tmp_path / "loop-control.json"
     control.write_text(json.dumps({"paused": ["a"]}), encoding="utf-8")
@@ -677,16 +696,18 @@ def test_control_file_resume_lets_the_course_continue(
 
     clock.on_sleep = unpause
     rep = serve(
-        ["a"],
-        prepare=False,
-        bun="bun",
-        iters=2,
-        step_mode=False,
-        control_file=str(control),
-        now=clock.now,
-        sleep=clock.sleep,
-        poll_sec=1.0,
-        max_seconds=60.0,
+        ServeSpec(
+            courses=["a"],
+            prepare=False,
+            bun="bun",
+            iters=2,
+            step_mode=False,
+            control_file=str(control),
+            now=clock.now,
+            sleep=clock.sleep,
+            poll_sec=1.0,
+            max_seconds=60.0,
+        )
     )
 
     assert rep.stop_reason == "all_settled"
@@ -703,24 +724,28 @@ def test_missing_or_broken_control_file_keeps_training(
     control.write_text("{ 这不是 JSON", encoding="utf-8")
 
     rep = serve(
-        ["a"],
-        prepare=False,
-        bun="bun",
-        iters=1,
-        step_mode=False,
-        control_file=str(control),
+        ServeSpec(
+            courses=["a"],
+            prepare=False,
+            bun="bun",
+            iters=1,
+            step_mode=False,
+            control_file=str(control),
+        )
     )
 
     assert rep.stop_reason == "all_settled" and rep.courses["a"]["rounds_done"] == 1
 
     # 文件根本不存在同理（空意图）
     rep2 = serve(
-        ["a"],
-        prepare=False,
-        bun="bun",
-        iters=1,
-        step_mode=False,
-        control_file=str(tmp_path / "nope.json"),
+        ServeSpec(
+            courses=["a"],
+            prepare=False,
+            bun="bun",
+            iters=1,
+            step_mode=False,
+            control_file=str(tmp_path / "nope.json"),
+        )
     )
     assert rep2.stop_reason == "all_settled"
 
@@ -757,9 +782,9 @@ def test_cli_serve_without_courses_means_discovery(
 
     seen: dict[str, Any] = {}
 
-    def fake_serve(courses: Any, **kw: Any) -> Any:
-        seen["courses"] = courses
-        seen.update(kw)
+    def fake_serve(spec: Any) -> Any:
+        seen.clear()
+        seen.update(dataclasses.asdict(spec))
         return loop_serve.ServeReport(stop_reason="stub")
 
     monkeypatch.setattr(loop_serve, "serve", fake_serve)
@@ -796,7 +821,7 @@ def test_cli_serve_takes_a_process_level_single_instance_lock(
     lock = tmp_path / ".run_cluster.lock"
     lock.write_text(f"{os.getpid()}|python|0", encoding="utf-8")
 
-    def fake_serve(courses: Any, **kw: Any) -> Any:
+    def fake_serve(spec: Any) -> Any:
         return loop_serve.ServeReport(stop_reason="stub")
 
     monkeypatch.setattr(loop_serve, "serve", fake_serve)
@@ -861,7 +886,9 @@ run_rl.main()
 """
 
 
-def test_course_args_match_run_rl_echo_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_course_args_match_run_rl_echo_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """对拍：`course_args(stem)` ≡ `trainer/run_rl.py --course <stem> --echo-config` 的解析快照。
 
     oracle = 在**子进程里跑 `run_rl.main()` 自己**、把 `echo_config` 换成 dump（同一调用点、
@@ -936,17 +963,21 @@ def test_done_course_reopened_by_marker_bump_runs_again(env: SimpleNamespace) ->
 
     clock.on_sleep = bump
     rep = serve(
-        None,
-        prepare=False,
-        bun="bun",
-        iters=1,
-        step_mode=False,
-        traj_root=str(env.tmp),
-        now=clock.now,
-        sleep=clock.sleep,
-        poll_sec=1.0,
-        max_seconds=30.0,
+        ServeSpec(
+            courses=None,
+            prepare=False,
+            bun="bun",
+            iters=1,
+            step_mode=False,
+            traj_root=str(env.tmp),
+            now=clock.now,
+            sleep=clock.sleep,
+            poll_sec=1.0,
+            max_seconds=30.0,
+        )
     )
 
-    assert env.opened == ["a"], "复活复用原 runtime 与热引擎，不重建（重建会丢 runner 进无限 RETRY）"
+    assert env.opened == ["a"], (
+        "复活复用原 runtime 与热引擎，不重建（重建会丢 runner 进无限 RETRY）"
+    )
     assert rep.courses["a"]["rounds_done"] == 2, "指针续跑第二轮"

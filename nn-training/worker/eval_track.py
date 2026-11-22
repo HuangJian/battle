@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -256,23 +257,25 @@ def reconcile_late_eval_rows(
         return 0
     log_line(f"[eval] it{it}: 迟到局已全落账（缺 {gap} 局）— 补一条 settled 对账")
     settle_eval_summary(
-        eval_jsonl=eval_jsonl,
-        key16=key16,
-        it=it,
-        pairs=pairs,
-        total=0,
-        landed=set(),
-        wins=[0],
-        cleared_total=[0],
-        outcomes={},
-        node_games={},
-        append_row=append_row,
-        t_eval_start=time.time(),
-        rollout_winrate=rollout_winrate,
-        course_fp=course_fp,
-        left_pending=0,
-        left_pairs=set(),
-        close_reason="settled",
+        EvalSettleSpec(
+            eval_jsonl=eval_jsonl,
+            key16=key16,
+            it=it,
+            pairs=pairs,
+            total=0,
+            landed=set(),
+            wins=[0],
+            cleared_total=[0],
+            outcomes={},
+            node_games={},
+            append_row=append_row,
+            t_eval_start=time.time(),
+            rollout_winrate=rollout_winrate,
+            course_fp=course_fp,
+            left_pending=0,
+            left_pairs=set(),
+            close_reason="settled",
+        )
     )
     return gap
 
@@ -396,35 +399,46 @@ def _scan_ledger(eval_jsonl: Path, key16: str, it: int) -> _LedgerTally:
     )
 
 
-def settle_eval_summary(
-    eval_jsonl: Path,
-    key16: str,
-    it: int,
-    pairs: list[tuple[int, int]],
-    total: int,
-    landed: set[tuple[int, int]],
-    wins: list[int],
-    cleared_total: list[int],
-    outcomes: dict[str, int],
-    node_games: dict[str, int],
-    append_row: Callable[[dict], None],
-    t_eval_start: float,
-    rollout_winrate: float | None,
-    course_fp: str | None = None,
-    left_pending: int = 0,
-    left_pairs: set[tuple[int, int]] | None = None,
-    close_reason: str | None = None,
-    # duck-typed：调用方（remote/offline_eval）传入 `common.log_bundle.LogBundle`，本模块刻意不
-    # import 它——`eval_track` 是纯逻辑底座，分层守卫不允许依赖 `common.log_bundle`（见
-    # `tests/worker/test_eval_track_split.py::test_eval_track_imports_only_stdlib_and_the_log_primitive`）。
-    # 标注用 `Any`（**全仓既有口径**：train_core / train_common / np_core 的 bundle 形参都这么写）
-    # ——既不 import 那个类，也不给它再起一个名字（那会把「同名散落」账本顶过门槛）。
-    eval_bundle: Any = None,
-    # P2-2 观测：竞速发牌 / 重复落盘 / 冻结累计秒。缺省值让云机调用点零改动。
-    tail_race_grants: int = 0,
-    dup_games: int = 0,
-    frozen_sec: float = 0.0,
-) -> None:
+@dataclass(frozen=True, kw_only=True)
+class EvalSettleSpec:
+    """`settle_eval_summary` 的旋钮袋（P0-3：21 参 → 一个对象）。
+
+    前 13 个是身份位（账本、本轮语料、现场计数与写者）；后 8 个是可选读数：课程血缘
+    （`course_fp`）、收工余量（`left_pending` / `left_pairs` / `close_reason`）、观测
+    （`eval_bundle` / `tail_race_grants` / `dup_games` / `frozen_sec`）。后 8 个旧版全带
+    缺省值，而 `total` / `wins` / `node_games` 等又类型相近 —— 云机若按位置多传/少传一位，
+    summary 的读数会静默错位。
+
+    `eval_bundle` 仍标注 `Any`（**全仓既有口径**：调用方传 `common.log_bundle.LogBundle`，
+    本模块刻意不 import 它——分层守卫见 `tests/worker/test_eval_track_split.py`）。
+    """
+
+    eval_jsonl: Path
+    key16: str
+    it: int
+    pairs: list[tuple[int, int]]
+    total: int
+    landed: set[tuple[int, int]]
+    wins: list[int]
+    cleared_total: list[int]
+    outcomes: dict[str, int]
+    node_games: dict[str, int]
+    append_row: Callable[[dict], None]
+    t_eval_start: float
+    rollout_winrate: float | None
+    course_fp: str | None = None
+    left_pending: int = 0
+    left_pairs: set[tuple[int, int]] | None = None
+    close_reason: str | None = None
+    # duck-typed：调用方（remote/offline_eval）传入 `common.log_bundle.LogBundle`。
+    eval_bundle: Any = None
+    # P2-2 观测：竞速发牌 / 重复落盘 / 冻结累计秒。
+    tail_race_grants: int = 0
+    dup_games: int = 0
+    frozen_sec: float = 0.0
+
+
+def settle_eval_summary(spec: EvalSettleSpec) -> None:
     """评估窗口结束后的对账与 summary 落账（原 dispatch_eval_round 尾部，纯函数化）。
 
     断点续跑口径：summary 必须聚合台账中该 (iter,wver) 的全部逐局行——只统计本次
@@ -456,15 +470,26 @@ def settle_eval_summary(
     `worker/eval_yield.py::eval_close_reason`）。`missing` 的 reason 同步细分：`left_pairs`
     命中 ⇒ `never-dispatched`（真·从未派出），否则走 `_missing_reasons`。
 
-    三个新参数均带缺省值（`left_pending=0` / `left_pairs=None` / `close_reason=None`）⇒
-    云机调用点（`remote/offline_eval.py`，位置参数调用）**零改动**：它的
-    `never_dispatched=0`、`lost` = 失败局数、`carried` = 全集口径残留 —— 云机侧没有
-    「本机待办队列」这个概念，不传是**有意**的，不是遗漏。
+    三个新读数（`left_pending` / `left_pairs` / `close_reason`）在 `EvalSettleSpec` 里
+    带缺省值 ⇒ 云机调用点（`remote/offline_eval.py`）不传它们是**有意**的，不是遗漏：
+    它的 `never_dispatched=0`、`lost` = 失败局数、`carried` = 全集口径残留 —— 云机侧没有
+    「本机待办队列」这个概念。
 
     `append_row` 由调用方注入（`common.fs.append_jsonl` 的每路径单写者）：本模块是纯逻辑
     底座，不能 import `common.fs`（分层守卫）。两轮评估可以重叠，summary 必须与逐局行走
     **同一个写者**——否则 summary 仍可能与别轮的行互相覆盖（2026-11-02 z4-polish.it60）。
     """
+    # 旧签名 21 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    eval_jsonl, key16, it = spec.eval_jsonl, spec.key16, spec.it
+    pairs, total, landed = spec.pairs, spec.total, spec.landed
+    wins, cleared_total = spec.wins, spec.cleared_total
+    outcomes, node_games = spec.outcomes, spec.node_games
+    append_row, t_eval_start = spec.append_row, spec.t_eval_start
+    rollout_winrate, course_fp = spec.rollout_winrate, spec.course_fp
+    left_pending, left_pairs = spec.left_pending, spec.left_pairs
+    close_reason, eval_bundle = spec.close_reason, spec.eval_bundle
+    tail_race_grants, dup_games = spec.tail_race_grants, spec.dup_games
+    frozen_sec = spec.frozen_sec
     dropped = total - len(landed)
     tally = _scan_ledger(eval_jsonl, key16, it)
     if tally.outcomes:

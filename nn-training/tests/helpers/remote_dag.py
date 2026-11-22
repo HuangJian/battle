@@ -126,6 +126,14 @@ LAYERS: dict[str, int] = {
     # ⇒ **L0**；`offline_deliver`(L2) 站在它上面，秩不变。（与 `deliver_ledger` 同一条纪律：
     # 同一个 LOC 预算把腿本体顶到 1000 行，就把纯数据/判据下沉。）
     "remote.deliver_wire": 0,
+    # `OfflineDeliverer` 的构造旋钮与缺省（2026-11-22，同一个 LOC 预算）：依赖面 = stdlib +
+    # `common.logutil`（缺省 logger）⇒ **L1**；`offline_deliver`(L2) 站在它上面，秩不变。
+    "remote.deliver_spec": 1,
+    # `run_job` 的 17 个入参（2026-11-22，P0-3 第四十四刀）：`job_round` 顶层零 torch 且不许
+    # import `remote.worker`（成环）—— 它要构造请求就只能依赖这个轻模块。依赖面 = stdlib +
+    # `common.log_bundle` ⇒ **L1**；`worker`(L5) / `job_round` / `plan_run` / `run_loop` /
+    # `worker_server` 都站在它上面，各自秩不变。
+    "remote.job_spec": 1,
     # 补传**档位机**（2026-10-23，`plan/offline-deliver-full-and-gaps` §3.0）：三档判定 /
     # `need_bps` / `eta` 三块纯函数。依赖面 = stdlib + `collections.abc`
     # ⇒ **L0**；读者只有 `offline_deliver`(L2)，秩不变。
@@ -554,6 +562,10 @@ LAYERS: dict[str, int] = {
     #: 只 import numpy + `common.runtime`（不在本账本内）⇒ **L0**。四条训练线的随机面都从这里取，
     #: 因此它必须待在 np_core(1)/common(2) 之下，不能反向。
     "worker.ppo.rng": 0,
+    # 2026-11-22（P0-3 第四十二刀）：`ppo_update` 的参数对象（torch / Paddle 两份子类 + 端口
+    # 适配器）。只靠 `worker.ppo.demo`(L0) / `worker.ppo.rng`(L0) / `common.log_bundle` ⇒ **L1**；
+    # `engine`(L3) 与 `engine_paddle` 站在它上面，秩不变。
+    "worker.ppo.update_spec": 1,
     "worker.modes": 0,
     "worker.node_identity": 0,
     "worker.paired_kill": 0,

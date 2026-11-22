@@ -57,6 +57,7 @@ from common.protocol import (
 )
 from remote import offline_boot
 from remote.artifacts import ArtifactStore
+from remote.deliver_spec import OfflineDelivererSpec
 from remote.hub_client import PublishSpec, publish_job
 from remote.offline_boot import BatchRunSpec, CourseRunSpec, PingerSpec, RunArgvSpec
 from remote.offline_deliver import OfflineDeliverer
@@ -64,7 +65,7 @@ from tests.helpers.console_stub import NoHandoffConsole
 from tests.helpers.hub_poll import hub_poll
 from tests.subproc_util import spawn_bound_port
 from worker.iter_job import build_iter_spec
-from worker.plan import build_plan, dump_plan
+from worker.plan import PlanSpec, build_plan, dump_plan
 
 
 @pytest.fixture(autouse=True)
@@ -184,7 +185,9 @@ def _publish_run_job(
     """
     args = _plan_args()
     plan = build_plan(
-        args, it=it, iters_total=it + n, rotate_seed=99, max_iters=n - 1, log=_quiet
+        PlanSpec(
+            args=args, it=it, iters_total=it + n, rotate_seed=99, max_iters=n - 1, log=_quiet
+        )
     )
     plan_bytes = dump_plan(plan)
     w = tmp_path / "init_weights.json"
@@ -445,7 +448,9 @@ def test_segment_rounds_backfeed_into_the_right_course_and_show_up_on_the_read_f
 
         # ── 补传（真 OfflineDeliverer；归位键就是 hub 下发的那门课）──
         d = OfflineDeliverer(
-            base_url=hub.base, token=TOKEN, run_id=run_id, artifacts_dir=art, course=course
+            OfflineDelivererSpec(
+                base_url=hub.base, token=TOKEN, run_id=run_id, artifacts_dir=art, course=course
+            )
         )
         assert d.sync() == 3, f"逐轮补传没上去：{hub.output()}"
 
@@ -469,7 +474,9 @@ def test_segment_rounds_backfeed_into_the_right_course_and_show_up_on_the_read_f
 
         # 幂等：重传同一段不产生重复轮次（补传天然会重传：重连 / 重启续投）
         d2 = OfflineDeliverer(
-            base_url=hub.base, token=TOKEN, run_id=run_id, artifacts_dir=art, course=course
+            OfflineDelivererSpec(
+                base_url=hub.base, token=TOKEN, run_id=run_id, artifacts_dir=art, course=course
+            )
         )
         assert d2.sync() == 0
         st, body = _http(hub.base, "/admin/offline")

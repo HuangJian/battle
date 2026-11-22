@@ -29,7 +29,12 @@ from worker.eval_local import (
     release_local_gate_if_starved,
     settle_eval_summary,
 )
-from worker.eval_track import EVAL_DAILY_SEEDS, EVAL_SEEDS_BASE, ROLLOUT_SEED_MAX
+from worker.eval_track import (
+    EVAL_DAILY_SEEDS,
+    EVAL_SEEDS_BASE,
+    ROLLOUT_SEED_MAX,
+    EvalSettleSpec,
+)
 
 
 def test_release_local_gate_if_starved() -> None:
@@ -123,20 +128,22 @@ def test_settle_summary_drops_dual_track_fields(tmp_path: Path) -> None:
         ],
     )
     settle_eval_summary(
-        eval_jsonl=elog,
-        key16=WVER,
-        it=1,
-        pairs=[(2000, s) for s in EVAL_SEEDS[:4]],
-        total=4,
-        landed={(2000, s) for s in EVAL_SEEDS[:4]},
-        wins=[2],
-        cleared_total=[2],
-        outcomes={},
-        node_games={},
-        append_row=lambda row: append_jsonl(elog, row),
-        t_eval_start=0.0,
-        rollout_winrate=None,
-        course_fp="fpA",
+        EvalSettleSpec(
+            eval_jsonl=elog,
+            key16=WVER,
+            it=1,
+            pairs=[(2000, s) for s in EVAL_SEEDS[:4]],
+            total=4,
+            landed={(2000, s) for s in EVAL_SEEDS[:4]},
+            wins=[2],
+            cleared_total=[2],
+            outcomes={},
+            node_games={},
+            append_row=lambda row: append_jsonl(elog, row),
+            t_eval_start=0.0,
+            rollout_winrate=None,
+            course_fp="fpA",
+        )
     )
     rows = [
         json.loads(ln)
@@ -154,22 +161,24 @@ def test_settle_summary_carries_eval_waste_counters(tmp_path: Path) -> None:
     """P2-2：竞速发牌/重复落盘/冻结秒数进 eval_summary，读面不用再猜。"""
     elog = tmp_path / "eval_log.jsonl"
     settle_eval_summary(
-        eval_jsonl=elog,
-        key16=WVER,
-        it=7,
-        pairs=[],
-        total=0,
-        landed=set(),
-        wins=[0],
-        cleared_total=[0],
-        outcomes={},
-        node_games={},
-        append_row=lambda row: append_jsonl(elog, row),
-        t_eval_start=0.0,
-        rollout_winrate=None,
-        tail_race_grants=3,
-        dup_games=2,
-        frozen_sec=12.34,
+        EvalSettleSpec(
+            eval_jsonl=elog,
+            key16=WVER,
+            it=7,
+            pairs=[],
+            total=0,
+            landed=set(),
+            wins=[0],
+            cleared_total=[0],
+            outcomes={},
+            node_games={},
+            append_row=lambda row: append_jsonl(elog, row),
+            t_eval_start=0.0,
+            rollout_winrate=None,
+            tail_race_grants=3,
+            dup_games=2,
+            frozen_sec=12.34,
+        )
     )
     summ = json.loads(elog.read_text(encoding="utf-8").splitlines()[-1])
     assert summ["eval_tail_race_grants"] == 3
@@ -196,19 +205,21 @@ def test_settle_summary_ignores_bc_evalboard_rows(tmp_path: Path) -> None:
         ],
     )
     settle_eval_summary(
-        eval_jsonl=elog,
-        key16=WVER,
-        it=3,
-        pairs=[(2000, 860001), (2000, 860002)],
-        total=2,
-        landed={(2000, 860001), (2000, 860002)},
-        wins=[2],
-        cleared_total=[2],
-        outcomes={},
-        node_games={},
-        append_row=lambda row: append_jsonl(elog, row),
-        t_eval_start=0.0,
-        rollout_winrate=None,
+        EvalSettleSpec(
+            eval_jsonl=elog,
+            key16=WVER,
+            it=3,
+            pairs=[(2000, 860001), (2000, 860002)],
+            total=2,
+            landed={(2000, 860001), (2000, 860002)},
+            wins=[2],
+            cleared_total=[2],
+            outcomes={},
+            node_games={},
+            append_row=lambda row: append_jsonl(elog, row),
+            t_eval_start=0.0,
+            rollout_winrate=None,
+        )
     )
     summ = next(
         json.loads(ln)
@@ -269,22 +280,24 @@ def _settle_summary(
 ) -> dict:
     """跑一次 `settle_eval_summary` 并把**本次落的那条** summary 读回来。"""
     settle_eval_summary(
-        eval_jsonl=elog,
-        key16=WVER,
-        it=it,
-        pairs=pairs,
-        total=total,
-        landed=landed,
-        wins=[0],
-        cleared_total=[0],
-        outcomes={},
-        node_games={},
-        append_row=lambda row: append_jsonl(elog, row),
-        t_eval_start=0.0,
-        rollout_winrate=None,
-        left_pending=left_pending,
-        left_pairs=left_pairs,
-        close_reason=close_reason,
+        EvalSettleSpec(
+            eval_jsonl=elog,
+            key16=WVER,
+            it=it,
+            pairs=pairs,
+            total=total,
+            landed=landed,
+            wins=[0],
+            cleared_total=[0],
+            outcomes={},
+            node_games={},
+            append_row=lambda row: append_jsonl(elog, row),
+            t_eval_start=0.0,
+            rollout_winrate=None,
+            left_pending=left_pending,
+            left_pairs=left_pairs,
+            close_reason=close_reason,
+        )
     )
     last = [
         json.loads(ln)

@@ -44,6 +44,7 @@ if str(ROOT) not in sys.path:
 
 from common.protocol import ProtocolError, normalize_manifest
 from worker.plan import (
+    PlanSpec,
     build_plan,
     check_plan_against_args,
     dump_plan,
@@ -240,7 +241,7 @@ def test_plan_carries_volume_and_replays_initial_wave() -> None:
     """计划带上块以后：逐轮对集 == 初波前缀，且过 dump/load 往返（节点看的是 JSON）。"""
     args = _args(**X20)
     blk = volume_block(args, est_samples_per_game=X20["est_samples_per_game"])
-    plan = build_plan(args, it=3, iters_total=9, rotate_seed=4242, volume=blk, log=lambda _m: None)
+    plan = build_plan(PlanSpec(args=args, it=3, iters_total=9, rotate_seed=4242, volume=blk, log=lambda _m: None))
     assert plan["volume"] == blk
     for it in planned_iters(plan):
         assert pairs_for(plan, it) == initial_wave_pairs(
@@ -254,7 +255,7 @@ def test_plan_carries_volume_and_replays_initial_wave() -> None:
 def test_plan_without_volume_keeps_build_pairs() -> None:
     """没有块 ⇒ 老口径（`build_pairs`）逐字节不变——已有课程/在飞的包不受影响。"""
     args = _args(seed_rotate=150)
-    plan = build_plan(args, it=3, iters_total=6, rotate_seed=4242, log=lambda _m: None)
+    plan = build_plan(PlanSpec(args=args, it=3, iters_total=6, rotate_seed=4242, log=lambda _m: None))
     assert "volume" not in plan
     from biz.course import build_pairs
 
@@ -265,12 +266,14 @@ def test_check_plan_against_args_catches_target_drift() -> None:
     """发布期自检：换一门课/改目标 ⇒ 计划重放对集与 args 重解不一致，拒发。"""
     args = _args(**X20)
     plan = build_plan(
-        args,
-        it=3,
-        iters_total=6,
-        rotate_seed=4242,
-        volume=volume_block(args, est_samples_per_game=X20["est_samples_per_game"]),
-        log=lambda _m: None,
+        PlanSpec(
+            args=args,
+            it=3,
+            iters_total=6,
+            rotate_seed=4242,
+            volume=volume_block(args, est_samples_per_game=X20["est_samples_per_game"]),
+            log=lambda _m: None,
+        )
     )
     check_plan_against_args(args, plan)  # 一致 ⇒ 静默通过
 
@@ -292,12 +295,14 @@ def test_validate_plan_rejects_tampered_volume() -> None:
     raw = json.loads(
         dump_plan(
             build_plan(
-                args,
-                it=1,
-                iters_total=3,
-                rotate_seed=7,
-                volume=volume_block(args, est_samples_per_game=X20["est_samples_per_game"]),
-                log=lambda _m: None,
+                PlanSpec(
+                    args=args,
+                    it=1,
+                    iters_total=3,
+                    rotate_seed=7,
+                    volume=volume_block(args, est_samples_per_game=X20["est_samples_per_game"]),
+                    log=lambda _m: None,
+                )
             )
         ).decode("utf-8")
     )
@@ -328,12 +333,14 @@ def test_iteration_manifest_carries_per_stage_quota(tmp_path: Path) -> None:
 
     args = _args(**X20)
     plan = build_plan(
-        args,
-        it=0,
-        iters_total=2,
-        rotate_seed=4242,
-        volume=volume_block(args, est_samples_per_game=X20["est_samples_per_game"]),
-        log=lambda _m: None,
+        PlanSpec(
+            args=args,
+            it=0,
+            iters_total=2,
+            rotate_seed=4242,
+            volume=volume_block(args, est_samples_per_game=X20["est_samples_per_game"]),
+            log=lambda _m: None,
+        )
     )
     manifest = normalize_manifest(
         {
@@ -431,8 +438,8 @@ def test_iteration_manifest_carries_per_stage_quota(tmp_path: Path) -> None:
             "wire": {"rollout_sec": 1.0, "rollout_bytes": 0},
         }
 
-    def _fake_run_job(base_url: str, token: str, job: dict, **kw: object) -> dict:
-        m = normalize_manifest(job["manifest"])
+    def _fake_run_job(spec) -> dict:
+        m = normalize_manifest(spec.job["manifest"])
         calls.append(m)
         n = len(calls)
         weights = json.dumps({"it": m["it"], "w": n}).encode("utf-8")
@@ -513,7 +520,9 @@ def _windowed_plan() -> tuple[SimpleNamespace, dict, list[int]]:
     )
     assert block is not None
     plan = _build_plan(
-        args, it=0, iters_total=1, rotate_seed=4242, volume=block, log=lambda _m: None
+        PlanSpec(
+            args=args, it=0, iters_total=1, rotate_seed=4242, volume=block, log=lambda _m: None
+        )
     )
     return args, plan, window
 

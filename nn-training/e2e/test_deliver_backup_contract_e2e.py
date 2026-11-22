@@ -34,6 +34,7 @@ import pytest
 
 from remote.artifacts import ArtifactStore
 from remote.deliver_proc import DelivererProcess, DelivererSpec
+from remote.deliver_spec import OfflineDelivererSpec
 from remote.offline_deliver import BACKUP_GRACE_SEC, OfflineDeliverer
 from tests.helpers.http_server import serve_fast
 
@@ -121,14 +122,16 @@ def _drawer_bytes(backup_root: Path) -> int:
 
 def _deliverer(root: Path, backup_root: Path, hub: _Hub, **kw) -> OfflineDeliverer:
     return OfflineDeliverer(
-        base_url=hub.url,
-        token="tok",
-        run_id="run-1",
-        artifacts_dir=root,
-        backup_root=backup_root,
-        timeout=2.0,
-        log=lambda _m: None,
-        **kw,
+        OfflineDelivererSpec(
+            base_url=hub.url,
+            token="tok",
+            run_id="run-1",
+            artifacts_dir=root,
+            backup_root=backup_root,
+            timeout=2.0,
+            log=lambda _m: None,
+            **kw,
+        )
     )
 
 

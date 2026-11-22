@@ -35,6 +35,7 @@ import remote.delta_files as delta_files
 import remote.opt_delta as od
 import remote.opt_standard as os_std
 from remote.artifacts import ArtifactStore
+from remote.job_spec import RunJobSpec
 from remote.plan_handoff import RunSetup
 from remote.round_forms import RoundForms
 
@@ -353,9 +354,9 @@ def test_plan_run_wires_both_halves(tmp_path: Path) -> None:
     )
     seen: list[tuple[int, str]] = []
 
-    def fake(base_url: str, token: str, job: dict, **kw: object) -> dict:
-        mm = normalize_manifest(job["manifest"])
-        assert kw.get("preloaded") is not None
+    def fake(spec: RunJobSpec) -> dict:
+        mm = normalize_manifest(spec.job["manifest"])
+        assert spec.preloaded is not None
         seen.append((int(mm["it"]), str(mm.get("w_fmt") or "")))
         return _iter_shaped_result(
             mm,

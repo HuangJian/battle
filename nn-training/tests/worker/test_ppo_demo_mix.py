@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
 from worker.models.student import PPOStudent
 from worker.ppo.demo import DemoBank
 from worker.ppo.engine import ppo_update
+from worker.ppo.update_spec import TorchUpdateSpec
 
 
 def _chunks(n_chunks: int = 2, b: int = 8, seed: int = 0, *, extra: bool = False) -> list[dict]:
@@ -59,9 +60,9 @@ def _bank(n: int = 64, seed: int = 1, single_mask: bool = False) -> dict:
     return {
         "obs": rng.integers(0, 256, (n, OBS_CHANNELS, 26, 26), dtype=np.uint8),
         "scalars": rng.standard_normal((n, SCALAR_DIM)).astype(np.float32),
-        "actions": np.stack(
-            [rng.integers(0, 5, (n,)), rng.integers(0, 2, (n,))], axis=1
-        ).astype(np.int64),
+        "actions": np.stack([rng.integers(0, 5, (n,)), rng.integers(0, 2, (n,))], axis=1).astype(
+            np.int64
+        ),
         "masks": masks,
     }
 
@@ -98,9 +99,9 @@ def _bank_v6(n: int = 64, seed: int = 1) -> dict:
         "obs": rng.integers(0, 256, (n, OBS_CHANNELS, 26, 26), dtype=np.uint8),
         "scalars": rng.standard_normal((n, SCALAR_DIM)).astype(np.float32),
         "extra": rng.standard_normal((n, POLICY_EXTRA_DIM)).astype(np.float32),
-        "actions": np.stack(
-            [rng.integers(0, 4, (n,)), rng.integers(0, 3, (n,))], axis=1
-        ).astype(np.int64),
+        "actions": np.stack([rng.integers(0, 4, (n,)), rng.integers(0, 3, (n,))], axis=1).astype(
+            np.int64
+        ),
         "masks": np.ones((n, MASK_V6_DIM), dtype=np.uint8),
     }
 
@@ -122,7 +123,17 @@ def _fresh(seed: int = 1234):
 def _run(epochs: int = 1, seed: int = 7, **kw: Any):
     np.random.seed(seed)
     model, opt = _fresh()
-    agg = ppo_update(model, opt, _chunks(), epochs, torch.device("cpu"), kl_coef=0.0, **kw)
+    agg = ppo_update(
+        TorchUpdateSpec(
+            model=model,
+            opt=opt,
+            chunks=_chunks(),
+            epochs=epochs,
+            device=torch.device("cpu"),
+            kl_coef=0.0,
+            **kw,
+        )
+    )
     state = {k: v.clone() for k, v in model.state_dict().items()}
     return agg, state
 
@@ -222,15 +233,17 @@ def test_demo_bc_feeds_the_bank_extra_to_a_policy_extra_model() -> None:
         },
     )
     agg = ppo_update(
-        model,
-        opt,
-        _chunks(extra=True),
-        1,
-        torch.device("cpu"),
-        kl_coef=0.0,
-        demo_bank=bank,
-        demo_bc_coef=0.02,
-        demo_per_mb=8,
+        TorchUpdateSpec(
+            model=model,
+            opt=opt,
+            chunks=_chunks(extra=True),
+            epochs=1,
+            device=torch.device("cpu"),
+            kl_coef=0.0,
+            demo_bank=bank,
+            demo_bc_coef=0.02,
+            demo_per_mb=8,
+        )
     )
     assert np.isfinite(agg["demo_bc"])
     assert agg["demo_bc"] > 0.0, f"demo_bc={agg['demo_bc']}，BC 项疑似未生效"
@@ -257,15 +270,17 @@ def test_demo_index_reuses_one_device_buffer(monkeypatch) -> None:
     np.random.seed(7)
     model, opt = _fresh()
     ppo_update(
-        model,
-        opt,
-        _chunks(),
-        1,
-        torch.device("cpu"),
-        kl_coef=0.0,
-        demo_bank=cast(DemoBank, _bank()),
-        demo_bc_coef=0.5,
-        demo_per_mb=8,
+        TorchUpdateSpec(
+            model=model,
+            opt=opt,
+            chunks=_chunks(),
+            epochs=1,
+            device=torch.device("cpu"),
+            kl_coef=0.0,
+            demo_bank=cast(DemoBank, _bank()),
+            demo_bc_coef=0.5,
+            demo_per_mb=8,
+        )
     )
     assert len(seen) == len(_chunks()), f"每步应调用一次 demo_index，实得 {len(seen)} 次"
     buffers = {buf for buf, _ in seen}
@@ -284,7 +299,15 @@ def _run_v6(epochs: int = 1, seed: int = 7, **kw: Any):
     np.random.seed(seed)
     model, opt = _fresh_v6()
     agg = ppo_update(
-        model, opt, _chunks_v6(), epochs, torch.device("cpu"), kl_coef=0.0, **kw
+        TorchUpdateSpec(
+            model=model,
+            opt=opt,
+            chunks=_chunks_v6(),
+            epochs=epochs,
+            device=torch.device("cpu"),
+            kl_coef=0.0,
+            **kw,
+        )
     )
     return agg, {k: v.clone() for k, v in model.state_dict().items()}
 

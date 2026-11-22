@@ -40,7 +40,7 @@ import trainer.loop_serve as loop_serve
 import worker.bc_config as bc_config
 import worker.train_ledger as train_ledger
 from remote import hub_client, hub_http
-from trainer.loop_serve import CourseRuntime, serve
+from trainer.loop_serve import CourseRuntime, ServeSpec, serve
 from worker.bc_ledger import ROUND_DONE_EVENT, read_events
 from worker.loop_tasks import ROUND_TASKS
 
@@ -302,17 +302,19 @@ def test_bc_course_runs_alongside_rl_and_yields_while_waiting(world: SimpleNames
     """
     clock = FakeClock()
     rep = serve(
-        [world.bc, "rl-a"],
-        prepare=False,
-        bun="bun",
-        iters=2,
-        step_mode=False,
-        traj_root=str(world.tmp),
-        now=clock.now,
-        sleep=clock.sleep,
-        poll_sec=1.0,
-        max_steps=200,
-        max_seconds=600.0,
+        ServeSpec(
+            courses=[world.bc, "rl-a"],
+            prepare=False,
+            bun="bun",
+            iters=2,
+            step_mode=False,
+            traj_root=str(world.tmp),
+            now=clock.now,
+            sleep=clock.sleep,
+            poll_sec=1.0,
+            max_steps=200,
+            max_seconds=600.0,
+        )
     )
 
     assert rep.stop_reason == "all_settled"
@@ -344,29 +346,27 @@ def test_bc_enqueue_keeps_the_reopened_round(world: SimpleNamespace) -> None:
     """
     log = Path(world.tmp) / "traj" / "training_log.jsonl"
     for it in (1, 2):
-        bc_loop.append_ledger(
-            log, {"event": ROUND_DONE_EVENT, "it": it, "epochs": 1}
-        )
+        bc_loop.append_ledger(log, {"event": ROUND_DONE_EVENT, "it": it, "epochs": 1})
     world.hub.result = {"metrics": {"epochs": 150}}
     clock = FakeClock()
     rep = serve(
-        [world.bc],
-        prepare=False,
-        bun="bun",
-        iters=2,
-        step_mode=False,
-        traj_root=str(world.tmp),
-        now=clock.now,
-        sleep=clock.sleep,
-        poll_sec=1.0,
-        max_steps=50,
+        ServeSpec(
+            courses=[world.bc],
+            prepare=False,
+            bun="bun",
+            iters=2,
+            step_mode=False,
+            traj_root=str(world.tmp),
+            now=clock.now,
+            sleep=clock.sleep,
+            poll_sec=1.0,
+            max_steps=50,
+        )
     )
 
     assert rep.stop_reason == "all_settled"
     assert world.published == [2]  # 只重开最后一个已完成轮，没有 it3
-    reopened = [
-        e for e in read_events(log) if e.get("event") == "bc_round_reopened"
-    ]
+    reopened = [e for e in read_events(log) if e.get("event") == "bc_round_reopened"]
     assert [(e["it"], e["old_epochs"], e["new_epochs"]) for e in reopened] == [(2, 1, 150)]
     assert rep.courses[world.bc]["next_it"] == 3
 
@@ -380,15 +380,17 @@ def test_bc_course_uses_round_granularity_even_in_step_mode(world: SimpleNamespa
 
     clock = FakeClock()
     rep = serve(
-        [world.bc],
-        prepare=False,
-        bun="bun",
-        step_mode=True,  # 默认细粒度
-        traj_root=str(world.tmp),
-        now=clock.now,
-        sleep=clock.sleep,
-        poll_sec=1.0,
-        max_steps=200,
+        ServeSpec(
+            courses=[world.bc],
+            prepare=False,
+            bun="bun",
+            step_mode=True,  # 默认细粒度
+            traj_root=str(world.tmp),
+            now=clock.now,
+            sleep=clock.sleep,
+            poll_sec=1.0,
+            max_steps=200,
+        )
     )
 
     assert rep.stop_reason == "all_settled"
@@ -409,21 +411,23 @@ def test_bc_round_is_not_republished_when_the_engine_is_evicted(
     本用例验的是**重建后的语义**（认领而非重发），与「何时驱逐」正交 ⇒ 这里显式关掉钉住，
     让驱逐重新成为确定事件；真机上的驱逐发生在**轮间**（那时 `mid_round=False`）。
     """
-    monkeypatch.setattr(loop_serve, "_pinned_mid_round", lambda _sup: (lambda _course: False))
+    monkeypatch.setattr(loop_serve, "_pinned_mid_round", lambda _sup: lambda _course: False)
     clock = FakeClock()
     rep = serve(
-        [world.bc, "rl-a"],
-        prepare=False,
-        bun="bun",
-        iters=1,
-        step_mode=False,
-        cache_courses=1,
-        cache_mb=10**9,
-        traj_root=str(world.tmp),
-        now=clock.now,
-        sleep=clock.sleep,
-        poll_sec=1.0,
-        max_steps=200,
+        ServeSpec(
+            courses=[world.bc, "rl-a"],
+            prepare=False,
+            bun="bun",
+            iters=1,
+            step_mode=False,
+            cache_courses=1,
+            cache_mb=10**9,
+            traj_root=str(world.tmp),
+            now=clock.now,
+            sleep=clock.sleep,
+            poll_sec=1.0,
+            max_steps=200,
+        )
     )
 
     assert rep.stop_reason == "all_settled"
@@ -436,14 +440,16 @@ def test_bc_course_is_opened_with_the_run_bc_lock_and_its_own_traj(world: Simple
     """开课：① 锁用 `run_bc`（与 `trainer/run_bc.py --course X` 互相看得见）；② traj 来自课程配置。"""
     clock = FakeClock()
     serve(
-        [world.bc],
-        prepare=False,
-        bun="bun",
-        traj_root=str(world.tmp),
-        now=clock.now,
-        sleep=clock.sleep,
-        poll_sec=1.0,
-        max_steps=4,
+        ServeSpec(
+            courses=[world.bc],
+            prepare=False,
+            bun="bun",
+            traj_root=str(world.tmp),
+            now=clock.now,
+            sleep=clock.sleep,
+            poll_sec=1.0,
+            max_steps=4,
+        )
     )
 
     assert len(world.locks) == 1
@@ -456,17 +462,19 @@ def test_a_broken_bc_course_does_not_take_down_the_rl_course(world: SimpleNamesp
     """故障域 = 单课：BC 课配置坏了，RL 课照跑（与既有单课隔离同规，不新增语义）。"""
     clock = FakeClock()
     rep = serve(
-        [world.bc, "rl-a"],
-        prepare=False,
-        bun="bun",
-        iters=1,
-        step_mode=False,
-        argv=["--remote-transport", "pull"],  # 不给 hub → BC 课解析失败（pull 需要 hub+token）
-        traj_root=str(world.tmp),
-        now=clock.now,
-        sleep=clock.sleep,
-        poll_sec=1.0,
-        max_steps=50,
+        ServeSpec(
+            courses=[world.bc, "rl-a"],
+            prepare=False,
+            bun="bun",
+            iters=1,
+            step_mode=False,
+            argv=["--remote-transport", "pull"],  # 不给 hub → BC 课解析失败（pull 需要 hub+token）
+            traj_root=str(world.tmp),
+            now=clock.now,
+            sleep=clock.sleep,
+            poll_sec=1.0,
+            max_steps=50,
+        )
     )
 
     assert rep.stop_reason == "all_settled"

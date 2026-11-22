@@ -15,7 +15,7 @@ NN_ROOT = Path(__file__).resolve().parents[2]
 if str(NN_ROOT) not in sys.path:
     sys.path.insert(0, str(NN_ROOT))
 
-from worker.eval_track import settle_eval_summary
+from worker.eval_track import EvalSettleSpec, settle_eval_summary
 
 
 def _row(stage: int, seed: int, *, intr: int, kills: int, ttk: float, bit: int, ticks: int) -> dict:
@@ -46,19 +46,21 @@ def test_ring_readings_land_in_summary(tmp_path: Path) -> None:
     led.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
     out: list[dict] = []
     settle_eval_summary(
-        led,
-        "abc",
-        7,
-        pairs=[(2000, 1), (2001, 2)],
-        total=2,
-        landed={(2000, 1), (2001, 2)},
-        wins=[2],
-        cleared_total=[2],
-        outcomes={},
-        node_games={},
-        append_row=out.append,
-        t_eval_start=0.0,
-        rollout_winrate=None,
+        EvalSettleSpec(
+            eval_jsonl=led,
+            key16="abc",
+            it=7,
+            pairs=[(2000, 1), (2001, 2)],
+            total=2,
+            landed={(2000, 1), (2001, 2)},
+            wins=[2],
+            cleared_total=[2],
+            outcomes={},
+            node_games={},
+            append_row=out.append,
+            t_eval_start=0.0,
+            rollout_winrate=None,
+        )
     )
     s = [r for r in out if r.get("event") == "eval_summary"][-1]
     assert s["ring_intr_mean"] == 6.0  # (4+8)/2
@@ -91,19 +93,21 @@ def test_missing_ring_fields_are_unknown_not_zero(tmp_path: Path) -> None:
     )
     out: list[dict] = []
     settle_eval_summary(
-        led,
-        "abc",
-        7,
-        pairs=[(2000, 1)],
-        total=1,
-        landed={(2000, 1)},
-        wins=[1],
-        cleared_total=[1],
-        outcomes={},
-        node_games={},
-        append_row=out.append,
-        t_eval_start=0.0,
-        rollout_winrate=None,
+        EvalSettleSpec(
+            eval_jsonl=led,
+            key16="abc",
+            it=7,
+            pairs=[(2000, 1)],
+            total=1,
+            landed={(2000, 1)},
+            wins=[1],
+            cleared_total=[1],
+            outcomes={},
+            node_games={},
+            append_row=out.append,
+            t_eval_start=0.0,
+            rollout_winrate=None,
+        )
     )
     s = [r for r in out if r.get("event") == "eval_summary"][-1]
     assert s["ring_intr_mean"] is None

@@ -84,18 +84,20 @@ def test_on_collect_end_fires_once_after_collector_exits(tmp_path, monkeypatch) 
         course_name="",
     )
     report = stream.run_rollout_stream(
-        "bun",
-        str(tmp_path / "w.json"),
-        tmp_path,
-        [],
-        args,
-        {"policy": {}},
-        "rid.1",
-        None,
-        None,
-        None,
-        backend=_NoWaveBackend(),
-        on_collect_end=on_collect_end,
+        stream.StreamRunSpec(
+            bun="bun",
+            rl_path=str(tmp_path / "w.json"),
+            traj_dir=tmp_path,
+            pairs=[],
+            args=args,
+            cfg={"policy": {}},
+            iter_id="rid.1",
+            model=None,
+            opt=None,
+            device="cpu",
+            backend=_NoWaveBackend(),
+            on_collect_end=on_collect_end,
+        )
     )
 
     assert order == ["collector", "end"], order
@@ -106,12 +108,12 @@ def test_dispatch_gate_opens_on_drain_and_refreezes_on_refill(tmp_path, monkeypa
     """P0-2 的 stream 动态闸：队列清空 → 解冻；回队 → 重冻；收官再兜底解冻。"""
     order: list[str] = []
 
-    def fake_queue(*_a, on_queue_drained=None, on_queue_active=None, **_kw):
-        on_queue_drained()
+    def fake_queue(spec):
+        spec.on_queue_drained()
         order.append("drained")
-        on_queue_active()
+        spec.on_queue_active()
         order.append("active")
-        on_queue_drained()
+        spec.on_queue_drained()
         order.append("drained")
         return {"games": 0}
 
@@ -136,20 +138,22 @@ def test_dispatch_gate_opens_on_drain_and_refreezes_on_refill(tmp_path, monkeypa
         course_name="",
     )
     stream.run_rollout_stream(
-        "bun",
-        str(tmp_path / "w.json"),
-        tmp_path,
-        [],
-        args,
-        {"policy": {}},
-        "rid.1",
-        None,
-        None,
-        None,
-        backend=_NoWaveBackend(),
-        on_dispatch_drained=lambda: order.append("release"),
-        on_dispatch_active=lambda: order.append("freeze"),
-        on_collect_end=lambda: order.append("end"),
+        stream.StreamRunSpec(
+            bun="bun",
+            rl_path=str(tmp_path / "w.json"),
+            traj_dir=tmp_path,
+            pairs=[],
+            args=args,
+            cfg={"policy": {}},
+            iter_id="rid.1",
+            model=None,
+            opt=None,
+            device="cpu",
+            backend=_NoWaveBackend(),
+            on_dispatch_drained=lambda: order.append("release"),
+            on_dispatch_active=lambda: order.append("freeze"),
+            on_collect_end=lambda: order.append("end"),
+        )
     )
 
     assert order == [

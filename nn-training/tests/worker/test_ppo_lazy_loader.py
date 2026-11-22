@@ -35,6 +35,7 @@ from biz.reward_library import METRICS_DIM
 from worker.data.npyio import CorpusMemoryPlan
 from worker.ppo import np_core
 from worker.ppo.lazy_corpus import load_lazy_corpus
+from worker.ppo.update_spec import PaddleUpdateSpec, TorchUpdateSpec
 
 
 @pytest.fixture(autouse=True)
@@ -246,9 +247,17 @@ def _ppo_update_parity(tmp_path: Path) -> None:
         value_anchor=0.1,
     )
     np.random.seed(31)
-    a1 = ppo_update(m1, o1, chunks_e, 2, torch.device("cpu"), **kw)
+    a1 = ppo_update(
+        TorchUpdateSpec(
+            model=m1, opt=o1, chunks=chunks_e, epochs=2, device=torch.device("cpu"), **kw
+        )
+    )
     np.random.seed(31)
-    a2 = ppo_update(m2, o2, chunks_l, 2, torch.device("cpu"), lazy=True, **kw)
+    a2 = ppo_update(
+        TorchUpdateSpec(
+            model=m2, opt=o2, chunks=chunks_l, epochs=2, device=torch.device("cpu"), lazy=True, **kw
+        )
+    )
     for p, q in zip(m1.parameters(), m2.parameters(), strict=True):
         assert torch.equal(p, q), "lazy 与 eager 的最终权重必须逐字节一致"
     for k in a1:
@@ -305,7 +314,11 @@ def test_ppo_update_lazy_transfers_only_per_batch(tmp_path: Path, monkeypatch) -
     model = Tiny()
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     np.random.seed(3)
-    eng.ppo_update(model, opt, chunks, 2, torch.device("cpu"), lazy=True)
+    eng.ppo_update(
+        TorchUpdateSpec(
+            model=model, opt=opt, chunks=chunks, epochs=2, device=torch.device("cpu"), lazy=True
+        )
+    )
     assert seen == [(8, OBS_CHANNELS, BOARD, BOARD)] * 4, (
         f"每批只应搬 mb=8 行（2 chunks × 2 epochs），实得 {seen}"
     )
@@ -364,8 +377,15 @@ def test_load_ppo_episodes_passes_manifest_loader(monkeypatch) -> None:
     sentinel = object()
 
     def _fake(spec: lc.PPOCorpusSpec):
-        seen.update({"root": spec.data_root, "loader": spec.loader, "mb": spec.mb,
-                     "per_stage_quota": spec.per_stage_quota, "bundle": spec.bundle})
+        seen.update(
+            {
+                "root": spec.data_root,
+                "loader": spec.loader,
+                "mb": spec.mb,
+                "per_stage_quota": spec.per_stage_quota,
+                "bundle": spec.bundle,
+            }
+        )
         return sentinel
 
     monkeypatch.setattr(lc, "load_ppo_corpus", _fake)
@@ -396,9 +416,7 @@ def test_paddle_ppo_update_eager_lazy_final_weights_identical(tmp_path: Path) ->
     _write_shard(tmp_path, "s1", 12, seed=1)
     _write_shard(tmp_path, "s2", 12, seed=2)
     chunks_e = np_core.chunk_episodes(_eager(tmp_path), 8, rng=np.random.default_rng(5))
-    chunks_l = np_core.chunk_episodes(
-        _lazy(tmp_path, mb=8), 8, rng=np.random.default_rng(5)
-    )
+    chunks_l = np_core.chunk_episodes(_lazy(tmp_path, mb=8), 8, rng=np.random.default_rng(5))
     _assert_same_chunks(chunks_e, chunks_l)
 
     paddle.set_device("cpu")
@@ -430,12 +448,18 @@ def test_paddle_ppo_update_eager_lazy_final_weights_identical(tmp_path: Path) ->
         value_anchor=0.1,
     )
     np.random.seed(31)
-    a1 = engine_paddle.ppo_update(m1, o1, chunks_e, 2, **kw)
+    a1 = engine_paddle.ppo_update(
+        PaddleUpdateSpec(model=m1, opt=o1, chunks=chunks_e, epochs=2, **kw)
+    )
     np.random.seed(31)
-    a2 = engine_paddle.ppo_update(m2, o2, chunks_l, 2, lazy=True, **kw)
+    a2 = engine_paddle.ppo_update(
+        PaddleUpdateSpec(model=m2, opt=o2, chunks=chunks_l, epochs=2, lazy=True, **kw)
+    )
     for name, p1 in m1.state_dict().items():
         np.testing.assert_array_equal(
-            p1.numpy(), m2.state_dict()[name].numpy(), err_msg=f"lazy 与 eager 的 {name} 必须逐字节一致"
+            p1.numpy(),
+            m2.state_dict()[name].numpy(),
+            err_msg=f"lazy 与 eager 的 {name} 必须逐字节一致",
         )
     for k in a1:
         assert a1[k] == pytest.approx(a2[k], rel=0, abs=1e-12), f"统计量 {k} 不一致"
@@ -448,9 +472,7 @@ def test_paddle_lazy_transfers_only_per_batch(tmp_path: Path, monkeypatch) -> No
     from worker.ppo import engine_paddle as eng
 
     _write_shard(tmp_path, "s1", 16, seed=1)
-    chunks = np_core.chunk_episodes(
-        _lazy(tmp_path, mb=8), 8, rng=np.random.default_rng(0)
-    )
+    chunks = np_core.chunk_episodes(_lazy(tmp_path, mb=8), 8, rng=np.random.default_rng(0))
     seen: list[tuple[int, ...]] = []
     real_batch = eng.tensored_batch
 
@@ -497,7 +519,7 @@ def test_paddle_lazy_transfers_only_per_batch(tmp_path: Path, monkeypatch) -> No
     model = Tiny()
     opt = paddle.optimizer.Adam(learning_rate=1e-3, parameters=model.parameters())
     np.random.seed(3)
-    eng.ppo_update(model, opt, chunks, 2, lazy=True)
+    eng.ppo_update(PaddleUpdateSpec(model=model, opt=opt, chunks=chunks, epochs=2, lazy=True))
     assert seen == [(8, OBS_CHANNELS, BOARD, BOARD)] * 4, (
         f"每批只应搬 mb=8 行（2 chunks × 2 epochs），实得 {seen}"
     )

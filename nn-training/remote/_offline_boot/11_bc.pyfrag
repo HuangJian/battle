@@ -53,7 +53,7 @@ def _run_bc_once(
         sys.path.insert(0, code_dir)
     # 包内代码（顶层 import 会破 standalone 契约：取到任务包之前 `remote` 不存在）。
     from remote.bc_job import resolve_ppo_backend
-    from remote.worker import worker_loop
+    from remote.worker import WorkerLoopSpec, worker_loop
 
     # ★ 2026-11-13（TPU 云机现场）：`auto` 必须在进 worker 之前解析掉 —— 否则 worker 只做
     # 兜底归一化，并打一行「--device 'auto' 未经解析，worker 兜底为 cpu」。
@@ -79,20 +79,22 @@ def _run_bc_once(
 
     return int(
         worker_loop(
-            hub,
-            token,
-            work_dir=_queue_work_dir(cfg),
-            device=device,
-            torch_threads=int(cfg.get("threads") or 0),
-            poll_sec=BC_POLL_SEC,
-            once=True,
-            max_idle_sec=BC_TAKE_IDLE_SEC,
-            role="offline",
-            # 课程筛选只作用于 peek 的**响应候选**；请求本身不带课程（poll 路径的形参围栏）。
-            job_filter=(
-                (lambda c: str(c.get("course") or "") == course) if course else None
-            ),
-            log=log,
+            WorkerLoopSpec(
+                base_url=hub,
+                token=token,
+                work_dir=_queue_work_dir(cfg),
+                device=device,
+                torch_threads=int(cfg.get("threads") or 0),
+                poll_sec=BC_POLL_SEC,
+                once=True,
+                max_idle_sec=BC_TAKE_IDLE_SEC,
+                role="offline",
+                # 课程筛选只作用于 peek 的**响应候选**；请求本身不带课程（poll 路径的形参围栏）。
+                job_filter=(
+                    (lambda c: str(c.get("course") or "") == course) if course else None
+                ),
+                log=log,
+            )
         )
     )
 

@@ -31,7 +31,7 @@ import trainer.loop_plan as loop_plan
 import trainer.loop_serve as loop_serve
 import worker.train_ledger as train_ledger
 from common.protocol import COURSE_ENABLE_MARKER
-from trainer.loop_serve import CourseRuntime, serve
+from trainer.loop_serve import CourseRuntime, ServeSpec, serve
 from worker.train.loop_util import course_lock_path
 
 
@@ -171,7 +171,7 @@ def test_reopenable_skipped_detects_course_file_appearing_and_changing(
     rec2 = {"c-cfg": _record(curricula, "c-cfg", loop_serve.SKIP_KIND_CONFIG, tmp_path)}
     assert loop_serve.reopenable_skipped(rec2, tmp_path) == []
     f = curricula / "c-cfg.jsonc"
-    f.write_text("{\"fixed\": true}\n", encoding="utf-8")  # 人改好了（size 变）
+    f.write_text('{"fixed": true}\n', encoding="utf-8")  # 人改好了（size 变）
     assert loop_serve.reopenable_skipped(rec2, tmp_path) == ["c-cfg"]
 
 
@@ -182,7 +182,9 @@ def test_reopenable_skipped_detects_marker_stop_start(
     monkeypatch.setattr(loop_serve, "CURRICULA_DIR", tmp_path / "curricula")
     (tmp_path / "curricula").mkdir()
     marker = _enable(tmp_path, "c-mark")
-    rec = {"c-mark": _record(tmp_path / "curricula", "c-mark", loop_serve.SKIP_KIND_CONFIG, tmp_path)}
+    rec = {
+        "c-mark": _record(tmp_path / "curricula", "c-mark", loop_serve.SKIP_KIND_CONFIG, tmp_path)
+    }
     assert loop_serve.reopenable_skipped(rec, tmp_path) == []
     st = marker.stat()
     os.utime(marker, ns=(st.st_atime_ns + 10**9, st.st_mtime_ns + 10**9))
@@ -236,13 +238,15 @@ def _serve_until_interrupt(
     clock = _Clock()
     clock.on_sleep = hook
     return serve(
-        None,
-        prepare=False,
-        bun="bun",
-        traj_root=str(tmp_path),
-        now=clock.now,
-        sleep=clock.sleep,
-        step_mode=step_mode,
+        ServeSpec(
+            courses=None,
+            prepare=False,
+            bun="bun",
+            traj_root=str(tmp_path),
+            now=clock.now,
+            sleep=clock.sleep,
+            step_mode=step_mode,
+        )
     )
 
 
@@ -373,7 +377,7 @@ def test_step_level_abort_revives_via_requeue_without_rebuilding(
 
     def hook(n: int) -> None:
         if n == 1:
-            (curricula / "bad.jsonc").write_text("{\"fixed\": true}\n", encoding="utf-8")
+            (curricula / "bad.jsonc").write_text('{"fixed": true}\n', encoding="utf-8")
         if n == 2:
             raise KeyboardInterrupt
 

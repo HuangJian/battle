@@ -107,19 +107,19 @@ def build_rows(courses: list[str], traj_root: str, sup: Supervisor) -> list[dict
         wait_kind, text = waiting_state(
             WaitingSpec(
                 inflight=inflight,
-            games_settled=int(facts["games_settled"]),
-            games_planned=int(facts["games_planned"]),
-            pending=len(tasks),
-            current=current,
-            finished=budget_exhausted(it, iters),
-            it=it,
-            iters=iters,
-            blocked="" if ok else reason,
-            # ★P1-3 / ★M2：被接管的课在「等云机」，不是收官——判据与训练侧同一处
-            # （`course_is_held` → `loop_hold.course_held`）。只读面没有真 args，合成一个
-            # **够用的**最小对象：`course=<课名>`（hub 直问与控制文件缓存都要这把键）。
-            # 没有 token/hub 地址 ⇒ hub 直问退回 None；**文件通道仍有效**（同机 `tmp/`），
-            # 而它正是控制台写的那份缓存（F13）。
+                games_settled=int(facts["games_settled"]),
+                games_planned=int(facts["games_planned"]),
+                pending=len(tasks),
+                current=current,
+                finished=budget_exhausted(it, iters),
+                it=it,
+                iters=iters,
+                blocked="" if ok else reason,
+                # ★P1-3 / ★M2：被接管的课在「等云机」，不是收官——判据与训练侧同一处
+                # （`course_is_held` → `loop_hold.course_held`）。只读面没有真 args，合成一个
+                # **够用的**最小对象：`course=<课名>`（hub 直问与控制文件缓存都要这把键）。
+                # 没有 token/hub 地址 ⇒ hub 直问退回 None；**文件通道仍有效**（同机 `tmp/`），
+                # 而它正是控制台写的那份缓存（F13）。
                 held=course_is_held(SimpleNamespace(course=course)),
             )
         )
@@ -246,6 +246,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.serve:
         # 惰性导入：只读路径（控制台每 10s 跑一次 --json）不得为 torch/网络付导入代价。
         from trainer.loop_serve import (
+            ServeSpec,
             acquire_cluster_lock,
             cluster_lock_path,
             release_cluster_lock,
@@ -289,18 +290,20 @@ def main(argv: list[str] | None = None) -> int:
             # ——账本 ∧ `training-enabled.txt`，见 `loop_plan.enabled_courses`——之后每个空转拍
             # 再扫；一门课都没开也照常运行，队列空着等）。显式课程表则退化为「只看这几门」。
             rep = serve(
-                courses or None,
-                argv=extra,
-                traj_root=args.traj_root,
-                control_file=args.control_file or None,
-                iters=args.iters,
-                poll_sec=args.poll_sec,
-                capacities={
-                    "local_ppo": args.local_ppo_slots,
-                    "eval_local": args.local_eval_slots,
-                    "local_rollout": args.rollout_slots,
-                },
-                max_seconds=args.max_seconds,
+                ServeSpec(
+                    courses=courses or None,
+                    argv=extra,
+                    traj_root=args.traj_root,
+                    control_file=args.control_file or None,
+                    iters=args.iters,
+                    poll_sec=args.poll_sec,
+                    capacities={
+                        "local_ppo": args.local_ppo_slots,
+                        "eval_local": args.local_eval_slots,
+                        "local_rollout": args.rollout_slots,
+                    },
+                    max_seconds=args.max_seconds,
+                )
             )
             if args.json:
                 print(
@@ -322,7 +325,9 @@ def main(argv: list[str] | None = None) -> int:
     traj_root = args.traj_root
     # 默认课程表 = **已开课**的课（账本 ∧ training-enabled.txt）：与 `--serve` 同一判据（
     # 2026-09-20 用户口径「课程开训需要用户手动开启」），否则只读计划视图会把历史课也列成在训。
-    courses = [c.strip() for c in args.courses.split(",") if c.strip()] or enabled_courses(traj_root)
+    courses = [c.strip() for c in args.courses.split(",") if c.strip()] or enabled_courses(
+        traj_root
+    )
 
     # 调度器只用来算「每课下一步是谁」+ 展示资源池读面；本轮不执行任何任务体。
     sup = Supervisor(
@@ -344,7 +349,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             print(json.dumps({"courses": [], "pools": sup.snapshot()["pools"]}, ensure_ascii=False))
         else:
-            print(f"[cluster] {traj_root} 下没有已开课的课程（先用 --courses，或在控制台点「开课」）")
+            print(
+                f"[cluster] {traj_root} 下没有已开课的课程（先用 --courses，或在控制台点「开课」）"
+            )
         return 0
 
     # ★ 2026-10-06（`--json` 契约回归修复）：计算期可能打诊断行——`course_openable` 走真课程
@@ -352,7 +359,7 @@ def main(argv: list[str] | None = None) -> int:
     # 它本身），只读入口按模式选诊断流的去处：`--json` 走 stderr（控制台只在非零退出时 tail
     # 它，契约不破：`JSON.parse` 第一个字符就是 `{`），人读表模式仍走 stdout（与改造前逐字节
     # 相同）。事故形状：那两行混进 stdout ⇒ 控制台报「输出不可解析」⇒ 整块读面不可用
-    #（顶部 pill 变 `it- 视图不可用`）。回归用例：`tests/trainer/test_course_openable.py::
+    # （顶部 pill 变 `it- 视图不可用`）。回归用例：`tests/trainer/test_course_openable.py::
     # test_json_stdout_is_pure_json_when_course_check_logs`。
     with contextlib.redirect_stdout(sys.stderr if args.json else sys.stdout):
         rows = build_rows(courses, traj_root, sup)

@@ -62,6 +62,7 @@ from common.protocol import (
     unpack_job_v2,
 )
 from common.text import exc_tail
+from remote.job_spec import RunJobSpec
 from remote.worker import _wire_flush as worker_wire_flush
 from remote.worker import _wire_start as worker_wire_start
 
@@ -374,25 +375,27 @@ def _execute_job(spec: JobExecSpec) -> None:
     worker_wire_start(jid)  # 阶段占比（in/out/ppo/other）的 wall 从开跑起算
     try:
         result = run_job(
-            "",
-            "",
-            {"job_id": jid, "manifest": manifest},
-            work_dir=work_dir,
-            device=device,
-            torch_threads=torch_threads,
-            epoch_mult=epoch_mult,
-            echo=echo,
-            preloaded={
-                "payload_zip": payload_zip,
-                "code_zip": code_zip,
-                # M3：kind=iter 的 TS 运行时（其余 job 恒 None → 键缺席，run_job 不读）。
-                "ts_code_zip": ts_code_zip,
-                # M2 B3：随 body 上传的内容寻址 blob（仅缓存未命中的那些）。
-                "blobs": blobs or {},
-            },
-            log=log,
-            # landed 取消（R2-4b）：hub 推的取消帧置 Event → run_job 在 epoch 边界停。
-            should_cancel=lambda: state.is_cancelled(jid),
+            RunJobSpec(
+                base_url="",
+                token="",
+                job={"job_id": jid, "manifest": manifest},
+                work_dir=work_dir,
+                device=device,
+                torch_threads=torch_threads,
+                epoch_mult=epoch_mult,
+                echo=echo,
+                preloaded={
+                    "payload_zip": payload_zip,
+                    "code_zip": code_zip,
+                    # M3：kind=iter 的 TS 运行时（其余 job 恒 None → 键缺席，run_job 不读）。
+                    "ts_code_zip": ts_code_zip,
+                    # M2 B3：随 body 上传的内容寻址 blob（仅缓存未命中的那些）。
+                    "blobs": blobs or {},
+                },
+                log=log,
+                # landed 取消（R2-4b）：hub 推的取消帧置 Event → run_job 在 epoch 边界停。
+                should_cancel=lambda: state.is_cancelled(jid),
+            )
         )
         state.set_result(jid, result)
         # 先落结果再敲 hub：通知到时 `GET /job/{id}/result` 必然读得到（顺序不可颠倒）。

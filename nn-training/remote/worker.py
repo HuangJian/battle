@@ -30,6 +30,7 @@ import os
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -301,7 +302,7 @@ from remote.job_lifecycle import (
 # `start_cancel_watcher` / `peek_jobs` / `download_payload` / `PREFETCH_ROUND_SEC`）的解析
 # 已随块搬到 `remote.job_round` ⇒ 拦截它们要 patch **该模块**（见其头部与
 # `tests/remote/test_job_round_split.py`）。
-from remote.job_round import RoundOutcome, run_one_round
+from remote.job_round import JobRoundSpec, RoundOutcome, run_one_round
 from remote.job_shell import (
     JobState,
     bc_or_none,
@@ -312,6 +313,7 @@ from remote.job_shell import (
     resolve_job_weights,
     run_iter_phase,
 )
+from remote.job_spec import RunJobSpec
 from remote.lifecycle import Lifecycle
 from remote.offline_greedy import collect_round
 from remote.payload_proc import PayloadProcess, make_prefetcher
@@ -510,46 +512,11 @@ def _guard_code_and_device(st: JobState) -> None:
         )
 
 
-def run_job(
-    base_url: str,
-    token: str,
-    job: dict,
-    *,
-    work_dir: Path,
-    device: str = "cpu",
-    torch_threads: int = 0,
-    #: ★ 2026-10-27（评审）：本节点用哪个框架跑 PPO（`""`/`auto` = 看本机，torch 优先）。
-    #: **显式参数**，与 `--device`/`--epoch-mult` 同路（`--backend` → `worker_loop` →
-    #: `run_one_round` → 这里）；不放 env —— 「没人传也生效」的隐形开关正是 2026-09-21
-    #: 事故的形状（`tests/worker/test_single_ppo_path.py` 的守卫）。
-    backend: str = "",
-    #: ★ 2026-10-26（用户口径）：训练侧放大 —— PPO 每轮更新遍数 × N（缺省 1.0 = manifest
-    #: 原样）。与离线盘的 `CFG.epoch_mult` 同义：只改更新遍数，不改 rollout 采样/评估语料，
-    #: 也不改 manifest 身份（hub 对账仍按发布时那份）。
-    epoch_mult: float = 1.0,
-    echo: bool = False,
-    preloaded: dict | None = None,
-    code_cache_dir: Path | None = None,
-    ts_code_cache_dir: Path | None = None,
-    lease_token: str = "",
-    # 日志节食（2026-09-24）：本 job 的「入口 + 启动 + 装载」读数攒进这个 bundle。
-    # 调用方（`trainer/` 的常驻轮 loop）先往里放它自己那几行（`it<N>: N 局 wver=…`），本函数
-    # 再把入口/设备读数放进去，训练核把装载读数补上，装载完成时打**一行**
-    # （`nn-training/common/log_bundle.py`）；不传就自建（只在行数上有差别，信息量不变）。
-    prep: Any = None,
-    # 注：半离线（kind=run）那条腿的 `artifacts_dir` / `run_max_iters` / `run_budget_sec`
-    # 三个入参随 2026-09-25 的退休一起没了（`plan/online-offline-role-routing.plan.md` §7）。
-    # ---- 调度面（2026-09-22，plan/transfer-scheduling R2-5）----
-    # `should_cancel()`：每 **epoch 边界** 问一次「结果是不是已经 landed」——是则抛
-    # `JobCancelledError`（停算丢弃，零回传/零 fail）。不在 chunk 内层加回调（用户拍板：
-    # 不值得为 15s→1s 去动 `ppo_update` 内层结构）。
-    # `on_ppo_start()`：PPO 真正启动前一刻打点（hub 把它记成 `computing_at` = 掉队阈值
-    # 的**唯一**时基；下载/解包/权重装载都已完成的那个瞬间）。
-    should_cancel: Any = None,
-    on_ppo_start: Any = None,
-    log=_log,
-) -> dict:
+def run_job(spec: RunJobSpec) -> dict:
     """执行单个 job：下载 → 校验 → PPO → 产出 weights_json + opt tar → POST。
+
+    参数全在 `RunJobSpec`（`remote/job_spec.py`）：17 个入参按名传，拼错就是 `TypeError`
+    （旧形状下 `device` / `epoch_mult` / `preloaded` / `should_cancel` 落缺省都是**静默**的）。
 
     preloaded（push 模式，2026-09-05）：{"payload_zip": bytes, "code_zip"?: bytes,
     "ts_code_zip"?: bytes}——HUB 把 payload/code 随 POST /job 直接上传（worker_server），
@@ -568,6 +535,16 @@ def run_job(
     本函数只保留**顺序编排** + 热替换护栏（`_CODE` 是 worker 的进程级单例）
     + 训练核调用（`remote.train_core` 是 L4，搬进 job_shell 会把它顶到 L5）。
     """
+    base_url, token, job = spec.base_url, spec.token, spec.job
+    work_dir = spec.work_dir
+    device, torch_threads, backend = spec.device, spec.torch_threads, spec.backend
+    epoch_mult, echo, preloaded = spec.epoch_mult, spec.echo, spec.preloaded
+    code_cache_dir, ts_code_cache_dir = spec.code_cache_dir, spec.ts_code_cache_dir
+    lease_token, prep = spec.lease_token, spec.prep
+    should_cancel, on_ppo_start = spec.should_cancel, spec.on_ppo_start
+    # 缺省日志出口**延迟解析**（不是 `spec.log = _log` 的字面绑定）：`_log` 留在宿主模块，
+    # 既有「patch 打在哪家」的读法不变。
+    log = spec.log if spec.log is not None else _log
     t_prep = time.time()
     st = JobState(
         base_url=base_url,
@@ -604,7 +581,7 @@ def run_job(
     # 本模块只剩「作业壳」：网络 / 校验 / 分叉 / 上报。核不认识 hub 的作业面，也不 import
     # 本模块（守卫钉住）；它读的模块全局都是**它自己命名空间**的（seam-free，见那边头部）。
     try:
-        spec = TrainSpec(
+        train_spec = TrainSpec(
             jid=st.jid,
             job_dir=st.job_dir,
             work_dir=work_dir,
@@ -635,7 +612,7 @@ def run_job(
             on_ppo_start=on_ppo_start,
             log=log,
         )
-        result, course = run_training_core(base_url, token, spec)
+        result, course = run_training_core(base_url, token, train_spec)
     finally:
         # ★ 2026-10-11（§3.5）：产出不搬回 ⇒ 本地盘回收从「每批 finally」移到**全 job 收尾、PPO 之后**
         #（PPO 读的就是这份产出）。清本轮 scratch 目录（ts 家不在里面、永不清）；失败也尽力清、
@@ -789,47 +766,62 @@ def _once_result(uploader: UploaderLike, round_: RoundOutcome, done: int) -> int
     return -1 if not job_ok else done
 
 
-def worker_loop(
-    base_url: str,
-    token: str,
-    *,
-    work_dir: Path,
-    device: str = "cpu",
-    torch_threads: int = 0,
-    epoch_mult: float = 1.0,
-    poll_sec: float = 5.0,
-    once: bool = False,
-    echo: bool = False,
-    max_idle_sec: float = 0.0,
-    restart_argv: list[str] | None = None,
-    hub_urls: list[str] | None = None,
+@dataclass(frozen=True, kw_only=True)
+class WorkerLoopSpec:
+    """`worker_loop` 的旋钮袋（P0-3：22 参 → 一个对象）。
+
+    前 3 个是身份位（hub / token / 工作目录），其余 19 个是会话旋钮：设备与线程、
+    轮询节拍与停机（`poll_sec` / `once` / `max_idle_sec` / `restart_argv`）、归属与筛选
+    （`role` / `job_filter`）、预取三档（`prefetch_depth` / `prefetch_mode` /
+    `prefetch_unpack`）、让路与回传（`bulk_yield` / `result_upload`）与缓存根。
+    这些旋钮在旧位置表里相邻且同型（三个 `str`、三个 `int`）——多传一位不报错，
+    只会让 worker 以错的角色/预取档/回传模式静默跑一整轮。
+
+    云机与笔记本走**同一个**入口（`main` 与 `offline_boot` 的 BC 腿），本类只是把
+    30 多个测试调用点的位置表变成具名读数。
+    """
+
+    base_url: str
+    token: str
+    work_dir: Path
+    device: str = "cpu"
+    torch_threads: int = 0
+    epoch_mult: float = 1.0
+    poll_sec: float = 5.0
+    once: bool = False
+    echo: bool = False
+    max_idle_sec: float = 0.0
+    restart_argv: list[str] | None = None
+    hub_urls: list[str] | None = None
     # 离线训练模式（2026-09-19，2026-09-25 语义升为**归属**）：本会话属于离线盘 ⇒
     # 只在 peek/claim 面带角色头，且只能领 `manifest.role="offline"` 的 job。
     # 缺省 `online` = 旧 worker 行为（`--offline` 的 CLI 名与头的字面量都不变）。
-    role: str = ROLE_ONLINE,
+    role: str = ROLE_ONLINE
     #: 本地 job 选择谓词（**不发给 hub**；BC 课程级 drain 用）。缺省 None = 不筛。
-    job_filter: Callable[[dict], bool] | None = None,
+    job_filter: Callable[[dict], bool] | None = None
     #: ★ 2026-10-27（评审）：PPO 训练框架（`""`/auto/torch/paddle），原样交给宿主 `run_job`
     #: （本模块不认识它的语义，与 `epoch_mult` 同一条路）。空串 = auto。
-    backend: str = "",
+    backend: str = ""
     # 软持有预取深度（P2，2026-09-22）：0 = 关预取（只调度不预取，§7 的回退档）
-    prefetch_depth: int = PREFETCH_DEPTH_DEFAULT,
+    prefetch_depth: int = PREFETCH_DEPTH_DEFAULT
     # 下行腿跑在哪里（2026-10-20，plan/ppo-worker-transfer-isolation 的下行半场）：
     # `process` = 独立子进程（缺省，见 `PREFETCH_MODE_DEFAULT`）/ `thread` = 进程内填充线程
     # （= 改造前的旧行为，逃生口）。空串 = 按 `$NN_PREFETCH_MODE` > 缺省解析。
-    prefetch_mode: str = "",
+    prefetch_mode: str = ""
     # 预取解包份数（plan/prefetch-stage-unpack §2.3）：peek 前 N 份顺手解好；0 = 只存字节
     # （= 改造前的旧行为，回退档）。与 `prefetch_depth` 独立：深度管「预取几份」，这个管「解几份」。
-    prefetch_unpack: int = PREFETCH_UNPACK_DEFAULT,
+    prefetch_unpack: int = PREFETCH_UNPACK_DEFAULT
     # bulk 让路策略（plan/transfer-residual W1）：auto（缺省）/ always（旧语义逃生口）/ never。
-    bulk_yield: str = "auto",
+    bulk_yield: str = "auto"
     # 结果回传模式（P2.5，2026-09-22）：async = 回传**不占关键路径**（缺省）；sync = 旧行为
-    result_upload: str = RESULT_UPLOAD_MODE_DEFAULT,
+    result_upload: str = RESULT_UPLOAD_MODE_DEFAULT
     # A3 持久缓存根（plan/aistudio-transfer-hardening §3.3）：None = 旧行为（缓存住 work_dir）。
     # 给了就只把**内容寻址缓存**挪过去（code/ts_code/blob），job 目录不动。
-    cache_dir: Path | None = None,
-    log=_log,
-) -> int:
+    cache_dir: Path | None = None
+    log: Callable[[str], None] = _log
+
+
+def worker_loop(spec: WorkerLoopSpec) -> int:
     """无状态轮询主循环。返回处理的 job 数。
 
     once=True：处理一个 job 后退出（M1 假云回环冒烟用）。
@@ -843,6 +835,17 @@ def worker_loop(
       （单 GPU 互挤否决项），work_dir 按 hub 索引分区（`hub0/<jid>`…），code_cache
       留共享根。异 commit job 由既有 `_CODE` 守卫转 86 + 监督器重拉。
     """
+    # 旧签名 22 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    base_url, token, work_dir = spec.base_url, spec.token, spec.work_dir
+    device, torch_threads = spec.device, spec.torch_threads
+    epoch_mult, poll_sec = spec.epoch_mult, spec.poll_sec
+    once, echo, max_idle_sec = spec.once, spec.echo, spec.max_idle_sec
+    restart_argv, hub_urls = spec.restart_argv, spec.hub_urls
+    role, job_filter = spec.role, spec.job_filter
+    backend, prefetch_depth = spec.backend, spec.prefetch_depth
+    prefetch_mode, prefetch_unpack = spec.prefetch_mode, spec.prefetch_unpack
+    bulk_yield, result_upload = spec.bulk_yield, spec.result_upload
+    cache_dir, log = spec.cache_dir, spec.log
     done = 0
     _prev_yield, _prev_p1_observer, pf_stores = _setup_bulk_yield(bulk_yield, log)
     #: 会话级让路自适应（A2）：`--bulk-yield never` 起步就不需要它；其余档位每轮收尾复查
@@ -937,35 +940,37 @@ def worker_loop(
             idle_since = time.time()
             _polls_since_log = 0  # claim 即上报：alive 行下次只数 claim 之后的轮询，不与本行重复
             round_ = run_one_round(
-                base_url,
-                token,
-                job,
-                part_dir=part_dir,
-                # 多 hub 才分区 code_cache；`multi` 是宿主概念，本模块不收（见 job_round 文档）
-                code_cache_dir=_code_cache_arg,
-                # R0（M0）：身份映射根（`--cache-dir` 或 work_dir，与 `blob_root.parent` 同源）
-                cache_root=_cache_root,
-                pf_store=pf_store,
-                polls_since_accept=_polls_since_accept,
-                worker_id=worker_id,
-                device=device,
-                torch_threads=torch_threads,
-                epoch_mult=epoch_mult,
-                backend=backend,
-                echo=echo,
-                restart_argv=restart_argv,
-                # 注：半离线（kind=run）腿的 `artifacts_dir` / `run_max_iters` / `run_budget_sec`
-                # 随 2026-09-25 的退休一起没了，`round` 签名里也不再有它们（见 `run_job` 注释）。
-                # 归属自报（2026-09-25）：本会话属于哪块盘 —— peek 与 claim 两条面都带它，
-                # 否则带标 worker 会在归属闸（`_JobStore._claim_locked`）上自锁。
-                role=role,
-                prefetch_depth=prefetch_depth,
-                prefetch_unpack=prefetch_unpack,
-                uploader=uploader,
-                # ★ 注入点：宿主在**调用点**读 `run_job` 这个值 ⇒ patch `remote.worker.run_job`
-                #   仍生效（引用即接缝）；漏传 = 调用当场 TypeError，无兜底。
-                run_job_fn=run_job,
-                log=log,
+                JobRoundSpec(
+                    base_url=base_url,
+                    token=token,
+                    job=job,
+                    part_dir=part_dir,
+                    # 多 hub 才分区 code_cache；`multi` 是宿主概念，本模块不收（见 job_round 文档）
+                    code_cache_dir=_code_cache_arg,
+                    # R0（M0）：身份映射根（`--cache-dir` 或 work_dir，与 `blob_root.parent` 同源）
+                    cache_root=_cache_root,
+                    pf_store=pf_store,
+                    polls_since_accept=_polls_since_accept,
+                    worker_id=worker_id,
+                    device=device,
+                    torch_threads=torch_threads,
+                    epoch_mult=epoch_mult,
+                    backend=backend,
+                    echo=echo,
+                    restart_argv=restart_argv,
+                    # 注：半离线（kind=run）腿的 `artifacts_dir` / `run_max_iters` / `run_budget_sec`
+                    # 随 2026-09-25 的退休一起没了，`round` 签名里也不再有它们（见 `run_job` 注释）。
+                    # 归属自报（2026-09-25）：本会话属于哪块盘 —— peek 与 claim 两条面都带它，
+                    # 否则带标 worker 会在归属闸（`_JobStore._claim_locked`）上自锁。
+                    role=role,
+                    prefetch_depth=prefetch_depth,
+                    prefetch_unpack=prefetch_unpack,
+                    uploader=uploader,
+                    # ★ 注入点：宿主在**调用点**读 `run_job` 这个值 ⇒ patch `remote.worker.run_job`
+                    #   仍生效（引用即接缝）；漏传 = 调用当场 TypeError，无兜底。
+                    run_job_fn=run_job,
+                    log=log,
+                )
             )
             if round_.uploaded:
                 done += 1
@@ -1122,26 +1127,28 @@ def main() -> None:
         # restart_argv「非空 = 有监督器」判定走退出码（空 = 无监督器返回）。
         # 这里传本进程的参数列表（与监督器那侧同源）即可，子进程不自己重拉。
         n = worker_loop(
-            hub_urls[0],
-            token,
-            work_dir=out,
-            device=args.device,
-            torch_threads=args.threads,
-            epoch_mult=args.epoch_mult,
-            backend=args.backend,
-            poll_sec=args.poll_sec,
-            once=args.once,
-            echo=args.echo,
-            max_idle_sec=args.max_idle_sec,
-            restart_argv=sys.argv[1:],
-            hub_urls=hub_urls,
-            prefetch_mode=args.prefetch_mode,
-            role=ROLE_OFFLINE if args.offline else ROLE_ONLINE,
-            prefetch_depth=args.prefetch_depth,
-            prefetch_unpack=args.prefetch_unpack,
-            bulk_yield=args.bulk_yield,
-            result_upload=args.result_upload,
-            cache_dir=Path(args.cache_dir) if args.cache_dir else None,
+            WorkerLoopSpec(
+                base_url=hub_urls[0],
+                token=token,
+                work_dir=out,
+                device=args.device,
+                torch_threads=args.threads,
+                epoch_mult=args.epoch_mult,
+                backend=args.backend,
+                poll_sec=args.poll_sec,
+                once=args.once,
+                echo=args.echo,
+                max_idle_sec=args.max_idle_sec,
+                restart_argv=sys.argv[1:],
+                hub_urls=hub_urls,
+                prefetch_mode=args.prefetch_mode,
+                role=ROLE_OFFLINE if args.offline else ROLE_ONLINE,
+                prefetch_depth=args.prefetch_depth,
+                prefetch_unpack=args.prefetch_unpack,
+                bulk_yield=args.bulk_yield,
+                result_upload=args.result_upload,
+                cache_dir=Path(args.cache_dir) if args.cache_dir else None,
+            )
         )
         _log(f"done: {n} job(s) processed")
         # H8：--once 失败（返回 -1）→ 非零退出码

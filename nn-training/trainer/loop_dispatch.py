@@ -31,7 +31,11 @@ from __future__ import annotations
 from typing import Any
 
 from common.log import default_router
-from trainer.rollout_phase import begin_payload_parts, dispatch_rollout_phase
+from trainer.rollout_phase import (
+    RolloutPhaseSpec,
+    begin_payload_parts,
+    dispatch_rollout_phase,
+)
 
 
 class TrainingDispatch:
@@ -119,31 +123,33 @@ class TrainingDispatch:
         begin_payload_parts(args, it, self._payload_parts)
         (report, stream_meta, eval_thread, eval_gate, collect_child, spawned_early) = (
             dispatch_rollout_phase(
-                args,
-                self.bun,
-                dist_cfg,
-                it,
-                self._traj_dir,
-                pairs,
-                self._jsonl_path,
-                self._model,
-                self._opt,
-                self._device,
-                self.ppo_backend,
-                self.update_kwargs,
-                self._start_it,
-                self._ref_model,
-                self._extra_wver,
-                eval_on_round,
-                course_fp=self._course_fp,
-                corpus_fp=self._corpus_fp,
-                # 收到就压（手工段）：缺的 shard（local 腿/预采子进程）打包时再读盘补。
-                on_shard=self._payload_parts.add,
-                # 采集收官（stream 的 collector 退出）→ 解冻本课 eval；串行路径由
-                # step_rollout 的 finally 解冻，这里传 None 也无害。
-                on_collect_end=on_collect_end,
-                on_dispatch_drained=on_dispatch_drained,
-                on_dispatch_active=on_dispatch_active,
+                RolloutPhaseSpec(
+                    args=args,
+                    bun=self.bun,
+                    dist_cfg=dist_cfg,
+                    it=it,
+                    traj_dir=self._traj_dir,
+                    pairs=pairs,
+                    jsonl_path=self._jsonl_path,
+                    model=self._model,
+                    opt=self._opt,
+                    device=self._device,
+                    ppo_backend=self.ppo_backend,
+                    update_kwargs=self.update_kwargs,
+                    start_it=self._start_it,
+                    ref_model=self._ref_model,
+                    extra_wver=self._extra_wver,
+                    eval_on_round=eval_on_round,
+                    course_fp=self._course_fp,
+                    corpus_fp=self._corpus_fp,
+                    # 收到就压（手工段）：缺的 shard（local 腿/预采子进程）打包时再读盘补。
+                    on_shard=self._payload_parts.add,
+                    # 采集收官（stream 的 collector 退出）→ 解冻本课 eval；串行路径由
+                    # step_rollout 的 finally 解冻，这里传 None 也无害。
+                    on_collect_end=on_collect_end,
+                    on_dispatch_drained=on_dispatch_drained,
+                    on_dispatch_active=on_dispatch_active,
+                )
             )
         )
         self._report = report

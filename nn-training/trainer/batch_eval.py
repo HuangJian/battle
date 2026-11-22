@@ -64,6 +64,7 @@ from common.log import log
 
 # 执行面 → `trainer/batch_runner.py`（S27/B3）
 from trainer.batch_runner import BatchEvalRunner as BatchEvalRunner
+from trainer.batch_runner import RunnerSpec as RunnerSpec
 from trainer.batch_runner import dispatch_batch_bg as dispatch_batch_bg
 
 # 台账 / 请求面 → `trainer/batch_store.py`（S26/B2）
@@ -159,18 +160,20 @@ def maybe_dispatch_batch(
     # ⇒ 就地改只是「第二写者」的假象，门面契约见 tests/trainer/test_batch_eval_facade.py。
     store.set_units_of(str(batch.get("batch_id")), len(units))
     return dispatch_batch_bg(
-        bun,
-        unit_weights,
-        eval_log,
-        args,
-        cfg,
-        batch,
-        unit,
-        nxt,
-        len(units),
-        run_id,
-        epoch,
-        policy,
-        window_event,
-        str(batch.get("init_sha16", "")),
+        RunnerSpec(
+            bun=bun,
+            rl_path=unit_weights,
+            eval_log=eval_log,
+            args=args,
+            cfg=cfg,
+            batch=batch,
+            unit=unit,
+            unit_idx=nxt,
+            unit_of=len(units),
+            run_id=run_id,
+            engine_epoch=epoch,
+            policy=policy,
+            window_event=window_event,
+            init_sha16=str(batch.get("init_sha16", "")),
+        )
     )

@@ -28,6 +28,7 @@ from common.schema import BOARD, OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM
 from worker.models.student import PPOStudent
 from worker.ppo.engine import ppo_update
 from worker.ppo.trainer import tensored_chunks
+from worker.ppo.update_spec import TorchUpdateSpec
 
 NEW_KEYS = (
     "spatial_proj.weight",
@@ -86,7 +87,11 @@ def test_20_ppo_steps_update_tower_and_heads() -> None:
     before = {k: v.detach().clone() for k, v in model.state_dict().items()}
     chunks = _synth_chunks()
     # 5 chunks × epochs=4 = 20 个梯度步；ent_coef 显式给小值避免策略坍缩干扰（纯冒烟）。
-    ppo_update(model, opt, chunks, epochs=4, device=torch.device("cpu"), ent_coef=0.01)
+    ppo_update(
+        TorchUpdateSpec(
+            model=model, opt=opt, chunks=chunks, epochs=4, device=torch.device("cpu"), ent_coef=0.01
+        )
+    )
     state = model.state_dict()
     for k in NEW_KEYS:
         delta = float((state[k] - before[k]).abs().sum())

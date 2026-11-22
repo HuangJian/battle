@@ -10,25 +10,85 @@ import common.task_client as task
 
 def test_task_key_matches_agent_vectors() -> None:
     """固定向量与 tools/agent/tests 的 taskKey 用例逐字节一致。"""
-    assert dist.task_key("it1", "rollout", "rollout", 2000, 7) == (
-        "it1:rollout:rollout:2000:7"
-    )
     assert dist.task_key(
-        "it1", "rollout", "rollout", 2000, 7, "abcdef1234567890"
+        dist.TaskKeySpec(iter_id="it1", mode="rollout", kind="rollout", stage=2000, seed=7)
+    ) == "it1:rollout:rollout:2000:7"
+    assert dist.task_key(
+        dist.TaskKeySpec(
+            iter_id="it1",
+            mode="rollout",
+            kind="rollout",
+            stage=2000,
+            seed=7,
+            stage_json_hash="abcdef1234567890",
+        )
     ) == "it1:rollout:rollout:2000:7:abcdef1234567890"
     assert dist.task_key(
-        "it1", "rollout", "rollout", 2000, 7, "", "c0ffee1234567890"
+        dist.TaskKeySpec(
+            iter_id="it1",
+            mode="rollout",
+            kind="rollout",
+            stage=2000,
+            seed=7,
+            course_fp="c0ffee1234567890",
+        )
     ) == "it1:rollout:rollout:2000:7:cc0ffee1234567890"
     assert dist.task_key(
-        "it1", "rollout", "rollout", 2000, 7, "abcdef1234567890", "c0ffee1234567890"
+        dist.TaskKeySpec(
+            iter_id="it1",
+            mode="rollout",
+            kind="rollout",
+            stage=2000,
+            seed=7,
+            stage_json_hash="abcdef1234567890",
+            course_fp="c0ffee1234567890",
+        )
     ) == "it1:rollout:rollout:2000:7:abcdef1234567890:c0ffee1234567890"
     assert dist.task_key(
-        "it1", "bc-v6", "rollout", 2000, 7, "", "", "de1", "5", "argmax"
+        dist.TaskKeySpec(
+            iter_id="it1",
+            mode="bc-v6",
+            kind="rollout",
+            stage=2000,
+            seed=7,
+            decision_events="de1",
+            decision_k="5",
+            label_mode="argmax",
+        )
     ) == "it1:bc-v6:rollout:2000:7:de1:k5:lmargmax"
     # course_fp 只取前 16 位，且 course-only 形状多一个 `c` 前缀。
     assert dist.task_key(
-        "it1", "rollout", "rollout", 2000, 7, "", "0123456789abcdefXYZ"
+        dist.TaskKeySpec(
+            iter_id="it1",
+            mode="rollout",
+            kind="rollout",
+            stage=2000,
+            seed=7,
+            course_fp="0123456789abcdefXYZ",
+        )
     ) == "it1:rollout:rollout:2000:7:c0123456789abcdef"
+    # 9 个推理/语料开关：逐个**单独**激活都要出现在键尾（同型位置位的失误面）。
+    def bare(**over: str) -> str:
+        return dist.task_key(
+            dist.TaskKeySpec(
+                iter_id="it1",
+                mode="rollout",
+                kind="rollout",
+                stage=2000,
+                seed=7,
+                **over,
+            )
+        )
+
+    for key, tail in (
+        (bare(skip_steel_only_shots="1"), ":skipSteelShots"),
+        (bare(break_bricks_on_path="1"), ":breakBricks"),
+        (bare(suppress_useless_fire="1"), ":suppressUselessFire"),
+        (bare(suppress_lead_miss_fire="1"), ":suppressLeadMissFire"),
+        (bare(opening_connect="1"), ":hybridOpen"),
+        (bare(corpus_fmt="replay"), ":cfr"),
+    ):
+        assert key == f"it1:rollout:rollout:2000:7{tail}", (key, tail)
 
 
 def test_cancel_task_posts_key(monkeypatch) -> None:

@@ -120,7 +120,14 @@ def test_missing_bun_rejects_before_any_download(
 ) -> None:
     """① 没 bun ⇒ ProtocolError（确定性拒绝链的那条）+ 零字节下载。"""
     with pytest.raises(ProtocolError, match="找不到"):
-        worker.run_job("http://hub", "tok", _job(kind), work_dir=tmp_path)
+        worker.run_job(
+            worker.RunJobSpec(
+                base_url="http://hub",
+                token="tok",
+                job=_job(kind),
+                work_dir=tmp_path,
+            )
+        )
     assert downloads == []
 
 
@@ -129,7 +136,15 @@ def test_echo_is_exempt_from_the_bun_check(
 ) -> None:
     """② echo 只验传输链（不跑 rollout）⇒ 没 bun 也照常往下走。"""
     with pytest.raises(_DownloadedError):
-        worker.run_job("http://hub", "tok", _job("iter"), work_dir=tmp_path, echo=True)
+        worker.run_job(
+            worker.RunJobSpec(
+                base_url="http://hub",
+                token="tok",
+                job=_job("iter"),
+                work_dir=tmp_path,
+                echo=True,
+            )
+        )
     assert downloads == [JID]
 
 
@@ -138,7 +153,14 @@ def test_ppo_is_exempt_from_the_bun_check(
 ) -> None:
     """③ kind=ppo（本机采样 + 云机只算 PPO）不需要 bun。"""
     with pytest.raises(_DownloadedError):
-        worker.run_job("http://hub", "tok", _job("ppo"), work_dir=tmp_path)
+        worker.run_job(
+            worker.RunJobSpec(
+                base_url="http://hub",
+                token="tok",
+                job=_job("ppo"),
+                work_dir=tmp_path,
+            )
+        )
     assert downloads == [JID]
 
 
@@ -148,7 +170,14 @@ def test_bun_present_does_not_block_the_flow(
     """正向对照：bun 在 ⇒ 自检放行（不是拦路虎）。"""
     monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/bun")
     with pytest.raises(_DownloadedError):
-        worker.run_job("http://hub", "tok", _job("iter"), work_dir=tmp_path)
+        worker.run_job(
+            worker.RunJobSpec(
+                base_url="http://hub",
+                token="tok",
+                job=_job("iter"),
+                work_dir=tmp_path,
+            )
+        )
     assert downloads == [JID]
 
 
@@ -167,7 +196,14 @@ def test_cached_result_is_reused_even_without_bun(
     job_dir = tmp_path / JID
     job_dir.mkdir(parents=True)
     (job_dir / "_result.json").write_text(json.dumps(cached), encoding="utf-8")
-    assert worker.run_job("http://hub", "tok", _job("iter"), work_dir=tmp_path) == cached
+    assert worker.run_job(
+        worker.RunJobSpec(
+            base_url="http://hub",
+            token="tok",
+            job=_job("iter"),
+            work_dir=tmp_path,
+        )
+    ) == cached
     assert downloads == []
 
 
@@ -191,7 +227,14 @@ def test_a_corrupt_cache_falls_through_to_the_full_path(
     monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/bun")
     _write_cache(tmp_path / JID, "{not json")
     with pytest.raises(_DownloadedError):
-        worker.run_job("http://hub", "tok", _job("iter"), work_dir=tmp_path)
+        worker.run_job(
+            worker.RunJobSpec(
+                base_url="http://hub",
+                token="tok",
+                job=_job("iter"),
+                work_dir=tmp_path,
+            )
+        )
     assert downloads == [JID]
 
 
@@ -207,7 +250,14 @@ def test_a_validation_failure_falls_through_to_the_full_path(
 
     monkeypatch.setattr(SHELL, "validate_result", _reject)
     with pytest.raises(_DownloadedError):
-        worker.run_job("http://hub", "tok", _job("iter"), work_dir=tmp_path)
+        worker.run_job(
+            worker.RunJobSpec(
+                base_url="http://hub",
+                token="tok",
+                job=_job("iter"),
+                work_dir=tmp_path,
+            )
+        )
     assert downloads == [JID]
 
 
@@ -223,5 +273,12 @@ def test_a_broken_validator_is_not_a_broken_cache(
 
     monkeypatch.setattr(SHELL, "validate_result", _wrong_arity)
     with pytest.raises(TypeError):
-        worker.run_job("http://hub", "tok", _job("iter"), work_dir=tmp_path)
+        worker.run_job(
+            worker.RunJobSpec(
+                base_url="http://hub",
+                token="tok",
+                job=_job("iter"),
+                work_dir=tmp_path,
+            )
+        )
     assert downloads == [], "校验器崩了不许继续下 payload（那会把 bug 变成一次白算）"

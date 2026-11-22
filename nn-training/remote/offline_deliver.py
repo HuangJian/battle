@@ -65,7 +65,6 @@ from pathlib import Path
 import remote.delta_files as delta_files
 from common import net_http, runtime
 from common.cli import house_parser, run_main
-from common.logutil import tag_logger
 from common.protocol import (
     AUTH_HEADER,
     OFFLINE_ARTIFACT_BODY_MAX,
@@ -92,34 +91,31 @@ from remote.deliver_ledger import (
 )
 from remote.deliver_mode import eta_text, need_bps
 from remote.deliver_parts import DeliverMetricsMixin
+from remote.deliver_spec import (
+    BACKUP_GRACE_SEC as BACKUP_GRACE_SEC,  # e2e 用例仍从这里取（旧家不改名）
+)
+from remote.deliver_spec import (
+    PROBE_FAIL_TTL_SEC as PROBE_FAIL_TTL_SEC,  # 用例从这里取（旧家不改名）
+)
+from remote.deliver_spec import (
+    PROBE_TTL_SEC as PROBE_TTL_SEC,  # 用例从这里取（旧家不改名）
+)
+from remote.deliver_spec import (
+    OfflineDelivererSpec,
+)
+from remote.deliver_spec import (
+    _log_default as _log_default,  # `deliver_proc` 的 spec 缺省仍从这里取
+)
 from remote.deliver_state import DeliverStateMixin
 from remote.deliver_wire import ResultBody, RoundBody, pick_anchors, read_eval_iters
 
-#: 探活结果的缓存秒数（训练一轮动辄几分钟，没必要每轮都探两次：`sync()` 前探一次即可，
-#: 只读的 `/ping` 也便宜——但 hub 不可达时每次 `urlopen` 都要等超时，才是真成本）。
-PROBE_TTL_SEC = 60.0
-#: 探活**失败**时的负缓存秒数（比成功短）：抖动恢复的窗口按秒算，而 60s 的负缓存会让
-#: 「隧道刚回来」这段最该补投的时间白白跳过（plan §4.2-1；评审 F2：别把 60s 的平坦重试换成年级退避）。
-#: 抽屉（网络盘）的**宽限**（秒）：一轮要在盘上躺这么久还没送出去，才值得备一份。
-#: 2026-10-29 用户口径「只在回传失败时才写网络盘」——而「一次探活没应答 / 隧道抖 60 秒」不算
-#: 失败：旧口径下每轮都会先写 1.5MB 到网络盘、投递成功后 60 秒再删掉（纯 churn，现场
-#: `art` 从 1.1s 抖到 88s 就是它）。判据用**产物年龄**（文件 mtime）而不是内存里的失败计数：
-#: 父侧补传器每拍新建一个只读镜像（`deliver_proc._reading`），内存态在它眼里永远是空的。
-BACKUP_GRACE_SEC = 300.0
-PROBE_FAIL_TTL_SEC = 15.0
+# 探测/宽限/超时的缺省与它们的长注在 `remote/deliver_spec`（P0-3：随构造旋钮一起搬走，
+# 本文件只保留 re-export，历史 import 一行不改）。
 #: `_disable`（401/403）后的**冷却**（秒）：到点自动清空停用状态并重探一次。
 #: 为什么不是「一停到底」（2026-10-16，评审 F1/C1）：token 轮换 / hub 换实例都会让 401 变成
 #: 暂时现象，而 `_sync` 首行 return 会让本会话**零尝试**——现场「27 轮 0 送达」的高相容解释之一。
 #: 冷却只影响「自己重试」的节奏，不改「401 立刻停用、当拍不重试」那条口径（D9 闭锁）。
 DISABLE_COOLDOWN_SEC = 600.0
-#: 单次 `sync()` 最多投递几轮。一个刚连上的积压段可能攒了十几轮，全推会让「落到训练循环里
-#: 的那一次调用」耗时不可控（每轮 ~1.9MB + 往返）。少量多次：下轮继续补。
-SYNC_CAP = 4
-#: 单件上传的**上限**超时（秒）。⚠ 它是 `socket.settimeout` 语义 —— 约束**每一次**
-#: 连接/send/recv 的阻塞时长，**不是整请求墙钟预算**（plan/offline-deliver-stall §1.1）：
-#: 稳定 5KB/s 传 250KB（50s）不会因为「超过 60s」失败，失败只发生在某一次操作卡住时。
-#: 实测体量：非 eval 轮 322KB / 带 400 局评估的轮 1.24MB（2026-10-21）。
-HTTP_TIMEOUT_SEC = 60.0
 #: 单件尝试超时的**下限**（秒）：1KB 的摘要/账本行件不该等满 60s 才认输。
 #: 缩放式 `timeout = clamp(MIN, bytes / RATE_FLOOR, self.timeout)`，见 `_timeout_for`。
 MIN_ATTEMPT_TIMEOUT_SEC = 20.0
@@ -154,7 +150,6 @@ DRAIN_MAX_PASSES = 256#: 备份抽屉的**开闸门槛**：只有「磁盘上有
 #: 为什么需要：`_repost` 是持久集 ⇒ 一个永远投不出去的轮次（文件被删/盘抖动/解析炸）会在每次
 #: 唤醒时重抛一次、并让整趟 `_push_backlog` 中止 —— 既不响亮也不收敛（2026-10-07 补，见 plan §10.6-1）。
 POST_FAILURE_LIMIT = 3
-_log_default = tag_logger("deliver", lambda: time)
 
 
 def _is_timeout(exc: BaseException) -> bool:
@@ -200,53 +195,17 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin, DeliverStateMixi
     所以「补传坏了」永远只意味着「产物停在节点本地」，而那是本来的交付面。
     """
 
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        token: str,
-        run_id: str,
-        artifacts_dir: str | Path,
-        course: str = "",
-        hub_lease: str = "",
-        #: **可读名**（`kaggle-o`）= 面板上的列名（plan/offline-leg-ppo-attribution）。与 `hub_lease`
-        #: 不同，它**不参与任何判定**，只是「这轮是谁推的」的人读面；空 = 体里不带那个键。
-        #: 名字在**构造期**由调用方算（见 `WORKER_NAME_ENV`）：本模块在 `worker_tag` 所在层下面。
-        worker_name: str = "",
-        #: 网络侧**备份抽屉**的落点（`<网络产物根>/backup`；空 = 不做备份 —— 纯离线腿 / 老调用方）。
-        #: 拍板-3：**回传失败的那些轮**才写这里（每轮观测 + 段末 sweep，幂等、有界、绝不抛）。
-        backup_root: str | Path | None = None,
-        #: 抽屉宽限（秒，见 `BACKUP_GRACE_SEC`）；参数化只为让用例把窗口拨短。
-        backup_grace: float = BACKUP_GRACE_SEC,
-        timeout: float = HTTP_TIMEOUT_SEC,
-        probe_ttl: float = PROBE_TTL_SEC,
-        #: 探活**失败**的负缓存（只对**失败**生效，且被 `probe_ttl` 封顶 ⇒ 只会更短、绝不更长）。
-        #: 参数化只为一件事：用例要能把这条常量扳回旧的平坦口径（60s）来反探针——否则
-        #: 「抖动 60s 后恢复」这个主场景就没有任何一条用例真在量它（plan §4.2-1 / DoD-3a）。
-        probe_fail_ttl: float = PROBE_FAIL_TTL_SEC,
-        sync_cap: int = SYNC_CAP,
-        #: ★ 2026-10-23（`plan/offline-deliver-full-and-gaps` §3.5）：课程的 `eval_every`，
-        #: 只用于 `anchors` 档「没有 A 层读数时按每 N 轮兜底」。
-        #: **缺省 0 = 旧行为**（退回全量）：直接构造 `OfflineDeliverer` 的历史调用点不该被
-        #: 静默改语义；真机腿由 `make_deliverer`（→ `DelivererProcess`/`deliver_worker`）显式给。
-        eval_every: int = 0,
-        #: ★ 2026-10-23（§3.3/S5）：**统计批**是否启用（`?parts=metrics`，把漏轮的 row 单独送上去）。
-        #: 缺省 False = **旧行为**（老 hub 没有这个入口，硬发只会 404 并污染探活）；
-        #: 由 `make_deliverer`（真机腿的构造入口）显式开 True——那才是要发统计的那条路。
-        metrics_parts: bool = False,
-        #: ★ 2026-10-23（§3.0）：**档位自适应**。开 ⇒ 每一拍按「实测吞吐 × 本档每轮字节」
-        #: 选档：好档 `full`（每轮整份）/ 中档 `bulk`（每轮 delta）/ 差档或断连 `anchors`
-        #: （只发评估轮 + 统计批）。关 ⇒ 永远 `anchors`（= 旧行为，只发有 A 层读数的轮）。
-        #: 缺省 False 的理由：直接构造 `OfflineDeliverer` 的历史调用点（测试/老腿）不该被
-        #: 静默改语义；真机腿由 `make_deliverer` 显式开（那里默认 True）。
-        adaptive: bool = False,
-        #: 后台并行模式（见模块 docstring）：True = 训练线程只入队，另一个线程推。
-        #: 缺省 False（同步老行为）——调用方明确要并行时开（`make_deliverer` 缺省已开）。
-        background: bool = False,
-        opener: Callable[[str, bytes, dict, float], tuple[int, bytes]] | None = None,
-        now_fn: Callable[[], float] | None = None,
-        log: Callable[[str], None] = _log_default,
-    ) -> None:
+    def __init__(self, spec: OfflineDelivererSpec) -> None:
+        # 旧签名 20 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+        base_url, token, run_id = spec.base_url, spec.token, spec.run_id
+        artifacts_dir, course = spec.artifacts_dir, spec.course
+        hub_lease, worker_name = spec.hub_lease, spec.worker_name
+        backup_root, backup_grace = spec.backup_root, spec.backup_grace
+        timeout, probe_ttl, probe_fail_ttl = spec.timeout, spec.probe_ttl, spec.probe_fail_ttl
+        sync_cap, eval_every = spec.sync_cap, spec.eval_every
+        metrics_parts, adaptive = spec.metrics_parts, spec.adaptive
+        background, opener = spec.background, spec.opener
+        now_fn, log = spec.now_fn, spec.log
         #: 后台补传线程归这里（`offline-deliver-drain-loop`）。
         self._rt = runtime.Runtime(scope="offline-deliver")
         self.base_url = str(base_url or "").rstrip("/")

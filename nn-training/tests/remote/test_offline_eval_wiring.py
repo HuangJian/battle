@@ -37,6 +37,7 @@ from hub.server import _HubQueue, _JobStore
 from remote import offline_boot, offline_eval
 from remote import weights_delta as wd
 from remote.artifacts import ArtifactStore, sha256_bytes
+from remote.offline_eval import CloudEvalSpec
 from remote.plan_handoff import RunSetup
 from remote.run_loop import (
     _close_eval,
@@ -126,11 +127,11 @@ def _run_ctx(
 def test_cloud_eval_is_wired_as_a_background_runner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls: list[dict] = []
+    calls: list[CloudEvalSpec] = []
 
-    def fake(**job: object) -> dict:
-        calls.append(dict(job))
-        return {"ran": True, "it": job["it"]}
+    def fake(spec: CloudEvalSpec) -> dict:
+        calls.append(spec)
+        return {"ran": True, "it": spec.it}
 
     monkeypatch.setattr(offline_eval, "run_cloud_eval", fake)
     course = _course()
@@ -144,24 +145,24 @@ def test_cloud_eval_is_wired_as_a_background_runner(
         _maybe_cloud_eval(ctx, 2)
         _maybe_cloud_eval(ctx, 3)
         assert ctx.eval_runner.wait_idle(10.0), "后台线程没跑完"
-        assert [c["it"] for c in calls] == [2]
-        assert calls[0]["course"] is course
-        assert calls[0]["eval_jsonl"] == ctx.store.root / ArtifactStore.EVAL_LOG_NAME
-        assert calls[0]["course_fp"] == "f" * 16
+        assert [c.it for c in calls] == [2]
+        assert calls[0].course is course
+        assert calls[0].eval_jsonl == ctx.store.root / ArtifactStore.EVAL_LOG_NAME
+        assert calls[0].course_fp == "f" * 16
         # 0 = **原样传「没指定」**（不在这里提前解析）：由 `run_cloud_eval` 按 game_watch 解析成
         # 「首次尝试 = DEFAULT_GAME_TIMEOUT_SEC、重试 ×4」——提前解析就丢掉「显式 vs 兜底」
         # 这个区别，而它决定重试要不要放宽。旧值 900s 会让一个卡住的局占着 slot 15 分钟
         # （本轮 drain 只有 600s ⇒ 整轮读数丢），2026-09-22 收掉。
         # 2026-10-26：兜底硬顶 5s → 30s（经典 35 关 3 命的长局在 4 核 CPU 上常态 6–15s，
         # 5s 会把每局都杀掉重跑）；点名线同步 20s，重试仍 ×4 ⇒ 120s。
-        assert calls[0]["game_timeout_sec"] == 0.0
+        assert calls[0].game_timeout_sec == 0.0
         assert DEFAULT_GAME_TIMEOUT_SEC == 30.0
         # 缺省并发在装配时解析成**真实数字**（与 rollout 同一口径），日志里报的也是它
         assert ctx.eval_slots == offline_eval.default_slots() > 0
-        assert calls[0]["slots"] == ctx.eval_slots
+        assert calls[0].slots == ctx.eval_slots
         assert all("缺省" not in m for m in logs)
         # 该轮的权重快照是**不可变**的 it-NNN/weights.json（不是活指针）
-        assert Path(str(calls[0]["weights_path"])).name == "weights.json"
+        assert Path(str(calls[0].weights_path)).name == "weights.json"
     finally:
         _close_eval(ctx)
 
@@ -178,11 +179,11 @@ def test_cloud_eval_weights_are_landed_before_the_exporter_parses_them(
 
     顺带钉住 `wver`：它是权重**字节**的 sha256，拿容器算就与本机/节点评的同一 W(it) 配不上对。
     """
-    calls: list[dict] = []
+    calls: list[CloudEvalSpec] = []
 
-    def fake(**job: object) -> dict:
-        calls.append(dict(job))
-        return {"ran": True, "it": job["it"]}
+    def fake(spec: CloudEvalSpec) -> dict:
+        calls.append(spec)
+        return {"ran": True, "it": spec.it}
 
     monkeypatch.setattr(offline_eval, "run_cloud_eval", fake)
     ctx, _logs = _run_ctx(tmp_path, eval_on_cloud=True, course=_course())
@@ -198,7 +199,7 @@ def test_cloud_eval_weights_are_landed_before_the_exporter_parses_them(
         _maybe_cloud_eval(ctx, 2)
         assert ctx.eval_runner.wait_idle(10.0), "后台线程没跑完"
         assert len(calls) == 1, calls
-        got = Path(str(calls[0]["weights_path"])).read_bytes()
+        got = Path(str(calls[0].weights_path)).read_bytes()
         # TS 侧是 `JSON.parse` 的：撞魔数 = rc=1 = 这一局废掉
         assert not got.startswith(b"BWD1"), "交出去的仍是 delta 容器——整轮都会报 BWD1"
         assert json.loads(got.decode("utf-8"))["params"], "不是能装载的整份"
@@ -217,11 +218,11 @@ def test_cloud_eval_skips_the_round_when_the_delta_base_is_missing(
     `standard_weights_copy` 找不到基准会 `ProtocolError`（绝不猜基准：落错 = 形状对、数值错）；
     评估是旁路 ⇒ 它只值一行 WARN 加这一轮缺读数，不能把整段按死在这一格上。
     """
-    calls: list[dict] = []
+    calls: list[CloudEvalSpec] = []
 
-    def fake(**job: object) -> dict:
-        calls.append(dict(job))
-        return {"ran": True, "it": job["it"]}
+    def fake(spec: CloudEvalSpec) -> dict:
+        calls.append(spec)
+        return {"ran": True, "it": spec.it}
 
     monkeypatch.setattr(offline_eval, "run_cloud_eval", fake)
     ctx, _logs = _run_ctx(tmp_path, eval_on_cloud=True, course=_course())
@@ -237,7 +238,7 @@ def test_cloud_eval_skips_the_round_when_the_delta_base_is_missing(
         # 空路径 =「没有权重可评」：`run_cloud_eval` 按「权重不在盘上」早退（绝不喂容器给 TS）。
         # 判据停在**行为**上（交出去的到底是什么），不验日志文案——空路径只可能来自缺基准那一档
         # （正常档一定交出整份），行为面已唯一确定分支；`logs` 留着只为排障时看得到现场。
-        assert calls[0]["weights_path"] == Path(""), f"落不了地就别把容器交出去：{calls[0]}"
+        assert calls[0].weights_path == Path(""), f"落不了地就别把容器交出去：{calls[0]}"
     finally:
         _close_eval(ctx)
 
@@ -254,7 +255,7 @@ def test_default_slots_does_not_reserve_for_the_planned_rollout_workers(
     """
     monkeypatch.setattr(pu, "effective_cores", lambda: 40)
     monkeypatch.setattr(
-        offline_eval, "run_cloud_eval", lambda **job: {"ran": True, "it": job["it"]}
+        offline_eval, "run_cloud_eval", lambda spec: {"ran": True, "it": spec.it}
     )
     ctx, logs = _run_ctx(
         tmp_path, eval_on_cloud=True, course=_course(), plan_workers=8
@@ -314,7 +315,9 @@ def test_eval_landing_triggers_a_repost_of_that_round(
 ) -> None:
     """评估落账 ⇒ 重投该轮（否则逐局行只能等段末 artifacts zip）。"""
     monkeypatch.setattr(
-        offline_eval, "run_cloud_eval", lambda **job: {"ran": True, "it": job["it"], "settled": 2}
+        offline_eval,
+        "run_cloud_eval",
+        lambda spec: {"ran": True, "it": spec.it, "settled": 2},
     )
 
     class _Deliverer:
@@ -348,7 +351,7 @@ def test_close_eval_drains_and_is_safe_when_disabled(
     release = __import__("threading").Event()
     started = __import__("threading").Event()
 
-    def slow(**_job: object) -> dict:
+    def slow(_spec: object) -> dict:
         started.set()
         release.wait(30)
         return {"ran": True}
@@ -383,7 +386,7 @@ def test_maybe_cloud_eval_waits_for_the_round_so_the_two_legs_really_alternate(
     release = __import__("threading").Event()
     started = __import__("threading").Event()
 
-    def slow(**_job: object) -> dict:
+    def slow(_spec: object) -> dict:
         started.set()
         release.wait(30)
         return {"ran": True, "settled": 1}
@@ -698,6 +701,7 @@ def test_multi_course_gets_its_own_work_dir_per_course(tmp_path: Path) -> None:
 
 def test_backfeed_body_includes_eval_rows_for_the_round(tmp_path: Path) -> None:
     """`_post_artifact` 的体里必须有 `eval_rows` —— 少了它，云上评的读数只能等整段结束。"""
+    from remote.deliver_spec import OfflineDelivererSpec
     from remote.offline_deliver import OfflineDeliverer
 
     art = tmp_path / "art"
@@ -723,13 +727,15 @@ def test_backfeed_body_includes_eval_rows_for_the_round(tmp_path: Path) -> None:
         return 200, b"{}"
 
     d = OfflineDeliverer(
-        base_url="https://h",
-        token="t",
-        run_id="run-x",
-        artifacts_dir=art,
-        opener=opener,
-        now_fn=time.time,
-        log=_quiet,
+        OfflineDelivererSpec(
+            base_url="https://h",
+            token="t",
+            run_id="run-x",
+            artifacts_dir=art,
+            opener=opener,
+            now_fn=time.time,
+            log=_quiet,
+        )
     )
     posted = d._post_artifact(2)
     assert posted
@@ -747,6 +753,7 @@ def test_deliverer_reposts_a_delivered_round_for_late_eval_rows(
     """已投递的轮次仍可被**重投**（评估后到的读数）——hub 幂等但会并账。"""
     import threading
 
+    from remote.deliver_spec import OfflineDelivererSpec
     from remote.offline_deliver import OfflineDeliverer
 
     art = tmp_path / "art"
@@ -763,13 +770,15 @@ def test_deliverer_reposts_a_delivered_round_for_late_eval_rows(
         return True
 
     d = OfflineDeliverer(
-        base_url="https://h",
-        token="t",
-        run_id="run-x",
-        artifacts_dir=art,
-        background=True,
-        opener=opener,
-        log=_quiet,
+        OfflineDelivererSpec(
+            base_url="https://h",
+            token="t",
+            run_id="run-x",
+            artifacts_dir=art,
+            background=True,
+            opener=opener,
+            log=_quiet,
+        )
     )
     # 探活不是本用例的被测面（不真打网络）；`_thread` 只为了过 `submit_eval_round` 的守卫
     # （「有后台线程才重投」——那条守卫本身由 `test_deliverer_*` 系列覆盖）。

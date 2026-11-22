@@ -17,6 +17,7 @@ import os
 import re
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any, cast
 
 import numpy as np
@@ -682,25 +683,40 @@ def trim_shard_arrays(d: ShardRow, keep: int) -> ShardRow:
 
 
 # ---------------- episode loading（ppo / ppo_intent 共用骨架）----------------
-def load_episodes_common(
-    data_root: str,
-    *,
-    label: str,
-    shard_kind: str,
-    need_files: Sequence[str],
+@dataclass(frozen=True, kw_only=True)
+class LoadEpisodesSpec:
+    """一轮全盘装载的全部输入（`load_episodes_common` 只收它）。
+
+    13 个形参里有 5 个是「哪条训练线」的方言（日志前缀 `label` / `shard_kind` / 必选文件
+    `need_files` / 装载器 / GAE / `gae_name`），另 5 个是行为旋钮（`normalize_ret` /
+    `normalize_adv` / `per_stage_quota` / `load_log_every` / `bundle`）。前一批是**每条腿
+    固定**的常量表，后一批才是随调用变的东西 —— 旧签名把两腹排成一条 13 位的关键字表，
+    三份常量表（本模块 / `ppo/goal.py` / `ppo/intent.py`）各手抄一遍，改名靠 grep。
+
+    `bundle` 仍是 `Any`（`common/log_bundle` 的攒行器与测试替身都合法；框架类型不进本模块）。
+    """
+
+    # 1. 方言面（每条训练线固定）。
+    data_root: str
+    label: str
+    shard_kind: str
+    need_files: Sequence[str]
+    shard_loader: Callable[[str], ShardRow]
+    gae: Callable[[ShardRow], tuple[np.ndarray, np.ndarray]]
+    gae_name: str
+    normalize_ret: bool
+    # 2. 行为旋钮（全部带缺省 = 旧关键字的缺省值，数值逐字节不变）。
     #: 奖励面的「或」判据（wire-diet §3 P1）：per-tick RL 是 metrics.npy **或** reward.npy。
     #: 缺省空 = 逐字节旧行为（intent/goal/BC 调用点不传）。
-    need_any_files: Sequence[str] = (),
-    shard_loader: Callable[[str], ShardRow],
-    gae: Callable[[ShardRow], tuple[np.ndarray, np.ndarray]],
-    gae_name: str,
-    normalize_ret: bool,
-    load_log_every: int = 128,
-    normalize_adv: bool = True,
-    per_stage_quota: int = 0,
-    bundle: Any = None,
-) -> list[dict]:
-    """Discover shards → per-shard GAE → global normalize → episode dicts.
+    need_any_files: Sequence[str] = ()
+    load_log_every: int = 128
+    normalize_adv: bool = True
+    per_stage_quota: int = 0
+    bundle: Any = None
+
+
+def load_episodes_common(spec: LoadEpisodesSpec) -> list[dict]:
+    """Discover shards → per-shard GAE → global normalize → episode dicts（入参全在 spec）。
 
     与原 ppo.load_episodes / ppo_intent.load_episodes_intent 逐字节等价：
       * 日志前缀/措辞经 label / shard_kind / gae_name 参数化保持原样；
@@ -708,6 +724,19 @@ def load_episodes_common(
       * adv 全局归一（mean 0 / std 1）；normalize_ret=True 时 ret 同步归一
         （intent 的 value 头目标，ppo 不归）。
     """
+    data_root = spec.data_root
+    label = spec.label
+    shard_kind = spec.shard_kind
+    need_files = spec.need_files
+    shard_loader = spec.shard_loader
+    gae = spec.gae
+    gae_name = spec.gae_name
+    normalize_ret = spec.normalize_ret
+    need_any_files = spec.need_any_files
+    load_log_every = spec.load_log_every
+    normalize_adv = spec.normalize_adv
+    per_stage_quota = spec.per_stage_quota
+    bundle = spec.bundle
     shards = discover_shards(data_root, need_files, need_any=need_any_files)
     if not shards:
         raise SystemExit(f"[{label}] no {shard_kind} shards found under {data_root}")
@@ -1168,17 +1197,19 @@ def load_episodes(
     trainer/stream.py），该 flag 只覆盖串行（local/remote）路径。
     """
     return load_episodes_common(
-        data_root,
-        label="ppo",
-        shard_kind="RL",
-        need_files=("obs.npy",),
-        need_any_files=RL_REWARD_FILES,
-        shard_loader=load_shard,
-        gae=lambda d: compute_gae(d["reward"], d["value"], d["done"], gamma, lam),
-        gae_name="GAE",
-        normalize_adv=normalize_adv,
-        normalize_ret=normalize_ret,
-        per_stage_quota=per_stage_quota,
-        # ★ 2026-09-24（日志节食）：装载读数攒进调用方的那一行（None = 逐字节原行为）。
-        bundle=bundle,
+        LoadEpisodesSpec(
+            data_root=data_root,
+            label="ppo",
+            shard_kind="RL",
+            need_files=("obs.npy",),
+            need_any_files=RL_REWARD_FILES,
+            shard_loader=load_shard,
+            gae=lambda d: compute_gae(d["reward"], d["value"], d["done"], gamma, lam),
+            gae_name="GAE",
+            normalize_ret=normalize_ret,
+            normalize_adv=normalize_adv,
+            per_stage_quota=per_stage_quota,
+            # ★ 2026-09-24（日志节食）：装载读数攒进调用方的那一行（None = 逐字节原行为）。
+            bundle=bundle,
+        )
     )

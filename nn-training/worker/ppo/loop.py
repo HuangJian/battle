@@ -18,8 +18,9 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from typing import Protocol
 
 import torch
 import torch.nn.functional as F
@@ -45,6 +46,26 @@ Forward = Callable[
 AuxLoss = Callable[[torch.Tensor, dict[str, torch.Tensor]], torch.Tensor | None]
 
 
+class _PPOModel(Protocol):
+    """循环只需要模型的三件事（`torch.nn.Module` 与测试替身都满足）。
+
+    比 `object` 多一层：`object` 下 `model.train()` 是 mypy 错误，得就地 `cast`（把验错藏在
+    函数体里）；Protocol 把这三件事写成契约，框架类型依然不进签名。
+    """
+
+    def train(self) -> object: ...
+
+    def parameters(self) -> Iterable[torch.Tensor]: ...
+
+    def named_parameters(self) -> Iterable[tuple[str, torch.Tensor]]: ...
+
+
+class _GradOpt(Protocol):
+    """优化器句柄：循环只调 `zero_grad()`（步进在 `np_core.optimizer_step` 里）。"""
+
+    def zero_grad(self) -> None: ...
+
+
 @dataclass(frozen=True)
 class HeadSpec:
     """一个头的**名字面**：列名 + 日志前缀 + 是否保留 `bc` 统计列。"""
@@ -68,10 +89,116 @@ class LossTerms:
     aux: AuxLoss | None = None
 
 
-def _empty(spec: HeadSpec) -> dict[str, float | bool]:
+@dataclass(frozen=True, kw_only=True)
+class PPOSpec:
+    """一次 PPO update 的全部输入（`run_ppo` 只收它）。
+
+    B8 ④（2026-11-19）曾特意把 15 个形参摊在签名上，理由是「形参表就是两个入口的契约，
+    包成对象只会把它隐形」。2026-11-22（P0-3 第四十六刀）改判：契约其实**不在**签名上 ——
+    它在 `goal.py` / `intent.py` 那两只「每条腿必须交齐」的入口，而入口本身由
+    `tests/worker/test_ppo_loop_core.py::test_entry_signatures_are_frozen` 钉死；
+    摊开的签名反而给了第二条隐形通道：两个入口各自把 10 个关键字手抄一遍（`ckpt_path` /
+    `target_kl` / `seed` / `value_warmup_epochs` / `ref_model` / `kl_coef` /
+    `on_epoch_done` / `rng`），漏抄一个不报错 —— 三级训练旋钮（warmup / kickstarting /
+    早停）就此静默失效。kw_only 的字段表钉在 `tests/worker/test_ppo_loop_spec.py`，
+    隐形度不高于原来的位置参数。
+    """
+
+    #: 2. 句柄面（torch / 测试替身都是合法句柄，框架类型不进本模块）。
+    model: _PPOModel
+    opt: _GradOpt
+    #: numpy minibatch 列表（`tensored_chunks` 的入参）。
+    chunks: list[dict]
+    epochs: int
+    device: torch.device | str
+    # 3. 配置面：名字面 + 算式面。
+    head: HeadSpec
+    terms: LossTerms
+    # 4. 训练旋钮（全部带缺省：工具/冒烟调用面只给前六项）。
+    ckpt_path: str | None = None
+    target_kl: float = TARGET_KL
+    seed: int = 7
+    value_warmup_epochs: int = 0
+    ref_model: object | None = None
+    kl_coef: float = 0.0
+    on_epoch_done: Callable[[int, object], None] | None = None
+    rng: PPORng | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class HeadUpdateSpec:
+    """一个头入口（`ppo_update_goal` / `ppo_update_intent`）的全部输入。
+
+    = `PPOSpec` 减去 `head` / `terms`：那两项是入口自己的**常量**配置（名字面 + 算式面），
+    其余 13 项（句柄 5 + 训练旋钮 8）全靠调用方交。两个入口的形参表逐字相同（旧
+    `test_entry_signatures_are_frozen` 钉的就是这 13 个名字），所以一份 spec 覆盖两条腿：
+    入口只剩 `run_ppo(spec.to_ppo(_SPEC, LossTerms(...)))` —— 每个头都要手抄一遍 8 个旋钮
+    的那条隐形通道（漏抄 = warmup / kickstarting / 早停 / RNG 静默失效）就此关掉。
+
+    端口（`worker/backend.py::update`）仍是 5 位置 + `**update_kwargs`：前 5 个是**每波**
+    都换的句柄（model / opt / chunks / epochs / device），旋钮才是每轮变的东西。后者由
+    `from_port` 收成一份 spec —— 未知键在构造时立刻 `TypeError`（旧写法一路透传到
+    `run_ppo(PPOSpec(...))` 之前都没有一处认得名字表）。
+    """
+
+    #: 2. 句柄面。
+    model: _PPOModel
+    opt: _GradOpt
+    chunks: list[dict]
+    epochs: int
+    device: torch.device | str
+    # 4. 训练旋钮（与 `PPOSpec` 同名同缺省；`head` / `terms` 由入口补）。
+    ckpt_path: str | None = None
+    target_kl: float = TARGET_KL
+    seed: int = 7
+    value_warmup_epochs: int = 0
+    ref_model: object | None = None
+    kl_coef: float = 0.0
+    on_epoch_done: Callable[[int, object], None] | None = None
+    rng: PPORng | None = None
+
+    @classmethod
+    def from_port(cls, model, opt, chunks, epochs, device, **update_kwargs):
+        """`worker/backend.py::update` 的调用形状 → 一份 spec。
+
+        形参刻意不注解：`**update_kwargs` 是 backend 私有的旋钮名（来源
+        `trainer/run_rl.py::update_kwargs` / `trainer/stream.py` 的注入），与
+        `worker/ppo/engine.update` 的同名端口同一种透传写法；旋钮名写错在这里就炸。
+        """
+        return cls(
+            model=model,
+            opt=opt,
+            chunks=chunks,
+            epochs=epochs,
+            device=device,
+            **update_kwargs,
+        )
+
+    def to_ppo(self, head: HeadSpec, terms: LossTerms) -> PPOSpec:
+        """补上本头的名字面/算式面 → `run_ppo` 的入参（逐字段搬运，不重排、不落缺省）。"""
+        return PPOSpec(
+            model=self.model,
+            opt=self.opt,
+            chunks=self.chunks,
+            epochs=self.epochs,
+            device=self.device,
+            head=head,
+            terms=terms,
+            ckpt_path=self.ckpt_path,
+            target_kl=self.target_kl,
+            seed=self.seed,
+            value_warmup_epochs=self.value_warmup_epochs,
+            ref_model=self.ref_model,
+            kl_coef=self.kl_coef,
+            on_epoch_done=self.on_epoch_done,
+            rng=self.rng,
+        )
+
+
+def _empty(head: HeadSpec) -> dict[str, float | bool]:
     """空 chunks 的返回值（键集与真跑一遍后的聚合完全一致）。"""
     out: dict[str, float | bool] = {"policy": 0.0, "value": 0.0, "entropy": 0.0, "kl": 0.0}
-    if spec.stats_with_bc:
+    if head.stats_with_bc:
         out["bc"] = 0.0
     out["gnorm"] = 0.0
     out["mean_ret"] = 0.0
@@ -93,7 +220,7 @@ def _step(
     model,
     opt,
     e: dict[str, torch.Tensor],
-    spec: HeadSpec,
+    head: HeadSpec,
     terms: LossTerms,
     ctx: _StepCtx,
 ) -> dict[str, float]:
@@ -105,9 +232,9 @@ def _step(
     obs = e["obs"]
     sc = e["scalars"]
     inj = e["inject"]
-    a = e[spec.a_key]
-    lp_old = e[spec.lp_key]
-    mask = e[spec.mask_key]
+    a = e[head.a_key]
+    lp_old = e[head.lp_key]
+    mask = e[head.mask_key]
     adv = e["adv"]
     ret = e["ret"]
 
@@ -163,7 +290,7 @@ def _step(
         "entropy": m["entropy"],
         "kl": m["kl"],
     }
-    if spec.stats_with_bc:
+    if head.stats_with_bc:
         row["bc"] = 0.0  # bc 软目标已清理（P2-6a）；保留键保 schema 兼容
     row["mean_ret"] = m["mean_ret"]
     row["gnorm"] = m["gnorm"]
@@ -171,13 +298,13 @@ def _step(
 
 
 def _log_epoch(
-    stats: list[dict[str, float]], spec: HeadSpec, ep: int, epochs: int, warmup: bool, t0: float
+    stats: list[dict[str, float]], head: HeadSpec, ep: int, epochs: int, warmup: bool, t0: float
 ) -> float:
     """一个 epoch 的收尾日志，返回该 epoch 的平均 KL（早停判据）。"""
     n_e = max(1, len(stats))
     ep_kl = sum(s["kl"] for s in stats) / n_e
     log(
-        f"[{spec.tag}] epoch {ep + 1}/{epochs}{'[warmup]' if warmup else ''} done "
+        f"[{head.tag}] epoch {ep + 1}/{epochs}{'[warmup]' if warmup else ''} done "
         f"({time.time() - t0:.0f}s total): kl={ep_kl:.4f} "
         f"entropy={sum(s['entropy'] for s in stats) / n_e:.4f} "
         f"policy={sum(s['policy'] for s in stats) / n_e:.4f} "
@@ -186,26 +313,9 @@ def _log_epoch(
     return ep_kl
 
 
-def run_ppo(
-    model,
-    opt,
-    chunks,
-    epochs,
-    device,
-    *,
-    spec: HeadSpec,
-    terms: LossTerms,
-    ckpt_path: str | None = None,
-    target_kl: float = TARGET_KL,
-    seed: int = 7,
-    value_warmup_epochs: int = 0,
-    ref_model=None,
-    kl_coef: float = 0.0,
-    on_epoch_done=None,
-    rng: PPORng | None = None,
-) -> dict[str, float | bool]:
+def run_ppo(spec: PPOSpec) -> dict[str, float | bool]:
     """跑 epochs 遍 PPO，返回聚合指标（policy / value / entropy / kl / gnorm / mean_ret
-    [+ bc] / early_stopped）。
+    [+ bc] / early_stopped）。入参全在 `PPOSpec`（字段语义见该类 docstring）。
 
     value_warmup_epochs > 0：前 N 个 epoch 只训 `value_head.*`（其余参数 `requires_grad=False`），
     策略 loss/entropy 不入 loss ⇒ KL 恒 0。
@@ -213,8 +323,23 @@ def run_ppo(
     on_epoch_done(ep_done, model)：每个 epoch 完成后同步回调（stream 的双缓冲预采触发点）。
     rng：显式随机流（§P1-7）；不给就按 `seed` 现造（工具/冒烟调用面）。
     """
+    model = spec.model
+    opt = spec.opt
+    chunks = spec.chunks
+    epochs = spec.epochs
+    device = spec.device
+    head = spec.head
+    terms = spec.terms
+    ckpt_path = spec.ckpt_path
+    target_kl = spec.target_kl
+    seed = spec.seed
+    value_warmup_epochs = spec.value_warmup_epochs
+    ref_model = spec.ref_model
+    kl_coef = spec.kl_coef
+    on_epoch_done = spec.on_epoch_done
+    rng = spec.rng
     if not chunks:
-        return _empty(spec)
+        return _empty(head)
     # §P1-7（2026-11-17）：随机流显式给（`PPORng`），全局 `np.random` 不再参与。
     # P1-5（2026-09-02）：**不在 update 内重播种 RNG** —— 流式模式每波调用一次 update，
     # 重播种会让每波 minibatch permutation 序列逐字节相同。RNG 由调用方播种一次；
@@ -229,7 +354,7 @@ def run_ppo(
     if ckpt_path:
         start_epoch = _ppo_load(ckpt_path, model, opt, ppo_rng)
         if start_epoch:
-            log(f"[{spec.tag}] resume PPO from checkpoint: epoch {start_epoch}/{epochs} done")
+            log(f"[{head.tag}] resume PPO from checkpoint: epoch {start_epoch}/{epochs} done")
 
     early_stopped = False
     for ep in range(start_epoch, epochs):
@@ -240,14 +365,14 @@ def run_ppo(
         n_ep_start = len(stats)
         ctx = _StepCtx(warmup=warmup, ref_model=ref_model, kl_coef=kl_coef, device=device)
         for j, i in enumerate(perm):
-            stats.append(_step(model, opt, tensored[int(i)], spec, terms, ctx))
+            stats.append(_step(model, opt, tensored[int(i)], head, terms, ctx))
             now = time.time()
             if now - last_hb >= HB_SEC:
                 last_hb = now
                 recent = stats[-32:]
                 n_r = len(recent)
                 log(
-                    f"[{spec.tag}] ep {ep + 1}/{epochs}{'[warmup]' if warmup else ''} "
+                    f"[{head.tag}] ep {ep + 1}/{epochs}{'[warmup]' if warmup else ''} "
                     f"chunk {j + 1}/{len(tensored)} elapsed={now - t0:.0f}s "
                     f"kl={sum(s['kl'] for s in recent) / n_r:.4f} "
                     f"entropy={sum(s['entropy'] for s in recent) / n_r:.4f} "
@@ -258,10 +383,10 @@ def run_ppo(
             _ppo_save(ckpt_path, model, opt, ep + 1, ppo_rng)
         if on_epoch_done is not None:
             on_epoch_done(ep + 1, model)
-        ep_kl = _log_epoch(stats[n_ep_start:], spec, ep, epochs, warmup, t0)
+        ep_kl = _log_epoch(stats[n_ep_start:], head, ep, epochs, warmup, t0)
         if not warmup and ep_kl > target_kl:
             log(
-                f"[{spec.tag}] target_kl={target_kl} exceeded (epoch {ep + 1} kl={ep_kl:.4f}) "
+                f"[{head.tag}] target_kl={target_kl} exceeded (epoch {ep + 1} kl={ep_kl:.4f}) "
                 f"— early stopping remaining epochs"
             )
             early_stopped = True
@@ -271,6 +396,6 @@ def run_ppo(
     if n:
         agg: dict[str, float | bool] = {k: sum(s[k] for s in stats) / n for k in stats[0]}
     else:
-        agg = {k: v for k, v in _empty(spec).items() if k != "early_stopped"}
+        agg = {k: v for k, v in _empty(head).items() if k != "early_stopped"}
     agg["early_stopped"] = early_stopped
     return agg

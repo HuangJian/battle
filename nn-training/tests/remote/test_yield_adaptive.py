@@ -34,6 +34,7 @@ from remote.bulk_sched import (
     YIELD_GIVEUP_P95_MS,
     yield_worth_it,
 )
+from remote.worker import WorkerLoopSpec
 
 # ───────────────── ① 判据表（纯函数）─────────────────
 
@@ -87,11 +88,11 @@ def _run_two_rounds(
     """跑两轮 `worker_loop`（第二轮 `stop=True` 整条退出），返回 `(日志, configure_yield 调用)`。"""
     seen: list[str] = []
 
-    def _fake_round(base_url, token, job, **_kw):
-        seen.append(job["job_id"])
+    def _fake_round(spec):
+        seen.append(spec.job["job_id"])
         if len(seen) == 1:
-            return round_mod.RoundOutcome(jid=job["job_id"], ok=True, uploaded=True, stop=False)
-        return round_mod.RoundOutcome(jid=job["job_id"], ok=False, uploaded=False, stop=True)
+            return round_mod.RoundOutcome(jid=spec.job["job_id"], ok=True, uploaded=True, stop=False)
+        return round_mod.RoundOutcome(jid=spec.job["job_id"], ok=False, uploaded=False, stop=True)
 
     n = {"i": 0}
 
@@ -115,7 +116,9 @@ def _run_two_rounds(
     monkeypatch.setattr(W, "_release_cloud_machine", lambda *_a, **_k: None)
     logs: list[str] = []
     W.worker_loop(
-        "http://hub", "tok", work_dir=tmp_path, poll_sec=0.01, bulk_yield=bulk_yield, log=logs.append
+        WorkerLoopSpec(
+            base_url="http://hub", token="tok", work_dir=tmp_path, poll_sec=0.01, bulk_yield=bulk_yield, log=logs.append
+        )
     )
     return logs, calls, prevs
 

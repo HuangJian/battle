@@ -329,7 +329,7 @@ class TrainingExport:
                 "或把已有权重放到 --out 指向的位置"
             )
         from worker.iter_job import build_iter_spec
-        from worker.plan import RUN_NODE_LABEL, build_plan, dump_plan, planned_iters
+        from worker.plan import RUN_NODE_LABEL, PlanSpec, build_plan, dump_plan, planned_iters
         from worker.stage_rotation import recipe_from_args
 
         wver = common.distribution.weights_fingerprint(args.out)
@@ -350,21 +350,23 @@ class TrainingExport:
             node_label=RUN_NODE_LABEL,
         )
         plan = build_plan(
-            args,
-            it=it - 1,
-            iters_total=iters_total,
-            rotate_seed=int(self._rotate_seed),
-            max_iters=0 if n < 0 else n,
-            workers=workers,
-            game_timeout_sec=game_timeout,
-            budget_sec=float(getattr(args, "run_budget_sec", 0.0) or 0.0),
-            volume=self._volume_plan_block(it),
-            # 配方缺席（`rotation_mode` 空）⇒ None ⇒ 计划不长这个键（老包逐字节不变）。
-            rotation=recipe_from_args(args),
-            # 段长上界的再降档（`--run-max-iters`；0 = 硬上界）——与 `common/manifest.py`
-            # 的注释、控制台的静态预判读的是同一件事（D1：两边不得漂）。
-            max_segment_iters=int(getattr(args, "run_max_iters", 0) or 0),
-            log=log,
+            PlanSpec(
+                args=args,
+                it=it - 1,
+                iters_total=iters_total,
+                rotate_seed=int(self._rotate_seed),
+                max_iters=0 if n < 0 else n,
+                workers=workers,
+                game_timeout_sec=game_timeout,
+                budget_sec=float(getattr(args, "run_budget_sec", 0.0) or 0.0),
+                volume=self._volume_plan_block(it),
+                # 配方缺席（`rotation_mode` 空）⇒ None ⇒ 计划不长这个键（老包逐字节不变）。
+                rotation=recipe_from_args(args),
+                # 开区间段的段长（`--run-max-iters`；0 = 用缺省段长）——有限课程上只缩短、
+                # 永不拒（2026-11-22 起程序不设上界）；与 `common/manifest.py` 的注释同一件事。
+                max_segment_iters=int(getattr(args, "run_max_iters", 0) or 0),
+                log=log,
+            )
         )
         log(
             f"[run_rl] 全离线导出：it{it} → it{plan['end_it']}"

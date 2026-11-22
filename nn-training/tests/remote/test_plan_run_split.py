@@ -60,6 +60,7 @@ if str(ROOT) not in sys.path:
 import remote.plan_run as plan_run_mod
 import remote.run_loop as run_loop_mod
 import remote.worker as worker_mod
+from remote.job_spec import RunJobSpec
 from tests.helpers import remote_dag as dag
 
 ENGINE_FILE = ROOT / "remote" / "plan_run.py"
@@ -286,7 +287,9 @@ def test_entry_injects_the_real_worker_and_keeps_it_deferred() -> None:
     orig = worker_mod.run_job
     worker_mod.run_job = fake  # _real_run_job 每次现取 worker 的模块全局
     try:
-        out = run_loop_mod._real_run_job("u", "t", {"job_id": "j"})
+        out = run_loop_mod._real_run_job(
+            RunJobSpec(base_url="u", token="t", job={"job_id": "j"}, work_dir=Path("tmp"))
+        )
     finally:
         worker_mod.run_job = orig
     assert out == {"ok": 1} and len(seen) == 1, "`_real_run_job` 没有把调用转给 worker.run_job"

@@ -8818,6 +8818,95 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-22-offline-deliverer-spec
+
+P0-3 第四十刀（`remote/offline_deliver.py`）：`OfflineDeliverer.__init__` 的 20 个关键字参数
+→ frozen + kw_only 的 `OfflineDelivererSpec`，入口只收 `spec`、展开后函数体逐字不动。
+为什么先搬文件：本文件 LOC 已 997/1000，20 字段 spec + 展开必越线。按 `deliver_wire` 的
+先例（同一个预算顶到 1000 ⇒ 纯数据下沉），把 spec 与它的缺省常量搬到新模块
+`remote/deliver_spec.py`（∅ 新依赖边：stdlib + `common.logutil`，拓扑秩 L1，已登记
+`tests/helpers/remote_dag.py`）；`offline_deliver` 只留仍在用的 re-export。改完 LOC = 991。
+`base_url` / `token` / `run_id` / `artifacts_dir` 是身份位，其余 16 个是网络/抽屉/模式/注入点
+旋钮 —— 旧表里三个 `float` 超时相邻，`probe_ttl` 写错不会报错，只会把抖动恢复窗口改小。
+调用点 27 处（全部关键字调用）全改传 spec。宽签名 **54 → 53**，本文件清零（文件 45 → 44）。
+守 `tests/remote/test_offline_deliver_spec.py`（3 条），细节 → `docs/nn/engineering.md §295`。
+
+## §2026-11-22-dispatch-spec
+
+P0-3 第三十九刀：`run_rollout_queue`（薄包装）与 `RolloutDispatcher.__init__`（OO 本体）
+共用一张 frozen + kw_only 的 `DispatchSpec`（定义在 `trainer/dispatch_state.py`）。
+两处旧版是**两张同样的 20 参表**，包装层把 19 个参数按位置原样转手 —— 传错一位不报错：
+`cfg` 进了 `args`、`on_result` 进了 `local_slots_max`，要跑到对应相位才炸。
+入参分类：7 个身份位（bun / 权重 / 语料 / 迭代）+ 12 个可选接线与旋钮。
+`on_shard` 同时从鸭子型 `object` 收窄为 `Callable[[str, dict[str, bytes], dict], None] | None`
+（`common.shard.write_shard` 的 `on_receive` 契约），`trainer/stream` 同步。
+调用点 15 处全改传 spec。宽签名 **56 → 54**，两个文件均清零（文件 47 → 45）。
+守 `tests/trainer/test_dispatch_spec.py`（3 条），细节 → `docs/nn/engineering.md §294`。
+
+## §2026-11-22-job-round-spec
+
+P0-3 第三十八刀（`remote/job_round.py`）：`run_one_round` 的 21 个参数 → frozen + kw_only
+的 `JobRoundSpec`，入口只收 `spec`、展开后函数体逐字不动。
+为什么不是「少几个参数」：旧表只有前 3 个位置位，18 个关键字靠逐名对齐 —— 漏传只在走到
+那条分支才 `NameError`，名字写错则静默落默认值（`role` 错成 online、`prefetch_unpack` 错成
+缺省档）。spec 让「漏传必填」在构造时就报。
+命名取 `JobRoundSpec` 而非 `RoundSpec`：`worker/eval_arbiter.RoundSpec` 已被 eval 轮占用，
+且 `tests/worker/test_eval_round_spec.py` 拿它做「生产装配点唯一」的全仓 AST 断言。
+调用点：生产 1（`worker_loop`）+ 单测 4；`test_job_round_split` 的双向一致断言改为
+「必填字段 ⊆ 实参关键字 ⊆ 字段表」（位置面只剩 `spec`）。
+宽签名 **57 → 56**；本文件 2 → 1（剩 `_prefetch_fill`），文件数仍 47。
+守 `tests/remote/test_job_round_spec.py`（3 条），细节 → `docs/nn/engineering.md §293`。
+
+## §2026-11-22-worker-loop-spec
+
+P0-3 第三十七刀（`remote/worker.py`）：`worker_loop` 的 22 个参数 → frozen + kw_only 的
+`WorkerLoopSpec`，入口只收 `spec`、展开后函数体逐字不动。
+为什么不是「少几个参数」：后 19 个会话旋钮在位置表里相邻且同型（预取三档都是 `int`/
+`str`、让路/回传/后端都是 `str`），云机与笔记本又走同一个入口 —— 多传一位不报错，只会
+让 worker 以错的角色/预取档/回传模式静默跑一整轮。
+调用点 27 处（`main` + 云机 BC 腿生成物 + 11 个测试文件）全部改传 spec；`job_filter` /
+`log` 仍用 `Callable` 类型，不抬 `Any` 预算（本文件 4 处不变）。
+冻語生成物：改 `remote/_offline_boot/11_bc.pyfrag` 后重建 `offline_boot.py`。
+宽签名 **58 → 57**；本文件 2 → 1（剩 `run_job`），故文件数仍 47。
+守 `tests/remote/test_worker_loop_spec.py`（3 条），细节 → `docs/nn/engineering.md §292`。
+
+## §2026-11-22-eval-settle-spec
+
+P0-3 第三十六刀（`worker/eval_track.py`）：`settle_eval_summary` 的 21 个参数 →
+frozen + kw_only 的 `EvalSettleSpec`，入口只收 `spec`、展开后函数体逐字不动。
+为什么不是「少几个参数」：云机调用点（`remote/offline_eval.finish_round`）旧版是
+**位置参数**调用，而 `total` / `wins` / `node_games` 类型相近且相邻 —— 多传少传一位不报错，
+summary 的分母/胜场会静默错位。改 spec 后全部走关键字。
+类型面不变：`eval_bundle: Any` 保留（全仓既有口径，`eval_track` 不许 import
+`common.log_bundle`），Any 计数 3 处不变；`dataclasses` 进 `ALLOWED_IMPORTS`（stdlib）。
+调用点：生产 3（收工 / 迟到行补账 / 云机）+ 单测 4。
+宽签名 **59 → 58**（48 → 47 文件），本文件 1 → **0**。
+守 `tests/worker/test_eval_settle_spec.py`（3 条），细节 → `docs/nn/engineering.md §291`。
+
+## §2026-11-22-stream-run-spec
+
+P0-3 第三十五刀（`trainer/stream.py`）：`run_rollout_stream` 的 22 个参数 →
+frozen + kw_only 的 `StreamRunSpec`，入口只收 `spec`、展开后函数体逐字不动。
+为什么不是「少几个参数」：中段夹着 `backend` / `update_kwargs`，尾部是 eval 动态闸 +
+零落盘 + 收官解冻的回调簇 —— 位置表串一位不报错，只会让评估不触发或语料不记账。
+字段类型直接对齐既有 `_StreamCtx`（`Callable[[], object] | None` 等），装配处零断言；
+`args` / `model` / `opt` 沿用上游 spec 的窄口径（不抬 G14 的 `Any` 基线）。
+调用点：生产 1（`rollout_phase` 的 stream 分支）+ e2e 4 + 单测 2。
+宽签名 **60 → 59**（49 → 48 文件），本文件 1 → **0**。
+守 `tests/trainer/test_stream_run_spec.py`（3 条），细节 → `docs/nn/engineering.md §290`。
+
+## §2026-11-22-rollout-phase-spec
+
+P0-3 第三十四刀（`trainer/rollout_phase.py`）：`dispatch_rollout_phase` 的 25 个参数 →
+frozen + kw_only 的 `RolloutPhaseSpec`，入口只收 `spec`、展开后函数体逐字不动。
+为什么不是「少几个参数」：后 9 个是可选接线（零落盘的 `on_shard`、stream 的 eval 解冻
+`on_collect_end` / `on_dispatch_drained` / `on_dispatch_active`、熔断 `halt_event`），
+两个调用点各只传其中一簇 —— 旧位置表漏传不报错，只会静默少做一件事。
+类型面：`args` 用 `argparse.Namespace | SimpleNamespace`，不透明的 `model` / `opt` /
+`ppo_backend` / `ref_model` 用 `object`（只做透传）⇒ 不抬 G14 的 `Any` 基线。
+调用点：生产 2（首波 + 补波）。宽签名 **61 → 60**（50 → 49 文件），本文件 1 → **0**。
+守 `tests/trainer/test_rollout_phase_spec.py`（3 条），细节 → `docs/nn/engineering.md §289`。
+
 ## §2026-11-22-bc-dispatch-spec
 
 P0-3 第三十三刀（`worker/bc_dispatch.py`）：`dispatch_bc_corpus` 的 25 个关键字参数 →
@@ -9655,6 +9744,182 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   三种载法，判据不变。
 - **验证**：聚焦 433 例 + 预算/分层 30 例全绿；nn 全量门禁见提交。全文 → `docs/nn/engineering.md` §261。
 
+## §2026-11-22-serve-spec（`serve` 的 18 个参数收成 `ServeSpec`）
+
+- **背景**：`trainer/loop_serve.serve` 是单进程多课程的入口，18 个参数里 `prepare` /
+  `max_steps` / `max_seconds` 决定「常驻还是跑一拍就走」、`pool` / `supervisor` 是测试的注入点。
+  同一组组合在 6 个文件里手抄 31 次 —— 关键字拼错不报错，只是静默落回缺省（一条「跑一拍就
+  退出」的用例会变成常驻，只能靠超时发现）。
+- **决定**：新增 frozen + kw_only `ServeSpec`（18 字段，缺省与旧签名逐字一致）；`serve(spec)`
+  展开成同名局部量后函数体不动。31 个调用点（生产 1 + 测试 30）机械改传对象；两处
+  `monkeypatch` 替身签名改 `(spec)`，转发形状那条用 `dataclasses.asdict(spec)` 断言全字段。
+  守 `tests/trainer/test_serve_spec.py`（frozen + kw_only / 字段表 / 签名只剩 `spec`）。
+- **被否决**：`serve(courses, *, spec)` 的两段式（位置 + spec 混用 = 两套构造面，正是本刀
+  要消灭的那种「拼错就落缺省」）。
+- **读数**：宽签名 53 → **52**、44 → **43** 文件（`WIDE_FUNCS_BASELINE` 删 `trainer/loop_serve.py`）；
+  `loop_serve.py` LOC 802 → 810。
+- **验证**：`tests/trainer/` 876 例全绿；预算/门禁用例绿。全文 → `docs/nn/engineering.md` §296。
+
+## §2026-11-22-ppo-update-spec（`ppo_update` 成对收 spec）
+
+- **背景**：`worker/ppo/engine.ppo_update`（20 参）与 `engine_paddle.ppo_update`（21 参）是同一个
+  调用面的两份实现，被 `remote/train_core`、`tools/paddle_parity`、`bench` 与 25 处测试并排调用。
+  关键字拼错不报错，只是静默落回缺省：`kl_coef` 少一位小数 = 这轮没 KL 惩罚（日志只剩「kl 偏大」）、
+  `target_kl` / `steps_out` 拼错 = 提前停与步数回传静默失效、`lazy` 拼成 `lazzy` = 整轮全量上卡。
+- **决定**：新模块 `worker/ppo/update_spec.py`：frozen + kw_only 的 `BaseUpdateSpec`（19 个同名
+  旋钮）+ `TorchUpdateSpec`（`+target_kl`）/ `PaddleUpdateSpec`（`+steps_out` / `+log`）；两个
+  `ppo_update` 只收 `spec`。35 处构造点（生产 8 + 测试 25 + 适配器 2）机械改传对象。
+- **端口面保留关键字（唯一没收的地方）**：`trainer/stream.py` 用同一调用面
+  `update(model, opt, chunks, epochs, device, **update_kwargs)` 驱动四个后端，而 goal / intent 的
+  `update_kwargs`（`seed` / `value_warmup_epochs`）与 PPO 不同 ⇒ 端口不能押在一份 spec 上。两个
+  引擎保留 5 位置 + `**kwargs` 的 `update` 适配器，其余按名进 spec，未知键在构造时 `TypeError`。
+- **被否决**：① 只改一侧（同一关键字在两条路上含义分叉，Paddle 少收一个 `kl_coef` 也照跑完）；
+  ② 一个超集 spec（torch 不认 `steps_out`/`log`、Paddle 不认 `target_kl` ⇒ 入口里判「传了但不管」
+  = 把静默失效从签名搬进入口）；③ 两端口的适配器抽成共用 `port_update(spec_cls, impl, …)` helper
+  —— 两个 `update` 成了逐字节等价的一行，结构克隆 17 → 18 当场红；最终两边形状各留一步（torch 一行
+  `return`、Paddle 先构局部 `spec`），**没有抬 `BASELINE_CLONE`**。
+- **读数**：宽签名 52 → **50**、43 → **41** 文件（`WIDE_FUNCS_BASELINE` 删两文件条目）；
+  `update_spec.py` 99 行（拓扑秩 L1，已登记 `tests/helpers/remote_dag.py`）。
+- **验证**：`tests/worker/test_ppo_update_spec.py`（7 条）· PPO 族 68 条 · `bun run pygate` 绿
+  （6745 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §297。
+
+## §2026-11-22-runner-spec（B 层派发两入口共收 `RunnerSpec`）
+
+- **背景**：`trainer/batch_runner.py` 里 `BatchEvalRunner.__init__`（16 参）与 `dispatch_batch_bg`
+  （13 参）是**同一张表的两份**，后者按**位置**把 13 个实参转手给前者。相邻的 `unit_idx` /
+  `unit_of` 都是 `int`、`init_sha16` / `run_id` 都是 `str`：传错一位不报错，只让 iterId 的
+  命名空间变样（那是 god/nn 不串键的唯一保证），要等台账里出现「本单元之外」的键才发现。
+- **决定**：新增 frozen + kw_only `RunnerSpec`（16 字段 = 11 个身份位 + `policy` / `window_event` /
+  `init_sha16` / `kind` / `include_scorable` 五个带缺省的旋钮，缺省与旧签名逐字一致）；
+  `BatchEvalRunner(spec)` 展开成同名局部量、`dispatch_batch_bg(spec)` 直接把同一份 spec 转手。
+  8 个构造点（生产 3 + 测试 5）全改传对象，派发口不再有位置手传层。守
+  `tests/trainer/test_runner_spec.py`（frozen + kw_only / 字段表 / 缺省语义 / 两入口只剩 spec）。
+- **被否决**：① 只收 `__init__`（派发口仍是 13 个位置实参 —— 错位的主失效面原封不动）；
+  ② 让 `dispatch_batch_bg` 收显式参数再自己拼 spec（等于把同一张表再抄一份，只是换成关键字）。
+- **读数**：宽签名 50 → **48**、41 → **40** 文件（`WIDE_FUNCS_BASELINE` 删 `trainer/batch_runner.py`）；
+  `batch_runner.py` LOC 513 → 519。连带：`test_batch_runner_split` 的 import 闭集加 stdlib
+  `dataclasses`，`test_batch_eval_facade` 的 `RUNNER_EXPORTS` 加 `RunnerSpec`（门面自别名规矩）。
+- **验证**：batch 族 + 门面 72 例绿；`bun run pygate` 绿（6749 passed / 3 skipped）。
+  全文 → `docs/nn/engineering.md` §298。
+
+## §2026-11-22-run-job-spec（`run_job` 的 17 个参数收成 `RunJobSpec`）
+
+- **背景**：`remote/worker.run_job` 是 worker 的作业执行入口（3 个身份位 + 14 个按名旋钮），
+  被四条腿调用。`remote/job_round` 只见注入点 `run_job_fn`（它不能 import `remote.worker`：
+  成环 + 顶层拉 torch），于是同一组 13 个关键字实参在「宿主 → 注入点」之间手抄两遍。拼错不报错、
+  只静默落缺省：`device` 落成 `cpu`（云机白拿 GPU）、`epoch_mult` 落成 1.0（训练侧放大失效）、
+  `preloaded` 落丢（全离线节点回头向空 `base_url` 发 GET）、`should_cancel` / `on_ppo_start`
+  落丢（取消帧与 `computing_at` 打点双双静默）。
+- **决定**：新模块 `remote/job_spec.py`（依赖面 = stdlib + `common.log_bundle`，拓扑秩 L1）住
+  frozen + kw_only `RunJobSpec`（17 字段，缺省与旧签名逐字一致）；`run_job(spec)` 展开成同名局部量
+  后函数体不动；`job_round._execute` / `plan_run` 合成轮 / `worker_server._execute_job` 改为构造
+  spec，`run_loop._real_run_job` 签名改 `(spec)`，`run_job_fn` 端口类型收窄成
+  `Callable[[RunJobSpec], dict]`。22 处调用点（生产 5 + 测试 17，含 6 个替身）全改。守
+  `tests/remote/test_run_job_spec.py`（5 条）。
+- **被否决**：① spec 就地住 `remote/worker.py`（`job_round` 一 import 就成环）；② `run_job_fn`
+  继续 `*args, **kw`（那就是本刀要杀的那种「拼错就落缺省、替身签名漂移也没人发现」）；
+  ③ 把 `log` 缺省写成 spec 字段的 `_log`（会把「patch 打在哪家」的读法从宿主搬进 spec）。
+- **读数**：宽签名 48 → **47**、40 → **39** 文件（`WIDE_FUNCS_BASELINE` 删 `remote/worker.py`）；
+  `Any` 基线 `remote/worker.py` 4 → 1、`remote/run_loop.py` 2 → 0（条目删）。
+- **验证**：remote / hub / e2e 相关族全绿；`bun run pygate` 绿（6754 passed / 3 skipped）。
+  全文 → `docs/nn/engineering.md` §299。
+
+## §2026-11-22-task-key-spec（`task_key` 的 16 个参数收成 `TaskKeySpec`）
+
+- **背景**：`common/task_key.task_key` = 5 个身份位 + 11 个带缺省开关，其中 9 个是
+  「激活 ⇒ 键尾追加一段 `:xxx`」的同型字符串且位置相邻。错一位不报错：键少一段 ⇒ 取消帧
+  打不中这一局（继续白烧卡）；或两态不同的局撞成同键 ⇒ full / replay 语料互相覆盖。它与
+  `tools/agent/sampler-agent.ts::taskKey` 逐字节镜像，生产侧唯一调用点（`task_client.build_params`
+  的 `on_key`）还要从 camelCase `params` 映射到这些字段，正是位置位最容易错位的地方。
+- **决定**：同模块 `common/task_key.py` 住 frozen + kw_only `TaskKeySpec`（16 字段，缺省逐字一致），
+  `task_key(spec)` 只收它；`common/distribution.py` 门面同步 re-export。守
+  `tests/common/test_task_key_spec.py`（5 条），固定向量测试补「6 个开关逐个单独激活」的键尾断言。
+- **被否决**：① 只收那 9 个开关、`iter_id/mode/kind/stage/seed` 继续裸传（身份位与开关混在同一个
+  调用形状里，正是位置位错位的来源）；② 把开关改成 `frozenset[str]`（键配方是**有序**拼接，
+  顺序即契约，集合会把这个信息丢掉，且 TS 侧对拍要重写）。
+- **读数**：宽签名 47 → **46**、39 → **38** 文件（`WIDE_FUNCS_BASELINE` 删 `common/task_key.py`）。
+- **验证**：`bun run pygate` 绿（6759 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §300。
+
+## §2026-11-22-ppo-spec（`run_ppo` 的 15 个参数收成 `PPOSpec`；推翻 B8 ④ 的「签名即契约」）
+
+- **背景**：`worker/ppo/loop.run_ppo` = 5 身份位 + 2 份配置（`HeadSpec` / `LossTerms`）+ 8 个
+  训练旋钮。B8 ④（2026-11-19）曾**特意**保留摊开签名，理由写在 `WIDE_FUNCS_BASELINE` 注释里：
+  「形参表就是两个入口的契约，包成对象只会把它隐形」。
+- **改判依据**：契约在**入口**（`ppo_update_goal` / `ppo_update_intent`，已由
+  `test_ppo_loop_core::test_entry_signatures_are_frozen` 钉死），不在签名的形态上；而摊开签名
+  给了第二条隐形通道 —— 两个入口各自手抄同一张 8 项旋钮表，漏抄一个不报错：`value_warmup_epochs`
+  落丢 = value 头随机直接 PPO（实测策略塌缩）、`ref_model`+`kl_coef` 落丢 = kickstarting 静默关、
+  `target_kl` 落丢 = 早停失效、`rng` 落丢 = 每波 minibatch 顺序逐字节相同。
+- **决定**：同模块 frozen + kw_only `PPOSpec`（15 字段，缺省逐字一致；`HeadSpec` 那份配置在 spec 里
+  叫 `head`，避免与 `run_ppo(spec)` 的 `spec` 同名相盖），`run_ppo(spec)` 展开成同名局部量、
+  循环体一字未改；两个入口仍是单条 `return run_ppo(PPOSpec(...))`。守
+  `tests/worker/test_ppo_loop_spec.py`（末条用 AST 校验两个入口**逐个**交齐 15 个关键字）。
+- **类型面**：`model` → `_PPOModel` 协议、`opt` → `_GradOpt` 协议（不用 `object` + 就地 `cast`：
+  协议把循环真正用到的 `train` / `parameters` / `named_parameters` / `zero_grad` 写成契约）。
+  协议方法 `train` 与 `worker/train/bc*.py` 同名 ⇒ 同名账 144 → 145（**协议声明不是实现**，
+  已按账本纪律写明；exact 16 / clone 17 未动）。
+- **顺带纠错**：`WIDE_FUNCS_BASELINE` 该条目注释写「13 个形参」，实测 15（8 个旋钮，非 6）。
+- **读数**：宽签名 46 → **45**、38 → **37** 文件（`WIDE_FUNCS_BASELINE` 删 `worker/ppo/loop.py`）。
+- **验证**：`bun run pygate` 绿（6764 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §301。
+
+## §2026-11-22-plan-spec（`build_plan` 的 14 个参数收成 `PlanSpec`）
+
+- **背景**：`worker/plan.build_plan` = 1 个位置位（`args`）+ 13 个关键字，全部由 hub 导出时
+  手写（`trainer/loop_export.py`）。漏一个不报错，只落缺省：`max_iters` / `max_segment_iters` 丢 =
+  计划覆盖整段课程（后者是硬上界的再降档）、`volume` / `rotation` 丢 = 静默退成固定局数老口径
+  （云端采样量与本地集群不一致）、`template_wver` / `node_label` 丢 = 模板 argv 指向错版本名/标签。
+  发布期自检（`check_plan_against_args`）掩护不了它 —— 它比的是**同一份计划**的重放。
+- **决定**：同模块 frozen + kw_only `PlanSpec`（14 字段，缺省逐字一致；`log` 的 no-op 缺省提成
+  模块级 `_noop_log`），`build_plan(spec)` 展开成同名局部量、主体不动。生产 1 处 + 测试 49 处
+  调用点全改（一次性 AST 脚本，带幂等检查）。守 `tests/worker/test_plan_spec.py`（含生产调用点
+  的关键字集合守卫）。
+- **被否决**：① 只收 8 个可选旋钮、`args`/`it`/`iters_total`/`rotate_seed` 继续裸传（身份位与
+  旋钮混在同一形状里，正是错位源）；② 把自检从「对集相等」改成「旋钮相等」（那等于把计划与
+  args 的对比换成对实现细节的断言，`volume` 路线根本没有可比的旋钮值）。
+- **读数**：宽签名 45 → **44**、37 → **36** 文件（`WIDE_FUNCS_BASELINE` 删 `worker/plan.py`）。
+- **验证**：`bun run pygate` 绿（6770 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §302。
+
+## §2026-11-22-head-update-spec（两个头入口 + 装载骨架收 spec；端口 `update` 改认名字）
+
+- **背景**：`worker/ppo/goal.ppo_update_goal` 与 `intent.ppo_update_intent` 各有 13 个形参且**逐字相同**
+  （句柄 5 + 旋钮 8），差别只在 `head` / `terms` 两项本模块常量；`np_core.load_episodes_common` 的 13 个
+  参数同样被三份常量表（`np_core.load_episodes` / `goal.load_episodes_goal` / `intent.load_episodes_intent`）
+  各手抄一遍。失效面不是「难读」而是静默：漏抄 `value_warmup_epochs` = warmup 退化成直接 PPO（value 头
+  随机 ⇒ 策略塌缩），漏抄 `kl_coef` = kickstarting 关掉，漏抄 `ckpt_path` / `target_kl` = 续跑与早停失效。
+- **决定**：`loop.HeadUpdateSpec`（frozen + kw_only，13 字段 = `PPOSpec` 减 `head`/`terms`）+ `to_ppo(head,
+  terms)` 作为「13 字段逐个搬进 PPOSpec」的**唯一**实现；两个入口只收一份 spec。`np_core.LoadEpisodesSpec`
+  同模块（方言面 8 + 行为旋钮 5，缺省逐字一致），三份表改成按名交一张表。
+- **端口保留 5 位置 + `**update_kwargs`，但它现在认名字**：前 5 个是每波都换的句柄，旋钮才是每轮变的；
+  `worker/backend.py::REQUIRED_UPDATE_KWARGS` 与 `tests/worker/test_backend_contract.py` 都建在这个形状上。
+  所以 `update` 从「别名到入口」改成薄适配器 → `HeadUpdateSpec.from_port(...)`，**未知旋钮构造时
+  TypeError**（旧写法一路 `**kwargs` 砍到 `run_ppo` 之前都没有一处认得名字表）。适配器形参不注解
+  （与 `worker/ppo/engine.update` 同款透传端口，不引 `Any`）。
+- **被否决**：① 收成「5 位置 + 一个旋钮袋」再改 stream 的两处调用（要动 `REQUIRED_UPDATE_KWARGS` 的
+  契约与 4 个 backend 的端口形状，且 per-tick 腿的旋钮集不同 —— `value_anchor` 不是 run_ppo 的旋钮）；
+  ② 两个头各留一份 spec（同形两份 = 同一张表写两遍，正是本刀要杀的形状）；③ 让 `PPOSpec` 内嵌
+  `HeadUpdateSpec`（会让 §301 那刀刚钉好的 15 字段表再翻一遍，收益只在命名，不在失效面）。
+- **读数**：宽签名 43 → **40**、35 → **32** 文件（`WIDE_FUNCS_BASELINE` 删 `worker/ppo/goal.py` /
+  `intent.py` / `np_core.py`）；复用账本 `BASELINE_CLONE` 17 → **18**（两个 `update` 端口都是
+  一行转发的字面 `def`，骨架相同；`test_update_is_exposed` 要求它是真 `def`，消掉只能把 13 个
+  名字埋回 `**kwargs`）；文本断言两条**未动**。
+- **验证**：`bun run pygate` 绿。全文 → `docs/nn/engineering.md` §304。
+
+## §2026-11-22-cloud-eval-spec（`run_cloud_eval` 的 14 个参数收成 `CloudEvalSpec`）
+
+- **背景**：`remote/offline_eval.run_cloud_eval` = 6 必填 + 8 带缺省关键字。生产侧不直接调它：
+  `plan_handoff._eval_job_builder` 造一张关键字**字典**，`CloudEvalRunner._loop` 再
+  `run_cloud_eval(**params)` 展开。键名错只是延到后台线程才炸，而取错值完全静默：
+  `ts_code_sha256` 错 = 跨轮暖池 key 对不上（每轮重 spawn 一池）、`game_timeout_sec` 错 = 丢掉
+  「显式 vs 兜底」的区别（后者决定重试要不要放大）、`course_fp` 错 = 逐局行与课程配不上对。
+- **决定**：同模块 frozen + kw_only `CloudEvalSpec`（14 字段，缺省逐字一致）；`run_cloud_eval(spec)`
+  展开成同名局部量；`_eval_job_builder.build(it)` 直接返回 spec，`CloudEvalRunner._loop` 调
+  `run_cloud_eval(spec)`（`**` 展开消失）；`_pending` 与 `build_job` 端口同时收窄（该文件 `Any`
+  基线 8 → 6）。守 `tests/remote/test_cloud_eval_spec.py`（7 条，含 AST 钉「不许回潮成 `**` 展开」）。
+- **被否决**：① 只收 8 个可选旋钮、前 6 个继续裸传（生产侧走的本来就是全关键字，没有「好看的
+  位置位」可言）；② spec 单独成 `remote/cloud_eval_spec.py`（这里不存在 `run_job` 那个成环压力：
+  `plan_handoff` 本来就要 `offline_eval`，且它是可选依赖，延迟 import 已够）。
+- **读数**：宽签名 44 → **43**、36 → **35** 文件（`WIDE_FUNCS_BASELINE` 删 `remote/offline_eval.py`）。
+- **验证**：`bun run pygate` 绿（6777 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §303。
 ## §2026-11-22-export-no-iters-cap（导出段长不再有上界：课程 `iters` 是唯一终点）
 
 - **背景**：g9-def（课程 `iters=1000`、已跑 it497 ⇒ 剩 503 轮）点导出被当场拒：

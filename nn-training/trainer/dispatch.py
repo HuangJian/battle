@@ -9,7 +9,6 @@ import secrets
 import threading
 import time
 from collections import deque
-from pathlib import Path
 
 import common.codehash
 import common.codehash_ref as codehash_ref
@@ -24,7 +23,7 @@ from common.log import log
 from common.proc import TOOLCHAIN
 from common.proc import version_mm as _mm
 from remote import weights_standard
-from trainer.dispatch_state import DispatchState, admit_rollout_nodes
+from trainer.dispatch_state import DispatchSpec, DispatchState, admit_rollout_nodes
 from trainer.queue_local import (
     QueueEdgeGate,
     halt_missing_split,
@@ -79,54 +78,28 @@ class RolloutDispatcher:
     ① ping 门 → ② 权重下发 → ③ 队列/线程 → ④ 聚合拆成方法，相位产物走 `DispatchState`。
     """
 
-    def __init__(
-        self,
-        bun: str,
-        rl_path: str,
-        traj_dir: Path,
-        pairs: list[tuple[int, int]],
-        args,
-        cfg: dict,
-        iter_id: str,
-        on_result=None,
-        local_slots_max: int | None = None,
-        tail_dispatch: bool = True,
-        halt_event: threading.Event | None = None,
-        on_queue_drained=None,
-        # 队列从「已全部派出」重新出现可派任务时回调（stream 用它重新冻结 eval）。
-        on_queue_active=None,
-        local_suspend: threading.Event | None = None,
-        extra_wver: str | None = None,
-        course_fp: str | None = None,
-        corpus_fp: str | None = None,
-        pool_halt: bool = False,
-        # 零落盘（plan/payload-zero-disk §3.1）：`(shard 名, files, manifest)` 回调，
-        # 经 `common.distribution.write_shard(on_receive=…)` 在**落盘之前**交出去 ——
-        # dispatch 腿的字节本来就在内存里，调用方（`ShardSegments.add`）当场打段+压好。
-        # 缺省 None = 逐字节旧行为（其它调用方无感）。
-        on_shard=None,
-    ):
-        self.bun = bun
-        self.rl_path = rl_path
-        self.traj_dir = traj_dir
-        self.pairs = pairs
-        self.args = args
-        self.cfg = cfg
-        self.iter_id = iter_id
-        self.on_result = on_result
-        self.local_slots_max = local_slots_max
-        self.tail_dispatch = tail_dispatch
-        self.halt_event = halt_event
-        self.on_queue_drained = on_queue_drained
-        self.on_queue_active = on_queue_active
-        self.local_suspend = local_suspend
-        self.extra_wver = extra_wver
-        self.course_fp = course_fp
-        self.corpus_fp = corpus_fp
+    def __init__(self, spec: DispatchSpec):
+        self.bun = spec.bun
+        self.rl_path = spec.rl_path
+        self.traj_dir = spec.traj_dir
+        self.pairs = spec.pairs
+        self.args = spec.args
+        self.cfg = spec.cfg
+        self.iter_id = spec.iter_id
+        self.on_result = spec.on_result
+        self.local_slots_max = spec.local_slots_max
+        self.tail_dispatch = spec.tail_dispatch
+        self.halt_event = spec.halt_event
+        self.on_queue_drained = spec.on_queue_drained
+        self.on_queue_active = spec.on_queue_active
+        self.local_suspend = spec.local_suspend
+        self.extra_wver = spec.extra_wver
+        self.course_fp = spec.course_fp
+        self.corpus_fp = spec.corpus_fp
         # ★ `pool_halt`（2026-10-21 用户口径）：`halt` 是**候选池铺满后逐关满额**的停 ⇒
         #   池里没派出去的候选不算「缺口」（它们从不运行）。外部熔断（KL halt 等）不置位
         #   本标记 ⇒ `missing` 保持旧语义（没派的局照旧报出来，e2e 的 halt preset 钉着它）。
-        self.pool_halt, self.on_shard = bool(pool_halt), on_shard
+        self.pool_halt, self.on_shard = bool(spec.pool_halt), spec.on_shard
         #: 本机槽的长驻池（`_run` 里按需建；生命周期 = 这一轮，见 `run`）。
         self._pool: serve_pool.ServePool | None = None
 

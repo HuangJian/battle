@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import argparse
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import common.distribution
@@ -15,6 +18,40 @@ from common.log import log
 from common.proc import version_mm as mm
 from worker import node_identity
 from worker.agent_meta import record_agent_meta as _record_agent_meta
+
+
+@dataclass(frozen=True, kw_only=True)
+class DispatchSpec:
+    """`run_rollout_queue` / `RolloutDispatcher` 的旋钮袋（P0-3：20 参 → 一个对象）。
+
+    两个入口（薄包装与 OO 本体）**共用同一张字段表** —— 旧版 `run_rollout_queue` 把 19 个
+    参数按位置转手给 `RolloutDispatcher.__init__`（只差一个 `on_shard` 靠关键字），传错
+    一位不会报错：`cfg` 进了 `args`、`on_result` 进了 `local_slots_max`，要跑到对应相位
+    才炸。前 7 个是身份位（bun / 权重 / 语料 / 迭代），后 12 个是可选接线与旋钮。
+    """
+
+    bun: str
+    rl_path: str
+    traj_dir: Path
+    pairs: list[tuple[int, int]]
+    args: argparse.Namespace | SimpleNamespace
+    cfg: dict
+    iter_id: str
+    on_result: Callable[..., None] | None = None
+    local_slots_max: int | None = None
+    tail_dispatch: bool = True
+    halt_event: threading.Event | None = None
+    # 队列从「已全部派出」重新出现可派任务时回调（stream 用它重新冻结 eval）。
+    on_queue_drained: Callable[[], None] | None = None
+    on_queue_active: Callable[[], None] | None = None
+    local_suspend: threading.Event | None = None
+    extra_wver: str | None = None
+    course_fp: str | None = None
+    corpus_fp: str | None = None
+    pool_halt: bool = False
+    # 零落盘（plan/payload-zero-disk §3.1）：`common.shard.write_shard` 的 `on_receive` ——
+    # `(shard 名, files, manifest)`，在**落盘之前**把字节交出去（`ShardSegments.add` 签名）。
+    on_shard: Callable[[str, dict[str, bytes], dict], None] | None = None
 
 
 @dataclass

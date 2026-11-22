@@ -61,6 +61,7 @@ from common.schema import (
 # 顶层就取（只带 numpy/typing）：`_as_bank` 的返回注要它，而 torch / paddle 两条腿
 # 仍是函数内延迟 import（本文件的约定：`--help` 与 fixture 侧不该拖后端）。
 from worker.ppo.demo import DemoBank
+from worker.ppo.update_spec import PaddleUpdateSpec, TorchUpdateSpec
 
 SEED = 20261027
 B = 8
@@ -330,19 +331,21 @@ def run_fixture(out: Path) -> None:
             ref_model.eval()
         np.random.seed(SEED)
         stats = engine.ppo_update(
-            model,
-            opt,
-            [chunk],
-            epochs=1,
-            device="cpu",
-            kl_coef=case.get("kl_coef", 0.0),
-            ref_model=ref_model,
-            kickstart_kl=case.get("kickstart_kl", 0.0),
-            ent_coef=case.get("ent_coef"),
-            demo_bank=_as_bank(demo),
-            demo_bc_coef=case.get("demo_bc_coef", 0.0),
-            demo_per_mb=case.get("demo_per_mb", 0),
-            value_anchor=case.get("value_anchor", 0.0),
+            TorchUpdateSpec(
+                model=model,
+                opt=opt,
+                chunks=[chunk],
+                epochs=1,
+                device="cpu",
+                kl_coef=case.get("kl_coef", 0.0),
+                ref_model=ref_model,
+                kickstart_kl=case.get("kickstart_kl", 0.0),
+                ent_coef=case.get("ent_coef"),
+                demo_bank=_as_bank(demo),
+                demo_bc_coef=case.get("demo_bc_coef", 0.0),
+                demo_per_mb=case.get("demo_per_mb", 0),
+                value_anchor=case.get("value_anchor", 0.0),
+            )
         )
         (cdir / "expected.json").write_text(json.dumps(stats, indent=2), encoding="utf-8")
         save_weights_json(model, str(cdir / "weights_after.json"))
@@ -380,7 +383,14 @@ def run_fixture(out: Path) -> None:
             _fill_lp_old(chunk2, outs2, arch, rng)
             np.savez(cdir / "chunk2.npz", **chunk2)
             stats2 = engine.ppo_update(
-                model, opt, [chunk2], epochs=2, device="cpu", ckpt_path=str(ckpt_run)
+                TorchUpdateSpec(
+                    model=model,
+                    opt=opt,
+                    chunks=[chunk2],
+                    epochs=2,
+                    device="cpu",
+                    ckpt_path=str(ckpt_run),
+                )
             )
             (cdir / "expected2.json").write_text(json.dumps(stats2, indent=2), encoding="utf-8")
             save_weights_json(model, str(cdir / "weights_after2.json"))
@@ -456,18 +466,20 @@ def run_check(
         demo = dict(np.load(cdir / "demo.npz")) if (cdir / "demo.npz").exists() else None
         np.random.seed(SEED)
         stats = engine_paddle.ppo_update(
-            model,
-            opt,
-            [chunk],
-            epochs=1,
-            kl_coef=cfg["kl_coef"],
-            ref_model=ref_model,
-            kickstart_kl=cfg["kickstart_kl"],
-            ent_coef=cfg["ent_coef"],
-            demo_bank=_as_bank(demo),
-            demo_bc_coef=cfg["demo_bc_coef"],
-            demo_per_mb=cfg["demo_per_mb"],
-            value_anchor=cfg["value_anchor"],
+            PaddleUpdateSpec(
+                model=model,
+                opt=opt,
+                chunks=[chunk],
+                epochs=1,
+                kl_coef=cfg["kl_coef"],
+                ref_model=ref_model,
+                kickstart_kl=cfg["kickstart_kl"],
+                ent_coef=cfg["ent_coef"],
+                demo_bank=_as_bank(demo),
+                demo_bc_coef=cfg["demo_bc_coef"],
+                demo_per_mb=cfg["demo_per_mb"],
+                value_anchor=cfg["value_anchor"],
+            )
         )
         expected = json.loads((cdir / "expected.json").read_text(encoding="utf-8"))
         d_stats = max(
@@ -595,7 +607,9 @@ def _check_ckpt(cdir: Path, arch: str, atol_weights: float) -> bool:
     assert want_steps == steps_done
 
     chunk2 = dict(np.load(cdir / "chunk2.npz"))
-    stats2 = engine_paddle.ppo_update(model, opt, [chunk2], epochs=2, ckpt_path=str(dst))
+    stats2 = engine_paddle.ppo_update(
+        PaddleUpdateSpec(model=model, opt=opt, chunks=[chunk2], epochs=2, ckpt_path=str(dst))
+    )
     expected2 = json.loads((cdir / "expected2.json").read_text(encoding="utf-8"))
     d_stats2 = max(
         float(abs(stats2[k] - expected2[k]) / (1.0 + abs(expected2[k]))) for k in expected2

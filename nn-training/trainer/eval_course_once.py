@@ -275,7 +275,7 @@ def main() -> int:
     import common.codehash
     import common.distribution
     from common.jsonc import load as jsonc_load
-    from trainer.batch_eval import ONESHOT_EVAL_KIND, BatchEvalRunner, data_root
+    from trainer.batch_eval import ONESHOT_EVAL_KIND, BatchEvalRunner, RunnerSpec, data_root
     from trainer.dispatch_queue import RUN_ID
 
     course_path = str(spec["course"])
@@ -376,24 +376,23 @@ def main() -> int:
     for i, unit in enumerate(units):
         rl_path: str | None = None if policy == "god" else str(unit["ckpt"])
         runner = BatchEvalRunner(
-            bun,
-            rl_path,
-            eval_log,
-            args,
-            cfg,
-            batch,
-            unit,
-            i,
-            len(units),
-            RUN_ID,
-            epoch,
-            policy,
-            None,
-            "",  # init_sha16（按位置，缺省空串）
-            # 专用权重桶（见 ONESHOT_EVAL_KIND）：训练作业每轮重写 'rollout' 桶，
-            # 一次性评估那份固定权重会被节点侧的保留份数收敛扫掉（→ ENOENT/10054）。
-            # **按关键字**：它前面还有 init_sha16，位置写错会静默回落 'rollout'。
-            kind=ONESHOT_EVAL_KIND,
+            RunnerSpec(
+                bun=bun,
+                rl_path=rl_path,
+                eval_log=eval_log,
+                args=args,
+                cfg=cfg,
+                batch=batch,
+                unit=unit,
+                unit_idx=i,
+                unit_of=len(units),
+                run_id=RUN_ID,
+                engine_epoch=epoch,
+                policy=policy,
+                # 专用权重桶（见 ONESHOT_EVAL_KIND）：训练作业每轮重写 'rollout' 桶，
+                # 一次性评估那份固定权重会被节点侧的保留份数收敛扫掉（→ ENOENT/10054）。
+                kind=ONESHOT_EVAL_KIND,
+            )
         )
         t0 = time.time()
         res = runner.run()

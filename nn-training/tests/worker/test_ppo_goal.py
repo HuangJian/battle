@@ -167,7 +167,7 @@ def test_ppo_update_smoke() -> None:
         chunks = _fake_chunks(coarse)
         model = ppo_goal.GoalRLNet(h=32, d=2)
         opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-        agg = ppo_goal.ppo_update_goal(
+        agg = ppo_goal.update(
             model, opt, chunks, epochs=3, device=torch.device("cpu"), target_kl=1e9, seed=1
         )
         assert np.isfinite(agg["policy"]) and np.isfinite(agg["value"]), f"coarse={coarse}: update finite (policy={agg['policy']:.3f} value={agg['value']:.3f})"
@@ -175,7 +175,7 @@ def test_ppo_update_smoke() -> None:
 
         model2 = ppo_goal.GoalRLNet(h=32, d=2)
         opt2 = torch.optim.Adam(model2.parameters(), lr=1e-3)
-        agg2 = ppo_goal.ppo_update_goal(
+        agg2 = ppo_goal.update(
             model2, opt2, chunks, epochs=3, device=torch.device("cpu"), target_kl=1e-9, seed=1
         )
         assert agg2["early_stopped"], f"coarse={coarse}: target_kl 极小 → early stop"
@@ -188,7 +188,7 @@ def test_ppo_update_smoke() -> None:
         # GoalRLNet 默认 with_value=True（基类 value_head 声明为 Linear|None，此处收窄）。
         assert model3.value_head is not None
         vhead_before = model3.value_head.weight.detach().clone()
-        agg3 = ppo_goal.ppo_update_goal(
+        agg3 = ppo_goal.update(
             model3,
             opt3,
             chunks,

@@ -31,6 +31,7 @@ if str(ROOT) not in sys.path:
 from worker.models.student import PPOStudent
 from worker.ppo.common import sync_scalars
 from worker.ppo.engine import ppo_update
+from worker.ppo.update_spec import TorchUpdateSpec
 
 ENGINE_KEYS = {
     "policy",
@@ -135,7 +136,11 @@ def test_engine_stats_keys_unchanged() -> None:
     torch.manual_seed(3)
     model = PPOStudent(h=8, d=1)
     opt = torch.optim.Adam(model.parameters(), lr=1.5e-4)
-    agg = ppo_update(model, opt, _chunks(), 2, torch.device("cpu"))
+    agg = ppo_update(
+        TorchUpdateSpec(
+            model=model, opt=opt, chunks=_chunks(), epochs=2, device=torch.device("cpu")
+        )
+    )
     assert set(agg) == ENGINE_KEYS, f"键集变化：{set(agg) ^ ENGINE_KEYS}"
     for k, v in agg.items():
         assert np.isfinite(v), f"{k} 非有限值：{v!r}"
@@ -152,9 +157,7 @@ def _set_lp_old_from_model(chunks: list[dict], model, delta: float = 0.0) -> Non
 
     with torch.no_grad():
         for c in chunks:
-            mv, fr, _val = model(
-                torch.from_numpy(c["obs"]), torch.from_numpy(c["scalars"])
-            )
+            mv, fr, _val = model(torch.from_numpy(c["obs"]), torch.from_numpy(c["scalars"]))
             mask = torch.from_numpy(c["mask"])
             lp_m = cat_logprob(
                 torch.from_numpy(c["a_move"]), masked_logsoftmax(mv, mask[:, :MOVE_DIM])
@@ -175,7 +178,9 @@ def test_clip_fraction_and_per_step_kl_readouts() -> None:
     chunks = _chunks(n_chunks=1, b=8, seed=7)
     _set_lp_old_from_model(chunks, model, delta=0.0)
     opt = torch.optim.Adam(model.parameters(), lr=1.5e-4)
-    agg = ppo_update(model, opt, chunks, 1, torch.device("cpu"))
+    agg = ppo_update(
+        TorchUpdateSpec(model=model, opt=opt, chunks=chunks, epochs=1, device=torch.device("cpu"))
+    )
     assert agg["clip_fraction"] == 0.0, f"ratio=1 时不应有出界样本：{agg['clip_fraction']}"
     assert agg["per_step_kl"] == 0.0, f"ratio=1 时 KL 应为 0：{agg['per_step_kl']}"
 
@@ -184,7 +189,11 @@ def test_clip_fraction_and_per_step_kl_readouts() -> None:
     chunks2 = _chunks(n_chunks=1, b=8, seed=7)
     _set_lp_old_from_model(chunks2, model2, delta=-10.0)
     opt2 = torch.optim.Adam(model2.parameters(), lr=1.5e-4)
-    agg2 = ppo_update(model2, opt2, chunks2, 1, torch.device("cpu"))
+    agg2 = ppo_update(
+        TorchUpdateSpec(
+            model=model2, opt=opt2, chunks=chunks2, epochs=1, device=torch.device("cpu")
+        )
+    )
     assert agg2["clip_fraction"] == 1.0, f"ratio=e^10 应全部出界：{agg2['clip_fraction']}"
     assert agg2["per_step_kl"] > 1.0, f"大漂移的 KL 读数应显著为正：{agg2['per_step_kl']}"
 
@@ -197,13 +206,15 @@ def test_target_kl_stops_remaining_epochs() -> None:
     opt = torch.optim.Adam(model.parameters(), lr=1.5e-4)
     epochs_seen: list[int] = []
     agg = ppo_update(
-        model,
-        opt,
-        _chunks(n_chunks=2, seed=11),
-        3,
-        torch.device("cpu"),
-        target_kl=1e-12,
-        on_epoch_done=lambda ep, _m: epochs_seen.append(ep),
+        TorchUpdateSpec(
+            model=model,
+            opt=opt,
+            chunks=_chunks(n_chunks=2, seed=11),
+            epochs=3,
+            device=torch.device("cpu"),
+            target_kl=1e-12,
+            on_epoch_done=lambda ep, _m: epochs_seen.append(ep),
+        )
     )
     assert agg["early_stopped"] is True
     assert epochs_seen == [1], f"应在 epoch 1 后停，实际 {epochs_seen}"
@@ -252,7 +263,7 @@ def test_intent_stats_keys_and_warmup_kl_exact_zero() -> None:
     ppo_intent, chunks = _intent_fixture()
     model = ppo_intent.IntentRLNet(h=32, d=2)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-    agg = ppo_intent.ppo_update_intent(
+    agg = ppo_intent.update(
         model,
         opt,
         chunks,
@@ -280,7 +291,9 @@ def test_engine_aggregate_bit_identical_to_per_item_path(monkeypatch) -> None:
     torch.manual_seed(9)
     model = PPOStudent(h=8, d=1)
     opt = torch.optim.Adam(model.parameters(), lr=1.5e-4)
-    batched = ppo_update(model, opt, chunks, 2, torch.device("cpu"))
+    batched = ppo_update(
+        TorchUpdateSpec(model=model, opt=opt, chunks=chunks, epochs=2, device=torch.device("cpu"))
+    )
 
     def _per_item(vals: dict) -> dict:
         """老路径：每个标量各来一次 host 同步。"""
@@ -291,7 +304,9 @@ def test_engine_aggregate_bit_identical_to_per_item_path(monkeypatch) -> None:
     torch.manual_seed(9)
     model2 = PPOStudent(h=8, d=1)
     opt2 = torch.optim.Adam(model2.parameters(), lr=1.5e-4)
-    per_item = ppo_update(model2, opt2, chunks, 2, torch.device("cpu"))
+    per_item = ppo_update(
+        TorchUpdateSpec(model=model2, opt=opt2, chunks=chunks, epochs=2, device=torch.device("cpu"))
+    )
 
     assert set(batched) == set(per_item)
     for k in batched:
@@ -342,7 +357,7 @@ def test_goal_stats_keys_include_bc() -> None:
 
     model = ppo_goal.GoalRLNet(h=32, d=2)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-    agg = ppo_goal.ppo_update_goal(
+    agg = ppo_goal.update(
         model,
         opt,
         chunks,

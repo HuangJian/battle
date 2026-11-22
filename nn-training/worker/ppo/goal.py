@@ -61,19 +61,19 @@ from worker.ppo.cli import run as run_cli
 # 但这个名字必须留在模块命名空间里。
 from worker.ppo.common import _ppo_load as _ppo_load  # RolloutBackend 契约（见上）
 from worker.ppo.common import log, masked_logsoftmax
-from worker.ppo.loop import HeadSpec, LossTerms, run_ppo
+from worker.ppo.loop import HeadSpec, HeadUpdateSpec, LossTerms, run_ppo
 from worker.ppo.np_core import (
-    # `chunk_episodes` 是 `worker/backend.py::RolloutBackend` 的成员（`trainer/stream.py` 调 `backend.chunk_episodes`）；
-    # 本模块不再直接调用它，但这个名字必须留在模块命名空间里。
-    chunk_episodes as chunk_episodes,
-)
-from worker.ppo.np_core import (
+    LoadEpisodesSpec,
     compute_gae,
     discover_shards,
     load_episodes_common,
     load_shard_fields,
 )
-from worker.ppo.rng import PPORng
+from worker.ppo.np_core import (
+    # `chunk_episodes` 是 `worker/backend.py::RolloutBackend` 的成员（`trainer/stream.py` 调 `backend.chunk_episodes`）；
+    # 本模块不再直接调用它，但这个名字必须留在模块命名空间里。
+    chunk_episodes as chunk_episodes,
+)
 
 # ---- hyper-params（与 ppo_intent 同源；γ 口径 §12.1 γ_step = 0.995^dt）----
 GAMMA_TICK = 0.995
@@ -218,17 +218,19 @@ def load_episodes_goal(
 ) -> list[dict]:
     """全盘回退装载（stream.py 无新结算时调它，**同样带** gamma/lam）。"""
     return load_episodes_common(
-        data_root,
-        label="ppo_goal",
-        shard_kind="goal RL",
-        need_files=("reward.npy", "obs.npy", "dt.npy", "goal_mask.npy"),
-        shard_loader=load_goal_shard,
-        gae=lambda d: compute_gae_variable(
-            d["reward"], d["value"], d["done"], d["dt"], gamma_tick=gamma, lam=lam
-        ),
-        gae_name="variable-step GAE",
-        normalize_adv=normalize_adv,
-        normalize_ret=True,
+        LoadEpisodesSpec(
+            data_root=data_root,
+            label="ppo_goal",
+            shard_kind="goal RL",
+            need_files=("reward.npy", "obs.npy", "dt.npy", "goal_mask.npy"),
+            shard_loader=load_goal_shard,
+            gae=lambda d: compute_gae_variable(
+                d["reward"], d["value"], d["done"], d["dt"], gamma_tick=gamma, lam=lam
+            ),
+            gae_name="variable-step GAE",
+            normalize_ret=True,
+            normalize_adv=normalize_adv,
+        )
     )
 
 
@@ -250,59 +252,32 @@ def _engage_ce(aux_logits, e: dict) -> torch.Tensor | None:
     return F.cross_entropy(aux_logits, e["engage_label"])
 
 
-def ppo_update_goal(
-    model,
-    opt,
-    chunks,
-    epochs,
-    device,
-    ckpt_path: str | None = None,
-    target_kl: float = TARGET_KL,
-    seed: int = 7,
-    value_warmup_epochs: int = 0,
-    ref_model: torch.nn.Module | None = None,
-    kl_coef: float = 0.0,
-    on_epoch_done=None,
-    rng: PPORng | None = None,
-):
-    """chunks: goal 承诺步 minibatch dicts（obs/scalars/inject/a_goal/lp_goal/adv/ret/goal_mask
-    [+ engage_label]）。
+def ppo_update_goal(spec: HeadUpdateSpec) -> dict[str, float | bool]:
+    """goal 头的一轮 PPO：`spec.chunks` = 承诺步 minibatch dicts
+    （obs/scalars/inject/a_goal/lp_goal/adv/ret/goal_mask [+ engage_label]）。
 
     **顺序在 `worker/ppo/loop.py::run_ppo`**（B8 ④：与 intent 曾各写一份同一顺序）；这里只
     给两份配置：`_SPEC`（列名/日志前缀/bc 列）+ `LossTerms`（前向 = `policy_logprobs`，
     辅助项 = engage CE）。数值逐位不变。
 
-    on_epoch_done(ep_done, model)：每个 epoch 完成后同步回调（与 ppo / ppo_intent 逐
-    行对齐）——双缓冲提前预采的触发点：stream 在 epoch3 完成时把 θ_{N,e3} 存盘 spawn
-    首波预采，PPO 继续最后一个 epoch。trainer/stream.py:123-124 **无条件**注入该回调，
-    故本形参是契约的一部分（缺失即 `--mode goal --stream 1` 首个波次 TypeError，
-    plan/python-refactor.md P0-1；由 tests/worker/test_backend_contract.py 守护）。
-
-    value_warmup：同 ppo_intent——前 N epoch 冻结主干只训 value 头（goal-BC 冷启动
-    value 随机，直接 PPO 会被 value 噪声主导）。
-    kickstarting：ref_model = goal-BC 冻结快照，kl_coef·KL(π_curr‖π_ref)，系数外置退火。
-    target_kl 早停同 ppo_intent。
+    13 个输入全在 `HeadUpdateSpec`（P0-3 第四十九刀）：`on_epoch_done` 是双缓冲提前预采的
+    触发点，trainer/stream.py 无条件注入（缺失即 `--mode goal --stream 1` 首个波次
+    TypeError，plan/python-refactor.md P0-1；由 tests/worker/test_backend_contract.py 守护）；
+    value_warmup / kickstarting / target_kl 早停的语义见 `run_ppo`。
     """
-    return run_ppo(
-        model,
-        opt,
-        chunks,
-        epochs,
-        device,
-        spec=_SPEC,
-        terms=LossTerms(forward=policy_logprobs, ent_coef=ENT_COEF, aux=_engage_ce),
-        ckpt_path=ckpt_path,
-        target_kl=target_kl,
-        seed=seed,
-        value_warmup_epochs=value_warmup_epochs,
-        ref_model=ref_model,
-        kl_coef=kl_coef,
-        on_epoch_done=on_epoch_done,
-        rng=rng,
-    )
+    return run_ppo(spec.to_ppo(_SPEC, LossTerms(forward=policy_logprobs, ent_coef=ENT_COEF, aux=_engage_ce)))
+
+
+def update(model, opt, chunks, epochs, device, **update_kwargs):
+    """backend 端口（`worker/backend.py::update`）：stream 的 5 位置 + 旋钮关键字 → spec。
+
+    不注解形参 = 与 `worker/ppo/engine.update` 同一种透传端口；旋钮名是 backend 私有的
+    （`trainer/run_rl.update_kwargs`），写错在 `from_port` 构造 spec 时立刻 TypeError。
+    """
+    return ppo_update_goal(HeadUpdateSpec.from_port(model, opt, chunks, epochs, device, **update_kwargs))  # fmt: skip
+
 
 # ---- stream backend 接口别名（trainer/stream.py 的 backend.update / load_episodes / _ppo_load）----
-update = ppo_update_goal
 load_episodes = load_episodes_goal
 
 

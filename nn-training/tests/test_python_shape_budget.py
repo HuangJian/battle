@@ -52,7 +52,8 @@ LONG_FUNCS_BASELINE: dict[str, int] = {
 
 #: 存量：包含 >8 参数函数的文件 → 个数。
 WIDE_FUNCS_BASELINE = {
-    "common/task_key.py": 1,
+    # 2026-11-22：`task_key` 的 5 个身份位 + 11 个同型开关收成 `TaskKeySpec`
+    # ⇒ 本文件宽签名归零，条目删除（守 `tests/common/test_task_key_spec.py`）。
     "hub/offline_push.py": 2,
     # 2026-11-21：`build_task_zip` 的 9 个关键字参数收成 `TaskZipSpec`
     # ⇒ 本文件宽签名归零，条目删除。
@@ -69,11 +70,12 @@ WIDE_FUNCS_BASELINE = {
     "remote/hub_client.py": 2,
     "remote/hub_http.py": 2,
     # 2026-11-19 合入上游的 relay/replay 参数（原 3 处 → 4 处）。
-    "remote/job_round.py": 2,
+    "remote/job_round.py": 1,  # run_one_round 已收 RoundSpec；剩 _prefetch_fill(10)
     "remote/lifecycle.py": 1,
     "remote/node_upgrade.py": 1,
-    "remote/offline_deliver.py": 1,
-    "remote/offline_eval.py": 1,
+    # `remote/offline_deliver.py` 已清零（P0-3 第四十刀：`OfflineDelivererSpec`）。
+    # 2026-11-22（P0-3 第四十八刀）：`run_cloud_eval` 的 14 个关键字收成 `CloudEvalSpec`
+    # ⇒ 本文件宽签名归零，条目删除（守 `tests/remote/test_cloud_eval_spec.py`）。
     # 2026-11-21：`_base_tar_bytes` / `_landed_bytes_for` 各 9 参 →
     # `BaseTarSpec` / `LandedBytesSpec` ⇒ 本文件宽签名归零，条目删除。
     # 2026-11-21：`pack_payload_zip` 的 9 个参数收成 `PackSpec`
@@ -86,24 +88,26 @@ WIDE_FUNCS_BASELINE = {
     "remote/rollout_node.py": 2,
     "remote/tailscale_boot.py": 1,
     "remote/upload_proc.py": 2,
-    "remote/worker.py": 2,
+    # `remote/worker.py` 已清零（P0-3 第四十四刀：`worker_loop` 收 `WorkerLoopSpec`、
+    # `run_job`(17) 收 `RunJobSpec`）；守 `tests/remote/test_run_job_spec.py`。
     "tools/c9_critic_calibration.py": 1,
     "tools/p0_auc_probe.py": 1,
     "tools/tpu-probe.py": 1,
     #: 2026-11-20：`_settle_unit` 的 15 参收成 `(self, ledger)`，通道机器搬去
     #: `trainer/batch_lanes.py` ⇒ 本文件 3 → **2**（新家没有新增宽签名）。
-    "trainer/batch_runner.py": 2,
+    #: 2026-11-22（P0-3 第四十三刀）：`BatchEvalRunner.__init__`(16) 与 `dispatch_batch_bg`(13)
+    #: 共收 `RunnerSpec` ⇒ 本文件清零，条目删除；守 `tests/trainer/test_runner_spec.py`。
     "trainer/bc_ingest.py": 0,
     "trainer/bc_loop.py": 1,
-    "trainer/dispatch.py": 1,
-    "trainer/dispatch_queue.py": 1,
-    "trainer/loop_serve.py": 1,
+    # `trainer/dispatch.py` 已清零（P0-3 第三十九刀：`DispatchSpec`）。
+    # `trainer/dispatch_queue.py` 已清零（P0-3 第三十九刀：`DispatchSpec`）。
     "trainer/loop_transport.py": 1,
     # 2026-11-21：`reap_alloc_timeouts` 的 9 个关键字参数收成 `ReapSpec`
     # ⇒ 本文件宽签名 2 → 1（剩 `__init__`），基线只许继续调小。
     "trainer/queue_local.py": 1,
-    "trainer/rollout_phase.py": 1,
-    "trainer/stream.py": 1,
+    # 2026-11-22（P0-3 第三十四刀）：`dispatch_rollout_phase` 的 25 个参数收成
+    # `RolloutPhaseSpec` ⇒ 本文件宽签名归零，条目删除。
+    # `trainer/stream.py` 已清零（P0-3 第三十五刀：`StreamRunSpec`）。
     # 2026-11-22（P0-3 第三十三刀）：`dispatch_bc_corpus` 的 25 个关键字参数收成
     # `BcDispatchSpec` ⇒ 本文件宽签名归零，条目删除。
     "worker/bc_eval.py": 1,
@@ -115,21 +119,26 @@ WIDE_FUNCS_BASELINE = {
     # 本文件宽签名归零**。守 `tests/worker/test_eval_round_spec.py`。
     # 2026-11-21（P0-3 第七刀）：`run_local_eval_game`（25 参，全仓最宽）收成
     # `EvalGameSpec` ⇒ 条目删除，本文件宽签名归零。
-    "worker/eval_track.py": 1,
+    # `worker/eval_track.py` 已清零（P0-3 第三十六刀：`EvalSettleSpec`）。
     "worker/gate_check.py": 1,
     "worker/greedy_round.py": 1,
     "worker/iter_rollout.py": 2,
     "worker/models/student.py": 1,
     "worker/models/student_paddle.py": 1,
-    "worker/plan.py": 1,
-    "worker/ppo/engine.py": 1,
-    "worker/ppo/engine_paddle.py": 1,
-    "worker/ppo/goal.py": 1,
-    "worker/ppo/intent.py": 1,
-    # 2026-11-19（B8 ④）：`run_ppo` 的 13 个形参就是两个入口的契约本身
-    # （ckpt/target_kl/seed/warmup/ref/kl/on_epoch_done/rng），包成对象只会把它隐形。
-    "worker/ppo/loop.py": 1,
-    "worker/ppo/np_core.py": 1,
+    # 2026-11-22（P0-3 第四十七刀）：`build_plan` 的 1 位置 + 13 关键字收成 `PlanSpec`
+    # ⇒ 本文件宽签名归零，条目删除（守 `tests/worker/test_plan_spec.py`）。
+    # 2026-11-22（P0-3 第四十二刀）：`ppo_update` 的 20 个参数（Paddle 21）收成
+    # `TorchUpdateSpec` / `PaddleUpdateSpec`（共用 `BaseUpdateSpec`）⇒ 两个条目删除；
+    # 守 `tests/worker/test_ppo_update_spec.py`。
+    # 2026-11-22（P0-3 第四十九刀 A 批）：两个头入口的 13 个形参收成 `HeadUpdateSpec`
+    # （入口只收一份 spec，`update` 端口仍是 5 位置 + `**update_kwargs`）⇒ 两个条目删除；
+    # 守 `tests/worker/test_ppo_loop_core.py`（字段表 + 端口可绑定性）与
+    # `tests/worker/test_ppo_loop_spec.py`（`to_ppo` 逐个搬运 15 个旋钮）。
+    # 2026-11-22（P0-3 第四十六刀）：`run_ppo` 的 15 个形参收成 `PPOSpec`，本文件宽签名归零，
+    # 条目删除。B8 ④（2026-11-19）曾特意摊开签名，但两个入口本来就各自手抄同一张旋钮表
+    # （漏抄一个不报错）—— 契约改钉在 `tests/worker/test_ppo_loop_spec.py` 的字段表上。
+    # 2026-11-22（P0-3 第四十九刀 A 批）：`load_episodes_common` 的 13 个参数收成
+    # `LoadEpisodesSpec` ⇒ 本文件宽签名归零，条目删除；守 `tests/worker/test_load_episodes_spec.py`。
     "worker/resume.py": 1,
     # 2026-11-21：`quota_sample_priority` 的 9 个位置参数收成 `QuotaSampleSpec`
     # ⇒ 本文件宽签名归零，条目删除。

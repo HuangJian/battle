@@ -13,19 +13,24 @@ run_training 主循环里与「采集子进程生命周期」相关的三块收�
 
 from __future__ import annotations
 
+import argparse
 import subprocess
 import threading
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from common.log import log
 from trainer.collect_only import precollect_snapshot_wver, spawn_collect_next
 from trainer.dispatch_queue import RUN_ID, local_slots_max_of, run_rollout_queue
+from trainer.dispatch_state import DispatchSpec
 from trainer.eval_dispatch import EvalDispatchSpec, dispatch_eval_bg
 from trainer.eval_m1 import dispatch_eval_bg_m1
 from trainer.queue_local import run_rollout
-from trainer.stream import run_rollout_stream
+from trainer.stream import StreamRunSpec, run_rollout_stream
 from worker.resume import completed_pairs, state_init_enabled
 
 #: 预采子进程「无新增 shard」的容忍上限（秒）。到点即 terminate + 回退自己采。
@@ -262,38 +267,48 @@ def _stream_extra_kwargs(
     return _stream_kwargs
 
 
-def dispatch_rollout_phase(
-    args,
-    bun: str,
-    dist_cfg: dict | None,
-    it: int,
-    traj_dir: Path,
-    pairs: list[tuple[int, int]],
-    jsonl_path: Path,
-    model,
-    opt,
-    device,
-    ppo_backend,
-    update_kwargs,
-    start_it: int,
-    ref_model,
-    extra_wver: str | None,
-    eval_on_round: bool,
-    course_fp: str | None = None,
-    corpus_fp: str | None = None,
-    halt_event: threading.Event | None = None,
-    on_result=None,
-    pool_halt: bool = False,
+@dataclass(frozen=True, kw_only=True)
+class RolloutPhaseSpec:
+    """`dispatch_rollout_phase` 的旋钮袋（P0-3：25 参 → 一个对象）。
+
+    前 16 个是身份位（不可缺省），后 9 个是**可选接线**：回调面（shard / 收官 / eval 闸）、
+    熔断句柄与双缓冲池标记。旧签名把它们排成一条 25 位的位置表，而两个调用点各只传
+    其中一簇——漏一个回调不会报错，只会在某条腿上静默少做一件事。
+    """
+
+    args: argparse.Namespace | SimpleNamespace
+    bun: str
+    dist_cfg: dict | None
+    it: int
+    traj_dir: Path
+    pairs: list[tuple[int, int]]
+    jsonl_path: Path
+    model: object
+    opt: object
+    device: str
+    ppo_backend: object
+    update_kwargs: Callable[..., dict]
+    start_it: int
+    ref_model: object
+    extra_wver: str | None
+    eval_on_round: bool
+    course_fp: str | None = None
+    corpus_fp: str | None = None
+    halt_event: threading.Event | None = None
+    on_result: Callable[..., None] | None = None
+    pool_halt: bool = False
     # 零落盘（plan/payload-zero-disk §3）：dispatch 腿收到 shard 时的回调（`ShardSegments.add`）。
     # 两条路（stream / 串行）都经 `run_rollout_queue` ⇒ 同一个注入点，这里只透传。
-    on_shard=None,
+    on_shard: Callable[..., None] | None = None
     # 采集真正收官（collector 线程退出）时回调一次；stream 用它解冻 eval 闸。
     # 串行路径的采集收官 = 本函数返回，调用方的 finally 负责解冻，不需要它。
-    on_collect_end=None,
+    on_collect_end: Callable[..., None] | None = None
     # stream 的 eval 动态闸：队列清空 = 解冻，回队 = 重冻（见 `run_rollout_stream`）。
-    on_dispatch_drained=None,
-    on_dispatch_active=None,
-) -> tuple[
+    on_dispatch_drained: Callable[..., None] | None = None
+    on_dispatch_active: Callable[..., None] | None = None
+
+
+def dispatch_rollout_phase(spec: RolloutPhaseSpec) -> tuple[
     dict,
     dict | None,
     threading.Thread | None,
@@ -311,6 +326,18 @@ def dispatch_rollout_phase(
         `local_fallback_only=True` 只在节点全部不可用时启动本机。
       - 串行/纯本地路径：eval_thread 直接回传；collect_child/spawned_early 恒 None/False。
     """
+    # 旧签名 25 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    args, bun, dist_cfg = spec.args, spec.bun, spec.dist_cfg
+    it, traj_dir, pairs = spec.it, spec.traj_dir, spec.pairs
+    jsonl_path, model, opt = spec.jsonl_path, spec.model, spec.opt
+    device, ppo_backend = spec.device, spec.ppo_backend
+    update_kwargs, start_it = spec.update_kwargs, spec.start_it
+    ref_model, extra_wver = spec.ref_model, spec.extra_wver
+    eval_on_round, course_fp = spec.eval_on_round, spec.course_fp
+    corpus_fp, halt_event = spec.corpus_fp, spec.halt_event
+    on_result, pool_halt = spec.on_result, spec.pool_halt
+    on_shard, on_collect_end = spec.on_shard, spec.on_collect_end
+    on_dispatch_drained, on_dispatch_active = spec.on_dispatch_drained, spec.on_dispatch_active
     stream_meta: dict | None = None
     eval_thread: threading.Thread | None = None
     eval_gate: threading.Event | None = None
@@ -387,52 +414,56 @@ def dispatch_rollout_phase(
                 args, ppo_backend, update_kwargs, it, start_it, ref_model
             )
             report = run_rollout_stream(
-                bun,
-                args.out,
-                traj_dir,
-                pairs,
-                args,
-                dist_cfg,
-                iter_id,
-                model,
-                opt,
-                device,
-                on_collect_done=_fire_eval,
-                on_epoch_done=_on_epoch_done,
-                extra_wver=extra_wver,
-                course_fp=course_fp,
-                corpus_fp=corpus_fp,
-                on_shard=on_shard,
-                on_collect_end=on_collect_end,
-                on_dispatch_drained=on_dispatch_drained,
-                on_dispatch_active=on_dispatch_active,
-                **_stream_kwargs,
+                StreamRunSpec(
+                    bun=bun,
+                    rl_path=args.out,
+                    traj_dir=traj_dir,
+                    pairs=pairs,
+                    args=args,
+                    cfg=dist_cfg,
+                    iter_id=iter_id,
+                    model=model,
+                    opt=opt,
+                    device=device,
+                    on_collect_done=_fire_eval,
+                    on_epoch_done=_on_epoch_done,
+                    extra_wver=extra_wver,
+                    course_fp=course_fp,
+                    corpus_fp=corpus_fp,
+                    on_shard=on_shard,
+                    on_collect_end=on_collect_end,
+                    on_dispatch_drained=on_dispatch_drained,
+                    on_dispatch_active=on_dispatch_active,
+                    **_stream_kwargs,
+                )
             )
             stream_meta = report
         else:
             report = run_rollout_queue(
-                bun,
-                args.out,
-                traj_dir,
-                pairs,
-                args,
-                dist_cfg,
-                iter_id,
-                # 本机直跑槽位（2026-09-06 引入 / 2026-09-09 统一语义）：
-                # 0 = 关闭本机直跑（全交给远端），负数/None = auto 退回 workers 封顶。
-                # 旧写法 `args.local_slots or None` 把 0 也吞成 None（关不掉）。
-                local_slots_max=local_slots_max_of(args),
-                course_fp=course_fp,
-                corpus_fp=corpus_fp,
-                # ★ 2026-10-21（用户口径「铺满 + 满额即停」）：调用方可以
-                #   ① `on_result` 每结算一局就更新逐关账本；② 满额后 `halt_event`
-                #   置位 ⇒ worker 立即停止取新任务，池里没派出去的候选从不运行。
-                #   `run_rollout`（无节点/纯本机）没有这两个口 ⇒ 只在队列路径传。
-                halt_event=halt_event,
-                on_result=on_result,
-                # 候选池语义：`halt` = 逐关满额 ⇒ 没派的候选不算缺口（外部熔断不带这个标记）
-                pool_halt=pool_halt,
-                on_shard=on_shard,
+                DispatchSpec(
+                    bun=bun,
+                    rl_path=args.out,
+                    traj_dir=traj_dir,
+                    pairs=pairs,
+                    args=args,
+                    cfg=dist_cfg,
+                    iter_id=iter_id,
+                    # 本机直跑槽位（2026-09-06 引入 / 2026-09-09 统一语义）：
+                    # 0 = 关闭本机直跑（全交给远端），负数/None = auto 退回 workers 封顶。
+                    # 旧写法 `args.local_slots or None` 把 0 也吞成 None（关不掉）。
+                    local_slots_max=local_slots_max_of(args),
+                    course_fp=course_fp,
+                    corpus_fp=corpus_fp,
+                    # ★ 2026-10-21（用户口径「铺满 + 满额即停」）：调用方可以
+                    #   ① `on_result` 每结算一局就更新逐关账本；② 满额后 `halt_event`
+                    #   置位 ⇒ worker 立即停止取新任务，池里没派出去的候选从不运行。
+                    #   `run_rollout`（无节点/纯本机）没有这两个口 ⇒ 只在队列路径传。
+                    halt_event=halt_event,
+                    on_result=on_result,
+                    # 候选池语义：`halt` = 逐关满额 ⇒ 没派的候选不算缺口（外部熔断不带这个标记）
+                    pool_halt=pool_halt,
+                    on_shard=on_shard,
+                )
             )
             # 串行：rollout 返回即 collector 收官。per-tick A-eval 不在此派发——
             # P0 修复：此处派发读到的活指针还是 W(it-1)（本轮 PPO 未跑）却标 itN。

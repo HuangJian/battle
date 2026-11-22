@@ -35,6 +35,7 @@ import remote.job_round as JR
 import remote.worker as W
 from common.protocol import RetryableError
 from remote.result_upload import ResultUploader, UploadTask
+from remote.worker import WorkerLoopSpec
 
 JID1 = "a1" * 8
 JID2 = "b2" * 8
@@ -250,8 +251,8 @@ def test_worker_loop_starts_the_next_job_before_the_upload_ends(
             _stamp(f"up_end:{jid}")
             return 200
 
-        def _run_job(base, token, job, **k):
-            jid = job["job_id"]
+        def _run_job(spec):
+            jid = spec.job["job_id"]
             if jid == JID2:
                 _stamp("run2")
                 second_started.set()
@@ -280,14 +281,16 @@ def test_worker_loop_starts_the_next_job_before_the_upload_ends(
         t = threading.Thread(target=_releaser, daemon=True)
         t.start()
         W.worker_loop(
-            "http://hub",
-            "tok",
-            work_dir=tmp_path,
-            poll_sec=0.0,
-            max_idle_sec=0.2,
-            prefetch_depth=0,  # 预取线程与本用例无关（省一条线程）
-            result_upload=mode,
-            log=lambda _m: None,
+            WorkerLoopSpec(
+                base_url="http://hub",
+                token="tok",
+                work_dir=tmp_path,
+                poll_sec=0.0,
+                max_idle_sec=0.2,
+                prefetch_depth=0,  # 预取线程与本用例无关（省一条线程）
+                result_upload=mode,
+                log=lambda _m: None,
+            )
         )
         t.join(timeout=5.0)
         gates[mode] = dict(releaser)
@@ -322,19 +325,23 @@ def test_worker_loop_marks_out_as_overlapped_in_the_phases_line(
         return 200
 
     monkeypatch.setattr(W, "post_result", _upload, raising=True)
-    monkeypatch.setattr(W, "run_job", lambda b, t, job, **k: {"job_id": job["job_id"]}, raising=True)
+    monkeypatch.setattr(
+        W, "run_job", lambda spec: {"job_id": spec.job["job_id"]}, raising=True
+    )
     _patch_hub(monkeypatch, [_job(JID1)])
 
     W._WIRE.clear()
     n = W.worker_loop(
-        "http://hub",
-        "tok",
-        work_dir=tmp_path,
-        poll_sec=0.0,
-        prefetch_depth=0,
-        result_upload="async",
-        once=True,
-        log=logs.append,
+        WorkerLoopSpec(
+            base_url="http://hub",
+            token="tok",
+            work_dir=tmp_path,
+            poll_sec=0.0,
+            prefetch_depth=0,
+            result_upload="async",
+            once=True,
+            log=logs.append,
+        )
     )
     assert n == 1
     phases = [m for m in logs if " phases " in m]
@@ -355,7 +362,9 @@ def test_once_waits_for_the_result_and_nonzero_exit_on_failure(
     async 下「成败」在提交那一刻还不知道 —— 必须先 drain 再判，否则失败会被
     静默当成成功（退出码 0），而 smoke 只判 returncode。
     """
-    monkeypatch.setattr(W, "run_job", lambda b, t, job, **k: {"job_id": job["job_id"]}, raising=True)
+    monkeypatch.setattr(
+        W, "run_job", lambda spec: {"job_id": spec.job["job_id"]}, raising=True
+    )
 
     posted: list[str] = []
 
@@ -367,14 +376,16 @@ def test_once_waits_for_the_result_and_nonzero_exit_on_failure(
     _patch_hub(monkeypatch, [_job(JID1)])
     ok_logs: list[str] = []
     n = W.worker_loop(
-        "http://hub",
-        "tok",
-        work_dir=tmp_path,
-        poll_sec=0.0,
-        once=True,
-        prefetch_depth=0,
-        result_upload="async",
-        log=ok_logs.append,
+        WorkerLoopSpec(
+            base_url="http://hub",
+            token="tok",
+            work_dir=tmp_path,
+            poll_sec=0.0,
+            once=True,
+            prefetch_depth=0,
+            result_upload="async",
+            log=ok_logs.append,
+        )
     )
     assert n == 1 and posted == [JID1], f"回传必须已经送出去（drain）：n={n} {ok_logs}"
 
@@ -385,14 +396,16 @@ def test_once_waits_for_the_result_and_nonzero_exit_on_failure(
     _patch_hub(monkeypatch, [_job(JID1)])  # 第二跑要自己的那一份（上面 seq 已耗尽）
     bad_logs: list[str] = []
     n2 = W.worker_loop(
-        "http://hub",
-        "tok",
-        work_dir=tmp_path,
-        poll_sec=0.0,
-        once=True,
-        prefetch_depth=0,
-        result_upload="async",
-        log=bad_logs.append,
+        WorkerLoopSpec(
+            base_url="http://hub",
+            token="tok",
+            work_dir=tmp_path,
+            poll_sec=0.0,
+            once=True,
+            prefetch_depth=0,
+            result_upload="async",
+            log=bad_logs.append,
+        )
     )
     assert n2 == -1, f"回传失败必须非零退出（H8）：{bad_logs}"
     assert any(JID1 in m and "回传失败" in m for m in bad_logs)
@@ -423,14 +436,16 @@ def test_cancelled_job_never_uploads_and_still_gets_its_wire_line(
     monkeypatch.setattr(W, "post_result", _post, raising=True)
     logs: list[str] = []
     W.worker_loop(
-        "http://hub",
-        "tok",
-        work_dir=tmp_path,
-        poll_sec=0.0,
-        once=True,
-        prefetch_depth=0,
-        result_upload="async",
-        log=logs.append,
+        WorkerLoopSpec(
+            base_url="http://hub",
+            token="tok",
+            work_dir=tmp_path,
+            poll_sec=0.0,
+            once=True,
+            prefetch_depth=0,
+            result_upload="async",
+            log=logs.append,
+        )
     )
     assert posted == [], "取消的 job 零回传"
     assert len([m for m in logs if " phases " in m]) == 1, f"取消路径也必须有一行阶段账：{logs}"

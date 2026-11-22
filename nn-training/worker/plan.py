@@ -25,7 +25,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -326,31 +327,60 @@ def template_argv(
 # ------------------------------------------------------------------ 计划组装 / 校验
 
 
-def build_plan(
-    args: Any,
-    *,
-    it: int,
-    iters_total: int,
-    rotate_seed: int,
-    max_iters: int = 0,
-    workers: int = 0,
-    game_timeout_sec: float = 0.0,
-    budget_sec: float = 0.0,
-    node_label: str = RUN_NODE_LABEL,
-    template_wver: str = "",
-    volume: dict | None = None,
-    #: 开区间段的**段长**（命令行 `--run-max-iters`）。只对「课程无限」（`iters_total<=0`）
-    #: 是缺省值来源：给了就用它，没给用 `RUN_SEGMENT_DEFAULT_ITERS`。有限课程上它**只能
-    #: 把段缩短**（`min`），永远不会让任何计划被拒——2026-11-22 用户口径：一切以课程定义
-    #: 为准，程序不设上界（原「只能降不能抬」的硬上界语义已删，见 `manifest.py` 同常量注释）。
-    max_segment_iters: int = 0,
+#: `PlanSpec.log` 的缺省出口（工具面 / 冒烟不传）—— 与旧形参的 `lambda msg: None` 同义。
+def _noop_log(_msg: str) -> None:
+    return None
+
+
+@dataclass(frozen=True, kw_only=True)
+class PlanSpec:
+    """`build_plan` 的全部输入（计划 = 「hub 本来会逐轮做的决定」一次性写下，见本模块头）。
+
+    ## 为什么收参数对象（P0-3）
+
+    原来是 1 个位置位（`args`）+ 13 个关键字。失效面全在那些关键字上：
+
+      * `it` / `iters_total` 错一轮 = 节点少跑或多跑一段（发出去的 argv 模板也差一轮）；
+      * `max_iters` / `max_segment_iters` 落丢 = 计划覆盖整段课程而不是本 job 的段；
+        后者丢回 0 = 「不缩短、不限长」（课程无限时退回缺省段长，见下一条注释）；
+      * `volume` / `rotation` 落丢 = 静默退成「固定局数」的老口径（云端采样量与本地
+        集群不一致，而计划自检仍然全绿——它比的是同一份计划）；
+      * `template_wver` / `node_label` 落丢 = 模板 argv 指向错的权重版本名 / 错节点标签。
+
+    `log` 的缺省仍是 no-op（工具面不传），但它是**最后一个**参数，因此不会被「少传一个」
+    之后错位到——这正是 kw_only 要保证的。
+
+    `args` 保持 `Any`：它是 argparse 的 `Namespace` / 测试里现造的 `SimpleNamespace`，
+    本模块只用 `pair_args` / `check_plan_against_args` / `build_rollout_cmd` 的既有口径。
+    """
+
+    args: Any
+    #: 计划区间左端点 = **本 job 要跑的上一轮**（语义见 `build_plan` docstring）。
+    it: int
+    iters_total: int
+    rotate_seed: int
+    max_iters: int = 0
+    workers: int = 0
+    game_timeout_sec: float = 0.0
+    budget_sec: float = 0.0
+    node_label: str = RUN_NODE_LABEL
+    template_wver: str = ""
+    volume: dict | None = None
+    #: 开区间段的**段长**（命令行 `--run-max-iters`，D1 补上的那个旋钮）。只对「课程无限」
+    #: （`iters_total<=0`）是缺省值来源：给了就用它，没给用 `RUN_SEGMENT_DEFAULT_ITERS`。
+    #: 有限课程上它**只能把段缩短**（`min`），永远不会让任何计划被拒——2026-11-22 用户口径：
+    #: 一切以课程定义为准，程序不设上界（原「只能降不能抬」的硬上界语义已删，见
+    #: `manifest.py` 同常量注释）。
+    max_segment_iters: int = 0
     #: ★ 轮换配方（2026-10-28，plan/it-stage-ratation §9.5）：`stage_rotation.recipe_from_args`
     #: 的产出（`mode`/`per_it`/`pinned`）或 None。带上它 ⇒ 计划覆盖的**每一轮**都由
     #: `pairs_for` 按当轮窗口重解（`volume` 块不再是一份块配多个窗口）；None ⇒ 老行为。
-    rotation: dict | None = None,
-    log=lambda msg: None,
-) -> dict:
-    """组装计划（hub 侧）。`it` = 计划区间左端点 = **本 job 要跑的上一轮**
+    rotation: dict | None = None
+    log: Callable[[str], None] = _noop_log
+
+
+def build_plan(spec: PlanSpec) -> dict:
+    """组装计划（hub 侧），入参全在 `PlanSpec`。`it` = 计划区间左端点 = **本 job 要跑的上一轮**
     （它的权重就是 payload 里的 init_weights；job 自己那一轮是 `it+1`，见下面的
     `tmpl_it` 与 `planned_iters`）。
 
@@ -388,6 +418,20 @@ def build_plan(
     ② `retarget_argv` 对模板本身必须是恒等（模板就是目标轮的 argv——重定向逻辑的回归在
     **发出去之前**就被抓住）。
     """
+    args = spec.args
+    it = spec.it
+    iters_total = spec.iters_total
+    rotate_seed = spec.rotate_seed
+    max_iters = spec.max_iters
+    workers = spec.workers
+    game_timeout_sec = spec.game_timeout_sec
+    budget_sec = spec.budget_sec
+    node_label = spec.node_label
+    template_wver = spec.template_wver
+    volume = spec.volume
+    max_segment_iters = spec.max_segment_iters
+    rotation = spec.rotation
+    log = spec.log
     it = int(it)
     iters_total = int(iters_total)
     span = int(max_iters or 0)

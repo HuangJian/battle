@@ -62,10 +62,12 @@ from tests.helpers.http_server import serve_fast
 from tests.subproc_util import run_utf8
 from trainer import run_rl
 from trainer.dispatch_queue import run_rollout_queue  # 真家（旧经 trainer.run_rl 再导出）
+from trainer.dispatch_state import DispatchSpec
 from trainer.eval_dispatch import EvalDispatchSpec
-from trainer.stream import (
-    run_rollout_stream as _run_rollout_stream,  # B7：run_rl 模块级不再 re-export
-)
+
+# B7：run_rl 模块级不再 re-export `run_rollout_stream`
+from trainer.stream import StreamRunSpec
+from trainer.stream import run_rollout_stream as _run_rollout_stream
 from worker.resume import (
     ResumedSpec,
     completed_pairs,
@@ -573,16 +575,18 @@ def test_it_queue_normal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
         traj.mkdir()
         drained_ts, result_ts = [], []
         rep = run_rollout_queue(
-            bun,
-            str(WEIGHTS),
-            traj,
-            [(0, 111), (3, 222)],
-            args,
-            cfg,
-            "i1.1",
-            local_slots_max=0,
-            on_result=lambda _s: result_ts.append(time.time()),
-            on_queue_drained=lambda: drained_ts.append(time.time()),
+            DispatchSpec(
+                bun=bun,
+                rl_path=str(WEIGHTS),
+                traj_dir=traj,
+                pairs=[(0, 111), (3, 222)],
+                args=args,
+                cfg=cfg,
+                iter_id="i1.1",
+                local_slots_max=0,
+                on_result=lambda _s: result_ts.append(time.time()),
+                on_queue_drained=lambda: drained_ts.append(time.time()),
+            )
         )
         wts = [t for kind, t, _x in srv.events if kind == "weights"]
         disp_pairs = {p for kind, _t, p in srv.events if kind == "dispatch"}
@@ -616,16 +620,18 @@ def test_it_halt_preset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         ev.set()
         calls = []
         rep2 = run_rollout_queue(
-            bun,
-            str(WEIGHTS),
-            traj,
-            [(0, 111), (3, 222)],
-            args,
-            cfg,
-            "i2.2",
-            local_slots_max=0,
-            halt_event=ev,
-            on_queue_drained=lambda: calls.append(1),
+            DispatchSpec(
+                bun=bun,
+                rl_path=str(WEIGHTS),
+                traj_dir=traj,
+                pairs=[(0, 111), (3, 222)],
+                args=args,
+                cfg=cfg,
+                iter_id="i2.2",
+                local_slots_max=0,
+                halt_event=ev,
+                on_queue_drained=lambda: calls.append(1),
+            )
         )
         assert rep2.get("halt_aborted") is True, "I2 halt_aborted flagged"
         assert len(rep2["missing"]) == 2 and rep2["games"] == 0, "I2 nothing dispatched/settled"
@@ -688,18 +694,20 @@ def test_it_stream_local_loser_retire(tmp_path: Path, monkeypatch: pytest.Monkey
 
         try:
             rep3b = _run_rollout_stream(
-                bun,
-                str(WEIGHTS),
-                traj,
-                [(0, 111), (0, 222), (1, 333), (1, 444)],
-                types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
-                cfg3b,
-                "i3b.3",
-                None,
-                None,
-                "cpu",
-                on_collect_done=_on_collect_done,
-                backend=stub3b,
+                StreamRunSpec(
+                    bun=bun,
+                    rl_path=str(WEIGHTS),
+                    traj_dir=traj,
+                    pairs=[(0, 111), (0, 222), (1, 333), (1, 444)],
+                    args=types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
+                    cfg=cfg3b,
+                    iter_id="i3b.3",
+                    model=None,
+                    opt=None,
+                    device="cpu",
+                    on_collect_done=_on_collect_done,
+                    backend=stub3b,
+                )
             )
         except BaseException as e:  # 回归证据：任何异常（含 BaseException）都要留成断言失败
             rep3b = None
@@ -741,18 +749,20 @@ def test_it_stream_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
             return th
 
         rep3 = _run_rollout_stream(
-            bun,
-            str(WEIGHTS),
-            traj,
-            [(0, 111), (0, 222), (1, 333), (1, 444)],
-            types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
-            cfg3,
-            "i3.3",
-            None,
-            None,
-            "cpu",
-            on_collect_done=on_collect_done,
-            backend=stub3,
+            StreamRunSpec(
+                bun=bun,
+                rl_path=str(WEIGHTS),
+                traj_dir=traj,
+                pairs=[(0, 111), (0, 222), (1, 333), (1, 444)],
+                args=types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
+                cfg=cfg3,
+                iter_id="i3.3",
+                model=None,
+                opt=None,
+                device="cpu",
+                on_collect_done=on_collect_done,
+                backend=stub3,
+            )
         )
         sm = rep3.pop("_stream")
         assert rep3["games"] == 4 and sm["waves"] >= 1, "I3 streamed round trained"
@@ -788,18 +798,20 @@ def test_it_stream_halt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         cfg4["policy"]["streamWaveGames"] = 2
         cfg4["policy"]["streamKlCap"] = 1e-6
         rep4 = _run_rollout_stream(
-            bun,
-            str(WEIGHTS),
-            traj,
-            [(0, 111), (0, 222), (1, 333), (1, 444)],
-            types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
-            cfg4,
-            "i4.4",
-            None,
-            None,
-            "cpu",
-            on_collect_done=None,
-            backend=stub4,
+            StreamRunSpec(
+                bun=bun,
+                rl_path=str(WEIGHTS),
+                traj_dir=traj,
+                pairs=[(0, 111), (0, 222), (1, 333), (1, 444)],
+                args=types.SimpleNamespace(**{**vars(args), "epochs": 1, "mb": 64}),
+                cfg=cfg4,
+                iter_id="i4.4",
+                model=None,
+                opt=None,
+                device="cpu",
+                on_collect_done=None,
+                backend=stub4,
+            )
         )
         sm4 = rep4.pop("_stream")
         assert sm4["halted"] is True, f"I4 halted (cum_kl={sm4['kl_cum']:.1f})"
@@ -817,15 +829,17 @@ def test_it_local_suspend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         susp = threading.Event()
         susp.set()
         rep5a = run_rollout_queue(
-            bun,
-            str(WEIGHTS),
-            traj,
-            pairs5,
-            args,
-            cfg,
-            "i5.51",
-            local_slots_max=2,
-            local_suspend=susp,
+            DispatchSpec(
+                bun=bun,
+                rl_path=str(WEIGHTS),
+                traj_dir=traj,
+                pairs=pairs5,
+                args=args,
+                cfg=cfg,
+                iter_id="i5.51",
+                local_slots_max=2,
+                local_suspend=susp,
+            )
         )
         assert rep5a["games"] == 2 and "local" not in rep5a["dist"]["nodes"], f"I5 suspended -> zero local settlements (byNode={rep5a['dist']['nodes']})"
         traj = tmp_path / "i5b"
@@ -840,14 +854,16 @@ def test_it_local_suspend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         # 竞速道照旧被触发（dup 仍会派发，只是不再与断言赛跑）。
         srv.dup_hang = 0.5
         rep5b = run_rollout_queue(
-            bun,
-            str(WEIGHTS),
-            traj,
-            pairs5,
-            args,
-            cfg,
-            "i5.52",
-            local_slots_max=2,
+            DispatchSpec(
+                bun=bun,
+                rl_path=str(WEIGHTS),
+                traj_dir=traj,
+                pairs=pairs5,
+                args=args,
+                cfg=cfg,
+                iter_id="i5.52",
+                local_slots_max=2,
+            )
         )
         assert rep5b["games"] == 2 and rep5b["dist"]["nodes"] == {"local": 2}, f"I5b no-suspend -> local owns head tasks ({rep5b['dist']['nodes']})"
     finally:
@@ -881,14 +897,16 @@ def test_it_longtail_race(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
             }
         )
         rep6 = run_rollout_queue(
-            bun,
-            str(WEIGHTS),
-            traj,
-            [(0, 111), (3, 222)],
-            args,
-            cfg,
-            "i6.6",
-            local_slots_max=0,
+            DispatchSpec(
+                bun=bun,
+                rl_path=str(WEIGHTS),
+                traj_dir=traj,
+                pairs=[(0, 111), (3, 222)],
+                args=args,
+                cfg=cfg,
+                iter_id="i6.6",
+                local_slots_max=0,
+            )
         )
         took6 = time.time() - t0
         n_slow_disp = sum(1 for kind, _t, p in srv.events if kind == "dispatch" and p == (0, 111))
@@ -934,14 +952,16 @@ def test_it_eval_deferred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
             raise AssertionError("I7 eval round never dispatched a game")
         t_collect = time.time()
         rep7 = run_rollout_queue(
-            bun,
-            str(WEIGHTS),
-            traj,
-            [(0, 111), (3, 222)],
-            args,
-            cfg,
-            "i7.9",
-            local_slots_max=0,
+            DispatchSpec(
+                bun=bun,
+                rl_path=str(WEIGHTS),
+                traj_dir=traj,
+                pairs=[(0, 111), (3, 222)],
+                args=args,
+                cfg=cfg,
+                iter_id="i7.9",
+                local_slots_max=0,
+            )
         )
         t_collect = round(time.time() - t_collect, 1)
         assert rep7["games"] == 2 and rep7["missing"] == [], f"I7 collection completes while slow eval in flight ({t_collect}s)"
@@ -1146,8 +1166,10 @@ def test_it_mixed_cluster_rollout_only_freezes_own_course_eval(
 
         # —— 真混跑：A 的 rollout 在 B 的 3 局 eval 仍在飞时跑完整轮 ——
         rep = run_rollout_queue(
-            bun, str(w_a), traj_a, [(0, 111), (3, 222)], args_a, cfg, "mix.7",
-            local_slots_max=0,
+            DispatchSpec(
+                bun=bun, rl_path=str(w_a), traj_dir=traj_a, pairs=[(0, 111), (3, 222)], args=args_a, cfg=cfg, iter_id="mix.7",
+                local_slots_max=0,
+            )
         )
         assert rep["games"] == 2 and rep["missing"] == [], "混跑：A 课 rollout 2 局全结算"
         assert th_b.is_alive(), "混跑：B 课 eval 在 rollout 收尾时仍在飞（同节点并行）"
@@ -1245,8 +1267,10 @@ def test_it_mixed_cluster_rollout_pauses_new_eval_grants_but_keeps_inflight(
 
         # —— 混跑：在飞局仍被按着，rollout 跑完整轮 ——
         rep = run_rollout_queue(
-            bun, str(w_a), traj_a, [(0, 111), (3, 222)], args_a, cfg, "mix2.7",
-            local_slots_max=0,
+            DispatchSpec(
+                bun=bun, rl_path=str(w_a), traj_dir=traj_a, pairs=[(0, 111), (3, 222)], args=args_a, cfg=cfg, iter_id="mix2.7",
+                local_slots_max=0,
+            )
         )
         assert rep["games"] == 2 and rep["missing"] == [], "混跑：rollout 2 局全结算"
         assert th.is_alive(), "eval 轮活着等解冻（pending 2 局）"
@@ -1299,18 +1323,20 @@ def test_it_precollect_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         cfg8["policy"]["streamWaveGames"] = 1
         stub8 = _StubPpo(kl=1e-12)
         rep8 = _run_rollout_stream(
-            bun,
-            str(WEIGHTS),
-            traj,
-            plan8,
-            args8,
-            cfg8,
-            "i8.8",
-            None,
-            None,
-            None,
-            backend=stub8,
-            extra_wver="e" * 64,
+            StreamRunSpec(
+                bun=bun,
+                rl_path=str(WEIGHTS),
+                traj_dir=traj,
+                pairs=plan8,
+                args=args8,
+                cfg=cfg8,
+                iter_id="i8.8",
+                model=None,
+                opt=None,
+                device="cpu",
+                backend=stub8,
+                extra_wver="e" * 64,
+            )
         )
         disp8 = [p for kind, _t, p in srv.events if kind == "dispatch"]
         assert stub8.updates >= 2, f"I8 precollected shard trained as first wave + rest collected (updates={stub8.updates})"
@@ -1390,7 +1416,9 @@ def test_it_early_race_v314(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
         srv._slowed_once = set()
         t0 = time.time()
         rep9 = run_rollout_queue(
-            bun, str(WEIGHTS), traj, plan9, args, cfg, "i9.9", local_slots_max=0
+            DispatchSpec(
+                bun=bun, rl_path=str(WEIGHTS), traj_dir=traj, pairs=plan9, args=args, cfg=cfg, iter_id="i9.9", local_slots_max=0
+            )
         )
         took9 = time.time() - t0
         assert rep9["games"] == 8 and rep9["missing"] == [], "I9 all 8 settled"
@@ -1442,14 +1470,16 @@ def test_it_tail_join_grace_v317(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         srv.dispatched = set()
         t0 = time.time()
         rep10 = run_rollout_queue(
-            bun,
-            str(WEIGHTS),
-            traj,
-            [(0, 111), (0, 222), (0, 333)],
-            args,
-            cfg,
-            "i10.10",
-            local_slots_max=0,
+            DispatchSpec(
+                bun=bun,
+                rl_path=str(WEIGHTS),
+                traj_dir=traj,
+                pairs=[(0, 111), (0, 222), (0, 333)],
+                args=args,
+                cfg=cfg,
+                iter_id="i10.10",
+                local_slots_max=0,
+            )
         )
         took10 = time.time() - t0
         assert rep10["games"] == 3 and rep10["missing"] == [], "I10 all 3 settled"

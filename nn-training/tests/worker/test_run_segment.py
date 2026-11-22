@@ -41,7 +41,7 @@ from trainer.loop_steps import (
 )
 from worker.cli import build_argparser
 from worker.iter_job import build_iter_spec
-from worker.plan import build_plan, dump_plan, planned_iters
+from worker.plan import PlanSpec, build_plan, dump_plan, planned_iters
 
 
 def _args(**over: object) -> SimpleNamespace:
@@ -189,11 +189,11 @@ def test_cli_default_rollout_src_never_shadows_the_course_level_key() -> None:
 
 def test_segment_plan_range_matches_declared_length() -> None:
     """`max_iters` 与 `planned_iters`/`end_it` 的对应（导出包的计划区间靠它）。"""
-    plan = build_plan(_args(), it=3, iters_total=20, rotate_seed=7, max_iters=4, log=lambda _m: None)
+    plan = build_plan(PlanSpec(args=_args(), it=3, iters_total=20, rotate_seed=7, max_iters=4, log=lambda _m: None))
     assert plan["end_it"] == 7
     assert planned_iters(plan) == [4, 5, 6, 7]
     # n<0（跑到课程末尾）：max_iters=0 → end_it = iters_total
-    whole = build_plan(_args(), it=3, iters_total=9, rotate_seed=7, log=lambda _m: None)
+    whole = build_plan(PlanSpec(args=_args(), it=3, iters_total=9, rotate_seed=7, log=lambda _m: None))
     assert whole["end_it"] == 9
 
 
@@ -220,7 +220,7 @@ def _publish(tmp_path: Path, *, n: int = 3, it: int = 1, **over: object) -> tupl
     """
     tmp_path.mkdir(parents=True, exist_ok=True)  # 子目录（拒发用例用 tmp_path/"a" 之类）
     args = _args()
-    plan = build_plan(args, it=it, iters_total=it + n, rotate_seed=99, max_iters=n - 1, log=lambda _m: None)
+    plan = build_plan(PlanSpec(args=args, it=it, iters_total=it + n, rotate_seed=99, max_iters=n - 1, log=lambda _m: None))
     plan_bytes = dump_plan(plan)
     w = tmp_path / "init_weights.json"
     w.write_text('{"format":"nn-weights-json","params":{}}', encoding="utf-8")

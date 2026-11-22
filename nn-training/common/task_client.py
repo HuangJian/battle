@@ -36,7 +36,7 @@ from common.distribution import (
     request_tag,
     set_request_tag,
 )
-from common.task_key import task_key
+from common.task_key import TaskKeySpec, task_key
 
 #: 「取包丢失」标记：节点重启 / 权重切换清场后结果缓存为空，轮询 /v1/result 答 404。
 #: **单一来源**——本常量在此定义，_poll_result 用它拼消息、is_task_lost_error 用它判据，
@@ -285,24 +285,28 @@ def _task_params(spec: FetchTaskSpec) -> dict:
     if spec.near_miss_times is not None:
         params["nearMissTimes"] = spec.near_miss_times
     if spec.on_key is not None:
+        # 参数按**名字**进 `TaskKeySpec`（参照 `params` 的 camelCase 键）：9 个开关曾经是
+        # 相邻同型的字符串位置位 —— 错一格不报错，只是键少一段（取消帧打不中这一局）。
         spec.on_key(
             task_key(
-                spec.iter_id,
-                str(params.get("mode", "rollout")),
-                str(params.get("kind", "rollout")),
-                spec.stage,
-                spec.seed,
-                str(params.get("stageJsonHash", "")),
-                str(params.get("courseFp", "")),
-                str(params.get("decisionEvents", "")),
-                str(params.get("decisionK", "")),
-                str(params.get("labelMode", "")),
-                str(params.get("skipSteelOnlyShots", "")),
-                str(params.get("breakBricksOnPath", "")),
-                str(params.get("suppressUselessFire", "")),
-                str(params.get("suppressLeadMissFire", "")),
-                str(params.get("openingConnect", "")),
-                str(params.get("corpusFmt", "")),
+                TaskKeySpec(
+                    iter_id=spec.iter_id,
+                    mode=str(params.get("mode", "rollout")),
+                    kind=str(params.get("kind", "rollout")),
+                    stage=spec.stage,
+                    seed=spec.seed,
+                    stage_json_hash=str(params.get("stageJsonHash", "")),
+                    course_fp=str(params.get("courseFp", "")),
+                    decision_events=str(params.get("decisionEvents", "")),
+                    decision_k=str(params.get("decisionK", "")),
+                    label_mode=str(params.get("labelMode", "")),
+                    skip_steel_only_shots=str(params.get("skipSteelOnlyShots", "")),
+                    break_bricks_on_path=str(params.get("breakBricksOnPath", "")),
+                    suppress_useless_fire=str(params.get("suppressUselessFire", "")),
+                    suppress_lead_miss_fire=str(params.get("suppressLeadMissFire", "")),
+                    opening_connect=str(params.get("openingConnect", "")),
+                    corpus_fmt=str(params.get("corpusFmt", "")),
+                )
             )
         )
     return params

@@ -21,7 +21,7 @@ CE, value-anchor pull, policy/value new-column rms, Adam + global-norm clip.
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import paddle
@@ -32,6 +32,7 @@ from worker.ppo.checkpoint_paddle import load_ckpt, save_ckpt
 from worker.ppo.demo import DemoBank
 from worker.ppo.rng import PPORng
 from worker.ppo.trainer import aggregate_stats, cat_entropy, cat_entropy_per, chunk_count
+from worker.ppo.update_spec import PaddleUpdateSpec
 from worker.ppo.vram import paddle_free_bytes, require_corpus
 
 CLIP_EPS = 0.2
@@ -289,32 +290,7 @@ def _paddle_backend() -> Backend:
     )
 
 
-def ppo_update(
-    model,
-    opt,
-    chunks,
-    epochs,
-    device=None,
-    ckpt_path: str | None = None,
-    on_epoch_done=None,
-    kl_coef: float = 0.0,
-    ref_model=None,
-    kickstart_kl: float = 0.0,
-    ent_coef: float | None = None,
-    demo_bank: DemoBank | None = None,
-    demo_bc_coef: float = 0.0,
-    demo_per_mb: int = 0,
-    progress: Any = None,
-    progress_head: str = "[ppo] PPO",
-    value_anchor: float = 0.0,
-    #: 引擎内部步数的**唯一出口**（`{"steps_done": int}`）：调用方不许拿
-    #: `epochs × len(chunks)` 自己重算 —— 引擎一旦跳 chunk / 从 ckpt 中途起步，重算就会静默
-    #: 漂移，而那个数要写进 `state.json` 与回传的 opt `step`（bias correction 的时基）。
-    steps_out: dict[str, int] | None = None,
-    rng: PPORng | None = None,
-    lazy: bool = False,
-    log=lambda _msg: None,
-):
+def ppo_update(spec: PaddleUpdateSpec):
     """Paddle PPO update. Same math as `worker.ppo.engine.ppo_update`; see module doc.
 
     `ckpt_path` 语义与 torch 侧一致：开跑前载入（model/opt/epochs_done/三条随机流的
@@ -326,12 +302,22 @@ def ppo_update(
     chunk 首次使用时现算（ref 冻结 ⇒ 与 eager 预计算逐位相同）。缺省 False =
     旧路径逐字节不变。
     """
+    # spec 的 model/chunks 是**不透明句柄**（同一个字段在 torch 侧是 `nn.Module`），这里按
+    # 本后端的真实类型收窄 —— 唯一的类型断言点，不再让 `object` 飘到 300 行之后。
+    model = cast("paddle.nn.Layer", spec.model)
+    chunks = cast("list[dict]", spec.chunks)
+    opt, epochs = spec.opt, spec.epochs
+    device, ckpt_path, on_epoch_done = spec.device, spec.ckpt_path, spec.on_epoch_done
+    kl_coef, ref_model, kickstart_kl = spec.kl_coef, spec.ref_model, spec.kickstart_kl
+    ent_coef, value_anchor = spec.ent_coef, spec.value_anchor
+    demo_bank, demo_bc_coef, demo_per_mb = spec.demo_bank, spec.demo_bc_coef, spec.demo_per_mb
+    progress, progress_head = spec.progress, spec.progress_head
+    steps_out, rng, lazy, log = spec.steps_out, spec.rng, spec.lazy, spec.log
     model.train()
     if device is not None:
         # Paddle 的设备是**进程级**状态（没有 torch.device 那种对象）：把调用方给的同一个值
-        # 再落一次（幂等；`remote/train_core` 的 Paddle 核开跑前也 set_device）。留着这个形参
-        # 是为了与 torch 侧 `ppo_update(model, opt, chunks, epochs, device, …)` 的调用面一致
-        # —— 不落地它就是一个**静默失效的承诺**（评审 2026-10-27 抓到的那一类）。
+        # 再落一次（幂等；`remote/train_core` 的 Paddle 核开跑前也 set_device）。这道落地
+        # 不能省 —— 省了它就是一个**静默失效的承诺**（评审 2026-10-27 抓到的那一类）。
         paddle.set_device(str(device))
     clip = CLIP_EPS
     ent_c = ENT_COEF if ent_coef is None else float(ent_coef)
@@ -436,7 +422,22 @@ def ppo_update(
     return agg
 
 
-update = ppo_update
+def update(model, opt, chunks, epochs, device, **update_kwargs):
+    """backend 端口（`worker/backend.py::update`）：关键字 → `PaddleUpdateSpec`。
+
+    端口的前 5 个位置参数由 `worker/backend.py` 定死，其余关键字按名进 spec；未知键在
+    构造 spec 时 `TypeError`（旧写法会静默落回缺省）。
+    """
+    spec = PaddleUpdateSpec(
+        model=model,
+        opt=opt,
+        chunks=chunks,
+        epochs=epochs,
+        device=device,
+        **update_kwargs,
+    )
+    return ppo_update(spec)
+
 
 __all__ = [
     "LR",

@@ -11,13 +11,16 @@
   ③ 12 行归一克隆窗口重新出现在目标文件的函数里 —— 唯一允许的例外是 `main`（两个 CLI
      的参数表与 help 文案：并成一张配置表不会更短、只会更难读，见附录 B 第 6 条的 DoD）。
 
-另加一条签名冻结：`ppo_update_goal` / `ppo_update_intent` 的形参表逐字不变 ——
-`trainer/stream.py` 与 `worker/backend.py::RolloutBackend` 都按位置/关键字叫它们。
+另加一条契约冻结：13 个训练输入的名字/缺省逐字不变 —— `trainer/stream.py` 与
+`worker/backend.py::RolloutBackend` 仍按这些名字调 `update(...)`。P0-3 第四十九刀之后它们
+不再摊在两个入口的签名上，而是 `HeadUpdateSpec` 的字段表（入口只收一个 `spec`）：
+入口原来各自手抄一遍这 13 个名字，漏抄一个不报错。
 """
 
 from __future__ import annotations
 
 import ast
+import dataclasses
 import inspect
 from pathlib import Path
 
@@ -26,11 +29,12 @@ import pytest
 import worker.ppo.goal as ppo_goal
 import worker.ppo.intent as ppo_intent
 from tests.helpers.clone_windows import function_windows
+from worker.ppo.loop import HeadUpdateSpec
 
 NN_DIR = Path(__file__).resolve().parents[2]
 PPO_DIR = NN_DIR / "worker" / "ppo"
 
-#: 两个入口的形参表（顺序敏感：stream.py 有一部分按位置传）。
+#: 一条训练腿的全部训练输入（`HeadUpdateSpec` 的字段表；名字敏感：stream.py 按这些名字传）。
 EXPECTED_PARAMS = [
     "model",
     "opt",
@@ -140,6 +144,32 @@ def test_no_clone_windows_outside_the_cli() -> None:
     [(ppo_goal, "ppo_update_goal"), (ppo_intent, "ppo_update_intent")],
 )
 def test_entry_signatures_are_frozen(mod, fn_name: str) -> None:
-    """stream.py / RolloutBackend 按这些名字调用 ⇒ 形参表只许加、不许改名/挪位。"""
-    params = list(inspect.signature(getattr(mod, fn_name)).parameters)
-    assert params == EXPECTED_PARAMS, f"{fn_name} 形参表变了：{params}"
+    """入口只收一份 spec；13 个输入名/缺省住在字段表里（见下面的字段表用例）。"""
+    # eval_str：两个入口都是 `from __future__ import annotations` ⇒ 注解默认是字符串。
+    params = inspect.signature(getattr(mod, fn_name), eval_str=True).parameters
+    assert list(params) == ["spec"], f"{fn_name} 不再是「只收一份 spec」：{list(params)}"
+    assert params["spec"].annotation is HeadUpdateSpec, f"{fn_name} 收的不是 HeadUpdateSpec"
+
+
+def test_head_update_spec_fields_are_frozen() -> None:
+    """13 个训练输入的字段表（顺序 + 缺省）—— stream / run_rl 按这些名字交付。"""
+    fields = dataclasses.fields(HeadUpdateSpec)
+    assert [f.name for f in fields] == EXPECTED_PARAMS, [f.name for f in fields]
+    defaulted = {f.name: f.default for f in fields if f.default is not dataclasses.MISSING}
+    assert list(defaulted) == EXPECTED_PARAMS[5:], (
+        f"带缺省的应恰是第 6 项起的旋钮，实际 {list(defaulted)}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("mod", "fn_name"),
+    [(ppo_goal, "ppo_update_goal"), (ppo_intent, "ppo_update_intent")],
+)
+def test_port_binds_stream_call_shape(mod, fn_name: str) -> None:
+    """`update` 端口必须接住 stream 的 5 位置 + 任意旋钮关键字（拼错在 spec 构造时炸）。"""
+    sig = inspect.signature(mod.update)
+    assert list(sig.parameters)[:5] == EXPECTED_PARAMS[:5], list(sig.parameters)
+    kinds = {p.kind for p in sig.parameters.values()}
+    assert inspect.Parameter.VAR_KEYWORD in kinds, "update 丢了 **update_kwargs（stream/kwargs 注入面）"
+    with pytest.raises(TypeError):
+        mod.update(None, None, [], 1, "cpu", no_such_knob=1)

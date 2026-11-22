@@ -41,7 +41,8 @@ class _FakeRunJob:
     def __init__(self) -> None:
         self.rounds: list[dict] = []
 
-    def __call__(self, _base, _token, job, *, on_ppo_start=None, **_kw):
+    def __call__(self, spec):
+        job, on_ppo_start = spec.job, spec.on_ppo_start
         m = job["manifest"]
         roll0 = time.monotonic()
         # sleep-ok: 夹具模拟 rollout 工作量（不是「等对方先跑」）

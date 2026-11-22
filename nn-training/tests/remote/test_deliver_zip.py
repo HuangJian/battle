@@ -450,6 +450,7 @@ def test_a_backup_drawer_is_importable_with_its_ledgers(tmp_path: Path) -> None:
     eval 全空，得靠人从 `/tmp` 抢救）。这里从「真補传器写出来的抽屉」出发跑到导入，
     钉住整条链：抽屉 → `import_from_run` → 课程账本（`iteration` 行 + eval 逐局行）。
     """
+    from remote.deliver_spec import OfflineDelivererSpec
     from remote.offline_deliver import OfflineDeliverer
     from worker.eval_rows import eval_row
 
@@ -463,15 +464,17 @@ def test_a_backup_drawer_is_importable_with_its_ledgers(tmp_path: Path) -> None:
     )
     drawer = tmp_path / "net" / "backup"
     d = OfflineDeliverer(
-        base_url="",  # 推不出去 ⇒ 两轮全 pending ⇒ 都进抽屉
-        token="",
-        run_id="seg-1",
-        artifacts_dir=src,
-        backup_root=drawer,
-        # 本用例验「抽屉里的两账本可导入」，与触发时机无关 ⇒ 关掉宽限（时机见
-        # e2e/test_deliver_backup_contract_e2e.py）。
-        backup_grace=0.0,
-        log=lambda _m: None,
+        OfflineDelivererSpec(
+            base_url="",  # 推不出去 ⇒ 两轮全 pending ⇒ 都进抽屉
+            token="",
+            run_id="seg-1",
+            artifacts_dir=src,
+            backup_root=drawer,
+            # 本用例验「抽屉里的两账本可导入」，与触发时机无关 ⇒ 关掉宽限（时机见
+            # e2e/test_deliver_backup_contract_e2e.py）。
+            backup_grace=0.0,
+            log=lambda _m: None,
+        )
     )
     assert d.backup_pending() == 2
     assert (drawer / "metrics.jsonl").is_file() and (drawer / "eval_log.jsonl").is_file()

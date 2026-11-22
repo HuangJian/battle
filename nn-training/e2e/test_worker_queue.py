@@ -28,6 +28,7 @@ if str(ROOT) not in sys.path:
 
 import remote.job_round as JR
 import remote.lifecycle as LC
+from remote.worker import WorkerLoopSpec
 from remote.worker_server import WORKER_QUEUE_MAX, WorkerServerState, make_worker_server
 from tests.helpers.http_server import serve_fast
 
@@ -238,7 +239,7 @@ def test_single_hub_unchanged_layout(tmp_path: Path) -> None:
         # 取活已换面（2026-09-22：`acquire_job` = peek+priority+claim）——本用例只关心
         # work 分区布局，故钉接线面而非取活实现。
         patch.object(W, "acquire_job", return_value=job),
-        patch.object(W, "run_job", side_effect=lambda *a, **k: seen.update(k) or {}) as _r,
+        patch.object(W, "run_job", side_effect=lambda spec: seen.update(vars(spec)) or {}) as _r,
         patch.object(W, "post_result", return_value=None),
         patch.object(JR, "peek_jobs", return_value=([], False)),
         patch.object(JR, "job_ready", return_value=None),
@@ -246,7 +247,9 @@ def test_single_hub_unchanged_layout(tmp_path: Path) -> None:
         patch.object(LC, "post_error", return_value=True),
     ):
         n = W.worker_loop(
-            "http://h0", "tok", work_dir=tmp_path, once=True, poll_sec=0.01, echo=True
+            WorkerLoopSpec(
+                base_url="http://h0", token="tok", work_dir=tmp_path, once=True, poll_sec=0.01, echo=True
+            )
         )
     assert n == 1
     assert seen["work_dir"] == tmp_path  # 无 hub0 子目录
@@ -268,7 +271,7 @@ def test_multi_hub_round_robin_and_partition(tmp_path: Path) -> None:
 
     with (
         patch.object(W, "acquire_job", side_effect=fake_poll),
-        patch.object(W, "run_job", side_effect=lambda *a, **k: seen.update(k) or {}),
+        patch.object(W, "run_job", side_effect=lambda spec: seen.update(vars(spec)) or {}),
         patch.object(W, "post_result", return_value=None),
         patch.object(JR, "peek_jobs", return_value=([], False)),
         patch.object(JR, "job_ready", return_value=None),
@@ -276,13 +279,15 @@ def test_multi_hub_round_robin_and_partition(tmp_path: Path) -> None:
         patch.object(LC, "post_error", return_value=True),
     ):
         n = W.worker_loop(
-            "http://h0",
-            "tok",
-            work_dir=tmp_path,
-            hub_urls=["http://h0", "http://h1"],
-            max_idle_sec=0.3,
-            poll_sec=0.01,
-            echo=True,
+            WorkerLoopSpec(
+                base_url="http://h0",
+                token="tok",
+                work_dir=tmp_path,
+                hub_urls=["http://h0", "http://h1"],
+                max_idle_sec=0.3,
+                poll_sec=0.01,
+                echo=True,
+            )
         )
     assert n == 1
     assert polls[0] == "http://h0" and polls[1] == "http://h1"  # round-robin
