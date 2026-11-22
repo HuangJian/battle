@@ -25,6 +25,25 @@
 
 ---
 
+## §289 P0-3 第三十六刀：`settle_eval_summary` 收 `EvalSettleSpec`（59 → 58）（2026-11-22）
+
+* `worker/eval_track.py`：21 参 → frozen + kw_only `EvalSettleSpec`（13 个身份位 +
+  8 个可缺省读数：`course_fp` / `left_pending` / `left_pairs` / `close_reason` /
+  `eval_bundle` / `tail_race_grants` / `dup_games` / `frozen_sec`）；入口只收 `spec`，
+  展开后函数体逐字不动。本文件宽签名 1 → **0**，全仓 59 → **58**、48 → **47** 文件。
+* 收益点不在行数：云机调用点 `remote/offline_eval.finish_round` 旧版是**位置参数**调用，
+  而 `total` / `wins` / `node_games` 类型相近且相邻——多传少传一位不报错，summary
+  读数静默错位；现今全部改**关键字**。
+* 类型面不变：`eval_bundle: Any` 保留（全仓既有口径，分层守卫不许 `eval_track` import
+  `common.log_bundle`），Any 计数 3 处不变；`dataclasses` 加进 `test_eval_track_split`
+  的 `ALLOWED_IMPORTS`（stdlib，仓内依赖仍只有 `common.log`）。
+* 调用点：生产 3（`eval_dispatch` 收工、`reconcile_late_eval_rows` 补账、`offline_eval`
+  云机）、单测 4（`test_eval_seed_pool`）。
+* 守 `tests/worker/test_eval_settle_spec.py`（3 条），`test_eval_track_split` 的
+  `TRACK_ONLY_NAMES` 补 `EvalSettleSpec`。
+* 回归：新守卫(3) + `test_eval_seed_pool`(28) + `test_eval_track_split` + `test_eval_rows_split`
+  + 形状预算绿；eval/offline 族 129 条绿；全量 `bun run pygate` 绿（6723 passed）。
+
 ## §288 P0-3 第三十五刀：`run_rollout_stream` 收 `StreamRunSpec`（60 → 59）（2026-11-22）
 
 * `trainer/stream.py`：22 参 → frozen + kw_only `StreamRunSpec`（10 个身份位 +

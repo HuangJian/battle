@@ -8818,6 +8818,19 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-22-eval-settle-spec
+
+P0-3 第三十六刀（`worker/eval_track.py`）：`settle_eval_summary` 的 21 个参数 →
+frozen + kw_only 的 `EvalSettleSpec`，入口只收 `spec`、展开后函数体逐字不动。
+为什么不是「少几个参数」：云机调用点（`remote/offline_eval.finish_round`）旧版是
+**位置参数**调用，而 `total` / `wins` / `node_games` 类型相近且相邻 —— 多传少传一位不报错，
+summary 的分母/胜场会静默错位。改 spec 后全部走关键字。
+类型面不变：`eval_bundle: Any` 保留（全仓既有口径，`eval_track` 不许 import
+`common.log_bundle`），Any 计数 3 处不变；`dataclasses` 进 `ALLOWED_IMPORTS`（stdlib）。
+调用点：生产 3（收工 / 迟到行补账 / 云机）+ 单测 4。
+宽签名 **59 → 58**（48 → 47 文件），本文件 1 → **0**。
+守 `tests/worker/test_eval_settle_spec.py`（3 条），细节 → `docs/nn/engineering.md §289`。
+
 ## §2026-11-22-stream-run-spec
 
 P0-3 第三十五刀（`trainer/stream.py`）：`run_rollout_stream` 的 22 个参数 →

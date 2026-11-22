@@ -44,6 +44,7 @@ MOVED_NAMES = {
 #: 不住门面的内部口径（只有 `eval_track` 自己有，读者直接从这个模块取）。
 TRACK_ONLY_NAMES = {
     "EVAL_DAILY_SEEDS",
+    "EvalSettleSpec",
     "EVAL_SEEDS_BASE",
     "MISSING_MAX",
     "ROLLOUT_SEED_MAX",
@@ -56,6 +57,7 @@ TRACK_ONLY_NAMES = {
 #: （仓内依赖仍然只有 `common.log` 一个）；「纯逻辑底座不许拖进运行器/torch/numpy」的闸不变。
 ALLOWED_IMPORTS = {
     "__future__",
+    "dataclasses",
     "json",
     "threading",
     "time",

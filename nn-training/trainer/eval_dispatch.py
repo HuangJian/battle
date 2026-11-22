@@ -64,7 +64,12 @@ from worker.eval_local import (
     settle_eval_summary,
 )
 from worker.eval_self_rescue import supervise_round
-from worker.eval_track import course_logger, lost_by_node, reconcile_late_eval_rows
+from worker.eval_track import (
+    EvalSettleSpec,
+    course_logger,
+    lost_by_node,
+    reconcile_late_eval_rows,
+)
 
 # 让位/份额（尾巴）策略在 `worker/eval_yield.py`：本派发器只消费判据——尾段预留量 /
 # 宽限强制释放点 / 在飞落账宽限的**公式**也住那边（不再是内联表达式）。
@@ -838,31 +843,33 @@ class EvalDispatcher:
 
         # 课程血缘进 summary 行（门控趋势过滤；与派发同源、同一份读数）。
         settle_eval_summary(
-            eval_jsonl=eval_jsonl,
-            key16=key16,
-            it=it,
-            pairs=pairs,
-            total=total,
-            landed=loaded,
-            wins=rnd.wins,
-            cleared_total=rnd.cleared_total,
-            outcomes=rnd.outcomes,
-            node_games=rnd.node_games,
-            # summary 与逐局行走同一个单写者（两轮重叠时也不互相覆盖）。
-            append_row=lambda row: append_jsonl(eval_jsonl, row),
-            t_eval_start=t_eval_start,
-            rollout_winrate=rollout_winrate,
-            # D14 课程血缘（门按 course_fp 过滤趋势行；无课程 = ""=不过滤）。
-            course_fp=course_fp,
-            # 2026-10-08（plan/eval-baseline-undispatched §2 P0-1/P0-2）：收工读数进 summary。
-            # `left_pending` = 收工时的待办余量（含重投回队）；`left_pairs` = 真·从未派出
-            # 的那批（attempts==0）——`never_dispatched`/`never-dispatched` 两个读面都只认它。
-            left_pending=left_pending,
-            left_pairs=never_pairs,
-            close_reason=close_reason,
-            tail_race_grants=tail_race_grants,
-            dup_games=dup_games,
-            frozen_sec=frozen_sec,
+            EvalSettleSpec(
+                eval_jsonl=eval_jsonl,
+                key16=key16,
+                it=it,
+                pairs=pairs,
+                total=total,
+                landed=loaded,
+                wins=rnd.wins,
+                cleared_total=rnd.cleared_total,
+                outcomes=rnd.outcomes,
+                node_games=rnd.node_games,
+                # summary 与逐局行走同一个单写者（两轮重叠时也不互相覆盖）。
+                append_row=lambda row: append_jsonl(eval_jsonl, row),
+                t_eval_start=t_eval_start,
+                rollout_winrate=rollout_winrate,
+                # D14 课程血缘（门按 course_fp 过滤趋势行；无课程 = ""=不过滤）。
+                course_fp=course_fp,
+                # 2026-10-08（plan/eval-baseline-undispatched §2 P0-1/P0-2）：收工读数进 summary。
+                # `left_pending` = 收工时的待办余量（含重投回队）；`left_pairs` = 真·从未派出
+                # 的那批（attempts==0）——`never_dispatched`/`never-dispatched` 两个读面都只认它。
+                left_pending=left_pending,
+                left_pairs=never_pairs,
+                close_reason=close_reason,
+                tail_race_grants=tail_race_grants,
+                dup_games=dup_games,
+                frozen_sec=frozen_sec,
+            )
         )
 
 

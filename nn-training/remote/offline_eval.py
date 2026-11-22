@@ -52,6 +52,7 @@ from worker.eval_local import (
     settle_eval_summary,
 )
 from worker.eval_rows import eval_row
+from worker.eval_track import EvalSettleSpec
 
 # 单局评估的硬顶：**与 rollout 共用一份口径**（`common/game_watch.py`）。
 # 旧值 900s（= policy.taskTimeoutSec）：一个卡住的评估局会占着一个 slot 15 分钟，而本轮
@@ -674,21 +675,23 @@ class _EvalRound:
             log(f"[eval-cloud] it{self.it}: 另有 {len(self.failed) - 5} 局失败（同上口径）")
         # summary 走 in-loop 的同一份结算（含双轨/技能子指标/掉落口径）
         settle_eval_summary(
-            self.eval_jsonl,
-            self.key16,
-            int(self.it),
-            self.pairs,
-            len(self.pairs),
-            self.seen,
-            self.wins,
-            self.cleared_total,
-            self.outcomes,
-            self.node_games,
-            lambda row: append_jsonl(self.eval_jsonl, row),
-            t0,
-            rollout_winrate,
-            course_fp=course_fp or "",
-            eval_bundle=eb,
+            EvalSettleSpec(
+                eval_jsonl=self.eval_jsonl,
+                key16=self.key16,
+                it=int(self.it),
+                pairs=self.pairs,
+                total=len(self.pairs),
+                landed=self.seen,
+                wins=self.wins,
+                cleared_total=self.cleared_total,
+                outcomes=self.outcomes,
+                node_games=self.node_games,
+                append_row=lambda row: append_jsonl(self.eval_jsonl, row),
+                t_eval_start=t0,
+                rollout_winrate=rollout_winrate,
+                course_fp=course_fp or "",
+                eval_bundle=eb,
+            )
         )
         out["ran"] = True
 
