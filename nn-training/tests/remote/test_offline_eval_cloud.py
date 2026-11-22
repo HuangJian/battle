@@ -40,6 +40,7 @@ from common.platform_utils import cpu_worker_slots
 from common.protocol import UnreapableChildError
 from remote import offline_eval
 from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
+from remote.deliver_spec import OfflineDelivererSpec
 from remote.deliver_wire import EVAL_ROWS_HARD
 from remote.offline_deliver import OfflineDeliverer
 from remote.offline_eval import (
@@ -838,7 +839,9 @@ def test_artifacts_zip_carries_the_cloud_eval_ledger(tmp_path: Path) -> None:
 
 def test_backfeed_body_carries_only_this_rounds_eval_rows(tmp_path: Path) -> None:
     d = OfflineDeliverer(
-        base_url="", token="", run_id="run-x", artifacts_dir=tmp_path, log=_quiet
+        OfflineDelivererSpec(
+            base_url="", token="", run_id="run-x", artifacts_dir=tmp_path, log=_quiet
+        )
     )
     rows = [
         {"event": "eval", "iter": 2, "wver": "a" * 16, "stage": 0, "seed": 1},

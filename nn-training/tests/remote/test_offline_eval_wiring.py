@@ -698,6 +698,7 @@ def test_multi_course_gets_its_own_work_dir_per_course(tmp_path: Path) -> None:
 
 def test_backfeed_body_includes_eval_rows_for_the_round(tmp_path: Path) -> None:
     """`_post_artifact` 的体里必须有 `eval_rows` —— 少了它，云上评的读数只能等整段结束。"""
+    from remote.deliver_spec import OfflineDelivererSpec
     from remote.offline_deliver import OfflineDeliverer
 
     art = tmp_path / "art"
@@ -723,13 +724,15 @@ def test_backfeed_body_includes_eval_rows_for_the_round(tmp_path: Path) -> None:
         return 200, b"{}"
 
     d = OfflineDeliverer(
-        base_url="https://h",
-        token="t",
-        run_id="run-x",
-        artifacts_dir=art,
-        opener=opener,
-        now_fn=time.time,
-        log=_quiet,
+        OfflineDelivererSpec(
+            base_url="https://h",
+            token="t",
+            run_id="run-x",
+            artifacts_dir=art,
+            opener=opener,
+            now_fn=time.time,
+            log=_quiet,
+        )
     )
     posted = d._post_artifact(2)
     assert posted
@@ -747,6 +750,7 @@ def test_deliverer_reposts_a_delivered_round_for_late_eval_rows(
     """已投递的轮次仍可被**重投**（评估后到的读数）——hub 幂等但会并账。"""
     import threading
 
+    from remote.deliver_spec import OfflineDelivererSpec
     from remote.offline_deliver import OfflineDeliverer
 
     art = tmp_path / "art"
@@ -763,13 +767,15 @@ def test_deliverer_reposts_a_delivered_round_for_late_eval_rows(
         return True
 
     d = OfflineDeliverer(
-        base_url="https://h",
-        token="t",
-        run_id="run-x",
-        artifacts_dir=art,
-        background=True,
-        opener=opener,
-        log=_quiet,
+        OfflineDelivererSpec(
+            base_url="https://h",
+            token="t",
+            run_id="run-x",
+            artifacts_dir=art,
+            background=True,
+            opener=opener,
+            log=_quiet,
+        )
     )
     # 探活不是本用例的被测面（不真打网络）；`_thread` 只为了过 `submit_eval_round` 的守卫
     # （「有后台线程才重投」——那条守卫本身由 `test_deliverer_*` 系列覆盖）。

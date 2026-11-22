@@ -44,6 +44,7 @@ from common.protocol import (
     encode_weights_json,
     sanitize_run_id,
 )
+from remote.deliver_spec import OfflineDelivererSpec
 from remote.offline_deliver import (
     DISABLE_COOLDOWN_SEC,
     MAX_FAILS_PER_PASS,
@@ -208,7 +209,9 @@ def _deliverer(base: str, root: Path, *, token: str = "sekret", **kw: object) ->
     #: （宽限期内一个字节都不许写网络盘）。
     kw.setdefault("backup_grace", 0.0)
     return OfflineDeliverer(
-        base_url=base, token=token, run_id=RUN, artifacts_dir=root, log=_quiet, **kw  # type: ignore[arg-type]
+        OfflineDelivererSpec(
+            base_url=base, token=token, run_id=RUN, artifacts_dir=root, log=_quiet, **kw  # type: ignore[arg-type]
+        )
     )
 
 
@@ -332,9 +335,11 @@ def test_backup_failure_is_only_a_warning(tmp_path: Path) -> None:
     blocker.write_bytes(b"x")
     logs: list[str] = []
     d = OfflineDeliverer(
-        base_url="", token="", run_id=RUN, artifacts_dir=root, backup_root=blocker / "backup",
-        backup_grace=0.0,  # 这条验的是「抽屉建不出来」的容错，与触发时机无关
-        log=logs.append,
+        OfflineDelivererSpec(
+            base_url="", token="", run_id=RUN, artifacts_dir=root, backup_root=blocker / "backup",
+            backup_grace=0.0,  # 这条验的是「抽屉建不出来」的容错，与触发时机无关
+            log=logs.append,
+        )
     )
     assert d.backup_pending() == 0
     assert any("备份跳过" in m for m in logs), logs
@@ -467,13 +472,15 @@ def test_disabled_delivery_revives_after_the_cooldown(tmp_path: Path) -> None:
     op = _Op()
     msgs: list[str] = []
     d = OfflineDeliverer(
-        base_url="http://hub.invalid",
-        token="tok",
-        run_id=RUN,
-        artifacts_dir=root,
-        log=msgs.append,
-        opener=op,
-        now_fn=lambda: clock[0],
+        OfflineDelivererSpec(
+            base_url="http://hub.invalid",
+            token="tok",
+            run_id=RUN,
+            artifacts_dir=root,
+            log=msgs.append,
+            opener=op,
+            now_fn=lambda: clock[0],
+        )
     )
     assert d.sync() == 0
     assert d.disabled_reason
@@ -516,12 +523,14 @@ def test_rejected_round_is_skipped_but_the_rest_keep_flowing(tmp_path: Path) -> 
 
     op = _Op()
     d = OfflineDeliverer(
-        base_url="http://hub.invalid",
-        token="t",
-        run_id=RUN,
-        artifacts_dir=root,
-        opener=op,
-        log=msgs.append,
+        OfflineDelivererSpec(
+            base_url="http://hub.invalid",
+            token="t",
+            run_id=RUN,
+            artifacts_dir=root,
+            opener=op,
+            log=msgs.append,
+        )
     )
     assert d.sync() == 2, "被拒的那一轮不得连坐后面的轮次"
     assert "post:2" in op.calls and "post:3" in op.calls
@@ -568,12 +577,14 @@ def test_conflict_409_is_a_content_rejection_not_a_delivery(tmp_path: Path) -> N
 
     op = _Op()
     d = OfflineDeliverer(
-        base_url="http://hub.invalid",
-        token="t",
-        run_id=RUN,
-        artifacts_dir=root,
-        opener=op,
-        log=msgs.append,
+        OfflineDelivererSpec(
+            base_url="http://hub.invalid",
+            token="t",
+            run_id=RUN,
+            artifacts_dir=root,
+            opener=op,
+            log=msgs.append,
+        )
     )
     assert d.sync() == 2, "被 409 拒的那一轮不得连坐后面的轮次"
     assert d.disabled_reason == "", "409 是内容问题，不得停用整条腿"
@@ -636,12 +647,14 @@ def test_row_with_mismatching_fingerprint_is_dropped_not_sent(tmp_path: Path) ->
         return 200, b"{}"
 
     d = OfflineDeliverer(
-        base_url="http://hub.invalid",
-        token="t",
-        run_id=RUN,
-        artifacts_dir=root,
-        opener=op,
-        log=msgs.append,
+        OfflineDelivererSpec(
+            base_url="http://hub.invalid",
+            token="t",
+            run_id=RUN,
+            artifacts_dir=root,
+            opener=op,
+            log=msgs.append,
+        )
     )
     assert d.sync() == 1, "行配不上不该拦住这一轮的权重"
     assert bodies[0]["row"] is None, "配不上的行一律不发（否则 hub 会拒收整个体）"
@@ -1718,12 +1731,14 @@ def test_failure_logs_first_then_every_tenth_and_reports_recovery(tmp_path: Path
     op = _ScriptedOpener(fail_all=True)
     msgs: list[str] = []
     d = OfflineDeliverer(
-        base_url="http://hub.invalid",
-        token="sekret",
-        run_id=RUN,
-        artifacts_dir=root,
-        opener=op,
-        log=msgs.append,
+        OfflineDelivererSpec(
+            base_url="http://hub.invalid",
+            token="sekret",
+            run_id=RUN,
+            artifacts_dir=root,
+            opener=op,
+            log=msgs.append,
+        )
     )
 
     for _ in range(5):  # 每拍 2 次失败（两轮 × 每拍上限 2）⇒ 5 拍攒到 10 次
@@ -2058,11 +2073,13 @@ def test_a_bad_run_id_is_the_only_constructor_failure(
     """
     root = _make_artifacts(tmp_path / "art")
     bad = OfflineDeliverer(
-        base_url="http://hub.invalid",
-        token="t",
-        run_id="../evil",
-        artifacts_dir=root,
-        log=_quiet,
+        OfflineDelivererSpec(
+            base_url="http://hub.invalid",
+            token="t",
+            run_id="../evil",
+            artifacts_dir=root,
+            log=_quiet,
+        )
     )
     assert bad.run_id == "", "非法 run_id ⇒ 不投产物（不是崩，也不是拼进路径）"
 
@@ -2074,11 +2091,13 @@ def test_a_bad_run_id_is_the_only_constructor_failure(
     monkeypatch.setattr(od, "sanitize_run_id", buggy)
     with pytest.raises(KeyError):
         OfflineDeliverer(
-            base_url="http://hub.invalid",
-            token="t",
-            run_id=RUN,
-            artifacts_dir=root,
-            log=_quiet,
+            OfflineDelivererSpec(
+                base_url="http://hub.invalid",
+                token="t",
+                run_id=RUN,
+                artifacts_dir=root,
+                log=_quiet,
+            )
         )
 
 

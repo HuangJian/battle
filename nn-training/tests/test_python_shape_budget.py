@@ -72,7 +72,7 @@ WIDE_FUNCS_BASELINE = {
     "remote/job_round.py": 1,  # run_one_round 已收 RoundSpec；剩 _prefetch_fill(10)
     "remote/lifecycle.py": 1,
     "remote/node_upgrade.py": 1,
-    "remote/offline_deliver.py": 1,
+    # `remote/offline_deliver.py` 已清零（P0-3 第四十刀：`OfflineDelivererSpec`）。
     "remote/offline_eval.py": 1,
     # 2026-11-21：`_base_tar_bytes` / `_landed_bytes_for` 各 9 参 →
     # `BaseTarSpec` / `LandedBytesSpec` ⇒ 本文件宽签名归零，条目删除。

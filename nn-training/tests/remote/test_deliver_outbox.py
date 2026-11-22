@@ -41,6 +41,7 @@ from remote.deliver_outbox import (
     read_state,
     round_path,
 )
+from remote.deliver_spec import OfflineDelivererSpec
 from remote.offline_deliver import OfflineDeliverer
 from tests.remote.test_offline_deliver import RUN, _make_artifacts
 
@@ -85,14 +86,16 @@ def _outbox(tmp_path: Path, root: Path, **kw: object) -> LocalOutboxDeliverer:
 def _http_leg(root: Path, rec: _Recorder, **kw: object) -> OfflineDeliverer:
     """同一份产物目录的 HTTP 腿（同一个时钟；`opener` 打桩 ⇒ 不碰网络）。"""
     return OfflineDeliverer(
-        base_url="http://hub.local",
-        token="t",
-        run_id=RUN,
-        artifacts_dir=root,
-        opener=rec,
-        now_fn=lambda: NOW,
-        log=_quiet,
-        **kw,  # type: ignore[arg-type]
+        OfflineDelivererSpec(
+            base_url="http://hub.local",
+            token="t",
+            run_id=RUN,
+            artifacts_dir=root,
+            opener=rec,
+            now_fn=lambda: NOW,
+            log=_quiet,
+            **kw,  # type: ignore[arg-type]
+        )
     )
 
 

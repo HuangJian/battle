@@ -8818,6 +8818,19 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-22-offline-deliverer-spec
+
+P0-3 第四十刀（`remote/offline_deliver.py`）：`OfflineDeliverer.__init__` 的 20 个关键字参数
+→ frozen + kw_only 的 `OfflineDelivererSpec`，入口只收 `spec`、展开后函数体逐字不动。
+为什么先搬文件：本文件 LOC 已 997/1000，20 字段 spec + 展开必越线。按 `deliver_wire` 的
+先例（同一个预算顶到 1000 ⇒ 纯数据下沉），把 spec 与它的缺省常量搬到新模块
+`remote/deliver_spec.py`（∅ 新依赖边：stdlib + `common.logutil`，拓扑秩 L1，已登记
+`tests/helpers/remote_dag.py`）；`offline_deliver` 只留仍在用的 re-export。改完 LOC = 991。
+`base_url` / `token` / `run_id` / `artifacts_dir` 是身份位，其余 16 个是网络/抽屉/模式/注入点
+旋钮 —— 旧表里三个 `float` 超时相邻，`probe_ttl` 写错不会报错，只会把抖动恢复窗口改小。
+调用点 27 处（全部关键字调用）全改传 spec。宽签名 **54 → 53**，本文件清零（文件 45 → 44）。
+守 `tests/remote/test_offline_deliver_spec.py`（3 条），细节 → `docs/nn/engineering.md §293`。
+
 ## §2026-11-22-dispatch-spec
 
 P0-3 第三十九刀：`run_rollout_queue`（薄包装）与 `RolloutDispatcher.__init__`（OO 本体）

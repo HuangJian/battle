@@ -126,6 +126,9 @@ LAYERS: dict[str, int] = {
     # ⇒ **L0**；`offline_deliver`(L2) 站在它上面，秩不变。（与 `deliver_ledger` 同一条纪律：
     # 同一个 LOC 预算把腿本体顶到 1000 行，就把纯数据/判据下沉。）
     "remote.deliver_wire": 0,
+    # `OfflineDeliverer` 的构造旋钮与缺省（2026-11-22，同一个 LOC 预算）：依赖面 = stdlib +
+    # `common.logutil`（缺省 logger）⇒ **L1**；`offline_deliver`(L2) 站在它上面，秩不变。
+    "remote.deliver_spec": 1,
     # 补传**档位机**（2026-10-23，`plan/offline-deliver-full-and-gaps` §3.0）：三档判定 /
     # `need_bps` / `eta` 三块纯函数。依赖面 = stdlib + `collections.abc`
     # ⇒ **L0**；读者只有 `offline_deliver`(L2)，秩不变。

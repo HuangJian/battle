@@ -43,6 +43,7 @@ if str(ROOT) not in sys.path:
 
 from common.protocol import OFFLINE_ARTIFACT_PATH, OFFLINE_RESULT_PATH
 from remote.deliver_proc import DelivererProcess, make_deliverer
+from remote.deliver_spec import OfflineDelivererSpec
 from remote.offline_deliver import OfflineDeliverer
 from tests.remote.test_offline_deliver import RUN, _make_artifacts
 
@@ -154,14 +155,16 @@ def _deliverer(
     root: Path, rec: Callable[[str, bytes, dict, float], tuple[int, bytes]], **kw
 ) -> OfflineDeliverer:
     return OfflineDeliverer(
-        base_url="http://127.0.0.1:1",
-        token="tok",
-        run_id=RUN,
-        artifacts_dir=root,
-        background=True,
-        opener=rec,
-        log=lambda _m: None,
-        **kw,
+        OfflineDelivererSpec(
+            base_url="http://127.0.0.1:1",
+            token="tok",
+            run_id=RUN,
+            artifacts_dir=root,
+            background=True,
+            opener=rec,
+            log=lambda _m: None,
+            **kw,
+        )
     )
 
 
@@ -281,13 +284,15 @@ def test_drain_loop_never_spins_without_waiting_or_working(tmp_path: Path) -> No
     root = _make_artifacts(tmp_path)
     rec = _Recorder()
     d = OfflineDeliverer(
-        base_url="http://127.0.0.1:1",
-        token="tok",
-        run_id=RUN,
-        artifacts_dir=root,
-        background=True,
-        opener=_dead_530,
-        log=lambda _m: None,
+        OfflineDelivererSpec(
+            base_url="http://127.0.0.1:1",
+            token="tok",
+            run_id=RUN,
+            artifacts_dir=root,
+            background=True,
+            opener=_dead_530,
+            log=lambda _m: None,
+        )
     )
     d.start()
     try:
@@ -351,13 +356,15 @@ def test_unsent_repost_is_loud_and_persisted(tmp_path: Path) -> None:
     _seed_ledger(root, artifacts=(1,))
     logs: list[str] = []
     d = OfflineDeliverer(
-        base_url="http://127.0.0.1:1",
-        token="tok",
-        run_id=RUN,
-        artifacts_dir=root,
-        background=True,
-        opener=_dead_530,
-        log=logs.append,
+        OfflineDelivererSpec(
+            base_url="http://127.0.0.1:1",
+            token="tok",
+            run_id=RUN,
+            artifacts_dir=root,
+            background=True,
+            opener=_dead_530,
+            log=logs.append,
+        )
     )
     d.start()
     try:
@@ -522,12 +529,14 @@ def test_sync_mode_is_still_synchronous(tmp_path: Path) -> None:
     root = _make_artifacts(tmp_path, iters=(1,))
     rec = _Recorder()
     d = OfflineDeliverer(
-        base_url="http://127.0.0.1:1",
-        token="tok",
-        run_id=RUN,
-        artifacts_dir=root,
-        opener=rec,
-        log=lambda _m: None,
+        OfflineDelivererSpec(
+            base_url="http://127.0.0.1:1",
+            token="tok",
+            run_id=RUN,
+            artifacts_dir=root,
+            opener=rec,
+            log=lambda _m: None,
+        )
     )
     assert d.background is False
     d.submit_round(1)

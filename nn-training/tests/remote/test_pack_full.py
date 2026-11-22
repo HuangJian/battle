@@ -34,6 +34,7 @@ from common.hashing import sha256_bytes
 from common.protocol import OFFLINE_DELIVERED_NAME
 from remote import land_provider, offline_boot, weights_delta
 from remote.artifacts import ArtifactStore
+from remote.deliver_spec import OfflineDelivererSpec
 from remote.deliver_zip import import_deliver_zip
 from remote.offline_deliver import OfflineDeliverer
 from remote.offline_deliverable import WEIGHTS_NAME, write_deliver_zip
@@ -295,11 +296,13 @@ def test_row_for_accepts_the_sibling_delta_after_landing(tmp_path: Path) -> None
     (store.root / OFFLINE_DELIVERED_NAME).write_text("{}", encoding="utf-8")
 
     deliv = OfflineDeliverer(
-        base_url="http://hub.invalid",
-        token="sekret",
-        run_id="pack-full",
-        artifacts_dir=store.root,
-        log=lambda _m: None,
+        OfflineDelivererSpec(
+            base_url="http://hub.invalid",
+            token="sekret",
+            run_id="pack-full",
+            artifacts_dir=store.root,
+            log=lambda _m: None,
+        )
     )
     row = deliv._row_for(1, sha256_bytes(_full_weights(1)))
     assert row is not None, "落地后（weights.json 是整份、原件在 .delta）行必须还能认出来"

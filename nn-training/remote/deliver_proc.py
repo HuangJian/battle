@@ -32,6 +32,7 @@ from common.protocol import ProtocolError, sanitize_run_id
 from remote import deliver_parts
 from remote.child_proc import pump_lines
 from remote.deliver_outbox import LocalOutboxDeliverer, OutboxSpec
+from remote.deliver_spec import OfflineDelivererSpec
 from remote.offline_deliver import (
     DRAIN_FLUSH_SEC,
     DRAIN_TICK_SEC,
@@ -476,20 +477,22 @@ class DelivererProcess:
             )
         else:
             self._fallback = OfflineDeliverer(
-                base_url=self.base_url,
-                token=self.token,
-                run_id=self._run_id_raw,
-                artifacts_dir=self.root,
-                course=self.course,
-                hub_lease=self.hub_lease,
-                worker_name=self.worker_name,
-                background=True,
-                # ★ 2026-10-24（评审 P1-6）：降级**不能**把新能力一起丢掉——子进程起不来时
-                #   这三项若缺，就退回「只发锚点、不发统计」的旧行为，而 §8.1 写的是「功能不退」。
-                adaptive=self._adaptive,
-                metrics_parts=self._metrics_parts,
-                eval_every=self._eval_every,
-                log=self.log,
+                OfflineDelivererSpec(
+                    base_url=self.base_url,
+                    token=self.token,
+                    run_id=self._run_id_raw,
+                    artifacts_dir=self.root,
+                    course=self.course,
+                    hub_lease=self.hub_lease,
+                    worker_name=self.worker_name,
+                    background=True,
+                    # ★ 2026-10-24（评审 P1-6）：降级**不能**把新能力一起丢掉——子进程起不来时
+                    #   这三项若缺，就退回「只发锚点、不发统计」的旧行为，而 §8.1 写的是「功能不退」。
+                    adaptive=self._adaptive,
+                    metrics_parts=self._metrics_parts,
+                    eval_every=self._eval_every,
+                    log=self.log,
+                )
             )
         self._fallback.start()
 
@@ -632,15 +635,17 @@ class DelivererProcess:
             )
             return self._mirror_obj
         self._mirror_obj = OfflineDeliverer(
-            base_url=self.base_url,
-            token=self.token,
-            run_id=self._run_id_raw,
-            artifacts_dir=self.root,
-            course=self.course,
-            background=False,
-            # ⚠ 镜像**不**带日志：它只该回答 `pending()`/`status()`（旧口径：子进程是
-            # `delivered.json` 的唯一写者）。备份那一笔要说话 ⇒ 走下面 `_backup()` 的专用镜像。
-            log=lambda _m: None,
+            OfflineDelivererSpec(
+                base_url=self.base_url,
+                token=self.token,
+                run_id=self._run_id_raw,
+                artifacts_dir=self.root,
+                course=self.course,
+                background=False,
+                # ⚠ 镜像**不**带日志：它只该回答 `pending()`/`status()`（旧口径：子进程是
+                # `delivered.json` 的唯一写者）。备份那一笔要说话 ⇒ 走下面 `_backup()` 的专用镜像。
+                log=lambda _m: None,
+            )
         )
         return self._mirror_obj
 
@@ -872,17 +877,19 @@ def make_deliverer(spec: FactorySpec) -> DelivererLike | None:
             floor_it=int(floor_it or 0)),
         )
     return OfflineDeliverer(
-        base_url=hub_url,
-        token=hub_token,
-        run_id=run_id,
-        artifacts_dir=artifacts_dir,
-        course=course,
-        hub_lease=hub_lease,
-        worker_name=worker_name,
-        backup_root=backup_root,
-        background=background if kind == "thread" else False,
-        eval_every=int(eval_every or 0),
-        metrics_parts=bool(metrics_parts),
-        adaptive=bool(adaptive),
-        log=log,
+        OfflineDelivererSpec(
+            base_url=hub_url,
+            token=hub_token,
+            run_id=run_id,
+            artifacts_dir=artifacts_dir,
+            course=course,
+            hub_lease=hub_lease,
+            worker_name=worker_name,
+            backup_root=backup_root,
+            background=background if kind == "thread" else False,
+            eval_every=int(eval_every or 0),
+            metrics_parts=bool(metrics_parts),
+            adaptive=bool(adaptive),
+            log=log,
+        )
     )

@@ -46,6 +46,7 @@ from common.settings import hub_token_from_env
 from remote import deliver_parts
 from remote.artifacts import atomic_write_json
 from remote.deliver_outbox import LocalOutboxDeliverer, OutboxSpec
+from remote.deliver_spec import OfflineDelivererSpec
 from remote.offline_deliver import (
     DRAIN_FLUSH_SEC,
     DRAIN_TICK_SEC,
@@ -295,21 +296,23 @@ def main(argv: list[str] | None = None) -> int:
         if not args.hub_url:
             build_argparser().error("需要 --hub-url 或 --outbox 之一")
         d = OfflineDeliverer(
-            base_url=args.hub_url,
-            token=token,
-            run_id=args.run_id,
-            artifacts_dir=args.artifacts,
-            course=args.course,
-            hub_lease=lease,
-            worker_name=worker_name,
-            # 子进程里没有「训练线程」可并行 —— 它就是那条腿，同步语义即正确语义。
-            background=False,
-            # ★ 2026-10-23（plan/offline-deliver-full-and-gaps §3.5/§3.3）：父侧把这两个开关
-            # 显式传进来，子进程的缺省保持旧行为（不传 = 老语义，谁都不改）。
-            eval_every=int(args.eval_every or 0),
-            metrics_parts=bool(args.metrics_parts),
-            adaptive=bool(args.adaptive),
-            log=_log,
+            OfflineDelivererSpec(
+                base_url=args.hub_url,
+                token=token,
+                run_id=args.run_id,
+                artifacts_dir=args.artifacts,
+                course=args.course,
+                hub_lease=lease,
+                worker_name=worker_name,
+                # 子进程里没有「训练线程」可并行 —— 它就是那条腿，同步语义即正确语义。
+                background=False,
+                # ★ 2026-10-23（plan/offline-deliver-full-and-gaps §3.5/§3.3）：父侧把这两个开关
+                # 显式传进来，子进程的缺省保持旧行为（不传 = 老语义，谁都不改）。
+                eval_every=int(args.eval_every or 0),
+                metrics_parts=bool(args.metrics_parts),
+                adaptive=bool(args.adaptive),
+                log=_log,
+            )
         )
     tick = max(0.05, float(args.tick_sec))
     idle = max(60.0, float(args.idle_timeout))

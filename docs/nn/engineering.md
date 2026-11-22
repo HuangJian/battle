@@ -25,6 +25,25 @@
 
 ---
 
+## §293 P0-3 第四十刀：`OfflineDeliverer` 收 `OfflineDelivererSpec`（54 → 53）（2026-11-22）
+
+* `remote/offline_deliver.py`：20 个关键字参数 → frozen + kw_only
+  `OfflineDelivererSpec`（7 个身份位 + 3 个网络/探测 + 2 个抽屉 + 4 个模式开关 +
+  3 个注入点）；入口只收 `spec`，展开后函数体逐字不动。本文件宽签名 1 → **0**，
+  全仓 54 → **53**，文件 45 → **44**。
+* **LOC 预算的代价与做法**：本文件原本 LOC = 997（< 1000 的硬门）。直接把 20 字段
+  spec 写进去必越线 ⇒ 按 `deliver_wire` 同一条纪律，把 spec **与其缺省常量**
+  （`PROBE_TTL_SEC` / `BACKUP_GRACE_SEC` / `PROBE_FAIL_TTL_SEC` / `SYNC_CAP` /
+  `HTTP_TIMEOUT_SEC` / `_log_default`）下沉到新模块 `remote/deliver_spec.py`（拓扑秩
+  **L1**，已登记 `tests/helpers/remote_dag.py`）；`offline_deliver` 只留需要的 re-export
+  （`BACKUP_GRACE_SEC` / `PROBE_*_TTL_SEC` / `_log_default`，其它删除）。改完 LOC = 991。
+* 调用点 27 处（生产 4：`deliver_worker` / `deliver_proc`×3；e2e 3；测试 20）全改传
+  spec（全是关键字调用，无位置位）。
+* 守 `tests/remote/test_offline_deliver_spec.py`（3 条）；`WIDE_FUNCS_BASELINE` 的
+  `remote/offline_deliver.py` 条目删除。
+* 回归：新守卫 + `offline_deliver` 族 244 条绿；`test_remote_dag` / 转发名护栏绿；
+  全量 `bun run pygate` 绿（6735 passed）。
+
 ## §292 P0-3 第三十九刀：派发两入口共收 `DispatchSpec`（56 → 54）（2026-11-22）
 
 * `trainer/dispatch_state.py` 新增 frozen + kw_only `DispatchSpec`（7 个身份位 + 12 个可选

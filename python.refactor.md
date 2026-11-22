@@ -1776,7 +1776,7 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      剩下的仍是逐模块工程，照该形状先铺端口再收测试。
    * **P1-4 类型化**：`Any` 1178 处 / 181 文件（G14 冻结）；mypy 仍是非 strict。
      批量换 `object` 已实测否决（406 个红点），只能逐个数据边界换成 TypedDict / 协议。
-   * **P0-3 参数爆炸**：仍有 **54 个函数 >8 参数 / 45 文件**（2026-11-22 实测；形状门禁按文件
+   * **P0-3 参数爆炸**：仍有 **53 个函数 >8 参数 / 44 文件**（2026-11-22 实测；形状门禁按文件
      冻结）。`dispatch_bc_corpus`(25) → `BcDispatchSpec`（§286，62 → 61）；
      `dispatch_rollout_phase`(25) → `RolloutPhaseSpec`（§287，61 → 60）；
      `run_rollout_stream`(22) → `StreamRunSpec`（§288，60 → 59）；
@@ -1784,8 +1784,8 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      `worker_loop`(22) → `WorkerLoopSpec`（§290，58 → 57）；
      `run_one_round`(21) → `JobRoundSpec`（§291，57 → 56）；
      `run_rollout_queue` / `RolloutDispatcher` → `DispatchSpec`（§292，56 → 54）；
+     `OfflineDeliverer.__init__`(20) → `OfflineDelivererSpec`（§293，54 → 53）；
      **下一批候选（按宽度）**：`worker/ppo/engine_paddle.ppo_update`(21) /
-     `remote/offline_deliver.LocalOutboxDeliverer.__init__`(21) /
      `worker/ppo/engine.ppo_update`(20)。`make_loaders` / `archive_course` / `collect_corpus` 与 `bc_ingest` 三兄弟
      已收成 spec（§273）；`load_ppo_corpus` / `ingest_offline_artifact` /
      `resumed_manifests` 紧随其后（§274）。审计的「124」是 2026-11-19 上游合入前的读数，合入带进了新的宽签名）。

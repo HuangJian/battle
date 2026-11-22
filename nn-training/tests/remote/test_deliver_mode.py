@@ -40,6 +40,7 @@ from remote.deliver_mode import (
     eta_text,
     need_bps,
 )
+from remote.deliver_spec import OfflineDelivererSpec
 from remote.deliver_wire import pick_anchors
 from remote.offline_deliver import OfflineDeliverer
 
@@ -240,14 +241,16 @@ def _deliverer(
     **kw,
 ) -> OfflineDeliverer:
     return OfflineDeliverer(
-        base_url="http://hub.invalid",
-        token="tok",
-        run_id=_RUN,
-        artifacts_dir=root,
-        metrics_parts=metrics_parts,
-        opener=opener,
-        log=logs.append,
-        **kw,
+        OfflineDelivererSpec(
+            base_url="http://hub.invalid",
+            token="tok",
+            run_id=_RUN,
+            artifacts_dir=root,
+            metrics_parts=metrics_parts,
+            opener=opener,
+            log=logs.append,
+            **kw,
+        )
     )
 
 
