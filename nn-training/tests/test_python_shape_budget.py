@@ -90,7 +90,8 @@ WIDE_FUNCS_BASELINE = {
     # 2026-11-19 合入上游：`run` 的交易参数 + relay 通道参数（原 1 处 → 2 处）。
     "remote/rollout_node.py": 2,
     "remote/tailscale_boot.py": 1,
-    "remote/upload_proc.py": 2,
+    # `remote/upload_proc.py` 已清零（P0-3 批 G：`UploaderProcess.__init__` 与 `make_uploader`
+    # 共用一份 `UploadSpec`）；守 `tests/remote/test_upload_spec.py`。
     # `remote/worker.py` 已清零（P0-3 第四十四刀：`worker_loop` 收 `WorkerLoopSpec`、
     # `run_job`(17) 收 `RunJobSpec`）；守 `tests/remote/test_run_job_spec.py`。
     "tools/c9_critic_calibration.py": 1,

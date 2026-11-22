@@ -1854,7 +1854,7 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      「`UnitLedger` 的字段集 + 只收一个对象」重锚（`LEDGER_FIELDS` + `_settle()`
      构造 `UnitLedger`），没有删任何一条判据；顺带发现**同族陷阱第 4 种形态 = 换模块**（patch 锚点、
      入边归属者表、行构造守卫、`GATE_SITES` 都要跟着换家，否则静默空转）。
-   * **P0-3 剩余宽签名：分文件分批待办（2026-11-22 实测 28 个 / 22 文件；A 批 ⇒ §304、B 批 ⇒ §305、C 批 ⇒ §306、D1 ⇒ §307）**
+   * **P0-3 剩余宽签名：分文件分批待办（2026-11-22 实测 26 个 / 21 文件；A 批 ⇒ §304、B 批 ⇒ §305、C 批 ⇒ §306、D1 ⇒ §307、G 批 ⇒ §308）**
 
      按**同一装配面 + 同一层**分批，每批 = 一把刀（spec 住同模块或就近轻模块 + 删
      `WIDE_FUNCS_BASELINE` 条目 + 一份字段表守卫 + `engineering.md` 一节 + `DECISIONS` 一条）。
@@ -1870,7 +1870,8 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      | **D2 · 训练循环杂项（剩）** | `trainer/queue_local.__init__`(12) · `worker/breaker.breaker_update`(12) · `worker/cmd.build_rollout_cmd`(10) · `worker/gate_check.evaluate`(9) · `worker/resume.merge_memory_shards`(9，**被 LOC 卡住**：先拆 `hub_client` 再收) | `build_rollout_cmd` 被 plan / rollout 两腿共用（`RUN_NODE_LABEL` 一脉），改前先查 `template_argv`；`breaker_update` 19 处调用、`evaluate` 61 处 ⇒ 这两个要单独一刀（先确认替身是否都按关键字调用） |
      | **E · rollout / job 腿** | `worker/iter_rollout._run_one_game_bounded`(11) · `worker/iter_rollout.run_iter_rollout`(9) · `remote/job_round._prefetch_fill`(10) · `remote/rollout_node._banner_lines`(10) · `remote/rollout_node._try_register_once`(9) · `remote/node_upgrade.request_upgrade_guarded`(9) | `run_iter_rollout` 的 9 参里前几个是 `args` 派生值（与 `PlanSpec` 同类：先看能不能直接复用 `RunSetup`）；`_run_one_game_bounded` 已有 `OneGameSpec`/`RetryGameSpec` 先例（§279），先查是否只是没接上 |
      | **F · 传输 / lifecycle** | `remote/lifecycle.__init__`(11) · `remote/error_report.report_error`(11) · `remote/hub_client.verify_and_land`(9) · `remote/hub_client.verify_and_land_bc`(9) · `remote/hub_http.report_job_failure`(9) · `remote/hub_http.wait_job`(9) · `remote/payload_proc.start_fill`(9) · `remote/tailscale_boot.fetch_guarded`(9) | `error_report` 6 个生产调用点；`hub_http` 两处是同族的「job 控制面薄壳」，与 B 批一起看更省事 |
-     | **G · 交付/上传** | `remote/upload_proc.__init__`(11) · `remote/upload_proc.make_uploader`(10) · `remote/bundle.export_bundle`(10) · `remote/bundle.write_export_status`(10) | `upload_proc` 是 `deliver_proc`（已收 `DelivererSpec` §264）的镜像 ⇒ **直接按那批的形状抄**，两处 `__init__`+工厂同刀收 |
+     | ~~**G1 · 回传腿两个入口**~~ **已完成（§308，28 → 26）** | ~~`remote/upload_proc.__init__`(11) · `remote/upload_proc.make_uploader`(10)~~ | 实测：两个入口参数表**逐字相同** ⇒ 共用一份 `UploadSpec`（不像 §264 那样给两份）；`mode=""` 的两种解释保留（进程入口 = `process`、工厂 = 缺省 async）；守 `tests/remote/test_upload_spec.py` |
+     | **G2 · 导出面** | `remote/bundle.export_bundle`(10) · `remote/bundle.write_export_status`(10) | 两个同名族函数共用「导出/状态」的同一张输入表；`bundle` LOC 419（有余量），但 `write_export_status` 被 e2e 与 hub 共用，改前先数调用点 |
      | **H · 工具面（升级最低风险）** | `tools/p0_auc_probe.build_report`(11) · `tools/c9_critic_calibration.build_report`(10) · `tools/tpu-probe.bench_case`(9) | 两个同名 `build_report` 是**双生**（同一张报告面）⇒ 同刀共收；工具面不被生产 import，适合用来先试新 recipe |
 
      记账/收尾同一套：`docs/nn/engineering.md` 新节 + `DECISIONS.md` 新条目（含被否决项）+ 

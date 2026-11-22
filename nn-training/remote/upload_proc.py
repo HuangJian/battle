@@ -35,6 +35,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 from typing import Any
 
 from common import runtime
@@ -62,28 +63,47 @@ PROC_BOOT_TIMEOUT_SEC = 5.0
 PROC_CLOSE_GRACE_SEC = 5.0
 
 
+@dataclass(frozen=True, kw_only=True)
+class UploadSpec:
+    """回传腿的构造旋钮（P0-3 批 G：`UploaderProcess.__init__`(11) 与 `make_uploader`(10)
+    **共用这一份** —— 两个入口的参数表本来就逐字相同，只有 `mode` 缺省语义不同）。
+
+    失效面：`drain_timeout` / `enqueue_timeout` 是两个 float 相邻（收线预算 vs 受理预算：
+    互换后收线会提前放弃、把在飞那份丢给降级同步补发，现场只看到「收工变慢」）；
+    `python` / `worker_module` 是「解释器 vs 模块名」两个 str 相邻（互换成 `python=remote.upload_worker`，
+    子进程起不来 ⇒ **每次**回传都降级）；`spawn` 与 `record_wire` 是「造进程 vs 记账」两个回调。
+
+    `mode` 缺省是 `""`（= 由入口决定）：`UploaderProcess` 认 `""` 为 `process`（它的本职），
+    `make_uploader` 认 `""` 为 `RESULT_UPLOAD_MODE_DEFAULT`（缺省 async）—— 与旧签名逐字一致。
+    """
+
+    upload: Callable[..., int]
+    mode: str = ""
+    depth: int = RESULT_QUEUE_DEPTH_DEFAULT
+    drain_timeout: float = RESULT_DRAIN_TIMEOUT_SEC
+    enqueue_timeout: float = RESULT_ENQUEUE_TIMEOUT_SEC
+    log: Callable[[str], None] | None = None
+    python: str | None = None
+    worker_module: str = UPLOAD_WORKER_MODULE
+    spawn: Callable[[list[str]], subprocess.Popen] | None = None
+    record_wire: Callable[[str, dict], None] | None = None
+
+
 class UploaderProcess:
     """回传腿的**独立进程**代理（父侧；与 `ResultUploader` 同接口，见 `UploaderLike`）。
 
     父侧只做三件事：**写管道**（writer 线程；`submit()` 本身零网络、零大块序列化）、
     **读管道**（reader 线程：普通行 = 子进程日志 → 转发；`@@upload@@` = 落定行 → 记账 + 回调）、
     **有界收线**（`close()`：drain → 关 stdin → 等余量 → 收线程 → 残票同步补发）。
+
+    入参 = 一个 `UploadSpec`（P0-3 批 G）；下面一次展开，函数体逐字不动。
     """
 
-    def __init__(
-        self,
-        *,
-        upload: Callable[..., int],
-        mode: str = "process",
-        depth: int = RESULT_QUEUE_DEPTH_DEFAULT,
-        drain_timeout: float = RESULT_DRAIN_TIMEOUT_SEC,
-        enqueue_timeout: float = RESULT_ENQUEUE_TIMEOUT_SEC,
-        log: Callable[[str], None] | None = None,
-        python: str | None = None,
-        worker_module: str = UPLOAD_WORKER_MODULE,
-        spawn: Callable[[list[str]], subprocess.Popen] | None = None,
-        record_wire: Callable[[str, dict], None] | None = None,
-    ) -> None:
+    def __init__(self, spec: UploadSpec) -> None:
+        upload, mode, depth = spec.upload, spec.mode, spec.depth
+        drain_timeout, enqueue_timeout = spec.drain_timeout, spec.enqueue_timeout
+        log, python, worker_module = spec.log, spec.python, spec.worker_module
+        spawn, record_wire = spec.spawn, spec.record_wire
         self.mode = mode if mode in RESULT_UPLOAD_MODES else "process"
         self._upload = upload
         self._drain_timeout = float(drain_timeout)
@@ -500,25 +520,18 @@ class UploaderProcess:
                 self._log(f"回传落定回调异常 job {jid}: {type(e).__name__}: {e}")
 
 
-def make_uploader(
-    *,
-    upload: Callable[..., int],
-    mode: str = "",
-    depth: int = RESULT_QUEUE_DEPTH_DEFAULT,
-    drain_timeout: float = RESULT_DRAIN_TIMEOUT_SEC,
-    enqueue_timeout: float = RESULT_ENQUEUE_TIMEOUT_SEC,
-    log: Callable[[str], None] | None = None,
-    record_wire: Callable[[str, dict], None] | None = None,
-    python: str | None = None,
-    worker_module: str = UPLOAD_WORKER_MODULE,
-    spawn: Callable[[list[str]], subprocess.Popen] | None = None,
-) -> UploaderLike:
+def make_uploader(spec: UploadSpec) -> UploaderLike:
     """按模式造回传器：`process`（独立子进程）/ `async`（进程内线程）/ `sync`（老行为）。
 
     **缺省仍是 `async`**（见 `RESULT_UPLOAD_MODE_DEFAULT` 的理由）：进程模式由入口显式开
     （云机 `remote/notebook_runtime.py::run_pull_worker` 带 `--result-upload process`）。
     未知值 ⇒ 响亮一行 + 按 `async`（绝不静默落到 `sync`：那会把回传重新压回关键路径）。
+
+    入参 = 一个 `UploadSpec`（P0-3 批 G，与 `UploaderProcess` 共用）；下面一次展开。
     """
+    upload, mode, depth = spec.upload, spec.mode, spec.depth
+    drain_timeout, enqueue_timeout = spec.drain_timeout, spec.enqueue_timeout
+    log = spec.log
     kind = str(mode or "").strip().lower() or RESULT_UPLOAD_MODE_DEFAULT
     if kind not in RESULT_UPLOAD_MODES:
         if log is not None:
@@ -533,17 +546,6 @@ def make_uploader(
             enqueue_timeout=enqueue_timeout,
             log=log,
         )
-    up = UploaderProcess(
-        upload=upload,
-        mode="process",
-        depth=depth,
-        drain_timeout=drain_timeout,
-        enqueue_timeout=enqueue_timeout,
-        log=log,
-        python=python,
-        worker_module=worker_module,
-        spawn=spawn,
-        record_wire=record_wire,
-    )
+    up = UploaderProcess(replace(spec, mode="process"))
     up.start()
     return up

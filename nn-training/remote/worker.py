@@ -338,7 +338,7 @@ from remote.train_core import TrainSpec as TrainSpec
 from remote.train_core import (
     run_training_core as run_training_core,
 )
-from remote.upload_proc import make_uploader
+from remote.upload_proc import UploadSpec, make_uploader
 from remote.wire import (
     _BULK as _BULK,
 )
@@ -867,7 +867,9 @@ def worker_loop(spec: WorkerLoopSpec) -> int:
     halt_seen: dict[int, bool] = {}
     # P2.5：`post_result` 按**调用时**解析 ⇒ patch `remote.worker.post_result` 仍生效。
     uploader = make_uploader(
-        upload=post_result, mode=result_upload, log=log, record_wire=record_upload_wire
+        UploadSpec(
+            upload=post_result, mode=result_upload, log=log, record_wire=record_upload_wire
+        )
     )
     try:
         while True:

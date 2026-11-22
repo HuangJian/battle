@@ -10056,3 +10056,26 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   `tests/worker/test_greedy_round_spec.py` / `tests/trainer/test_push_round_spec.py`。
   全文 → `docs/nn/engineering.md` §307。
 
+
+## §2026-11-22-upload-spec
+
+**P0-3 批 G：回传腿的两个入口共用一份 `UploadSpec`（宽签名 28 → 26，22 → 21 文件）。**
+
+- **背景**：`remote/upload_proc` 的 `UploaderProcess.__init__`(11 含 self) 与 `make_uploader`(10)
+  参数表**逐字相同**，只有 `mode` 的缺省语义不同（`"process"` vs `""` = 缺省档 async）。
+  坏点是两对相邻同类位：`drain_timeout` / `enqueue_timeout`（收线预算 vs 受理预算：互换后收线
+  提前放弃、把在飞那份丢给降级同步补发，现场只看到「收工变慢」）；`python` / `worker_module`
+  （解释器 vs 模块名：互换后子进程起不来，**每一次**回传都降级，日志只有一句「降级」）。
+- **决定**：一份 `UploadSpec`（frozen + kw_only，10 字段）同时给两个入口；
+  `UploadSpec.mode = ""` 保留「由入口决定」的两种解释，`make_uploader` 造进程时用
+  `dataclasses.replace(spec, mode="process")`（§231 旋钮袋先例）。顺带把工厂里那 10 行
+  关键字转手压成 `UploaderProcess(replace(spec, mode="process"))`。
+- **被否决**：① 照 `deliver_proc`（§264）给两份 spec（`UploaderSpec` + `FactorySpec`）——那里的两个
+  入口参数表确实不同，这里逐字相同，两份只会让同一张表被抄两遍；② 把 `mode` 统一成
+  `RESULT_UPLOAD_MODE_DEFAULT`（会改 `UploaderProcess` 的缺省行为：老调用方不传 mode 现在拿到
+  `process`）；③ 只收 `__init__`、工厂继续摊开（同一文件两个入口两种形状）。
+- **读数**：宽签名 28 → **26**、22 → **21** 文件（删 `remote/upload_proc.py` 两条）。
+- **验证**：`bun run pygate` 绿（6853 passed / 13 skipped）；`ruff` + `mypy`(1079 文件) 绿。守
+  `tests/remote/test_upload_spec.py`（字段表 / 冻结 / 两入口形状 / `mode=""` 的两种解释 /
+  旧关键字面 TypeError）。全文 → `docs/nn/engineering.md` §308。
+

@@ -39,7 +39,7 @@ from remote.result_upload import (
     ResultUploader,
     UploadTask,
 )
-from remote.upload_proc import UploaderProcess, make_uploader
+from remote.upload_proc import UploaderProcess, UploadSpec, make_uploader
 from tests.helpers.http_server import serve_fast
 
 JID1 = "a1" * 8
@@ -178,7 +178,7 @@ def _recorder(seen: list[str]):
 def _proc(**kw) -> tuple[UploaderProcess, list[str]]:
     logs: list[str] = []
     upload = kw.pop("upload", lambda *a, **k: 200)
-    up = make_uploader(upload=upload, mode="process", log=logs.append, **kw)
+    up = make_uploader(UploadSpec(upload=upload, mode="process", log=logs.append, **kw))
     assert isinstance(up, UploaderProcess)
     return up, logs
 
@@ -357,14 +357,16 @@ def test_worker_wire_replay_matches_the_thread_mode_ledger() -> None:
 
 def test_default_mode_is_still_async() -> None:
     """**缺省不许变**：云机入口显式开 `process`；库缺省仍是 async（不起子进程）。"""
-    up = make_uploader(upload=lambda *a, **k: 200)
+    up = make_uploader(UploadSpec(upload=lambda *a, **k: 200))
     assert isinstance(up, ResultUploader) and up.mode == "async"
     assert set(RESULT_UPLOAD_MODES) == {"process", "async", "sync"}
 
 
 def test_unknown_mode_is_loud_and_falls_back_to_async() -> None:
     logs: list[str] = []
-    up = make_uploader(upload=lambda *a, **k: 200, mode="asink", log=logs.append)
+    up = make_uploader(
+        UploadSpec(upload=lambda *a, **k: 200, mode="asink", log=logs.append)
+    )
     assert isinstance(up, ResultUploader) and up.mode == "async"
     assert logs, "未知模式必须留痕（不许静默）"
 
@@ -404,7 +406,9 @@ def test_real_child_process_posts_to_the_hub() -> None:
     t.start()
     base = f"http://127.0.0.1:{srv.server_address[1]}"
     logs: list[str] = []
-    up = UploaderProcess(upload=post_result, drain_timeout=30.0, log=logs.append)
+    up = UploaderProcess(
+        UploadSpec(upload=post_result, drain_timeout=30.0, log=logs.append)
+    )
     try:
         up.start()
         assert up.stats()["mode"] == "process", f"真子进程没起来：{logs}"

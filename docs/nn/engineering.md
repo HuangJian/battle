@@ -29,6 +29,30 @@
 
 ---
 
+## §308 P0-3 批 G：回传腿的两个入口共用一份 `UploadSpec`（28 → 26）（2026-11-22）
+
+* **一把刀两处，共用一份 spec**：`remote/upload_proc.UploaderProcess.__init__`(11，含 self) 与
+  同文件 `make_uploader`(10)。读数：宽签名 **28 → 26**、22 → **21** 文件。
+* **为什么不像 `deliver_proc`（§264）那样给两份**：那两个入口的参数表本来就**逐字相同**
+  （`upload` / `mode` / `depth` / `drain_timeout` / `enqueue_timeout` / `log` / `python` /
+  `worker_module` / `spawn` / `record_wire`），只有 `mode` 的**缺省语义**不同 ——
+  `UploaderProcess` 认 `""` 为 `process`（它的本职），`make_uploader` 认 `""` 为
+  `RESULT_UPLOAD_MODE_DEFAULT`（缺省 async）。合成两份只会让「同一张表」出现两次抄写。
+  `UploadSpec.mode = ""` 保留两种解释；`make_uploader` 造进程时用
+  `replace(spec, mode="process")`（§231 的旋钮袋先例）。
+* **坏点是两对相邻同类位**：`drain_timeout` / `enqueue_timeout`（收线预算 vs 受理预算 ——
+  互换后收线提前放弃、把在飞那份丢给降级同步补发，现场只看到「收工变慢」）；`python` /
+  `worker_module`（解释器 vs 模块名 —— 互换后子进程起不来，**每一次**回传都降级，而日志里
+  只有一句「降级」）。`spawn` 与 `record_wire` 是「造进程 vs 记账」两个回调，同类相邻。
+* **一个顺手的去重**：`make_uploader` 里那 10 个关键字转手（旧代码逐字重抄一遍
+  `UploaderProcess(...)`）现在只剩 `replace(spec, mode="process")` —— 这是「收 spec」的
+  额外收益：转发面从 10 行变成一个表达式。
+* **守卫** `tests/remote/test_upload_spec.py`：10 字段表（与旧形参逐一对齐）· 冻结 ·
+  `kw_only` · **两个入口都只收一个对象** · **`mode=""` 的两种解释都还在**
+  （进程入口 = `process`、工厂 = `async`）· 显式 `mode` 仍然优先 · 旧关键字面与错键 `TypeError`。
+* **验证**：`bun run pygate` 绿（6853 passed / 13 skipped）；`ruff` + `mypy`（1079 文件）绿；
+  `WIDE_FUNCS_BASELINE` 删 `remote/upload_proc.py`（2 条）。
+
 ## §307 P0-3 批 D1：云机轮内 greedy + push 发一轮（30 → 28）（2026-11-22）
 
 * **一把刀两处**，都是「一轮活」的入口：`worker/greedy_round.run_greedy_round`(12 关键字) →
