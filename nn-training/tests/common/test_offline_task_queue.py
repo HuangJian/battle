@@ -49,6 +49,7 @@ from hub import server as hub_server
 from hub.server import _HubQueue, make_server
 from hub.task_pack import pack_triggers
 from remote import offline_boot
+from remote.offline_boot import BatchRunSpec, CourseRunSpec, PingerSpec, RunArgvSpec
 from tests.helpers.http_server import serve_fast
 
 TOKEN = "sekret"
@@ -805,9 +806,9 @@ def test_run_batch_does_not_run_while_the_handoff_is_pending(
     monkeypatch.setattr(offline_boot, "claim_course", lambda *a, **k: ("", "pending_export"))
     monkeypatch.setattr(offline_boot, "run_one_course", fake_run)
     leases = {"hub": "http://hub", "token": "tok", "worker": "w1", "served": {}}
-    rc = offline_boot._run_batch(
+    rc = offline_boot._run_batch(BatchRunSpec(
         {}, {}, lambda _m: None, None, ["c5-gae"], multi=False, leases=leases, shas={}
-    )
+    ))
     assert rc == 0 and ran == []
     assert leases["blockers"] == {"c5-gae": "pending_export"}
     assert leases["ran"] == 0 and leases["gave_up"] == []
@@ -825,10 +826,10 @@ def test_run_auto_waits_for_the_export_without_burning_idle_budget(
             return [{"course": "c5-gae", "pack_sha256": ""}], [], []
         return [], [], []
 
-    def fake_batch(cfg, creds, log, stop, courses, *, multi, leases, shas):
-        leases["blockers"] = {"c5-gae": "pending_export"}
-        leases["ran"] = 0
-        leases["gave_up"] = []
+    def fake_batch(spec):
+        spec.leases["blockers"] = {"c5-gae": "pending_export"}
+        spec.leases["ran"] = 0
+        spec.leases["gave_up"] = []
         return 0
 
     monkeypatch.setattr(offline_boot, "resolve_courses", fake_resolve)
@@ -883,8 +884,13 @@ def test_run_auto_claims_runs_and_releases(monkeypatch: pytest.MonkeyPatch, tmp_
 
     seen: dict = {}
 
-    def fake_batch(cfg, creds, log, stop, courses, *, multi, leases, shas):
-        seen.update(courses=list(courses), worker=leases["worker"], hub=leases["hub"], shas=shas)
+    def fake_batch(spec):
+        seen.update(
+            courses=list(spec.courses),
+            worker=spec.leases["worker"],
+            hub=spec.leases["hub"],
+            shas=spec.shas,
+        )
         return 0
 
     monkeypatch.setattr(offline_boot, "resolve_courses", fake_resolve)
@@ -934,10 +940,10 @@ def test_run_auto_keeps_the_per_course_layout_when_the_next_round_has_one_course
 
     seen: list[bool] = []
 
-    def fake_batch(cfg, creds, log, stop, courses, *, multi, leases, shas):
-        seen.append(multi)
-        for c in courses:
-            leases["served"][str(c)] = str(shas.get(c) or "x")
+    def fake_batch(spec):
+        seen.append(spec.multi)
+        for c in spec.courses:
+            spec.leases["served"][str(c)] = str((spec.shas or {}).get(c) or "x")
         return 1  # 段内失败（真实 rc 不为 0）
 
     monkeypatch.setattr(offline_boot, "resolve_courses", fake_resolve)
@@ -1137,11 +1143,11 @@ def test_run_auto_stops_when_a_served_pack_comes_back_ready(
             return [{"course": "b", "pack_sha256": "b" * 64}], [], manifest
         return [], [], manifest
 
-    def fake_batch(cfg, creds, log, stop, courses, *, multi, leases, shas):
-        leases["served"]["b"] = "b" * 64  # 与生产 `_run_batch` 同义：跑完记 served[course]=sha
-        leases["blockers"] = {}
-        leases["gave_up"] = []
-        leases["ran"] = 1
+    def fake_batch(spec):
+        spec.leases["served"]["b"] = "b" * 64  # 与生产 `_run_batch` 同义：跑完记 served[course]=sha
+        spec.leases["blockers"] = {}
+        spec.leases["gave_up"] = []
+        spec.leases["ran"] = 1
         return 0
 
     monkeypatch.setattr(offline_boot, "resolve_courses", fake_resolve)
@@ -1518,10 +1524,10 @@ def _pinger(
 ) -> tuple[Any, list[str]]:
     """装一个打点层（`post`/`clock`/`reclaim` 是注入点；None = 真实现）→ `(detach, log 行)`。"""
     lines: list[str] = []
-    detach = offline_boot.install_progress_pinger(
+    detach = offline_boot.install_progress_pinger(PingerSpec(
         hub, token, "c5-gae", lease, lines.append, interval=interval, post=post, clock=clock,
         reclaim=reclaim,
-    )
+    ))
     return detach, lines
 
 
@@ -1871,17 +1877,18 @@ def test_run_batch_reports_the_revoked_outcome_and_retires_the_course(
 
     monkeypatch.setattr(offline_boot, "release_course", fake_release)
 
-    def fake_run(cfg, creds, log, stop, *, course, multi, lease, progress, **_kw: Any) -> int:
-        assert lease == "lease1"
-        progress["outcome"] = "revoked"
+    def fake_run(spec) -> int:
+        assert spec.lease == "lease1"
+        assert spec.progress is not None
+        spec.progress["outcome"] = "revoked"
         return 0
 
     monkeypatch.setattr(offline_boot, "run_one_course", fake_run)
     leases: dict = {"hub": "http://hub", "token": "tok", "worker": "w1", "served": {}}
     lines: list[str] = []
-    rc = offline_boot._run_batch(
+    rc = offline_boot._run_batch(BatchRunSpec(
         {}, {}, lines.append, None, ["c5-gae"], multi=False, leases=leases, shas={}
-    )
+    ))
     assert rc == 0
     assert leases["revoked"] == ["c5-gae"] and leases["ran"] == 1
     assert any("租约结局：revoked" in ln for ln in lines), lines
@@ -1905,11 +1912,11 @@ def test_run_auto_does_not_reclaim_a_revoked_course(
             return [{"course": "c5-gae", "pack_sha256": ""}], [], []
         return [], [], []
 
-    def fake_batch(cfg, creds, log, stop, courses, *, multi, leases, shas):
-        leases["revoked"] = ["c5-gae"]
-        leases["blockers"] = {}
-        leases["gave_up"] = []
-        leases["ran"] = 1
+    def fake_batch(spec):
+        spec.leases["revoked"] = ["c5-gae"]
+        spec.leases["blockers"] = {}
+        spec.leases["gave_up"] = []
+        spec.leases["ran"] = 1
         return 0
 
     monkeypatch.setattr(offline_boot, "resolve_courses", fake_resolve)
@@ -1947,18 +1954,18 @@ def test_explicit_course_queue_claims_before_fetching_the_pack(
 
     monkeypatch.setattr(offline_boot, "claim_course", fake_claim)
 
-    def fake_run(cfg, creds, log, stop, *, course, multi, lease, progress=None, **_kw: Any) -> int:
+    def fake_run(spec) -> int:
         events.append("run")
-        got_lease.append(lease)
+        got_lease.append(spec.lease)
         return 0
 
     monkeypatch.setattr(offline_boot, "run_one_course", fake_run)
     monkeypatch.setattr(offline_boot, "heartbeat_loop", lambda *a, **k: threading.Event())
     monkeypatch.setattr(offline_boot, "release_course", lambda *a, **k: None)
     leases = {"hub": "http://hub", "token": "tok", "worker": "w-exp", "served": {}}
-    rc = offline_boot._run_batch(
+    rc = offline_boot._run_batch(BatchRunSpec(
         {}, {}, lambda _m: None, None, ["c5-gae"], multi=False, leases=leases, shas={}
-    )
+    ))
     assert rc == 0 and events == ["claim", "run"], events
     assert got_lease == ["lease9"], "取包那条腿（run_one_course）必须拿到 claim 的租约"
 
@@ -1966,7 +1973,7 @@ def test_explicit_course_queue_claims_before_fetching_the_pack(
 def test_run_hands_the_lease_context_to_the_batch_for_explicit_courses(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """★M3：点名腿的接线（`run()` → `_run_batch(leases=…)`）——旧行为是 `leases=None`。"""
+    """★M3：点名腿的接线（`run()` → `_run_batch(BatchRunSpec(leases=…))`）——旧行为是 `leases=None`。"""
     seen: dict = {}
 
     monkeypatch.setattr(offline_boot, "_load_deliverable", lambda: _StubDeliverable())
@@ -1974,8 +1981,8 @@ def test_run_hands_the_lease_context_to_the_batch_for_explicit_courses(
         offline_boot, "_explicit_leases", lambda cfg, creds, log: {"hub": "h", "worker": "w"}
     )
 
-    def spy(cfg, creds, log, stop, courses, *, multi, leases, shas=None) -> int:
-        seen.update(courses=list(courses), leases=leases, multi=multi)
+    def spy(spec) -> int:
+        seen.update(courses=list(spec.courses), leases=spec.leases, multi=spec.multi)
         return 0
 
     monkeypatch.setattr(offline_boot, "_run_batch", spy)
@@ -2053,8 +2060,8 @@ def test_run_one_course_wires_the_progress_pinger_around_the_loop(
     """
     order: list[str] = []
 
-    def spy_install(hub: str, token: str, course: str, lease: str, log: Any, **kw: Any):
-        assert (hub, token, course, lease) == ("http://hub", "tok", "c5-gae", "lease7")
+    def spy_install(spec: Any):
+        assert (spec.hub, spec.token, spec.course, spec.lease) == ("http://hub", "tok", "c5-gae", "lease7")
         order.append("install")
 
         def _detach() -> str:
@@ -2077,7 +2084,7 @@ def test_run_one_course_wires_the_progress_pinger_around_the_loop(
     monkeypatch.setattr(offline_boot, "install_progress_pinger", spy_install)
     monkeypatch.setattr(offline_boot, "local_artifacts", lambda dest: None)
     progress: dict = {}
-    rc = offline_boot.run_one_course(
+    rc = offline_boot.run_one_course(CourseRunSpec(
         {"course": "c5-gae", "device": "cpu", "work_dir": str(tmp_path)},
         {"HUB_TOKEN": "tok"},
         lambda _m: None,
@@ -2086,7 +2093,7 @@ def test_run_one_course_wires_the_progress_pinger_around_the_loop(
         lease="lease7",
         run_loop_main=fake_loop,
         progress=progress,
-    )
+    ))
     assert rc == 0
     assert order == ["install", "run", "detach"], order
     assert progress["outcome"] == "revoked"
@@ -2110,7 +2117,7 @@ def test_run_one_course_does_not_arm_the_pinger_without_a_lease(
     monkeypatch.setattr(offline_boot, "install_progress_pinger", fake_install)
     monkeypatch.setattr(offline_boot, "local_artifacts", lambda dest: None)
     progress: dict = {}
-    rc = offline_boot.run_one_course(
+    rc = offline_boot.run_one_course(CourseRunSpec(
         {"course": "c5-gae", "device": "cpu", "work_dir": str(tmp_path)},
         {},
         lambda _m: None,
@@ -2118,7 +2125,7 @@ def test_run_one_course_does_not_arm_the_pinger_without_a_lease(
         course="c5-gae",
         run_loop_main=lambda argv: 0,
         progress=progress,
-    )
+    ))
     assert rc == 0 and armed == [] and progress == {}
 
 

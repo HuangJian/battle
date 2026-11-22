@@ -25,6 +25,17 @@
 
 ---
 
+## §284 P0-3 第三十一刀：`offline_boot` 四个宽签名收 spec（71 → 67）（2026-11-21）
+
+* `build_run_argv`→`RunArgvSpec`、`run_one_course`→`CourseRunSpec`、`_run_batch`→`BatchRunSpec`、
+  `install_progress_pinger`→`PingerSpec`；`remote/offline_boot.py` 宽签名 4 → **0**。
+* **坑**：本文件的引导态（`spec_from_file_location` 且不在 `sys.modules`）下 `@dataclass`
+  会炸（KW_ONLY 判定查 `sys.modules`）⇒ 四个 spec 用 `NamedTuple`。
+* 调用点：生产 4（`_run_auto` 两处 + `_run` 两处 + `offline_push_task`）+ 测试 ~40 + 测试替身 9，
+  替身签名一律改收 spec（读 `spec.courses/leases/shas/multi/lease/progress`）。
+* 回归：`test_offline_boot`(68) / `test_offline_task_queue` + `test_offline_bc_course` +
+  `test_offline_training_e2e`(149 合计) 全绿；ruff/mypy 无错。
+
 ## §283 P0-3 第三十刀：`claim_job` 收 `ClaimSpec`（宽签名 72 → 71）（2026-11-21）
 
 * 10 参 → frozen `ClaimSpec`；`base_url/token/jid` 保持可位置传，避免大面积改测试可读性。

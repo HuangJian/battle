@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import remote.offline_boot as offline_boot
+from remote.offline_boot import CourseRunSpec, RunArgvSpec
 from tests.remote.test_offline_local_first import (
     _artifacts,
     _local,
@@ -78,7 +79,7 @@ def _run_push_course(
             in_loop()
         return 0
 
-    rc = offline_boot.run_one_course(
+    rc = offline_boot.run_one_course(CourseRunSpec(
         _push_base(tmp_path, outbox, **(cfg or {})),
         {},
         logs.append,
@@ -90,7 +91,7 @@ def _run_push_course(
         push_outbox=outbox,
         stop_file=str(stop or (tmp_path / "stop")),
         run_loop_main=fake_run_loop,
-    )
+    ))
     assert rc == 0
     assert calls == ["ensure_code", "ensure_ts_tree"], calls
     return seen, logs
@@ -101,7 +102,7 @@ def _run_push_course(
 
 def test_build_run_argv_outbox_never_carries_a_hub_url(tmp_path: Path) -> None:
     """`--outbox` 与 `--hub-url` **互斥**：同时给就变回 HTTP 补传（而 push 包里没有 token）。"""
-    argv = offline_boot.build_run_argv(
+    argv = offline_boot.build_run_argv(RunArgvSpec(
         {"course": "c5-gae", "live_backfeed": True},
         None,
         tmp_path,
@@ -109,20 +110,20 @@ def test_build_run_argv_outbox_never_carries_a_hub_url(tmp_path: Path) -> None:
         str(tmp_path / "tok"),
         outbox=tmp_path / "ob",
         stop_file=str(tmp_path / "stop"),
-    )
+    ))
     assert argv.count("--outbox") == 1 and argv.count("--no-deliver") == 1
     assert argv.count("--hub-url") == 0 and argv.count("--hub-token-file") == 0
     assert argv[argv.index("--stop-file") + 1] == str(tmp_path / "stop")
 
 
 def test_build_run_argv_without_outbox_keeps_the_http_leg(tmp_path: Path) -> None:
-    argv = offline_boot.build_run_argv(
+    argv = offline_boot.build_run_argv(RunArgvSpec(
         {"course": "c5-gae", "live_backfeed": True},
         None,
         tmp_path,
         "https://hub.example",
         str(tmp_path / "tok"),
-    )
+    ))
     assert argv[argv.index("--hub-url") + 1] == "https://hub.example"
     assert argv.count("--outbox") == 0
 
@@ -161,7 +162,7 @@ def test_push_course_with_local_artifacts_does_not_replay_the_pack(
 
 def test_push_course_without_a_pack_is_loud(tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as e:
-        offline_boot.run_one_course(
+        offline_boot.run_one_course(CourseRunSpec(
             _push_base(tmp_path, tmp_path / "ob"),
             {},
             lambda _m: None,
@@ -170,7 +171,7 @@ def test_push_course_without_a_pack_is_loud(tmp_path: Path) -> None:
             push_mode=True,
             assigned_pack=tmp_path / "nope.zip",
             push_outbox=tmp_path / "ob",
-        )
+        ))
     assert str(e.value).startswith("[offline-push] 任务包缺失"), e.value
 
 

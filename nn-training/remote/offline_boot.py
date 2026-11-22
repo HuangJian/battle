@@ -82,7 +82,7 @@ import uuid
 import zipfile
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 # ── 交付面（S5 第十四刀）住兄弟文件 `remote/offline_deliverable.py` ────────────────────
 # notebook 把它与 `offline_boot.py` / `tailscale_boot.py` 一起从 GitHub raw 拉进同一目录
@@ -1616,21 +1616,24 @@ def write_lease_file(dest_dir: Path, lease: str) -> str:
 
 
 # ═══ part 6/12: 06_run — 跑一局：build_run_argv + run_one_course（产物） ═══
-def build_run_argv(
-    cfg: dict,
-    pack: Path | None,
-    dest: Path,
-    hub: str,
-    token_file: str,
-    resume_dir: str | Path | None = None,
-    *,
-    local_first: bool = False,
-    lease_file: str = "",
-    backup_root: str | Path | None = None,
-    outbox: str | Path = "",
-    stop_file: str = "",
-    floor_it: int = 0,
-) -> list[str]:
+class RunArgvSpec(NamedTuple):
+    """`build_run_argv` 的旋钮袋（P0-3：12 参 → 一个对象）。"""
+
+    cfg: dict
+    pack: Path | None
+    dest: Path
+    hub: str
+    token_file: str
+    resume_dir: str | Path | None = None
+    local_first: bool = False
+    lease_file: str = ""
+    backup_root: str | Path | None = None
+    outbox: str | Path = ""
+    stop_file: str = ""
+    floor_it: int = 0
+
+
+def build_run_argv(spec: RunArgvSpec) -> list[str]:
     """run_loop 的 argv（纯函数，便于单测钉住回传/评估/锚点三组开关的形状）。
 
     `cfg["course"]` 在这一层恒是**单个**课程名（`run_one_course` 已把多课程列表拆开），
@@ -1640,6 +1643,12 @@ def build_run_argv(
     plan/manifest/代码/TS 全从产物目录读（`run_loop.main` 允许 `--artifacts` 单独用）。
     这是本 plan 的核心动作：**不存在"包覆盖本机计划"这条路径**（评审 F1/F3）。
     """
+    # 旧签名 12 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    cfg, pack, dest, hub = spec.cfg, spec.pack, spec.dest, spec.hub
+    token_file, resume_dir = spec.token_file, spec.resume_dir
+    local_first, lease_file = spec.local_first, spec.lease_file
+    backup_root, outbox = spec.backup_root, spec.outbox
+    stop_file, floor_it = spec.stop_file, spec.floor_it
     course = str(cfg.get("course") or "").strip()
     argv: list[str] = []
     if pack is not None and not local_first:
@@ -1914,24 +1923,27 @@ def _deliver(
 
 
 
-def run_one_course(
-    cfg: dict,
-    creds: dict,
-    log: Callable[[str], None],
-    keepalive_stop: Any,
-    *,
-    course: str,
-    multi: bool = False,
-    run_loop_main: Callable[[list[str]], int] | None = None,
-    lease: str = "",
-    progress: dict | None = None,
-    push_mode: bool = False,
-    assigned_pack: str | Path | None = None,
-    assigned_resume: str | Path | None = None,
-    push_outbox: str | Path = "",
-    stop_file: str = "",
-    push_floor_it: int = 0,
-) -> int:
+class CourseRunSpec(NamedTuple):
+    """`run_one_course` 的旋钮袋（P0-3：15 参 → 一个对象）。"""
+
+    cfg: dict
+    creds: dict
+    log: Callable[[str], None]
+    keepalive_stop: Any
+    course: str
+    multi: bool = False
+    run_loop_main: Callable[[list[str]], int] | None = None
+    lease: str = ""
+    progress: dict | None = None
+    push_mode: bool = False
+    assigned_pack: str | Path | None = None
+    assigned_resume: str | Path | None = None
+    push_outbox: str | Path = ""
+    stop_file: str = ""
+    push_floor_it: int = 0
+
+
+def run_one_course(spec: CourseRunSpec) -> int:
     """跑**一门课**的整段：取包 → 引导代码 → `remote.run_loop` → 打交付物；返回 rc。
 
     `multi=True`（同一会话里还有别的课）时工作目录再套一层课程名——见 `course_work_dir`。
@@ -1950,6 +1962,13 @@ def run_one_course(
     东西（两个产物根、半截目录闸、本机优先、code.zip 引导、argv 装配）两边逐字相同 —— 复制一份
     就等着两边漂开（P1-9 的原始动机就是「不要让 push 分支变成半成品」）。
     """
+    # 旧签名 15 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    cfg, creds, log = spec.cfg, spec.creds, spec.log
+    keepalive_stop, course, multi = spec.keepalive_stop, spec.course, spec.multi
+    run_loop_main, lease, progress = spec.run_loop_main, spec.lease, spec.progress
+    push_mode, assigned_pack = spec.push_mode, spec.assigned_pack
+    assigned_resume, push_outbox = spec.assigned_resume, spec.push_outbox
+    stop_file, push_floor_it = spec.stop_file, spec.push_floor_it
     deliverable, ccfg, work, net, dest = _prepare_roots(cfg, course, multi, log)
 
     # ── 本机优先：产物目录三件齐全 ⇒ 不让包改写这一段的计划/清单（plan §3 判定表）──
@@ -2026,7 +2045,7 @@ def run_one_course(
     else:
         log("实时回传关闭（CFG.live_backfeed=False）—— 跑完统一打包，手动下载导入")
 
-    argv = build_run_argv(
+    argv = build_run_argv(RunArgvSpec(
         ccfg,
         pack,
         dest,
@@ -2041,7 +2060,7 @@ def run_one_course(
         outbox=push_outbox if push_mode else "",
         stop_file=stop_file if push_mode else "",
         floor_it=int(push_floor_it or 0) if push_mode else 0,
-    )
+    ))
     log("开始训练：python -m remote.run_loop " + " ".join(_redact(argv)))
     # ★M3 / Q2：把轮内打点层挂上（只在这时候才可能：hub 可达 ∧ 领到租约）——快照侧的完成
     # 事件（`plan_run` 的轮边界 / `iter_rollout` 的每 N 局完）会经
@@ -2055,7 +2074,7 @@ def run_one_course(
             Path(push_outbox) / OFFLINE_PUSH_PROGRESS_NAME, log
         )
     elif hub and lease:
-        detach_progress = install_progress_pinger(
+        detach_progress = install_progress_pinger(PingerSpec(
             hub,
             token,
             course,
@@ -2063,7 +2082,7 @@ def run_one_course(
             log,
             # 409 expired/taken ⇒ 重新领一次（评审 F1 / plan §4.2-2）：旧口径是整段哑。
             reclaim=lambda: _reclaim_lease(hub, token, course, work, log),
-        )
+        ))
     try:
         try:
             rc = int(run_loop_main(argv) or 0)
@@ -2458,19 +2477,22 @@ def _reclaim_lease(
 
 
 # ═══ part 8/12: 08_progress — 打点：install_progress_pinger / install_local_progress_sink / 交还租约 ═══
-def install_progress_pinger(
-    hub: str,
-    token: str,
-    course: str,
-    lease: str,
-    log: Callable[[str], None],
-    *,
-    interval: float = PROGRESS_MIN_INTERVAL_SEC,
-    timeout: float = PROGRESS_TIMEOUT_SEC,
-    post: Callable[..., tuple[int, dict]] | None = None,
-    reclaim: Callable[[], str] | None = None,
-    clock: Callable[[], float] | None = None,
-) -> Callable[[], str]:
+class PingerSpec(NamedTuple):
+    """`install_progress_pinger` 的旋钮袋（P0-3：10 参 → 一个对象）。"""
+
+    hub: str
+    token: str
+    course: str
+    lease: str
+    log: Callable[[str], None]
+    interval: float = PROGRESS_MIN_INTERVAL_SEC
+    timeout: float = PROGRESS_TIMEOUT_SEC
+    post: Callable[..., tuple[int, dict]] | None = None
+    reclaim: Callable[[], str] | None = None
+    clock: Callable[[], float] | None = None
+
+
+def install_progress_pinger(spec: PingerSpec) -> Callable[[], str]:
     """把**打点层**挂进 `sys.modules[PROGRESS_HOOK_NAME]` → 返回 `detach()`（撤销注册）。
 
     ★M3 / Q2 / F3：打点是「**完成事件**驱动的观测」，不是定时任务。快照侧
@@ -2496,6 +2518,10 @@ def install_progress_pinger(
 
     打点的任何失败都**不影响训练**（观测腿，与心跳同一条纪律）；`post` 是测试注入点。
     """
+    # 旧签名 10 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    hub, token, course, lease = spec.hub, spec.token, spec.course, spec.lease
+    log, interval, timeout = spec.log, spec.interval, spec.timeout
+    post, reclaim, clock = spec.post, spec.reclaim, spec.clock
     post_fn = post or _post_json
     now_fn = clock or time.monotonic
     url = progress_url(hub, course, lease)
@@ -3067,18 +3093,21 @@ def session_multi(courses: list[str], served: dict[str, str] | None = None) -> b
 
 
 # ═══ part 10/12: 10_batch — 批与自动：_run_batch / _run_auto ═══
-def _run_batch(
-    cfg: dict,
-    creds: dict,
-    log: Callable[[str], None],
-    keepalive_stop: Any,
-    courses: list[str],
-    *,
-    multi: bool,
-    leases: dict | None = None,
-    shas: dict[str, str] | None = None,
-    kinds: dict[str, str] | None = None,
-) -> int:
+class BatchRunSpec(NamedTuple):
+    """`_run_batch` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    cfg: dict
+    creds: dict
+    log: Callable[[str], None]
+    keepalive_stop: Any
+    courses: list[str]
+    multi: bool
+    leases: dict | None = None
+    shas: dict[str, str] | None = None
+    kinds: dict[str, str] | None = None
+
+
+def _run_batch(spec: BatchRunSpec) -> int:
     """串行跑一批课；返回 rc。失败分两类（plan/offline-switch-auto-bundle §3.5）：
 
       · **取不到任务包**（`PackUnavailableError`）⇒ 记一行、**跳过继续下一门**；末尾汇总，
@@ -3092,6 +3121,10 @@ def _run_batch(
     `leases` 非空时逐课领租约（best-effort）+ 心跳线程 + 跑完交还，并把跑成功的包 sha 记进
     `leases["served"]`（防自激）。租约的任何失败都**不影响**训练。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    cfg, creds, log = spec.cfg, spec.creds, spec.log
+    keepalive_stop, courses, multi = spec.keepalive_stop, spec.courses, spec.multi
+    leases, shas, kinds = spec.leases, spec.shas, spec.kinds
     rc = 0
     skipped: list[str] = []
     # 自动交接的两个「不跑」名单（§3.1a/§3.3a）：中间态（等下一拍）与会话放弃。
@@ -3163,7 +3196,7 @@ def _run_batch(
                 beat = heartbeat_loop(ctx["hub"], ctx["token"], course, lease, log)
         progress: dict = {}
         try:
-            rc = run_one_course(
+            rc = run_one_course(CourseRunSpec(
                 cfg,
                 creds,
                 log,
@@ -3172,7 +3205,7 @@ def _run_batch(
                 multi=multi,
                 lease=lease,
                 progress=progress,
-            )
+            ))
         except PackUnavailableError as e:
             # ★ 只放宽「取不到包」这一类（顺序必须在 `except SystemExit` **之前**，
             #   否则会被父类吃掉）：记一行 + 继续下一门；汇总与非零退出在循环之后。
@@ -3266,7 +3299,7 @@ def _run_task_round(
     # 只在真有 BC 课时多传一个参数：RL-only 的批保持旧调用形状（测试桩 / 旧调用方都不用改），
     # 而 BC 课一旦出现就与 RL 课走同一次 `_run_batch`。
     batch_kwargs = {"kinds": kind_map} if "bc" in kind_map.values() else {}
-    rc = _run_batch(
+    rc = _run_batch(BatchRunSpec(
         cfg,
         creds,
         log,
@@ -3276,7 +3309,7 @@ def _run_task_round(
         leases=leases,
         shas={str(t["course"]): str(t.get("pack_sha256") or "") for t in tasks},
         **batch_kwargs,
-    )
+    ))
     return rc, leases
 
 
@@ -3823,16 +3856,17 @@ def run(
         log(f"课程队列（{len(explicit)} 门，串行，CFG 点名）：{', '.join(explicit)}")
         explicit_kinds = _explicit_kinds(cfg, creds, log)
         # 老 hub 没有 `kind`（空表）⇒ 逐字旧行为：全部按 RL 跑。
-        extra = {"kinds": explicit_kinds} if explicit_kinds else {}
         return _run_batch(
-            cfg,
-            creds,
-            log,
-            keepalive_stop,
-            explicit,
-            multi=len(explicit) > 1,
-            leases=_explicit_leases(cfg, creds, log),
-            **extra,
+            BatchRunSpec(
+                cfg,
+                creds,
+                log,
+                keepalive_stop,
+                explicit,
+                multi=len(explicit) > 1,
+                leases=_explicit_leases(cfg, creds, log),
+                kinds=explicit_kinds or None,
+            )
         )
     if not bool(cfg.get("auto_discover", True)):
         # 显式关掉自动发现 = 「我就是要手填 course」的口径 ⇒ 与今天逐字相同地响亮拒。

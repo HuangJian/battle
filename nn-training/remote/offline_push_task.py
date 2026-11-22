@@ -91,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # 延迟 import：`offline_boot` 会解 `code.zip` 并把整个仓塞进 sys.path（引导期不能提前）。
     try:
-        from remote.offline_boot import run_one_course
+        from remote.offline_boot import CourseRunSpec, run_one_course
     except Exception as e:  # 代码没铺好：说清楚，别让服务端只看到一行 traceback
         raise SystemExit(
             f"[offline-push] 训练入口不可用（{type(e).__name__}: {e}）——"
@@ -99,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
         ) from e
 
     return int(
-        run_one_course(
+        run_one_course(CourseRunSpec(
             cfg,
             {},  # push 腿不用 hub 凭据（不探活 / 不取包 / 不取锚点 / 不回传）
             _child_log,
@@ -111,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
             push_outbox=outbox,
             stop_file=str(args.stop_file or ""),
             push_floor_it=floor_it,
-        )
+        ))
         or 0
     )
 

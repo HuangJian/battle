@@ -58,6 +58,7 @@ from common.protocol import (
 from remote import offline_boot
 from remote.artifacts import ArtifactStore
 from remote.hub_client import PublishSpec, publish_job
+from remote.offline_boot import BatchRunSpec, CourseRunSpec, PingerSpec, RunArgvSpec
 from remote.offline_deliver import OfflineDeliverer
 from tests.helpers.console_stub import NoHandoffConsole
 from tests.helpers.hub_poll import hub_poll
@@ -569,9 +570,9 @@ def test_a_fresh_run_lays_down_code_and_ts_tree_before_the_loop(
         "task_zip": str(pack),  # = 手动送包那条路：拿包就走，不经 hub
     }
     logs: list[str] = []
-    rc = offline_boot.run_one_course(
+    rc = offline_boot.run_one_course(CourseRunSpec(
         cfg, {}, logs.append, None, course=C_OFF, multi=False, run_loop_main=fake_loop
-    )
+    ))
 
     assert rc == 0, logs
     assert dest_existed == [True], f"run_loop 起来时产物目录必须已存在；日志：{logs}"

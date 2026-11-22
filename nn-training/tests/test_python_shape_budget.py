@@ -72,7 +72,6 @@ WIDE_FUNCS_BASELINE = {
     "remote/job_round.py": 2,
     "remote/lifecycle.py": 1,
     "remote/node_upgrade.py": 1,
-    "remote/offline_boot.py": 4,
     "remote/offline_deliver.py": 1,
     "remote/offline_eval.py": 1,
     # 2026-11-21：`_base_tar_bytes` / `_landed_bytes_for` 各 9 参 →

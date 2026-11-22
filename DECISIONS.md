@@ -8818,6 +8818,16 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-21-offline-boot-specs
+
+P0-3 第三十一刀（`remote/offline_boot.py` 一整个族）：`build_run_argv`(12)、
+`run_one_course`(15)、`_run_batch`(9)、`install_progress_pinger`(10) → `RunArgvSpec` /
+`CourseRunSpec` / `BatchRunSpec` / `PingerSpec`（字段顺序与缺省值逐字沿用）。
+四者用 `NamedTuple` 而非 `dataclass`：本文件要能在**不在 `sys.modules` 里**的情况下被
+`spec_from_file_location` 执行（notebook 首段引导，守 `test_module_imports_without_remote_on_sys_path`），
+`@dataclass` 的 KW_ONLY 判定会 `sys.modules.get(...)` 拿到 None 而炸。
+宽签名 **71 → 67**，`offline_boot.py` 4 → **0**。
+
 ## §2026-11-21-claim-job-spec
 
 P0-3 第三十刀（`job_lifecycle.py` 收官）：`claim_job`（10 参）→ frozen `ClaimSpec`

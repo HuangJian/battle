@@ -18,6 +18,7 @@ import pytest
 
 from common import progress_hook
 from remote import offline_boot
+from remote.offline_boot import PingerSpec
 
 
 @pytest.fixture()
@@ -88,9 +89,9 @@ def test_boot_side_reports_through_the_common_hook() -> None:
         calls.append(url)
         return 200, {}
 
-    detach = offline_boot.install_progress_pinger(
+    detach = offline_boot.install_progress_pinger(PingerSpec(
         "http://hub", "tok", "c5-gae", "lease1", lambda _m: None, post=fake_post
-    )
+    ))
     try:
         assert progress_hook.report("iter", done=1, total=3) is True
     finally:
@@ -115,7 +116,7 @@ def test_iter_progress_logs_at_most_once_a_minute() -> None:
         posts.append(url)
         return 200, {}
 
-    detach = offline_boot.install_progress_pinger(
+    detach = offline_boot.install_progress_pinger(PingerSpec(
         "http://hub",
         "tok",
         "c5-gae",
@@ -124,7 +125,7 @@ def test_iter_progress_logs_at_most_once_a_minute() -> None:
         interval=0.0,  # 只看日志窗：发报一律放行
         post=fake_post,
         clock=lambda: now[0],
-    )
+    ))
     try:
         # 一轮 3s 的采集：一行都不打（换轮即重置窗口 + 该轮第一条不打）
         for done, total in [(1, 94), (31, 124), (93, 186), (180, 239), (239, 239)]:

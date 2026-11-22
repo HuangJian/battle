@@ -25,6 +25,7 @@ import pytest
 
 from remote import bundle as bundle_mod
 from remote import offline_boot
+from remote.offline_boot import RunArgvSpec
 
 
 def test_blocked_poll_shortens_to_the_nearest_lease_expiry() -> None:
@@ -398,7 +399,7 @@ def test_hub_candidates_prefers_cfg_url_and_ignores_placeholder() -> None:
 
 
 def test_build_run_argv_live_backfeed_uses_the_deliver_leg(tmp_path: Path) -> None:
-    argv = offline_boot.build_run_argv(
+    argv = offline_boot.build_run_argv(RunArgvSpec(
         {
             "course": "c5-gae",
             "device": "cuda",
@@ -411,7 +412,7 @@ def test_build_run_argv_live_backfeed_uses_the_deliver_leg(tmp_path: Path) -> No
         tmp_path / "run",
         "https://hub.example",
         "/tmp/hub.token",
-    )
+    ))
     assert argv[:4] == ["--bundle", str(tmp_path / "task-c5-gae.zip"), "--artifacts", str(tmp_path / "run")]
     assert "--hub-url" in argv and argv[argv.index("--hub-url") + 1] == "https://hub.example"
     assert "--hub-token-file" in argv and "--no-deliver" not in argv
@@ -423,16 +424,16 @@ def test_build_run_argv_live_backfeed_uses_the_deliver_leg(tmp_path: Path) -> No
 def test_build_run_argv_backfeed_carries_the_course(tmp_path: Path) -> None:
     """开回传 ⇒ argv 带 `--hub-course <CFG.course>`；纯离线则**不带**（不需要也不该有）。"""
     cfg = {"course": "c5-gae", "live_backfeed": True}
-    live = offline_boot.build_run_argv(cfg, tmp_path / "t.zip", tmp_path / "run", "h", "f")
+    live = offline_boot.build_run_argv(RunArgvSpec(cfg, tmp_path / "t.zip", tmp_path / "run", "h", "f"))
     assert live[live.index("--hub-course") + 1] == "c5-gae"
-    pure = offline_boot.build_run_argv(
+    pure = offline_boot.build_run_argv(RunArgvSpec(
         {**cfg, "live_backfeed": False}, tmp_path / "t.zip", tmp_path / "run", "h", "f"
-    )
+    ))
     assert "--hub-course" not in pure
     # CFG 里没填课程（cell 会在 run() 里响亮拒跑）⇒ 不给空串形参，宁可不带
-    no_course = offline_boot.build_run_argv(
+    no_course = offline_boot.build_run_argv(RunArgvSpec(
         {"live_backfeed": True}, tmp_path / "t.zip", tmp_path / "run", "h", "f"
-    )
+    ))
     assert "--hub-course" not in no_course
 
 
@@ -442,53 +443,53 @@ def test_build_run_argv_offline_packaging_switch(tmp_path: Path) -> None:
         ({"live_backfeed": False}, "https://hub.example", "/tmp/hub.token"),
         ({"live_backfeed": True}, "", ""),  # 回传开着但没 hub —— 同样纯离线
     ):
-        argv = offline_boot.build_run_argv(cfg, tmp_path / "t.zip", tmp_path / "run", hub, tok)
+        argv = offline_boot.build_run_argv(RunArgvSpec(cfg, tmp_path / "t.zip", tmp_path / "run", hub, tok))
         assert "--no-deliver" in argv and "--hub-url" not in argv
-    default_on = offline_boot.build_run_argv({}, tmp_path / "t.zip", tmp_path / "run", "h", "f")
+    default_on = offline_boot.build_run_argv(RunArgvSpec({}, tmp_path / "t.zip", tmp_path / "run", "h", "f"))
     assert "--no-deliver" not in default_on, "缺省是实时回传（用户口径）"
 
 
 def test_build_run_argv_passes_training_scale_only_when_non_default(tmp_path: Path) -> None:
     """★ 2026-10-24：样本/epoch 倍数缺省 1.0 **不传 flag**（旧包 argv 逐字不变）；
     非缺省时原样传给 run_loop。非法值在构造 argv 时就响亮拒（不把坏值带进子进程）。"""
-    base = offline_boot.build_run_argv({}, None, tmp_path / "run", "", "")
+    base = offline_boot.build_run_argv(RunArgvSpec({}, None, tmp_path / "run", "", ""))
     assert not {"--sample-mult", "--epoch-mult"} & set(base)
-    scaled = offline_boot.build_run_argv(
+    scaled = offline_boot.build_run_argv(RunArgvSpec(
         {"sample_mult": 2, "epoch_mult": 1.5}, None, tmp_path / "run", "", ""
-    )
+    ))
     assert scaled[scaled.index("--sample-mult") + 1] == "2"
     assert scaled[scaled.index("--epoch-mult") + 1] == "1.5"
     for bad in (0, -1, float("nan"), "oops"):
         with pytest.raises(ValueError, match="sample_mult"):
-            offline_boot.build_run_argv(
+            offline_boot.build_run_argv(RunArgvSpec(
                 {"sample_mult": bad}, None, tmp_path / "run", "", ""
-            )
+            ))
 
 
 def test_build_run_argv_rotation_switch_only_when_non_default(tmp_path: Path) -> None:
     """★ 2026-10-28：`CFG["rotation"]` 三态；缺省 `auto` **不传 flag**（旧包 argv 逐字不变），
     `on`/`off` 原样传给 run_loop；非法值在构造 argv 时就响亮拒。"""
-    base = offline_boot.build_run_argv({}, None, tmp_path / "run", "", "")
+    base = offline_boot.build_run_argv(RunArgvSpec({}, None, tmp_path / "run", "", ""))
     assert not {"--rotation"} & set(base)
-    auto = offline_boot.build_run_argv(
+    auto = offline_boot.build_run_argv(RunArgvSpec(
         {"rotation": "auto"}, None, tmp_path / "run", "", ""
-    )
+    ))
     assert not {"--rotation"} & set(auto)
     for value in ("on", "off"):
-        argv = offline_boot.build_run_argv(
+        argv = offline_boot.build_run_argv(RunArgvSpec(
             {"rotation": value}, None, tmp_path / "run", "", ""
-        )
+        ))
         assert argv[argv.index("--rotation") + 1] == value
     for bad in ("yes", 1, "offf"):
         with pytest.raises(ValueError, match="rotation"):
-            offline_boot.build_run_argv(
+            offline_boot.build_run_argv(RunArgvSpec(
                 {"rotation": bad}, None, tmp_path / "run", "", ""
-            )
+            ))
 
 
 def test_build_run_argv_floor_it_rides_with_the_push_outbox(tmp_path: Path) -> None:
     """F7：`--floor-it` 只跟 push 的 `--outbox` 一起出现；0/无 outbox ⇒ 不带（run_loop 缺省 0）。"""
-    argv = offline_boot.build_run_argv(
+    argv = offline_boot.build_run_argv(RunArgvSpec(
         {"course": "c5-gae"},
         None,
         tmp_path / "run",
@@ -496,17 +497,17 @@ def test_build_run_argv_floor_it_rides_with_the_push_outbox(tmp_path: Path) -> N
         "",
         outbox=tmp_path / "outbox",
         floor_it=3,
-    )
+    ))
     assert {"--outbox", "--no-deliver"} <= set(argv)
     assert argv[argv.index("--floor-it") + 1] == "3"
     # HTTP 补传腿（没有 outbox）不许带它 —— 那边每轮都要发，跳轮会漏产物
-    assert offline_boot.build_run_argv(
+    assert offline_boot.build_run_argv(RunArgvSpec(
         {}, None, tmp_path / "run", "h", "f"
-    ).count("--floor-it") == 0
+    )).count("--floor-it") == 0
     # push 腿但地板是 0 ⇒ 也不带（所有轮都物化）
-    zero = offline_boot.build_run_argv(
+    zero = offline_boot.build_run_argv(RunArgvSpec(
         {}, None, tmp_path / "run", "", "", outbox=tmp_path / "outbox"
-    )
+    ))
     assert zero.count("--floor-it") == 0
 
 
@@ -567,11 +568,11 @@ def test_lease_file_is_owner_only_and_goes_to_argv(tmp_path: Path) -> None:
         assert (Path(p).stat().st_mode & 0o777) == 0o600
     assert offline_boot.write_lease_file(tmp_path, "") == ""
     cfg = {"course": "c5-gae", "live_backfeed": True}
-    argv = offline_boot.build_run_argv(
+    argv = offline_boot.build_run_argv(RunArgvSpec(
         cfg, tmp_path / "t.zip", tmp_path / "run", "h", "f", lease_file=p
-    )
+    ))
     assert argv[argv.index("--hub-lease-file") + 1] == p
-    no_lease = offline_boot.build_run_argv(cfg, tmp_path / "t.zip", tmp_path / "run", "h", "f")
+    no_lease = offline_boot.build_run_argv(RunArgvSpec(cfg, tmp_path / "t.zip", tmp_path / "run", "h", "f"))
     assert "--hub-lease-file" not in no_lease
     # 日志用的 argv 不得把它露出来（与 `--hub-token` 同一处理）
     redacted = offline_boot._redact(["--hub-lease", "l3ak"])

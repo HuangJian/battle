@@ -19,6 +19,7 @@ import pytest
 from remote import job_lifecycle as jl
 from remote import offline_boot as ob
 from remote import worker as worker_mod
+from remote.offline_boot import BatchRunSpec
 
 
 def _ready(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -48,9 +49,9 @@ def test_run_auto_puts_bc_and_rl_in_the_same_batch_with_kinds(
             [],
         )
 
-    def fake_batch(*a: Any, **kw: Any) -> int:
-        seen["courses"] = list(a[4])
-        seen["kinds"] = kw.get("kinds")
+    def fake_batch(spec: Any) -> int:
+        seen["courses"] = list(spec.courses)
+        seen["kinds"] = spec.kinds
         raise SystemExit("batch-ran")
 
     monkeypatch.setattr(ob, "resolve_courses", fake_resolve)
@@ -77,9 +78,9 @@ def test_run_batch_routes_a_bc_course_to_the_bc_drain(
 
     monkeypatch.setattr(ob, "run_bc_course", fake_bc)
     monkeypatch.setattr(ob, "claim_course", no_lease)
-    rc = ob._run_batch(
+    rc = ob._run_batch(BatchRunSpec(
         {}, {}, lambda _m: None, None, ["bc1"], multi=False, kinds={"bc1": "bc"}
-    )
+    ))
     assert rc == 0
     assert seen == ["bc1"]
 
