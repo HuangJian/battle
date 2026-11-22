@@ -54,6 +54,10 @@ ALLOWED_IMPORTS = {
     "common.protocol",
     "remote.http",
     "remote.job_fs",
+    # 2026-11-22（python.refactor.md §P0-3 批 C）：`_run_bc_job` 的入参改成 L1 的
+    # `remote.job_spec.BcJobSpec`。L1 → L4 是向下边；反方向（`job_shell` import
+    # `bc_job`）才是环，见 `tests/remote/test_job_shell_split.py`。
+    "remote.job_spec",
     "worker.data.weights_io",
     "worker.train.bc",
 }

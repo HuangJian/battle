@@ -210,12 +210,13 @@ def world(bc_course: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Si
     def collect_corpus(spec: Any):
         collected.append(int(spec.it))
 
-    def publish_bc_job(**kw: Any) -> dict:
-        it = int(kw["it"])
+    def publish_bc_job(spec: Any) -> dict:
+        # `spec` 是 `PublishBcSpec`（P0-3）；接口收一个对象，不改字段。
+        it = int(spec.it)
         n["jid"] += 1
         jid = f"jid{n['jid']}"
         published.append(it)
-        job_root = Path(kw["job_root"])
+        job_root = Path(spec.job_root)
         (job_root / jid).mkdir(parents=True, exist_ok=True)
         manifest = {"job_id": jid, "it": it, "kind": "bc", "mode": "bc"}
         (job_root / jid / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")

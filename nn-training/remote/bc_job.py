@@ -47,6 +47,7 @@ from common.protocol import (
 )
 from remote.http import WireRequest, _request
 from remote.job_fs import _persist_result
+from remote.job_spec import BcJobSpec
 
 #: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
 _log = tag_logger("worker", lambda: time)
@@ -398,7 +399,7 @@ def resolve_bc_seed(manifest: dict) -> tuple[int, str]:
     return int(explicit), "course"
 
 
-def _check_corpus_lineage(manifest: dict, shard_dirs: list[str]) -> None:
+def _check_corpus_lineage(manifest: dict, shard_dirs: list[Path]) -> None:
     """D14 语料血缘：与 PPO 同规（BC shard manifest 同样携带 course_fp/corpus_fp）。
 
     自 `_run_bc_job` 原样搬出：fixed 源是课程显式声明的「原样使用现成语料」，
@@ -523,21 +524,7 @@ def _bc_train_namespace(
     )
 
 
-def _run_bc_job(
-    *,
-    jid: str,
-    manifest: dict,
-    job_dir: Path,
-    shard_dirs: list[str],
-    device: str,
-    torch_threads: int,
-    echo: bool,
-    base_url: str = "",
-    token: str = "",
-    lease_token: str = "",
-    backend: str = "torch",
-    log=_log,
-) -> dict:
+def _run_bc_job(spec: BcJobSpec) -> dict:
     """云端 BC job（plan/bc-cloud-integration.plan.md §3；每 epoch 回传 2026-09-13）：
     D14 语料血缘校验 →（--echo 冒烟回显）→ **resume 接续**（hub bc-resume 优先，
     本地 bc-resume/ 兜底——中断重领同 job 从最后完成的 epoch 接着训，绝不从头重训）
@@ -547,7 +534,16 @@ def _run_bc_job(
 
     语料 = payload 解包出的 npy shard 目录（obs/scalars/actions/masks/conditions/
     returns + manifest），bc.py 的 scan_shards 对 job_dir 递归扫描即全部装载。
+
+    入参 = 一个 `BcJobSpec`（P0-3 批 C：12 个关键字 → 一个对象；装配点在
+    `remote/job_shell.bc_or_none`，spec 住 L1 的 `remote/job_spec`）。下面一次展开，
+    函数体逐字不动。
     """
+    jid, manifest, job_dir = spec.jid, spec.manifest, spec.job_dir
+    shard_dirs, device, torch_threads = spec.shard_dirs, spec.device, spec.torch_threads
+    echo, base_url, token = spec.echo, spec.base_url, spec.token
+    lease_token, backend = spec.lease_token, spec.backend
+    log = spec.log or _log
     # ---- D14 语料血缘：与 PPO 同规（BC shard manifest 同样携带 course_fp/corpus_fp）----
     # fixed 源是课程显式声明的「原样使用现成语料」：其 shard 可能来自别的课程版本，
     # 按本课指纹拒收会把整个功能变成死路；发布端因此写入 corpus_source=fixed，

@@ -1816,7 +1816,13 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      （端点**不收**：同一条腿的 `cancel_job`/`wait_result`/`poll_result` 都是 `(url, token)` 开头）、
      `remote/push_register.Registry.__init__`(9) → `RegistrySpec` ⇒ 全仓 40 → **34**、32 → **28**
      文件（§305；守 `tests/hub/test_push_spec.py`）。
-     **下一批见下面「P0-3 剩余宽签名：分文件分批待办」（C–H）**。
+     **C 批（同一把刀的第三批，BC 链四入口）**：`remote/bc_job._run_bc_job`(12) → `BcJobSpec`
+     （住 L1 的 `remote/job_spec`：装配点 `job_shell`(L4) 不许 import `bc_job`(L4)，否则成环）·
+     `trainer/bc_loop.publish_bc_job`(12) → `PublishBcSpec` · `worker/bc_eval.dispatch_bc_eval`(12) →
+     `BcEvalSpec` · `remote/colab_bc.run_training`(**10 位置参数**) → `TrainRun` ⇒ 全仓 34 → **30**、
+     28 → **24** 文件（§306；守 `tests/remote/test_bc_job_spec.py` / `tests/trainer/test_publish_bc_spec.py` /
+     `tests/worker/test_bc_eval_spec.py`）。
+     **下一批见下面「P0-3 剩余宽签名：分文件分批待办」（C2、D–H）**。
      `make_loaders` / `archive_course` / `collect_corpus` 与 `bc_ingest` 三兄弟
      已收成 spec（§273）；`load_ppo_corpus` / `ingest_offline_artifact` /
      `resumed_manifests` 紧随其后（§274）。审计的「124」是 2026-11-19 上游合入前的读数，合入带进了新的宽签名）。
@@ -1848,7 +1854,7 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      「`UnitLedger` 的字段集 + 只收一个对象」重锚（`LEDGER_FIELDS` + `_settle()`
      构造 `UnitLedger`），没有删任何一条判据；顺带发现**同族陷阱第 4 种形态 = 换模块**（patch 锚点、
      入边归属者表、行构造守卫、`GATE_SITES` 都要跟着换家，否则静默空转）。
-   * **P0-3 剩余宽签名：分文件分批待办（2026-11-22 实测 34 个 / 28 文件；A 批 ⇒ §304、B 批 ⇒ §305）**
+   * **P0-3 剩余宽签名：分文件分批待办（2026-11-22 实测 30 个 / 24 文件；A 批 ⇒ §304、B 批 ⇒ §305、C 批 ⇒ §306）**
 
      按**同一装配面 + 同一层**分批，每批 = 一把刀（spec 住同模块或就近轻模块 + 删
      `WIDE_FUNCS_BASELINE` 条目 + 一份字段表守卫 + `engineering.md` 一节 + `DECISIONS` 一条）。
@@ -1858,7 +1864,8 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      |---|---|---|
      | ~~**A · PPO 两入口**~~ **已完成（§304，43 → 40）** | ~~`ppo_update_goal` / `ppo_update_intent` / `load_episodes_common`~~ | 实测：入口形参表被 `test_ppo_loop_core` 钉着 ⇒ 契约改钉 `HeadUpdateSpec` 字段表；端口保留 `**update_kwargs`，错键在 `from_port` 构造时爆 |
      | ~~**B · hub 推送/派发**~~ **已完成（§305，40 → 34）** | ~~`hub/offline_push.__init__`(12) · `_settle_assignment`(8→`SettlePlan`) · `remote/push_dispatch.__init__`(11) · `_await_result`(8→`JobLeg`，顺手删死参 `rec`) · `remote/push_client.submit_job`(8→`(url, token, JobUpload)`) · `remote/push_register.Registry.__init__`(9→`RegistrySpec`)~~ | 实测：`_settle_assignment` 收的是那**四个同名开关**（`SettlePlan`，写读同源），不是前四项位置；`submit_job` **端点不收**（同腿四处端点一个形状）；守 `tests/hub/test_push_spec.py` |
-     | **C · BC 面** | `remote/bc_job._run_bc_job`(12) · `trainer/bc_loop.publish_bc_job`(12) · `worker/bc_eval.dispatch_bc_eval`(12) · `remote/colab_bc.run_training`(10) · `worker/models/student.__init__`(10) · `worker/models/student_paddle.__init__`(10) | 两个 `student.__init__` 是**同形双生**（torch / paddle）⇒ 同刀共收一份 spec；`run_training` 与 notebook 引导同族 |
+     | ~~**C1 · BC 链四入口**~~ **已完成（§306，34 → 30）** | ~~`remote/bc_job._run_bc_job`(12) · `trainer/bc_loop.publish_bc_job`(12) · `worker/bc_eval.dispatch_bc_eval`(12) · `remote/colab_bc.run_training`(10 位置参数)~~ | 实测：`BcJobSpec` 必须住 L1 的 `remote/job_spec` —— 装配点 `job_shell`(L4) 不许 import `bc_job`(L4)；`run_training` 十个位置参数全是 str/Path/int ⇒ 最危险的反而是它；守 `tests/remote/test_bc_job_spec.py` · `tests/trainer/test_publish_bc_spec.py` · `tests/worker/test_bc_eval_spec.py` |
+     | **C2 · 学生网** | `worker/models/student.__init__`(10) · `worker/models/student_paddle.__init__`(10) | **同形双生**（torch / paddle）⇒ 同刀共收一份 spec；22 处调用多是 `StudentNet()` / `StudentNet(h=16, d=2)`，先定「第 9 个参数怎么并」（9 个 kw 缺省），再决定 spec 是「架构 + 旋钮袋」还是两段 |
      | **D · 训练循环杂项** | `trainer/queue_local.__init__`(12) · `trainer/loop_transport._push_job_round`(10) · `worker/breaker.breaker_update`(12) · `worker/greedy_round.run_greedy_round`(12) · `worker/cmd.build_rollout_cmd`(10) · `worker/gate_check.evaluate`(9) · `worker/resume.merge_memory_shards`(9) | `build_rollout_cmd` 被 plan / rollout 两腿共用（`RUN_NODE_LABEL` 一脉），改前先查 `template_argv`；`breaker_update` 20 处调用 |
      | **E · rollout / job 腿** | `worker/iter_rollout._run_one_game_bounded`(11) · `worker/iter_rollout.run_iter_rollout`(9) · `remote/job_round._prefetch_fill`(10) · `remote/rollout_node._banner_lines`(10) · `remote/rollout_node._try_register_once`(9) · `remote/node_upgrade.request_upgrade_guarded`(9) | `run_iter_rollout` 的 9 参里前几个是 `args` 派生值（与 `PlanSpec` 同类：先看能不能直接复用 `RunSetup`）；`_run_one_game_bounded` 已有 `OneGameSpec`/`RetryGameSpec` 先例（§279），先查是否只是没接上 |
      | **F · 传输 / lifecycle** | `remote/lifecycle.__init__`(11) · `remote/error_report.report_error`(11) · `remote/hub_client.verify_and_land`(9) · `remote/hub_client.verify_and_land_bc`(9) · `remote/hub_http.report_job_failure`(9) · `remote/hub_http.wait_job`(9) · `remote/payload_proc.start_fill`(9) · `remote/tailscale_boot.fetch_guarded`(9) | `error_report` 6 个生产调用点；`hub_http` 两处是同族的「job 控制面薄壳」，与 B 批一起看更省事 |

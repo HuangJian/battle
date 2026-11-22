@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -323,21 +324,36 @@ def _run_bc_eval_one(
     return None, last_err or "failed"
 
 
-def dispatch_bc_eval(
-    *,
-    weights_bytes: bytes,
-    eval_levels: list[str],
-    games_per_stage: int,
-    it: int,
-    epoch: int,
-    course_max_ticks: int | None = None,
-    cfg: dict | None = None,
-    nodes: list[dict] | None = None,
-    course: Any | None = None,
-    course_env: bool = False,
-    meta_path: str | Path | None = None,
-    log=_log,
-) -> dict:
+@dataclass(frozen=True, kw_only=True)
+class BcEvalSpec:
+    """一次 BC 权重评估的全部输入（P0-3 批 C：12 个关键字 → 一个对象）。
+
+    失效面：`it` / `epoch` 互换 ⇒ 评估行挂错轮（表里看起来「每轮都评了」，查时找不到）；
+    `course_env` 与 `eval_levels` 是一对互斥的图源开关（前者真时后者被**忽略**，传了也不报错）；
+    `course_max_ticks` 错 ⇒ 面板与实际关卡值不可比（跨面板不可相减的同一条口径）；
+    `meta_path` 错 ⇒ 节点页「今日贡献」系统性漏计（2026-11-13 报障）。
+    """
+
+    weights_bytes: bytes
+    #: 关卡文件路径列表（`course_env=True` 时被忽略）。
+    eval_levels: list[str]
+    games_per_stage: int
+    it: int
+    epoch: int
+    #: 课程声明的面板（与关卡值并存入行，跨面板不可相减）。
+    course_max_ticks: int | None = None
+    cfg: dict | None = None
+    nodes: list[dict] | None = None
+    #: `course_env=True` 时的课程对象（`stage_ids` / `max_ticks` / `difficulty` / `player`）。
+    course: Any | None = None
+    #: 图源开关：True = 直接继承课程解析后的 stage 集与环境覆盖。
+    course_env: bool = False
+    #: 机器健康账落点（`dist-agent-meta.jsonl`；与训练同一份）。
+    meta_path: str | Path | None = None
+    log: Callable[[str], None] = _log
+
+
+def dispatch_bc_eval(spec: BcEvalSpec) -> dict:
     """把一份 BC 权重在 eval 图上跑干净评估并聚合。
 
     两种图源（2026-11-12）：
@@ -361,7 +377,14 @@ def dispatch_bc_eval(
     `meta_path` 非空 ⇒ 每局结算后追加一行 `dist-agent-meta.jsonl`（与 A/B 层同一份机器
     健康账）：`node` 取承载该局的节点、`mode="eval"`。**BC eval 以前不写这本账**，节点页
     「今日贡献」因此把 BC 手动 eval 的局数系统性漏掉（2026-11-13 报障）。
+
+    入参 = 一个 `BcEvalSpec`（P0-3 批 C）；下面一次展开，函数体逐字不动。
     """
+    weights_bytes, eval_levels = spec.weights_bytes, spec.eval_levels
+    games_per_stage, it, epoch = spec.games_per_stage, spec.it, spec.epoch
+    course_max_ticks, cfg, nodes = spec.course_max_ticks, spec.cfg, spec.nodes
+    course, course_env = spec.course, spec.course_env
+    meta_path, log = spec.meta_path, spec.log
     if nodes is None:
         from common.distribution import load_dist_config
 

@@ -64,10 +64,11 @@ WIDE_FUNCS_BASELINE = {
     # ⇒ `hub/queue_claims.py` · `hub/queue_peer.py` · `hub/store.py` ·
     # `hub/store_leases.py` 四个文件各 1/1/1/2 条宽签名归零，条目删除。
     # P3 lazy loader 的装载参数（loader/gamma/lam/normalize/配额/mb/bundle）本就 >8。
-    # 上游合入的宽签名（BC 数据集）——同批登记，待收对象。
-    "remote/bc_job.py": 1,
+    # 2026-11-22（P0-3 批 C）：`_run_bc_job` 的 12 个关键字参数收成 `BcJobSpec`
+    # （L1 的 `remote/job_spec`；`job_shell` 装配，不许 import `bc_job`）
+    # ⇒ `remote/bc_job.py` 归零，条目删除；守 `tests/remote/test_bc_job_spec.py`。
     "remote/bundle.py": 2,
-    "remote/colab_bc.py": 1,
+    # `remote/colab_bc.py` 已清零（P0-3 批 C：`run_training` 的 10 个位置参数 → `TrainRun`）。
     "remote/error_report.py": 1,
     "remote/hub_client.py": 2,
     "remote/hub_http.py": 2,
@@ -100,7 +101,8 @@ WIDE_FUNCS_BASELINE = {
     #: 2026-11-22（P0-3 第四十三刀）：`BatchEvalRunner.__init__`(16) 与 `dispatch_batch_bg`(13)
     #: 共收 `RunnerSpec` ⇒ 本文件清零，条目删除；守 `tests/trainer/test_runner_spec.py`。
     "trainer/bc_ingest.py": 0,
-    "trainer/bc_loop.py": 1,
+    # `trainer/bc_loop.py` 已清零（P0-3 批 C：`publish_bc_job` 的 12 个关键字 →
+    # `PublishBcSpec`）；守 `tests/trainer/test_publish_bc_spec.py`。
     # `trainer/dispatch.py` 已清零（P0-3 第三十九刀：`DispatchSpec`）。
     # `trainer/dispatch_queue.py` 已清零（P0-3 第三十九刀：`DispatchSpec`）。
     "trainer/loop_transport.py": 1,
@@ -112,7 +114,8 @@ WIDE_FUNCS_BASELINE = {
     # `trainer/stream.py` 已清零（P0-3 第三十五刀：`StreamRunSpec`）。
     # 2026-11-22（P0-3 第三十三刀）：`dispatch_bc_corpus` 的 25 个关键字参数收成
     # `BcDispatchSpec` ⇒ 本文件宽签名归零，条目删除。
-    "worker/bc_eval.py": 1,
+    # `worker/bc_eval.py` 已清零（P0-3 批 C：`dispatch_bc_eval` 的 12 个关键字 →
+    # `BcEvalSpec`）；守 `tests/worker/test_bc_eval_spec.py`。
     "worker/breaker.py": 1,
     "worker/cmd.py": 1,
     # 2026-11-20（python.refactor.md P0-3 第一/二刀）：`EvalRound.__init__` 的 40 个关键字

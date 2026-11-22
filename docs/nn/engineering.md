@@ -29,6 +29,48 @@
 
 ---
 
+## §306 P0-3 批 C：BC 链四入口收 spec（34 → 30）（2026-11-22）
+
+* **一把刀四处**，全在「一件 BC 活」的四个入口上：`remote/bc_job._run_bc_job`(12) ·
+  `trainer/bc_loop.publish_bc_job`(12) · `worker/bc_eval.dispatch_bc_eval`(12) ·
+  `remote/colab_bc.run_training`(**10 个位置参数**)。读数：宽签名 **34 → 30**、文件 28 → **24**。
+* **为什么这四个是一批**：它们是同一条链的四个断点（打包发布 → 云端执行 → 权重评估 → 本机训练），
+  参数**按同一张表长出来**（job 身份 + 语料指纹 + 落盘点 + 观测出口）。逐个收会让同一条链出现四种
+  形状；一起收才能让「这件活是谁、语料在哪、写到哪」在四个点上用同一组名字。
+* **最危险的是最不起眼的那个**：`run_training(py, nn, corpus, run_dir, log_path, state_f, device,
+  total_epochs, seed, tag)` —— 十个 str/Path/int 全无类型区分。`run_dir`/`log_path` 互换 =
+  把权重写进日志文件；`total_epochs`/`seed` 互换（int 与 int）只会让这次跑「不是你点的那次」。
+  它只有一个调用点，所以坏起来**只会在 notebook 里现场发现**。
+* **形状**（每处都收成 frozen + `kw_only` 的一份值对象，缺省逐字保留）：
+  * `BcJobSpec`(12) —— 但**不住 `bc_job`**：装配点是 `remote/job_shell.bc_or_none`(L4)，而
+    `job_shell` 不许 import `bc_job`(L4，同秩成环，`tests/helpers/remote_dag.py` 有明文)。
+    所以它和 `RunJobSpec` 一起住 L1 的 `remote/job_spec.py`：L1 → L4 是向下边。
+  * `PublishBcSpec`(12) 住 `trainer/bc_loop`（它唯一的读者/写者就是那个模块的轮循环）。
+  * `BcEvalSpec`(12) 住 `worker/bc_eval`（`dispatch_bc_eval` 的全部输入）。
+  * `TrainRun`(10) 住 `remote/colab_bc`（notebook 引导的入口参数）。
+* **延迟解析的日志出口**：`BcJobSpec.log = None` 而非 `= _log`（与 `RunJobSpec` 同规）——
+  直接绑模块属性会让 `monkeypatch.setattr(bc_job, "_log", …)` 对默认路径失效（默认值 import
+  时就固化了）。`BcEvalSpec.log` 反而保留 `= _log`：`bc_eval` 是它自己日志出口的拥有者。
+* **一处类型收窄**（mypy 抓到的）：`BcJobSpec.shard_dirs` 原来照旧签名写成 `list[str]`，而
+  `JobState.shard_dirs` 是 `list[Path]`（payload 解包产物）。改成 `list[Path]` 并顺带把
+  `_check_corpus_lineage` 的注解对齐；e2e 里唯一一个 `_fake_shard_dir` 的 `str` 返回值改成 `Path`。
+* **守卫**（三个文件，形状与 `tests/hub/test_push_spec.py` 同口径）：
+  `tests/remote/test_bc_job_spec.py`（`BcJobSpec` / `TrainRun`：字段表 · 冻结 · `kw_only` ·
+  入口只收一个对象 · 旧的十位置调用面当场 `TypeError` · 错键 `TypeError`）·
+  `tests/trainer/test_publish_bc_spec.py` · `tests/worker/test_bc_eval_spec.py`。
+* **口径陷阱（第二批，记一笔）**：`BcEvalSpec.log: Any = _log` 会让 `test_any_budget` 红
+  （`worker/bc_eval.py` 12 → 13 处）。`Any` 在这里也不诚实——它就是 `Callable[[str], None]`；
+  同理 `PublishBcSpec.log` 从 `Any` 改成 `Callable[..., None]`（`common.log.log` 带关键字
+  `course`/`router`，标死 `[[str], None]` 会把真实签名说窄）。
+* **被否决**：① 四个 spec 挤进一个 `BcSpec`（发布与执行拿的是不同阶段的输入：发布时还没有
+  `job_dir`，评估时权重已是 `bytes`）；② `BcJobSpec` 留在 `bc_job.py`、让 `job_shell` 反向 import
+  （L4 → L4 成环，`remote_dag` 当场红）；③ `TrainRun` 只把三个 Path 收成对象（最危险的
+  `total_epochs`/`seed` 两个 int 还在位置上）；④ 顺手把两个 `StudentNet.__init__`(10) 一起收
+  （它们是**同形双生** torch/paddle，需要先定「第 9 个参数怎么并」，另起一刀）。
+* **验证**：`bun run pygate` 绿（6835 passed / 13 skipped）；`ruff` + `mypy`（1076 文件）绿；
+  `WIDE_FUNCS_BASELINE` 删四条（`remote/bc_job.py` / `remote/colab_bc.py` / `trainer/bc_loop.py` /
+  `worker/bc_eval.py`），文本断言 / G5 私有断言 / `Any` 基线**全部未动**。
+
 ## §305 P0-3 批 B：hub 推送/派发六处宽签名收 spec（40 → 34）（2026-11-22）
 
 * **一把刀六处**，全在「hub 推送 / 派发」这一条腿上：`hub/offline_push.OfflinePushDispatcher.__init__`(12)

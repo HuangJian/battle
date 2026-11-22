@@ -1,4 +1,9 @@
-"""`run_job` 的参数对象（17 个入参 → 一份 frozen + kw_only spec）。
+"""`remote/` 侧两个**作业级**入口的参数对象（`RunJobSpec` / `BcJobSpec`）。
+
+`RunJobSpec` = `run_job` 的 17 个入参 → 一份 frozen + kw_only spec；`BcJobSpec` = 云端 BC 那件活的
+12 个入参（P0-3 批 C）。
+
+## `run_job` 那半
 
 ## 为什么要有它
 
@@ -20,6 +25,19 @@
 就必须有一个谁都能 import 的轻模块。本文件的依赖面只有 stdlib + `common.log_bundle`
 （拓扑秩 **L1**，已登记 `tests/helpers/remote_dag.py`）。
 
+`BcJobSpec` 搭同一个文件是同一个理由的另一半：它的生产者是 `remote/job_shell.bc_or_none`（L4），
+消费者是 `remote/bc_job._run_bc_job`（L4）——`job_shell` **不许** import `bc_job`（同秩成环，
+会把 job_shell 顶到 L5，`remote_dag` 账本里有明文），所以 spec 不能住在 `bc_job` 里。
+放在 L1 是本文件唯一的层级可达解。
+
+### `BcJobSpec` 的字段分档
+
+身份（`jid` / `manifest` / `job_dir`）· 语料（`shard_dirs`）· 执行旋钮（`device` /
+`torch_threads` / `backend` / `echo`）· 传输（`base_url` / `token` / `lease_token`）· 日志。
+前三档都是「抄错一格就静默跑错东西」的身份位：`torch_threads` 错 = 云机 96 核按一核跑；
+`backend` 错 = torch/paddle 权重互不兼容（回传的 `weights.json` 下游读不了）；
+`echo` 错 = 冒烟跑成真训（或反之：真训回一份占位权重）。
+
 字段分档：身份（`base_url` / `token` / `job`）· 落盘（`work_dir` / 两个 code 缓存目录）·
 执行旋钮（`device` / `torch_threads` / `backend` / `epoch_mult` / `echo` / `lease_token`）·
 随包字节（`preloaded`）· 观测与调度注入点（`prep` / `should_cancel` / `on_ppo_start` / `log`）。
@@ -32,6 +50,37 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from common.log_bundle import LogBundle
+
+
+@dataclass(frozen=True, kw_only=True)
+class BcJobSpec:
+    """云端一件 BC 活的全部输入（`remote/bc_job._run_bc_job` 只收它）。
+
+    装配点 = `remote/job_shell.bc_or_none`（它手上就有 `JobState` 的这几个字段）。
+    字段分档与「为什么住在这里」见模块头。
+    """
+
+    jid: str
+    #: hub 的作业 manifest（`kind="bc"`；`epochs` / D14 指纹 / 种子全在里面）。
+    manifest: dict
+    #: 本 job 的落盘根（payload 解包出的 npy shard 与产物都在它下面）。
+    job_dir: Path
+    #: 语料 shard 目录（payload 解包出的 `Path`；D14 逐 shard 校验的面）。
+    shard_dirs: list[Path]
+    device: str
+    #: torch 线程数（0 = 不设）。
+    torch_threads: int
+    #: 冒烟：不拉 torch 不训练，回一份占位权重 + smoke 标记。
+    echo: bool
+    #: hub 地址与 token；空 `base_url` = 半离线（resume 只走本地盘）。
+    base_url: str = ""
+    token: str = ""
+    #: 租约 token（hub 用它挡旧 worker 覆盖新 resume）。
+    lease_token: str = ""
+    #: `torch` / `paddle`（与 PPO 同规；paddle 走 `train/bc_paddle.py`）。
+    backend: str = "torch"
+    #: 日志出口；None = `remote/bc_job` 自己的 `_log`（延迟解析，与 `RunJobSpec` 同规）。
+    log: Callable[[str], None] | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

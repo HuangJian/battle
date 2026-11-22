@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 
 # 入口脚本自举（脚本模式下 sys.path[0] 是脚本目录，仓内模块要放回 nn-training 根）。
@@ -200,18 +201,36 @@ def bank_progress(run_dir: Path, state_f: Path, s: dict) -> dict:
     return s
 
 
-def run_training(
-    py: str,
-    nn: Path,
-    corpus: Path,
-    run_dir: Path,
-    log_path: Path,
-    state_f: Path,
-    device: str,
-    total_epochs: int,
-    seed: int,
-    tag: str,
-) -> None:
+@dataclass(frozen=True, kw_only=True)
+class TrainRun:
+    """一次 colab BC 训练的输入（P0-3 批 C：10 个**位置**参数 → 一个对象）。
+
+    这十个全是 str/Path/int（`py` / `nn` / `corpus` / `run_dir` / `log_path` / `state_f` /
+    `device` / `total_epochs` / `seed` / `tag`），在旧签名里一个都不可辨：`run_dir` 与
+    `log_path` 互换 = 日志写进 run 目录、权重写进日志文件（训练跑完才发现）；`total_epochs`
+    与 `seed` 互换（int 与 int）= 种子变成 8 这种「能跑、只是不是你要的那次」。
+    """
+
+    #: 解释器路径（`find_python` 的结果）。
+    py: str
+    #: nn-training 根（子进程的 cwd 基点）。
+    nn: Path
+    corpus: Path
+    run_dir: Path
+    log_path: Path
+    state_f: Path
+    device: str
+    total_epochs: int
+    seed: int
+    #: 写进 `--notes` 的 run 标签（现场追溯用）。
+    tag: str
+
+
+def run_training(run: TrainRun) -> None:
+    py, nn = run.py, run.nn
+    corpus, run_dir, log_path = run.corpus, run.run_dir, run.log_path
+    state_f, device = run.state_f, run.device
+    total_epochs, seed, tag = run.total_epochs, run.seed, run.tag
     run_dir.mkdir(parents=True, exist_ok=True)
     s = load_state(state_f, total_epochs)
     base = s.get("done", 0)
@@ -323,7 +342,20 @@ def main(argv: list[str] | None = None) -> int:
     log(ver)
 
     ensure_corpus(corpus, args.corpus_zip, drive_dir, mount, args.min_shards)
-    run_training(py, nn, corpus, run_dir, log_path, state_f, device, args.epochs, args.seed, args.run_tag)
+    run_training(
+        TrainRun(
+            py=py,
+            nn=nn,
+            corpus=corpus,
+            run_dir=run_dir,
+            log_path=log_path,
+            state_f=state_f,
+            device=device,
+            total_epochs=int(args.epochs),
+            seed=int(args.seed),
+            tag=str(args.run_tag),
+        )
+    )
     return 0
 
 

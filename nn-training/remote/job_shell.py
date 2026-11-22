@@ -54,6 +54,7 @@ from remote.download import (
     _resolve_weights,
 )
 from remote.job_fs import _persist_result
+from remote.job_spec import BcJobSpec
 from remote.wire import _wire_block
 from worker.iter_rollout import RoundContext, resolve_bun
 from worker.stream_collect import StreamCollector
@@ -225,18 +226,20 @@ def bc_or_none(st: JobState, *, run_bc) -> dict | None:
     if str(st.manifest["kind"]) != "bc":
         return None
     result: dict | None = run_bc(
-        jid=st.jid,
-        manifest=st.manifest,
-        job_dir=st.job_dir,
-        shard_dirs=st.shard_dirs,
-        device=st.device,
-        torch_threads=st.torch_threads,
-        echo=st.echo,
-        base_url=st.base_url,
-        token=st.token,
-        lease_token=st.lease_token,
-        backend=st.backend,
-        log=st.log,
+        BcJobSpec(
+            jid=st.jid,
+            manifest=st.manifest,
+            job_dir=st.job_dir,
+            shard_dirs=st.shard_dirs,
+            device=st.device,
+            torch_threads=st.torch_threads,
+            echo=st.echo,
+            base_url=st.base_url,
+            token=st.token,
+            lease_token=st.lease_token,
+            backend=st.backend,
+            log=st.log,
+        )
     )
     return result
 

@@ -110,20 +110,21 @@ def rec(monkeypatch: pytest.MonkeyPatch) -> Recorder:
     def collect_corpus(spec: Any):
         r.collected.append(spec.it)
 
-    def publish_bc_job(**kw: Any) -> dict:
-        it = int(kw["it"])
+    def publish_bc_job(spec: Any) -> dict:
+        # `spec` 是 `PublishBcSpec`（P0-3）；接口收一个对象，不改字段。
+        it = int(spec.it)
         jid = r.new_jid()
         r.published.append(it)
-        job_root = Path(kw["job_root"])
+        job_root = Path(spec.job_root)
         (job_root / jid).mkdir(parents=True, exist_ok=True)
-        course_obj = kw.get("course")
+        course_obj = spec.course
         epochs = int(getattr(getattr(course_obj, "train", None), "epochs", 0) or 0)
         manifest = {
             "job_id": jid,
             "it": it,
             "kind": "bc",
             "course_name": "x",
-            "course_key": str(kw.get("course_key") or ""),
+            "course_key": str(spec.course_key or ""),
             "epochs": epochs,
             "mode": "bc",
         }
@@ -249,15 +250,17 @@ def test_publish_records_code_snapshot_freshness(
     monkeypatch.setattr(bc_loop, "publish_job", fake_publish)
 
     manifest = bc_loop.publish_bc_job(
-        course=course,
-        course_fp="f" * 64,
-        corpus_fp="c" * 64,
-        course_text="{}",
-        it=1,
-        traj=traj,
-        job_root=job_root,
-        jsonl_path=traj / "training_log.jsonl",
-        log=logs.append,
+        bc_loop.PublishBcSpec(
+            course=course,
+            course_fp="f" * 64,
+            corpus_fp="c" * 64,
+            course_text="{}",
+            it=1,
+            traj=traj,
+            job_root=job_root,
+            jsonl_path=traj / "training_log.jsonl",
+            log=logs.append,
+        )
     )
 
     assert manifest["job_id"] == "jid-stale"
@@ -301,16 +304,18 @@ def test_publish_bc_job_fixed_uses_rl_shard_pattern(
     monkeypatch.setattr(bc_loop, "iter_bc_shard_dirs", fake_iter)
     with pytest.raises(SystemExit, match="无完整 BC shard"):
         bc_loop.publish_bc_job(
-            course=course,
-            course_fp="f" * 64,
-            corpus_fp="c" * 64,
-            course_text="{}",
-            it=1,
-            traj=tmp_path / "traj",
-            job_root=tmp_path / "jobs",
-            jsonl_path=tmp_path / "training_log.jsonl",
-            data_round_dir=fixed_dir,
-            log=lambda _m: None,
+            bc_loop.PublishBcSpec(
+                course=course,
+                course_fp="f" * 64,
+                corpus_fp="c" * 64,
+                course_text="{}",
+                it=1,
+                traj=tmp_path / "traj",
+                job_root=tmp_path / "jobs",
+                jsonl_path=tmp_path / "training_log.jsonl",
+                data_round_dir=fixed_dir,
+                log=lambda _m: None,
+            )
         )
 
     assert captured["name_pattern"] == "*_s*_seed*"

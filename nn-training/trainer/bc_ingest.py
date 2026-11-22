@@ -33,7 +33,7 @@ from common.log import log
 from common.protocol import decode_weights_json
 from worker.archive import backup_weights
 from worker.bc_config import BcCourseConfig
-from worker.bc_eval import BcEvalError, dispatch_bc_eval
+from worker.bc_eval import BcEvalError, BcEvalSpec, dispatch_bc_eval
 from worker.bc_ledger import append_ledger
 
 #: 无进展告警阈值（秒）：等 job 时超过这么久没有新 epoch 入账 ⇒ 提示检查云机 worker（一次）。
@@ -268,20 +268,22 @@ def run_epoch_eval(spec: EpochEvalSpec, log=log) -> None:
         d = _json.loads(body.decode("utf-8"))
         weights = decode_weights_json(str(d["weights"]))
         result = dispatch_bc_eval(
-            weights_bytes=weights,
-            eval_levels=list(course.eval.levels),
-            games_per_stage=int(course.eval.games_per_stage),
-            it=it,
-            epoch=epoch,
-            # B4：课程声明的面板与实际关卡值并存入行，跨面板不可相减。
-            course_max_ticks=int(course.max_ticks),
-            cfg=cfg,
-            course=course,
-            course_env=bool(course.eval.course_env),
-            # 机器健康账（与训练同一份）：节点页「今日贡献」只读 dist-agent-meta；
-            # BC eval 不写它 = 手动 evalA 的局数系统性漏计（2026-11-13 报障）。
-            meta_path=jsonl_path.parent / "dist-agent-meta.jsonl",
-            log=log,
+            BcEvalSpec(
+                weights_bytes=weights,
+                eval_levels=list(course.eval.levels),
+                games_per_stage=int(course.eval.games_per_stage),
+                it=it,
+                epoch=epoch,
+                # B4：课程声明的面板与实际关卡值并存入行，跨面板不可相减。
+                course_max_ticks=int(course.max_ticks),
+                cfg=cfg,
+                course=course,
+                course_env=bool(course.eval.course_env),
+                # 机器健康账（与训练同一份）：节点页「今日贡献」只读 dist-agent-meta；
+                # BC eval 不写它 = 手动 evalA 的局数系统性漏计（2026-11-13 报障）。
+                meta_path=jsonl_path.parent / "dist-agent-meta.jsonl",
+                log=log,
+            )
         )
         append_ledger(jsonl_path, {"event": "bc_eval", "it": int(it), **result})
     except BcEvalError as e:

@@ -38,6 +38,7 @@ from hub.server import _JobStore, make_server
 from hub.store_leases import LeaseSpec
 from remote import worker as worker_mod
 from remote.job_lifecycle import PostResultSpec
+from remote.job_spec import BcJobSpec
 from tests.helpers.http_server import serve_fast
 from tests.helpers.hub_poll import hub_poll
 from trainer import bc_loop
@@ -127,7 +128,7 @@ def _publish_bc_job(tmp_path: Path, store: _JobStore, *, epochs: int, jid: str) 
     return jd
 
 
-def _fake_shard_dir(job_dir: Path) -> str:
+def _fake_shard_dir(job_dir: Path) -> Path:
     """伪造 shard 目录：只含 manifest.json（D14 血缘比对用；真训练被替换）。"""
     sd = job_dir / "bc_s0_seed1"
     sd.mkdir(parents=True, exist_ok=True)
@@ -135,7 +136,7 @@ def _fake_shard_dir(job_dir: Path) -> str:
         json.dumps({"course_fp": COURSE_FP, "corpus_fp": CORPUS_FP, "stage": 0, "seed": 1}),
         encoding="utf-8",
     )
-    return str(sd)
+    return sd
 
 
 def _fake_weights(ep: int) -> bytes:
@@ -352,17 +353,19 @@ def test_e2e_bc_interrupt_resume_continue_and_zeroretrain(
         monkeypatch.setattr("worker.train.bc.train", fake_train)
         manifest = json.loads((jd / "manifest.json").read_text(encoding="utf-8"))
         result = worker_mod._run_bc_job(
-            jid=jid,
-            manifest=manifest,
-            job_dir=jd,
-            shard_dirs=[_fake_shard_dir(jd)],
-            device="cpu",
-            torch_threads=1,
-            echo=False,
-            base_url=base,
-            token=TOKEN,
-            lease_token=tok_b,
-            log=_quiet,
+            BcJobSpec(
+                jid=jid,
+                manifest=manifest,
+                job_dir=jd,
+                shard_dirs=[_fake_shard_dir(jd)],
+                device="cpu",
+                torch_threads=1,
+                echo=False,
+                base_url=base,
+                token=TOKEN,
+                lease_token=tok_b,
+                log=_quiet,
+            )
         )
         assert calls == [(1, 3)]  # 只训剩下的 1 个 epoch，offset=3
         assert result["metrics"]["resumed_from"] == 3
@@ -388,17 +391,19 @@ def test_e2e_bc_interrupt_resume_continue_and_zeroretrain(
         _, resume_body = _http_json(base, f"/jobs/{jid}/resume")
         expected_final = decode_weights_json(str(resume_body["weights"]))
         result2 = worker_mod._run_bc_job(
-            jid=jid,
-            manifest=manifest,
-            job_dir=jd,
-            shard_dirs=[_fake_shard_dir(jd)],
-            device="cpu",
-            torch_threads=1,
-            echo=False,
-            base_url=base,
-            token=TOKEN,
-            lease_token=tok_b,
-            log=_quiet,
+            BcJobSpec(
+                jid=jid,
+                manifest=manifest,
+                job_dir=jd,
+                shard_dirs=[_fake_shard_dir(jd)],
+                device="cpu",
+                torch_threads=1,
+                echo=False,
+                base_url=base,
+                token=TOKEN,
+                lease_token=tok_b,
+                log=_quiet,
+            )
         )
         assert result2["metrics"]["resumed_complete"] is True
         assert result2["metrics"]["epochs"] == 4

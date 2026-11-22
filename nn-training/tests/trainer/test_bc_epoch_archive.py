@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -131,9 +132,10 @@ def test_epoch_eval_reads_that_epoch_not_latest_resume(tmp_path: Path, monkeypat
     monkeypatch.setattr(hub_http, "_request", _fake_hub(paths, []))
     seen: dict[str, bytes] = {}
 
-    def fake_eval(*, weights_bytes: bytes, **kwargs):
-        seen["weights"] = weights_bytes
-        return {"epoch": kwargs["epoch"], "wver": "x", "levels": []}
+    def fake_eval(spec: Any):
+        # `spec` 是 `worker.bc_eval.BcEvalSpec`（P0-3 批 C）。
+        seen["weights"] = spec.weights_bytes
+        return {"epoch": spec.epoch, "wver": "x", "levels": []}
 
     monkeypatch.setattr(bc_ingest, "dispatch_bc_eval", fake_eval)
 

@@ -9988,3 +9988,41 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：`bun run pygate` 绿（6814 passed / 13 skipped）；守 `tests/hub/test_push_spec.py`
   （25 条：六张字段表 / 冻结 / `kw_only` / 入口形状 / 收摊键名单源 / 腿对象唯一调用点）。
   全文 → `docs/nn/engineering.md` §305。
+
+## §2026-11-22-bc-specs
+
+**P0-3 批 C：BC 链四个宽入口各收一份值对象（宽签名 34 → 30，28 → 24 文件）。**
+
+- **背景**：`python.refactor.md` §P0-3 的剩余宽签名表 B 批之后还剩 34 处。C 批选的是**同一条链的四个
+  断点**（一件 BC 活的打包发布 → 云端执行 → 权重评估 → 本机训练），它们参数按同一张表长出来：
+  `_run_bc_job`(12) · `publish_bc_job`(12) · `dispatch_bc_eval`(12) · `run_training`(10 **位置**参数)。
+- **坏在哪**（不是审美）：这四处全是「同类可互换的位置位」。`run_training` 的十个 str/Path/int 里
+  `run_dir` 与 `log_path` 互换 = 权重写进日志、日志写进权重目录；`total_epochs` 与 `seed` 互换
+  （int 与 int）只会让这次跑「不是你点的那次」，而且它只有一个调用点（notebook 引导），坏了只能在
+  现场发现。`publish_bc_job` 的 `course_fp`/`corpus_fp` 互换 ⇒ 云端 D14 逐 shard 拒收（2026-09-20
+  事故那条面）；`traj`/`job_root` 互换 ⇒ `iter_bc_shard_dirs` 一个 shard 都扫不到。`dispatch_bc_eval`
+  的 `it`/`epoch` 互换 ⇒ 评估行挂错轮；`course_env=True` 时 `eval_levels` 被**静默忽略**（传错也不报）。
+- **决定**：四处各收一份 frozen 值对象，缺省值逐字保留：
+  `BcJobSpec`(12) · `PublishBcSpec`(12) · `BcEvalSpec`(12) · `TrainRun`(10)。入口只剩一个位置参数
+  （`spec` / `run`）。**`BcJobSpec` 不住 `bc_job.py`**：装配点 `remote/job_shell.bc_or_none`(L4) 不许
+  import `bc_job`(L4，同秩成环) ⇒ 与 `RunJobSpec` 一起住 L1 的 `remote/job_spec.py`（L1 → L4 是
+  向下边）。
+- **延迟解析的日志出口**：`BcJobSpec.log = None`（与 `RunJobSpec` 同规），运行时 `spec.log or _log`；
+  直接绑 `bc_job._log` 会让 `monkeypatch.setattr` 对默认路径失效。`BcEvalSpec.log` 保留 `= _log`
+  ——`bc_eval` 是它自己日志出口的拥有者。
+- **两处类型诚实化**（mypy / `test_any_budget` 抓到的）：`BcJobSpec.shard_dirs` 由 `list[str]` 改
+  `list[Path]`（`JobState.shard_dirs` 的产物形态），`_check_corpus_lineage` 注解随之对齐；两个 `log`
+  字段从 `Any` 改 `Callable`（`BcEvalSpec` 标 `Callable[[str], None]`，`PublishBcSpec` 标
+  `Callable[..., None]`——`common.log.log` 带关键字 `course`/`router`，标死会把真签名说窄）。
+- **被否决**：① 四处合成一个 `BcSpec`（发布时还没有 `job_dir`、评估时权重已是 `bytes`，是不同阶段的
+  输入）；② `BcJobSpec` 留在 `bc_job.py` + `job_shell` 反向 import（L4 → L4 成环，`remote_dag` 红）；
+  ③ `TrainRun` 只收三个 Path（最危险的两个 int 还在位置上）；④ 顺手把两个 `StudentNet.__init__`(10)
+  一起收——它们是同形双生（torch/paddle），要先定「第 9 个参数怎么并」，**另起一刀**。
+- **读数**：宽签名 34 → **30**、28 → **24** 文件（`WIDE_FUNCS_BASELINE` 删 `remote/bc_job.py` /
+  `remote/colab_bc.py` / `trainer/bc_loop.py` / `worker/bc_eval.py`）；文本断言、G5 私有断言、
+  `Any` 基线全部未动。
+- **验证**：`bun run pygate` 绿（6835 passed / 13 skipped）；`ruff` + `mypy`（1076 文件）绿。守
+  `tests/remote/test_bc_job_spec.py` / `tests/trainer/test_publish_bc_spec.py` /
+  `tests/worker/test_bc_eval_spec.py`（字段表 / 冻结 / `kw_only` / 入口形状 / 旧调用面 `TypeError`）。
+  全文 → `docs/nn/engineering.md` §306。
+

@@ -40,6 +40,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -94,7 +95,7 @@ from worker.bc_config import (
     load_bc_course,
     resolve_bc_course,
 )
-from worker.bc_eval import BcEvalError, dispatch_bc_eval
+from worker.bc_eval import BcEvalError, BcEvalSpec, dispatch_bc_eval
 from worker.bc_ledger import (
     ROUND_DONE_EVENT,
     ROUND_JOB_MISSING_EVENT,
@@ -242,26 +243,49 @@ def collect_corpus(spec: CollectSpec) -> Path:
 # ---- 任务发布 --------------------------------------------------------------
 
 
-def publish_bc_job(
-    *,
-    course: BcCourseConfig,
-    course_fp: str,
-    corpus_fp: str,
-    course_text: str,
-    it: int,
-    traj: Path,
-    job_root: Path,
-    jsonl_path: Path,
-    course_key: str = "",
-    round_name: str = "",
-    data_round_dir: Path | None = None,
-    log=log,
-) -> dict:
+@dataclass(frozen=True, kw_only=True)
+class PublishBcSpec:
+    """一件 BC job 的发布输入（P0-3 批 C：12 个关键字 → 一个对象）。
+
+    失效面：`course_fp` / `corpus_fp` 互换 ⇒ payload 里写的是对方的血缘指纹（云端 D14 逐 shard
+    拒收，整份活退回，现场只看到「云机不要这份语料」）；`traj` / `job_root` 互换 ⇒ 往语料目录里
+    写 job、往 job 目录里找 shard（`iter_bc_shard_dirs` 一个都扫不到 ⇒ `SystemExit`「无完整 BC
+    shard」）；`round_name` / `data_round_dir` 是同一个「语料在哪一轮」的两种说法（真轮缺省 /
+    fixed 源），少传一个就是发布找不到 shard。
+    """
+
+    course: BcCourseConfig
+    #: 本课指纹（`corpus.source == "fixed"` 时发布端不拿它剔 shard）。
+    course_fp: str
+    corpus_fp: str
+    #: 课程文件原文（写进 job 的 course 段，云端按它复盘）。
+    course_text: str
+    it: int
+    traj: Path
+    job_root: Path
+    jsonl_path: Path
+    course_key: str = ""
+    #: 语料轮目录名（真轮缺省 `it{it}`；冒烟轮 `"smoke"`）。
+    round_name: str = ""
+    #: fixed 源的实际语料根；None = 历史 `<traj>/bc-data/<round>`。
+    data_round_dir: Path | None = None
+    log: Callable[..., None] = log
+
+
+def publish_bc_job(spec: PublishBcSpec) -> dict:
     """打包 + 发布 BC job（hub/push 共用；返回归一化 manifest）。
 
-    round_name：语料轮目录名（真轮缺省 it{it}；smoke 轮 "smoke"——采集/发布/落位
+    `round_name`：语料轮目录名（真轮缺省 it{it}；smoke 轮 "smoke"——采集/发布/落位
     三处必须同目录，否则发布找不到 shard）。
-    data_round_dir：fixed 源的实际语料根；None = 历史 `<traj>/bc-data/<round>`。"""
+    `data_round_dir`：fixed 源的实际语料根；None = 历史 `<traj>/bc-data/<round>`。
+
+    入参 = 一个 `PublishBcSpec`（P0-3 批 C）；下面一次展开，函数体逐字不动。
+    """
+    course, course_fp = spec.course, spec.course_fp
+    corpus_fp, course_text, it = spec.corpus_fp, spec.course_text, spec.it
+    traj, job_root, jsonl_path = spec.traj, spec.job_root, spec.jsonl_path
+    course_key, round_name = spec.course_key, spec.round_name
+    data_round_dir, log = spec.data_round_dir, spec.log
     # D14 血缘过滤：与云端逐 shard 拒收同判据（protocol.d14_corpus_match）——
     # 异血缘 shard 不进 payload（2026-09-20 事故：混入即整份被云退回）。
     # fixed 源是显式「原样使用」：shard 的 lineage 来自别的课程版本，不能按本课
@@ -564,17 +588,23 @@ def train_local_bc(
                             log(f"[run_bc] it{it} ep{gepoch}: 本地 eval（ckpt 权重）")
                             try:
                                 result = dispatch_bc_eval(
-                                weights_bytes=ckpt.read_bytes(),
-                                eval_levels=list(course.eval.levels),
-                                games_per_stage=int(course.eval.games_per_stage),
-                                it=it,
-                                epoch=gepoch,
-                                cfg=cfg,
-                                course=course,
-                                course_env=bool(course.eval.course_env),
-                                meta_path=jsonl_path.parent / "dist-agent-meta.jsonl",
-                                log=log,
-                            )
+                                    BcEvalSpec(
+                                        weights_bytes=ckpt.read_bytes(),
+                                        eval_levels=list(course.eval.levels),
+                                        games_per_stage=int(
+                                            course.eval.games_per_stage
+                                        ),
+                                        it=it,
+                                        epoch=gepoch,
+                                        cfg=cfg,
+                                        course=course,
+                                        course_env=bool(course.eval.course_env),
+                                        meta_path=(
+                                            jsonl_path.parent / "dist-agent-meta.jsonl"
+                                        ),
+                                        log=log,
+                                    )
+                                )
                                 if jsonl_path is not None:
                                     append_ledger(
                                         jsonl_path, {"event": "bc_eval", "it": int(it), **result}
@@ -1246,18 +1276,20 @@ class BcLoop:
             self._close_round(it, metrics, smoke=rt.smoke)
             return None
         manifest = publish_bc_job(
-            course=rt.course,
-            course_fp=rt.course_fp,
-            corpus_fp=rt.corpus_fp,
-            course_text=rt.course_text,
-            it=it,
-            traj=rt.traj,
-            job_root=rt.job_root,
-            jsonl_path=rt.jsonl_path,
-            course_key=rt.course_key,
-            round_name=("smoke" if rt.smoke else ""),
-            data_round_dir=data_round_dir,
-            log=self.log,
+            PublishBcSpec(
+                course=rt.course,
+                course_fp=rt.course_fp,
+                corpus_fp=rt.corpus_fp,
+                course_text=rt.course_text,
+                it=it,
+                traj=rt.traj,
+                job_root=rt.job_root,
+                jsonl_path=rt.jsonl_path,
+                course_key=rt.course_key,
+                round_name=("smoke" if rt.smoke else ""),
+                data_round_dir=data_round_dir,
+                log=self.log,
+            )
         )
         jid = str(manifest["job_id"])
         self._jobs[it] = (jid, manifest)

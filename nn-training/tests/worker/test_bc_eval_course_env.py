@@ -117,15 +117,17 @@ def test_dispatch_course_env_inherits_env(monkeypatch: pytest.MonkeyPatch) -> No
     c = load_bc_course("g0-4s2e")
     calls = _mock_engine(monkeypatch)
     res = be.dispatch_bc_eval(
-        weights_bytes=b"x",
-        eval_levels=[],
-        games_per_stage=2,
-        it=1,
-        epoch=10,
-        nodes=NODES,
-        course=c,
-        course_env=True,
-        log=lambda m: None,
+        be.BcEvalSpec(
+            weights_bytes=b"x",
+            eval_levels=[],
+            games_per_stage=2,
+            it=1,
+            epoch=10,
+            nodes=NODES,
+            course=c,
+            course_env=True,
+            log=lambda m: None,
+        )
     )
     assert len(calls) == 4 * 2  # 4 关 × 2 seed
     assert {x["stage"] for x in calls} == {2000, 2001, 2002, 2003}
@@ -157,16 +159,18 @@ def test_dispatch_writes_agent_meta_per_game(
     _mock_engine(monkeypatch)
     meta = tmp_path / "dist-agent-meta.jsonl"
     be.dispatch_bc_eval(
-        weights_bytes=b"x",
-        eval_levels=[],
-        games_per_stage=2,
-        it=3,
-        epoch=10,
-        nodes=NODES,
-        course=c,
-        course_env=True,
-        meta_path=meta,
-        log=lambda m: None,
+        be.BcEvalSpec(
+            weights_bytes=b"x",
+            eval_levels=[],
+            games_per_stage=2,
+            it=3,
+            epoch=10,
+            nodes=NODES,
+            course=c,
+            course_env=True,
+            meta_path=meta,
+            log=lambda m: None,
+        )
     )
     rows = [json.loads(x) for x in meta.read_text(encoding="utf-8").splitlines() if x.strip()]
     assert len(rows) == 4 * 2  # 4 关 × 2 seed
@@ -193,16 +197,18 @@ def test_dispatch_records_failed_games_in_agent_meta(
     monkeypatch.setattr(be, "post_weights_cached", lambda *a, **k: None)
     meta = tmp_path / "dist-agent-meta.jsonl"
     be.dispatch_bc_eval(
-        weights_bytes=b"x",
-        eval_levels=[],
-        games_per_stage=1,
-        it=1,
-        epoch=10,
-        nodes=NODES,
-        course=c,
-        course_env=True,
-        meta_path=meta,
-        log=lambda m: None,
+        be.BcEvalSpec(
+            weights_bytes=b"x",
+            eval_levels=[],
+            games_per_stage=1,
+            it=1,
+            epoch=10,
+            nodes=NODES,
+            course=c,
+            course_env=True,
+            meta_path=meta,
+            log=lambda m: None,
+        )
     )
     rows = [json.loads(x) for x in meta.read_text(encoding="utf-8").splitlines() if x.strip()]
     assert len(rows) == 4
@@ -219,14 +225,16 @@ def test_dispatch_levels_path_unchanged(monkeypatch: pytest.MonkeyPatch) -> None
     n = len(lvl.stage_ids)
     calls = _mock_engine(monkeypatch)
     res = be.dispatch_bc_eval(
-        weights_bytes=b"x",
-        eval_levels=["arena4"],
-        games_per_stage=1,
-        it=1,
-        epoch=10,
-        nodes=NODES,
-        course_env=False,
-        log=lambda m: None,
+        be.BcEvalSpec(
+            weights_bytes=b"x",
+            eval_levels=["arena4"],
+            games_per_stage=1,
+            it=1,
+            epoch=10,
+            nodes=NODES,
+            course_env=False,
+            log=lambda m: None,
+        )
     )
     assert len(calls) == n  # arena4 全部关 × 1 seed
     panel = res["levels"][0]["panel"]
