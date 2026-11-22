@@ -25,6 +25,26 @@
 
 ---
 
+## §294 P0-3 第四十一刀：`trainer/loop_serve.serve` 收 `ServeSpec`（53 → 52）（2026-11-22）
+
+* `trainer/loop_serve.serve` 原来 18 个参数（1 个位置 `courses` + 17 个关键字），现在只收
+  一份 frozen + kw_only 的 `ServeSpec`；函数体在入口处把 18 个字段展开成同名局部量，再逐字
+  执行 ⇒ 行为零差异。本文件宽签名 1 → **0**，全仓 53 → **52**，文件 44 → **43**。
+* **为什么这 18 个参数比别的宽签名更危险**：`prepare` / `max_steps` / `max_seconds` 三个旋钮
+  决定进程是**常驻**还是**跑一拍就走**，而 `pool` / `supervisor` 是测试与 e2e 的注入点
+  （`prepare=False` + 注入 = 不碰 torch、不碰网络、不起进程）。这四五个旋钮的组合在 6 个
+  测试文件里手抄了 31 次；关键字拼错 Python 不报错，只是**静默落回缺省** —— 一条「跑一拍
+  就退出」的用例会变成常驻，靠测试超时才发现。
+* 调用点 31 处（`trainer/run_rl_cluster` 1 + 测试 30）全部由 AST 脚本机械改：包一层
+  `ServeSpec(...)`，首个位置实参改 `courses=…`；两处 `serve` 替身（`monkeypatch.setattr`）
+  的签名同步改成 `(spec)`，其中转发形状那条改用 `dataclasses.asdict(spec)` 取全字段。
+* 新守卫 `tests/trainer/test_serve_spec.py`（3 条：frozen + 全字段 kw_only / 18 字段与缺省值
+  逐项表 / `serve` 的签名只剩 `spec`）。`WIDE_FUNCS_BASELINE` 的 `trainer/loop_serve.py`
+  条目删除。
+* 读数：`trainer/loop_serve.py` LOC 802 → **810**（< 1000，不必下沉模块）。
+
+---
+
 ## §293 P0-3 第四十刀：`OfflineDeliverer` 收 `OfflineDelivererSpec`（54 → 53）（2026-11-22）
 
 * `remote/offline_deliver.py`：20 个关键字参数 → frozen + kw_only

@@ -23,7 +23,7 @@
    Tee 会把每行复制进两份课日志。这里改成**行级路由**（`biz.log.open_course_sink` +
    `prefix_scope`）：每行带 `[课]` 前缀，并镜像到该课自己的 `out_log`。
 
-**可测性**：`serve(..., prepare=False)` + 注入 `pool` / `supervisor` ⇒ 全流程不碰 torch、不碰
+**可测性**：`serve(ServeSpec(prepare=False, pool=…, supervisor=…))` ⇒ 全流程不碰 torch、不碰
 网络、不起进程（见 `tests/trainer/test_serve_wiring.py` 与 `e2e/test_loop_supervisor_integration.py`）。
 """
 
@@ -281,9 +281,7 @@ def _open_bc_course(
     #   恒空、worker 干等（bc-human-retrial 生产实测；R3-4 只接了引擎，没接传输）。
     #   已显式给传输（--remote/--local/--remote-transport，含测试）的不动。
     extra = list(argv or [])
-    if not any(
-        a in ("--remote", "--local") or a.startswith("--remote-transport") for a in extra
-    ):
+    if not any(a in ("--remote", "--local") or a.startswith("--remote-transport") for a in extra):
         extra.append("--remote")
     args = bc_course_args(course, extra)
     # 课程机器侧覆盖：与 RL 同源（同一份 rl-config 块、同一个白名单）——BC 解析器缺的键会被
@@ -457,9 +455,7 @@ def build_executor(
         ensure_ready(rt, engine)
         with prefix_scope(task.course):
             if not _ensure_course_lock(rt):
-                detail = (
-                    f"本课锁被别的实例持有（{rt.lock_path}）——该课下线，锁释放后自动复活"
-                )
+                detail = f"本课锁被别的实例持有（{rt.lock_path}）——该课下线，锁释放后自动复活"
                 log(f"[serve] 课程 {task.course}：{detail}")
                 if report is not None:
                     _record_skip(report, task.course, SKIP_KIND_LOCK, detail, traj_root)
@@ -613,9 +609,7 @@ def _record_skip(
     report.skipped_at[course] = {"kind": kind, "fp": _skip_fingerprint(course, kind, traj_root)}
 
 
-def reopenable_skipped(
-    skipped_at: dict[str, dict[str, Any]], traj_root: str | Path
-) -> list[str]:
+def reopenable_skipped(skipped_at: dict[str, dict[str, Any]], traj_root: str | Path) -> list[str]:
     """被跳过的课里，**判据已变**、值得重试的课（2026-10-05 事故治本）。
 
     只读 stat（课程文件 / 开课标记 / 锁 / 账本），不建 runtime、不写任何状态——与
@@ -996,9 +990,7 @@ def _publish_heartbeat(heartbeat, report: ServeReport, sup) -> None:
     )
 
 
-def _finish_serve(
-    report: ServeReport, sup, pool, own_pool: bool, heartbeat
-) -> ServeReport:
+def _finish_serve(report: ServeReport, sup, pool, own_pool: bool, heartbeat) -> ServeReport:
     """收尾（自 `serve` 原样搬出）：课程状态快照 → 心跳收线 → 池释放 → 退出日志。"""
     report.courses = {
         course: {
@@ -1023,28 +1015,46 @@ def _finish_serve(
     return report
 
 
-def serve(
-    courses: list[str] | None = None,
-    *,
-    argv: list[str] | None = None,
-    traj_root: str = "tmp",
-    control_file: str | None = None,
-    iters: int = 0,
-    poll_sec: float = DEFAULT_POLL_SEC,
-    capacities: dict[str, int] | None = None,
-    cache_courses: int = 0,
-    cache_mb: float = DEFAULT_CACHE_MB,
-    step_mode: bool = True,
-    max_seconds: float = 0.0,
-    max_steps: int = 0,
-    prepare: bool = True,
-    bun: str | None = None,
-    pool: EnginePool | None = None,
-    supervisor: Supervisor | None = None,
-    now: Callable[[], float] = time.time,
-    sleep: Callable[[float], None] = time.sleep,
-) -> ServeReport:
-    """单进程服务 N 门课。
+@dataclass(frozen=True, kw_only=True)
+class ServeSpec:
+    """`serve` 的全部装配参数。
+
+    为什么收成对象：18 个参数里 `cache_courses` / `cache_mb` / `step_mode` / `max_seconds` /
+    `max_steps` 全是**同质的旋钮**，而 `pool` 与 `supervisor` 只能被注入（e2e 靠它不碰进程）；
+    同一个「注入 + 调参」的组合在 20+ 个测试里手抄，抄错一个名字不会报错 —— 只会静默落回
+    默认值，而这里的默认值决定了进程是**常驻**（`prepare=True`、无限步）还是**跑一拍就走**。
+    `frozen`：一份 spec 被同一进程里的两个课程复用是合法的（`run_rl_cluster` 就是一处），
+    但 `serve` 会就地改写 `cache_courses`/`pool` 的本地副本，spec 本身不许跟着变。
+    """
+
+    #: 显式课程表；None/空 = 发现模式（进程不绑课程）。
+    courses: list[str] | None = None
+    #: 传给开课的额外 CLI（`run_rl_cluster` 透传 `--mode`）。
+    argv: list[str] | None = None
+    traj_root: str = "tmp"
+    control_file: str | None = None
+    iters: int = 0
+    poll_sec: float = DEFAULT_POLL_SEC
+    capacities: dict[str, int] | None = None
+    #: 引擎缓存：课程数上限（<=0 = 按开课数自动）与字节顶。
+    cache_courses: int = 0
+    cache_mb: float = DEFAULT_CACHE_MB
+    step_mode: bool = True
+    #: 退出条件（0 = 不限）。
+    max_seconds: float = 0.0
+    max_steps: int = 0
+    #: False = 不做进程级准备（UTF-8 stdio / chdir / git push / bun 探测）：测试与 e2e 用。
+    prepare: bool = True
+    bun: str | None = None
+    #: 注入点：给了就不再自建（`own_pool` 判据决定退出时谁关它）。
+    pool: EnginePool | None = None
+    supervisor: Supervisor | None = None
+    now: Callable[[], float] = time.time
+    sleep: Callable[[float], None] = time.sleep
+
+
+def serve(spec: ServeSpec) -> ServeReport:
+    """单进程服务 N 门课（参数见 `ServeSpec`）。
 
     **进程不绑课程**（用户 2026-09-18 口径）：`courses=None`/空 ⇒ 发现模式——启动时扫
     `--traj-root` 下**已开课**的课程（账本 ∧ `training-enabled.txt`，见 `enabled_courses`），
@@ -1064,6 +1074,24 @@ def serve(
     课程级失败（课程文件缺失、锁被占）**不**终止进程：该课进 `skipped`，其余课照跑
     （故障域 = 单课，plan §4.3）。
     """
+    courses = spec.courses
+    argv = spec.argv
+    traj_root = spec.traj_root
+    iters = spec.iters
+    poll_sec = spec.poll_sec
+    capacities = spec.capacities
+    control_file = spec.control_file
+    cache_courses = spec.cache_courses
+    cache_mb = spec.cache_mb
+    step_mode = spec.step_mode
+    max_seconds = spec.max_seconds
+    max_steps = spec.max_steps
+    prepare = spec.prepare
+    bun = spec.bun
+    pool = spec.pool
+    supervisor = spec.supervisor
+    now = spec.now
+    sleep = spec.sleep
     report = ServeReport()
     if prepare:
         bun = prepare_process(argv)
@@ -1286,9 +1314,7 @@ def _settle_rounds(
             if str(getattr(rt, "kind", "") or "") == "bc":
                 rt.engine.finish_course(max(int(q.next_it) - 1, 0))
             else:
-                rt.engine.finish_course(
-                    max(int(q.next_it) - 1, 0), drain=True, block=False
-                )
+                rt.engine.finish_course(max(int(q.next_it) - 1, 0), drain=True, block=False)
         # ★ 2026-10-15：把**收工判据**打进这行日志（`LoopRunner.finish_reason`：`iters=N 跑满` /
         #   `itN 已按账本结算` / `全离线任务包已导出` / `硬边界停车（门/熔断/止损/预算）` /
         #   `smoke-void`）。没有它，一次收官在盘上只剩「正常收官（itX/Y）」这句模板文案：2026-10-15

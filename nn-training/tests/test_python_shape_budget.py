@@ -97,7 +97,6 @@ WIDE_FUNCS_BASELINE = {
     "trainer/bc_loop.py": 1,
     # `trainer/dispatch.py` 已清零（P0-3 第三十九刀：`DispatchSpec`）。
     # `trainer/dispatch_queue.py` 已清零（P0-3 第三十九刀：`DispatchSpec`）。
-    "trainer/loop_serve.py": 1,
     "trainer/loop_transport.py": 1,
     # 2026-11-21：`reap_alloc_timeouts` 的 9 个关键字参数收成 `ReapSpec`
     # ⇒ 本文件宽签名 2 → 1（剩 `__init__`），基线只许继续调小。

@@ -35,7 +35,7 @@ import trainer.loop_plan as loop_plan
 import trainer.loop_serve as loop_serve
 import worker.train_ledger as train_ledger
 from common.protocol import COURSE_ENABLE_MARKER
-from trainer.loop_serve import CourseRuntime, serve
+from trainer.loop_serve import CourseRuntime, ServeSpec, serve
 
 
 class _Ledger:
@@ -188,13 +188,15 @@ def _serve_until_interrupt(
     clock = _Clock()
     clock.on_sleep = hook
     return serve(
-        None,
-        prepare=False,
-        bun="bun",
-        traj_root=str(tmp_path),
-        now=clock.now,
-        sleep=clock.sleep,
-        step_mode=False,
+        ServeSpec(
+            courses=None,
+            prepare=False,
+            bun="bun",
+            traj_root=str(tmp_path),
+            now=clock.now,
+            sleep=clock.sleep,
+            step_mode=False,
+        )
     )
 
 
@@ -366,9 +368,7 @@ def test_revived_course_still_gets_finish_course_at_the_end(
 # ─────────────────── W4：同拍只复活一次（不双入队） ───────────────────
 
 
-def test_stop_start_revives_once_not_twice(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_stop_start_revives_once_not_twice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """W4：同一「停→开」同时命中两条通道的判据 ⇒ 必须只复活一次。
 
     `reopened_parked` 复活成功后从 `skipped_at` 摘名 ⇒ 紧接着的 `reopenable_skipped`
@@ -521,4 +521,3 @@ def test_revive_hygiene_makes_the_reopened_course_actually_work_again(
 
     tasks = runner.planner("c", 10, queue)
     assert len(tasks) == len(round_tasks("c", 10)) > 0, "重开后的课必须真的还能干活"
-

@@ -9743,3 +9743,19 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   文本断言与复用账本未动；归属闸守卫（`test_role_routing`）扩成「role= / LeaseSpec( / spec」
   三种载法，判据不变。
 - **验证**：聚焦 433 例 + 预算/分层 30 例全绿；nn 全量门禁见提交。全文 → `docs/nn/engineering.md` §261。
+
+## §2026-11-22-serve-spec（`serve` 的 18 个参数收成 `ServeSpec`）
+
+- **背景**：`trainer/loop_serve.serve` 是单进程多课程的入口，18 个参数里 `prepare` /
+  `max_steps` / `max_seconds` 决定「常驻还是跑一拍就走」、`pool` / `supervisor` 是测试的注入点。
+  同一组组合在 6 个文件里手抄 31 次 —— 关键字拼错不报错，只是静默落回缺省（一条「跑一拍就
+  退出」的用例会变成常驻，只能靠超时发现）。
+- **决定**：新增 frozen + kw_only `ServeSpec`（18 字段，缺省与旧签名逐字一致）；`serve(spec)`
+  展开成同名局部量后函数体不动。31 个调用点（生产 1 + 测试 30）机械改传对象；两处
+  `monkeypatch` 替身签名改 `(spec)`，转发形状那条用 `dataclasses.asdict(spec)` 断言全字段。
+  守 `tests/trainer/test_serve_spec.py`（frozen + kw_only / 字段表 / 签名只剩 `spec`）。
+- **被否决**：`serve(courses, *, spec)` 的两段式（位置 + spec 混用 = 两套构造面，正是本刀
+  要消灭的那种「拼错就落缺省」）。
+- **读数**：宽签名 53 → **52**、44 → **43** 文件（`WIDE_FUNCS_BASELINE` 删 `trainer/loop_serve.py`）；
+  `loop_serve.py` LOC 802 → 810。
+- **验证**：`tests/trainer/` 876 例全绿；预算/门禁用例绿。全文 → `docs/nn/engineering.md` §294。
