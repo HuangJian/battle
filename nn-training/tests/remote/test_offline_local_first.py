@@ -92,11 +92,13 @@ def _pack(
     ts: bytes | None = TS_A,
     index: dict | None = None,
     plan: dict | None = None,
+    manifest: dict | None = None,
 ) -> Path:
-    """一个够用的任务包（索引 + code.zip [+ ts_code.zip] [+ plan.json]）——成员名走真常量。
+    """一个够用的任务包（索引 + code.zip [+ ts_code.zip] [+ plan.json] [+ manifest.json]）。
 
     `plan` 只在「包是不是本机进度的加长段」那组用例里给（`pack_extends_local` 读它）：
     缺 `plan.json` 的包 ⇒ 判定为「不收包」= 本机优先，这是**刻意保留的保守默认**。
+    `manifest` 只在「这批产物是哪门课的」那组用例里给（`course_fp` 是课程身份）。
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w") as z:
@@ -107,6 +109,8 @@ def _pack(
             z.writestr(offline_boot.TS_CODE_NAME, ts)
         if plan is not None:
             z.writestr(offline_boot.PLAN_NAME, json.dumps(plan))
+        if manifest is not None:
+            z.writestr(offline_boot.MANIFEST_NAME, json.dumps(manifest))
     return path
 
 
@@ -120,10 +124,16 @@ def _artifacts(
     ts: bytes = TS_A,
     run_id: str = "run-local",
     plan_sha256: str = "l" * 64,
+    course_fp: str = "",
+    course_name: str = "",
     with_plan: bool = True,
     with_manifest: bool = True,
 ) -> Path:
-    """一个**三件齐全**的产物目录（缺件用 `with_*` 造半截目录）。"""
+    """一个**三件齐全**的产物目录（缺件用 `with_*` 造半截目录）。
+
+    `course_fp` = manifest 的课程指纹（老产物根判「这批产物是哪门课的」就靠它）；
+    `course_name` = 写 `.course-name` 标记（2026-11-22 之后开段才有的正身）。
+    """
     dest.mkdir(parents=True, exist_ok=True)
     (dest / offline_boot.STATE_NAME).write_text(
         json.dumps(
@@ -137,8 +147,17 @@ def _artifacts(
         )
     if with_manifest:
         (dest / offline_boot.MANIFEST_NAME).write_text(
-            json.dumps({"code_sha256": _sha(code), "ts_code_sha256": _sha(ts)}), encoding="utf-8"
+            json.dumps(
+                {
+                    "code_sha256": _sha(code),
+                    "ts_code_sha256": _sha(ts),
+                    **({"course_fp": course_fp} if course_fp else {}),
+                }
+            ),
+            encoding="utf-8",
         )
+    if course_name:
+        (dest / offline_boot.LOCAL_COURSE_NAME).write_text(course_name + "\n", encoding="utf-8")
     (dest / offline_boot.CODE_NAME).write_bytes(code)
     (dest / offline_boot.TS_CODE_NAME).write_bytes(ts)
     with zipfile.ZipFile(io.BytesIO(ts)) as z:
@@ -655,6 +674,107 @@ def test_run_one_course_keeps_local_first_when_the_pack_has_no_plan(
     argv, _calls = _run_course(tmp_path, monkeypatch, pack=pack)
     assert "--bundle" not in argv, argv
     assert argv[:2] == ["--artifacts", str(_local(tmp_path))]
+
+
+# ─────────── 产物根的课程身份（★ 2026-11-22：停课的那门被重新派活后续训） ───────────
+
+
+def test_local_belongs_to_course_prefers_the_marker(tmp_path: Path) -> None:
+    """标记（`.course-name`）是正身：课程文件被编辑也不改判，`course_fp` 对不上也不改判。"""
+    local = offline_boot.local_artifacts(
+        _artifacts(tmp_path / "run", course_fp="a" * 64, course_name="g9-def")
+    )
+    assert local is not None
+    assert offline_boot.local_belongs_to_course(local, "g9-def", None) == (
+        True,
+        "产物根标记 course=g9-def",
+    )
+    assert offline_boot.local_belongs_to_course(local, "g10-press", None)[0] is False
+    pack = _pack(tmp_path / "p" / "task-g9-def.zip", manifest={"course_fp": "b" * 64})
+    assert offline_boot.local_belongs_to_course(local, "g9-def", pack)[0] is True
+
+
+def test_local_belongs_to_course_falls_back_to_the_pack_fingerprint(tmp_path: Path) -> None:
+    """老产物根没有标记 ⇒ 拿包的 `course_fp` 对 manifest 的 `course_fp`；判不出就 `None`。"""
+    local = offline_boot.local_artifacts(_artifacts(tmp_path / "run", course_fp="a" * 64))
+    assert local is not None
+    same = _pack(tmp_path / "p" / "task-c5-gae.zip", manifest={"course_fp": "a" * 64})
+    other = _pack(tmp_path / "q" / "task-g9-def.zip", manifest={"course_fp": "b" * 64})
+    assert offline_boot.local_belongs_to_course(local, "c5-gae", same)[0] is True
+    belongs, _why = offline_boot.local_belongs_to_course(local, "g9-def", other)
+    assert belongs is False
+    # 包缺 manifest / 本机缺指纹 / 根本没包 ⇒ 判不出 = 老行为（不用猜值去拦人）
+    assert offline_boot.local_belongs_to_course(local, "g9-def", None)[0] is None
+    bare = _pack(tmp_path / "r" / "task-x.zip")
+    assert offline_boot.local_belongs_to_course(local, "g9-def", bare)[0] is None
+    no_fp = offline_boot.local_artifacts(_artifacts(tmp_path / "run2"))
+    assert no_fp is not None
+    assert offline_boot.local_belongs_to_course(no_fp, "g9-def", same)[0] is None
+
+
+def test_run_one_course_does_not_resume_another_courses_segment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 现场（2026-11-22）：g10-press 跑到 it331 停课，云机重启后 hub 派 g9-def。
+
+    产物根里那批 g10-press 的 plan/manifest **不得**当续跑点（否则 `--hub-course g9-def`
+    只是把别人的轮次报给 g9-def）⇒ 走包，本课产物改落 `<本地根>/<课>`，老产物一个字不动。
+    """
+    old = _artifacts(_local(tmp_path), course_fp="a" * 64)
+    pack = _pack(
+        tmp_path / "d" / "task-c5-gae.zip",
+        index={"it": 101, "end_it": 500},
+        plan={"start_it": 100, "end_it": 500},
+        manifest={"course_fp": "b" * 64},
+    )
+    argv, calls = _run_course(tmp_path, monkeypatch, pack=pack)
+    scoped = _local(tmp_path) / "c5-gae"
+    assert argv[:2] == ["--bundle", str(pack)], argv
+    assert argv[2:4] == ["--artifacts", str(scoped)], argv
+    assert ("obtain_pack", True) in calls, "本机有产物 ⇒ 取包仍是不等待的那种（判据的输入）"
+    # 老产物原封不动（它属于另一门课：覆盖 = 抹掉别人的账本，认领 = 把现场洗掉）
+    assert offline_boot.local_artifacts(old) is not None
+    assert not (old / offline_boot.LOCAL_COURSE_NAME).exists()
+    assert json.loads((old / offline_boot.STATE_NAME).read_text(encoding="utf-8"))["last_it"] == 3
+
+
+def test_run_one_course_keeps_local_first_for_its_own_course(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同一门课（`course_fp` 相同）⇒ 照旧本机优先：课程身份这一问不许把正常续跑拦掉。"""
+    dest = _artifacts(_local(tmp_path), course_fp="a" * 64)
+    pack = _pack(tmp_path / "d" / "task-c5-gae.zip", manifest={"course_fp": "a" * 64})
+    argv, _calls = _run_course(tmp_path, monkeypatch, pack=pack)
+    # 第一个参数是 `--artifacts` ⇒ 包没参与（本机优先）；`--artifacts` 指向本机那个根。
+    assert argv[:2] == ["--artifacts", str(dest)], argv
+
+
+def test_run_one_course_refuses_a_foreign_root_without_a_pack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """标记说「这是 g10-press 的产物」而这次要跑 c5-gae、包又取不到 ⇒ 响亮停手（给三条出路）。
+
+    不静默续训（本次 bug），也不静默清空（那是别人的进度）：两条都比停手糟。
+    """
+    _artifacts(_local(tmp_path), course_fp="a" * 64, course_name="g10-press")
+    with pytest.raises(SystemExit):
+        _run_course(tmp_path, monkeypatch, pack=None)
+    assert (_local(tmp_path) / offline_boot.STATE_NAME).is_file(), "老产物必须原封不动"
+
+
+def test_claim_local_course_writes_once_and_never_overwrites(tmp_path: Path) -> None:
+    """标记只在「确实是产物根 ∧ 还没有标记」时写；别的课的标记绝不覆盖（那是事故证据）。"""
+    empty = tmp_path / "empty"
+    offline_boot.claim_local_course(empty, "c5-gae", _quiet)
+    assert not (empty / offline_boot.LOCAL_COURSE_NAME).exists(), "空目录不是产物根，不许认领"
+
+    dest = _artifacts(tmp_path / "run")
+    offline_boot.claim_local_course(dest, "c5-gae", _quiet)
+    assert offline_boot.read_local_course_name(dest) == "c5-gae"
+
+    other = _artifacts(tmp_path / "run2", course_name="g10-press")
+    offline_boot.claim_local_course(other, "c5-gae", _quiet)
+    assert offline_boot.read_local_course_name(other) == "g10-press"
 
 
 def test_run_one_course_refuses_a_half_broken_dest(

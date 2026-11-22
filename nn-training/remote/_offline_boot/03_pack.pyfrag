@@ -166,6 +166,37 @@ def restore_from_backup(dest: str | Path, backup_root: str | Path, log: Callable
     return after
 
 
+def read_local_course_name(dest: str | Path) -> str:
+    """产物根的课程标记（`<dest>/.course-name`）；缺失 / 坏值 ⇒ `""`（= 不知道，不猜）。"""
+    try:
+        text = (Path(dest) / LOCAL_COURSE_NAME).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    name = text.strip()
+    return name if name and "\n" not in name and len(name) <= 64 else ""
+
+
+def claim_local_course(dest: str | Path, course: str, log: Callable[[str], None]) -> None:
+    """把产物根标记成**本课**的（best-effort：写不下只降级，绝不因此停跑）。
+
+    只在这确实是产物根（三件齐）且**还没有标记**时写：已有标记属于别的课 ⇒ 一个字都不动
+    —— 那是「别的课在这儿跑过」的证据，覆盖它等于把事故现场洗掉。
+    """
+    if not course or local_artifacts(dest) is None:
+        return
+    root = Path(dest)
+    have = read_local_course_name(root)
+    if have == course:
+        return
+    if have:
+        log(f"WARN 产物根已有别的课的标记（{have}）—— 不覆盖：{root / LOCAL_COURSE_NAME}")
+        return
+    try:
+        (root / LOCAL_COURSE_NAME).write_text(course + "\n", encoding="utf-8")
+    except OSError as e:
+        log(f"WARN 课程标记写不下（{type(e).__name__}: {e}）—— 下次仍按 course_fp 对账")
+
+
 def local_artifacts(dest: str | Path) -> dict | None:
     """本机产物目录的「续跑真值」（三件齐全才认，否则 None）。
 
@@ -191,7 +222,68 @@ def local_artifacts(dest: str | Path) -> dict | None:
         "run_id": str(st.get("run_id", "") or ""),
         "code_sha256": str(man.get("code_sha256", "") or ""),
         "ts_code_sha256": str(man.get("ts_code_sha256", "") or ""),
+        # 课程身份的两条来源：本课自己写的标记（准），老产物根没有 ⇒ 只有 manifest 的指纹。
+        "course_name": read_local_course_name(root),
+        "course_fp": str(man.get("course_fp", "") or ""),
     }
+
+
+def read_pack_manifest(zip_path: str | Path) -> dict:
+    """读任务包里的 `manifest.json`（读不到 / 不是 dict ⇒ `{}`，**永不抛**）。
+
+    包内的 `manifest.json` 与 `run_loop` 将要用的那份是**同一份字节**：它的 `course_fp`
+    是「这个包属于哪门课」的权威判据（缺了才退回 `course.jsonc` 的字节哈希）。
+    """
+    try:
+        with zipfile.ZipFile(Path(zip_path)) as zf:
+            man = json.loads(zf.read(MANIFEST_NAME).decode("utf-8"))
+    except (KeyError, OSError, ValueError, zipfile.BadZipFile):
+        return {}
+    return man if isinstance(man, dict) else {}
+
+
+def pack_course_fp(zip_path: str | Path) -> str:
+    """任务包的课程身份：manifest 的 `course_fp`，缺了退回 `course.jsonc` 的字节 sha256。"""
+    fp = str(read_pack_manifest(zip_path).get("course_fp", "") or "")
+    if fp:
+        return fp
+    try:
+        with zipfile.ZipFile(Path(zip_path)) as zf:
+            return hashlib.sha256(zf.read(COURSE_NAME)).hexdigest()
+    except (KeyError, OSError, zipfile.BadZipFile):
+        return ""
+
+
+def local_belongs_to_course(
+    local: dict, course: str, pack: str | Path | None
+) -> tuple[bool | None, str]:
+    """本机产物是不是**这门课**的 ⇒ `(True / False / None, 判据一句话)`。
+
+    为什么必须有这一问（★ 2026-11-22 现场）：产物根是**机器级**的（`CFG.local_root` 单课不
+    加课程层），而 `CFG.course` 留空时课由 hub 在每次重启后派。「本机优先」只看三件齐不齐
+    ⇒ g10-press（跑到 it331 被停课）的 plan/manifest 被拿来续训 hub 派的 g9-def，
+    `--hub-course g9-def` 只是把别人的轮次报到 g9-def 账上。**本机优先的前提是同一门课。**
+
+    判据序（越靠前越准）：
+      ① 产物根的 `.course-name` 标记（本课开段时自己写的）——不受课程文件编辑影响；
+      ② 老产物根没有标记 ⇒ 本的 `manifest.course_fp` 对包内 `manifest.course_fp`：
+         同 = 同一份课程文件；不同 = 不是同一门课**或**课程文件被改过（后者按 D14 血缘也是
+         新实验，不该悄悄续在老账本上）；
+      ③ 都判不出 ⇒ `None`（按老行为本机优先——**不用猜值去拦人**，只在有证据时才换根）。
+    """
+    marked = str(local.get("course_name") or "")
+    if marked:
+        return (marked == course, f"产物根标记 course={marked}")
+    if pack is None:
+        return (None, "没有课程标记，也没有包可比对")
+    pack_fp = pack_course_fp(pack)
+    local_fp = str(local.get("course_fp") or "")
+    if not pack_fp or not local_fp:
+        return (None, "包或本机产物没有 course_fp")
+    return (
+        pack_fp == local_fp,
+        f"course_fp 本机 {_sha12(local_fp)} vs 包 {_sha12(pack_fp)}",
+    )
 
 
 def pack_extends_local(local: dict, plan: dict) -> bool:

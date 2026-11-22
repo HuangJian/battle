@@ -6,6 +6,47 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §169 停课的腿被重新派活时**续训了停课那门课**：产物根是机器级的，「本机优先」缺一个「同一门课」前提（2026-11-22）
+
+**症状**（用户 notebook 原文）：g10-press 自主跑到 it331 → 重启云机 → 控制台停课 g10-press →
+云机领到 g9-def，日志却：
+
+```
+[09:05:54] 清单里可领：g9-def
+[09:05:55] 本机已有产物 it332（计划 it300 → it500，run=f242e1632f774e43）…
+[09:05:59] ★ 包与本机不是同一段：本机 it332 … vs 包 it498→it1000 … 本机优先：**不**用包改写计划
+[09:06:03] 开始训练：… --hub-course g9-def
+```
+
+g9-def 的包（it498→it1000）被判成「不是加长段」⇒ 本机优先 ⇒ 拿 g10-press 的 `plan.json`/
+`manifest.json`/`<artifacts>/course.jsonc` 续训，`--hub-course g9-def` 只是把**别人的轮次**
+报进 g9-def 的账本。
+
+**根因**（两层，缺一不会出事）：
+1. 产物根是**机器级**的：`offline_deliverable.local_root_path` 在「显式 `CFG.local_root` + 单课」
+   时**不加课程层**（设计如此：老机器上的在跑段靠它续跑）。`CFG.course` 留空走清单发现时，
+   同一台机换课 = 同一个产物根。
+2. 「本机优先」的判据只有「三件齐」（`local_artifacts`）+「包是不是加长段」
+   （`pack_extends_local`）——**没有一条问过「这批产物是哪门课的」**。课程本身也不是从 hub 派
+   的包里读的：`run_standalone` 从 `<artifacts>/course.jsonc` 加载（`remote/run_loop.py`）。
+
+**修复**（`remote/_offline_boot/03_pack.pyfrag` / `06_run.pyfrag`，生成物 `remote/offline_boot.py`）：
+- `local_belongs_to_course(local, course, pack)`：① `<dest>/.course-name` 标记（开段时写，最准）；
+  ② 老产物根没有标记 ⇒ 本的 `manifest.course_fp` 对包内 `manifest.course_fp`（缺则 `course.jsonc`
+  字节 sha256）；③ 都判不出 ⇒ `None`（老行为，本机优先——不用猜值拦人）。
+- 判据 `False` ⇒ **不以它为续跑点**：本课产物改落 `<dest>/<课>`（老产物一个字不动），先按该课
+  自己的网络盘抽屉恢复，再照常判「加长段」。包也取不到 ⇒ `SystemExit` 列三条出路（不静默续训、
+  不静默清空）。
+- `claim_local_course`：三件齐 ∧ 无标记时写 `.course-name`；**别的课的标记绝不覆盖**（那是证据）。
+- `_choose_pack` 的返回值多一项「产物根」——argv/`ensure_code`/`_deliver` 全部用它。
+
+**口径**：同一门课但**课程文件改过**（`course_fp` 变）⇒ 按 D14 血缘算新实验，同样改落子目录从
+包起跑（hub 的锚点就是本机 `last_it` 附近，不丢轮次）；要强行续老目录就自己搬或改 `CFG.local_root`。
+
+**回归**：`tests/remote/test_offline_local_first.py` 五条（标记优先 / 指纹回退 / 别的课不续训 /
+同课照旧本机优先 / 无包时响亮停手 + 标记写入）。红测结论：旧代码上新用例红在
+`argv[0] == '--artifacts'`（= 正在续训停课那门），修复后 65 例全绿。
+
 ## §168 DSW 接不上 relay 的真因：cloudflared 回源写 `localhost` 被解析成 `::1`（502），且换端口后注册仍打 443（2026-11-19）
 
 **症状（用户 notebook 日志 + 本机取证，同一时刻两件事同屏）**：
