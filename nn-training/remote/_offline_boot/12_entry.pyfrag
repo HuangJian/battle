@@ -39,16 +39,17 @@ def run(
         log(f"课程队列（{len(explicit)} 门，串行，CFG 点名）：{', '.join(explicit)}")
         explicit_kinds = _explicit_kinds(cfg, creds, log)
         # 老 hub 没有 `kind`（空表）⇒ 逐字旧行为：全部按 RL 跑。
-        extra = {"kinds": explicit_kinds} if explicit_kinds else {}
         return _run_batch(
-            cfg,
-            creds,
-            log,
-            keepalive_stop,
-            explicit,
-            multi=len(explicit) > 1,
-            leases=_explicit_leases(cfg, creds, log),
-            **extra,
+            BatchRunSpec(
+                cfg,
+                creds,
+                log,
+                keepalive_stop,
+                explicit,
+                multi=len(explicit) > 1,
+                leases=_explicit_leases(cfg, creds, log),
+                kinds=explicit_kinds or None,
+            )
         )
     if not bool(cfg.get("auto_discover", True)):
         # 显式关掉自动发现 = 「我就是要手填 course」的口径 ⇒ 与今天逐字相同地响亮拒。

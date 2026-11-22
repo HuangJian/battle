@@ -19,11 +19,13 @@
 
 from __future__ import annotations
 
+import argparse
 import shutil
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import common.codehash
@@ -95,7 +97,7 @@ class EvalDispatchSpec:
     bun: str
     rl_path: str
     traj_dir: Path
-    args: Any
+    args: argparse.Namespace | SimpleNamespace
     cfg: dict
     iter_id: str
     it: int

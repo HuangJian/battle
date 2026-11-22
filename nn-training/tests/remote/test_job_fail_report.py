@@ -232,6 +232,7 @@ def test_wait_job_timeout_confirm_recognizes_failure(tmp_path: Path) -> None:
 
 def test_worker_report_job_failure_reaches_hub(tmp_path: Path) -> None:
     """pull 侧 worker 的回报端点（worker 自带 transport）：原因 + 机器身份都到位。"""
+    from remote.job_lifecycle import FailReportSpec
     from remote.worker import report_job_failure as worker_report
     from remote.worker import worker_tag
 
@@ -240,14 +241,16 @@ def test_worker_report_job_failure_reaches_hub(tmp_path: Path) -> None:
         token = store.claim(LeaseSpec(jid))
         assert token
         ok = worker_report(
-            base,
-            "sekret",
-            jid,
-            "bun 未安装",
-            kind="ProtocolError",
-            detail="tb",
-            lease_token=token,
-            log=_QUIET,
+            FailReportSpec(
+                base,
+                "sekret",
+                jid,
+                "bun 未安装",
+                kind="ProtocolError",
+                detail="tb",
+                lease_token=token,
+                log=_QUIET,
+            )
         )
         assert ok is True
         rec = store.job_failure(jid)

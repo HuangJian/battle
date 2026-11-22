@@ -76,7 +76,7 @@ import uuid
 import zipfile
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 # ── 交付面（S5 第十四刀）住兄弟文件 `remote/offline_deliverable.py` ────────────────────
 # notebook 把它与 `offline_boot.py` / `tailscale_boot.py` 一起从 GitHub raw 拉进同一目录

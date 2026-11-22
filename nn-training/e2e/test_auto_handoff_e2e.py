@@ -667,16 +667,16 @@ def test_auto_loop_runs_the_claimable_batch_in_order(
 
         seen: list[str] = []
 
-        def fake_run(cfg, creds, log, stop, *, course, multi=False, **kw):
+        def fake_run(spec):
             """假训练：记一笔 + 报段末摘要（`end_it_reached` ⇒ hub 记 completed，循环换下一门）。"""
-            seen.append(course)
+            seen.append(spec.course)
             st, res = _http(
-                cfg["hub_url"],
+                spec.cfg["hub_url"],
                 OFFLINE_RESULT_PATH,
                 method="POST",
                 body={
-                    "course": course,
-                    "run_id": f"seg-{course}",
+                    "course": spec.course,
+                    "run_id": f"seg-{spec.course}",
                     "it_end": 8,
                     "state": "complete",
                     "end_it_reached": True,

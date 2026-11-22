@@ -96,10 +96,10 @@ def test_bad_job_systemexit_is_reported_as_job_failure(
     outcome = _pull_round(tmp_path, monkeypatch, SystemExit(BAD_CORPUS), msgs, reported)
 
     assert len(reported) == 1, reported
-    call = reported[0]
-    assert call["args"][2] == JID
-    assert call["args"][3] == BAD_CORPUS  # 原因原样上浮（hub 侧 / 训练侧都读它）
-    assert call["kwargs"]["kind"] == "SystemExit"
+    spec = reported[0]["args"][0]
+    assert spec.jid == JID
+    assert spec.reason == BAD_CORPUS  # 原因原样上浮（hub 侧 / 训练侧都读它）
+    assert spec.kind == "SystemExit"
     # 会话必须活着：ok=False（本轮没产出）、没交回传、也没要求整条循环退出
     assert (outcome.ok, outcome.uploaded, outcome.stop) == (False, False, False)
 

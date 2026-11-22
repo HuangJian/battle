@@ -30,6 +30,7 @@ import pytest
 
 import remote.offline_deliverable as deliverable_mod
 from remote import offline_boot
+from remote.offline_boot import CourseRunSpec, RunArgvSpec
 
 
 def _quiet(_msg: str) -> None:
@@ -263,17 +264,23 @@ def test_describe_local_vs_pack_says_it_adopts() -> None:
 def test_build_run_argv_local_first_drops_the_bundle(tmp_path: Path) -> None:
     dest = tmp_path / "run"
     argv = offline_boot.build_run_argv(
-        {"course": "c5-gae"}, tmp_path / "task-c5-gae.zip", dest, "h", "f", local_first=True
+        RunArgvSpec(
+            {"course": "c5-gae"}, tmp_path / "task-c5-gae.zip", dest, "h", "f", local_first=True
+        )
     )
     assert "--bundle" not in argv, "本机优先 ⇒ 包不参与（plan/manifest/代码/TS 全从产物目录读）"
     assert argv[:2] == ["--artifacts", str(dest)]
 
     # 没拿到包（optional 取失败）同样只走 --artifacts
-    none_pack = offline_boot.build_run_argv({"course": "c5-gae"}, None, dest, "h", "f")
+    none_pack = offline_boot.build_run_argv(
+        RunArgvSpec({"course": "c5-gae"}, None, dest, "h", "f")
+    )
     assert none_pack[:2] == ["--artifacts", str(dest)] and "--bundle" not in none_pack
 
     # 老行为逐字不变（有包 + 不本机优先）
-    legacy = offline_boot.build_run_argv({"course": "c5-gae"}, tmp_path / "t.zip", dest, "h", "f")
+    legacy = offline_boot.build_run_argv(
+        RunArgvSpec({"course": "c5-gae"}, tmp_path / "t.zip", dest, "h", "f")
+    )
     assert legacy[:4] == ["--bundle", str(tmp_path / "t.zip"), "--artifacts", str(dest)]
 
 
@@ -553,7 +560,9 @@ def _run_course(
     }
     logs = log_sink if log_sink is not None else []
     rc = offline_boot.run_one_course(
-        base, {}, logs.append, None, course="c5-gae", multi=False, run_loop_main=fake_run_loop
+        CourseRunSpec(
+            base, {}, logs.append, None, course="c5-gae", multi=False, run_loop_main=fake_run_loop
+        )
     )
     assert rc == 0
     return seen, calls
@@ -985,8 +994,8 @@ def _run_many(
     seen: list[str] = []
     it = iter(outcomes)
 
-    def fake_one(cfg, creds, log, stop, course=None, multi=False, lease="", progress=None):
-        seen.append(str(course))
+    def fake_one(spec: CourseRunSpec) -> int:
+        seen.append(str(spec.course))
         nxt = next(it)
         if isinstance(nxt, BaseException):
             raise nxt
@@ -1159,19 +1168,21 @@ def test_run_one_course_code_changed_says_restart_session(
     logs: list[str] = []
     with pytest.raises(SystemExit) as ei:
         offline_boot.run_one_course(
-            {
-                "course": "c5-gae",
-                "work_dir": str(tmp_path / "w"),
-                "local_root": str(_local(tmp_path)),
-                "device": "cpu",
-                "live_backfeed": False,
-            },
-            {},
-            logs.append,
-            None,
-            course="c5-gae",
-            multi=False,
-            run_loop_main=boom,
+            CourseRunSpec(
+                {
+                    "course": "c5-gae",
+                    "work_dir": str(tmp_path / "w"),
+                    "local_root": str(_local(tmp_path)),
+                    "device": "cpu",
+                    "live_backfeed": False,
+                },
+                {},
+                logs.append,
+                None,
+                course="c5-gae",
+                multi=False,
+                run_loop_main=boom,
+            )
         )
     msg = str(ei.value)
     assert "Restart session" in msg, msg

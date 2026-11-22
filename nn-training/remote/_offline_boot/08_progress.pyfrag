@@ -1,17 +1,20 @@
 # ═══ part 8/12: 08_progress — 打点：install_progress_pinger / install_local_progress_sink / 交还租约 ═══
-def install_progress_pinger(
-    hub: str,
-    token: str,
-    course: str,
-    lease: str,
-    log: Callable[[str], None],
-    *,
-    interval: float = PROGRESS_MIN_INTERVAL_SEC,
-    timeout: float = PROGRESS_TIMEOUT_SEC,
-    post: Callable[..., tuple[int, dict]] | None = None,
-    reclaim: Callable[[], str] | None = None,
-    clock: Callable[[], float] | None = None,
-) -> Callable[[], str]:
+class PingerSpec(NamedTuple):
+    """`install_progress_pinger` 的旋钮袋（P0-3：10 参 → 一个对象）。"""
+
+    hub: str
+    token: str
+    course: str
+    lease: str
+    log: Callable[[str], None]
+    interval: float = PROGRESS_MIN_INTERVAL_SEC
+    timeout: float = PROGRESS_TIMEOUT_SEC
+    post: Callable[..., tuple[int, dict]] | None = None
+    reclaim: Callable[[], str] | None = None
+    clock: Callable[[], float] | None = None
+
+
+def install_progress_pinger(spec: PingerSpec) -> Callable[[], str]:
     """把**打点层**挂进 `sys.modules[PROGRESS_HOOK_NAME]` → 返回 `detach()`（撤销注册）。
 
     ★M3 / Q2 / F3：打点是「**完成事件**驱动的观测」，不是定时任务。快照侧
@@ -37,6 +40,10 @@ def install_progress_pinger(
 
     打点的任何失败都**不影响训练**（观测腿，与心跳同一条纪律）；`post` 是测试注入点。
     """
+    # 旧签名 10 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    hub, token, course, lease = spec.hub, spec.token, spec.course, spec.lease
+    log, interval, timeout = spec.log, spec.interval, spec.timeout
+    post, reclaim, clock = spec.post, spec.reclaim, spec.clock
     post_fn = post or _post_json
     now_fn = clock or time.monotonic
     url = progress_url(hub, course, lease)

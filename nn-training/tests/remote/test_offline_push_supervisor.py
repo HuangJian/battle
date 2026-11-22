@@ -348,8 +348,20 @@ def test_task_entry_wires_push_mode_without_any_hub_credentials(
 
     captured: dict[str, object] = {}
 
-    def fake_run(cfg, creds, log, stop, **kw):
-        captured.update({"cfg": cfg, "creds": creds, **kw})
+    def fake_run(spec):
+        captured.update(
+            {
+                "cfg": spec.cfg,
+                "creds": spec.creds,
+                "course": spec.course,
+                "push_mode": spec.push_mode,
+                "assigned_pack": spec.assigned_pack,
+                "assigned_resume": spec.assigned_resume,
+                "push_outbox": spec.push_outbox,
+                "stop_file": spec.stop_file,
+                "push_floor_it": spec.push_floor_it,
+            }
+        )
         return 0
 
     monkeypatch.setattr(boot, "run_one_course", fake_run)
@@ -386,8 +398,8 @@ def test_task_entry_passes_resume_it_as_the_floor(
 
     captured: dict[str, object] = {}
 
-    def fake_run(_cfg, _creds, _log, _stop, **kw):
-        captured.update(kw)
+    def fake_run(spec):
+        captured.update({"push_floor_it": spec.push_floor_it})
         return 0
 
     monkeypatch.setattr(boot, "run_one_course", fake_run)

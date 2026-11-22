@@ -173,11 +173,14 @@ def test_credentials_are_read_before_any_network_change() -> None:
     assert "run_one_course(" not in body, "取包那一步住在 _run_batch 里（别在 run() 里绕过凭据顺序）"
     batch = src[src.index("def _run_batch(") :]
     batch = batch[: batch.index("\ndef ")]
-    assert "creds: dict" in batch[:400], "_run_batch 必须收下已读好的凭据"
+    assert "spec: BatchRunSpec" in batch[:400], "_run_batch 必须收下已读好的凭据"
     assert batch.index("run_one_course(") > 0
     assert "creds: dict" in src[src.index("def _run_auto(") :][:400], "_run_auto 同上"
     per_course = src[src.index("def run_one_course(") :]
-    assert "creds: dict" in per_course[:400], "run_one_course 必须收下已读好的凭据"
+    assert "spec: CourseRunSpec" in per_course[:400], "run_one_course 必须收下已读好的凭据"
+    # P0-3 把这些参收进旋钮袋：袋里必须真有 `creds` 字段（否则凭据得从别处摸）。
+    for cls in ("class BatchRunSpec(", "class CourseRunSpec("):
+        assert "creds: dict" in src[src.index(cls) :][:600], f"{cls} 必须带 creds 字段"
     # 2026-11-18（长函数存量）：取包那一段搬进同文件的 `_choose_pack`（只从 ctx 拿凭据），
     # 时序判据跟着搬：`obtain_pack` 仍只出现在一个收 `creds` 的地方。
     per_pack = src[src.index("def _choose_pack(") :]

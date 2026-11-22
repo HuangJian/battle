@@ -42,6 +42,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
@@ -353,7 +354,7 @@ def _intercept_selection(
     return pick
 
 
-def main() -> None:
+def _parse_args() -> argparse.Namespace:
     ap = house_parser()
     ap.add_argument("--corpus", default=str(NN_ROOT / "data" / "human-x20-corpus"))
     ap.add_argument("--out", default=str(NN_ROOT / "data" / "human-x20-corpus" / "demo_bank.npz"))
@@ -428,7 +429,11 @@ def main() -> None:
             "由 kickstart_ref 的 KL 缰绳负责 ⇒ 普通块是重复付费。"
         ),
     )
-    args = ap.parse_args()
+    return ap.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
 
     if args.defense_frames > 0 and not args.v6:
         raise SystemExit(
@@ -436,7 +441,6 @@ def main() -> None:
             "legacy 语料的列序不同（会静默按错列筛）"
         )
 
-    mask_dim = MASK_V6_DIM if args.v6 else MASK_DIM
     shards = sorted(Path(args.corpus).glob("shard_*"))
     if not shards:
         raise SystemExit(f"no shards in {args.corpus}")
@@ -462,6 +466,34 @@ def main() -> None:
     else:
         def_idx = _defense_selection(args, meta, rng)
 
+    bank = _collect(args, shards, quota, def_idx, rng)
+    _write_and_report(args, shards, bank)
+
+
+class _Collected(NamedTuple):
+    """`_collect` 的产物（一长串返回值收成一个对象，P0-3）。"""
+
+    obs: np.ndarray
+    scalars: np.ndarray
+    extra: np.ndarray
+    actions: np.ndarray
+    masks: np.ndarray
+    total: int
+    kept_def: int
+    kept_gen: int
+    dropped_dup: int
+    def_stats: dict
+
+
+def _collect(
+    args: argparse.Namespace,
+    shards: list[Path],
+    quota: dict[Path, int],
+    def_idx: dict[Path, np.ndarray],
+    rng: np.random.Generator,
+) -> _Collected:
+    """逐 shard 取普通块 + 稀有块；打散后返回整份 bank（不落盘）。"""
+    mask_dim = MASK_V6_DIM if args.v6 else MASK_DIM
     obs_l, sc_l, ex_l, ac_l, m_l = [], [], [], [], []
     total = 0
     kept_def = kept_gen = dropped_dup = 0
@@ -518,8 +550,24 @@ def main() -> None:
     assert mm.shape[1] == mask_dim, (mm.shape, mask_dim)
     # 抽样后打散：bank 是"每步均匀抽 per_mb 个"，若按关顺序落盘，前若干轮会全抽到同一关。
     perm = rng.permutation(total)
-    obs, sc, ex, ac, mm = obs[perm], sc[perm], ex[perm], ac[perm], mm[perm]
+    return _Collected(
+        obs[perm],
+        sc[perm],
+        ex[perm],
+        ac[perm],
+        mm[perm],
+        total,
+        kept_def,
+        kept_gen,
+        dropped_dup,
+        def_stats,
+    )
 
+
+def _write_and_report(args: argparse.Namespace, shards: list[Path], bank: _Collected) -> None:
+    """落盘 npz 并打印体积 / 标签边缘 / 稀有块画像。"""
+    obs, sc, ex, ac, mm = bank.obs, bank.scalars, bank.extra, bank.actions, bank.masks
+    total = bank.total
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out, obs=obs, scalars=sc, extra=ex, actions=ac, masks=mm)
@@ -544,12 +592,12 @@ def main() -> None:
     mv = np.bincount(ac[:, 0], minlength=5 if not args.v6 else 4) / max(1, total)
     print(f"[demo-bank] move 边缘 {np.round(mv, 4).tolist()}（legacy 5 类 / v6 4 类）")
     if args.defense_frames > 0 or args.intercept_frames > 0:
-        # 别叫 `n`：上面循环里的 `n` 是 shard 帧数（int），mypy 会按第一处赋值钉住类型。
+        def_stats = bank.def_stats
         dn = int(def_stats["n"]) or 1
         label = "拦截块" if args.intercept_frames > 0 else "防守块"
         print(
             f"[demo-bank] {label}实测 n={def_stats['n']}（占 bank {def_stats['n'] / max(1, total):.1%}）"
-            f" 普通块 n={kept_gen}（去重丢弃 {dropped_dup}）"
+            f" 普通块 n={bank.kept_gen}（去重丢弃 {bank.dropped_dup}）"
         )
         print(
             f"[demo-bank] {label}画像 s38 均值 {def_stats['s38'] / dn:.3f} · 到基地均值 "

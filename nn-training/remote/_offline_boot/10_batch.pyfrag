@@ -1,16 +1,19 @@
 # ═══ part 10/12: 10_batch — 批与自动：_run_batch / _run_auto ═══
-def _run_batch(
-    cfg: dict,
-    creds: dict,
-    log: Callable[[str], None],
-    keepalive_stop: Any,
-    courses: list[str],
-    *,
-    multi: bool,
-    leases: dict | None = None,
-    shas: dict[str, str] | None = None,
-    kinds: dict[str, str] | None = None,
-) -> int:
+class BatchRunSpec(NamedTuple):
+    """`_run_batch` 的旋钮袋（P0-3：9 参 → 一个对象）。"""
+
+    cfg: dict
+    creds: dict
+    log: Callable[[str], None]
+    keepalive_stop: Any
+    courses: list[str]
+    multi: bool
+    leases: dict | None = None
+    shas: dict[str, str] | None = None
+    kinds: dict[str, str] | None = None
+
+
+def _run_batch(spec: BatchRunSpec) -> int:
     """串行跑一批课；返回 rc。失败分两类（plan/offline-switch-auto-bundle §3.5）：
 
       · **取不到任务包**（`PackUnavailableError`）⇒ 记一行、**跳过继续下一门**；末尾汇总，
@@ -24,6 +27,10 @@ def _run_batch(
     `leases` 非空时逐课领租约（best-effort）+ 心跳线程 + 跑完交还，并把跑成功的包 sha 记进
     `leases["served"]`（防自激）。租约的任何失败都**不影响**训练。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    cfg, creds, log = spec.cfg, spec.creds, spec.log
+    keepalive_stop, courses, multi = spec.keepalive_stop, spec.courses, spec.multi
+    leases, shas, kinds = spec.leases, spec.shas, spec.kinds
     rc = 0
     skipped: list[str] = []
     # 自动交接的两个「不跑」名单（§3.1a/§3.3a）：中间态（等下一拍）与会话放弃。
@@ -95,7 +102,7 @@ def _run_batch(
                 beat = heartbeat_loop(ctx["hub"], ctx["token"], course, lease, log)
         progress: dict = {}
         try:
-            rc = run_one_course(
+            rc = run_one_course(CourseRunSpec(
                 cfg,
                 creds,
                 log,
@@ -104,7 +111,7 @@ def _run_batch(
                 multi=multi,
                 lease=lease,
                 progress=progress,
-            )
+            ))
         except PackUnavailableError as e:
             # ★ 只放宽「取不到包」这一类（顺序必须在 `except SystemExit` **之前**，
             #   否则会被父类吃掉）：记一行 + 继续下一门；汇总与非零退出在循环之后。
@@ -198,7 +205,7 @@ def _run_task_round(
     # 只在真有 BC 课时多传一个参数：RL-only 的批保持旧调用形状（测试桩 / 旧调用方都不用改），
     # 而 BC 课一旦出现就与 RL 课走同一次 `_run_batch`。
     batch_kwargs = {"kinds": kind_map} if "bc" in kind_map.values() else {}
-    rc = _run_batch(
+    rc = _run_batch(BatchRunSpec(
         cfg,
         creds,
         log,
@@ -208,7 +215,7 @@ def _run_task_round(
         leases=leases,
         shas={str(t["course"]): str(t.get("pack_sha256") or "") for t in tasks},
         **batch_kwargs,
-    )
+    ))
     return rc, leases
 
 

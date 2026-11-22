@@ -417,7 +417,9 @@ def test_cloud_eval_not_assembled_without_corpus(tmp_path: Path) -> None:
 
 def _argv(cfg: dict, tmp_path: Path, resume: Path | None = None) -> list[str]:
     return offline_boot.build_run_argv(
-        cfg, tmp_path / "task-c5-gae.zip", tmp_path / "run", "https://hub.example", "tok", resume
+        offline_boot.RunArgvSpec(
+            cfg, tmp_path / "task-c5-gae.zip", tmp_path / "run", "https://hub.example", "tok", resume
+        )
     )
 
 

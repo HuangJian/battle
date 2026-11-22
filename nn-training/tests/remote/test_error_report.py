@@ -361,7 +361,7 @@ def _round_with(
     monkeypatch.setattr(JR, "abandon_job", lambda *a, **k: None, raising=True)
     failures: list[str] = []
     monkeypatch.setattr(
-        JR, "report_job_failure", lambda *a, **k: failures.append(str(a[2])), raising=True
+        JR, "report_job_failure", lambda *a, **k: failures.append(str(a[0].jid)), raising=True
     )
     _run_loop(
         tmp_path,
