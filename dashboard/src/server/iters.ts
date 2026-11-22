@@ -1030,6 +1030,11 @@ function collectEvalSummaries(
           dmgPerKill: null,
           scoreMean: null,
           scoreStd: null,
+          // 环内拦截（2026-11-22，experiments §161）：summary 行直读，旧行 = null。
+          ringIntrMean: typeof r.ring_intr_mean === 'number' ? r.ring_intr_mean : null,
+          ringKillRate: typeof r.ring_kill_rate === 'number' ? r.ring_kill_rate : null,
+          ringTtkMean: typeof r.ring_ttk_mean === 'number' ? r.ring_ttk_mean : null,
+          innerPressFrac: typeof r.inner_press_frac === 'number' ? r.inner_press_frac : null,
           behaviorMetrics: null,
         })
       } catch {

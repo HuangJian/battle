@@ -57,6 +57,7 @@ from worker.eval_local import (
     eval_census_fields,
     eval_loot_fields,
     eval_metric_fields,
+    eval_ring_fields,
     run_local_eval_game,
 )
 
@@ -478,6 +479,7 @@ class _UnitLanes:
             "ticks": manifest.get("ticks"),
             "score": manifest.get("score"),
             "kills": manifest.get("kills"),
+            **eval_ring_fields(manifest),
             "enemyHits": manifest.get("enemyHits"),
             "hitRate": manifest.get("hitRate"),
             "powerUpsCollected": manifest.get("powerUpsCollected"),

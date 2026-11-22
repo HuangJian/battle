@@ -74,7 +74,12 @@ import {
 } from '../../src/nn/opening-corridor'
 import { RING_CELLS } from '../../src/utils/base-ring'
 import { computePlayer2SpawnCol } from '../../src/utils/helpers'
-import { corridorCells, nearestPickupCenter } from '../../src/nn/danger-metrics'
+import {
+  BASE_INTRUDER_CELLS,
+  corridorCells,
+  countBaseIntruders,
+  nearestPickupCenter,
+} from '../../src/nn/danger-metrics'
 import { featuresEngine } from '../../src/nn/conv/conv'
 import { GoalExecutor } from '../../src/nn/goal-executor'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
@@ -339,6 +344,19 @@ interface RolloutModel {
  * `stopTicks` 会**静默归零** ⇒ 依赖它的 wBlock 项从 −0.5 分暴涨到 −16.3 分
  * （idle 148.5/千 − stop 143.7/千 ⇒ 5/千；归零则 −110 × 0.1485）。
  */
+/** 环内拦截 telemetry（2026-11-22，「God 多赢的 24pp 全在基地被拆」那一轮的产物）。
+
+ *  **环** = 以基地中心（`BASE_POS` 2×2 的中心）为心、**Chebyshev ≤ INTRUDER_RING_CELLS 格**的区域。
+ *  为什么是 6 格：基地 2×2 + 一圈墙之外再留 3 格（≈ 半个屏高），语义是"已经进入最后一道
+ *  防线"——比 `s38` 那个贴脸压力环（1 格）宽得多、比防守 bank 用的 12 格窄。
+ *  为什么用 Chebyshev：与移动/卡关的"格"语义一致（8 向都是一步=1 格）。
+ *
+ *  这三个读数的用途（`docs/nn/experiments.md` §160 补三）：实测 NN 放进去的基地压力**比
+ *  God 少**，但每一档压力下都被拆得更多 ⇒ 病不在"让人靠近"，在"靠近之后清不掉"。
+ *  所以要把 `kills` 拆成**环内/环外**，并量出"进环 → 被击杀"的拍数（ttk）。
+ */
+export const INTRUDER_RING_CELLS = BASE_INTRUDER_CELLS
+
 export function isStopTick(ai: InputLike): boolean {
   return ai.isHolding?.() === true || ai.getMoveDirection() === null
 }
@@ -509,6 +527,18 @@ interface Telemetry {
   killerKinds: (TankKind | null)[]
   /** tank id → kind 回查表（census 每 tick 记，供 `byId` 归因已死/已清理的凶手）。 */
   kindById: Map<number, TankKind>
+  /** 环内拦截（`RING_CELLS`）：敌人 id → 首次进环的 tick（离开即删，故终局内容 = 仍在环内）。 */
+  ringEnterTick: Map<number, number>
+  /** 累计进环次数（同一敌人多次进出会多次入账；用来算"漏进来几个"）。 */
+  ringIntruders: number
+  /** 进环后被**玩家**打掉的个数。 */
+  ringKills: number
+  /** 进环后又活着离开的个数（= 拦不住但也没丢基地）。 */
+  ringEscaped: number
+  /** 被击杀者的「进环 → 死亡」拍数之和（除以 `ringKills` 得均值）。 */
+  ringTtkSum: number
+  /** v17：环内有敌的 tick 数（与 rollout 的 `baseIntruderTicks` 同判据）。 */
+  baseIntruderTicks: number
 }
 
 function countBaseWall(world: World): number {
@@ -749,6 +779,19 @@ interface EvalResult {
   firstKillKind: TankKind | null
   killOrder: TankKind[]
   killerKinds: (TankKind | null)[]
+  /** 环内拦截 telemetry（2026-11-22，`INTRUDER_RING_CELLS` 见文件头）：把 `kills` 拆成环内/环外，
+   *  并给"进环 → 被击杀"的拍数。用途是把"守不住基地"拆成"没拦住"（intruders 多）
+   *  还是"拦了但太慢"（ttk 长）——§160 补三 已证 NN 是后者。 */
+  ringCells: number
+  ringIntruders: number
+  ringKills: number
+  ringEscaped: number
+  ringAlive: number
+  /** 被击杀入侵者的平均「进环→死亡」拍数；无环内击杀 = **-1**。 */
+  ringTtkMean: number
+  killsOuter: number
+  /** v17：环内有敌的 tick 数（0..ticks）。 */
+  baseIntruderTicks: number
   puSpawnBomb: number
   puSpawnTank: number
   puSpawnFreeze: number
@@ -1113,8 +1156,17 @@ export function runEvalOne(
     killOrder: [],
     killerKinds: [],
     kindById: new Map<number, TankKind>(),
+    ringEnterTick: new Map<number, number>(),
+    ringIntruders: 0,
+    ringKills: 0,
+    ringEscaped: 0,
+    ringTtkSum: 0,
+    baseIntruderTicks: 0,
   }
   const postThaw = createPostThawState()
+  // 环心（基地 2×2 的中心）：只算一次，逐 tick 复用。
+  const ringCx = (BASE_POS.col + 1) * CELL
+  const ringCy = (BASE_POS.row + 1) * CELL
   const seenPuIds = new Set<number>()
   let prevLivePuIds = new Set<number>()
   /** metrics v9：bulletId → **开火时刻** shooter 中心格键（与 export-rl-rollout 同式；
@@ -1681,6 +1733,9 @@ export function runEvalOne(
     else if (winKind === 'respawnShield' || winKind === 'starShieldGrace')
       tel.deathDerivedShieldTicks++
 
+    // ---- metrics v17：环内入侵 tick（与 rollout `baseIntruderTicks` 同一实现）----
+    if (countBaseIntruders(world) > 0) tel.baseIntruderTicks++
+
     // ---- Phase 0 逐敌种 census（T3）----
     // 位于 consumeEvents **之前**、sim.tick() 之后：`removeDeadEntities` 已在 tick 末
     // 把本 tick 阵亡的敌车摘掉，所以世界里的敌车都是活的；只跳过出生保护中的
@@ -1690,12 +1745,26 @@ export function runEvalOne(
       const tanks = world.tanks
       const kindById = tel.kindById
       const exposure = tel.exposureByKind
+      const ring = tel.ringEnterTick
       for (let i = 0; i < tanks.length; i++) {
         const tk = tanks[i]
         if (!kindById.has(tk.id)) kindById.set(tk.id, tk.kind)
         if (tk.spawnTimer > 0) continue
         const ki = enemyKindIndex(tk.kind)
         if (ki >= 0) exposure[ki]++
+        if (ki < 0) continue
+        // 环内拦截：中心到基地中心的 Chebyshev 格距（进/出各记一次，离开算 escaped）。
+        const dx = Math.abs(tk.x + TANK / 2 - ringCx)
+        const dy = Math.abs(tk.y + TANK / 2 - ringCy)
+        const inRing = Math.max(dx, dy) / CELL <= INTRUDER_RING_CELLS
+        const enterTick = ring.get(tk.id)
+        if (inRing && enterTick === undefined) {
+          ring.set(tk.id, t - 1) // 与 `tank_destroyed` 的 `t - 1` 同口径
+          tel.ringIntruders++
+        } else if (!inRing && enterTick !== undefined) {
+          ring.delete(tk.id)
+          tel.ringEscaped++
+        }
       }
     }
 
@@ -1716,6 +1785,13 @@ export function runEvalOne(
           tel.killOrder.push(vk)
           const ki = enemyKindIndex(vk)
           if (ki >= 0) tel.killsByKind[ki]++
+          // 环内拦截：这一杀是不是"已经进环的入侵者"？是则记 ttk（进环→死亡拍数）。
+          const ringEnter = tel.ringEnterTick.get(e.tank.id)
+          if (ringEnter !== undefined) {
+            tel.ringEnterTick.delete(e.tank.id)
+            tel.ringKills++
+            tel.ringTtkSum += Math.max(0, t - 1 - ringEnter)
+          }
         }
       } else if (e.type === 'player_hit') {
         tel.playerHits++
@@ -2160,6 +2236,14 @@ export function runEvalOne(
     firstKillKind: tel.firstKillKind,
     killOrder: tel.killOrder,
     killerKinds: tel.killerKinds,
+    ringCells: INTRUDER_RING_CELLS,
+    ringIntruders: tel.ringIntruders,
+    ringKills: tel.ringKills,
+    ringEscaped: tel.ringEscaped,
+    ringAlive: tel.ringEnterTick.size,
+    ringTtkMean: tel.ringKills > 0 ? tel.ringTtkSum / tel.ringKills : -1,
+    killsOuter: world.killCount - tel.ringKills,
+    baseIntruderTicks: tel.baseIntruderTicks,
     puSpawnBomb: tel.puSpawnBomb,
     puSpawnTank: tel.puSpawnTank,
     puSpawnFreeze: tel.puSpawnFreeze,
@@ -2356,6 +2440,15 @@ export function main(argv: string[]): void {
     dims: res.dims,
     scorable: res.scorable,
     kills: res.kills,
+    // 环内拦截（2026-11-22）：环内/环外击杀拆分 + 进环→死亡拍数。
+    ringCells: res.ringCells,
+    ringIntruders: res.ringIntruders,
+    ringKills: res.ringKills,
+    ringEscaped: res.ringEscaped,
+    ringAlive: res.ringAlive,
+    ringTtkMean: res.ringTtkMean,
+    killsOuter: res.killsOuter,
+    baseIntruderTicks: res.baseIntruderTicks,
     enemyHits: res.enemyHits,
     playerHits: res.playerHits,
     playerDamageTaken: res.playerDamageTaken,

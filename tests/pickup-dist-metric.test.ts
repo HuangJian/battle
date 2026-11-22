@@ -170,6 +170,7 @@ function mkTel(): Telemetry {
     deathDerivedShieldTicks: 0,
     stuckTicksCum: 0,
     wallPressTicks: 0,
+    baseIntruderTicks: 0,
     cooldownRejectTicks: 0,
     thShotsAtBaseCum: 0,
     thCostBreach: 0,

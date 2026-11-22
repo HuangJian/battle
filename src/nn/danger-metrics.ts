@@ -688,6 +688,39 @@ export function hotLaneTick(win: HotLaneWindow, world: World, exempt: boolean): 
  *
  * 纯函数、零分配、不读 rng、不写 World。
  */
+/**
+ * 「基地入侵」计数：存活且已接战（`spawnTimer<=0`）的敌车中，中心落在**基地环内**的个数。
+ *
+ * 环定义与 eval 侧 telemetry 同一份（`tools/sim/export-eval-game.ts::INTRUDER_RING_CELLS`）：
+ * 以基地中心（`BASE_POS` 2×2 的中心）为心、**Chebyshev ≤ 6 格**。为什么是 6 格：基地 2×2
+ * 加一圈墙之外再留 3 格 ≈ 半个屏高，语义是「已进入最后一道防线」——比 `s38` 那个贴脸
+ * 压力环（1 格）宽、比防守 bank 的 12 格窄。
+ *
+ * 用途（`docs/nn/experiments.md` §161）：实测 NN 的环内拦截率只有 God 的一半
+ * （19.6% vs 36.7%）而 ttk 只差 10% ⇒ 病在「进来之后打不死」。奖励侧需要一个**逐拍**
+ * 的入侵读数量（metrics v17 `baseIntruderTicks`），本函数是两个导出器的唯一实现。
+ *
+ * 零分配、只用 `world.allTanks`（AGENTS §14.6）。
+ */
+export function countBaseIntruders(world: World): number {
+  const cx = (BASE_POS.col + 1) * CELL
+  const cy = (BASE_POS.row + 1) * CELL
+  const band = BASE_INTRUDER_CELLS * CELL
+  let n = 0
+  const tanks = world.allTanks
+  for (let i = 0; i < tanks.length; i++) {
+    const t = tanks[i]
+    if (!t.alive || t.allegiance !== 'enemy' || t.spawnTimer > 0) continue
+    const dx = Math.abs(t.x + t.w / 2 - cx)
+    const dy = Math.abs(t.y + t.h / 2 - cy)
+    if (dx <= band && dy <= band) n++
+  }
+  return n
+}
+
+/** 「基地入侵」环半径（格）：与 eval 侧 `INTRUDER_RING_CELLS` **必须同值**。 */
+export const BASE_INTRUDER_CELLS = 6
+
 export function nearestEnemyDistPx(world: World): number {
   const p = world.player
   if (!p || !p.alive) return ENEMY_DIST_SENTINEL
