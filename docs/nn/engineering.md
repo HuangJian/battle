@@ -25,6 +25,26 @@
 
 ---
 
+## §298 P0-3 第四十五刀：`task_key` 收 `TaskKeySpec`（47 → 46）（2026-11-22）
+
+* `common/task_key.task_key` 原来 16 个参数：5 个身份位（`iter_id` / `mode` / `kind` / `stage` /
+  `seed`）+ 11 个带缺省的开关。现在只收一份 frozen + kw_only `TaskKeySpec`（同模块，L0 零新依赖）。
+  宽签名 47 → **46**，文件 39 → **38**（`common/task_key.py` 条目从 `WIDE_FUNCS_BASELINE` 删除）。
+* **失效面**：11 个开关里 **9 个是同型字符串**（`skip_steel_only_shots` / `break_bricks_on_path` /
+  `suppress_useless_fire` / `suppress_lead_miss_fire` / `opening_connect` / `corpus_fmt` 等）且位置相邻，
+  每个只决定键尾多不多一段 `:xxx`。错一位**不报错**，后果两种：键少一段 ⇒ 取消帧打不中这一局
+  （`POST /v1/cancel` 的 key 与 agent 认可的不一致，这局继续白烧卡）；或者两态不同的局撞成
+  同一个键 ⇒ full 与 replay 语料互相覆盖（语料污染，`§15` 那类自优化错误的上游）。
+  而它与 TS 侧（`tools/agent/sampler-agent.ts::taskKey`）是**逐字节镜像**，位置位错位最难肉眼发现。
+* **调用点极少但都很关键**：生产只有一个（`common/task_client.build_params` 在 `on_key` 回调里按
+  `params` 的 camelCase 键拼），所以这一刀也是「把从 camelCase map 到 snake_case 字段的对照表
+  写成名字」—— 两侧名字不同，正好是位置位最容易错位的地方。
+* `common/distribution.py` 门面同步 re-export `TaskKeySpec`（测试走 `dist.task_key(...)` 的旧路径不变）。
+* 新守卫 `tests/common/test_task_key_spec.py`（5 条：frozen + 全字段 kw_only / 16 字段与缺省逐项表 /
+  `task_key` 只剩 `spec` / 全缺省键逐字节 / 未知字段 `TypeError`）。
+  固定向量（`test_task_cancel.py`）保留并**补上 6 个开关的逐个激活**：每个开关单独打开都必须在
+  键尾多出且只多出自己那一段。
+
 ## §297 P0-3 第四十四刀：`run_job` 收 `RunJobSpec`（48 → 47）（2026-11-22）
 
 * `remote/worker.run_job` 原来 3 个身份位（`base_url` / `token` / `job`）+ 14 个按名旋钮，

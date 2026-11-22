@@ -9823,3 +9823,19 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   `Any` 基线 `remote/worker.py` 4 → 1、`remote/run_loop.py` 2 → 0（条目删）。
 - **验证**：remote / hub / e2e 相关族全绿；`bun run pygate` 绿（6754 passed / 3 skipped）。
   全文 → `docs/nn/engineering.md` §297。
+
+## §2026-11-22-task-key-spec（`task_key` 的 16 个参数收成 `TaskKeySpec`）
+
+- **背景**：`common/task_key.task_key` = 5 个身份位 + 11 个带缺省开关，其中 9 个是
+  「激活 ⇒ 键尾追加一段 `:xxx`」的同型字符串且位置相邻。错一位不报错：键少一段 ⇒ 取消帧
+  打不中这一局（继续白烧卡）；或两态不同的局撞成同键 ⇒ full / replay 语料互相覆盖。它与
+  `tools/agent/sampler-agent.ts::taskKey` 逐字节镜像，生产侧唯一调用点（`task_client.build_params`
+  的 `on_key`）还要从 camelCase `params` 映射到这些字段，正是位置位最容易错位的地方。
+- **决定**：同模块 `common/task_key.py` 住 frozen + kw_only `TaskKeySpec`（16 字段，缺省逐字一致），
+  `task_key(spec)` 只收它；`common/distribution.py` 门面同步 re-export。守
+  `tests/common/test_task_key_spec.py`（5 条），固定向量测试补「6 个开关逐个单独激活」的键尾断言。
+- **被否决**：① 只收那 9 个开关、`iter_id/mode/kind/stage/seed` 继续裸传（身份位与开关混在同一个
+  调用形状里，正是位置位错位的来源）；② 把开关改成 `frozenset[str]`（键配方是**有序**拼接，
+  顺序即契约，集合会把这个信息丢掉，且 TS 侧对拍要重写）。
+- **读数**：宽签名 47 → **46**、39 → **38** 文件（`WIDE_FUNCS_BASELINE` 删 `common/task_key.py`）。
+- **验证**：`bun run pygate` 绿（6759 passed / 3 skipped）。全文 → `docs/nn/engineering.md` §298。

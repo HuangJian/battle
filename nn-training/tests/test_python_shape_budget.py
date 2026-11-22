@@ -52,7 +52,8 @@ LONG_FUNCS_BASELINE: dict[str, int] = {
 
 #: 存量：包含 >8 参数函数的文件 → 个数。
 WIDE_FUNCS_BASELINE = {
-    "common/task_key.py": 1,
+    # 2026-11-22：`task_key` 的 5 个身份位 + 11 个同型开关收成 `TaskKeySpec`
+    # ⇒ 本文件宽签名归零，条目删除（守 `tests/common/test_task_key_spec.py`）。
     "hub/offline_push.py": 2,
     # 2026-11-21：`build_task_zip` 的 9 个关键字参数收成 `TaskZipSpec`
     # ⇒ 本文件宽签名归零，条目删除。

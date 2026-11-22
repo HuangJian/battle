@@ -103,6 +103,7 @@ from common.shard import (
 from common.shard import (
     write_shard as write_shard,
 )
+from common.task_key import TaskKeySpec as TaskKeySpec
 from common.task_key import task_key as task_key
 from common.weights_ledger import (
     _WEIGHTS_PUSHED as _WEIGHTS_PUSHED,
