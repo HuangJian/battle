@@ -25,6 +25,23 @@
 
 ---
 
+## §287 P0-3 第三十四刀：`dispatch_rollout_phase` 收 `RolloutPhaseSpec`（61 → 60）（2026-11-22）
+
+* `trainer/rollout_phase.py`：25 参 → frozen + kw_only `RolloutPhaseSpec`（16 个身份位 +
+  9 个可选接线：`course_fp` / `corpus_fp` / `halt_event` / `on_result` / `pool_halt` /
+  `on_shard` / `on_collect_end` / `on_dispatch_drained` / `on_dispatch_active`）；入口只收
+  `spec`，展开后函数体逐字不动。本文件宽签名 1 → **0**，全仓 61 → **60**、50 → **49** 文件。
+* 类型面不抬 G14：`args` 用 `argparse.Namespace | SimpleNamespace`（与 `EvalDispatchSpec` /
+  `trainer/stream` 同口径），`model` / `opt` / `ppo_backend` / `ref_model` 用 `object`
+  （只做透传）；本文件既有 1 处 `Any` 不变。
+* 调用点：生产 2（`trainer/loop_dispatch._rollout_phase` 首波 +
+  `trainer/loop_volume._dispatch_volume_wave` 补波）。两个调用点各只传其中一簇回调 ⇒
+  旧位置表漏传不会报错，只会静默少做一件事（零落盘少记一段账 / eval 闸没人解冻）。
+* 守 `tests/trainer/test_rollout_phase_spec.py`（3 条：frozen + kw_only / 字段表 /
+  入口只收 `spec`）。
+* 回归：新守卫(3) + `test_loop_volume_split`(13) + `test_python_shape_budget`(4) 绿；
+  ruff / mypy（1053 文件）无错。
+
 ## §286 P0-3 第三十三刀：`dispatch_bc_corpus` 收 `BcDispatchSpec`（62 → 61）（2026-11-22）
 
 * `worker/bc_dispatch.py`：25 个关键字参数 → frozen + kw_only 的 `BcDispatchSpec`，

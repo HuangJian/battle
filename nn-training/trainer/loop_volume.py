@@ -60,7 +60,11 @@ from typing import Any
 
 from biz.course import build_pairs
 from common.log import log
-from trainer.rollout_phase import begin_payload_parts, dispatch_rollout_phase
+from trainer.rollout_phase import (
+    RolloutPhaseSpec,
+    begin_payload_parts,
+    dispatch_rollout_phase,
+)
 from worker.reports import combine_reports
 from worker.resume import settled_stage_totals, trailing_samples_per_game
 
@@ -489,27 +493,29 @@ class TrainingVolume:
         # 零落盘（plan/payload-zero-disk §3.2）：补波与首波记同一份段账（同一 it ⇒ 不清）。
         begin_payload_parts(self.args, it, self._payload_parts)
         (report, stream_meta, _thread, _gate, _child, _early) = dispatch_rollout_phase(
-            self.args,
-            self.bun,
-            dist_cfg,
-            it,
-            self._traj_dir,
-            pairs,
-            self._jsonl_path,
-            self._model,
-            self._opt,
-            self._device,
-            self.ppo_backend,
-            self.update_kwargs,
-            self._start_it,
-            self._ref_model,
-            self._extra_wver,
-            False,
-            course_fp=self._course_fp,
-            corpus_fp=self._corpus_fp,
-            halt_event=halt_event,
-            on_result=on_result,
-            on_shard=self._payload_parts.add,
+            RolloutPhaseSpec(
+                args=self.args,
+                bun=self.bun,
+                dist_cfg=dist_cfg,
+                it=it,
+                traj_dir=self._traj_dir,
+                pairs=pairs,
+                jsonl_path=self._jsonl_path,
+                model=self._model,
+                opt=self._opt,
+                device=self._device,
+                ppo_backend=self.ppo_backend,
+                update_kwargs=self.update_kwargs,
+                start_it=self._start_it,
+                ref_model=self._ref_model,
+                extra_wver=self._extra_wver,
+                eval_on_round=False,
+                course_fp=self._course_fp,
+                corpus_fp=self._corpus_fp,
+                halt_event=halt_event,
+                on_result=on_result,
+                on_shard=self._payload_parts.add,
+            )
         )
         if stream_meta is not None:
             raise SystemExit("[volume] 补波落到 stream 路径——v1 只支持串行路径")

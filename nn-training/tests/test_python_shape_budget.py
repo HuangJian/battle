@@ -102,7 +102,8 @@ WIDE_FUNCS_BASELINE = {
     # 2026-11-21：`reap_alloc_timeouts` 的 9 个关键字参数收成 `ReapSpec`
     # ⇒ 本文件宽签名 2 → 1（剩 `__init__`），基线只许继续调小。
     "trainer/queue_local.py": 1,
-    "trainer/rollout_phase.py": 1,
+    # 2026-11-22（P0-3 第三十四刀）：`dispatch_rollout_phase` 的 25 个参数收成
+    # `RolloutPhaseSpec` ⇒ 本文件宽签名归零，条目删除。
     "trainer/stream.py": 1,
     # 2026-11-22（P0-3 第三十三刀）：`dispatch_bc_corpus` 的 25 个关键字参数收成
     # `BcDispatchSpec` ⇒ 本文件宽签名归零，条目删除。

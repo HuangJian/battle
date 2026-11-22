@@ -8818,6 +8818,18 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判死线**（it120）：两门在 `DirectAimed` 上配对差 <1pp 且都 ≥15 ⇒ 探索也不是卡点，
   转 DECISIONS §2026-11-20-goalnn-base-defense-structural-verdict 里留的两条路。
 - **全文**：`docs/nn/experiments.md §151`。
+## §2026-11-22-rollout-phase-spec
+
+P0-3 第三十四刀（`trainer/rollout_phase.py`）：`dispatch_rollout_phase` 的 25 个参数 →
+frozen + kw_only 的 `RolloutPhaseSpec`，入口只收 `spec`、展开后函数体逐字不动。
+为什么不是「少几个参数」：后 9 个是可选接线（零落盘的 `on_shard`、stream 的 eval 解冻
+`on_collect_end` / `on_dispatch_drained` / `on_dispatch_active`、熔断 `halt_event`），
+两个调用点各只传其中一簇 —— 旧位置表漏传不报错，只会静默少做一件事。
+类型面：`args` 用 `argparse.Namespace | SimpleNamespace`，不透明的 `model` / `opt` /
+`ppo_backend` / `ref_model` 用 `object`（只做透传）⇒ 不抬 G14 的 `Any` 基线。
+调用点：生产 2（首波 + 补波）。宽签名 **61 → 60**（50 → 49 文件），本文件 1 → **0**。
+守 `tests/trainer/test_rollout_phase_spec.py`（3 条），细节 → `docs/nn/engineering.md §287`。
+
 ## §2026-11-22-bc-dispatch-spec
 
 P0-3 第三十三刀（`worker/bc_dispatch.py`）：`dispatch_bc_corpus` 的 25 个关键字参数 →

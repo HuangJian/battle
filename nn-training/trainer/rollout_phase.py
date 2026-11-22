@@ -13,10 +13,14 @@ run_training 主循环里与「采集子进程生命周期」相关的三块收�
 
 from __future__ import annotations
 
+import argparse
 import subprocess
 import threading
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from common.log import log
@@ -262,38 +266,48 @@ def _stream_extra_kwargs(
     return _stream_kwargs
 
 
-def dispatch_rollout_phase(
-    args,
-    bun: str,
-    dist_cfg: dict | None,
-    it: int,
-    traj_dir: Path,
-    pairs: list[tuple[int, int]],
-    jsonl_path: Path,
-    model,
-    opt,
-    device,
-    ppo_backend,
-    update_kwargs,
-    start_it: int,
-    ref_model,
-    extra_wver: str | None,
-    eval_on_round: bool,
-    course_fp: str | None = None,
-    corpus_fp: str | None = None,
-    halt_event: threading.Event | None = None,
-    on_result=None,
-    pool_halt: bool = False,
+@dataclass(frozen=True, kw_only=True)
+class RolloutPhaseSpec:
+    """`dispatch_rollout_phase` 的旋钮袋（P0-3：25 参 → 一个对象）。
+
+    前 16 个是身份位（不可缺省），后 9 个是**可选接线**：回调面（shard / 收官 / eval 闸）、
+    熔断句柄与双缓冲池标记。旧签名把它们排成一条 25 位的位置表，而两个调用点各只传
+    其中一簇——漏一个回调不会报错，只会在某条腿上静默少做一件事。
+    """
+
+    args: argparse.Namespace | SimpleNamespace
+    bun: str
+    dist_cfg: dict | None
+    it: int
+    traj_dir: Path
+    pairs: list[tuple[int, int]]
+    jsonl_path: Path
+    model: object
+    opt: object
+    device: str
+    ppo_backend: object
+    update_kwargs: Callable[..., dict]
+    start_it: int
+    ref_model: object
+    extra_wver: str | None
+    eval_on_round: bool
+    course_fp: str | None = None
+    corpus_fp: str | None = None
+    halt_event: threading.Event | None = None
+    on_result: Callable[..., None] | None = None
+    pool_halt: bool = False
     # 零落盘（plan/payload-zero-disk §3）：dispatch 腿收到 shard 时的回调（`ShardSegments.add`）。
     # 两条路（stream / 串行）都经 `run_rollout_queue` ⇒ 同一个注入点，这里只透传。
-    on_shard=None,
+    on_shard: Callable[..., None] | None = None
     # 采集真正收官（collector 线程退出）时回调一次；stream 用它解冻 eval 闸。
     # 串行路径的采集收官 = 本函数返回，调用方的 finally 负责解冻，不需要它。
-    on_collect_end=None,
+    on_collect_end: Callable[..., None] | None = None
     # stream 的 eval 动态闸：队列清空 = 解冻，回队 = 重冻（见 `run_rollout_stream`）。
-    on_dispatch_drained=None,
-    on_dispatch_active=None,
-) -> tuple[
+    on_dispatch_drained: Callable[..., None] | None = None
+    on_dispatch_active: Callable[..., None] | None = None
+
+
+def dispatch_rollout_phase(spec: RolloutPhaseSpec) -> tuple[
     dict,
     dict | None,
     threading.Thread | None,
@@ -311,6 +325,18 @@ def dispatch_rollout_phase(
         `local_fallback_only=True` 只在节点全部不可用时启动本机。
       - 串行/纯本地路径：eval_thread 直接回传；collect_child/spawned_early 恒 None/False。
     """
+    # 旧签名 25 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+    args, bun, dist_cfg = spec.args, spec.bun, spec.dist_cfg
+    it, traj_dir, pairs = spec.it, spec.traj_dir, spec.pairs
+    jsonl_path, model, opt = spec.jsonl_path, spec.model, spec.opt
+    device, ppo_backend = spec.device, spec.ppo_backend
+    update_kwargs, start_it = spec.update_kwargs, spec.start_it
+    ref_model, extra_wver = spec.ref_model, spec.extra_wver
+    eval_on_round, course_fp = spec.eval_on_round, spec.course_fp
+    corpus_fp, halt_event = spec.corpus_fp, spec.halt_event
+    on_result, pool_halt = spec.on_result, spec.pool_halt
+    on_shard, on_collect_end = spec.on_shard, spec.on_collect_end
+    on_dispatch_drained, on_dispatch_active = spec.on_dispatch_drained, spec.on_dispatch_active
     stream_meta: dict | None = None
     eval_thread: threading.Thread | None = None
     eval_gate: threading.Event | None = None
