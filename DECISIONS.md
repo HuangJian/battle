@@ -10520,3 +10520,20 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：nn `7009 passed / 3 skipped`；四向证伪见 engineering §329（160 行新文件红 / 220 行连
   硬顶一起红 / 幽灵表项红 / 撤探针后全绿）。`BASELINE_SRC` 1236 → 1239（口径 B 连坐）。
   全文 → `docs/nn/engineering.md` §329。
+
+## §2026-11-23-offline-tasks-view
+
+- **背景**：`hub/queue_offline.offline_tasks` 197 行 —— 新 150 行存量闸（§329）里最长的一格。
+  它不是「胖」，是三种视角挤在一起：读一门课（包 sha / holder / BC 独占 / 忙 / hold / 导包软态）、
+  判它（`state` 六段 + `reason` 七段）、成型（15 字段的行）。中间量 16 个全在一个 `for` 体里滚。
+- **决定**：切成 `offline_tasks`(34) 编排 · `_offline_view`(97) 读面 · `_offline_state`(46) 判据 ·
+  `_offline_row`(50) 成型；中间量收进模块私有 `@dataclass(frozen=True) _OfflineView`（16 字段），
+  三段都只读它。`LONG_FUNCS_BASELINE` 删 `hub/queue_offline.py`（71 → 70）。
+- **被否决**：① 按位置传 16 个中间量给两个下游 —— `holder` / `bc_owner` / `busy` 同型互换不抛，
+  清单会静默反着说（P0-3 那一族的老病）；② 只把行字典提成方法（197 → ~140）—— 判据链与读面还在
+  同一个作用域里，下一次改动仍要读 140 行；③ 把 `_OfflineView` 挪进 `hub/task_pack.py` 或
+  `common/` —— 只有一个消费方，出去就是第二个包要维护的公开形状；④ 把 `state` / `reason` 两栏
+  合成一个 `(state, reason)` 的小对象 —— 两栏都是**同一批判据**的两个投影，合成对象不会减少
+  任何分支，只会多一层 `view.state`。
+- **验证**：nn `7009 passed / 3 skipped`；hub 族 **674 passed**；结构守卫（`test_hub_queue_split`）
+  的域成员清单 +3 登记三个私有接缝 ⇒ 实现名 113 → 116。全文 → `docs/nn/engineering.md` §330。

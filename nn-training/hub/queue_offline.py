@@ -33,6 +33,7 @@ import os
 import secrets
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -288,6 +289,33 @@ def stall_verdict(
     return ""
 
 
+@dataclass(frozen=True)
+class _OfflineView:
+    """单门课的读数：清单的 `state` / `reason` / 行字段都从这里取，不各自再查一遍。
+
+    `runnable` 是**开课标记在**（`stopped` 是唯一 opt-out）；`holder_*` 三个标志是
+    同一份 holder 的三个派生读数（`live` = 非 stale 且非 revoked，`state` 只认它）。
+    `pack_meta` 之外没有隐藏状态：每次 `offline_tasks` 现算，零副作用。
+    """
+
+    runnable: bool
+    kind: str
+    pack: dict | None
+    meta: dict
+    stale_reason: str
+    holder: dict | None
+    bc_owner: str
+    bc_job: str
+    bc_held: bool
+    completed: bool
+    busy: str
+    hold: dict
+    pending_export: dict
+    holder_stale: bool
+    holder_revoked: bool
+    holder_live: bool
+
+
 class QueueOfflineMixin(QueuePeer):
     """域混入：离线任务清单 + 领取租约。见模块头部。"""
 
@@ -356,175 +384,12 @@ class QueueOfflineMixin(QueuePeer):
                     courses.append(c)
         rows: list[dict] = []
         for course in courses:
-            try:
-                pack_path = self.task_pack_path(course)
-            except ProtocolError:
-                continue  # 目录名不合规（历史残留）⇒ 清单里跳过，不当 500 报
-            kind = _course_kind(course)
-            st = self._stores.get(course)
-            # ★M4b：可领上位闸 = **开课标记在**（`stopped` 是唯一 opt-out）。课程不再有
-            # 在线/离线模式 —— claim 成功即接管（hold），协作派发被 hold 闸压住；停课的
-            # 行只在 `?include=all` 里出现（state=not_offline）。
-            runnable = self.course_open(course)
-            pack: dict | None = None
-            meta = {"run_id": "", "it": 0, "end_it": 0, "commit": "", "created_at": 0.0}
-            stale_reason = ""
-            if kind == "rl" and pack_path.is_file():
-                try:
-                    pstat = pack_path.stat()
-                    pack = {
-                        "name": pack_path.name,
-                        "bytes": int(pstat.st_size),
-                        "sha256": _file_sha256(pack_path),
-                        "mtime": float(pstat.st_mtime),
-                    }
-                except OSError:
-                    pack = None
-                if pack is not None:
-                    meta = pack_index_meta(pack_path)
-                    stale_reason = task_pack_stale_reason(
-                        pack_init_sha=pack_index_part_sha(pack_path, INIT_WEIGHTS_NAME),
-                        active_sha=_file_sha256(
-                            pack_path.parent / _JobStore.ACTIVE_WEIGHTS_NAME
-                        ),
-                    )
-            bc_owner = bc_job = ""
-            bc_held = False
-            if kind == "bc":
-                # BC 课没有 task pack：完成看账本收官，独占看课程的 `bc-exclusive.json`。
-                holder = None
-                if st is not None:
-                    bc_owner, bc_job = st.bc_exclusive_owner()
-                bc_held = bool(bc_owner or bc_job)
-                if bc_owner:
-                    # 合成一个 holder：`blocked_rows` / `holder_revoked` 等既有遥测
-                    # 只认 row["holder"]，这样 BC 被别的盘占住时云机也能看到等待原因。
-                    holder = {
-                        "worker_id": bc_owner,
-                        "age_sec": 0.0,
-                        # 进度静默阈：`blocked_poll_sec` 据此退避（0 会被钳到 1s，变成
-                        # 每秒打一次 hub；BC 的独占锁没有 TTL，只能等对方 release）。
-                        "expires_in": float(hold_progress_stale_sec()),
-                        "beat_at": 0.0,
-                        "silent_sec": 0.0,
-                        "progress_ago": -1.0,
-                        "stale": False,
-                        "revoked": False,
-                    }
-                pack_sha = ""
-                completed = course_finished(
-                    Path(st.jsonl_path)
-                    if st is not None
-                    else self.course_dir(course) / "training_log.jsonl"
-                )
-                hold = {}
-                pending_export = {}
-                busy = self.busy_reason(course, worker) if runnable else ""
-            else:
-                holder = self.holder_info(course)
-                pack_sha = str((pack or {}).get("sha256") or "")
-                completed = self.completion_blocked(course, pack_sha)
-                busy = self.busy_reason(course, worker) if runnable else ""
-                hold = self.hold_of(course)
-                pending_export = self.pending_export_of(course)
-            holder_stale = bool(holder and holder.get("stale"))
-            holder_revoked = bool(holder and holder.get("revoked"))
-            treat_offline = runnable
-            #: ★M1b 定案：`state` 的 `held` 只算**活着的接管**（`live`）——stale / revoked 的
-            #: 镜子不再算「有主」。理由：`state` 回答的是「现在能不能有人接手」，而那两个
-            #: 情况 `claimable=true`；`claimed ∧ claimable` 对任何读方都是自相矛盾。
-            #: 谁在跑仍然看得见：`holder` 字段照给，`reason` 前缀明说 `held-stale:` / `held-revoked:`。
-            #: （不用 `stale` 表示「主失联」：那个词在本清单里已经是**包旧**的意思，别叠加第二义。）
-            holder_live = bool(holder is not None and not holder_stale and not holder_revoked)
-            if completed:
-                state = TASK_STATE_COMPLETED
-            elif treat_offline:
-                state = task_state(
-                    pack_exists=True if kind == "bc" else pack is not None,
-                    stale=bool(stale_reason),
-                    held=(bc_held if kind == "bc" else holder_live),
-                )
-            else:
-                state = TASK_STATE_NOT_OFFLINE
-            reason = ""
-            if not runnable:
-                reason = "not_offline: 这门课不在训练中（开课标记已删）"
-            elif completed:
-                reason = (
-                    "completed: BC 全轮已完成（等人停课 / 新开一段）"
-                    if kind == "bc"
-                    else "completed: 本段已跑满（等人停课 / 重导包）"
-                )
-            elif holder_revoked:
-                reason = (
-                    f"held-revoked: {(holder or {}).get('worker_id') or '?'}"
-                    "（已被撤销，可直接接管）"
-                )
-            elif holder is not None:
-                if holder_stale:
-                    # ★M1b：文案跟判据走（活性 = **进度**静默）；旧记录（没有进度字段）
-                    # 退回心跳龄 —— `progress_ago < 0` 就是那一档。
-                    # 哨兵是 `-1.0`，别用 `or`（真值 0.0 会被吃成缺失）
-                    raw_ago = holder.get("progress_ago")
-                    ago = float(raw_ago) if isinstance(raw_ago, (int, float)) else -1.0
-                    what = "进度" if ago >= 0 else "心跳"
-                    reason = (
-                        f"held-stale: {holder.get('worker_id') or '?'}"
-                        f"（{what}静默 {max(0.0, ago):.0f}s，可直接接管）"
-                    )
-                else:
-                    reason = f"held: {holder.get('worker_id') or '?'}"
-            elif kind == "bc" and bc_held:
-                reason = f"held: {bc_owner or '?'}（BC 独占：持有者未知也挡）"
-            elif busy:
-                reason = busy
+            view = self._offline_view(course, worker)
+            if view is None:
+                continue
+            state, reason = self._offline_state(view)
             runs = progress.get(course) or {}
-            latest = max(runs.values(), key=lambda r: float(r.get("last_mtime") or 0.0)) if runs else None
-            rows.append(
-                {
-                    "course": course,
-                    "kind": kind,
-                    "state": state,
-                    # 可领（判据唯一实现 `auto_claimable`）：可领闸 ∧ 无主（或主已失联/撤销）
-                    # ∧ 未完成 ∧ 不忙；无包也算「可尝试领」（claim 会写 `pending_export` 并
-                    # 触发导包 —— P0-1 的唯一入口）。过期包也可领：包旧只意味着起点旧，而
-                    #「领不领」是云机的判断（它还要比 `served` 的 sha）。
-                    # ★M4b：`authority`/`auto_handoff`/`seize` 三键随模式删除；停课一律 false。
-                    "claimable": bool(runnable)
-                    and auto_claimable(
-                        holder_present=(bc_held if kind == "bc" else holder is not None),
-                        completed=completed,
-                        busy=bool(busy),
-                        holder_stale=False if kind == "bc" else holder_stale,
-                        holder_revoked=False if kind == "bc" else holder_revoked,
-                    ),
-                    "reason": reason,
-                    #: ★M1b：**一拖一按 worker 判**的结果直接透出来（`bool(busy)`）。
-                    #: 为什么不只靠 `reason` 文案：云机选下一门时只做布尔判断（不解析中文），
-                    #: 而 `claimable` 把「忙」与「被别人带 held」两个原因合成了一个 false——
-                    #: 分开才能让「本拍不跑换下一门」与「等它 release」两条建议各归各位。
-                    "busy": bool(busy),
-                    #: 开课时间（`training-enabled.txt` mtime，T4 的 SSOT）；读不到 ⇒ +inf 排最后。
-                    "open_time": self.open_time_of(course),
-                    "pack": pack,
-                    "run_id": meta["run_id"],
-                    "it": meta["it"],
-                    "end_it": meta["end_it"],
-                    "stale_reason": stale_reason,
-                    "holder": holder,
-                    #: BC 课的课程级独占读数（`""` = 无主；RL 课恒为空）。云机靠它判断
-                    #: 「这门 BC 课是不是已经在被某个盘 drain」，不必去猜 `/jobs` 的进度。
-                    "bc_owner": bc_owner,
-                    "bc_job": bc_job,
-                    #: ★M1b：接管镜像（`{}` = 无 hold）+ 导包软态（超窗读面即空）。
-                    "hold": hold,
-                    "pending_export": pending_export,
-                    "progress": {
-                        "count": int(latest["count"]) if latest else 0,
-                        "last_mtime": float(latest["last_mtime"]) if latest else 0.0,
-                    },
-                }
-            )
+            rows.append(self._offline_row(course, view, state, reason, runs))
         rows.sort(
             key=lambda r: (
                 TASK_STATE_RANK.get(str(r["state"]), 9),
@@ -533,6 +398,202 @@ class QueueOfflineMixin(QueuePeer):
             )
         )
         return rows
+
+    def _offline_view(self, course: str, worker: str) -> _OfflineView | None:
+        """单门课的读数：包/主/开工/忙/BC 独占（+ 两个派生标志）；目录名不合规 ⇒ None。"""
+        try:
+            pack_path = self.task_pack_path(course)
+        except ProtocolError:
+            return None  # 目录名不合规（历史残留）⇒ 清单里跳过，不当 500 报
+        kind = _course_kind(course)
+        st = self._stores.get(course)
+        # ★M4b：可领上位闸 = **开课标记在**（`stopped` 是唯一 opt-out）。课程不再有
+        # 在线/离线模式 —— claim 成功即接管（hold），协作派发被 hold 闸压住；停课的
+        # 行只在 `?include=all` 里出现（state=not_offline）。
+        runnable = self.course_open(course)
+        pack: dict | None = None
+        meta = {"run_id": "", "it": 0, "end_it": 0, "commit": "", "created_at": 0.0}
+        stale_reason = ""
+        if kind == "rl" and pack_path.is_file():
+            try:
+                pstat = pack_path.stat()
+                pack = {
+                    "name": pack_path.name,
+                    "bytes": int(pstat.st_size),
+                    "sha256": _file_sha256(pack_path),
+                    "mtime": float(pstat.st_mtime),
+                }
+            except OSError:
+                pack = None
+            if pack is not None:
+                meta = pack_index_meta(pack_path)
+                stale_reason = task_pack_stale_reason(
+                    pack_init_sha=pack_index_part_sha(pack_path, INIT_WEIGHTS_NAME),
+                    active_sha=_file_sha256(pack_path.parent / _JobStore.ACTIVE_WEIGHTS_NAME),
+                )
+        bc_owner = bc_job = ""
+        bc_held = False
+        if kind == "bc":
+            # BC 课没有 task pack：完成看账本收官，独占看课程的 `bc-exclusive.json`。
+            holder = None
+            if st is not None:
+                bc_owner, bc_job = st.bc_exclusive_owner()
+            bc_held = bool(bc_owner or bc_job)
+            if bc_owner:
+                # 合成一个 holder：`blocked_rows` / `holder_revoked` 等既有遥测
+                # 只认 row["holder"]，这样 BC 被别的盘占住时云机也能看到等待原因。
+                holder = {
+                    "worker_id": bc_owner,
+                    "age_sec": 0.0,
+                    # 进度静默阈：`blocked_poll_sec` 据此退避（0 会被钳到 1s，变成
+                    # 每秒打一次 hub；BC 的独占锁没有 TTL，只能等对方 release）。
+                    "expires_in": float(hold_progress_stale_sec()),
+                    "beat_at": 0.0,
+                    "silent_sec": 0.0,
+                    "progress_ago": -1.0,
+                    "stale": False,
+                    "revoked": False,
+                }
+            pack_sha = ""
+            completed = course_finished(
+                Path(st.jsonl_path)
+                if st is not None
+                else self.course_dir(course) / "training_log.jsonl"
+            )
+            hold = {}
+            pending_export = {}
+            busy = self.busy_reason(course, worker) if runnable else ""
+        else:
+            holder = self.holder_info(course)
+            pack_sha = str((pack or {}).get("sha256") or "")
+            completed = self.completion_blocked(course, pack_sha)
+            busy = self.busy_reason(course, worker) if runnable else ""
+            hold = self.hold_of(course)
+            pending_export = self.pending_export_of(course)
+        holder_stale = bool(holder and holder.get("stale"))
+        holder_revoked = bool(holder and holder.get("revoked"))
+        #: ★M1b 定案：`state` 的 `held` 只算**活着的接管**（`live`）——stale / revoked 的
+        #: 镜子不再算「有主」。理由：`state` 回答的是「现在能不能有人接手」，而那两个
+        #: 情况 `claimable=true`；`claimed ∧ claimable` 对任何读方都是自相矛盾。
+        #: 谁在跑仍然看得见：`holder` 字段照给，`reason` 前缀明说 `held-stale:` / `held-revoked:`。
+        #: （不用 `stale` 表示「主失联」：那个词在本清单里已经是**包旧**的意思，别叠加第二义。）
+        holder_live = bool(holder is not None and not holder_stale and not holder_revoked)
+        return _OfflineView(
+            runnable=runnable,
+            kind=kind,
+            pack=pack,
+            meta=meta,
+            stale_reason=stale_reason,
+            holder=holder,
+            bc_owner=bc_owner,
+            bc_job=bc_job,
+            bc_held=bc_held,
+            completed=completed,
+            busy=busy,
+            hold=hold,
+            pending_export=pending_export,
+            holder_stale=holder_stale,
+            holder_revoked=holder_revoked,
+            holder_live=holder_live,
+        )
+
+    def _offline_state(self, view: _OfflineView) -> tuple[str, str]:
+        """`state` + `reason`：两栏同源（判据只在这里写一次）。"""
+        treat_offline = view.runnable
+        if view.completed:
+            state = TASK_STATE_COMPLETED
+        elif treat_offline:
+            state = task_state(
+                pack_exists=True if view.kind == "bc" else view.pack is not None,
+                stale=bool(view.stale_reason),
+                held=(view.bc_held if view.kind == "bc" else view.holder_live),
+            )
+        else:
+            state = TASK_STATE_NOT_OFFLINE
+        reason = ""
+        if not view.runnable:
+            reason = "not_offline: 这门课不在训练中（开课标记已删）"
+        elif view.completed:
+            reason = (
+                "completed: BC 全轮已完成（等人停课 / 新开一段）"
+                if view.kind == "bc"
+                else "completed: 本段已跑满（等人停课 / 重导包）"
+            )
+        elif view.holder_revoked:
+            reason = (
+                f"held-revoked: {(view.holder or {}).get('worker_id') or '?'}"
+                "（已被撤销，可直接接管）"
+            )
+        elif view.holder is not None:
+            if view.holder_stale:
+                # ★M1b：文案跟判据走（活性 = **进度**静默）；旧记录（没有进度字段）
+                # 退回心跳龄 —— `progress_ago < 0` 就是那一档。
+                # 哨兵是 `-1.0`，别用 `or`（真值 0.0 会被吃成缺失）
+                raw_ago = view.holder.get("progress_ago")
+                ago = float(raw_ago) if isinstance(raw_ago, (int, float)) else -1.0
+                what = "进度" if ago >= 0 else "心跳"
+                reason = (
+                    f"held-stale: {view.holder.get('worker_id') or '?'}"
+                    f"（{what}静默 {max(0.0, ago):.0f}s，可直接接管）"
+                )
+            else:
+                reason = f"held: {view.holder.get('worker_id') or '?'}"
+        elif view.kind == "bc" and view.bc_held:
+            reason = f"held: {view.bc_owner or '?'}（BC 独占：持有者未知也挡）"
+        elif view.busy:
+            reason = view.busy
+        return state, reason
+
+    def _offline_row(
+        self, course: str, view: _OfflineView, state: str, reason: str, runs: dict
+    ) -> dict:
+        """一行清单（字段表见 §3.1）；`claimable` 的唯一实现是 `auto_claimable`。"""
+        latest = (
+            max(runs.values(), key=lambda r: float(r.get("last_mtime") or 0.0)) if runs else None
+        )
+        return {
+            "course": course,
+            "kind": view.kind,
+            "state": state,
+            # 可领（判据唯一实现 `auto_claimable`）：可领闸 ∧ 无主（或主已失联/撤销）
+            # ∧ 未完成 ∧ 不忙；无包也算「可尝试领」（claim 会写 `pending_export` 并
+            # 触发导包 —— P0-1 的唯一入口）。过期包也可领：包旧只意味着起点旧，而
+            # 「领不领」是云机的判断（它还要比 `served` 的 sha）。
+            # ★M4b：`authority`/`auto_handoff`/`seize` 三键随模式删除；停课一律 false。
+            "claimable": bool(view.runnable)
+            and auto_claimable(
+                holder_present=(view.bc_held if view.kind == "bc" else view.holder is not None),
+                completed=view.completed,
+                busy=bool(view.busy),
+                holder_stale=False if view.kind == "bc" else view.holder_stale,
+                holder_revoked=False if view.kind == "bc" else view.holder_revoked,
+            ),
+            "reason": reason,
+            #: ★M1b：**一拖一按 worker 判**的结果直接透出来（`bool(busy)`）。
+            #: 为什么不只靠 `reason` 文案：云机选下一门时只做布尔判断（不解析中文），
+            #: 而 `claimable` 把「忙」与「被别人带 held」两个原因合成了一个 false——
+            #: 分开才能让「本拍不跑换下一门」与「等它 release」两条建议各归各位。
+            "busy": bool(view.busy),
+            #: 开课时间（`training-enabled.txt` mtime，T4 的 SSOT）；读不到 ⇒ +inf 排最后。
+            "open_time": self.open_time_of(course),
+            "pack": view.pack,
+            "run_id": view.meta["run_id"],
+            "it": view.meta["it"],
+            "end_it": view.meta["end_it"],
+            "stale_reason": view.stale_reason,
+            "holder": view.holder,
+            #: BC 课的课程级独占读数（`""` = 无主；RL 课恒为空）。云机靠它判断
+            #: 「这门 BC 课是不是已经在被某个盘 drain」，不必去猜 `/jobs` 的进度。
+            "bc_owner": view.bc_owner,
+            "bc_job": view.bc_job,
+            #: ★M1b：接管镜像（`{}` = 无 hold）+ 导包软态（超窗读面即空）。
+            "hold": view.hold,
+            "pending_export": view.pending_export,
+            "progress": {
+                "count": int(latest["count"]) if latest else 0,
+                "last_mtime": float(latest["last_mtime"]) if latest else 0.0,
+            },
+        }
 
     def _lease_rec(self, course: str) -> dict | None:
         """有效租约（**惰性过期**：读时就地清掉 ⇒ 读面与领取面同一条判据）。
@@ -645,7 +706,7 @@ class QueueOfflineMixin(QueuePeer):
             mine = bool(hold) and holder == wid
             if state == "live" and not mine:
                 # ★不变量 3（plan §1.2-③）：live 的 hold **不可被顶**——`takeover=1` 也不行
-                #（要清先 revoke）。否则「不能覆盖 live」就是句空话。
+                # （要清先 revoke）。否则「不能覆盖 live」就是句空话。
                 return {}, "foreign"
             if hold and not mine:
                 reclaimed_from = holder  # 别人 stale ⇒ 自动接管（不必 takeover=1）
@@ -780,7 +841,7 @@ class QueueOfflineMixin(QueuePeer):
         # 「墓碑仍占闸」。为什么无条件（而不是「有租约才清」）：hold 是**落盘的**，而
         # `_leases` 是进程内的——hub 重启后 `offline` 的 `release_hold=1`（人点「强制解除
         # 接管」）会命中「没有内存租约但盘上有 hold」，那时不清就等于按钮坏了。
-        #（墓碑本身住内存租约，`holder_info`/`offline_leases` 照样看得到，供排障。）
+        # （墓碑本身住内存租约，`holder_info`/`offline_leases` 照样看得到，供排障。）
         held = bool(self.hold_of(course))
         if held or rec is not None:
             self._dispatch_update(course, hold={})
@@ -874,9 +935,7 @@ class QueueOfflineMixin(QueuePeer):
         )
         return rec
 
-    def _dispatch_update(
-        self, course: str, *, guard_hold_token: str = "", **fields: Any
-    ) -> dict:
+    def _dispatch_update(self, course: str, *, guard_hold_token: str = "", **fields: Any) -> dict:
         """改一条记录并**原子落盘**（写 `.tmp` 再 `os.replace`；盘 IO 不持任何业务锁）。
 
         `guard_hold_token`：只在「盘上那份 hold 的 token 仍是它」时才写。
@@ -1252,9 +1311,7 @@ class QueueOfflineMixin(QueuePeer):
             # ★ 2026-11-13：BC 课**没有任务包**，`pending_export` 对它没有语义 —— 旧 kind 误判
             # 可能在盘上留下一笔历史记录，读面不能据此报「导包停滞」（否则告警永远响）。
             pending = (
-                {}
-                if kind == "bc"
-                else (self.dispatch_record(course).get("pending_export") or {})
+                {} if kind == "bc" else (self.dispatch_record(course).get("pending_export") or {})
             )
             runs = progress.get(course) or {}
             last = max((float(r.get("last_mtime") or 0.0) for r in runs.values()), default=0.0)
@@ -1290,7 +1347,6 @@ class QueueOfflineMixin(QueuePeer):
                 }
             )
         return out
-
 
 
 # ── 生成器备注（tmp/gen_queue_offline.py；生成后的人工部分已并入正文）─────

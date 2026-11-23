@@ -52,7 +52,6 @@ LONG_FUNCS_HARD_BASELINE: dict[str, int] = {}
 LONG_FUNCS_BASELINE: dict[str, int] = {
     "hub/boot.py": 1,
     "hub/offline.py": 1,
-    "hub/queue_offline.py": 1,
     "hub/smoke_loopback.py": 1,
     "hub/store_offline.py": 1,
     "remote/bc_job.py": 1,

@@ -332,6 +332,8 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
   > 同日起门禁再收紧一档：**> 150 行**进入存量闸（71 个 / 60 文件冻结、新增即红），
   > **> 200 行**仍是零容忍硬顶（engineering §329）—— 150~200 那档正是上面这种
   > 「贴着阈值」的函数聚集的地方。
+  > 第一刀就落在这档最长的一格：`hub/queue_offline.offline_tasks` 197 → 34（+ 三段：
+  > 读一门课 / 判它 / 成型一行），存量 71 → 70（engineering §330）。
 
 **为什么这是问题**
 

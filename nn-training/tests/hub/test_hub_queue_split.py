@@ -218,6 +218,12 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
         (
             "offline_task_courses",
             "offline_tasks",
+            # 2026-11-23（P0-2 存量）：`offline_tasks`(197) 按「一门课怎么读 / 怎么判 / 怎么成型」
+            # 拆成三段（engineering §330）。三个都是**私有**接缝，但混入的实现名一律登记：
+            # 同名跨域才会让 MRO 顺序变成语义，这是本清单存在的理由。
+            "_offline_view",
+            "_offline_state",
+            "_offline_row",
             "_lease_rec",
             "_lease_rec_locked",
             "offline_lease",
@@ -655,7 +661,9 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     # 2026-11-18（G5）：+1（`auth_state`：D9 闭锁的只读快照）⇒ 136；再 +1（`course_store`）⇒ 137。
     # B7-S2：`queue_scope` 的 26 个方法切成协作者 ⇒ 混入方法 138 → 112。
     # 2026-11-23：+1（`shared_ts_code_zip`：`GET /ts_code` 的共享取件口）⇒ 113。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 113, len(DOMAIN_METHODS)
+    # 2026-11-23：+3（`_offline_view` / `_offline_state` / `_offline_row`：`offline_tasks`
+    # 197 → 34 行时切出的三段私有接缝）⇒ 116。
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 116, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -665,7 +673,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 113, len(seen)
+    assert len(seen) == 116, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == sorted(OWN_METHODS), (

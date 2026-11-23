@@ -29,6 +29,43 @@
 
 ---
 
+## §330 P0-2 存量：`hub/queue_offline.offline_tasks`（197 → 34 + 97 + 46 + 50）（2026-11-23）
+
+新 150 行存量闸（§329）里最长的一格。它不是一个「胖函数」，而是**一行清单的三种视角**挤在
+一起：怎么读一门课（包 / 主 / 忙 / BC 独占）、怎么判它（`state` + `reason` 六段优先级）、
+怎么成型（15 个字段的 dict）。读完才能回答「这门课现在能不能领」——中间量有 16 个，全在
+一个 `for` 体的局部作用域里滚。
+
+**切法：按「读 / 判 / 成型」三段切，语句顺序与判据一字未动**
+
+| 新方法 | 行数 | 职责 |
+|---|---|---|
+| `offline_tasks` | 34 | 课程清单装配 + 逐课调三段 + 按 `(state rank, open_time, course)` 排序 |
+| `_offline_view(course, worker)` | 97 | 单门课的读数（包 sha/过期原因、holder、BC 独占、`completed`、`busy`、hold、导包软态），目录名不合规 ⇒ `None` |
+| `_offline_state(view)` | 46 | `state` 六段 + `reason` 七段（★M1b「`held` 只算 live」的定案就住这里） |
+| `_offline_row(course, view, state, reason, runs)` | 50 | 15 字段的行字典（`claimable` 仍只走 `auto_claimable`） |
+
+**为什么要一个 `_OfflineView` 对象而不是传 16 个参数**：`state` 与行字典用的是同一批中间量，
+拆开后如果按位置传，`holder` / `bc_owner` / `busy` 这种同型值互换不抛、只让清单静默反着说
+（P0-3 那一族的老病）。`frozen` dataclass 让「读一次、只读」在类型上成立，也顺手把跨方法
+的隐式契约变成字段表。**没有把 `_OfflineView` 提出本模块**：它只有一个消费方，出去就是
+第二个包要维护的公开形状。
+
+**行为不变的两条硬判据**：① `state` / `reason` 的判据链一行未改（`stale_reason` 仍只影响
+`state` 的 `stale` 位、不影响 `reason`）；② `claimable` 仍**只有** `auto_claimable` 一个实现，
+`bc` 课把三个 `holder_*` 位显式压成 `False`（BC 独占没有 TTL，不能走 stale/revoked 那套）。
+
+**结构守卫随改**：`tests/hub/test_hub_queue_split.py` 的域成员清单 +3（`_offline_view` /
+`_offline_state` / `_offline_row`）⇒ 实现名 113 → **116**。三个虽私有也要登记：那个清单防的
+是「同名跨域让 MRO 顺序变成语义」，私有名一样会撞。
+
+`LONG_FUNCS_BASELINE` 删掉 `hub/queue_offline.py` 条目（1 → 0，71 个 → **70 个 / 59 文件**）。
+文件 1299 → 1355 行（+56 全是方法头与 `_OfflineView` 的字段表）。
+
+**门禁**：nn `7009 passed / 3 skipped`（70.0s）；hub 族 **674 passed**。**行为差异：无**。
+
+---
+
 ## §329 形状门禁收紧到 **150 行**：200 当硬顶、150 当存量闸（71 个 / 60 文件）（2026-11-23）
 
 `FUNC_LINE_LIMIT` 从 200 收到 150。诱因是 §328：`bc_paddle._Train.run_epochs` **恰好 200 行**，
