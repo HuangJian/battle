@@ -130,6 +130,19 @@ class _Stats:
         }
 
 
+@dataclass(frozen=True)
+class _Attempt:
+    """一局的结果三元组（`run_slot` 只按它决定继续 / 重排 / 记账）。
+
+    `busy_hint` 是「这次失败是背压而非故障」——`_note_failure` 靠它决定要不要计
+    节点失败 streak；`requeue_busy` 是「已被放回队列」——`run_slot` 靠它跳过失败记账。
+    """
+
+    ok: bool
+    busy_hint: bool
+    requeue_busy: bool
+
+
 @dataclass
 class _Corpus:
     """一轮 BC 派发的共享状态（槽位线程从这里取；`dispatch_bc_corpus` 只做装配与收账）。"""
@@ -165,169 +178,218 @@ class _Corpus:
     busy_tries: dict[tuple[int, int], int]
 
     def run_slot(self, node: dict) -> None:
+        """一个槽位线程：取任务 → 落一局 → 记账，直到队列空（或本节点被熔断）。
+
+        本方法只**编排**：取任务 / 熔断放回 / 单局重试 / 两笔账各住在自己那一段。
+        """
         url = node["url"]
         auth = node.get("authKey", "")
         nid = str(node.get("id") or url)
         empty_waits = 0
         while True:
-            try:
-                stage, seed = self.work.get_nowait()
-            except queue.Empty:
-                # 熔断发生后，被放回的任务要等健康节点接手：队列暂空时多等一会儿再退
-                # （最多 tripped_idle_polls 轮，缺省 2s）。无熔断的正常轮次零开销——直接退出。
-                if self.tripped and empty_waits < self.tripped_idle_polls:
-                    empty_waits += 1
-                    time.sleep(TRIPPED_IDLE_STEP_SEC)
-                    continue
+            pair, empty_waits = self._take_task(empty_waits)
+            if pair is None:
                 return
+            stage, seed = pair
             # 熔断：本节点已摘掉 → 手上这个任务**无条件放回**队列，然后本 worker 退出。
             # 不能 continue（否则放回的任务会被自己立刻重新拾起，等于没熔断）；放回是安全的，
             # 因为本 worker 立即 return，不存在"放回→自取"死循环。队列若最终无人消费，
             # 主线程末尾对账会把差额计 failed（不静默漏采）。
             if self.node_fail_limit > 0 and nid in self.tripped:
-                with self.lock:
-                    others = [k for k in self.node_fail_streak if k not in self.tripped]
-                    first = (stage, seed) not in self.requeued
-                    self.requeued.add((stage, seed))
-                self.work.put((stage, seed))
-                if first:
-                    self.log(
-                        f"[bc-dispatch] {nid} 已熔断 → s{stage} seed{seed} 改派其它节点"
-                        f"（健康节点：{'、'.join(others) if others else '无'}）"
-                    )
+                self._requeue_tripped(nid, stage, seed)
                 return
-            ok = False
-            busy_hint = False
-            requeue_busy = False
-            for attempt in (1, 2):  # 局失败重试一次（可能换节点）
-                try:
-                    manifest, files = fetch_task(
-                        FetchTaskSpec(
-                            url=url,
-                            auth_key=auth,
-                            iter_id=self.iter_id,
-                            wver=self.label_fp if self.action_v6 else BC_WVER,
-                            stage=stage,
-                            seed=seed,
-                            max_ticks=self.max_ticks,
-                            difficulty=self.difficulty,
-                            timeout=self.task_timeout_sec,
-                            mode=BC_V6_MODE if self.action_v6 else BC_MODE,
-                            stage_json=self.stage_json_for(stage) or "",
-                            lives_override=self.lives_override,
-                            player_level=self.player_level,
-                            course_fp=self.course_fp,
-                            wins=None if self.action_v6 else (1 if self.wins_only else 0),
-                            near_miss_times=None if self.action_v6 else self.near_miss_times,
-                            label_mode=self.label_mode if self.action_v6 else "",
-                        )
-                    )
-                    reason = validate_result(
-                        manifest, files, self.label_fp if self.action_v6 else BC_WVER, {(stage, seed)}, self.seen_keys
-                    )
-                    if reason:
-                        raise common.distribution.DistError(0, f"validate: {reason}")
-                    with self.lock:
-                        self.stats.games += 1
-                    skip_reason = ""
-                    if self.action_v6:
-                        # v6 没有 God 教师的 kept 标记：按 manifest.outcome 判定。
-                        # error/aborted = 无效样本，无论 all/ratio/wins-only 都不落盘。
-                        outcome_class = classify_outcome(manifest)
-                        if outcome_class is None:
-                            skip_reason = "invalid"
-                        elif self.wins_only and outcome_class != "win":
-                            skip_reason = "wins-only"
-                    elif manifest.get("kept") is False:
-                        skip_reason = "wins-only"
-                    if skip_reason:
-                        with self.lock:
-                            if skip_reason == "invalid":
-                                self.stats.invalid_skipped += 1
-                            else:
-                                self.stats.loss_skipped += 1
-                            self.seen_keys.add((stage, seed))
-                        self.log(
-                            f"[bc-dispatch] {nid} s{stage} seed{seed}: skip"
-                            f"（{skip_reason} outcome={manifest.get('outcome')!r}）"
-                        )
-                    else:
-                        shard_dir = Path(self.out_dir) / f"bc_s{stage}_seed{seed}"
-                        manifest = dict(manifest)
-                        manifest["course_fp"] = self.course_fp
-                        manifest["corpus_fp"] = self.corpus_fp
-                        manifest["it"] = int(self.it)
-                        if self.action_v6:
-                            # 审计/加载端可查；同时让“换标签模式/权重”在 shard 层可见。
-                            manifest["label_mode"] = self.label_mode
-                            manifest["label_policy_fp"] = self.label_fp
-                        write_shard(files, manifest, str(shard_dir))
-                        with self.lock:
-                            self.stats.kept += 1
-                        self.log(
-                            f"[bc-dispatch] {nid} s{stage} seed{seed}: kept "
-                            f"nSamples={manifest.get('nSamples')} outcome={manifest.get('outcome')}"
-                        )
-                    with self.lock:
-                        self.seen_keys.add((stage, seed))
-                        self.busy_tries.pop((stage, seed), None)
-                    self.node_fail_streak[nid] = 0  # 一次成功即清零连续失败
-                    ok = True
-                    break
-                except common.distribution.DistError as e:
-                    reason = str(e.reason)
-                    busy_hint = _is_busy_hint(reason)
-                    if busy_hint:
-                        # 背压（2026-09-14 事故）：节点并发槽占满时回 503 busy。原实现把它
-                        # 当普通失败「立刻重试一次」——同一瞬的 40 局里溢出的那批两次都撞
-                        # busy，直接计 failed 并把整轮训练打死（实测 7 局）。busy 是限流信号
-                        # 而非故障：任务放回队列（让空闲节点接手）+ 退避后再抢，且**不消耗**
-                        # attempt 配额、**不计**节点失败 streak。退避上限后仍 busy 才认失败。
-                        with self.lock:
-                            n = self.busy_tries.get((stage, seed), 0)
-                            if n < self.busy_retry_limit:
-                                self.busy_tries[(stage, seed)] = n + 1
-                                self.work.put((stage, seed))
-                                requeue_busy = True
-                        if requeue_busy:
-                            if n == 0:
-                                self.log(
-                                    f"[bc-dispatch] {nid} 并发槽满（busy）→ 退避重排"
-                                    f"（背压，不计失败；上限 {self.busy_retry_limit} 次）"
-                                )
-                            time.sleep(self.busy_backoff_sec * (n + 1))
-                            break
-                    # 截断放宽到 600：节点回传的 reason 已做「错误类型行 + 栈顶帧」摘要
-                    # （sampler-agent.summarizeChildFailure），原文截断会把诊断信息切掉。
-                    self.log(
-                        f"[bc-dispatch] {nid} s{stage} seed{seed} attempt {attempt} "
-                        f"failed: {reason[:600]}"
-                    )
-                except Exception as e:  # 未知异常同样重试一次后放弃
-                    busy_hint = False
-                    self.log(
-                        f"[bc-dispatch] {nid} s{stage} seed{seed} attempt {attempt} "
-                        f"error: {type(e).__name__}: {str(e)[:600]}"
-                    )
-            if requeue_busy:
+            outcome = self._attempt(nid, url, auth, stage, seed)
+            if outcome.requeue_busy:
                 continue  # 已被背压重排，本任务不计失败、本 worker 去取下一个
-            if not ok:
+            if not outcome.ok:
+                self._note_failure(nid, outcome.busy_hint)
+
+    def _take_task(self, waited: int) -> tuple[tuple[int, int] | None, int]:
+        """取下一个 `(stage, seed)`；队列空 ⇒ `None`。
+
+        `waited` 是**跨取任务累计**的空轮数（原实现如此：不随成功取到而清零）——
+        熔断后最多等 `tripped_idle_polls` 轮，无熔断的正常轮次零开销。
+        """
+        while True:
+            try:
+                return self.work.get_nowait(), waited
+            except queue.Empty:
+                # 熔断发生后，被放回的任务要等健康节点接手：队列暂空时多等一会儿再退
+                # （最多 tripped_idle_polls 轮，缺省 2s）。无熔断的正常轮次零开销——直接退出。
+                if self.tripped and waited < self.tripped_idle_polls:
+                    waited += 1
+                    time.sleep(TRIPPED_IDLE_STEP_SEC)
+                    continue
+                return None, waited
+
+    def _requeue_tripped(self, nid: str, stage: int, seed: int) -> None:
+        """本节点已熔断：把手上的任务放回队列，只在本轮**第一次**遇到它时打一行日志。"""
+        with self.lock:
+            others = [k for k in self.node_fail_streak if k not in self.tripped]
+            first = (stage, seed) not in self.requeued
+            self.requeued.add((stage, seed))
+        self.work.put((stage, seed))
+        if first:
+            self.log(
+                f"[bc-dispatch] {nid} 已熔断 → s{stage} seed{seed} 改派其它节点"
+                f"（健康节点：{'、'.join(others) if others else '无'}）"
+            )
+
+    def _fetch_spec(self, url: str, auth: str, stage: int, seed: int) -> FetchTaskSpec:
+        """这个节点这一局的取件请求（v6 与 legacy 的差异全在这张表里，不散在重试循环中）。"""
+        return FetchTaskSpec(
+            url=url,
+            auth_key=auth,
+            iter_id=self.iter_id,
+            wver=self.label_fp if self.action_v6 else BC_WVER,
+            stage=stage,
+            seed=seed,
+            max_ticks=self.max_ticks,
+            difficulty=self.difficulty,
+            timeout=self.task_timeout_sec,
+            mode=BC_V6_MODE if self.action_v6 else BC_MODE,
+            stage_json=self.stage_json_for(stage) or "",
+            lives_override=self.lives_override,
+            player_level=self.player_level,
+            course_fp=self.course_fp,
+            wins=None if self.action_v6 else (1 if self.wins_only else 0),
+            near_miss_times=None if self.action_v6 else self.near_miss_times,
+            label_mode=self.label_mode if self.action_v6 else "",
+        )
+
+    def _attempt(self, nid: str, url: str, auth: str, stage: int, seed: int) -> _Attempt:
+        """一局：取 → 校验 → 分类 → 落盘。局失败重试一次（可能换节点），busy 走背压重排。"""
+        ok = False
+        busy_hint = False
+        requeue_busy = False
+        for attempt in (1, 2):  # 局失败重试一次（可能换节点）
+            try:
+                manifest, files = fetch_task(self._fetch_spec(url, auth, stage, seed))
+                reason = validate_result(
+                    manifest,
+                    files,
+                    self.label_fp if self.action_v6 else BC_WVER,
+                    {(stage, seed)},
+                    self.seen_keys,
+                )
+                if reason:
+                    raise common.distribution.DistError(0, f"validate: {reason}")
                 with self.lock:
-                    self.stats.failed += 1
-                    if self.node_fail_limit > 0 and not busy_hint:
-                        self.node_fail_streak[nid] = self.node_fail_streak.get(nid, 0) + 1
-                        if self.node_fail_streak[nid] >= self.node_fail_limit and nid not in self.tripped:
-                            self.tripped.add(nid)
+                    self.stats.games += 1
+                skip_reason = ""
+                if self.action_v6:
+                    # v6 没有 God 教师的 kept 标记：按 manifest.outcome 判定。
+                    # error/aborted = 无效样本，无论 all/ratio/wins-only 都不落盘。
+                    outcome_class = classify_outcome(manifest)
+                    if outcome_class is None:
+                        skip_reason = "invalid"
+                    elif self.wins_only and outcome_class != "win":
+                        skip_reason = "wins-only"
+                elif manifest.get("kept") is False:
+                    skip_reason = "wins-only"
+                if skip_reason:
+                    self._record_skip(nid, stage, seed, skip_reason, manifest)
+                else:
+                    self._record_kept(nid, stage, seed, manifest, files)
+                with self.lock:
+                    self.seen_keys.add((stage, seed))
+                    self.busy_tries.pop((stage, seed), None)
+                self.node_fail_streak[nid] = 0  # 一次成功即清零连续失败
+                ok = True
+                break
+            except common.distribution.DistError as e:
+                reason = str(e.reason)
+                busy_hint = _is_busy_hint(reason)
+                if busy_hint:
+                    # 背压（2026-09-14 事故）：节点并发槽占满时回 503 busy。原实现把它
+                    # 当普通失败「立刻重试一次」——同一瞬的 40 局里溢出的那批两次都撞
+                    # busy，直接计 failed 并把整轮训练打死（实测 7 局）。busy 是限流信号
+                    # 而非故障：任务放回队列（让空闲节点接手）+ 退避后再抢，且**不消耗**
+                    # attempt 配额、**不计**节点失败 streak。退避上限后仍 busy 才认失败。
+                    with self.lock:
+                        n = self.busy_tries.get((stage, seed), 0)
+                        if n < self.busy_retry_limit:
+                            self.busy_tries[(stage, seed)] = n + 1
+                            self.work.put((stage, seed))
+                            requeue_busy = True
+                    if requeue_busy:
+                        if n == 0:
                             self.log(
-                                f"[bc-dispatch] ⚠ 节点 {nid} 连续 {self.node_fail_limit} 次任务失败"
-                                " → 本轮熔断（剩余任务只派其它节点；请 /v1/ping 看 codeHash"
-                                " 与节点日志定位）"
+                                f"[bc-dispatch] {nid} 并发槽满（busy）→ 退避重排"
+                                f"（背压，不计失败；上限 {self.busy_retry_limit} 次）"
                             )
+                        time.sleep(self.busy_backoff_sec * (n + 1))
+                        break
+                # 截断放宽到 600：节点回传的 reason 已做「错误类型行 + 栈顶帧」摘要
+                # （sampler-agent.summarizeChildFailure），原文截断会把诊断信息切掉。
+                self.log(
+                    f"[bc-dispatch] {nid} s{stage} seed{seed} attempt {attempt} "
+                    f"failed: {reason[:600]}"
+                )
+            except Exception as e:  # 未知异常同样重试一次后放弃
+                busy_hint = False
+                self.log(
+                    f"[bc-dispatch] {nid} s{stage} seed{seed} attempt {attempt} "
+                    f"error: {type(e).__name__}: {str(e)[:600]}"
+                )
+        return _Attempt(ok=ok, busy_hint=busy_hint, requeue_busy=requeue_busy)
+
+    def _record_skip(
+        self, nid: str, stage: int, seed: int, skip_reason: str, manifest: dict
+    ) -> None:
+        """无效 / 非目标结局：计数 + 记进 `seen_keys`（不再重采同一对）+ 一行日志。"""
+        with self.lock:
+            if skip_reason == "invalid":
+                self.stats.invalid_skipped += 1
+            else:
+                self.stats.loss_skipped += 1
+            self.seen_keys.add((stage, seed))
+        self.log(
+            f"[bc-dispatch] {nid} s{stage} seed{seed}: skip"
+            f"（{skip_reason} outcome={manifest.get('outcome')!r}）"
+        )
+
+    def _record_kept(self, nid: str, stage: int, seed: int, manifest: dict, files: dict) -> None:
+        """落一个 shard：补齐血缘字段 → 写盘 → 计数 → 一行日志。"""
+        shard_dir = Path(self.out_dir) / f"bc_s{stage}_seed{seed}"
+        manifest = dict(manifest)
+        manifest["course_fp"] = self.course_fp
+        manifest["corpus_fp"] = self.corpus_fp
+        manifest["it"] = int(self.it)
+        if self.action_v6:
+            # 审计/加载端可查；同时让“换标签模式/权重”在 shard 层可见。
+            manifest["label_mode"] = self.label_mode
+            manifest["label_policy_fp"] = self.label_fp
+        write_shard(files, manifest, str(shard_dir))
+        with self.lock:
+            self.stats.kept += 1
+        self.log(
+            f"[bc-dispatch] {nid} s{stage} seed{seed}: kept "
+            f"nSamples={manifest.get('nSamples')} outcome={manifest.get('outcome')}"
+        )
+
+    def _note_failure(self, nid: str, busy_hint: bool) -> None:
+        """一局两试都失败：计 failed，并按连续失败数决定要不要熔断本节点。
+
+        `busy_hint`（背压）**不计** streak —— 那是限流信号，不是节点故障。
+        """
+        with self.lock:
+            self.stats.failed += 1
+            if self.node_fail_limit > 0 and not busy_hint:
+                self.node_fail_streak[nid] = self.node_fail_streak.get(nid, 0) + 1
+                if self.node_fail_streak[nid] >= self.node_fail_limit and nid not in self.tripped:
+                    self.tripped.add(nid)
+                    self.log(
+                        f"[bc-dispatch] ⚠ 节点 {nid} 连续 {self.node_fail_limit} 次任务失败"
+                        " → 本轮熔断（剩余任务只派其它节点；请 /v1/ping 看 codeHash"
+                        " 与节点日志定位）"
+                    )
 
 
 def _is_busy_hint(reason: str) -> bool:
     """节点回 503 busy（并发槽满）不算节点故障——不能据此熔断。"""
     return "busy" in reason[:64].lower()
+
 
 @dataclass(frozen=True, kw_only=True)
 class BcDispatchSpec:
@@ -523,8 +585,7 @@ def dispatch_bc_corpus(spec: BcDispatchSpec) -> dict:
         f"[bc-dispatch] round it{it} done in {stats.elapsed_sec}s: games={stats.games} "
         f"kept={stats.kept} loss_skipped={stats.loss_skipped} "
         f"invalid_skipped={stats.invalid_skipped} failed={stats.failed} "
-        f"nodes={stats.nodes}"
-        + (f" tripped={'、'.join(stats.failed_nodes)}" if tripped else "")
+        f"nodes={stats.nodes}" + (f" tripped={'、'.join(stats.failed_nodes)}" if tripped else "")
     )
     return stats.as_dict()
 

@@ -337,6 +337,8 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
   > 余下 70 个按「接缝烂度」分诊过一遍，下一批的五处已点名（engineering §331）：
   > 行数排序不是判据 —— 同样 180 行，纯函数里的四段规则远比「整个生命周期在一个
   > `while` 体内」好拆。
+  > 第一批的第一格已落地：`worker/bc_dispatch.run_slot` 159 → 26（+ 六段，`_Attempt`
+  > 收三个跨循环布尔），存量 70 → 69（engineering §332）。
 
 **为什么这是问题**
 

@@ -95,7 +95,6 @@ LONG_FUNCS_BASELINE: dict[str, int] = {
     "trainer/run_rl_cluster.py": 1,
     "trainer/stream.py": 1,
     "worker/bc_collect.py": 1,
-    "worker/bc_dispatch.py": 2,
     "worker/bc_eval.py": 1,
     "worker/cli.py": 1,
     "worker/eval_replays_once.py": 1,

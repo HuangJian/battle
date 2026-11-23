@@ -10537,3 +10537,21 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   任何分支，只会多一层 `view.state`。
 - **验证**：nn `7009 passed / 3 skipped`；hub 族 **674 passed**；结构守卫（`test_hub_queue_split`）
   的域成员清单 +3 登记三个私有接缝 ⇒ 实现名 113 → 116。全文 → `docs/nn/engineering.md` §330。
+
+## §2026-11-23-run-slot-phases
+
+- **背景**：`worker/bc_dispatch._Corpus.run_slot` 159 行 / **5 条顶层语句** —— 槽位线程的整条生命
+  周期（取任务 → 熔断放回 → 取一局 → 校验 → 分类 → 落盘 → 记账 → 重试/背压/熔断）全在一个 `while`
+  体里。它是 §331 分诊排第一的那格，因为**没有现成的缝可切**：得先造。
+- **决定**：切成 `run_slot`(26) 编排 · `_take_task`(17) · `_requeue_tripped`(12) · `_fetch_spec`(21)
+  · `_attempt`(76) · `_record_skip`(14) / `_record_kept`(18) · `_note_failure`(16)；`_attempt` 用
+  `_Attempt(ok, busy_hint, requeue_busy)` 出参。`LONG_FUNCS_BASELINE` 删 `worker/bc_dispatch.py`。
+- **被否决**：① 只把 `fetch_task(FetchTaskSpec(...))` 那 25 行提出来（159 → ~134）—— 三个循环级
+  布尔仍在同一个作用域里滚，下一刀还得重新读一遍全函数；② 把 `_take_task` 的 `waited` 改成「每轮
+  清零」—— 那等于**悄悄改行为**（原实现跨取任务累计），不属重构；③ 用返回值元组
+  `(ok, busy_hint, requeue_busy)` 而不是 `_Attempt` —— 三个同型布尔按位置解包正是本仓反复踩的坑
+  （P0-3 一族），命名对象让 `if not outcome.busy_hint` 自己会说话；④ 把 `_attempt` 里的两条
+  `except` 合成一条 —— 背压（busy）与未知异常的重试语义不同（前者不消耗 attempt、不清零 streak），
+  合了就丢。
+- **验证**：nn `7009 passed / 3 skipped`；`tests/worker` 全量绿。存量 70 → 69（另一格
+  `dispatch_bc_corpus` 被格式化收到恰好 150，`ast.unparse` 前后相同）。全文 → engineering §332。
