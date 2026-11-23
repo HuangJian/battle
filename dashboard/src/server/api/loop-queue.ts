@@ -44,7 +44,17 @@ export const LOOP_QUEUE_TIMEOUT_MS = 20_000
  *  （`await` 一个非 promise 是常量代价）——注入点不因默认执行体改异步而变。 */
 export type LoopQueueRunner = () => RunPythonResult | Promise<RunPythonResult>
 
+/** 缺省执行体的**测试注入面**：门禁预载把它换成空夹具，避免每个测试 worker 冷启一次
+ *  python（实测 455ms/进程）。生产路径没人调它 ⇒ 行为逐字不变；要验真子进程的用例继续
+ *  走 `getLoopQueueView(fakeRunner)` 的显式注入，不受这里影响。 */
+let defaultRunnerOverride: LoopQueueRunner | null = null
+
+export function setDefaultLoopQueueRunner(run: LoopQueueRunner | null): void {
+  defaultRunnerOverride = run
+}
+
 function defaultLoopQueueRunner(): Promise<RunPythonResult> {
+  if (defaultRunnerOverride) return Promise.resolve(defaultRunnerOverride())
   return runRunPythonAsyncScript(
     'nn-training/trainer/run_rl_cluster.py',
     ['--traj-root', tmpLogsDir(), '--json'],

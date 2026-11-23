@@ -225,9 +225,17 @@ export function EvalSummary({
     }
   }, [course])
 
+  // 只有**课程变了**才立即补拉：挂载与 enabled 翻 true 时 usePolling 自己会首拉，
+  // 再手动 refresh 就是同一帧两发 /api/evalboard（实测每次挂载/回前台双发）。
+  const lastCourseRef = useRef(course)
   useEffect(() => {
-    if (enabled) void refresh()
-  }, [enabled, refresh])
+    if (!enabled || lastCourseRef.current === course) {
+      lastCourseRef.current = course
+      return
+    }
+    lastCourseRef.current = course
+    void refresh()
+  }, [enabled, course, refresh])
   usePolling({ enabled, intervalSec: 300, fetch: refresh })
 
   /** 入队成功后异步等批结束并刷表——不 await 阻塞 UI；无硬超时（仍在跑就继续等）。 */

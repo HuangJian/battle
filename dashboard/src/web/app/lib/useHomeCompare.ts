@@ -63,15 +63,20 @@ export function useHomeCompare(opts: {
     fetch: () => loadRef.current(),
   })
 
-  // 开关/请求身份变化 ⇒ 立即重拉（不等下一拍）；关掉时清数据并作废在途响应。
+  // 只有**请求身份变了**才立即重拉；开关翻 true / 挂载由 usePolling 首拉，不再双发。
+  // 关掉时清数据并作废在途响应（原纪律不动）。
+  const lastKeyRef = useRef(requestKey)
   useEffect(() => {
     if (!opts.enabled) {
       appliedRef.current = null
       seqRef.current++
       setData(null)
       setError(null)
+      lastKeyRef.current = requestKey
       return
     }
+    if (lastKeyRef.current === requestKey) return
+    lastKeyRef.current = requestKey
     void loadRef.current()
   }, [opts.enabled, requestKey])
 

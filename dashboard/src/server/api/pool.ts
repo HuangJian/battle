@@ -87,16 +87,18 @@ export function invalidatePoolViews(): void {
   poolProbeCache.clear()
 }
 
-/** 本机 codeHash：`tools/agent/sampler-agent`（重模块，惰性 import 一次）按 SSOT 清单
- *  （`codehash-files.txt`）算内容摘要；失败降级空串。
+/** 本机 codeHash：按 SSOT 清单（`codehash-files.txt`）算内容摘要；失败降级空串。
  *
- *  ★ 2026-09-22：**删掉了原来的 5s TTL memo** —— 实测这份摘要只要 **3–5ms**
- *  （145 文件 / 2.1MB），而调用方（池探测层）自带 30s 采样节奏、自身要等 ~2.5s 的逐节点 ping。
- *  给一个 4ms 的计算挂窗口，换不到任何东西，只多一个陈旧面（长驻控制台改了代码也要等窗口）；
- *  而**内容摘要的输入就是全部内容，指纹不可能更便宜** ⇒ 这一类的正确处置是「不用缓存」。 */
+ *  ★ 2026-11-23：改从 `tools/agent/codehash-files.ts`（**纯模块**）取函数。旧实现 import
+ *  `sampler-agent` 只为拿两个 re-export，实测**模块加载 1445ms**、真正的 hash 只要 17ms；
+ *  每个测试 worker 的冷 `buildPoolView` 都被这 1.4s 顶住（全量墙钟的主要长杆）。两份实现的
+ *  codeHash 已对拍逐字节相等（`codehash-files.ts:34` 就是 sampler-agent 的实现来源）。
+ *
+ *  ★ 2026-09-22：**删掉了原来的 5s TTL memo** —— 摘要本身只要 3–17ms，调用方（池探测层）
+ *  自带 30s 采样节奏；给一个毫秒级计算挂窗口，换不到任何东西，只多一个陈旧面。 */
 async function localCodeHash(): Promise<string> {
   try {
-    const mod = (await import('../../../../tools/agent/sampler-agent')) as {
+    const mod = (await import('../../../../tools/agent/codehash-files')) as {
       collectCodeHashEntries: () => { relPath: string; content: Buffer }[]
       computeCodeHashFromFiles: (e: { relPath: string; content: Buffer }[]) => string
     }

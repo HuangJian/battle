@@ -227,11 +227,12 @@ export function App({ initial }: AppProps) {
       const vis = !document.hidden
       setDocumentVisible(vis)
       setNow(Date.now())
-      if (vis) void refreshState()
+      // 不在这里 refreshState：visible 翻 true 会让 usePolling 的 effect 重跑并立即首拉，
+      // 手动再拉一拍 = 同一帧两次全量 /api/state（切课那次的同类浪费）。
     }
     document.addEventListener('visibilitychange', onVis)
     return () => document.removeEventListener('visibilitychange', onVis)
-  }, [refreshState])
+  }, [])
 
   // 阶段耗时自走：可见时 10s 一跳（后台 tab 靠 visibilitychange 回来时校正）。
   useEffect(() => {
@@ -280,12 +281,17 @@ export function App({ initial }: AppProps) {
   //   ——课程封存的预演就是（保留几件 / 删几件 / 释放多少 MB）。flash 一闪就没的数字没法
   //   据此决定，而再走一个专用端点就是同一件事的第二条通道，故这里把 detail 一起交给调用方。
   const doAction = useCallback(
-    async (act: string, body: Record<string, unknown> = {}): Promise<ActionResult> => {
+    async (
+      act: string,
+      body: Record<string, unknown> = {},
+      opts: { refresh?: boolean } = {},
+    ): Promise<ActionResult> => {
       const course = viewCourseRef.current
       const fullBody = course ? { course, ...body } : body
       const r = await postAction(act, fullBody)
       setFlash({ ok: r.ok, message: r.message })
-      void refreshState()
+      // 切课自己已经拉过一次 /api/state（`selectCourse`）：第二拍只是同一份重活。
+      if (opts.refresh !== false) void refreshState()
       // 池面板（节点统计）与动作不同源：服务端已在动作后软作废那份视图（旧值 + 后台重算），
       // 这里推一下 nonce 让面板**立即**再校验 —— 否则「停用节点」要等 300s 的下一次轮询
       // 才在池表里上屏（同一页上下两处事实不合）。
@@ -397,9 +403,11 @@ export function App({ initial }: AppProps) {
       viewCourseRef.current = c
       setViewCourse(c)
       writeUrlCourse(c)
+      // 一次切课只拉一拍 /api/state（query 里已是新课，不依赖 setCourse 落地）：
+      // 旧实现这里 refreshState + doAction 内部再 refreshState = 两拍全量指标解析。
       void refreshState()
-      setPoolFreshNonce((n) => n + 1)
-      if (!readOnly) void doAction('setCourse', { course: c })
+      if (!readOnly) void doAction('setCourse', { course: c }, { refresh: false })
+      else setPoolFreshNonce((n) => n + 1)
     },
     [readOnly, refreshState, doAction],
   )

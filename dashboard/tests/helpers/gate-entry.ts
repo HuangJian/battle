@@ -17,13 +17,14 @@
  *
  *   · 已在门禁里（`BCITY_TEST_GATE=1`，由 `scripts/run-tests.ts` 设）或已是 worker
  *     （`BUN_TEST_WORKER_ID`）⇒ **原样放行**，不转交（否则无限套娃）。
- *   · 否则读 `/proc/self/cmdline` 取**用户真正敲的**参数。preload 里的 `process.argv` 已被
+ *   · 否则读**当前进程原始命令行**取用户真正敲的参数。preload 里的 `process.argv` 已被
  *     Bun 改写成「当前测试文件」，不可用于转发（实测：`bun test --coverage` 与裸跑看到的
- *     argv 完全一样）。
+ *     argv 完全一样）。Linux 走 `/proc/self/cmdline`；Windows 走 WMI
+ *     `Win32_Process.CommandLine`（`process.pid`，不是父进程——父进程是 shell）。
  *   · 真参数原样转交给门禁（`tests` 之外的 positional 也转发 ⇒ `bun test <file>` 只跑那个
  *     文件），stdio 继承、退出码照抄。
- *   · `/proc` 读不到（非 Linux）⇒ 不转交，并**自己**加载两份预载（至少把 env 隔离挂上），
- *     同时打一行提示：那条路得不到文件级隔离，全量跑会红——请用 `bun run test`。
+ *   · 两条路都读不到（非 Linux/Windows）⇒ 不转交，并**自己**加载两份预载（至少把 env
+ *     隔离挂上），同时打一行提示：那条路得不到文件级隔离，全量跑会红——请用 `bun run test`。
  *
  * ## 不做什么
  *
@@ -35,12 +36,37 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { testArgsFromCommandLine } from './windows-command-line'
 
 /** dashboard 根（本文件住 `dashboard/tests/helpers/`）。 */
 const DASH = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
 
 /** 门禁标记（`scripts/run-tests.ts` 在 spawn 子进程时设）。有它 ⇒ 已在隔离里。 */
 const GATE_ENV = 'BCITY_TEST_GATE'
+
+/** Windows：WMI 返回的是当前进程的原始命令行（`process.argv` 已被 Bun 改写）。 */
+function windowsArgs(): string[] | null {
+  if (process.platform !== 'win32') return null
+  const query = `(Get-CimInstance Win32_Process -Filter "ProcessId = ${process.pid}").CommandLine`
+  for (const exe of ['powershell.exe', 'pwsh.exe']) {
+    try {
+      const r = Bun.spawnSync([exe, '-NoProfile', '-Command', query], {
+        stdout: 'pipe',
+        stderr: 'pipe',
+      })
+      if (r.exitCode !== 0) continue
+      const line = new TextDecoder()
+        .decode(r.stdout)
+        .replace(/^\uFEFF/, '')
+        .trim()
+      const args = testArgsFromCommandLine(line)
+      if (args) return args
+    } catch {
+      /* 换下一个 PowerShell 变体 */
+    }
+  }
+  return null
+}
 
 /** 用户真正敲的参数（`bun test <...>` 里 `test` 之后的部分）；读不到 = null。 */
 function originalArgs(): string[] | null {
@@ -50,10 +76,11 @@ function originalArgs(): string[] | null {
       .split('\0')
       .filter((s) => s.length > 0)
     const i = argv.findIndex((a) => a === 'test')
-    return i >= 0 ? argv.slice(i + 1) : null
+    if (i >= 0) return argv.slice(i + 1)
   } catch {
-    return null
+    /* 非 Linux：下面走 WMI */
   }
+  return windowsArgs()
 }
 
 /** 已在隔离里：门禁标记（启动器或其子进程）或 Bun 自己的 worker。 */
@@ -71,7 +98,7 @@ if (!isolated) {
   }
   // 兜底（非 Linux）：至少把 env 隔离挂上；文件级隔离拿不到，全量跑仍会红。
   process.stderr.write(
-    '[bun test] 读不到原始命令行（非 Linux），无法转交门禁；已加载 env 隔离预载。\n' +
+    '[bun test] 读不到原始命令行（非 Linux/Windows），无法转交门禁；已加载 env 隔离预载。\n' +
       '[bun test] 全量请用 `bun run test`（文件级隔离是必须的：同进程共享 global ⇒ 76 red）。\n',
   )
   await import('./no-proxy')

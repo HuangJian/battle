@@ -12,8 +12,7 @@ import {
   buildIterRows,
   buildPairedReferee,
   parseActualsCacheText,
-  parseEvalSummariesText,
-  parseEvalWinsText,
+  parseEvalSummariesAndWinsText,
   readIterMetrics,
   readPairedReferee,
 } from '../iters'
@@ -49,8 +48,9 @@ export async function readCourseMetrics(course: string): Promise<CourseMetricsRe
       readCourseText(course, '.pool-actuals-cache.json'),
     ])
     if (!trainingLog) return { rows: [], pairedReferee: null, source: 'archive' }
-    const evalSummaries = evalLog ? parseEvalSummariesText(evalLog, course) : new Map()
-    const evalWins = evalLog ? parseEvalWinsText(evalLog) : new Map()
+    const { summaries: evalSummaries, wins: evalWins } = evalLog
+      ? parseEvalSummariesAndWinsText(evalLog, course)
+      : { summaries: new Map(), wins: new Map() }
     const actualsCache = cacheJson ? parseActualsCacheText(cacheJson) : new Map()
     const { rows } = buildIterRows({
       trainingLogText: trainingLog,

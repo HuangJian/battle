@@ -77,6 +77,7 @@ import {
 } from './scheduler'
 import { createOpLog } from './op-log'
 import { createShipLoop } from './ship-loop'
+import { mountQuotaBanner } from '../ui/quota-banner'
 
 export interface BootEnv {
   doc?: Document
@@ -732,6 +733,10 @@ function startHost(
   panel.setSession(logKey())
   panel.setStopPpoVisible(offlineDetected)
 
+  // 本周配额横幅：Quota 文本只在 Kaggle 外层页可见，且会话起来后才渲染出数值。
+  // 轮询兜底（2s），位置经 GM 记忆。装面板后一起挂；卸载时一起撤。
+  const quotaBanner = mountQuotaBanner(doc, runtime, win)
+
   // Kaggle 的「是否仍需编辑 / 配额超限」弹窗会卡住训练页：自动点白名单里的继续键
   const autoContinue = installAutoContinue(doc, {
     onConfirm: (label) => log(`[auto] 已点击「${label}」（Kaggle 弹窗）`),
@@ -903,6 +908,7 @@ function startHost(
     clearInterval(markTimer)
     if (idleTimer !== null) clearInterval(idleTimer)
     autoContinue.dispose()
+    quotaBanner.destroy()
     stopCmd?.stop()
     sched?.stop()
     doc.removeEventListener('visibilitychange', onVisibility)

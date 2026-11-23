@@ -293,9 +293,16 @@ export function CompareTrendsModal({
   const loadRef = useRef(load)
   loadRef.current = load
 
-  // 打开/可见/选项变化 ⇒ 立即重拉（不等下一拍）；轮询只负责「节奏」
+  // 只有**选项变了**才立即重拉；弹窗打开 / tab 回前台会让 usePolling 重开并首拉，
+  // 这里再拉一次就是同参双发。关着时记住当前 key，下次打开由轮询首拉。
+  const lastKeyRef = useRef(requestKey)
   useEffect(() => {
-    if (!open || !visible) return
+    if (!open || !visible) {
+      lastKeyRef.current = requestKey
+      return
+    }
+    if (lastKeyRef.current === requestKey) return
+    lastKeyRef.current = requestKey
     void loadRef.current()
   }, [open, visible, requestKey])
 
