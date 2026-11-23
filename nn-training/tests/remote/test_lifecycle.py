@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import signal
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -31,7 +32,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from remote import lifecycle as LC
-from remote.lifecycle import LIFECYCLE_COMPONENT, Lifecycle, readings, readings_line
+from remote.lifecycle import (
+    LIFECYCLE_COMPONENT,
+    Lifecycle,
+    LifecycleSpec,
+    readings,
+    readings_line,
+)
 
 
 class _Clock:
@@ -74,15 +81,15 @@ def sent(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
 
 def _life(tmp_path: Path, clock: _Clock, **kw: Any) -> Lifecycle:
-    return Lifecycle(
-        "http://hub.invalid:8787",
-        "tok",
-        "kaggle-c",
+    spec = LifecycleSpec(
+        base_url="http://hub.invalid:8787",
+        token="tok",
+        worker_id="kaggle-c",
         work_dir=tmp_path,
         device="cuda:0",
         now_fn=clock,
-        **kw,
     )
+    return Lifecycle(replace(spec, **kw))
 
 
 def test_readings_are_structured(tmp_path: Path) -> None:
@@ -96,7 +103,7 @@ def test_readings_are_structured(tmp_path: Path) -> None:
 
 def test_no_hub_means_no_request(tmp_path: Path, sent: list[dict[str, Any]]) -> None:
     """② 没有 hub 地址/ token ⇒ 一条都不发（这是「旧调用方零影响」的判据）。"""
-    lc = Lifecycle("", "", "kaggle-c", work_dir=tmp_path)
+    lc = Lifecycle(LifecycleSpec(base_url="", token="", worker_id="kaggle-c", work_dir=tmp_path))
     lc.start()
     lc.tick()
     lc.close(done=3)

@@ -35,6 +35,7 @@ import signal
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -135,6 +136,29 @@ def readings_line(work_dir: Path | str, device: str = "") -> str:
     return " · ".join(parts)
 
 
+@dataclass(frozen=True, kw_only=True)
+class LifecycleSpec:
+    """一个 worker 会话的生命周期上报面（11 位旋钮，`python.refactor.md` §P0-3 批 F）。
+
+    为什么不是 11 个参数（原：3 位置 + 8 关键字）：`base_url` / `token` / `worker_id`
+    三个相邻身份串里互换一个，上报就落到别的 hub / 别的机器名下（而观测腿的读者正是靠
+    `worker_id` 对账）；`work_dir`（Path）与 `device` / `role`（两个自由串）相邻，
+    互换后读数会去量错的目录；`log` 与 `now_fn` 是**两个签名不同的回调**（mypy 抓得住，
+    运行时互换只会让时间戳进日志）。按名字构造后，拼错的键当场 `TypeError`。
+    """
+
+    base_url: str
+    token: str
+    worker_id: str
+    work_dir: Path | str
+    device: str = ""
+    role: str = ""
+    once: bool = False
+    reading_sec: float = LIFECYCLE_READING_SEC
+    log: Callable[[str], None] | None = None
+    now_fn: Callable[[], float] = time.time
+
+
 class Lifecycle:
     """一个 worker 会话的生命周期上报器（一次构造、四个调用点，见模块 docstring 的表）。
 
@@ -143,30 +167,17 @@ class Lifecycle:
     单测、离线无 hub 的场景本来就该没有这条腿）。
     """
 
-    def __init__(
-        self,
-        base_url: str,
-        token: str,
-        worker_id: str,
-        *,
-        work_dir: Path | str,
-        device: str = "",
-        role: str = "",
-        once: bool = False,
-        reading_sec: float = LIFECYCLE_READING_SEC,
-        log: Callable[[str], None] | None = None,
-        now_fn: Callable[[], float] = time.time,
-    ) -> None:
-        self._base = base_url
-        self._token = token
-        self._wid = worker_id
-        self._work_dir = Path(work_dir)
-        self._device = device
-        self._role = role
-        self._once = once
-        self._reading_sec = float(reading_sec)
-        self._log = log
-        self._now = now_fn
+    def __init__(self, spec: LifecycleSpec) -> None:
+        self._base = spec.base_url
+        self._token = spec.token
+        self._wid = spec.worker_id
+        self._work_dir = Path(spec.work_dir)
+        self._device = spec.device
+        self._role = spec.role
+        self._once = spec.once
+        self._reading_sec = float(spec.reading_sec)
+        self._log = spec.log
+        self._now = spec.now_fn
         self._last_reading = 0.0
         self._why = ""
         self._sig: int = 0

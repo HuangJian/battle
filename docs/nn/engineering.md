@@ -29,6 +29,23 @@
 
 ---
 
+## §320 P0-3 批 F：`Lifecycle.__init__`(11) → `LifecycleSpec`（11 → 10）（2026-11-23）
+
+* **一把刀一处**：`remote/lifecycle.Lifecycle.__init__`（3 位置 + 8 关键字，11 参）→ 一个
+  `LifecycleSpec`（frozen + kw_only，住同模块）。调用面只有 3 处（生产 `remote/worker.py` 的
+  `_lifecycle` 装配、用例 2 处）。读数：宽签名 **11 → 10**、9 → **8 文件**（`remote/lifecycle.py` 清零）。
+* **为什么值得动**：这是云机被整机收走时**唯一会说话的腿**（kaggle 事故 2026-10-31 的产物），
+  而它的坏点全是相邻位：三个身份串 `base_url` / `token` / `worker_id` 互换一个，「遗言」就记到
+  别的 hub / 别的机器名下（观测腿与控制台 `/admin/errors` 正是靠 `worker_id` 对账）；
+  `work_dir`（Path）/ `device` / `role` 三个自由位互换 ⇒ 读点去量错的目录；
+  `log` 与 `now_fn` 是两个签名不同的回调 —— mypy 抓得住，运行时互换只是让时间戳进日志。
+* **装配点用 `replace`**（不是再造一份 spec）：生产只有一个装配点，直接按名字写全 8 位；
+  用例的 `_life(**kw)` 助手从「关键字透传」改成 `replace(spec, **kw)` —— 只覆盖几个旋钮的语义
+  与 §231 同款。
+* **验收**：`bun run pygate` 绿（6956 passed）。守卫 `tests/remote/test_lifecycle_spec.py`
+  （字段表 / frozen + kw_only / 入口只吃一份 spec / **三个身份位各自落到自己的槽**：走真实出口的
+  payload 断言 `url` / `token` / `worker`，不读私有字段 / 空 hub ⇒ 一条不发）。
+
 ## §319 P0-3 批 C2：学生网双生 `StudentNet` / `PPOStudent`（各 9）→ `NetSpec`（13 → 11）（2026-11-23）
 
 * **一把刀两个文件，同一份构造面**：`worker/models/student.py`（torch）与

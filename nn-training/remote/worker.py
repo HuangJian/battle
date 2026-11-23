@@ -314,7 +314,7 @@ from remote.job_shell import (
     run_iter_phase,
 )
 from remote.job_spec import RunJobSpec
-from remote.lifecycle import Lifecycle
+from remote.lifecycle import Lifecycle, LifecycleSpec
 from remote.offline_greedy import collect_round
 from remote.payload_proc import PayloadProcess, make_prefetcher
 from remote.prefetch import (
@@ -707,7 +707,16 @@ def _start_services(
     # 云机被整机收走时，**只有 hub 侧的请求间隔**还留着（notebook 日志是浏览器抓的，人不在就断）
     # ⇒ 这四条是「云机自己说的最后一句」。不阻塞训练、失败即丢、不进任何判据。
     life = Lifecycle(
-        base_url, token, worker_id, work_dir=work_dir, device=device, role=role, once=once, log=log
+        LifecycleSpec(
+            base_url=base_url,
+            token=token,
+            worker_id=worker_id,
+            work_dir=work_dir,
+            device=device,
+            role=role,
+            once=once,
+            log=log,
+        )
     )
     life.start()
     return worker_id, life

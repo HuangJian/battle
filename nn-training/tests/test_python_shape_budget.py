@@ -74,7 +74,9 @@ WIDE_FUNCS_BASELINE = {
     # `remote/hub_http.py` 已清零（P0-3 批 F4：`WaitJobSpec` / `HubFailSpec`）。
     # 2026-11-19 合入上游的 relay/replay 参数（原 3 处 → 4 处）。
     "remote/job_round.py": 1,  # run_one_round 已收 RoundSpec；剩 _prefetch_fill(10)
-    "remote/lifecycle.py": 1,
+    # 2026-11-23（P0-3 批 F）：`Lifecycle.__init__` 的 3 位置 + 8 关键字收成 `LifecycleSpec`
+    # （frozen + kw_only，住同模块）⇒ 本文件宽签名归零，条目删除；守
+    # `tests/remote/test_lifecycle_spec.py`。
     "remote/node_upgrade.py": 1,
     # `remote/offline_deliver.py` 已清零（P0-3 第四十刀：`OfflineDelivererSpec`）。
     # 2026-11-22（P0-3 第四十八刀）：`run_cloud_eval` 的 14 个关键字收成 `CloudEvalSpec`

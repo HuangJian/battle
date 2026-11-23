@@ -10341,3 +10341,21 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   `tests/worker/test_net_spec.py`（字段表 / frozen + kw_only / 入口只吃一份 spec / `build_ppo` 交
   spec 给工厂 / 缺省 = legacy 128 / 三个布尔档各自换形 / torch 与 paddle 双生 `arch()` 与头宽逐字段
   相同）。全文 → `docs/nn/engineering.md` §319。
+
+## §2026-11-23-lifecycle-spec
+
+- **背景**：`python.refactor.md` §P0-3 批 F。`remote/lifecycle.Lifecycle.__init__` 收 3 个位置参数
+  + 8 个关键字（11 参）；调用面 3 处（`remote/worker.py` 装配 + 用例 2 处）。
+- **坏点**：三个身份串 `base_url` / `token` / `worker_id` 相邻（互换一个就把云机遗言记到别的
+  hub / 机器名下，而观测腿与 `/admin/errors` 靠 `worker_id` 对账）；`work_dir`（Path）/
+  `device` / `role` 三个自由位相邻（读点会量错目录）；`log` 与 `now_fn` 是两个签名不同的回调
+  （运行时互换只让时间戳进日志）。
+- **决定**：`LifecycleSpec`（frozen + kw_only，10 字段，前三位 = 旧位置面，住同模块）；
+  `Lifecycle.__init__(spec)` 只把 spec 展开成原来的私有槽，构造体其余不动。生产装配点按名字写全；
+  用例助手的 `**kw` 透传改成 `replace(spec, **kw)`。
+- **被否决**：① 保留旧关键字面并存 —— 失效面不减；② `reading_sec` / `now_fn` 收进子 spec
+  （「读点节律」小袋）—— 两个字段不值一份对象，且会让「怎么构造上报器」变成两段式；
+  ③ 给 spec 加 `__post_init__` 把 `reading_sec <= 0` 拒掉 —— 旧代码没这条语义，新增校验会改行为。
+- **读数**：宽签名 11 → **10**、9 → **8 文件**（`remote/lifecycle.py` 条目从 `WIDE_FUNCS_BASELINE` 删除）。
+- **验证**：`bun run pygate` 绿（6956 passed）；`ruff check` + `mypy` 绿。守
+  `tests/remote/test_lifecycle_spec.py`。全文 → `docs/nn/engineering.md` §320。
