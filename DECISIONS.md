@@ -10392,3 +10392,17 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   这边要过 JSON 管道，字段集不同；② 让 `start_fill` 自己拼命令 dict 传参 —— 那正是现在这版。
 - **验证**：`bun run pygate` 绿（6972 passed）；守 `tests/remote/test_prefetch_proc.py` ⑤
   （含「四组位置对着真子进程收到的命令键」一条）。全文 → `docs/nn/engineering.md` §322。
+
+## §2026-11-23-one-game-bounded-reuses-retry-spec
+
+- **背景**：`python.refactor.md` §P0-3 批 E 的 `worker/iter_rollout._run_one_game_bounded`(11)。
+  它的 10 个字段是 `RetryGameSpec`（§279）的逐字副本，另加 `ceiling_sec`。
+- **坏点**：两份相邻同类位（`exec_dir` / `ts_dir` 两个 Path、`out_dir` str、`explicit` / `pool`、
+  `log` / `pool`）靠位置对齐 —— 抄错一格不抛，只是把局跑进别的目录或把日志记进池子。
+- **决定**：**不新造 spec**，直接收 `RetryGameSpec` + 关键字 `ceiling_sec`（11 → 2）；
+  转手给重试层用 `replace(spec, abandoned=abandoned)`。放弃位仍在本层新造。
+- **被否决**：① 新造 `BoundedGameSpec(RetryGameSpec + ceiling_sec)` —— 两个对象之间还要再抄一遍
+  十个字段，互换面反而翻倍；② 把 `ceiling_sec` 塞进 `RetryGameSpec` —— 上界是**本层**的看门狗
+  参数（重试层看不到它），放进去会让「谁负责超界」变模糊。
+- **验证**：`bun run pygate` 绿（6976 passed）；守 `tests/worker/test_one_game_bounded_spec.py`。
+  全文 → `docs/nn/engineering.md` §323。

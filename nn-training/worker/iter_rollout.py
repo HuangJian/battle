@@ -38,7 +38,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_COMPLETED, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
@@ -590,18 +590,7 @@ def _run_one_game_with_retries(spec: RetryGameSpec) -> tuple[float, int]:
 
 
 def _run_one_game_bounded(
-    bun: str,
-    argv: list[str],
-    exec_dir: Path,
-    ts_dir: Path,
-    out_dir: str,
-    timeout_sec: float,
-    log=lambda msg: None,
-    explicit: bool = False,
-    pool: serve_pool.ServePool | None = None,
-    *,
-    ceiling_sec: float | None = None,
-    job_dir: Path | None = None,
+    spec: RetryGameSpec, *, ceiling_sec: float | None = None
 ) -> tuple[float, int]:
     """跑一局，但**本线程永远在墙钟上界内返回**：真活交给一条可放弃的 daemon 线程。
 
@@ -623,9 +612,9 @@ def _run_one_game_bounded(
 
     `exec_dir` / `job_dir` 同 `_run_one_game_with_retries`（回退档两个同值 ⇒ 形状与今天逐字相同）。
     """
-    label = _game_label(argv)
+    label = _game_label(spec.argv)
     ceiling = (
-        game_watch.game_ceiling_sec(timeout_sec, explicit=explicit)
+        game_watch.game_ceiling_sec(spec.timeout_sec, explicit=spec.explicit)
         if ceiling_sec is None
         else float(ceiling_sec)
     )
@@ -633,29 +622,15 @@ def _run_one_game_bounded(
     #: （P1-1，评审 P1-4 的 exec 握手窗口）——不置位 = 那条链会把整局跑完并往 `w{i}/` 写。
     abandoned = threading.Event()
     ok, res = call_bounded(
-        lambda: _run_one_game_with_retries(
-            RetryGameSpec(
-                bun,
-                argv,
-                exec_dir,
-                ts_dir,
-                out_dir,
-                timeout_sec,
-                log,
-                explicit,
-                pool,
-                abandoned,
-                job_dir=job_dir,
-            )
-        ),
+        lambda: _run_one_game_with_retries(replace(spec, abandoned=abandoned)),
         ceiling,
         name=f"rollout-{label}",
     )
     if not ok:
         abandoned.set()
         # 现场 = 日志真身处（换根档在 scratch；回退档就是 job 目录）。
-        where = str(Path(exec_dir) / out_dir / ROLLOUT_LOG_NAME)
-        log(game_watch.ceiling_line("rollout", label, ceiling, where))
+        where = str(Path(spec.exec_dir) / spec.out_dir / ROLLOUT_LOG_NAME)
+        spec.log(game_watch.ceiling_line("rollout", label, ceiling, where))
         raise UnreapableChildError(
             f"rollout 单局超界（{ceiling:g}s 内整条链路都没返回）：{label}"
             f"——大概率卡在不可中断的 IO（挂住的挂载点：mkdir/open/写盘/子进程 exec 握手）；"
@@ -1347,17 +1322,19 @@ def _drive_games(r: _IterRun) -> None:
                     inflight[
                         ex.submit(
                             _run_one_game_bounded,
-                            bun,
-                            argvs[i],
-                            exec_jd,
-                            tsd,
-                            _game_out_dir(argvs[i]),
-                            timeout_sec,
-                            log,
-                            explicit,
-                            pool,
+                            RetryGameSpec(
+                                bun,
+                                argvs[i],
+                                exec_jd,
+                                tsd,
+                                _game_out_dir(argvs[i]),
+                                timeout_sec,
+                                log,
+                                explicit,
+                                pool,
+                                job_dir=jd,
+                            ),
                             ceiling_sec=ceiling_sec,
-                            job_dir=jd,
                         )
                     ] = i
 

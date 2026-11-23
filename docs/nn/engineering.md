@@ -29,6 +29,22 @@
 
 ---
 
+## §323 P0-3 批 E 末一处：`_run_one_game_bounded`(11) → 直接吃 `RetryGameSpec`（6 → 5）（2026-11-23）
+
+* **不是新 spec，是接上已有的那份**：`_run_one_game_bounded` 的 10 个字段是
+  `_run_one_game_with_retries(spec: RetryGameSpec)`（§279）的**逐字副本**，再加一个
+  `ceiling_sec`。两份相邻同类位靠位置对齐：`exec_dir` / `ts_dir` 两个 `Path`（跑局目录 vs TS 树）、
+  `out_dir` 是 str、`explicit` 与 `pool`、`log` 与 `pool` —— 抄错一格不抛，只是把局跑进别的目录、
+  或把日志记进池子。
+* **改法**：入口 `_run_one_game_bounded(spec: RetryGameSpec, *, ceiling_sec=None)`；上界仍按
+  `spec.timeout_sec` / `spec.explicit` 现场算；转手给重试层用
+  `replace(spec, abandoned=abandoned)`（`RetryGameSpec` 是 frozen）—— 放弃位仍是**本层新造**的，
+  「本局被放弃 ⇒ 那条链就地自杀子进程」的语义一字不动。
+* **装配点只有一个**（`run_iter_rollout` 的 `_fill` 里 `ex.submit(...)`），按名字写全 10 栏。
+* **验收**：`bun run pygate` 绿（6976 passed）。守卫 `tests/worker/test_one_game_bounded_spec.py`
+  （入口形状 = `spec` + 关键字 `ceiling_sec` / 上界两个来源都对着 `call_bounded` 的**实参**断言 /
+  超界真的上抛 `UnreapableChildError` / frozen 与 `replace` 的新对象语义）。
+
 ## §322 P0-3 批 F：`PayloadProcess.start_fill`(9) → `FillAsk`（7 → 6）（2026-11-23）
 
 * **一处，但两端**：`start_fill` 是「父侧下一道 `fill` 命令」的那一头，另一头就是 §321 的

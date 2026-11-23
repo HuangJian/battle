@@ -138,7 +138,10 @@ WIDE_FUNCS_BASELINE = {
     "worker/gate_check.py": 1,
     # `worker/greedy_round.py` 已清零（P0-3 批 D：`run_greedy_round` 的 12 个关键字 →
     # `GreedyRoundSpec`）；守 `tests/worker/test_greedy_round_spec.py`。
-    "worker/iter_rollout.py": 2,
+    # 2026-11-23（P0-3 批 E）：`_run_one_game_bounded` 的 10 个逐字副本字段改成直接收
+    # `RetryGameSpec`（§279 先例）+ 关键字 `ceiling_sec` ⇒ 2 → 1；守
+    # `tests/worker/test_one_game_bounded_spec.py`。
+    "worker/iter_rollout.py": 1,  # 剩 run_iter_rollout(9)
     # 2026-11-23（P0-3 批 C2）：`StudentNet` / `PPOStudent` 的 9 个构造旋钮（torch / paddle 双生）
     # 收成一个 `NetSpec`（frozen + kw_only，住 `worker/models/arch_meta.py`；`read_arch_kwargs`
     # 随之改成返回 spec 的 `read_arch_spec`）⇒ `worker/models/student.py` 与
