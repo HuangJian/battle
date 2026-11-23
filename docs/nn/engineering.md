@@ -29,6 +29,55 @@
 
 ---
 
+## §331 150~200 行存量的接缝分类：先拆这五个（2026-11-23）
+
+§329 把 150~200 行冻结成 70 个（60 文件）。**按行数排序没意义** —— 同样是 180 行，一个纯函数里
+四段顺序规则比一个「整槽位生命周期活在一个 `while` 里」好拆得多。所以按**接缝烂度**过了一遍：
+分支数、循环层数与嵌套、`try` 块、`self.` 属性面、局部绑定数、顶层语句数（顶层语句越少越好拆，
+说明整个人生周期在一坨控制流里）。
+
+**计分口径**（`branch + 2×嵌套循环 + 循环 + try + self/4`；局部绑定与顶层语句只作人工判断的旁证）：
+
+| 函数 | 行 | 分支 | 环/嵌 | try | self | 顶层语句 | 病灶 |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `worker/bc_dispatch.py:167 run_slot` | 159 | 27 | 2/1 | 2 | 29 | **5** | 整个槽位生命周期在一个 `while` 体内：领取 → 导出 → 训练 → 回传 → 收工，读一眼要 159 行 |
+| `remote/offline_deliver.py:1008 _sync` | 162 | **30** | 1/0 | 0 | 27 | 25 | 一拍里五件事：复活 / 模式 / 指标缺口 / 产物补传 / 账本落盘 |
+| `trainer/queue_local.py:711 rescan_nodes` | 186 | 19 | 4/2 | 0 | 0 | 36 | 线程主体与判据混住：spawn → 等 → ping → 注册写 → 退避 → halt |
+| `worker/gate_check.py:336 evaluate` | 171 | **31** | 4/0 | 0 | 0 | 41 | 31 个分支的**纯函数**：每个闸族一段，分支数全档最高 |
+| `remote/hub_publish.py:168 _publish_stage` | **188** | 20 | 4/0 | 0 | 0 | 32 | 全档最长；docstring 自己就列了三件事（manifest 预建 / 身份守卫 / payload 附带） |
+| `tools/wave2_judge.py:355 main` | 189 | 23 | **12/4** | 1 | 0 | 57 | 环嵌套全档最深，但是一次性判分工具（债务记在 `tools/`，不占生产风险） |
+| `trainer/loop_core.py:130 __init__` | 157 | **1** | 0/0 | 1 | **80** | **81** | 80 个属性、1 个分支：不是「拆行」而是「缺一个装配对象」 |
+| `remote/offline_deliver.py:198 __init__` | 155 | 5 | 0/0 | 1 | 65 | — | 同上，构造器干装配 |
+| `worker/scripts/eval_intent_m5.py:90 main` | 195 | 13 | 8/2 | 0 | 0 | — | 探针脚本 |
+| `trainer/loop_volume.py:1117 _volume_collect_greedy` | 187 | 15 | 4/1 | 0 | 15 | — | 贪心采集：循环体里混着采集与派生 |
+| `remote/push_client.py:201 submit_job` | 166 | 26 | 4/1 | 2 | 0 | — | 提交腿：编包 / 建池 / 重试 / 记账 |
+| `remote/push_dispatch.py:1200 _await_result` | 165 | 21 | 1/0 | 2 | 11 | — | 等待-结算，状态机在 `try` 里 |
+
+**先拆这五个（按接缝烂度，不按行数）**
+
+1. **`worker/bc_dispatch.run_slot`** —— 最坏：159 行只有 **5 条顶层语句**，接缝得先**造**出来。
+   落点：`_claim_next`（挑活 + 退避）/ `_export_corpus`（语料导出与判据）/ `_run_training`
+   （起子进程 + 流式日志）/ `_publish_and_retire`（回传与收工）。`while` 体只剩相位调度。
+2. **`remote/offline_deliver._sync`** —— 一拍五件事、30 个分支。落点：`_sync_revive` / `_sync_metrics_gap`
+   / `_sync_artifacts` / `_sync_ledger`，`_sync` 只剩顺序与预算切分（`budget_sec` 的语义住一处）。
+3. **`trainer/queue_local.rescan_nodes`** —— 线程主体与判据混住，且 4 环 2 嵌。落点：`_rescan_once`
+   （一轮发现）/ `_rescan_wait`（退避 + halt 检查）/ `_rescan_register`（写节点表与 reason 归因）；
+   参数已经是 `RescanSpec`（§232），拆完就能纯化。
+4. **`worker/gate_check.evaluate`** —— 31 分支但**纯函数**，风险最低、收益最直接：每个闸族一个
+   `_gate_*` 段，`evaluate` 退化成「按序求值 + 取最严」的表驱动。已有 60 处调用点与 `GateAsk`
+   守卫，拆完不需要新测试。
+5. **`remote/hub_publish._publish_stage`** —— 188 行最长，docstring 已把三件事写清：`_stage_manifest`
+   / `_guard_identity` / `_stage_extras`。发布腿今天刚搬出 `hub_client`（§324），内部接缝还没跟上。
+
+**明确先不动的三处**：`tools/wave2_judge.main`（12 环 4 嵌，但一次性判分工具的环嵌套是数据形状，
+不是耦合）· `trainer/loop_core.__init__` 与 `remote/offline_deliver.__init__`（80 / 65 个属性、几乎
+零分支 —— 那是「缺装配对象」，属于 P0-3 那一族，不该按行数硬切）· `worker/scripts/*` 探针（同 tools）。
+
+> 这张表只是**排序依据**，不是承诺：每一刀仍要过三道关（可读性 / 可验证 / 行为不变），
+> 拆不动就换下一格 —— 存量表只减不增，但「为了减而硬切」会造出比原来更难读的两半。
+
+---
+
 ## §330 P0-2 存量：`hub/queue_offline.offline_tasks`（197 → 34 + 97 + 46 + 50）（2026-11-23）
 
 新 150 行存量闸（§329）里最长的一格。它不是一个「胖函数」，而是**一行清单的三种视角**挤在

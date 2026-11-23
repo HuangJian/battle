@@ -334,6 +334,9 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
   > 「贴着阈值」的函数聚集的地方。
   > 第一刀就落在这档最长的一格：`hub/queue_offline.offline_tasks` 197 → 34（+ 三段：
   > 读一门课 / 判它 / 成型一行），存量 71 → 70（engineering §330）。
+  > 余下 70 个按「接缝烂度」分诊过一遍，下一批的五处已点名（engineering §331）：
+  > 行数排序不是判据 —— 同样 180 行，纯函数里的四段规则远比「整个生命周期在一个
+  > `while` 体内」好拆。
 
 **为什么这是问题**
 
