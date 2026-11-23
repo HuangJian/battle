@@ -577,7 +577,13 @@ BASELINE_FORM = 1536
 #: 运行期收集到的 id / reason / 长度，没有任何源码措辞；口径 B 的已知限边是「文件里出现
 #: .py 字面量 ⇒ 该文件所有 assert 计入」，该文件本来就有 CLI 端到端用例的 .py 路径，
 #: 于是新断言被连坐算 +1。属于误计，不是新增文本判据。
-BASELINE_SRC = 1227
+#: 2026-11-23 抬到 **1228**（+1，实测）：`tests/remote/test_rollout_node_notebook.py` 的 hub
+#: 兜底守卫断言两份代码包**铺成了同一棵树**（`nn-training/remote/rollout_node.py` 里是假包
+#: 写的那份内容、`tools/agent/sampler-agent.ts` 在仓根）—— 判据是落盘数据，不是源码措辞；
+#: 计进去只因路径带 `.py` 字面量（口径 B 的门是文本级的）。同一条用例里那个撞名的局部量
+#: 已改名（`calls` → `rounds`，与第 274 行无关的 AST 收集量不再连坐）。这里剩下的 1 条无法
+#: 换写法：包内成员名就是 `remote/rollout_node.py`，cell 侧也按这个名字校验。口径 A 不变。
+BASELINE_SRC = 1228
 #: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。派生式（基线九成，见
 #: `tests/helpers/budget.py`）：两个计数器各自随自己的基线收紧，清理基线时不必回填数字。
 def _floor_of_form() -> int:

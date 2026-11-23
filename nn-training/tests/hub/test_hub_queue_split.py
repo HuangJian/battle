@@ -185,6 +185,8 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "_job_dir",
             "job_root_of",
             "shared_code_zip",
+            # 2026-11-23：`GET /ts_code` 的取件口（采样节点在 git 拉不动时 bootstrap）。
+            "shared_ts_code_zip",
             "epoch_of",
             "job_status",
             "job_priority_of",
@@ -652,7 +654,8 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     # 2026-11-12：+1（`clear_bc_exclusive`：dashboard 的人工「解除 BC 独占」口）⇒ 135。
     # 2026-11-18（G5）：+1（`auth_state`：D9 闭锁的只读快照）⇒ 136；再 +1（`course_store`）⇒ 137。
     # B7-S2：`queue_scope` 的 26 个方法切成协作者 ⇒ 混入方法 138 → 112。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 112, len(DOMAIN_METHODS)
+    # 2026-11-23：+1（`shared_ts_code_zip`：`GET /ts_code` 的共享取件口）⇒ 113。
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 113, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -662,7 +665,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 112, len(seen)
+    assert len(seen) == 113, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == sorted(OWN_METHODS), (

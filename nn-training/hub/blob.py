@@ -7,6 +7,7 @@
     GET /jobs/{id}/ts_code   ts_code.zip（M3：kind=iter 的节点用）
     GET /jobs/{id}/blob      ?name=opt|ref（M2 B3 内容寻址）
     GET /code                共享 code.zip（colab bootstrap 用；多课程取第一份真存在的）
+    GET /ts_code             共享 ts_code.zip（采样节点 bootstrap 用；快照优先）
 
 ## 这一组的形状本来就该收成一个助手
 
@@ -214,3 +215,26 @@ class BlobRoutes:
             )
             return
         self._serve_path(p, missing="shared code zip 在两次调用之间消失了（训练循环刚重启？）")
+
+    # ---- GET /ts_code（共享 ts_code.zip，采样节点 bootstrap 用） ----
+    def _get_shared_ts_code(self) -> None:
+        """递本会话的 TS 运行时包（`src/` + `tools/`），鉴权与 `/code` 同规。
+
+        只给「没有 job 的节点」用（采样节点在 git 拉不动时靠它起来）；有 job 的节点走
+        `/jobs/{id}/ts_code`，那条路的字节与这里同源（同一份集群快照），只是按 job 目录定位。
+        没有 ts 件（快照里打包失败 / 旧 hub / 从没起过 trainer）⇒ 404，措辞点名下一步。
+        """
+        if not self._auth_ok():
+            return
+        p = self.hub.shared_ts_code_zip()
+        if p is None:
+            self._json(
+                {
+                    "error": "no shared ts_code zip — 集群代码快照里没有 TS 件"
+                    "（hub/trainer 重启一次会重打；见 remote/code_snapshot.py），"
+                    "且各课 job_root 里也没有 ts_code.zip"
+                },
+                404,
+            )
+            return
+        self._serve_path(p, missing="shared ts_code zip 在两次调用之间消失了（训练循环刚重启？）")

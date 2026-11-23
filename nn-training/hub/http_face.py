@@ -279,6 +279,8 @@ GET_ROUTES: tuple[Route, ...] = (
     Route("exact", "/ping", "_get_ping"),
     Route("exact", "/", "_get_ping"),
     Route("exact", "/code", "_get_shared_code"),
+    # 采样节点 bootstrap 用的共享 TS 运行时包（与 `/jobs/{id}/ts_code` 同源、同快照）。
+    Route("exact", "/ts_code", "_get_shared_ts_code"),
     Route("exact", "/jobs/peek", "_get_peek"),
     Route("exact", "/admin/workers/halt", "_get_workers_halt"),
     Route("exact", "/admin/workers/resume", "_get_workers_resume"),

@@ -10286,3 +10286,30 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **遗留（删除候选）**：`hub_http.report_job_failure` 无生产调用者，只经 `hub_client` 转发名 + 一条用例活着，
   与 `job_lifecycle.report_job_failure` 是重复实现 —— 收 spec 只是让这份重复不再是「宽签名」。
 
+## §2026-11-23-hub-shared-ts-code-bootstrap
+
+**采样节点的代码来源：git 拉不动 ⇒ 从 hub 取 python + TS 两份代码包（新端点 `GET /ts_code`）；取不到就无限重试，不再 `SystemExit`。**
+
+- **背景**：`ipynb/rollout.ipynb` 的采样节点要的是整棵树（`src/` + `tools/` + `nn-training/`）。hub 的
+  `GET /code` 只有 python 侧（`pack_code_zip` 按角色裁掉 `tools/`），TS 运行时此前只在
+  `GET /jobs/{id}/ts_code` 上 —— 而采样节点**没有 job**。于是 `git fetch` 一失败（DSW / 国内云机的常态）
+  整个 cell 就 `SystemExit`：节点起不来，而 hub 上恰好有本会话冻好的同一份 TS 包。
+- **决定**：hub 新增 exact 路由 `GET /ts_code`（鉴权与 `/code` 同规）→
+  `hub/queue_observe.py::shared_ts_code_zip()`：集群代码快照的 ts 件优先，其次「第一份真存在的
+  `<job_root>/ts_code.zip`」。notebook cell 在两条失败路径（既有 checkout 的 fetch/checkout/reset 失败、
+  新 clone 与源码归档全挂）改调 `_wait_hub_code()`：`/code` 解到 `code_dir/nn-training`、`/ts_code`
+  解到 `code_dir` 根，**无限重试**（退避 5→60s，唯一出口是两份包都就位或人按 ■）。
+- **被否决**：① 拿任意 job id 复用 `/jobs/{id}/ts_code` —— 那是别的课的指针，采样节点不拥有那个 job；
+  ② 把 TS 塞进 `code.zip` —— 破坏「一个包一份 sha、按角色裁剪」的传输契约；③ 只对 git 无限重试 ——
+  被墙的 GitHub 永远不收敛，节点照样起不来；④ 保留 `SystemExit` + 提示 —— 用户 2026-11-23 明确否掉。
+- **与 §2026-10-10-goalnn-cluster-code-snapshot-ts 的关系（不是翻案）**：那次否决的是「publish 时另开一条
+  共享 ts 指针」（job 目录里已有一份，按路径拷贝即可）。这里服务的是**没有 job 的 bootstrap 取件**，与
+  `/code` 存在的理由同构；两条路递出的字节同源（同一份集群快照），只是定位方式不同。
+- **违反后果**：让 git 的可用性成为节点的单点（今天就是它）；或者反过来用旧树「先跑起来」——
+  「不拿旧代码凑合」是 `SystemExit` 当初存在的理由，这里只是把出口换成更硬的来源。
+- **落地与门槛**：`hub/{blob,http_face,queue_observe}.py` · `ipynb/rollout.ipynb`（含 markdown 第 5 条）·
+  `tests/hub/test_shared_code_snapshot.py`（快照优先 / 回落 / 404 措辞）·
+  `tests/hub/test_hub_routes_split.py`（`blob` 内联鉴权 1 → 2）· `tests/hub/test_hub_queue_split.py`
+  （域成员 112 → 113）· `tests/remote/test_rollout_node_notebook.py`（两包铺成同一棵树 + 无限重试）。
+  hub 需重启才带 `/ts_code`：旧 hub 回 404，cell 的日志行直接点名「重启 hub」。
+

@@ -103,6 +103,69 @@ def test_corrupt_snapshot_falls_back_to_legacy(
     assert q.shared_code_zip("b") == root / "b" / "remote-jobs" / "code.zip"
 
 
+def _write_snapshot_with_ts(d: Path, ts_payload: bytes = b"snapshot-ts") -> Path:
+    """手造一份带 TS 件的合法快照（元数据加 `ts_zip` / `ts_sha256` / `ts_bytes`）。"""
+    zp = _write_snapshot(d)
+    tzp = d / "ts_code.deadbeef1234.zip"
+    tzp.write_bytes(ts_payload)
+    meta = json.loads((d / cs.META_NAME).read_text(encoding="utf-8"))
+    meta.update(
+        {
+            "ts_zip": tzp.name,
+            "ts_sha256": hashlib.sha256(ts_payload).hexdigest(),
+            "ts_bytes": len(ts_payload),
+        }
+    )
+    (d / cs.META_NAME).write_text(json.dumps(meta), encoding="utf-8")
+    assert zp.is_file()
+    return tzp
+
+
+def _legacy_ts_zip(root: Path, course: str, payload: bytes = b"legacy-ts") -> Path:
+    p = root / course / "remote-jobs" / "ts_code.zip"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(payload)
+    return p
+
+
+def test_shared_ts_code_prefers_the_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub) -> None:
+    """TS 件与代码件同一条纪律：会话快照就在那里，`get /ts_code` 只是把它递出去。"""
+    q, root = hub
+    tzp = _write_snapshot_with_ts(tmp_path / "snap")
+    _legacy_ts_zip(root, "a")  # 旧路径也有：快照优先，回回落不算
+    monkeypatch.setenv("BCITY_CODE_SNAPSHOT_DIR", str(tmp_path / "snap"))
+    assert q.shared_ts_code_zip() == tzp
+
+
+def test_shared_ts_code_falls_back_to_legacy_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub
+) -> None:
+    """无快照（或快照里没 ts 件）⇒ 回落「第一份真存在的 `<job_root>/ts_code.zip`」。"""
+    q, root = hub
+    _write_snapshot(tmp_path / "snap")  # 没有 ts 字段的旧快照
+    monkeypatch.setenv("BCITY_CODE_SNAPSHOT_DIR", str(tmp_path / "snap"))
+    assert q.shared_ts_code_zip() is None  # 一处都没有
+    tzp = _legacy_ts_zip(root, "b")
+    assert q.shared_ts_code_zip() == tzp
+
+
+def test_no_shared_ts_code_means_404(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """都没有 ⇒ 读面 `None` + 真 handler 的 404 点名「快照里没有 TS 件」。"""
+    from tests.hub.test_hub_routes_split import _Probe
+
+    root = tmp_path / "traj"
+    q = _HubQueue({"a": _store(root, "a")}, order=["a"])
+    monkeypatch.setenv("BCITY_CODE_SNAPSHOT_DIR", str(tmp_path / "empty"))
+    assert q.shared_ts_code_zip() is None
+    rec = _Probe("/ts_code", hub=q).auth(True)
+    rec._get_shared_ts_code()
+    assert len(rec.calls_json) == 1 and rec.calls_json[0][1] == 404
+    err = rec.calls_json[0][0]
+    assert isinstance(err, dict) and str(err["error"]).startswith(
+        "no shared ts_code zip — 集群代码快照里没有 TS 件"
+    )
+
+
 def test_no_snapshot_no_legacy_means_404(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

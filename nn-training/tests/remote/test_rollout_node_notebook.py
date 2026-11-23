@@ -513,6 +513,77 @@ def test_cell_archive_retries_after_whole_round_fails(tmp_path: Path) -> None:
     assert (code_dir / "tools" / "agent" / "a.ts").is_file()
 
 
+def _hub_ns(code_dir: Path, **extra: Any) -> dict[str, Any]:
+    """摘出 hub 兜底那几个函数并备好它们读的模块/全局（cell 不整段执行）。"""
+    ns: dict[str, Any] = {
+        "zipfile": zipfile,
+        "tempfile": tempfile,
+        "shutil": shutil,
+        "os": os,
+        "Path": Path,
+        "code_dir": code_dir,
+        "_log": lambda _m: None,
+        "_HUB_BACKOFF_SEC": (5, 10, 20, 30, 60),
+        "CFG": {},
+        "_secret": lambda _k, _v="": "",
+    }
+    # 先 exec 真函数，再让调用方覆盖（否则 stub 会被 cell 里的同名函数盖掉）。
+    ns = _cell_funcs(
+        {"_safe_unzip", "_hub_unpack", "_hub_base_url", "_hub_code_packs", "_wait_hub_code"}, ns
+    )
+    ns.update(extra)
+    return ns
+
+
+def test_cell_hub_packs_land_as_one_runnable_tree(tmp_path: Path) -> None:
+    """git 拉不动时的兜底：`/code` 进 `nn-training/`、`/ts_code` 进仓根（与 clone 同一种树）。"""
+    code_dir = tmp_path / "code"
+    urls: list[str] = []
+
+    def _fake_get(url, dest, _token, timeout=600):
+        urls.append(url)
+        with zipfile.ZipFile(dest, "w") as zf:
+            if url.endswith("/ts_code"):
+                zf.writestr("tools/agent/sampler-agent.ts", "ts")
+            else:
+                zf.writestr("remote/rollout_node.py", "py")
+        return ""
+
+    ns = _hub_ns(
+        code_dir,
+        _hub_base_url=lambda: "http://hub:8787",
+        _secret=lambda _k, _v="": "tok",
+        _hub_get=_fake_get,
+    )
+    # cell 的函数都住在 exec 命名空间里；成功 = 返回空串（非空是给人看的失败原因）。
+    packs = ns["_hub_code_packs"]
+    assert packs() == ""
+    assert urls == ["http://hub:8787/code", "http://hub:8787/ts_code"]
+    assert (code_dir / "nn-training" / "remote" / "rollout_node.py").read_text() == "py"
+    assert (code_dir / "tools" / "agent" / "sampler-agent.ts").read_text() == "ts"
+
+
+def test_cell_hub_packs_retry_forever_until_both_land(tmp_path: Path) -> None:
+    """两轮失败不是终点：退避后继续（唯一出口是铺好）——墙掉的云机不该让节点起不来。"""
+    code_dir = tmp_path / "code"
+    sleeps: list[float] = []
+    rounds = {"n": 0}
+
+    def _flaky():
+        rounds["n"] += 1
+        return "HTTP 404（hub 上没有这份包）" if rounds["n"] < 3 else ""
+
+    class _T:
+        @staticmethod
+        def sleep(sec: float) -> None:
+            sleeps.append(sec)
+
+    ns = _hub_ns(code_dir, _hub_code_packs=_flaky, time=_T)
+    ns["_wait_hub_code"]("git 拉取失败")
+    assert rounds["n"] == 3
+    assert sleeps == [5, 10]
+
+
 def test_cell_archive_extraction_rejects_path_traversal(tmp_path: Path) -> None:
     """归档来自公网 ⇒ 成员路径越界必须拒收，不许写到 code_dir 外面。"""
     archive = tmp_path / "evil.zip"

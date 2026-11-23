@@ -11,7 +11,7 @@
   `_ready` 上（同一把锁下的一致读），在队列层重新拼就是第二个事实源。
 * `frozen_info` / `frozen_jobs` / `consume_freeze_announcement` / `unfreeze` / `reclaims`
   —— §4.1 毒包熔断的读面与**唯一**可逆口（人工解冻）。
-* `_job_dir` / `job_root_of` / `shared_code_zip` —— 路径解析。
+* `_job_dir` / `job_root_of` / `shared_code_zip` / `shared_ts_code_zip` —— 路径解析。
 
 ## `_MISSING_ROOT`：找不到归属时的**哨兵**根
 
@@ -37,6 +37,7 @@ from common.protocol import (
     BOTH_ROLE_KINDS,
     PRIORITY_NONE,
     ROLE_OFFLINE,
+    TS_CODE_NAME,
     WORKER_ERROR_TTL_SEC,
     WORKER_PREFETCH_TTL_SEC,
 )
@@ -259,6 +260,27 @@ class QueueObserveMixin(QueuePeer):
         order = [course] if course in self._stores else self._order
         for c in order:
             p = self._stores[c].job_root / "code.zip"
+            if p.exists():
+                return p
+        return None
+
+    def shared_ts_code_zip(self) -> Path | None:
+        """共享 ts_code.zip 路径（`GET /ts_code` 的取件口：节点 bootstrap 用）。
+
+        与 `shared_code_zip` 同一条纪律：**集群代码快照优先**（`read_cluster_snapshot()` 在
+        会话启动时就已把 `code.zip` / `ts_code.zip` 一起冻好），快照缺失/不含 ts 件 ⇒ 回落
+        「第一份真存在的 `<job_root>/ts_code.zip`」——旧 hub 与无快照场景的行为不变。
+
+        为什么需要这个口子：`/jobs/{id}/ts_code` 只服务**已发布 job 的节点**，而采样节点
+        （rollout/eval）没有 job ⇒ git 拉不动时整台就起不来。`/code` 的 python 包
+        与这里的 TS 包凑齐，才等于一份能跑 sampler-agent 的树（`code_dir/nn-training` +
+        `code_dir/{src,tools}`）。
+        """
+        snap = read_cluster_snapshot()
+        if snap is not None and snap.ts_zip_path is not None:
+            return snap.ts_zip_path
+        for c in self._order:
+            p = self._stores[c].job_root / TS_CODE_NAME
             if p.exists():
                 return p
         return None

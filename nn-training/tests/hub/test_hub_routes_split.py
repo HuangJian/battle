@@ -143,7 +143,9 @@ DRIFT = {
 #: `/offline/lease` 及其 heartbeat / release）与旧的取包链一样都不挂 job，只能自己鉴权。
 #: ★M1b：`offline` 7 → **9**（新增 `GET /offline/hold` 与 `POST /offline/progress` 两个
 #: 「拿不到 job」的端点：课程名/租约 token 都在查询串上，与租约三端同一条形状）。
-ALLOWED_INLINE_AUTH = {"schedule": 2, "result": 0, "blob": 1, "offline": 9}
+# blob: 2 = `GET /code` + `GET /ts_code`（两条**共享包**端点都没有 job 作用域，
+# 鉴权只能内联；2026-11-23 加 `/ts_code`，供采样节点在 git 拉不动时 bootstrap）。
+ALLOWED_INLINE_AUTH = {"schedule": 2, "result": 0, "blob": 2, "offline": 9}
 
 ALLOWED_IMPORTS = {
     "hub.blob": {"common.protocol"},
