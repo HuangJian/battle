@@ -30,6 +30,7 @@ import common.task_client
 import trainer.eval_dispatch as ed
 import worker.eval_exec as ee
 import worker.eval_yield as eval_yield
+from biz.reward_library import METRICS
 from tests.helpers.toolchain import stub_toolchain
 from trainer.eval_dispatch import EvalDispatchSpec
 
@@ -1673,6 +1674,9 @@ def test_sibling_eval_rows_land_without_dispatch(tmp_path, monkeypatch) -> None:
                 "cleared": 1,
                 "score": 2.0,
                 "dims": {"kills": 4},
+                # 2026-11-23：复用面加了版本门（行必须带全本版指标列才可移植）；
+                # 真 eval 行就是这个形状（`test_eval_metric_columns` 的覆盖守卫保证）。
+                **{k: 0 for k in METRICS},
             }
         )
         + "\n",

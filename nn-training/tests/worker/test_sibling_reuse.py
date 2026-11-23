@@ -26,6 +26,7 @@ import pytest
 
 from biz.corpus_fp import corpus_identity_fp, episode_identity_fp
 from biz.course_resolve import load_course
+from biz.reward_library import METRICS, METRICS_VERSION
 from worker import sibling_reuse as sr
 
 REPO = Path(__file__).resolve().parents[3]
@@ -81,7 +82,17 @@ def _shard(root: Path, stage: int = 2000, seed: int = 7, *, wver: str = WVER) ->
     shard = wave / f"rl_s{stage}_seed{seed}"
     shard.mkdir(parents=True)
     (shard / "manifest.json").write_text(
-        json.dumps({"stage": stage, "seed": seed, "wver": wver, "corpus_fp": "src", "nSamples": 30}),
+        json.dumps(
+            {
+                "stage": stage,
+                "seed": seed,
+                "wver": wver,
+                "corpus_fp": "src",
+                "nSamples": 30,
+                # 真导出器必写（`export-rl-rollout.ts`）；复用面 2026-11-23 起拿它做版本门。
+                "metrics_version": METRICS_VERSION,
+            }
+        ),
         encoding="utf-8",
     )
     for name in ("obs.npy", "metrics.npy"):
@@ -336,6 +347,9 @@ def _row(stage: int, seed: int, *, wver: str = WVER16, **extra: object) -> dict:
         "cleared": 1,
         "score": 2.0,
         "dims": {"kills": 4},
+        # 真 eval 行带全本版指标列（`tests/worker/test_eval_metric_columns.py` 的覆盖守卫
+        # 保证）；`find_eval_rows` 2026-11-23 起拿这个全集做版本门。
+        **{k: 0 for k in METRICS},
     }
     base.update(extra)
     return base
@@ -360,6 +374,51 @@ def test_eval_rows_matched_by_wver_and_pair(
     got = sr.find_eval_rows([(2000, 7), (2000, 8), (2000, 9), (2001, 7)], WVER16, args)
     assert set(got) == {(2000, 7), (2001, 7)}
     assert got[(2000, 7)][1] == LEG_B
+
+
+def test_eval_row_from_older_metrics_is_never_transplanted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★ 2026-11-23 版本门：`wver` 相同但行缺本版指标列 ⇒ 不借（本课自采）。
+
+    现场（g11-ringkill it0）：v18 换了行宽，it0 照样借了 g10-press 的 v17 行
+    ⇒ `ringKilledCum` 整族不存在、`ringIntruders` 是 0，起点面板无法用于新主判。
+    缺**任一**列都算旧行（列名集合就是该版本的契约）。
+    """
+    a, b = _course(LEG_A), _course(LEG_B)
+    root = tmp_path / "b"
+    _wire_trajs(monkeypatch, {a.traj: tmp_path / "a", b.traj: root})
+    stale = _row(2000, 7)
+    stale.pop("ringIntrudedCum")  # 只缺一列就够
+    _ledger(root, [stale, _row(2000, 8)])
+    args = SimpleNamespace(course_obj=a, reuse_siblings=1)
+    got = sr.find_eval_rows([(2000, 7), (2000, 8)], WVER16, args)
+    assert set(got) == {(2000, 8)}, got
+    todo, reused = sr.reuse_eval_round([(2000, 7), (2000, 8)], key16=WVER16, args=args, it=5)
+    assert todo == [(2000, 7)]
+    assert set(reused) == {(2000, 8)}
+
+
+def test_rollout_shard_from_older_metrics_version_is_never_borrowed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★ 2026-11-23 版本门（rollout 面）：`wver` 相同但 `metrics_version` 不同 ⇒ 不借。
+
+    旧宽度 shard 借过来只有两种下场：`np_core` 形状断言炸掉，或者更糟——
+    行宽恰好对得上而列序换了（v9/v16 那种「换定义不换宽度」），静默算错势能差。
+    """
+    a, b = _course(LEG_A), _course(LEG_B)
+    root = tmp_path / "b"
+    _wire_trajs(monkeypatch, {a.traj: tmp_path / "a", b.traj: root})
+    stale = _shard(root, 2000, 7)
+    mm = json.loads((stale / "manifest.json").read_text(encoding="utf-8"))
+    mm["metrics_version"] = METRICS_VERSION - 1
+    (stale / "manifest.json").write_text(json.dumps(mm), encoding="utf-8")
+    fresh = _shard(root, 2000, 8)
+    assert fresh.is_dir()
+    args = SimpleNamespace(course_obj=a, reuse_siblings=1)
+    got = sr.rollout_sources([(2000, 7), (2000, 8)], WVER, args)
+    assert set(got) == {(2000, 8)}, got
 
 
 def test_transplant_keeps_readings_and_reidentifies_row() -> None:

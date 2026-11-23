@@ -8,8 +8,14 @@
 2. **到工作目录里找这一局**：
    · rollout ⇒ `**/rl_s{stage}_seed{seed}/manifest.json` 且 `wver` 与本次**逐字节同**
      （`paired_rotate_seed` 不必单独比：抽到的 seed 已经写在这局的目录名/argv 里，
-     两条腿种子流不同就根本不会撞上同一 (stage, seed)）；
-   · eval   ⇒ 兄弟课 `eval_log.jsonl` 里 `(wver16, stage, seed)` 相同的 `event:"eval"` 行。
+     两条腿种子流不同就根本不会撞上同一 (stage, seed)），**且 `metrics_version` 与当前同**；
+   · eval   ⇒ 兄弟课 `eval_log.jsonl` 里 `(wver16, stage, seed)` 相同的 `event:"eval"` 行，
+     **且那一行带全当前版本的指标列**（`_EVAL_ROW_REQUIRED_KEYS`）。
+
+   ★ 2026-11-23（g11-ringkill 实测）：`wver` 相同 ≠ 可借。同一份起点权重在本版指标换了之后
+   照样撞得上，而借来的 shard/行是**旧宽度/旧列集**——v18 那次 it0 就是借的 g10-press 行，
+   `ringKilledCum` 整族不存在、`ringIntruders` 还是 0，起点面板因此不能用于新主判。
+   两个面各自加版本门：shard 读 manifest 的 `metrics_version`；eval 行比对**列名全集**。
 3. **找到就取，找不到就本课自采**（前课被 `keep_iters` 清了、权重没撞上、兄弟课还没跑到
    —— 一律按 miss，不降级、不伪造）。
 
@@ -36,6 +42,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from biz.reward_library import METRICS, METRICS_VERSION
 from common.log import log
 
 NN_DIR = Path(__file__).resolve().parents[1]  # nn-training/
@@ -45,6 +52,12 @@ CURRICULA_DIR = NN_DIR / "curricula"
 #: 命中局的结算节点标签（观测面）：它不是采样机 ⇒ 不入 `dist-agent-meta.jsonl` 的机器健康账，
 #: 会以 `nodes.reuse` 出现在评估 summary 里（一眼看出这一轮有多少局是借来的）。
 REUSE_NODE = "reuse"
+
+#: eval 行必须**带全**当前版本的指标列才允许移植（`biz.reward_library.METRICS` 全集）。
+#: 为什么不比"版本号"：eval 行历来不带 `metrics_version`，加一版就要改 schema + 回填历史；
+#: 而"列名集合"本来就是该版本的契约（`tests/worker/test_eval_metric_columns.py` 断言每一列
+#: 都在行里）⇒ 缺任何一列 = 那行是**旧包**写的。派生自 METRICS，不新增第二个事实源。
+_EVAL_ROW_REQUIRED_KEYS: tuple[str, ...] = tuple(METRICS)
 
 #: 每轮最多扫多少个兄弟课程目录（用户 2026-10-22 口径：**100**——复用面本身就是「全库同族」，
 #: 扫不全就等于白算；扫描成本随课程数线性增，而命中才读 manifest）。
@@ -159,6 +172,11 @@ def rollout_sources(
             except (OSError, ValueError):
                 continue
             if mm.get("wver") != wver:
+                continue
+            # 版本门（2026-11-23）：旧包 shard 的 metrics 是**另一种宽度/列集**，借过来
+            # PPO 一读就撞形状断言（`np_core`），或在更隐蔽的情形下算出错的势能差。
+            # 缺键 = 旧 shard ⇒ 一律按 miss（本课自采，不降级、不伪造）。
+            if int(mm.get("metrics_version") or 0) != METRICS_VERSION:
                 continue
             # greedy 与采样语料不互借（plan/greedy-outcome-quota rev4）：普通轮借到
             # greedy shard = 把失败轨迹当 on-policy 样本；greedy 轮借到普通局 = 没挖到
@@ -306,6 +324,11 @@ def find_eval_rows(
             if not isinstance(row, dict) or row.get("event") != "eval":
                 continue
             if row.get("wver") != wver16 or "source" in row:
+                continue
+            # 版本门（2026-11-23）：旧包写的行缺几个新列 —— 移植过来等于给新腿的锚
+            # 混进旧口径（g11-ringkill it0 实测：`ringKilledCum` 整族没有、`ringIntruders`
+            # 还是 0）。缺任一列 ⇒ 按 miss 本课自采。
+            if not all(k in row for k in _EVAL_ROW_REQUIRED_KEYS):
                 continue
             try:
                 key = (int(row["stage"]), int(row["seed"]))

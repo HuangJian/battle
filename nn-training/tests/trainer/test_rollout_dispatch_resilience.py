@@ -31,6 +31,7 @@ import common.shard
 import common.task_client
 import trainer.dispatch as disp
 import trainer.queue_local as ql
+from biz.reward_library import METRICS_VERSION
 from tests.helpers.toolchain import stub_toolchain
 from trainer.dispatch_state import DispatchSpec
 
@@ -533,7 +534,16 @@ def test_sibling_reuse_filters_tasks_before_any_dispatch(tmp_path, monkeypatch) 
     shard.mkdir(parents=True)
     wver = common.distribution.weights_fingerprint(str(h.weights))
     (shard / "manifest.json").write_text(
-        json.dumps({"stage": 2000, "seed": 1, "wver": wver, "nSamples": 30}),
+        json.dumps(
+            {
+                "stage": 2000,
+                "seed": 1,
+                "wver": wver,
+                "nSamples": 30,
+                # 2026-11-23：复用面加了版本门（旧 shard 不借）；真导出器必写这个键。
+                "metrics_version": METRICS_VERSION,
+            }
+        ),
         encoding="utf-8",
     )
     for name in ("obs.npy", "metrics.npy"):
