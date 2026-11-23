@@ -29,6 +29,32 @@
 
 ---
 
+## §327 P0-3 批 K（收尾）：`verify_and_land` / `verify_and_land_bc` / `merge_memory_shards`（宽签名 3 → 0）（2026-11-23）
+
+* **这三条就是 §307 记下的「先拆再收」**：当时 `remote/hub_client.py` 恰好 999/1000 行，收 spec 要多几行
+  构造 ⇒ 只能先拆。§324 把发布腿整块搬去 `remote/hub_publish`（999 → 651）之后，这一刀才动得了。
+* **分桶**：`verify_and_land` 7 处、`verify_and_land_bc` 4 处、`merge_memory_shards` 1 处，全部是
+  「前 2–3 个位置参数 + 关键字」。
+* **坏点（三处同一个）**：位置面上的**同型相邻**。`verify_and_land(result, manifest, …)` 里两份都是
+  `dict`，互换不抛 —— 三重校验的每一项都比到「另一个 job 的指纹」，报出来的却是「云端跑错了 job」；
+  `verify_and_land_bc` 同形；`merge_memory_shards(it_dir, cands, mem, …)` 里 `cands`（已收集）与
+  `mem`（回传账）都是 `dict[str, …]`，互换后「同名以盘上为准」反着生效 —— 回传账被当成已收集，
+  于是本轮**一个 shard 都不补**（没有任何日志）。
+* **改法**：`LandSpec` / `BcLandSpec` 住 `remote/publish_spec.py`（那一轮 job 的两端：发布 → 校验落位
+  的数据形状都在这一个模块里；L0，不进 hub 的 numpy/torch 闭包），`ShardMergeSpec` 住 `worker/resume.py`
+  （L0，hub_client(L1) 已经在它上面 ⇒ 不改层号）。三个入口都只剩 `ask` 一个参数，函数体开头逐名摊开。
+  **不共用一份 spec**：PPO 有 init-weights fencing / `state_init` / `mem`，BC 有
+  `round_name` / `data_root` / `fixed_source` —— 共用会让两边各长出三个用不着的位（§309 先例）。
+* **坑（记账）**：① 打桩点跟着签名走：`def verify_and_land_bc(result, manifest, **kw)` 这种测试桩不会
+  因为签名变了而报错，只在运行时 `TypeError`（`test_bc_loop` / `test_serve_bc` 各一处，被门禁抓到）；
+  ② `trainer/loop_remote_job` 的落位相位要**继续**在方法体内自带 import（`remote.publish_spec` 进
+  `DELAYED_IMPORTS` 闭集，否则那两条源码契约用例先红）。
+* **验收**：`bun run pygate` 绿（**6998 passed / 3 skipped**）；`ruff check` + `mypy` 绿；
+  `WIDE_FUNCS_BASELINE` 的 `remote/hub_client.py: 2` 与 `worker/resume.py: 1` 两个条目删除 ⇒
+  **P0-3「剩余宽签名」清零**（分文件表里已无 >8 参函数）。守 `tests/remote/test_land_specs.py`
+  （7 条：入口形状 / 字段闭集 / kw_only + frozen / PPO 与 BC 不共形 / `cands`-`mem` 各就各位 /
+  同名以盘上为准 / `state_init` 与 metrics 版本两路过滤 + `mver_bad` 原地累加）。
+
 ## §326 P0-3 批 J：`worker/iter_rollout.run_iter_rollout`(9) → `IterRunSpec`（57 处调用点）（2026-11-23）
 
 * **分桶**：57 处调用点，**全部**是两个位置参数 `(job_dir, spec)` + 关键字（`log` 57/57 显式传，

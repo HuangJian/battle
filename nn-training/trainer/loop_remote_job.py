@@ -782,6 +782,7 @@ class TrainingRemoteJob(TrainingRemotePush):
             mark_job_completed,
             verify_and_land,
         )
+        from remote.publish_spec import LandSpec
         from worker.resume import state_init_enabled
 
         try:
@@ -796,17 +797,17 @@ class TrainingRemoteJob(TrainingRemotePush):
             # 对账要把本轮回传的 shard 算进去，否则每轮都报一条假的「活目录不一致」。
             published_mem = getattr(self, "_published_mem", None)
             verify_and_land(
-                result,
-                sess.manifest,
-                init_weights_path=args.out,
-                traj_dir=args.traj,
-                it=sess.it,
-                out_weights=args.out,
-                # data_fp 重算必须用与发布**同一条**过滤（P3.5）：否则本地算出的集合
-                # 与云端收到的集合分叉，三重校验会响亮拒收一份本来正常的 job。
-                state_init=state_init_enabled(args),
-                mem=published_mem,
-                log=log,
+                LandSpec(
+                    result=result,
+                    manifest=sess.manifest,
+                    init_weights_path=args.out,
+                    traj_dir=args.traj,
+                    it=sess.it,
+                    out_weights=args.out,
+                    state_init=state_init_enabled(args),
+                    mem=published_mem,
+                    log=log,
+                )
             )
         except TripleCheckError as e:
             # ★ 2026-10-11（事故；评审 F2）：三重校验拒收 = 这份 job 的**确定性终局**。

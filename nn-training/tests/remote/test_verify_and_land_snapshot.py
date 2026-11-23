@@ -30,6 +30,7 @@ import pytest
 from common.protocol import encode_opt_tar, encode_weights_json
 from remote.hub_client import HubClientError, verify_and_land
 from remote.hub_publish import PublishSpec, publish_job
+from remote.publish_spec import LandSpec
 
 STAGE = 2000
 
@@ -113,13 +114,15 @@ def test_late_shard_after_publish_does_not_reject(tmp_path: Path) -> None:
     _shard(it_dir, 33, "w" * 12)
     out_w = tmp_path / "out" / "weights.json"
     wver = verify_and_land(
-        _result(m, w, m["data_fp"]),
-        m,
-        init_weights_path=str(w),
-        traj_dir=str(tmp_path / "c-snap"),
-        it=1,
-        out_weights=str(out_w),
-        log=lambda _m: None,
+        LandSpec(
+            result=_result(m, w, m["data_fp"]),
+            manifest=m,
+            init_weights_path=str(w),
+            traj_dir=str(tmp_path / "c-snap"),
+            it=1,
+            out_weights=str(out_w),
+            log=lambda _m: None,
+        )
     )
     assert out_w.exists(), "迟到 shard 不得让一份正确结果落不了盘"
     assert wver == hashlib.sha256(out_w.read_bytes()).hexdigest()
@@ -130,11 +133,13 @@ def test_declared_fp_still_enforced(tmp_path: Path) -> None:
     m, w, _it_dir = _publish_local_round(tmp_path)
     with pytest.raises(HubClientError):
         verify_and_land(
-            _result(m, w, "0" * 64),
-            m,
-            init_weights_path=str(w),
-            traj_dir=str(tmp_path / "c-snap"),
-            it=1,
-            out_weights=str(tmp_path / "out" / "weights.json"),
-            log=lambda _m: None,
+            LandSpec(
+                result=_result(m, w, "0" * 64),
+                manifest=m,
+                init_weights_path=str(w),
+                traj_dir=str(tmp_path / "c-snap"),
+                it=1,
+                out_weights=str(tmp_path / "out" / "weights.json"),
+                log=lambda _m: None,
+            )
         )

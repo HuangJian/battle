@@ -53,6 +53,7 @@ from remote.hub_client import (
     wait_job,
 )
 from remote.hub_http import WaitJobSpec
+from remote.publish_spec import LandSpec
 from worker.config import load_course
 
 #: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。迁移前是手拼
@@ -376,13 +377,15 @@ def main() -> int:
             )
         )
         verify_and_land(
-            result,
-            m,
-            init_weights_path=init_path,
-            traj_dir=str(traj_dir),
-            it=rd,
-            out_weights=str(out_weights),
-            log=log,
+            LandSpec(
+                result=result,
+                manifest=m,
+                init_weights_path=init_path,
+                traj_dir=str(traj_dir),
+                it=rd,
+                out_weights=str(out_weights),
+                log=log,
+            )
         )
         t_total = time.time() - t0
         mark_job_completed(str(work / "training_log.jsonl"), jid)

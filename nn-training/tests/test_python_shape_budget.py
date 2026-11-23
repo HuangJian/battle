@@ -70,7 +70,11 @@ WIDE_FUNCS_BASELINE = {
     # `remote/bundle.py` 已清零（P0-3 批 G2：`BundleSpec` / `ExportStatusSpec`）。
     # `remote/colab_bc.py` 已清零（P0-3 批 C：`run_training` 的 10 个位置参数 → `TrainRun`）。
     # `remote/error_report.py` 已清零（P0-3 批 F3：`report_error` → `ErrorReportSpec`）。
-    "remote/hub_client.py": 2,
+    # 2026-11-23（P0-3 批 K）：`verify_and_land` / `verify_and_land_bc` 的 2 位置 + 7 关键字
+    # 各收成 `LandSpec` / `BcLandSpec`（frozen + kw_only，住 `remote/publish_spec.py`）——
+    # `result` 与 `manifest` 是两份**同型 dict**，位置互换不抛、只让三重校验全部失配
+    # ⇒ 本文件宽签名归零（发布腿已于 §324 搬去 `remote/hub_publish`），条目删除；
+    # 守 `tests/remote/test_land_specs.py`。
     # `remote/hub_http.py` 已清零（P0-3 批 F4：`WaitJobSpec` / `HubFailSpec`）。
     # 2026-11-23（P0-3 批 E）：`_prefetch_fill` 的 4 位置 + 6 关键字收成 `PrefetchFillSpec`
     # ⇒ 本文件宽签名归零（`run_one_round` 早已收 `RoundSpec`），条目删除；守
@@ -169,7 +173,10 @@ WIDE_FUNCS_BASELINE = {
     # 2026-11-22（P0-3 批 D 待办）：`merge_memory_shards`(3 位置 + 6 关键字) 收 `ShardMergeSpec`
     # 的改法已写通，但**卡在调用方的 LOC 墙**：`remote/hub_client.py` 恰好 999/1000，
     # 单对象构造最少 +1 行（§230 同款先例 = 先拆模块，再收签名）。拆完再动，本节不动。
-    "worker/resume.py": 1,
+    # 2026-11-23（P0-3 批 K）：`merge_memory_shards` 的 3 位置 + 6 关键字收成 `ShardMergeSpec`
+    # （frozen + kw_only，同模块）—— `cands`（已收集）与 `mem`（回传账）同型外层字典，
+    # 互换后「同名以盘上为准」反着生效（回传账被当成已收集 ⇒ 一个 shard 都不补）
+    # ⇒ 本文件宽签名归零，条目删除（§307 记的「先拆再收」在这里结账）；守同上。
     # 2026-11-21：`quota_sample_priority` 的 9 个位置参数收成 `QuotaSampleSpec`
     # ⇒ 本文件宽签名归零，条目删除。
     # 2026-11-21：`plan_topup` 的 9 个关键字参数收成 `TopUpSpec`

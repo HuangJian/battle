@@ -134,11 +134,11 @@ def rec(monkeypatch: pytest.MonkeyPatch) -> Recorder:
         (job_root / "code.zip").write_bytes(b"code")
         return manifest
 
-    def verify_and_land_bc(result: dict, manifest: dict, **kw: Any) -> None:
-        it = int(kw["it"])
-        r.landed.append((it, str(manifest["job_id"])))
-        Path(str(kw["out_weights"])).parent.mkdir(parents=True, exist_ok=True)
-        Path(str(kw["out_weights"])).write_text("{}", encoding="utf-8")
+    def verify_and_land_bc(ask: Any) -> None:
+        it = int(ask.it)
+        r.landed.append((it, str(ask.manifest["job_id"])))
+        Path(str(ask.out_weights)).parent.mkdir(parents=True, exist_ok=True)
+        Path(str(ask.out_weights)).write_text("{}", encoding="utf-8")
 
     def archive_round(course: Any, key: str, it: int, out: str, metrics: dict, *, smoke: bool):
         r.archived.append(int(it))

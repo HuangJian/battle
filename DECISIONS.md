@@ -10462,3 +10462,21 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：`bun run pygate` 绿（6991 passed / 3 skipped）；`WIDE_FUNCS_BASELINE` 的
   `worker/iter_rollout.py: 1` 删除（宽签名 4 → 3）。守 `tests/worker/test_iter_run_spec.py`（6 条）。
   全文 → `docs/nn/engineering.md` §326。
+
+## §2026-11-23-land-specs
+
+- **背景**：`python.refactor.md` §P0-3 的最后三条宽签名。§307 曾记过「改法写通但卡在
+  `hub_client` 999/1000 行的 LOC 墙」⇒ 先拆（§324 发布腿搬出，999 → 651），再收。
+- **坏点**：三处都栽在**同型相邻位置参数**上。`verify_and_land(result, manifest)`: 两份 `dict`
+  互换不抛，三重校验全部失配后报「云端跑错了 job」；`merge_memory_shards(it_dir, cands, mem)`:
+  `cands` 与 `mem` 互换后「同名以盘上为准」反着生效，本轮一个 shard 都不补（连一行日志都没有）。
+- **决定**：`LandSpec` / `BcLandSpec` 住 `remote/publish_spec.py`（一轮 job 的两端形状同处），
+  `ShardMergeSpec` 住 `worker/resume.py`（L0，不改 DAG 层号）；三入口都只吃一份对象。
+  **不共用一份 spec**：PPO 与 BC 的落位字段表不同（fencing / `mem` vs `round_name` / `data_root` /
+  `fixed_source`），共用会让两边各长出三个用不着的位。
+- **被否决**：① 让 `BcLandSpec` 继承 `LandSpec` 再把不用的字段设 `None` —— 「用不着」与「没给」
+  在类型上分不开，且 BC 侧的 `result["init_weights_fp"]` 对账会被 fencing 字段的存在误导；
+  ② `merge_memory_shards` 只改签名前半段（保留 `cands` / `mem` 两个位置参数）—— 那正是坏点本身。
+- **验证**：`bun run pygate` 绿（6998 passed / 3 skipped）；`WIDE_FUNCS_BASELINE` 两个条目删除 ⇒
+  **P0-3 剩余宽签名清零**。守 `tests/remote/test_land_specs.py`（7 条）。全文 →
+  `docs/nn/engineering.md` §327。

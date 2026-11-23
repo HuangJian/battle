@@ -32,6 +32,7 @@ from common.log import log
 from common.paths import REPO_ROOT
 from remote.hub_client import verify_and_land_bc
 from remote.hub_http import JOB_CLOSED, JOB_UNKNOWN, JOB_UNREACHABLE, job_reconcile_state
+from remote.publish_spec import BcLandSpec
 from worker.bc_config import BcCourseConfig
 from worker.bc_ledger import ROUND_LAND_REJECTED_EVENT, append_ledger
 
@@ -74,15 +75,17 @@ def land_bc_result(
         data_root = rt.data_root / (round_name or f"it{it}")
     try:
         verify_and_land_bc(
-            result,
-            manifest,
-            traj_dir=str(rt.traj),
-            it=it,
-            out_weights=rt.out_weights,
-            round_name=round_name,
-            data_root=data_root,
-            fixed_source=fixed_source,
-            log=log,
+            BcLandSpec(
+                result=result,
+                manifest=manifest,
+                traj_dir=str(rt.traj),
+                it=it,
+                out_weights=rt.out_weights,
+                round_name=round_name,
+                data_root=data_root,
+                fixed_source=fixed_source,
+                log=log,
+            )
         )
     except Exception as e:
         append_ledger(

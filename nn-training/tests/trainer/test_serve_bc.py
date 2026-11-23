@@ -222,8 +222,8 @@ def world(bc_course: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Si
         (job_root / jid / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         return manifest
 
-    def verify_and_land_bc(result: dict, manifest: dict, **kw: Any) -> None:
-        landed.append((int(kw["it"]), str(manifest["job_id"])))
+    def verify_and_land_bc(ask: Any) -> None:
+        landed.append((int(ask.it), str(ask.manifest["job_id"])))
 
     def archive_round(course: Any, key: str, it: int, out: str, metrics: dict, *, smoke: bool):
         archived.append(int(it))

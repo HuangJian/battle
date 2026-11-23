@@ -209,6 +209,9 @@ DELAYED_IMPORTS: dict[str, frozenset[str]] = {
             # `remote.hub_client` 搬去 `remote.hub_publish`。发布相位方法仍然自带 import，
             # 只是目标换成新模块（hub_client 站在它下面，不充门面）。
             "remote.hub_publish",
+            # 2026-11-23（P0-3 批 K）：落位相位改收 `LandSpec`（`result` 与 `manifest` 两份
+            # 同型 dict 不再靠位置区分）—— spec 住 `remote.publish_spec`，同样是相位方法自带 import。
+            "remote.publish_spec",
             "remote.push_client",
             "trainer.collect_only",
             "worker.config",

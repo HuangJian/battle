@@ -262,18 +262,33 @@ def _scan_shards(
 MEM_SHARD_NODE = "@mem"
 
 
-def merge_memory_shards(
-    it_dir: Path,
-    cands: dict[str, list[Path]],
-    mem: Mapping[str, dict],
-    *,
-    counters: tuple[int, int, int, str, str],
-    mver_bad: dict[int | None, int],
-    course_fp: str = "",
-    corpus_fp: str = "",
-    state_init: bool = False,
-    metrics_version: int | None = None,
-) -> tuple[int, int, int, str, str]:
+@dataclass(frozen=True, kw_only=True)
+class ShardMergeSpec:
+    """`merge_memory_shards` 的唯一入参（2026-11-23，P0-3 批 K）。
+
+    坏点：`cands`（`name → [Path]`，发布端已收集的）与 `mem`（`name → manifest`，回传的
+    内存账）是两个**同型外层**的字典，却排在相邻位置口上 —— 互换不抛（都是 `dict[str, …]`），
+    只会让「同名以盘上为准」反着生效：回传的整份账被当成已收集，于是本轮一个 shard 都不补。
+    `counters` 与 `mver_bad` 则是两个「原地累加的账」，也要按名字写。
+    """
+
+    #: 本轮 job 的 `it{it}` 目录（占位路径的父目录，名称键从这里来）。
+    it_dir: Path
+    #: 发布端已收集的 shard：`name → [path]`（本函数往里面**追加**，同名以盘上为准）。
+    cands: dict[str, list[Path]]
+    #: 回传的内存账：`name → manifest`（零落盘 | 2026-10-28）。
+    mem: Mapping[str, dict]
+    #: 发布端已有的 `(skipped, skipped_init, skipped_mver, first_init, first_mver)`。
+    counters: tuple[int, int, int, str, str]
+    #: 行宽漂移的逐版本计数（**原地**累加）。
+    mver_bad: dict[int | None, int]
+    course_fp: str = ""
+    corpus_fp: str = ""
+    state_init: bool = False
+    metrics_version: int | None = None
+
+
+def merge_memory_shards(ask: ShardMergeSpec) -> tuple[int, int, int, str, str]:
     """把内存账 `mem`（`name → manifest`）并入发布端的 `cands`（`name → [path]`）。
 
     零落盘（2026-10-28）：dispatch 腿回传的 shard **不在盘上** —— 占位路径只提供 `.name`
@@ -288,6 +303,15 @@ def merge_memory_shards(
     `remote.hub_client`(L1) 已经在它上面 ⇒ 不新增边、不改层号；放 `remote/` 会逼 hub_client
     升到 L2 并连坐一串（`tests/test_remote_dag.py` 当场红）。
     """
+    it_dir = ask.it_dir
+    cands = ask.cands
+    mem = ask.mem
+    counters = ask.counters
+    mver_bad = ask.mver_bad
+    course_fp = ask.course_fp
+    corpus_fp = ask.corpus_fp
+    state_init = ask.state_init
+    metrics_version = ask.metrics_version
     skipped, skipped_init, skipped_mver, first_init, first_mver = counters
     for name, mm in sorted(mem.items()):
         if name in cands:

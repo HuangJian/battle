@@ -57,6 +57,7 @@ from common.protocol import (
     validate_result,
     validate_rollout_spec,
 )
+from remote.publish_spec import LandSpec
 from tests.helpers.iter_exec import stub_exec
 from trainer.loop_steps import TrainingSteps
 from worker.iter_job import build_iter_spec
@@ -762,13 +763,15 @@ def test_verify_and_land_extracts_opt_only_tar(tmp_path: Path) -> None:
     }
     out_w = tmp_path / "out" / "weights.json"
     verify_and_land(
-        good,
-        m,
-        init_weights_path=str(w),
-        traj_dir=str(tmp_path / "traj2"),
-        it=1,
-        out_weights=str(out_w),
-        log=lambda _m: None,
+        LandSpec(
+            result=good,
+            manifest=m,
+            init_weights_path=str(w),
+            traj_dir=str(tmp_path / "traj2"),
+            it=1,
+            out_weights=str(out_w),
+            log=lambda _m: None,
+        )
     )
     ckpt = tmp_path / "traj2" / "it1" / "ppo_ckpt_remote"
     assert (ckpt / "opt.pt").read_bytes() == b"\x00" * 32
@@ -916,13 +919,15 @@ def test_verify_and_land_iter_uses_declared_data_fp(tmp_path: Path) -> None:
     }
     out_w = tmp_path / "out" / "weights.json"
     verify_and_land(
-        good,
-        m,
-        init_weights_path=str(w),
-        traj_dir=str(tmp_path / "traj"),
-        it=1,
-        out_weights=str(out_w),
-        log=lambda _m: None,
+        LandSpec(
+            result=good,
+            manifest=m,
+            init_weights_path=str(w),
+            traj_dir=str(tmp_path / "traj"),
+            it=1,
+            out_weights=str(out_w),
+            log=lambda _m: None,
+        )
     )
     assert out_w.read_bytes() == new_weights
     assert (tmp_path / "traj" / "it1" / "ppo_ckpt_remote" / "model.pt").exists()
@@ -930,13 +935,15 @@ def test_verify_and_land_iter_uses_declared_data_fp(tmp_path: Path) -> None:
     bad = dict(good, data_fp="0" * 64)
     with pytest.raises(HubClientError) as e:
         verify_and_land(
-            bad,
-            m,
-            init_weights_path=str(w),
-            traj_dir=str(tmp_path / "traj"),
-            it=1,
-            out_weights=str(out_w),
-            log=lambda _m: None,
+            LandSpec(
+                result=bad,
+                manifest=m,
+                init_weights_path=str(w),
+                traj_dir=str(tmp_path / "traj"),
+                it=1,
+                out_weights=str(out_w),
+                log=lambda _m: None,
+            )
         )
     assert "data_fp" in str(e.value)
     # 声明集对应的 result.report 校验（协议层已经比过），这里补一条编码往返

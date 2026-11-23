@@ -14,6 +14,7 @@ import pytest
 from common.protocol import PROTO, data_fp, encode_weights_json
 from remote.hub_client import verify_and_land_bc
 from remote.hub_http import HubClientError
+from remote.publish_spec import BcLandSpec
 
 
 def _write_shard(root: Path, name: str, *, stage: int, seed: int) -> Path:
@@ -76,14 +77,16 @@ def test_fixed_source_lands_against_its_own_root(tmp_path: Path) -> None:
     out = tmp_path / "weights.json"
 
     wver = verify_and_land_bc(
-        _result(fp),
-        _manifest(fp),
-        traj_dir=tmp_path / "traj",
-        it=1,
-        out_weights=str(out),
-        data_root=fixed,
-        fixed_source=True,
-        log=lambda _m: None,
+        BcLandSpec(
+            result=_result(fp),
+            manifest=_manifest(fp),
+            traj_dir=tmp_path / "traj",
+            it=1,
+            out_weights=str(out),
+            data_root=fixed,
+            fixed_source=True,
+            log=lambda _m: None,
+        )
     )
 
     assert out.read_bytes() == b'{"ok":true}'
@@ -101,12 +104,14 @@ def test_collect_source_still_lands_from_default_round_dir(tmp_path: Path) -> No
     out = tmp_path / "weights.json"
 
     verify_and_land_bc(
-        _result(fp),
-        _manifest(fp),
-        traj_dir=traj,
-        it=1,
-        out_weights=str(out),
-        log=lambda _m: None,
+        BcLandSpec(
+            result=_result(fp),
+            manifest=_manifest(fp),
+            traj_dir=traj,
+            it=1,
+            out_weights=str(out),
+            log=lambda _m: None,
+        )
     )
 
     assert out.read_bytes() == b'{"ok":true}'
@@ -120,10 +125,12 @@ def test_fixed_source_without_root_hint_is_rejected_loudly(tmp_path: Path) -> No
 
     with pytest.raises(HubClientError):
         verify_and_land_bc(
-            _result(fp),
-            _manifest(fp),
-            traj_dir=tmp_path / "traj",
-            it=1,
-            out_weights=str(tmp_path / "weights.json"),
-            log=lambda _m: None,
+            BcLandSpec(
+                result=_result(fp),
+                manifest=_manifest(fp),
+                traj_dir=tmp_path / "traj",
+                it=1,
+                out_weights=str(tmp_path / "weights.json"),
+                log=lambda _m: None,
+            )
         )

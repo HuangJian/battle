@@ -59,7 +59,13 @@ from common.protocol import (
 # `PublishSpec` 族 / `pack_payload_zip` 的 `X as X` 门面）整块搬去 `remote/hub_publish.py`。
 # 本模块站在它**下面**（L1 vs L2）⇒ **不留转发名**（留了就是环），调用点改成从
 # `remote.hub_publish` import。上面那些 blob/角色/指纹协议常量也随之只在那边用得上。
-from worker.resume import merge_memory_shards, shard_state_init_ok, walk_shard_dirs
+from remote.publish_spec import BcLandSpec, LandSpec
+from worker.resume import (
+    ShardMergeSpec,
+    merge_memory_shards,
+    shard_state_init_ok,
+    walk_shard_dirs,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -241,10 +247,17 @@ def iter_shard_dirs(
         cands.setdefault(d.name, []).append(d)
     if mem:
         skipped, skipped_init, skipped_mver, first_init_miss, first_mver_miss = merge_memory_shards(
-            it_dir, cands, mem,
-            counters=(skipped, skipped_init, skipped_mver, first_init_miss, first_mver_miss),
-            mver_bad=mver_bad, course_fp=course_fp, corpus_fp=corpus_fp,
-            state_init=state_init, metrics_version=expected_mver,
+            ShardMergeSpec(
+                it_dir=it_dir,
+                cands=cands,
+                mem=mem,
+                counters=(skipped, skipped_init, skipped_mver, first_init_miss, first_mver_miss),
+                mver_bad=mver_bad,
+                course_fp=course_fp,
+                corpus_fp=corpus_fp,
+                state_init=state_init,
+                metrics_version=expected_mver,
+            )
         )
     if skipped:
         log(
@@ -879,19 +892,11 @@ def cancel_job(
 # ------------------------------------------------------------------ 校验落位
 
 
-def verify_and_land(
-    result: dict,
-    manifest: dict,
-    *,
-    init_weights_path: str,
-    traj_dir: str | Path,
-    it: int,
-    out_weights: str,
-    state_init: bool = False,
-    mem: Mapping[str, dict] | None = None,
-    log=_log,
-) -> str:
+def verify_and_land(ask: LandSpec) -> str:
     """三重校验（D12）+ 落盘（weights_json → args.out；opt tar → ppo_ckpt_remote）。
+
+    入参就是 `LandSpec`（2026-11-23，P0-3 批 K）—— `result` 与 `manifest` 这两份同型 dict
+    原先排在位置口上，互换不抛、只会让三重校验全部失配。
 
     校验：
       1. init_weights_fp == 当前 args.out 指纹（fencing：云从 hub 打包的 init 起步）；
@@ -917,6 +922,15 @@ def verify_and_land(
     import remote.opt_delta as opt_delta
     import remote.weights_delta as weights_delta
 
+    result = ask.result
+    manifest = ask.manifest
+    init_weights_path = ask.init_weights_path
+    traj_dir = ask.traj_dir
+    it = ask.it
+    out_weights = ask.out_weights
+    state_init = ask.state_init
+    mem = ask.mem
+    log = ask.log or _log
     m = normalize_manifest(manifest)
     if result["init_weights_fp"] != _sha256_file(init_weights_path):
         raise TripleCheckError("三重校验失败: init_weights_fp 不匹配（云起点 ≠ 当前 args.out）——拒收")
@@ -1008,19 +1022,11 @@ def verify_and_land(
     return wver
 
 
-def verify_and_land_bc(
-    result: dict,
-    manifest: dict,
-    *,
-    traj_dir: str | Path,
-    it: int,
-    out_weights: str,
-    round_name: str = "",
-    data_root: str | Path | None = None,
-    fixed_source: bool = False,
-    log=_log,
-) -> str:
+def verify_and_land_bc(ask: BcLandSpec) -> str:
     """BC 结果校验 + 落盘（plan/bc-cloud-integration.plan.md §4；verify_and_land 的 BC 版）。
+
+    入参就是 `BcLandSpec`（2026-11-23，P0-3 批 K）：与 `LandSpec` 同名不同形（无 fencing、
+    有 `round_name` / `data_root` / `fixed_source`），所以两份 spec 各住一处。
 
     校验（无 init-weights fencing——BC 无 warm-start，改对账 manifest 自带指纹）：
       1. init_weights_fp == manifest 值（防 result 错配 job）；
@@ -1031,6 +1037,15 @@ def verify_and_land_bc(
     落盘：weights_json 原子写 out_weights（无 opt tar——BC v1 不跨轮续训）。
     返回落盘 weights 的指纹（wver）。
     """
+    result = ask.result
+    manifest = ask.manifest
+    traj_dir = ask.traj_dir
+    it = ask.it
+    out_weights = ask.out_weights
+    round_name = ask.round_name
+    data_root = ask.data_root
+    fixed_source = ask.fixed_source
+    log = ask.log or _log
     m = normalize_manifest(manifest)
     if result["init_weights_fp"] != m["init_weights_fp"]:
         raise HubClientError(
