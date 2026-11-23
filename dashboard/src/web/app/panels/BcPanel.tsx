@@ -13,7 +13,7 @@
  * BC 课程未启用 eval 或无 epoch 数据 → 空态说明，不渲染误导空行。
  */
 
-import { useCallback, useEffect, useState } from 'preact/hooks'
+import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
 import {
   bcProgressWord,
   buildBcTrend,
@@ -275,8 +275,15 @@ export function BcPanel({ course, enabled = true }: BcPanelProps) {
 
   // 切课程**立即**重拉：`usePolling` 的链只按 `enabled` 重开（课程不是它的判据），
   // 否则两门 BC 课之间切换会顶旧课数据最长 10s（与 App 的 stateView 同一条竞态纪律）。
+  // 挂载 / enabled 翻 true 不在这里拉：usePolling 已经首拉，重复拉就是双发。
+  const lastCourseRef = useRef(course)
   useEffect(() => {
-    if (enabled && course) void refresh().catch(() => undefined)
+    if (!enabled || !course || lastCourseRef.current === course) {
+      lastCourseRef.current = course
+      return
+    }
+    lastCourseRef.current = course
+    void refresh().catch(() => undefined)
   }, [enabled, course, refresh])
 
   // 完整指标表 modal 的 Esc 关闭（自持，不依赖 App 全局键处理）。

@@ -6,7 +6,7 @@
  * 禁止相减（§3.5）。非阶梯课程（落 stage-<id>）给显式提示而非空白。
  */
 
-import { useCallback, useEffect, useState } from 'preact/hooks'
+import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
 import type {
   EvalAlert,
   EvalBatchRow,
@@ -222,8 +222,16 @@ export function EvalApp({
     }
   }, [courses])
 
+  // 课程集合变了才立即拉：挂载时 usePolling 已经首拉，旧实现同帧 N×/api/evalboard 双发。
+  const lastCoursesRef = useRef(courses.join(','))
   useEffect(() => {
+    const key = courses.join(',')
+    if (lastCoursesRef.current === key) return
+    lastCoursesRef.current = key
     void refresh()
+  }, [refresh, courses])
+
+  useEffect(() => {
     // URL 可分享（A8/R8）：?courses=a,b。
     try {
       const q = courses.length > 0 ? `?courses=${encodeURIComponent(courses.join(','))}` : ''
@@ -231,7 +239,7 @@ export function EvalApp({
     } catch {
       /* SSR/无 history 环境 */
     }
-  }, [refresh, courses])
+  }, [courses])
   usePolling({ enabled: true, intervalSec: 300, fetch: refresh })
 
   const toggleCourse = (c: string): void => {

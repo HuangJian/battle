@@ -823,276 +823,371 @@ function evalMetricValue(r: Record<string, unknown>, key: string): number | null
   return typeof v === 'number' && Number.isFinite(v) ? v : null
 }
 
-/** eval 汇总的解析内核（
- *  · 路径版：`readChunkLines` 分块喂（增量、内存恒定）；
- *  · 冷存/内容版：`parseEvalSummariesText` 直接喂字符串。两路同一份语义。 */
+/** eval 汇总的解析内核：路径版（增量读）与冷存内容版共用同一份逐行摄入 + 归并语义。
+ *  ★ 2026-11-23：聚合状态外置，`readEvalSummaries` 才能在同一份状态上续读新字节。 */
+interface GameAgg {
+  n: number
+  ticks: number
+  kills: number
+  pu: number
+  /** 掉落累计（可推导的局）与局数：`totalPUSpawn = ΣpuSpawn / puSpawnN>0`。 */
+  puSpawn: number
+  puSpawnN: number
+  scoreSum: number
+  scoreSqSum: number
+  residualSum: number
+  residualN: number
+  /** 胜局累计耗时（ticks）与胜局数：「胜局耗时」口径（avgWinTicks）。 */
+  winTicks: number
+  winN: number
+  /** 败局累计耗时（ticks）与败局数：「败局耗时」口径（avgLossTicks）。
+   *  ⚠️ 该值高 = 清场停滞，不是"更会活"（见 EvalSummary.avgLossTicks 方向警告）。 */
+  lossTicks: number
+  lossN: number
+  /** 全样本累计承伤（dmgPerKill 的分子）。 */
+  dmg: number
+  /** dmgPerKill 的**配套分母**（仅累计"行内有 playerDamageTaken"的那些局的 kills）与
+   *  有效局数。分子分母必须同口径——否则老课程（eval_log 无该字段）会退化成假 0，
+   *  或"分子只覆盖部分局、分母覆盖全部局"造成系统性低估。 */
+  dmgKills: number
+  dmgN: number
+  /** 歼灭率分子分母（仅累计有 enemyTotal 的局）。 */
+  killRateKills: number
+  killRateEnemies: number
+  killRateN: number
+  /** 胜局残血占比累计（0–1）。 */
+  residualPctSum: number
+  residualPctN: number
+  startLivesSum: number
+  startLivesN: number
+  /** 完整逐局指标的原始值（按 key 分组；统计量在 summary 合并时算）。 */
+  metricValues: Map<string, number[]>
+}
+
+/** 解析状态：`out` = summary 行归并结果，`games` = 逐局聚合桶（同一 logPath 可跨调用续用）。 */
+interface EvalSummaryState {
+  course: string
+  out: Map<number, EvalSummary>
+  games: Map<number, Map<string, GameAgg>>
+}
+
+function createEvalSummaryState(course: string): EvalSummaryState {
+  return { course, out: new Map(), games: new Map() }
+}
+
+/** 一行账本 → 聚合状态（全量 / 增量共用同一条路径，语义不会两边漂）。 */
+function ingestEvalSummaryLine(state: EvalSummaryState, line: string): void {
+  const { out, games, course } = state
+  if (!line.trim()) return
+  try {
+    const r = JSON.parse(line) as Record<string, unknown>
+    const iter = Number(r.iter ?? -1)
+    if (!Number.isInteger(iter) || iter < 0) return
+    if (r.event === 'eval') {
+      const wver = String(r.wver ?? '')
+      if (!wver) return
+      let byWver = games.get(iter)
+      if (!byWver) {
+        byWver = new Map()
+        games.set(iter, byWver)
+      }
+      let agg = byWver.get(wver)
+      if (!agg) {
+        agg = {
+          n: 0,
+          ticks: 0,
+          kills: 0,
+          pu: 0,
+          puSpawn: 0,
+          puSpawnN: 0,
+          scoreSum: 0,
+          scoreSqSum: 0,
+          residualSum: 0,
+          residualN: 0,
+          winTicks: 0,
+          winN: 0,
+          lossTicks: 0,
+          lossN: 0,
+          dmg: 0,
+          dmgKills: 0,
+          dmgN: 0,
+          killRateKills: 0,
+          killRateEnemies: 0,
+          killRateN: 0,
+          residualPctSum: 0,
+          residualPctN: 0,
+          startLivesSum: 0,
+          startLivesN: 0,
+          metricValues: new Map(),
+        }
+        byWver.set(wver, agg)
+      }
+      // 逐局指标：只收有限数值（缺键/None/字符串 = 无读数，不补 0）。
+      for (const def of BEHAVIOR_METRICS) {
+        const v = evalMetricValue(r, def.key)
+        if (v != null) {
+          let xs = agg.metricValues.get(def.key)
+          if (!xs) {
+            xs = []
+            agg.metricValues.set(def.key, xs)
+          }
+          xs.push(v)
+        }
+      }
+      const score = Number(r.score ?? 0)
+      agg.n++
+      agg.ticks += Number(r.ticks ?? 0) || 0
+      agg.kills += Number(r.kills ?? 0) || 0
+      agg.pu += Number(r.powerUpsCollected ?? 0) || 0
+      const rowSpawn = puSpawnFromRow(r)
+      if (rowSpawn != null) {
+        agg.puSpawn += rowSpawn
+        agg.puSpawnN++
+      }
+      agg.scoreSum += score
+      agg.scoreSqSum += score * score
+      // 承伤（dmgPerKill 分子）：全样本累计，不区分胜负；**分子分母同口径**——
+      // 只有行内真有 playerDamageTaken 时才把该局计入（同时累计该局 kills），
+      // 否则老课程 eval_log 缺字段会退化成假 0、或分子分母覆盖范围不一致而低估。
+      const pd = Number(r.playerDamageTaken)
+      if (Number.isFinite(pd)) {
+        agg.dmg += pd
+        agg.dmgKills += Number(r.kills ?? 0) || 0
+        agg.dmgN++
+      }
+      // 歼灭率：manifest/eval 行的 enemyTotal，缺则 stage 反查。
+      // ⚠ 云机实时体的 enemyTotal 只在 `metricValues` 里（白名单外）——顶层缺席时
+      //   反查会拿关卡几何（classic 20 敌）冒充课程实跑敌数（o2 系列 2 敌）⇒ 歼灭率 ÷10。
+      const stageId = Number(r.stage)
+      const enemyTotal = resolveEnemyTotal(
+        Number.isFinite(stageId) ? stageId : NaN,
+        evalMetricValue(r, 'enemyTotal'),
+        course,
+      )
+      if (enemyTotal != null && enemyTotal > 0) {
+        agg.killRateKills += Number(r.kills ?? 0) || 0
+        agg.killRateEnemies += enemyTotal
+        agg.killRateN++
+      }
+      const sl = evalMetricValue(r, 'startLives')
+      if (sl != null && sl > 0) {
+        agg.startLivesSum += sl
+        agg.startLivesN++
+      }
+      // 残血：仅胜局；(剩余命数 − 1) × 满血 + 当前命 hp（口径见 residualHpFromFields）
+      const won = r.win === true || r.win === 1
+      if (won) {
+        // 胜局耗时：仅胜局累计 ticks（胜局缺 ticks/0 = 数据缺口，不计入分母）。
+        const wt = Number(r.ticks ?? 0) || 0
+        if (wt > 0) {
+          agg.winTicks += wt
+          agg.winN++
+        }
+        const fields = {
+          outcome: 'stage_clear',
+          playerDamageTaken:
+            typeof r.playerDamageTaken === 'number' ? r.playerDamageTaken : undefined,
+          playerDeaths: typeof r.playerDeaths === 'number' ? r.playerDeaths : undefined,
+          puGotTank: typeof r.puGotTank === 'number' ? r.puGotTank : undefined,
+          startLives: sl != null && sl > 0 ? sl : undefined,
+          // 云机行同样只在快照里；缺它残血会退成「满血 − 整局承伤」的下限值。
+          playerHpRatio: evalMetricValue(r, 'playerHpRatio') ?? undefined,
+        }
+        const rh = residualHpFromFields(fields, loadCourseStartLives(course))
+        if (rh !== null) {
+          agg.residualSum += rh
+          agg.residualN++
+        }
+        const rp = residualHpPctFromFields(fields, loadCourseStartLives(course))
+        if (rp !== null) {
+          agg.residualPctSum += rp
+          agg.residualPctN++
+        }
+      } else {
+        // 败局耗时：仅败局累计 ticks（败局缺 ticks/0 = 数据缺口，不计入分母）。
+        const lt = Number(r.ticks ?? 0) || 0
+        if (lt > 0) {
+          agg.lossTicks += lt
+          agg.lossN++
+        }
+      }
+      return
+    }
+    if (r.event !== 'eval_summary') return
+    out.set(iter, {
+      time: evalStampLocal(String(r.time ?? ''), r.nodes),
+      games: Number(r.games ?? 0),
+      wins: Number(r.wins ?? 0),
+      winRate: typeof r.winRate === 'number' ? r.winRate : null,
+      clears: Number(r.clears ?? 0),
+      clearRate: typeof r.clearRate === 'number' ? r.clearRate : null,
+      dropped: Number(r.dropped ?? 0),
+      closeReason: typeof r.close_reason === 'string' ? r.close_reason : null,
+      sec: Number(r.sec ?? 0),
+      wver: String(r.wver ?? ''),
+      outcomes: (r.outcomes ?? {}) as Record<string, number>,
+      avgTicks: null,
+      avgWinTicks: null,
+      totalKills: null,
+      totalPU: null,
+      totalPUSpawn: null,
+      avgResidualHp: null,
+      avgLossTicks: null,
+      dmgPerKill: null,
+      scoreMean: null,
+      scoreStd: null,
+      // 环内拦截（2026-11-22，experiments §161）：summary 行直读，旧行 = null。
+      ringIntrMean: typeof r.ring_intr_mean === 'number' ? r.ring_intr_mean : null,
+      ringKillRate: typeof r.ring_kill_rate === 'number' ? r.ring_kill_rate : null,
+      ringTtkMean: typeof r.ring_ttk_mean === 'number' ? r.ring_ttk_mean : null,
+      innerPressFrac: typeof r.inner_press_frac === 'number' ? r.inner_press_frac : null,
+      behaviorMetrics: null,
+    })
+  } catch {
+    /* skip bad line */
+  }
+}
+
+/** 逐局桶 → summary 派生字段。增量追加后重跑一遍：O(轮数 × 指标数)，远小于重扫账本。 */
+function finalizeEvalSummaries(state: EvalSummaryState): Map<number, EvalSummary> {
+  const { out, games, course } = state
+  // 合并：每个 summary 只配它自己 wver 的逐局桶。总体 std（÷n）。
+  for (const [iter, s] of out) {
+    const agg = games.get(iter)?.get(s.wver)
+    if (!agg || agg.n === 0) continue
+    const mean = agg.scoreSum / agg.n
+    s.avgTicks = Math.round(agg.ticks / agg.n)
+    s.avgWinTicks = agg.winN > 0 ? Math.round(agg.winTicks / agg.winN) : null
+    s.totalKills = agg.kills
+    s.totalPU = agg.pu
+    s.totalPUSpawn = agg.puSpawnN > 0 ? agg.puSpawn : null
+    s.avgResidualHp = agg.residualN > 0 ? Math.round(agg.residualSum / agg.residualN) : null
+    s.avgLossTicks = agg.lossN > 0 ? Math.round(agg.lossTicks / agg.lossN) : null
+    // 承伤/杀：全样本口径（Σdmg / Σ同批 kills），保留 1 位小数（够看趋势）。
+    // 无任何带 playerDamageTaken 的局（老课程）→ null（显示 -），不是 0。
+    s.dmgPerKill = agg.dmgN > 0 && agg.dmgKills > 0 ? +(agg.dmg / agg.dmgKills).toFixed(1) : null
+    s.killRate =
+      agg.killRateN > 0 && agg.killRateEnemies > 0 ? agg.killRateKills / agg.killRateEnemies : null
+    const evalStartLives =
+      agg.startLivesN > 0 ? agg.startLivesSum / agg.startLivesN : loadCourseStartLives(course)
+    s.dmgPerKillPct =
+      s.dmgPerKill != null ? s.dmgPerKill / dmgPerKillCapacity(evalStartLives) : null
+    s.avgResidualHpPct = agg.residualPctN > 0 ? agg.residualPctSum / agg.residualPctN : null
+    s.scoreMean = +mean.toFixed(4)
+    s.scoreStd = +Math.sqrt(Math.max(0, agg.scoreSqSum / agg.n - mean * mean)).toFixed(4)
+    const behavior: Record<string, MetricStats> = {}
+    for (const def of BEHAVIOR_METRICS) {
+      const st = computeMetricStats(agg.metricValues.get(def.key) ?? [])
+      if (st) behavior[def.key] = st
+    }
+    s.behaviorMetrics = Object.keys(behavior).length > 0 ? behavior : null
+  }
+  return out
+}
+
+/** 内容版 / 路径版共用的「一次性喂完」入口（冷存走这里；每次调用都是新状态）。 */
 function collectEvalSummaries(
   course: string,
   feed: (onLine: (line: string) => void) => void,
 ): Map<number, EvalSummary> {
-  const out = new Map<number, EvalSummary>()
-  interface GameAgg {
-    n: number
-    ticks: number
-    kills: number
-    pu: number
-    /** 掉落累计（可推导的局）与局数：`totalPUSpawn = ΣpuSpawn / puSpawnN>0`。 */
-    puSpawn: number
-    puSpawnN: number
-    scoreSum: number
-    scoreSqSum: number
-    residualSum: number
-    residualN: number
-    /** 胜局累计耗时（ticks）与胜局数：「胜局耗时」口径（avgWinTicks）。 */
-    winTicks: number
-    winN: number
-    /** 败局累计耗时（ticks）与败局数：「败局耗时」口径（avgLossTicks）。
-     *  ⚠️ 该值高 = 清场停滞，不是"更会活"（见 EvalSummary.avgLossTicks 方向警告）。 */
-    lossTicks: number
-    lossN: number
-    /** 全样本累计承伤（dmgPerKill 的分子）。 */
-    dmg: number
-    /** dmgPerKill 的**配套分母**（仅累计"行内有 playerDamageTaken"的那些局的 kills）与
-     *  有效局数。分子分母必须同口径——否则老课程（eval_log 无该字段）会退化成假 0，
-     *  或"分子只覆盖部分局、分母覆盖全部局"造成系统性低估。 */
-    dmgKills: number
-    dmgN: number
-    /** 歼灭率分子分母（仅累计有 enemyTotal 的局）。 */
-    killRateKills: number
-    killRateEnemies: number
-    killRateN: number
-    /** 胜局残血占比累计（0–1）。 */
-    residualPctSum: number
-    residualPctN: number
-    startLivesSum: number
-    startLivesN: number
-    /** 完整逐局指标的原始值（按 key 分组；统计量在 summary 合并时算）。 */
-    metricValues: Map<string, number[]>
-  }
-  const games = new Map<number, Map<string, GameAgg>>()
-  try {
-    feed((line) => {
-      if (!line.trim()) return
-      try {
-        const r = JSON.parse(line) as Record<string, unknown>
-        const iter = Number(r.iter ?? -1)
-        if (!Number.isInteger(iter) || iter < 0) return
-        if (r.event === 'eval') {
-          const wver = String(r.wver ?? '')
-          if (!wver) return
-          let byWver = games.get(iter)
-          if (!byWver) {
-            byWver = new Map()
-            games.set(iter, byWver)
-          }
-          let agg = byWver.get(wver)
-          if (!agg) {
-            agg = {
-              n: 0,
-              ticks: 0,
-              kills: 0,
-              pu: 0,
-              puSpawn: 0,
-              puSpawnN: 0,
-              scoreSum: 0,
-              scoreSqSum: 0,
-              residualSum: 0,
-              residualN: 0,
-              winTicks: 0,
-              winN: 0,
-              lossTicks: 0,
-              lossN: 0,
-              dmg: 0,
-              dmgKills: 0,
-              dmgN: 0,
-              killRateKills: 0,
-              killRateEnemies: 0,
-              killRateN: 0,
-              residualPctSum: 0,
-              residualPctN: 0,
-              startLivesSum: 0,
-              startLivesN: 0,
-              metricValues: new Map(),
-            }
-            byWver.set(wver, agg)
-          }
-          // 逐局指标：只收有限数值（缺键/None/字符串 = 无读数，不补 0）。
-          for (const def of BEHAVIOR_METRICS) {
-            const v = evalMetricValue(r, def.key)
-            if (v != null) {
-              let xs = agg.metricValues.get(def.key)
-              if (!xs) {
-                xs = []
-                agg.metricValues.set(def.key, xs)
-              }
-              xs.push(v)
-            }
-          }
-          const score = Number(r.score ?? 0)
-          agg.n++
-          agg.ticks += Number(r.ticks ?? 0) || 0
-          agg.kills += Number(r.kills ?? 0) || 0
-          agg.pu += Number(r.powerUpsCollected ?? 0) || 0
-          const rowSpawn = puSpawnFromRow(r)
-          if (rowSpawn != null) {
-            agg.puSpawn += rowSpawn
-            agg.puSpawnN++
-          }
-          agg.scoreSum += score
-          agg.scoreSqSum += score * score
-          // 承伤（dmgPerKill 分子）：全样本累计，不区分胜负；**分子分母同口径**——
-          // 只有行内真有 playerDamageTaken 时才把该局计入（同时累计该局 kills），
-          // 否则老课程 eval_log 缺字段会退化成假 0、或分子分母覆盖范围不一致而低估。
-          const pd = Number(r.playerDamageTaken)
-          if (Number.isFinite(pd)) {
-            agg.dmg += pd
-            agg.dmgKills += Number(r.kills ?? 0) || 0
-            agg.dmgN++
-          }
-          // 歼灭率：manifest/eval 行的 enemyTotal，缺则 stage 反查。
-          // ⚠ 云机实时体的 enemyTotal 只在 `metricValues` 里（白名单外）——顶层缺席时
-          //   反查会拿关卡几何（classic 20 敌）冒充课程实跑敌数（o2 系列 2 敌）⇒ 歼灭率 ÷10。
-          const stageId = Number(r.stage)
-          const enemyTotal = resolveEnemyTotal(
-            Number.isFinite(stageId) ? stageId : NaN,
-            evalMetricValue(r, 'enemyTotal'),
-            course,
-          )
-          if (enemyTotal != null && enemyTotal > 0) {
-            agg.killRateKills += Number(r.kills ?? 0) || 0
-            agg.killRateEnemies += enemyTotal
-            agg.killRateN++
-          }
-          const sl = evalMetricValue(r, 'startLives')
-          if (sl != null && sl > 0) {
-            agg.startLivesSum += sl
-            agg.startLivesN++
-          }
-          // 残血：仅胜局；(剩余命数 − 1) × 满血 + 当前命 hp（口径见 residualHpFromFields）
-          const won = r.win === true || r.win === 1
-          if (won) {
-            // 胜局耗时：仅胜局累计 ticks（胜局缺 ticks/0 = 数据缺口，不计入分母）。
-            const wt = Number(r.ticks ?? 0) || 0
-            if (wt > 0) {
-              agg.winTicks += wt
-              agg.winN++
-            }
-            const fields = {
-              outcome: 'stage_clear',
-              playerDamageTaken:
-                typeof r.playerDamageTaken === 'number' ? r.playerDamageTaken : undefined,
-              playerDeaths: typeof r.playerDeaths === 'number' ? r.playerDeaths : undefined,
-              puGotTank: typeof r.puGotTank === 'number' ? r.puGotTank : undefined,
-              startLives: sl != null && sl > 0 ? sl : undefined,
-              // 云机行同样只在快照里；缺它残血会退成「满血 − 整局承伤」的下限值。
-              playerHpRatio: evalMetricValue(r, 'playerHpRatio') ?? undefined,
-            }
-            const rh = residualHpFromFields(fields, loadCourseStartLives(course))
-            if (rh !== null) {
-              agg.residualSum += rh
-              agg.residualN++
-            }
-            const rp = residualHpPctFromFields(fields, loadCourseStartLives(course))
-            if (rp !== null) {
-              agg.residualPctSum += rp
-              agg.residualPctN++
-            }
-          } else {
-            // 败局耗时：仅败局累计 ticks（败局缺 ticks/0 = 数据缺口，不计入分母）。
-            const lt = Number(r.ticks ?? 0) || 0
-            if (lt > 0) {
-              agg.lossTicks += lt
-              agg.lossN++
-            }
-          }
-          return
-        }
-        if (r.event !== 'eval_summary') return
-        out.set(iter, {
-          time: evalStampLocal(String(r.time ?? ''), r.nodes),
-          games: Number(r.games ?? 0),
-          wins: Number(r.wins ?? 0),
-          winRate: typeof r.winRate === 'number' ? r.winRate : null,
-          clears: Number(r.clears ?? 0),
-          clearRate: typeof r.clearRate === 'number' ? r.clearRate : null,
-          dropped: Number(r.dropped ?? 0),
-          closeReason: typeof r.close_reason === 'string' ? r.close_reason : null,
-          sec: Number(r.sec ?? 0),
-          wver: String(r.wver ?? ''),
-          outcomes: (r.outcomes ?? {}) as Record<string, number>,
-          avgTicks: null,
-          avgWinTicks: null,
-          totalKills: null,
-          totalPU: null,
-          totalPUSpawn: null,
-          avgResidualHp: null,
-          avgLossTicks: null,
-          dmgPerKill: null,
-          scoreMean: null,
-          scoreStd: null,
-          // 环内拦截（2026-11-22，experiments §161）：summary 行直读，旧行 = null。
-          ringIntrMean: typeof r.ring_intr_mean === 'number' ? r.ring_intr_mean : null,
-          ringKillRate: typeof r.ring_kill_rate === 'number' ? r.ring_kill_rate : null,
-          ringTtkMean: typeof r.ring_ttk_mean === 'number' ? r.ring_ttk_mean : null,
-          innerPressFrac: typeof r.inner_press_frac === 'number' ? r.inner_press_frac : null,
-          behaviorMetrics: null,
-        })
-      } catch {
-        /* skip bad line */
-      }
-    })
-    // 合并：每个 summary 只配它自己 wver 的逐局桶。总体 std（÷n）。
-    for (const [iter, s] of out) {
-      const agg = games.get(iter)?.get(s.wver)
-      if (!agg || agg.n === 0) continue
-      const mean = agg.scoreSum / agg.n
-      s.avgTicks = Math.round(agg.ticks / agg.n)
-      s.avgWinTicks = agg.winN > 0 ? Math.round(agg.winTicks / agg.winN) : null
-      s.totalKills = agg.kills
-      s.totalPU = agg.pu
-      s.totalPUSpawn = agg.puSpawnN > 0 ? agg.puSpawn : null
-      s.avgResidualHp = agg.residualN > 0 ? Math.round(agg.residualSum / agg.residualN) : null
-      s.avgLossTicks = agg.lossN > 0 ? Math.round(agg.lossTicks / agg.lossN) : null
-      // 承伤/杀：全样本口径（Σdmg / Σ同批 kills），保留 1 位小数（够看趋势）。
-      // 无任何带 playerDamageTaken 的局（老课程）→ null（显示 -），不是 0。
-      s.dmgPerKill = agg.dmgN > 0 && agg.dmgKills > 0 ? +(agg.dmg / agg.dmgKills).toFixed(1) : null
-      s.killRate =
-        agg.killRateN > 0 && agg.killRateEnemies > 0
-          ? agg.killRateKills / agg.killRateEnemies
-          : null
-      const evalStartLives =
-        agg.startLivesN > 0 ? agg.startLivesSum / agg.startLivesN : loadCourseStartLives(course)
-      s.dmgPerKillPct =
-        s.dmgPerKill != null ? s.dmgPerKill / dmgPerKillCapacity(evalStartLives) : null
-      s.avgResidualHpPct = agg.residualPctN > 0 ? agg.residualPctSum / agg.residualPctN : null
-      s.scoreMean = +mean.toFixed(4)
-      s.scoreStd = +Math.sqrt(Math.max(0, agg.scoreSqSum / agg.n - mean * mean)).toFixed(4)
-      const behavior: Record<string, MetricStats> = {}
-      for (const def of BEHAVIOR_METRICS) {
-        const st = computeMetricStats(agg.metricValues.get(def.key) ?? [])
-        if (st) behavior[def.key] = st
-      }
-      s.behaviorMetrics = Object.keys(behavior).length > 0 ? behavior : null
-    }
-  } catch {
-    /* unreadable */
-  }
-  return out
+  const state = createEvalSummaryState(course)
+  feed((line) => ingestEvalSummaryLine(state, line))
+  return finalizeEvalSummaries(state)
 }
+
+/** 路径版 eval 汇总的**指纹 + 锚点 memo**（2026-11-23）。
+ *
+ *  为什么必须有：`/api/state` 每 3s 一拍、切课一次发两拍，而 `readIterMetrics` 每拍都调
+ *  `readEvalSummaries`。实测 g9-def 的 `eval_log.jsonl` 408MB / 145k 行，一次全量解析
+ *  3414–3799ms；g11-ringkill 117MB / 42k 行也要 1007–1285ms。这两门课恰是全仓最大两份，
+ *  切过去就卡好几秒。账本是只追加的（`append_jsonl`）⇒ 指纹没变直接复用；新增字节只读
+ *  尾部增量，靠 64B 锚点判「重写/截短」（与 `evalWinsMemo` 同一套纪律）。
+ *
+ *  ⚠ 不能只做「指纹变就全量重读」：在训课每几分钟追加一次 eval，那等于每次追加都卡 3.5s。 */
+const evalSummariesMemo = new Map<
+  string,
+  {
+    fp: string
+    state: EvalSummaryState
+    offset: number
+    carry: string
+    anchor: string
+  }
+>()
 
 /** 路径版：tmp / 热备份目录（真实文件，`readChunkLines` 增量）。 */
 export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
   const course = courseFromTrajDir(trajDir)
   const logPath = join(trajDir, 'eval_log.jsonl')
   if (!existsSync(logPath)) return new Map()
-  return collectEvalSummaries(course, (onLine) => {
-    readChunkLines(logPath, 0, '', onLine, true)
+  let size: number
+  let fp: string
+  try {
+    const st = statSync(logPath)
+    size = st.size
+    fp = `${size}:${st.mtimeMs}`
+  } catch {
+    return new Map()
+  }
+  const hit = evalSummariesMemo.get(logPath)
+  // 指纹没变也查一次锚点：同 size + 同 mtimeMs 的重写（测试夹具/备份回灌）不能吃旧账。
+  if (hit && hit.fp === fp && readAnchor(logPath, hit.offset) === hit.anchor) return hit.state.out
+
+  let state = hit ? hit.state : createEvalSummaryState(course)
+  let start = 0
+  let carry = ''
+  if (hit) {
+    if (size >= hit.offset && readAnchor(logPath, hit.offset) === hit.anchor) {
+      start = hit.offset
+      carry = hit.carry
+    } else {
+      state = createEvalSummaryState(course) // 重写 / 截短 / 换文件 ⇒ 全量重来
+    }
+  }
+  let offset = start
+  let nextCarry = ''
+  try {
+    const r = readChunkLines(
+      logPath,
+      start,
+      carry,
+      (line) => ingestEvalSummaryLine(state, line),
+      start === 0,
+    )
+    offset = r.offset
+    nextCarry = r.carry
+  } catch {
+    /* unreadable：游标保持不动，下次再试 */
+  }
+  finalizeEvalSummaries(state)
+  evalSummariesMemo.set(logPath, {
+    fp,
+    state,
+    offset,
+    carry: nextCarry,
+    anchor: readAnchor(logPath, offset),
   })
+  return state.out
 }
 
 /** 内容版：冷存包（内存 buffer）⇒ 同一解析内核（plan §3.3 的「取内容 + 解析内容」拆分）。 */
 export function parseEvalSummariesText(text: string, course: string): Map<number, EvalSummary> {
   return collectEvalSummaries(course, (onLine) => forEachTextLine(text, onLine))
+}
+
+/** 冷存分支专用：**一趟**文本扫描同时产 summary 与逐局胜负表。旧实现各调一次
+ * `parseEvalSummariesText` / `parseEvalWinsText`，同一份解压文本被逐行 JSON.parse 两遍。 */
+export function parseEvalSummariesAndWinsText(
+  text: string,
+  course: string,
+): { summaries: Map<number, EvalSummary>; wins: Map<number, Map<string, boolean>> } {
+  const state = createEvalSummaryState(course)
+  const wins = new Map<number, Map<string, boolean>>()
+  forEachTextLine(text, (line) => {
+    ingestEvalSummaryLine(state, line)
+    applyEvalWinLine(wins, line)
+  })
+  return { summaries: finalizeEvalSummaries(state), wins }
 }
 
 /** 逐局胜负表的解析内核（路径版与内容版共用 `applyEvalWinLine`）。 */
@@ -1119,38 +1214,32 @@ function evalGameClass(win: boolean, outcome: string): EvalGameClass {
  *  - 排除带 `source` 字段的行（EvalBoard B/C 批与 A 层同册不同源，见 eval_done_keys）。
  *  - 同键重复落账取最后一条（断点重试诚实覆盖）。
  *  - 无任何 summary / 文件不可读 → null（弹窗显示「暂无 eval 评估记录」）。 */
+/** 逐局视图的指纹 memo（2026-11-23）：弹窗打开 + 手动刷新都走这一条，旧实现
+ *  `readEvalGames` 两趟全量扫 408MB 账本（实测 3895ms）。summary 头改用已缓存的
+ *  `readEvalSummaries`，逐局行仍只扫一趟；结果按 (账本, iter) 指纹复用。 */
+const evalGamesMemo = new Map<string, { fp: string; anchor: string; data: EvalGamesData | null }>()
+
 export function readEvalGames(trajDir: string, iter?: number): EvalGamesData | null {
   const course = courseFromTrajDir(trajDir)
   const fallbackLives = course ? loadCourseStartLives(course) : ASSUMED_START_LIVES
   const logPath = join(trajDir, 'eval_log.jsonl')
   if (!existsSync(logPath)) return null
-  // 第一趟：summary 按 iter 归并（同 iter 重复 = 补跑后的重复落账，取最后一条）。
-  const summaries = new Map<number, { wver: string; time: string }>()
+  let size: number
+  let fp: string
   try {
-    readChunkLines(
-      logPath,
-      0,
-      '',
-      (line) => {
-        if (!line.trim()) return
-        try {
-          const r = JSON.parse(line) as Record<string, unknown>
-          if (r.event !== 'eval_summary') return
-          const iter = Number(r.iter ?? -1)
-          if (!Number.isInteger(iter) || iter < 0) return
-          summaries.set(iter, {
-            wver: String(r.wver ?? ''),
-            time: evalStampLocal(String(r.time ?? ''), r.nodes),
-          })
-        } catch {
-          /* skip bad line */
-        }
-      },
-      true,
-    )
+    const st = statSync(logPath)
+    size = st.size
+    fp = `${size}:${st.mtimeMs}`
   } catch {
     return null
   }
+  const memoKey = `${logPath}|${iter ?? ''}`
+  const hit = evalGamesMemo.get(memoKey)
+  if (hit && hit.fp === fp && readAnchor(logPath, size) === hit.anchor) return hit.data
+
+  // 第一趟原样只为了 summary 的 (iter, wver, time)——直接复用 /api/state 已经缓存的
+  // evalSummaries（同一份账本、同一条 evalStampLocal 口径），不再为它重扫一遍全文。
+  const summaries = readEvalSummaries(trajDir)
   if (summaries.size === 0) return null
   let target: number
   if (iter === undefined) {
@@ -1242,7 +1331,7 @@ export function readEvalGames(trajDir: string, iter?: number): EvalGamesData | n
     if (row.cls === 'win') wins++
     if (row.cleared) clears++
   }
-  return {
+  const data: EvalGamesData = {
     iter: target,
     wver: head.wver,
     time: head.time,
@@ -1253,6 +1342,8 @@ export function readEvalGames(trajDir: string, iter?: number): EvalGamesData | n
     outcomes,
     rows: all,
   }
+  evalGamesMemo.set(memoKey, { fp, anchor: readAnchor(logPath, size), data })
+  return data
 }
 
 /** 该课程的全部可导出 eval 轮（导出 replay 弹窗的选择器数据源）。
@@ -1261,51 +1352,102 @@ export function readEvalGames(trajDir: string, iter?: number): EvalGamesData | n
  *  ——成本纪律的先例见 eval-board/ckpts.ts（只 stat 不读内容）与 stack/kickstart-receipt.ts
  *  （不调 readEvalSummaries）。按 iter 降序返回。
  *
- *  谓词与 readEvalGames 第一趟**同源**：`Number.isInteger(iter) && iter >= 0 && wver 非空`
+ *  谓词与 `readEvalSummaries` 的 summary 行**同源**：`Number.isInteger(iter) && iter >= 0 && wver 非空`
  *  ——否则会漏出「列表里有、点开零行」的形状（缺 wver 的轮在视图里配不上，无法导出）。
  *  `reused_wver === true`（eval_a_once 的「同 wver 已在别轮评完」回填）单独标出：
  *  这类 summary 的逐局行归属原 iter，本轮的逐局行**不存在**，选开是一张空表。
  *  无 eval_log → 空数组（不是 null：弹窗按空列表显示「暂无评估记录」）。 */
+function applyEvalRoundLine(byIter: Map<number, EvalRoundOption>, line: string): void {
+  if (!line.trim()) return
+  try {
+    const r = JSON.parse(line) as Record<string, unknown>
+    if (r.event !== 'eval_summary') return
+    const iter = Number(r.iter ?? -1)
+    const wver = String(r.wver ?? '')
+    if (!Number.isInteger(iter) || iter < 0 || !wver) return
+    const games = typeof r.games === 'number' && Number.isFinite(r.games) ? r.games : null
+    const wins = typeof r.wins === 'number' && Number.isFinite(r.wins) ? r.wins : null
+    const rawWr = typeof r.winRate === 'number' && Number.isFinite(r.winRate) ? r.winRate : null
+    byIter.set(iter, {
+      iter,
+      wver,
+      time: String(r.time ?? ''),
+      games,
+      wins,
+      winRate: rawWr ?? (games != null && games > 0 && wins != null ? wins / games : null),
+      reusedWver: r.reused_wver === true,
+    })
+  } catch {
+    /* skip bad line */
+  }
+}
+
+/** 轮列表的指纹 + 锚点 memo（2026-11-23）：弹窗每开一次原本都要把 g9-def 的 408MB
+ *  账本整趟扫一遍（实测 2019ms），只为读几百行 summary。保持「单趟 summary-only」
+ *  语义不变，只是把结果按账本指纹留下来，追加走尾部增量。 */
+const evalRoundOptionsMemo = new Map<
+  string,
+  {
+    fp: string
+    byIter: Map<number, EvalRoundOption>
+    out: EvalRoundOption[]
+    offset: number
+    carry: string
+    anchor: string
+  }
+>()
+
 export function readEvalRoundOptions(trajDir: string): EvalRoundOption[] {
   const logPath = join(trajDir, 'eval_log.jsonl')
   if (!existsSync(logPath)) return []
-  const byIter = new Map<number, EvalRoundOption>()
+  let size: number
+  let fp: string
   try {
-    readChunkLines(
-      logPath,
-      0,
-      '',
-      (line) => {
-        if (!line.trim()) return
-        try {
-          const r = JSON.parse(line) as Record<string, unknown>
-          if (r.event !== 'eval_summary') return
-          const iter = Number(r.iter ?? -1)
-          const wver = String(r.wver ?? '')
-          if (!Number.isInteger(iter) || iter < 0 || !wver) return
-          const games = typeof r.games === 'number' && Number.isFinite(r.games) ? r.games : null
-          const wins = typeof r.wins === 'number' && Number.isFinite(r.wins) ? r.wins : null
-          const rawWr =
-            typeof r.winRate === 'number' && Number.isFinite(r.winRate) ? r.winRate : null
-          byIter.set(iter, {
-            iter,
-            wver,
-            time: String(r.time ?? ''),
-            games,
-            wins,
-            winRate: rawWr ?? (games != null && games > 0 && wins != null ? wins / games : null),
-            reusedWver: r.reused_wver === true,
-          })
-        } catch {
-          /* skip bad line */
-        }
-      },
-      true,
-    )
+    const st = statSync(logPath)
+    size = st.size
+    fp = `${size}:${st.mtimeMs}`
   } catch {
     return []
   }
-  return [...byIter.values()].sort((a, b) => b.iter - a.iter)
+  const hit = evalRoundOptionsMemo.get(logPath)
+  if (hit && hit.fp === fp && readAnchor(logPath, size) === hit.anchor) return hit.out
+
+  let byIter = hit ? hit.byIter : new Map<number, EvalRoundOption>()
+  let start = 0
+  let carry = ''
+  if (hit) {
+    if (size >= hit.offset && readAnchor(logPath, hit.offset) === hit.anchor) {
+      start = hit.offset
+      carry = hit.carry
+    } else {
+      byIter = new Map()
+    }
+  }
+  let offset = start
+  let nextCarry = ''
+  try {
+    const r = readChunkLines(
+      logPath,
+      start,
+      carry,
+      (line) => applyEvalRoundLine(byIter, line),
+      start === 0,
+    )
+    offset = r.offset
+    nextCarry = r.carry
+  } catch {
+    return hit ? hit.out : []
+  }
+  const out = [...byIter.values()].sort((a, b) => b.iter - a.iter)
+  evalRoundOptionsMemo.set(logPath, {
+    fp,
+    byIter,
+    out,
+    offset,
+    carry: nextCarry,
+    anchor: readAnchor(logPath, offset),
+  })
+  return out
 }
 
 /** eval 逐局胜负表：iter → `stage:seed` → win（同键重复落账取最后一条）。
