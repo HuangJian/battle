@@ -150,17 +150,13 @@ def _scalar(t: paddle.Tensor) -> float:
     return float(np.asarray(t.numpy()).reshape(-1)[0])
 
 
-def _masked_acc(
-    logits: paddle.Tensor, target: paddle.Tensor, mask: paddle.Tensor
-) -> float:
+def _masked_acc(logits: paddle.Tensor, target: paddle.Tensor, mask: paddle.Tensor) -> float:
     keep = mask.sum(axis=-1) >= 2
     if not bool(keep.any().item()):
         return 0.0
     z = paddle.where(mask > 0, logits, paddle.full_like(logits, -1e9))
     idx = _kept(keep)
-    hit = paddle.gather(z.argmax(axis=-1), idx) == paddle.gather(
-        target.astype("int64"), idx
-    )
+    hit = paddle.gather(z.argmax(axis=-1), idx) == paddle.gather(target.astype("int64"), idx)
     return _scalar(hit.astype("float32").mean())
 
 
@@ -284,14 +280,13 @@ def train(args: Any) -> dict[str, Any]:
     if dev == "auto":
         dev = (
             "cuda"
-            if bool(paddle.is_compiled_with_cuda())
-            and int(paddle.device.cuda.device_count()) > 0
+            if bool(paddle.is_compiled_with_cuda()) and int(paddle.device.cuda.device_count()) > 0
             else "cpu"
         )
     paddle.set_device(dev)
     say(f"[train] backend=paddle device={paddle.get_device()}")
 
-    use_value = (float(getattr(args, "value_coef", 0.0) or 0.0) > 0 or action_v6)
+    use_value = float(getattr(args, "value_coef", 0.0) or 0.0) > 0 or action_v6
     spec = NetSpec(action_v6=action_v6, policy_extra=policy_extra)
     model: paddle.nn.Layer = PPOStudent(spec) if use_value else StudentNet(spec)
     if getattr(args, "resume", None):
@@ -319,20 +314,14 @@ def train(args: Any) -> dict[str, Any]:
         cf = counts["fire"]
         ftot = sum(cf.values()) or 1
         fw = [((ftot / (3 * max(1, cf.get(k, 0)))) ** weight_exp) for k in range(3)]
-        fire_class_weight = (
-            paddle.to_tensor(fw, dtype="float32") if weight_exp > 0 else None
-        )
+        fire_class_weight = paddle.to_tensor(fw, dtype="float32") if weight_exp > 0 else None
         ch = counts["hold"]
         htot = sum(ch.values()) or 1
         hw = [((htot / (2 * max(1, ch.get(k, 0)))) ** weight_exp) for k in range(2)]
-        hold_class_weight = (
-            paddle.to_tensor(hw, dtype="float32") if weight_exp > 0 else None
-        )
+        hold_class_weight = paddle.to_tensor(hw, dtype="float32") if weight_exp > 0 else None
         fire_pos_weight = -1.0
     else:
-        fire_pos_weight = resolve_fire_pos_weight(
-            getattr(args, "fire_pos_weight", 0.0), counts
-        )
+        fire_pos_weight = resolve_fire_pos_weight(getattr(args, "fire_pos_weight", 0.0), counts)
         fire_class_weight = (
             paddle.to_tensor([1.0, float(fire_pos_weight)], dtype="float32")
             if fire_pos_weight > 0
@@ -372,7 +361,13 @@ def train(args: Any) -> dict[str, Any]:
         fire_class_weight=fire_class_weight,
         hold_class_weight=hold_class_weight,
         fire_pos_weight=fire_pos_weight,
-        history={"train_loss": [], "val_loss": [], "move_acc": [], "fire_acc": [], "value_loss": []},
+        history={
+            "train_loss": [],
+            "val_loss": [],
+            "move_acc": [],
+            "fire_acc": [],
+            "value_loss": [],
+        },
         epoch_base=int(getattr(args, "epoch_offset", 0) or 0),
         epoch_total=int(getattr(args, "epoch_offset", 0) or 0) + int(args.epochs),
         patience=int(getattr(args, "patience", 0) or 0),
@@ -423,133 +418,8 @@ class _Train:
         """逐个 epoch：训练 / 验证 / 历史 / 早停 / 断点 / on_epoch 回调。"""
         for epoch in range(1, int(args.epochs) + 1):
             gepoch = self.epoch_base + epoch
-            self.model.train()
-            order = self.rng.permutation(len(self.tr_idx))
-            run = {"loss": 0.0, "n": 0, "vloss": 0.0, "vn": 0}
-            for start in range(0, len(order), int(args.batch)):
-                sel = self.tr_idx[order[start : start + int(args.batch)]]
-                b = _make_batch(
-                    self.data, sel, self.action_v6, self.rng, float(getattr(args, "mirror_p", 0.5))
-                )
-                self.opt.clear_grad()
-                out = self.model(b["obs"], b["scalars"], b["extra"])
-                if self.action_v6:
-                    lm, lf, lh, vpred = out
-                    loss = (
-                        _masked_ce(lm, b["move"], b["mask_move"])
-                        + _masked_ce(lf, b["fire"], b["mask_fire"], class_weight=self.fire_class_weight)
-                        + _masked_ce(lh, b["hold"], b["mask_hold"], class_weight=self.hold_class_weight)
-                    )
-                    valid = ~paddle.isnan(b["ret"])
-                    if float(getattr(args, "value_coef", 0.0) or 0.0) > 0 and bool(
-                        valid.any().item()
-                    ):
-                        vi = _kept(valid)
-                        vloss = F.mse_loss(
-                            paddle.gather(vpred.squeeze(-1), vi), paddle.gather(b["ret"], vi)
-                        )
-                        loss = loss + float(args.value_coef) * vloss
-                        nv = int(_scalar(valid.astype("int64").sum()))
-                        run["vloss"] += _scalar(vloss) * nv
-                        run["vn"] += nv
-                elif self.use_value:
-                    lm, lf, vpred = out
-                    loss = _masked_ce(lm, b["move"], b["mask_move"]) + _masked_ce(
-                        lf, b["fire"], b["mask_fire"], class_weight=self.fire_class_weight
-                    )
-                    valid = ~paddle.isnan(b["ret"])
-                    if bool(valid.any().item()):
-                        vi = _kept(valid)
-                        vloss = F.mse_loss(
-                            paddle.gather(vpred.squeeze(-1), vi), paddle.gather(b["ret"], vi)
-                        )
-                        loss = loss + float(args.value_coef) * vloss
-                        nv = int(_scalar(valid.astype("int64").sum()))
-                        run["vloss"] += _scalar(vloss) * nv
-                        run["vn"] += nv
-                else:
-                    lm, lf = out
-                    loss = _masked_ce(lm, b["move"], b["mask_move"]) + _masked_ce(
-                        lf, b["fire"], b["mask_fire"], class_weight=self.fire_class_weight
-                    )
-                loss.backward()
-                _clip_grad_norm(self.model.parameters(), 1.0)
-                self.opt.step()
-                run["loss"] += _scalar(loss) * int(b["obs"].shape[0])
-                run["n"] += int(b["obs"].shape[0])
-            self.scheduler.step()
-            train_loss = run["loss"] / max(1, run["n"])
-
-            self.model.eval()
-            v = {
-                "loss": 0.0,
-                "n": 0,
-                "ma": 0.0,
-                "fa": 0.0,
-                "ha": 0.0,
-                "vloss": 0.0,
-                "vn": 0,
-                "wloss": 0.0,
-                "wn": 0,
-            }
-            with paddle.no_grad():
-                for start in range(0, len(self.val_idx), int(args.batch)):
-                    sel = self.val_idx[start : start + int(args.batch)]
-                    b = _make_batch(self.data, sel, self.action_v6, None, 0.0)
-                    out_v = self.model(b["obs"], b["scalars"], b["extra"])
-                    if self.action_v6:
-                        lm, lf, lh, vpred = out_v
-                    elif self.use_value:
-                        lm, lf, vpred = out_v
-                    else:
-                        lm, lf = out_v
-                    loss = _masked_ce(lm, b["move"], b["mask_move"]) + _masked_ce(
-                        lf, b["fire"], b["mask_fire"]
-                    )
-                    if self.action_v6:
-                        loss = loss + _masked_ce(lh, b["hold"], b["mask_hold"])
-                        if self.weight_exp > 0 and (
-                            self.fire_class_weight is not None or self.hold_class_weight is not None
-                        ):
-                            wloss = (
-                                _masked_ce(lm, b["move"], b["mask_move"])
-                                + _masked_ce(
-                                    lf,
-                                    b["fire"],
-                                    b["mask_fire"],
-                                    class_weight=self.fire_class_weight,
-                                )
-                                + _masked_ce(
-                                    lh,
-                                    b["hold"],
-                                    b["mask_hold"],
-                                    class_weight=self.hold_class_weight,
-                                )
-                            )
-                            v["wloss"] += _scalar(wloss) * int(b["obs"].shape[0])
-                            v["wn"] += int(b["obs"].shape[0])
-                    if self.use_value:
-                        valid = ~paddle.isnan(b["ret"])
-                        if bool(valid.any().item()):
-                            vi = _kept(valid)
-                            vloss = F.mse_loss(
-                                paddle.gather(vpred.squeeze(-1), vi), paddle.gather(b["ret"], vi)
-                            )
-                            nv = int(_scalar(valid.astype("int64").sum()))
-                            v["vloss"] += _scalar(vloss) * nv
-                            v["vn"] += nv
-                    n = int(b["obs"].shape[0])
-                    v["loss"] += _scalar(loss) * n
-                    v["n"] += n
-                    v["ma"] += _masked_acc(lm, b["move"], b["mask_move"]) * n
-                    v["fa"] += _masked_acc(lf, b["fire"], b["mask_fire"]) * n
-                    if self.action_v6:
-                        v["ha"] += _masked_acc(lh, b["hold"], b["mask_hold"]) * n
-            val_loss = v["loss"] / max(1, v["n"])
-            ma = v["ma"] / max(1, v["n"])
-            fa = v["fa"] / max(1, v["n"])
-            ha = (v["ha"] / max(1, v["n"])) if self.action_v6 else None
-            vl = v["vloss"] / max(1, v["vn"]) if v["vn"] > 0 else float("nan")
+            train_loss = self._train_epoch(args)
+            val_loss, ma, fa, ha, vl, v = self._validate(args)
             self.history["train_loss"].append(round(train_loss, 4))
             self.history["val_loss"].append(round(val_loss, 4))
             if v["wn"] > 0:
@@ -600,25 +470,161 @@ class _Train:
                     },
                 )
                 say(f"[train] checkpoint epoch {gepoch}/{self.epoch_total} -> {ckpt_path}")
-            on_epoch = getattr(args, "on_epoch", None)
-            if on_epoch is not None:
-                on_epoch(
-                    gepoch,
-                    self.model,
-                    {
-                        "train_loss": round(train_loss, 4),
-                        "val_loss": round(val_loss, 4),
-                        "move_acc": round(ma, 4),
-                        "fire_acc": round(fa, 4),
-                        **({"hold_acc": round(ha, 4)} if ha is not None else {}),
-                        **(
-                            {"val_loss_weighted": round(v["wloss"] / v["wn"], 4)}
-                            if v["wn"] > 0
-                            else {}
-                        ),
-                        "lr": float(self.opt.get_lr()),
-                    },
+            self._emit_epoch(args, gepoch, (train_loss, val_loss, ma, fa, ha), v)
+
+    def _train_epoch(self, args) -> float:
+        """单 epoch 的训练内循环（含 scheduler 步进）；返回样本加权平均 train_loss。"""
+        self.model.train()
+        order = self.rng.permutation(len(self.tr_idx))
+        run = {"loss": 0.0, "n": 0, "vloss": 0.0, "vn": 0}
+        for start in range(0, len(order), int(args.batch)):
+            sel = self.tr_idx[order[start : start + int(args.batch)]]
+            b = _make_batch(
+                self.data, sel, self.action_v6, self.rng, float(getattr(args, "mirror_p", 0.5))
+            )
+            self.opt.clear_grad()
+            out = self.model(b["obs"], b["scalars"], b["extra"])
+            if self.action_v6:
+                lm, lf, lh, vpred = out
+                loss = (
+                    _masked_ce(lm, b["move"], b["mask_move"])
+                    + _masked_ce(lf, b["fire"], b["mask_fire"], class_weight=self.fire_class_weight)
+                    + _masked_ce(lh, b["hold"], b["mask_hold"], class_weight=self.hold_class_weight)
                 )
+                valid = ~paddle.isnan(b["ret"])
+                if float(getattr(args, "value_coef", 0.0) or 0.0) > 0 and bool(valid.any().item()):
+                    vi = _kept(valid)
+                    vloss = F.mse_loss(
+                        paddle.gather(vpred.squeeze(-1), vi), paddle.gather(b["ret"], vi)
+                    )
+                    loss = loss + float(args.value_coef) * vloss
+                    nv = int(_scalar(valid.astype("int64").sum()))
+                    run["vloss"] += _scalar(vloss) * nv
+                    run["vn"] += nv
+            elif self.use_value:
+                lm, lf, vpred = out
+                loss = _masked_ce(lm, b["move"], b["mask_move"]) + _masked_ce(
+                    lf, b["fire"], b["mask_fire"], class_weight=self.fire_class_weight
+                )
+                valid = ~paddle.isnan(b["ret"])
+                if bool(valid.any().item()):
+                    vi = _kept(valid)
+                    vloss = F.mse_loss(
+                        paddle.gather(vpred.squeeze(-1), vi), paddle.gather(b["ret"], vi)
+                    )
+                    loss = loss + float(args.value_coef) * vloss
+                    nv = int(_scalar(valid.astype("int64").sum()))
+                    run["vloss"] += _scalar(vloss) * nv
+                    run["vn"] += nv
+            else:
+                lm, lf = out
+                loss = _masked_ce(lm, b["move"], b["mask_move"]) + _masked_ce(
+                    lf, b["fire"], b["mask_fire"], class_weight=self.fire_class_weight
+                )
+            loss.backward()
+            _clip_grad_norm(self.model.parameters(), 1.0)
+            self.opt.step()
+            run["loss"] += _scalar(loss) * int(b["obs"].shape[0])
+            run["n"] += int(b["obs"].shape[0])
+        self.scheduler.step()
+        return run["loss"] / max(1, run["n"])
+
+    def _validate(self, args) -> tuple[float, float, float, float | None, float, dict]:
+        """单 epoch 的验证（无增强、无权重）；返回 `(val_loss, move_acc, fire_acc, hold_acc, value_loss, 累加器)`。"""
+        self.model.eval()
+        v = {
+            "loss": 0.0,
+            "n": 0,
+            "ma": 0.0,
+            "fa": 0.0,
+            "ha": 0.0,
+            "vloss": 0.0,
+            "vn": 0,
+            "wloss": 0.0,
+            "wn": 0,
+        }
+        with paddle.no_grad():
+            for start in range(0, len(self.val_idx), int(args.batch)):
+                sel = self.val_idx[start : start + int(args.batch)]
+                b = _make_batch(self.data, sel, self.action_v6, None, 0.0)
+                out_v = self.model(b["obs"], b["scalars"], b["extra"])
+                if self.action_v6:
+                    lm, lf, lh, vpred = out_v
+                elif self.use_value:
+                    lm, lf, vpred = out_v
+                else:
+                    lm, lf = out_v
+                loss = _masked_ce(lm, b["move"], b["mask_move"]) + _masked_ce(
+                    lf, b["fire"], b["mask_fire"]
+                )
+                if self.action_v6:
+                    loss = loss + _masked_ce(lh, b["hold"], b["mask_hold"])
+                    if self.weight_exp > 0 and (
+                        self.fire_class_weight is not None or self.hold_class_weight is not None
+                    ):
+                        wloss = (
+                            _masked_ce(lm, b["move"], b["mask_move"])
+                            + _masked_ce(
+                                lf,
+                                b["fire"],
+                                b["mask_fire"],
+                                class_weight=self.fire_class_weight,
+                            )
+                            + _masked_ce(
+                                lh,
+                                b["hold"],
+                                b["mask_hold"],
+                                class_weight=self.hold_class_weight,
+                            )
+                        )
+                        v["wloss"] += _scalar(wloss) * int(b["obs"].shape[0])
+                        v["wn"] += int(b["obs"].shape[0])
+                if self.use_value:
+                    valid = ~paddle.isnan(b["ret"])
+                    if bool(valid.any().item()):
+                        vi = _kept(valid)
+                        vloss = F.mse_loss(
+                            paddle.gather(vpred.squeeze(-1), vi), paddle.gather(b["ret"], vi)
+                        )
+                        nv = int(_scalar(valid.astype("int64").sum()))
+                        v["vloss"] += _scalar(vloss) * nv
+                        v["vn"] += nv
+                n = int(b["obs"].shape[0])
+                v["loss"] += _scalar(loss) * n
+                v["n"] += n
+                v["ma"] += _masked_acc(lm, b["move"], b["mask_move"]) * n
+                v["fa"] += _masked_acc(lf, b["fire"], b["mask_fire"]) * n
+                if self.action_v6:
+                    v["ha"] += _masked_acc(lh, b["hold"], b["mask_hold"]) * n
+        val_loss = v["loss"] / max(1, v["n"])
+        ma = v["ma"] / max(1, v["n"])
+        fa = v["fa"] / max(1, v["n"])
+        ha = (v["ha"] / max(1, v["n"])) if self.action_v6 else None
+        vl = v["vloss"] / max(1, v["vn"]) if v["vn"] > 0 else float("nan")
+        return val_loss, ma, fa, ha, vl, v
+
+    def _emit_epoch(
+        self, args, gepoch: int, loss: tuple[float, float, float, float, float | None], v: dict
+    ) -> None:
+        """每 epoch 回调（云端 BC 的持久化/回传接点，与 `bc.py` 同形）。"""
+        train_loss, val_loss, ma, fa, ha = loss
+        on_epoch = getattr(args, "on_epoch", None)
+        if on_epoch is not None:
+            on_epoch(
+                gepoch,
+                self.model,
+                {
+                    "train_loss": round(train_loss, 4),
+                    "val_loss": round(val_loss, 4),
+                    "move_acc": round(ma, 4),
+                    "fire_acc": round(fa, 4),
+                    **({"hold_acc": round(ha, 4)} if ha is not None else {}),
+                    **(
+                        {"val_loss_weighted": round(v["wloss"] / v["wn"], 4)} if v["wn"] > 0 else {}
+                    ),
+                    "lr": float(self.opt.get_lr()),
+                },
+            )
 
     def finalize(self, args) -> dict:
         """选权重 → 写版本化 JSON → 激活 → 返回训练账。"""
@@ -672,11 +678,10 @@ class _Train:
             "sizes": dict(self.sizes),
             "majority_ce": {k: sanitize_json(v) for k, v in self.mb.items()},
             "fire_pos_weight": float(self.fire_pos_weight),
-            "class_counts": {k: {int(kk): int(vv) for kk, vv in c.items()} for k, c in self.counts.items()},
+            "class_counts": {
+                k: {int(kk): int(vv) for kk, vv in c.items()} for k, c in self.counts.items()
+            },
         }
-
-
-
 
 
 # `bc_core.smoothed_val_loss` / `EARLY_STOP_MIN_DELTA` 是给对账脚本与测试的转发面；

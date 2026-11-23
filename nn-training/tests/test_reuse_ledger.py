@@ -217,7 +217,12 @@ BASELINE_CLONE = 18
 #: `def train(self)` 的**声明**（`worker/ppo/loop.py`），与 `worker/train/bc.py` /
 #: `bc_paddle.py` 的同名凑成 ≥3。与上面 `ConvertPool.summary()` / `RunSetup` 同款：协议镜像，
 #: 不是实现（`def train` 的体只有 `...`；exact 16 / clone 17 都没动）。
-BASELINE_SAME_NAME_GE3 = 145
+#: **2026-11-23 抬同名 1 格（145 → 146）的账**：`bc_paddle._Train.run_epochs`(200 行) 按 torch
+#: 双生的三道接缝拆成 `_train_epoch` / `_validate` / `_emit_epoch`（engineering §328）。`_validate`
+#: 因此在 `worker/train/bc.py` / `bc_paddle.py` / `worker/scripts/measure_checkpoint_rss.py`
+#: 三个模块出现 —— 这不是「又抄了一份」，恰恰相反：两个后端**必须**同形（判据见
+#: `tests/worker/test_bc_epoch_seams.py`），名字不同才是欠账。exact / clone 都没动（16 / 17）。
+BASELINE_SAME_NAME_GE3 = 146
 
 
 def _stems(modules: frozenset[str]) -> frozenset[str]:

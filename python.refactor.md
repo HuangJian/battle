@@ -325,6 +325,9 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
 * `worker/cli.build_argparser`：650 行，把 **92 个 `add_argument`** 手写在同一个函数里。
 * 生产代码 **124 个函数参数 > 8**（2026-09 读数）。**2026-11-23 实测 0** —— 本节的批表已全部落地，
   `tests/test_python_shape_budget.py` 的 `WIDE_FUNCS_BASELINE` 已是空表。
+  > 2026-11-23 又收一处**贴着阈值**的：`worker/train/bc_paddle.py::run_epochs` 恰好 200 行
+  > （门禁判据是 `> 200`），照 torch 双生的三道接缝拆成 57 / 56 / 73 / 22，并新增
+  > `tests/worker/test_bc_epoch_seams.py` 钉「两个后端必须同形」（engineering §328）。
 
 **为什么这是问题**
 

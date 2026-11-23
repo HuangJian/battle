@@ -583,7 +583,11 @@ BASELINE_FORM = 1536
 #: 计进去只因路径带 `.py` 字面量（口径 B 的门是文本级的）。同一条用例里那个撞名的局部量
 #: 已改名（`calls` → `rounds`，与第 274 行无关的 AST 收集量不再连坐）。这里剩下的 1 条无法
 #: 换写法：包内成员名就是 `remote/rollout_node.py`，cell 侧也按这个名字校验。口径 A 不变。
-BASELINE_SRC = 1228
+#: 2026-11-23 抬到 **1236**（+8，实测）：新增 `tests/worker/test_bc_epoch_seams.py` —— BC 两个
+#:   后端的 epoch 循环必须同形（`run_epochs` 只编排，训练 / 验证 / 回调各在自己接缝里）。
+#:   判据全是 AST（只看有几层循环、接缝行数），没有一条在比措辞；计进口径 B 只因文件里带
+#:   `bc.py` / `bc_paddle.py` 两个 `.py` 字面量。口径 A 不变（1536）。
+BASELINE_SRC = 1236
 #: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。派生式（基线九成，见
 #: `tests/helpers/budget.py`）：两个计数器各自随自己的基线收紧，清理基线时不必回填数字。
 def _floor_of_form() -> int:

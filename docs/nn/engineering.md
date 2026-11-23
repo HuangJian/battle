@@ -29,6 +29,45 @@
 
 ---
 
+## §328 BC 双生的第二半：`bc_paddle._Train.run_epochs`（200 → 57 + 56 + 73 + 22）（2026-11-23）
+
+§252 只拆了 torch 侧。paddle 侧一直是 200 行——**恰好压在 >200 行门禁的线上**（判据是 `> 200`，
+不是 `>= 200`），所以形状门禁从头到尾没红过一次、也就没人动它。这是「贴着阈值」的典型：
+门禁告诉你「还没坏」，不告诉你「已经烂」。
+
+**切法照 §252 的三道接缝，一个字都没重排**
+
+| 新方法 | 行数 | 职责 |
+|---|---|---|
+| `run_epochs(args)` | 57 | epoch 编排：历史写入、日志行、平滑 val 选优、早停、`--ckpt-every`、`_emit_epoch` |
+| `_train_epoch(args)` | 56 | 训练内循环（v6 三头 / value / legacy 三种损失 + 梯度裁剪 + `opt.step()`）+ `scheduler.step()` |
+| `_validate(args)` | 73 | 无增强验证（`val_loss_weighted`、三/四个准确率、`value_loss`），返回 `(val_loss, ma, fa, ha, vl, 累加器)` |
+| `_emit_epoch(args, gepoch, loss, v)` | 22 | 每 epoch 回调（云端 BC 的持久化 / 回传接点） |
+
+判据：**语句顺序一字未动**（`model.train()` → 训练循环 → `scheduler.step()` → `eval()` → 验证循环 →
+历史/日志/选优/早停/断点/回调）；RNG 消耗点（`rng.permutation` 与 `_make_batch` 的 mirror 抽样）位置同前
+⇒ 同 seed 逐位一致。行为差别为零（只多两次方法调用）。
+
+**新增守卫 `tests/worker/test_bc_epoch_seams.py`（纯 AST，9 条）**：两个后端的 `_Train` 必须有同一组接缝
+（`run_epochs` / `_train_epoch` / `_validate` / `_emit_epoch`）；`run_epochs` 里**只许有 epoch 这一层循环**、
+循环体内再套循环即红；训练/验证接缝各自恰好一个批次循环；每个接缝 ≤ 100 行。旧形状实测红
+（`run_epochs` 200 行、epoch 循环内嵌套 2 个循环），所以这条守卫不是装饰：它盯的是「同一个 bug 在
+两个后端长成两种形状」，这是 >200 行门禁永远看不见的那一半。
+
+**两处基线逐笔记账**
+
+* `BASELINE_SAME_NAME_GE3` 145 → **146**：`_validate` 现在同时出现在 `worker/train/bc.py`、
+  `bc_paddle.py`、`worker/scripts/measure_checkpoint_rss.py` 三个模块。这不是「又抄了一份」——
+  恰恰相反，两个后端**必须**同形，新守卫就是为了钉这件事。exact / clone 未动（16 / 17）。
+* `BASELINE_SRC` 1228 → **1236**（+8）：新守卫文件带两个 `.py` 字面量 ⇒ 口径 B 把它的 8 条断言
+  全计成「生产源码文本断言」。判据本身是 AST（循环层数 / 接缝行数），没有一条在比措辞。
+
+`LONG_FUNCS_BASELINE` / `WIDE_FUNCS_BASELINE` 早就是空表，本次不动（两张表仍是 `{}`）。
+
+**门禁**：nn `7007 passed / 3 skipped`（68.3s）。**行为差异：无**。
+
+---
+
 ## §327 P0-3 批 K（收尾）：`verify_and_land` / `verify_and_land_bc` / `merge_memory_shards`（宽签名 3 → 0）（2026-11-23）
 
 * **这三条就是 §307 记下的「先拆再收」**：当时 `remote/hub_client.py` 恰好 999/1000 行，收 spec 要多几行

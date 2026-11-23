@@ -10480,3 +10480,25 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：`bun run pygate` 绿（6998 passed / 3 skipped）；`WIDE_FUNCS_BASELINE` 两个条目删除 ⇒
   **P0-3 剩余宽签名清零**。守 `tests/remote/test_land_specs.py`（7 条）。全文 →
   `docs/nn/engineering.md` §327。
+
+## §2026-11-23-bc-paddle-epoch-seams
+
+- **背景**：`worker/train/bc_paddle.py::_Train.run_epochs` 200 行。§252 只拆了 torch 双生
+  （201 → 63 + 79 + 65），paddle 侧一直贴着形状门禁的线（判据是 `> 200`，不是 `>= 200`），
+  所以门禁从没红过。
+- **决定**：照 torch 的三道接缝拆成 `run_epochs`(57) 编排 · `_train_epoch`(56) 训练内循环 ·
+  `_validate`(73) 无增强验证 · `_emit_epoch`(22) 每 epoch 回调。**语句顺序一字未动**（RNG 消耗点
+  位置同前 ⇒ 同 seed 逐位一致），paddle 的 `_train_epoch` / `_validate` 比 torch 多一个 `args`
+  形参（batch 大小与 `value_coef` 从 CLI 读，torch 侧这些在实例字段里）。
+- **新增守卫**：`tests/worker/test_bc_epoch_seams.py`（纯 AST，9 条）钉「两个后端必须同形」——
+  接缝名一致、`run_epochs` 只许有 epoch 一层循环、训练/验证接缝各恰好一个批次循环、每个接缝
+  ≤ 100 行。旧形状实测红（200 行 + 嵌套 2 个循环）。
+- **被否决**：① 只把验证段提出来（`run_epochs` 仍 ~130 行）—— 贴着阈值的函数会再一次被下一个人
+  当成「还能塞」；② 把两份 `_Train` 合并成一个泛型基类 —— 两个后端的张量 API（`opt.clear_grad()`
+  vs `zero_grad()`、`get_lr()` vs `param_groups`、`no_grad()` vs `torch.no_grad()`）差异比共性多，
+  合并只会长出 `if backend == …`；③ 让新守卫直接 import 两个后端 —— 本机没有 paddle（既有用例
+  全 skip），守卫也就跟着 skip，等于没写。
+- **两笔预算**：`BASELINE_SAME_NAME_GE3` 145 → 146（`_validate` 出现在三个模块，是同形而非抄写）·
+  `BASELINE_SRC` 1228 → 1236（口径 B 把带 `.py` 字面量的新文件全部断言计入；判据本身是 AST）。
+- **验证**：nn `7007 passed / 3 skipped`；`LONG_FUNCS_BASELINE` / `WIDE_FUNCS_BASELINE` 仍是空表。
+  全文 → `docs/nn/engineering.md` §328。
