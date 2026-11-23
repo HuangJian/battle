@@ -41,13 +41,41 @@
 | `trainer/loop_control.py` 归属 | **已搬 `worker/`** | 它只 import `common.*`（纯逻辑），却靠 `from trainer.dispatch_queue import REPO_ROOT` 那条「为取一个路径常量」的边才算「编排」（与 `biz/batch_plan.py` 同一型）。2026-11-16 随仓根收口一起暴露 ⇒ 搬进 `worker/loop_control.py`（与 `worker/gate_halt.py` 同族：控制文件契约），顺带正过来 `worker/loop_hold → trainer.loop_control` 这条反向边；`TRAINER_ORCHESTRATION` / `remote_dag.LAYERS` / 各处指针同步。 |
 | P0-1 / P0-2 / P0-3 / P0-4 / P0-7 / P0-8，P1-1 / 4 / 5 / 6 / 7 / 8 / 11 / 12 | **部分修** | 结构与契约类改造，按 §10 的 B3–B8 分批；§8 的验收条件即各批 DoD。已落地的三笔：**P0-7 的「宽泛捕获 + 只 pass」面**已由 G9 锁住增长，并有 3 批落地（日志层 `warn_once` · 退役模块 5 处 · `job_lifecycle` 6 处控制面通知 · 开算打点 3 处，现已 35 处 —— 日志层 / 退役模块 / `job_lifecycle` / 开算打点 / 行泵 / `unassign` / 心跳两处 / 补传转发 十三批，55 → 35，其余未动；**P1-11 的死代码**清掉了 `worker/train/loop_util.py` 的全部退役循环工具（该入口 2026-10-17 退役，`_emit` / `_TrainTee` / `heartbeat` / `auto_export_corpus` / `parse_val_loss_from_output` 全仓零调用，文件 321 → 109 行）。P1-11 的转发名清了两批（2026-11-16：`worker/ppo/engine.py` 11 → 1、`trainer/` 四处 12 → 0，见 §P1-11 第四/五批；`noqa: F401` 18 → 6 → **0**（2026-11-19 全仓归零，见 G6 行）），其余（兼容壳 / 其他转发名）与 P0-1 / P0-8 等仍在；**P1-4 的第一步**（`warn_unused_ignores=true` + `platform="linux"`，清掉 111 条无用 ignore，`type: ignore` 271/98 → 163/68）已落地；`Any` 那半边**已加门禁 G14**（1178/181 冻结，只减不增）+ 实测否决「批量换 `object`」 |
 | `remote/offline_boot.py` 3554 行单文件（§0.4-12 / §7.6 / §10-B8） | **已落地（生成式拆分）** | 发行物改**生成物**：源码拆在 `remote/_offline_boot/*.pyfrag` **12 段**（按顶层块边界切，最大 441 行），`tools/build_offline_boot.py` 逐字节拼回 `remote/offline_boot.py`（6 行「不要手改」文件头 + 12 行分段头 + 段间 11 个空行 ⇒ 与拆分前 **+29 行，其余逐字节相同**）。为什么分片是 `.pyfrag` 而不是 `.py`：生产树的静态门禁（print / 宽捕获 / `Any` / 函数形状 / LOC / 层级账本 / 抑制符）都按 `rglob("*.py")` 扫**发行物**，分片若叫 `.py` 同一行字会被数两遍 ⇒ 要么抬基线（本仓禁）、要么给每个门禁加排除名单（= 让门禁看不见代码）；`.pyfrag` 让「被检查的东西」与「被运输的东西」是同一个文件。守卫 `tests/remote/test_offline_boot_is_generated.py`（提交物 == `build()` · 分片目录无表外分片 / 无 `.py` · 分段头编号与位置一致 · 每段以换行收尾），四向证伪实测红（手改生成物 / 加表外分片 / 加 `.py` / 分段头漂号）。LOC 豁免**改成有条件的**：`test_python_loc_budget.py` 新增逐分片 LOC 判据（同一个 `loc_of`；实测往 `12_entry.pyfrag` 塞 1000 行 ⇒ 红）—— 「拆不开」已不再是理由，只剩「运输契约要单文件」。`test_module_doc_budget`（53 行）与 G3/G4/G14 读数**全部不动**（扫描面仍是发行物那一个文件） |
-| P1-6 并发（没有生命周期管理） | **已修（`Runtime` + G16 · 时钟 + G17 · 裸线程 + G18 零容忍：50 → 0 处）** | 全仓 10 处就地建池（生产包 9 + `tools/` 1）→ **0 处**：新增 `common/runtime.py`（L0，stdlib-only）的 `Runtime`，做成 `ThreadPoolExecutor` 的**同形替身**（`with Runtime(scope=…, workers=N) as ex:` 后 `ex.submit/map` 照旧，转发默认池 `"main"`）—— 单一所有者（`close()` 一次收完，`__exit__` 调它）· 线程名 `<scope>-<pool>`（scope 必填；G15 只管 `Thread(`，池这一半在这里）· 取消点 `request_stop()` / `check()` / `sleep()` / `submit|map` 拒新活（**已开跑的不打断** —— Python 线程杀不掉）· `describe()` 第一次让「开了几个线程、超没超」可读。**三条有意不做**：不静默节流（`workers=N` 是调用方的决定，上限只约束隐式请求并只报数）· 不读 env（上限走参数，G13 不抬）· 不替调用方接 `halt_event`（6 模块的 halt 语义要真跑；`stop=` 已吃 `Event`）。新增**零容忍门禁 G16** `tests/test_executor_ownership.py`（生产包只许 `common/runtime.py` 构造池 + `Runtime(` 必须带 `scope=` + 迁移处数下限），迁移前实测红（9 违规 / 0 使用）、迁移后绿。基线两笔逐笔记账：SOURCE 1159→1160 · 同名散落 110→113（协议名 + `describe`；exact 14 / clone 17 未动）。`iter_rollout` 的 LOC 仍 999。**第二刀（时钟）**：`Runtime(clock=, monotonic=)` 两个零参可调用（墙钟只做时间戳 / 单调钟只做时长，缺省就是 `time` 那两个），`describe()["clock"]` 报可调用名；首个迁移点 `post_weights_parallel` 的 4 处计时走 `ex.monotonic()`，并因形状门禁（>7 参数）把 `log`/`on_alive`/`monotonic` 收进 `PushHooks`（签名 9→7）；存量 482 处 / 92 文件冻结进 `tests/golden/wall_clock_baseline.json`（只许调小，`common/runtime.py` 与引导期单文件豁免），新门禁 **G17** `tests/test_wall_clock_budget.py`（冻结 + 只降 + 扫描自检 + seam 点分调用 ≥4 的两向护栏） |
-| P0-8 测试耦合（第 3/4/5 项） | **已修（2026-11-19）** | `check()`/`FAILS` 脚本壳 → 真 `assert`（9 文件 / 345 处；conftest 的 `_no_silent_check_failures` 与 5 条自证用例退役，`tests/test_conftest_hooks.py` 只留两条 hook 契约）；根 conftest 不再改写 stdlib `BaseServer.serve_forever`（66 处改用 `tests/helpers/http_server.py::serve_fast`，G6 的 conftest `type: ignore` 随之清零）；新增 **G19** 冻结「monkeypatch 打私有名」（392 处 / 95 文件，只减不增；2026-11-21 端口收编 −14）。端口样板已扩到训练机侧：`common.proc.Toolchain`（`TOOLCHAIN` 端口 + `stub_toolchain`）收编三家 `bun_version` 共 6 处**公开名** patch（G19 不动；裸名契约随改，文本断言 1535→1536 / 1224→1226；§260）。**仍开放**：全量 monkeypatch（4 160 处）与私有属性赋值（429 处）迁移，要先铺端口对象 |
+| P1-6 并发（没有生命周期管理） | **已修（`Runtime` + G16 · 时钟 + G17 · 裸线程 + G18：就地建池 0 处，裸 `Thread(` 剩 9 处 / 4 文件（冻结））** | 全仓 10 处就地建池（生产包 9 + `tools/` 1）→ **0 处**：新增 `common/runtime.py`（L0，stdlib-only）的 `Runtime`，做成 `ThreadPoolExecutor` 的**同形替身**（`with Runtime(scope=…, workers=N) as ex:` 后 `ex.submit/map` 照旧，转发默认池 `"main"`）—— 单一所有者（`close()` 一次收完，`__exit__` 调它）· 线程名 `<scope>-<pool>`（scope 必填；G15 只管 `Thread(`，池这一半在这里）· 取消点 `request_stop()` / `check()` / `sleep()` / `submit|map` 拒新活（**已开跑的不打断** —— Python 线程杀不掉）· `describe()` 第一次让「开了几个线程、超没超」可读。**三条有意不做**：不静默节流（`workers=N` 是调用方的决定，上限只约束隐式请求并只报数）· 不读 env（上限走参数，G13 不抬）· 不替调用方接 `halt_event`（6 模块的 halt 语义要真跑；`stop=` 已吃 `Event`）。新增**零容忍门禁 G16** `tests/test_executor_ownership.py`（生产包只许 `common/runtime.py` 构造池 + `Runtime(` 必须带 `scope=` + 迁移处数下限），迁移前实测红（9 违规 / 0 使用）、迁移后绿。基线两笔逐笔记账：SOURCE 1159→1160 · 同名散落 110→113（协议名 + `describe`；exact 14 / clone 17 未动）。`iter_rollout` 的 LOC 仍 999。**第二刀（时钟）**：`Runtime(clock=, monotonic=)` 两个零参可调用（墙钟只做时间戳 / 单调钟只做时长，缺省就是 `time` 那两个），`describe()["clock"]` 报可调用名；首个迁移点 `post_weights_parallel` 的 4 处计时走 `ex.monotonic()`，并因形状门禁（>7 参数）把 `log`/`on_alive`/`monotonic` 收进 `PushHooks`（签名 9→7）；存量 482 处 / 92 文件冻结进 `tests/golden/wall_clock_baseline.json`（只许调小，`common/runtime.py` 与引导期单文件豁免），新门禁 **G17** `tests/test_wall_clock_budget.py`（冻结 + 只降 + 扫描自检 + seam 点分调用 ≥4 的两向护栏） |
+| P0-8 测试耦合（第 3/4/5 项） | **已修（2026-11-19）** | `check()`/`FAILS` 脚本壳 → 真 `assert`（9 文件 / 345 处；conftest 的 `_no_silent_check_failures` 与 5 条自证用例退役，`tests/test_conftest_hooks.py` 只留两条 hook 契约）；根 conftest 不再改写 stdlib `BaseServer.serve_forever`（66 处改用 `tests/helpers/http_server.py::serve_fast`，G6 的 conftest `type: ignore` 随之清零）；新增 **G19** 冻结「monkeypatch 打私有名」（392 处 / 95 文件，只减不增；2026-11-21 端口收编 −14）。端口样板已扩到训练机侧：`common.proc.Toolchain`（`TOOLCHAIN` 端口 + `stub_toolchain`）收编三家 `bun_version` 共 6 处**公开名** patch（G19 不动；裸名契约随改，文本断言 1535→1536 / 1224→1226；§260）。**仍开放**：全量 monkeypatch（4 160 处）与私有属性赋值（429 处）迁移，要先铺端口对象（2026-11-23 实测：含 `monkeypatch` 的行 4,630、
+`monkeypatch.setattr/delattr(` 2,082 —— 两处口径都比原文宽，趋势仍在涨） |
 | B7 壳收敛（S1/S3/S2，2026-11-19） | **已修** | `queue_discover` 并入 `queue_scope`；5 条 `_job_or_404` 私有断言提出 `assert`；`QueueScope` 切成协作对象 + 组合类 26 个同名转发壳 ⇒ `_HubQueue` bases **9 → 7**、MRO **14 → 12**，hub 私有断言 **25 → 19**。锁对象/顺序与 `_solo` 借表语义逐字不变；`queue*.py` 4 035 → 4 207（+172 全是壳，七个域文件本身 −38）。见 `docs/nn/engineering.md` §225 |
 | B7 前半：`hub/http_face.py` 的 55 支 `elif` 路由 + 五份进程级类属性状态 | **已修（路由表 + `HubState`）** | ① 两个端点面各 30 支顺序 `elif` → **数据表** `GET_ROUTES`(30) / `POST_ROUTES`(28) + 纯函数 `match_route`；`do_GET` / `do_POST` **68/72 → 18/18 行**。表存**方法名**（在实例之前就存在，import 即可断言），9 个带参端点各一个零参包装方法 ⇒ 表里没有闭包、没有 `(*args)` 间接面。新守卫 `tests/hub/test_hub_route_table.py`（方法存在 / `(形态,参数)` 不重复 / 逐行代表路径只命中自己 / AST 零路径比较 / 三族参数绑定从**公开入口**验 / 404 与 `ProtocolError⇒400` 两条边界）；`test_admin_mem` 的接线判据从「AST 找 `Compare`」改成「问表」（旧写法钉的是形状）。**刻意不冻结路由条数**（加端点不是欠债）。② 五份可变类属性（`_blocked_logged` / `_seen_worker_sources` / `_worker_source_warned` / `_worker_pulse` / **`_REJECT_WARN_AT`**）收进 `HubState`（`state: HubState = HubState()`），写点变成 `self.state.…`，用例隔离改成整份换新；第五份是新守卫抓到的（附录行只点了四份）。守卫 `tests/hub/test_hub_state.py`（类体不许再有可变容器类属性 / 两个 `HubState` 互不共享 / 跨请求实例看到同一份）。文件 LOC 572 → 564 → **567**。见 `docs/nn/engineering.md` §217/§218 |
 | P1-7 RNG 建在全局 `np.random` 上 | **已修** | 新 `worker/ppo/rng.py::PPORng` 持三条显式流（`chunk`/`epoch`/`demo`，派生自 `common/runtime.py` 的 `substream(seed, name)` = blake2b·128bit·stdlib-only）；ckpt 改存 `state.json["rng_streams"]`（每条流的 `bit_generator.state`），旧 ckpt ⇒ `restore()` False + 响亮 WARN；`chunk_episodes(shuffle=True)` 缺 rng ⇒ `ValueError`；四条训练线 + `remote/train_core`（种子改完整 hex）+ `trainer/stream` 显式传；AST 零容忍门禁 `tests/worker/test_ppo_rng_streams.py`。有意代价：PCG64 ≠ MT19937 ⇒ 与历史轨迹数值断代 |
 
 ---
+
+### 门禁读数复核（2026-11-23）
+
+> 上表的「证据」列里散落着各条门禁的存量数；它们会随每一刀调小，抄在正文里必然过期。
+> 下面是一次全量对账（数值 = `tests/golden/*.json` 的当前和，测试就是判据）：
+
+| 门禁 | 正文里写的 | 2026-11-23 实测 | 备注 |
+|------|-----------|-----------------|------|
+| G3 生产包 `print` | 123 / 38 文件 | **123 / 38** | 与基线一致（门禁只许调小） |
+| G4 宽泛捕获 | 339 / 137 | **352 / 141** | 期间新增的边界逐笔记在测试表头 |
+| G9 宽捕 + 只 `pass` | 35 / 28 | **26 / 19** | 十三批清理的净额 |
+| G13 env 直读 | 60 / 30 | **68 / 38** | 新读者来自后续合入，逐笔抬过格 |
+| G14 `Any` 注解 | 1,178 / 181 | **1,211 / 185** | 同上（`README` 说的「只减」指新增代码不得再加） |
+| G7 函数级 `assert` | 62 | **60 / 32** | 模块级全生产面仍为 0 |
+| G17 墙钟直读 | 482 / 92 | **521 / 101** | 同上，随合入上涨后重新冻结 |
+| G18 裸 `Thread(` | 「50 → 0」 | **9 / 4** | 首次冻结是 48 / 35（非 50、非 0），见 §P1-6 |
+| G19 私有名 monkeypatch | 392 / 95 | **392 / 95** | 与基线一致 |
+| G5 测试私有断言 | 172 / 50 | **166 / 54** | 批次清理的净额 |
+| G6 `# type: ignore` | 163 / 68 | **166 / 68** | 同 G13/G14，随合入小幅上涨 |
+| G6 `# noqa: F401` | 0 | **0** | 全仓归零（2026-11-19） |
+| §9 模块 docstring > 50 行 | 13 → 现 12 文件 | **11 文件** | `common/game_watch.py` 之后又降一个 |
+| §9 文本形态断言 | 1,536 | **1,536** | 与基线一致 |
+| P0-2 / P0-3 形状 | 45 个 > 200 行、124 个 > 8 参 | **0 / 0** | 两张基线已清空（§P0-2 复核） |
+
+**读法**：`= 基线` 的行说明「正文数与门禁一致」；`> 基线` 的行不是回归 —— 是门禁在**新合入的代码**上
+重新冻结过（每次抬格都在对应测试文件头有日期与理由）。真正**过期**的是「50 → 0」那条：G18 的基线
+从第一天起就是 48 处 / 35 文件，三批迁移后是 9 / 4 —— 它从来没有清零过。`§3`/`§4` 正文里的 2026-09 读数按本节开头声明保留为「修复前基线」。
 
 ## 0. 执行摘要
 
@@ -66,8 +94,8 @@ dict 越穿越深、全局状态越躲越多，而**测试白盒耦合**把每�
 |---|------|-----------|
 | 1 | **混入式上帝对象**：拆分把 1 个大类变成 8 个混入拼回的同一个对象，耦合没降、可读性更差 | **审计时读数**（2026-11-12；B7 后已修，见附录 B）：`hub/queue.py:7` `_HubQueue` 继承 8 个基类（2026-11-19：**7**）；`trainer/loop_core.py:120` `TrainingLoop` 经 4 层混入组合出 ~12 个类的成员；全仓 25 个 `*Mixin` |
 | 2 | **函数粒度失控**：45 个函数 > 200 行，最长的 1184 行、圈复杂度 190 | `trainer/dispatch.py:151 _run`（1184 行 / CC 190）；`remote/hub_client.py:680 publish_job`（**56 个参数**） |
-| 3 | **隐式 dict 契约**：模块之间靠裸 `dict` + 魔法字符串 + `None` 传状态，类型系统完全失效 | 生产代码 4,117 处 `.get(`；`e.get("a_hold")` 决定动作空间（`worker/ppo/engine.py`）；726 处 `Any` |
-| 4 | **全局可变状态成灾**：14 处 `global`、7 个 L0 模块级可变容器，**直接违反 `common/__init__.py` 自己写的契约 #4** | `common/log.py:23,26`；`common/fs.py:130`；`common/distribution.py:647`；`biz/reward_context.py:54` |
+| 3 | **隐式 dict 契约**：模块之间靠裸 `dict` + 魔法字符串 + `None` 传状态，类型系统完全失效 | 生产代码 4,117 处 `.get(`（2026-11-23 实测 4,057）；`e.get("a_hold")` 决定动作空间（`worker/ppo/engine.py`）；726 处 `Any` |
+| 4 | **全局可变状态成灾**：14 处 `global`（2026-11-23 实测 8）、7 个 L0 模块级可变容器，**直接违反 `common/__init__.py` 自己写的契约 #4** | `common/log.py:23,26`；`common/fs.py:130`；`common/distribution.py:647`；`biz/reward_context.py:54` |
 | 5 | **测试在反向设计生产代码**：混入被选中的第 3 条理由写的是"tests 直接读私有状态" | `hub/queue.py` 模块头；测试侧 3,962 处 `monkeypatch`、656 处私有属性断言、385 处私有属性赋值 |
 
 ### 0.3 分维度评级
@@ -132,26 +160,30 @@ nn-training/.venv/bin/python tmp/py-clones.py
 
 | 目录 | 文件 | 行数 | 职责 | 主要问题 |
 |------|-----:|-----:|------|---------|
-| `common/` | 38 | 9,565 | L0 原语 | 契约被自己违反；`distribution.py`（1555 行）是杂物间 |
-| `biz/` | 12 | 5,017 | 课程/奖励纯逻辑 | 较好；`course_spec._check_rules` CC=70 |
-| `worker/` | 96 | 37,029 | 节点执行体 | `iter_rollout` 604 行函数；`eval_arbiter` 773 行/58 方法类 |
-| `trainer/` | 44 | 21,653 | 本机编排 | `dispatch._run` 1184 行；`loop_core` 12 类混入 |
-| `hub/` | 43 | 15,550 | hub 服务端 | 8 基类组合；手写 HTTP 路由 55 个 `elif`；类属性当全局状态 |
-| `remote/` | 62 | 44,457 | 线路/云引导 | `offline_boot` 3552 行；`hub_client.publish_job` 56 参数 |
-| `tools/` | 41 | 14,497 | 一次性探针 | 连字符文件名、无入口约定、与生产代码混放 |
-| `tests/`+`e2e/` | 499 | 155,612 | 测试 | 白盒耦合、超长文件（2254 行）、`check()` 遗产 |
+| `common/` | 53 | 12,686 | L0 原语 | 契约已由 pydantic 模型兜住；`distribution.py` 582 行（1555 → 582） |
+| `biz/` | 13 | 5,597 | 课程/奖励纯逻辑 | 较好；`course_spec._check_rules` 的 CC 未复核（无 CC 工具，见 §P0-2 复核） |
+| `worker/` | 136 | 41,162 | 节点执行体 | `iter_rollout` 入口已拆（编排 ~20 行）；`eval_arbiter` 1,182 行 / 85 方法 |
+| `trainer/` | 49 | 23,271 | 本机编排 | `dispatch._run` 已拆（编排 ~30 行）；`loop_core` 312 行 |
+| `hub/` | 42 | 17,512 | hub 服务端 | 7 基类（B7）；路由已是数据表；类属性已进 `HubState` |
+| `remote/` | 86 | 50,702 | 线路/云引导 | `offline_boot` 是生成物（12 分片）；`publish_job` 已收 `PublishSpec` |
+| `tools/` | 45 | 16,022 | 一次性探针 | 连字符文件名、无入口约定、与生产代码混放 |
+| `tests/`+`e2e/` | 673 | 187,891 | 测试 | 白盒耦合（G5/G19 冻结）、最长文件 2,343 行（`tests/remote/test_remote_iter.py`） |
 | `tmp/` | — | 34,188 | 本地临时脚本（`.gitignore` 已覆盖，0 个文件入库） | 不构成仓库债，但会污染本地 lint/AST 口径 |
 
-**生产函数粒度分布**（4,398 个函数）
+**生产函数粒度分布**（2026-09 读数 4,398 个函数；2026-11-23 实测 **5,301** 个）
 
 | 指标 | 数量 |
 |------|-----:|
-| > 200 行 | **45** |
-| > 100 行 | **161** |
-| 参数 > 8 个 | **124** |
-| 带 `**kwargs` | 37 |
-| 签名里出现 `Any` | **316** |
-| 完全无注解 | 65 |
+| > 200 行 | **45** → **0** |
+| > 100 行 | **161** → **182** |
+| 参数 > 8 个 | **124** → **0** |
+| 带 `**kwargs` | 37 → 36 |
+| 签名里出现 `Any` | **316**（口径未复核；G14 的另一个口径是 1,211 处 / 185 文件） |
+| 完全无注解 | 65（口径未复核） |
+
+> 2026-11-23 复核：「→」右侧是本次实测（`ast.walk` 全量、7 个生产包）。前四行是硬读数
+> （>200 / >100 / >8 参 / `**kwargs`），后两行的 2026-09 口径无法复现，只标「未复核」，不编新数。
+> 目录表的「文件 / 行数」两列同样是物理行全量重数（`rglob("*.py")`，含 `__pycache__` 之外的树）。
 
 ---
 
@@ -258,7 +290,7 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
 * `_run` 的 CC=190 意味着**至少 190 条独立路径**；该函数里含 3 个相位（ping 门 / 权重下发 /
   中央队列），每个相位有自己的失败模式、超时、日志与早退。任何一条分支的回归都只能靠
   "读 1200 行"发现。
-* 全仓 **1,528 个 `except` 处理器**里相当一部分就在这类函数内，异常路径与正常路径交织 ⇒ 覆盖率再高也测不全。
+* 全仓 **1,528 个 `except` 处理器**（2026-11-23 实测 1,532 —— 规模基本没变，这一项不是靠重构能降的）里相当一部分就在这类函数内，异常路径与正常路径交织 ⇒ 覆盖率再高也测不全。
 * `ppo_update` 598 行把"模型前向 / 损失组装 / 诊断 / 断点 / profiler / 日志"六件事塞进一个循环体，
   新增一个 loss 项（历史上加过 4 次：kl、kickstart、demo、value_anchor）都要改这个函数的中段。
 
@@ -291,7 +323,8 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
 * `remote/train_core.run_training_core`：29 个。
 * `remote/train_core.py:976 _run_training_core_paddle`：28 个。
 * `worker/cli.build_argparser`：650 行，把 **92 个 `add_argument`** 手写在同一个函数里。
-* 生产代码 **124 个函数参数 > 8**。
+* 生产代码 **124 个函数参数 > 8**（2026-09 读数）。**2026-11-23 实测 0** —— 本节的批表已全部落地，
+  `tests/test_python_shape_budget.py` 的 `WIDE_FUNCS_BASELINE` 已是空表。
 
 **为什么这是问题**
 
@@ -314,7 +347,8 @@ Python 没有"命名参数即文档"的强制力。56 个参数的调用点只�
 
 **现象**
 
-* 生产代码 **4,117 处 `.get(`**。
+* 生产代码 **4,117 处 `.get(`**（2026-11-23 实测 **4,057**：这一项几乎没动，P0-4 的进度全在
+  `manifest`/`result` 契约化那一侧，不在 `.get(` 的数量上）。
 * `manifest`、`shard`、`result`、`metrics`、`course`、`cfg` 六类对象全是裸 `dict`。
 * 魔法字符串决定**动作空间**：
 
@@ -384,6 +418,8 @@ else:
 
 全仓 **11 处 `global` 语句**（2026-11-20 实测）：`biz/reward_context` ×2（裁定保留）、`hub/admin` 1、
 `remote/{wire,http,payload_slim,worker,tailscale_boot}` 各 1、`tools/{task,forkdist}` 3。`common/**` 0 处。
+**2026-11-23 实测 8 处**：`biz/reward_context` ×2、`common/cell` 1、`remote/{payload_slim,tailscale_boot}` 各 1、
+`tools/{task,forkdist}` 3 —— `hub/admin` 与 `remote/{wire,http,worker}` 那 4 处随各自改造消失了，`common/**` 也不再是 0。
 （原文记的 14 处含 `worker/eval_exec` ×2 与 `worker/eval_arbiter` ×1，§236 之后归零。）
 
 > **2026-11-20 复核**：上表**整张已清零**——log / fs / weights_ledger（2026-11-13 对象化 +
@@ -537,7 +573,9 @@ common/logutil.py   stamp() / log_line() / tag_logger()  ← 也自带 STAMP_FMT
 **现象**
 
 * 生产包 **444 处 `except Exception`**、**36 处 `except BaseException`**、
-  **70 处 `except ...: pass`**（完全静默）。
+  **70 处 `except ...: pass`**（完全静默；以上为 2026-09 粗扫，含 `tests/`/`tools/`）。
+  > 2026-11-23 复核（门禁口径：7 个生产包，`except Exception` / `BaseException` / 裸 `except`）：
+  > G4 **352 处 / 141 文件**、G9（宽捕且体内只有 `pass`）**26 处 / 19 文件**，两张基线都只许调小。
 * 分类本身是**优点**：`common/errors.py` 的 6 个异常各自对应一个处置分支，注释把
   "为什么必须独立"讲得比多数开源项目清楚。问题是分类只在**少数关键路径**上被使用，
   其余地方一律 `except Exception` 兜底。
@@ -638,7 +676,7 @@ _socketserver.BaseServer.serve_forever = _serve_forever_fast_poll  # type: ignor
 
 ## 4. P1 —— 应该修
 
-### P1-1　导入体系：409 个文件在做 `sys.path` 手术
+### P1-1　导入体系：439 个文件在做 `sys.path` 手术（2026-11-23 实测；2026-09 为 409）
 
 **现象**
 
@@ -771,9 +809,10 @@ bank 的 `extra` 只有 Paddle 侧进模型，torch 侧 `_setup_demo` 从来没�
 剩下 163 条是真在压错误的；`Any`（复测 1176 处 / 182 文件）→ 字段表/协议那半边：门禁 G14
 已锁住增长，逐边界的下降才刚开始（「批量换 `object`」已实测否决，见上方 P1-4）。
 
-### P1-5　配置：130 处环境变量 + 裸 `dict` CFG
+### P1-5　配置：68 处环境变量直读 + 裸 `dict` CFG（2026-11-23 实测；2026-09 为 130）
 
-* `os.getenv/os.environ.get` 生产代码 **130 处**，散落在各模块顶层与函数内。
+* `os.getenv/os.environ.get` 生产代码 **130 处**（2026-09 宽口径）。门禁 G13 的口径（生产包内
+  `os.getenv` / `os.environ.get` / `os.environ[...]` 直读）2026-11-23 实测 **68 处 / 38 文件**，散落在各模块顶层与函数内。
 * `CFG[...]` 这种 notebook 侧的裸 dict 26 处；`rl-config.json` 有 JSON Schema，但读侧仍是 `cfg.get("policy", {})`。
 * 没有 `Settings` 层：同一个变量（`NN_GATE_NPROC`、`PPO_XLA_DIAG`、`PPO_PROFILE_STEPS`…）
   在多个文件里各读一次、各给默认值。
@@ -797,9 +836,12 @@ bank 的 `extra` 只有 Paddle 侧进模型，torch 侧 `_setup_demo` 从来没�
 - 两向证伪：把 `EVALBOARD_DATA` 的旧读法放回 `worker/eval_heartbeat` ⇒ 增长 + 单家两条同时红；
   基线抬高一格 ⇒「只许调小」红。
 
-### P1-6　并发：54 个线程、无生命周期管理
+### P1-6　并发：裸 `Thread(` 9 处、无生命周期管理（2026-11-23 实测；2026-09 为 54）
 
-* `threading.Thread(` **54 处**，绝大多数 `daemon=True`；线程池出现在 trainer/worker 多处。
+* `threading.Thread(` **54 处**（2026-09），绝大多数 `daemon=True`；线程池出现在 trainer/worker 多处。
+  > 2026-11-23 复核：`Runtime`（G16）落地后**就地建池 0 处**；裸 `Thread(` 仍有 **9 处 / 4 文件**
+  > （`remote/rollout_relay.py` 6 · `common/http_pool.py` 1 · `hub/http_face.py` 1 · `trainer/queue_local.py` 1），
+  > 按 G18 冻结、只许调小（基线最初就是 48 处 / 35 文件，不是 50，也从未清零）。
 * 没有统一的 shutdown 语义：`_JsonlWriter` 靠 30s 空闲自退；`executors` 靠 `reset_for_tests()`；
   `hub` 的后台线程靠 `halt_event`。
 * 多个线程池各自 `ThreadPoolExecutor(...)` 就地创建（`dispatch.py` 里 `min(8, len(cfg_nodes))`），
