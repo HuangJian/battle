@@ -47,6 +47,7 @@ from remote.hub_client import pack_ts_code_zip
 from tests.subproc_util import run_utf8
 from worker.iter_job import build_iter_spec
 from worker.iter_rollout import run_iter_rollout
+from worker.iter_run import IterRunSpec
 
 REPO_ROOT = ROOT.parent
 #: 每局 tick 上限——验收只要「采到 shard 并逐位可比」，不要长局（本文件要秒级跑完）。
@@ -197,7 +198,14 @@ def test_node_runner_shards_byte_identical_to_direct_run(tmp_path: Path) -> None
     )
 
     # B：过节点侧执行器（真 bun + 真 TS 树 + 真权重）
-    out = run_iter_rollout(dir_b, spec, ts_dir=ts_root, log=lambda _m: None)
+    out = run_iter_rollout(
+        IterRunSpec(
+            job_dir=dir_b,
+            spec=spec,
+            ts_dir=ts_root,
+            log=lambda _m: None,
+        )
+    )
 
     # 两侧同形（`w0/rl_s0_seed0`，与本机 rollout 一致）
     shard = Path("w0") / "rl_s0_seed0"

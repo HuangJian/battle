@@ -29,6 +29,30 @@
 
 ---
 
+## §326 P0-3 批 J：`worker/iter_rollout.run_iter_rollout`(9) → `IterRunSpec`（57 处调用点）（2026-11-23）
+
+* **分桶**：57 处调用点，**全部**是两个位置参数 `(job_dir, spec)` + 关键字（`log` 57/57 显式传，
+  `ctx` 10、`ts_dir` 4、`it` 3、`volume_line` 3、`next_game` 2、`on_game_settled` 2）。位置面只有一种形状。
+* **坏点**：`job_dir`（`str|Path`，产出落点）与 `spec`（`dict`，跑哪几局）是相邻的两个**完全不同**的
+  入参，互换不抛 —— `dict(Path)` 不报、后面的 `spec["argv"]` 才在开池那一刻炸，而 `Path(dict)` 报的
+  栈已经离调用点很远。七个关键字里的问题在别处：`next_game` / `on_game_settled` / `volume_line`
+  三个回调同型，`ts_dir` 与 `it` 一个是路径一个是标签。
+* **改法**：`IterRunSpec`（frozen + kw_only，9 字段）住 `worker/iter_run.py` —— 那是 `IterRun`
+  （本轮批级状态）的家，`IterRun.from_spec(spec)` 是两者之间**唯一的一次搬运**（逐名写，不用
+  `**asdict()`：后者会让日后新增的可选位静默漏过搬运）。`run_iter_rollout(spec: IterRunSpec)`
+  只剩一句 `r = _IterRun.from_spec(spec)`；`log` **不再有缺省**（57 处都显式传，留着缺省只让
+  「谁在打这轮日志」变糊）。57 处调用点用 AST 脚本一次性改写。
+* **坑（记账）**：① 属性调用形态（`iter_rollout.run_iter_rollout(...)`）要替换「函数名起」而不是
+  整个 Call 节点，否则前缀 `iter_rollout.` 被吞掉；② 测试里的 `def fake_run(job_dir, spec, *, …)`
+  桩要跟着签名改（`def fake_run(ask)` 里再摊开）—— 这类桩不会因为签名变了而报错，只会在运行时
+  `TypeError`；③ 守卫用例里 `run.log is calls.append` 是假的（每次取 `append` 都是新的绑定方法），
+  要先绑定一次再比 `==`。
+* **验收**：`bun run pygate` 绿（**6991 passed / 3 skipped**）；`ruff check` + `mypy` 绿；
+  `WIDE_FUNCS_BASELINE` 的 `worker/iter_rollout.py: 1` 删除（全仓宽签名 4 → 3，3 → 2 文件；
+  剩 `hub_client` 的两条 `verify_and_land*` 与 `resume.merge_memory_shards`）。
+  守卫 `tests/worker/test_iter_run_spec.py`（6 条：入口形状 / 字段闭集与顺序 / kw_only + frozen /
+  `log` 无缺省且其余缺省沿用 / `from_spec` 九个名字逐位对账 / 两轮互不共享批级容器）。
+
 ## §325 P0-3 批 I：`worker/gate_check.evaluate`(9) → `GateAsk`（60 处调用点，宽签名 5 → 4）（2026-11-23）
 
 * **先分桶再动刀**：`grep` 到 61 处 `evaluate(`，AST 一扫其中 1 处是 `tools/bc_learnability_probe._evaluate`

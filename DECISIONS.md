@@ -10445,3 +10445,20 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：`bun run pygate` 绿（6985 passed / 3 skipped）；`ruff check` + `mypy` 绿；
   `WIDE_FUNCS_BASELINE` 里 `worker/gate_check.py: 1` 删除（宽签名 5 → 4）。守
   `tests/worker/test_gate_ask.py`（9 条）。全文 → `docs/nn/engineering.md` §325。
+
+## §2026-11-23-iter-run-spec
+
+- **背景**：`python.refactor.md` §P0-3 剩余宽签名最后一批里的 `worker/iter_rollout.run_iter_rollout`(9 参)。
+  57 处调用点，全部是 `(job_dir, spec)` 两位置 + 关键字。
+- **坏点**：`job_dir`（产出落点）与 `spec`（跑哪几局）相邻且类型完全不同，互换不抛；三个回调
+  （`next_game` / `on_game_settled` / `volume_line`）与 `ts_dir` / `it` 混在关键字里全凭名字记。
+- **决定**：`IterRunSpec`（frozen + kw_only，9 字段）住 `worker/iter_run.py`（`IterRun` 的家），
+  `IterRun.from_spec` 是唯一搬运（逐名写，不用 `**asdict()`）；`run_iter_rollout(spec)` 只剩一句
+  构造；`log` 取消缺省（57/57 显式传）。57 处调用点由 AST 脚本改写。
+- **被否决**：① 直接把 `IterRun` 当入参 —— 它带 30+ 个可变批级字段，调用方会被迫构造半成品；
+  ② 让 `IterRunSpec` 继承 `IterRun` —— frozen 不能做可变类的基类；
+  ③ `from_spec` 用 `**{f.name: getattr(spec, f.name) for f in fields(spec)}` —— 名字对得齐，但
+  日后给 spec 加可选位时 `IterRun` 侧的同名位会静默留着旧缺省值，逐名写才逼人对账。
+- **验证**：`bun run pygate` 绿（6991 passed / 3 skipped）；`WIDE_FUNCS_BASELINE` 的
+  `worker/iter_rollout.py: 1` 删除（宽签名 4 → 3）。守 `tests/worker/test_iter_run_spec.py`（6 条）。
+  全文 → `docs/nn/engineering.md` §326。

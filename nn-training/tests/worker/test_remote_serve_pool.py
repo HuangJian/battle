@@ -33,6 +33,7 @@ import worker.serve_pool as serve_pool
 from common import game_watch
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from tests.helpers.iter_exec import stub_exec
+from worker.iter_run import IterRunSpec
 from worker.serve_pool import ServePool
 
 # ------------------------------------------------------------------ 桩
@@ -950,7 +951,7 @@ def test_run_iter_rollout_goes_through_the_pool(
         d = tmp_path / name
         d.mkdir()
         _install_entry(d, _STUB_SERVE, count=str(count), fail_seed="")
-        return d, iter_rollout.run_iter_rollout(d, spec, log=msgs.append)
+        return d, iter_rollout.run_iter_rollout(IterRunSpec(job_dir=d, spec=spec, log=msgs.append))
 
     job_dir, out = _round("job")
     stats = out["serve_pool"]
@@ -1011,7 +1012,11 @@ def test_zero_real_ready_keeps_the_pool_instead_of_closing_it(
     job_dir.mkdir()
     _install_entry(job_dir, _STUB_SLOW_BOOT, delay="3600")
     out = iter_rollout.run_iter_rollout(
-        job_dir, _serve_spec(tmp_path, script, [(1, 1), (1, 2)]), log=msgs.append
+        IterRunSpec(
+            job_dir=job_dir,
+            spec=_serve_spec(tmp_path, script, [(1, 1), (1, 2)]),
+            log=msgs.append,
+        )
     )
     assert out["report"]["games"] == 2 and len(out["shard_dirs"]) == 2
     stats = out["serve_pool"]
@@ -1040,7 +1045,7 @@ def test_concurrent_pool_games_never_hit_the_counter_race(
     job_dir.mkdir()
     _install_entry(job_dir, _STUB_SERVE, count=str(count), fail_seed="")
     spec = _serve_spec(tmp_path, script, [(3, s) for s in range(12)], workers=4)
-    out = iter_rollout.run_iter_rollout(job_dir, spec, log=msgs.append)
+    out = iter_rollout.run_iter_rollout(IterRunSpec(job_dir=job_dir, spec=spec, log=msgs.append))
     stats = out["serve_pool"]
     assert stats is not None, (msgs[-8:], out["report"])
     assert stats["served"] == 12 and stats["fallback"] == 0, (stats, msgs[-8:])
@@ -1062,7 +1067,7 @@ def test_run_iter_rollout_pool_failure_still_produces_the_round(
     _install_entry(job_dir, _STUB_SERVE, count=str(count), fail_seed="7")
     spec = _serve_spec(tmp_path, script, [(3, 7), (3, 8)])
     # 一次性路径用**同一个桩**（同一份 argv 直接跑，不带 --serve）：它同样能产 shard
-    out = iter_rollout.run_iter_rollout(job_dir, spec, log=msgs.append)
+    out = iter_rollout.run_iter_rollout(IterRunSpec(job_dir=job_dir, spec=spec, log=msgs.append))
     assert len(out["shard_dirs"]) == 2
     stats = out["serve_pool"]
     assert stats is not None and stats["served"] == 1 and stats["fallback"] == 1
@@ -1081,7 +1086,11 @@ def test_run_iter_rollout_env_switch_returns_to_per_game_spawn(
     job_dir = tmp_path / "job"
     job_dir.mkdir()
     out = iter_rollout.run_iter_rollout(
-        job_dir, _serve_spec(tmp_path, script, [(3, 7)]), log=lambda _m: None
+        IterRunSpec(
+            job_dir=job_dir,
+            spec=_serve_spec(tmp_path, script, [(3, 7)]),
+            log=lambda _m: None,
+        )
     )
     assert out["serve_pool"] is None
     assert len(out["shard_dirs"]) == 1
@@ -1101,7 +1110,7 @@ def test_run_iter_rollout_mixed_scripts_never_builds_a_pool(
     job_dir.mkdir()
     spec = _serve_spec(tmp_path, a, [(3, 7)])
     spec["argv"].append(_argv(b, 3, 8, "w1"))
-    out = iter_rollout.run_iter_rollout(job_dir, spec, log=lambda _m: None)
+    out = iter_rollout.run_iter_rollout(IterRunSpec(job_dir=job_dir, spec=spec, log=lambda _m: None))
     assert out["serve_pool"] is None
     assert len(out["shard_dirs"]) == 2
 

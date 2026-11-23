@@ -144,7 +144,9 @@ WIDE_FUNCS_BASELINE = {
     # 2026-11-23（P0-3 批 E）：`_run_one_game_bounded` 的 10 个逐字副本字段改成直接收
     # `RetryGameSpec`（§279 先例）+ 关键字 `ceiling_sec` ⇒ 2 → 1；守
     # `tests/worker/test_one_game_bounded_spec.py`。
-    "worker/iter_rollout.py": 1,  # 剩 run_iter_rollout(9)
+    # 2026-11-23（P0-3 批 J）：`run_iter_rollout` 的 2 位置 + 7 关键字收成 `IterRunSpec`
+    # （frozen + kw_only，住 `worker/iter_run.py` —— `IterRun` 的家，`from_spec` 是唯一搬运）
+    # ⇒ 本文件宽签名归零，条目删除；守 `tests/worker/test_iter_run_spec.py`。
     # 2026-11-23（P0-3 批 C2）：`StudentNet` / `PPOStudent` 的 9 个构造旋钮（torch / paddle 双生）
     # 收成一个 `NetSpec`（frozen + kw_only，住 `worker/models/arch_meta.py`；`read_arch_kwargs`
     # 随之改成返回 spec 的 `read_arch_spec`）⇒ `worker/models/student.py` 与

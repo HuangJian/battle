@@ -30,6 +30,7 @@ from worker.greedy_round import (
     run_greedy_round,
 )
 from worker.iter_rollout import run_iter_rollout
+from worker.iter_run import IterRunSpec
 from worker.reports import combine_reports
 
 
@@ -45,16 +46,17 @@ def collect_round(
 ) -> dict:
     """跑本轮 rollout（普通波 + 可选 greedy 波），返回 `iter_info`（已并账）。"""
     info = run_iter_rollout(
-        job_dir,
-        manifest["rollout"],
-        ts_dir=ts_dir,
-        log=log,
-        ctx=ctx,
-        it=it,
-        next_game=None if collector is None else collector.next_game,
-        on_game_settled=None if collector is None else collector.observe,
-        # 收官读数并进轮末那一行（2026-10-29 日志瘦身：原来它自己一行）。
-        volume_line=None if collector is None else collector.summary_line,
+        IterRunSpec(
+            job_dir=job_dir,
+            spec=manifest["rollout"],
+            ts_dir=ts_dir,
+            log=log,
+            ctx=ctx,
+            it=it,
+            next_game=None if collector is None else collector.next_game,
+            on_game_settled=None if collector is None else collector.observe,
+            volume_line=None if collector is None else collector.summary_line,
+        )
     )
     out = greedy_stage(
         manifest=manifest,
@@ -123,12 +125,14 @@ def greedy_stage(
         nonlocal wave_no
         wave_no += 1
         info = run_iter_rollout(
-            greedy_root / f"wave{wave_no}",
-            greedy_spec(rollout, pairs),
-            ts_dir=ts_dir,
-            log=log,
-            ctx=rctx,
-            it=it,
+            IterRunSpec(
+                job_dir=greedy_root / f"wave{wave_no}",
+                spec=greedy_spec(rollout, pairs),
+                ts_dir=ts_dir,
+                log=log,
+                ctx=rctx,
+                it=it,
+            )
         )
         dirs = [_under_ppo_root(str(d), shards_root) for d in (info.get("shard_dirs") or [])]
         return {"report": info.get("report") or {}, "shard_dirs": dirs}

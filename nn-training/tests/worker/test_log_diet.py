@@ -191,6 +191,7 @@ def test_iter_round_is_one_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     """成功一轮：**一行**收尾，且设置/进度/单局耗时都在那一行里。"""
     from tests.remote.test_remote_iter import _STUB_FLAKY, _fast_watchdog, _one_game_spec
     from worker.iter_rollout import run_iter_rollout
+    from worker.iter_run import IterRunSpec
 
     _fast_watchdog(monkeypatch)
     marker = tmp_path / "flaky.marker"
@@ -199,7 +200,13 @@ def test_iter_round_is_one_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     msgs: list[str] = []
     job_dir = tmp_path / "job"
     job_dir.mkdir()
-    run_iter_rollout(job_dir, _one_game_spec(tmp_path, script), log=msgs.append)
+    run_iter_rollout(
+        IterRunSpec(
+            job_dir=job_dir,
+            spec=_one_game_spec(tmp_path, script),
+            log=msgs.append,
+        )
+    )
 
     done = [m for m in msgs if m.startswith("kind=iter rollout done")]
     assert len(done) == 1, msgs
@@ -227,6 +234,7 @@ def test_iter_abort_still_prints_the_watchdog_contract(
     from common.protocol import RetryableError
     from tests.remote.test_remote_iter import _STUB_HANG, _fast_watchdog, _one_game_spec
     from worker.iter_rollout import run_iter_rollout
+    from worker.iter_run import IterRunSpec
 
     _fast_watchdog(monkeypatch)
     script = tmp_path / "hang.py"
@@ -236,7 +244,11 @@ def test_iter_abort_still_prints_the_watchdog_contract(
     job_dir.mkdir()
     with pytest.raises(RetryableError):
         run_iter_rollout(
-            job_dir, _one_game_spec(tmp_path, script, game_timeout_sec=0.2), log=msgs.append
+            IterRunSpec(
+                job_dir=job_dir,
+                spec=_one_game_spec(tmp_path, script, game_timeout_sec=0.2),
+                log=msgs.append,
+            )
         )
     aborted = [m for m in msgs if "中断" in m]
     assert len(aborted) == 1, msgs

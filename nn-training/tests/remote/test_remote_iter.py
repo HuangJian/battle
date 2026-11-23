@@ -61,6 +61,7 @@ from tests.helpers.iter_exec import stub_exec
 from trainer.loop_steps import TrainingSteps
 from worker.iter_job import build_iter_spec
 from worker.iter_rollout import run_iter_rollout, scan_shard_dirs, verify_shards
+from worker.iter_run import IterRunSpec
 
 # ------------------------------------------------------------------ fixtures
 
@@ -984,7 +985,7 @@ def test_run_iter_rollout_with_stub_bun(tmp_path: Path, monkeypatch) -> None:
     spec = _stub_spec(tmp_path, [(3, 7), (4, 1)])
     job_dir = tmp_path / "job"
     job_dir.mkdir()
-    out = run_iter_rollout(job_dir, spec, log=lambda _m: None)
+    out = run_iter_rollout(IterRunSpec(job_dir=job_dir, spec=spec, log=lambda _m: None))
     assert sorted(Path(p).name for p in out["shard_dirs"]) == [
         "rl_s3_seed7",
         "rl_s4_seed1",
@@ -1024,7 +1025,7 @@ def test_rollout_workers_are_clamped_to_the_local_core_budget(
     spec = _stub_spec(tmp_path, [(3, 7), (4, 1), (5, 2)])
     spec["workers"] = 220  # hub/导出机规模；本机上限 2
     before = iter_expected_data_fp(spec)
-    out = run_iter_rollout(job_dir, spec, log=msgs.append)
+    out = run_iter_rollout(IterRunSpec(job_dir=job_dir, spec=spec, log=msgs.append))
     assert out["workers"] == 2
     assert len(out["shard_dirs"]) == 3, "夹取不动声明集/产出（只是别同时跑那么多）"
     assert iter_expected_data_fp(spec) == before
@@ -1039,7 +1040,7 @@ def test_rollout_workers_are_clamped_to_the_local_core_budget(
     job_dir2.mkdir()
     spec2 = _stub_spec(tmp_path, [(3, 7), (4, 1), (5, 2)])
     spec2["workers"] = 220
-    out2 = run_iter_rollout(job_dir2, spec2, log=msgs2.append)
+    out2 = run_iter_rollout(IterRunSpec(job_dir=job_dir2, spec=spec2, log=msgs2.append))
     assert out2["workers"] == 3, "3 局 / 不夹取 ⇒ 并发受局数限制 = 3"
     assert not any("并发夹取" in m for m in msgs2), msgs2
 
@@ -1079,7 +1080,7 @@ def test_auto_workers_use_the_local_core_budget(tmp_path, monkeypatch) -> None:
     job_dir = tmp_path / "job"
     job_dir.mkdir()
     spec = _stub_spec(tmp_path, [(3, 7), (4, 1), (5, 2), (6, 3), (7, 4)], workers=0)
-    out = run_iter_rollout(job_dir, spec, log=msgs.append)
+    out = run_iter_rollout(IterRunSpec(job_dir=job_dir, spec=spec, log=msgs.append))
     assert out["workers"] == 3, "节点自定 = 本机核数口径"
     assert any("并发定档" in m and "3" in m for m in msgs), msgs
     assert not any("并发夹取" in m for m in msgs), msgs  # 自定不是「夹」出来的
@@ -1089,7 +1090,7 @@ def test_auto_workers_use_the_local_core_budget(tmp_path, monkeypatch) -> None:
     msgs2: list[str] = []
     job_dir2 = tmp_path / "job2"
     job_dir2.mkdir()
-    out2 = run_iter_rollout(job_dir2, spec, log=msgs2.append)
+    out2 = run_iter_rollout(IterRunSpec(job_dir=job_dir2, spec=spec, log=msgs2.append))
     assert out2["workers"] == 3
 
     # env=正整数 = 上限（对自定档也生效）
@@ -1097,7 +1098,7 @@ def test_auto_workers_use_the_local_core_budget(tmp_path, monkeypatch) -> None:
     msgs3: list[str] = []
     job_dir3 = tmp_path / "job3"
     job_dir3.mkdir()
-    out3 = run_iter_rollout(job_dir3, spec, log=msgs3.append)
+    out3 = run_iter_rollout(IterRunSpec(job_dir=job_dir3, spec=spec, log=msgs3.append))
     assert out3["workers"] == 2
 
 
@@ -1133,7 +1134,7 @@ def test_run_iter_rollout_rejects_undeclared_shard(tmp_path: Path, monkeypatch) 
     # 声明集 = 1 局，但目录里多出一个（模拟导出器多产/串局）
     _write_shard(job_dir / shard_name(9, 9), 9, 9)
     with pytest.raises(ProtocolError):
-        run_iter_rollout(job_dir, spec, log=lambda _m: None)
+        run_iter_rollout(IterRunSpec(job_dir=job_dir, spec=spec, log=lambda _m: None))
 
 
 def test_run_iter_rollout_reports_rc_failure(tmp_path: Path, monkeypatch) -> None:
@@ -1152,7 +1153,7 @@ def test_run_iter_rollout_reports_rc_failure(tmp_path: Path, monkeypatch) -> Non
     from common.protocol import RetryableError
 
     with pytest.raises(RetryableError) as e:
-        run_iter_rollout(job_dir, spec, log=lambda _m: None)
+        run_iter_rollout(IterRunSpec(job_dir=job_dir, spec=spec, log=lambda _m: None))
     assert "rc=3" in str(e.value)
 
 
@@ -1231,7 +1232,11 @@ def test_hung_game_is_retried_then_fails_loud(tmp_path: Path, monkeypatch) -> No
     job_dir.mkdir()
     with pytest.raises(RetryableError) as e:
         run_iter_rollout(
-            job_dir, _one_game_spec(tmp_path, script, game_timeout_sec=0.2), log=msgs.append
+            IterRunSpec(
+                job_dir=job_dir,
+                spec=_one_game_spec(tmp_path, script, game_timeout_sec=0.2),
+                log=msgs.append,
+            )
         )
     text = str(e.value)
     assert "连续 2 次失败" in text and "s0/d0" in text
@@ -1247,7 +1252,13 @@ def test_flaky_game_is_retried_in_place_and_round_succeeds(tmp_path: Path, monke
     msgs: list[str] = []
     job_dir = tmp_path / "job"
     job_dir.mkdir()
-    out = run_iter_rollout(job_dir, _one_game_spec(tmp_path, script), log=msgs.append)
+    out = run_iter_rollout(
+        IterRunSpec(
+            job_dir=job_dir,
+            spec=_one_game_spec(tmp_path, script),
+            log=msgs.append,
+        )
+    )
     assert len(out["shard_dirs"]) == 1
     shard = Path(out["shard_dirs"][0])
     assert (shard / "obs.npy").exists(), sorted(p.name for p in shard.iterdir())
@@ -1298,7 +1309,13 @@ def test_clean_overrun_is_machine_stall_not_in_place_retry(
 
     stub_exec(monkeypatch, run_game=counted)
     try:
-        out = run_iter_rollout(job_dir, _one_game_spec(tmp_path, script), log=msgs.append)
+        out = run_iter_rollout(
+            IterRunSpec(
+                job_dir=job_dir,
+                spec=_one_game_spec(tmp_path, script),
+                log=msgs.append,
+            )
+        )
     finally:
         release.set()  # 放掉被放弃的那条 daemon 线程（挂住的替身）
     # 整轮成功（只补那一局）——但走的是「清理超界 ⇒ 整轮重投」那条路
@@ -1423,7 +1440,7 @@ def test_plan_without_timeout_uses_node_fallback_cap(tmp_path: Path, monkeypatch
     job_dir.mkdir()
     spec = _one_game_spec(tmp_path, script, game_timeout_sec=0.0)
     with pytest.raises(RetryableError) as e:
-        run_iter_rollout(job_dir, spec, log=msgs.append)
+        run_iter_rollout(IterRunSpec(job_dir=job_dir, spec=spec, log=msgs.append))
     assert "硬顶 0.2s" in str(e.value)
     # 启动日志必须自报口径：是 plan 指定的还是节点兜底的（否则「为什么被杀了」无从归因）
     assert any("看门狗" in m and "兜底" in m for m in msgs), msgs
@@ -1449,7 +1466,11 @@ def test_retry_gets_relaxed_cap_only_when_plan_did_not_set_one(
     msgs: list[str] = []
     with pytest.raises(RetryableError):
         run_iter_rollout(
-            job_dir, _one_game_spec(tmp_path, script, game_timeout_sec=0.0), log=msgs.append
+            IterRunSpec(
+                job_dir=job_dir,
+                spec=_one_game_spec(tmp_path, script, game_timeout_sec=0.0),
+                log=msgs.append,
+            )
         )
     assert any("本次上限 0.2s" in m for m in msgs), msgs  # 0.05s × RETRY_TIMEOUT_FACTOR(4)
 
@@ -1458,9 +1479,11 @@ def test_retry_gets_relaxed_cap_only_when_plan_did_not_set_one(
     job_dir2.mkdir()
     with pytest.raises(RetryableError):
         run_iter_rollout(
-            job_dir2,
-            _one_game_spec(tmp_path, script, game_timeout_sec=0.05),
-            log=msgs_explicit.append,
+            IterRunSpec(
+                job_dir=job_dir2,
+                spec=_one_game_spec(tmp_path, script, game_timeout_sec=0.05),
+                log=msgs_explicit.append,
+            )
         )
     widened = 0.05 * game_watch.EXPLICIT_RETRY_FACTOR
     assert any(f"本次上限 {widened:g}s" in m for m in msgs_explicit), msgs_explicit
@@ -1475,7 +1498,13 @@ def test_round_logs_game_time_distribution(tmp_path: Path, monkeypatch) -> None:
     msgs: list[str] = []
     job_dir = tmp_path / "job"
     job_dir.mkdir()
-    run_iter_rollout(job_dir, _one_game_spec(tmp_path, script), log=msgs.append)
+    run_iter_rollout(
+        IterRunSpec(
+            job_dir=job_dir,
+            spec=_one_game_spec(tmp_path, script),
+            log=msgs.append,
+        )
+    )
     dist = [m for m in msgs if "单局耗时" in m]
     assert len(dist) == 1, msgs
     assert "p50=" in dist[0] and "最慢：s0/d0=" in dist[0] and "重试过的局 1 个" in dist[0]
@@ -1491,7 +1520,13 @@ def test_slow_game_warn_names_the_game(tmp_path: Path, monkeypatch) -> None:
     msgs: list[str] = []
     job_dir = tmp_path / "job"
     job_dir.mkdir()
-    out = run_iter_rollout(job_dir, _one_game_spec(tmp_path, script, game_timeout_sec=20.0), log=msgs.append)
+    out = run_iter_rollout(
+        IterRunSpec(
+            job_dir=job_dir,
+            spec=_one_game_spec(tmp_path, script, game_timeout_sec=20.0),
+            log=msgs.append,
+        )
+    )
     assert any("异常慢" in m and "s0/d0" in m for m in msgs), msgs
     assert out["report"]["games"] == 1
     assert not any("单局重试" in m for m in msgs), msgs  # 慢 ≠ 失败：不该重跑
@@ -1693,7 +1728,11 @@ def test_a_child_that_cannot_be_reaped_is_retried_in_round_never_failing(
     t0 = time.time()
     try:
         out = run_iter_rollout(
-            job_dir, _one_game_spec(tmp_path, script, game_timeout_sec=0.5), log=msgs.append
+            IterRunSpec(
+                job_dir=job_dir,
+                spec=_one_game_spec(tmp_path, script, game_timeout_sec=0.5),
+                log=msgs.append,
+            )
         )
         wall = time.time() - t0
     finally:
@@ -1735,7 +1774,11 @@ def test_reap_stall_round_retry_is_unbounded_unless_operator_caps_it(
     try:
         with pytest.raises(RetryableError) as ei:
             run_iter_rollout(
-                job_dir, _one_game_spec(tmp_path, script, game_timeout_sec=0.2), log=msgs.append
+                IterRunSpec(
+                    job_dir=job_dir,
+                    spec=_one_game_spec(tmp_path, script, game_timeout_sec=0.2),
+                    log=msgs.append,
+                )
             )
         wall = time.time() - t0
     finally:
@@ -1767,7 +1810,11 @@ def test_a_round_that_stalls_names_the_games_still_in_flight(
     job_dir = tmp_path / "job"
     job_dir.mkdir()
     out = run_iter_rollout(
-        job_dir, _one_game_spec(tmp_path, script, game_timeout_sec=20.0), log=msgs.append
+        IterRunSpec(
+            job_dir=job_dir,
+            spec=_one_game_spec(tmp_path, script, game_timeout_sec=20.0),
+            log=msgs.append,
+        )
     )
     stalls = [m for m in msgs if "整轮停滞" in m]
     assert stalls, f"停滞这么久必须有读数（否则停机时什么都看不见）：{msgs}"
@@ -1783,7 +1830,11 @@ def test_a_round_that_stalls_names_the_games_still_in_flight(
     job_dir2 = tmp_path / "job2"
     job_dir2.mkdir()
     run_iter_rollout(
-        job_dir2, _one_game_spec(tmp_path, fast, game_timeout_sec=20.0), log=msgs2.append
+        IterRunSpec(
+            job_dir=job_dir2,
+            spec=_one_game_spec(tmp_path, fast, game_timeout_sec=20.0),
+            log=msgs2.append,
+        )
     )
     assert not any("整轮停滞" in m for m in msgs2), msgs2
 
@@ -1851,7 +1902,13 @@ def test_a_game_stuck_in_uncancellable_io_cannot_hold_the_round_hostage(
     job_dir.mkdir()
     t0 = time.time()
     try:
-        out = run_iter_rollout(job_dir, _one_game_spec(tmp_path, script), log=msgs.append)
+        out = run_iter_rollout(
+            IterRunSpec(
+                job_dir=job_dir,
+                spec=_one_game_spec(tmp_path, script),
+                log=msgs.append,
+            )
+        )
         wall = time.time() - t0
     finally:
         stub.release.set()  # 放掉替身那条 daemon 线程（别让它白占一条线程到套件结束）
@@ -1906,7 +1963,13 @@ def test_a_round_end_scan_that_never_returns_stalls_the_round_loudly(
     t0 = time.time()
     try:
         with pytest.raises(UnreapableChildError) as ei:
-            run_iter_rollout(job_dir, _one_game_spec(tmp_path, script), log=msgs.append)
+            run_iter_rollout(
+                IterRunSpec(
+                    job_dir=job_dir,
+                    spec=_one_game_spec(tmp_path, script),
+                    log=msgs.append,
+                )
+            )
         wall = time.time() - t0
     finally:
         stub.release.set()  # 放掉那条 daemon 线程（别让它占着线程到套件结束）
@@ -2212,7 +2275,7 @@ def test_rollout_reports_every_settled_game_to_the_progress_hook(
     spec = _stub_spec(tmp_path, [(3, 7), (4, 1), (5, 2)])
     job_dir = tmp_path / "job"
     job_dir.mkdir()
-    run_iter_rollout(job_dir, spec, log=lambda _m: None)
+    run_iter_rollout(IterRunSpec(job_dir=job_dir, spec=spec, log=lambda _m: None))
     assert [k for k, _kw in seen] == ["iter"] * 3
     assert [kw["done"] for _k, kw in seen] == [1, 2, 3]
     assert all(kw["total"] == 3 for _k, kw in seen)
@@ -2220,7 +2283,13 @@ def test_rollout_reports_every_settled_game_to_the_progress_hook(
     monkeypatch.delitem(sys.modules, progress_hook.HOOK_NAME)
     job_dir2 = tmp_path / "job2"
     job_dir2.mkdir()
-    assert run_iter_rollout(job_dir2, spec, log=lambda _m: None)["report"]["games"] == 3
+    assert run_iter_rollout(
+        IterRunSpec(
+            job_dir=job_dir2,
+            spec=spec,
+            log=lambda _m: None,
+        )
+    )["report"]["games"] == 3
 
 
 def test_volume_line_merges_into_the_rollout_line(tmp_path: Path, monkeypatch) -> None:
@@ -2235,7 +2304,12 @@ def test_volume_line_merges_into_the_rollout_line(tmp_path: Path, monkeypatch) -
     job_dir.mkdir()
     spec = _stub_spec(tmp_path, [(3, 7), (4, 1)])
     run_iter_rollout(
-        job_dir, spec, log=msgs.append, volume_line=lambda: "流式采集：动态加采 2 局｜过采 0"
+        IterRunSpec(
+            job_dir=job_dir,
+            spec=spec,
+            log=msgs.append,
+            volume_line=lambda: "流式采集：动态加采 2 局｜过采 0",
+        )
     )
     done = [m for m in msgs if "kind=iter rollout done in" in m]
     assert len(done) == 1, msgs
@@ -2250,6 +2324,13 @@ def test_volume_line_merges_into_the_rollout_line(tmp_path: Path, monkeypatch) -
     def boom() -> str:
         raise RuntimeError("分关账读坏了")
 
-    run_iter_rollout(job_dir2, _stub_spec(tmp_path, [(3, 7)]), log=msgs2.append, volume_line=boom)
+    run_iter_rollout(
+        IterRunSpec(
+            job_dir=job_dir2,
+            spec=_stub_spec(tmp_path, [(3, 7)]),
+            log=msgs2.append,
+            volume_line=boom,
+        )
+    )
     assert any("读数拼接失败" in m for m in msgs2), msgs2
     assert any("kind=iter rollout done in" in m for m in msgs2), msgs2

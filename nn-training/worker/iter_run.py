@@ -82,6 +82,41 @@ class RoundContext:
             )
 
 
+@dataclass(frozen=True, kw_only=True)
+class IterRunSpec:
+    """开始一轮 rollout 时**由调用方给定**的 9 个旋钮（`run_iter_rollout` 的唯一参数）。
+
+    这一组名字原先排在 `run_iter_rollout` 的位置口上（`job_dir, spec` 两个位置 + 七个
+    关键字）：`job_dir` 是「产出落哪个目录」、`spec` 是「跑哪几局」，两个相邻的 `str|Path` /
+    `dict` —— 互换不抛（`Path(dict)` 才报、`dict(Path)` 也不报），只会把这一轮跑进错的目录
+    或拿空模板去开池。另外 `next_game` / `on_game_settled` / `volume_line` 三个回调与
+    `ts_dir` / `it` 两个「标签位」混在一起，全凭名字记。
+
+    与 `IterRun` 的分工：**本对象只装输入的旋钮**（frozen），`IterRun` 装本轮跑起来的
+    可变状态（`jd` / `tsd` / `pool` / `game_secs` / …）。`IterRun.from_spec` 是两者之间
+    唯一的一次搬运，字段表由 `tests/worker/test_iter_run_spec.py` 对账。
+    """
+
+    #: 本轮 job 目录（产出落点；`spec` 里的相对路径都相对它）。
+    job_dir: str | Path
+    #: 已过 `protocol.validate_rollout_spec` 的归一化字典（argv 白名单 + 逐局 stage/seed）。
+    spec: dict
+    #: 解包后的 TS 代码根；`None` = 用 job 目录（单测桩脚本是绝对路径，不需要独立 TS 根）。
+    ts_dir: str | Path | None = None
+    #: 本轮日志出口（`run_iter_rollout` 原先缺省 `_log`，57 处调用点全部显式传）。
+    log: Callable[[str], None]
+    #: 轮级资源（补差批复用）；`None` = 本轮自建自收。
+    ctx: RoundContext | None = None
+    #: 轮号（只用于打点标签，不参与任何判据；缺省 `0` 会让进度行显示「第 0 轮」）。
+    it: int = 0
+    #: 逐局流式调度器：每个槽位一空就调一次取下一局；`None` = 逐字老行为（argv 即全部）。
+    next_game: Callable[[], list[str] | None] | None = None
+    #: `(argv, n_samples)` → None：把刚结算那一局的产出告诉调度器。
+    on_game_settled: Callable[..., None] | None = None
+    #: 轮末并进**同一行**的读数（流式采集的 `summary_line`）；异常只记一行。
+    volume_line: Callable[[], str] | None = None
+
+
 @dataclass
 class IterRun:
     """一轮 rollout 的批级状态（轮级资源仍住 `RoundContext`）。"""
@@ -119,3 +154,23 @@ class IterRun:
     round_retries: int = 0
     retry_cap: int = 0
     ok: bool = False
+
+    @classmethod
+    def from_spec(cls, spec: IterRunSpec) -> IterRun:
+        """输入旋钮 → 批级状态（`run_iter_rollout` 的唯一入口）。
+
+        逐名搬运而非 `**asdict()`：这九个名字是**输入面**，多抄/少抄一格都会被
+        `tests/worker/test_iter_run_spec.py` 的字段表对账到；`asdict` 会把日后给
+        `IterRunSpec` 加的可选位默默漏过一次搬运（`IterRun` 侧同名位仍是旧缺省值）。
+        """
+        return cls(
+            job_dir=spec.job_dir,
+            spec=spec.spec,
+            ts_dir=spec.ts_dir,
+            log=spec.log,
+            ctx=spec.ctx,
+            it=spec.it,
+            next_game=spec.next_game,
+            on_game_settled=spec.on_game_settled,
+            volume_line=spec.volume_line,
+        )

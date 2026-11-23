@@ -50,6 +50,7 @@ from common.platform_utils import sandbox_delete_blocked
 from common.protocol import INIT_WEIGHTS_NAME, ProtocolError
 from tests.helpers.iter_exec import stub_exec
 from worker.iter_rollout import run_iter_rollout, scan_shard_dirs
+from worker.iter_run import IterRunSpec
 
 # ------------------------------------------------------------------ 桩与夹具
 
@@ -261,17 +262,23 @@ def test_round_capacity_budget_covers_the_topup_batches(
     # 每个阶段一个干净的 job 目录：回退档的产出就住在那儿，复用会撞上上一次的 shard 集。
     (tmp_path / "b").mkdir(exist_ok=True)
     (tmp_path / "c").mkdir(exist_ok=True)
-    run_iter_rollout(_job_dir(tmp_path), _stub_spec(tmp_path, [(0, 0), (1, 1)]), log=lambda _m: None)
+    run_iter_rollout(
+        IterRunSpec(
+            job_dir=_job_dir(tmp_path),
+            spec=_stub_spec(tmp_path, [(0, 0), (1, 1)]),
+            log=lambda _m: None,
+        )
+    )
     assert seen["need"] == scratch.need_bytes_for(2), "没配 volume ⇒ 就是首批（与旧行为一致）"
 
     spec = _stub_spec(tmp_path, [(0, 0), (1, 1)])
     spec["volume"] = {"topup": {"max_batches": 3}}
-    run_iter_rollout(_job_dir(tmp_path / "b"), spec, log=lambda _m: None)
+    run_iter_rollout(IterRunSpec(job_dir=_job_dir(tmp_path / "b"), spec=spec, log=lambda _m: None))
     assert seen["need"] == scratch.need_bytes_for(2 * (1 + 3)), seen
 
     bad = _stub_spec(tmp_path, [(0, 0)])
     bad["volume"] = {"topup": {"max_batches": "nonsense"}}
-    run_iter_rollout(_job_dir(tmp_path / "c"), bad, log=lambda _m: None)
+    run_iter_rollout(IterRunSpec(job_dir=_job_dir(tmp_path / "c"), spec=bad, log=lambda _m: None))
     assert seen["need"] == scratch.need_bytes_for(1), "畸形字段 ⇒ 当成没配（不把整轮推去回退档）"
 
 
@@ -303,7 +310,7 @@ def test_round_capacity_budget_uses_the_round_slot_not_the_first_batch(
         "per_stage_quota": 24000,
         "est_s_by_stage": {2000: 0},
     }
-    run_iter_rollout(cold, spec, log=lambda _m: None)
+    run_iter_rollout(IterRunSpec(job_dir=cold, spec=spec, log=lambda _m: None))
     assert seen["need"] == scratch.need_bytes_for(94 * (1 + 3)), seen
 
     # ② est 可求（190 samples/局 ⇒ 待补 ≈ 127 局 ⇒ 2 批）⇒ 94 × 3，不是 94 × 65
@@ -316,7 +323,7 @@ def test_round_capacity_budget_uses_the_round_slot_not_the_first_batch(
         "per_stage_quota": 24000,
         "est_s_by_stage": {2000: 190},
     }
-    run_iter_rollout(est, spec2, log=lambda _m: None)
+    run_iter_rollout(IterRunSpec(job_dir=est, spec=spec2, log=lambda _m: None))
     assert seen["need"] == scratch.need_bytes_for(94 * (1 + 2)), seen
 
 
@@ -582,7 +589,13 @@ def test_rollout_reroots_and_keeps_the_produce_in_scratch(
     _only_candidate(monkeypatch, local)
     job = _job_dir(tmp_path)
     msgs: list[str] = []
-    out = run_iter_rollout(job, _stub_spec(tmp_path, [(0, 0), (1, 1)]), log=msgs.append)
+    out = run_iter_rollout(
+        IterRunSpec(
+            job_dir=job,
+            spec=_stub_spec(tmp_path, [(0, 0), (1, 1)]),
+            log=msgs.append,
+        )
+    )
     layout = scratch.layout_for(local, job)
 
     # ① 产出在 scratch（形状与出厂时逐字相同：`scan_shard_dirs` / `collect_reports` / `data_fp` 零改动）
@@ -614,7 +627,13 @@ def test_rollout_falls_back_byte_for_byte_when_no_candidate(
     monkeypatch.setattr(scratch, "SCRATCH_CANDIDATES", ())
     job = _job_dir(tmp_path)
     msgs: list[str] = []
-    out = run_iter_rollout(job, _stub_spec(tmp_path, [(0, 0)]), log=msgs.append)
+    out = run_iter_rollout(
+        IterRunSpec(
+            job_dir=job,
+            spec=_stub_spec(tmp_path, [(0, 0)]),
+            log=msgs.append,
+        )
+    )
     assert out["report"]["shards"] == 1
     assert (job / "w0" / "rl_s0_seed0" / "manifest.json").exists()
     assert any("回退原地" in m for m in msgs), msgs
@@ -637,7 +656,13 @@ def test_rollout_reports_the_landing_point_and_keeps_the_scratch_path(
     monkeypatch.setattr(scratch, "SCRATCH_CANDIDATES", (str(local),))
     job = _job_dir(tmp_path)
     msgs: list[str] = []
-    out = run_iter_rollout(job, _stub_spec(tmp_path, [(0, 0)]), log=msgs.append)
+    out = run_iter_rollout(
+        IterRunSpec(
+            job_dir=job,
+            spec=_stub_spec(tmp_path, [(0, 0)]),
+            log=msgs.append,
+        )
+    )
 
     # 行为判据：换根真的发生了（候选盘上有 scratch 家），且产出落在本地盘（§3.5：不搬回）
     assert list(local.glob(f"{scratch.SCRATCH_DIR_PREFIX}*")), "候选可用 ⇒ 换根"
@@ -667,7 +692,13 @@ def test_settlement_is_future_return_and_missing_produce_is_loud(
     _only_candidate(monkeypatch, local)
     job = _job_dir(tmp_path)
     msgs: list[str] = []
-    out = run_iter_rollout(job, _stub_spec(tmp_path, [(0, 0), (1, 1)]), log=msgs.append)
+    out = run_iter_rollout(
+        IterRunSpec(
+            job_dir=job,
+            spec=_stub_spec(tmp_path, [(0, 0), (1, 1)]),
+            log=msgs.append,
+        )
+    )
     assert any("2/2 games settled" in m for m in msgs), msgs
     assert out["report"]["shards"] == 2
 
@@ -680,7 +711,7 @@ def test_settlement_is_future_return_and_missing_produce_is_loud(
          "--weights", INIT_WEIGHTS_NAME]
     ]
     with pytest.raises(ProtocolError) as ei:
-        run_iter_rollout(job, spec, log=msgs.append)
+        run_iter_rollout(IterRunSpec(job_dir=job, spec=spec, log=msgs.append))
     assert "没有任何 shard" in str(ei.value), ei.value
 
 

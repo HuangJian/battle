@@ -154,7 +154,8 @@ def test_offline_stage_runs_waves_and_skips_ordinary_seeds(
     ordinary_dir.mkdir(parents=True)
     seen: list[list[tuple[int, int]]] = []
 
-    def fake_run(job_dir, spec, *, ts_dir=None, log=lambda _m: None, ctx=None, it=0, **_kw):
+    def fake_run(ask):
+        job_dir, spec = ask.job_dir, ask.spec
         pairs: list[tuple[int, int]] = []
         dirs: list[str] = []
         for row in spec["argv"]:

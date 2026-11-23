@@ -80,6 +80,7 @@ from common.protocol import (
 )
 from worker import serve_pool
 from worker.iter_run import IterRun as _IterRun
+from worker.iter_run import IterRunSpec as IterRunSpec
 from worker.iter_run import RoundContext as RoundContext
 
 #: 本腿的日志出口（`run_iter_rollout` 的缺省 `log`）：与全仓同一条 `[HH:MM:SS] [tag] msg`
@@ -1565,22 +1566,11 @@ def _finish_run(r: _IterRun) -> dict[str, Any]:
 
 
 
-def run_iter_rollout(
-    job_dir: str | Path,
-    spec: dict,
-    *,
-    ts_dir: str | Path | None = None,
-    log=_log,
-    ctx: RoundContext | None = None,
-    it: int = 0,
-    next_game: Callable[[], list[str] | None] | None = None,
-    on_game_settled: Callable[..., None] | None = None,
-    #: 轮末想并进**同一行**的读数（流式采集的 `summary_line`）。在 `emit` 前一刻调用 ⇒
-    #: 拿到的是收官后的数；异常只记一行（读数不许把一轮 rollout 弄挂）。
-    #: 2026-10-29 日志瘦身：`流式采集：动态加采 …` 原来是独立一行，现在并进轮末那行。
-    volume_line: Callable[[], str] | None = None,
-) -> dict[str, Any]:
+def run_iter_rollout(spec: IterRunSpec) -> dict[str, Any]:
     """执行整轮 rollout，返回 `{report, shard_dirs, rollout_sec, bun_version, game_secs}`。
+
+    入参就是 `IterRunSpec`（9 个旋钮，按名字）—— 原先的 `job_dir` / `spec` 两个位置参数
+    已收进去（`python.refactor.md` §P0-3 批 J；互换不会崩，只会把这一轮跑进错的目录）。
 
     ★ **逐局流式**（2026-10-27，用户口径：「采完一局，立即判差额最大的关，用空出的 worker
     采它，直到所有关满额」）：`next_game` 非空时，本轮采哪几局由调度器**现场**决定——
@@ -1601,17 +1591,7 @@ def run_iter_rollout(
     云机/控制台的进度行会显示成「在处理第 0 轮」（2026-10-24 真机：`y34-hitfix` 已在
     it102，进度行却一直是 `iter it0 2/17`）。它不参与任何判据。
     """
-    r = _IterRun(
-        job_dir=job_dir,
-        spec=spec,
-        ts_dir=ts_dir,
-        log=log,
-        ctx=ctx,
-        it=it,
-        next_game=next_game,
-        on_game_settled=on_game_settled,
-        volume_line=volume_line,
-    )
+    r = _IterRun.from_spec(spec)
     _setup_run(r)
     _setup_scratch(r)
     _setup_pool(r)

@@ -58,6 +58,7 @@ from tests.helpers.stream_spec import (
     stage_of,
     volume_block,
 )
+from worker.iter_run import IterRunSpec
 from worker.volume_quota import stage_seeds
 
 #: 夹具「按住」一局的上限（见 ①）：放行的正路是「第 N 局已开跑」这个**事件**；这个上限只
@@ -235,13 +236,15 @@ def _run_round(
 
     logs: list[str] = []
     info = iter_rollout.run_iter_rollout(
-        job,
-        spec,
-        ts_dir=job,
-        log=logs.append,
-        it=IT,
-        next_game=collector.next_game,
-        on_game_settled=collector.observe,
+        IterRunSpec(
+            job_dir=job,
+            spec=spec,
+            ts_dir=job,
+            log=logs.append,
+            it=IT,
+            next_game=collector.next_game,
+            on_game_settled=collector.observe,
+        )
     )
     return info, logs, collector
 

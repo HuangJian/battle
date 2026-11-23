@@ -38,6 +38,7 @@ from tests.remote.test_rollout_scratch import (
     _watchdog,
 )
 from worker.iter_rollout import RoundContext, run_iter_rollout
+from worker.iter_run import IterRunSpec
 
 
 class _FakePool:
@@ -119,13 +120,27 @@ def test_round_ctx_reuses_pick_tree_and_pool_across_batches(
     job = _job_dir(tmp_path)
     rctx = RoundContext()
     msgs: list[str] = []
-    run_iter_rollout(job, _stub_spec(tmp_path, [(0, 0)]), log=msgs.append, ctx=rctx)
+    run_iter_rollout(
+        IterRunSpec(
+            job_dir=job,
+            spec=_stub_spec(tmp_path, [(0, 0)]),
+            log=msgs.append,
+            ctx=rctx,
+        )
+    )
     assert counts == {"pick": 1, "tree": 1}
     assert len(pools) == 1 and rctx.pool is pools[0], "首批建池并挂到轮级 ctx 上"
     assert rctx.root is not None and rctx.workers >= 1
 
     sub = _second_batch_dir(job, tmp_path)
-    second = run_iter_rollout(sub, _stub_spec(tmp_path, [(1, 1)]), log=msgs.append, ctx=rctx)
+    second = run_iter_rollout(
+        IterRunSpec(
+            job_dir=sub,
+            spec=_stub_spec(tmp_path, [(1, 1)]),
+            log=msgs.append,
+            ctx=rctx,
+        )
+    )
     assert counts == {"pick": 1, "tree": 1}, "补差批不许重跑落点解析 / 重装 TS 树"
     assert len(pools) == 1 and rctx.pool is pools[0], "池不许重建（生命周期 = 轮）"
     assert (pools[0].started, pools[0].closed) == (1, 0), "只冷启动一次，且本批不收（还要给补差批用）"
@@ -152,7 +167,13 @@ def test_pool_ownership_moves_to_the_ctx(tmp_path: Path, monkeypatch: pytest.Mon
 
     own = _FakePool()
     stub_exec(monkeypatch, make_pool=lambda *a, **kw: own)
-    run_iter_rollout(job, _stub_spec(tmp_path, [(0, 0)]), log=lambda _m: None)
+    run_iter_rollout(
+        IterRunSpec(
+            job_dir=job,
+            spec=_stub_spec(tmp_path, [(0, 0)]),
+            log=lambda _m: None,
+        )
+    )
     assert (own.started, own.closed) == (1, 1), "老调用（无 ctx）必须自建自收"
 
     shared = _FakePool()
@@ -161,7 +182,14 @@ def test_pool_ownership_moves_to_the_ctx(tmp_path: Path, monkeypatch: pytest.Mon
     job2 = tmp_path / "job2"
     job2.mkdir()
     (job2 / INIT_WEIGHTS_NAME).write_text('{"w": 1}', encoding="utf-8")
-    run_iter_rollout(job2, _stub_spec(tmp_path, [(0, 0)]), log=lambda _m: None, ctx=rctx)
+    run_iter_rollout(
+        IterRunSpec(
+            job_dir=job2,
+            spec=_stub_spec(tmp_path, [(0, 0)]),
+            log=lambda _m: None,
+            ctx=rctx,
+        )
+    )
     assert (shared.started, shared.closed) == (1, 0), "传 ctx 时本批不许收池（补差批还要用它）"
     rctx.close()
     assert shared.closed == 1
@@ -194,7 +222,7 @@ def test_a_failing_batch_leaves_the_pool_for_the_owner(
     ]
     rctx = RoundContext()
     with pytest.raises(ProtocolError):
-        run_iter_rollout(job, spec, log=lambda _m: None, ctx=rctx)
+        run_iter_rollout(IterRunSpec(job_dir=job, spec=spec, log=lambda _m: None, ctx=rctx))
     assert rctx.pool is pool and pool.closed == 0, "抛出时池还在 ctx 上（等调用方收）"
     rctx.close()
     assert pool.closed == 1
@@ -223,7 +251,14 @@ def test_pool_is_built_at_the_round_slot_width_for_topup_rounds(
     spec["workers"] = 0  # 节点自定 ⇒ 槽位 = cpu_worker_slots() = 4
     spec["volume"] = {"topup": {"max_batches": 3}}
     rctx = RoundContext()
-    run_iter_rollout(_job_dir(tmp_path), spec, log=lambda _m: None, ctx=rctx)
+    run_iter_rollout(
+        IterRunSpec(
+            job_dir=_job_dir(tmp_path),
+            spec=spec,
+            log=lambda _m: None,
+            ctx=rctx,
+        )
+    )
     assert widths == [4], f"补差轮的池要按槽位建（首批只有 1 局）：{widths}"
     assert rctx.workers == 4
 
@@ -254,7 +289,7 @@ def test_narrow_pool_is_rebuilt_to_the_round_slot(
     spec = _stub_spec(tmp_path, [(0, 0)])
     spec["workers"] = 8
     spec["volume"] = {"topup": {"max_batches": 3}}
-    run_iter_rollout(job, spec, log=lambda _m: None, ctx=rctx)
+    run_iter_rollout(IterRunSpec(job_dir=job, spec=spec, log=lambda _m: None, ctx=rctx))
     assert narrow.closed == 1, "窄池必须被收掉（不能把它留给宽批）"
     assert built == [wide] and rctx.pool is wide
 
@@ -266,10 +301,24 @@ def test_round_ctx_fallback_picks_once_too(tmp_path: Path, monkeypatch: pytest.M
     counts = _count_pick_and_tree(monkeypatch)
     job = _job_dir(tmp_path)
     rctx = RoundContext()
-    run_iter_rollout(job, _stub_spec(tmp_path, [(0, 0)]), log=lambda _m: None, ctx=rctx)
+    run_iter_rollout(
+        IterRunSpec(
+            job_dir=job,
+            spec=_stub_spec(tmp_path, [(0, 0)]),
+            log=lambda _m: None,
+            ctx=rctx,
+        )
+    )
     assert (rctx.root, rctx.ts_home) == (None, None)
     sub = _second_batch_dir(job, tmp_path)
-    run_iter_rollout(sub, _stub_spec(tmp_path, [(1, 1)]), log=lambda _m: None, ctx=rctx)
+    run_iter_rollout(
+        IterRunSpec(
+            job_dir=sub,
+            spec=_stub_spec(tmp_path, [(1, 1)]),
+            log=lambda _m: None,
+            ctx=rctx,
+        )
+    )
     assert counts == {"pick": 1, "tree": 0}, "回退档不装树；落点解析也只跑一次"
     assert (sub / "w0" / "rl_s1_seed1" / "manifest.json").exists()
     rctx.cleanup()  # 回退档没有 scratch 要清（幂等且不抛）
