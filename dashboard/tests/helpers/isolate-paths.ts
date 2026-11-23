@@ -88,3 +88,14 @@ const SEED_RL_CONFIG = {
   },
 }
 writeFileSync(process.env.BCITY_RL_CONFIG!, JSON.stringify(SEED_RL_CONFIG, null, 2), 'utf-8')
+
+// 2026-11-23 慢测试：缺省调度器执行体会冷启 python（实测 455ms/进程），而绝大多数
+// 用例只需要 `/api/state` 的其它事实。这里把**缺省**执行体换成空夹具；显式给 runner 的
+// 用例（server-api-loop-queue.test.ts 等）照旧走自己的假输出，验的是同一条解析路径。
+const { setDefaultLoopQueueRunner } = await import('../../src/server/api/loop-queue')
+setDefaultLoopQueueRunner(() => ({
+  code: 0,
+  stdout: '{"courses":[]}',
+  stderr: '',
+  timeout: false,
+}))

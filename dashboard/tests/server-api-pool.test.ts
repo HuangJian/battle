@@ -10,6 +10,8 @@
  */
 
 import { describe, expect, it } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import { buildPoolView, poolCountersView } from '../src/server/api'
 import { poolHistoryCounters } from '../src/server/pool-history'
 
@@ -69,5 +71,13 @@ describe('/api/pool（buildPoolView）', () => {
     expect(typeof c.fullRescans).toBe('number')
     expect(typeof c.bytesRead).toBe('number')
     expect(poolHistoryCounters().calls).toBe(before.calls)
+  })
+})
+
+describe('codeHash 取数不能拖慢冷 /api/pool（2026-11-23 慢测试）', () => {
+  it('从纯模块 codehash-files 取函数，不再 import 重模块 sampler-agent', () => {
+    const src = readFileSync(path.join(import.meta.dir, '../src/server/api/pool.ts'), 'utf-8')
+    expect(src).toContain('tools/agent/codehash-files')
+    expect(src).not.toContain("import('../../../../tools/agent/sampler-agent')")
   })
 })

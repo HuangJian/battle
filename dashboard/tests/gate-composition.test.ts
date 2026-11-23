@@ -65,4 +65,11 @@ describe('dashboard 门禁命令组成', () => {
     expect(entry).toContain('BUN_TEST_WORKER_ID')
     expect(launcher).toContain('BCITY_TEST_GATE')
   })
+
+  it('Windows 上也能取回原始命令行（WMI），否则裸 `bun test` 不转交 ⇒ 同进程污染红', () => {
+    const entry = readFileSync(resolve(DASH, 'tests/helpers/gate-entry.ts'), 'utf8')
+    expect(entry).toContain("process.platform !== 'win32'")
+    expect(entry).toContain('Win32_Process')
+    expect(entry).toContain('windowsArgs()')
+  })
 })

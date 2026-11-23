@@ -39,6 +39,7 @@ import {
   tmpPoolDir,
 } from '../src/core/paths'
 import { ISOLATED_ROOT } from './helpers/isolate-paths'
+import { getLoopQueueView } from '../src/server/api/loop-queue'
 
 describe('测试路径隔离（helpers/isolate-paths.ts 预载）', () => {
   it('隔离根本身在 OS 临时目录里，不在仓库内', () => {
@@ -94,6 +95,13 @@ describe('测试路径隔离（helpers/isolate-paths.ts 预载）', () => {
   it('curriculaDir 刻意**不**隔离（入库源数据，与 src/ 同级）', () => {
     // 这条是上面边界的反面证据：哪天有人把它也加进预载，这里会红，逼他先想清楚。
     expect(curriculaDir().startsWith(REPO_ROOT)).toBe(true)
+  })
+
+  it('缺省调度器执行体已被预载替换（测试不冷启 python，455ms/进程）', async () => {
+    const v = await getLoopQueueView()
+    expect(v.error ?? null).toBeNull()
+    expect(v.rows).toEqual([])
+    expect(v.trainingCount).toBe(0)
   })
 })
 
