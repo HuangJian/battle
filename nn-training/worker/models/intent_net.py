@@ -36,6 +36,7 @@ if _ilu.find_spec("common") is None:
 
 from common.cli import house_parser, run_main
 from common.schema import BOARD, OBS_CHANNELS, SCALAR_DIM
+from worker.models.arch_meta import NetSpec
 from worker.models.student import StudentNet
 
 # 仓库根（models/ 上溯 3 层；2026-09-08 双 tmp 统一：相对 tmp/ 一律锚定仓库根 tmp/）
@@ -50,10 +51,10 @@ INJECT_DIM = 9  # one-hot(8) + duration(1)
 class IntentNet(StudentNet):
     """StudentNet 主干 + 三意图头（+可选 value 头，M8）。"""
 
-    def __init__(self, inject: bool = False, with_value: bool = False, **kwargs):
+    def __init__(self, spec: NetSpec, inject: bool = False, with_value: bool = False):
         self.inject = inject
         self.inject_dim = INJECT_DIM
-        super().__init__(**kwargs)
+        super().__init__(spec)
         head_in = self.head_hidden + INJECT_DIM  # 137
         self.intent_head = nn.Linear(head_in, INTENT_DIM)
         self.enemy_head = nn.Linear(head_in, ENEMY_HEAD_DIM)
@@ -113,7 +114,7 @@ def export_intent_weights(model: IntentNet, out_path: str) -> None:
     from worker.data.weights_io import save_weights_json
 
     sd = model.state_dict()
-    ref = StudentNet().state_dict()
+    ref = StudentNet(NetSpec()).state_dict()
     missing = [k for k in ref if k not in sd]
     shape_mismatch = [k for k in ref if k in sd and tuple(sd[k].shape) != tuple(ref[k].shape)]
     if missing or shape_mismatch:
@@ -142,10 +143,12 @@ def build_intent_model(meta: dict, params: dict) -> IntentNet:
     """
     arch = meta.get("arch", {})
     model = IntentNet(
+        NetSpec(
+            h=arch.get("h", 64),
+            d=arch.get("d", 8),
+            head_hidden=arch.get("head_hidden", 128),
+        ),
         inject=True,
-        h=arch.get("h", 64),
-        d=arch.get("d", 8),
-        head_hidden=arch.get("head_hidden", 128),
     )
     model.load_state_dict(params, strict=False)
     model.eval()
@@ -193,7 +196,7 @@ def main() -> None:
         export_golden(args.golden, args.h, args.d, args.golden_seed)
         return
 
-    m = IntentNet(h=args.h, d=args.d)
+    m = IntentNet(NetSpec(h=args.h, d=args.d))
     n = sum(int(p.numel()) for p in m.parameters())
     print(f"IntentNet params: {n} (~{n / 1000:.1f}K)")
     obs = torch.zeros(2, OBS_CHANNELS, BOARD, BOARD, dtype=torch.uint8)
@@ -231,7 +234,7 @@ def export_golden(path: str, h: int, d: int, seed: int) -> None:
     inj[0, 0] = 1.0  # prev 类 0 热
 
     torch.manual_seed(seed + 1)
-    m = IntentNet(h=h, d=d, with_value=True).eval()
+    m = IntentNet(NetSpec(h=h, d=d), with_value=True).eval()
     with torch.no_grad():
         i_log, e_log, a_log, v_log = m.forward_rl(obs, sc, inj)
 

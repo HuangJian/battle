@@ -21,6 +21,7 @@ torch = pytest.importorskip("torch")
 from worker.bc_config import load_bc_course
 from worker.data.npyio import load_dataset
 from worker.data.weights_io import save_weights_json
+from worker.models.arch_meta import NetSpec
 from worker.models.student import PPOStudent
 from worker.train.bc import _freeze_non_value, train
 
@@ -97,7 +98,7 @@ def test_v6_loader_reads_optional_returns(corpus: Path) -> None:
 def test_value_only_preserves_every_non_value_parameter(corpus: Path, tmp_path: Path) -> None:
     init = tmp_path / "init.json"
     torch.manual_seed(7)
-    model = PPOStudent(action_v6=True, policy_extra=True)
+    model = PPOStudent(NetSpec(action_v6=True, policy_extra=True))
     save_weights_json(model, str(init), extra_meta={"arch": model.arch()})
     before = json.loads(init.read_text(encoding="utf-8"))["params"]
 
@@ -115,7 +116,7 @@ def test_value_only_preserves_every_non_value_parameter(corpus: Path, tmp_path: 
 
 
 def test_freeze_non_value_keeps_only_value_head_trainable() -> None:
-    model = PPOStudent(action_v6=True)
+    model = PPOStudent(NetSpec(action_v6=True))
     _freeze_non_value(model)
     for name, p in model.named_parameters():
         assert p.requires_grad is name.startswith("value_head."), name

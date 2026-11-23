@@ -39,6 +39,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from worker.models.arch_meta import NetSpec
 from worker.models.student import PPOStudent
 from worker.ppo.engine import ppo_update
 from worker.ppo.update_spec import TorchUpdateSpec
@@ -81,7 +82,7 @@ def _chunks(n_chunks: int = 3, b: int = 8, seed: int = 0) -> list[dict]:
 
 def _fresh(seed: int = 1234, *, v6: bool = False):
     torch.manual_seed(seed)
-    model = PPOStudent(h=8, d=1, action_v6=v6)
+    model = PPOStudent(NetSpec(h=8, d=1, action_v6=v6))
     opt = torch.optim.Adam(model.parameters(), lr=1.5e-4)
     return model, opt
 
@@ -135,7 +136,7 @@ def _run(
 
 def test_ref_forward_called_once_per_chunk() -> None:
     """epochs=4、3 个 chunk -> ref 前向恰好 3 次（旧行为是 12 次）。"""
-    ref = _CountingRef(PPOStudent(h=8, d=1).eval())
+    ref = _CountingRef(PPOStudent(NetSpec(h=8, d=1)).eval())
     for p in ref.parameters():
         p.requires_grad_(False)
     _run(epochs=4, ref=ref)
@@ -146,9 +147,9 @@ def test_determinism_with_cached_ref() -> None:
     """同种子两次运行聚合指标完全一致（缓存不引入不确定性）。"""
     # 两个 ref 必须同种子——否则比的是两份不同权重的 ref，不是缓存的不确定性。
     torch.manual_seed(99)
-    ref_a = PPOStudent(h=8, d=1).eval()
+    ref_a = PPOStudent(NetSpec(h=8, d=1)).eval()
     torch.manual_seed(99)
-    ref_b = PPOStudent(h=8, d=1).eval()
+    ref_b = PPOStudent(NetSpec(h=8, d=1)).eval()
     a = _run(epochs=2, ref=ref_a)
     b = _run(epochs=2, ref=ref_b)
     assert set(a) >= AGG_KEYS, f"聚合缺键：{AGG_KEYS - set(a)}"
@@ -164,7 +165,7 @@ def test_kickstart_zero_without_ref() -> None:
 
 def test_kickstart_active_with_ref() -> None:
     """有 ref 时 kickstart 必须是非零有限值（否则说明 KL 项根本没进 loss）。"""
-    ref = PPOStudent(h=8, d=1).eval()
+    ref = PPOStudent(NetSpec(h=8, d=1)).eval()
     for p in ref.parameters():
         p.requires_grad_(False)
     agg = _run(epochs=1, ref=ref, kickstart_kl=1.0)
@@ -177,7 +178,7 @@ def test_kickstart_active_with_ref() -> None:
 
 def test_v6_ref_forward_is_4_tuple_and_survives() -> None:
     """v6 ref 返回 4 头，缓存段不得再按 3 元解包（现场：y32 两腿 grad 段连炸）。"""
-    ref = _CountingRef(PPOStudent(h=8, d=1, action_v6=True).eval())
+    ref = _CountingRef(PPOStudent(NetSpec(h=8, d=1, action_v6=True)).eval())
     for p in ref.parameters():
         p.requires_grad_(False)
     agg = _run(epochs=2, ref=ref, v6=True)
@@ -193,9 +194,9 @@ def test_v6_kickstart_anchors_the_hold_head() -> None:
     自由度，漏锚等于 kickstart 对它完全不生效。漏锚时下面两次读数**逐位相同**。
     """
     torch.manual_seed(11)
-    ref_a = PPOStudent(h=8, d=1, action_v6=True).eval()
+    ref_a = PPOStudent(NetSpec(h=8, d=1, action_v6=True)).eval()
     torch.manual_seed(11)
-    ref_b = PPOStudent(h=8, d=1, action_v6=True).eval()
+    ref_b = PPOStudent(NetSpec(h=8, d=1, action_v6=True)).eval()
     with torch.no_grad():
         assert ref_b.hold_head is not None
         # 只抬**一类**：hold 是 2 类 softmax，给两类同加一个常数是平移不变变换
@@ -211,7 +212,7 @@ def test_v6_kickstart_anchors_the_hold_head() -> None:
 
 def test_v6_ref_with_legacy_data_is_rejected_loudly() -> None:
     """ref 与语料不同代 ⇒ 响亮拒绝（不能靠掩码切片静默错位）。"""
-    ref = PPOStudent(h=8, d=1, action_v6=True).eval()
+    ref = PPOStudent(NetSpec(h=8, d=1, action_v6=True)).eval()
     for p in ref.parameters():
         p.requires_grad_(False)
     with pytest.raises(ValueError, match="不同源"):
@@ -220,7 +221,7 @@ def test_v6_ref_with_legacy_data_is_rejected_loudly() -> None:
 
 def test_legacy_ref_with_v6_data_is_rejected_loudly() -> None:
     """反方向同一条判据（legacy ref + v6 语料）。"""
-    ref = PPOStudent(h=8, d=1).eval()
+    ref = PPOStudent(NetSpec(h=8, d=1)).eval()
     for p in ref.parameters():
         p.requires_grad_(False)
     with pytest.raises(ValueError, match="不同源"):

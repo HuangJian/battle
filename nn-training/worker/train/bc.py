@@ -60,6 +60,7 @@ from common.log import say
 from common.schema import OBS_SCHEMA_MAJOR
 from worker.data.dataset import LoaderSpec, make_loaders
 from worker.data.weights_io import load_state_into, save_weights_json
+from worker.models.arch_meta import NetSpec
 from worker.models.core import NNPolicy, param_count
 from worker.models.student import PPOStudent, StudentNet
 
@@ -983,14 +984,11 @@ def train(args) -> dict:
                 "--policy-coef 0 是 value-only：需要 --arch student 且 --value-coef > 0"
                 "（否则没有任何可训练目标）"
             )
+    spec = NetSpec(action_v6=action_v6, policy_extra=policy_extra)
     model = (
-        PPOStudent(action_v6=action_v6, policy_extra=policy_extra)
+        PPOStudent(spec)
         if use_value
-        else (
-            StudentNet(action_v6=action_v6, policy_extra=policy_extra)
-            if args.arch == "student"
-            else NNPolicy()
-        )
+        else (StudentNet(spec) if args.arch == "student" else NNPolicy())
     )
     if getattr(args, "resume", None):
         say(f"[train] resuming from {args.resume}")

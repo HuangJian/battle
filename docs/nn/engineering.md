@@ -29,6 +29,42 @@
 
 ---
 
+## §319 P0-3 批 C2：学生网双生 `StudentNet` / `PPOStudent`（各 9）→ `NetSpec`（13 → 11）（2026-11-23）
+
+* **一把刀两个文件，同一份构造面**：`worker/models/student.py`（torch）与
+  `worker/models/student_paddle.py`（paddle）的 `StudentNet.__init__` / `PPOStudent.__init__`
+  各 9 个关键字参数 → 一个 `NetSpec`（frozen + kw_only，住 `worker/models/arch_meta.py`
+  —— 那是两个框架**本来就有**的共用面，和 `arch()` / `policy_input_dim` / `build_ppo` 同一个家）。
+  读数：宽签名 **13 → 11**、11 → **9 文件**（两个条目从 `WIDE_FUNCS_BASELINE` 删除）。
+* **为什么值得动**：九个位全带缺省，而它们分两族 —— `in_ch`/`board`/`scalar_dim` 三个**形状**、
+  `h`/`d`/`head_hidden` 三个**宽度**、`policy_extra`/`spatial_tower`/`action_v6` 三个**相邻布尔档**。
+  互换任何一对都**不抛异常**：建出来的就是另一个架构的模型，而 `arch()` 会把这个错的档写进
+  权重文件 —— 混跑的机器要么装载时才炸（形状对不上），要么**照跑但是另一个网络**。
+  按名字构造后，拼错的键当场 `TypeError`。
+* **顺手把「权重清单 → 构造参数」那份裸 dict 收掉**：`read_arch_kwargs` 返回的
+  `dict[str, Any]` 只为了 `**kwargs` 展开（`Any` 的来源，也是拼错键名不报错的来源），
+  改成 `read_arch_spec(...) -> NetSpec`；`build_ppo` 的工厂类型从 `type[ModelT]`（mypy 读成
+  `type[object]` ⇒ “Too many arguments for object”）收成 `Callable[[NetSpec], ModelT]`。
+  该文件 `Any` 1 → 0，`tests/golden/any_baseline.json` 同步下调（额度只许降）。
+* **子类跟着收**：`GoalNet(spec, with_value=…)` / `IntentNet(spec, inject=…, with_value=…)` /
+  `GoalRLNet(spec)` / `IntentRLNet(spec)` / `IntentProbeNet(spec, inject=…)` —— 各子类的
+  `with_value` / `inject` **留在 spec 外面**（它们是「这一族网络多不多一个头」，不是架构档，
+  而且 `**kwargs` 里塞 `setdefault` 的旧写法正是「传错就静默用缺省」那一类）。
+* **调用面 120 处机械改写**（生产 12 处、工具 16 处、用例 92 处）：`X()` → `X(NetSpec())`、
+  `X(h=8, d=1)` → `X(NetSpec(h=8, d=1))`。改写脚本按 AST 定位 `Call` 节点且**只碰没有位置实参**
+  的调用（有位置实参的当场 abort 交人工）—— 手写正则会把 `StudentNet(NetSpec())` 二次包一层。
+* **两个坑**（都是「改完才发现」，值得记）：
+  ① `ruff format .` **不是**本仓的门禁子命令（门禁只跑 `ruff check .`），全仓 `ruff format` 一次
+  会改写 631 个文件（本机 ruff 0.16.6 与仓库现状的换行/空行口径不同）⇒ 收尾只对自己的
+  文件跑，`git diff --stat` 里不应出现与本次无关的文件；
+  ② 子类 `**kwargs` 转发（`GoalRLNet` / `IntentRLNet`）在第一步 grep 里看不见 ——
+  搜 `GoalNet(` 抓不到 `GoalRLNet(h=32, d=2)`，而 mypy 全会错：**收构造面时要按「谁继承它」
+  再搜一遍**，不能只搜构造名。
+* **验收**：`bun run pygate` 绿（6951 passed）；守卫 `tests/worker/test_net_spec.py`（字段表冻结 /
+  frozen + kw_only / 两个入口只吃一份 spec（旧关键字面与无参面都 TypeError）/ `build_ppo` 把 spec
+  交给工厂 / 缺省路径 = legacy 128 / 三个布尔档各自换形 + 塔必须配 extra / **双生同源**：同一份
+  spec 在 torch 与 paddle 上 `arch()` 与 `policy_input_dim` 逐字段相同）。
+
 ## §318 P0-3 批 F4：`hub_http` 的 `wait_job` / `report_job_failure`（各 9）→ `WaitJobSpec` / `HubFailSpec`（15 → 13）（2026-11-22）
 
 * **一把刀两处，同一族**：`remote/hub_http` 的 job 控制面薄壳各收一份 spec ——

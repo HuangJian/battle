@@ -32,6 +32,7 @@ from common.schema import (
     OBS_CHANNELS,
     SCALAR_DIM,
 )
+from worker.models.arch_meta import NetSpec
 from worker.models.student import (
     DEFAULT_D,
     DEFAULT_H,
@@ -50,7 +51,7 @@ def _dummy(batch: int = 2, device="cpu"):
 
 def test_student_forward_shape_and_budget() -> None:
     torch.manual_seed(0)
-    m = StudentNet()
+    m = StudentNet(NetSpec())
     obs, sc = _dummy()
     mv, fr = m(obs, sc)
     assert tuple(mv.shape) == (2, MOVE_DIM), f"move logits (2,{MOVE_DIM}) (got {tuple(mv.shape)})"
@@ -62,7 +63,7 @@ def test_student_forward_shape_and_budget() -> None:
 
 def test_ppo_student_value_head() -> None:
     torch.manual_seed(1)
-    m = PPOStudent()
+    m = PPOStudent(NetSpec())
     obs, sc = _dummy()
     mv, fr, val = m(obs, sc)
     assert tuple(val.shape) == (2, 1), f"value head (2,1)（got {tuple(val.shape)}）"
@@ -70,7 +71,7 @@ def test_ppo_student_value_head() -> None:
     assert tuple(m.move_head.weight.shape) == (MOVE_DIM, m.head_hidden), f"move_head.weight shape ({MOVE_DIM},{m.head_hidden})（got {tuple(m.move_head.weight.shape)}）"
     assert m.move_head.weight.shape[0] == 5, "线上动作头 == 5 槽（0=STOP,1..4=方向）"
     # value head 是额外参数；学生主干与 StudentNet 同参数
-    n_student = param_count(StudentNet())
+    n_student = param_count(StudentNet(NetSpec()))
     n_ppo = param_count(m)
     # 128+1 = head_hidden→1
     assert n_ppo == n_student + 129, f"PPOStudent = StudentNet + value_head（{n_ppo} vs {n_student}+129）"
@@ -79,7 +80,7 @@ def test_ppo_student_value_head() -> None:
 def test_action_v6_heads() -> None:
     """B1 v6: hold_head presence switches the heads to hold2/move4/fire3."""
     torch.manual_seed(2)
-    m = StudentNet(h=16, d=2, action_v6=True)
+    m = StudentNet(NetSpec(h=16, d=2, action_v6=True))
     obs, sc = _dummy()
     mv, fr, hd = m(obs, sc)
     assert tuple(mv.shape) == (2, MOVE4_DIM), f"v6 move logits (2,{MOVE4_DIM})（got {tuple(mv.shape)}）"
@@ -87,13 +88,13 @@ def test_action_v6_heads() -> None:
     assert tuple(hd.shape) == (2, HOLD_DIM), f"v6 hold logits (2,{HOLD_DIM})（got {tuple(hd.shape)}）"
     assert m.arch().get("actionV6") is True, "arch 记录 actionV6（与权重同行的自述）"
 
-    pm = PPOStudent(h=16, d=2, action_v6=True)
+    pm = PPOStudent(NetSpec(h=16, d=2, action_v6=True))
     out = pm(obs, sc)
     assert len(out) == 4, f"PPOStudent v6 = (move, fire, hold, value)（got {len(out)}）"
     assert tuple(out[3].shape) == (2, 1), "v6 value head (2,1)"
 
     # Legacy default must stay exactly 5/2 and expose no hold head.
-    legacy = StudentNet(h=16, d=2)
+    legacy = StudentNet(NetSpec(h=16, d=2))
     assert legacy.hold_head is None, "legacy StudentNet 不带 hold_head"
     assert legacy.arch().get("actionV6") is None, "legacy arch 不写 actionV6"
 
@@ -115,7 +116,7 @@ def test_coord_channels_formula() -> None:
 
 
 def test_arch_metadata() -> None:
-    m = StudentNet()
+    m = StudentNet(NetSpec())
     a = m.arch()
     assert a["kind"] == "student", "arch.kind == student"
     assert a["h"] == DEFAULT_H and a["d"] == DEFAULT_D, "arch 记录 h/d"
@@ -125,9 +126,9 @@ def test_arch_metadata() -> None:
 
 def test_deterministic_init() -> None:
     torch.manual_seed(99)
-    m1 = StudentNet()
+    m1 = StudentNet(NetSpec())
     torch.manual_seed(99)
-    m2 = StudentNet()
+    m2 = StudentNet(NetSpec())
     for (k1, p1), (k2, p2) in zip(m1.state_dict().items(), m2.state_dict().items(), strict=True):
         assert k1 == k2 and torch.equal(p1, p2), f"同 seed 初始化逐位一致（{k1}）"
 
@@ -149,7 +150,7 @@ def test_stem_input_normalization_folded() -> None:
     """
     import torch
 
-    m = StudentNet(h=16, d=2)
+    m = StudentNet(NetSpec(h=16, d=2))
     # stem.weight 的 kaiming 边界 ≈ sqrt(6/(fan_in))，fan_in=16*9=144
     bound = (6.0 / 144.0) ** 0.5
     assert float(m.stem.weight.abs().max()) <= bound / 255.0 + 1e-6, (

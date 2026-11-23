@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
 
 from common.schema import BOARD, OBS_CHANNELS, POLICY_EXTRA_DIM
 from worker.data.weights_io import load_state_into, load_weights_json, save_weights_json
+from worker.models.arch_meta import NetSpec
 from worker.models.student import PPOStudent
 from worker.ppo.engine import build_ppo
 from worker.scripts.migrate_obs_channel import migrate
@@ -35,7 +36,7 @@ from worker.scripts.migrate_obs_channel import migrate
 def _legacy_source(tmp_path: Path, *, policy_extra: bool = False) -> Path:
     """合成 v6 档（16 obs 通道）起点：旧宽度模型存盘，再把 schema_major 改回 6。"""
     torch.manual_seed(3)
-    model = PPOStudent(in_ch=OBS_CHANNELS - 1, policy_extra=policy_extra)
+    model = PPOStudent(NetSpec(in_ch=OBS_CHANNELS - 1, policy_extra=policy_extra))
     src = tmp_path / "v6-src.json"
     save_weights_json(model, str(src))
     meta = json.loads(src.read_text(encoding="utf-8"))
@@ -85,7 +86,7 @@ def test_old_schema_input_is_bit_exact(tmp_path: Path) -> None:
     target = build_ppo(str(dst))
     assert target.in_ch == OBS_CHANNELS
     assert load_state_into(target, str(dst)) == []  # 严格 schema 门 + 全键装载
-    source = PPOStudent(in_ch=OBS_CHANNELS - 1, policy_extra=True)
+    source = PPOStudent(NetSpec(in_ch=OBS_CHANNELS - 1, policy_extra=True))
     _, old = load_weights_json(str(src), allow_legacy_schema=True)
     source.load_state_dict(old)
     source.eval()
@@ -104,7 +105,7 @@ def test_old_schema_input_is_bit_exact(tmp_path: Path) -> None:
 def test_refuses_source_at_current_schema(tmp_path: Path) -> None:
     torch.manual_seed(5)
     src = tmp_path / "current.json"
-    save_weights_json(PPOStudent(), str(src))
+    save_weights_json(PPOStudent(NetSpec()), str(src))
     with pytest.raises(SystemExit, match="没有可迁移的通道"):
         migrate(str(src), str(tmp_path / "out.json"))
 

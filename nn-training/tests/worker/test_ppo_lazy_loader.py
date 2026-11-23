@@ -210,6 +210,7 @@ def _ppo_update_parity(tmp_path: Path) -> None:
     """同 seed 跑 eager chunks 与 lazy chunks 的完整 ppo_update，最终权重逐字节一致。"""
     import torch
 
+    from worker.models.arch_meta import NetSpec
     from worker.models.student import PPOStudent
     from worker.ppo.engine import ppo_update
 
@@ -220,11 +221,11 @@ def _ppo_update_parity(tmp_path: Path) -> None:
     _assert_same_chunks(chunks_e, chunks_l)
 
     torch.manual_seed(0)
-    m1 = PPOStudent()
+    m1 = PPOStudent(NetSpec())
     torch.manual_seed(0)
-    m2 = PPOStudent()
+    m2 = PPOStudent(NetSpec())
     torch.manual_seed(1)
-    ref = PPOStudent()
+    ref = PPOStudent(NetSpec())
     ref.eval()
     for p in ref.parameters():
         p.requires_grad = False
@@ -410,6 +411,7 @@ def test_load_ppo_episodes_passes_manifest_loader(monkeypatch) -> None:
 def test_paddle_ppo_update_eager_lazy_final_weights_identical(tmp_path: Path) -> None:
     paddle = pytest.importorskip("paddle")
 
+    from worker.models.arch_meta import NetSpec
     from worker.models.student_paddle import PPOStudent
     from worker.ppo import engine_paddle
 
@@ -421,11 +423,11 @@ def test_paddle_ppo_update_eager_lazy_final_weights_identical(tmp_path: Path) ->
 
     paddle.set_device("cpu")
     paddle.seed(0)
-    m1 = PPOStudent(h=8, d=1, head_hidden=16)
+    m1 = PPOStudent(NetSpec(h=8, d=1, head_hidden=16))
     paddle.seed(0)
-    m2 = PPOStudent(h=8, d=1, head_hidden=16)
+    m2 = PPOStudent(NetSpec(h=8, d=1, head_hidden=16))
     paddle.seed(1)
-    ref = PPOStudent(h=8, d=1, head_hidden=16)
+    ref = PPOStudent(NetSpec(h=8, d=1, head_hidden=16))
     ref.eval()
     for p in ref.parameters():
         p.stop_gradient = True

@@ -43,6 +43,7 @@ if str(_NN) not in sys.path:
 from common.cli import house_parser, run_main
 from common.schema import BOARD
 from worker.data.weights_io import load_weights_json
+from worker.models.arch_meta import NetSpec
 from worker.models.student import PPOStudent
 
 OBS_CH = 16
@@ -86,11 +87,9 @@ def auc_score(scores: np.ndarray, labels: np.ndarray) -> float:
 def load_model(weights_path: str) -> PPOStudent:
     meta, params = load_weights_json(weights_path)
     arch = meta.get("arch", meta) if isinstance(meta, dict) else {}
-    model = PPOStudent(
-        h=int(arch.get("h", 64)),
+    model = PPOStudent(NetSpec(h=int(arch.get("h", 64)),
         d=int(arch.get("d", 8)),
-        head_hidden=int(arch.get("head_hidden", 128)),
-    )
+        head_hidden=int(arch.get("head_hidden", 128)),))
     missing, unexpected = model.load_state_dict(params, strict=False)
     if missing:
         raise RuntimeError(f"权重缺键: {missing[:5]}...")

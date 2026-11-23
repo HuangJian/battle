@@ -1822,7 +1822,7 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      `BcEvalSpec` · `remote/colab_bc.run_training`(**10 位置参数**) → `TrainRun` ⇒ 全仓 34 → **30**、
      28 → **24** 文件（§306；守 `tests/remote/test_bc_job_spec.py` / `tests/trainer/test_publish_bc_spec.py` /
      `tests/worker/test_bc_eval_spec.py`）。
-     **下一批见下面「P0-3 剩余宽签名：分文件分批待办」（C2、D–H）**。
+     **下一批见下面「P0-3 剩余宽签名：分文件分批待办」（D2c、E、F）** —— C2 已落（§319）。
      `make_loaders` / `archive_course` / `collect_corpus` 与 `bc_ingest` 三兄弟
      已收成 spec（§273）；`load_ppo_corpus` / `ingest_offline_artifact` /
      `resumed_manifests` 紧随其后（§274）。审计的「124」是 2026-11-19 上游合入前的读数，合入带进了新的宽签名）。
@@ -1854,7 +1854,7 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      「`UnitLedger` 的字段集 + 只收一个对象」重锚（`LEDGER_FIELDS` + `_settle()`
      构造 `UnitLedger`），没有删任何一条判据；顺带发现**同族陷阱第 4 种形态 = 换模块**（patch 锚点、
      入边归属者表、行构造守卫、`GATE_SITES` 都要跟着换家，否则静默空转）。
-   * **P0-3 剩余宽签名：分文件分批待办（2026-11-22 实测 13 个 / 11 文件；A 批 ⇒ §304、B 批 ⇒ §305、C 批 ⇒ §306、D1 ⇒ §307、G 批 ⇒ §308、H1 ⇒ §309、H2 ⇒ §310、G2 ⇒ §311、D2 ⇒ §312–§314、F1 ⇒ §315、F2 ⇒ §316、F3 ⇒ §317、F4 ⇒ §318）**
+   * **P0-3 剩余宽签名：分文件分批待办（2026-11-23 实测 11 个 / 9 文件；A 批 ⇒ §304、B 批 ⇒ §305、C 批 ⇒ §306、D1 ⇒ §307、G 批 ⇒ §308、H1 ⇒ §309、H2 ⇒ §310、G2 ⇒ §311、D2 ⇒ §312–§314、F1 ⇒ §315、F2 ⇒ §316、F3 ⇒ §317、F4 ⇒ §318、C2 ⇒ §319）**
 
      按**同一装配面 + 同一层**分批，每批 = 一把刀（spec 住同模块或就近轻模块 + 删
      `WIDE_FUNCS_BASELINE` 条目 + 一份字段表守卫 + `engineering.md` 一节 + `DECISIONS` 一条）。
@@ -1865,7 +1865,7 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
      | ~~**A · PPO 两入口**~~ **已完成（§304，43 → 40）** | ~~`ppo_update_goal` / `ppo_update_intent` / `load_episodes_common`~~ | 实测：入口形参表被 `test_ppo_loop_core` 钉着 ⇒ 契约改钉 `HeadUpdateSpec` 字段表；端口保留 `**update_kwargs`，错键在 `from_port` 构造时爆 |
      | ~~**B · hub 推送/派发**~~ **已完成（§305，40 → 34）** | ~~`hub/offline_push.__init__`(12) · `_settle_assignment`(8→`SettlePlan`) · `remote/push_dispatch.__init__`(11) · `_await_result`(8→`JobLeg`，顺手删死参 `rec`) · `remote/push_client.submit_job`(8→`(url, token, JobUpload)`) · `remote/push_register.Registry.__init__`(9→`RegistrySpec`)~~ | 实测：`_settle_assignment` 收的是那**四个同名开关**（`SettlePlan`，写读同源），不是前四项位置；`submit_job` **端点不收**（同腿四处端点一个形状）；守 `tests/hub/test_push_spec.py` |
      | ~~**C1 · BC 链四入口**~~ **已完成（§306，34 → 30）** | ~~`remote/bc_job._run_bc_job`(12) · `trainer/bc_loop.publish_bc_job`(12) · `worker/bc_eval.dispatch_bc_eval`(12) · `remote/colab_bc.run_training`(10 位置参数)~~ | 实测：`BcJobSpec` 必须住 L1 的 `remote/job_spec` —— 装配点 `job_shell`(L4) 不许 import `bc_job`(L4)；`run_training` 十个位置参数全是 str/Path/int ⇒ 最危险的反而是它；守 `tests/remote/test_bc_job_spec.py` · `tests/trainer/test_publish_bc_spec.py` · `tests/worker/test_bc_eval_spec.py` |
-     | **C2 · 学生网** | `worker/models/student.__init__`(10) · `worker/models/student_paddle.__init__`(10) | **同形双生**（torch / paddle）⇒ 同刀共收一份 spec；22 处调用多是 `StudentNet()` / `StudentNet(h=16, d=2)`，先定「第 9 个参数怎么并」（9 个 kw 缺省），再决定 spec 是「架构 + 旋钮袋」还是两段 |
+     | ~~**C2 · 学生网**~~ **已完成（§319，13 → 11）** | ~~`worker/models/student.__init__`(10) · `worker/models/student_paddle.__init__`(10)~~ | 实测：**同形双生**（torch / paddle）⇒ 同刀共收一份 `NetSpec`（住 `worker/models/arch_meta.py`），**六个子类**（`PPOStudent` / `GoalNet` / `IntentNet` / `GoalRLNet` / `IntentRLNet` / `IntentProbeNet`）一并只收 spec，`read_arch_kwargs` 改成返回 spec 的 `read_arch_spec`；120 处调用点（含工具/用例）按 AST 改写；守 `tests/worker/test_net_spec.py` | 原估：22 处调用多是 `StudentNet()` / `StudentNet(h=16, d=2)`，先定「第 9 个参数怎么并」（9 个 kw 缺省），再决定 spec 是「架构 + 旋钮袋」还是两段 |
      | ~~**D1 · 一轮的两份输入**~~ **已完成（§307，30 → 28）** | ~~`worker/greedy_round.run_greedy_round`(12) · `trainer/loop_transport._push_job_round`(10)~~ | 实测：坏点是**相邻同类位**（`it`/`rotate_seed`/`round_target` 三个 int、`manifest`/`jid`、两个 bytes）；`merge_memory_shards` 同批改通但**撞 `remote/hub_client.py` LOC 999/1000** ⇒ 已回滚，按 §230 先拆 `hub_client` 的发布侧合并段；守 `tests/worker/test_greedy_round_spec.py` · `tests/trainer/test_push_round_spec.py` |
      | ~~**D2a · `LaneSpec` + `BreakerSpec`**~~ **已完成（§312 · §313，21 → 19）** | ~~`trainer/queue_local.__init__`(12) · `worker/breaker.breaker_update`(12)~~ | 实测：`LaneSpec` 只是一份共享账（`local_cap`/`last_remote_ok`）+ 两个 Event；`breaker_update` 是**五条相邻阈值分属 KL/ENT 两族**（19 处调用，生产 2 + 用例 17）；守 `tests/trainer/test_lane_spec.py` · `tests/worker/test_breaker_spec.py` |
      | ~~**D2b · `RolloutCmdSpec`**~~ **已完成（§314，19 → 18）** | ~~`worker/cmd.build_rollout_cmd`(10，15 调用)~~ | 实测：`stage`/`seed`、`weights`/`out_dir`、`wver`/`node_label`/`code_sha` 三对相邻；改写要防「行内注释吞掉下一个关键字」；`args: Any` 进 `any_baseline`（同族先例）；守 `tests/worker/test_rollout_cmd_spec.py` |

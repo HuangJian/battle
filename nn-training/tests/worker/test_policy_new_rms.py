@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.schema import POLICY_EXTRA_DIM, SCALAR_DIM
+from worker.models.arch_meta import NetSpec
 from worker.models.student import SPATIAL_TOWER_FC_OUT, PPOStudent
 from worker.ppo.engine import policy_new_rms_of
 
@@ -29,7 +30,7 @@ from worker.ppo.engine import policy_new_rms_of
 def test_leg_a_covers_both_heads() -> None:
     """腿 A：返回值 = move+fire 双头新列片联合 rms（列片与 value 同一片 [128,165)）。"""
     torch.manual_seed(0)
-    m = PPOStudent(policy_extra=True)
+    m = PPOStudent(NetSpec(policy_extra=True))
     with torch.no_grad():
         m.move_head.weight.fill_(2.0)
         m.fire_head.weight.fill_(4.0)
@@ -51,7 +52,7 @@ def test_leg_a_covers_both_heads() -> None:
 def test_read_only_never_writes() -> None:
     """纯只读：调用前后双头权重逐位等；两次调用返回值相等（无 RNG、无状态）。"""
     torch.manual_seed(1)
-    m = PPOStudent(policy_extra=True)
+    m = PPOStudent(NetSpec(policy_extra=True))
     before_move = m.move_head.weight.clone()
     before_fire = m.fire_head.weight.clone()
     r1 = policy_new_rms_of(m)
@@ -62,7 +63,7 @@ def test_read_only_never_writes() -> None:
 
 def test_legacy_and_missing_heads_return_zero() -> None:
     """legacy（空片）→ 0.0；缺头（无 move/fire）→ 0.0；权重逐位不动。"""
-    legacy = PPOStudent()
+    legacy = PPOStudent(NetSpec())
     before = legacy.move_head.weight.clone()
     assert float(policy_new_rms_of(legacy)) == 0.0
     assert torch.equal(legacy.move_head.weight, before)
@@ -73,7 +74,7 @@ def test_legacy_and_missing_heads_return_zero() -> None:
 def test_tower_covers_whole_head() -> None:
     """塔：整头相对旧 128 全是新的 ⇒ 双头全宽进 rms（与 value 同一片语义）。"""
     torch.manual_seed(2)
-    m = PPOStudent(policy_extra=True, spatial_tower=True)
+    m = PPOStudent(NetSpec(policy_extra=True, spatial_tower=True))
     dim = m.policy_input_dim
     assert dim == SPATIAL_TOWER_FC_OUT + SCALAR_DIM + POLICY_EXTRA_DIM
     with torch.no_grad():

@@ -26,6 +26,7 @@ from __future__ import annotations
 import importlib.util as _ilu
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -52,11 +53,11 @@ def migrate(src: str, dst: str, *, seed: int = 20261101, verify: bool = True) ->
     import torch
 
     from worker.data.weights_io import load_state_into, load_weights_json, save_weights_json
-    from worker.models.arch_meta import read_arch_kwargs
+    from worker.models.arch_meta import read_arch_spec
     from worker.models.student import PPOStudent
 
     # 源可能是**上一代 schema** ⇒ arch 清单按 warm-start 态读（生产路径仍严格）。
-    kwargs = read_arch_kwargs(src, allow_legacy_schema=True)
+    spec = read_arch_spec(src, allow_legacy_schema=True)
     meta, params = load_weights_json(src, allow_legacy_schema=True)
     new_obs = int(OBS_CHANNELS)
 
@@ -78,7 +79,7 @@ def migrate(src: str, dst: str, *, seed: int = 20261101, verify: bool = True) ->
             f"拒绝：arch.in_ch={arch_in} 与 stem 反推的 {old_obs} 不符（权重档自相矛盾）"
         )
 
-    model = PPOStudent(**kwargs)
+    model = PPOStudent(spec)
     not_loaded = load_state_into(model, src, allow_legacy_schema=True)
     # 未装载键只允许是 stem（换形的那一张）。缺别的键 = 源不是同族完整权重档
     # （静默随机 init 会把「迁移成功」伪装成事实）。
@@ -117,7 +118,7 @@ def migrate(src: str, dst: str, *, seed: int = 20261101, verify: bool = True) ->
     if verify:
         # 源模型 = 同架构 + 旧 in_ch；逐位装载后与迁移后的目标模型比 logits。
         torch.manual_seed(seed)
-        src_model = PPOStudent(in_ch=old_obs, **kwargs)
+        src_model = PPOStudent(replace(spec, in_ch=old_obs))
         load_state_into(src_model, src, allow_legacy_schema=True)
         src_model.eval()
         model.eval()

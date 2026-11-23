@@ -38,6 +38,7 @@ from common.schema import OBS_SCHEMA_MAJOR
 from worker.data.mirror import mirror_x
 from worker.data.npyio import load_dataset
 from worker.data.shard_split import plan_shard_split, should_split_by_shards
+from worker.models.arch_meta import NetSpec
 from worker.models.student_paddle import (
     PPOStudent,
     StudentNet,
@@ -291,11 +292,8 @@ def train(args: Any) -> dict[str, Any]:
     say(f"[train] backend=paddle device={paddle.get_device()}")
 
     use_value = (float(getattr(args, "value_coef", 0.0) or 0.0) > 0 or action_v6)
-    model: paddle.nn.Layer = (
-        PPOStudent(action_v6=action_v6, policy_extra=policy_extra)
-        if use_value
-        else StudentNet(action_v6=action_v6, policy_extra=policy_extra)
-    )
+    spec = NetSpec(action_v6=action_v6, policy_extra=policy_extra)
+    model: paddle.nn.Layer = PPOStudent(spec) if use_value else StudentNet(spec)
     if getattr(args, "resume", None):
         say(f"[train] resuming from {args.resume}")
         missing = load_state_into(model, str(args.resume))

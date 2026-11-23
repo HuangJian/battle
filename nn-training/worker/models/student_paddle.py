@@ -25,31 +25,26 @@ import paddle
 import paddle.nn as nn
 
 from common.schema import (
-    BOARD,
     FIRE3_DIM,
     FIRE_DIM,
     HOLD_DIM,
     MOVE4_DIM,
     MOVE_DIM,
-    OBS_CHANNELS,
     OBS_SCHEMA_MAJOR,
     POLICY_EXTRA_DIM,
-    SCALAR_DIM,
 )
 from worker.data.weights_meta import COVERAGE_RAISE, FORMAT, validate_weights_meta
 
 # 架构默认档 / 空间塔冻结值 / 架构元数据面 —— 与 torch 双生**同一份**
 # （`worker/models/arch_meta.py`）；下面这些是转发名（名字是契约，位置不是）。
 from worker.models.arch_meta import (
-    DEFAULT_D,
-    DEFAULT_H,
-    DEFAULT_HEAD_HIDDEN,
     SPATIAL_TOWER_C,
     SPATIAL_TOWER_FC_OUT,
     SPATIAL_TOWER_FEAT,
     SPATIAL_TOWER_POOL,
+    NetSpec,
     StudentArchMixin,
-    read_arch_kwargs,
+    read_arch_spec,
 )
 
 
@@ -136,19 +131,15 @@ class ConvMixerBlock(nn.Layer):
 
 
 class StudentNet(StudentArchMixin, nn.Layer):
-    def __init__(
-        self,
-        in_ch: int = OBS_CHANNELS,
-        board: int = BOARD,
-        scalar_dim: int = SCALAR_DIM,
-        h: int = DEFAULT_H,
-        d: int = DEFAULT_D,
-        head_hidden: int = DEFAULT_HEAD_HIDDEN,
-        policy_extra: bool = False,
-        spatial_tower: bool = False,
-        action_v6: bool = False,
-    ):
+    def __init__(self, spec: NetSpec):
         super().__init__()
+        in_ch, board, scalar_dim = spec.in_ch, spec.board, spec.scalar_dim
+        h, d, head_hidden = spec.h, spec.d, spec.head_hidden
+        policy_extra, spatial_tower, action_v6 = (
+            spec.policy_extra,
+            spec.spatial_tower,
+            spec.action_v6,
+        )
         self.in_ch = in_ch
         self.board = board
         self.scalar_dim = scalar_dim
@@ -287,8 +278,8 @@ class StudentNet(StudentArchMixin, nn.Layer):
 
 
 class PPOStudent(StudentNet):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, spec: NetSpec):
+        super().__init__(spec)
         self.value_head = TorchLinear(
             self.policy_input_dim,
             1,
@@ -419,4 +410,4 @@ def build_ppo(weights_path: str | None) -> PPOStudent:
     按这个名字与语义用它；arch 判据与 torch 侧逐字节同源 —— 那是混跑时两台机器建出
     同形状模型（因而能互相接手 checkpoint）的唯一保证。
     """
-    return PPOStudent(**read_arch_kwargs(weights_path))
+    return PPOStudent(read_arch_spec(weights_path))

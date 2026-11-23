@@ -198,14 +198,15 @@ def _kick_chunks() -> list[dict]:
 def _kick_models():
     import torch
 
+    from worker.models.arch_meta import NetSpec
     from worker.models.student import PPOStudent
 
     torch.manual_seed(0)
-    m = PPOStudent()
+    m = PPOStudent(NetSpec())
     torch.manual_seed(0)
-    m2 = PPOStudent()
+    m2 = PPOStudent(NetSpec())
     torch.manual_seed(1)
-    ref = PPOStudent()
+    ref = PPOStudent(NetSpec())
     ref.eval()
     for p in ref.parameters():
         p.requires_grad = False

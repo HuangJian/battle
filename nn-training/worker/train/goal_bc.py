@@ -33,6 +33,7 @@ import torch.nn.functional as F
 
 from common.cli import house_parser, run_main
 from common.runtime import substream
+from worker.models.arch_meta import NetSpec
 from worker.models.goal_net import GoalNet, export_goal_weights, load_goal_weights
 from worker.ppo.common import log
 from worker.ppo.np_core import discover_shards
@@ -161,7 +162,7 @@ def main():
 
     episodes = load_episodes(args.data, args.window)
 
-    model = GoalNet()
+    model = GoalNet(NetSpec())
     if args.init_from and os.path.exists(args.init_from):
         # 迁移主干 + 保留 goal/engage 头（同构网络直接全载）
         load_goal_weights(model, args.init_from)

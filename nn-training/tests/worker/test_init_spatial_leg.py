@@ -42,6 +42,7 @@ if str(ROOT) not in sys.path:
 
 from common.schema import BOARD, OBS_CHANNELS, OBS_SCHEMA_MAJOR
 from worker.data.weights_io import load_state_into, load_weights_json, save_weights_json
+from worker.models.arch_meta import NetSpec
 from worker.models.student import PPOStudent
 from worker.ppo.engine import build_ppo
 from worker.scripts.init_spatial_leg import convert
@@ -89,7 +90,7 @@ def _legacy_source(tmp_path: Path) -> Path:
     """
     torch.manual_seed(7)
     src = tmp_path / "legacy-src.json"
-    save_weights_json(PPOStudent(), str(src))
+    save_weights_json(PPOStudent(NetSpec()), str(src))
     meta = json.loads(src.read_text(encoding="utf-8"))
     meta["schema_major"] = 3
     src.write_text(json.dumps(meta, indent=2), encoding="utf-8")
@@ -141,7 +142,7 @@ def test_leg_a_from_v6_source_pads_zero_columns_and_is_bit_identical(tmp_path: P
     对照就被起点变化污染了。
     """
     torch.manual_seed(13)
-    src = _saved(tmp_path / "v6-src.json", PPOStudent(action_v6=True))
+    src = _saved(tmp_path / "v6-src.json", PPOStudent(NetSpec(action_v6=True)))
     dst = tmp_path / "legA-v6.json"
     info = convert(
         str(src),
@@ -229,7 +230,7 @@ def test_leg_a_column_migration_old_cols_bit_exact(tmp_path: Path) -> None:
     """④ 腿 A 列迁移：旧列逐位等、新列 0.01 量级、未迁移张量逐位等（A10）。"""
     torch.manual_seed(11)
     src = _truncate_tail(
-        _saved(tmp_path / "legA-v4.json", PPOStudent(policy_extra=True)),
+        _saved(tmp_path / "legA-v4.json", PPOStudent(NetSpec(policy_extra=True))),
         {"fc.weight": 94, "move_head.weight": 137, "fire_head.weight": 137, "value_head.weight": 128},
     )
     dst = tmp_path / "legA-v5.json"
@@ -276,7 +277,7 @@ def test_leg_a_column_migration_old_cols_bit_exact(tmp_path: Path) -> None:
 def test_leg_b_segmented_migration(tmp_path: Path) -> None:
     """⑤ 腿 B 分段映射：三段逐位等 + 新两段重 init + value 不在表内。"""
     torch.manual_seed(12)
-    src = _saved(tmp_path / "legB-v4.json", PPOStudent(policy_extra=True, spatial_tower=True))
+    src = _saved(tmp_path / "legB-v4.json", PPOStudent(NetSpec(policy_extra=True, spatial_tower=True)))
     # 新布局 [tower 112 | s46 112..157 | extra57 158..214] → 旧布局 [tower | s30 | extra9]
     meta = json.loads(src.read_text(encoding="utf-8"))
     for name in ("move_head.weight", "fire_head.weight"):
@@ -329,7 +330,7 @@ def test_leg_a_to_b_migration_extra9_segment(tmp_path: Path) -> None:
     """
     torch.manual_seed(14)
     src = _truncate_tail(
-        _saved(tmp_path / "legA2B-v4.json", PPOStudent(policy_extra=True)),
+        _saved(tmp_path / "legA2B-v4.json", PPOStudent(NetSpec(policy_extra=True))),
         {"fc.weight": 94, "move_head.weight": 137, "fire_head.weight": 137, "value_head.weight": 128},
     )
     dst = tmp_path / "legA2B-v5.json"
@@ -379,7 +380,7 @@ def test_migration_rejects_unexpected_shape(tmp_path: Path) -> None:
     """⑥ 形状既非同行、也非合法「宽−n/分段」⇒ 响亮拒绝（不静默错位）。"""
     torch.manual_seed(13)
     src = _truncate_tail(
-        _saved(tmp_path / "legA-bad.json", PPOStudent(policy_extra=True)),
+        _saved(tmp_path / "legA-bad.json", PPOStudent(NetSpec(policy_extra=True))),
         {"move_head.weight": 100},  # 既不是 185 也不是 137
     )
     with pytest.raises(SystemExit):

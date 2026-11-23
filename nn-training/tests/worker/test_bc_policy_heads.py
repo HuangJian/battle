@@ -15,6 +15,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from worker.data.weights_io import save_weights_json
+from worker.models.arch_meta import NetSpec
 from worker.models.student import PPOStudent
 from worker.train.bc import TRAIN_HEAD_PREFIXES, _freeze_except, train
 
@@ -83,7 +84,7 @@ def _args(corpus: Path, init: Path, out: Path, **over: object) -> SimpleNamespac
 def test_policy_heads_only_preserves_trunk_and_value(corpus: Path, tmp_path: Path) -> None:
     init = tmp_path / "init.json"
     torch.manual_seed(11)
-    model = PPOStudent(action_v6=True, policy_extra=True)
+    model = PPOStudent(NetSpec(action_v6=True, policy_extra=True))
     save_weights_json(model, str(init), extra_meta={"arch": model.arch()})
     before = json.loads(init.read_text(encoding="utf-8"))["params"]
 
@@ -106,7 +107,7 @@ def test_train_heads_value_conflicts_with_policy_coef(corpus: Path, tmp_path: Pa
     init = tmp_path / "init.json"
     torch.manual_seed(12)
     save_weights_json(
-        PPOStudent(action_v6=True, policy_extra=True),
+        PPOStudent(NetSpec(action_v6=True, policy_extra=True)),
         str(init),
         extra_meta={"arch": "student"},
     )
@@ -120,7 +121,7 @@ def test_train_heads_policy_conflicts_with_zero_policy_coef(
     init = tmp_path / "init.json"
     torch.manual_seed(13)
     save_weights_json(
-        PPOStudent(action_v6=True, policy_extra=True),
+        PPOStudent(NetSpec(action_v6=True, policy_extra=True)),
         str(init),
         extra_meta={"arch": "student"},
     )
@@ -129,7 +130,7 @@ def test_train_heads_policy_conflicts_with_zero_policy_coef(
 
 
 def test_freeze_except_keeps_only_policy_heads() -> None:
-    model = PPOStudent(action_v6=True)
+    model = PPOStudent(NetSpec(action_v6=True))
     _freeze_except(model, TRAIN_HEAD_PREFIXES["policy"])
     heads = TRAIN_HEAD_PREFIXES["policy"]
     for name, p in model.named_parameters():

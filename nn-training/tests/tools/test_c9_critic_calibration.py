@@ -162,6 +162,7 @@ def test_write_returns_writes_float32_target(tmp_path: Path) -> None:
 def test_values_from_weights_uses_saved_checkpoint(tmp_path: Path) -> None:
     torch = pytest.importorskip("torch")
     from worker.data.weights_io import save_weights_json
+    from worker.models.arch_meta import NetSpec
     from worker.models.student import PPOStudent
 
     d = _write_shard(tmp_path, 16, 0, [10.0, 20.0, 30.0], [0, 0, 1])
@@ -170,7 +171,7 @@ def test_values_from_weights_uses_saved_checkpoint(tmp_path: Path) -> None:
     np.save(d / "scalars.npy", rng.standard_normal((3, 46)).astype(np.float32))
     np.save(d / "extra.npy", rng.standard_normal((3, 57)).astype(np.float32))
     torch.manual_seed(3)
-    model = PPOStudent(action_v6=False, policy_extra=False)
+    model = PPOStudent(NetSpec(action_v6=False, policy_extra=False))
     w = tmp_path / "value-only.json"
     save_weights_json(model, str(w), extra_meta={"arch": model.arch()})
     loaded = C.load_value_model(str(w))

@@ -46,7 +46,7 @@ import torch
 import torch.nn.functional as F
 
 from worker.data.weights_io import load_state_into, save_weights_json
-from worker.models.arch_meta import read_arch_kwargs
+from worker.models.arch_meta import read_arch_spec
 from worker.models.student import PPOStudent
 
 
@@ -133,8 +133,8 @@ def main() -> int:
     val_idx = set(order[:n_val].tolist())
 
     # ---- 模型 ----
-    kwargs = read_arch_kwargs(a.init_weights)
-    model = PPOStudent(**kwargs).to(a.device)
+    spec = read_arch_spec(a.init_weights)
+    model = PPOStudent(spec).to(a.device)
     load_state_into(model, a.init_weights)  # 第二个参数是**路径**（见 weights_io.py:147）
     n_par = sum(p.numel() for p in model.parameters())
     log(log_f, f"模型 params {n_par} · action_v6={model.action_v6} · device={a.device}")

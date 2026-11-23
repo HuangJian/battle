@@ -51,6 +51,7 @@ import torch.nn.functional as F
 from common.cli import run_main
 from common.contracts import GOAL_EPISODE_FIELDS, GOAL_EPISODE_OPTIONAL, GoalEpisode
 from common.schema import BOARD
+from worker.models.arch_meta import NetSpec
 from worker.models.goal_net import GoalNet, export_goal_weights, load_goal_weights
 from worker.ppo._episode import episode_from_shard
 from worker.ppo.cli import CliSpec
@@ -104,9 +105,8 @@ def action_dim_of(mask_width: int) -> int:
 class GoalRLNet(GoalNet):
     """GoalNet + value 头（goal RL 默认 with_value=True）。"""
 
-    def __init__(self, **kwargs):
-        kwargs.setdefault("with_value", True)
-        super().__init__(**kwargs)
+    def __init__(self, spec: NetSpec):
+        super().__init__(spec, with_value=True)
 
 
 def build_rl_net(weights_path: str | None) -> GoalRLNet:
@@ -121,7 +121,7 @@ def build_rl_net(weights_path: str | None) -> GoalRLNet:
             d = a.get("d", 8)
         except Exception as e:
             log(f"[ppo_goal] WARN build_rl_net: ignoring {weights_path}: {e!r}")
-    return GoalRLNet(h=h or 64, d=d or 8)
+    return GoalRLNet(NetSpec(h=h or 64, d=d or 8))
 
 
 # ---------------- trajectory loading ----------------

@@ -99,9 +99,10 @@ def test_make_loaders_v6_and_three_head_ce(corpus: Path) -> None:
     obs, sc, ex, mv, fr, hd, mm, mf, mh, _ret = batch
     assert obs.dtype == torch.uint8
 
+    from worker.models.arch_meta import NetSpec
     from worker.models.student import PPOStudent
 
-    model = PPOStudent(action_v6=True)
+    model = PPOStudent(NetSpec(action_v6=True))
     out = model(obs, sc, ex)
     assert len(out) == 4, "v6 的 PPOStudent.forward 必须返回 4 元组"
     lm, lf, lh, vpred = out

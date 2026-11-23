@@ -50,6 +50,7 @@ import torch.nn as nn
 
 from common.cli import house_parser, run_main
 from common.schema import BOARD, OBS_CHANNELS, SCALAR_DIM
+from worker.models.arch_meta import NetSpec
 from worker.models.student import StudentNet, coord_channels
 
 GOAL_HEATMAP_DIM = BOARD * BOARD  # 676（动作空间 = 坦克顶点热图；§9.4.0 合法顶点 25×25=625）
@@ -61,8 +62,8 @@ GOAL_INJECT_RESERVED_FROM = 5  # 维 5–8 保留恒 0
 class GoalNet(StudentNet):
     """StudentNet 主干 + goal 热图头 + engage 头（+可选 value 头）。"""
 
-    def __init__(self, with_value: bool = False, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, spec: NetSpec, with_value: bool = False):
+        super().__init__(spec)
         # 必须显式赋值：nn.Module.__getattr__ 对未注册名抛 AttributeError，
         # forward(inject=None) 分支此前会在此炸掉（mypy 也是靠它才暴露的）。
         self.inject_dim = INJECT_DIM
@@ -126,7 +127,7 @@ def export_goal_weights(model: GoalNet, out_path: str) -> None:
     from worker.data.weights_io import save_weights_json
 
     sd = model.state_dict()
-    ref = StudentNet(h=model.h, d=model.d).state_dict()
+    ref = StudentNet(NetSpec(h=model.h, d=model.d)).state_dict()
     missing = [k for k in ref if k not in sd]
     shape_mismatch = [k for k in ref if k in sd and tuple(sd[k].shape) != tuple(ref[k].shape)]
     if missing or shape_mismatch:
@@ -178,7 +179,7 @@ def main() -> None:
         export_golden(args.golden, args.h, args.d, args.golden_seed)
         return
 
-    m = GoalNet(h=args.h, d=args.d)
+    m = GoalNet(NetSpec(h=args.h, d=args.d))
     n = sum(int(p.numel()) for p in m.parameters())
     print(f"GoalNet params: {n} (~{n / 1000:.1f}K)")
     obs = torch.zeros(2, OBS_CHANNELS, BOARD, BOARD, dtype=torch.uint8)
@@ -211,7 +212,7 @@ def export_golden(path: str, h: int, d: int, seed: int) -> None:
     inj[0, 4] = 1.0  # arrived
 
     torch.manual_seed(seed + 1)
-    m = GoalNet(h=h, d=d, with_value=True).eval()
+    m = GoalNet(NetSpec(h=h, d=d), with_value=True).eval()
     with torch.no_grad():
         g_log, e_log, v_log = m.forward_rl(obs, sc, inj)
 

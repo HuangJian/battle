@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
 import torch
 
 from common.schema import BOARD, OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM
+from worker.models.arch_meta import NetSpec
 from worker.models.student import PPOStudent
 from worker.ppo.engine import ppo_update
 from worker.ppo.trainer import tensored_chunks
@@ -42,7 +43,7 @@ NEW_KEYS = (
 
 def _make_model() -> PPOStudent:
     torch.manual_seed(20261005)
-    return PPOStudent(h=8, d=1, policy_extra=True, spatial_tower=True)
+    return PPOStudent(NetSpec(h=8, d=1, policy_extra=True, spatial_tower=True))
 
 
 def _synth_chunks(n_chunks: int = 5, mb: int = 32, seed: int = 7) -> list[dict]:

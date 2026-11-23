@@ -134,8 +134,11 @@ WIDE_FUNCS_BASELINE = {
     # `worker/greedy_round.py` 已清零（P0-3 批 D：`run_greedy_round` 的 12 个关键字 →
     # `GreedyRoundSpec`）；守 `tests/worker/test_greedy_round_spec.py`。
     "worker/iter_rollout.py": 2,
-    "worker/models/student.py": 1,
-    "worker/models/student_paddle.py": 1,
+    # 2026-11-23（P0-3 批 C2）：`StudentNet` / `PPOStudent` 的 9 个构造旋钮（torch / paddle 双生）
+    # 收成一个 `NetSpec`（frozen + kw_only，住 `worker/models/arch_meta.py`；`read_arch_kwargs`
+    # 随之改成返回 spec 的 `read_arch_spec`）⇒ `worker/models/student.py` 与
+    # `worker/models/student_paddle.py` 两个条目删除（各 1 个宽签名，该两文件归零）；
+    # 守 `tests/worker/test_net_spec.py`。
     # 2026-11-22（P0-3 第四十七刀）：`build_plan` 的 1 位置 + 13 关键字收成 `PlanSpec`
     # ⇒ 本文件宽签名归零，条目删除（守 `tests/worker/test_plan_spec.py`）。
     # 2026-11-22（P0-3 第四十二刀）：`ppo_update` 的 20 个参数（Paddle 21）收成

@@ -32,6 +32,7 @@ sys.path.insert(0, str(REPO))
 import worker.ppo.goal as ppo_goal
 import worker.ppo.np_core as ppo_np
 from worker.data.weights_io import load_weights_json
+from worker.models.arch_meta import NetSpec
 from worker.models.goal_net import export_goal_weights
 
 
@@ -66,7 +67,7 @@ def test_variable_dt_differs() -> None:
 def test_goal_net_roundtrip(tmp_path: Path) -> None:
     td = tempfile.mkdtemp(dir=str(tmp_path))
     path = os.path.join(td, "goal.json")
-    m = ppo_goal.GoalRLNet(h=32, d=2)
+    m = ppo_goal.GoalRLNet(NetSpec(h=32, d=2))
     export_goal_weights(m, path)
     meta, _ = load_weights_json(path)
     assert meta["arch"]["kind"] == "goal", "arch.kind == goal"
@@ -76,7 +77,7 @@ def test_goal_net_roundtrip(tmp_path: Path) -> None:
     assert shapes["engage_head.weight"] == [2, 128 + 9], "engage_head [2,137]"
     assert shapes["value_head.weight"] == [1, 128 + 9], "value_head [1,137]"
     assert not any(k.startswith("intent_head") for k in shapes), "无 intent 头（goal 专属）"
-    m2 = ppo_goal.GoalRLNet(h=32, d=2)
+    m2 = ppo_goal.GoalRLNet(NetSpec(h=32, d=2))
     ppo_goal.load_goal_weights(m2, path)
     for k in ("goal_conv.weight", "engage_head.weight", "value_head.weight"):
         assert (torch.equal(
@@ -144,7 +145,7 @@ def _fake_chunks(coarse: bool):
 
 
 def test_policy_logprobs_dims() -> None:
-    model = ppo_goal.GoalRLNet(h=32, d=2)
+    model = ppo_goal.GoalRLNet(NetSpec(h=32, d=2))
     obs = torch.randint(0, 256, (4, OBS_CHANNELS, 26, 26), dtype=torch.uint8)
     sc = torch.randn(4, SCALAR_DIM)
     inj = torch.rand(4, 9)
@@ -165,7 +166,7 @@ def test_policy_logprobs_dims() -> None:
 def test_ppo_update_smoke() -> None:
     for coarse in (False, True):
         chunks = _fake_chunks(coarse)
-        model = ppo_goal.GoalRLNet(h=32, d=2)
+        model = ppo_goal.GoalRLNet(NetSpec(h=32, d=2))
         opt = torch.optim.Adam(model.parameters(), lr=1e-3)
         agg = ppo_goal.update(
             model, opt, chunks, epochs=3, device=torch.device("cpu"), target_kl=1e9, seed=1
@@ -173,7 +174,7 @@ def test_ppo_update_smoke() -> None:
         assert np.isfinite(agg["policy"]) and np.isfinite(agg["value"]), f"coarse={coarse}: update finite (policy={agg['policy']:.3f} value={agg['value']:.3f})"
         assert not agg["early_stopped"], f"coarse={coarse}: target_kl=1e9 不触发早停"
 
-        model2 = ppo_goal.GoalRLNet(h=32, d=2)
+        model2 = ppo_goal.GoalRLNet(NetSpec(h=32, d=2))
         opt2 = torch.optim.Adam(model2.parameters(), lr=1e-3)
         agg2 = ppo_goal.update(
             model2, opt2, chunks, epochs=3, device=torch.device("cpu"), target_kl=1e-9, seed=1
@@ -181,7 +182,7 @@ def test_ppo_update_smoke() -> None:
         assert agg2["early_stopped"], f"coarse={coarse}: target_kl 极小 → early stop"
 
         # value warmup：策略头零梯度、主干冻结、value 头被训练。
-        model3 = ppo_goal.GoalRLNet(h=32, d=2)
+        model3 = ppo_goal.GoalRLNet(NetSpec(h=32, d=2))
         opt3 = torch.optim.Adam(model3.parameters(), lr=1e-3)
         stem_before = model3.stem.weight.detach().clone()
         goal_before = model3.goal_conv.weight.detach().clone()

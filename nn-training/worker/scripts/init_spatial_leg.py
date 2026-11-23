@@ -410,6 +410,7 @@ def convert(
     import torch
 
     from worker.data.weights_io import load_state_into, load_weights_json, save_weights_json
+    from worker.models.arch_meta import NetSpec
     from worker.models.student import PPOStudent, param_count
 
     if legacy_arch and (policy_extra or spatial_tower):
@@ -423,7 +424,7 @@ def convert(
 
     torch.manual_seed(seed)
     model = PPOStudent(
-        policy_extra=policy_extra, spatial_tower=spatial_tower, action_v6=action_v6
+        NetSpec(policy_extra=policy_extra, spatial_tower=spatial_tower, action_v6=action_v6)
     )
     not_loaded = load_state_into(model, src, allow_legacy_schema=True)
     # obs-v5 列迁移（§2.7）：换形张量不是「缺失」，而是「拷旧列 + 新列 0.01 初始化」。

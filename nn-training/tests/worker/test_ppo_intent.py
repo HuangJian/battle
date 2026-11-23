@@ -30,6 +30,7 @@ sys.path.insert(0, str(REPO))
 import worker.ppo.intent as ppo_intent
 import worker.ppo.np_core as ppo_np
 from worker.data.weights_io import load_weights_json
+from worker.models.arch_meta import NetSpec
 from worker.models.intent_net import export_intent_weights
 
 
@@ -85,7 +86,7 @@ def test_variable_dt_differs() -> None:
 def test_rl_net_roundtrip_value_head(tmp_path: Path) -> None:
     """IntentRLNet 含 value 头：export/load 往返 + 主干 shape 断言（预注册 #8）。"""
     torch.manual_seed(3)
-    m = ppo_intent.IntentRLNet(h=64, d=8)
+    m = ppo_intent.IntentRLNet(NetSpec(h=64, d=8))
     # 三头 + value 头全在。
     for hname in ("intent_head", "enemy_head", "anchor_head", "value_head"):
         assert any(k.startswith(hname + ".") for k in m.state_dict()), f"IntentRLNet has {hname}"
@@ -112,7 +113,7 @@ def test_rl_net_roundtrip_value_head(tmp_path: Path) -> None:
     meta, params = load_weights_json(p)
     assert meta["arch"]["kind"] == "intent", "arch.kind=intent"
     assert "value_head.weight" in params, "exported value_head.weight present"
-    m2 = ppo_intent.IntentRLNet(h=64, d=8)
+    m2 = ppo_intent.IntentRLNet(NetSpec(h=64, d=8))
     from worker.models.intent_net import load_intent_weights
 
     load_intent_weights(m2, p)
@@ -156,7 +157,7 @@ def test_ppo_update_smoke() -> None:
     ep["ret"] = ret
     chunks = ppo_intent.chunk_episodes([ep], 32)
 
-    model = ppo_intent.IntentRLNet(h=32, d=2)
+    model = ppo_intent.IntentRLNet(NetSpec(h=32, d=2))
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     # 合成随机数据下 lp_old 与随机模型初始 logp 严重失配 → KL 必然爆炸；
     # 用极大阈值只测"不早停"路径（真实数据 lp_old 来自同一模型，KL 正常）。
@@ -167,7 +168,7 @@ def test_ppo_update_smoke() -> None:
     assert not agg["early_stopped"], "target_kl=1e9 不触发早停"
 
     # 极小阈值 → 早停触发。
-    model2 = ppo_intent.IntentRLNet(h=32, d=2)
+    model2 = ppo_intent.IntentRLNet(NetSpec(h=32, d=2))
     opt2 = torch.optim.Adam(model2.parameters(), lr=1e-3)
     agg2 = ppo_intent.update(
         model2, opt2, chunks, epochs=3, device=torch.device("cpu"), target_kl=1e-9, seed=1
@@ -175,7 +176,7 @@ def test_ppo_update_smoke() -> None:
     assert agg2["early_stopped"], "target_kl 极小 → early stop 触发"
 
     # value warmup：前 epochs 全预热 → 策略（主干+三头）零梯度、KL=0、value 头被训练。
-    model3 = ppo_intent.IntentRLNet(h=32, d=2)
+    model3 = ppo_intent.IntentRLNet(NetSpec(h=32, d=2))
     opt3 = torch.optim.Adam(model3.parameters(), lr=1e-3)
     stem_before = model3.stem.weight.detach().clone()
     policy_w_before = model3.intent_head.weight.detach().clone()

@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from worker.models.arch_meta import NetSpec
 from worker.models.student import PPOStudent
 from worker.ppo.demo import DemoBank
 from worker.ppo.engine import ppo_update
@@ -108,14 +109,14 @@ def _bank_v6(n: int = 64, seed: int = 1) -> dict:
 
 def _fresh_v6(seed: int = 1234):
     torch.manual_seed(seed)
-    model = PPOStudent(h=8, d=1, policy_extra=True, action_v6=True)
+    model = PPOStudent(NetSpec(h=8, d=1, policy_extra=True, action_v6=True))
     opt = torch.optim.Adam(model.parameters(), lr=1.5e-4)
     return model, opt
 
 
 def _fresh(seed: int = 1234):
     torch.manual_seed(seed)
-    model = PPOStudent(h=8, d=1)
+    model = PPOStudent(NetSpec(h=8, d=1))
     opt = torch.optim.Adam(model.parameters(), lr=1.5e-4)
     return model, opt
 
@@ -141,7 +142,7 @@ def _run(epochs: int = 1, seed: int = 7, **kw: Any):
 def _initial_state() -> dict[str, torch.Tensor]:
     """与 `_fresh` 同种子的初始权重（证明“更新确实跑了”的参照）。"""
     torch.manual_seed(1234)
-    return {k: v.clone() for k, v in PPOStudent(h=8, d=1).state_dict().items()}
+    return {k: v.clone() for k, v in PPOStudent(NetSpec(h=8, d=1)).state_dict().items()}
 
 
 def test_demo_off_is_bitwise_pure_ppo() -> None:
@@ -219,7 +220,7 @@ def test_demo_bc_feeds_the_bank_extra_to_a_policy_extra_model() -> None:
     """
     np.random.seed(7)
     torch.manual_seed(1234)
-    model = PPOStudent(h=8, d=1, policy_extra=True)
+    model = PPOStudent(NetSpec(h=8, d=1, policy_extra=True))
     opt = torch.optim.Adam(model.parameters(), lr=1.5e-4)
     # `DemoBank` 的五个键都是必需的；`_bank()` 刻意不建 `extra`（那几条用例走的是
     # 「bank 没有 extra」的兼容面），所以这里补上再标成字段表。
@@ -324,7 +325,7 @@ def test_demo_v6_uses_move_slice_not_legacy_width() -> None:
     # hold 头不在 demo loss 里（本次只训 move），但它必须被**PPO**更新过：
     # 用「不等于初始权重」证明整条 ppo_update 真的跑了。
     torch.manual_seed(1234)
-    init = PPOStudent(h=8, d=1, policy_extra=True, action_v6=True).state_dict()
+    init = PPOStudent(NetSpec(h=8, d=1, policy_extra=True, action_v6=True)).state_dict()
     assert not torch.equal(state["hold_head.weight"], init["hold_head.weight"])
     assert not torch.equal(state["move_head.weight"], init["move_head.weight"])
 

@@ -26,6 +26,7 @@ import torch
 import torch.nn as nn
 
 from common.cli import house_parser, run_main
+from worker.models.arch_meta import NetSpec
 from worker.models.intent_net import IntentNet, export_intent_weights
 from worker.models.student import DEFAULT_D, DEFAULT_H
 
@@ -391,7 +392,7 @@ def main() -> None:
     )
 
     dev = torch.device("cpu")
-    model = IntentProbeNet(inject=args.inject, h=args.h, d=args.d).to(dev)
+    model = IntentProbeNet(NetSpec(h=args.h, d=args.d), inject=args.inject).to(dev)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     ce = nn.CrossEntropyLoss()
 

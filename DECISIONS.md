@@ -10313,3 +10313,31 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   （域成员 112 → 113）· `tests/remote/test_rollout_node_notebook.py`（两包铺成同一棵树 + 无限重试）。
   hub 需重启才带 `/ts_code`：旧 hub 回 404，cell 的日志行直接点名「重启 hub」。
 
+
+## §2026-11-23-student-net-spec
+
+- **背景**：`python.refactor.md` §P0-3 批 C2。`StudentNet` / `PPOStudent` 是学生网的两个框架实现
+  （torch `worker/models/student.py` / paddle `worker/models/student_paddle.py`），构造成员各 9 个
+  关键字参数，全部带缺省。
+- **坏点（互换后不抛、只是建出另一个架构）**：`in_ch` / `board` / `scalar_dim` 三个形状标量相邻；
+  `h` / `d` / `head_hidden` 三个宽度相邻；`policy_extra` / `spatial_tower` / `action_v6` 是三个
+  **相邻布尔档** —— 前一对互换让 `arch()` 把错的档写回权重文件（混跑机器要么装载才炸、要么照跑
+  另一个网络），后一对互换让「腿 A 的 165 宽 / 腿 B 的塔 / v6 的 hold 头」静默换位。
+  另外 `read_arch_kwargs` 返回裸 `dict[str, Any]` 供 `**kwargs` 展开：拼错键名不报错，`Any` 也从这来。
+- **决定**：新增 `NetSpec`（frozen + kw_only，9 字段，字段顺序 = 旧形参顺序），住
+  `worker/models/arch_meta.py`（双生**本来就有**的共用面）；`StudentNet.__init__(spec)` 构造体逐字
+  不动（只在顶部把 spec 展开成局部名）；`PPOStudent` / `GoalNet` / `IntentNet` / `GoalRLNet` /
+  `IntentRLNet` / `IntentProbeNet` 同步只收 spec（各自的 `with_value` / `inject` 留在 spec 外）。
+  `read_arch_kwargs` → `read_arch_spec(...) -> NetSpec`（arch_meta 的 `Any` 归零），
+  `build_ppo` 的工厂类型 `type[ModelT]` → `Callable[[NetSpec], ModelT]`。120 处调用点（生产 12 /
+  工具 16 / 用例 92）按 AST 改写（只碰无位置实参的调用，有位置实参赛的人工）。
+- **被否决**：① 保留关键字面只加一个可选 `spec=` —— 两条路并存时互换失效面仍在，且「一半按名字
+  一半按位置」比现状更难读；② `NetSpec` 住 `worker/data/weights_meta.py` —— 那里是**文件级**清单的
+  家，构造规格属于模型族；③ 把 `with_value` / `inject` 也塞进 spec —— 它们是「这一族多不多一个头」，
+  与权重的 arch 字段无关（goal/intent 的权重档里没有这两个键），塞进去会让 spec 与 arch 不再一一对应。
+- **读数**：宽签名 13 → **11**、11 → **9 文件**（两个条目从 `WIDE_FUNCS_BASELINE` 删除）；
+  `worker/models/arch_meta.py` 的 `Any` 1 → 0（`tests/golden/any_baseline.json` 同步下调）。
+- **验证**：`bun run pygate` 绿（6951 passed）；`ruff check` + `mypy`(1092 文件) 绿。守
+  `tests/worker/test_net_spec.py`（字段表 / frozen + kw_only / 入口只吃一份 spec / `build_ppo` 交
+  spec 给工厂 / 缺省 = legacy 128 / 三个布尔档各自换形 / torch 与 paddle 双生 `arch()` 与头宽逐字段
+  相同）。全文 → `docs/nn/engineering.md` §319。

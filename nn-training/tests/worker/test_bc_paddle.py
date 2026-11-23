@@ -15,6 +15,7 @@ import pytest
 paddle = pytest.importorskip("paddle")
 
 from common.schema import BOARD, OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM
+from worker.models.arch_meta import NetSpec
 from worker.models.student_paddle import PPOStudent, save_weights_json
 from worker.train import bc_paddle
 from worker.train.bc_core import SMOOTH_WINDOW, select_best_epoch
@@ -68,7 +69,7 @@ def _args(tmp_path, *, arch: str = "student", device: str = "cpu") -> SimpleName
 def test_paddle_bc_runs_one_v6_epoch_and_exports_weights(tmp_path) -> None:
     _write_v6_shard(tmp_path / "data" / "bc_s0_seed1")
     init = tmp_path / "init.json"
-    save_weights_json(PPOStudent(action_v6=True, policy_extra=True), str(init))
+    save_weights_json(PPOStudent(NetSpec(action_v6=True, policy_extra=True)), str(init))
 
     args = _args(tmp_path)
     args.resume = str(init)
@@ -97,7 +98,7 @@ def test_paddle_bc_delivers_epoch_chosen_by_smoothed_val_loss(tmp_path) -> None:
     """B1 双生：与 bc.py 同一判据——完整窗口滑动平均的最小值，不是单点 argmin。"""
     _write_v6_shard(tmp_path / "data" / "bc_s0_seed1")
     init = tmp_path / "init.json"
-    save_weights_json(PPOStudent(action_v6=True, policy_extra=True), str(init))
+    save_weights_json(PPOStudent(NetSpec(action_v6=True, policy_extra=True)), str(init))
 
     args = _args(tmp_path)
     args.resume = str(init)

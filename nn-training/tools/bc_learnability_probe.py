@@ -42,6 +42,7 @@ from worker.data.dataset import NNDataset, _AugWrapper
 from worker.data.npyio import load_dataset, scan_shards
 from worker.data.shard_split import plan_shard_split
 from worker.data.weights_io import save_weights_json
+from worker.models.arch_meta import NetSpec
 from worker.models.core import NNPolicy
 from worker.models.student import StudentNet
 from worker.train.bc import _masked_ce
@@ -201,7 +202,7 @@ def main() -> None:
         flush=True,
     )
 
-    model: torch.nn.Module = StudentNet() if args.arch == "student" else NNPolicy()
+    model: torch.nn.Module = StudentNet(NetSpec()) if args.arch == "student" else NNPolicy()
     model.to(dev)
     # 与 worker/train/bc.py 同优化器纪律（AdamW + cosine + grad clip 1.0）：
     # 裸 Adam 在 raw-uint8 输入上会一步炸 logits（实测单 shard loss 36）。

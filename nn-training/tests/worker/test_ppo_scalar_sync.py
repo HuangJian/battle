@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from worker.models.arch_meta import NetSpec
 from worker.models.student import PPOStudent
 from worker.ppo.common import sync_scalars
 from worker.ppo.engine import ppo_update
@@ -134,7 +135,7 @@ def test_engine_stats_keys_unchanged() -> None:
     x26-obs it90 的 `value_new_rms` 即如此落地）。"""
     np.random.seed(3)
     torch.manual_seed(3)
-    model = PPOStudent(h=8, d=1)
+    model = PPOStudent(NetSpec(h=8, d=1))
     opt = torch.optim.Adam(model.parameters(), lr=1.5e-4)
     agg = ppo_update(
         TorchUpdateSpec(
@@ -174,7 +175,7 @@ def test_clip_fraction_and_per_step_kl_readouts() -> None:
     """D8/D10：ratio=1 ⇒ clip=0 / per_step_kl=0；整体偏移 ⇒ clip=1。"""
     np.random.seed(7)
     torch.manual_seed(7)
-    model = PPOStudent(h=8, d=1)
+    model = PPOStudent(NetSpec(h=8, d=1))
     chunks = _chunks(n_chunks=1, b=8, seed=7)
     _set_lp_old_from_model(chunks, model, delta=0.0)
     opt = torch.optim.Adam(model.parameters(), lr=1.5e-4)
@@ -185,7 +186,7 @@ def test_clip_fraction_and_per_step_kl_readouts() -> None:
     assert agg["per_step_kl"] == 0.0, f"ratio=1 时 KL 应为 0：{agg['per_step_kl']}"
 
     torch.manual_seed(7)
-    model2 = PPOStudent(h=8, d=1)
+    model2 = PPOStudent(NetSpec(h=8, d=1))
     chunks2 = _chunks(n_chunks=1, b=8, seed=7)
     _set_lp_old_from_model(chunks2, model2, delta=-10.0)
     opt2 = torch.optim.Adam(model2.parameters(), lr=1.5e-4)
@@ -202,7 +203,7 @@ def test_target_kl_stops_remaining_epochs() -> None:
     """D8 轮内中止：阈值极小 ⇒ 第一个 epoch 后停；回调只被调一次。"""
     np.random.seed(11)
     torch.manual_seed(11)
-    model = PPOStudent(h=8, d=1)
+    model = PPOStudent(NetSpec(h=8, d=1))
     opt = torch.optim.Adam(model.parameters(), lr=1.5e-4)
     epochs_seen: list[int] = []
     agg = ppo_update(
@@ -261,7 +262,7 @@ def test_intent_stats_keys_and_warmup_kl_exact_zero() -> None:
     """intent：键集不变；全 warmup 时 kl 必须是精确 0.0（原为 Python float 短路）。"""
     torch.manual_seed(11)
     ppo_intent, chunks = _intent_fixture()
-    model = ppo_intent.IntentRLNet(h=32, d=2)
+    model = ppo_intent.IntentRLNet(NetSpec(h=32, d=2))
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     agg = ppo_intent.update(
         model,
@@ -289,7 +290,7 @@ def test_engine_aggregate_bit_identical_to_per_item_path(monkeypatch) -> None:
 
     np.random.seed(9)
     torch.manual_seed(9)
-    model = PPOStudent(h=8, d=1)
+    model = PPOStudent(NetSpec(h=8, d=1))
     opt = torch.optim.Adam(model.parameters(), lr=1.5e-4)
     batched = ppo_update(
         TorchUpdateSpec(model=model, opt=opt, chunks=chunks, epochs=2, device=torch.device("cpu"))
@@ -302,7 +303,7 @@ def test_engine_aggregate_bit_identical_to_per_item_path(monkeypatch) -> None:
     monkeypatch.setattr(eng, "sync_scalars", _per_item)
     np.random.seed(9)
     torch.manual_seed(9)
-    model2 = PPOStudent(h=8, d=1)
+    model2 = PPOStudent(NetSpec(h=8, d=1))
     opt2 = torch.optim.Adam(model2.parameters(), lr=1.5e-4)
     per_item = ppo_update(
         TorchUpdateSpec(model=model2, opt=opt2, chunks=chunks, epochs=2, device=torch.device("cpu"))
@@ -355,7 +356,7 @@ def test_goal_stats_keys_include_bc() -> None:
     ep["ret"] = ret
     chunks = ppo_goal.chunk_episodes([ep], 32)
 
-    model = ppo_goal.GoalRLNet(h=32, d=2)
+    model = ppo_goal.GoalRLNet(NetSpec(h=32, d=2))
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     agg = ppo_goal.update(
         model,

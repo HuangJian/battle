@@ -152,7 +152,6 @@
     "worker/loop_scheduler.py": 2,
     "worker/loop_tasks.py": 7,
     "worker/metrics_stats.py": 3,
-    "worker/models/arch_meta.py": 1,
     "worker/models/student_paddle.py": 3,
     "worker/paired.py": 1,
     "worker/paired_kill.py": 9,

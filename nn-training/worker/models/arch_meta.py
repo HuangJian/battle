@@ -17,9 +17,11 @@ DAG 层号 **L1**（`tests/helpers/remote_dag.py`）：顶层只 import `worker.
 from __future__ import annotations
 
 import os
-from typing import Any, TypeVar
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TypeVar
 
-from common.schema import POLICY_EXTRA_DIM
+from common.schema import BOARD, OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM
 from worker.data.weights_meta import read_weights_meta
 
 #: 架构默认档（h=64 / d=8 / head_hidden=128，plan/RL-Net-Selection.md §4.3 的甜点）。
@@ -36,10 +38,35 @@ SPATIAL_TOWER_FEAT = SPATIAL_TOWER_C * SPATIAL_TOWER_POOL * SPATIAL_TOWER_POOL  
 ModelT = TypeVar("ModelT")
 
 
-def read_arch_kwargs(
+@dataclass(frozen=True, kw_only=True)
+class NetSpec:
+    """`StudentNet` / `PPOStudent` 的构造规格（两个框架共用一份，2026-11-23）。
+
+    为什么不是 9 个关键字参数（`python.refactor.md` §P0-3 批 C2）：九个位里前六个是
+    **相邻同类标量**（`in_ch`/`board`/`scalar_dim` 三个形状、`h`/`d`/`head_hidden` 三个宽度），
+    后三个是**相邻布尔档**（`policy_extra` / `spatial_tower` / `action_v6`）—— 互换任何一对
+    都不抛异常，只是建出**另一个架构**的模型（形状对不上权重时才在装载时炸，而
+    `arch()` 写回权重文件时已经带着错的档）。按名字构造后，拼错的键当场 `TypeError`。
+
+    字段顺序 = 旧形参顺序；`spatial_tower=True` 而 `policy_extra=False` 仍是构造期
+    `ValueError`（腿 B 的头输入含 extra，见 `policy_input_dim`）。
+    """
+
+    in_ch: int = OBS_CHANNELS
+    board: int = BOARD
+    scalar_dim: int = SCALAR_DIM
+    h: int = DEFAULT_H
+    d: int = DEFAULT_D
+    head_hidden: int = DEFAULT_HEAD_HIDDEN
+    policy_extra: bool = False
+    spatial_tower: bool = False
+    action_v6: bool = False
+
+
+def read_arch_spec(
     weights_path: str | None, *, allow_legacy_schema: bool = False
-) -> dict[str, Any]:
-    """权重文件的 `arch` 元数据 → `PPOStudent(...)` 的构造关键字（纯读，免框架）。
+) -> NetSpec:
+    """权重文件的 `arch` 元数据 → `NetSpec`（纯读，免框架）。
 
     `None` / 路径不在 ⇒ 全默认档（legacy 128）。**给了存在的路径就必须读得动**：坏文件在这里
     响亮失败，不静默退回默认架构 —— 那等于「建了错的模型却照跑」（`remote/worker.py` §3.3-2
@@ -62,23 +89,23 @@ def read_arch_kwargs(
         policy_extra = bool(a.get("policyExtra", False))
         spatial_tower = bool(a.get("spatialTower", False))
         action_v6 = bool(a.get("actionV6", False))
-    return {
-        "h": h or DEFAULT_H,
-        "d": d or DEFAULT_D,
-        "head_hidden": head_hidden or DEFAULT_HEAD_HIDDEN,
-        "policy_extra": policy_extra,
-        "spatial_tower": spatial_tower,
-        "action_v6": action_v6,
-    }
+    return NetSpec(
+        h=h or DEFAULT_H,
+        d=d or DEFAULT_D,
+        head_hidden=head_hidden or DEFAULT_HEAD_HIDDEN,
+        policy_extra=policy_extra,
+        spatial_tower=spatial_tower,
+        action_v6=action_v6,
+    )
 
 
-def build_ppo(model_cls: type[ModelT], weights_path: str | None) -> ModelT:
+def build_ppo(model_cls: Callable[[NetSpec], ModelT], weights_path: str | None) -> ModelT:
     """按权重文件的 arch 元数据构建 PPO 模型（**两个框架共用这一份实现**）。
 
     调用方是两个转发名：`worker.ppo.engine.build_ppo`（torch）与
     `worker.models.student_paddle.build_ppo`（paddle）——名字是契约，实现只有这里一份。
     """
-    return model_cls(**read_arch_kwargs(weights_path))
+    return model_cls(read_arch_spec(weights_path))
 
 
 class StudentArchMixin:
@@ -135,7 +162,7 @@ class StudentArchMixin:
         return []
 
     def arch(self) -> dict:
-        """权重 JSON 的 `arch` 元数据（写入方 `save_weights_json`，读回方 `read_arch_kwargs`）。"""
+        """权重 JSON 的 `arch` 元数据（写入方 `save_weights_json`，读回方 `read_arch_spec`）。"""
         d = {
             "kind": "student",
             "in_ch": self.in_ch,

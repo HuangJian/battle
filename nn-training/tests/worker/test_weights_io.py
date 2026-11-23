@@ -34,6 +34,7 @@ from worker.data.weights_io import (
     save_weights_json,
     tensor_to_b64,
 )
+from worker.models.arch_meta import NetSpec
 from worker.models.core import NNPolicy
 from worker.models.student import PPOStudent, StudentNet
 
@@ -74,7 +75,7 @@ def test_load_weights_json_runs_the_meta_validation(tmp_path: Path) -> None:
 def test_load_roundtrip_preserves_values(tmp_path: Path) -> None:
     """save → load 往返：张量逐值一致。"""
     p = tmp_path / "rt.json"
-    model = StudentNet()
+    model = StudentNet(NetSpec())
     save_weights_json(model, str(p))
     _meta, params = load_weights_json(str(p))
     for k, v in model.state_dict().items():
@@ -90,7 +91,7 @@ def test_load_wrong_family_raises(tmp_path: Path) -> None:
     src = NNPolicy()
     p = tmp_path / "wrong-family.json"
     save_weights_json(src, str(p))
-    dst = PPOStudent()
+    dst = PPOStudent(NetSpec())
     with pytest.raises(ValueError, match="覆盖率"):
         load_state_into(dst, str(p))
 
@@ -101,10 +102,10 @@ def test_load_legit_warmstart_partial_ok(tmp_path: Path) -> None:
     coverage=95.2% ≥ COVERAGE_WARN：仅打印 missing 提示；value_head 保持加载前
     状态（BC 检查点没有该键，不得被污染）。
     """
-    src = StudentNet()
+    src = StudentNet(NetSpec())
     p = tmp_path / "warm.json"
     save_weights_json(src, str(p))
-    dst = PPOStudent()
+    dst = PPOStudent(NetSpec())
     value_before = dst.value_head.weight.detach().clone()
     load_state_into(dst, str(p))  # 不应抛错
     # value 头保持加载前状态（BC 检查点无该键，严格为"未被触碰"而非仅非零）
@@ -115,10 +116,10 @@ def test_load_legit_warmstart_partial_ok(tmp_path: Path) -> None:
 
 def test_load_exact_family_full_match(tmp_path: Path) -> None:
     """同族同架构：覆盖率为 100%，静默无 print。"""
-    src = StudentNet()
+    src = StudentNet(NetSpec())
     p = tmp_path / "same.json"
     save_weights_json(src, str(p))
-    dst = StudentNet()
+    dst = StudentNet(NetSpec())
     load_state_into(dst, str(p))
     torch.testing.assert_close(dst.stem.weight, src.stem.weight)
 
@@ -126,7 +127,7 @@ def test_load_exact_family_full_match(tmp_path: Path) -> None:
 # ---- P2-6c：NaN/Inf 权重拒绝写出 ----
 def test_save_rejects_nan_weights(tmp_path: Path) -> None:
     """参数含 NaN 时 save 必须 raise（fail fast），不得写出让 TS 静默跑歪的坏文件。"""
-    model = StudentNet()
+    model = StudentNet(NetSpec())
     with torch.no_grad():
         model.stem.weight[0, 0, 0, 0] = float("nan")
     with pytest.raises(ValueError, match="非有限值"):
@@ -134,7 +135,7 @@ def test_save_rejects_nan_weights(tmp_path: Path) -> None:
 
 
 def test_save_rejects_inf_weights(tmp_path: Path) -> None:
-    model = StudentNet()
+    model = StudentNet(NetSpec())
     with torch.no_grad():
         model.fc.bias[0] = float("inf")
     with pytest.raises(ValueError, match="非有限值"):

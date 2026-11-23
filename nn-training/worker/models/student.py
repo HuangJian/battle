@@ -71,11 +71,11 @@ from worker.models._common import param_count as param_count
 from worker.models.arch_meta import (
     DEFAULT_D,
     DEFAULT_H,
-    DEFAULT_HEAD_HIDDEN,
     SPATIAL_TOWER_C,
     SPATIAL_TOWER_FC_OUT,
     SPATIAL_TOWER_FEAT,
     SPATIAL_TOWER_POOL,
+    NetSpec,
     StudentArchMixin,
 )
 
@@ -120,19 +120,15 @@ class StudentNet(StudentArchMixin, nn.Module):
     的输入宽度（critic 与策略吃同一份 `pf`）；legacy 档 value 仍是 128 = head_hidden。
     """
 
-    def __init__(
-        self,
-        in_ch: int = OBS_CHANNELS,
-        board: int = BOARD,
-        scalar_dim: int = SCALAR_DIM,
-        h: int = DEFAULT_H,
-        d: int = DEFAULT_D,
-        head_hidden: int = DEFAULT_HEAD_HIDDEN,
-        policy_extra: bool = False,
-        spatial_tower: bool = False,
-        action_v6: bool = False,
-    ):
+    def __init__(self, spec: NetSpec):
         super().__init__()
+        in_ch, board, scalar_dim = spec.in_ch, spec.board, spec.scalar_dim
+        h, d, head_hidden = spec.h, spec.d, spec.head_hidden
+        policy_extra, spatial_tower, action_v6 = (
+            spec.policy_extra,
+            spec.spatial_tower,
+            spec.action_v6,
+        )
         self.in_ch = in_ch
         self.board = board
         self.scalar_dim = scalar_dim
@@ -267,8 +263,8 @@ class PPOStudent(StudentNet):
     value_head optional slot and serve V(s) for on-policy rollout.
     """
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, spec: NetSpec):
+        super().__init__(spec)
         # obs-v5（plan/obs-v5-vector-gap.plan.md §2.6）：critic 吃与策略头**同一份** `pf`。
         # 旧稿只吃 `head_hidden`（128）—— critic 与策略不在同一坐标系，正是本 plan 要修的根因
         # （DECISIONS §2026-10-12-goalnn-obs-v5-critic-superset 已推翻「critic 输入集不动」）。
@@ -359,7 +355,13 @@ def export_student_golden(
 
     torch.manual_seed(seed + 1)
     m = PPOStudent(
-        h=h, d=d, policy_extra=policy_extra, spatial_tower=spatial_tower, action_v6=action_v6
+        NetSpec(
+            h=h,
+            d=d,
+            policy_extra=policy_extra,
+            spatial_tower=spatial_tower,
+            action_v6=action_v6,
+        )
     ).eval()
     with torch.no_grad():
         out = m(obs, sc, ex if policy_extra else None)
@@ -432,9 +434,7 @@ if __name__ == "__main__":
         )
         raise SystemExit(0)
 
-    m = StudentNet(
-        policy_extra=args.policy_extra, spatial_tower=args.spatial_tower
-    )
+    m = StudentNet(NetSpec(policy_extra=args.policy_extra, spatial_tower=args.spatial_tower))
     n = param_count(m)
     print(f"StudentNet params: {n} (~{n / 1000:.1f}K)  budget<=200K: {n <= 200_000}")
     dummy_obs = torch.zeros(2, OBS_CHANNELS, BOARD, BOARD, dtype=torch.uint8)

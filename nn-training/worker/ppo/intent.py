@@ -45,6 +45,7 @@ import numpy.typing as npt
 
 from common.cli import run_main
 from common.contracts import INTENT_EPISODE_FIELDS, IntentEpisode
+from worker.models.arch_meta import NetSpec
 from worker.models.intent_net import IntentNet, export_intent_weights, load_intent_weights
 
 # 共享 PPO 基础设施（ppo_common.py；行为与旧内联实现逐字节一致，见其模块 doc）。
@@ -99,10 +100,8 @@ HB_SEC = 60.0
 class IntentRLNet(IntentNet):
     """IntentNet + value 头（M8 默认 inject=True, with_value=True）。"""
 
-    def __init__(self, **kwargs):
-        kwargs.setdefault("inject", True)
-        kwargs.setdefault("with_value", True)
-        super().__init__(**kwargs)
+    def __init__(self, spec: NetSpec):
+        super().__init__(spec, inject=True, with_value=True)
 
 
 def build_rl_net(weights_path: str | None) -> IntentRLNet:
@@ -117,7 +116,7 @@ def build_rl_net(weights_path: str | None) -> IntentRLNet:
             d = a.get("d", 8)
         except Exception as e:  # 权重损坏/格式不符 → 回落默认架构（保留原行为，仅不再静默）
             log(f"[ppo_intent] WARN build_rl_net: ignoring {weights_path}: {e!r}")
-    return IntentRLNet(h=h or 64, d=d or 8)
+    return IntentRLNet(NetSpec(h=h or 64, d=d or 8))
 
 
 # ---------------- trajectory loading ----------------

@@ -42,6 +42,7 @@ from common.schema import (  # v3：dummy 前向形状随 schema 常量
     SCALAR_DIM,
 )
 from worker.data.weights_io import save_weights_json
+from worker.models.arch_meta import NetSpec
 from worker.models.student import PPOStudent
 from worker.ppo.engine import build_ppo
 
@@ -74,7 +75,7 @@ def main() -> None:
     args.out = str(out)
 
     torch.manual_seed(args.seed)
-    model = PPOStudent(policy_extra=True) if args.policy_extra else build_ppo(None)
+    model = PPOStudent(NetSpec(policy_extra=True)) if args.policy_extra else build_ppo(None)
 
     with torch.no_grad():
         for n, p in model.named_parameters():

@@ -263,6 +263,7 @@ def run_fixture(out: Path) -> None:
     import torch
 
     from worker.data.weights_io import load_state_into, save_weights_json
+    from worker.models.arch_meta import NetSpec
     from worker.models.student import PPOStudent
     from worker.ppo import engine
 
@@ -271,11 +272,11 @@ def run_fixture(out: Path) -> None:
 
     for name, flags in ARCHS.items():
         torch.manual_seed(SEED + len(name))
-        m = PPOStudent(h=64, d=8, head_hidden=128, **flags)
+        m = PPOStudent(NetSpec(h=64, d=8, head_hidden=128, **flags))
         save_weights_json(m, str(out / "models" / f"{name}.json"))
     for name in ("legacy", "v6"):
         torch.manual_seed(SEED + 100 + len(name))
-        rm = PPOStudent(h=64, d=8, head_hidden=128, **ARCHS[name])
+        rm = PPOStudent(NetSpec(h=64, d=8, head_hidden=128, **ARCHS[name]))
         save_weights_json(rm, str(out / "models" / f"{name}_ref.json"))
 
     for case in CASES:
@@ -302,7 +303,7 @@ def run_fixture(out: Path) -> None:
             encoding="utf-8",
         )
 
-        model = PPOStudent(h=64, d=8, head_hidden=128, **ARCHS[arch])
+        model = PPOStudent(NetSpec(h=64, d=8, head_hidden=128, **ARCHS[arch]))
         load_state_into(model, str(out / "models" / f"{arch}.json"))
         model.eval()
         with torch.no_grad():
@@ -324,7 +325,7 @@ def run_fixture(out: Path) -> None:
         opt = torch.optim.Adam(model.parameters(), lr=LR)
         ref_model = None
         if case.get("ref"):
-            ref_model = PPOStudent(h=64, d=8, head_hidden=128, **ARCHS[arch])
+            ref_model = PPOStudent(NetSpec(h=64, d=8, head_hidden=128, **ARCHS[arch]))
             load_state_into(ref_model, str(out / "models" / f"{arch}_ref.json"))
             for p in ref_model.parameters():
                 p.requires_grad = False
@@ -428,6 +429,7 @@ def run_check(
 ) -> int:
     import paddle
 
+    from worker.models.arch_meta import NetSpec
     from worker.models.student_paddle import PPOStudent, load_state_into
     from worker.ppo import engine_paddle
 
@@ -438,7 +440,7 @@ def run_check(
         cdir = root / "cases" / case["name"]
         cfg = json.loads((cdir / "case.json").read_text(encoding="utf-8"))
         arch = cfg["arch"]
-        model = PPOStudent(h=64, d=8, head_hidden=128, **ARCHS[arch])
+        model = PPOStudent(NetSpec(h=64, d=8, head_hidden=128, **ARCHS[arch]))
         load_state_into(model, str(root / cfg["weights"]))
         model.eval()
         chunk = dict(np.load(cdir / "chunk.npz"))
@@ -458,7 +460,7 @@ def run_check(
         opt = paddle.optimizer.Adam(learning_rate=LR, parameters=model.parameters())
         ref_model = None
         if cfg["ref"]:
-            ref_model = PPOStudent(h=64, d=8, head_hidden=128, **ARCHS[arch])
+            ref_model = PPOStudent(NetSpec(h=64, d=8, head_hidden=128, **ARCHS[arch]))
             load_state_into(ref_model, str(root / cfg["ref"]))
             for p in ref_model.parameters():
                 p.stop_gradient = True
@@ -581,6 +583,7 @@ def _check_ckpt(cdir: Path, arch: str, atol_weights: float) -> bool:
     import paddle
 
     from common.torch_pickle import load_torch_pickle
+    from worker.models.arch_meta import NetSpec
     from worker.models.student_paddle import PPOStudent
     from worker.ppo import engine_paddle
     from worker.ppo.checkpoint_paddle import load_ckpt, named_params
@@ -591,7 +594,7 @@ def _check_ckpt(cdir: Path, arch: str, atol_weights: float) -> bool:
     shutil.rmtree(dst, ignore_errors=True)
     shutil.copytree(cdir / "ckpt_torch", dst)
 
-    model = PPOStudent(h=64, d=8, head_hidden=128, **ARCHS[arch])
+    model = PPOStudent(NetSpec(h=64, d=8, head_hidden=128, **ARCHS[arch]))
     opt = paddle.optimizer.Adam(learning_rate=LR, parameters=model.parameters())
     epochs_done, steps_done = load_ckpt(model, opt, str(dst), PPORng.from_seed(0))
     assert (epochs_done, steps_done) == (1, 1), (
@@ -678,6 +681,7 @@ def run_verify(root: Path, atol: float, rtol: float) -> int:
     import torch
 
     from worker.data.weights_io import load_state_into
+    from worker.models.arch_meta import NetSpec
     from worker.models.student import PPOStudent
 
     failed = 0
@@ -685,7 +689,7 @@ def run_verify(root: Path, atol: float, rtol: float) -> int:
     for case in CASES:
         cdir = root / "cases" / case["name"]
         arch = ARCHS[case["arch"]]
-        model = PPOStudent(h=64, d=8, head_hidden=128, **arch)
+        model = PPOStudent(NetSpec(h=64, d=8, head_hidden=128, **arch))
         pj = cdir / "paddle_after.json"
         load_state_into(model, str(pj))
         chunk = dict(np.load(cdir / "chunk.npz"))
@@ -728,10 +732,11 @@ def _verify_ckpt(cdir: Path, arch: str, atol: float) -> bool:
     """
     import torch
 
+    from worker.models.arch_meta import NetSpec
     from worker.models.student import PPOStudent
 
     ck = cdir / "ckpt_paddle"
-    model = PPOStudent(h=64, d=8, head_hidden=128, **ARCHS[arch])
+    model = PPOStudent(NetSpec(h=64, d=8, head_hidden=128, **ARCHS[arch]))
     opt = torch.optim.Adam(model.parameters(), lr=1.0)
     model.load_state_dict(torch.load(ck / "model.pt", map_location="cpu", weights_only=True))
     opt.load_state_dict(torch.load(ck / "opt.pt", map_location="cpu", weights_only=True))
@@ -835,13 +840,14 @@ def bc_fixture(root: Path) -> None:
     import torch
 
     from worker.data.weights_io import load_state_into, save_weights_json
+    from worker.models.arch_meta import NetSpec
     from worker.models.student import PPOStudent
     from worker.train.bc import train as torch_bc_train
 
     root.mkdir(parents=True, exist_ok=True)
     _bc_write_data(root)
     torch.manual_seed(SEED)
-    model = PPOStudent(h=64, d=8, head_hidden=128, action_v6=True, policy_extra=True)
+    model = PPOStudent(NetSpec(h=64, d=8, head_hidden=128, action_v6=True, policy_extra=True))
     save_weights_json(model, str(root / "bc-init.json"))
     load_state_into(model, str(root / "bc-init.json"))
     model.eval()
@@ -855,7 +861,7 @@ def bc_fixture(root: Path) -> None:
     metrics = torch_bc_train(_bc_args(root, "bc-torch"))
     (root / "bc-torch-metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     # train() 内部自建模型；基准前向必须从导出的 active 权重重建，不能复用闭包外的初始模型。
-    trained = PPOStudent(h=64, d=8, head_hidden=128, action_v6=True, policy_extra=True)
+    trained = PPOStudent(NetSpec(h=64, d=8, head_hidden=128, action_v6=True, policy_extra=True))
     load_state_into(trained, str(root / "bc-torch" / "weights.json"))
     trained.eval()
     _bc_forward_torch(trained, root, "bc-torch-after.npz")
@@ -871,11 +877,12 @@ def bc_check(root: Path, atol_metrics: float, atol_forward: float) -> int:
     import numpy as np
     import paddle
 
+    from worker.models.arch_meta import NetSpec
     from worker.models.student_paddle import PPOStudent, load_state_into, save_weights_json
     from worker.train import bc_paddle
 
     paddle.set_device("cpu")
-    model = PPOStudent(h=64, d=8, head_hidden=128, action_v6=True, policy_extra=True)
+    model = PPOStudent(NetSpec(h=64, d=8, head_hidden=128, action_v6=True, policy_extra=True))
     load_state_into(model, str(root / "bc-init.json"))
     model.eval()
     batch = _bc_load_batch(root)
@@ -900,7 +907,7 @@ def bc_check(root: Path, atol_metrics: float, atol_forward: float) -> int:
         / (1.0 + abs(float(ref["history"][k][-1])))
         for k in keys
     )
-    model = PPOStudent(h=64, d=8, head_hidden=128, action_v6=True, policy_extra=True)
+    model = PPOStudent(NetSpec(h=64, d=8, head_hidden=128, action_v6=True, policy_extra=True))
     load_state_into(model, str(root / "bc-paddle" / "weights.json"))
     model.eval()
     with paddle.no_grad():
@@ -939,9 +946,10 @@ def bc_verify(root: Path, atol: float) -> int:
     import torch
 
     from worker.data.weights_io import load_state_into
+    from worker.models.arch_meta import NetSpec
     from worker.models.student import PPOStudent
 
-    model = PPOStudent(h=64, d=8, head_hidden=128, action_v6=True, policy_extra=True)
+    model = PPOStudent(NetSpec(h=64, d=8, head_hidden=128, action_v6=True, policy_extra=True))
     load_state_into(model, str(root / "bc-paddle-weights.json"))
     batch = _bc_load_batch(root)
     with torch.no_grad():

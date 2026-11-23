@@ -21,6 +21,7 @@ if str(NN_ROOT) not in sys.path:
 from tools.bc_relabel import find_shards, relabel_shard
 from tools.p0_teacher_agreement import load_policy_model
 from worker.data.weights_io import save_weights_json
+from worker.models.arch_meta import NetSpec
 from worker.models.student import PPOStudent
 
 N = 4
@@ -31,7 +32,7 @@ def teacher(tmp_path: Path) -> Path:
     """现造一个 v6 教师权重：测试不依赖仓库里的 `weights/`（gitignore，CI 没有）。"""
     torch.manual_seed(21)
     p = tmp_path / "teacher.json"
-    m = PPOStudent(action_v6=True, policy_extra=True)
+    m = PPOStudent(NetSpec(action_v6=True, policy_extra=True))
     save_weights_json(m, str(p), extra_meta={"arch": m.arch()})
     return p
 
