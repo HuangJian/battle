@@ -36,10 +36,10 @@ import argparse
 import hashlib
 import json
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from common.cli import house_parser, run_main
 from common.platform_utils import force_utf8_stdio
@@ -165,6 +165,9 @@ from worker.gate_judges import (
 from worker.gate_judges import (
     _wins_mastery_pooled as _wins_mastery_pooled,
 )
+
+if TYPE_CHECKING:  # 运行时零 biz.config 依赖（理由同 `_lazy_config`：红线随家）。
+    from worker.config import GateRule, GatesSpec
 
 
 def _lazy_config() -> tuple[Any, Any, Any]:
@@ -336,6 +339,10 @@ class GateAsk:
 def evaluate(ask: GateAsk) -> GateResult:
     """课程结束门求值（纯函数，§4.1）。输入见 `GateAsk`，输出 `GateResult`。
 
+    只做**编排**：装配 ctx → 两遍求值 → 读数与附加条件 → lattice / override。
+    每段判据住自己的助手或表里（`_RULE_PASSES` / `_ADVANCE_CONDITIONS` / `_ADVANCE_VETOES`），
+    加一类门不必再读这个函数。
+
     Returns:
         GateResult：verdict ∈ {HOLD, ADVANCE, REMEDIATE, STOP, PAUSE, ABORT}。
     """
@@ -343,13 +350,11 @@ def evaluate(ask: GateAsk) -> GateResult:
     trend_rows = ask.trend_rows
     health = ask.health
     budget = ask.budget
-    course_fp = ask.course_fp
-    only_kinds = ask.only_kinds
     override = ask.override
     now_v = time.time() if ask.now is None else float(ask.now)
-    GATE_SPLIT, GatesSpec, _ = _lazy_config()
+    gate_split, gates_spec, _ = _lazy_config()
     spec = getattr(course, "gates", None)
-    if spec is None and isinstance(course, GatesSpec):
+    if spec is None and isinstance(course, gates_spec):
         spec = course
     if spec is None:
         return GateResult(
@@ -359,32 +364,117 @@ def evaluate(ask: GateAsk) -> GateResult:
             health=health,
         )
 
-    rows = normalize_rows(trend_rows, course_fp)
+    rows = normalize_rows(trend_rows, ask.course_fp)
     teacher_wr = spec.teacher.wins / spec.teacher.games if spec.teacher.games else 0.0
     ctx = _Ctx(spec=spec, rows=rows, teacher_win_rate=teacher_wr, now=now_v, budget=budget)
 
-    # ---- pass 1：非分流门（完成度不依赖 advance_if）----
-    completions: dict[str, float] = {}
+    partials, completions = _read_rules(spec, ctx, trend_rows, ask.only_kinds)
+    prep = _advance_preps(spec, rows, budget, completions)
+
+    readings: list[RuleReading] = []
+    #: 达标但被 ADVANCE 附加条件挡住的门（观测必须自带牙齿：HOLD 也要说清差在哪）。
+    blocked_advance: list[str] = []
+    for rule in spec.rules:
+        if rule.id not in partials:  # §385 only_kinds 过滤掉的规则不参与判决
+            continue
+        reading, blocked = _rule_reading(rule, partials[rule.id], prep, gate_split)
+        readings.append(reading)
+        if blocked:
+            blocked_advance.append(blocked)
+
+    verdict, route, reason = _decide(readings, blocked_advance, prep)
+    #: G12 人工改向（最高优先级）最后覆盖 verdict / reason / route。
+    ov = dict(override) if override else None
+    if ov is not None:
+        ov_verdict = str(ov.get("verdict") or "HOLD")
+        verdict = ov_verdict
+        reason = f"G12 override → {ov_verdict}：{ov.get('reason', '')}".strip()
+        route = ov.get("route")
+    return GateResult(
+        verdict=verdict,
+        reason=reason,
+        readings=tuple(readings),
+        route=route,
+        override=ov,
+        seeds=prep.seeds_state,
+        now=now_v,
+        health=health,
+    )
+
+
+#: 分流门的 kind（`route` 是判决本身；其余 kind 的 `route` 只是去向建议）。
+_SPLIT_KINDS = frozenset({"plateau", "budget"})
+
+#: 求值遍序：先非分流门（完成度不依赖 `advance_if`），再分流门（`route` 读前一遍的完成度）。
+_RULE_PASSES: tuple[bool, ...] = (False, True)
+
+#: ADVANCE 的附加条件（顺序 = HOLD 说明串的拼接顺序）。**全绿才放行**。
+_ADVANCE_CONDITIONS: tuple[
+    tuple[Callable[[_AdvancePreps], bool], Callable[[_AdvancePreps], str]], ...
+] = (
+    (lambda p: p.advance_ready, lambda p: "(advance_requires 未全绿)"),
+    (lambda p: p.seeds_ok, lambda p: f"(seed 集 {p.seeds_state})"),
+    (lambda p: p.train_ok, lambda p: p.train_note),
+)
+
+#: 已放出 ADVANCE 之后仍可能被撤回的条件（顺序同上；每条只在自己不满足时追加一句）。
+_ADVANCE_VETOES: tuple[tuple[Callable[[_AdvancePreps], bool], str], ...] = (
+    (lambda p: not p.advance_ready, "（advance_requires 未全绿 → HOLD）"),
+    (lambda p: not p.seeds_ok, "（窗口 seed 集 <2 → HOLD）"),
+)
+
+
+@dataclass(frozen=True)
+class _AdvancePreps:
+    """ADVANCE 的三条附加条件读数：`advance_requires` 全绿 · 窗口 ≥2 seed 集 · 样本通过量。
+
+    `seeds_state` 同时进 `GateResult.seeds`（"ok" / "insufficient" / "unknown"）。
+    """
+
+    advance_ready: bool
+    seeds_state: str
+    seeds_ok: bool
+    train_ok: bool
+    train_note: str
+
+    @property
+    def all_ok(self) -> bool:
+        return all(check(self) for check, _ in _ADVANCE_CONDITIONS)
+
+    def blocked_note(self) -> str:
+        """未满足的附加条件拼成一句（空串 = 全绿）。"""
+        return "".join(note(self) for check, note in _ADVANCE_CONDITIONS if not check(self))
+
+
+def _read_rules(
+    spec: GatesSpec,
+    ctx: _Ctx,
+    trend_rows: Sequence[Mapping[str, object]],
+    only_kinds: Sequence[str] | None,
+) -> tuple[dict[str, _Partial], dict[str, float]]:
+    """按 `_RULE_PASSES` 两遍求值，返回 `(partials, completions)`。"""
     partials: dict[str, _Partial] = {}
-    for rule in spec.rules:
-        if rule.kind in ("plateau", "budget"):
-            continue
-        if only_kinds is not None and rule.kind not in only_kinds:
-            continue
-        partials[rule.id] = _eval_one(rule, ctx, trend_rows, spec)
-        completions[rule.id] = partials[rule.id].completion
+    completions: dict[str, float] = {}
+    for split in _RULE_PASSES:
+        for rule in spec.rules:
+            if (rule.kind in _SPLIT_KINDS) != split:
+                continue
+            if only_kinds is not None and rule.kind not in only_kinds:
+                continue
+            partials[rule.id] = _eval_one(
+                rule, ctx, trend_rows, spec, completions if split else None
+            )
+            completions[rule.id] = partials[rule.id].completion
+    return partials, completions
 
-    # ---- pass 2：分流门（route 读 pass 1 的完成度）----
-    for rule in spec.rules:
-        if rule.kind not in ("plateau", "budget"):
-            continue
-        if only_kinds is not None and rule.kind not in only_kinds:
-            continue
-        p = _eval_one(rule, ctx, trend_rows, spec, completions)
-        partials[rule.id] = p
-        completions[rule.id] = p.completion
 
-    # ---- ADVANCE 附加条件：advance_requires 全绿 + 窗口 ≥2 seed 集 ----
+def _advance_preps(
+    spec: GatesSpec,
+    rows: Sequence[EvalRow],
+    budget: BudgetInfo | None,
+    completions: Mapping[str, float],
+) -> _AdvancePreps:
+    """ADVANCE 的三条附加条件（§4.4 + §12.4）：数据不够下结论 ≠ 事故。"""
     by_rule = {r.id: r for r in spec.rules}
     advance_ready = all(
         completions.get(gid, 0.0) >= 1.0
@@ -399,9 +489,7 @@ def evaluate(ask: GateAsk) -> GateResult:
         seeds_state = "ok"
     else:
         seeds_state = "insufficient"
-    seeds_ok = seeds_state != "insufficient"
 
-    # ---- ADVANCE 附加条件之四：样本通过量（§12.4：数据不够下结论 ≠ 事故）----
     min_samples = getattr(spec, "min_train_samples", None)
     train_ok = True
     train_note = ""
@@ -411,52 +499,57 @@ def evaluate(ask: GateAsk) -> GateResult:
             train_ok = False
             train_note = f"（样本通过量 {got / 1e6:.2f}M < {float(min_samples) / 1e6:.2f}M）"
 
-    readings: list[RuleReading] = []
-    #: 达标但被 ADVANCE 附加条件挡住的门（观测必须自带牙齿：HOLD 也要说清差在哪）。
-    blocked_advance: list[str] = []
-    for rule in spec.rules:
-        if rule.id not in partials:  # §385 only_kinds 过滤掉的规则不参与判决
-            continue
-        p = partials[rule.id]
-        verdict = "ADVANCE" if rule.verdict == GATE_SPLIT else rule.verdict
-        released = p.fired and p.completion >= 1.0
-        if rule.verdict == GATE_SPLIT:
-            # 分流门：fired 即放行，实际判决取 route
-            released = p.fired
-        if not rule.enabled:
-            released = False
-        elif released and (p.route if rule.verdict == GATE_SPLIT else verdict) == "ADVANCE":
-            # ADVANCE 附加条件（§4.4 + §12.4）：advance_requires 全绿 + 窗口 ≥2 seed 集
-            # + 样本通过量 ≥ min_train_samples。
-            # 分流门按**实际 route** 判（route=REMEDIATE 不需 advance_requires 背书，
-            # 否则平台期永远放不出 REMEDIATE——c6 回溯实测正是卡在这里）。
-            gates_ok = advance_ready and seeds_ok and train_ok
-            if not gates_ok:
-                blocked_advance.append(
-                    f"{rule.id}"
-                    + ("" if advance_ready else "(advance_requires 未全绿)")
-                    + ("" if seeds_ok else f"(seed 集 {seeds_state})")
-                    + (train_note if not train_ok else "")
-                )
-            released = gates_ok
-        readings.append(
-            RuleReading(
-                rule_id=rule.id,
-                kind=rule.kind,
-                verdict=verdict,
-                fired=p.fired,
-                released=released,
-                completion=p.completion,
-                reason=p.reason,
-                enabled=rule.enabled,
-                dormant=p.dormant or not rule.enabled,
-                unknown=p.unknown,
-                route=p.route,
-                split=rule.verdict == GATE_SPLIT,
-            )
-        )
+    return _AdvancePreps(
+        advance_ready=advance_ready,
+        seeds_state=seeds_state,
+        seeds_ok=seeds_state != "insufficient",
+        train_ok=train_ok,
+        train_note=train_note,
+    )
 
-    # ---- lattice：同轮多门取最高优先级 ----
+
+def _rule_reading(
+    rule: GateRule, p: _Partial, prep: _AdvancePreps, gate_split: str
+) -> tuple[RuleReading, str]:
+    """单条规则 → 读数 + 被 ADVANCE 附加条件挡住时的说明（空串 = 没被挡）。"""
+    verdict = "ADVANCE" if rule.verdict == gate_split else rule.verdict
+    released = p.fired and p.completion >= 1.0
+    if rule.verdict == gate_split:
+        # 分流门：fired 即放行，实际判决取 route
+        released = p.fired
+    blocked = ""
+    if not rule.enabled:
+        released = False
+    elif released and (p.route if rule.verdict == gate_split else verdict) == "ADVANCE":
+        # ADVANCE 附加条件（§4.4 + §12.4）：advance_requires 全绿 + 窗口 ≥2 seed 集
+        # + 样本通过量 ≥ min_train_samples。
+        # 分流门按**实际 route** 判（route=REMEDIATE 不需 advance_requires 背书，
+        # 否则平台期永远放不出 REMEDIATE——c6 回溯实测正是卡在这里）。
+        gates_ok = prep.all_ok
+        if not gates_ok:
+            blocked = f"{rule.id}" + prep.blocked_note()
+        released = gates_ok
+    return (
+        RuleReading(
+            rule_id=rule.id,
+            kind=rule.kind,
+            verdict=verdict,
+            fired=p.fired,
+            released=released,
+            completion=p.completion,
+            reason=p.reason,
+            enabled=rule.enabled,
+            dormant=p.dormant or not rule.enabled,
+            unknown=p.unknown,
+            route=p.route,
+            split=rule.verdict == gate_split,
+        ),
+        blocked,
+    )
+
+
+def _lattice(readings: Sequence[RuleReading]) -> RuleReading | None:
+    """同轮多门取最高优先级；同优先级取**带 route 的那条**（分流门信息更全）。"""
     best: RuleReading | None = None
     for rd in readings:
         if not rd.released:
@@ -464,46 +557,34 @@ def evaluate(ask: GateAsk) -> GateResult:
         if best is None:
             best = rd
             continue
-        # 同优先级时取**带 route 的那条**（分流门信息更全：既给判决又给去向）。
         key_new = (VERDICT_PRIORITY.get(rd.effective_verdict, 0), rd.route is not None)
         key_old = (VERDICT_PRIORITY.get(best.effective_verdict, 0), best.route is not None)
         if key_new > key_old:
             best = rd
+    return best
+
+
+def _decide(
+    readings: Sequence[RuleReading], blocked_advance: Sequence[str], prep: _AdvancePreps
+) -> tuple[str, str | None, str]:
+    """lattice → 附加条件否决 ⇒ `(verdict, route, reason)`（G12 override 由 evaluate 收尾）。"""
+    best = _lattice(readings)
     verdict = "HOLD"
     route: str | None = None
     if best is not None:
         verdict = best.effective_verdict
         route = best.route
         reason = f"{best.rule_id}({best.kind}): {best.reason}"
-        if not advance_ready and verdict == "ADVANCE":
-            verdict = "HOLD"
-            reason += "（advance_requires 未全绿 → HOLD）"
-        if not seeds_ok and verdict == "ADVANCE":
-            verdict = "HOLD"
-            reason += "（窗口 seed 集 <2 → HOLD）"
+        for veto, note in _ADVANCE_VETOES:
+            if verdict == "ADVANCE" and veto(prep):
+                verdict = "HOLD"
+                reason += note
     elif blocked_advance:
         # 门已达标、只差附加条件——HOLD 也要说清差在哪一环（否则屏幕上只有沉默）。
         reason = f"ADVANCE 待放行（{'，'.join(blocked_advance)}）→ HOLD"
     else:
         reason = "无门放行（HOLD）"
-
-    ov = dict(override) if override else None
-    if ov is not None:
-        ov_verdict = str(ov.get("verdict") or "HOLD")
-        verdict = ov_verdict
-        reason = f"G12 override → {ov_verdict}：{ov.get('reason', '')}".strip()
-        route = ov.get("route")
-
-    return GateResult(
-        verdict=verdict,
-        reason=reason,
-        readings=tuple(readings),
-        route=route,
-        override=ov,
-        seeds=seeds_state,
-        now=now_v,
-        health=health,
-    )
+    return verdict, route, reason
 
 
 # --------------------------------------------------------------------------- CLI（薄壳）

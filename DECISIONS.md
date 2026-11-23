@@ -10555,3 +10555,27 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   合了就丢。
 - **验证**：nn `7009 passed / 3 skipped`；`tests/worker` 全量绿。存量 70 → 69（另一格
   `dispatch_bc_corpus` 被格式化收到恰好 150，`ast.unparse` 前后相同）。全文 → engineering §332。
+
+## §2026-11-23-gate-table-verdict
+
+- **背景**：`worker/gate_check.evaluate` 171 行 / **6 条顶层语句** —— 装配 ctx、两遍全规则扫描、
+  读数与 ADVANCE 附加条件、lattice、G12 override 五件事首尾相接。加一类门口味不清：要同时改
+  「选遍」「附加条件」「判决」三处，而三者都在同一个 171 行窗口里。§331 分诊把它排进第一批。
+
+- **决定**：切成 `evaluate`(64) 编排 · `_read_rules`(20) · `_advance_preps`(38) ·
+  `_rule_reading`(38) · `_lattice`(14) · `_decide`(21)，并把「哪些算一遍」「附加条件是什么」
+  从 `if` 链改成表：`_SPLIT_KINDS` / `_RULE_PASSES` / `_ADVANCE_CONDITIONS` / `_ADVANCE_VETOES`；
+  三条附加条件读数收进 frozen `_AdvancePreps`（`all_ok` / `blocked_note()` 由表算出）。
+  `LONG_FUNCS_BASELINE` 删 `worker/gate_check.py`（68 → 67 个 / 57 文件）。
+
+- **被否决**：① 只提 3 段（171 → ~90）—— 附加条件、lattice、override 仍在同一个函数体内，
+  加一类门依旧要读 90 行；② `_ADVANCE_CONDITIONS` 写成 `if` 链 —— 「顺序 = HOLD 说明串拼接
+  顺序」这条会散在三处（判定 / 说明 / 撤回），改一处忘两处不报错；③ 把 `_AdvancePreps` 挪去
+  `worker/gate_judges` —— 它不是判决项而是一条 ADVANCE 的附加条件，且会让 gate_judges 多一个
+  跨档形状（那边已有 `_Ctx` / `_Partial`）；④ override 留在 `_decide` 里 —— 两处 `Mapping[str,
+  Any]` 注解会让 G14 14 → 15，且 override 是外部输入、不属判决（差分矩阵仍在 `evaluate` 面覆盖）。
+
+- **验证**：HEAD 版 vs 新版 9450 组矩阵逐字段比较（verdict / reason / route / seeds / override /
+  readings）**全一致**，四种判决全覆盖；`Any` 基线 13 未动（`spec` / `rule` 走 TYPE_CHECKING 的
+  `GatesSpec` / `GateRule`）；同名散落 146 未动（助手从 `_reading` 改名 `_rule_reading`，避开第 3
+  份）；nn `7009 passed / 3 skipped`。全文 → `docs/nn/engineering.md` §333。

@@ -29,6 +29,72 @@
 
 ---
 
+## §333 P0-2 存量：`worker/gate_check.evaluate`（171 → 64 + 表驱动判决）（2026-11-23）
+
+§331 分诊里第五格。判据是「**171 行只有 6 条顶层语句**」：函数自己不长在控制流里，而长在
+**五件事首尾相接**——装配 ctx、两遍全规则扫描、读数与 ADVANCE 附加条件、lattice 取门、
+G12 override。加一类门要同时改第 2、3、4 段，读的人却只有一个 171 行的窗口。
+
+**切法（每个助手只回答一个问题）**
+
+| 函数 | 行数 | 回答的问题 |
+|---|---:|---|
+| `evaluate` | 64 | 装配 → 两遍求值 → 读数 → 判决 → override（编排） |
+| `_read_rules` | 20 | 这一轮哪些规则要算、按什么遍序算 |
+| `_advance_preps` | 38 | ADVANCE 的三条附加条件各是什么读数 |
+| `_rule_reading` | 38 | 一条规则 → 读数（分流门判决取 route；放行后还要过附加条件） |
+| `_lattice` | 14 | 同轮多门放行时取哪一条 |
+| `_decide` | 21 | lattice + 附加条件否决 ⇒ `(verdict, route, reason)` |
+
+**判决改成表驱动**：四张表 + 一个 frozen dataclass
+
+* `_SPLIT_KINDS = frozenset({"plateau", "budget"})` —— 原先把这组字面量抄了两遍（选遍一次、
+  判「分流门按 route 取判决」一次），漏改一处就是「某个门静默按普通门判」。
+* `_RULE_PASSES = (False, True)` —— 遍序本身就是数据（先非分流门，再分流门，因为 `route` 读
+  前一遍的完成度）；原先是两段手抄的 `for`，加第三遍/换序现在只改元组。
+* `_ADVANCE_CONDITIONS = ((check, note), …)` —— 三条附加条件（`advance_requires` 全绿 / 窗口
+  ≥2 seed 集 / 样本通过量）；**元组顺序就是 HOLD 说明串的拼接顺序**。`_AdvancePreps.all_ok`
+  是 `all(check(p) …)`，`blocked_note()` 是「没满足的那几条各说一句」。
+* `_ADVANCE_VETOES = ((check, note), …)` —— 已放出 ADVANCE 之后的撤回（同两条，但只在
+  `verdict == "ADVANCE"` 时逐条查）。
+
+`_AdvancePreps(advance_ready, seeds_state, seeds_ok, train_ok, train_note)` 是这三条读数的唯一
+载体；`seeds_state` 同时原样进 `GateResult.seeds`（`ok` / `insufficient` / `unknown`）。
+
+**行为不变的四点易错处**（逐条对过原文）
+
+1. **分流门不看完成度**：`released = p.fired`（不是 `fired and completion >= 1.0`），判决取
+   `route` —— `plateau` / `budget` 的完成度语义与普通门不同（§332 那句「平台期永远放不出
+   REMEDIATE」的教训就挂在这条上）。
+2. **撤回收紧的顺序**：先 `advance_requires` 后 seed 集，且第二条只在 `verdict` 仍是 ADVANCE 时
+   触发 ⇒ 第一条已把它降成 HOLD，第二条不再追加说明。
+3. **`only_kinds` 过滤掉的规则不进 `readings`**（连读数表都没有它），所以判决面上看不出它存在；
+   `_read_rules` 只填 `partials`，`evaluate` 按 `rule.id not in partials` 跳过。
+4. **override 留在 `evaluate`**：它是外部输入（G12 人工改向），不是判决 —— `_decide` 只管
+   lattice 与撤回，`dict(override)` 非空时最后覆盖 verdict / reason / route。
+
+**差分对账**：矩阵 = 规则前缀 1~7 × `advance_requires` 5 档 × `sustain` 3 档 × 趋势行
+0/1/3/4/6 × 预算 3 档 × override 有/无 × `only_kinds` 3 档 = **9450 组**；用 HEAD 版模块
+（`importlib` 加载 `tmp/_old_gate_check.py`）与新版逐字段比较 `verdict` / `reason` / `route` /
+`seeds` / `override` / `readings.to_dict()`：**9450 一致 / 0 不一致**，ADVANCE / HOLD /
+REMEDIATE / STOP 四种判决全覆盖。
+
+**两笔顺手账**
+
+* `Any` 基线 **13 未动**：新助手的 `spec` / `rule` 走 `TYPE_CHECKING` 的 `GatesSpec` / `GateRule`
+  （运行期仍零 `biz.config` 依赖，红线随家），`rows` 用 `EvalRow`；唯一想标 `Any` 的 override
+  干脆留在 `evaluate`，那里本来就只有一处既有的 `Mapping[str, Any]`。
+* 助手原本叫 `_reading` —— 它在 `remote/deliver_proc.py` / `worker/kickstart_burn.py` 已有同名，
+  再加一份就是同名散落第 3 份。改名 `_rule_reading`，`BASELINE_SAME_NAME_GE3` **146 未动**
+  （实测先涨到 147 才发现的）。
+
+**门禁读数**：nn `7009 passed / 3 skipped`（71.3s，墙钟 79s）；`tests/worker -k gate` 174 passed；
+`LONG_FUNCS_BASELINE` 删 `worker/gate_check.py` ⇒ 存量 **68 → 67 个 / 58 → 57 文件**
+（条目按表的实测值算；§332 正文记的「70 → 69」多算一格，那一刀实际是 70 → 68）。文件
+712 → **715** 行。**行为差异：无**。
+
+---
+
 ## §332 P0-2 存量：`worker/bc_dispatch._Corpus.run_slot`（159 → 26 + 六段）（2026-11-23）
 
 §331 分诊里排第一的那格，判据是「**159 行只有 5 条顶层语句**」：整条槽位线程的生命周期

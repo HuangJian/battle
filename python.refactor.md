@@ -176,7 +176,7 @@ nn-training/.venv/bin/python tmp/py-clones.py
 |------|-----:|
 | > 200 行 | **45** → **0** |
 | > 100 行 | **161** → **182** |
-| > 150 行 | 未计 → **71**（2026-11-23 起为存量闸，见 engineering §329） |
+| > 150 行 | 未计 → **67**（2026-11-23 起以 71 冻结为存量闸，逐刀下调；见 engineering §329 / §333） |
 | 参数 > 8 个 | **124** → **0** |
 | 带 `**kwargs` | 37 → 36 |
 | 签名里出现 `Any` | **316**（口径未复核；G14 的另一个口径是 1,211 处 / 185 文件） |
@@ -339,6 +339,9 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
   > `while` 体内」好拆。
   > 第一批的第一格已落地：`worker/bc_dispatch.run_slot` 159 → 26（+ 六段，`_Attempt`
   > 收三个跨循环布尔），存量 70 → 69（engineering §332）。
+  > 第五格也落地了：`worker/gate_check.evaluate` 171 → 64（+ 五个助手），判决改表驱动
+  > （`_SPLIT_KINDS` / `_RULE_PASSES` / `_ADVANCE_CONDITIONS` / `_ADVANCE_VETOES` + frozen
+  > `_AdvancePreps`）；HEAD-vs-新 9450 组矩阵差分全一致，存量 68 → 67（engineering §333）。
 
 **为什么这是问题**
 
