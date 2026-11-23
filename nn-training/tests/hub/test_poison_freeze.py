@@ -46,6 +46,7 @@ from common.protocol import (
 from hub.server import FREEZE_AFTER_RECLAIMS, _JobStore, make_server
 from hub.store_leases import LeaseSpec
 from remote.hub_client import wait_job
+from remote.hub_http import WaitJobSpec
 from tests.helpers.http_server import serve_fast
 from tests.helpers.hub_poll import hub_poll
 
@@ -311,7 +312,16 @@ def test_frozen_job_tells_training_side_immediately(tmp_path: Path, capsys) -> N
 
         # 训练侧：立刻收兵（带原因），而不是等满 25 分钟
         with pytest.raises(JobFailedError) as ei:
-            wait_job(base, TOKEN, JID, timeout_sec=25 * 60, poll_sec=0.05, log=lambda _m: None)
+            wait_job(
+                WaitJobSpec(
+                    base_url=base,
+                    token=TOKEN,
+                    jid=JID,
+                    timeout_sec=25 * 60,
+                    poll_sec=0.05,
+                    log=lambda _m: None,
+                )
+            )
         assert ei.value.kind == "PoisonFrozen"
         assert "熔断冻结" in str(ei.value)
     finally:

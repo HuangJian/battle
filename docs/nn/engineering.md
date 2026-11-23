@@ -29,6 +29,42 @@
 
 ---
 
+## §318 P0-3 批 F4：`hub_http` 的 `wait_job` / `report_job_failure`（各 9）→ `WaitJobSpec` / `HubFailSpec`（15 → 13）（2026-11-22）
+
+* **一把刀两处，同一族**：`remote/hub_http` 的 job 控制面薄壳各收一份 spec ——
+  `wait_job`(3 位置 + 6 关键字) 与 `report_job_failure`(4 位置 + 5 关键字)。读数：宽签名
+  **15 → 13**、12 → **11** 文件（`remote/hub_http.py` 清零）。调用面：`wait_job` 13 处
+  （生产 3：`trainer/loop_remote_job` · `runner` 侧两腿；`hub/smoke_loopback` · `e2e` ·
+  用例 10），`report_job_failure` 只经 `hub_client` 的转发名 + 一条用例活着。
+* **`wait_job` 的坏点**：`timeout_sec` / `poll_sec` / `poll_max_sec` / `report_every_sec` 是
+  **四个相邻 float，单位还全是秒** —— 互换后什么都不抛：超时与轮询步长互换 ⇒ 25 分钟一次探测、
+  5 秒总预算（job 永远等不到）；退避封顶与报告间隔互换 ⇒ 封顶成 900s 却每 60s 一行（或反之：
+  刷屏且永不封顶）。`now` 与 `log` 是**两个相邻回调**且都可调用 —— 互换后时间戳进日志、
+  日志对象当时钟，两边都静默错乱。
+* **重入也跟着收**：`leased`（被撤单后同 jid 重发）那条以前是手工逐个重传 8 个旋钮 ——
+  新增一个旋钮而忘了补一行，就是「延长等待期判据悄悄换了值」。现在整份 `return wait_job(spec)`：
+  重入只有一条路，旋钮不可能只改一半。
+* **`report_job_failure` 的坏点**：`kind` / `detail` / `worker` / `lease_token` 是四个相邻字符串，
+  而它们**去向三处完全不同** —— `kind` 进 hub 的拒因分类（控制台按它分组）、`detail` 进 body
+  的详情（4000 字上限）、`worker` 进 body 的归属字段、`lease_token` 进 `X-Lease-Token`
+  **请求头**。互换后请求依然 200 / 依然被拒，只是「谁报的」与「凭什么报」换了位置。
+* **同名不同形就各给一份**：`job_lifecycle.report_job_failure` 的 `FailReportSpec`（§281）是
+  `worker_id` + `worker_tag()` 兜底、无 `lease_token`；`hub_http` 这份是显式 `worker` + 租约头。
+  字段表逐字不同 ⇒ **不**共用（§309 的先例：同名不代表同形）—— `hub_http` 是传输薄壳，
+  它的入参就是「要发出去的字节」，不该长出取身份的副作用。
+* **两个门禁面跟着动（都是加，不是松）**：① `tests/remote/test_hub_http_split.py` 的
+  `ALLOWED_IMPORTS` 加 `dataclasses` / `collections.abc`（stdlib 叶子，与 `typing` 同档，
+  理由写在表头）；② `tests/trainer/test_loop_remote_split.py` 的延迟 import 集加
+  `remote.hub_http` —— 族内不再从门面 `hub_client` 拿转发名（spec 住所有者），同层向下。
+* **守卫不用私有补丁**：`tests/remote/test_wait_job_spec.py` 起一个真 hub（`_RecordingHub` +
+  `serve_fast`），按路径排队发应答、把每次请求的路径/头/体记下来 —— 于是「`lease_token` 进头、
+  `worker` 进体」与「leased 后重入仍带同一份旋钮」都是**行为判据**，不是对 `_request` 的
+  monkeypatch（`test_monkeypatch_targets_budget` 基线保持 0）。替身的 server 派生类把
+  `routes` / `calls` / `status` 显式声明，私有面一个 `# type: ignore` 都不用。
+* **验收**：9 条用例（两份字段表 / frozen+kw_only / 入口只吃一个 spec / 旧位置面 TypeError /
+  四个秒级旋钮不互串 / `lease_token`→头 + `worker`→体 / leased 重入带同 knobs / 身份位）；
+  `nn-python-gate.sh` 120s 绿（ruff + mypy 1090 文件 + pytest xdist）。
+
 ## §317 P0-3 批 F3：`error_report.report_error`(11) → `ErrorReportSpec`（16 → 15）（2026-11-22）
 
 * **一把刀一处**：`remote/error_report.report_error`(2 位置 + 9 关键字) → 一个 `ErrorReportSpec`。

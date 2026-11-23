@@ -48,6 +48,7 @@ from common.protocol import (
     OFFLINE_RELEASE_PATH,
 )
 from remote.hub_client import PublishSpec, mark_job_completed, publish_job, wait_job
+from remote.hub_http import WaitJobSpec
 from remote.worker_server import WorkerServerState, make_worker_server
 from tests.helpers.console_stub import NoHandoffConsole
 from tests.helpers.http_server import serve_fast
@@ -412,7 +413,17 @@ def test_single_hub_dispatches_two_courses_to_one_worker(tmp_path: Path) -> None
 
         # 训练侧真等（HTTP 轮询：hub 按 job_id 路由到课程）
         results = {
-            c: wait_job(hub.base, TOKEN, jids[c], timeout_sec=60, poll_sec=0.1, poll_max_sec=0.5, log=_quiet)
+            c: wait_job(
+                WaitJobSpec(
+                    base_url=hub.base,
+                    token=TOKEN,
+                    jid=jids[c],
+                    timeout_sec=60,
+                    poll_sec=0.1,
+                    poll_max_sec=0.5,
+                    log=_quiet,
+                )
+            )
             for c in (c_a, c_b)
         }
         for c in (c_a, c_b):
@@ -528,14 +539,32 @@ def test_held_course_is_not_dispatched_and_resumes_on_release(tmp_path: Path) ->
         # 同 hub、同一台 worker：在线课的活照常走（离线只停自己那一门）
         m_live = _publish(c_live, dirs[c_live][0], dirs[c_live][1], traj, code_zip)
         r_live = wait_job(
-            hub.base, TOKEN, m_live["job_id"], timeout_sec=60, poll_sec=0.1, poll_max_sec=0.5, log=_quiet
+            WaitJobSpec(
+                base_url=hub.base,
+                token=TOKEN,
+                jid=m_live["job_id"],
+                timeout_sec=60,
+                poll_sec=0.1,
+                poll_max_sec=0.5,
+                log=_quiet,
+            )
         )
         assert r_live["agg"]["policy"] == 0.1
         assert worker.started == [m_live["job_id"]]
 
         # 交还接管 ⇒ 「已分派任务回落队首等 worker」的那份立刻被推走（无需重发）
         hub.release_hold(c_off, token_off)
-        r_off = wait_job(hub.base, TOKEN, jid_off, timeout_sec=60, poll_sec=0.1, poll_max_sec=0.5, log=_quiet)
+        r_off = wait_job(
+            WaitJobSpec(
+                base_url=hub.base,
+                token=TOKEN,
+                jid=jid_off,
+                timeout_sec=60,
+                poll_sec=0.1,
+                poll_max_sec=0.5,
+                log=_quiet,
+            )
+        )
         assert r_off["job_id"] == jid_off
         assert sorted(worker.started) == sorted([m_live["job_id"], jid_off])
         q = hub.queue()

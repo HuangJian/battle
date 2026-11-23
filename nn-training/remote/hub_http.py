@@ -33,6 +33,8 @@ import http.client
 import json
 import time
 import urllib.parse
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import NamedTuple
 
 from common.logutil import tag_logger
@@ -109,18 +111,29 @@ def _request(
         return e.code, e.read()
 
 
-def report_job_failure(
-    base_url: str,
-    token: str,
-    jid: str,
-    reason: str,
-    *,
-    kind: str = "",
-    detail: str = "",
-    worker: str = "",
-    lease_token: str = "",
-    log=_log,
-) -> bool:
+@dataclass(frozen=True, kw_only=True)
+class HubFailSpec:
+    """行政面 `report_job_failure` 的**全部**输入（唯一形参）。
+
+    为什么收成一份（而不是继续 4 个位置 + 4 个关键字）：`kind` / `detail` / `worker` /
+    `lease_token` 是四个相邻字符串，而它们去向**三处完全不同**的地方 —— `kind` 进 hub 的拒因
+    分类（控制台按它分组）、`detail` 进 body 的详情（4000 字上限）、`worker` 进 body 的归属字段、
+    `lease_token` 进 `X-Lease-Token` **请求头**。互换后请求依然 200/被拒，只是「谁报的」与「凭什么
+    报」换了位置：`lease_token` 进错槽位 ⇒ 租约校验没带上，worker 名字则人以头值的形式发给 hub。
+    """
+
+    base_url: str
+    token: str
+    jid: str
+    reason: str
+    kind: str = ""
+    detail: str = ""
+    worker: str = ""
+    lease_token: str = ""
+    log: Callable[..., None] = _log
+
+
+def report_job_failure(spec: HubFailSpec) -> bool:
     """回报**确定性**失败原因（`POST /jobs/{id}/fail`）——训练侧随即从
     `wait_job` 拿到 410 + 原因立刻停腿，不再等满超时。
 
@@ -131,6 +144,10 @@ def report_job_failure(
     瞬时失败（网络/5xx）走 release 回池，**不**报这里——那会把可恢复的 job 钉死。
     重发同 job（同幂等键 → 同 job_id）时 publish_job 会清除失败标记。
     """
+    # 旧签名 9 参 → 一个 spec（P0-3 批 F4）；下面一次展开，函数体逐字不动。
+    base_url, token, jid, reason = spec.base_url, spec.token, spec.jid, spec.reason
+    kind, detail = spec.kind, spec.detail
+    worker, lease_token, log = spec.worker, spec.lease_token, spec.log
     if not base_url or not jid or not reason:
         return False
     body = json.dumps(
@@ -594,18 +611,32 @@ def _wait_state_note(base_url: str, token: str, jid: str, waited: float) -> str:
     )
 
 
-def wait_job(
-    base_url: str,
-    token: str,
-    jid: str,
-    *,
-    timeout_sec: float = 25 * 60,
-    poll_sec: float = 5.0,
-    poll_max_sec: float = 60.0,
-    report_every_sec: float = WAIT_REPORT_SEC,
-    now=time.time,
-    log=_log,
-) -> dict:
+@dataclass(frozen=True, kw_only=True)
+class WaitJobSpec:
+    """`wait_job` 的**全部**输入（唯一形参；连同"再等一个预算"那次重入）。
+
+    为什么收成一份（而不是继续 4 个关键字 float）：`timeout_sec` / `poll_sec` /
+    `poll_max_sec` / `report_every_sec` 是**四个相邻的 float，单位还全是秒** —— 互换后什么都不抛：
+    超时与轮询步长互换 ⇒ 25 分钟一次探测、5 秒总预算（job 永远等不到）；退避封顶与报告间隔互换
+    ⇒ 退避封顶成 900s、「仍在等什么」却每 60s 一行（或反之：刷屏且永不封顶）。`now` 与 `log`
+    是**两个相邻回调**且都可调用 —— 互换后时间戳进日志、日志对象当时钟，两边都静默错乱。
+
+    重入那条（`leased` ⇒ 再等一个预算）以前是手工逐个重传 8 个旋钮：新增一个旋钮而忘了在这里
+    补一行，就是「延长等待期判据悄悄换了值」。现在整份 spec 原样传回。
+    """
+
+    base_url: str
+    token: str
+    jid: str
+    timeout_sec: float = 25 * 60
+    poll_sec: float = 5.0
+    poll_max_sec: float = 60.0
+    report_every_sec: float = WAIT_REPORT_SEC
+    now: Callable[[], float] = time.time
+    log: Callable[..., None] = _log
+
+
+def wait_job(spec: WaitJobSpec) -> dict:
     """阻塞等待 job 完成（worker 已 POST 结果）→ 返回结果 dict。超时抛 HubClientError。
 
     R9（2026-09-10 c6 it50 事故，plan/feasibility-map.md §12）：**轮询退避**。
@@ -621,6 +652,11 @@ def wait_job(
     「在等什么」（等待认领 vs 执行中，见 `_wait_state_note`）——零 worker 时应当**响亮**地
     等，而不是让操作员从超时反推（C 腿事故：无人认领空转 3.5 小时，日志只有超时）。
     """
+    # 旧签名 3 位置 + 6 关键字 → 一个 spec（P0-3 批 F4）；下面一次展开，函数体逐字不动。
+    base_url, token, jid = spec.base_url, spec.token, spec.jid
+    timeout_sec, poll_sec = spec.timeout_sec, spec.poll_sec
+    poll_max_sec, report_every_sec = spec.poll_max_sec, spec.report_every_sec
+    now, log = spec.now, spec.log
     t0 = now()
     deadline = t0 + timeout_sec
     err_streak = 0
@@ -689,15 +725,6 @@ def wait_job(
             # 云仍在跑 ⇒ 再给一个完整预算（H3 原语义）。report/now 原样下传：
             # 延长等待期仍要按同一节流继续「在等什么」的报告。
             log(f"wait_job: job {jid} 仍在 leased（云 PPO 执行中）——再等 {timeout_sec}s")
-            return wait_job(
-                base_url,
-                token,
-                jid,
-                timeout_sec=timeout_sec,
-                poll_sec=poll_sec,
-                poll_max_sec=poll_max_sec,
-                report_every_sec=report_every_sec,
-                now=now,
-                log=log,
-            )
+            # 同一份 spec 原样重入：以前是手工重传 8 个旋钮（漏一个就静默换判据）。
+            return wait_job(spec)
     raise HubClientError(f"wait_job: job {jid} 超时（>{timeout_sec}s）未完成")

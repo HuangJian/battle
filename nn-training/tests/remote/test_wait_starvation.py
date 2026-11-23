@@ -30,6 +30,7 @@ import remote.hub_http as hub_http
 from common.protocol import JobFailedError, normalize_manifest
 from hub.store_leases import LeaseSpec
 from remote.hub_client import HubClientError, JobCancelledError, cancel_job, wait_job
+from remote.hub_http import WaitJobSpec
 from tests.remote.test_remote_ppo import _boot_server, _mini_manifest
 
 
@@ -54,16 +55,18 @@ def test_wait_reports_starvation_with_zero_workers(tmp_path: Path) -> None:
     try:
         try:
             wait_job(
-                base,
-                "sekret",
-                jid,
-                # timeout 0.6 → 0.3（2026-09-29，§43）：本用例只关心「等待期说过什么」，
-                # 超时那一瞬是预期结局 —— 它是本用例的固有开销，0.3s 仍容 6 次探测（0.05s 步长）
-                # 与 ≥2 次节流后的报告（report_every_sec=0.1）。
-                timeout_sec=0.3,
-                poll_sec=0.05,
-                report_every_sec=0.1,
-                log=lines.append,
+                WaitJobSpec(
+                    base_url=base,
+                    token="sekret",
+                    jid=jid,
+                    # timeout 0.6 → 0.3（2026-09-29，§43）：本用例只关心「等待期说过什么」，
+                    # 超时那一瞬是预期结局 —— 它是本用例的固有开销，0.3s 仍容 6 次探测（0.05s 步长）
+                    # 与 ≥2 次节流后的报告（report_every_sec=0.1）。
+                    timeout_sec=0.3,
+                    poll_sec=0.05,
+                    report_every_sec=0.1,
+                    log=lines.append,
+                )
             )
         except Exception:
             pass  # 超时是预期结局：本用例只关心**等待期说过什么**
@@ -98,13 +101,15 @@ def test_wait_reports_leased_not_starvation_when_claimed(tmp_path: Path) -> None
         def _wait() -> None:
             try:
                 wait_job(
-                    base,
-                    "sekret",
-                    jid,
-                    timeout_sec=5.0,
-                    poll_sec=0.05,
-                    report_every_sec=0.05,
-                    log=lines.append,
+                    WaitJobSpec(
+                        base_url=base,
+                        token="sekret",
+                        jid=jid,
+                        timeout_sec=5.0,
+                        poll_sec=0.05,
+                        report_every_sec=0.05,
+                        log=lines.append,
+                    )
                 )
             except BaseException as e:  # 记下来，别吞在后台线程里
                 err.append(e)
@@ -159,13 +164,15 @@ def test_wait_stops_when_the_ledger_says_cancelled(tmp_path: Path) -> None:
         )
         with pytest.raises(JobCancelledError) as ei:
             wait_job(
-                base,
-                "sekret",
-                jid,
-                timeout_sec=0.3,
-                poll_sec=0.05,
-                report_every_sec=0.1,
-                log=lines.append,
+                WaitJobSpec(
+                    base_url=base,
+                    token="sekret",
+                    jid=jid,
+                    timeout_sec=0.3,
+                    poll_sec=0.05,
+                    report_every_sec=0.1,
+                    log=lines.append,
+                )
             )
         assert not isinstance(ei.value, JobFailedError)  # 停腿那条路不许被走到
         assert isinstance(ei.value, HubClientError)  # 可重试：与 M1 lost 同一条处置路
@@ -185,13 +192,15 @@ def test_wait_report_can_be_disabled(tmp_path: Path) -> None:
     try:
         try:
             wait_job(
-                base,
-                "sekret",
-                jid,
-                timeout_sec=0.3,
-                poll_sec=0.05,
-                report_every_sec=0.0,
-                log=lines.append,
+                WaitJobSpec(
+                    base_url=base,
+                    token="sekret",
+                    jid=jid,
+                    timeout_sec=0.3,
+                    poll_sec=0.05,
+                    report_every_sec=0.0,
+                    log=lines.append,
+                )
             )
         except Exception:
             pass

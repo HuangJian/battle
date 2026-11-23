@@ -42,6 +42,7 @@ HTTP 全在本机临时端口。
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import re
@@ -388,12 +389,13 @@ def fast_wait_poll(monkeypatch: pytest.MonkeyPatch) -> None:
     训练侧的下一次轮询要等满 5s（实测 6.8s = 1.0s 准备/打包/发布 + 5.0s 轮询窗 + 收尾）。
     """
     import remote.hub_client as hc
+    from remote.hub_http import WaitJobSpec
 
     real = hc.wait_job
 
-    def _fast(base_url: str, token: str, jid: str, **kw: object) -> dict:
-        kw.setdefault("poll_sec", 0.05)
-        return real(base_url, token, jid, **kw)  # type: ignore[arg-type]
+    def _fast(spec: WaitJobSpec) -> dict:
+        # 只改轮询步长（换掉整份 spec 的一个字段），其余旋钮原样透传。
+        return real(dataclasses.replace(spec, poll_sec=0.05))
 
     monkeypatch.setattr(hc, "wait_job", _fast)
 

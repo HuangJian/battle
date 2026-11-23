@@ -68,6 +68,11 @@ MOVED_NAMES = {
 #: `hub_http.py` 允许的 import 面（stdlib + 协议层；多一个即红）。
 ALLOWED_IMPORTS = {
     "__future__",
+    # 2026-11-22（python.refactor.md §P0-3 批 F4）：`WaitJobSpec` / `HubFailSpec` 是
+    # frozen + kw_only 的旋钮袋 —— `dataclasses` 与 `collections.abc.Callable` 都是 stdlib
+    # 叶子（导入期不攥住任何运行时资源），与 `typing` 同档，不是新的依赖面。
+    "collections.abc",
+    "dataclasses",
     # 2026-11-15：`NET_ERRORS` 里点名 `http.client.HTTPException`（窄捕的捕获面必须写得出
     # 「协议层错乱」这个形状）。stdlib 叶子模块，导入期不攥住网络栈，也不是 `urllib.*` 那种
     # 要延迟到 `_request` 里的东西。

@@ -24,7 +24,7 @@ from types import SimpleNamespace
 import pytest
 
 from common.protocol import JobFailedError
-from remote.hub_http import wait_job  # 所有者（S5 第五刀）；旧家 hub_client 仍转发此名
+from remote.hub_http import WaitJobSpec, wait_job  # 所有者（S5 第五刀）；旧家 hub_client 仍转发此名
 from trainer.loop_steps import TrainingSteps
 
 
@@ -218,7 +218,11 @@ def test_wait_job_poll_backoff_on_network_errors() -> None:
     hub_http._request = fake_request  # type: ignore[assignment]
     try:
         hub_http.time.sleep = lambda s: sleeps.append(float(s))
-        out = wait_job("http://x", "t", "j1", timeout_sec=10, poll_sec=5.0, log=lambda m: None)
+        out = wait_job(
+            WaitJobSpec(
+                base_url="http://x", token="t", jid="j1", timeout_sec=10, poll_sec=5.0, log=lambda m: None
+            )
+        )
     finally:
         hub_http._request, hub_http.time.sleep = orig_req, orig_sleep
     assert out == {"ok": 1}
@@ -241,7 +245,11 @@ def test_wait_job_404_does_not_backoff() -> None:
     hub_http._request = fake_request  # type: ignore[assignment]
     try:
         hub_http.time.sleep = lambda s: sleeps.append(float(s))
-        wait_job("http://x", "t", "j2", timeout_sec=10, poll_sec=5.0, log=lambda m: None)
+        wait_job(
+            WaitJobSpec(
+                base_url="http://x", token="t", jid="j2", timeout_sec=10, poll_sec=5.0, log=lambda m: None
+            )
+        )
     finally:
         hub_http._request, hub_http.time.sleep = orig_req, orig_sleep
     assert sleeps == [5.0, 5.0]

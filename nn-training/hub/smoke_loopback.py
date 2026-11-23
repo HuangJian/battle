@@ -52,6 +52,7 @@ from remote.hub_client import (
     verify_and_land,
     wait_job,
 )
+from remote.hub_http import WaitJobSpec
 from worker.config import load_course
 
 #: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。迁移前是手拼
@@ -369,7 +370,11 @@ def main() -> int:
         if rc.returncode != 0:
             log(f"FATAL: cloud worker exited rc={rc.returncode} (it{rd})")
             return 1
-        result = wait_job(hub_url, args.token, jid, timeout_sec=300, poll_sec=1, log=log)
+        result = wait_job(
+            WaitJobSpec(
+                base_url=hub_url, token=args.token, jid=jid, timeout_sec=300, poll_sec=1, log=log
+            )
+        )
         verify_and_land(
             result,
             m,

@@ -40,6 +40,7 @@ from common.protocol import FAIL_NAME, JobFailedError, normalize_manifest
 from hub.server import _JobStore
 from hub.store_leases import LeaseSpec
 from remote.hub_client import PublishSpec, publish_job, report_job_failure, wait_job
+from remote.hub_http import HubFailSpec, WaitJobSpec
 from tests.helpers.http_server import serve_fast
 from tests.remote.test_remote_ppo import (
     _boot_server,
@@ -187,22 +188,33 @@ def test_wait_job_fails_fast_with_reason_instead_of_timeout(tmp_path: Path) -> N
         token = store.claim(LeaseSpec(jid))
         assert token
         ok = report_job_failure(
-            base,
-            "sekret",
-            jid,
-            "bun 未安装（PATH 里没有 bun，node_modules 缺失）",
-            kind="ProtocolError",
-            detail="Traceback… FileNotFoundError: bun",
-            worker="kaggle-1:42",
-            lease_token=token,
-            log=_QUIET,
+            HubFailSpec(
+                base_url=base,
+                token="sekret",
+                jid=jid,
+                reason="bun 未安装（PATH 里没有 bun，node_modules 缺失）",
+                kind="ProtocolError",
+                detail="Traceback… FileNotFoundError: bun",
+                worker="kaggle-1:42",
+                lease_token=token,
+                log=_QUIET,
+            )
         )
         assert ok is True
 
         t0 = time.time()
         with pytest.raises(JobFailedError) as ei:
             # 与生产同参：预算 25 分钟、轮询 5s —— 修复前这里要等到超时才返回
-            wait_job(base, "sekret", jid, timeout_sec=25 * 60, poll_sec=5.0, log=_QUIET)
+            wait_job(
+                WaitJobSpec(
+                    base_url=base,
+                    token="sekret",
+                    jid=jid,
+                    timeout_sec=25 * 60,
+                    poll_sec=5.0,
+                    log=_QUIET,
+                )
+            )
         elapsed = time.time() - t0
         # timing-ok: 上界兜底（修复前 1500s，10s 只挡挂起）
         assert elapsed < 10.0, f"应立刻收兵，实测 {elapsed:.1f}s（修复前是 1500s）"
@@ -223,7 +235,16 @@ def test_wait_job_timeout_confirm_recognizes_failure(tmp_path: Path) -> None:
         assert _post_fail(base, jid, {"reason": "TS 运行时取不到（ts_code 404）"}, lease=token)[0] == 200
         with pytest.raises(JobFailedError) as ei:
             # timeout_sec 极小 → 直奔收尾确认分支（status → failed）
-            wait_job(base, "sekret", jid, timeout_sec=0.001, poll_sec=0.01, log=_QUIET)
+            wait_job(
+                WaitJobSpec(
+                    base_url=base,
+                    token="sekret",
+                    jid=jid,
+                    timeout_sec=0.001,
+                    poll_sec=0.01,
+                    log=_QUIET,
+                )
+            )
         assert "TS 运行时" in str(ei.value)
     finally:
         srv.shutdown()

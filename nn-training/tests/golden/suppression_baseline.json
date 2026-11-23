@@ -3,7 +3,6 @@
   "type_ignore": {
     "common/distribution.py": 1,
     "common/pid_probe.py": 1,
-    "e2e/test_cloud_iter_e2e.py": 1,
     "e2e/test_run_rl.py": 2,
     "e2e/test_volume_e2e.py": 1,
     "hub/admin.py": 2,

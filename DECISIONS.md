@@ -10266,3 +10266,23 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   `tests/remote/test_error_report_spec.py`（字段表 / frozen+kw_only / 入口只吃一个 spec / 旧位置面
   TypeError / 三个身份位不互串 / `it` 与 `severity` 各自保型 / 没 hub 时连线程都不起）。
   全文 → `docs/nn/engineering.md` §317。
+
+## §2026-11-22-wait-job-spec
+
+**`hub_http` 的 job 控制面两层薄壳各收一份 spec**（python.refactor.md §P0-3 批 F4；全文 `docs/nn/engineering.md` §318）。
+
+- `wait_job`(3 位置 + 6 关键字) → `WaitJobSpec`；`report_job_failure`(4 位置 + 5 关键字) → `HubFailSpec`。
+  宽签名 15 → 13、12 → 11 文件。
+- **重入也走 spec**：`leased`（撤单后同 jid 重发）那条从「手工重传 8 个旋钮」改成 `return wait_job(spec)` ——
+  以后加旋钮，不可能只改一半。
+- **同名不同形不共用**：`job_lifecycle.report_job_failure` 的 `FailReportSpec`（§281）有 `worker_id` +
+  `worker_tag()` 兜底、无租约头；`hub_http` 这份是显式 `worker` + `lease_token` 进 `X-Lease-Token`。
+  传输薄壳的入参就是「要发出去的字节」，不该长出取身份的副作用（同 §309 先例）。
+- **门禁面两处只加不松**：`test_hub_http_split` 的 `ALLOWED_IMPORTS` 收 `dataclasses` / `collections.abc`
+  （stdlib 叶子）；`test_loop_remote_split` 的延迟 import 集收 `remote.hub_http`（族内直接从所有者拿 spec，
+  不再经门面转发名）。
+- **守卫不打私有补丁**：起真 hub（`_RecordingHub`）按行为判「租约进头 / worker 进体 / 重入带同 knobs」，
+  `test_monkeypatch_targets_budget` 基线保持 0。
+- **遗留（删除候选）**：`hub_http.report_job_failure` 无生产调用者，只经 `hub_client` 转发名 + 一条用例活着，
+  与 `job_lifecycle.report_job_failure` 是重复实现 —— 收 spec 只是让这份重复不再是「宽签名」。
+

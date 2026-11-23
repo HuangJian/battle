@@ -756,11 +756,18 @@ class TrainingRemoteJob(TrainingRemotePush):
         ——让位点因此落在「已经发布、只是还没回」这个**真状态**上（`_remote_ppo_step`）。
         """
         from remote.hub_client import wait_job
+        from remote.hub_http import WaitJobSpec
 
         if sess.transport == "push":
             return self._push_fetch(sess)
         return wait_job(
-            sess.hub_url, sess.hub_token, sess.jid, timeout_sec=sess.timeout_sec, log=log
+            WaitJobSpec(
+                base_url=sess.hub_url,
+                token=sess.hub_token,
+                jid=sess.jid,
+                timeout_sec=sess.timeout_sec,
+                log=log,
+            )
         )
 
     def _remote_ppo_land(self, sess: RemotePpoJob, result: dict) -> dict:
