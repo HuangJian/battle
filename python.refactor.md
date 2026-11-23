@@ -233,6 +233,26 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
 < 1000 行（且豁免了 `offline_boot.py`），**函数级完全无人管**——这就是"文件达标、函数失控"的
 由来：拆文件最容易，拆函数要动参数与状态。
 
+**2026-11-23 复核**（上面「现象」表是 2026-09 的快照，代码已经把这张表走完了）：
+
+* **现状**：生产包 **0 个函数 > 200 行**、**0 个函数 > 8 参**（`tests/test_python_shape_budget.py` 的
+  `LONG_FUNCS_BASELINE` / `WIDE_FUNCS_BASELINE` 两张表都已清空，空表保留只为「再进一个存量要写理由」）；
+  > 150 行 **72** 个、> 100 行 **182** 个（共 5,301 个函数）。表里 9 行全部落地，包括
+  `tools/paired_power.py main` 已从 625 行降到 **35** 行。
+* **第 4 条只落了一半**：门禁是 **200 行 / 8 参**，本节要的是「>120 行 / CC>40 / 参数>7 直接红」；
+  **圈复杂度至今没有测量口径**，所以「CC 190」这类读数无法被门禁复现。要收紧阈值，先补 CC 的度量
+  （`radon` 之类的新依赖按 §C 记账）与按文件冻结的基线，再动线 —— 否则只是把阈值写进文档。
+* **离天花板最近的三个**（按「独立所有者 + 独立触发条件」判可行性；行数为 2026-11-23 实测，含 def 与末行）：
+
+  | 函数 | 行数 | 文件 LOC | 为什么可切 / 不可切 |
+  |------|-----:|---------:|---------------------|
+  | `worker/train/bc_paddle.py::_Train.run_epochs` | **200**（恰好压线） | 592/1000 | **推荐下一刀**。与 `worker/train/bc.py` 的同名函数是双生，torch 侧已于 `docs/nn/engineering.md` §252 拆成 `run_epochs`(63) + `_train_epoch`(79) + `_validate`(65)；本侧接缝逐字相同（训练内循环 / 验证 / 历史·早停·断点·回调），守卫 `tests/worker/test_bc_paddle.py`（+ `test_bc_early_stop` / `test_bc_log_stamp`）现成，LOC 有 400 行余量 |
+  | `hub/queue_offline.py::offline_tasks` | 197 | 793/1000 | 可切：hub 侧离线队列的「领任务 / 发 blob / 收工」三相，但文件只剩 207 行预算，切出来要**搬模块**（同 §295 手法），不是纯方法拆分 |
+  | `remote/http.py::_get_with_retry` | 190 | 512/1000 | 收益递减：重试循环与错误映射能分开，但 §265 刚把它收成 `WireGet`，再拆只是换形状、不减路径 |
+
+* **不动的**：`tools/*.main`（`paired_power` / `tpu-probe` / `wave2_judge`，186–195 行）按本节早先的口径
+  「一次性工具、可接受度略高」保留 —— 它们没有第二个消费者，拆开只会多一层只有自己用的私有函数。
+
 **为什么这是问题**
 
 * `_run` 的 CC=190 意味着**至少 190 条独立路径**；该函数里含 3 个相位（ping 门 / 权重下发 /
