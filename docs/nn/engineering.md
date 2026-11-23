@@ -29,6 +29,33 @@
 
 ---
 
+## §325 P0-3 批 I：`worker/gate_check.evaluate`(9) → `GateAsk`（60 处调用点，宽签名 5 → 4）（2026-11-23）
+
+* **先分桶再动刀**：`grep` 到 61 处 `evaluate(`，AST 一扫其中 1 处是 `tools/bc_learnability_probe._evaluate`
+  （同名不同物），真正落在求值器上的 **60 处**：**全部**前两个位置参数都是 `(course, trend_rows)`，
+  其余按关键字补 —— `now` 40 处、`budget,now` 13 处、`budget,now,only_kinds` 2 处，
+  四个生产/CLI 调用点各 1 处带全 `override` / `course_fp` / `decider` / `only_kinds`。位置面因此是**单一形状**：
+  一个对象就够，不需要按调用点分叉。
+* **坏点**：`course, trend_rows` 是两个相邻、类型完全不同的入参，却排在位置口上 —— `evaluate(rows, course)`
+  不抛，`getattr(course, "gates", None)` 拿到 `None` ⇒ 静默「门关闭 → HOLD」，屏幕上一句解释都没有。
+  三个缺省值（`health` / `budget` / `now`）同样可按位置传；另有 `override` / `only_kinds`（两个"改判决"的开关）
+  与 `course_fp` / `decider`（两个"血缘"位）两组相邻位，互换不崩、只让判决说错话。
+* **改法**：`GateAsk`（frozen + kw_only，住 `worker/gate_check.py` 同模块 —— 它只服务这一个入口，
+  也没有第二个消费者），`evaluate(ask: GateAsk) -> GateResult`；函数体开头 `course = ask.course` 等
+  逐名摊开，后面的 250 行判决逻辑一行未动（唯一改动是把 `now_v` 的取值改成 `ask.now`）。
+  60 处调用点用一段 AST 脚本一次性改写成 `evaluate(GateAsk(course=…, trend_rows=…, …))`。
+* **坑（记账）**：① 机械改写的换行要按**整行宽度**判（`assert evaluate(...).verdict == "HOLD"`
+  前面还有 `assert `，只量调用本身会写出 108 列的缺口）；② 续行缩进按所在行缩进 +4（按
+  `evaluate` 的列号对齐会得到歪的 `GateAsk(`）；③ 守卫用例里"frozen"要用对象**自己的**
+  `__setattr__`——`object.__setattr__` 会绕过 dataclass 的冻结点（用例当场假绿），
+  而 `ask.decider = …` 又得挂 `type: ignore`（抑制符预算只减不增）；位置面则用
+  `inspect.signature` 的 `KEYWORD_ONLY` 判据，不必真去撞 `TypeError`。
+* **验收**：`bun run pygate` 绿（**6985 passed / 3 skipped**）；`ruff check` + `mypy` 绿；
+  `WIDE_FUNCS_BASELINE` 的 `worker/gate_check.py: 1` 条目删除（全仓宽签名 5 → 4，4 → 3 文件）。
+  守卫 `tests/worker/test_gate_ask.py`（9 条：入口形状 / 字段闭集 / frozen + kw_only / 两位置参数互换 /
+  `only_kinds` 真的筛掉指标门 / `override` 真的压过规则 / `course_fp` 真的滤掉别课的行 /
+  `now` 与 `health` 真的透传）。
+
 ## §324 发布腿搬出 `remote/hub_client` → `remote/hub_publish`（LOC 999 → 651，为 `verify_and_land` 腾预算）（2026-11-23）
 
 * **不是重构冲动，是预算堵点**：`remote/hub_client.py` LOC 实测 **999/1000**（`tests/test_python_loc_budget.py`

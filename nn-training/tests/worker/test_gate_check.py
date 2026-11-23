@@ -20,6 +20,7 @@ from worker.events import GateVerdict, write_gate_verdict
 from worker.gate_check import (
     EXIT_CODES,
     BudgetInfo,
+    GateAsk,
     GateOverrideError,
     evaluate,
     first_run_start_ts,
@@ -131,7 +132,7 @@ def test_module_import_has_no_torch_numpy() -> None:
 
 def test_no_gates_block_holds() -> None:
     """无 gates 块（老课程）→ HOLD，且读数为零（零行为变化）。"""
-    res = evaluate(object(), _rows(3))
+    res = evaluate(GateAsk(course=object(), trend_rows=_rows(3)))
     assert res.verdict == "HOLD"
     assert res.readings == ()
     assert res.exit_code == 0
@@ -147,14 +148,20 @@ def test_wins_mastery_advance_after_sustain() -> None:
         sustain=3,
     )
     thr = 0.6 * 0.6  # 0.36
-    hold = evaluate(spec, _rows(2, wr=0.40), now=FROZEN_NOW)
+    hold = evaluate(GateAsk(course=spec, trend_rows=_rows(2, wr=0.40), now=FROZEN_NOW))
     assert hold.verdict == "HOLD"  # 窗口仅 2/3
     assert "数据不足" in hold.readings[0].reason
-    adv = evaluate(spec, _rows(3, wr=0.40), now=FROZEN_NOW)
+    adv = evaluate(GateAsk(course=spec, trend_rows=_rows(3, wr=0.40), now=FROZEN_NOW))
     assert adv.verdict == "ADVANCE"
     assert adv.readings[0].completion == 1.0
     # 阈值下方（0.35 < 0.36）不放行
-    assert evaluate(spec, _rows(3, wr=0.35), now=FROZEN_NOW).verdict == "HOLD"
+    assert evaluate(
+        GateAsk(
+            course=spec,
+            trend_rows=_rows(3, wr=0.35),
+            now=FROZEN_NOW,
+        )
+    ).verdict == "HOLD"
     del thr
 
 
@@ -165,7 +172,7 @@ def test_same_wver_replay_does_not_inflate_streak() -> None:
         sustain=3,
     )
     rows = [_row(1, wr=0.5), _row(2, wr=0.5, wver="w001"), _row(3, wr=0.5, wver="w001")]
-    res = evaluate(spec, rows, now=FROZEN_NOW)
+    res = evaluate(GateAsk(course=spec, trend_rows=rows, now=FROZEN_NOW))
     assert res.verdict == "HOLD"
     assert "数据不足" in res.readings[0].reason  # 去重后只有 2 个 wver
 
@@ -177,11 +184,11 @@ def test_seeds_insufficient_blocks_advance() -> None:
         sustain=2,
     )
     same = [_row(1, wr=0.5, seed="s0"), _row(2, wr=0.5, seed="s0")]
-    res = evaluate(spec, same, now=FROZEN_NOW)
+    res = evaluate(GateAsk(course=spec, trend_rows=same, now=FROZEN_NOW))
     assert res.seeds == "insufficient"
     assert res.verdict == "HOLD"
     two = [_row(1, wr=0.5, seed="s0"), _row(2, wr=0.5, seed="s1")]
-    assert evaluate(spec, two, now=FROZEN_NOW).verdict == "ADVANCE"
+    assert evaluate(GateAsk(course=spec, trend_rows=two, now=FROZEN_NOW)).verdict == "ADVANCE"
 
 
 def test_seeds_unknown_does_not_block() -> None:
@@ -190,7 +197,7 @@ def test_seeds_unknown_does_not_block() -> None:
         [{"id": "G1", "kind": "wins_mastery", "rel_teacher": 0.6, "verdict": "ADVANCE"}],
         sustain=2,
     )
-    res = evaluate(spec, _rows(2, wr=0.5), now=FROZEN_NOW)
+    res = evaluate(GateAsk(course=spec, trend_rows=_rows(2, wr=0.5), now=FROZEN_NOW))
     assert res.seeds == "unknown"
     assert res.verdict == "ADVANCE"
 
@@ -214,11 +221,11 @@ def test_skill_floor_three_subconditions() -> None:
         sustain=2,
     )
     good = _rows(2, kills=2.5, phits=0.5, zkf=0.10)
-    assert evaluate(spec, good, now=FROZEN_NOW).verdict == "ADVANCE"
+    assert evaluate(GateAsk(course=spec, trend_rows=good, now=FROZEN_NOW)).verdict == "ADVANCE"
     bad_kills = _rows(2, kills=1.5, phits=0.5, zkf=0.10)
-    assert evaluate(spec, bad_kills, now=FROZEN_NOW).verdict == "HOLD"
+    assert evaluate(GateAsk(course=spec, trend_rows=bad_kills, now=FROZEN_NOW)).verdict == "HOLD"
     bad_phits = _rows(2, kills=2.5, phits=0.9, zkf=0.10)
-    assert evaluate(spec, bad_phits, now=FROZEN_NOW).verdict == "HOLD"
+    assert evaluate(GateAsk(course=spec, trend_rows=bad_phits, now=FROZEN_NOW)).verdict == "HOLD"
 
 
 def test_skill_floor_missing_metric_is_unknown_not_zero() -> None:
@@ -228,7 +235,7 @@ def test_skill_floor_missing_metric_is_unknown_not_zero() -> None:
         sustain=2,
     )
     rows = [{k: v for k, v in _row(i).items() if k != "kills_mean"} for i in (1, 2)]
-    res = evaluate(spec, rows, now=FROZEN_NOW)
+    res = evaluate(GateAsk(course=spec, trend_rows=rows, now=FROZEN_NOW))
     assert res.readings[0].unknown is True
     assert res.verdict == "HOLD"
     assert "缺 kills_mean" in res.readings[0].reason
@@ -239,8 +246,20 @@ def test_teacher_parity() -> None:
         [{"id": "G10", "kind": "teacher_parity", "tol_pp": 5.0, "verdict": "ADVANCE"}],
         sustain=2,
     )
-    assert evaluate(spec, _rows(2, wr=0.60), now=FROZEN_NOW).verdict == "ADVANCE"
-    assert evaluate(spec, _rows(2, wr=0.50), now=FROZEN_NOW).verdict == "HOLD"  # −10pp
+    assert evaluate(
+        GateAsk(
+            course=spec,
+            trend_rows=_rows(2, wr=0.60),
+            now=FROZEN_NOW,
+        )
+    ).verdict == "ADVANCE"
+    assert evaluate(
+        GateAsk(
+            course=spec,
+            trend_rows=_rows(2, wr=0.50),
+            now=FROZEN_NOW,
+        )
+    ).verdict == "HOLD"  # −10pp
 
 
 # --------------------------------------------------------------------------- effect size / duty（§12.4 评审新增）
@@ -279,10 +298,16 @@ def test_effect_size_blocks_meaningless_gain() -> None:
         baseline_win_rate=0.30,
     )
     # 教师线 0.5×0.6=0.30 达标，但相对起点 0.30 只 +0.5pp（≈噪声）→ 不放行
-    res = evaluate(spec, _rows(2, wr=0.32), now=FROZEN_NOW)
+    res = evaluate(GateAsk(course=spec, trend_rows=_rows(2, wr=0.32), now=FROZEN_NOW))
     assert res.verdict == "HOLD"
     assert "起点0.30+5.0pp" in res.readings[0].reason
-    assert evaluate(spec, _rows(2, wr=0.36), now=FROZEN_NOW).verdict == "ADVANCE"
+    assert evaluate(
+        GateAsk(
+            course=spec,
+            trend_rows=_rows(2, wr=0.36),
+            now=FROZEN_NOW,
+        )
+    ).verdict == "ADVANCE"
 
 
 def test_require_rising_blocks_declining_window() -> None:
@@ -302,11 +327,11 @@ def test_require_rising_blocks_declining_window() -> None:
         baseline_win_rate=0.20,
     )
     down = [_row(1, wr=0.45), _row(2, wr=0.42), _row(3, wr=0.38)]
-    res = evaluate(spec, down, now=FROZEN_NOW)
+    res = evaluate(GateAsk(course=spec, trend_rows=down, now=FROZEN_NOW))
     assert res.verdict == "HOLD"
     assert "非同向" in res.readings[0].reason
     up = [_row(1, wr=0.38), _row(2, wr=0.42), _row(3, wr=0.45)]
-    assert evaluate(spec, up, now=FROZEN_NOW).verdict == "ADVANCE"
+    assert evaluate(GateAsk(course=spec, trend_rows=up, now=FROZEN_NOW)).verdict == "ADVANCE"
 
 
 def test_duty_gate_trips_on_accident_burn() -> None:
@@ -319,13 +344,27 @@ def test_duty_gate_trips_on_accident_burn() -> None:
         sustain=1,
     )
     burned = BudgetInfo(started_at=FROZEN_NOW - 6.5 * 3600, train_sec=1.0 * 3600)
-    res = evaluate(spec, _rows(1), budget=burned, now=FROZEN_NOW)
+    res = evaluate(GateAsk(course=spec, trend_rows=_rows(1), budget=burned, now=FROZEN_NOW))
     assert res.verdict == "REMEDIATE"
     assert "烧事故" in res.reason
     healthy = BudgetInfo(started_at=FROZEN_NOW - 6.5 * 3600, train_sec=4.0 * 3600)
-    assert evaluate(spec, _rows(1), budget=healthy, now=FROZEN_NOW).verdict == "HOLD"
+    assert evaluate(
+        GateAsk(
+            course=spec,
+            trend_rows=_rows(1),
+            budget=healthy,
+            now=FROZEN_NOW,
+        )
+    ).verdict == "HOLD"
     # 无墙钟基线 → unknown 不误停
-    assert evaluate(spec, _rows(1), budget=BudgetInfo(), now=FROZEN_NOW).verdict == "HOLD"
+    assert evaluate(
+        GateAsk(
+            course=spec,
+            trend_rows=_rows(1),
+            budget=BudgetInfo(),
+            now=FROZEN_NOW,
+        )
+    ).verdict == "HOLD"
 
 
 def test_duty_boot_cold_start_not_punished() -> None:
@@ -344,7 +383,7 @@ def test_duty_boot_cold_start_not_punished() -> None:
         duty_events=3,
         train_sec=213.0,
     )
-    res = evaluate(spec, _rows(1), budget=b, now=FROZEN_NOW)
+    res = evaluate(GateAsk(course=spec, trend_rows=_rows(1), budget=b, now=FROZEN_NOW))
     assert res.verdict == "HOLD"
     assert "健康" in res.readings[0].reason
 
@@ -361,7 +400,14 @@ def test_duty_chronic_burn_detected_with_baseline() -> None:
         duty_events=5,
         train_sec=3600.0,
     )
-    assert evaluate(spec, _rows(1), budget=b, now=FROZEN_NOW).verdict == "REMEDIATE"
+    assert evaluate(
+        GateAsk(
+            course=spec,
+            trend_rows=_rows(1),
+            budget=b,
+            now=FROZEN_NOW,
+        )
+    ).verdict == "REMEDIATE"
 
 
 def test_duty_min_events_guard_holds_during_boot() -> None:
@@ -376,7 +422,7 @@ def test_duty_min_events_guard_holds_during_boot() -> None:
         duty_events=1,  # 只完成 1 轮
         train_sec=10.0,
     )
-    res = evaluate(spec, _rows(1), budget=b, now=FROZEN_NOW)
+    res = evaluate(GateAsk(course=spec, trend_rows=_rows(1), budget=b, now=FROZEN_NOW))
     assert res.verdict == "HOLD"
     assert "起步期" in res.readings[0].reason
 
@@ -392,12 +438,28 @@ def test_evaluate_only_kinds_filters_rules() -> None:
     )
     healthy = BudgetInfo(duty_baseline_ts=FROZEN_NOW - 1000, duty_events=3, train_sec=600.0)
     assert (
-        evaluate(spec, [], budget=healthy, now=FROZEN_NOW, only_kinds=("duty",)).verdict
+        evaluate(
+            GateAsk(
+                course=spec,
+                trend_rows=[],
+                budget=healthy,
+                now=FROZEN_NOW,
+                only_kinds=("duty",),
+            )
+        ).verdict
         == "HOLD"
     )
     burned = BudgetInfo(duty_baseline_ts=FROZEN_NOW - 7200, duty_events=3, train_sec=300.0)
     assert (
-        evaluate(spec, [], budget=burned, now=FROZEN_NOW, only_kinds=("duty",)).verdict
+        evaluate(
+            GateAsk(
+                course=spec,
+                trend_rows=[],
+                budget=burned,
+                now=FROZEN_NOW,
+                only_kinds=("duty",),
+            )
+        ).verdict
         == "REMEDIATE"
     )
 
@@ -469,7 +531,7 @@ def test_plateau_route_by_completion() -> None:
         _row(3, wr=0.50, kills=2.5),
         _row(4, wr=0.51, kills=2.5),
     ]
-    res = evaluate(spec, flat, now=FROZEN_NOW)
+    res = evaluate(GateAsk(course=spec, trend_rows=flat, now=FROZEN_NOW))
     assert res.verdict == "ADVANCE"
     assert res.route == "ADVANCE"
     # 仍在爬升 → 未枯竭：G4 不放行（HOLD 的那一门），但 G1 单门仍可 ADVANCE
@@ -480,7 +542,7 @@ def test_plateau_route_by_completion() -> None:
         _row(3, wr=0.40, kills=2.2),
         _row(4, wr=0.50, kills=2.8),
     ]
-    up = evaluate(spec, rising, now=FROZEN_NOW)
+    up = evaluate(GateAsk(course=spec, trend_rows=rising, now=FROZEN_NOW))
     assert {r.rule_id: r.fired for r in up.readings}["G4"] is False
     assert up.verdict == "ADVANCE"
     # 枯竭但 G2 不达标（击杀 1.5 < 2.065）→ 完成度不足 → REMEDIATE
@@ -490,7 +552,7 @@ def test_plateau_route_by_completion() -> None:
         _row(3, wr=0.50, kills=1.5),
         _row(4, wr=0.51, kills=1.5),
     ]
-    rem = evaluate(spec, stalled_bad, now=FROZEN_NOW)
+    rem = evaluate(GateAsk(course=spec, trend_rows=stalled_bad, now=FROZEN_NOW))
     assert rem.verdict == "REMEDIATE"
     assert rem.route == "REMEDIATE"
 
@@ -520,7 +582,7 @@ def test_plateau_skips_missing_metrics_but_needs_one() -> None:
         {k: v for k, v in _row(i, wr=wr).items() if k != "kills_mean"}
         for i, wr in enumerate((0.28, 0.27, 0.24, 0.24, 0.23, 0.26), start=1)
     ]
-    res = evaluate(spec, flat_no_kills, now=FROZEN_NOW)
+    res = evaluate(GateAsk(course=spec, trend_rows=flat_no_kills, now=FROZEN_NOW))
     # G1（rel 1.2 × 0.60 = 0.72）远未达标 → route REMEDIATE，且 REMEDIATE 不需
     # advance_requires 背书（否则平台期永远放不出判决）
     assert res.verdict == "REMEDIATE", res.reason
@@ -544,7 +606,7 @@ def test_plateau_all_metrics_missing_is_unknown() -> None:
         sustain=1,
     )
     rows = [{k: v for k, v in _row(i).items() if k != "kills_mean"} for i in (1, 2, 3, 4)]
-    res = evaluate(spec, rows, now=FROZEN_NOW)
+    res = evaluate(GateAsk(course=spec, trend_rows=rows, now=FROZEN_NOW))
     assert res.readings[0].unknown is True
     assert res.verdict == "HOLD"
 
@@ -569,20 +631,41 @@ def test_budget_stop_with_frozen_now() -> None:
     over = BudgetInfo(started_at=FROZEN_NOW - 11 * 3600, max_hours=10.0, iters=0)
     # 未达标的行（wr 0.10 < 0.36）：G1 不放行，只有预算门能说话
     weak = _rows(1, wr=0.10)
-    assert evaluate(spec, weak, budget=early, now=FROZEN_NOW).verdict == "HOLD"
-    res = evaluate(spec, weak, budget=over, now=FROZEN_NOW)
+    assert evaluate(
+        GateAsk(
+            course=spec,
+            trend_rows=weak,
+            budget=early,
+            now=FROZEN_NOW,
+        )
+    ).verdict == "HOLD"
+    res = evaluate(GateAsk(course=spec, trend_rows=weak, budget=over, now=FROZEN_NOW))
     assert res.verdict == "STOP"
     assert res.route == "REMEDIATE"  # G1 完成度 0 < 0.7
     # 达标的行：STOP 的 route 指 ADVANCE（已完成度够，只是时间到了）
     strong = _rows(1, wr=0.60)
-    res2 = evaluate(spec, strong, budget=over, now=FROZEN_NOW)
+    res2 = evaluate(GateAsk(course=spec, trend_rows=strong, budget=over, now=FROZEN_NOW))
     assert res2.verdict == "STOP"  # STOP(3) > ADVANCE(1)
     assert res2.route == "ADVANCE"
     iters_done = BudgetInfo(started_at=None, max_hours=0.0, iters=10, cur_iter=10)
-    assert evaluate(spec, weak, budget=iters_done, now=FROZEN_NOW).verdict == "STOP"
+    assert evaluate(
+        GateAsk(
+            course=spec,
+            trend_rows=weak,
+            budget=iters_done,
+            now=FROZEN_NOW,
+        )
+    ).verdict == "STOP"
     # 基线不可知（无 run_start）→ 预算门 unknown，不误停
     unknown = BudgetInfo(started_at=None, max_hours=1.0, iters=0)
-    assert evaluate(spec, weak, budget=unknown, now=FROZEN_NOW).verdict == "HOLD"
+    assert evaluate(
+        GateAsk(
+            course=spec,
+            trend_rows=weak,
+            budget=unknown,
+            now=FROZEN_NOW,
+        )
+    ).verdict == "HOLD"
 
 
 # --------------------------------------------------------------------------- G7 / G9 / G12
@@ -603,11 +686,23 @@ def test_course_valid_needs_rising_timeout() -> None:
         sustain=1,
     )
     rising = [_row(1, timeout=0.20), _row(2, timeout=0.26), _row(3, timeout=0.32)]
-    assert evaluate(spec, rising, now=FROZEN_NOW).verdict == "REMEDIATE"
+    assert evaluate(GateAsk(course=spec, trend_rows=rising, now=FROZEN_NOW)).verdict == "REMEDIATE"
     flat = [_row(1, timeout=0.30), _row(2, timeout=0.30), _row(3, timeout=0.30)]
-    assert evaluate(spec, flat, now=FROZEN_NOW).verdict == "HOLD"  # 超限但不恶化
+    assert evaluate(
+        GateAsk(
+            course=spec,
+            trend_rows=flat,
+            now=FROZEN_NOW,
+        )
+    ).verdict == "HOLD"  # 超限但不恶化
     low = [_row(1, timeout=0.05), _row(2, timeout=0.10), _row(3, timeout=0.12)]
-    assert evaluate(spec, low, now=FROZEN_NOW).verdict == "HOLD"  # 上升但未超限
+    assert evaluate(
+        GateAsk(
+            course=spec,
+            trend_rows=low,
+            now=FROZEN_NOW,
+        )
+    ).verdict == "HOLD"  # 上升但未超限
 
 
 def test_hack_is_pause_and_beats_advance() -> None:
@@ -630,7 +725,7 @@ def test_hack_is_pause_and_beats_advance() -> None:
         _row(3, wr=0.50, kills=2.0, pu=2.0),
         _row(4, wr=0.50, kills=2.0, pu=2.0),
     ]
-    res = evaluate(spec, rows, now=FROZEN_NOW)
+    res = evaluate(GateAsk(course=spec, trend_rows=rows, now=FROZEN_NOW))
     assert res.verdict == "PAUSE", res.reason
     by_id = {r.rule_id: r for r in res.readings}
     # 两门都放行，但 lattice 取最高优先级（PAUSE > ADVANCE）
@@ -645,7 +740,7 @@ def test_hack_is_pause_and_beats_advance() -> None:
         _row(3, wr=0.50, kills=3.2, pu=2.0),
         _row(4, wr=0.50, kills=3.2, pu=2.0),
     ]
-    assert evaluate(spec, one_way, now=FROZEN_NOW).verdict == "ADVANCE"
+    assert evaluate(GateAsk(course=spec, trend_rows=one_way, now=FROZEN_NOW)).verdict == "ADVANCE"
 
 
 def test_override_is_highest_priority() -> None:
@@ -655,10 +750,12 @@ def test_override_is_highest_priority() -> None:
         sustain=2,
     )
     res = evaluate(
-        spec,
-        _rows(2, wr=0.60),
-        now=FROZEN_NOW,
-        override={"verdict": "STOP", "reason": "人工改向：换课程"},
+        GateAsk(
+            course=spec,
+            trend_rows=_rows(2, wr=0.60),
+            now=FROZEN_NOW,
+            override={"verdict": "STOP", "reason": "人工改向：换课程"},
+        )
     )
     assert res.verdict == "STOP"
     assert "人工改向" in res.reason
@@ -685,9 +782,9 @@ def test_advance_requires_all_enabled_gates() -> None:
     ]
     spec = _spec(rules, sustain=2, advance_requires=["G1", "G2"])
     good = _rows(2, wr=0.60, kills=2.5)
-    assert evaluate(spec, good, now=FROZEN_NOW).verdict == "ADVANCE"
+    assert evaluate(GateAsk(course=spec, trend_rows=good, now=FROZEN_NOW)).verdict == "ADVANCE"
     bad = _rows(2, wr=0.60, kills=1.0)  # G2 不达标
-    res = evaluate(spec, bad, now=FROZEN_NOW)
+    res = evaluate(GateAsk(course=spec, trend_rows=bad, now=FROZEN_NOW))
     assert res.verdict == "HOLD"
     assert "advance_requires 未全绿" in res.reason
 
@@ -707,7 +804,7 @@ def test_dormant_cross_course_gate_is_unknown_not_blocking() -> None:
         },
     ]
     spec = _spec(rules, sustain=2)
-    res = evaluate(spec, _rows(2, wr=0.60), now=FROZEN_NOW)
+    res = evaluate(GateAsk(course=spec, trend_rows=_rows(2, wr=0.60), now=FROZEN_NOW))
     by_id = {r.rule_id: r for r in res.readings}
     assert by_id["G3"].dormant is True
     assert by_id["G3"].released is False
@@ -829,7 +926,7 @@ def test_evaluate_10k_rows_is_fast() -> None:
     )
     rows = [_row(i, wr=0.5, timeout=0.05 * (i % 3)) for i in range(10_000)]
     t0 = time.perf_counter()
-    res = evaluate(spec, rows, now=FROZEN_NOW)
+    res = evaluate(GateAsk(course=spec, trend_rows=rows, now=FROZEN_NOW))
     dt = time.perf_counter() - t0
     assert res.verdict in EXIT_CODES
     # timing-ok: 上界兜底（10k 行求值应瞬时，3s 只挡退化）
@@ -876,12 +973,24 @@ def test_pooled_window_survives_a_single_noisy_dip() -> None:
     wrs = (0.35, 0.42, 0.43)
 
     per_point = _spec([dict(rule)], sustain=3)
-    hold = evaluate(per_point, [_row(i + 1, wr=w) for i, w in enumerate(wrs)], now=FROZEN_NOW)
+    hold = evaluate(
+        GateAsk(
+            course=per_point,
+            trend_rows=[_row(i + 1, wr=w) for i, w in enumerate(wrs)],
+            now=FROZEN_NOW,
+        )
+    )
     assert hold.verdict == "HOLD"  # 第一个点 0.35 < 0.36 → 2/3，判不出爬坡
     assert hold.readings[0].completion == 2 / 3
 
     pooled = _spec([dict(rule, pool_window=3)], sustain=3)
-    adv = evaluate(pooled, [_row(i + 1, wr=w) for i, w in enumerate(wrs)], now=FROZEN_NOW)
+    adv = evaluate(
+        GateAsk(
+            course=pooled,
+            trend_rows=[_row(i + 1, wr=w) for i, w in enumerate(wrs)],
+            now=FROZEN_NOW,
+        )
+    )
     assert adv.verdict == "ADVANCE"
     assert adv.readings[0].completion == 1.0
     assert "池化 3 轮 300 局 120 胜 = 0.400" in adv.readings[0].reason
@@ -903,7 +1012,7 @@ def test_pooled_window_still_blocks_a_genuinely_low_policy() -> None:
         sustain=3,
     )
     rows = [_row(1, wr=0.50), _row(2, wr=0.20), _row(3, wr=0.20)]  # 池化 0.30 < 0.36
-    res = evaluate(spec, rows, now=FROZEN_NOW)
+    res = evaluate(GateAsk(course=spec, trend_rows=rows, now=FROZEN_NOW))
     assert res.verdict == "HOLD"
     assert res.readings[0].completion == 0.0
     assert "未达标" in res.readings[0].reason
@@ -928,10 +1037,10 @@ def test_pooled_conf_z_requires_effect_above_noise() -> None:
     )
     # 池化 p=0.35 恰等于 floor=0.35：点估计达标，但 0.35-1×SE < 0.35 → 噪声里，不放行
     edge = [_row(1, wr=0.33), _row(2, wr=0.35), _row(3, wr=0.37)]
-    assert evaluate(spec, edge, now=FROZEN_NOW).verdict == "HOLD"
+    assert evaluate(GateAsk(course=spec, trend_rows=edge, now=FROZEN_NOW)).verdict == "HOLD"
     # p=0.38 > floor 且高于噪声带 → 放行
     clear = [_row(1, wr=0.36), _row(2, wr=0.38), _row(3, wr=0.40)]
-    res = evaluate(spec, clear, now=FROZEN_NOW)
+    res = evaluate(GateAsk(course=spec, trend_rows=clear, now=FROZEN_NOW))
     assert res.verdict == "ADVANCE"
     assert "效应未高于噪声" not in res.readings[0].reason
 
@@ -950,7 +1059,7 @@ def test_pooled_insufficient_window_is_unknown_not_negative() -> None:
         ],
         sustain=3,
     )
-    res = evaluate(spec, _rows(2, wr=0.9), now=FROZEN_NOW)
+    res = evaluate(GateAsk(course=spec, trend_rows=_rows(2, wr=0.9), now=FROZEN_NOW))
     assert res.verdict == "HOLD"
     assert res.readings[0].unknown is True
     assert "数据不足" in res.readings[0].reason
@@ -972,7 +1081,7 @@ def test_pooled_require_rising_blocks_downtrend() -> None:
         sustain=3,
     )
     rows = [_row(1, wr=0.45), _row(2, wr=0.42), _row(3, wr=0.39)]  # 池化 0.42 ≥ 0.36 但下降
-    res = evaluate(spec, rows, now=FROZEN_NOW)
+    res = evaluate(GateAsk(course=spec, trend_rows=rows, now=FROZEN_NOW))
     assert res.verdict == "HOLD"
     assert "非同向" in res.readings[0].reason
 
@@ -983,8 +1092,14 @@ def test_without_pool_window_behaviour_is_unchanged() -> None:
         [{"id": "G1", "kind": "wins_mastery", "rel_teacher": 0.6, "verdict": "ADVANCE"}],
         sustain=3,
     )
-    assert evaluate(spec, _rows(3, wr=0.40), now=FROZEN_NOW).verdict == "ADVANCE"
-    res = evaluate(spec, _rows(3, wr=0.35), now=FROZEN_NOW)
+    assert evaluate(
+        GateAsk(
+            course=spec,
+            trend_rows=_rows(3, wr=0.40),
+            now=FROZEN_NOW,
+        )
+    ).verdict == "ADVANCE"
+    res = evaluate(GateAsk(course=spec, trend_rows=_rows(3, wr=0.35), now=FROZEN_NOW))
     assert res.verdict == "HOLD"
     assert "轮达标" in res.readings[0].reason  # 逐点口径的 reason
 
@@ -1024,12 +1139,16 @@ def test_min_train_samples_blocks_advance_with_note() -> None:
         min_train_samples=4_000_000,
     )
     budget = BudgetInfo(train_sec=99999.0, train_samples=3_000_000.0)
-    res = evaluate(spec, _rows(3, wr=0.5), budget=budget, now=FROZEN_NOW)
+    res = evaluate(GateAsk(course=spec, trend_rows=_rows(3, wr=0.5), budget=budget, now=FROZEN_NOW))
     assert res.verdict == "HOLD"
     assert "样本通过量" in res.reason and "3.00M < 4.00M" in res.reason
     ok = evaluate(
-        spec, _rows(3, wr=0.5), budget=BudgetInfo(train_sec=1.0, train_samples=4_000_000.0),
-        now=FROZEN_NOW,
+        GateAsk(
+            course=spec,
+            trend_rows=_rows(3, wr=0.5),
+            budget=BudgetInfo(train_sec=1.0, train_samples=4_000_000.0),
+            now=FROZEN_NOW,
+        )
     )
     assert ok.verdict == "ADVANCE"
 

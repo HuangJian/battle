@@ -22,6 +22,7 @@ from worker.eval_track import a_eval_seed_list
 from worker.events import GateVerdict, write_gate_verdict
 from worker.gate_check import (
     BudgetInfo,
+    GateAsk,
     count_iteration_events,
     evaluate,
     first_iter_end_ts,
@@ -140,14 +141,16 @@ class TrainingGuardsGate:
             # 非评估轮：只查 duty（数据每轮皆新；指标门无新 eval 不判）。
             try:
                 res = evaluate(
-                    course,
-                    [],
-                    budget=budget,
-                    now=now,
-                    override=override,
-                    course_fp=course_fp,
-                    decider="loop",
-                    only_kinds=("duty",),
+                    GateAsk(
+                        course=course,
+                        trend_rows=[],
+                        budget=budget,
+                        now=now,
+                        override=override,
+                        course_fp=course_fp,
+                        decider="loop",
+                        only_kinds=("duty",),
+                    )
                 )
             except Exception as e:
                 log(f"[run_rl] gate it{it}: duty 求值异常（{type(e).__name__}: {e}）— 本轮跳过门")
@@ -164,13 +167,15 @@ class TrainingGuardsGate:
             return False
         try:
             res = evaluate(
-                course,
-                rows,
-                budget=budget,
-                now=now,
-                override=override,
-                course_fp=course_fp,
-                decider="loop",
+                GateAsk(
+                    course=course,
+                    trend_rows=rows,
+                    budget=budget,
+                    now=now,
+                    override=override,
+                    course_fp=course_fp,
+                    decider="loop",
+                )
             )
         except Exception as e:
             log(f"[run_rl] gate it{it}: 求值异常（{type(e).__name__}: {e}）— 本轮跳过门")

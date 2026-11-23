@@ -10425,3 +10425,23 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   `hub_client` 999 → **651 LOC**。三条预算基线（`any` / `assert` / `wall_clock`）里的条目跟着代码
   搬去 `remote/hub_publish.py`（总量不变）。守 `tests/remote/test_publish_spec.py` 新增「不许漏回
   `hub_client`」一条 + `tests/helpers/remote_dag.py` 的 L2 登记。全文 → `docs/nn/engineering.md` §324。
+
+## §2026-11-23-gate-ask
+
+- **背景**：`python.refactor.md` §P0-3 剩余宽签名里的 `worker/gate_check.evaluate`（9 参）。
+  用户指令：先把 61 处调用**按位置参数个数分桶**，再收成 spec。实测 61 处里 1 处是
+  `tools/bc_learnability_probe._evaluate`（同名不同物），求值器上是 60 处，**全部**是
+  `(course, trend_rows)` 两位置 + 关键字，位置面只有一种形状。
+- **坏点**：两个相邻但类型不同的位置参数 —— `evaluate(rows, course)` 不抛，`getattr(course, "gates")`
+  拿到 `None` ⇒ 静默「门关闭 → HOLD」；`override`/`only_kinds` 与 `course_fp`/`decider` 两对开关/血缘位
+  互换则让判决说错话。
+- **决定**：`GateAsk`（frozen + kw_only，住 `worker/gate_check.py`，只有这一个消费者），
+  `evaluate(ask: GateAsk) -> GateResult`；函数体只把 9 个名字摊开，判决逻辑零改动；
+  60 处调用点由 AST 脚本一次性改写（含唯一的 CLI 调用点）。
+- **被否决**：① 只把 `now` / `budget` 改成 kw-only、保留两个位置参数 —— 那正是「互换不抛」的坏点；
+  ② 给 spec 加第二个构造入口（`GateAsk.from_course(...)`）—— 又多一份抄字段的地方；
+  ③ 把 `GateAsk` 下沉到 `worker/gate_inputs.py`（输入面同族）—— 它描述的是**入口形状**而非输入读数，
+  放进去会让输入面反向依赖引擎的入口。
+- **验证**：`bun run pygate` 绿（6985 passed / 3 skipped）；`ruff check` + `mypy` 绿；
+  `WIDE_FUNCS_BASELINE` 里 `worker/gate_check.py: 1` 删除（宽签名 5 → 4）。守
+  `tests/worker/test_gate_ask.py`（9 条）。全文 → `docs/nn/engineering.md` §325。

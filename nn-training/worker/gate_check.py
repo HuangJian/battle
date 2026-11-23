@@ -297,36 +297,56 @@ class GateResult:
 # --------------------------------------------------------------------------- 主入口
 
 
-def evaluate(
-    course: Any,
-    trend_rows: Sequence[Mapping[str, Any]],
-    health: Mapping[str, Any] | None = None,
-    budget: BudgetInfo | None = None,
-    now: float | None = None,
-    *,
-    override: Mapping[str, Any] | None = None,
-    course_fp: str = "",
-    decider: str = "loop",
-    only_kinds: Sequence[str] | None = None,
-) -> GateResult:
-    """课程结束门求值（纯函数，§4.1）。
+@dataclass(frozen=True, kw_only=True)
+class GateAsk:
+    """一次课程门求值的输入（`evaluate` 的唯一参数，2026-11-23）。
 
-    Args:
-        course: `CourseConfig`（读 `.gates`）或直接传 `GatesSpec`；无 gates → HOLD。
-        trend_rows: settled `eval_summary` 行（原始 dict，时间序）。
-        health: 预留（§3.3 末：健康门不经求值器，由 loop_guards 直接判）。
-        budget: G5 输入；None → 预算门 unknown。
-        now: epoch 秒；None → `time.time()`（单测注入 frozen now）。
-        override: G12 人工改向（最高优先级）；非法由 `load_override` 抛。
-        course_fp: 本课课程指纹；用于行过滤与 sustain 去重键。
-        decider: "loop" | "notebook" | "cli"（记入事件，血缘可归因）。
-        only_kinds: 非 None 时只求值这些 kind（§385：非评估轮单独查 duty）；
-            其余规则全部当作休眠跳过。eval rows 为空时依赖 rows 的门自然 unknown。
+    9 个名字收成一份对象（`python.refactor.md` §P0-3 批 I）：原先的前两个位置参数
+    （`course` / `trend_rows`）+ 三个位置可传的缺省值（`health` / `budget` / `now`）
+    —— 它们在 60 处调用点里有 57 处只写 `course, rows` 两个、其余按关键字补，
+    位置面一旦泄露（`evaluate(rows, course)`）不会抛，只是「拿课程当读数行」静默 HOLD。
+
+    三个相邻的身份/开关位也一并收进对象，调用点必须**按名字**写：
+    `override`（G12 人工改向，最高优先级）与 `only_kinds`（§385 只查某类 duty）
+    互换会让「人工改向」被当成「只看子集」；`course_fp` 与 `decider` 互换则让
+    sustain 去重键与事件血缘都错位。
+    """
+
+    #: `CourseConfig`（读 `.gates`）或直接传 `GatesSpec`；无 gates → HOLD。
+    course: Any
+    #: settled `eval_summary` 行（原始 dict，时间序）。
+    trend_rows: Sequence[Mapping[str, Any]]
+    #: 预留（§3.3 末：健康门不经求值器，由 `loop_guards` 直接判）。
+    health: Mapping[str, Any] | None = None
+    #: G5 输入；None → 预算门 unknown。
+    budget: BudgetInfo | None = None
+    #: epoch 秒；None → `time.time()`（单测注入 frozen now，§4.7 确定性）。
+    now: float | None = None
+    #: G12 人工改向（最高优先级）；非法由 `load_override` 抛。
+    override: Mapping[str, Any] | None = None
+    #: 本课课程指纹；用于行过滤与 sustain 去重键。
+    course_fp: str = ""
+    #: "loop" | "notebook" | "cli"（记入事件，血缘可归因）。
+    decider: str = "loop"
+    #: 非 None 时只求值这些 kind（§385：非评估轮单独查 duty）；其余规则全部当作休眠跳过。
+    #: eval rows 为空时依赖 rows 的门自然 unknown。
+    only_kinds: Sequence[str] | None = None
+
+
+def evaluate(ask: GateAsk) -> GateResult:
+    """课程结束门求值（纯函数，§4.1）。输入见 `GateAsk`，输出 `GateResult`。
 
     Returns:
         GateResult：verdict ∈ {HOLD, ADVANCE, REMEDIATE, STOP, PAUSE, ABORT}。
     """
-    now_v = time.time() if now is None else float(now)
+    course = ask.course
+    trend_rows = ask.trend_rows
+    health = ask.health
+    budget = ask.budget
+    course_fp = ask.course_fp
+    only_kinds = ask.only_kinds
+    override = ask.override
+    now_v = time.time() if ask.now is None else float(ask.now)
     GATE_SPLIT, GatesSpec, _ = _lazy_config()
     spec = getattr(course, "gates", None)
     if spec is None and isinstance(course, GatesSpec):
@@ -551,7 +571,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         ov_path = traj.parent / str(course.gates.override_file)
         override = load_override(ov_path)
     res = evaluate(
-        course, rows, budget=budget, override=override, course_fp=fp, decider=args.decider
+        GateAsk(
+            course=course,
+            trend_rows=rows,
+            budget=budget,
+            override=override,
+            course_fp=fp,
+            decider=args.decider,
+        )
     )
     if args.json:
         print(

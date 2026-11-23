@@ -135,7 +135,10 @@ WIDE_FUNCS_BASELINE = {
     # 2026-11-21（P0-3 第七刀）：`run_local_eval_game`（25 参，全仓最宽）收成
     # `EvalGameSpec` ⇒ 条目删除，本文件宽签名归零。
     # `worker/eval_track.py` 已清零（P0-3 第三十六刀：`EvalSettleSpec`）。
-    "worker/gate_check.py": 1,
+    # 2026-11-23（P0-3 批 I）：`evaluate` 的 5 位置 + 4 关键字收成 `GateAsk`（frozen + kw_only，
+    # 住同模块）—— 60 处调用点里 57 处只写 `course, rows`，位置面一泄露（`evaluate(rows, course)`）
+    # 不抛，只静默 HOLD；`override`/`only_kinds` 与 `course_fp`/`decider` 两对相邻位也随之按名字。
+    # ⇒ 本文件宽签名归零，条目删除；守 `tests/worker/test_gate_ask.py`。
     # `worker/greedy_round.py` 已清零（P0-3 批 D：`run_greedy_round` 的 12 个关键字 →
     # `GreedyRoundSpec`）；守 `tests/worker/test_greedy_round_spec.py`。
     # 2026-11-23（P0-3 批 E）：`_run_one_game_bounded` 的 10 个逐字副本字段改成直接收
