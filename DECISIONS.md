@@ -10379,3 +10379,16 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：`bun run pygate` 绿（6969 passed）；`ruff check` + `mypy` 绿。守
   `tests/remote/test_remote_specs_batch_e.py`（含「`depth` 落到 peek 的 `n=`」「去重键两栏各自参与」
   「四个地址/凭据串各自落位」三条功能性断言）。全文 → `docs/nn/engineering.md` §321。
+
+## §2026-11-23-fill-ask
+
+- **背景**：`python.refactor.md` §P0-3 批 F 的最后一处小入口。`PayloadProcess.start_fill` 收
+  8 个关键字（含 `self` = 9），是 §321 `_prefetch_fill` 那条命令的另一端。宽签名 7 → 6。
+- **坏点**：`depth` / `unpack_n` 相邻 int、`worker_id` / `role` 相邻自由串、`base_url` / `token`
+  相邻身份串 —— 三组互换都只是把命令发错，命令通道照收。
+- **决定**：`FillAsk`（frozen + kw_only，住 `remote/payload_proc.py`，即命令的**发出侧**）；
+  归一化（`int()` / `sorted(str(x) …)`）留在 `start_fill`，属于出口规范化而非输入形状。
+- **被否决**：① 复用 §321 的 `PrefetchFillSpec` —— 那边多 `store` / `stop`（内存对象），
+  这边要过 JSON 管道，字段集不同；② 让 `start_fill` 自己拼命令 dict 传参 —— 那正是现在这版。
+- **验证**：`bun run pygate` 绿（6972 passed）；守 `tests/remote/test_prefetch_proc.py` ⑤
+  （含「四组位置对着真子进程收到的命令键」一条）。全文 → `docs/nn/engineering.md` §322。

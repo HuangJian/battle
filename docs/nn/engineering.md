@@ -29,6 +29,22 @@
 
 ---
 
+## §322 P0-3 批 F：`PayloadProcess.start_fill`(9) → `FillAsk`（7 → 6）（2026-11-23）
+
+* **一处，但两端**：`start_fill` 是「父侧下一道 `fill` 命令」的那一头，另一头就是 §321 的
+  `_prefetch_fill`。同一个坏点：`depth` / `unpack_n` 两个相邻 int（取几份 vs 解包前几份）、
+  `worker_id` / `role` 两个相邻自由串（归属盘报错 = 领错盘的任务）、`base_url` / `token` 两个
+  相邻身份串（填充打到别的 hub）。8 个关键字 → 一个 frozen + kw_only 的 `FillAsk`，
+  `skip` 的 `sorted(str(x) …)` 与 `int()` 归一仍在 `start_fill` 里（那是**出口**的规范化，
+  不是输入的形状）。
+* **坑（记账）**：探针里把 `FillAsk` 插在 `# ---- 一轮的填充` 这个**类体内注释**后面 ⇒
+  类体在 dataclass 处被截断，`start_fill` 之后的十几个方法成了 `FillAsk` 的方法，
+  `PayloadProcess` 丢掉 `_read_loop` —— `ruff check` 一句不报（语法合法），只有 `test_close_reaps_…`
+  的 `AttributeError` 抓得住。往后往类里加东西，锚点选 `class X:` 之前，别选类内注释。
+* **验收**：`bun run pygate` 绿（6972 passed）。守卫在 `tests/remote/test_prefetch_proc.py` ⑤
+  （字段表 / frozen + kw_only / 入口只吃一份 spec / **四组位置各就各位**：身份两栏、归属两栏、
+  深度两栏都对着**真子进程收到的命令键**断言）。
+
 ## §321 P0-3 批 E（三处）：`PrefetchFillSpec` / `UpgradeAsk` / `RegisterAsk`（10 → 7，8 → 5 文件）（2026-11-23）
 
 * **一把刀三处，都属「节点侧旁路腿」**：预取填充器、重启守卫、注册一次。三处的坏点同形 ——

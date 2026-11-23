@@ -47,6 +47,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +76,26 @@ PROC_TAKE_TIMEOUT_SEC = 30.0
 PROC_STOP_TIMEOUT_SEC = 40.0
 #: 收线时等子进程退出的余量（秒）。
 PROC_CLOSE_GRACE_SEC = 5.0
+
+
+@dataclass(frozen=True, kw_only=True)
+class FillAsk:
+    """进程腿「下一轮填充」的全部输入（P0-3 批 F：8 个关键字 → 一个对象）。
+
+    这是 `start_fill` 与 `job_round._prefetch_fill` 之间的**同一条命令**的两端，坏点也同形：
+    `depth` / `unpack_n` 是两个相邻 int（取几份 vs 解包前几份 —— 互换后命令通道照收，
+    只是预取窗口白开）；`worker_id` / `role` 是两个相邻自由串（归属盘报错 = 领错盘的任务）；
+    `base_url` / `token` 是两个相邻身份串（填充打到别的 hub）。
+    """
+
+    base_url: str
+    token: str
+    worker_id: str = ""
+    role: str = "online"
+    depth: int = 0
+    unpack_n: int = 0
+    skip: set[str] | None = None
+    log: Callable[[str], None] | None = None
 
 
 class PayloadProcess:
@@ -247,34 +268,23 @@ class PayloadProcess:
 
     # ------------------------------------------------------------ 一轮的填充
 
-    def start_fill(
-        self,
-        *,
-        base_url: str,
-        token: str,
-        worker_id: str = "",
-        role: str = "online",
-        depth: int = 0,
-        unpack_n: int = 0,
-        skip: set[str] | None = None,
-        log: Callable[[str], None] | None = None,
-    ) -> bool:
+    def start_fill(self, spec: FillAsk) -> bool:
         """下 `fill`（起一轮填充）。返回 False = 没交出去（已降级 / 子进程没了）。
 
-        `log` 只在降级分支用得上 —— 进程模式的日志由子进程自己写、父侧原样转发。
+        `spec.log` 只在降级分支用得上 —— 进程模式的日志由子进程自己写、父侧原样转发。
         """
         if self._local is not None:
             return False
         rep = self._request(
             {
                 "op": "fill",
-                "base_url": base_url,
-                "token": token,
-                "worker_id": worker_id,
-                "role": role,
-                "depth": int(depth),
-                "unpack_n": int(unpack_n),
-                "skip": sorted(str(x) for x in (skip or set())),
+                "base_url": spec.base_url,
+                "token": spec.token,
+                "worker_id": spec.worker_id,
+                "role": spec.role,
+                "depth": int(spec.depth),
+                "unpack_n": int(spec.unpack_n),
+                "skip": sorted(str(x) for x in (spec.skip or set())),
             },
             timeout=PROC_CONTROL_TIMEOUT_SEC,
         )

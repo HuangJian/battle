@@ -87,7 +87,8 @@ WIDE_FUNCS_BASELINE = {
     # `BaseTarSpec` / `LandedBytesSpec` ⇒ 本文件宽签名归零，条目删除。
     # 2026-11-21：`pack_payload_zip` 的 9 个参数收成 `PackSpec`
     # ⇒ 本文件宽签名归零，条目删除。
-    "remote/payload_proc.py": 1,
+    # 2026-11-23（P0-3 批 F）：`PayloadProcess.start_fill` 的 8 个关键字收成 `FillAsk`
+    # ⇒ 本文件宽签名归零，条目删除；守 `tests/remote/test_prefetch_proc.py`（⑤ 三条）。
     # 2026-11-22（P0-3 批 B）：`submit_job` 的 8 参收成 `(base_url, token, JobUpload)`；
     # `PushDispatcher.__init__`(11) / `_await_result`(8) 收成 `PushDispatchSpec` / `JobLeg`；
     # `Registry.__init__`(9) 收成 `RegistrySpec` ⇒ 三个条目删除；守 `tests/hub/test_push_spec.py`。

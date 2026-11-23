@@ -208,13 +208,15 @@ def test_fill_only_sends_a_command_and_the_child_stages(tmp_path: Path) -> None:
     try:
         assert pf.fills_out_of_process, "进程模式没起效（还在父进程里）"
         assert pf.start_fill(
-            base_url="http://hub",
-            token="sekret",
-            worker_id="w1",
-            role="online",
-            depth=2,
-            unpack_n=1,
-            skip={JID1},
+            PP.FillAsk(
+                base_url="http://hub",
+                token="sekret",
+                worker_id="w1",
+                role="online",
+                depth=2,
+                unpack_n=1,
+                skip={JID1},
+            )
         )
         assert _until(lambda: any(c.get("op") == "fill" for c in child.commands)), (
             f"没下到子进程：{child.commands}"
@@ -296,7 +298,7 @@ def test_boot_failure_degrades_to_in_process_store(tmp_path: Path) -> None:
         assert isinstance(pf.local_store, PrefetchStore)
         assert pf.held() == set() and pf.stats()["held"] == 0
         # `start_fill` 明确返回 False（`job_round` 据此起旧线程）
-        assert pf.start_fill(base_url="", token="") is False
+        assert pf.start_fill(PP.FillAsk(base_url="", token="")) is False
         assert pf.take(JID1) is None
     finally:
         pf.close()
@@ -310,7 +312,7 @@ def test_child_death_midflight_degrades_instead_of_hanging(tmp_path: Path) -> No
         assert child.wait(timeout=5.0) == 1
         assert _until(lambda: not pf.fills_out_of_process), f"子进程死了却没降级：{logs}"
         assert pf.status()["degrade_reason"], logs
-        assert pf.start_fill(base_url="", token="") is False
+        assert pf.start_fill(PP.FillAsk(base_url="", token="")) is False
     finally:
         pf.close()
 
@@ -456,7 +458,7 @@ def test_mode_env_is_between_the_argument_and_the_default(tmp_path: Path, monkey
 
 def test_close_reaps_the_child_and_is_idempotent(tmp_path: Path) -> None:
     pf, child = _proc(tmp_path)
-    pf.start_fill(base_url="", token="")
+    pf.start_fill(PP.FillAsk(base_url="", token=""))
     pf.close()
     pf.close()
     assert not pf.status()["alive"]
@@ -554,9 +556,70 @@ def test_real_child_boots_init_fills_and_shuts_down(tmp_path: Path) -> None:
         assert len(logs) == before, logs
         assert pf.status()["unclaimed"] == 0, pf.status()
         # 不可达的 hub 地址 ⇒ peek 立刻失败（`urlopen` 的 URL 解析错误），填充器进等待循环
-        assert pf.start_fill(base_url="", token="", depth=1, unpack_n=0)
+        assert pf.start_fill(PP.FillAsk(base_url="", token="", depth=1, unpack_n=0))
         assert pf.take(JID1) is None
         pf.stop_fill()
     finally:
         pf.close()
     assert not pf.status()["alive"]
+
+
+# ────────────────────── ⑤ `FillAsk` 的形状护栏（P0-3 批 F） ──────────────────────
+# 这条命令的两端是 `start_fill` 与 `job_round._prefetch_fill`：原来 8 个关键字里
+# `depth`/`unpack_n` 是两个相邻 int（取几份 vs 解包前几份）、`worker_id`/`role` 是两个相邻
+# 自由串（归属盘）、`base_url`/`token` 是两个相邻身份串 —— 互换都不抛，只是命令照样被收下。
+
+
+def test_fill_ask_field_table_and_shape() -> None:
+    import dataclasses
+
+    assert [f.name for f in dataclasses.fields(PP.FillAsk)] == [
+        "base_url",
+        "token",
+        "worker_id",
+        "role",
+        "depth",
+        "unpack_n",
+        "skip",
+        "log",
+    ]
+    assert all(f.kw_only for f in dataclasses.fields(PP.FillAsk))
+    spec = PP.FillAsk(base_url="", token="")
+    field = "token"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        setattr(spec, field, "other")
+
+
+def test_start_fill_takes_one_spec_only() -> None:
+    import inspect
+
+    params = list(inspect.signature(PayloadProcess.start_fill).parameters.values())
+    assert [p.name for p in params] == ["self", "spec"], [p.name for p in params]
+    maker: Any = PayloadProcess.start_fill
+    with pytest.raises(TypeError):
+        maker(object(), base_url="", token="")
+
+
+def test_fill_ask_grid_lands_in_its_own_command_keys(tmp_path: Path) -> None:
+    """四个位置各就各位：身份两栏、归属两栏、深度两栏都不能串。"""
+    pf, child = _proc(tmp_path)
+    try:
+        assert pf.start_fill(
+            PP.FillAsk(
+                base_url="http://hub",
+                token="tok",
+                worker_id="w-1",
+                role="offline",
+                depth=3,
+                unpack_n=1,
+                skip={JID1},
+            )
+        )
+        assert _until(lambda: any(c.get("op") == "fill" for c in child.commands))
+        cmd = next(c for c in child.commands if c.get("op") == "fill")
+        assert (cmd["base_url"], cmd["token"]) == ("http://hub", "tok")
+        assert (cmd["worker_id"], cmd["role"]) == ("w-1", "offline")
+        assert (cmd["depth"], cmd["unpack_n"]) == (3, 1)
+        pf.stop_fill()
+    finally:
+        pf.close()

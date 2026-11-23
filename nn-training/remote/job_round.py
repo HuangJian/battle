@@ -82,7 +82,7 @@ from remote.job_spec import RunJobSpec
 # 下行腿的**进程模式**代理（2026-10-20）：本模块只拿它做 isinstance 分派（「填充在子进程
 # 里？」）与三处调用（`take` / `start_fill` / `stop_fill`）；暂存账、填充循环都在对方那边
 # （`payload_proc` L1 / `payload_worker` L5）—— 分层是向下的（本模块 L4 → L1），不反向。
-from remote.payload_proc import PayloadProcess
+from remote.payload_proc import FillAsk, PayloadProcess
 from remote.prefetch import (
     PREFETCH_DEPTH_DEFAULT,
     PREFETCH_UNPACK_DEFAULT,
@@ -625,14 +625,16 @@ class _Round:
                     self.pf_proc is not None
                     and self.pf_proc.fills_out_of_process
                     and self.pf_proc.start_fill(
-                        base_url=self.base_url,
-                        token=self.token,
-                        worker_id=self.worker_id,
-                        role=self.role,
-                        depth=self.prefetch_depth,
-                        unpack_n=self.prefetch_unpack,
-                        skip={self.jid},
-                        log=self.pf_log,
+                        FillAsk(
+                            base_url=self.base_url,
+                            token=self.token,
+                            worker_id=self.worker_id,
+                            role=self.role,
+                            depth=self.prefetch_depth,
+                            unpack_n=self.prefetch_unpack,
+                            skip={self.jid},
+                            log=self.pf_log,
+                        )
                     )
                 )
                 if not remote_ok:
