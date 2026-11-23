@@ -29,6 +29,33 @@
 
 ---
 
+## §321 P0-3 批 E（三处）：`PrefetchFillSpec` / `UpgradeAsk` / `RegisterAsk`（10 → 7，8 → 5 文件）（2026-11-23）
+
+* **一把刀三处，都属「节点侧旁路腿」**：预取填充器、重启守卫、注册一次。三处的坏点同形 ——
+  相邻的**同类字符串/数值**互换不抛，只是把事做错：
+  * `remote/job_round._prefetch_fill`（4 位置 + 6 关键字）→ `PrefetchFillSpec`：
+    `depth` 与 `unpack_n` 是两个相邻 int（取几份 vs 解包前几份，互换后预取窗口白开一轮，
+    日志里只看到深度变了）。`store` 的类型如实写成 `PrefetchStore | PayloadProcess` ——
+    子进程腿降级后由 `PayloadProcess.__getattr__` 逐字转发给进程内那份暂存器，老分支正是
+    靠这一条一字不改地接住（`_flush_prefetch_round` 的参数同步放宽）。
+  * `remote/node_upgrade.request_upgrade_guarded`（5 位置 + 4 关键字）→ `UpgradeAsk`：
+    `ping_hash` / `expected_hash` 正是去重键的两栏 —— 互换则**去重恒不命中（连环杀）或恒命中
+    （永不再发）**，两者都不抛；`timeout` 与 `cooldown_sec` 是两个 float（HTTP 预算 vs 去重窗，
+    互换后 20 秒冷却、20 分钟超时）。
+  * `remote/rollout_node._try_register_once`（9 关键字）→ `RegisterAsk`：
+    `url` / `auth` / `hub_url` / `hub_token` 是四个相邻的地址与凭据串 —— 互换 `auth` 与
+    `hub_token` 会把**本节点密钥发去 hub**（两个都是 Bearer）。
+* **装配点**：生产侧四处（`payload_worker._fill_once`、`job_round.run_one_round` 的预取线程、
+  `RolloutNode._try_register`、`upgrade_stale_nodes` 的扫描分支）；用例侧把 `**kw` 打桩改成
+  `spec.<field>` 读取，`threading.Thread(target=_prefetch_fill, args=…, kwargs=…)` 改成
+  `args=(PrefetchFillSpec(…),)`。`tests/remote/test_node_upgrade.py` 的 15 处调用收成一个
+  `_ask(nid, url, ping_hash, **kw)` 助手（`auth_key` / `branch` 是整份文件的固定布景，删掉
+  `args` 元组与 6 处 `*args`）。
+* **验收**：`bun run pygate` 绿（6969 passed）。守卫 `tests/remote/test_remote_specs_batch_e.py`
+  （三份字段表 / frozen + kw_only / 入口只吃一份 spec / **关键格各就各位**：`depth` 落到
+  `peek_jobs(n=…)` 而不是 `unpack_n`、去重键两栏各自参与、四个地址与凭据串各自落位、
+  空 URL 在发包前短路）。
+
 ## §320 P0-3 批 F：`Lifecycle.__init__`(11) → `LifecycleSpec`（11 → 10）（2026-11-23）
 
 * **一把刀一处**：`remote/lifecycle.Lifecycle.__init__`（3 位置 + 8 关键字，11 参）→ 一个

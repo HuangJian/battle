@@ -177,7 +177,16 @@ def test_self_stop_logs_a_reason_and_stops_even_issuing_peek(tmp_path: Path, mon
     logs: list[str] = []
     stop = threading.Event()
     # 直接同步调用：`_prefetch_fill` 一轮就该 return（不用起线程）
-    JR._prefetch_fill("http://hub", "tok", s, stop, depth=1, log=logs.append)
+    JR._prefetch_fill(
+        JR.PrefetchFillSpec(
+            base_url="http://hub",
+            token="tok",
+            store=s,
+            stop=stop,
+            depth=1,
+            log=logs.append,
+        )
+    )
 
     assert peeks == [], f"自停后**一次 peek 都不该发**（peek 本身抢控制面）：{peeks}"
     joined = "\n".join(logs)
@@ -210,7 +219,16 @@ def test_a_healthy_session_is_never_turned_off(tmp_path: Path, monkeypatch) -> N
     assert prefetch_worth_it(prefetched=5, taken=5, white_bytes=0)
 
     # 首轮就该照常 peek（不因「现在 hits=0」而误杀）
-    JR._prefetch_fill("http://hub", "tok", s, stop, depth=1, log=logs.append)
+    JR._prefetch_fill(
+        JR.PrefetchFillSpec(
+            base_url="http://hub",
+            token="tok",
+            store=s,
+            stop=stop,
+            depth=1,
+            log=logs.append,
+        )
+    )
     assert len(peeks) >= 1, "健康会话不该被关掉（关掉 = 一轮 peek 都没有）"
 
 
@@ -261,7 +279,16 @@ def _one_round_prefetch(monkeypatch, store, cands: list[dict]) -> list[str]:
         return _PAY
 
     monkeypatch.setattr(JR, "download_payload", _dl)
-    JR._prefetch_fill("http://hub", "tok", store, stop, depth=1, log=lambda _m: None)
+    JR._prefetch_fill(
+        JR.PrefetchFillSpec(
+            base_url="http://hub",
+            token="tok",
+            store=store,
+            stop=stop,
+            depth=1,
+            log=lambda _m: None,
+        )
+    )
     return events
 
 
@@ -293,7 +320,16 @@ def test_the_gate_reads_the_three_readings_the_store_exposes(monkeypatch) -> Non
     monkeypatch.setattr(PrefetchStore, "stats", lambda _self: {})
     stop = threading.Event()
     with pytest.raises(KeyError) as ei:
-        JR._prefetch_fill("http://hub", "tok", s, stop, depth=1, log=lambda _m: None)
+        JR._prefetch_fill(
+            JR.PrefetchFillSpec(
+                base_url="http://hub",
+                token="tok",
+                store=s,
+                stop=stop,
+                depth=1,
+                log=lambda _m: None,
+            )
+        )
     assert ei.value.args[0] == "prefetched", f"装配点不再读 stats()['prefetched']：{ei.value}"
 
 

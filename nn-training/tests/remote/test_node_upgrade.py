@@ -21,6 +21,7 @@ import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Any
 from urllib.parse import urlparse
 
 import remote.node_upgrade as nu
@@ -97,6 +98,15 @@ class MockAgent:
         self.server.server_close()
 
 
+def _ask(nid: str, url: str, ping_hash: str, **kw: Any) -> nu.UpgradeAsk:
+    """一次重启请求：用例只关心「哪个节点 / 哪个 agent hash / 期望 hash」，其余是固定布景。
+
+    `auth_key` 与 `branch` 在整份文件里恒为 `"K"` / `"goal-nn"`（守卫本身在这两栏上只做透传，
+    参见 `test_request_upgrade_guarded_dirty_tree` 的 self/pullBranch 断言）。
+    """
+    return nu.UpgradeAsk(nid=nid, url=url, auth_key="K", branch="goal-nn", ping_hash=ping_hash, **kw)
+
+
 def test_request_upgrade_posts_the_branch_and_auth() -> None:
     """stale 节点 → `POST /v1/restart {pullBranch}` + Bearer；不可达 → False（不抛）。"""
     mock = MockAgent()
@@ -166,48 +176,36 @@ def test_request_upgrade_guarded_dedup() -> None:
     mock = MockAgent(code_hash="stale-hash-abc")
     try:
         ok1, r1 = nu.request_upgrade_guarded(
-            "n1", mock.url(), "K", "goal-nn", "stale-hash-abc", dirty=[], expected_hash="expect-1"
+            _ask("n1", mock.url(), "stale-hash-abc", dirty=[], expected_hash="expect-1")
         )
         assert ok1 and r1 == "restart-requested", r1
         assert len(mock.restart_calls) == 1, "首次恰好 1 次 POST"
         ok2, r2 = nu.request_upgrade_guarded(
-            "n1", mock.url(), "K", "goal-nn", "stale-hash-abc", dirty=[], expected_hash="expect-1"
+            _ask("n1", mock.url(), "stale-hash-abc", dirty=[], expected_hash="expect-1")
         )
         assert ok2 is False and r2 == "dedup", f"同 (hash, 期望) 二次 → dedup, got {r2}"
         assert len(mock.restart_calls) == 1, "dedup 不再发 POST"
         # F1 核心回归：agent hash 没变但训练机期望 hash 变了 ⇒ 能收到第二次升级请求。
         ok3, r3 = nu.request_upgrade_guarded(
-            "n1", mock.url(), "K", "goal-nn", "stale-hash-abc", dirty=[], expected_hash="expect-2"
+            _ask("n1", mock.url(), "stale-hash-abc", dirty=[], expected_hash="expect-2")
         )
         assert ok3 and r3 == "restart-requested", r3
         assert len(mock.restart_calls) == 2, "期望 hash 变化后的重启恰好发出"
         ok4, r4 = nu.request_upgrade_guarded(
-            "n1", mock.url(), "K", "goal-nn", "stale-hash-abc", dirty=[], expected_hash="expect-2"
+            _ask("n1", mock.url(), "stale-hash-abc", dirty=[], expected_hash="expect-2")
         )
         assert ok4 is False and r4 == "dedup", f"同 (hash, 期望) 三次 → 仍 dedup, got {r4}"
         assert len(mock.restart_calls) == 2, "仍 dedup 不再发 POST"
         # 节点 hash 变化（pull 生效 / 手动更新成功但仍 stale）→ 恢复重启资格。
         mock.code_hash = "still-stale-but-new"
         ok5, r5 = nu.request_upgrade_guarded(
-            "n1",
-            mock.url(),
-            "K",
-            "goal-nn",
-            "still-stale-but-new",
-            dirty=[],
-            expected_hash="expect-2",
+            _ask("n1", mock.url(), "still-stale-but-new", dirty=[], expected_hash="expect-2")
         )
         assert ok5 and r5 == "restart-requested", r5
         assert len(mock.restart_calls) == 3, "第三次重启恰好发出"
         # 不同节点互不影响（去重按 nid 隔离）。
         ok6, r6 = nu.request_upgrade_guarded(
-            "n2",
-            mock.url(),
-            "K",
-            "goal-nn",
-            "still-stale-but-new",
-            dirty=[],
-            expected_hash="expect-2",
+            _ask("n2", mock.url(), "still-stale-but-new", dirty=[], expected_hash="expect-2")
         )
         assert ok6 and r6 == "restart-requested", r6
         assert len(mock.restart_calls) == 4, "n2 的首杀发出"
@@ -219,19 +217,26 @@ def test_request_upgrade_guarded_cooldown() -> None:
     """F3：去重是**冷却窗**而非永久压制；窗过后允许重发并重置时钟；落盘 memo 预置同理。"""
     nu.reset_restart_state()
     mock = MockAgent(code_hash="stale-hash-abc")
-    args = ("n1", mock.url(), "K", "goal-nn", "stale-hash-abc")
     try:
-        ok1, r1 = nu.request_upgrade_guarded(*args, dirty=[], expected_hash="E", cooldown_sec=60)
+        ok1, r1 = nu.request_upgrade_guarded(
+            _ask("n1", mock.url(), "stale-hash-abc", dirty=[], expected_hash="E", cooldown_sec=60)
+        )
         assert ok1 and r1 == "restart-requested", r1
-        ok2, r2 = nu.request_upgrade_guarded(*args, dirty=[], expected_hash="E", cooldown_sec=60)
+        ok2, r2 = nu.request_upgrade_guarded(
+            _ask("n1", mock.url(), "stale-hash-abc", dirty=[], expected_hash="E", cooldown_sec=60)
+        )
         assert ok2 is False and r2 == "dedup", f"窗内 → dedup, got {r2}"
         assert len(mock.restart_calls) == 1, "窗内不再发 POST"
         # 窗过期（cooldown=0 等价于「已过 10 分钟」）⇒ 允许再发一次（自愈路径）。
-        ok3, r3 = nu.request_upgrade_guarded(*args, dirty=[], expected_hash="E", cooldown_sec=0)
+        ok3, r3 = nu.request_upgrade_guarded(
+            _ask("n1", mock.url(), "stale-hash-abc", dirty=[], expected_hash="E", cooldown_sec=0)
+        )
         assert ok3 and r3 == "restart-requested", r3
         assert len(mock.restart_calls) == 2, "重发恰好一次"
         # 重发后时钟重置：窗内再问又回到 dedup（防连环杀没被废掉）。
-        ok4, r4 = nu.request_upgrade_guarded(*args, dirty=[], expected_hash="E", cooldown_sec=60)
+        ok4, r4 = nu.request_upgrade_guarded(
+            _ask("n1", mock.url(), "stale-hash-abc", dirty=[], expected_hash="E", cooldown_sec=60)
+        )
         assert ok4 is False and r4 == "dedup", f"重发后窗内 → dedup, got {r4}"
         assert len(mock.restart_calls) == 2, "重发后时钟重置，窗内不发 POST"
         # 调用方持久化 memo（TS 落盘那条腿）预置 atSec：一小时前的下发 ⇒ 已过期 ⇒ 可重发。
@@ -246,13 +251,17 @@ def test_request_upgrade_guarded_cooldown() -> None:
                 }
             ]
         )
-        ok5, r5 = nu.request_upgrade_guarded(*args, dirty=[], expected_hash="E")
+        ok5, r5 = nu.request_upgrade_guarded(
+            _ask("n1", mock.url(), "stale-hash-abc", dirty=[], expected_hash="E")
+        )
         assert ok5 and r5 == "restart-requested", f"memo 里 1h 前的下发应已过期, got {r5}"
         assert len(mock.restart_calls) == 3, "过期 memo 后的重发发出"
         # 旧 memo（无 atSec）视作「刚刚下发」⇒ 保持旧的永久去重语义（向后兼容）。
         nu.reset_restart_state()
         nu.seed_restart_state([{"id": "n1", "pingHash": "stale-hash-abc", "expectedHash": "E"}])
-        ok6, r6 = nu.request_upgrade_guarded(*args, dirty=[], expected_hash="E")
+        ok6, r6 = nu.request_upgrade_guarded(
+            _ask("n1", mock.url(), "stale-hash-abc", dirty=[], expected_hash="E")
+        )
         assert ok6 is False and r6 == "dedup", f"旧 memo（无 atSec）→ dedup, got {r6}"
     finally:
         nu.reset_restart_state()
@@ -272,22 +281,20 @@ def test_request_upgrade_guarded_dirty_tree(monkeypatch) -> None:
     try:
         dirty = ["src/types.ts", "src/game/SimulationCombat.ts"]
         ok, r = nu.request_upgrade_guarded(
-            "remote", remote.url(), "K", "goal-nn", "stale-hash-abc", dirty=dirty
+            _ask("remote", remote.url(), "stale-hash-abc", dirty=dirty)
         )
         assert ok is False and r == "dirty-tree:2", f"远端脏树 → 拒发, got {r}"
         assert len(remote.restart_calls) == 0, "远端脏树 → 不杀进程"
         # self 节点：dirty 仍放行，纯重启。
         ok2, r2 = nu.request_upgrade_guarded(
-            "self", self_mock.url(), "K", "goal-nn", "stale-hash-abc", dirty=dirty
+            _ask("self", self_mock.url(), "stale-hash-abc", dirty=dirty)
         )
         assert ok2 and r2 == "restart-requested", r2
         assert self_mock.restart_calls[0]["body"].get("pullBranch") == "", (
             "self 重启 pullBranch 强制为空（禁 pull）"
         )
         # dirty=None 自动检测：不抛异常、reason 合法即可（真实仓库状态不确定）。
-        ok3, r3 = nu.request_upgrade_guarded(
-            "auto", remote.url(), "K", "goal-nn", "auto-hash", dirty=None
-        )
+        ok3, r3 = nu.request_upgrade_guarded(_ask("auto", remote.url(), "auto-hash", dirty=None))
         assert isinstance(ok3, bool) and isinstance(r3, str), f"dirty=None 自动检测不抛, got {r3}"
     finally:
         remote.close()

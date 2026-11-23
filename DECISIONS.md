@@ -10359,3 +10359,23 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **读数**：宽签名 11 → **10**、9 → **8 文件**（`remote/lifecycle.py` 条目从 `WIDE_FUNCS_BASELINE` 删除）。
 - **验证**：`bun run pygate` 绿（6956 passed）；`ruff check` + `mypy` 绿。守
   `tests/remote/test_lifecycle_spec.py`。全文 → `docs/nn/engineering.md` §320。
+
+## §2026-11-23-batch-e-specs
+
+- **背景**：`python.refactor.md` §P0-3 批 E 的三个节点侧旁路腿。宽签名 10 → 7（8 → 5 文件）。
+- **坏点（同形：相邻同类位互换不抛）**：
+  · `job_round._prefetch_fill`：`depth` / `unpack_n` 两个相邻 int（取几份 vs 解包前几份）；
+  · `node_upgrade.request_upgrade_guarded`：`ping_hash` / `expected_hash` 是**去重键的两栏**
+    （互换 ⇒ 连环杀或永不再发），`timeout` / `cooldown_sec` 两个 float（HTTP 预算 vs 去重窗）；
+  · `rollout_node._try_register_once`：`url` / `auth` / `hub_url` / `hub_token` 四个相邻地址与
+    凭据串（`auth` ↔ `hub_token` = 把本节点密钥发去 hub）。
+- **决定**：各给一份 frozen + kw_only spec，住同模块（三处都无 LOC 压力：573 / 142 / 824 LOC）；
+  入口只吃一份 spec，构造体只把字段展开成同名局部量。`PrefetchFillSpec.store` 如实写成
+  `PrefetchStore | PayloadProcess`（降级代理），并同步放宽 `_flush_prefetch_round` 的形参。
+- **被否决**：① 三处共用一个「节点腿 spec」—— 字段几乎不重叠，共用一个对象只会让三处都拿到
+  用不上的旋钮；② 给 `_prefetch_fill` 保留 `(base_url, token, store, stop, **kw)` 的位置面 ——
+  那正是 `store`/`stop` 互换（AttributeError 只在运行时暴露）与 `depth`/`unpack_n` 互换的来源；
+  ③ 在 `request_upgrade_guarded` 里把 `dirty=None` 变成必填 —— 会改掉「自动探测」这条既有语义。
+- **验证**：`bun run pygate` 绿（6969 passed）；`ruff check` + `mypy` 绿。守
+  `tests/remote/test_remote_specs_batch_e.py`（含「`depth` 落到 peek 的 `n=`」「去重键两栏各自参与」
+  「四个地址/凭据串各自落位」三条功能性断言）。全文 → `docs/nn/engineering.md` §321。

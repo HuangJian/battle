@@ -388,8 +388,17 @@ def test_the_filler_unpacks_only_the_first_n_candidates(tmp_path: Path, monkeypa
     stop = threading.Event()
     t = threading.Thread(
         target=JR._prefetch_fill,
-        args=("http://hub", "tok", store, stop),
-        kwargs={"depth": 3, "unpack_n": 1, "log": lambda _m: None},
+        args=(
+            JR.PrefetchFillSpec(
+                base_url="http://hub",
+                token="tok",
+                store=store,
+                stop=stop,
+                depth=3,
+                unpack_n=1,
+                log=lambda _m: None,
+            ),
+        ),
         daemon=True,
     )
     t.start()
@@ -472,7 +481,16 @@ def test_filler_uses_p2_and_only_download_payload(tmp_path: Path, monkeypatch) -
     stop = threading.Event()
 
     def _run() -> None:
-        JR._prefetch_fill("http://hub", "tok", store, stop, depth=2, log=lambda _m: None)
+        JR._prefetch_fill(
+            JR.PrefetchFillSpec(
+                base_url="http://hub",
+                token="tok",
+                store=store,
+                stop=stop,
+                depth=2,
+                log=lambda _m: None,
+            )
+        )
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
@@ -513,7 +531,16 @@ def test_filler_swallows_preemption_and_errors(tmp_path: Path, monkeypatch) -> N
     stop = threading.Event()
 
     def _run() -> None:
-        JR._prefetch_fill("http://hub", "tok", store, stop, depth=1, log=logs.append)
+        JR._prefetch_fill(
+            JR.PrefetchFillSpec(
+                base_url="http://hub",
+                token="tok",
+                store=store,
+                stop=stop,
+                depth=1,
+                log=logs.append,
+            )
+        )
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
@@ -669,10 +696,19 @@ def test_prefetch_survives_the_cancel_watcher_control_ring(tmp_path: Path, monke
     monkeypatch.setattr(http_mod, "_request", _fake_request)
     logs: list[str] = []
     stop = threading.Event()
-    t = threading.Thread(
-        target=lambda: JR._prefetch_fill("http://hub", "tok", store, stop, depth=1, log=logs.append),
-        daemon=True,
-    )
+    def _run() -> None:
+        JR._prefetch_fill(
+            JR.PrefetchFillSpec(
+                base_url="http://hub",
+                token="tok",
+                store=store,
+                stop=stop,
+                depth=1,
+                log=logs.append,
+            )
+        )
+
+    t = threading.Thread(target=_run, daemon=True)
     t.start()
     deadline = time.time() + 10
     while not store.has(JID) and time.time() < deadline:
@@ -842,8 +878,16 @@ def test_filler_reports_the_shape_once_and_never_leaves_a_failed_download_hangin
     stop = threading.Event()
     t = threading.Thread(
         target=JR._prefetch_fill,
-        args=("http://hub", "tok", store, stop),
-        kwargs={"depth": 2, "log": lambda _m: None},
+        args=(
+            JR.PrefetchFillSpec(
+                base_url="http://hub",
+                token="tok",
+                store=store,
+                stop=stop,
+                depth=2,
+                log=lambda _m: None,
+            ),
+        ),
         daemon=True,
     )
     t.start()
@@ -876,8 +920,16 @@ def test_filler_reports_the_held_set_and_stops_on_unchanged_shape(
     stop = threading.Event()
     t = threading.Thread(
         target=JR._prefetch_fill,
-        args=("http://hub", "tok", store, stop),
-        kwargs={"depth": 1, "log": lambda _m: None},
+        args=(
+            JR.PrefetchFillSpec(
+                base_url="http://hub",
+                token="tok",
+                store=store,
+                stop=stop,
+                depth=1,
+                log=lambda _m: None,
+            ),
+        ),
         daemon=True,
     )
     t.start()
@@ -915,8 +967,16 @@ def test_filler_backs_off_after_a_failed_report(tmp_path: Path, monkeypatch) -> 
     stop = threading.Event()
     t = threading.Thread(
         target=JR._prefetch_fill,
-        args=("http://hub", "tok", store, stop),
-        kwargs={"depth": 1, "log": lambda _m: None},
+        args=(
+            JR.PrefetchFillSpec(
+                base_url="http://hub",
+                token="tok",
+                store=store,
+                stop=stop,
+                depth=1,
+                log=lambda _m: None,
+            ),
+        ),
         daemon=True,
     )
     t.start()

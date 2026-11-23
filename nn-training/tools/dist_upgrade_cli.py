@@ -227,15 +227,17 @@ def run_spec(spec: dict) -> dict:
         # dirty=None ⇒ 守卫内部自己探测（远端才探；self 直接跳过探测，同 remote.node_upgrade 语义）。
         eff_dirty = [] if self_node else reported_dirty
         ok, reason = remote.node_upgrade.request_upgrade_guarded(
-            nid,
-            str(n["url"]),
-            str(n.get("authKey") or ""),
-            branch,
-            ping_hash,
-            timeout=timeout,
-            dirty=eff_dirty,
-            expected_hash=expected,
-            cooldown_sec=cooldown,
+            remote.node_upgrade.UpgradeAsk(
+                nid=nid,
+                url=str(n["url"]),
+                auth_key=str(n.get("authKey") or ""),
+                branch=branch,
+                ping_hash=ping_hash,
+                timeout=timeout,
+                dirty=eff_dirty,
+                expected_hash=expected,
+                cooldown_sec=cooldown,
+            )
         )
         return {"id": nid, "ok": bool(ok), "reason": str(reason)}
 

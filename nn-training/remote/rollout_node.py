@@ -483,22 +483,35 @@ def emit_output_summary(port: int, auth: str, log: Callable[[str], None]) -> Non
     log(node_report.disk_line(status))
 
 
-def _try_register_once(
-    *,
-    url: str,
-    auth: str,
-    node_id: str,
-    workers: int,
-    label: str,
-    hub_url: str,
-    hub_token: str,
-    log: Callable[[str], None],
-    urlopen: RegisterFn | None = None,
-) -> dict:
+@dataclass(frozen=True, kw_only=True)
+class RegisterAsk:
+    """一次节点注册的全部输入（P0-3 批 E：9 个关键字 → 一个对象）。
+
+    失效面：`url` / `auth` / `hub_url` / `hub_token` 是**四个相邻的地址与凭据串** ——
+    互换 `auth` 与 `hub_token` 会把本节点的密钥发去 hub（两个都是 Bearer），
+    互换 `url` 与 `hub_url` 则把注册打到自己的隧道口（永远失败、且日志看起来像「隧道没好」）；
+    `node_id` / `label` 是两个相邻自由串（注册名与展示标签互换 ⇒ 控制台上多一行错名字）。
+    """
+
+    url: str
+    auth: str
+    node_id: str
+    workers: int
+    label: str
+    hub_url: str
+    hub_token: str
+    log: Callable[[str], None]
+    urlopen: RegisterFn | None = None
+
+
+def _try_register_once(spec: RegisterAsk) -> dict:
     """注册一次；空 URL 是第一行硬闸（零 HTTP，也不写 `reg_state`）。
 
     `kind="nourl"` 是**本地**失败，调用方据此走「等隧道」而不是注册退避。
     """
+    url, auth = spec.url, spec.auth
+    node_id, workers, label = spec.node_id, spec.workers, spec.label
+    hub_url, hub_token, log = spec.hub_url, spec.hub_token, spec.log
     if not url:
         return {
             "ok": False,
@@ -510,7 +523,8 @@ def _try_register_once(
             "kind": "nourl",
         }
     payload = build_register_payload(node_id, url, auth, workers, label)
-    return register(urlopen or urllib.request.urlopen, hub_url, hub_token, payload, log)
+    opener = spec.urlopen or urllib.request.urlopen
+    return register(opener, hub_url, hub_token, payload, log)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -680,18 +694,20 @@ class _Session:
     def _try_register(self) -> dict:
         t = self.tunnel
         out = _try_register_once(
-            url=t.url,
-            auth=self.auth,
-            node_id=self.node_id,
-            workers=self.workers,
-            label=worker_name(
-                self.env,
-                "t" if t.link == LINK_TAILSCALE else ("r" if t.link == LINK_RELAY else "c"),
-            ),
-            hub_url=self.hub_url,
-            hub_token=self.hub_token,
-            log=self.log,
-            urlopen=urllib.request.urlopen,
+            RegisterAsk(
+                url=t.url,
+                auth=self.auth,
+                node_id=self.node_id,
+                workers=self.workers,
+                label=worker_name(
+                    self.env,
+                    "t" if t.link == LINK_TAILSCALE else ("r" if t.link == LINK_RELAY else "c"),
+                ),
+                hub_url=self.hub_url,
+                hub_token=self.hub_token,
+                log=self.log,
+                urlopen=urllib.request.urlopen,
+            )
         )
         if out["ok"]:
             self.reg_state.update({"url": t.url, "authKey": self.auth})

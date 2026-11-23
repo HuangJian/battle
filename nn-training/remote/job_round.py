@@ -136,7 +136,7 @@ def _course_of(job: dict) -> str:
     return str(job.get("course") or "").strip()
 
 
-def _flush_prefetch_round(store: PrefetchStore, log: Any) -> None:
+def _flush_prefetch_round(store: PrefetchStore | PayloadProcess, log: Any) -> None:
     """预取每轮收账：**只剩 wire 传输行**（真搬了字节才有）。
 
     `prefetch: held=… hits=… misses=… 本轮下载=…MB 会话累计=…MB` 摘要行已退役（2026-10-06，
@@ -155,19 +155,32 @@ def _flush_prefetch_round(store: PrefetchStore, log: Any) -> None:
     _wire_flush(PREFETCH_WIRE_ID, log)
 
 
-def _prefetch_fill(
-    base_url: str,
-    token: str,
-    store: PrefetchStore,
-    stop: threading.Event,
-    *,
-    worker_id: str = "",
-    role: str = ROLE_ONLINE,
-    depth: int = PREFETCH_DEPTH_DEFAULT,
-    unpack_n: int = PREFETCH_UNPACK_DEFAULT,
-    skip: set[str] | None = None,
-    log: Any = None,
-) -> None:
+@dataclass(frozen=True, kw_only=True)
+class PrefetchFillSpec:
+    """后台预取填充器的全部输入（P0-3 批 E：4 位置 + 6 关键字 → 一个对象）。
+
+    失效面：`base_url` / `token` 是相邻的两个身份串（预取打到别的 hub）；
+    `depth` / `unpack_n` 是**两个相邻 int 且语义相近**（一个是深度、一个是解包份数，
+    互换后「解包前 N 份」变成「取 N 份」—— 预取窗口白开一轮，而日志里只看到深度变了）；
+    `store` 与 `stop` 一个是暂存器、一个是取消点，互换当场 AttributeError，但那是
+    运行时才发现。按名字构造后拼错的键当场 TypeError。
+    """
+
+    base_url: str
+    token: str
+    #: 子进程腿降级后传进来的 `PayloadProcess` 会用 `__getattr__` 逐字转发给进程内那份暂存器
+    #: （`job_round` 的老分支靠这一条一字不改地接住），所以这里如实写两个形状。
+    store: PrefetchStore | PayloadProcess
+    stop: threading.Event
+    worker_id: str = ""
+    role: str = ROLE_ONLINE
+    depth: int = PREFETCH_DEPTH_DEFAULT
+    unpack_n: int = PREFETCH_UNPACK_DEFAULT
+    skip: set[str] | None = None
+    log: Any = None
+
+
+def _prefetch_fill(spec: PrefetchFillSpec) -> None:
     """后台填充软持有队列（P2）：`peek`（控制面，无副作用）→ **P2** 下载 → 暂存。
 
     与 `run_job` **重叠**运行——这就是预取的全部价值所在（§0：串行把 GPU 饿死在传输上）。
@@ -184,8 +197,15 @@ def _prefetch_fill(
     （`store(unpack=True)`）——这半场今天是关键路径（`download.py:753`），而这里的窗口是
     上一轮的 PPO（32–35s）。`unpack_n=0` = 只存字节 = 改造前的旧行为（回退档）。
     """
-    skip = skip or set()
-    log = log or (lambda _m: None)
+    base_url, token, store, stop = spec.base_url, spec.token, spec.store, spec.stop
+    worker_id, role, depth, unpack_n = (
+        spec.worker_id,
+        spec.role,
+        spec.depth,
+        spec.unpack_n,
+    )
+    skip = spec.skip or set()
+    log = spec.log or (lambda _m: None)
     #: 上一拍**成功**上报的规范化快照（`None` = 还没报过 ⇒ 首轮无条件报一次）。
     #: 为什么首轮必报：hub 的表是进程内存（重启即清），worker 不重报就会让面板永久少一行
     #: ——「形状未变不发」的前提是「对面已经有一份」。失败不落账 ⇒ 下一拍自然再试一次。
@@ -618,19 +638,19 @@ class _Round:
                 if not remote_ok:
                     self.pf_thread = rt.thread(
                         _prefetch_fill,
-                        self.base_url,
-                        self.token,
-                        self.pf_store,
-                        self.pf_stop,
+                        PrefetchFillSpec(
+                            base_url=self.base_url,
+                            token=self.token,
+                            store=self.pf_store,
+                            stop=self.pf_stop,
+                            worker_id=self.worker_id,
+                            role=self.role,
+                            depth=self.prefetch_depth,
+                            unpack_n=self.prefetch_unpack,
+                            skip={self.jid},
+                            log=self.pf_log,
+                        ),
                         name="pf",
-                        kwargs={
-                            "worker_id": self.worker_id,
-                            "role": self.role,
-                            "depth": self.prefetch_depth,
-                            "unpack_n": self.prefetch_unpack,
-                            "skip": {self.jid},
-                            "log": self.pf_log,
-                        },
                         daemon=True,
                     )
         self.hb_stop = threading.Event()

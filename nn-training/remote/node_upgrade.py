@@ -30,6 +30,7 @@ import json
 import os
 import time
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 from common.codehash import dirty_hash_files
 from common.codehash_ref import is_self_node as _is_self_node
@@ -200,17 +201,29 @@ def seed_restart_state(entries: Iterable[object]) -> int:
     return n
 
 
-def request_upgrade_guarded(
-    nid: str,
-    url: str,
-    auth_key: str,
-    branch: str,
-    ping_hash: str,
-    timeout: float = 20.0,
-    dirty: list[str] | None = None,
-    expected_hash: str = "",
-    cooldown_sec: float | None = None,
-) -> tuple[bool, str]:
+@dataclass(frozen=True, kw_only=True)
+class UpgradeAsk:
+    """一次重启请求的全部输入（P0-3 批 E：5 位置 + 4 关键字 → 一个对象）。
+
+    失效面：`nid` / `url` / `auth_key` 是三个相邻身份位（互换后重启打到别的节点，
+    或者拿别的节点的 key 去签）；`branch` 与 `ping_hash` / `expected_hash` 是三个
+    **相邻内容哈希串** —— 去重键正是 `(ping_hash, expected_hash)`，互换后去重恒不命中
+    （连环杀）或恒命中（永不再发），而两者都不抛；`timeout` 与 `cooldown_sec` 是两个
+    相邻 float（一个 HTTP 预算、一个去重窗）—— 互换后 20 秒冷却、20 分钟超时。
+    """
+
+    nid: str
+    url: str
+    auth_key: str
+    branch: str
+    ping_hash: str
+    timeout: float = 20.0
+    dirty: list[str] | None = None
+    expected_hash: str = ""
+    cooldown_sec: float | None = None
+
+
+def request_upgrade_guarded(spec: UpgradeAsk) -> tuple[bool, str]:
     """带护栏的重启请求（ping 门 / rescan / upgrade_stale_nodes 共用入口）。
 
     返回 (ok, reason)：
@@ -228,6 +241,15 @@ def request_upgrade_guarded(
     expected_hash 默认 "" 使未传参调用方行为与旧版逐字等价（向后兼容）；调用方
     必须显式传训练机当前 codeHash（F1 核心：dedup 键含期望值）。
     """
+    nid, url, auth_key, branch, ping_hash = (
+        spec.nid,
+        spec.url,
+        spec.auth_key,
+        spec.branch,
+        spec.ping_hash,
+    )
+    timeout, dirty = spec.timeout, spec.dirty
+    expected_hash, cooldown_sec = spec.expected_hash, spec.cooldown_sec
     if dirty is None:
         dirty = [] if is_self_node(url, nid) else dirty_hash_files()
     if not is_self_node(url, nid) and dirty:
@@ -280,15 +302,17 @@ def upgrade_stale_nodes(
             out.append({"id": nid, "upgraded": False, "reason": "current"})
             continue
         ok, reason = request_upgrade_guarded(
-            nid,
-            n["url"],
-            n.get("authKey", ""),
-            branch,
-            ping_hash,
-            timeout=restart_timeout,
-            dirty=dirty,
-            expected_hash=expected_hash,
-            cooldown_sec=cooldown_sec,
+            UpgradeAsk(
+                nid=nid,
+                url=n["url"],
+                auth_key=n.get("authKey", ""),
+                branch=branch,
+                ping_hash=ping_hash,
+                timeout=restart_timeout,
+                dirty=dirty,
+                expected_hash=expected_hash,
+                cooldown_sec=cooldown_sec,
+            )
         )
         # pingHash 回传给调用方：一次性 CLI 要靠它把本次下发写进跨调用 memo
         # （键 = (nid, agent ping hash, 期望 hash)，与 `_RESTARTS.seen` 同构）。

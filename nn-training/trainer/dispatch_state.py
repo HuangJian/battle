@@ -167,13 +167,15 @@ def admit_rollout_nodes(
                 dedup_streak.pop(nid, None)
                 continue
             ok, reason = remote.node_upgrade.request_upgrade_guarded(
-                nid,
-                n["url"],
-                n.get("authKey", ""),
-                upgrade_branch,
-                str(ping.get("codeHash")),
-                dirty=dirty_files,
-                expected_hash=code_hash,
+                remote.node_upgrade.UpgradeAsk(
+                    nid=nid,
+                    url=n["url"],
+                    auth_key=n.get("authKey", ""),
+                    branch=upgrade_branch,
+                    ping_hash=str(ping.get("codeHash")),
+                    dirty=dirty_files,
+                    expected_hash=code_hash,
+                )
             )
             if remote.node_upgrade.is_self_node(n["url"], nid):
                 log(

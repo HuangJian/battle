@@ -72,12 +72,14 @@ WIDE_FUNCS_BASELINE = {
     # `remote/error_report.py` 已清零（P0-3 批 F3：`report_error` → `ErrorReportSpec`）。
     "remote/hub_client.py": 2,
     # `remote/hub_http.py` 已清零（P0-3 批 F4：`WaitJobSpec` / `HubFailSpec`）。
-    # 2026-11-19 合入上游的 relay/replay 参数（原 3 处 → 4 处）。
-    "remote/job_round.py": 1,  # run_one_round 已收 RoundSpec；剩 _prefetch_fill(10)
+    # 2026-11-23（P0-3 批 E）：`_prefetch_fill` 的 4 位置 + 6 关键字收成 `PrefetchFillSpec`
+    # ⇒ 本文件宽签名归零（`run_one_round` 早已收 `RoundSpec`），条目删除；守
+    # `tests/remote/test_remote_specs_batch_e.py`。
     # 2026-11-23（P0-3 批 F）：`Lifecycle.__init__` 的 3 位置 + 8 关键字收成 `LifecycleSpec`
     # （frozen + kw_only，住同模块）⇒ 本文件宽签名归零，条目删除；守
     # `tests/remote/test_lifecycle_spec.py`。
-    "remote/node_upgrade.py": 1,
+    # 2026-11-23（P0-3 批 E）：`request_upgrade_guarded` 的 5 位置 + 4 关键字收成 `UpgradeAsk`
+    # ⇒ 本文件宽签名归零，条目删除；守 `tests/remote/test_remote_specs_batch_e.py`。
     # `remote/offline_deliver.py` 已清零（P0-3 第四十刀：`OfflineDelivererSpec`）。
     # 2026-11-22（P0-3 第四十八刀）：`run_cloud_eval` 的 14 个关键字收成 `CloudEvalSpec`
     # ⇒ 本文件宽签名归零，条目删除（守 `tests/remote/test_cloud_eval_spec.py`）。
@@ -90,8 +92,8 @@ WIDE_FUNCS_BASELINE = {
     # `PushDispatcher.__init__`(11) / `_await_result`(8) 收成 `PushDispatchSpec` / `JobLeg`；
     # `Registry.__init__`(9) 收成 `RegistrySpec` ⇒ 三个条目删除；守 `tests/hub/test_push_spec.py`。
     # 2026-11-19 合入上游：`run` 的交易参数 + relay 通道参数（原 1 处 → 2 处）。
-    # `remote/rollout_node.py` 只剩 `_try_register_once`（P0-3 批 F1：`_banner_lines` → `BannerSpec`）。
-    "remote/rollout_node.py": 1,
+    # 2026-11-23（P0-3 批 E）：`_try_register_once` 的 9 个关键字收成 `RegisterAsk`
+    # ⇒ 本文件宽签名归零（`BannerSpec` 于批 F1 收掉另一处），条目删除；守同批用例。
     # `remote/tailscale_boot.py` 已清零（P0-3 批 F2：`fetch_guarded` → `FetchSpec`）；
     # 注意 `GLOBAL_BASELINE` 里另有该文件的 1 条 `global` 存量（与本表无关，本次未动）。
     # `remote/upload_proc.py` 已清零（P0-3 批 G：`UploaderProcess.__init__` 与 `make_uploader`

@@ -521,15 +521,17 @@ def test_empty_url_never_posts_to_hub() -> None:
     """★ 空 URL 是本地失败：零 HTTP、kind=nourl、不写 reg_state。"""
     calls: list = []
     out = rn._try_register_once(
-        url="",
-        auth="ak",
-        node_id="n",
-        workers=1,
-        label="l",
-        hub_url="http://hub:8787",
-        hub_token="tok",
-        log=lambda _m: None,
-        urlopen=_opener(_Resp({}), calls=calls),
+        rn.RegisterAsk(
+            url="",
+            auth="ak",
+            node_id="n",
+            workers=1,
+            label="l",
+            hub_url="http://hub:8787",
+            hub_token="tok",
+            log=lambda _m: None,
+            urlopen=_opener(_Resp({}), calls=calls),
+        )
     )
     assert out == {
         "ok": False,
@@ -546,15 +548,17 @@ def test_empty_url_never_posts_to_hub() -> None:
 def test_try_register_once_posts_with_the_injected_opener() -> None:
     calls: list = []
     out = rn._try_register_once(
-        url="https://a.trycloudflare.com",
-        auth="ak",
-        node_id="n",
-        workers=1,
-        label="l",
-        hub_url="http://hub:8787",
-        hub_token="tok",
-        log=lambda _m: None,
-        urlopen=_opener(_Resp({"action": "created"}), calls=calls),
+        rn.RegisterAsk(
+            url="https://a.trycloudflare.com",
+            auth="ak",
+            node_id="n",
+            workers=1,
+            label="l",
+            hub_url="http://hub:8787",
+            hub_token="tok",
+            log=lambda _m: None,
+            urlopen=_opener(_Resp({"action": "created"}), calls=calls),
+        )
     )
     assert out["ok"] is True and len(calls) == 1
 
@@ -699,8 +703,8 @@ def test_422_and_cf_failure_stops_without_second_tailscale_post(
     def _interrupt(*_a: object) -> None:
         raise KeyboardInterrupt
 
-    def _fake_register(**kw: object) -> dict:
-        posts.append(str(kw["url"]))
+    def _fake_register(spec: rn.RegisterAsk) -> dict:
+        posts.append(str(spec.url))
         return {
             "ok": False,
             "status": 422,
@@ -763,9 +767,9 @@ def test_empty_url_multiple_ticks_never_posts_or_backs_off(
         posts.append("called")
         raise AssertionError("空 URL 不得进入 register()")
 
-    def _gate(**kw: Any) -> dict:
-        gates.append(str(kw["url"]))
-        return real_once(**kw)
+    def _gate(spec: rn.RegisterAsk) -> dict:
+        gates.append(str(spec.url))
+        return real_once(spec)
 
     def _time() -> float:
         return clock["now"]
@@ -839,8 +843,8 @@ def test_dead_tunnel_process_rebuilds_and_reregisters(
         built.append(url)
         return url, proc
 
-    def _register(**kw: object) -> dict:
-        posts.append(str(kw["url"]))
+    def _register(spec: rn.RegisterAsk) -> dict:
+        posts.append(str(spec.url))
         tunnel.rc = 7  # 注册成功后隧道进程死掉
         return {
             "ok": True,
@@ -1321,8 +1325,8 @@ def test_register_uses_the_port_the_relay_actually_used(
         def stats_line(self) -> str:
             return "relay fake"
 
-    def _register(**kw: object) -> dict:
-        posts.append(str(kw["hub_url"]))
+    def _register(spec: rn.RegisterAsk) -> dict:
+        posts.append(str(spec.hub_url))
         return {
             "ok": True,
             "status": 200,

@@ -424,8 +424,16 @@ def test_the_moved_seam_resolves_in_the_round_module(monkeypatch, tmp_path: Path
     store = PrefetchStore(tmp_path / "work", budget_bytes=1 << 20)
     t = threading.Thread(
         target=round_mod._prefetch_fill,
-        args=("http://hub", "tok", store, stop),
-        kwargs={"depth": 1, "log": lambda _m: None},
+        args=(
+            round_mod.PrefetchFillSpec(
+                base_url="http://hub",
+                token="tok",
+                store=store,
+                stop=stop,
+                depth=1,
+                log=lambda _m: None,
+            ),
+        ),
         daemon=True,
     )
     t.start()

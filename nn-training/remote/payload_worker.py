@@ -169,23 +169,25 @@ class _Engine:
 
 def _fill_once(engine: _Engine, cmd: dict[str, Any], stop: threading.Event) -> None:
     """跑一轮 `_prefetch_fill`（**唯一实现**在 `job_round`；本函数只做参数搬运与兜底）。"""
-    from remote.job_round import _prefetch_fill
+    from remote.job_round import PrefetchFillSpec, _prefetch_fill
 
     store = engine.store
     if store is None:  # pragma: no cover - `fill` 已挡在前面
         return
     try:
         _prefetch_fill(
-            str(cmd.get("base_url") or ""),
-            str(cmd.get("token") or ""),
-            store,
-            stop,
-            worker_id=str(cmd.get("worker_id") or ""),
-            role=str(cmd.get("role") or "online"),
-            depth=int(cmd.get("depth") or 0),
-            unpack_n=int(cmd.get("unpack_n") or 0),
-            skip={str(x) for x in (cmd.get("skip") or [])},
-            log=_log,
+            PrefetchFillSpec(
+                base_url=str(cmd.get("base_url") or ""),
+                token=str(cmd.get("token") or ""),
+                store=store,
+                stop=stop,
+                worker_id=str(cmd.get("worker_id") or ""),
+                role=str(cmd.get("role") or "online"),
+                depth=int(cmd.get("depth") or 0),
+                unpack_n=int(cmd.get("unpack_n") or 0),
+                skip={str(x) for x in (cmd.get("skip") or [])},
+                log=_log,
+            )
         )
     except BaseException as e:  # 填充腿是提前量：崩了也必须把原因说出来，而不是静默消失
         _log(f"★ 填充腿异常退出（{type(e).__name__}: {e}）——下一轮 fill 会重新拉起")

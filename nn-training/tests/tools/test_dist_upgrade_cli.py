@@ -58,13 +58,11 @@ def test_current_node_short_circuits(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_stale_node_maps_to_shared_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict = {}
 
-    def fake(
-        nid, url, auth, branch, ping_hash, timeout=20.0, dirty=None, expected_hash="",
-        cooldown_sec=None,
-    ):
+    def fake(spec):
         seen.update(
-            nid=nid, url=url, auth=auth, branch=branch, ping=ping_hash, dirty=dirty,
-            exp=expected_hash, cooldown=cooldown_sec,
+            nid=spec.nid, url=spec.url, auth=spec.auth_key, branch=spec.branch,
+            ping=spec.ping_hash, dirty=spec.dirty, exp=spec.expected_hash,
+            cooldown=spec.cooldown_sec,
         )
         return True, "restart-requested"
 
@@ -97,8 +95,8 @@ def test_self_node_skips_dirty_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     """self/回环节点：不探 dirty（同 remote.node_upgrade 语义），且分支必须置空（禁 pull）。"""
     seen: dict = {}
 
-    def fake(nid, url, auth, branch, *a, **k):
-        seen["branch"] = branch
+    def fake(spec):
+        seen["branch"] = spec.branch
         return True, "restart-requested"
 
     monkeypatch.setattr(remote.node_upgrade, "request_upgrade_guarded", fake)

@@ -139,11 +139,13 @@ def test_worker_loop_forwards_role(
     )
     import ast
 
+    # 2026-11-23（P0-3 批 E）：填充器的十个旋钮收成一个 `PrefetchFillSpec` —— 装配点仍是
+    # 「一句 kwargs 字典」，只是键现在挂在 spec 构造里（`role=` 必须在场）。
     assert any(
-        isinstance(n, ast.Dict)
-        and any(isinstance(k, ast.Constant) and k.value == "role" for k in n.keys)
+        isinstance(n, ast.Call)
+        and any(isinstance(k, ast.keyword) and k.arg == "role" for k in n.keywords)
         for n in ast.walk(ast.parse(src))
-    ), "预取线程的 kwargs 没带 role"
+    ), "预取 spec 没带 role"
 
     seen.clear()
     W.worker_loop(
