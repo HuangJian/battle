@@ -30,158 +30,18 @@ FUNC_LINE_LIMIT = 200
 PARAM_LIMIT = 8
 
 #: 存量：包含 >200 行函数的文件 → 该文件里这类函数的**个数**。
-#: 2026-11-19：**清零**（第 37 刀拆掉最后一个 `_remote_ppo_publish`）——此后任何 >200 行
-#: 函数都是新增，直接红。
-LONG_FUNCS_BASELINE: dict[str, int] = {
-    # 2026-11-19 合入上游 goal-nn（74 提交）时的存量：这三处是**上游的编排面**
-    # （采样节点主流程、评估节点门、BC epoch 循环），合并时只做了结构适配；
-    # 拆它们要按「独立所有者 + 独立触发条件」做，见 python.refactor.md §P0-2。
-    # （`common/task_client.fetch_task` 已按 P0-2/P0-3 拆成 `FetchTaskSpec` + `_task_params`，
-    # `fetch_task` 只剩传输编排 ⇒ 条目删除。）
-    # 2026-11-21：`worker/train/bc.py::_Train.run_epochs`（201 行）拆成
-    # `run_epochs`（63，只留 epoch 编排 / 历史 / 早停 / 断点 / 回调）+
-    # `_train_epoch`（79，训练内循环 + scheduler）+ `_validate`（65，验证与三个准确率）；
-    # `trainer/eval_dispatch._eval_admit`（248）拆成 `_eval_admit`（21，编排）+
-    # `_eval_eligible`（176，节点门那一大段能力位/fail-closed 判据）+
-    # `_eval_publish_weights`（47，冻结门 + 下发 + 窗口起算）+
-    # `_eval_local_fallback`（33，兜底唯一入口）；`remote/rollout_node.run`（249）拆成
-    # `run`（162，装配 + 三段编排）+ `_open_channel`（50，通道决策，返回生效的 hub_url）+
-    # `_supervise`（80，监护 while + 收线）。
-    # ⇒ **清零**：此后任何 >200 行函数都是新增，直接红。
-}
+#: 2026-11-19 **清零**（第 37 刀拆掉最后一个 `_remote_ppo_publish`）⇒ 此后任何 >200 行函数
+#: 都是新增，直接红。空表**不删**：将来真有一时拆不动的存量，加条目要写清日期 + 理由 + 守卫用例，
+#: 那时这张表才是唯一允许它存在的凭据（同 `L0_MUTABLE_ALLOWED` 的口径）。
+LONG_FUNCS_BASELINE: dict[str, int] = {}
 
 #: 存量：包含 >8 参数函数的文件 → 个数。
-WIDE_FUNCS_BASELINE = {
-    # 2026-11-22：`task_key` 的 5 个身份位 + 11 个同型开关收成 `TaskKeySpec`
-    # ⇒ 本文件宽签名归零，条目删除（守 `tests/common/test_task_key_spec.py`）。
-    # 2026-11-22（P0-3 批 B）：`OfflinePushDispatcher.__init__`(12) 与
-    # `_settle_assignment`(8) 分别收成 `OfflinePushSpec` / `SettlePlan` ⇒ 本文件宽签名归零，
-    # 条目删除；守 `tests/hub/test_push_spec.py`。
-    # 2026-11-21：`build_task_zip` 的 9 个关键字参数收成 `TaskZipSpec`
-    # ⇒ 本文件宽签名归零，条目删除。
-    # 2026-11-21：认领族（`claim` / `claim_outcome` / `_claim_locked`）的
-    # (job_id, ttl, worker, mode, epoch, role, capabilities) 收成一个 `LeaseSpec`
-    # ⇒ `hub/queue_claims.py` · `hub/queue_peer.py` · `hub/store.py` ·
-    # `hub/store_leases.py` 四个文件各 1/1/1/2 条宽签名归零，条目删除。
-    # P3 lazy loader 的装载参数（loader/gamma/lam/normalize/配额/mb/bundle）本就 >8。
-    # 2026-11-22（P0-3 批 C）：`_run_bc_job` 的 12 个关键字参数收成 `BcJobSpec`
-    # （L1 的 `remote/job_spec`；`job_shell` 装配，不许 import `bc_job`）
-    # ⇒ `remote/bc_job.py` 归零，条目删除；守 `tests/remote/test_bc_job_spec.py`。
-    # `remote/bundle.py` 已清零（P0-3 批 G2：`BundleSpec` / `ExportStatusSpec`）。
-    # `remote/colab_bc.py` 已清零（P0-3 批 C：`run_training` 的 10 个位置参数 → `TrainRun`）。
-    # `remote/error_report.py` 已清零（P0-3 批 F3：`report_error` → `ErrorReportSpec`）。
-    # 2026-11-23（P0-3 批 K）：`verify_and_land` / `verify_and_land_bc` 的 2 位置 + 7 关键字
-    # 各收成 `LandSpec` / `BcLandSpec`（frozen + kw_only，住 `remote/publish_spec.py`）——
-    # `result` 与 `manifest` 是两份**同型 dict**，位置互换不抛、只让三重校验全部失配
-    # ⇒ 本文件宽签名归零（发布腿已于 §324 搬去 `remote/hub_publish`），条目删除；
-    # 守 `tests/remote/test_land_specs.py`。
-    # `remote/hub_http.py` 已清零（P0-3 批 F4：`WaitJobSpec` / `HubFailSpec`）。
-    # 2026-11-23（P0-3 批 E）：`_prefetch_fill` 的 4 位置 + 6 关键字收成 `PrefetchFillSpec`
-    # ⇒ 本文件宽签名归零（`run_one_round` 早已收 `RoundSpec`），条目删除；守
-    # `tests/remote/test_remote_specs_batch_e.py`。
-    # 2026-11-23（P0-3 批 F）：`Lifecycle.__init__` 的 3 位置 + 8 关键字收成 `LifecycleSpec`
-    # （frozen + kw_only，住同模块）⇒ 本文件宽签名归零，条目删除；守
-    # `tests/remote/test_lifecycle_spec.py`。
-    # 2026-11-23（P0-3 批 E）：`request_upgrade_guarded` 的 5 位置 + 4 关键字收成 `UpgradeAsk`
-    # ⇒ 本文件宽签名归零，条目删除；守 `tests/remote/test_remote_specs_batch_e.py`。
-    # `remote/offline_deliver.py` 已清零（P0-3 第四十刀：`OfflineDelivererSpec`）。
-    # 2026-11-22（P0-3 第四十八刀）：`run_cloud_eval` 的 14 个关键字收成 `CloudEvalSpec`
-    # ⇒ 本文件宽签名归零，条目删除（守 `tests/remote/test_cloud_eval_spec.py`）。
-    # 2026-11-21：`_base_tar_bytes` / `_landed_bytes_for` 各 9 参 →
-    # `BaseTarSpec` / `LandedBytesSpec` ⇒ 本文件宽签名归零，条目删除。
-    # 2026-11-21：`pack_payload_zip` 的 9 个参数收成 `PackSpec`
-    # ⇒ 本文件宽签名归零，条目删除。
-    # 2026-11-23（P0-3 批 F）：`PayloadProcess.start_fill` 的 8 个关键字收成 `FillAsk`
-    # ⇒ 本文件宽签名归零，条目删除；守 `tests/remote/test_prefetch_proc.py`（⑤ 三条）。
-    # 2026-11-22（P0-3 批 B）：`submit_job` 的 8 参收成 `(base_url, token, JobUpload)`；
-    # `PushDispatcher.__init__`(11) / `_await_result`(8) 收成 `PushDispatchSpec` / `JobLeg`；
-    # `Registry.__init__`(9) 收成 `RegistrySpec` ⇒ 三个条目删除；守 `tests/hub/test_push_spec.py`。
-    # 2026-11-19 合入上游：`run` 的交易参数 + relay 通道参数（原 1 处 → 2 处）。
-    # 2026-11-23（P0-3 批 E）：`_try_register_once` 的 9 个关键字收成 `RegisterAsk`
-    # ⇒ 本文件宽签名归零（`BannerSpec` 于批 F1 收掉另一处），条目删除；守同批用例。
-    # `remote/tailscale_boot.py` 已清零（P0-3 批 F2：`fetch_guarded` → `FetchSpec`）；
-    # 注意 `GLOBAL_BASELINE` 里另有该文件的 1 条 `global` 存量（与本表无关，本次未动）。
-    # `remote/upload_proc.py` 已清零（P0-3 批 G：`UploaderProcess.__init__` 与 `make_uploader`
-    # 共用一份 `UploadSpec`）；守 `tests/remote/test_upload_spec.py`。
-    # `remote/worker.py` 已清零（P0-3 第四十四刀：`worker_loop` 收 `WorkerLoopSpec`、
-    # `run_job`(17) 收 `RunJobSpec`）；守 `tests/remote/test_run_job_spec.py`。
-    # `tools/c9_critic_calibration.py` 已清零（P0-3 批 H：`build_report` → `CriticReportSpec`）；
-    # 与 `p0_auc_probe` 同一个守卫 `tests/tools/test_report_specs.py`。
-    # `tools/p0_auc_probe.py` 已清零（P0-3 批 H：`build_report` → `AucReportSpec`）。
-    # `tools/tpu-probe.py` 已清零（P0-3 批 H2：`bench_case` → `BenchCaseSpec`）。
-    #: 2026-11-20：`_settle_unit` 的 15 参收成 `(self, ledger)`，通道机器搬去
-    #: `trainer/batch_lanes.py` ⇒ 本文件 3 → **2**（新家没有新增宽签名）。
-    #: 2026-11-22（P0-3 第四十三刀）：`BatchEvalRunner.__init__`(16) 与 `dispatch_batch_bg`(13)
-    #: 共收 `RunnerSpec` ⇒ 本文件清零，条目删除；守 `tests/trainer/test_runner_spec.py`。
-    "trainer/bc_ingest.py": 0,
-    # `trainer/bc_loop.py` 已清零（P0-3 批 C：`publish_bc_job` 的 12 个关键字 →
-    # `PublishBcSpec`）；守 `tests/trainer/test_publish_bc_spec.py`。
-    # `trainer/dispatch.py` 已清零（P0-3 第三十九刀：`DispatchSpec`）。
-    # `trainer/dispatch_queue.py` 已清零（P0-3 第三十九刀：`DispatchSpec`）。
-    # `trainer/loop_transport.py` 已清零（P0-3 批 D：`_push_job_round` 的 10 个形参 →
-    # `PushJobRoundSpec`）；守 `tests/trainer/test_push_round_spec.py`。
-    # 2026-11-21：`reap_alloc_timeouts` 的 9 个关键字参数收成 `ReapSpec`
-    # ⇒ 本文件宽签名 2 → 1（剩 `__init__`），基线只许继续调小。
-    "trainer/queue_local.py": 1,
-    # 2026-11-22（P0-3 第三十四刀）：`dispatch_rollout_phase` 的 25 个参数收成
-    # `RolloutPhaseSpec` ⇒ 本文件宽签名归零，条目删除。
-    # `trainer/stream.py` 已清零（P0-3 第三十五刀：`StreamRunSpec`）。
-    # 2026-11-22（P0-3 第三十三刀）：`dispatch_bc_corpus` 的 25 个关键字参数收成
-    # `BcDispatchSpec` ⇒ 本文件宽签名归零，条目删除。
-    # `worker/bc_eval.py` 已清零（P0-3 批 C：`dispatch_bc_eval` 的 12 个关键字 →
-    # `BcEvalSpec`）；守 `tests/worker/test_bc_eval_spec.py`。
-    # `worker/breaker.py` 已清零（P0-3 批 D2：`breaker_update` → `BreakerSpec`）。
-    # `worker/cmd.py` 已清零（P0-3 批 D2b：`build_rollout_cmd` → `RolloutCmdSpec`）。
-    # 2026-11-20（python.refactor.md P0-3 第一/二刀）：`EvalRound.__init__` 的 40 个关键字
-    # 参数收进 `RoundSpec`（装配点 = `trainer/eval_dispatch._round_spec`），`settle_task`
-    # 的 9 个结果位（含一个从没人读的 `wall_sec`）收进 `SettleOutcome` ⇒ **条目删除，
-    # 本文件宽签名归零**。守 `tests/worker/test_eval_round_spec.py`。
-    # 2026-11-21（P0-3 第七刀）：`run_local_eval_game`（25 参，全仓最宽）收成
-    # `EvalGameSpec` ⇒ 条目删除，本文件宽签名归零。
-    # `worker/eval_track.py` 已清零（P0-3 第三十六刀：`EvalSettleSpec`）。
-    # 2026-11-23（P0-3 批 I）：`evaluate` 的 5 位置 + 4 关键字收成 `GateAsk`（frozen + kw_only，
-    # 住同模块）—— 60 处调用点里 57 处只写 `course, rows`，位置面一泄露（`evaluate(rows, course)`）
-    # 不抛，只静默 HOLD；`override`/`only_kinds` 与 `course_fp`/`decider` 两对相邻位也随之按名字。
-    # ⇒ 本文件宽签名归零，条目删除；守 `tests/worker/test_gate_ask.py`。
-    # `worker/greedy_round.py` 已清零（P0-3 批 D：`run_greedy_round` 的 12 个关键字 →
-    # `GreedyRoundSpec`）；守 `tests/worker/test_greedy_round_spec.py`。
-    # 2026-11-23（P0-3 批 E）：`_run_one_game_bounded` 的 10 个逐字副本字段改成直接收
-    # `RetryGameSpec`（§279 先例）+ 关键字 `ceiling_sec` ⇒ 2 → 1；守
-    # `tests/worker/test_one_game_bounded_spec.py`。
-    # 2026-11-23（P0-3 批 J）：`run_iter_rollout` 的 2 位置 + 7 关键字收成 `IterRunSpec`
-    # （frozen + kw_only，住 `worker/iter_run.py` —— `IterRun` 的家，`from_spec` 是唯一搬运）
-    # ⇒ 本文件宽签名归零，条目删除；守 `tests/worker/test_iter_run_spec.py`。
-    # 2026-11-23（P0-3 批 C2）：`StudentNet` / `PPOStudent` 的 9 个构造旋钮（torch / paddle 双生）
-    # 收成一个 `NetSpec`（frozen + kw_only，住 `worker/models/arch_meta.py`；`read_arch_kwargs`
-    # 随之改成返回 spec 的 `read_arch_spec`）⇒ `worker/models/student.py` 与
-    # `worker/models/student_paddle.py` 两个条目删除（各 1 个宽签名，该两文件归零）；
-    # 守 `tests/worker/test_net_spec.py`。
-    # 2026-11-22（P0-3 第四十七刀）：`build_plan` 的 1 位置 + 13 关键字收成 `PlanSpec`
-    # ⇒ 本文件宽签名归零，条目删除（守 `tests/worker/test_plan_spec.py`）。
-    # 2026-11-22（P0-3 第四十二刀）：`ppo_update` 的 20 个参数（Paddle 21）收成
-    # `TorchUpdateSpec` / `PaddleUpdateSpec`（共用 `BaseUpdateSpec`）⇒ 两个条目删除；
-    # 守 `tests/worker/test_ppo_update_spec.py`。
-    # 2026-11-22（P0-3 第四十九刀 A 批）：两个头入口的 13 个形参收成 `HeadUpdateSpec`
-    # （入口只收一份 spec，`update` 端口仍是 5 位置 + `**update_kwargs`）⇒ 两个条目删除；
-    # 守 `tests/worker/test_ppo_loop_core.py`（字段表 + 端口可绑定性）与
-    # `tests/worker/test_ppo_loop_spec.py`（`to_ppo` 逐个搬运 15 个旋钮）。
-    # 2026-11-22（P0-3 第四十六刀）：`run_ppo` 的 15 个形参收成 `PPOSpec`，本文件宽签名归零，
-    # 条目删除。B8 ④（2026-11-19）曾特意摊开签名，但两个入口本来就各自手抄同一张旋钮表
-    # （漏抄一个不报错）—— 契约改钉在 `tests/worker/test_ppo_loop_spec.py` 的字段表上。
-    # 2026-11-22（P0-3 第四十九刀 A 批）：`load_episodes_common` 的 13 个参数收成
-    # `LoadEpisodesSpec` ⇒ 本文件宽签名归零，条目删除；守 `tests/worker/test_load_episodes_spec.py`。
-    # 2026-11-22（P0-3 批 D 待办）：`merge_memory_shards`(3 位置 + 6 关键字) 收 `ShardMergeSpec`
-    # 的改法已写通，但**卡在调用方的 LOC 墙**：`remote/hub_client.py` 恰好 999/1000，
-    # 单对象构造最少 +1 行（§230 同款先例 = 先拆模块，再收签名）。拆完再动，本节不动。
-    # 2026-11-23（P0-3 批 K）：`merge_memory_shards` 的 3 位置 + 6 关键字收成 `ShardMergeSpec`
-    # （frozen + kw_only，同模块）—— `cands`（已收集）与 `mem`（回传账）同型外层字典，
-    # 互换后「同名以盘上为准」反着生效（回传账被当成已收集 ⇒ 一个 shard 都不补）
-    # ⇒ 本文件宽签名归零，条目删除（§307 记的「先拆再收」在这里结账）；守同上。
-    # 2026-11-21：`quota_sample_priority` 的 9 个位置参数收成 `QuotaSampleSpec`
-    # ⇒ 本文件宽签名归零，条目删除。
-    # 2026-11-21：`plan_topup` 的 9 个关键字参数收成 `TopUpSpec`
-    # ⇒ 本文件宽签名归零，条目删除。
-}
+#: 2026-11-23 **清零**：`python.refactor.md` §P0-3 的最后三条（`verify_and_land` /
+#: `verify_and_land_bc` / `merge_memory_shards`）收成 `LandSpec` / `BcLandSpec` / `ShardMergeSpec`
+#: 之后，全仓已无 >8 参函数 ⇒ 此后任何一处都是新增，直接红。加条目的规矩同上
+#: （日期 + 理由 + 守卫用例）；「哪一刀收了哪份签名」的历史见 `python.refactor.md` §P0-3 的批表
+#: 与 `docs/nn/engineering.md` §229–§327，不再往本文件抄一遍。
+WIDE_FUNCS_BASELINE: dict[str, int] = {}
 
 #: `common/` 里**允许**在运行期被改写的模块级容器（P0-5 的存量，拆完即删）。
 #: 2026-11-13：`log` / `fs` / `weights_ledger` 已改成显式对象（`LogRouter` / `JsonlLedger` /
