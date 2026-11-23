@@ -237,8 +237,8 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
 
 * **现状**：生产包 **0 个函数 > 200 行**、**0 个函数 > 8 参**（`tests/test_python_shape_budget.py` 的
   `LONG_FUNCS_BASELINE` / `WIDE_FUNCS_BASELINE` 两张表都已清空，空表保留只为「再进一个存量要写理由」）；
-  > 150 行 **72** 个、> 100 行 **182** 个（共 5,301 个函数）。表里 9 行全部落地，包括
-  `tools/paired_power.py main` 已从 625 行降到 **35** 行。
+  > 150 行 **72** 个、> 100 行 **182** 个（共 5,301 个函数）。表里 9 行全部落地：
+  `dispatch._run` 1184 → 编排 ~30、`tools/paired_power.py main` 625 → **35**，其余落点见上表右侧备注。
 * **第 4 条只落了一半**：门禁是 **200 行 / 8 参**，本节要的是「>120 行 / CC>40 / 参数>7 直接红」；
   **圈复杂度至今没有测量口径**，所以「CC 190」这类读数无法被门禁复现。要收紧阈值，先补 CC 的度量
   （`radon` 之类的新依赖按 §C 记账）与按文件冻结的基线，再动线 —— 否则只是把阈值写进文档。
@@ -250,8 +250,8 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
   | `hub/queue_offline.py::offline_tasks` | 197 | 793/1000 | 可切：hub 侧离线队列的「领任务 / 发 blob / 收工」三相，但文件只剩 207 行预算，切出来要**搬模块**（同 §295 手法），不是纯方法拆分 |
   | `remote/http.py::_get_with_retry` | 190 | 512/1000 | 收益递减：重试循环与错误映射能分开，但 §265 刚把它收成 `WireGet`，再拆只是换形状、不减路径 |
 
-* **不动的**：`tools/*.main`（`paired_power` / `tpu-probe` / `wave2_judge`，186–195 行）按本节早先的口径
-  「一次性工具、可接受度略高」保留 —— 它们没有第二个消费者，拆开只会多一层只有自己用的私有函数。
+* **不动的**：`tools/*.main`（`tpu-probe` 183 行 / `wave2_judge` 189 行）按本节早先的口径「一次性工具、
+  可接受度略高」保留 —— 它们没有第二个消费者，拆开只会多一层只有自己用的私有函数。
 
 **为什么这是问题**
 
