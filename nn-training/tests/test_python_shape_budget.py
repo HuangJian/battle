@@ -2,9 +2,12 @@
 
 两条护栏，都是「**存量按文件冻结、新增即红**」的口径：
 
-1. **函数形状**：单个函数 > 200 行、或参数（posonly + args + kwonly）> 8 个。
-   为什么粒度是「文件」而不是「函数名」：函数名会随重构改，文件路径稳定；存量计数
-   已经是最松的判定——只要不再变胖就绿，降下来之后可以随时把基线调低。
+1. **函数形状**：单个函数 > 150 行（存量闸）、> 200 行（硬顶，零容忍）、或参数
+   （posonly + args + kwonly）> 8 个。为什么粒度是「文件」而不是「函数名」：函数名会随重构改，
+   文件路径稳定；存量计数已经是最松的判定——只要不再变胖就绿，降下来之后把基线调低。
+   **两道线必顶并存**（2026-11-23）：150 是预警圈（存量冻结、降了就改基线），200 是硬顶
+   （任何文件都不许有）—— 只留 150 会让「151 → 199」在已登记的文件里悄忆长胖，
+   只留 200 则正是下面 §2026-11-23 那段记录的坑。
 2. **L0 纯度**：`common/**` 的模块级容器只有在**运行期会被改写**时才算违规；只读常量表
    （`KIND_TEXT`、`schema.*`）合法。判定 = 该名字出现在 `global` 语句，被 `.append/.update/…`
    改写，或被下标赋值/删除。
@@ -17,6 +20,7 @@ from __future__ import annotations
 import ast
 from functools import lru_cache
 from pathlib import Path
+from typing import NamedTuple
 
 from tests.helpers import source_scan
 
@@ -26,14 +30,87 @@ ROOT = Path(__file__).resolve().parents[1]
 PROD_DIRS = ("biz", "common", "hub", "remote", "train", "trainer", "tools", "worker")
 
 #: 阈值（`python.refactor.md` §P0-2 / §P0-3）。**只许收紧。**
-FUNC_LINE_LIMIT = 200
+#: 2026-11-23 从 200 收到 **150**，同时保留 200 作硬顶 —— 诱因是 `worker/train/bc_paddle.py`
+#: 的 `run_epochs` 恰好 200 行：判据是 `> 200`，所以它一次都没被这条闸看见过。贴着阈值的
+#: 函数给自己发「还没坏」的通行证，而它里面照旧塞着三件事（engineering §328）。
+FUNC_LINE_LIMIT = 150
+FUNC_LINE_HARD_LIMIT = 200
 PARAM_LIMIT = 8
 
-#: 存量：包含 >200 行函数的文件 → 该文件里这类函数的**个数**。
+#: 硬顶：包含 >200 行函数的文件 → 该文件里这类函数的**个数**。
 #: 2026-11-19 **清零**（第 37 刀拆掉最后一个 `_remote_ppo_publish`）⇒ 此后任何 >200 行函数
 #: 都是新增，直接红。空表**不删**：将来真有一时拆不动的存量，加条目要写清日期 + 理由 + 守卫用例，
 #: 那时这张表才是唯一允许它存在的凭据（同 `L0_MUTABLE_ALLOWED` 的口径）。
-LONG_FUNCS_BASELINE: dict[str, int] = {}
+LONG_FUNCS_HARD_BASELINE: dict[str, int] = {}
+
+#: 存量：包含 >150 行函数的文件 → 个数（2026-11-23 阈值 200 → 150 当天实测 **71 个 / 60 文件**）。
+#: 这张表是**预警圈**而不是清零目标：150~200 行的函数大多是「一个循环 + 三段收尾」，拆它们
+#: 要先想清楚接缝（`bc._Train.run_epochs` 就是照这个思路拆的，engineering §252/§328）。规矩三条：
+#: ① **只减不增**（新文件出现 = 直接红）；② **降了就往下改**（`test_long_funcs_baseline_is_current`
+#: 要求逐文件相等，防「表比现实松」）；③ 真要先加一格，写清日期 + 理由 + 守卫用例。
+#: 注：`remote/offline_boot.py` 是生成物（12 段 `.pyfrag` 拼回，工程 §118）——它那 5 个要改分片。
+LONG_FUNCS_BASELINE: dict[str, int] = {
+    "hub/boot.py": 1,
+    "hub/offline.py": 1,
+    "hub/queue_offline.py": 1,
+    "hub/smoke_loopback.py": 1,
+    "hub/store_offline.py": 1,
+    "remote/bc_job.py": 1,
+    "remote/deliver_worker.py": 1,
+    "remote/deliver_zip.py": 1,
+    "remote/http.py": 1,
+    "remote/hub_publish.py": 1,
+    "remote/job_round.py": 1,
+    "remote/offline_boot.py": 5,
+    "remote/offline_deliver.py": 2,
+    "remote/offline_eval.py": 1,
+    "remote/offline_push.py": 1,
+    "remote/plan_handoff.py": 2,
+    "remote/plan_run.py": 1,
+    "remote/push_client.py": 1,
+    "remote/push_dispatch.py": 1,
+    "remote/rollout_node.py": 1,
+    "remote/rollout_relay.py": 1,
+    "remote/run_loop.py": 1,
+    "remote/worker.py": 2,
+    "remote/worker_server.py": 1,
+    "tools/bootstrap.py": 1,
+    "tools/lever_scan.py": 1,
+    "tools/spatial-probe.py": 1,
+    "tools/tpu-probe.py": 1,
+    "tools/wave2_judge.py": 1,
+    "trainer/batch_lanes.py": 1,
+    "trainer/batch_runner.py": 1,
+    "trainer/bc_loop.py": 1,
+    "trainer/dispatch_state.py": 1,
+    "trainer/eval_a_once.py": 1,
+    "trainer/eval_course_once.py": 1,
+    "trainer/eval_dispatch.py": 2,
+    "trainer/loop_core.py": 1,
+    "trainer/loop_remote_job.py": 2,
+    "trainer/loop_serve.py": 1,
+    "trainer/loop_volume.py": 2,
+    "trainer/queue_local.py": 1,
+    "trainer/queue_worker.py": 1,
+    "trainer/rollout_phase.py": 1,
+    "trainer/run_rl_cluster.py": 1,
+    "trainer/stream.py": 1,
+    "worker/bc_collect.py": 1,
+    "worker/bc_dispatch.py": 2,
+    "worker/bc_eval.py": 1,
+    "worker/cli.py": 1,
+    "worker/eval_replays_once.py": 1,
+    "worker/eval_track.py": 1,
+    "worker/gate_check.py": 1,
+    "worker/greedy_round.py": 1,
+    "worker/iter_rollout.py": 1,
+    "worker/loop_guards_leg.py": 1,
+    "worker/model_build.py": 1,
+    "worker/ppo/backend.py": 1,
+    "worker/scripts/eval_intent_m5.py": 1,
+    "worker/train/bc.py": 1,
+    "worker/train/intent_probe.py": 1,
+}
 
 #: 存量：包含 >8 参数函数的文件 → 个数。
 #: 2026-11-23 **清零**：`python.refactor.md` §P0-3 的最后三条（`verify_and_land` /
@@ -94,14 +171,25 @@ def _tree(p: Path) -> ast.AST:
     return ast.parse(source_scan.read_text(str(p), "replace"), filename=str(p))
 
 
-@lru_cache(maxsize=1)
-def _shape_counts() -> tuple[dict[str, int], dict[str, int], int, dict[str, int]]:
-    """`(长函数计数, 宽参数计数, 函数总数, global 语句计数)`；全进程只扫一次。
+class Shape(NamedTuple):
+    """一次扫描的全部读数（同一次 `ast.walk` 的四项）。"""
 
-    四项共用**同一次** `ast.walk`：`global` 那项原来自己又 `rglob` + 解析了一遍整棵生产树
-    （2026-11-20 实测本文件 2.6s → 1.4s）。
+    long_: dict[str, int]
+    hard: dict[str, int]
+    wide: dict[str, int]
+    total: int
+    globs: dict[str, int]
+
+
+@lru_cache(maxsize=1)
+def _shape_counts() -> Shape:
+    """`(>150 行, >200 行, 宽参数, 函数总数, global)` 按文件计数；全进程只扫一次。
+
+    五项共用**同一次** `ast.walk`：`global` 那项原来自己又 `rglob` + 解析了一遍整棵生产树
+    （2026-11-20 实测本文件 2.6s → 1.4s）；150/200 两道线也共用这一次。
     """
     long_: dict[str, int] = {}
+    hard: dict[str, int] = {}
     wide: dict[str, int] = {}
     globs: dict[str, int] = {}
     total = 0
@@ -120,11 +208,13 @@ def _shape_counts() -> tuple[dict[str, int], dict[str, int], int, dict[str, int]
             nparams = len(args.posonlyargs) + len(args.args) + len(args.kwonlyargs)
             if length > FUNC_LINE_LIMIT:
                 long_[rel] = long_.get(rel, 0) + 1
+            if length > FUNC_LINE_HARD_LIMIT:
+                hard[rel] = hard.get(rel, 0) + 1
             if nparams > PARAM_LIMIT:
                 wide[rel] = wide.get(rel, 0) + 1
         if n_globals:
             globs[rel] = n_globals
-    return long_, wide, total, globs
+    return Shape(long_, hard, wide, total, globs)
 
 
 def _growth(actual: dict[str, int], baseline: dict[str, int]) -> dict[str, tuple[int, int]]:
@@ -186,16 +276,16 @@ def _mutated_names(tree: ast.AST) -> set[str]:
 
 def _globals() -> dict[str, int]:
     """每个生产文件的 `global` 语句数（派生自 `_shape_counts` 的同一次扫描）。"""
-    return _shape_counts()[3]
+    return _shape_counts().globs
 
 
 # ── 护栏本体 ───────────────────────────────────────────────────────────────
 
 
 def test_no_new_long_functions() -> None:
-    long_, _, total, _ = _shape_counts()
-    assert total >= 4000, f"只扫到 {total} 个函数——扫描入口坏了（ROOT={ROOT}）"
-    over = _growth(long_, LONG_FUNCS_BASELINE)
+    shape = _shape_counts()
+    assert shape.total >= 4000, f"只扫到 {shape.total} 个函数——扫描入口坏了（ROOT={ROOT}）"
+    over = _growth(shape.long_, LONG_FUNCS_BASELINE)
     detail = "\n".join(f"  {rel}: {n} 个（基线 {base}）" for rel, (n, base) in over.items())
     assert not over, (
         f"以下文件新增了 >{FUNC_LINE_LIMIT} 行的函数：\n{detail}\n"
@@ -204,9 +294,33 @@ def test_no_new_long_functions() -> None:
     )
 
 
+def test_long_funcs_baseline_is_current() -> None:
+    """存量表必须贴着实测：降下来不往下改 ⇒ 闸门比现实松一格，下一个人泄了也不会红。"""
+    actual = _shape_counts().long_
+    stale = {
+        rel: (n, actual.get(rel, 0))
+        for rel, n in sorted(LONG_FUNCS_BASELINE.items())
+        if actual.get(rel, 0) != n
+    }
+    detail = "\n".join(f"  {rel}: 基线 {n} · 实测 {now}" for rel, (n, now) in stale.items())
+    assert not stale, (
+        f"`LONG_FUNCS_BASELINE` 与实测对不上（> {FUNC_LINE_LIMIT} 行）：\n{detail}\n"
+        "  降了就往下改（归零的条目删掉）；变胖了才是真回归。"
+    )
+
+
+def test_no_function_over_hard_cap() -> None:
+    """200 行硬顶：任何文件都不许有，没有存量豁免。"""
+    over = _growth(_shape_counts().hard, LONG_FUNCS_HARD_BASELINE)
+    detail = "\n".join(f"  {rel}: {n} 个（基线 {base}）" for rel, (n, base) in over.items())
+    assert not over, (
+        f"以下文件有 >{FUNC_LINE_HARD_LIMIT} 行的函数：\n{detail}\n"
+        "  硬顶不设存量（曾于 2026-11-19 清零，engineering §254）；先拆再接新活。"
+    )
+
+
 def test_no_new_wide_functions() -> None:
-    _, wide, _, _ = _shape_counts()
-    over = _growth(wide, WIDE_FUNCS_BASELINE)
+    over = _growth(_shape_counts().wide, WIDE_FUNCS_BASELINE)
     detail = "\n".join(f"  {rel}: {n} 个（基线 {base}）" for rel, (n, base) in over.items())
     assert not over, (
         f"以下文件新增了 >{PARAM_LIMIT} 个参数的函数：\n{detail}\n"

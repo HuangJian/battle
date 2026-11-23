@@ -29,6 +29,43 @@
 
 ---
 
+## §329 形状门禁收紧到 **150 行**：200 当硬顶、150 当存量闸（71 个 / 60 文件）（2026-11-23）
+
+`FUNC_LINE_LIMIT` 从 200 收到 150。诱因是 §328：`bc_paddle._Train.run_epochs` **恰好 200 行**，
+判据是 `> 200`，于是它一次都没被这条闸看见过 —— 「贴着阈值的函数」会拿到一张「还没坏」的通行证，
+而它里面照旧塞着三件事。这不是孤例：收紧前全仓 150~200 行有 **71 个函数 / 60 个文件**，
+全部在门禁视野之外。
+
+**两条线并存（只留一条都会留一个洞）**
+
+| 线 | 常量 | 基线 | 语义 |
+|---|---|---|---|
+| 预警圈 | `FUNC_LINE_LIMIT = 150` | `LONG_FUNCS_BASELINE`（71 / 60，逐文件计数） | 存量冻结、新增即红 |
+| 硬顶 | `FUNC_LINE_HARD_LIMIT = 200` | `LONG_FUNCS_HARD_BASELINE`（空表） | 任何文件都不许有，无豁免 |
+
+* 只留 150 + 空基线 ⇒ 一次红 71 处，等于逼人「要么别提交，要么抬基线」，最后一定会抬；
+* 只留 150 + 存量表、砍掉硬顶 ⇒ 已登记的文件里 151 → 199 悄悄长胖也不红（旧的 200 零容忍恰好挡这一手）；
+* 只留 200 ⇒ 就是本文开头那个洞。
+
+**第三条判据：存量表必须贴着实测**（`test_long_funcs_baseline_is_current`，逐文件严格相等）。
+「只减不增」的老写法只防增长，降下来不往下改不会红 ⇒ 表比现实松一格，下一个人正好在那一格里长胖。
+代价是：真把某个 150+ 函数拆了，同一次提交要把那一格往下调（归零就删条目）—— 这正是想要的手感。
+
+**存量分布**（2026-11-23 实测 71 / 60）：最长的 5 个是 `hub/queue_offline.offline_tasks`
+**197** · `worker/scripts/eval_intent_m5.main` 195 · `trainer/run_rl_cluster.main` 194 ·
+`trainer/loop_remote_job._remote_ppo_publish` / `remote/worker_server.make_worker_server` /
+`remote/offline_push.run_push` / `remote/offline_boot._run_auto` 各 190~191。
+`remote/offline_boot.py` 占 5 格，但它是**生成物**（12 段 `.pyfrag` 拼回，§118）—— 拆它要改分片再重建。
+
+**四向证伪（实测）**：新建 `worker/_tmp_shape_probe.py`（160 行函数）⇒ >150 判据红；
+再建 220 行的 ⇒ 150 与硬顶两条同时红；把 `"hub/ghost.py": 1` 塞进存量表 ⇒ 「表与实测对不上」红；
+撤掉探针后 8 条全绿。
+
+**门禁**：nn `7009 passed / 3 skipped`（69.2s）。顺带记一笔：`BASELINE_SRC` 1236 → **1239**
+（三条新判据所在文件本来就带 `*.py` 字面量，口径 B 连坐；判据本身全是 AST）。
+
+---
+
 ## §328 BC 双生的第二半：`bc_paddle._Train.run_epochs`（200 → 57 + 56 + 73 + 22）（2026-11-23）
 
 §252 只拆了 torch 侧。paddle 侧一直是 200 行——**恰好压在 >200 行门禁的线上**（判据是 `> 200`，
@@ -62,7 +99,8 @@
 * `BASELINE_SRC` 1228 → **1236**（+8）：新守卫文件带两个 `.py` 字面量 ⇒ 口径 B 把它的 8 条断言
   全计成「生产源码文本断言」。判据本身是 AST（循环层数 / 接缝行数），没有一条在比措辞。
 
-`LONG_FUNCS_BASELINE` / `WIDE_FUNCS_BASELINE` 早就是空表，本次不动（两张表仍是 `{}`）。
+`LONG_FUNCS_HARD_BASELINE`（>200 行）/ `WIDE_FUNCS_BASELINE` 早就是空表，本次不动。
+（>150 行的存量表是第二天才有的，见 §329。）
 
 **门禁**：nn `7007 passed / 3 skipped`（68.3s）。**行为差异：无**。
 

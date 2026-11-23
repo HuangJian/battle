@@ -176,6 +176,7 @@ nn-training/.venv/bin/python tmp/py-clones.py
 |------|-----:|
 | > 200 行 | **45** → **0** |
 | > 100 行 | **161** → **182** |
+| > 150 行 | 未计 → **71**（2026-11-23 起为存量闸，见 engineering §329） |
 | 参数 > 8 个 | **124** → **0** |
 | 带 `**kwargs` | 37 → 36 |
 | 签名里出现 `Any` | **316**（口径未复核；G14 的另一个口径是 1,211 处 / 185 文件） |
@@ -328,6 +329,9 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
   > 2026-11-23 又收一处**贴着阈值**的：`worker/train/bc_paddle.py::run_epochs` 恰好 200 行
   > （门禁判据是 `> 200`），照 torch 双生的三道接缝拆成 57 / 56 / 73 / 22，并新增
   > `tests/worker/test_bc_epoch_seams.py` 钉「两个后端必须同形」（engineering §328）。
+  > 同日起门禁再收紧一档：**> 150 行**进入存量闸（71 个 / 60 文件冻结、新增即红），
+  > **> 200 行**仍是零容忍硬顶（engineering §329）—— 150~200 那档正是上面这种
+  > 「贴着阈值」的函数聚集的地方。
 
 **为什么这是问题**
 

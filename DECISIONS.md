@@ -10500,5 +10500,23 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   全 skip），守卫也就跟着 skip，等于没写。
 - **两笔预算**：`BASELINE_SAME_NAME_GE3` 145 → 146（`_validate` 出现在三个模块，是同形而非抄写）·
   `BASELINE_SRC` 1228 → 1236（口径 B 把带 `.py` 字面量的新文件全部断言计入；判据本身是 AST）。
-- **验证**：nn `7007 passed / 3 skipped`；`LONG_FUNCS_BASELINE` / `WIDE_FUNCS_BASELINE` 仍是空表。
+- **验证**：nn `7007 passed / 3 skipped`；`LONG_FUNCS_HARD_BASELINE` / `WIDE_FUNCS_BASELINE` 仍是空表。
   全文 → `docs/nn/engineering.md` §328。
+
+## §2026-11-23-long-function-150-gate
+
+- **背景**：`bc_paddle._Train.run_epochs` 恰好 200 行，而形状门禁判据是 `> 200` ⇒ 它一次都没红过
+  （engineering §328）。收紧前 150~200 行的函数有 **71 个 / 60 个文件**，全在门禁视野外 ——
+  门槛设成整数，生产代码就会在整数下沿堆积。
+- **决定**：`FUNC_LINE_LIMIT` 200 → **150**，同时保留 `FUNC_LINE_HARD_LIMIT = 200` 作硬顶。
+  150 用**逐文件存量表**（`LONG_FUNCS_BASELINE`，71/60，2026-11-23 实测）；200 仍是零容忍
+  （`LONG_FUNCS_HARD_BASELINE = {}`）。再加一条 `test_long_funcs_baseline_is_current`：
+  存量表与实测**逐文件相等** —— 「只减不增」只防增长，降下来不往下改就会让表比现实松一格。
+- **被否决**：① 150 + 零容忍 —— 一次红 71 处，只剩「别提交」和「抬基线」两条路，而抬基线会让闸更松；
+  ② 只留 150 存量表、砍掉 200 硬顶 —— 已登记文件里 151 → 199 长胖不红（正是这次要堵的洞的另一半）；
+  ③ 按函数名冻结 —— 改名即失效，文件路径才稳；④ 用圈复杂度/认知复杂度替代行数 ——
+  本仓没有 CC 工具，行数是唯一能逐位复算、跨人跨机一致的读数（§P0-2 复核里记过这一点）。
+- **代价**：真拆了一个 150+ 函数，同一次提交要把那一格往下调（归零删条目）。
+- **验证**：nn `7009 passed / 3 skipped`；四向证伪见 engineering §329（160 行新文件红 / 220 行连
+  硬顶一起红 / 幽灵表项红 / 撤探针后全绿）。`BASELINE_SRC` 1236 → 1239（口径 B 连坐）。
+  全文 → `docs/nn/engineering.md` §329。
