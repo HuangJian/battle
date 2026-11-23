@@ -26,6 +26,8 @@ from typing import Any
 
 import pytest
 
+from remote.hub_publish import PublishSpec, publish_job
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -1082,7 +1084,6 @@ def test_trainer_publish_with_dispatch_flag_flows_through_hub_push(
     hub 的认领判据（`push_job_wants_hub_push`）必须是同一个值——写错一处就是 job 永远
     躺在队首（训练侧一直等、hub 一直不动，而两边日志都很安静）。
     """
-    from remote.hub_client import PublishSpec, publish_job
 
     w1 = worker_factory()
     wfile = tmp_path / "init_weights.json"

@@ -28,6 +28,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from remote.hub_publish import PublishSpec, publish_job
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -194,7 +196,6 @@ def test_land_falls_back_to_the_old_form_when_the_sender_ignores_the_bit(tmp_pat
 
 def _publish(tmp_path: Path, *, it: int = 1, wfile: str | Path | None = None) -> dict:
     """`wfile=None` = 现造一份真的 init 权重；`wfile=""` = **没有** init 字节（首轮 / 旧路径）。"""
-    from remote.hub_client import PublishSpec, publish_job
     from tests.helpers.publish_spec import publish_fields
 
     if wfile is None:

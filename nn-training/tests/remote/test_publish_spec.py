@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from remote.hub_client import PublishSpec, publish_job
+from remote.hub_publish import publish_job
 from tests.helpers.publish_spec import make_spec
 
 
@@ -49,3 +49,19 @@ def test_field_kwargs_are_rejected() -> None:
     """唯一入口是对象：旧的 `publish_job(it=1, ...)` 形态必须响亮失败。"""
     with pytest.raises(TypeError):
         publish_job(it=1)  # type: ignore[call-arg]
+
+
+def test_publish_leg_has_no_facade_in_hub_client() -> None:
+    """发布腿住在 `remote.hub_publish`，`remote.hub_client` **不留转发名**（2026-11-23）。
+
+    hub_client 站在 hub_publish **下面**（L1 vs L2）：留个 `from remote.hub_publish import …`
+    就是环，留个惰性转发则是白给的第二入口 —— 两种都会被这条用例点名。调用点一律直连新模块。
+    """
+    import remote.hub_client as hub_client
+    import remote.hub_publish as hub_publish
+
+    moved = {"PublishSpec", "PublishFacts", "PublishStaged", "publish_job"}
+    leaked = sorted(name for name in moved if hasattr(hub_client, name))
+    assert leaked == [], f"发布腿的名字又漏回 hub_client 了：{leaked}"
+    missing = sorted(name for name in moved if not hasattr(hub_publish, name))
+    assert missing == [], f"remote.hub_publish 缺名字：{missing}"

@@ -3,7 +3,6 @@
   "biz/reward_library.py": 4,
   "remote/colab_bc.py": 1,
   "remote/deliver_proc.py": 5,
-  "remote/hub_client.py": 1,
   "remote/hub_http.py": 1,
   "remote/payload_slim.py": 3,
   "remote/plan_run.py": 1,
@@ -30,5 +29,6 @@
   "worker/ppo/engine.py": 2,
   "worker/ppo/engine_paddle.py": 1,
   "worker/train/bc_paddle.py": 1,
-  "worker/train/intent_probe.py": 1
+  "worker/train/intent_probe.py": 1,
+  "remote/hub_publish.py": 1
 }

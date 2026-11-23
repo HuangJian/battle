@@ -27,6 +27,8 @@ from pathlib import Path
 
 import numpy as np
 
+from remote.hub_publish import PublishSpec, publish_job
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -317,7 +319,6 @@ def test_slim_transforms_land_in_the_segment() -> None:
 def test_publish_job_uses_the_round_segments_and_their_slim(tmp_path: Path) -> None:
     """§3.2 的接线：`publish_job` 把本轮段**原样**打进 payload，且 `payload_fmt` 来自
     产出它们的那份 slim（另建一份会报「未改」—— 日志骗人）。"""
-    from remote.hub_client import PublishSpec, publish_job
 
     files, man = _rl_files()
     name = f"rl_s{STAGE}_seed1"
@@ -381,7 +382,6 @@ def test_publish_job_ships_replay_converter_and_identity(tmp_path: Path) -> None
     payload 根下发预构建转换器；full 时两者都缺席（旧字节不变）。"""
     import hashlib
 
-    from remote.hub_client import publish_job
     from remote.publish_spec import PublishSpec
 
     it_dir = tmp_path / "it1"

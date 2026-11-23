@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from remote.hub_client import PublishSpec
+from remote.hub_publish import PublishSpec
 
 
 def publish_fields(root: Path, **overrides: Any) -> dict[str, Any]:

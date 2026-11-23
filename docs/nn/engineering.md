@@ -29,6 +29,39 @@
 
 ---
 
+## §324 发布腿搬出 `remote/hub_client` → `remote/hub_publish`（LOC 999 → 651，为 `verify_and_land` 腾预算）（2026-11-23）
+
+* **不是重构冲动，是预算堵点**：`remote/hub_client.py` LOC 实测 **999/1000**（`tests/test_python_loc_budget.py`
+  的口径：非空 + 非纯注释 + 非 docstring），于是 §307 记过的那件事一直挂着 ——
+  `verify_and_land` / `verify_and_land_bc`（各 9 参）和 `worker/resume.merge_memory_shards`(9) 都要
+  「先拆再收」。拆哪儿？发布腿（`_publish_facts` / `_publish_stage` / `_publish_commit` / `publish_job`，
+  物理 690–1101 共 442 行）本身就是**独立所有者**：输入是 `PublishSpec`，输出是「job 目录 + 账本事件」，
+  与 job 面的读取（校验落位）只共享 `cancel_stale_jobs` / `_previous_job_id` 两个名字。
+* **拓扑**：`remote/hub_publish` = **L2**（依赖 `hub_client`(L1) 的 `cancel_stale_jobs` /
+  `_previous_job_id`，加上 `hub_http` / `payload_pack` / `publish_spec` / `common.*`）。方向单向 ——
+  `hub_client` **不** import 新模块，所以**不留门面**（留 `from remote.hub_publish import …` 就是环；
+  留惰性转发则是白给第二入口）。19 个文件的 import 面直接改指新模块；`PublishSpec` 族与
+  `pack_payload_zip` 的 `X as X` 门面随之下沉。
+* **搬运本身零语义**：`_sha256_file` / `_sha256_bytes` / `_append_ledger` 改名成 `common.hashing` /
+  `common.fs` 的公开名（`sha256_file` / `sha256_bytes` / `append_jsonl`），`_log = tag_logger("hub",
+  lambda: time)` 随段走；`hub_client` 里那段换成指针注释（搬去哪儿、为什么不留门面、patch 目标已搬）。
+* **顺手删的**：`hub_client` 顶层那批 `common.protocol` 常量（`BLOB_*` / `ROLE*` / `TS_CODE_NAME` /
+  `blob_path` / `collision_rows` / `iter_expected_data_fp` / `job_seed` / `role_of` /
+  `validate_rollout_spec` / `job_id as make_job_id`）、`base64` / `shutil` / `Any` / `cast` /
+  `ShardSlim` —— 全仓 AST 扫过一遍：**没有任何模块**从 `hub_client` 拿这些名字（只在发布段里用）。
+* **三条预算基线跟着搬**（不是放宽）：`any_baseline` / `assert_baseline` / `wall_clock_baseline` 里
+  `remote/hub_client.py` 的条目删掉或减一，同时在 `remote/hub_publish.py` 记上同样的数（1 / 1 / 1）
+  —— 总量不变，只是额度跟着代码走；`test_*_budget` 的「只减不增」判据照样绿。
+* **坑（记账）**：① 机械改 import 的脚本按「文件里出现过该 import」就整块重写，会把原本**函数内**的
+  延迟 import 抬到模块顶层 —— `tests/trainer/test_loop_remote_split.py` 的 `DELAYED_IMPORTS` /
+  `TOP_IMPORTS` 两条闭集判据当场抓住（`loop_remote_job` 的发布相位必须继续自带 import）；
+  ② 打桩点跟着名字走：`hc.publish_job` 两处（`test_remote_failure_policy` / `test_replay_publish_wiring`）
+  不改就只是**静默失效的替身**（前者还叠了个 mypy `attr-defined`）。
+* **验收**：`bun run pygate` 绿（**6976 passed / 3 skipped**，与拆前同数）；`ruff check` + `mypy` 绿；
+  `remote/hub_client.py` **999 → 651 LOC**，`remote/hub_publish.py` 363 LOC；新增守卫
+  `tests/remote/test_publish_spec.py::test_publish_leg_has_no_facade_in_hub_client`（发布腿四个名字
+  一个都不许漏回 `hub_client`，也不许在 `hub_publish` 缺席）。
+
 ## §323 P0-3 批 E 末一处：`_run_one_game_bounded`(11) → 直接吃 `RetryGameSpec`（6 → 5）（2026-11-23）
 
 * **不是新 spec，是接上已有的那份**：`_run_one_game_bounded` 的 10 个字段是

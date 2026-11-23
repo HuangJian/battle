@@ -205,6 +205,10 @@ DELAYED_IMPORTS: dict[str, frozenset[str]] = {
             # 同层向下、同一条「相位方法自带 import」的形状。
             "remote.hub_http",
             "remote.hub_client",
+            # 2026-11-23（LOC 预算那一刀）：发布腿（`PublishSpec` / `publish_job`）从
+            # `remote.hub_client` 搬去 `remote.hub_publish`。发布相位方法仍然自带 import，
+            # 只是目标换成新模块（hub_client 站在它下面，不充门面）。
+            "remote.hub_publish",
             "remote.push_client",
             "trainer.collect_only",
             "worker.config",

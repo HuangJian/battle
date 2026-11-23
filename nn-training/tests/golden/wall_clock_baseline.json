@@ -26,7 +26,7 @@
     "remote/download.py": 8,
     "remote/error_report.py": 1,
     "remote/http.py": 10,
-    "remote/hub_client.py": 4,
+    "remote/hub_client.py": 3,
     "remote/job_lifecycle.py": 4,
     "remote/job_round.py": 5,
     "remote/job_shell.py": 3,
@@ -104,6 +104,7 @@
     "hub/admin.py": 2,
     "remote/replay_corpus.py": 5,
     "remote/rollout_relay.py": 15,
-    "worker/ppo/lazy_corpus.py": 4
+    "worker/ppo/lazy_corpus.py": 4,
+    "remote/hub_publish.py": 1
   }
 }

@@ -18,6 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import remote.hub_client as hub_client
+import remote.hub_publish as hub_publish
 from remote import weights_standard
 from trainer.loop_remote_job import PackInputs, TrainingRemoteJob
 
@@ -128,7 +129,7 @@ def test_publish_spec_carries_replay_fmt_and_converter(tmp_path: Path, monkeypat
         seen["spec"] = spec
         return {"job_id": "jid-replay"}
 
-    monkeypatch.setattr(hub_client, "publish_job", _fake_publish)
+    monkeypatch.setattr(hub_publish, "publish_job", _fake_publish)
     monkeypatch.setattr(hub_client, "git_head", lambda: "deadbeef")
 
     rig._remote_ppo_publish(7)

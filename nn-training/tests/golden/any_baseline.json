@@ -180,10 +180,10 @@
     "worker/trainer_heartbeat.py": 2,
     "worker/volume_waves.py": 6,
     "common/node_speed.py": 2,
-    "remote/hub_client.py": 1,
     "remote/rollout_relay.py": 1,
     "worker/cloud_sampling.py": 2,
     "worker/iter_run.py": 3,
-    "worker/ppo/vram.py": 5
+    "worker/ppo/vram.py": 5,
+    "remote/hub_publish.py": 1
   }
 }

@@ -32,6 +32,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from remote.hub_publish import PublishSpec, publish_job
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -857,7 +859,7 @@ def test_hub_admin_client_set_cloud_halt(tmp_path: Path) -> None:
 
     TrainingLoop 与 console 都走该函数下发停机/恢复；无 hub（local/push）短路 False。
     """
-    from remote.hub_client import PublishSpec, set_cloud_halt
+    from remote.hub_client import set_cloud_halt
 
     base, _store, srv, th = _boot_server(tmp_path)
     try:
@@ -1073,7 +1075,6 @@ def test_publish_job_slim_blob_and_payload_diet(tmp_path: Path) -> None:
     """M2：slim=True → payload 去冗余文件；opt/ref 只留 sha；blob 落盘（pull 端点源）。"""
     import tarfile as _tar
 
-    from remote.hub_client import PublishSpec, publish_job
     from remote.opt_delta import opt_tar_bytes as _opt_tar_bytes
 
     shard_dir = tmp_path / "rl_s1_seed10"
@@ -1144,7 +1145,6 @@ def test_publish_job_slim_off_restores_legacy_inline(tmp_path: Path) -> None:
     manifest 无 opt_sha/ref_sha（逐字节旧行为）。"""
     import tarfile as _tar
 
-    from remote.hub_client import PublishSpec, publish_job
     from remote.opt_delta import opt_tar_bytes as _opt_tar_bytes
 
     shard_dir = tmp_path / "rl_s1_seed10"

@@ -27,12 +27,14 @@ from unittest.mock import patch
 
 import pytest
 
+from remote.hub_publish import PublishSpec, publish_job
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.protocol import PLAN_NAME, TS_CODE_NAME, unpack_payload
-from remote.hub_client import HubClientError, PublishSpec, publish_job
+from remote.hub_client import HubClientError
 from trainer.loop_steps import (
     ROLLOUT_SRCS,
     ROLLOUT_SRCS_RETIRED,

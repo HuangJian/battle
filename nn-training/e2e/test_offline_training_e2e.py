@@ -39,6 +39,8 @@ import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
+from remote.hub_publish import PublishSpec, publish_job
+
 ROOT = Path(__file__).resolve().parent.parent  # nn-training/
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -58,7 +60,6 @@ from common.protocol import (
 from remote import offline_boot
 from remote.artifacts import ArtifactStore
 from remote.deliver_spec import OfflineDelivererSpec
-from remote.hub_client import PublishSpec, publish_job
 from remote.offline_boot import BatchRunSpec, CourseRunSpec, PingerSpec, RunArgvSpec
 from remote.offline_deliver import OfflineDeliverer
 from tests.helpers.console_stub import NoHandoffConsole

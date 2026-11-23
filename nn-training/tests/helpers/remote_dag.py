@@ -341,6 +341,11 @@ LAYERS: dict[str, int] = {
     # 那里收的是注入进来的 `after_write`。
     "remote.round_forms": 2,
     "remote.hub_client": 1,
+    # 发布腿（2026-11-23，LOC 预算那一刀）：从 `remote.hub_client` 整块搬出的
+    # `_publish_facts` / `_publish_stage` / `_publish_commit` / `publish_job`。它要 hub_client 的
+    # `cancel_stale_jobs` 与 `_previous_job_id`（job 身份守卫要读上一轮）⇒ 拓扑秩 1 + 1 = **L2**；
+    # 方向单向（hub_client **不** import 它，留门面就是环）⇒ 调用点直接 import 本模块。
+    "remote.hub_publish": 2,
     # 2026-10-10（plan/cluster-code-snapshot）：集群代码快照——会话级 `code.zip` 锚点。
     # 它只 import `remote.hub_client`(L1) 的 `pack_code_zip` + `common.*` ⇒ 拓扑秩 1 + 1 = **L2**；
     # 消费侧（`hub.queue_observe` / `trainer.*`）都在它上面，边一律严格向下。

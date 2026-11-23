@@ -47,6 +47,8 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from remote.hub_publish import PublishSpec, publish_job
+
 ROOT = Path(__file__).resolve().parent.parent  # nn-training/
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -724,7 +726,6 @@ from common.protocol import (
     OFFLINE_HEARTBEAT_PATH,
     ROLE_ONLINE,
 )
-from remote.hub_client import PublishSpec, publish_job
 from remote.job_lifecycle import ClaimSpec, claim_job, peek_jobs
 from tests.helpers.http_server import serve_fast
 

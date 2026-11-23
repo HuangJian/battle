@@ -152,6 +152,7 @@ def test_jobfailed_marks_leg_dead_and_never_republishes(tmp_path: Path) -> None:
         （ROUND_RETRY）。下面用发布钩子把「有没有人又发了一次」变成可断言的事实。
     """
     import remote.hub_client as hc
+    import remote.hub_publish as hp
     from trainer.loop_core import TrainingLoop
     from worker.loop_round import ROUND_RETRY
 
@@ -171,14 +172,14 @@ def test_jobfailed_marks_leg_dead_and_never_republishes(tmp_path: Path) -> None:
     sleep_calls: list[float] = []
     publish_calls: list[str] = []
     loop._ledger_apply = lambda _ev: None
-    orig_sleep, orig_publish = hc.time.sleep, hc.publish_job
+    orig_sleep, orig_publish = hc.time.sleep, hp.publish_job
     hc.time.sleep = lambda s: sleep_calls.append(float(s))
 
     def _spy_publish(jid: str, *a: object, **kw: object) -> object:
         publish_calls.append(str(jid))
         raise AssertionError("已判死腿之后又发布了 job —— 这正是 §4 要挡的重发")
 
-    hc.publish_job = _spy_publish  # type: ignore[assignment]
+    hp.publish_job = _spy_publish  # type: ignore[assignment]
     try:
         # `round_failure` 的「判死腿上抛」是**裸 raise**（重抛当前异常）⇒ 必须在 `except` 块里
         # 调用（生产侧的调用点都在 `except ... as e:` 里；直接调会得到「No active exception」）。
@@ -188,7 +189,7 @@ def test_jobfailed_marks_leg_dead_and_never_republishes(tmp_path: Path) -> None:
             with pytest.raises(JobFailedError):
                 loop.round_failure(e, 58, backoff=False)
     finally:
-        hc.time.sleep, hc.publish_job = orig_sleep, orig_publish
+        hc.time.sleep, hp.publish_job = orig_sleep, orig_publish
     assert publish_calls == []  # 一个字都没再发出去
     assert sleep_calls == []  # 也没在「睡 30s 再试同一 job」的阶梯上转圈
     assert loop.resume_state().consec_fail == 1  # 失败留痕（iter_error）仍然照写；只是不再重试

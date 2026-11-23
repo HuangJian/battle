@@ -31,6 +31,8 @@ from pathlib import Path
 
 import pytest
 
+from remote.hub_publish import PublishSpec, publish_job
+
 # 复用现有测试基建（`_boot_server` / `_http` / `_mini_manifest` / `_write_shard`）
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -39,7 +41,7 @@ if str(ROOT) not in sys.path:
 from common.protocol import FAIL_NAME, JobFailedError, normalize_manifest
 from hub.server import _JobStore
 from hub.store_leases import LeaseSpec
-from remote.hub_client import PublishSpec, publish_job, report_job_failure, wait_job
+from remote.hub_client import report_job_failure, wait_job
 from remote.hub_http import HubFailSpec, WaitJobSpec
 from tests.helpers.http_server import serve_fast
 from tests.remote.test_remote_ppo import (

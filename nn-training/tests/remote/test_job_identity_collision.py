@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from remote.hub_publish import PublishSpec, publish_job
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -38,7 +40,7 @@ from common.protocol import (
     job_id as make_job_id,
 )
 from hub.server import _HubQueue, _JobStore
-from remote.hub_client import HubClientError, PublishSpec, publish_job
+from remote.hub_client import HubClientError
 from remote.job_lifecycle import ClaimSpec
 
 #: 两门课共用的四分量（事故现场的「全同」部分）。

@@ -236,11 +236,8 @@ class TrainingRemoteJob(TrainingRemotePush):
         # 本相位只做「打包 + 发布」：等结果与校验落位各在自己的相位里（三相拆分后
         # 三处的导入也各自独立——一份 import 清单服务三段，是拆相前那种形状的残留）。
         from biz.reward_library import METRICS_VERSION
-        from remote.hub_client import (
-            PublishSpec,
-            git_head,
-            publish_job,
-        )
+        from remote.hub_client import git_head
+        from remote.hub_publish import PublishSpec, publish_job
 
         hub_url, token, gpu_nodes, hub_push, job_root = self._remote_transport(args)
         course, course_text, course_fp, corpus_fp, shard_dirs, mem = self._remote_course_and_shards(

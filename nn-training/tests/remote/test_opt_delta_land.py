@@ -25,13 +25,15 @@ from pathlib import Path
 import pytest
 import torch
 
+from remote.hub_publish import PublishSpec, publish_job
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.errors import ProtocolError
 from remote import opt_delta as od
-from remote.hub_client import PublishSpec, _extract_tar
+from remote.hub_client import _extract_tar
 from remote.opt_delta import land_opt_delta as _land_opt_delta
 
 
@@ -170,7 +172,6 @@ def test_land_dispatches_on_the_magic_not_the_bit(tmp_path: Path) -> None:
 
 
 def _publish(tmp_path: Path, *, it: int = 1, ckpt_dir: Path | None = None, slim: bool = True) -> dict:
-    from remote.hub_client import publish_job
     from tests.helpers.publish_spec import publish_fields
 
     wfile = tmp_path / "init_weights.json"

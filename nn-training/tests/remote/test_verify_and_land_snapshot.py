@@ -28,7 +28,8 @@ from pathlib import Path
 import pytest
 
 from common.protocol import encode_opt_tar, encode_weights_json
-from remote.hub_client import HubClientError, PublishSpec, publish_job, verify_and_land
+from remote.hub_client import HubClientError, verify_and_land
+from remote.hub_publish import PublishSpec, publish_job
 
 STAGE = 2000
 

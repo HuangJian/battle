@@ -31,6 +31,8 @@ import sys
 import time
 from pathlib import Path
 
+from remote.hub_publish import PublishSpec, publish_job
+
 ROOT = Path(__file__).resolve().parent.parent  # nn-training/
 REPO = ROOT.parent  # git 根
 sys.path.insert(0, str(ROOT))
@@ -43,12 +45,10 @@ from common.protocol import find_payload
 from common.schema import BOARD, OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM  # 合成语料形状随 schema
 from hub.server import _JobStore, make_server
 from remote.hub_client import (
-    PublishSpec,
     git_head,
     iter_shard_dirs,
     mark_job_completed,
     pack_code_zip,
-    publish_job,
     verify_and_land,
     wait_job,
 )

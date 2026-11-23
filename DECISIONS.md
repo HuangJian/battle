@@ -10406,3 +10406,22 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   参数（重试层看不到它），放进去会让「谁负责超界」变模糊。
 - **验证**：`bun run pygate` 绿（6976 passed）；守 `tests/worker/test_one_game_bounded_spec.py`。
   全文 → `docs/nn/engineering.md` §323。
+
+## §2026-11-23-hub-publish-split
+
+- **背景**：`remote/hub_client.py` LOC 999/1000（`tests/test_python_loc_budget.py` 口径），
+  `verify_and_land` / `verify_and_land_bc` / `merge_memory_shards` 三条宽签名的「先拆再收」被堵住
+  （§307 记过的那笔）。用户指令：拆发布侧合并段，为两条 `verify_and_land` 的 spec 腾 LOC。
+- **决定**：发布腿（`_publish_facts` / `_publish_stage` / `_publish_commit` / `publish_job`，
+  物理 442 行）整块搬去**新模块** `remote/hub_publish.py`（L2 = `hub_client`(1)+1）。**不留门面**：
+  `hub_client` 不 import 它（否则成环），19 个文件的 import 面直接改指新模块，`PublishSpec` 族与
+  `pack_payload_zip` 的 `X as X` 门面随之下沉。job 面（`_append_ledger` / `cancel_stale_jobs` /
+  `mark_job_completed` / 打包族 / `verify_and_land*`）留在原处。
+- **被否决**：① 留在 `hub_client` 里做「惰性转发门面」（延迟 import 到函数内）—— 白给第二入口，
+  且下一条宽签名还要在这 1000 行里挤；② 把发布腿并进 `remote/payload_pack`（打包器同一家族）——
+  打包是「造字节」、发布是「造 job 目录 + 账本事件」，两个独立所有者共用一份会立刻长出双职责；
+  ③ 先收 `verify_and_land` 再拆 —— 收不动（999 行里再加 spec 直接超线）。
+- **验证**：`bun run pygate` 绿（6976 passed / 3 skipped，与拆前同数）；`ruff check` + `mypy` 绿；
+  `hub_client` 999 → **651 LOC**。三条预算基线（`any` / `assert` / `wall_clock`）里的条目跟着代码
+  搬去 `remote/hub_publish.py`（总量不变）。守 `tests/remote/test_publish_spec.py` 新增「不许漏回
+  `hub_client`」一条 + `tests/helpers/remote_dag.py` 的 L2 登记。全文 → `docs/nn/engineering.md` §324。

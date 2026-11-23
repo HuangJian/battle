@@ -46,6 +46,7 @@ from pathlib import Path
 
 from common.cli import house_parser
 from common.log import log
+from remote.hub_publish import PublishSpec, publish_job
 
 # BC 训练器（`worker/train/bc.py` / `bc_paddle.py` / `device.py`）的每条日志自带
 # `[HH:MM:SS] ` 前缀（2026-11-12：云机 BC 日志逐行可对时）。解析前必须剥掉——
@@ -65,11 +66,9 @@ from remote.code_snapshot import (
     workspace_code_sha,
 )
 from remote.hub_client import (
-    PublishSpec,
     git_head,
     iter_bc_shard_dirs,
     mark_job_completed,
-    publish_job,
 )
 from trainer.bc_round_job import (
     find_round_job as _find_round_job,

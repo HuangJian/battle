@@ -30,6 +30,8 @@ from typing import Any, cast
 import numpy as np
 import pytest
 
+from remote.hub_publish import PublishSpec, publish_job
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -625,7 +627,6 @@ def _publish_iter(
     它决定 payload 带不带 `init_weights.json`（旧条件 `not use_opt_blob or keep_init_weights`）：
     有 opt blob ⇒ 不带（权重走 init blob）；首轮/导出包无 opt blob ⇒ 带（bundle 要它）。
     """
-    from remote.hub_client import PublishSpec, publish_job
 
     w = tmp_path / "init_weights.json"
     w.write_text('{"format":"nn-weights-json","params":{}}', encoding="utf-8")
@@ -801,7 +802,7 @@ def test_publish_iter_manifest_and_layout(tmp_path: Path) -> None:
 
 def test_publish_iter_refuses_local_shards(tmp_path: Path) -> None:
     """混着发（既有本地 shard 又声明上云）= 双份采集 —— 发布端就拒。"""
-    from remote.hub_client import HubClientError, PublishSpec, publish_job
+    from remote.hub_client import HubClientError
 
     spec = validate_rollout_spec(_spec([(3, 7)]))
     sd = tmp_path / shard_name(3, 7)
@@ -849,7 +850,6 @@ def test_publish_iter_needs_ts_code_sha(tmp_path: Path) -> None:
 
 
 def _publish_iter_missing_ts(tmp_path: Path) -> dict:
-    from remote.hub_client import PublishSpec, publish_job
 
     spec = validate_rollout_spec(_spec([(3, 7)]))
     w = tmp_path / "w.json"

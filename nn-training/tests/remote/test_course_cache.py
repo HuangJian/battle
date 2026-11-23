@@ -25,6 +25,8 @@ from pathlib import Path
 
 import pytest
 
+from remote.hub_publish import PublishSpec, publish_job
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -262,7 +264,6 @@ def test_settle_leaves_pending_alone_on_unknown_status(tmp_path: Path) -> None:
 
 
 def _publish(tmp_path: Path, *, it: int, run_id: str = "r1", course_fp: str = COURSE_FP) -> dict:
-    from remote.hub_client import PublishSpec, publish_job
     from tests.helpers.publish_spec import publish_fields
 
     wfile = tmp_path / "init_weights.json"
