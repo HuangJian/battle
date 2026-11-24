@@ -86,7 +86,7 @@ LONG_FUNCS_BASELINE: dict[str, int] = {
     "trainer/loop_core.py": 1,
     "trainer/loop_remote_job.py": 2,
     "trainer/loop_serve.py": 1,
-    "trainer/loop_volume.py": 2,
+    "trainer/loop_volume.py": 1,
     "trainer/queue_worker.py": 1,
     "trainer/rollout_phase.py": 1,
     "trainer/run_rl_cluster.py": 1,

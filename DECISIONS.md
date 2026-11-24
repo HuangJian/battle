@@ -10678,3 +10678,23 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：13 组决策表差分全同（返回账 / 异常 / 日志 / 请求序列 / 退避 / forget 序列）；
   语句对账 81 → 95（only_old 2 / only_new 11，全部接线）；push/transport/BC 用例与三个预算门
   全绿；门禁 7009 passed / 3 skipped。全文 → `docs/nn/engineering.md` §338。
+
+## §2026-11-24-greedy-budget
+
+- **背景**：`trainer/loop_volume._volume_collect_greedy` 187 行（§331 分诊表与 §338 之后的下一格：
+  剩余非排除项里最大的一块）。第二遍采集阶段把预算 / 每波取局 / 收官混在一个 `while` 里。
+
+- **决定**：切出 `_GreedyBudget` + `_GreedyTargets`（frozen）与 `_greedy_budget`(45) /
+  `_greedy_wave_pairs`(47) / `_greedy_settle`(80)，`_volume_collect_greedy` 187 → **85**；
+  `LONG_FUNCS_BASELINE` 该文件 2 → 1（总 63 → 62）。助手只收标量 / 预算对象，**不收**
+  `GreedyQuotaPlan`（那会给闭合的顶层 import 面加一条边，或让 `Any` 回潮）。
+
+- **被否决**：① 签名写 `GreedyQuotaPlan` —— `worker.greedy_quota` 只许方法体内延迟 import，
+  `TYPE_CHECKING` 也被守卫按顶层算；② 收官重算 `bin_targets(plan)` —— 白多一次调用且可能漂移；
+  ③ `stopped_no_games` 进预算对象 —— 循环控制不是预算；④ while 整体进取局助手 —— 派发与 halt
+  得再返回第二态。
+
+- **验证**：HEAD-vs-新 14 组决策表差分全同（四道前置门 / plan None / 已达标 / total 满 / `plan_g`
+  空 / 全 ordinary / halt / 一波后收官 / `soft=false` raise / 批顶；观测含扫描与派发序列、
+  三个 greedy 槽位、主 report、分关账、日志、异常）；`CLUSTER` 15 → 18 与 `_StubLoop` 三转发；
+  ruff / mypy / 门禁全绿。全文 → `docs/nn/engineering.md` §339。

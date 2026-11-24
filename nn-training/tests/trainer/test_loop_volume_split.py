@@ -60,7 +60,7 @@ CORE_PY = NN_ROOT / "trainer" / "loop_core.py"
 STEPS_PY = NN_ROOT / "trainer" / "loop_steps.py"
 ROUND_STEPS_PY = NN_ROOT / "trainer" / "loop_round_steps.py"
 
-#: 这一簇的成员（闭集）：15 个方法 —— 新方法要么住在 `TrainingLoop`，要么改这张表。
+#: 这一簇的成员（闭集）：18 个方法 —— 新方法要么住在 `TrainingLoop`，要么改这张表。
 CLUSTER = (
     "_volume_active",
     "_volume_stages",
@@ -79,6 +79,10 @@ CLUSTER = (
     # 2026-11-18（长函数存量）：`_volume_collect_greedy` 拆出的派发波与盘上扫描。
     "_dispatch_greedy_wave",
     "_greedy_scan",
+    # 2026-11-24（长函数存量）：`_volume_collect_greedy` 拆出的预算 / 取局 / 收官三段。
+    "_greedy_budget",
+    "_greedy_wave_pairs",
+    "_greedy_settle",
     # 2026-10-28（零落盘）：补波的「本波已采多少」要读本轮内存账（回传 shard 不在盘上）。
     "_round_mem_shards",
     # 2026-11-18（G5）：公开只读观测面 —— 测试断言配额/分关账/greedy 读数走它，

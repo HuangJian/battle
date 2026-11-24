@@ -29,6 +29,48 @@
 
 ---
 
+## §339 分诊第六格：`trainer/loop_volume._volume_collect_greedy` 187 → 85 + 三段（2026-11-24）
+
+§331 的分诊表与 `submit_job`（§338）之后，剩余非排除项里最大的一块。它是一个**独立的第二遍采集
+阶段**：四道前置门（`greedy_quota` 缺席 / stream 路径 / `collect_only` / `export_bundle`）→
+解析计划 → 开跑预算 → 每波取局 + 派发 → 收官，全都直排在一个 `while` 里。
+
+切法（三段都按原语句的连续区间搬，语句顺序与判据未动）：
+
+| 助手 | 行 | 职责 |
+|---|---|---|
+| `_greedy_budget(it, stages, targets, args, *, collect_target, cap)` | 45 | 每关估算 / 硬顶（`default_game_caps` 传**全局** `collect_target`，不是每关的）/ 宽度 / 波数 / `start_idx` / 已派过的普通局 |
+| `_greedy_wave_pairs(it, budget, manifests, *, seed_salt, collect_target)` | 47 | 续抽下标 → `_greedy_plan_games` → `continuous_pairs` → 冲突过滤；`None` = 这一波没局可派 |
+| `_greedy_settle(it, quota, targets, *, stopped_no_games)` | 80 | 重扫 → degraded / cap_hit → 两份 brief → 合并 report → 全量账 → `_greedy_stats` / 分关账 → 日志 → 硬目标 `raise` |
+
+`_volume_collect_greedy` 187 → **85**；文件 LOC 893 → 973（限额 1000）。`LONG_FUNCS_BASELINE`
+`trainer/loop_volume.py` 2 → 1（总 63 → 62）。两个 frozen dataclass：
+
+  · `_GreedyBudget` —— 派生预算；`start_idx` 仍是**共享可变字典**（frozen 只挡属性重绑，波内按
+    实派局推进的语义不变）；
+  · `_GreedyTargets` —— 收官读数与硬目标判据要的五个标量。
+
+**为什么不把 `GreedyQuotaPlan` 传进助手**：那个类住在 `worker.greedy_quota`，而本模块的顶层
+import 面是**闭合集**（`tests/trainer/test_loop_volume_split.py::test_top_level_import_surface_is_closed`）；
+`if TYPE_CHECKING:` 也会被那条守卫按 `ast.If` 的 body 算成顶层 import。签名里写 `Any` 又撞
+G14 的「只减不增」。把五个标量就地复制一次，换掉了「为了注解多一条跨层边」。
+
+**验证**：HEAD-vs-新 **14 组**决策表差分全同（假 `_greedy_scan` / `_greedy_collected` /
+`_greedy_plan_games` / `continuous_pairs` / `_dispatch_greedy_wave`，真 `_volume_collect_greedy`
+跑在两侧；观测 = 扫描与派发次数、派发序列、`_greedy_plan` / `_greedy_stats` / `_greedy_report` /
+`_report` / `_volume_collected` / `_volume_stage_stats` / 日志 / 异常类型与文案）。场景含四道前置门、
+plan 为 `None`、已达标、total 到顶、`plan_g` 空、全被 ordinary 排除、halt、一波后收官、
+`soft=false` 硬目标 `raise`、`volume_max_batches` 触顶。`CLUSTER` 闭集 15 → 18，
+`tests/worker/test_rollout_volume.py::_StubLoop` 补三个转发。
+
+**被否决**：① 助手直接收 `GreedyQuotaPlan` —— 见上（顶层 import 面 / `Any` 两条门）；② 收官时
+重算 `bin_targets(plan)` —— 白多一次纯调用，却让「同一轮里前后两份 targets」有了漂移的可能；③ 把
+`stopped_no_games` 塞进 `_GreedyBudget` —— 它是循环控制状态，不是预算；④ 把整个 while 也搬进
+`_greedy_wave_pairs` —— 派发与 halt 会跟着搬走，助手得再返回「继续 / 停」的第二态。
+
+**保留的原语句**：循环前那次 `_greedy_scan` 的结果并不被使用（循环第一拍会重扫），但它是一次
+无副作用读，按「语句序未动」保留在原位。
+
 ## §338 分诊下一格：`remote/push_client.submit_job` 166 → 88 + 三段（2026-11-24）
 
 §331 的五格拆完后，按同一张「接缝烂度」表往下走：`submit_job` 是剩余非排除项里分支最多的

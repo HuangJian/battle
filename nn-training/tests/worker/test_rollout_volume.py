@@ -635,6 +635,51 @@ class _StubLoop:
     def _greedy_scan(self, it: int):
         return TrainingLoop._greedy_scan(cast(Any, self), it)
 
+    def _greedy_budget(
+        self,
+        it: int,
+        stages: list[int],
+        targets: dict,
+        args,
+        *,
+        collect_target: int,
+        cap: float,
+    ) -> Any:
+        return TrainingLoop._greedy_budget(
+            cast(Any, self),
+            it,
+            stages,
+            targets,
+            args,
+            collect_target=collect_target,
+            cap=cap,
+        )
+
+    def _greedy_wave_pairs(
+        self,
+        it: int,
+        budget,
+        manifests: dict,
+        *,
+        seed_salt: int,
+        collect_target: int,
+    ) -> list[tuple[int, int]] | None:
+        return TrainingLoop._greedy_wave_pairs(
+            cast(Any, self),
+            it,
+            budget,
+            manifests,
+            seed_salt=seed_salt,
+            collect_target=collect_target,
+        )
+
+    def _greedy_settle(
+        self, it: int, quota, targets: dict, *, stopped_no_games: bool
+    ) -> None:
+        TrainingLoop._greedy_settle(
+            cast(Any, self), it, quota, targets, stopped_no_games=stopped_no_games
+        )
+
     def _dispatch_greedy_wave(
         self, it: int, pairs, dist_cfg, total: int, plan, bins: dict, targets: dict
     ) -> bool:

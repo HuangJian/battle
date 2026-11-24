@@ -213,6 +213,32 @@ class _Continuous:
     first_est_src: dict[int, str]
 
 
+@dataclass(frozen=True)
+class _GreedyTargets:
+    """greedy 计划的**只读标量面**：读数与硬目标判据要的那五个数。"""
+
+    total_target: int
+    collect_target: int
+    per_stage_target: int
+    cap: float
+    soft: bool
+
+
+@dataclass(frozen=True)
+class _GreedyBudget:
+    """开跑前一次算清的派生预算；`start_idx` 是共享可变字典（每波按实派局推进）。"""
+
+    stages: list[int]
+    targets: dict[str, int]
+    est_s: dict[int, int]
+    est_global: int
+    game_caps: dict
+    width: int
+    max_batches: int
+    start_idx: dict[int, int]
+    ordinary: set[tuple[int, int]]
+
+
 class TrainingVolume:
     """动态采集（按样本量）编排 mixin：初波/补波/连续配额 → 派发 → 报告合并 → WAL。
 
@@ -1103,6 +1129,181 @@ class TrainingVolume:
         )
         return halt.is_set()
 
+    def _greedy_budget(
+        self,
+        it: int,
+        stages: list[int],
+        targets: dict[str, int],
+        args: object,
+        *,
+        collect_target: int,
+        cap: float,
+    ) -> _GreedyBudget:
+        """关硬顶 / 宽度 / 波数 / 续抽下标 / 已派过的普通局 —— 一次算清。"""
+        from worker.volume_alloc import default_game_caps
+        from worker.volume_quota import DEFAULT_MAX_BATCHES
+
+        est_s = self._volume_stage_ests_map(it)
+        est_global = int(self._volume_est or 0)
+        # 硬顶按**全局** collect_target 算（`default_game_caps` 会再除以关数）；传
+        # `per_stage_collect` 会把每关硬顶再除一次关数 ⇒ 第一波结算后即触顶，
+        # greedy 阶段提前收官（2026-11-09 S3 实测）。
+        game_caps = default_game_caps(
+            stages,
+            collect_target,
+            ests=est_s,
+            mult=max(1, int(cap + 0.999)),
+        )
+        width = (
+            int(getattr(args, "local_slots", 0) or 0)
+            or int(getattr(args, "workers", 0) or 0)
+            or len(stages)
+        )
+        max_batches = int(getattr(args, "volume_max_batches", 0) or DEFAULT_MAX_BATCHES)
+        start_idx = {s: 0 for s in stages}
+        ordinary = set(getattr(self, "_volume_ordinary_seeds", set()))
+
+        return _GreedyBudget(
+            stages=stages,
+            targets=targets,
+            est_s=est_s,
+            est_global=est_global,
+            game_caps=game_caps,
+            width=width,
+            max_batches=max_batches,
+            start_idx=start_idx,
+            ordinary=ordinary,
+        )
+
+    def _greedy_wave_pairs(
+        self,
+        it: int,
+        budget: _GreedyBudget,
+        manifests: dict,
+        *,
+        seed_salt: int,
+        collect_target: int,
+    ) -> list[tuple[int, int]] | None:
+        """这一波要派的 `(stage, seed)`；`None` = 无可派局，调用方收官。"""
+        from worker.volume_quota import continuous_pairs
+
+        stages = budget.stages
+        est_s, est_global = budget.est_s, budget.est_global
+        game_caps, width = budget.game_caps, budget.width
+        start_idx, ordinary = budget.start_idx, budget.ordinary
+
+        collected, games = _greedy_collected(manifests, stages)
+        # 重启后从已结算局数续抽，不重放已结算的 seed。
+        for s in stages:
+            start_idx[s] = max(start_idx.get(s, 0), games.get(s, 0))
+
+        plan_g = _greedy_plan_games(
+            stages,
+            collected,
+            games,
+            est_s,
+            est_global,
+            game_caps,
+            width,
+            collect_target,
+        )
+        if not plan_g:
+            return None
+        pairs = continuous_pairs(
+            self._rotate_seed ^ seed_salt, it, plan_g, start_idx
+        )
+        pairs = [(s, sd) for s, sd in pairs if (s, sd) not in ordinary]
+        if not pairs:
+            return None
+        # 冲突过滤会削掉部分 (stage, seed)：seed 索引只能按**实际派出**的局前进，
+        # 否则被跳过的 seed 永久丢失（plan rev4 §5.1「冲突就跳过，下一波补」）。
+        # 下一波开头的 max(start_idx, games) 仍保证掉局不重派。
+        for s, _sd in pairs:
+            start_idx[s] = start_idx.get(s, 0) + 1
+
+        return pairs
+
+    def _greedy_settle(
+        self,
+        it: int,
+        quota: _GreedyTargets,
+        targets: dict[str, int],
+        *,
+        stopped_no_games: bool,
+    ) -> None:
+        """收官：重扫 → degraded / cap_hit → 合并 report → 账目 → 日志与硬目标。"""
+        from worker.greedy_quota import (
+            GREEDY_QUOTA_RULE_V1,
+            is_greedy_manifest,
+            manifest_samples,
+        )
+
+        names, manifests, bins, total = self._greedy_scan(it)
+        degraded = any(int(bins[b]) < int(targets[b]) for b in targets)
+        cap_hit = bool(degraded and total >= quota.collect_target)
+        # 2026-11-10（用户裁决）：主 rollout report 改**全量**口径。此前 greedy 波只进
+        # `_greedy_report`（死数据），`write_rollout_end` / `write_iteration` 读的是
+        # `self._report` ⇒ 控制台恒显示纯采样的 >98%，greedy 败局/超时局完全不可见。
+        # 合并前各存一份 brief，供控制台下钻「采样 vs greedy」两份读数（实现与云机腿共用一份）。
+        from worker.greedy_quota import report_brief as _brief
+
+        sampling_report = _brief(self._report)
+        greedy_report = _brief(self._greedy_report)
+        if self._greedy_report:
+            self._report = combine_reports([self._report, self._greedy_report])
+        # 全量指标：`transitions_collected` 由 `_volume_collected` 落账（不读 report）。
+        # 两边同加才守得住 e2e 的 `report.totalSamples == _volume_collected` 等式。
+        if self._volume_collected is not None:
+            self._volume_collected = int(self._volume_collected) + int(total)
+        self._greedy_stats = {
+            "rule": GREEDY_QUOTA_RULE_V1,
+            "target": int(quota.total_target),
+            "collect_target": int(quota.collect_target),
+            "cap": float(quota.cap),
+            "soft": bool(quota.soft),
+            "per_stage_target": int(quota.per_stage_target),
+            "bins": dict(bins),
+            "targets": dict(targets),
+            "total": int(total),
+            "degraded": bool(degraded),
+            "cap_hit": cap_hit,
+            "waves": int(self._greedy_waves),
+            "stopped_no_games": bool(stopped_no_games),
+            # 拆分读数（合并前的采样 / 本轮 greedy）；`merge_greedy_stats` 只挂
+            # `prefilter` 子键，这两个键会一路带进 iteration 事件。
+            "sampling_report": sampling_report,
+            "greedy_report": greedy_report,
+        }
+        # 分关 greedy 账挂到 `volume_stage_stats` 的**增量**子键：控制台的分关表能看见
+        # greedy 样本落在哪几关，同时普通配额诊断的 stages/shortfall/est_src 口径不动。
+        if isinstance(self._volume_stage_stats, dict):
+            by_stage: dict[str, dict] = {}
+            greedy_games = 0
+            for name in names:
+                mm = manifests.get(name) or {}
+                if not is_greedy_manifest(mm):
+                    continue
+                greedy_games += 1
+                row = by_stage.setdefault(
+                    str(mm.get("stage")), {"samples": 0, "games": 0}
+                )
+                row["samples"] += manifest_samples(mm)
+                row["games"] += 1
+            self._volume_stage_stats["greedy"] = {
+                "samples": int(total),
+                "games": greedy_games,
+                "stages": by_stage,
+            }
+        log(
+            f"[greedy] it{it}: 收官 bins={bins} targets={targets} total={total} "
+            f"degraded={degraded} cap_hit={cap_hit} waves={self._greedy_waves}"
+        )
+        if degraded and not quota.soft:
+            raise RuntimeError(
+                f"greedy_quota 硬目标未达成（soft=false）：bins={bins} targets={targets} "
+                f"total={total}/{quota.collect_target}"
+            )
+
     def _greedy_scan(self, it: int):
         """盘上 greedy 进度（自 `_volume_collect_greedy` 搬出）：`(names, manifests, bins, total)`。"""
         from worker.greedy_quota import greedy_progress, load_manifests, shard_dirs_for_round
@@ -1147,15 +1348,7 @@ class TrainingVolume:
             # 包是给人看的全量；不跑第二遍、不预筛。
             return
 
-        from worker.greedy_quota import (
-            GREEDY_QUOTA_RULE_V1,
-            bin_targets,
-            is_greedy_manifest,
-            manifest_samples,
-            parse_greedy_quota,
-        )
-        from worker.volume_alloc import default_game_caps
-        from worker.volume_quota import DEFAULT_MAX_BATCHES, continuous_pairs
+        from worker.greedy_quota import bin_targets, parse_greedy_quota
 
         stages = self._volume_stages(it)
         plan = parse_greedy_quota(
@@ -1171,133 +1364,39 @@ class TrainingVolume:
         # 递归扫描由 `shard_dirs_for_round` 负责（生产布局，非 itN 直接子目录）。
         names, manifests, bins, total = self._greedy_scan(it)
         targets = bin_targets(plan)
-
-        est_s = self._volume_stage_ests_map(it)
-        est_global = int(self._volume_est or 0)
-        # 硬顶按**全局** collect_target 算（`default_game_caps` 会再除以关数）；传
-        # `per_stage_collect` 会把每关硬顶再除一次关数 ⇒ 第一波结算后即触顶，
-        # greedy 阶段提前收官（2026-11-09 S3 实测）。
-        game_caps = default_game_caps(
-            stages,
-            plan.collect_target,
-            ests=est_s,
-            mult=max(1, int(plan.cap + 0.999)),
+        budget = self._greedy_budget(
+            it, stages, targets, args, collect_target=plan.collect_target, cap=plan.cap
         )
-        width = (
-            int(getattr(args, "local_slots", 0) or 0)
-            or int(getattr(args, "workers", 0) or 0)
-            or len(stages)
+        quota = _GreedyTargets(
+            total_target=plan.total_target,
+            collect_target=plan.collect_target,
+            per_stage_target=plan.per_stage_target,
+            cap=plan.cap,
+            soft=plan.soft,
         )
-        max_batches = int(getattr(args, "volume_max_batches", 0) or DEFAULT_MAX_BATCHES)
-        start_idx = {s: 0 for s in stages}
-        ordinary = set(getattr(self, "_volume_ordinary_seeds", set()))
         stopped_no_games = False
 
-        while self._greedy_waves < max_batches:
+        while self._greedy_waves < budget.max_batches:
             names, manifests, bins, total = self._greedy_scan(it)
-            if all(int(bins[b]) >= int(targets[b]) for b in targets):
+            if all(int(bins[b]) >= int(budget.targets[b]) for b in budget.targets):
                 break
             if total >= plan.collect_target:
                 break
 
-            collected, games = _greedy_collected(manifests, stages)
-            # 重启后从已结算局数续抽，不重放已结算的 seed。
-            for s in stages:
-                start_idx[s] = max(start_idx.get(s, 0), games.get(s, 0))
-
-            plan_g = _greedy_plan_games(
-                stages,
-                collected,
-                games,
-                est_s,
-                est_global,
-                game_caps,
-                width,
-                plan.collect_target,
+            pairs = self._greedy_wave_pairs(
+                it,
+                budget,
+                manifests,
+                seed_salt=plan.seed_salt,
+                collect_target=plan.collect_target,
             )
-            if not plan_g:
+            if pairs is None:
                 stopped_no_games = True
                 break
-            pairs = continuous_pairs(
-                self._rotate_seed ^ plan.seed_salt, it, plan_g, start_idx
-            )
-            pairs = [(s, sd) for s, sd in pairs if (s, sd) not in ordinary]
-            if not pairs:
-                stopped_no_games = True
-                break
-            # 冲突过滤会削掉部分 (stage, seed)：seed 索引只能按**实际派出**的局前进，
-            # 否则被跳过的 seed 永久丢失（plan rev4 §5.1「冲突就跳过，下一波补」）。
-            # 下一波开头的 max(start_idx, games) 仍保证掉局不重派。
-            for s, _sd in pairs:
-                start_idx[s] = start_idx.get(s, 0) + 1
 
             if self._dispatch_greedy_wave(
                 it, pairs, dist_cfg, int(total), plan, bins, targets
             ):
                 break
 
-        names, manifests, bins, total = self._greedy_scan(it)
-        degraded = any(int(bins[b]) < int(targets[b]) for b in targets)
-        cap_hit = bool(degraded and total >= plan.collect_target)
-        # 2026-11-10（用户裁决）：主 rollout report 改**全量**口径。此前 greedy 波只进
-        # `_greedy_report`（死数据），`write_rollout_end` / `write_iteration` 读的是
-        # `self._report` ⇒ 控制台恒显示纯采样的 >98%，greedy 败局/超时局完全不可见。
-        # 合并前各存一份 brief，供控制台下钻「采样 vs greedy」两份读数（实现与云机腿共用一份）。
-        from worker.greedy_quota import report_brief as _brief
-
-        sampling_report = _brief(self._report)
-        greedy_report = _brief(self._greedy_report)
-        if self._greedy_report:
-            self._report = combine_reports([self._report, self._greedy_report])
-        # 全量指标：`transitions_collected` 由 `_volume_collected` 落账（不读 report）。
-        # 两边同加才守得住 e2e 的 `report.totalSamples == _volume_collected` 等式。
-        if self._volume_collected is not None:
-            self._volume_collected = int(self._volume_collected) + int(total)
-        self._greedy_stats = {
-            "rule": GREEDY_QUOTA_RULE_V1,
-            "target": int(plan.total_target),
-            "collect_target": int(plan.collect_target),
-            "cap": float(plan.cap),
-            "soft": bool(plan.soft),
-            "per_stage_target": int(plan.per_stage_target),
-            "bins": dict(bins),
-            "targets": dict(targets),
-            "total": int(total),
-            "degraded": bool(degraded),
-            "cap_hit": cap_hit,
-            "waves": int(self._greedy_waves),
-            "stopped_no_games": bool(stopped_no_games),
-            # 拆分读数（合并前的采样 / 本轮 greedy）；`merge_greedy_stats` 只挂
-            # `prefilter` 子键，这两个键会一路带进 iteration 事件。
-            "sampling_report": sampling_report,
-            "greedy_report": greedy_report,
-        }
-        # 分关 greedy 账挂到 `volume_stage_stats` 的**增量**子键：控制台的分关表能看见
-        # greedy 样本落在哪几关，同时普通配额诊断的 stages/shortfall/est_src 口径不动。
-        if isinstance(self._volume_stage_stats, dict):
-            by_stage: dict[str, dict] = {}
-            greedy_games = 0
-            for name in names:
-                mm = manifests.get(name) or {}
-                if not is_greedy_manifest(mm):
-                    continue
-                greedy_games += 1
-                row = by_stage.setdefault(
-                    str(mm.get("stage")), {"samples": 0, "games": 0}
-                )
-                row["samples"] += manifest_samples(mm)
-                row["games"] += 1
-            self._volume_stage_stats["greedy"] = {
-                "samples": int(total),
-                "games": greedy_games,
-                "stages": by_stage,
-            }
-        log(
-            f"[greedy] it{it}: 收官 bins={bins} targets={targets} total={total} "
-            f"degraded={degraded} cap_hit={cap_hit} waves={self._greedy_waves}"
-        )
-        if degraded and not plan.soft:
-            raise RuntimeError(
-                f"greedy_quota 硬目标未达成（soft=false）：bins={bins} targets={targets} "
-                f"total={total}/{plan.collect_target}"
-            )
+        self._greedy_settle(it, quota, targets, stopped_no_games=stopped_no_games)
