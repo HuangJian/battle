@@ -397,6 +397,10 @@ LAYERS: dict[str, int] = {
     # 预算：读数加进去就 1008 行）。依赖面 = stdlib + `deliver_mode`(L0，只用于类型)
     # ⇒ 拓扑秩 **L1**；`offline_deliver` 站在它上面，仍是 L2。
     "remote.deliver_state": 1,
+    # 补传**一拍编排**（2026-11-23，LOC 下沉）：`_sync` 的九段（起跑闸 → 选谁发 → 探活 →
+    # 统计批 / 权重批 → 收尾记账）与 `_PassPlan`。依赖面 = stdlib + `deliver_mode`(L0，
+    # 档位机与节奏常量) ⇒ **L1**；腿本体 `offline_deliver`(L2) 继承本混入，反向 import 不存在。
+    "remote.deliver_sync": 1,
     # 补传腿本体（投递/探活/降级）：最深依赖是 `backup_drawer`/`deliver_ledger`(L1) ⇒ 拓扑秩 **L2**。
     "remote.offline_deliver": 2,
     # 补传腿的进程模式（2026-10-07，`plan/offline-deliver-isolation.plan.md` P1）：

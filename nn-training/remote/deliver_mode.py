@@ -239,3 +239,26 @@ class ModeTracker:
                 f"｜断连 {self.disconnects}/{int(DISCONNECT_WINDOW_SEC)}s）"
             )
         return self.mode
+
+
+#: ## 补传的节奏常量（2026-11-23，随 `remote/deliver_sync` 一起下沉）
+#:
+#: 为什么住这里：三个常量同属「一拍怎么排」的**节奏**面（与 `ModeTracker` 的
+#: `round_period_sec` / `need_bps` 同一主题），读者是 `deliver_sync`(L1) 与
+#: `offline_deliver`(L2)。放在任何一个 L1 模块都会让 `deliver_sync` 变成 L2（与腿本体
+#: 同秩 ⇒ DAG 不允许）；留在腿本体又会让「多一个助手」再撞一次 1000 行预算。
+#: 旧家 `offline_deliver` 仍以 `as` 再导出（历史 import 不改名）。
+# 探测/宽限/超时的缺省与它们的长注在 `remote/deliver_spec`（P0-3：随构造旋钮一起搬走，
+# 本文件只保留 re-export，历史 import 一行不改）。
+#: `_disable`（401/403）后的**冷却**（秒）：到点自动清空停用状态并重探一次。
+#: 为什么不是「一停到底」（2026-10-16，评审 F1/C1）：token 轮换 / hub 换实例都会让 401 变成
+#: 暂时现象，而 `_sync` 首行 return 会让本会话**零尝试**——现场「27 轮 0 送达」的高相容解释之一。
+#: 冷却只影响「自己重试」的节奏，不改「401 立刻停用、当拍不重试」那条口径（D9 闭锁）。
+DISABLE_COOLDOWN_SEC = 600.0
+#: 一次 `sync()` 最多吃几次**传输失败**（每次失败已经付掉一个超时窗口：60s 一次，
+#: 两次就是这条腿这一拍的预算）。超了就把剩下的留给下一拍 —— 这是「不阻塞」的另一半：
+#: 继续推后面的轮次，但**不许**把一拍拖成 4×60s（段末 90s 预算会被吃穿）。
+MAX_FAILS_PER_PASS = 2
+#: 同一类不可用日志的最小间隔（秒）——hub 关机时每轮一条就够了。
+#: ⚠ 只给 `unreachable` / `probe` 用；`transport` 走三触发（见上）。
+LOG_THROTTLE_SEC = 300.0

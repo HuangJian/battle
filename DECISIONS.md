@@ -10579,3 +10579,29 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   readings）**全一致**，四种判决全覆盖；`Any` 基线 13 未动（`spec` / `rule` 走 TYPE_CHECKING 的
   `GatesSpec` / `GateRule`）；同名散落 146 未动（助手从 `_reading` 改名 `_rule_reading`，避开第 3
   份）；nn `7009 passed / 3 skipped`。全文 → `docs/nn/engineering.md` §333。
+
+## §2026-11-23-offline-sync-face
+
+- **背景**：`remote/offline_deliver._sync` 162 行 —— §331 分诊点名的「最烂一格」。一拍的五件事
+  （起跑闸 / 选谁发 / 探活 / 统计批 / 权重批 / 收尾记账）直排在一个窗口里，且三条早退各抄一套
+  retry 簿记。原地按段拆会撞 LOC 预算：腿本体 **991 / 1000**，拆完 1020。
+
+- **决定**（§5.7「先拆再收」）：整面搬进 **`remote/deliver_sync.py`**（`DeliverPassMixin`，L1）
+  ——`_sync`(41) + `_pass_gate`(11) / `_plan_pass`(35) / `_record_probe_fail`(9) / `_send_metrics`(9) /
+  `_settle_metrics_only`(11) / `_order_todo`(9) / `_deliver_todo`(58) / `_settle_pass`(14) +
+  frozen `_PassPlan(todo, gap)`；腿本体 991 → **897**。三个节奏常量
+  （`DISABLE_COOLDOWN_SEC` / `MAX_FAILS_PER_PASS` / `LOG_THROTTLE_SEC`）下沉 `deliver_mode`(L0)
+  并保留 `as` 再导出；`LONG_FUNCS_BASELINE` 2 → 1（总 67 → 66），`LAYERS` 登记 `deliver_sync: 1`。
+
+- **被否决**：① 不搬模块、靠合并助手与删 `_PassPlan` 硬压行数 —— 算下来正好 1000（门禁判
+  「≥1000」），且把刚拆出的命名缝又捏回去；② 常量进 `deliver_spec`(L1) —— `deliver_sync` 被顶成
+  L2，与腿本体同秩，`test_remote_dag` 两条严格向下断言当场红；③ 为三个常量再开
+  `deliver_timing` —— 多一条账本只为三行数，而 `deliver_mode` 本就是 L0 的节奏家；④ 宿主面用
+  `TYPE_CHECKING` 的 `def` 存根 —— 同名账本 146 → 148（`probe` / `pending_anchors` 各成第 3 份），
+  改用 `Callable` 注解；⑤ 顺手 `ruff format` 腿本体 —— HEAD 本就不是格式干净的，会掺进 ~40 处
+  无关漂移；⑥ 删掉 `_deliver_todo` 里没人读的 `sent` —— 与本刀无关的死代码清理另开。
+
+- **验证**：HEAD-vs-新 **2000 组**行为差分全一致（返回值 + 八项记账 + 落盘次数 + 统计批入参 +
+  投递顺序）；覆盖 `ret>0` 409 / 统计 271 / 投递 652 / 落盘 623 / 降级 139；敏感性探针
+  （`stop` 改回 `break`）→ 540 组红；语句级对账 10 处差异 = 预期接线。nn 门禁 **7009 passed /
+  3 skipped**；同名散落 146 未动。全文 → `docs/nn/engineering.md` §334。

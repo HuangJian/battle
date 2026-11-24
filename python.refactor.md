@@ -342,6 +342,10 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
   > 第五格也落地了：`worker/gate_check.evaluate` 171 → 64（+ 五个助手），判决改表驱动
   > （`_SPLIT_KINDS` / `_RULE_PASSES` / `_ADVANCE_CONDITIONS` / `_ADVANCE_VETOES` + frozen
   > `_AdvancePreps`）；HEAD-vs-新 9450 组矩阵差分全一致，存量 68 → 67（engineering §333）。
+  > 第二格（§331 点名的「最烂一格」）也落地了：`remote/offline_deliver._sync` 162 → 41
+  > （+ 八段，frozen `_PassPlan` 收两批），整面搬进 `remote/deliver_sync`(L1) —— 腿本体 LOC
+  > 991/1000 撞顶，按 §5.7「先拆再收」；三个节奏常量随之下沉 `deliver_mode`(L0)。
+  > HEAD-vs-新 2000 组行为差分全一致（敏感性探针 540 组红），存量 67 → 66（engineering §334）。
 
 **为什么这是问题**
 

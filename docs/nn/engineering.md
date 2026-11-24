@@ -29,6 +29,64 @@
 
 ---
 
+## §334 P0-2 存量：`remote/offline_deliver._sync`（162 → 41 + 八段；顺带把「一拍编排」整家搬进 `remote/deliver_sync`）（2026-11-23）
+
+§331 分诊里点的「最烂一格」。判据不是行数：`_sync` 把**一拍的五件事**（起跑闸 → 选谁发 →
+探活 → 统计批 / 权重批 → 收尾记账）直排在一个窗口里，而每段都带着「早退时必须抄哪几笔账」的
+隐性知识 —— `if not todo` 那条早退自带一套 `_retry_n` / `_last_error` / `_next_try` 清理，
+和末尾的收尾**不是**同一份代码；改统计批的人必须同时读末尾，才知道 `changed` 从哪来。
+
+**先撞上的不是切法，是预算**：腿本体 LOC **991 / 1000**（`test_python_loc_budget` 的口径：
+去掉空行 / 纯注释 / docstring）。原地按段拆到 **1020** ⇒ 门禁红。按 §5.7 与 §230 的纪律
+（「改法撞 LOC 上限 ⇒ 先拆再收」）：先把**整面**搬进 `remote/deliver_sync.py`
+（`DeliverPassMixin`，**L1**），再按段拆 —— 腿本体落回 **897**，新家 175。
+
+**切法**（每个助手只回答一个问题；判据与语句顺序一字未动，只把早退改成返回值）
+
+| 段 | 行 | 回答什么 |
+|---|---|---|
+| `_sync` | 41 | 编排：起跑闸 → 选谁 → 探活 → 统计批 / 权重批 → 收尾 |
+| `_pass_gate` | 11 | 这一拍该不该起跑（停用档记一次「下次何时再试」） |
+| `_plan_pass` | 35 | 这一拍发谁（锚点轮 / 重投 + 统计批缺口；空 ⇒ `None` 顺手清失败面） |
+| `_record_probe_fail` | 9 | 探活没过的可观测面（负缓存长度，不做退避判决） |
+| `_send_metrics` | 9 | 统计批先走（小件优先），返回「账本要不要落盘」 |
+| `_settle_metrics_only` | 11 | 只有统计的那一拍怎么收尾 |
+| `_order_todo` | 9 | 段末最新一轮排最前（D-1） |
+| `_deliver_todo` | 58 | 权重批逐轮投递与销账（G2：失败不 `break`，上限 `MAX_FAILS_PER_PASS`） |
+| `_settle_pass` | 14 | 收尾：落盘 + 失败面 |
+
+`_PassPlan(todo, gap)`（frozen）是两批的唯一入口：原文里它们是两个跨了几十行的局部列表，
+回传时按名字给、不靠位置。
+
+**常量为什么下沉 `deliver_mode`(L0)**：`DISABLE_COOLDOWN_SEC` / `MAX_FAILS_PER_PASS` /
+`LOG_THROTTLE_SEC` 读者是 `deliver_sync`(L1) 与腿本体(L2)。放进 `deliver_spec`(L1) 会把
+`deliver_sync` 顶成 **L2** —— 与它要服务的腿本体同秩，`test_remote_dag` 的两条严格向下
+断言当场红（实测）。`deliver_mode` 是既有的 L0「节奏」家（`ModeTracker.round_period_sec` /
+`need_bps`），三个常量与它同主题；`offline_deliver` 仍以 `as` 再导出（历史 import 与用例
+一行不改）。
+
+**证据（三向）**
+
+1. **语句级对账**：HEAD 版 `_sync` 体内 93 条语句，逐条在九段里找 → 10 条「找不到」，全部是
+   预期的接线变化（3 处早退改返回值、探活失败块提成助手、`changed = False` 改进 `_send_metrics`
+   的返回、统计条件反转成早退、`bool(...)` 收口、统计-only 收尾提成助手、D-1 重排改返回值）；
+   没有一条语句丢失或换序。
+2. **行为差分**：替身吃掉 IO（探活 / 投递 / 统计批 / 落盘 / 时钟），固定种子枚举 **2000 组**
+   分支面（mode × 探活 × 停用 × gap × todo × 五种 outcome × `sync_cap` × `force_probe` ×
+   budget × 降级 × rowless）→ 返回值与 `_retry_n` / `_last_error` / `_next_try` / `_repost` /
+   `_metrics_sent` / `_metrics_owed` / `_post_failures` / 落盘次数 / 统计批入参（含剩余预算）/
+   投递顺序 / 两枚投递中标志 **2000 组全一致**。
+3. **矩阵不是空转**：同一批场景的覆盖读数 = `ret>0` 409 · 统计批真被调 271 · `posted>0` 652 ·
+   落盘 623 · 四种失败原因全覆盖 · 降级 139；把新版「失败不 `break`」改回 `break`（G2 的反面）
+   后 **540 组**立刻不一致 ⇒ 差分是敏感的。
+
+**守卫读数**：`LONG_FUNCS_BASELINE` 的 `remote/offline_deliver.py` 2 → 1（`_sync` 搬走；
+`__init__` 155 行留守），总存量 67 → 66；同名散落 **146 未动** —— `probe` / `pending_anchors`
+的宿主面用 `Callable` 注解而不是 `TYPE_CHECKING` 存根（存根会被 `tools/reuse_audit.py` 计成
+第三份定义，实测 148）；`Any` 基线未动。nn 门禁 `7009 passed / 3 skipped`。
+
+---
+
 ## §333 P0-2 存量：`worker/gate_check.evaluate`（171 → 64 + 表驱动判决）（2026-11-23）
 
 §331 分诊里第五格。判据是「**171 行只有 6 条顶层语句**」：函数自己不长在控制流里，而长在
