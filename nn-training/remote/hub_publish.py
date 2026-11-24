@@ -27,7 +27,7 @@ import json
 import shutil
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 from common.fs import append_jsonl
 from common.hashing import sha256_bytes, sha256_file
@@ -165,23 +165,12 @@ def _publish_facts(spec: PublishSpec) -> PublishFacts:
     )
 
 
-def _publish_stage(spec: PublishSpec, facts: PublishFacts) -> PublishStaged:
-    """第二相：manifest 预建 + job 身份守卫 + payload 附带文件（plan/init）落临时区。"""
-    import remote.opt_delta as opt_delta
-    import remote.weights_delta as weights_delta
-
-    job_root_p = Path(spec.job_root)
-    kind = facts.kind
-    rollout_spec = facts.rollout_spec
-    # 4) manifest 预建（payload_sha256 占位）→ 打包（payload 内不再带占位 manifest）
-    extra_files: list[Path] = []
-    tmp_extra_dir = job_root_p / ".extra_tmp"
-    from remote.replay_corpus import attach_converter, converter_sha
+def _stage_manifest(spec: PublishSpec, facts: PublishFacts) -> tuple[dict[str, object], bool]:
+    """4) manifest 预建（`payload_sha256` 占位）：纯数据，不碰盘。返回 (m, 是否 replay 语料)。"""
+    from remote.replay_corpus import converter_sha
 
     _is_replay = str(spec.corpus_fmt or "full") == "replay"
-    # ⚠ 这个 mkdir 刻意**挪到守卫之后**（下方 4b）：守卫要求「拒发时不留任何痕迹」，
-    # 而 `.extra_tmp` 也算痕迹（半份 job 目录比没有 job 更危险）。
-    m: dict[str, Any] = {
+    m: dict[str, object] = {
         "proto": 1,
         "runId": spec.run_id,
         "it": spec.it,
@@ -231,6 +220,20 @@ def _publish_stage(spec: PublishSpec, facts: PublishFacts) -> PublishStaged:
     # job 身份：幂等键的五个分量在上面那份字面量里就齐了（下面只补**非键**字段），
     # 所以刻意在这里算出来——守卫要在**任何写盘之前**用它。
     m["job_id"] = make_job_id(m)
+    return m, _is_replay
+
+
+def _stage_scaffold(
+    spec: PublishSpec,
+    m: dict[str, object],
+    job_root_p: Path,
+    tmp_extra_dir: Path,
+    extra_files: list[Path],
+    is_replay: bool,
+) -> None:
+    """4b) 发布端守卫（**任何写盘之前**）+ 临时区 + 转换器 bundle；拒发时不留任何痕迹。"""
+    from remote.replay_corpus import attach_converter
+
     # 4b) **发布端守卫**（2026-09-24 job 身份事故，plan/job-identity-collision.plan.md §3.3）：
     #     同一条 job 身份不许被**别的课程**占用。判据的唯一实现在 `protocol.collision_rows`。
     #     位置：job_id 算完之后、**任何写盘之前**——拒发时不留 job 目录、不留账本行、
@@ -250,10 +253,25 @@ def _publish_stage(spec: PublishSpec, facts: PublishFacts) -> PublishStaged:
             "而 hub 无法在两者间区分归属（两个训练轮会读到同一份结果）。"
             "处置：给其中一门课不同的课程文件（改注释也算），或换 runId 重启那条腿。"
         )
+    # ⚠ 这个 mkdir 刻意**挪到守卫之后**（下方 4b）：守卫要求「拒发时不留任何痕迹」，
+    # 而 `.extra_tmp` 也算痕迹（半份 job 目录比没有 job 更危险）。
     tmp_extra_dir.mkdir(parents=True, exist_ok=True)
     # trainer 预构建的转换器 bundle：随 payload 根下发（worker 只跑不建；full = no-op）。
-    if _is_replay:
+    if is_replay:
         attach_converter(extra_files, tmp_extra_dir, spec.replay_converter_path or "")
+
+
+def _stage_payload_extras(
+    spec: PublishSpec,
+    facts: PublishFacts,
+    m: dict[str, object],
+    extra_files: list[Path],
+    tmp_extra_dir: Path,
+) -> None:
+    """payload 附带文件（ts_code / plan / init_weights）：写进 `m` 与 `extra_files`。"""
+    kind = facts.kind
+    rollout_spec = facts.rollout_spec
+
     if rollout_spec is not None:
         m["ts_code_sha256"] = str(spec.ts_code_sha256)
         m["rollout"] = rollout_spec
@@ -289,6 +307,16 @@ def _publish_stage(spec: PublishSpec, facts: PublishFacts) -> PublishStaged:
         extra_files.append(init_copy)
     # M2（B2）：不再打 payload 内 opt_init.tar.b64 —— 全仓无读取方（opt 只从
     # manifest["opt_init"] / opt_sha blob 取）。
+
+
+def _stage_keys(
+    spec: PublishSpec, facts: PublishFacts, job_root_p: Path, m: dict[str, object]
+) -> None:
+    """5) 两套键（BC / PPO）+ 续接/形态位 + 非身份附加键；`m` 原地改。"""
+    import remote.opt_delta as opt_delta
+    import remote.weights_delta as weights_delta
+
+    kind = facts.kind
     if kind == "bc":
         # BC manifest：免除 PPO 专有键（与 protocol.MANIFEST_BC_EXEMPT 同表），并入 extra
         for k in ("kl_coef", "kl_cap", "adv_norm", "normalize_ret", "kickstart_kl", "ent_coef"):
@@ -344,6 +372,23 @@ def _publish_stage(spec: PublishSpec, facts: PublishFacts) -> PublishStaged:
     # 变成两个 job。缺省由 kind 推（同一份快照，不引入第二个读盘点）；显式 `role=` 可覆盖。
     # 旧 hub/旧 worker 忽略未知键 ⇒ 没这个字段的旧 job 由 `role_of` 按 kind 兜底。
     m[ROLE_FIELD] = spec.role if spec.role in ROLES else role_of({"kind": kind})
+
+
+def _publish_stage(spec: PublishSpec, facts: PublishFacts) -> PublishStaged:
+    """第二相：manifest 预建 + job 身份守卫 + payload 附带文件（plan/init）落临时区。
+
+    四段（2026-11-24，长函数存量）：`_stage_manifest`（纯数据 + job_id）→
+    `_stage_scaffold`（身份守卫 + 临时区 + 转换器）→ `_stage_payload_extras`（附带文件）→
+    `_stage_keys`（BC/PPO 键集 + 续接/形态位）。顺序 = 原函数 `# 4)` 起的语句顺序：守卫仍在
+    **任何写盘之前**，manifest 的键插入序（= payload 里那份占位副本的字节序）逐条未动。
+    """
+    job_root_p = Path(spec.job_root)
+    extra_files: list[Path] = []
+    tmp_extra_dir = job_root_p / ".extra_tmp"
+    m, is_replay = _stage_manifest(spec, facts)
+    _stage_scaffold(spec, m, job_root_p, tmp_extra_dir, extra_files, is_replay)
+    _stage_payload_extras(spec, facts, m, extra_files, tmp_extra_dir)
+    _stage_keys(spec, facts, job_root_p, m)
     jid = str(m["job_id"])
     jd = job_root_p / jid
     return PublishStaged(

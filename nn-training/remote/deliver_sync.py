@@ -228,7 +228,6 @@ class DeliverPassMixin:
     ) -> tuple[int, bool]:
         """权重批：逐轮 `_post_artifact_guarded` 并销账；返回 `(done, 账本要不要落盘)`。"""
         done = 0
-        sent: list[int] = []
         fails = 0
         for it in todo[: self.sync_cap]:
             if deadline is not None and self._now() >= deadline:
@@ -255,7 +254,6 @@ class DeliverPassMixin:
                 self._post_failures.pop(it, None)
             if outcome == "ok":
                 done += 1
-                sent.append(it)
                 # `row` **真的**随这一趟到达才销统计账（评审 P1-7）：权重体可能因为账本行与
                 # 权重指纹不符而没有 `row`（`build_round_body` 宁可不带），那一轮必须留给
                 # 统计批再试——否则「权重到了、统计永久丢」且账本显示已送。

@@ -346,6 +346,12 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
   > （+ 八段，frozen `_PassPlan` 收两批），整面搬进 `remote/deliver_sync`(L1) —— 腿本体 LOC
   > 991/1000 撞顶，按 §5.7「先拆再收」；三个节奏常量随之下沉 `deliver_mode`(L0)。
   > HEAD-vs-新 2000 组行为差分全一致（敏感性探针 540 组红），存量 67 → 66（engineering §334）。
+  > 第三格也落地了：`trainer/queue_local.rescan_nodes` 186 → 139（+ 四个判断助手
+  > `_rescan_candidates` / `_rearm_room` / `_rescan_ready` / `_rescan_admit`）；语句对账 92 → 90，
+  > A4 回场/上界用例全绿，存量 66 → 65（engineering §335）。
+  > 第五格也落地了：`remote/hub_publish._publish_stage` 188 → 24（+ `_stage_manifest` /
+  > `_stage_scaffold` / `_stage_payload_extras` / `_stage_keys`）；发布字节级 A/B 全同、`Any` 1 → 0，
+  > 存量 65 → 64（engineering §336）。§334 留的死 `sent` 顺手删掉（engineering §337）。
 
 **为什么这是问题**
 

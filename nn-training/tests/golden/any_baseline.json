@@ -183,7 +183,6 @@
     "remote/rollout_relay.py": 1,
     "worker/cloud_sampling.py": 2,
     "worker/iter_run.py": 3,
-    "worker/ppo/vram.py": 5,
-    "remote/hub_publish.py": 1
+    "worker/ppo/vram.py": 5
   }
 }

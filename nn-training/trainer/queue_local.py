@@ -708,6 +708,100 @@ class RescanSpec:
     rearm_warned: set[str] | None = None
 
 
+def _rescan_candidates(
+    spec: RescanSpec,
+    configured: list[dict],
+    streaks: dict[str, int],
+    soft_streaks: dict[str, int],
+) -> list[tuple[dict, str, str]]:
+    """这一拍的候选：尚未孵化（`new`）∪ 已停派（`rearm`），持锁取一份一致快照。
+
+    判据仍是原来那两句（`spawned_ids` 未命中 / 熔断或软停计数越线），只是从循环体里搬出来：
+    「谁被跳过」不该和「怎么并行 ping、怎么补孵」挤在同一个窗口里。
+    """
+    with spec.lock:
+        cands: list[tuple[dict, str, str]] = []
+        for n in configured:
+            nid = str(n.get("id") or n.get("url") or "?")
+            if nid not in spec.spawned_ids:
+                cands.append((n, nid, "new"))
+            elif (
+                streaks.get(nid, 0) >= spec.fail_streak_max
+                or soft_streaks.get(nid, 0) >= spec.soft_streak_max
+            ):
+                cands.append((n, nid, "rearm"))
+    return cands
+
+
+def _rearm_room(
+    spec: RescanSpec, nid: str, rearm_counts: dict[str, int], rearm_warned: set[str]
+) -> bool:
+    """回场上界：每节点每轮最多补孵 `rearm_cap` 次；用尽 ⇒ False（首次告警只喊一次）。
+
+    告警跟着「第一次撞上上界」发，所以 `rearm_warned` 在这里加，而不是在调用方。
+    """
+    with spec.lock:
+        capped = rearm_counts.get(nid, 0) >= spec.rearm_cap
+        first_warn = capped and nid not in rearm_warned
+        if first_warn:
+            rearm_warned.add(nid)
+    if not capped:
+        return True
+    if first_warn:
+        log(
+            f"[dist] rescan {nid}: 本轮回场上界 {spec.rearm_cap} 次已用尽 — "
+            f"不再补孵（节点持续失败，见日志根因）"
+        )
+    return False
+
+
+def _rescan_ready(spec: RescanSpec, n: dict, nid: str, ping: dict, iter_id: str) -> bool:
+    """回场前三道门：codeHash → bun 版本 → 本轮 bootId；任一道不过 ⇒ False。
+
+    `iter_id` 按**名字**传进来（不从 `spec` 取）：`round_key("rollout", iter_id)` 这个表达式必须与
+    `trainer/dispatch_state.py` 的钉逐字同形，`tests/worker/test_node_identity.py` 比的就是它。
+    """
+    if _rescan_stale_code(
+        nid, n, ping, spec.code_hash, spec.upgrade_branch, spec.dirty_files
+    ):
+        return False
+    remote_full = str(ping.get("bunVersion", "?"))
+    # mm 就地内联（param 已删）：major.minor 一致性红线（确定性，M4）
+    if ".".join(remote_full.split(".")[:2]) != ".".join(str(spec.local_bun).split(".")[:2]):
+        return False
+    # 中途上线/回场前再核一次本轮 bootId（与 dispatch 的钉**同一个键**——两处必
+    # 共用 `round_key("rollout", iter_id)`，见 biz/node_identity 与它的接线守卫）：
+    # 不一致 = 这一轮里这个端口换过进程 ⇒ 本轮不再回场（下一轮重新钉）。
+    boot_why = node_identity.note_ping(
+        node_identity.round_key("rollout", iter_id), nid, ping
+    )
+    if boot_why:
+        log(f"[dist] rescan {nid}: {boot_why} — 本轮不再回场")
+        return False
+    return True
+
+
+def _rescan_admit(
+    spec: RescanSpec,
+    nid: str,
+    why: str,
+    nd: dict,
+    streaks: dict[str, int],
+    soft_streaks: dict[str, int],
+    rearm_counts: dict[str, int],
+) -> None:
+    """锁内登记这节点：入 `alive`（仅 `new`）/ 重置失败计数 / 记一次回场。"""
+    with spec.lock:
+        spec.spawned_ids.add(nid)
+        if why == "new":
+            spec.alive.append(nd)
+        # 回场：重置失败计数（否则 worker 在循环顶部立刻又 return）。
+        streaks[nid] = 0
+        soft_streaks[nid] = 0
+        if why == "rearm":
+            rearm_counts[nid] = rearm_counts.get(nid, 0) + 1
+
+
 def rescan_nodes(spec: RescanSpec) -> None:
     """v3.9 动态节点发现线程主体（`dispatch.run()` spawn，输入 = 一个 `RescanSpec`）。
 
@@ -736,16 +830,14 @@ def rescan_nodes(spec: RescanSpec) -> None:
       · ping 并行（与 B/C 层同款）；补 `kind=wkind` —— 旧实现漏传 kind，goal/intent
         腿的中途上线节点会把权重发进 rollout 桶，任务全 409；
       · `nd` 带 `ping`（旧实现漏带 ⇒ stageJson 任务在回场节点上被能力握手拒掉）。
+
+    分段（2026-11-24，长函数存量）：这一面原先 186 行直排 —— 候选快照 / 回场上界 / 三道门 /
+    锁内登记各是一个可独立读的判据，现在各住 `_rescan_candidates` / `_rearm_room` /
+    `_rescan_ready` / `_rescan_admit`；循环体只剩「等 → 取候选 → 并行 ping → 逐台过门 → 补孵」。
+    判据与语句顺序逐条未动。
     """
-    # 解包（方法体逐字保留）：要改语义请改 `RescanSpec` 或函数体，别把「参数没了」当逻辑变了。
+    # 解包（本线程自己那份）：三道门 / 回场上界 / 候选判据直接读 `spec`（见上面四个助手）。
     cfg = spec.cfg
-    code_hash = spec.code_hash
-    upgrade_branch = spec.upgrade_branch
-    dirty_files = spec.dirty_files
-    local_bun = spec.local_bun
-    spawned_ids = spec.spawned_ids
-    alive = spec.alive
-    lock = spec.lock
     weights_bytes = spec.weights_bytes
     iter_id = spec.iter_id
     wver = spec.wver
@@ -761,9 +853,6 @@ def rescan_nodes(spec: RescanSpec) -> None:
     wkind = spec.wkind
     streaks = spec.streaks
     soft_streaks = spec.soft_streaks
-    fail_streak_max = spec.fail_streak_max
-    soft_streak_max = spec.soft_streak_max
-    rearm_cap = spec.rearm_cap
     rearm_warned = spec.rearm_warned
     #: 补孵的采样线程归它（名字 `queue-rescan-rearm:<节点>`）。建在**本线程体内**：
     #: 这份 Runtime 的生命期 = rescan 线程自己，不是跨轮单例；谁等线程仍由调用方的
@@ -804,17 +893,7 @@ def rescan_nodes(spec: RescanSpec) -> None:
         next_probe_at = time.time() + max(0.05, rescan_sec)
 
         # 候选 = 尚未孵化 ∪ 已停派（真故障熔断 / 连续瞬断软停）。
-        with lock:
-            cands: list[tuple[dict, str, str]] = []
-            for n in configured:
-                nid = str(n.get("id") or n.get("url") or "?")
-                if nid not in spawned_ids:
-                    cands.append((n, nid, "new"))
-                elif (
-                    streaks.get(nid, 0) >= fail_streak_max
-                    or soft_streaks.get(nid, 0) >= soft_streak_max
-                ):
-                    cands.append((n, nid, "rearm"))
+        cands = _rescan_candidates(spec, configured, streaks, soft_streaks)
         if not cands:
             continue
         # 并行 ping（串行 3s/台 会让一个 pass 卡十几秒，与 B/C 层同款修法）。
@@ -825,33 +904,9 @@ def rescan_nodes(spec: RescanSpec) -> None:
             if ping is None:
                 continue  # 仍未上线，下个 pass 再试
             # 回场上界：每节点每轮最多补孵 rearm_cap 次（防「永远失败的节点」无限起线程）。
-            if why == "rearm":
-                with lock:
-                    capped = rearm_counts.get(nid, 0) >= rearm_cap
-                    first_warn = capped and nid not in rearm_warned
-                    if first_warn:
-                        rearm_warned.add(nid)
-                if capped:
-                    if first_warn:
-                        log(
-                            f"[dist] rescan {nid}: 本轮回场上界 {rearm_cap} 次已用尽 — "
-                            f"不再补孵（节点持续失败，见日志根因）"
-                        )
-                    continue
-            if _rescan_stale_code(nid, n, ping, code_hash, upgrade_branch, dirty_files):
+            if why == "rearm" and not _rearm_room(spec, nid, rearm_counts, rearm_warned):
                 continue
-            remote_full = str(ping.get("bunVersion", "?"))
-            # mm 就地内联（param 已删）：major.minor 一致性红线（确定性，M4）
-            if ".".join(remote_full.split(".")[:2]) != ".".join(str(local_bun).split(".")[:2]):
-                continue
-            # 中途上线/回场前再核一次本轮 bootId（与 dispatch 的钉**同一个键**——两处必
-            # 共用 `round_key("rollout", iter_id)`，见 biz/node_identity 与它的接线守卫）：
-            # 不一致 = 这一轮里这个端口换过进程 ⇒ 本轮不再回场（下一轮重新钉）。
-            boot_why = node_identity.note_ping(
-                node_identity.round_key("rollout", iter_id), nid, ping
-            )
-            if boot_why:
-                log(f"[dist] rescan {nid}: {boot_why} — 本轮不再回场")
+            if not _rescan_ready(spec, n, nid, ping, iter_id):
                 continue
             # 与 rollout 腿同一份口径（2026-11-14）：config 优先，缺省 workers → cpus。
             c_n = common.distribution.node_slots(
@@ -871,15 +926,7 @@ def rescan_nodes(spec: RescanSpec) -> None:
                 "c": c_n,
                 "ping": ping,
             }
-            with lock:
-                spawned_ids.add(nid)
-                if why == "new":
-                    alive.append(nd)
-                # 回场：重置失败计数（否则 worker 在循环顶部立刻又 return）。
-                streaks[nid] = 0
-                soft_streaks[nid] = 0
-                if why == "rearm":
-                    rearm_counts[nid] = rearm_counts.get(nid, 0) + 1
+            _rescan_admit(spec, nid, why, nd, streaks, soft_streaks, rearm_counts)
             if why == "new":
                 log(
                     f"[dist] rescan: node {nid} online mid-run — weights {mode}, "
@@ -889,7 +936,7 @@ def rescan_nodes(spec: RescanSpec) -> None:
                 log(
                     f"[dist] rescan: node {nid} 回场（此前停派）— weights {mode}，"
                     f"重置失败计数并补孵 {c_n} 个采样线程"
-                    f"（第 {rearm_counts[nid]}/{rearm_cap} 次）"
+                    f"（第 {rearm_counts[nid]}/{spec.rearm_cap} 次）"
                 )
             for _ in range(c_n):
                 t = rt.thread(worker, nd, name=f"rearm:{nd.get('id')}", daemon=True)

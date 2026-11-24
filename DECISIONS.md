@@ -10605,3 +10605,53 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   投递顺序）；覆盖 `ret>0` 409 / 统计 271 / 投递 652 / 落盘 623 / 降级 139；敏感性探针
   （`stop` 改回 `break`）→ 540 组红；语句级对账 10 处差异 = 预期接线。nn 门禁 **7009 passed /
   3 skipped**；同名散落 146 未动。全文 → `docs/nn/engineering.md` §334。
+
+## §2026-11-24-rescan-pass
+
+- **背景**：`trainer/queue_local.rescan_nodes` 186 行（§331 分诊第三格）：候选快照 / 回场上界 /
+  三道门（codeHash · bun 版本 · 本轮 bootId）/ 锁内登记四类判据直排在一个 `while` 里，跳过一台
+  节点的形态是四个散开的 `continue`。
+
+- **决定**：四个判据各成一个助手（`_rescan_candidates` / `_rearm_room` / `_rescan_ready` /
+  `_rescan_admit`），`rescan_nodes` 186 → **139**；解包块只留本线程有读者的字段；`iter_id` 按名字
+  传（`round_key("rollout", iter_id)` 必须与 `dispatch_state.py` 的钉同形）。`LONG_FUNCS_BASELINE`
+  该文件 1 → 0；文件 LOC 813 → 832（限额 1000）。
+
+- **被否决**：① 四条判据再收一个「判断器」类 —— `RescanSpec` 刚收掉 27 参，第二层对象是同一张
+  脸的再搬家；② 助手收解包后的十几个局部（8~10 参/助手）—— 宽签名闸已清零，且正是 `RescanSpec`
+  要消灭的成因面；③ 整面搬进新模块 —— 813/1000 无预算压力；④ `spec.iter_id` ——
+  `test_node_identity` 的文本判据当场红（实测）。
+
+- **验证**：语句对账 92 → 90（only_old 7 / only_new 11，逐条归为调用文本 + `<exit>` + 助手调用）；
+  `test_rollout_dispatch_resilience`（A4 回场 / 上界）· `test_rescan_spec` · `test_node_identity` 全绿；
+  门禁 7009 passed / 3 skipped。全文 → `docs/nn/engineering.md` §335。
+
+## §2026-11-24-publish-stage
+
+- **背景**：`remote/hub_publish._publish_stage` 188 行（§331 分诊第五格）：manifest 预建 + job_id /
+  身份守卫 / 临时区与转换器 / 附带文件 / 两套键 / 续接与形态位 / 附加键，七件事一个窗口；
+  「守卫在任何写盘之前」与 manifest 键插入序（payload 字节）是隐性契约。
+
+- **决定**：按原语句的连续区间拆成 `_stage_manifest`(56) / `_stage_scaffold`(36) /
+  `_stage_payload_extras`(44) / `_stage_keys`(63)，`_publish_stage` 188 → **24**；新助手的 `m`
+  注 `dict[str, object]`（`Any` 1 → 0，基线条目删除）；`LONG_FUNCS_BASELINE` 该文件 1 → 0
+  （与 rescan 合计 66 → 64）。
+
+- **被否决**：① 按 manifest 键分组拆字面量 —— 键序即 payload 字节，多个字面量要靠调用顺序维持，
+  比一份纯数据更难核对；② 用 `PublishStaged` 当 builder —— 它是返回形状，双用途；③ `_stage_keys`
+  自己再解析一次 `spec.job_root` —— 同字段两份解析；④ 新助手沿用 `dict[str, Any]` —— G14 只减不增。
+
+- **验证**：语句对账 65 → 71（only_old 2 / only_new 8，全部预期接线）；**字节级 A/B**（HEAD 在
+  detached worktree 里跑同一 `PublishSpec`）：job_id / manifest / payload 成员 sha256 / job 文件表 /
+  `job_pending` 事件（除 ts）全同；门禁 7009 passed / 3 skipped。全文 → `docs/nn/engineering.md` §336。
+
+## §2026-11-24-deliver-sent-dead
+
+- **背景**：`remote/deliver_sync._deliver_todo` 里 `sent` 只被 append、从无读者（§334 记账时点名的小清理）。
+
+- **决定**：删掉声明与 append 两行，返回值仍是 `(done, changed)`。
+
+- **被否决**：把它接进返回值 —— 没有调用方要这份列表，加返回值是新增语义。
+
+- **验证**：`grep -n "sent" remote/deliver_sync.py` 为空；deliver 族用例全绿；门禁 7009 passed /
+  3 skipped。全文 → `docs/nn/engineering.md` §337。

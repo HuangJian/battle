@@ -29,6 +29,82 @@
 
 ---
 
+## §337 `remote/deliver_sync._deliver_todo`：删掉没人读的 `sent`（2026-11-24）
+
+§334 记账时留的「另开一刀」。`sent: list[int] = []` + `sent.append(it)` 两行，全仓无读者 ——
+返回值只有 `(done, changed)`，日志 / 账本 / 下一拍照不读这份「本拍送出去的轮次」。删掉，不动别的。
+
+**验证**：`grep -n "sent" remote/deliver_sync.py` 为空；`tests/remote/test_offline_deliver*.py` /
+`test_deliver_mode.py` 全绿；门禁 7009 passed / 3 skipped。**被否决**：把它接进返回值给调用方 ——
+没有任何调用方要这份列表（`_sync` 只把 `done` 交给 `_settle_pass`），加返回值是新增语义而非清理。
+
+## §336 分诊第五格：`remote/hub_publish._publish_stage` 188 → 24 + 四段（2026-11-24）
+
+发布三相的中间一相，188 行直排七件事：4) manifest 预建 + job_id → 4b) 身份撞车守卫（写盘之前）→
+临时区 + replay 转换器 → rollout / plan / init 附带文件 → BC/PPO 两套键 → 续接与形态位
+（`opt_from` / `opt_fmt` / `w_fmt`）→ 非身份附加键（`course_name` / `dispatch` / `role`）。守卫的
+「拒发时不留任何痕迹」与 `.extra_tmp` 的 mkdir 顺序、manifest 的**键插入序**（= payload 里那份
+占位副本的字节序）都是隐性契约，全都埋在同一个窗口里。
+
+切法（四段，按原语句的连续区间搬，未重排）：
+
+| 助手 | 行 | 职责 |
+|---|---|---|
+| `_stage_manifest(spec, facts)` | 56 | 4) 纯数据：manifest 字面量 + `job_id`（不碰盘） |
+| `_stage_scaffold(spec, m, job_root_p, tmp_extra_dir, extra_files, is_replay)` | 36 | 4b) 身份守卫 → 临时区 → 转换器 |
+| `_stage_payload_extras(spec, facts, m, extra_files, tmp_extra_dir)` | 44 | ts_code / plan / init_weights |
+| `_stage_keys(spec, facts, job_root_p, m)` | 63 | 两套键 + 续接/形态位 + 附加键 |
+
+`_publish_stage` 188 → **24**。`LONG_FUNCS_BASELINE` 里 `remote/hub_publish.py` 的 1 归零
+（连同 §335 ⇒ 66 → 64）。`Any` 基线 **1 → 0**：新助手的 `m` 一律注 `dict[str, object]`
+（发布端只搬字节，字段语义在 `PublishSpec`），`typing.Any` 从 import 里消失，
+`tests/golden/any_baseline.json` 的条目删除。
+
+**验证**：HEAD-vs-新语句对账 65 → 71，only_old 2（`dict[str, Any]` 注解、`_is_replay` 改参数名）/
+only_new 8（`return m` + 元组解包 + 三个助手调用 + `kind` 二次绑定），其余逐条相同；**字节级 A/B**
+（同一 `PublishSpec`，HEAD 在 `git worktree add --detach` 里跑）：`job_id` / manifest 全文 /
+payload 四个成员的内容 sha256 / job 目录文件表 / `job_pending` 事件（除 `ts`）**全同**。
+**被否决**：① 按 manifest 的键分组再拆 —— 键插入序是 payload 字节的一部分，拆成多个字面量就得
+靠调用顺序维持同一份序，比一个 56 行的纯数据函数更难核对；② 用一个可变 `PublishStaged` 当
+builder 传下去 —— 它是**返回形状**，当中间容器会变成双用途；③ 让 `_stage_keys` 自己再
+`Path(spec.job_root)` 一次 —— 同一个字段两份解析，迟早有一份漂；④ 新助手沿用 `dict[str, Any]`
+—— G14 的额度只减不增。
+
+## §335 分诊第三格：`trainer/queue_local.rescan_nodes` 186 → 139 + 四个判断助手（2026-11-24）
+
+§331 分诊点名的第三格。这个函数不是「一个循环 + 三段收尾」——它是**四条判据 + 一台状态机**直排
+在一个 `while` 里：候选快照（持锁扫节点）、回场上界（每节点每轮 `rearm_cap` 次）、回场三道门
+（codeHash / bun 版本 / 本轮 bootId）、锁内登记（入 `alive`、清失败计数、记一次回场）。改任何一条
+判据都要横穿 90 行；四段各自带着「跳过这台节点时要抄哪几笔账」的隐性知识，而「跳过」的形态在原文
+里是四个散开的 `continue`。
+
+切法（判据面各住一个助手，循环体只剩编排）：
+
+  · `_rescan_candidates(spec, configured, streaks, soft_streaks)` —— 持锁取候选快照；
+  · `_rearm_room(spec, nid, rearm_counts, rearm_warned)` —— 上界还有没有名额，首次告警在这里打；
+  · `_rescan_ready(spec, n, nid, ping, iter_id)` —— 三道门，任一道不过 ⇒ False；
+  · `_rescan_admit(spec, nid, why, nd, streaks, soft_streaks, rearm_counts)` —— 锁内登记。
+
+`rescan_nodes` 186 → **139**（文件 LOC 813 → 832，限额 1000）。`LONG_FUNCS_BASELINE` 里
+`trainer/queue_local.py` 的 1 归零。
+
+**没有把解包块原样留着**：`code_hash` / `local_bun` / `spawned_ids` … 十几个别名在助手接管后已无
+读者，留着就是第二份「参数表」（正是 `RescanSpec` 要收的那张脸）。只解包本线程自己用的那几个。
+
+**`iter_id` 按名字传、不从 `spec` 取**：`tests/worker/test_node_identity.py` 比较的是
+`dispatch_state.py`（钉）与 `queue_local.py`（查）两处 `round_key("rollout", <ident>)` 的字面实参；
+写成 `spec.iter_id` 会让集合比较当场红（实测）。这条守卫要的是「两处共用同一个键表达式」，助手把
+身份收进 spec 反而绕开了它。
+
+**验证**：HEAD-vs-新语句对账 92 → 90 条语句，7 处 only_old / 11 处 only_new，逐条可归为「整节点
+ dump 因调用文本变化而变」+ 5 个 `<exit>`（`continue` → `return False`）+ 助手调用；行为面
+`tests/trainer/test_rollout_dispatch_resilience.py`（A4 回场 / 上界 4 轮）+ `test_rescan_spec.py`
+（签名）+ `test_node_identity.py` 全绿；门禁 7009 passed / 3 skipped。**被否决**：① 四条判据再收
+一个「判断器」类 —— `RescanSpec` 刚把 27 参收成 1 个，再来一层对象是同一张脸的第二次搬家；
+② 助手直接收解包后的十几个局部 —— 每个助手 8~10 参，宽签名闸（已清零）与 `RescanSpec` 的理由
+同时作废；③ 整面搬进新模块 —— 813/1000 没有预算压力，搬只把接缝挪个位置；④ 用 `spec.iter_id`
+—— 见上，节点门的文本判据会红。
+
 ## §334 P0-2 存量：`remote/offline_deliver._sync`（162 → 41 + 八段；顺带把「一拍编排」整家搬进 `remote/deliver_sync`）（2026-11-23）
 
 §331 分诊里点的「最烂一格」。判据不是行数：`_sync` 把**一拍的五件事**（起跑闸 → 选谁发 →
