@@ -198,23 +198,30 @@ class JobUpload:
     log: Callable[[str], None] = _default_log
 
 
-def submit_job(base_url: str, token: str, upload: JobUpload) -> dict:
-    """POST /job 上传 manifest + payload（+ 按需 code / TS 运行时）。瞬时失败退避重试；
-    409 busy / 428 code-missing / 428 ts-code-missing 亦按可重试处理（hub 侧换节点或
-    补传后重试）。
+@dataclass
+class _UploadPlan:
+    """本轮「带什么上路」：三次缓存探针的结论 + 要补传的 blob 字节。
 
-    M0 统一计量：成功时返回本轮实测传输账（body_bytes / payload_bytes /
-    code_bytes / ts_code_bytes / upload_sec / attempts）——训练主循环把它写进
-    iteration 事件的 `wire` 子字典；旧调用方忽略返回值，行为不变。
-
-    M3：kind=iter 的 TS 运行时同 code.zip 同规按 sha 内容寻址，命中就不传
-    （manifest 无 ts_code_sha256 的 job 恒不涉及）。
+    `need_code` / `need_ts` 与 `blob_needs` 会在重试循环里被节点回执（428）翻面 —— 所以是**可变**
+    对象，且只活在这一轮（不越过 `submit_job` 的边界）。
     """
-    # 旧签名 8 参 → 一个 `upload` 对象（P0-3）；下面一次展开，函数体逐字不动。
-    manifest, payload_zip = upload.manifest, upload.payload_zip
-    code_zip, blobs, ts_code_zip = upload.code_zip, upload.blobs, upload.ts_code_zip
-    echo, timeout, attempts = upload.echo, upload.timeout, upload.attempts
-    log = upload.log
+
+    need_code: bool
+    need_ts: bool
+    blob_src: dict[str, bytes]
+    blob_needs: dict[str, bytes]
+    ts_sha: str
+
+
+def _plan_uploads(
+    base_url: str,
+    token: str,
+    manifest: dict,
+    code_zip: bytes | None,
+    blobs: dict[str, bytes] | None,
+    ts_code_zip: bytes | None,
+) -> _UploadPlan:
+    """开跑前的三次缓存探针 + blob 需求（M2 B3 / M3）：本轮带什么，只在这里决定。"""
     need_code = not code_cached_on_node(base_url, token, manifest["code_sha256"])
     if need_code and code_zip is None:
         raise RetryableError("节点无 code 缓存且本次未携带 code.zip")
@@ -242,41 +249,122 @@ def submit_job(base_url: str, token: str, upload: JobUpload) -> dict:
         and not blob_cached_on_node(base_url, token, init_sha)
     ):
         blob_needs[BLOB_INIT] = init_raw
+    return _UploadPlan(
+        need_code=need_code,
+        need_ts=need_ts,
+        blob_src=blob_src,
+        blob_needs=blob_needs,
+        ts_sha=_ts_sha,
+    )
+
+
+def _body_for(
+    manifest: dict,
+    payload_zip: bytes,
+    code_zip: bytes | None,
+    ts_code_zip: bytes | None,
+    plan: _UploadPlan,
+    use_v2: bool,
+) -> tuple[bytes, str, bool, bool]:
+    """这一拍要 POST 的字节与 Content-Type（v2 裸二进制段；JSON 体是永远在场的退路）。"""
+    need_code, need_ts = plan.need_code, plan.need_ts
+    blob_needs = plan.blob_needs
+    code_sent = need_code and code_zip is not None
+    # JSON 形状始终构造 —— 既是 v2 的退路，也是 v2 打包的源。
+    body_obj: dict = {
+        "manifest": manifest,
+        "payload_b64": base64.b64encode(payload_zip).decode("ascii"),
+    }
+    if code_sent:
+        assert code_zip is not None  # 收窄：code_sent 已保证非 None
+        body_obj["code_b64"] = base64.b64encode(code_zip).decode("ascii")
+    ts_sent = need_ts and ts_code_zip is not None
+    if ts_sent:
+        assert ts_code_zip is not None  # 收窄：ts_sent 已保证非 None
+        body_obj["ts_code_b64"] = base64.b64encode(ts_code_zip).decode("ascii")
+    if blob_needs:
+        body_obj["blobs"] = {
+            k: base64.b64encode(v).decode("ascii") for k, v in blob_needs.items()
+        }
+    if use_v2:
+        body_bytes = pack_job_v2(
+            manifest,
+            payload_zip,
+            code_zip if code_sent else None,
+            blob_needs,
+            ts_code_zip if ts_sent else None,
+        )
+        ctype = WIRE_JOB_CONTENT_TYPE
+    else:
+        body_bytes = json.dumps(body_obj, ensure_ascii=False).encode("utf-8")
+        ctype = "application/json"
+    return body_bytes, ctype, code_sent, ts_sent
+
+
+def _handle_428(
+    base_url: str, resp: bytes, plan: _UploadPlan, manifest: dict
+) -> str:
+    """节点说缺什么，下一轮就带什么（并把缓存记忆翻面）；返回可读的失败面。"""
+    need_code, need_ts = plan.need_code, plan.need_ts
+    blob_needs = plan.blob_needs
+    blob_src = plan.blob_src
+    _ts_sha = plan.ts_sha
+    need_code = True  # 节点缓存未命中：下次重试带 code
+    # 记忆必须翻面：否则下一轮探针"沿用命中"又会跳过补传（见 `_cached_or_last_hit`）。
+    forget_cache_hit(base_url, "code", manifest.get("code_sha256", ""))
+    # M2 B3：节点说缺 blob → 把本次携带的 blob 全补上（命中缓存的不必传）。
+    if b"blob-missing" in resp:
+        for name, raw in blob_src.items():
+            # opt-blob-diet（§4）：`init` 同规——节点说缺就得补传，否则下一次
+            # 重试仍然 428（而 `need_blobs` 已经点名了它）。
+            if name in ("opt", "ref", BLOB_INIT) and raw:
+                blob_needs[name] = raw
+        for name in ("opt", "ref"):
+            forget_cache_hit(base_url, "blob", manifest.get(f"{name}_sha", ""))
+        forget_cache_hit(base_url, "blob", manifest.get("init_weights_fp", ""))
+        last = "428 blob-missing"
+    elif b"ts-code-missing" in resp:
+        # M3：节点没有 TS 运行时缓存 → 下次重试带上（调用方必须提供字节；
+        # 拿不到就在下一轮循环里被 need_ts+None 的守卫响亮拒掉）。
+        # **必须**把 need_ts 置真：走到这里的典型场景是「/ts-code-sha 探到缓存、
+        # 但真正 POST 时缓存已不在」（并发清理/两课共享节点），此时 need_ts 本是
+        # False ⇒ 不置真就会一直重发不带 ts 的体，白烧满重试预算后整轮失败。
+        # 与上面 code-missing 的 `need_code = True` 同规。
+        need_ts = True
+        forget_cache_hit(base_url, "ts", _ts_sha)
+        last = "428 ts-code-missing"
+    else:
+        last = "428 code-missing"
+    plan.need_code, plan.need_ts = need_code, need_ts
+    return last
+
+
+def submit_job(base_url: str, token: str, upload: JobUpload) -> dict:
+    """POST /job 上传 manifest + payload（+ 按需 code / TS 运行时）。瞬时失败退避重试；
+    409 busy / 428 code-missing / 428 ts-code-missing 亦按可重试处理（hub 侧换节点或
+    补传后重试）。
+
+    M0 统一计量：成功时返回本轮实测传输账（body_bytes / payload_bytes /
+    code_bytes / ts_code_bytes / upload_sec / attempts）——训练主循环把它写进
+    iteration 事件的 `wire` 子字典；旧调用方忽略返回值，行为不变。
+
+    M3：kind=iter 的 TS 运行时同 code.zip 同规按 sha 内容寻址，命中就不传
+    （manifest 无 ts_code_sha256 的 job 恒不涉及）。
+    """
+    # 旧签名 8 参 → 一个 `upload` 对象（P0-3）；下面一次展开，函数体逐字不动。
+    manifest, payload_zip = upload.manifest, upload.payload_zip
+    code_zip, blobs, ts_code_zip = upload.code_zip, upload.blobs, upload.ts_code_zip
+    echo, timeout, attempts = upload.echo, upload.timeout, upload.attempts
+    log = upload.log
+    plan = _plan_uploads(base_url, token, manifest, code_zip, blobs, ts_code_zip)
+    blob_needs = plan.blob_needs
     last: str = ""
     t0 = time.time()
-    # M2 B5：/job 体默认走 v2（payload/code/blob 裸二进制段，省掉 base64 的 33%%）；
-    # 旧 hub 进程只认 application/json，4xx 时退回 JSON 重发一次（同 result 路径）。
     use_v2 = True
     for attempt in range(1, attempts + 1):
-        code_sent = need_code and code_zip is not None
-        # JSON 形状始终构造 —— 既是 v2 的退路，也是 v2 打包的源。
-        body_obj: dict = {
-            "manifest": manifest,
-            "payload_b64": base64.b64encode(payload_zip).decode("ascii"),
-        }
-        if code_sent:
-            assert code_zip is not None  # 收窄：code_sent 已保证非 None
-            body_obj["code_b64"] = base64.b64encode(code_zip).decode("ascii")
-        ts_sent = need_ts and ts_code_zip is not None
-        if ts_sent:
-            assert ts_code_zip is not None  # 收窄：ts_sent 已保证非 None
-            body_obj["ts_code_b64"] = base64.b64encode(ts_code_zip).decode("ascii")
-        if blob_needs:
-            body_obj["blobs"] = {
-                k: base64.b64encode(v).decode("ascii") for k, v in blob_needs.items()
-            }
-        if use_v2:
-            body_bytes = pack_job_v2(
-                manifest,
-                payload_zip,
-                code_zip if code_sent else None,
-                blob_needs,
-                ts_code_zip if ts_sent else None,
-            )
-            ctype = WIRE_JOB_CONTENT_TYPE
-        else:
-            body_bytes = json.dumps(body_obj, ensure_ascii=False).encode("utf-8")
-            ctype = "application/json"
+        body_bytes, ctype, code_sent, ts_sent = _body_for(
+            manifest, payload_zip, code_zip, ts_code_zip, plan, use_v2
+        )
         try:
             status, resp = _request(
                 base_url,
@@ -294,7 +382,7 @@ def submit_job(base_url: str, token: str, upload: JobUpload) -> dict:
             status, resp = None, repr(e).encode()
         if status in (200, 202):
             log(
-                f"job {manifest['job_id']} 已推送到 {base_url}（code 上传={'是' if need_code else '否，缓存命中'}）"
+                f"job {manifest['job_id']} 已推送到 {base_url}（code 上传={'是' if plan.need_code else '否，缓存命中'}）"
             )
             # worker 的受理态：`accepted` = 立刻开算；`queued` = 进了它的接单队列
             # （hub 预推，2026-10-24）。旧 worker/旧形体读不到就当空串 = 旧语义。
@@ -316,32 +404,7 @@ def submit_job(base_url: str, token: str, upload: JobUpload) -> dict:
                 "status": str((ack or {}).get("status") or "") if isinstance(ack, dict) else "",
             }
         if status == 428:
-            need_code = True  # 节点缓存未命中：下次重试带 code
-            # 记忆必须翻面：否则下一轮探针"沿用命中"又会跳过补传（见 `_cached_or_last_hit`）。
-            forget_cache_hit(base_url, "code", manifest.get("code_sha256", ""))
-            # M2 B3：节点说缺 blob → 把本次携带的 blob 全补上（命中缓存的不必传）。
-            if b"blob-missing" in resp:
-                for name, raw in blob_src.items():
-                    # opt-blob-diet（§4）：`init` 同规——节点说缺就得补传，否则下一次
-                    # 重试仍然 428（而 `need_blobs` 已经点名了它）。
-                    if name in ("opt", "ref", BLOB_INIT) and raw:
-                        blob_needs[name] = raw
-                for name in ("opt", "ref"):
-                    forget_cache_hit(base_url, "blob", manifest.get(f"{name}_sha", ""))
-                forget_cache_hit(base_url, "blob", manifest.get("init_weights_fp", ""))
-                last = "428 blob-missing"
-            elif b"ts-code-missing" in resp:
-                # M3：节点没有 TS 运行时缓存 → 下次重试带上（调用方必须提供字节；
-                # 拿不到就在下一轮循环里被 need_ts+None 的守卫响亮拒掉）。
-                # **必须**把 need_ts 置真：走到这里的典型场景是「/ts-code-sha 探到缓存、
-                # 但真正 POST 时缓存已不在」（并发清理/两课共享节点），此时 need_ts 本是
-                # False ⇒ 不置真就会一直重发不带 ts 的体，白烧满重试预算后整轮失败。
-                # 与上面 code-missing 的 `need_code = True` 同规。
-                need_ts = True
-                forget_cache_hit(base_url, "ts", _ts_sha)
-                last = "428 ts-code-missing"
-            else:
-                last = "428 code-missing"
+            last = _handle_428(base_url, resp, plan, manifest)
         elif status == 409:
             last = "409 busy"
         elif status is not None and 400 <= status < 500:

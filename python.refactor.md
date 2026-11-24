@@ -352,6 +352,9 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
   > 第五格也落地了：`remote/hub_publish._publish_stage` 188 → 24（+ `_stage_manifest` /
   > `_stage_scaffold` / `_stage_payload_extras` / `_stage_keys`）；发布字节级 A/B 全同、`Any` 1 → 0，
   > 存量 65 → 64（engineering §336）。§334 留的死 `sent` 顺手删掉（engineering §337）。
+  > 分诊五格拆完后按同一张表往下走：`remote/push_client.submit_job` 166 → 88（+ `_UploadPlan` /
+  > `_plan_uploads` / `_body_for` / `_handle_428`），HEAD-vs-新 13 组决策表差分全同，存量 64 → 63
+  > （engineering §338）；`rescan_nodes` 另补了 13 组假钟/假 ping 决策表差分（§335 末段）。
 
 **为什么这是问题**
 

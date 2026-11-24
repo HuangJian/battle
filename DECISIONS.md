@@ -10626,6 +10626,9 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   `test_rollout_dispatch_resilience`（A4 回场 / 上界）· `test_rescan_spec` · `test_node_identity` 全绿；
   门禁 7009 passed / 3 skipped。全文 → `docs/nn/engineering.md` §335。
 
+- **验证补强（2026-11-24）**：脚本化决策表差分 **13/13 全同**（假钟 / 假 all_settled / 假 ping、
+  权重 POST、升级请求、Runtime.thread；HEAD^ 的旧实现 vs 现在）。见 §335 末段。
+
 ## §2026-11-24-publish-stage
 
 - **背景**：`remote/hub_publish._publish_stage` 188 行（§331 分诊第五格）：manifest 预建 + job_id /
@@ -10655,3 +10658,23 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 
 - **验证**：`grep -n "sent" remote/deliver_sync.py` 为空；deliver 族用例全绿；门禁 7009 passed /
   3 skipped。全文 → `docs/nn/engineering.md` §337。
+
+- **同类扫描（2026-11-24）**：全仓「本地新建容器只改不读」AST 扫描 **0 处**（放宽后的 24 处
+  逐条都是别名 / 参数 / 共享账）。见 §337 末段。
+
+## §2026-11-24-push-submit-plan
+
+- **背景**：`remote/push_client.submit_job` 166 行（§331 五格之后的下一格：剩余非排除项里分支
+  最多）。一次推送的三件事 —— 缓存探针与补传清单 / 组体（v2 与 JSON 退路）/ 428 恢复 —— 与
+  重试循环混住。
+
+- **决定**：切出 `_UploadPlan` + `_plan_uploads` / `_body_for` / `_handle_428`，`submit_job`
+  166 → **88**；`LONG_FUNCS_BASELINE` 该文件 1 → 0（总 64 → 63）。
+
+- **被否决**：① 把重试循环也切成「一次尝试」—— 需再包 `attempt`/`use_v2`/`last`/`t0`；②
+  `_UploadPlan` frozen + `replace()` —— 428 每拍翻面，双份值；③ `_plan_uploads` 收整个 `JobUpload`
+  —— P0-3 的收口退化；④ 428 文案留在 `submit_job` —— 判据与文案分居。
+
+- **验证**：13 组决策表差分全同（返回账 / 异常 / 日志 / 请求序列 / 退避 / forget 序列）；
+  语句对账 81 → 95（only_old 2 / only_new 11，全部接线）；push/transport/BC 用例与三个预算门
+  全绿；门禁 7009 passed / 3 skipped。全文 → `docs/nn/engineering.md` §338。

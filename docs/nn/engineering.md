@@ -29,6 +29,33 @@
 
 ---
 
+## §338 分诊下一格：`remote/push_client.submit_job` 166 → 88 + 三段（2026-11-24）
+
+§331 的五格拆完后，按同一张「接缝烂度」表往下走：`submit_job` 是剩余非排除项里分支最多的
+（26 个分支、2 个 `try`、166 行）。它不是 lifecycle-in-a-loop，而是**一次推送的三段规则**：
+
+  · `_plan_uploads(base_url, token, manifest, code_zip, blobs, ts_code_zip)` —— 开跑前的三次缓存
+    探针（code / ts / opt-ref-init blob）与「谁需要补传」，返回可变的 `_UploadPlan`；
+  · `_body_for(manifest, payload_zip, code_zip, ts_code_zip, plan, use_v2)` —— 这一拍的字节与
+    Content-Type（v2 裸二进制段 + 永远在场的 JSON 退路），顺带回报 `code_sent` / `ts_sent`；
+  · `_handle_428(base_url, resp, plan, manifest)` —— 节点说缺什么就翻面带什么（含三个
+    `forget_cache_hit`），并把 `need_code` / `need_ts` 写回 plan。
+
+`submit_job` 166 → **88**；文件 LOC 255 → 303（限额 1000）。`LONG_FUNCS_BASELINE` 里
+`remote/push_client.py` 的 1 归零（总 64 → 63）。重试循环本身（2xx 账 / 409 / 4xx v2 回退 / 退避）
+留在原地：它才是「一次推送」的骨架，而三段各自是一个可以单独回答的问题。
+
+**验证**：HEAD-vs-新 **13 组**决策表差分全同（返回账 / 异常类型与文案 / 日志 / 请求序列（体长、
+Content-Type、是否 v2）/ 退避秒数 / `forget_cache_hit` 序列）；语句对账 81 → 95，only_old 2
+（`for` 与 428 `if` 的整节点 dump，因为体内文本变了）/ only_new 11（`plan` 装配、元组解包、三段
+调用、`<exit>`、别名绑定），逐条可归为接线。
+
+**被否决**：① 把重试循环也切成「一次尝试」助手 —— `attempt` / `use_v2` / `last` / `t0` 四个跨
+迭代状态得再打一个包，而循环体只剩 30 行；② `_UploadPlan` 用 frozen + `replace()` —— 428 每拍
+翻面两次，重建对象会让「这一轮带什么」出现两份值；③ 让 `_plan_uploads` 直接收 `JobUpload` ——
+那样 `submit_job` 的 8 参收口（P0-3）就退化成「传对象再拆对象」；④ 把 428 文案留在 `submit_job`
+—— 判据与文案分居两处，正是这次要拆的耦合。
+
 ## §337 `remote/deliver_sync._deliver_todo`：删掉没人读的 `sent`（2026-11-24）
 
 §334 记账时留的「另开一刀」。`sent: list[int] = []` + `sent.append(it)` 两行，全仓无读者 ——
@@ -37,6 +64,12 @@
 **验证**：`grep -n "sent" remote/deliver_sync.py` 为空；`tests/remote/test_offline_deliver*.py` /
 `test_deliver_mode.py` 全绿；门禁 7009 passed / 3 skipped。**被否决**：把它接进返回值给调用方 ——
 没有任何调用方要这份列表（`_sync` 只把 `done` 交给 `_settle_pass`），加返回值是新增语义而非清理。
+
+**同类扫描（2026-11-24）**：把「本地新建的容器只被改、从不被读」做成 AST 扫描（`.append` /
+`.add` / `.extend` / `.update` / `.setdefault` / `.pop` / `.clear` / `d[k] = v` / `del d[k]`，
+排除参数、`_` 前缀、`global`/`nonlocal`）扫 `biz/common/hub/remote/train/trainer/worker`：**0 处**。
+放宽到「任何被改的容器」会得到 24 处，逐条看都是**别名**（`b = _wire_bucket(jid)`、
+`st = setdefault(...)`、`box` 来自元组、`prep_b` 来自 spec）—— 改的是调用方/共享账，不是死列表。
 
 ## §336 分诊第五格：`remote/hub_publish._publish_stage` 188 → 24 + 四段（2026-11-24）
 
@@ -104,6 +137,12 @@ builder 传下去 —— 它是**返回形状**，当中间容器会变成双用
 ② 助手直接收解包后的十几个局部 —— 每个助手 8~10 参，宽签名闸（已清零）与 `RescanSpec` 的理由
 同时作废；③ 整面搬进新模块 —— 813/1000 没有预算压力，搬只把接缝挪个位置；④ 用 `spec.iter_id`
 —— 见上，节点门的文本判据会红。
+
+**补强（2026-11-24，决策表差分）**：`tests` 之外另跑了一次脚本化差分 —— 假钟 + 假 `all_settled`
++ 假 ping / 权重 POST / 升级请求 / `Runtime.thread`，13 组场景（新上线 / 已孵化 / 两档回场 /
+cap 用尽 / 改代码 / bun 不符 / bootId 变 / ping 先 None 后通 / 停用节点 / 软硬两档停派），
+HEAD^ 的旧 `rescan_nodes` 与现在逐字段相同（日志 / ping 序列 / POST / 升级 / 遗忘 / 补孵线程 /
+`spawned_ids` / `alive` / `streaks`）。
 
 ## §334 P0-2 存量：`remote/offline_deliver._sync`（162 → 41 + 八段；顺带把「一拍编排」整家搬进 `remote/deliver_sync`）（2026-11-23）
 
