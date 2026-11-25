@@ -29,6 +29,72 @@
 
 ---
 
+## §345 分诊表复查：剩余 60 个里 44 格仍带 try/嵌套循环，下一批五格（2026-11-25）
+
+`LONG_FUNCS_BASELINE` 在 §344 后剩 **60** 个。按 §331 的同一口径重算
+（`branch + 2×最大循环嵌套 + 循环 + try + self/4`；`branch` = `If`/`IfExp`/推导式 `if`），
+筛「`try>0` 或最大循环嵌套 ≥2」⇒ **44 / 60**（16 格既无 try 也无嵌套循环）。
+
+先按 §331 的先例排除四族，不占下一批名额：`tools/*` 一次性工具（`lever_scan` 43.0 /
+`wave2_judge` 42.0 是全场最高两格，但债务在 `tools/`）· `worker/scripts/*` 与
+`worker/train/intent_probe`（诊断探针，31.0）· `remote/offline_boot.py` 的 5 格（`.pyfrag`
+生成物，改分片）· `*.__init__`（`loop_core` 23.0 / `offline_deliver` 25.5，80/78 个 `self`，
+属 P0-3 装配对象，不能按行切）。
+
+| # | 函数 | 行 | br | 环/嵌 | try | self | 顶层语句 | score |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 | `trainer/batch_lanes.worker` | 178 | 26 | 1/1 | 1 | 80 | **3** | **50.0** |
+| 2 | `remote/push_dispatch._await_result` | 165 | 22 | 1/1 | 2 | 39 | 11 | **36.8** |
+| 3 | `remote/job_round.run` | 176 | 7 | 0/0 | 1 | 90 | **3** | **30.5** |
+| 4 | `remote/worker_server.make_worker_server` | 191 | 18 | 0/0 | 2 | 33 | 6 | **28.2** |
+| 5 | `worker/greedy_round.run_greedy_round` | 151 | 20 | 4/**2** | 0 | 0 | 34 | **28.0** |
+| 6 | `trainer/loop_volume._volume_continuous_loop` | 170 | 16 | 3/2 | 1 | 13 | 13 | 27.2 |
+| 7 | `remote/deliver_worker.main` | 160 | 19 | 3/2 | 1 | 0 | 26 | 27.0 |
+| 8 | `worker/model_build.build_model` | 167 | 20 | 3/1 | 2 | 0 | 18 | 27.0 |
+| 9 | `trainer/loop_serve.serve` | 184 | 17 | 3/2 | 1 | 0 | 45 | 25.0 |
+| 10 | `remote/deliver_zip.import_deliver_zip` | 178 | 19 | 0/0 | 2 | 0 | 29 | 24.0 |
+| 11 | `hub/offline._post_offline_lease` | 168 | 16 | 0/0 | 1 | 25 | 13 | 23.2 |
+| 12 | `hub/boot.main` | 152 | 12 | 2/2 | **5** | 0 | 23 | 23.0 |
+
+**下一批五格（按烂度，不按行数）**
+
+1. **`trainer/batch_lanes.worker`** —— 与 `run_slot` 同形：178 行只有 3 条顶层语句，整条
+   泳道生命周期住在一个 `while` 里（领取 / 竞速 / 取包 / 结算 / 熔断）。切法：`_lane_claim`
+   （锁内的 tripped / pending / 竞速 → task）、`_lane_fetch`（fetch + 异常归因 + `in_flight`）、
+   `_lane_settle`（seen / dup / record / 断连）；`while` 体只剩「三步 + 停机判据」。验证：假时钟 +
+   假 `fetch_manifest` / `record`，逐迭代决策表（领取请求 / 竞速次数 / 落盘顺序 / 断连时机 /
+   退出因）；形状由 `LONG_FUNCS_BASELINE` 与 `test_batch_runner_phases` 的 `LEDGER_FIELDS` 钉住。
+2. **`remote/push_dispatch._await_result`** —— 165 行、11 条顶层语句，`while` 里塞着续租、
+   探活、排队时钟、结果分类与四条回落。切法：`_await_expired`（deadline / 队龄，含
+   `_queue_expired`）、`_await_probe`（online + heartbeat + GET）、`_await_apply`（200/202/
+   410/409/428/5xx 的去向）；入口只剩两个时钟 + 循环。验证：两条腿（`started` 真/假）×
+   6 种响应 × 停机/超时/探活失败的决策表，假 `_http` / `_now` / `_requeue`，比对回落顺序与日志。
+3. **`remote/job_round.run`** —— 176 行、3 条顶层语句：一个 `try` + **7 个 handler** + finally，
+   90 个 `self`。切法：`_round_execute` 与 7 个 `_on_<kind>`（cancel / machine-stall / retryable /
+   code-changed / rejected / system-exit / finalize），入口只保留 **异常顺序**
+   （`UnreapableChildError` 必须仍在 `RetryableError` 前）。验证：7 类异常 × 租约 / POST /
+   失败上报 / 退出语义的决策表，假 HTTP；`RoundOutcome` 全字段对账。
+4. **`remote/worker_server.make_worker_server`** —— 191 行，但 6 条顶层语句里有一个 **146 行的
+   内嵌 `Handler` 类**。切法：把 `Handler` 提成模块级 `_make_handler(state, token, log)` 工厂
+   （现在靠闭包抓 `state` / `token` / `log`，提级要显式传），`do_GET` / `do_POST` 再各按路由表
+   分两段；入口回到「epoch_mult + handler + starter + return」。验证：路由表（方法/路径 →
+   状态码/响应体）与鉴权/404/410/409 的矩阵；现有 `tests/remote/test_worker_server*` 不动。
+5. **`worker/greedy_round.run_greedy_round`** —— 151 行却有 34 条顶层语句、`while` 体 23 条
+   （含 2 层嵌套循环）。切法：`_greedy_plan`（quota / targets / est / caps / 游标初始化）、
+   `_greedy_next_pairs`（进度 → `plan_g` → pairs → start_idx 前进）、`_greedy_settle`
+   （manifests / bins / by_stage / stats / 硬目标 raise）；入口 = plan + while + settle。验证：
+   配额矩阵（None / soft / 三档）× `run_wave` 返回（空 / 单波 / 多波 / 缺键）× 普通采样占位，
+   假 `load_manifests`，比对返回 dict 与日志。
+
+**再往后**（同一张表，暂不占下一批）：`loop_volume._volume_continuous_loop` 27.2 ·
+`deliver_worker.main` 27.0 · `model_build.build_model` 27.0 · `loop_serve.serve` 25.0 ·
+`deliver_zip.import_deliver_zip` 24.0 · `hub/boot.main` 23.0。`model_build` 是唯一带数值风险的
+一格（后端分支 + 张量形状），放在纯控制流的几格之后。
+
+> 口径不变：每一刀仍是「同一公开面 + 假边界，HEAD-vs-新决策表全字段差分」；存量表只减不增。
+
+---
+
 ## §344 分诊第八格：`worker/eval_track.settle_eval_summary` 175 → 46 + 四段（2026-11-25）
 
 §331 的分诊表继续。`settle_eval_summary` 是全档里少有的「0 循环 / 0 try / 27 条顶层语句」

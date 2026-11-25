@@ -359,6 +359,10 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
   > 五读数接内容哈希缓存，1.44s → 0.05s；其余守卫都已是「一次 walk + 缓存」，无平方项可套。
   > 分诊第八格 ⇒ §344（`worker/eval_track.settle_eval_summary` 175 → 46 + 读数/缺口/成行/
   > 日志四段；HEAD-vs-新 300 组决策表全同，存量 61 → 60）。
+  > 2026-11-25 复查：剩余 60 个里 44 格仍带 `try`/嵌套循环；排除工具 / 探针 / 生成物 /
+  > 构造器后，下一批五格已点名（engineering §345）：`batch_lanes.worker` /
+  > `push_dispatch._await_result` / `job_round.run` / `worker_server.make_worker_server` /
+  > `greedy_round.run_greedy_round`。
 
 **为什么这是问题**
 
