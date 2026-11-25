@@ -1052,6 +1052,121 @@ class ServeSpec:
     now: Callable[[], float] = time.time
     sleep: Callable[[float], None] = time.sleep
 
+@dataclass(frozen=True)
+class _ServeStart:
+    """启动阶段的结果：`serve` 只负责「准备 → 建服务 → 跑一拍循环」。"""
+
+    bun: str
+    t0: float
+    discover: bool
+    runtimes: dict[str, CourseRuntime]
+    seen_marker: dict[str, int]
+
+
+def _start_serve(spec: ServeSpec, report: ServeReport) -> _ServeStart:
+    """进程级准备 + 课程表发现 + 开课（自 `serve` 原样搬出）。
+
+    `prepare` 只做一次（UTF-8 / push / bun 探测），发现模式在启动时扫一次已开课的课程；
+    两者都在**建引擎之前**完成 —— 没课的进程不该拉起 torch。
+    """
+    argv = spec.argv
+    traj_root = spec.traj_root
+    bun = spec.bun
+    if spec.prepare:
+        bun = prepare_process(argv)
+    bun = bun or "bun"
+    t0 = spec.now()
+    discover = not spec.courses  # 发现模式：进程独立于课程（没课在训也照常起）
+
+    runtimes: dict[str, CourseRuntime] = {}
+    # 入队时见到的开课标记 mtime（`reopened_parked` 的比较基准：只有"停→开"能让它变大）。
+    seen_marker: dict[str, int] = {}
+    explicit = list(spec.courses or [])
+    if discover:
+        explicit = enabled_courses(traj_root)
+        if explicit:
+            log(f"[serve] 发现 {len(explicit)} 门已开课的课程：{', '.join(explicit)}")
+        else:
+            log(
+                f"[serve] {traj_root} 下暂无已开课的课程——进程照常运行，队列空着等"
+                "（先在控制台点「开课」：写 training-enabled.txt + 账本即自动入队）"
+            )
+    for _c in _open_courses(explicit, runtimes, report, argv=argv, traj_root=traj_root):
+        _m = _marker_mtime_ns(traj_root, _c)
+        if _m is not None:
+            seen_marker[_c] = _m
+    return _ServeStart(bun, t0, discover, runtimes, seen_marker)
+
+
+def _build_service(
+    spec: ServeSpec, start: _ServeStart, report: ServeReport
+) -> tuple[EnginePool, Supervisor, bool]:
+    """引擎池 + 调度器 + 初始入队（自 `serve` 原样搬出）。返回 `(pool, sup, own_pool)`。"""
+    runtimes = start.runtimes
+    cache_courses = spec.cache_courses
+    cache_mb = spec.cache_mb
+    # ★ P2（2026-10-02 事故）：上限默认**自动 = 并行课程上限**，不是死值 5。
+    # 「5」是 R2c 定案时的并行课程上限估计，而开课是人手点的操作面事实 —— 一旦开课数越过它，
+    # 引擎按 LRU 互逐。真实约束是**字节顶**（每课栈 MB 级；256MB ≈ 130 课，
+    # 见 `scripts/measure_checkpoint_rss.py`），数量顶在这里没有保护价值。
+    # 显式传正值 ⇒ 原样尊重（e2e/单测用它构造驱逐），但越界时响亮告警。
+    if cache_courses <= 0:
+        cache_courses = max(DEFAULT_CACHE_COURSES, len(runtimes))
+        if len(runtimes) > DEFAULT_CACHE_COURSES:
+            log(
+                f"[serve] 开课 {len(runtimes)} 门 > 引擎缓存默认上限 {DEFAULT_CACHE_COURSES}"
+                f"——上限自动抬到 {cache_courses}（真约束是字节顶 {cache_mb:.0f}MB，"
+                "每课栈 MB 级：worker/scripts/measure_checkpoint_rss.py）"
+            )
+    elif len(runtimes) > cache_courses:
+        log(
+            f"[serve] ⚠ 显式 cache_courses={cache_courses} < 开课 {len(runtimes)} 门："
+            "轮间会被驱逐（权重可重建，但 **Adam 动量重置**）；"
+            "**轮内**（队列还有待办步骤）的课不驱逐"
+        )
+
+    own_pool = spec.pool is None
+    pool = spec.pool or EnginePool(
+        factory=build_factory(
+            runtimes,
+            bun=start.bun,
+            iters=spec.iters,
+            step_mode=spec.step_mode,
+            now=spec.now,
+        ),
+        courses=cache_courses,
+        mb=cache_mb,
+    )
+    sup = spec.supervisor or Supervisor(
+        executor=build_executor(pool, runtimes, report, traj_root=spec.traj_root),
+        planner=_planner(runtimes),
+        capacities=dict(spec.capacities or DEFAULT_CAPACITIES),
+        now=spec.now,
+    )
+    # ★ P1（2026-10-02 事故）：把 `EnginePool` docstring 那句「绝不驱逐正在用的引擎」补全 ——
+    # 此前 `keep` 只护住「本次 `get` 的那一门」，其余**轮内**的课照样被抽走引擎：重建后的
+    # 引擎没有轮内属性（`_node_rollout` 等），而调度器队列仍停在该轮之后的步骤 ⇒ 一步一崩
+    # （h4-hurt-f75/f150：1076 次 run_start / 0 条 iteration）。判据挂在**队列**上：
+    # `tasks` 非空 = 这一轮还没走完（含 WAIT 等外部）⇒ 此刻不许抽栈。
+    pool.pinned = _pinned_mid_round(sup)
+
+    # 初始队列内容用**盘上事实**算（不构建引擎：扫到但没在训的课不该拉起 torch）。
+    _enqueue_opened(
+        sup,
+        runtimes,
+        report,
+        list(runtimes),
+        step_mode=spec.step_mode,
+        traj_root=spec.traj_root,
+    )
+
+    log(
+        f"[serve] 单进程 supervisor 启动：{len(runtimes)} 课（{'发现模式：不绑课程' if start.discover else '显式课程表'}）/ 池容量 "
+        + " ".join(f"{k}={v}" for k, v in (spec.capacities or DEFAULT_CAPACITIES).items())
+        + f" / 粒度={'13 步' if spec.step_mode else '轮'}"
+    )
+    return pool, sup, own_pool
+
 
 def serve(spec: ServeSpec) -> ServeReport:
     """单进程服务 N 门课（参数见 `ServeSpec`）。
@@ -1074,100 +1189,27 @@ def serve(spec: ServeSpec) -> ServeReport:
     课程级失败（课程文件缺失、锁被占）**不**终止进程：该课进 `skipped`，其余课照跑
     （故障域 = 单课，plan §4.3）。
     """
-    courses = spec.courses
-    argv = spec.argv
-    traj_root = spec.traj_root
-    iters = spec.iters
-    poll_sec = spec.poll_sec
-    capacities = spec.capacities
-    control_file = spec.control_file
-    cache_courses = spec.cache_courses
-    cache_mb = spec.cache_mb
-    step_mode = spec.step_mode
-    max_seconds = spec.max_seconds
-    max_steps = spec.max_steps
-    prepare = spec.prepare
-    bun = spec.bun
-    pool = spec.pool
-    supervisor = spec.supervisor
-    now = spec.now
-    sleep = spec.sleep
     report = ServeReport()
-    if prepare:
-        bun = prepare_process(argv)
-    bun = bun or "bun"
-    t0 = now()
-    discover = not courses  # 发现模式：进程独立于课程（没课在训也照常起）
-
-    runtimes: dict[str, CourseRuntime] = {}
-    # 入队时见到的开课标记 mtime（`reopened_parked` 的比较基准：只有"停→开"能让它变大）。
-    seen_marker: dict[str, int] = {}
-    explicit = list(courses or [])
-    if discover:
-        explicit = enabled_courses(traj_root)
-        if explicit:
-            log(f"[serve] 发现 {len(explicit)} 门已开课的课程：{', '.join(explicit)}")
-        else:
-            log(
-                f"[serve] {traj_root} 下暂无已开课的课程——进程照常运行，队列空着等"
-                "（先在控制台点「开课」：写 training-enabled.txt + 账本即自动入队）"
-            )
-    for _c in _open_courses(explicit, runtimes, report, argv=argv, traj_root=traj_root):
-        _m = _marker_mtime_ns(traj_root, _c)
-        if _m is not None:
-            seen_marker[_c] = _m
-    if not runtimes and not discover:
+    start = _start_serve(spec, report)
+    if not start.runtimes and not start.discover:
         report.stop_reason = "no_courses"
         log("[serve] 显式课程表里没有能开的课——退出")
         return report
+    pool, sup, own_pool = _build_service(spec, start, report)
 
-    # ★ P2（2026-10-02 事故）：上限默认**自动 = 并行课程上限**，不是死值 5。
-    # 「5」是 R2c 定案时的并行课程上限估计，而开课是人手点的操作面事实 —— 一旦开课数越过它，
-    # 引擎按 LRU 互逐。真实约束是**字节顶**（每课栈 MB 级；256MB ≈ 130 课，
-    # 见 `scripts/measure_checkpoint_rss.py`），数量顶在这里没有保护价值。
-    # 显式传正值 ⇒ 原样尊重（e2e/单测用它构造驱逐），但越界时响亮告警。
-    if cache_courses <= 0:
-        cache_courses = max(DEFAULT_CACHE_COURSES, len(runtimes))
-        if len(runtimes) > DEFAULT_CACHE_COURSES:
-            log(
-                f"[serve] 开课 {len(runtimes)} 门 > 引擎缓存默认上限 {DEFAULT_CACHE_COURSES}"
-                f"——上限自动抬到 {cache_courses}（真约束是字节顶 {cache_mb:.0f}MB，"
-                "每课栈 MB 级：worker/scripts/measure_checkpoint_rss.py）"
-            )
-    elif len(runtimes) > cache_courses:
-        log(
-            f"[serve] ⚠ 显式 cache_courses={cache_courses} < 开课 {len(runtimes)} 门："
-            "轮间会被驱逐（权重可重建，但 **Adam 动量重置**）；"
-            "**轮内**（队列还有待办步骤）的课不驱逐"
-        )
-
-    own_pool = pool is None
-    pool = pool or EnginePool(
-        factory=build_factory(runtimes, bun=bun, iters=iters, step_mode=step_mode, now=now),
-        courses=cache_courses,
-        mb=cache_mb,
-    )
-    sup = supervisor or Supervisor(
-        executor=build_executor(pool, runtimes, report, traj_root=traj_root),
-        planner=_planner(runtimes),
-        capacities=dict(capacities or DEFAULT_CAPACITIES),
-        now=now,
-    )
-    # ★ P1（2026-10-02 事故）：把 `EnginePool` docstring 那句「绝不驱逐正在用的引擎」补全 ——
-    # 此前 `keep` 只护住「本次 `get` 的那一门」，其余**轮内**的课照样被抽走引擎：重建后的
-    # 引擎没有轮内属性（`_node_rollout` 等），而调度器队列仍停在该轮之后的步骤 ⇒ 一步一崩
-    # （h4-hurt-f75/f150：1076 次 run_start / 0 条 iteration）。判据挂在**队列**上：
-    # `tasks` 非空 = 这一轮还没走完（含 WAIT 等外部）⇒ 此刻不许抽栈。
-    pool.pinned = _pinned_mid_round(sup)
-
-    # 初始队列内容用**盘上事实**算（不构建引擎：扫到但没在训的课不该拉起 torch）。
-    _enqueue_opened(sup, runtimes, report, list(runtimes), step_mode=step_mode, traj_root=traj_root)
-
-    log(
-        f"[serve] 单进程 supervisor 启动：{len(runtimes)} 课（{'发现模式：不绑课程' if discover else '显式课程表'}）/ 池容量 "
-        + " ".join(f"{k}={v}" for k, v in (capacities or DEFAULT_CAPACITIES).items())
-        + f" / 粒度={'13 步' if step_mode else '轮'}"
-    )
+    control_file = spec.control_file
+    traj_root = spec.traj_root
+    argv = spec.argv
+    step_mode = spec.step_mode
+    max_seconds = spec.max_seconds
+    max_steps = spec.max_steps
+    poll_sec = spec.poll_sec
+    now = spec.now
+    sleep = spec.sleep
+    runtimes = start.runtimes
+    seen_marker = start.seen_marker
+    discover = start.discover
+    t0 = start.t0
 
     done_hooked: set[str] = set()
     #: ★M4 弱版：开关不一致的已喊记账（恢复一致后自动摘名——再犯再喊）。

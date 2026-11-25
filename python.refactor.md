@@ -2129,3 +2129,7 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > `_plan_after` / `_plan_preempt` / `_plan_reroll` / `_plan_settle`（决策对象 `_RetryPlan` +
 > `_RetryState` / `_Attempt` / `_RetryAction`）；HEAD-vs-新 18 组差分全同（探针 4/4 红），
 > 存量 49 → 48（engineering §357）。
+
+> 2026-11-25 第二十一格：`trainer/loop_serve.serve` 184 → 111 + `_start_serve` /
+> `_build_service`（主循环逐字未动）；HEAD-vs-新 11 组差分全同（探针 4/4 红），
+> 存量 48 → 47（engineering §358）。

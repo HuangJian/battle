@@ -11011,3 +11011,24 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   新单测 `tests/remote/test_wire_retry_plan.py`（12 条）逐行钉决策表；既有 `test_wire_reroll.py`
   一行不改全绿；全量 pygate 7052 passed / 13 skipped；根 `bun run check` 绿。
   全文 → `docs/nn/engineering.md` §357；设计稿 → `docs/nn/http-retry-decision.md`。
+
+## §2026-11-25-serve-startup
+
+- **背景**：`trainer/loop_serve.serve` 184 行，把「进程只做一次」（prepare / 发现 / 开课）·
+  「服务装配」（缓存上限 / 池 / 调度器 / pinned / 初始入队）·「一拍一次的主循环」摊在一条直线；
+  `LONG_FUNCS_BASELINE` 第 21 格。
+
+- **决定**：`_start_serve`（33 行，返 `_ServeStart{bun, t0, discover, runtimes, seen_marker}`）·
+  `_build_service`（68 行，返 `pool, sup, own_pool`）· `serve` **184 → 111**，主循环逐字未动。
+  `trainer/loop_serve.py` 的形状存量删条（48 → 47，该文件归零）。
+
+- **被否决**：① 一个 `_ServeSetup` 返 20 字段载体 —— 两段返回值各只 3/5 字段；② 继续拆主循环 ——
+  要造可变状态对象，收益只有行数；③ `_Server` 类 —— 一次性编排不该有生命周期。
+
+- **验证**：HEAD(`e02f607e`)-vs-新 11 组差分 **0 差异**（无课可开 / 显式收官 / 发现空转
+  `max_seconds` / 发现 `max_steps` / 发现跳坏课 / cache 告警 / 注入 pool+sup / prepare 成功 /
+  prepare `SystemExit` / aborted trace / 控制面告警），比对 `ServeReport`、日志与完整事件序列
+  （prepare / enabled / marker / open / factory / pool / executor / planner / supervisor /
+  pinned / enqueue / 启动行 / read_control / switch / settle / discover_tick / heartbeat /
+  finish / sleep）；探针 4/4 红。serve 四个测试文件 59 条全绿；全量 pygate 7052 passed /
+  13 skipped；根 `bun run check` 绿。全文 → `docs/nn/engineering.md` §358。

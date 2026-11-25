@@ -29,6 +29,38 @@
 
 ---
 
+## §358 分诊第二十一格：`trainer/loop_serve.serve` 184 → 111 + 两段启动（2026-11-25）
+
+`serve` 原来把「进程只做一次的事」（UTF-8/push/bun 探测、发现已开课课程、开课并登记 marker）
+与「服务对象的装配」（引擎缓存上限、池/调度器、`pool.pinned`、初始入队、启动行）和「一拍一次的
+主循环」摊在同一条直线上。现在：`_start_serve` 33（返回 `_ServeStart{bun, t0, discover,
+runtimes, seen_marker}`）· `_build_service` 68（返回 `pool, sup, own_pool`）· `serve` **184 → 111**，
+其中主循环（`done_hooked` 到 `_finish_serve`）**逐字未动**。`LONG_FUNCS_BASELINE` 删
+`trainer/loop_serve.py`（48 → 47，该文件归零）；文件 LOC 839/1000。
+
+**为什么切这两刀而不是继续拆循环**：主循环的每一步都同时读 `sup` / `runtimes` / `report` /
+`done_hooked` / `switch_warned` / 控制面与心跳，拆它要造一个十几字段的可变载体，而收益只是
+「行数变少」；启动两段各自有**一次**的生命周期（进程级 / 装配级）与清晰的返回值，切完入口只剩
+「准备 → 建服务 → 跑 → 收尾」。
+
+**切面首版就踩到的真坑**：`report` 必须穿过 `_build_service` —— `build_executor` 把一步级失败
+记进 `report.failures`，`_enqueue_opened` 把开课失败记进 `report.skipped`；首版拼接脚本把两处
+写成 `report=None`，差分的事件序列（`executor` 的 `report is not None` / `enqueue`）会当场红。
+
+**验证**：HEAD(`e02f607e`)-vs-新 11 组差分 **0 差异**（无课可开 / 显式课程收官 / 发现模式空转
+撞 `max_seconds` / 发现模式撞 `max_steps` / 发现时跳过坏课 / 显式 `cache_courses` 告警 /
+注入 `pool`+`supervisor`（`own_pool=False`）/ `prepare=True` / `prepare` 抛 `SystemExit` /
+aborted trace / 控制面告警行），比对 `ServeReport`（stop_reason / steps / skipped / courses）、
+日志与完整事件序列（prepare / enabled / marker / open / factory 参数 / pool 构造 / executor /
+planner / supervisor 构造 / pinned / enqueue / 启动行 / read_control / switch / settle /
+discover_tick / heartbeat / finish / sleep）；探针 4/4 红（pinned / marker / enqueue / discover）。
+`tests/trainer/test_serve_{wiring,bc,aborted_revival,skipped_retry}.py` 59 条全绿；全量 pygate
+**7052 passed / 13 skipped**；根 `bun run check` 绿。
+
+**被否决**：① 一个 `_ServeSetup` 返回 20 字段载体 —— 启动两段的返回值各只有 3/5 字段，大载体
+只是把局部变量换个地方存；② 继续拆主循环 —— 要造可变状态对象，收益只有行数；③ `_Server` 类 ——
+`serve` 是一次性编排，做成类等于给一次调用建生命周期。
+
 ## §357 分诊第二十格：`remote/http._get_with_retry` 的重试控制流 → `_RetryPlan`（2026-11-25）
 
 190 行里「下一次干什么」由 4 处 `continue`、1 处 `raise`、1 处 `return` 与 7 个裸局部共同表达：
