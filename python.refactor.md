@@ -363,6 +363,9 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
   > 构造器后，下一批五格已点名（engineering §345）：`batch_lanes.worker` /
   > `push_dispatch._await_result` / `job_round.run` / `worker_server.make_worker_server` /
   > `greedy_round.run_greedy_round`。
+  > 第九格也落地了：`trainer/batch_lanes.worker` 178 → 29 + 四段（`_lane_claim` / `_lane_fetch` /
+  > `_lane_accept` / `_lane_fail` + `_LanePick`）；HEAD-vs-新 289 组决策表全同，存量 60 → 59
+  > （engineering §346）。
 
 **为什么这是问题**
 

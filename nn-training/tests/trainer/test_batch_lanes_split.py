@@ -61,6 +61,10 @@ MACHINE_METHODS = (
     "record",
     "params_for",
     "fetch_manifest",
+    "_lane_claim",
+    "_lane_fetch",
+    "_lane_accept",
+    "_lane_fail",
     "worker",
     "_watch",
     # 2026-11-20：收尾要的 15 个把手一次交清（`UnitLedger` 的唯一装配点）。

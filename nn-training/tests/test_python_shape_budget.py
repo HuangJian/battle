@@ -80,7 +80,6 @@ LONG_FUNCS_BASELINE: dict[str, int] = {
     "tools/spatial-probe.py": 1,
     "tools/tpu-probe.py": 1,
     "tools/wave2_judge.py": 1,
-    "trainer/batch_lanes.py": 1,
     "trainer/batch_runner.py": 1,
     "trainer/bc_loop.py": 1,
     "trainer/dispatch_state.py": 1,

@@ -99,7 +99,9 @@ INBOUND_CALLS: dict[str, dict[str, int]] = {
     # （`BatchEvalRunner._run_channels.worker` → `_UnitLanes.worker`）—— 同一族陷阱第三次：
     # 搬成员 = 改归属者名字，只数旧宿主会静默退化。
     "batch_iter_id": {"BatchEvalRunner._open_unit": 1},
-    "is_transient_error": {"_UnitLanes.worker": 1},
+    # 2026-11-25：`worker` 拆四段 ⇒ 瞬断判据随 `fetch_manifest` 进 `_lane_fetch`
+    # （同族陷阱第四次：归属者跟着方法走，不跟着入口走）。
+    "is_transient_error": {"_UnitLanes._lane_fetch": 1},
     "kind_for_policy": {"BatchEvalRunner.__init__": 1},
     "node_gate_reason": {"_UnitLanes.bringup": 1},
     "select_next_unit": {"maybe_dispatch_batch": 1},

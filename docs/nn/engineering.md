@@ -29,6 +29,31 @@
 
 ---
 
+## §346 分诊第九格：`trainer/batch_lanes.worker` 178 → 29 + 四段（2026-11-25）
+
+`worker` 的 178 行里只有 3 条顶层语句：一个 `while` 套「熔断 / 领取 / 竞速 / 取包 / 结算 /
+背压」。按 §345 的切法落地，四段全部是方法（不自造闭包）：
+
+| 段 | 行 | 职责 | 返回 |
+|---|---:|---|---|
+| `_lane_claim` | 41 | tripped → pending → 竞速；锁内只改账 | `_LanePick(stop, task, race_copy)` |
+| `_lane_fetch` | 21 | 计时 + `fetch_manifest` + 异常三分 + `in_flight` 归零 | `(ok, err, transient, manifest, t_task)` |
+| `_lane_accept` | 45 | seen / dup / record / settled 满断连 | `True` ⇒ 本迭代 continue |
+| `_lane_fail` | 69 | 竞速或收工丢弃 / 背压重排 / 硬失败熔断 | 本拍退避秒数 |
+
+入口 `worker` 29 行，只剩停机判据与三步调度。三条判据刻意留在入口：
+`attempt = self.attempts[task]` 必须在 `_lane_fail` 之前读（背压会回退它）、退避 `sleep` 在锁外、
+`all_done.wait(...)` 的空转分支。
+
+**验证**：HEAD(`51c3ca67`)-vs-新 289 组决策表（pending × inflight/竞速 × seen × fetch 四态 ×
+streak × trace），比对 18 项终态 + 日志/落盘/退避序列，**0 差异**；
+`tests/trainer/test_batch_lanes_worker.py` 7 条行为守卫。`trainer/batch_lanes.py` 移出
+`LONG_FUNCS_BASELINE`（60 → 59）。入边契约随归属者更名：`is_transient_error` 的调用点从
+`_UnitLanes.worker` 改记 `_UnitLanes._lane_fetch`（`test_batch_plan_split` 已同步）。
+
+坑：`worker` 的 `slot` 参数从未使用（保留签名，调用点仍逐位传）；`if ok` 成功块即使
+`manifest is None` 也先记 seen/writers —— 这是「试满不重排」的前置，不能顺手挪进 record 分支。
+
 ## §345 分诊表复查：剩余 60 个里 44 格仍带 try/嵌套循环，下一批五格（2026-11-25）
 
 `LONG_FUNCS_BASELINE` 在 §344 后剩 **60** 个。按 §331 的同一口径重算

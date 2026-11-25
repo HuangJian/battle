@@ -159,6 +159,14 @@ class LaneOwner(Protocol):
     def _settle_unit(self, ledger: UnitLedger) -> dict: ...
 
 
+class _LanePick(NamedTuple):
+    """worker 一拍的第一步：停 / 没活 / 领到。"""
+
+    stop: bool
+    task: tuple[int, int] | None
+    race_copy: bool
+
+
 class _UnitLanes:
     """一个单元的**通道机器**（原 `_run_channels` 体内：状态 + 11 个闭包 + 起跑 + 主循环）。
 
@@ -638,50 +646,194 @@ class _UnitLanes:
             raise common.distribution.DistError(0, why)
         return m
 
+    def _lane_claim(self, nid: str, lane: dict) -> _LanePick:
+        """一拍的第一步：熔断 / 领新局 / 竞速副本 —— 锁内只改账，不跑局。"""
+        with self.lock:
+            if self.streaks.get(nid, 0) >= self.fail_streak_max:
+                # 熔断 → 交回通道：supervise 会每 recover_ping_sec 重探（req 5）。
+                if nid != "local":
+                    lane["tripped"] = True
+                return _LanePick(stop=True, task=None, race_copy=False)
+            # 关窗（rollout 抢占）本地与远端一并停派；在途局自然收完。
+            if self.pending and self.window_open():
+                task = self.pending.popleft()
+                self.attempts[task] = self.attempts.get(task, 0) + 1
+                register_inflight(self.inflight, task)
+                self.inflight_nodes.setdefault(task, set()).add(nid)
+                return _LanePick(stop=False, task=task, race_copy=False)
+            if self.inflight:
+                # ---- 尾段竞速（与 A 层同机制）----
+                # 队列已空但还有在飞局 ⇒ 空闲槽复制一份到本节点，**先返回者结算**、
+                # 败者按 dup 丢弃。专项修的就是「快节点干完、只剩慢节点拖尾巴」：
+                # 实测 3 台慢节点（a96 平均 124s/局）只出 8.9% 的局却吃掉 63% 节点秒，
+                # 每单元尾巴空转 1–3 分钟（2026-09-19）。
+                cand = pick_race_target(self.inflight, nid, self.inflight_nodes, {})
+                if cand is not None and cand in self.seen:
+                    # 不变式：inflight 里的任务必然 ∉ seen（赢家一律走 clear_inflight）。
+                    # 残留 ⇒ 对它竞速只会「回包即 dup」，而 pop_inflight 在计数 > 0 时
+                    # 会把本节点移出 inflight_nodes ⇒ 下一轮又能抢同一个 ⇒ 竞速风车
+                    # （2026-09-19 实测：同一节点对同一已结算任务 5s 内重抢 48 次，
+                    #  单批 411 条 tail-race + 111 条 dup settle，纯烧算力）。
+                    # 摘除残留并放弃本次竞速（每轮至多清一个，有界）。
+                    clear_inflight(self.inflight, self.inflight_nodes, cand)
+                    cand = None
+                if cand is not None:
+                    task = cand
+                    self.inflight[task] += 1
+                    self.inflight_nodes.setdefault(task, set()).add(nid)
+                    # **不**递增 attempts：副本是投机重跑，若算进去，一局被 6 台
+                    # 各抢一次后**一次真失败**就会直接耗满配额（局面被丢弃）。
+                    # 该局必然已从 pending 领过一次 ⇒ 键已在（setdefault 兜底）。
+                    self.attempts.setdefault(task, 1)
+                    return _LanePick(stop=False, task=task, race_copy=True)
+        return _LanePick(stop=False, task=None, race_copy=False)
+
+    def _lane_fetch(self, nd: dict, nid: str, task: tuple[int, int]) -> tuple[
+        bool, str, bool, dict | None, float
+    ]:
+        """跑一局并把异常归成 `(ok, err, transient)`；`in_flight` 在 finally 里归零。"""
+        manifest: dict | None = None
+        t_task = time.monotonic()
+        with self.lock:
+            self.in_flight[0] += 1
+        if self.trace:
+            log(f'[batcheval] → {nid} s{task[0]}/seed{task[1]}')
+        try:
+            manifest = self.fetch_manifest(nd, task)
+            ok, err, transient = True, "", False
+        except Exception as e:
+            ok = False
+            err = str(e)[:200]
+            transient = is_transient_error(e)
+        finally:
+            with self.lock:
+                self.in_flight[0] -= 1
+        return ok, err, transient, manifest, t_task
+
+    def _lane_accept(
+        self, nid: str, task: tuple[int, int], manifest: dict | None, t_task: float
+    ) -> bool:
+        """胜者落盘 / 竞速去重 / 收工断连；返回 True ⇒ 本迭代 continue。"""
+        dup_settle = False
+        last_settled = False
+        with self.lock:
+            if task in self.seen:
+                pop_inflight(self.inflight, self.inflight_nodes, task, nid)
+                dup_settle = True
+            else:
+                self.seen.add(task)
+                self.writers[0] += 1  # 收工前必须等它落盘（见 writers 注释）
+                clear_inflight(self.inflight, self.inflight_nodes, task)
+                self.streaks[nid] = 0
+                self.busy_tries.pop(task, None)
+                if len(self.seen) >= self.total:
+                    self.all_done.set()
+                    last_settled = True
+        if dup_settle:
+            self.dup_settles[0] += 1
+            # 收工后的副本回包是**噪**（收尾汇总里给计数）；在飞期间的逐条留作
+            # 竞速证据（且只在开了事件追踪时打，训练循环的日志逐字不变）。
+            if self.trace and not self.all_done.is_set():
+                log(f'[batcheval] dup settle s{task[0]}/seed{task[1]} node={nid} — dropped')
+            return True
+        if manifest is None:
+            return False
+        self.record(manifest, nid, task)  # 只有胜者落盘（settled/node_games 同源）
+        if self.trace:
+            # 事件：**单局结果返回**（含节点与耗时：与「→」配对可算在飞曲线）。
+            log(
+                f'[batcheval] ← {nid} s{task[0]}/seed{task[1]} '
+                f"{time.monotonic() - t_task:.1f}s ticks={manifest.get('ticks')} "
+                f"{manifest.get('outcome')}"
+            )
+        if last_settled:
+            # 用户第 4 条：竞速后 settled 一满，**直接关闭所有节点的连接**——
+            # 立即！马上！right now！不等慢节点把尾巴算完（那些结果本就无用）。
+            closing = common.distribution.abort_active_requests(self.req_scope)
+            log(
+                f'[batcheval] settled 满（{len(self.seen)}/{self.total}）— 断连 {closing} 条'
+                f'在飞连接 + 拒发新请求，立即收工（慢节点/竞速副本不再等）'
+            )
+        return True
+
+    def _lane_fail(
+        self,
+        nid: str,
+        lane: dict,
+        task: tuple[int, int],
+        err: str,
+        transient: bool,
+        attempt: int,
+    ) -> float:
+        """失败回收：竞速副本 / 背压重排 / 硬失败熔断；返回本拍要睡的秒数。"""
+        sleep_for = 0.0
+        with self.lock:
+            pop_inflight(self.inflight, self.inflight_nodes, task, nid)
+            # 竞速副本/收工断连的回包：本任务已被胜者结算（或本单元已收工）⇒ 结果
+            # 无关，**丢弃且不计任何账**（既不是背压，也不是节点故障）。不加这一支，
+            # 主动断连会被当成硬失败去熔断节点（2026-09-19）。
+            if task in self.seen or self.all_done.is_set():
+                pass
+            elif transient:
+                # 背压/瞬断（503 busy、10054 连接重置、超时）：**节点容量或网络**问题，
+                # 既不是任务问题、也不是节点故障 ⇒ 任务只重排、**永不丢弃**，
+                # 且不消耗 attempt 配额（退避指数封顶 BUSY_BACKOFF_CAP_SEC ⇒ 不烧 CPU；
+                # 真正的放弃由 deadline / all_done 兜底）。
+                # ⚠ 2026-09-19 修复：原条件是 `... and busy_tries < busy_retry_limit`，
+                # 上限用尽后掉进下面的「硬失败」分支 ⇒ attempts 被抬到 7（> 2）
+                # ⇒ 一局被误判「试满丢弃」⇒ settled 799/800 干等到 deadline。
+                n = self.busy_tries.get(task, 0) + 1
+                self.busy_tries[task] = n
+                self.pending.append(task)
+                # 回退 `pending.popleft()` 时累加的那一次（背压不是一次真尝试）。
+                self.attempts[task] = max(1, self.attempts.get(task, 1) - 1)
+                self.node_soft_fails[nid] = self.node_soft_fails.get(nid, 0) + 1
+                sleep_for = min(BUSY_BACKOFF_CAP_SEC, self.busy_backoff_sec * (2 ** (n - 1)))
+                if n == self.busy_retry_limit:
+                    log(
+                        f'[batcheval] ⚠ {nid} 对 s{task[0]}/seed{task[1]} 已连续 {n} 次背压'
+                        f'（上限 {self.busy_retry_limit}）—— 任务继续排队，但该节点疑似持续'
+                        f'满负荷（退避封顶 {BUSY_BACKOFF_CAP_SEC:.0f}s，不再计入失败）'
+                    )
+                log(
+                    f'[batcheval] {nid} s{task[0]}/seed{task[1]} 背压（{err[:90]}）'
+                    f'→ 退避 {sleep_for:.2f}s 重排（第 {n} 次；不计节点失败）'
+                )
+            else:
+                self.streaks[nid] = self.streaks.get(nid, 0) + 1
+                self.node_hard_fails[nid] = self.node_hard_fails.get(nid, 0) + 1
+                if attempt < EVAL_TASK_ATTEMPTS and task not in self.seen:
+                    self.pending.append(task)
+                    log(
+                        f'[batcheval] {nid} s{task[0]}/seed{task[1]} failed ({err}) — '
+                        f'requeued（第 {attempt}/{EVAL_TASK_ATTEMPTS} 次）'
+                    )
+                else:
+                    # 试满配额（或已结算）⇒ 不再重排，但**失败本身必须留痕**：
+                    # 2026-09-19 实测「真失败计数 gcs=1」却在日志里查不到任何原因
+                    #（原实现只有「会重排」那条才打日志）——静默计数正是排查黑洞。
+                    log(
+                        f'[batcheval] {nid} s{task[0]}/seed{task[1]} failed ({err}) — '
+                        f'试满 {attempt}/{EVAL_TASK_ATTEMPTS} 次，本单元不再重排'
+                    )
+                if self.streaks[nid] == self.fail_streak_max:
+                    if nid != "local":
+                        lane["tripped"] = True  # supervise 收工后会重探（req 5）
+                    log(
+                        f'[batcheval] ⚠ 节点 {nid} 连续 {self.fail_streak_max} 次真失败'
+                        f' → 停派该节点，{self.recover_ping_sec:.0f}s 后重探'
+                        f'（其余节点继续；/v1/ping 看 codeHash 与节点日志）'
+                    )
+        return sleep_for
+
     def worker(self, nd: dict, lane: dict, slot: int) -> None:
         common.distribution.set_request_tag(self.req_scope, kind="batch")
         nid = str(nd["id"])
         while time.time() < self.deadline and not self.all_done.is_set():
-            task = None
-            race_copy = False
-            with self.lock:
-                if self.streaks.get(nid, 0) >= self.fail_streak_max:
-                    # 熔断 → 交回通道：supervise 会每 recover_ping_sec 重探（req 5）。
-                    if nid != "local":
-                        lane["tripped"] = True
-                    return
-                # 关窗（rollout 抢占）本地与远端一并停派；在途局自然收完。
-                if self.pending and self.window_open():
-                    task = self.pending.popleft()
-                    self.attempts[task] = self.attempts.get(task, 0) + 1
-                    register_inflight(self.inflight, task)
-                    self.inflight_nodes.setdefault(task, set()).add(nid)
-                elif self.inflight:
-                    # ---- 尾段竞速（与 A 层同机制）----
-                    # 队列已空但还有在飞局 ⇒ 空闲槽复制一份到本节点，**先返回者结算**、
-                    # 败者按 dup 丢弃。专项修的就是「快节点干完、只剩慢节点拖尾巴」：
-                    # 实测 3 台慢节点（a96 平均 124s/局）只出 8.9% 的局却吃掉 63% 节点秒，
-                    # 每单元尾巴空转 1–3 分钟（2026-09-19）。
-                    cand = pick_race_target(self.inflight, nid, self.inflight_nodes, {})
-                    if cand is not None and cand in self.seen:
-                        # 不变式：inflight 里的任务必然 ∉ seen（赢家一律走 clear_inflight）。
-                        # 残留 ⇒ 对它竞速只会「回包即 dup」，而 pop_inflight 在计数 > 0 时
-                        # 会把本节点移出 inflight_nodes ⇒ 下一轮又能抢同一个 ⇒ 竞速风车
-                        # （2026-09-19 实测：同一节点对同一已结算任务 5s 内重抢 48 次，
-                        #  单批 411 条 tail-race + 111 条 dup settle，纯烧算力）。
-                        # 摘除残留并放弃本次竞速（每轮至多清一个，有界）。
-                        clear_inflight(self.inflight, self.inflight_nodes, cand)
-                        cand = None
-                    if cand is not None:
-                        task = cand
-                        self.inflight[task] += 1
-                        self.inflight_nodes.setdefault(task, set()).add(nid)
-                        # **不**递增 attempts：副本是投机重跑，若算进去，一局被 6 台
-                        # 各抢一次后**一次真失败**就会直接耗满配额（局面被丢弃）。
-                        # 该局必然已从 pending 领过一次 ⇒ 键已在（setdefault 兜底）。
-                        self.attempts.setdefault(task, 1)
-                        race_copy = True
-            if task is None:
+            pick = self._lane_claim(nid, lane)
+            if pick.stop:
+                return
+            if pick.task is None:
                 if not self.pending and not self.inflight:
                     return
                 if not self.window_open():
@@ -689,130 +841,17 @@ class _UnitLanes:
                     return
                 self.all_done.wait(min(5.0, max(0.1, self.deadline - time.time())))
                 continue
+            task = pick.task
             attempt = self.attempts[task]
-            if race_copy:
+            if pick.race_copy:
                 log(
                     f'[batcheval] tail-race s{task[0]}/seed{task[1]} '
                     f'node={nid} — race lane'
                 )
-            sleep_for = 0.0
-            manifest: dict | None = None
-            t_task = time.monotonic()
-            with self.lock:
-                self.in_flight[0] += 1
-            if self.trace:
-                log(f'[batcheval] → {nid} s{task[0]}/seed{task[1]}')
-            try:
-                manifest = self.fetch_manifest(nd, task)
-                ok, err, transient = True, "", False
-            except Exception as e:
-                ok = False
-                err = str(e)[:200]
-                transient = is_transient_error(e)
-            finally:
-                with self.lock:
-                    self.in_flight[0] -= 1
-            # 竞速败者：结果与胜者逐字相同（同一 (stage,seed,wver) 纯函数），丢弃不落盘。
-            dup_settle = False
-            last_settled = False
-            if ok:
-                with self.lock:
-                    if task in self.seen:
-                        pop_inflight(self.inflight, self.inflight_nodes, task, nid)
-                        dup_settle = True
-                    else:
-                        self.seen.add(task)
-                        self.writers[0] += 1  # 收工前必须等它落盘（见 writers 注释）
-                        clear_inflight(self.inflight, self.inflight_nodes, task)
-                        self.streaks[nid] = 0
-                        self.busy_tries.pop(task, None)
-                        if len(self.seen) >= self.total:
-                            self.all_done.set()
-                            last_settled = True
-            if dup_settle:
-                self.dup_settles[0] += 1
-                # 收工后的副本回包是**噪**（收尾汇总里给计数）；在飞期间的逐条留作
-                # 竞速证据（且只在开了事件追踪时打，训练循环的日志逐字不变）。
-                if self.trace and not self.all_done.is_set():
-                    log(
-                        f'[batcheval] dup settle s{task[0]}/seed{task[1]} node={nid} — dropped'
-                    )
+            ok, err, transient, manifest, t_task = self._lane_fetch(nd, nid, task)
+            if ok and self._lane_accept(nid, task, manifest, t_task):
                 continue
-            if ok and manifest is not None:
-                self.record(manifest, nd["id"], task)  # 只有胜者落盘（settled/node_games 同源）
-                if self.trace:
-                    # 事件：**单局结果返回**（含节点与耗时：与「→」配对可算在飞曲线）。
-                    log(
-                        f'[batcheval] ← {nid} s{task[0]}/seed{task[1]} '
-                        f"{time.monotonic() - t_task:.1f}s ticks={manifest.get('ticks')} "
-                        f"{manifest.get('outcome')}"
-                    )
-                if last_settled:
-                    # 用户第 4 条：竞速后 settled 一满，**直接关闭所有节点的连接**——
-                    # 立即！马上！right now！不等慢节点把尾巴算完（那些结果本就无用）。
-                    closing = common.distribution.abort_active_requests(self.req_scope)
-                    log(
-                        f'[batcheval] settled 满（{len(self.seen)}/{self.total}）— 断连 {closing} 条'
-                        f'在飞连接 + 拒发新请求，立即收工（慢节点/竞速副本不再等）'
-                    )
-                continue
-            with self.lock:
-                pop_inflight(self.inflight, self.inflight_nodes, task, nid)
-                # 竞速副本/收工断连的回包：本任务已被胜者结算（或本单元已收工）⇒ 结果
-                # 无关，**丢弃且不计任何账**（既不是背压，也不是节点故障）。不加这一支，
-                # 主动断连会被当成硬失败去熔断节点（2026-09-19）。
-                if task in self.seen or self.all_done.is_set():
-                    pass
-                elif transient:
-                    # 背压/瞬断（503 busy、10054 连接重置、超时）：**节点容量或网络**问题，
-                    # 既不是任务问题、也不是节点故障 ⇒ 任务只重排、**永不丢弃**，
-                    # 且不消耗 attempt 配额（退避指数封顶 BUSY_BACKOFF_CAP_SEC ⇒ 不烧 CPU；
-                    # 真正的放弃由 deadline / all_done 兜底）。
-                    # ⚠ 2026-09-19 修复：原条件是 `... and busy_tries < busy_retry_limit`，
-                    # 上限用尽后掉进下面的「硬失败」分支 ⇒ attempts 被抬到 7（> 2）
-                    # ⇒ 一局被误判「试满丢弃」⇒ settled 799/800 干等到 deadline。
-                    n = self.busy_tries.get(task, 0) + 1
-                    self.busy_tries[task] = n
-                    self.pending.append(task)
-                    # 回退 `pending.popleft()` 时累加的那一次（背压不是一次真尝试）。
-                    self.attempts[task] = max(1, self.attempts.get(task, 1) - 1)
-                    self.node_soft_fails[nid] = self.node_soft_fails.get(nid, 0) + 1
-                    sleep_for = min(BUSY_BACKOFF_CAP_SEC, self.busy_backoff_sec * (2 ** (n - 1)))
-                    if n == self.busy_retry_limit:
-                        log(
-                            f'[batcheval] ⚠ {nid} 对 s{task[0]}/seed{task[1]} 已连续 {n} 次背压'
-                            f'（上限 {self.busy_retry_limit}）—— 任务继续排队，但该节点疑似持续'
-                            f'满负荷（退避封顶 {BUSY_BACKOFF_CAP_SEC:.0f}s，不再计入失败）'
-                        )
-                    log(
-                        f'[batcheval] {nid} s{task[0]}/seed{task[1]} 背压（{err[:90]}）'
-                        f'→ 退避 {sleep_for:.2f}s 重排（第 {n} 次；不计节点失败）'
-                    )
-                else:
-                    self.streaks[nid] = self.streaks.get(nid, 0) + 1
-                    self.node_hard_fails[nid] = self.node_hard_fails.get(nid, 0) + 1
-                    if attempt < EVAL_TASK_ATTEMPTS and task not in self.seen:
-                        self.pending.append(task)
-                        log(
-                            f'[batcheval] {nid} s{task[0]}/seed{task[1]} failed ({err}) — '
-                            f'requeued（第 {attempt}/{EVAL_TASK_ATTEMPTS} 次）'
-                        )
-                    else:
-                        # 试满配额（或已结算）⇒ 不再重排，但**失败本身必须留痕**：
-                        # 2026-09-19 实测「真失败计数 gcs=1」却在日志里查不到任何原因
-                        #（原实现只有「会重排」那条才打日志）——静默计数正是排查黑洞。
-                        log(
-                            f'[batcheval] {nid} s{task[0]}/seed{task[1]} failed ({err}) — '
-                            f'试满 {attempt}/{EVAL_TASK_ATTEMPTS} 次，本单元不再重排'
-                        )
-                    if self.streaks[nid] == self.fail_streak_max:
-                        if nid != "local":
-                            lane["tripped"] = True  # supervise 收工后会重探（req 5）
-                        log(
-                            f'[batcheval] ⚠ 节点 {nid} 连续 {self.fail_streak_max} 次真失败'
-                            f' → 停派该节点，{self.recover_ping_sec:.0f}s 后重探'
-                            f'（其余节点继续；/v1/ping 看 codeHash 与节点日志）'
-                        )
+            sleep_for = self._lane_fail(nid, lane, task, err, transient, attempt)
             if sleep_for > 0:
                 # 锁外退避（持锁睡会卡住全部 worker）。
                 time.sleep(sleep_for)

@@ -10781,3 +10781,21 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：HEAD-vs-新 300 组决策表（键序 + 全字段 JSON + 日志 + bundle 事件）**0 差异**；
   `tests/worker/test_eval_settle_split.py` 5 条（9 例）；全量门禁 7026 passed / 3 skipped。
   全文 → `docs/nn/engineering.md` §344。
+
+## §2026-11-25-batch-lane-split
+
+- **背景**：`_UnitLanes.worker` 178 行、3 条顶层语句，一个 `while` 里混着熔断 / 领取 / 竞速 /
+  取包 / 结算 / 背压六种判据；`LONG_FUNCS_BASELINE` 第 9 格。
+
+- **决定**：按「锁内只改账、锁外跑局」切成 `_lane_claim` / `_lane_fetch` / `_lane_accept` /
+  `_lane_fail` 四段 + `_LanePick` NamedTuple，入口 29 行；`trainer/batch_lanes.py` 移出
+  `LONG_FUNCS_BASELINE`（60 → 59）。`is_transient_error` 的 AST 入边归属随 `fetch_manifest`
+  改记 `_UnitLanes._lane_fetch`。
+
+- **被否决**：① 按 §345 草案把「取包」与「结算」合成 `_lane_settle` —— 取包的 `try/finally`
+  与结算的锁不是同一条边界，合成后 `in_flight` 归零要跨锁传 5 个返回值，入口反而更绕；
+  ② 让 `_lane_fail` 自己读 attempts —— 背压分支会先回退 attempt，读晚一拍会多减一次；
+  ③ 删 `slot` 死参 —— 调用点按位置传参，改动波及 `threads` 装配面，不在本刀范围（保留）。
+
+- **验证**：HEAD(`51c3ca67`)-vs-新 289 组决策表 **0 差异**；新增 7 条行为守卫；
+  全量门禁 7033 passed / 3 skipped。全文 → `docs/nn/engineering.md` §346。
