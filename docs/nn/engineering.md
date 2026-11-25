@@ -29,6 +29,29 @@
 
 ---
 
+## §355 分诊第十八格：`remote/deliver_zip.import_deliver_zip` 178 → 42 + 四段（2026-11-25）
+
+产物 zip 的导入原来把四件事摊在一个函数里：门前检查（存在 / 尺寸 / 文件名课程 / 是不是 zip /
+拿错包）、解包认形状（zip-slip / 下探一层 / `it-*/` / `state.json` / `IMPORT_META` 对账 /
+run_id 校正）、逐轮并进（`_land_rounds` / `_land_anchors` / 两路账本搬运 / 包体检）、盘上收尾
+（重扫末轮 / ckpt / 三行日志 / 成句柄）。入口现在只剩这四段的**顺序**，两个只读载体
+`_ImportPackage` / `_ImportMerged` 跨段携带（42 行）；`_import_precheck` 33 · `_unpack_import` 45 ·
+`_merge_import` 40 · `_import_result` 71。`LONG_FUNCS_BASELINE` 删 `remote/deliver_zip.py`（51 → 50）。
+
+**为什么中转目录的清理留在入口**：包体检读的是**包里**的字节（导入目录已被 merge 污染），
+所以 `shutil.rmtree(work)` 必须晚于 `_merge_import` ⇒ `try/finally` 只属于入口；搬进
+`_unpack_import` 会在体检之前删掉它的输入。
+
+**为什么 `_ImportPackage.final` 由解包段返回**：`state.json` 的 `run_id` 才是权威，落点可能在
+解包之后才被校正（文件名猜错时的正路）；`final` 只算一次、经载体传给后面两段，避免
+「按文件名算一遍、按 state 再算一遍」两个可漂的入口。
+
+**验证**：HEAD(`28c95b1`)-vs-新 16 组差分（正常 / 课程对账两侧 / `IMPORT_META` 三态 / 任务包 /
+非 zip / 缺失 / 空 zip / 套一层目录 / state 校正 run_id / partial 自述 / 重导合并 / replace /
+残留 `*.tmp-*`），zip 只打一次、两侧同一份字节，比对返回 dict、日志序列、落盘树（文本按归一
+内容 / 二进制按 sha）、异常类型与消息、残留壳，**0 差异**；敏感性探针（不并 anchors）10 组红。
+`tests/remote/test_deliver_zip.py` + 形状 / LOC 预算 54 条绿；全量 pygate 7041 passed / 13 skipped。
+
 ## §354 分诊第十七格：`trainer/loop_remote_job._remote_ppo_land` 151 → 17 + 五段（2026-11-25）
 
 相位③原来把五件事摊在一个函数里：三重校验 + 落位（含 `TripleCheckError` 的 cancel / 上抛）、

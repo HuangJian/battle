@@ -2114,3 +2114,8 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > （`_land_verified` / `_land_settled` / `_land_precollect` / `_land_settle_fields` /
 > `_land_accept_log`）；HEAD-vs-新 20 组差分全同（敏感性探针 3 组红），存量 52 → 51
 > （engineering §354）。
+
+> 2026-11-25 第十八格：`remote/deliver_zip.import_deliver_zip` 178 → 42 + 四段
+> （`_import_precheck` / `_unpack_import` / `_merge_import` / `_import_result`，载体
+> `_ImportPackage` / `_ImportMerged`）；HEAD-vs-新 16 组差分全同（探针 10 组红），
+> 存量 51 → 50（engineering §355）。

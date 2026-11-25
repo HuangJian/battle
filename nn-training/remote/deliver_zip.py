@@ -40,6 +40,7 @@ import re
 import shutil
 import sys
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 
 # 产物账本行 → 课程账本行的搬运**只在 remote.artifacts 实现一份**（人工导入与实时补传共用）：
@@ -398,6 +399,34 @@ def _land_anchors(src: Path, final: Path, *, conflicts: int, log=lambda _m: None
         shutil.copy2(s, d)
 
 
+@dataclass(frozen=True)
+class _ImportPackage:
+    """解好的产物包：`base` 是解压中转根，`final` 是它该落的目录（可能被 `state.json` 校正）。"""
+
+    base: Path
+    final: Path
+    #: 包内发现的轮次（升序，`_scan_iters` 的口径）。
+    iters: list[int]
+    st: dict
+    meta: dict
+    meta_raw: dict
+    #: 包内自述的课程（`IMPORT_META` 里那个；缺省空串）。
+    pkg_course: str
+
+
+@dataclass(frozen=True)
+class _ImportMerged:
+    """并进 `final` 之后的读数：包自己那一段、体检结论与账本搬运量。"""
+
+    pkg_iters: list[int]
+    landed: dict
+    n_eval: int
+    n_eval_sums: int
+    n_rows: int
+    partial: bool
+    checks: list[dict]
+
+
 def import_deliver_zip(
     zip_path: str | Path,
     dest_root: str | Path,
@@ -413,7 +442,37 @@ def import_deliver_zip(
     `iters`/`last_it`/`ckpt` 全部是**盘上真实**（合并后）——`ckpt` 必须指向盘上存在的那份权重
     （控制台拿它去跑 evalA）；`package_*` = 这个包自己带的那一段（便于对账）。
     任一门不过抛 `ProtocolError`，且**不写任何东西**；落位不再依赖目录改名（`_land_rounds`）。
+
+    入口只剩四段：**门前检查 → 解包认形状 → 逐轮并进 → 盘上收尾**。三段之间只有两个只读
+    载体（`_ImportPackage` / `_ImportMerged`），中转目录的清理仍钉在入口的 `finally` 上
+    （体检读的是包里的字节，必须晚于清理）。
     """
+    src, size, names, name_course = _import_precheck(zip_path, course)
+    dest_root = Path(dest_root)
+    dest_root.mkdir(parents=True, exist_ok=True)
+    # run_id 先按文件名猜（它就是 hub 侧/云机侧的 run id），解完再用 state.json 校正。
+    run_id = name_course or ""
+    if not run_id:
+        run_id = re.sub(r"[^A-Za-z0-9._-]", "_", src.stem)[:64] or "deliver"
+    work = dest_root / f"{run_id}.tmp-{os.getpid()}"
+    final = dest_root / run_id
+    if work.exists():
+        shutil.rmtree(work, ignore_errors=True)
+    try:
+        pkg = _unpack_import(src, work, course=course, run_id=run_id, final=final)
+        merged = _merge_import(
+            pkg, dest_root, replace=replace, names_count=len(names), size=size, log=log
+        )
+    finally:
+        # 中转目录只用于解压，**永远不残留**（也不再有「改名成功/失败」这个中间态）。
+        shutil.rmtree(work, ignore_errors=True)
+    return _import_result(
+        pkg, merged, course=course, name_course=name_course, src=src, size=size, log=log
+    )
+
+
+def _import_precheck(zip_path: str | Path, course: str) -> tuple[Path, int, list[str], str]:
+    """门前检查（**不写任何东西**）：存在 / 非空 / 尺寸上界 / 文件名课程 / 是不是 zip / 拿错包。"""
     src = Path(zip_path)
     if not src.exists():
         raise ProtocolError(f"产物 zip 不存在: {src}")
@@ -444,84 +503,115 @@ def import_deliver_zip(
         )
     if not names:
         raise ProtocolError(f"zip 是空的: {src}")
+    return src, size, names, name_course
 
-    dest_root = Path(dest_root)
-    dest_root.mkdir(parents=True, exist_ok=True)
-    # run_id 先按文件名猜（它就是 hub 侧/云机侧的 run id），解完再用 state.json 校正。
-    run_id = name_course or ""
-    if not run_id:
-        run_id = re.sub(r"[^A-Za-z0-9._-]", "_", src.stem)[:64] or "deliver"
-    work = dest_root / f"{run_id}.tmp-{os.getpid()}"
-    final = dest_root / run_id
-    st: dict = {}
-    if work.exists():
-        shutil.rmtree(work, ignore_errors=True)
-    try:
-        work.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(src) as zf:
-            safe_extract_zip(zf, work)  # 门①：zip-slip（不可信输入）
-        # zip 成员可能整包套了一层目录（`unzip -d` 手滑）——下探一层直到看见 it-*/。
-        base = work
-        for _ in range(3):
-            if _scan_iters(base):
-                break
-            subs = [d for d in base.iterdir() if d.is_dir()]
-            if len(subs) != 1:
-                break
-            base = subs[0]
-        iters = _scan_iters(base)  # 门②：形状
-        if not iters:
-            raise ProtocolError(
-                f"这个包里没有 {ArtifactStore.IT_PREFIX}NNN/weights.json（或压缩版 "
-                "weights.delta）——不是训练产物 zip"
-                f"（包内顶层: {sorted(p.name for p in list(base.iterdir())[:8])}）"
-            )
-        st = _read_json(base / ArtifactStore.STATE_NAME)
-        # 包内自述（§5.2 / §6.2-2）：一键包会带 `IMPORT_META.json`。它**不是**权威（`state.json`
-        # 仍是 run_id 的权威，而课程由 `--course` 与文件名对账），但它能拦下两种静默错：
-        #   ① 包自述的课 ≠ 本次导入的课（有人改名了）⇒ 当场拒，不猜（见下）；
-        #   ② `state.json` 缺失/没 run_id 时，包自述的 run 名至少比「按文件名猜」准确。
-        meta_raw = _read_json(base / IMPORT_META_NAME) if (base / IMPORT_META_NAME).is_file() else {}
-        meta = meta_raw if str(meta_raw.get("magic") or "") == IMPORT_META_MAGIC else {}
-        pkg_course = str(meta.get("course") or "")
-        if course and pkg_course and pkg_course != course:
-            raise ProtocolError(
-                f"包内自述的课程（{pkg_course}，{IMPORT_META_NAME}）与本次导入的课程（{course}）"
-                "不一致——拿 A 课的权重去评 B 课的语料，读数会看起来完全正常。"
-                f"要么切到 {pkg_course} 再导，要么把文件名/控制台课程都改到 {pkg_course}"
-            )
-        run_id = str(st.get("run_id") or meta.get("run_id") or run_id)
-        # state.json 里的 run_id 才是权威：与目录名（= 文件名猜的）不一致就落到它那个目录，
-        # 否则同一个 run 的产物会分裂成两个目录（后一次导入又建一个）。
-        if run_id != final.name:
-            final = dest_root / re.sub(r"[^A-Za-z0-9._-]", "_", str(run_id))[:64]
-        pkg_iters = list(iters)
-        # 逐轮并进 final（**全程不出现目录改名/替换**，见 `_land_rounds` 的为什么）：轮次集合 =
-        # 盘上已有的 ∪ 这个包的；同名轮先到者为准（`replace=True` 是人工裁决的逃生门，D5）。
-        landed = _land_rounds(base, final, iters, replace=replace, log=log)
-        _land_anchors(base, final, conflicts=landed["skipped_rounds"], log=log)
-        # 读数从**包里**读（此刻 `base` 还在盘上）：`final/metrics.jsonl` 可能停在上一次导入的
-        # 水位，只读它会让这一包的曲线静默进不了课程账本（控制台「各轮指标表」缺行）。
-        n_eval, n_eval_sums = _merge_carried_eval_rows(base, dest_root)
-        n_rows = _merge_carried_metric_rows(base, dest_root, run_id=final.name, log=log)
-        # 体检在 `base` 还在盘上时做（读的是**包**里的字节：导入目录已被 merge 污染）。
-        partial = int(st.get("last_it") or 0) > pkg_iters[-1]
-        checks = _package_checks(
-            base,
-            pkg_iters,
-            st,
-            names=len(names),
-            size=size,
-            partial=partial,
-            meta=meta,
-            meta_raw=meta_raw,
+
+def _unpack_import(
+    src: Path, work: Path, *, course: str, run_id: str, final: Path
+) -> _ImportPackage:
+    """解包 + 门①zip-slip + 门②形状 + 包内自述对账；`state.json` 的 run_id 校正落点。"""
+    work.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(src) as zf:
+        safe_extract_zip(zf, work)  # 门①：zip-slip（不可信输入）
+    # zip 成员可能整包套了一层目录（`unzip -d` 手滑）——下探一层直到看见 it-*/。
+    base = work
+    for _ in range(3):
+        if _scan_iters(base):
+            break
+        subs = [d for d in base.iterdir() if d.is_dir()]
+        if len(subs) != 1:
+            break
+        base = subs[0]
+    iters = _scan_iters(base)  # 门②：形状
+    if not iters:
+        raise ProtocolError(
+            f"这个包里没有 {ArtifactStore.IT_PREFIX}NNN/weights.json（或压缩版 "
+            "weights.delta）——不是训练产物 zip"
+            f"（包内顶层: {sorted(p.name for p in list(base.iterdir())[:8])}）"
         )
-    finally:
-        # 中转目录只用于解压，**永远不残留**（也不再有「改名成功/失败」这个中间态）。
-        shutil.rmtree(work, ignore_errors=True)
-    # 落地之后一律以**盘上真实**为准：早先导入留下的轮次仍在（先到者为准 ≠ 清空重来）。
+    st = _read_json(base / ArtifactStore.STATE_NAME)
+    # 包内自述（§5.2 / §6.2-2）：一键包会带 `IMPORT_META.json`。它**不是**权威（`state.json`
+    # 仍是 run_id 的权威，而课程由 `--course` 与文件名对账），但它能拦下两种静默错：
+    #   ① 包自述的课 ≠ 本次导入的课（有人改名了）⇒ 当场拒，不猜（见下）；
+    #   ② `state.json` 缺失/没 run_id 时，包自述的 run 名至少比「按文件名猜」准确。
+    meta_raw = _read_json(base / IMPORT_META_NAME) if (base / IMPORT_META_NAME).is_file() else {}
+    meta = meta_raw if str(meta_raw.get("magic") or "") == IMPORT_META_MAGIC else {}
+    pkg_course = str(meta.get("course") or "")
+    if course and pkg_course and pkg_course != course:
+        raise ProtocolError(
+            f"包内自述的课程（{pkg_course}，{IMPORT_META_NAME}）与本次导入的课程（{course}）"
+            "不一致——拿 A 课的权重去评 B 课的语料，读数会看起来完全正常。"
+            f"要么切到 {pkg_course} 再导，要么把文件名/控制台课程都改到 {pkg_course}"
+        )
+    run_id = str(st.get("run_id") or meta.get("run_id") or run_id)
+    # state.json 里的 run_id 才是权威：与目录名（= 文件名猜的）不一致就落到它那个目录，
+    # 否则同一个 run 的产物会分裂成两个目录（后一次导入又建一个）。
+    if run_id != final.name:
+        final = final.parent / re.sub(r"[^A-Za-z0-9._-]", "_", str(run_id))[:64]
+    return _ImportPackage(
+        base=base, final=final, iters=iters, st=st, meta=meta, meta_raw=meta_raw, pkg_course=pkg_course
+    )
+
+
+def _merge_import(
+    pkg: _ImportPackage,
+    dest_root: Path,
+    *,
+    replace: bool,
+    names_count: int,
+    size: int,
+    log,
+) -> _ImportMerged:
+    """逐轮并进 `final`（**全程不出现目录改名/替换**）+ 账本行搬运 + 包体检。"""
+    pkg_iters = list(pkg.iters)
+    # 逐轮并进 final（**全程不出现目录改名/替换**，见 `_land_rounds` 的为什么）：轮次集合 =
+    # 盘上已有的 ∪ 这个包的；同名轮先到者为准（`replace=True` 是人工裁决的逃生门，D5）。
+    landed = _land_rounds(pkg.base, pkg.final, pkg.iters, replace=replace, log=log)
+    _land_anchors(pkg.base, pkg.final, conflicts=landed["skipped_rounds"], log=log)
+    # 读数从**包里**读（此刻 `base` 还在盘上）：`final/metrics.jsonl` 可能停在上一次导入的
+    # 水位，只读它会让这一包的曲线静默进不了课程账本（控制台「各轮指标表」缺行）。
+    n_eval, n_eval_sums = _merge_carried_eval_rows(pkg.base, dest_root)
+    n_rows = _merge_carried_metric_rows(pkg.base, dest_root, run_id=pkg.final.name, log=log)
+    # 体检在 `base` 还在盘上时做（读的是**包**里的字节：导入目录已被 merge 污染）。
+    partial = int(pkg.st.get("last_it") or 0) > pkg_iters[-1]
+    checks = _package_checks(
+        pkg.base,
+        pkg_iters,
+        pkg.st,
+        names=names_count,
+        size=size,
+        partial=partial,
+        meta=pkg.meta,
+        meta_raw=pkg.meta_raw,
+    )
+    return _ImportMerged(
+        pkg_iters=pkg_iters,
+        landed=landed,
+        n_eval=n_eval,
+        n_eval_sums=n_eval_sums,
+        n_rows=n_rows,
+        partial=partial,
+        checks=checks,
+    )
+
+
+def _import_result(
+    pkg: _ImportPackage,
+    merged: _ImportMerged,
+    *,
+    course: str,
+    name_course: str,
+    src: Path,
+    size: int,
+    log,
+) -> dict:
+    """落地之后一律以**盘上真实**为准：重扫末轮、定 ckpt、打三行人读日志、成句柄。"""
+    final = pkg.final
     iters = _scan_iters(final)
     last_it = max(iters)
+    pkg_iters = merged.pkg_iters
+    landed = merged.landed
+    st = pkg.st
     final_ckpt = delta_files.find_existing(
         final / f"{ArtifactStore.IT_PREFIX}{last_it:03d}", "weights.json"
     ) or (final / f"{ArtifactStore.IT_PREFIX}{last_it:03d}" / "weights.json")
@@ -537,19 +627,19 @@ def import_deliver_zip(
             "（盘上有更靠后的轮次，先到者为准不清空）⇒ 评估用的是盘上末轮"
         )
     log(f"[deliver] 末轮权重：{final_ckpt}")
-    failed = [c for c in checks if not c["ok"]]
+    failed = [c for c in merged.checks if not c["ok"]]
     log(
-        f"[deliver] 体检：{len(checks) - len(failed)}/{len(checks)} "
+        f"[deliver] 体检：{len(merged.checks) - len(failed)}/{len(merged.checks)} "
         + ("全绿" if not failed else "未过 " + "·".join(f"{c['id']}（{c['detail']}）" for c in failed))
     )
     return {
         "run_id": final.name,
         "dir": str(final),
         # 包体检（§6.2-1 / DoD-5c）：`{id, ok, detail}` 逐项；**报告不是门**（不阻断导入）。
-        "checks": checks,
+        "checks": merged.checks,
         "checks_ok": not failed,
         #: 半段快照（`state.json` 自报的末轮 > 包内末轮）——控制台顶栏那句「是否半段」的判据。
-        "partial": partial,
+        "partial": merged.partial,
         # 盘上真实（合并后）——`ckpt` 必须是盘上存在的那份权重（控制台拿它去跑 evalA）。
         "iters": iters,
         "last_it": last_it,
@@ -565,14 +655,14 @@ def import_deliver_zip(
         "course_in_name": name_course,
         # 包内自述（§6.2-2）：控制台据此提醒「包自述的课 ≠ 当前课」（**不静默切课**）——
         # 与课程不一致的包在前面已经被拦下，这里只是把**同一份事实**回传上屏。
-        "package_course": pkg_course,
-        "package_run_id": str(meta.get("run_id") or ""),
-        "package_source": str(meta.get("source") or ""),
+        "package_course": pkg.pkg_course,
+        "package_run_id": str(pkg.meta.get("run_id") or ""),
+        "package_source": str(pkg.meta.get("source") or ""),
         "state": str(st.get("state") or ""),
         "rows": len(iters),
-        "eval_rows": n_eval,
-        "eval_summaries": n_eval_sums,
-        "metric_rows": n_rows,
+        "eval_rows": merged.n_eval,
+        "eval_summaries": merged.n_eval_sums,
+        "metric_rows": merged.n_rows,
         "source_zip": str(src),
         "bytes": size,
     }

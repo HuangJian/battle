@@ -10944,3 +10944,23 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   探针（从入口摘掉 `_land_precollect`）3 组红；`test_loop_remote_split` / `test_remote_ppo` /
   形状 / LOC 预算 99 条绿；全量 pygate 7041 passed / 13 skipped。
   全文 → `docs/nn/engineering.md` §354。
+
+## §2026-11-25-deliver-zip-import
+
+- **背景**：`remote/deliver_zip.import_deliver_zip` 178 行，四件事摊在一个函数里：门前检查
+  （存在/尺寸/文件名课程/是不是 zip/拿错包）、解包认形状（zip-slip / 下探一层 / `it-*/` /
+  `state.json` / `IMPORT_META` 对账 / run_id 校正）、逐轮并进（landing / anchors / 两路账本
+  搬运 / 包体检）、盘上收尾（重扫末轮 / ckpt / 三行日志 / 成句柄）；`LONG_FUNCS_BASELINE` 第 18 格。
+
+- **决定**：入口只留四段的**顺序**（42 行），两个只读载体 `_ImportPackage` / `_ImportMerged`
+  跨段携带；`_import_precheck` / `_unpack_import` / `_merge_import` / `_import_result` 各一段。
+  `remote/deliver_zip.py` 的形状存量删条（51 → 50，该文件归零）。
+
+- **被否决**：① 把 `shutil.rmtree(work)` 搬进 `_unpack_import` —— 包体检读的是包里的字节，
+  清理必须晚于 merge，否则体检拿到的是不存在的 base；② 让 `_merge_import` 返回带 `final` 的
+  第二份包 —— `final` 在解包段就定了，merge 只产出读数（两个载体各自只增一件事）；
+  ③ 把返回 dict 的组装提前到 merge 段 —— 重扫末轮与 ckpt 必须以落盘之后为准。
+
+- **验证**：HEAD(`28c95b1`)-vs-新 16 组差分 **0 差异**（zip 只打一次、两侧同一份字节）；
+  敏感性探针（不并 anchors）10 组红；`tests/remote/test_deliver_zip.py` + 形状/LOC 预算 54 条绿；
+  全量 pygate 7041 passed / 13 skipped。全文 → `docs/nn/engineering.md` §355。
