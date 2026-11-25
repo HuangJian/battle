@@ -213,6 +213,121 @@ class _Continuous:
     first_est_src: dict[int, str]
 
 
+@dataclass(frozen=True, slots=True)
+class _WavePlan:
+    """一波连续采集的派发表与读数（派发前一次算清，循环只消费）。"""
+
+    games: dict[int, int]
+    dispatch_est: dict[int, int]
+    raw_est: dict[int, int]
+    src: str
+    src_by_stage: dict[int, str]
+    shortfall: dict[int, int]
+    pool_note: str
+    capped: bool
+
+
+def _plan_continuous_wave(
+    state: _Continuous,
+    collected: dict[int, int],
+    games_done: dict[int, int],
+    pool_mult: float,
+) -> _WavePlan:
+    """按盘上账本算下一波：est → 候选池（或冷启动满铺）→ 派发表。"""
+    from worker.volume_alloc import (
+        pick_stage_est,
+        pool_games_by_stage,
+        pull_est_low,
+        spread_games_by_stage,
+    )
+
+    # 局均估计（plan/rollout-estfree-worksteal §4.1）：① **本轮自己**已结算的局
+    # （自校准 — 冷启动第一小批之后就有值了）；② 前几轮的**盘上历史**（est_s，最近一轮）。
+    # 顺序不能反（plan/rollout-corpus-supply §1.3/§3.1 A0-a）：旧代码是
+    # `trailing or learned`，而 trailing 永远有值 ⇒ 自校准**恒被短路**，est 一直跟着
+    # 历史窗口走（652 vs 实际 530，+23% ⇒ 少派局 ⇒ 多补一批）。
+    # 两者都拿不到（首轮第一小批）⇒ **不猜**：按宽度满铺一把（est-free），下一批起重校准。
+    est_s_now: dict[int, int] = {}
+    est_src_now: dict[int, str] = {}
+    for s in state.stages:
+        est_s_now[s], est_src_now[s] = pick_stage_est(
+            _learned_samples_per_game(collected.get(s, 0), games_done.get(s, 0)),
+            int(state.est_s.get(s, 0) or 0),
+        )
+    est_now = int(state.est_global or 0) or _learned_samples_per_game(
+        sum(collected.values()), sum(games_done.values())
+    )
+    # 派局用的 est 往低处拉（A0-c）：`ceil(缺口/est)` 因此多派 ~8% 局，把「局长继续变短」
+    # 的趋势误差吃掉一部分。只动派局，**不动硬顶**（`stage_caps` 仍由原 est 算）。
+    est_dispatch = {s: pull_est_low(v) for s, v in est_s_now.items()}
+    est_srcs = set(est_src_now.values())
+    est_src = next(iter(est_srcs)) if len(est_srcs) == 1 else "mixed"
+    shortfall = {
+        s: state.quota - int(collected.get(s, 0))
+        for s in state.stages
+        if int(collected.get(s, 0)) < state.quota
+    }
+    if est_now > 0:
+        # ★ 2026-10-21（用户口径）：派的是**候选池**，不是"刚好够的局数"。
+        #   池 = 缺口 × mult（默认 2）⇒ 队列里一直有活 ⇒ 每个槽从 t=0 起就满负荷；
+        #   结算一局就补一局（`on_result` 实时更新 `live`），逐关一满额就 `halt`，
+        #   池里剩下的候选**从不运行**。墙钟由「配额达成时刻」决定，与池多大无关，
+        #   因此 est 的 ±40% 跳变不再换来「第二批」。
+        games = pool_games_by_stage(
+            stages=state.stages,
+            collected=collected,
+            games_done=games_done,
+            target_transitions=state.target,
+            ests=est_dispatch,
+            game_caps=state.stage_caps,
+            width=0,  # 池远大于槽位 ⇒ 不需要（也没法）知道集群有几个槽
+            mult=pool_mult,
+        )
+        pool_note = f"池 {sum(games.values())} 局（×{pool_mult}）"
+        capped = False
+    else:
+        # 无估计（首轮无历史）⇒ 「不猜」档：与云机补差**同一个** est-free 原语满铺。
+        games = spread_games_by_stage(
+            stages=state.stages,
+            collected=collected,
+            games_done=games_done,
+            target_transitions=state.target,
+            game_caps=state.stage_caps,
+            width=state.width,
+        )
+        capped = False
+        est_src = "cold-start"
+        est_src_now = {s: "cold-start" for s in state.stages}
+        pool_note = f"池 {sum(games.values())} 局（冷启动按宽度 {state.width} 铺）"
+    return _WavePlan(
+        games=games,
+        dispatch_est=est_dispatch,
+        raw_est=est_s_now,
+        src=est_src,
+        src_by_stage=est_src_now,
+        shortfall=shortfall,
+        pool_note=pool_note,
+        capped=capped,
+    )
+
+
+def _remember_first_est(state: _Continuous, plan: _WavePlan) -> None:
+    """记首波读数：批数由首波决定，记末波的 est 等于「事后诸葛亮」。"""
+    if state.first_est_used:
+        return
+    # 冷启动档（无 learned、无 trailing）根本不是「用了某个估计」：那批是
+    # `spread_games_by_stage(width)` 按机器宽度铺的。记 `-1` 而不是 `0`
+    # （0 在下游是「无估计」的值，会和「估出来是 0」混成一件事）。
+    cold = all(v == "cold-start" for v in plan.src_by_stage.values())
+    state.first_est_used = {
+        s: (-1 if cold else int(plan.dispatch_est.get(s, 0))) for s in state.stages
+    }
+    state.first_est_raw = {
+        s: (-1 if cold else int(plan.raw_est.get(s, 0))) for s in state.stages
+    }
+    state.first_est_src = dict(plan.src_by_stage)
+
+
 @dataclass(frozen=True)
 class _GreedyTargets:
     """greedy 计划的**只读标量面**：读数与硬目标判据要的那五个数。"""
@@ -810,14 +925,7 @@ class TrainingVolume:
 
         import common.distribution
         from worker.resume import settled_stage_totals
-        from worker.volume_alloc import (
-            DEFAULT_POOL_MULT,
-            pick_stage_est,
-            pool_games_by_stage,
-            pull_est_low,
-            quota_met,
-            spread_games_by_stage,
-        )
+        from worker.volume_alloc import DEFAULT_POOL_MULT, quota_met
         from worker.volume_quota import continuous_pairs
 
         # ★★ 铺满 + 满额即停（用户口径 2026-10-21）：
@@ -866,98 +974,25 @@ class TrainingVolume:
             # 同步 dispatch：批间无在飞；批内调度器自己竞速。
             # （`inflight` 只喂给旧版 `plan_continuous_batch` 的软停；改成候选池后不再需要——
             #   满额判据由 `on_result` 的实时账本承担。）
-            # 局均估计（plan/rollout-estfree-worksteal §4.1）：① **本轮自己**已结算的局
-            # （自校准 — 冷启动第一小批之后就有值了）；② 前几轮的**盘上历史**（est_s，最近一轮）。
-            # 顺序不能反（plan/rollout-corpus-supply §1.3/§3.1 A0-a）：旧代码是
-            # `trailing or learned`，而 trailing 永远有值 ⇒ 自校准**恒被短路**，est 一直跟着
-            # 历史窗口走（652 vs 实际 530，+23% ⇒ 少派局 ⇒ 多补一批）。
-            # 两者都拿不到（首轮第一小批）⇒ **不猜**：按宽度满铺一把（est-free），下一批起重校准。
-            est_s_now: dict[int, int] = {}
-            est_src_now: dict[int, str] = {}
-            for s in state.stages:
-                est_s_now[s], est_src_now[s] = pick_stage_est(
-                    _learned_samples_per_game(collected.get(s, 0), games_done.get(s, 0)),
-                    int(state.est_s.get(s, 0) or 0),
-                )
-            est_now = int(state.est_global or 0) or _learned_samples_per_game(
-                sum(collected.values()), sum(games_done.values())
-            )
-            # 派局用的 est 往低处拉（A0-c）：`ceil(缺口/est)` 因此多派 ~8% 局，把「局长继续变短」
-            # 的趋势误差吃掉一部分。只动派局，**不动硬顶**（`stage_caps` 仍由原 est 算）。
-            est_dispatch = {s: pull_est_low(v) for s, v in est_s_now.items()}
-            est_srcs = set(est_src_now.values())
-            est_src = next(iter(est_srcs)) if len(est_srcs) == 1 else "mixed"
-            if est_now > 0:
-                # ★ 2026-10-21（用户口径）：派的是**候选池**，不是"刚好够的局数"。
-                #   池 = 缺口 × mult（默认 2）⇒ 队列里一直有活 ⇒ 每个槽从 t=0 起就满负荷；
-                #   结算一局就补一局（`on_result` 实时更新 `live`），逐关一满额就 `halt`，
-                #   池里剩下的候选**从不运行**。墙钟由「配额达成时刻」决定，与池多大无关，
-                #   因此 est 的 ±40% 跳变不再换来「第二批」。
-                plan_g = pool_games_by_stage(
-                    stages=state.stages,
-                    collected=collected,
-                    games_done=games_done,
-                    target_transitions=state.target,
-                    ests=est_dispatch,
-                    game_caps=state.stage_caps,
-                    width=0,  # 池远大于槽位 ⇒ 不需要（也没法）知道集群有几个槽
-                    mult=pool_mult,
-                )
-                short_note = {
-                    s: state.quota - int(collected.get(s, 0))
-                    for s in state.stages
-                    if int(collected.get(s, 0)) < state.quota
-                }
-                plan_capped = False
-                pool_note = f"池 {sum(plan_g.values())} 局（×{pool_mult}）"
-            else:
-                # 无估计（首轮无历史）⇒ 「不猜」档：与云机补差**同一个** est-free 原语满铺。
-                plan_g = spread_games_by_stage(
-                    stages=state.stages,
-                    collected=collected,
-                    games_done=games_done,
-                    target_transitions=state.target,
-                    game_caps=state.stage_caps,
-                    width=state.width,
-                )
-                short_note = {
-                    s: state.quota - int(collected.get(s, 0))
-                    for s in state.stages
-                    if int(collected.get(s, 0)) < state.quota
-                }
-                plan_capped = False
-                est_src = "cold-start"
-                est_src_now = {s: "cold-start" for s in state.stages}
-                pool_note = f"池 {sum(plan_g.values())} 局（冷启动按宽度 {state.width} 铺）"
-            if not plan_g:
+            plan = _plan_continuous_wave(state, collected, games_done, pool_mult)
+            if not plan.games:
                 break
             # 首波读数：进 iteration 事件（`est_used` / `est_src`）—— 批数由首波决定，
             # 记末波的 est 等于「事后诸葛亮」，会读不出「首波高估了多少」。
-            if not state.first_est_used:
-                # 冷启动档（无 learned、无 trailing）根本不是「用了某个估计」：那批是
-                # `spread_games_by_stage(width)` 按机器宽度铺的。记 `-1` 而不是 `0`
-                # （0 在下游是「无估计」的值，会和「估出来是 0」混成一件事）。
-                cold = all(v == "cold-start" for v in est_src_now.values())
-                state.first_est_used = {
-                    s: (-1 if cold else int(est_dispatch.get(s, 0))) for s in state.stages
-                }
-                state.first_est_raw = {
-                    s: (-1 if cold else int(est_s_now.get(s, 0))) for s in state.stages
-                }
-                state.first_est_src = dict(est_src_now)
-            pairs = continuous_pairs(self._rotate_seed, it, plan_g, state.start_idx)
+            _remember_first_est(state, plan)
+            pairs = continuous_pairs(self._rotate_seed, it, plan.games, state.start_idx)
             self._volume_ordinary_seeds.update(pairs)
-            for s, n in plan_g.items():
+            for s, n in plan.games.items():
                 state.start_idx[s] = state.start_idx.get(s, 0) + int(n)
             self._volume_waves += 1
             log(
                 f"[volume] it{it}: batch{self._volume_waves} "
-                f"games={plan_g}（{pool_note}；差额 {short_note} "
-                f"est_used={ {s: est_dispatch.get(s) for s in plan_g} } "
-                f"est_raw={ {s: est_s_now.get(s) for s in plan_g} } src={est_src}"
+                f"games={plan.games}（{plan.pool_note}；差额 {plan.shortfall} "
+                f"est_used={ {s: plan.dispatch_est.get(s) for s in plan.games} } "
+                f"est_raw={ {s: plan.raw_est.get(s) for s in plan.games} } src={plan.src}"
                 + (
                     f"，无历史 ⇒ 按宽度 {state.width} 满铺（不猜 est））"
-                    if est_src == "cold-start"
+                    if plan.src == "cold-start"
                     else "）"
                 )
             )
@@ -965,7 +1000,7 @@ class TrainingVolume:
                 it, pairs, dist_cfg, halt_event=halt, on_result=_quota_watch, pool_halt=True
             )
             combined = wave_report if combined is None else combine_reports([combined, wave_report])
-            if plan_capped:
+            if plan.capped:
                 self._volume_capped = True
             # ★ 满额即收工：池里剩下的候选**没有派出去**（不是"派了再丢"），
             #   所以这里直接退出循环——不会再有第二批，也没有第二批的固定开销。

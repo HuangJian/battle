@@ -29,6 +29,21 @@
 
 ---
 
+## §351 分诊第十四格：`trainer/loop_volume._volume_continuous_loop` 170 → 90 + 两段（2026-11-25）
+
+入口只留每波账本读取、首波记录、pair/start_idx 推进、日志与派出；估算与派发表拆成模块级
+`_plan_continuous_wave`（est → 候选池 / 冷启动满铺 → `_WavePlan`，82 行）与
+`_remember_first_est`（首波三表，15 行）。两个助手都不碰 `self`，所以不进
+`TrainingVolume` 的成员闭集。
+
+**验证**：HEAD(`ad210dd1`)-vs-新 9 组差分（冷启动两波 / `on_result` 熔断 / 池倍率 /
+est 两波 / mixed 源 / 首波即达标 / `max_batches` / 预填首波读数 / 显式池倍率），
+输出 combined、波数、halted/capped、start_idx、首波三表、完整日志与 ordinary 集合
+**0 差异**；`LONG_FUNCS_BASELINE` 删 `trainer/loop_volume.py`（55 → 54）。
+
+坑：`shortfall` 原在两个分支各算一遍，搬走时只留一份——别在装配处又算一次；
+`_remember_first_est` 的 `-1` 冷启动哨兵要原样保留（`0` 在下游是「无估计」）。
+
 ## §350 分诊第十三格：`worker/greedy_round.run_greedy_round` 151 → 102 + 两段（2026-11-25）
 
 入口只留配额解析、波次循环与派出；读数与收官账本拆出去：`_progress_of`（产物名 →

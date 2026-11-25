@@ -10869,3 +10869,20 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：HEAD(`2c4fdd95`)-vs-新 6 组差分 **0 差异**；既有 greedy 用例全绿；
   全量门禁 7051 passed / 3 skipped。全文 → `docs/nn/engineering.md` §350。
 
+## §2026-11-25-volume-wave-plan
+
+- **背景**：`trainer/loop_volume._volume_continuous_loop` 170 行，逐波 est 解析、候选池 /
+  冷启动分支与首波三表全挤在循环体里；`LONG_FUNCS_BASELINE` 第 14 格。
+
+- **决定**：把「盘上账本 → `_WavePlan`」抽成模块级 `_plan_continuous_wave`，首波三表抽成
+  `_remember_first_est`，入口 90 行；`trainer/loop_volume.py` 移出 `LONG_FUNCS_BASELINE`
+  （55 → 54）。两个助手不碰 `self`，所以不加进 `TrainingVolume` 的成员闭集。
+
+- **被否决**：① 加成 `TrainingVolume` 方法 —— `tests/trainer/test_loop_volume_split.py` 的
+  CLUSTER 是闭集，且两个助手只吃 `state` / 账本，模块函数更诚实；② 把候选池与冷启动再拆
+  两函数 —— 共用 est 解析与 `_WavePlan` 装配，拆开会让同一份字段在两条路径各拼一遍；
+  ③ 返回 tuple —— 8 个位置量（三个 dict 相邻）互换不抛，日志会静默打错账。
+
+- **验证**：HEAD(`ad210dd1`)-vs-新 9 组差分 **0 差异**；既有 volume 用例与全量门禁
+  7051 passed / 3 skipped。全文 → `docs/nn/engineering.md` §351。
+
