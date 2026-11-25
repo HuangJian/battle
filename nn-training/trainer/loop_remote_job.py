@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import time
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from common.log import log
 from common.protocol import coef_active
@@ -39,6 +39,9 @@ from trainer.loop_transport import (
     resolve_route,
 )
 from worker.loop_round import RemotePpoJob
+
+if TYPE_CHECKING:
+    from biz.course_spec import CourseConfig
 
 
 def _trim_shards_to_quota(
@@ -123,6 +126,37 @@ class PackInputs(NamedTuple):
     diet_slim: object | None
     corpus_fmt: str
     replay_converter_path: str
+
+
+class _PublishSetup(NamedTuple):
+    """发布相位的装配读数（传输 / 课程+shard / commit / ckpt / kickstart 一次出门）。
+
+    这些值在 `_remote_ppo_publish` 里原本是同一作用域的一串局部量：一半进 `PublishSpec`，
+    一半进 `RemotePpoJob`。抽 `_remote_publish_setup` 时不能把它们拆成两次调用（传输裁决与
+    课程血缘的顺序、`_published_mem` 的副作用都只能发生一次），所以用一个只读载体跨方法携带。
+    """
+
+    hub_url: str
+    token: str
+    gpu_nodes: list[dict]
+    hub_push: bool
+    job_root: str
+    course: CourseConfig
+    course_text: str
+    course_fp: str
+    corpus_fp: str
+    shard_dirs: list[Path]
+    mem: dict[str, dict]
+    run_id: str
+    commit: str
+    ckpt_remote: Path | None
+    kick_on: bool
+    kick_kl: float
+    ref_b64: str
+    ref_fp: str
+    demo_raw: bytes | None
+    demo_coef: float
+    demo_per_mb: int
 
 
 class TrainingRemoteJob(TrainingRemotePush):
@@ -223,7 +257,9 @@ class TrainingRemoteJob(TrainingRemotePush):
 
         相位（2026-11-19，长函数存量第三十七刀）：传输裁决 / 课程+shard 集 / 代码快照 /
         kickstart+demo / 打包开关 / 发布收尾 / 离线导出七段住本类的 `_remote_*` 助手；
-        本方法只保留**顺序编排**与 `PublishSpec` 本身（那一整块是数据，不是逻辑）。
+        发布前的这七段装配（2026-11-25，第十六刀）收进 `_remote_publish_setup`（返回只读
+        `_PublishSetup`），`PublishSpec` 那一整块数据（是数据，不是逻辑）收进
+        `_remote_publish_spec`；本方法只剩**顺序编排**与三相载体的成型。
         """
         args = self.args
         t_ppo = time.time()
@@ -235,9 +271,77 @@ class TrainingRemoteJob(TrainingRemotePush):
         self._forensics(f"remote_pre it{it}")
         # 本相位只做「打包 + 发布」：等结果与校验落位各在自己的相位里（三相拆分后
         # 三处的导入也各自独立——一份 import 清单服务三段，是拆相前那种形状的残留）。
-        from biz.reward_library import METRICS_VERSION
+        # 发布前的装配（传输 / 课程+shard / 代码快照 / ckpt / kickstart）整段进
+        # `_remote_publish_setup`；它必须留在 guard + journal 之后、打包之前。
+        setup = self._remote_publish_setup(args, it, rollout_spec, export_path)
+        # I1 取证：publish 前的临终对照点（上传大 payload 前的 RSS/磁盘基线）。
+        self._forensics(f"remote_pre_publish it{it}")
+        # M0：打包（tar.xz + 编码）/ 落盘墙钟——iteration 事件的 wire.pack_sec。
+        t_pack = time.time()
+        pack = self._remote_pack_inputs(args, it, rollout_spec, setup.job_root, setup.mem)
+        # ★ 2026-10-26 分段计时（**纯观测，跑一轮就撤**）：`pack_sec` 一直是黑盒——
+        #   实测 `pack_payload_zip` 在 2.3 GB / 666 shard 上只要 54 s（`tmp/probe-it8-pack.py`），
+        #   而现场 `pack_sec` = 161 s（it2）/ 243 s（it1）⇒ **约 93 s 不在这三段里的某一段**。
+        #   三个时间点各一行 log，写清「标准权重整份化 / publish_job（含打包）/ journal attach」
+        #   各占多少。不改 manifest、不写盘、失败也不影响流程（`time.time()` 不会抛）。
+        t_std = time.time()
+        manifest = self._remote_publish_spec(
+            it, rollout_spec, plan_bytes, export_path, setup, pack
+        )
+        t_pub = time.time()  # publish_job 返回点（= 打包 + 落盘 job 目录 + 写 blob/manifest 全部完成）
+        jid = manifest["job_id"]
+        pack_sec = self._remote_after_publish(
+            it, jid, setup.hub_push, export_path, (t_pack, t_std, t_pub), setup.shard_dirs
+        )
+        if export_path is not None:
+            self._remote_export_bundle(
+                export_path, manifest, plan_bytes, args, setup.job_root, jid, setup.hub_url
+            )
+        # ---- 会话成型：三相之间**唯一**的载体（发布 → 等结果 → 落位） ----
+        # 超时预算在这里算定：同一份 job 的等待预算不该因为「谁先问了一句」而变
+        # （细粒度路径会让位后再回来，那时 `wait_timeout_sec` 已经不在作用域里了）。
+        timeout_sec = float(wait_timeout_sec or 0.0) or 30 * 60.0
+        sess = RemotePpoJob(
+            it=it,
+            jid=jid,
+            manifest=manifest,
+            transport="push" if setup.gpu_nodes else "hub",
+            nodes=list(setup.gpu_nodes),
+            job_root=setup.job_root,
+            hub_url=setup.hub_url,
+            hub_token=setup.token,
+            timeout_sec=timeout_sec,
+            t_ppo=t_ppo,
+            pack_sec=pack_sec,
+            kick_on=setup.kick_on,
+            kick_kl=setup.kick_kl,
+            rollout_spec=rollout_spec,
+            hub_push=setup.hub_push,
+        )
+        # remote PPO 等待期集群空闲 —— 立即开 evalboard 窗领批（含等待期间新入队的）。
+        # 否则「rollout 后才 enqueue」的批要等 PPO 收官后的第二次 idle，卡数十分钟。
+        # **必须落在发布相位**：窗口要在「开始等」那一刻就开——细粒度路径会先让位，
+        # 等到结果再开窗就永远错过那段空闲（那正是它要服务的窗口）。
+        if hasattr(self, "_evalboard_idle"):
+            self._evalboard_idle(it, getattr(self, "_last_dist_cfg", None))
+        # 直推节点链路：**发布即提交**（三相拆分的关键约定）。探针要问「那份 job 现在怎么
+        # 样了」，而节点上还没有这份 job 时它只会一直答「还没回」⇒ 提交必须落在发布相位，
+        # 等待相位才可能真让位。提交本身是**有界**的上传（几十 MB），不是那 25 分钟的等待。
+        if setup.gpu_nodes:
+            self._push_submit_first(sess)
+        return sess
+
+    def _remote_publish_setup(
+        self, args, it: int, rollout_spec, export_path
+    ) -> _PublishSetup:
+        """发布前的装配：传输裁决 → 课程+shard 集 → 代码快照 → ckpt / kickstart。
+
+        顺序是契约：课程血缘（`course_fp` / `corpus_fp`）必须在扫 shard 之前算定，
+        `_remote_course_and_shards` 里还会就地写 `self._published_mem`（验收相位对账用），
+        所以整段只能跑一次。延迟 import 仍逐方法自带（`remote.hub_client` /
+        `trainer.dispatch_queue`），与拆相前的写法一致。
+        """
         from remote.hub_client import git_head
-        from remote.hub_publish import PublishSpec, publish_job
 
         hub_url, token, gpu_nodes, hub_push, job_root = self._remote_transport(args)
         course, course_text, course_fp, corpus_fp, shard_dirs, mem = self._remote_course_and_shards(
@@ -255,39 +359,60 @@ class TrainingRemoteJob(TrainingRemotePush):
         kick_on, kick_kl, ref_b64, ref_fp, demo_raw, demo_coef, demo_per_mb = (
             self._remote_kickstart_demo(args, it)
         )
-        # I1 取证：publish 前的临终对照点（上传大 payload 前的 RSS/磁盘基线）。
-        self._forensics(f"remote_pre_publish it{it}")
-        # M0：打包（tar.xz + 编码）/ 落盘墙钟——iteration 事件的 wire.pack_sec。
-        t_pack = time.time()
-        pack = self._remote_pack_inputs(args, it, rollout_spec, job_root, mem)
-        # ★ 2026-10-26 分段计时（**纯观测，跑一轮就撤**）：`pack_sec` 一直是黑盒——
-        #   实测 `pack_payload_zip` 在 2.3 GB / 666 shard 上只要 54 s（`tmp/probe-it8-pack.py`），
-        #   而现场 `pack_sec` = 161 s（it2）/ 243 s（it1）⇒ **约 93 s 不在这三段里的某一段**。
-        #   三个时间点各一行 log，写清「标准权重整份化 / publish_job（含打包）/ journal attach」
-        #   各占多少。不改 manifest、不写盘、失败也不影响流程（`time.time()` 不会抛）。
-        t_std = time.time()
-        manifest = publish_job(
+        return _PublishSetup(
+            hub_url=hub_url,
+            token=token,
+            gpu_nodes=gpu_nodes,
+            hub_push=hub_push,
+            job_root=job_root,
+            course=course,
+            course_text=course_text,
+            course_fp=course_fp,
+            corpus_fp=corpus_fp,
+            shard_dirs=shard_dirs,
+            mem=mem,
+            run_id=run_id,
+            commit=commit,
+            ckpt_remote=ckpt_remote,
+            kick_on=kick_on,
+            kick_kl=kick_kl,
+            ref_b64=ref_b64,
+            ref_fp=ref_fp,
+            demo_raw=demo_raw,
+            demo_coef=demo_coef,
+            demo_per_mb=demo_per_mb,
+        )
+
+    def _remote_publish_spec(
+        self, it, rollout_spec, plan_bytes, export_path, setup: _PublishSetup, pack: PackInputs
+    ) -> dict:
+        """拼 `PublishSpec` 并交给 `publish_job`（纯数据组装，不含策略分支）。"""
+        from biz.reward_library import METRICS_VERSION
+        from remote.hub_publish import PublishSpec, publish_job
+
+        args = self.args
+        return publish_job(
             PublishSpec(
-                job_root=job_root,
+                job_root=setup.job_root,
                 jsonl_path=str(self._jsonl_path),
-                run_id=run_id,
+                run_id=setup.run_id,
                 it=it,
                 traj_dir=args.traj,
-                shard_dirs=shard_dirs,
+                shard_dirs=setup.shard_dirs,
                 # 零落盘：dispatch 腿的 shard 只在内存账里（`data_fp` / 验收对账读它）。
-                mem=mem,
+                mem=setup.mem,
                 init_weights_path=args.out,
-                ckpt_remote_dir=ckpt_remote,
-                commit=commit,
+                ckpt_remote_dir=setup.ckpt_remote,
+                commit=setup.commit,
                 code_sha256=self._code_sha256,
                 code_zip_path=self._code_zip_path,
-                course=course_text,
-                course_fp=course_fp,
+                course=setup.course_text,
+                course_fp=setup.course_fp,
                 # P4-W2 归属：课程短名（args.course_name，apply_course 挂上）；无课程为 ""。
                 course_name=str(getattr(args, "course_name", "") or ""),
-                corpus_fp=corpus_fp,
-                reward_formula=course.reward.formula,
-                formula_hash=course.reward_spec().identity(),
+                corpus_fp=setup.corpus_fp,
+                reward_formula=setup.course.reward.formula,
+                formula_hash=setup.course.reward_spec().identity(),
                 metrics_version=METRICS_VERSION,
                 gamma=float(getattr(args, "gamma", 0.995)),
                 lam=float(getattr(args, "lam", 0.95)),
@@ -300,16 +425,16 @@ class TrainingRemoteJob(TrainingRemotePush):
                 ent_coef=getattr(args, "_ent_coef", None),
                 adv_norm=getattr(args, "adv_norm", "auto"),
                 normalize_ret=bool(getattr(args, "normalize_ret", 0)),
-                kickstart_kl=kick_kl,
-                ref_weights_b64=ref_b64,
-                ref_weights_fp=ref_fp,
-                demo_bank_bytes=demo_raw,
-                demo_bc_coef=demo_coef,
-                demo_per_mb=demo_per_mb,
+                kickstart_kl=setup.kick_kl,
+                ref_weights_b64=setup.ref_b64,
+                ref_weights_fp=setup.ref_fp,
+                demo_bank_bytes=setup.demo_raw,
+                demo_bc_coef=setup.demo_coef,
+                demo_per_mb=setup.demo_per_mb,
                 # value 门控牵引（x26-obs it90 诊断；缺席 = 0.0 = 关）。
                 value_anchor=float(getattr(args, "value_anchor", 0.0) or 0.0),
                 shuffle=True,
-                schedule_raw=course.ppo_schedule_dicts(),
+                schedule_raw=setup.course.ppo_schedule_dicts(),
                 # 严格样本量配额（target_transitions 路线）：与 _serial_ppo 同一个来源，
                 # 保证 remote 与本机两条 PPO 路径装载口径一致。0 = 全收（历史行为）。
                 per_stage_quota=self._per_stage_quota(it),
@@ -318,7 +443,7 @@ class TrainingRemoteJob(TrainingRemotePush):
                 keep_init_weights=bool(getattr(args, "smoke", False)),
                 # wire-diet：真正生效的开关 + 本轮的奖励规格（课程公式的**显式**来源）。
                 wire_diet=pack.wire_diet,
-                reward_spec=(course.reward_spec() if pack.wire_diet else None),
+                reward_spec=(setup.course.reward_spec() if pack.wire_diet else None),
                 # 零落盘：本轮已经压好的段 + 产出它们的那份 slim（`payload_fmt` 与读数同源）。
                 presegmented=pack.presegmented,
                 diet_slim=pack.diet_slim,
@@ -340,7 +465,7 @@ class TrainingRemoteJob(TrainingRemotePush):
                 # 云机不在网络上，记一条 `job_pending` 只会让控制台看到一条永远等不到工人的任务。
                 register=export_path is None,
                 # hub 中介推送的意图（hub 读它决定「这份活由我推」；缺席 = pull，字节不变）。
-                dispatch="push" if hub_push else "",
+                dispatch="push" if setup.hub_push else "",
                 ts_code_sha256=(
                     str(getattr(self, "_ts_code_sha256", "") or "") if rollout_spec else ""
                 ),
@@ -348,46 +473,6 @@ class TrainingRemoteJob(TrainingRemotePush):
             ),
             log=log,
         )
-        t_pub = time.time()  # publish_job 返回点（= 打包 + 落盘 job 目录 + 写 blob/manifest 全部完成）
-        jid = manifest["job_id"]
-        pack_sec = self._remote_after_publish(
-            it, jid, hub_push, export_path, (t_pack, t_std, t_pub), shard_dirs
-        )
-        if export_path is not None:
-            self._remote_export_bundle(export_path, manifest, plan_bytes, args, job_root, jid, hub_url)
-        # ---- 会话成型：三相之间**唯一**的载体（发布 → 等结果 → 落位） ----
-        # 超时预算在这里算定：同一份 job 的等待预算不该因为「谁先问了一句」而变
-        # （细粒度路径会让位后再回来，那时 `wait_timeout_sec` 已经不在作用域里了）。
-        timeout_sec = float(wait_timeout_sec or 0.0) or 30 * 60.0
-        sess = RemotePpoJob(
-            it=it,
-            jid=jid,
-            manifest=manifest,
-            transport="push" if gpu_nodes else "hub",
-            nodes=list(gpu_nodes),
-            job_root=job_root,
-            hub_url=hub_url,
-            hub_token=token,
-            timeout_sec=timeout_sec,
-            t_ppo=t_ppo,
-            pack_sec=pack_sec,
-            kick_on=kick_on,
-            kick_kl=kick_kl,
-            rollout_spec=rollout_spec,
-            hub_push=hub_push,
-        )
-        # remote PPO 等待期集群空闲 —— 立即开 evalboard 窗领批（含等待期间新入队的）。
-        # 否则「rollout 后才 enqueue」的批要等 PPO 收官后的第二次 idle，卡数十分钟。
-        # **必须落在发布相位**：窗口要在「开始等」那一刻就开——细粒度路径会先让位，
-        # 等到结果再开窗就永远错过那段空闲（那正是它要服务的窗口）。
-        if hasattr(self, "_evalboard_idle"):
-            self._evalboard_idle(it, getattr(self, "_last_dist_cfg", None))
-        # 直推节点链路：**发布即提交**（三相拆分的关键约定）。探针要问「那份 job 现在怎么
-        # 样了」，而节点上还没有这份 job 时它只会一直答「还没回」⇒ 提交必须落在发布相位，
-        # 等待相位才可能真让位。提交本身是**有界**的上传（几十 MB），不是那 25 分钟的等待。
-        if gpu_nodes:
-            self._push_submit_first(sess)
-        return sess
 
     def _remote_guard_plan(self, plan_bytes, rollout_spec, export_path) -> None:
         """kind=run 的唯一咽喉：两条退役/形状守卫（拒发点仍住发布相位）。"""

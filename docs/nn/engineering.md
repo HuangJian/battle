@@ -29,6 +29,25 @@
 
 ---
 
+## §353 分诊第十六格：`trainer/loop_remote_job._remote_ppo_publish` 191 → 97 + 两段（2026-11-25）
+
+发布相位原来把「传输 / 课程+shard / 代码快照 / ckpt / kickstart」的装配与整块
+`PublishSpec` 都摊在入口里。装配收 `_remote_publish_setup`（51 行，返回只读
+`_PublishSetup`，21 个字段），`PublishSpec` 数据收 `_remote_publish_spec`（90 行）；
+入口 97 行只剩 guard / journal / 打包计时 / 发布收尾 / 三相载体成型。
+`trainer/loop_remote_job.py` 的 `LONG_FUNCS_BASELINE` 2 → 1（余 `_remote_ppo_land` 151，
+下一格）。
+
+**为什么不拆成两个只取数的助手**：`_remote_course_and_shards` 会就地写 `self._published_mem`
+（验收相位对账用），传输裁决与课程血缘也有先后依赖 —— 装配只能跑一次，所以用一个只读
+载体跨方法携带，而不是把 21 个值拆成两组各传一遍（那会多出可漂的入口）。
+
+**验证**：HEAD(`5c5c68d7`)-vs-新 6 组假 transport / 课程 / 打包 / 发布差分（hub / push /
+kind=iter / export+plan / 退役 kind=run / smoke + 无 evalboard），比对 `PublishSpec` 全字段、
+`publish_job` 调用、journal / forensics 顺序、`_remote_after_publish` 实参、export bundle 实参、
+`RemotePpoJob` 全字段与两条 SystemExit 消息，**0 差异**；相关 84 条 trainer 用例绿；形状 /
+Any / LOC 预算用例绿。
+
 ## §352 分诊第十五格：`remote/deliver_worker.main` 162 → 103 + 两段（2026-11-25）
 
 入口只留参数/环境、控制器命令循环、收线分支与状态落盘；装配拆 `_build_deliverer`

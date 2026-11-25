@@ -10904,3 +10904,22 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：HEAD(`80c23d4f`)-vs-新 6 组差分 **0 差异**；全量门禁 7051 passed / 3 skipped。
   全文 → `docs/nn/engineering.md` §352。
 
+
+## §2026-11-25-remote-ppo-publish
+
+- **背景**：`trainer/loop_remote_job._remote_ppo_publish` 191 行，发布前的装配（传输 / 课程+shard /
+  代码快照 / ckpt / kickstart）与整块 `PublishSpec`（约 80 行纯数据）都摊在入口里；
+  `LONG_FUNCS_BASELINE` 第 16 格。
+
+- **决定**：装配收 `_remote_publish_setup`（返回只读 `_PublishSetup`），`PublishSpec` 组装收
+  `_remote_publish_spec`；入口 97 行。`trainer/loop_remote_job.py` 基线 2 → 1（余
+  `_remote_ppo_land` 151）。
+
+- **被否决**：① 拆成「传输 helper + 课程 helper」两个只取数的函数 —— `_remote_course_and_shards`
+  会就地写 `self._published_mem`，且传输裁决与课程血缘有先后依赖，拆两遍等于让装配顺序出现
+  两个入口；② 把 21 个值直接摊成关键字参数 —— 会新增一个 >8 参函数（宽签名基线已清零），
+  且相邻的 `ref_b64` / `ref_fp` / `demo_*` 互换不抛；③ 只抽 `PublishSpec` 一块 —— 入口仍有
+  110 行，且 setup 那一串局部量仍要靠阅读顺序确认。
+
+- **验证**：HEAD(`5c5c68d7`)-vs-新 6 组差分 **0 差异**（含两条 SystemExit）；相关 trainer 用例
+  84 条、全量门禁 7051 passed / 3 skipped。全文 → `docs/nn/engineering.md` §353。

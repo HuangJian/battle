@@ -2105,3 +2105,7 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 口径账：本次未动 `BASELINE_FORM`/`BASELINE_SRC`（新用例的两条断言都不落在文本口径里 ——
 语句级 `for node in ast.walk(tree)` 会把 `node` 记成「读 .py 的名字」从而让别处那条匿名断言
 凭空 +1，所以那个循环变量叫 `h`；这是个值得记的口径陷阱）。
+
+> 2026-11-25 第十六格：`trainer/loop_remote_job._remote_ppo_publish` 191 → 97 +
+> `_remote_publish_setup`（51，只读 `_PublishSetup`）/ `_remote_publish_spec`（90）；
+> HEAD-vs-新 6 组差分全同（含两条 SystemExit），存量 53 → 52（engineering §353）。
