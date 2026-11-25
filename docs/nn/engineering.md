@@ -29,6 +29,57 @@
 
 ---
 
+## §341 死变量的常驻门禁：本地新建容器「只改不读」清零（2026-11-25）
+
+§337 末段的一次性扫描抓到了 `remote/deliver_sync._deliver_todo` 的死 `sent`（声明 + 三次
+`append`、零读者）。那种形状静态读起来像「正在收集」——只有把**读面**数一遍才发现没人消费，
+所以一次性扫描不够：下一个死容器会以完全一样的理由长回来。
+
+**门禁 G20**：`tests/test_write_only_containers.py`，生产面（与 G9 同面，`worker/scripts/`
+豁免）零容忍。判据四条同时成立才报：
+
+1. **本地**：函数体里的简单赋值目标（`x = …` / `x: T = …`），且只绑定一次；参数、`global` /
+   `nonlocal`、嵌套作用域的同名绑定全部跳过（保守）；
+2. **新建**：右值是 `[]` / `{}` / 集合字面量 / 三种推导式，或 `list()` / `dict()` / `set()` /
+   `deque()` / `Counter()` / `defaultdict(...)` / `OrderedDict()` 构造；
+3. **有改写**：`x.append/extend/update/add/insert/setdefault/…`、`x[k] = v`、`del x[k]`、
+   `x += …` 至少一处；
+4. **零读取**：除此之外没有任何 `Load`（含 return / 传参 / 迭代 / `len` / 闭包捕获），也没有
+   第二次绑定。
+
+为什么不做成 ruff/既有 linter：`F841` 只抓「绑定后完全没用」，抓不到「一直被改写」这种形态；
+文本 grep 会把注释、参数、别名一起算进来。AST 是唯一能同时表达「改名面」与「读面」的层。
+
+**为什么保守面这么宽**：别名（`alias = rows`）是读，参数是外部所有权，模块级/实例属性容器是
+共享账（`LEDGER` 就该被多处写）——这三类都不是「死」，误报会让门禁被关掉。宁可漏报。
+
+**自检四条**（防空跑）：死容器必报 · 下标写入 + `del` 必报 · 读/别名/参数/模块级/闭包捕获
+全不报 · 扫描面 >3000 个函数（实测 **4805**）。生产面当前 **0 处**。
+
+## §342 回归扫：`offline_tasks` / `run_slot` / `evaluate` 对拆分前的决策表差分（2026-11-25）
+
+§330 / §332 / §333 三刀各自的差分是「当时那一次」的证据。本扫把**拆分前基线**（`24b1b799`，
+三刀之前）与当前实现（`1bbec796`）逐函数对齐，确认没有后期漂移。
+
+方法是**同一份公开面 + 同一批假边界**，在不同树里各跑一遍，比较完整观测：
+
+| 函数 | 基线 vs 现在 | 假边界 | 用例 | 差异 |
+|---|---|---|---:|---:|
+| `hub/queue_offline.offline_tasks` | 真方法 + 真 `_offline_view/_state/_row`（新侧） | 课程 kind / pack 索引 / `course_finished` / holder 与 state 方法；pack 文件用固定 mtime | **640 组状态组合 → 161 场景**（每场景跑 upper / `worker=w1` / `include_all`） | **0** |
+| `worker/bc_dispatch._Corpus.run_slot` | 真 `_Corpus` + 真 `run_slot` | `fetch_task` / `validate_result` / `write_shard` / `classify_outcome` / 时钟 | **12 场景**（keep / wins-only skip / v6 三结局 / validate 拒 / 重试成功 / 两试失败 / 熔断 / busy 重排 / busy 超限 / 未知异常 / 已熔断放回 / streak 清零） | **0** |
+| `worker/gate_check.evaluate` | 真 `GatesSpec` 校验 + 真 `evaluate`（固定 `now`） | 无（纯函数） | **10370 用例** = 9 规则集 × 12 行形态 × 4 `only_kinds` × 8 预算 × 3 override + 2 无 gates | **0** |
+
+观测面（逐字段比较，不只看判决）：
+
+* `offline_tasks`：整张行清单（15 字段 + `progress` + `panel` 类读数）与异常文案；
+* `run_slot`：stats / 日志 / 退避序列 / 落盘调用（目录名规范化）/ 取件请求 / 剩余队列 /
+  `seen_keys` / `node_fail_streak` / `tripped` / `requeued` / `busy_tries`；
+* `evaluate`：`dataclasses.asdict(GateResult)` 全字段（verdict / reason / route / override /
+  seeds / readings 的 12 个字段）。
+
+结论：三刀自落地后**无行为漂移**。脚手架（三个 harness）跑完即删，方法留在本节：以后每一刀
+的 diff 都应以「拆分前 commit 的 worktree + 同一份公开面」为基线，而不是只信当时的门禁。
+
 ## §340 分诊第七格：`worker/bc_eval.dispatch_bc_eval` 186 → 84 + 单图源单元（2026-11-25）
 
 §331 的分诊表继续往下走。这一格不是「一个函数做四件不相干的事」，而是**装配段 + 一个
