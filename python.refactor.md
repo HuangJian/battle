@@ -366,6 +366,9 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
   > 第九格也落地了：`trainer/batch_lanes.worker` 178 → 29 + 四段（`_lane_claim` / `_lane_fetch` /
   > `_lane_accept` / `_lane_fail` + `_LanePick`）；HEAD-vs-新 289 组决策表全同，存量 60 → 59
   > （engineering §346）。
+  > 第十格也落地了：`remote/push_dispatch._await_result` 165 → 82 + 五段（`_await_stale` /
+  > `_await_queue_expired` / `_await_landed` / `_await_running` / `_await_gone` + `_AwaitState`）；
+  > HEAD-vs-新 96 组响应序列差分全同，存量 59 → 58（engineering §347）。
 
 **为什么这是问题**
 

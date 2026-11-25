@@ -687,6 +687,21 @@ class JobLeg:
     t0: float
 
 
+@dataclass
+class _AwaitState:
+    """`_await_result` 的两把时钟与「最后一眼」状态（拆段后仍只有一份真源）。"""
+
+    jid: str
+    wid: str
+    lease: str
+    t0: float
+    started: bool
+    deadline: float
+    queue_deadline: float
+    queue_logged: bool = False
+    last_queued: bool = False
+
+
 class PushDispatcher(TickLoopHost):
     """hub 中介 push 派发器：按队列顺序推给空闲 worker，超时回落队首换 worker。        一拍（`tick`）做四件事：热重载登记表 → 到点探活 → 挑活挑人 → 起一条 job 线程。
         挑活挑人**全程只用 `_snapshot()` 那一份自有状态读数**（见那里的「为什么」）。
@@ -1197,13 +1212,114 @@ class PushDispatcher(TickLoopHost):
                     self._ready_at.pop(jid, None)
             self._wake.set()
 
+    def _await_stale(self, st: _AwaitState, log: Callable[[str], None]) -> bool:
+        """两把到点判据：无结果预算（真开算后）与探活离场。"""
+        if st.started and self._now() > st.deadline:
+            self._requeue(st.jid, st.lease, st.wid,
+                          f"推送后 {self.timeout_sec:.0f}s 无结果", avoid_worker=True, log=log)
+            return True
+        if not self.workers.is_online(st.wid):
+            self._requeue(st.jid, st.lease, st.wid,
+                          f"worker 连续 {PUSH_DEAD_MISSES} 次探活失败（判定离场）",
+                          avoid_worker=True, log=log)
+            return True
+        return False
+
+    def _await_queue_expired(self, st: _AwaitState, log: Callable[[str], None]) -> bool:
+        """队龄上限到了吗（只在「刚看过/刚问不到」时调）。"""
+        if self._now() <= st.queue_deadline:
+            return False
+        self._requeue(st.jid, st.lease, st.wid,
+                      f"排队 {self.timeout_sec:.0f}s 仍未开算", avoid_worker=True, log=log)
+        return True
+
+    def _await_landed(
+        self, st: _AwaitState, body: bytes, t_pushed: float | None,
+        log: Callable[[str], None],
+    ) -> None:
+        """HTTP 200：解析 → `accept_result` → 200/409/400/403/其它四档。"""
+        st.last_queued = False
+        if not st.started:
+            st.started = True
+            st.deadline = self._now() + self.timeout_sec
+            self._mark_started(st.jid, st.wid)
+        try:
+            result = json.loads(body.decode("utf-8"))
+        except ValueError as e:
+            self._requeue(
+                st.jid, st.lease, st.wid, f"结果不是 JSON（{e}）",
+                avoid_worker=True, log=log,
+            )
+            return
+        if not isinstance(result, dict):
+            self._requeue(st.jid, st.lease, st.wid, "结果不是对象", avoid_worker=True, log=log)
+            return
+        code_, why = accept_result(
+            self.hub, st.jid, result, st.lease, log=log, worker=push_worker_id_of(st.wid)
+        )
+        if code_ == 200:
+            log(f"{st.jid} <- {st.wid} 结果已回灌（{self._now() - st.t0:.0f}s）")
+            self._warn_slow_result(
+                st.jid, st.wid, st.t0 if t_pushed is None else t_pushed, self._now(), log=log
+            )
+            # landed ⇒ 给同 job 的其它在途副本推取消帧（§2.4/§2.9）。
+            self._cancel_others(st.jid, st.wid, log=log)
+        elif code_ == 409:
+            # 别人已胜（首写锁定）：这份是备份/重复，**直接丢弃** —— 不回落重派
+            # （重派只会再输一次；§2.9 末段：409 与 403 不同待遇）。
+            log(f"{st.jid} 结果被拒 409（{why}）——别人已胜，本份丢弃")
+        elif code_ in (400, 403):
+            # 结果本身不合契约：换一台重跑是合理的（不把这份结果投毒进账本）。
+            self._requeue(
+                st.jid, st.lease, st.wid, f"结果入账被拒 HTTP {code_}: {why}",
+                avoid_worker=True, log=log,
+            )
+        else:
+            log(f"{st.jid} 结果入账返回 HTTP {code_}（{why}）——继续等")
+
+    def _await_running(
+        self, st: _AwaitState, body: bytes, log: Callable[[str], None]
+    ) -> bool:
+        """HTTP 202：排队 / 真开算两种相位；返回 True = 已回落、调用方直接 return。"""
+        phase = _status_of(body)
+        if phase == "queued" and not st.started:
+            # 排队不烧「推送后无结果」的预算（预算从第一次看到 running 起算）。
+            st.last_queued = True
+            if self._await_queue_expired(st, log):
+                return True
+            if not st.queue_logged:
+                st.queue_logged = True
+                log(f"{st.jid} 在 {st.wid} 排队中（开算前不计无结果超时）")
+            self._wait_next_poll(st.jid)
+            return False
+        st.last_queued = False
+        if not st.started:
+            st.started = True
+            st.deadline = self._now() + self.timeout_sec
+            self._mark_started(st.jid, st.wid)
+            log(f"{st.jid} 在 {st.wid} 排队 {self._now() - st.t0:.0f}s 后开算")
+        self._wait_next_poll(st.jid)
+        return False
+
+    def _await_gone(
+        self, st: _AwaitState, body: bytes, log: Callable[[str], None]
+    ) -> None:
+        """HTTP 410：节点判定终局失败 ⇒ 落 fail.json，训练侧立即停腿。"""
+        try:
+            loaded = json.loads(body.decode("utf-8"))
+            fb = loaded if isinstance(loaded, dict) else {}
+        except ValueError:
+            fb = {}
+        self.hub.store_job_failure(st.jid, push_failure_record(fb, st.wid, self.hub._now()))
+        log(f"{st.jid} 被 {st.wid} 判定终局失败：{fb.get('error')}")
+
     def _await_result(
         self,
         leg: JobLeg,
         *,
         started: bool = True,
         t_pushed: float | None = None,
-        log: Any = None,
+        log: Callable[[str], None] | None = None,
     ) -> None:
         """等 worker 出结果：续租 + 探活判死 + 到点回落。结果就地入账（两条腿同一函数）。
 
@@ -1223,145 +1339,49 @@ class PushDispatcher(TickLoopHost):
         # 缺省出口自己带课名（本函数手上就有 `course`）——直接调它的调用方（用例 / 将来的第二条腿）
         # 不会因为忘了传 `jlog` 而掉回「只有 jid」的旧形状。
         log = tagged(self._log, course_tag(course)) if log is None else log
-        deadline = self._now() + self.timeout_sec
-        queue_deadline = self._now() + self.timeout_sec
-        queue_logged = False
-        #: 上一次**看到**的状态是不是「在队里」。排队上限只在「最后一眼还在队里」时生效——
-        #: 不然「刚开算、但采样间隔跳过了 running 那一拍」的 job 会被队龄误杀。
-        last_queued = False
-
-        def _queue_expired() -> bool:
-            """队龄上限到了吗（到了就回落换台）。只在「刚看过/刚问不到」时调。"""
-            if self._now() <= queue_deadline:
-                return False
-            self._requeue(
-                jid, lease, wid, f"排队 {self.timeout_sec:.0f}s 仍未开算", avoid_worker=True, log=log
-            )
-            return True
-
+        st = _AwaitState(jid, wid, lease, t0, started,
+                         self._now() + self.timeout_sec,
+                         self._now() + self.timeout_sec)
         while not self._stop.is_set():
-            if started and self._now() > deadline:
-                self._requeue(
-                    jid,
-                    lease,
-                    wid,
-                    f"推送后 {self.timeout_sec:.0f}s 无结果",
-                    avoid_worker=True,
-                    log=log,
-                )
-                return
-            if not self.workers.is_online(wid):
-                self._requeue(
-                    jid,
-                    lease,
-                    wid,
-                    f"worker 连续 {PUSH_DEAD_MISSES} 次探活失败（判定离场）",
-                    avoid_worker=True,
-                    log=log,
-                )
+            if self._await_stale(st, log):
                 return
             # hub 是这份 job 的租约持有人：不续租就会被 pull worker 领走（同一份活两处跑）。
-            self.hub.heartbeat(jid, lease)
-            res = _http(url, key, f"/job/{jid}/result", timeout=30.0)
+            self.hub.heartbeat(st.jid, st.lease)
+            res = _http(url, key, f"/job/{st.jid}/result", timeout=30.0)
             if res is None:
                 # 问不到：只有「最后一眼还在队里」才拿队龄兜底（隧道断了的排队单不该无限占租约）。
-                if last_queued and _queue_expired():
+                if st.last_queued and self._await_queue_expired(st, log):
                     return
-                self._wait_next_poll(jid)
+                self._wait_next_poll(st.jid)
                 continue
             status, body = res
             if status == 200:
-                last_queued = False
-                if not started:
-                    started = True
-                    deadline = self._now() + self.timeout_sec
-                    self._mark_started(jid, wid)
-                try:
-                    result = json.loads(body.decode("utf-8"))
-                except ValueError as e:
-                    self._requeue(jid, lease, wid, f"结果不是 JSON（{e}）", avoid_worker=True, log=log)
-                    return
-                if not isinstance(result, dict):
-                    self._requeue(jid, lease, wid, "结果不是对象", avoid_worker=True, log=log)
-                    return
-                code_, why = accept_result(
-                    self.hub, jid, result, lease, log=log, worker=push_worker_id_of(wid)
-                )
-                if code_ == 200:
-                    log(f"{jid} <- {wid} 结果已回灌（{self._now() - t0:.0f}s）")
-                    self._warn_slow_result(
-                        jid, wid, t0 if t_pushed is None else t_pushed, self._now(), log=log
-                    )
-                    # landed ⇒ 给同 job 的其它在途副本推取消帧（§2.4/§2.9）。
-                    self._cancel_others(jid, wid, log=log)
-                elif code_ == 409:
-                    # 别人已胜（首写锁定）：这份是备份/重复，**直接丢弃** —— 不回落重派
-                    # （重派只会再输一次；§2.9 末段：409 与 403 不同待遇）。
-                    log(f"{jid} 结果被拒 409（{why}）——别人已胜，本份丢弃")
-                elif code_ in (400, 403):
-                    # 结果本身不合契约：换一台重跑是合理的（不把这份结果投毒进账本）。
-                    self._requeue(
-                        jid,
-                        lease,
-                        wid,
-                        f"结果入账被拒 HTTP {code_}: {why}",
-                        avoid_worker=True,
-                        log=log,
-                    )
-                else:
-                    log(f"{jid} 结果入账返回 HTTP {code_}（{why}）——继续等")
+                self._await_landed(st, body, t_pushed, log)
                 return
             if status == 202:
                 # 节点在跑（accepted/running）：**等**，不是回落——把它读成「HTTP 202 ⇒
                 # 换台重推」会让每一拍都重推同一份活（并把它标进 `_avoid`，直到没有机器
                 # 能接），而 202 恰恰是推模式**正常**的在途答复（与 pull 侧
                 # `probe_job_result` 的 TRANSIENT 同义）。到点由上面的 deadline 兜底。
-                phase = _status_of(body)
-                if phase == "queued" and not started:
-                    # 排队不烧「推送后无结果」的预算（预算从第一次看到 running 起算）。
-                    last_queued = True
-                    if _queue_expired():
-                        return
-                    if not queue_logged:
-                        queue_logged = True
-                        log(f"{jid} 在 {wid} 排队中（开算前不计无结果超时）")
-                    self._wait_next_poll(jid)
-                    continue
-                last_queued = False
-                if not started:
-                    started = True
-                    deadline = self._now() + self.timeout_sec
-                    self._mark_started(jid, wid)
-                    log(f"{jid} 在 {wid} 排队 {self._now() - t0:.0f}s 后开算")
-                self._wait_next_poll(jid)
+                if self._await_running(st, body, log):
+                    return
                 continue
             if status == 410:
                 # 节点判定「这份活在这台机器上跑不成」（能力缺失类）：终局，落 fail.json，
                 # 训练侧随后从 /jobs/{id}/result 拿 410 + 原因立即停腿（不再等满超时）。
-                try:
-                    loaded = json.loads(body.decode("utf-8"))
-                    fb = loaded if isinstance(loaded, dict) else {}
-                except ValueError:
-                    fb = {}
-                self.hub.store_job_failure(jid, push_failure_record(fb, wid, self.hub._now()))
-                log(f"{jid} 被 {wid} 判定终局失败：{fb.get('error')}")
+                self._await_gone(st, body, log)
                 return
             if status in (409, 428):
-                self._requeue(
-                    jid,
-                    lease,
-                    wid,
-                    f"worker 拒绝这份活（HTTP {status}）",
-                    avoid_worker=True,
-                    log=log,
-                )
+                self._requeue(st.jid, st.lease, st.wid,
+                              f"worker 拒绝这份活（HTTP {status}）", avoid_worker=True, log=log)
                 return
             if status >= 500:
-                self._wait_next_poll(jid)
+                self._wait_next_poll(st.jid)
                 continue
-            self._requeue(jid, lease, wid, f"HTTP {status}", avoid_worker=True, log=log)
+            self._requeue(st.jid, st.lease, st.wid, f"HTTP {status}",
+                          avoid_worker=True, log=log)
             return
-        self._requeue(jid, lease, wid, "派发器停机", avoid_worker=False, log=log)
+        self._requeue(st.jid, st.lease, st.wid, "派发器停机", avoid_worker=False, log=log)
 
     def worker_token_ok(self, token: str) -> bool:
         """这个 Bearer 是不是**某台已登记 push worker** 的 authKey（或派发器缺省 token）。

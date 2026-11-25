@@ -10799,3 +10799,21 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 
 - **验证**：HEAD(`51c3ca67`)-vs-新 289 组决策表 **0 差异**；新增 7 条行为守卫；
   全量门禁 7033 passed / 3 skipped。全文 → `docs/nn/engineering.md` §346。
+
+## §2026-11-25-push-await-split
+
+- **背景**：`PushDispatcher._await_result` 165 行、11 条顶层语句，一个 `while` 里混着续租、
+  探活、两把时钟、200 入账四档、202 排队/开算、410 终局与 409/428/5xx/停机回落。
+
+- **决定**：切成 `_await_stale` / `_await_queue_expired` / `_await_landed` / `_await_running` /
+  `_await_gone` 五段 + `_AwaitState`（两把时钟 + `queue_logged` / `last_queued`），入口 69 行；
+  `remote/push_dispatch.py` 移出 `LONG_FUNCS_BASELINE`（59 → 58）。公开签名与「恰好一处
+  `_await_result(...)` 调用」不变。
+
+- **被否决**：① 用返回值传 `started` / `deadline` / `queue_logged` 三元组 —— 每个分支都要拆包
+  重装，入口反而更长；② 把 `_await_queue_expired` 并进 `_await_running` —— 「问不到」分支也
+  要用它，两处会各写一份；③ 把 200 的 409/400/403 再拆一层 —— 四档共享同一个 `accept_result`
+  结果，拆开只会让 `code_` 判据散成两份。
+
+- **验证**：HEAD(`826fa83f`)-vs-新 96 组响应序列差分 **0 差异**；新增 9 条行为守卫；
+  全量门禁 7042 passed / 3 skipped。全文 → `docs/nn/engineering.md` §347。

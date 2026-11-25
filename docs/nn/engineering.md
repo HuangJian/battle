@@ -29,6 +29,21 @@
 
 ---
 
+## §347 分诊第十格：`remote/push_dispatch._await_result` 165 → 69 + 五段（2026-11-25）
+
+入口只留「续租 → 取结果 → 按状态分派」；判据拆成 `_await_stale`（deadline + 探活离场，12）/
+`_await_queue_expired`（队龄，7）/ `_await_landed`（200 四档，43）/ `_await_running`（202 排队/
+开算，23）/ `_await_gone`（410 落 fail，11）。两把时钟与「最后一眼」进位到 `_AwaitState`
+（mutable dataclass；`queue_logged` / `last_queued` 仍有唯一真源），入口 69 行。
+
+**验证**：HEAD(`826fa83f`)-vs-新 96 组响应序列差分（12 种响应 × started × online × t_pushed），
+比对 requeue / mark_started / wait / warn / cancel / heartbeat / store / 日志与停机终态，**0 差异**；
+`tests/remote/test_push_await_phases.py` 9 条行为守卫。`remote/push_dispatch.py` 移出
+`LONG_FUNCS_BASELINE`（59 → 58）。
+
+坑：`_queue_expired` 的真实判据是「最后一眼还在排队」且**只在问不到时**兜底；把它挪进
+`_await_running` 后必须保留 `last_queued` 的翻面时机，否则隧道断了的排队单会无限占租约。
+
 ## §346 分诊第九格：`trainer/batch_lanes.worker` 178 → 29 + 四段（2026-11-25）
 
 `worker` 的 178 行里只有 3 条顶层语句：一个 `while` 套「熔断 / 领取 / 竞速 / 取包 / 结算 /
