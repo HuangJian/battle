@@ -29,6 +29,32 @@
 
 ---
 
+## §354 分诊第十七格：`trainer/loop_remote_job._remote_ppo_land` 151 → 17 + 五段（2026-11-25）
+
+相位③原来把五件事摊在一个函数里：三重校验 + 落位（含 `TripleCheckError` 的 cancel / 上抛）、
+记账收口与冒烟作废、下一轮预采、结算字段（agg / 往返秒 / wire 读数）、kickstart 警示与验收行。
+入口现在只剩这五段的**顺序**（顺序本身是契约：拒收之后不许记账、冒烟作废晚于记账且早于预采、
+结算字段晚于冒烟判据），各段搬进 `_land_verified` / `_land_settled` / `_land_precollect` /
+`_land_settle_fields` / `_land_accept_log`（46 / 15 / 23 / 36 / 41 行）。`LONG_FUNCS_BASELINE`
+删 `trainer/loop_remote_job.py`（52 → 51，该文件归零）。
+
+**为什么用方法而不是模块级助手**：五段都要写实例槽位（`_agg` / `_chunks_n` / `_total_steps` /
+`_kl_cum` / `_ppo_sec` / `_ppo_cloud_sec` / `_wire` / `_collect_child`）并读 `self.args` /
+`self._jsonl_path`。摊成模块级函数要么把 `self` 原样传一遍（等于换个名字的同一函数），要么
+新增一个「返回八个值」的元组 —— 后者会让槽位只能由入口散写，「谁写这个槽位」的单写者判据
+失效。方法形态下 `test_loop_remote_split` 的槽位闭集 / 借用手 / 延迟 import 闭集一条都不用改
+（新 methods 进 `own_methods`，`remote.hub_client` 两处 import 仍是同一条延迟集条目）。
+
+**验证**：HEAD(`647e7e49`)-vs-新 20 组差分（hub / 直推 × 冒烟 × 两条拒收 × 预采六态 ×
+`ppo_sec` 三态 × wire 配置 × `published_mem` × `state_init`），比对日志序列、`LandSpec` 全字段、
+cancel / mark / journal / forensics 的顺序与实参、八个结算槽位、返回值与异常，**0 差异**；
+敏感性探针（从入口摘掉 `_land_precollect`）3 组红。`tests/trainer/test_loop_remote_split.py` +
+`tests/remote/test_remote_ppo.py` + 形状 / LOC 预算 99 条绿；全量 pygate 7041 passed / 13 skipped。
+
+坑：`write_text` 在 Windows 上默认把 `\n` 翻成 `\r\n`，而本仓入库是 LF —— 拼接脚本写盘后
+`git diff` 会多出 1000+ 行伪改动。按 §17.4 验落盘时先看 `git diff --stat` 的行数，再
+`read_bytes().replace(b"\r\n", b"\n")` 归一（本次实测 1027 处）。
+
 ## §353 分诊第十六格：`trainer/loop_remote_job._remote_ppo_publish` 191 → 97 + 两段（2026-11-25）
 
 发布相位原来把「传输 / 课程+shard / 代码快照 / ckpt / kickstart」的装配与整块

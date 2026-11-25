@@ -2109,3 +2109,8 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > 2026-11-25 第十六格：`trainer/loop_remote_job._remote_ppo_publish` 191 → 97 +
 > `_remote_publish_setup`（51，只读 `_PublishSetup`）/ `_remote_publish_spec`（90）；
 > HEAD-vs-新 6 组差分全同（含两条 SystemExit），存量 53 → 52（engineering §353）。
+
+> 2026-11-25 第十七格：`trainer/loop_remote_job._remote_ppo_land` 151 → 17 + 五段
+> （`_land_verified` / `_land_settled` / `_land_precollect` / `_land_settle_fields` /
+> `_land_accept_log`）；HEAD-vs-新 20 组差分全同（敏感性探针 3 组红），存量 52 → 51
+> （engineering §354）。

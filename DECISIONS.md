@@ -10923,3 +10923,24 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 
 - **验证**：HEAD(`5c5c68d7`)-vs-新 6 组差分 **0 差异**（含两条 SystemExit）；相关 trainer 用例
   84 条、全量门禁 7051 passed / 3 skipped。全文 → `docs/nn/engineering.md` §353。
+
+## §2026-11-25-remote-ppo-land
+
+- **背景**：`trainer/loop_remote_job._remote_ppo_land` 151 行，五件事挤在同一个相位方法里：
+  三重校验落位（含 `TripleCheckError` 的 cancel + 上抛）、记账收口与冒烟作废、下一轮预采、
+  结算字段（agg / 往返秒 / wire 读数）、kickstart 警示与验收行；`LONG_FUNCS_BASELINE` 第 17 格。
+
+- **决定**：入口只留五段的**顺序**（`_land_verified` → `_land_settled` → `_land_precollect` →
+  `_land_settle_fields` → `_land_accept_log` → `return result`），各段搬进同名方法；
+  `trainer/loop_remote_job.py` 的形状存量删条（52 → 51，该文件归零）。
+
+- **被否决**：① 拆成模块级助手 —— 五段都要写实例槽位并读 `self.args` / `self._jsonl_path`，
+  传 `self` 等于换个名字的同一函数，返回八元组又会让「槽位单写者」判据失效（写手退化成入口散写）；
+  ② 把 `_land_settled` 与 `_land_precollect` 合成一段 —— 冒烟作废的 `raise` 必须早于预采，
+  合成后这段的退出语义（正常返回 vs 抛）变成隐式；③ 再抽一个 `_LandState` 载体 —— 结算字段
+  本来就是槽位的最后一份写者，包一层对象只多一条可漂的搬运。
+
+- **验证**：HEAD(`647e7e49`)-vs-新 20 组差分 **0 差异**（含两条拒收与冒烟两条 raise）；敏感性
+  探针（从入口摘掉 `_land_precollect`）3 组红；`test_loop_remote_split` / `test_remote_ppo` /
+  形状 / LOC 预算 99 条绿；全量 pygate 7041 passed / 13 skipped。
+  全文 → `docs/nn/engineering.md` §354。

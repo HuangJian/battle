@@ -8,8 +8,9 @@
 取回相位用 `_push_fetch`（直推腿）；`TrainingRemoteDrive` 继承本模块。
 
 本模块的**延迟 import** 刻意逐方法自带（`_remote_ppo_publish` 里的 `remote.hub_client` /
-`biz.config` / `biz.reward_library` / `trainer.dispatch_queue` / `remote.bundle`；`_remote_ppo_land` 里的
-`remote.hub_client` / `trainer.collect_only`）——它们各自服务一段，合成一份清单会重新长出拆相前的形状。
+`biz.config` / `biz.reward_library` / `trainer.dispatch_queue` / `remote.bundle`；落位相位拆成
+`_land_verified` / `_land_settled` / `_land_precollect` 等五段，各自的 `remote.hub_client` /
+`trainer.collect_only` 就住在用到它的那一段里）——它们各自服务一段，合成一份清单会重新长出拆相前的形状。
 """
 
 from __future__ import annotations
@@ -858,15 +859,22 @@ class TrainingRemoteJob(TrainingRemotePush):
         `result` 由相位②给（阻塞或非阻塞取到的是同一件东西），本相位因此对驱动方式
         完全无感——这也是把「校验落位」单独切出来的理由：它既不该被等法影响，也不该
         自己再去碰网络。
+
+        入口只剩**五段的顺序**：校验落位 → 记账收口 → 下一轮预采 → 结算字段 → 验收日志。
+        顺序本身就是契约（拒收之后不许记账、冒烟作废必须晚于记账且早于预采、结算字段
+        必须晚于冒烟判据），所以它留在入口逐行可读，各段内部各自成方法。
         """
+        self._land_verified(sess, result)
+        self._land_settled(sess, result)
+        self._land_precollect(sess)
+        self._land_settle_fields(sess, result)
+        self._land_accept_log(sess, result)
+        return result
+
+    def _land_verified(self, sess: RemotePpoJob, result: dict) -> None:
+        """三重校验 + 落位（D12）：任一不等响亮拒绝，不落盘；拒收 = 这份 job 的确定性终局。"""
         args = self.args
-        # 三重校验 + 落位（D12）：任一不等响亮拒绝，不落盘
-        from remote.hub_client import (
-            TripleCheckError,
-            cancel_job,
-            mark_job_completed,
-            verify_and_land,
-        )
+        from remote.hub_client import TripleCheckError, cancel_job, verify_and_land
         from remote.publish_spec import LandSpec
         from worker.resume import state_init_enabled
 
@@ -908,6 +916,11 @@ class TrainingRemoteJob(TrainingRemotePush):
                 f"{'已作废（账本 job_cancelled）' if cancelled else '净态非 pending，不重复作废'}"
             )
             raise
+
+    def _land_settled(self, sess: RemotePpoJob, result: dict) -> None:
+        """记账收口 + 冒烟作废：`job_completed` 先落，冒烟轮才有「已记账但作废」这一档。"""
+        from remote.hub_client import mark_job_completed
+
         mark_job_completed(self._jsonl_path, sess.jid)
         # I1：远端提交序列完成（校验落位 + job 记账）——WAL 收口。冒烟作废轮也算
         # 完成（commit 本身成功了；作废轮由 _prepare_iter_dir 清场后重试新轮）。
@@ -919,6 +932,10 @@ class TrainingRemoteJob(TrainingRemotePush):
             # 发布时逐字节相同（init 回显），无需回滚；重试轮 _prepare_iter_dir 清场。
             log(f"[run_rl] remote ppo it{sess.it}: job {sess.jid} 是冒烟回显（result.smoke）——本轮作废")
             raise SmokeVoidRoundError(sess.jid)
+
+    def _land_precollect(self, sess: RemotePpoJob) -> None:
+        """H7：PPO 等待窗口后 spawn 下一轮首波预采（θ_N 快照，复用双缓冲机制）。"""
+        args = self.args
         # H7（review-hy）：--remote-precollect 1 → 在 PPO 等待窗口后 spawn 下一轮首波
         # 预采（θ_N 快照，复用 spawn_collect_next 双缓冲机制）。默认 0（Q10 测后开）
         # 时不可达。stale 分数上限 30% 的筛选（S5/F4）属 §6-D3 后续项，未在此实现。
@@ -939,7 +956,10 @@ class TrainingRemoteJob(TrainingRemotePush):
                 log(
                     f"[run_rl] remote precollect: next-round first-wave spawned (pid={self._collect_child.pid})"
                 )
-        # 结算字段（下游 breaker / stop-loss / events 账本原样消费，D4）
+
+    def _land_settle_fields(self, sess: RemotePpoJob, result: dict) -> None:
+        """结算字段（下游 breaker / stop-loss / events 账本原样消费，D4）+ 传输读数。"""
+        args = self.args
         self._agg = _remote_forward_agg(result.get("agg", {}))
         self._chunks_n = int(result.get("agg", {}).get("chunks", 0))
         self._total_steps = int(result.get("agg", {}).get("steps", 0))
@@ -973,6 +993,10 @@ class TrainingRemoteJob(TrainingRemotePush):
                 "rollout_src": ("node" if sess.rollout_spec else "local"),
             },
         )
+
+    def _land_accept_log(self, sess: RemotePpoJob, result: dict) -> None:
+        """启动协议的警示 + 本轮验收行（`accepted` 是运维读的那一行）。"""
+        args = self.args
         # 启动协议补丁（2026-09-08 vk1 事故）：kickstart_ref 已要求时，it1 校准把
         # 「缰绳真实落地」做进循环——云端 agg 无 kickstart 键或值恒 0 = worker 没跑
         # 缰绳（旧代码/模块钉住），响亮警示而非静默裸奔；正常值应为 0.1~0.6 量级。
@@ -1002,4 +1026,3 @@ class TrainingRemoteJob(TrainingRemotePush):
             + (f"demo_bc={self._agg.get('demo_bc', 0.0):.4f} " if self._agg.get("demo_bc") else "")
             + f"({self._ppo_sec}s round-trip) -> {args.out}"
         )
-        return result
