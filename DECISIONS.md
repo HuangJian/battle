@@ -10817,3 +10817,20 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 
 - **验证**：HEAD(`826fa83f`)-vs-新 96 组响应序列差分 **0 差异**；新增 9 条行为守卫；
   全量门禁 7042 passed / 3 skipped。全文 → `docs/nn/engineering.md` §347。
+
+## §2026-11-25-job-round-run-split
+
+- **背景**：`_Round.run` 176 行，四档失败处置（取消 / 机器级停滞 / 瞬时 / 确定性拒绝）、
+  两个 `SystemExit` 出口、兜底上报与 finally 全在一个方法里；`LONG_FUNCS_BASELINE` 第 11 格。
+
+- **决定**：每档一个方法（`_drop_cancelled` / `_release_unreapable` / `_release_retryable` /
+  `_maybe_reload` / `_report_rejected` / `_report_exit` / `_report_crash`），finally 收进
+  `_wrap_up`，入口 23 行；`remote/job_round.py` 移出 `LONG_FUNCS_BASELINE`（58 → 57）。
+
+- **被否决**：① 把 `UnreapableChildError` 并进 `RetryableError` 分支 —— 它是子类，日志会
+  退化成「瞬时失败」，现场再也看不出「机器级」；② 让 `_report_exit` 返回布尔代替裸 `raise` ——
+  调用方还得再判一次，且 `HOT_RELOAD_EXIT` 的语义就是「继续抛」；③ 把 finally 拆成两个
+  方法 —— 收尾顺序（flush → 三个 Event → join）是一条时序，拆开只会制造第二份顺序表。
+
+- **验证**：HEAD(`1fc65fd3`)-vs-新 27 组差分 **0 差异**；新增 9 条行为守卫；
+  全量门禁 7051 passed / 3 skipped。全文 → `docs/nn/engineering.md` §348。

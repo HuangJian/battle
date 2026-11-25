@@ -369,6 +369,9 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
   > 第十格也落地了：`remote/push_dispatch._await_result` 165 → 82 + 五段（`_await_stale` /
   > `_await_queue_expired` / `_await_landed` / `_await_running` / `_await_gone` + `_AwaitState`）；
   > HEAD-vs-新 96 组响应序列差分全同，存量 59 → 58（engineering §347）。
+  > 第十一格也落地了：`remote/job_round._Round.run` 176 → 23 + 八段（四档失败 / 两个
+  > SystemExit 出口 / 兜底上报 / `_wrap_up`）；HEAD-vs-新 27 组差分全同，存量 58 → 57
+  > （engineering §348）。
 
 **为什么这是问题**
 

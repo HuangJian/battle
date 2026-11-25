@@ -62,7 +62,6 @@ LONG_FUNCS_BASELINE: dict[str, int] = {
     "remote/deliver_worker.py": 1,
     "remote/deliver_zip.py": 1,
     "remote/http.py": 1,
-    "remote/job_round.py": 1,
     "remote/offline_boot.py": 5,
     "remote/offline_deliver.py": 1,
     "remote/offline_eval.py": 1,

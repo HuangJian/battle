@@ -29,6 +29,22 @@
 
 ---
 
+## §348 分诊第十一格：`remote/job_round._Round.run` 176 → 23 + 八段（2026-11-25）
+
+入口只留 try/except 分派；四档失败与两个特殊出口各住一个方法：`_drop_cancelled`（9）/
+`_release_unreapable`（26）/ `_release_retryable`（20）/ `_maybe_reload`（10）/
+`_report_rejected`（18）/ `_report_exit`（21）/ `_report_crash`（19），finally 收进
+`_wrap_up`（20）。异常顺序原样：Cancelled → Unreapable → Retryable → CodeChanged →
+Protocol → SystemExit → Exception。
+
+**验证**：HEAD(`1fc65fd3`)-vs-新 27 组差分（9 种出口 × uploaded/store/proc/threads/reload），
+比对 abandon/release/error/failure/reload/flush/日志、join 与三个 Event 终态，**0 差异**；
+`tests/remote/test_job_round_run_phases.py` 9 条行为守卫。`remote/job_round.py` 移出
+`LONG_FUNCS_BASELINE`（58 → 57）。
+
+坑：`UnreapableChildError` 是 `RetryableError` 的子类，`except` 顺序不能动；`HOT_RELOAD_EXIT`
+必须在 `_report_exit` 里裸 `raise` 重抛，吞掉就把热替换变成一份假失败。
+
 ## §347 分诊第十格：`remote/push_dispatch._await_result` 165 → 69 + 五段（2026-11-25）
 
 入口只留「续租 → 取结果 → 按状态分派」；判据拆成 `_await_stale`（deadline + 探活离场，12）/

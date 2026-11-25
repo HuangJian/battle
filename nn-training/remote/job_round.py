@@ -782,176 +782,172 @@ class _Round:
         try:
             self._execute()
         except JobCancelledError as e:
-            # ★ 唯一正确的取消处置（§2.4）：不写 _result.json、不 POST、不报 fail、
-            # abandon（release 租约 + 零 reclaim），立刻去问 priority 选下家。
-            # 绝不能落到下方 except ProtocolError（= 把合法放弃报成确定性失败 ⇒ 训练停腿）
-            # 或 except RetryableError（= 把别人已赢下的活 release 回池）。
-            self.log(
-                f"job {self.jid} CANCELLED: {e} — 停算丢弃（零回传/零 fail），"
-                f"cancel_latency_s={time.time() - self.t_ppo0:.1f}"
-            )
-            abandon_job(self.base_url, self.token, self.jid, worker_id=self.worker_id, reason="landed")
+            self._drop_cancelled(e)
         except UnreapableChildError as e:
-            # ★ 机器级停滞（子进程 SIGKILL 之后收不了尸：D 状态 / 挂住的挂载点；2026-09-25 二次取证）。
-            # **必须排在 `except RetryableError` 之前**——它是 `RetryableError` 的子类，落到那条上
-            # 处置虽然也是 release，但日志会退化成「瞬时失败」，现场就看不出「机器级」这一档（那正是
-            # 这次事故最难查的地方）。处置 = **立即还租约、立即重领重投**：不睡（云机按分钟计费，
-            # 空转就是烧配额）、不报 `report_job_failure`（那会把机器的问题记在内容头上 ⇒ hub 落终局
-            # failed ⇒ 训练停腿 ⇒ 反过来把云机停掉）、不计毒包（hub 只对**租约过期**计 reclaims，
-            # 主动 release 不算 ⇒ 反复重投永远不会把自己冻死）。
-            self.log(
-                f"job {self.jid} 机器级停滞（子进程收不了尸）: {e} — release 租约立即重领"
-                "重投同一份活（不睡/不报失败/不计毒包，云机不停）"
-            )
-            # 观测腿（plan/component-error-registry §4.3-S3b）：**不报 `report_job_failure`**（那会把
-            # 机器的问题记在内容头上 ⇒ hub 落终局 failed ⇒ 训练停腿），但也不能什么都不说——这档
-            # 此前只见于云机日志（2026-09-25 事故最难查的地方）。纯观测、失败即丢、不进任何判据。
-            report_error(
-                ErrorReportSpec(
-                    base_url=self.base_url,
-                    token=self.token,
-                    reason=f"{type(e).__name__}: {e}",
-                    detail=exc_tail(e),
-                    component="ppo-worker",
-                    course=_course_of(self.job),
-                    job_id=self.jid,
-                    it=self.job_it,
-                    severity="warn",
-                    worker_id=self.worker_id,
-                    log=self.log,
-                )
-            )
-            release_job(self.base_url, self.token, self.jid, self.lease_token, log=self.log)
+            self._release_unreapable(e)
         except RetryableError as e:
-            # 瞬时失败（网络/5xx/传输损坏）：主动还租约立即回池——不再付 30min 过期等待
-            self.log(f"job {self.jid} 瞬时失败: {e} — release 租约回池，立即可重领")
-            # 观测腿（同上）：连发时它是「这台机器有问题」的唯一信号（本机侧只能看到「活一直在回池」）。
-            report_error(
-                ErrorReportSpec(
-                    base_url=self.base_url,
-                    token=self.token,
-                    reason=f"{type(e).__name__}: {e}",
-                    detail=exc_tail(e),
-                    component="ppo-worker",
-                    course=_course_of(self.job),
-                    job_id=self.jid,
-                    it=self.job_it,
-                    severity="warn",
-                    worker_id=self.worker_id,
-                    log=self.log,
-                )
-            )
-            release_job(self.base_url, self.token, self.jid, self.lease_token, log=self.log)
+            self._release_retryable(e)
         except CodeChangedError as e:
-            # 热替换：本进程 sys.modules 是旧代码，继续跑 = 用旧逻辑产出"看着正常"的
-            # 结果。有监督器 → 以 HOT_RELOAD_EXIT 干净退出，由 supervise_worker 用同一
-            # 套参数重新拉起子进程（fresh sys.modules → 新代码生效，输出流不断）。
-            # 无监督器（裸 worker_loop 直调）→ 降级为提示人工重启。
-            self.log(f"job {self.jid}: {e}")
-            release_job(self.base_url, self.token, self.jid, self.lease_token, log=self.log)  # 别占着租约等重启
-            if not _request_reload(self.restart_argv, log=self.log):
-                self.log(
-                    "无监督器 —— 请手动重启本进程"
-                    "（notebook: Runtime → Restart runtime 后重跑步骤 4）"
-                )
-                self.stop = True
+            self._maybe_reload(e)
         except ProtocolError as e:
-            self.log(f"job {self.jid} REJECTED: {e} — skip (not retried)")
-            # 确定性拒绝（commit 不符/模式不符/节点能力缺失如 bun 装不上）不重试——
-            # 轮询下一个。
-            # 2026-09-17：**必须把原因报给 hub**，否则这条确定性失败在训练侧只表现为
-            # 25 分钟超时（能力缺失被读成网络/排队问题，且每次重试白烧一个超时窗口）。
-            # 只在这一分支报（CodeChangedError 会重启进程靠租约回池、RetryableError
-            # 靠 release 回池，报了就等于把可恢复的 job 钉死）；hub 侧把它落成终局后
-            # 该 job 不再回池，重发同 job（同幂等键）会清标记。
-            report_job_failure(
-                FailReportSpec(
-                    self.base_url,
-                    self.token,
-                    self.jid,
-                    str(e) or type(e).__name__,
-                    kind=type(e).__name__,
-                    detail=_failure_detail(e),
-                    lease_token=self.lease_token,
-                    worker_id=self.worker_id,
-                    log=self.log,
-                )
-            )
+            self._report_rejected(e)
         except SystemExit as e:
-            # ★ 2026-11-20（kaggle 真机，用户口径「坏 job 只该报失败」）：`SystemExit` 是
-            # **BaseException**，下面那条 `except Exception` 接不住它 ⇒ 一次内容有问题的
-            # job（现场：payload 缺 `corpus_fmt`，语料里根本没有 obs）让子进程 rc=1，监督器
-            # 按「崩溃」重拉、又领回同一份坏 job，五次退避后「会话结束 rc=1」——**一台云机
-            # 的整段会话为一个坏 job 陪葬**。
-            # 这里的语义只有一条：**job 作用域里的 `SystemExit` = 这份活跑不成**（确定性：
-            # 同一份字节重领也会在同一处炸）⇒ 报给 hub 落终局（训练侧立刻带原因停腿），
-            # 然后继续轮询。
-            # 唯一例外是 `HOT_RELOAD_EXIT`：它请求的是「监督器换代码重拉进程」，在这里被
-            # 当失败吞掉就等于把热替换变成一份假失败（进程带着旧代码继续跑）。
-            if getattr(e, "code", None) == HOT_RELOAD_EXIT:
-                raise
-            _reason = str(e) or type(e).__name__
-            self.log(f"job {self.jid} FAILED: SystemExit: {_reason} — 报失败后继续轮询（worker 不退）")
-            report_job_failure(
-                FailReportSpec(
-                    self.base_url,
-                    self.token,
-                    self.jid,
-                    _reason,
-                    kind=type(e).__name__,
-                    detail=_failure_detail(e),
-                    lease_token=self.lease_token,
-                    worker_id=self.worker_id,
-                    log=self.log,
-                )
-            )
+            self._report_exit(e)
         except Exception as e:
-            self.log(f"job {self.jid} FAILED: {type(e).__name__}: {e} — will re-poll (idempotent)")
-            # 瞬态失败（网络/远端关闭）：租约未续会自动回池，重拉同 job 幂等。
-            # ★ 2026-09-21（§4）：本分支**只准**装真瞬态。内容决定性失败（解包/校验/
-            #   运行时能力缺失）必须在上游就转成 `ProtocolError`（见 unpack_payload_or_fail、
-            #   manifest 校验、bun 检测），否则同一份字节会无限重领（事故：40 次 / 3.5h 空转）。
-            # 观测腿（同上）：兜底瞬态此前**零出口**——只有云机日志，而日志随机器一起消失。
-            report_error(
-                ErrorReportSpec(
-                    base_url=self.base_url,
-                    token=self.token,
-                    reason=f"{type(e).__name__}: {e}",
-                    detail=exc_tail(e),
-                    component="ppo-worker",
-                    course=_course_of(self.job),
-                    job_id=self.jid,
-                    it=self.job_it,
-                    severity="warn",
-                    worker_id=self.worker_id,
-                    log=self.log,
-                )
-            )
+            self._report_crash(e)
         finally:
-            # 每 job 一行传输账：payload/code/blob/result 的 (bytes, sec) + 零字节命中 + 重抽。
-            # P2.5：async 且本 job **已交回传**时**不**在这里 flush —— `out` 的账要等回传
-            # 落定才记完，过早 flush 会把回传读成 0s（`_result_settled` 负责收）。
-            # 没走到回传（取消/失败/backup 丢弃）的话回传永不会落定，必须在这里收。
-            if not self.uploaded:
-                _wire_flush(self.jid, self.log)
-            # 取消环必须每 job 都收（否则一个 job 一个常驻线程，长跑 worker 会漏线程）
-            self.watch_stop.set()
-            self.hb_stop.set()
-            # 预取暂存：`take()` 交棒、搬入在 `_ensure_payload` —— 早退路径（结果复用/bun 自检
-            # 失败/取消/热替换/异常）上那份还没被搬走，就地清掉（幂等；搬成功时是空操作）。
-            if self.pf_store is not None:
-                self.pf_store.release_handoff()
-            # 预取填充同理：job 结束即停。进程模式等子进程确认收干净（同 30s 预算），
-            # 进程内线程照旧 join（它最多再跑一轮下载）。
-            if self.pf_proc is not None:
-                self.pf_proc.stop_fill()
-            self.pf_stop.set()
-            if self.pf_thread is not None:
-                self.pf_thread.join(timeout=30.0)
-            if self.hb_thread is not None:
-                self.hb_thread.join(timeout=HEARTBEAT_SEC + 5)
+            self._wrap_up()
         return RoundOutcome(
             jid=self.jid, ok=self.job_ok, uploaded=self.uploaded, stop=self.stop
         )
 
+    def _drop_cancelled(self, e: JobCancelledError) -> None:
+        """唯一正确的取消处置（§2.4）：零回传 / 零 fail / abandon。"""
+        # ★ 绝不能落到 `_release_retryable`（= 把别人已赢下的活 release 回池）
+        #   或 `_report_rejected`（= 把合法放弃报成确定性失败 ⇒ 训练停腿）。
+        self.log(
+            f"job {self.jid} CANCELLED: {e} — 停算丢弃（零回传/零 fail），"
+            f"cancel_latency_s={time.time() - self.t_ppo0:.1f}"
+        )
+        abandon_job(self.base_url, self.token, self.jid, worker_id=self.worker_id, reason="landed")
 
+    def _release_unreapable(self, e: UnreapableChildError) -> None:
+        """机器级停滞：还租约立即重领重投；**不报 job 失败**（不能记在内容头上）。"""
+        # ★ 必须排在 `_release_retryable` 之前——它是 RetryableError 的子类，落到那条上
+        #   日志会退化成「瞬时失败」，现场就看不出「机器级」这一档（2026-09-25 二次取证）。
+        # 处置 = 立即还租约、立即重领重投：不睡（云机按分钟计费）、不报
+        # `report_job_failure`（会把机器问题记到内容上 ⇒ 训练停腿）、不计毒包。
+        self.log(
+            f"job {self.jid} 机器级停滞（子进程收不了尸）: {e} — release 租约立即重领"
+            "重投同一份活（不睡/不报失败/不计毒包，云机不停）"
+        )
+        report_error(
+            ErrorReportSpec(
+                base_url=self.base_url,
+                token=self.token,
+                reason=f"{type(e).__name__}: {e}",
+                detail=exc_tail(e),
+                component="ppo-worker",
+                course=_course_of(self.job),
+                job_id=self.jid,
+                it=self.job_it,
+                severity="warn",
+                worker_id=self.worker_id,
+                log=self.log,
+            )
+        )
+        release_job(self.base_url, self.token, self.jid, self.lease_token, log=self.log)
+
+    def _release_retryable(self, e: RetryableError) -> None:
+        """瞬时失败（网络/5xx/传输损坏）：主动还租约立即回池。"""
+        self.log(f"job {self.jid} 瞬时失败: {e} — release 租约回池，立即可重领")
+        # 观测腿：连发时它是「这台机器有问题」的唯一信号。
+        report_error(
+            ErrorReportSpec(
+                base_url=self.base_url,
+                token=self.token,
+                reason=f"{type(e).__name__}: {e}",
+                detail=exc_tail(e),
+                component="ppo-worker",
+                course=_course_of(self.job),
+                job_id=self.jid,
+                it=self.job_it,
+                severity="warn",
+                worker_id=self.worker_id,
+                log=self.log,
+            )
+        )
+        release_job(self.base_url, self.token, self.jid, self.lease_token, log=self.log)
+
+    def _maybe_reload(self, e: CodeChangedError) -> None:
+        """热替换：有监督器 ⇒ 干净退出；无监督器 ⇒ 提示人工重启并停循环。"""
+        self.log(f"job {self.jid}: {e}")
+        release_job(self.base_url, self.token, self.jid, self.lease_token, log=self.log)
+        if not _request_reload(self.restart_argv, log=self.log):
+            self.log(
+                "无监督器 —— 请手动重启本进程"
+                "（notebook: Runtime → Restart runtime 后重跑步骤 4）"
+            )
+            self.stop = True
+
+    def _report_rejected(self, e: ProtocolError) -> None:
+        """确定性拒绝（commit/模式/能力不符）：不重试，报给 hub 落终局。"""
+        self.log(f"job {self.jid} REJECTED: {e} — skip (not retried)")
+        # 只在这一分支报（CodeChangedError 靠重启回池、RetryableError 靠 release 回池，
+        # 报了等于把可恢复的 job 钉死）；hub 侧把它落成终局后重发同 job 会清标记。
+        report_job_failure(
+            FailReportSpec(
+                self.base_url,
+                self.token,
+                self.jid,
+                str(e) or type(e).__name__,
+                kind=type(e).__name__,
+                detail=_failure_detail(e),
+                lease_token=self.lease_token,
+                worker_id=self.worker_id,
+                log=self.log,
+            )
+        )
+
+    def _report_exit(self, e: SystemExit) -> None:
+        """job 作用域里的 `SystemExit` = 这份活跑不成；`HOT_RELOAD_EXIT` 除外。"""
+        # SystemExit 是 BaseException，`except Exception` 接不住；不接就会让监督器
+        # 把「坏 job」当「进程崩溃」重拉，五次退避后整段会话陪葬（2026-11-20 真机）。
+        if getattr(e, "code", None) == HOT_RELOAD_EXIT:
+            raise
+        _reason = str(e) or type(e).__name__
+        self.log(f"job {self.jid} FAILED: SystemExit: {_reason} — 报失败后继续轮询（worker 不退）")
+        report_job_failure(
+            FailReportSpec(
+                self.base_url,
+                self.token,
+                self.jid,
+                _reason,
+                kind=type(e).__name__,
+                detail=_failure_detail(e),
+                lease_token=self.lease_token,
+                worker_id=self.worker_id,
+                log=self.log,
+            )
+        )
+
+    def _report_crash(self, e: Exception) -> None:
+        """兜底瞬态：只上报，租约未续会自动回池（重拉同 job 幂等）。"""
+        self.log(f"job {self.jid} FAILED: {type(e).__name__}: {e} — will re-poll (idempotent)")
+        # 本分支只准装真瞬态；内容决定性失败必须在上游转成 ProtocolError。
+        report_error(
+            ErrorReportSpec(
+                base_url=self.base_url,
+                token=self.token,
+                reason=f"{type(e).__name__}: {e}",
+                detail=exc_tail(e),
+                component="ppo-worker",
+                course=_course_of(self.job),
+                job_id=self.jid,
+                it=self.job_it,
+                severity="warn",
+                worker_id=self.worker_id,
+                log=self.log,
+            )
+        )
+
+    def _wrap_up(self) -> None:
+        """finally：传输账 / 取消环 / 预取暂存与填充 / 心跳，全部按 job 生命周期收掉。"""
+        # P2.5：async 且已交回传时**不**在这里 flush —— `out` 的账要等回传落定才记完，
+        # 过早 flush 会把回传读成 0s。没走到回传（取消/失败/backup 丢弃）必须在这里收。
+        if not self.uploaded:
+            _wire_flush(self.jid, self.log)
+        # 取消环必须每 job 都收（否则一个 job 一个常驻线程，长跑 worker 会漏线程）。
+        self.watch_stop.set()
+        self.hb_stop.set()
+        # 预取暂存：早退路径上那份还没被搬走，就地清掉（幂等；搬成功时是空操作）。
+        if self.pf_store is not None:
+            self.pf_store.release_handoff()
+        # 预取填充：job 结束即停；进程模式等子进程确认收干净，进程内线程照旧 join。
+        if self.pf_proc is not None:
+            self.pf_proc.stop_fill()
+        self.pf_stop.set()
+        if self.pf_thread is not None:
+            self.pf_thread.join(timeout=30.0)
+        if self.hb_thread is not None:
+            self.hb_thread.join(timeout=HEARTBEAT_SEC + 5)
