@@ -29,6 +29,38 @@
 
 ---
 
+## §357 分诊第二十格：`remote/http._get_with_retry` 的重试控制流 → `_RetryPlan`（2026-11-25）
+
+190 行里「下一次干什么」由 4 处 `continue`、1 处 `raise`、1 处 `return` 与 7 个裸局部共同表达：
+三套独立预算（`attempts` / `WIRE_REROLL_MAX` / `WIRE_PREEMPT_MAX`）的推进条件只存在于各分支的
+赋值里。现在一次尝试产出一个 frozen `_RetryPlan`（`action` 闭集 DELIVER / REROLL / RESCHEDULE /
+BACKOFF / RAISE + `_RetryState` + 已结算的续传前缀 + 该拍日志 + payload/异常），循环只剩
+「记日志 → 睡眠 → 交付/上抛」：
+
+`_get_with_retry` 190 → 69（函数体 ~35）· `_attempt_once` 35（占槽 + 发一次请求，异常收进
+`_Attempt`）· `_plan_after` 15（分诊）· `_plan_preempt` 50 · `_plan_reroll` 44 · `_plan_settle` 71。
+`LONG_FUNCS_BASELINE` 删 `remote/http.py`（49 → 48，该文件归零）；文件 LOC 636/1000。
+
+**为什么记账留在 planner 而不是循环**：账与分支是同一件事（preempt → failed → 日志；
+reroll → 续传 → 两笔账 → 日志；resend 记账早于丢前缀；`_wire_add`/`_note_rate` 早于交付）。
+挪进循环就要在每个 action 上再分一次支，等于把控制流换个地方散开。planner **不发日志、
+不睡眠、不抛**，因此决策表能在无网络、无时钟的用例里逐行钉住。
+
+**★ 差分抓到的真 bug（提交前）**：200-忽略-Range 那一支单独 `return` 了 DELIVER，漏掉后面共用的
+`_wire_add`/`_note_rate` ⇒ 传输账少两笔、时钟少两拍。HEAD-vs-新差分当场报出；修法是那一支只置
+`lines` / 重设前缀，继续走共用的成功收尾。
+
+**验证**：18 组差分 **0 差异**（200 / 206 续传 / 200 忽略 Range / 4xx / 5xx 后成功 / 重试耗尽 /
+P2 挤走预算内·超预算 / P1 挤走·耗尽 / 重抽有收益·无收益·预算耗尽 / 带 `.got` 的网络异常 /
+空 base_url / `attempts=0` / 单次 500 / 进度回调），比对返回字节、异常类型与消息、日志序列、
+每次请求的 `range_start`/`allow_reroll`、全部 `_wire_*` 事件与 `sleep` 序列；探针 4/4 红。
+新单测 `tests/remote/test_wire_retry_plan.py`（12 条）逐行钉决策表；既有 `test_wire_reroll.py`
+一行不改全绿。全量 pygate **7052 passed / 13 skipped**；根 `bun run check` 绿。
+
+**被否决**：① 只加 `Enum`（sleep/parts/异常仍靠并行局部量）；② 重试装饰器/生成器状态机
+（拿不到续传前缀与三套预算的账，且聪明得读不懂）；③ 决策搬 `remote/wire.py`（要 import
+`WireGet`/`ProtocolError` ⇒ 反转 `http ← wire`）；④ `_Retrier` 类持有状态（为 35 行循环造对象）。
+
 ## §356 分诊第十九格：`hub/boot.main` 152 → 14 + 七段（2026-11-25）
 
 进程入口原来把七件事摊在一个函数里：token 解析（`--token` / `--token-file`）、两道进程闸

@@ -2124,3 +2124,8 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > `_acquire_startup_guards` / `_ensure_code_snapshot` / `_build_push_dispatcher` /
 > `_build_offline_push_dispatcher` / `_mount_worker_pulse` / `_serve`）；HEAD-vs-新 13 组
 > 差分全同（探针 4/4 红），存量 50 → 49（engineering §356）。
+
+> 2026-11-25 第二十格：`remote/http._get_with_retry` 190 → 69（函数体 ~35）+ `_attempt_once` `/
+> `_plan_after` / `_plan_preempt` / `_plan_reroll` / `_plan_settle`（决策对象 `_RetryPlan` +
+> `_RetryState` / `_Attempt` / `_RetryAction`）；HEAD-vs-新 18 组差分全同（探针 4/4 红），
+> 存量 49 → 48（engineering §357）。

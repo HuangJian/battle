@@ -10987,3 +10987,27 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   `test_python_shape_budget` / `test_hub_entry_split` / `test_hub_queue_split` 47 条绿；
   全量 pygate 7041 passed / 13 skipped；根 `bun run check` 绿。
   全文 → `docs/nn/engineering.md` §356。
+
+## §2026-11-25-http-retry-plan
+
+- **背景**：`remote/http._get_with_retry` 190 行，7 种处置散在 4 处 `continue`、`except` 与循环尾；
+  三套独立预算（`attempts` / `WIRE_REROLL_MAX` / `WIRE_PREEMPT_MAX`）的推进条件只存在于各分支的
+  赋值里；`LONG_FUNCS_BASELINE` 第 20 格。
+
+- **决定**：一次尝试产出 frozen `_RetryPlan`（`action` 闭集 DELIVER / REROLL / RESCHEDULE /
+  BACKOFF / RAISE + `_RetryState` + 已结算的续传前缀 + 该拍日志 + payload/异常），循环只执行
+  「记日志 → 睡眠 → 交付/上抛」。`_attempt_once`（占槽 + 发一次请求，异常收进 `_Attempt`）·
+  `_plan_after`（分诊）→ `_plan_preempt` / `_plan_reroll` / `_plan_settle`（决策与分支记账）。
+  `remote/http.py` 的形状存量删条（49 → 48，该文件归零）。
+
+- **被否决**：① 只加 `Enum`（sleep/parts/异常仍靠并行局部量）——动作定了，「下一次干什么」还是散；
+  ② 重试装饰器/生成器状态机 —— 拿不到续传前缀与三套预算的账；③ 决策搬 `remote/wire.py` ——
+  要 import `WireGet` / `ProtocolError`，反转 `http ← wire`；④ `_Retrier` 类持有状态 —— 为 35 行
+  循环造对象，收益只有少传两个参数。
+
+- **验证**：HEAD(`8b309242`)-vs-新 18 组差分 **0 差异**（返回字节 / 异常类型与消息 / 日志序列 /
+  每次请求的 `range_start`·`allow_reroll` / `_wire_*` 事件 / `sleep` 序列）；敏感性探针 4/4 红。
+  差分在提交前拓到一个真 bug：200-忽略-Range 分支漏了共用的 `_wire_add`/`_note_rate`。
+  新单测 `tests/remote/test_wire_retry_plan.py`（12 条）逐行钉决策表；既有 `test_wire_reroll.py`
+  一行不改全绿；全量 pygate 7052 passed / 13 skipped；根 `bun run check` 绿。
+  全文 → `docs/nn/engineering.md` §357；设计稿 → `docs/nn/http-retry-decision.md`。

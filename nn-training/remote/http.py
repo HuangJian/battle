@@ -39,7 +39,8 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from enum import Enum
 from typing import Any
 
 from common import net_http
@@ -676,6 +677,280 @@ class WireGet:
     bulk_prio: str = BULK_P1_CRITICAL
 
 
+class _RetryAction(str, Enum):
+    """一拍之后的**唯一**动作集（`_plan_after` 的产出，循环只解释它）。"""
+
+    DELIVER = "deliver"
+    REROLL = "reroll"
+    RESCHEDULE = "reschedule"
+    BACKOFF = "backoff"
+    RAISE = "raise"
+
+
+@dataclass(frozen=True)
+class _RetryState:
+    """跨拍累积的预算与最近一次失败（取代原先六个裸局部）。"""
+
+    attempt: int
+    preempts: int = 0  # 被 P1 挤走的次数（P2 专属）：独立预算，不消耗 attempts
+    rerolls: int = 0
+    #: 重抽开关（2026-10-12）：一次「抽了没用」即永久关闭（本函数内）。见 `WireSlowError`。
+    reroll_ok: bool = False
+    #: 上一次重抽的实测速率（判「换连接到底有没有变好」；第一抽没有对比对象，允许抽）。
+    prev_rate: float = 0.0
+    last: str = ""
+
+
+@dataclass(frozen=True)
+class _Attempt:
+    """一次尝试的全部观测：**异常也收进来**，分诊留给 `_plan_after`。"""
+
+    status: int | None
+    body: bytes
+    got: int
+    t_req: float
+    t_xfer: float
+    exc: BaseException | None = None
+
+
+@dataclass(frozen=True)
+class _RetryPlan:
+    """「下一次干什么」的唯一表达：动作 + 新预算 + 已结算的续传前缀 + 该拍的日志。"""
+
+    action: _RetryAction
+    state: _RetryState
+    parts: bytes = b""
+    sleep_sec: float = 0.0
+    log_lines: tuple[str, ...] = ()
+    payload: bytes | None = None
+    error: BaseException | None = None
+
+
+def _attempt_once(
+    spec: WireGet, *, parts_len: int, allow_reroll: bool, t_req: float
+) -> _Attempt:
+    """一拍：占 bulk 槽位 + 发一次请求；异常原样收进 `_Attempt`（不分诊、不抛）。"""
+    bulk_prio = spec.bulk_prio
+    t_xfer = t_req
+    try:
+        # label 带优先级（S3a/W0）：现场日志里 `bulk payload/P1` 与 `bulk payload/P2` 一眼可分
+        #（否则「排队 3.9s」到底压在关键下载还是无害预取上，结构上判不出来）。
+        with _BULK.slot(bulk_prio, label=f"{spec.wire_seg or spec.path}/{bulk_prio}") as _tok:
+            t_xfer = time.time()  # ★ 排队结束、开传那一刻
+            try:
+                status, body = _request(
+                    WireRequest(
+                        spec.base_url,
+                        spec.token,
+                        spec.path,
+                        timeout=spec.timeout,
+                        progress=spec.progress,
+                        idle_timeout=spec.idle_timeout,
+                        total_timeout=spec.total_timeout,
+                        allow_reroll=allow_reroll,
+                        pace=_bulk_pace(_tok, bulk_prio),
+                        range_start=parts_len,
+                    )
+                )
+            finally:
+                # S3d：本次排队归到**本 jid** 的账（失败/被挤走的排队也要记——那是真花掉的时间）。
+                _wire_note_wait(spec.wire_jid, spec.wire_seg, _BULK.take_wait(_tok))
+    except (BulkPreemptError, WireSlowError) as e:
+        return _Attempt(None, b"", 0, t_req, t_xfer, e)
+    except Exception as e:  # 网络层抖动（URLError/timeout/reset）
+        # M3/R6：`_read_body` 抛的超时带已收字节（`.got`）——失败账要能读出它。
+        return _Attempt(None, repr(e).encode(), int(getattr(e, "got", 0) or 0), t_req, t_xfer, e)
+    return _Attempt(status, body, 0, t_req, t_xfer)
+
+
+def _plan_after(
+    spec: WireGet, state: _RetryState, att: _Attempt, parts: bytearray
+) -> _RetryPlan:
+    """把一拍的观测翻成 `_RetryPlan`：**唯一**做决策与分支记账的地方。
+
+    顺序是契约（差分逐条钉住）：preempt → failed → 日志；reroll → 续传 → 两笔账 → 日志；
+    resend 记账早于丢前缀；`_wire_add`/`_note_rate` 早于交付。它**不发日志、不睡眠、不抛**
+    —— 那三件事由循环按 plan 执行，决策因此能在无网络、无时钟的用例里逐行钉住。
+    """
+    e = att.exc
+    if isinstance(e, BulkPreemptError):
+        return _plan_preempt(spec, state, att, parts, e)
+    if isinstance(e, WireSlowError):
+        return _plan_reroll(spec, state, att, parts, e)
+    return _plan_settle(spec, state, att, parts)
+
+
+def _plan_preempt(
+    spec: WireGet,
+    state: _RetryState,
+    att: _Attempt,
+    parts: bytearray,
+    e: BulkPreemptError,
+) -> _RetryPlan:
+    """被 P1 挤走：P2 有独立预算（不消耗 attempts），P1 保留原语义（消耗）。"""
+    wasted = int(getattr(e, "bytes_read", 0) or 0)
+    _wire_note_preempt(spec.wire_jid, wasted)
+    # R6：被挤走也是一次**未成功**的尝试 —— 时间也要进账（字节由 preempt= 单独报）。
+    _wire_note_failed(spec.wire_jid, wasted, time.time() - att.t_xfer)
+    preempts = state.preempts + 1
+    new = replace(state, preempts=preempts)
+    label = f"bulk {spec.wire_seg or spec.path}: {e}"
+    if spec.bulk_prio == BULK_P2_PREFETCH:
+        # 挤走不是失败：重排有独立预算，**不消耗 attempts**。耗尽时抛的仍是
+        # `BulkPreemptError`（不是 `RetryableError`）——`_prefetch_fill` 只吞前者。
+        if preempts <= WIRE_PREEMPT_MAX:
+            return _RetryPlan(
+                _RetryAction.RESCHEDULE,
+                new,
+                bytes(parts),
+                log_lines=(
+                    f"{label} —— 立即重排"
+                    f"（preempt {preempts}/{WIRE_PREEMPT_MAX}；不消耗重试预算）",
+                ),
+            )
+        return _RetryPlan(
+            _RetryAction.RAISE,
+            new,
+            bytes(parts),
+            log_lines=(f"{label} —— 抢占重排上限（{WIRE_PREEMPT_MAX}）用完，放弃这份提前量",),
+            error=e,
+        )
+    # P1 不会被抢占（不变量：POST 大 body 没有安全 Range）——保留原语义。
+    if state.attempt < spec.attempts:
+        return _RetryPlan(
+            _RetryAction.RESCHEDULE,
+            replace(state, attempt=state.attempt + 1, preempts=preempts),
+            bytes(parts),
+            log_lines=(f"{label} —— 立即重排（{state.attempt}/{spec.attempts}）",),
+        )
+    return _RetryPlan(
+        _RetryAction.RAISE,
+        new,
+        bytes(parts),
+        log_lines=(f"{label} —— 重试次数用完，放弃这份提前量",),
+        error=e,
+    )
+
+
+def _plan_reroll(
+    spec: WireGet,
+    state: _RetryState,
+    att: _Attempt,
+    parts: bytearray,
+    e: WireSlowError,
+) -> _RetryPlan:
+    """低速重抽：续传这一截、记两笔账，并按「换连接有没有变好」决定是否继续抽。"""
+    rerolls = state.rerolls + 1
+    # 续传（2026-10-12）：这一截**不作废**——并进累积缓冲，下次带 `Range` 接着传。
+    # 所以 `wasted` 记 0（真作废只可能来自「服务端忽略 Range」，由 `_wire_note_resend` 记）。
+    parts += e.partial
+    _wire_note_reroll(spec.wire_jid, 0)
+    # R6：重抽也是「未成功的一次」——花掉的**时间**归 failed=；字节用**本段**（`partial`）
+    # 而非累计 `bytes_read`（带 Range 时累计口径会把前几次尝试的字节重复计入）。
+    _wire_note_failed(spec.wire_jid, len(e.partial), time.time() - att.t_xfer)
+    floor = _min_rate()
+    lines = [
+        f"wire: re-roll #{rerolls}/{WIRE_REROLL_MAX} {spec.wire_seg or spec.path}: "
+        f"实测 {e.rate / 1024:.0f} KB/s < 阈值 {floor / 1024:.0f} KB/s"
+        f"（按此速率剩余 {e.remain_sec:.0f}s）——断开续传（续传起点 {len(parts)} bytes）"
+    ]
+    reroll_ok = state.reroll_ok
+    # 无收益即停（2026-10-12）：换一条连接还是这个速率 ⇒ 不是坏签，是链路整体降速。
+    # 再抽只是把一整块（256KB）一遍遍扔掉（真机 79 → 51 KB/s）；⚠ 只关本函数内的重抽。
+    if state.prev_rate > 0.0 and e.rate < state.prev_rate * WIRE_REROLL_GAIN:
+        reroll_ok = False
+        lines.append(
+            f"wire: 重抽无收益（{state.prev_rate / 1024:.0f} → {e.rate / 1024:.0f} KB/s）"
+            "——判定为链路整体降速而非坏签，停止重抽，按当前速率传完"
+        )
+    # 重抽仍消耗 attempts（与 for 版逐字等价：continue 会推进）。
+    return _RetryPlan(
+        _RetryAction.REROLL,
+        replace(
+            state,
+            attempt=state.attempt + 1,
+            rerolls=rerolls,
+            reroll_ok=reroll_ok,
+            prev_rate=max(state.prev_rate, e.rate),
+        ),
+        bytes(parts),
+        log_lines=tuple(lines),
+    )
+
+
+def _plan_settle(
+    spec: WireGet, state: _RetryState, att: _Attempt, parts: bytearray
+) -> _RetryPlan:
+    """非异常结果：交付（含 Range 合并）或按 4xx / 瞬时失败给出下一步。"""
+    path = spec.path
+    wire_jid = spec.wire_jid
+    wire_seg = spec.wire_seg
+    status = att.status
+    body = att.body
+    lines: tuple[str, ...] = ()
+    if status == 206:
+        # 续传的尾巴（服务端接受了 `Range`）⇒ 拼上去就是整份。
+        parts += body
+    elif status == 200:
+        if parts:
+            # 带了 `Range` 却回 200 = 服务端忽略了 Range（旧 hub / 中间代理剥头）⇒ 这一份
+            # 是从 0 传的整份，之前那截真的白传了：如实记账（只记浪费，不加重抽次数）。
+            _wire_note_resend(wire_jid, len(parts))
+            line = (
+                f"wire: {wire_seg or path} 服务端不支持 Range（回 200）"
+                f"——已收 {len(parts)} bytes 作废，本次从头传"
+            )
+            lines = (line,)
+            parts = bytearray()
+        parts = bytearray(body)
+    if status in (200, 206):
+        # 两个口径分开（2026-09-25）：`elapsed`（墙钟，含排队）只喂 `_note_rate`（保守侧）；
+        # 段账用**纯传输**秒数 —— 否则与 hub 侧「响应发送完成 … in Xs」无法对账。
+        elapsed = time.time() - att.t_req
+        _wire_add(wire_jid, wire_seg, len(body), time.time() - att.t_xfer)
+        if elapsed > 0:
+            _note_rate(len(body) / elapsed, len(body))
+        return _RetryPlan(
+            _RetryAction.DELIVER, state, bytes(parts), payload=bytes(parts), log_lines=lines
+        )
+    if status is not None and 400 <= status < 500:
+        # 4xx 是**确定性的答案**（鉴权/归属/队列拒绝），不是传输失败 —— 不进 failed 账。
+        return _RetryPlan(
+            _RetryAction.RAISE,
+            state,
+            bytes(parts),
+            error=ProtocolError(f"{path} failed: HTTP {status}"),
+        )
+    # R6（2026-10-13）：这一次尝试没成功 —— 传输墙钟与已收字节进账（否则现场那 300 s
+    # 只会以「other 巨大」的形式出现，归不了因）。
+    _wire_note_failed(
+        wire_jid, len(body) if status is not None else att.got, time.time() - att.t_xfer
+    )
+    last = (
+        f"HTTP {status}"
+        if status is not None
+        else repr(body.decode("utf-8", "replace")[:120])
+    )
+    if state.attempt < spec.attempts:
+        backoff = min(2**state.attempt, 8)
+        return _RetryPlan(
+            _RetryAction.BACKOFF,
+            replace(state, attempt=state.attempt + 1, last=last),
+            bytes(parts),
+            sleep_sec=backoff,
+            log_lines=(
+                f"{path}: 瞬时失败({last}) — {backoff}s 后第 "
+                f"{state.attempt + 1}/{spec.attempts} 次重试",
+            ),
+        )
+    return _RetryPlan(
+        _RetryAction.RAISE,
+        replace(state, last=last),
+        bytes(parts),
+        error=RetryableError(f"{path} 重试 {spec.attempts} 次仍失败: {last}"),
+    )
+
+
 def _get_with_retry(spec: WireGet) -> bytes:
     """GET + 瞬时失败退避重试：网络异常/5xx → 指数退避重试；4xx → ProtocolError。
 
@@ -695,32 +970,11 @@ def _get_with_retry(spec: WireGet) -> bytes:
     退避、立刻重排**；重排有**独立预算** `WIRE_PREEMPT_MAX`（2026-09-25：不消耗 `attempts`，
     上限用完仍抛 `BulkPreemptError`，因为挤走不是失败）。槽位**不含**退避睡眠：绝不抱着唯一
     通道睡觉。
+
+    2026-11-25（分诊第十九格）：重试控制流收进 `_RetryPlan` —— 一次尝试产出一个决策对象
+    （动作 + 新预算 + 续传前缀 + 该拍日志），循环只解释它；4 处 `continue` 不再存在。
     """
-    # 旧签名 13 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
-    base_url = spec.base_url
-    token = spec.token
     path = spec.path
-    timeout = spec.timeout
-    attempts = spec.attempts
-    log = spec.log
-    progress = spec.progress
-    idle_timeout = spec.idle_timeout
-    total_timeout = spec.total_timeout
-    wire_jid = spec.wire_jid
-    wire_seg = spec.wire_seg
-    reroll = spec.reroll
-    bulk_prio = spec.bulk_prio
-    last: str = ""
-    rerolls = 0
-    preempts = 0  # 被 P1 挤走的次数（P2 专属）：独立预算，不消耗 attempts
-    attempt = 1
-    #: 重抽开关（2026-10-12）：一次「抽了没用」即永久关闭（本函数内）。见下面的 `WireSlowError`。
-    reroll_ok = reroll
-    #: 上一次重抽前的实测速率（判「换连接到底有没有变好」；第一抽没有对比对象，允许抽）。
-    prev_rate = 0.0
-    #: **跨尝试累积**的字节（2026-10-12，Range 断点续传）：`WireSlowError.partial` 并进来，
-    #: 下次请求带 `Range: bytes=<offset>-` 接着传 —— 断连不再把已收的那截扔掉。
-    parts = bytearray()
     # ★ 2026-10-04（x20-adv-acc 现场）：base_url 为空 = **确定性配置错误**，重试不会变好 ——
     #   旧行为是 urllib 抛 `ValueError: unknown url type: '/jobs/…/blob?name=opt'`，被当成
     #   瞬时抖动退避重试 3 次（白等 6s+，日志还引导不到根因）。最常见来源：自主段/离线段的
@@ -728,141 +982,41 @@ def _get_with_retry(spec: WireGet) -> bytes:
     #   （见 `plan_handoff._seed_opt_blob_cache` / `_seed_ref_blob_cache`，以及 `import_bundle`
     #   对 `opt.tar` 的落位）；在线腿则是 --hub-url/hub_ip 没给。别抱着唯一通道睡觉之前
     #   先把这条判掉：下面进来就会占一个 bulk 槽位。
-    if not str(base_url or "").strip():
+    if not str(spec.base_url or "").strip():
         raise ProtocolError(
             f"没有 hub 地址（base_url 为空）却要下载 {path} —— 确定性配置错误，重试不会变好："
             "blob/载荷必须已在节点本地（自主段没有下载通道），检查任务包/锚点是否带全"
             "（opt/ref/demo 的种子链）或在线腿的 --hub-url/hub_ip"
         )
-    while attempt <= attempts:  # 用 while 而非 for：挤走时要**原地**重排，不推进 attempt
+    state = _RetryState(attempt=1, reroll_ok=spec.reroll)
+    #: **跨尝试累积**的字节（2026-10-12，Range 断点续传）：`WireSlowError.partial` 并进来，
+    #: 下次请求带 `Range: bytes=<offset>-` 接着传 —— 断连不再把已收的那截扔掉。
+    parts = bytearray()
+    while state.attempt <= spec.attempts:  # 用 while 而非 for：挤走时要**原地**重排，不推进 attempt
         # 重抽只在前几次尝试上开放：**最后一次必然老老实实传完**（否则慢链路就变成
         # 「永远下不完」——6 KB/s 的坏签确实存在，重抽是赌，不能把赌注全压在赌上）。
-        allow_reroll = reroll_ok and attempt < attempts and rerolls < WIRE_REROLL_MAX
+        allow_reroll = (
+            state.reroll_ok
+            and state.attempt < spec.attempts
+            and state.rerolls < WIRE_REROLL_MAX
+        )
         t_req = time.time()  # 本次尝试的**墙钟**（含排队）：只喂 `_note_rate`（保守侧）
-        t_xfer = t_req  # 进槽后重取：段账只算**真实传输**（排队归调度账 `wait=`）
-        got = 0  # 本次尝试已收字节（M3：网络层异常自带 `.got` 时才非零）
-        try:
-            # label 带优先级（S3a/W0）：现场日志里 `bulk payload/P1` 与 `bulk payload/P2` 一眼可分
-            #（否则「排队 3.9s」到底压在关键下载还是无害预取上，结构上判不出来）。
-            with _BULK.slot(bulk_prio, label=f"{wire_seg or path}/{bulk_prio}") as _tok:
-                t_xfer = time.time()  # ★ 排队结束、开传那一刻
-                status, body = None, b""
-                try:
-                    status, body = _request(
-                        WireRequest(base_url,
-                        token,
-                        path,
-                        timeout=timeout,
-                        progress=progress,
-                        idle_timeout=idle_timeout,
-                        total_timeout=total_timeout,
-                        allow_reroll=allow_reroll,
-                        pace=_bulk_pace(_tok, bulk_prio),
-                        range_start=len(parts)),
-                    )
-                finally:
-                    # S3d：本次排队归到**本 jid** 的账（失败/被挤走的排队也要记——那是真花掉的时间）。
-                    _wire_note_wait(wire_jid, wire_seg, _BULK.take_wait(_tok))
-        except BulkPreemptError as e:
-            _wire_note_preempt(wire_jid, int(getattr(e, "bytes_read", 0) or 0))
-            # R6：被挤走也是一次**未成功**的尝试 —— 时间也要进账（字节由 preempt= 单独报）。
-            _wire_note_failed(
-                wire_jid, int(getattr(e, "bytes_read", 0) or 0), time.time() - t_xfer
-            )
-            preempts += 1
-            if bulk_prio == BULK_P2_PREFETCH:
-                # 挤走不是失败：重排有独立预算，**不消耗 attempts**。耗尽时抛的仍是
-                # `BulkPreemptError`（不是 `RetryableError`）——`_prefetch_fill` 只吞前者，
-                # 落后者会把「丢半截」误报成瞬时故障。
-                if preempts <= WIRE_PREEMPT_MAX:
-                    log(
-                        f"bulk {wire_seg or path}: {e} —— 立即重排"
-                        f"（preempt {preempts}/{WIRE_PREEMPT_MAX}；不消耗重试预算）"
-                    )
-                    continue
-                log(
-                    f"bulk {wire_seg or path}: {e} —— 抢占重排上限"
-                    f"（{WIRE_PREEMPT_MAX}）用完，放弃这份提前量"
-                )
-                raise
-            # P1 不会被抢占（不变量：POST 大 body 没有安全 Range）——保留原语义。
-            if attempt < attempts:
-                log(f"bulk {wire_seg or path}: {e} —— 立即重排（{attempt}/{attempts}）")
-                attempt += 1
-                continue
-            log(f"bulk {wire_seg or path}: {e} —— 重试次数用完，放弃这份提前量")
-            raise
-        except WireSlowError as e:
-            rerolls += 1
-            # 续传（2026-10-12）：这一截**不作废**——并进累积缓冲，下次带 `Range` 接着传。
-            # 所以 `wasted` 记 0（真作废只可能来自「服务端忽略 Range」，由 `_wire_note_resend` 记）。
-            parts += e.partial
-            _wire_note_reroll(wire_jid, 0)
-            # R6（2026-10-13）：重抽也是「未成功的一次」——花掉的**时间**归 failed=（作废的**字节**
-            # 由 reroll= 报，续传口径下恒 0）。字节用**本段**（`partial`）而非累计 `bytes_read`：
-            # 带 Range 时累计口径会把前几次尝试的字节重复计入。
-            _wire_note_failed(wire_jid, len(e.partial), time.time() - t_xfer)
-            floor = _min_rate()
-            log(
-                f"wire: re-roll #{rerolls}/{WIRE_REROLL_MAX} {wire_seg or path}: "
-                f"实测 {e.rate / 1024:.0f} KB/s < 阈值 {floor / 1024:.0f} KB/s"
-                f"（按此速率剩余 {e.remain_sec:.0f}s）——断开续传（续传起点 {len(parts)} bytes）"
-            )
-            # 无收益即停（2026-10-12，抖动是常态）：换一条连接还是这个速率 ⇒ **不是坏签，是链路
-            # 整体降速**。再抽只是把一整块（256KB）一遍遍扔掉 —— 真机证据：重抽前后 79 → 51 KB/s，
-            # 越抽越差，而每次重抽白扔 256KB + 一次建连。判据只能放在这里（`_reroll_decision` 手里
-            # 只有单次样本，没有「上一次」）。⚠ 只关**本函数内**的重抽，不触碰全局状态。
-            if prev_rate > 0.0 and e.rate < prev_rate * WIRE_REROLL_GAIN:
-                reroll_ok = False
-                log(
-                    f"wire: 重抽无收益（{prev_rate / 1024:.0f} → {e.rate / 1024:.0f} KB/s）"
-                    "——判定为链路整体降速而非坏签，停止重抽，按当前速率传完"
-                )
-            prev_rate = max(prev_rate, e.rate)
-            attempt += 1  # 重抽仍消耗 attempts（与 for 版逐字等价：continue 会推进）
-            continue  # 立即换连接重抽（不退避）
-        except Exception as e:  # 网络层抖动（URLError/timeout/reset）
-            status, body = None, repr(e).encode()
-            # M3/R6：`_read_body` 抛的超时带已收字节（`.got`）——失败账要能读出它。
-            got = int(getattr(e, "got", 0) or 0)
-        if status == 206:
-            # 续传的尾巴（服务端接受了 `Range`）⇒ 拼上去就是整份。
-            parts += body
-        elif status == 200:
-            if parts:
-                # 带了 `Range` 却回 200 = 服务端**忽略了 Range**（旧 hub / 中间代理剥头）⇒
-                # 这一份是从 0 传的整份，之前那截真的白传了：如实记账（只记浪费，不加重抽次数）。
-                _wire_note_resend(wire_jid, len(parts))
-                log(
-                    f"wire: {wire_seg or path} 服务端不支持 Range（回 200）"
-                    f"——已收 {len(parts)} bytes 作废，本次从头传"
-                )
-                parts = bytearray()
-            parts = bytearray(body)
-        if status in (200, 206):
-            # 两个口径分开（2026-09-25）：
-            #   `elapsed`（墙钟，含排队）⇒ 只喂 `_note_rate`（保守侧，不抬高 `_min_rate`）；
-            #   段账用**纯传输**秒数 —— 否则与 hub 侧「响应发送完成 … in Xs」无法对账
-            #   （现场：worker 侧 `payload=…/321.8s` 里含 `排队 17.6s 才拿到单通道`）。
-            elapsed = time.time() - t_req
-            _wire_add(wire_jid, wire_seg, len(body), time.time() - t_xfer)
-            if elapsed > 0:
-                _note_rate(len(body) / elapsed, len(body))
-            return bytes(parts)
-        if status is not None and 400 <= status < 500:
-            # 4xx 是**确定性的答案**（鉴权/归属/队列拒绝），不是传输失败 —— 不进 failed 账。
-            raise ProtocolError(f"{path} failed: HTTP {status}")
-        # R6（2026-10-13）：这一次尝试没成功（瞬时网络错 / 非 200）——它的**传输墙钟**与已收
-        # 字节进账。不入账的话，现场那 300 s 只会以「other 巨大」的形式出现（P0.5 归不了因）。
-        _wire_note_failed(
-            wire_jid, len(body) if status is not None else got, time.time() - t_xfer
+        att = _attempt_once(
+            spec, parts_len=len(parts), allow_reroll=allow_reroll, t_req=t_req
         )
-        last = (
-            f"HTTP {status}" if status is not None else repr(body.decode("utf-8", "replace")[:120])
-        )
-        if attempt < attempts:
-            backoff = min(2**attempt, 8)
-            log(f"{path}: 瞬时失败({last}) — {backoff}s 后第 {attempt + 1}/{attempts} 次重试")
-            time.sleep(backoff)
-        attempt += 1
-    raise RetryableError(f"{path} 重试 {attempts} 次仍失败: {last}")
+        plan = _plan_after(spec, state, att, parts)
+        for line in plan.log_lines:
+            spec.log(line)
+        state = plan.state
+        parts = bytearray(plan.parts)
+        if plan.action is _RetryAction.DELIVER:
+            if plan.payload is None:  # 契约：DELIVER 必带 payload
+                raise RuntimeError("_RetryPlan: DELIVER 缺 payload（不应到这里）")
+            return plan.payload
+        if plan.action is _RetryAction.RAISE:
+            if plan.error is None:  # 契约：RAISE 必带 error
+                raise RuntimeError("_RetryPlan: RAISE 缺 error（不应到这里）")
+            raise plan.error
+        if plan.sleep_sec:  # BACKOFF：先日志后睡眠（顺序是契约）
+            time.sleep(plan.sleep_sec)
+    raise RetryableError(f"{path} 重试 {spec.attempts} 次仍失败: {state.last}")
