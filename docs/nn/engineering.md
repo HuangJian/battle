@@ -29,6 +29,37 @@
 
 ---
 
+## §356 分诊第十九格：`hub/boot.main` 152 → 14 + 七段（2026-11-25）
+
+进程入口原来把七件事摊在一个函数里：token 解析（`--token` / `--token-file`）、两道进程闸
+（单实例锁 + 端口探测）、能力自检后的集群代码快照、课程表、push 派发器、离线 push 派发器、
+worker 静默哨兵、起服务并前台跑。入口现在只剩**启动顺序**（14 行）；
+`_resolve_token` 13 · `_acquire_startup_guards` 20 · `_ensure_code_snapshot` 14 ·
+`_build_push_dispatcher` 27 · `_build_offline_push_dispatcher` 36 · `_mount_worker_pulse` 33 ·
+`_serve` 27。`LONG_FUNCS_BASELINE` 删 `hub/boot.py`（50 → 49，该文件归零）。
+
+**为什么按「失败契约」切而不是按行数均分**：`_resolve_token` / `_acquire_startup_guards` 是
+**拒启**（`sys.exit(1)`，配置或进程环境不对），`_ensure_code_snapshot` 是**只 WARN**（hub 起得来
+比一份新代码重要），派发器两段是**可选装配**（不启用也要说话 —— 离线那条 `else` 日志是
+2026-10-24 真机踩的坑），`_mount_worker_pulse` 是**后台线程**，`_serve` 才是前台生命周期。
+
+**为什么派发器不在 `_serve` 里建**：顺序是「建 → 挂（`make_server` 只挂类属性）→ start →
+serve → stop」，建的过程会读登记表并打「已启用 / 未挂载」的日志；塞进 `_serve` 会让「为什么
+没派单」的日志落在 `serve_forever` 之前还是之后变得看不出来。
+
+**被否决**：① 一个 `BootContext` 载体 —— 七段都是直线启动步骤、各产出一个值，载体只多一条
+可漂的搬运；② 把 token 并进 `_acquire_startup_guards` —— 两者失败语义不同（参数解析 vs 进程
+闸），且锁/端口那段的注释解释的是「双实例事故」；③ 把 `_ensure_code_snapshot` 并进
+`_build_hub_queue` —— 快照与课程表无关（hub 快照也给 `/code` 的 bootstrap 取件用）。
+
+**验证**：HEAD(`8a8d86e`)-vs-新 13 组差分 **0 差异**（无 token / 坏 token-file / 课程冲突 /
+非法课程名 / 单课程缺 jsonl / 锁失败 / 端口占用 / 单课程成功 + 快照失败 / 全开
+（多课程 + discover + push + offline + pulse + 自定义节拍）/ 仅 push 无 offline / 启动发现扫描抛错 /
+pulse 关闭 / token-file），比对退出码与**完整事件序列**（锁/端口/快照/Store/HubQueue/两个派发器
+spec/日志/`make_server`/`start`·`stop` 顺序/线程注册）；敏感性探针（摘 `_mount_worker_pulse`、
+摘 offline 的未挂载日志、`_resolve_token` 返回空、摘端口守卫）**4/4 红**。
+`test_python_shape_budget` + `test_hub_entry_split` + `test_hub_queue_split` 47 条绿。
+
 ## §355 分诊第十八格：`remote/deliver_zip.import_deliver_zip` 178 → 42 + 四段（2026-11-25）
 
 产物 zip 的导入原来把四件事摊在一个函数里：门前检查（存在 / 尺寸 / 文件名课程 / 是不是 zip /

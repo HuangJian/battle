@@ -353,9 +353,9 @@ def _build_hub_queue(args) -> _HubQueue:
     return hub
 
 
-def main() -> None:
-    args = _hub_parser().parse_args()
-    token = args.token
+def _resolve_token(args) -> str:
+    """token 来源：`--token` 或 `--token-file`；读失败 / 两者都没有 ⇒ 拒启。"""
+    token: str = args.token
     if args.token_file:
         try:
             token = Path(args.token_file).read_text(encoding="utf-8").strip()
@@ -365,6 +365,11 @@ def main() -> None:
     if not token:
         _log("ERROR: 需要 --token 或 --token-file")
         sys.exit(1)
+    return token
+
+
+def _acquire_startup_guards(args) -> None:
+    """启动前的两道进程闸：单实例锁 + 端口探测（两者失败都 `exit(1)`）。"""
     # §单实例锁（2026-09-17，第二道闸）：端口守卫是「探测 → bind」的 TOCTOU —— 两个
     # starter 同时探测会双双通过（Windows 的 SO_REUSEADDR 还允许双绑，后启动者静默
     # 变僵尸）。锁用 O_CREAT|O_EXCL 把启动串行化，且能在**持有者身份可核验**的前提下
@@ -383,109 +388,134 @@ def main() -> None:
     except RuntimeError as e:
         _log(f"ERROR: {e}")
         sys.exit(1)
-    # ★ 2026-10-23：**能力自检**放在一切服务活动之前（缺依赖时每一轮回传都会静默降级，
-    # 而那行提示以前只在 42 MB 日志里）。非致命：缺 numpy/torch 只影响「delta → 整份」，
-    # hub 的其余职责（派发/受理原件/账本）照旧 ⇒ 只 WARN，不退出。
-    _landing_deps_warn()
-    # ---- 集群代码快照（2026-10-10 用户指令，plan/cluster-code-snapshot）----
-    # hub 是「会话」的第一个锚点候选：一启动就把当前工作区打成一份 code.zip，之后所有课程的
-    # 所有 job（以及 `/code` 的 bootstrap 取件）都用它——「只要不重启，大家跑同一份代码」。
-    # **警告不致命**：hub 起不来的代价远高于一份旧代码；训练侧 publish 有兜底（缺快照 ⇒
-    # per-course 打包 + WARN），`/code` 拿不到快照时会 404 且措辞点名。
+
+
+def _ensure_code_snapshot() -> None:
+    """集群代码快照（2026-10-10，plan/cluster-code-snapshot）：失败只 WARN。
+
+    hub 是「会话」的第一个锚点候选：一启动就把当前工作区打成一份 code.zip，之后所有课程的
+    所有 job（以及 `/code` 的 bootstrap 取件）都用它——「只要不重启，大家跑同一份代码」。
+    **警告不致命**：hub 起不来的代价远高于一份旧代码；训练侧 publish 有兜底（缺快照 ⇒
+    per-course 打包 + WARN），`/code` 拿不到快照时会 404 且措辞点名。
+    """
     try:
         ensure_cluster_snapshot(anchor_kind="hub", log=_log)
     except OSError as e:
         _log(
             f"WARN: 集群代码快照未能建立（{e}）——训练侧将回落 per-course 打包",
         )
-    hub = _build_hub_queue(args)
-    # push 派发（可选，2026-09-18）：登记表来自 rl-config 的 gpu_push 节点（控制台的
-    # worker 登记入口回写它），派发器每拍探活 + 按队列顺序推给空闲 worker。
-    push_disp: PushDispatcher | None = None
-    if args.push:
-        push_workers = PushWorkers(
-            args.push_config or DEFAULT_PUSH_CONFIG,
+
+
+def _build_push_dispatcher(args, hub: _HubQueue, token: str) -> PushDispatcher | None:
+    """push 派发（可选，2026-09-18）：登记表来自 rl-config 的 gpu_push 节点。"""
+    if not args.push:
+        return None
+    push_workers = PushWorkers(
+        args.push_config or DEFAULT_PUSH_CONFIG,
+        log=_PUSH_LOG,
+    )
+    push_workers.reload(force=True)  # 先读一次（缺文件/空表不致命，只是没人可推）
+    push_disp = PushDispatcher(
+        PushDispatchSpec(
+            hub=hub,
+            workers=push_workers,
+            token=token,
+            poll_sec=args.push_poll_sec,
+            timeout_sec=args.push_timeout_sec,
+            push_ahead=args.push_ahead,
             log=_PUSH_LOG,
         )
-        push_workers.reload(force=True)  # 先读一次（缺文件/空表不致命，只是没人可推）
-        push_disp = PushDispatcher(
-            PushDispatchSpec(
-                hub=hub,
-                workers=push_workers,
-                token=token,
-                poll_sec=args.push_poll_sec,
-                timeout_sec=args.push_timeout_sec,
-                push_ahead=args.push_ahead,
-                log=_PUSH_LOG,
-            )
-        )
-        _log(
-            f"push 派发已启用：登记表={push_workers.path} "
-            f"候选 worker={len(push_workers.snapshot())} "
-            f"poll={args.push_poll_sec:g}s timeout={args.push_timeout_sec:g}s "
-            f"ahead={max(0, args.push_ahead)} cooldown={push_disp.cooldown_sec:g}s",
-        )
-    # 离线 push 派发（2026-10-24，plan/push-mode-notebooks §6.6 / W5）：登记表与 GPU 共用
-    # 同一份 rl-config 来源（`nodes[]` 里能力键为 `offline_push` 的条目）。
-    offline_disp: OfflinePushDispatcher | None = None
-    if args.offline_push:
-        offline_workers = OfflinePushWorkers(
-            args.push_config or DEFAULT_PUSH_CONFIG,
-            log=_OFFLINE_PUSH_LOG,
-        )
-        offline_workers.reload(force=True)  # 缺文件/空表不致命：只是没人可派
-        offline_disp = OfflinePushDispatcher(
-            OfflinePushSpec(
-                hub=hub,
-                workers=offline_workers,
-                token=token,
-                port=args.port,
-                poll_sec=float(args.offline_push_poll_sec),
-                log=_OFFLINE_PUSH_LOG,
-            )
-        )
-        _log(
-            f"离线 push 派发已启用：登记表={offline_workers.path} "
-            f"候选 worker={len(offline_workers.snapshot())} poll={args.offline_push_poll_sec:g}s "
-            f"在途={len(offline_disp.assignments.snapshot())}",
-        )
-    else:
-        # 不打印「没开」才是 2026-10-24 真机踩的坑：离线 worker 注册成功后一直 idle，
-        # 而 hub 日志里既没有「已启用」也没有「未启用」——两边都不说话。
+    )
+    _log(
+        f"push 派发已启用：登记表={push_workers.path} "
+        f"候选 worker={len(push_workers.snapshot())} "
+        f"poll={args.push_poll_sec:g}s timeout={args.push_timeout_sec:g}s "
+        f"ahead={max(0, args.push_ahead)} cooldown={push_disp.cooldown_sec:g}s",
+    )
+    return push_disp
+
+
+def _build_offline_push_dispatcher(
+    args, hub: _HubQueue, token: str
+) -> OfflinePushDispatcher | None:
+    """离线 push 派发（2026-10-24，plan/push-mode-notebooks §6.6 / W5）：与 GPU 共用登记表。
+
+    未启用时也要**说话**：2026-10-24 真机踩的坑是离线 worker 注册成功后一直 idle，
+    而 hub 日志里既没有「已启用」也没有「未启用」——两边都不说话。
+    """
+    if not args.offline_push:
         _log(
             "离线 push 派发**未挂载**"
             "（启动参数无 --offline-push）——离线 worker 注册进来也不会派单；"
             "控制台节点页「离线 push」面板会显示「hub 未启用」",
         )
-    # ── worker 静默哨兵（2026-10-31，`hub/worker_pulse.py`）─────────────────────────
-    # 只在**进程入口**起线程（不在 `make_server` 里）：e2e/用例起 hub 时会拿到默认阈值但
-    # 不起后台线程 —— 观测面不该给夹具塞一条常驻线程（同 `--discover` 的后台节拍只在 main 起）。
+        return None
+    offline_workers = OfflinePushWorkers(
+        args.push_config or DEFAULT_PUSH_CONFIG,
+        log=_OFFLINE_PUSH_LOG,
+    )
+    offline_workers.reload(force=True)  # 缺文件/空表不致命：只是没人可派
+    offline_disp = OfflinePushDispatcher(
+        OfflinePushSpec(
+            hub=hub,
+            workers=offline_workers,
+            token=token,
+            port=args.port,
+            poll_sec=float(args.offline_push_poll_sec),
+            log=_OFFLINE_PUSH_LOG,
+        )
+    )
+    _log(
+        f"离线 push 派发已启用：登记表={offline_workers.path} "
+        f"候选 worker={len(offline_workers.snapshot())} poll={args.offline_push_poll_sec:g}s "
+        f"在途={len(offline_disp.assignments.snapshot())}",
+    )
+    return offline_disp
+
+
+def _mount_worker_pulse(args, hub: _HubQueue) -> None:
+    """worker 静默哨兵（2026-10-31，`hub/worker_pulse.py`）：只在**进程入口**起线程。
+
+    不在 `make_server` 里起：e2e/用例起 hub 时会拿到默认阈值但不起后台线程 —— 观测面
+    不该给夹具塞一条常驻线程（同 `--discover` 的后台节拍只在 main 起）。
+    """
     if args.worker_silence_sec != WORKER_PULSE_SILENCE_SEC:
         HubHandler.configure_pulse(silence_sec=args.worker_silence_sec)
-    if args.worker_silence_sec > 0:
+    if args.worker_silence_sec <= 0:
+        return
 
-        def _pulse_loop() -> None:
-            while True:
-                time.sleep(max(0.05, WORKER_PULSE_SWEEP_SEC))
-                try:
-                    for ev in HubHandler.pulse_events():
-                        body = error_body(ev, silence_sec=args.worker_silence_sec)
-                        # 进 hub 的错误 ring（控制台 `/admin/errors` 读面自然呈现），并落一行
-                        # 日志——后者是**事后**唯一能 grep 的痕迹（ring 只活
-                        # `WORKER_ERROR_TTL_SEC`＝120s，控制台没在跑就没人接得住）。
-                        hub.note_worker_error(body)
-                        _log(
-                            f"⚠ {body['reason']}（worker={body['worker']}，只观测，不影响派发）",
-                        )
-                except Exception as e:  # 观测面坏掉不该让进程死（同 discover 扫描失败）
-                    _log(f"静默哨兵扫描失败: {e}")
+    def _pulse_loop() -> None:
+        while True:
+            time.sleep(max(0.05, WORKER_PULSE_SWEEP_SEC))
+            try:
+                for ev in HubHandler.pulse_events():
+                    body = error_body(ev, silence_sec=args.worker_silence_sec)
+                    # 进 hub 的错误 ring（控制台 `/admin/errors` 读面自然呈现），并落一行
+                    # 日志——后者是**事后**唯一能 grep 的痕迹（ring 只活
+                    # `WORKER_ERROR_TTL_SEC`＝120s，控制台没在跑就没人接得住）。
+                    hub.note_worker_error(body)
+                    _log(
+                        f"⚠ {body['reason']}（worker={body['worker']}，只观测，不影响派发）",
+                    )
+            except Exception as e:  # 观测面坏掉不该让进程死（同 discover 扫描失败）
+                _log(f"静默哨兵扫描失败: {e}")
 
-        #: 静默哨兵线程归 hub 域（`hub-worker-pulse-scan`）：只观测，没人等它。
-        common.runtime.Runtime(scope="hub-worker-pulse").thread(_pulse_loop, name="scan", daemon=True)
-        _log(
-            f"worker 静默哨兵已挂载：阈值={args.worker_silence_sec:g}s "
-            f"扫描={WORKER_PULSE_SWEEP_SEC:g}s ⇒ 静默事件进 /admin/errors（只观测）",
-        )
+    #: 静默哨兵线程归 hub 域（`hub-worker-pulse-scan`）：只观测，没人等它。
+    common.runtime.Runtime(scope="hub-worker-pulse").thread(_pulse_loop, name="scan", daemon=True)
+    _log(
+        f"worker 静默哨兵已挂载：阈值={args.worker_silence_sec:g}s "
+        f"扫描={WORKER_PULSE_SWEEP_SEC:g}s ⇒ 静默事件进 /admin/errors（只观测）",
+    )
+
+
+def _serve(
+    args,
+    hub: _HubQueue,
+    token: str,
+    push_disp: PushDispatcher | None,
+    offline_disp: OfflinePushDispatcher | None,
+) -> None:
+    """起 server → 挂上派发器 → 前台跑；退出（含 Ctrl-C）时按反序停派发器。"""
     srv = make_server(
         hub, args.port, token, host=args.host, push=push_disp, offline_push=offline_disp
     )
@@ -505,3 +535,19 @@ def main() -> None:
             push_disp.stop()
         if offline_disp is not None:
             offline_disp.stop()
+
+
+def main() -> None:
+    args = _hub_parser().parse_args()
+    token = _resolve_token(args)
+    _acquire_startup_guards(args)
+    # ★ 2026-10-23：**能力自检**放在一切服务活动之前（缺依赖时每一轮回传都会静默降级，
+    # 而那行提示以前只在 42 MB 日志里）。非致命：缺 numpy/torch 只影响「delta → 整份」，
+    # hub 的其余职责（派发/受理原件/账本）照旧 ⇒ 只 WARN，不退出。
+    _landing_deps_warn()
+    _ensure_code_snapshot()
+    hub = _build_hub_queue(args)
+    push_disp = _build_push_dispatcher(args, hub, token)
+    offline_disp = _build_offline_push_dispatcher(args, hub, token)
+    _mount_worker_pulse(args, hub)
+    _serve(args, hub, token, push_disp, offline_disp)

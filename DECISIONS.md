@@ -10964,3 +10964,26 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：HEAD(`28c95b1`)-vs-新 16 组差分 **0 差异**（zip 只打一次、两侧同一份字节）；
   敏感性探针（不并 anchors）10 组红；`tests/remote/test_deliver_zip.py` + 形状/LOC 预算 54 条绿；
   全量 pygate 7041 passed / 13 skipped。全文 → `docs/nn/engineering.md` §355。
+
+## §2026-11-25-hub-boot-main-split
+
+- **背景**：`hub/boot.py::main` 152 行，七件事挤在进程入口里：token 解析、单实例锁 + 端口守卫、
+  集群代码快照、课程表、push 派发器、离线 push 派发器、worker 静默哨兵、起服务并前台跑；
+  `LONG_FUNCS_BASELINE` 第 19 格。
+
+- **决定**：入口只留启动顺序（14 行），七段各成一函数（`_resolve_token` /
+  `_acquire_startup_guards` / `_ensure_code_snapshot` / `_build_push_dispatcher` /
+  `_build_offline_push_dispatcher` / `_mount_worker_pulse` / `_serve`）；
+  `hub/boot.py` 的形状存量删条（50 → 49，该文件归零）。
+
+- **被否决**：① `BootContext` 载体 —— 七段都是直线启动步骤、各产出一个值，载体只多一条可漂的
+  搬运；② 把 token 并进 `_acquire_startup_guards` —— 失败语义不同（参数解析 vs 进程闸），且那
+  段的注释解释的是双实例事故；③ 把快照并进 `_build_hub_queue` —— 快照与课程表无关（`/code`
+  的 bootstrap 取件也读它）；④ 派发器在 `_serve` 里建 —— 「建 → 挂 → start → serve → stop」的
+  顺序和「已启用 / 未挂载」日志的位置会变得看不出来。
+
+- **验证**：HEAD(`8a8d86e`)-vs-新 13 组差分 **0 差异**（退出码 + 完整事件序列：锁/端口/快照/
+  Store/HubQueue/派发器 spec/日志/`make_server`/start·stop/线程注册）；敏感性探针 4/4 红；
+  `test_python_shape_budget` / `test_hub_entry_split` / `test_hub_queue_split` 47 条绿；
+  全量 pygate 7041 passed / 13 skipped；根 `bun run check` 绿。
+  全文 → `docs/nn/engineering.md` §356。

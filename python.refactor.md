@@ -2119,3 +2119,8 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > （`_import_precheck` / `_unpack_import` / `_merge_import` / `_import_result`，载体
 > `_ImportPackage` / `_ImportMerged`）；HEAD-vs-新 16 组差分全同（探针 10 组红），
 > 存量 51 → 50（engineering §355）。
+
+> 2026-11-25 第十九格：`hub/boot.main` 152 → 14 + 七段（`_resolve_token` /
+> `_acquire_startup_guards` / `_ensure_code_snapshot` / `_build_push_dispatcher` /
+> `_build_offline_push_dispatcher` / `_mount_worker_pulse` / `_serve`）；HEAD-vs-新 13 组
+> 差分全同（探针 4/4 红），存量 50 → 49（engineering §356）。

@@ -54,7 +54,6 @@ _CACHE_VERSION = 1
 #: 要求逐文件相等，防「表比现实松」）；③ 真要先加一格，写清日期 + 理由 + 守卫用例。
 #: 注：`remote/offline_boot.py` 是生成物（12 段 `.pyfrag` 拼回，工程 §118）——它那 5 个要改分片。
 LONG_FUNCS_BASELINE: dict[str, int] = {
-    "hub/boot.py": 1,
     "hub/offline.py": 1,
     "hub/smoke_loopback.py": 1,
     "hub/store_offline.py": 1,
