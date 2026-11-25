@@ -29,6 +29,43 @@
 
 ---
 
+## §340 分诊第七格：`worker/bc_eval.dispatch_bc_eval` 186 → 84 + 单图源单元（2026-11-25）
+
+§331 的分诊表继续往下走。这一格不是「一个函数做四件不相干的事」，而是**装配段 + 一个
+`for src` 循环体**：循环体里是一个评估图源的完整生命周期（派局 → 槽位线程 → 收齐 → 聚合
+面板 → 每局写机器健康账），图源之间只共享 `iter_id` / `wver` / 游戏数这些标量。
+
+切法（循环体整段搬，语句顺序与判据未动）：
+
+| 单元 | 行 | 职责 |
+|---|---:|---|
+| `_push_eval_weights(nodes, *, iter_id, wver, weights_bytes, log)` | 22 | 逐节点推权重，返回成功台数（0 ⇒ 入口 `raise`） |
+| `_eval_slots(nodes)` | 7 | 槽位 = 节点并发 |
+| `_eval_source(run, src, slots)` | 111 | 单图源：建任务队列 → 槽位线程（`Runtime(scope="bc-eval")`，自己 join）→ 收齐 → 面板告警 → 聚合 + panel |
+| `dispatch_bc_eval(spec)` | 84 | 装配：节点门 / wver / 推送 / 槽位 / 图源循环 / 返回 |
+
+`_EvalRun`（frozen + kw_only）只装 7 个跨图源常量（`iter_id` / `wver` / `it` /
+`games_per_stage` / `course_max_ticks` / `meta_path` / `log`）；它替代的是循环体的闭包捕获，
+不新增语义。**为什么不传 7 个标量**：那会把宽签名从 0 个搬成 8 个参数（正好贴着 >8 门），
+而 `iter_id` / `wver` 都是字符串，换位是静默的。
+
+**为什么槽位线程跟着循环体走**：`rows` 的锁与 `join` 是同一个单元的两半；把线程池留在入口
+就得把 `rows` 跨函数传出去（列表原地改 = 隐式共享），而这里要的正是「一个图源收齐后下一个」。
+`_eval_source` 的返回注解写 `dict[str, object]` 而不是 `dict[str, Any]` —— 后者会让该文件的
+`Any` 从 11 涨到 12（额度只许降）。
+
+**验证**：HEAD worktree-vs-新 **12 组**决策表差分全同（真 `dispatch_bc_eval` 与真线程，假
+`fetch_task` / `post_weights_cached` / `validate_eval_result` / `eval_capable_nodes`；观测 =
+返回 dict（去掉 `ts`）、日志（耗时归一）、逐局请求表（排序后）、推送序列、机器健康账（去掉
+`ts`））：course_env 基础 / course_env + meta / levels(arena4) 双槽 / 推送全败 / 推送部分败 /
+面板 max_ticks 漂移 / 单局失败 + meta / `games_per_stage=0` / 空图源 / `nodes=None` 且无节点 /
+`nodes=None` 有节点 / 并发 3+2 双节点。
+
+`LONG_FUNCS_BASELINE` 删 `worker/bc_eval.py` 条目（**62 → 61 个**），文件 542 → 602 行
+（限额 1000）。守卫 `tests/worker/test_bc_eval_split.py`（4 条）：入口 ≤100 行且不再碰
+单局/聚合、`_eval_source(run, src, slots)` 的所有权（局 + 线程 + 聚合 + 健康账）、`_EvalRun`
+字段闭集、助手零新 import 边（`queue` / `threading` 是原循环体的既有延迟 import）。
+
 ## §339 分诊第六格：`trainer/loop_volume._volume_collect_greedy` 187 → 85 + 三段（2026-11-24）
 
 §331 的分诊表与 `submit_job`（§338）之后，剩余非排除项里最大的一块。它是一个**独立的第二遍采集

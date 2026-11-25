@@ -10698,3 +10698,27 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   空 / 全 ordinary / halt / 一波后收官 / `soft=false` raise / 批顶；观测含扫描与派发序列、
   三个 greedy 槽位、主 report、分关账、日志、异常）；`CLUSTER` 15 → 18 与 `_StubLoop` 三转发；
   ruff / mypy / 门禁全绿。全文 → `docs/nn/engineering.md` §339。
+
+## §2026-11-25-bc-eval-source
+
+- **背景**：`worker/bc_eval.dispatch_bc_eval` 186 行（§331 分诊表继续往下走）。它不是「四件
+  不相干的事」，而是装配段 + 一个 `for src` 循环体；循环体里是一个评估图源的完整单元
+  （派局 / 槽位线程 / 收齐 / 聚合面板 / 每局写机器健康账），图源之间只共享 7 个标量。
+
+- **决定**：切出 `_push_eval_weights`(22) / `_eval_slots`(7) / `_eval_source`(111) + frozen
+  `_EvalRun`（`iter_id` / `wver` / `it` / `games_per_stage` / `course_max_ticks` /
+  `meta_path` / `log`），入口 186 → **84**；`LONG_FUNCS_BASELINE` 删 `worker/bc_eval.py`
+  条目（62 → 61）。
+
+- **被否决**：① `_eval_source` 收 7 个标量 —— 8 个参数贴着 >8 门，且两个字符串参数换位
+  静默；② 槽位线程池留在入口、只搬「跑局」 —— `rows` 的锁与 `join` 是同一单元，跨函数传
+  列表 = 隐式共享；③ 返回 `(agg, failed)` —— `failed` 已在 `agg` 里；④ `_push_eval_weights`
+  改返回 bool —— 调用点只判 0，但保留台数不吃亏且是旧值；⑤ 返回注解 `dict[str, Any]` ——
+  该文件 `Any` 11 → 12，撞只许降的额度。
+
+- **验证**：HEAD-vs-新 12 组决策表差分全同（返回账 / 日志 / 逐局请求表 / 推送序列 / 机器
+  健康账）；`tests/worker/test_bc_eval_split.py` 4 条新守卫 + spec/fields/course_env/形状门；
+  门禁 7013 passed / 3 skipped。全文 → `docs/nn/engineering.md` §340。
+
+- **坑（留给下一次）**：测试里验 frozen 要用 `setattr(obj, 动态名, …)` —— 直接 `row.attr = …`
+  会被 mypy 判 read-only，`getattr(obj, "常量")` 会被 ruff B009 拦。

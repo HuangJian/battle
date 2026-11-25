@@ -353,6 +353,168 @@ class BcEvalSpec:
     log: Callable[[str], None] = _log
 
 
+@dataclass(frozen=True, kw_only=True)
+class _EvalRun:
+    """一次 dispatch 内跨图源不变的字段（`_eval_source` 的上下文）。
+
+    只在 `_eval_source` 的**签名**里替代闭包捕获；值全部来自 `BcEvalSpec`，不新增语义。
+    """
+
+    iter_id: str
+    wver: str
+    it: int
+    games_per_stage: int
+    course_max_ticks: int | None
+    meta_path: str | Path | None
+    log: Callable[[str], None]
+
+
+def _push_eval_weights(
+    nodes: list[dict],
+    *,
+    iter_id: str,
+    wver: str,
+    weights_bytes: bytes,
+    log: Callable[[str], None],
+) -> int:
+    """每台节点推一份权重；返回成功台数（0 ⇒ 调用方放弃本轮）。
+
+    自 `dispatch_bc_eval` 原样搬出（逐节点失败只记一行，与旧行为一字不差）。
+    """
+    pushed = 0
+    for n in nodes:
+        try:
+            post_weights_cached(
+                n["url"], n.get("authKey", ""), iter_id, wver, weights_bytes, kind="rollout"
+            )
+            pushed += 1
+        except common.distribution.DistError as e:
+            log(f"[bc-eval] weights 推送失败 {n.get('id')}: {e.reason[:120]}")
+    return pushed
+
+
+def _eval_slots(nodes: list[dict]) -> list[dict]:
+    """任务槽位 = 节点并发（评估局短，槽位即并发；自 `dispatch_bc_eval` 原样搬出）。"""
+    slots: list[dict] = []
+    for n in nodes:
+        for _ in range(max(1, int(n.get("concurrency", 1) or 1))):
+            slots.append(n)
+    return slots
+
+
+def _eval_source(run: _EvalRun, src: dict, slots: list[dict]) -> dict[str, object]:
+    """一个评估图源的全部局：派发 → 收齐 → 聚合面板（原 `dispatch_bc_eval` 的循环体）。
+
+    这是「一个图源」的完整单元（独立触发条件 = 上一个图源收齐），所以整段搬进助手：
+    槽位线程与单局读账的先后、`record_agent_meta` 每局一行、面板口径告警都逐字保留。
+    """
+    level_name = str(src["name"])
+    tasks: list[tuple[int, int]] = [
+        (stage, seed)
+        for stage in src["stage_ids"]
+        for seed in range(1, int(run.games_per_stage) + 1)
+    ]
+    rows: list[dict[str, Any]] = []
+
+    import queue as _q
+    import threading as _th
+
+    work: _q.Queue = _q.Queue()
+    for task in tasks:
+        work.put(task)
+    lock = _th.Lock()
+
+    def slot_worker(
+        node: dict,
+        work: Any = work,
+        lock: Any = lock,
+        rows: list[dict[str, Any]] = rows,
+        src: dict[str, Any] = src,
+        level_name: str = level_name,
+    ) -> None:
+        node_id = str(node.get("id") or "?")
+        while True:
+            try:
+                stage, seed = work.get_nowait()
+            except _q.Empty:
+                return
+            m, err = _run_bc_eval_one(
+                node,
+                stage,
+                seed,
+                iter_id=run.iter_id,
+                wver=run.wver,
+                src=src,
+                level_name=level_name,
+                log=run.log,
+            )
+            with lock:
+                if m is None:
+                    rows.append({"failed": True})
+                else:
+                    rows.append(m)
+                # 机器健康账（与 A/B 层同一份）：节点页「今日贡献」按它聚合；
+                # 不写 = BC eval 的局数在节点页系统性缺失（2026-11-13 报障）。
+                if run.meta_path is not None:
+                    if m is None:
+                        record_eval_failed(
+                            run.meta_path, int(run.it), (int(stage), int(seed)), node_id, err
+                        )
+                    else:
+                        record_agent_meta(
+                            run.meta_path,
+                            {
+                                "node": node_id,
+                                "mode": "eval",
+                                "it": int(run.it),
+                                "stage": int(stage),
+                                "seed": int(seed),
+                                "ok": True,
+                                "win": 1 if m.get("win") else 0,
+                                "elapsedSec": m.get("elapsedSec"),
+                                "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            },
+                        )
+
+    #: 槽位线程归这里（`bc-eval-<槽位>`）：本助手自己起、自己 join。
+    rt = common.runtime.Runtime(scope="bc-eval")
+    threads = [
+        rt.thread(slot_worker, n, daemon=True, name=f"{i}") for i, n in enumerate(slots)
+    ]
+    for t in threads:
+        t.join()
+
+    ok_rows = [r for r in rows if not r.get("failed")]
+    failed = len(rows) - len(ok_rows)
+    if run.course_max_ticks is not None and int(src["max_ticks"]) != int(run.course_max_ticks):
+        run.log(
+            f"[bc-eval] {level_name}: 面板 max_ticks={int(src['max_ticks'])} ≠ 课程声明 "
+            f"{int(run.course_max_ticks)}——行内 panel 已记两个值，禁止与别的面板相减"
+        )
+    agg = aggregate_eval_rows(ok_rows)
+    agg.update(
+        {
+            "level": level_name,
+            "failed": failed,
+            "panel": build_eval_panel(
+                BcPanelSpec(
+                    level_name=level_name,
+                    max_ticks=int(src["max_ticks"]),
+                    difficulty=str(src["difficulty"]),
+                    lives=src["lives"],
+                    games_per_stage=int(run.games_per_stage),
+                    stages=len(src["stage_ids"]),
+                    course_max_ticks=run.course_max_ticks,
+                    source=str(src["kind"]),
+                    stage_ids=list(src["stage_ids"]),
+                    enemies=src.get("enemies"),
+                )
+            ),
+        }
+    )
+    return agg
+
+
 def dispatch_bc_eval(spec: BcEvalSpec) -> dict:
     """把一份 BC 权重在 eval 图上跑干净评估并聚合。
 
@@ -378,7 +540,8 @@ def dispatch_bc_eval(spec: BcEvalSpec) -> dict:
     健康账）：`node` 取承载该局的节点、`mode="eval"`。**BC eval 以前不写这本账**，节点页
     「今日贡献」因此把 BC 手动 eval 的局数系统性漏掉（2026-11-13 报障）。
 
-    入参 = 一个 `BcEvalSpec`（P0-3 批 C）；下面一次展开，函数体逐字不动。
+    入参 = 一个 `BcEvalSpec`（P0-3 批 C）；本函数只做装配与逐图源编排，单图源的
+    派发 → 收齐 → 聚合在 `_eval_source`。
     """
     weights_bytes, eval_levels = spec.weights_bytes, spec.eval_levels
     games_per_stage, it, epoch = spec.games_per_stage, spec.it, spec.epoch
@@ -394,141 +557,38 @@ def dispatch_bc_eval(spec: BcEvalSpec) -> dict:
 
     wver = hashlib.sha256(weights_bytes).hexdigest()
     iter_id = f"bc-eval-it{it}-ep{epoch}-{wver[:8]}"
-    pushed = 0
-    for n in nodes:
-        try:
-            post_weights_cached(
-                n["url"], n.get("authKey", ""), iter_id, wver, weights_bytes, kind="rollout"
-            )
-            pushed += 1
-        except common.distribution.DistError as e:
-            log(f"[bc-eval] weights 推送失败 {n.get('id')}: {e.reason[:120]}")
-    if pushed == 0:
+    if (
+        _push_eval_weights(
+            nodes, iter_id=iter_id, wver=wver, weights_bytes=weights_bytes, log=log
+        )
+        == 0
+    ):
         raise BcEvalError("weights 推送全部失败——本 epoch 评估放弃")
 
-    # 任务槽位 = 节点并发（评估局短，槽位即并发）
-    slots: list[dict] = []
-    for n in nodes:
-        for _ in range(max(1, int(n.get("concurrency", 1) or 1))):
-            slots.append(n)
+    slots = _eval_slots(nodes)
 
     level_rows: list[dict[str, Any]] = []
     t0 = time.time()
     sources = _build_eval_sources(
         course_env=course_env, course=course, eval_levels=eval_levels
     )
+    run = _EvalRun(
+        iter_id=iter_id,
+        wver=wver,
+        it=it,
+        games_per_stage=games_per_stage,
+        course_max_ticks=course_max_ticks,
+        meta_path=meta_path,
+        log=log,
+    )
     for src in sources:
-        level_name = str(src["name"])
-        tasks: list[tuple[int, int]] = [
-            (stage, seed)
-            for stage in src["stage_ids"]
-            for seed in range(1, int(games_per_stage) + 1)
-        ]
-        rows: list[dict[str, Any]] = []
-        failed = 0
-
-        import queue as _q
-        import threading as _th
-
-        work: _q.Queue = _q.Queue()
-        for task in tasks:
-            work.put(task)
-        lock = _th.Lock()
-
-        def slot_worker(
-            node: dict,
-            work: Any = work,
-            lock: Any = lock,
-            rows: list[dict[str, Any]] = rows,
-            src: dict[str, Any] = src,
-            level_name: str = level_name,
-        ) -> None:
-            node_id = str(node.get("id") or "?")
-            while True:
-                try:
-                    stage, seed = work.get_nowait()
-                except _q.Empty:
-                    return
-                m, err = _run_bc_eval_one(
-                    node,
-                    stage,
-                    seed,
-                    iter_id=iter_id,
-                    wver=wver,
-                    src=src,
-                    level_name=level_name,
-                    log=log,
-                )
-                with lock:
-                    if m is None:
-                        rows.append({"failed": True})
-                    else:
-                        rows.append(m)
-                    # 机器健康账（与 A/B 层同一份）：节点页「今日贡献」按它聚合；
-                    # 不写 = BC eval 的局数在节点页系统性缺失（2026-11-13 报障）。
-                    if meta_path is not None:
-                        if m is None:
-                            record_eval_failed(
-                                meta_path, int(it), (int(stage), int(seed)), node_id, err
-                            )
-                        else:
-                            record_agent_meta(
-                                meta_path,
-                                {
-                                    "node": node_id,
-                                    "mode": "eval",
-                                    "it": int(it),
-                                    "stage": int(stage),
-                                    "seed": int(seed),
-                                    "ok": True,
-                                    "win": 1 if m.get("win") else 0,
-                                    "elapsedSec": m.get("elapsedSec"),
-                                    "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
-                                },
-                            )
-
-        #: 槽位线程归这里（`bc-eval-<槽位>`）：本函数自己起、自己 join。
-        rt = common.runtime.Runtime(scope="bc-eval")
-        threads = [
-            rt.thread(slot_worker, n, daemon=True, name=f"{i}") for i, n in enumerate(slots)
-        ]
-        for t in threads:
-            t.join()
-
-        ok_rows = [r for r in rows if not r.get("failed")]
-        failed = len(rows) - len(ok_rows)
-        if course_max_ticks is not None and int(src["max_ticks"]) != int(course_max_ticks):
-            log(
-                f"[bc-eval] {level_name}: 面板 max_ticks={int(src['max_ticks'])} ≠ 课程声明 "
-                f"{int(course_max_ticks)}——行内 panel 已记两个值，禁止与别的面板相减"
-            )
-        agg = aggregate_eval_rows(ok_rows)
-        agg.update(
-            {
-                "level": level_name,
-                "failed": failed,
-                "panel": build_eval_panel(
-                    BcPanelSpec(
-                        level_name=level_name,
-                        max_ticks=int(src["max_ticks"]),
-                        difficulty=str(src["difficulty"]),
-                        lives=src["lives"],
-                        games_per_stage=int(games_per_stage),
-                        stages=len(src["stage_ids"]),
-                        course_max_ticks=course_max_ticks,
-                        source=str(src["kind"]),
-                        stage_ids=list(src["stage_ids"]),
-                        enemies=src.get("enemies"),
-                    )
-                ),
-            }
-        )
+        agg = _eval_source(run, src, slots)
         level_rows.append(agg)
         log(
-            f"[bc-eval] {level_name}: n={agg['n']} win_rate={agg['win_rate']} "
+            f"[bc-eval] {agg['level']}: n={agg['n']} win_rate={agg['win_rate']} "
             f"kills_mean={agg['kills_mean']} phits_mean={agg['phits_mean']} "
             f"pickup_mean={agg['pickup_mean']} timeout_frac={agg['timeout_frac']} "
-            f"failed={failed} ({round(time.time() - t0, 1)}s)"
+            f"failed={agg['failed']} ({round(time.time() - t0, 1)}s)"
         )
 
     return {
