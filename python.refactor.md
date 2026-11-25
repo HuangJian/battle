@@ -355,6 +355,8 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
   > 分诊五格拆完后按同一张表往下走：`remote/push_client.submit_job` 166 → 88（+ `_UploadPlan` /
   > `_plan_uploads` / `_body_for` / `_handle_428`），HEAD-vs-新 13 组决策表差分全同，存量 64 → 63
   > （engineering §338）；`rescan_nodes` 另补了 13 组假钟/假 ping 决策表差分（§335 末段）。
+  > 2026-11-25：整树 AST 守卫耗时盘点（engineering §343）—— 最慢的 `python_shape`
+  > 五读数接内容哈希缓存，1.44s → 0.05s；其余守卫都已是「一次 walk + 缓存」，无平方项可套。
 
 **为什么这是问题**
 

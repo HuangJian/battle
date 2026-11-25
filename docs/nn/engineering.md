@@ -29,6 +29,37 @@
 
 ---
 
+## §343 整树 AST 守卫耗时盘点：`python_shape` 接内容哈希缓存（2026-11-25）
+
+G20（§341）与文本断言（§71）都走 `tests/helpers/scan_cache.py` 之后，把其余整树 AST 守卫
+逐条量了一遍（`pytest --durations`，单进程、温缓存）：
+
+| 守卫 | call |
+|---|---:|
+| `test_python_shape_budget::test_no_new_long_functions` | **1.44s → 0.05s** |
+| `test_private_assert_budget` | 1.27s |
+| `test_thread_names` | 1.20s |
+| `test_monkeypatch_targets_budget` | 1.17s |
+| `test_suppression_budget` | 0.94s |
+| `test_layering::test_remote_never_reaches_orchestration_trainer` | 0.94s |
+| `test_forward_names_are_live` | 0.88s |
+| `test_any_budget` / `test_docstring_refs` | 0.84s |
+| `test_module_doc_budget` / `test_wall_clock_budget` | 0.79s / 0.78s |
+| `test_broad_except_budget` | 0.70s |
+| 其余（`lock_reentrancy` / `silent_except` / `loc_budget` / …） | ≤ 0.40s |
+
+最慢的一条就是形状预算：它已经「一次 `ast.walk` 供五项」，但没有跨会话缓存 ⇒ 每次门禁
+都重新解析整棵生产树（370 文件 / 4805 函数）。改法沿用 §341：逐文件的五个整数按
+**路径 + 内容 sha256** 存 `scan_cache`（`_CACHE_VERSION` 随口径 +1；损坏/版本不符当空库），
+扫描面仍走 `full_scan=True` 清旧键。判据、基线、错误文案一字不动（`LONG_FUNCS_BASELINE`
+仍要求逐文件相等）。整文件 8 条用例：冷 **2.2s** / 热 **0.75s**。
+
+**为什么不做成并行扫描**：forkdist 已经把用例分到 8 个进程，单条用例内部再开进程池要付
+启动 + pickle 成本，缓存命中后总价已低于启动成本；「线性作用域表」只有 G20 有平方项
+（每函数重扫全模块函数表），其余守卫都是一次 `ast.walk`，没有可套的结构改动。
+
+---
+
 ## §341 死变量的常驻门禁：本地新建容器「只改不读」清零（2026-11-25）
 
 §337 末段的一次性扫描抓到了 `remote/deliver_sync._deliver_todo` 的死 `sent`（声明 + 三次

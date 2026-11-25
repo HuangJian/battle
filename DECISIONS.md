@@ -10747,3 +10747,20 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **同批回归扫（无代码改动）**：`offline_tasks` / `run_slot` / `evaluate` 对拆分前 `24b1b799`
   的决策表差分 —— 161 场景（640 组合）/ 12 场景 / 10370 用例，全字段 **0 差异**。
   见 `docs/nn/engineering.md` §342。
+
+## §2026-11-25-ast-guard-survey
+
+- **背景**：G20（§341）与文本断言接上 `scan_cache` 后，其余整树 AST 守卫没有量过；门禁里
+  最慢的单条是 `test_python_shape_budget::test_no_new_long_functions`（1.44s），每次都重新
+  解析 370 个生产文件。
+
+- **决定**：逐文件五读数（>150 / >200 / 宽参 / 函数数 / `global`）按**路径 + 内容 sha256**
+  落盘（`scan_cache` scope `python-shape`，`_CACHE_VERSION` 随口径 +1）；扫描面仍完整，
+  `save(full_scan=True)` 清旧键。判据、基线、错误文案不动。
+
+- **被否决**：① 用例内进程池并行 —— forkdist 已分片，池启动/pickle 比省下的解析贵；
+  ② 常驻 AST —— `source_scan` 2026-09-29 实测 GC 净亏损；③ 只加 `lru_cache` —— 门禁每次
+  是新进程，跨会话无收益。
+
+- **验证**：整文件 8 条用例冷 2.2s / 热 0.75s；`test_no_new_long_functions` 1.44s → 0.05s；
+  全量门禁 7017 passed / 3 skipped。全文 → `docs/nn/engineering.md` §343。

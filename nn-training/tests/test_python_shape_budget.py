@@ -22,7 +22,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import NamedTuple
 
-from tests.helpers import source_scan
+from tests.helpers import scan_cache, source_scan
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -42,6 +42,10 @@ PARAM_LIMIT = 8
 #: 都是新增，直接红。空表**不删**：将来真有一时拆不动的存量，加条目要写清日期 + 理由 + 守卫用例，
 #: 那时这张表才是唯一允许它存在的凭据（同 `L0_MUTABLE_ALLOWED` 的口径）。
 LONG_FUNCS_HARD_BASELINE: dict[str, int] = {}
+
+#: 逐文件读数的磁盘缓存版本（`tests/helpers/scan_cache.py`）：计数口径变了就 +1。
+#: 缓存的是五个整数，不常驻 AST；命中时只付读盘 + sha256。
+_CACHE_VERSION = 1
 
 #: 存量：包含 >150 行函数的文件 → 个数（2026-11-23 阈值 200 → 150 当天实测 **71 个 / 60 文件**）。
 #: 这张表是**预警圈**而不是清零目标：150~200 行的函数大多是「一个循环 + 三段收尾」，拆它们
@@ -174,13 +178,36 @@ class Shape(NamedTuple):
     globs: dict[str, int]
 
 
+def _shape_of_file(source: str, filename: str) -> tuple[int, int, int, int, int]:
+    """一个文件的 `(>150, >200, 宽参, 函数总数, global 语句)`，五项共用一次 `ast.walk`。"""
+    long_ = hard = wide = total = globs = 0
+    for node in ast.walk(ast.parse(source, filename=filename)):
+        if isinstance(node, ast.Global):
+            globs += 1
+            continue
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        total += 1
+        length = (node.end_lineno or node.lineno) - node.lineno + 1
+        args = node.args
+        if length > FUNC_LINE_LIMIT:
+            long_ += 1
+        if length > FUNC_LINE_HARD_LIMIT:
+            hard += 1
+        if len(args.posonlyargs) + len(args.args) + len(args.kwonlyargs) > PARAM_LIMIT:
+            wide += 1
+    return long_, hard, wide, total, globs
+
+
 @lru_cache(maxsize=1)
 def _shape_counts() -> Shape:
     """`(>150 行, >200 行, 宽参数, 函数总数, global)` 按文件计数；全进程只扫一次。
 
     五项共用**同一次** `ast.walk`：`global` 那项原来自己又 `rglob` + 解析了一遍整棵生产树
-    （2026-11-20 实测本文件 2.6s → 1.4s）；150/200 两道线也共用这一次。
+    （2026-11-20 实测本文件 2.6s → 1.4s）；150/200 两道线也共用这一次。逐文件读数再按
+    内容哈希落盘（`tests/helpers/scan_cache.py`）：源码不变时只付读盘 + sha256（实测 1.4s → 0.2s）。
     """
+    cache = scan_cache.Cache("python-shape", version=_CACHE_VERSION, root=ROOT)
     long_: dict[str, int] = {}
     hard: dict[str, int] = {}
     wide: dict[str, int] = {}
@@ -188,25 +215,22 @@ def _shape_counts() -> Shape:
     total = 0
     for p in _prod_files():
         rel = p.relative_to(ROOT).as_posix()
-        n_globals = 0
-        for node in ast.walk(_tree(p)):
-            if isinstance(node, ast.Global):
-                n_globals += 1
-                continue
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            total += 1
-            length = (node.end_lineno or node.lineno) - node.lineno + 1
-            args = node.args
-            nparams = len(args.posonlyargs) + len(args.args) + len(args.kwonlyargs)
-            if length > FUNC_LINE_LIMIT:
-                long_[rel] = long_.get(rel, 0) + 1
-            if length > FUNC_LINE_HARD_LIMIT:
-                hard[rel] = hard.get(rel, 0) + 1
-            if nparams > PARAM_LIMIT:
-                wide[rel] = wide.get(rel, 0) + 1
+        source = source_scan.read_text(str(p), "replace")
+        hit: tuple[int, int, int, int, int] | None = cache.get(rel, source)
+        if hit is None:
+            hit = _shape_of_file(source, rel)
+            cache.put(rel, source, hit)
+        n_long, n_hard, n_wide, n_total, n_globals = hit
+        if n_long:
+            long_[rel] = n_long
+        if n_hard:
+            hard[rel] = n_hard
+        if n_wide:
+            wide[rel] = n_wide
+        total += n_total
         if n_globals:
             globs[rel] = n_globals
+    cache.save(full_scan=True)  # 扫的是完整扫描面 ⇒ 顺手清掉旧内容的条目
     return Shape(long_, hard, wide, total, globs)
 
 
