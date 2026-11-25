@@ -10834,3 +10834,20 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 
 - **验证**：HEAD(`1fc65fd3`)-vs-新 27 组差分 **0 差异**；新增 9 条行为守卫；
   全量门禁 7051 passed / 3 skipped。全文 → `docs/nn/engineering.md` §348。
+
+## §2026-11-25-worker-server-phases
+
+- **背景**：`make_worker_server` 191 行，嵌套 `Handler` 的 `do_GET` / `do_POST` 占掉约 130 行，
+  入口自己只剩装配；`LONG_FUNCS_BASELINE` 第 12 格。
+
+- **决定**：请求面搬到模块级 `_auth_ok` / `_worker_get` / `_worker_post`（多一个 `handler`
+  形参，`self._json` → `respond_json(handler, …)`），入口 63 行；`remote/worker_server.py`
+  移出 `LONG_FUNCS_BASELINE`（57 → 56）。公开工厂签名与 `Handler` 的闭包捕获不变。
+
+- **被否决**：① 把 `Handler` 改成模块级类 + 类属性存 token/state —— 每个 server 的 token 无
+  处可放，且会破坏 `make_worker_server(state, 0, token)` 的一处装配；② 只拆 `do_POST` ——
+  `do_GET` 仍有 68 行，入口仍过 150；③ 让 helper 返回 `(status, body)` 再由 Handler 统一发 ——
+  410/202 的分支要在返回值里重编码一遍日志顺序，等于把响应形状拆成两份。
+
+- **验证**：HEAD(`404bbb89`)-vs-新 19 个真 HTTP 请求差分 **0 差异**；既有三组 worker_server
+  用例全绿；全量门禁 7051 passed / 3 skipped。全文 → `docs/nn/engineering.md` §349。

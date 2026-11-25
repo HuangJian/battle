@@ -372,6 +372,8 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
   > 第十一格也落地了：`remote/job_round._Round.run` 176 → 23 + 八段（四档失败 / 两个
   > SystemExit 出口 / 兜底上报 / `_wrap_up`）；HEAD-vs-新 27 组差分全同，存量 58 → 57
   > （engineering §348）。
+  > 第十二格也落地了：`remote/worker_server.make_worker_server` 191 → 63 + `_auth_ok` /
+  > `_worker_get` / `_worker_post`；19 个真 HTTP 请求差分全同，存量 57 → 56（engineering §349）。
 
 **为什么这是问题**
 

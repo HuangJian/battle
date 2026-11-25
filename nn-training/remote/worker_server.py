@@ -478,6 +478,158 @@ def _decode_job_body(
     }, None
 
 
+def _auth_ok(handler: BaseHTTPRequestHandler, token: str) -> bool:
+    auth = handler.headers.get(AUTH_HEADER, "")
+    return secrets.compare_digest(auth, f"Bearer {token}")
+
+
+def _worker_get(
+    handler: BaseHTTPRequestHandler,
+    state: WorkerServerState,
+    token: str,
+    log: Callable[[str], None],
+) -> None:
+    """GET 面：ping / code-sha / ts-code-sha / blob-sha / job status|result。"""
+    path = handler.path.split("?", 1)[0]
+    try:
+        if not _auth_ok(handler, token):
+            respond_json(handler, {"error": "unauthorized"}, 401)
+            return
+        if path == "/ping":
+            respond_json(handler,
+                {
+                    "ok": True,
+                    "pid": os.getpid(),
+                    "busy": state.busy(),
+                    "queued": state.queued(),
+                    "done": state.done_total,
+                    # 能力位（2026-11-16，plan/replay-corpus.plan.md D2/B7）：
+                    # 本进程含 replay pre-pass；push 派发器据此不把 replay job
+                    # 推给旧 worker_server（additive）。
+                    "capabilities": [CAP_REPLAY_CORPUS],
+                }
+            )
+        elif path == "/code-sha":
+            qs = parse_qs(urlparse(handler.path).query)
+            sha = (qs.get("sha") or [""])[0]
+            respond_json(handler, {"sha": sha, "cached": state.code_cached(sha)})
+        elif path == "/ts-code-sha":
+            # M3：与 /code-sha 同规 —— hub 侧据此判要不要随 body 传 TS 运行时。
+            qs = parse_qs(urlparse(handler.path).query)
+            sha = (qs.get("sha") or [""])[0]
+            respond_json(handler, {"sha": sha, "cached": state.ts_code_cached(sha)})
+        elif path == "/blob-sha":
+            # M2 B3：opt/ref 内容寻址 blob 是否已缓存（HUB 决定是否随 job 上传）。
+            qs = parse_qs(urlparse(handler.path).query)
+            sha = (qs.get("sha") or [""])[0]
+            respond_json(handler, {"sha": sha, "cached": state.blob_cached(sha)})
+        elif path.startswith("/job/") and path.endswith("/status"):
+            jid = path[len("/job/") : -len("/status")]
+            rec = state.get(jid)
+            respond_json(handler, {"state": rec["state"] if rec else "unknown"})
+        elif path.startswith("/job/") and path.endswith("/result"):
+            jid = path[len("/job/") : -len("/result")]
+            rec = state.get(jid)
+            if rec is None:
+                respond_json(handler, {"error": "unknown job"}, 404)
+            elif rec["state"] == "done":
+                respond_json(handler, rec["result"])
+            elif rec["state"] == "failed":
+                # 410（= 不会有结果，原因是终局）而非 500：500 在
+                # push_client.wait_result 里被当**瞬时错误**重试到预算耗尽，
+                # 把「bun 装不上」伪装成网络问题（2026-09-17）。
+                respond_json(handler,
+                    {
+                        "failed": True,
+                        "error": rec.get("error", "?"),
+                        "fail_kind": rec.get("kind", ""),
+                        # 现场（traceback 尾段）。**纯加法**：旧 hub 忽略未知键，
+                        # 旧 worker 不带该键 ⇒ `push_dispatch` 回退原常量。
+                        "fail_detail": rec.get("detail", ""),
+                    },
+                    410,
+                )
+            else:
+                # `queued` 也如实回答（预推单在队里）：hub 用它区分「还没开算」
+                # 与「在跑」——前者不烧无结果超时、也不打 computing_at。
+                respond_json(handler, {"status": rec["state"]}, 202)
+        else:
+            respond_json(handler, {"error": "not found"}, 404)
+    except Exception as e:  # 单请求不崩服务
+        log(f"GET {path} ERROR: {e}")
+        respond_json(handler, {"error": "internal"}, 500)
+
+
+def _worker_post(
+    handler: BaseHTTPRequestHandler,
+    state: WorkerServerState,
+    token: str,
+    log: Callable[[str], None],
+) -> None:
+    """POST 面：cancel / job 受理（幂等 / 排队 / 队满 / accepted）。"""
+    path = handler.path.split("?", 1)[0]
+    try:
+        if not _auth_ok(handler, token):
+            respond_json(handler, {"error": "unauthorized"}, 401)
+            return
+        if path.startswith("/job/") and path.endswith("/cancel"):
+            # landed 取消帧（R2-4b）：幂等置 Event。未知 jid 也 200（先到先得——
+            # 取消帧常常比 job body 早到/晚到，都不该变成错误）。
+            cid = path[len("/job/") : -len("/cancel")]
+            known = state.request_cancel(cid)
+            respond_json(handler, {"job_id": cid, "cancel": True, "known": known}, 200)
+            return
+        if path != "/job":
+            respond_json(handler, {"error": "not found"}, 404)
+            return
+        raw = handler.rfile.read(int(handler.headers.get("Content-Length", "0")))
+        fields, err = _decode_job_body(raw, state)
+        if err is not None:
+            respond_json(handler, err[0], err[1])
+            return
+        manifest = fields["manifest"]
+        jid = manifest["job_id"]
+        # 受理/排队的这三行在主线程上打（早于 `_execute_job` 包装日志）——
+        # 同一个课程前缀，云端日志里「谁在训」从第一行就看得见。
+        _ctag = course_tag(manifest)
+        payload_zip = fields["payload_zip"]
+        code_zip = fields["code_zip"]
+        ts_code_zip = fields["ts_code_zip"]
+        blobs = fields["blobs"]
+        echo = handler.headers.get("X-Smoke-Echo", "") == "1"
+        item = {
+            "manifest": manifest,
+            "payload_zip": payload_zip,
+            "code_zip": code_zip,
+            "ts_code_zip": ts_code_zip,
+            "blobs": blobs,
+            "echo": echo,
+        }
+        verdict = state.submit(jid, item)
+        if verdict["action"] == "duplicate":
+            # 幂等：超时重试/重复 POST 不重复 spawn（修旧 busy-409 下的重传风暴）。
+            rec = state.get(jid) or {"state": "queued"}
+            log(f"{_ctag}job {jid} 重复提交——幂等受理（当前 {rec.get('state')}），不重复执行")
+            respond_json(handler, {"job_id": jid, "status": rec.get("state", "queued")}, 202)
+        elif verdict["action"] == "queue":
+            log(f"{_ctag}job {jid} 入队（position={verdict['position']}）— 在跑 job 结束后即顶上")
+            respond_json(handler,
+                {"job_id": jid, "status": "queued", "position": verdict["position"]}, 202
+            )
+        elif verdict["action"] == "full":
+            respond_json(handler,
+                {"error": f"busy — 队列已满（{WORKER_QUEUE_MAX}），稍后重试"}, 409
+            )
+        else:
+            log(f"{_ctag}job {jid} accepted（echo={echo}）— PPO 后台执行")
+            respond_json(handler, {"job_id": jid, "status": "accepted"}, 202)
+    except (ProtocolError, ValueError, KeyError) as e:
+        respond_json(handler, {"error": str(e)}, 400)
+    except Exception as e:
+        log(f"POST {path} ERROR: {e}")
+        respond_json(handler, {"error": "internal"}, 500)
+
+
 def make_worker_server(
     state: WorkerServerState,
     port: int,
@@ -497,8 +649,7 @@ def make_worker_server(
 
     class Handler(BaseHTTPRequestHandler):
         def _auth_ok(self) -> bool:
-            auth = self.headers.get(AUTH_HEADER, "")
-            return secrets.compare_digest(auth, f"Bearer {token}")
+            return _auth_ok(self, token)
 
         # 与 hub 侧同一响应形状（common/http_respond.py）：头部顺序 / UTF-8 /
         # ensure_ascii=False / 长度算法一旦漂移就是跨端解不开。别名 = 方法，
@@ -509,137 +660,10 @@ def make_worker_server(
             pass
 
         def do_GET(self) -> None:
-            path = self.path.split("?", 1)[0]
-            try:
-                if not self._auth_ok():
-                    self._json({"error": "unauthorized"}, 401)
-                    return
-                if path == "/ping":
-                    self._json(
-                        {
-                            "ok": True,
-                            "pid": os.getpid(),
-                            "busy": state.busy(),
-                            "queued": state.queued(),
-                            "done": state.done_total,
-                            # 能力位（2026-11-16，plan/replay-corpus.plan.md D2/B7）：
-                            # 本进程含 replay pre-pass；push 派发器据此不把 replay job
-                            # 推给旧 worker_server（additive）。
-                            "capabilities": [CAP_REPLAY_CORPUS],
-                        }
-                    )
-                elif path == "/code-sha":
-                    qs = parse_qs(urlparse(self.path).query)
-                    sha = (qs.get("sha") or [""])[0]
-                    self._json({"sha": sha, "cached": state.code_cached(sha)})
-                elif path == "/ts-code-sha":
-                    # M3：与 /code-sha 同规 —— hub 侧据此判要不要随 body 传 TS 运行时。
-                    qs = parse_qs(urlparse(self.path).query)
-                    sha = (qs.get("sha") or [""])[0]
-                    self._json({"sha": sha, "cached": state.ts_code_cached(sha)})
-                elif path == "/blob-sha":
-                    # M2 B3：opt/ref 内容寻址 blob 是否已缓存（HUB 决定是否随 job 上传）。
-                    qs = parse_qs(urlparse(self.path).query)
-                    sha = (qs.get("sha") or [""])[0]
-                    self._json({"sha": sha, "cached": state.blob_cached(sha)})
-                elif path.startswith("/job/") and path.endswith("/status"):
-                    jid = path[len("/job/") : -len("/status")]
-                    rec = state.get(jid)
-                    self._json({"state": rec["state"] if rec else "unknown"})
-                elif path.startswith("/job/") and path.endswith("/result"):
-                    jid = path[len("/job/") : -len("/result")]
-                    rec = state.get(jid)
-                    if rec is None:
-                        self._json({"error": "unknown job"}, 404)
-                    elif rec["state"] == "done":
-                        self._json(rec["result"])
-                    elif rec["state"] == "failed":
-                        # 410（= 不会有结果，原因是终局）而非 500：500 在
-                        # push_client.wait_result 里被当**瞬时错误**重试到预算耗尽，
-                        # 把「bun 装不上」伪装成网络问题（2026-09-17）。
-                        self._json(
-                            {
-                                "failed": True,
-                                "error": rec.get("error", "?"),
-                                "fail_kind": rec.get("kind", ""),
-                                # 现场（traceback 尾段）。**纯加法**：旧 hub 忽略未知键，
-                                # 旧 worker 不带该键 ⇒ `push_dispatch` 回退原常量。
-                                "fail_detail": rec.get("detail", ""),
-                            },
-                            410,
-                        )
-                    else:
-                        # `queued` 也如实回答（预推单在队里）：hub 用它区分「还没开算」
-                        # 与「在跑」——前者不烧无结果超时、也不打 computing_at。
-                        self._json({"status": rec["state"]}, 202)
-                else:
-                    self._json({"error": "not found"}, 404)
-            except Exception as e:  # 单请求不崩服务
-                log(f"GET {path} ERROR: {e}")
-                self._json({"error": "internal"}, 500)
+            _worker_get(self, state, token, log)
 
         def do_POST(self) -> None:
-            path = self.path.split("?", 1)[0]
-            try:
-                if not self._auth_ok():
-                    self._json({"error": "unauthorized"}, 401)
-                    return
-                if path.startswith("/job/") and path.endswith("/cancel"):
-                    # landed 取消帧（R2-4b）：幂等置 Event。未知 jid 也 200（先到先得——
-                    # 取消帧常常比 job body 早到/晚到，都不该变成错误）。
-                    cid = path[len("/job/") : -len("/cancel")]
-                    known = state.request_cancel(cid)
-                    self._json({"job_id": cid, "cancel": True, "known": known}, 200)
-                    return
-                if path != "/job":
-                    self._json({"error": "not found"}, 404)
-                    return
-                raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-                fields, err = _decode_job_body(raw, state)
-                if err is not None:
-                    self._json(err[0], err[1])
-                    return
-                manifest = fields["manifest"]
-                jid = manifest["job_id"]
-                # 受理/排队的这三行在主线程上打（早于 `_execute_job` 包装日志）——
-                # 同一个课程前缀，云端日志里「谁在训」从第一行就看得见。
-                _ctag = course_tag(manifest)
-                payload_zip = fields["payload_zip"]
-                code_zip = fields["code_zip"]
-                ts_code_zip = fields["ts_code_zip"]
-                blobs = fields["blobs"]
-                echo = self.headers.get("X-Smoke-Echo", "") == "1"
-                item = {
-                    "manifest": manifest,
-                    "payload_zip": payload_zip,
-                    "code_zip": code_zip,
-                    "ts_code_zip": ts_code_zip,
-                    "blobs": blobs,
-                    "echo": echo,
-                }
-                verdict = state.submit(jid, item)
-                if verdict["action"] == "duplicate":
-                    # 幂等：超时重试/重复 POST 不重复 spawn（修旧 busy-409 下的重传风暴）。
-                    rec = state.get(jid) or {"state": "queued"}
-                    log(f"{_ctag}job {jid} 重复提交——幂等受理（当前 {rec.get('state')}），不重复执行")
-                    self._json({"job_id": jid, "status": rec.get("state", "queued")}, 202)
-                elif verdict["action"] == "queue":
-                    log(f"{_ctag}job {jid} 入队（position={verdict['position']}）— 在跑 job 结束后即顶上")
-                    self._json(
-                        {"job_id": jid, "status": "queued", "position": verdict["position"]}, 202
-                    )
-                elif verdict["action"] == "full":
-                    self._json(
-                        {"error": f"busy — 队列已满（{WORKER_QUEUE_MAX}），稍后重试"}, 409
-                    )
-                else:
-                    log(f"{_ctag}job {jid} accepted（echo={echo}）— PPO 后台执行")
-                    self._json({"job_id": jid, "status": "accepted"}, 202)
-            except (ProtocolError, ValueError, KeyError) as e:
-                self._json({"error": str(e)}, 400)
-            except Exception as e:
-                log(f"POST {path} ERROR: {e}")
-                self._json({"error": "internal"}, 500)
+            _worker_post(self, state, token, log)
 
     def _starter(jid: str, item: dict) -> None:
         #: 一个 job 一条线程（`worker-job-<jid前8>-run`）：它跑完自己把状态写回 `state`。

@@ -72,7 +72,6 @@ LONG_FUNCS_BASELINE: dict[str, int] = {
     "remote/rollout_relay.py": 1,
     "remote/run_loop.py": 1,
     "remote/worker.py": 2,
-    "remote/worker_server.py": 1,
     "tools/bootstrap.py": 1,
     "tools/lever_scan.py": 1,
     "tools/spatial-probe.py": 1,

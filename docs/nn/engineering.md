@@ -29,6 +29,22 @@
 
 ---
 
+## §349 分诊第十二格：`remote/worker_server.make_worker_server` 191 → 63 + 三段（2026-11-25）
+
+入口只留 `epoch_mult` 校验、日志出口、紧凑的 `Handler`（四个转发方法）与 `_starter`；
+嵌套 Handler 的两个请求面搬到模块级：`_auth_ok`（Bearer 比较，3）/ `_worker_get`（ping /
+code-sha / ts-code-sha / blob-sha / job status|result，75）/ `_worker_post`（cancel / job
+受理四档，68）。请求面只多一个 `handler` 形参，`self._json` 换成 `respond_json(handler, …)`，
+状态与日志仍是闭包参数。
+
+**验证**：HEAD(`404bbb89`)-vs-新 19 个真 HTTP 请求差分（鉴权 / 五个 GET 端点 / job 四种状态 /
+cancel / 未知路径 / 坏 body），状态码与 JSON 体 **0 差异**；存量 `remote/worker_server.py`
+移出 `LONG_FUNCS_BASELINE`（57 → 56）。既有 `test_worker_server_error_detail` /
+`test_worker_server_lock` / `test_hub_push_dispatch` 全绿。
+
+坑：抽出的函数仍由 `Handler` 的闭包捕获 `state` / `token` / `log`，不能再把 Handler 做成
+模块级类（否则每个 server 的 token 无处可放）；`self._json` 的别名保留，转发层才零改动。
+
 ## §348 分诊第十一格：`remote/job_round._Round.run` 176 → 23 + 八段（2026-11-25）
 
 入口只留 try/except 分派；四档失败与两个特殊出口各住一个方法：`_drop_cancelled`（9）/
