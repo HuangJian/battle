@@ -357,6 +357,8 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
   > （engineering §338）；`rescan_nodes` 另补了 13 组假钟/假 ping 决策表差分（§335 末段）。
   > 2026-11-25：整树 AST 守卫耗时盘点（engineering §343）—— 最慢的 `python_shape`
   > 五读数接内容哈希缓存，1.44s → 0.05s；其余守卫都已是「一次 walk + 缓存」，无平方项可套。
+  > 分诊第八格 ⇒ §344（`worker/eval_track.settle_eval_summary` 175 → 46 + 读数/缺口/成行/
+  > 日志四段；HEAD-vs-新 300 组决策表全同，存量 61 → 60）。
 
 **为什么这是问题**
 

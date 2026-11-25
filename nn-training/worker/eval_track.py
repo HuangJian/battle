@@ -438,6 +438,199 @@ class EvalSettleSpec:
     frozen_sec: float = 0.0
 
 
+class _SettleCounts(NamedTuple):
+    """settle 的计数面：账本聚合优先，现场计数兜底。"""
+
+    n: int
+    wins: int
+    clears: int
+    outcomes: dict[str, int]
+    node_games: dict[str, int]
+    tally: _LedgerTally
+
+
+class _SettleGaps(NamedTuple):
+    """`dropped` 的三项细分（恒有 dropped == never + lost + carried）与缺口原因。"""
+
+    dropped: int
+    never_dispatched: int
+    lost: int
+    carried: int
+    missing: list[dict[str, object]]
+
+
+def _settle_counts(spec: EvalSettleSpec) -> _SettleCounts:
+    """账本里有本 (it,wver) 的行 ⇒ 用它（断点续跑口径）；否则用现场计数。"""
+    tally = _scan_ledger(spec.eval_jsonl, spec.key16, spec.it)
+    if tally.outcomes:
+        return _SettleCounts(
+            n=sum(tally.outcomes.values()),
+            wins=tally.wins,
+            clears=tally.clears,
+            outcomes=tally.outcomes,
+            node_games=tally.nodes,
+            tally=tally,
+        )
+    return _SettleCounts(
+        n=len(spec.landed),
+        wins=spec.wins[0],
+        clears=spec.cleared_total[0],
+        outcomes=spec.outcomes,
+        node_games=spec.node_games,
+        tally=tally,
+    )
+
+
+def _settle_gaps(spec: EvalSettleSpec, counts: _SettleCounts) -> _SettleGaps:
+    """`dropped` 的数值不动，只解释它由什么组成（G6 的缺口三分 + reason 清单）。"""
+    dropped = max(spec.total - len(spec.landed), len(spec.pairs) - counts.n)
+    # 缺口细分（2026-10-08，plan/eval-baseline-undispatched §2 P0-2，评审 F1/F2）：
+    # `dropped` 数值不动，只解释它由什么组成。`lost` 从**第一项**推，不是 `dropped - never`
+    # ——后者会让第二项（别轮已评/零梯度复用）整块灌进 `lost` 变成幻数（续跑轮会报出
+    # 「一局没丢却丢了 180 局」）。`left_pairs` 只收 attempts==0 的局（派过的重投回队
+    # 不算「从未派出」——那是 `lost`）。
+    never_set = set(spec.left_pairs) if spec.left_pairs else set()
+    never_dispatched = len(never_set)
+    not_landed = max(0, spec.total - len(spec.landed))
+    lost = max(0, not_landed - never_dispatched)
+    # 第二项残留（≥0：`pending ∩ landed = ∅` 且 `pending ⊆ todo` ⇒ never ≤ not_landed）。
+    carried = max(0, dropped - never_dispatched - lost)
+    # 缺口原因（G6）：只在真有缺口时扫 meta；有界 MISSING_MAX、按 seed 升序。
+    missing: list[dict[str, object]] = []
+    if dropped > 0:
+        meta_reasons = _missing_reasons(spec.eval_jsonl.parent / "dist-agent-meta.jsonl", spec.it)
+        gap_pairs = sorted(
+            (p for p in spec.pairs if p not in counts.tally.keys), key=lambda p: (p[1], p[0])
+        )
+        missing = [
+            {
+                "stage": s,
+                "seed": sd,
+                # 真·从未派出（收工时的 pending 快照，attempts==0）优先于 meta 扫描；
+                # `undispatched` 从此只表示「meta 有 ok=True 行却没落盘行」的罕怪态
+                # （P0-3；评审 F9：字段名与 reason 不再同义）。
+                "reason": "never-dispatched"
+                if (s, sd) in never_set
+                else meta_reasons.get((s, sd), "undispatched"),
+            }
+            for (s, sd) in gap_pairs[:MISSING_MAX]
+        ]
+    return _SettleGaps(dropped, never_dispatched, lost, carried, missing)
+
+
+def _summary_row(
+    spec: EvalSettleSpec, counts: _SettleCounts, gaps: _SettleGaps
+) -> dict[str, object]:
+    """summary 行（字段序即落盘序；各字段口径见 `settle_eval_summary` 的 docstring）。"""
+    n = counts.n
+    wins_v = counts.wins
+    clears_v = counts.clears
+    outcomes = counts.outcomes
+    node_games = counts.node_games
+    tally = counts.tally
+    dropped = gaps.dropped
+    never_dispatched = gaps.never_dispatched
+    lost = gaps.lost
+    carried = gaps.carried
+    missing = gaps.missing
+    clean_wr = (wins_v / n) if n else None
+    clear_rate = (clears_v / n) if n else None
+    return {
+        "event": "eval_summary",
+        "iter": spec.it,
+        "wver": spec.key16,
+        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "sec": round(time.time() - spec.t_eval_start, 1),
+        "games": n,
+        "wins": wins_v,
+        "winRate": round(clean_wr, 4) if clean_wr is not None else None,
+        # 全歼率（敌人全灭即算，不受 BONUS TIME 截断影响）——S3/S4a 门判定读它。
+        "clears": clears_v,
+        "clearRate": round(clear_rate, 4) if clear_rate is not None else None,
+        "outcomes": outcomes,
+        "dropped": dropped,
+        # 缺口细分（plan/eval-baseline-undispatched §2 P0-2）：dropped 数值不动，
+        # 三个新键解释它由什么组成（恒有 dropped == never_dispatched + lost + carried）。
+        "never_dispatched": never_dispatched,
+        "lost": lost,
+        "carried": carried,
+        # 收工时的待办余量（含重投回队的局）与收工原因（新行才有；旧行缺字段 = unknown）。
+        "left_pending": int(spec.left_pending),
+        "close_reason": spec.close_reason,
+        "eval_tail_race_grants": int(spec.tail_race_grants),
+        "eval_dup_games": int(spec.dup_games),
+        "frozenSec": round(float(spec.frozen_sec), 1),
+        # 缺口局 + 原因（G6；上限 MISSING_MAX）。旧行缺本字段 = unknown（不是 0）。
+        "missing": missing,
+        "rolloutWinRate": report_winrate_safe(spec.rollout_winrate),
+        # 每节点实际结算的评估局数（勿与并发槽位混淆——首版曾误写 nd["c"]）
+        "nodes": dict(sorted(node_games.items())),
+        # ---- 门控技能子指标（§8；缺数据 None = unknown，门侧不当事）----
+        # 分母 = 该指标有值的局数（旧 agent 缺 playerHits 时 phits_mean 为 None，
+        # 不与 kills 混用一个分母——混用会把"没数据"伪装成"0 次被击中"）。
+        # ---- 环内拦截（2026-11-22，experiments §161）----
+        # 四个读数一组：进环次数/局、拦截率（**总和比**，不是均值比）、进环→死亡拍数、
+        # 环内有敌的 tick 占比（与训练侧奖励列 `baseIntruderTicks/ticks` 同口径）。
+        # 旧行整键缺席 ⇒ None（unknown），门侧按 unknown 处理。
+        "ring_intr_mean": _ratio(tally.ring_intr),
+        "ring_kill_rate": (
+            round(tally.ring_kills[0] / tally.ring_intr[0], 4)
+            if tally.ring_intr[0] > 0
+            else None
+        ),
+        "ring_ttk_mean": _ratio(tally.ring_ttk),
+        "inner_press_frac": _ratio(tally.inner_frac),
+        "kills_mean": _ratio(tally.kills),
+        "zero_kill_frac": (
+            round(tally.zero_kill / tally.kills[1], 4) if tally.kills[1] else None
+        ),
+        "phits_mean": _ratio(tally.phits),
+        "pickup_mean": _ratio(tally.pu),
+        "timeout_frac": (round(tally.timeout / n, 4) if n else None),
+        # D14 课程血缘：门按 course_fp 过滤趋势行（改课程 = 新实验，不与旧课混读）。
+        "course_fp": spec.course_fp or "",
+    }
+
+
+def _log_settle(spec: EvalSettleSpec, counts: _SettleCounts, gaps: _SettleGaps) -> None:
+    """summary 落账后的那一行（有 `eval_bundle` 时并进云机 eval 的同一行）。"""
+    n = counts.n
+    wins_v = counts.wins
+    clears_v = counts.clears
+    outcomes = counts.outcomes
+    dropped = gaps.dropped
+    never_dispatched = gaps.never_dispatched
+    lost = gaps.lost
+    carried = gaps.carried
+    it, key16 = spec.it, spec.key16
+    rollout_winrate = spec.rollout_winrate
+    clean_wr = (wins_v / n) if n else None
+    clear_rate = (clears_v / n) if n else None
+    eval_bundle = spec.eval_bundle
+    if n:
+        winrate_part = (
+            f"clean winRate={clean_wr:.1%} ({wins_v}/{n}, dropped={dropped})"
+            + (
+                f"（never_dispatched={never_dispatched} lost={lost} carried={carried}）"
+                if dropped > 0
+                else ""
+            )
+            + (f" clearRate={clear_rate:.1%} ({clears_v}/{n})" if clear_rate is not None else "")
+            + (f" vs rollout(sampled)={rollout_winrate:.1%}" if rollout_winrate is not None else "")
+            + f" outcomes={json.dumps(outcomes)}"
+        )
+        if eval_bundle is not None:
+            # 并进取云机 eval 的同一行（Cat 3 日志节食）；in-loop 路径不传 bundle ⇒ 照旧单独打。
+            eval_bundle.add("winRate", winrate_part)
+        else:
+            log(f"[eval] it{it} DONE wver={key16[:12]}… {winrate_part}")
+    else:
+        note = f"[eval] it{it}: no game settled within window — nothing recorded"
+        if eval_bundle is not None:
+            eval_bundle.note(note)
+        else:
+            log(note)
+
 def settle_eval_summary(spec: EvalSettleSpec) -> None:
     """评估窗口结束后的对账与 summary 落账（原 dispatch_eval_round 尾部，纯函数化）。
 
@@ -479,137 +672,8 @@ def settle_eval_summary(spec: EvalSettleSpec) -> None:
     底座，不能 import `common.fs`（分层守卫）。两轮评估可以重叠，summary 必须与逐局行走
     **同一个写者**——否则 summary 仍可能与别轮的行互相覆盖（2026-11-02 z4-polish.it60）。
     """
-    # 旧签名 21 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
-    eval_jsonl, key16, it = spec.eval_jsonl, spec.key16, spec.it
-    pairs, total, landed = spec.pairs, spec.total, spec.landed
-    wins, cleared_total = spec.wins, spec.cleared_total
-    outcomes, node_games = spec.outcomes, spec.node_games
-    append_row, t_eval_start = spec.append_row, spec.t_eval_start
-    rollout_winrate, course_fp = spec.rollout_winrate, spec.course_fp
-    left_pending, left_pairs = spec.left_pending, spec.left_pairs
-    close_reason, eval_bundle = spec.close_reason, spec.eval_bundle
-    tail_race_grants, dup_games = spec.tail_race_grants, spec.dup_games
-    frozen_sec = spec.frozen_sec
-    dropped = total - len(landed)
-    tally = _scan_ledger(eval_jsonl, key16, it)
-    if tally.outcomes:
-        n = sum(tally.outcomes.values())
-        wins_v = tally.wins
-        clears_v = tally.clears
-        outcomes = tally.outcomes
-        node_games = tally.nodes
-    else:
-        n = len(landed)
-        wins_v = wins[0]
-        clears_v = cleared_total[0]
-    dropped = max(dropped, len(pairs) - n)
-    # 缺口细分（2026-10-08，plan/eval-baseline-undispatched §2 P0-2，评审 F1/F2）：
-    # `dropped` 数值不动，只解释它由什么组成。`lost` 从**第一项**推，不是 `dropped - never`
-    # ——后者会让第二项（别轮已评/零梯度复用）整块灌进 `lost` 变成幻数（续跑轮会报出
-    # 「一局没丢却丢了 180 局」）。`left_pairs` 只收 attempts==0 的局（派过的重投回队
-    # 不算「从未派出」——那是 `lost`）。
-    never_set = set(left_pairs) if left_pairs else set()
-    never_dispatched = len(never_set)
-    not_landed = max(0, total - len(landed))
-    lost = max(0, not_landed - never_dispatched)
-    # 第二项残留（≥0：`pending ∩ landed = ∅` 且 `pending ⊆ todo` ⇒ never ≤ not_landed）。
-    carried = max(0, dropped - never_dispatched - lost)
-    # 缺口原因（G6）：只在真有缺口时扫 meta；有界 MISSING_MAX、按 seed 升序。
-    missing: list[dict[str, object]] = []
-    if dropped > 0:
-        meta_reasons = _missing_reasons(eval_jsonl.parent / "dist-agent-meta.jsonl", it)
-        gap_pairs = sorted((p for p in pairs if p not in tally.keys), key=lambda p: (p[1], p[0]))
-        missing = [
-            {
-                "stage": s,
-                "seed": sd,
-                # 真·从未派出（收工时的 pending 快照，attempts==0）优先于 meta 扫描；
-                # `undispatched` 从此只表示「meta 有 ok=True 行却没落盘行」的罕怪态
-                # （P0-3；评审 F9：字段名与 reason 不再同义）。
-                "reason": "never-dispatched"
-                if (s, sd) in never_set
-                else meta_reasons.get((s, sd), "undispatched"),
-            }
-            for (s, sd) in gap_pairs[:MISSING_MAX]
-        ]
-    clean_wr = (wins_v / n) if n else None
-    clear_rate = (clears_v / n) if n else None
-    summary = {
-        "event": "eval_summary",
-        "iter": it,
-        "wver": key16,
-        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "sec": round(time.time() - t_eval_start, 1),
-        "games": n,
-        "wins": wins_v,
-        "winRate": round(clean_wr, 4) if clean_wr is not None else None,
-        # 全歼率（敌人全灭即算，不受 BONUS TIME 截断影响）——S3/S4a 门判定读它。
-        "clears": clears_v,
-        "clearRate": round(clear_rate, 4) if clear_rate is not None else None,
-        "outcomes": outcomes,
-        "dropped": dropped,
-        # 缺口细分（plan/eval-baseline-undispatched §2 P0-2）：dropped 数值不动，
-        # 三个新键解释它由什么组成（恒有 dropped == never_dispatched + lost + carried）。
-        "never_dispatched": never_dispatched,
-        "lost": lost,
-        "carried": carried,
-        # 收工时的待办余量（含重投回队的局）与收工原因（新行才有；旧行缺字段 = unknown）。
-        "left_pending": int(left_pending),
-        "close_reason": close_reason,
-        "eval_tail_race_grants": int(tail_race_grants),
-        "eval_dup_games": int(dup_games),
-        "frozenSec": round(float(frozen_sec), 1),
-        # 缺口局 + 原因（G6；上限 MISSING_MAX）。旧行缺本字段 = unknown（不是 0）。
-        "missing": missing,
-        "rolloutWinRate": report_winrate_safe(rollout_winrate),
-        # 每节点实际结算的评估局数（勿与并发槽位混淆——首版曾误写 nd["c"]）
-        "nodes": dict(sorted(node_games.items())),
-        # ---- 门控技能子指标（§8；缺数据 None = unknown，门侧不当事）----
-        # 分母 = 该指标有值的局数（旧 agent 缺 playerHits 时 phits_mean 为 None，
-        # 不与 kills 混用一个分母——混用会把"没数据"伪装成"0 次被击中"）。
-        # ---- 环内拦截（2026-11-22，experiments §161）----
-        # 四个读数一组：进环次数/局、拦截率（**总和比**，不是均值比）、进环→死亡拍数、
-        # 环内有敌的 tick 占比（与训练侧奖励列 `baseIntruderTicks/ticks` 同口径）。
-        # 旧行整键缺席 ⇒ None（unknown），门侧按 unknown 处理。
-        "ring_intr_mean": _ratio(tally.ring_intr),
-        "ring_kill_rate": (
-            round(tally.ring_kills[0] / tally.ring_intr[0], 4)
-            if tally.ring_intr[0] > 0
-            else None
-        ),
-        "ring_ttk_mean": _ratio(tally.ring_ttk),
-        "inner_press_frac": _ratio(tally.inner_frac),
-        "kills_mean": _ratio(tally.kills),
-        "zero_kill_frac": (
-            round(tally.zero_kill / tally.kills[1], 4) if tally.kills[1] else None
-        ),
-        "phits_mean": _ratio(tally.phits),
-        "pickup_mean": _ratio(tally.pu),
-        "timeout_frac": (round(tally.timeout / n, 4) if n else None),
-        # D14 课程血缘：门按 course_fp 过滤趋势行（改课程 = 新实验，不与旧课混读）。
-        "course_fp": course_fp or "",
-    }
-    append_row(summary)
-    if n:
-        winrate_part = (
-            f"clean winRate={clean_wr:.1%} ({wins_v}/{n}, dropped={dropped})"
-            + (
-                f"（never_dispatched={never_dispatched} lost={lost} carried={carried}）"
-                if dropped > 0
-                else ""
-            )
-            + (f" clearRate={clear_rate:.1%} ({clears_v}/{n})" if clear_rate is not None else "")
-            + (f" vs rollout(sampled)={rollout_winrate:.1%}" if rollout_winrate is not None else "")
-            + f" outcomes={json.dumps(outcomes)}"
-        )
-        if eval_bundle is not None:
-            # 并进取云机 eval 的同一行（Cat 3 日志节食）；in-loop 路径不传 bundle ⇒ 照旧单独打。
-            eval_bundle.add("winRate", winrate_part)
-        else:
-            log(f"[eval] it{it} DONE wver={key16[:12]}… {winrate_part}")
-    else:
-        note = f"[eval] it{it}: no game settled within window — nothing recorded"
-        if eval_bundle is not None:
-            eval_bundle.note(note)
-        else:
-            log(note)
+
+    counts = _settle_counts(spec)
+    gaps = _settle_gaps(spec, counts)
+    spec.append_row(_summary_row(spec, counts, gaps))
+    _log_settle(spec, counts, gaps)

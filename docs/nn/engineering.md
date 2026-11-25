@@ -29,6 +29,31 @@
 
 ---
 
+## §344 分诊第八格：`worker/eval_track.settle_eval_summary` 175 → 46 + 四段（2026-11-25）
+
+§331 的分诊表继续。`settle_eval_summary` 是全档里少有的「0 循环 / 0 try / 27 条顶层语句」
+的纯装配函数：读账本 → 算缺口 → 拼 summary 行 → 落账 + 打一行日志。175 行里约 40 行是
+docstring，真正的代码是四个顺序段，接缝在**数据边界**上而不是控制流里。
+
+切法（判据 / 字段序 / 文案一字不动）：
+
+- `_settle_counts(spec) -> _SettleCounts`：账本聚合优先、现场计数兜底（n/wins/clears/…）；
+- `_settle_gaps(spec, counts) -> _SettleGaps`：`dropped` 与 `never/lost/carried/missing`；
+- `_summary_row(spec, counts, gaps)`：summary 的 33 个字段（落盘序不变）；
+- `_log_settle(spec, counts, gaps)`：`eval_bundle` 并线 / 单独 `log` 的那一行；
+- 入口只剩 5 条语句。`worker/eval_track.py` 从 `LONG_FUNCS_BASELINE` 删除，存量 61 → 60。
+
+差分：HEAD-vs-新 **300 组决策表**（账本空/有行、缺口三分、`missing` 截断与 reason、零局、
+`rollout_winrate` 有无、`eval_bundle` 有无），比较 summary 行（键序 + 全字段 JSON）与
+日志 / bundle 事件，**0 差异**。新增 `tests/worker/test_eval_settle_split.py` 5 条行为守卫
+（9 例：缺口恒等式 5 组、字段序闭集、missing 上限/排序/reason、零局、bundle 二选一）。
+
+**坑**：缺口恒等式 `dropped == never + lost + carried` 只在生产前置
+（`pending ⊆ todo \ landed` 且 `not_landed ≥ never`）下成立；差分语料生成必须先满足它，
+否则会拿一个原函数本来就不保证的等式当判据。
+
+---
+
 ## §343 整树 AST 守卫耗时盘点：`python_shape` 接内容哈希缓存（2026-11-25）
 
 G20（§341）与文本断言（§71）都走 `tests/helpers/scan_cache.py` 之后，把其余整树 AST 守卫

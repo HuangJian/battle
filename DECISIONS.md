@@ -10764,3 +10764,20 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 
 - **验证**：整文件 8 条用例冷 2.2s / 热 0.75s；`test_no_new_long_functions` 1.44s → 0.05s；
   全量门禁 7017 passed / 3 skipped。全文 → `docs/nn/engineering.md` §343。
+
+## §2026-11-25-settle-eval-split
+
+- **背景**：`settle_eval_summary` 175 行、0 循环 / 0 try / 27 条顶层语句，是「纯装配」的
+  典型：读账本 → 缺口三分 → 33 字段 summary 行 → 落账 + 日志。行数大半是 docstring。
+
+- **决定**：切成 `_settle_counts` / `_settle_gaps` / `_summary_row` / `_log_settle` 四段，
+  入口 5 条语句；`worker/eval_track.py` 移出 `LONG_FUNCS_BASELINE`（61 → 60）。字段序、
+  `dropped` 公式、`missing` 截断、日志文案全部不动。
+
+- **被否决**：① 按「账本/现场」拆两个入口 —— 分支只有一处，拆完调用方要判两次；
+  ② 把 33 字段 dict 拆成多个小 dict 再合并 —— 合并顺序就是落盘序，多一层反而更脆；
+  ③ 收 `_summary_row` 的 10 个计数参数 —— 撞 >8 参数闸，改为两个 NamedTuple。
+
+- **验证**：HEAD-vs-新 300 组决策表（键序 + 全字段 JSON + 日志 + bundle 事件）**0 差异**；
+  `tests/worker/test_eval_settle_split.py` 5 条（9 例）；全量门禁 7026 passed / 3 skipped。
+  全文 → `docs/nn/engineering.md` §344。

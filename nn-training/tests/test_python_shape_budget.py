@@ -98,7 +98,6 @@ LONG_FUNCS_BASELINE: dict[str, int] = {
     "worker/bc_collect.py": 1,
     "worker/cli.py": 1,
     "worker/eval_replays_once.py": 1,
-    "worker/eval_track.py": 1,
     "worker/greedy_round.py": 1,
     "worker/iter_rollout.py": 1,
     "worker/loop_guards_leg.py": 1,
