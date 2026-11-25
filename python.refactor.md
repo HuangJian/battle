@@ -374,6 +374,8 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
   > （engineering §348）。
   > 第十二格也落地了：`remote/worker_server.make_worker_server` 191 → 63 + `_auth_ok` /
   > `_worker_get` / `_worker_post`；19 个真 HTTP 请求差分全同，存量 57 → 56（engineering §349）。
+  > 第十三格也落地了：`worker/greedy_round.run_greedy_round` 151 → 102 + `_progress_of` /
+  > `_greedy_finish`；6 组差分全同，存量 56 → 55（engineering §350）。
 
 **为什么这是问题**
 

@@ -41,6 +41,7 @@ from common.protocol import ProtocolError
 from worker.greedy_quota import (
     BINS,
     GREEDY_QUOTA_RULE_V1,
+    GreedyQuotaPlan,
     bin_targets,
     greedy_progress,
     is_greedy_manifest,
@@ -172,6 +173,79 @@ class GreedyRoundSpec:
     log: Callable[[str], None] = _quiet
 
 
+def _progress_of(produced: Sequence[str]) -> tuple[list[Path], dict[str, dict], dict[str, int], int]:
+    """产物名 → (dirs, manifests, bins, total)；循环与收官共用同一口径。"""
+    dirs = [Path(d) for d in produced]
+    manifests = load_manifests(dirs)
+    bins, total = greedy_progress([p.name for p in dirs], manifests)
+    return dirs, manifests, bins, total
+
+
+def _greedy_finish(
+    plan: GreedyQuotaPlan,
+    spec: GreedyRoundSpec,
+    produced: Sequence[str],
+    waves: int,
+    stopped_no_games: bool,
+    greedy_report: dict | None,
+    log: Callable[[str], None],
+) -> dict:
+    """收官账本：进度 / 降级判据 / by_stage / stats / 硬目标 / 返回五键。"""
+    it = spec.it
+    sampling_brief = spec.sampling_brief
+    dirs, manifests, bins, total = _progress_of(produced)
+    names = [p.name for p in dirs]
+    targets = bin_targets(plan)
+    budget = int(plan.total_target)
+    degraded = any(int(bins[b]) < int(targets[b]) for b in BINS if int(targets[b]) > 0)
+    cap_hit = bool(degraded and total >= budget)
+    by_stage: dict[str, dict[str, int]] = {}
+    greedy_games = 0
+    for name in names:
+        mm = manifests.get(name) or {}
+        if not is_greedy_manifest(mm):
+            continue
+        greedy_games += 1
+        row = by_stage.setdefault(str(mm.get("stage")), {"samples": 0, "games": 0})
+        row["samples"] += manifest_samples(mm)
+        row["games"] += 1
+    stats = {
+        "rule": GREEDY_QUOTA_RULE_V1,
+        "target": int(plan.total_target),
+        "collect_target": budget,
+        "cap": float(plan.cap),
+        "soft": bool(plan.soft),
+        "per_stage_target": int(plan.per_stage_target),
+        "bins": dict(bins),
+        "targets": dict(targets),
+        "total": int(total),
+        "degraded": bool(degraded),
+        "cap_hit": cap_hit,
+        "waves": int(waves),
+        "stopped_no_games": bool(stopped_no_games),
+        # 拆分读数：只在**采样口径**上算 est（与 trainer 同键，`worker/resume` 优先读它）。
+        "sampling_report": dict(sampling_brief or {}),
+        "greedy_report": report_brief(greedy_report),
+    }
+    log_text = (
+        f"[greedy] it{it}: 收官 bins={bins} targets={targets} total={total} "
+        f"degraded={degraded} cap_hit={cap_hit} waves={waves}"
+    )
+    log(log_text)
+    plan_soft = bool(plan.soft)
+    if degraded and not plan_soft:
+        raise RuntimeError(
+            f"greedy_quota 硬目标未达成（soft=false）：bins={bins} targets={targets} "
+            f"total={total}/{budget}"
+        )
+    return {
+        "shard_dirs": [str(p) for p in dirs if is_greedy_manifest(manifests.get(p.name) or {})],
+        "report": dict(greedy_report or {}),
+        "greedy_quota_stats": stats,
+        "by_stage": {"samples": int(total), "games": int(greedy_games), "stages": by_stage},
+        "waves": int(waves),
+    }
+
 def run_greedy_round(spec: GreedyRoundSpec) -> dict:
     """在云机轮内跑完 greedy 采集，返回 `{shard_dirs, report, greedy_quota_stats, by_stage, waves}`。
 
@@ -188,7 +262,7 @@ def run_greedy_round(spec: GreedyRoundSpec) -> dict:
     raw_quota, round_target = spec.raw_quota, spec.round_target
     stages, it, rotate_seed = spec.stages, spec.it, spec.rotate_seed
     ordinary, run_wave = spec.ordinary, spec.run_wave
-    sampling_brief, ests = spec.sampling_brief, spec.ests
+    ests = spec.ests
     width, max_batches, log = spec.width, spec.max_batches, spec.log
     plan = parse_greedy_quota(raw_quota, target_transitions=int(round_target), stages=list(stages))
     if plan is None:
@@ -209,9 +283,7 @@ def run_greedy_round(spec: GreedyRoundSpec) -> dict:
     greedy_report: dict | None = None
     produced: list[str] = []
     while waves < limit:
-        dirs = [Path(d) for d in produced]
-        manifests = load_manifests(dirs)
-        bins, total = greedy_progress([p.name for p in dirs], manifests)
+        dirs, manifests, bins, total = _progress_of(produced)
         if all(int(bins[b]) >= int(targets[b]) for b in BINS if int(targets[b]) > 0):
             break
         if total >= budget:
@@ -273,53 +345,6 @@ def run_greedy_round(spec: GreedyRoundSpec) -> dict:
             f"[greedy] it{it}: batch{waves} games={len(pairs)} bins={bins} "
             f"targets={targets} total={total}/{budget}"
         )
-    dirs = [Path(d) for d in produced]
-    manifests = load_manifests(dirs)
-    names = [p.name for p in dirs]
-    bins, total = greedy_progress(names, manifests)
-    degraded = any(int(bins[b]) < int(targets[b]) for b in BINS if int(targets[b]) > 0)
-    cap_hit = bool(degraded and total >= budget)
-    by_stage: dict[str, dict[str, int]] = {}
-    greedy_games = 0
-    for name in names:
-        mm = manifests.get(name) or {}
-        if not is_greedy_manifest(mm):
-            continue
-        greedy_games += 1
-        row = by_stage.setdefault(str(mm.get("stage")), {"samples": 0, "games": 0})
-        row["samples"] += manifest_samples(mm)
-        row["games"] += 1
-    stats = {
-        "rule": GREEDY_QUOTA_RULE_V1,
-        "target": int(plan.total_target),
-        "collect_target": budget,
-        "cap": float(plan.cap),
-        "soft": bool(plan.soft),
-        "per_stage_target": int(plan.per_stage_target),
-        "bins": dict(bins),
-        "targets": dict(targets),
-        "total": int(total),
-        "degraded": bool(degraded),
-        "cap_hit": cap_hit,
-        "waves": int(waves),
-        "stopped_no_games": bool(stopped_no_games),
-        # 拆分读数：只在**采样口径**上算 est（与 trainer 同键，`worker/resume` 优先读它）。
-        "sampling_report": dict(sampling_brief or {}),
-        "greedy_report": report_brief(greedy_report),
-    }
-    log(
-        f"[greedy] it{it}: 收官 bins={bins} targets={targets} total={total} "
-        f"degraded={degraded} cap_hit={cap_hit} waves={waves}"
+    return _greedy_finish(
+        plan, spec, produced, waves, stopped_no_games, greedy_report, log
     )
-    if degraded and not plan.soft:
-        raise RuntimeError(
-            f"greedy_quota 硬目标未达成（soft=false）：bins={bins} targets={targets} "
-            f"total={total}/{budget}"
-        )
-    return {
-        "shard_dirs": [str(p) for p in dirs if is_greedy_manifest(manifests.get(p.name) or {})],
-        "report": dict(greedy_report or {}),
-        "greedy_quota_stats": stats,
-        "by_stage": {"samples": int(total), "games": int(greedy_games), "stages": by_stage},
-        "waves": int(waves),
-    }

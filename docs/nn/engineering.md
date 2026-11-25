@@ -29,6 +29,21 @@
 
 ---
 
+## §350 分诊第十三格：`worker/greedy_round.run_greedy_round` 151 → 102 + 两段（2026-11-25）
+
+入口只留配额解析、波次循环与派出；读数与收官账本拆出去：`_progress_of`（产物名 →
+dirs/manifests/bins/total，循环与收官共用同一口径，6 行）/ `_greedy_finish`（进度重读 /
+降级判据 / by_stage / stats / 硬目标 / 五键返回，64 行）。`_greedy_finish` 收 `spec`
+而不是散开的 `it`/`sampling_brief`，避免再新增 `Any` 注解。
+
+**验证**：HEAD(`2c4fdd95`)-vs-新 6 组差分（未激活 / 全零 / 预推超预算 / ordinary 排除 /
+软目标 / 硬目标 raise），输出五键、报告、日志与波次序列 **0 差异**；
+`tests/worker/test_greedy_round.py` / `test_greedy_round_spec.py` 全绿。
+`worker/greedy_round.py` 移出 `LONG_FUNCS_BASELINE`（56 → 55）。
+
+坑：`_greedy_finish` 必须把最终日志也带过去（第一版漏了 `log`，差分只差收官那一行）；
+`Any` 计数按注解出现次数算，收 `spec` 比多传两个 `Mapping[str, Any]` 更省额度。
+
 ## §349 分诊第十二格：`remote/worker_server.make_worker_server` 191 → 63 + 三段（2026-11-25）
 
 入口只留 `epoch_mult` 校验、日志出口、紧凑的 `Handler`（四个转发方法）与 `_starter`；

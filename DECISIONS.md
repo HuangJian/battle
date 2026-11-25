@@ -10850,4 +10850,22 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   410/202 的分支要在返回值里重编码一遍日志顺序，等于把响应形状拆成两份。
 
 - **验证**：HEAD(`404bbb89`)-vs-新 19 个真 HTTP 请求差分 **0 差异**；既有三组 worker_server
-  用例全绿；全量门禁 7051 passed / 3 skipped。全文 → `docs/nn/engineering.md` §349。
+  用例全绿；  全量门禁 7051 passed / 3 skipped。全文 → `docs/nn/engineering.md` §349。
+
+## §2026-11-25-greedy-finish-split
+
+- **背景**：`run_greedy_round` 151 行，波次循环之后还塞着 49 行收官账本（进度重读 /
+  by_stage / stats / 硬目标 / 返回五键）；`LONG_FUNCS_BASELINE` 第 13 格。
+
+- **决定**：抽出 `_progress_of`（产物名 → dirs/manifests/bins/total）与 `_greedy_finish`
+  （收官账本，收 `spec` 而不是散开的 `it` / `sampling_brief`），入口 102 行；
+  `worker/greedy_round.py` 移出 `LONG_FUNCS_BASELINE`（56 → 55）。
+
+- **被否决**：① 只抽 `_greedy_finish` 不抽 `_progress_of` —— 同一段「读产物」在循环顶与收官
+  各一份，迟早漂；② 把整个波次规划搬出去 —— `start_idx` 的就地推进与 `ordinary` 排除是循环
+  状态，搬出去要传 12 个参数（撞宽签名闸）；③ 让 `_greedy_finish` 收 `sampling_brief` /
+  `it` —— 每多一个 `Mapping[str, Any]` 注解就多一处 `Any`，收 `spec` 反而更省。
+
+- **验证**：HEAD(`2c4fdd95`)-vs-新 6 组差分 **0 差异**；既有 greedy 用例全绿；
+  全量门禁 7051 passed / 3 skipped。全文 → `docs/nn/engineering.md` §350。
+
