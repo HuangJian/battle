@@ -378,6 +378,8 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
   > `_greedy_finish`；6 组差分全同，存量 56 → 55（engineering §350）。
   > 第十四格：`trainer/loop_volume._volume_continuous_loop` 170 → 90 +
   > `_plan_continuous_wave` / `_remember_first_est`；9 组差分全同，存量 55 → 54（engineering §351）。
+  > 第十五格：`remote/deliver_worker.main` 162 → 103 + `_build_deliverer` /
+  > `_drain_tick`；6 组假 ctl/deliverer 差分全同，存量 54 → 53（engineering §352）。
 
 **为什么这是问题**
 

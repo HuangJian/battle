@@ -10886,3 +10886,21 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：HEAD(`ad210dd1`)-vs-新 9 组差分 **0 差异**；既有 volume 用例与全量门禁
   7051 passed / 3 skipped。全文 → `docs/nn/engineering.md` §351。
 
+## §2026-11-25-deliver-worker-main
+
+- **背景**：`remote/deliver_worker.main` 162 行，deliverer 装配（outbox / hub 两条 spec 路径）
+  与「正常 tick / 收线」两种预算的 sync 循环都压在入口里；`LONG_FUNCS_BASELINE` 第 15 格。
+
+- **决定**：装配抽成 `_build_deliverer`（两者缺一 ⇒ `build_argparser().error`），单趟预算补推
+  抽成 `_drain_tick`，入口 103 行；`remote/deliver_worker.py` 移出 `LONG_FUNCS_BASELINE`
+  （54 → 53）。
+
+- **被否决**：① 只抽 `_build_deliverer` —— 入口仍有 120 行，收线预算循环是最容易改错的一段；
+  ② 把控制器命令处理也抽成对象 —— final/stop 靠 `break` 控制流，搬出去要同进同出
+  `stop_deadline` / `stop_budget` / `saw_final` / `last_ctl_at` 四值，反而多一层面；
+  ③ 给 `_drain_tick` 传入 `TICK_ROUNDS` / `TICK_SECONDS` —— 这两个是模块契约，传参只多一处
+  可漂的入口。
+
+- **验证**：HEAD(`80c23d4f`)-vs-新 6 组差分 **0 差异**；全量门禁 7051 passed / 3 skipped。
+  全文 → `docs/nn/engineering.md` §352。
+

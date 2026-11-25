@@ -265,6 +265,78 @@ def build_argparser() -> argparse.ArgumentParser:
     return ap
 
 
+def _build_deliverer(
+    args: argparse.Namespace, *, token: str, lease: str, worker_name: str
+) -> OfflineDeliverer | LocalOutboxDeliverer:
+    """装配补传实现：`--outbox` 只落盘，否则走 hub。"""
+    if args.outbox:
+        # ★ 2026-10-23（plan/push-mode-notebooks §6.4a / P0-1）：push 腿的**同一份实现**跑在子进程里
+        #（复用父侧的隔离/重启/收线机制）；这里一个 HTTP 客户端都不会被构造。
+        return LocalOutboxDeliverer(
+            OutboxSpec(
+                outbox_dir=args.outbox,
+                artifacts_dir=args.artifacts,
+                run_id=args.run_id,
+                parts=deliver_parts,
+                course=args.course,
+                hub_lease=lease,
+                worker_name=worker_name,
+                floor_it=int(args.floor_it or 0),
+                background=False,
+                log=_log,
+            ),
+        )
+    if not args.hub_url:
+        build_argparser().error("需要 --hub-url 或 --outbox 之一")
+    return OfflineDeliverer(
+        OfflineDelivererSpec(
+            base_url=args.hub_url,
+            token=token,
+            run_id=args.run_id,
+            artifacts_dir=args.artifacts,
+            course=args.course,
+            hub_lease=lease,
+            worker_name=worker_name,
+            # 子进程里没有「训练线程」可并行 —— 它就是那条腿，同步语义即正确语义。
+            background=False,
+            # ★ 2026-10-23（plan/offline-deliver-full-and-gaps §3.5/§3.3）：父侧把这两个开关
+            # 显式传进来，子进程的缺省保持旧行为（不传 = 老语义，谁都不改）。
+            eval_every=int(args.eval_every or 0),
+            metrics_parts=bool(args.metrics_parts),
+            adaptive=bool(args.adaptive),
+            log=_log,
+        )
+    )
+
+
+def _drain_tick(
+    d: OfflineDeliverer | LocalOutboxDeliverer, stop_deadline: float | None
+) -> int:
+    """一趟预算内的补推：正常 tick 限轮/秒；收线时用完 `stop.budget`。"""
+    rounds = 0
+    until = time.monotonic() + (
+        TICK_SECONDS if stop_deadline is None else max(0.0, stop_deadline - time.monotonic())
+    )
+    while True:
+        # 收线时把**剩余预算**递进去（`sync` 会在起跑前判它、并把单件超时夹到剩余量上）：
+        # 否则一次失败就要阻塞一整个超时窗口，4 次就把 `stop.budget` 吃穿——
+        # 父侧 `_stop_child` 到点会直接 `terminate()`，段末那次强制补发当场失效。
+        budget = (
+            None
+            if stop_deadline is None
+            else max(0.0, stop_deadline - time.monotonic())
+        )
+        n = d.sync(force_probe=stop_deadline is not None, budget_sec=budget)
+        if n <= 0:
+            break
+        rounds += n
+        if stop_deadline is None and rounds >= TICK_ROUNDS:
+            break
+        if time.monotonic() >= until:
+            break
+    return rounds
+
+
 def main(argv: list[str] | None = None) -> int:
     """每 tick：读控制行 → 按预算推积压 → 落状态。**永不把异常带出去**（退出码说话）。"""
     args = build_argparser().parse_args(argv)
@@ -277,43 +349,7 @@ def main(argv: list[str] | None = None) -> int:
     worker_name = (os.environ.get(WORKER_NAME_ENV) or "").strip()
     ctl = CtlReader(args.ctl, args.ctl_offset)
     status_path = Path(args.status)
-    if args.outbox:
-        # ★ 2026-10-23（plan/push-mode-notebooks §6.4a / P0-1）：push 腿的**同一份实现**跑在子进程里
-        #（复用父侧的隔离/重启/收线机制）；这里一个 HTTP 客户端都不会被构造。
-        d: OfflineDeliverer | LocalOutboxDeliverer = LocalOutboxDeliverer(
-            OutboxSpec(outbox_dir=args.outbox,
-            artifacts_dir=args.artifacts,
-            run_id=args.run_id,
-            parts=deliver_parts,
-            course=args.course,
-            hub_lease=lease,
-            worker_name=worker_name,
-            floor_it=int(args.floor_it or 0),
-            background=False,
-            log=_log),
-        )
-    else:
-        if not args.hub_url:
-            build_argparser().error("需要 --hub-url 或 --outbox 之一")
-        d = OfflineDeliverer(
-            OfflineDelivererSpec(
-                base_url=args.hub_url,
-                token=token,
-                run_id=args.run_id,
-                artifacts_dir=args.artifacts,
-                course=args.course,
-                hub_lease=lease,
-                worker_name=worker_name,
-                # 子进程里没有「训练线程」可并行 —— 它就是那条腿，同步语义即正确语义。
-                background=False,
-                # ★ 2026-10-23（plan/offline-deliver-full-and-gaps §3.5/§3.3）：父侧把这两个开关
-                # 显式传进来，子进程的缺省保持旧行为（不传 = 老语义，谁都不改）。
-                eval_every=int(args.eval_every or 0),
-                metrics_parts=bool(args.metrics_parts),
-                adaptive=bool(args.adaptive),
-                log=_log,
-            )
-        )
+    d = _build_deliverer(args, token=token, lease=lease, worker_name=worker_name)
     tick = max(0.05, float(args.tick_sec))
     idle = max(60.0, float(args.idle_timeout))
     parent_gone = threading.Event()
@@ -369,28 +405,7 @@ def main(argv: list[str] | None = None) -> int:
                 break
             if stop_deadline is not None and time.monotonic() >= stop_deadline:
                 break
-            # 预算：正常 tick 限轮数/秒数；收线时放宽到 `stop.budget` 耗尽为止。
-            rounds = 0
-            until = time.monotonic() + (
-                TICK_SECONDS if stop_deadline is None else max(0.0, stop_deadline - time.monotonic())
-            )
-            while True:
-                # 收线时把**剩余预算**递进去（`sync` 会在起跑前判它、并把单件超时夹到剩余量上）：
-                # 否则一次失败就要阻塞一整个超时窗口，4 次就把 `stop.budget` 吃穿——
-                # 父侧 `_stop_child` 到点会直接 `terminate()`，段末那次强制补发当场失效。
-                budget = (
-                    None
-                    if stop_deadline is None
-                    else max(0.0, stop_deadline - time.monotonic())
-                )
-                n = d.sync(force_probe=stop_deadline is not None, budget_sec=budget)
-                if n <= 0:
-                    break
-                rounds += n
-                if stop_deadline is None and rounds >= TICK_ROUNDS:
-                    break
-                if time.monotonic() >= until:
-                    break
+            rounds = _drain_tick(d, stop_deadline)
             _write_status(status_path, d, ctl=ctl, last_ctl_at=last_ctl_at)
             if (
                 stop_deadline is None

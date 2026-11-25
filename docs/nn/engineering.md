@@ -29,6 +29,20 @@
 
 ---
 
+## §352 分诊第十五格：`remote/deliver_worker.main` 162 → 103 + 两段（2026-11-25）
+
+入口只留参数/环境、控制器命令循环、收线分支与状态落盘；装配拆 `_build_deliverer`
+（outbox 与 hub 两条 spec 路径 + 「二者必居其一」的 parser error，42 行），单趟预算内补推拆
+`_drain_tick`（正常 tick 限轮/秒，收线把剩余 budget 递进 `sync`，26 行）。
+
+**验证**：HEAD(`80c23d4f`)-vs-新 6 组假 ctl / 假 deliverer 差分（outbox final+stop /
+hub stop / stop 带 drain / repost 后 stop / stdin EOF / 缺目标），比对 stdout、状态文件、
+spec 字段、`deliver_result` / repost / sync 参数与 close，**0 差异**；`LONG_FUNCS_BASELINE`
+删 `remote/deliver_worker.py`（54 → 53）。
+
+坑：`main` 里 `if args.outbox:` 在抽出的 `_build_deliverer` 里也有一份 —— 按行号切必须从
+`def main` 之后起算，否则会把新助手连同入口一起切掉。
+
 ## §351 分诊第十四格：`trainer/loop_volume._volume_continuous_loop` 170 → 90 + 两段（2026-11-25）
 
 入口只留每波账本读取、首波记录、pair/start_idx 推进、日志与派出；估算与派发表拆成模块级
