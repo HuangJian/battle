@@ -32,6 +32,7 @@ import json
 import time
 import zlib
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -316,6 +317,70 @@ def _artifact_land_note(note: str, wj: bytes, full_fp: str, got: str, it: int) -
     return note
 
 
+@dataclass(frozen=True)
+class _OfflineRound:
+    """一轮补传**算好的落位** —— path / verify / write 三相之间传的就是它。
+
+    `w_full`/`o_full` = 落地后的整份，`wj`/`opt` = 线上来的原件；`to_write` 是按内容定好名的
+    待写表（两个形态各占一个名字）；`have_path` = 盘上已有那份（None = 这一轮是新的）。
+    """
+
+    d: Path
+    it_dir: Path
+    to_write: dict[str, bytes]
+    have_path: Path | None
+    w_full: bytes
+    wj: bytes
+    o_full: bytes
+    opt: bytes
+    full_fp: str
+    raw_fp: str
+    opt_form: str
+
+
+def _offline_round_verdict(
+    rnd: _OfflineRound, *, run_id: str, it: int, landed: dict
+) -> dict | None:
+    """**verify 相**：盘上已有同一轮的权重 ⇒ duplicate / conflict；None = 接新。
+
+    判据是**内容**不是名字：整份先到、或原件先到，都算命中。
+    ★ 2026-10-15 修：旧口径在「原件命中」上加了个 `not weights.json.is_file()` 的条件 ⇒
+    旧数据（`.json` 里装容器）**同一份字节**重传会被判 conflict 409，而客户端把 409 当硬拒
+    （`remote/offline_deliver._reject_round`）⇒ 一轮正确产物永久出局。丢包/超时重传是常态，
+    不能这么判。冲突是**稀有路径**（要人裁决）⇒ 只有这一支才读文件算哈希，且分块算。
+    """
+    have_path = rnd.have_path
+    if have_path is None:
+        return None
+    if same_bytes(have_path, rnd.w_full) or same_bytes(have_path, rnd.wj):
+        healed = _heal_round(rnd.it_dir, rnd.to_write, w_full=rnd.w_full, wj=rnd.wj)
+        if healed:
+            _log(
+                f"补传 it{int(it)} 幂等命中：补落 {'、'.join(healed)}"
+                "（内容同源，原件旁存）",
+            )
+        return {
+            "status": "duplicate",
+            "run_id": run_id,
+            "it": int(it),
+            "landed": landed,
+            "healed": healed,
+        }
+    have_fp = sha256_file(have_path)
+    return {
+        "status": "conflict",
+        "run_id": run_id,
+        "it": int(it),
+        "have_fp": have_fp,
+        "got_fp": rnd.full_fp,
+        "error": (
+            f"补传冲突 it{int(it)}：hub 已有**不同**字节的权重"
+            f"（hub {have_fp[:12]}… 本次 {rnd.full_fp[:12]}…）"
+            "——不覆盖、需人裁决"
+        ),
+    }
+
+
 class OfflineRoundsMixin:
     """域混入：见模块头部。"""
 
@@ -448,116 +513,21 @@ class OfflineRoundsMixin:
         o_full: bytes = staged.get("opt.tar") or opt
         landed: dict = staged.get("landed") or {}
         note = str(staged.get("note") or "")
-        #: 这一轮回传的 opt **形态**（`plan/anchor-full-rounds` S4）：按内容判（不看名字）。
-        #: 读方靠它回答「这一轮发的是整份还是 delta」——省量只能从账本上量，不能靠推断。
-        opt_form = delta_files.form_of(opt)
-        full_fp = hashlib.sha256(w_full).hexdigest()
         with self._lock:
-            d = self.offline_run_dir(run_id)
-            it_dir = d / f"it-{int(it):03d}"
-            # 两个形态各写各的名字（名字自述形态，两版都留）：整份 → `weights.json`/`opt.tar`，
-            # 原件 → `*.delta`（只在它确实是容器时）。落地失败 ⇒ 只有 `*.delta`（锚点那边会跳过它）。
-            to_write: dict[str, bytes] = {delta_files.named_for("weights.json", w_full): w_full}
-            if delta_files.named_for("weights.json", wj) != delta_files.named_for("weights.json", w_full):
-                to_write[delta_files.named_for("weights.json", wj)] = wj
-            if opt:
-                to_write[delta_files.named_for("opt.tar", o_full)] = o_full
-                if delta_files.named_for("opt.tar", opt) != delta_files.named_for("opt.tar", o_full):
-                    to_write[delta_files.named_for("opt.tar", opt)] = opt
-            have_full = it_dir / "weights.json"
-            have_raw = it_dir / "weights.delta"
-            # ★ 2026-10-17：只记**路径**不读字节（`have in (w_full, wj)` 改成分块比对，
-            # 冲突时才整份算一次哈希——那本来就是稀有路径；判据逐字不变）。
-            have_path: Path | None = None
-            if have_full.is_file() and not delta_files.any_container_file(have_full):
-                have_path = have_full
-            elif have_raw.is_file():
-                have_path = have_raw
-            elif have_full.is_file():  # 旧数据：`weights.json` 里装着容器（名字没跟着内容走）
-                have_path = have_full
-            if have_path is not None:
-                # 幂等/冲突判据 = **同一轮的权威字节**：整份先到、或原件先到，都算命中。
-                # ★ 2026-10-15 修：旧口径在「原件命中」上加了个 `not weights.json.is_file()` 的
-                #   条件 ⇒ 旧数据（`.json` 里装容器）**同一份字节**重传会被判 conflict 409，
-                #   而客户端把 409 当硬拒（`remote/offline_deliver._reject_round`）⇒ 一轮正确产物
-                #   永久出局。丢包/超时重传是常态（下面那段注释就是这么写的），不能这么判。
-                if same_bytes(have_path, w_full) or same_bytes(have_path, wj):
-                    healed = _heal_round(it_dir, to_write, w_full=w_full, wj=wj)
-                    if healed:
-                        _log(
-                            f"补传 it{int(it)} 幂等命中：补落 {'、'.join(healed)}"
-                            "（内容同源，原件旁存）",
-                        )
-                    return {
-                        "status": "duplicate",
-                        "run_id": run_id,
-                        "it": int(it),
-                        "landed": landed,
-                        "healed": healed,
-                    }
-                # 冲突是**稀有路径**（要人裁决）⇒ 这里才读文件算哈希，且分块算（L2）。
-                have_fp = sha256_file(have_path)
-                return {
-                    "status": "conflict",
-                    "run_id": run_id,
-                    "it": int(it),
-                    "have_fp": have_fp,
-                    "got_fp": full_fp,
-                    "error": (
-                        f"补传冲突 it{int(it)}：hub 已有**不同**字节的权重"
-                        f"（hub {have_fp[:12]}… 本次 {full_fp[:12]}…）"
-                        "——不覆盖、需人裁决"
-                    ),
-                }
-            _write_offline_round(it_dir, to_write, row, run_id, int(it), body, self._now)
-            # 账本一行 = 一轮（只在**接新**时追加；重复投递不再写——否则同一轮会出现两行，
-            # 而这个文件的读方（人/控制台）按 it 画曲线）。
-            with open(d / self.OFFLINE_METRICS_NAME, "a", encoding="utf-8") as f:
-                f.write(
-                    json.dumps(
-                        {
-                            "event": "offline_artifact",
-                            "run_id": run_id,
-                            "it": int(it),
-                            "weights_fp": got,
-                            "landed_fp": full_fp,
-                            # ★ 空串 = 整份到手；有值 = 没到手 + 原因（读方据此判断这一轮能不能直接用）
-                            "land_note": str(staged.get("note") or ""),
-                            "opt_bytes": len(opt),
-                            "opt_form": opt_form,
-                            **(row if isinstance(row, dict) else {}),
-                            # ★ 归属身份排在 `**row` **之后**：那是**位置判据**（客户端给的字节不许
-                            #   冒名顶替 hub 的认定），别顺手挪到上面去。
-                            **_artifact_identity(body, self.leases.hold_meta),
-                            "ts": self._now(),
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n"
-                )
-            self._append_ledger(
-                {
-                    "event": "offline_artifact",
-                    "run_id": run_id,
-                    "it": int(it),
-                    "weights_fp": got,
-                    # hub 手上那份（**落地后的整份**）的地址：与 `weights_fp`（回传原件）分开记——
-                    # 读方按"我能不能直接用它"选地址时看这一个。
-                    "landed_fp": full_fp,
-                    "opt_form": opt_form,
-                    **_artifact_identity(body, self.leases.hold_meta),
-                    "ts": self._now(),
-                }
+            rnd = self._offline_round_path(
+                run_id, it, w_full=w_full, wj=wj, opt=opt, o_full=o_full, raw_fp=got
             )
-            self._land_round_metrics(row, run_id=run_id, it=int(it))
-            # 镜像/活动指针/归档一律用**落地后的整份**（那三处是给人/控制台/TS 读的）。
-            self._land_offline_round_extras(
-                it=int(it),
+            verdict = _offline_round_verdict(rnd, run_id=run_id, it=it, landed=landed)
+            if verdict is not None:
+                return verdict
+            self._offline_round_commit(
+                rnd,
                 run_id=run_id,
-                weights_json=w_full,
-                opt=o_full,
+                it=it,
                 row=row,
+                body=body,
                 advance_active=advance_active,
+                note=note,
             )
         # ★ 2026-10-23（现场教训）：**「这一轮没拿到整份」必须留痕**。两种形态：
         #   ① `stage` 缺席（本进程没带整份落地器——hub 是 2026-10-15 之前启动的老进程就长这样）：
@@ -565,7 +535,7 @@ class OfflineRoundsMixin:
         #      而全程零提示，只能靠人去数文件才发现；
         #   ② `stage` 在、但基准不在 hub 侧（`note` 非空，原有路径）。
         # 两者都写进账本行与返回值（不只是 stdout）。
-        note = _artifact_land_note(note, wj, full_fp, got, int(it))
+        note = _artifact_land_note(note, wj, rnd.full_fp, got, int(it))
         return {
             "status": "accepted",
             "run_id": run_id,
@@ -573,8 +543,127 @@ class OfflineRoundsMixin:
             "landed": landed,
             "land_note": note,
             "raw_fp": got,
-            "weights_fp": full_fp,
+            "weights_fp": rnd.full_fp,
         }
+
+    def _offline_round_path(
+        self,
+        run_id: str,
+        it: int,
+        *,
+        w_full: bytes,
+        wj: bytes,
+        opt: bytes,
+        o_full: bytes,
+        raw_fp: str,
+    ) -> _OfflineRound:
+        """**path 相**：定这一轮的落位（目录 + 两种形态的名字 + 盘上已有那份的路径）。
+
+        名字自述形态、两版都留：整份 → `weights.json`/`opt.tar`，原件 → `*.delta`（只在它
+        确实是容器时）。落地失败 ⇒ 只有 `*.delta`（锚点那边会跳过它）。
+
+        ★ 2026-10-17：只记**路径**不读字节（`have in (w_full, wj)` 改成分块比对，冲突时才
+        整份算一次哈希——那本来就是稀有路径；判据逐字不变）。
+        """
+        d = self.offline_run_dir(run_id)
+        it_dir = d / f"it-{int(it):03d}"
+        to_write: dict[str, bytes] = {delta_files.named_for("weights.json", w_full): w_full}
+        if delta_files.named_for("weights.json", wj) != delta_files.named_for("weights.json", w_full):
+            to_write[delta_files.named_for("weights.json", wj)] = wj
+        if opt:
+            to_write[delta_files.named_for("opt.tar", o_full)] = o_full
+            if delta_files.named_for("opt.tar", opt) != delta_files.named_for("opt.tar", o_full):
+                to_write[delta_files.named_for("opt.tar", opt)] = opt
+        have_full = it_dir / "weights.json"
+        have_raw = it_dir / "weights.delta"
+        have_path: Path | None = None
+        if have_full.is_file() and not delta_files.any_container_file(have_full):
+            have_path = have_full
+        elif have_raw.is_file():
+            have_path = have_raw
+        elif have_full.is_file():  # 旧数据：`weights.json` 里装着容器（名字没跟着内容走）
+            have_path = have_full
+        # 这一轮回传的 opt **形态**（`plan/anchor-full-rounds` S4）：按内容判（不看名字）。
+        # 读方靠它回答「这一轮发的是整份还是 delta」——省量只能从账本上量，不能靠推断。
+        return _OfflineRound(
+            d=d,
+            it_dir=it_dir,
+            to_write=to_write,
+            have_path=have_path,
+            w_full=w_full,
+            wj=wj,
+            o_full=o_full,
+            opt=opt,
+            full_fp=hashlib.sha256(w_full).hexdigest(),
+            raw_fp=raw_fp,
+            opt_form=delta_files.form_of(opt),
+        )
+
+    def _offline_round_commit(
+        self,
+        rnd: _OfflineRound,
+        *,
+        run_id: str,
+        it: int,
+        row: object,
+        body: dict,
+        advance_active: bool,
+        note: str,
+    ) -> None:
+        """**write 相**：落文件 → 补传账本一行 → 课程账本 → 指标 → 镜像/指针/归档。
+
+        只在**接新**时走到这里（duplicate/conflict 已由 verify 相返回）。
+        """
+        _write_offline_round(rnd.it_dir, rnd.to_write, row, run_id, int(it), body, self._now)
+        # 账本一行 = 一轮（重复投递不再写——否则同一轮会出现两行，而这个文件的读方
+        # （人/控制台）按 it 画曲线）。
+        with open(rnd.d / self.OFFLINE_METRICS_NAME, "a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "event": "offline_artifact",
+                        "run_id": run_id,
+                        "it": int(it),
+                        "weights_fp": rnd.raw_fp,
+                        "landed_fp": rnd.full_fp,
+                        # ★ 空串 = 整份到手；有值 = 没到手 + 原因（读方据此判断这一轮能不能直接用）
+                        "land_note": note,
+                        "opt_bytes": len(rnd.opt),
+                        "opt_form": rnd.opt_form,
+                        **(row if isinstance(row, dict) else {}),
+                        # ★ 归属身份排在 `**row` **之后**：那是**位置判据**（客户端给的字节不许
+                        #   冒名顶替 hub 的认定），别顺手挪到上面去。
+                        **_artifact_identity(body, self.leases.hold_meta),
+                        "ts": self._now(),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+        self._append_ledger(
+            {
+                "event": "offline_artifact",
+                "run_id": run_id,
+                "it": int(it),
+                "weights_fp": rnd.raw_fp,
+                # hub 手上那份（**落地后的整份**）的地址：与 `weights_fp`（回传原件）分开记——
+                # 读方按"我能不能直接用它"选地址时看这一个。
+                "landed_fp": rnd.full_fp,
+                "opt_form": rnd.opt_form,
+                **_artifact_identity(body, self.leases.hold_meta),
+                "ts": self._now(),
+            }
+        )
+        self._land_round_metrics(row, run_id=run_id, it=int(it))
+        # 镜像/活动指针/归档一律用**落地后的整份**（那三处是给人/控制台/TS 读的）。
+        self._land_offline_round_extras(
+            it=int(it),
+            run_id=run_id,
+            weights_json=rnd.w_full,
+            opt=rnd.o_full,
+            row=row,
+            advance_active=advance_active,
+        )
 
     def store_offline_metrics(self, body: object) -> dict:
         """★ 2026-10-23（`plan/offline-deliver-full-and-gaps` §3.4 / S4）：**只带统计**的补传。

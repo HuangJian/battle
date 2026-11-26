@@ -2156,3 +2156,10 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > 2026-11-26 第二十七格：`trainer/run_rl_cluster.main` 194→9（`_parse_args` 54 /
 > `_serve_cluster` 79 / `_plan_view` 59；逐字搬移，惰性 import 与 monkeypatch 接缝不变）；
 > 存量 37 → 36（engineering §364）。
+
+> 2026-11-26 第二十八格（批）：`hub/store_offline.store_offline_artifact` 181→86
+> （path `_offline_round_path` 52 / verify `_offline_round_verdict` 41 / write
+> `_offline_round_commit` 65；锁仍包住三相，`_OfflineRound` 只做载体）·
+> `remote/offline_eval.run_cloud_eval` 186→142（pool-setup `_acquire_eval_pool` 53 /
+> round-close `_close_eval_round` 18；池所有权仍在外层 `finally`，不新增 `Any`）；
+> 两个文件形状存量清零，36 → 34（engineering §365）。

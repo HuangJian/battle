@@ -29,6 +29,43 @@
 
 ---
 
+## §365 分诊第二十八格（批）：`store_offline_artifact` 与 `run_cloud_eval`（2026-11-26）
+
+两格同批，都是「把入口编排切成相位」；被搬的语句逐字未改，只有缩进与参数名变化。
+
+### `hub/store_offline.store_offline_artifact`：181 → **86**（path / verify / write）
+
+| 相位 | 行数 | 职责 |
+|---|---:|---|
+| `_offline_round_path` | 52 | 定 `it-NNN/` 目录、按内容给两种形态定名（`to_write`）、探盘上已有那份（`have_path`，只探路径不读字节） |
+| `_offline_round_verdict`（模块级） | 41 | 同轮字节命中 ⇒ duplicate + `_heal_round`；不同字节 ⇒ conflict（此刻才算文件哈希）；None = 接新 |
+| `_offline_round_commit` | 65 | 落文件 → `metrics.jsonl` 一行 → 课程账本 → 指标 → 镜像/指针/归档 |
+
+三相之间传 `_OfflineRound`（frozen dataclass：目录、`to_write`、`have_path`、四个字节体 +
+`full_fp`/`raw_fp`/`opt_form`）。`with self._lock` 仍包住三相整段；`_log` / `delta_files` /
+`_write_offline_round` / `_artifact_identity` 仍在模块级解析，`stage` 注入面与
+`monkeypatch.setattr(store_offline, "time", …)` 不变。
+
+### `remote/offline_eval.run_cloud_eval`：186 → **142**（pool-setup / round-close）
+
+| 相位 | 行数 | 职责 |
+|---|---:|---|
+| `_acquire_eval_pool`（模块级） | 53 | 跨轮暖池 `take` → 否则 `make_pool` → 新池 `start()`；起不来当场关掉并返回 None |
+| `_close_eval_round`（模块级） | 18 | `ran` 才打「落账」摘要 + 整行 `eb.emit`（重投后缀仍在这一处） |
+
+池的**所有权没搬**：`_acquire_eval_pool` 只取/建，`run_cloud_eval` 的 `finally` 仍负责关（内层
+`run_rounds` 的 finally 仍先把池存回 `CloudEvalPool` 或关掉）。测试全走
+`offline_eval.serve_pool.make_pool` 与 `CLOUD_EVAL_POOL` 模块属性，接缝不变。返回类型写
+`serve_pool.ServePool | None`、摘要收 `dict[str, object]` —— `Any` 基线保持 **6**。
+
+**验证**：`test_offline_eval_{pool,cloud,wiring}.py` / `test_cloud_eval_spec.py` /
+`test_round_ctx.py` / `test_offline_{backfeed,push_dispatch}.py` / `test_backfill_offline.py` /
+`test_hub_{job_store,queue}_split.py` / `e2e/test_offline_push_e2e.py` 聚焦 **158 条**绿；全量
+pygate **7055 passed / 13 skipped**（ruff + mypy 绿）。形状存量 **36 → 34**（两个文件清零）。
+
+**被否决**：把 `_EvalRound` 的共享状态构造也切出去 —— 那里只是一串字段赋值，切出去要 13 个参数
+或再造一个装配器；本轮点名的接缝只有 pool-setup 与 round-close。
+
 ## §364 分诊第二十七格：`trainer/run_rl_cluster.main`（2026-11-26）
 
 194 行 → **9 行**，三段接缝（全部逐字搬移，只有缩进变化）：

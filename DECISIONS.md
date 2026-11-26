@@ -11129,3 +11129,31 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 
 - **验证**：六个入口/读面测试 + 形状/LOC/分层/入口在位共 123 条绿。
   全文 → `docs/nn/engineering.md` §364。
+
+## §2026-11-26-store-offline-artifact-split
+
+- **背景**：`hub/store_offline.store_offline_artifact` 181 行，把落位计算、幂等/冲突裁决与四处写入
+  （回传树 / 补传账本 / 课程账本 / 镜像归档）串在同一个 `with self._lock` 里。
+
+- **决定**：按 path / verify / write 三相拆开 —— `_offline_round_path`(52) 出 `_OfflineRound`
+  （目录 + `to_write` + `have_path`），`_offline_round_verdict`(41) 只回答 duplicate / conflict /
+  接新，`_offline_round_commit`(65) 做全部写入；入口(86) 只剩解码 → stage → 三相依次调用。
+  锁仍包住整段，`stage` 注入与模块级 monkeypatch 接缝不变。形状存量 36 → 35（该文件清零）。
+
+- **被否决**：把 `_write_offline_round` 并进 commit —— 它已是独立函数，本刀只切入口自身的相位。
+
+- **验证**：离线回传/补做/派发/队列拆分聚焦 158 条 + 全量 pygate 7055 passed / 13 skipped。
+  全文 → `docs/nn/engineering.md` §365。
+
+## §2026-11-26-cloud-eval-phase-split
+
+- **背景**：`remote/offline_eval.run_cloud_eval` 186 行，池的取/建/起与轮末摘要都挤在主体里；
+  这是分诊里最后一个非 tools 的 150+ 格。
+
+- **决定**：切 pool-setup（`_acquire_eval_pool`，53 行）与 round-close（`_close_eval_round`，
+  18 行）两相，入口 186 → 142。池的**所有权不动**（外层 `finally` 仍关；`run_rounds` 内层
+  finally 仍先存回/关闭）。返回类型用 `serve_pool.ServePool | None`、摘要收 `dict[str, object]`，
+  不新增 `Any`（基线保持 6）。形状存量 35 → 34（该文件清零）。
+
+- **验证**：eval 池/云评估/接线/spec/round-ctx 聚焦用例 + `test_any_budget` + 全量 pygate 绿。
+  全文 → `docs/nn/engineering.md` §365。

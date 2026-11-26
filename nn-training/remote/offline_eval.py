@@ -736,6 +736,81 @@ class CloudEvalSpec:
     log: Any = None
 
 
+def _acquire_eval_pool(
+    bun_bin: str,
+    ts: Path,
+    pool_key: str,
+    requested: int,
+    *,
+    it: int,
+    eb: LogBundle,
+    log,
+) -> serve_pool.ServePool | None:
+    """**pool-setup 相**：取跨轮暖池，否则起一个新的长驻池；None = 本轮全走一次性 spawn。
+
+    长驻 worker 池（`docs/nn/runtime-opt.md` §22.7）：逐局 spawn 时每局重付一次 bun 启动 +
+    wasm 编译 + 首用 attestation×3 + 权重解析。收益 ∝ **每 lane 局数**（§22.2）：本地 16 核
+    （n_slots=12、100 局 ⇒ 8 局/lane）约 1.2–1.3×；96 vCPU 的 TPU 会话（92 slots、100 局
+    ⇒ ~1 局/lane）则基本持平（冷启动本来就能并发，无复用）。池**每轮一个**并在轮末关掉：
+    不把常驻进程留到段末（空闲占内存），而冷启动一轮只付一次。池上限取 `requested`
+    （= `min(slots, 本轮局数)`）：slots 远大于局数时按 slots 起池等于为几局预热几十个进程。
+
+    所有权仍在调用方（`run_cloud_eval` 的 finally 关）——这里不关成功的池；起不来的那个
+    当场关掉并返回 None（「只慢不错」的出路）。
+    """
+    pool: serve_pool.ServePool | None = None
+    reused = False
+    # 跨轮暖池：key 必须是 manifest 的 ts_code_sha256；薄池不取（take 会关旧）。
+    if len(pool_key) == 64 and CLOUD_EVAL_POOL.enabled:
+        pool = CLOUD_EVAL_POOL.take(pool_key, min_workers=requested)
+        reused = pool is not None
+        if pool is not None:
+            eb.add(
+                "worker池",
+                f"复用跨轮暖池：{pool.max_workers} 宽（请求 {requested}，mode=eval）"
+                "——本轮 spawned 应为 0",
+            )
+    if pool is None:
+        pool = serve_pool.make_pool(
+            bun_bin, ts, requested, log, for_script=serve_pool.EVAL_SCRIPT
+        )
+    if pool is not None and not getattr(pool, "closed", False):
+        # `take` 返回的暖池已经 `begin_round`；只有新池才 `start()`。
+        ready_n = int(getattr(pool, "max_workers", 0) or 0) if reused else pool.start()
+        if ready_n:
+            eb.add(
+                "worker池",
+                f"长驻 worker 池：{ready_n}/{requested} 就绪（同质入口 "
+                f"{serve_pool.SERVE_ANY_SCRIPT}，mode=eval）——逐局进程启动/权重解析只付一次，"
+                "单局失败自动回退一次性 spawn",
+            )
+        else:
+            eb.note(f"[eval-cloud] it{it} 长驻 worker 池起不来 ⇒ 本轮全部走一次性 spawn")
+            pool.close()
+            pool = None
+    return pool
+
+
+def _close_eval_round(out: dict[str, object], eb: LogBundle, it: int) -> None:
+    """**round-close 相**：落账摘要 + 整行 emit（没跑起来的轮什么都不打）。
+
+    正常轮恒空的重投后缀也在这里（机器卡过才留痕，与 rollout 腿的「整轮重投」同一口径）。
+    """
+    if not out.get("ran"):
+        return
+    retried = out.get("roundRetries")
+    eb.add(
+        "落账",
+        f"{out['settled']}/{out['games']} 局（失败 {out['failed']}，{out['sec']}s，"
+        f"wver={str(out['wver'])[:12]}…"
+        # 正常轮恒空（机器卡过才留痕，与 rollout 腿的「整轮重投」同一个口径）
+        + (f"，整轮重投 {retried} 次" if retried else "")
+        + "）",
+    )
+    # 整轮 eval 的读数合成一行（开评 / worker池 / servePool / 单局耗时 / winRate / 落账）。
+    eb.emit(f"[eval-cloud] it{it} 评估")
+
+
 def run_cloud_eval(spec: CloudEvalSpec) -> dict:
     """在云机跑第 `spec.it` 轮的 A 层评估：逐局落账 + `settle_eval_summary`。**永不抛**。
 
@@ -811,43 +886,9 @@ def run_cloud_eval(spec: CloudEvalSpec) -> dict:
             f"{len(todo)}/{len(pairs)} 局（语料 {len(plan.stages)} 关 × {plan.n_seeds} 种，"
             f"wver={key16[:12]}…，并发 {n_slots}）",
         )
-        # 长驻 worker 池（`docs/nn/runtime-opt.md` §22.7）：逐局 spawn 时每局重付一次 bun 启动 +
-        # wasm 编译 + 首用 attestation×3 + 权重解析。收益 ∝ **每 lane 局数**（§22.2）：本地 16 核
-        # （n_slots=12、100 局 ⇒ 8 局/lane）约 1.2–1.3×；96 vCPU 的 TPU 会话（92 slots、100 局
-        # ⇒ ~1 局/lane）则基本持平（冷启动本来就能并发，无复用）。池**每轮一个**并在轮末关掉：
-        # 不把常驻进程留到段末（空闲占内存），而冷启动一轮只付一次。
-        # 池上限取 `min(slots, 本轮局数)`：slots 远大于局数时（例：96 vCPU 会话给 92 slots、
-        # 本轮只有 8 局），按 slots 起池等于为 8 局预热 92 个进程 —— 纯浪费（冷启动排队）。
+        # 长驻 worker 池：取跨轮暖池或新建（起不来 ⇒ None，本轮走一次性 spawn）。
         requested = min(n_slots, len(todo))
-        reused = False
-        # 跨轮暖池：key 必须是 manifest 的 ts_code_sha256；薄池不取（take 会关旧）。
-        if len(pool_key) == 64 and CLOUD_EVAL_POOL.enabled:
-            pool = CLOUD_EVAL_POOL.take(pool_key, min_workers=requested)
-            reused = pool is not None
-            if pool is not None:
-                eb.add(
-                    "worker池",
-                    f"复用跨轮暖池：{pool.max_workers} 宽（请求 {requested}，mode=eval）"
-                    "——本轮 spawned 应为 0",
-                )
-        if pool is None:
-            pool = serve_pool.make_pool(
-                bun_bin, ts, requested, log, for_script=serve_pool.EVAL_SCRIPT
-            )
-        if pool is not None and not getattr(pool, "closed", False):
-            # `take` 返回的暖池已经 `begin_round`；只有新池才 `start()`。
-            ready_n = int(getattr(pool, "max_workers", 0) or 0) if reused else pool.start()
-            if ready_n:
-                eb.add(
-                    "worker池",
-                    f"长驻 worker 池：{ready_n}/{requested} 就绪（同质入口 "
-                    f"{serve_pool.SERVE_ANY_SCRIPT}，mode=eval）——逐局进程启动/权重解析只付一次，"
-                    "单局失败自动回退一次性 spawn",
-                )
-            else:
-                eb.note(f"[eval-cloud] it{it} 长驻 worker 池起不来 ⇒ 本轮全部走一次性 spawn")
-                pool.close()
-                pool = None
+        pool = _acquire_eval_pool(bun_bin, ts, pool_key, requested, it=it, eb=eb, log=log)
         lock = threading.Lock()
         seen: set[tuple[int, int]] = set()
         wins = [0]
@@ -910,15 +951,5 @@ def run_cloud_eval(spec: CloudEvalSpec) -> dict:
             pool.close()  # 幂等：内层 finally 已关过就是空操作（防「创建后、执行前」抛出的漏）
         set_eval_busy(False)
         out["sec"] = round(time.time() - t0, 2)
-    if out["ran"]:
-        eb.add(
-            "落账",
-            f"{out['settled']}/{out['games']} 局（失败 {out['failed']}，{out['sec']}s，"
-            f"wver={out['wver'][:12]}…"
-            # 正常轮恒空（机器卡过才留痕，与 rollout 腿的「整轮重投」同一个口径）
-            + (f"，整轮重投 {out['roundRetries']} 次" if out.get("roundRetries") else "")
-            + "）",
-        )
-        # 整轮 eval 的读数合成一行（开评 / worker池 / servePool / 单局耗时 / winRate / 落账）。
-        eb.emit(f"[eval-cloud] it{it} 评估")
+    _close_eval_round(out, eb, it)
     return out
