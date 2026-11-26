@@ -29,6 +29,27 @@
 
 ---
 
+## §364 分诊第二十七格：`trainer/run_rl_cluster.main`（2026-11-26）
+
+194 行 → **9 行**，三段接缝（全部逐字搬移，只有缩进变化）：
+
+| 接缝 | 行数 | 职责 |
+|---|---:|---|
+| `_parse_args` | 54 | `house_parser` + flag 声明（`--serve` / `--json` / 单实例锁 / 池容量 / `--mode` 透传） |
+| `_serve_cluster` | 79 | 惰性 import `loop_serve` → 进程级锁 → 集群快照 → `serve(ServeSpec)` → `--json` 收尾 / `finally` 释放 |
+| `_plan_view` | 59 | 发现默认课表 → `Supervisor` → 空表契约 → 诊断流重定向 → 人读表 / `--json` |
+
+`main` 只剩「钉 UTF-8 → 解析 → 按 `--serve` 分派」。惰性 import 位置不变（仍在 serve 路径内），
+`monkeypatch.setattr(loop_serve, "serve", …)` 与 `remote.code_snapshot.ensure_cluster_snapshot`
+照旧在调用时解析；`--json` 空表形状、诊断行走 stderr、锁在 `serve()` 前把关且 `finally` 释放均未动。
+
+**验证**：`test_serve_wiring` / `test_loop_plan_waiting` / `test_course_openable` /
+`test_single_resident_trainer` / `test_loop_plan_bc_rows` / `test_single_ppo_path` +
+形状/LOC/分层/入口在位 **123 条**绿；形状存量 **37 → 36**（该文件清零）。
+
+**被否决**：把 `_plan_view` 的 `build_rows` / `_fmt_table` 也搬出去 —— 它们已是独立函数，
+本刀只处理入口自身的三段编排；纯函数搬家只会增加 import 边。
+
 ## §363 分诊第二十六格：`worker/model_build.build_model`（2026-11-26）
 
 167 行 → **45 行**，六个接缝（torch 仍在函数内延迟导入，模块顶层不拉 torch）：

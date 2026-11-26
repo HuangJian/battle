@@ -11113,3 +11113,19 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：`tests/worker/test_model_build_warm_start.py` 用假 tensor 与独立重实现的原始循环
   对账（缩放、清零、keep_value）；加 `test_serve_wiring` 与形状/LOC/Any/assert/文本共 54 条绿。
   全文 → `docs/nn/engineering.md` §363。
+
+## §2026-11-26-run-rl-cluster-main-split
+
+- **背景**：`trainer/run_rl_cluster.main` 194 行，把 CLI 声明、`--serve` 写的一半与只读计划视图
+  塞在同一个入口；它同时是控制台轮询的 `--json` 契约面。
+
+- **决定**：拆 `_parse_args`(54) / `_serve_cluster`(79) / `_plan_view`(59)，`main`(9) 只做
+  「钉 UTF-8 → 解析 → 分派」。三段逐字搬移、只改缩进；惰性 import 仍在 serve 路径内，
+  `loop_serve.serve` / `code_snapshot.ensure_cluster_snapshot` 的 monkeypatch 接缝不变。
+  形状存量删 `trainer/run_rl_cluster.py: 1`（37 → 36，该文件清零）。
+
+- **被否决**：把 `build_rows` / `_fmt_table` 也搬走 —— 它们已是独立函数；本刀只切入口自身的
+  三段编排，纯函数搬家只会新增 import 边。
+
+- **验证**：六个入口/读面测试 + 形状/LOC/分层/入口在位共 123 条绿。
+  全文 → `docs/nn/engineering.md` §364。

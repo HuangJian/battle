@@ -29,6 +29,7 @@ TTL 缓存）：改 `--json` 的字段名/语义 = 改控制台，两边必须�
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import json
 import os
@@ -185,11 +186,8 @@ def _fmt_table(rows: list[dict]) -> str:
     return "\n".join(out)
 
 
-def main(argv: list[str] | None = None) -> int:
-    # CLI 入口钉 UTF-8（见 tests/subproc_util.py 的契约：每个 CLI 入口都要调）
-    from common.platform_utils import force_utf8_stdio
-
-    force_utf8_stdio()
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    """CLI 声明（与 `main` 分开：入口只剩「钉 UTF-8 → 解析 → 分派」）。"""
     ap = house_parser(description="单进程多课程训练调度器（R2c-1：只读计划视图）")
     ap.add_argument("--traj-root", default="tmp", help="课程 traj 根（每课 = <root>/<课>）")
     ap.add_argument("--courses", default="", help="逗号分隔；空 = 扫 --traj-root 自动发现")
@@ -241,87 +239,92 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--max-seconds", type=float, default=0.0, help="--serve：墙钟上限（0 = 不限；调试/CI 用）"
     )
-    args = ap.parse_args(argv)
+    return ap.parse_args(argv)
 
-    if args.serve:
-        # 惰性导入：只读路径（控制台每 10s 跑一次 --json）不得为 torch/网络付导入代价。
-        from trainer.loop_serve import (
-            ServeSpec,
-            acquire_cluster_lock,
-            cluster_lock_path,
-            release_cluster_lock,
-            serve,
+
+def _serve_cluster(args: argparse.Namespace) -> int:
+    """`--serve` 写的一半：进程级单实例锁 → 集群代码快照 → supervisor 跑到底。"""
+    # 惰性导入：只读路径（控制台每 10s 跑一次 --json）不得为 torch/网络付导入代价。
+    from trainer.loop_serve import (
+        ServeSpec,
+        acquire_cluster_lock,
+        cluster_lock_path,
+        release_cluster_lock,
+        serve,
+    )
+
+    # **进程级单实例锁**（2026-09-19 / R3-5）：单进程服务**所有**课程 ⇒ 双开就是两套调度器
+    # 抢同一批 traj（按课锁只能拦住「同一门课被两个进程跑」，拦不住「两套调度器各跑一半课程」）。
+    # 控制台启动前也会看它（registry + 锁双保险）；锁文件里的 holder 死了会自动收回。
+    lock_path = args.cluster_lock or cluster_lock_path()
+    if not acquire_cluster_lock(lock_path, force=args.force):
+        raise SystemExit(
+            f"[serve] 已有单进程服务器在跑（锁 {lock_path}）——一个进程服务所有课程，"
+            "双开会两套调度器抢同一批 traj；先停掉它，或确认无人在跑后加 --force 接管"
         )
+    # ---- 集群代码快照（2026-10-10 用户指令，plan/cluster-code-snapshot）----
+    # serve 是**进程内**多课程（本进程持集群锁 + 一个 Supervisor + N 门课，`loop_serve.py`
+    # 头注）⇒ 这里就是「会话」的锚点：一份 code.zip 供本会话所有课程——**包括之后由
+    # 控制台新开的课**（发现模式每拍重扫 traj-root）——使用。
+    # 警告不致命（同 hub）：publish 有 per-course 兜底，起不来比一份旧代码严重得多。
+    from remote.code_snapshot import ensure_cluster_snapshot
 
-        # **进程级单实例锁**（2026-09-19 / R3-5）：单进程服务**所有**课程 ⇒ 双开就是两套调度器
-        # 抢同一批 traj（按课锁只能拦住「同一门课被两个进程跑」，拦不住「两套调度器各跑一半课程」）。
-        # 控制台启动前也会看它（registry + 锁双保险）；锁文件里的 holder 死了会自动收回。
-        lock_path = args.cluster_lock or cluster_lock_path()
-        if not acquire_cluster_lock(lock_path, force=args.force):
-            raise SystemExit(
-                f"[serve] 已有单进程服务器在跑（锁 {lock_path}）——一个进程服务所有课程，"
-                "双开会两套调度器抢同一批 traj；先停掉它，或确认无人在跑后加 --force 接管"
+    try:
+        # 打一行进 trainer 日志（`[code-snapshot] sha12=… reused=…`）：事后要能对上
+        # 「本轮跑的是哪份代码」——§4.3 明确不做源码新鲜度检测，这行就是唯一的线索。
+        ensure_cluster_snapshot(anchor_kind="trainer", log=lambda m: print(m, flush=True))
+    except OSError as e:
+        print(
+            f"[serve] WARN: 集群代码快照未能建立（{e}）——publish 将回落 per-course 打包",
+            flush=True,
+        )
+    # `--mode` 是**课程级**附加参数（rl-config 默认按模式取）——只有它需要透传给开课。
+    # 它必须是本解析器**显式声明**的参数：不声明则 argparse 先以 unrecognized arguments
+    # 拒启（`--serve --mode goal` 的老坑）。★ §3：`--ppo` 已删除，无此项可透传。
+    extra: list[str] = []
+    if args.mode:
+        extra += ["--mode", args.mode]
+    try:
+        courses = [c.strip() for c in args.courses.split(",") if c.strip()]
+        # 空课程表 = **发现模式**（进程不绑课程：扫 --traj-root 下所有**已开课**的课
+        # ——账本 ∧ `training-enabled.txt`，见 `loop_plan.enabled_courses`——之后每个空转拍
+        # 再扫；一门课都没开也照常运行，队列空着等）。显式课程表则退化为「只看这几门」。
+        rep = serve(
+            ServeSpec(
+                courses=courses or None,
+                argv=extra,
+                traj_root=args.traj_root,
+                control_file=args.control_file or None,
+                iters=args.iters,
+                poll_sec=args.poll_sec,
+                capacities={
+                    "local_ppo": args.local_ppo_slots,
+                    "eval_local": args.local_eval_slots,
+                    "local_rollout": args.rollout_slots,
+                },
+                max_seconds=args.max_seconds,
             )
-        # ---- 集群代码快照（2026-10-10 用户指令，plan/cluster-code-snapshot）----
-        # serve 是**进程内**多课程（本进程持集群锁 + 一个 Supervisor + N 门课，`loop_serve.py`
-        # 头注）⇒ 这里就是「会话」的锚点：一份 code.zip 供本会话所有课程——**包括之后由
-        # 控制台新开的课**（发现模式每拍重扫 traj-root）——使用。
-        # 警告不致命（同 hub）：publish 有 per-course 兜底，起不来比一份旧代码严重得多。
-        from remote.code_snapshot import ensure_cluster_snapshot
-
-        try:
-            # 打一行进 trainer 日志（`[code-snapshot] sha12=… reused=…`）：事后要能对上
-            # 「本轮跑的是哪份代码」——§4.3 明确不做源码新鲜度检测，这行就是唯一的线索。
-            ensure_cluster_snapshot(anchor_kind="trainer", log=lambda m: print(m, flush=True))
-        except OSError as e:
+        )
+        if args.json:
             print(
-                f"[serve] WARN: 集群代码快照未能建立（{e}）——publish 将回落 per-course 打包",
-                flush=True,
-            )
-        # `--mode` 是**课程级**附加参数（rl-config 默认按模式取）——只有它需要透传给开课。
-        # 它必须是本解析器**显式声明**的参数：不声明则 argparse 先以 unrecognized arguments
-        # 拒启（`--serve --mode goal` 的老坑）。★ §3：`--ppo` 已删除，无此项可透传。
-        extra: list[str] = []
-        if args.mode:
-            extra += ["--mode", args.mode]
-        try:
-            courses = [c.strip() for c in args.courses.split(",") if c.strip()]
-            # 空课程表 = **发现模式**（进程不绑课程：扫 --traj-root 下所有**已开课**的课
-            # ——账本 ∧ `training-enabled.txt`，见 `loop_plan.enabled_courses`——之后每个空转拍
-            # 再扫；一门课都没开也照常运行，队列空着等）。显式课程表则退化为「只看这几门」。
-            rep = serve(
-                ServeSpec(
-                    courses=courses or None,
-                    argv=extra,
-                    traj_root=args.traj_root,
-                    control_file=args.control_file or None,
-                    iters=args.iters,
-                    poll_sec=args.poll_sec,
-                    capacities={
-                        "local_ppo": args.local_ppo_slots,
-                        "eval_local": args.local_eval_slots,
-                        "local_rollout": args.rollout_slots,
+                json.dumps(
+                    {
+                        "stop_reason": rep.stop_reason,
+                        "steps": rep.steps,
+                        "courses": rep.courses,
+                        "skipped": rep.skipped,
+                        "engines": rep.engines,
                     },
-                    max_seconds=args.max_seconds,
+                    ensure_ascii=False,
                 )
             )
-            if args.json:
-                print(
-                    json.dumps(
-                        {
-                            "stop_reason": rep.stop_reason,
-                            "steps": rep.steps,
-                            "courses": rep.courses,
-                            "skipped": rep.skipped,
-                            "engines": rep.engines,
-                        },
-                        ensure_ascii=False,
-                    )
-                )
-            return 0
-        finally:
-            release_cluster_lock(lock_path)
+        return 0
+    finally:
+        release_cluster_lock(lock_path)
 
+
+def _plan_view(args: argparse.Namespace) -> int:
+    """默认只读计划视图：`--json` 是控制台契约面，人读表是运维面。"""
     traj_root = args.traj_root
     # 默认课程表 = **已开课**的课（账本 ∧ training-enabled.txt）：与 `--serve` 同一判据（
     # 2026-09-20 用户口径「课程开训需要用户手动开启」），否则只读计划视图会把历史课也列成在训。
@@ -379,6 +382,17 @@ def main(argv: list[str] | None = None) -> int:
             "“入队/暂停/单例 trainingLoop 卡片”的操作面见 plan/r2-loop-task-queue.md §8 的 R2d。"
         )
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    # CLI 入口钉 UTF-8（见 tests/subproc_util.py 的契约：每个 CLI 入口都要调）
+    from common.platform_utils import force_utf8_stdio
+
+    force_utf8_stdio()
+    args = _parse_args(argv)
+    if args.serve:
+        return _serve_cluster(args)
+    return _plan_view(args)
 
 
 if __name__ == "__main__":
