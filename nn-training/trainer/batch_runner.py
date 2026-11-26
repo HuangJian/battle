@@ -211,24 +211,10 @@ class BatchEvalRunner:
         window = float(getattr(args, "eval_window_sec", 1500) or 1500)
         deadline = time.time() + window
         god = self.policy == "god"
-        if god:
-            # god 局无权语义，但 agent 的 /v1/task **一律**按 (kind, wver) 查缓存桶
-            #（无 god 豁免；weightsOf 是全量 sha 精确查表，2026-09-19 核实）⇒
-            # 必须 POST 占位 `{}` 并把它的 sha 当 wver 传。key16 仍是行身份（显示/去重）。
-            weights_bytes = b"{}"
-            wver = hashlib.sha256(weights_bytes).hexdigest()
-            key16 = f"god-{self.engine_epoch[:12]}"
-        else:
-            if not self.rl_path:
-                log("[batcheval] nn unit without weights — skipped")
-                return {"settled": 0, "total": 0, "dropped": 0}
-            # ★ 2026-10-15：指纹与推给节点的字节都必须是**整份** —— 离线腿回传的 delta 容器
-            #   （hub 原样落位）会让本机指纹与节点 cache 键对不上，且节点侧 `JSON.parse` 直接
-            #   报 `BWD1`。`read_standard` = 读侧落地 + 读字节（幂等；整份只读 4 字节）——
-            #   两件事都落在**读盘之后**，所以指纹必须算在它后面。
-            weights_bytes = weights_standard.read_standard(self.rl_path)
-            wver = common.distribution.weights_fingerprint(self.rl_path)
-            key16 = wver[:16]
+        ident = self._unit_weights()
+        if ident is None:
+            return {"settled": 0, "total": 0, "dropped": 0}
+        weights_bytes, wver, key16 = ident
         iter_base = batch_iter_id(self.run_id, str(self.batch.get("batch_id")))
         iter_id = f"{iter_base}u{self.unit_idx}"
         kind = self.kind
@@ -257,13 +243,7 @@ class BatchEvalRunner:
         # 单 unit 跨多关（一次性评估：用户 2026-09-19 第 2 条「不要 u0/u1/u2 阶段」）：
         # unit["pairs"] = [[stageId, seed], …] 时以它为准；缺省仍由 seeds × stageId 展开
         #（ladder/corpora 的单元逐字不变）。逐关参数走 unit["stageParams"]，见 params_for。
-        if unit.get("pairs"):
-            pairs = [(int(p[0]), int(p[1])) for p in unit["pairs"]]
-        else:
-            seeds = [int(s) for s in unit["seeds"]]
-            pairs = [(int(unit["stageId"]), s) for s in seeds]
-        total, done_before = len(pairs), self._done_keys(key16)
-        todo = [p for p in pairs if p not in done_before]
+        pairs, total, todo = self._unit_pairs(unit, key16)
         if not todo:
             log(f"[batcheval] {unit['rung']} u{self.unit_idx}: already settled — skip")
             return {"settled": total, "total": total, "dropped": 0}
@@ -281,19 +261,7 @@ class BatchEvalRunner:
             engine_epoch=self.engine_epoch,
         )
 
-        snapshot_path: str | None = None
-        local_slots = max(0, int(policy_cfg.get("evalLocalSlots", EVAL_LOCAL_SLOTS_DEFAULT)))
-        if not god and self.rl_path and local_slots > 0:
-            try:
-                snap = self.eval_log.parent / f"_batcheval_frozen_{self.unit_idx}.json"
-                shutil.copyfile(self.rl_path, str(snap))
-                snapshot_path = str(snap)
-            except OSError as e:
-                log(f"[batcheval] WARN weights snapshot failed — local off: {e}")
-        # god 局不读权重文件（export 侧 weightsText='{}'）：无 rl_path 时占位串即可
-        # （从不读取）；nn 局必须读派发时刻冻结快照。
-        local_weights = snapshot_path or ((self.rl_path or "no-weights-god") if god else None)
-
+        local_slots, local_weights = self._local_weights(policy_cfg, god)
         local_bun = TOOLCHAIN.bun_version(self.bun)
         # 节点门指纹（2026-09-17 统一）：与 rollout 门同源 = SSOT 清单的 codeHash。
         # ---- 派发通道：**每节点各自就绪、各自派单**（用户 2026-09-19 五条裁定）----
@@ -348,6 +316,54 @@ class BatchEvalRunner:
             trace=trace,
             req_scope=req_scope,
         )
+
+    def _unit_weights(self) -> tuple[bytes, str, str] | None:
+        """本单元的权重字节 + 指纹 + key16；None = nn 单元没有权重（整单元 0 局）。"""
+        if self.policy == "god":
+            # god 局无权语义，但 agent 的 /v1/task **一律**按 (kind, wver) 查缓存桶
+            #（无 god 豁免；weightsOf 是全量 sha 精确查表，2026-09-19 核实）⇒
+            # 必须 POST 占位 `{}` 并把它的 sha 当 wver 传。key16 仍是行身份（显示/去重）。
+            weights_bytes = b"{}"
+            wver = hashlib.sha256(weights_bytes).hexdigest()
+            return weights_bytes, wver, f"god-{self.engine_epoch[:12]}"
+        if not self.rl_path:
+            log("[batcheval] nn unit without weights — skipped")
+            return None
+        # ★ 2026-10-15：指纹与推给节点的字节都必须是**整份** —— 离线腿回传的 delta 容器
+        #   （hub 原样落位）会让本机指纹与节点 cache 键对不上，且节点侧 `JSON.parse` 直接
+        #   报 `BWD1`。`read_standard` = 读侧落地 + 读字节（幂等；整份只读 4 字节）——
+        #   两件事都落在**读盘之后**，所以指纹必须算在它后面。
+        weights_bytes = weights_standard.read_standard(self.rl_path)
+        wver = common.distribution.weights_fingerprint(self.rl_path)
+        return weights_bytes, wver, wver[:16]
+
+    def _unit_pairs(
+        self, unit: dict, key16: str
+    ) -> tuple[list[tuple[int, int]], int, list[tuple[int, int]]]:
+        """单元的对集：显式 `unit["pairs"]` 优先，否则 seeds × stageId；已结算的剔除。"""
+        if unit.get("pairs"):
+            pairs = [(int(p[0]), int(p[1])) for p in unit["pairs"]]
+        else:
+            seeds = [int(s) for s in unit["seeds"]]
+            pairs = [(int(unit["stageId"]), s) for s in seeds]
+        done_before = self._done_keys(key16)
+        return pairs, len(pairs), [p for p in pairs if p not in done_before]
+
+    def _local_weights(self, policy_cfg: dict, god: bool) -> tuple[int, str | None]:
+        """本机槽位数与「冻结快照 / god 占位」权重路径（None = 本机不跑）。"""
+        local_slots = max(0, int(policy_cfg.get("evalLocalSlots", EVAL_LOCAL_SLOTS_DEFAULT)))
+        snapshot_path: str | None = None
+        if not god and self.rl_path and local_slots > 0:
+            try:
+                snap = self.eval_log.parent / f"_batcheval_frozen_{self.unit_idx}.json"
+                shutil.copyfile(self.rl_path, str(snap))
+                snapshot_path = str(snap)
+            except OSError as e:
+                log(f"[batcheval] WARN weights snapshot failed — local off: {e}")
+        # god 局不读权重文件（export 侧 weightsText='{}'）：无 rl_path 时占位串即可
+        # （从不读取）；nn 局必须读派发时刻冻结快照。
+        local_weights = snapshot_path or ((self.rl_path or "no-weights-god") if god else None)
+        return local_slots, local_weights
 
     def _run_channels(self, plan: _UnitPlan) -> dict:
         """通道机器：**每节点一条通道**（就绪即派单 / 失联重探）+ 本机槽位 + 尾段竞速。

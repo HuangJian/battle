@@ -11260,3 +11260,23 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   `forget_weights_node` / `UpgradeAsk` 字段 / `note_ping`/`node_online` 入参）**0 差异**；
   dispatch 相关用例 **37 passed**；形状存量 27 文件 / 30 → 26 / 29；全量 pygate 绿。
   全文 → `docs/nn/engineering.md` §370。
+
+## §2026-11-26-open-unit-prerequisites
+
+- **背景**：`trainer/batch_runner._open_unit`（160 行）把三件不相干的前置条件揉在一条直线里：
+  权重身份（god 占位 / nn 读整份 + 指纹）、对集展开与剔除已结算、本机权重的冻结快照。
+
+- **决定**：抽 `_unit_weights`（返回 `(bytes, wver, key16) | None`，None = 整单元 0 局）、
+  `_unit_pairs`（显式 pairs 优先，否则 seeds × stage）、`_local_weights`（槽位 + 快照 / god 占位）；
+  `_open_unit` 只留阈值、身份、对集、心跳、节点门与 `_UnitPlan` 装配。契约面不动：
+  `_UnitPlan` 仍在唯一一处构造，守卫的字段闭集与 `_settle_unit(self, ledger)` 逐字不变。
+
+- **被否决**：把阈值（超时 / 背压 / 重探 / 宽限）也收成一个 `_UnitCfg` 载体 —— 它们是
+  11 个互不相关的读数，且本来就一一进 `_UnitPlan`；再包一层只会让读者多跳一次，「哪些
+  进了契约」反而更模糊。
+
+- **验证**：13 组假边界决策表（含快照失败 / 空 seeds / god 两种）逐字段比 plan、日志、
+  `clear_abort` / 心跳 / `codehash_ref` / 指纹 / `read_standard` 调用与快照落盘 ⇒ **0 差异**；
+  batch_runner 守门用例 **36 passed**（含钉「wver 赋值语句原文」的 `test_batch_eval_wver`）；
+  形状存量 26 文件 / 29 → 25 / 28；全量 pygate 绿。
+  全文 → `docs/nn/engineering.md` §371。

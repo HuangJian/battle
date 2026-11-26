@@ -2196,3 +2196,8 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > （`_stale_code` / `_bun_gate` / `_boot_gate` / `_admitted_node`；`_stale_code` 不返回布尔——
 > 这条分支没有准入路径）；16 组假边界决策表差分全同（含 `dedup_streak` / agent meta /
 > 升级请求字段），存量 27 文件 / 30 → 26 / 29（engineering §370）。
+
+> 2026-11-26 第三十三格：`trainer/batch_runner._open_unit` 160 → 139 + 三份前置条件
+> （`_unit_weights` / `_unit_pairs` / `_local_weights`；`_UnitPlan` 仍在入口唯一一处构造，
+> `_settle_unit(self, ledger)` 不动）；13 组假边界决策表差分全同（含快照失败 / 空 seeds /
+> god 两种），存量 26 文件 / 29 → 25 / 28（engineering §371）。

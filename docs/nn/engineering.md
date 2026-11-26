@@ -29,6 +29,35 @@
 
 ---
 
+## §371 分诊第三十三格：`trainer/batch_runner._open_unit` 160 → 139 + 三份前置条件（2026-11-26）
+
+单元开头的三段「把前置条件算清楚」各占二十到四十行，与三件不相干的事混在一起：
+权重身份（god 占位 / nn 读整份 + 指纹）、对集展开（显式 pairs / seeds×stage，剔除已结算）、
+本机权重的冻结快照。抽成 `_unit_weights` / `_unit_pairs` / `_local_weights` 后，
+`_open_unit` 只剩「阈值 → 身份 → 对集 → 心跳 → 节点门 → `_UnitPlan`」。
+
+| 段 | 行数 | 职责 |
+|---|---:|---|
+| `_open_unit` | 139 | 两处早退（缺权重 / 全结算）+ 阈值 + 通道表装配 |
+| `_unit_weights` | 33 | god `{}` 占位；nn 读整份（`read_standard`）后再算指纹 ⇒ `(bytes, wver, key16)` |
+| `_unit_pairs` | 12 | 显式 pairs 优先，否则 seeds × stageId；剔除 `_done_keys` |
+| `_local_weights` | 20 | `evalLocalSlots` / 冻结快照（失败只降本机） / god 占位串 |
+
+**契约面未动**：`_UnitPlan` 仍在 `_open_unit` 里**恰好构造一处**（守卫
+`test_open_unit_returns_the_contract_and_the_lanes_unpack_it_identically` 钉字段闭集），
+`_run` 的三句式与 `_settle_unit(self, ledger)` 都不变。
+
+**证明**：13 组假边界决策表（nn 缺权重 / 全已结算 / 部分已结算 / 显式 pairs / god 两种 /
+阈值全改 / 本机槽位 0 / 快照拷贝失败 / 空 seeds / lives+level+stageParams）逐字段比
+`_UnitPlan` 或早退 dict、日志、`clear_abort` 作用域、心跳入参、`codehash_ref` / 指纹 /
+`read_standard` 调用、冻结快照是否落盘 ⇒ **0 差异**。
+
+**守卫**：`tests/trainer/test_batch_runner_phases.py` + `test_batch_runner_split.py` +
+`test_batch_eval_wver.py` **36 passed**；`LONG_FUNCS_BASELINE` 删 `trainer/batch_runner.py`
+一格（26 文件 / 29 → 25 / 28）。⚠ `test_batch_eval_wver` 钉的是**源码文本**
+`wver = hashlib.sha256(weights_bytes).hexdigest()`：god 分支的抽取必须保留这条赋值语句本身
+（不能内联进 return），否则「截断可以在赋值处」那道守卫会失效。
+
 ## §370 分诊第三十二格：`trainer/dispatch_state.admit_rollout_nodes` 152 → 36 + 四道门（2026-11-26）
 
 节点准入表原来是一条 152 行的 `for` 循环，体内顺序问四道门（codeHash / bun /
