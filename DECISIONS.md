@@ -11280,3 +11280,20 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   batch_runner 守门用例 **36 passed**（含钉「wver 赋值语句原文」的 `test_batch_eval_wver`）；
   形状存量 26 文件 / 29 → 25 / 28；全量 pygate 绿。
   全文 → `docs/nn/engineering.md` §371。
+
+## §2026-11-26-bc-collect-exits
+
+- **背景**：`worker/bc_collect.collect_corpus`（159 行）把四个出口串在一条直线里：fixed 源、
+  全已齐、派发、ratio 裁剪；其中「apply_corpus_policy + 可选 append_ledger」在「全齐」与
+  「派发完」两处**逐字重复**，改裁剪条件要记得改两遍。
+
+- **决定**：四条出口各成函数（`_fixed_corpus` / `_complete_corpus` / `_dispatch_corpus` /
+  `_apply_policy`），种子段与目标集进 frozen `_CollectPlan`；两处裁剪归一到 `_apply_policy`
+  一个实现。空盘 + games_per_stage=0 的响亮拒留在 `_complete_corpus`（它就在那个出口）。
+
+- **被否决**：把 `_CollectPlan` 里的 `wins_only` 与 `policy` 合并成一个枚举 —— 二者正交
+  （smoke 强制 wins_only=False 且 policy="all"），合并会让「只看 wins_only 跳过裁剪」和
+  「裁剪策略是什么」搅在一起。
+
+- **验证**：13 组假边界决策表（异常文案逐字）**0 差异**；BC 用例 **48 passed**；
+  形状存量 25 文件 / 28 → 24 / 27；全量 pygate 绿。全文 → `docs/nn/engineering.md` §372。

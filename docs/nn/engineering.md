@@ -29,6 +29,30 @@
 
 ---
 
+## §372 分诊第三十四格：`worker/bc_collect.collect_corpus` 159 → 33 + 四条出口（2026-11-26）
+
+这一格是「四个出口串在一条直线里」：fixed 源（不派发只校验+记账）· 全已齐（空盘要响亮拒）·
+派发（失败任务数门槛）· ratio 裁剪（两处**逐字重复**的 apply + append_ledger）。最后那个重复
+本身就是债：裁剪条件一改就要记得改两遍。
+
+| 段 | 行数 | 职责 |
+|---|---:|---|
+| `collect_corpus` | 33 | fixed → 计划 → 全齐 / 派发 → 裁剪 |
+| `_fixed_corpus` | 36 | 校验 `data_fp` + 一条 `bc_corpus_mix` 账 |
+| `_collect_plan` | 34 | seeds × stages − landed（smoke 改覆盖且全量重采）`_CollectPlan` |
+| `_complete_corpus` | 24 | 空盘响亮拒 / 语料已齐 + 裁剪 |
+| `_dispatch_corpus` | 38 | `BcDispatchSpec` + failed/failed_nodes 门槛 |
+| `_apply_policy` | 18 | wins_only 跳过；apply + 可选 append_ledger（**两处重复的唯一实现**） |
+
+**证明**：13 组假边界决策表（fixed ±jsonl / 空 fixed_dir / 全齐 × wins_only / 空盘拒 /
+dispatch 失败带与不带熔断节点 / action_v6 两种标签策略 / smoke / 单关单种子 / games_per_stage=0）
+逐字比对返回路径、异常类型与文案、日志、账本事件、`apply_corpus_policy` 入参、
+`BcDispatchSpec` 全部字段与 `stage_json_for` 结果 ⇒ **0 差异**。
+
+**守卫**：`tests/worker/test_bc_corpus_ratio.py` + `tests/trainer/test_bc_loop.py`
+**48 passed**；`LONG_FUNCS_BASELINE` 删 `worker/bc_collect.py` 一格
+（25 文件 / 28 → 24 / 27）。
+
 ## §371 分诊第三十三格：`trainer/batch_runner._open_unit` 160 → 139 + 三份前置条件（2026-11-26）
 
 单元开头的三段「把前置条件算清楚」各占二十到四十行，与三件不相干的事混在一起：

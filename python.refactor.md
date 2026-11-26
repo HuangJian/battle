@@ -2201,3 +2201,8 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > （`_unit_weights` / `_unit_pairs` / `_local_weights`；`_UnitPlan` 仍在入口唯一一处构造，
 > `_settle_unit(self, ledger)` 不动）；13 组假边界决策表差分全同（含快照失败 / 空 seeds /
 > god 两种），存量 26 文件 / 29 → 25 / 28（engineering §371）。
+
+> 2026-11-26 第三十四格：`worker/bc_collect.collect_corpus` 159 → 33 + 四条出口
+> （`_fixed_corpus` / `_complete_corpus` / `_dispatch_corpus` / `_apply_policy`，种子面进
+> `_CollectPlan`；两处逐字重复的 ratio 落账归一）；13 组假边界决策表差分全同（含异常文案），
+> 存量 25 文件 / 28 → 24 / 27（engineering §372）。
