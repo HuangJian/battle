@@ -11297,3 +11297,19 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 
 - **验证**：13 组假边界决策表（异常文案逐字）**0 差异**；BC 用例 **48 passed**；
   形状存量 25 文件 / 28 → 24 / 27；全量 pygate 绿。全文 → `docs/nn/engineering.md` §372。
+
+## §2026-11-26-slot-fill-out-of-the-loop
+
+- **背景**：`worker/iter_rollout._drive_games`（173 行）把填槽器 `_fill` 写成闭包，靠默认
+  参数钉住 `inflight/pending/ceiling_sec`、靠 `nonlocal` 写 `supply_open`；一局的入口在
+  第 30 行才开始，读的人要同时握住六个存活位置。
+
+- **决定**：填槽搬成模块级 `_SlotFill`（15 字段参数袋，同 `RetryGameSpec` 先例）+ `_fill_slots`，
+  `supply_open` 改为**返回值**而不是 `nonlocal` 回写；`pending` 仍每轮重建，与旧默认参数绑定等价。
+
+- **被否决**：保留闭包、只把函数体拆成两个嵌套函数 —— 存活位置从六个变八个（两处默认参数
+  绑定 + 两处 nonlocal），只是把长函数切短，没把状态面变小。
+
+- **验证**：15 组假边界场景（假 Runtime/future/时钟）逐字段 **0 差异**；相关用例 109 passed；
+  `Any` 基线 13 → 12；LOC 936 → 966；存量 24 文件 / 27 → 23 / 26；全量 pygate 绿。
+  全文 → `docs/nn/engineering.md` §373。

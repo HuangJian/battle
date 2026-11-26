@@ -142,7 +142,7 @@
     "worker/greedy_quota.py": 12,
     "worker/greedy_round.py": 6,
     "worker/iter_job.py": 1,
-    "worker/iter_rollout.py": 13,
+    "worker/iter_rollout.py": 12,
     "worker/kickstart_burn.py": 8,
     "worker/loop_guards_gate.py": 14,
     "worker/loop_guards_leg.py": 7,

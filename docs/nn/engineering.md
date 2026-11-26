@@ -29,6 +29,34 @@
 
 ---
 
+## §373 分诊第三十五格：`worker/iter_rollout._drive_games` 173 → 128 + 填槽器出栈（2026-11-26）
+
+这一格是「闭包藏在三重 while 里」：`_fill` 用默认参数把 `inflight/pending/ceiling_sec` 钉住、
+又用 `nonlocal supply_open` 写外层状态，于是「一局的入口」在 173 行函数的第 30 行才开始，
+读的人要同时握住六个存活位置。
+
+| 段 | 行数 | 职责 |
+|---|---:|---|
+| `_drive_games` | 128 | 外层重投 × 内层逐局结算 |
+| `_SlotFill` | 15 字段 | 一拍填槽的全部输入（逐局只差「第几局」） |
+| `_fill_slots` | ~35 | 补重投 → 问调度器 → `ex.submit`；返回更新后的 `supply_open` |
+
+**关键选择**：`supply_open` 不再靠 `nonlocal` 写回，而是由 `_fill_slots` 返回 —— 这样
+“供给关没关”在调用点是一行赋值，不再是一个隔着 40 行的隐藏写面；`pending` 仍由外层
+每轮重建（重投后 `pending = sorted(stuck)`），旧闭包的默认参数绑定与此等价。
+
+**证明**：15 组假 Runtime / 假 future / 假时钟场景，逐字段比对返回/异常、日志、`rb.add`/
+`beat`、打点、`ex.submit` 的 `RetryGameSpec` 全字段与 ceiling、wait 超时、清理调用、
+`r.game_secs/game_attempts/argvs/round_retries` ⇒ **0 差异**。场景覆盖：静态两局、流式三局、
+空拍不关供给、供给立刻耗尽、单局停滞后重投、重投上限上抛、清半截失败告警、记账回调抛异常、
+两连停滞告警、同拍多局按派单序、进度节流命中/未中、带旧重投计数、两局停滞重投序、
+结果回填、既有读数保留。
+
+**守卫**：`tests/remote/test_remote_iter.py` + `test_worker_reap_stall.py` + `test_iter_run_spec.py`
+**109 passed**（含 any/shape 闸）；`Any` 13 → 12（`pending: list[Any]` 变 `list[int]`，新字段
+用 `runtime.Runtime` / `serve_pool.ServePool`），golden 同步调小；`LONG_FUNCS_BASELINE` 删
+`worker/iter_rollout.py`（24 文件 / 27 → 23 / 26）；LOC 936 → 966（< 1000）。
+
 ## §372 分诊第三十四格：`worker/bc_collect.collect_corpus` 159 → 33 + 四条出口（2026-11-26）
 
 这一格是「四个出口串在一条直线里」：fixed 源（不派发只校验+记账）· 全已齐（空盘要响亮拒）·

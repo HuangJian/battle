@@ -2206,3 +2206,7 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > （`_fixed_corpus` / `_complete_corpus` / `_dispatch_corpus` / `_apply_policy`，种子面进
 > `_CollectPlan`；两处逐字重复的 ratio 落账归一）；13 组假边界决策表差分全同（含异常文案），
 > 存量 25 文件 / 28 → 24 / 27（engineering §372）。
+
+> 2026-11-26 第三十五格：`worker/iter_rollout._drive_games` 173 → 128 + 填槽器出栈
+> （`_SlotFill` + `_fill_slots`，`supply_open` 改返回值、不再 `nonlocal`）；15 组假 Runtime /
+> 假时钟场景差分全同，`Any` 13 → 12，存量 24 文件 / 27 → 23 / 26（engineering §373）。

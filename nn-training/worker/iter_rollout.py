@@ -1268,6 +1268,70 @@ def _clean_stuck(r: _IterRun, stuck: list[int], ceiling_sec: float) -> None:
             )
 
 
+@dataclass(frozen=True, kw_only=True)
+class _SlotFill:
+    """一拍填槽需要的全部东西（`_fill_slots` 的唯一参数袋；逐局只差「第几局」）。"""
+
+    ex: runtime.Runtime
+    inflight: dict[Any, int]
+    pending: list[int]
+    argvs: list[list[str]]
+    next_game: Callable[[], list[str] | None] | None
+    workers: int
+    ceiling_sec: float
+    bun: str
+    exec_jd: Path
+    tsd: Path
+    timeout_sec: float
+    log: Callable[..., None]
+    explicit: bool
+    pool: serve_pool.ServePool | None
+    jd: Path
+
+
+def _fill_slots(f: _SlotFill, supply_open: bool) -> bool:
+    """把**空出来的槽位**立刻填满：先补重投的局，再问调度器「下一局派哪一关」。
+
+    ★ 这就是「采完一局 → 立即判断差额最大的关 → 立即用空出的 worker 采它」：
+    每结算一局都会回头叫它一次，从来不「等这一批跑完」。返回更新后的 `supply_open`。
+    """
+    while len(f.inflight) < f.workers:
+        if f.pending:
+            i = f.pending.pop(0)
+        elif supply_open and f.next_game is not None:
+            argv = f.next_game()
+            if argv is None:
+                supply_open = False  # 所有关满额（或触顶）⇒ 不再派新局
+                break
+            if not argv:
+                # 本拍没活可派（在飞的局预计就补齐）——**不关供给**：
+                # 下一局结算后 `_fill_slots` 会再问一次（关了就静默短采）。
+                break
+            f.argvs.append(list(argv))
+            i = len(f.argvs) - 1
+        else:
+            break
+        f.inflight[
+            f.ex.submit(
+                _run_one_game_bounded,
+                RetryGameSpec(
+                    f.bun,
+                    f.argvs[i],
+                    f.exec_jd,
+                    f.tsd,
+                    _game_out_dir(f.argvs[i]),
+                    f.timeout_sec,
+                    f.log,
+                    f.explicit,
+                    f.pool,
+                    job_dir=f.jd,
+                ),
+                ceiling_sec=f.ceiling_sec,
+            )
+        ] = i
+    return supply_open
+
+
 def _drive_games(r: _IterRun) -> None:
     """逐局流式调度 + 带超时 wait + 机器级停滞重投（原循环体逐字搬移）。"""
     jd, exec_jd, tsd = r.jd, r.exec_jd, r.tsd
@@ -1293,53 +1357,24 @@ def _drive_games(r: _IterRun) -> None:
             ceiling_sec = game_watch.game_ceiling_sec(timeout_sec, explicit=explicit)
             inflight: dict[Any, int] = {}
 
-            def _fill(
-                inflight: dict[Any, int] = inflight,
-                pending: list[Any] = pending,
-                ceiling_sec: float = ceiling_sec,
-            ) -> None:
-                """把**空出来的槽位**立刻填满：先补重投的局，再问调度器「下一局派哪一关」。
-
-                ★ 这就是「采完一局 → 立即判断差额最大的关 → 立即用空出的 worker 采它」：
-                每结算一局都会回头叫它一次，从来不「等这一批跑完」。
-                """
-                nonlocal supply_open
-                while len(inflight) < workers:
-                    if pending:
-                        i = pending.pop(0)
-                    elif supply_open and next_game is not None:
-                        argv = next_game()
-                        if argv is None:
-                            supply_open = False  # 所有关满额（或触顶）⇒ 不再派新局
-                            break
-                        if not argv:
-                            # 本拍没活可派（在飞的局预计就补齐）——**不关供给**：
-                            # 下一局结算后 `_fill` 会再问一次（关了就静默短采）。
-                            break
-                        argvs.append(list(argv))
-                        i = len(argvs) - 1
-                    else:
-                        break
-                    inflight[
-                        ex.submit(
-                            _run_one_game_bounded,
-                            RetryGameSpec(
-                                bun,
-                                argvs[i],
-                                exec_jd,
-                                tsd,
-                                _game_out_dir(argvs[i]),
-                                timeout_sec,
-                                log,
-                                explicit,
-                                pool,
-                                job_dir=jd,
-                            ),
-                            ceiling_sec=ceiling_sec,
-                        )
-                    ] = i
-
-            _fill()
+            fill = _SlotFill(
+                ex=ex,
+                inflight=inflight,
+                pending=pending,
+                argvs=argvs,
+                next_game=next_game,
+                workers=workers,
+                ceiling_sec=ceiling_sec,
+                bun=bun,
+                exec_jd=exec_jd,
+                tsd=tsd,
+                timeout_sec=timeout_sec,
+                log=log,
+                explicit=explicit,
+                pool=pool,
+                jd=jd,
+            )
+            supply_open = _fill_slots(fill, supply_open)
             # 循环用**带超时的 wait** 而不是 `as_completed`：`as_completed` 只在「有局结算」时
             # 才醒，而进度行与心跳都挂在结算上 ⇒ 所有线程一起卡住时它们一起哑，日志进入完全
             # 静默（2026-09-25 现场：5s 的 270/336 之后 890s 一行都没有）。带超时的 wait 每
@@ -1415,7 +1450,7 @@ def _drive_games(r: _IterRun) -> None:
                         last_log_at = now
                         rb.beat("kind=iter rollout", now=now)
                     # ★ 槽位空出来了 ⇒ 立刻问调度器「下一局派哪一关」（一局一拍）。
-                    _fill()
+                    supply_open = _fill_slots(fill, supply_open)
                 last_settle = now
             if not stuck:
                 # 本次尝试全部收齐（重投集合空）⇒ 收工。流式档「还有没有下一局」由上一步
