@@ -11157,3 +11157,27 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 
 - **验证**：eval 池/云评估/接线/spec/round-ctx 聚焦用例 + `test_any_budget` + 全量 pygate 绿。
   全文 → `docs/nn/engineering.md` §365。
+
+## §2026-11-26-intent-probe-main-split
+
+- **背景**：`worker/train/intent_probe.main` 181 行，把数据索引/按局切分、六块 npy 拼装、
+  注入特征、两级采样、训练循环、val 前向与报告写盘串在一个函数里；它是分诊里最大的非
+  `tools/` 格（与 `hub/smoke_loopback.main` 并列 181）。
+
+- **决定**：切六段 —— `_index_shards`(29) / `_load_split`(31) / `_inject_features`(4) /
+  `_sample_train`(48) / `_fit`(30) / `_predict_val`(13)，入口 181 → 58。载体用两个 frozen
+  dataclass：`_Split`（六个整块张量）与 `_TrainSet`（采样后的三块 + 注入），不新增 `Any`
+  （`args` 沿本文件既有的非注入口径）。P2-6c「注入必须先于乱序采样构建」的约束从注释改成
+  **调用顺序**（`_inject_features` 在 `_sample_train` 之前），理由搬进后者 docstring。
+
+- **顺带修复（同一刀）**：P2-6c 给两臂返回值加了 `sel` 后，两个调用点仍是 6 名平铺解包 ⇒
+  `--quota>0` 的两条臂都 `ValueError`（A 臂是默认口径），自 2026-09-02 起该路径不可用且无用例
+  覆盖。改为 `(五行), sel = …`，并按 §7 先写红：`tests/worker/test_intent_probe_sampling.py`
+  3 条（A 臂、B 臂、同 seed 可复现）；未改代码上 3/3 红，改后绿。
+
+- **被否决**：把索引与载入合成「准备数据」一段 —— 失败面不同（无 shard vs 内存上限），
+  合并还要再造一个 6 字段载体。
+
+- **验证**：新用例 3 条 + 形状/`Any`/assert/print 预算 22 条 + 全量 pygate **7058 passed /
+  13 skipped**（ruff + mypy 绿）。形状存量 **34 → 33**（`intent_probe.py` 清零）。
+  全文 → `docs/nn/engineering.md` §366。

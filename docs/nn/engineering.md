@@ -29,6 +29,41 @@
 
 ---
 
+## §366 分诊第二十九格：`worker/train/intent_probe.main`（2026-11-26）
+
+181 行 → **58 行**，六段接缝（逐字搬移，只有缩进与参数名变化）；同一刀还抓到配额采样两臂的解包缺陷。
+
+| 相位 | 行数 | 职责 |
+|---|---:|---|
+| `_index_shards`（模块级） | 29 | 各数据根下 shard 索引（`intent.npy` 存在才算）+ 按局切 train/val |
+| `_load_split`（模块级） | 31 | 按 shard 次序列 load 六个 npy 拼成一块；`max_train>0` 时仍按 1.5 倍设内存上限 |
+| `_inject_features`（模块级） | 4 | `build_injection` 的 `(prev one-hot(8), duration)` 列块 |
+| `_sample_train`（模块级） | 48 | 上限乱序子采样 → 两类配额采样 → `--ss-eps` 自喂混合；注入按同一下标同步筛 |
+| `_fit`（模块级） | 30 | Adam + CE 的 epoch 循环（enemy/anchor 头保持随机初始化） |
+| `_predict_val`（模块级） | 13 | val 划分 1024 一批前向 → 逐帧 argmax |
+
+两个 frozen dataclass 做载体：`_Split`（obs/scal/intent/bucket/root/self_inj）、`_TrainSet`
+（采样后的 obs/scal/intent/inj）。`main` 只剩编排：切分 → 载入 → 构建注入 → 采样 → 建网 →
+`_fit` → 存权重 → `_predict_val` → `_build_report` → 写盘。注入特征**先于**采样构建的
+P2-6c 约束由调用顺序结构性保证（注释搬进 `_sample_train` 的 docstring）。
+
+### 同一刀修掉的缺陷：两条配额臂都解包失败
+
+P2-6c（2026-09-02）给 `quota_sample` / `quota_sample_priority` 的返回值加了 `sel`
+（`(五行, sel)`），但两个调用点仍按 6 名平铺解包 —— `--quota>0` 的 A 臂（默认
+`--priority-root=-1`）与 B 臂（`--priority-root>=0`）都在
+`ValueError: not enough values to unpack (expected 6, got 2)` 上原地就炸，也就是说这条
+采样路径自那时起没跑通过。没有任何用例碰它，所以门禁一直绿。改成
+`(xo, xs, xi, xb, xinj), sel = …`，并补 `tests/worker/test_intent_probe_sampling.py`
+（3 条：A 臂行数/每类配额、B 臂同契约、同 seed 逐元素可复现）；改前先在未动代码上确认红。
+
+**验证**：新用例 3 条 + 形状/`Any`/assert/print 预算 22 条 + 全量 pygate
+**7058 passed / 13 skipped**（ruff + mypy 绿）。形状存量 **34 → 33**（该文件清零）。
+
+**被否决**：把 `_index_shards` 与 `_load_split` 合成一个「准备数据」大段 —— 索引只花一次
+`os.listdir`，载入按 shard 拼 6 个数组，两者的失败面（无 shard / 内存上限）不同，且合并后
+还要再造一个 6 字段载体。
+
 ## §365 分诊第二十八格（批）：`store_offline_artifact` 与 `run_cloud_eval`（2026-11-26）
 
 两格同批，都是「把入口编排切成相位」；被搬的语句逐字未改，只有缩进与参数名变化。

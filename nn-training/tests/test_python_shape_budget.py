@@ -84,7 +84,6 @@ LONG_FUNCS_BASELINE: dict[str, int] = {
     "worker/ppo/backend.py": 1,
     "worker/scripts/eval_intent_m5.py": 1,
     "worker/train/bc.py": 1,
-    "worker/train/intent_probe.py": 1,
 }
 
 #: 存量：包含 >8 参数函数的文件 → 个数。

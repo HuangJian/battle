@@ -2163,3 +2163,10 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > `remote/offline_eval.run_cloud_eval` 186→142（pool-setup `_acquire_eval_pool` 53 /
 > round-close `_close_eval_round` 18；池所有权仍在外层 `finally`，不新增 `Any`）；
 > 两个文件形状存量清零，36 → 34（engineering §365）。
+
+> 2026-11-26 第二十九格：`worker/train/intent_probe.main` 181→58（`_index_shards` 29 /
+> `_load_split` 31 / `_inject_features` 4 / `_sample_train` 48 / `_fit` 30 /
+> `_predict_val` 13；载体 `_Split` / `_TrainSet`，注入先于采样的 P2-6c 约束改由调用顺序
+> 保证）；同一刀抓到两条配额臂自 P2-6c 起的 `ValueError` 解包缺陷 —— 补
+> `tests/worker/test_intent_probe_sampling.py` 3 条（先红后绿）；存量 34 → 33
+> （engineering §366）。

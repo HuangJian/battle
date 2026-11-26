@@ -270,16 +270,38 @@ def _build_report(
     return report
 
 
-def main() -> None:
-    args = _probe_parser().parse_args()
+@dataclass(frozen=True)
+class _Split:
+    """一个数据划分（train / val）拼好的整块张量（`_load_split` 的返回）。"""
 
-    torch.manual_seed(args.seed)
-    rng = np.random.RandomState(args.seed)
+    obs: np.ndarray
+    scal: np.ndarray
+    intent: np.ndarray
+    bucket: np.ndarray
+    root: np.ndarray
+    self_inj: np.ndarray
 
-    # ---- 索引 shards，按局切分 train/val（多数据根合并训练，shards[i] 为完整路径）----
-    shards = []
+
+@dataclass(frozen=True)
+class _TrainSet:
+    """采样后的训练张量 + 注入特征（`_sample_train` 的返回）。"""
+
+    obs: np.ndarray
+    scal: np.ndarray
+    intent: np.ndarray
+    inj: np.ndarray | None
+
+
+def _index_shards(
+    roots: list[str], rng: np.random.RandomState, val_frac: float
+) -> tuple[list[str], list[int], list[int], list[int]]:
+    """索引各数据根下的 shards 并**按局**切 train/val（同局相邻帧不跨集）。
+
+    返回 (shards, 每个 shard 的根索引, train 下标, val 下标)；shards 为完整路径。
+    """
+    shards: list[str] = []
     root_of: dict[str, int] = {}
-    for ri, root in enumerate(args.data):
+    for ri, root in enumerate(roots):
         root_of[root] = ri
         shards += [
             os.path.join(root, d)
@@ -289,67 +311,81 @@ def main() -> None:
         ]
     shards = sorted(shards)
     if not shards:
-        print(f"[probe] no shards under {args.data}", file=sys.stderr)
+        print(f"[probe] no shards under {roots}", file=sys.stderr)
         sys.exit(1)
     # 每个 shard 的根索引（B 臂 priority-root 需要按根识别帧来源）。
     shard_roots = [root_of[os.path.dirname(d)] for d in shards]
     perm = rng.permutation(len(shards))
-    n_val = max(1, int(len(shards) * args.val_shard_frac))
+    n_val = max(1, int(len(shards) * val_frac))
     val_idx = set(perm[:n_val].tolist())
-
-    def load_split(indices) -> tuple[np.ndarray, ...]:
-        obs_l, sc_l, in_l, bk_l, rt_l, inx_l = [], [], [], [], [], []
-        total = 0
-        cap = args.max_train * 1.5 if args.max_train > 0 else 0
-        for i in indices:
-            base = shards[i]
-            o = np.load(os.path.join(base, "obs.npy"))
-            total += o.shape[0]
-            if cap > 0 and total > cap:
-                break
-            obs_l.append(o)
-            sc_l.append(np.load(os.path.join(base, "scalars.npy")))
-            in_l.append(np.load(os.path.join(base, "intent.npy")))
-            bk_l.append(np.load(os.path.join(base, "bucket.npy")))
-            rt_l.append(np.full(o.shape[0], shard_roots[i], dtype=np.int8))
-            # self-feed 注入（P1-2 scheduled sampling 数据源；缺省 -1 哨兵 = 该帧无 self 注入）。
-            sj = os.path.join(base, "self_inj.npy")
-            inx_l.append(
-                np.load(sj) if os.path.exists(sj) else np.full(o.shape[0], -1.0, dtype=np.float32)
-            )
-        return (
-            np.concatenate(obs_l),
-            np.concatenate(sc_l),
-            np.concatenate(in_l).astype(np.int64),
-            np.concatenate(bk_l).astype(np.int64),
-            np.concatenate(rt_l).astype(np.int64),
-            np.concatenate(inx_l).astype(np.float32),
-        )
-
-    val_shards = [i for i in range(len(shards)) if i in val_idx]
     train_shards = [i for i in range(len(shards)) if i not in val_idx]
-    xo, xs, xi, xb, xr, xinj = load_split(train_shards)
+    val_shards = [i for i in range(len(shards)) if i in val_idx]
+    return shards, shard_roots, train_shards, val_shards
 
-    # 注入特征（teacher-forced）**必须先于任何子采样构建**（P2-6c，2026-09-02 修复）：
-    # build_injection 依赖序列顺序（prev = seq[i-1]、dur 连续计数），而
-    # max_train / quota 采样都是乱序选取——在乱序后的 xi 上重建会把"上一帧"变成
-    # "随机他帧"（旧实现，探针结论不可信）。全量有序构建 → 按采样 sel 同步取行。
-    # load_split 输出在 shard 内部保持帧序（scan_shards 排序拼接），跨 shard 边界的
-    # prev 断裂是既有的近似（注释已承认 per-shard 重建不可行，探针只测特征增益）。
-    train_inj = None
-    if args.inject:
-        t_inj_oh, t_inj_dur = build_injection(xi)
-        train_inj = np.concatenate([t_inj_oh, t_inj_dur[:, None]], axis=1).astype(np.float32)
 
+def _load_split(
+    shards: list[str], indices: list[int], shard_roots: list[int], max_train: int
+) -> _Split:
+    """把若干 shard 的 npy 按序拼成一块（`max_train` > 0 时按 1.5 倍设内存上限）。"""
+    obs_l, sc_l, in_l, bk_l, rt_l, inx_l = [], [], [], [], [], []
+    total = 0
+    cap = max_train * 1.5 if max_train > 0 else 0
+    for i in indices:
+        base = shards[i]
+        o = np.load(os.path.join(base, "obs.npy"))
+        total += o.shape[0]
+        if cap > 0 and total > cap:
+            break
+        obs_l.append(o)
+        sc_l.append(np.load(os.path.join(base, "scalars.npy")))
+        in_l.append(np.load(os.path.join(base, "intent.npy")))
+        bk_l.append(np.load(os.path.join(base, "bucket.npy")))
+        rt_l.append(np.full(o.shape[0], shard_roots[i], dtype=np.int8))
+        # self-feed 注入（P1-2 scheduled sampling 数据源；缺省 -1 哨兵 = 该帧无 self 注入）。
+        sj = os.path.join(base, "self_inj.npy")
+        inx_l.append(
+            np.load(sj) if os.path.exists(sj) else np.full(o.shape[0], -1.0, dtype=np.float32)
+        )
+    return _Split(
+        obs=np.concatenate(obs_l),
+        scal=np.concatenate(sc_l),
+        intent=np.concatenate(in_l).astype(np.int64),
+        bucket=np.concatenate(bk_l).astype(np.int64),
+        root=np.concatenate(rt_l).astype(np.int64),
+        self_inj=np.concatenate(inx_l).astype(np.float32),
+    )
+
+
+def _inject_features(intent: np.ndarray) -> np.ndarray:
+    """teacher-forced 注入特征：(prev one-hot(8), duration) 拼成一列块。"""
+    onehot, dur = build_injection(intent)
+    return np.concatenate([onehot, dur[:, None]], axis=1).astype(np.float32)
+
+
+def _sample_train(
+    split: _Split, inj: np.ndarray | None, args, rng: np.random.RandomState
+) -> _TrainSet:
+    """按混合上限与每类配额采样训练帧，注入特征按同一下标同步筛。
+
+    注入特征**必须先于任何子采样构建**（P2-6c，2026-09-02 修复）：
+    `build_injection` 依赖序列顺序（prev = seq[i-1]、dur 连续计数），而
+    max_train / quota 采样都是乱序选取——在乱序后的 intent 上重建会把「上一帧」变成
+    「随机他帧」（旧实现，探针结论不可信）。全量有序构建 → 按采样 sel 同步取行。
+    `_load_split` 输出在 shard 内部保持帧序，跨 shard 边界的 prev 断裂是既有的近似
+    （注释已承认 per-shard 重建不可行，探针只测特征增益）。
+    """
+    xo, xs, xi, xb, xr = split.obs, split.scal, split.intent, split.bucket, split.root
+    xinj = split.self_inj
     # 先按混合上限子采样、再按类配额采样（P2-2，配额 ≪ 上限时以配额为准）。
     if args.max_train > 0 and len(xi) > args.max_train:
         sel = rng.choice(len(xi), size=args.max_train, replace=False)
         xo, xs, xi, xb, xr, xinj = xo[sel], xs[sel], xi[sel], xb[sel], xr[sel], xinj[sel]
-        if train_inj is not None:
-            train_inj = train_inj[sel]
+        if inj is not None:
+            inj = inj[sel]
     if args.quota > 0:
         if args.priority_root >= 0:
-            xo, xs, xi, xb, xinj, sel = quota_sample_priority(
+            # 两臂都返回 `(五行, sel)`（P2-6c）：行元组与下标分开解包。
+            (xo, xs, xi, xb, xinj), sel = quota_sample_priority(
                 QuotaSampleSpec(
                     xi=xi,
                     xo=xo,
@@ -363,45 +399,29 @@ def main() -> None:
                 )
             )
         else:
-            xo, xs, xi, xb, xinj, sel = quota_sample(xi, xo, xs, xb, xinj, args.quota, rng)
-        if train_inj is not None:
-            train_inj = train_inj[sel]
+            (xo, xs, xi, xb, xinj), sel = quota_sample(xi, xo, xs, xb, xinj, args.quota, rng)
+        if inj is not None:
+            inj = inj[sel]
+    # P1-2 scheduled sampling（离线 self 注入混合）：训练时按 ε 概率用自喂 prev/dur
+    # 注入，让模型见过真实 self-feed 输入分布（收敛 M5 的 12.8pp teacher/self-feed gap）。
+    if args.inject and args.ss_eps > 0:
+        assert inj is not None  # args.inject 分支内必已构建（mypy 收窄）
+        avail = xinj[:, 0] >= 0  # 有 self_inj 的帧
+        mask = avail & (rng.rand(len(xi)) < args.ss_eps)
+        inj = np.where(mask[:, None], xinj, inj)
+    return _TrainSet(obs=xo, scal=xs, intent=xi, inj=inj)
 
-    vo, vs_, vi, vb, _vr, _vx = load_split(val_shards)
-    val_inj = None
-    if args.inject:
-        v_inj_oh, v_inj_dur = build_injection(vi)
-        val_inj = np.concatenate([v_inj_oh, v_inj_dur[:, None]], axis=1).astype(np.float32)
-        # P1-2 scheduled sampling（离线 self 注入混合）：训练时按 ε 概率用自喂 prev/dur
-        # 注入，让模型见过真实 self-feed 输入分布（收敛 M5 的 12.8pp teacher/self-feed gap）。
-        if args.ss_eps > 0:
-            assert train_inj is not None  # args.inject 分支内必已构建（mypy 收窄）
-            avail = xinj[:, 0] >= 0  # 有 self_inj 的帧
-            mask = avail & (rng.rand(len(xi)) < args.ss_eps)
-            train_inj = np.where(mask[:, None], xinj, train_inj)
 
-    print(
-        f"[probe] shards={len(shards)} (train {len(train_shards)} / val {len(val_shards)}) "
-        f"trainFrames={len(xi)} valFrames={len(vi)} inject={args.inject} quota={args.quota}",
-        file=sys.stderr,
-    )
-    print(
-        f"[probe] label dist train={np.bincount(xi, minlength=8).tolist()} "
-        f"val={np.bincount(vi, minlength=8).tolist()}",
-        file=sys.stderr,
-    )
-
-    dev = torch.device("cpu")
-    model = IntentProbeNet(NetSpec(h=args.h, d=args.d), inject=args.inject).to(dev)
+def _fit(model: IntentProbeNet, train: _TrainSet, args) -> None:
+    """CE 训练 intent 头（enemy/anchor 头保持随机初始化，留给 M8 接管）。"""
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     ce = nn.CrossEntropyLoss()
 
-    to = torch.from_numpy(xo)
-    ts = torch.from_numpy(xs)
-    ti = torch.from_numpy(xi)
-    t_inj_t = torch.from_numpy(train_inj) if train_inj is not None else None
-    v_inj_t = torch.from_numpy(val_inj) if val_inj is not None else None
-    n = len(xi)
+    to = torch.from_numpy(train.obs)
+    ts = torch.from_numpy(train.scal)
+    ti = torch.from_numpy(train.intent)
+    t_inj_t = torch.from_numpy(train.inj) if train.inj is not None else None
+    n = len(train.intent)
 
     for ep in range(args.epochs):
         model.train()
@@ -423,26 +443,72 @@ def main() -> None:
             file=sys.stderr,
         )
 
+
+def _predict_val(model: IntentProbeNet, split: _Split, inj: np.ndarray | None) -> np.ndarray:
+    """对 val 划分批量前向，返回逐帧 argmax 预测。"""
+    model.eval()
+    preds = []
+    with torch.no_grad():
+        for b in range(0, len(split.intent), 1024):
+            logits = model.intent_forward(
+                torch.from_numpy(split.obs[b : b + 1024]),
+                torch.from_numpy(split.scal[b : b + 1024]),
+                torch.from_numpy(inj[b : b + 1024]) if inj is not None else None,
+            )
+            preds.append(logits.argmax(1).numpy())
+    return np.concatenate(preds)
+
+
+def main() -> None:
+    args = _probe_parser().parse_args()
+
+    torch.manual_seed(args.seed)
+    rng = np.random.RandomState(args.seed)
+
+    # ---- 索引 shards，按局切分 train/val（多数据根合并训练，shards[i] 为完整路径）----
+    shards, shard_roots, train_shards, val_shards = _index_shards(
+        args.data, rng, args.val_shard_frac
+    )
+    train_split = _load_split(shards, train_shards, shard_roots, args.max_train)
+    # 注入特征先于任何子采样构建（理由见 `_sample_train`）。
+    train_inj = _inject_features(train_split.intent) if args.inject else None
+    train = _sample_train(train_split, train_inj, args, rng)
+
+    val_split = _load_split(shards, val_shards, shard_roots, args.max_train)
+    val_inj = _inject_features(val_split.intent) if args.inject else None
+
+    print(
+        f"[probe] shards={len(shards)} (train {len(train_shards)} / val {len(val_shards)}) "
+        f"trainFrames={len(train.intent)} valFrames={len(val_split.intent)} "
+        f"inject={args.inject} quota={args.quota}",
+        file=sys.stderr,
+    )
+    print(
+        f"[probe] label dist train={np.bincount(train.intent, minlength=8).tolist()} "
+        f"val={np.bincount(val_split.intent, minlength=8).tolist()}",
+        file=sys.stderr,
+    )
+
+    model = IntentProbeNet(NetSpec(h=args.h, d=args.d), inject=args.inject).to(
+        torch.device("cpu")
+    )
+    _fit(model, train, args)
+
     # M5：保存全尺寸权重（intent_net 导出格式，含主干 shape 断言 + 三头）。
     if args.save:
         export_intent_weights(model, args.save)
         print(f"[probe] weights saved -> {args.save}", file=sys.stderr)
 
     # ---- 评估：overall + 三桶 acc vs majority 余量 ----
-    model.eval()
-    preds = []
-    with torch.no_grad():
-        for b in range(0, len(vi), 1024):
-            logits = model.intent_forward(
-                torch.from_numpy(vo[b : b + 1024]),
-                torch.from_numpy(vs_[b : b + 1024]),
-                v_inj_t[b : b + 1024] if v_inj_t is not None else None,
-            )
-            preds.append(logits.argmax(1).numpy())
-    pred = np.concatenate(preds)
+    pred = _predict_val(model, val_split, val_inj)
 
     report = _build_report(
-        vi=vi, pred=pred, vb=vb, args=args, shards=shards, n_train=len(xi)
+        vi=val_split.intent,
+        pred=pred,
+        vb=val_split.bucket,
+        args=args,
+        shards=shards,
+        n_train=len(train.intent),
     )
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
