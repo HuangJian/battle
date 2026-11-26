@@ -29,6 +29,38 @@
 
 ---
 
+## §369 分诊第三十一格：`remote/rollout_relay.probe_hub` 154 → 32 + 五段（2026-11-26）
+
+分诊表里剩余的最大一格**非排除项**（`tools/*`、`worker/scripts/*`、`offline_boot` 分片与
+`__init__` 装配对象四族照 §345 的先例不占名额）。判据不是行数：**一条 `if not ok_route:`
+装了 110 行** —— 路由通了只拼一行；只有全挂时才顺序下潜五层，而每层都比上一层贵。
+
+| 段 | 行数 | 职责 |
+|---|---:|---|
+| `probe_hub` | 32 | 解析一次 DNS → 探路由 → 归并人读行；全挂时调 `_unreachable_tail` |
+| `_probe_routes` | 20 | 单腿直跑 / 双腿并行（线程名、daemon、join 顺序逐字保留） |
+| `_route_findings` | 17 | 按 `routes` 保序归类 `ok_route` / `fails`，并写 `facts["routes"]` |
+| `_unreachable_tail` | 26 | 网关注记 → `_tcp_sweep` → `_tls_readings` → `_fail_hint` → `_alt_port_advice` |
+| `_tls_readings` | 56 | 裸 TLS 与两张对照并行；返回 `_TlsReadings(line, tls, ctrl, net)` |
+| `_alt_port_advice` | 40 | 换端口候选 / 验通后整句改写判词；返回 `_PortAdvice(line, kind, hint)` |
+| `_ProbeCtx` | — | frozen 只读现场（`facts` 是唯一写面） |
+
+**为什么用载体**：`_unreachable_tail` 的原料是 8 个（host/port/token/node_id/timeout/
+ips/scheme/facts）+ `hub_url`，直接传就是 9 参、当场撞 §P0-3 的形状门。`_ProbeCtx` 是
+一次预检的现场快照，不是新一层可变态；两个 NamedTuple 只承载「一层读完的结论」，
+避免「返回 4 元组再按下标取」。
+
+**证明不是「换个地方写同一段」**：`tmp/diff_probe.py` 把 HEAD 版（`git show HEAD:`）与
+新实现装上同一组假边界（`_probe_one_route` / `_resolve_ips` / `_tcp_sweep` / `_tls_sweep` /
+`_port_sweep` / `net_http.bypass_proxy`），256 组场景（4 路由结果 × 4 TCP × 4 TLS+对照 ×
+4 端口扫描，URL 与代理开关轮转）逐字段比对 `(ok, line, facts)` **以及扫描调用序列**
+（谁被调、参数、顺序）⇒ **0 差异**。TLS 对照的两种形态（不可解析 / 多 IP 一致 / 多 IP
+不一致）都在组合里；`app-stall` 分支也验证了「不触发端口扫描」。
+
+**守卫**：`tests/remote/test_rollout_relay.py` + `tests/remote/test_rollout_node.py`
+**105 passed**；`LONG_FUNCS_BASELINE` 删 `remote/rollout_relay.py` 一格（28 文件 / 31 →
+27 / 30）；`probe_hub` 的签名、返回三元组与 `facts` 键集逐字未变。
+
 ## §368 `intent_probe` 训练路径审计：self_inj 哨兵宽度与两个空块分支（2026-11-26）
 
 拆完 `main` 后把该文件**训练路径**里配额两臂之外的未覆盖分支过了一遍（配额两臂已由

@@ -11220,3 +11220,25 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 
 - **验证**：新 8 条先红后绿 + 采样 3 条 + 形状/`Any`/assert 预算；ruff + mypy 绿。
   全文 → `docs/nn/engineering.md` §368。
+
+## §2026-11-26-rollout-relay-probe-split
+
+- **背景**：`python.refactor.md` §10 的分诊（150–200 行函数按接缝烂度逐格拆）在 §367 后剩
+  31 个函数；排除 `tools/*`、`worker/scripts/*`、`offline_boot` 分片与 `__init__` 装配对象后，
+  最大一格是 `remote/rollout_relay.probe_hub`（154 行、27 分支，其中一条 `if not ok_route:`
+  装了 110 行的失败诊断尾）。
+
+- **决定**：把诊断尾按「每层都比上一层贵」拆成五段 —— `_probe_routes`（单腿直跑 / 双腿
+  并行）· `_route_findings`（按 `routes` 保序归类）· `_unreachable_tail`（网关 → 裸 TCP →
+  TLS+对照 → 备用端口 → 判词的顺序）· `_tls_readings` / `_alt_port_advice`（两层读数与改写）；
+  现场用 frozen `_ProbeCtx` 承载，避免 9 参再撞 §P0-3 的形状门。`probe_hub` 只剩 32 行，
+  签名与 `(ok, line, facts)` 契约不变。
+
+- **被否决**：把 `facts` 换成各层返回值再统一合并 —— 每层只写自己那几把键（`tcp` / `tls` /
+  `tls_ctrl` / `alt_ports` / `hint`），合并层会让「哪个键在哪种分支下存在」再抄一遍，
+  而现有用例与 `RelayChannel` 都直接读 `facts`。
+
+- **验证**：HEAD-vs-新 256 组决策表差分（含三个 sweep 的调用序列）**0 差异**；
+  `tests/remote/test_rollout_relay.py` + `test_rollout_node.py` **105 passed**；
+  `LONG_FUNCS_BASELINE` 删除该文件条目（28 文件 / 31 → 27 / 30）；全量 pygate 绿。
+  全文 → `docs/nn/engineering.md` §369。

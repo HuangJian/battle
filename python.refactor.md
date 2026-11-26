@@ -2185,3 +2185,9 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > 三条缺陷 + 单 shard 拒绝全部按 §7 先写红（`tests/worker/test_intent_probe_training_path.py`
 > 8 条，4 红）再修；另补 `build_injection` / `max_train` 对齐 / `_fit`+`_predict_val`
 > 端到端覆盖（engineering §368）。
+
+> 2026-11-26 第三十一格：`remote/rollout_relay.probe_hub` 154 → 32 + 五段
+> （`_probe_routes` / `_route_findings` / `_unreachable_tail` / `_tls_readings` /
+> `_alt_port_advice`；载体 frozen `_ProbeCtx` + `_TlsReadings` / `_PortAdvice`，
+> 「每层都比上一层贵」的顺序逐字保留）；HEAD-vs-新 256 组决策表差分全同（含三个
+> sweep 的调用序列），存量 28 文件 / 31 → 27 / 30（engineering §369）。

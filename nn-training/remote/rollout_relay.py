@@ -38,7 +38,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from typing import Any, Protocol, TypedDict, cast
+from dataclasses import dataclass
+from typing import Any, NamedTuple, Protocol, TypedDict, cast
 
 from common import http_pool, net_http
 
@@ -510,15 +511,76 @@ def probe_hub(
 
     为什么还回 `facts`：判据要能被**结构化**消费（`dns` / `routes` 逐条结论），
     否则用例只能对着日志措辞断言 —— 改一个词就红，而红得没有意义。
+
+    分层判词只在全路由不通时跑（`_unreachable_tail`）：网关 → 裸 TCP → TLS（+ 两条
+    对照）→ 备用端口；每层都比上一层贵，且只在前一层给出「还值得往下查」时问。
     """
     host, port = _host_port(hub_url)
     ips = _resolve_ips(host, port)  # 只解析**一次**：DNS 轮转会让两条日志自相矛盾
     dns = _dns_summary(host, port, ips)
     facts: RelayFacts = {"host": host, "port": port, "dns": dns, "routes": {}}
     url = f"{str(hub_url).rstrip('/')}/relay/{node_id}/_poll?wait=0"
-    # 回环 / `NO_PROXY` 点名的目标只走直连：否则本机那台 LAN 代理会把一条「本来必然通」
-    # 的回环请求也吊到 timeout，日志里就多出一条吓人的 `inherit=timeout`（实测 6s/次）。
+    # 回环 / `NO_PROXY` 点名的目标只走直连：否则本机那台 LAN 代理会把一条「本来必然通」的
+    # 回环请求也吊到 timeout，日志里就多出一条吓人的 `inherit=timeout`（实测 6s/次）。
     routes = ["direct"] if net_http.bypass_proxy(hub_url) else ["inherit", "direct"]
+    got = _probe_routes(routes, url, token, timeout)
+    ok_route, fails = _route_findings(routes, got, facts)
+    line = f"relay 预检 {host}:{port} → DNS={dns} ｜ " + " ｜ ".join(ok_route + fails)
+    if not ok_route:
+        ctx = _ProbeCtx(
+            host=host,
+            port=port,
+            token=token,
+            node_id=node_id,
+            timeout=timeout,
+            ips=ips,
+            scheme=(urllib.parse.urlsplit(str(hub_url)).scheme or "").lower(),
+            facts=facts,
+        )
+        line += _unreachable_tail(ctx)
+    return bool(ok_route), line, facts
+
+
+@dataclass(frozen=True)
+class _ProbeCtx:
+    """一次预检的只读现场；`facts` 是其中唯一的写面（人读片段由各层 `return` 拼）。"""
+
+    host: str
+    port: int
+    token: str
+    node_id: str
+    timeout: float
+    ips: list[str]
+    scheme: str
+    facts: RelayFacts
+
+
+class _TlsReadings(NamedTuple):
+    """TLS 层的四份读数：人读片段 + 裸握手 + 两张对照（`_fail_hint` 直接吃）。"""
+
+    line: str
+    tls: dict[str, str]
+    ctrl: dict[str, str]
+    net: dict[str, str]
+
+
+class _PortAdvice(NamedTuple):
+    """备用端口扫描的结论；`hint` 非空 = 已验通，整句判词要改写。"""
+
+    line: str
+    kind: str
+    hint: str
+
+
+def _probe_routes(
+    routes: list[str], url: str, token: str, timeout: float
+) -> dict[str, tuple[str, str]]:
+    """逐路由探一拍，返回 `route -> (verdict, human)`。
+
+    两条腿**并行**：串行就是 2×timeout（DSW 实测 12s），而预检要的只是「通不通」，
+    两条路之间没有先后依赖；并行还顺带修掉「前一条把预算烧完、后一条没机会说话」。
+    单条腿（回环只有 `direct`）不建线程，结果等价。
+    """
     got: dict[str, tuple[str, str]] = {}
 
     def _run(route: str) -> None:
@@ -526,20 +588,25 @@ def probe_hub(
 
     if len(routes) == 1:
         _run(routes[0])
-    else:
-        # 两条腿**并行**：串行就是 2×timeout（DSW 实测 12s），而预检要的只是「通不通」，
-        # 两条路之间没有先后依赖；并行还顺带修掉「前一条把预算烧完、后一条没机会说话」。
-        ths = [
-            threading.Thread(target=_run, args=(r,), daemon=True, name=f"relay-route:{r}")
-            for r in routes
-        ]
-        for t in ths:
-            t.start()
-        for t in ths:
-            t.join()
+        return got
+    ths = [
+        threading.Thread(target=_run, args=(r,), daemon=True, name=f"relay-route:{r}")
+        for r in routes
+    ]
+    for t in ths:
+        t.start()
+    for t in ths:
+        t.join()
+    return got
+
+
+def _route_findings(
+    routes: list[str], got: dict[str, tuple[str, str]], facts: RelayFacts
+) -> tuple[list[str], list[str]]:
+    """按 `routes` **保序**归类：人读行的字段顺序不随线程完成顺序漂。"""
     ok_route: list[str] = []
     fails: list[str] = []
-    for route in routes:  # 保序：人读行的字段顺序不随线程完成顺序漂
+    for route in routes:
         verdict, human = got.get(route, ("fail", f"{route}=fail"))
         facts["routes"][route] = verdict
         # `gateway-*` 也归到「不通」那一栏：它只是回话快，路由并没有通
@@ -547,113 +614,127 @@ def probe_hub(
             ok_route.append(human)
         else:
             fails.append(human)
-    line = f"relay 预检 {host}:{port} → DNS={dns} ｜ " + " ｜ ".join(ok_route + fails)
-    if not ok_route:
-        gw = [f"{r}={v}" for r, v in facts["routes"].items() if str(v).startswith("gateway-")]
-        if gw:
-            line += (
-                f"（{','.join(gw)}：中间层回话快但到不了 hub —— 代理/CF 边缘那一跳断了，不算通）"
-            )
-        # HTTPS 全不通时补一层**逐 IP 的裸 TCP**：把「IP 黑洞 / TLS 被掐 / 没有 v6 路由」
-        # 分开 —— 三者都只表现为 timeout，却对应完全不同的修法（2026-11-18 DSW 现场）。
-        tcp = _tcp_sweep(ips, port, TCP_PROBE_SEC)
-        facts["tcp"] = tcp
-        if tcp:
-            line += " ｜ TCP=" + ",".join(f"{ip}:{port} {verdict}" for ip, verdict in tcp.items())
-        # TCP 通了才值得再往下切一刀：**裸 TLS 握手**。同一次真机实测（TCP 全 ok、HTTPS 全超时）
-        # 就卡在这一层的三种可能之间，而「握手被丢 / 握手成功但 hub 不回话 / 中间人」的修法
-        # 互不相干。对照主机（同边缘、不同域名）一起探，用**同一个支付一次**的预算。
-        tls: dict[str, str] = {}
-        ctrl: dict[str, str] = {}
-        net: dict[str, str] = {}
-        ok_ips = [ip for ip, verdict in tcp.items() if verdict == "ok"]
-        # TLS 这一层只对 `https://` 有意义：`http://1.2.3.4:8787` 上的裸握手必然失败，
-        # 那不是「被掐」，把它的失败写成 `tls-blocked` 只会把人送去换机器。
-        scheme = (urllib.parse.urlsplit(str(hub_url)).scheme or "").lower()
-        if ok_ips and scheme == "https":
-            ctl_out: dict[str, dict[str, str]] = {}
+    return ok_route, fails
 
-            def _ctl_probe(ctl_host: str) -> None:
-                # 对照恒用 443：要问的是「本机到那边的 TLS 起不起得来」，与 hub 的端口无关。
-                ctl_ips = _resolve_ips(ctl_host, 443)
-                if ctl_ips:
-                    swept = _tls_sweep(ctl_ips, 443, ctl_host, TLS_PROBE_SEC)
-                    ctl_out[ctl_host] = {ip: v for ip, (v, _h) in swept.items()}
 
-            # 两条对照与 hub 那轮 TLS **并行**：多问一家不该再加一份预算。
-            ctl_threads = [
-                threading.Thread(
-                    target=_ctl_probe, args=(h,), daemon=True, name=f"relay-ctl-probe:{h}"
-                )
-                for h in (CTRL_HOST, CTRL_HOST_NET)
-            ]
-            for t in ctl_threads:
-                t.start()
-            tls_out = _tls_sweep(ok_ips, port, host, TLS_PROBE_SEC)
-            for t in ctl_threads:
-                t.join()
-            tls = {ip: v for ip, (v, _h) in tls_out.items()}
-            ctrl = ctl_out.get(CTRL_HOST, {})
-            net = ctl_out.get(CTRL_HOST_NET, {})
-            facts["tls"] = tls
-            if ctrl:
-                facts["tls_ctrl"] = ctrl
-            if net:
-                facts["tls_net"] = net
-            line += " ｜ TLS=" + ",".join(
-                f"{ip} {v}（{human}）" for ip, (v, human) in tls_out.items()
-            )
-            tails: list[str] = []
-            for ctl_host, ctl_got in ((CTRL_HOST, ctrl), (CTRL_HOST_NET, net)):
-                if not ctl_got:
-                    continue
-                vals = list(ctl_got.values())
-                # 四个地址各不相同会把这行淹掉；一致时只说一次 + 地址数。
-                tails.append(
-                    f"{ctl_host}="
-                    + (
-                        f"{vals[0]}（{len(vals)} 个地址一致）"
-                        if len(set(vals)) == 1
-                        else ",".join(vals)
-                    )
-                )
-            if tails:
-                line += "；对照 " + ",".join(tails)
-        kind, hint = _fail_hint(tcp, tls, ctrl, net)
-        # 最后一张牌：**换端口**。2026-11-18 DSW 用户在机器上直接验过 —— 同一个域名 443 握手被丢
-        # （`000`），而 2053/2083/2087/2096 全回 401（TLS+HTTP 整链通、hub 在回话），8443 也被掐。
-        # ⇒ 那个中间层只盯标准 HTTPS 端口。它比「换域名 / 换机器 / 配代理」便宜一个数量级，
-        # 所以放在所有判词之后、只在**端口级失败**时问一次。
-        # 候选 = 备用端口里**除当前端口**之外的全部（含 443）：配置已经落在备用端口上时
-        # （2026-11-19 DSW 现场就是 :2083），旧写法整段跳过扫描 ⇒ 2083 被掐那天
-        # 443/2053/2096/2087/8443 一个都没试过，直接判成「按域名/SNI 掐」，唯一的自救路
-        # 被自己的守卫挡掉了。
-        cands = tuple(p for p in (443, *ALT_HTTPS_PORTS) if p != port)
-        if scheme == "https" and kind in _SWEEP_HINTS and cands:
-            swept = _port_sweep(
-                host, cands, token, node_id, min(timeout, PROBE_TIMEOUT_SEC)
-            )
-            facts["alt_ports"] = {str(p): v for p, v in swept.items()}
-            alt = next(
-                (p for p in cands if str(swept.get(p, "")).startswith(("ok", "http-"))),
-                0,
-            )
-            if alt:
-                facts["alt_port"] = alt
-                kind = "port-blocked"
-                hint = (
-                    f"{port} 的 TLS 被中间层掐，但**同一域名走 :{alt} 整链通**（hub 回了 HTTP）"
-                    f" ⇒ 换端口就够：hub_url 写成 https://{host}:{alt} —— 本次已自动改，CFG 不用动，"
-                    "也不用换域名/换机器/配代理"
-                )
-                line += f" ｜ 备用端口 :{alt} 通（{swept[alt]}）"
-            else:
-                line += " ｜ 备用端口全不通（" + ",".join(str(p) for p in cands) + "）"
-        facts["hint"] = kind
-        line += " ⇒ " + hint
-        line += "；hub 未升级只会 404，不会超时"
-    return bool(ok_route), line, facts
+def _unreachable_tail(ctx: _ProbeCtx) -> str:
+    """全路由不通时的分层判词（每层都比上一层贵，只在前一层值得时问）。"""
+    line = ""
+    gw = [f"{r}={v}" for r, v in ctx.facts["routes"].items() if str(v).startswith("gateway-")]
+    if gw:
+        line += f"（{','.join(gw)}：中间层回话快但到不了 hub —— 代理/CF 边缘那一跳断了，不算通）"
+    # HTTPS 全不通时补一层**逐 IP 的裸 TCP**：把「IP 黑洞 / TLS 被掐 / 没有 v6 路由」
+    # 分开 —— 三者都只表现为 timeout，却对应完全不同的修法（2026-11-18 DSW 现场）。
+    tcp = _tcp_sweep(ctx.ips, ctx.port, TCP_PROBE_SEC)
+    ctx.facts["tcp"] = tcp
+    if tcp:
+        line += " ｜ TCP=" + ",".join(
+            f"{ip}:{ctx.port} {verdict}" for ip, verdict in tcp.items()
+        )
+    readings = _tls_readings(ctx, tcp)
+    line += readings.line
+    kind, hint = _fail_hint(tcp, readings.tls, readings.ctrl, readings.net)
+    advice = _alt_port_advice(ctx, kind)
+    line += advice.line
+    ctx.facts["hint"] = advice.kind
+    line += " ⇒ " + (advice.hint or hint)
+    line += "；hub 未升级只会 404，不会超时"
+    return line
 
+
+def _tls_readings(ctx: _ProbeCtx, tcp: dict[str, str]) -> _TlsReadings:
+    """TCP 通了才值得再往下切一刀：**裸 TLS 握手** + 两条对照（同一份预算）。
+
+    同一次真机实测（TCP 全 ok、HTTPS 全超时）就卡在这一层的三种可能之间，而「握手被丢 /
+    握手成功但 hub 不回话 / 中间人」的修法互不相干。对照主机（同边缘、不同域名）一起探。
+    """
+    ok_ips = [ip for ip, verdict in tcp.items() if verdict == "ok"]
+    # TLS 这一层只对 `https://` 有意义：`http://1.2.3.4:8787` 上的裸握手必然失败，
+    # 那不是「被掐」，把它的失败写成 `tls-blocked` 只会把人送去换机器。
+    if not (ok_ips and ctx.scheme == "https"):
+        return _TlsReadings("", {}, {}, {})
+    ctl_out: dict[str, dict[str, str]] = {}
+
+    def _ctl_probe(ctl_host: str) -> None:
+        # 对照恒用 443：要问的是「本机到那边的 TLS 起不起得来」，与 hub 的端口无关。
+        ctl_ips = _resolve_ips(ctl_host, 443)
+        if ctl_ips:
+            swept = _tls_sweep(ctl_ips, 443, ctl_host, TLS_PROBE_SEC)
+            ctl_out[ctl_host] = {ip: v for ip, (v, _h) in swept.items()}
+
+    # 两条对照与 hub 那轮 TLS **并行**：多问一家不该再加一份预算。
+    ctl_threads = [
+        threading.Thread(target=_ctl_probe, args=(h,), daemon=True, name=f"relay-ctl-probe:{h}")
+        for h in (CTRL_HOST, CTRL_HOST_NET)
+    ]
+    for t in ctl_threads:
+        t.start()
+    tls_out = _tls_sweep(ok_ips, ctx.port, ctx.host, TLS_PROBE_SEC)
+    for t in ctl_threads:
+        t.join()
+    tls = {ip: v for ip, (v, _h) in tls_out.items()}
+    ctrl = ctl_out.get(CTRL_HOST, {})
+    net = ctl_out.get(CTRL_HOST_NET, {})
+    ctx.facts["tls"] = tls
+    if ctrl:
+        ctx.facts["tls_ctrl"] = ctrl
+    if net:
+        ctx.facts["tls_net"] = net
+    line = " ｜ TLS=" + ",".join(
+        f"{ip} {v}（{human}）" for ip, (v, human) in tls_out.items()
+    )
+    tails: list[str] = []
+    for ctl_host, ctl_got in ((CTRL_HOST, ctrl), (CTRL_HOST_NET, net)):
+        if not ctl_got:
+            continue
+        vals = list(ctl_got.values())
+        # 四个地址各不相同会把这行淹掉；一致时只说一次 + 地址数。
+        tails.append(
+            f"{ctl_host}="
+            + (
+                f"{vals[0]}（{len(vals)} 个地址一致）"
+                if len(set(vals)) == 1
+                else ",".join(vals)
+            )
+        )
+    if tails:
+        line += "；对照 " + ",".join(tails)
+    return _TlsReadings(line, tls, ctrl, net)
+
+
+def _alt_port_advice(ctx: _ProbeCtx, kind: str) -> _PortAdvice:
+    """最后一张牌：**换端口**（只在端口级失败时问一次）。
+
+    2026-11-18 DSW 用户在机器上直接验过 —— 同一个域名 443 握手被丢（`000`），而
+    2053/2083/2087/2096 全回 401（TLS+HTTP 整链通、hub 在回话），8443 也被掐。
+    ⇒ 那个中间层只盯标准 HTTPS 端口。它比「换域名 / 换机器 / 配代理」便宜一个数量级，
+    所以放在所有判词之后。
+    """
+    # 候选 = 备用端口里**除当前端口**之外的全部（含 443）：配置已经落在备用端口上时
+    # （2026-11-19 DSW 现场就是 :2083），旧写法整段跳过扫描 ⇒ 2083 被掐那天
+    # 443/2053/2096/2087/8443 一个都没试过，直接判成「按域名/SNI 掐」，唯一的自救路
+    # 被自己的守卫挡掉了。
+    cands = tuple(p for p in (443, *ALT_HTTPS_PORTS) if p != ctx.port)
+    if not (ctx.scheme == "https" and kind in _SWEEP_HINTS and cands):
+        return _PortAdvice("", kind, "")
+    swept = _port_sweep(
+        ctx.host, cands, ctx.token, ctx.node_id, min(ctx.timeout, PROBE_TIMEOUT_SEC)
+    )
+    ctx.facts["alt_ports"] = {str(p): v for p, v in swept.items()}
+    alt = next(
+        (p for p in cands if str(swept.get(p, "")).startswith(("ok", "http-"))),
+        0,
+    )
+    if not alt:
+        return _PortAdvice(" ｜ 备用端口全不通（" + ",".join(str(p) for p in cands) + "）", kind, "")
+    ctx.facts["alt_port"] = alt
+    return _PortAdvice(
+        f" ｜ 备用端口 :{alt} 通（{swept[alt]}）",
+        "port-blocked",
+        f"{ctx.port} 的 TLS 被中间层掐，但**同一域名走 :{alt} 整链通**（hub 回了 HTTP）"
+        f" ⇒ 换端口就够：hub_url 写成 https://{ctx.host}:{alt} —— 本次已自动改，CFG 不用动，"
+        "也不用换域名/换机器/配代理",
+    )
 
 def _dns_summary(host: str, port: int, ips: list[str] | None = None) -> str:
     """DNS 读数的紧凑表示：`104.21.x.x(v4),2606:4700::1(v6)` / `fail`。
