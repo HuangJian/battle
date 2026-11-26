@@ -29,6 +29,32 @@
 
 ---
 
+## §370 分诊第三十二格：`trainer/dispatch_state.admit_rollout_nodes` 152 → 36 + 四道门（2026-11-26）
+
+节点准入表原来是一条 152 行的 `for` 循环，体内顺序问四道门（codeHash / bun /
+bootId / 槽位），其中 **codeHash 不符**那一支占了 60 行（升级请求 + 5 种原因各自的日志 +
+去重计数），把它淹成了一个「读不出有几道门」的函数。
+
+| 段 | 行数 | 职责 |
+|---|---:|---|
+| `admit_rollout_nodes` | 36 | 按原顺序问门：ping → `_stale_code` → `_bun_gate` → `_boot_gate` → `_admitted_node` |
+| `_stale_code` | 78 | 失效权重账本 + guarded 升级 + self/restart/dedup/dirty/失败五臂日志与去重计数（**一律排除**） |
+| `_bun_gate` | 16 | major.minor 红、patch 黄；红时失效权重账本 |
+| `_boot_gate` | 24 | 本轮 bootId 钉 + 不一致时写 agent meta |
+| `_admitted_node` | 18 | 槽位（显式 config / 自报池容量）+ `node_online` 日志 + 节点行 |
+
+`_stale_code` 不返回布尔：这条分支没有准入路径，返回 True/False 反而要读的人自己确认
+「False 是不是表示 continue」；名字与去掉 `continue` 后的调用点直接说明了这一点。
+
+**证明**：16 组假边界决策表（ping=None / codeHash 空 / 无升级分支 / restart-requested /
+self / dedup 连续第 3 次 / dirty-tree / 请求失败 / bun 红 / bun 黄 / boot 换进程 / 探测比配置
+多或短）逐字段比对返回节点、日志行、`dedup_streak` 变更、agent meta 写入、
+`forget_weights_node` 调用、`UpgradeAsk` 字段与 `note_ping`/`node_online` 入参 ⇒ **0 差异**。
+
+**守卫**：`tests/trainer/test_rollout_dispatch_resilience.py` + `tests/trainer/test_dispatch_spec.py`
+**37 passed**；`LONG_FUNCS_BASELINE` 删 `trainer/dispatch_state.py` 一格
+（27 文件 / 30 → 26 / 29）。
+
 ## §369 分诊第三十一格：`remote/rollout_relay.probe_hub` 154 → 32 + 五段（2026-11-26）
 
 分诊表里剩余的最大一格**非排除项**（`tools/*`、`worker/scripts/*`、`offline_boot` 分片与

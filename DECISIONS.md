@@ -11242,3 +11242,21 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   `tests/remote/test_rollout_relay.py` + `test_rollout_node.py` **105 passed**；
   `LONG_FUNCS_BASELINE` 删除该文件条目（28 文件 / 31 → 27 / 30）；全量 pygate 绿。
   全文 → `docs/nn/engineering.md` §369。
+
+## §2026-11-26-admit-rollout-nodes-gates
+
+- **背景**：`trainer/dispatch_state.admit_rollout_nodes`（152 行）把四道准入门的顺序埋在
+  一条 `for` 里，其中 codeHash 不符那一支占 60 行（升级请求、五种原因的日志、去重计数），
+  读不出「一共几道门」。
+
+- **决定**：每道门一段 —— `_stale_code`（一律排除，因此不返回布尔）· `_bun_gate` ·
+  `_boot_gate` · `_admitted_node`；入口只保留原询问顺序与 `continue` 语义。ping=None 分支
+  （不摘权重账本的理由）留在入口，因为它是「根本够不着」，不是一道门。
+
+- **被否决**：把 `_stale_code` 改成返回 `why|None` 再由入口统一打日志 —— 五种原因各自
+  使用不同的 `reason` 细节与去重动作，汇总层会把它们再拆一遍。
+
+- **验证**：16 组假边界决策表（返回节点 / 日志 / `dedup_streak` / agent meta /
+  `forget_weights_node` / `UpgradeAsk` 字段 / `note_ping`/`node_online` 入参）**0 差异**；
+  dispatch 相关用例 **37 passed**；形状存量 27 文件 / 30 → 26 / 29；全量 pygate 绿。
+  全文 → `docs/nn/engineering.md` §370。

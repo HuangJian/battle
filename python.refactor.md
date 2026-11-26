@@ -2191,3 +2191,8 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > `_alt_port_advice`；载体 frozen `_ProbeCtx` + `_TlsReadings` / `_PortAdvice`，
 > 「每层都比上一层贵」的顺序逐字保留）；HEAD-vs-新 256 组决策表差分全同（含三个
 > sweep 的调用序列），存量 28 文件 / 31 → 27 / 30（engineering §369）。
+
+> 2026-11-26 第三十二格：`trainer/dispatch_state.admit_rollout_nodes` 152 → 36 + 四道门
+> （`_stale_code` / `_bun_gate` / `_boot_gate` / `_admitted_node`；`_stale_code` 不返回布尔——
+> 这条分支没有准入路径）；16 组假边界决策表差分全同（含 `dedup_streak` / agent meta /
+> 升级请求字段），存量 27 文件 / 30 → 26 / 29（engineering §370）。
