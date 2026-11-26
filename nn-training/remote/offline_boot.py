@@ -2086,6 +2086,196 @@ class CourseRunSpec(NamedTuple):
     push_floor_it: int = 0
 
 
+class _CoursePrep(NamedTuple):
+    """`run_one_course` 的前置产物：根目录决策 + 选中的包。"""
+
+    ccfg: dict
+    work: Path
+    net: Path
+    dest: Path
+    pack: Any
+    local_first: bool
+
+
+class _CourseTargets(NamedTuple):
+    """启动一门课所需的身份/落点/argv 输入。"""
+
+    ccfg: dict
+    hub: str
+    token: str
+    run_loop_main: Callable[[list[str]], int]
+    resume_dir: Path | None
+    tok_file: str
+    lease_file: str
+
+
+def _resolve_course_targets(
+    spec: CourseRunSpec, prep: _CoursePrep, log: Callable[[str], None]
+) -> _CourseTargets:
+    """hub/代码/设备/续跑锚点/回传凭据 → 启动目标（顺序与原函数逐字一致）。"""
+    ccfg = prep.ccfg
+    creds = spec.creds
+    token = str(creds.get("HUB_TOKEN") or "")
+    hub = _probe_hub(ccfg, creds, token, log, spec.push_mode)
+
+    ensure_code(prep.pack, log, dest=prep.dest, hub=hub, token=token)
+    ensure_ts_tree(prep.pack, log, dest=prep.dest)
+    from remote.notebook_runtime import resolve_device  # code.zip 已在 sys.path 上
+
+    run_loop_main = spec.run_loop_main
+    if run_loop_main is None:
+        from remote.run_loop import main as _run_loop_main
+
+        run_loop_main = _run_loop_main
+    if not str(ccfg.get("device") or "").strip() or str(ccfg["device"]).strip() == "auto":
+        # `auto` 不能原样传下去（下游不认这个名字，2026-09-15 事故）——先解析成 cuda/tpu/cpu。
+        ccfg = {
+            **ccfg,
+            "device": resolve_device(
+                {
+                    "device": ccfg.get("device", "auto"),
+                    "use_multi_gpu": bool(ccfg.get("use_multi_gpu", True)),
+                },
+                log,
+            ),
+        }
+
+    resume_dir: Path | None = None
+    if spec.push_mode:
+        # 锚点由任务包给（hub 侧的 `resume_anchor` 已铺成 `resume/it-NNN/`）——不取。
+        anchor = Path(spec.assigned_resume) if spec.assigned_resume else None
+        if anchor is not None and anchor.is_dir():
+            resume_dir = anchor
+            log(f"push 腿：用任务包里的续跑锚点 {anchor}")
+    elif hub:
+        # 续跑锚点：hub 手里可能有更新的（自回传 / 人工导入的）完整轮次。先取它，
+        # 再交给 run_loop——于是「重领任务」= 从最新进度接着跑，而不是从头重跑。
+        resume_dir = fetch_resume(hub, token, spec.course, prep.work / "resume", log)
+    # ★ `tok_file` 必须先置空：`live_backfeed=False`（或 hub 不可达）时下面不会赋值，
+    #   而它又被传进 `build_run_argv`——原来那条路会 `NameError`（纯离线盘一直没跑到）。
+    tok_file = ""
+    lease_file = ""
+    if spec.push_mode:
+        log(
+            f"push 腿：产物只落本地 outbox（{spec.push_outbox or '未指定'}）"
+            "——hub 自己来拉，不做 HTTP 回传"
+        )
+    elif bool(ccfg.get("live_backfeed", True)):
+        if hub:
+            tok_file = write_token_file(prep.work, token)
+            lease_file = write_lease_file(prep.work, spec.lease)
+            log(f"实时回传开启 → {hub}（每轮 best-effort 推产物）")
+        else:
+            log("实时回传开着，但此刻够不着 hub —— 改为纯离线（产物照样逐轮落盘）")
+    else:
+        log("实时回传关闭（CFG.live_backfeed=False）—— 跑完统一打包，手动下载导入")
+    return _CourseTargets(ccfg, hub, token, run_loop_main, resume_dir, tok_file, lease_file)
+
+
+def _build_course_argv(
+    spec: CourseRunSpec,
+    prep: _CoursePrep,
+    targets: _CourseTargets,
+    backup_root: Path | None,
+    log: Callable[[str], None],
+) -> list[str]:
+    """`remote.run_loop` 的 argv（备份抽屉/push outbox/stop/floor 的开关都在这里）。"""
+    argv = build_run_argv(
+        RunArgvSpec(
+            targets.ccfg,
+            prep.pack,
+            prep.dest,
+            targets.hub,
+            targets.tok_file,
+            targets.resume_dir,
+            local_first=prep.local_first,
+            lease_file=targets.lease_file,
+            # 备份抽屉（C1）的落点：网络侧产物根下。没有 hub 时这条腿不存在（补传账本都没有）
+            # ⇒ 传了也只是个路径，不写任何东西。push 腿也不立抽屉：outbox 本身就是耐久副本。
+            backup_root=backup_root,
+            outbox=spec.push_outbox if spec.push_mode else "",
+            stop_file=spec.stop_file if spec.push_mode else "",
+            floor_it=int(spec.push_floor_it or 0) if spec.push_mode else 0,
+        )
+    )
+    log("开始训练：python -m remote.run_loop " + " ".join(_redact(argv)))
+    return argv
+
+
+def _attach_course_progress(
+    spec: CourseRunSpec,
+    prep: _CoursePrep,
+    targets: _CourseTargets,
+    log: Callable[[str], None],
+) -> Callable[[], str] | None:
+    """轮内打点层：push 腿写文件，hub+租约腿走 HTTP pinger；否则不挂。"""
+    # ★M3 / Q2：把轮内打点层挂上（只在这时候才可能：hub 可达 ∧ 领到租约）——快照侧的完成
+    # 事件（`plan_run` 的轮边界 / `iter_rollout` 的每 N 局完）会经
+    # `common.progress_hook` 找到它。`finally` 里**必须撤销注册**：同一会话后面还要跑别的课，
+    # 留着一个指向上一课的 URL 的打点层就会把下一段的进度报到别人账上。
+    if spec.push_mode and spec.push_outbox:
+        # push 腿的打点落**文件**（`/offline/push/progress` 的读面就是它）：不节流 ——
+        # 写几百字节比一次 HTTP POST 便宜几个数量级，节流只会让 hub 看到更慢的进度。
+        return install_local_progress_sink(
+            Path(spec.push_outbox) / OFFLINE_PUSH_PROGRESS_NAME, log
+        )
+    if targets.hub and spec.lease:
+        return install_progress_pinger(
+            PingerSpec(
+                targets.hub,
+                targets.token,
+                spec.course,
+                spec.lease,
+                log,
+                # 409 expired/taken ⇒ 重新领一次（评审 F1 / plan §4.2-2）：旧口径是整段哑。
+                reclaim=lambda: _reclaim_lease(
+                    targets.hub, targets.token, spec.course, prep.work, log
+                ),
+            )
+        )
+    return None
+
+
+def _run_course_loop(
+    run_loop_main: Callable[[list[str]], int],
+    argv: list[str],
+    dest: Path,
+    course: str,
+    progress: dict | None,
+    detach_progress: Callable[[], str] | None,
+    log: Callable[[str], None],
+) -> int:
+    """跑 `run_loop`（含 CodeChangedError 的人话翻译），收尾撤打点并回填租约结局。"""
+    try:
+        try:
+            rc = int(run_loop_main(argv) or 0)
+        except Exception as e:
+            # ★ 2026-10-29（现场：同 kernel 重跑 cell ⇒ `CodeChangedError` 裸抛，看着像崩溃）：
+            #   `remote/worker.py` 的 `_ACTIVE_CODE_SHA` 是**进程级**的——本 kernel 上一段导入的
+            #   代码若与这一段的任务包/commit 不同，第一轮就被守卫拒跑（它拒得对：继续跑会用旧
+            #   代码产出「看似正常」的结果）。但 remedy 在日志里从来没写过，而人第一反应是
+            #   「重跑这一格」。这里翻成一句可执行的：**必须换进程**。
+            #   按类名判而不 import：本模块是 standalone 运输单元（顶层不许 import 本仓代码）。
+            if type(e).__name__ == "CodeChangedError":
+                raise SystemExit(
+                    "[offline] 本 kernel 已经 import 过**上一段的代码**（"
+                    f"{str(getattr(e, 'loaded_sha', ''))[:12]}…），本段要求 "
+                    f"{str(getattr(e, 'job_sha', ''))[:12]}…——同 kernel 重跑本 cell **不会**"
+                    "重新导入模块。处置：Runtime → Restart session（或换新会话）后再跑本格；"
+                    "本地产物与会话无关（/tmp 若被清，本机会从网络盘备份或任务包锚点续跑）。"
+                ) from e
+            raise
+        log(f"run_loop 退出 rc={rc}；产物目录 {dest}")
+        # 段末补记课程身份（新起的段到这里才有三件；写不下只降级，不影响 rc）。
+        claim_local_course(dest, course, log)
+        return rc
+    finally:
+        if detach_progress is not None:
+            outcome = detach_progress()
+            if progress is not None:
+                progress["outcome"] = outcome
+
+
 def run_one_course(spec: CourseRunSpec) -> int:
     """跑**一门课**的整段：取包 → 引导代码 → `remote.run_loop` → 打交付物；返回 rc。
 
@@ -2108,10 +2298,8 @@ def run_one_course(spec: CourseRunSpec) -> int:
     # 旧签名 15 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
     cfg, creds, log = spec.cfg, spec.creds, spec.log
     keepalive_stop, course, multi = spec.keepalive_stop, spec.course, spec.multi
-    run_loop_main, lease, progress = spec.run_loop_main, spec.lease, spec.progress
+    lease, progress = spec.lease, spec.progress
     push_mode, assigned_pack = spec.push_mode, spec.assigned_pack
-    assigned_resume, push_outbox = spec.assigned_resume, spec.push_outbox
-    stop_file, push_floor_it = spec.stop_file, spec.push_floor_it
     deliverable, ccfg, work, net, dest = _prepare_roots(cfg, course, multi, log)
 
     # ── 本机优先：产物目录三件齐全 ⇒ 不让包改写这一段的计划/清单（plan §3 判定表）──
@@ -2143,132 +2331,30 @@ def run_one_course(spec: CourseRunSpec) -> int:
     # 只在本机已有本课产物时写得上（三件齐才写）——新起的段由 run_loop 写完后补记。
     claim_local_course(dest, course, log)
 
-    token = str(creds.get("HUB_TOKEN") or "")
-    hub = _probe_hub(ccfg, creds, token, log, push_mode)
-
-    ensure_code(pack, log, dest=dest, hub=hub, token=token)
-    ensure_ts_tree(pack, log, dest=dest)
-    from remote.notebook_runtime import resolve_device  # code.zip 已在 sys.path 上
-
-    if run_loop_main is None:
-        from remote.run_loop import main as _run_loop_main
-
-        run_loop_main = _run_loop_main
-    if not str(ccfg.get("device") or "").strip() or str(ccfg["device"]).strip() == "auto":
-        # `auto` 不能原样传下去（下游不认这个名字，2026-09-15 事故）——先解析成 cuda/tpu/cpu。
-        ccfg = {
-            **ccfg,
-            "device": resolve_device(
-                {
-                    "device": ccfg.get("device", "auto"),
-                    "use_multi_gpu": bool(ccfg.get("use_multi_gpu", True)),
-                },
-                log,
-            ),
-        }
-
-    resume_dir: Path | None = None
-    if push_mode:
-        # 锚点由任务包给（hub 侧的 `resume_anchor` 已铺成 `resume/it-NNN/`）——不取。
-        anchor = Path(assigned_resume) if assigned_resume else None
-        if anchor is not None and anchor.is_dir():
-            resume_dir = anchor
-            log(f"push 腿：用任务包里的续跑锚点 {anchor}")
-    elif hub:
-        # 续跑锚点：hub 手里可能有更新的（自回传 / 人工导入的）完整轮次。先取它，
-        # 再交给 run_loop——于是「重领任务」= 从最新进度接着跑，而不是从头重跑。
-        resume_dir = fetch_resume(hub, token, course, work / "resume", log)
-    # ★ `tok_file` 必须先置空：`live_backfeed=False`（或 hub 不可达）时下面不会赋值，
-    #   而它又被传进 `build_run_argv`——原来那条路会 `NameError`（纯离线盘一直没跑到）。
-    tok_file = ""
-    lease_file = ""
-    if push_mode:
-        log(f"push 腿：产物只落本地 outbox（{push_outbox or '未指定'}）——hub 自己来拉，不做 HTTP 回传")
-    elif bool(ccfg.get("live_backfeed", True)):
-        if hub:
-            tok_file = write_token_file(work, token)
-            lease_file = write_lease_file(work, lease)
-            log(f"实时回传开启 → {hub}（每轮 best-effort 推产物）")
-        else:
-            log("实时回传开着，但此刻够不着 hub —— 改为纯离线（产物照样逐轮落盘）")
-    else:
-        log("实时回传关闭（CFG.live_backfeed=False）—— 跑完统一打包，手动下载导入")
-
-    argv = build_run_argv(RunArgvSpec(
-        ccfg,
-        pack,
+    prep = _CoursePrep(ccfg, work, net, dest, pack, local_first)
+    targets = _resolve_course_targets(spec, prep, log)
+    # 备份抽屉（C1）的落点：网络侧产物根下。没有 hub 时这条腿不存在（补传账本都没有）
+    # ⇒ 传了也只是个路径，不写任何东西。push 腿也不立抽屉：outbox 本身就是耐久副本。
+    backup_root = None if push_mode else net / deliverable.BACKUP_DIR_NAME
+    argv = _build_course_argv(spec, prep, targets, backup_root, log)
+    detach_progress = _attach_course_progress(spec, prep, targets, log)
+    rc = _run_course_loop(
+        targets.run_loop_main,
+        argv,
         dest,
-        hub,
-        tok_file,
-        resume_dir,
-        local_first=local_first,
-        lease_file=lease_file,
-        # 备份抽屉（C1）的落点：网络侧产物根下。没有 hub 时这条腿不存在（补传账本都没有）
-        # ⇒ 传了也只是个路径，不写任何东西。push 腿也不立抽屉：outbox 本身就是耐久副本。
-        backup_root=None if push_mode else net / deliverable.BACKUP_DIR_NAME,
-        outbox=push_outbox if push_mode else "",
-        stop_file=stop_file if push_mode else "",
-        floor_it=int(push_floor_it or 0) if push_mode else 0,
-    ))
-    log("开始训练：python -m remote.run_loop " + " ".join(_redact(argv)))
-    # ★M3 / Q2：把轮内打点层挂上（只在这时候才可能：hub 可达 ∧ 领到租约）——快照侧的完成
-    # 事件（`plan_run` 的轮边界 / `iter_rollout` 的每 N 局完）会经
-    # `common.progress_hook` 找到它。`finally` 里**必须撤销注册**：同一会话后面还要跑别的课，
-    # 留着一个指向上一课的 URL 的打点层就会把下一段的进度报到别人账上。
-    detach_progress: Callable[[], str] | None = None
-    if push_mode and push_outbox:
-        # push 腿的打点落**文件**（`/offline/push/progress` 的读面就是它）：不节流 ——
-        # 写几百字节比一次 HTTP POST 便宜几个数量级，节流只会让 hub 看到更慢的进度。
-        detach_progress = install_local_progress_sink(
-            Path(push_outbox) / OFFLINE_PUSH_PROGRESS_NAME, log
-        )
-    elif hub and lease:
-        detach_progress = install_progress_pinger(PingerSpec(
-            hub,
-            token,
-            course,
-            lease,
-            log,
-            # 409 expired/taken ⇒ 重新领一次（评审 F1 / plan §4.2-2）：旧口径是整段哑。
-            reclaim=lambda: _reclaim_lease(hub, token, course, work, log),
-        ))
-    try:
-        try:
-            rc = int(run_loop_main(argv) or 0)
-        except Exception as e:
-            # ★ 2026-10-29（现场：同 kernel 重跑 cell ⇒ `CodeChangedError` 裸抛，看着像崩溃）：
-            #   `remote/worker.py` 的 `_ACTIVE_CODE_SHA` 是**进程级**的——本 kernel 上一段导入的
-            #   代码若与这一段的任务包/commit 不同，第一轮就被守卫拒跑（它拒得对：继续跑会用旧
-            #   代码产出「看似正常」的结果）。但 remedy 在日志里从来没写过，而人第一反应是
-            #   「重跑这一格」。这里翻成一句可执行的：**必须换进程**。
-            #   按类名判而不 import：本模块是 standalone 运输单元（顶层不许 import 本仓代码）。
-            if type(e).__name__ == "CodeChangedError":
-                raise SystemExit(
-                    "[offline] 本 kernel 已经 import 过**上一段的代码**（"
-                    f"{str(getattr(e, 'loaded_sha', ''))[:12]}…），本段要求 "
-                    f"{str(getattr(e, 'job_sha', ''))[:12]}…——同 kernel 重跑本 cell **不会**"
-                    "重新导入模块。处置：Runtime → Restart session（或换新会话）后再跑本格；"
-                    "本地产物与会话无关（/tmp 若被清，本机会从网络盘备份或任务包锚点续跑）。"
-                ) from e
-            raise
-        log(f"run_loop 退出 rc={rc}；产物目录 {dest}")
-        # 段末补记课程身份（新起的段到这里才有三件；写不下只降级，不影响 rc）。
-        claim_local_course(dest, course, log)
-    finally:
-        if detach_progress is not None:
-            outcome = detach_progress()
-            if progress is not None:
-                progress["outcome"] = outcome
+        course,
+        progress,
+        detach_progress,
+        log,
+    )
 
     # ── 段末交付面（★ 2026-10-14 B4 / 评审 P0-2 + 拍板-3）─────────────────────────────
     # 常态（补传全成功）**不许**把一个大 zip 拷到慢挂点上 —— 那正是本计划要移除的那类等待。
     # 只有三种情形才落交付档：① **没有 hub**（纯手工递送：产物只在本地根，交付档是唯一动线）；
     # ② 网络侧**有备份抽屉**（= 有轮次没送出去，人需要一份能导入控制台的包）；③ 人显式点了
     # `download_dir`（那块钱由人主动付）。
-    _deliver(deliverable, ccfg, dest, net, course, hub, push_mode, log)
+    _deliver(deliverable, targets.ccfg, dest, net, course, targets.hub, push_mode, log)
     return rc
-
-
 
 # ═══ part 7/12: 07_queue — 队列面：任务清单 / 认领 / 心跳 / 进度端点 / 重新领租约 ═══
 def _json_dict(raw: bytes) -> dict:
@@ -2643,6 +2729,120 @@ class PingerSpec(NamedTuple):
     clock: Callable[[], float] | None = None
 
 
+#: 打点层的可变状态（`Any` 值的 dict；别名让四个 helper 共用同一处注解）。
+_PingState = dict[str, Any]
+
+
+def _ping_log_event(
+    state: _PingState,
+    kind: str,
+    it: int,
+    done: int,
+    total: int,
+    now: float,
+    log: Callable[[str], None],
+) -> None:
+    """完成事件的**日志行**（与发报解耦，先过两条腿共用的节流）。"""
+    # 轮边界「本轮开始」只上发报、不单独打日志行（每轮一条、与 PPO/eval 阶段头重复，
+    # 属刷屏；hub 活性不受影响——发报照常走）。
+    if str(kind or "") != "round-start" and _should_log_progress(
+        state.get("shown"),
+        kind=str(kind or ""),
+        it=int(it),
+        done=int(done),
+        total=int(total),
+    ) and _iter_log_due(state, str(kind or ""), now, int(it)):
+        state["shown"] = (str(kind or ""), int(it), int(done), int(total))
+        log(_progress_label(kind, it=int(it), done=int(done), total=int(total)))
+
+
+def _ping_handle_409(
+    state: _PingState,
+    doc: dict,
+    *,
+    hub: str,
+    course: str,
+    token: str,
+    reclaim: Callable[[], str] | None,
+    log: Callable[[str], None],
+    url: str,
+) -> str:
+    """409 分流（expired/taken 可重领；revoked 是人的意志）；返回（可能换过的）URL。"""
+    why = "revoked" if doc.get("revoked") else ("expired" if doc.get("expired") else "taken")
+    holder = doc.get("holder") if isinstance(doc.get("holder"), dict) else {}
+    # `expired`/`taken` 可以**重建会话**（plan §4.2-2）：重新 claim 拿到新 lease 再报进度；
+    # `revoked` 是人的意志，保持不动。
+    if why in ("expired", "taken") and reclaim is not None:
+        fresh = ""
+        try:
+            fresh = str(reclaim() or "")
+        except Exception as e:  # 重新领租约的任何意外都不得影响训练
+            log(f"[打点] 重新领租约异常（忽略）：{type(e).__name__}: {e}")
+        if fresh:
+            url = progress_url(hub, course, fresh)
+            state["fails"] = 0
+            state["cool"] = 0.0
+            state["level"] = 0
+            log(f"[打点] {why} ⇒ 已重新领到租约——恢复报进度")
+            return url
+    state["dead"] = why
+    state["outcome"] = why
+    log(
+        {
+            "revoked": "⚠ 打点被拒：租约已被撤销（人强制解除了接管）——"
+            "本段跑完即打包，本会话不再领这一课",
+            "expired": "⚠ 打点被拒：租约已过期（重新领租约没成功）——本段继续跑完并打包"
+            "（回传可能被判 duplicate 丢弃）",
+        }.get(
+            why,
+            f"⚠ 打点被拒：租约已被 {(holder or {}).get('worker_id') or '别人'} 接管——"
+            "本段继续跑完并打包（回传可能被判 duplicate 丢弃）",
+        )
+    )
+    return url
+
+
+def _ping_handle_ok(state: _PingState, log: Callable[[str], None]) -> None:
+    """200：清失败读数与降频档，本段结局复位（不再 unreachable）。"""
+    if int(state["fails"]):
+        log(f"[打点] 恢复发报（连丢 {state['fails']} 拍之后）")
+    state["fails"] = 0
+    state["cool"] = 0.0
+    state["level"] = 0
+    state["outcome"] = ""  # 复活：本段结局不再是 unreachable
+
+
+def _ping_handle_failure(
+    state: _PingState,
+    code: int,
+    event: tuple[str, int, int, int],
+    *,
+    force: bool,
+    now: float,
+    log: Callable[[str], None],
+) -> None:
+    """连不上 / 5xx / 404：计失败，连丢到上限改降频窗（不永久哑）。"""
+    kind, it, done, total = event
+    state["fails"] = int(state["fails"]) + 1
+    if int(state["fails"]) >= PROGRESS_FAIL_LIMIT:
+        level = min(int(state["level"]), len(PROGRESS_COOLDOWN_SEC) - 1)
+        cool = float(PROGRESS_COOLDOWN_SEC[level])
+        state["level"] = int(state["level"]) + 1
+        state["cool"] = now + cool
+        # `fails` **不清零**：它是「这一阵子连丢了几拍」的连续读数，下一个成功才复位
+        # （所以恢复那一行能说出「连丢了多少拍」，且再进降频时会升到下一档）。
+        state["outcome"] = "unreachable"
+        log(
+            f"⚠ 打点连丢 {state['fails']} 拍没成功（HTTP {code or '连不上'}）——"
+            f"降频：{cool:.0f}s 后再试（不再永久停）；训练继续"
+        )
+    elif force:
+        log(
+            f"[打点] {_progress_label(kind, it=int(it), done=int(done), total=int(total))} "
+            f"没成功（HTTP {code or '连不上'}）——下一拍再试"
+        )
+
+
 def install_progress_pinger(spec: PingerSpec) -> Callable[[], str]:
     """把**打点层**挂进 `sys.modules[PROGRESS_HOOK_NAME]` → 返回 `detach()`（撤销注册）。
 
@@ -2676,7 +2876,7 @@ def install_progress_pinger(spec: PingerSpec) -> Callable[[], str]:
     post_fn = post or _post_json
     now_fn = clock or time.monotonic
     url = progress_url(hub, course, lease)
-    state: dict[str, Any] = {
+    state: _PingState = {
         # `-inf` 而不是 `0.0`：首拍必须恒发，而 `now - 0.0 < interval` 只在
         # `now`(=time.monotonic()) **大于 interval** 时才成立 —— monotonic 的起点是
         # **系统启动**（Windows 尤其），所以「开机不到 1 小时」的机器上首拍会被
@@ -2725,17 +2925,7 @@ def install_progress_pinger(spec: PingerSpec) -> Callable[[], str]:
         # 那一份判据（25% 一桶 / 换阶段 / 完成 / retry），发报不受它影响（下面照常走）。
         # 走 `_should_log_progress`（延迟 import + 兜底）：`_ping` 承诺**永不抛**，而本文件
         # 在引导形态下没有 `common/` ⇒ 裸 import 会让第一条进度事件就炸掉打点。
-        # 轮边界「本轮开始」只上发报、不单独打日志行（每轮一条、与 PPO/eval 阶段头重复，
-        # 属刷屏；hub 活性不受影响——发报在下面照常走）。
-        if str(kind or "") != "round-start" and _should_log_progress(
-            state.get("shown"),
-            kind=str(kind or ""),
-            it=int(it),
-            done=int(done),
-            total=int(total),
-        ) and _iter_log_due(state, str(kind or ""), now, int(it)):
-            state["shown"] = (str(kind or ""), int(it), int(done), int(total))
-            log(_progress_label(kind, it=int(it), done=int(done), total=int(total)))
+        _ping_log_event(state, kind, it, done, total, now, log)
         if not force and float(state["cool"]) > now:
             return False  # 降频窗内（不是死；到点自己回来）
         # `at` 从 0 起 ⇒ **首拍恒发**（段开工那一句不会被时间窗吃掉）。
@@ -2744,65 +2934,29 @@ def install_progress_pinger(spec: PingerSpec) -> Callable[[], str]:
         state["at"] = now
         code, doc = post_fn(url, token, log, timeout=timeout)
         if code == 200:
-            if int(state["fails"]):
-                log(f"[打点] 恢复发报（连丢 {state['fails']} 拍之后）")
-            state["fails"] = 0
-            state["cool"] = 0.0
-            state["level"] = 0
-            state["outcome"] = ""  # 复活：本段结局不再是 unreachable
+            _ping_handle_ok(state, log)
             return True
         if code == 409:
-            why = "revoked" if doc.get("revoked") else ("expired" if doc.get("expired") else "taken")
-            holder = doc.get("holder") if isinstance(doc.get("holder"), dict) else {}
-            # `expired`/`taken` 可以**重建会话**（plan §4.2-2）：重新 claim 拿到新 lease 再报进度；
-            # `revoked` 是人的意志，保持不动。
-            if why in ("expired", "taken") and reclaim is not None:
-                fresh = ""
-                try:
-                    fresh = str(reclaim() or "")
-                except Exception as e:  # 重新领租约的任何意外都不得影响训练
-                    log(f"[打点] 重新领租约异常（忽略）：{type(e).__name__}: {e}")
-                if fresh:
-                    url = progress_url(hub, course, fresh)
-                    state["fails"] = 0
-                    state["cool"] = 0.0
-                    state["level"] = 0
-                    log(f"[打点] {why} ⇒ 已重新领到租约——恢复报进度")
-                    return False
-            state["dead"] = why
-            state["outcome"] = why
-            log(
-                {
-                    "revoked": "⚠ 打点被拒：租约已被撤销（人强制解除了接管）——"
-                    "本段跑完即打包，本会话不再领这一课",
-                    "expired": "⚠ 打点被拒：租约已过期（重新领租约没成功）——本段继续跑完并打包"
-                    "（回传可能被判 duplicate 丢弃）",
-                }.get(
-                    why,
-                    f"⚠ 打点被拒：租约已被 {(holder or {}).get('worker_id') or '别人'} 接管——"
-                    "本段继续跑完并打包（回传可能被判 duplicate 丢弃）",
-                )
+            url = _ping_handle_409(
+                state,
+                doc,
+                hub=hub,
+                course=course,
+                token=token,
+                reclaim=reclaim,
+                log=log,
+                url=url,
             )
             return False
         # 连不上（0）/ 5xx / 404：下一拍再试；连丢 PROGRESS_FAIL_LIMIT 拍 ⇒ **降频**（不永久哑）。
-        state["fails"] = int(state["fails"]) + 1
-        if int(state["fails"]) >= PROGRESS_FAIL_LIMIT:
-            level = min(int(state["level"]), len(PROGRESS_COOLDOWN_SEC) - 1)
-            cool = float(PROGRESS_COOLDOWN_SEC[level])
-            state["level"] = int(state["level"]) + 1
-            state["cool"] = now + cool
-            # `fails` **不清零**：它是「这一阵子连丢了几拍」的连续读数，下一个成功才复位
-            # （所以恢复那一行能说出「连丢了多少拍」，且再进降频时会升到下一档）。
-            state["outcome"] = "unreachable"
-            log(
-                f"⚠ 打点连丢 {state['fails']} 拍没成功（HTTP {code or '连不上'}）——"
-                f"降频：{cool:.0f}s 后再试（不再永久停）；训练继续"
-            )
-        elif force:
-            log(
-                f"[打点] {_progress_label(kind, it=int(it), done=int(done), total=int(total))} "
-                f"没成功（HTTP {code or '连不上'}）——下一拍再试"
-            )
+        _ping_handle_failure(
+            state,
+            code,
+            (kind, it, done, total),
+            force=force,
+            now=now,
+            log=log,
+        )
         return False
 
     # 写模块命名空间而不是 `mod.note_progress = …`：后者在 mypy 眼里是「Module 没有这个
@@ -2851,7 +3005,7 @@ def install_local_progress_sink(
     """
     p = Path(path)
     now_fn = clock or time.time
-    state: dict[str, Any] = {"seq": 0}
+    state: _PingState = {"seq": 0}
     try:
         prev_doc = json.loads(p.read_text(encoding="utf-8"))
         if isinstance(prev_doc, dict) and isinstance(prev_doc.get("seq"), int):
@@ -2917,6 +3071,91 @@ def release_course(
 
 
 # ═══ part 9/12: 09_session — 会话面：课程解析 / 终局判据 / 显式租约与 kind / session_multi ═══
+def _pick_eligible(
+    t: dict,
+    skip: set[str] | None,
+    served: dict[str, str] | None,
+    log: Callable[[str], None],
+) -> bool:
+    """两路共用的过滤：`skip` / 本会话已跑过的包（同 sha）。"""
+    course = str(t.get("course") or "")
+    if not course:
+        return False
+    if skip and course in skip:
+        # 两种原因共用一个名单（★M3 起）：hub 触发导包到上界【本会话放弃】与
+        # 租约被撤销（打点 409）【本会话不再领】——两种都要人处理后才再领。
+        log(f"跳过 {course}：本会话不再领它（导包到上界 / 租约被撤销；人处理后才再领）")
+        return False
+    pack_doc = t.get("pack")
+    sha = str(pack_doc.get("sha256") or "") if isinstance(pack_doc, dict) else ""
+    if sha and served is not None and served.get(course) == sha:
+        log(f"跳过 {course}：本会话已跑过这份包（sha12={sha[:12]}）——包换了新段才会再领")
+        return False
+    return True
+
+
+def _as_pick(t: dict) -> dict:
+    pack_doc = t.get("pack")
+    sha = str(pack_doc.get("sha256") or "") if isinstance(pack_doc, dict) else ""
+    return {
+        "course": str(t.get("course") or ""),
+        "pack_sha256": sha,
+        "kind": str(t.get("kind") or "rl"),
+    }
+
+
+def _claimable_picks(
+    tasks: list[dict],
+    skip: set[str] | None,
+    served: dict[str, str] | None,
+    log: Callable[[str], None],
+) -> list[dict]:
+    """可领行 → picks（`pending_export` 软态排最后）。空表 = 本拍没有可领的课。"""
+    claimable_rows = [t for t in tasks if t.get("claimable") and _pick_eligible(t, skip, served, log)]
+    # ★M3：**导包软态（`pending_export`）排到最后**——`pending_export` 不占闸（Q1），所以行
+    # 照样 `claimable`，但它的 claim 必然 409（包还没造出来）：排后面 = 先把能跑的挑完，
+    # `_run_batch` 走到它时记一笔 blocker 就换下一门（不让一次注定失败的 claim 排在队首）。
+    ready = [_as_pick(t) for t in claimable_rows if not t.get("pending_export")]
+    exporting = [_as_pick(t) for t in claimable_rows if t.get("pending_export")]
+    picked = ready + exporting
+    if picked:
+        log("清单里可领：" + "、".join(f"{p['course']}" for p in picked))
+        if exporting:
+            log(
+                "其中 "
+                + "、".join(f"{p['course']}" for p in exporting)
+                + " 正在导包（pending_export，软态不占闸）——排在最后：本拍多半领不到，"
+                "领到就触发交接"
+            )
+    return picked
+
+
+def _blocked_rows(
+    tasks: list[dict],
+    worker: str,
+    skip: set[str] | None,
+    served: dict[str, str] | None,
+    log: Callable[[str], None],
+) -> list[dict]:
+    """被**别人**有效持有、且不是已跑过/skip 的行——P1-9 的 `blocked` 读数。"""
+    return [
+        {
+            "course": str(t.get("course") or ""),
+            "holder": _holder_id(t),
+            "expires_in": _holder_left(t),
+        }
+        for t in tasks
+        if _holder_id(t) and _holder_id(t) != worker and _pick_eligible(t, skip, served, log)
+    ]
+
+
+def _log_wait_rows(tasks: list[dict], log: Callable[[str], None]) -> None:
+    """不可领的原因逐行报出（空队列从此自解释）。"""
+    wait_rows = [t for t in tasks if not t.get("claimable")]
+    if wait_rows:
+        log("不可领：" + "、".join(f"{_blocked_note(t)}" for t in wait_rows))
+
+
 def resolve_courses(
     cfg: dict,
     creds: dict,
@@ -2997,48 +3236,8 @@ def resolve_courses(
             str(t.get("course") or "") for t in tasks if worker and _holder_id(t) == worker
         ]
 
-    def _eligible(t: dict) -> bool:
-        """两路共用的过滤：`skip` / 本会话已跑过的包（同 sha）。"""
-        course = str(t.get("course") or "")
-        if not course:
-            return False
-        if skip and course in skip:
-            # 两种原因共用一个名单（★M3 起）：hub 触发导包到上界【本会话放弃】与
-            # 租约被撤销（打点 409）【本会话不再领】——两种都要人处理后才再领。
-            log(f"跳过 {course}：本会话不再领它（导包到上界 / 租约被撤销；人处理后才再领）")
-            return False
-        pack_doc = t.get("pack")
-        sha = str(pack_doc.get("sha256") or "") if isinstance(pack_doc, dict) else ""
-        if sha and served is not None and served.get(course) == sha:
-            log(f"跳过 {course}：本会话已跑过这份包（sha12={sha[:12]}）——包换了新段才会再领")
-            return False
-        return True
-
-    def _as_pick(t: dict) -> dict:
-        pack_doc = t.get("pack")
-        sha = str(pack_doc.get("sha256") or "") if isinstance(pack_doc, dict) else ""
-        return {
-            "course": str(t.get("course") or ""),
-            "pack_sha256": sha,
-            "kind": str(t.get("kind") or "rl"),
-        }
-
-    claimable_rows = [t for t in tasks if t.get("claimable") and _eligible(t)]
-    # ★M3：**导包软态（`pending_export`）排到最后**——`pending_export` 不占闸（Q1），所以行
-    # 照样 `claimable`，但它的 claim 必然 409（包还没造出来）：排后面 = 先把能跑的挑完，
-    # `_run_batch` 走到它时记一笔 blocker 就换下一门（不让一次注定失败的 claim 排在队首）。
-    ready = [_as_pick(t) for t in claimable_rows if not t.get("pending_export")]
-    exporting = [_as_pick(t) for t in claimable_rows if t.get("pending_export")]
-    picked = ready + exporting
+    picked = _claimable_picks(tasks, skip, served, log)
     if picked:
-        log("清单里可领：" + "、".join(f"{p['course']}" for p in picked))
-        if exporting:
-            log(
-                "其中 "
-                + "、".join(f"{p['course']}" for p in exporting)
-                + " 正在导包（pending_export，软态不占闸）——排在最后：本拍多半领不到，"
-                "领到就触发交接"
-            )
         return picked, [], tasks
     # ★ 2026-10-04 现场（Kaggle「清单 3 条 ⇒ 队列为空」，用户：「colab 已停机、也切过模式，
     #   为什么还持有租约？」）：租约只在**显式 release / 900s TTL 到期 / 接管静默超阈被判 stale**
@@ -3047,7 +3246,7 @@ def resolve_courses(
     #   而**清单行的 `claimable` 把任何持有者（包括自己）一律排除**，这一档到不了现场 ⇒
     #   自己把自己锁到 TTL 过期（Kaggle 十几分钟的会话就废在这一等上）。
     #   这里补上：没有可领的课、而某几行是**我自己**的租约 ⇒ 照领（claim 会续上）。
-    mine = [t for t in tasks if worker and _holder_id(t) == worker and _eligible(t)]
+    mine = [t for t in tasks if worker and _holder_id(t) == worker and _pick_eligible(t, skip, served, log)]
     if mine:
         log(
             "续领自己未交还的租约："
@@ -3058,22 +3257,12 @@ def resolve_courses(
     # busy 的行**照收**：claim 会回 409 `busy`，调用方按「中间态不占 idle 预算」等到
     # 别的课跑完（比「空队列」更准确）。★P1-9（R3-g）：被**别人**的有效租约持有的行——带回
     # 给调用方（退避再问、不占 idle 预算）。
-    blocked = [
-        {
-            "course": str(t.get("course") or ""),
-            "holder": _holder_id(t),
-            "expires_in": _holder_left(t),
-        }
-        for t in tasks
-        if _holder_id(t) and _holder_id(t) != worker and _eligible(t)
-    ]
+    blocked = _blocked_rows(tasks, worker, skip, served, log)
     # ★ 2026-10-04 现场（Kaggle：「hub 清单：3 条」接着「队列为空」，看不出为什么）：
     #   不可领的原因**就在 hub 行的 `state`/`reason`/`holder` 里**（not_offline=停课 /
     #   held=有主 / completed=本段跑满 / busy / 无任务包 / 包过期），不打印就等于把排查
     #   推给人工去 curl `/offline/tasks`。这里逐行报出——空队列从此自解释。
-    wait_rows = [t for t in tasks if not t.get("claimable")]
-    if wait_rows:
-        log("不可领：" + "、".join(f"{_blocked_note(t)}" for t in wait_rows))
+    _log_wait_rows(tasks, log)
     return [], blocked, tasks
 
 
@@ -3258,6 +3447,119 @@ class BatchRunSpec(NamedTuple):
     kinds: dict[str, str] | None = None
 
 
+class _BatchLeg(NamedTuple):
+    """一条课程腿的结果：主循环只看这四个信号，不再重复租约/异常分支。"""
+
+    rc: int = 0
+    blocked: str = ""
+    gave_up: bool = False
+    skipped: bool = False
+    revoked: bool = False
+
+
+def _run_batch_bc(
+    cfg: dict,
+    creds: dict,
+    log: Callable[[str], None],
+    keepalive_stop: threading.Event | None,
+    course: str,
+    rest: list[str],
+) -> int:
+    """BC 腿：反复领这门课的 BC job，跑到收官/停课/被别的主接管才交还。"""
+    try:
+        bc_rc = run_bc_course(cfg, creds, log, keepalive_stop, course=course)
+    except SystemExit as e:
+        if rest:
+            log(
+                f"课程 {course}（BC）未跑完（{e.code}）——串行到此为止，剩余 "
+                f"{len(rest)} 门课未执行：{', '.join(rest)}"
+            )
+        raise
+    if bc_rc != 0:
+        log(
+            f"课程 {course}（BC）退出 rc={bc_rc} ——串行到此为止；"
+            + (f"剩余 {len(rest)} 门课未执行：{', '.join(rest)}" if rest else "它已是最后一门课")
+        )
+    elif rest:
+        log(f"课程 {course}（BC）完成 —— 下一门：{rest[0]}")
+    return bc_rc
+
+
+def _run_batch_rl(
+    cfg: dict,
+    creds: dict,
+    log: Callable[[str], None],
+    keepalive_stop: threading.Event | None,
+    course: str,
+    multi: bool,
+    ctx: dict,
+    rest: list[str],
+) -> _BatchLeg:
+    """RL 腿：领租约 →（心跳）→ run_one_course → 交还；中间态/放弃/跳过都收成信号。"""
+    lease = ""
+    beat: threading.Event | None = None
+    if ctx:
+        lease, why = claim_course(ctx["hub"], ctx["token"], course, ctx["worker"], log)
+        if why in (
+            "busy",
+            "pending_export",
+            "completed",
+            "not_offline",
+            "held",
+            "proto",
+            "bc_course",
+        ):
+            # 自动交接的中间态：**本拍不跑**（不是「取不到包」的错误，也不进 skipped ——
+            # 它会在 caller 的下一拍重问；旧口径「一律照旧跑」会在这里白跑一场）。
+            log(
+                f"课程 {course} 本拍不跑（{why}）"
+                + (f"——继续看下一门：{rest[0]}" if rest else "——等下一拍")
+            )
+            return _BatchLeg(blocked=why)
+        if why == "give_up":
+            log(f"课程 {course} 本会话放弃（hub 触发导包到上界）——等下一门/等处理")
+            return _BatchLeg(gave_up=True)
+        if lease:
+            beat = heartbeat_loop(ctx["hub"], ctx["token"], course, lease, log)
+    progress: dict = {}
+    try:
+        rc = run_one_course(
+            CourseRunSpec(
+                cfg,
+                creds,
+                log,
+                keepalive_stop,
+                course=course,
+                multi=multi,
+                lease=lease,
+                progress=progress,
+            )
+        )
+    except PackUnavailableError as e:
+        # ★ 只放宽「取不到包」这一类（顺序必须在 `except SystemExit` **之前**，
+        #   否则会被父类吃掉）：记一行 + 继续下一门；汇总与非零退出在循环之后。
+        log(f"课程 {course} 跳过（取不到任务包）：{e.code}")
+        if rest:
+            log(f"  —— 继续下一门：{rest[0]}（末尾会汇总；训练失败/配置错误仍然立即停）")
+        return _BatchLeg(skipped=True)
+    except SystemExit as e:
+        if rest:
+            log(
+                f"课程 {course} 未跑完（{e.code}）——串行到此为止，剩余 {len(rest)} 门课未执行："
+                f"{', '.join(rest)}"
+            )
+        raise
+    finally:
+        if beat is not None:
+            beat.set()
+        if lease:
+            release_course(ctx["hub"], ctx["token"], course, lease, log)
+    outcome = str(progress.get("outcome") or "")
+    if outcome:
+        log(f"课程 {course} 的租约结局：{outcome}（段已跑完并打包）")
+    return _BatchLeg(rc=rc, revoked=outcome == "revoked")
+
+
 def _run_batch(spec: BatchRunSpec) -> int:
     """串行跑一批课；返回 rc。失败分两类（plan/offline-switch-auto-bundle §3.5）：
 
@@ -3290,109 +3592,45 @@ def _run_batch(spec: BatchRunSpec) -> int:
         log(f"===== [{i + 1}/{len(courses)}] 课程 {course} =====")
         kind = str((kinds or {}).get(course, "rl") or "rl").strip().lower()
         if kind == "bc":
-            # BC 课程 = 课程级 drain：反复领**这门课**的 BC job（hub 用 bc-exclusive.json
-            # 保证一门课同一时刻只有一台盘在跑），跑到收官/停课/被别的主接管才交还。
-            try:
-                bc_rc = run_bc_course(cfg, creds, log, keepalive_stop, course=course)
-            except SystemExit as e:
-                if rest:
-                    log(
-                        f"课程 {course}（BC）未跑完（{e.code}）——串行到此为止，剩余 "
-                        f"{len(rest)} 门课未执行：{', '.join(rest)}"
-                    )
-                raise
+            bc_rc = _run_batch_bc(cfg, creds, log, keepalive_stop, course, rest)
             if bc_rc != 0:
-                log(
-                    f"课程 {course}（BC）退出 rc={bc_rc} ——串行到此为止；"
-                    + (
-                        f"剩余 {len(rest)} 门课未执行：{', '.join(rest)}"
-                        if rest
-                        else "它已是最后一门课"
-                    )
-                )
                 return bc_rc
             ran += 1
-            if rest:
-                log(f"课程 {course}（BC）完成 —— 下一门：{rest[0]}")
             continue
-        # 租约上下文取成局部 dict（不用 `leases[...]`）：`finally` 里也要用，而 `leases` 是
+        # 租约上下文取成局部 dict（不用 `leases[...]`）：helper 与交还都要用，而 `leases` 是
         # 可选的（None = 老行为、不领租约）。空 dict 即「这条腿不领」。
-        ctx = leases if leases is not None else {}
-        lease = ""
-        beat: threading.Event | None = None
-        if ctx:
-            lease, why = claim_course(ctx["hub"], ctx["token"], course, ctx["worker"], log)
-            if why in (
-                "busy",
-                "pending_export",
-                "completed",
-                "not_offline",
-                "held",
-                "proto",
-                "bc_course",
-            ):
-                # 自动交接的中间态：**本拍不跑**（不是「取不到包」的错误，也不进 skipped ——
-                # 它会在 caller 的下一拍重问；旧口径「一律照旧跑」会在这里白跑一场）。
-                blockers[course] = why
-                log(
-                    f"课程 {course} 本拍不跑（{why}）"
-                    + (f"——继续看下一门：{rest[0]}" if rest else "——等下一拍")
-                )
-                continue
-            if why == "give_up":
-                gave_up.append(course)
-                log(f"课程 {course} 本会话放弃（hub 触发导包到上界）——等下一门/等处理")
-                continue
-            if lease:
-                beat = heartbeat_loop(ctx["hub"], ctx["token"], course, lease, log)
-        progress: dict = {}
-        try:
-            rc = run_one_course(CourseRunSpec(
-                cfg,
-                creds,
-                log,
-                keepalive_stop,
-                course=course,
-                multi=multi,
-                lease=lease,
-                progress=progress,
-            ))
-        except PackUnavailableError as e:
-            # ★ 只放宽「取不到包」这一类（顺序必须在 `except SystemExit` **之前**，
-            #   否则会被父类吃掉）：记一行 + 继续下一门；汇总与非零退出在循环之后。
-            skipped.append(course)
-            log(f"课程 {course} 跳过（取不到任务包）：{e.code}")
-            if rest:
-                log(f"  —— 继续下一门：{rest[0]}（末尾会汇总；训练失败/配置错误仍然立即停）")
+        leg = _run_batch_rl(
+            cfg,
+            creds,
+            log,
+            keepalive_stop,
+            course,
+            multi,
+            leases if leases is not None else {},
+            rest,
+        )
+        if leg.blocked:
+            blockers[course] = leg.blocked
             continue
-        except SystemExit as e:
-            if rest:
-                log(
-                    f"课程 {course} 未跑完（{e.code}）——串行到此为止，剩余 {len(rest)} 门课未执行："
-                    f"{', '.join(rest)}"
-                )
-            raise
-        finally:
-            if beat is not None:
-                beat.set()
-            if lease:
-                release_course(ctx["hub"], ctx["token"], course, lease, log)
-        outcome = str(progress.get("outcome") or "")
-        if outcome:
-            log(f"课程 {course} 的租约结局：{outcome}（段已跑完并打包）")
-            if outcome == "revoked":
-                revoked.append(course)
-        if rc != 0:
+        if leg.gave_up:
+            gave_up.append(course)
+            continue
+        if leg.skipped:
+            skipped.append(course)
+            continue
+        if leg.revoked:
+            revoked.append(course)
+        if leg.rc != 0:
             log(
-                f"课程 {course} 退出 rc={rc} ——串行到此为止；"
+                f"课程 {course} 退出 rc={leg.rc} ——串行到此为止；"
                 + (f"剩余 {len(rest)} 门课未执行：{', '.join(rest)}" if rest else "它已是最后一门课")
             )
-            return rc
+            return leg.rc
         ran += 1
-        if ctx and shas:
+        if leases is not None and shas:
             sha = str(shas.get(course) or "")
             if sha:
-                ctx["served"][course] = sha
+                leases["served"][course] = sha
         if rest:
             log(f"课程 {course} 完成 —— 下一门：{rest[0]}")
     if skipped:
@@ -3523,6 +3761,149 @@ def _wait_out_a_hub_blackout(
     return None
 
 
+class _AutoKnobs(NamedTuple):
+    """`_run_auto` 的七个数值/模式旋钮（`0` 是合法值，不能用 `or 缺省`）。"""
+
+    mode: str
+    budget: float
+    idle_wait: float
+    idle_wait_terminal: float
+    poll: float
+    hub_wait: float
+
+
+def _auto_knobs(cfg: dict) -> _AutoKnobs:
+    def _num(key: str, default: float) -> float:
+        """数值旋钮（**`0` 是合法值**：`or 缺省` 那套写法会把「立刻收工」悄悄变成等半小时）。"""
+        v = cfg.get(key)
+        if v is None or v == "":
+            return default
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
+    return _AutoKnobs(
+        mode=str(cfg.get("queue_mode") or "drain").strip().lower(),
+        budget=_num("session_budget_sec", 0.0),  # 0 = 不限（与逐段的 budget_sec 不是一把旋钮）
+        idle_wait=_num("idle_wait_sec", _num("wait_pack_sec", DEFAULT_WAIT_SEC)),
+        # 终态窗口：**独立**锚点与预算（不占 idle_wait_sec——「没活了」与「活还没到」是两件事）。
+        idle_wait_terminal=_num("idle_wait_terminal_sec", IDLE_WAIT_TERMINAL_SEC),
+        poll=_num("queue_poll_sec", DEFAULT_QUEUE_POLL_SEC),
+        #: 清单连不上时的独立窗口（网络态，不占 idle 预算；理由见 `HUB_WAIT_SEC`）。
+        hub_wait=_num("hub_wait_sec", HUB_WAIT_SEC),
+    )
+
+
+def _take_bc_when_idle(
+    cfg: dict, creds: dict, log: Callable[[str], None], holds: dict
+) -> bool:
+    """空档（清单都払不到 / 都被别人持有）里顺路领一份 BC 作业跑掉（★M5）。
+
+    返回 True = 真跑了一份（调用方据此重置空转锚：干了活就不算 idle，否则一段长 BC
+    会把 `idle_wait_sec` 提前吃满——会话看着有产出却自我收工）。
+    """
+    summary = try_take_bc_job(cfg, creds, log, holding=bool(holds.get("mine")))
+    if not summary:
+        return False
+    log(summary)
+    return True
+
+
+def _auto_blackout_step(
+    hub_since: float | None,
+    now: float,
+    *,
+    knobs: _AutoKnobs,
+    keepalive_stop: threading.Event | None,
+    start: float,
+    rc: int,
+    log: Callable[[str], None],
+) -> tuple[int | None, float | None]:
+    """hub 清单连不上的一拍：起锚/报等待/到顶收工；返回 `(退出 rc 或 None, 新锚)`。"""
+    if hub_since is None:
+        hub_since = now
+        log(
+            "hub 清单连不上 —— 先不判死："
+            f"每 {knobs.poll:g}s 再问，上限 hub_wait_sec={knobs.hub_wait:g}s（不占 idle 预算）"
+        )
+    _rc = _wait_out_a_hub_blackout(
+        waited=now - hub_since,
+        hub_wait=knobs.hub_wait,
+        poll=knobs.poll,
+        log=log,
+        keepalive_stop=keepalive_stop,
+        budget=knobs.budget,
+        start=start,
+        rc=rc,
+    )
+    return _rc, hub_since
+
+
+def _auto_blocked_step(
+    blocked_rows: list[dict],
+    *,
+    knobs: _AutoKnobs,
+    keepalive_stop: threading.Event | None,
+    start: float,
+    rc: int,
+    log: Callable[[str], None],
+) -> tuple[int | None, float]:
+    """「有活但都被别人持有」的一拍：报出持有者与退避秒数；返回 `(退出 rc 或 None, wait)`。"""
+    wait = blocked_poll_sec(blocked_rows, knobs.poll)
+    log(
+        "清单里有活但都被别人持有："
+        + "、".join(
+            f"{b['course']}@{b['holder'] or '?'}（{float(b['expires_in']):.0f}s 后过期）"
+            for b in blocked_rows
+        )
+        + f"—— {wait:g}s 后再问（不占 idle 预算）"
+    )
+    if keepalive_stop is not None and keepalive_stop.is_set():
+        log("收到停机信号 ⇒ 收工")
+        return rc, wait
+    if knobs.budget > 0 and time.monotonic() - start >= knobs.budget:
+        log(f"会话预算 session_budget_sec={knobs.budget:.0f}s 用尽 ⇒ 收工")
+        return rc, wait
+    return None, wait
+
+
+def _auto_terminal_step(
+    terminal_since: float | None,
+    now: float,
+    names: str,
+    *,
+    knobs: _AutoKnobs,
+    keepalive_stop: threading.Event | None,
+    start: float,
+    rc: int,
+    log: Callable[[str], None],
+) -> tuple[int | None, float | None]:
+    """清单全终态的一拍：起锚/到顶收工/报等待；返回 `(退出 rc 或 None, 新锚)`。"""
+    if terminal_since is None:
+        terminal_since = now
+        log(
+            "清单全为终态（completed / not_offline）或本会话已跑过它的包："
+            + names
+            + f" —— 等 {knobs.idle_wait_terminal:.0f}s 确认无人介入后收工"
+            "（要立刻收工把它设成 0；要恢复旧行为设成 1800）"
+        )
+    if now - terminal_since >= knobs.idle_wait_terminal:
+        log(f"清单全终态且已等满 idle_wait_terminal_sec={knobs.idle_wait_terminal:.0f}s ⇒ 收工")
+        return rc, terminal_since
+    if knobs.budget > 0 and now - start >= knobs.budget:
+        log(f"会话预算 session_budget_sec={knobs.budget:.0f}s 用尽 ⇒ 收工")
+        return rc, terminal_since
+    if keepalive_stop is not None and keepalive_stop.is_set():
+        log("收到停机信号 ⇒ 收工")
+        return rc, terminal_since
+    log(
+        f"清单全终态 —— {knobs.poll:.0f}s 后再问"
+        f"（已等 {now - terminal_since:.0f}s / 上限 {knobs.idle_wait_terminal:.0f}s）"
+    )
+    return None, terminal_since
+
+
 def _run_auto(
     cfg: dict, creds: dict, log: Callable[[str], None], keepalive_stop: Any
 ) -> int:
@@ -3543,40 +3924,9 @@ def _run_auto(
     #: 本会话已放弃的课（hub 触发导包到上界）：别再每轮领一次（`resolve_courses(skip=…)`）。
     gave_up: set[str] = set()
     rc = 0
-    mode = str(cfg.get("queue_mode") or "drain").strip().lower()
-
-    def _num(key: str, default: float) -> float:
-        """数值旋钮（**`0` 是合法值**：`or 缺省` 那套写法会把「立刻收工」悄悄变成等半小时）。"""
-        v = cfg.get(key)
-        if v is None or v == "":
-            return default
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return default
-
+    knobs = _auto_knobs(cfg)
     #: ★M5：本盘自己此刻还持着的课（`resolve_courses` 回填）——BC 前置闸读它（Q5）。
     holds: dict = {}
-
-    def _idle_take_bc() -> bool:
-        """空档（清单都払不到 / 都被别人持有）里顺路领一份 BC 作业跑掉（★M5）。
-
-        返回 True = 真跑了一份（调用方据此重置空转锚：干了活就不算 idle，否则一段长 BC
-        会把 `idle_wait_sec` 提前吃满——会话看着有产出却自我收工）。
-        """
-        summary = try_take_bc_job(cfg, creds, log, holding=bool(holds.get("mine")))
-        if not summary:
-            return False
-        log(summary)
-        return True
-
-    budget = _num("session_budget_sec", 0.0)  # 0 = 不限（与逐段的 budget_sec 不是一把旋钮）
-    idle_wait = _num("idle_wait_sec", _num("wait_pack_sec", DEFAULT_WAIT_SEC))
-    # 终态窗口：**独立**锚点与预算（不占 idle_wait_sec——「没活了」与「活还没到」是两件事）。
-    idle_wait_terminal = _num("idle_wait_terminal_sec", IDLE_WAIT_TERMINAL_SEC)
-    poll = _num("queue_poll_sec", DEFAULT_QUEUE_POLL_SEC)
-    #: 清单连不上时的独立窗口（网络态，不占 idle 预算；理由见 `HUB_WAIT_SEC`）。
-    hub_wait = _num("hub_wait_sec", HUB_WAIT_SEC)
     start = time.monotonic()
     idle_since = start
     #: 终态窗口的锚点（`None` = 本拍不是「全终态」）。在**非终态**的每一拍复位。
@@ -3604,26 +3954,18 @@ def _run_auto(
             # 不是「不知道跑哪几门课」。等它回来（开机 DNS 未就绪 / 网络抖动 / 隧道刚重启），
             # 但窗口有限（`hub_wait_sec`），过了才响亮收工。也**不消耗** idle 预算：
             # 我们还不知道有没有活。
-            now = time.monotonic()
-            if hub_since is None:
-                hub_since = now
-                log(
-                    "hub 清单连不上 —— 先不判死："
-                    f"每 {poll:g}s 再问，上限 hub_wait_sec={hub_wait:g}s（不占 idle 预算）"
-                )
-            _rc = _wait_out_a_hub_blackout(
-                waited=now - hub_since,
-                hub_wait=hub_wait,
-                poll=poll,
-                log=log,
+            _rc, hub_since = _auto_blackout_step(
+                hub_since,
+                time.monotonic(),
+                knobs=knobs,
                 keepalive_stop=keepalive_stop,
-                budget=budget,
                 start=start,
                 rc=rc,
+                log=log,
             )
             if _rc is not None:
                 return _rc
-            time.sleep(poll)
+            time.sleep(knobs.poll)
             continue
         hub_since = None
         if tasks:
@@ -3633,38 +3975,33 @@ def _run_auto(
                 cfg, creds, log, keepalive_stop, tasks, served, worker
             )
             rc = batch_rc or rc
-            if _record_round_outcome(leases, gave_up, poll, log):
+            if _record_round_outcome(leases, gave_up, knobs.poll, log):
                 # 中间态（导包是分钟级 / 别的课在跑）：backoff，但**不消耗** idle 预算。
-                if _idle_take_bc():  # ★M5：空档里领一份 BC（跑完才回来）
+                if _take_bc_when_idle(cfg, creds, log, holds):  # ★M5：空档里领一份 BC
                     idle_since = time.monotonic()
-                time.sleep(poll)
+                time.sleep(knobs.poll)
             continue
         # ★P1-9（R3-g）：`tasks` 空但 `blocked` 非空 = 「还得等一会儿」（别人的有效租约，
         # 通常等 release / TTL / 接管），与「空队列」是两件事：退避再问、**不消耗**
         # `idle_wait_sec`（重置 idle 锚点），只受会话预算与停机信号约束。
         # ⚠ 与上面 `leases["blockers"]`（tasks 非空时的交接中间态）同名不同物。
         if blocked_rows:
-            _idle_take_bc()  # ★M5：都被别人持着 ⇒ 用空档领一份 BC（Q5：两型均可领）
-            wait = blocked_poll_sec(blocked_rows, poll)
-            log(
-                "清单里有活但都被别人持有："
-                + "、".join(
-                    f"{b['course']}@{b['holder'] or '?'}（{float(b['expires_in']):.0f}s 后过期）"
-                    for b in blocked_rows
-                )
-                + f"—— {wait:g}s 后再问（不占 idle 预算）"
+            _take_bc_when_idle(cfg, creds, log, holds)  # ★M5：都被别人持着 ⇒ 空档领 BC
+            _rc, wait = _auto_blocked_step(
+                blocked_rows,
+                knobs=knobs,
+                keepalive_stop=keepalive_stop,
+                start=start,
+                rc=rc,
+                log=log,
             )
-            if keepalive_stop is not None and keepalive_stop.is_set():
-                log("收到停机信号 ⇒ 收工")
-                return rc
-            if budget > 0 and time.monotonic() - start >= budget:
-                log(f"会话预算 session_budget_sec={budget:.0f}s 用尽 ⇒ 收工")
-                return rc
+            if _rc is not None:
+                return _rc
             idle_since = time.monotonic()
             terminal_since = None  # 有活（被别人持有）⇒ 同上，别让终态窗口提前收工
             time.sleep(wait)
             continue
-        if mode != "drain":
+        if knobs.mode != "drain":
             log("队列为空（queue_mode=once）⇒ 收工（rc=0：没活干不是失败）")
             return rc
         # ★ 2026-10-07：清单**全为终态**（跑满待人重导包 / 人固定在离线之外）或**本会话已跑过这份包**
@@ -3673,48 +4010,38 @@ def _run_auto(
         #   判据走 `all_terminal(manifest, served)`——注意是**原始清单**：`tasks`/`blocked_rows` 都不带 `state`。
         if all_terminal(manifest, served):
             now = time.monotonic()
-            if terminal_since is None:
-                terminal_since = now
-                log(
-                    "清单全为终态（completed / not_offline）或本会话已跑过它的包："
-                    + "、".join(str(t.get("course") or "?") for t in manifest)
-                    + f" —— 等 {idle_wait_terminal:.0f}s 确认无人介入后收工"
-                    "（要立刻收工把它设成 0；要恢复旧行为设成 1800）"
-                )
-            if now - terminal_since >= idle_wait_terminal:
-                log(
-                    f"清单全终态且已等满 idle_wait_terminal_sec={idle_wait_terminal:.0f}s ⇒ 收工"
-                )
-                return rc
-            if budget > 0 and now - start >= budget:
-                log(f"会话预算 session_budget_sec={budget:.0f}s 用尽 ⇒ 收工")
-                return rc
-            if keepalive_stop is not None and keepalive_stop.is_set():
-                log("收到停机信号 ⇒ 收工")
-                return rc
-            log(
-                f"清单全终态 —— {poll:.0f}s 后再问"
-                f"（已等 {now - terminal_since:.0f}s / 上限 {idle_wait_terminal:.0f}s）"
+            _rc, terminal_since = _auto_terminal_step(
+                terminal_since,
+                now,
+                "、".join(str(t.get("course") or "?") for t in manifest),
+                knobs=knobs,
+                keepalive_stop=keepalive_stop,
+                start=start,
+                rc=rc,
+                log=log,
             )
-            time.sleep(poll)
+            if _rc is not None:
+                return _rc
+            time.sleep(knobs.poll)
             continue
         terminal_since = None
         waited = time.monotonic() - idle_since
-        if waited >= idle_wait:
-            log(f"队列空且已等满 idle_wait_sec={idle_wait:.0f}s ⇒ 收工")
+        if waited >= knobs.idle_wait:
+            log(f"队列空且已等满 idle_wait_sec={knobs.idle_wait:.0f}s ⇒ 收工")
             return rc
-        if budget > 0 and time.monotonic() - start >= budget:
-            log(f"会话预算 session_budget_sec={budget:.0f}s 用尽 ⇒ 收工")
+        if knobs.budget > 0 and time.monotonic() - start >= knobs.budget:
+            log(f"会话预算 session_budget_sec={knobs.budget:.0f}s 用尽 ⇒ 收工")
             return rc
         if keepalive_stop is not None and keepalive_stop.is_set():
             log("收到停机信号 ⇒ 收工")
             return rc
-        log(f"队列为空 —— {poll:.0f}s 后再问一次（idle 已等 {waited:.0f}s / 上限 {idle_wait:.0f}s）")
-        if _idle_take_bc():  # ★M5：队列空 = 自主盘最典型的空档（会话还在 wait）
+        log(
+            f"队列为空 —— {knobs.poll:.0f}s 后再问一次"
+            f"（idle 已等 {waited:.0f}s / 上限 {knobs.idle_wait:.0f}s）"
+        )
+        if _take_bc_when_idle(cfg, creds, log, holds):  # ★M5：队列空 = 自主盘最典型的空档
             idle_since = time.monotonic()
-        time.sleep(poll)
-
-
+        time.sleep(knobs.poll)
 
 # ═══ part 11/12: 11_bc — BC 腿：代码就绪 / 取一次 BC 作业 / run_bc_course / try_take_bc_job ═══
 def _bc_code_ready() -> bool:

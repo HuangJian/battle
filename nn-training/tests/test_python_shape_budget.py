@@ -57,7 +57,6 @@ LONG_FUNCS_BASELINE: dict[str, int] = {
     "hub/smoke_loopback.py": 1,
     "hub/store_offline.py": 1,
     "remote/bc_job.py": 1,
-    "remote/offline_boot.py": 5,
     "remote/offline_deliver.py": 1,
     "remote/offline_eval.py": 1,
     "remote/offline_push.py": 1,

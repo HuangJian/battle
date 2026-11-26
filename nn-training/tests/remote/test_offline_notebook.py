@@ -174,7 +174,13 @@ def test_credentials_are_read_before_any_network_change() -> None:
     batch = src[src.index("def _run_batch(") :]
     batch = batch[: batch.index("\ndef ")]
     assert "spec: BatchRunSpec" in batch[:400], "_run_batch 必须收下已读好的凭据"
-    assert batch.index("run_one_course(") > 0
+    # 2026-11-26：逐课 RL 腿搬进 `_run_batch_rl`（同一文件、只从 spec 拿 creds）——
+    # 时序判据跟着接缝走：真正调 `run_one_course` 的地方必须收 `creds: dict`。
+    rl = src[src.index("def _run_batch_rl(") :]
+    rl = rl[: rl.index("\ndef ")]
+    assert rl.index("creds: dict") < rl.index("run_one_course("), (
+        "_run_batch_rl 必须收下已读好的凭据，再调 run_one_course"
+    )
     assert "creds: dict" in src[src.index("def _run_auto(") :][:400], "_run_auto 同上"
     per_course = src[src.index("def run_one_course(") :]
     assert "spec: CourseRunSpec" in per_course[:400], "run_one_course 必须收下已读好的凭据"

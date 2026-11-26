@@ -11051,3 +11051,23 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   `claim_offline` 参数、`note_progress` token、日志、缺包腿与账本清零；探针 3/3 红。
   115 条 hub 用例全绿；全量 pygate 7052 passed / 13 skipped；根 `bun run check` 2873 pass。
   全文 → `docs/nn/engineering.md` §359。
+
+## §2026-11-26-offline-boot-batch
+
+- **背景**：`remote/offline_boot.py` 是笔记本按文件名拉取的 standalone 运输单元，源码拆在
+  `remote/_offline_boot/*.pyfrag`、由生成器拼回；五个 >150 行函数（`run_one_course` 181 ·
+  `install_progress_pinger` 183 · `resolve_courses` 158 · `_run_batch` 169 · `_run_auto` 190）
+  是形状存量里最大的一簇。
+
+- **决定**：只改分片、重建发行物；五函数拆成「目标解析 / argv / 打点 / 运行」·「日志 / 409 /
+  失败」·「行过滤 / 可领 / blocked」·「BC 腿 / RL 腿」·「旋钮 / 黑障 / blocked / 终态」
+  五组 helper。结果 78 / 140 / 108 / 105 / 139；`LONG_FUNCS_BASELINE` 删 `remote/offline_boot.py: 5`
+  （46 → 41，该文件清零）。新 helper 的两个 >8 参签名用 event 元组与 `names` 串收掉，宽签名仍 0。
+
+- **守卫随接缝走**：凭据时序文本断言从 `_run_batch` 体内改指 `_run_batch_rl`（先收 `creds`
+  再调 run_one_course），断言总数不变；`_CoursePrep` 不持 `Any`（`backup_root` 预计算），
+  pinger 用 `_PingState` 别名，Any 基线不涨。
+
+- **验证**：重建 + `--check` 绿；`test_offline_boot*.py` 65 条行为用例绿；形状/LOC/Any/assert/
+  文本断言/notebook 守卫 81 条绿；全量 pygate 7052 passed / 13 skipped；根 `bun run check` 绿。
+  本批为逐字搬移（无新分支），未另写 HEAD-vs-新差分。全文 → `docs/nn/engineering.md` §360。

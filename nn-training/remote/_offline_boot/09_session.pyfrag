@@ -1,4 +1,89 @@
 # ═══ part 9/12: 09_session — 会话面：课程解析 / 终局判据 / 显式租约与 kind / session_multi ═══
+def _pick_eligible(
+    t: dict,
+    skip: set[str] | None,
+    served: dict[str, str] | None,
+    log: Callable[[str], None],
+) -> bool:
+    """两路共用的过滤：`skip` / 本会话已跑过的包（同 sha）。"""
+    course = str(t.get("course") or "")
+    if not course:
+        return False
+    if skip and course in skip:
+        # 两种原因共用一个名单（★M3 起）：hub 触发导包到上界【本会话放弃】与
+        # 租约被撤销（打点 409）【本会话不再领】——两种都要人处理后才再领。
+        log(f"跳过 {course}：本会话不再领它（导包到上界 / 租约被撤销；人处理后才再领）")
+        return False
+    pack_doc = t.get("pack")
+    sha = str(pack_doc.get("sha256") or "") if isinstance(pack_doc, dict) else ""
+    if sha and served is not None and served.get(course) == sha:
+        log(f"跳过 {course}：本会话已跑过这份包（sha12={sha[:12]}）——包换了新段才会再领")
+        return False
+    return True
+
+
+def _as_pick(t: dict) -> dict:
+    pack_doc = t.get("pack")
+    sha = str(pack_doc.get("sha256") or "") if isinstance(pack_doc, dict) else ""
+    return {
+        "course": str(t.get("course") or ""),
+        "pack_sha256": sha,
+        "kind": str(t.get("kind") or "rl"),
+    }
+
+
+def _claimable_picks(
+    tasks: list[dict],
+    skip: set[str] | None,
+    served: dict[str, str] | None,
+    log: Callable[[str], None],
+) -> list[dict]:
+    """可领行 → picks（`pending_export` 软态排最后）。空表 = 本拍没有可领的课。"""
+    claimable_rows = [t for t in tasks if t.get("claimable") and _pick_eligible(t, skip, served, log)]
+    # ★M3：**导包软态（`pending_export`）排到最后**——`pending_export` 不占闸（Q1），所以行
+    # 照样 `claimable`，但它的 claim 必然 409（包还没造出来）：排后面 = 先把能跑的挑完，
+    # `_run_batch` 走到它时记一笔 blocker 就换下一门（不让一次注定失败的 claim 排在队首）。
+    ready = [_as_pick(t) for t in claimable_rows if not t.get("pending_export")]
+    exporting = [_as_pick(t) for t in claimable_rows if t.get("pending_export")]
+    picked = ready + exporting
+    if picked:
+        log("清单里可领：" + "、".join(f"{p['course']}" for p in picked))
+        if exporting:
+            log(
+                "其中 "
+                + "、".join(f"{p['course']}" for p in exporting)
+                + " 正在导包（pending_export，软态不占闸）——排在最后：本拍多半领不到，"
+                "领到就触发交接"
+            )
+    return picked
+
+
+def _blocked_rows(
+    tasks: list[dict],
+    worker: str,
+    skip: set[str] | None,
+    served: dict[str, str] | None,
+    log: Callable[[str], None],
+) -> list[dict]:
+    """被**别人**有效持有、且不是已跑过/skip 的行——P1-9 的 `blocked` 读数。"""
+    return [
+        {
+            "course": str(t.get("course") or ""),
+            "holder": _holder_id(t),
+            "expires_in": _holder_left(t),
+        }
+        for t in tasks
+        if _holder_id(t) and _holder_id(t) != worker and _pick_eligible(t, skip, served, log)
+    ]
+
+
+def _log_wait_rows(tasks: list[dict], log: Callable[[str], None]) -> None:
+    """不可领的原因逐行报出（空队列从此自解释）。"""
+    wait_rows = [t for t in tasks if not t.get("claimable")]
+    if wait_rows:
+        log("不可领：" + "、".join(f"{_blocked_note(t)}" for t in wait_rows))
+
+
 def resolve_courses(
     cfg: dict,
     creds: dict,
@@ -79,48 +164,8 @@ def resolve_courses(
             str(t.get("course") or "") for t in tasks if worker and _holder_id(t) == worker
         ]
 
-    def _eligible(t: dict) -> bool:
-        """两路共用的过滤：`skip` / 本会话已跑过的包（同 sha）。"""
-        course = str(t.get("course") or "")
-        if not course:
-            return False
-        if skip and course in skip:
-            # 两种原因共用一个名单（★M3 起）：hub 触发导包到上界【本会话放弃】与
-            # 租约被撤销（打点 409）【本会话不再领】——两种都要人处理后才再领。
-            log(f"跳过 {course}：本会话不再领它（导包到上界 / 租约被撤销；人处理后才再领）")
-            return False
-        pack_doc = t.get("pack")
-        sha = str(pack_doc.get("sha256") or "") if isinstance(pack_doc, dict) else ""
-        if sha and served is not None and served.get(course) == sha:
-            log(f"跳过 {course}：本会话已跑过这份包（sha12={sha[:12]}）——包换了新段才会再领")
-            return False
-        return True
-
-    def _as_pick(t: dict) -> dict:
-        pack_doc = t.get("pack")
-        sha = str(pack_doc.get("sha256") or "") if isinstance(pack_doc, dict) else ""
-        return {
-            "course": str(t.get("course") or ""),
-            "pack_sha256": sha,
-            "kind": str(t.get("kind") or "rl"),
-        }
-
-    claimable_rows = [t for t in tasks if t.get("claimable") and _eligible(t)]
-    # ★M3：**导包软态（`pending_export`）排到最后**——`pending_export` 不占闸（Q1），所以行
-    # 照样 `claimable`，但它的 claim 必然 409（包还没造出来）：排后面 = 先把能跑的挑完，
-    # `_run_batch` 走到它时记一笔 blocker 就换下一门（不让一次注定失败的 claim 排在队首）。
-    ready = [_as_pick(t) for t in claimable_rows if not t.get("pending_export")]
-    exporting = [_as_pick(t) for t in claimable_rows if t.get("pending_export")]
-    picked = ready + exporting
+    picked = _claimable_picks(tasks, skip, served, log)
     if picked:
-        log("清单里可领：" + "、".join(f"{p['course']}" for p in picked))
-        if exporting:
-            log(
-                "其中 "
-                + "、".join(f"{p['course']}" for p in exporting)
-                + " 正在导包（pending_export，软态不占闸）——排在最后：本拍多半领不到，"
-                "领到就触发交接"
-            )
         return picked, [], tasks
     # ★ 2026-10-04 现场（Kaggle「清单 3 条 ⇒ 队列为空」，用户：「colab 已停机、也切过模式，
     #   为什么还持有租约？」）：租约只在**显式 release / 900s TTL 到期 / 接管静默超阈被判 stale**
@@ -129,7 +174,7 @@ def resolve_courses(
     #   而**清单行的 `claimable` 把任何持有者（包括自己）一律排除**，这一档到不了现场 ⇒
     #   自己把自己锁到 TTL 过期（Kaggle 十几分钟的会话就废在这一等上）。
     #   这里补上：没有可领的课、而某几行是**我自己**的租约 ⇒ 照领（claim 会续上）。
-    mine = [t for t in tasks if worker and _holder_id(t) == worker and _eligible(t)]
+    mine = [t for t in tasks if worker and _holder_id(t) == worker and _pick_eligible(t, skip, served, log)]
     if mine:
         log(
             "续领自己未交还的租约："
@@ -140,22 +185,12 @@ def resolve_courses(
     # busy 的行**照收**：claim 会回 409 `busy`，调用方按「中间态不占 idle 预算」等到
     # 别的课跑完（比「空队列」更准确）。★P1-9（R3-g）：被**别人**的有效租约持有的行——带回
     # 给调用方（退避再问、不占 idle 预算）。
-    blocked = [
-        {
-            "course": str(t.get("course") or ""),
-            "holder": _holder_id(t),
-            "expires_in": _holder_left(t),
-        }
-        for t in tasks
-        if _holder_id(t) and _holder_id(t) != worker and _eligible(t)
-    ]
+    blocked = _blocked_rows(tasks, worker, skip, served, log)
     # ★ 2026-10-04 现场（Kaggle：「hub 清单：3 条」接着「队列为空」，看不出为什么）：
     #   不可领的原因**就在 hub 行的 `state`/`reason`/`holder` 里**（not_offline=停课 /
     #   held=有主 / completed=本段跑满 / busy / 无任务包 / 包过期），不打印就等于把排查
     #   推给人工去 curl `/offline/tasks`。这里逐行报出——空队列从此自解释。
-    wait_rows = [t for t in tasks if not t.get("claimable")]
-    if wait_rows:
-        log("不可领：" + "、".join(f"{_blocked_note(t)}" for t in wait_rows))
+    _log_wait_rows(tasks, log)
     return [], blocked, tasks
 
 

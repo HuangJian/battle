@@ -29,6 +29,41 @@
 
 ---
 
+## §360 分诊第二十三格（批）：`remote/offline_boot` 五个长函数 → 分片内接缝（2026-11-26）
+
+`remote/offline_boot.py` 是 **standalone 运输单元**（notebook 按文件名从 GitHub raw 拉），
+源码住 `remote/_offline_boot/*.pyfrag`，由 `tools/build_offline_boot.py` 逐字节拼回。本批只改
+分片、重建发行物，五个 >150 行函数全部落到 150 以下（存量 **46 → 41**，首次把这一文件的五格清空）：
+
+| 函数 | 前 | 后 | 新接缝 |
+|---|---:|---:|---|
+| `run_one_course` | 181 | 78 | `_resolve_course_targets` 61（hub/代码/设备/锚点/凭据）· `_build_course_argv` 29 · `_attach_course_progress` 32 · `_run_course_loop` 38；`_CoursePrep` / `_CourseTargets` 两个载体 |
+| `install_progress_pinger` | 183 | 140 | `_ping_log_event` 21 · `_ping_handle_ok` 11 · `_ping_handle_409` 44 · `_ping_handle_failure` 30；`_PingState` 别名让四个 helper 共用一处 `Any` |
+| `resolve_courses` | 158 | 108 | `_pick_eligible` 21 · `_as_pick` 8 · `_claimable_picks` 24 · `_blocked_rows` 17 · `_log_wait_rows` 5 |
+| `_run_batch` | 169 | 105 | `_run_batch_bc` 26 · `_run_batch_rl` 73；`_BatchLeg` 把中间态/放弃/跳过/撤销收成四个信号 |
+| `_run_auto` | 190 | 139 | `_AutoKnobs` + `_auto_knobs` 21 · `_take_bc_when_idle` 13 · `_auto_blackout_step` 28 · `_auto_blocked_step` 26 · `_auto_terminal_step` 35 |
+
+**接缝为什么这么切**：`run_one_course` 的「目标解析」与「argv 装配」读者不同（前者写凭据文件、
+后者只读目标）；`_run_batch` 的 BC/RL 两条腿除了排序与计数器不共享任何状态；`_run_auto` 的四个
+循环分支各自只碰一个预算锚（hub 黑障 / blocked / 终态 / idle），搬成纯函数后主循环只剩派发。
+`install_progress_pinger` 把「日志行」「409 分流」「失败降频」从闭包里拆出，闭包只留节流与投递。
+
+**守卫跟着接缝走**：`test_credentials_are_read_before_any_network_change` 原先要求
+`run_one_course(` 出现在 `_run_batch` 体内；现在它住 `_run_batch_rl`，判据改成「该 helper 先收
+`creds: dict` 再调 run_one_course」，仍是一条文本断言（预算不涨）。两个新 helper 曾撞 >8 参：
+`_ping_handle_failure` 把 `(kind, it, done, total)` 收成 event 元组、`_auto_terminal_step` 把
+清单名串成 `names`，宽签名实测仍为 0。
+
+**验证**：`tools/build_offline_boot.py` 重建（4373 行 / 12 分片，`--check` 守卫绿）；
+`tests/remote/test_offline_boot*.py` **65 条**行为用例全绿；形状/LOC/Any/assert/文本断言/
+notebook 接线守卫 **81 条**绿；全量 pygate **7052 passed / 13 skipped**；根 `bun run check` 绿。
+本批是逐字搬移（未新增分支），没有另写 HEAD-vs-新差分；验证面是上述行为用例与全量门禁。
+
+**被否决**：① 把五个函数搬进新分片 —— 顺序表会变、运输契约虽不受影响但生成物 diff 更大，
+收益只是文件更短；② `run_one_course` 只拆一个 `_run_course_setup` —— 会留下 110+ 行的
+「目标 + argv + 打点」混合体；③ `_run_batch` 继续用一个循环内联两条腿 —— BC/RL 的中断语义
+（SystemExit vs rc）必须各写各的。
+
 ## §359 分诊第二十二格：`hub/offline._post_offline_lease` 169 → 32 + 五段（2026-11-25）
 
 租约三合一端点把 `claim` / `heartbeat` / `release` 三条只共享「课程名 + 包路径」的腿挤在一条

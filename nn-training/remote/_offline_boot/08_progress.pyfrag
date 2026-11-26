@@ -14,6 +14,120 @@ class PingerSpec(NamedTuple):
     clock: Callable[[], float] | None = None
 
 
+#: 打点层的可变状态（`Any` 值的 dict；别名让四个 helper 共用同一处注解）。
+_PingState = dict[str, Any]
+
+
+def _ping_log_event(
+    state: _PingState,
+    kind: str,
+    it: int,
+    done: int,
+    total: int,
+    now: float,
+    log: Callable[[str], None],
+) -> None:
+    """完成事件的**日志行**（与发报解耦，先过两条腿共用的节流）。"""
+    # 轮边界「本轮开始」只上发报、不单独打日志行（每轮一条、与 PPO/eval 阶段头重复，
+    # 属刷屏；hub 活性不受影响——发报照常走）。
+    if str(kind or "") != "round-start" and _should_log_progress(
+        state.get("shown"),
+        kind=str(kind or ""),
+        it=int(it),
+        done=int(done),
+        total=int(total),
+    ) and _iter_log_due(state, str(kind or ""), now, int(it)):
+        state["shown"] = (str(kind or ""), int(it), int(done), int(total))
+        log(_progress_label(kind, it=int(it), done=int(done), total=int(total)))
+
+
+def _ping_handle_409(
+    state: _PingState,
+    doc: dict,
+    *,
+    hub: str,
+    course: str,
+    token: str,
+    reclaim: Callable[[], str] | None,
+    log: Callable[[str], None],
+    url: str,
+) -> str:
+    """409 分流（expired/taken 可重领；revoked 是人的意志）；返回（可能换过的）URL。"""
+    why = "revoked" if doc.get("revoked") else ("expired" if doc.get("expired") else "taken")
+    holder = doc.get("holder") if isinstance(doc.get("holder"), dict) else {}
+    # `expired`/`taken` 可以**重建会话**（plan §4.2-2）：重新 claim 拿到新 lease 再报进度；
+    # `revoked` 是人的意志，保持不动。
+    if why in ("expired", "taken") and reclaim is not None:
+        fresh = ""
+        try:
+            fresh = str(reclaim() or "")
+        except Exception as e:  # 重新领租约的任何意外都不得影响训练
+            log(f"[打点] 重新领租约异常（忽略）：{type(e).__name__}: {e}")
+        if fresh:
+            url = progress_url(hub, course, fresh)
+            state["fails"] = 0
+            state["cool"] = 0.0
+            state["level"] = 0
+            log(f"[打点] {why} ⇒ 已重新领到租约——恢复报进度")
+            return url
+    state["dead"] = why
+    state["outcome"] = why
+    log(
+        {
+            "revoked": "⚠ 打点被拒：租约已被撤销（人强制解除了接管）——"
+            "本段跑完即打包，本会话不再领这一课",
+            "expired": "⚠ 打点被拒：租约已过期（重新领租约没成功）——本段继续跑完并打包"
+            "（回传可能被判 duplicate 丢弃）",
+        }.get(
+            why,
+            f"⚠ 打点被拒：租约已被 {(holder or {}).get('worker_id') or '别人'} 接管——"
+            "本段继续跑完并打包（回传可能被判 duplicate 丢弃）",
+        )
+    )
+    return url
+
+
+def _ping_handle_ok(state: _PingState, log: Callable[[str], None]) -> None:
+    """200：清失败读数与降频档，本段结局复位（不再 unreachable）。"""
+    if int(state["fails"]):
+        log(f"[打点] 恢复发报（连丢 {state['fails']} 拍之后）")
+    state["fails"] = 0
+    state["cool"] = 0.0
+    state["level"] = 0
+    state["outcome"] = ""  # 复活：本段结局不再是 unreachable
+
+
+def _ping_handle_failure(
+    state: _PingState,
+    code: int,
+    event: tuple[str, int, int, int],
+    *,
+    force: bool,
+    now: float,
+    log: Callable[[str], None],
+) -> None:
+    """连不上 / 5xx / 404：计失败，连丢到上限改降频窗（不永久哑）。"""
+    kind, it, done, total = event
+    state["fails"] = int(state["fails"]) + 1
+    if int(state["fails"]) >= PROGRESS_FAIL_LIMIT:
+        level = min(int(state["level"]), len(PROGRESS_COOLDOWN_SEC) - 1)
+        cool = float(PROGRESS_COOLDOWN_SEC[level])
+        state["level"] = int(state["level"]) + 1
+        state["cool"] = now + cool
+        # `fails` **不清零**：它是「这一阵子连丢了几拍」的连续读数，下一个成功才复位
+        # （所以恢复那一行能说出「连丢了多少拍」，且再进降频时会升到下一档）。
+        state["outcome"] = "unreachable"
+        log(
+            f"⚠ 打点连丢 {state['fails']} 拍没成功（HTTP {code or '连不上'}）——"
+            f"降频：{cool:.0f}s 后再试（不再永久停）；训练继续"
+        )
+    elif force:
+        log(
+            f"[打点] {_progress_label(kind, it=int(it), done=int(done), total=int(total))} "
+            f"没成功（HTTP {code or '连不上'}）——下一拍再试"
+        )
+
+
 def install_progress_pinger(spec: PingerSpec) -> Callable[[], str]:
     """把**打点层**挂进 `sys.modules[PROGRESS_HOOK_NAME]` → 返回 `detach()`（撤销注册）。
 
@@ -47,7 +161,7 @@ def install_progress_pinger(spec: PingerSpec) -> Callable[[], str]:
     post_fn = post or _post_json
     now_fn = clock or time.monotonic
     url = progress_url(hub, course, lease)
-    state: dict[str, Any] = {
+    state: _PingState = {
         # `-inf` 而不是 `0.0`：首拍必须恒发，而 `now - 0.0 < interval` 只在
         # `now`(=time.monotonic()) **大于 interval** 时才成立 —— monotonic 的起点是
         # **系统启动**（Windows 尤其），所以「开机不到 1 小时」的机器上首拍会被
@@ -96,17 +210,7 @@ def install_progress_pinger(spec: PingerSpec) -> Callable[[], str]:
         # 那一份判据（25% 一桶 / 换阶段 / 完成 / retry），发报不受它影响（下面照常走）。
         # 走 `_should_log_progress`（延迟 import + 兜底）：`_ping` 承诺**永不抛**，而本文件
         # 在引导形态下没有 `common/` ⇒ 裸 import 会让第一条进度事件就炸掉打点。
-        # 轮边界「本轮开始」只上发报、不单独打日志行（每轮一条、与 PPO/eval 阶段头重复，
-        # 属刷屏；hub 活性不受影响——发报在下面照常走）。
-        if str(kind or "") != "round-start" and _should_log_progress(
-            state.get("shown"),
-            kind=str(kind or ""),
-            it=int(it),
-            done=int(done),
-            total=int(total),
-        ) and _iter_log_due(state, str(kind or ""), now, int(it)):
-            state["shown"] = (str(kind or ""), int(it), int(done), int(total))
-            log(_progress_label(kind, it=int(it), done=int(done), total=int(total)))
+        _ping_log_event(state, kind, it, done, total, now, log)
         if not force and float(state["cool"]) > now:
             return False  # 降频窗内（不是死；到点自己回来）
         # `at` 从 0 起 ⇒ **首拍恒发**（段开工那一句不会被时间窗吃掉）。
@@ -115,65 +219,29 @@ def install_progress_pinger(spec: PingerSpec) -> Callable[[], str]:
         state["at"] = now
         code, doc = post_fn(url, token, log, timeout=timeout)
         if code == 200:
-            if int(state["fails"]):
-                log(f"[打点] 恢复发报（连丢 {state['fails']} 拍之后）")
-            state["fails"] = 0
-            state["cool"] = 0.0
-            state["level"] = 0
-            state["outcome"] = ""  # 复活：本段结局不再是 unreachable
+            _ping_handle_ok(state, log)
             return True
         if code == 409:
-            why = "revoked" if doc.get("revoked") else ("expired" if doc.get("expired") else "taken")
-            holder = doc.get("holder") if isinstance(doc.get("holder"), dict) else {}
-            # `expired`/`taken` 可以**重建会话**（plan §4.2-2）：重新 claim 拿到新 lease 再报进度；
-            # `revoked` 是人的意志，保持不动。
-            if why in ("expired", "taken") and reclaim is not None:
-                fresh = ""
-                try:
-                    fresh = str(reclaim() or "")
-                except Exception as e:  # 重新领租约的任何意外都不得影响训练
-                    log(f"[打点] 重新领租约异常（忽略）：{type(e).__name__}: {e}")
-                if fresh:
-                    url = progress_url(hub, course, fresh)
-                    state["fails"] = 0
-                    state["cool"] = 0.0
-                    state["level"] = 0
-                    log(f"[打点] {why} ⇒ 已重新领到租约——恢复报进度")
-                    return False
-            state["dead"] = why
-            state["outcome"] = why
-            log(
-                {
-                    "revoked": "⚠ 打点被拒：租约已被撤销（人强制解除了接管）——"
-                    "本段跑完即打包，本会话不再领这一课",
-                    "expired": "⚠ 打点被拒：租约已过期（重新领租约没成功）——本段继续跑完并打包"
-                    "（回传可能被判 duplicate 丢弃）",
-                }.get(
-                    why,
-                    f"⚠ 打点被拒：租约已被 {(holder or {}).get('worker_id') or '别人'} 接管——"
-                    "本段继续跑完并打包（回传可能被判 duplicate 丢弃）",
-                )
+            url = _ping_handle_409(
+                state,
+                doc,
+                hub=hub,
+                course=course,
+                token=token,
+                reclaim=reclaim,
+                log=log,
+                url=url,
             )
             return False
         # 连不上（0）/ 5xx / 404：下一拍再试；连丢 PROGRESS_FAIL_LIMIT 拍 ⇒ **降频**（不永久哑）。
-        state["fails"] = int(state["fails"]) + 1
-        if int(state["fails"]) >= PROGRESS_FAIL_LIMIT:
-            level = min(int(state["level"]), len(PROGRESS_COOLDOWN_SEC) - 1)
-            cool = float(PROGRESS_COOLDOWN_SEC[level])
-            state["level"] = int(state["level"]) + 1
-            state["cool"] = now + cool
-            # `fails` **不清零**：它是「这一阵子连丢了几拍」的连续读数，下一个成功才复位
-            # （所以恢复那一行能说出「连丢了多少拍」，且再进降频时会升到下一档）。
-            state["outcome"] = "unreachable"
-            log(
-                f"⚠ 打点连丢 {state['fails']} 拍没成功（HTTP {code or '连不上'}）——"
-                f"降频：{cool:.0f}s 后再试（不再永久停）；训练继续"
-            )
-        elif force:
-            log(
-                f"[打点] {_progress_label(kind, it=int(it), done=int(done), total=int(total))} "
-                f"没成功（HTTP {code or '连不上'}）——下一拍再试"
-            )
+        _ping_handle_failure(
+            state,
+            code,
+            (kind, it, done, total),
+            force=force,
+            now=now,
+            log=log,
+        )
         return False
 
     # 写模块命名空间而不是 `mod.note_progress = …`：后者在 mypy 眼里是「Module 没有这个
@@ -222,7 +290,7 @@ def install_local_progress_sink(
     """
     p = Path(path)
     now_fn = clock or time.time
-    state: dict[str, Any] = {"seq": 0}
+    state: _PingState = {"seq": 0}
     try:
         prev_doc = json.loads(p.read_text(encoding="utf-8"))
         if isinstance(prev_doc, dict) and isinstance(prev_doc.get("seq"), int):
