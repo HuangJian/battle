@@ -11088,3 +11088,15 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：BC/stream 六个测试文件 + 形状/LOC/Any/assert/文本守卫 79 条绿；提交由
   pre-commit 全量门禁把关。
   全文 → `docs/nn/engineering.md` §361。
+
+## §2026-11-26-offline-push-split
+
+- **背景**：`remote/offline_push.run_push` 191 行，同时拥有服务装配、任务 starter、隧道重注册、
+  进度/状态节流与收摊；形状存量最后一格在这个文件。
+
+- **决定**：拆出 `_make_starter` / `_refresh_tunnel` / `_note_progress` / `_note_status` /
+  `_shutdown_push`（113 行）；三个游标（`cf_url` / `last_seq` / `last_status`）用返回值回写，
+  不引入类或模块级状态；`tick_sec` / `sleep` / `keepalive_stop` 注入面不变。形状存量 39 → 38。
+
+- **验证**：supervisor + face 测试与形状/LOC/Any/assert/文本守卫 62 条绿；提交由 pre-commit
+  全量门禁把关。全文 → `docs/nn/engineering.md` §362。

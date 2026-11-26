@@ -29,6 +29,28 @@
 
 ---
 
+## §362 分诊第二十五格：`remote/offline_push.run_push`（2026-11-26）
+
+191 行 → **113 行**，五个模块级接缝：
+
+| 接缝 | 行数 | 职责 |
+|---|---:|---|
+| `_make_starter` | 41 | 任务受理后写 `cfg.json` + 起训练子进程（返回 starter，状态面仍注 `state.note_child_exit`） |
+| `_refresh_tunnel` | 11 | quick tunnel 换名 → 重注册；未换只让 `Registry` 自带退避重试 |
+| `_note_progress` | 19 | `state.progress(last_seq)` 取增量 → `should_log_progress` 节流 → `progress_text`，返回新游标 |
+| `_note_status` | 26 | 状态行只在变化/心跳时打（`STATUS_HEARTBEAT_SEC`），返回新比较元组 |
+| `_shutdown_push` | 17 | 注销 → 停子进程 → 关隧道/服务（与原 finally 同序） |
+
+主函数保留端口/token/registry/server 装配、隧道首注册、会话预算与拍循环。循环里三个游标
+（`cf_url` / `last_seq` / `last_status`）均以返回值回写，没有新增闭包或模块级状态；`_Child` 仍在
+`run_push` 里创建，starter 只捕获它。`tick_sec` / `sleep` / `keepalive_stop` 的注入面不变。
+
+**验证**：`test_offline_push_supervisor` + `test_offline_push_face` + 形状/LOC/Any/assert/文本
+**62 条**绿；形状存量 **39 → 38**。提交由 pre-commit 全量门禁把关。
+
+**被否决**：① 把 setup 也塞进 `_PushBoot` —— 端口/token 生成要回写 `cfg`，返回值变六个，
+收益只是主函数再短 20 行；② 把拍循环搬进类 —— 四个游标都是局部值，类只会把它们变成字段。
+
 ## §361 分诊第二十四格（T0）：`train_local_bc` 与 `stream.run`（2026-11-26）
 
 两处都是「长函数里混着多套读者」的典型，切法与上一批同一条纪律：主函数只剩编排。

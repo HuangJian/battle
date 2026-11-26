@@ -198,6 +198,130 @@ def _build_child_env() -> dict[str, str]:
     return env
 
 
+def _make_starter(
+    cfg: dict, state: PushFaceState, child: _Child, log: Callable[[str], None]
+) -> Callable[[dict, Path, Path], None]:
+    """任务受理后：写 cfg.json、起训练子进程。"""
+
+    def starter(task: dict, task_dir: Path, outbox: Path) -> None:
+        cfg_path = task_dir / "cfg.json"
+        try:
+            cfg_path.write_text(
+                json.dumps(redacted_cfg(cfg), ensure_ascii=False), encoding="utf-8"
+            )
+        except OSError as e:
+            log(f"WARN 写 {cfg_path} 失败（{type(e).__name__}: {e}）——子进程会缺参数")
+        argv = [
+            sys.executable,
+            "-u",
+            "-m",
+            "remote.offline_push_task",
+            "--task-dir",
+            str(task_dir),
+            "--outbox",
+            str(outbox),
+            "--stop-file",
+            str(task_dir / "stop"),
+            "--cfg",
+            str(cfg_path),
+        ]
+        try:
+            child.spawn(
+                argv,
+                log_path=task_dir / "run.log",
+                env=_build_child_env(),
+                on_exit=state.note_child_exit,
+                task_id=str(task.get("task_id") or ""),
+                log=log,
+            )
+        except OSError as e:
+            log(f"训练子进程起不来（{type(e).__name__}: {e}）")
+            state.note_child_exit(-1)
+
+    return starter
+
+
+def _refresh_tunnel(
+    reg: Registry, cf_log: Path, cf_url: str, push_token: str, log: Callable[[str], None]
+) -> str:
+    """隧道换名（quick tunnel 重连）⇒ 重注册；未换 ⇒ 只在未注册时重试。"""
+    url = tunnel_url_of(cf_log) or cf_url
+    if url and url != cf_url:
+        log(f"★ 隧道换名：{cf_url or '?'} → {url} —— 重注册")
+        cf_url = url
+    if cf_url:
+        reg.ensure(cf_url, push_token)
+    return cf_url
+
+
+def _note_progress(
+    state: PushFaceState,
+    last_seq: int,
+    last_shown: tuple[str, int, int, int] | None,
+    log: Callable[[str], None],
+) -> tuple[int, tuple[str, int, int, int] | None]:
+    """发报走 face；日志行走两条腿共用的节流，返回新的游标。"""
+    prog = state.progress(last_seq)
+    seq = int(prog.get("seq", 0) or 0)
+    if seq > last_seq and not prog.get("unchanged"):
+        last_seq = seq
+        kind = str(prog.get("kind") or "")
+        it = int(prog.get("it", 0) or 0)
+        done = int(prog.get("done", 0) or 0)
+        total = int(prog.get("total", 0) or 0)
+        if should_log_progress(last_shown, kind=kind, it=it, done=done, total=total):
+            last_shown = (kind, it, done, total)
+            log(progress_text(seq=seq, kind=kind, it=it, done=done, total=total))
+    return last_seq, last_shown
+
+
+def _note_status(
+    phase: str,
+    task: dict,
+    snap: dict,
+    last_status: tuple,
+    last_status_at: float,
+    now: float,
+    t0: float,
+    log: Callable[[str], None],
+) -> tuple[tuple, float]:
+    """状态行只在变化时打；`STATUS_HEARTBEAT_SEC` 兜底一次「还活着」。"""
+    cur = (
+        phase,
+        str(task.get("course") or "-"),
+        bool(snap.get("busy")),
+        snap.get("rc"),
+    )
+    if cur != last_status or now - last_status_at >= STATUS_HEARTBEAT_SEC:
+        log(
+            f"{STATUS_PREFIX}: phase={phase} course={cur[1]} busy={cur[2]}"
+            f" wait={int(now - t0)}s"
+            + (f" rc={cur[3]}" if cur[3] is not None else "")
+        )
+        last_status = cur
+        last_status_at = now
+    return last_status, last_status_at
+
+
+def _shutdown_push(
+    reg: Registry,
+    state: PushFaceState,
+    child: _Child,
+    cf_proc,
+    server,
+    log: Callable[[str], None],
+) -> None:
+    """收摊：注销 / 停子进程 / 关隧道与服务（顺序与原 finally 一致）。"""
+    reg.unregister()
+    task_dir = state.task_dir
+    if task_dir is not None:
+        child.request_stop(stop_file=task_dir / "stop")
+    stop_proc(cf_proc)
+    server.shutdown()
+    server.server_close()
+    log("offline push 服务已收摊")
+
+
 def run_push(
     cfg: dict,
     log: Callable[[str], None] = _log_push,
@@ -248,44 +372,7 @@ def run_push(
     log(f"worker 服务已监听 :{port}（端点 /offline/push/*，Bearer 鉴权）")
 
     child = _Child()
-
-    def _starter(task: dict, task_dir: Path, outbox: Path) -> None:
-        """任务受理后：写 cfg.json、起训练子进程。"""
-        cfg_path = task_dir / "cfg.json"
-        try:
-            cfg_path.write_text(
-                json.dumps(redacted_cfg(cfg), ensure_ascii=False), encoding="utf-8"
-            )
-        except OSError as e:
-            log(f"WARN 写 {cfg_path} 失败（{type(e).__name__}: {e}）——子进程会缺参数")
-        argv = [
-            sys.executable,
-            "-u",
-            "-m",
-            "remote.offline_push_task",
-            "--task-dir",
-            str(task_dir),
-            "--outbox",
-            str(outbox),
-            "--stop-file",
-            str(task_dir / "stop"),
-            "--cfg",
-            str(cfg_path),
-        ]
-        try:
-            child.spawn(
-                argv,
-                log_path=task_dir / "run.log",
-                env=_build_child_env(),
-                on_exit=state.note_child_exit,
-                task_id=str(task.get("task_id") or ""),
-                log=log,
-            )
-        except OSError as e:
-            log(f"训练子进程起不来（{type(e).__name__}: {e}）")
-            state.note_child_exit(-1)
-
-    state.set_starter(_starter)
+    state.set_starter(_make_starter(cfg, state, child, log))
 
     # ── 隧道 + 注册 ──
     cf_log = work / "cloudflared.log"
@@ -332,62 +419,21 @@ def run_push(
                 break
             now = time.time()
             if now - last_tick >= float(tick_sec):
-                # 隧道换名（quick tunnel 重连）⇒ 重注册；未换 ⇒ 只在未注册时重试（Registry 自己退避）。
-                url = tunnel_url_of(cf_log) or cf_url
-                if url and url != cf_url:
-                    log(f"★ 隧道换名：{cf_url or '?'} → {url} —— 重注册")
-                    cf_url = url
-                if cf_url:
-                    reg.ensure(cf_url, push_token)
+                cf_url = _refresh_tunnel(reg, cf_log, cf_url, push_token, log)
                 snap = state.snapshot()
                 phase = str(snap.get("phase") or "")
                 task = snap.get("task") or {}
-                prog = state.progress(last_seq)
-                seq = int(prog.get("seq", 0) or 0)
-                if seq > last_seq and not prog.get("unchanged"):
-                    last_seq = seq
-                    kind = str(prog.get("kind") or "")
-                    it = int(prog.get("it", 0) or 0)
-                    done = int(prog.get("done", 0) or 0)
-                    total = int(prog.get("total", 0) or 0)
-                    # 日志行先过**两条腿共用**的那份节流（`should_log_progress`），
-                    # 措辞再走同一份 `progress_text`（`seq` 是消息编号，不是轮号）。
-                    if should_log_progress(
-                        last_shown, kind=kind, it=it, done=done, total=total
-                    ):
-                        last_shown = (kind, it, done, total)
-                        log(progress_text(seq=seq, kind=kind, it=it, done=done, total=total))
-                # ★ 状态行**只在变化时才打**（2026-10-25 用户口径：每 15s 一行
-                #   `任务状态: phase=running …` 是零信息量的刷屏）；但也不能一整天不吭声
-                #   ⇒ `STATUS_HEARTBEAT_SEC` 兜底一次「还活着」。
-                cur = (
-                    phase,
-                    str(task.get("course") or "-"),
-                    bool(snap.get("busy")),
-                    snap.get("rc"),
+                last_seq, last_shown = _note_progress(state, last_seq, last_shown, log)
+                last_status, last_status_at = _note_status(
+                    phase, task, snap, last_status, last_status_at, now, t0, log
                 )
-                if cur != last_status or now - last_status_at >= STATUS_HEARTBEAT_SEC:
-                    log(
-                        f"{STATUS_PREFIX}: phase={phase} course={cur[1]} busy={cur[2]}"
-                        f" wait={int(now - t0)}s"
-                        + (f" rc={cur[3]}" if cur[3] is not None else "")
-                    )
-                    last_status = cur
-                    last_status_at = now
                 last_tick = now
             # 一拍一醒（注入口 = 用例把「真墙钟」换成拍数，见 `tests/remote/test_offline_push_supervisor.py`）。
             sleep(1.0)
     except KeyboardInterrupt:
         log("收到中断")
     finally:
-        reg.unregister()
-        task_dir = state.task_dir
-        if task_dir is not None:
-            child.request_stop(stop_file=task_dir / "stop")
-        stop_proc(cf_proc)
-        server.shutdown()
-        server.server_close()
-        log("offline push 服务已收摊")
+        _shutdown_push(reg, state, child, cf_proc, server, log)
     return 0
 
 

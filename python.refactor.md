@@ -2146,3 +2146,6 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 
 > 2026-11-26 第二十四格（T0）：`train_local_bc` 177→29 · `stream.run` 176→19；
 > 存量 41 → 39（engineering §361）。
+
+> 2026-11-26 第二十五格：`remote/offline_push.run_push` 191→113；存量 39 → 38
+> （engineering §362）。
