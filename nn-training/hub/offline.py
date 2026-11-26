@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import time
 import urllib.parse
+from collections.abc import Callable
 from email.message import Message
 from io import BufferedIOBase
 from pathlib import Path
@@ -477,6 +478,7 @@ class OfflineRoutes:
         参数一律走查询串（与其余端点同一条形状）。**409 表达业务拒绝**（被别人持有 /
         已过期 / 不是持有人）——**不用 403**：job 腿上「403 lease mismatch 被 worker 读成
         ProtocolError ⇒ 报 job 失败 ⇒ 训练停腿」已经踩过一次（plan §3.2 返回码纪律）。
+        入口只做三件事：鉴权 → 查询串 → 课程/包名校验；三条腿的规则各住一个 helper。
         """
         if not self._auth_ok():
             return
@@ -495,138 +497,162 @@ class OfflineRoutes:
             self._json({"error": str(e), "course": course}, 400)
             return
         if action == "claim":
-            worker = _q("worker")
-            if not worker:
-                self._json(
-                    {
-                        "error": (
-                            "需要 ?worker=<本机 id>（写进 <work>/.worker-id）；空 id 会让两台互相顶租约"
-                        ),
-                        "course": course,
-                    },
-                    400,
-                )
-                return
-            # ★M1b（plan §1.5.2-P0-4）：**显式拒旧端**。本轮起「谁在跑这门课」由 hold 记账；
-            # 旧码既不带 `?proto=2` 也不懂 hold ⇒ 在**入口**就让它停住（不靠它自律）。
-            # 为什么借 `busy` 这个键：旧码的 409 分流里只有 `busy` 腿会把 `error` **原样**
-            # 打进会话日志且本拍不跑（`remote/offline_boot.py` 的 blocker 路径；不耗 idle 预算、
-            # 绝不静默双跑）——于是「请刷新 notebook」这句能真正到达现场。新码据 `proto_required` 判读。
-            if _q("proto") != str(OFFLINE_CLAIM_PROTO_VERSION):
-                self._json(
-                    {
-                        "error": (
-                            "hub 的离线派发已改为 hold v2（接管模型）：本会话的客户端太旧"
-                            f"（缺 ?proto={OFFLINE_CLAIM_PROTO_VERSION}）——请刷新"
-                            "`battle.offline.ipynb` 后重开会话（旧会话把当前段跑完并打包即可，"
-                            "不会与云机双跑）"
-                        ),
-                        "course": course,
-                        "busy": True,
-                        "proto_required": OFFLINE_CLAIM_PROTO_VERSION,
-                        "retry_after": TASK_AUTO_HANDOFF_RETRY_SEC,
-                    },
-                    409,
-                )
-                return
-            # 开课门（★M4b）：唯一 opt-out = 停课（标记不在）⇒ 409 `not_offline`。
-            # （旧的 pinned_online 与「冷课 online 记录」两条门随权威删除；在训课一律放行，
-            # 它的包由下面的导包触发现场生成。）
-            if not self.hub.course_open(course):
-                self._json(
-                    {
-                        "error": (
-                            "这门课不在训练中（开课标记已删）⇒ 不在候选："
-                            "重新开课后云机会自动接走"
-                        ),
-                        "course": course,
-                        "not_offline": True,
-                    },
-                    409,
-                )
-                return
-            if not pack.is_file():
-                # P0-1（plan/auto-offline-handoff §3.1a）：在训课**本来就没有包**——claim 不能 404，
-                # 而是「记 `pending_export` + 请控制台导包 + 409 指路」（★M4b：不建 hold）；
-                # 不属候选的课（停课/未知）仍是 404。
-                # ★六轮 F4：带上 worker（`begin_pending_export` 的「换主/超窗 ⇒ 重置触发账本」要用它）。
-                self._claim_without_pack(course, pack, worker)
-                return
-            sha = _file_sha256(pack)
-            if self.hub.completion_blocked(course, sha):
-                # 段末摘要报到跑满 ⇒ 不可再领（二轮 P1-1）；重导包 sha 变 = 自动解封。
-                self._json(
-                    {
-                        "error": (
-                            "这门课当前任务包已跑满（不自动重跑）——"
-                            "等人停课，或到控制台重导任务包（新包 sha 不同即自动解封）"
-                        ),
-                        "course": course,
-                        "completed": True,
-                    },
-                    409,
-                )
-                return
-            takeover = _q("takeover").lower() in ("1", "true", "yes")
-            lease, why = self.hub.claim_offline(course, worker, takeover=takeover)
-            if not lease:
-                self._offline_claim_refusal(course, worker, why)
-                return
-            # 包真的在手里的这一刻，把「缺包重试」账本清掉（下次再缺从零计数）。
-            reset_auto_handoff_triggers(course)
-            # ★ 2026-10-04（用户报障「抢占在训在线课之后，在线训练的权重和 opt 全丢了？」）：
-            #   **有包**的自动课在 claim 成功时也要请控制台判一次新鲜度 —— 包是「导出那一刻的
-            #   起点（代码+权重+动量）」的快照，而在训课的权重**每轮都在动**；离线腿的续跑
-            #   锚点只认回传/导入的轮次（`queue_resume.resume_sources`），**看不见本机在线轮**
-            #   ⇒ 拿旧包 = 把云机拖回旧起点（白丢在线进度）。控制台按「包比活动权重新?」决定
-            #   跳过还是作废+重导（规则表 ⑥'），且作废是**同步**的（renameSync 在本次 HTTP
-            #   响应内完成）⇒ 云机随后取包时旧包已不在（404 等新包）——竞态在响应返回前关闭。
-            handoff_note = self._ask_console_freshness(course)
-            # ★ 2026-10-08（e2e 三条红 → 真 bug）：进度锚以**响应时刻**为准 —— claim 的第一个
-            # 进度锚在 claim 开头就打了（`claim_offline` 末段的 `note_hold`），而上面的控制台
-            # 核对是**阻塞调用**（控制台不可达时实测 ~2s，上限 `TASK_PACK_TRIGGER_TIMEOUT_SEC`）
-            # ⇒ 秒级判活窗下（e2e 用 `BCITY_HOLD_PROGRESS_STALE_SEC=2`）刚交到客户端手里的
-            # hold 当场是 stale：`GET /offline/hold` 回 held=false、清单 `claimable` 翻 true、
-            # 同一台盘的 busy 闸同时失效（一拖一形同虚设）。带 token 重打：核对期间万一被
-            # 别人 stale-接管，这一拍不会把旧主复活（`note_progress` 的令牌门）。
-            self.hub.note_progress(course, token=str(lease.get("token") or ""))
-            _log(
-                f"offline-claim {course} "
-                f"worker={lease['worker_id']} takeover={int(takeover)}",
-            )
-            payload: dict = {"lease": lease}
-            if handoff_note:
-                payload["handoff"] = handoff_note
-            self._json(payload, 200)
+            self._offline_lease_claim(course, _q, pack)
             return
         token = _q("lease")
         if action == "heartbeat":
-            res, why = self.hub.heartbeat_offline(course, token)
-            if not res:
-                holder = self.hub.holder_info(course)
-                who = holder["worker_id"] if holder else "?"
-                if why == "revoked":
-                    error = (
-                        "租约已被撤销（人强制解除了接管）——本会话继续跑完并打包；"
-                        "下一会话不要再领它"
-                    )
-                elif why == "expired":
-                    error = "租约已过期（本会话产物照旧落盘 + 打包；回传可能被判 duplicate 丢弃）"
-                else:
-                    error = f"租约已被 {who} 接管——本会话继续跑完并打包"
-                self._json(
-                    {
-                        "error": error,
-                        "course": course,
-                        "expired": why == "expired",
-                        "revoked": why == "revoked",
-                        "holder": holder,
-                    },
-                    409,
-                )
-                return
-            self._json(res, 200)
+            self._offline_lease_heartbeat(course, token)
             return
+        self._offline_lease_release(course, token)
+
+    def _offline_lease_claim(self, course: str, q: Callable[[str], str], pack: Path) -> None:
+        """claim 腿：worker 自证 → 入口门（旧端/开课/包/跑满）→ 领租约 → 成功回执。"""
+        worker = q("worker")
+        if not worker:
+            self._json(
+                {
+                    "error": (
+                        "需要 ?worker=<本机 id>（写进 <work>/.worker-id）；空 id 会让两台互相顶租约"
+                    ),
+                    "course": course,
+                },
+                400,
+            )
+            return
+        if not self._claim_admissible(course, q, pack, worker):
+            return
+        takeover = q("takeover").lower() in ("1", "true", "yes")
+        lease, why = self.hub.claim_offline(course, worker, takeover=takeover)
+        if not lease:
+            self._offline_claim_refusal(course, worker, why)
+            return
+        self._settle_claimed_lease(course, takeover, lease)
+
+    def _claim_admissible(
+        self, course: str, q: Callable[[str], str], pack: Path, worker: str
+    ) -> bool:
+        """claim 的入口门：拒因回执在这里写掉并返回 False，放行返回 True。"""
+        # ★M1b（plan §1.5.2-P0-4）：**显式拒旧端**。本轮起「谁在跑这门课」由 hold 记账；
+        # 旧码既不带 `?proto=2` 也不懂 hold ⇒ 在**入口**就让它停住（不靠它自律）。
+        # 为什么借 `busy` 这个键：旧码的 409 分流里只有 `busy` 腿会把 `error` **原样**
+        # 打进会话日志且本拍不跑（`remote/offline_boot.py` 的 blocker 路径；不耗 idle 预算、
+        # 绝不静默双跑）——于是「请刷新 notebook」这句能真正到达现场。新码据 `proto_required` 判读。
+        if q("proto") != str(OFFLINE_CLAIM_PROTO_VERSION):
+            self._json(
+                {
+                    "error": (
+                        "hub 的离线派发已改为 hold v2（接管模型）：本会话的客户端太旧"
+                        f"（缺 ?proto={OFFLINE_CLAIM_PROTO_VERSION}）——请刷新"
+                        "`battle.offline.ipynb` 后重开会话（旧会话把当前段跑完并打包即可，"
+                        "不会与云机双跑）"
+                    ),
+                    "course": course,
+                    "busy": True,
+                    "proto_required": OFFLINE_CLAIM_PROTO_VERSION,
+                    "retry_after": TASK_AUTO_HANDOFF_RETRY_SEC,
+                },
+                409,
+            )
+            return False
+        # 开课门（★M4b）：唯一 opt-out = 停课（标记不在）⇒ 409 `not_offline`。
+        # （旧的 pinned_online 与「冷课 online 记录」两条门随权威删除；在训课一律放行，
+        # 它的包由下面的导包触发现场生成。）
+        if not self.hub.course_open(course):
+            self._json(
+                {
+                    "error": (
+                        "这门课不在训练中（开课标记已删）⇒ 不在候选："
+                        "重新开课后云机会自动接走"
+                    ),
+                    "course": course,
+                    "not_offline": True,
+                },
+                409,
+            )
+            return False
+        if not pack.is_file():
+            # P0-1（plan/auto-offline-handoff §3.1a）：在训课**本来就没有包**——claim 不能 404，
+            # 而是「记 `pending_export` + 请控制台导包 + 409 指路」（★M4b：不建 hold）；
+            # 不属候选的课（停课/未知）仍是 404。
+            # ★六轮 F4：带上 worker（`begin_pending_export` 的「换主/超窗 ⇒ 重置触发账本」要用它）。
+            self._claim_without_pack(course, pack, worker)
+            return False
+        sha = _file_sha256(pack)
+        if self.hub.completion_blocked(course, sha):
+            # 段末摘要报到跑满 ⇒ 不可再领（二轮 P1-1）；重导包 sha 变 = 自动解封。
+            self._json(
+                {
+                    "error": (
+                        "这门课当前任务包已跑满（不自动重跑）——"
+                        "等人停课，或到控制台重导任务包（新包 sha 不同即自动解封）"
+                    ),
+                    "course": course,
+                    "completed": True,
+                },
+                409,
+            )
+            return False
+        return True
+
+    def _settle_claimed_lease(self, course: str, takeover: bool, lease: dict) -> None:
+        """claim 成功后的收尾：清缺包账本 → 核包新鲜度 → 响应时刻重打进度锚 → 200。"""
+        # 包真的在手里的这一刻，把「缺包重试」账本清掉（下次再缺从零计数）。
+        reset_auto_handoff_triggers(course)
+        # ★ 2026-10-04（用户报障「抢占在训在线课之后，在线训练的权重和 opt 全丢了？」）：
+        #   **有包**的自动课在 claim 成功时也要请控制台判一次新鲜度 —— 包是「导出那一刻的
+        #   起点（代码+权重+动量）」的快照，而在训课的权重**每轮都在动**；离线腿的续跑
+        #   锚点只认回传/导入的轮次（`queue_resume.resume_sources`），**看不见本机在线轮**
+        #   ⇒ 拿旧包 = 把云机拖回旧起点（白丢在线进度）。控制台按「包比活动权重新?」决定
+        #   跳过还是作废+重导（规则表 ⑥'），且作废是**同步**的（renameSync 在本次 HTTP
+        #   响应内完成）⇒ 云机随后取包时旧包已不在（404 等新包）——竞态在响应返回前关闭。
+        handoff_note = self._ask_console_freshness(course)
+        # ★ 2026-10-08（e2e 三条红 → 真 bug）：进度锚以**响应时刻**为准 —— claim 的第一个
+        # 进度锚在 claim 开头就打了（`claim_offline` 末段的 `note_hold`），而上面的控制台
+        # 核对是**阻塞调用**（控制台不可达时实测 ~2s，上限 `TASK_PACK_TRIGGER_TIMEOUT_SEC`）
+        # ⇒ 秒级判活窗下（e2e 用 `BCITY_HOLD_PROGRESS_STALE_SEC=2`）刚交到客户端手里的
+        # hold 当场是 stale：`GET /offline/hold` 回 held=false、清单 `claimable` 翻 true、
+        # 同一台盘的 busy 闸同时失效（一拖一形同虚设）。带 token 重打：核对期间万一被
+        # 别人 stale-接管，这一拍不会把旧主复活（`note_progress` 的令牌门）。
+        self.hub.note_progress(course, token=str(lease.get("token") or ""))
+        _log(
+            f"offline-claim {course} "
+            f"worker={lease['worker_id']} takeover={int(takeover)}",
+        )
+        payload: dict = {"lease": lease}
+        if handoff_note:
+            payload["handoff"] = handoff_note
+        self._json(payload, 200)
+
+    def _offline_lease_heartbeat(self, course: str, token: str) -> None:
+        """heartbeat 腿：续 TTL；409 按 expired / revoked / taken 三种原因分流。"""
+        res, why = self.hub.heartbeat_offline(course, token)
+        if not res:
+            holder = self.hub.holder_info(course)
+            who = holder["worker_id"] if holder else "?"
+            if why == "revoked":
+                error = (
+                    "租约已被撤销（人强制解除了接管）——本会话继续跑完并打包；"
+                    "下一会话不要再领它"
+                )
+            elif why == "expired":
+                error = "租约已过期（本会话产物照旧落盘 + 打包；回传可能被判 duplicate 丢弃）"
+            else:
+                error = f"租约已被 {who} 接管——本会话继续跑完并打包"
+            self._json(
+                {
+                    "error": error,
+                    "course": course,
+                    "expired": why == "expired",
+                    "revoked": why == "revoked",
+                    "holder": holder,
+                },
+                409,
+            )
+            return
+        self._json(res, 200)
+
+    def _offline_lease_release(self, course: str, token: str) -> None:
+        """release 腿：只放自己的租约；不是持有人一律 409（不覆盖别人的）。"""
         ok, _why = self.hub.release_offline(course, token)
         if not ok:
             self._json(

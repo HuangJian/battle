@@ -11032,3 +11032,22 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   pinned / enqueue / 启动行 / read_control / switch / settle / discover_tick / heartbeat /
   finish / sleep）；探针 4/4 红。serve 四个测试文件 59 条全绿；全量 pygate 7052 passed /
   13 skipped；根 `bun run check` 绿。全文 → `docs/nn/engineering.md` §358。
+
+## §2026-11-25-lease-endpoint
+
+- **背景**：`hub/offline._post_offline_lease` 169 行，claim / heartbeat / release 三条腿只共享
+  「课程名 + 包路径」；`LONG_FUNCS_BASELINE` 最后一格（`hub/offline.py: 1`）。
+
+- **决定**：入口 169 → 32（鉴权 → 查询串 → 课程/包校验 → 三分派）；`_offline_lease_claim` 22 ·
+  `_claim_admissible` 65 · `_settle_claimed_lease` 28 · `_offline_lease_heartbeat` 27 ·
+  `_offline_lease_release` 14。`hub/offline.py` 形状存量删条（47 → 46，该文件归零）。
+
+- **被否决**：① 每道门一个函数（五个单门各带一份参数、调用点串五遍）；② `_LeaseClaim`
+  冻结上下文（只读三个字段，载体比参数多）；③ 保留 claim 100+ 行（准入与收尾的读者不同）。
+
+- **验证**：HEAD(`004fa46c`)-vs-新 21 组差分 **0 差异**（鉴权失败 / 无课 / 非法课 / 无 worker /
+  旧 proto / 停课 / 缺包 / 跑满 / bc / busy / held / claim 成功 ±handoff、takeover /
+  heartbeat ok/expired/revoked/taken / release ok/拒 / 未知 action）；比对 `_json` 全文、
+  `claim_offline` 参数、`note_progress` token、日志、缺包腿与账本清零；探针 3/3 红。
+  115 条 hub 用例全绿；全量 pygate 7052 passed / 13 skipped；根 `bun run check` 2873 pass。
+  全文 → `docs/nn/engineering.md` §359。

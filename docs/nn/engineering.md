@@ -29,6 +29,35 @@
 
 ---
 
+## §359 分诊第二十二格：`hub/offline._post_offline_lease` 169 → 32 + 五段（2026-11-25）
+
+租约三合一端点把 `claim` / `heartbeat` / `release` 三条只共享「课程名 + 包路径」的腿挤在一条
+函数里。现在入口只做鉴权、查询串、课程/包名校验与三分派（**169 → 32**）：`_offline_lease_claim`
+22（worker 自证 → 准入 → 领 → 收尾）· `_claim_admissible` 65（旧端闸 / 开课门 / 无包腿 /
+完跑闸；拒因回执写掉后返回 False）· `_settle_claimed_lease` 28（清缺包账本 → 控制台核新鲜度 →
+响应时刻重打进度锚 → 200）· `_offline_lease_heartbeat` 27（expired / revoked / taken 三分流）·
+`_offline_lease_release` 14。`hub/offline.py` 长函数归零（存量 47 → 46）。
+
+**为什么这样切**：三条腿的 409 文案、判据与副作用完全不同；claim 内部又分「准入」（每道门
+各自写回执后中止）与「收尾」（成功后才跑的三件事）——把 65 行的准入再拆成五个单门函数只会
+让每条门都带一份 `course/pack/worker`，并在调用点串五遍。
+
+**形状不变式**：409（不是 403）；旧端拒因借 `busy` 键 + `proto_required` 读数；未知 action 仍
+落到 release（入口 `else` 支路）；`token` 在 claim 分支前只算一次；`_claim_without_pack` 先于
+sha / 完跑闸。
+
+**验证**：HEAD(`004fa46c`)-vs-新 21 组差分 **0 差异**（鉴权失败 / 无课 / 非法课 / 无 worker /
+旧 proto / 停课 / 缺包 / 跑满 / bc / busy / held / claim 成功（±handoff、`takeover=TRUE`）/
+heartbeat（ok / expired / revoked / taken）/ release（ok / 拒）/ 未知 action → release）；
+比对每次 `_json`（status + body 全文）、`claim_offline` 参数、`note_progress` token、日志、
+缺包腿与账本清零事件。探针 3/3 红（跳过旧端闸 / 跳过 claim 收尾 / release 恒成功）。
+五个 hub 测试文件 115 条全绿；形状/LOC 预算绿；全量 pygate **7052 passed / 13 skipped**；
+根 `bun run check` 2873 pass。
+
+**被否决**：① 每道门一个函数 —— 五个单门各带一份参数、调用点串五遍，收益只有名字；
+② 一个 `_LeaseClaim` 冻结上下文 —— 准入后只读 course/worker/takeover，载体比参数多；
+③ 保留 claim 100+ 行 —— 准入与收尾的读者不同（五道门 vs 三件副作用）。
+
 ## §358 分诊第二十一格：`trainer/loop_serve.serve` 184 → 111 + 两段启动（2026-11-25）
 
 `serve` 原来把「进程只做一次的事」（UTF-8/push/bun 探测、发现已开课课程、开课并登记 marker）

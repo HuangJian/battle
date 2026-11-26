@@ -2133,3 +2133,8 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > 2026-11-25 第二十一格：`trainer/loop_serve.serve` 184 → 111 + `_start_serve` /
 > `_build_service`（主循环逐字未动）；HEAD-vs-新 11 组差分全同（探针 4/4 红），
 > 存量 48 → 47（engineering §358）。
+
+> 2026-11-25 第二十二格：`hub/offline._post_offline_lease` 169 → 32 + 五段
+> （`_offline_lease_claim` / `_claim_admissible` / `_settle_claimed_lease` /
+> `_offline_lease_heartbeat` / `_offline_lease_release`）；HEAD-vs-新 21 组差分全同
+> （探针 3/3 红），存量 47 → 46（engineering §359）。
