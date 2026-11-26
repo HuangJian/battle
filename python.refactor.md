@@ -2220,3 +2220,9 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > `_ReplayPlan`；`ns` 随 plan 走，因为 `stage_json_for_args` 要 `course_obj`）；23 组假边界
 > 场景逐字段差分 0（manifest / 日志 / `EvalGameSpec` 25 字段 / workers / 产物面），
 > `Any` 不变，存量 22 文件 / 25 → 21 / 24（engineering §375）。
+
+> 2026-11-26 第三十八格：`trainer/eval_dispatch._eval_close` 162 → 95 + 三本账载体与三段收工
+> （`_CloseBook` 15 字段 / `_wait_landing` 12 / `_announce_close` 50 / `_drain_writers` 10 /
+> `_log_close_books` 15；`tail` 只拼一次，四分支共用）；14 组假收工账场景逐字段差分 0
+> （日志 / `EvalSettleSpec` / rnd 调用序列），`Any` 保持 4，存量 21 文件 / 24 → 20 / 23
+> （engineering §376）。

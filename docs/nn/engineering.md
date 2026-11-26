@@ -29,6 +29,35 @@
 
 ---
 
+## §376 分诊第三十八格：`trainer/eval_dispatch._eval_close` 162 → 95 + 三本账载体与三段收工（2026-11-26）
+
+`_eval_close` 是「一次读账、四处自述、最后落 summary」：`rnd.close()` 的读数被抄成 14 个局部
+变量，四个收工分支各自重拼一遍 `{landed}/{total}` 与窗口余量，三本账行再算一遍缺口。改一个
+读数要动四处，抄错一处就是同一轮两份收工自述。
+
+| 段 | 行数 | 职责 |
+|---|---:|---|
+| `_eval_close` | ~95 | 等收口 → 收工账 → 三行自述 → summary |
+| `_CloseBook` | 15 字段 | 收工读数 + 派生归因（`never_n` / `tail` 是 property） |
+| `_wait_landing` | ~12 | 窗口到期后的有界等落账 |
+| `_announce_close` | ~50 | 四分支自述 + 缺口告警 + 回场/浪费 |
+| `_drain_writers` | ~10 | 1s 写手预算 |
+| `_log_close_books` | ~15 | 派出/认领/落盘 + 认领≠落盘告警 |
+
+**关键选择**：`_CloseBook` 在 `_eval_close` 里由**已经类型化**的局部量构造（不走
+`stats: dict[str, Any]` 的二次解包）—— 这样既不新增 `Any`（基线保持 4），也不用为每个
+`int(stats[...])` 加 cast。`tail` 只拼一次，四个分支共用；`_announce_close` 收 `rnd` 只为了
+保住「缺口告警 → report_comebacks → 浪费」的原始顺序（`report_comebacks()` 自己会打日志）。
+
+**证明**：14 组假收工账场景（假 rnd / 假 execs / 假时钟 / 假 `settle_eval_summary`）逐字段比对
+日志逐行、`EvalSettleSpec` 全字段（含 `left_pairs` 集合）、`stop`/`report_comebacks`/`settled.wait`
+调用序列、`inflight_grace_cap` 与 `lost_by_node` 入参、abort scope ⇒ **0 差异**。场景覆盖：
+settled 满、在飞落账、写手卡住、workers-gone、机器级故障（有/无 errno）、从未派出、认领≠落盘、
+浪费计数、等两次才 settled、池线程已死、缺口预览截断、total=0、it0 基线。
+
+**守卫**：eval 派发/收口/兜底用例 **82 passed**（含 shape 闸）；`Any` 保持 4；LOC 979 → 1057；
+存量 21 文件 / 24 → 20 / 23。
+
 ## §375 分诊第三十七格：`worker/eval_replays_once._export` 178 → 97 + 课程/口径/重放三段（2026-11-26）
 
 `_export` 的三个阶段原本按时间顺序平铺：解析课程（`load_course` + `apply_course` + traj 归一）、

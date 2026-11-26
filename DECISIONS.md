@@ -11347,3 +11347,18 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：23 组假边界场景逐字段 **0 差异**（manifest / 日志 / `EvalGameSpec` 25 字段 / workers /
   产物面）；32 passed；存量 22 文件 / 25 → 21 / 24；全量 pygate 绿。
   全文 → `docs/nn/engineering.md` §375。
+
+## §2026-11-26-eval-close-book
+
+- **背景**：`trainer/eval_dispatch._eval_close`（162 行）把 `rnd.close()` 的读数抄成 14 个局部量，
+  四个收工分支各自重拼 `{landed}/{total}` 与窗口余量，三本账行再算一遍缺口。改一个读数要动四处。
+
+- **决定**：读数收进 frozen `_CloseBook`（`never_n` / `tail` 为 property，tail 只拼一次）；
+  收工拆 `_wait_landing` / `_announce_close` / `_drain_writers` / `_log_close_books`。
+  `_announce_close` 收 `rnd` 只为一件事：保住「缺口告警 → report_comebacks → 浪费」的原顺序。
+
+- **被否决**：让 `_CloseBook` 直接吃 `stats: dict[str, Any]` —— 那会在签名里新增 `Any`
+  （基线只能收紧），还得为每个 `int(stats[...])` 加 cast；在已类型化的调用点构造更干净。
+
+- **验证**：14 组假收工账场景逐字段 **0 差异**（日志 / `EvalSettleSpec` / rnd 调用序列 / 入参）；
+  82 passed；存量 21 文件 / 24 → 20 / 23；全量 pygate 绿。全文 → `docs/nn/engineering.md` §376。

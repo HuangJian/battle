@@ -249,9 +249,11 @@ def test_eval_dispatch_inline_formulas_are_gone() -> None:
         what
         for what, ok in {
             "reserved = reserve_local_slots(": "reserved = reserve_local_slots(" in src,
-            # 份额分支仍调用；兜底模式靠 gate_wired=False 归零
-            "grace_end = time.time() + inflight_grace_cap(task_timeout)": (
-                "grace_end = time.time() + inflight_grace_cap(task_timeout)" in src
+            # 份额分支仍调用；兜底模式靠 gate_wired=False 归零。
+            # 2026-11-26 第三十八格：等待体搬进 `_wait_landing`，实参留在调用点 ——
+            # 判据仍是「上界只能来自 `inflight_grace_cap(task_timeout)`」。
+            "_wait_landing(rnd, execs, inflight_grace_cap(task_timeout))": (
+                "_wait_landing(rnd, execs, inflight_grace_cap(task_timeout))" in src
             ),
             "worker/eval_arbiter.py: local_release_due(now, clock.deadline(now))": any(
                 len(c.args) == 2

@@ -23,6 +23,7 @@ import argparse
 import shutil
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -179,6 +180,150 @@ def _capability_skip(
                 f"（旧 agent）—— skipped，任务落本机 local"
             )
     return None
+
+
+@dataclass(frozen=True)
+class _CloseBook:
+    """收工那一刻的三本账（`EvalRound.close()` 读数 + 派生归因）。
+
+    认领 / 落盘 / 缺口三个口径必须**可比**：原先它们在 162 行里各算各的，四个收工分支
+    各自重抄一遍 `{landed}/{total}` 与窗口余量，抄错一处就是「同一轮两份收工自述」。
+    `tail` 是四个分支共用的括号段，只在这里拼一次。
+    """
+
+    total: int
+    left_pending: int
+    inflight_n: int
+    never_pairs: set[tuple[int, int]]
+    landed: set[tuple[int, int]]
+    landed_n: int
+    claimed_n: int
+    remain: float
+    lost_n: int
+    lost_per_node: dict[str, int]
+    lost_errnos: dict[str, int]
+    close_reason: str
+    tail_race_grants: int
+    dup_games: int
+    frozen_sec: float
+
+    @property
+    def never_n(self) -> int:
+        return len(self.never_pairs)
+
+    @property
+    def tail(self) -> str:
+        return (
+            f"【{self.close_reason}：剩余待派 {self.left_pending}（从未派出 {self.never_n}）、"
+            f"在飞 {self.inflight_n}、已落账 {self.landed_n}、窗口余 {self.remain:.0f}s】"
+        )
+
+
+def _wait_landing(rnd: EvalRound, execs, grace_cap: float) -> None:
+    """窗口到期后的**有界**等在飞局落账（在飞清空即走，线程全死也不再等）。
+
+    在飞清零 ≠ 已落账：settle 先摘 `inflight`、写手随后才登记 `landed`
+    （高负载下这段能跨过收工快照 ⇒ summary 误报 lost）。两个计数都归零
+    才是「这局真的落完了」。
+    """
+    grace_end = time.time() + grace_cap
+    while time.time() < grace_end and not rnd.settled.is_set():
+        if (
+            rnd.inflight_len() <= 0
+            and rnd.writers_pending() <= 0
+        ) or not _pools_alive(rnd, execs):
+            break
+        rnd.settled.wait(0.2)
+
+
+def _announce_close(
+    it: int,
+    book: _CloseBook,
+    *,
+    window: float,
+    closing: int,
+    rnd: EvalRound,
+    log: Callable[[str], None],
+) -> None:
+    """收工四分支的自述 + 缺口告警 + 回场/浪费读数（文案逐字沿用旧实现）。"""
+    if book.close_reason == "settled":
+        log(
+            f"[eval] it{it}: settled 满（{book.landed_n}/{book.total}）— 断连 {closing} 条"
+            f"在飞连接 + 拒发新请求，立即收工（慢节点/竞速副本不再等）{book.tail}"
+        )
+    elif book.close_reason == "machine-fault":
+        top_node, top_n = max(book.lost_per_node.items(), key=lambda kv: kv[1])
+        top_errno = (
+            max(book.lost_errnos.items(), key=lambda kv: kv[1])[0]
+            if book.lost_errnos
+            else "-"
+        )
+        log(
+            f"[eval] it{it}: 机器级故障收工 —— {top_node} 独占 {top_n}/{book.lost_n} 局"
+            f"（errno={top_errno}）；缺口不进本轮判决，收官 drain 会补"
+            f"— 断连 {closing} 条在飞连接{book.tail}"
+        )
+    elif book.close_reason == "workers-gone":
+        log(
+            f"[eval] it{it}: 收工（worker 线程归零，未全落盘 {book.landed_n}/{book.total}）"
+            f"— 断连 {closing} 条在飞连接（在途局丢弃，下次续跑）{book.tail}"
+        )
+    else:
+        log(
+            f"[eval] it{it}: 收工（窗口到期 {window - book.remain:.0f}s，"
+            f"未全落盘 {book.landed_n}/{book.total}）— 断连 {closing} 条在飞连接"
+            f"（在途局丢弃，下次续跑）{book.tail}"
+        )
+    if book.left_pending > 0:
+        # 可读性行（**不是**验收通道：_log() 只在 prefix_scope 内镜像课程日志，
+        # eval 跑在后台线程 ⇒ 落盘的验收面只有 summary 的 close_reason/left_pending，
+        # 2026-10-08 评审 F10）。
+        log(
+            f"[eval] it{it}: WARN 有 {book.left_pending} 局未落盘 —— 从未派出 {book.never_n} 局"
+            f"（never-dispatched）、派出未落盘 {book.left_pending - book.never_n} 局（lost）"
+            f"—— 查 worker 退出原因（远端节点断连/线程异常），不是节点失败"
+        )
+    rnd.report_comebacks()
+    if book.tail_race_grants or book.dup_games or book.frozen_sec:
+        log(
+            f"[eval] it{it}: waste tail_race={book.tail_race_grants} "
+            f"dup={book.dup_games} frozen={book.frozen_sec:.0f}s"
+        )
+
+
+def _drain_writers(it: int, rnd: EvalRound, log: Callable[[str], None]) -> None:
+    """收工前给写手 1s 预算（行晚于 summary 落账时要留下痕迹）。"""
+    quiet_deadline = time.monotonic() + 1.0
+    while time.monotonic() < quiet_deadline:
+        if rnd.writers_pending() <= 0:
+            break
+        time.sleep(0.002)
+    pending_writers = rnd.writers_pending()
+    if pending_writers > 0:
+        log(
+            f"[eval] it{it}: 收工仍有 {pending_writers} 个写行者未落盘"
+            f"（1s 预算用尽，行可能晚于本行 summary 落账）"
+        )
+
+
+def _log_close_books(
+    it: int,
+    book: _CloseBook,
+    todo: list[tuple[int, int]],
+    log: Callable[[str], None],
+) -> None:
+    """三本账收工行（G5，评审 P0-5）：认领/落盘两个口径必须可比。"""
+    gap_preview = [f"s{s}/seed{sd}" for (s, sd) in todo if (s, sd) not in book.landed][:8]
+    log(
+        f"[eval] it{it}: 派出={book.total} 认领={book.claimed_n} 落盘={book.landed_n} "
+        f"缺口={book.total - book.landed_n}"
+        + (f"（{'、'.join(gap_preview)}…）" if gap_preview else "")
+    )
+    if book.claimed_n != book.landed_n:
+        log(
+            f"[eval] it{it}: WARN 认领≠落盘（{book.claimed_n} vs {book.landed_n}）"
+            f"— 未落盘局带 missing 原因进 summary，收官 drain 可补"
+        )
 
 
 class EvalDispatcher:
@@ -727,116 +872,49 @@ class EvalDispatcher:
         reason = supervise_round(rnd, execs)
         rnd.stop()
         if reason != "settled":
-            grace_end = time.time() + inflight_grace_cap(task_timeout)
-            while time.time() < grace_end and not rnd.settled.is_set():
-                # 在飞清零 ≠ 已落账：settle 先摘 `inflight`、写手随后才登记 `landed`
-                # （高负载下这段能跨过收工快照 ⇒ summary 误报 lost）。两个计数都归零
-                # 才是「这局真的落完了」。
-                if (
-                    rnd.inflight_len() <= 0
-                    and rnd.writers_pending() <= 0
-                ) or not _pools_alive(rnd, execs):
-                    break
-                rnd.settled.wait(0.2)
+            _wait_landing(rnd, execs, inflight_grace_cap(task_timeout))
         # —— 收工自报（plan/eval-baseline-undispatched §2 P0-1）：原因 + 队列剩余 ——
         # `never_pairs` 只装 attempts==0 的局：`pending` 是**待办**队列，失败局会被
         # 放回去（重投回队）——把它算成「从未派出」会在有失败的轮里撒谎
         # （2026-10-08 评审 F1）。`left_pending` 照报全量（人读最顺），归因只认 `never_pairs`。
+        # —— 收工三本账：一次读齐，四个日志分支 / summary 共用同一份读数 ——
         stats = rnd.close()
-        tail_race_grants = int(stats.get("tail_race_grants", 0) or 0)
-        dup_games = int(stats.get("dup_games", 0) or 0)
-        frozen_sec = float(stats.get("frozen_sec", 0.0) or 0.0)
-        left_pending = int(stats["left_pending"])
-        inflight_n = int(stats["inflight_n"])
+        landed = stats["landed"]
         never_pairs = stats["never_pairs"]
-        landed_close_n = len(stats["landed"])
-        claimed_n = len(stats["claimed"])
-        remain = rnd.deadline(time.time()) - time.time()
-        never_n = len(never_pairs)
+        landed_n = len(landed)
         # D3（§4.2）：单节点集中亏损 = 机器级故障。`lost` 与 `eval_track` 同源式子；
         # 归因只读 meta 的 `ok=false` 行（没有 meta 的丢局不计入 ⇒ 偏保守）。
-        lost_n = max(0, total - landed_close_n - never_n)
+        lost_n = max(0, total - landed_n - len(never_pairs))
         lost_per_node, lost_errnos = lost_by_node(meta_path, it) if lost_n else ({}, {})
-        close_reason = eval_close_reason(
-            reason == "settled",
-            reason == "workers-gone",
-            reason == "window",
-            lost=lost_n,
+        book = _CloseBook(
+            total=total,
+            left_pending=int(stats["left_pending"]),
+            inflight_n=int(stats["inflight_n"]),
+            never_pairs=never_pairs,
+            landed=landed,
+            landed_n=landed_n,
+            claimed_n=len(stats["claimed"]),
+            remain=rnd.deadline(time.time()) - time.time(),
+            lost_n=lost_n,
             lost_per_node=lost_per_node,
-            stopped_nodes=rnd.stopped_nodes(),
-        )
-        tail = (
-            f"【{close_reason}：剩余待派 {left_pending}（从未派出 {never_n}）、"
-            f"在飞 {inflight_n}、已落账 {landed_close_n}、窗口余 {remain:.0f}s】"
+            lost_errnos=lost_errnos,
+            close_reason=eval_close_reason(
+                reason == "settled",
+                reason == "workers-gone",
+                reason == "window",
+                lost=lost_n,
+                lost_per_node=lost_per_node,
+                stopped_nodes=rnd.stopped_nodes(),
+            ),
+            tail_race_grants=int(stats.get("tail_race_grants", 0) or 0),
+            dup_games=int(stats.get("dup_games", 0) or 0),
+            frozen_sec=float(stats.get("frozen_sec", 0.0) or 0.0),
         )
         # settled 满 = 断连（收工只等「正在写行」的赢家落盘）。
         closing = common.distribution.abort_active_requests(req_scope)
-        if close_reason == "settled":
-            _log(
-                f"[eval] it{it}: settled 满（{landed_close_n}/{total}）— 断连 {closing} 条"
-                f"在飞连接 + 拒发新请求，立即收工（慢节点/竞速副本不再等）{tail}"
-            )
-        elif close_reason == "machine-fault":
-            top_node, top_n = max(lost_per_node.items(), key=lambda kv: kv[1])
-            top_errno = (
-                max(lost_errnos.items(), key=lambda kv: kv[1])[0] if lost_errnos else "-"
-            )
-            _log(
-                f"[eval] it{it}: 机器级故障收工 —— {top_node} 独占 {top_n}/{lost_n} 局"
-                f"（errno={top_errno}）；缺口不进本轮判决，收官 drain 会补"
-                f"— 断连 {closing} 条在飞连接{tail}"
-            )
-        elif close_reason == "workers-gone":
-            _log(
-                f"[eval] it{it}: 收工（worker 线程归零，未全落盘 {landed_close_n}/{total}）"
-                f"— 断连 {closing} 条在飞连接（在途局丢弃，下次续跑）{tail}"
-            )
-        else:
-            _log(
-                f"[eval] it{it}: 收工（窗口到期 {window - remain:.0f}s，"
-                f"未全落盘 {landed_close_n}/{total}）— 断连 {closing} 条在飞连接"
-                f"（在途局丢弃，下次续跑）{tail}"
-            )
-        if left_pending > 0:
-            # 可读性行（**不是**验收通道：_log() 只在 prefix_scope 内镜像课程日志，
-            # eval 跑在后台线程 ⇒ 落盘的验收面只有 summary 的 close_reason/left_pending，
-            # 2026-10-08 评审 F10）。
-            _log(
-                f"[eval] it{it}: WARN 有 {left_pending} 局未落盘 —— 从未派出 {never_n} 局"
-                f"（never-dispatched）、派出未落盘 {left_pending - never_n} 局（lost）"
-                f"—— 查 worker 退出原因（远端节点断连/线程异常），不是节点失败"
-            )
-        rnd.report_comebacks()
-        if tail_race_grants or dup_games or frozen_sec:
-            _log(
-                f"[eval] it{it}: waste tail_race={tail_race_grants} "
-                f"dup={dup_games} frozen={frozen_sec:.0f}s"
-            )
-        quiet_deadline = time.monotonic() + 1.0
-        while time.monotonic() < quiet_deadline:
-            if rnd.writers_pending() <= 0:
-                break
-            time.sleep(0.002)
-        pending_writers = rnd.writers_pending()
-        if pending_writers > 0:
-            _log(
-                f"[eval] it{it}: 收工仍有 {pending_writers} 个写行者未落盘"
-                f"（1s 预算用尽，行可能晚于本行 summary 落账）"
-            )
-
-        # —— 三本账收工行（G5，评审 P0-5）：认领/落盘两个口径必须可比 ——
-        loaded = stats["landed"]
-        gap_preview = [f"s{s}/seed{sd}" for (s, sd) in todo if (s, sd) not in loaded][:8]
-        _log(
-            f"[eval] it{it}: 派出={total} 认领={claimed_n} 落盘={landed_close_n} "
-            f"缺口={total - landed_close_n}"
-            + (f"（{'、'.join(gap_preview)}…）" if gap_preview else "")
-        )
-        if claimed_n != landed_close_n:
-            _log(
-                f"[eval] it{it}: WARN 认领≠落盘（{claimed_n} vs {landed_close_n}）"
-                f"— 未落盘局带 missing 原因进 summary，收官 drain 可补"
-            )
+        _announce_close(it, book, window=window, closing=closing, rnd=rnd, log=_log)
+        _drain_writers(it, rnd, _log)
+        _log_close_books(it, book, todo, _log)
 
         # 课程血缘进 summary 行（门控趋势过滤；与派发同源、同一份读数）。
         settle_eval_summary(
@@ -846,7 +924,7 @@ class EvalDispatcher:
                 it=it,
                 pairs=pairs,
                 total=total,
-                landed=loaded,
+                landed=landed,
                 wins=rnd.wins,
                 cleared_total=rnd.cleared_total,
                 outcomes=rnd.outcomes,
@@ -860,12 +938,12 @@ class EvalDispatcher:
                 # 2026-10-08（plan/eval-baseline-undispatched §2 P0-1/P0-2）：收工读数进 summary。
                 # `left_pending` = 收工时的待办余量（含重投回队）；`left_pairs` = 真·从未派出
                 # 的那批（attempts==0）——`never_dispatched`/`never-dispatched` 两个读面都只认它。
-                left_pending=left_pending,
-                left_pairs=never_pairs,
-                close_reason=close_reason,
-                tail_race_grants=tail_race_grants,
-                dup_games=dup_games,
-                frozen_sec=frozen_sec,
+                left_pending=book.left_pending,
+                left_pairs=book.never_pairs,
+                close_reason=book.close_reason,
+                tail_race_grants=book.tail_race_grants,
+                dup_games=book.dup_games,
+                frozen_sec=book.frozen_sec,
             )
         )
 
