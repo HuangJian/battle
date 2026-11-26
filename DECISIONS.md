@@ -11362,3 +11362,20 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 
 - **验证**：14 组假收工账场景逐字段 **0 差异**（日志 / `EvalSettleSpec` / rnd 调用序列 / 入参）；
   82 passed；存量 21 文件 / 24 → 20 / 23；全量 pygate 绿。全文 → `docs/nn/engineering.md` §376。
+
+## §2026-11-26-rollout-phase-legs
+
+- **背景**：`trainer/rollout_phase.dispatch_rollout_phase` 176 行 = 18 行展开 + 三层 if + 两条腿
+  各 60 行内联。流式腿里挂着两个闭包，`_on_epoch_done` 用 `nonlocal` 写两个句柄再由函数返回带出，
+  「返回值由回调决定」，读的人要同时握住两条线程的时序。
+
+- **决定**：三条腿各一个函数 —— `dispatch_rollout_phase` 43 行只做选择与 course 归属，
+  `_stream_phase` 111 行、`_queue_phase` 54 行各收 spec + `iter_id`。`nonlocal` 原样保留
+  （采集线程回调里无法改成返回值），但写面缩进同一个函数体。
+
+- **被否决**：把 `_on_epoch_done` 改成「返回 hook + 一个可变 carrier」—— 只是把 `nonlocal`
+  换成对象字段，写面没变少，还多一个只为两个布尔存在的类。
+
+- **验证**：22 组假边界场景逐字段 **0 差异**（返回元组 / 三个 spec 全字段 / `_fire_eval` 返回值 /
+  提前预采五档决策 / course 归属 / 日志）；63 passed；存量 20 文件 / 23 → 19 / 22；全量 pygate 绿。
+  全文 → `docs/nn/engineering.md` §377。

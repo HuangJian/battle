@@ -29,6 +29,33 @@
 
 ---
 
+## §377 分诊第三十九格：`trainer/rollout_phase.dispatch_rollout_phase` 176 → 43 + 三条腿各一函数（2026-11-26）
+
+`dispatch_rollout_phase` 原本是「一个 18 行展开 → 三层 `if` → 两条腿各 60 行内联」。流式腿里
+还挂着两个闭包（`_fire_eval` 派 eval、`_on_epoch_done` 提前预采），后者用 `nonlocal` 写
+`collect_child`/`spawned_early` 再由函数返回带出去 —— 一个函数的返回值由**回调**决定，读的人
+必须同时握住两条线程的时序。
+
+| 段 | 行数 | 职责 |
+|---|---:|---|
+| `dispatch_rollout_phase` | 43 | 三路选择 + course 归属 + 返回元组 |
+| `_stream_phase` | 111 | 流式腿（两个回调仍在闭包里，句柄改为返回值） |
+| `_queue_phase` | 54 | 串行腿 + intent/goal 的 m1 eval |
+
+**关键选择**：`_stream_phase` 内的 `nonlocal` 原样保留、由函数返回带出 —— 它是**采集线程
+回调中**的写面，不可能改成返回值；把写面缩进同一个函数体，已经比原来「隔 120 行」好读。
+`dist_cfg` 走**显式参数**而不是在 new 函数里读 `spec.dist_cfg`：后者在新函数里是
+`dict | None`，三处 `cfg=` 全红；入口 `assert` 能收窄但会被 `test_module_asserts`
+（新函数级 assert 零容忍）拦住 —— 改用参数并把「只有 dist 分支会传」写在签名上。
+
+**证明**：22 组假边界场景（假三条 rollout 腿 / 假两个 eval 派发器 / 假 spec 构造器 / 假
+`save_weights_json`）逐字段比对返回元组、`StreamRunSpec`/`DispatchSpec`/`EvalDispatchSpec`
+全字段、`run_rollout` 位置参数、`_fire_eval` 返回值、提前预采决策（epoch 门槛 / collect_only /
+iters 耗尽 / 快照失败 / spawn None）、`report["course"]` 归属、日志 ⇒ **0 差异**。
+
+**守卫**：rollout 派发 / spec / loop 尾部 / layering **63 passed**（含 shape 闸）；`Any` 保持 1；
+LOC 508 → 546；存量 20 文件 / 23 → 19 / 22。
+
 ## §376 分诊第三十八格：`trainer/eval_dispatch._eval_close` 162 → 95 + 三本账载体与三段收工（2026-11-26）
 
 `_eval_close` 是「一次读账、四处自述、最后落 summary」：`rnd.close()` 的读数被抄成 14 个局部

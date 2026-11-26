@@ -2226,3 +2226,8 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > `_log_close_books` 15；`tail` 只拼一次，四分支共用）；14 组假收工账场景逐字段差分 0
 > （日志 / `EvalSettleSpec` / rnd 调用序列），`Any` 保持 4，存量 21 文件 / 24 → 20 / 23
 > （engineering §376）。
+
+> 2026-11-26 第三十九格：`trainer/rollout_phase.dispatch_rollout_phase` 176 → 43 + 三条腿各一函数
+> （`_stream_phase` 111 / `_queue_phase` 54；两个 new 入口 `assert dist_cfg is not None` 让 mypy
+> 收窄，`nonlocal` 写面缩进同一函数体）；22 组假边界场景逐字段差分 0（返回元组 / 三个 spec
+> 全字段 / 预采五档 / course 归属 / 日志），存量 20 文件 / 23 → 19 / 22（engineering §377）。

@@ -326,164 +326,198 @@ def dispatch_rollout_phase(spec: RolloutPhaseSpec) -> tuple[
         `local_fallback_only=True` 只在节点全部不可用时启动本机。
       - 串行/纯本地路径：eval_thread 直接回传；collect_child/spawned_early 恒 None/False。
     """
-    # 旧签名 25 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
-    args, bun, dist_cfg = spec.args, spec.bun, spec.dist_cfg
+    stream_meta: dict | None = None
+    eval_thread: threading.Thread | None = None
+    eval_gate: threading.Event | None = None
+    collect_child: subprocess.Popen | None = None
+    spawned_early = False
+    enabled = [
+        n for n in (spec.dist_cfg or {}).get("nodes", []) if n.get("enabled", True)
+    ]
+    if spec.dist_cfg and enabled:
+        iter_id = f"{RUN_ID}.{spec.it}"
+        log(f"[dist] queue mode iterId={iter_id} nodes={[n.get('id') for n in enabled]}")
+        # 本地 eval 不再有「份额门」：in-loop 只在集群全部不可用时兜底（2026-10-26）。
+        if int(getattr(spec.args, "stream", 0) or 0):
+            report, collect_child, spawned_early = _stream_phase(spec, iter_id, spec.dist_cfg)
+            stream_meta = report
+        else:
+            report, eval_thread = _queue_phase(spec, iter_id, spec.dist_cfg)
+    else:
+        report = run_rollout(spec.bun, spec.args.out, spec.traj_dir, spec.pairs, spec.args)
+    # P4-W2 归属（S9 收窄）：dispatch 报告带 course（短名）——跨课对账/审计用，
+    # **不参与调度**（调度只看 shard 路径与 course_fp 血缘）。
+    _cn = str(getattr(spec.args, "course_name", "") or "")
+    if _cn and isinstance(report, dict):
+        report["course"] = _cn
+    return report, stream_meta, eval_thread, eval_gate, collect_child, spawned_early
+
+
+def _stream_phase(
+    spec: RolloutPhaseSpec, iter_id: str, dist_cfg: dict
+) -> tuple[dict, subprocess.Popen | None, bool]:
+    """dist 队列**流式**腿：collector 线程跑 PPO，回调里派 eval / 预采下一轮。
+
+    返回 `(report, collect_child, spawned_early)`：后两项由 `_on_epoch_done` 在采集线程
+    里写入、run 返回后读出——旧实现的 `nonlocal` 对外语义原样保留（双缓冲句柄要交回调用方）。
+    """
+    args, bun = spec.args, spec.bun
     it, traj_dir, pairs = spec.it, spec.traj_dir, spec.pairs
     jsonl_path, model, opt = spec.jsonl_path, spec.model, spec.opt
     device, ppo_backend = spec.device, spec.ppo_backend
     update_kwargs, start_it = spec.update_kwargs, spec.start_it
     ref_model, extra_wver = spec.ref_model, spec.extra_wver
     eval_on_round, course_fp = spec.eval_on_round, spec.course_fp
-    corpus_fp, halt_event = spec.corpus_fp, spec.halt_event
-    on_result, pool_halt = spec.on_result, spec.pool_halt
+    corpus_fp = spec.corpus_fp
     on_shard, on_collect_end = spec.on_shard, spec.on_collect_end
     on_dispatch_drained, on_dispatch_active = spec.on_dispatch_drained, spec.on_dispatch_active
-    stream_meta: dict | None = None
-    eval_thread: threading.Thread | None = None
-    eval_gate: threading.Event | None = None
     collect_child: subprocess.Popen | None = None
     spawned_early = False
-    if dist_cfg and any(n.get("enabled", True) for n in dist_cfg.get("nodes", [])):
-        iter_id = f"{RUN_ID}.{it}"
-        enabled = [n for n in dist_cfg["nodes"] if n.get("enabled", True)]
-        log(f"[dist] queue mode iterId={iter_id} nodes={[n.get('id') for n in enabled]}")
-        # 本地 eval 不再有「份额门」：in-loop 只在集群全部不可用时兜底（2026-10-26）。
-        if int(getattr(args, "stream", 0) or 0):
-            # 吞吐 T3：非 eval 轮不派发（返回 None → 无 eval_thread → 调用方
-            # join 跳过，集群尾段留给下一轮采集/双缓冲）。
-            def _fire_eval():
-                # A 层：仅 eval 轮派发。B/C（evalboard）与 A-eval 解耦——
-                # 由 TrainingLoop 在「无 rollout/eval」的 idle 窗领取（2026-09-11 用户）。
-                if not eval_on_round:
-                    return None
-                if args.mode == "per-tick":
-                    return dispatch_eval_bg(EvalDispatchSpec(
-                        bun,
-                        args.out,
-                        traj_dir,
-                        args,
-                        dist_cfg,
-                        iter_id,
-                        it,
-                        local_gate=None,
-                        local_fallback_only=True,
-                    ))
-                # intent/goal：m1-eval 固定语料整批路线（trainer/eval_m1.py）。
-                return dispatch_eval_bg_m1(bun, args.out, args, it, jsonl_path, args.baseline)
+    # 吞吐 T3：非 eval 轮不派发（返回 None → 无 eval_thread → 调用方
+    # join 跳过，集群尾段留给下一轮采集/双缓冲）。
+    def _fire_eval():
+        # A 层：仅 eval 轮派发。B/C（evalboard）与 A-eval 解耦——
+        # 由 TrainingLoop 在「无 rollout/eval」的 idle 窗领取（2026-09-11 用户）。
+        if not eval_on_round:
+            return None
+        if args.mode == "per-tick":
+            return dispatch_eval_bg(EvalDispatchSpec(
+                bun,
+                args.out,
+                traj_dir,
+                args,
+                dist_cfg,
+                iter_id,
+                it,
+                local_gate=None,
+                local_fallback_only=True,
+            ))
+        # intent/goal：m1-eval 固定语料整批路线（trainer/eval_m1.py）。
+        return dispatch_eval_bg_m1(bun, args.out, args, it, jsonl_path, args.baseline)
 
-            # 吞吐 T4 提前预采（--precollect-early>0）：ppo_backend 第 (epochs-early) 个
-            # epoch 完成后，把当前 model（θ_{N,e3}）冻结为快照并 spawn 预采下一轮
-            # 首波——预采墙钟藏进剩下的 epochs 里，而非 ppo_backend 全部结束后的串行等待。
-            # 快照≈最终权重（差最后一段梯度），on-policy 带内；配合
-            # --precollect-games 限制只采首波，剩余局由下轮以 θ_N 现场采。
-            _early = int(getattr(args, "precollect_early", 0) or 0)
-            spawned_early = False
+    # 吞吐 T4 提前预采（--precollect-early>0）：ppo_backend 第 (epochs-early) 个
+    # epoch 完成后，把当前 model（θ_{N,e3}）冻结为快照并 spawn 预采下一轮
+    # 首波——预采墙钟藏进剩下的 epochs 里，而非 ppo_backend 全部结束后的串行等待。
+    # 快照≈最终权重（差最后一段梯度），on-policy 带内；配合
+    # --precollect-games 限制只采首波，剩余局由下轮以 θ_N 现场采。
+    _early = int(getattr(args, "precollect_early", 0) or 0)
+    spawned_early = False
 
-            def _on_epoch_done(ep_done: int, _mdl):
-                nonlocal collect_child
-                nonlocal spawned_early
-                if _early <= 0 or spawned_early:
-                    return
-                if ep_done < args.epochs - _early:
-                    return
-                if not (
-                    getattr(args, "double_buffer", 0)
-                    and not getattr(args, "collect_only", 0)
-                    and (args.iters <= 0 or it < args.iters)
-                ):
-                    return
-                # 冻结当前权重快照（θ_{N,e3}）→ spawn；ppo_backend 尾段自然完成临时文件。
-                _snap = str(Path(args.out).with_name(f"weights-collect-{it + 1}.json"))
-                try:
-                    from worker.data.weights_io import save_weights_json as _save_json
+    def _on_epoch_done(ep_done: int, _mdl):
+        nonlocal collect_child
+        nonlocal spawned_early
+        if _early <= 0 or spawned_early:
+            return
+        if ep_done < args.epochs - _early:
+            return
+        if not (
+            getattr(args, "double_buffer", 0)
+            and not getattr(args, "collect_only", 0)
+            and (args.iters <= 0 or it < args.iters)
+        ):
+            return
+        # 冻结当前权重快照（θ_{N,e3}）→ spawn；ppo_backend 尾段自然完成临时文件。
+        _snap = str(Path(args.out).with_name(f"weights-collect-{it + 1}.json"))
+        try:
+            from worker.data.weights_io import save_weights_json as _save_json
 
-                    _save_json(_mdl, _snap)
-                    log(f"[double-buffer] early snapshot θ_{{N,e{ep_done}}} -> {_snap}")
-                except Exception as _e:
-                    log(f"[double-buffer] early snapshot fail: {_e} — skip")
-                    return
-                spawned_early = True
-                collect_child = spawn_collect_next(args, it, snap_src=_snap)
-                if collect_child is not None:
-                    log(
-                        f"[double-buffer] precollect EARLY at epoch {ep_done}/{args.epochs} "
-                        f"(rest of ppo_backend hides collection)"
-                    )
-
-            _stream_kwargs = _stream_extra_kwargs(
-                args, ppo_backend, update_kwargs, it, start_it, ref_model
+            _save_json(_mdl, _snap)
+            log(f"[double-buffer] early snapshot θ_{{N,e{ep_done}}} -> {_snap}")
+        except Exception as _e:
+            log(f"[double-buffer] early snapshot fail: {_e} — skip")
+            return
+        spawned_early = True
+        collect_child = spawn_collect_next(args, it, snap_src=_snap)
+        if collect_child is not None:
+            log(
+                f"[double-buffer] precollect EARLY at epoch {ep_done}/{args.epochs} "
+                f"(rest of ppo_backend hides collection)"
             )
-            report = run_rollout_stream(
-                StreamRunSpec(
-                    bun=bun,
-                    rl_path=args.out,
-                    traj_dir=traj_dir,
-                    pairs=pairs,
-                    args=args,
-                    cfg=dist_cfg,
-                    iter_id=iter_id,
-                    model=model,
-                    opt=opt,
-                    device=device,
-                    on_collect_done=_fire_eval,
-                    on_epoch_done=_on_epoch_done,
-                    extra_wver=extra_wver,
-                    course_fp=course_fp,
-                    corpus_fp=corpus_fp,
-                    on_shard=on_shard,
-                    on_collect_end=on_collect_end,
-                    on_dispatch_drained=on_dispatch_drained,
-                    on_dispatch_active=on_dispatch_active,
-                    **_stream_kwargs,
-                )
-            )
-            stream_meta = report
-        else:
-            report = run_rollout_queue(
-                DispatchSpec(
-                    bun=bun,
-                    rl_path=args.out,
-                    traj_dir=traj_dir,
-                    pairs=pairs,
-                    args=args,
-                    cfg=dist_cfg,
-                    iter_id=iter_id,
-                    # 本机直跑槽位（2026-09-06 引入 / 2026-09-09 统一语义）：
-                    # 0 = 关闭本机直跑（全交给远端），负数/None = auto 退回 workers 封顶。
-                    # 旧写法 `args.local_slots or None` 把 0 也吞成 None（关不掉）。
-                    local_slots_max=local_slots_max_of(args),
-                    course_fp=course_fp,
-                    corpus_fp=corpus_fp,
-                    # ★ 2026-10-21（用户口径「铺满 + 满额即停」）：调用方可以
-                    #   ① `on_result` 每结算一局就更新逐关账本；② 满额后 `halt_event`
-                    #   置位 ⇒ worker 立即停止取新任务，池里没派出去的候选从不运行。
-                    #   `run_rollout`（无节点/纯本机）没有这两个口 ⇒ 只在队列路径传。
-                    halt_event=halt_event,
-                    on_result=on_result,
-                    # 候选池语义：`halt` = 逐关满额 ⇒ 没派的候选不算缺口（外部熔断不带这个标记）
-                    pool_halt=pool_halt,
-                    on_shard=on_shard,
-                )
-            )
-            # 串行：rollout 返回即 collector 收官。per-tick A-eval 不在此派发——
-            # P0 修复：此处派发读到的活指针还是 W(it-1)（本轮 PPO 未跑）却标 itN。
-            # 改由 loop 主循环在采集收官后调 _dispatch_delayed_eval：为上一轮权重
-            # W(it-1) 派发（读不可变归档，标权重轮），游戏仍藏进随后 PPO 空窗。
-            # （stream 路径的 _fire_eval 维持原语义；eval_on_round 参数保留给它用，
-            # 串行 per-tick 分支不再消费。）
-            # intent/goal 走 m1 独立语义（止损判门依赖同轮 summary），原样保留。
-            if eval_on_round and args.mode in ("intent", "goal"):
-                eval_thread = dispatch_eval_bg_m1(
-                    bun, args.out, args, it, jsonl_path, args.baseline
-                )
-    else:
-        report = run_rollout(bun, args.out, traj_dir, pairs, args)
-    # P4-W2 归属（S9 收窄）：dispatch 报告带 course（短名）——跨课对账/审计用，
-    # **不参与调度**（调度只看 shard 路径与 course_fp 血缘）。
-    _cn = str(getattr(args, "course_name", "") or "")
-    if _cn and isinstance(report, dict):
-        report["course"] = _cn
-    return report, stream_meta, eval_thread, eval_gate, collect_child, spawned_early
+
+    _stream_kwargs = _stream_extra_kwargs(
+        args, ppo_backend, update_kwargs, it, start_it, ref_model
+    )
+    report = run_rollout_stream(
+        StreamRunSpec(
+            bun=bun,
+            rl_path=args.out,
+            traj_dir=traj_dir,
+            pairs=pairs,
+            args=args,
+            cfg=dist_cfg,
+            iter_id=iter_id,
+            model=model,
+            opt=opt,
+            device=device,
+            on_collect_done=_fire_eval,
+            on_epoch_done=_on_epoch_done,
+            extra_wver=extra_wver,
+            course_fp=course_fp,
+            corpus_fp=corpus_fp,
+            on_shard=on_shard,
+            on_collect_end=on_collect_end,
+            on_dispatch_drained=on_dispatch_drained,
+            on_dispatch_active=on_dispatch_active,
+            **_stream_kwargs,
+        )
+    )
+    return report, collect_child, spawned_early
+
+
+def _queue_phase(
+    spec: RolloutPhaseSpec, iter_id: str, dist_cfg: dict
+) -> tuple[dict, threading.Thread | None]:
+    """dist 队列**串行**腿：`run_rollout_queue` 返回即采集收官；intent/goal 另派 m1 eval。
+
+    串行 per-tick 不在此派发 A-eval（读到的是 W(it-1) 却标 itN）——由 loop 主循环在采集
+    收官后调 `_dispatch_delayed_eval`。
+    """
+    args, bun = spec.args, spec.bun
+    it, traj_dir, pairs = spec.it, spec.traj_dir, spec.pairs
+    jsonl_path = spec.jsonl_path
+    course_fp, corpus_fp = spec.course_fp, spec.corpus_fp
+    halt_event, on_result = spec.halt_event, spec.on_result
+    pool_halt, on_shard = spec.pool_halt, spec.on_shard
+    eval_on_round = spec.eval_on_round
+    eval_thread: threading.Thread | None = None
+    report = run_rollout_queue(
+        DispatchSpec(
+            bun=bun,
+            rl_path=args.out,
+            traj_dir=traj_dir,
+            pairs=pairs,
+            args=args,
+            cfg=dist_cfg,
+            iter_id=iter_id,
+            # 本机直跑槽位（2026-09-06 引入 / 2026-09-09 统一语义）：
+            # 0 = 关闭本机直跑（全交给远端），负数/None = auto 退回 workers 封顶。
+            # 旧写法 `args.local_slots or None` 把 0 也吞成 None（关不掉）。
+            local_slots_max=local_slots_max_of(args),
+            course_fp=course_fp,
+            corpus_fp=corpus_fp,
+            # ★ 2026-10-21（用户口径「铺满 + 满额即停」）：调用方可以
+            #   ① `on_result` 每结算一局就更新逐关账本；② 满额后 `halt_event`
+            #   置位 ⇒ worker 立即停止取新任务，池里没派出去的候选从不运行。
+            #   `run_rollout`（无节点/纯本机）没有这两个口 ⇒ 只在队列路径传。
+            halt_event=halt_event,
+            on_result=on_result,
+            # 候选池语义：`halt` = 逐关满额 ⇒ 没派的候选不算缺口（外部熔断不带这个标记）
+            pool_halt=pool_halt,
+            on_shard=on_shard,
+        )
+    )
+    # 串行：rollout 返回即 collector 收官。per-tick A-eval 不在此派发——
+    # P0 修复：此处派发读到的活指针还是 W(it-1)（本轮 PPO 未跑）却标 itN。
+    # 改由 loop 主循环在采集收官后调 _dispatch_delayed_eval：为上一轮权重
+    # W(it-1) 派发（读不可变归档，标权重轮），游戏仍藏进随后 PPO 空窗。
+    # （stream 路径的 _fire_eval 维持原语义；eval_on_round 参数保留给它用，
+    # 串行 per-tick 分支不再消费。）
+    # intent/goal 走 m1 独立语义（止损判门依赖同轮 summary），原样保留。
+    if eval_on_round and args.mode in ("intent", "goal"):
+        eval_thread = dispatch_eval_bg_m1(
+            bun, args.out, args, it, jsonl_path, args.baseline
+        )
+    return report, eval_thread
 
 
 def spawn_next_collect(
