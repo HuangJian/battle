@@ -358,8 +358,8 @@ class _StreamRun:
                     f"(extra wver {c.extra_wver[:12]}…) into training queue"
                 )
 
-    def run(self) -> dict:
-        """跑完整轮：起 collector → 波次循环 → 尾部排水 → 报告。"""
+    def _configure_round(self) -> None:
+        """解析本轮槽位 / KL 上限 / 波次规模 / 残局缺口。"""
         c = self.c
         # R6 语义：首个 PPO 波次启动即置位 → 本机 dist 槽位让位训练（集群停摆豁免在
         # queue 侧）；PPO 全部收尾后本机转投 eval 尾段（local_gate，主循环置位）。
@@ -405,6 +405,8 @@ class _StreamRun:
         except OSError:
             c.remaining_games = None
 
+    def _start_collector(self) -> None:
+        c = self.c
         #: 收集线程归这里（`stream-collector`）：本函数自己等它，收尾即散。
         c.th = common.runtime.Runtime(scope="stream").thread(
             self._collector, name="collector", daemon=True
@@ -416,6 +418,13 @@ class _StreamRun:
         )
         c.wave_cap = max(c.wave_games * 2, 24)
         self._seed_precollected()
+
+    def _await_waves(self) -> float:
+        """等 collector：够一波就训一波，线程退出即返回真实收官时刻。"""
+        c = self.c
+        th = c.th
+        if th is None:
+            raise RuntimeError("stream collector thread was not started")
         while True:
             with c.lock:
                 n_pending = len(c.pend)
@@ -429,16 +438,23 @@ class _StreamRun:
             if n_pending >= w_thr:
                 self._drain(False, cap=w_cap)
                 continue
-            if not c.th.is_alive():
+            if not th.is_alive():
                 break
-            c.th.join(timeout=3.0)
+            th.join(timeout=3.0)
         # rollout_sec 锚点改为 collector 线程真实退出时刻（box["t_end"]）：此前在
         # 主线程测量，最后一个 in-flight wave 的更新时长会被误计入采集窗口。
-        collect_done = c.box.get("t_end") or time.time()
-        c.th.join(timeout=5.0)
+        return c.box.get("t_end") or time.time()
+
+    def _finish_collector(self, collect_done: float) -> None:
+        """join collector、解冻 eval、报告剩余待训局数。"""
+        c = self.c
+        th = c.th
+        if th is None:
+            raise RuntimeError("stream collector thread was not started")
+        th.join(timeout=5.0)
         # collector 已退出 ⇒ 节点不再有本轮的采集任务在派发（尾部只可能有竞速输家）。
         # 解冻 eval 只能在这里做：此前 `_rollout_phase` 的 `with` 作用域会把 PPO 也包进去。
-        if c.on_collect_end is not None and not c.th.is_alive():
+        if c.on_collect_end is not None and not th.is_alive():
             try:
                 c.on_collect_end()
             except Exception as cb_err:
@@ -449,6 +465,9 @@ class _StreamRun:
             f"[stream] collector done in {collect_done - c.t0:.0f}s — "
             f"draining {n_left} settled-but-untrained games"
         )
+
+    def _drain_tail(self) -> None:
+        c = self.c
         while True:
             with c.lock:
                 n_pending = len(c.pend)
@@ -462,16 +481,10 @@ class _StreamRun:
                 remaining=c.remaining_games,
             )
             self._drain(True, cap=tw_cap)
-        if "err" in c.box:
-            tb = str(c.box.get("err_tb") or "")
-            raise RuntimeError(
-                f"stream collector failed: {c.box['err']}"
-                + (f"\n--- collector traceback ---\n{tb}" if tb else "")
-            )
-        report: dict[str, Any] | None = c.box.get("report")
-        if report is None:
-            raise RuntimeError("stream collector produced no report")
-        # 断点续跑轮可能零结算（全部秒回）
+
+    def _zero_settle_update(self) -> None:
+        """断点续跑轮可能零结算（全部秒回）：补齐权重收尾或全盘回退训练。"""
+        c = self.c
         if c.state["chunks"] == 0 and int(getattr(c.args, "epochs", 0)) > 0:
             eps_done = c.backend._ppo_load(str(c.traj_dir / "ppo_ckpt"), c.model, c.opt, c.ppo_rng)
             if eps_done >= c.args.epochs:
@@ -502,6 +515,9 @@ class _StreamRun:
                 c.state["ppo_sec"] += time.time() - t_p
                 c.state["steps"] = sum(e["obs"].shape[0] for e in episodes)
                 c.state["chunks"] = len(chunks)
+
+    def _build_report(self, report: dict, collect_done: float) -> dict:
+        c = self.c
         rollout_sec = round(collect_done - c.t0, 1)  # 采集窗口（collector 真实退出锚点）
         tail_sec = round(time.time() - collect_done, 1)
         log(
@@ -534,6 +550,26 @@ class _StreamRun:
         if c.box.get("eval_thread") is not None:
             report["_eval_thread"] = c.box["eval_thread"]
         return report
+
+    def run(self) -> dict:
+        """跑完整轮：起 collector → 波次循环 → 尾部排水 → 报告。"""
+        c = self.c
+        self._configure_round()
+        self._start_collector()
+        collect_done = self._await_waves()
+        self._finish_collector(collect_done)
+        self._drain_tail()
+        if "err" in c.box:
+            tb = str(c.box.get("err_tb") or "")
+            raise RuntimeError(
+                f"stream collector failed: {c.box['err']}"
+                + (f"\n--- collector traceback ---\n{tb}" if tb else "")
+            )
+        report: dict[str, Any] | None = c.box.get("report")
+        if report is None:
+            raise RuntimeError("stream collector produced no report")
+        self._zero_settle_update()
+        return self._build_report(report, collect_done)
 
 
 @dataclass(frozen=True, kw_only=True)

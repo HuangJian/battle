@@ -29,6 +29,39 @@
 
 ---
 
+## §361 分诊第二十四格（T0）：`train_local_bc` 与 `stream.run`（2026-11-26）
+
+两处都是「长函数里混着多套读者」的典型，切法与上一批同一条纪律：主函数只剩编排。
+
+| 函数 | 前 | 后 | 新接缝 |
+|---|---:|---:|---|
+| `bc_loop.train_local_bc` | 177 | **29** | `_LocalBcPlan` + `_local_bc_plan` 29 · `_local_bc_argv` 48 · `_local_record_epoch` 20 · `_local_eval_if_due` 42 · `_local_handle_line` 8 · `_local_run_process` 30 · `_local_read_metrics` 19 |
+| `stream._StreamRun.run` | 176 | **19** | `_configure_round` 46 · `_start_collector` 13 · `_await_waves` 22 · `_finish_collector` 17 · `_drain_tail` 15 · `_zero_settle_update` 33 · `_build_report` 34 |
+
+**`train_local_bc` 的接缝**：命令行装配（含 v6 / 空间头开关与绝对路径归一）与逐行消费（剥戳 →
+中继 → `bc_epoch` 账本 → eval 边界）是两拨读者；`_LocalBcPlan` 把 8 个解析值一次算好，
+`_local_eval_if_due` 仍以 `jsonl_path is not None` 为门（与原实现的同一层守卫，没有放宽）。
+模块level 的 `_EPOCH_LINE_RE` / `_EPOCH_HEAD_RE` 取代函数内 `import re as _re`，正则逐字未变。
+
+**`stream.run` 的接缝**：原函数同时拥有「旋钮解析」「线程生命周期」「波次循环」「尾排」
+「零结算回退」「报告拼装」六件事。拆开后 `run` 只按原顺序调用七个方法；`collect_done` 仍取
+`box["t_end"]`，`on_collect_end` 仍在 collector 真退出后触发，零结算回退仍在报告校验之后、
+日志之前——顺序与副作用面未动。
+
+**LOC 门的连带搬迁**：`bc_loop` 加完这段后 1054 LOC，越过单文件 <1000 的门 ⇒ 本机训练整段
+搬进新文件 `trainer/bc_local.py`（308 行），`bc_loop` 只留 `train_local_bc` / `_strip_stamp`
+门面（`X as X`），`test_bc_ingest_split` 的编排面判据改成「bc_loop 导出的是 bc_local 同一对象」。
+`bc_local` 不反向 import `bc_loop`，依赖方向仍单向。
+
+**验证**：`test_bc_loop` / `test_bc_loop_stamp` / `test_bc_ingest_split` / `test_rl_stream` /
+`test_stream_collect_end` / `test_stream_run_spec` + 形状/LOC/Any/assert/文本 **79 条**绿；形状存量
+**41 → 39**（两个文件各删一格）。`_build_report` 的 `dict[str, Any]` 改成裸 `dict`，Any 基线未涨。
+提交由 pre-commit 全量门禁把关。
+
+**被否决**：① 把 `train_local_bc` 的 eval 回退搬进 `bc_ingest` —— 那层只做云端回传消费，本机
+ckpt 路径依赖 `out_weights`，搬过去会把两条腿的权重源混在一起；② 给 `stream.run` 造一个
+`_StreamPhases` 类 —— 七个相位共享同一份 `_StreamCtx`，再包一层只是把 `self.c` 换成 `self.ctx.c`。
+
 ## §360 分诊第二十三格（批）：`remote/offline_boot` 五个长函数 → 分片内接缝（2026-11-26）
 
 `remote/offline_boot.py` 是 **standalone 运输单元**（notebook 按文件名从 GitHub raw 拉），

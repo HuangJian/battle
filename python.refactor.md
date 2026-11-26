@@ -2143,3 +2143,6 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > （`run_one_course` 181→78 · `install_progress_pinger` 183→140 · `resolve_courses`
 > 158→108 · `_run_batch` 169→105 · `_run_auto` 190→139）；改 `.pyfrag` 分片后重建，
 > 存量 46 → 41（engineering §360）。
+
+> 2026-11-26 第二十四格（T0）：`train_local_bc` 177→29 · `stream.run` 176→19；
+> 存量 41 → 39（engineering §361）。

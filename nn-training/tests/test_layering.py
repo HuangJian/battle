@@ -172,6 +172,9 @@ TRAINER_ORCHESTRATION = frozenset(
         "batch_runner",
         "batch_store",
         "bc_ingest",
+        #: 2026-11-26：本机 BC 子进程的启动/逐行消费从 `bc_loop` 拆出（后者 LOC 超门）——
+        #: 它直接拿 `worker.bc_eval` / `trainer.bc_ingest` ⇒ 编排成员，不是纯逻辑。
+        "bc_local",
         "bc_loop",
         #: 2026-11-05（G4，plan/bc-single-course.plan.md）：`bc_loop` 拆出 `bc_round_job`
         #: （盘上未收口 job 的扫描 + hub 对账）—— 它直接拿 `remote.hub_http.job_reconcile_state`

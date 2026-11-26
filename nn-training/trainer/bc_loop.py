@@ -34,11 +34,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import re
 import secrets
 import shutil
 import subprocess
-import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -46,17 +44,6 @@ from pathlib import Path
 
 from common.cli import house_parser
 from common.log import log
-from remote.hub_publish import PublishSpec, publish_job
-
-# BC 训练器（`worker/train/bc.py` / `bc_paddle.py` / `device.py`）的每条日志自带
-# `[HH:MM:SS] ` 前缀（2026-11-12：云机 BC 日志逐行可对时）。解析前必须剥掉——
-# `line.startswith("[epoch")` 与账本正则都锚在行首，不剥就会**静默停写** bc_epoch。
-_STAMP_PREFIX = re.compile(r"^\[\d{2}:\d{2}:\d{2}\] ")
-
-
-def _strip_stamp(line: str) -> str:
-    """剥掉行首的 `[HH:MM:SS] `（无戳行原样返回）。"""
-    return _STAMP_PREFIX.sub("", line)
 from common.paths import REPO_ROOT
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from common.settings import push_node_from_env
@@ -70,6 +57,9 @@ from remote.hub_client import (
     iter_bc_shard_dirs,
     mark_job_completed,
 )
+from remote.hub_publish import PublishSpec, publish_job
+from trainer.bc_local import _strip_stamp as _strip_stamp
+from trainer.bc_local import train_local_bc as train_local_bc
 from trainer.bc_round_job import (
     find_round_job as _find_round_job,
 )
@@ -77,7 +67,6 @@ from trainer.bc_round_job import (
     land_bc_result,
     positive_int_or,
     prune_remote_jobs,
-    train_tuning_argv,
     train_tuning_meta,
 )
 from trainer.bc_round_job import (
@@ -94,7 +83,6 @@ from worker.bc_config import (
     load_bc_course,
     resolve_bc_course,
 )
-from worker.bc_eval import BcEvalError, BcEvalSpec, dispatch_bc_eval
 from worker.bc_ledger import (
     ROUND_DONE_EVENT,
     ROUND_JOB_MISSING_EVENT,
@@ -456,185 +444,6 @@ def bc_run_start_event(course: BcCourseConfig, course_key: str, run_id: str = ""
 
 
 # ---- 本机训练 --------------------------------------------------------------
-
-
-def train_local_bc(
-    course: BcCourseConfig,
-    data_round_dir: Path,
-    out_weights: str,
-    *,
-    smoke: bool,
-    jsonl_path: Path | None = None,
-    it: int = 0,
-    cfg: dict | None = None,
-    log=log,
-) -> dict:
-    """--local：本机子进程 train/bc.py（训练机 venv torch；run_bc 本身保持 torch-free）。"""
-    epochs = 1 if smoke else int(course.train.epochs)
-    batch = min(int(course.train.batch), 256) if smoke else int(course.train.batch)
-    eval_on = course.eval.enabled and not smoke
-    # 本地 eval 权重源 = bc.py 的 ckpt 文件——ckpt_every 对齐 eval 边界
-    ckpt_every = (
-        int(course.eval.every_epochs) if (eval_on and not smoke) else int(course.train.ckpt_every)
-    )
-    cmd = [
-        sys.executable,
-        "-u",
-        str(NN_ROOT / "worker" / "train" / "bc.py"),
-        "--data-dir",
-        str(data_round_dir),
-        "--arch",
-        str(course.train.arch),
-        "--out",
-        str(out_weights),
-        "--epochs",
-        str(epochs),
-        "--batch",
-        str(batch),
-        "--lr",
-        str(course.train.lr),
-        "--val-split",
-        str(course.train.val_split),
-        "--mirror-p",
-        str(course.train.mirror_p),
-        "--value-coef",
-        str(course.train.value_coef),
-        "--seed",
-        str(course.train.seed),
-        "--fire-pos-weight",
-        str(course.train.fire_pos_weight),
-        *train_tuning_argv(course.train),
-        "--ckpt-every",
-        str(ckpt_every),
-        "--device",
-        "cpu",
-        "--notes",
-        f"run_bc local course={course.name}",
-    ]
-    # 本地 CLI 也必须能与云端口径同构（2026-11-05）：v6 三头 / 空间头开关以前只在
-    # 云端 manifest 里，本地 `train/bc.py` 会把 v6 语料按 legacy 5 类读。
-    if course.resolved_action_v6:
-        cmd.append("--action-v6")
-    if course.train.policy_extra:
-        cmd.append("--policy-extra")
-    # 路径一律**绝对**：run_bc 本体 chdir 仓库根，而子进程 cwd=NN_ROOT——相对路径
-    # 会在 nn-training/ 下找语料（2026-09-13 实测 FileNotFoundError）。
-    cmd[cmd.index("--data-dir") + 1] = str(Path(cmd[cmd.index("--data-dir") + 1]).resolve())
-    cmd[cmd.index("--out") + 1] = str(Path(cmd[cmd.index("--out") + 1]).resolve())
-    log(f"[run_bc] local BC: {' '.join(cmd[:6])} … (epochs={epochs} batch={batch})")
-    t0 = time.time()
-    # §16.3 进度可观测：Popen 逐行**流式**中继（capture_output 会缓冲到进程结束——
-    # 60 epoch 的训练跑中零输出 = 无法验证进度/无法预算判活）。
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(NN_ROOT),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        **_POPEN_NO_WINDOW,
-    )
-    import re as _re
-
-    out_lines: list[str] = []
-    if proc.stdout is None:  # pragma: no cover — stdout=PIPE 结构性保证非空
-        raise SystemExit("[run_bc] local bc.py: 拿不到子进程 stdout（不该发生）")
-    _evaluated: set[int] = set()
-    for raw in proc.stdout:
-        line = raw.rstrip()
-        out_lines.append(line)
-        # 训练器自带时间戳（2026-11-12）——中继与解析都走剥戳后的正文：`log()` 会再
-        # 加一道自己的时间戳，账本正则要的是 `[epoch` 在行首。
-        bare = _strip_stamp(line)
-        if bare.startswith(
-            ("[epoch", "[train] done", "[train] samples", "[train] majority", "[train] checkpoint")
-        ):
-            log(f"[bc.py] {bare}")
-        # 本地模式同权：epoch 行 → bc_epoch 账本；eval 边界 → ckpt 权重 → 多地图 eval
-        if jsonl_path is not None and bare.startswith("[epoch"):
-            m = _re.match(
-                r"\[epoch\s+(\d+)/(\d+)\] train_loss=([\d.]+) val_loss=([\d.]+) "
-                r"acc move=([\d.]+) fire=([\d.]+)(?: value=[\d.]+ )?lr=([\d.eE+]+)",
-                bare,
-            )
-            if m:
-                gepoch = int(m.group(1))
-                ledger_bc_epoch(
-                    jsonl_path,
-                    it,
-                    {
-                        "epoch": gepoch,
-                        "train_loss": float(m.group(3)),
-                        "val_loss": float(m.group(4)),
-                        "move_acc": float(m.group(5)),
-                        "fire_acc": float(m.group(6)),
-                        "lr": float(m.group(7)),
-                    },
-                )
-            if eval_on:
-                m2 = _re.match(r"\[epoch\s+(\d+)/", bare)
-                if m2:
-                    gepoch = int(m2.group(1))
-                    if (
-                        gepoch
-                        and gepoch % int(course.eval.every_epochs) == 0
-                        and gepoch not in _evaluated
-                    ):
-                        _evaluated.add(gepoch)
-                        ckpt = Path(f"{out_weights}.ckpt.{gepoch}")
-                        if ckpt.exists():
-                            log(f"[run_bc] it{it} ep{gepoch}: 本地 eval（ckpt 权重）")
-                            try:
-                                result = dispatch_bc_eval(
-                                    BcEvalSpec(
-                                        weights_bytes=ckpt.read_bytes(),
-                                        eval_levels=list(course.eval.levels),
-                                        games_per_stage=int(
-                                            course.eval.games_per_stage
-                                        ),
-                                        it=it,
-                                        epoch=gepoch,
-                                        cfg=cfg,
-                                        course=course,
-                                        course_env=bool(course.eval.course_env),
-                                        meta_path=(
-                                            jsonl_path.parent / "dist-agent-meta.jsonl"
-                                        ),
-                                        log=log,
-                                    )
-                                )
-                                if jsonl_path is not None:
-                                    append_ledger(
-                                        jsonl_path, {"event": "bc_eval", "it": int(it), **result}
-                                    )
-                            except BcEvalError as e:
-                                log(f"[run_bc] it{it} ep{gepoch}: eval 放弃（{e}）")
-    rc = proc.wait()
-    if rc != 0:
-        # 失败把尾段响亮带出（全量输出已随流中继进日志，这里只补尾部定位）
-        tail = "\n".join(out_lines[-12:])
-        log(f"[run_bc] local bc.py 退出码 {rc}——训练失败，子进程尾段：\n{tail}")
-        raise SystemExit(f"[run_bc] local bc.py 退出码 {rc}——训练失败")
-    # bc.py 落盘 versioned archive + active pointer；回读 metrics——注意 extra_meta
-    # 是**顶层合并**（sizes/best_val_loss/history 都是 JSON 顶层键，weights_io.save_weights_json）。
-    out_p = Path(out_weights)
-    with open(out_p, encoding="utf-8") as f:
-        wj = json.load(f)
-    hist = wj.get("history", {})
-    sizes = wj.get("sizes", {})
-    metrics = {
-        "epochs": epochs,
-        # 早停时 weights.json 的实际完成数（旧产物没有该键 ⇒ 回落到课程目标）。
-        "epochs_completed": int(wj.get("epochs_completed", epochs) or epochs),
-        "train_samples": int(sizes.get("train", 0) or 0),
-        "val_samples": int(sizes.get("val", 0) or 0),
-        "best_val_loss": float(wj.get("best_val_loss", 0.0) or 0.0),
-        "move_acc": float(hist.get("move_acc", [0.0])[-1]) if hist.get("move_acc") else 0.0,
-        "fire_acc": float(hist.get("fire_acc", [0.0])[-1]) if hist.get("fire_acc") else 0.0,
-        "local_sec": round(time.time() - t0, 1),
-    }
-    return metrics
 
 
 # ---- 传输裁决 --------------------------------------------------------------

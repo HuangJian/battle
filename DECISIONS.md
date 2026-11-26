@@ -11071,3 +11071,20 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：重建 + `--check` 绿；`test_offline_boot*.py` 65 条行为用例绿；形状/LOC/Any/assert/
   文本断言/notebook 守卫 81 条绿；全量 pygate 7052 passed / 13 skipped；根 `bun run check` 绿。
   本批为逐字搬移（无新分支），未另写 HEAD-vs-新差分。全文 → `docs/nn/engineering.md` §360。
+
+## §2026-11-26-t0-bc-loop-stream
+
+- **背景**：T0 两处长函数 —— `trainer/bc_loop.train_local_bc` 177 行（命令行装配 + 逐行
+  消费 + eval + 指标回读混在一起）、`trainer/stream._StreamRun.run` 176 行（旋钮解析 /
+  线程生命周期 / 波次循环 / 尾排 / 零结算回退 / 报告六件事）。
+
+- **决定**：`train_local_bc` 引入 `_LocalBcPlan`，拆成 plan / argv / epoch 账本 / eval 触发 /
+  逐行分派 / 子进程 / 指标七段（29 行）；`stream.run` 拆成七个方法（19 行）。调用顺序、
+  `jsonl_path is not None` 的 eval 门、`box["t_end"]` 锚点与零结算回退位置均未动。
+  形状存量删两格（41 → 39）；`_build_report` 用裸 `dict` 而非 `dict[str, Any]`，Any 基线未涨。
+  `bc_loop` 加完这段后 1054 LOC，越过单文件 <1000 的门 ⇒ 本机训练整段搬进
+  `trainer/bc_local.py`，bc_loop 只留同名门面（不反向 import）。
+
+- **验证**：BC/stream 六个测试文件 + 形状/LOC/Any/assert/文本守卫 79 条绿；提交由
+  pre-commit 全量门禁把关。
+  全文 → `docs/nn/engineering.md` §361。

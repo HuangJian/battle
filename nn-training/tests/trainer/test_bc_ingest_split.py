@@ -125,7 +125,6 @@ def test_bc_loop_kept_the_orchestration_surface() -> None:
     for name in (
         "BcLoop",
         "BcRuntime",
-        "train_local_bc",
         "collect_corpus",
         "publish_bc_job",
         "archive_round",
@@ -135,6 +134,11 @@ def test_bc_loop_kept_the_orchestration_surface() -> None:
         "bc_argparser",
     ):
         assert name in defined, f"bc_loop.py 丢了编排面 {name}"
+    # 2026-11-26：本机训练实现搬进 `trainer/bc_local.py`（bc_loop 越过 LOC 门禁）；
+    # 编排面仍由 bc_loop **导出**，调用点与 monkeypatch 点不变。
+    from trainer import bc_local as bc_local_mod
+
+    assert bc_loop_mod.train_local_bc is bc_local_mod.train_local_bc
 
 
 # ─────────────────────── ③ 依赖方向：允许面闭集，无环 ───────────────────────
