@@ -376,7 +376,9 @@ def _load_split(
 def _inject_features(intent: np.ndarray) -> np.ndarray:
     """teacher-forced 注入特征：(prev one-hot(8), duration) 拼成一列块。"""
     onehot, dur = build_injection(intent)
-    return np.concatenate([onehot, dur[:, None]], axis=1).astype(np.float32)
+    # dtype 必须交给 concatenate：`build_injection` 的返回值 dtype 是 Any，
+    # 「先拼再 astype」会让整条表达式退化成 Any（mypy `no-any-return`）。
+    return np.concatenate([onehot, dur[:, None]], axis=1, dtype=np.float32)
 
 
 def _sample_train(
