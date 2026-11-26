@@ -112,6 +112,75 @@ class EvalDispatchSpec:
     local_fallback_only: bool = False
 
 
+def _capability_skip(
+    args: argparse.Namespace | SimpleNamespace, ping: dict, nid: str, need_sj: bool
+) -> str | None:
+    """能力位门：返回该节点的跳过文案（`None` = 合格）。
+
+    九道门同一条 fail-closed 规则——旧 agent 没有能力声明时不会报错，它会静默按缺省
+    跑、把这一批的局混成另一种玩法，所以必须整台跳过、任务落回本机 local。写成一张表
+    而不是九段 if：加一个能力位 = 加一行。顺序即判据顺序（与 rollout 腿同源）。
+    `evalSupport` 单独在前：它的文案没有「任务落本机 local」尾，也不拼「需 … 能力位」。
+    """
+    if not ping.get("evalSupport"):
+        return (
+            f"[eval] node {nid}: agent lacks evalSupport — skipped "
+            f"(sync code + restart agent to enable)"
+        )
+    gates = (
+        (need_sj, "stageJsonSupport", "stageJsonSupport 能力位", "自定义关"),
+        (
+            bool(getattr(args, "opening_connect", False)),
+            "openingConnectSupport",
+            "openingConnectSupport能力位",
+            "hybrid opening",
+        ),
+        (
+            bool(getattr(args, "decision_events", False)),
+            "decisionEventsSupport",
+            "decisionEventsSupport 能力位",
+            "事件课程",
+        ),
+        (
+            int(getattr(args, "decision_k", 10)) != 10,
+            "decisionKSupport",
+            "decisionKSupport 能力位",
+            "K≠10 课程",
+        ),
+        (
+            bool(getattr(args, "skip_steel_only_shots", False)),
+            "skipSteelOnlyShotsSupport",
+            "skipSteelOnlyShotsSupport 能力位",
+            "顶钢空枪门",
+        ),
+        (
+            bool(getattr(args, "break_bricks_on_path", False)),
+            "breakBricksOnPathSupport",
+            "breakBricksOnPathSupport 能力位",
+            "拆砖",
+        ),
+        (
+            bool(getattr(args, "suppress_useless_fire", False)),
+            "suppressUselessFireSupport",
+            "suppressUselessFireSupport 能力位",
+            "通用废射门",
+        ),
+        (
+            bool(getattr(args, "suppress_lead_miss_fire", False)),
+            "suppressLeadMissFireSupport",
+            "suppressLeadMissFireSupport 能力位",
+            "预测门",
+        ),
+    )
+    for enabled, key, need, label in gates:
+        if enabled and not ping.get(key):
+            return (
+                f"[eval] node {nid}: {label} eval 需 {need}"
+                f"（旧 agent）—— skipped，任务落本机 local"
+            )
+    return None
+
+
 class EvalDispatcher:
     """固定语料干净评估的单轮派发器（阻塞版，调用方放后台线程跑）。
 
@@ -465,81 +534,9 @@ class EvalDispatcher:
                     f" — 本轮不参与"
                 )
                 continue
-            if not ping.get("evalSupport"):
-                _log(
-                    f"[eval] node {nid}: agent lacks evalSupport — skipped "
-                    f"(sync code + restart agent to enable)"
-                )
-                continue
-            if need_sj and not ping.get("stageJsonSupport"):
-                _log(
-                    f"[eval] node {nid}: 自定义关 eval 需 stageJsonSupport 能力位"
-                    f"（旧 agent）—— skipped，任务落本机 local"
-                )
-                continue
-            # R2 事件 rung：事件课程的局只派给能力位节点（旧 agent 静默跑均匀局混入）。
-            # 缺席 = 老课程不查（getattr 缺省 False）。
-            # Hybrid opening：无能力位节点跳过（旧 agent 静默跑 bare 混入）。
-            if bool(getattr(args, "opening_connect", False)) and not ping.get(
-                "openingConnectSupport"
-            ):
-                _log(
-                    f"[eval] node {nid}: hybrid opening eval 需 openingConnectSupport"
-                    f"能力位（旧 agent）—— skipped，任务落本机 local"
-                )
-                continue
-            if bool(getattr(args, "decision_events", False)) and not ping.get(
-                "decisionEventsSupport"
-            ):
-                _log(
-                    f"[eval] node {nid}: 事件课程 eval 需 decisionEventsSupport 能力位"
-                    f"（旧 agent）—— skipped，任务落本机 local"
-                )
-                continue
-            # 决策周期 K（plan/k5-rhythm.plan.md）：K≠10 课程的局同样只派给能力位节点
-            # （旧 agent 静默跑 K=10 混入，同规 fail-closed；缺席/10 = 不查）。
-            if int(getattr(args, "decision_k", 10)) != 10 and not ping.get("decisionKSupport"):
-                _log(
-                    f"[eval] node {nid}: K≠10 课程 eval 需 decisionKSupport 能力位"
-                    f"（旧 agent）—— skipped，任务落本机 local"
-                )
-                continue
-            # 顶钢空枪门（课程 inference_rules.skip_steel_only_shots）：开启批只派给
-            # 有能力位的节点（旧 agent 静默跑关闭态 = 混批，fail-closed）。
-            if bool(getattr(args, "skip_steel_only_shots", False)) and not ping.get(
-                "skipSteelOnlyShotsSupport"
-            ):
-                _log(
-                    f"[eval] node {nid}: 顶钢空枪门 eval 需 skipSteelOnlyShotsSupport 能力位"
-                    f"（旧 agent）—— skipped，任务落本机 local"
-                )
-                continue
-            # 拆砖免绕路：同上，开启批只派给有能力位的节点。
-            if bool(getattr(args, "break_bricks_on_path", False)) and not ping.get(
-                "breakBricksOnPathSupport"
-            ):
-                _log(
-                    f"[eval] node {nid}: 拆砖 eval 需 breakBricksOnPathSupport 能力位"
-                    f"（旧 agent）—— skipped，任务落本机 local"
-                )
-                continue
-            # B8 通用废射门：同上，开启批只派给有能力位的节点。
-            if bool(getattr(args, "suppress_useless_fire", False)) and not ping.get(
-                "suppressUselessFireSupport"
-            ):
-                _log(
-                    f"[eval] node {nid}: 通用废射门 eval 需 suppressUselessFireSupport 能力位"
-                    f"（旧 agent）—— skipped，任务落本机 local"
-                )
-                continue
-            # B10 预测门：同上。
-            if bool(getattr(args, "suppress_lead_miss_fire", False)) and not ping.get(
-                "suppressLeadMissFireSupport"
-            ):
-                _log(
-                    f"[eval] node {nid}: 预测门 eval 需 suppressLeadMissFireSupport 能力位"
-                    f"（旧 agent）—— skipped，任务落本机 local"
-                )
+            skip = _capability_skip(args, ping, nid, need_sj)
+            if skip:
+                _log(skip)
                 continue
             if mm(str(ping.get("bunVersion", "?"))) != mm(local_bun):
                 _log(f"[eval] node {nid}: bun version mismatch — skipped")

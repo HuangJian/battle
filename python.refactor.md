@@ -2210,3 +2210,7 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > 2026-11-26 第三十五格：`worker/iter_rollout._drive_games` 173 → 128 + 填槽器出栈
 > （`_SlotFill` + `_fill_slots`，`supply_open` 改返回值、不再 `nonlocal`）；15 组假 Runtime /
 > 假时钟场景差分全同，`Any` 13 → 12，存量 24 文件 / 27 → 23 / 26（engineering §373）。
+
+> 2026-11-26 第三十六格：`trainer/eval_dispatch._eval_eligible` 173 → 100 + 九道能力位门
+> 归一成一张表（`_capability_skip`，保留 `openingConnectSupport能力位` 的历史空格）；
+> 25 组假节点场景差分为 0，存量 23 文件 / 26 → 22 / 25（engineering §374）。

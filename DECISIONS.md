@@ -11313,3 +11313,20 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：15 组假边界场景（假 Runtime/future/时钟）逐字段 **0 差异**；相关用例 109 passed；
   `Any` 基线 13 → 12；LOC 936 → 966；存量 24 文件 / 27 → 23 / 26；全量 pygate 绿。
   全文 → `docs/nn/engineering.md` §373。
+
+## §2026-11-26-capability-gate-table
+
+- **背景**：`trainer/eval_dispatch._eval_eligible` 里九道能力位门是九段逐字同构的
+  `if flag and not ping.get(key): _log(同一条文案); continue`。规则只有一条却复制九遍；
+  漏一个 `continue` 就会让旧 agent 混进这一批（它会静默按缺省跑）。
+
+- **决定**：九道门归一成 `_capability_skip` 里的一张八行表（外加 `evalSupport` 单独一条，
+  它的文案没有「任务落本机 local」尾）；每行自带 `need` 文案片段，保留历史上
+  `openingConnectSupport能力位` 少一个空格的原文。加一个能力位 = 加一行。
+
+- **被否决**：用 `need.split("能力位")[0]` 从文案反推 ping key —— 少写一列，但把一个显示
+  字符串变成判据来源（改文案会静默改判据），直接违反「不拿表现面当事实」。
+
+- **验证**：25 组假节点场景逐字 **0 差异**（日志/顺序/alive/meta）；eval 相关用例 81 passed；
+  `Any` 基线不变；存量 23 文件 / 26 → 22 / 25；LOC 982 → 967；全量 pygate 绿。
+  全文 → `docs/nn/engineering.md` §374。

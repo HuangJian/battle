@@ -29,6 +29,30 @@
 
 ---
 
+## §374 分诊第三十六格：`trainer/eval_dispatch._eval_eligible` 173 → 100 + 能力位九行一张表（2026-11-26）
+
+九道能力位门原本是九段逐字同构的 `if flag and not ping.get(key): _log(同一条 fail-closed
+文案); continue`，每段的 `continue` 前都留一行日志。规则只有一条，却复制了九遍：加一个
+能力位 = 复制一段 + 把新 key 抄对；漏一个 `continue` 就会让旧 agent 混进这一批。
+
+| 段 | 行数 | 职责 |
+|---|---:|---|
+| `_eval_eligible` | ~100 | ping → 能力位表 → bun/ codeHash / bootId → 让位 |
+| `_capability_skip` | ~55 | `evalSupport` 单独一条 + 八行表（enabled, key, 文案片段, label） |
+
+**关键细节**：旧文案里只有 `openingConnectSupport` 与「能力位」之间没有空格（历史笔误），
+其余都有；表里每行自带 `need` 片段（`"openingConnectSupport能力位"` vs `"…Support 能力位"`）
+逐字保留，不顺手“修正”文案（那会让控制台读日志的人一对不上）。
+
+**证明**：25 组假节点场景（假 ping / 假 codehash / 假 boot 账本 / 假 slot cap），逐字比对
+日志文案与顺序、`alive` 的 `c/baseC`、`need_sj`/`local_bun`、meta 记录 ⇒ **0 差异**。场景覆盖：
+无节点、全过、ping 超时、evalSupport 缺、need_sj 两档、七道能力位 + 全缺、K=10/3、
+bun 不符、codeHash 不符、boot 不符、在飞让位（部分/全满）、url 回落、workers 回落、
+多节点混合序、push 节点过滤。
+
+**守卫**：eval 派发/请求/兜底用例 **81 passed**（含 any/shape 闸）；`Any` 基线保持 4
+（helper 形参用 `Namespace | SimpleNamespace`）；存量 23 文件 / 26 → 22 / 25；LOC 982 → 967。
+
 ## §373 分诊第三十五格：`worker/iter_rollout._drive_games` 173 → 128 + 填槽器出栈（2026-11-26）
 
 这一格是「闭包藏在三重 while 里」：`_fill` 用默认参数把 `inflight/pending/ceiling_sec` 钉住、
