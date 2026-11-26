@@ -29,6 +29,38 @@
 
 ---
 
+## §375 分诊第三十七格：`worker/eval_replays_once._export` 178 → 97 + 课程/口径/重放三段（2026-11-26）
+
+`_export` 的三个阶段原本按时间顺序平铺：解析课程（`load_course` + `apply_course` + traj 归一）、
+从 `ns` 抠出 11 个语义口径并打一行自证、再起 `Runtime.map` 跑整批。中间那 40 行是「透传面」——
+2026-10-19 事故就出在这里：漏传 `decision_k`（y24-k4），重放跑的是另一个策略，22 局全 mismatch、
+败局重放成胜局。
+
+| 段 | 行数 | 职责 |
+|---|---:|---|
+| `_export` | ~97 | 路径/清单 → 权重 → 清场 → 记账 → payload |
+| `_course_context` | ~24 | 课程文件 → (course, ns, traj) |
+| `_replay_knobs` | ~45 | 11 项语义口径 → frozen `_ReplayKnobs` + 自证一行 |
+| `_run_games` | ~70 | 并行重放 + 逐局台账对账 → mismatch |
+
+**关键选择**：`_ReplayPlan` 收「一批重放的固定输入」（权重 / 产物面 / 账本 / 口径 / 墙钟原点 /
+workers），`_run_games(plan, games, log)` 只剩三个参数 —— 闭包 `one` 的存活位置从 12 个降到
+`plan` 一个对象。`ns` 也在 plan 里：`stage_json_for_args` 要经它取 `course_obj`（自定义关的
+stageJson 必须与账本同源）。`lives`/`level` 保持 `None` 语义（`EvalGameSpec` 的缺省是「不覆盖」，
+不是 0）。
+
+**证明**：23 组假边界场景（假 Runtime / 假 `run_local_eval_game` / 假时钟 / 假 log）逐字段比对
+rc、manifest 全字段（含 `sec`、`weightsPath` 相对/绝对两态）、日志逐行、每局 `EvalGameSpec`
+25 字段、workers、产物清单、tmp 目录收尾 ⇒ **0 差异**。场景覆盖：games 缺失/空/坏行、权重未命中、
+两局全出/缺一局/全缺、账本三字段 mismatch 与 null 字段、账本 iter/wver 不匹配、单局抛异常、
+workers 钳位 0/99、旧产物清场、课程 knob 全开（decision_k=4 / decision_events / player /
+inference_rules / opening_connect / max_ticks / difficulty）、权重在仓外、相对 out-dir / 相对 games、
+6 局进度行、自定义关 stageJson、it0 基线轮。
+
+**守卫**：`tests/worker/test_eval_replays_once.py` + shape/LOC 闸 **32 passed**；`Any` 不变
+（新载体全用具体类型；`CourseConfig` 走 `TYPE_CHECKING`，不给脚本启动路径加 `biz` 依赖）；
+存量 22 文件 / 25 → 21 / 24；LOC 450 → 548。
+
 ## §374 分诊第三十六格：`trainer/eval_dispatch._eval_eligible` 173 → 100 + 能力位九行一张表（2026-11-26）
 
 九道能力位门原本是九段逐字同构的 `if flag and not ping.get(key): _log(同一条 fail-closed

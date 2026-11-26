@@ -2214,3 +2214,9 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > 2026-11-26 第三十六格：`trainer/eval_dispatch._eval_eligible` 173 → 100 + 九道能力位门
 > 归一成一张表（`_capability_skip`，保留 `openingConnectSupport能力位` 的历史空格）；
 > 25 组假节点场景差分为 0，存量 23 文件 / 26 → 22 / 25（engineering §374）。
+
+> 2026-11-26 第三十七格：`worker/eval_replays_once._export` 178 → 97 + 课程/口径/重放三段
+> （`_course_context` 24 / `_replay_knobs` 45 → frozen `_ReplayKnobs` / `_run_games` 70 +
+> `_ReplayPlan`；`ns` 随 plan 走，因为 `stage_json_for_args` 要 `course_obj`）；23 组假边界
+> 场景逐字段差分 0（manifest / 日志 / `EvalGameSpec` 25 字段 / workers / 产物面），
+> `Any` 不变，存量 22 文件 / 25 → 21 / 24（engineering §375）。

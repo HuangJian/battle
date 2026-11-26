@@ -11330,3 +11330,20 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：25 组假节点场景逐字 **0 差异**（日志/顺序/alive/meta）；eval 相关用例 81 passed；
   `Any` 基线不变；存量 23 文件 / 26 → 22 / 25；LOC 982 → 967；全量 pygate 绿。
   全文 → `docs/nn/engineering.md` §374。
+
+## §2026-11-26-replay-export-seams
+
+- **背景**：`worker/eval_replays_once._export`（178 行）把「解析课程 / 抠 11 个语义口径 / 并联重放」
+  平铺成三段。中间那 40 行是**透传面**，2026-10-19 的 `decision_k` 漏传就出在这类平铺里：
+  重放跑的是另一个策略，22 局全 mismatch，败局重放成胜局。
+
+- **决定**：拆成 `_course_context`（课程 → `ns`/traj）、`_replay_knobs`（11 项 → frozen
+  `_ReplayKnobs` + 一行自证）、`_run_games`（批量并行 + 逐局对账）。`_ReplayPlan` 承载一批的
+  固定输入（含 `ns`，因为 `stage_json_for_args` 要 `course_obj`），闭包存活位置 12 → 1 个对象。
+
+- **被否决**：把 11 个口径塞进 `EvalGameSpec(**kwargs)` 展开 —— 字段名就看不见了，而那正是这次
+  事故的要害（漏一个键不报错，只是静默跑另一个策略）。
+
+- **验证**：23 组假边界场景逐字段 **0 差异**（manifest / 日志 / `EvalGameSpec` 25 字段 / workers /
+  产物面）；32 passed；存量 22 文件 / 25 → 21 / 24；全量 pygate 绿。
+  全文 → `docs/nn/engineering.md` §375。

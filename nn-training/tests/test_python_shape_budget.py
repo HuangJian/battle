@@ -72,7 +72,6 @@ LONG_FUNCS_BASELINE: dict[str, int] = {
     "trainer/queue_worker.py": 1,
     "trainer/rollout_phase.py": 1,
     "worker/cli.py": 1,
-    "worker/eval_replays_once.py": 1,
     "worker/loop_guards_leg.py": 1,
     "worker/ppo/backend.py": 1,
     "worker/scripts/eval_intent_m5.py": 1,

@@ -28,7 +28,12 @@ import shutil
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # 只借类型：`biz` 的重依赖不进本脚本的启动路径
+    from biz.course_spec import CourseConfig
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "nn-training"))
@@ -231,23 +236,58 @@ def _read_replay_ledger(traj: Path, it: int, wver: str) -> dict[tuple[int, int],
     return ledger
 
 
-def _export(args: argparse.Namespace, manifest_path: Path) -> int:
-    from common.platform_utils import force_utf8_stdio
+@dataclass(frozen=True)
+class _ReplayKnobs:
+    """重放一局的语义口径（课程数值 + 评估/部署链推理规则）。
 
-    force_utf8_stdio()
+    每一项都必须与账本那一局**同口径**透传：`decision_k` 漏了会跑成另一个策略
+    （2026-10-19 事故：y24-k4 的 22 局全 mismatch，败局重放成胜局）；推理规则漏了则
+    「关/开」两态不是同一局。集中成一个 frozen 载体，是让**透传面在一处可读**——
+    原先它散在 `_export` 的 40 行里，抄漏一格没有任何报错。
+    """
 
-    from common.log import log
-    from worker.config import apply_course, load_course, stage_json_for_args
-    from worker.eval_local import EvalGameSpec, run_local_eval_game
+    max_ticks: int
+    difficulty: str
+    lives: int | None
+    level: int | None
+    decision_events: bool
+    decision_k: int
+    skip_steel_only_shots: bool
+    break_bricks_on_path: bool
+    suppress_useless_fire: bool
+    suppress_lead_miss_fire: bool
+    opening_connect: bool
 
-    t0 = time.time()
-    out_dir = Path(args.out_dir)
-    if not out_dir.is_absolute():
-        out_dir = REPO / out_dir
 
-    games = _load_games(args, manifest_path, log)
-    if games is None:
-        return 2
+@dataclass(frozen=True)
+class _ReplayPlan:
+    """一批重放的固定输入（逐局只差 stage/seed 与它自己的产物目录）。"""
+
+    weights: Path
+    out_dir: Path
+    tmp_reports: Path
+    ledger: dict[tuple[int, int], dict]
+    knobs: _ReplayKnobs
+    #: 课程合并后的命名空间（`stage_json_for_args` 要从它取 `course_obj`）。
+    ns: argparse.Namespace
+    bun: str
+    it: int
+    wver: str
+    timeout: float
+    workers: int
+    #: 本批墙钟原点（进度行的 elapsed 与 manifest 的 sec 同源）。
+    t0: float
+
+
+def _course_context(
+    args: argparse.Namespace,
+) -> tuple[CourseConfig, argparse.Namespace, Path]:
+    """课程文件 → (`course`, 合并后的 `ns`, 归一化后的 traj 目录)。
+
+    与训练主循环 / evalA 同一单一事实来源（`load_course` + `apply_course`），绝不在这里
+    手写第二份课程语义。traj 的基准是 REPO（不随 cwd 漂移），与 out-dir/manifest 一致。
+    """
+    from worker.config import apply_course, load_course
 
     course_path = REPO / "nn-training" / "curricula" / f"{args.course}.jsonc"
     if not course_path.exists():
@@ -259,6 +299,134 @@ def _export(args: argparse.Namespace, manifest_path: Path) -> int:
     traj = Path(str(getattr(ns, "traj", "") or "")) or (REPO / "tmp" / args.course)
     if not traj.is_absolute():
         traj = REPO / traj
+    return course, ns, traj
+
+
+def _replay_knobs(
+    ns: argparse.Namespace, it: int, log: Callable[[str], None]
+) -> _ReplayKnobs:
+    """从课程派生的 `ns` 读出全部语义口径，并打一行自证（人一眼能对账本）。
+
+    ★ 决策节奏必须与账本那一局同口径（2026-10-19 事故修复）：不传 decision_events /
+    decision_k 时 `run_local_eval_game` 静默取缺省（False / 10）⇒ 对 `decision_k ≠ 10`
+    的课跑的是**另一个策略**。主循环派发处（trainer/eval_dispatch.py、trainer/dispatch.py、
+    remote/offline_eval.py）都透传这两项，漏一处就是「train/deploy 静默分裂」。
+    """
+    knobs = _ReplayKnobs(
+        max_ticks=int(getattr(ns, "max_ticks", 2400) or 2400),
+        difficulty=str(getattr(ns, "difficulty", "hard") or "hard"),
+        lives=getattr(ns, "lives_override", None),
+        level=getattr(ns, "player_level", None),
+        decision_events=bool(getattr(ns, "decision_events", False)),
+        decision_k=int(getattr(ns, "decision_k", 10)),
+        skip_steel_only_shots=bool(getattr(ns, "skip_steel_only_shots", False)),
+        break_bricks_on_path=bool(getattr(ns, "break_bricks_on_path", False)),
+        suppress_useless_fire=bool(getattr(ns, "suppress_useless_fire", False)),
+        suppress_lead_miss_fire=bool(getattr(ns, "suppress_lead_miss_fire", False)),
+        opening_connect=bool(getattr(ns, "opening_connect", False)),
+    )
+    log(
+        f"[replay-exp] it{it} 语义口径: decision_k={knobs.decision_k} "
+        f"decision_events={knobs.decision_events} "
+        f"skip_steel_only_shots={knobs.skip_steel_only_shots} "
+        f"break_bricks_on_path={knobs.break_bricks_on_path} "
+        f"suppress_useless_fire={knobs.suppress_useless_fire} "
+        f"suppress_lead_miss_fire={knobs.suppress_lead_miss_fire} "
+        f"opening_connect={knobs.opening_connect} "
+        f"max_ticks={knobs.max_ticks} difficulty={knobs.difficulty}"
+    )
+    return knobs
+
+
+def _run_games(
+    plan: _ReplayPlan, games: list[dict[str, int]], log: Callable[[str], None]
+) -> list[dict]:
+    """按 `plan.workers` 并行重放整批，返回确定性对账的 mismatch 列表。
+
+    单局失败只记一行、不拖垮整批；每局落账后与账本对 `(outcome, ticks, kills)`，
+    任一不一致就记进 mismatch（不静默——错版本的重放比没有更糟）。
+    """
+    from worker.config import stage_json_for_args
+    from worker.eval_local import EvalGameSpec, run_local_eval_game
+
+    k = plan.knobs
+    ok = 0
+    failed = 0
+    done = 0
+    mismatch: list[dict] = []
+
+    def one(g: dict[str, int]) -> None:
+        nonlocal ok, failed, done
+        stage, seed = g["stage"], g["seed"]
+        game_dir = plan.tmp_reports / f"s{stage}_sd{seed}"
+        try:
+            man = run_local_eval_game(
+                EvalGameSpec(
+                    bun=plan.bun,
+                    weights_snapshot=str(plan.weights),
+                    stage=stage,
+                    seed=seed,
+                    out_dir=game_dir,
+                    max_ticks=k.max_ticks,
+                    difficulty=k.difficulty,
+                    timeout_sec=plan.timeout,
+                    wver=plan.wver,
+                    stage_json=stage_json_for_args(plan.ns, stage) or "",
+                    lives_override=k.lives if k.lives is not None else None,
+                    player_level=k.level if k.level is not None else None,
+                    # 决策节奏与账本那一局同口径（缺省 False/10 只对 decision_k==10 的课成立）。
+                    decision_events=k.decision_events,
+                    decision_k=k.decision_k,
+                    skip_steel_only_shots=k.skip_steel_only_shots,
+                    break_bricks_on_path=k.break_bricks_on_path,
+                    suppress_useless_fire=k.suppress_useless_fire,
+                    suppress_lead_miss_fire=k.suppress_lead_miss_fire,
+                    opening_connect=k.opening_connect,
+                    policy="nn",
+                    replay_dir=str(plan.out_dir),
+                )
+            )
+        except Exception as e:  # 单局失败不拖垮整批
+            failed += 1
+            log(f"[replay-exp] fail s{stage} seed{seed}: {e}")
+            return
+        # 确定性对账：重放局 vs 账本（outcome/ticks/kills 任一不一致 = 标记，不静默）。
+        row = plan.ledger.get((stage, seed))
+        if row:
+            for key in ("outcome", "ticks", "kills"):
+                if row.get(key) is not None and row.get(key) != man.get(key):
+                    mismatch.append(
+                        {"stage": stage, "seed": seed, "field": key,
+                         "ledger": row.get(key), "resim": man.get(key)}
+                    )
+        ok += 1
+        done += 1
+        if done % 5 == 0 or done == len(games):
+            log(f"[replay-exp] progress {done}/{len(games)} ok={ok} fail={failed} "
+                f"elapsed={time.time() - plan.t0:.0f}s")
+
+    with common.runtime.Runtime(scope="replay-export") as rt:
+        rt.map(one, games, workers=plan.workers)
+    return mismatch
+
+
+def _export(args: argparse.Namespace, manifest_path: Path) -> int:
+    from common.platform_utils import force_utf8_stdio
+
+    force_utf8_stdio()
+
+    from common.log import log
+
+    t0 = time.time()
+    out_dir = Path(args.out_dir)
+    if not out_dir.is_absolute():
+        out_dir = REPO / out_dir
+
+    games = _load_games(args, manifest_path, log)
+    if games is None:
+        return 2
+
+    course, ns, traj = _course_context(args)
 
     weights = resolve_weights(traj, args.course, args.wver, args.iter)
     if weights is None:
@@ -280,37 +448,10 @@ def _export(args: argparse.Namespace, manifest_path: Path) -> int:
         return 3
     log(f"[replay-exp] it{args.iter} course={course.name} weights={weights.name}")
 
-    max_ticks = int(getattr(ns, "max_ticks", 2400) or 2400)
-    difficulty = str(getattr(ns, "difficulty", "hard") or "hard")
-    lives = getattr(ns, "lives_override", None)
-    level = getattr(ns, "player_level", None)
-    # ★ 决策节奏必须与账本那一局**同口径**透传（2026-10-19 事故修复）：
-    #   原先这里不传 decision_events / decision_k，`run_local_eval_game` 静默取缺省
-    #   （False / 10）⇒ 对 `decision_k ≠ 10` 的课（如 y24-k4 = 4），重放跑的是**另一个
-    #   策略**：22 局全 mismatch，且败局会重放成胜局（用户报障「勾了 kills=0/1/2 的败局，
-    #   导出一堆胜利」）。主循环派发处（trainer/eval_dispatch.py:807-809 /
-    #   trainer/dispatch.py:778 / remote/offline_eval.py:546）都透传这两项，
-    #   漏一处就是「train/deploy 静默分裂」——`run_local_eval_game` 的 docstring 点名过这类。
-    decision_events = bool(getattr(ns, "decision_events", False))
-    decision_k = int(getattr(ns, "decision_k", 10))
-    # 评估/部署链推理规则（课程 inference_rules；缺席 = 老行为）。重放必须与
-    # 账本那一局同口径，否则“关/开”两态不是同一策略（与 decision_k 同类事故）。
-    skip_steel_only_shots = bool(getattr(ns, "skip_steel_only_shots", False))
-    break_bricks_on_path = bool(getattr(ns, "break_bricks_on_path", False))
-    suppress_useless_fire = bool(getattr(ns, "suppress_useless_fire", False))
-    suppress_lead_miss_fire = bool(getattr(ns, "suppress_lead_miss_fire", False))
-    # Hybrid opening（课程 `opening_connect`）：重放必须与账本同口径，
-    # 否则账本开了条件接管、导出跑 bare —— s2020 会从 gameover/6076 变成 timeout/36000。
-    opening_connect = bool(getattr(ns, "opening_connect", False))
-    log(
-        f"[replay-exp] it{args.iter} 语义口径: decision_k={decision_k} "
-        f"decision_events={decision_events} skip_steel_only_shots={skip_steel_only_shots} "
-        f"break_bricks_on_path={break_bricks_on_path} "
-        f"suppress_useless_fire={suppress_useless_fire} "
-        f"suppress_lead_miss_fire={suppress_lead_miss_fire} "
-        f"opening_connect={opening_connect} "
-        f"max_ticks={max_ticks} difficulty={difficulty}"
-    )
+    # 评估/部署链推理规则（课程 inference_rules；缺席 = 老行为）与 hybrid opening 都
+    # 在 `_replay_knobs` 里一次读齐：「关/开」两态必须是同一策略（与 decision_k 同类事故），
+    # 例如账本开了 opening_connect、导出跑 bare ⇒ s2020 从 gameover/6076 变 timeout/36000。
+    knobs = _replay_knobs(ns, args.iter, log)
 
     # 上一轮产物清场（同课程重导出不残留旧文件；manifest 在 traj 直下不受影响）。
     # F4（串话归因）：POST 受理时控制台已清旧 manifest，此处再清 out_dir 里的旧 .replay——
@@ -328,64 +469,21 @@ def _export(args: argparse.Namespace, manifest_path: Path) -> int:
     # 对账基准：eval_log 里该 (iter, wver) 的逐局行（含远程节点局）。
     ledger = _read_replay_ledger(traj, args.iter, args.wver)
 
-    workers = max(1, min(int(args.workers), 8))
-    ok = 0
-    failed = 0
-    mismatch: list[dict] = []
-    done = 0
-
-    def one(g: dict[str, int]) -> None:
-        nonlocal ok, failed, done
-        stage, seed = g["stage"], g["seed"]
-        game_dir = tmp_reports / f"s{stage}_sd{seed}"
-        try:
-            man = run_local_eval_game(
-                EvalGameSpec(
-                    bun=args.bun,
-                    weights_snapshot=str(weights),
-                    stage=stage,
-                    seed=seed,
-                    out_dir=game_dir,
-                    max_ticks=max_ticks,
-                    difficulty=difficulty,
-                    timeout_sec=float(args.timeout),
-                    wver=args.wver,
-                    stage_json=stage_json_for_args(ns, stage) or "",
-                    lives_override=lives if lives is not None else None,
-                    player_level=level if level is not None else None,
-                    # 决策节奏与账本那一局同口径（缺省 False/10 只对 decision_k==10 的课成立）。
-                    decision_events=decision_events,
-                    decision_k=decision_k,
-                    skip_steel_only_shots=skip_steel_only_shots,
-                    break_bricks_on_path=break_bricks_on_path,
-                    suppress_useless_fire=suppress_useless_fire,
-                    suppress_lead_miss_fire=suppress_lead_miss_fire,
-                    opening_connect=opening_connect,
-                    policy="nn",
-                    replay_dir=str(out_dir),
-                )
-            )
-        except Exception as e:  # 单局失败不拖垮整批
-            failed += 1
-            log(f"[replay-exp] fail s{stage} seed{seed}: {e}")
-            return
-        # 确定性对账：重放局 vs 账本（outcome/ticks/kills 任一不一致 = 标记，不静默）。
-        row = ledger.get((stage, seed))
-        if row:
-            for k in ("outcome", "ticks", "kills"):
-                if row.get(k) is not None and row.get(k) != man.get(k):
-                    mismatch.append(
-                        {"stage": stage, "seed": seed, "field": k,
-                         "ledger": row.get(k), "resim": man.get(k)}
-                    )
-        ok += 1
-        done += 1
-        if done % 5 == 0 or done == len(games):
-            log(f"[replay-exp] progress {done}/{len(games)} ok={ok} fail={failed} "
-                f"elapsed={time.time() - t0:.0f}s")
-
-    with common.runtime.Runtime(scope="replay-export") as rt:
-        rt.map(one, games, workers=workers)
+    plan = _ReplayPlan(
+        weights=weights,
+        out_dir=out_dir,
+        tmp_reports=tmp_reports,
+        ledger=ledger,
+        knobs=knobs,
+        ns=ns,
+        bun=args.bun,
+        it=args.iter,
+        wver=args.wver,
+        timeout=float(args.timeout),
+        workers=max(1, min(int(args.workers), 8)),
+        t0=t0,
+    )
+    mismatch = _run_games(plan, games, log)
 
     files, errors = _manifest_for(games, out_dir)
     shutil.rmtree(tmp_reports, ignore_errors=True)
@@ -396,8 +494,8 @@ def _export(args: argparse.Namespace, manifest_path: Path) -> int:
         "iter": args.iter,
         "wver": args.wver,
         "weightsPath": str(weights.relative_to(REPO)) if weights.is_relative_to(REPO) else str(weights),
-        "difficulty": difficulty,
-        "maxTicks": max_ticks,
+        "difficulty": knobs.difficulty,
+        "maxTicks": knobs.max_ticks,
         "generatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
         "sec": round(time.time() - t0, 1),
         "requested": len(games),
