@@ -11181,3 +11181,42 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：新用例 3 条 + 形状/`Any`/assert/print 预算 22 条 + 全量 pygate **7058 passed /
   13 skipped**（ruff + mypy 绿）。形状存量 **34 → 33**（`intent_probe.py` 清零）。
   全文 → `docs/nn/engineering.md` §366。
+
+## §2026-11-26-smoke-and-bc-job-phase-splits
+
+- **背景**：分诊剩下的两个最大非 `tools/` 格——`hub/smoke_loopback.main` 181 行与
+  `remote/bc_job._run_bc_job` 179 行，各自把「准备 / 跑一轮 / 收尾」或「派发 / 训练 /
+  落盘」串成一个函数，中间量靠局部变量满天飞。
+
+- **决定**：按阶段切，接缝即阶段边界。`smoke_loopback.main` → `_boot`(91) / `_tick`(90) /
+  `_report_smoke`(22)，载体是 frozen `_Boot`（16 个就绪件）与 `_Round`（一轮产出）；worker 非 0
+  退出改抛 `_WorkerExitError`，`main` 仍返回 1。`_run_bc_job` → `_bc_dispatch`(46) /
+  `_bc_epoch_reporter`(36) / `_bc_run`(75) / `_bc_settle`(17)，载体 frozen `_BcPlan`。
+
+- **顺序约束（bc_job）**：`_load_bc_trainer` 必须仍在 `_bc_dispatch` 之前——paddle 的线程
+  环境旋钮要早于 `check_device` 可能触发的 paddle import；拆分时把这条写进 dispatch 的
+  docstring，免得下次「整理顺序」踩回去。
+
+- **被否决**：给 BC 的计划载体塞 `bc_train` / `save_weights_json` 两个训练器句柄——它们只能
+  标 `Any`（`_load_bc_trainer` 无返回注），会动 `any_baseline` 的 3，改为由入口传入。
+
+- **验证**：形状/`Any`/assert/模块契约 + BC/hub 拆分守卫 **56 passed**；全量 pygate 见下。
+  两个文件形状存量清零（31 条目 / 合计 33 → 29 / 31）。全文 → `docs/nn/engineering.md` §367。
+
+## §2026-11-26-intent-probe-training-path-audit
+
+- **背景**：上一刀修掉配额两臂的解包缺陷后，`worker/train/intent_probe.py` 的训练路径仍有
+  多条分支零用例（self-feed 注入装载、`--ss-eps`、`--max-train` 子采样、单 shard 切分）。
+
+- **决定**：按 §7 先写红用例（`tests/worker/test_intent_probe_training_path.py`，8 条），
+  在未改代码上确认 4 条红，再做最小修复：① `_load_split` 缺 `self_inj.npy` 的哨兵从 1-D
+  `(n,)` 改成 `(n, 9)` 全 -1（与 `gen_self_inj.py` 的 N×9 契约对齐；混合数据根不再在
+  `concatenate` 炸，`--ss-eps` 的 `xinj[:, 0]` 不再 IndexError）；② `--max-train` 的内存上限
+  当软约束（至少装第一个 shard，空块会 `np.concatenate([])`）；③ 只有 1 个 shard 时
+  `_index_shards` 响亮退出（train 划分必空）。
+
+- **已知边界（未修）**：全零帧语料下 `_fit` 的 `tot_loss / n` 仍除零——语料为空时上游已无
+  意义，先定义「空语料该报什么」再动，不在本刀范围。
+
+- **验证**：新 8 条先红后绿 + 采样 3 条 + 形状/`Any`/assert 预算；ruff + mypy 绿。
+  全文 → `docs/nn/engineering.md` §368。

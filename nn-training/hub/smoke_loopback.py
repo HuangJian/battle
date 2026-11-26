@@ -28,7 +28,10 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from dataclasses import dataclass
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from remote.hub_publish import PublishSpec, publish_job
@@ -54,7 +57,7 @@ from remote.hub_client import (
 )
 from remote.hub_http import WaitJobSpec
 from remote.publish_spec import LandSpec
-from worker.config import load_course
+from worker.config import CourseConfig, load_course
 
 #: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。迁移前是手拼
 #: `[{time.strftime('%H:%M:%S')}] [smoke] {msg}` 的 `print(..., flush=True)`（输出不变）。
@@ -229,16 +232,50 @@ def _assert_smoke_final(
     )
 
 
-def main() -> int:
-    args = _smoke_parser().parse_args()
+class _WorkerExitError(RuntimeError):
+    """云 worker 非 0 退出：`_tick` 内立刻终止，`main` 转成退出码 1（原行为）。"""
 
+
+@dataclass(frozen=True)
+class _Boot:
+    """boot 段的就绪件：tick / report 两段只读它，不再各自重算路径与指纹。"""
+
+    work: Path
+    course_bytes: bytes
+    course: CourseConfig
+    course_fp: str
+    init_w: Path
+    init_weights_fp: str
+    traj_dir: Path
+    store: _JobStore
+    srv: ThreadingHTTPServer
+    th: threading.Thread
+    hub_url: str
+    commit: str
+    code_zip_path: Path
+    code_sha256: str
+    worker_env: dict[str, str]
+    worker_cmd: list[str]
+
+
+@dataclass(frozen=True)
+class _Round:
+    """tick 段一轮的产出（report 段只读最后一轮，计量行读全部）。"""
+
+    jid: str
+    up_bytes: int
+    result: dict
+    ckpt: Path
+    sec: float
+    landed_wver: str
+
+
+def _boot(args, log) -> _Boot:
+    """boot 段：工作目录 → 课程 → 自造 init 权重 → 合成语料 → 假云 hub → code.zip → worker argv。"""
     work = REPO / args.work  # 2026-09-08 双 tmp 统一：锚定仓库根 tmp/，不用 ROOT(nn-training)/tmp
     if work.exists():
         rmtree_best_effort(work)  # 冒烟目录可整体重建（非训练产物）
     work.mkdir(parents=True)
-
-    def log(msg: str) -> None:
-        _log(f"{msg}")
 
     # ---- 0) 课程 + course_fp（D14：sha256 of 课程文件字节） ----
     course_path = ROOT / "curricula" / "p4-onset.jsonc"
@@ -282,15 +319,14 @@ def main() -> int:
     hub_url = f"http://127.0.0.1:{port}"
     log(f"hub-server (fake cloud) on {hub_url}")
 
-    # ---- 4) 多轮发布/执行（M2：slim 默认开；第 2 轮起 opt blob 应缓存命中）----
-    commit = git_head(REPO)
-    # 打包 code.zip（**一个集群会话一次**：2026-10-10 起真链路由启动路径的
+    # ---- 4a) 打包 code.zip（**一个集群会话一次**：2026-10-10 起真链路由启动路径的
     # `remote/code_snapshot.py::ensure_cluster_snapshot` 建（hub/trainer 会话级锚）；
     # 冒烟预演自己起假云机，不走那条锚，故这里按同一意图现打一份。
+    commit = git_head(REPO)
     code_zip_path = work / "code.zip"
     code_sha256 = pack_code_zip(ROOT, code_zip_path, log=log)
-    out_weights = work / "weights.json"
 
+    # ---- 4b) 云 worker 进程的 argv（每轮同一条命令，`--once` 领一件活） ----
     worker_env = dict(os.environ)
     worker_env["PYTHONPATH"] = str(ROOT) + os.pathsep + worker_env.get("PYTHONPATH", "")
     worker_cmd = [
@@ -307,110 +343,161 @@ def main() -> int:
         "--poll-sec",
         "1",
     ]
-    rounds = max(2, int(args.rounds))
-    prev_ckpt: Path | None = None
-    up_hist: list[int] = []
-    last_result: dict = {}
-    last_wver = ""
-    jid = ""
-    t_total = 0.0
-    for rd in range(1, rounds + 1):
-        if rd > 1:
-            # 合成下一轮语料（真实 run 由 rollout 落盘；harness 复制上一轮 shard）
-            src_it = traj_dir / f"it{rd - 1}"
-            dst_it = traj_dir / f"it{rd}"
-            if dst_it.exists():
-                rmtree_best_effort(dst_it)
-            shutil.copytree(src_it, dst_it)
-        shard_dirs_r = iter_shard_dirs(str(traj_dir), rd)
-        assert shard_dirs_r, f"it{rd} 无 shard"
-        init_path = str(out_weights) if rd > 1 else str(init_w)
-        m = publish_job(
-            PublishSpec(
-                job_root=work / "jobs",
-                jsonl_path=str(work / "training_log.jsonl"),
-                run_id="smoke-loopback",
-                it=rd,
-                traj_dir=str(traj_dir),
-                shard_dirs=shard_dirs_r,
-                init_weights_path=init_path,
-                ckpt_remote_dir=str(prev_ckpt) if prev_ckpt else None,
-                commit=commit,
-                code_sha256=code_sha256,
-                code_zip_path=code_zip_path,
-                course=course_bytes.decode("utf-8"),
-                course_fp=course_fp,
-                reward_formula=course.reward.formula,
-                formula_hash=course.reward_spec().identity(),
-                metrics_version=METRICS_VERSION,
-                gamma=float(course.gamma),
-                lam=float(course.lam),
-                mode="per-tick",
-                epochs=args.epochs,
-                mb=512,
-                lr=float(course.lr),
-                kl_coef=0.0,
-                kl_cap=None,
-                adv_norm="auto",
-                shuffle=True,
-                schedule_raw=course.ppo_schedule_dicts(),
-                slim=True,
-            ),
+    return _Boot(
+        work=work,
+        course_bytes=course_bytes,
+        course=course,
+        course_fp=course_fp,
+        init_w=init_w,
+        init_weights_fp=init_weights_fp,
+        traj_dir=traj_dir,
+        store=store,
+        srv=srv,
+        th=th,
+        hub_url=hub_url,
+        commit=commit,
+        code_zip_path=code_zip_path,
+        code_sha256=code_sha256,
+        worker_env=worker_env,
+        worker_cmd=worker_cmd,
+    )
+
+
+def _tick(rd: int, args, boot: _Boot, out_weights: Path, prev_ckpt: Path | None, log) -> _Round:
+    """tick 段：一轮 = 备语料 → 发布 job → 起云 worker → 等结果 → 校验落位 → 计量对账。"""
+    if rd > 1:
+        # 合成下一轮语料（真实 run 由 rollout 落盘；harness 复制上一轮 shard）
+        src_it = boot.traj_dir / f"it{rd - 1}"
+        dst_it = boot.traj_dir / f"it{rd}"
+        if dst_it.exists():
+            rmtree_best_effort(dst_it)
+        shutil.copytree(src_it, dst_it)
+    shard_dirs_r = iter_shard_dirs(str(boot.traj_dir), rd)
+    assert shard_dirs_r, f"it{rd} 无 shard"
+    init_path = str(out_weights) if rd > 1 else str(boot.init_w)
+    m = publish_job(
+        PublishSpec(
+            job_root=boot.work / "jobs",
+            jsonl_path=str(boot.work / "training_log.jsonl"),
+            run_id="smoke-loopback",
+            it=rd,
+            traj_dir=str(boot.traj_dir),
+            shard_dirs=shard_dirs_r,
+            init_weights_path=init_path,
+            ckpt_remote_dir=str(prev_ckpt) if prev_ckpt else None,
+            commit=boot.commit,
+            code_sha256=boot.code_sha256,
+            code_zip_path=boot.code_zip_path,
+            course=boot.course_bytes.decode("utf-8"),
+            course_fp=boot.course_fp,
+            reward_formula=boot.course.reward.formula,
+            formula_hash=boot.course.reward_spec().identity(),
+            metrics_version=METRICS_VERSION,
+            gamma=float(boot.course.gamma),
+            lam=float(boot.course.lam),
+            mode="per-tick",
+            epochs=args.epochs,
+            mb=512,
+            lr=float(boot.course.lr),
+            kl_coef=0.0,
+            kl_cap=None,
+            adv_norm="auto",
+            shuffle=True,
+            schedule_raw=boot.course.ppo_schedule_dicts(),
+            slim=True,
+        ),
+        log=log,
+    )
+    jid = m["job_id"]
+    log(
+        f"it{rd} job published: {jid} (data_fp={m['data_fp'][:12]}… "
+        f"payload={m['payload_sha256'][:12]}… slim={m.get('slim')} "
+        f"opt_sha={str(m.get('opt_sha'))[:12]}…)"
+    )
+
+    t0 = time.time()
+    log(f"it{rd} starting cloud worker: {' '.join(boot.worker_cmd)}")
+    proc = subprocess.run(
+        boot.worker_cmd, cwd=str(ROOT), env=boot.worker_env, timeout=600, **POPEN_NO_WINDOW
+    )
+    if proc.returncode != 0:
+        raise _WorkerExitError(f"cloud worker exited rc={proc.returncode} (it{rd})")
+    result = wait_job(
+        WaitJobSpec(
+            base_url=boot.hub_url, token=args.token, jid=jid, timeout_sec=300, poll_sec=1, log=log
+        )
+    )
+    verify_and_land(
+        LandSpec(
+            result=result,
+            manifest=m,
+            init_weights_path=init_path,
+            traj_dir=str(boot.traj_dir),
+            it=rd,
+            out_weights=str(out_weights),
             log=log,
         )
-        jid = m["job_id"]
-        log(
-            f"it{rd} job published: {jid} (data_fp={m['data_fp'][:12]}… "
-            f"payload={m['payload_sha256'][:12]}… slim={m.get('slim')} "
-            f"opt_sha={str(m.get('opt_sha'))[:12]}…)"
-        )
-
-        t0 = time.time()
-        log(f"it{rd} starting cloud worker: {' '.join(worker_cmd)}")
-        rc = subprocess.run(worker_cmd, cwd=str(ROOT), env=worker_env, timeout=600, **POPEN_NO_WINDOW)
-        if rc.returncode != 0:
-            log(f"FATAL: cloud worker exited rc={rc.returncode} (it{rd})")
-            return 1
-        result = wait_job(
-            WaitJobSpec(
-                base_url=hub_url, token=args.token, jid=jid, timeout_sec=300, poll_sec=1, log=log
-            )
-        )
-        verify_and_land(
-            LandSpec(
-                result=result,
-                manifest=m,
-                init_weights_path=init_path,
-                traj_dir=str(traj_dir),
-                it=rd,
-                out_weights=str(out_weights),
-                log=log,
-            )
-        )
-        t_total = time.time() - t0
-        mark_job_completed(str(work / "training_log.jsonl"), jid)
-        prev_ckpt = traj_dir / f"it{rd}" / "ppo_ckpt_remote"
-        last_result = result
-
-        # M0 计量对账 + M2 blob 命中（hub 实测 == 发布归档 == worker 实测）
-        up_bytes = _check_round_wire(rd, m, store, jid, result, work)
-        up_hist.append(up_bytes)
-        last_wver = hashlib.sha256(out_weights.read_bytes()).hexdigest()
-
-    # ---- 7) 断言（末轮产物 + 账本双态）----
-    _assert_smoke_final(out_weights, last_wver, init_weights_fp, traj_dir, rounds, work, jid)
-
-    agg = last_result.get("agg", {})
-    log(
-        f"SMOKE PASS: rounds={rounds} up_bytes={up_hist} last_round={t_total:.1f}s jid={jid} "
-        f"steps={agg.get('steps')} chunks={agg.get('chunks')} "
-        f"kl={agg.get('kl')} ppo_sec={last_result.get('ppo_sec')} "
-        f"landed_wver={last_wver[:12]}…"
     )
-    srv.shutdown()
-    th.join(timeout=5)
-    return 0
+    sec = time.time() - t0
+    mark_job_completed(str(boot.work / "training_log.jsonl"), jid)
 
+    # M0 计量对账 + M2 blob 命中（hub 实测 == 发布归档 == worker 实测）
+    up_bytes = _check_round_wire(rd, m, boot.store, jid, result, boot.work)
+    return _Round(
+        jid=jid,
+        up_bytes=up_bytes,
+        result=result,
+        ckpt=boot.traj_dir / f"it{rd}" / "ppo_ckpt_remote",
+        sec=sec,
+        landed_wver=hashlib.sha256(out_weights.read_bytes()).hexdigest(),
+    )
+
+
+def _report_smoke(boot: _Boot, out_weights: Path, rounds: list[_Round], log) -> None:
+    """report 段：末轮产物 + 账本双态断言 → SMOKE PASS 一行（含逐轮 up_bytes）→ 关假云 server。"""
+    last = rounds[-1]
+    _assert_smoke_final(
+        out_weights,
+        last.landed_wver,
+        boot.init_weights_fp,
+        boot.traj_dir,
+        len(rounds),
+        boot.work,
+        last.jid,
+    )
+    agg = last.result.get("agg", {})
+    log(
+        f"SMOKE PASS: rounds={len(rounds)} up_bytes={[r.up_bytes for r in rounds]} "
+        f"last_round={last.sec:.1f}s jid={last.jid} "
+        f"steps={agg.get('steps')} chunks={agg.get('chunks')} "
+        f"kl={agg.get('kl')} ppo_sec={last.result.get('ppo_sec')} "
+        f"landed_wver={last.landed_wver[:12]}…"
+    )
+    boot.srv.shutdown()
+    boot.th.join(timeout=5)
+
+
+def main() -> int:
+    args = _smoke_parser().parse_args()
+
+    def log(msg: str) -> None:
+        _log(f"{msg}")
+
+    boot = _boot(args, log)
+    out_weights = boot.work / "weights.json"
+    rounds = max(2, int(args.rounds))
+    done: list[_Round] = []
+    prev_ckpt: Path | None = None
+    try:
+        for rd in range(1, rounds + 1):
+            rnd = _tick(rd, args, boot, out_weights, prev_ckpt, log)
+            done.append(rnd)
+            prev_ckpt = rnd.ckpt
+    except _WorkerExitError as e:
+        log(f"FATAL: {e}")
+        return 1
+    _report_smoke(boot, out_weights, done, log)
+    return 0
 
 if __name__ == "__main__":
     run_main(main)

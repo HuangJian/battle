@@ -2170,3 +2170,18 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > 保证）；同一刀抓到两条配额臂自 P2-6c 起的 `ValueError` 解包缺陷 —— 补
 > `tests/worker/test_intent_probe_sampling.py` 3 条（先红后绿）；存量 34 → 33
 > （engineering §366）。
+
+> 2026-11-26 第三十格（批）：`hub/smoke_loopback.main` 181→21（boot `_boot` 91 / tick
+> `_tick` 90 / report `_report_smoke` 22；载体 frozen `_Boot`（16 个就绪件）/ `_Round`；worker
+> 非 0 退出改 `_WorkerExitError`，出口码不变）· `remote/bc_job._run_bc_job` 179→30
+> （dispatch `_bc_dispatch` 46 / epoch 回传 `_bc_epoch_reporter` 36 / run `_bc_run` 75 /
+> settle `_bc_settle` 17；载体 `_BcPlan`；`_load_bc_trainer` 仍先于设备检查，paddle 线程
+> 旋钮早于 paddle import）；两文件形状存量清零，31 条目 / 合计 33 → 29 / 31
+> （engineering §367）。
+
+> 2026-11-26 训练路径审计：`worker/train/intent_probe.py` 的 self-feed 注入装载此前零用例
+> ——缺 `self_inj.npy` 的 shard 哨兵是 1-D `(n,)`，与 `gen_self_inj.py` 的 N×9 契约不符
+> ⇒ 混合数据根 `concatenate` ValueError、全缺时 `--ss-eps` 的 `xinj[:, 0]` IndexError。
+> 三条缺陷 + 单 shard 拒绝全部按 §7 先写红（`tests/worker/test_intent_probe_training_path.py`
+> 8 条，4 红）再修；另补 `build_injection` / `max_train` 对齐 / `_fit`+`_predict_val`
+> 端到端覆盖（engineering §368）。

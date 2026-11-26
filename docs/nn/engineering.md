@@ -29,6 +29,57 @@
 
 ---
 
+## §368 `intent_probe` 训练路径审计：self_inj 哨兵宽度与两个空块分支（2026-11-26）
+
+拆完 `main` 后把该文件**训练路径**里配额两臂之外的未覆盖分支过了一遍（配额两臂已由
+`test_intent_probe_sampling.py` 钉住）。三条真缺陷 + 一条清晰的拒绝，全部先红后绿
+（`tests/worker/test_intent_probe_training_path.py`，8 条）。
+
+| 分支 | 缺陷 | 修法 |
+|---|---|---|
+| `_load_split` 遇到缺 `self_inj.npy` 的 shard | 哨兵是 1-D `(n,)`，而 `gen_self_inj.py` 产出 **N×9**（prev one-hot(8)+dur）⇒ 混合数据根在 `np.concatenate` 处 ValueError | 哨兵改 `(n, 9)` 全 -1 |
+| `--ss-eps>0` 且所有 shard 都没有 self_inj | 上一行的 1-D 形状让 `--ss-eps` 的 `xinj[:, 0]` IndexError——即文档里的 P1-2 scheduled-sampling 流程 | 同上；`avail = xinj[:,0] >= 0` 的哨兵语义不变 |
+| `--max-train` 小于第一个 shard 的帧数 | cap 先判断再 append ⇒ 块为空，`np.concatenate([])` ValueError | 上限当**软**约束：至少装进第一个 shard |
+| 只有一个 shard | val 拿走唯一一个 ⇒ train 空，numpy 抛「need at least one array」 | `_index_shards` 响亮退出（按局切分需要 ≥2 个） |
+
+顺带补上此前**无任何用例**但行为正确的分支：`build_injection` 的 prev/duration 语义；
+`max_train` 子采样与注入特征同下标（P2-6c 的不变量，用 obs 携带行号反查全量有序注入）；
+`--ss-eps=1` 只替换有 self 注入的帧、哨兵帧保留 teacher；`_fit` + `_predict_val`
+端到端（12 帧 / h=8，两 epoch 后预测逐帧落在 0..7）。
+
+**已知边界（未修）**：全零帧语料下 `_fit` 的 `tot_loss / n` 仍会除零。语料为空时上游
+已经无意义，修它得先定义「空语料该报什么」，不在本刀范围。
+
+## §367 分诊第三十格（批）：`hub/smoke_loopback.main` + `remote/bc_job._run_bc_job`（2026-11-26）
+
+两格（181 / 179 行）都按**阶段**切而不是按行数，接缝即阶段边界。
+
+**`smoke_loopback.main` 181 → 21**（假云回环冒烟）：
+
+| 段 | 行数 | 职责 |
+|---|---:|---|
+| `_boot(args, log)` | 91 | 工作目录 → 课程 + fp → 自造 init 权重 → 合成 shard → 假云 hub server → `code.zip` → worker argv ⇒ `_Boot`（16 字段 frozen） |
+| `_tick(rd, args, boot, out_weights, prev_ckpt, log)` | 90 | 备下一轮语料 → `publish_job` → 起云 worker → `wait_job` → `verify_and_land` → 计量对账 ⇒ `_Round` |
+| `_report_smoke(boot, out_weights, rounds, log)` | 22 | 末轮产物 + 账本双态断言 → SMOKE PASS 一行（逐轮 `up_bytes`）→ `shutdown` + `join` |
+
+worker 非 0 退出原来直接 `return 1`，现在 `_tick` 抛 `_WorkerExitError`、`main` 转回
+退出码 1（输出行不变）。`_Boot` / `_Round` 让 tick 只收一份参数袋；不新增 `Any`
+（`args` 沿本文件既有口径）。
+
+**`bc_job._run_bc_job` 179 → 30**（云端 BC job）：
+
+| 段 | 行数 | 职责 |
+|---|---:|---|
+| `_bc_dispatch(spec, t0)` | 46 | 种子/设备（paddle `check_device`）→ resume 接续（hub 优先、本地兜底）→ 回传 backlog ⇒ `_BcPlan` |
+| `_bc_epoch_reporter(plan, spec, save_weights_json)` | 36 | 每 epoch 回传回调（本地原子覆盖 + hub POST + backlog 补发） |
+| `_bc_run(plan, spec, bc_train, save_weights_json)` | 75 | 续跑已满 ⇒ 零重训；否则 argv → 训练 → 收尾补发 → `(metrics, 权重字节)` |
+| `_bc_settle(plan, result_metrics, wj_bytes)` | 17 | 结果体 → `validate_result` 自查 → `_persist_result` 落盘 |
+
+顺序保持：**先 `_load_bc_trainer` 再 `_bc_dispatch`**（paddle 的线程环境旋钮必须早于
+`check_device` 可能触发的 paddle import）。顺手删掉 `_run_bc_job` 里那句
+`if "metrics" in dir(): pass` 的死代码。`Any` 仍为 3、形状存量两文件清零
+（31 条目 / 合计 **33 → 29 条目 / 31**）。
+
 ## §366 分诊第二十九格：`worker/train/intent_probe.main`（2026-11-26）
 
 181 行 → **58 行**，六段接缝（逐字搬移，只有缩进与参数名变化）；同一刀还抓到配额采样两臂的解包缺陷。

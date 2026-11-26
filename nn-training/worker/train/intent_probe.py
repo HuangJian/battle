@@ -313,6 +313,13 @@ def _index_shards(
     if not shards:
         print(f"[probe] no shards under {roots}", file=sys.stderr)
         sys.exit(1)
+    if len(shards) < 2:
+        # 按局切分至少需要 2 个 shard；否则 train 划分必空，会在 `_load_split`
+        # 的 `np.concatenate([])` 处抛一句看不懂的 ValueError。
+        sys.exit(
+            f"[probe] 只有 {len(shards)} 个 shard（val_frac={val_frac}）"
+            "——按局切分至少需要 2 个"
+        )
     # 每个 shard 的根索引（B 臂 priority-root 需要按根识别帧来源）。
     shard_roots = [root_of[os.path.dirname(d)] for d in shards]
     perm = rng.permutation(len(shards))
@@ -327,14 +334,20 @@ def _load_split(
     shards: list[str], indices: list[int], shard_roots: list[int], max_train: int
 ) -> _Split:
     """把若干 shard 的 npy 按序拼成一块（`max_train` > 0 时按 1.5 倍设内存上限）。"""
-    obs_l, sc_l, in_l, bk_l, rt_l, inx_l = [], [], [], [], [], []
+    obs_l: list[np.ndarray] = []
+    sc_l: list[np.ndarray] = []
+    in_l: list[np.ndarray] = []
+    bk_l: list[np.ndarray] = []
+    rt_l: list[np.ndarray] = []
+    inx_l: list[np.ndarray] = []
     total = 0
     cap = max_train * 1.5 if max_train > 0 else 0
     for i in indices:
         base = shards[i]
         o = np.load(os.path.join(base, "obs.npy"))
         total += o.shape[0]
-        if cap > 0 and total > cap:
+        # 上限是软的：至少装进第一个 shard，否则块为空（`np.concatenate([])` 直接抛错）。
+        if cap > 0 and total > cap and obs_l:
             break
         obs_l.append(o)
         sc_l.append(np.load(os.path.join(base, "scalars.npy")))
@@ -343,8 +356,12 @@ def _load_split(
         rt_l.append(np.full(o.shape[0], shard_roots[i], dtype=np.int8))
         # self-feed 注入（P1-2 scheduled sampling 数据源；缺省 -1 哨兵 = 该帧无 self 注入）。
         sj = os.path.join(base, "self_inj.npy")
+        # 哨兵必须与 `gen_self_inj.py` 的 N×9（prev one-hot(8)+dur）同宽：1-D 会让
+        # 混合数据根在 concatenate 处炸、让 `--ss-eps` 的 `xinj[:, 0]` IndexError。
         inx_l.append(
-            np.load(sj) if os.path.exists(sj) else np.full(o.shape[0], -1.0, dtype=np.float32)
+            np.load(sj)
+            if os.path.exists(sj)
+            else np.full((o.shape[0], 9), -1.0, dtype=np.float32)
         )
     return _Split(
         obs=np.concatenate(obs_l),

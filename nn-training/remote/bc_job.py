@@ -32,6 +32,7 @@ import json
 import os
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -524,57 +525,47 @@ def _bc_train_namespace(
     )
 
 
-def _run_bc_job(spec: BcJobSpec) -> dict:
-    """云端 BC job（plan/bc-cloud-integration.plan.md §3；每 epoch 回传 2026-09-13）：
-    D14 语料血缘校验 →（--echo 冒烟回显）→ **resume 接续**（hub bc-resume 优先，
-    本地 bc-resume/ 兜底——中断重领同 job 从最后完成的 epoch 接着训，绝不从头重训）
-    → 按 `backend` 复用 `train/bc.py::train` 或 `train/bc_paddle.py::train`（on_epoch
-    回调每 epoch 回传权重+指标：hub POST /jobs/{id}/epoch 租约校验防旧 worker 覆盖新
-    resume + 本地原子覆盖）→ BC 权重 + metrics 回传。
+@dataclass(frozen=True)
+class _BcPlan:
+    """dispatch 段的只读装配：run / settle 两段只读它（回传 backlog 也挂在这里）。"""
 
-    语料 = payload 解包出的 npy shard 目录（obs/scalars/actions/masks/conditions/
-    returns + manifest），bc.py 的 scan_shards 对 job_dir 递归扫描即全部装载。
+    jid: str
+    manifest: dict
+    job_dir: Path
+    out_path: Path
+    backend: str
+    dev: str
+    total_epochs: int
+    resume_epoch: int
+    resume_weights: bytes
+    seed_int: int
+    seed_src: str
+    pending: list[dict]
+    t0: float
 
-    入参 = 一个 `BcJobSpec`（P0-3 批 C：12 个关键字 → 一个对象；装配点在
-    `remote/job_shell.bc_or_none`，spec 住 L1 的 `remote/job_spec`）。下面一次展开，
-    函数体逐字不动。
+
+def _bc_dispatch(spec: BcJobSpec, t0: float) -> _BcPlan:
+    """dispatch 段：种子/设备 → 续跑起点（hub 优先、本地兜底）→ 回传 backlog。
+
+    调用方必须先 `_load_bc_trainer`：paddle 的线程环境旋钮要早于任何 paddle import，
+    而 `check_device` 就可能是第一个（顺序与拆分前一致）。
     """
     jid, manifest, job_dir = spec.jid, spec.manifest, spec.job_dir
-    shard_dirs, device, torch_threads = spec.shard_dirs, spec.device, spec.torch_threads
-    echo, base_url, token = spec.echo, spec.base_url, spec.token
-    lease_token, backend = spec.lease_token, spec.backend
     log = spec.log or _log
-    # ---- D14 语料血缘：与 PPO 同规（BC shard manifest 同样携带 course_fp/corpus_fp）----
-    # fixed 源是课程显式声明的「原样使用现成语料」：其 shard 可能来自别的课程版本，
-    # 按本课指纹拒收会把整个功能变成死路；发布端因此写入 corpus_source=fixed，
-    # 云端只对这一种显式来源跳过血缘门（其余仍逐 shard 拒收）。
-    _check_corpus_lineage(manifest, shard_dirs)
-
-    t0 = time.time()
-
-    # ---- 冒烟回显（--echo，2026-09-05 同语义）：不拉 torch 不训练——占位 weights +
-    # smoke 标记（消费方 run_bc 作废轮，不落盘不归档）。三重校验按构造必过。
-    if echo:
-        return _run_bc_echo(jid, manifest, job_dir, log)
-
-    # ---- 延迟 import 训练器（B7 同款；本模块顶层零 torch/paddle）----
-    bc_train, save_weights_json = _load_bc_trainer(backend, torch_threads)
-
     # 训练种子（2026-09-14 修正）：课程/调用方指定优先 —— 见 resolve_bc_seed。
     seed_int, seed_src = resolve_bc_seed(manifest)
-    dev = _bc_device(device)
-    if backend == "paddle":
+    dev = _bc_device(spec.device)
+    if spec.backend == "paddle":
         # Paddle 没有 XLA/DataParallel/MPS 路径：在开跑前响亮拒绝 torch 专属实验臂。
         from remote.paddle_env import check_device
 
         dev = check_device(jid, dev)
-    out_path = job_dir / "bc-weights.json"
     total_epochs = int(manifest["epochs"])
 
     # ---- resume 接续：hub 优先（跨会话/跨 worker 持久），本地 bc-resume/ 兜底 ----
     resume: tuple[int, bytes] | None = None
-    if base_url:
-        resume = _bc_fetch_resume(base_url, token, jid, log=log)
+    if spec.base_url:
+        resume = _bc_fetch_resume(spec.base_url, spec.token, jid, log=log)
     if resume is None:
         resume = _bc_load_local_resume(job_dir.parent, jid)
     resume_epoch, resume_weights = resume if resume else (0, b"")
@@ -584,10 +575,29 @@ def _run_bc_job(spec: BcJobSpec) -> dict:
     # 隧道 530 丢包（2026-11-04）：一次回传失败 = 这一 epoch 的指标行永久缺失（hub 只留最新
     # resume，训练侧轮询也永远看不到它）。失败的那一份 body 留在 backlog，下一次回传成功后
     # 重放 `POST /jobs/{id}/epoch`——hub 按 epoch 幂等，迟到的旧 epoch 只补行、不倒回 resume。
-    pending_epochs: list[dict] = []
+    return _BcPlan(
+        jid=jid,
+        manifest=manifest,
+        job_dir=job_dir,
+        out_path=job_dir / "bc-weights.json",
+        backend=spec.backend,
+        dev=dev,
+        total_epochs=total_epochs,
+        resume_epoch=resume_epoch,
+        resume_weights=resume_weights,
+        seed_int=seed_int,
+        seed_src=seed_src,
+        pending=[],
+        t0=t0,
+    )
 
-    # 每 epoch 回传回调：本地原子覆盖 + hub POST（均 best-effort——失败只 WARN，
-    # resume 停在最后一次成功回传的 epoch，下个 epoch 重试 + 补发 backlog）。
+
+def _bc_epoch_reporter(plan: _BcPlan, spec: BcJobSpec, save_weights_json):
+    """构建每 epoch 回传回调：本地原子覆盖 + hub POST（均 best-effort——失败只 WARN，
+    resume 停在最后一次成功回传的 epoch，下个 epoch 重试 + 补发 backlog）。"""
+    log = spec.log or _log
+    jid, job_dir = plan.jid, plan.job_dir
+
     def _on_epoch(gepoch: int, raw_model: Any, m: dict) -> None:
         tmp = job_dir / "bc-epoch-tmp.json"
         save_weights_json(raw_model, str(tmp), extra_meta={"epoch": gepoch, "ckpt": True})
@@ -601,25 +611,33 @@ def _run_bc_job(spec: BcJobSpec) -> dict:
         except OSError:
             pass
         _bc_store_local_resume(job_dir.parent, jid, body)
-        if not base_url:
+        if not spec.base_url:
             return
-        if not _bc_post_epoch(base_url, token, jid, body, lease_token, log=log):
-            _bc_backlog_add(pending_epochs, body, log=log)
+        if not _bc_post_epoch(spec.base_url, spec.token, jid, body, spec.lease_token, log=log):
+            _bc_backlog_add(plan.pending, body, log=log)
             return
-        if not pending_epochs:
+        if not plan.pending:
             return
-        n = len(pending_epochs)
-        left = _bc_backlog_replay(base_url, token, jid, pending_epochs, lease_token, log=log)
+        n = len(plan.pending)
+        left = _bc_backlog_replay(
+            spec.base_url, spec.token, jid, plan.pending, spec.lease_token, log=log
+        )
         if left:
             log(f"WARN: job {jid}: 仍 {left} 行 epoch 指标补发失败——留到下个 epoch")
         else:
             log(f"job {jid}: {n} 行漏传的 epoch 指标已补发入账")
 
+    return _on_epoch
+
+
+def _bc_run(plan: _BcPlan, spec: BcJobSpec, bc_train, save_weights_json) -> tuple[dict, bytes]:
+    """run 段：续跑已满 ⇒ 零重训；否则装 argv → 训练 → 收尾补发 backlog → (metrics, 权重字节)。"""
+    log = spec.log or _log
+    resume_epoch, total_epochs = plan.resume_epoch, plan.total_epochs
     if resume_epoch >= total_epochs > 0:
         # 上轮已完成全部 epoch、只差最终回传（epoch POST 成功但 result 丢失）：
         # resume 权重即终态——零重训直接产出。
-        log(f"job {jid}: resume 已达 {resume_epoch}/{total_epochs} —— 零重训直接回传终态")
-        wj_bytes = resume_weights
+        log(f"job {plan.jid}: resume 已达 {resume_epoch}/{total_epochs} —— 零重训直接回传终态")
         result_metrics: dict[str, Any] = {
             "epochs": total_epochs,
             "train_samples": 0,
@@ -628,78 +646,113 @@ def _run_bc_job(spec: BcJobSpec) -> dict:
             "delivered_epoch": int(resume_epoch),
             "resumed_complete": True,
         }
-    else:
-        ns = _bc_train_namespace(
-            manifest,
-            out_path,
-            total_epochs,
-            resume_epoch,
-            seed_int,
-            dev,
-            jid,
-            _on_epoch,
-        )
-        if resume_epoch:
-            resume_in = job_dir / "bc-resume-in.json"
-            resume_in.write_bytes(resume_weights)
-            ns.resume = str(resume_in)
-            ns.epoch_offset = resume_epoch
-        else:
-            init_resume = bc_init_resume_path(job_dir, resume_epoch)
-            if init_resume is not None:
-                ns.resume = init_resume
-                log(f"job {jid}: warm start——init_weights.json 作起点，优化器/LR 全新")
-        log(
-            f"job {jid}: BC start backend={backend} arch={ns.arch} epochs={ns.epochs} "
-            f"batch={ns.batch} lr={ns.lr} device={dev} seed={seed_int}({seed_src}) "
-            f"shards={len(shard_dirs)}"
-            + (f" resume@{resume_epoch}" if resume_epoch else "")
-        )
-        metrics = bc_train(ns)
-        # 收尾补发：最后一个 epoch 的回传也可能吃 530——训练一结束就没有「下一个 epoch」
-        # 来带它了，必须在这里再试一次（失败则留日志：那几行账本就是缺的）。
-        if base_url and pending_epochs:
-            n = len(pending_epochs)
-            left = _bc_backlog_replay(base_url, token, jid, pending_epochs, lease_token, log=log)
-            log(
-                f"job {jid}: 收尾补发 epoch 指标 {n} 行"
-                + ("" if not left else f"——仍缺 {left} 行（隧道仍不可达）")
-            )
-        hist = metrics.get("history", {})
-        sizes = metrics.get("sizes", {})
-        result_metrics = {
-            "epochs": total_epochs,
-            "train_samples": int(sizes.get("train", 0) or 0),
-            "val_samples": int(sizes.get("val", 0) or 0),
-            "best_val_loss": float(metrics.get("best_val_loss", 0.0) or 0.0),
-            # B1：交付权重来自 best val 的那一 epoch，不是 history[-1]（ep80）。
-            "delivered_epoch": int(metrics.get("delivered_epoch", 0) or 0),
-            # B3：早停后实际跑完的 epoch 数（`epochs` 仍是课程声明的上限）。
-            "epochs_completed": int(metrics.get("epochs_completed", total_epochs) or total_epochs),
-            "early_stopped": bool(metrics.get("early_stopped", False)),
-            "move_acc": float(hist.get("move_acc", [0.0])[-1]) if hist.get("move_acc") else 0.0,
-            "fire_acc": float(hist.get("fire_acc", [0.0])[-1]) if hist.get("fire_acc") else 0.0,
-            "params": int(metrics.get("params", 0) or 0),
-        }
-        if resume_epoch:
-            result_metrics["resumed_from"] = resume_epoch
-        wj_bytes = Path(str(metrics["out"])).read_bytes()
+        return result_metrics, plan.resume_weights
 
-    bc_sec = round(time.time() - t0, 1)
-    if "metrics" in dir():
-        pass
+    ns = _bc_train_namespace(
+        plan.manifest,
+        plan.out_path,
+        total_epochs,
+        resume_epoch,
+        plan.seed_int,
+        plan.dev,
+        plan.jid,
+        _bc_epoch_reporter(plan, spec, save_weights_json),
+    )
+    if resume_epoch:
+        resume_in = plan.job_dir / "bc-resume-in.json"
+        resume_in.write_bytes(plan.resume_weights)
+        ns.resume = str(resume_in)
+        ns.epoch_offset = resume_epoch
+    else:
+        init_resume = bc_init_resume_path(plan.job_dir, resume_epoch)
+        if init_resume is not None:
+            ns.resume = init_resume
+            log(f"job {plan.jid}: warm start——init_weights.json 作起点，优化器/LR 全新")
+    log(
+        f"job {plan.jid}: BC start backend={plan.backend} arch={ns.arch} epochs={ns.epochs} "
+        f"batch={ns.batch} lr={ns.lr} device={plan.dev} seed={plan.seed_int}({plan.seed_src}) "
+        f"shards={len(spec.shard_dirs)}"
+        + (f" resume@{resume_epoch}" if resume_epoch else "")
+    )
+    metrics = bc_train(ns)
+    # 收尾补发：最后一个 epoch 的回传也可能吃 530——训练一结束就没有「下一个 epoch」
+    # 来带它了，必须在这里再试一次（失败则留日志：那几行账本就是缺的）。
+    if spec.base_url and plan.pending:
+        n = len(plan.pending)
+        left = _bc_backlog_replay(
+            spec.base_url, spec.token, plan.jid, plan.pending, spec.lease_token, log=log
+        )
+        log(
+            f"job {plan.jid}: 收尾补发 epoch 指标 {n} 行"
+            + ("" if not left else f"——仍缺 {left} 行（隧道仍不可达）")
+        )
+    hist = metrics.get("history", {})
+    sizes = metrics.get("sizes", {})
+    result_metrics = {
+        "epochs": total_epochs,
+        "train_samples": int(sizes.get("train", 0) or 0),
+        "val_samples": int(sizes.get("val", 0) or 0),
+        "best_val_loss": float(metrics.get("best_val_loss", 0.0) or 0.0),
+        # B1：交付权重来自 best val 的那一 epoch，不是 history[-1]（ep80）。
+        "delivered_epoch": int(metrics.get("delivered_epoch", 0) or 0),
+        # B3：早停后实际跑完的 epoch 数（`epochs` 仍是课程声明的上限）。
+        "epochs_completed": int(metrics.get("epochs_completed", total_epochs) or total_epochs),
+        "early_stopped": bool(metrics.get("early_stopped", False)),
+        "move_acc": float(hist.get("move_acc", [0.0])[-1]) if hist.get("move_acc") else 0.0,
+        "fire_acc": float(hist.get("fire_acc", [0.0])[-1]) if hist.get("fire_acc") else 0.0,
+        "params": int(metrics.get("params", 0) or 0),
+    }
+    if resume_epoch:
+        result_metrics["resumed_from"] = resume_epoch
+    return result_metrics, Path(str(metrics["out"])).read_bytes()
+
+
+def _bc_settle(plan: _BcPlan, result_metrics: dict, wj_bytes: bytes) -> dict:
+    """settle 段：拼结果体 → 自查 → 落盘。"""
     result = {
-        "job_id": jid,
-        "data_fp": manifest["data_fp"],
-        "init_weights_fp": manifest["init_weights_fp"],
+        "job_id": plan.jid,
+        "data_fp": plan.manifest["data_fp"],
+        "init_weights_fp": plan.manifest["init_weights_fp"],
         "weights_json": encode_weights_json(wj_bytes),
         "opt_tar_b64": "",
         "metrics": result_metrics,
-        "commit_echo": manifest["commit"],
-        "bc_sec": bc_sec,
+        "commit_echo": plan.manifest["commit"],
+        "bc_sec": round(time.time() - plan.t0, 1),
     }
-    validate_result(result, manifest, commit_echo_must_match=False)  # 自查
+    validate_result(result, plan.manifest, commit_echo_must_match=False)  # 自查
     # _persist_result 落 work_dir/<jid>/_result.json —— job_dir.parent 即 run_job 语义
     # 里的 work_dir（pull 与 push 两条路径同构），重领同 job 的缓存复用才能读到。
-    _persist_result(job_dir.parent, jid, result)
+    _persist_result(plan.job_dir.parent, plan.jid, result)
     return result
+
+
+def _run_bc_job(spec: BcJobSpec) -> dict:
+    """云端 BC job（plan/bc-cloud-integration.plan.md §3；每 epoch 回传 2026-09-13）：
+    dispatch（D14 血缘 → 冒烟回显 → 种子/设备 → resume 起点）→ run（训练 + 每 epoch
+    回传 + 收尾补发）→ settle（自查 + 落盘）。
+
+    语料 = payload 解包出的 npy shard 目录（obs/scalars/actions/masks/conditions/
+    returns + manifest），bc.py 的 scan_shards 对 job_dir 递归扫描即全部装载。
+
+    入参 = 一个 `BcJobSpec`（P0-3 批 C：12 个关键字 → 一个对象；装配点在
+    `remote/job_shell.bc_or_none`，spec 住 L1 的 `remote/job_spec`）。下面一次展开，
+    函数体逐字不动。
+    """
+    # ---- D14 语料血缘：与 PPO 同规（BC shard manifest 同样携带 course_fp/corpus_fp）----
+    # fixed 源是课程显式声明的「原样使用现成语料」：其 shard 可能来自别的课程版本，
+    # 按本课指纹拒收会把整个功能变成死路；发布端因此写入 corpus_source=fixed，
+    # 云端只对这一种显式来源跳过血缘门（其余仍逐 shard 拒收）。
+    _check_corpus_lineage(spec.manifest, spec.shard_dirs)
+
+    t0 = time.time()
+
+    # ---- 冒烟回显（--echo，2026-09-05 同语义）：不拉 torch 不训练——占位 weights +
+    # smoke 标记（消费方 run_bc 作废轮，不落盘不归档）。三重校验按构造必过。
+    if spec.echo:
+        return _run_bc_echo(spec.jid, spec.manifest, spec.job_dir, spec.log or _log)
+
+    # ---- 延迟 import 训练器（B7 同款；本模块顶层零 torch/paddle）----
+    bc_train, save_weights_json = _load_bc_trainer(spec.backend, spec.torch_threads)
+    plan = _bc_dispatch(spec, t0)
+    result_metrics, wj_bytes = _bc_run(plan, spec, bc_train, save_weights_json)
+    return _bc_settle(plan, result_metrics, wj_bytes)
