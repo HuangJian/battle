@@ -11100,3 +11100,16 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 
 - **验证**：supervisor + face 测试与形状/LOC/Any/assert/文本守卫 62 条绿；提交由 pre-commit
   全量门禁把关。全文 → `docs/nn/engineering.md` §362。
+
+## §2026-11-26-model-build-split
+
+- **背景**：`worker/model_build.build_model` 167 行，混着 intent/goal 迁移、BC value 判定、
+  真实 obs 采样与 warm-start 缩放；torch 必须保持函数内延迟导入。
+
+- **决定**：拆出 `_build_intent_or_goal` / `_bc_value_pretrained` / `_sample_real_obs` /
+  `_scale_trunk` / `_scale_policy_and_value` / `_warm_start_normalize`（45 行）；顺序不变：
+  alpha → 缩 trunk → beta（读已缩放的 trunk）→ 缩策略头/value。形状存量 38 → 37。
+
+- **验证**：`tests/worker/test_model_build_warm_start.py` 用假 tensor 与独立重实现的原始循环
+  对账（缩放、清零、keep_value）；加 `test_serve_wiring` 与形状/LOC/Any/assert/文本共 54 条绿。
+  全文 → `docs/nn/engineering.md` §363。

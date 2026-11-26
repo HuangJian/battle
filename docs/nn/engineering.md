@@ -29,6 +29,32 @@
 
 ---
 
+## §363 分诊第二十六格：`worker/model_build.build_model`（2026-11-26）
+
+167 行 → **45 行**，六个接缝（torch 仍在函数内延迟导入，模块顶层不拉 torch）：
+
+| 接缝 | 行数 | 职责 |
+|---|---:|---|
+| `_build_intent_or_goal` | 38 | intent/goal 的 B′ 三头迁移：无权重走 CLI init-from，有权重续跑 |
+| `_bc_value_pretrained` | 10 | 读 BC weights.json 的 `value_coef`，决定 value 头是否清零 |
+| `_sample_real_obs` | 30 | 最近 shard + 合成极端样本（校准真 obs 来源） |
+| `_scale_trunk` | 7 | trunk × alpha |
+| `_scale_policy_and_value` | 9 | move/fire/hold × beta；value 未预训则清零 |
+| `_warm_start_normalize` | 29 | 量级测量与 alpha/beta 计算（调用上两个缩放接缝） |
+
+**顺序未变**：先算 alpha → 缩放 trunk → 再算 beta（读到已缩放的 trunk）→ 缩放策略头 /
+value；`value_pretrained` 仍在 per-tick 且非 resume 时读。
+
+**假 tensor 差分**：`tests/worker/test_model_build_warm_start.py` 用最小假参数对象，把
+`_scale_trunk` / `_scale_policy_and_value` 与**独立重实现的原始循环**逐项对账（缩放倍率、
+value 清零、keep_value 路径），不依赖真 torch。
+
+**验证**：新差分 + `test_serve_wiring` + 形状/LOC/Any/assert/文本 **54 条**绿；形状存量
+**38 → 37**。提交由 pre-commit 全量门禁把关。
+
+**被否决**：把 `_sample_real_obs` / `_warm_start_normalize` 搬去 `worker.models` —— 它们依赖
+`repo/tmp` 的 shard 与训练入口路径，属于权重初始化编排，不是模型定义。
+
 ## §362 分诊第二十五格：`remote/offline_push.run_push`（2026-11-26）
 
 191 行 → **113 行**，五个模块级接缝：

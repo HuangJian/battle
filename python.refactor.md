@@ -2149,3 +2149,6 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 
 > 2026-11-26 第二十五格：`remote/offline_push.run_push` 191→113；存量 39 → 38
 > （engineering §362）。
+
+> 2026-11-26 第二十六格：`worker/model_build.build_model` 167→45；配假 tensor 差分；
+> 存量 38 → 37（engineering §363）。
