@@ -590,7 +590,12 @@ BASELINE_FORM = 1536
 #: 2026-11-23 抬到 **1239**（+3，实测）：函数形状门禁从 200 收紧到 150（旁边留 200 硬顶）。
 #:   三条新判据全在 `tests/test_python_shape_budget.py`：>150 存量增长、存量表与实测算相等、
 #:   >200 硬顶。该文件本来就带 `*.py` 字面量（`PROD_DIRS` 的 rglob）⇒ 口径 B 计入。口径 A 不变。
-BASELINE_SRC = 1239
+#: 2026-11-27 抬到 **1241**（+2，实测）：`tests/test_subproc_util.py` 新增两条**结构**守卫 ——
+#:   `test_no_private_dead_port_helper_anywhere`（不许再有 `def _dead_port`）与
+#:   `test_http_servers_in_tests_use_serve_fast`（`serve_forever` 裸引用 vs 传了间隔，AST 判据）。
+#:   两条都不在比措辞；计进口径 B 只因该文件带 `*.py` 字面量（`_test_files()` 的 rglob）——
+#:   与前面几格同一已知限边。口径 A 不变（1536）。
+BASELINE_SRC = 1241
 
 
 #: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。派生式（基线九成，见

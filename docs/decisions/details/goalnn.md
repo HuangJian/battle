@@ -7811,3 +7811,17 @@ WSL forkdist：8 → 64.5s，12 → 52.7 / 55.6s（同向）。⇒ 8 核机器�
 
 - `tests/remote/test_push_bootstrap_teardown.py`：它钉的就是 `shutdown()` 只停循环、`server_close()` 才放套接字——用 10ms 轮询会把这条契约的**时间面**也改掉，故保持缺省。
 - 生产侧的 `srv.serve_forever()`（`hub/boot.py`、`remote/worker_server.py`、`hub/smoke_loopback.py` 等）：缺省 0.5s 是生产行为，不动。
+
+### 防回流
+
+`tests/test_subproc_util.py::test_http_servers_in_tests_use_serve_fast`：判据是 AST 的**属性引用** ——
+测试文件里 `srv.serve_forever` 只要出现就算违规（裸 `threading.Thread(target=srv.serve_forever)`
+不是 Call 节点，按「找调用」扫会整片漏掉，而它正是这次要防的写法）；显式传了位置参数或
+`poll_interval=` 的调用放行；`tests/helpers/http_server.py` 自己是豁免项。
+
+实测（2026-11-27）：把 `threading.Thread(target=srv.serve_forever)` 塞进临时文件 ⇒ 守卫报
+`tests/_tmp_guard_probe.py:3`；同一文件里的 `srv.serve_forever(0.05)` **不报**；删掉临时文件后全绿。
+
+该守卫是结构判据（不在比措辞），但按口径 B 计进了 `BASELINE_SRC`（该文件带 `*.py` 的 rglob ⇒
+文件内断言整体计入）：基线 **1239 → 1241**（+2，连同 §2026-11-27-goalnn-test-dead-port-rst 那条
+AST 守卫），口径 A 仍 1536。

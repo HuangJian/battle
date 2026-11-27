@@ -349,3 +349,49 @@ def test_service_spawning_tests_borrow_ports_from_subproc_util() -> None:
             "「探一个端口 → 交给子进程 bind」的竞态会把假红带回来"
         )
     assert checked >= 4, f"只扫到 {checked} 个起真进程的文件——标记清单落后于实际？"
+
+
+#: 允许直接用 `serve_forever` 的文件：它就是那条 10ms 轮询的封装本身。
+_SERVE_FOREVER_ALLOWED = {"tests/helpers/http_server.py"}
+
+
+def _unfast_serve_forever_lines(src: str) -> list[int]:
+    """源码里「用了缺省轮询周期」的 `serve_forever` 行号（显式给了间隔的不算）。
+
+    判据是 AST 的**属性引用**，不是调用：`threading.Thread(target=srv.serve_forever)` 那种
+    裸线程里 `serve_forever` 只是个值，按「找 Call 节点」扫会整片漏掉——而它正是要防的写法。
+    """
+    tree = ast.parse(src)
+    explicit = {
+        id(n.func)
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "serve_forever"
+        and (n.args or any(k.arg == "poll_interval" for k in n.keywords))
+    }
+    return sorted(
+        n.lineno
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Attribute) and n.attr == "serve_forever" and id(n) not in explicit
+    )
+
+
+def test_http_servers_in_tests_use_serve_fast() -> None:
+    """源码守卫：测试里起 HTTP 服务必须经 `serve_fast`。
+
+    `BaseServer.serve_forever()` 的 `poll_interval` 缺省 **0.5s**，而 `shutdown()` 要等循环
+    看见停止标志 ⇒ 每个服务白付 0–0.5s（起两个服务的用例实测 1.03s，几乎全是两次关服；
+    2026-11-27 之前有 7 个文件各起裸线程）。合并到 `tests/helpers/http_server.py::serve_fast`
+    后由这条守卫防回流；显式传了 `poll_interval` 的调用是知情选择，不拦。
+    """
+    offenders: list[str] = []
+    for rel in _test_files():
+        if rel in _SERVE_FOREVER_ALLOWED:
+            continue
+        src = (ROOT / rel).read_text(encoding="utf-8")
+        offenders += [f"{rel}:{line}" for line in _unfast_serve_forever_lines(src)]
+    assert offenders == [], (
+        "这些地方用缺省 0.5s 轮询起了 HTTP 服务——改用 tests/helpers/http_server.serve_fast："
+        f"{offenders}"
+    )
