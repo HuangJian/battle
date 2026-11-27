@@ -128,6 +128,15 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
     """
 
     def __init__(self, args, ppo_backend, bun, update_kwargs) -> None:
+        """槽位声明分五段；顺序 = 旧 `__init__` 的赋值顺序，各 mixin 只读写。"""
+        self._init_core_state(args, ppo_backend, bun, update_kwargs)
+        self._init_volume_state()
+        self._init_remote_state()
+        self._init_eval_state()
+        self._init_ledger_state()
+
+    def _init_core_state(self, args, ppo_backend, bun, update_kwargs) -> None:
+        """构造入参与宿主句柄 / 迭代起点与派发状态 / 轨迹根与 JSONL 落点 / M2 启动清场。"""
         self.args = args
         self.ppo_backend = ppo_backend  # _setup 内按 args.mode 重新解析（原 run_training 同款覆盖）
         self.bun = bun
@@ -200,6 +209,9 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         except Exception as e:  # 清理失败不能阻断开关课（下一拍/下一进程还有机会）
             log(f"[run_rl] WARN 启动清理上一 runId 残留未完成（不影响开课）：{type(e).__name__}: {e}")
         self._rotate_seed = 0
+
+    def _init_volume_state(self) -> None:
+        """动态采集与 greedy 配额的槽位（未开该模式的轮读到 None）。"""
         # 动态采集（plan/dynamic-rollout-volume）：None = 本轮课程未开该模式，
         # 事件字段随之留空（additive，旧行无此键）；开启时 = 目标/已结算 transitions。
         self._volume_target: int | None = None
@@ -223,6 +235,9 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         self._greedy_waves = 0
         #: 普通连续配额已派出的 (stage, seed)；greedy 阶段过滤掉它们，保证两批种子不相交。
         self._volume_ordinary_seeds: set[tuple[int, int]] = set()
+
+    def _init_remote_state(self) -> None:
+        """本轮计量（rollout/PPO 秒）/ 节点采集标志 / iteration 事件共享面。"""
         self._rollout_sec = 0.0
         # M3（rollout 上云）：本轮节点侧采集墙钟；None = 本轮不在节点采集（本地轮）。
         # 每轮开头复位——_write_iter_stats / _log_report 靠它区分两种口径。
@@ -243,6 +258,9 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         self._extra_wver: str | None = None
         self._report: dict = {}
         self._stream_meta: dict | None = None
+
+    def _init_eval_state(self) -> None:
+        """评估线程与 EvalBoard 窗 / 接管与降级去重 / 熔断与停腿标志。"""
         #: 接管等待的**去重文案**（★P1-1，plan §3.5；★M2 换词）：被接管的课 = 等待不是收官
         #: ⇒ 每拍重问同一轮，那行日志会每 `poll_interval` 重放一遍（比今天更吵）。记下上一条，
         #: **同一状态只喊一次**（状态变了——接管解除 / 换了一门课——就再喊）。
@@ -272,6 +290,9 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         # R9（2026-09-10 c6 it50 事故）：远端失败计数 / 已降级 / 停腿标记。
         self._remote_fail = 0
         self._leg_abort = False
+
+    def _init_ledger_state(self) -> None:
+        """训练秒与样本通过量 / 载入与尾段读数 / 零 shard 连击。"""
         # G13 duty 的分子：累计有效训练秒（Σ 真训练秒 ppo_cloud_sec）。
         # 初值从账本重算（跨重启不被低估——否则重启后占空比误报"在烧事故"）。
         self._train_sec_total = 0.0
@@ -284,6 +305,7 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         self._eval_join_sec = 0.0
         # 配额事故计数（plan P4-W3）：连续零 shard 落盘的轮数（每课一进程一本）。
         self._zero_shard_streak = 0
+
 
     # ------------------------------------------------------------------ 编排
     #

@@ -406,9 +406,8 @@ def _read_secret_file(path: str, flag: str) -> str:
         return ""
 
 
-def _build_parser():
-    """`main` 的 argv 定义表（自 `main` 原样搬出；描述 / 默认值 / help 逐字保留）。"""
-    ap = house_parser(description="自主段运行（产物目录是唯一输入；不需要 hub）")
+def _add_input_args(ap) -> None:
+    """输入/预算段：包 / 产物 / 工作目录 / 设备 / 轮数 / 墙钟（顺序即 --help 顺序）。"""
     ap.add_argument(
         "--bundle",
         default="",
@@ -430,6 +429,9 @@ def _build_parser():
         default=0.0,
         help="本次最多跑多少秒（0=不限）——Kaggle 会话到点前干净停机的把手",
     )
+
+def _add_hub_args(ap) -> None:
+    """hub 回传 / outbox / 停机哨兵 / outbox 地板（顺序逐字保留）。"""
     ap.add_argument(
         "--hub-url",
         default="",
@@ -490,6 +492,9 @@ def _build_parser():
             "它们，来自任务包的 resume_it）；0 = 全部物化"
         ),
     )
+
+def _add_job_args(ap) -> None:
+    """评估 / 放大 / 轮换 / 续跑锚点 / 备份抽屉（顺序逐字保留）。"""
     ap.add_argument(
         "--eval-on-cloud",
         action="store_true",
@@ -556,6 +561,13 @@ def _build_parser():
             "典型值 = `<网络产物根>/backup`，由 remote/offline_boot 传（见 plan/offline-local-disk-first §3.4）"
         ),
     )
+
+def _build_parser():
+    """`main` 的 argv 定义表（自 `main` 原样搬出；描述 / 默认值 / help 逐字保留）。"""
+    ap = house_parser(description="自主段运行（产物目录是唯一输入；不需要 hub）")
+    _add_input_args(ap)
+    _add_hub_args(ap)
+    _add_job_args(ap)
     return ap
 
 

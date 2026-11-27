@@ -469,6 +469,69 @@ class RunContext:
         self.deliverer.close(timeout)
 
 
+def _resolve_deliverer(
+    setup: RunSetup,
+    *,
+    store: ArtifactStore,
+    backup: Path,
+    log: Callable[[str], None] = _log_default,
+) -> DelivererLike | None:
+    """补传腿的装配点：显式注入 > 按 hub/outbox 开关现造 > None。
+
+    50 行的嵌套条件从 `open_run_context` 原样搬出（`RunSetup` 只读；`store.root` /
+    `backup` 是本次解析出来的派生落点）。
+    """
+    deliverer = setup.deliverer
+    hub_url = setup.hub_url
+    hub_token = setup.hub_token
+    hub_course = setup.hub_course
+    hub_lease = setup.hub_lease
+    outbox_dir = setup.outbox_dir
+    floor_it = setup.floor_it
+    deliver = setup.deliver
+    course = setup.course
+    work_dir = setup.work_dir
+    return (
+        deliverer
+        if deliverer is not None
+        else (
+            make_deliverer(
+                FactorySpec(hub_url=hub_url,
+                hub_token=hub_token,
+                run_id=store.run_id,
+                artifacts_dir=store.root,
+                course=hub_course,
+                # 可读名（`kaggle-o`）= dashboard 节点贡献统计里 PPO 组的列名
+                # （plan/offline-leg-ppo-attribution）。**为什么在这里算**：`worker_tag` 住
+                # `remote/job_lifecycle`(L3)，而 `deliver_proc`(L2) / `offline_deliver`(L1) 都在
+                # 它下面（本仓层号是 `tests/test_remote_dag.py` 逐条对账的）—— 那两个自己去算
+                # 就是向上依赖。本函数(L5) 是唯一装配点，两条入口（`run_loop` / `plan_run`）都过它。
+                # `offline=True` ⇒ `<env>-o`（本机 = `local`）：自主腿走的**就是**离线链路。
+                # 代价：这个参数表达式**先于** `make_deliverer` 返回 None 的判定求值（没有
+                # hub 时白探一次）。值得：它只是两个 `importlib` 判据（`common/env_probe`，
+                # 无 I/O、同参同值，`plan_handoff` 面向的是一次段启动而非热路径）。
+                worker_name=worker_tag(offline=True, hub_url=hub_url),
+                # 控制/状态文件的落点（只有子进程模式用）：`work_dir` **跨会话复用**，
+                # 所以文件名必须带会话身份（见 `DelivererProcess._new_state_path`）。
+                work_dir=work_dir,
+                # 本课租约 token（★M1b/P1-1「送信端」）：补传体据此推进 hub 侧活动起点。
+                hub_lease=hub_lease,
+                # 网络侧**备份抽屉**（拍板-3）：产物没能回传成功的轮次写这里。
+                # 落点 = 上面 `resolve_backup_root` 的产物（生产路径 = `<网络产物根>/backup`）。
+                backup_root=backup,
+                # ★ P0-1：outbox 分支在工厂里先于 hub_url/token 早退（见 `make_deliverer`）。
+                outbox_dir=outbox_dir or None,
+                floor_it=int(floor_it or 0),
+                # ★ 2026-10-24（评审 P1-4）：`anchors` 档的兜底步长必须是**本课程的**
+                #   `eval_every`，不能吃工厂缺省 5——`eval_every=1` 的课会因此只发 1/5 的轮。
+                eval_every=int(getattr(course, "eval_every", 5) or 5),
+                log=log),
+            )
+            if (deliver or str(outbox_dir or "").strip())
+            else None
+        )
+    )
+
 def open_run_context(setup: RunSetup) -> RunContext:
     """建（或接上）产物目录 + 写出本段的起点 checkpoint，返回运行上下文。
 
@@ -490,15 +553,7 @@ def open_run_context(setup: RunSetup) -> RunContext:
     ts_code_zip_bytes = setup.ts_code_zip_bytes
     course = setup.course
     rollout_workers = setup.rollout_workers
-    hub_url = setup.hub_url
-    hub_token = setup.hub_token
-    hub_course = setup.hub_course
-    hub_lease = setup.hub_lease
     backup_root = setup.backup_root
-    deliver = setup.deliver
-    outbox_dir = setup.outbox_dir
-    floor_it = setup.floor_it
-    deliverer = setup.deliverer
     log = setup.log
     # ★ 事故回归：矛盾包在**任何落盘之前**当场拒收（曾经这条判据写反、又不住生产路径上）。
     _assert_plan_manifest_aligned(plan, manifest)
@@ -544,46 +599,7 @@ def open_run_context(setup: RunSetup) -> RunContext:
         rollout_workers=(
             int(rollout_workers) if int(rollout_workers or 0) > 0 else cpu_worker_slots()
         ),
-        deliverer=(
-            deliverer
-            if deliverer is not None
-            else (
-                make_deliverer(
-                    FactorySpec(hub_url=hub_url,
-                    hub_token=hub_token,
-                    run_id=store.run_id,
-                    artifacts_dir=store.root,
-                    course=hub_course,
-                    # 可读名（`kaggle-o`）= dashboard 节点贡献统计里 PPO 组的列名
-                    # （plan/offline-leg-ppo-attribution）。**为什么在这里算**：`worker_tag` 住
-                    # `remote/job_lifecycle`(L3)，而 `deliver_proc`(L2) / `offline_deliver`(L1) 都在
-                    # 它下面（本仓层号是 `tests/test_remote_dag.py` 逐条对账的）—— 那两个自己去算
-                    # 就是向上依赖。本函数(L5) 是唯一装配点，两条入口（`run_loop` / `plan_run`）都过它。
-                    # `offline=True` ⇒ `<env>-o`（本机 = `local`）：自主腿走的**就是**离线链路。
-                    # 代价：这个参数表达式**先于** `make_deliverer` 返回 None 的判定求值（没有
-                    # hub 时白探一次）。值得：它只是两个 `importlib` 判据（`common/env_probe`，
-                    # 无 I/O、同参同值，`plan_handoff` 面向的是一次段启动而非热路径）。
-                    worker_name=worker_tag(offline=True, hub_url=hub_url),
-                    # 控制/状态文件的落点（只有子进程模式用）：`work_dir` **跨会话复用**，
-                    # 所以文件名必须带会话身份（见 `DelivererProcess._new_state_path`）。
-                    work_dir=work_dir,
-                    # 本课租约 token（★M1b/P1-1「送信端」）：补传体据此推进 hub 侧活动起点。
-                    hub_lease=hub_lease,
-                    # 网络侧**备份抽屉**（拍板-3）：产物没能回传成功的轮次写这里。
-                    # 落点 = 上面 `resolve_backup_root` 的产物（生产路径 = `<网络产物根>/backup`）。
-                    backup_root=backup,
-                    # ★ P0-1：outbox 分支在工厂里先于 hub_url/token 早退（见 `make_deliverer`）。
-                    outbox_dir=outbox_dir or None,
-                    floor_it=int(floor_it or 0),
-                    # ★ 2026-10-24（评审 P1-4）：`anchors` 档的兜底步长必须是**本课程的**
-                    #   `eval_every`，不能吃工厂缺省 5——`eval_every=1` 的课会因此只发 1/5 的轮。
-                    eval_every=int(getattr(course, "eval_every", 5) or 5),
-                    log=log),
-                )
-                if (deliver or str(outbox_dir or "").strip())
-                else None
-            )
-        ),
+        deliverer=_resolve_deliverer(setup, store=store, backup=backup, log=log),
     )
     ctx = RunContext(
         resolved,

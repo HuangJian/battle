@@ -38,7 +38,7 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
 from common import net_http, node_report
 from common.env_probe import probe_cloud_env, worker_name
@@ -1003,22 +1003,34 @@ def _supervise(
         _terminate(cfp)
 
 
-def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]) -> int:
-    """采样节点主流程。返回进程退出码（0 = 正常收线）。
+class _RunPlan(NamedTuple):
+    """`run` 的起步读数：CFG/凭据解析 + bun 就绪（此后只读）。"""
 
-    cell 契约：CFG / `_secret` / 保活线程 / clone / `sys.path` 都已就绪；本函数**不再碰
-    clone**（它需要 GITHUB_TOKEN，住 cell 的 clone 段）。
+    code_dir: Path
+    ts_authkey: str
+    hub_ip: str
+    hub_token: str
+    env: str
+    has_ts: bool
+    link: str
+    port: int
+    workers: int
+    slot_note: str
+    node_id: str
+    hub_url: str
+    hub_configured: bool
+    cf_log: Path
+    forced_cf: bool
+    bun: str
+
+def _run_plan(
+    cfg: dict, log: Callable[[str], None], code_dir: Path,
+    ts_authkey: str, hub_ip: str, hub_token: str,
+) -> _RunPlan | None:
+    """凭据之后的全部起步读数：环境/通道/磁盘门/节点身份/hub 地址/bun。
+
+    凭据仍在 `run` 里先读（`ensure()` 会改写代理，源码顺序由 notebook 契约钉住）。
     """
-    cfg = cfg if isinstance(cfg, dict) else {}
-    code_dir = Path(str(cfg.get("code_dir") or "")).expanduser()
-    if not code_dir.is_dir():
-        log(f"FATAL: code_dir 不存在: {code_dir}")
-        return 2
-
-    # ── 1. 凭据（★ ensure 之前读完；值永不进日志）────────────────────────
-    ts_authkey = str(secret("TS_AUTHKEY", cfg.get("ts_authkey")) or "").strip()
-    hub_ip = str(secret("HUB_IP", cfg.get("hub_ip")) or "").strip()
-    hub_token = str(secret("HUB_TOKEN", cfg.get("hub_token")) or "").strip()
     hub_port = int(cfg.get("hub_port") or 0)
     cfg_hub_url = str(cfg.get("hub_url") or "").strip()
 
@@ -1031,7 +1043,7 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
     (floor_mb, warn_mb), _disk_why = node_report.startup_disk(cfg)
     if _disk_why:
         log(f"FATAL: {_disk_why}")
-        return 2
+        return None
     node_id = str(cfg.get("node_id") or "").strip() or f"rollout-{env}"
     hub_url = registry_url(hub_ip, hub_port, cfg_hub_url) if (hub_ip or cfg_hub_url) else ""
     hub_configured = bool(hub_url and hub_token)
@@ -1057,92 +1069,180 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
     bun = _ensure_bun(code_dir, cfg, log)
     if not bun:
         log("FATAL: bun 不可用（也装不上）")
-        return 2
-
-    # ── 3. 通道：tailscale 优先；失败回落 cloudflared / relay ──────────────
+        return None
     cf_log = Path("/tmp/rollout-cloudflared.log")
     forced_cf = str(cfg.get("link") or "").strip().lower() == LINK_CLOUDFLARED
-    # `workers` = agent 的 worker 数（下限 6）：6 条道会把 16 worker 的节点腰斩成 6 并发
-    # （2026-11-19 hub 日志实测，见 `POLL_WORKERS` 注释）。
-    relay = (
-        RelayChannel(
-            hub_url=hub_url,
-            token=hub_token,
-            node_id=node_id,
-            agent_port=port,
-            log=log,
-            workers=workers,
-        )
-        if hub_configured
-        else None
-    )
-    tunnel = _Tunnel(cfg=cfg, log=log, port=port, cf_log=cf_log, link=link, relay=relay)
-    hub_url, next_tunnel_try = _open_channel(
-        tunnel,
-        cfg=cfg,
-        log=log,
-        hub_url=hub_url,
+    return _RunPlan(
+        code_dir=code_dir,
         ts_authkey=ts_authkey,
+        hub_ip=hub_ip,
+        hub_token=hub_token,
+        env=env,
         has_ts=has_ts,
+        link=link,
+        port=port,
+        workers=workers,
+        slot_note=slot_note,
+        node_id=node_id,
+        hub_url=hub_url,
+        hub_configured=hub_configured,
+        cf_log=cf_log,
         forced_cf=forced_cf,
+        bun=bun,
     )
 
-    # ── 4. sampler-agent ─────────────────────────────────────────────────
-    entry = _agent_entry(code_dir)
+class _AgentBoot(NamedTuple):
+    """sampler-agent 拉起后的句柄与首拍读数。"""
+
+    entry: Path
+    agent: subprocess.Popen
+    auth: str
+    agent_log: Path
+    auth_path: Path
+    ping: dict | None
+    ping_base_ms: int
+
+def _open_agent(plan: _RunPlan, cfg: dict, log: Callable[[str], None]) -> _AgentBoot | None:
+    """找入口、拉起 agent、等 auth、打首拍 ping；入口缺失返回 None。"""
+    entry = _agent_entry(plan.code_dir)
     if entry is None:
-        log(f"FATAL: 找不到 sampler-agent.ts（{code_dir / 'tools'}）")
-        return 2
+        log(f"FATAL: 找不到 sampler-agent.ts（{plan.code_dir / 'tools'}）")
+        return None
     agent_log = Path("/tmp/rollout-agent.log")
     auth_path = entry.parent / "agent.auth"
-    agent = _start_agent(bun, entry, code_dir, port, workers, cfg, agent_log)
+    agent = _start_agent(plan.bun, entry, plan.code_dir, plan.port, plan.workers, cfg, agent_log)
     auth = _wait_auth(agent, auth_path)
     _t_ping0 = time.time()
-    ping = _ping(port, auth)
+    ping = _ping(plan.port, auth)
     # 超额认购自检的基准（P3）：worker 刚预热完、还没有任务时的 ping 延迟。
     # agent 未就绪（ping=None）时基准记 0：拿一次超时的 5s 当基准会把告警永久压死。
     ping_base_ms = max(1, int((time.time() - _t_ping0) * 1000)) if ping is not None else 0
     if ping is None:
         log("agent 30–60s 未就绪 —— 下面是 agent 日志尾部（真因通常在这）：")
         _dump_tail(agent_log, log)
-
-    session = _Session(
-        tunnel=tunnel,
-        env=env,
-        cfg=cfg,
-        log=log,
-        port=port,
-        workers=workers,
-        code_dir=code_dir,
-        bun=bun,
+    return _AgentBoot(
         entry=entry,
         agent=agent,
         auth=auth,
         agent_log=agent_log,
         auth_path=auth_path,
-        node_id=node_id,
+        ping=ping,
+        ping_base_ms=ping_base_ms,
+    )
+
+def _build_session(
+    plan: _RunPlan,
+    tunnel: _Tunnel,
+    boot: _AgentBoot,
+    cfg: dict,
+    log: Callable[[str], None],
+    *,
+    hub_url: str,
+    next_tunnel_try: float,
+) -> _Session:
+    """`_Session` 的唯一装配点（tunnel/open_channel 之后的 hub_url 由调用方给）。"""
+    session = _Session(
+        tunnel=tunnel,
+        env=plan.env,
+        cfg=cfg,
+        log=log,
+        port=plan.port,
+        workers=plan.workers,
+        code_dir=plan.code_dir,
+        bun=plan.bun,
+        entry=boot.entry,
+        agent=boot.agent,
+        auth=boot.auth,
+        agent_log=boot.agent_log,
+        auth_path=boot.auth_path,
+        node_id=plan.node_id,
         hub_url=hub_url,
-        hub_token=hub_token,
-        hub_configured=hub_configured,
+        hub_token=plan.hub_token,
+        hub_configured=plan.hub_configured,
         reg_state={"url": "", "authKey": ""},
         backoff=0.0,
         next_retry=0.0,
         next_tunnel_try=next_tunnel_try,
         next_tunnel_probe=time.time() + TUNNEL_PROBE_SEC,
     )
+    return session
+
+def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]) -> int:
+    """采样节点主流程。返回进程退出码（0 = 正常收线）。
+
+    cell 契约：CFG / `_secret` / 保活线程 / clone / `sys.path` 都已就绪；本函数**不再碰
+    clone**（它需要 GITHUB_TOKEN，住 cell 的 clone 段）。
+    """
+    cfg = cfg if isinstance(cfg, dict) else {}
+    code_dir = Path(str(cfg.get("code_dir") or "")).expanduser()
+    if not code_dir.is_dir():
+        log(f"FATAL: code_dir 不存在: {code_dir}")
+        return 2
+
+    # ── 1. 凭据（★ ensure 之前读完；值永不进日志）────────────────────────
+    ts_authkey = str(secret("TS_AUTHKEY", cfg.get("ts_authkey")) or "").strip()
+    hub_ip = str(secret("HUB_IP", cfg.get("hub_ip")) or "").strip()
+    hub_token = str(secret("HUB_TOKEN", cfg.get("hub_token")) or "").strip()
+    plan = _run_plan(cfg, log, code_dir, ts_authkey, hub_ip, hub_token)
+    if plan is None:
+        return 2
+
+    # ── 3. 通道：tailscale 优先；失败回落 cloudflared / relay ──────────────
+    # `workers` = agent 的 worker 数（下限 6）：6 条道会把 16 worker 的节点腰斩成 6 并发
+    # （2026-11-19 hub 日志实测，见 `POLL_WORKERS` 注释）。
+    relay = (
+        RelayChannel(
+            hub_url=plan.hub_url,
+            token=plan.hub_token,
+            node_id=plan.node_id,
+            agent_port=plan.port,
+            log=log,
+            workers=plan.workers,
+        )
+        if plan.hub_configured
+        else None
+    )
+    tunnel = _Tunnel(
+        cfg=cfg, log=log, port=plan.port, cf_log=plan.cf_log, link=plan.link, relay=relay
+    )
+    hub_url, next_tunnel_try = _open_channel(
+        tunnel,
+        cfg=cfg,
+        log=log,
+        hub_url=plan.hub_url,
+        ts_authkey=plan.ts_authkey,
+        has_ts=plan.has_ts,
+        forced_cf=plan.forced_cf,
+    )
+
+    # ── 4. sampler-agent ─────────────────────────────────────────────────
+    boot = _open_agent(plan, cfg, log)
+    if boot is None:
+        return 2
+
+    session = _build_session(
+        plan,
+        tunnel,
+        boot,
+        cfg,
+        log,
+        hub_url=hub_url,
+        next_tunnel_try=next_tunnel_try,
+    )
 
     # ── 5. 注册（首拍；422 ⇒ tailscale 入站不可达 ⇒ 回落重注册）───────────
-    if hub_configured:
+    if plan.hub_configured:
         session.register_first()
 
     # ── 6. 横幅（注册成功 = 自动；否则保留手工路径）───────────────────────
     for line in _banner_lines(
         BannerSpec(
-            node_id=node_id,
+            node_id=plan.node_id,
             url=tunnel.url,
             auth=session.auth,
-            workers=workers,
-            bun_version=_proc_bun_version(bun, fallback=""),
-            code_hash=str((ping or {}).get("codeHash", "")),
+            workers=plan.workers,
+            bun_version=_proc_bun_version(plan.bun, fallback=""),
+            code_hash=str((boot.ping or {}).get("codeHash", "")),
             hub_configured=session.hub_configured,
             reg_state=session.reg_state,
             channel=tunnel.link,
@@ -1154,14 +1254,14 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
     # 超额认购自检（P3）：默认 `workers=物理核×2` 就是 §2026-11-11 事故的配方，基线 ping
     # 是唯一能提前看见「父进程事件循环被饿」的读数（事故里 1.8s → 30~60s）。
     disk_state: dict = {"level": None, "rejecting": False, "warned_at": 0.0}
-    log(node_report.workers_selfcheck_line(workers, slot_note, ping_base_ms))
+    log(node_report.workers_selfcheck_line(plan.workers, plan.slot_note, boot.ping_base_ms))
 
     _supervise(
         session,
         cfg=cfg,
         log=log,
         hub_url=hub_url,
-        ping_base_ms=ping_base_ms,
+        ping_base_ms=boot.ping_base_ms,
         disk_state=disk_state,
     )
 

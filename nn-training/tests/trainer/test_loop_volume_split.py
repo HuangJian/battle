@@ -107,7 +107,7 @@ CLUSTER_SLOTS = (
 #: 旧类里对这几个槽位的**跨模块使用**：宿主 `__init__` 赋值七个 + `TrainingSteps._record_iteration`
 #: 读三个（落 iteration 事件）。任何新增读写都要显式改这张表。
 CROSS_MODULE_HANDS: frozenset[str] = frozenset(
-    [f"__init__|{slot}|Store" for slot in CLUSTER_SLOTS]
+    [f"_init_volume_state|{slot}|Store" for slot in CLUSTER_SLOTS]
     + [
         "_record_iteration|_volume_capped|Load",
         "_record_iteration|_volume_collected|Load",
@@ -296,11 +296,12 @@ def test_volume_slots_are_declared_in_the_new_home() -> None:
 
 
 def test_host_still_initializes_the_slots() -> None:
-    """`TrainingLoop.__init__` 仍**赋值**全部七个槽位（跨轮字段的持有者不变）。"""
-    init = _methods(CORE_PY, "TrainingLoop")["__init__"]
+    """`TrainingLoop` 仍**赋值**全部七个槽位（2026-11-27 §385：声明段 `_init_volume_state`）。"""
+    methods = _methods(CORE_PY, "TrainingLoop")
     writes = {
         n.attr
-        for n in ast.walk(init)
+        for name in ("__init__", "_init_volume_state")
+        for n in ast.walk(methods[name])
         if isinstance(n, ast.Attribute)
         and isinstance(n.value, ast.Name)
         and n.value.id == "self"

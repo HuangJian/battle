@@ -2265,3 +2265,22 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > rescan/收尾五段（`_queue_lane` 17 / `_spawn_node_workers` 22 / `_push_need` 19 /
 > `_rescan_thread` 50 / `_drain_and_join` 45；`worker` 用具体 Callable 类型，Any 预算不回涨）；
 > 5 组场景差分 0，存量 16 文件 / 16 → 15 / 15（engineering §384）。
+
+> 2026-11-27 第四十七格（批）：`remote/run_loop._build_parser` 151→7（输入/预算 · hub/outbox ·
+> 评估/放大/备份三段 adder）· `worker/cli._flag_rows` 165→14（入口/intent · 训练 · 采集 · 并发/PPO ·
+> 评估 · 课程/远端六段；`_Rows` / `_Default` 别名让 Any 保持 1）· `trainer/loop_core.TrainingLoop.__init__`
+> 157→7（core/volume/remote/eval/ledger 五个 `_init_*`，赋值顺序不变）；27/94×6 个 action 与 80 个
+> 实例属性差分 0，存量 15 文件 / 15 → 12 / 12（engineering §385）。
+
+> 2026-11-27 第四十八格（批）：`remote/worker.main` 168→68 + `_worker_parser` 104（argv 表整段
+> 搬出）· `remote/rollout_node.run` 164→100 + `_RunPlan`(16) / `_run_plan` 67 / `_AgentBoot`(7) /
+> `_open_agent` 27 / `_build_session` 36（凭据留在 `run`：notebook AST 契约钉 `secret("TS_AUTHKEY")`
+> 先于 `_ensure_bun`）· `remote/plan_handoff.open_run_context` 159→112 + `_resolve_deliverer` 62
+> （删 8 个失效局部解包）；4+2+3 组差分 0，存量 12 文件 / 12 → 9 / 9（engineering §386）。
+
+> 2026-11-27 第四十九格（批）：`remote/offline_deliver.OfflineDeliverer.__init__` 155→20
+> （wire 45 / backup 15 / transport 18 / observability 72；每段只从 `spec` 取自己那几格）·
+> `worker/train/bc.train` 160→57（`_bc_prepare` 21 / `_bc_loaders` 45 / `_bc_model` 89；10 项返回含
+> `arch_meta`）· `worker/ppo/backend.run_step` 153→55（forward 31 / policy 42 / kickstart 17 /
+> demo 26 / apply 10；无注解返回元组保 Any=21）；3+3+3 组差分 0（含 step 后参数 `torch.equal`），
+> 存量 9 文件 / 9 → 6 / 6（engineering §387）。

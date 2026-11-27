@@ -77,8 +77,17 @@ CLUSTERS = {
     "trainer/loop_dispatch.py": ("TrainingDispatch", ("_eval_on_round", "_evalboard_yield", "_rollout_phase", "_finalize_returned_shards")),
 }
 
-#: 组合根**只许**留这两个成员（`__init__` = 槽位持有者；`_run_inspect` = 结构性例外）。
-STAYS = ("__init__", "_run_inspect")
+#: 组合根**只许**留这些成员：`__init__` 与五个**纯声明段**（`_init_*` 只做 `self.*` 赋值，
+#: 2026-11-27 §385 按声明族切开）；`_run_inspect` 是结构性例外。
+STAYS = (
+    "__init__",
+    "_run_inspect",
+    "_init_core_state",
+    "_init_volume_state",
+    "_init_remote_state",
+    "_init_eval_state",
+    "_init_ledger_state",
+)
 
 #: 组装（本文件是这两条的唯一所有者）：`RoundSteps` 的基类元组与全量 MRO 名单。
 #: 2026-09-25（S4 第二十一刀）：`TrainingSteps` 末位追加 `TrainingExport` ⇒ 全量 MRO 名单里
@@ -323,7 +332,7 @@ def test_composition_is_exact() -> None:
 
 
 def test_composition_root_keeps_only_the_structural_pair() -> None:
-    """★ 组合根的方法闭集**恰好** `{__init__, _run_inspect}`——本刀的目标，正面钉住。"""
+    """★ 组合根的方法闭集**恰好** `{__init__, _run_inspect} ∪ _init_*` —— 只有声明，零逻辑。"""
     got = sorted(_methods(CORE_PY, "TrainingLoop"))
     assert got == sorted(STAYS), f"组合根多/少了方法：{got}"
     # `_run_inspect` 的模块级搭档必须同住（结构性例外的原因见头注）。

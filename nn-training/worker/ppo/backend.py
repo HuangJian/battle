@@ -109,29 +109,11 @@ class StepState:
     demo_idx_buf: Any = None
 
 
-def run_step(
-    bk: Backend,
-    model,
-    opt,
-    st: StepState,
-    cfg: StepConfig,
-    rng,
-    i: int,
-    *,
-    batch: dict | None = None,
-) -> dict[str, float]:
-    """一个 minibatch：前向 → loss → backward → 裁剪 → step → 遥测（**唯一实现**）。
-
-    返回统计行（11 个键，顺序即 `sync` 的取值顺序）——调用方只负责循环 / 心跳 / 诊断。
-
-    `batch` = 调用方已物化好的当前 minibatch（P3 lazy：`tensored_batch` 现转的那份）；
-    None = 从 `st.tensored[i]` 取（eager 路径，逐字节不变）。
-    """
-    e = st.tensored[int(i)] if batch is None else batch
+def _forward_terms(bk, model, e, layout):
+    """前向 + 三头掩码 log-softmax + PPO 比值（`run_step` 的纯读段）。"""
     obs = e["obs"]
     sc = e["scalars"]
     mask = e["mask"]  # (T, 7) legacy / (T, 9) v6 —— 切片由 `HeadLayout` 给
-    layout = st.layout
 
     # B1 v6：`PPOStudent.forward` 在 `action_v6` 下返回 **4-tuple**（legacy 3-tuple）。
     # 动作空间在调用方按 shard 事实定一次，这里只消费契约，不逐 chunk 嗅 `a_hold`。
@@ -157,7 +139,12 @@ def run_step(
     if hold_logp is not None:
         lp_new = lp_new + bk.cat_logprob(e["a_hold"], hold_logp)
         lp_old = lp_old + e["lp_hold"]
+    return val, move_logp, fire_logp, hold_logp, lp_new, lp_old
 
+
+def _policy_terms(bk, e, cfg, val, heads, lp_new, lp_old):
+    """policy/value/entropy/clip 四条读数与总 loss（policy_mask 两分支）。"""
+    move_logp, fire_logp, hold_logp = heads
     adv = e["adv"]
     ret = e["ret"]
     ratio = bk.exp(lp_new - lp_old)
@@ -196,42 +183,58 @@ def run_step(
         if cfg.kl_coef > 0.0:
             kl_per = ((ratio - 1.0) - (lp_new - lp_old)).reshape(-1)
             loss = loss + cfg.kl_coef * (kl_per * w).sum() / denom
+    return policy_loss, value_loss, entropy, loss, clip_frac
+
+
+def _kickstart_term(bk, st, cfg, i, heads):
+    """kickstart 对 ref 的 KL 锚（`(读数, 要加进 loss 的项 | None)`）。
+
+    ★ v6：**三头都锚** —— hold 是 v6 唯一新增的自由度，漏掉它等于 kickstart 对
+    hold 头完全不生效（move/fire 被钉住，hold 却能第一时间学坏）。
+    """
+    move_logp, fire_logp, hold_logp = heads
     kick_mean = bk.zeros()
     ref = st.ref_cache[int(i)]
-    if ref is not None:
-        # 预计算缓存：数值与「此处现算 ref_model」逐位相同，每 chunk 只付一次前向。
-        # ★ v6：**三头都锚** —— hold 是 v6 唯一新增的自由度，漏掉它等于 kickstart 对
-        # hold 头完全不生效（move/fire 被钉住，hold 却能第一时间学坏）。
-        kl_parts = bk.kl_rows(move_logp, ref[0]) + bk.kl_rows(fire_logp, ref[1])
-        if len(ref) > 2 and hold_logp is not None:
-            kl_parts = kl_parts + bk.kl_rows(hold_logp, ref[2])
-        kick_mean = kl_parts.mean()
-        loss = loss + cfg.kickstart_kl * kick_mean
-    demo_bc_mean = bk.zeros()
-    if st.demo_on:
-        # demo 流（`PPORng.demo`）与 epoch 顺序**分开**：改 demo 系数 / 抽样量不会推歪
-        # 哪个 chunk 先训（§P1-7）；状态随 ckpt 落盘，续跑从同一点接着抽。
-        didx = rng.demo.integers(0, st.demo_n, size=int(cfg.demo_per_mb))
-        didx_t = bk.demo_index(st.demo_idx_buf, didx)
-        demo_t = st.demo_t
-        dm = model(
-            demo_t["obs"][didx_t],
-            demo_t["scalars"][didx_t],
-            demo_t["extra"][didx_t] if "extra" in demo_t else None,
-        )[0]
-        dmm = demo_t["masks"][didx_t]
-        dact = demo_t["actions"][didx_t]
-        # 只训 move（2026-10-18）：fire 的 mask 语义是「当前打得出去吗」，label 是
-        # 「有没有按住」，冷却期两者互斥 ⇒ 可训练子集里 hold 只有 1.84%，fire CE 实际
-        # 只教 release。恢复方式见 `tests/worker/test_ppo_demo_mix.py` 的守灵用例。
-        # ⚠ 2026-11-21：掩码切片**必须走 `layout.move_slice`**，不能写 `:MOVE_DIM`。
-        #   同一个常量去切 v6 的 9 列掩码 = 取 move4 + fire[0]（多一列）⇒ masked_fill 形状
-        #   不匹配当场炸还算好的；若有人把 v6 标签塞进 7 列 bank，`:5` 会静默错位（0=STOP
-        #   的 legacy 语义 vs 0=up 的 v6 语义），loss 照降、行为全错。
-        #   v6 的 move 头是 4 类、legacy 是 5 类 —— 宽度只能由 layout 给。
-        demo_bc_mean = bk.demo_masked_ce(dm, dact[:, 0], dmm[:, layout.move_slice])
-        loss = loss + float(cfg.demo_bc_coef) * demo_bc_mean
+    if ref is None:
+        return kick_mean, None
+    # 预计算缓存：数值与「此处现算 ref_model」逐位相同，每 chunk 只付一次前向。
+    kl_parts = bk.kl_rows(move_logp, ref[0]) + bk.kl_rows(fire_logp, ref[1])
+    if len(ref) > 2 and hold_logp is not None:
+        kl_parts = kl_parts + bk.kl_rows(hold_logp, ref[2])
+    kick_mean = kl_parts.mean()
+    return kick_mean, cfg.kickstart_kl * kick_mean
 
+
+def _demo_term(bk, model, st, cfg, rng, layout):
+    """demo BC 项（move 头）；未启用时返回设备侧 0 标量。"""
+    demo_bc_mean = bk.zeros()
+    if not st.demo_on:
+        return demo_bc_mean
+    # demo 流（`PPORng.demo`）与 epoch 顺序**分开**：改 demo 系数 / 抽样量不会推歪
+    # 哪个 chunk 先训（§P1-7）；状态随 ckpt 落盘，续跑从同一点接着抽。
+    didx = rng.demo.integers(0, st.demo_n, size=int(cfg.demo_per_mb))
+    didx_t = bk.demo_index(st.demo_idx_buf, didx)
+    demo_t = st.demo_t
+    dm = model(
+        demo_t["obs"][didx_t],
+        demo_t["scalars"][didx_t],
+        demo_t["extra"][didx_t] if "extra" in demo_t else None,
+    )[0]
+    dmm = demo_t["masks"][didx_t]
+    dact = demo_t["actions"][didx_t]
+    # 只训 move（2026-10-18）：fire 的 mask 语义是「当前打得出去吗」，label 是
+    # 「有没有按住」，冷却期两者互斥 ⇒ 可训练子集里 hold 只有 1.84%，fire CE 实际
+    # 只教 release。恢复方式见 `tests/worker/test_ppo_demo_mix.py` 的守灵用例。
+    # ⚠ 2026-11-21：掩码切片**必须走 `layout.move_slice`**，不能写 `:MOVE_DIM`。
+    #   同一个常量去切 v6 的 9 列掩码 = 取 move4 + fire[0]（多一列）⇒ masked_fill 形状
+    #   不匹配当场炸还算好的；若有人把 v6 标签塞进 7 列 bank，`:5` 会静默错位（0=STOP
+    #   的 legacy 语义 vs 0=up 的 v6 语义），loss 照降、行为全错。
+    #   v6 的 move 头是 4 类、legacy 是 5 类 —— 宽度只能由 layout 给。
+    return bk.demo_masked_ce(dm, dact[:, 0], dmm[:, layout.move_slice])
+
+
+def _apply_step(bk, model, opt, cfg, loss):
+    """反向 → 裁剪 → step → 值锚收缩 / policy rms（顺序即 D8 的数值契约）。"""
     bk.zero_grad(opt)
     bk.backward(loss)
     gn = bk.clip_grad_norm(model.parameters(), cfg.max_grad_norm)
@@ -239,6 +242,41 @@ def run_step(
     # 值锚收缩放在 clip+step **之后** ⇒ 不吃 clip 配额、不进 Adam 矩（ρ≤0 只读数）。
     value_new_rms = bk.anchor_pull(model, cfg.value_anchor)
     policy_new_rms = bk.policy_rms(model)
+    return gn, value_new_rms, policy_new_rms
+
+
+def run_step(
+    bk: Backend,
+    model,
+    opt,
+    st: StepState,
+    cfg: StepConfig,
+    rng,
+    i: int,
+    *,
+    batch: dict | None = None,
+) -> dict[str, float]:
+    """一个 minibatch：前向 → loss → backward → 裁剪 → step → 遥测（**唯一实现**）。
+
+    返回统计行（11 个键，顺序即 `sync` 的取值顺序）——调用方只负责循环 / 心跳 / 诊断。
+
+    `batch` = 调用方已物化好的当前 minibatch（P3 lazy：`tensored_batch` 现转的那份）；
+    None = 从 `st.tensored[i]` 取（eager 路径，逐字节不变）。
+    """
+    e = st.tensored[int(i)] if batch is None else batch
+    layout = st.layout
+    val, move_logp, fire_logp, hold_logp, lp_new, lp_old = _forward_terms(bk, model, e, layout)
+    heads = (move_logp, fire_logp, hold_logp)
+    policy_loss, value_loss, entropy, loss, clip_frac = _policy_terms(
+        bk, e, cfg, val, heads, lp_new, lp_old
+    )
+    kick_mean, kick_add = _kickstart_term(bk, st, cfg, i, heads)
+    if kick_add is not None:
+        loss = loss + kick_add
+    demo_bc_mean = _demo_term(bk, model, st, cfg, rng, layout)
+    loss = loss + float(cfg.demo_bc_coef) * demo_bc_mean
+
+    gn, value_new_rms, policy_new_rms = _apply_step(bk, model, opt, cfg, loss)
 
     with bk.no_grad():
         # 一次同步取全部标量：逐项 `.item()` 在 CUDA 上每次都是全设备同步。
@@ -255,8 +293,8 @@ def run_step(
                 "clip_fraction": clip_frac,
                 "kickstart": kick_mean,
                 "demo_bc": demo_bc_mean,
-                "mean_ret": ret.mean(),
-                "mean_adv": adv.mean(),
+                "mean_ret": e["ret"].mean(),
+                "mean_adv": e["adv"].mean(),
                 "gnorm": gn,
                 "value_new_rms": value_new_rms,
                 "policy_new_rms": policy_new_rms,

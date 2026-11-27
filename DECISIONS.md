@@ -11503,3 +11503,66 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   `RescanSpec` 全字段 / POST 实参 / 回调孵化 / 日志 / `halted` / 分发时间戳关系）；定向 38 passed；
   代码行 754 → 770；存量 16 文件 / 16 → 15 / 15；全量 pygate 绿。
   全文 → `docs/nn/engineering.md` §384。
+
+## §2026-11-27-declaration-table-seams
+
+- **背景**：`remote/run_loop._build_parser`（151）· `worker/cli._flag_rows`（165）·
+  `trainer/loop_core.TrainingLoop.__init__`（157）没有控制流可拆 —— 前两者是 argparse 的数据表，
+  后者是 80 个槽位声明。体量本身就是唯一问题，硬拆控制流只会造出不存在的语义。
+
+- **决定**：按**声明族**切并保留顺序：parser 三段（输入/预算 · hub/outbox · 评估/放大/备份）；
+  flag 表六段（入口/intent · 训练 · 采集 · 并发/PPO · 评估 · 课程/远端）；`__init__` 五段
+  （core/volume/remote/eval/ledger）。`_flag_rows` 的分段共用 `_Rows` / `_Default` 别名，避免
+  每个函数各写一份 `dict[str, Any]`（Any 预算 1 不回涨）。
+
+- **被否决**：把 `_flag_rows` 改成模块级常量表 —— 93 行里 70+ 行的 default 依赖 `mode` /
+  `rl_args` / `effective_cores()` 调用期求值，改常量要把它们全部改成函数或占位符，读起来更差。
+  `loop_core` 改用 dataclass/槽位表 —— 状态已被 mixin 直接读写，改成对象属性会动 20 个方法的
+  访问面（违反「本刀不改语义」）。
+
+- **守卫演进**：`test_loop_core_tail_split` 的组合根闭集从 `{__init__, _run_inspect}` 扩到
+  加上五个 `_init_*`（仍只做 `self.*` 赋值、零逻辑）；`test_loop_volume_split` 的两条扫描把
+  `_init_volume_state` 当宿主 `__init__` 的声明延伸（`__init__|slot|Store` →
+  `_init_volume_state|slot|Store`）。闭集仍正面钉住「声明可以分段，行为不许搬回来」。
+
+- **验证**：action 快照（27 / 94 × 6 组）与 80 个实例属性逐项差分 **0**；定向 51 passed；
+  存量 15 文件 / 15 → 12 / 12；全量 pygate 绿。全文 → `docs/nn/engineering.md` §385。
+
+## §2026-11-27-cloud-run-lifecycle-seams
+
+- **背景**：`remote/worker.main`（168）把 argv 定义表与启动流程平铺在一起；`rollout_node.run`
+  （164）从凭据一路写到 agent 拉起；`plan_handoff.open_run_context`（159）在 35 参 `RunSetup`
+  解包后还夹着补传腿的嵌套装配。三处都只在启动时跑一次，却各自占掉一张长函数预算。
+
+- **决定**：按**阶段边界**切：argv 表独立成 `_worker_parser`；`run` 保留「凭据 → `_run_plan`
+  → 通道 → `_open_agent` → `_build_session` → 注册」六拍，读数进 `_RunPlan`、agent 句柄进
+  `_AgentBoot`；补传腿整体成 `_resolve_deliverer(setup, *, store, backup, log)`。
+
+- **被否决**：把凭据读取也搬进 `_run_plan` —— notebook AST 契约钉住 `secret("TS_AUTHKEY")`
+  在 `run` 内且先于 `_ensure_bun`（`ensure()` 改写代理）；搬走会让「先读凭据再 ensure」的
+  顺序断言变空话。给 `open_run_context` 再拆一段产物根解析 —— 它同时产出 `root` / `backup`
+  并喂给 `store`，拆开要新增 3 个返回值，接缝比原函数更长。
+
+- **验证**：4 + 2 + 3 组差分全 0（`WorkerLoopSpec` 全字段 / 调用序与退出码 / `RunContext`
+  派生字段与 deliverer 类型）；定向 167 passed；存量 12 文件 / 12 → 9 / 9；全量 pygate 绿。
+  全文 → `docs/nn/engineering.md` §386。
+
+## §2026-11-27-delivery-bc-ppo-step-seams
+
+- **背景**：`OfflineDeliverer.__init__`（155）是四个状态族的平铺；`bc.train`（160）从播种一路
+  写到 `_Train(...)`；`backend.run_step`（153）把前向、两分支 policy loss、kickstart、demo、
+  反传与遥测塞在同一函数。三者都已在 150 预警圈里，且没有真正的控制流可拆。
+
+- **决定**：按**状态族 / 数据面 / 数学段**切：补传四段（wire/backup/transport/observability），
+  每段只从 `spec` 取自己那几格；BC 三段（prepare/loaders/model），`_bc_model` 返回含
+  `arch_meta` 的 10 项；`run_step` 五段，`kickstart` 返回 `(读数, 要加的项 | None)` 保住
+  「无 ref 不加 loss 项」的原语义。所有跨段传递都用返回值，不用 `nonlocal` / 实例临时位。
+
+- **被否决**：`_bc_ctx` 再拆一段 —— `_Train` 的 30 个关键字就是装配清单，拆出去只会造一个
+  30 参函数（宽签名门禁）或一份重复的字段表。给 `run_step` 的中间量加 `NamedTuple` ——
+  字段类型只能是 `Any`（本模块刻意不 import 框架），`worker/ppo/backend.py` 的 Any 预算
+  21 会当场涨；改用无注解的返回元组，数值面不变。
+
+- **验证**：3 + 3 + 3 组差分全 0（实例属性 / `_Train` 全字段与协作调用 / 13 项 sync 读数与
+  step 后参数张量）；定向 196 passed；存量 9 文件 / 9 → 6 / 6；全量 pygate 绿。
+  全文 → `docs/nn/engineering.md` §387。

@@ -29,6 +29,89 @@
 
 ---
 
+## §386 分诊第四十八格（批）：云端三段启动装配（2026-11-27）
+
+三处都是「一次启动走到底」的装配段，切法按**阶段边界**：argv 定义 / 凭据后的读数 / 会话装配。
+
+| 文件 | 旧 | 新 | 段 |
+|---|---:|---:|---|
+| `remote/worker.main` | 168 | 68 | `_worker_parser`(104) |
+| `remote/rollout_node.run` | 164 | 100 | `_RunPlan`(16 字段) / `_run_plan`(67) / `_AgentBoot`(7 字段) / `_open_agent`(27) / `_build_session`(36) |
+| `remote/plan_handoff.open_run_context` | 159 | 112 | `_resolve_deliverer`(62) |
+
+**关键选择**：`worker.main` 只把 argparse 定义表整段搬出（描述 / 缺省 / help 逐字不动），
+凭据 / 路径归一 / 多 hub 轮询 / 子进程分支全留在 `main`。`rollout_node.run` 的**凭据读取
+刻意留在 `run`**：notebook AST 契约钉住 `secret("TS_AUTHKEY")` 必须出现在 `run` 体内、
+且先于 `_ensure_bun`（`ensure()` 会改写代理）；`_run_plan` 只接三个已解析的凭据串，返回
+`_RunPlan | None`（磁盘门 / bun 装不上 ⇒ `None`，`run` 统一 `return 2`）。`_build_session`
+的 `hub_url` 用 `_open_channel` 的返回值按关键字传入，不再从 plan 重读。`open_run_context`
+删掉原 8 个失效局部解包，补传腿装配整体搬进 `_resolve_deliverer(setup, *, store, backup, log)`。
+
+**证明**：`worker.main` 4 组 argv（单 hub / 多 hub / token-file / REMOTE_WORKER_CHILD）的
+`WorkerLoopSpec` 全字段与 `sys.exit` 码相同；`rollout_node.run` 2 组 cfg（正常 / code_dir
+缺失）的调用序、日志行、退出码相同；`open_run_context` 3 组 setup（hub / outbox / 显式
+deliverer）的 `RunContext` 派生字段与 deliverer 类型相同 ⇒ **0 差异**。
+
+**守卫**：定向 167 passed；`LONG_FUNCS_BASELINE` **12 文件 / 12 → 9 / 9**。
+
+## §387 分诊第四十九格（批）：补传构造 / BC 装配 / PPO 单步三处（2026-11-27）
+
+三处都是「一条直线写到底」的装配/数值段，切法分别是：状态族、数据面、数学段。
+
+| 文件 | 旧 | 新 | 段 |
+|---|---:|---:|---|
+| `remote/offline_deliver.OfflineDeliverer.__init__` | 155 | 20 | `_init_wire_state`(45) / `_init_backup_state`(15) / `_init_transport_state`(18) / `_init_observability_state`(72) |
+| `worker/train/bc.train` | 160 | 57 | `_bc_prepare`(21) / `_bc_loaders`(45) / `_bc_model`(89) |
+| `worker/ppo/backend.run_step` | 153 | 55 | `_forward_terms`(31) / `_policy_terms`(42) / `_kickstart_term`(17) / `_demo_term`(26) / `_apply_step`(10) |
+
+**关键选择**：`OfflineDeliverer` 的四段按「谁在运行期改写它」切 —— 连接身份（只读）· 备份/抽屉
+读数（写方在 `backup_pending`）· 传输/时钟/档位（`_modes` 必须晚于 `_now`/`log`）· 观测面
+（`status()` 的只读面）；`_init_background_state` / `_init_probe_state` / `_load_ledger` 仍留在
+`__init__` 尾部，顺序不变。每个 `_init_*` 只从 `spec` 取自己那几格（不再整份 20 参展开）。
+`bc.train` 的三段按数据面切：播种+设备（SPMD 先于 loader）· 语料+三类权重 · 模型/守卫/优化器；
+`_bc_model` 返回 10 项（含 `arch_meta`），`_Train` 装配留在 `train`。`run_step` 的五段是数学段：
+前向+比值 · policy/value/entropy（两分支）· kickstart 锚 · demo BC · 反向/step；`kickstart`
+用 `(读数, 要加的项 | None)` 保留「没有 ref 就不往 loss 上加」的原语义。
+
+**证明**：`OfflineDeliverer` enabled / 缺 token / 非法 run_id 三组：全部实例属性 + 日志逐项相同；
+`bc.train` legacy / v6-policy / v6-value-only 三组：`_Train` 全字段、全部协作调用、日志、返回
+相同；`run_step` 三组（legacy / v6+pm+ref+demo / v6+ref 无 demo）：13 项 sync 读数逐位相同、
+step 后全部参数张量 `torch.equal` ⇒ **0 差异**。
+
+**守卫**：定向 196 passed（offline_deliver / bc 八个契约文件 / ppo 五个数值与契约文件 / shape）；
+`LONG_FUNCS_BASELINE` **9 文件 / 9 → 6 / 6**（余下六格全是 tools 一次性脚本与 `worker/scripts`）。
+
+## §385 分诊第四十七格（批）：CLI 数据表与槽位声明三处（2026-11-27）
+
+三处都是「纯声明被体量拖成 >150 行」，没有控制流可拆；接缝按**声明族**切，顺序逐字保留。
+
+| 文件 | 旧 | 新 | 段 |
+|---|---:|---:|---|
+| `remote/run_loop._build_parser` | 151 | 7 | `_add_input_args`(23) / `_add_hub_args`(62) / `_add_job_args`(68) |
+| `worker/cli._flag_rows` | 165 | 14 | `_entry_flags`(26) / `_train_flags`(24) / `_volume_flags`(30) / `_collect_flags`(19) / `_eval_flags`(18) / `_course_remote_flags`(62) |
+| `trainer/loop_core.TrainingLoop.__init__` | 157 | 7 | `_init_core_state`(74) / `_init_volume_state`(25) / `_init_remote_state`(22) / `_init_eval_state`(31) / `_init_ledger_state`(14) |
+
+`_flag_rows` 的分段函数共用模块级别名 `_Rows` / `_Default`（`Callable[[str, object], object]`），
+不逐函数重复 `dict[str, Any]` —— `worker/cli.py` 的 Any 读数保持 1。`--remote-iter-game-timeout`
+的 `from common import game_watch` 跟着它所在段走（仍是 `_flag_rows` 调用期导入，顶层零重物）。
+`loop_core` 的五个 `_init_*` 按旧赋值顺序串联，彼此不共享局部变量（原 `__init__` 本来只有
+`self.*` 赋值）。
+
+**证明**：`_build_parser` 27 个 action 的 `(option_strings, dest, default, type 名, choices, help,
+nargs, const, action 类, required)` 逐项相同；`_flag_rows` 93 行全字段相同（闭包里的 lambda 按
+`__name__` 归一），且 `per-tick/intent/goal × 两套 rl_args` 的 `build_argparser` 94 个 action
+全同；`TrainingLoop` 旧新构造后的 80 个实例属性逐名同值 ⇒ **0 差异**。
+
+**守卫**：定向 51 passed（shape / cli help / run segment / 单 PPO 路径 / loop park / 收工 drain）；
+`LONG_FUNCS_BASELINE` **15 文件 / 15 → 12 / 12**。`ruff format --check` 对这三个文件仍报旧账
+（HEAD 本来就未格式化），本刀不引入全文件重排。
+
+**组合根闭集演进**：`test_loop_core_tail_split` 从「恰好 `__init__` + `_run_inspect`」扩到
+这五个**纯声明段**（每个方法只写 `self.*`，零分支/零调用）；`test_loop_volume_split` 的两条
+扫描把 `_init_volume_state` 当宿主 `__init__` 的延伸（`__init__|slot|Store` →
+`_init_volume_state|slot|Store`）。判据没松：行为搬回组合根仍会红，松的只是「声明只能住一个
+函数体」这条形状。
+
 ## §384 分诊第四十六格：`trainer/queue_worker.run_queue` 175 → 38 + 车道/孵化/推送/rescan/收尾五段（2026-11-27）
 
 `run_queue` 是一轮消费者编排：本地车道孵化 → reuse 节点立刻开采 → need 节点并行 POST

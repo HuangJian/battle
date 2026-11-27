@@ -54,21 +54,12 @@ _CACHE_VERSION = 1
 #: 要求逐文件相等，防「表比现实松」）；③ 真要先加一格，写清日期 + 理由 + 守卫用例。
 #: 注：`remote/offline_boot.py` 是生成物（12 段 `.pyfrag` 拼回，工程 §118）——它那 5 个要改分片。
 LONG_FUNCS_BASELINE: dict[str, int] = {
-    "remote/offline_deliver.py": 1,
-    "remote/plan_handoff.py": 1,
-    "remote/rollout_node.py": 1,
-    "remote/run_loop.py": 1,
-    "remote/worker.py": 1,
     "tools/bootstrap.py": 1,
     "tools/lever_scan.py": 1,
     "tools/spatial-probe.py": 1,
     "tools/tpu-probe.py": 1,
     "tools/wave2_judge.py": 1,
-    "trainer/loop_core.py": 1,
-    "worker/cli.py": 1,
-    "worker/ppo/backend.py": 1,
     "worker/scripts/eval_intent_m5.py": 1,
-    "worker/train/bc.py": 1,
 }
 
 #: 存量：包含 >8 参数函数的文件 → 个数。

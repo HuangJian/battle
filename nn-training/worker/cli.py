@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from typing import Any
 
 # 核数口径的唯一实现（容器配额/亲和掩码 > `os.cpu_count()`）：`--workers` 的缺省值就靠它。
@@ -27,17 +28,13 @@ from worker.modes import (
     DEFAULT_EVAL_AT_INTENT,
 )
 
+_Rows = tuple[tuple[tuple[str, ...], dict[str, Any]], ...]
+#: `rl_args.get(name, fallback)` 的注入形状（`_flag_rows` 的闭包按这个签名传）。
+_Default = Callable[[str, object], object]
 
-def _flag_rows(mode: str, rl_args: dict) -> tuple[tuple[tuple[str, ...], dict[str, Any]], ...]:
-    """92 个 flag 的**数据表**：`(flag 名组, add_argument 关键字)`。"""
 
-    def _d(name, fallback):
-        return rl_args.get(name, fallback)
-
-    # 节点侧单局硬顶兜底值：**引用看门狗里的那个常量**（不在 help 里抄第二份数字——
-    # 抄了就会漂，而 help 说的必须就是代码做的事）。函数内 import：本模块顶层不拉重物。
-    from common import game_watch
-
+def _entry_flags(mode: str, _d: _Default) -> _Rows:
+    """入口 / intent-goal 专属 / 三族熔断阈值（顺序即 --help 顺序）。"""
     return (
         # ===== RL 入口整合（DECISIONS §307）：三模式后端 =====
         (("--mode",), {"default": mode, "choices": list(_MODES), "help": "后端：per-tick（默认）/ intent（意图步）/ goal（goal 承诺步，" "原 run_rl_intent --goal）"}),
@@ -61,6 +58,11 @@ def _flag_rows(mode: str, rl_args: dict) -> tuple[tuple[tuple[str, ...], dict[st
         (("--ent-break",), {"type": float, "default": _d("ent_break", ENT_BREAK), "help": "F4 ENT 熔断阈值：熵 <= 此值且 winRate < ent-break-max-winrate 才计连击"}),
         (("--ent-break-consec",), {"type": int, "default": _d("ent_break_consec", ENT_BREAK_CONSEC), "help": "F4 ENT 连续轮阈值"}),
         (("--ent-break-max-winrate",), {"type": float, "default": _d("ent_break_max_winrate", ENT_BREAK_MAX_WINRATE), "help": "F4 ENT 护栏：winRate >= 此值视为已收敛，不因低熵停车"}),
+    )
+
+def _train_flags(_d: _Default) -> _Rows:
+    """动作空间 / 熔断总闸 / 日志 / 权重与轨迹落点 / 轮次与种子面。"""
+    return (
         # 关闭**全部过程熔断**（KL / 熵 / NaN）。只给「换环境迁移」这类特例：起点权重来自
         # 另一个环境（c20 → 35 关），首轮 KL 天然 0.4–0.8（正常带 0.003–0.013），按正常阈值
         # 必在 it1–4 熔断，而价格偏差（wDmg 按旧环境承伤密度标的）要跑起来才看得出。
@@ -81,6 +83,11 @@ def _flag_rows(mode: str, rl_args: dict) -> tuple[tuple[tuple[str, ...], dict[st
         (("--seeds",), {"default": "0-3", "help": "explicit seed range (ignored in rotate mode)"}),
         (("--seed-rotate",), {"type": int, "default": _d("seed_rotate", 0), "help": "explicit 模式 seed 轮转：>0 时每迭代对 --stages 每关抽 N 个全新 " "seed（(rotateSeed,it) 键控、断点复现）；0 = 固定 --seeds（旧行为）"}),
         (("--target-transitions",), {"type": int, "default": _d("target_transitions", 0), "help": "按样本量动态采集（plan/dynamic-rollout-volume）：本轮目标 transitions" "（已结算 shard 的 nSamples 之和，分关达标线 = ceil(/关数)）；" "0 = 关闭，走 --seed-rotate 固定局数旧语义"}),
+    )
+
+def _volume_flags(_d: _Default) -> _Rows:
+    """动态采集 / 局数硬顶 / est 聚合 / 轮换 / 课程窗口 / 奖励与 dodge 覆盖。"""
+    return (
         # ⚠ `--est-*` 已退役（2026-10-12，plan/rollout-estfree-worksteal §4.2 E3）：局均 samples
         # 不再是输入，只由**盘上历史**派生（`worker.resume.trailing_*`）；首轮无历史 = 无估计 ⇒
         # 「不猜」档（本机按宽度满铺 / 云机初批每关 1 局）。旧名 `--est-ticks-per-game`（10× 量纲错）
@@ -107,6 +114,11 @@ def _flag_rows(mode: str, rl_args: dict) -> tuple[tuple[tuple[str, ...], dict[st
         # goal-nn 卡 A3：dodge 模式覆盖（''=按 stage 解析：arena→l0，真实关→off；
         # 'off'|'l0'|'god' 强制，'god' 仅 A/B 报告用）。经 queue/agent 透传到导出器。
         (("--dodge",), {"default": "", "help": "dodge override: '' (stage-derived), 'off', 'l0', or 'god'"}),
+    )
+
+def _collect_flags(_d: _Default) -> _Rows:
+    """并发 / 本机直跑 / PPO 超参 / 续跑 / 流式与评估开关。"""
+    return (
         (("--workers",), {"type": int, "default": _d("workers", min(effective_cores(), 12)), "help": "concurrent bun rollout workers (games partitioned by seed)"}),
         (("--local-slots",), {"type": int, "default": _d("local_slots", None), "help": "trainer direct-thread slots (stream mode). R6 schedule: " "first-dispatched during collection; suspend once PPO waves " "begin (auto-resume if the whole cluster stalls); join eval " "remainder after PPO. 0 = 关闭本机直跑（全交给远端节点；远端集体失联仍自动" "兜底接管）；缺省/未配置 = auto（stream 走 max(2, workers//4)，queue 走 " "workers 封顶）。默认取 rl-config 的 rl.local_slots（每轮热读，2026-09-06 起）"}),
         (("--force",), {"action": "store_true", "help": "run_rl 单实例锁（.run_rl.lock）强制接管——运维重启时旧进程" "未被 --kill-previous 杀掉的兜底"}),
@@ -122,6 +134,11 @@ def _flag_rows(mode: str, rl_args: dict) -> tuple[tuple[tuple[str, ...], dict[st
         (("--keep-iters",), {"type": int, "default": _d("keep_iters", 3), "help": "keep only the last N trajectory dirs (disk bound); 0 = keep all"}),
         (("--reuse-siblings",), {"type": int, "default": 1, "help": "同族课程产物直取（plan/episode-reuse.plan.md）：1（默认）= 到同 level/关卡/难度、" "同起点权重的兄弟课程**工作目录**里找这一局现成的 shard / eval 行，找到就复用、找不到就" "自采；0 = 关（逐字节旧行为）。**不建缓存**：只在盘上已有的内容里找，零额外占用。"}),
         (("--stream",), {"type": int, "default": _d("stream", 1), "help": "1（默认，AGENTS §15.6）= 流式迭代：采集与 PPO 波次重叠，集群不在 PPO 窗口闲置；" "0 = 串行（采集全部完成后再统一 PPO）——仅调试/归因用"}),
+    )
+
+def _eval_flags(mode: str, _d: _Default) -> _Rows:
+    """干净评估 / 双缓冲预采 / collect-only 子进程通道。"""
+    return (
         (("--eval-stages",), {"default": "", "help": "干净评估语料（goal-nn）：'' = 真实关 0..total_stages-1（旧行为）；" "传关卡规格如 '1000-1002' = arena 训练场自评（OOD 信号）"}),
         (("--eval-games-per-stage",), {"type": int, "default": 2, "help": "干净评估：每关固定种子贪心局数（0=关闭）。rollout 收官后的 PPO 空窗期 " "分发到全部 ping.evalSupport 节点；结果追加 tmp/rl-traj/eval_log.jsonl"}),
         (("--eval-window-sec",), {"type": int, "default": _d("eval_window_sec", 1500), "help": "干净评估线程的墙钟预算；超时未结算的局放弃（不阻塞 PPO 与下一轮）"}),
@@ -136,6 +153,13 @@ def _flag_rows(mode: str, rl_args: dict) -> tuple[tuple[tuple[str, ...], dict[st
         #   不能走普通 CLI：`bc`/`iters` 这些键由**课程**定义（apply_course 会覆盖 CLI 值，
         #   显式 CLI 还会被 course_cli_conflicts 拒启）⇒ 内部动作只能走「课程之后」的通道。
         (("--collect-only-config",), {"default": "", "help": "内部：预采子进程的动作覆盖 JSON（在 apply_course 之后施加；见 worker/course_args）。"}),
+    )
+
+def _course_remote_flags(_d: _Default) -> _Rows:
+    """课程入口 / 冒烟 / 门禁停机 / 远端 PPO / 导出段长。"""
+    # 节点侧单局硬顶兜底值：引用看门狗里的那个常量（不在 help 里抄第二份数字）。
+    from common import game_watch
+    return (
         # ===== 课程配置化（plan/rl-training-config.md §3）：唯一启动入口，无 CLI 逐参覆盖 =====
         (("--course",), {"default": "", "help": "课程名（nn-training/curricula/<name>.jsonc）或路径。启动参数/关卡布局/" "奖励公式的单一事实来源——优先级：课程配置 > rl-config.json > argparse 默认；" "传入后各训练参数不再允许 CLI 逐参覆盖（评审 P1-7：改名避开 --curriculum-* 语义）"}),
         (("--course-file",), {"default": "", "help": "等价于 --course <路径>（显式文件路径形式；与 --course 互斥）"}),
@@ -192,6 +216,21 @@ def _flag_rows(mode: str, rl_args: dict) -> tuple[tuple[tuple[str, ...], dict[st
         (("--remote-iter-workers",), {"type": int, "default": _d("remote_iter_workers", 0), "help": "M3 rollout 上云：节点侧 rollout 并发（0 = **节点按本机核数自定**，缺省；" ">0 = 钉住该值，节点侧仍按核数上限钳制；课程文件里的 workers 已无读者）"}),
         (("--gate-remediate-stop-after",), {"type": int, "default": _d("gate_remediate_stop_after", 4), "help": "I2（2026-09-13）：提示类门（plateau）REMEDIATE 连续这么多次后**停腿**" "（0 = 关，保留旧行为）。c6-pickup3 6 次 / c6-bonus 10 次 cloud halt 的教训：" "平台期每 5 轮必然复现 REMEDIATE，反复确认的「边际收益枯竭」就是停腿信号"}),
         (("--echo-config",), {"action": "store_true", "help": "只打印生效配置 + 当轮公式与 params 指纹（AST dump），不训练——" "可重定向到文件，据此复现任意 iter 的完整奖励计算（评审 R1-8 / LC §4.5）"}),
+    )
+
+def _flag_rows(mode: str, rl_args: dict) -> _Rows:
+    """93 个 flag 的**数据表**（分段见 `_*_flags`；顺序即 `--help` 顺序）。"""
+
+    def _d(name, fallback):
+        return rl_args.get(name, fallback)
+
+    return (
+        *_entry_flags(mode, _d),
+        *_train_flags(_d),
+        *_volume_flags(_d),
+        *_collect_flags(_d),
+        *_eval_flags(mode, _d),
+        *_course_remote_flags(_d),
     )
 
 

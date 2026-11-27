@@ -197,16 +197,34 @@ class OfflineDeliverer(
     """
 
     def __init__(self, spec: OfflineDelivererSpec) -> None:
-        # 旧签名 20 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
+        # 旧签名 20 参 → 一个 spec（P0-3）；四段展开见 `_init_*`（赋值次序不变）。
+        self._init_wire_state(spec)
+        self._init_backup_state()
+        self._init_transport_state(spec)
+        self._init_observability_state()
+        self._init_background_state(spec.background)
+        self._init_probe_state()
+        self._load_ledger()
+        self._init_probe_state()
+        self._load_ledger()
+        if not self.enabled and not self.disabled_reason:
+            missing = []
+            if not self.base_url:
+                missing.append("hub_url")
+            if not self.token:
+                missing.append("token")
+            if not self.run_id:
+                missing.append(f"合法 run_id（收到 {str(spec.run_id)[:40]!r}）")
+            self.log(f"补传未启用（缺 {' / '.join(missing)}）——产物只落本地产物目录")
+
+    def _init_wire_state(self, spec: OfflineDelivererSpec) -> None:
+        """连接身份 / 产物根 / 备份抽屉落点 / 统计开关（原 `__init__` 首段）。"""
         base_url, token, run_id = spec.base_url, spec.token, spec.run_id
         artifacts_dir, course = spec.artifacts_dir, spec.course
         hub_lease, worker_name = spec.hub_lease, spec.worker_name
         backup_root, backup_grace = spec.backup_root, spec.backup_grace
-        timeout, probe_ttl, probe_fail_ttl = spec.timeout, spec.probe_ttl, spec.probe_fail_ttl
-        sync_cap, eval_every = spec.sync_cap, spec.eval_every
+        eval_every = spec.eval_every
         metrics_parts, adaptive = spec.metrics_parts, spec.adaptive
-        background, opener = spec.background, spec.opener
-        now_fn, log = spec.now_fn, spec.log
         #: 后台补传线程归这里（`offline-deliver-drain-loop`）。
         self._rt = runtime.Runtime(scope="offline-deliver")
         self.base_url = str(base_url or "").rstrip("/")
@@ -244,6 +262,9 @@ class OfflineDeliverer(
         self._metrics_unsupported = False
         #: ★ 档位机（S0/S7）：自适应开关（状态本身在下面 `_now` 就绪后才造）。
         self.adaptive = bool(adaptive)
+
+    def _init_backup_state(self) -> None:
+        """本会话的备份 / 抽屉 / 清理读数与惰性写方（零 IO）。"""
         #: 本会话的备份统计（只读面/日志用）：`(轮次, 字节, 失败, 账本未变跳过)`。
         self._backup_stat: tuple[int, int, int, int] = (0, 0, 0, 0)
         #: 抽屉字节读数 `(总字节, 两账本字节, 单轮均字节)`：由**写方**在 `backup_pending()` 里顺手量
@@ -257,6 +278,13 @@ class OfflineDeliverer(
         self._prune_forced: bool = True
         #: 抽屉写方（惰性建；`None` = 还没建/这条腿不做备份）。它的 `_last` 就是上面那份读数。
         self._drawer: BackupDrawer | None = None
+
+    def _init_transport_state(self, spec: OfflineDelivererSpec) -> None:
+        """HTTP 超时 / 探活 TTL / 统计批 / 时钟与日志 / 档位机 / enabled。"""
+        timeout, probe_ttl, probe_fail_ttl = spec.timeout, spec.probe_ttl, spec.probe_fail_ttl
+        sync_cap = spec.sync_cap
+        opener = spec.opener
+        now_fn, log = spec.now_fn, spec.log
         self.timeout = float(timeout)
         self.probe_ttl = float(probe_ttl)
         self.probe_fail_ttl = float(probe_fail_ttl)
@@ -269,6 +297,9 @@ class OfflineDeliverer(
             adaptive=self.adaptive, now_fn=self._now, log=self.log
         )
         self.enabled = bool(self.base_url and self.token and self.run_id)
+
+    def _init_observability_state(self) -> None:
+        """停用与重试读数 / 探活缓存 / 失败面 / 欠账与账本缓存 / 行字节读数。"""
         #: 本会话停用（bad token / 体被拒）——一次性配置问题，重试无意义（见模块 docstring）。
         #: ⚠ 不是死刑：`_maybe_revive()` 在 `DISABLE_COOLDOWN_SEC` 后自动解封并重探。
         self.disabled_reason = ""
@@ -339,18 +370,7 @@ class OfflineDeliverer(
         #: 两个数一起看才是读数——只有一个数时无法区分「没评」与「瘦到 0」。
         self._eval_rows_raw_bytes = 0
         self._eval_rows_wire_bytes = 0
-        self._init_background_state(background)
-        self._init_probe_state()
-        self._load_ledger()
-        if not self.enabled and not self.disabled_reason:
-            missing = []
-            if not self.base_url:
-                missing.append("hub_url")
-            if not self.token:
-                missing.append("token")
-            if not self.run_id:
-                missing.append(f"合法 run_id（收到 {str(run_id)[:40]!r}）")
-            self.log(f"补传未启用（缺 {' / '.join(missing)}）——产物只落本地产物目录")
+
 
     def _init_background_state(self, background: bool) -> None:
         """后台并行（单写者线程）的状态位；自 `__init__` 原样搬出，赋值次序不变。"""

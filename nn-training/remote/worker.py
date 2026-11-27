@@ -1078,7 +1078,8 @@ def worker_loop(spec: WorkerLoopSpec) -> int:
         )
 
 
-def main() -> None:
+def _worker_parser():
+    """worker 的 argv 定义表（自 `main` 原样搬出；描述 / 默认值 / help 逐字保留）。"""
     ap = house_parser(description="remote PPO worker (cloud, stateless)")
     ap.add_argument(
         "--poll",
@@ -1180,6 +1181,10 @@ def main() -> None:
         help="自报本会话属于**离线盘**（role=offline）：只领归属为 offline 的 job"
         "（注：kind=run 那条腿 2026-09-25 退役后，离线课走取包链，不再经队列——见 plan §7）",
     )
+    return ap
+
+def main() -> None:
+    ap = _worker_parser()
     args = ap.parse_args()
     token = args.token
     if args.token_file:

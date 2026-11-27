@@ -907,6 +907,66 @@ class _Train:
 
 
 def train(args) -> dict:
+    action_v6, dev, mesh, use_dp = _bc_prepare(args)
+    (
+        train_dl,
+        val_dl,
+        sizes,
+        mb,
+        counts,
+        weight_exp,
+        fire_class_weight,
+        hold_class_weight,
+        fire_pos_weight,
+    ) = _bc_loaders(args, action_v6, mesh, dev)
+    (
+        model,
+        raw_model,
+        n_params,
+        use_value,
+        policy_coef,
+        train_heads,
+        trainable,
+        opt,
+        scheduler,
+        arch_meta,
+    ) = _bc_model(args, dev, mesh, use_dp, action_v6)
+    ctx = _Train(
+        train_dl=train_dl,
+        val_dl=val_dl,
+        sizes=sizes,
+        mb=mb,
+        model=model,
+        raw_model=raw_model,
+        opt=opt,
+        scheduler=scheduler,
+        dev=dev,
+        action_v6=action_v6,
+        use_value=use_value,
+        policy_coef=policy_coef,
+        weight_exp=weight_exp,
+        fire_class_weight=fire_class_weight,
+        hold_class_weight=hold_class_weight,
+        fire_pos_weight=fire_pos_weight,
+        train_heads=train_heads,
+        trainable=trainable,
+        history={"train_loss": [], "val_loss": [], "move_acc": [], "fire_acc": [], "value_loss": []},
+        epoch_base=int(getattr(args, "epoch_offset", 0) or 0),
+        epoch_total=int(getattr(args, "epoch_offset", 0) or 0) + int(args.epochs),
+        patience=int(getattr(args, "patience", 0) or 0),
+        epochs_done=int(getattr(args, "epoch_offset", 0) or 0),
+        t0=time.time(),
+        n_params=n_params,
+        counts=counts,
+        arch_meta=arch_meta,
+        mesh=mesh,
+    )
+    ctx.run_epochs(args)
+    return ctx.finalize_bc(args)
+
+
+def _bc_prepare(args):
+    """RNG 播种 + 设备/SPMD 入口。顺序契约：SPMD 先于 `make_loaders`，`use_spmd` 先于 `xla_device()`。"""
     # P2-3（2026-09-02）：可复现性补全——此前只有 torch.manual_seed，numpy/random
     # 全局 RNG 未播种（_majority_baseline 的 Counter 顺序、DataLoader worker 内
     # mirrorX 增强的 np rng 依赖全局状态时会漂移）。train DataLoader 的 shuffle
@@ -925,6 +985,11 @@ def train(args) -> dict:
         dev, mesh = _xla_entry(args)
     else:
         dev = _bc_torch_device(dev_name, use_dp)
+    return action_v6, dev, mesh, use_dp
+
+
+def _bc_loaders(args, action_v6, mesh, dev):
+    """语料装载 + 多数类地板 + 分类计数 + 三类权重（日志口径逐字保留）。"""
     train_dl, val_dl, sizes = make_loaders(
         LoaderSpec(
             args.data_dir,
@@ -957,7 +1022,21 @@ def train(args) -> dict:
         args, counts, action_v6, dev
     )
     # v6 的 `PPOStudent.forward` 恒返回 4 元组（move/fire/hold/value）⇒ 即使 value_coef=0
-    # 也必须用 PPOStudent（StudentNet 没有 value_head），否则解包失败。
+    return (
+        train_dl,
+        val_dl,
+        sizes,
+        mb,
+        counts,
+        weight_exp,
+        fire_class_weight,
+        hold_class_weight,
+        fire_pos_weight,
+    )
+
+
+def _bc_model(args, dev, mesh, use_dp, action_v6):
+    """构建/恢复模型、value-only 与 train_heads 守卫、冻结、DP 包装、优化器。"""
     action_v6_pre = bool(getattr(args, "action_v6", False))
     use_value = (getattr(args, "value_coef", 0.0) > 0 or action_v6_pre) and args.arch == "student"
     # B1 v6 三头（hold2/move4/fire3）：与 `build_ppo` 同一契约——开关走 CLI，
@@ -1033,39 +1112,20 @@ def train(args) -> dict:
         raise ValueError("没有可训练参数（policy_coef=0 时检查 value_head）")
     opt = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, args.epochs))
-
-    ctx = _Train(
-        train_dl=train_dl,
-        val_dl=val_dl,
-        sizes=sizes,
-        mb=mb,
-        model=model,
-        raw_model=raw_model,
-        opt=opt,
-        scheduler=scheduler,
-        dev=dev,
-        action_v6=action_v6,
-        use_value=use_value,
-        policy_coef=policy_coef,
-        weight_exp=weight_exp,
-        fire_class_weight=fire_class_weight,
-        hold_class_weight=hold_class_weight,
-        fire_pos_weight=fire_pos_weight,
-        train_heads=train_heads,
-        trainable=trainable,
-        history={"train_loss": [], "val_loss": [], "move_acc": [], "fire_acc": [], "value_loss": []},
-        epoch_base=int(getattr(args, "epoch_offset", 0) or 0),
-        epoch_total=int(getattr(args, "epoch_offset", 0) or 0) + int(args.epochs),
-        patience=int(getattr(args, "patience", 0) or 0),
-        epochs_done=int(getattr(args, "epoch_offset", 0) or 0),
-        t0=time.time(),
-        n_params=n_params,
-        counts=counts,
-        arch_meta=raw_model.arch(),
-        mesh=mesh,
+    return (
+        model,
+        raw_model,
+        n_params,
+        use_value,
+        policy_coef,
+        train_heads,
+        trainable,
+        opt,
+        scheduler,
+        raw_model.arch(),
     )
-    ctx.run_epochs(args)
-    return ctx.finalize_bc(args)
+
+
 
 
 def _safe_copy(src: str, dst: str) -> None:
