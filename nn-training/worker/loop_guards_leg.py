@@ -30,6 +30,7 @@ from worker.gate_check import read_trend_rows
 from worker.kickstart_burn import (
     MODE_BASELINE,
     MODE_PAIRED,
+    BurnVerdict,
     burn_mode,
     burn_overrides,
     burn_verdict,
@@ -71,6 +72,18 @@ class BurnGuardView:
     stop_detail: str
     notified: bool
     fallback_logged: bool
+
+
+@dataclass(frozen=True, kw_only=True)
+class _BurnInput:
+    """一次干烧判定所需的账本读数与止损口径（`_burn_input` 的唯一产物）。"""
+
+    rows: tuple[dict, ...]
+    margin_pp: float
+    points: int
+    mode: str
+    peer: str
+    peer_rows: tuple[dict, ...] | None
 
 
 class TrainingGuardsLeg:
@@ -139,30 +152,11 @@ class TrainingGuardsLeg:
             return None
         return resolved[0]
 
-    def _kickstart_burn(self, it: int) -> bool:
-        """§5 干烧熔断（结果面，plan/accident.plan.md §5.2）：返 True = 停腿告警。
-
-        只在缰绳开着（`kickstart_ref`）时守——干烧是「锚主导更新把起点洗回去」的形态，
-        没锚就没这回事。基线不靠人填：`eval_log.jsonl` 的 it0 行（课程 bc 权重的干净评估，
-        即缰绳锚定的同一份权重）；连续 `points` 个评估点低于基线 `margin_pp` ⇒ 停腿。
-
-        与 F4 过程熔断的分工：那个看更新健康度（kl/ent），这个看**结果有没有退回去**。
-        停腿而不只是告警：C 事故那里两臂 × 12h 全是白烧，读数是 `it1` 就低的；单点低是
-        噪声，连着三个点低是趋势（阈值走课程文件的 `kickstart_burn` 块，缺席用模块常量）。
-
-        **参照物两档**（课程文件 `kickstart_burn.mode`，2026-09-30）：`baseline`（默认）比
-        **本腿自己的 it0**；`paired` 比**对端臂的同 it 读数**（同网格配对差）。`auto`（缺省值）
-        = 能解析出唯一同 V 对端就走 `paired`，否则回 `baseline`。选 `paired` 的实测理由：
-        h4-lane 三腿回测里零奖励的对照臂自己也飘到 streak 2、有可归因效应的那条反而挨杀，
-        而 Δ 把两臂共享的漂移减掉（零假设 FP 49.3% → 0.56%，详见 `worker/kickstart_burn.py` 头注）。
-
-        账本行是唯一数据源（`eval_log.jsonl` + `read_trend_rows(..., include_baseline=True)`）
-        ⇒ 重启可回放、控制台可复算；判据本体在 `biz/kickstart_burn.py`，此处只做
-        「读 → 判 → 落账/日志」。
-        """
+    def _burn_input(self, it: int) -> _BurnInput | None:
+        """前置闸 + 读账本 + 解析参照物；`None` = 本轮不判（三条早退各自的作用已生效）。"""
         args = self.args
         if not bool(getattr(args, "kickstart_ref", False)):
-            return False
+            return None
         # ★ 2026-10-23：**缰绳已退火到期就不判**。判据的前提是「锚主导更新把起点洗回去」，
         #   锚的系数归零之后这个形态不存在，再判就是拿一个不成立的前提停腿。
         #   现场（y32-nohp it41）：`kickstart 系数已衰减到期（kk=0.0000）` 之后 1 秒即
@@ -175,7 +169,7 @@ class TrainingGuardsLeg:
                     "清空落后计数，不再判「回锚」（锚不在，无锚可回）"
                 )
                 self._burn_streak = 0
-            return False
+            return None
         # 读 **eval_log.jsonl**（per-tick 的评估行落这里；`training_log.jsonl` 是训练事件册
         # ——与 `_gate` 同一个源文件、同一个读者，不另开第二个读法）。
         try:
@@ -185,14 +179,14 @@ class TrainingGuardsLeg:
             )
         except Exception as e:  # 读账本失败不得阻断训练（同 _gate 的兜底风格）
             log(f"[run_rl] WARN kickstart-burn 读账本失败（{type(e).__name__}: {e}）——本轮不判")
-            return False
+            return None
         # 止损一族 2026-10-02 起住课程文件（DECISIONS §2026-10-02-goalnn-burn-rule-in-course-file）：
         # 块存在即权威（args 上的启动物化快照，restart-only）；块缺席 = 模块缺省
         # （第二刀已删 rl-config 回落读面）。
         block = getattr(args, "kickstart_burn", None)
         margin_pp, points = burn_overrides(block)
         mode, peer_name = burn_mode(block)
-        peer_rows: tuple | None = None
+        peer_rows: tuple[dict, ...] | None = None
         peer = ""
         if mode != MODE_BASELINE:
             got = self._burn_paired_rows(peer_name)
@@ -215,37 +209,41 @@ class TrainingGuardsLeg:
         #   「先掉胜率换行为」。显式 `mode: baseline` 仍然照判（操作者自己选的，认）。
         if mode != MODE_BASELINE and peer_rows is None:
             self._burn_streak = 0
-            return False
-        v = burn_verdict(
-            rows, points=points, margin_pp=margin_pp, peer_rows=peer_rows, peer_name=peer
+            return None
+        return _BurnInput(
+            rows=rows,
+            margin_pp=margin_pp,
+            points=points,
+            mode=mode,
+            peer=peer,
+            peer_rows=peer_rows,
         )
-        # 基线段（MODE_BASELINE）没它就无从比较；配对模式仍可判，所以只在 baseline 下退。
-        if v.baseline is None and v.mode == MODE_BASELINE:
-            return False
-        prev = int(getattr(self, "_burn_streak", 0) or 0)
-        if v.streak != prev:
-            # **状态转移才落账**（同 `_stop_loss` 的口径）：每轮都写会把账本淹掉，
-            # 而 0 → 0 无需记录。日志也只在计数上升时说，别拿同一句话刷屏。
-            if v.streak:
-                if v.mode == MODE_PAIRED:
-                    detail = (
-                        f"（Δ {v.delta_pp or 0.0:+.1f}pp：本臂 {(v.last or 0.0) * 100:.1f}%"
-                        f" vs {peer} {(v.peer or 0.0) * 100:.1f}%）"
-                    )
-                else:
-                    detail = (
-                        f"（起点 {(v.baseline or 0.0) * 100:.1f}%，最新 {(v.last or 0.0) * 100:.1f}%）"
-                    )
-                log(
-                    f"[run_rl] WARN kickstart-burn it{it}: 参照"
-                    + (f"对端 {peer}" if v.mode == MODE_PAIRED else "本腿起点")
-                    + f"，连续 {v.streak}/{points} 个评估点落后 >{margin_pp:.1f}pp "
-                    + detail
-                    + "——再低就停腿（疑似回锚）"
+
+    def _burn_note(
+        self, it: int, v: BurnVerdict, *, points: int, margin_pp: float, peer: str
+    ) -> None:
+        """落后计数**状态转移**时才落账（同 `_stop_loss` 的口径）：每轮都写会把账本淹掉。"""
+        if v.streak:
+            if v.mode == MODE_PAIRED:
+                detail = (
+                    f"（Δ {v.delta_pp or 0.0:+.1f}pp：本臂 {(v.last or 0.0) * 100:.1f}%"
+                    f" vs {peer} {(v.peer or 0.0) * 100:.1f}%）"
                 )
-            self._ledger_apply(
-                write_kickstart_burn(
-                    KickstartBurn(self._jsonl_path,
+            else:
+                detail = (
+                    f"（起点 {(v.baseline or 0.0) * 100:.1f}%，最新 {(v.last or 0.0) * 100:.1f}%）"
+                )
+            log(
+                f"[run_rl] WARN kickstart-burn it{it}: 参照"
+                + (f"对端 {peer}" if v.mode == MODE_PAIRED else "本腿起点")
+                + f"，连续 {v.streak}/{points} 个评估点落后 >{margin_pp:.1f}pp "
+                + detail
+                + "——再低就停腿（疑似回锚）"
+            )
+        self._ledger_apply(
+            write_kickstart_burn(
+                KickstartBurn(
+                    self._jsonl_path,
                     it,
                     v.streak,
                     v.baseline,
@@ -253,36 +251,36 @@ class TrainingGuardsLeg:
                     margin_pp,
                     mode=v.mode,
                     delta_pp=v.delta_pp,
-                    peer=v.peer),
-                )
+                    peer=v.peer,
+                ),
             )
-        self._burn_streak = v.streak
-        if not v.tripped:
-            return False
-        # ★ 2026-10-23：**平台开关 = notify ⇒ 只提示、不停腿**。`trainer/loop_guards.py`
-        #   `_sync_cloud_halt` 的契约原话是「门判决只作用于远端云机，TrainingLoop 永不停车」，
-        #   而本方法自己 `training PAUSED` + 收官 ⇒ 违反该契约，且日志会出现
-        #   「notify → 只提示」紧接「training PAUSED」的自相矛盾（现场 18:06:28/18:23:12）。
-        #   notify 的语义就是「只提示」：记账 + 喊一次，训练继续（切到 halt 立即生效）。
-        if self._gate_halt_mode() == "notify":
-            if not getattr(self, "_burn_notified", False):
-                log(f"[run_rl] CRITICAL KICKSTART-BURN it{it}: {v.reason}")
-                log(
-                    "[run_rl] 门禁动作为 notify（平台开关）→ **判据只提示，本腿不停车**；"
-                    "要真停腿请把平台开关拨到 halt（`tmp/gate-halt.json`）"
-                )
-                self._burn_notified = True
-            self._sync_cloud_halt(it, "ABORT")
-            self._ledger_apply(
-                write_gate_verdict(
-                    GateVerdict(self._jsonl_path,
+        )
+
+    def _burn_notify(self, it: int, v: BurnVerdict) -> None:
+        """平台开关 = notify：记账 + 只提示一次，训练继续（切到 halt 立即生效）。"""
+        if not getattr(self, "_burn_notified", False):
+            log(f"[run_rl] CRITICAL KICKSTART-BURN it{it}: {v.reason}")
+            log(
+                "[run_rl] 门禁动作为 notify（平台开关）→ **判据只提示，本腿不停车**；"
+                "要真停腿请把平台开关拨到 halt（`tmp/gate-halt.json`）"
+            )
+            self._burn_notified = True
+        self._sync_cloud_halt(it, "ABORT")
+        self._ledger_apply(
+            write_gate_verdict(
+                GateVerdict(
+                    self._jsonl_path,
                     it,
                     "ABORT",
                     f"kickstart-burn(notify, 不停腿): {v.reason}",
-                    decider="loop"),
-                )
+                    decider="loop",
+                ),
             )
-            return False
+        )
+
+    def _burn_halt(self, it: int, v: BurnVerdict, *, peer: str) -> None:
+        """真停腿：收官日志 + 云机达令 + ABORT 判决 + 收工原因。"""
+        args = self.args
         log(f"[run_rl] CRITICAL KICKSTART-BURN it{it}: {v.reason}")
         log(
             f"[run_rl] training PAUSED; weights kept at {args.out}; "
@@ -299,14 +297,66 @@ class TrainingGuardsLeg:
         # kickstart_burn 事件已在上面「状态转移」处写过（不重复写）：这里只补判决。
         self._ledger_apply(
             write_gate_verdict(
-                GateVerdict(self._jsonl_path,
-                it,
-                "ABORT",
-                f"kickstart-burn: {v.reason}",
-                decider="loop"),
+                GateVerdict(
+                    self._jsonl_path,
+                    it,
+                    "ABORT",
+                    f"kickstart-burn: {v.reason}",
+                    decider="loop",
+                ),
             )
         )
         self._stop_cause, self._stop_detail = "kickstart_burn", f"干烧回锚：{v.reason}"
+
+    def _kickstart_burn(self, it: int) -> bool:
+        """§5 干烧熔断（结果面，plan/accident.plan.md §5.2）：返 True = 停腿告警。
+
+        只在缰绳开着（`kickstart_ref`）时守——干烧是「锚主导更新把起点洗回去」的形态，
+        没锚就没这回事。基线不靠人填：`eval_log.jsonl` 的 it0 行（课程 bc 权重的干净评估，
+        即缰绳锚定的同一份权重）；连续 `points` 个评估点低于基线 `margin_pp` ⇒ 停腿。
+
+        与 F4 过程熔断的分工：那个看更新健康度（kl/ent），这个看**结果有没有退回去**。
+        停腿而不只是告警：C 事故那里两臂 × 12h 全是白烧，读数是 `it1` 就低的；单点低是
+        噪声，连着三个点低是趋势（阈值走课程文件的 `kickstart_burn` 块，缺席用模块常量）。
+
+        **参照物两档**（课程文件 `kickstart_burn.mode`，2026-09-30）：`baseline`（默认）比
+        **本腿自己的 it0**；`paired` 比**对端臂的同 it 读数**（同网格配对差）。`auto`（缺省值）
+        = 能解析出唯一同 V 对端就走 `paired`，否则回 `baseline`。选 `paired` 的实测理由：
+        h4-lane 三腿回测里零奖励的对照臂自己也飘到 streak 2、有可归因效应的那条反而挨杀，
+        而 Δ 把两臂共享的漂移减掉（零假设 FP 49.3% → 0.56%，详见 `worker/kickstart_burn.py` 头注）。
+
+        账本行是唯一数据源（`eval_log.jsonl` + `read_trend_rows(..., include_baseline=True)`）
+        ⇒ 重启可回放、控制台可复算；判据本体在 `biz/kickstart_burn.py`，此处只做
+        「读 → 判 → 落账/日志」。
+        """
+        burn = self._burn_input(it)
+        if burn is None:
+            return False
+        v = burn_verdict(
+            burn.rows,
+            points=burn.points,
+            margin_pp=burn.margin_pp,
+            peer_rows=burn.peer_rows,
+            peer_name=burn.peer,
+        )
+        # 基线段（MODE_BASELINE）没它就无从比较；配对模式仍可判，所以只在 baseline 下退。
+        if v.baseline is None and v.mode == MODE_BASELINE:
+            return False
+        prev = int(getattr(self, "_burn_streak", 0) or 0)
+        if v.streak != prev:
+            self._burn_note(it, v, points=burn.points, margin_pp=burn.margin_pp, peer=burn.peer)
+        self._burn_streak = v.streak
+        if not v.tripped:
+            return False
+        # ★ 2026-10-23：**平台开关 = notify ⇒ 只提示、不停腿**。`trainer/loop_guards.py`
+        #   `_sync_cloud_halt` 的契约原话是「门判决只作用于远端云机，TrainingLoop 永不停车」，
+        #   而本方法自己 `training PAUSED` + 收官 ⇒ 违反该契约，且日志会出现
+        #   「notify → 只提示」紧接「training PAUSED」的自相矛盾（现场 18:06:28/18:23:12）。
+        #   notify 的语义就是「只提示」：记账 + 喊一次，训练继续（切到 halt 立即生效）。
+        if self._gate_halt_mode() == "notify":
+            self._burn_notify(it, v)
+            return False
+        self._burn_halt(it, v, peer=burn.peer)
         return True
 
     def _paired_kill(self, it: int) -> bool:

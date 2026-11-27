@@ -464,13 +464,8 @@ def _iter_manifest(
     return m
 
 
-def _run_iteration(
-    ctx: RunContext, it: int, *, prev_it: int, on_ppo_start: Callable[[], None] | None = None
-) -> dict:
-    """跑第 `it` 轮：合成 kind=iter job → 喂回 `run_job`（生产链路的字面复用）。
-
-    `prev_it` = 上一轮（其产物权重就是本轮 init_weights）。返回本轮 result。
-    """
+def _iter_init(ctx: RunContext, it: int, prev_it: int) -> tuple[Path, str]:
+    """上一轮产物 → 本轮 init：整份权重旁路落地 + opt 落地（并钉 `ctx.last_opt_sha`）。"""
     weights = ctx.store.weights_path(prev_it)
     if not weights.exists():
         raise ProtocolError(f"第 {it} 轮的 init 权重不在产物里: {weights}（产物被删/状态损坏？）")
@@ -498,9 +493,9 @@ def _run_iteration(
     #   `blob_cache/<sha>`，而离线段没有下载通道）。下一轮的落地基准也随之是这份整份（链上一步，
     #   而它在缓存里 = O(1) 命中）。找不到基准 ⇒ 响亮记一行、本段按**无动量**跑（与
     #   `plan_handoff._stored_opt_sha` 同口径：动量是可选件，首轮本来就没有 ⇒ 不让整段死在 init）。
-    #   ⚠ **不**退回 `ctx.last_opt_sha`（那是上一个调用在下面 `:279` 写下的「回传出去的那份
-    #   delta 自己的 sha」）—— 那正是一个**拿不到的地址**（容器解不开、离线段也没有下载通道），
-    #   声明它 = 把这次要修的形态又从后门放回来。
+    #   ⚠ **不**退回 `ctx.last_opt_sha`（那是上一个调用写下的「回传出去的那份 delta 自己的 sha」）
+    #   —— 那正是一个**拿不到的地址**（容器解不开、离线段也没有下载通道），声明它 = 把这次要修的
+    #   形态又从后门放回来。
     try:
         ctx.last_opt_sha = opt_standard.landed_opt_sha(
             ctx.store.opt_path(prev_it),
@@ -511,55 +506,17 @@ def _run_iteration(
     except ProtocolError as e:
         ctx.log(f"WARN: it{prev_it} 的 opt 是 delta 容器且本机找不到基准（{e}）——本段按无动量跑")
         ctx.last_opt_sha = ""
-    vol_probe, window_override, rotation_override, _plan_in, profile = _round_volume(ctx, it)
-    _full_per_stage = int(vol_probe["per_stage_quota"]) if isinstance(vol_probe, dict) else 0
-    vol_probe, _greedy = _apply_greedy_budget(ctx, it, vol_probe, _full_per_stage)
-    _plan = dict(_plan_in, volume=vol_probe) if isinstance(vol_probe, dict) else _plan_in
-    if window_override is not None or profile is not None:
-        # 降级/选档轮：块已经按当轮窗口解好，**不要再**让 `pairs_for` 按配方派生一次
-        # （那会解回窗口/另一份 target）。profile 的 rotation 已进 _plan_in 用于解块与读数。
-        _plan.pop("rotation", None)
-    pairs = pairs_for(_plan, it)
-    if not isinstance(vol_probe, dict):
-        # 固定对集课没有「训练侧配额」可放大 ⇒ 直接补同分布的**新种子**（不是重跑同一局）。
-        pairs = _scaled_pairs(pairs, ctx.sample_mult)
-    spec = iter_spec(_plan, it, pairs, wver=init_fp, course=ctx.course)
-    spec = with_rollout_workers(spec, int(ctx.rollout_workers or 0))
-    if _greedy is not None:
-        # 两个键跟 spec 上云：云机在 rollout 之后、PPO 之前自己算配额并发 greedy 波
-        # （分母必须是**减量前**的整轮 target，否则 12% 会按减量后的分母算成别的比例）。
-        from common.protocol import validate_rollout_spec
+    return weights, init_fp
 
-        _gplan, _total_t, _block = _greedy
-        spec = validate_rollout_spec(
-            {**spec, "greedy_quota": _block, "greedy_round_target": int(_total_t)}
-        )
-    # 日志面用**重铺后的** plan（否则打出来的还是打包时的旧 G_s，与实采对不上）
-    vol = vol_probe
-    epochs_eff = int(ctx.manifest.get("epochs") or 0)
-    if ctx.epoch_mult != 1.0:
-        # PPO 遍数是整数（`train_core` 直接拿去喂 `ppo_update`）：向上取整，最少 1。
-        epochs_eff = max(1, math.ceil(epochs_eff * ctx.epoch_mult))
-    # ★ 2026-10-30（用户口径「准备完成行只留必要读数」）：it{it} 段只留
-    # 「本轮采了多少 / 采了哪几关 / 起点权重 / 训练侧配额」四件事。
-    # 「动态采集：每关初波 N 局」删掉（那是**计划**的形状，不是本轮的实际读数——
-    # 它每轮都一样 ⇒ 每轮重复一遍纯噪音；真实采到多少局在下一段「配额=… kept N steps」里）。
-    # ⚠ 顺带修掉一个隐患：老口径读 `vol['games_per_stage']`，而新形态的 volume 块只有
-    # `games_per_stage_by_stage` ⇒ 那个键可能不存在（读它会 KeyError）。新口径不读它了。
-    prep_b = LogBundle(ctx.log)
-    prep_b.add(
-        f"it{it}",
-        f"{len(pairs)} 局（{len({s for s, _ in pairs})} 关）wver={init_fp[:12]}…"
-        + (f" 配额 {vol['per_stage_quota']}/关" if isinstance(vol, dict) else ""),
-    )
-    # 「放大」是**一句话**（样本放大与 PPO 遍数是同一件事的两个数）⇒ 用 add_raw：
-    # 渲染成「放大×2 ⇒ 105 局；epochs×1 ⇒ 4」而不是「放大=样本×2 ⇒ …」（那个等号会让
-    # 读者误以为「放大」和「×2 ⇒ …」是两件独立的事）。旧的「样本」「PPO 」两个前缀词删掉。
-    if ctx.sample_mult != 1.0 or ctx.epoch_mult != 1.0:
-        prep_b.add_raw(
-            f"放大×{ctx.sample_mult:g} ⇒ {len(pairs)} 局；epochs×{ctx.epoch_mult:g} ⇒ {epochs_eff}"
-        )
-    m = _iter_manifest(ctx, it, spec, init_fp, epochs_eff, vol, _greedy, _full_per_stage)
+
+def _execute_iter(
+    ctx: RunContext,
+    m: dict,
+    weights: Path,
+    prep_b: LogBundle,
+    on_ppo_start: Callable[[], None] | None,
+) -> dict:
+    """写 payload → 补锚点 → 组 preloaded → `run_job` → `validate_result`（返回 result）。"""
     # ---- 本轮 payload：只有 init_weights.json（shard 由节点现场产，与 kind=iter 一致）----
     it_dir = ctx.work_dir / m["job_id"]
     it_dir.mkdir(parents=True, exist_ok=True)
@@ -615,6 +572,20 @@ def _run_iteration(
         )
     )
     validate_result(result, m, commit_echo_must_match=False)
+    return result
+
+
+def _annotate_iter_result(
+    ctx: RunContext,
+    result: dict,
+    *,
+    profile: cloud_sampling.CloudProfile | None,
+    plan_in: dict,
+    it: int,
+    vol: dict | None,
+    override: str,
+) -> dict:
+    """结果面留痕：采样档 / 本轮窗口 / 下一轮 opt 链（返回同一个 result）。"""
     if profile is not None:
         # 账本行留痕（`_row_extra` → `LEDGER_FIELDS`）：GPU/TPU 两档的分布不同，
         # 但语料身份相同 ⇒ 每轮必须说清这一轮用的是哪一档。
@@ -623,16 +594,85 @@ def _run_iteration(
     #   云机轮此前只有 `volume_stage_stats` 的键可看（而它本身还没进行账）⇒ 账本里
     #   看不出「这段在轮换、这一轮采了哪 12 关」；`override` 非空 = 笔记本开关改过语料面。
     _rot = rotation_event(
-        _plan_in,
+        plan_in,
         int(it),
-        window=[int(s) for s in (vol_probe or {}).get("stages", ())],
-        override=rotation_override,
+        window=[int(s) for s in (vol or {}).get("stages", ())],
+        override=override,
     )
     if _rot is not None:
         result["rotation"] = _rot
     raw = _opt_bytes_from_result(result)
     ctx.last_opt_sha = sha256_bytes(raw) if raw else ""
     return result
+
+
+def _run_iteration(
+    ctx: RunContext, it: int, *, prev_it: int, on_ppo_start: Callable[[], None] | None = None
+) -> dict:
+    """跑第 `it` 轮：合成 kind=iter job → 喂回 `run_job`（生产链路的字面复用）。
+
+    `prev_it` = 上一轮（其产物权重就是本轮 init_weights）。返回本轮 result。
+    """
+    weights, init_fp = _iter_init(ctx, it, prev_it)
+    vol_probe, window_override, rotation_override, _plan_in, profile = _round_volume(ctx, it)
+    _full_per_stage = int(vol_probe["per_stage_quota"]) if isinstance(vol_probe, dict) else 0
+    vol_probe, _greedy = _apply_greedy_budget(ctx, it, vol_probe, _full_per_stage)
+    _plan = dict(_plan_in, volume=vol_probe) if isinstance(vol_probe, dict) else _plan_in
+    if window_override is not None or profile is not None:
+        # 降级/选档轮：块已经按当轮窗口解好，**不要再**让 `pairs_for` 按配方派生一次
+        # （那会解回窗口/另一份 target）。profile 的 rotation 已进 _plan_in 用于解块与读数。
+        _plan.pop("rotation", None)
+    pairs = pairs_for(_plan, it)
+    if not isinstance(vol_probe, dict):
+        # 固定对集课没有「训练侧配额」可放大 ⇒ 直接补同分布的**新种子**（不是重跑同一局）。
+        pairs = _scaled_pairs(pairs, ctx.sample_mult)
+    spec = iter_spec(_plan, it, pairs, wver=init_fp, course=ctx.course)
+    spec = with_rollout_workers(spec, int(ctx.rollout_workers or 0))
+    if _greedy is not None:
+        # 两个键跟 spec 上云：云机在 rollout 之后、PPO 之前自己算配额并发 greedy 波
+        # （分母必须是**减量前**的整轮 target，否则 12% 会按减量后的分母算成别的比例）。
+        from common.protocol import validate_rollout_spec
+
+        _gplan, _total_t, _block = _greedy
+        spec = validate_rollout_spec(
+            {**spec, "greedy_quota": _block, "greedy_round_target": int(_total_t)}
+        )
+    # 日志面用**重铺后的** plan（否则打出来的还是打包时的旧 G_s，与实采对不上）
+    vol = vol_probe
+    epochs_eff = int(ctx.manifest.get("epochs") or 0)
+    if ctx.epoch_mult != 1.0:
+        # PPO 遍数是整数（`train_core` 直接拿去喂 `ppo_update`）：向上取整，最少 1。
+        epochs_eff = max(1, math.ceil(epochs_eff * ctx.epoch_mult))
+    # ★ 2026-10-30（用户口径「准备完成行只留必要读数」）：it{it} 段只留
+    # 「本轮采了多少 / 采了哪几关 / 起点权重 / 训练侧配额」四件事。
+    # 「动态采集：每关初波 N 局」删掉（那是**计划**的形状，不是本轮的实际读数——
+    # 它每轮都一样 ⇒ 每轮重复一遍纯噪音；真实采到多少局在下一段「配额=… kept N steps」里）。
+    # ⚠ 顺带修掉一个隐患：老口径读 `vol['games_per_stage']`，而新形态的 volume 块只有
+    # `games_per_stage_by_stage` ⇒ 那个键可能不存在（读它会 KeyError）。新口径不读它了。
+    prep_b = LogBundle(ctx.log)
+    prep_b.add(
+        f"it{it}",
+        f"{len(pairs)} 局（{len({s for s, _ in pairs})} 关）wver={init_fp[:12]}…"
+        + (f" 配额 {vol['per_stage_quota']}/关" if isinstance(vol, dict) else ""),
+    )
+    # 「放大」是**一句话**（样本放大与 PPO 遍数是同一件事的两个数）⇒ 用 add_raw：
+    # 渲染成「放大×2 ⇒ 105 局；epochs×1 ⇒ 4」而不是「放大=样本×2 ⇒ …」（那个等号会让
+    # 读者误以为「放大」和「×2 ⇒ …」是两件独立的事）。旧的「样本」「PPO 」两个前缀词删掉。
+    if ctx.sample_mult != 1.0 or ctx.epoch_mult != 1.0:
+        prep_b.add_raw(
+            f"放大×{ctx.sample_mult:g} ⇒ {len(pairs)} 局；epochs×{ctx.epoch_mult:g} ⇒ {epochs_eff}"
+        )
+    m = _iter_manifest(ctx, it, spec, init_fp, epochs_eff, vol, _greedy, _full_per_stage)
+    result = _execute_iter(ctx, m, weights, prep_b, on_ppo_start)
+    return _annotate_iter_result(
+        ctx,
+        result,
+        profile=profile,
+        plan_in=_plan_in,
+        it=it,
+        vol=vol_probe,
+        override=rotation_override,
+    )
 
 
 def _opt_bytes_from_result(result: dict) -> bytes:

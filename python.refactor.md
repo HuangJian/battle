@@ -2241,3 +2241,17 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > `_fill_rl_defaults` / `_baseline_landed`；重依赖仍是函数内延迟 import）；10 组账本/CLI
 > 场景逐字段差分 0（返回码 / 归一化日志 / `EvalDispatchSpec` 全字段 / 账本行），
 > 存量 19 文件 / 21 → 19 / 20（engineering §379）。
+> 2026-11-27 第四十二格：`trainer/eval_course_once.main` 174 → 80 + spec/课程/配置/执行/
+> 落盘/汇总六段（同名 `_course_once_*`；两个载体用 NamedTuple —— 测试不注册 `sys.modules`，
+> `@dataclass(kw_only)` 会在导入期炸）；10 组 spec 场景逐字段差分 0（返回码 / 日志 /
+> `RunnerSpec` / 产物 JSONL），存量 19 文件 / 20 → 18 / 19（engineering §380）。
+
+> 2026-11-27 第四十三格：`remote/plan_run._run_iteration` 172 → 67 + init/执行/留痕三段
+> （`_iter_init` / `_execute_iter` / `_annotate_iter_result`；`iter_spec` 留原位，run_job 赋值与
+> `_reseed_anchors` 搬家后守卫改钉 `_execute_iter`）；9 组假 RunContext 场景差分 0，
+> 存量 18 文件 / 19 → 17 / 18（engineering §381）。
+
+> 2026-11-27 第四十四格：`worker/loop_guards_leg._kickstart_burn` 171 → 50 + 读数/落账/提示/停腿
+> 四段（`_burn_input` + `_BurnInput` / `_burn_note` / `_burn_notify` / `_burn_halt`；
+> 三条早退副作用原样保留，notify 与 halt 分家）；9 组场景差分 0，存量 17 文件 / 18 → 16 / 17
+> （engineering §382）。

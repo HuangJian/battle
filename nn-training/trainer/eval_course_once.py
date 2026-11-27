@@ -34,6 +34,7 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import NamedTuple
 
 # 2026-09-30（刀 7）：入口从 nn-training/ 顶层搬进 trainer/ ⇒ 仓库根 = 本文件上溯 2 层。
 # 2026-10-11（S1）：原先还要摘掉脚本目录项，防脚本目录里的 `queue.py` 遮蔽 stdlib `queue`；该模块
@@ -258,12 +259,44 @@ def _to_tool_row(row: dict, meta: dict, n_stages: int, seed0: int, games: int) -
     }
 
 
-def main() -> int:
+class _CourseKnobs(NamedTuple):
+    """课程文件里**影响一次评估**的全部读数（`inference_rules` 已展开成四个布尔）。"""
+
+    stages: list[dict]
+    max_ticks: int
+    lives: int
+    level: int
+    difficulty: str
+    skip_steel_only_shots: bool
+    break_bricks_on_path: bool
+    suppress_useless_fire: bool
+    suppress_lead_miss_fire: bool
+
+
+class _ExecPlan(NamedTuple):
+    """跑完 `units` 所需的执行面（每个权重一个单元，共用同一套批次与 runner 旋钮）。"""
+
+    bun: str
+    eval_log: Path
+    args: SimpleNamespace
+    cfg: dict
+    batch: dict
+    epoch: str
+    policy: str
+
+
+def _course_once_spec() -> dict:
+    """`--spec` → JSON dict（TS 侧生成；唯一入口参数）。"""
     ap = house_parser(description="one-shot course eval (reuses BatchEvalRunner)")
     ap.add_argument("--spec", required=True, help="JSON spec（TS 侧生成）")
     a = ap.parse_args()
-    spec = json.loads(Path(a.spec).read_text(encoding="utf-8"))
+    # 显式落一个 dict 变量：`json.loads` 是 Any，直接 return 会触发 no-any-return。
+    data: dict = json.loads(Path(a.spec).read_text(encoding="utf-8"))
+    return data
 
+
+def _course_once_run_dir(spec: dict) -> Path:
+    """建（并返回）本次 runDir，同时把两条诊断开关落进环境（缺省才设，不覆盖调用方）。"""
     run_dir = Path(spec["runDir"]).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
     # 诊断工具：缺省打**事件级**日志（逐局派发/返回 + 在飞采样 + 阶段墙钟），
@@ -271,43 +304,45 @@ def main() -> int:
     os.environ.setdefault("EVAL_TRACE_EVENTS", "1")
     # 临时批次：EvalBoard 数据根指向本次 runDir（心跳/台账都不进控制台既有数据）
     os.environ.setdefault("EVALBOARD_DATA", str(run_dir / "evalboard"))
+    return run_dir
 
-    import common.codehash
-    import common.distribution
+
+def _course_once_knobs(course_path: str, spec: dict) -> _CourseKnobs | None:
+    """课程正文 → 评估旋钮；`None` = 没有自定义关卡（调用方响亮退 2）。"""
     from common.jsonc import load as jsonc_load
-    from trainer.batch_eval import ONESHOT_EVAL_KIND, BatchEvalRunner, RunnerSpec, data_root
-    from trainer.dispatch_queue import RUN_ID
 
-    course_path = str(spec["course"])
     course = jsonc_load(course_path)
     stages = course.get("stages") or []
     if not stages:
-        _log(f"[course-once] course has no custom stages: {course_path}")
-        return 2
+        return None
     player = course.get("player") or {}
-    max_ticks = int(course.get("max_ticks") or spec.get("maxTicks") or 36000)
-    lives = int(player.get("lives", 3))
-    level = int(player.get("level", 0))
-    difficulty = str(course.get("difficulty") or spec.get("difficulty") or "hard")
     # 评估/部署链的推理侧规则（默认全关；训练链不认）：块内键名拼错 = 响亮拒，
     # 不静默忽略（`InferenceRulesBlock` 是 extra="forbid"）。
     inference_rules = InferenceRulesBlock(**(course.get("inference_rules") or {}))
-    skip_steel_only_shots = bool(inference_rules.skip_steel_only_shots)
-    break_bricks_on_path = bool(inference_rules.break_bricks_on_path)
-    suppress_useless_fire = bool(inference_rules.suppress_useless_fire)
-    suppress_lead_miss_fire = bool(inference_rules.suppress_lead_miss_fire)
-    policy = str(spec.get("policy") or "nn")
-    games = int(spec["games"])
-    seed0 = int(spec.get("seed0") or 0)
-    weights = [{"label": str(w["label"]), "path": str(w["path"])} for w in spec.get("weights") or []]
-    if policy != "god" and not weights:
-        _log("[course-once] --policy nn needs at least one weight")
-        return 2
-    n_stages = len(stages)
-    plan = _stage_plan(games, n_stages, seed0)
+    return _CourseKnobs(
+        stages=stages,
+        max_ticks=int(course.get("max_ticks") or spec.get("maxTicks") or 36000),
+        lives=int(player.get("lives", 3)),
+        level=int(player.get("level", 0)),
+        difficulty=str(course.get("difficulty") or spec.get("difficulty") or "hard"),
+        skip_steel_only_shots=bool(inference_rules.skip_steel_only_shots),
+        break_bricks_on_path=bool(inference_rules.break_bricks_on_path),
+        suppress_useless_fire=bool(inference_rules.suppress_useless_fire),
+        suppress_lead_miss_fire=bool(inference_rules.suppress_lead_miss_fire),
+    )
+
+
+def _course_once_cfg(spec: dict) -> tuple[dict, list[dict]]:
+    """分派配置 + 过门节点表（`--dist-nodes` 优先；`noNodes` / `localSlots` 只在内存里改）。"""
+    import common.distribution
 
     # 配置文件：显式 --dist-nodes 优先（`load_dist_config` 接受路径），否则默认 rl-config.json
-    cfg = dict(common.distribution.load_dist_config(str(spec.get("distCfgPath") or common.distribution.CONFIG_PATH)) or {})
+    cfg = dict(
+        common.distribution.load_dist_config(
+            str(spec.get("distCfgPath") or common.distribution.CONFIG_PATH)
+        )
+        or {}
+    )
     if spec.get("noNodes"):
         cfg = {**cfg, "nodes": []}
     # 本机槽位：默认由配置决定（`policy.evalLocalSlots` → `EVAL_LOCAL_SLOTS_DEFAULT`，
@@ -316,28 +351,16 @@ def main() -> int:
     if spec.get("localSlots") is not None:
         cfg["policy"] = {**(cfg.get("policy") or {}), "evalLocalSlots": int(spec["localSlots"])}
     nodes = [n for n in (cfg.get("nodes") or []) if n.get("enabled", True)]
-    _log(
-        f"[course-once] course={course_path} stages={n_stages} games/weights={games} "
-        f"policy={policy} weights={len(weights)} difficulty={difficulty} max_ticks={max_ticks} "
-        f"lives={lives} level={level} nodes={len(nodes)} runDir={run_dir} "
-        f"skip_steel_only_shots={skip_steel_only_shots} break_bricks_on_path={break_bricks_on_path} "
-        f"suppress_useless_fire={suppress_useless_fire} "
-        f"suppress_lead_miss_fire={suppress_lead_miss_fire}"
-    )
+    return cfg, nodes
 
-    eval_log = run_dir / "eval_log.jsonl"
-    # 临时批次：每次运行都是干净的账（续跑靠显式 --resume，暂不提供）。
-    _reset_run_ledgers(run_dir)
-    batch = {
-        "batch_id": f"adhoc-{spec.get('iterId') or int(time.time() * 1000)}",
-        "iter": 0,
-        "course": Path(course_path).stem,
-        "policy": policy,
-        "units": {},
-    }
+
+def _course_once_args(spec: dict, knobs: _CourseKnobs) -> SimpleNamespace:
+    """`BatchEvalRunner` 读的那袋旋钮（本机份额已在 cfg 里，不走 args.local_slots）。"""
     # args.local_slots 不用：本机份额已在上面解析进 cfg["policy"]["evalLocalSlots"]
     #（显式 spec.localSlots = TS 侧 configLocalSlots 的解析结果，含 rl.local_slots）
-    args = SimpleNamespace(mode="per-tick", out="", eval_window_sec=float(spec.get("windowSec") or 86400))
+    args = SimpleNamespace(
+        mode="per-tick", out="", eval_window_sec=float(spec.get("windowSec") or 86400)
+    )
     # R2 事件 rung：手动 judge 由 TS 侧 --decision-events 驱动（缺席 = 老行为）；
     # BatchEvalRunner 经 self.args 取（与 distLocal 的内存覆盖不同，这是语义开关）。
     args.decision_events = bool(spec.get("decisionEvents"))
@@ -346,49 +369,37 @@ def main() -> int:
     args.decision_k = int(spec.get("decisionK") or 10)
     # 评估/部署链的推理侧规则：来自**课程文件**的 `inference_rules` 块（默认全关）；
     # 只对 eval 生效，训练 rollout 不认（worker.cmd 无此开关）。
-    args.skip_steel_only_shots = skip_steel_only_shots
-    args.break_bricks_on_path = break_bricks_on_path
-    args.suppress_useless_fire = suppress_useless_fire
-    args.suppress_lead_miss_fire = suppress_lead_miss_fire
+    args.skip_steel_only_shots = knobs.skip_steel_only_shots
+    args.break_bricks_on_path = knobs.break_bricks_on_path
+    args.suppress_useless_fire = knobs.suppress_useless_fire
+    args.suppress_lead_miss_fire = knobs.suppress_lead_miss_fire
     # Hybrid opening：一次性课程评估 `--opening-connect`（TS 侧 spec）。
     # 走 eval_rule_kwargs 同时透传到本机 run_local_eval_game 与远端 fetch_task。
     args.opening_connect = bool(spec.get("openingConnect"))
-    bun = shutil.which("bun") or "bun"
-    epoch = common.codehash.compute_engine_epoch()
+    return args
 
-    units, meta = build_course_units(
-        weights if policy != "god" else [{"label": "god", "path": ""}],
-        stages,
-        plan,
-        max_ticks=max_ticks,
-        difficulty=difficulty,
-        lives=lives,
-        level=level,
-    )
-    if not units:
-        _log("[course-once] no pairs to evaluate (empty seed plan?)")
-        return 2
-    _log(
-        f"[course-once] units={len(units)}（每权重一个连续单元，跨 {n_stages} 关）"
-        f" games/weight={games}"
-    )
+
+def _course_once_units(units: list[dict], plan: _ExecPlan) -> None:
+    """逐权重单元串行跑完（每单元一条连续派发流，B 层负责节点/重试/本机份额）。"""
+    from trainer.batch_eval import ONESHOT_EVAL_KIND, BatchEvalRunner, RunnerSpec
+    from trainer.dispatch_queue import RUN_ID
 
     for i, unit in enumerate(units):
-        rl_path: str | None = None if policy == "god" else str(unit["ckpt"])
+        rl_path: str | None = None if plan.policy == "god" else str(unit["ckpt"])
         runner = BatchEvalRunner(
             RunnerSpec(
-                bun=bun,
+                bun=plan.bun,
                 rl_path=rl_path,
-                eval_log=eval_log,
-                args=args,
-                cfg=cfg,
-                batch=batch,
+                eval_log=plan.eval_log,
+                args=plan.args,
+                cfg=plan.cfg,
+                batch=plan.batch,
                 unit=unit,
                 unit_idx=i,
                 unit_of=len(units),
                 run_id=RUN_ID,
-                engine_epoch=epoch,
-                policy=policy,
+                engine_epoch=plan.epoch,
+                policy=plan.policy,
                 # 专用权重桶（见 ONESHOT_EVAL_KIND）：训练作业每轮重写 'rollout' 桶，
                 # 一次性评估那份固定权重会被节点侧的保留份数收敛扫掉（→ ENOENT/10054）。
                 kind=ONESHOT_EVAL_KIND,
@@ -402,9 +413,13 @@ def main() -> int:
             f"({time.time() - t0:.1f}s)"
         )
 
+
+def _course_once_rows(
+    spec: dict, eval_log: Path, meta: dict, n_stages: int, seed0: int, games: int
+) -> tuple[list[dict], Path] | None:
+    """B 层逐局账本 → 工具 JSONL（按 `id` 排序后在 `spec.out` 落盘）；无账本 ⇒ `None`。"""
     if not eval_log.exists():
-        _log("[course-once] no rows written (all units deferred?)")
-        return 1
+        return None
     raw = [
         json.loads(line)
         for line in eval_log.read_text(encoding="utf-8").splitlines()
@@ -414,21 +429,108 @@ def main() -> int:
     rows.sort(key=lambda r: r["id"])
     out_path = Path(spec["out"]).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8")
+    out_path.write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8"
+    )
+    return rows, out_path
 
-    # 来源汇总（节点侧自报，不再靠 TS 侧猜）
+
+def _course_once_report(rows: list[dict], out_path: Path, expected: int) -> int:
+    """来源汇总 + 落盘行数 + 完整性判定（不完整 = 1；节点忙/不可达时属预期）。"""
+    from trainer.batch_eval import data_root
+
     by_node: dict[str, int] = {}
     for r in rows:
         by_node[str(r["node"])] = by_node.get(str(r["node"]), 0) + 1
     provenance = ", ".join(f"{k}={v}" for k, v in sorted(by_node.items()))
     _log(f"[course-once] provenance: {provenance}（共 {len(rows)} 局）")
     _log(f"[course-once] wrote {len(rows)} rows -> {out_path} (evalboard data root {data_root()})")
-
-    expected = games * (len(weights) if policy != "god" else 1)
     if len(rows) != expected:
         _log(f"[course-once] incomplete rows {len(rows)}/{expected} — 节点忙/不可达时属预期，重跑即可")
         return 1
     return 0
+
+
+def main() -> int:
+    spec = _course_once_spec()
+    run_dir = _course_once_run_dir(spec)
+
+    import common.codehash
+
+    course_path = str(spec["course"])
+    knobs = _course_once_knobs(course_path, spec)
+    if knobs is None:
+        _log(f"[course-once] course has no custom stages: {course_path}")
+        return 2
+    policy = str(spec.get("policy") or "nn")
+    games = int(spec["games"])
+    seed0 = int(spec.get("seed0") or 0)
+    weights = [
+        {"label": str(w["label"]), "path": str(w["path"])} for w in spec.get("weights") or []
+    ]
+    if policy != "god" and not weights:
+        _log("[course-once] --policy nn needs at least one weight")
+        return 2
+    n_stages = len(knobs.stages)
+    plan = _stage_plan(games, n_stages, seed0)
+
+    cfg, nodes = _course_once_cfg(spec)
+    _log(
+        f"[course-once] course={course_path} stages={n_stages} games/weights={games} "
+        f"policy={policy} weights={len(weights)} difficulty={knobs.difficulty} "
+        f"max_ticks={knobs.max_ticks} lives={knobs.lives} level={knobs.level} "
+        f"nodes={len(nodes)} runDir={run_dir} "
+        f"skip_steel_only_shots={knobs.skip_steel_only_shots} "
+        f"break_bricks_on_path={knobs.break_bricks_on_path} "
+        f"suppress_useless_fire={knobs.suppress_useless_fire} "
+        f"suppress_lead_miss_fire={knobs.suppress_lead_miss_fire}"
+    )
+
+    eval_log = run_dir / "eval_log.jsonl"
+    # 临时批次：每次运行都是干净的账（续跑靠显式 --resume，暂不提供）。
+    _reset_run_ledgers(run_dir)
+    batch = {
+        "batch_id": f"adhoc-{spec.get('iterId') or int(time.time() * 1000)}",
+        "iter": 0,
+        "course": Path(course_path).stem,
+        "policy": policy,
+        "units": {},
+    }
+    args = _course_once_args(spec, knobs)
+    bun = shutil.which("bun") or "bun"
+    epoch = common.codehash.compute_engine_epoch()
+
+    units, meta = build_course_units(
+        weights if policy != "god" else [{"label": "god", "path": ""}],
+        knobs.stages,
+        plan,
+        max_ticks=knobs.max_ticks,
+        difficulty=knobs.difficulty,
+        lives=knobs.lives,
+        level=knobs.level,
+    )
+    if not units:
+        _log("[course-once] no pairs to evaluate (empty seed plan?)")
+        return 2
+    _log(
+        f"[course-once] units={len(units)}（每权重一个连续单元，跨 {n_stages} 关）"
+        f" games/weight={games}"
+    )
+
+    _course_once_units(
+        units,
+        _ExecPlan(
+            bun=bun, eval_log=eval_log, args=args, cfg=cfg, batch=batch, epoch=epoch, policy=policy
+        ),
+    )
+
+    got = _course_once_rows(spec, eval_log, meta, n_stages, seed0, games)
+    if got is None:
+        _log("[course-once] no rows written (all units deferred?)")
+        return 1
+    rows, out_path = got
+    expected = games * (len(weights) if policy != "god" else 1)
+    return _course_once_report(rows, out_path, expected)
 
 
 if __name__ == "__main__":

@@ -29,6 +29,92 @@
 
 ---
 
+## §382 分诊第四十四格：`worker/loop_guards_leg._kickstart_burn` 171 → 50 + 读数/落账/提示/停腿四段（2026-11-27）
+
+`_kickstart_burn` 原来是「三条前置早退 → 解析参照物 → 判定 → 状态转移落账 → notify/halt
+两条收尾」全部平铺。三个早退各自带副作用（清落后计数、只喊一次的回退警告、读账本失败只记
+一行），收尾两条的日志/账本/云机达令顺序又不能换。
+
+| 段 | 行数 | 职责 |
+|---|---:|---|
+| `_kickstart_burn` | 50 | 判定 + 状态转移 + notify/halt 分派 |
+| `_BurnInput` | 6 字段 | 一次判定所需的账本读数与止损口径 |
+| `_burn_input` | 75 | 三条前置闸 + 读账本 + 解析参照物（早退副作用原样保留） |
+| `_burn_note` | 40 | 落后计数状态转移：日志 + `write_kickstart_burn` |
+| `_burn_notify` | 22 | `notify`：只提示一次 + 云机达令 + 判据账，**不停腿** |
+| `_burn_halt` | 30 | `halt`：收官日志 + 云机达令 + 判据账 + 收工原因 |
+
+**关键选择**：早退不抛、不返回哨兵对象，而是 `_burn_input` 返回 `None` —— 三个早退的
+副作用（清 streak / 置 `_burn_fallback_logged` / 读失败只记一行）都留在 helper 内逐字执行。
+`notify` 与 `halt` 各一个函数：它们是**两种语义**（只提示 vs 真停车），合在一个分支里正是
+2026-10-23 现场「notify → 只提示」紧接「training PAUSED」的来源。
+
+**证明**：9 组场景（baseline 触发 / notify / auto 无对端 / paired / 缰绳退火 / 缰绳关 /
+无 it0 基线 / streak 不变 / 未触发）逐字段比对返回码、日志逐行、账本事件、云机达令、
+收工原因、streak 与两个一次性标志 ⇒ **0 差异**。
+
+**守卫**：定向 44 passed（三格合用一条命令，含 shape / reuse 闸）；LOC 284 → 324；
+存量 19 文件 / 20 → 16 / 17（三格合计）。
+
+## §381 分诊第四十三格：`remote/plan_run._run_iteration` 172 → 67 + init/执行/留痕三段（2026-11-27）
+
+一轮的 172 行有三个不同寿命的块：**上一轮产物落地**（权重整份 + opt 基准，`ctx.last_opt_sha`
+是它的副作用）、**本轮 spec 装配**（volume / greedy / pairs / iter_spec / manifest）、以及
+**执行与留痕**（payload → run_job → validate → 采样档/轮换/下一轮 opt）。
+
+| 段 | 行数 | 职责 |
+|---|---:|---|
+| `_run_iteration` | 67 | volume/greedy/pairs/spec/manifest 的装配序列 |
+| `_iter_init` | 62 | 权重整份落地 + opt 落地（写 `ctx.last_opt_sha`） |
+| `_execute_iter` | 55 | payload + 锚点补齐 + `run_job` + `validate_result` |
+| `_annotate_iter_result` | 25 | 采样档 / 轮换事件 / 下一轮 opt 链 |
+
+**关键选择**：`iter_spec` **留在** `_run_iteration` —— `test_iter_spec_seam_is_the_engine_module`
+钉的是「调用点在引擎、patch `remote.plan_run.iter_spec` 生效」，搬进 helper 没有收益却要改
+seam。`run_job = ctx.run_job_fn` 与 `_reseed_anchors` 随执行腿搬到 `_execute_iter`，两条守卫
+（无 `_real_run_job` 回落 / 每轮重种锚点）跟着改钉新函数体，判据不变。
+`_iter_init` 对 `ctx.last_opt_sha` 的写入是既有契约（下一轮 manifest 的 `opt_sha`），
+所以它留在 init 段而不是藏在返回值里。
+
+**证明**：9 组假 `RunContext` 场景（plain / opt 基准缺失 / 未注入 run_job / code+ts 随包字节 /
+双倍数 + volume / 窗口覆盖 + profile / greedy / rotation 事件 / 无 opt 字节）逐字段比对
+返回 result、`ctx.last_opt_sha`、日志、调用序列、`RunJobSpec` 全字段、manifest 与 payload ⇒
+**0 差异**。
+
+**守卫**：LOC 791 → 822；存量 18 文件 / 19 → 17 / 18。
+
+## §380 分诊第四十二格：`trainer/eval_course_once.main` 174 → 80 + spec/课程/配置/执行/落盘/汇总六段（2026-11-27）
+
+`main` 原本从 argparse 一路写到 provenance：spec → runDir/env → 课程旋钮 → 分派配置 →
+`RunnerSpec` 旋钮 → 逐单元跑 → 读账本映射 → 落盘与完整性。每一段只服务下一段，但入口读
+不出「哪几行会动环境、哪几行会写账本」。
+
+| 段 | 行数 | 职责 |
+|---|---:|---|
+| `main` | 80 | 顺序编排 + 两条响亮退 2（无关卡 / nn 无权重） |
+| `_course_once_spec` | 8 | argparse + spec JSON（显式 `dict` 变量避免 no-any-return） |
+| `_course_once_run_dir` | 9 | runDir mkdir + 两个诊断 env（缺省才设） |
+| `_CourseKnobs` | 9 字段 | 课程正文里影响一次评估的全部读数（推理规则已展开成布尔） |
+| `_course_once_knobs` | 25 | 课程 → knobs；`None` = 无自定义关卡 |
+| `_course_once_cfg` | 20 | rl-config + `noNodes` / `localSlots` 的内存覆盖 + 过门节点 |
+| `_course_once_args` | 22 | `BatchEvalRunner` 读的旋钮袋 |
+| `_ExecPlan` | 7 字段 | 逐单元跑所需的执行面 |
+| `_course_once_units` | 35 | 每权重一个连续单元 + 专用权重桶 + 逐单元墙钟 |
+| `_course_once_rows` | 18 | 账本 → 工具 JSONL（按 id 排序落盘） |
+| `_course_once_report` | 13 | provenance + 落盘行数 + 完整性 |
+
+**关键选择**：两个载体用 `NamedTuple` 而不是 `@dataclass` —— `tests/trainer/test_eval_course_once.py`
+用 `module_from_spec` + `exec_module` 加载本模块但**不注册 `sys.modules`**，而 `@dataclass`
+在 `kw_only` 处理时要 `sys.modules[cls.__module__]` ⇒ 导入期 `AttributeError`
+（本格第一次跑门禁就撞上）。NamedTuple 没有这个前提，且本仓的同型载体早已是 NamedTuple。
+
+**证明**：10 组 spec 场景（单权重 / 双权重三关 / 行数不全 / 零行 / god / 无关卡 / 无权 /
+`localSlots=0 + noNodes` / 推理规则 + 四个开关 / 旧账本残留）逐字段比对返回码、归一化日志、
+`RunnerSpec` 全字段（含 args/cfg/batch/unit/kind）与产物 JSONL ⇒ **0 差异**。
+
+**守卫**：`test_oneshot_runner_uses_dedicated_weight_kind` 的「`BatchEvalRunner(` 恰好一处 +
+`kind=ONESHOT_EVAL_KIND`」仍成立；LOC 287 → 358；存量 19 文件 / 20 → 18 / 19。
+
 ## §379 分诊第四十一格：`trainer/eval_a_once.main` 181 → 114 + CLI/课程/权重/配置/基线五段（2026-11-26）
 
 `main` 原本是一条 181 行的直线：25 行 argparse → 基线 iter 护栏 → 课程/`ns` → traj 与

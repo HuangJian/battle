@@ -11413,3 +11413,55 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：10 组账本/CLI 场景逐字段 **0 差异**（返回码 / 归一化日志 / `EvalDispatchSpec` 全字段 /
   账本行）；定向 45 passed；存量 20 文件 / 22 → 19 / 20（两格合计；本文件条目删除）；全量 pygate 绿。
   全文 → `docs/nn/engineering.md` §379。
+
+## §2026-11-27-eval-course-once-seams
+
+- **背景**：`trainer/eval_course_once.main` 174 行从 argparse 写到 provenance：spec / runDir /
+  课程旋钮 / 分派配置 / runner args / 逐单元执行 / 账本映射 / 落盘汇总。环境准备与账本写入
+  混在一条序列里。
+
+- **决定**：拆 `_course_once_spec` / `_course_once_run_dir` / `_CourseKnobs` /
+  `_course_once_knobs` / `_course_once_cfg` / `_course_once_args` / `_ExecPlan` /
+  `_course_once_units` / `_course_once_rows` / `_course_once_report`；`main` 只留顺序编排（80 行）。
+  两个载体用 `NamedTuple`。
+
+- **被否决**：`@dataclass(kw_only=True)` —— 该模块的测试用 `module_from_spec` + `exec_module`
+  加载且**不注册 `sys.modules`**，`dataclass` 处理 `kw_only` 时要 `sys.modules[cls.__module__]`
+  ⇒ 导入期 AttributeError（本格第一次门禁就撞上）。NamedTuple 无此前提。
+
+- **验证**：10 组 spec 场景逐字段 **0 差异**（返回码 / 归一化日志 / `RunnerSpec` 全字段 /
+  产物 JSONL）；定向 44 passed；存量 19 文件 / 20 → 18 / 19；全量 pygate 绿。
+  全文 → `docs/nn/engineering.md` §380。
+
+## §2026-11-27-plan-run-iteration-phases
+
+- **背景**：`remote/plan_run._run_iteration` 172 行把三种寿命的块平铺：上一轮产物落地
+  （写 `ctx.last_opt_sha`）、本轮 spec 装配、执行与结果留痕。
+
+- **决定**：拆 `_iter_init`（权重整份 + opt 落地的副作用留在这里）/ `_execute_iter`
+  （payload + 锚点补齐 + `run_job` + validate）/ `_annotate_iter_result`（采样档 / 轮换 /
+  下一轮 opt）；`_run_iteration` 只留 volume→greedy→pairs→spec→manifest 的装配（67 行）。
+
+- **被否决**：把 `iter_spec` 也搬进 helper —— `test_iter_spec_seam_is_the_engine_module` 钉住
+  「调用点在 `_run_iteration`、patch `remote.plan_run.iter_spec` 生效」，搬走只改 seam 不加可读性。
+  `run_job` 赋值与 `_reseed_anchors` 随执行腿搬家，守卫改钉 `_execute_iter`（判据不变）。
+
+- **验证**：9 组假 `RunContext` 场景逐字段 **0 差异**（result / `last_opt_sha` / 日志 /
+  调用序列 / `RunJobSpec` / manifest / payload）；定向 44 passed；存量 18 文件 / 19 → 17 / 18；
+  全量 pygate 绿。全文 → `docs/nn/engineering.md` §381。
+
+## §2026-11-27-kickstart-burn-seams
+
+- **背景**：`worker/loop_guards_leg._kickstart_burn` 171 行 = 三条前置早退（各带副作用）+
+  参照物解析 + 判定 + 状态转移落账 + notify/halt 两条收尾。一次性标志与收工原因散在长序列里。
+
+- **决定**：早退/读数收进 `_burn_input`（返回 `None`，三个副作用原样保留）+ frozen
+  `_BurnInput`；状态转移落账 `_burn_note`；`notify` / `halt` 各一个收尾函数；
+  `_kickstart_burn` 只留判定与分派（50 行）。
+
+- **被否决**：把 notify 与 halt 合在一个分支 —— 它们是两种语义（只提示 vs 真停车），
+  2026-10-23 现场「notify → 只提示」紧接「training PAUSED」正是混在一起的产物。
+
+- **验证**：9 组场景逐字段 **0 差异**（返回码 / 日志 / 账本事件 / 云机达令 / 收工原因 /
+  streak / 两个一次性标志）；定向 44 passed；存量 17 文件 / 18 → 16 / 17；全量 pygate 绿。
+  全文 → `docs/nn/engineering.md` §382。

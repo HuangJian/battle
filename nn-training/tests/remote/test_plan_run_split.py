@@ -198,7 +198,7 @@ def test_engine_has_no_worker_fallback_any_more() -> None:
 
     判据分三层，缺一不可：
       ① `plan_run` 里没有 `_real_run_job` 这个名字（连引用都没有）；
-      ② `_run_iteration` 里没有 `... or _real_run_job` 这种回落；
+      ② `_execute_iter` 里没有 `... or _real_run_job` 这种回落（装配点 2026-11-26 起住这条腿）；
       ③ 取而代之的是一条**响亮**的 RuntimeError（漏注入时立即炸，而不是静默跑错执行器）。
     """
     tree = _tree(ENGINE_FILE)
@@ -214,9 +214,9 @@ def test_engine_has_no_worker_fallback_any_more() -> None:
         for a in n.names
     } | {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
     assert "_real_run_job" not in imported
-    # ② `run_job = ctx.run_job_fn`——**没有** `or …` 回落
+    # ② `run_job = ctx.run_job_fn`——**没有** `or …` 回落（执行腿是 `_execute_iter`）
     run_iter = next(
-        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_run_iteration"
+        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_execute_iter"
     )
     assigns = [
         n
@@ -224,9 +224,9 @@ def test_engine_has_no_worker_fallback_any_more() -> None:
         if isinstance(n, ast.Assign)
         and any(isinstance(t, ast.Name) and t.id == "run_job" for t in n.targets)
     ]
-    assert len(assigns) == 1, f"`_run_iteration` 里 run_job 的赋值应只有一处，实得 {len(assigns)}"
+    assert len(assigns) == 1, f"`_execute_iter` 里 run_job 的赋值应只有一处，实得 {len(assigns)}"
     assert ast.unparse(assigns[0].value) == "ctx.run_job_fn", (
-        f"`_run_iteration` 里又出现了回落：run_job = {ast.unparse(assigns[0].value)}"
+        f"`_execute_iter` 里又出现了回落：run_job = {ast.unparse(assigns[0].value)}"
     )
     # ③ 漏注入时**响亮报错**（而不是 None() 静默炸在别处）
     assert "run_job_fn 未注入" in ENGINE_FILE.read_text(encoding="utf-8")
@@ -337,12 +337,14 @@ def test_facade_covers_every_engine_name_the_entry_reads() -> None:
 
 
 def _run_iteration_calls(name: str) -> bool:
-    """`_run_iteration` 里有没有**直接调** `name`（AST；与措辞无关）。
+    """执行腿（`_execute_iter`）里有没有**直接调** `name`（AST；与措辞无关）。
 
+    2026-11-26 起「一轮的装配」拆成 `_iter_init` / `_run_iteration` / `_execute_iter` /
+    `_annotate_iter_result`：每轮重种锚点随执行腿走，判据跟着接缝迁到 `_execute_iter`。
     拆成函数是为了不住断言里挂 `.py` 派生的名字（文本断言预算口径 B 的计数面）。
     """
     run_iter = next(
-        n for n in _tree(ENGINE_FILE).body if isinstance(n, ast.FunctionDef) and n.name == "_run_iteration"
+        n for n in _tree(ENGINE_FILE).body if isinstance(n, ast.FunctionDef) and n.name == "_execute_iter"
     )
     called = {
         n.func.id
@@ -362,7 +364,7 @@ def test_run_iteration_reseeds_the_anchors_every_round() -> None:
     # `pytest.fail` 而不是 `assert`：`_run_iteration_calls` 是读 `.py` 面的生产者，断言里引用它
     # 会被文本断言预算（口径 B）计一笔 —— 而这里是纯粹的 AST 结构判据（谁调了谁），不是文本判据。
     if not _run_iteration_calls("_reseed_anchors"):
-        pytest.fail("`_run_iteration` 不再每轮重种锚点——缓存被清后整段会死在 `_fetch_ref` 上")
+        pytest.fail("执行腿不再每轮重种锚点——缓存被清后整段会死在 `_fetch_ref` 上")
 
 
 def test_iter_spec_seam_is_the_engine_module() -> None:
