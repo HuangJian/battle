@@ -11569,3 +11569,20 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
   有账本时重复日志并清掉刚读回的拒收指纹），`__init__` 最终 18 行，AST 守卫钉每阶段一次。
   永久差分用例 → `tests/test_refactor_split_seams.py`（11 例）。
   全文 → `docs/nn/engineering.md` §387。
+
+## §2026-11-27-hub-seams
+
+- **背景**：P0-8 的 G19 存量里，hub 面有 11 处私有 patch；其中 6 处是 hub 自己的
+  `task_pack._net_urlopen` 与 `disp._client`，5 处是 remote `job_lifecycle` 的
+  `_request` / `_wire_add`。不先给 hub 一个端口样板，后面每个包都会继续复制私有名。
+
+- **决定**：`hub/seams.py` 用 `NetPort` Protocol + `NET` 实例收 task-pack 的出站边界；
+  `task_pack` 的三个控制台函数收 `net=`（缺省 `seams.NET`），`OfflinePushSpec.client_mod`
+  继续做构造注入。层账本：`hub.seams` L0、`hub.task_pack` L1、
+  `hub.offline_ingest` / `hub.offline_push_pack` L2。
+
+- **被否决**：只改公开名（仍是模块 patch、替身不隔离）；patch `common.net_http.urlopen`
+  （全局出口）；在 `task_pack` 内重复定义端口（下一个包再复制一份）。
+
+- **验证**：G19 392 / 95 → **384 / 91**（hub 自有 6 → 0）；定向 232 passed；
+  完整 pygate **7087 passed / 3 skipped**，ruff + mypy 绿。全文 → `docs/nn/engineering.md` §388。

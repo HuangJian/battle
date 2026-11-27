@@ -49,6 +49,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from hub import seams
 from hub import task_pack as tp
 from hub.task_pack import DEFAULT_CONSOLE_URL
 from tests.conftest import PRODUCTION_STATE_PINS, TEST_CONSOLE_URL
@@ -79,17 +80,18 @@ def test_hub_dials_the_stub_not_the_live_console(monkeypatch: pytest.MonkeyPatch
 
     只断言「环境变量是死桩」不够——真正要钉的是 hub 代码的解析路径（`hub/task_pack.py::
     trigger_auto_handoff` 的 `os.environ.get(BCITY_CONSOLE_URL) or DEFAULT_CONSOLE_URL`）。
-    把 `_net_urlopen` 换成捕获器：既不碰网络，又能看见它到底拨了哪个 URL；同时钉住
+    把 `hub.seams.NET` 换成捕获器：既不碰网络，又能看见它到底拨了哪个 URL；同时钉住
     不可达的语义（降级为手动，**不得**读成「已触发」）。
     """
     seen: list[str] = []
 
-    def _capture(req: Any, timeout: float | None = None) -> Any:
-        """替身：只记 URL —— 不碰网络（本用例要看的正是「拨哪个地址」）。"""
-        seen.append(str(req.full_url))
-        raise OSError("stub：测试期不许有真控制台")
+    class _Capture:
+        def open(self, req: Any, timeout: float | None = None) -> Any:
+            """替身：只记 URL —— 不碰网络（本用例要看的正是「拨哪个地址」）。"""
+            seen.append(str(req.full_url))
+            raise OSError("stub：测试期不许有真控制台")
 
-    monkeypatch.setattr(tp, "_net_urlopen", _capture)
+    monkeypatch.setattr(seams, "NET", _Capture())
     ok, why = tp.trigger_auto_handoff("c5-gae", log=lambda _m: None)
     assert seen and seen[0].startswith(TEST_CONSOLE_URL), (
         f"hub 拨的不是死桩：{seen}（生产默认是 {DEFAULT_CONSOLE_URL}）"

@@ -205,18 +205,21 @@ LAYERS: dict[str, int] = {
     # 它存在的理由就是复用账本：第三个副本（`_repo_root` / `_spawn` / `_stop_child`）会立刻
     # 变成三份各自会漂的真相。
     "remote.child_proc": 0,
-    # 任务包新鲜度门 / 缺包自愈门 / 清单读数的**纯判据**（合并 origin 时新拆的叶子）：只靠
-    # `common.protocol` + `net_http`(L0) ⇒ **L1**。放在这里（而不是挂在 `hub/http_face`）是因为
-    # 它有两个低层读者：`hub.offline`（取包端点）与 `hub.queue_offline`（离线清单）。
-    "hub.task_pack": 0,
+    # hub 的第三方边界端口（2026-11-27，P0-8 单包样板）：只碰 stdlib + `common.net_http`
+    # ⇒ **L0**。`hub.task_pack` 通过 `seams.NET` 出站，不再直连 `common.net_http`。
+    "hub.seams": 0,
+    # 任务包新鲜度门 / 缺包自愈门 / 清单读数的**判据**：依赖 `hub.seams`(L0) +
+    # `common.protocol` ⇒ **L1**。放在这里（而不是挂在 `hub/http_face`）是因为它有两个低层
+    # 读者：`hub.offline`（取包端点）与 `hub.queue_offline`（离线清单）。
+    "hub.task_pack": 1,
 
     # ★ 2026-10-24（plan/push-mode-notebooks §6.6/§6.7，W5）：离线 push 的 hub 侧四件。
-    # `offline_ingest` 站在 `hub.task_pack`(L0) 上（共享入账 + 盖章/下一段）⇒ **L1**；
+    # `offline_ingest` 站在 `hub.task_pack`(L1) 上（共享入账 + 盖章/下一段）⇒ **L2**；
     # `offline_push_assign` 与 `offline_push_client` 只碰 stdlib/common ⇒ **L0**；
     # 派发器 `offline_push` 站在 `remote.push_dispatch`(L2) 与 `hub.offline_push_workers`(L3)
     # 上 ⇒ **L4**（`hub.offline` 仍是 L3：两条腿互不 import）。
-    # `hub.offline`(L3) 反向 import `offline_ingest` 不改变它的秩（1 < 3）。
-    "hub.offline_ingest": 1,
+    # `hub.offline`(L3) 反向 import `offline_ingest` 不改变它的秩（2 < 3）。
+    "hub.offline_ingest": 2,
     "hub.offline_push_assign": 0,
     "hub.offline_push": 4,
     "remote.offline_push_client": 0,
@@ -227,8 +230,8 @@ LAYERS: dict[str, int] = {
     "hub.offline_pack_fresh": 0,
     "hub.offline_push_workers": 3,
     # ★ 2026-10-25（LOC 预算拆出）：外层任务包组装（`build_task_zip` / `write_resume`）——
-    # 只做文件 IO + 常量拼装，依赖 `hub.task_pack`(L0) 与 `common.protocol`(L0) ⇒ 拓扑秩 **L1**。
-    "hub.offline_push_pack": 1,
+    # 只做文件 IO + 常量拼装，依赖 `hub.task_pack`(L1) 与 `common.protocol`(L0) ⇒ 拓扑秩 **L2**。
+    "hub.offline_push_pack": 2,
 
     "remote.result_upload": 0,
     # 回传腿的**进程模式**（2026-10-20，`plan/ppo-worker-transfer-isolation`）：父侧代理

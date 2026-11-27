@@ -42,8 +42,8 @@ from threading import Lock
 
 from common.hold_window import hold_progress_stale_sec
 from common.logutil import tag_logger
-from common.net_http import urlopen as _net_urlopen
 from common.protocol import PLAN_NAME
+from hub import seams
 
 #: 「这个包读不出来」的异常集（P0-7 第十七批，2026-11-18）。
 #:
@@ -681,13 +681,16 @@ def reset_task_pack_miss_triggers(course: str = "") -> None:
     pack_triggers().clear_miss(course)
 
 
-def trigger_task_bundle_export(course: str, log=_hub_log) -> tuple[bool, str]:
+def trigger_task_bundle_export(
+    course: str, log=_hub_log, *, net: seams.NetPort | None = None
+) -> tuple[bool, str]:
     """POST 控制台 action `exportTaskBundle`（控制台是**唯一打包者**，hub 只触发）。
 
     返回 `(是否算触发成功, 原因)`。`busy`（上一次导出还在跑 ⇒ HTTP 409）**算触发成功**
     ——它本来就会产出新包。控制台不可达/只读门控（403）⇒ 不算，调用方降级成"请手动导出"。
-    回环地址经 `common.net_http.urlopen`（用户级 HTTP_PROXY 会认不出 `127.*`，实测踩过）。
+    回环地址经 `hub.seams.NET`（用户级 HTTP_PROXY 会认不出 `127.*`，实测踩过）。
     """
+    net = net or seams.NET
     base = os.environ.get(CONSOLE_URL_ENV, "").strip() or DEFAULT_CONSOLE_URL
     body = json.dumps({"course": course}, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
@@ -697,7 +700,7 @@ def trigger_task_bundle_export(course: str, log=_hub_log) -> tuple[bool, str]:
         method="POST",
     )
     try:
-        with _net_urlopen(req, timeout=TASK_PACK_TRIGGER_TIMEOUT_SEC) as resp:
+        with net.open(req, timeout=TASK_PACK_TRIGGER_TIMEOUT_SEC) as resp:
             resp.read()
     except urllib.error.HTTPError as e:
         if e.code == 409:
@@ -721,7 +724,11 @@ def auto_handoff_failure(course: str) -> tuple[str, float]:
 
 
 def console_export_status(
-    course: str, *, log=_hub_log, timeout: float = TASK_PACK_TRIGGER_TIMEOUT_SEC
+    course: str,
+    *,
+    log=_hub_log,
+    timeout: float = TASK_PACK_TRIGGER_TIMEOUT_SEC,
+    net: seams.NetPort | None = None,
 ) -> dict:
     """问控制台「上次导出成没成」+「此刻有没有本课的导出进程」（**只读**动作，零副作用）。
 
@@ -738,6 +745,7 @@ def console_export_status(
     **不可知不是失败**：没写过状态（正在跑 / 被 kill / 旧版本）/ 控制台不可达 ⇒ 只回 unknown；
     这条腿只负责「**知道**失败时少烧资源」，不负责把未知当失败。
     """
+    net = net or seams.NET
     base = os.environ.get(CONSOLE_URL_ENV, "").strip() or DEFAULT_CONSOLE_URL
     body = json.dumps({"course": course}, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
@@ -747,7 +755,7 @@ def console_export_status(
         method="POST",
     )
     try:
-        with _net_urlopen(req, timeout=timeout) as resp:
+        with net.open(req, timeout=timeout) as resp:
             parsed = json.loads(resp.read().decode("utf-8") or "{}")
     except _CONSOLE_NET_ERRORS as e:
         log(f"export-status {course}: 控制台不可达/不接受（{type(e).__name__}）——视为不可知")
@@ -775,7 +783,11 @@ def console_export_status(
 
 
 def poll_console_export_status(
-    course: str, *, now: float | None = None, log=_hub_log
+    course: str,
+    *,
+    now: float | None = None,
+    log=_hub_log,
+    net: seams.NetPort | None = None,
 ) -> dict:
     """在「谁在导包」的窗口里问一次控制台：**限频** + **只认新事实**。
 
@@ -794,7 +806,7 @@ def poll_console_export_status(
     allow, last = pack_triggers().poll_window(course, now=now)
     if not allow:
         return {}
-    got = console_export_status(course, log=log)
+    got = console_export_status(course, log=log, net=net)
     exporting = got.get("exporting")
     if got.get("unknown"):
         if exporting is True:
@@ -842,7 +854,9 @@ def reset_auto_handoff_triggers(course: str = "") -> None:
     pack_triggers().clear_handoff(course)
 
 
-def trigger_auto_handoff(course: str, log=_hub_log) -> tuple[bool, str]:
+def trigger_auto_handoff(
+    course: str, log=_hub_log, *, net: seams.NetPort | None = None
+) -> tuple[bool, str]:
     """触发控制台的**自动交接**动作（写 rl-config + 导包；**不写意图、不 pin**）。
 
     与 `trigger_task_bundle_export` 的分工：那个是「缺包自愈」（取包路径的附带动作）；
@@ -851,6 +865,7 @@ def trigger_auto_handoff(course: str, log=_hub_log) -> tuple[bool, str]:
     本进程的 `/admin/nodes/register` 只 upsert `nodes[]` 的 `managed` 条目，
     §2026-10-10-goalnn-rollout-node-auto-register）。控制台不可达 ⇒ 降级为手动，半状态由 stalled 兜住。
     """
+    net = net or seams.NET
     base = os.environ.get(CONSOLE_URL_ENV, "").strip() or DEFAULT_CONSOLE_URL
     body = json.dumps({"course": course}, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
@@ -860,7 +875,7 @@ def trigger_auto_handoff(course: str, log=_hub_log) -> tuple[bool, str]:
         method="POST",
     )
     try:
-        with _net_urlopen(req, timeout=TASK_PACK_TRIGGER_TIMEOUT_SEC) as resp:
+        with net.open(req, timeout=TASK_PACK_TRIGGER_TIMEOUT_SEC) as resp:
             resp.read()
     except urllib.error.HTTPError as e:
         if e.code == 409:

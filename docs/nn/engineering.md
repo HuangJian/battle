@@ -29,6 +29,44 @@
 
 ---
 
+## §388 P0-8 单包端口样板：hub 的 task-pack 网络端口（2026-11-27）
+
+**背景**：P0-8 的关键不是把 `_net_urlopen` 改个名，而是让测试不再需要知道实现里的私有名。
+hub 测试面原 G19 = 11 处：6 处 hub 自有（`task_pack` 5 + `offline_push` 1），5 处是 remote
+`job_lifecycle` 的 `_request` / `_wire_add`。本轮只动 hub 自有部分。
+
+**决定**：
+
+* 新增 `hub/seams.py`：`NetPort` Protocol + `_NetHTTP` 缺省实现 + `NET` 实例；只碰 stdlib 与
+  `common.net_http` ⇒ 层号 **L0**。
+* `hub/task_pack` 的三个控制台调用点（`trigger_task_bundle_export` / `console_export_status` /
+  `trigger_auto_handoff`）收 `net: seams.NetPort | None = None`，缺省 `seams.NET`；
+  `poll_console_export_status` 透传。测试传替身，不 patch 私有名。
+* `hub/offline_push` 本来就有 `OfflinePushSpec.client_mod` 构造注入；两个测试从 patch
+  `disp._client` 改为构造期传参（其中一个本来不在 G19 口径里，顺手消掉私有属性读）。
+* 层账本随新叶子上移：`hub.task_pack` 0 → 1；`hub.offline_ingest` 1 → 2；
+  `hub.offline_push_pack` 1 → 2；其余读者（`hub.offline` / `queue_*`）仍严格向下。
+
+**被否决**：
+
+* 只把 `_net_urlopen` 改名公开 —— 测试仍在 patch 模块名，替身不按调用点隔离，端口对象也没有家。
+* 直接 patch `common.net_http.urlopen` —— 全局出口，一个测试会影响同进程其它 hub/worker 腿。
+* 在 `hub.task_pack` 内定义 `NET` —— 省掉层账本，但下一个 hub 模块要再复制一份端口，样板失去复用价值。
+
+**证明**：
+
+* `tests/hub/test_offline_task_pack.py` 4 处、`test_auto_handoff.py` 1 处、
+  `test_offline_push_dispatch.py` 1 处私有 patch 归零；共享夹具
+  `tests/common/test_offline_task_queue.py`（1）与 `tests/test_production_isolation.py`（1）
+  也改打 `hub.seams.NET`。
+* G19 `tests/golden/monkeypatch_private_baseline.json`：392 / 95 → **384 / 91**；
+  hub 面自有私有 patch **6 → 0**，剩 5 处是 remote 包的 `_request` / `_wire_add`。
+* 定向 232 passed；完整 nn pygate **7087 passed / 3 skipped**，ruff + mypy 绿。
+* 行为未动：同一批用例覆盖 409/busy、不可达降级、unknown 三态、认领/收摊重放。
+
+**下一步**：remote 包的 `_request` / `_wire_add` 同型端口；`hub/queue_*` 的 `_stores` 私有读数
+仍走 G5 的公开 view，不混进本轮。
+
 ## §386 分诊第四十八格（批）：云端三段启动装配（2026-11-27）
 
 三处都是「一次启动走到底」的装配段，切法按**阶段边界**：argv 定义 / 凭据后的读数 / 会话装配。

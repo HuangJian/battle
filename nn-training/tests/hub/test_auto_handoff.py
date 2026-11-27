@@ -181,7 +181,7 @@ def _stub_console_export_status(
     """
     calls: list[str] = []
 
-    def fake(course: str, log=None, timeout=None):
+    def fake(course: str, log=None, timeout=None, net=None):
         calls.append(course)
         if unknown:
             # `present` 缺省跟随 `unknown`：不可达时不给（调用方也不该用）。
@@ -705,11 +705,12 @@ def test_console_status_running_stale_or_expired_is_unknown(monkeypatch) -> None
             return json.dumps(doc).encode("utf-8")
 
     def ask(status: dict | None, exporting: object = _MISSING) -> dict:
+        class _Net:
+            def open(self, _req, timeout=None):
+                return _Resp(status, exporting)
+
         monkeypatch.setattr(task_pack_mod, "console_export_status", _REAL_CONSOLE_EXPORT_STATUS)
-        monkeypatch.setattr(
-            task_pack_mod, "_net_urlopen", lambda _req, timeout=None: _Resp(status, exporting)
-        )
-        return _REAL_CONSOLE_EXPORT_STATUS("c1")
+        return _REAL_CONSOLE_EXPORT_STATUS("c1", net=_Net())
 
     # ★ 2026-10-22：返回值多了 `present` / `exporting` 两个事实字段（`exporting` 三态，
     #   旧控制台不给 ⇒ `None`，**不许当 False**）。

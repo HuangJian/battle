@@ -43,6 +43,16 @@ from tests.helpers.http_server import serve_fast
 TOKEN = "sekret"
 
 
+class _Net:
+    """测试替身：只实现 `hub.seams.NetPort.open`，不碰任何私有名。"""
+
+    def __init__(self, open_fn) -> None:
+        self._open = open_fn
+
+    def open(self, req, timeout=30.0):
+        return self._open(req, timeout=timeout)
+
+
 # ------------------------------------------------------------------ 夹具
 
 
@@ -431,25 +441,26 @@ def test_task_pack_without_active_weights_is_served(tmp_path, monkeypatch) -> No
     assert calls == []
 
 
-def test_trigger_marks_busy_as_success(tmp_path, monkeypatch) -> None:
+def test_trigger_marks_busy_as_success(tmp_path) -> None:
     """控制台回 409（上一次导出还在跑）⇒ **算触发成功**（它本来就会产新包）。"""
     import urllib.error
 
     def fail(req, timeout=0.0):
         raise urllib.error.HTTPError(req.full_url, 409, "busy", {}, None)  # type: ignore[arg-type]
 
-    # 实现住 `hub/task_pack.py` ⇒ 它读的 `_net_urlopen` 也在那里（patch 门面是空操作）。
-    monkeypatch.setattr(task_pack_mod, "_net_urlopen", fail)
-    ok, why = task_pack_mod.trigger_task_bundle_export("c5-gae", log=lambda _m: None)
+    ok, why = task_pack_mod.trigger_task_bundle_export(
+        "c5-gae", log=lambda _m: None, net=_Net(fail)
+    )
     assert ok is True and why == "busy"
 
 
-def test_trigger_reports_unreachable_console(tmp_path, monkeypatch) -> None:
+def test_trigger_reports_unreachable_console(tmp_path) -> None:
     def boom(req, timeout=0.0):
         raise OSError("connection refused")
 
-    monkeypatch.setattr(task_pack_mod, "_net_urlopen", boom)
-    ok, why = task_pack_mod.trigger_task_bundle_export("c5-gae", log=lambda _m: None)
+    ok, why = task_pack_mod.trigger_task_bundle_export(
+        "c5-gae", log=lambda _m: None, net=_Net(boom)
+    )
     assert ok is False and why == "OSError"
 
 
@@ -651,18 +662,16 @@ def test_a_programmer_error_in_the_pack_read_is_not_read_as_a_corrupt_pack(
         task_pack_mod.pack_seg_end_kind(pack)
 
 
-def test_console_unreachable_is_unknown_but_our_own_bug_surfaces(monkeypatch) -> None:
+def test_console_unreachable_is_unknown_but_our_own_bug_surfaces() -> None:
     """`console_export_status`：传输失败 ⇒ unknown（不可知不是失败）；本模块的 bug ⇒ 穿出去。"""
 
     def refuse(*_a, **_k):
         raise urllib.error.URLError("connection refused")
 
-    monkeypatch.setattr(task_pack_mod, "_net_urlopen", refuse)
-    assert task_pack_mod.console_export_status("mk-1") == {"unknown": True}
+    assert task_pack_mod.console_export_status("mk-1", net=_Net(refuse)) == {"unknown": True}
 
     def boom(*_a, **_k):
         raise AttributeError("request built wrong")
 
-    monkeypatch.setattr(task_pack_mod, "_net_urlopen", boom)
     with pytest.raises(AttributeError):
-        task_pack_mod.console_export_status("mk-1")
+        task_pack_mod.console_export_status("mk-1", net=_Net(boom))

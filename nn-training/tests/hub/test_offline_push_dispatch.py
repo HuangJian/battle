@@ -975,12 +975,12 @@ def test_task_zip_carries_resume_json_and_a_deterministic_id(
                 shutil.rmtree(z.parent, ignore_errors=True)
 
 
-def test_adoption_accepts_only_the_same_unfinished_task(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_adoption_accepts_only_the_same_unfinished_task(tmp_path: Path) -> None:
     """F9/F10：上传没拿到 202（超时/409）时，确定性 task_id 让「同一单」可判。"""
+    state: dict = {}
+    client = types.SimpleNamespace(get_state=lambda _url, _key: dict(state))
     hub, _pack = _mk_hub(tmp_path)
-    disp, _workers = _dispatcher(hub, tmp_path)
+    disp, _workers = _dispatcher(hub, tmp_path, client_mod=client)
     try:
         disp.assignments.put(
             {
@@ -992,12 +992,13 @@ def test_adoption_accepts_only_the_same_unfinished_task(
             }
         )
         tid, sha = "0123456789abcdef", "s" * 64
-        state: dict = {
-            "phase": "running",
-            "ack": False,
-            "task": {"task_id": tid, "course": COURSE, "pack_sha256": sha},
-        }
-        monkeypatch.setattr(disp._client, "get_state", lambda _url, _key: dict(state))
+        state.update(
+            {
+                "phase": "running",
+                "ack": False,
+                "task": {"task_id": tid, "course": COURSE, "pack_sha256": sha},
+            }
+        )
         meta = {"task_id": tid, "pack_sha256": sha, "resume_it": 2}
         adopted = disp._adopt_existing(COURSE, "http://w", "k", meta)
         assert adopted is True
@@ -1023,12 +1024,13 @@ def test_adoption_accepts_only_the_same_unfinished_task(
         disp.stop()
 
 
-def test_settle_without_an_answer_is_parked_then_replayed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_settle_without_an_answer_is_parked_then_replayed(tmp_path: Path) -> None:
     """F3：收摊时 worker 没答（None/5xx）⇒ 记 `settling` 原样重放；有答（404/409）才算完。"""
+    client = types.SimpleNamespace(
+        cancel_task=lambda *_a, **_k: None, post_ack=lambda *_a, **_k: None
+    )
     hub, _pack = _mk_hub(tmp_path)
-    disp, _workers = _dispatcher(hub, tmp_path)
+    disp, _workers = _dispatcher(hub, tmp_path, client_mod=client)
     try:
         disp.assignments.put(
             {
@@ -1044,15 +1046,9 @@ def test_settle_without_an_answer_is_parked_then_replayed(
         )
         rec = disp.assignments.get(COURSE)
         assert rec is not None
-        # ⚠ **私有 client 替身，不要 monkeypatch `disp._client`**：它缺省就是**模块对象**
-        # （`hub/offline_push.py`: `self._client = client_mod`，进程内所有 dispatcher 共享）。
-        # 打补丁会让**别的用例留下的 pump 线程**也打到这里的假函数上 —— 2026-10-29 门禁
-        # 红现场：`calls == ["cancel", "ack", "ack"]`（第三个 ack 不属于本单）。替身只属于
-        # 本用例（构造期就有 `client_mod` 这个缝）。
-        client = types.SimpleNamespace(
-            cancel_task=lambda *_a, **_k: None, post_ack=lambda *_a, **_k: None
-        )
-        monkeypatch.setattr(disp, "_client", client)
+        # 替身走构造期的 `client_mod` 端口，不 patch `disp._client`：后者是模块对象，
+        # 进程内所有 dispatcher 共享；打补丁会让别的用例留下的 pump 线程也打到假函数上
+        # （2026-10-29 门禁红现场：`calls == ["cancel", "ack", "ack"]`，第三个 ack 不属于本单）。
         settled = disp._settle_assignment(
             COURSE,
             "http://w",

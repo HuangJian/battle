@@ -135,7 +135,7 @@ def _offline_hub(tmp_path: Path) -> tuple[str, _HubQueue, ThreadingHTTPServer]:
 
 
 class _RefusingConsole:
-    """`hub/task_pack.py::_net_urlopen` 的替身：控制台**一碰就拒**（=「控制台没起」的真实形状）。
+    """`hub.seams.NET` 的替身：控制台**一碰就拒**（=「控制台没起」的真实形状）。
 
     **为什么不靠 `tests/conftest.py` 钉的那个死端口**（2026-10-20）：死端口上没人听**不等于**
     连上去立刻被拒 —— 防火墙/沙箱把 SYN 丢掉时 `connect` 会一路挂到
@@ -153,7 +153,7 @@ class _RefusingConsole:
         #: 被拦下的 URL（以后要断言「真发过控制台腿」时用——否则「不可达」可能只是没发）。
         self.calls: list[str] = []
 
-    def __call__(self, req: Any, timeout: float | None = None) -> Any:
+    def open(self, req: Any, timeout: float | None = None) -> Any:
         self.calls.append(getattr(req, "full_url", None) or str(req))
         raise ConnectionRefusedError(111, "Connection refused")
 
@@ -162,13 +162,13 @@ class _RefusingConsole:
 def console_down(monkeypatch: pytest.MonkeyPatch) -> _RefusingConsole:
     """控制台**一碰就拒**（见 `_RefusingConsole`；不打桩就白等 8s/次 claim）。
 
-    只打 `hub.task_pack` 的那个别名（三个触发腿都只走它）：hub 其余外发调用不受影响，
+    只打 `hub.seams.NET`（三个触发腿都只走它）：hub 其余外发调用不受影响，
     `tests/conftest.py` 的地址桩照旧在（安全网不扶）。
     """
-    from hub import task_pack
+    from hub import seams
 
     stub = _RefusingConsole()
-    monkeypatch.setattr(task_pack, "_net_urlopen", stub)
+    monkeypatch.setattr(seams, "NET", stub)
     return stub
 
 
@@ -311,7 +311,7 @@ def test_claim_grants_a_lease_and_blocks_another_worker(
     assert lease["ttl_sec"] == OFFLINE_LEASE_TTL_SEC and lease["token"]
     assert lease["expires_at"] > 0
     # claim 成功时 hub 会**同步**请一次控制台核对包新鲜度（`_ask_console_freshness`）：
-    # 桩被调到 = 那个 `_net_urlopen` 别名仍是唯一出口（换人了 ⇒ 本文件其余用例会静默慢回去）；
+    # 桩被调到 = `hub.seams.NET` 仍是唯一出口（换人了 ⇒ 本文件其余用例会静默慢回去）；
     # 且「控制台不可达」只是**回执**，不挡租约（降级不留半状态）。
     assert console_down.calls, "claim 没走控制台腿？`hub/task_pack` 的外发出口换人了"
     assert "控制台不可达" in str(doc.get("handoff") or ""), doc
