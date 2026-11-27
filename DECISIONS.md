@@ -11565,4 +11565,7 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 
 - **验证**：3 + 3 + 3 组差分全 0（实例属性 / `_Train` 全字段与协作调用 / 13 项 sync 读数与
   step 后参数张量）；定向 196 passed；存量 9 文件 / 9 → 6 / 6；全量 pygate 绿。
+  复查又修掉首版留下的一对重复 `_init_probe_state()` / `_load_ledger()`（空目录差分看不见；
+  有账本时重复日志并清掉刚读回的拒收指纹），`__init__` 最终 18 行，AST 守卫钉每阶段一次。
+  永久差分用例 → `tests/test_refactor_split_seams.py`（11 例）。
   全文 → `docs/nn/engineering.md` §387。

@@ -2278,7 +2278,7 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > 先于 `_ensure_bun`）· `remote/plan_handoff.open_run_context` 159→112 + `_resolve_deliverer` 62
 > （删 8 个失效局部解包）；4+2+3 组差分 0，存量 12 文件 / 12 → 9 / 9（engineering §386）。
 
-> 2026-11-27 第四十九格（批）：`remote/offline_deliver.OfflineDeliverer.__init__` 155→20
+> 2026-11-27 第四十九格（批）：`remote/offline_deliver.OfflineDeliverer.__init__` 155→18
 > （wire 45 / backup 15 / transport 18 / observability 72；每段只从 `spec` 取自己那几格）·
 > `worker/train/bc.train` 160→57（`_bc_prepare` 21 / `_bc_loaders` 45 / `_bc_model` 89；10 项返回含
 > `arch_meta`）· `worker/ppo/backend.run_step` 153→55（forward 31 / policy 42 / kickstart 17 /

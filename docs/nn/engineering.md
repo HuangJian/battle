@@ -60,7 +60,7 @@ deliverer）的 `RunContext` 派生字段与 deliverer 类型相同 ⇒ **0 差�
 
 | 文件 | 旧 | 新 | 段 |
 |---|---:|---:|---|
-| `remote/offline_deliver.OfflineDeliverer.__init__` | 155 | 20 | `_init_wire_state`(45) / `_init_backup_state`(15) / `_init_transport_state`(18) / `_init_observability_state`(72) |
+| `remote/offline_deliver.OfflineDeliverer.__init__` | 155 | 18 | `_init_wire_state`(45) / `_init_backup_state`(15) / `_init_transport_state`(18) / `_init_observability_state`(72) |
 | `worker/train/bc.train` | 160 | 57 | `_bc_prepare`(21) / `_bc_loaders`(45) / `_bc_model`(89) |
 | `worker/ppo/backend.run_step` | 153 | 55 | `_forward_terms`(31) / `_policy_terms`(42) / `_kickstart_term`(17) / `_demo_term`(26) / `_apply_step`(10) |
 
@@ -78,7 +78,12 @@ deliverer）的 `RunContext` 派生字段与 deliverer 类型相同 ⇒ **0 差�
 相同；`run_step` 三组（legacy / v6+pm+ref+demo / v6+ref 无 demo）：13 项 sync 读数逐位相同、
 step 后全部参数张量 `torch.equal` ⇒ **0 差异**。
 
+**复查修正**：首版拆完多出一对重复的 `_init_probe_state()` / `_load_ledger()` —— 空产物目录下差分看不出，
+有账本时会重复日志并先清空刚读回的拒收指纹。已删重复对，并加 AST 守卫钉「每个阶段恰好一次」；`__init__` 最终 18 行。
+
 **守卫**：定向 196 passed（offline_deliver / bc 八个契约文件 / ppo 五个数值与契约文件 / shape）；
+新增永久差分 `tests/test_refactor_split_seams.py`（11 例：27/20/93 声明表指纹、构造阶段序列、云端磁盘门、补传腿装配、
+`run_step` legacy 与 v6 两组黄金值；BC 两段仍由 `test_bc_policy_heads` 的真训练覆盖）。
 `LONG_FUNCS_BASELINE` **9 文件 / 9 → 6 / 6**（余下六格全是 tools 一次性脚本与 `worker/scripts`）。
 
 ## §385 分诊第四十七格（批）：CLI 数据表与槽位声明三处（2026-11-27）

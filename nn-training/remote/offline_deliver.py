@@ -205,8 +205,6 @@ class OfflineDeliverer(
         self._init_background_state(spec.background)
         self._init_probe_state()
         self._load_ledger()
-        self._init_probe_state()
-        self._load_ledger()
         if not self.enabled and not self.disabled_reason:
             missing = []
             if not self.base_url:
