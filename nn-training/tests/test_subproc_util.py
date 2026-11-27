@@ -30,6 +30,7 @@ import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.port_guard import ensure_port_free
+from tests.helpers import source_scan
 from tests.subproc_util import (
     PORT_TAKEN_MARKER,
     SPAWN_PORT_ATTEMPTS,
@@ -280,17 +282,23 @@ _SERVICE_SPAWN_MARKERS = ('"hub.server",', '"remote.remote_worker_serve",', '"re
 _GUARD_EXEMPT = {"tests/subproc_util.py", "tests/test_subproc_util.py"}
 
 
+@cache
 def _code_of(rel: str) -> str:
     """源码**剥掉注释**后的正文。
 
     防回流尺子必须这样做（R4 已栽过一次）：这些「已退役」的记录恰恰写在注释里，直接扫原文
     会把「写明它退役了」判成「它还在」（同 `dashboard/tests/push-config.test.ts::code()`）。
+
+    走 `source_scan.read_text` 的文本缓存 + `@cache` 的剥注释结果：本文件 5 条守卫各扫一遍
+    600+ 测试文件，裸 `read_text` 在 Windows 上把这两条守卫顶到 6.9s / 3.4s（2026-11-27
+    `--durations`）；源码在一次 pytest 进程里不变（见 source_scan 模块头），派生小结果可缓存。
     """
-    src = (ROOT / rel).read_text(encoding="utf-8")
+    src = source_scan.read_text(str(ROOT / rel))
     return "\n".join(line.split("#", 1)[0] for line in src.splitlines())
 
 
-def _test_files() -> list[str]:
+@cache
+def _test_files() -> tuple[str, ...]:
     """全部测试文件（相对 nn-training/，逐层递归），排除豁免名单。"""
     out: list[str] = []
     for layer in ("tests", "e2e"):
@@ -299,7 +307,7 @@ def _test_files() -> list[str]:
             if rel not in _GUARD_EXEMPT:
                 out.append(rel)
     assert len(out) > 50, f"测试文件扫得太少（{len(out)}）——路径写错了？"
-    return out
+    return tuple(out)
 
 
 def test_no_private_free_port_helper_anywhere() -> None:
@@ -327,7 +335,12 @@ def test_no_private_dead_port_helper_anywhere() -> None:
     # （文本形态断言预算只管后者）。
     offenders: list[str] = []
     for rel in _test_files():
-        tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+        # 廉价预筛：名字为 `_dead_port` 的 FunctionDef 必然在源码里留下这个字面量。
+        # 600+ 文件里只有几份注释/文档提到它 ⇒ AST 解析从全仓缩到那几份。
+        text = source_scan.read_text(str(ROOT / rel))
+        if "_dead_port" not in text:
+            continue
+        tree = ast.parse(text, filename=str(ROOT / rel))
         if any(
             isinstance(n, ast.FunctionDef) and n.name == "_dead_port" for n in ast.walk(tree)
         ):
@@ -389,7 +402,10 @@ def test_http_servers_in_tests_use_serve_fast() -> None:
     for rel in _test_files():
         if rel in _SERVE_FOREVER_ALLOWED:
             continue
-        src = (ROOT / rel).read_text(encoding="utf-8")
+        src = source_scan.read_text(str(ROOT / rel))
+        # AST 属性 `x.serve_forever` 必然留下该字面量：挡掉绝大多数文件的解析。
+        if "serve_forever" not in src:
+            continue
         offenders += [f"{rel}:{line}" for line in _unfast_serve_forever_lines(src)]
     assert offenders == [], (
         "这些地方用缺省 0.5s 轮询起了 HTTP 服务——改用 tests/helpers/http_server.serve_fast："

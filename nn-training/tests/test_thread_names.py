@@ -28,6 +28,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+from tests.helpers import source_scan
+
 #: 生产包（`tools/` 与 `worker/scripts/` 不数 —— 与 G3/G4/G14 同款）。
 FACE = ("biz", "common", "hub", "remote", "train", "trainer", "worker")
 
@@ -61,7 +63,12 @@ def test_every_thread_has_a_name() -> None:
     total = 0
     for p in _iter_face_py():
         rel = p.relative_to(ROOT).as_posix()
-        for line, has_name in _thread_calls(p.read_text(encoding="utf-8", errors="replace")):
+        src = source_scan.read_text(str(p), "replace")
+        # 判据只认名为 `Thread` 的 Call；源码里连这个标识符都没有的文件必无命中。
+        # 373 个生产文件全 AST 解析在满载下测到 4.69s（2026-11-27），预筛后只剩少数。
+        if "Thread" not in src:
+            continue
+        for line, has_name in _thread_calls(src):
             total += 1
             if not has_name:
                 offenders.append(f"  {rel}:{line}")
@@ -78,11 +85,11 @@ def test_every_thread_has_a_name() -> None:
 
 def test_scan_counts_both_spellings_and_ignores_other_calls() -> None:
     """口径自检：`threading.Thread` 与 `Thread` 都算，`Executor`/同名变量不算。"""
-    src = (
+    sample = (
         "import threading\n"
         "threading.Thread(target=f, name='a')\n"
         "Thread(target=g)\n"
         "Pool(target=h, name='c')\n"
         "t = threading.Thread(target=i, args=(1,), daemon=True)\n"
     )
-    assert _thread_calls(src) == [(2, True), (3, False), (5, False)]
+    assert _thread_calls(sample) == [(2, True), (3, False), (5, False)]
