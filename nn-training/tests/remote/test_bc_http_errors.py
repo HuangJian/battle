@@ -17,6 +17,7 @@ import pytest
 
 from common.protocol import ProtocolError, RetryableError
 from remote import bc_job as mod
+from remote.seams import PortPair
 
 URL = "http://127.0.0.1:9"
 TOKEN = "tok"
@@ -48,7 +49,7 @@ def _dead(monkeypatch: pytest.MonkeyPatch, err: BaseException) -> list[int]:
         calls.append(1)
         raise err
 
-    monkeypatch.setattr(mod, "_request", boom)
+    monkeypatch.setattr(mod, "WIRE", PortPair(boom))
     return calls
 
 

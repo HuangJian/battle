@@ -31,6 +31,7 @@ from hub.server import _HubQueue, _JobStore, make_server
 from hub.store_leases import LeaseSpec
 from remote import push_dispatch
 from remote.job_lifecycle import ClaimSpec
+from remote.seams import PortPair
 from tests.helpers.http_server import serve_fast
 
 TOKEN = "sekret"
@@ -112,7 +113,7 @@ def test_claim_body_carries_capabilities_only_when_given(monkeypatch) -> None:
         bodies.append(json.loads(spec.data))
         return 200, b'{"status":"ok","lease_token":"t","job_id":"j"}'
 
-    monkeypatch.setattr(JL, "_request", _fake_request)
+    monkeypatch.setattr(JL, "WIRE", PortPair(_fake_request))
     JL.claim_job(ClaimSpec("http://hub", TOKEN, JID, capabilities=[CAP_REPLAY_CORPUS]))
     JL.claim_job(ClaimSpec("http://hub", TOKEN, JID))
     assert bodies[0]["capabilities"] == [CAP_REPLAY_CORPUS]

@@ -41,6 +41,7 @@ from hub.server import _HubQueue, _JobStore, make_server
 from hub.store_leases import LeaseSpec
 from remote.job_lifecycle import ClaimSpec, PostResultSpec
 from remote.push_dispatch import accept_result
+from remote.seams import PortPair
 from tests.helpers.http_server import serve_fast
 from tests.helpers.push_worker import result_of
 
@@ -291,8 +292,7 @@ def test_post_result_sends_worker_header(monkeypatch: pytest.MonkeyPatch) -> Non
             seen.update(headers)
         return 200, b"{}"
 
-    monkeypatch.setattr(JL, "_request", fake_request)
-    monkeypatch.setattr(JL, "_wire_add", lambda *a, **k: None)
+    monkeypatch.setattr(JL, "WIRE", PortPair(fake_request))
     rc = JL.post_result(PostResultSpec("http://hub", "tok", JID, {"a": 1}, log=lambda _m: None))
     assert rc == 200
     assert seen.get(WORKER_ID_HEADER) == JL.worker_tag()

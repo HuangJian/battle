@@ -58,6 +58,9 @@ ALLOWED_IMPORTS = {
     # `remote.job_spec.BcJobSpec`。L1 → L4 是向下边；反方向（`job_shell` import
     # `bc_job`）才是环，见 `tests/remote/test_job_shell_split.py`。
     "remote.job_spec",
+    # 2026-11-28（P0-8 第二代）：出站线路端口（L0）。BC 链的两个小包走 `WIRE.request`，
+    # 不再直调 `remote.http._request`；端口本身零仓内 import ⇒ 不新增向上边。
+    "remote.seams",
     "worker.data.weights_io",
     "worker.train.bc",
 }

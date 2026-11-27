@@ -74,6 +74,7 @@ from remote.http import (
     _sched_headers,
     _warn_non_200,
 )
+from remote.seams import PortPair, WirePort
 from remote.wire import (
     _BULK,
     _bulk_pace,
@@ -84,6 +85,13 @@ from remote.wire import (
 
 #: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
 _log = tag_logger("worker", lambda: time)
+
+#: 出站线路端口（P0-8，2026-11-28）：`request` = 一次 HTTP 往返，`add` = 一段传输账。
+#: 缺省就是本模块原先直调的两个原语；**调用点只碰这个对象**（`WIRE.request(…)`），
+#: 测试也打它（公开名）而不是 `_request` / `_wire_add` 这类实现私有名。
+#: 为什么不是自带实现的单例：`http`(L2) + `wire`(L1) 一 import 就会把本文件抬到它们下面
+#: 去不到的位置 —— 组装壳留在 L0，秩由宿主自己决定（见 `remote/seams.py` 模块头）。
+WIRE: WirePort = PortPair(request=_request, add=_wire_add)
 
 __all__ = [
     "_failure_detail",
@@ -134,12 +142,14 @@ def peek_jobs(
       ② 无副作用：hub 侧不动轮转游标（R2-C2），所以「先看一眼」不会移走别人的轮次；
       ③ 停机达令同行（承接退役的旧轮询面）。
     """
-    status, body = _request(
-        WireRequest(base_url,
-        token,
-        f"/jobs/peek?n={max(1, int(n))}",
-        timeout=timeout,
-        headers=_sched_headers(worker_id, role=role) or None),
+    status, body = WIRE.request(
+        WireRequest(
+            base_url,
+            token,
+            f"/jobs/peek?n={max(1, int(n))}",
+            timeout=timeout,
+            headers=_sched_headers(worker_id, role=role) or None,
+        ),
     )
     if status != 200:
         _warn_non_200(base_url, status, log, body=body)
@@ -191,14 +201,16 @@ def report_prefetch(
         ensure_ascii=False,
     ).encode("utf-8")
     try:
-        status, _body = _request(
-            WireRequest(base_url,
-            token,
-            ADMIN_WORKER_PREFETCH_PATH,
-            timeout=timeout,
-            data=payload,
-            method="POST",
-            headers={"Content-Type": "application/json"}),
+        status, _body = WIRE.request(
+            WireRequest(
+                base_url,
+                token,
+                ADMIN_WORKER_PREFETCH_PATH,
+                timeout=timeout,
+                data=payload,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            ),
         )
     except NET_ERRORS as e:  # 连不上/超时/URL 写错：观测腿永不把主循环拖下水
         log(f"prefetch 上报失败（{type(e).__name__}: {exc_tail(e)}）——本轮跳过，下轮再来")
@@ -240,17 +252,19 @@ def request_priority(
         ensure_ascii=False,
     ).encode("utf-8")
     try:
-        status, body = _request(
-            WireRequest(base_url,
-            token,
-            "/jobs/priority",
-            timeout=timeout,
-            data=payload,
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                **_sched_headers(worker_id),
-            }),
+        status, body = WIRE.request(
+            WireRequest(
+                base_url,
+                token,
+                "/jobs/priority",
+                timeout=timeout,
+                data=payload,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    **_sched_headers(worker_id),
+                },
+            ),
         )
     except NET_ERRORS as e:  # 不可达：按 highest 下垂（见 docstring）
         if log is not None:
@@ -314,16 +328,18 @@ def claim_job(spec: ClaimSpec) -> dict | None:
     if capabilities is not None:
         req_body["capabilities"] = list(capabilities)
     payload = json.dumps(req_body, ensure_ascii=False).encode("utf-8")
-    status, body = _request(
-        WireRequest(base_url,
-        token,
-        f"/jobs/{jid}/claim",
-        timeout=timeout,
-        data=payload,
-        method="POST",
-        # ★ 归属头必须随 claim 一起发（F6 的老毛病是「头只到 peek，claim 不带」；
-        # 而在归属闸下沉到 `_claim_locked` 之后，claim 不带头 = 带标 worker 自锁）。
-        headers={"Content-Type": "application/json", **_sched_headers(worker_id, role=role)}),
+    status, body = WIRE.request(
+        WireRequest(
+            base_url,
+            token,
+            f"/jobs/{jid}/claim",
+            timeout=timeout,
+            data=payload,
+            method="POST",
+            # ★ 归属头必须随 claim 一起发（F6 的老毛病是「头只到 peek，claim 不带」；
+            # 而在归属闸下沉到 `_claim_locked` 之后，claim 不带头 = 带标 worker 自锁）。
+            headers={"Content-Type": "application/json", **_sched_headers(worker_id, role=role)},
+        ),
     )
     if status != 200:
         _warn_non_200(base_url, status, log, body=body, jid=jid)
@@ -335,21 +351,25 @@ def claim_job(spec: ClaimSpec) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def job_started(base_url: str, token: str, jid: str, *, worker_id: str = "", timeout: float = 15.0) -> None:
+def job_started(
+    base_url: str, token: str, jid: str, *, worker_id: str = "", timeout: float = 15.0
+) -> None:
     """`POST /jobs/{id}/start`：打 `computing_at`（掉队阈值的唯一时基，R2-C1）。
 
     抛点 = PPO 真正启动前一刻（下载/解包/权重装载都已完成），**不是** claim 之后。
     尽力而为：不可达不致命（最坏后果是这份 job 的掉队阈值晚一点起算）。
     """
     try:
-        _request(
-            WireRequest(base_url,
-            token,
-            f"/jobs/{jid}/start",
-            timeout=timeout,
-            data=json.dumps({"worker_id": worker_id}).encode("utf-8"),
-            method="POST",
-            headers={"Content-Type": "application/json"}),
+        WIRE.request(
+            WireRequest(
+                base_url,
+                token,
+                f"/jobs/{jid}/start",
+                timeout=timeout,
+                data=json.dumps({"worker_id": worker_id}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            ),
         )
     except NET_ERRORS as e:
         # 不可达不致命，但**必须留痕**：`computing_at` 是掉队阈值的唯一时基，没送到就意味着
@@ -357,17 +377,21 @@ def job_started(base_url: str, token: str, jid: str, *, worker_id: str = "", tim
         _log(f"job {jid}: start 通知没送到（{e!r}）—— 掉队阈值晚起算，本轮照跑")
 
 
-def job_ready(base_url: str, token: str, jid: str, *, worker_id: str = "", timeout: float = 15.0) -> None:
+def job_ready(
+    base_url: str, token: str, jid: str, *, worker_id: str = "", timeout: float = 15.0
+) -> None:
     """`POST /jobs/{id}/ready`：算完待回传（P0 小包，只降别人的优先级、**永不**取消）。"""
     try:
-        _request(
-            WireRequest(base_url,
-            token,
-            f"/jobs/{jid}/ready",
-            timeout=timeout,
-            data=json.dumps({"worker_id": worker_id}).encode("utf-8"),
-            method="POST",
-            headers={"Content-Type": "application/json"}),
+        WIRE.request(
+            WireRequest(
+                base_url,
+                token,
+                f"/jobs/{jid}/ready",
+                timeout=timeout,
+                data=json.dumps({"worker_id": worker_id}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            ),
         )
     except NET_ERRORS as e:
         # 没送到 ⇒ 别人的优先级不降（P0 小包的全部作用就是降别人优先级），租约兜底。
@@ -389,14 +413,16 @@ def abandon_job(
     可见性，那份 job 的优先级会永远上不到 highest（死 worker 的承诺挂着）。幂等。
     """
     try:
-        _request(
-            WireRequest(base_url,
-            token,
-            f"/jobs/{jid}/abandon",
-            timeout=timeout,
-            data=json.dumps({"worker_id": worker_id, "reason": reason}).encode("utf-8"),
-            method="POST",
-            headers={"Content-Type": "application/json"}),
+        WIRE.request(
+            WireRequest(
+                base_url,
+                token,
+                f"/jobs/{jid}/abandon",
+                timeout=timeout,
+                data=json.dumps({"worker_id": worker_id, "reason": reason}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            ),
         )
     except NET_ERRORS as e:
         # 不可达：租约过期兜底（与 release_job 同策略）—— 但 hub 侧的 claimed/computing/ready
@@ -409,7 +435,9 @@ def job_status(
 ) -> dict | None:
     """`GET /jobs/{id}/status` → 摘要 dict；不可达/未知名 → None（调用方不据此取消）。"""
     try:
-        status, body = _request(WireRequest(base_url, token, f"/jobs/{jid}/status", timeout=timeout))
+        status, body = WIRE.request(
+            WireRequest(base_url, token, f"/jobs/{jid}/status", timeout=timeout)
+        )
     except NET_ERRORS:
         return None
     if status != 200:
@@ -454,7 +482,9 @@ def start_cancel_watcher(
                 return
 
     #: 取消观察线程归这里（`cancel-<jid前8>-watch`）：调用方拿句柄决定等不等。
-    return common.runtime.Runtime(scope=f"cancel-{jid[:8]}").thread(_loop, name="watch", daemon=True)
+    return common.runtime.Runtime(scope=f"cancel-{jid[:8]}").thread(
+        _loop, name="watch", daemon=True
+    )
 
 
 def _priority_rank(prio: str) -> int:
@@ -611,7 +641,7 @@ def record_upload_wire(jid: str, wire: dict) -> None:
                 nbytes, sec = int(pair[0]), float(pair[1])
             except (TypeError, ValueError, IndexError):
                 continue
-            _wire_add(jid, str(seg), nbytes, sec)
+            WIRE.add(jid, str(seg), nbytes, sec)
     try:
         wait = float(wire.get("waits") or 0.0)
     except (TypeError, ValueError):
@@ -676,24 +706,26 @@ def post_result(spec: PostResultSpec) -> int:
             with _BULK.slot(BULK_P1_CRITICAL, label="result") as _tok:
                 t_xfer = time.time()  # ★ 排队结束、开传那一刻
                 try:
-                    status, body = _request(
-                        WireRequest(base_url,
-                        token,
-                        f"/jobs/{jid}/result",
-                        timeout=timeout,
-                        data=req_body,
-                        method="POST",
-                        headers={
-                            "Content-Type": ctype,
-                            # H2：结果回传须携带领取时下发的 lease_token（hub 校验后收）
-                            **({"X-Lease-Token": lease_token} if lease_token else {}),
-                            # 承接归属（plan/worker-contribution-view W2）：身份与 claim 同源。
-                            # 缺它 ⇒ hub 的 job_result_accepted / job_rejected 归不到人。
-                            # 身份由 worker_loop 单次计算后经 `worker_id=` 下传（plan/worker-name-
-                            # readable）；缺参调用点回退 `worker_tag()`（旧调用方逐字兼容）。
-                            WORKER_ID_HEADER: worker_id or worker_tag(),
-                        },
-                        pace=_bulk_pace(_tok, BULK_P1_CRITICAL)),
+                    status, body = WIRE.request(
+                        WireRequest(
+                            base_url,
+                            token,
+                            f"/jobs/{jid}/result",
+                            timeout=timeout,
+                            data=req_body,
+                            method="POST",
+                            headers={
+                                "Content-Type": ctype,
+                                # H2：结果回传须携带领取时下发的 lease_token（hub 校验后收）
+                                **({"X-Lease-Token": lease_token} if lease_token else {}),
+                                # 承接归属（plan/worker-contribution-view W2）：身份与 claim 同源。
+                                # 缺它 ⇒ hub 的 job_result_accepted / job_rejected 归不到人。
+                                # 身份由 worker_loop 单次计算后经 `worker_id=` 下传（plan/worker-name-
+                                # readable）；缺参调用点回退 `worker_tag()`（旧调用方逐字兼容）。
+                                WORKER_ID_HEADER: worker_id or worker_tag(),
+                            },
+                            pace=_bulk_pace(_tok, BULK_P1_CRITICAL),
+                        ),
                     )
                 finally:
                     # S3d：回传段的排队也归本 jid 的账（不接就把 §51 那半「排队 17.6s」丢掉）。
@@ -704,12 +736,12 @@ def post_result(spec: PostResultSpec) -> int:
             # `result POST ok: … bytes in …s (attempt k) [JSON 体为 …]` 行已退役（2026-10-06，
             # 用户指令「删除云机 worker 刷屏 log」）：同一笔账已在每 job 的 wire 行里
             # （`result=…MB/…s(…KB/s)`），而 v2-vs-JSON 体积早已一次性验证完毕。
-            _wire_add(jid, "result", len(req_body), time.time() - t_xfer)
+            WIRE.add(jid, "result", len(req_body), time.time() - t_xfer)
             return status
         if status == 409:
             # 竞速广播下这是**输家的正常结局**：同 job 已被别人先回传，本份结果丢弃。
             # 绝不重试、绝不当失败上报（否则一个赢家会让 N-1 个 worker 白报错）。
-            _wire_add(jid, "result", len(req_body), time.time() - t_xfer)  # 字节确实出去了
+            WIRE.add(jid, "result", len(req_body), time.time() - t_xfer)  # 字节确实出去了
             log("result POST 409（hub 已有同 job 结果：竞速输家/重复回传）——按成功丢弃")
             return 409
         if status == 403 and mode == CLAIM_MODE_BACKUP:
@@ -747,13 +779,15 @@ def release_job(
     """瞬时失败后主动还租约（POST /jobs/{id}/release）：job 立即回池可重领，
     不再干等 30min 租约过期。尽力而为：release 本身不可达时由租约过期兜底。"""
     try:
-        _request(
-            WireRequest(base_url,
-            token,
-            f"/jobs/{jid}/release",
-            timeout=CONTROL_TIMEOUT_SEC,
-            method="POST",
-            headers={**({} if not lease_token else {"X-Lease-Token": lease_token})}),
+        WIRE.request(
+            WireRequest(
+                base_url,
+                token,
+                f"/jobs/{jid}/release",
+                timeout=CONTROL_TIMEOUT_SEC,
+                method="POST",
+                headers={**({} if not lease_token else {"X-Lease-Token": lease_token})},
+            ),
         )
     except NET_ERRORS as e:
         # 租约过期兜底（30min），与旧行为一致——但这条 job 会在这半小时里**看起来还在跑**，
@@ -864,17 +898,19 @@ def report_job_failure(spec: FailReportSpec) -> bool:
         ensure_ascii=False,
     ).encode("utf-8")
     try:
-        status, resp = _request(
-            WireRequest(base_url,
-            token,
-            f"/jobs/{jid}/fail",
-            timeout=CONTROL_TIMEOUT_SEC,
-            data=body,
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                **({"X-Lease-Token": lease_token} if lease_token else {}),
-            }),
+        status, resp = WIRE.request(
+            WireRequest(
+                base_url,
+                token,
+                f"/jobs/{jid}/fail",
+                timeout=CONTROL_TIMEOUT_SEC,
+                data=body,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    **({"X-Lease-Token": lease_token} if lease_token else {}),
+                },
+            ),
         )
     except NET_ERRORS as e:
         log(f"job {jid} 失败回报未送达（{type(e).__name__}）——训练侧将走超时兜底")
@@ -894,13 +930,15 @@ def heartbeat(base_url: str, token: str, jid: str, lease_token: str = "") -> Non
     而租约 300s ⇒ 连续 4 次全败才会掉租约。
     """
     try:
-        _request(
-            WireRequest(base_url,
-            token,
-            f"/jobs/{jid}/heartbeat",
-            timeout=CONTROL_TIMEOUT_SEC,
-            method="POST",
-            headers={**({} if not lease_token else {"X-Lease-Token": lease_token})}),
+        WIRE.request(
+            WireRequest(
+                base_url,
+                token,
+                f"/jobs/{jid}/heartbeat",
+                timeout=CONTROL_TIMEOUT_SEC,
+                method="POST",
+                headers={**({} if not lease_token else {"X-Lease-Token": lease_token})},
+            ),
         )
     except NET_ERRORS as e:
         # 心跳失败不致命（下一次再续），但连续失败 = 租约在走向过期：那是「活干完了 hub 却

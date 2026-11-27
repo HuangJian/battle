@@ -1533,6 +1533,7 @@ from common.protocol import RetryableError
 from hub.store_leases import LeaseSpec
 from remote.download import BlobAsk
 from remote.job_lifecycle import PostResultSpec
+from remote.seams import PortPair
 from tests.helpers.http_server import serve_fast
 
 
@@ -1583,7 +1584,7 @@ def test_post_result_retry_then_success(monkeypatch, _no_sleep) -> None:
     def fake_request(spec, **_kw):
         return next(statuses), b"{}"
 
-    monkeypatch.setattr(JL, "_request", fake_request)
+    monkeypatch.setattr(JL, "WIRE", PortPair(fake_request))
     rc = worker_mod.post_result(
         PostResultSpec(
             "http://hub",
@@ -1598,7 +1599,7 @@ def test_post_result_retry_then_success(monkeypatch, _no_sleep) -> None:
 
 
 def test_post_result_409_is_idempotent_success(monkeypatch, _no_sleep) -> None:
-    monkeypatch.setattr(JL, "_request", lambda *_a, **_k: (409, b"duplicate"))
+    monkeypatch.setattr(JL, "WIRE", PortPair(lambda *_a, **_k: (409, b"duplicate")))
     rc = worker_mod.post_result(
         PostResultSpec(
             "http://hub",
@@ -1625,7 +1626,7 @@ def test_post_result_4xx_rejected_no_retry(monkeypatch, _no_sleep) -> None:
         posted.append(spec.data or b"")
         return 400, b"result rejected: bad fingerprints"
 
-    monkeypatch.setattr(JL, "_request", fake_request)
+    monkeypatch.setattr(JL, "WIRE", PortPair(fake_request))
     with pytest.raises(ProtocolError, match="400"):
         worker_mod.post_result(PostResultSpec("http://hub", "t", "jid1", {"x": 1}, log=lambda _m: None))
     assert len(posted) == 2, f"v2 -> 一次 JSON 退路 -> 抛错（实得 {len(posted)} 次）"

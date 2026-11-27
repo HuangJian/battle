@@ -62,6 +62,7 @@ from hub.server import _HubQueue, _JobStore, make_server
 from hub.store_leases import LeaseSpec
 from remote.job_lifecycle import AcquireSpec, ClaimSpec, PostResultSpec
 from remote.job_spec import RunJobSpec
+from remote.seams import PortPair
 from remote.worker import WorkerLoopSpec
 from tests.helpers import hub_seams
 from tests.helpers.http_server import serve_fast
@@ -475,7 +476,7 @@ def test_claim_unknown_job_409(tmp_path: Path) -> None:
 
 
 def _patch_request(monkeypatch: pytest.MonkeyPatch, status: int, body: bytes = b"{}") -> None:
-    monkeypatch.setattr(JL, "_request", lambda *a, **k: (status, body), raising=True)
+    monkeypatch.setattr(JL, "WIRE", PortPair(lambda *a, **k: (status, body)), raising=True)
 
 
 def test_post_result_403_backup_is_discard_not_failure(
@@ -487,7 +488,6 @@ def test_post_result_403_backup_is_discard_not_failure(
     （「一个赢家把输家炸成事故」，hub 侧注释里已写过一次）。
     """
     _patch_request(monkeypatch, 403, b'{"error":"lease mismatch"}')
-    monkeypatch.setattr(JL, "_wire_add", lambda *a, **k: None, raising=True)
     result = {"job_id": JID, "weights_json": "", "opt_tar_b64": ""}
     assert W.post_result(PostResultSpec("http://hub", "tok", JID, result, mode=CLAIM_MODE_BACKUP)) == 403
     with pytest.raises(ProtocolError):
@@ -499,7 +499,6 @@ def test_post_result_409_is_success_for_both_modes(
 ) -> None:
     """409 = 别人已落盘（幂等成功）——两种模式都按丢弃，绝不报失败。"""
     _patch_request(monkeypatch, 409, b'{"error":"already stored"}')
-    monkeypatch.setattr(JL, "_wire_add", lambda *a, **k: None, raising=True)
     result = {"job_id": JID, "weights_json": "", "opt_tar_b64": ""}
     assert W.post_result(PostResultSpec("http://hub", "tok", JID, result)) == 409
     assert W.post_result(PostResultSpec("http://hub", "tok", JID, result, mode=CLAIM_MODE_BACKUP)) == 409

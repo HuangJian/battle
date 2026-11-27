@@ -11628,3 +11628,13 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **仍存在的 git 调用**：`remote/hub_client.git_head`（job manifest 的 `commit` / `commit_echo` 协议，门禁 1 次）；`tests/test_python_loc_budget.py` 的 `git ls-files -z`（2 次，门禁自身枚举 Python 文件）。两者都不是 codeHash/训练路径。
 
 —— 实测分类 / 取舍 / 验证读数 → `.workbuddy/memory/2026-11-27.md` 当日记录
+
+## §2026-11-28-goalnn-wire-seam（2026-11-28，P0-8 第二代：`remote/seams.py::WIRE` 出站线路端口）
+
+- **背景**：P0-8 第一代（`hub/seams.py::NET`）收的是第三方边界；§388 留下的「remote 包 `_request` / `_wire_add` 同型端口」实测**不是 5 处而是 32 处**（`job_lifecycle._request` 23 · `_wire_add` 4 · `bc_job._request` 4，跨 14 个测试文件）—— 那 5 处只是 hub 用例里看得见的一角。
+- **决定**：新增 `remote/seams.py`（**L0**）：`WirePort` 协议（`request` / `add` 两项能力）+ `PortPair` frozen 组装壳。宿主用**自己已 import** 的原语拼缺省端口（`WIRE = PortPair(request=_request, add=_wire_add)`），调用点一律 `WIRE.request(…)` / `WIRE.add(…)`；测试改为 `monkeypatch.setattr(JL, "WIRE", PortPair(fake))`（公开名）或直接传替身。
+- **被否决**：① 照抄 `hub/seams.py` 的自带实现单例 —— `http`(L2) / `wire`(L1) 一 import 就抬到 L3，与 `job_lifecycle`(L3) 同秩，层账本要求严格小于；② Protocol 用属性注解（`request: Callable`）—— frozen dataclass 的只读属性与「可写属性」语义冲突，mypy 报 `read-only attribute`（实测）；③ 给 12 个入口逐个加 `net=` 参数 —— 内部互调（`acquire_job → peek_jobs/request_priority/claim_job`）要全链透传，收益不足以覆盖风险；④ 为了保住账本数字把端口方法改名 —— `WIRE.request` 是调用点的语义本身。
+- **违反后果**：宿主里再出现 `_request(…)` / `_wire_add(…)` 直调 ⇒ `tests/remote/test_wire_seam.py` 红；把 `WIRE` 绑进缺省值 / 类属性 / 模块级别名 ⇒ 同文件红（patch 会静默打空，是「测试全绿而注入失效」的老坑）。`PortPair(fake)` 的 `add` 是 NoOp ⇒ 需要真实记账的用例必须写 `add=JL.WIRE.add`。
+- **证明**：G19 `384 / 91 → 352 / 83`（−32 次 / −8 文件）；14 个用例文件 250 passed + 两条证伪（注入直调 / 绑定 `WIRE` 各红一次）；层账本、形状、LOC、doc、复用（同名 +1 已记账）、文本断言（+2 已记账）全绿。
+
+—— 全文（形状理由 / 坑 / 下一步）→ `docs/nn/engineering.md` §389

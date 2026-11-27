@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
 import remote.job_lifecycle as JL
 from common.protocol import WORKER_ID_HEADER
 from remote.job_lifecycle import PostResultSpec
+from remote.seams import PortPair
 
 JID = "j" * 16
 
@@ -72,8 +73,7 @@ def test_post_result_threads_worker_id(monkeypatch) -> None:
             seen.update(headers)
         return 200, b"{}"
 
-    monkeypatch.setattr(JL, "_request", fake_request)
-    monkeypatch.setattr(JL, "_wire_add", lambda *_a, **_k: None)
+    monkeypatch.setattr(JL, "WIRE", PortPair(fake_request))
     rc = JL.post_result(
         PostResultSpec(
             "http://hub", "tok", JID, {"a": 1}, worker_id="kaggle-c", log=lambda _m: None
@@ -95,7 +95,7 @@ def test_report_job_failure_threads_worker_id(monkeypatch) -> None:
             captured["body"] = json.loads(data.decode("utf-8"))
         return 200, b"{}"
 
-    monkeypatch.setattr(JL, "_request", fake_request)
+    monkeypatch.setattr(JL, "WIRE", PortPair(fake_request))
     ok = JL.report_job_failure(
         JL.FailReportSpec("http://hub", "tok", JID, "boom", worker_id="colab-t", log=lambda _m: None)
     )

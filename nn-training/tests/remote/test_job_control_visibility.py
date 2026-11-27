@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from remote import job_lifecycle as jl
+from remote.seams import PortPair
 
 JID = "jid-visibility-1"
 
@@ -44,10 +45,10 @@ _NOTICES = {
 def test_control_post_failure_is_logged_and_not_raised(
     name: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    def _unreachable(*_a: object, **_k: object) -> None:
+    def _unreachable(*_a: object, **_k: object) -> tuple[int, bytes]:
         raise OSError("hub 不可达")
 
-    monkeypatch.setattr(jl, "_request", _unreachable)
+    monkeypatch.setattr(jl, "WIRE", PortPair(_unreachable))
 
     # ① 不致命：调用方不该被控制面的失败拖死（租约兜底是设计好的语义）。
     _NOTICES[name]()
@@ -67,10 +68,10 @@ def test_heartbeat_failure_says_the_lease_is_still_running(
     这条**只**看「有没有提到 job + 异常」，不看整句措辞；后缀用 `endswith` 对账。
     """
 
-    def _unreachable(*_a: object, **_k: object) -> None:
+    def _unreachable(*_a: object, **_k: object) -> tuple[int, bytes]:
         raise TimeoutError("timed out")
 
-    monkeypatch.setattr(jl, "_request", _unreachable)
+    monkeypatch.setattr(jl, "WIRE", PortPair(_unreachable))
     jl.heartbeat("http://hub", "tok", JID, lease_token="lt")
 
     lines = [ln for ln in capsys.readouterr().out.splitlines() if JID in ln]
@@ -91,10 +92,10 @@ def test_programmer_error_is_not_disguised_as_a_network_failure(
     """
     import remote.http as http_mod
 
-    def _buggy(*_a: object, **_k: object) -> None:
+    def _buggy(*_a: object, **_k: object) -> tuple[int, bytes]:
         raise AttributeError("'NoneType' object has no attribute 'job_id'")
 
-    monkeypatch.setattr(jl, "_request", _buggy)
+    monkeypatch.setattr(jl, "WIRE", PortPair(_buggy))
     assert issubclass(AttributeError, http_mod.NET_ERRORS) is False  # 口径自检
     with pytest.raises(AttributeError):
         _NOTICES[name]()

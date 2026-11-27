@@ -42,6 +42,7 @@ from remote import worker as worker_mod
 from remote.bulk_sched import BULK_P1_CRITICAL, BULK_P2_PREFETCH, BulkPreemptError
 from remote.http import WireGet, WireRequest
 from remote.job_lifecycle import PostResultSpec
+from remote.seams import PortPair
 
 # 跨测试模块复用可观测等待原语（先例：`test_role_routing` → `test_run_segment._publish`）。
 # 同款夹具在 `test_bulk_sched` 已用于「单通道并发排队」。
@@ -603,7 +604,8 @@ def test_post_result_never_rerolls_but_is_accounted(monkeypatch) -> None:
         seen.update(vars(spec))
         return 200, b'{"ok":1}'
 
-    monkeypatch.setattr(JL, "_request", fake)
+    # 这条断言的就是「字节进了账」⇒ `add` 必须留真的（缺省端口自己那一个），只换发送面。
+    monkeypatch.setattr(JL, "WIRE", PortPair(fake, add=JL.WIRE.add))
     status = worker_mod.post_result(PostResultSpec("http://hub", "t", "j7", {"a": 1}, log=lambda _m: None))
     assert status == 200
     assert not seen.get("allow_reroll", False)
@@ -942,7 +944,9 @@ def test_queue_wait_is_attributed_by_jid(monkeypatch) -> None:
 def test_result_segment_seconds_exclude_the_queue_wait(monkeypatch) -> None:
     """回传段同理（现场 `result=0.63MB/18-19s` 的主角）。"""
     th = _hold_slot_for(0.3, monkeypatch)
-    monkeypatch.setattr(JL, "_request", lambda *a, **kw: (200, b'{"ok":1}'))
+    monkeypatch.setattr(
+        JL, "WIRE", PortPair(lambda *a, **kw: (200, b'{"ok":1}'), add=JL.WIRE.add)
+    )
     status = worker_mod.post_result(PostResultSpec("http://hub", "t", "jr", {"a": 1}, log=lambda _m: None))
     th.join(5)
     assert status == 200

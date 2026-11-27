@@ -49,9 +49,14 @@ from common.protocol import (
 from remote.http import WireRequest, _request
 from remote.job_fs import _persist_result
 from remote.job_spec import BcJobSpec
+from remote.seams import PortPair, WirePort
 
 #: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
 _log = tag_logger("worker", lambda: time)
+
+#: 出站线路端口（P0-8，2026-11-28）：只发请求、不写 job 行 ⇒ `add` 用缺省的 `_noop`。
+#: BC 链没有传输账要记（epoch/resume 两个小包），所以这里**不**接 `wire._wire_add`。
+WIRE: WirePort = PortPair(request=_request)
 
 #: 「这一发 BC 传输没成」的真失败形态 —— `_request` 的路面就这三类：urllib 的
 #: `URLError`/`HTTPError` 与 socket 面都是 `OSError`；体半途断/首块太慢是 `RetryableError`；
@@ -78,6 +83,7 @@ __all__ = [
     "resolve_ppo_backend",
 ]
 
+
 def _bc_fetch_resume(
     base_url: str,
     token: str,
@@ -92,7 +98,9 @@ def _bc_fetch_resume(
     last = ""
     for attempt in range(1, 4):
         try:
-            status, body = _request(WireRequest(base_url, token, f"/jobs/{jid}/resume", timeout=30.0))
+            status, body = WIRE.request(
+                WireRequest(base_url, token, f"/jobs/{jid}/resume", timeout=30.0)
+            )
         except _BC_HTTP_ERRORS as e:
             status, body = None, repr(e).encode()
         if status == 200:
@@ -103,7 +111,9 @@ def _bc_fetch_resume(
                 raise ProtocolError(f"bc resume 体非法: {e}") from e
         if status == 404:
             return None
-        last = f"HTTP {status}" if status is not None else repr(body.decode("utf-8", "replace")[:120])
+        last = (
+            f"HTTP {status}" if status is not None else repr(body.decode("utf-8", "replace")[:120])
+        )
         if attempt < 3:
             log(f"bc resume 查询瞬时失败({last})——退避重试 {attempt}/3")
             time.sleep(min(2**attempt, 8))
@@ -176,26 +186,26 @@ def _bc_post_epoch(
     last = ""
     for attempt in range(1, 3):
         try:
-            status, resp = _request(
-                WireRequest(base_url,
-                token,
-                f"/jobs/{jid}/epoch",
-                timeout=60.0,
-                data=data,
-                method="POST",
-                headers={
-                    "Content-Type": "application/json",
-                    **({"X-Lease-Token": lease_token} if lease_token else {}),
-                }),
+            status, resp = WIRE.request(
+                WireRequest(
+                    base_url,
+                    token,
+                    f"/jobs/{jid}/epoch",
+                    timeout=60.0,
+                    data=data,
+                    method="POST",
+                    headers={
+                        "Content-Type": "application/json",
+                        **({"X-Lease-Token": lease_token} if lease_token else {}),
+                    },
+                ),
             )
         except _BC_HTTP_ERRORS as e:
             status, resp = None, repr(e).encode()
         if status in (200, 201):
             return True
         last = (
-            f"HTTP {status}"
-            if status is not None
-            else repr(resp.decode("utf-8", "replace")[:120])
+            f"HTTP {status}" if status is not None else repr(resp.decode("utf-8", "replace")[:120])
         )
         if attempt < 2:
             time.sleep(2)
@@ -336,9 +346,7 @@ def resolve_ppo_backend(requested: str) -> str:
     """
     req = str(requested or "auto").strip().lower()
     if req not in PPO_BACKENDS:
-        raise ProtocolError(
-            f"未知 PPO backend={requested!r}（只认 {'/'.join(PPO_BACKENDS)}）"
-        )
+        raise ProtocolError(f"未知 PPO backend={requested!r}（只认 {'/'.join(PPO_BACKENDS)}）")
     if req != "auto":
         return req
     if _module_available("torch"):
@@ -415,9 +423,7 @@ def _check_corpus_lineage(manifest: dict, shard_dirs: list[Path]) -> None:
             with open(os.path.join(_sd, "manifest.json"), encoding="utf-8") as _f:
                 _sm = json.load(_f)
         except (OSError, ValueError) as _e:
-            raise ProtocolError(
-                f"D14 course_fp: 读 shard manifest 失败 {_sd}: {_e}"
-            ) from _e
+            raise ProtocolError(f"D14 course_fp: 读 shard manifest 失败 {_sd}: {_e}") from _e
         if not d14_corpus_match(_cfp, _corpus, _sm):
             raise ProtocolError(
                 f"D14 corpus_fp 不匹配：job={_corpus[:12] or _cfp[:12]}… "
@@ -671,8 +677,7 @@ def _bc_run(plan: _BcPlan, spec: BcJobSpec, bc_train, save_weights_json) -> tupl
     log(
         f"job {plan.jid}: BC start backend={plan.backend} arch={ns.arch} epochs={ns.epochs} "
         f"batch={ns.batch} lr={ns.lr} device={plan.dev} seed={plan.seed_int}({plan.seed_src}) "
-        f"shards={len(spec.shard_dirs)}"
-        + (f" resume@{resume_epoch}" if resume_epoch else "")
+        f"shards={len(spec.shard_dirs)}" + (f" resume@{resume_epoch}" if resume_epoch else "")
     )
     metrics = bc_train(ns)
     # 收尾补发：最后一个 epoch 的回传也可能吃 530——训练一结束就没有「下一个 epoch」

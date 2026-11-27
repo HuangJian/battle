@@ -40,6 +40,7 @@ from common.protocol import (
 )
 from hub.server import _HubQueue, make_server
 from remote.job_lifecycle import ClaimSpec
+from remote.seams import PortPair
 from remote.worker import WorkerLoopSpec
 from tests.helpers.http_server import serve_fast
 from tests.helpers.hub_poll import hub_poll
@@ -58,7 +59,7 @@ def test_peek_sends_role_header_when_offline(monkeypatch: pytest.MonkeyPatch) ->
         seen.append({"path": spec.path, "headers": dict(spec.headers or {})})
         return 200, b'{"jobs": [], "halt": false}'
 
-    monkeypatch.setattr(JL, "_request", _fake_request)
+    monkeypatch.setattr(JL, "WIRE", PortPair(_fake_request))
     assert W.peek_jobs("http://hub", "t", worker_id="host:1", role=ROLE_OFFLINE) == ([], False)
     assert seen[0]["headers"][ROLE_HEADER] == ROLE_HEADER_VALUE
     assert seen[0]["headers"][WORKER_ID_HEADER] == "host:1"
@@ -72,7 +73,7 @@ def test_peek_sends_no_role_header_by_default(monkeypatch: pytest.MonkeyPatch) -
         seen.append(dict(spec.headers or {}))
         return 200, b'{"jobs": [], "halt": false}'
 
-    monkeypatch.setattr(JL, "_request", _fake_request)
+    monkeypatch.setattr(JL, "WIRE", PortPair(_fake_request))
     assert W.peek_jobs("http://hub", "t") == ([], False)
     assert ROLE_HEADER not in seen[0]
 
@@ -89,7 +90,7 @@ def test_claim_sends_role_header_too(monkeypatch: pytest.MonkeyPatch) -> None:
         seen.append({"path": spec.path, "headers": dict(spec.headers or {})})
         return 200, b'{"job_id": "j", "status": "ok", "lease_token": "t"}'
 
-    monkeypatch.setattr(JL, "_request", _fake_request)
+    monkeypatch.setattr(JL, "WIRE", PortPair(_fake_request))
     assert W.claim_job(ClaimSpec("http://hub", "t", "j" * 16, worker_id="host:1", role=ROLE_OFFLINE))
     assert seen[0]["path"].endswith("/claim")
     assert seen[0]["headers"][ROLE_HEADER] == ROLE_HEADER_VALUE

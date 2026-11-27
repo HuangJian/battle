@@ -38,6 +38,7 @@ import remote.job_lifecycle as jl
 from common.protocol import HEARTBEAT_SEC
 from remote.http import WireRequest
 from remote.job_lifecycle import CONTROL_TIMEOUT_SEC
+from remote.seams import PortPair
 
 
 class _Resp:
@@ -344,7 +345,7 @@ def test_the_calls_without_a_timeout_parameter_use_the_same_budget(monkeypatch) 
         seen.append(float(spec.timeout))
         return (200, b"{}")
 
-    monkeypatch.setattr(jl, "_request", _fake_request)
+    monkeypatch.setattr(jl, "WIRE", PortPair(_fake_request))
     jl.heartbeat("http://hub.invalid:500", "tok", "j1")
     jl.release_job("http://hub.invalid:500", "tok", "j1")
     jl.report_job_failure(
@@ -367,7 +368,7 @@ def test_a_failed_priority_ask_retried_and_says_how_many_times(monkeypatch) -> N
         attempts.append(1)
         raise OSError("超时")
 
-    monkeypatch.setattr(jl, "_request", _dead)
+    monkeypatch.setattr(jl, "WIRE", PortPair(_dead))
     logs: list[str] = []
     out = jl.request_priority("http://hub.invalid:500", "tok", log=logs.append)
     assert out == {"epoch": None, "priorities": {}, "reasons": {}}

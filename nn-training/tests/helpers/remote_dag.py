@@ -74,6 +74,7 @@ def package_roots() -> dict[str, Path]:
     """包名 → 目录。**函数形式且现读全局**：合成源码的自证用例 monkeypatch 目录后必须生效。"""
     return {"remote": REMOTE_DIR, "hub": HUB_DIR, "worker": WORKER_DIR}
 
+
 #: `remote/` 内部的**分层账本**：数字越小越底层，每条边必须从大数指向小数。
 #:
 #: 这份数字不是拍脑袋排的，是**拓扑秩**（从叶子往上的最长路径长度）——所以它读起来就是架构：
@@ -208,11 +209,15 @@ LAYERS: dict[str, int] = {
     # hub 的第三方边界端口（2026-11-27，P0-8 单包样板）：只碰 stdlib + `common.net_http`
     # ⇒ **L0**。`hub.task_pack` 通过 `seams.NET` 出站，不再直连 `common.net_http`。
     "hub.seams": 0,
+    # remote 的**出站线路端口**（2026-11-28，P0-8 第二代）：只有 Protocol 与 `PortPair`
+    # 组装壳，零仓内 import ⇒ **L0**。缺省实现由宿主自己拼（`job_lifecycle` / `bc_job`
+    # 用自己已 import 的 `http._request` / `wire._wire_add`）——所以它不抬任何读者的秩：
+    # `job_lifecycle`(L3) 站在 L0 上，边方向仍严格向上。
+    "remote.seams": 0,
     # 任务包新鲜度门 / 缺包自愈门 / 清单读数的**判据**：依赖 `hub.seams`(L0) +
     # `common.protocol` ⇒ **L1**。放在这里（而不是挂在 `hub/http_face`）是因为它有两个低层
     # 读者：`hub.offline`（取包端点）与 `hub.queue_offline`（离线清单）。
     "hub.task_pack": 1,
-
     # ★ 2026-10-24（plan/push-mode-notebooks §6.6/§6.7，W5）：离线 push 的 hub 侧四件。
     # `offline_ingest` 站在 `hub.task_pack`(L1) 上（共享入账 + 盖章/下一段）⇒ **L2**；
     # `offline_push_assign` 与 `offline_push_client` 只碰 stdlib/common ⇒ **L0**；
@@ -232,7 +237,6 @@ LAYERS: dict[str, int] = {
     # ★ 2026-10-25（LOC 预算拆出）：外层任务包组装（`build_task_zip` / `write_resume`）——
     # 只做文件 IO + 常量拼装，依赖 `hub.task_pack`(L1) 与 `common.protocol`(L0) ⇒ 拓扑秩 **L2**。
     "hub.offline_push_pack": 2,
-
     "remote.result_upload": 0,
     # 回传腿的**进程模式**（2026-10-20，`plan/ppo-worker-transfer-isolation`）：父侧代理
     # `UploaderProcess` + 工厂 `make_uploader`。依赖面 = `result_upload`(L0，共同接口/常量)
@@ -490,7 +494,6 @@ LAYERS: dict[str, int] = {
     # 一次性修复工具（origin 侧新增）：把**已经落地的回传轮**补做课程侧落位。它 import
     # `hub.server`（拿 `_JobStore` 起真 store）——与探针同一个位置（L8，站在门面上）。
     "hub.backfill_offline": 8,
-
     # ── 2026-09-30（刀 7：入口脚本归位 —— 三个新模块入账）────────────────────────────
     # `remote.remote_worker`（云 worker 入口，刀 7 前住 `nn-training/` 顶层）只 import
     # `remote.worker`(L5) ⇒ 1 + 5 = **L6**；`remote.remote_worker_serve`（push 模式服务端
@@ -500,7 +503,6 @@ LAYERS: dict[str, int] = {
     "worker.rl_config_schema": 0,
     "remote.remote_worker": 6,
     "remote.remote_worker_serve": 7,
-
     # ── 2026-09-30（刀 6：本地 torch 训练全栈搬进 worker/）────────────────────────────
     # 用户口径：`worker/` = 「所有支持本地 torch 训练的所有代码」，云机 worker = local worker
     # + remote；`biz/` 只留游戏业务。于是五大算法包（models/ppo/data/train/scripts 39 模块）
@@ -954,9 +956,7 @@ def reaches_transport(module: str) -> bool:
     测试全绿而判据早已失效（本文件头部记过同型的教训）。
     """
     top, deferred, _ = graph()
-    edges = {
-        m: set(top.get(m, ())) | set(deferred.get(m, ())) for m in remote_modules()
-    }
+    edges = {m: set(top.get(m, ())) | set(deferred.get(m, ())) for m in remote_modules()}
     seen: set[str] = set()
     stack = [module]
     while stack:
@@ -981,7 +981,7 @@ def cycles(edges: dict[str, set[str]]) -> list[list[str]]:
     found: list[list[str]] = []
 
     def strong(v: str) -> None:
-        work: list[tuple[str, Iterator[str]]] = [(v, iter(sorted(edges.get(v, ())))) ]
+        work: list[tuple[str, Iterator[str]]] = [(v, iter(sorted(edges.get(v, ()))))]
         index[v] = low[v] = len(index)
         stack.append(v)
         on_stack.add(v)

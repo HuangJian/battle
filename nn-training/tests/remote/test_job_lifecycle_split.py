@@ -77,6 +77,9 @@ ALLOWED_IMPORTS = {
     "common.text",
     "remote.bulk_sched",
     "remote.http",
+    # 2026-11-28（P0-8 第二代）：出站线路端口的**协议与组装壳**（L0，零仓内 import）。
+    # 本簇不再裸调 `_request` / `_wire_add`，而是走 `WIRE`（缺省由这里的两个原语组装）。
+    "remote.seams",
     "remote.wire",
 }
 
@@ -109,9 +112,7 @@ def _defined(path: Path) -> set[str]:
 def _names(path: Path, ctx: type[ast.expr_context]) -> set[str]:
     """该文件里以**裸名字**出现、且处于指定上下文（`Load` = 引用 / `Call` 另判）的名字。"""
     return {
-        n.id
-        for n in ast.walk(_tree(path))
-        if isinstance(n, ast.Name) and isinstance(n.ctx, ctx)
+        n.id for n in ast.walk(_tree(path)) if isinstance(n, ast.Name) and isinstance(n.ctx, ctx)
     }
 
 
@@ -121,6 +122,25 @@ def _bare_calls(path: Path) -> set[str]:
         for n in ast.walk(_tree(path))
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
     }
+
+
+def _module_assign_value(tree: ast.Module, name: str) -> ast.expr | None:
+    """模块顶层 `name = …` / `name: T = …` 的右值。
+
+    端口组装点必须按 AST 判：字面量断言会被缩进/换行/注释尾随便一次格式化改红，
+    而对齐的是「这一行仍然是 PortPair(两个原语)」这件事本身。
+    """
+    for node in tree.body:
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == name
+        ) or (
+            isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)
+        ):
+            return node.value
+    return None
 
 
 # ─────────────────────────── 结构契约 ───────────────────────────
@@ -164,10 +184,10 @@ def test_job_lifecycle_has_no_top_level_mutable_state() -> None:
             if not name.startswith("__") and isinstance(value, (ast.Dict, ast.List, ast.Set)):
                 mutable.add(name)
     assert mutable == set(), f"job_lifecycle.py 顶层多了可变容器：{sorted(mutable)}"
-    globals_decl = [
-        node.names for node in ast.walk(_tree(JL_FILE)) if isinstance(node, ast.Global)
-    ]
-    assert globals_decl == [], f"job_lifecycle.py 里出现 `global`（状态该住 wire/http）：{globals_decl}"
+    globals_decl = [node.names for node in ast.walk(_tree(JL_FILE)) if isinstance(node, ast.Global)]
+    assert globals_decl == [], (
+        f"job_lifecycle.py 里出现 `global`（状态该住 wire/http）：{globals_decl}"
+    )
 
 
 # ───────────────────────── 注入点分档（本刀主坑） ─────────────────────────
@@ -181,6 +201,7 @@ def test_cluster_internal_seam_is_the_job_lifecycle_module(monkeypatch) -> None:
     `remote.job_lifecycle` 那一份」必须仍然成功——反过来（只 patch worker）就是本步最容易犯、
     且**测试全绿**的静默错误。
     """
+
     def bomb(*a, **k):
         raise AssertionError("打偏：应 patch job_lifecycle")
 
@@ -226,11 +247,17 @@ def test_request_family_has_no_call_site_in_worker_any_more() -> None:
     assert stale == [], f"worker.py 里又出现这些调用了——seam 分档需重判：{stale}"
     # 转发名仍在（否则 `tests/remote/test_loopback_http_no_proxy.py` 会 import 失败）
     assert hasattr(worker_mod, "_request") and "_request as _request" in src
-    # 反向：这些调用点确实都搬到了簇里（否则上面那条是空的）
+    # 反向：这些调用点确实都搬到了簇里（否则上面那条是空的）。
+    # 2026-11-28（P0-8 第二代）起传输原语不再**裸调**：`_request` / `_wire_add` 只出现在
+    # `WIRE = PortPair(request=…, add=…)` 这一行（组装点），真正的调用是 `WIRE.request` /
+    # `WIRE.add` —— 所以这里的判据改成「端口组装行仍在」，它同时钉住缺省实现的两个来源
+    # （`remote.http._request` / `remote.wire._wire_add`，见 `test_wire_seam.py`）。
     jl_calls = _bare_calls(JL_FILE)
-    assert {"_request", "_wire_add", "_bulk_pace"} <= jl_calls, sorted(
-        {"_request", "_wire_add", "_bulk_pace"} - jl_calls
-    )
+    assert "_bulk_pace" in jl_calls, "簇里连让路 hook 都没了 ⇒ 上面那条成了空判据"
+    wire_value = _module_assign_value(_tree(JL_FILE), "WIRE")
+    assert isinstance(wire_value, ast.Call), "`WIRE` 没了 ⇒ 所有 `WIRE.request` 调用点无处解析"
+    assert ast.unparse(wire_value.func) == "PortPair", ast.unparse(wire_value)
+    assert {k.arg for k in wire_value.keywords} == {"request", "add"}, ast.unparse(wire_value)
 
 
 def test_host_reference_counts_as_a_seam_keeps_post_result_patches_alive() -> None:

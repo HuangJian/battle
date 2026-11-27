@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 
 import remote.bc_job as bc_job
+from remote.seams import PortPair
 
 
 def _body(epoch: int, loss: float = 1.0) -> dict:
@@ -45,7 +46,7 @@ def test_post_epoch_reports_failure_on_tunnel_530(monkeypatch) -> None:
         paths.append(spec.path)
         return 530, b"<html>cloudflare: origin unreachable</html>"
 
-    monkeypatch.setattr(bc_job, "_request", fake_request)
+    monkeypatch.setattr(bc_job, "WIRE", PortPair(fake_request))
     jid = "j" * 16
     ok = bc_job._bc_post_epoch("http://hub", "t", jid, _body(5), "tok", log=lambda _m: None)
     assert ok is False
@@ -61,7 +62,7 @@ def test_backlog_replay_posts_every_missing_epoch_then_clears(monkeypatch) -> No
         posted.append(json.loads(spec.data))
         return 200, b"{}"
 
-    monkeypatch.setattr(bc_job, "_request", fake_request)
+    monkeypatch.setattr(bc_job, "WIRE", PortPair(fake_request))
     pending = [_body(5), _body(6)]
     left = bc_job._bc_backlog_replay(
         "http://hub", "t", "j" * 16, pending, "tok", log=lambda _m: None
@@ -80,7 +81,7 @@ def test_backlog_replay_keeps_rows_when_tunnel_still_down(monkeypatch) -> None:
         calls.append(spec.path)
         return 530, b""
 
-    monkeypatch.setattr(bc_job, "_request", fake_request)
+    monkeypatch.setattr(bc_job, "WIRE", PortPair(fake_request))
     pending = [_body(5), _body(6)]
     left = bc_job._bc_backlog_replay(
         "http://hub", "t", "j" * 16, pending, "tok", log=lambda _m: None

@@ -35,6 +35,7 @@ import remote.job_lifecycle as jl_mod
 import remote.worker as worker_mod
 from remote.http import WireGet
 from remote.job_lifecycle import PostResultSpec
+from remote.seams import PortPair
 from tests.helpers import remote_dag as dag
 
 HTTP_FILE = ROOT / "remote" / "http.py"
@@ -177,16 +178,17 @@ def test_request_seam_for_the_moved_callers_is_the_http_module(
 
 
 def test_request_seam_for_the_job_face_is_the_job_lifecycle_module(monkeypatch) -> None:
-    """档位二：直调 `_request` 的**作业面**（`post_result`）解析在**定义它的模块**命名空间。
+    """档位二：作业面（`post_result`）的**发请求**能力来自 `remote.job_lifecycle` 的 `WIRE` 端口。
 
-    S4 第五步时这一档是 `worker`；第八刀把作业面搬到 `remote/job_lifecycle.py` 后，注入点
-    随它改指该模块。所以「patch `remote.job_lifecycle._request`，同时把 `remote.http._request`
-    换成炸弹」必须仍然成功。
+    S4 第五步时这一档是 `worker`；第八刀把作业面搬到 `remote/job_lifecycle.py`；2026-11-28
+    起它不再直调 `remote.http._request`，而是读本模块的 `WIRE`（缺省由 `PortPair` 用同一对原语
+    拼出来）。判据不变：「patch 作业面的端口，同时把 `remote.http._request` 换成炸弹」必须仍然
+    成功 —— 打偏的话这里看到的会是 `打偏` 而不是 200。
     """
     monkeypatch.setattr(
         http_mod, "_request", lambda *a, **k: (_ for _ in ()).throw(AssertionError("打偏"))
     )
-    monkeypatch.setattr(jl_mod, "_request", lambda *a, **k: (200, b"{}"))
+    monkeypatch.setattr(jl_mod, "WIRE", PortPair(lambda spec: (200, b"{}")))
     rc = jl_mod.post_result(PostResultSpec("http://hub", "t", "jid1", {"job_id": "jid1"}, log=lambda _m: None))
     assert rc == 200
 

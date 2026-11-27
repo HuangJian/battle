@@ -48,6 +48,7 @@ from remote.prefetch import (
     PrefetchStore,
     pick_candidates,
 )
+from remote.seams import PortPair
 from remote.worker import WorkerLoopSpec
 
 JID = "j" * 16
@@ -998,7 +999,7 @@ def test_report_prefetch_is_best_effort_and_never_raises(monkeypatch) -> None:
         seen.append((spec.path, json.loads(spec.data.decode("utf-8"))))
         return 200, b'{"ok": true}'
 
-    monkeypatch.setattr(JL, "_request", _ok)
+    monkeypatch.setattr(JL, "WIRE", PortPair(_ok))
     snap = {"held": ["a" * 16], "dl": ["b" * 16]}
     assert JL.report_prefetch("http://hub", "tok", snap, worker_id="kaggle-c") is True
     assert seen == [
@@ -1008,7 +1009,7 @@ def test_report_prefetch_is_best_effort_and_never_raises(monkeypatch) -> None:
         )
     ], seen
 
-    monkeypatch.setattr(JL, "_request", lambda *a, **k: (403, b'{"error":"nope"}'))
+    monkeypatch.setattr(JL, "WIRE", PortPair(lambda *a, **k: (403, b'{"error":"nope"}')))
     logs: list[str] = []
     assert JL.report_prefetch("http://hub", "tok", snap, log=logs.append) is False
     assert any("被拒" in m for m in logs), logs
@@ -1016,7 +1017,7 @@ def test_report_prefetch_is_best_effort_and_never_raises(monkeypatch) -> None:
     def _boom(*a, **k):
         raise W.RetryableError("hub 不可达")
 
-    monkeypatch.setattr(JL, "_request", _boom)
+    monkeypatch.setattr(JL, "WIRE", PortPair(_boom))
     logs.clear()
     assert JL.report_prefetch("http://hub", "tok", snap, log=logs.append) is False
     assert any("上报失败" in m for m in logs), logs

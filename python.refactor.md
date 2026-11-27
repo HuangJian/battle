@@ -88,7 +88,7 @@
 
 **仍开放的真欠账（按重要性 × 复杂度）**：
 
-1. **P0-8 全量 monkeypatch / 私有属性赋值 / 私有 import**：G19 审查时只冻结 392 处「打私有名」；全量仍无闸，端口对象先行。
+1. **P0-8 全量 monkeypatch / 私有属性赋值 / 私有 import**：G19 只冻结「打私有名」（2026-11-28 已到 **352 / 83**，见下方增量节）；全量 4.7k 行含 `monkeypatch` 的面仍无闸，端口对象先行。
 2. **P0-1 `TrainingLoop`**：4 个直接基类、约 12 个间接类；再拆要像 B7 一样把编排状态搬成协作者，风险高于 `_HubQueue`。
 3. **P1-1 导入体系 / src layout**：444 个 `sys.path` 文件、596 处函数内 import；editable 安装已可用，但不能一次性删。
 4. **P1-4 `Any` / mypy 非 strict**：1,207 / 184 处；批量换 `object` 已实测否决，只能按数据边界做 `TypedDict` / dataclass。
@@ -99,6 +99,14 @@
 **不算欠账**：P0-5 清单 15/15 清零；P0-4 manifest/result/action 已收；P1-2/3/6/7/8/9/10 已修；B1/B3/B4/B6/B7/B8 已落；P1-11 活转发名是契约、P1-12 没有未完成改造；G3/G4/G5/G6/G9/G13/G14/G17/G18/G19 是冻结存量（G18 是 9/4，不是 0）。
 
 **本轮已落（P0-8 首刀）**：hub 单包端口样板 —— `hub/seams.py::NET` + `task_pack` 的 `net=` 注入 + `OfflinePushSpec.client_mod` 构造注入；hub 自有私有 patch 6 处清零，顺带把共享夹具里 2 处（`tests/common/test_offline_task_queue.py`、`tests/test_production_isolation.py`）也迁到端口。G19 **392 / 95 → 384 / 91**；跨包的 `_request` / `_wire_add` 5 处留给 remote 包。
+
+**2026-11-28 增量（P0-8 第二代，`remote/seams.py::WIRE`）**：上一行的「5 处」只是 hub 用例里看得见的一角 ——
+按 (模块, 私有名) 聚合实测是 **32 处 / 14 文件**（`job_lifecycle._request` 23 · `_wire_add` 4 ·
+`bc_job._request` 4）。`WirePort`（`request` / `add` 两项能力）+ `PortPair` 组装壳（L0，宿主自拼缺省实现，
+不抬秩）落地后：G19 **384 / 91 → 352 / 83**，两条证伪（宿主直调 / `WIRE` 提前绑定）各红一次。
+**下一个已知口径**：`remote/hub_http._request` 一族还有 48 处（28 + 18 + 2），它有独立 7 参签名与自己的
+实现 ⇒ 要另立 `HubWirePort`；`remote/http._request` 自身 21 处属「测传输核心内部」，得先给
+`_get_with_retry` 加 `send=`。全文 → `docs/nn/engineering.md` §389。
 
 ## 0. 执行摘要
 

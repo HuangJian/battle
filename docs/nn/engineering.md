@@ -29,6 +29,60 @@
 
 ---
 
+## §389 P0-8 第二代：出站线路端口（`remote/seams.py::WIRE`，2026-11-28）
+
+**背景**：§388 留的下一步是「remote 包的 `_request` / `_wire_add` 同型端口」。实测**不是 5 处，
+是 32 处 / 14 个测试文件**（G19 口径：祖先表按 (模块, 私有名) 聚合为 `remote.job_lifecycle._request`
+23 · `_wire_add` 4 · `remote.bc_job._request` 4，余 1 处是同族的跨包 patch）。其中 5 处就在
+hub 的两个用例里（`test_priority_schedule` / `test_worker_attribution`），正是 §388 看见的那一角。
+
+**形状**（`remote/seams.py`，**L0**）：
+
+* `WirePort` = 两项能力：`request(spec) -> (status, body)`（契约 = `remote/http._request`）与
+  `add(jid, seg, nbytes, sec)`（契约 = `remote/wire._wire_add`）；
+* `PortPair` 是**组装壳**（frozen dataclass，字段即能力）：宿主用自己已 import 的两个原语拼缺省端口
+  （`WIRE = PortPair(request=_request, add=_wire_add)`）⇒ seams 零仓内 import、不抬任何读者的秩；
+* 调用点一律 `WIRE.request(…)` / `WIRE.add(…)`，`_request` / `_wire_add` 在宿主里只剩组装行那一次
+  （`Name(Load)`，不是 `Call`）。
+
+**为什么不照抄 `hub/seams.py` 的自带实现单例**：`http._request` 在 L2、`wire._wire_add` 在 L1，
+端口要住在 `job_lifecycle`(L3) **下面**才不抬读者；自带实现就得 import 它们 ⇒ 秩 3，与读者同秩，
+层账本要求严格小于。组装壳把「缺省实现从哪来」交回宿主，秩不变。
+
+**为什么 Protocol 用属性注解而不是 `def request(...)`**：`tools/reuse_audit` 的「同名 ≥3 模块」
+会因此把 seams 算成 `request` 的第三个定义点（`remote/control_pool` / `common/http_pool` 已有两个），
+基线当场 +1 —— 而它本来就只是一份能力声明。
+
+**证明**：
+
+* G19 `monkeypatch_private_baseline.json`：**384 / 91 → 352 / 83**（−32 次 / −8 文件）；
+  14 个用例文件 250 passed，`test_job_lifecycle_split` / `test_wire_seam` 17 passed。
+* 证伪两条（改完即恢复）：往 `job_lifecycle` 塞一个 `_request(...)` 直调 ⇒
+  `test_hosts_never_call_transport_primitives_directly[job_lifecycle.py]` 红；把 `WIRE` 绑进
+  `bc_job` 的函数缺省值 ⇒ `test_port_name_is_resolved_at_call_time[bc_job.py]` 红。
+* 层账本：`remote.seams = 0`，`job_lifecycle` / `bc_job` 的顶层依赖白名单各加一格；全绿。
+* mypy（`platform=linux`，`warn_unused_ignores`）三个改动模块零问题；ruff 全绿。
+
+**坑**：
+
+1. **`PortPair(fake)` 的 `add` 是 `_noop`** ⇒ 两条「字节要进账」的用例（`test_wire_reroll` 的
+   `post_result` 段账）必须写 `PortPair(fake, add=JL.WIRE.add)`：只换发送面、留下真实记账。
+   同理，`bc_job` 只接 `request` 是**有意的**（它不写 job 行），守卫里按文件钉死关键字集合，
+   防止有人「顺手补全」。
+2. **`WIRE` 必须调用时解析**：绑成缺省参数 / 类属性 / 模块级别名都会让 `patch JL.WIRE` 静默打空
+   （「patch 打偏而测试全绿」的老坑）。守卫用 AST 三条判据钉住，含模块级别名。
+3. 文本断言口径 B **+2 抬格**（1241 → 1243）：两条守卫都只能读源码，计入只因文件带 `.py` 字面量
+   —— 与 §388 之前几格同一已知限边，理由写在 `tests/test_source_text_assert_budget.py` 表头。
+4. 反向：`test_job_lifecycle_split` 原来断言「簇里仍有 `_request` / `_wire_add` **裸调用**」——
+   本刀把裸调用变成端口组装，判据改成「组装行仍是 `PortPair(request=…, add=…)`」（AST，不写字面量）。
+
+**下一步（未做）**：`remote/hub_http._request` 那一族（28 + 18 + 2 = 48 处）是另一半 ——
+它有自己的 7 参签名与独立实现（不走 `common.http_pool`），要单独定义 `HubWirePort`；
+`remote/http._request` 自身的 21 处 patch 属「测传输核心内部」，需要先给 `_get_with_retry`
+加 `send=` 参数，与本刀不同型。
+
+---
+
 ## §388 P0-8 单包端口样板：hub 的 task-pack 网络端口（2026-11-27）
 
 **背景**：P0-8 的关键不是把 `_net_urlopen` 改个名，而是让测试不再需要知道实现里的私有名。

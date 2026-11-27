@@ -595,7 +595,14 @@ BASELINE_FORM = 1536
 #:   `test_http_servers_in_tests_use_serve_fast`（`serve_forever` 裸引用 vs 传了间隔，AST 判据）。
 #:   两条都不在比措辞；计进口径 B 只因该文件带 `*.py` 字面量（`_test_files()` 的 rglob）——
 #:   与前面几格同一已知限边。口径 A 不变（1536）。
-BASELINE_SRC = 1241
+#: 2026-11-28 抬到 **1243**（+2，实测）：新增 `tests/remote/test_wire_seam.py`（P0-8 第二代
+#:   线路端口）。两条判据都只能读源码：`test_hosts_never_call_transport_primitives_directly`
+#:   （宿主里 `_request` / `_wire_add` 的**调用点必须为 0**）与
+#:   `test_port_name_is_resolved_at_call_time`（`WIRE` 不许绑进缺省值 / 类属性 / 模块级别名）
+#:   —— 被测物是「这个模块还直调私有名吗」「这个名字是不是被提前绑死了」，没有任何运行期出口
+#:   （绑死了照样能跑，只是 patch 打空）。计进口径 B 只因文件里带 `job_lifecycle.py` /
+#:   `bc_job.py` 两个 `.py` 字面量（`HOSTS` 元组）；口径 A 不变（1536）。
+BASELINE_SRC = 1243
 
 
 #: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。派生式（基线九成，见
