@@ -151,15 +151,8 @@ class RolloutDispatcher:
         status_timeout = common.distribution.status_timeout_of(policy)
         fail_streak_max = int(policy.get("nodeFailStreak", 3))
         # 主动升级机制（M8）：ping 发现 codeHash **stale** 的节点 → POST /v1/restart
-        # 指示它 git pull + 重启（本轮不参与，重启后 rescan 纳入）；拿不到升级分支时
-        # 只告警、不重启（下面 `if not upgrade_branch`）。
-        # 节点远控升级分支：**永远**以训练机当前分支为准（run_rl 启动时锁存到
-        # remote.node_upgrade.UPGRADE_BRANCH）。**不读 config 的 upgradeBranch**：
-        # 2026-08-30 事故里残留的 'intent-ai' 把全部节点 reset 回旧代码，而当时的
-        # `upgrade_branch_or(explicit)` 是「显式值优先于锁存」⇒ 只要配置里有非空值就
-        # 盖掉锁存。该键已从 rl-config.json 删除（plan/rl-config-cleanup.plan.md §3.1），
-        # 读点去掉；2026-09-26 评审又把那个 `explicit` 参数一并拿掉
-        # （`current_upgrade_branch()`）⇒ 坑在**签名层面**不再可能复现。
+        # 带 `pullBranch`（节点先 git pull 再重启；本轮不参与，重启后 rescan 纳入）。
+        # 分支名由入口读 `.git/HEAD` 锁存（零 git 子进程）；空串 ⇒ 不重启、只排除。
         upgrade_branch = remote.node_upgrade.current_upgrade_branch()
         wver = common.distribution.weights_fingerprint(rl_path)
         local_bun = TOOLCHAIN.bun_version(bun)
@@ -173,17 +166,8 @@ class RolloutDispatcher:
         # ping 超时（statusTimeoutSec=3s）全部并行——7 死节点从串行 ~21s/轮 压到 ~3s；
         # 判定与日志按配置顺序串行回放（保序、保线程安全）。节点中途上线的接管仍靠
         # 下一轮迭代的 ping 门（与 rollout 既有语义一致）。
-        # 脏工作区护栏（2026-09-01 重启循环修复①）：参考 codeHash 以 self 自报为准
-        # （self 缺失才回退工作区现算）。含未提交改动时远端 git pull 永不收敛 ⇒ 下发
-        # pull+restart 是无效扰动（实测：节点拉到最新提交后 hash 仍不等 → 每轮 rescan
-        # 再杀一次，无限重启循环）。self/回环节点不受限（代码同源，纯重启即可拾取）。
-        dirty_files = common.codehash.dirty_hash_files()
-        if dirty_files:
-            log(
-                f"[dist] WARN: {len(dirty_files)} uncommitted file(s) in codeHash set "
-                f"({', '.join(dirty_files[:5])}{', …' if len(dirty_files) > 5 else ''}) — "
-                f"remote restart suppressed until committed+pushed"
-            )
+        # 参考 codeHash 以 self 自报为准（self 缺失才回退工作区现算）；git 索引/工作区
+        # 比对已随 dirty-tree 守卫一起移除（2026-11-27 用户裁定整套去 git）。
         # push 节点（`gpu_push` / `offline_push`）没有 `/v1/ping`：留在候选表里只会每轮换一条
         # `ping failed — excluded this round`（判据见 `common/protocol.sampler_nodes`）。
         cfg_nodes = common.protocol.sampler_nodes(cfg.get("nodes", []))
@@ -205,7 +189,7 @@ class RolloutDispatcher:
         code_hash = codehash_ref.reference_code_hash(cfg_nodes, probe_results)
         # 准入判据从 `st` 读：先把本相位算出的字段写进去（方法末尾的写入是给后续相位的）。
         st.code_hash, st.upgrade_branch = code_hash, upgrade_branch
-        st.dirty_files, st.local_bun = dirty_files, local_bun
+        st.local_bun = local_bun
         st.meta_path, st.iter_no = meta_path, iter_no
         nodes = admit_rollout_nodes(st, probe_results, cfg_nodes, DEDUP_STREAK)
         # ── 起始分布（state_init）：整轮纯本机（2026-09-25 路由修正）───────────────────
@@ -380,7 +364,7 @@ class RolloutDispatcher:
         status_timeout, fail_streak_max = st.status_timeout, st.fail_streak_max
         upgrade_branch, wver, local_bun = st.upgrade_branch, st.wver, st.local_bun
         iter_no, meta_path = st.iter_no, st.meta_path
-        code_hash, dirty_files = st.code_hash, st.dirty_files
+        code_hash = st.code_hash
         wkind, weights_bytes = st.wkind, st.weights_bytes
         reuse, need = st.reuse, st.need
         last_settle_at, t_dist_start_box = st.last_settle_at, st.t_dist_start_box
@@ -487,7 +471,7 @@ class RolloutDispatcher:
             policy=policy, task_timeout=task_timeout, status_timeout=status_timeout,
             fail_streak_max=fail_streak_max, upgrade_branch=upgrade_branch, wver=wver,
             local_bun=local_bun, iter_no=iter_no, meta_path=meta_path,
-            code_hash=code_hash, dirty_files=dirty_files, wkind=wkind,
+            code_hash=code_hash, wkind=wkind,
             weights_bytes=weights_bytes, reuse=reuse, need=need,
             n_total_tasks=n_total_tasks, norm_pairs=norm_pairs,
             remote_dead_sec=remote_dead_sec,

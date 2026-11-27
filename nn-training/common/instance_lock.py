@@ -56,7 +56,7 @@ import os
 import sys
 import time
 
-from common.pid_probe import pid_alive
+from common.pid_probe import pid_alive, proc_cmdline_nt
 from common.proc import run_capture
 
 __all__ = [
@@ -93,7 +93,7 @@ def _win_cmdline_wmic(pid: int) -> str | None:
 
     ⚠ **Win11 24H2 起 `wmic` 已被移除**（2026-09-17 本机实测：`which wmic` 找不到、
     `System32/wbem/WMIC.exe` 不存在）⇒ 本函数在新机上必然返回 None，真实现是
-    `_win_cmdline_cim`。保留它是因为还有一批未打该补丁的机器/云机镜像只认 wmic。
+    `pid_probe.proc_cmdline_nt`（原生）与 `_win_cmdline_cim`。保留它是因为还有一批未打该补丁的机器/云机镜像只认 wmic。
 
     ⚠ 走 `common.proc.run_capture` 而不是裸 `subprocess.run`（2026-10-13 用户报障「启动
     trainer/hub 闪黑窗」）：本函数只被**无控制台**的父进程调用（trainer / hub / 云机 worker
@@ -118,7 +118,7 @@ def _win_cmdline_wmic(pid: int) -> str | None:
 
 
 def _win_cmdline_cim(pid: int) -> str | None:
-    """Windows：`Get-CimInstance Win32_Process` 读命令行（wmic 被移除后的唯一内置途径）。
+    """Windows：`Get-CimInstance Win32_Process` 读命令行（原生/wmic 都读不到时的最后回落）。
 
     用 `pwsh`（PowerShell 7；**不**回落到 inbox 的 `powershell.exe` —— 仓库铁律
     §17.7，而这条路径只在「锁已存在且有活持有者」时才走，可接受 ~0.5s 的启动开销）。
@@ -154,14 +154,13 @@ def _win_cmdline_cim(pid: int) -> str | None:
 def proc_cmdline(pid: int) -> str | None:
     """进程命令行（身份核验用）；读不到 → None（调用方必须按「身份未知」fail-closed）。
 
-    POSIX 读 `/proc/<pid>/cmdline`（macOS 无 `/proc` → None）；Windows 先用 wmic、
-    被移除的新机上回落 PowerShell `Get-CimInstance`（见两个 `_win_cmdline_*` 的说明）。
-    与 `dashboard/src/launch/cli.ts::listPythonProcesses` 同款（那边也走 wmic）。
+    POSIX 读 `/proc/<pid>/cmdline`（macOS 无 `/proc` → None）；Windows 先用原生 ctypes
+    （`pid_probe.proc_cmdline_nt`，无子进程），读不到再回落 wmic / pwsh `Get-CimInstance`。
     """
     if pid <= 0:
         return None
     if os.name == "nt":
-        return _win_cmdline_wmic(pid) or _win_cmdline_cim(pid)
+        return proc_cmdline_nt(pid) or _win_cmdline_wmic(pid) or _win_cmdline_cim(pid)
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
             raw = f.read()

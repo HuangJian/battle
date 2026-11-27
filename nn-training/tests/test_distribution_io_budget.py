@@ -1,14 +1,16 @@
 """G8：`common/` 的出站副作用（HTTP / git 子进程）只减不增
 （`python.refactor.md` §8、§10-B8）。
 
-`common/` 是 L0（stdlib-only 的纯层），但这条线路上仍留着 HTTP 出口与 `git ls-files -s` /
-`git cat-file --batch` 两个子进程。B8 的方向是把这些副作用搬去 `remote/`，本门禁只做一件事
+`common/` 是 L0（stdlib-only 的纯层），这条线路上留着 HTTP 出口。B8 的方向是把这些副作用
+搬去 `remote/`，本门禁只做一件事
 ——**拦住「再往 L0 加一处 IO」**：存量按「模块 + 原语名」冻结，只许降，降了必须改基线
 （否则旧额度会回流）。
 
 2026-11-16：codeHash 实现从 `distribution.py` 拆到 `codehash.py`，两个 git 子进程跟着搬了家。
 门禁的扫描面因此**扩成两个模块**（按「模块 + 原语」记账），否则「搬个家」会被读成「副作用消失」，
 而实际上它们还在 L0 里，只是换了文件 —— 那正是这类门禁最容易自欺的地方。
+2026-11-27：用户裁定整套去 git，`dirty_hash_files` 及其两个 git 子进程从 `codehash.py` 删除，
+两格基线归零（不是搬家，是真消失）；扫描面保留 `common.codehash`，防它再长出别的 IO。
 
 2026-11-19（B8 第十刀）：升级/重启簇从 `distribution.py` 整簇搬去 `remote/node_upgrade.py`。
 **基线数值一个不变**——那一簇从来没有自己的 IO 原语，它一直走 `_request` 漏斗。所以这次
@@ -49,8 +51,6 @@ IO_BARE = frozenset({"run_capture", "racing_urlopen", "urlopen_no_proxy"})
 BASELINE = {
     "common.distribution|net_http.racing_urlopen": 1,  # 唯一的网络出口
     "common.distribution|urllib.request.Request": 1,  # _request 的请求面
-    "common.codehash|run_capture": 1,  # git ls-files -s
-    "common.codehash|subprocess.run": 1,  # git cat-file --batch
 }
 
 #: 扫描面 = L0 里**所有**碰出站 IO 的模块（新增一处 IO 就得先在这里露面）。
@@ -125,7 +125,7 @@ def test_baseline_only_shrinks() -> None:
 def test_scan_sees_the_known_io_surface() -> None:
     actual = _scan()
     assert actual.get("common.distribution|net_http.racing_urlopen") == 1, actual
-    assert actual.get("common.codehash|subprocess.run") == 1, "扫描入口坏了（git 子进程没数到）"
+    assert actual.get("common.distribution|urllib.request.Request") == 1, actual
     assert set(actual) == set(BASELINE), actual
     assert sum(actual.values()) == sum(BASELINE.values()), actual
 

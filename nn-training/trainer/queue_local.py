@@ -571,7 +571,7 @@ def run_local_rollout(
 
 
 def _rescan_stale_code(
-    nid: str, n: dict, ping: dict, code_hash: str, upgrade_branch, dirty_files
+    nid: str, n: dict, ping: dict, code_hash: str, upgrade_branch
 ) -> bool:
     """rescan 的 codeHash 门（自 `rescan_nodes` 原样搬出）。
 
@@ -580,7 +580,7 @@ def _rescan_stale_code(
     """
     if ping.get("codeHash") == code_hash:
         return False
-    # guarded 重启（跨代去重 + 脏树拒发，同 ping 门）；dedup 静默跳过
+    # guarded 重启（跨代去重，同 ping 门）；dedup 静默跳过
     # （rescan 周期 ~15s，重复刷屏无信息量）。F2：日志带两侧 hash——
     # 与 ping 门同口径，运维一眼看出差异在哪一侧。
     common.distribution.forget_weights_node(nid)
@@ -595,7 +595,6 @@ def _rescan_stale_code(
             auth_key=n.get("authKey", ""),
             branch=upgrade_branch,
             ping_hash=str(ping.get("codeHash")),
-            dirty=dirty_files,
             expected_hash=code_hash,
         )
     )
@@ -604,12 +603,6 @@ def _rescan_stale_code(
             f"[dist] rescan {nid}: codeHash stale "
             f"(local={local_short} remote={remote_short}) — requested "
             f"upgrade to {upgrade_branch} (accepted)"
-        )
-    elif reason.startswith("dirty-tree"):
-        log(
-            f"[dist] rescan {nid}: codeHash stale "
-            f"(local={local_short} remote={remote_short}) — remote restart "
-            f"suppressed ({reason}: uncommitted training-tree changes)"
         )
     elif remote.node_upgrade.is_self_node(n["url"], nid):
         log(
@@ -679,7 +672,6 @@ class RescanSpec:
     cfg: dict
     code_hash: str
     upgrade_branch: str
-    dirty_files: list[str]
     local_bun: str
     spawned_ids: set[str]
     alive: list[dict]
@@ -761,9 +753,7 @@ def _rescan_ready(spec: RescanSpec, n: dict, nid: str, ping: dict, iter_id: str)
     `iter_id` 按**名字**传进来（不从 `spec` 取）：`round_key("rollout", iter_id)` 这个表达式必须与
     `trainer/dispatch_state.py` 的钉逐字同形，`tests/worker/test_node_identity.py` 比的就是它。
     """
-    if _rescan_stale_code(
-        nid, n, ping, spec.code_hash, spec.upgrade_branch, spec.dirty_files
-    ):
+    if _rescan_stale_code(nid, n, ping, spec.code_hash, spec.upgrade_branch):
         return False
     remote_full = str(ping.get("bunVersion", "?"))
     # mm 就地内联（param 已删）：major.minor 一致性红线（确定性，M4）

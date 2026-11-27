@@ -41,7 +41,6 @@ from common.proc import run_capture
 
 __all__ = [
     "CODE_META_NAME",
-    "GIT_TIMEOUT_SEC",
     "REPO_TOPS",
     "SENTINEL_MODULES",
     "SENTINEL_TIMEOUT_SEC",
@@ -54,8 +53,6 @@ __all__ = [
 #: 挥发字段（时间戳/绝对路径）一进 zip，`code_cache/<sha>` 就每次失配。
 CODE_META_NAME = "code_meta.jsonc"
 
-#: git 探测超时（仓库异常大时 `status` 会慢）；超时/没有 git ⇒ 当作「没有仓」，不挡打包。
-GIT_TIMEOUT_SEC = 30.0
 
 #: 代表模块清单（见模块 docstring；改这里必须同时改 `remote/offline_boot.py` 的那份 —— 用例钉）。
 SENTINEL_MODULES: tuple[str, ...] = ("common.shard", "worker.ppo.np_core", "remote.run_loop")
@@ -88,48 +85,21 @@ _CHILD_SCRIPT = (
 )
 
 
-def _git_out(nn_root: str | Path, *args: str) -> str | None:
-    """跑一条 git **只读**命令的 stdout（rc≠0 / 没有 git / 超时 ⇒ None，永不抛）。"""
-    try:
-        proc = run_capture(["git", "-C", str(nn_root), *args], timeout=GIT_TIMEOUT_SEC)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return proc.stdout if proc.returncode == 0 else None
-
-
 def code_tree_provenance(nn_root: str | Path, log=None) -> dict:  # log 与 pack_code_zip 同形（不引类型）
-    """`code_meta.jsonc` 的实体：`{commit, dirty, dirty_files, import_ok}`（B2/B4）。
+    """`code_meta.jsonc` 的实体：`{import_ok}`（B2/B4）。
 
-    * `commit` / `dirty` / `dirty_files` —— `git rev-parse HEAD` + `git status --porcelain -- .`。
-      这是「快照 = 工作树」这件事的**体检**：混血树（`np_core.py` 已改 / `shard.py` 未改）的指纹
-      就是 `dirty=true` + 两份文件同在一个清单里。**没有仓 / 没有 git / 超时 ⇒ 三项留空，不 WARN**
-      （打包端刻意支持「没有仓也能打」——`tmp/.code-snapshot` 的所有者可能是任意进程）。
-      `dirty_files` **排序**后才写，且走 git 默认口径（未跟踪目录折叠成一条，不 `-uall`）：
-      `-uall` 会把 `.venv310bak/` 那种上万个文件展开进 meta 撑爆它；真正的干活判据是
-      「被改的**已跟踪**文件」（现场那对 np_core/shard 正是这一类，逐个列出）。
-    * `import_ok` —— 导入哨兵（`run_import_sentinel`，实测 <0.4s、torch-free）的结论。
-      **只记录事实、不挡打包**：用户工作流是边改边跑（plan §6「打包端硬拒脏树」已否决）——
-      脏包在**导出那一刻**就被 WARN 出来，比等云机跑到 `train_core` 里 `import worker.ppo.engine`
-      才爆（rollout 全白跑、账本无行、kernel 继续计时）便宜得多。
+    2026-11-27：`commit` / `dirty` / `dirty_files` 三项删除——它们只写不读，唯一来源是
+    `git -C <tree> rev-parse HEAD` + `status --porcelain`（每次打包两个子进程），而当前
+    代码分发已改为 hub `code.zip`，不再有「这棵树对应哪个 commit」的可信语义。
+    保留 `import_ok` —— 导入哨兵（`run_import_sentinel`，实测 <0.4s、torch-free）的结论，
+    **只记录事实、不挡打包**：坏包在导出那一刻被 WARN，比等云机跑到 `train_core` 里
+    `import worker.ppo.engine` 才爆（rollout 全白跑、账本无行、kernel 继续计时）便宜得多。
     """
-    commit = (_git_out(nn_root, "rev-parse", "HEAD") or "").strip()
-    files: list[str] = []
-    for line in (_git_out(nn_root, "status", "--porcelain", "--", ".") or "").splitlines():
-        rel = line[3:].strip() if len(line) > 3 else ""
-        if " -> " in rel:  # 重命名/复制：取新名
-            rel = rel.split(" -> ", 1)[1]
-        if rel:
-            files.append(rel.strip('"'))
-    files = sorted(files)
-    dirty = bool(files)
-    if log and dirty:
-        head_txt = ", ".join(files[:5]) + ("…" if len(files) > 5 else "")
-        log(f"WARN code.zip 出自脏工作树（{len(files)} 个未提交改动: {head_txt}）——快照可能内部不自洽")
     ok, kind, detail = run_import_sentinel(nn_root)
     if log and not ok:
         why = "环境缺件（非代码问题）" if kind == "env" else "这份代码树内部不自洽（云端会在训练前拒跑）"
         log(f"WARN code.zip 的导入哨兵未通过（{kind}）: {detail} —— {why}")
-    return {"commit": commit, "dirty": dirty, "dirty_files": files, "import_ok": ok}
+    return {"import_ok": ok}
 
 
 def run_import_sentinel(

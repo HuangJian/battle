@@ -84,13 +84,12 @@ class DispatchState:
     window: float = 1800.0
     status_timeout: float = 0.0
     fail_streak_max: int = 3
-    upgrade_branch: str = ""
     wver: str = ""
     local_bun: str = ""
     iter_no: int = 0
     meta_path: Path = field(default_factory=lambda: Path("."))
     code_hash: str = ""
-    dirty_files: list[str] = field(default_factory=list)
+    upgrade_branch: str = ""
     cfg_nodes: list[dict] = field(default_factory=list)
     nodes: list[dict] = field(default_factory=list)
     # ---- ② 权重下发产物 ----
@@ -170,14 +169,13 @@ def _stale_code(
     """codeHash 不符 ⇒ 版本升级/去重/告警，**本轮一律排除**（不返回布尔：没有准入路径）。
 
     主动升级（guarded，2026-09-01 重启循环修复②）：分支 = 训练机当前分支
-    （`remote.node_upgrade.UPGRADE_BRANCH` 锁存）。护栏见
+    （`remote.node_upgrade.current_upgrade_branch()` 锁存）。护栏见
     `remote.node_upgrade.request_upgrade_guarded` —— 跨代去重（同节点同 (agent codeHash,
-    期望 hash) 只杀一次，F1：键含期望 hash）+ 脏工作区拒发（远端 pull 永不收敛，手动更新
-    重启的进程不再被远控杀掉）。F2：mismatch 分支所有日志携带两侧 hash 前缀。
+    期望 hash) 只杀一次，F1：键含期望 hash）。git 脏树拒发已随 2026-11-27 去 git 裁定移除。
+    F2：mismatch 分支所有日志携带两侧 hash 前缀。
     """
     code_hash = st.code_hash
     upgrade_branch = st.upgrade_branch
-    dirty_files = st.dirty_files
     # codeHash 不符 ⇒ 节点可能 pull/restart 丢权重——缓存必须失效
     common.distribution.forget_weights_node(nid)
     local_short = code_hash[:8]
@@ -185,7 +183,7 @@ def _stale_code(
     if not upgrade_branch:
         log(
             f"[dist] node {nid}: codeHash mismatch "
-            f"(local={local_short} remote={remote_short}) — excluded (red)"
+            f"(local={local_short} remote={remote_short}) — excluded (red, no upgrade branch)"
         )
         dedup_streak.pop(nid, None)
         return
@@ -196,7 +194,6 @@ def _stale_code(
             auth_key=n.get("authKey", ""),
             branch=upgrade_branch,
             ping_hash=str(ping.get("codeHash")),
-            dirty=dirty_files,
             expected_hash=code_hash,
         )
     )
@@ -209,7 +206,7 @@ def _stale_code(
     elif reason == "restart-requested":
         log(
             f"[dist] node {nid}: requested upgrade to {upgrade_branch} "
-            f"(accepted) — will rejoin after restart"
+            f"(accepted) — node will git pull then restart"
         )
     elif reason == "dedup":
         # F6：连续 ≥3 轮 dedup 且非 self ⇒ 显式告警——dedup 是静默排除，
@@ -229,13 +226,6 @@ def _stale_code(
                 f"'bun tools/agent/codehash-report.ts' 与本机 diff"
                 f"（见 plan/dist-codehash-stale-fix.md §4）"
             )
-    elif reason.startswith("dirty-tree"):
-        log(
-            f"[dist] node {nid}: codeHash mismatch "
-            f"(local={local_short} remote={remote_short}) — remote pull "
-            f"cannot converge (uncommitted training-tree changes), restart "
-            f"suppressed ({reason}) — excluded this round"
-        )
     else:
         log(
             f"[dist] node {nid}: codeHash mismatch "

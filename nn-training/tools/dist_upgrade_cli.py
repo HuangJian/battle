@@ -158,11 +158,8 @@ def run_scan(spec: dict) -> dict:
 
 
 def _report_dirty() -> list[str]:
-    """调用方要在日志里说明「为什么远端被拒」——取不到就不报（守卫侧仍会自行判定）。"""
-    try:
-        return list(common.codehash.dirty_hash_files())
-    except Exception:
-        return []
+    """2026-11-27 git 脏树守卫退役：永远空表，输出字段保留只为报告形状兼容。"""
+    return []
 
 
 def run_spec(spec: dict) -> dict:
@@ -203,29 +200,16 @@ def run_spec(spec: dict) -> dict:
         ids_seen.add(nid)
 
     # 并行下发：N 个节点各自最多等 timeout 秒；串行会变成 N×timeout（2026-11-21
-    # 「全部升级」把 dashboard 后端堵住几分钟的事故）。dirty 只探测一次，别让每个
-    # 线程各扫一遍工作区。
-    reported_dirty = (_report_dirty() if not dry else None) if dirty is None else list(dirty)
+    # 「全部升级」把 dashboard 后端堵住几分钟的事故）。dirty-tree 守卫已退役，不再探测。
 
     def dispatch_one(n: dict) -> dict:
         nid = str(n.get("id") or n.get("url"))
         ping_hash = str(n.get("pingHash") or "")
-        self_node = remote.node_upgrade.is_self_node(str(n["url"]), nid)
         if ping_hash and ping_hash == expected:
             return {"id": nid, "ok": False, "reason": "current"}
         if dry:
-            # dry 只看 dirty 与身份，不发 POST：给调用方一次「先说清楚再动手」的机会。
-            eff_dirty = reported_dirty
-            if eff_dirty is None:
-                eff_dirty = [] if self_node else common.codehash.dirty_hash_files()
-            why = (
-                f"dirty-tree:{len(eff_dirty)}"
-                if eff_dirty and not self_node
-                else "planned"
-            )
-            return {"id": nid, "ok": False, "reason": why}
-        # dirty=None ⇒ 守卫内部自己探测（远端才探；self 直接跳过探测，同 remote.node_upgrade 语义）。
-        eff_dirty = [] if self_node else reported_dirty
+            # dry 只看身份，不发 POST：给调用方一次「先说清楚再动手」的机会。
+            return {"id": nid, "ok": False, "reason": "planned"}
         ok, reason = remote.node_upgrade.request_upgrade_guarded(
             remote.node_upgrade.UpgradeAsk(
                 nid=nid,
@@ -234,7 +218,6 @@ def run_spec(spec: dict) -> dict:
                 branch=branch,
                 ping_hash=ping_hash,
                 timeout=timeout,
-                dirty=eff_dirty,
                 expected_hash=expected,
                 cooldown_sec=cooldown,
             )
@@ -245,7 +228,7 @@ def run_spec(spec: dict) -> dict:
     with ThreadPoolExecutor(max_workers=min(len(raw_nodes), 16)) as pool:
         results = list(pool.map(dispatch_one, raw_nodes))
 
-    return {"dirty": list(reported_dirty or []), "results": results}
+    return {"dirty": _report_dirty(), "results": results}
 
 
 def main() -> int:

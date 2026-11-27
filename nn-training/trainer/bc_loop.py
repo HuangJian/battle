@@ -36,7 +36,6 @@ import hashlib
 import json
 import secrets
 import shutil
-import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -45,7 +44,6 @@ from pathlib import Path
 from common.cli import house_parser
 from common.log import log
 from common.paths import REPO_ROOT
-from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from common.settings import push_node_from_env
 from remote.code_snapshot import (
     current_code_zip_path,
@@ -168,20 +166,9 @@ def append_weights_md_row(
     md_path = Path(weights_dir) / "WEIGHTS.md"
     try:
         trained_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        # 2026-11-27：BC 走 notebook + hub code.zip，不再有 git 仓库/commit 可溯源；
+        # 列保留（表格格式与旧档案一致）但恒为 "n/a"，不再起 git 子进程。
         sha = "n/a"
-        try:
-            raw: bytes = subprocess.check_output(
-                ["git", "rev-parse", "--short", "HEAD"],
-                cwd=str(REPO_ROOT),
-                stderr=subprocess.DEVNULL,
-                timeout=15,
-                **_POPEN_NO_WINDOW,
-            )
-            sha = raw.decode().strip() or "n/a"
-        except (OSError, subprocess.SubprocessError):
-            pass  # git 不在 PATH / 超时 / cwd 没了 ⇒ 溯源列记 "n/a"（列本身是显式的）
-        # 其余照抛：命令拼错（TypeError/IndexError）与「git 不可用」是两件事，后者是本列
-        # 允许的降级，前者是我们自己的 bug。
         row = (
             f"| {trained_at} | `{Path(archive_path).name}` | {epochs} "
             f"| {samples[0]}/{samples[1]} | {best_val:.4f} "

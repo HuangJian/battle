@@ -164,6 +164,24 @@ def test_proc_cmdline_readable_without_wmic() -> None:
     assert "python" in cmd.lower() or "pytest" in cmd.lower(), cmd
 
 
+def test_proc_cmdline_includes_full_argv_on_windows() -> None:
+    """原生 PEB 读取必须拿到**整条 argv**，不只是 exe 路径。
+
+    `RTL_USER_PROCESS_PARAMETERS` 里 `ImagePathName`（x64 +0x60）紧挨 `Environment`，
+    `CommandLine` 在 +0x70；偏移错一格时命令里没有 `-m hub.server` 这类 marker，
+    活着的持有者会被判成「PID 复用」而接管锁 ⇒ 双监听窗口回来（2026-11-27 全量 7 红）。
+    """
+    if os.name != "nt":
+        pytest.skip("Windows 原生 PEB 读取")
+    import ctypes
+
+    k32 = ctypes.__dict__["WinDLL"]("kernel32")
+    get_cli = k32.GetCommandLineW
+    get_cli.restype = ctypes.c_wchar_p
+    api = get_cli()
+    assert il.proc_cmdline(os.getpid()) == api
+
+
 def test_unreadable_cmdline_fails_closed(
     tmp_path: Path, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:

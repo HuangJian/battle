@@ -10,9 +10,8 @@
   3) 不可达节点优雅跳过（不崩、不阻塞）；
   4) `request_upgrade` 失败（非 200/202）返回 False；
   5) 跨代去重（F1：dedup 键含期望 hash）与冷却窗（F3：窗过后允许重发）；
-  6) 脏工作区护栏（远端拒发 / self 节点纯重启且 pullBranch 强制空）；
-  7) `RestartMemo` / `BranchLatch` 的实例隔离（进程级状态只有默认实例，测试自己 new 一份）；
-  8) 分支锁存：`set(None)` 收敛成空串（调用方不再各自写 `or ""`）。
+  6) `dirty` / `branch` 退役字段：传了也照常纯重启（git 脏树与分支锁已删除）；
+  7) `RestartMemo` 的实例隔离（进程级状态只有默认实例，测试自己 new 一份）。
 """
 
 from __future__ import annotations
@@ -21,6 +20,7 @@ import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -268,8 +268,8 @@ def test_request_upgrade_guarded_cooldown() -> None:
         mock.close()
 
 
-def test_request_upgrade_guarded_dirty_tree(monkeypatch) -> None:
-    """脏工作区护栏：远端拒发 `dirty-tree:<n>`；self 节点纯重启且 pullBranch 强制空。
+def test_request_upgrade_guarded_retired_dirty_field(monkeypatch) -> None:
+    """git 脏树守卫已退役：`dirty` 字段仅为签名兼容保留，远端与 self 都照常放行。
 
     注意：mock agent 绑 127.0.0.1 会被 `is_self_node` 判为 self——用 monkeypatch 模拟
     真实远端（非回环主机）与 self 两种身份（与被测模块同一命名空间）。
@@ -283,9 +283,12 @@ def test_request_upgrade_guarded_dirty_tree(monkeypatch) -> None:
         ok, r = nu.request_upgrade_guarded(
             _ask("remote", remote.url(), "stale-hash-abc", dirty=dirty)
         )
-        assert ok is False and r == "dirty-tree:2", f"远端脏树 → 拒发, got {r}"
-        assert len(remote.restart_calls) == 0, "远端脏树 → 不杀进程"
-        # self 节点：dirty 仍放行，纯重启。
+        assert ok is True and r == "restart-requested", f"dirty 已退役 → 照常下发, got {r}"
+        assert len(remote.restart_calls) == 1, "远端应收到一次重启请求"
+        assert remote.restart_calls[0]["body"].get("pullBranch") == "goal-nn", (
+            "采样节点必须先 git pull 到训练机分支再重启"
+        )
+        # self 节点：纯重启且 pullBranch 强制空。
         ok2, r2 = nu.request_upgrade_guarded(
             _ask("self", self_mock.url(), "stale-hash-abc", dirty=dirty)
         )
@@ -293,16 +296,16 @@ def test_request_upgrade_guarded_dirty_tree(monkeypatch) -> None:
         assert self_mock.restart_calls[0]["body"].get("pullBranch") == "", (
             "self 重启 pullBranch 强制为空（禁 pull）"
         )
-        # dirty=None 自动检测：不抛异常、reason 合法即可（真实仓库状态不确定）。
+        # dirty=None 也不再触发 git 探测：只按 dedup 与远端回执出结论。
         ok3, r3 = nu.request_upgrade_guarded(_ask("auto", remote.url(), "auto-hash", dirty=None))
-        assert isinstance(ok3, bool) and isinstance(r3, str), f"dirty=None 自动检测不抛, got {r3}"
+        assert isinstance(ok3, bool) and isinstance(r3, str), f"dirty=None 不留悬挂分支, got {r3}"
     finally:
         remote.close()
         self_mock.close()
 
 
-def test_upgrade_stale_nodes_dirty_tree(monkeypatch) -> None:
-    """`upgrade_stale_nodes` 在脏工作区下对远端节点全部拒发（零 restart POST）。"""
+def test_upgrade_stale_nodes_ignores_retired_dirty(monkeypatch) -> None:
+    """`upgrade_stale_nodes` 不再看 git 脏树：`dirty` 传什么都照常升级远端。"""
     nu.reset_restart_state()
     stale = MockAgent(code_hash="stale-hash-abc")
     cfg = {"nodes": [{"id": "stale", "url": stale.url(), "authKey": "K1", "enabled": True}]}
@@ -317,11 +320,48 @@ def test_upgrade_stale_nodes_dirty_tree(monkeypatch) -> None:
             dirty=["src/nn/rl-reward-toy.ts"],
         )
         by_id = {r["id"]: r for r in res}
-        assert by_id["stale"]["upgraded"] is False, "脏树 → 不升级"
-        assert by_id["stale"]["reason"] == "dirty-tree:1", by_id["stale"]["reason"]
-        assert len(stale.restart_calls) == 0, "脏树 → 零 restart POST"
+        assert by_id["stale"]["upgraded"] is True, "dirty 已退役 → 照常升级"
+        assert by_id["stale"]["reason"] == "restart-requested", by_id["stale"]["reason"]
+        assert len(stale.restart_calls) == 1, "应发出一次 restart POST"
+        assert stale.restart_calls[0]["body"].get("pullBranch") == "goal-nn", (
+            "节点先 git pull 再重启，pullBranch 不能为空"
+        )
     finally:
         stale.close()
+
+
+def test_branch_latches_are_independent_and_default_to_empty() -> None:
+    """`BranchLatch` 是实例对象：两个实例互不相见，`set(None)` 收敛成 `""`。
+
+    采样节点远控升级要 `pullBranch`；分支名由入口读 `.git/HEAD` 后锁存（零 git 子进程）。
+    """
+    a = nu.BranchLatch()
+    b = nu.BranchLatch()
+    assert a.get() == "" and b.get() == ""
+    a.set("goal-nn")
+    assert a.get() == "goal-nn"
+    assert b.get() == "", "另一个实例不得看到别人的锁存"
+    a.set(None)
+    assert a.get() == "", "None 收成空串（空串 = 不升级，调用方只告警）"
+    assert nu.BranchLatch("feature/x").get() == "feature/x"
+
+
+def test_branch_from_head_reads_the_ref_without_git(tmp_path: Path) -> None:
+    """`.git/HEAD` 直接读：分支名正确、detached HEAD / 无仓 ⇒ 空串（不抛）。"""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "HEAD").write_text("ref: refs/heads/goal-nn\n", encoding="utf-8")
+    assert nu.branch_from_head(tmp_path) == "goal-nn"
+    (tmp_path / ".git" / "HEAD").write_text("a" * 40 + "\n", encoding="utf-8")
+    assert nu.branch_from_head(tmp_path) == "", "detached HEAD 没有分支可 pull"
+    # worktree：`.git` 是文件里的相对 `gitdir:`，必须相对 `.git` 文件所在目录解析
+    real = tmp_path / "real"
+    (real / ".git").mkdir(parents=True)
+    (real / ".git" / "HEAD").write_text("ref: refs/heads/wt-branch\n", encoding="utf-8")
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / ".git").write_text("gitdir: ../real/.git\n", encoding="utf-8")
+    assert nu.branch_from_head(wt) == "wt-branch"
+    assert nu.branch_from_head(tmp_path / "nope") == ""
 
 
 def test_restart_memos_are_independent() -> None:
@@ -336,19 +376,3 @@ def test_restart_memos_are_independent() -> None:
     assert a.seen.get("mac") == ("ping", "expected", 1.0)
 
 
-def test_branch_latches_are_independent_and_default_to_empty() -> None:
-    """`BranchLatch` 是实例对象：两个实例互不相见，`set(None)` 收敛成 `""`。
-
-    为什么不是模块字符串 + `global`（2026-11-20 换掉）：字符串看不出「只有 set/get 两个合法
-    操作」，写点也拦不住；类之后 `GLOBAL_BASELINE` 里本文件那条归零，`None` 也不必每个读点
-    各写一遍 `or ""`。
-    """
-    a = nu.BranchLatch()
-    b = nu.BranchLatch()
-    assert a.get() == "" and b.get() == ""
-    a.set("goal-nn")
-    assert a.get() == "goal-nn"
-    assert b.get() == "", "另一个实例不得看到别人的锁存"
-    a.set(None)
-    assert a.get() == "", "None 收成空串（空串 = 不升级，调用方只告警）"
-    assert nu.BranchLatch("feature/x").get() == "feature/x"

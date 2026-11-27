@@ -24,54 +24,6 @@ from tests.subproc_util import run_utf8
 REPO = Path(__file__).resolve().parents[3]
 
 
-def test_parse_porcelain() -> None:
-    """`_parse_porcelain`：修改/暂存/未跟踪/改名（含引号路径）/空行。"""
-    text = (
-        " M src/types.ts\n"
-        "M  src/nn/rl-reward-toy.ts\n"
-        "?? tools/agent/restart-guard.ts\n"
-        'R  old_name.ts -> "new name.ts"\n'
-        "\n"
-    )
-    got = common.codehash._parse_porcelain(text)
-    assert got == [
-        "src/types.ts",
-        "src/nn/rl-reward-toy.ts",
-        "tools/agent/restart-guard.ts",
-        "new name.ts",
-    ], got
-
-
-def test_dirty_hash_files_smoke() -> None:
-    """真实仓库上不抛异常、返回 list。"""
-    d = common.codehash.dirty_hash_files()
-    assert isinstance(d, list), f"dirty_hash_files 返回 list（不抛）, got {type(d).__name__}"
-
-
-def test_dirty_hash_files_eol_blindspot() -> None:
-    """dirty 判据必须穿透 autocrlf：工作区**原始字节** vs 索引 blob 逐字节比对。
-
-    回归 2026-09-09 mac 事故：src/nn/wasm/conv_feats.c 工作区 CRLF / 索引 LF，
-    git status（core.autocrlf=input 会先规范化再比较）判为干净 ⇒ dirty=[] ⇒
-    训练机期望 codeHash 与远端干净 checkout 不等，节点卡了 40 分钟零贡献。
-    """
-    real = common.codehash._collect_code_hash_files()
-    assert real, "codeHash 文件集非空（前置条件）"
-    rel, content = real[0]
-    orig = common.codehash._collect_code_hash_files
-    try:
-        common.codehash._collect_code_hash_files = lambda: [(rel, content)]
-        assert common.codehash.dirty_hash_files() == [], "工作区字节=索引 → clean"
-        # 仅行尾差异（语义等价、字节不同）必须判 dirty——git status 看不见它
-        common.codehash._collect_code_hash_files = lambda: [(rel, content.replace(b"\n", b"\r\n"))]
-        assert common.codehash.dirty_hash_files() == [rel], "纯 CRLF 污染 → dirty（autocrlf 盲区）"
-        # 未跟踪文件（远端 pull 拿不到）同样 dirty
-        common.codehash._collect_code_hash_files = lambda: [("no/such/untracked.ts", b"x")]
-        assert common.codehash.dirty_hash_files() == ["no/such/untracked.ts"], "未跟踪 → dirty"
-    finally:
-        common.codehash._collect_code_hash_files = orig
-
-
 def test_codehash_f3_noise_filtering() -> None:
     """F3（plan/dist-codehash-stale-fix.md）：目录递归受噪声过滤——.DS_Store /
     __pycache__ / x.pyc / 编辑器临时后缀不计入；合法 .ts/.wasm 保留；显式单文件

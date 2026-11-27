@@ -25,7 +25,8 @@
 
 `code.zip` 是**工作树快照**，工作树可能半提交（现场：`np_core.py` 已改 / `shard.py` 未改 ⇒
 云端直到训练前才 `ImportError: METRICS_NAME`，rollout 全白跑）。所以包里多一个
-`code_meta.jsonc`（`commit` / `dirty` / `dirty_files` / `import_ok`）：
+`code_meta.jsonc`（2026-11-27 起只含 `import_ok`；`commit` / `dirty` / `dirty_files`
+的 git 三元组已删除——没有生产读者，且每次打包白起两个 git 子进程）：
 ★ **只放由树内容唯一决定的字段 + 固定时间戳** —— 挥发字段（时间戳/绝对路径）一进 zip，
 「同源码同 sha」就破了（`test_code_snapshot.py` 钉着这条，`code_cache/<sha>` 会每次失配）。
 
@@ -39,8 +40,6 @@ docstring 自己承认这道 `.py` 门是文本级的、会误伤路径字符串
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
 import sys
 import zipfile
 from collections.abc import Iterable
@@ -163,7 +162,7 @@ def test_code_zip_reports_expected_file_count(tmp_path: Path) -> None:
 
 
 def test_code_zip_carries_provenance_meta(tmp_path: Path) -> None:
-    """B2：包里总有一个 `code_meta.jsonc`，字段就是那四个，且**不含挥发字段**（固定时间戳）。"""
+    """B2：包里总有一个 `code_meta.jsonc`，只含 `import_ok`（git 三元组已随去 git 删除）。"""
     nn_root = tmp_path / "nn"
     nn_root.mkdir()
     _make_tree(nn_root)
@@ -174,60 +173,9 @@ def test_code_zip_carries_provenance_meta(tmp_path: Path) -> None:
     with zipfile.ZipFile(zip_path) as z:
         meta = json.loads(z.read(CODE_META_NAME).decode("utf-8"))
         info = z.getinfo(CODE_META_NAME)
-    assert set(meta) == {"commit", "dirty", "dirty_files", "import_ok"}, meta
-    # 假树自己是干净的（dirty 只看**它自己**那一棵：`git status --porcelain -- .`）——
-    # 而 `commit` 取不到就是空串（本打包器刻意支持「没有仓也能打」；这里可能取到外层仓的）。
-    assert meta["dirty"] is False and meta["dirty_files"] == [], meta
-    assert meta["commit"] == "" or len(str(meta["commit"])) == 40, meta
+    assert set(meta) == {"import_ok"}, meta
     assert meta["import_ok"] is False, "假树里没有哨兵模块 ⇒ 结论必须如实为 False"
     assert info.date_time == (1980, 1, 1, 0, 0, 0), "固定时间戳（'同内容同 sha' 的一半）"
-
-
-def test_provenance_flags_a_dirty_tree_and_sorts_the_file_list(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """脏树 ⇒ `dirty=true` + 文件清单**有序**（顺序漂移会造一个假 sha 漂移）。"""
-    nn_root = tmp_path / "nn"
-    nn_root.mkdir()
-    _make_tree(nn_root)
-
-    def fake_git_out(_root: Path, *args: str) -> str:
-        if args[:1] == ("rev-parse",):
-            return "d" * 40 + "\n"
-        return " M worker/ppo/np_core.py\n M common/shard.py\nR  old/name.py -> new/name.py\n"
-
-    monkeypatch.setattr(code_sentinel_mod, "_git_out", fake_git_out)
-    zip_path = tmp_path / "code.zip"
-    logs: list[str] = []
-    pack_code_zip(nn_root, zip_path, log=logs.append)
-    with zipfile.ZipFile(zip_path) as z:
-        meta = json.loads(z.read(CODE_META_NAME).decode("utf-8"))
-    assert meta["commit"] == "d" * 40
-    assert meta["dirty"] is True
-    assert meta["dirty_files"] == ["common/shard.py", "new/name.py", "worker/ppo/np_core.py"]
-    assert any("脏工作树" in m and "3 个未提交改动" in m for m in logs), logs
-
-
-def test_provenance_reads_a_real_git_repo(tmp_path: Path) -> None:
-    """有仓时如实读：`git init` 出来的树（什么都没提交）⇒ dirty + 全量未跟踪清单。"""
-    if shutil.which("git") is None:
-        pytest.skip("这台机器没有 git")
-    nn_root = tmp_path / "nn"
-    nn_root.mkdir()
-    _make_tree(nn_root)
-    subprocess.run(
-        ["git", "-C", str(nn_root), "init"], check=True, capture_output=True, text=True
-    )
-    zip_path = tmp_path / "code.zip"
-    pack_code_zip(nn_root, zip_path)
-    with zipfile.ZipFile(zip_path) as z:
-        meta = json.loads(z.read(CODE_META_NAME).decode("utf-8"))
-    assert meta["commit"] == "", "空仓没有 HEAD —— 但这不是「没有仓」，dirty 照样要查"
-    # git 默认把「整棵未跟踪目录」折叠成一条（`remote/`），不逐文件展开 —— `-uall` 会把
-    # 假树里那个 `.venv310bak/`（事故 1 的主角）展开成上万条，把 meta 撑爆。钉住折叠语义。
-    assert meta["dirty"] is True
-    assert {"remote/", "worker/"} <= set(meta["dirty_files"])
-    assert meta["dirty_files"] == sorted(meta["dirty_files"])
 
 
 def test_dot_dir_exclusion_survives_new_venv_backup_names(tmp_path: Path) -> None:

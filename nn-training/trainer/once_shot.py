@@ -36,13 +36,7 @@ from pathlib import Path
 
 from common.log import log
 from common.paths import REPO_ROOT
-from common.proc import run_capture
-from worker.archive import ensure_current_branch_pushed
-from worker.train.loop_util import (
-    acquire_lock,
-    cleanup_lock,
-    course_lock_path,
-)
+from worker.train.loop_util import course_lock_path
 
 
 def require_course_open(args, traj_root: Path) -> None:
@@ -123,39 +117,6 @@ def _ensure_cluster_snapshot(args) -> None:
         log(f"[run_rl] WARN: 集群代码快照未能建立（{e}）——publish 将回落 per-course 打包")
 
 
-def _push_current_branch() -> None:
-    """启动前推送当前分支到 origin（远端 agent 靠 git pull 同步——§30 教训）。
-
-    2026-08-30 事故修复（用户指令）：节点的远控升级分支**永远用训练机当前分支**，不再读
-    rl-config 的 upgradeBranch（残留旧战役分支名曾把全部节点 reset 回 31 个提交前的 intent-ai）。
-    config 键仅作 push 失败时的最后回退。
-
-    并发 push 串行化（plan multi-course-parallel-training P1c F-C5）：`.git` 是双课共享的，
-    双 trainer 同时 `git push` 会顶成 non-fast-forward/锁竞争。repo 级 O_EXCL 锁串行化
-    （与单实例锁同一实现）；拿不到锁 → 响亮日志后跳过本次推送（节点沿用远端已有分支继续）。
-    拒 `--no-push` 开关：静默不推比显式跳过更难排查。
-    """
-    push_lock = str(REPO_ROOT / ".git_push.lock")
-    if acquire_lock(push_lock, tag="git push"):
-        try:
-            ensure_current_branch_pushed(REPO_ROOT)  # side-effect: push current branch
-        finally:
-            cleanup_lock(push_lock)
-    else:
-        log(
-            "[run_rl] WARN: 另一进程正在 git push（.git_push.lock 被占）——跳过本次"
-            "启动前推送，节点沿用远端已有分支；如远端长期无新提交请检查持锁进程"
-        )
-    current_branch = run_capture(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO_ROOT, timeout=30
-    ).stdout.strip()
-    if current_branch and current_branch != "HEAD":
-        import remote.node_upgrade as nu
-
-        nu.set_upgrade_branch(current_branch)
-        log(f"[run_rl] node upgrade branch locked to training-machine branch: {current_branch}")
-
-
 def _run_collect_only(args, bun: str) -> None:
     """预采腿（T4 双缓冲的子进程侧）：只采一轮落盘，随后退出。
 
@@ -178,11 +139,17 @@ def run_once_shot(args, *, course_key: str) -> None:
     """执行一次性腿（调用方 = `run_rl.py` 的壳：参数已解析、课程已施加、闸已放行）。
 
     `course_key` 由壳推导（课程文件 stem），用于锁名与清理 —— 与 serve/控制台的键同源。
-    顺序与搬运前逐条同义（快照 → 推送当前分支 → bun → 各腿）：预采子进程同样会推一次
-    （`set_upgrade_branch` 是**子进程内**的生效值，节点同步靠它——不是可省的副作用）。
+    顺序与搬运前逐条同义（快照 → 分支锁存 → bun → 各腿）。2026-11-28：采样节点远控升级
+    仍要 `git pull` 后重启 ⇒ 分支名从 `.git/HEAD` 读取并锁存（零 git 子进程）；
+    启动前 `git push` 仍不恢复。
     """
     _ensure_cluster_snapshot(args)
-    _push_current_branch()
+    import remote.node_upgrade as nu
+
+    branch = nu.branch_from_head(REPO_ROOT)
+    if branch:
+        nu.set_upgrade_branch(branch)
+        log(f"[run_rl] node upgrade branch locked via .git/HEAD: {branch}")
     bun = _require_bun()
     if getattr(args, "collect_only", 0):
         _run_collect_only(args, bun)

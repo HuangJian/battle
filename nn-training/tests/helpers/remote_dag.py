@@ -246,7 +246,7 @@ LAYERS: dict[str, int] = {
     "remote.error_report": 0,
     # 训练机对采样节点的**远控升级 / 重启护栏**（2026-11-19，B8 从 `common/distribution.py`
     # 整簇搬来）：`POST /v1/restart` + 去重/冷却/脏树判据。依赖面 = stdlib + `common.*`
-    # （wire client 的 `node_request`/`node_ping` 与 `dirty_hash_files`，**不在本账本内、不计边**）
+    # （wire client 的 `node_request`/`node_ping`，**不在本账本内、不计边**）
     # ⇒ 拓扑秩 **L0**；读者是 `trainer.*` 与 `tools/dist_upgrade_cli.py`（都不入账本），
     # 所以把出口留在 `common.distribution`、只搬控制动作，不会制造反向边。
     # ⚠ 它**不**自备 HTTP 出口：`_request` 已改名为 `common.distribution.node_request`，

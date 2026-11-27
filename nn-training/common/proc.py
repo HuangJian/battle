@@ -38,6 +38,7 @@ from __future__ import annotations
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from common.platform_utils import POPEN_NO_WINDOW
@@ -85,6 +86,41 @@ def run_capture(
     )
 
 
+class _BunProbeError(Exception):
+    """一次 `--version` 没拿到结论；**刻意抛出来让 lru_cache 不缓存失败**（装上 bun 后立刻生效）。"""
+
+
+def _probe_bun_version(
+    bun: str, *, timeout: float, require_zero: bool
+) -> str | None:
+    try:
+        proc = run_capture([bun, "--version"], timeout=timeout)
+    except Exception:  # 找不到 bun / 超时 / 权限……探测失败都不致命
+        return None
+    if require_zero and proc.returncode != 0:
+        return None
+    out = (proc.stdout or "").strip()
+    if not out:
+        return None
+    return out.splitlines()[0].strip() or None
+
+
+@lru_cache(maxsize=16)
+def _bun_version_cached(
+    bun: str, timeout: float, require_zero: bool, stamp: tuple[int, int]
+) -> str:
+    """同一个 bun 二进制（size + mtime_ns 进键）的 `--version` 只起一次子进程。
+
+    2026-11-27 门禁实测 572 次 spawn 里 **69 次**只是 `bun --version`（真跑 bun 的只有
+    8 次）；每次 ~65ms 全花在进程启动上，而版本在一次进程生命期内不会变。失败走异常，
+    lru_cache 不缓存 ⇒ 二进制刚装上/被替换都能立刻探到。
+    """
+    got = _probe_bun_version(bun, timeout=timeout, require_zero=require_zero)
+    if got is None:
+        raise _BunProbeError
+    return got
+
+
 def bun_version(
     bun: str,
     *,
@@ -105,15 +141,16 @@ def bun_version(
     但把它写成一个参数比写在注释里可靠。
     """
     try:
-        proc = run_capture([bun, "--version"], timeout=timeout)
-    except Exception:  # 找不到 bun / 超时 / 权限……探测失败都不致命
+        st = Path(bun).stat()
+    except OSError:
+        # 路径不存在 / stat 失败：现探一次且不进缓存（失败不缓存，装上了立刻能发现）。
+        return _probe_bun_version(bun, timeout=timeout, require_zero=require_zero) or fallback
+    try:
+        return _bun_version_cached(
+            bun, timeout, require_zero, (st.st_size, st.st_mtime_ns)
+        )
+    except _BunProbeError:
         return fallback
-    if require_zero and proc.returncode != 0:
-        return fallback
-    out = (proc.stdout or "").strip()
-    if not out:
-        return fallback
-    return out.splitlines()[0].strip() or fallback
 
 
 @dataclass(frozen=True)

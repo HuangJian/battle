@@ -20,8 +20,8 @@ import pid_alive`：`trainer/run_rl.py` / `trainer/run_bc.py` / `train/loop_util
 
 * `pid_alive(pid)` → `True` 仅当该 PID 上确有一个存活进程；其余（`None` / `<=0` / 已退出 /
   打不开 / 任何异常）一律 `False`。**绝不产生信号、绝不改变任何进程状态。**
-* 调用方若还需要「这个 PID 是不是我以为的那个程序」，用 `common.instance_lock` 的命令行
-  指纹核验（那是第二层，不属于本函数）。
+* 调用方若还需要「这个 PID 是不是我以为的那个程序」，用 `proc_cmdline_nt`（Windows 直读
+  PEB，无子进程）/ `common.instance_lock.proc_cmdline` 的指纹核验（第二层，不属于 `pid_alive`）。
 """
 
 from __future__ import annotations
@@ -31,6 +31,103 @@ import os
 # Windows 常量（仅 Windows 分支使用；不导入 ctypes 到模块级以保持跨平台零成本加载）
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _STILL_ACTIVE = 259
+
+
+def proc_cmdline_nt(pid: int) -> str | None:
+    """Windows 原生命令行：`NtQueryInformationProcess` → PEB → `RTL_USER_PROCESS_PARAMETERS`。
+
+    旧路径（`wmic` / pwsh `Get-CimInstance`）每次**起一个子进程**，本机实测 0.38–0.42s/次
+    （WSL 读 `/proc` 只要 0.0001s）。hub 启动的 code-snapshot 锚核验 + 陈旧锁接管每次读
+    1–2 回 ⇒ 一条真 hub 的 e2e 白付 0.4–0.8s，Windows 门禁 78s vs WSL 52s 的主因之一。
+    这里在进程内直读 Windows 结构，实测 0.0002s（首次加载 ctypes DLL ~0.01s）。
+
+    失败一律返回 None ⇒ 调用方回落旧路径（身份读不到时 fail-closed，绝不猜）。
+    跨架构（64 位 Python 读 32 位进程）拿不到正确 PEB ⇒ 也自然回落到旧路径。
+    """
+    import ctypes
+    import struct
+    from ctypes import wintypes
+
+    # 经 __dict__ 取而非 ctypes.WinDLL：mypy 的跨平台 typeshed 不总暴露这个 Windows-only 属性。
+    win_dll = ctypes.__dict__["WinDLL"]
+    k32 = win_dll("kernel32", use_last_error=True)
+    ntdll = win_dll("ntdll", use_last_error=True)
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.ReadProcessMemory.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPCVOID,
+        wintypes.LPVOID,
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    k32.ReadProcessMemory.restype = wintypes.BOOL
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    ntdll.NtQueryInformationProcess.argtypes = [
+        wintypes.HANDLE,
+        wintypes.ULONG,
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        wintypes.LPVOID,
+    ]
+    ntdll.NtQueryInformationProcess.restype = wintypes.LONG
+
+    class _BasicInfo(ctypes.Structure):
+        _fields_ = [
+            ("exit_status", wintypes.LONG),
+            ("peb", ctypes.c_void_p),
+            ("affinity", ctypes.c_size_t),
+            ("priority", wintypes.LONG),
+            ("pid", ctypes.c_size_t),
+            ("parent", ctypes.c_size_t),
+        ]
+
+    # PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ：只读句柄，绝不碰目标进程。
+    handle = k32.OpenProcess(0x1000 | 0x0010, False, pid)
+    if not handle:
+        return None
+    try:
+        info = _BasicInfo()
+        if ntdll.NtQueryInformationProcess(handle, 0, ctypes.byref(info), ctypes.sizeof(info), None):
+            return None
+        if not info.peb:
+            return None
+        ptr_size = ctypes.sizeof(ctypes.c_void_p)
+        params = ctypes.c_void_p()
+        if not k32.ReadProcessMemory(
+            handle,
+            ctypes.c_void_p(info.peb + (0x20 if ptr_size == 8 else 0x10)),
+            ctypes.byref(params),
+            ptr_size,
+            None,
+        ) or not params.value:
+            return None
+        # UNICODE_STRING = {USHORT Length; USHORT Max; PAD; PWSTR Buffer}
+        # 偏移指 **CommandLine** 这个 UNICODE_STRING 的起点（x64 0x70 / x86 0x40）。
+        # 取 0x60 会读到前一个 ImagePathName —— 只有 exe 路径、没有 argv，实例锁的
+        # marker 判据会把活持有者误判成 PID 复用（2026-11-27 全量门禁 7 红现场）。
+        cmdline_off = 0x70 if ptr_size == 8 else 0x40
+        head = ctypes.create_string_buffer(8 + ptr_size if ptr_size == 8 else 4 + ptr_size)
+        if not k32.ReadProcessMemory(
+            handle,
+            ctypes.c_void_p(params.value + cmdline_off),
+            head,
+            len(head),
+            None,
+        ):
+            return None
+        length = struct.unpack_from("<H", head.raw, 0)[0]
+        if not length:
+            return None
+        buffer_addr = struct.unpack_from(
+            "<Q" if ptr_size == 8 else "<I", head.raw, 8 if ptr_size == 8 else 4
+        )[0]
+        data = ctypes.create_string_buffer(length)
+        if not k32.ReadProcessMemory(handle, ctypes.c_void_p(buffer_addr), data, length, None):
+            return None
+        return data.raw[:length].decode("utf-16-le", "replace").strip("\x00").strip() or None
+    finally:
+        k32.CloseHandle(handle)
 
 
 def pid_alive(pid: int | None) -> bool:

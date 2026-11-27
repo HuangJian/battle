@@ -20,7 +20,6 @@
   "tests/remote/test_control_pool.py": 8,
   "tests/remote/test_deliver_outbox.py": 1,
   "tests/remote/test_http_split.py": 4,
-  "tests/remote/test_hub_client_code_zip.py": 1,
   "tests/remote/test_hub_http_split.py": 6,
   "tests/remote/test_hub_liveness_cancel.py": 2,
   "tests/remote/test_hub_push_dispatch.py": 6,

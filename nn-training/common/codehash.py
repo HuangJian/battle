@@ -8,21 +8,21 @@
 不发一个 HTTP 请求 —— 分发层的探活 / 下发 / 任务面与它无关，混在一个 1600 行模块里时，
 「codeHash 是什么」要翻过十几个网络函数才找得到。
 
-三条判据都在这里，不要在外面重写：
-  * `compute_code_hash` —— 值本身（`ping.codeHash` 与本地期望值比的都是它）；
-  * `check_code_hash` —— 节点门（rollout 与 eval 同一个门，拒收原因是一句话）；
-  * `dirty_hash_files` —— 工作区字节 ≠ git 索引内容的集合（非空 ⇒ 远端 pull 不可能收敛）。
+两条判据都在这里，不要在外面重写：
+  * `compute_code_hash` —— 值本身（self 缺失/未报时回落的本地算值，见 `common.codehash_ref`）；
+  * `check_code_hash` —— 节点门（rollout 与 eval 同一个门，拒收原因是一句话）。
+
+2026-11-27 移除 `dirty_hash_files`：节点门的参考 hash 早已取 self 自报（DECISIONS
+§2026-11-15-goalnn-self-codehash-reference），git 索引/工作区比对与该门无关；这条遗留
+守卫只剩「抑制远端 pull+restart」一个用途，用户裁定整套去 git 后删除。
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
-import subprocess
 
 from common.paths import REPO_ROOT
-from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
-from common.proc import run_capture
 
 
 def compute_code_hash() -> str:
@@ -137,102 +137,3 @@ def check_code_hash(ping: dict, expected: str) -> str | None:
     if got != expected:
         return f"codeHash mismatch: node={str(got)[:8]} expected={expected[:8]}"
     return None
-
-
-# --------------------------------------------------------------- git 脏文件（dirty hash）
-
-
-def _parse_porcelain(text: str) -> list[str]:
-    """git status --porcelain v1 输出 → 路径列表（含改名目标、去引号）。"""
-    out: list[str] = []
-    for line in text.splitlines():
-        if len(line) < 4:
-            continue
-        # 格式：XY<space>PATH；改名行形如 "R  old -> new"
-        p = line[3:].split(" -> ", 1)[-1].strip().strip('"')
-        if p:
-            out.append(p)
-    return out
-
-
-def _git_index_blobs(rels: list[str]) -> dict[str, str]:
-    """索引中 rel → blob sha 映射；未跟踪路径不出现在结果里。"""
-    if not rels:
-        return {}
-    # 显式 UTF-8：`text=True` 单独用会按 locale 解码（zh-CN Windows = cp936），
-    # 中文路径/非 ASCII 会静默丢输出（docs/nn/engineering.md §19）。走 run_capture 统一。
-    proc = run_capture(["git", "ls-files", "-s", "--", *rels], cwd=REPO_ROOT, timeout=15)
-    if proc.returncode != 0:
-        return {}
-    out: dict[str, str] = {}
-    for line in proc.stdout.splitlines():
-        if "\t" not in line:
-            continue
-        meta, raw_path = line.split("\t", 1)
-        fields = meta.split()
-        if len(fields) < 2:
-            continue
-        out[raw_path.strip().strip('"').replace("\\", "/")] = fields[1]
-    return out
-
-
-def _git_cat_blobs(shas: list[str]) -> dict[str, bytes]:
-    """批量取 blob 原始字节（git cat-file --batch）；缺失的 sha 不进结果。"""
-    if not shas:
-        return {}
-    proc = subprocess.run(
-        ["git", "cat-file", "--batch"],
-        cwd=REPO_ROOT,
-        input=("\n".join(shas) + "\n").encode(),
-        capture_output=True,
-        timeout=30,
-        **_POPEN_NO_WINDOW,
-    )
-    out: dict[str, bytes] = {}
-    buf = proc.stdout
-    pos = 0
-    while pos < len(buf):
-        nl = buf.find(b"\n", pos)
-        if nl < 0:
-            break
-        parts = buf[pos:nl].decode("utf-8", "replace").split()
-        pos = nl + 1
-        if len(parts) < 3:
-            continue  # "<sha> missing"
-        oid, size = parts[0], int(parts[2])
-        out[oid] = buf[pos : pos + size]
-        pos += size + 1
-    return out
-
-
-def dirty_hash_files() -> list[str]:
-    """codeHash 覆盖集中「工作区字节 ≠ git 索引内容」的文件（含未跟踪文件）。
-
-    非空 ⇒ 期望 codeHash 含 pull 拿不到的本地字节，远端 git pull 永远无法收敛——
-    此时对远端节点下发 restart+pull 只会产生无效扰动（拉到同样的提交、hash 依旧
-    不等 → 下轮再杀，无限重启循环）。返回空列表 = 集内代码与索引逐字节一致。
-
-    判据用**原始字节 vs 索引 blob 字节**，不用 git status：core.autocrlf=input 会把
-    工作区 CRLF 规范化成 LF 再比对，「工作区 CRLF / 索引 LF」这类纯 EOL 污染被完全
-    隐藏（2026-09-09 mac 事故：git status 干净、dirty=[]，但 codeHash 与远端干净
-    checkout 只差一个 src/nn/wasm/conv_feats.c 的 CRLF，节点卡了 40 分钟）。
-
-    未跟踪文件同样计为 dirty——远端 pull 不会带出该文件。git 不可用/出错时返回 []
-    （保守放行）——跨代去重护栏仍兜底防循环。
-    """
-    entries = _collect_code_hash_files()
-    if not entries:
-        return []
-    try:
-        idx = _git_index_blobs([rel for rel, _ in entries])
-        blobs = _git_cat_blobs(sorted(set(idx.values())))
-    except (OSError, subprocess.SubprocessError, ValueError):
-        # git 不可用 / 超时（`TimeoutExpired` 是 `SubprocessError`）/ 输出格式变了（`int()` 失败）：
-        # 一律保守放行（`dirty=[]`），跨代去重护栏仍兜底防循环。别的错（本函数自己的 bug）照抛。
-        return []
-    dirty: list[str] = []
-    for rel, content in entries:
-        sha = idx.get(rel)
-        if sha is None or blobs.get(sha) != content:
-            dirty.append(rel)
-    return dirty

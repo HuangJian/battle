@@ -39,7 +39,6 @@ import math
 import os
 import random
 import shutil
-import subprocess
 import sys
 import time
 from collections import Counter
@@ -52,7 +51,6 @@ import torch
 import torch.nn.functional as F
 
 # Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口弹出抢焦点。
-from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common.cli import house_parser, run_main
@@ -377,21 +375,6 @@ actual `weights.*.json` files on disk.
 """
 
 
-def _git_sha() -> str:
-    """Best-effort short git sha of the repo at training time (for the registry)."""
-    try:
-        # **_POPEN_NO_WINDOW 使 check_output 的重载无法解析（→ Any），显式收窄为 bytes。
-        raw: bytes = subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=os.path.dirname(os.path.abspath(__file__)),
-            stderr=subprocess.DEVNULL,
-            **_POPEN_NO_WINDOW,
-        )
-        return raw.decode().strip()
-    except Exception:
-        return "n/a"
-
-
 def _append_weights_md(
     out_dir: str,
     versioned_path: str,
@@ -412,7 +395,8 @@ def _append_weights_md(
         f"| {trained_at} | `{os.path.basename(versioned_path)}` | {args.epochs} "
         f"| {sizes['train']}/{sizes['val']} | {best_val:.4f} "
         f"| {history['move_acc'][-1]}/{history['fire_acc'][-1]}/{vl_s} "
-        f"| {_git_sha()} | {args.notes} |\n"
+        # 2026-11-27：云端 BC 从 hub 下载 code.zip，没有 git 仓库；列保留但恒为 n/a。
+        f"| n/a | {args.notes} |\n"
     )
     if not os.path.exists(md_path):
         with open(md_path, "w", encoding="utf-8") as f:

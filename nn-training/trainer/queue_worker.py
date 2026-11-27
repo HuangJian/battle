@@ -73,13 +73,12 @@ class QueueState:
     task_timeout: float
     status_timeout: float
     fail_streak_max: int
-    upgrade_branch: str
     wver: str
     local_bun: str
     iter_no: int
     meta_path: Path
     code_hash: str
-    dirty_files: list[str]
+    upgrade_branch: str
     wkind: str
     weights_bytes: bytes
     reuse: list[dict]
@@ -837,7 +836,6 @@ def _rescan_thread(
                 cfg=q.cfg,
                 code_hash=q.code_hash,
                 upgrade_branch=q.upgrade_branch,
-                dirty_files=q.dirty_files,
                 local_bun=q.local_bun,
                 spawned_ids=q.spawned_ids,
                 alive=q.alive,

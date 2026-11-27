@@ -187,7 +187,7 @@ def test_upgrade_ask_keeps_the_dedup_key_and_both_floats_apart(
     assert nu.request_upgrade_guarded(_ask()) == (True, "restart-requested")
     assert calls == [
         {"url": "http://node:1", "auth_key": "AUTH", "branch": "goal-nn", "timeout": 1.5}
-    ], "三栏身份/分支与 HTTP 预算各自落位"
+    ], "身份/分支与 HTTP 预算各自落位（节点先 git pull 到分支再重启）"
     # 冷却窗（900s）内、同一 (agent hash, 期望 hash) ⇒ dedup；期望 hash 变 ⇒ 放行。
     assert nu.request_upgrade_guarded(_ask())[1] == "dedup"
     assert nu.request_upgrade_guarded(_ask(expected_hash="expect-2"))[1] == "restart-requested"

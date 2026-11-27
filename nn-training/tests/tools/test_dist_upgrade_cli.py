@@ -69,26 +69,21 @@ def test_stale_node_maps_to_shared_guard(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(remote.node_upgrade, "request_upgrade_guarded", fake)
     out = dist_upgrade_cli.run_spec({**SPEC, "dirty": ["src/x.ts"], "cooldown_sec": 30})
     assert out["results"] == [{"id": "mac", "ok": True, "reason": "restart-requested"}]
-    assert out["dirty"] == ["src/x.ts"]
-    # 显式 dirty 透传（调用方每轮已检测则复用，不重复探测）；期望 hash 必须显式传（F1）。
-    assert seen["dirty"] == ["src/x.ts"] and seen["exp"] == "b" * 64 and seen["branch"] == "goal-nn"
+    assert out["dirty"] == [], "git 脏树守卫退役后报告恒为空表"
+    # dirty 字段不再透传给守卫（仅签名兼容）；期望 hash 必须显式传（F1）。
+    assert seen["dirty"] is None and seen["exp"] == "b" * 64 and seen["branch"] == "goal-nn"
     # F3：spec.cooldown_sec 透传到守卫（缺省 None ⇒ 由 remote.node_upgrade 决定 env/常量）。
     assert seen["cooldown"] == 30.0
 
 
-def test_dirty_none_probes_really(monkeypatch: pytest.MonkeyPatch) -> None:
-    probed: list[int] = []
-
-    def probe() -> list[str]:
-        probed.append(1)
-        return ["src/y.ts"]
-
-    monkeypatch.setattr(common.codehash, "dirty_hash_files", probe)
-    monkeypatch.setattr(remote.node_upgrade, "request_upgrade_guarded", lambda *a, **k: (False, "dirty-tree:1"))
+def test_dirty_none_no_longer_probes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """git 脏树守卫退役：`dirty=null` 不再起 git 进程，报告字段恒为空表。"""
+    monkeypatch.setattr(
+        remote.node_upgrade, "request_upgrade_guarded", lambda *a, **k: (True, "restart-requested")
+    )
     out = dist_upgrade_cli.run_spec({**SPEC, "dirty": None})
-    assert probed, "dirty=null 必须由本进程探测（字节级判据单源在 remote.node_upgrade）"
-    assert out["dirty"] == ["src/y.ts"]
-    assert out["results"][0]["reason"] == "dirty-tree:1"
+    assert out["dirty"] == [], "dirty=null 不再探测 git，报告恒为空表"
+    assert out["results"][0]["reason"] == "restart-requested"
 
 
 def test_self_node_skips_dirty_probe(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -123,7 +118,7 @@ def test_dry_run_sends_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(remote.node_upgrade, "request_upgrade_guarded", fake)
     out = dist_upgrade_cli.run_spec({**SPEC, "dry_run": True, "dirty": ["src/z.ts"]})
     assert called == []
-    assert out["results"][0]["reason"] == "dirty-tree:1"
+    assert out["results"][0]["reason"] == "planned"
 
 
 def test_run_spec_dispatches_in_parallel(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -237,7 +232,6 @@ def test_scan_pings_itself_and_only_stale_is_upgraded(
         return {"codeHash": "b" * 64, "agentVersion": "def"}
 
     monkeypatch.setattr(remote.node_upgrade, "node_ping", fake_ping)
-    monkeypatch.setattr(remote.node_upgrade, "dirty_hash_files", lambda: [])
     posted: list[str] = []
     monkeypatch.setattr(remote.node_upgrade, "request_upgrade", _recorder(posted))
     out = dist_upgrade_cli.run_scan(
@@ -268,11 +262,6 @@ def test_scan_seen_memo_suppresses_restart(tmp_path: Path, monkeypatch: pytest.M
     cfg_path = _write_cfg(tmp_path, {"nodes": [CFG["nodes"][0]]})
     remote.node_upgrade.reset_restart_state()
     monkeypatch.setattr(remote.node_upgrade, "node_ping", _ping_a)
-    # 工作区脏不脏与用例语义无关（scan 不传 dirty ⇒ 守卫会字节级探测）——如果断言真的
-    # 依赖「本仓此刻恰好没有未提交的 SSOT 文件」，那改 tools/agent/** 就会把这个用例弄红
-    # （实测 2026-09-19 F2）。固定为「干净」：打在**守卫模块的绑定**上
-    # （打 `common.codehash` 是 inert 的——守卫 import 期已绑好名字）。
-    monkeypatch.setattr(remote.node_upgrade, "dirty_hash_files", lambda: [])
     posted: list[str] = []
     monkeypatch.setattr(remote.node_upgrade, "request_upgrade", _recorder(posted))
     # 第一次：真发（并返回 pingHash 供调用方持久化）。
@@ -348,7 +337,6 @@ def test_scan_seen_atsec_expires_dedup_cooldown(
     """
     cfg_path = _write_cfg(tmp_path, {"nodes": [CFG["nodes"][0]]})
     monkeypatch.setattr(remote.node_upgrade, "node_ping", _ping_a)
-    monkeypatch.setattr(remote.node_upgrade, "dirty_hash_files", lambda: [])  # 同上：与工作区无关
     posted: list[str] = []
     monkeypatch.setattr(remote.node_upgrade, "request_upgrade", _recorder(posted))
 
@@ -396,15 +384,8 @@ def test_scan_seen_atsec_expires_dedup_cooldown(
     remote.node_upgrade.reset_restart_state()
 
 
-def test_upgrade_branch_has_no_explicit_override_path() -> None:
-    """评审更正（2026-09-26）：升级分支**只有一个来源**（训练机锁存）。
-
-    此前是 `upgrade_branch_or(explicit)`，语义「显式值优先于锁存」——那是 2026-08-30 事故的
-    载体（rl-config 里残留的 `'intent-ai'` 只要非空就盖掉锁存，把全部节点 reset 回旧代码）。
-    读点已随 `policy.upgradeBranch` 删除；本次又把那个参数一并拿掉 ⇒ 坑在**签名层面**不再
-    可能复现。这条用例盯的就是签名本身：谁想再引入「从配置/调用方传分支进来」这条路径，
-    必须先改这条断言（= 一次有意识的决定，而不是顺手写一行 `or` 兜底）。
-    """
+def test_upgrade_branch_latch_is_the_single_source() -> None:
+    """采样节点要 `pullBranch`：分支只有一个来源（训练机锁存），且入口无显式覆盖参数。"""
     import inspect
 
     assert not hasattr(remote.node_upgrade, "upgrade_branch_or"), "旧的「显式优先」入口不得复活"
@@ -413,6 +394,6 @@ def test_upgrade_branch_has_no_explicit_override_path() -> None:
     try:
         assert remote.node_upgrade.current_upgrade_branch() == "goal-nn"
         remote.node_upgrade.set_upgrade_branch("")
-        assert remote.node_upgrade.current_upgrade_branch() == "", "锁存为空 = 不升级（调用方只告警）"
+        assert remote.node_upgrade.current_upgrade_branch() == ""
     finally:
         remote.node_upgrade.set_upgrade_branch("")

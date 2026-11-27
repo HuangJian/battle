@@ -42,7 +42,6 @@ from biz.course_resolve import CURRICULA_DIR
 from common.log import close_course_sinks, log, open_course_sink, prefix_scope
 from common.paths import REPO_ROOT
 from common.platform_utils import force_utf8_stdio
-from common.proc import run_capture
 from trainer.loop_plan import (
     COURSE_ENABLE_MARKER,
     course_enabled,
@@ -69,7 +68,7 @@ from worker.engine_pool import DEFAULT_CACHE_COURSES, DEFAULT_CACHE_MB, EnginePo
 from worker.loop_control import ControlApplier, read_control
 from worker.loop_scheduler import ABORTED, QUEUE_DONE, Supervisor
 from worker.loop_tasks import RoundFacts, Task, abort, pending_tasks
-from worker.train.loop_util import acquire_lock, cleanup_lock, course_lock_path
+from worker.train.loop_util import acquire_lock, course_lock_path
 
 #: nn-training 目录（锁文件/课程文件都相对它——与 `trainer/run_rl.py` 的 `Path(__file__).parent` 同一个）。
 NN_DIR = Path(__file__).resolve().parent.parent
@@ -125,8 +124,8 @@ def prepare_process(argv: list[str] | None = None) -> str:
     """进程级一次性准备，返回 bun 路径（rollout 需要它）。**副作用：启动前 push 当前分支。**
 
     与 `trainer/run_rl.py` 的对应片段同序同义（B7 之后 torch 仍不在启动路径上）：UTF-8 stdio →
-    faulthandler → `chdir(REPO_ROOT)` → 启动前 `git push`（repo 级 O_EXCL 锁串行化——多课并发
-    push 会顶成 non-fast-forward/锁竞争）→ 节点升级分支锁到训练机当前分支 → bun 存在性。
+    faulthandler → `chdir(REPO_ROOT)` → 分支锁存（读 `.git/HEAD`，零 git 子进程；
+    采样节点远控升级要 `pullBranch`）→ bun 存在性。启动前 `git push` 仍不恢复。
 
     **只做一次**：每课各做一次就等于每个课程都推一遍 git（这正是单进程入口要省掉的事）。
     """
@@ -136,27 +135,12 @@ def prepare_process(argv: list[str] | None = None) -> str:
     faulthandler.enable()
     os.chdir(str(REPO_ROOT))
 
-    from worker.archive import ensure_current_branch_pushed
+    import remote.node_upgrade as _nu
 
-    push_lock = str(REPO_ROOT / ".git_push.lock")
-    if acquire_lock(push_lock, tag="git push"):
-        try:
-            ensure_current_branch_pushed(REPO_ROOT)  # side-effect: push current branch
-        finally:
-            cleanup_lock(push_lock)
-    else:
-        log(
-            "[serve] WARN: 另一进程正在 git push（.git_push.lock 被占）——跳过本次启动前推送，"
-            "节点沿用远端已有分支；如远端长期无新提交请检查持锁进程"
-        )
-    branch = run_capture(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO_ROOT, timeout=30
-    ).stdout.strip()
-    if branch and branch != "HEAD":
-        import remote.node_upgrade as _nu
-
+    branch = _nu.branch_from_head(REPO_ROOT)
+    if branch:
         _nu.set_upgrade_branch(branch)
-        log(f"[serve] node upgrade branch locked to training-machine branch: {branch}")
+        log(f"[serve] node upgrade branch locked via .git/HEAD: {branch}")
 
     bun = shutil.which("bun")
     if bun is None:

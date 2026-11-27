@@ -264,7 +264,6 @@ def world(bc_course: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Si
     monkeypatch.setattr("trainer.run_rl._acquire_run_rl_lock", fake_acquire)
     monkeypatch.setattr("trainer.run_rl._cleanup_run_rl_lock", lambda path: None)
     monkeypatch.setattr(loop_serve, "acquire_lock", fake_acquire)
-    monkeypatch.setattr(loop_serve, "cleanup_lock", lambda path: None)
 
     # ---- open_course：BC 课走**真**分支，RL 课给假 args ----
     real_open = loop_serve.open_course

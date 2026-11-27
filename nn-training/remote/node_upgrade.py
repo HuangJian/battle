@@ -10,18 +10,12 @@
   * 消费者全在它上面：`trainer/`（入口锁存分支 / ping 门 / rescan）与 `tools/dist_upgrade_cli.py`
     —— 没有 `common/` 或 `worker/` 的读者，所以搬上来不会制造反向边。
 
-两块状态都是有理由的进程级状态，且**都住显式对象**（模块只留一个默认实例，没有模块级可变量、
-没有 `global`）：
-  * `_BRANCH`（`BranchLatch`）：训练机当前分支的**锁存值**（`run_rl` / `run_bc` / `loop_serve`
-    启动时 `set_upgrade_branch` 一次）。远端升级永远用它，rl-config 的 `upgradeBranch` 已废弃——
-    2026-08-30 事故：残留旧分支名把全部节点 reset 回旧代码。
-  * `_RESTARTS`（`RestartMemo`）：跨代重启去重 + 冷却窗。要隔离的测试自己 new 一份
-    （`reset_restart_state` / `seed_restart_state` 是给 CLI 与用例的入口）。
+进程级状态只有 `_RESTARTS`（`RestartMemo`）：跨代重启去重 + 冷却窗。要隔离的测试自己
+new 一份（`reset_restart_state` / `seed_restart_state` 是给 CLI 与用例的入口）。
 
-为什么要对象化而不是一个模块字符串（2026-11-20，P0-5 收尾）：字符串 + `global` 在 AST 层面
-就是「进程级可变态」，读代码的人无法从类型看出它只有 set/get 两个合法操作；`BranchLatch` 把
-写入通道收成一个方法（顺带把 `None` 收成 `""`，调用方不必再写 `or ""`），`GLOBAL_BASELINE` 里
-本文件的那条也因此归零。
+2026-11-28 用户更正：**采样节点**的远控升级仍要求先 `git pull` 到最新代码再重启
+（`pullBranch` 非空）。BC/RL 训练机自己不再 clone/fetch（代码走 hub `code.zip`），
+但入口必须把当前分支名锁存给节点；分支名由入口读 `.git/HEAD` 文件得到（零 git 子进程）。
 """
 
 from __future__ import annotations
@@ -31,8 +25,8 @@ import os
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 
-from common.codehash import dirty_hash_files
 from common.codehash_ref import is_self_node as _is_self_node
 from common.distribution import NET_ERRORS, node_ping, node_request
 
@@ -42,11 +36,11 @@ class BranchLatch:
 
     节点远控升级**永远**用这个分支，且它是**唯一**来源——rl-config 的 upgradeBranch 已废弃
     （残留旧战役分支名曾把全部节点 reset 回旧代码，2026-08-30 事故）。取值入口 =
-    `current_upgrade_branch()`；值随派发向下传给 `trainer/queue_local`，**没有**
-    「调用方传 branch 进来」那条路了。
+    `current_upgrade_branch()`；值随派发向下传给 `trainer/queue_local`。
 
-    为什么是个对象：把「写」收成一个方法之后，模块里不再需要 `global`（那条基线归零），
-    而 `None` 也在入口处收成 `""` ——调用方不必每处再写 `or ""`。
+    2026-11-28 用户更正：采样节点的远控升级仍然要求**先 git pull 到最新代码再重启**
+    （`pullBranch` 非空）。BC/RL 训练机自己不再 clone/fetch，但**必须锁存分支名**给节点用：
+    分支名由入口读 `.git/HEAD` 文件得到（零 git 子进程），不是调用 git。
     """
 
     def __init__(self, branch: str = "") -> None:
@@ -66,6 +60,35 @@ def set_upgrade_branch(branch: str) -> None:
     _BRANCH.set(branch)
 
 
+def current_upgrade_branch() -> str:
+    """节点远控升级要用的分支 = **训练机锁存的那一个**（空串 = 不升级，调用方只告警）。
+
+    ★ 2026-09-26：显式值优先于锁存的入口已删除（2026-08-30 事故载体）；本函数无参数。
+    """
+    return _BRANCH.get()
+
+
+def branch_from_head(repo_root: str | Path) -> str:
+    """读 `.git/HEAD` 取当前分支名（**零 git 子进程**；detached HEAD ⇒ 空串）。
+
+    BC/RL 训练机不再 clone/fetch，但采样节点仍要 `pullBranch` 才能 git pull 到最新代码。
+    入口只需分支名，读文件即可；worktree 的 `.git` 是文件，先解 `gitdir:` 指针。
+    """
+    dot = Path(repo_root) / ".git"
+    try:
+        if dot.is_file():
+            for line in dot.read_text(encoding="utf-8").splitlines():
+                if line.startswith("gitdir:"):
+                    target = Path(line.split(":", 1)[1].strip())
+                    dot = target if target.is_absolute() else dot.parent / target
+                    break
+        head = (dot / "HEAD").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    prefix = "ref: refs/heads/"
+    return head[len(prefix):].strip() if head.startswith(prefix) else ""
+
+
 def is_self_node(url: str, node_id: str = "") -> bool:
     """self/回环节点：agent 由训练机同一工作区启动——代码与训练机**天然同源**。
 
@@ -80,24 +103,13 @@ def is_self_node(url: str, node_id: str = "") -> bool:
     return _is_self_node(url, node_id)
 
 
-def current_upgrade_branch() -> str:
-    """节点远控升级要用的分支 = **训练机锁存的那一个**（空串 = 不升级，调用方只告警）。
-
-    ★ 2026-09-26（评审更正）：本函数此前是 `upgrade_branch_or(explicit)`，语义为
-    「**显式值优先于锁存**」——那正是 2026-08-30 事故的载体：rl-config 里残留的
-    `'intent-ai'` 只要非空就盖掉锁存，把全部节点 reset 回旧代码。读点已随
-    `policy.upgradeBranch` 一起删除（plan/rl-config-cleanup.plan.md §3.1），本次评审又把
-    那个 `explicit` 参数拿掉 ⇒「配置能盖锁存」在**签名层面**不再成立——要复发必须改签名，
-    而不是顺手写一行 `or` 兜底回去。
-    """
-    return _BRANCH.get()
-
-
 def request_upgrade(url: str, auth_key: str, branch: str, timeout: float = 20.0) -> bool:
-    """主动升级机制（M8）：POST /v1/restart {pullBranch} → agent 端 git pull + 重启。
+    """远控重启（M8）：POST /v1/restart {pullBranch}。
 
+    2026-11-27：生产调用方（`request_upgrade_guarded`）恒传 `branch=""` ⇒ agent 只重启、
+    不做任何 git 操作；`branch` 参数保留只为底层协议测试与向后兼容。
     编排层 ping 发现节点 codeHash 不符（stale）时调用——把它从「静默排除」升级为
-    「主动指示更新重启」。返回 True = 接受（agent 异步执行，重启窗口内不可达，
+    「主动指示重启」。返回 True = 接受（agent 异步执行，重启窗口内不可达，
     rescan 会在它恢复后按新 codeHash 纳入）。失败返回 False（不抛、不阻塞训练）。
     """
     try:
@@ -215,9 +227,11 @@ class UpgradeAsk:
     nid: str
     url: str
     auth_key: str
-    branch: str
-    ping_hash: str
+    #: 2026-11-27 退役：节点不再 git pull，guarded 请求恒发 `pullBranch=""`（纯重启）。
+    branch: str = ""
+    ping_hash: str = ""
     timeout: float = 20.0
+    #: 2026-11-27 退役字段：git 脏树守卫已删除，保留字段只为旧调用方签名兼容（不再读）。
     dirty: list[str] | None = None
     expected_hash: str = ""
     cooldown_sec: float | None = None
@@ -227,17 +241,16 @@ def request_upgrade_guarded(spec: UpgradeAsk) -> tuple[bool, str]:
     """带护栏的重启请求（ping 门 / rescan / upgrade_stale_nodes 共用入口）。
 
     返回 (ok, reason)：
-      restart-requested  — 已下发，节点将 pull + 重启（本轮生效；含**冷却窗过期后的重发**）
+      restart-requested  — 已下发，节点将 **git pull 到该分支后重启**（本轮生效；含冷却窗过期后的重发）
+      no-branch          — 非 self 节点但分支名为空：不发请求（空 pullBranch 等于不更新代码）
       dedup              — 同节点同 (agent codeHash, 期望 hash) 且**仍在冷却窗内**，跳过
                            （防连环杀；期望 hash 变化 ⇒ 立即允许再发一次，F1；
                             冷却窗过期 ⇒ 也允许再发一次，F3——否则 pull 失败/不支持远端
                             升级的节点会被永久压制，见 RESTART_DEDUP_COOLDOWN_SEC）
-      dirty-tree:<n>     — 期望 hash 含 n 个未提交文件，远端 pull 永不收敛，拒发
       restart-failed     — agent 拒绝（409 grace / 5xx）或不可达；不写去重状态
                            （协调器下轮 rescan 自动重试）
-    self/回环节点：永远**纯重启**（branch 强制空——共享工作区禁 pull），不受
-    脏工作区护栏限制，去重同样生效。
-    dirty 显式传参供测试与调用方复用每轮已检测结果；None = 自动检测。
+    2026-11-28：采样节点仍要求先 git pull 再重启 ⇒ `branch` 必须非空（self 节点例外，
+    永远纯重启）；`dirty` 已退役，字段仅为签名兼容保留，不再参与判据。
     expected_hash 默认 "" 使未传参调用方行为与旧版逐字等价（向后兼容）；调用方
     必须显式传训练机当前 codeHash（F1 核心：dedup 键含期望值）。
     """
@@ -248,12 +261,8 @@ def request_upgrade_guarded(spec: UpgradeAsk) -> tuple[bool, str]:
         spec.branch,
         spec.ping_hash,
     )
-    timeout, dirty = spec.timeout, spec.dirty
+    timeout = spec.timeout
     expected_hash, cooldown_sec = spec.expected_hash, spec.cooldown_sec
-    if dirty is None:
-        dirty = [] if is_self_node(url, nid) else dirty_hash_files()
-    if not is_self_node(url, nid) and dirty:
-        return False, f"dirty-tree:{len(dirty)}"
     key = (ping_hash, expected_hash)
     prev = _RESTARTS.seen.get(nid)
     # 冷却窗内 ⇒ dedup（防连环杀）；窗**已过**而节点仍 stale（pull 失败 / 环境不支持远端
@@ -265,7 +274,10 @@ def request_upgrade_guarded(spec: UpgradeAsk) -> tuple[bool, str]:
         and time.time() - prev[2] < restart_dedup_cooldown_sec(cooldown_sec)
     ):
         return False, "dedup"
-    actual_branch = "" if is_self_node(url, nid) else branch
+    self_node = is_self_node(url, nid)
+    if not self_node and not branch:
+        return False, "no-branch"
+    actual_branch = "" if self_node else branch
     ok = request_upgrade(url, auth_key, actual_branch, timeout=timeout)
     if ok:
         _RESTARTS.seen[nid] = (ping_hash, expected_hash, time.time())
@@ -283,7 +295,7 @@ def upgrade_stale_nodes(
     cooldown_sec: float | None = None,
 ) -> list[dict]:
     """主动升级扫描：ping 每个 enabled 节点，codeHash ≠ expected（stale）→
-    request_upgrade_guarded（跨代去重 + 脏工作区拒发，2026-09-01 重启循环修复）。
+    request_upgrade_guarded（跨代去重 + 先 git pull 再重启；`dirty` 参数仅为签名兼容保留）。
 
     返回 [{id, upgraded, reason}]（诊断用）。不可达/失败跳过——升级机制是 best-effort，
     绝不阻塞本轮 dispatch（stale 节点本轮仍不参与，待重启后由 rescan 纳入）。
@@ -309,7 +321,6 @@ def upgrade_stale_nodes(
                 branch=branch,
                 ping_hash=ping_hash,
                 timeout=restart_timeout,
-                dirty=dirty,
                 expected_hash=expected_hash,
                 cooldown_sec=cooldown_sec,
             )

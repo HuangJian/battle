@@ -1986,11 +1986,24 @@ def test_two_eval_rounds_share_dispatch_round_robin(tmp_path, monkeypatch) -> No
 
     monkeypatch.setattr(EvalArbiter, "register", spy_register)
 
+    a_first = threading.Event()
+    b_first = threading.Event()
+
     def fetch(*_a, **kw):
         kw = dict(_a[0].__dict__) if _a else kw
-        order.append("A" if str(kw["iter_id"]).startswith("rid.a") else "B")
-        if len(order) == 1:
-            assert release.wait(timeout=30.0), "首局未被放行（用例内部死锁）"
+        who = "A" if str(kw["iter_id"]).startswith("rid.a") else "B"
+        if who == "A":
+            if not a_first.is_set():
+                a_first.set()
+                assert release.wait(timeout=30.0), "首局未被放行（用例内部死锁）"
+            elif not b_first.is_set():
+                # 2026-11-27 满载 flake：B 登记后它的首局还没排进 fetch，A 的第二局
+                # 已经发出 ⇒ A,A,B,B。这里等的是「B 真的发了一局」，不是「B 登记了」，
+                # 否则判据仍取决于 worker 线程谁先被唤醒（单跑绿、全量偶红）。
+                assert b_first.wait(timeout=30.0), "B 的首局没发出来（用例内部死锁）"
+        order.append(who)
+        if who == "B":
+            b_first.set()
         return hb.manifest(kw["stage"], kw["seed"]), {}
 
     out: dict[str, tuple] = {}
@@ -2002,7 +2015,7 @@ def test_two_eval_rounds_share_dispatch_round_robin(tmp_path, monkeypatch) -> No
     try:
         # 先单独起 A：它登记后首局被扣住（唯一线程），队列不会再被 A 吃掉。
         ta.start()
-        assert _wait_until(lambda: order.count("A") > 0, timeout=20.0), f"A 没有开派: {order}"
+        assert _wait_until(lambda: a_first.is_set(), timeout=20.0), f"A 没有开派: {order}"
         # A 卡在首局，再起 B：B 登记后两条队列都在，放行首局 ⇒ 发牌按轮轮转。
         tb = threading.Thread(target=_run, args=("b", hb, "rid.b", 8), daemon=True)
         tb.start()

@@ -18,7 +18,7 @@
 （不覆盖 out、不归档），打 `BC SMOKE PASS`——控制台 smokeTrain 的三里程碑之一。
 
 **本模块只做进程级一次性副作用 + 阻塞式驱动**（`force_utf8_stdio` / `chdir` / 单实例锁 /
-启动前 `git push` / hub 停机态清零）——「一轮怎么跑」全部在 `trainer/bc_loop.py`，因为单进程
+hub 停机态清零）——「一轮怎么跑」全部在 `trainer/bc_loop.py`，因为单进程
 supervisor（`trainer/run_rl_cluster.py --serve`）也要用**同一份**一轮实现（两套实现必然分叉：
 BC 的续跑判据是 `bc_round_completed` / job 认领 / bc-resume，任何一处写成第二份就是重发布
 = resume 失效 = 从头训）。
@@ -42,10 +42,8 @@ from common.cli import run_main
 from common.log import log
 from common.paths import REPO_ROOT
 from common.platform_utils import force_utf8_stdio
-from common.proc import run_capture
 from trainer.bc_loop import BcLoop, bc_argparser, resolve_bc_runtime
-from worker.archive import ensure_current_branch_pushed
-from worker.train.loop_util import acquire_lock, cleanup_lock, course_lock_path
+from worker.train.loop_util import course_lock_path
 
 #: nn-training 目录（锁文件与子进程 cwd 都相对它——与 `trainer/loop_serve.py` 的 `NN_DIR` 同一个）。
 #: 2026-09-30（刀 7）：入口从 nn-training/ 顶层搬进 trainer/ ⇒ 上溯层数 +1
@@ -57,7 +55,7 @@ def main(argv: list[str] | None = None) -> None:
     """进程级准备 → 解析 → **阻塞式**驱动（单课进程只服务这一门课，等外部时原地重问）。
 
     与改造前 `main()` 的顺序逐条同义，只有一处刻意调整：**课程/传输解析先于单实例锁**
-    （配置错就不该占锁，也不该白推一次 `git push`；锁只保护「真的开始跑」之后的互斥）。
+    （配置错就不该占锁；锁只保护「真的开始跑」之后的互斥）。
     """
     force_utf8_stdio()
     os.chdir(str(REPO_ROOT))
@@ -74,22 +72,14 @@ def main(argv: list[str] | None = None) -> None:
     if _refuse:
         raise SystemExit(_refuse)
 
-    # ---- git push 串行化（节点代码同步依赖 origin；与 run_rl / serve 同规）----
-    push_lock = str(REPO_ROOT / ".git_push.lock")
-    if acquire_lock(push_lock, tag="git push"):
-        try:
-            ensure_current_branch_pushed(REPO_ROOT)
-        finally:
-            cleanup_lock(push_lock)
+    # 2026-11-28 用户更正：采样节点远控升级仍要 `git pull` 后再重启 ⇒ 必须锁存分支名。
+    # BC 自己不 clone/fetch，分支名读 `.git/HEAD` 文件（零 git 子进程），不是调用 git。
     import common.distribution as dc
     import remote.node_upgrade as nu
 
-    current_branch = run_capture(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO_ROOT, timeout=30
-    ).stdout.strip()
-    # 升级分支必须在 load_dist_config 之前钉住（节点远端分支的选择依赖它）。
-    if current_branch and current_branch != "HEAD":
-        nu.set_upgrade_branch(current_branch)
+    branch = nu.branch_from_head(REPO_ROOT)
+    if branch:
+        nu.set_upgrade_branch(branch)
     runtime = resolve_bc_runtime(args, cfg=dc.load_dist_config())
 
     # ---- 单实例锁（与 run_rl 同实现、按课命名；双开响亮拒启）----

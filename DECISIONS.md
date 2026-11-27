@@ -11615,3 +11615,16 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **违反后果**：新起的测试 HTTP 服务若用裸 `Thread(target=srv.serve_forever)`，每条用例白付 0–0.5s/服务，且会重新把「关服慢」藏在测试之外（本文件已把 `serve_fast` 的理由写在模块头）。
 
 —— 全文（实测读数）→ `docs/decisions/details/goalnn.md` §2026-11-27-goalnn-test-serve-fast-shutdown
+
+## §2026-11-27-goalnn-retire-git-dirty-guard（2026-11-27，用户拍板整套去 git）
+
+- **背景**：为 Windows 门禁提速做 spawn 分类，全量 711 次子进程里 git 占 248 次；其中 83 对 `git ls-files -s` + `git cat-file --batch` 来自 `common/codehash.py::dirty_hash_files`（一轮派发两次 git，各 ~75ms）。用户指正：codeHash 参考口径早已改成本机 self 节点自报（§2026-11-15-goalnn-self-codehash-reference），与 git 仓库无关。我最初把两件事混了：那批 git 实际来自另一条遗留的 dirty-tree 守卫。
+- **决定**：用户点选「彻底删掉」⇒ 删除 `dirty_hash_files` 及其 git 索引比对；`trainer/dispatch.py` 不再算 `dirty_files` / 打脏树 WARN，`trainer/dispatch_state.py` / `queue_local.py` / `queue_worker.py` 的字段与传递链一并移除；`remote/node_upgrade.py` 与 `tools/dist_upgrade_cli.py` 不再拒发 `dirty-tree:<n>`（`UpgradeAsk.dirty` 字段仅留签名兼容，判据不再读）；相关测试改为断言「传 dirty 也照常升级」；`tests/test_distribution_io_budget.py` 两格 git 基线归零并记理由。
+- **被否决**：① 只缓存 dirty 结果（已做过，248 → ~100 次，但语义仍依赖 git，用户要的是彻底无关）；② 以纯 Python 解析 `.git/index` 替代 git 进程（省进程不省语义，且引入索引格式解析面）；③ 保留守卫但只在非 self 节点运行（self 已由参考 hash 覆盖，剩余场景正是用户要删的）。
+- **后果**：失去「工作区脏 ⇒ 抑制远端 pull+restart」那道保险（原为 2026-09-01 重启循环修复①）；远端升级只按 self 自报 hash + 跨代去重 + 冷却窗判据执行。门禁里 dirty 那批 git 子进程归零，总 spawn 529 → 508；`bun run pygate` 7080 passed / 13 skipped 绿。
+- **后续（2026-11-27 深夜，用户补充口径）**：BC 训练已与 RL 同跑 notebook、从 hub 下载 `code.zip`，不做 git clone/fetch ⇒ ① `trainer/run_bc.py` 删除启动前 `ensure_current_branch_pushed` / `.git_push.lock` / `rev-parse --abbrev-ref` 分支锁存；② `trainer/bc_loop.append_weights_md_row` 与 `worker/train/bc.py::_append_weights_md` 的 `git rev-parse --short HEAD` 删除，WEIGHTS.md 的 git 列保留但恒写 `n/a`；③ `remote/code_snapshot.py::_git_head` 删除——`commit` 字段没有任何读者（`CodeSnapshot` 不含它）。门禁 spawn 491 → 约 465，`rev-parse --short` 归零。
+- **第三批（2026-11-28 00:3x，用户「改！改！」）**：① `common/code_sentinel.code_tree_provenance` 删除 git 三元组（`commit` / `dirty` / `dirty_files`），`code_meta.jsonc` 只留 `import_ok`——这些字段无生产读者，每次打包白起 2 个 git 子进程；② 删除启动前 `git push` 与 `worker/archive.ensure_current_branch_pushed`（训练机不再 clone/fetch；用户拍板），RL 入口 `loop_serve.py` / `once_shot.py` 与 `run_bc.py` 均不再 push。
+- **更正（2026-11-28 00:5x，用户明确）**：**采样节点的远控升级仍要求先 `git pull` 到最新代码再重启**，不能发空 `pullBranch`。因此恢复 `BranchLatch` / `set_upgrade_branch` / `current_upgrade_branch` 与 `UpgradeAsk.branch` 语义（非 self 节点分支为空 ⇒ `no-branch`，不误发空拉取）；分支名改由入口读 `.git/HEAD` 文件获得（零 git 子进程，detached HEAD ⇒ 空串 ⇒ 不升级只排除）。`git push` 仍保持删除——origin 由用户/外部流程更新。
+- **仍存在的 git 调用**：`remote/hub_client.git_head`（job manifest 的 `commit` / `commit_echo` 协议，门禁 1 次）；`tests/test_python_loc_budget.py` 的 `git ls-files -z`（2 次，门禁自身枚举 Python 文件）。两者都不是 codeHash/训练路径。
+
+—— 实测分类 / 取舍 / 验证读数 → `.workbuddy/memory/2026-11-27.md` 当日记录

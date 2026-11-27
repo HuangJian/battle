@@ -20,7 +20,6 @@ from pathlib import Path
 
 from common.log import log
 from common.paths import REPO_ROOT
-from common.proc import run_capture
 
 WEIGHTS_BACKUP_DIR = REPO_ROOT / "nn-training" / "weights"
 WEIGHTS_BACKUP_KEEP = 20  # 仅作手动 prune（tools/weights_prune.py）的参考配额；backup_weights 不自动删
@@ -95,28 +94,3 @@ def backup_weights(
         return None
 
 
-def ensure_current_branch_pushed(repo_root: Path) -> str | None:
-    """Push current branch to origin before starting — remote agents upgrade via
-    `git pull` from origin (not local); unpushed commits → agents pull stale code →
-    codeHash mismatch → excluded → training runs on local alone.
-
-    Returns the pushed branch name, or None on any (non-fatal) failure.
-    """
-    try:
-        branch_res = run_capture(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_root, timeout=30
-        )
-        branch = branch_res.stdout.strip()
-        if not branch or branch == "HEAD":
-            return None
-        r = run_capture(["git", "push", "origin", branch], cwd=repo_root, timeout=120)
-        if r.returncode == 0:
-            log(f"[archive] pushed {branch} -> origin (agents can git-pull to sync)")
-            return branch
-        log(
-            f"[archive] WARN git push {branch} failed (rc={r.returncode}): "
-            f"{(r.stderr or r.stdout)[-200:]} — remote agents may stay stale"
-        )
-    except Exception as e:
-        log(f"[archive] WARN git push skipped: {e}")
-    return None
