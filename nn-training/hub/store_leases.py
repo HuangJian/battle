@@ -107,6 +107,7 @@ class LeaseSpec:
     role: str = ROLE_ONLINE
     capabilities: list[str] | None = None
 
+
 #: 毒包熔断阈值（plan/accident.plan.md §4.1，2026-09-21）：同一 job 被**认领后零回传**满这么多次
 #: ⇒ hub 冻结它并响亮告警。为什么是「零回传」而不是「失败」：worker 报得上来的失败早就有
 #: 确定性通道了（`POST /jobs/{id}/fail`，§4.0/P0）；这里兑的是**未知崩溃类型**——worker 连
@@ -331,7 +332,10 @@ class LeaseBook:
         now = self._clock() if at is None else float(at)
         with self._progress_lock:
             self._last_progress[job_id] = now
-        self._bc_lock_touch(job_id)  # 课程级独占窗跟随 epoch 进度续命（落盘）
+        # ★2026-11-28：把**同一个** `now` 交给锁（不再让锁自己再读一次钟）。
+        # 两处锚差一次 `_clock()` + 一次落盘 IO，满载下能拉开毫秒级：租约先过期、锁后过期
+        # ⇒ `e2e/test_hold_e2e` 的「超窗后换人重领」偶发被 `bc_exclusive` 拒（2026-11-28 门禁）。
+        self._bc_lock_touch(job_id, at=now)  # 课程级独占窗跟随 epoch 进度续命（落盘）
 
     def job_progress_at(self, job_id: str) -> float:
         """最近一次进度锚（`epoch`）时刻；从未有过 ⇒ `0.0`（哨兵：`>` 才是真值）。"""
@@ -414,8 +418,11 @@ class LeaseBook:
         except OSError:
             pass
 
-    def _bc_lock_touch(self, job_id: str) -> None:
+    def _bc_lock_touch(self, job_id: str, at: float | None = None) -> None:
         """epoch 进度续独占窗；**锁文件缺失（旧代码认领 / 重启前认领）时按进度重建**。
+
+        `at`：锚时刻。调用方（`note_job_progress`）与内存进度锚**共用**同一个读数 ——
+        否则两个判据（租约死活 / 课程独占）会在同一窗的边界上错开一次钟。
 
         2026-11-12 二次报障：锁是认领时写的；若认领发生在部署/重启之前，盘上根本没有锁，
         重启后内存租约又全丢 ⇒ 另一台云机立刻领走同一份课。epoch 是持续存在的进度事实，
@@ -425,8 +432,8 @@ class LeaseBook:
         · 记录缺失/损坏/属于已超窗的旧 job ⇒ 用本 job 重建；
         · 记录属于**另一个仍新鲜**的 job ⇒ 不动（僵尸 epoch 不该抢走现行锁）。
         """
+        now = self._clock() if at is None else float(at)
         p = self._bc_lock_path()
-        now = self._clock()
         try:
             rec = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -771,7 +778,11 @@ class LeaseBook:
             # 避让：上一份**过期死掉**的租约若就是这个请求者跑的，本次不给他（让别的
             # worker 顶上）。身份比对只能在这里做——上面刚完成租约回收，stale 记录此刻
             # 才是最新的；在队列层先判会恒为空（2026-09-18 实测）。
-            if avoid_stale_holder and worker_id and self._stale_holders.get(job_id, "") == worker_id:
+            if (
+                avoid_stale_holder
+                and worker_id
+                and self._stale_holders.get(job_id, "") == worker_id
+            ):
                 return False, "", "stale_holder"
             token = secrets.token_hex(16)
             self._leases[job_id] = now + ttl
@@ -1035,7 +1046,11 @@ class LeaseBook:
             self._last_heartbeat.pop(job_id, None)
             self._last_progress.pop(job_id, None)  # ★M5：验收落位 ⇒ 进度锚清
             completed_ids = {
-                e.get("job_id") for e in self.ledger._read_ledger() if e.get("event") == "job_completed"
+                e.get("job_id")
+                for e in self.ledger._read_ledger()
+                if e.get("event") == "job_completed"
             }
             if job_id not in completed_ids:
-                self.ledger._append_ledger({"event": "job_completed", "job_id": job_id, "ts": self._clock()})
+                self.ledger._append_ledger(
+                    {"event": "job_completed", "job_id": job_id, "ts": self._clock()}
+                )

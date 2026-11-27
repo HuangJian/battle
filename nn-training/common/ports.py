@@ -66,4 +66,21 @@ class PortPair:
     add: Callable[..., None] = _noop
 
 
-__all__ = ["PortPair", "WirePort"]
+class FetchPort(Protocol):
+    """「拿到整份字节」的端口（`remote.download` 那一层：重试/重抽/记账都已封在实现里）。
+
+    与 `WirePort.request` 的区别是**语义层级**：`request` 是「发一次、拿 status+body」，
+    `fetch` 是「按 Range 续、按退避重试、按 bulk 让路，最终给我整份字节」。下载编排只关心后者。
+    """
+
+    def get(self, spec: object) -> bytes: ...
+
+
+@dataclass(frozen=True)
+class FetchPair:
+    """单能力端口（字段即能力）：`download` 用 `FETCH.get(WireGet(...))`。"""
+
+    get: Callable[..., bytes]
+
+
+__all__ = ["FetchPair", "FetchPort", "PortPair", "WirePort"]

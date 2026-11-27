@@ -29,6 +29,33 @@
 
 ---
 
+## §390 两条满载 flake 的根因：BC 独占锁与租约**各读一次钟** + relay 单飞判据数了「一辈子」（2026-11-28）
+
+**① `e2e/test_hold_e2e.py::test_bc_exclusivity_chain_end_to_end`**（偶发 `claim 被拒: bc_exclusive:w-bc`）
+
+两个判据读两个存储：`_lease_state` 的 BC 分支读内存 `_last_progress`，
+`bc_exclusive_owner` 读落盘的 `bc-exclusive.json["progress_at"]`。而 `note_job_progress`
+把 `now` 写进内存后，`_bc_lock_touch` **自己又读了一次钟**（再加一次 `mkdir`/读/写/`os.replace`
+的 IO）。两次读数差在空载下是微秒，满载下被抢占放大到毫秒级 —— 租约先过期、独占还挡着，
+于是「超窗后换人重领」在这一小段窗口里必然被拒。
+
+修法：`_bc_lock_touch(job_id, at=now)` —— 调用方把**同一个**读数传下去，两个判据逐位同锚。
+守卫 `tests/hub/test_bc_lease_exclusive.py::test_course_lock_anchor_equals_the_progress_anchor`
+（用「每读一次前进 1ms」的钟，固定钟测不出这个 bug；证伪过：去掉 `at=now` 当场红）。
+
+**② `tests/hub/test_relay_ping_cache.py::test_expired_payload_is_served_then_refreshed_single_flight`**
+（偶发 `len(seen) == 2`）
+
+旧判据在 `_wait_payload`（等刷新落地）**之后**数总次数。单飞的契约是「**同时**只有一个在飞」，
+不是「一辈子只刷一次」：落地后 TTL 再到期时重刷是合法行为，被旧断言算成违规。
+改成：刷新还挂着时断言 `ping_busy is True`（持有者唯一），落地后只断言载荷变新；
+并发互斥仍由前一段（刷新挂起期间三次 GET 只允许 `len(seen) == 1`）钉住。
+
+**共同教训**：两条都是「判据看着同源、实际各读一次」——一个是两次 `_clock()`，一个是把
+「并发互斥」错写成「总次数」。修 flake 的判据必须落在这两类**语义**上，而不是放宽时间窗。
+
+---
+
 ## §389 P0-8 第二代：出站线路端口（`common/ports.py::WIRE`，2026-11-28）
 
 **背景**：§388 留的下一步是「remote 包的 `_request` / `_wire_add` 同型端口」。实测**不是 5 处，
@@ -92,9 +119,15 @@ hub 控制面是 7 个位置参数。钉死任一个都会逼出第二套协议�
 5. 反向：`test_job_lifecycle_split` 原来断言「簇里仍有 `_request` / `_wire_add` **裸调用**」——
    本刀把裸调用变成端口组装，判据改成「组装行仍是 `PortPair(request=…, add=…)`」（AST，不写字面量）。
 
-**下一步（未做）**：`remote/http._request` 自身的 21 处 patch 属「测传输核心内部」（`_get_with_retry`
-的重试控制流），要给它加 `send=` 参数才谈得上注入；`remote/offline_boot`（生成物，改 `.pyfrag`）、
-`notebook_runtime` / `rollout_node` 的探针族是剩余大头（各有 20~50 处）。
+**批三（同日）**：`remote/http._request` 21 处 + `remote/download._get_with_retry` 3 处。
+`_attempt_once` 是 `_get_with_retry` 唯一发请求的地方 ⇒ 一处 `WIRE.request` 就收住了整条
+重试/重抽控制流；`download` 的接缝语义不同（「拿到整份字节」而不是「发一次」），
+另立 `FetchPair`（`FETCH.get`）—— 把两者混成一个协议就会让下载编排去伪造 status/body。
+G19 **304 / 71 → 280 / 69**（累计 384 / 91 → 280 / 69，−104 次 / −22 文件）。
+
+**下一步（未做）**：`remote/offline_boot`（生成物，改 `.pyfrag`）与 `notebook_runtime` /
+`rollout_node` 的探针族是剩余大头（各有 20~50 处）；`trainer/loop_core.TrainingLoop._*` 的
+15 处与 P0-1 混入拆解同批。
 
 ---
 

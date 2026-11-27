@@ -59,6 +59,7 @@ from typing import Any, NamedTuple, Protocol
 import remote.course_cache as course_cache
 import remote.weights_standard as weights_standard
 from common.logutil import kb, secs, tag_logger
+from common.ports import FetchPair
 from common.protocol import (
     BLOB_INIT,
     BLOB_OPT,
@@ -78,6 +79,10 @@ from remote.http import (
 )
 from remote.job_fs import JOB_DIR_KEEP, prune_job_dirs, unpack_payload_or_fail
 from remote.wire import _wire_hit
+
+#: 取整份字节的端口（P0-8，2026-11-28）：编排层只碰 `FETCH.get(…)`，
+#: 测试替掉它就不必伪造 `_get_with_retry` 的重试/重抽/记账细节。
+FETCH: FetchPair = FetchPair(get=_get_with_retry)
 
 #: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
 _log = tag_logger("worker", lambda: time)
@@ -142,20 +147,22 @@ def download_payload(
     `bulk_prio`（2026-09-22）：开算前的关键下载用缺省 P1；**预取**（软持有）传
     `BULK_P2_PREFETCH`——它必须能在 **P1 关键传输**到达时丢掉半截（`BulkPreemptError`）。
     """
-    return _get_with_retry(
-        WireGet(base_url,
-        token,
-        f"/jobs/{jid}/payload",
-        timeout=BODY_TOTAL_TIMEOUT_SEC,
-        attempts=attempts,
-        log=log,
-        idle_timeout=BODY_IDLE_TIMEOUT_SEC,
-        total_timeout=BODY_TOTAL_TIMEOUT_SEC,
-        progress=_progress_logger(f"job {jid}: payload", log),
-        wire_jid=wire_jid or jid,
-        wire_seg="payload",
-        reroll=True,
-        bulk_prio=bulk_prio),
+    return FETCH.get(
+        WireGet(
+            base_url,
+            token,
+            f"/jobs/{jid}/payload",
+            timeout=BODY_TOTAL_TIMEOUT_SEC,
+            attempts=attempts,
+            log=log,
+            idle_timeout=BODY_IDLE_TIMEOUT_SEC,
+            total_timeout=BODY_TOTAL_TIMEOUT_SEC,
+            progress=_progress_logger(f"job {jid}: payload", log),
+            wire_jid=wire_jid or jid,
+            wire_seg="payload",
+            reroll=True,
+            bulk_prio=bulk_prio,
+        ),
     )
 
 
@@ -168,19 +175,21 @@ def download_code(
     log=_log,
 ) -> bytes:
     # code.zip 同样走隧道（1-3MB）：与 payload 同规的停滞判据与进度行。
-    return _get_with_retry(
-        WireGet(base_url,
-        token,
-        f"/jobs/{jid}/code",
-        timeout=120.0,
-        attempts=attempts,
-        log=log,
-        idle_timeout=BODY_IDLE_TIMEOUT_SEC,
-        total_timeout=120.0,
-        progress=_progress_logger(f"job {jid}: code", log),
-        wire_jid=jid,
-        wire_seg="code",
-        reroll=True),
+    return FETCH.get(
+        WireGet(
+            base_url,
+            token,
+            f"/jobs/{jid}/code",
+            timeout=120.0,
+            attempts=attempts,
+            log=log,
+            idle_timeout=BODY_IDLE_TIMEOUT_SEC,
+            total_timeout=120.0,
+            progress=_progress_logger(f"job {jid}: code", log),
+            wire_jid=jid,
+            wire_seg="code",
+            reroll=True,
+        ),
     )
 
 
@@ -196,19 +205,21 @@ def download_ts_code(
 
     代价只付一次：内容寻址缓存（`ts_code_cache/<sha>`）命中后同 sha 永不重下。
     """
-    return _get_with_retry(
-        WireGet(base_url,
-        token,
-        f"/jobs/{jid}/ts_code",
-        timeout=BODY_TOTAL_TIMEOUT_SEC,
-        attempts=attempts,
-        log=log,
-        idle_timeout=BODY_IDLE_TIMEOUT_SEC,
-        total_timeout=BODY_TOTAL_TIMEOUT_SEC,
-        progress=_progress_logger(f"job {jid}: ts_code", log),
-        wire_jid=jid,
-        wire_seg="ts_code",
-        reroll=True),
+    return FETCH.get(
+        WireGet(
+            base_url,
+            token,
+            f"/jobs/{jid}/ts_code",
+            timeout=BODY_TOTAL_TIMEOUT_SEC,
+            attempts=attempts,
+            log=log,
+            idle_timeout=BODY_IDLE_TIMEOUT_SEC,
+            total_timeout=BODY_TOTAL_TIMEOUT_SEC,
+            progress=_progress_logger(f"job {jid}: ts_code", log),
+            wire_jid=jid,
+            wire_seg="ts_code",
+            reroll=True,
+        ),
     )
 
 
@@ -222,19 +233,21 @@ def download_blob(
     log=_log,
 ) -> bytes:
     """M2 B3：取内容寻址 blob（raw opt/ref）。404 = 确定性缺失（响亮失败，非静默降级）。"""
-    return _get_with_retry(
-        WireGet(base_url,
-        token,
-        f"/jobs/{jid}/blob?name={name}",
-        timeout=BODY_TOTAL_TIMEOUT_SEC,
-        attempts=attempts,
-        log=log,
-        idle_timeout=BODY_IDLE_TIMEOUT_SEC,
-        total_timeout=BODY_TOTAL_TIMEOUT_SEC,
-        progress=_progress_logger(f"job {jid}: blob {name}", log),
-        wire_jid=jid,
-        wire_seg=f"blob:{name}",
-        reroll=True),
+    return FETCH.get(
+        WireGet(
+            base_url,
+            token,
+            f"/jobs/{jid}/blob?name={name}",
+            timeout=BODY_TOTAL_TIMEOUT_SEC,
+            attempts=attempts,
+            log=log,
+            idle_timeout=BODY_IDLE_TIMEOUT_SEC,
+            total_timeout=BODY_TOTAL_TIMEOUT_SEC,
+            progress=_progress_logger(f"job {jid}: blob {name}", log),
+            wire_jid=jid,
+            wire_seg=f"blob:{name}",
+            reroll=True,
+        ),
     )
 
 
@@ -293,19 +306,21 @@ def download_blobs(
     if len(names) == 1:
         return {names[0]: download_blob(base_url, token, jid, names[0], log=log)}
     try:
-        body = _get_with_retry(
-            WireGet(base_url,
-            token,
-            f"/jobs/{jid}/blob?name={','.join(names)}",
-            timeout=BODY_TOTAL_TIMEOUT_SEC,
-            attempts=attempts,
-            log=log,
-            idle_timeout=BODY_IDLE_TIMEOUT_SEC,
-            total_timeout=BODY_TOTAL_TIMEOUT_SEC,
-            progress=_progress_logger(f"job {jid}: blob {len(names)} 件", log),
-            wire_jid=jid,
-            wire_seg=f"blob:{'+'.join(names)}",
-            reroll=True),
+        body = FETCH.get(
+            WireGet(
+                base_url,
+                token,
+                f"/jobs/{jid}/blob?name={','.join(names)}",
+                timeout=BODY_TOTAL_TIMEOUT_SEC,
+                attempts=attempts,
+                log=log,
+                idle_timeout=BODY_IDLE_TIMEOUT_SEC,
+                total_timeout=BODY_TOTAL_TIMEOUT_SEC,
+                progress=_progress_logger(f"job {jid}: blob {len(names)} 件", log),
+                wire_jid=jid,
+                wire_seg=f"blob:{'+'.join(names)}",
+                reroll=True,
+            ),
         )
         return parse_blob_batch(body)
     except Exception as e:
@@ -762,7 +777,9 @@ def _resolve_weights(spec: WeightsAsk) -> tuple[Path | None, str, int]:
             path.write_bytes(local["weights"])
             # 零字节命中也要进传输账（与 code/ts_code 同规；`why` 让摘要能区分是身份命中）
             _wire_hit(jid, "init:local", "course_cache")
-            log(f"job {jid}: init 身份命中（course_cache/{str(course_fp)[:8]}…）——本机 f32 副本，零字节")
+            log(
+                f"job {jid}: init 身份命中（course_cache/{str(course_fp)[:8]}…）——本机 f32 副本，零字节"
+            )
             return _landed("course_cache", 0)
     if fp in _SENTINEL_INIT_FP or not is_content_sha(fp):
         if path.exists():
@@ -784,15 +801,17 @@ def _resolve_weights(spec: WeightsAsk) -> tuple[Path | None, str, int]:
     # ---- W1/W2/W3：一律走 `_resolve_blob`（内容寻址 + sha 校验 + 命中即写 cache）----
     try:
         raw, hit, src = _resolve_blob(
-            BlobAsk(blob_root=blob_root,
-            name=BLOB_INIT,
-            sha=fp,
-            inline_b64="",
-            jid=jid,
-            base_url=base_url,
-            token=token,
-            preloaded=preloaded,
-            log=log),
+            BlobAsk(
+                blob_root=blob_root,
+                name=BLOB_INIT,
+                sha=fp,
+                inline_b64="",
+                jid=jid,
+                base_url=base_url,
+                token=token,
+                preloaded=preloaded,
+                log=log,
+            ),
         )
     except RetryableError:
         raise  # 瞬时：重领重下能修（§3.2 的失败分类红线）
@@ -1000,7 +1019,12 @@ def _ensure_payload_raw(
     _staged = str((preloaded or {}).get("staged_dir") or "")
     if _staged:
         _adopted = _adopt_staged(
-            Path(_staged), jid=jid, work_dir=work_dir, preloaded=preloaded or {}, log=log, bundle=bundle
+            Path(_staged),
+            jid=jid,
+            work_dir=work_dir,
+            preloaded=preloaded or {},
+            log=log,
+            bundle=bundle,
         )
         if _adopted is not None:
             return _adopted

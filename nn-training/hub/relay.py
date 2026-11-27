@@ -336,6 +336,16 @@ class NodeRelay:
             box.ping_busy = True
             return True
 
+    def ping_busy_of(self, node: str) -> bool:
+        """该节点是否**正有一个**后台刷新在飞（公开读数）。
+
+        为什么要有它：单飞的契约是「同时只有一个」，测试要断言这件事；直接读
+        `relay._boxes[node].ping_busy` 会把私有字段变成事实 API（G5）。
+        """
+        with self._lock:
+            box = self._boxes.get(node)
+            return bool(box is not None and box.ping_busy)
+
     def release_ping_refresh(self, node: str) -> None:
         """刷新失败时放开单飞行（否则这台节点再也不会被刷新）。"""
         with self._lock:

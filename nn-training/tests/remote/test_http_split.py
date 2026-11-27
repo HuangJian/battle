@@ -170,7 +170,7 @@ def test_request_seam_for_the_moved_callers_is_the_http_module(
     monkeypatch.setattr(
         worker_mod, "_request", lambda *a, **k: (_ for _ in ()).throw(AssertionError("打偏"))
     )
-    monkeypatch.setattr(http_mod, "_request", lambda *a, **k: (200, b"payload-bytes"))
+    monkeypatch.setattr(http_mod, "WIRE", PortPair(lambda *a, **k: (200, b"payload-bytes")))
     out = worker_mod._get_with_retry(
         WireGet("http://hub", "t", "/jobs/j1/payload", timeout=1.0, attempts=1, log=lambda _m: None)
     )
@@ -186,7 +186,9 @@ def test_request_seam_for_the_job_face_is_the_job_lifecycle_module(monkeypatch) 
     成功 —— 打偏的话这里看到的会是 `打偏` 而不是 200。
     """
     monkeypatch.setattr(
-        http_mod, "_request", lambda *a, **k: (_ for _ in ()).throw(AssertionError("打偏"))
+        http_mod,
+        "WIRE",
+        PortPair(lambda *a, **k: (_ for _ in ()).throw(AssertionError("打偏"))),
     )
     monkeypatch.setattr(jl_mod, "WIRE", PortPair(lambda spec: (200, b"{}")))
     rc = jl_mod.post_result(PostResultSpec("http://hub", "t", "jid1", {"job_id": "jid1"}, log=lambda _m: None))

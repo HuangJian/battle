@@ -13,6 +13,7 @@ import pytest
 
 import remote.http as http
 import remote.wire as wire
+from common.ports import PortPair
 from remote.bulk_sched import BULK_P1_CRITICAL, BULK_P2_PREFETCH, BulkPreemptError
 from remote.http import WireGet, _Attempt, _plan_after, _RetryAction, _RetryState
 from remote.wire import WireSlowError
@@ -23,7 +24,6 @@ LEDGER = {
     "_wire_note_failed": "failed",
     "_wire_note_reroll": "reroll",
     "_wire_note_resend": "resend",
-    "_wire_add": "add",
     "_note_rate": "rate",
 }
 
@@ -38,6 +38,13 @@ def seen(monkeypatch):
         monkeypatch.setattr(
             http, name, (lambda a: lambda *args: getattr(calls, a).append(args))(attr)
         )
+    # `_wire_add` 不再是裸调用（P0-8 第三代）：它被 `WIRE.add` 承载 ⇒ 打公开端口，
+    # 发送面保留真实现（本文件不发请求，只走 `_plan_*` 的记账分支）。
+    monkeypatch.setattr(
+        http,
+        "WIRE",
+        PortPair(request=http.WIRE.request, add=lambda *args: calls.add.append(args)),
+    )
     # `_min_rate` 读的是 `remote.wire.rate_reference()` ⇒ 打公开名的替身，不动私有名。
     monkeypatch.setattr(
         wire, "rate_reference", lambda: types.SimpleNamespace(floor=lambda: 10_000.0)

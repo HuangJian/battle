@@ -107,9 +107,12 @@
 `PortPair` 组装壳（宿主自拼缺省实现，不抬秩；落 **`common/`** —— `hub_http` 自己是 L0，
 端口若住 `remote/` 会撞「内部边严格向下」）落地后：G19 **384 / 91 → 304 / 71**，
 两条证伪（宿主直调 / `WIRE` 提前绑定）各红一次，批一 250 + 批二 158 条用例全绿。
-**下一个已知口径**：`remote/http._request` 自身 21 处属「测传输核心内部」—— 要先给
-`_get_with_retry` 加 `send=`；`offline_boot`（生成物）与 `notebook_runtime` / `rollout_node`
-的探针族是剩余大头。全文 → `docs/nn/engineering.md` §389。
+**批三（同日）**：`remote/http._request` 21 处 + `download._get_with_retry` 3 处 ——
+`_attempt_once` 是唯一发请求点（一处 `WIRE.request` 收住整条重试/重抽），`download` 另立
+`FetchPair`（「拿到整份字节」与「发一次」不是同一个协议）。G19 **304 / 71 → 280 / 69**
+（累计 384 / 91 → 280 / 69）。**下一个已知口径**：`offline_boot`（生成物，改 `.pyfrag`）、
+`notebook_runtime` / `rollout_node` 的探针族（各 20~50 处）、`TrainingLoop._*` 15 处（与 P0-1 同批）。
+全文 → `docs/nn/engineering.md` §389。
 
 ## 0. 执行摘要
 

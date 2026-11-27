@@ -694,7 +694,7 @@ def test_prefetch_survives_the_cancel_watcher_control_ring(tmp_path: Path, monke
                 pace=getattr(spec, "pace", None),
             )
 
-    monkeypatch.setattr(http_mod, "_request", _fake_request)
+    monkeypatch.setattr(http_mod, "WIRE", PortPair(_fake_request))
     logs: list[str] = []
     stop = threading.Event()
     def _run() -> None:

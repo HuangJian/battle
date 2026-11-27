@@ -78,6 +78,8 @@ ALLOWED_IMPORTS = {
     "common.protocol",
     "remote.bulk_sched",
     "remote.course_cache",
+    # 2026-11-28（P0-8 批三）：取整份字节的端口（`FETCH.get`）。零仓内 import ⇒ 不新增向上边。
+    "common.ports",
     "remote.http",
     "remote.job_fs",
     # 2026-10-15（离线 delta 事故）：`_resolve_weights` 返回前把 delta 容器落地成整份

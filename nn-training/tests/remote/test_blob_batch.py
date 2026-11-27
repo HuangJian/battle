@@ -28,6 +28,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import remote.download as dl
+from common.ports import FetchPair
 from common.protocol import BLOB_OPT, BLOB_REF, RetryableError, blob_path
 from hub.blob import BlobRoutes
 
@@ -90,7 +91,9 @@ def test_one_name_delegates_to_the_old_single_path(monkeypatch) -> None:
 
     monkeypatch.setattr(dl, "download_blob", _one)
     monkeypatch.setattr(
-        dl, "_get_with_retry", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("不该走批量"))
+        dl,
+        "FETCH",
+        FetchPair(lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("不该走批量"))),
     )
     assert dl.download_blobs("http://hub", "t", "j1", [BLOB_OPT]) == {BLOB_OPT: b"one"}
     assert seen == [BLOB_OPT]
@@ -104,7 +107,7 @@ def test_batch_issues_exactly_one_get(monkeypatch) -> None:
         calls.append(spec.path)
         return _frame(BLOB_OPT, OPT_RAW) + _frame(BLOB_REF, REF_RAW)
 
-    monkeypatch.setattr(dl, "_get_with_retry", _get)
+    monkeypatch.setattr(dl, "FETCH", FetchPair(_get))
     got = dl.download_blobs("http://hub", "t", "j1", [BLOB_OPT, BLOB_REF], log=lambda _m: None)
     assert got == {BLOB_OPT: OPT_RAW, BLOB_REF: REF_RAW}
     assert len(calls) == 1, f"应当是**一次** GET：{calls}"
@@ -120,7 +123,7 @@ def test_batch_failure_falls_back_to_one_by_one(monkeypatch) -> None:
         return OPT_RAW if n == BLOB_OPT else REF_RAW
 
     monkeypatch.setattr(
-        dl, "_get_with_retry", lambda *_a, **_k: (_ for _ in ()).throw(OSError("400"))
+        dl, "FETCH", FetchPair(lambda *_a, **_k: (_ for _ in ()).throw(OSError("400")))
     )
     monkeypatch.setattr(dl, "download_blob", _single)
     got = dl.download_blobs("http://hub", "t", "j1", [BLOB_OPT, BLOB_REF], log=lambda _m: None)
@@ -172,7 +175,9 @@ def test_a_corrupt_cache_entry_is_refetched_not_trusted(tmp_path: Path, monkeypa
         log=logs.append,
     )
     assert got[BLOB_OPT] == (OPT_RAW, False, "download")
-    assert (root / _sha(OPT_RAW)).read_bytes() == OPT_RAW, "重取后要把坏的覆盖掉（否则白付一辈子下载税）"
+    assert (root / _sha(OPT_RAW)).read_bytes() == OPT_RAW, (
+        "重取后要把坏的覆盖掉（否则白付一辈子下载税）"
+    )
 
 
 def test_preloaded_bytes_are_used_as_is(tmp_path: Path, monkeypatch) -> None:
@@ -283,9 +288,7 @@ class _FakeHandler(BlobRoutes):
         parts = []
         for name, p in entries:
             raw = p.read_bytes()
-            parts.append(
-                name.encode("utf-8") + b"\n" + str(len(raw)).encode("ascii") + b"\n" + raw
-            )
+            parts.append(name.encode("utf-8") + b"\n" + str(len(raw)).encode("ascii") + b"\n" + raw)
         self._bytes(b"".join(parts))
 
 

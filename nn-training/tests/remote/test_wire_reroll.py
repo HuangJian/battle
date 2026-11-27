@@ -116,7 +116,9 @@ class _FakeClock:
 
 def test_reroll_decision_matches_the_live_slow_draw() -> None:
     """12:59 现场：首块 256 KB 用了 39 s ⇒ 6.4 KB/s、预计剩余 ~1180 s ⇒ **该重抽**。"""
-    should, rate, remain = worker_mod._reroll_decision(256 * 1024, 3486200, 39.0, min_rate=80 * 1024)
+    should, rate, remain = worker_mod._reroll_decision(
+        256 * 1024, 3486200, 39.0, min_rate=80 * 1024
+    )
     assert should is True
     assert rate < 80 * 1024
     assert remain > worker_mod.WIRE_REROLL_BUDGET_SEC
@@ -145,7 +147,9 @@ def test_reroll_decision_handles_edge_inputs() -> None:
 def test_reroll_decision_honours_the_remaining_time_budget() -> None:
     """慢，但**马上就完了**（预计剩余 < 20 s）⇒ 不折腾：重抽也有建连成本。"""
     # 8 KB/s、还剩 80 KB ⇒ 预计 10 s < 20 s
-    should, rate, remain = worker_mod._reroll_decision(32 * 1024, 112 * 1024, 4.0, min_rate=80 * 1024)
+    should, rate, remain = worker_mod._reroll_decision(
+        32 * 1024, 112 * 1024, 4.0, min_rate=80 * 1024
+    )
     assert rate < 80 * 1024
     assert remain < worker_mod.WIRE_REROLL_BUDGET_SEC
     assert should is False
@@ -209,7 +213,7 @@ def _rerolling_request(monkeypatch, waste_bytes: int = 256 * 1024, *, improving:
 
     # 注入点 = `remote.http`：`_get_with_retry` 已搬进 http（S4 第五步），它在本模块命名空间
     # 解析 `_request` ⇒ patch `worker` 会静默失效（patch 后调**宿主**函数的仍是 `worker`）。
-    monkeypatch.setattr(http_mod, "_request", fake)
+    monkeypatch.setattr(http_mod, "WIRE", PortPair(fake, add=http_mod.WIRE.add))
     return calls, total
 
 
@@ -218,15 +222,17 @@ def test_rerolls_then_succeeds_and_records_the_waste(monkeypatch) -> None:
     calls, total = _rerolling_request(monkeypatch)
     lines: list[str] = []
     out = worker_mod._get_with_retry(
-        WireGet("http://hub",
-        "t",
-        "/jobs/j1/payload",
-        timeout=300.0,
-        attempts=3,
-        log=lines.append,
-        wire_jid="j1",
-        wire_seg="payload",
-        reroll=True),
+        WireGet(
+            "http://hub",
+            "t",
+            "/jobs/j1/payload",
+            timeout=300.0,
+            attempts=3,
+            log=lines.append,
+            wire_jid="j1",
+            wire_seg="payload",
+            reroll=True,
+        ),
     )
     assert len(out) == total, f"续传没拼成整份：{len(out)}"
     assert calls == [True, True, False]  # 最后一次尝试不重抽 ⇒ 必然传完
@@ -256,18 +262,20 @@ def test_a_server_that_ignores_range_is_accounted_as_waste(monkeypatch) -> None:
             raise worker_mod.WireSlowError(100_000, 6.4 * 1024, 1180.0, partial=b"z" * 100_000)
         return 200, b"q" * total  # 旧 hub：Range 被忽略
 
-    monkeypatch.setattr(http_mod, "_request", fake)
+    monkeypatch.setattr(http_mod, "WIRE", PortPair(fake, add=http_mod.WIRE.add))
     lines: list[str] = []
     out = worker_mod._get_with_retry(
-        WireGet("http://hub",
-        "t",
-        "/jobs/j6/payload",
-        timeout=300.0,
-        attempts=3,
-        log=lines.append,
-        wire_jid="j6",
-        wire_seg="payload",
-        reroll=True),
+        WireGet(
+            "http://hub",
+            "t",
+            "/jobs/j6/payload",
+            timeout=300.0,
+            attempts=3,
+            log=lines.append,
+            wire_jid="j6",
+            wire_seg="payload",
+            reroll=True,
+        ),
     )
     assert calls == [0, 100_000], f"重抽没带续传起点：{calls}"
     assert out == b"q" * total, "服务端给了整份就按整份返回"
@@ -282,15 +290,17 @@ def test_reroll_is_capped_and_the_last_attempt_always_transfers(monkeypatch) -> 
     calls, total = _rerolling_request(monkeypatch)
     lines: list[str] = []
     out = worker_mod._get_with_retry(
-        WireGet("http://hub",
-        "t",
-        "/jobs/j2/payload",
-        timeout=300.0,
-        attempts=8,
-        log=lines.append,
-        wire_jid="j2",
-        wire_seg="payload",
-        reroll=True),
+        WireGet(
+            "http://hub",
+            "t",
+            "/jobs/j2/payload",
+            timeout=300.0,
+            attempts=8,
+            log=lines.append,
+            wire_jid="j2",
+            wire_seg="payload",
+            reroll=True,
+        ),
     )
     assert len(out) == total, f"续传没拼成整份：{len(out)}"
     assert calls.count(True) == worker_mod.WIRE_REROLL_MAX == 3
@@ -311,15 +321,17 @@ def test_a_reroll_that_does_not_improve_stops_rerolling(monkeypatch) -> None:
     """
     calls, total = _rerolling_request(monkeypatch, improving=False)
     out = worker_mod._get_with_retry(
-        WireGet("http://hub",
-        "t",
-        "/jobs/j5/payload",
-        timeout=300.0,
-        attempts=8,
-        log=lambda _m: None,
-        wire_jid="j5",
-        wire_seg="payload",
-        reroll=True),
+        WireGet(
+            "http://hub",
+            "t",
+            "/jobs/j5/payload",
+            timeout=300.0,
+            attempts=8,
+            log=lambda _m: None,
+            wire_jid="j5",
+            wire_seg="payload",
+            reroll=True,
+        ),
     )
     assert len(out) == total, f"停抽之后必须老实传完：{len(out)}"
     assert calls == [True, True, False], f"无收益没停手：{calls}"
@@ -370,18 +382,20 @@ def test_exhausted_rerolls_still_fail_loudly(monkeypatch) -> None:
     def fake(spec: WireRequest, **_kw):
         return 500, b"boom"
 
-    monkeypatch.setattr(http_mod, "_request", fake)
+    monkeypatch.setattr(http_mod, "WIRE", PortPair(fake, add=http_mod.WIRE.add))
     # 不替生产退避白等（`_get_with_retry` 第 1 次重试睡 2s；本用例只看抛不抛）：
     monkeypatch.setattr(http_mod.time, "sleep", lambda _s: None)
     with pytest.raises(RetryableError):
         worker_mod._get_with_retry(
-            WireGet("http://hub",
-            "t",
-            "/jobs/j4/payload",
-            timeout=60.0,
-            attempts=2,
-            log=lambda _m: None,
-            reroll=True),
+            WireGet(
+                "http://hub",
+                "t",
+                "/jobs/j4/payload",
+                timeout=60.0,
+                attempts=2,
+                log=lambda _m: None,
+                reroll=True,
+            ),
         )
 
 
@@ -491,18 +505,20 @@ def test_failed_attempts_are_accounted_in_the_wire_line(monkeypatch) -> None:
             raise err
         return 200, body
 
-    monkeypatch.setattr(http_mod, "_request", fake)
+    monkeypatch.setattr(http_mod, "WIRE", PortPair(fake, add=http_mod.WIRE.add))
     monkeypatch.setattr(http_mod.time, "sleep", lambda _s: None)  # 退避不真等
     lines: list[str] = []
     out = worker_mod._get_with_retry(
-        WireGet("http://hub",
-        "t",
-        "/jobs/j9/payload",
-        timeout=300.0,
-        attempts=2,
-        log=lines.append,
-        wire_jid="j9",
-        wire_seg="payload"),
+        WireGet(
+            "http://hub",
+            "t",
+            "/jobs/j9/payload",
+            timeout=300.0,
+            attempts=2,
+            log=lines.append,
+            wire_jid="j9",
+            wire_seg="payload",
+        ),
     )
     assert out == body
     worker_mod._wire_flush("j9", lines.append)
@@ -534,18 +550,20 @@ def test_preempted_prefetch_attempts_are_accounted_too(monkeypatch) -> None:
             raise err
         return 200, body
 
-    monkeypatch.setattr(http_mod, "_request", fake)
+    monkeypatch.setattr(http_mod, "WIRE", PortPair(fake, add=http_mod.WIRE.add))
     lines: list[str] = []
     out = worker_mod._get_with_retry(
-        WireGet("http://hub",
-        "t",
-        "/jobs/pre/payload",
-        timeout=300.0,
-        attempts=3,
-        log=lines.append,
-        wire_jid="pre",
-        wire_seg="payload",
-        bulk_prio=BULK_P2_PREFETCH),
+        WireGet(
+            "http://hub",
+            "t",
+            "/jobs/pre/payload",
+            timeout=300.0,
+            attempts=3,
+            log=lines.append,
+            wire_jid="pre",
+            wire_seg="payload",
+            bulk_prio=BULK_P2_PREFETCH,
+        ),
     )
     assert out == body
     worker_mod._wire_flush("pre", lines.append)
@@ -565,7 +583,9 @@ def test_download_payload_records_its_segment(monkeypatch) -> None:
     """真实下载路径（`download_payload`）自带记账：成功即落 `payload=` 段。"""
     # `download_payload` 走 `_get_with_retry`（已搬 `remote.http`）⇒ 注入点在 http。
     monkeypatch.setattr(
-        http_mod, "_request", lambda *a, **kw: (200, b"p" * (512 * 1024))
+        http_mod,
+        "WIRE",
+        PortPair(lambda *a, **kw: (200, b"p" * (512 * 1024)), add=http_mod.WIRE.add),
     )
     worker_mod.download_payload("http://hub", "t", "j6", log=lambda _m: None)
     lines: list[str] = []
@@ -606,7 +626,9 @@ def test_post_result_never_rerolls_but_is_accounted(monkeypatch) -> None:
 
     # 这条断言的就是「字节进了账」⇒ `add` 必须留真的（缺省端口自己那一个），只换发送面。
     monkeypatch.setattr(JL, "WIRE", PortPair(fake, add=JL.WIRE.add))
-    status = worker_mod.post_result(PostResultSpec("http://hub", "t", "j7", {"a": 1}, log=lambda _m: None))
+    status = worker_mod.post_result(
+        PostResultSpec("http://hub", "t", "j7", {"a": 1}, log=lambda _m: None)
+    )
     assert status == 200
     assert not seen.get("allow_reroll", False)
     assert seen.get("method") == "POST"
@@ -724,19 +746,21 @@ def test_preempt_retries_do_not_consume_attempts(monkeypatch) -> None:
             raise BulkPreemptError("被 P1 挤走", bytes_read=MB)
         return 200, body
 
-    monkeypatch.setattr(http_mod, "_request", fake)
+    monkeypatch.setattr(http_mod, "WIRE", PortPair(fake, add=http_mod.WIRE.add))
     lines: list[str] = []
     out = worker_mod._get_with_retry(
-        WireGet("http://hub",
-        "t",
-        "/jobs/j9/payload",
-        timeout=300.0,
-        attempts=3,
-        log=lines.append,
-        wire_jid="j9",
-        wire_seg="payload",
-        reroll=True,
-        bulk_prio=BULK_P2_PREFETCH),
+        WireGet(
+            "http://hub",
+            "t",
+            "/jobs/j9/payload",
+            timeout=300.0,
+            attempts=3,
+            log=lines.append,
+            wire_jid="j9",
+            wire_seg="payload",
+            reroll=True,
+            bulk_prio=BULK_P2_PREFETCH,
+        ),
     )
     assert out == body
     assert calls["n"] == 6, f"抢占被当成失败了（挤 5 次后应第 6 次才真传）：{calls['n']}"
@@ -754,19 +778,21 @@ def test_preempt_budget_is_capped_and_still_raises_preempt_error(monkeypatch) ->
         calls["n"] += 1
         raise BulkPreemptError("被 P1 挤走", bytes_read=1024)
 
-    monkeypatch.setattr(http_mod, "_request", fake)
+    monkeypatch.setattr(http_mod, "WIRE", PortPair(fake, add=http_mod.WIRE.add))
     lines: list[str] = []
     with pytest.raises(BulkPreemptError):
         worker_mod._get_with_retry(
-            WireGet("http://hub",
-            "t",
-            "/jobs/j10/payload",
-            timeout=300.0,
-            attempts=3,
-            log=lines.append,
-            wire_jid="j10",
-            wire_seg="payload",
-            bulk_prio=BULK_P2_PREFETCH),
+            WireGet(
+                "http://hub",
+                "t",
+                "/jobs/j10/payload",
+                timeout=300.0,
+                attempts=3,
+                log=lines.append,
+                wire_jid="j10",
+                wire_seg="payload",
+                bulk_prio=BULK_P2_PREFETCH,
+            ),
         )
     assert calls["n"] == worker_mod.WIRE_PREEMPT_MAX + 1, calls
     # G4 的对账口径：wire 行的 `preempt=N` 与日志里的「挤走」行数**恒等**
@@ -786,18 +812,20 @@ def test_real_failures_still_consume_attempts_after_preempts(monkeypatch) -> Non
             raise BulkPreemptError("被 P1 挤走", bytes_read=0)
         return 500, b"boom"
 
-    monkeypatch.setattr(http_mod, "_request", fake)
+    monkeypatch.setattr(http_mod, "WIRE", PortPair(fake, add=http_mod.WIRE.add))
     # 同上：2 次挤走 + 2 次真失败中间的退避（2s/4s）不用真等。
     monkeypatch.setattr(http_mod.time, "sleep", lambda _s: None)
     with pytest.raises(RetryableError):
         worker_mod._get_with_retry(
-            WireGet("http://hub",
-            "t",
-            "/jobs/j11/payload",
-            timeout=60.0,
-            attempts=2,
-            log=lambda _m: None,
-            bulk_prio=BULK_P2_PREFETCH),
+            WireGet(
+                "http://hub",
+                "t",
+                "/jobs/j11/payload",
+                timeout=60.0,
+                attempts=2,
+                log=lambda _m: None,
+                bulk_prio=BULK_P2_PREFETCH,
+            ),
         )
     assert calls["n"] == 4, f"2 次挤走 + 2 次真实尝试：{calls['n']}"
 
@@ -848,17 +876,21 @@ def _segment_seconds(line: str, seg: str) -> float:
 def test_segment_seconds_exclude_the_queue_wait(monkeypatch) -> None:
     """下载段账 = **纯传输**（排队归调度账 `wait=` / `排队 … 才拿到单通道`）。"""
     th = _hold_slot_for(0.3, monkeypatch)
-    monkeypatch.setattr(http_mod, "_request", lambda *a, **kw: (200, b"p" * 128))
+    monkeypatch.setattr(
+        http_mod, "WIRE", PortPair(lambda *a, **kw: (200, b"p" * 128), add=http_mod.WIRE.add)
+    )
     t0 = time.time()
     out = worker_mod._get_with_retry(
-        WireGet("http://hub",
-        "t",
-        "/jobs/jq/payload",
-        timeout=60.0,
-        attempts=1,
-        log=lambda _m: None,
-        wire_jid="jq",
-        wire_seg="payload"),
+        WireGet(
+            "http://hub",
+            "t",
+            "/jobs/jq/payload",
+            timeout=60.0,
+            attempts=1,
+            log=lambda _m: None,
+            wire_jid="jq",
+            wire_seg="payload",
+        ),
     )
     wall = time.time() - t0
     th.join(5)
@@ -881,21 +913,25 @@ def test_queue_log_label_carries_the_priority(monkeypatch) -> None:
     worker_mod._WIRE.clear()
     worker_mod._BULK.reset()
     th = _hold_slot_for(1.05, monkeypatch)  # >1.0s 才触发 `slot()` 的「排队」日志（既有阈值）
-    monkeypatch.setattr(http_mod, "_request", lambda *a, **kw: (200, b"p" * 16))
+    monkeypatch.setattr(
+        http_mod, "WIRE", PortPair(lambda *a, **kw: (200, b"p" * 16), add=http_mod.WIRE.add)
+    )
     logs: list[str] = []
     prev_log = worker_mod._BULK._log
     worker_mod.set_bulk_log(logs.append)
     try:
         worker_mod._get_with_retry(
-            WireGet("http://hub",
-            "t",
-            "/jobs/jp/payload",
-            timeout=60.0,
-            attempts=1,
-            log=lambda _m: None,
-            wire_jid="prefetch",
-            wire_seg="payload",
-            bulk_prio=BULK_P2_PREFETCH),
+            WireGet(
+                "http://hub",
+                "t",
+                "/jobs/jp/payload",
+                timeout=60.0,
+                attempts=1,
+                log=lambda _m: None,
+                wire_jid="prefetch",
+                wire_seg="payload",
+                bulk_prio=BULK_P2_PREFETCH,
+            ),
         )
     finally:
         worker_mod.set_bulk_log(prev_log)
@@ -919,16 +955,20 @@ def test_queue_wait_is_attributed_by_jid(monkeypatch) -> None:
         return real_slot(*a, **kw)
 
     monkeypatch.setattr(worker_mod._BULK, "slot", _slow_slot)
-    monkeypatch.setattr(http_mod, "_request", lambda *a, **kw: (200, b"p" * 16))
+    monkeypatch.setattr(
+        http_mod, "WIRE", PortPair(lambda *a, **kw: (200, b"p" * 16), add=http_mod.WIRE.add)
+    )
     worker_mod._get_with_retry(
-        WireGet("http://hub",
-        "t",
-        "/jobs/jp/payload",
-        timeout=60.0,
-        attempts=1,
-        log=lambda _m: None,
-        wire_jid="prefetch",
-        wire_seg="payload"),
+        WireGet(
+            "http://hub",
+            "t",
+            "/jobs/jp/payload",
+            timeout=60.0,
+            attempts=1,
+            log=lambda _m: None,
+            wire_jid="prefetch",
+            wire_seg="payload",
+        ),
     )
     th.join(5)
     lines: list[str] = []
@@ -944,10 +984,10 @@ def test_queue_wait_is_attributed_by_jid(monkeypatch) -> None:
 def test_result_segment_seconds_exclude_the_queue_wait(monkeypatch) -> None:
     """回传段同理（现场 `result=0.63MB/18-19s` 的主角）。"""
     th = _hold_slot_for(0.3, monkeypatch)
-    monkeypatch.setattr(
-        JL, "WIRE", PortPair(lambda *a, **kw: (200, b'{"ok":1}'), add=JL.WIRE.add)
+    monkeypatch.setattr(JL, "WIRE", PortPair(lambda *a, **kw: (200, b'{"ok":1}'), add=JL.WIRE.add))
+    status = worker_mod.post_result(
+        PostResultSpec("http://hub", "t", "jr", {"a": 1}, log=lambda _m: None)
     )
-    status = worker_mod.post_result(PostResultSpec("http://hub", "t", "jr", {"a": 1}, log=lambda _m: None))
     th.join(5)
     assert status == 200
 

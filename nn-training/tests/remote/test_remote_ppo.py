@@ -1553,7 +1553,7 @@ def test_download_retry_transient_then_success(monkeypatch, _no_sleep) -> None:
         return 200, b"payload-bytes"
 
     # 下载路径走 `_get_with_retry`（已搬 `remote.http`）⇒ 注入点在 http（S4 第五步）。
-    monkeypatch.setattr(http_mod, "_request", fake_request)
+    monkeypatch.setattr(http_mod, "WIRE", PortPair(fake_request))
     out = worker_mod.download_payload("http://hub", "t", "jid1", log=lambda _m: None)
     assert out == b"payload-bytes"
     assert calls == ["/jobs/jid1/payload"] * 2
@@ -1566,14 +1566,14 @@ def test_download_4xx_is_deterministic(monkeypatch, _no_sleep) -> None:
         calls.append(spec.path)
         return 404, b"not found"
 
-    monkeypatch.setattr(http_mod, "_request", fake_request)
+    monkeypatch.setattr(http_mod, "WIRE", PortPair(fake_request))
     with pytest.raises(ProtocolError, match="404"):
         worker_mod.download_code("http://hub", "t", "jid1", log=lambda _m: None)
     assert len(calls) == 1  # 4xx 确定性拒绝：不重试
 
 
 def test_download_exhausted_raises_retryable(monkeypatch, _no_sleep) -> None:
-    monkeypatch.setattr(http_mod, "_request", lambda *_a, **_k: (500, b"x"))
+    monkeypatch.setattr(http_mod, "WIRE", PortPair(lambda *_a, **_k: (500, b"x")))
     with pytest.raises(RetryableError, match="重试 3 次"):
         worker_mod.download_payload("http://hub", "t", "jid1", attempts=3, log=lambda _m: None)
 

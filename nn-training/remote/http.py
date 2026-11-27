@@ -46,6 +46,7 @@ from typing import Any
 from common import net_http
 from common.errors import NET_ERRORS as _BASE_NET_ERRORS
 from common.logutil import tag_logger
+from common.ports import PortPair
 from common.protocol import (
     AUTH_HEADER,
     ROLE_HEADER,
@@ -137,6 +138,7 @@ __all__ = [
 #: 放宽到 12s 让那一次有机会排队完成；配套 `_tries=1` ⇒ 最坏阻塞与旧行为持平。
 #: ⚠ 放宽的那一次**不进 P0 延迟分位表**（`bulk_sched.control(sample=False)`），理由见那里。
 CONTROL_TIMEOUT_BULK_FACTOR = 2.0
+
 
 class ProxyOpeners:
     """显式 ProxyHandler 的 opener：**懒建一次，之后一直复用**（P0-5，2026-11-21）。
@@ -362,9 +364,7 @@ def _read_body(
                     slow_streak += 1
                     if slow_streak >= WIRE_REROLL_PROBES:
                         # 累计口径（`offset + len(buf)`）+ 本段字节（`partial`）：调用方据此续传与记账。
-                        raise WireSlowError(
-                            offset + len(buf), rate, remain, partial=bytes(buf)
-                        )
+                        raise WireSlowError(offset + len(buf), rate, remain, partial=bytes(buf))
                 else:
                     slow_streak = 0
         if total_timeout is not None and now - t0 > total_timeout:
@@ -581,9 +581,7 @@ def _request(spec: WireRequest) -> tuple[int, bytes]:
     if _widened:
         sock_timeout = sock_timeout * CONTROL_TIMEOUT_BULK_FACTOR
     # 控制面标记（P0）：命中即让 bulk 在分片间隙让路；控制面自己**不进** bulk 队列。
-    ctl = (
-        _BULK.control(label=path, sample=not _widened) if control_path(path) else nullcontext()
-    )
+    ctl = _BULK.control(label=path, sample=not _widened) if control_path(path) else nullcontext()
     # B2：控制面走连接池（省每请求一次 TLS 握手 / 建连）。**三个条件同时成立**才走池：
     #   ① 池开着；② 这条是控制面（`control_path`）；③ **非回环**（本机 hub 走 net_http.urlopen，
     #   绕代理是它的既有语义，不能改）。bulk（大 body）永远不进池。
@@ -637,6 +635,12 @@ def _request(spec: WireRequest) -> tuple[int, bytes]:
 
 
 # ---- 新调度面（2026-09-22，plan/transfer-scheduling）：peek / priority / claim ----
+
+#: 出站线路端口（P0-8，2026-11-28）：`_attempt_once` 只碰这个对象。
+#: 测试打 `remote.http.WIRE`（公开名）来替掉「怎么发」；传输核心（`_request` 本体）仍是
+#: 唯一的实现，端口只是它的具名入口。
+WIRE: PortPair = PortPair(request=_request, add=_wire_add)
+
 
 def _sched_headers(worker_id: str, *, role: str = ROLE_ONLINE) -> dict[str, str]:
     """新面的公共头：worker 身份（必须） + 归属角色（离线盘才带）。
@@ -726,19 +730,17 @@ class _RetryPlan:
     error: BaseException | None = None
 
 
-def _attempt_once(
-    spec: WireGet, *, parts_len: int, allow_reroll: bool, t_req: float
-) -> _Attempt:
+def _attempt_once(spec: WireGet, *, parts_len: int, allow_reroll: bool, t_req: float) -> _Attempt:
     """一拍：占 bulk 槽位 + 发一次请求；异常原样收进 `_Attempt`（不分诊、不抛）。"""
     bulk_prio = spec.bulk_prio
     t_xfer = t_req
     try:
         # label 带优先级（S3a/W0）：现场日志里 `bulk payload/P1` 与 `bulk payload/P2` 一眼可分
-        #（否则「排队 3.9s」到底压在关键下载还是无害预取上，结构上判不出来）。
+        # （否则「排队 3.9s」到底压在关键下载还是无害预取上，结构上判不出来）。
         with _BULK.slot(bulk_prio, label=f"{spec.wire_seg or spec.path}/{bulk_prio}") as _tok:
             t_xfer = time.time()  # ★ 排队结束、开传那一刻
             try:
-                status, body = _request(
+                status, body = WIRE.request(
                     WireRequest(
                         spec.base_url,
                         spec.token,
@@ -763,9 +765,7 @@ def _attempt_once(
     return _Attempt(status, body, 0, t_req, t_xfer)
 
 
-def _plan_after(
-    spec: WireGet, state: _RetryState, att: _Attempt, parts: bytearray
-) -> _RetryPlan:
+def _plan_after(spec: WireGet, state: _RetryState, att: _Attempt, parts: bytearray) -> _RetryPlan:
     """把一拍的观测翻成 `_RetryPlan`：**唯一**做决策与分支记账的地方。
 
     顺序是契约（差分逐条钉住）：preempt → failed → 日志；reroll → 续传 → 两笔账 → 日志；
@@ -804,8 +804,7 @@ def _plan_preempt(
                 new,
                 bytes(parts),
                 log_lines=(
-                    f"{label} —— 立即重排"
-                    f"（preempt {preempts}/{WIRE_PREEMPT_MAX}；不消耗重试预算）",
+                    f"{label} —— 立即重排（preempt {preempts}/{WIRE_PREEMPT_MAX}；不消耗重试预算）",
                 ),
             )
         return _RetryPlan(
@@ -878,9 +877,7 @@ def _plan_reroll(
     )
 
 
-def _plan_settle(
-    spec: WireGet, state: _RetryState, att: _Attempt, parts: bytearray
-) -> _RetryPlan:
+def _plan_settle(spec: WireGet, state: _RetryState, att: _Attempt, parts: bytearray) -> _RetryPlan:
     """非异常结果：交付（含 Range 合并）或按 4xx / 瞬时失败给出下一步。"""
     path = spec.path
     wire_jid = spec.wire_jid
@@ -907,7 +904,7 @@ def _plan_settle(
         # 两个口径分开（2026-09-25）：`elapsed`（墙钟，含排队）只喂 `_note_rate`（保守侧）；
         # 段账用**纯传输**秒数 —— 否则与 hub 侧「响应发送完成 … in Xs」无法对账。
         elapsed = time.time() - att.t_req
-        _wire_add(wire_jid, wire_seg, len(body), time.time() - att.t_xfer)
+        WIRE.add(wire_jid, wire_seg, len(body), time.time() - att.t_xfer)
         if elapsed > 0:
             _note_rate(len(body) / elapsed, len(body))
         return _RetryPlan(
@@ -926,11 +923,7 @@ def _plan_settle(
     _wire_note_failed(
         wire_jid, len(body) if status is not None else att.got, time.time() - att.t_xfer
     )
-    last = (
-        f"HTTP {status}"
-        if status is not None
-        else repr(body.decode("utf-8", "replace")[:120])
-    )
+    last = f"HTTP {status}" if status is not None else repr(body.decode("utf-8", "replace")[:120])
     if state.attempt < spec.attempts:
         backoff = min(2**state.attempt, 8)
         return _RetryPlan(
@@ -996,14 +989,10 @@ def _get_with_retry(spec: WireGet) -> bytes:
         # 重抽只在前几次尝试上开放：**最后一次必然老老实实传完**（否则慢链路就变成
         # 「永远下不完」——6 KB/s 的坏签确实存在，重抽是赌，不能把赌注全压在赌上）。
         allow_reroll = (
-            state.reroll_ok
-            and state.attempt < spec.attempts
-            and state.rerolls < WIRE_REROLL_MAX
+            state.reroll_ok and state.attempt < spec.attempts and state.rerolls < WIRE_REROLL_MAX
         )
         t_req = time.time()  # 本次尝试的**墙钟**（含排队）：只喂 `_note_rate`（保守侧）
-        att = _attempt_once(
-            spec, parts_len=len(parts), allow_reroll=allow_reroll, t_req=t_req
-        )
+        att = _attempt_once(spec, parts_len=len(parts), allow_reroll=allow_reroll, t_req=t_req)
         plan = _plan_after(spec, state, att, parts)
         for line in plan.log_lines:
             spec.log(line)

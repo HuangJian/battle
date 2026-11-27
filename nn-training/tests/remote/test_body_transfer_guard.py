@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from common.ports import PortPair
 from common.protocol import AUTH_HEADER, RetryableError
 from hub.server import _JobStore, make_server
 from remote import http as http_mod
@@ -122,7 +123,7 @@ def test_download_payload_passes_idle_guard(monkeypatch) -> None:
         seen.update(vars(spec))
         return 200, b"payload"
 
-    monkeypatch.setattr(http_mod, "_request", fake_request)
+    monkeypatch.setattr(http_mod, "WIRE", PortPair(fake_request))
     assert worker_mod.download_payload("http://hub", "t", "jid1", log=lambda _m: None) == b"payload"
     assert seen["idle_timeout"] == worker_mod.BODY_IDLE_TIMEOUT_SEC
     assert seen["total_timeout"] == worker_mod.BODY_TOTAL_TIMEOUT_SEC
@@ -141,7 +142,7 @@ def test_stalled_download_is_loud_and_retried(monkeypatch) -> None:
             raise TimeoutError("body 停滞：45s 内没有新字节（已收 131072 bytes / 共 4848536）")
         return 200, b"payload-bytes"
 
-    monkeypatch.setattr(http_mod, "_request", fake_request)
+    monkeypatch.setattr(http_mod, "WIRE", PortPair(fake_request))
     out = worker_mod.download_payload("http://hub", "t", "jid1", log=logs.append)
     assert out == b"payload-bytes" and len(calls) == 2
     retry = [line for line in logs if "瞬时失败" in line and "停滞" in line]
@@ -153,8 +154,8 @@ def test_stalled_download_exhausts_into_retryable(monkeypatch) -> None:
     monkeypatch.setattr(worker_mod.time, "sleep", lambda _s: None)
     monkeypatch.setattr(
         http_mod,
-        "_request",
-        lambda *_a, **_k: (_ for _ in ()).throw(TimeoutError("body 停滞：45s 无新字节")),
+        "WIRE",
+        PortPair(lambda *_a, **_k: (_ for _ in ()).throw(TimeoutError("body 停滞：45s 无新字节"))),
     )
     with pytest.raises(RetryableError, match="重试 3 次"):
         worker_mod.download_payload("http://hub", "t", "jid1", attempts=3, log=lambda _m: None)

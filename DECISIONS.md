@@ -11638,3 +11638,13 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **证明**：G19 `384 / 91 → 304 / 71`（−80 次 / −20 文件）；批一 250 passed、批二 134 passed；两条证伪（宿主直调 / `WIRE` 提前绑定）各红一次；层账本、形状、LOC、doc、复用（同名 +1 已记账）、文本断言（+2 已记账）全绿。
 
 —— 全文（形状理由 / 坑 / 下一步）→ `docs/nn/engineering.md` §389
+
+## §2026-11-28-goalnn-bc-lock-same-clock（2026-11-28，BC 独占锁与进度锚共用同一次钟读数）
+
+- **背景**：`e2e/test_hold_e2e` 的「超窗后换人重领」偶发 `claim 被拒: bc_exclusive:w-bc`（单跑绿、`e2e/ -n 12` 三次绿，只在全仓满载时出现）。
+- **决定**：`LeaseBook.note_job_progress` 把自己读到的 `now` 传给 `_bc_lock_touch(job_id, at=now)`；锁文件不再自己再读一次钟。两个判据（`_lease_state` 的 BC 分支读内存锚、`bc_exclusive_owner` 读落盘锚）从此逐位同锚。
+- **被否决**：① 把 `bc_exclusive_owner` 的窗调宽（掩盖错位、真让位会迟到）；② 测试改成「等独占也清了再 claim」（把 flake 挪进测试，生产仍会在边界上错位）。
+- **违反后果**：`tests/hub/test_bc_lease_exclusive.py::test_course_lock_anchor_equals_the_progress_anchor` 用「每读一次前进 1ms」的钟钉住逐位相等 —— 谁把 `at=now` 去掉，当场红。
+- **附带**：`tests/hub/test_relay_ping_cache.py` 的单飞断言从「总次数 == 1」（在刷新落地后数）改成「挂起期间并发互斥 + 落地后载荷变新」——落地后 TTL 再到期时重刷是合法行为。
+
+—— 全文 → `docs/nn/engineering.md` §390

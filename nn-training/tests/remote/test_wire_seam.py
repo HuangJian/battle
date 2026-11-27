@@ -44,7 +44,12 @@ HOSTS = (
     ROOT / "remote" / "bc_job.py",
     ROOT / "remote" / "hub_http.py",
     ROOT / "remote" / "push_client.py",
+    # 批三：传输核心自己（`_attempt_once` 是 `_get_with_retry` 唯一发请求的地方）。
+    ROOT / "remote" / "http.py",
 )
+
+#: 「取整份字节」那一层的宿主（`FETCH.get`，不是 `WIRE.request`）：下载编排只关心字节。
+FETCH_HOSTS = (ROOT / "remote" / "download.py",)
 TIGHT = ("_request", "_wire_add")
 
 
@@ -101,12 +106,28 @@ def test_host_builds_its_port_from_its_own_primitives(path: Path) -> None:
     assert isinstance(value, ast.Call), f"{path.name} 缺 `WIRE = PortPair(…)` 组装行"
     assert ast.unparse(value.func) == "PortPair", ast.unparse(value)
     kw = {k.arg for k in value.keywords}
-    if path.name == "job_lifecycle.py":
+    if path.name in ("job_lifecycle.py", "http.py"):
+        # 这两个宿主既发请求也记传输账（`job_lifecycle` 的结果段 / `http` 的 body 段）。
         assert kw == {"request", "add"}, ast.unparse(value)
         assert {ast.unparse(k.value) for k in value.keywords} == {"_request", "_wire_add"}
     else:
-        # 其余三个宿主不写 job 行 ⇒ 只接发送面，`add` 走缺省 `_noop`（不是忘了接）。
+        # 其余宿主不写 job 行 ⇒ 只接发送面，`add` 走缺省 `_noop`（不是忘了接）。
         assert kw == {"request"}, ast.unparse(value)
+
+
+@pytest.mark.parametrize("path", FETCH_HOSTS, ids=lambda p: p.name)
+def test_fetch_host_wraps_the_whole_get_in_one_port(path: Path) -> None:
+    """`download` 的接缝是「拿到整份字节」，不是「发一次请求」——两者不能混成一个协议。"""
+    value = _module_assign(_tree(path), "FETCH")
+    assert isinstance(value, ast.Call), f"{path.name} 缺 `FETCH = FetchPair(…)` 组装行"
+    assert ast.unparse(value.func) == "FetchPair", ast.unparse(value)
+    assert {k.arg for k in value.keywords} == {"get"}, ast.unparse(value)
+    calls = [
+        ast.unparse(n.func)
+        for n in ast.walk(_tree(path))
+        if isinstance(n, ast.Call) and ast.unparse(n.func) == "_get_with_retry"
+    ]
+    assert calls == [], f"{path.name} 又直调 `_get_with_retry`：{calls}（编排层必须走 FETCH.get）"
 
 
 # ───────────────────────── 2. 调用时解析 ─────────────────────────

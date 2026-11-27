@@ -92,6 +92,35 @@ def test_bc_epoch_progress_renews_the_window_then_stale_yields(tmp_path: Path) -
     assert st.claim(LeaseSpec(JID, worker_id="cloud-2"))
 
 
+def test_course_lock_anchor_equals_the_progress_anchor(tmp_path: Path) -> None:
+    """课程独占锁的 `progress_at` 必须**逐位等于**内存进度锚（同一次钟读数）。
+
+    两个判据读两个存储：`_lease_state` 的 BC 分支读内存 `_last_progress`，
+    `bc_exclusive_owner` 读落盘的 `bc-exclusive.json`。各自读一次钟就够在窗边界上错开
+    —— 租约先过期、独占还挡着 ⇒ `e2e/test_hold_e2e` 的「超窗后换人重领」偶发被
+    `bc_exclusive:` 拒（2026-11-28 全量门禁）。这条把「同一个锚」钉成可执行判据。
+    """
+    import json
+
+    class _Ticking(_Clock):
+        """每读一次前进 1ms —— 判据是「两次读数是否相等」，固定钟测不出来。"""
+
+        def __call__(self) -> float:
+            self.t += 0.001
+            return self.t
+
+    clock = _Ticking()
+    st = _store(tmp_path, clock)
+    st.publish(JID, _manifest(), b"PKfake")
+    assert st.claim(LeaseSpec(JID, worker_id="cloud-1"))
+    st.note_job_progress(JID)  # 一次 epoch 回传（内部自取钟）
+    anchor = st.job_progress_at(JID)
+    locks = list(tmp_path.rglob("bc-exclusive.json"))
+    assert len(locks) == 1, locks
+    rec = json.loads(locks[0].read_text(encoding="utf-8"))
+    assert float(rec["progress_at"]) == anchor, (rec, anchor)
+
+
 def test_course_lock_survives_hub_and_trainer_restart(tmp_path: Path) -> None:
     """hub 重启（内存租约全丢）+ trainer 重启（同课新 job）都不破坏独占（2026-11-12 用户口径）。"""
     clock = _Clock()

@@ -174,11 +174,20 @@ def test_expired_payload_is_served_then_refreshed_single_flight(
     for _ in range(3):
         status, body = _get(hub_port, f"/relay/{node}/v1/ping")
         assert status == 200 and json.loads(body)["v"] == 1, body
-    assert len(seen) == 1, (seen, id(relay), id(relay._boxes.get(node)), relay._boxes[node].ping_busy)
+    assert len(seen) == 1, (
+        seen,
+        id(relay),
+        id(relay._boxes.get(node)),
+        relay._boxes[node].ping_busy,
+    )
 
+    # 单飞的契约是「**同时**只有一个在飞」，不是「一辈子只刷一次」：
+    # 刷新落地后 TTL 再到期时重刷是合法行为（旧判据在落地后又数了一次总次数，
+    # 2026-11-28 全量门禁偶发 `seen==2` 假红）。并发互斥由上一段（177）钉住，
+    # 这里只钉「挂着的那个确实是单飞持有者」与「落地后载荷变新」。
+    assert relay.ping_busy_of(node) is True, "刷新还没返回，单飞标记却已放开"
     release.set()
     assert _wait_payload(relay, node, 2), relay.ping_snapshot(node)
-    assert len(seen) == 1, (seen, id(relay), id(relay._boxes.get(node)), relay._boxes[node].ping_busy)
     # 刷新用的等待上限比调用方预算（3s）宽得多 —— 它不挡任何人，给足一个长轮询周期
     assert seen[0][0] == "GET" and seen[0][1] == "/v1/ping" and seen[0][2] > 20.0, seen[0]
 
