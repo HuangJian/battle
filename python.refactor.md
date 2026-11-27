@@ -2255,3 +2255,8 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > 四段（`_burn_input` + `_BurnInput` / `_burn_note` / `_burn_notify` / `_burn_halt`；
 > 三条早退副作用原样保留，notify 与 halt 分家）；9 组场景差分 0，存量 17 文件 / 18 → 16 / 17
 > （engineering §382）。
+
+> 2026-11-27 第四十五格：`remote/plan_handoff._eval_job_builder` 173 → 61 + 落点/落地/搬迁三段
+> （`_eval_scratch_layout` 62 / `_eval_land_weights` 21 / `_eval_relocate_weights` 44；
+> 落点缓存收进 `_EvalLayout`（`Any` 9 → 8），`CloudEvalSpec(` 唯一装配点未动）；10 组场景差分 0，
+> 存量 16 文件 / 17 → 16 / 16（engineering §383）。

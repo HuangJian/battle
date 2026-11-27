@@ -29,6 +29,36 @@
 
 ---
 
+## §383 分诊第四十五格：`remote/plan_handoff._eval_job_builder` 173 → 61 + 落点/落地/搬迁三段（2026-11-27）
+
+`_eval_job_builder` 是个工厂：`state` 缓存 + 三个闭包（`_layout` 解析并安装 scratch、
+`_land_weights` 把 delta 容器换成整份、`build` 组装 `CloudEvalSpec`）。三段的失败模式互不相同
+（挂载点不返回 / delta 缺基准 / 清理安装超界），却都挤在同一个 173 行工厂里。
+
+| 段 | 行数 | 职责 |
+|---|---:|---|
+| `_eval_job_builder` | 61 | 落点载体 + `_layout` 一次性包装 + `build` 组装 spec |
+| `_EvalLayout` | 5 | 落点缓存的载体（`layout` / `resolved`） |
+| `_eval_scratch_layout` | 62 | 解析/安装 scratch（两处 `call_bounded` + 回退日志） |
+| `_eval_land_weights` | 21 | delta → 整份（旁路缓存；失败只丢这一轮读数） |
+| `_eval_relocate_weights` | 44 | 上一轮回收 + 权重换本地盘；失败降档本段 |
+
+**关键选择**：`_layout` 的缓存语义原样保留 —— `None`（回退原地）也必须被缓存，否则每轮各等
+一次注定超界的上界；载体 `_EvalLayout` 用 `resolved` 区分「没解析」与「解析成回退」
+（`dict[str, Any]` 换成这个载体后本文件 `Any` 9 → 8，`any_baseline.json` 同步下调）。
+`_eval_relocate_weights` 失败时把 `holder.layout` 清空（段降档）；返回值 `None` 与「无需搬迁」
+共用一条路径。`CloudEvalSpec(` 仍是全文件**唯一**装配点（`test_cloud_eval_spec` 的 AST 守卫）。
+
+**证明**：10 组场景逐字段比对返回 spec（weights/eval_jsonl/ts_root/work_dir/course_fp/
+ts_code_sha256/slots/game_timeout_sec）、归一化日志、`call_bounded` 名字序列 ⇒ **0 差异**：
+happy（两轮复用落点）/ 无 TS 目录 / `open_scratch` 抛 `ProtocolError` / 落点解析超界 /
+TS 树装不过去 / TS 树抛（异常原样外泄，与旧版一致）/ 回收失败降档 + 下一轮不再等 /
+安装返回 False / 安装超界 / 权重是 delta 且缺基准。
+
+**守卫**：定向 76 passed（交接面闭集 / spec 装配 AST / 引擎侧转发 / scratch e2e / Any 预算 /
+shape / reuse）；代码行 808 → 823；`Any` 9 → 8（`any_baseline.json` 下调）；存量
+**16 文件 / 17 → 16 / 16**（本文件只剩 `open_run_context`）。
+
 ## §382 分诊第四十四格：`worker/loop_guards_leg._kickstart_burn` 171 → 50 + 读数/落账/提示/停腿四段（2026-11-27）
 
 `_kickstart_burn` 原来是「三条前置早退 → 解析参照物 → 判定 → 状态转移落账 → notify/halt

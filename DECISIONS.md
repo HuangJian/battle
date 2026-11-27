@@ -11465,3 +11465,22 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：9 组场景逐字段 **0 差异**（返回码 / 日志 / 账本事件 / 云机达令 / 收工原因 /
   streak / 两个一次性标志）；定向 44 passed；存量 17 文件 / 18 → 16 / 17；全量 pygate 绿。
   全文 → `docs/nn/engineering.md` §382。
+
+## §2026-11-27-plan-handoff-eval-builder-seams
+
+- **背景**：`remote/plan_handoff._eval_job_builder` 173 行的工厂里同时住着 scratch 落点解析
+  （两处 `call_bounded` + 三种回退成因）、delta → 整份权重落地、逐轮搬迁与段降档；三段的
+  失败模式不同，读日志时却分不出哪一段在说话。
+
+- **决定**：拆 `_eval_scratch_layout`（62）/ `_eval_land_weights`（21）/
+  `_eval_relocate_weights`（44，失败清 `holder.layout`）；落点缓存收进 `_EvalLayout`
+  （`resolved` 区分「没解析」与「解析成回退」），工厂只留包装与 `CloudEvalSpec` 组装（61）。
+
+- **被否决**：把缓存也搬进 `_eval_scratch_layout` —— 工厂是唯一持有落点载体的地方；
+  让 helper 返回哨兵对象会把「回退」与「未解析」混成同一条路径。
+  另：`dict[str, Any]` 载体被 `test_any_budget` 挡下（9 → 13）⇒ 换 `_EvalLayout`，
+  顺手把本文件 `Any` 降到 8 并下调基线。
+
+- **验证**：10 组场景逐字段 **0 差异**（spec 全字段 / 归一化日志 / `call_bounded` 名字序列；
+  含异常原样外泄与段降档后不再等上界）；定向 76 passed；代码行 808 → 823；`Any` 9 → 8；
+  存量 16 文件 / 17 → 16 / 16；全量 pygate 绿。全文 → `docs/nn/engineering.md` §383。

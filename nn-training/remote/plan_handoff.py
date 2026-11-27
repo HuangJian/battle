@@ -1095,6 +1095,147 @@ def _eval_round_done(ctx: RunContext) -> Callable[[int, dict], None]:
     return on_done
 
 
+@dataclass
+class _EvalLayout:
+    """本腿 scratch 落点的一次解析结果（`None` 也要缓存：回退后不再每轮各等一次上界）。"""
+
+    layout: scratch.ScratchLayout | None = None
+    resolved: bool = False
+
+
+def _eval_scratch_layout(ctx: RunContext, ep: Any) -> scratch.ScratchLayout | None:
+    """解析 + 安装本腿的 scratch（一次）；`None` = 回退原地。
+
+    ★ 2026-10-14（`plan/offline-local-disk-first` §3.3 A4 / 评审 P0-3）：**裸调用一律包上界**，
+    与 rollout 腿同口径（此前常态五处 + 安装失败收尾一处全是裸调：挂在坏挂载点上的
+    `mkdir`/`open`/`write` 既不返回也不抛，而 `_layout` 跑在**主训练循环线程**上
+    —— 现场 139s 静默就是这么来的）。
+    上界只弃线程、**不杀**（`common.platform_utils.call_bounded`）⇒ 带界的那一笔等满即返回，
+    接着走**回退原地**：评估是旁路，宁可不搬，不能拖训练。
+    """
+    layout = None
+    if str(ctx.ts_tree_dir or ""):
+        t0 = time.time()
+        why = ""
+        try:
+            ok, picked = call_bounded(
+                partial(
+                    scratch.open_scratch,
+                    ctx.store.root,
+                    # 本轮局数 = 关数 × 种子数（`offline_eval.eval_pairs` 同一口径）；
+                    # eval 单局产出 ~3.4KB ⇒ 需求极小，判据只有容量一条（速度闸已删）。
+                    need_bytes=scratch.need_bytes_for(
+                        max(1, len(ep.stages) * ep.n_seeds), scratch.SCRATCH_EST_EVAL_BYTES
+                    ),
+                    log=ctx.log,
+                ),
+                game_watch.DRAIN_CEILING_SEC,
+                name="eval-scratch-pick",
+            )
+        except ProtocolError as e:  # env 显式指定但不可写 ⇒ 评估腿记一笔、走原地
+            ctx.log(f"WARN 云机评估 scratch 落点不可用（{e}）——本轮评估走原地")
+            ok, picked = True, None
+        if not ok:
+            why = f"落点解析超界＞{game_watch.DRAIN_CEILING_SEC:g}s"
+            ctx.log(
+                f"WARN 云机评估 scratch 落点解析超界（{game_watch.DRAIN_CEILING_SEC:g}s 内没返回）"
+                "——本轮评估走原地（评估是旁路：宁可不搬，不拖训练）"
+            )
+            picked = None
+        layout = picked
+        if layout is not None:
+            src = Path(str(ctx.ts_tree_dir))
+            ok_tree, tree_ok = call_bounded(
+                partial(scratch.install_tree, src, layout.ts_for(src.name), log=ctx.log),
+                game_watch.SCAN_CEILING_SEC,
+                name="eval-scratch-ts",
+            )
+            if not src.is_dir() or not ok_tree or not tree_ok:
+                why = (
+                    f"TS 树装不过去（≤{game_watch.SCAN_CEILING_SEC:g}s）"
+                    if src.is_dir()
+                    else "TS 树源目录不在"
+                )
+                ctx.log("WARN 云机评估 TS 树换本地盘失败或超界——本轮评估回落原地（不搬）")
+                layout = None
+        where = (
+            f"本地:{layout.job}"
+            if layout is not None
+            else f"网络(回退原地｜成因={why or 'ts_tree_dir 未配置'})"
+        )
+        ctx.log(f"[eval-cloud] 落点={where}｜建布局 {time.time() - t0:.2f}s")
+    return layout
+
+
+def _eval_land_weights(ctx: RunContext, it: int) -> Path:
+    """本轮评估要用的权重 = **整份**（store 里那份可能是 delta 容器）。空路径 = 本轮不评。
+
+    ★ 2026-10-16（云机 eval 整轮 `JSON Parse error: Unexpected identifier "BWD1"` 的根因，
+    `docs/nn/remote-transport.md` §101）：离线段逐轮回传走 R1 —— `it-NNN/weights.json` 里
+    装的是 int16 delta 容器（`BWD1`，`remote/weights_delta`），hub 原样落位。TS 导出器是
+    `JSON.parse` 的（`tools/sim/export-eval-game.ts:1418`）⇒ 每局都撞在魔数上（rc=1），
+    serve-pool 回退到熔断阈值后整轮 0 读数。rollout 腿在 `plan_run._run_iteration` 里
+    **先落地再装载**，eval 腿此前没这一步（§98 的接线点名单漏了这一处）。
+
+    用**旁路缓存**（`standard_weights_copy`）：产物本体保持 delta ⇒ deliver 腿发送的字节、
+    hub 侧 duplicate/conflict 判据、账本指纹**全都不变**，而这里拿到的是能直接装载的整份
+    ——也顺带让 `wver`（字节 sha256）与本机/节点评的同一 W(it) 真正逐位相同。
+    基准逐字节找不到 ⇒ 记一行并交回空路径（评估是旁路：缺基准只丢这一轮读数，不拖训练）。
+    """
+    raw = ctx.store.weights_path(it)
+    try:
+        return weights_standard.standard_weights_copy(raw, ctx.store.root, log=ctx.log)
+    except ProtocolError as e:
+        ctx.log(f"WARN 云机评估 it{it} 的权重是 delta 容器且基准不在本机（{e}）——本轮不评")
+        return Path("")
+
+
+def _eval_relocate_weights(
+    ctx: RunContext,
+    holder: _EvalLayout,
+    layout: scratch.ScratchLayout | None,
+    it: int,
+    weights: Path,
+) -> tuple[Path, Path, str] | None:
+    """把当轮权重与 TS 根换到节点本地盘；返回 `(weights, work_dir, ts_root)`，`None` = 原地。
+
+    任一清理/安装步骤超界或失败 ⇒ **本段**降级到回退原地（`state["layout"] = None`：不再每轮
+    各付一次注定等满的上界），并响亮一行。
+    """
+    if layout is None or not str(weights):
+        return None
+    # 上一轮的 game 目录/权重当场回收（占用有界；轮与轮串行 ⇒ 不会删到在跑的）。
+    # ★ A4：这三处也包上界。
+    ok_c1, _ = call_bounded(
+        partial(scratch.clear_dir, layout.eval_dir),
+        game_watch.DRAIN_CEILING_SEC,
+        name="eval-scratch-clear",
+    )
+    ok_c2, _ = call_bounded(
+        partial(scratch.clear_dir, layout.eval_weights_for(int(it)).parent),
+        game_watch.DRAIN_CEILING_SEC,
+        name="eval-scratch-clear-w",
+    )
+    dst_w = layout.eval_weights_for(int(it))
+    ok_ins, ins_ok = call_bounded(
+        partial(scratch.install_file, weights, dst_w, log=ctx.log),
+        game_watch.DRAIN_CEILING_SEC,
+        name="eval-scratch-weights",
+    )
+    if ok_c1 and ok_c2 and ok_ins and ins_ok:
+        # 逐字节拷贝 ⇒ key16/wver 不变（账本可配对）
+        return dst_w, layout.eval_dir, str(layout.ts_for(Path(str(ctx.ts_tree_dir)).name))
+    # 旧代码在这里还有第 6 个裸调用（`clear_dir(layout.eval_dir)` 清半截拷贝）。
+    # 现在**不再清**：降级后本段不会再碰这个 scratch，留下的至多是一个
+    # `install_file` 的 `.tmp-<pid>`（原子安装的子产物），段末随容器一起没。
+    ctx.log(
+        f"WARN 云机评估落点段超界或失败（≤{game_watch.DRAIN_CEILING_SEC:g}s/步）"
+        f"——本段评估回落原地（权重 {weights}）"
+    )
+    holder.layout = None
+    return None
+
+
 def _eval_job_builder(ctx: RunContext, ep: Any) -> Callable[[int], CloudEvalSpec]:
     """`it` → `run_cloud_eval` 的入参对象（**提交时才求值**：权重路径按当轮算）。
 
@@ -1110,137 +1251,26 @@ def _eval_job_builder(ctx: RunContext, ep: Any) -> Callable[[int], CloudEvalSpec
     换不过去就**逐字**走今天的行为（评估是旁路：宁可不搬，不能拖训练）。
     """
     #: 每轮 build 都重建一次（runner 串行评轮）⇒ 上一轮的 game 目录/权重当场回收，占用有界。
-    state: dict[str, Any] = {}
+    holder = _EvalLayout()
     # 可选依赖：`remote.offline_eval` 在截断的代码快照里可能整个不在（`rl` 包缺席）。
     # 这里与 `_setup_cloud_eval` 同口径延迟 import；它已在本模块的依赖闭集白名单里（L2 ⇐ L5）。
     from remote.offline_eval import CloudEvalSpec
 
-    def _layout() -> Any:
-        """解析 + 安装本腿的 scratch（一次）；`None` = 回退原地。
-
-        ★ 2026-10-14（`plan/offline-local-disk-first` §3.3 A4 / 评审 P0-3）：**裸调用一律包上界**，
-        与 rollout 腿同口径（此前常态五处 + 安装失败收尾一处全是裸调：挂在坏挂载点上的
-        `mkdir`/`open`/`write` 既不返回也不抛，而 `_layout` 跑在**主训练循环线程**上
-        —— 现场 139s 静默就是这么来的）。
-        上界只弃线程、**不杀**（`common.platform_utils.call_bounded`）⇒ 带界的那一笔等满即返回，
-        接着走**回退原地**：评估是旁路，宁可不搬，不能拖训练。
-        """
-        if "layout" in state:
-            return state["layout"]
-        layout = None
-        if str(ctx.ts_tree_dir or ""):
-            t0 = time.time()
-            why = ""
-            try:
-                ok, picked = call_bounded(
-                    partial(
-                        scratch.open_scratch,
-                        ctx.store.root,
-                        # 本轮局数 = 关数 × 种子数（`offline_eval.eval_pairs` 同一口径）；
-                        # eval 单局产出 ~3.4KB ⇒ 需求极小，判据只有容量一条（速度闸已删）。
-                        need_bytes=scratch.need_bytes_for(
-                            max(1, len(ep.stages) * ep.n_seeds), scratch.SCRATCH_EST_EVAL_BYTES
-                        ),
-                        log=ctx.log,
-                    ),
-                    game_watch.DRAIN_CEILING_SEC,
-                    name="eval-scratch-pick",
-                )
-            except ProtocolError as e:  # env 显式指定但不可写 ⇒ 评估腿记一笔、走原地
-                ctx.log(f"WARN 云机评估 scratch 落点不可用（{e}）——本轮评估走原地")
-                ok, picked = True, None
-            if not ok:
-                why = f"落点解析超界＞{game_watch.DRAIN_CEILING_SEC:g}s"
-                ctx.log(
-                    f"WARN 云机评估 scratch 落点解析超界（{game_watch.DRAIN_CEILING_SEC:g}s 内没返回）"
-                    "——本轮评估走原地（评估是旁路：宁可不搬，不拖训练）"
-                )
-                picked = None
-            layout = picked
-            if layout is not None:
-                src = Path(str(ctx.ts_tree_dir))
-                ok_tree, tree_ok = call_bounded(
-                    partial(scratch.install_tree, src, layout.ts_for(src.name), log=ctx.log),
-                    game_watch.SCAN_CEILING_SEC,
-                    name="eval-scratch-ts",
-                )
-                if not src.is_dir() or not ok_tree or not tree_ok:
-                    why = (
-                        f"TS 树装不过去（≤{game_watch.SCAN_CEILING_SEC:g}s）"
-                        if src.is_dir()
-                        else "TS 树源目录不在"
-                    )
-                    ctx.log("WARN 云机评估 TS 树换本地盘失败或超界——本轮评估回落原地（不搬）")
-                    layout = None
-            where = (
-                f"本地:{layout.job}"
-                if layout is not None
-                else f"网络(回退原地｜成因={why or 'ts_tree_dir 未配置'})"
-            )
-            ctx.log(f"[eval-cloud] 落点={where}｜建布局 {time.time() - t0:.2f}s")
-        state["layout"] = layout
-        return layout
-
-    def _land_weights(it: int) -> Path:
-        """本轮评估要用的权重 = **整份**（store 里那份可能是 delta 容器）。空路径 = 本轮不评。
-
-        ★ 2026-10-16（云机 eval 整轮 `JSON Parse error: Unexpected identifier "BWD1"` 的根因，
-        `docs/nn/remote-transport.md` §101）：离线段逐轮回传走 R1 —— `it-NNN/weights.json` 里
-        装的是 int16 delta 容器（`BWD1`，`remote/weights_delta`），hub 原样落位。TS 导出器是
-        `JSON.parse` 的（`tools/sim/export-eval-game.ts:1418`）⇒ 每局都撞在魔数上（rc=1），
-        serve-pool 回退到熔断阈值后整轮 0 读数。rollout 腿在 `plan_run._run_iteration` 里
-        **先落地再装载**，eval 腿此前没这一步（§98 的接线点名单漏了这一处）。
-
-        用**旁路缓存**（`standard_weights_copy`）：产物本体保持 delta ⇒ deliver 腿发送的字节、
-        hub 侧 duplicate/conflict 判据、账本指纹**全都不变**，而这里拿到的是能直接装载的整份
-        ——也顺带让 `wver`（字节 sha256）与本机/节点评的同一 W(it) 真正逐位相同。
-        基准逐字节找不到 ⇒ 记一行并交回空路径（评估是旁路：缺基准只丢这一轮读数，不拖训练）。
-        """
-        raw = ctx.store.weights_path(it)
-        try:
-            return weights_standard.standard_weights_copy(raw, ctx.store.root, log=ctx.log)
-        except ProtocolError as e:
-            ctx.log(f"WARN 云机评估 it{it} 的权重是 delta 容器且基准不在本机（{e}）——本轮不评")
-            return Path("")
+    def _layout() -> scratch.ScratchLayout | None:
+        """本腿的 scratch 只解析一次（成功与回退都缓存，回退后不再每轮各等一次上界）。"""
+        if not holder.resolved:
+            holder.layout = _eval_scratch_layout(ctx, ep)
+            holder.resolved = True
+        return holder.layout
 
     def build(it: int) -> CloudEvalSpec:
         layout = _layout()
-        weights = _land_weights(int(it))
+        weights = _eval_land_weights(ctx, int(it))
         ts_root = ctx.ts_tree_dir or ""
         work_dir = ctx.work_dir / "eval-work"
-        if layout is not None and str(weights):
-            # 上一轮的 game 目录/权重当场回收（占用有界；轮与轮串行 ⇒ 不会删到在跑的）。
-            # ★ A4：这三处也包上界；任一步超界/失败 ⇒ **本段**降级到回退原地
-            # （`state["layout"] = None`：不再每轮各付一次注定等满的上界），并响亮一行。
-            ok_c1, _ = call_bounded(
-                partial(scratch.clear_dir, layout.eval_dir),
-                game_watch.DRAIN_CEILING_SEC,
-                name="eval-scratch-clear",
-            )
-            ok_c2, _ = call_bounded(
-                partial(scratch.clear_dir, layout.eval_weights_for(int(it)).parent),
-                game_watch.DRAIN_CEILING_SEC,
-                name="eval-scratch-clear-w",
-            )
-            dst_w = layout.eval_weights_for(int(it))
-            ok_ins, ins_ok = call_bounded(
-                partial(scratch.install_file, weights, dst_w, log=ctx.log),
-                game_watch.DRAIN_CEILING_SEC,
-                name="eval-scratch-weights",
-            )
-            if ok_c1 and ok_c2 and ok_ins and ins_ok:
-                weights = dst_w  # 逐字节拷贝 ⇒ key16/wver 不变（账本可配对）
-                work_dir = layout.eval_dir
-                ts_root = str(layout.ts_for(Path(str(ctx.ts_tree_dir)).name))
-            else:
-                # 旧代码在这里还有第 6 个裸调用（`clear_dir(layout.eval_dir)` 清半截拷贝）。
-                # 现在**不再清**：降级后本段不会再碰这个 scratch，留下的至多是一个
-                # `install_file` 的 `.tmp-<pid>`（原子安装的子产物），段末随容器一起没。
-                ctx.log(
-                    f"WARN 云机评估落点段超界或失败（≤{game_watch.DRAIN_CEILING_SEC:g}s/步）"
-                    f"——本段评估回落原地（权重 {weights}）"
-                )
-                state["layout"] = None
+        moved = _eval_relocate_weights(ctx, holder, layout, int(it), weights)
+        if moved is not None:
+            weights, work_dir, ts_root = moved
         # 参数对象（2026-11-22 P0-3）：以前这里是一张关键字表，`CloudEvalRunner._loop` 再
         # `run_cloud_eval(**params)` 展开 —— 键名拼错要等到后台线程执行才可能被发现，取错值
         # 更是静默（`ts_code_sha256` 错 = 跨轮暖池 key 对不上、`game_timeout_sec` 错 = 丢掉
@@ -1265,6 +1295,5 @@ def _eval_job_builder(ctx: RunContext, ep: Any) -> Callable[[int], CloudEvalSpec
             game_timeout_sec=float(ctx.eval_game_timeout_sec or 0.0),
             log=ctx.log,
         )
-
 
     return build
