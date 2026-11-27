@@ -284,13 +284,21 @@ def _round_params() -> tuple[list[str], list[str]]:
     return pos, [a.arg for a in fn.args.kwonlyargs]
 
 
-def test_the_call_site_passes_exactly_the_round_interface() -> None:
-    """★ **接口双向一致**：`worker_loop` 调用点的 `JobRoundSpec(...)` 必须把 `JobRoundSpec` 的
-    **全部必填字段**逐名传齐。
+def _round_spec_calls() -> list[ast.Call]:
+    """`_round_spec` 里的 `JobRoundSpec(...)` 构造点（2026-11-26 第三十九格后的装配接缝）。"""
+    return [
+        n
+        for n in ast.walk(_func(WORKER_FILE, "_round_spec"))
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "JobRoundSpec"
+    ]
 
-    21 个入参的搬运，**漏传一个**是这一刀最可能的失误形态：运行时不一定立刻炸（只有走到那条
-    分支才 NameError），而这条断言在**提交时**就红。反向也钉住（spec 里删了必填字段而调用点
-    还在传）。位置面只剩一个：`run_one_round(spec)`。
+
+def test_the_call_site_passes_exactly_the_round_interface() -> None:
+    """★ **接口双向一致**：`worker_loop` → `_round_spec(...)` → `JobRoundSpec(...)`。
+
+    20 个入参的搬运，**漏传一个**是这一刀最可能的失误形态：运行时不一定立刻炸（只有走到那条
+    分支才 NameError），而这条断言在**提交时**就红。反向也钉住（spec 里删了必填字段而构造点
+    还在传）。装配点自 2026-11-26 起住 `_round_spec`（宿主只调它）——判据跟着接缝走，仍逐名对账。
     """
     assert _round_params() == (["spec"], []), _round_params()
     calls = [
@@ -301,11 +309,13 @@ def test_the_call_site_passes_exactly_the_round_interface() -> None:
     assert len(calls) == 1, f"`worker_loop` 里应只有一处 `{ROUND_FN}(...)`，实得 {len(calls)}"
     spec_call = calls[0].args[0] if len(calls[0].args) == 1 and not calls[0].keywords else None
     detail = ast.dump(spec_call)[:80] if isinstance(spec_call, ast.Call) else repr(spec_call)
-    assert isinstance(spec_call, ast.Call) and getattr(spec_call.func, "id", "") == "JobRoundSpec", (
-        f"实参不是唯一的 `JobRoundSpec(...)`：{detail}"
+    assert isinstance(spec_call, ast.Call) and getattr(spec_call.func, "id", "") == "_round_spec", (
+        f"实参不是唯一的 `_round_spec(...)`：{detail}"
     )
+    builders = _round_spec_calls()
+    assert len(builders) == 1, f"`_round_spec` 里应只有一处 `JobRoundSpec(...)`，实得 {len(builders)}"
     # 逐名一致（三条合成一条：本文件每条 assert 都计口径 B，不许拆着写）。
-    names = [k.arg for k in spec_call.keywords]
+    names = [k.arg for k in builders[0].keywords]
     known = {f.name for f in dataclasses.fields(JobRoundSpec)}
     required = {
         f.name
@@ -379,13 +389,9 @@ def test_run_job_is_read_as_a_value_at_the_call_site() -> None:
     （功能性证明就是那 10 处既有 patch：`test_async_result_upload.py` / `test_priority_schedule.py` /
     `test_remote_hotswap.py` / `test_soft_hold_prefetch.py` —— 它们全都还在 patch `W`）。
     """
-    calls = [
-        n
-        for n in ast.walk(_func(WORKER_FILE, "worker_loop"))
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == ROUND_FN
-    ]
-    spec_call = calls[0].args[0]
-    kw = {k.arg: k.value for k in getattr(spec_call, "keywords", [])}
+    builders = _round_spec_calls()
+    assert len(builders) == 1, f"`_round_spec` 里应只有一处 `JobRoundSpec(...)`，实得 {len(builders)}"
+    kw = {k.arg: k.value for k in builders[0].keywords}
     assert (
         "run_job_fn" in kw
         and isinstance(kw["run_job_fn"], ast.Name)

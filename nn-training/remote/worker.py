@@ -15,9 +15,10 @@
 ## 2026-11-18 收刀之后，这个模块里**还剩什么**
 
 宿主只剩三件：`run_job`（134 行，编排：建 `JobState` → 调 `remote/job_shell.py` 的相位 →
-热替换护栏 → 训练核）· `worker_loop`（196 行，轮询壳：多 hub round-robin / 停机感知 /
-空闲退出 / 回传收尾）· `main`（CLI 入口：argparse → 子进程或监督器模式），外加
-`_alive_log` / `_guard_code_and_device` / `_start_services` 等小件与**整页**显式转发门面。
+热替换护栏 → 训练核）· `worker_loop`（轮询壳：多 hub round-robin / 停机感知 / 空闲退出 /
+回传收尾，会话装配在 `_open_loop`、一轮入参在 `_round_spec`）· `main`（CLI 入口：argparse →
+子进程或监督器模式），外加 `_alive_log` / `_guard_code_and_device` / `_start_services` 等
+小件与**整页**显式转发门面。
 
 `_CODE`（`CodeSession`，会话级代码指纹）与 `make_uploader(upload=post_result)` 的调用点
 **刻意留在这里**：它们是会话级单例 / patch 接缝（`test_worker_state_contract` 与
@@ -830,6 +831,107 @@ class WorkerLoopSpec:
     log: Callable[[str], None] = _log
 
 
+@dataclass(frozen=True, kw_only=True)
+class _LoopServices:
+    """`worker_loop` 的**会话级外件**：一次装配、跨轮存活（§378）。
+
+    轮询壳自己的账（`done` / `idle_since` / 轮询计数 / `hi` / `halt_seen`）不在这里 ——
+    它们是 while 的局部状态，跟着 while 走才读得懂。这里只放「会话开一次就固定」的东西：
+    身份 / 生命周期 / 回传器 / hub 列表 / 预取暂存区表 / 让路还原账。
+    """
+
+    worker_id: str
+    life: Lifecycle
+    uploader: UploaderLike
+    hubs: list[str]
+    multi: bool
+    cache_root: Path
+    code_cache_arg: Path | None
+    pf_stores: dict[int, PrefetchStore | PayloadProcess]
+    prev_yield: tuple[float, float | None]
+    prev_p1_observer: object
+
+
+def _open_loop(spec: WorkerLoopSpec) -> _LoopServices:
+    """起一次会话的会话级服务（让路 → hub 计划 → 身份/生命周期 → 回传 → 预取表）。
+
+    顺序与拆分前逐字一致：缓存根的静默 mkdir 在身份日志之前，启动行在回传器之前。
+    """
+    log = spec.log
+    prev_yield, prev_p1_observer, pf_stores = _setup_bulk_yield(spec.bulk_yield, log)
+    hubs, multi, cache_root, code_cache_arg = hub_plan(
+        spec.hub_urls, spec.base_url, spec.work_dir, spec.cache_dir
+    )
+    worker_id, life = _start_services(
+        spec.base_url, spec.token, spec.work_dir, spec.device, spec.role, spec.once, log
+    )
+    # P2.5：`post_result` 按**调用时**解析 ⇒ patch `remote.worker.post_result` 仍生效。
+    uploader = make_uploader(
+        UploadSpec(
+            upload=post_result,
+            mode=spec.result_upload,
+            log=log,
+            record_wire=record_upload_wire,
+        )
+    )
+    return _LoopServices(
+        worker_id=worker_id,
+        life=life,
+        uploader=uploader,
+        hubs=hubs,
+        multi=multi,
+        cache_root=cache_root,
+        code_cache_arg=code_cache_arg,
+        pf_stores=pf_stores,
+        prev_yield=prev_yield,
+        prev_p1_observer=prev_p1_observer,
+    )
+
+
+def _round_spec(
+    spec: WorkerLoopSpec,
+    services: _LoopServices,
+    *,
+    base_url: str,
+    job: dict,
+    part_dir: Path,
+    pf_store: PrefetchStore | PayloadProcess | None,
+    polls_since_accept: int,
+) -> JobRoundSpec:
+    """把宿主读到的值装成**一轮**的入参（20 个关键字逐名对齐，漏传在构造时就报）。"""
+    return JobRoundSpec(
+        base_url=base_url,
+        token=spec.token,
+        job=job,
+        part_dir=part_dir,
+        # 多 hub 才分区 code_cache；`multi` 是宿主概念，本模块不收（见 job_round 文档）
+        code_cache_dir=services.code_cache_arg,
+        # R0（M0）：身份映射根（`--cache-dir` 或 work_dir，与 `blob_root.parent` 同源）
+        cache_root=services.cache_root,
+        pf_store=pf_store,
+        polls_since_accept=polls_since_accept,
+        worker_id=services.worker_id,
+        device=spec.device,
+        torch_threads=spec.torch_threads,
+        epoch_mult=spec.epoch_mult,
+        backend=spec.backend,
+        echo=spec.echo,
+        restart_argv=spec.restart_argv,
+        # 注：半离线（kind=run）腿的 `artifacts_dir` / `run_max_iters` / `run_budget_sec`
+        # 随 2026-09-25 的退休一起没了，`round` 签名里也不再有它们（见 `run_job` 注释）。
+        # 归属自报（2026-09-25）：本会话属于哪块盘 —— peek 与 claim 两条面都带它，
+        # 否则带标 worker 会在归属闸（`_JobStore._claim_locked`）上自锁。
+        role=spec.role,
+        prefetch_depth=spec.prefetch_depth,
+        prefetch_unpack=spec.prefetch_unpack,
+        uploader=services.uploader,
+        # ★ 注入点：宿主在**调用点**读 `run_job` 这个值 ⇒ patch `remote.worker.run_job`
+        #   仍生效（引用即接缝）；漏传 = 调用当场 TypeError，无兜底。
+        run_job_fn=run_job,
+        log=spec.log,
+    )
+
+
 def worker_loop(spec: WorkerLoopSpec) -> int:
     """无状态轮询主循环。返回处理的 job 数。
 
@@ -844,27 +946,12 @@ def worker_loop(spec: WorkerLoopSpec) -> int:
       （单 GPU 互挤否决项），work_dir 按 hub 索引分区（`hub0/<jid>`…），code_cache
       留共享根。异 commit job 由既有 `_CODE` 守卫转 86 + 监督器重拉。
     """
-    # 旧签名 22 参 → 一个 spec（P0-3）；下面一次展开，函数体逐字不动。
-    base_url, token, work_dir = spec.base_url, spec.token, spec.work_dir
-    device, torch_threads = spec.device, spec.torch_threads
-    epoch_mult, poll_sec = spec.epoch_mult, spec.poll_sec
-    once, echo, max_idle_sec = spec.once, spec.echo, spec.max_idle_sec
-    restart_argv, hub_urls = spec.restart_argv, spec.hub_urls
-    role, job_filter = spec.role, spec.job_filter
-    backend, prefetch_depth = spec.backend, spec.prefetch_depth
-    prefetch_mode, prefetch_unpack = spec.prefetch_mode, spec.prefetch_unpack
-    bulk_yield, result_upload = spec.bulk_yield, spec.result_upload
-    cache_dir, log = spec.cache_dir, spec.log
+    log = spec.log
+    services = _open_loop(spec)
     done = 0
-    _prev_yield, _prev_p1_observer, pf_stores = _setup_bulk_yield(bulk_yield, log)
     #: 会话级让路自适应（A2）：`--bulk-yield never` 起步就不需要它；其余档位每轮收尾复查
     #: 控制面分位数，超阈值即**就地降为 never 语义**并打一行原因（一次性、不回升）。
-    _yield_live = bulk_yield != "never"
-    # 会话级服务先起（静默的缓存根 mkdir 在它之前，日志顺序与拆分前一致）。
-    hubs, multi, _cache_root, _code_cache_arg = hub_plan(
-        hub_urls, base_url, work_dir, cache_dir
-    )
-    worker_id, life = _start_services(base_url, token, work_dir, device, role, once, log)
+    _yield_live = spec.bulk_yield != "never"
     idle_since = time.time()
     _last_alive_log = time.time()
     _polls_since_log = 0
@@ -874,24 +961,24 @@ def worker_loop(spec: WorkerLoopSpec) -> int:
     hi = 0
     # §386：停机状态感知（过渡尝试一次；halt 清除后复位，下次停机可再试）——按 hub 独立。
     halt_seen: dict[int, bool] = {}
-    # P2.5：`post_result` 按**调用时**解析 ⇒ patch `remote.worker.post_result` 仍生效。
-    uploader = make_uploader(
-        UploadSpec(
-            upload=post_result, mode=result_upload, log=log, record_wire=record_upload_wire
-        )
-    )
     try:
         while True:
-            base_url = hubs[hi]
+            base_url = services.hubs[hi]
             # work 分区（P3b C3）：多 hub 按源分区 hub0/<jid>…（分区才语义正确）；
             # 单 hub 沿用旧根（默认行为零变化）。code_cache 永远共享根。
-            part_dir = work_dir / f"hub{hi}" if multi else work_dir
-            if multi:
+            part_dir = spec.work_dir / f"hub{hi}" if services.multi else spec.work_dir
+            if services.multi:
                 part_dir.mkdir(parents=True, exist_ok=True)
             _ensure_pf_store(
-                pf_stores, hi, part_dir, prefetch_mode, prefetch_depth, prefetch_unpack, log
+                services.pf_stores,
+                hi,
+                part_dir,
+                spec.prefetch_mode,
+                spec.prefetch_depth,
+                spec.prefetch_unpack,
+                log,
             )
-            pf_store = pf_stores.get(hi)
+            pf_store = services.pf_stores.get(hi)
             try:
                 _polls_since_log += 1
                 _polls_since_accept += 1
@@ -901,29 +988,29 @@ def worker_loop(spec: WorkerLoopSpec) -> int:
                 job = acquire_job(
                     AcquireSpec(
                         base_url,
-                        token,
-                        worker_id=worker_id,
-                        role=role,  # 归属自报：本会话只领本盘的活
-                        accept=job_filter,  # 本地筛选（不发给 hub；BC 课程级 drain）
+                        spec.token,
+                        worker_id=services.worker_id,
+                        role=spec.role,  # 归属自报：本会话只领本盘的活
+                        accept=spec.job_filter,  # 本地筛选（不发给 hub；BC 课程级 drain）
                         # P2：已被别人落盘的 job（none 级）就地丢掉本地预取副本——再预取就白花带宽。
                         on_drop=(pf_store.drop if pf_store is not None else None),
                         log=log,
                     )
                 )
             except Exception as e:
-                _acquire_fails, wait_s = acquire_retry(_acquire_fails, e, poll_sec, log)
+                _acquire_fails, wait_s = acquire_retry(_acquire_fails, e, spec.poll_sec, log)
                 if wait_s > 0.0:
                     time.sleep(wait_s)
-                hi = (hi + 1) % len(hubs)
+                hi = (hi + 1) % len(services.hubs)
                 continue
             _acquire_fails = 0  # 控制面通了（无论有没有活）：连败计数归零
             _poll_halt(job, hi, halt_seen, log)
             if job is None:
-                if once:
+                if spec.once:
                     break  # --once：无 job 或已处理完都退出（冒烟/单发）
-                if max_idle_sec > 0 and time.time() - idle_since > max_idle_sec:
-                    log(f"idle > {max_idle_sec}s — exit")
-                    life.why(f"空闲超时 >{max_idle_sec:g}s")
+                if spec.max_idle_sec > 0 and time.time() - idle_since > spec.max_idle_sec:
+                    log(f"idle > {spec.max_idle_sec}s — exit")
+                    services.life.why(f"空闲超时 >{spec.max_idle_sec:g}s")
                     break
                 if time.time() - _last_alive_log > ALIVE_LOG_SEC:
                     _alive_log(
@@ -931,9 +1018,9 @@ def worker_loop(spec: WorkerLoopSpec) -> int:
                     )
                     _last_alive_log = time.time()
                     _polls_since_log = 0
-                life.tick()
-                time.sleep(poll_sec)
-                hi = (hi + 1) % len(hubs)  # 空闲也轮转：多 hub 下一个也得被问到
+                services.life.tick()
+                time.sleep(spec.poll_sec)
+                hi = (hi + 1) % len(services.hubs)  # 空闲也轮转：多 hub 下一个也得被问到
                 continue
             if job.get("halt") is True and not job.get("job_id"):
                 # 纯停机达令、无任务：不退出、继续等待（云机活着=随时可续训）。
@@ -945,42 +1032,20 @@ def worker_loop(spec: WorkerLoopSpec) -> int:
                     )
                     _last_alive_log = time.time()
                     _polls_since_log = 0
-                time.sleep(poll_sec)
-                hi = (hi + 1) % len(hubs)  # 纯停机达令也轮转
+                time.sleep(spec.poll_sec)
+                hi = (hi + 1) % len(services.hubs)  # 纯停机达令也轮转
                 continue
             idle_since = time.time()
             _polls_since_log = 0  # claim 即上报：alive 行下次只数 claim 之后的轮询，不与本行重复
             round_ = run_one_round(
-                JobRoundSpec(
+                _round_spec(
+                    spec,
+                    services,
                     base_url=base_url,
-                    token=token,
                     job=job,
                     part_dir=part_dir,
-                    # 多 hub 才分区 code_cache；`multi` 是宿主概念，本模块不收（见 job_round 文档）
-                    code_cache_dir=_code_cache_arg,
-                    # R0（M0）：身份映射根（`--cache-dir` 或 work_dir，与 `blob_root.parent` 同源）
-                    cache_root=_cache_root,
                     pf_store=pf_store,
                     polls_since_accept=_polls_since_accept,
-                    worker_id=worker_id,
-                    device=device,
-                    torch_threads=torch_threads,
-                    epoch_mult=epoch_mult,
-                    backend=backend,
-                    echo=echo,
-                    restart_argv=restart_argv,
-                    # 注：半离线（kind=run）腿的 `artifacts_dir` / `run_max_iters` / `run_budget_sec`
-                    # 随 2026-09-25 的退休一起没了，`round` 签名里也不再有它们（见 `run_job` 注释）。
-                    # 归属自报（2026-09-25）：本会话属于哪块盘 —— peek 与 claim 两条面都带它，
-                    # 否则带标 worker 会在归属闸（`_JobStore._claim_locked`）上自锁。
-                    role=role,
-                    prefetch_depth=prefetch_depth,
-                    prefetch_unpack=prefetch_unpack,
-                    uploader=uploader,
-                    # ★ 注入点：宿主在**调用点**读 `run_job` 这个值 ⇒ patch `remote.worker.run_job`
-                    #   仍生效（引用即接缝）；漏传 = 调用当场 TypeError，无兜底。
-                    run_job_fn=run_job,
-                    log=log,
                 )
             )
             if round_.uploaded:
@@ -992,17 +1057,25 @@ def worker_loop(spec: WorkerLoopSpec) -> int:
             # A2 让路自适应关闭：每轮收尾复查一次分位，判据/原因行在 `yield_self_check`。
             _yield_live = yield_self_check(_yield_live, log)
             if round_.stop:
-                life.why("hub 要求停算")
+                services.life.why("hub 要求停算")
                 return done
-            if once:
+            if spec.once:
                 # H8（review-hy）：--once 模式 job 失败必须非零退出——冒烟/单发场景
                 # 退出码 0 会静默掩盖失败（smoke 只判 returncode）。
                 # P2.5：async 下成败只能等回传落定才知道，所以 --once 必须先 drain 再判。
-                return _once_result(uploader, round_, done)
-            hi = (hi + 1) % len(hubs)  # 跑完一个换下一 hub（round-robin 公平）
+                return _once_result(services.uploader, round_, done)
+            hi = (hi + 1) % len(services.hubs)  # 跑完一个换下一 hub（round-robin 公平）
         return done
     finally:
-        close_worker(_prev_yield, _prev_p1_observer, pf_stores, uploader, life, done, log)
+        close_worker(
+            services.prev_yield,
+            services.prev_p1_observer,
+            services.pf_stores,
+            services.uploader,
+            services.life,
+            done,
+            log,
+        )
 
 
 def main() -> None:

@@ -234,11 +234,12 @@ def test_request_family_has_no_call_site_in_worker_any_more() -> None:
 
 
 def test_host_reference_counts_as_a_seam_keeps_post_result_patches_alive() -> None:
-    """★ 「引用即接缝」：`worker_loop` 把 `post_result` 当**值**传出去
-    （`ResultUploader(upload=post_result, …)`），读的仍是 `worker` 的模块全局。
+    """★ 「引用即接缝」：会话装配（`_open_loop`）把 `post_result` 当**值**传出去
+    （`UploadSpec(upload=post_result, …)`），读的仍是 `worker` 的模块全局。
 
     所以全仓那 9 处 `patch remote.worker.post_result` **没有**因为本刀失效——判据要用 AST 的
     `Load`（引用）而不是 `Call`（调用），否则会把它们误判成死注入。
+    2026-11-26 第四十格把装配搬进 `_open_loop`：判据跟着接缝走，仍是「宿主命名空间里传值」。
     """
     loads: dict[str, set[str]] = {}
     for node in _tree(WORKER_FILE).body:
@@ -248,8 +249,8 @@ def test_host_reference_counts_as_a_seam_keeps_post_result_patches_alive() -> No
                 for n in ast.walk(node)
                 if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
             }
-    assert "post_result" in loads.get("worker_loop", set()), (
-        "worker_loop 不再引用 post_result ⇒ `patch remote.worker.post_result` 变空操作，"
+    assert "post_result" in loads.get("_open_loop", set()), (
+        "会话装配（`_open_loop`）不再引用 post_result ⇒ `patch remote.worker.post_result` 变空操作，"
         "那批测试要改指 remote.job_lifecycle"
     )
     # 而且它是被**传值**（关键字实参 `upload=`），不是被调用——这正是「无调用点但接缝仍在」

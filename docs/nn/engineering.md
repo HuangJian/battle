@@ -29,6 +29,69 @@
 
 ---
 
+## §379 分诊第四十一格：`trainer/eval_a_once.main` 181 → 114 + CLI/课程/权重/配置/基线五段（2026-11-26）
+
+`main` 原本是一条 181 行的直线：25 行 argparse → 基线 iter 护栏 → 课程/`ns` → traj 与
+`eval_jsonl` → 权重解析（含两基相对路径查找）→ 分派配置与三个 rl 缺省 → it0 幂等早退 →
+派发 → summary 回读/回填 → 清理与收尾日志。每一段都只服务于下一步，但读的人要一次握住
+「哪几行是环境准备、哪几行会写账本」。
+
+| 段 | 行数 | 职责 |
+|---|---:|---|
+| `main` | 114 | 顺序编排：参数 → 护栏 → 课程 → 权重 → 配置 → 派发 → 回读/清理/日志 |
+| `_eval_a_cli` | 30 | CLI 表（house_parser；参数与帮助文本逐字保留） |
+| `_apply_course_args` | 25 | 课程文件 → (`ns`, 路径, 课程名)；D14 血缘用此刻冻结的字节 |
+| `_locate_ckpt` | 11 | 相对权重路径按仓库根 / `nn-training` 根两基解析 |
+| `_dispatch_cfg` | 11 | rl-config 读入 + `--local-slots` 的**内存**覆盖 |
+| `_fill_rl_defaults` | 8 | 派发器裸取的三个 rl 缺省（`max_ticks` / `difficulty` / `eval_window_sec`） |
+| `_baseline_landed` | 20 | it0 幂等判据 + 缺口例外，连同两条原因日志 |
+
+**关键选择**：`_apply_course_args` 返回**课程名**而不是 course 对象 —— 日志只需要一个字段，
+返回对象会为了类型注解把 `worker.config` 在模块顶层拖进来（本脚本刻意只做函数内延迟 import）。
+`_baseline_landed` 把「已落账」与「缺口太大、不早退」两条日志一起收进去，调用点只剩
+`if args.baseline and _baseline_landed(...): return 0` —— 早退原因仍由同一处打印。
+所有 `from ... import` 仍在**函数内**：模块顶层不拉 `worker.config` / `trainer.eval_dispatch`。
+
+**证明**：10 组账本场景（baseline 首派 / 已落账 / 大缺口重派 / baseline 非 0 iter / 缺 ckpt /
+ckpt 不存在 / 一局未落 / 正常行 + `--local-slots 0` / 派发器直写 summary / 只有 B 层 source 行）
+逐字段比对返回码、日志（时间字段归一）、`EvalDispatchSpec` 全字段与 `ns` 六个读数、账本行
+（`time`/`sec`/`course_fp` 归一）⇒ **0 差异**。
+
+**守卫**：定向 45 passed（与 §378 合用一条命令，含 shape 闸）；`Any` 不变；LOC 229 → 247；
+存量 20 文件 / 22 → 19 / 20（两格合计；`trainer/eval_a_once.py` 条目归零删除）。
+
+## §378 分诊第四十格：`remote/worker.worker_loop` 176 → 144 + 会话外件与一轮入参（2026-11-26）
+
+`worker_loop` 原本把三件事织在一条函数里：22 个旋钮的一次性展开（20 行）、会话级服务装配
+（让路 / hub 计划 / 身份 / 生命周期 / 回传器，约 30 行）、以及 126 行 while。轮询语义本身
+必须留在这里（`_alive_log` 的两个相位、`--once` 的成败判据、多 hub 轮转都在 while 里），
+但「开一次会话才做一次」和「每轮怎么装 `JobRoundSpec`」不必占据同一个函数体。
+
+| 段 | 行数 | 职责 |
+|---|---:|---|
+| `worker_loop` | 144 | 轮询账 + 四条分支：无 job / 纯停机达令 / 一轮 / `--once` 收尾 |
+| `_LoopServices` | 10 字段 | 会话级外件：身份 / 生命周期 / 回传器 / hubs / 预取表 / 让路还原账 |
+| `_open_loop` | 55 | 一次装配（让路 → hub 计划 → 身份 → 回传），顺序与拆分前逐字一致 |
+| `_round_spec` | 40 | 把宿主读数装成 `JobRoundSpec`（20 个关键字逐名对齐） |
+
+**关键选择**：**不合并**两条等待分支。`test_the_alive_log_is_written_in_one_place` 钉住
+`worker_loop` 里恰好两处 `_alive_log` 调用、两处 `halted` 字面量一真一假、同一句
+`time.time() - _last_alive_log > ALIVE_LOG_SEC` 出现两次 —— 那是 2026-09-11「停机期日志静默
+被误读成 worker 罢工」的反漂移判据。合并成一个带 `halted` 参数的 helper 会把相位藏进实参，
+守卫只能跟着弱化，所以两条分支原样留在 while 里。
+`JobRoundSpec` 装配搬进 `_round_spec` 后，接口守卫改为在**新接缝**上做同一张逐名字段对账
+（`worker_loop` 只许有一处 `run_one_round(_round_spec(...))`；`run_job_fn` 仍是裸名字
+`run_job`，`patch remote.worker.run_job` 照旧生效）。
+
+**证明**：10 组假边界场景（`--once` 无 job / 空闲超时 / 存活日志 / 纯停机达令 / 连续取活
+失败两次 / uploaded+stop / `--once` 未回传 / 多 hub 轮转 + 让路自适应 / `--bulk-yield never` /
+offline+`cuda-dp`+echo）逐字段比对返回码、日志、调用序列、`JobRoundSpec` 全字段与收线实参
+⇒ **0 差异**。
+
+**守卫**：`test_job_round_split` / `test_worker_loop_spec` / `test_yield_adaptive` 与 §379 的
+定向命令合跑 **45 passed**（含 shape 闸）；`Any` 保持 1（`_alive_log` 的 `log: Any`）；
+LOC 852 → 908；存量 20 文件 / 22 → 19 / 21。
+
 ## §377 分诊第三十九格：`trainer/rollout_phase.dispatch_rollout_phase` 176 → 43 + 三条腿各一函数（2026-11-26）
 
 `dispatch_rollout_phase` 原本是「一个 18 行展开 → 三层 `if` → 两条腿各 60 行内联」。流式腿里

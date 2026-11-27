@@ -2231,3 +2231,13 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > （`_stream_phase` 111 / `_queue_phase` 54；两个 new 入口 `assert dist_cfg is not None` 让 mypy
 > 收窄，`nonlocal` 写面缩进同一函数体）；22 组假边界场景逐字段差分 0（返回元组 / 三个 spec
 > 全字段 / 预采五档 / course 归属 / 日志），存量 20 文件 / 23 → 19 / 22（engineering §377）。
+> 2026-11-26 第四十格：`remote/worker.worker_loop` 176 → 144 + 会话外件 `_LoopServices` /
+> `_open_loop` 与一轮入参 `_round_spec`（`JobRoundSpec` 的 20 字段逐名装配搬到新接缝，
+> 守卫同口径对账）；10 组假边界场景逐字段差分 0（返回码 / 日志 / 调用序列 / spec 全字段 /
+> 收线实参），存量 20 文件 / 22 → 19 / 21（engineering §378）。
+
+> 2026-11-26 第四十一格：`trainer/eval_a_once.main` 181 → 114 + CLI/课程/权重/配置/基线五段
+> （`_eval_a_cli` / `_apply_course_args` / `_locate_ckpt` / `_dispatch_cfg` /
+> `_fill_rl_defaults` / `_baseline_landed`；重依赖仍是函数内延迟 import）；10 组账本/CLI
+> 场景逐字段差分 0（返回码 / 归一化日志 / `EvalDispatchSpec` 全字段 / 账本行），
+> 存量 19 文件 / 21 → 19 / 20（engineering §379）。

@@ -158,7 +158,8 @@ def resolve_eval_ckpt(ckpt_arg: str, ns, baseline: bool) -> str:
     return ckpt_arg
 
 
-def main() -> int:
+def _eval_a_cli() -> argparse.Namespace:
+    """evalA 的 CLI（house_parser 统一 --help/--log；参数表与拆分前逐字一致）。"""
     ap = house_parser(description="Run one A-layer clean eval for a course ckpt")
     ap.add_argument("--course", required=True)
     ap.add_argument(
@@ -179,7 +180,89 @@ def main() -> int:
         default=None,
         help="本机份额（缺省 = policy.evalLocalSlots / 缺省 4；0 = 纯节点）",
     )
-    args = ap.parse_args()
+    return ap.parse_args()
+
+
+def _apply_course_args(course_arg: str) -> tuple[argparse.Namespace, Path, str]:
+    """课程文件 → (极简 args, 课程路径, 课程名)。
+
+    `apply_course` 扁平覆盖进命名空间（与训练主循环同一单一事实来源）；D14 课程血缘用
+    **此刻冻结**的字节（主循环用启动期那份，本脚本没有启动期）。
+    """
+    from worker.config import apply_course, load_course
+
+    course_path = REPO / "nn-training" / "curricula" / f"{course_arg}.jsonc"
+    if not course_path.exists():
+        # 兼容 --course 传绝对/相对路径
+        course_path = Path(course_arg)
+    course = load_course(str(course_path))
+    ns = argparse.Namespace(mode=course.mode, total_stages=35)
+    apply_course(ns, course)
+    ns.course_path = str(course_path)
+    try:
+        ns.course_frozen_bytes = course_path.read_bytes()
+    except OSError:
+        pass
+    return ns, course_path, str(course.name)
+
+
+def _locate_ckpt(arg: str) -> Path:
+    """相对权重路径依次按仓库根 / `nn-training` 根解析（同拆分前的两基查找）。"""
+    ckpt = Path(arg)
+    if ckpt.is_absolute():
+        return ckpt
+    for base in (REPO, REPO / "nn-training"):
+        cand = base / ckpt
+        if cand.exists():
+            return cand
+    return REPO / ckpt
+
+
+def _dispatch_cfg(local_slots: int | None) -> dict:
+    """分派配置：与主循环同一份 rl-config.json；`--local-slots` 只在**内存里**覆盖。"""
+    import common.distribution
+
+    cfg = dict(common.distribution.load_dist_config() or {})
+    if local_slots is not None:
+        # 绝不回写 rl-config.json（同 trainer/eval_course_once.py --dist-local）。
+        cfg["policy"] = {**(cfg.get("policy") or {}), "evalLocalSlots": int(local_slots)}
+    return cfg
+
+
+def _fill_rl_defaults(ns: argparse.Namespace, cfg: dict) -> None:
+    """主循环的 args 由 CLI 默认值 + rl-config 拼出；本脚本没有 CLI 默认值那层，缺字段补同源值。"""
+    rl_cfg = cfg.get("rl") or {}
+    # 否则派发器裸取 args.max_ticks 会 AttributeError。
+    ns.max_ticks = int(getattr(ns, "max_ticks", 0) or rl_cfg.get("max_ticks") or 12000)
+    ns.difficulty = str(getattr(ns, "difficulty", "") or rl_cfg.get("difficulty") or "hard")
+    ns.eval_window_sec = float(rl_cfg.get("eval_window_sec") or 1500)
+
+
+def _baseline_landed(eval_jsonl: Path, key16: str, it: int) -> bool:
+    """it0 基线幂等早退：`event=eval_summary ∧ iter ∧ 同 wver` 已落账且缺口不够大。
+
+    判据与主循环 `baseline_summary_landed` 逐字同口径（本文件的 `_read_summary` 就是同一把
+    尺，读的也是同一册 `traj/eval_log.jsonl`）。阈值例外 `baseline_needs_retry` 是
+    2026-10-08 的评审补丁（plan/eval-baseline-undispatched §2 P1-1，F3-3）：缺口大到不算
+    落账时**不得**早退，否则人工补基线补不动（缺口的那几局永远不回来）。
+    """
+    from common.log import log
+    from worker.eval_local import BASELINE_RETRY_MAX, baseline_needs_retry
+
+    if _read_summary(eval_jsonl, key16, it) is None:
+        return False
+    if not baseline_needs_retry(eval_jsonl, key16):
+        log(f"[evalA] it0 基线已落账（wver={key16[:12]}…）——跳过派发")
+        return True
+    log(
+        f"[evalA] it0 基线缺口大到不算落账（wver={key16[:12]}…）"
+        f"——不早退（重派预算 {BASELINE_RETRY_MAX} 轮，按 wver 记在账本里）"
+    )
+    return False
+
+
+def main() -> int:
+    args = _eval_a_cli()
 
     import common.distribution
     from common.platform_utils import force_utf8_stdio
@@ -188,7 +271,6 @@ def main() -> int:
 
     from common.log import log
     from trainer.eval_dispatch import EvalDispatchSpec, dispatch_eval_round
-    from worker.config import apply_course, load_course
     from worker.eval_local import BASELINE_EVAL_ITER
 
     # it0 基线 = 「W(0) 的读数」这件事本身：iter 不是 0 就不是基线（落进别的 iter 槽会被
@@ -200,20 +282,7 @@ def main() -> int:
         )
         return 2
 
-    course_path = REPO / "nn-training" / "curricula" / f"{args.course}.jsonc"
-    if not course_path.exists():
-        # 兼容 --course 传绝对/相对路径
-        course_path = Path(args.course)
-    course = load_course(str(course_path))
-    # 极简 args：apply_course 扁平覆盖进命名空间（与训练主循环同一单一事实来源）
-    ns = argparse.Namespace(mode=course.mode, total_stages=35)
-    apply_course(ns, course)
-    # D14 课程血缘：主循环用**启动期冻结**的字节（args.course_frozen_bytes），本脚本此刻冻结。
-    ns.course_path = str(course_path)
-    try:
-        ns.course_frozen_bytes = course_path.read_bytes()
-    except OSError:
-        pass
+    ns, course_path, course_name = _apply_course_args(args.course)
 
     traj = Path(getattr(ns, "traj", "") or "") or (REPO / "tmp" / args.course)
     if not traj.is_absolute():
@@ -229,15 +298,7 @@ def main() -> int:
     if not ckpt_arg:
         log("[evalA] 缺 --ckpt（非 baseline 模式必须给权重路径）")
         return 2
-    ckpt = Path(ckpt_arg)
-    if not ckpt.is_absolute():
-        for base in (REPO, REPO / "nn-training"):
-            cand = base / ckpt
-            if cand.exists():
-                ckpt = cand
-                break
-        else:
-            ckpt = REPO / ckpt
+    ckpt = _locate_ckpt(ckpt_arg)
     if not ckpt.exists():
         log(f"[evalA] ckpt 不存在: {ckpt}")
         return 2
@@ -246,43 +307,21 @@ def main() -> int:
     #   而且容器不能算 file 指纹（wver 要进任务 argv）。读侧就地落地成整份（幂等）。
     weights_standard.ensure_standard_weights(ckpt, log=log)
 
-    # 分派配置：与主循环同一份 rl-config.json（节点池 / policy）。
-    cfg = dict(common.distribution.load_dist_config() or {})
-    if args.local_slots is not None:
-        # 只在**内存里**覆盖（同 trainer/eval_course_once.py --dist-local），绝不回写 rl-config.json。
-        cfg["policy"] = {**(cfg.get("policy") or {}), "evalLocalSlots": int(args.local_slots)}
-    rl_cfg = cfg.get("rl") or {}
-    # 主循环的 args 由 CLI 默认值 + rl-config 拼出；本脚本没有 CLI 默认值那层，
-    # 缺字段直接补 rl-config 同源值（否则派发器裸取 args.max_ticks 会 AttributeError）。
-    ns.max_ticks = int(getattr(ns, "max_ticks", 0) or rl_cfg.get("max_ticks") or 12000)
-    ns.difficulty = str(getattr(ns, "difficulty", "") or rl_cfg.get("difficulty") or "hard")
-    ns.eval_window_sec = float(rl_cfg.get("eval_window_sec") or 1500)
+    cfg = _dispatch_cfg(args.local_slots)
+    _fill_rl_defaults(ns, cfg)
 
     wver = common.distribution.weights_fingerprint(str(ckpt))
     key16 = wver[:16]
-    # 幂等早退（离线课「停课→重开」/重试不重派）：判据与主循环 `baseline_summary_landed`
-    # 逐字同口径——`event=eval_summary ∧ iter=0 ∧ 同 wver`（本文件的 `_read_summary` 就是
-    # 同一把尺，读的也是同一册 `traj/eval_log.jsonl`）。
-    # ⚠ 2026-10-08（plan/eval-baseline-undispatched §2 P1-1，评审 F3-3）：加上同一道
-    # 阈值例外 `baseline_needs_retry`——否则「缺口大到不算落账」只在主循环生效，
-    # 人工补基线（--baseline）会被这句早退挡住，补不动（缺口的一局不补 = 白派一趟）。
-    if args.baseline and _read_summary(eval_jsonl, key16, BASELINE_EVAL_ITER) is not None:
-        from worker.eval_local import BASELINE_RETRY_MAX, baseline_needs_retry
+    if args.baseline and _baseline_landed(eval_jsonl, key16, BASELINE_EVAL_ITER):
+        return 0
 
-        if not baseline_needs_retry(eval_jsonl, key16):
-            log(f"[evalA] it0 基线已落账（wver={key16[:12]}…）——跳过派发")
-            return 0
-        log(
-            f"[evalA] it0 基线缺口大到不算落账（wver={key16[:12]}…）"
-            f"——不早退（重派预算 {BASELINE_RETRY_MAX} 轮，按 wver 记在账本里）"
-        )
     enabled = [
         str(n.get("id") or n.get("url") or "?")
         for n in (cfg.get("nodes") or [])
         if n.get("enabled", True)
     ]
     log(
-        f"[evalA] it{args.iter} course={course.name} wver={key16[:12]}… "
+        f"[evalA] it{args.iter} course={course_name} wver={key16[:12]}… "
         f"max_ticks={ns.max_ticks} difficulty={ns.difficulty} "
         f"→ 派发（与 in-loop 同路：节点池 {enabled or '（无，仅本机）'} + 本机份额）"
         + ("【it0 基线：课程 bc 起点冻结权重】" if args.baseline else "")

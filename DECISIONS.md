@@ -11379,3 +11379,37 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：22 组假边界场景逐字段 **0 差异**（返回元组 / 三个 spec 全字段 / `_fire_eval` 返回值 /
   提前预采五档决策 / course 归属 / 日志）；63 passed；存量 20 文件 / 23 → 19 / 22；全量 pygate 绿。
   全文 → `docs/nn/engineering.md` §377。
+
+## §2026-11-26-worker-loop-services
+
+- **背景**：`remote/worker.worker_loop` 176 行 = 22 个旋钮一次性展开 + 会话服务装配（让路 /
+  hub / 身份 / 回传 / 预取表）+ 126 行 while。「开一次会话」与「每一轮」混读，判断一条日志
+  属于哪个相位要来回找。
+
+- **决定**：会话级外件收进 frozen `_LoopServices`，由 `_open_loop` 一次装配（顺序逐字不变）；
+  一轮的 20 字段 `JobRoundSpec` 收进 `_round_spec`；`worker_loop` 只剩轮询账与四条分支（144 行）。
+
+- **被否决**：把「无 job」与「纯停机达令」两条等待分支合并成一个带 `halted` 参数的 helper ——
+  `_alive_log` 的两处相位（`halted` 一真一假）是 2026-09-11 现场的反漂移判据，合并会把相位
+  藏进实参，守卫只能跟着弱化。
+
+- **验证**：10 组假边界场景逐字段 **0 差异**（返回码 / 日志 / 调用序列 / `JobRoundSpec` 全字段 /
+  收线实参）；定向 45 passed；存量 20 文件 / 22 → 19 / 21；全量 pygate 绿。
+  全文 → `docs/nn/engineering.md` §378。
+
+## §2026-11-26-eval-a-once-seams
+
+- **背景**：`trainer/eval_a_once.main` 181 行直线：CLI → 基线护栏 → 课程/`ns` → traj/权重 →
+  rl 配置缺省 → it0 幂等 → 派发 → summary 回读/回填 → 清理。环境准备与账本写入混在一条序列里。
+
+- **决定**：拆 `_eval_a_cli` / `_apply_course_args` / `_locate_ckpt` / `_dispatch_cfg` /
+  `_fill_rl_defaults` / `_baseline_landed`；`main` 只留顺序编排（114 行）。`_apply_course_args`
+  返回课程名而不是对象（避免为日志一个字段把 `worker.config` 拖到模块顶层）；所有重依赖仍是
+  函数内延迟 import。
+
+- **被否决**：把 `baseline_needs_retry` 的判定留在 `main` 里只抽「读 summary」—— 那样两条原因
+  日志会与判断分离，早退点读不出「为什么这条缺口还值得重派」。
+
+- **验证**：10 组账本/CLI 场景逐字段 **0 差异**（返回码 / 归一化日志 / `EvalDispatchSpec` 全字段 /
+  账本行）；定向 45 passed；存量 20 文件 / 22 → 19 / 20（两格合计；本文件条目删除）；全量 pygate 绿。
+  全文 → `docs/nn/engineering.md` §379。
