@@ -35,6 +35,7 @@ import pytest
 
 import remote.hub_client as hub_client_mod
 import remote.hub_http as hub_http_mod
+from common.ports import PortPair
 from tests.helpers import remote_dag as dag
 
 HTTP_FILE = ROOT / "remote" / "hub_http.py"
@@ -85,6 +86,10 @@ ALLOWED_IMPORTS = {
     "urllib.request",
     # 2026-11-14（python.refactor.md §P0-6）：`log=` 默认回调的时间戳不再手拼。
     "common.logutil",
+    # 2026-11-28（P0-8 第二代）：出站线路端口（`WirePort` + `PortPair` 组装壳）。
+    # 纯 stdlib（dataclasses / typing），零仓内 import ⇒ 不构成新的依赖面；放 `common/`
+    # 正是因为本模块自己就是 L0，端口若住 `remote/` 会撞「remote 内部边必须严格向下」。
+    "common.ports",
     "common.protocol",
     "common.net_http",
 }
@@ -196,18 +201,14 @@ def test_hub_client_module_has_no_request_call_site_any_more() -> None:
 
 
 def test_request_seam_is_the_hub_http_module(monkeypatch) -> None:
-    """档位一：`probe_job_result`（在 hub_http）解析 `_request` 于 **hub_http** 命名空间。
+    """档位一：`probe_job_result`（在 hub_http）解析**本模块**的 `WIRE`（P0-8 第二代端口）。
 
-    所以「patch `remote.hub_http._request`，同时把 `remote.hub_client._request` 换成炸弹」
-    必须仍然成功——**反面**（只 patch hub_client）是这一步最容易犯的静默错误，
-    下一条专门钉它。
+    「只 patch `remote.hub_client._request`」仍是这一步最容易犯的静默错误 —— 现在它由
+    两条结构判据挡下：`hub_client` 转发的是同一个对象（下一条），且它没有调用点。
     """
-    monkeypatch.setattr(
-        hub_client_mod,
-        "_request",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("打偏：patch 了转发名")),
-    )
-    monkeypatch.setattr(hub_http_mod, "_request", lambda *a, **k: (200, b'{"ok": 1}'))
+    # 「转发名同源」由 `test_hub_client_module_has_no_request_call_site_any_more` 的
+    # `hasattr` 判据钉住（私有属性逐条对比会进 G5 的私有断言预算）。
+    monkeypatch.setattr(hub_http_mod, "WIRE", PortPair(lambda *a, **k: (200, b'{"ok": 1}')))
     probe = hub_http_mod.probe_job_result("http://hub", "t", "j1")
     assert probe.state == hub_http_mod.PROBE_READY
     assert probe.result == {"ok": 1}
@@ -226,13 +227,10 @@ def test_patching_the_forwarding_name_is_a_no_op_by_design(monkeypatch) -> None:
         calls.append(path)
         return 200, b'{"ok": 1}'
 
-    monkeypatch.setattr(hub_http_mod, "_request", fake_real)
-    # 打偏：这个赋值不该改变任何行为
-    monkeypatch.setattr(
-        hub_client_mod,
-        "_request",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("这个补丁该是空操作")),
-    )
+    monkeypatch.setattr(hub_http_mod, "WIRE", PortPair(fake_real))
+    # 不再「真打一枪」验证空操作：`hub_client` 没有 `_request` 调用点这件事由
+    # `test_hub_client_module_has_no_request_call_site_any_more` 的 AST 判据钉住，
+    # 这里只留行为面 —— 请求确实从 `WIRE` 发出去。
     probe = hub_http_mod.probe_job_result("http://hub", "t", "j1")
     assert probe.result == {"ok": 1}
     assert calls == ["/jobs/j1/result"]
@@ -276,7 +274,7 @@ def test_probe_classifies_ready_pending_transient_and_terminal_failure(monkeypat
             raise st
         return st, body
 
-    monkeypatch.setattr(hub_http_mod, "_request", fake)
+    monkeypatch.setattr(hub_http_mod, "WIRE", PortPair(fake))
 
     reply["st"], reply["body"] = 200, b'{"job_id": "j1"}'
     probe = hub_http_mod.probe_job_result("http://hub", "t", "j1")
@@ -317,9 +315,9 @@ def test_probe_does_not_disguise_a_programmer_error_as_transient(monkeypatch) ->
     表现是「hub 一直没答」，于是等待环变成静默挂死，而真因（形状变了/字段拼错）永远看不到。
     2026-11-15 改成 `common.errors.NET_ERRORS`（`common.protocol` 门面转发）后，这类错穿出去。
     """
-    def _buggy(*_a: object, **_k: object) -> None:
+    def _buggy(*_a: object, **_k: object) -> tuple[int, bytes]:
         raise AttributeError("'dict' object has no attribute 'decode'")
 
-    monkeypatch.setattr(hub_http_mod, "_request", _buggy)
+    monkeypatch.setattr(hub_http_mod, "WIRE", PortPair(_buggy))
     with pytest.raises(AttributeError):
         hub_http_mod.probe_job_result("http://hub", "t", "j1")

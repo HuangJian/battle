@@ -100,13 +100,16 @@
 
 **本轮已落（P0-8 首刀）**：hub 单包端口样板 —— `hub/seams.py::NET` + `task_pack` 的 `net=` 注入 + `OfflinePushSpec.client_mod` 构造注入；hub 自有私有 patch 6 处清零，顺带把共享夹具里 2 处（`tests/common/test_offline_task_queue.py`、`tests/test_production_isolation.py`）也迁到端口。G19 **392 / 95 → 384 / 91**；跨包的 `_request` / `_wire_add` 5 处留给 remote 包。
 
-**2026-11-28 增量（P0-8 第二代，`remote/seams.py::WIRE`）**：上一行的「5 处」只是 hub 用例里看得见的一角 ——
-按 (模块, 私有名) 聚合实测是 **32 处 / 14 文件**（`job_lifecycle._request` 23 · `_wire_add` 4 ·
-`bc_job._request` 4）。`WirePort`（`request` / `add` 两项能力）+ `PortPair` 组装壳（L0，宿主自拼缺省实现，
-不抬秩）落地后：G19 **384 / 91 → 352 / 83**，两条证伪（宿主直调 / `WIRE` 提前绑定）各红一次。
-**下一个已知口径**：`remote/hub_http._request` 一族还有 48 处（28 + 18 + 2），它有独立 7 参签名与自己的
-实现 ⇒ 要另立 `HubWirePort`；`remote/http._request` 自身 21 处属「测传输核心内部」，得先给
-`_get_with_retry` 加 `send=`。全文 → `docs/nn/engineering.md` §389。
+**2026-11-28 增量（P0-8 第二代，`common/ports.py::WIRE`）**：上一行的「5 处」只是 hub 用例里看得见的一角 ——
+按 G19 实测是 **80 处 / 28 个测试文件**，分两批：批一 `job_lifecycle` / `bc_job` 32 处
+（`_request` 23 · `_wire_add` 4 · `bc_job._request` 4，余 1 处同族跨包 patch），批二
+`hub_http` / `push_client` 48 处（28 + 10 + e2e 10）。`WirePort`（`request` / `add` 两项能力）+
+`PortPair` 组装壳（宿主自拼缺省实现，不抬秩；落 **`common/`** —— `hub_http` 自己是 L0，
+端口若住 `remote/` 会撞「内部边严格向下」）落地后：G19 **384 / 91 → 304 / 71**，
+两条证伪（宿主直调 / `WIRE` 提前绑定）各红一次，批一 250 + 批二 158 条用例全绿。
+**下一个已知口径**：`remote/http._request` 自身 21 处属「测传输核心内部」—— 要先给
+`_get_with_retry` 加 `send=`；`offline_boot`（生成物）与 `notebook_runtime` / `rollout_node`
+的探针族是剩余大头。全文 → `docs/nn/engineering.md` §389。
 
 ## 0. 执行摘要
 

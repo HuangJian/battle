@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 
 import remote.bc_job as bc_job
-from remote.seams import PortPair
+from common.ports import PortPair
 
 
 def _body(epoch: int, loss: float = 1.0) -> dict:

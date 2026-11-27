@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
 
 import remote.hub_http as hub_http
 import trainer.loop_remote_drive as drive_mod
+from common.ports import PortPair
 from trainer.loop_remote_drive import LOST_GRACE_SEC, LOST_PROBE_SEC
 from trainer.loop_steps import TrainingSteps
 from worker.loop_round import RemotePpoJob, RoundContext
@@ -262,7 +263,7 @@ def test_wait_report_line_when_period_elapses(tmp_path: Path, monkeypatch) -> No
     _patch_liveness(monkeypatch, rig)
     monkeypatch.setattr(drive_mod, "log", rig.logs.append)
     # hub 侧观测走 _request：这里全部失败（best-effort —— 打点不允许依赖网络成败）。
-    monkeypatch.setattr(hub_http, "_request", lambda *a, **k: (_ for _ in ()).throw(OSError("no net")))
+    monkeypatch.setattr(hub_http, "WIRE", PortPair(lambda *a, **k: (_ for _ in ()).throw(OSError("no net"))))
 
     ctx = RoundContext(it=7, resumable=True)
     rig.step._remote_ppo_step(ctx)

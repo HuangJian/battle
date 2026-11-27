@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from common.ports import PortPair
 from common.protocol import (
     WIRE_JOB_CONTENT_TYPE,
     WIRE_JOB_MAGIC,
@@ -97,7 +98,7 @@ def test_submit_code_cache_hit_skips_code_upload(monkeypatch: pytest.MonkeyPatch
         ctypes.append((headers or {}).get("Content-Type", ""))
         return 202, b'{"status":"accepted"}'
 
-    monkeypatch.setattr("remote.push_client._request", fake_request)
+    monkeypatch.setattr("remote.push_client.WIRE", PortPair(fake_request))
     monkeypatch.setattr("remote.push_client.time.sleep", lambda _s: None)
     payload, code = b"pay", b"code"
     man = _mini_manifest("j1", payload, _sha(code))
@@ -129,7 +130,7 @@ def test_submit_428_retries_with_code(monkeypatch: pytest.MonkeyPatch) -> None:
             return 428, b'{"error":"code-missing"}'
         return 202, b'{"status":"accepted"}'
 
-    monkeypatch.setattr("remote.push_client._request", fake_request)
+    monkeypatch.setattr("remote.push_client.WIRE", PortPair(fake_request))
     monkeypatch.setattr("remote.push_client.time.sleep", lambda _s: None)
     payload, code = b"pay", b"code"
     man = _mini_manifest("j1", payload, _sha(code))
@@ -165,7 +166,7 @@ def test_submit_ts_code_cache_hit_skips_ts_upload(monkeypatch: pytest.MonkeyPatc
         seen.append(_decode_job_body(data))
         return 202, b'{"status":"accepted"}'
 
-    monkeypatch.setattr("remote.push_client._request", fake_request)
+    monkeypatch.setattr("remote.push_client.WIRE", PortPair(fake_request))
     ts_zip = b"ts-tree-zip"
     payload, code = b"pay", b"code"
     man = _mini_manifest("m3-j1", payload, _sha(code))
@@ -200,7 +201,7 @@ def test_submit_ts_code_uploaded_on_cache_miss(monkeypatch: pytest.MonkeyPatch) 
         seen.append(_decode_job_body(data))
         return 202, b'{"status":"accepted"}'
 
-    monkeypatch.setattr("remote.push_client._request", fake_request)
+    monkeypatch.setattr("remote.push_client.WIRE", PortPair(fake_request))
     ts_zip = b"ts-tree-zip"
     payload, code = b"pay", b"code"
     man = _mini_manifest("m3-j2", payload, _sha(code))
@@ -243,7 +244,7 @@ def test_submit_428_ts_code_missing_retries_with_ts(monkeypatch: pytest.MonkeyPa
             return 428, b'{"error":"ts-code-missing"}'
         return 202, b'{"status":"accepted"}'
 
-    monkeypatch.setattr("remote.push_client._request", fake_request)
+    monkeypatch.setattr("remote.push_client.WIRE", PortPair(fake_request))
     monkeypatch.setattr("remote.push_client.time.sleep", lambda _s: None)
     ts_zip = b"ts-tree-zip"
     payload, code = b"pay", b"code"
@@ -275,7 +276,7 @@ def test_submit_missing_ts_code_is_loud(monkeypatch: pytest.MonkeyPatch) -> None
             return 200, json.dumps({"cached": True}).encode()
         return 200, json.dumps({"cached": False}).encode()
 
-    monkeypatch.setattr("remote.push_client._request", fake_request)
+    monkeypatch.setattr("remote.push_client.WIRE", PortPair(fake_request))
     payload, code = b"pay", b"code"
     man = _mini_manifest("m3-j4", payload, _sha(code))
     man["ts_code_sha256"] = "t" * 64
@@ -301,7 +302,7 @@ def test_submit_4xx_is_protocol_error(monkeypatch: pytest.MonkeyPatch) -> None:
         posts.append(((headers or {}).get("Content-Type", ""), data.startswith(WIRE_JOB_MAGIC)))
         return 400, b'{"error":"bad manifest"}'
 
-    monkeypatch.setattr("remote.push_client._request", fake_request)
+    monkeypatch.setattr("remote.push_client.WIRE", PortPair(fake_request))
     monkeypatch.setattr("remote.push_client.time.sleep", lambda _s: None)
     man = _mini_manifest("j1", b"p", "0" * 64)
     with pytest.raises(ProtocolError, match="400"):
@@ -330,7 +331,7 @@ def test_submit_v2_falls_back_to_json_on_legacy_node(monkeypatch: pytest.MonkeyP
             return 400, b'{"error":"Expecting value: line 1 column 1 (char 0)"}'
         return 202, b'{"status":"accepted"}'
 
-    monkeypatch.setattr("remote.push_client._request", fake_request)
+    monkeypatch.setattr("remote.push_client.WIRE", PortPair(fake_request))
     monkeypatch.setattr("remote.push_client.time.sleep", lambda _s: None)
     payload, code = b"pay", b"code"
     man = _mini_manifest("j1", payload, _sha(code))
@@ -365,7 +366,7 @@ def test_wait_result_polls_until_200(monkeypatch: pytest.MonkeyPatch) -> None:
     # ★ 补丁打在**共用的** HTTP 出口上（R2c-3 起 `wait_result` 的单次探测走
     # `probe_job_result`——两条链路共用一份状态码分类，所以 HTTP 出口也只有一处）。
     # S5 第五刀：出口的所有者是 `remote.hub_http`（`hub_client._request` 只是转发名）。
-    monkeypatch.setattr("remote.hub_http._request", fake_request)
+    monkeypatch.setattr("remote.hub_http.WIRE", PortPair(fake_request))
     monkeypatch.setattr("remote.push_client.time.sleep", lambda _s: None)
     out = wait_result("http://n", "tok", "j1", timeout_sec=30, poll_sec=0.01, log=lambda m: None)
     assert out["job_id"] == "j1" and out["agg"]["kl"] == 0.1
@@ -376,7 +377,7 @@ def test_wait_result_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_request(url, token, path, *, timeout=30.0, **kw):
         return 202, b'{"status":"running"}'
 
-    monkeypatch.setattr("remote.hub_http._request", fake_request)
+    monkeypatch.setattr("remote.hub_http.WIRE", PortPair(fake_request))
     # 让 deadline 立刻过期：time.time 先返回 t0 再返回 t0+10
     ticks = iter([1000.0, 1000.0, 1010.0, 1010.0, 1010.0])
 

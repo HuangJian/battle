@@ -33,9 +33,9 @@ if str(ROOT) not in sys.path:
 import remote.http as http_mod
 import remote.job_lifecycle as jl_mod
 import remote.worker as worker_mod
+from common.ports import PortPair
 from remote.http import WireGet
 from remote.job_lifecycle import PostResultSpec
-from remote.seams import PortPair
 from tests.helpers import remote_dag as dag
 
 HTTP_FILE = ROOT / "remote" / "http.py"

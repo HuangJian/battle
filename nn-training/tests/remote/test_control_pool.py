@@ -35,10 +35,10 @@ if str(ROOT) not in sys.path:
 import remote.control_pool as cp
 import remote.http as http_mod
 import remote.job_lifecycle as jl
+from common.ports import PortPair
 from common.protocol import HEARTBEAT_SEC
 from remote.http import WireRequest
 from remote.job_lifecycle import CONTROL_TIMEOUT_SEC
-from remote.seams import PortPair
 
 
 class _Resp:

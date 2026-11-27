@@ -17,6 +17,7 @@ import pytest
 
 import remote.hub_http as hub_http
 import trainer.bc_ingest as bc_ingest
+from common.ports import PortPair
 from trainer.bc_ingest import READY, BcWait, EpochEvalSpec, ingest_bc_metrics
 from worker.bc_config import BcCourseConfig, BcEvalBlock, BcTrainBlock
 
@@ -63,8 +64,8 @@ def test_late_backfill_row_is_ledgered_without_eval(
     monkeypatch.setattr(bc_ingest, "run_epoch_eval", fake_eval)
     monkeypatch.setattr(
         hub_http,
-        "_request",
-        lambda *_a, **_k: (200, json.dumps({"rows": _rows(4, 6, 5)}).encode("utf-8")),
+        "WIRE",
+        PortPair(lambda *_a, **_k: (200, json.dumps({"rows": _rows(4, 6, 5)}).encode("utf-8"))),
     )
 
     wait = BcWait(jid="j" * 16)
@@ -98,8 +99,8 @@ def test_duplicate_row_does_not_cancel_same_batch_boundary_eval(
     monkeypatch.setattr(bc_ingest, "run_epoch_eval", fake_eval)
     monkeypatch.setattr(
         hub_http,
-        "_request",
-        lambda *_a, **_k: (200, json.dumps({"rows": _rows(1, 2, 3, 2)}).encode("utf-8")),
+        "WIRE",
+        PortPair(lambda *_a, **_k: (200, json.dumps({"rows": _rows(1, 2, 3, 2)}).encode("utf-8"))),
     )
 
     wait = BcWait(jid="j" * 16)
@@ -131,7 +132,7 @@ def test_ready_on_first_poll_flushes_metrics_before_audit(
             return 200, json.dumps({"rows": _rows(1, 2, 3)}).encode("utf-8")
         return 404, b"{}"
 
-    monkeypatch.setattr(hub_http, "_request", request)
+    monkeypatch.setattr(hub_http, "WIRE", PortPair(request))
     course = BcCourseConfig(
         name="bc-flush",
         train=BcTrainBlock(epochs=3),
@@ -178,7 +179,7 @@ def test_ready_evaluates_final_epoch_when_metric_row_missing(
         return 404, b"{}"
 
     monkeypatch.setattr(bc_ingest, "run_epoch_eval", fake_eval)
-    monkeypatch.setattr(hub_http, "_request", request)
+    monkeypatch.setattr(hub_http, "WIRE", PortPair(request))
     wait = BcWait(jid="j" * 16)
 
     status, _ = wait.poll_once(
@@ -208,8 +209,8 @@ def test_in_order_rows_keep_evaluating_at_boundaries(
     monkeypatch.setattr(bc_ingest, "run_epoch_eval", fake_eval)
     monkeypatch.setattr(
         hub_http,
-        "_request",
-        lambda *_a, **_k: (200, json.dumps({"rows": _rows(1, 2)}).encode("utf-8")),
+        "WIRE",
+        PortPair(lambda *_a, **_k: (200, json.dumps({"rows": _rows(1, 2)}).encode("utf-8"))),
     )
 
     wait = BcWait(jid="j" * 16)

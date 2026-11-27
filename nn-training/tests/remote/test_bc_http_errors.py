@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import pytest
 
+from common.ports import PortPair
 from common.protocol import ProtocolError, RetryableError
 from remote import bc_job as mod
-from remote.seams import PortPair
 
 URL = "http://127.0.0.1:9"
 TOKEN = "tok"

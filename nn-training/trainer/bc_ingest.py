@@ -15,7 +15,7 @@
 （`BcLoop.run_one_round` → `BcWait.poll_once`）共用这份会话，故它必须能被**两条驱动路径**同时依赖。
 
 依赖面 = stdlib（`json`/`time`/`dataclasses`/`pathlib`）+ `common.protocol` + `remote.hub_http`
-（`_request` **函数内导入**，测试/故障注入打的就是它）+ `biz.bc_config`/`biz.bc_eval`/`biz.bc_ledger`/`biz.log`。
+（`WIRE` **函数内导入**，测试/故障注入打的就是它）+ `biz.bc_config`/`biz.bc_eval`/`biz.bc_ledger`/`biz.log`。
 
 `trainer/bc_loop.py` 保留 `X as X` 门面，历史 import 与 monkeypatch 点（`bc_loop.time` / `bc_loop.wait_bc_round`）
 一行不改（「名字是契约，位置不是」）。
@@ -111,11 +111,11 @@ def _archive_epoch_weights(
         return None
     import tempfile
 
-    from remote.hub_http import _request
+    from remote.hub_http import WIRE
 
     prefix = course.resolve_backup_prefix(course.name)
     try:
-        st, body = _request(
+        st, body = WIRE.request(
             hub_url, token, f"/jobs/{jid}/epoch-weights/{int(epoch)}", timeout=30.0
         )
         if st == 404:
@@ -253,10 +253,10 @@ def run_epoch_eval(spec: EpochEvalSpec, log=log) -> None:
     cfg = spec.cfg
     import json as _json
 
-    from remote.hub_http import _request
+    from remote.hub_http import WIRE
 
     try:
-        st, body = _request(
+        st, body = WIRE.request(
             hub_url, token, f"/jobs/{jid}/epoch-weights/{int(epoch)}", timeout=30.0
         )
         if st == 404:
@@ -397,15 +397,15 @@ class BcWait:
         `transient`(网络错、5xx)；**其余状态码与坏结果抛错**——「还没好」与「永远好不了」
         必须分开，混在一起就是一个静默挂死的等待环。
 
-        `_request` **函数内导入**（原 `run_bc.wait_bc_round` 同款）：它是 HTTP 面的私有
-        助手，按名字导入会把绑定钉死在 import 时刻——测试/故障注入靠 `monkeypatch`
-        `remote.hub_http._request` 换掉整条 HTTP 链路，顶层导入会让补丁失效（症状：单测真去连
+        `WIRE` **函数内导入**（原 `run_bc.wait_bc_round` 同款）：它是 HTTP 面的端口对象，
+        按名字导入会把绑定钉死在 import 时刻——测试/故障注入靠 `monkeypatch`
+        `remote.hub_http.WIRE` 换掉整条 HTTP 链路，顶层导入会让补丁失效（症状：单测真去连
         hub 并挂满超时）。
         """
-        from remote.hub_http import _request
+        from remote.hub_http import WIRE
 
         try:
-            status, body = _request(hub_url, token, f"/jobs/{self.jid}/result", timeout=30.0)
+            status, body = WIRE.request(hub_url, token, f"/jobs/{self.jid}/result", timeout=30.0)
         except Exception as e:
             self.err_streak += 1
             logger(
@@ -512,7 +512,7 @@ def ingest_bc_metrics(
 
     失败**不抛**（指标/评估是观测面，绝不打断训练等待）；无进展超时只告警一次。
     """
-    from remote.hub_http import _request  # 同 `poll_once`：可被 monkeypatch 替换
+    from remote.hub_http import WIRE  # 同 `poll_once`：可被 monkeypatch 替换
 
     eval_cfg = course.eval
     try:
@@ -521,7 +521,7 @@ def ingest_bc_metrics(
         if not wait.seeded:
             wait.seeded = True
             _seed_from_ledger(wait, jsonl_path)
-        mstatus, mbody = _request(hub_url, token, f"/jobs/{wait.jid}/bc-metrics", timeout=15.0)
+        mstatus, mbody = WIRE.request(hub_url, token, f"/jobs/{wait.jid}/bc-metrics", timeout=15.0)
         if mstatus == 200:
             rows = json.loads(mbody.decode("utf-8")).get("rows") or []
             new_rows = rows[wait.seen_metrics :]

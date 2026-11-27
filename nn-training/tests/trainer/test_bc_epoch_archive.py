@@ -10,6 +10,7 @@ import pytest
 
 import remote.hub_http as hub_http
 import trainer.bc_ingest as bc_ingest
+from common.ports import PortPair
 from common.protocol import encode_weights_json
 from trainer.bc_ingest import BcWait, EpochEvalSpec, ingest_bc_metrics, run_epoch_eval
 from worker.bc_config import BcCourseConfig, BcEvalBlock
@@ -65,7 +66,7 @@ def _archived(backup_dir: Path) -> list[Path]:
 
 def test_ingest_archives_every_new_epoch(tmp_path: Path, monkeypatch) -> None:
     paths: list[str] = []
-    monkeypatch.setattr(hub_http, "_request", _fake_hub(paths, _rows(1, 2)))
+    monkeypatch.setattr(hub_http, "WIRE", PortPair(_fake_hub(paths, _rows(1, 2))))
     course = _course(tmp_path)
     wait = BcWait(jid=JID)
 
@@ -89,7 +90,7 @@ def test_ingest_archives_every_new_epoch(tmp_path: Path, monkeypatch) -> None:
 def test_archive_is_idempotent_for_replayed_epoch(tmp_path: Path, monkeypatch) -> None:
     """补发链路会重放同一 epoch：归档复用旧文件，不产生第二份。"""
     paths: list[str] = []
-    monkeypatch.setattr(hub_http, "_request", _fake_hub(paths, _rows(3)))
+    monkeypatch.setattr(hub_http, "WIRE", PortPair(_fake_hub(paths, _rows(3))))
     course = _course(tmp_path)
     for _ in range(2):
         ingest_bc_metrics(
@@ -108,7 +109,7 @@ def test_archive_is_idempotent_for_replayed_epoch(tmp_path: Path, monkeypatch) -
 def test_no_backup_dir_means_no_archive(tmp_path: Path, monkeypatch) -> None:
     """没配 backup_dir 不写 RL 默认归档面（也不该去拉权重）。"""
     paths: list[str] = []
-    monkeypatch.setattr(hub_http, "_request", _fake_hub(paths, _rows(1)))
+    monkeypatch.setattr(hub_http, "WIRE", PortPair(_fake_hub(paths, _rows(1))))
     course = _course(tmp_path, backup=False)
 
     ingest_bc_metrics(
@@ -129,7 +130,7 @@ def test_no_backup_dir_means_no_archive(tmp_path: Path, monkeypatch) -> None:
 def test_epoch_eval_reads_that_epoch_not_latest_resume(tmp_path: Path, monkeypatch) -> None:
     """B6：ep4 的 eval 必须取 `/epoch-weights/4`，不能拿 `/resume`（可能是 ep6）。"""
     paths: list[str] = []
-    monkeypatch.setattr(hub_http, "_request", _fake_hub(paths, []))
+    monkeypatch.setattr(hub_http, "WIRE", PortPair(_fake_hub(paths, [])))
     seen: dict[str, bytes] = {}
 
     def fake_eval(spec: Any):
@@ -176,7 +177,7 @@ def test_archive_failure_does_not_break_ingest(tmp_path: Path, monkeypatch, stat
             return 200, json.dumps({"rows": _rows(1)}).encode("utf-8")
         return status, b"{}"
 
-    monkeypatch.setattr(hub_http, "_request", request)
+    monkeypatch.setattr(hub_http, "WIRE", PortPair(request))
     wait = BcWait(jid=JID)
     ingest_bc_metrics(
         wait,

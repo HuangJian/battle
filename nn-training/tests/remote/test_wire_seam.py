@@ -1,8 +1,9 @@
-"""`remote/seams.py::WIRE` 的契约守卫（P0-8 第二代，2026-11-28）。
+"""`common/ports.py::WIRE` 的契约守卫（P0-8 第二代，2026-11-28）。
 
 P0-8 的第一代样板是 `hub/seams.py::NET`（第三方边界）。这一代收的是**包内传输原语**：
-`remote/http._request` / `remote/wire._wire_add` 被 `job_lifecycle` / `bc_job` 的用例
-`monkeypatch.setattr(…, "_request", …)` 打了 31 处 —— patch 的前提是「知道实现叫这个名字」，
+`remote/http._request` / `remote/wire._wire_add` / `remote/hub_http._request` 被
+`job_lifecycle` / `bc_job` / `hub_http` / `push_client` 的用例
+`monkeypatch.setattr(…, "_request", …)` 打了 80 处 —— patch 的前提是「知道实现叫这个名字」，
 于是实现一改名，用例就得跟着改，重构只能退化成搬文件。
 
 本文件钉四件事：
@@ -15,8 +16,9 @@ P0-8 的第一代样板是 `hub/seams.py::NET`（第三方边界）。这一代�
 4. **替身真的被读到**（行为断言，不是 AST 形状）：把 `WIRE` 换成「必然不联网」的替身，
    `peek_jobs` 必须返回替身的数据 —— 不联网还能拿到数据，才算注入生效。
 
-层号也在这里钉一条：`remote/seams.py` 零仓内 import（L0）。它一旦 import `remote.http`，
-就会变成 L3、与 `job_lifecycle` 同秩，层账本（`tests/test_remote_dag.py`）当场红。
+落点也在这里钉一条：端口住 `common/ports.py`（零仓内 import）。它一旦 import `remote.*`，
+L0 的宿主（`hub_http`）就没法用它 —— remote 内部的边必须严格向下，同层 import 会被
+`tests/test_remote_dag.py` 当场判红（这是它从 `remote/seams.py` 搬过来的原因）。
 """
 
 from __future__ import annotations
@@ -34,10 +36,15 @@ if str(ROOT) not in sys.path:
 
 import remote.bc_job as bc_mod
 import remote.job_lifecycle as jl_mod
-from remote.seams import PortPair, WirePort
+from common.ports import PortPair, WirePort
 
-SEAMS_FILE = ROOT / "remote" / "seams.py"
-HOSTS = (ROOT / "remote" / "job_lifecycle.py", ROOT / "remote" / "bc_job.py")
+SEAMS_FILE = ROOT / "common" / "ports.py"
+HOSTS = (
+    ROOT / "remote" / "job_lifecycle.py",
+    ROOT / "remote" / "bc_job.py",
+    ROOT / "remote" / "hub_http.py",
+    ROOT / "remote" / "push_client.py",
+)
 TIGHT = ("_request", "_wire_add")
 
 
@@ -98,7 +105,7 @@ def test_host_builds_its_port_from_its_own_primitives(path: Path) -> None:
         assert kw == {"request", "add"}, ast.unparse(value)
         assert {ast.unparse(k.value) for k in value.keywords} == {"_request", "_wire_add"}
     else:
-        # bc_job 不写 job 行 ⇒ 只接发送面，`add` 走缺省 `_noop`（不是忘了接）。
+        # 其余三个宿主不写 job 行 ⇒ 只接发送面，`add` 走缺省 `_noop`（不是忘了接）。
         assert kw == {"request"}, ast.unparse(value)
 
 
@@ -172,7 +179,7 @@ def test_seams_module_has_no_project_imports() -> None:
     project = [
         m for m in mods if m.startswith(("remote", "common", "hub", "worker", "trainer", "biz"))
     ]
-    assert project == [], f"remote/seams.py 抬层了：{project}"
+    assert project == [], f"common/ports.py 抬层了：{project}"
 
 
 # ───────────────────────── 4. 替身真的被读到 ─────────────────────────

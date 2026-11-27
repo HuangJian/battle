@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from typing import NamedTuple
 
 from common.logutil import tag_logger
+from common.ports import PortPair
 from common.protocol import AUTH_HEADER, FAIL_BODY_MAX, JobFailedError
 from common.protocol import NET_ERRORS as _BASE_NET_ERRORS
 
@@ -110,6 +111,10 @@ def _request(
     except urllib.error.HTTPError as e:
         return e.code, e.read()
 
+#: 出站线路端口（P0-8，2026-11-28）：hub 控制面 / 发布侧自己的实现（不走 `remote.http`）。
+#: 调用点只碰这个对象，测试也打它（公开名）而不是 `_request`。
+WIRE: PortPair = PortPair(request=_request)
+
 
 @dataclass(frozen=True, kw_only=True)
 class HubFailSpec:
@@ -162,7 +167,7 @@ def report_job_failure(spec: HubFailSpec) -> bool:
     if len(body) > FAIL_BODY_MAX:  # 已按字段截断，兜底防御（hub 也会 400）
         return False
     try:
-        st, resp = _request(
+        st, resp = WIRE.request(
             base_url,
             token,
             f"/jobs/{jid}/fail",
@@ -214,7 +219,7 @@ def set_cloud_halt(
     if qs:
         path += "?" + "&".join(qs)
     try:
-        st, body = _request(base_url, token, path, timeout=timeout)
+        st, body = WIRE.request(base_url, token, path, timeout=timeout)
     except NET_ERRORS as e:  # 网络层（tunnel 抖动等）——基础设施不可用，不阻断训练
         log(f"cloud {'halt' if halt else 'resume'} 下发失败（{type(e).__name__}: {e}）")
         return False
@@ -245,7 +250,7 @@ def hub_halted(base_url: str, token: str, timeout: float = 10.0, course: str = "
     if course:
         path += "?course=" + urllib.parse.quote(course)
     try:
-        st, body = _request(base_url, token, path, timeout=timeout)
+        st, body = WIRE.request(base_url, token, path, timeout=timeout)
     except NET_ERRORS:
         return None
     if st != 200:
@@ -373,7 +378,7 @@ def probe_job_result(
     try:
         # `timeout` 走**关键字**：测试里的假 `_request` 常把它声明成 keyword-only
         # （位置传参会 TypeError，症状是「探针一调就炸」而不是「问了没答」）。
-        status, body = _request(base_url, token, path.format(jid=jid), timeout=timeout)
+        status, body = WIRE.request(base_url, token, path.format(jid=jid), timeout=timeout)
     except NET_ERRORS as e:  # 瞬时网络错误：与 404 一样是「没答」，不是失败
         return ProbeResult(PROBE_TRANSIENT, None, f"{type(e).__name__}")
     if status == 200:
@@ -428,7 +433,7 @@ def job_reconcile_state(
     `unreachable` 一律保守（不重发）——网络抖动不是丢失，误判的代价是整轮 GPU。
     """
     try:
-        status, body = _request(base_url, token, f"/jobs/{jid}/status", timeout=timeout)
+        status, body = WIRE.request(base_url, token, f"/jobs/{jid}/status", timeout=timeout)
     except NET_ERRORS:
         return JOB_UNREACHABLE
     if status == 404:
@@ -461,7 +466,7 @@ def job_liveness(
     「问一句就走」的纪律一样适用。
     """
     try:
-        status, _body = _request(base_url, token, f"/jobs/{jid}/status", timeout=timeout)
+        status, _body = WIRE.request(base_url, token, f"/jobs/{jid}/status", timeout=timeout)
     except NET_ERRORS:  # 网络层（隧道抖动/DNS/连接拒绝）——不是「它没了」
         return JOB_UNREACHABLE
     if status == 200:
@@ -492,7 +497,7 @@ def unfreeze_job(
     if not base_url or not jid:
         return False
     try:
-        status, body = _request(
+        status, body = WIRE.request(
             base_url,
             token,
             f"/admin/unfreeze?job_id={urllib.parse.quote(jid)}",
@@ -535,7 +540,7 @@ def admin_cancel_job(
     if not base_url or not jid:
         return ADMIN_CANCEL_UNREACHABLE
     try:
-        status, body = _request(
+        status, body = WIRE.request(
             base_url,
             token,
             f"/admin/cancel-job?job_id={urllib.parse.quote(jid)}",
@@ -568,7 +573,7 @@ def _wait_state_note(base_url: str, token: str, jid: str, waited: float) -> str:
     state = "?"
     extra = ""
     try:
-        st, body = _request(base_url, token, f"/jobs/{jid}/status", timeout=15.0)
+        st, body = WIRE.request(base_url, token, f"/jobs/{jid}/status", timeout=15.0)
         if st == 200:
             info = json.loads(body.decode("utf-8"))
             if isinstance(info, dict):
@@ -598,7 +603,7 @@ def _wait_state_note(base_url: str, token: str, jid: str, waited: float) -> str:
         )
     workers = "?"
     try:
-        st2, body2 = _request(base_url, token, "/admin/queue", timeout=15.0)
+        st2, body2 = WIRE.request(base_url, token, "/admin/queue", timeout=15.0)
         if st2 == 200:
             q = json.loads(body2.decode("utf-8"))
             if isinstance(q, dict) and q.get("active_workers") is not None:
@@ -689,19 +694,19 @@ def wait_job(spec: WaitJobSpec) -> dict:
         continue
     # H3：超时前二次确认——leased（云仍在跑）→ 延长等待；done → 直接取结果；
     # frozen（§4.1 熔断）→ 立刻带原因收兵。
-    s_status, s_body = _request(base_url, token, f"/jobs/{jid}/status", timeout=15.0)
+    s_status, s_body = WIRE.request(base_url, token, f"/jobs/{jid}/status", timeout=15.0)
     if s_status == 200:
         s_info = json.loads(s_body.decode("utf-8"))
         state = s_info.get("state") if isinstance(s_info, dict) else None
         if state == "done":
-            st2, body2 = _request(base_url, token, f"/jobs/{jid}/result", timeout=15.0)
+            st2, body2 = WIRE.request(base_url, token, f"/jobs/{jid}/result", timeout=15.0)
             if st2 == 200:
                 loaded = json.loads(body2.decode("utf-8"))
                 if isinstance(loaded, dict):
                     return loaded
         elif state == "failed":
             # 终局（2026-09-17）：收尾确认时也要认失败——否则又多等一个超时窗口。
-            st2, body2 = _request(base_url, token, f"/jobs/{jid}/result", timeout=15.0)
+            st2, body2 = WIRE.request(base_url, token, f"/jobs/{jid}/result", timeout=15.0)
             raise _job_failed_from_body(jid, body2 if st2 == 410 else s_body)
         elif state == "frozen":
             # ★ 毒包熔断（§4.1）：不再「再给一个预算」——冻结就是「没人会来跑它了」，

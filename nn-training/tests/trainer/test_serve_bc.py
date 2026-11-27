@@ -39,6 +39,7 @@ import trainer.loop_plan as loop_plan
 import trainer.loop_serve as loop_serve
 import worker.bc_config as bc_config
 import worker.train_ledger as train_ledger
+from common.ports import PortPair
 from remote import hub_client, hub_http
 from trainer.loop_serve import CourseRuntime, ServeSpec, serve
 from worker.bc_ledger import ROUND_DONE_EVENT, read_events
@@ -242,7 +243,7 @@ def world(bc_course: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Si
     monkeypatch.setattr(bc_loop, "archive_round", archive_round)
     monkeypatch.setattr(bc_loop, "find_round_job", find_round_job)
     # 注入点 = HTTP 面的所有者；`set_cloud_halt` 仍走 `hub_client` 的转发名（调用方延迟 import 它）。
-    monkeypatch.setattr(hub_http, "_request", hub.request)
+    monkeypatch.setattr(hub_http, "WIRE", PortPair(hub.request))
     monkeypatch.setattr(hub_client, "set_cloud_halt", lambda *a, **kw: True)
 
     def fake_clear_halt(url: str, token: str, **kw: Any) -> bool:

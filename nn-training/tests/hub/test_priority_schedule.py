@@ -39,6 +39,7 @@ if str(ROOT) not in sys.path:
 import remote.job_lifecycle as JL
 import remote.job_round as JR
 import remote.worker as W
+from common.ports import PortPair
 from common.protocol import (
     CLAIM_MODE_BACKUP,
     CLAIM_MODE_EXCLUSIVE,
@@ -62,7 +63,6 @@ from hub.server import _HubQueue, _JobStore, make_server
 from hub.store_leases import LeaseSpec
 from remote.job_lifecycle import AcquireSpec, ClaimSpec, PostResultSpec
 from remote.job_spec import RunJobSpec
-from remote.seams import PortPair
 from remote.worker import WorkerLoopSpec
 from tests.helpers import hub_seams
 from tests.helpers.http_server import serve_fast

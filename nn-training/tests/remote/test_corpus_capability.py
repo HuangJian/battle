@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import remote.job_lifecycle as JL
+from common.ports import PortPair
 from common.protocol import (
     CAP_REPLAY_CORPUS,
     COURSE_ENABLE_MARKER,
@@ -31,7 +32,6 @@ from hub.server import _HubQueue, _JobStore, make_server
 from hub.store_leases import LeaseSpec
 from remote import push_dispatch
 from remote.job_lifecycle import ClaimSpec
-from remote.seams import PortPair
 from tests.helpers.http_server import serve_fast
 
 TOKEN = "sekret"

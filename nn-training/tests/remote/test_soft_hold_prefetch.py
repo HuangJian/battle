@@ -42,13 +42,13 @@ import remote.job_lifecycle as JL
 import remote.job_round as JR
 import remote.job_shell as SHELL
 import remote.worker as W
+from common.ports import PortPair
 from remote.bulk_sched import BULK_P1_CRITICAL, BULK_P2_PREFETCH, BulkPreemptError
 from remote.prefetch import (
     PREFETCH_DIR_NAME,
     PrefetchStore,
     pick_candidates,
 )
-from remote.seams import PortPair
 from remote.worker import WorkerLoopSpec
 
 JID = "j" * 16

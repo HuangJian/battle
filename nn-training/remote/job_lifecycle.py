@@ -48,6 +48,7 @@ from typing import Any
 import common.env_probe as env_probe
 import common.runtime
 from common.logutil import tag_logger
+from common.ports import PortPair, WirePort
 from common.protocol import (
     ADMIN_WORKER_PREFETCH_PATH,
     CAP_REPLAY_CORPUS,
@@ -74,7 +75,6 @@ from remote.http import (
     _sched_headers,
     _warn_non_200,
 )
-from remote.seams import PortPair, WirePort
 from remote.wire import (
     _BULK,
     _bulk_pace,
@@ -90,7 +90,7 @@ _log = tag_logger("worker", lambda: time)
 #: 缺省就是本模块原先直调的两个原语；**调用点只碰这个对象**（`WIRE.request(…)`），
 #: 测试也打它（公开名）而不是 `_request` / `_wire_add` 这类实现私有名。
 #: 为什么不是自带实现的单例：`http`(L2) + `wire`(L1) 一 import 就会把本文件抬到它们下面
-#: 去不到的位置 —— 组装壳留在 L0，秩由宿主自己决定（见 `remote/seams.py` 模块头）。
+#: 去不到的位置 —— 组装壳留在 L0，秩由宿主自己决定（见 `common/ports.py` 模块头）。
 WIRE: WirePort = PortPair(request=_request, add=_wire_add)
 
 __all__ = [

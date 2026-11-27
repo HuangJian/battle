@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from common.logutil import tag_logger
+from common.ports import PortPair, WirePort
 from common.protocol import (
     ProtocolError,
     RetryableError,
@@ -49,7 +50,6 @@ from common.protocol import (
 from remote.http import WireRequest, _request
 from remote.job_fs import _persist_result
 from remote.job_spec import BcJobSpec
-from remote.seams import PortPair, WirePort
 
 #: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
 _log = tag_logger("worker", lambda: time)

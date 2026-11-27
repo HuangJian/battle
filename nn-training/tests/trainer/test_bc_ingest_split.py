@@ -30,6 +30,7 @@ if str(ROOT) not in sys.path:
 
 import trainer.bc_ingest as bc_ingest_mod
 import trainer.bc_loop as bc_loop_mod
+from common.ports import PortPair
 
 INGEST_FILE = ROOT / "trainer" / "bc_ingest.py"
 LOOP_FILE = ROOT / "trainer" / "bc_loop.py"
@@ -208,7 +209,7 @@ def test_poll_once_classifies_ready_pending_transient(tmp_path: Path, monkeypatc
     from worker.bc_config import load_bc_course
 
     # S5 第五刀：`_request` 的宿主是 `remote.hub_http`（patch `hub_client` 的转发名不再有效）。
-    monkeypatch.setattr(hub_http, "_request", fake)
+    monkeypatch.setattr(hub_http, "WIRE", PortPair(fake))
     jsonl = tmp_path / "training_log.jsonl"
     course = load_bc_course("bc-c4-v3")  # pending 路径要进 ingest_bc_metrics → 读 course.eval
     wait = bc_ingest_mod.BcWait(jid="j1")

@@ -29,6 +29,7 @@ import pytest
 # 的调用点解析在该模块 ⇒ 那类 patch 目标必须是 `JL`（宿主调用的仍 patch `W`）。
 import remote.job_lifecycle as JL
 import remote.worker as W
+from common.ports import PortPair
 from common.protocol import (
     AUTH_HEADER,
     COURSE_ENABLE_MARKER,
@@ -40,7 +41,6 @@ from common.protocol import (
 )
 from hub.server import _HubQueue, make_server
 from remote.job_lifecycle import ClaimSpec
-from remote.seams import PortPair
 from remote.worker import WorkerLoopSpec
 from tests.helpers.http_server import serve_fast
 from tests.helpers.hub_poll import hub_poll

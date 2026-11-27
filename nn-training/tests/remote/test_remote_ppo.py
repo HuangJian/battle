@@ -1529,11 +1529,11 @@ import remote.http as http_mod
 # 的调用点解析在该模块 ⇒ 那类 patch 目标必须是 `JL`（宿主调用的仍 patch `W`）。
 import remote.job_lifecycle as JL
 import remote.worker as worker_mod
+from common.ports import PortPair
 from common.protocol import RetryableError
 from hub.store_leases import LeaseSpec
 from remote.download import BlobAsk
 from remote.job_lifecycle import PostResultSpec
-from remote.seams import PortPair
 from tests.helpers.http_server import serve_fast
 
 

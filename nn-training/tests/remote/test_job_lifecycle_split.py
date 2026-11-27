@@ -79,7 +79,7 @@ ALLOWED_IMPORTS = {
     "remote.http",
     # 2026-11-28（P0-8 第二代）：出站线路端口的**协议与组装壳**（L0，零仓内 import）。
     # 本簇不再裸调 `_request` / `_wire_add`，而是走 `WIRE`（缺省由这里的两个原语组装）。
-    "remote.seams",
+    "common.ports",
     "remote.wire",
 }
 

@@ -26,8 +26,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from common.ports import PortPair
 from remote import job_lifecycle as jl
-from remote.seams import PortPair
 
 JID = "jid-visibility-1"
 

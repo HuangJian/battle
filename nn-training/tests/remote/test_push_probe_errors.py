@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from common.ports import PortPair
 from remote import push_client as pc
 
 
@@ -24,16 +25,16 @@ def _request_returning(status: int, body: bytes) -> Any:
 
 
 def test_probe_reports_a_hit_and_a_miss(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(pc, "_request", _request_returning(200, b'{"cached": true}'))
+    monkeypatch.setattr(pc, "WIRE", PortPair(_request_returning(200, b'{"cached": true}')))
     hit = pc._probe_sha("http://node", "tok", "/code-sha/z", 5.0)
-    monkeypatch.setattr(pc, "_request", _request_returning(200, b'{"cached": false}'))
+    monkeypatch.setattr(pc, "WIRE", PortPair(_request_returning(200, b'{"cached": false}')))
     miss = pc._probe_sha("http://node", "tok", "/code-sha/z", 5.0)
     assert hit is True and miss is False, "三态：节点明说命中 / 明说没有"
 
 
 def test_a_non_200_status_is_cannot_ask(monkeypatch: pytest.MonkeyPatch) -> None:
     """404/500 是节点明说「这个端点现在不给答案」⇒ 三态的中间那一档。"""
-    monkeypatch.setattr(pc, "_request", _request_returning(404, b""))
+    monkeypatch.setattr(pc, "WIRE", PortPair(_request_returning(404, b"")))
     got = pc._probe_sha("http://node", "tok", "/code-sha/z", 5.0)
     assert got is None
 
@@ -42,7 +43,7 @@ def test_a_network_error_is_cannot_ask(monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom(*_a: object, **_k: object) -> tuple[int, bytes]:
         raise OSError("隧道断了")
 
-    monkeypatch.setattr(pc, "_request", _boom)
+    monkeypatch.setattr(pc, "WIRE", PortPair(_boom))
     got = pc._probe_sha("http://node", "tok", "/code-sha/z", 5.0)
     assert got is None, "链路断了是「问不到」，不是「没有」"
 
@@ -51,7 +52,7 @@ def test_a_200_with_a_non_json_body_must_not_look_like_cannot_ask(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """节点回执形状变了是**确定性**问题：读成 `None` 会让每轮都白传一次 code.zip。"""
-    monkeypatch.setattr(pc, "_request", _request_returning(200, b"<html>proxy</html>"))
+    monkeypatch.setattr(pc, "WIRE", PortPair(_request_returning(200, b"<html>proxy</html>")))
     with pytest.raises(ValueError):
         pc._probe_sha("http://node", "tok", "/code-sha/z", 5.0)
 
@@ -64,6 +65,6 @@ def test_a_programmer_error_is_not_disguised_as_cannot_ask(
     def _wrong_arity(*_a: object, **_k: object) -> tuple[int, bytes]:
         raise TypeError("_request() got an unexpected keyword argument")
 
-    monkeypatch.setattr(pc, "_request", _wrong_arity)
+    monkeypatch.setattr(pc, "WIRE", PortPair(_wrong_arity))
     with pytest.raises(TypeError):
         pc._probe_sha("http://node", "tok", "/code-sha/z", 5.0)

@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
 
 import trainer.bc_loop as bc_loop
 import trainer.bc_round_job as bc_round_job
+from common.ports import PortPair
 from remote import hub_client, hub_http
 from trainer.bc_loop import BcLoop, BcRuntime, find_round_job, prune_remote_jobs
 from worker.bc_config import load_bc_course
@@ -99,7 +100,7 @@ def hub(monkeypatch: pytest.MonkeyPatch) -> FakeHub:
     h = FakeHub()
     # ★ 注入点 = HTTP 面的所有者（`bc_ingest` 也向它取 `_request`）；
     # `hub_client._request` 是转发名，照它打补丁是**空操作**。
-    monkeypatch.setattr(hub_http, "_request", h.request)
+    monkeypatch.setattr(hub_http, "WIRE", PortPair(h.request))
     return h
 
 

@@ -48,7 +48,7 @@
     "tests/trainer/test_loop_park.py": 1,
     "tests/trainer/test_loop_plan_waiting.py": 3,
     "tests/trainer/test_loop_runner_budget.py": 7,
-    "tests/trainer/test_remote_failure_policy.py": 3,
+    "tests/trainer/test_remote_failure_policy.py": 1,
     "tests/worker/test_engine_pool.py": 1,
     "tests/worker/test_eval_census_fields.py": 1,
     "tests/worker/test_eval_timing.py": 10,

@@ -26,6 +26,7 @@ import pytest
 import remote.hub_client as hc
 import remote.hub_http as hub_http
 import remote.push_client as pc
+from common.ports import PortPair
 from common.protocol import JobFailedError
 from remote.hub_client import (
     PROBE_PENDING,
@@ -63,7 +64,7 @@ def http(monkeypatch: pytest.MonkeyPatch) -> _FakeHTTP:
 
     # ★ 注入点 = HTTP 面的所有者（S5 第五刀：`_request` 已下沉 `remote.hub_http`）。
     # 旧家的 `hub_client._request` 是**转发名**，照它打补丁不会影响宿主函数。
-    monkeypatch.setattr(hub_http, "_request", fake_request)
+    monkeypatch.setattr(hub_http, "WIRE", PortPair(fake_request))
     return fake
 
 
@@ -97,7 +98,7 @@ def test_network_error_is_transient(monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(*a: object, **kw: object):
         raise OSError("tunnel i/o timeout")
 
-    monkeypatch.setattr(hub_http, "_request", boom)
+    monkeypatch.setattr(hub_http, "WIRE", PortPair(boom))
     res = probe_job_result("http://h", "t", "j1")
     assert res.state == PROBE_TRANSIENT and "OSError" in res.detail
 

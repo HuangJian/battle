@@ -21,6 +21,7 @@ NODE_RESULT_PATH = "/job/{jid}/result"
 # `_request` 仍是本模块其它函数（缓存查询、submit）的实现细节；结果探测自身走
 # `probe_job_result`（状态码分类的唯一实现，见 hub_http——**HTTP 面的所有者**）。
 from common.logutil import log_line
+from common.ports import PortPair
 from common.protocol import (
     BLOB_INIT,
     NET_ERRORS,
@@ -31,6 +32,10 @@ from common.protocol import (
     pack_job_v2,
 )
 from remote.hub_http import PROBE_READY, PROBE_TRANSIENT, _request, probe_job_result
+
+#: 出站线路端口（P0-8，2026-11-28）：本模块的 `_request` 来自 `remote.hub_http`，
+#: 但解析在本模块命名空间 ⇒ 测试打的是**这里的** `WIRE`（与 `hub_http.WIRE` 互不影响）。
+WIRE: PortPair = PortPair(request=_request)
 
 #: 探针的「问不到」面：网络/传输类（`NET_ERRORS`）**加** `ValueError`（200 但 body 不是
 #: JSON）。必须模块级具名 tuple —— `except (*NET_ERRORS, ValueError)` 的星号形式 mypy 不收。
@@ -113,7 +118,7 @@ def _probe_sha(base_url: str, token: str, path: str, timeout: float) -> bool | N
     `common/distribution` 的探针、`remote/hub_http` 的薄壳同一条判据）。
     """
     try:
-        status, body = _request(base_url, token, path, timeout=timeout)
+        status, body = WIRE.request(base_url, token, path, timeout=timeout)
     except PROBE_ERRORS:
         return None
     if status != 200:
@@ -366,7 +371,7 @@ def submit_job(base_url: str, token: str, upload: JobUpload) -> dict:
             manifest, payload_zip, code_zip, ts_code_zip, plan, use_v2
         )
         try:
-            status, resp = _request(
+            status, resp = WIRE.request(
                 base_url,
                 token,
                 "/job",
@@ -437,7 +442,7 @@ def cancel_job(base_url: str, token: str, jid: str, *, timeout: float = 15.0) ->
     那一行的口径一致）。所以本函数**不抛**，调用方也不必包 try。
     """
     try:
-        status, _body = _request(
+        status, _body = WIRE.request(
             base_url, token, f"/job/{jid}/cancel", timeout=timeout, method="POST"
         )
     except Exception:

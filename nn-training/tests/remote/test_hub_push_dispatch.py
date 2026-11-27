@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from common.ports import PortPair
 from common.protocol import (
     AUTH_HEADER,
     CAP_OFFLINE_PUSH,
@@ -827,7 +828,7 @@ def test_cache_probe_failure_reuses_last_hit(monkeypatch) -> None:
             raise TimeoutError("tunnel slow")
         raise AssertionError(f"意外的路径：{path}")
 
-    monkeypatch.setattr(pc, "_request", fake_request)
+    monkeypatch.setattr(pc, "WIRE", PortPair(fake_request))
     url, tok, sha = "http://node.local", "tok", "a" * 64
     assert pc.code_cached_on_node(url, tok, sha) is True
     assert pc.code_cached_on_node(url, tok, sha) is True, (
@@ -866,7 +867,7 @@ def test_submit_job_transient_retry_ladder(monkeypatch) -> None:
         calls["n"] += 1
         return 409, b"busy"
 
-    monkeypatch.setattr(pc, "_request", fake_request)
+    monkeypatch.setattr(pc, "WIRE", PortPair(fake_request))
     # 只替 pc 命名空间里的 time：不碰全局 time.sleep（其它线程/插件还要用）。
     monkeypatch.setattr(
         pc, "time", _types.SimpleNamespace(sleep=lambda s: slept.append(s), time=time.time)

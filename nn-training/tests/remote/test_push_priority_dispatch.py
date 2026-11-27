@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import remote.push_client as PC
+from common.ports import PortPair
 from remote.push_dispatch import PushDispatcher, PushDispatchSpec
 from remote.worker_server import WorkerServerState
 from tests.remote.test_hub_push_dispatch import (
@@ -176,10 +177,10 @@ def test_cancel_job_unreachable_is_false_not_raise(monkeypatch) -> None:
     def _boom(*a, **k):
         raise OSError("隧道断了")
 
-    monkeypatch.setattr(PC, "_request", _boom, raising=True)
+    monkeypatch.setattr(PC, "WIRE", PortPair(_boom), raising=True)
     assert PC.cancel_job("http://x", "t", "j1") is False
 
 
 def test_cancel_job_200_is_true(monkeypatch) -> None:
-    monkeypatch.setattr(PC, "_request", lambda *a, **k: (200, b"{}"), raising=True)
+    monkeypatch.setattr(PC, "WIRE", PortPair(lambda *a, **k: (200, b"{}")), raising=True)
     assert PC.cancel_job("http://x", "t", "j1") is True

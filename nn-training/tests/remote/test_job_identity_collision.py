@@ -31,6 +31,7 @@ if str(ROOT) not in sys.path:
 import remote.http as http_mod
 import remote.job_lifecycle as jl_mod
 import remote.worker as worker_mod
+from common.ports import PortPair
 from common.protocol import (
     collision_rows,
     idempotency_key,
@@ -42,7 +43,6 @@ from common.protocol import (
 from hub.server import _HubQueue, _JobStore
 from remote.hub_client import HubClientError
 from remote.job_lifecycle import ClaimSpec
-from remote.seams import PortPair
 
 #: 两门课共用的四分量（事故现场的「全同」部分）。
 _SHARED = {

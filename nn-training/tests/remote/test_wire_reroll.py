@@ -35,6 +35,7 @@ if str(ROOT) not in sys.path:
 # 第八刀起，本簇住在 `remote/job_lifecycle.py`：**簇内互调**与直调 `_request` / `_wire_add`
 # 的调用点解析在该模块 ⇒ 那类 patch 目标必须是 `JL`（宿主调用的仍 patch `W`）。
 import remote.job_lifecycle as JL
+from common.ports import PortPair
 from common.protocol import RetryableError
 from remote import http as http_mod
 from remote import wire as wire_mod
@@ -42,7 +43,6 @@ from remote import worker as worker_mod
 from remote.bulk_sched import BULK_P1_CRITICAL, BULK_P2_PREFETCH, BulkPreemptError
 from remote.http import WireGet, WireRequest
 from remote.job_lifecycle import PostResultSpec
-from remote.seams import PortPair
 
 # 跨测试模块复用可观测等待原语（先例：`test_role_routing` → `test_run_segment._publish`）。
 # 同款夹具在 `test_bulk_sched` 已用于「单通道并发排队」。

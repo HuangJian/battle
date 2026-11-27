@@ -23,9 +23,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import remote.job_lifecycle as JL
+from common.ports import PortPair
 from common.protocol import WORKER_ID_HEADER
 from remote.job_lifecycle import PostResultSpec
-from remote.seams import PortPair
 
 JID = "j" * 16
 

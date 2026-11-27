@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from common.ports import PortPair
 from worker.bc_config import (
     bc_corpus_identity_fp,
     load_bc_course,
@@ -441,7 +442,7 @@ def test_wait_bc_round_zero_wait_sec_means_unlimited(tmp_path: Path, monkeypatch
         return 404, b"{}"
 
     # 注入点 = HTTP 面的所有者（`bc_ingest` 向它取 `_request`）。
-    monkeypatch.setattr(hub_http, "_request", fake_request)
+    monkeypatch.setattr(hub_http, "WIRE", PortPair(fake_request))
     monkeypatch.setattr(bc_loop.time, "sleep", lambda _s: None)  # 免真等 poll_sec
 
     out = bc_loop.wait_bc_round(

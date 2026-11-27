@@ -23,6 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from common.ports import PortPair
 from common.protocol import JobFailedError
 from remote.hub_http import WaitJobSpec, wait_job  # 所有者（S5 第五刀）；旧家 hub_client 仍转发此名
 from trainer.loop_steps import TrainingSteps
@@ -215,8 +216,8 @@ def test_wait_job_poll_backoff_on_network_errors() -> None:
 
     import remote.hub_http as hub_http
 
-    orig_req, orig_sleep = hub_http._request, hub_http.time.sleep
-    hub_http._request = fake_request  # type: ignore[assignment]
+    orig_wire, orig_sleep = hub_http.WIRE, hub_http.time.sleep
+    hub_http.WIRE = PortPair(fake_request)
     try:
         hub_http.time.sleep = lambda s: sleeps.append(float(s))
         out = wait_job(
@@ -225,7 +226,7 @@ def test_wait_job_poll_backoff_on_network_errors() -> None:
             )
         )
     finally:
-        hub_http._request, hub_http.time.sleep = orig_req, orig_sleep
+        hub_http.WIRE, hub_http.time.sleep = orig_wire, orig_sleep
     assert out == {"ok": 1}
     assert sleeps == [5.0, 10.0, 20.0]  # 5 × 2^k，封顶 60
 
@@ -242,8 +243,8 @@ def test_wait_job_404_does_not_backoff() -> None:
 
     import remote.hub_http as hub_http
 
-    orig_req, orig_sleep = hub_http._request, hub_http.time.sleep
-    hub_http._request = fake_request  # type: ignore[assignment]
+    orig_wire, orig_sleep = hub_http.WIRE, hub_http.time.sleep
+    hub_http.WIRE = PortPair(fake_request)
     try:
         hub_http.time.sleep = lambda s: sleeps.append(float(s))
         wait_job(
@@ -252,5 +253,5 @@ def test_wait_job_404_does_not_backoff() -> None:
             )
         )
     finally:
-        hub_http._request, hub_http.time.sleep = orig_req, orig_sleep
+        hub_http.WIRE, hub_http.time.sleep = orig_wire, orig_sleep
     assert sleeps == [5.0, 5.0]

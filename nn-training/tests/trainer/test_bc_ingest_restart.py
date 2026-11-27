@@ -19,6 +19,7 @@ import pytest
 
 import remote.hub_http as hub_http
 import trainer.bc_ingest as bc_ingest
+from common.ports import PortPair
 from trainer.bc_ingest import BcWait, EpochEvalSpec, ingest_bc_metrics
 from worker.bc_config import BcCourseConfig, BcEvalBlock, BcTrainBlock
 
@@ -92,8 +93,8 @@ def test_restart_does_not_reingest_or_reeval_known_epochs(
     monkeypatch.setattr(bc_ingest, "run_epoch_eval", fake_eval)
     monkeypatch.setattr(
         hub_http,
-        "_request",
-        lambda *_a, **_k: (200, json.dumps({"rows": _rows(1, 2, 3, 4, 5, 6)}).encode("utf-8")),
+        "WIRE",
+        PortPair(lambda *_a, **_k: (200, json.dumps({"rows": _rows(1, 2, 3, 4, 5, 6)}).encode("utf-8"))),
     )
 
     wait = BcWait(jid=JID)
@@ -139,8 +140,8 @@ def test_restart_evaluates_boundary_with_metric_row_but_no_eval(
     monkeypatch.setattr(bc_ingest, "run_epoch_eval", fake_eval)
     monkeypatch.setattr(
         hub_http,
-        "_request",
-        lambda *_a, **_k: (200, json.dumps({"rows": _rows(1, 2, 3, 4)}).encode("utf-8")),
+        "WIRE",
+        PortPair(lambda *_a, **_k: (200, json.dumps({"rows": _rows(1, 2, 3, 4)}).encode("utf-8"))),
     )
 
     wait = BcWait(jid=JID)
@@ -179,8 +180,8 @@ def test_new_job_starts_from_scratch(tmp_path: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(bc_ingest, "run_epoch_eval", fake_eval)
     monkeypatch.setattr(
         hub_http,
-        "_request",
-        lambda *_a, **_k: (200, json.dumps({"rows": _rows(1, 2)}).encode("utf-8")),
+        "WIRE",
+        PortPair(lambda *_a, **_k: (200, json.dumps({"rows": _rows(1, 2)}).encode("utf-8"))),
     )
 
     wait = BcWait(jid=JID)

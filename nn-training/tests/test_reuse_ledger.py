@@ -222,7 +222,7 @@ BASELINE_CLONE = 18
 #: 因此在 `worker/train/bc.py` / `bc_paddle.py` / `worker/scripts/measure_checkpoint_rss.py`
 #: 三个模块出现 —— 这不是「又抄了一份」，恰恰相反：两个后端**必须**同形（判据见
 #: `tests/worker/test_bc_epoch_seams.py`），名字不同才是欠账。exact / clone 都没动（16 / 17）。
-#: **2026-11-28 抬同名 1 格（146 → 147）的账**：P0-8 第二代出站端口（`remote/seams.py`）
+#: **2026-11-28 抬同名 1 格（146 → 147）的账**：P0-8 第二代出站端口（`common/ports.py`）
 #: 声明 `WirePort.request(...)` —— 它与 `common/http_pool.request` / `remote/control_pool.request`
 #: 凑成 ≥3。与前几格同款：**协议镜像，不是实现**（`def request` 的体只有 `...`；真正的收发仍是
 #: `remote.http._request`，端口只是它的具名入口）。取这个名字是判据本身：调用点写

@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
 import pytest
 
 import remote.hub_http as hub_http
+from common.ports import PortPair
 from common.protocol import JobFailedError, normalize_manifest
 from hub.store_leases import LeaseSpec
 from remote.hub_client import HubClientError, JobCancelledError, cancel_job, wait_job
@@ -148,13 +149,14 @@ def test_wait_stops_when_the_ledger_says_cancelled(tmp_path: Path) -> None:
     base, _store, srv, th, jid = _publish_unclaimed(tmp_path)
     lines: list[str] = []
     asked: list[str] = []
-    real_request = hub_http._request
+    real_wire = hub_http.WIRE
+    real_request = real_wire.request
 
     def _spy(base_url, token, path, *a, **k):
         asked.append(path)
         return real_request(base_url, token, path, *a, **k)
 
-    hub_http._request = _spy
+    hub_http.WIRE = PortPair(_spy)
     try:
         # trainer 侧 M2 的撤单行（hub 与 trainer 共读同一份 training_log.jsonl）。
         assert cancel_job(
@@ -178,9 +180,10 @@ def test_wait_stops_when_the_ledger_says_cancelled(tmp_path: Path) -> None:
         assert isinstance(ei.value, HubClientError)  # 可重试：与 M1 lost 同一条处置路
         assert asked.count("/admin/queue") == 0  # 早返回：不问在线 worker（那条路只服务 pending）
     finally:
-        hub_http._request = real_request
+        hub_http.WIRE = real_wire
         srv.shutdown()
         th.join()
+    assert asked, "spy 没生效（端口没被换掉）—— 下面那条 asked 断言就成了空判据"
     cancelled = [ln for ln in lines if "已被撤单" in ln]
     assert cancelled, lines
 

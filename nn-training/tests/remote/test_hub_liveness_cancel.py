@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import remote.hub_http as http_mod
+from common.ports import PortPair
 
 JID = "j" * 16
 
@@ -51,7 +52,7 @@ def _routes(
             raise r
         return r
 
-    monkeypatch.setattr(http_mod, "_request", fake)
+    monkeypatch.setattr(http_mod, "WIRE", PortPair(fake))
     return seen
 
 
@@ -93,7 +94,7 @@ def test_unfreeze_is_best_effort_and_never_raises(monkeypatch) -> None:
         sent.append("x")
         return 200, b"{}"
 
-    monkeypatch.setattr(http_mod, "_request", _count)
+    monkeypatch.setattr(http_mod, "WIRE", PortPair(_count))
     assert http_mod.unfreeze_job("", "t", JID) is False
     assert http_mod.unfreeze_job("http://hub.invalid", "t", "") is False
     assert sent == []

@@ -209,11 +209,8 @@ LAYERS: dict[str, int] = {
     # hub 的第三方边界端口（2026-11-27，P0-8 单包样板）：只碰 stdlib + `common.net_http`
     # ⇒ **L0**。`hub.task_pack` 通过 `seams.NET` 出站，不再直连 `common.net_http`。
     "hub.seams": 0,
-    # remote 的**出站线路端口**（2026-11-28，P0-8 第二代）：只有 Protocol 与 `PortPair`
-    # 组装壳，零仓内 import ⇒ **L0**。缺省实现由宿主自己拼（`job_lifecycle` / `bc_job`
-    # 用自己已 import 的 `http._request` / `wire._wire_add`）——所以它不抬任何读者的秩：
-    # `job_lifecycle`(L3) 站在 L0 上，边方向仍严格向上。
-    "remote.seams": 0,
+    # remote 的出站线路端口住 `common/ports.py`（不是 remote 模块，2026-11-28）：
+    # `hub_http` 自己是 L0，端口若在 remote 内会撞「边必须严格向下」；住 common 两侧都成立。
     # 任务包新鲜度门 / 缺包自愈门 / 清单读数的**判据**：依赖 `hub.seams`(L0) +
     # `common.protocol` ⇒ **L1**。放在这里（而不是挂在 `hub/http_face`）是因为它有两个低层
     # 读者：`hub.offline`（取包端点）与 `hub.queue_offline`（离线清单）。
