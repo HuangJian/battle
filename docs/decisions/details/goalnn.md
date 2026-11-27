@@ -7692,3 +7692,122 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **未闭的环**：① 2 核机上 ×2 的真实 ping 读数与 `★ 超额认购` 是否出现（需真机跑一轮）；
   ② eval 调高后抢槽的实测（R8）；③ 批量流式回传与中央列表调度（P5）；④ 上线前必须清盘
   （现场 free=2706MB，距熔断 2048 只剩 658MB）。
+
+## §2026-11-27-goalnn-gate-workers-wait-bound（2026-11-27，Windows 原生 pygate >100s vs WSL ~60s）
+
+### 现场与对照口径
+
+同一 commit `a9891ec`、同机、两边都空载：Windows 原生（8 物理 / 16 逻辑，Python 3.12.13，
+`D:\github\battle2`，NTFS）vs WSL2（`/home/hj/battle`，ext4，Python 3.10.21，`nproc` = 16）。
+两侧 `physical_cores()` 都 = 8 ⇒ 门禁默认都开 8 worker（Linux 走 `forkdist`，Windows 走 xdist）。
+
+| 指标 | Windows | WSL | 倍率 |
+|---|---|---|---|
+| 门禁总墙钟（改动前） | 111s | 68s | 1.63× |
+| pytest 墙钟（改动前） | 109.5s | 64.8s | 1.69× |
+| Σ 每用例 call 时间（8 worker） | 605s | 304s | 2.0× |
+| 解释器启动 | 110ms | 21ms | 5.2× |
+| `import torch` | 2.2s | 1.2s | 1.8× |
+| `python -c pass` 子进程 | 85ms | 20ms | 4.3× |
+| `hub.server` 起到可答 | 1.55s | 0.90s | 1.7× |
+| 建文件 + 2×stat | 0.227ms | 0.044ms | 5.2× |
+| unlink | 0.086ms | 0.014ms | 6.1× |
+| 回环 HTTP 往返 | 2.7ms | 3.1ms | 1.0× |
+| 收集（tests/+e2e/，单进程） | 9.4s | 7.8s | 1.2× |
+
+### 归因（不是猜测，是可复算的）
+
+1. **Σ call 时间缺口 301s ≈ 缺口本身**：8 worker 并行 ⇒ 301/8 ≈ 37s 墙钟，与 43s 的实测缺口同量级。
+   即缺口在**用例执行里**，不在启动/调度框架。
+2. **它高度集中**：top 50 例占 55%（151.8s）、top 200 例占 80%；按目录 `e2e/` 37%、`tests/remote/` 27%、
+   `tests/worker/` 13%，而纯逻辑的 `tests/biz/` 76 例只差 1.4s ⇒ **不是解释器/框架整体慢**。
+3. **集中在「等」的地方**：全量实测 **~772 个子进程**（worker 侧 `wait` 合计 104s）、
+   `hub.server` 每起一次 1.55s、闭合回环端口在 Windows 上是 **timeout 而非 refused**
+   （`probe_hub(timeout=2.0)` 两路 ⇒ 4.03s，WSL 同例 0.01s），文件元数据操作 5~6×。
+4. **结构性差异**：Linux 的 `forkdist` 收集一次再 fork（COW 共享 `sys.modules` 与 Item）；
+   Windows 无 `os.fork` ⇒ xdist 每个 worker 各自 `import torch` + 收集 666 个模块（9.4s / 378MB 地板）。
+5. **WSL 的额外优势**：8 worker 面对 16 vCPU，等待天然被重叠；Windows 的 8 worker 在 8 物理核上
+   还要与自己的子进程抢核。
+
+⇒ 结论：**本套件是 wait-bound 的，不是 CPU-bound 的**。对 wait-bound 负载，加 worker 是重叠等待；
+对 CPU 密集负载（`bun test`）才是抢核 + 涨内存（§2026-10-03 的正确结论，但被误用到了 pytest 上）。
+
+### 实测阶梯（Windows xdist，全套 `tests/ e2e/`，各 1~2 轮）
+
+| worker | 墙钟 |
+|---|---|
+| 8 | 93.9 / 109.5s |
+| 10 | 90.5s |
+| **12** | **81.5 / 86.6s** |
+| 14 | 87.7s |
+| 16 | 85.7s |
+
+WSL forkdist：8 → 64.5s，12 → 52.7 / 55.6s（同向）。⇒ 8 核机器上 1.5× = 12 是最优点；
+超过 12 后 HT 抢执行单元 + 每 worker 的 import/收集地板开始回吐。
+
+### 落地后的读数
+
+- Windows：`bun run pygate` **111s → 81s**（pytest 109.5 → 80.0s，7080 passed）。
+- WSL（同口径 `NN_GATE_NPROC=12`，该副本未带本次改动）：**68s → 50s**（pytest 64.8 → 47.2s）。
+
+### 未做（环境侧，仓库改不动）
+
+- **Defender 实时保护**对本仓库 + venv 的扫描（`Add-MpPreference -ExclusionPath`，需管理员）；
+  它是「进程启动 5×」「文件元数据 5~6×」最可能的放大器（本次无法验证：当前 shell 无管理员）。
+- ~~**闭合回环端口 timeout**（Windows 网络栈/过滤驱动行为）：`_dead_port()` 类用例白等 timeout；
+  要改只能改测试侧的探测超时，属另一件事。~~ → **已落地**：见本文件
+  §2026-11-27-goalnn-test-dead-port-rst（`subproc_util.DeadPort`，接受即 RST）。
+
+## §2026-11-27-goalnn-test-dead-port-rst
+
+### 实测：Windows 上「死端口」到底怎么死
+
+| 目标 | Windows | WSL |
+|---|---|---|
+| 闭端口（`bind(0)` 后 `close`）TCP | **`TimeoutError` 2.011s / 2.012s** | `ConnectionRefusedError` 0.003s |
+| 闭端口 HTTP（urllib） | `URLError: timed out` 2.029s | `TimeoutError` 2.048s |
+| `bind` 但不 `listen` | **`TimeoutError` 2.017s** | `ConnectionRefusedError` 0.006s |
+| **接受即 RST**（`SO_LINGER=0`）TCP | `ok` 0.014s | `ok` 0.000s |
+| **接受即 RST** HTTP | `ConnectionResetError` 0.001s | `ConnectionResetError` 0.001s |
+
+⇒ Windows 的回环栈（或过滤驱动）对「没有监听者」的 SYN **直接丢弃**，不回 RST；不是端口没关干净。
+所以 `_dead_port()`（bind 后 close）在这台机器上就是「每条用例白等 2s×N」。
+
+### 落地
+
+- `tests/subproc_util.py`：`DeadPort` / `dead_port()`（唯一事实源，附平台相关的 `struct linger` 打包：
+  Windows 两个 `u_short`、POSIX 两个 `int`，混用会 EINVAL）。
+- `tests/remote/test_rollout_relay.py`：`dead_link` fixture、`probe_hub` 不可达、`channel.open` 失败、
+  `_forward` 502 四条改用 `DeadPort`；断言放宽为 `("refused", "timeout", "reset")` 的**小写**比较
+  （RST 的原文是 `ConnectionResetError`）。TCP 层那条保留闭端口 + `TCP_PROBE_SEC=0.3`。
+- `tests/remote/test_error_report.py`：`post_error` 的死 hub 改用 `dead_port()`。
+- `tests/test_subproc_util.py`：新增守卫 `test_no_private_dead_port_helper_anywhere`（用 **AST** 找
+  `def _dead_port`，不是比源码措辞 —— 不占文本形态断言预算；先写成 `"…" in code` 的两条把
+  1536 抬到 1538，改成 AST 后归零）。
+
+### 读数
+
+`tests/remote/test_rollout_relay.py + test_error_report.py` 的 `--durations` 表：
+**4.09 / 4.08 / 4.02 / 5.59 / 2.02s → 全部消失**（最长降到 2.0s 的「转发超时」用例，它等的是 relay 自己的预算，
+不是 TCP 行为）。条数不变：7080 passed / 13 skipped；`bun run pygate` 84.1s、`bun run check` 2873 pass 绿。
+
+墙钟仍在当天噪声（±10s）内：收益是**确定性**——不再有 2–5.6s 的固定白等，也不再刷 >5s 警告。
+
+## §2026-11-27-goalnn-test-serve-fast-shutdown
+
+### 实测
+
+| 用例 / 文件 | 改前 | 改后 |
+|---|---|---|
+| `test_rollout_relay.py`（起两个服务那批） | **1.03s / 1.02s**（多条） | 0.25 – 0.45s |
+| `test_corpus_capability::test_http_claim_replay_requires_capability` | 0.53s | < 0.25s |
+| `test_hub_client_gone::test_client_gone_is_warn_not_error` | ~0.5s | 0.25s |
+| `test_http_pool::test_no_proxy_forces_direct_and_keeps_its_own_connection` | **4.03s** | **0.62s** |
+
+1.03s 的构成是两次 `shutdown()`（0.5s 轮询 × 2），不是请求本身；关掉 `poll_interval` 后只剩真实请求时间。
+`test_http_pool` 那条的 4.03s 与关服无关：它把代理指向死端口 `127.0.0.1:9`，Windows 上是 timeout（不是 refused）⇒ 两次请求各等满 2s 预算。压到 0.3s 后判据（被代理拦住 / 直连成功）不变。
+
+### 未动
+
+- `tests/remote/test_push_bootstrap_teardown.py`：它钉的就是 `shutdown()` 只停循环、`server_close()` 才放套接字——用 10ms 轮询会把这条契约的**时间面**也改掉，故保持缺省。
+- 生产侧的 `srv.serve_forever()`（`hub/boot.py`、`remote/worker_server.py`、`hub/smoke_loopback.py` 等）：缺省 0.5s 是生产行为，不动。

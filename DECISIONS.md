@@ -2927,6 +2927,8 @@ JUnit 逐用例（`--reporter=junit`）一看：几乎每个文件只有 1–3 �
 
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §20「决策正文归档」· 锚 `### §2026-10-03-goalnn-gate-parallelism-physical-cores`
 
+- **修订（2026-11-27）**：本条只留下「两个口径按消费域分工」与 `physical_cores()` 的定义；**门禁 pytest 的 worker 默认值不再等于物理核数**（改按 1.5 × 物理核，见 §2026-11-27-goalnn-gate-workers-wait-bound）——原结论测的是 CPU 密集的 `bun test`，pytest 套件是 wait-bound 的，内存风险已由 §2026-11-20 的提交余量闸单独管。
+
 ## §2026-10-03-offline-pack-truncation-and-ref-blob（2026-10-03，用户报障×2：半截任务包被当成功 / 离线包缺 kickstart ref 字节）
 
 - **决定**：① 两处孪生 `_read_body`（`remote/tailscale_boot.py`、`remote/http.py`）在 EOF 处
@@ -11586,3 +11588,30 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 
 - **验证**：G19 392 / 95 → **384 / 91**（hub 自有 6 → 0）；定向 232 passed；
   完整 pygate **7087 passed / 3 skipped**，ruff + mypy 绿。全文 → `docs/nn/engineering.md` §388。
+
+## §2026-11-27-goalnn-gate-workers-wait-bound（2026-11-27，用户报障：同机 `bun run pygate` 在 Windows 原生 >100s、WSL ~60s）
+
+- **背景**：本套件是 **wait-bound** 的（全量实测 ~772 个子进程 + 上千次 HTTP/死端口探测），8 worker 在 8 物理核上等不到重叠；而 WSL 的 8 worker 有 16 vCPU ⇒ 等待被重叠掉。与 §2026-10-03 的「HT worker 只涨内存」不矛盾：那条测的是 CPU 密集的 `bun test`，内存风险现已由 §2026-11-20 的提交余量闸单独管。
+- **备选与否决**：① 维持物理核、只做磁盘/杀软侧优化 —— 否，纯逻辑目录（`tests/biz/` 76 例）差值仅 1.4s，磁盘解释不了 300s 的 call 时间缺口；② 直接开满逻辑核（16）—— 否，实测 85.7s 反而比 12 的 81.5s 慢（HT 抢执行单元 + 每 worker 的 import/收集地板）；③ 拆「torch 池 / 免 torch 池」—— 否，§2026-09-26 已否决，关键路径变成较慢的那一池。
+- **决定**：pytest worker 缺省 = `platform_utils.pytest_workers()`（**1.5 × 物理核，封顶 `effective_cores()`**），公式只有一份，门禁脚本 / `tools/task.py` / Makefile 三处共用（`NN_GATE_NPROC` / `NPROC` 覆盖不变；`physical_cores()` 口径本身不动）。
+- **违反后果**：退回物理核 ⇒ 每次门禁白付 ~30s（Windows 111 → 81s）；三处各写一套公式 ⇒ 入口并行度漂移，且「为什么是 12」再也无从可查。
+
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-27-goalnn-gate-workers-wait-bound
+
+## §2026-11-27-goalnn-test-dead-port-rst（2026-11-27，收掉 Windows 上「死端口按 timeout 计费」的白等）
+
+- **背景**：Windows 上连**没人监听**的回环口是 **2s timeout 而不是 refused**（实测同一端口两次 2.011 / 2.012s；`bind` 之后**不** `listen` 也一样 2.017s ⇒ SYN 被丢、不回 RST），而同机 WSL 是 0.003s `ConnectionRefusedError`。于是每条「对着死端口探一下」的用例在 Windows 上都按 timeout 计费：`tests/remote/test_rollout_relay.py` 实测单条 **4.09 / 4.08 / 4.02 / 5.59s**（WSL 0.01s），正是全量门禁里那批 >5s 警告的来源。
+- **决定**：新增 `tests/subproc_util.py::DeadPort`（`dead_port()` 上下文管理器）= 一个**接受连接后立刻带 `SO_LINGER=0` close** 的回环口，客户端 ms 级拿到 RST；`tests/remote/` 的死端口用例一律改用它（Windows 1ms / WSL 1ms，两平台一致）。唯一例外是「要钉 TCP 层连不上」的 `test_probe_hub_sweeps_every_resolved_ip_when_https_fails`——它继续用闭端口，但把 `TCP_PROBE_SEC` 压到 0.3s。
+- **被否决**：① 只把用例里的 `timeout=` 调小——死因会从 refused 漂成 timeout，`_err_text` 的分叉用例反而失真；② 保留 `bind` 后 `close`——那正是 2s 的来源；③ 用「立刻 FIN」而不是 RST——客户端要先写成功再读 EOF，慢且措辞不稳定（`RemoteDisconnected` 与 `ConnectionResetError` 混着来）。
+- **违反后果**：新增「对着死端口」的用例若再用 `bind` 后 `close`，Windows 上每条白付 2s（`tests/test_subproc_util.py` 的源码守卫已钉住）；`_err_text` 对 RST 的原话是 `ConnectionResetError`，断言必须比小写（大写 `Reset` 不在 `"reset"` 里）。
+
+—— 全文（实测表 / 取舍 / 验证读数）→ `docs/decisions/details/goalnn.md` §2026-11-27-goalnn-test-dead-port-rst
+
+## §2026-11-27-goalnn-test-serve-fast-shutdown（2026-11-27，收掉测试里每次关服白等半个轮询周期）
+
+- **背景**：`socketserver.BaseServer.serve_forever()` 的 `poll_interval` 缺省 **0.5s**，而 `shutdown()` 无条件等循环看见停止标志 ⇒ 每次关服白等 0–0.5s。仓库早已有 `tests/helpers/http_server.py::serve_fast`（10ms 轮询，且刻意**不**再全局改写标准库缺省值），但仍有 7 处测试自己起了裸线程：`tests/remote/test_rollout_relay.py` 的 `_serve()`（起两个服务的用例实测 **1.03s**，几乎全是两次关服）+ `tests/common/test_http_pool.py`、`tests/hub/{test_relay_ping_cache,test_offline_bc_course,test_hub_origin_close,test_hub_client_gone}.py`、`tests/remote/test_corpus_capability.py`。
+- **决定**：这些 fixture 一律走 `serve_fast(...)`；**被测行为本身就是关服语义**的地方（`tests/remote/test_push_bootstrap_teardown.py` 的 `shutdown()`/`server_close()` 契约）保持缺省构造，不遮蔽生产问题。另把 `test_http_pool.py` 里「死代理端口」的预算从 2s 压到 0.3s（死回环口在 Windows 上是 timeout，实测该条 4.03s）。
+- **被否决**：① 再次全局 patch 标准库缺省值——上一轮正是因为「关服慢」在测试里永远不可复现才拆掉的；② 把 `shutdown()` 换成 `server_close()`——语义不同（前者停循环、后者放套接字），多条用例钉的正是这个组合。
+- **违反后果**：新起的测试 HTTP 服务若用裸 `Thread(target=srv.serve_forever)`，每条用例白付 0–0.5s/服务，且会重新把「关服慢」藏在测试之外（本文件已把 `serve_fast` 的理由写在模块头）。
+
+—— 全文（实测读数）→ `docs/decisions/details/goalnn.md` §2026-11-27-goalnn-test-serve-fast-shutdown

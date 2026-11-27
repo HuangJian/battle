@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import ast
 import os
 import socket
 import sys
@@ -312,6 +313,26 @@ def test_no_private_free_port_helper_anywhere() -> None:
         code = _code_of(rel)
         assert "def _free_port" not in code, f"{rel} 又写了一份私有探端口助手——用 subproc_util"
         assert "_free_port()" not in code, f"{rel} 仍在调用私有 _free_port()"
+
+
+def test_no_private_dead_port_helper_anywhere() -> None:
+    """源码守卫：死端口一律走 `subproc_util.dead_port()`。
+
+    2026-11-27：每个文件各写一份 `_dead_port()`（bind 后 close）时，Windows 上**每条**
+    用到它的用例都白等 2–5.6s（`tests/remote/` 实测 4.09s vs 同机 WSL 0.01s）—— 闭回环口
+    在 Windows 上是 timeout 而不是 refused（SYN 被丢，不回 RST）。`DeadPort` 反过来：
+    接受连接后立刻 RST，~1ms，且两个平台一致。
+    """
+    # AST 而不是 `"_dead_port" in code`：这是「不许有这个名字的定义」的结构判据，不是比措辞
+    # （文本形态断言预算只管后者）。
+    offenders: list[str] = []
+    for rel in _test_files():
+        tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+        if any(
+            isinstance(n, ast.FunctionDef) and n.name == "_dead_port" for n in ast.walk(tree)
+        ):
+            offenders.append(rel)
+    assert offenders == [], f"这些测试又写了一份私有死端口助手——用 subproc_util.dead_port()：{offenders}"
 
 
 def test_service_spawning_tests_borrow_ports_from_subproc_util() -> None:

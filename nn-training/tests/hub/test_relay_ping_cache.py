@@ -42,6 +42,7 @@ if str(ROOT) not in sys.path:
 from hub import http_face
 from hub.relay import CHANNEL_STALE_SEC, PING_SERVE_MAX_SEC, PING_TTL_SEC, NodeRelay
 from hub.server import _HubQueue, make_server
+from tests.helpers.http_server import serve_fast
 
 TOKEN = "sekret"
 
@@ -72,7 +73,7 @@ def node(relay: NodeRelay) -> Iterator[str]:
 def hub_port(tmp_path: Path) -> Iterator[int]:
     hub = _HubQueue({}, discover_root=tmp_path)
     srv = make_server(hub, 0, TOKEN, host="127.0.0.1")
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     try:
         yield int(srv.server_address[1])
     finally:

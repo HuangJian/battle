@@ -67,6 +67,7 @@ from tests.remote.test_worker_reap_stall import (
     _patch_hub,
     _run_loop,
 )
+from tests.subproc_util import dead_port
 
 TOKEN = "tok-err"
 REASON = "RetryableError: 传输损坏"
@@ -132,14 +133,6 @@ class _FakeHub:
     @property
     def base(self) -> str:
         return f"http://127.0.0.1:{self._srv.server_address[1]}"
-
-
-def _dead_port() -> int:
-    """占一个端口再放掉 ⇒ 这个端口上必然没人监听（= 云机上 hub 不可达那一档）。"""
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-    port = int(srv.server_address[1])
-    srv.server_close()
-    return port
 
 
 def _wait_for(pred: Any, timeout: float = 5.0) -> bool:
@@ -228,8 +221,11 @@ def test_post_error_swallows_5xx_and_unreachable_hubs() -> None:
         assert post_error(hub.base, TOKEN, error_payload(worker="w", reason=REASON)) is False
         assert len(hub.calls) == 1  # 请求真的发出去了，只是被拒
 
-    dead = f"http://127.0.0.1:{_dead_port()}"
-    assert post_error(dead, TOKEN, error_payload(worker="w", reason=REASON)) is False
+    # 死端口用 `dead_port()`（接受即 RST）：Windows 上连没人监听的端口是 2s timeout，而旧写法
+    # （bind 后 close）让这条用例每条都白等 2s —— 见 `tests/subproc_util.py::DeadPort`。
+    with dead_port() as port:
+        dead = f"http://127.0.0.1:{port}"
+        assert post_error(dead, TOKEN, error_payload(worker="w", reason=REASON)) is False
     assert post_error("", TOKEN, error_payload(worker="w", reason=REASON)) is False
     assert post_error("http://127.0.0.1:1", "", error_payload(worker="w", reason=REASON)) is False
 

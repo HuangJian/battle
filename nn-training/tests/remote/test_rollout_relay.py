@@ -30,6 +30,8 @@ import pytest
 from common import net_http
 from remote import rollout_relay as rr
 from remote.rollout_relay import RelayChannel, RelayLink, RelayUnreachable, _forward, probe_hub
+from tests.helpers.http_server import serve_fast
+from tests.subproc_util import DeadPort, dead_port, free_port
 
 
 class _Quiet(BaseHTTPRequestHandler):
@@ -50,7 +52,9 @@ class _Quiet(BaseHTTPRequestHandler):
 
 def _serve(handler: type[BaseHTTPRequestHandler]) -> tuple[ThreadingHTTPServer, int]:
     srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    # `serve_fast`：轮询周期钉到 10ms。缺省 0.5s 时每次 `shutdown()` 最多白等半个周期 ——
+    # 本文件里起两个服务的用例实测 1.03s，几乎全是两次关服的等待（见 tests/helpers/http_server.py）。
+    serve_fast(srv).start()
     return srv, int(srv.server_address[1])
 
 
@@ -239,11 +243,10 @@ def test_forward_keeps_agent_4xx_as_reply() -> None:
 
 def test_forward_reports_unreachable_agent_as_502() -> None:
     """端口不通 = 转发失败（502），与上面那条的可重试语义分开。"""
-    probe = socket.socket()
-    probe.bind(("127.0.0.1", 0))
-    closed_port = probe.getsockname()[1]
-    probe.close()
-    resp = _forward(closed_port, {"method": "GET", "path": "/v1/ping", "headers": {}})
+    # 端口不通用 `dead_port()`（接受即 RST）：Windows 上连闭端口是 timeout 而非 refused，
+    # 旧写法让本条白等 2s（见 `tests/subproc_util.py::DeadPort`）。
+    with dead_port() as closed_port:
+        resp = _forward(closed_port, {"method": "GET", "path": "/v1/ping", "headers": {}})
     assert resp["status"] == 502
     # 体里必须是一条可读的 failure 说明（结构判据，不抠字面）
     assert isinstance(json.loads(base64.b64decode(resp["body_b64"])).get("error"), str)
@@ -327,21 +330,18 @@ def test_channel_ensure_rebuilds_after_workers_die() -> None:
 # ---------------------------------------------------------------- 连不上时说得清（2026-11-18 DSW）
 
 
-def _dead_port() -> int:
-    """一个**没人监听**的本机端口（连上必 ECONNREFUSED，且是秒级，不靠墙钟）。"""
-    probe = socket.socket()
-    probe.bind(("127.0.0.1", 0))
-    port = int(probe.getsockname()[1])
-    probe.close()
-    return port
-
-
 @pytest.fixture
 def dead_link() -> Iterator[tuple[RelayLink, list[str]]]:
-    """指向「没人监听的端口」的通道 + 它自己的日志表。"""
+    """指向「这个端口没有服务」的通道 + 它自己的日志表。
+
+    死端口是 `DeadPort`（接受即 RST），不是「bind 后 close」：Windows 上连**没人监听**的回环口
+    是 2s timeout 而不是 refused（见 `tests/subproc_util.py::DeadPort`），旧写法让每条用到它的
+    用例都按 timeout 计费。
+    """
     logs: list[str] = []
+    dead = DeadPort()
     link = RelayLink(
-        hub_url=f"http://127.0.0.1:{_dead_port()}",
+        hub_url=f"http://127.0.0.1:{dead.port}",
         token="t",
         node_id="n1",
         agent_port=1,
@@ -352,6 +352,7 @@ def dead_link() -> Iterator[tuple[RelayLink, list[str]]]:
         yield link, logs
     finally:
         link.stop()
+        dead.close()
 
 
 def test_unreachable_hub_raises_with_reason_and_host(
@@ -363,7 +364,8 @@ def test_unreachable_hub_raises_with_reason_and_host(
         link._poll()
     text = link.last_error
     assert text.startswith("direct="), f"last_error 必须是逐路由结论：{text!r}"
-    assert any(k in text for k in ("refused", "timeout"))
+    # `reset` = `DeadPort` 那种「接受即 RST」的死因（原文 `ConnectionResetError`，故比小写）。
+    assert any(k in text.lower() for k in ("refused", "timeout", "reset"))
     assert isinstance(ei.value, urllib.error.URLError)  # 上层 except URLError 语义不变
 
 
@@ -375,7 +377,7 @@ def test_failure_log_names_host_and_reason(dead_link: tuple[RelayLink, list[str]
     link._log_failure(ei.value, 35.0)
     assert len(logs) == 1
     assert logs[0].startswith(f"relay 轮询失败（hub={link.hub_host}，35.0s）"), logs[0]
-    assert any(k in logs[0] for k in ("refused", "timeout"))
+    assert any(k in logs[0].lower() for k in ("refused", "timeout", "reset"))
     for _ in range(ERR_SILENT_BURST):
         link._log_failure(ei.value, 35.0)
     assert len(logs) == 1, "同一条失败连续刷屏（6 线程 × 每轮 1 行）必须被压掉"
@@ -414,7 +416,8 @@ def test_probe_hub_reports_routes_against_live_hub() -> None:
 
 
 def test_probe_hub_flags_unreachable_with_actionable_hint() -> None:
-    ok, line, facts = probe_hub(f"http://127.0.0.1:{_dead_port()}", "t", "n1", timeout=2.0)
+    with dead_port() as port:
+        ok, line, facts = probe_hub(f"http://127.0.0.1:{port}", "t", "n1", timeout=2.0)
     assert ok is False
     assert set(facts["routes"].values()) == {"fail"}
     assert "hub_url" in line  # 判词要直接指向可改的那个开关
@@ -428,7 +431,11 @@ def test_probe_hub_sweeps_every_resolved_ip_when_https_fails(
     2026-11-18 DSW 现场只有一句 `inherit=timeout ｜ direct=timeout`，看不出是整组 anycast IP
     被挡还是 TCP 通、掐在 SNI 上；两者的修法完全不同（换承载 vs 换域名/走代理）。
     """
-    port = _dead_port()
+    # 这条要的是**TCP 层**连不上（下面钉的是 `_tcp_verdict` 的结论）⇒ 不能用 `dead_port()`：
+    # 它接受连接，TCP 是「通」的。闭端口在 Windows 上是 timeout 而非 refused，所以把探测预算
+    # 压到 0.3s —— 判词只看「连不上」，与预算大小无关，用例不该为此付 2s 墙钟。
+    monkeypatch.setattr(rr, "TCP_PROBE_SEC", 0.3)
+    port = free_port()
     monkeypatch.setattr(net_http, "bypass_proxy", lambda _u: False)
     monkeypatch.setattr(
         rr, "_probe_one_route", lambda route, url, token, timeout: ("fail", f"{route}=stub")
@@ -543,7 +550,8 @@ def test_channel_open_failure_names_preflight_and_host(monkeypatch: pytest.Monke
     monkeypatch.setattr(rr, "TCP_PROBE_SEC", 0.6)
     agent_log: dict = {}
     agent_srv, agent_port = _fake_agent(agent_log)
-    port = _dead_port()
+    dead = DeadPort()
+    port = dead.port
     logs: list[str] = []
     ch = RelayChannel(
         hub_url=f"http://127.0.0.1:{port}",
@@ -559,6 +567,7 @@ def test_channel_open_failure_names_preflight_and_host(monkeypatch: pytest.Monke
     finally:
         ch.stop()
         agent_srv.shutdown()
+        dead.close()
     assert any(ln.startswith(f"relay 预检 127.0.0.1:{port} ") for ln in logs), logs
     joined = "\n".join(logs)
     assert f"hub=127.0.0.1:{port}" in joined and "cloudflared" in joined

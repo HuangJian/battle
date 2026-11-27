@@ -388,19 +388,30 @@ def test_gate_worker_count_scales_with_cores() -> None:
     code = _gate_code()
     assert "NN_GATE_NPROC" in code, "缺少 NN_GATE_NPROC 逃生口"
     assert re.search(r"CORES=\$\(.*physical_cores", code), (
-        "worker 数应从核数派生，且核数走 common.platform_utils.physical_cores（真物理核 ∧ "
-        "cgroup 配额 ∧ 亲和掩码取小）—— 2026-10-03 决议：门禁按**物理核**（超线程 worker "
-        "不涨吞吐只涨内存，16 worker 的 bun test 把 Windows 提交上限顶穿 ⇒ 一片假红）；"
-        "`os.cpu_count()` 在容器里报的是宿主机核数（Kaggle 224 vs 配额 96，2026-09-25 云机"
-        "卡死那笔账），故配额/掩码仍是硬信号；写死 4 在 16 核上白白浪费并行度（2026-09-17 "
-        "实测 n=4 → n=12 提速 1/3）"
+        "核数探测应走 common.platform_utils.physical_cores（真物理核 ∧ cgroup 配额 ∧ "
+        "亲和掩码取小）——`os.cpu_count()` 在容器里报的是宿主机核数（Kaggle 224 vs 配额 "
+        "96，2026-09-25 云机卡死那笔账），故配额/掩码仍是硬信号；写死常数在 16 核上白白"
+        "浪费并行度（2026-09-17 实测 n=4 → n=12 提速 1/3）"
     )
     assert "cpu_count()" not in code, (
         "门禁里不许再拿 os.cpu_count() 定并行度——「本机几核」只允许一个答案，"
         "就是 common.platform_utils.physical_cores()（注释里的事故说明不算，_gate_code 已去注释）"
     )
-    assert re.search(r"NPROC=\$\{NN_GATE_NPROC:-\$CORES\}", code), (
-        "NPROC 默认值应 = min(物理核数, 上界)，且由 NN_GATE_NPROC 覆盖"
+    # 2026-11-27：worker 默认值不再直接 = 物理核数，改为共享的 pytest_workers()
+    # （1.5 × 物理核，封顶逻辑核）。理由：本套件是 wait-bound 的（~770 个子进程 +
+    # 上千次 HTTP/死端口探测），加 worker 是重叠等待而非抢核——8 核机器实测 12 比 8
+    # 快 13%~26%，Windows xdist 与 WSL forkdist 同向。公式只许有一份（platform_utils），
+    # 门禁脚本里再写一遍算术就是第二个真相。
+    assert re.search(r"NPROC_DEFAULT=\$\(.*pytest_workers", code), (
+        "NPROC 默认值应派生自 common.platform_utils.pytest_workers()（与 tools/task.py "
+        "同一份实现，见 `默认 worker` 一节）"
+    )
+    assert not re.search(r"CORES\s*[+*/]", code), (
+        "门禁脚本里不许自己算 worker 公式（如 CORES + CORES/2）——算术留在 "
+        "platform_utils.pytest_workers()，否则两个入口会漂移"
+    )
+    assert re.search(r"NPROC=\$\{NN_GATE_NPROC:-\$NPROC_DEFAULT\}", code), (
+        "NPROC 默认值应 = pytest_workers()（探测失败回落物理核数），交 NN_GATE_NPROC 覆盖"
     )
     cap = re.search(r'NPROC" -gt (\d+)', code)
     assert cap, "NPROC 缺上界——worker 无上限会按核数放大内存（-n 12 峰值 RSS 实测 ≈ 3.9GB）"

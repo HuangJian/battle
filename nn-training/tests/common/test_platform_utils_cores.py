@@ -216,6 +216,40 @@ def test_physical_cores_never_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     assert pu.physical_cores() == 1
 
 
+# ------------------------------------------------ pytest 门禁 worker 数口径（2026-11-27）
+
+
+def test_pytest_workers_is_one_and_a_half_physical_cores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """默认 = 1.5 × 物理核（本套件 wait-bound，实测 8 核机器上 12 比 8 快 13%~26%）。"""
+    monkeypatch.setattr(pu, "physical_cores", lambda: 8)
+    monkeypatch.setattr(pu, "effective_cores", lambda: 16)
+    assert pu.pytest_workers() == 12
+    monkeypatch.setattr(pu, "physical_cores", lambda: 4)
+    assert pu.pytest_workers() == 6
+
+
+def test_pytest_workers_never_exceeds_logical_cores(monkeypatch: pytest.MonkeyPatch) -> None:
+    """无超线程（physical == logical）⇒ 停在物理核数，不制造超订；容器配额同样算硬上界。"""
+    monkeypatch.setattr(pu, "physical_cores", lambda: 8)
+    monkeypatch.setattr(pu, "effective_cores", lambda: 8)
+    assert pu.pytest_workers() == 8
+    monkeypatch.setattr(pu, "effective_cores", lambda: 6)  # cgroup 配额 / 亲和掩码夹取
+    assert pu.pytest_workers() == 6
+    # 2 核机器：1.5×2 = 3，但 logical 只有 2 ⇒ 2（不能靠 "半个核" 凭空变出并行度）。
+    monkeypatch.setattr(pu, "physical_cores", lambda: 2)
+    monkeypatch.setattr(pu, "effective_cores", lambda: 2)
+    assert pu.pytest_workers() == 2
+
+
+def test_pytest_workers_never_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """坏读数不得算出 0（零 worker 会让门禁当场卡死）；单核机器至少 1。"""
+    monkeypatch.setattr(pu, "physical_cores", lambda: 0)
+    monkeypatch.setattr(pu, "effective_cores", lambda: 0)
+    assert pu.pytest_workers() == 1
+
+
 # ------------------------------------------------ 内存闸：worker 数再按提交余量封顶（门禁）
 
 

@@ -197,15 +197,15 @@ def test_task_py_dispatches_per_platform() -> None:
     """`python tools/task.py <target>` 在 Linux 上走 forkdist，在其它平台保留 xdist。
 
     真 import 一次 tools/task.py（它模块级没有副作用）并看它拼出来的 argv —— 比 grep 文本强。
-    worker 数是**显式数字**（`physical_cores()`，2026-10-03）：Windows 分支若写 `-n auto`，
-    那是由 xdist 自己按逻辑核解析的，我们看不见（口径会漂）。
+    worker 数是**显式数字**（`pytest_workers()`，2026-11-27；此前是 `physical_cores()`）：
+    Windows 分支若写 `-n auto`，那是由 xdist 自己按逻辑核解析的，我们看不见（口径会漂）。
     """
     sys.path.insert(0, str(NN_ROOT))
     try:
         from tools import task
 
         got = task.pytest_dispatch()
-        n = str(task.physical_cores())
+        n = str(task.pytest_workers())
     finally:
         sys.path.pop(0)
     src = TASK_PY.read_text(encoding="utf-8")

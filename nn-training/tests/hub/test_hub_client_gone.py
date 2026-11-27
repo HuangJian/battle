@@ -45,6 +45,7 @@ from common.protocol import AUTH_HEADER
 from hub import relay as relay_mod
 from hub.http_face import CLIENT_GONE_LOG_EVERY, HubHandler
 from hub.server import _HubQueue, make_server
+from tests.helpers.http_server import serve_fast
 
 TOKEN = "sekret"
 
@@ -52,7 +53,7 @@ TOKEN = "sekret"
 def _boot(tmp_path: Path) -> ThreadingHTTPServer:
     hub = _HubQueue({}, discover_root=tmp_path)
     srv = make_server(hub, 0, TOKEN, host="127.0.0.1")
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     return srv
 
 

@@ -34,6 +34,7 @@ from common.protocol import (
 )
 from hub.server import _HubQueue, make_server
 from hub.task_pack import TASK_STATE_CLAIMED, TASK_STATE_COMPLETED
+from tests.helpers.http_server import serve_fast
 
 TOKEN = "sekret"
 
@@ -181,7 +182,7 @@ def test_claim_endpoint_refuses_a_bc_course_without_writing_pending_export(
     """
     hub, _d = _boot_bc(tmp_path, monkeypatch)
     srv = make_server(hub, 0, TOKEN, host="127.0.0.1")
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     base = f"http://127.0.0.1:{srv.server_address[1]}"
     try:
         code, raw = _req(

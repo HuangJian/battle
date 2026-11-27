@@ -17,6 +17,7 @@ import urllib.error
 import pytest
 
 from common import http_pool
+from tests.helpers.http_server import serve_fast
 
 
 class _H(http.server.BaseHTTPRequestHandler):
@@ -72,7 +73,7 @@ def srv():
     _H.drop_used = set()
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _H)
     httpd.daemon_threads = True
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    serve_fast(httpd).start()
     base = f"http://127.0.0.1:{httpd.server_address[1]}"
     http_pool.reset()
     http_pool.clear_abort("")
@@ -235,10 +236,13 @@ def test_no_proxy_forces_direct_and_keeps_its_own_connection(srv, monkeypatch) -
     桩里把代理指向一个死端口：不传该参 ⇒ `URLError`（证明桩真的在拦），传了 ⇒ 真连得上。
     池键含代理 ⇒ 两条路由各自一条连接，不会把直连的响应借给代理腿。
     """
+    # 代理指向一个死端口 ⇒ 本条只看「请求是不是被代理拦住了」，不需要 2s 的预算：死回环口在
+    # Windows 上是 **timeout**（不是 refused，见 `tests/subproc_util.py::DeadPort`），2s 预算
+    # 会让这一条白等 4s（实测 4.03s）。0.3s 足以区分「被代理拦住」与「直连成功」。
     monkeypatch.setattr(http_pool, "_proxy_for", lambda *_a: "http://127.0.0.1:9")
     with pytest.raises(urllib.error.URLError):
-        http_pool.request(f"{srv}/ok", timeout=2)
-    assert http_pool.request(f"{srv}/ok", timeout=2, no_proxy=True)[1] == b"ok"
+        http_pool.request(f"{srv}/ok", timeout=0.3)
+    assert http_pool.request(f"{srv}/ok", timeout=0.3, no_proxy=True)[1] == b"ok"
 
 
 def test_close_thread_drops_connections_but_keeps_counters(srv) -> None:

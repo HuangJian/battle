@@ -19,12 +19,13 @@ from pathlib import Path
 
 from hub.boot import make_server
 from hub.store import _JobStore
+from tests.helpers.http_server import serve_fast
 
 
 def test_origin_closes_after_each_response(tmp_path: Path) -> None:
     store = _JobStore(tmp_path / "jobs", tmp_path / "training_log.jsonl")
     srv = make_server(store, 0, "sekret", host="127.0.0.1")
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    serve_fast(srv).start()
     conn = http.client.HTTPConnection("127.0.0.1", int(srv.server_address[1]), timeout=5.0)
     try:
         conn.request("GET", "/ping", headers={"Authorization": "Bearer sekret"})

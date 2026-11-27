@@ -31,7 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from common.cli import house_parser, run_main
-from common.platform_utils import POPEN_NO_WINDOW, physical_cores, rmtree_best_effort
+from common.platform_utils import POPEN_NO_WINDOW, pytest_workers, rmtree_best_effort
 
 #: `HERE` 的语义不变（nn-training 根：pyproject.toml / .venv / 子脚本都相对它）⇒ 上溯 +1。
 HERE = Path(__file__).resolve().parents[1]
@@ -143,15 +143,21 @@ def pytest_dispatch() -> list[str]:
     继承 `sys.modules` 与已收集的 Item，避掉 xdist「每个 worker 各收全部 ~275 个模块」那份冗工。
     16 核实测（tests/ + e2e/）：wall 21.99 → 17.57s、user 233.9 → 121.6s（轮数越多越赚）。
 
-    worker 数**显式传数字**（2026-10-03 起 = `physical_cores()`，物理核数）：不再写 `auto`
+    worker 数**显式传数字**（2026-11-27 起 = `pytest_workers()`，1.5 × 物理核封顶逻辑核）：
+    不再写 `auto`
     —— 那在 forkdist 里会解析成核数，但在 **Windows/macOS 的 xdist 分支里 `-n auto` 是
     xdist 自己解析的**（它看逻辑核/亲和掩码，看不见我们的口径）。显式数字让三个入口
-    （本脚本 / Makefile / CI / 门禁脚本）共用同一个物理核口径。
+    （本脚本 / Makefile / CI / 门禁脚本）共用同一个口径（公式只在 `platform_utils` 里有一份）。
+
+    为何 1.5 × 物理核而不是物理核（2026-11-27 实测，同机 8 物理/16 逻辑）：本套件是
+    wait-bound 的（~770 个子进程 + 上千次 HTTP/死端口探测），worker 大半在等 ⇒ 12 比 8
+    快 13%~26%（Windows xdist 与 WSL forkdist 同向）。内存风险由 `memory_budget_workers()`
+    单独闸，不靠压低 worker 数兜（详见 `pytest_workers` 的 docstring）。
 
     为何只在 Linux：Windows 没有 `os.fork`（插件会当场拒绝）；macOS 上 master 在 fork 前
     已经 import torch，libgomp/dyld 与 fork 的组合本仓没有验证过。两者继续 xdist。
     """
-    n = str(physical_cores())
+    n = str(pytest_workers())
     if sys.platform.startswith("linux") and hasattr(os, "fork"):
         return ["-p", "tools.forkdist", "--forkdist", n]
     return ["-n", n]

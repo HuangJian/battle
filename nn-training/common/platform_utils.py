@@ -465,6 +465,28 @@ def physical_cores() -> int:
     return max(1, int(os.cpu_count() or 1))
 
 
+def pytest_workers() -> int:
+    """pytest 门禁的并行度：**1.5 × 物理核**，上界 = `effective_cores()`（超线程/配额/掩码）。
+
+    为什么与 `physical_cores()` 分家（2026-11-27 实测，同机 8 物理 / 16 逻辑，Windows 原生）：
+    那条「HT worker 只涨内存不涨吞吐」是 `bun test`（CPU 密集）的结论，而 **pytest 套件是
+    wait-bound**：~770 个子进程、上千次 HTTP 与闭合端口探测，worker 大半时间在等，不是在算。
+    这种负载下加 worker 是**重叠等待**，不是抢核。全套 `tests/ e2e/` 实测（各 1~2 轮）：
+        -n 8  → 93.9 / 109.5s      -n 10 → 90.5s      -n 12 → 81.5 / 86.6s
+        -n 14 → 87.7s              -n 16 → 85.7s
+    ⇒ 8 核机器上 12 是最优（−13%~−26%），超过 12 后回吐（HT 抢执行单元 + 每 worker 的
+    收集/import 地板）。Linux 侧同向：WSL forkdist 8 → 64.5s，12 → 52.7 / 55.6s。
+    这与 2026-10-03 的物理核决议不冲突：那条的硬约束是**内存**（16 worker 顶穿提交上限），
+    而内存现在由 `memory_budget_workers()` 按提交余量单独闸（门禁与 task.py 都接上了），
+    所以核数口径可以按「等待型负载」取，内存风险不再靠压低 worker 数兜。
+
+    上界取 `effective_cores()` 而不是固定 12：无超线程的机器（physical == logical）自然停在
+    物理核数，容器配额/亲和掩码是硬事实（`os.cpu_count()` 在容器里报宿主机核数）。
+    """
+    phys = physical_cores()
+    return max(1, min(effective_cores(), phys + phys // 2))
+
+
 def cpu_worker_slots(cores: int | None = None) -> int:
     """本机该开几个 CPU 并行槽：**`cores ≤ 4` ⇒ 全给（`cores`）**；否则
     ``max(cores − 2, floor(cores × 0.8))``（至少 1）。

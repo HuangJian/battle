@@ -17,12 +17,15 @@ CPython 读线程在 ``subprocess._readerthread`` 里解码失败死亡 → ``st
 
 from __future__ import annotations
 
+import contextlib
+import os
 import re
 import socket
+import struct
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
@@ -102,6 +105,75 @@ def free_port(host: str = "127.0.0.1") -> int:
     with socket.socket() as s:
         s.bind((host, 0))
         return int(s.getsockname()[1])
+
+
+#: `SO_LINGER` 的「关了立刻 RST」取值：Windows 的 `struct linger` 是两个 `u_short`，POSIX 是
+#: 两个 `int` —— 长度不同，混用会让 setsockopt 直接 EINVAL。
+_LINGER_RST = struct.pack("hh", 1, 0) if os.name == "nt" else struct.pack("ii", 1, 0)
+
+
+class DeadPort:
+    """一个**接受连接后立刻 RST** 的回环口 = 「这个端口没有服务」的确定性替身。
+
+    为什么不能只用「bind(0) 再 close」（`free_port()` 那种，端口随即没人监听）：**Windows 上
+    连一个没人监听的回环口是 2s timeout，不是 refused**（2026-11-27 实测：同一端口
+    `127.0.0.1:<p>` 连两次都是 2.011s / 2.012s 的 `TimeoutError`，而同机 WSL 是 0.003s 的
+    `ConnectionRefusedError`；`bind` 之后**不** `listen` 也一样 2.017s ⇒ 是 SYN 被丢了、
+    没有回 RST，不是「端口还没关干净」）。于是每条「对着死端口探一下」的用例在 Windows 上
+    都按 timeout 计费：`tests/remote/` 实测单条 4.09s vs WSL 0.01s。
+
+    这里反过来用：端口**有**监听（SYN 立刻被应答），`accept` 之后带 `SO_LINGER=0` 立刻
+    `close()` ⇒ 客户端拿到 RST。同样是「这里没有 HTTP 服务」，却是 ~1ms、且两个平台一致
+    （Windows 0.001s / WSL 0.001s）。代价是**TCP 层是通的**：要钉「TCP 连不上」的用例
+    不能用它（见 `tests/remote/test_rollout_relay.py` 里那条 TCP 扫描用例）。
+    """
+
+    def __init__(self, host: str = "127.0.0.1") -> None:
+        self._host = host
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._srv.bind((host, 0))
+        self._srv.listen(64)
+        self.port = int(self._srv.getsockname()[1])
+        self._stop = threading.Event()
+        self._th = threading.Thread(target=self._reject, daemon=True, name=f"dead-port:{self.port}")
+        self._th.start()
+
+    def _reject(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._srv.accept()
+            except OSError:
+                return
+            try:
+                conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, _LINGER_RST)
+                conn.close()
+            except OSError:  # 对端已经走了：这个连接的结论已经送出
+                pass
+
+    def close(self) -> None:
+        self._stop.set()
+        # 自连一次把阻塞在 `accept()` 的线程叫醒 —— 只 `close()` 监听套接字在 Windows 上叫不醒它。
+        try:
+            with socket.create_connection((self._host, self.port), timeout=1.0):
+                pass
+        except OSError:
+            pass
+        self._th.join(timeout=2.0)
+        try:
+            self._srv.close()
+        except OSError:
+            pass
+
+
+@contextlib.contextmanager
+def dead_port(host: str = "127.0.0.1") -> Iterator[int]:
+    """`with dead_port() as port:` —— 「这个端口没有服务」，且失败是 ms 级（见 `DeadPort`）。"""
+    dp = DeadPort(host)
+    try:
+        yield dp.port
+    finally:
+        dp.close()
 
 
 @dataclass

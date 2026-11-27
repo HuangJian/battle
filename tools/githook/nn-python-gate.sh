@@ -38,9 +38,17 @@
 #     -n 4  线程=1   → 39.7s（封线程不救小并发）  -n 12 线程=1   → 28/25/21s（24.7）
 #     -n 8  线程=1 → 24/27s   -n 16 线程=1 → 25/22s   -n auto 线程=1 → 21/27s
 #   ⇒ 只加 worker 更慢、只封线程无收益，**两者同时**才把门禁从 ~36s 压到 ~23s（-36%）。
-#   默认 worker  = min(**物理核数**, 32)（2026-10-03 起口径 = 物理核，超线程不计入）：
-#                 核数走 platform_utils.physical_cores()；上界 32 只作内存兜底
+#   默认 worker  = **1.5 × 物理核**，上界 32（2026-11-27 改；此前 = 物理核数）：
+#                 公式住 platform_utils.pytest_workers()（= min(effective_cores, 1.5×物理核)，
+#                 与 tools/task.py 同一份实现）；上界 32 只作内存兜底
 #                 （-n 12 峰值 pytest 进程树 RSS ≈ 3.9GB）。NN_GATE_NPROC 覆盖。
+#                 **为什么不再按物理核**（2026-11-27 实测，同机 8 物理/16 逻辑，Windows 原生）：
+#                 2026-10-03 那条「HT worker 只涨内存」是 `bun test`（CPU 密集）的结论；pytest
+#                 套件是 **wait-bound** 的（~770 个子进程 + 上千次 HTTP/死端口探测，worker 大半
+#                 在等），加 worker 是重叠等待而非抢核。全套 tests/+e2e/ 实测：-n 8 → 93.9/109.5s，
+#                 -n 10 → 90.5s，-n 12 → 81.5/86.6s，-n 14 → 87.7s，-n 16 → 85.7s ⇒ 12 最优。
+#                 Linux 侧同向（WSL forkdist 8 → 64.5s，12 → 52.7/55.6s）。原先压物理核是为了内存，
+#                 而内存现在由下面的「内存闸」按提交余量单独管 ⇒ 两个旋钮各管一件事。
 #                 **再按提交余量封顶**（2026-11-20）：见下方「内存闸」一节——余量够就一个
 #                 都不减（时钟不变），余量不够才变窄（防「两个开发环境同时跑」双双顶穿
 #                 页文件：本机实测单份峰值提交 6.58GB，两份 ≈ 13GB）。
@@ -203,7 +211,13 @@ CORES=$(cd "$NN_ROOT" && "$NN_PY" -S -c 'from common.platform_utils import physi
 case "$CORES" in
   '' | *[!0-9]*) CORES=4 ;;
 esac
-NPROC=${NN_GATE_NPROC:-$CORES}
+# 默认 worker 数走 platform_utils.pytest_workers()（1.5 × 物理核，封顶逻辑核）——
+# 与 tools/task.py 共用同一份实现，别在这里重写公式（见文件头「默认 worker」一节）。
+NPROC_DEFAULT=$(cd "$NN_ROOT" && "$NN_PY" -S -c 'from common.platform_utils import pytest_workers; print(pytest_workers())' 2>/dev/null || echo "")
+case "$NPROC_DEFAULT" in
+  '' | *[!0-9]*) NPROC_DEFAULT=$CORES ;;
+esac
+NPROC=${NN_GATE_NPROC:-$NPROC_DEFAULT}
 [ "$NPROC" -gt 32 ] && NPROC=32
 [ "$NPROC" -lt 1 ] && NPROC=1
 
