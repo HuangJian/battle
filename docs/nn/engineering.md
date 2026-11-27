@@ -29,6 +29,36 @@
 
 ---
 
+## §384 分诊第四十六格：`trainer/queue_worker.run_queue` 175 → 38 + 车道/孵化/推送/rescan/收尾五段（2026-11-27）
+
+`run_queue` 是一轮消费者编排：本地车道孵化 → reuse 节点立刻开采 → need 节点并行 POST
+（成功即 spawn）→ rescan 线程 → 等结算窗口 + grace join。五个块的失败模式互不相同（本地车道
+失联补孵、POST 半途断、rescan 节点资格、卡死 worker 的 join），却平铺在同一个 175 行函数里。
+
+| 段 | 行数 | 职责 |
+|---|---:|---|
+| `run_queue` | 38 | 编排：车道 → reuse → push → rescan → 收尾 |
+| `_queue_lane` | 17 | `LocalLane(LaneSpec(...))` 的唯一装配点 |
+| `_spawn_node_workers` | 22 | 单节点权重就绪即孵化（去重 + 先 start 再入表） |
+| `_push_need` | 19 | need 并行 POST + 每个成功节点回调 spawn + 收工时间戳 |
+| `_rescan_thread` | 50 | 动态发现线程（`RescanSpec` 的唯一装配点）；不需要时 `None` |
+| `_drain_and_join` | 45 | 结算等待（步长钳 deadline）+ grace join + 卡住线程一行 |
+
+**关键选择**：`_push_need` 收一个 `on_alive` 回调而不是自己 import/reach `_spawn_node_workers`
+——推线程与孵化线程的耦合只剩「每个成功节点一次回调」，这也是 `PushHooks` 本来的形状。
+`_rescan_thread` 返回 `None` 表示「本段不做 rescan」（`rescan_sec <= 0` 或没配节点），
+调用点不另写一遍条件。`worker` 的类型写成 `Callable[[dict | None, int | None], None]`
+而不是 `Any` —— 既满足 `LaneSpec` / `RescanSpec` 的字段类型，又不让 Any 预算回涨
+（`trainer/queue_worker.py` 保持 6）。
+
+**证明**：5 组场景逐字段比对线程名序列、`alive` / `spawned_ids`、`LaneSpec` 全字段、
+`RescanSpec` 全字段、`post_weights_parallel` 实参、推送回调后的孵化结果、日志、
+`halted`、两张分发表时间戳的关系 ⇒ **0 差异**：reuse+need+rescan / 无推送无 rescan /
+仅 rescan / halt（窗口未齐立即收线）/ 同 id 节点去重。
+
+**守卫**：定向 38 passed（rescan 关键字传参 / tail grace 语义 / 模块 assert 白名单 / Any /
+shape / reuse）；代码行 754 → 770；存量 **16 文件 / 16 → 15 / 15**。
+
 ## §383 分诊第四十五格：`remote/plan_handoff._eval_job_builder` 173 → 61 + 落点/落地/搬迁三段（2026-11-27）
 
 `_eval_job_builder` 是个工厂：`state` 缓存 + 三个闭包（`_layout` 解析并安装 scratch、

@@ -2260,3 +2260,8 @@ grep -rn "^\s*global " --include='*.py' common hub remote trainer worker biz | w
 > （`_eval_scratch_layout` 62 / `_eval_land_weights` 21 / `_eval_relocate_weights` 44；
 > 落点缓存收进 `_EvalLayout`（`Any` 9 → 8），`CloudEvalSpec(` 唯一装配点未动）；10 组场景差分 0，
 > 存量 16 文件 / 17 → 16 / 16（engineering §383）。
+
+> 2026-11-27 第四十六格：`trainer/queue_worker.run_queue` 175 → 38 + 车道/孵化/推送/
+> rescan/收尾五段（`_queue_lane` 17 / `_spawn_node_workers` 22 / `_push_need` 19 /
+> `_rescan_thread` 50 / `_drain_and_join` 45；`worker` 用具体 Callable 类型，Any 预算不回涨）；
+> 5 组场景差分 0，存量 16 文件 / 16 → 15 / 15（engineering §384）。

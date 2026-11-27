@@ -753,41 +753,9 @@ def queue_worker(q: QueueState, nd: dict | None, local_slot: int | None = None) 
             time.sleep(min(_cap, max(min(0.5, _cap), q.deadline - time.time())))
 
 
-def run_queue(q: QueueState) -> None:
-    """③b 消费者编排：本机/远端/推送/rescan 线程孵化与收尾 join。"""
-    worker = partial(queue_worker, q)
-    q.threads = []
-    q.extra_threads = []
-    #: 本轮的采样/下发/rescan 线程都归它（名字统一 `queue-*`，`describe()` 里可读）。
-    #: 建在 `run_queue` 里而不是模块级：一轮一份，收尾即散，不制造跨轮的单例。
-    rt = common.runtime.Runtime(scope="queue")
-
-
-    # alive / spawned_ids：权重就绪后才 append（边分发边开采；rescan 共享）。
-    q.alive = []
-    q.spawned_ids = set()
-    alive_lock = threading.Lock()
-
-    def _spawn_node_workers(nd: dict) -> None:
-        """单节点权重就绪后立刻孵化其采样线程（POST 成功回调 / reuse / rescan）。
-
-        **先 start 再入列表**：join 快照可能与 append 竞态，对未 start 的线程
-        join 会 RuntimeError（stream smoke：local 秒结后 push/spawn 尚未启动）。
-        """
-        with alive_lock:
-            if nd["id"] in q.spawned_ids:
-                return
-            q.spawned_ids.add(nd["id"])
-            if nd not in q.alive:
-                q.alive.append(nd)
-        for _ in range(nd["c"]):
-            t = rt.thread(worker, nd, name=f"worker:{nd.get('id')}", daemon=True)
-            q.threads.append(t)
-            q.extra_threads.append(t)
-
-    # 本地线程先孵化：本地权重已在磁盘（rl_path），不依赖远端 POST。
-    # B3：初始只开 local_slots 条（0 = 不开）；失联补孵由 LocalLane 守护。
-    q.local_lane = LocalLane(
+def _queue_lane(q: QueueState, worker: Callable[[dict | None, int | None], None]) -> LocalLane:
+    """本轮的本地采样车道（初始 `local_slots` 条；失联补孵由守护自己管）。"""
+    return LocalLane(
         LaneSpec(
             worker=worker,
             local_slots=q.local_slots,
@@ -802,86 +770,107 @@ def run_queue(q: QueueState) -> None:
             threads=q.threads,
         )
     )
-    q.t_dist_start_box[0] = time.time()
-    q.local_lane.start()
 
-    # reuse 节点：同 wver 已下发，立刻开采。
-    for nd in q.reuse:
-        _spawn_node_workers(nd)
 
-    def _push_need_and_spawn() -> None:
-        """need 节点并行 POST；每个成功节点立刻 spawn（边分发边开采）。"""
-        try:
-            if not q.need:
-                return
-            common.weights_client.post_weights_parallel(
-                q.need,
-                q.iter_id,
-                q.wver,
-                q.weights_bytes,
-                timeout=min(300.0, max(60.0, q.task_timeout)),
-                kind=q.wkind,
-                hooks=common.weights_client.PushHooks(
-                    log=q.log, on_alive=_spawn_node_workers
-                ),
-            )
-        except Exception as e:
-            # Fake/真节点在采集结束时被关掉会 URLError；不拖垮 push 线程。
-            q.log(f"[dist] weights-push aborted ({e}) — 未成功 POST 的节点本轮不采样")
-        finally:
-            q.t_dist_done_box[0] = time.time()
+def _spawn_node_workers(
+    q: QueueState,
+    rt: common.runtime.Runtime,
+    worker: Callable[[dict | None, int | None], None],
+    alive_lock: threading.Lock,
+    nd: dict,
+) -> None:
+    """单节点权重就绪后立刻孵化其采样线程（POST 成功回调 / reuse / rescan）。
 
-    if q.need:
-        push_t = rt.thread(_push_need_and_spawn, name="weights-push", daemon=True)
-        q.threads.append(push_t)
-    else:
-        q.t_dist_done_box[0] = q.t_dist_start_box[0]
+    **先 start 再入列表**：join 快照可能与 append 竞态，对未 start 的线程
+    join 会 RuntimeError（stream smoke：local 秒结后 push/spawn 尚未启动）。
+    """
+    with alive_lock:
+        if nd["id"] in q.spawned_ids:
+            return
+        q.spawned_ids.add(nd["id"])
+        if nd not in q.alive:
+            q.alive.append(nd)
+    for _ in range(nd["c"]):
+        t = rt.thread(worker, nd, name=f"worker:{nd.get('id')}", daemon=True)
+        q.threads.append(t)
+        q.extra_threads.append(t)
 
-    # v3.9 动态节点发现：rescan 线程周期 ping 配置里未上线的节点，合格则
-    # 权重下发 + 孵化新 worker 线程（与初始节点同等待遇，共享 pending 队列）。
-    if q.rescan_sec > 0 and q.cfg.get("nodes"):
-        scan_t = rt.thread(
-            rescan_nodes,
-            # 只传一个 spec（2026-11-20，§P0-3 第四刀续）：这里曾是 27 个实参的 `dict(...)`，
-            # 历史上第 19 个位置参数错位过一次（线程启动即抛，运行中上线的节点永远不被
-            # 发现——见 `rescan_nodes` 与 `RescanSpec` 的 docstring）。
-            kwargs=dict(
-                spec=RescanSpec(
-                    cfg=q.cfg,
-                    code_hash=q.code_hash,
-                    upgrade_branch=q.upgrade_branch,
-                    dirty_files=q.dirty_files,
-                    local_bun=q.local_bun,
-                    spawned_ids=q.spawned_ids,
-                    alive=q.alive,
-                    lock=q.lock,
-                    weights_bytes=q.weights_bytes,
-                    iter_id=q.iter_id,
-                    wver=q.wver,
-                    task_timeout=q.task_timeout,
-                    status_timeout=q.status_timeout,
-                    all_settled=q.all_settled,
-                    deadline=q.deadline,
-                    rescan_sec=q.rescan_sec,
-                    worker=worker,
-                    extra_threads=q.extra_threads,
-                    # v3.14b：halt 感知——熔断后 rescan 立即退出，主 join 不再白等超时
-                    halt_event=q.halt_event,
-                    # A4：首个 pass 提前 / 权重 kind / 回场重置失败计数所需的状态。
-                    first_probe_sec=q.recover_first_sec,
-                    wkind=q.wkind,
-                    streaks=q.streaks,
-                    soft_streaks=q.soft_streaks,
-                    fail_streak_max=q.fail_streak_max,
-                    soft_streak_max=q.soft_streak_max,
-                    rearm_cap=q.rearm_cap,
-                )
-            ),
-            daemon=True,
-            name="rollout-rescan",
+
+def _push_need(q: QueueState, on_alive: Callable[[dict], None]) -> None:
+    """need 节点并行 POST；每个成功节点立刻 spawn（边分发边开采）。"""
+    try:
+        if not q.need:
+            return
+        common.weights_client.post_weights_parallel(
+            q.need,
+            q.iter_id,
+            q.wver,
+            q.weights_bytes,
+            timeout=min(300.0, max(60.0, q.task_timeout)),
+            kind=q.wkind,
+            hooks=common.weights_client.PushHooks(log=q.log, on_alive=on_alive),
         )
-        q.threads.append(scan_t)
+    except Exception as e:
+        # Fake/真节点在采集结束时被关掉会 URLError；不拖垮 push 线程。
+        q.log(f"[dist] weights-push aborted ({e}) — 未成功 POST 的节点本轮不采样")
+    finally:
+        q.t_dist_done_box[0] = time.time()
 
+
+def _rescan_thread(
+    q: QueueState, rt: common.runtime.Runtime, worker: Callable[[dict | None, int | None], None]
+) -> threading.Thread | None:
+    """v3.9 动态节点发现线程；不需要 rescan 时返回 `None`。
+
+    rescan 周期 ping 配置里未上线的节点，合格则权重下发 + 孵化新 worker 线程
+    （与初始节点同等待遇，共享 pending 队列）。
+    """
+    if not (q.rescan_sec > 0 and q.cfg.get("nodes")):
+        return None
+    return rt.thread(
+        rescan_nodes,
+        # 只传一个 spec（2026-11-20，§P0-3 第四刀续）：这里曾是 27 个实参的 `dict(...)`，
+        # 历史上第 19 个位置参数错位过一次（线程启动即抛，运行中上线的节点永远不被
+        # 发现——见 `rescan_nodes` 与 `RescanSpec` 的 docstring）。
+        kwargs=dict(
+            spec=RescanSpec(
+                cfg=q.cfg,
+                code_hash=q.code_hash,
+                upgrade_branch=q.upgrade_branch,
+                dirty_files=q.dirty_files,
+                local_bun=q.local_bun,
+                spawned_ids=q.spawned_ids,
+                alive=q.alive,
+                lock=q.lock,
+                weights_bytes=q.weights_bytes,
+                iter_id=q.iter_id,
+                wver=q.wver,
+                task_timeout=q.task_timeout,
+                status_timeout=q.status_timeout,
+                all_settled=q.all_settled,
+                deadline=q.deadline,
+                rescan_sec=q.rescan_sec,
+                worker=worker,
+                extra_threads=q.extra_threads,
+                # v3.14b：halt 感知——熔断后 rescan 立即退出，主 join 不再白等超时
+                halt_event=q.halt_event,
+                # A4：首个 pass 提前 / 权重 kind / 回场重置失败计数所需的状态。
+                first_probe_sec=q.recover_first_sec,
+                wkind=q.wkind,
+                streaks=q.streaks,
+                soft_streaks=q.soft_streaks,
+                fail_streak_max=q.fail_streak_max,
+                soft_streak_max=q.soft_streak_max,
+                rearm_cap=q.rearm_cap,
+            )
+        ),
+        daemon=True,
+        name="rollout-rescan",
+    )
+
+
+def _drain_and_join(q: QueueState) -> None:
+    """等结算窗口收线，再按 grace join 线程；不等卡在不可中断调用里的 worker。"""
     # v3.17 收尾兜底（2026-09-06，竞速收尾洞②）：旧实现对每个线程
     # join(window + task_timeout) = 2700s —— 只要有一个 worker 卡在**不可中断**
     # 的 HTTP 调用（同步 agent 的 200 分支、提交阶段挂起），整轮就空等到满超时，
@@ -927,4 +916,41 @@ def run_queue(q: QueueState) -> None:
         )
 
 
+def run_queue(q: QueueState) -> None:
+    """③b 消费者编排：本机/远端/推送/rescan 线程孵化与收尾 join。"""
+    worker = partial(queue_worker, q)
+    q.threads = []
+    q.extra_threads = []
+    #: 本轮的采样/下发/rescan 线程都归它（名字统一 `queue-*`，`describe()` 里可读）。
+    #: 建在 `run_queue` 里而不是模块级：一轮一份，收尾即散，不制造跨轮的单例。
+    rt = common.runtime.Runtime(scope="queue")
 
+    # alive / spawned_ids：权重就绪后才 append（边分发边开采；rescan 共享）。
+    q.alive = []
+    q.spawned_ids = set()
+    alive_lock = threading.Lock()
+
+    def _spawn(nd: dict) -> None:
+        _spawn_node_workers(q, rt, worker, alive_lock, nd)
+
+    # 本地线程先孵化：本地权重已在磁盘（rl_path），不依赖远端 POST。
+    # B3：初始只开 local_slots 条（0 = 不开）；失联补孵由 LocalLane 守护。
+    q.local_lane = _queue_lane(q, worker)
+    q.t_dist_start_box[0] = time.time()
+    q.local_lane.start()
+
+    # reuse 节点：同 wver 已下发，立刻开采。
+    for nd in q.reuse:
+        _spawn(nd)
+
+    if q.need:
+        push_t = rt.thread(partial(_push_need, q, _spawn), name="weights-push", daemon=True)
+        q.threads.append(push_t)
+    else:
+        q.t_dist_done_box[0] = q.t_dist_start_box[0]
+
+    scan_t = _rescan_thread(q, rt, worker)
+    if scan_t is not None:
+        q.threads.append(scan_t)
+
+    _drain_and_join(q)

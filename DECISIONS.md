@@ -11484,3 +11484,22 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **验证**：10 组场景逐字段 **0 差异**（spec 全字段 / 归一化日志 / `call_bounded` 名字序列；
   含异常原样外泄与段降档后不再等上界）；定向 76 passed；代码行 808 → 823；`Any` 9 → 8；
   存量 16 文件 / 17 → 16 / 16；全量 pygate 绿。全文 → `docs/nn/engineering.md` §383。
+
+## §2026-11-27-run-queue-orchestration-seams
+
+- **背景**：`trainer/queue_worker.run_queue` 175 行把五件事平铺：本地车道孵化、reuse 节点开采、
+  need 并行 POST（成功即 spawn）、rescan 线程装配、结算等待与 grace join。每块的失败模式不同
+  （本地失联补孵 / POST 半途断 / 节点资格 / 卡死 worker 的 join），读起来却只有一条长序列。
+
+- **决定**：拆 `_queue_lane`（`LocalLane` 唯一装配）/ `_spawn_node_workers`（去重 + 先 start
+  再入表）/ `_push_need`（收 `on_alive` 回调）/ `_rescan_thread`（`RescanSpec` 唯一装配，
+  不需要时 `None`）/ `_drain_and_join`（等待 + join + 卡住线程一行）；编排只留 38 行。
+
+- **被否决**：`_push_need` 自己 reach `_spawn_node_workers` —— 推线程与孵化线程的耦合会被写成
+  第二份「怎么 spawn」，而 `PushHooks.on_alive` 本来就是回调形状。`worker` 标 `Any` 被
+  `test_any_budget` 挡下（6 → 8）⇒ 用 `Callable[[dict | None, int | None], None]`。
+
+- **验证**：5 组场景逐字段 **0 差异**（线程名序列 / `alive` / `spawned_ids` / `LaneSpec` 与
+  `RescanSpec` 全字段 / POST 实参 / 回调孵化 / 日志 / `halted` / 分发时间戳关系）；定向 38 passed；
+  代码行 754 → 770；存量 16 文件 / 16 → 15 / 15；全量 pygate 绿。
+  全文 → `docs/nn/engineering.md` §384。
