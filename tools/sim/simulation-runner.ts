@@ -8,6 +8,7 @@ import { GoalExecutor } from '../../src/nn/goal-executor'
 import { IntentPlayer } from '../../src/nn/intent-player'
 import { IntentExecutor } from '../../src/nn/intent-executor'
 import { IntentOracleProbe } from '../../src/nn/intent-oracle-probe'
+import { IntentOptionProbe } from '../../src/nn/intent-option-probe'
 import { IntentSearchInput } from './intent-search-input'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
@@ -434,6 +435,7 @@ export const SIM_POLICIES = [
   'intent',
   'intent-exec',
   'intent-oracle',
+  'intent-option',
   'intent-search',
   'goal',
   'goal-god',
@@ -441,7 +443,13 @@ export const SIM_POLICIES = [
 export type SimPolicy = (typeof SIM_POLICIES)[number]
 
 /** 只能本机跑、不可经 dist 分派的 policy（m1-eval 用它做 fail-closed）。 */
-export const LOCAL_ONLY_POLICIES = ['intent', 'intent-oracle', 'intent-search', 'goal-god'] as const
+export const LOCAL_ONLY_POLICIES = [
+  'intent',
+  'intent-oracle',
+  'intent-option',
+  'intent-search',
+  'goal-god',
+] as const
 
 export function assertSimPolicy(p: string | undefined): SimPolicy {
   const policy = p ?? 'god'
@@ -720,23 +728,30 @@ export function runSimulation(opts: RunOptions): SimResult {
                 seed, // 内部派生 oracle/exec 两个独立 RNG（§47）
                 replanEvery: opts.replanEvery,
               }) as unknown as GodAIInput)
-            : policy === 'intent-search'
-              ? (new IntentSearchInput(world, {
-                  seed, // exec RNG 与 intent-oracle 的 exec 同源（两臂 CRN）
-                  searchEvery: opts.intentSearchEvery ?? opts.intentSearchHorizon ?? 120,
-                  horizon: opts.intentSearchHorizon ?? 120,
+            : policy === 'intent-option'
+              ? (new IntentOptionProbe(world, {
+                  seed, // 与 intent-oracle 同源 RNG ⇒ 两臂可逐字节对账
+                  replanEvery: opts.replanEvery,
                 }) as unknown as GodAIInput)
-              : policy === 'goal' || policy === 'goal-god'
-                ? (new GoalExecutor(world, {
-                    weightsText:
-                      policy === 'goal-god' ? '' : readFileSync(opts.goalWeightsDir ?? '', 'utf8'),
-                    rng: godRng, // §47：执行器内部 God-AI 独立 RNG（兜底/物理层）
-                    promiseTicks: opts.promiseTicks || undefined,
-                    // 诊断模式（§T9a 归因）：goal-god = 不跑网络，追逐 God-AI 导航目标，
-                    // 测执行器上限。不构建模型 ⇒ weights 可缺。
-                    followGodNav: policy === 'goal-god',
+              : policy === 'intent-search'
+                ? (new IntentSearchInput(world, {
+                    seed, // exec RNG 与 intent-oracle 的 exec 同源（两臂 CRN）
+                    searchEvery: opts.intentSearchEvery ?? opts.intentSearchHorizon ?? 120,
+                    horizon: opts.intentSearchHorizon ?? 120,
                   }) as unknown as GodAIInput)
-                : new GodAIInput(world, godAIParams, godRng)
+                : policy === 'goal' || policy === 'goal-god'
+                  ? (new GoalExecutor(world, {
+                      weightsText:
+                        policy === 'goal-god'
+                          ? ''
+                          : readFileSync(opts.goalWeightsDir ?? '', 'utf8'),
+                      rng: godRng, // §47：执行器内部 God-AI 独立 RNG（兜底/物理层）
+                      promiseTicks: opts.promiseTicks || undefined,
+                      // 诊断模式（§T9a 归因）：goal-god = 不跑网络，追逐 God-AI 导航目标，
+                      // 测执行器上限。不构建模型 ⇒ weights 可缺。
+                      followGodNav: policy === 'goal-god',
+                    }) as unknown as GodAIInput)
+                  : new GodAIInput(world, godAIParams, godRng)
   const sim = new Simulation(world, input)
 
   // Lie-Back-Win-Mode: when --coop, set up player2 with God AI.
