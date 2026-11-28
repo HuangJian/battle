@@ -214,7 +214,7 @@ def ensure_bun(
     `remote/replay_corpus.resolve_js_runtime` 两者皆无才失败）。
     `code_dir` 只给 `cfg.bun_install_deps` 的 `bun install` 用（缺省 `/tmp`；该开关缺省关）。
     """
-    return _ensure_bun(Path(code_dir or "/tmp"), dict(cfg or {}), log or (lambda _m: None))
+    return NODE.ensure_bun(Path(code_dir or "/tmp"), dict(cfg or {}), log or (lambda _m: None))
 
 
 def _start_cloudflared(
@@ -292,9 +292,9 @@ def _ensure_cloudflared_url(
     total = max(1, int(attempts))
     for i in range(1, total + 1):
         posture, protocol, edge_ip, debug = ladder[min(i - 1, len(ladder) - 1)]
-        _reset_cf_log(cf_log, i)
+        NODE.reset_cf_log(cf_log, i)
         t0 = time.time()
-        cfp = _start_cloudflared(
+        cfp = NODE.start_cloudflared(
             cfg,
             port,
             cf_log,
@@ -307,7 +307,7 @@ def _ensure_cloudflared_url(
         if cfp is None:
             log("cloudflared 不可用（二进制缺失/启动失败）—— 不再重试")
             return "", None
-        url = _wait_tunnel_url(cf_log, cfp, log, timeout=wait_timeout, attempt=(i, total))
+        url = NODE.wait_tunnel_url(cf_log, cfp, log, timeout=wait_timeout, attempt=(i, total))
         alive = cfp.poll() is None
         if url and alive:
             flag = protocol or "auto"
@@ -321,8 +321,8 @@ def _ensure_cloudflared_url(
             log(f"cloudflared 第 {i}/{total} 次未就绪（进程已退出 rc={rc}，存活 {elapsed:.0f}s）")
         if url:
             log(f"  日志里有 URL 但进程已退出：{url}（不采用）")
-        log(f"  死因: {_dead_reason(cf_log)}")
-        _dump_tail(cf_log, log, 6)
+        log(f"  死因: {NODE.dead_reason(cf_log)}")
+        NODE.dump_tail(cf_log, log, 6)
         _terminate(cfp)
         if i < total:
             time.sleep(CLOUDFLARED_RETRY_SEC * i)
@@ -478,7 +478,7 @@ def emit_output_summary(port: int, auth: str, log: Callable[[str], None]) -> Non
     读失败 ⇒ 两行各自走「不可知」档：可丢的观测不该让监护循环炸，也不该被读成
     「节点不健康」（判活是 `_ping` 的职责）。
     """
-    status = _status(port, auth)
+    status = NODE.status(port, auth)
     log(node_report.output_line(status))
     log(node_report.disk_line(status))
 
@@ -525,6 +525,74 @@ def _try_register_once(spec: RegisterAsk) -> dict:
     payload = build_register_payload(node_id, url, auth, workers, label)
     opener = spec.urlopen or urllib.request.urlopen
     return register(opener, hub_url, hub_token, payload, log)
+
+
+@dataclass(frozen=True)
+class NodePorts:
+    """节点运行时「与这台机器打交道」的全部步骤（P0-8 端口对象，2026-11-28）。
+
+    为什么要有它：这些步骤原先只能靠 `monkeypatch.setattr(rn, "_ping", …)` 打桩，
+    测试面因此冻结了 18 个私有名（G19：`test_rollout_node` 49 处 + `test_tailscale_boot_bun`
+    3 处）—— 实现一挪名，几十条用例跟着红，重构只能退化成「搬文件但保持形状」。
+
+    形状与 `remote/notebook_runtime.RuntimeProbes`（§389 批四）同：**字段 = 一个能力**，缺省实现
+    是宿主自己已有的函数（`NODE = NodePorts(...)` 那一行是它们在本模块唯一一次被点名），
+    用例改一个字段就只换自己关心的那一步：
+
+        monkeypatch.setattr(rn, "NODE", dataclasses.replace(rn.NODE, ping=fake))
+
+    ★ 调用点一律 `NODE.x(...)`（**调用时**读模块全局）：绑成缺省参数 / 类属性 / 模块级别名
+      都会让 `patch rn.NODE` 静默打空 —— 那一坑在 §389 有专门守卫。
+    """
+
+    #: 并发槽位（显式值 / 物理核 ×2）：`(slots, note)`。
+    slot_count: Callable[[int], tuple[int, str]]
+    #: bun 供给（`remote/node_toolchain.ensure_bun` 的持久缓存版）。
+    ensure_bun: Callable[[Path, dict, Callable[[str], None]], str]
+    #: 出网姿势预检：`("inherit"|"direct", 说明)`。
+    net_probe: Callable[[Callable[[str], None]], tuple[str, str]]
+    #: tailscale 引导：`(url, ok)`，失败不抛。
+    open_tailscale: Callable[[dict, str, int, Callable[[str], None]], tuple[str, bool]]
+    #: cloudflared 阶梯（起进程 + 等 URL）：`(url, proc)`。句柄不透明 ⇒ `object`。
+    cloudflared_url: Callable[..., tuple[str, object]]
+    start_cloudflared: RegisterFn
+    wait_tunnel_url: Callable[..., str]
+    reset_cf_log: Callable[..., None]
+    dead_reason: Callable[[Path], str]
+    dump_tail: Callable[..., None]
+    #: quick tunnel 换名读数（`push_tunnel.tunnel_url_of`）。
+    tunnel_url: Callable[[Path], str]
+    #: sampler-agent 拉起 / 等 authKey / 两条本地读数。
+    start_agent: RegisterFn
+    wait_auth: Callable[..., str]
+    ping: Callable[..., dict | None]
+    status: Callable[..., dict | None]
+    #: 注册一次（`RegisterAsk` → `register()` 的结果面）。
+    try_register: Callable[[RegisterAsk], dict]
+    #: 横幅里的 bun 版本读数。
+    bun_version: Callable[..., str]
+
+
+#: 缺省端口：每个字段就是本模块里已有的那个实现（这一行是它们唯一的点名处）。
+NODE = NodePorts(
+    slot_count=_slot_count,
+    ensure_bun=_ensure_bun,
+    net_probe=_net_probe,
+    open_tailscale=_open_tailscale,
+    cloudflared_url=_ensure_cloudflared_url,
+    start_cloudflared=_start_cloudflared,
+    wait_tunnel_url=_wait_tunnel_url,
+    reset_cf_log=_reset_cf_log,
+    dead_reason=_dead_reason,
+    dump_tail=_dump_tail,
+    tunnel_url=_tunnel_url,
+    start_agent=_start_agent,
+    wait_auth=_wait_auth,
+    ping=_ping,
+    status=_status,
+    try_register=_try_register_once,
+    bun_version=_proc_bun_version,
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -615,7 +683,7 @@ class _Tunnel:
 
     def postures(self) -> tuple[str, str]:
         if self.probe_postures is None:
-            self.probe_postures = _net_probe(self.log)
+            self.probe_postures = NODE.net_probe(self.log)
         return self.probe_postures
 
     def open_relay(self, reason: str) -> bool:
@@ -648,7 +716,7 @@ class _Tunnel:
         self.url, self.cfp, started = _open_cloudflared_once(
             current_url=self.url,
             cfp=self.cfp,
-            ensure=lambda: _ensure_cloudflared_url(
+            ensure=lambda: NODE.cloudflared_url(
                 self.cfg,
                 self.port,
                 self.cf_log,
@@ -693,7 +761,7 @@ class _Session:
 
     def _try_register(self) -> dict:
         t = self.tunnel
-        out = _try_register_once(
+        out = NODE.try_register(
             RegisterAsk(
                 url=t.url,
                 auth=self.auth,
@@ -751,10 +819,10 @@ class _Session:
     def restart_agent(self) -> None:
         """受监护重启：清旧进程、从盘上拉起、等 authKey（变了就让外层重注册）。"""
         _terminate(self.agent)
-        self.agent = _start_agent(
+        self.agent = NODE.start_agent(
             self.bun, self.entry, self.code_dir, self.port, self.workers, self.cfg, self.agent_log
         )
-        auth2 = _wait_auth(self.agent, self.auth_path, 30)
+        auth2 = NODE.wait_auth(self.agent, self.auth_path, 30)
         if auth2 and auth2 != self.auth:
             self.auth = auth2
             self.next_retry = 0.0
@@ -822,7 +890,7 @@ class _Session:
             t.url, t.cfp, started = _open_cloudflared_once(
                 current_url=t.url,
                 cfp=t.cfp,
-                ensure=lambda: _ensure_cloudflared_url(
+                ensure=lambda: NODE.cloudflared_url(
                     self.cfg,
                     self.port,
                     t.cf_log,
@@ -840,7 +908,7 @@ class _Session:
                 self.next_tunnel_probe = now + TUNNEL_PROBE_SEC
             self.next_tunnel_try = now + TUNNEL_RETRY_SEC
         if t.url and t.cfp is not None:
-            cur = _tunnel_url(t.cf_log)
+            cur = NODE.tunnel_url(t.cf_log)
             if cur and cur != t.url:
                 t.url = cur
                 self.next_retry = 0.0
@@ -896,7 +964,7 @@ def _open_channel(
         tunnel.open_relay("通道决策=relay")
         hub_url = _follow_relay_port()
     if tunnel.link == LINK_TAILSCALE:
-        tunnel.url, ok = _open_tailscale(cfg, ts_authkey, tunnel.port, log)
+        tunnel.url, ok = NODE.open_tailscale(cfg, ts_authkey, tunnel.port, log)
         if not ok:
             log("—— 回落 cloudflared")
             tunnel.link = LINK_CLOUDFLARED
@@ -904,7 +972,7 @@ def _open_channel(
         tunnel.open_cloudflared("通道决策=cloudflared")
     if not tunnel.url and not forced_cf and tunnel.link != LINK_RELAY and has_ts:
         log("cloudflared 未就绪 —— 回落 tailscale")
-        tunnel.url, ok = _open_tailscale(cfg, ts_authkey, tunnel.port, log)
+        tunnel.url, ok = NODE.open_tailscale(cfg, ts_authkey, tunnel.port, log)
         if ok:
             tunnel.link = LINK_TAILSCALE
     elif not tunnel.url and forced_cf:
@@ -955,7 +1023,7 @@ def _supervise(
                 tick += 1
                 if tick % 6 == 0:
                     _t_probe = time.time()
-                    _probe = _ping(port, auth)
+                    _probe = NODE.ping(port, auth)
                     _probe_ms = max(1, int((time.time() - _t_probe) * 1000))
                     if _probe is None:
                         miss += 1
@@ -1038,7 +1106,7 @@ def _run_plan(
     has_ts = bool(ts_authkey)
     link = resolve_link(env, str(cfg.get("link") or "auto"), has_ts)
     port = int(cfg.get("agent_port") or 8443)
-    workers, slot_note = _slot_count(int(cfg.get("workers") or 0))
+    workers, slot_note = NODE.slot_count(int(cfg.get("workers") or 0))
     # 磁盘阈值（P3）：校验在**起 agent 之前**（响了就停，不静默夹取）。
     (floor_mb, warn_mb), _disk_why = node_report.startup_disk(cfg)
     if _disk_why:
@@ -1066,7 +1134,7 @@ def _run_plan(
     node_report.reclaim_node_id(node_id, log)
 
     # ── 2. bun（公网安装在 ensure 之前）───────────────────────────────────
-    bun = _ensure_bun(code_dir, cfg, log)
+    bun = NODE.ensure_bun(code_dir, cfg, log)
     if not bun:
         log("FATAL: bun 不可用（也装不上）")
         return None
@@ -1110,16 +1178,16 @@ def _open_agent(plan: _RunPlan, cfg: dict, log: Callable[[str], None]) -> _Agent
         return None
     agent_log = Path("/tmp/rollout-agent.log")
     auth_path = entry.parent / "agent.auth"
-    agent = _start_agent(plan.bun, entry, plan.code_dir, plan.port, plan.workers, cfg, agent_log)
-    auth = _wait_auth(agent, auth_path)
+    agent = NODE.start_agent(plan.bun, entry, plan.code_dir, plan.port, plan.workers, cfg, agent_log)
+    auth = NODE.wait_auth(agent, auth_path)
     _t_ping0 = time.time()
-    ping = _ping(plan.port, auth)
+    ping = NODE.ping(plan.port, auth)
     # 超额认购自检的基准（P3）：worker 刚预热完、还没有任务时的 ping 延迟。
     # agent 未就绪（ping=None）时基准记 0：拿一次超时的 5s 当基准会把告警永久压死。
     ping_base_ms = max(1, int((time.time() - _t_ping0) * 1000)) if ping is not None else 0
     if ping is None:
         log("agent 30–60s 未就绪 —— 下面是 agent 日志尾部（真因通常在这）：")
-        _dump_tail(agent_log, log)
+        NODE.dump_tail(agent_log, log)
     return _AgentBoot(
         entry=entry,
         agent=agent,
@@ -1241,7 +1309,7 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
             url=tunnel.url,
             auth=session.auth,
             workers=plan.workers,
-            bun_version=_proc_bun_version(plan.bun, fallback=""),
+            bun_version=NODE.bun_version(plan.bun, fallback=""),
             code_hash=str((boot.ping or {}).get("codeHash", "")),
             hub_configured=session.hub_configured,
             reg_state=session.reg_state,

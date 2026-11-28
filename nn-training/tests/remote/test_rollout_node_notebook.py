@@ -172,8 +172,10 @@ def test_credentials_are_read_before_tailscale_ensure(
     )
     # 先读凭据、后开通道还不够：开通道那条路径里必须**真的有** tailscale 引导（ensure 在它内部）。
     chan = ast.parse(textwrap.dedent(inspect.getsource(rn._open_channel)))
+    # 2026-11-28（P0-8）：调用点走端口对象 `NODE.open_tailscale(...)`，判据按「被调名」认两形。
     assert any(
-        isinstance(n, ast.Call) and getattr(n.func, "id", "") == "_open_tailscale"
+        isinstance(n, ast.Call)
+        and (getattr(n.func, "id", "") == "_open_tailscale" or getattr(n.func, "attr", "") == "open_tailscale")
         for n in ast.walk(chan)
     ), "_open_channel 里找不到 tailscale 引导"
     # ensure() 本身搬进 `_open_tailscale`（plan/rollout-tunnel-url-retry B2），

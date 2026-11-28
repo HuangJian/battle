@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.error
+from dataclasses import replace
 from email.message import Message
 from io import BytesIO
 from pathlib import Path
@@ -347,7 +348,7 @@ def test_emit_output_summary_prints_output_and_disk_lines(monkeypatch: pytest.Mo
         calls.append(1)
         return status
 
-    monkeypatch.setattr(rn, "_status", _st)
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, status=_st))
     seen: list[str] = []
     rn.emit_output_summary(8443, "tok", seen.append)
     assert len(calls) == 1, "磁盘行与产出行必须共用同一次 /v1/status（零额外请求）"
@@ -356,7 +357,7 @@ def test_emit_output_summary_prints_output_and_disk_lines(monkeypatch: pytest.Mo
         seen[1] == "磁盘 free=2706MB（warn<4096 / 熔断<2048） · 档位=warn · 拒收=否 · 距熔断 658MB"
     )
     # agent 不可达 ⇒ 两行都如实说不可知（不是零行、不是抛）
-    monkeypatch.setattr(rn, "_status", lambda port, auth: None)
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, status=lambda port, auth: None))
     seen.clear()
     rn.emit_output_summary(8443, "tok", seen.append)
     assert seen == ["近30min产出 不可知（agent 未应答）", "磁盘 free=不可知（agent 未应答）"]
@@ -717,17 +718,17 @@ def test_422_and_cf_failure_stops_without_second_tailscale_post(
 
     monkeypatch.setattr(rn, "probe_cloud_env", lambda: "test")
     monkeypatch.setattr(rn, "resolve_link", lambda *_a: rn.LINK_TAILSCALE)
-    monkeypatch.setattr(rn, "_slot_count", lambda _n: (1, "test"))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, slot_count=lambda _n: (1, "test")))
     monkeypatch.setattr(rn, "registry_url", lambda *_a: "http://hub:8787")
-    monkeypatch.setattr(rn, "ensure_bun", lambda *_a: "/bin/bun")
-    monkeypatch.setattr(rn, "_net_probe", lambda _log: ("inherit", "direct"))
-    monkeypatch.setattr(rn, "_open_tailscale", lambda *_a: ("http://100.64.0.5:8443", True))
-    monkeypatch.setattr(rn, "_ensure_cloudflared_url", lambda *_a, **_k: ("", None))
-    monkeypatch.setattr(rn, "_start_agent", lambda *_a: _Agent())
-    monkeypatch.setattr(rn, "_wait_auth", lambda *_a, **_k: "ak")
-    monkeypatch.setattr(rn, "_ping", lambda *_a, **_k: {"codeHash": "0123456789abcdef"})
-    monkeypatch.setattr(rn, "_proc_bun_version", lambda *_a, **_k: "1.4.4")
-    monkeypatch.setattr(rn, "_try_register_once", _fake_register)
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, ensure_bun=lambda *_a: "/bin/bun"))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, net_probe=lambda _log: ("inherit", "direct")))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, open_tailscale=lambda *_a: ("http://100.64.0.5:8443", True)))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, cloudflared_url=lambda *_a, **_k: ("", None)))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, start_agent=lambda *_a: _Agent()))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, wait_auth=lambda *_a, **_k: "ak"))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, ping=lambda *_a, **_k: {"codeHash": "0123456789abcdef"}))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, bun_version=lambda *_a, **_k: "1.4.4"))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, try_register=_fake_register))
     monkeypatch.setattr(rn.time, "sleep", _interrupt)
     # 清场（`reclaim_node_id`）与注册地址无关：它会写共享 pidfile，跑完留下的记录会被
     # 下一次运行当成「上一个节点还活着」而白等（同 `test_register_uses_the_port_...`）。
@@ -782,17 +783,17 @@ def test_empty_url_multiple_ticks_never_posts_or_backs_off(
 
     monkeypatch.setattr(rn, "probe_cloud_env", lambda: "test")
     monkeypatch.setattr(rn, "resolve_link", lambda *_a: rn.LINK_CLOUDFLARED)
-    monkeypatch.setattr(rn, "_slot_count", lambda _n: (1, "test"))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, slot_count=lambda _n: (1, "test")))
     monkeypatch.setattr(rn, "registry_url", lambda *_a: "http://hub:8787")
-    monkeypatch.setattr(rn, "ensure_bun", lambda *_a: "/bin/bun")
-    monkeypatch.setattr(rn, "_net_probe", lambda _log: ("inherit", "direct"))
-    monkeypatch.setattr(rn, "_ensure_cloudflared_url", lambda *_a, **_k: ("", None))
-    monkeypatch.setattr(rn, "_start_agent", lambda *_a: _Proc(None))
-    monkeypatch.setattr(rn, "_wait_auth", lambda *_a, **_k: "ak")
-    monkeypatch.setattr(rn, "_ping", lambda *_a, **_k: {"codeHash": "0123456789abcdef"})
-    monkeypatch.setattr(rn, "_proc_bun_version", lambda *_a, **_k: "1.4.4")
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, ensure_bun=lambda *_a: "/bin/bun"))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, net_probe=lambda _log: ("inherit", "direct")))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, cloudflared_url=lambda *_a, **_k: ("", None)))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, start_agent=lambda *_a: _Proc(None)))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, wait_auth=lambda *_a, **_k: "ak"))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, ping=lambda *_a, **_k: {"codeHash": "0123456789abcdef"}))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, bun_version=lambda *_a, **_k: "1.4.4"))
     monkeypatch.setattr(rn, "register", _register)
-    monkeypatch.setattr(rn, "_try_register_once", _gate)
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, try_register=_gate))
     monkeypatch.setattr(rn.node_report, "reclaim_node_id", lambda *_a: 0)
     monkeypatch.setattr(rn.time, "time", _time)
     monkeypatch.setattr(rn.time, "sleep", _sleep)
@@ -867,17 +868,17 @@ def test_dead_tunnel_process_rebuilds_and_reregisters(
 
     monkeypatch.setattr(rn, "probe_cloud_env", lambda: "test")
     monkeypatch.setattr(rn, "resolve_link", lambda *_a: rn.LINK_CLOUDFLARED)
-    monkeypatch.setattr(rn, "_slot_count", lambda _n: (1, "test"))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, slot_count=lambda _n: (1, "test")))
     monkeypatch.setattr(rn, "registry_url", lambda *_a: "http://hub:8787")
-    monkeypatch.setattr(rn, "ensure_bun", lambda *_a: "/bin/bun")
-    monkeypatch.setattr(rn, "_net_probe", lambda _log: ("inherit", "direct"))
-    monkeypatch.setattr(rn, "_ensure_cloudflared_url", _ensure)
-    monkeypatch.setattr(rn, "_start_agent", lambda *_a: _Proc(None))
-    monkeypatch.setattr(rn, "_wait_auth", lambda *_a, **_k: "ak")
-    monkeypatch.setattr(rn, "_ping", lambda *_a, **_k: {"codeHash": "0123456789abcdef"})
-    monkeypatch.setattr(rn, "_tunnel_url", lambda _p: "")
-    monkeypatch.setattr(rn, "_proc_bun_version", lambda *_a, **_k: "1.4.4")
-    monkeypatch.setattr(rn, "_try_register_once", _register)
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, ensure_bun=lambda *_a: "/bin/bun"))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, net_probe=lambda _log: ("inherit", "direct")))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, cloudflared_url=_ensure))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, start_agent=lambda *_a: _Proc(None)))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, wait_auth=lambda *_a, **_k: "ak"))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, ping=lambda *_a, **_k: {"codeHash": "0123456789abcdef"}))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, tunnel_url=lambda _p: ""))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, bun_version=lambda *_a, **_k: "1.4.4"))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, try_register=_register))
     monkeypatch.setattr(rn, "unregister", lambda *_a, **_k: {"ok": True, "error": None})
     monkeypatch.setattr(rn.node_report, "reclaim_node_id", lambda *_a: 0)
     monkeypatch.setattr(rn.time, "time", _time)
@@ -919,15 +920,18 @@ def test_cloudflared_dead_process_triggers_restart(
         starts.append(p)
         return p
 
-    monkeypatch.setattr(rn, "_start_cloudflared", _start)
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, start_cloudflared=_start))
     monkeypatch.setattr(
         rn,
-        "_wait_tunnel_url",
-        lambda *_a, **_k: "" if len(starts) == 1 else "https://b.trycloudflare.com",
+        "NODE",
+        replace(
+            rn.NODE,
+            wait_tunnel_url=lambda *_a, **_k: ("" if len(starts) == 1 else "https://b.trycloudflare.com"),
+        ),
     )
-    monkeypatch.setattr(rn, "_reset_cf_log", lambda *_a: None)
-    monkeypatch.setattr(rn, "_dead_reason", lambda *_a: "x")
-    monkeypatch.setattr(rn, "_dump_tail", lambda *_a, **_k: None)
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, reset_cf_log=lambda *_a: None))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, dead_reason=lambda *_a: "x"))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, dump_tail=lambda *_a, **_k: None))
     monkeypatch.setattr(rn.time, "sleep", lambda *_a: None)
 
     url, cfp = rn._ensure_cloudflared_url(
@@ -950,11 +954,11 @@ def test_dead_url_is_not_accepted_even_when_log_has_it(
         starts.append(p)
         return p
 
-    monkeypatch.setattr(rn, "_start_cloudflared", _start)
-    monkeypatch.setattr(rn, "_wait_tunnel_url", lambda *_a, **_k: next(urls))
-    monkeypatch.setattr(rn, "_reset_cf_log", lambda *_a: None)
-    monkeypatch.setattr(rn, "_dead_reason", lambda *_a: "x")
-    monkeypatch.setattr(rn, "_dump_tail", lambda *_a, **_k: None)
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, start_cloudflared=_start))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, wait_tunnel_url=lambda *_a, **_k: next(urls)))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, reset_cf_log=lambda *_a: None))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, dead_reason=lambda *_a: "x"))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, dump_tail=lambda *_a, **_k: None))
     monkeypatch.setattr(rn.time, "sleep", lambda *_a: None)
 
     url, cfp = rn._ensure_cloudflared_url(
@@ -974,11 +978,11 @@ def test_cloudflared_retry_is_bounded_and_ladder_returns_to_preferred(
         starts.append(dict(kw))
         return _Proc(1)
 
-    monkeypatch.setattr(rn, "_start_cloudflared", _start)
-    monkeypatch.setattr(rn, "_wait_tunnel_url", lambda *_a, **_k: "")
-    monkeypatch.setattr(rn, "_reset_cf_log", lambda *_a: None)
-    monkeypatch.setattr(rn, "_dead_reason", lambda *_a: "x")
-    monkeypatch.setattr(rn, "_dump_tail", lambda *_a, **_k: None)
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, start_cloudflared=_start))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, wait_tunnel_url=lambda *_a, **_k: ""))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, reset_cf_log=lambda *_a: None))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, dead_reason=lambda *_a: "x"))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, dump_tail=lambda *_a, **_k: None))
     monkeypatch.setattr(rn.time, "sleep", lambda s: sleeps.append(s))
 
     url, cfp = rn._ensure_cloudflared_url(
@@ -1348,13 +1352,13 @@ def test_register_uses_the_port_the_relay_actually_used(
     monkeypatch.setattr(rn, "probe_cloud_env", lambda: "test")
     monkeypatch.setattr(rn, "resolve_link", lambda *_a: rn.LINK_RELAY)
     monkeypatch.setattr(rn, "RelayChannel", _Relay)
-    monkeypatch.setattr(rn, "_slot_count", lambda _n: (1, "test"))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, slot_count=lambda _n: (1, "test")))
     monkeypatch.setattr(rn, "registry_url", lambda *_a: "https://hub.example.com")
-    monkeypatch.setattr(rn, "_ensure_bun", lambda *_a: "/bin/bun")
-    monkeypatch.setattr(rn, "_start_agent", lambda *_a: _Proc(None))
-    monkeypatch.setattr(rn, "_wait_auth", lambda *_a, **_k: "ak")
-    monkeypatch.setattr(rn, "_ping", lambda *_a, **_k: {"codeHash": "0123456789abcdef"})
-    monkeypatch.setattr(rn, "_try_register_once", _register)
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, ensure_bun=lambda *_a: "/bin/bun"))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, start_agent=lambda *_a: _Proc(None)))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, wait_auth=lambda *_a, **_k: "ak"))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, ping=lambda *_a, **_k: {"codeHash": "0123456789abcdef"}))
+    monkeypatch.setattr(rn, "NODE", replace(rn.NODE, try_register=_register))
     # 清场（`reclaim_node_id`）与注册地址无关：它会写共享 pidfile，跑完留下的记录会被
     # 下一次运行当成「上一个节点还活着」而白等 8s（本用例曾因此固定耗时 10.5s）。
     monkeypatch.setattr(rn.node_report, "reclaim_node_id", lambda *_a: 0)

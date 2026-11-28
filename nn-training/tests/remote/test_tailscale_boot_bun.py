@@ -33,6 +33,7 @@ import ast
 import inspect
 import json
 import textwrap
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -219,7 +220,7 @@ def test_notebook_bun_goes_through_the_cache_aware_installer(
         calls.append((dict(cfg), Path(code_dir)))
         return str(Path(cfg["bin_cache_dir"]) / "bun")
 
-    monkeypatch.setattr(rollout_node, "_ensure_bun", fake_ensure_bun)
+    monkeypatch.setattr(rollout_node, "NODE", replace(rollout_node.NODE, ensure_bun=fake_ensure_bun))
     monkeypatch.setattr(common_proc, "bun_version", lambda *a, **k: "1.4.4")
     cache = tmp_path / "cache"
     code = tmp_path / "code"
@@ -246,7 +247,7 @@ def test_ensure_replay_bun_is_never_fatal(
         calls.append("x")
         return ""
 
-    monkeypatch.setattr(rollout_node, "_ensure_bun", empty_ensure)
+    monkeypatch.setattr(rollout_node, "NODE", replace(rollout_node.NODE, ensure_bun=empty_ensure))
     logs: list[str] = []
     assert notebook_runtime.ensure_replay_bun({}, logs.append) == ""
     assert calls == [], "没有代码根的宿主（单测/嵌入）不该去装 bun"
@@ -258,7 +259,7 @@ def test_ensure_replay_bun_is_never_fatal(
     def boom(code_dir: Path, cfg: dict, log) -> str:
         raise OSError("network down")
 
-    monkeypatch.setattr(rollout_node, "_ensure_bun", boom)
+    monkeypatch.setattr(rollout_node, "NODE", replace(rollout_node.NODE, ensure_bun=boom))
     assert notebook_runtime.ensure_replay_bun({"code_dir": str(tmp_path / "c")}, logs.append) == ""
 
 

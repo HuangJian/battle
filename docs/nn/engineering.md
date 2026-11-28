@@ -29,6 +29,57 @@
 
 ---
 
+## §391 P0-8 第三代：采样节点端口（`remote/rollout_node.py::NodePorts`，2026-11-28）
+
+**背景**：§389 结尾点名的剩余大头之一是「`remote/rollout_node` ~50 处，要一个 `NodePorts`」。
+实测 **52 处**：`tests/remote/test_rollout_node.py` 49（G19 基线全量）+ `test_tailscale_boot_bun.py`
+3（打 `rollout_node._ensure_bun`，图的是从 `notebook_runtime.ensure_replay_bun` 的公开入口
+拦截共享装机）。**两个文件都归零**。
+
+**形状**：`NodePorts`（frozen dataclass，17 个字段）住 `remote/rollout_node.py` 本体；字段 =
+「这台机器上的一步」：
+
+* 起步：`slot_count` / `ensure_bun` / `net_probe`
+* 通道：`open_tailscale` / `cloudflared_url`（整个阶梯）/ `start_cloudflared` /
+  `wait_tunnel_url` / `reset_cf_log` / `dead_reason` / `dump_tail` / `tunnel_url`
+* agent：`start_agent` / `wait_auth` / `ping` / `status` / `bun_version`
+* 注册：`try_register`
+
+缺省实现就是本模块里已有的那 17 个名字，**唯一一次点名**在 `NODE = NodePorts(...)` 那一行；
+调用点一律 `NODE.x(...)`。用例改一个字段只换自己关心的那一步：
+
+```python
+monkeypatch.setattr(rn, "NODE", replace(rn.NODE, ping=fake))
+```
+
+**为什么住模块本体而不是 `common/ports.py`**：与 §389 的跨包情形相反，这 17 个实现全在
+`rollout_node` 自己的依赖面之内（`node_toolchain` / `rollout_tunnel` / `push_tunnel` /
+`common.proc`），端口若搬去 `common/` 反而要抬读者秩或让 `common` 认识 `remote`。端口只是
+「把已有的模块级函数收成字段」，零新依赖、零秩变化（`tests/helpers/remote_dag.py` 未动）。
+
+**坑**：
+
+1. **有一处打桩原本是死的**：`test_rollout_node.py` 里 3 条 `setattr(rn, "ensure_bun", …)` 打的是
+   **公开包装**，而 `_run_plan` 读的是 `_ensure_bun` —— 桩从来没生效（用例一直在真跑装机探测）。
+   端口落地后这 3 条改打 `NODE.ensure_bun`，才真正隔离（也是本刀唯一的行为面变化，方向是
+   「用例更 hermetic」）。
+2. **源码形状守卫要跟着口径改**：`test_rollout_node_notebook` 原来断言 `_open_channel` 里存在
+   `Name("_open_tailscale")` 调用，端口化后是 `Attribute("open_tailscale")`；判据改成两形都认
+   （守卫的意图是「通道路径里真有 tailscale 引导」，不是「调用写成裸名」）。
+3. **`Any` 不进基线**：`cloudflared_url` 的返回值只当不透明句柄用 ⇒ 标 `tuple[str, object]`，
+   G14 保持 `remote/rollout_node.py: 11`（若写 `tuple[str, Any]` 会当场 +1）。
+4. 多行形态的 `monkeypatch.setattr(` 只有一处（`_wait_tunnel_url`）；批量迁移按「每插一个
+   `replace(` 就多补一个闭括号」收尾，已 py_compile + 94 条用例核对。
+
+**证明**：G19 `monkeypatch_private_baseline.json` **254 / 68 → 202 / 66**（−52 次 / −2 文件；
+两个条目归零后按「基线只许调小」删除）；三个文件 94 passed；`nn-python-gate.sh` 全绿
+（ruff + mypy + 7107 passed / 4 skipped）。
+
+**下一步（未做）**：`remote/offline_boot`（生成物，改 `.pyfrag`）仍是剩余大头；
+`trainer/loop_core.TrainingLoop._*` 的 15 处与 P0-1 混入拆解同批。
+
+---
+
 ## §390 两条满载 flake 的根因：BC 独占锁与租约**各读一次钟** + relay 单飞判据数了「一辈子」（2026-11-28）
 
 **① `e2e/test_hold_e2e.py::test_bc_exclusivity_chain_end_to_end`**（偶发 `claim 被拒: bc_exclusive:w-bc`）

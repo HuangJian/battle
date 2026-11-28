@@ -112,9 +112,12 @@
 `FetchPair`（「拿到整份字节」与「发一次」不是同一个协议）。G19 **304 / 71 → 280 / 69**
 （累计 384 / 91 → 280 / 69）。**批四（同日）**：`notebook_runtime` 26 处收进 `RuntimeProbes`（`backend` / `cuda` / `paddle` /
 `hub_open` 四字段 + `PROBES`），G19 **280 / 69 → 254 / 68**（累计 384 / 91 → 254 / 68）。
-**下一个已知口径**：`offline_boot`（生成物，改 `.pyfrag`）、`rollout_node`（~50 处，要 `NodePorts`）、
-`TrainingLoop._*` 15 处（与 P0-1 同批）。
-全文 → `docs/nn/engineering.md` §389。
+**批五（同日）**：`remote/rollout_node` 52 处（`test_rollout_node` 49 + `test_tailscale_boot_bun` 3）
+收进模块自带的 `NodePorts`（17 字段 frozen dataclass，`NODE` 是唯一装配行；调用点一律
+`NODE.x(...)`），另 3 条打的是公开包装 `ensure_bun`，不计 G19 但随同一端口一起迁。
+G19 **254 / 68 → 202 / 66**（累计 384 / 91 → 202 / 66，−182 次 / −25 文件，两个文件归零）。
+**下一个已知口径**：`offline_boot`（生成物，改 `.pyfrag`）、`TrainingLoop._*` 15 处（与 P0-1 同批）。
+全文 → `docs/nn/engineering.md` §389 / §391。
 
 ## 0. 执行摘要
 
