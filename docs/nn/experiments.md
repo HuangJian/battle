@@ -7,6 +7,63 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 ---
 
+## §168 P′-2a2 修饰维度 headroom：**pathMode=break 独活（+5.2pp，LCB +3.1）**，targetKind/target/param 全砍（2026-11-28）
+
+**口径**：classic35 / hard / 3 命 / 0★ / 20 敌 / 36000 拍；seeds 2000000001–2000000060
+（35×60=2100，逐 (stage,seed) 配对）；codeHash `76705562…`。**option 固定 = oracle 全链意图**
+（与 `intent-option` 同源），exec = E2′ `nnOption`；`searchEvery=120`、`H=120`，
+窗口分 = `tools/sim/window-score.ts`（与 P′-2a-B 同一实现）。M0 = `intent-option --replan 120`
+（无修饰委托）。累积消融档 L1..L4，每档只加一个维度；判决 = 相邻臂配对 Δ 的单侧 95% LCB>0
+（预注册 `plan/hier-options-prereg.v1.json` `p2a2`）。
+
+**五臂（2100 局）**
+
+| arm | 修饰 | n | win | winRate | 95% CI | avgKills | avgTicks | 基毁率 |
+|---|---|---:|---:|---:|---|---:|---:|---:|
+| m0 | 无（纯委托 @120） | 2100 | 1464 | 69.7% | [67.7, 71.6] | 17.21 | 5442 | 26.7% |
+| l1 | + targetKind | 2100 | 1486 | 70.8% | [68.8, 72.7] | 17.33 | 5076 | 25.7% |
+| l2 | + target（显式槽） | 2100 | 1481 | 70.5% | [68.5, 72.4] | 17.25 | 4910 | 26.4% |
+| l3 | + pathMode（break） | 2100 | 1590 | **75.7%** | [73.8, 77.5] | 17.90 | 4694 | 21.8% |
+| l4 | + param（standoff） | 2100 | 1569 | 74.7% | [72.8, 76.5] | 17.78 | 4653 | 22.7% |
+
+**逐维度判决（相邻配对）**
+
+| 维度 | 对照 | Δ | McNemar p | bootstrap LCB95 | 判决 |
+|---|---|---:|---:|---:|---|
+| D1 targetKind | l1 − m0 | +1.0pp | 0.44 | **−1.05pp** | **砍** |
+| D2 target | l2 − l1 | −0.2pp | 0.88 | **−2.76pp** | **砍** |
+| D3 pathMode | l3 − l2 | **+5.2pp** | 2e-5 | **+3.14pp** | **保留 break** |
+| D4 param | l4 − l3 | −1.0pp | 0.29 | **−2.43pp** | **砍** |
+| TOTAL | l4 − m0 | +5.0pp | 1.4e-4 | +1.71pp | 参考 |
+| diag | l3 − m0 | **+6.0pp** | 7.7e-6 | **+3.14pp** | 最佳实测臂 |
+
+**选择频率（70 局普查，L4；2963 次搜索）**：targetKind 26.9% / target 8.8% /
+pathMode 9.0% / param 3.2%。break 只在约 1/11 的窗口被选中，却贡献了全部增量
+⇒ 价值集中在少数「隔墙追击」窗口，不是全局改道。
+
+**机制与口径边界**
+
+- `target` 维度 = `enemySlotOrder` 1..4 槽的显式 `targetId`（逐 tick 跟踪；目标死亡 ⇒ 回退
+  option 子链，不静默改就近目标）+ powerup 第 2 近显式格 + 基地锚点（ring 外一格可站立格）。
+- `pathMode` 的 **detour 在 E2′ 与 direct 同径**（`navigateTowards` 本来不穿砖）⇒ 不单列；
+  `break` 只挂在 enemy 目标上（避免拆自家环，L0 硬约束）。
+- `param` = standoff 0/3/6 格（enemy/anchor 目标；距离 ≤ 档位交回 option 子链）；powerup 强制 0。
+- **M0@120（69.7%）高于 intent-oracle@30（63.6%，§165）**：承诺期从 30 → 120 拍本身
+  ≈+6.1pp，不能与 P′-2a-A 的 63.6% 混算；这也是本卡用同 cadence M0 做基线的原因。
+- **限制**：累积设计没有「break-only（不配 targetKind/target）」臂；按 D1/D2 的负结果，
+  break 的收益不依赖显式选槽/选种头的增量，但「break + 规则最近敌」的独立臂未跑（后验）。
+
+**结论**：① P′-4a 选择层只保留 **option + pathMode（direct/break）** 头；targetKind/target/param
+不建学习头，target 由执行器规则（最近敌/最近道具/基地锚点）决定。② E2′ 目标执行层保留
+`break`，standoff 与显式槽选择不进入产品路径。③ 下一步 = P′-2b1（executor→executor 低层
+读数），其后 P′-4a option+break 版。
+
+**复现**：`tmp/p2a2/{m0,l1,l2,l3,l4}-2100.json`、`summary.md`（一次性，未入库）；
+工具 = `tools/sim/intent-option-search.ts`（policy `intent-option-search`，`--modifier-level 0..4`）；
+`bun run check` **2922 pass**（Campaign 前一次；codeHash 相符）。
+
+---
+
 ## §167 P′-3 E2′：委托层 **byte-identical**、700 局 **0 差异**；目标执行层落地（2026-11-28）
 
 **口径**：classic35 / hard / 3 命 / 0★ / 20 敌 / 36000 拍；seeds 2000000001–2000000020

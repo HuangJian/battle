@@ -11684,3 +11684,11 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **违反后果**：`_optionCmd` 漏进 DECISION_STATE_FIELDS ⇒ 分支回档分叉；`_optionChains` 不在 reset 重建 ⇒ stage 切换后用旧链；新增 GodAIInput 字段不进 hub-fields allowlist ⇒ 结构门红。
 
 
+
+## §2026-11-28-hier-p2a2-modifiers（2026-11-28，P′-2a2 修饰维度：pathMode=break 独活 +5.2pp；targetKind/target/param 砍）
+
+- **口径**：classic35 / hard / 3 命 / 0★ / 20 敌 / 36000 拍；seeds 2000000001–2000000060（2100，逐 (stage,seed) 配对）；codeHash `76705562…`。option 固定 = oracle 全链意图，exec = E2′ `nnOption`；`searchEvery=H=120`，窗口分 = `tools/sim/window-score.ts`。M0 = `intent-option --replan 120`（同 cadence 纯委托）。累积消融 L1..L4，每档加一个维度；门 = 相邻臂 Δ 单侧 95% LCB>0（预注册 `plan/hier-options-prereg.v1.json` `p2a2`）。
+- **决定**：① **pathMode（break）保留**：L3 − L2 = **+5.2pp**（McNemar p=2e-5，stage-cluster LCB **+3.14pp**）；L3 总臂 75.7%（L3 − M0 **+6.0pp**，LCB +3.14）。② **targetKind 砍**：+1.0pp（LCB −1.05）；**target 砍**：−0.2pp（LCB −2.76）；**param 砍**：−1.0pp（LCB −2.43）。③ 选择频率（70 局普查）：targetKind 26.9% / target 8.8% / break 9.0% / param 3.2% ⇒ break 的价值集中在少数「隔墙追击」窗口。④ P′-4a 选择层只建 **option + pathMode(direct/break)** 头；target 由执行器规则（最近敌/最近道具/基地锚点）决定，不建 targetKind/target/param 学习头。
+- **被否决**：① 用 targetKind 的点估计 +1.0pp 当正收益（LCB 跨 0）；② 给 param 的 standoff 语义再加档（3.2% 选中且负收益，先砍）；③ 用 M0@120 与 intent-oracle@30（63.6%）相减（承诺期 30→120 本身 ≈+6.1pp，口径不同）；④ 把 detour 单列成维度（E2′ 与 direct 同径）；⑤ 把 break 收益归给「显式选槽」（D2 负；但 break-only 独立臂未跑，列为后验限制）。
+- **证明/复现**：全文/五臂/配对表/普查 → `docs/nn/experiments.md` §168；产物 `tmp/p2a2/{m0,l1,l2,l3,l4}-2100.json`、`summary.md`（一次性，未入库）；工具 `tools/sim/intent-option-search.ts`（local-only policy `intent-option-search`，`--modifier-level 0..4`）；`bun run check` 2922 pass。
+- **违反后果**：`--modifier-level` 不进 wver ⇒ 不同消融档共用账本（已修：wver 含 level/h/every）；`targetId` 不进 `NNOptionCommand`/DECISION_STATE_FIELDS ⇒ 显式槽臂退化成就近目标且分支回档分叉（单测 `tests/god/nn-option-exec.test.ts` 红）；`param=0` 若走进 standoff 分支 ⇒ P′-3 的 byte-identical 门破（当前 `standoff<=0` 提前返回）。
