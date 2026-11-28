@@ -7,6 +7,66 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 ---
 
+## §171 P′-4a 实施：6 槽 option 线全链路（probe → E2′ 执行器 → rollout → 评估/课程）；init −14.3pp 是起点不是判决（2026-11-28）
+
+**背景**：P′-2a2 判定 `pathMode=break` 独活（+5.2pp，LCB +3.1），targetKind/target/param 砍；
+P′-4a 的动作空间由此定为 **3 option × pathMode = 6 联合槽**，HOLD_break 恒非法（L0）。
+本卡把「选择层」从测量仪器接成可训练产品线：
+
+| 件 | 交付 |
+|---|---|
+| 词表/规则 | `src/ai/intent/options.ts`：槽表、8 意图→槽映射（CLEAR→HUNT_break）、掩码、target 规则（HUNT 敌>道具、IB 威胁→敌否则锚点、HOLD 锚点；break 只对敌） |
+| 执行器 | `src/nn/hier-option-executor.ts`（InputLike）：replan=30、注入 7（6 one-hot + 槽龄）、`_optionCmd` + `{'nnOption'}` → E2′ |
+| 训练采集 | `tools/sim/export-intent-rollout.ts` 按权重 `arch.intentDim` 分支：8=legacy intent / 6=option（inject 7、mask 6、shaping 槽级表）；新增 `--stage-json`/`--course-fp`/`--corpus-fp` |
+| 评估 | m1-eval local-only `--policy hier-option`；`trainer/eval_m1.py::intent_eval_policy` 按 `arch.intentDim` 自动选（6→hier-option，8→intent-exec） |
+| 课程 | `nn-training/curricula/hier-option-3.jsonc`（mode=intent，seed_rotate=1，35 局/轮，bc=probe init） |
+
+**6 槽 probe（700 局语料，`tmp/option-probe-hard-700`）**：训练 60k 帧 / val 28,059；
+label dist train `[57646, 1221, 815, 0, 318, 0]` / val `[27002, 463, 414, 0, 180, 0]`
+（槽 3/5 无标签）。balanced CE 2 epochs：
+
+| 指标 | 值 |
+|---|---:|
+| 槽级 top-1 | 0.7305 |
+| majority（全 HUNT_direct） | 0.9623 |
+| balancedAcc | **0.7258** |
+| option3 折叠 top-1（预注册门 ≥0.65） | **0.8375 ✓** |
+| recall HUNT_direct / HUNT_break / IB_direct / HOLD_direct | 0.729 / 0.983 / 0.664 / 0.528 |
+
+⇒ 无类坍缩（HOLD 召回 >0）；槽级 top-1 低于 majority 是 balanced 权重的预期，不是退化。
+init 权重 `arch.intentDim=6 / injectDim=7`；PPO init（value 随机）76,519 参数。
+
+**链路自检**（全部绿）：
+- 1 局 rollout（s0/seed1，3000 拍）88 intent-steps，槽分布 `38/22/10/0/18/0`；
+  `inject (88,7)`、`mask (88,6)`、manifest `vocab=option6`。
+- PPO 单轮更新：entropy **1.0637**、kl 0.0018、policy 0.0772 ⇒ 6 槽未坍缩、可训练。
+- 自定义关：`--stage-json` 解 classic35 id 2000，结果与内置 stage 0 逐局一致（88 步/2707 拍/7 杀）。
+
+**同面板评估（70 局：35 关 × seeds 2000000001-2；hard / 0★ / m1-eval / no-dist）**
+
+| 臂 | 胜率 | 均杀 |
+|---|---:|---:|
+| `hier-option` init（本卡 probe 权重） | **21.4%**（15/70） | 11.16 |
+| per-tick `g11-ringkill.it580` | **35.7%**（25/70） | 12.56 |
+
+⚠ 两条口径说明：① 这是 **BC init**，不是 PPO 产物——P′-4a 门判的是训练后权重；
+② m1-eval 不套 OpeningController，与训练评估链的 39.7% 不可相减，只能在这条 70 局面板上配对。
+init 落后 −14.3pp 与 probe 的 HOLD 召回 0.53 一致：**起点偏低但方向可训练**，PPO 是否抬得动由
+课程首轮 eval 回答。
+
+**顺带修掉的阻断**（都在本卡路径上，均带回归用例）：
+1. `model_build._build_intent_or_goal` 调不存在的 `nn-training/ppo_intent.py`（flat 脚本已并包）
+   ⇒ mode=intent/goal 首启 `CalledProcessError`；改 `-m worker.ppo.intent|goal`（cwd=nn-training，
+   避开 `worker/ppo/common.py` 遮蔽顶层 `common`）。
+2. intent CLI 的 `update` 绑了只收 `HeadUpdateSpec` 的函数 ⇒ update 模式 TypeError；改绑端口 `update`。
+3. 意图 rollout 命令不传 `--stage-json`/血缘 ⇒ 2000+i 静默 SKIP、远端 PPO 拒收；已与 per-tick 同规。
+4. `trainer/eval_m1.py` 对 mode=intent 硬编码 `--policy intent-exec` ⇒ 6 槽权重会被 8 意图执行器
+   评估（语义全错）；改由 `arch.intentDim` 决定。
+
+**下一步**：控制台开 `hier-option-3`；首轮自检 `intent RL weights <- ...init.bc`、manifest
+`option6`、entropy≈1；600–1000 轮后按 700 筛查 → 2100 确认对 per-tick 非劣/正收益。
+
+---
 ## §170 P′-4a 前置：option3 top-1 **0.885（加权）/0.973（不加权）**；不加权坍缩到全 HUNT，HOLD 自然窗口仅 93（2026-11-28）
 
 **背景**：P′-1 遗留的「top-1 ≥65%（tagger vs 规则链）未测」是 P′-4a 的前置。本卡先修

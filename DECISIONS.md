@@ -11708,3 +11708,11 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **被否决**：① 用不加权的 0.9726 当门通过（= majority，零信息）；② 把 ESCAPE/RETURN_DEFENSE 塞进 option 标签（白名单结构性不可达）；③ 不修 obs 形状而在探针里裁通道（会把 bug 留在语料里）。
 - **证明/复现**：全文/混淆矩阵/分层 → `docs/nn/experiments.md` §170；产物 `tmp/option-probe-hard/probe-report-{unweighted,balanced}.json`（一次性，未入库）；测试 `nn-training/tests/worker/test_option_probe_mapping.py`、`tests/intent-tagger.test.ts`（obs 形状回归）；`bun run check` 2924 pass。
 - **违反后果**：obs 头通道回写死 ⇒ P′-4a 所有 shard 帧截断；不加权 CE 直接进 PPO ⇒ option 坍缩到 HUNT；HOLD 不掩码 ⇒ 1.2% 帧的类在策略里永远不选（防守全丢）。
+
+## §2026-11-28-hier-p4a-option6（2026-11-28，P′-4a 实施：6 槽 option 线接通；init 21.4% vs per-tick 35.7%（70 局同面板）；阻断四修）
+
+- **口径**：classic35 / hard / 0★ / 20 敌 / 36000 拍；动作 = `HUNT/INTERCEPT_BASE/HOLD × {direct,break}` 6 联合槽（HOLD_break 掩码）；target 由执行器规则决定（P′-2a2 已砍 targetKind/target/param 学习头）。语料 = `tmp/option-probe-hard-700`（700 局，train 60k / val 28,059 帧）。
+- **决定**：① **6 槽 probe 训练并导出 PPO init**（`option_probe.py --slots 6 --save`）：option3 折叠 top-1 **0.8375**（门 0.65 ✓）、balancedAcc 0.7258、HOLD_direct recall **0.528**（无类坍缩）；`arch.intentDim=6 / injectDim=7` 为俯仰两侧唯一动作维来源。② **执行器 = `HierOptionExecutor`（E2′）**：replan=30，`_optionCmd` + `{'nnOption'}`，target 规则（HUNT 敌>道具；IB 威胁→敌否则基地锚点；HOLD 锚点；break 只对敌）。③ **rollout/评估按 `arch.intentDim` 分支**：6 → HierOptionExecutor / `--policy hier-option`，8 → legacy intent；新增 `--stage-json`/`--course-fp`/`--corpus-fp` 与 course `hier-option-3`。④ **init 是起点不是判决**：同面板 70 局 init **21.4%** vs per-tick `g11.it580` **35.7%**（m1-eval 不套 OpeningController，与训练链 39.7% 不可相减）；P′-4a 门判 PPO 训练后权重。
+- **被否决**：① 用 8 意图执行器评估 6 槽权重（槽 id 被当意图，语义全错）；② 用不存在的 flat `nn-training/ppo_intent.py` 做 init（并包后已删）；③ 让意图导出器继续只跑内置关（classic35 id 2000+ 会静默 SKIP）；④ 为凑 HOLD 覆盖率开 God 默认参数。
+- **证明/复现**：全文/自检读数/阻断清单 → `docs/nn/experiments.md` §171；课程 `nn-training/curricula/hier-option-3.jsonc`；测试 `tests/intent-options.test.ts`、`tests/nn/hier-option-executor.test.ts`、`nn-training/tests/worker/test_{option_probe_mapping,model_build_warm_start,rl_cmd,ppo_cli_core}.py`、`nn-training/tests/trainer/test_eval_m1_policy.py`；`bun run check` 2935 pass + `nn-python-gate` 绿。
+- **违反后果**：6 槽权重落到 8 意图执行器/评估器 ⇒ 静默错语义（不崩、胜率失真）；意图线不走 `--stage-json` ⇒ 2000+i 整批跳过；init 读数被当成 P′-4a 判决 ⇒ 在 PPO 还没跑前误停线。
