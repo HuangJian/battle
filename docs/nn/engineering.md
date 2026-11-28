@@ -117,12 +117,39 @@ TrainingDispatch)`）；`loop_baseline.py` 的 `Any` **6 → 2**；G5 基线 `te
 `BundleHost` / 宿主 getter / hub 两处 —— 同一概念同一名字）；口径 B **1276 → 1278**（两个守卫文件
 本就带 `.py` 字面量，新增的全是结构判据）。
 
+### 第四刀：派发与让位 → `Dispatcher`（同日）
+
+`trainer/loop_dispatch.py::TrainingDispatch`（`RoundSteps` 的第二个基类，4 方法）→ `Dispatcher`
+对象 + `DispatchHost` Protocol + `RolloutOutcome`（frozen）。这一簇**没有自有状态**：
+`_report` / `_stream_meta` / `_eval_thread` / `_eval_gate` / `_collect_child` / `_spawned_early`
+六格都被别的簇读写，`_eval_at_set` / `_eb_window` / `_eb_thread` 由 `TrainingLifecycle` 建 ⇒
+它们继续归组合根，对象只**算**：
+
+* `rollout_phase` 返回 `RolloutOutcome`，宿主经 `land_rollout(outcome)` 一次落位（写面只有一个具名
+  方法，不再让对象伸手写六个槽名）；
+* `eb_thread` 是唯一的 except：它有 getter + setter（关窗后清句柄），其余读面全是只读 property；
+* 宿主新增 9 个活读数（`start_it` / `model` / `opt` / `device` / `ref_model` / `eval_at_set` /
+  `eb_window` / `eb_thread` / `payload_parts`）—— 全部是 `cast` 的直透，不是副本；
+* `TrainingLoop.__mro__` **18 → 17**；`RoundSteps.__bases__` = `(TrainingVolume,)`。
+
+**顺序契约换了个更强的保证**：原先真实现胜出靠「`TrainingDispatch` 在 `TrainingEval` 之前」的
+MRO 下标；现在是组合根**类体里的一行壳** —— `TrainingLoop` 永远是 MRO 第一项，壳就在它的
+`__dict__` 里，任何基类的 `raise` 占位都不可能反过来胜出。守卫从「比下标」改成钉
+`"_eval_on_round" in TrainingLoop.__dict__` + 「它确实转发」（`inspect.getsource`）。
+
+计数记账：`Any` `loop_dispatch` 25 → **13**、`loop_core` 仍 11（三个回调参改 `Callable[..., object]`，
+`RoundSteps` 的三条借手声明改成 `Callable` 形状而不加 `Any`）；同名散落 **149 → 153**
+（`course_fp` / `corpus_fp` / `eval_every` / `jsonl_path` —— 四个宿主读数现在在四个 Protocol 与
+宿主 getter 之间同名，同一组宿主接口）；口径 A **1537 → 1539**（顺序契约与「实现在 `RoundSteps`
+不得再出现」两条结构判据）；测试删掉 4 条只对「混入簇」成立的用例（CLUSTERS 表退场）。
+
 ### 下一刀的口径（照同一形状）
 
-`TrainingDispatch`（4 方法，inbound 4）**不能照抄**：`_eval_on_round` 在 `TrainingEval` 里有个
-`raise` 占位，而今天的胜出者靠 MRO 顺序（`Dispatch` 在 `Eval` 之前）。移出基类前必须先定「真实现」
-的归属——要么把占位删掉、要么给宿主立一个公开入口并在协议里声明顺序契约，否则占位的 `raise`
-会静默上位（`test_eval_on_round_position_contract` 正是钉这一点的那条用例）。
+P0-1 的剩余簇见 `python.refactor.md` 的处理状态表：`TrainingVolume`（含 `VolumeView` 读数）是
+下一个候选，但它被 `RoundSteps` / 派发 / 远端三面读写，状态面（`_report` / `_stream_meta` /
+`_payload_parts`）与 `Dispatcher` 共享 ⇒ 要么先把那三格也升成宿主只读 property，要么接受
+「读多写少」的接口扩容（同名散落会再涨，需先想清楚）。`TrainingRemote*` 四簇与 `TrainingEval`
+的入边最多，应放在最后。
 每刀都要：对象拥有自己的状态、宿主读面走 Protocol、组合根只留一行壳、
 守卫从 `is` 同一性改成 AST 形状 —— **不要**把 `self.host._private` 当捷径（那就只是多绕一层）。
 

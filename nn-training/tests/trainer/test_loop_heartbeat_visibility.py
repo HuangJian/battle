@@ -1,6 +1,6 @@
 """EvalBoard 心跳失败必须看得见（`worker/eval_heartbeat.write_state` 的两个训练侧调用点）。
 
-为什么单列一个文件：这两处（`TrainingDispatch._evalboard_yield` 关窗 /
+为什么单列一个文件：这两处（`Dispatcher.evalboard_yield` 关窗 /
 `TrainingLifecycle._evalboard_idle` 开窗）原先都是 `except Exception: pass`。静默的后果不是
 「少写一个 JSON」，而是 console 的「训练忙碌中 / 已等 N 分钟」**永久停在旧值**——训练侧一切正常，
 屏幕上却像卡住，而这条链的读者正是靠那一个文件判断要不要干预。
@@ -25,7 +25,7 @@ import pytest
 from common.log import LogRouter
 from trainer import batch_runner
 from trainer.batch_runner import _heartbeat
-from trainer.loop_dispatch import TrainingDispatch
+from trainer.loop_dispatch import Dispatcher
 
 
 def _recorder(calls: list[dict[str, Any]]) -> types.ModuleType:
@@ -42,18 +42,18 @@ def _recorder(calls: list[dict[str, Any]]) -> types.ModuleType:
     return mod
 
 
-def _yield_probe() -> TrainingDispatch:
-    probe = object.__new__(TrainingDispatch)
-    probe._eb_window = threading.Event()
-    probe._eb_thread = None
-    return probe
+def _yield_probe() -> Dispatcher:
+    """最小宿主：`evalboard_yield` 只碰 `eb_window` / `eb_thread`（`eb_thread` 可写）。"""
+    return Dispatcher(
+        types.SimpleNamespace(eb_window=threading.Event(), eb_thread=None)
+    )
 
 
 def test_evalboard_yield_writes_closed_window(monkeypatch: pytest.MonkeyPatch) -> None:
     """正常路径：关窗那一刻写 `window_open=False` + 关窗时刻 —— 这是 console 的读数来源。"""
     calls: list[dict[str, Any]] = []
     monkeypatch.setitem(sys.modules, "worker.eval_heartbeat", _recorder(calls))
-    _yield_probe()._evalboard_yield()
+    _yield_probe().evalboard_yield()
     assert calls == [{"window_open": False, "last_window_closed_ts": 42}]
 
 
@@ -63,8 +63,8 @@ def test_evalboard_yield_reports_heartbeat_failure_once(
     probe = _yield_probe()
     # `None` ⇒ `from worker.eval_heartbeat import …` 抛 ImportError：这就是「包不可用」那条成因。
     monkeypatch.setitem(sys.modules, "worker.eval_heartbeat", None)
-    probe._evalboard_yield()  # 不抛即前半段契约
-    probe._evalboard_yield()
+    probe.evalboard_yield()  # 不抛即前半段契约
+    probe.evalboard_yield()
 
     out = capsys.readouterr().out
     assert out.count("关窗心跳没写成") == 1, f"同一 key 只许喊一次，实际：{out!r}"

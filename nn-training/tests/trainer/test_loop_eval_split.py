@@ -232,10 +232,11 @@ def test_composition_appends_the_new_mixin() -> None:
         TrainingLifecycle,
     )
     assert TrainingEval not in TrainingLoop.__bases__
-    # 真实现（S4 第二十刀起住 trainer/loop_dispatch，之前住组合根）；占位在 TrainingEval —— MRO 胜过它。
+    # 真实现（S4 第二十刀起住 trainer/loop_dispatch；P0-1 第四刀起是协作对象 `Dispatcher`，
+    # 组合根留一行壳）；占位在 TrainingEval —— 组合根类体的壳永远先解析。
     assert TrainingLoop._eval_on_round is not TrainingEval._eval_on_round
-    assert TrainingLoop._eval_on_round.__module__ == "trainer.loop_dispatch"
-    assert "def _eval_on_round" not in CORE_PY.read_text(encoding="utf-8")
+    assert TrainingLoop._eval_on_round.__module__ == "trainer.loop_core"
+    assert "def _eval_on_round" in CORE_PY.read_text(encoding="utf-8")
 
 
 # ─────────────────────────────── 状态面 ───────────────────────────────

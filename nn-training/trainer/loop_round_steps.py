@@ -30,7 +30,6 @@ import common.distribution
 from common.log import log
 from common.protocol import RUN_SEGMENT_DEFAULT_ITERS
 from remote import weights_standard
-from trainer.loop_dispatch import TrainingDispatch
 from trainer.loop_hold import course_hold_facts
 from trainer.loop_steps import (
     BundleExportedError,
@@ -75,7 +74,7 @@ HELD_LEG_HINT = "battle.offline.ipynb（/offline/tasks 清单 → /offline/task-
 HELD_WAIT_HINT = "云机接管中：自主 worker 正在跑这段（15 分钟无回传自动恢复协作派发）"
 
 
-class RoundSteps(TrainingVolume, TrainingDispatch):
+class RoundSteps(TrainingVolume):
     """轮内 13 步（mixin；与 `TrainingSteps` / `TrainingGuards` 以 `self.*` 共享引擎状态）。
 
     MRO 里排在最前（`TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards)`）：它只定义
@@ -109,10 +108,14 @@ class RoundSteps(TrainingVolume, TrainingDispatch):
     #   · 动态采集的四个入口（`_iteration_pairs` / `_volume_active` / `_volume_collect_continuous`
     #     / `_volume_topup`）—— 基类 `TrainingVolume`（`trainer/loop_volume.py`，S4 第十八刀）
     #   · 本轮派发与让位（`_rollout_phase` / `_eval_on_round` /
-    #     `_evalboard_yield`）—— 基类 `TrainingDispatch`（S4 第二十刀）
+    #     `_evalboard_yield`）—— 2026-11-28 起是协作对象 `Dispatcher`（P0-1 第四刀）
     #   本轮目录与产出健康（`_prepare_iter_dir` / `_check_quota_incident`）自 2026-11-28（P0-1）
     #   起**不再**是基类：住在协作对象 `trainer/loop_iter_dir.py::IterWorkspace`，本类经组合根
     #   上的一行转发壳调用（`self` 在组合实例上解析，与搬家前逐字相同）。
+    # P0-1 第四刀：派发簇的三条手现在是组合根上的壳 ⇒ 本类按「借来的方法」声明（mypy 可见）。
+    _rollout_phase: Callable[..., None]
+    _eval_on_round: Callable[[int], bool]
+    _evalboard_yield: Callable[[], None]
     _evalboard_idle: Any
     _export_offline_bundle: Any
     _remote_iter: Any

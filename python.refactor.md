@@ -155,9 +155,23 @@ G5 `test_loop_core_tail_split` 3 → 2；同名散落 147 → 148（`traj_dir` �
 MRO **19 → 18**，`TrainingSteps.__bases__` = `(TrainingRemote, TrainingEval)`；`loop_export` 的
 `Any` 11 → 2（两个 `log` 改 `Callable`），`loop_remote_push` 3 → 2；同名散落 148 → 149
 （`traj_root` 的协议声明）；口径 B 1276 → 1278（结构判据）。
-**下一刀**：`TrainingDispatch`（4 方法 / inbound 4）—— 不能照抄：`TrainingEval._eval_on_round`
-是 `raise` 占位，今天的胜出者靠 MRO 顺序（`Dispatch` 在 `Eval` 之前），移出基类前先定真实现
-的宿主入口/顺序契约（`test_eval_on_round_position_contract` 钉的就是这一点）。
+**P0-1 第四刀（同日，派发与让位）**：`trainer/loop_dispatch.py::TrainingDispatch` → `Dispatcher` +
+`DispatchHost` + `RolloutOutcome`。这一簇**无自有状态**（六个轮级槽被别的簇读写，`_eval_at_set` /
+`_eb_window` / `_eb_thread` 由 Lifecycle 建）⇒ 对象只算，宿主经 `land_rollout(outcome)` 一次落位；
+宿主新增 9 个活读数（全 `cast` 直透）。MRO **18 → 17**，`RoundSteps.__bases__` = `(TrainingVolume,)`。
+**顺序契约变强了**：真实现胜出从「MRO 下标靠前」变成「组合根类体里的一行壳」——
+`TrainingLoop` 永远是 MRO 第一项，`TrainingEval` 的 `raise` 占位不可能反过来胜出；守卫改钉
+`"_eval_on_round" in TrainingLoop.__dict__` + 真转发。`Any` `loop_dispatch` 25 → 13；
+同名散落 149 → 153（`course_fp` / `corpus_fp` / `eval_every` / `jsonl_path`：同一组宿主接口）；
+口径 A 1537 → 1539。
+**P0-1 剩余簇的迁移顺序**（按状态面 × 入边排，前两刀已验证的形状）：
+1. `TrainingVolume`（`RoundSteps` 第一个基类，12 成员）—— 状态面最重（`_report` / `_stream_meta` /
+   `_payload_parts` 与 `Dispatcher` 共享），先得把这三格从「对象写」改成「宿主落位」；
+2. `TrainingRemote*` 四簇（Drive / Fail / Job / Push）—— 入边最多（`_remote_ppo*` 一条链），
+   还得先统一 `sess` 的所有权；
+3. `TrainingEval` —— `_eval_thread` / `_eval_gate` / `_eval_tail*` 与 `Dispatcher`、`Lifecycle`
+   双向读写，且带 `_eval_on_round` 占位（占位本身可随簇一起平移成宿主入口）；
+4. `TrainingGuards` 四簇 + `TrainingLifecycle` —— 两者共享停机/账本槽，应最后动（它们读全世界）。
 
 ## 0. 执行摘要
 

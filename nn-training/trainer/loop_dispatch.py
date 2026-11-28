@@ -1,36 +1,49 @@
-"""loop_dispatch —— **本轮派发与让位** mixin（2026-09-25 从 trainer/loop_core.py 拆出，S4 第二十刀）。
+"""loop_dispatch —— **本轮派发与让位**：协作对象 `Dispatcher`（2026-11-28，P0-1 第四刀）。
 
-三个成员共享一个判据源：**本轮把活派给谁 / 让位给谁**。
+原先是 `RoundSteps` 的第二个基类（`TrainingDispatch`，S4 第二十刀从 `loop_core.py` 拆出）。
+四个成员共享一个判据源：**本轮把活派给谁 / 让位给谁**。
 
-- `_rollout_phase`：采集派发三路（dist 流式 / dist 串行 / 纯本地），结果落 `self._report`
-  （`trainer.rollout_phase.dispatch_rollout_phase` 是它的实现口，**延迟** import 保留）。
-- `_eval_on_round`：本轮是否派 A-eval（吞吐 T3 稀疏化的三条件：eval-games / eval_every / eval_at）。
-- `_evalboard_yield`：rollout 抢占时**关窗**（在途 B/C 局停派新 seed），并写 R4-G1 心跳。
+- `rollout_phase`：采集派发三路（dist 流式 / dist 串行 / 纯本地），结果**作为值返回**
+  （`RolloutOutcome`；宿主自己落到 `_report` 等槽位 —— 组合根拥有状态，对象只算）。
+- `eval_on_round`：本轮是否派 A-eval（吞吐 T3 稀疏化的三条件：eval-games / eval_every / eval_at）。
+- `evalboard_yield`：rollout 抢占时**关窗**（在途 B/C 局停派新 seed），并写 R4-G1 心跳。
+- `finalize_returned_shards`：轮末把 dispatch 腿的分关账写盘（零落盘）。
 
-## 宿主：`RoundSteps`，且 `_eval_on_round` 必须**早于** `TrainingEval` 的占位
+## 谁读谁写
 
-唯一父调用者是 `RoundSteps`（`step_rollout` / `step_eval_dispatch` / `step_record_iteration`），
-另有 `TrainingEval` / `TrainingGuards` 以 `self.` 调 `_eval_on_round`——三者**互不继承**（祖先集
-交集为空），但本簇**不需要**组合根：挂在 `RoundSteps` 的基类里就已经在 `TrainingLoop` 的 MRO 上
-（`RoundSteps` 是它的第一个基类）⇒ 三条入边照旧解析。
+* 宿主读面：`args` / `bun` / `update_kwargs` / `ppo_backend` 是**活引用**（对象不拷副本），
+  `traj_dir` / `jsonl_path` / `course_fp` / `corpus_fp` / `extra_wver` / `eval_every` /
+  `eval_at_set` / `eb_window` / `eb_thread` / `model` / `opt` / `device` / `ref_model` /
+  `start_it` / `payload_parts` 是只读 property（`_traj_dir` 每轮重指、`_eb_thread` 会被换掉）。
+* 宿主写面只有两条、都**具名**：`land_rollout(outcome)`（六个轮级槽一次性落位）与
+  `eb_thread` 的 setter（关窗后清句柄）。对象不直接伸手写 `_report` / `_eval_thread` 这类槽。
 
-⚠ `_eval_on_round` 有一处**顺序契约**：`trainer/loop_eval.py` 的同名成员是**占位**（body 用 `raise`，
-MRO 被改坏就响亮失败），真实现必须**在 MRO 里更靠前**。挂 `RoundSteps` 一侧天然满足
-（`RoundSteps` 基类的线性化位置早于 `TrainingSteps` 的基类 `TrainingEval`）；若把本簇改成
-`TrainingLoop` 的**末位**基类，占位会反过来胜出 ⇒ 守卫把这条顺序钉住。
+## `_eval_on_round` 的顺序契约（本刀的关键）
+
+`trainer/loop_eval.py` 的同名成员是**占位**（body 用 `raise`，MRO 被改坏就响亮失败）。原先靠
+「`TrainingDispatch` 的线性化位置早于 `TrainingEval`」保证真实现胜出；拆成协作对象后，真正的
+保证变成**组合根本体的转发壳**：`TrainingLoop._eval_on_round` 是类体里定义的方法，而
+`TrainingLoop` 是所有混入的**第一个**类 ⇒ 永远先于任何基类解析，占位不可能反过来胜出。
+守卫（`test_loop_core_tail_split.py::test_eval_on_round_position_contract`）从「比 MRO 下标」
+改成钉这两件事：壳住在 `TrainingLoop.__dict__`、且它**不是** `TrainingEval` 的那个对象。
 
 ## DI seam
 
 `trainer.rollout_phase`（`dispatch_rollout_phase`）· `trainer.batch_eval`（`maybe_dispatch_batch`）·
 `worker.eval_heartbeat`（`write_state`）三处**延迟** import：那是原有的注入面，测试 patch 的一直是
-实现模块。
+实现模块（`monkeypatch.setattr(ed, "dispatch_eval_bg", …)` 之类），搬家不改注入点。
 """
 
 from __future__ import annotations
 
-from typing import Any
+import threading
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Protocol
 
 from common.log import default_router
+from remote.payload_pack import ShardSegments
 from trainer.rollout_phase import (
     RolloutPhaseSpec,
     begin_payload_parts,
@@ -38,64 +51,108 @@ from trainer.rollout_phase import (
 )
 
 
-class TrainingDispatch:
-    """本轮派发与让位（采集三路 / A-eval 稀疏化 / EvalBoard 关窗；见本模块头注）。"""
+@dataclass(frozen=True)
+class RolloutOutcome:
+    """一轮采集派发的六件结果（宿主 `land_rollout` 一次落位；字段名 = 旧槽位名去下划线）。"""
 
-    # 依赖的 `TrainingLoop` 实例属性（声明类型供 mypy/阅读）。与其它混入里的同类声明**有意并存**。
+    report: Any
+    stream_meta: Any
+    eval_thread: Any
+    eval_gate: Any
+    collect_child: Any
+    spawned_early: Any
+
+
+class DispatchHost(Protocol):
+    """`Dispatcher` 需要的宿主面（全是活读数；写面只有 `land_rollout` / `eb_thread`）。"""
+
     args: Any
     bun: Any
     update_kwargs: Any
-    _model: Any
-    _opt: Any
-    _device: Any
-    _ref_model: Any
-    _start_it: Any
-    _traj_dir: Any
-    _jsonl_path: Any
-    _extra_wver: Any
-    _course_fp: Any
-    _corpus_fp: Any
-    _report: Any
-    _stream_meta: Any
-    _eval_thread: Any
-    _eval_gate: Any
-    _collect_child: Any
-    _spawned_early: Any
-    _eval_every: Any
-    _eval_at_set: Any
-    _eb_window: Any
-    _eb_thread: Any
-    #: 零落盘（plan/payload-zero-disk）：本轮 shard 段账（`ShardSegments`，组合根建）。
-    #: 两个入口都碰它：首波/补波在这里 `begin`+传回调，远端发布在 `loop_remote_job` 取。
-    _payload_parts: Any
-
-    #: 兄弟混入的方法（混入常态：在组合实例上解析）——声明类型，理由同 `trainer/loop_volume.py`。
     ppo_backend: Any
 
-    def _eval_on_round(self, it: int) -> bool:
-        """吞吐 T3：本轮是否派发干净评估。per-tick 按 eval-games/eval-every/eval-at
-        三条件；intent/goal 按 eval_at（默认 '5,10,15'）——别的模式不派发不 join。
+    @property
+    def traj_dir(self) -> Path: ...
 
-        本实现 MRO 胜过 `TrainingEval._eval_on_round` 的占位（`trainer/loop_eval.py`，
-        S4 第十七刀）——占位存在是为了「MRO 被改坏就响亮失败」。"""
-        args = self.args
+    @property
+    def jsonl_path(self) -> Path: ...
+
+    @property
+    def course_fp(self) -> str | None: ...
+
+    @property
+    def corpus_fp(self) -> str | None: ...
+
+    @property
+    def extra_wver(self) -> str | None: ...
+
+    @property
+    def eval_every(self) -> int: ...
+
+    @property
+    def eval_at_set(self) -> set[int]: ...
+
+    @property
+    def eb_window(self) -> threading.Event: ...
+
+    @property
+    def eb_thread(self) -> threading.Thread | None: ...
+
+    @eb_thread.setter
+    def eb_thread(self, value: threading.Thread | None) -> None: ...
+
+    @property
+    def model(self) -> object: ...
+
+    @property
+    def opt(self) -> object: ...
+
+    @property
+    def device(self) -> str: ...
+
+    @property
+    def ref_model(self) -> object: ...
+
+    @property
+    def start_it(self) -> int: ...
+
+    @property
+    def payload_parts(self) -> ShardSegments: ...
+
+    def land_rollout(self, outcome: RolloutOutcome) -> None:
+        """把一轮派发的六个结果落到宿主的轮级槽位（唯一写面）。"""
+        ...
+
+
+class Dispatcher:
+    """本轮派发与让位（采集三路 / A-eval 稀疏化 / EvalBoard 关窗；见本模块头注）。"""
+
+    def __init__(self, host: DispatchHost) -> None:
+        self._host = host
+
+    def eval_on_round(self, it: int) -> bool:
+        """吞吐 T3：本轮是否派发干净评估。per-tick 按 eval-games/eval-every/eval-at
+        三条件；intent/goal 按 eval_at（默认 '5,10,15'）——别的模式不派发不 join。"""
+        args = self._host.args
         if args.mode == "per-tick":
+            eval_every = self._host.eval_every
+            eval_at_set = self._host.eval_at_set
             return (
                 int(getattr(args, "eval_games_per_stage", 0) or 0) > 0
-                and self._eval_every > 0
-                and (self._eval_every == 1 or it % self._eval_every == 0)
-                and (not self._eval_at_set or it in self._eval_at_set)
+                and eval_every > 0
+                and (eval_every == 1 or it % eval_every == 0)
+                and (not eval_at_set or it in eval_at_set)
             )
-        return it in self._eval_at_set
+        return it in self._host.eval_at_set
 
-    def _evalboard_yield(self) -> None:
+    def evalboard_yield(self) -> None:
         """rollout 抢占：关窗让出集群。在途 B/C 局停派新 seed（window_event 清位）。"""
-        self._eb_window.clear()
-        t = self._eb_thread
+        self._host.eb_window.clear()
+        t = self._host.eb_thread
         if t is not None and t.is_alive():
             # 短等在途局收尾；不阻塞训练主链（超时即走，剩余 seed 下窗续跑）。
             t.join(timeout=15.0)
-        self._eb_thread = None
+        self._host.eb_thread = None
         # R4-G1 心跳：关窗 + 关窗时刻（console 只读，用来显示「训练忙碌中已等 N 分钟」）。
         try:
             from worker.eval_heartbeat import now_ms, write_state
@@ -106,44 +163,45 @@ class TrainingDispatch:
                 "eval_heartbeat:close", f"关窗心跳没写成：{e!r}——console 会显示旧状态"
             )
 
-    def _rollout_phase(
+    def rollout_phase(
         self,
         it: int,
         pairs: list[tuple[int, int]],
         dist_cfg: dict | None,
         eval_on_round: bool,
-        on_collect_end=None,
-        on_dispatch_drained=None,
-        on_dispatch_active=None,
-    ) -> None:
-        """单轮采集派发（三路：dist 流式 / dist 串行 / 纯本地），结果落 self._report。"""
-        args = self.args
+        on_collect_end: Callable[..., Any] | None = None,
+        on_dispatch_drained: Callable[..., Any] | None = None,
+        on_dispatch_active: Callable[..., Any] | None = None,
+    ) -> RolloutOutcome:
+        """单轮采集派发（三路：dist 流式 / dist 串行 / 纯本地）；结果作为值返回。"""
+        host = self._host
+        args = host.args
         # 零落盘（plan/payload-zero-disk §3.2）：本轮段的账从这一轮开始记（换轮即清空）。
         # 必须在派发**之前**：dispatch 线程一回传就会往里面写。
-        begin_payload_parts(args, it, self._payload_parts)
+        begin_payload_parts(args, it, host.payload_parts)
         (report, stream_meta, eval_thread, eval_gate, collect_child, spawned_early) = (
             dispatch_rollout_phase(
                 RolloutPhaseSpec(
                     args=args,
-                    bun=self.bun,
+                    bun=host.bun,
                     dist_cfg=dist_cfg,
                     it=it,
-                    traj_dir=self._traj_dir,
+                    traj_dir=host.traj_dir,
                     pairs=pairs,
-                    jsonl_path=self._jsonl_path,
-                    model=self._model,
-                    opt=self._opt,
-                    device=self._device,
-                    ppo_backend=self.ppo_backend,
-                    update_kwargs=self.update_kwargs,
-                    start_it=self._start_it,
-                    ref_model=self._ref_model,
-                    extra_wver=self._extra_wver,
+                    jsonl_path=host.jsonl_path,
+                    model=host.model,
+                    opt=host.opt,
+                    device=host.device,
+                    ppo_backend=host.ppo_backend,
+                    update_kwargs=host.update_kwargs,
+                    start_it=host.start_it,
+                    ref_model=host.ref_model,
+                    extra_wver=host.extra_wver,
                     eval_on_round=eval_on_round,
-                    course_fp=self._course_fp,
-                    corpus_fp=self._corpus_fp,
+                    course_fp=host.course_fp,
+                    corpus_fp=host.corpus_fp,
                     # 收到就压（手工段）：缺的 shard（local 腿/预采子进程）打包时再读盘补。
-                    on_shard=self._payload_parts.add,
+                    on_shard=host.payload_parts.add,
                     # 采集收官（stream 的 collector 退出）→ 解冻本课 eval；串行路径由
                     # step_rollout 的 finally 解冻，这里传 None 也无害。
                     on_collect_end=on_collect_end,
@@ -152,14 +210,19 @@ class TrainingDispatch:
                 )
             )
         )
-        self._report = report
-        self._stream_meta = stream_meta
-        self._eval_thread = eval_thread
-        self._eval_gate = eval_gate
-        self._collect_child = collect_child
-        self._spawned_early = spawned_early
+        outcome = RolloutOutcome(
+            report=report,
+            stream_meta=stream_meta,
+            eval_thread=eval_thread,
+            eval_gate=eval_gate,
+            collect_child=collect_child,
+            spawned_early=spawned_early,
+        )
+        # 槽位归组合根：一次具名落位（对象不直接写 `_report` / `_eval_thread` 这类名字）。
+        host.land_rollout(outcome)
+        return outcome
 
-    def _finalize_returned_shards(self, it: int) -> None:
+    def finalize_returned_shards(self, it: int) -> None:
         """零落盘：轮末把本轮 dispatch 腿（sampler agent）的分关账写盘（2026-10-28）。
 
         回传 shard 本身**从未落盘**（`common.shard.write_shard` 见到段账就只交字节、不写盘），这里只写
@@ -169,10 +232,9 @@ class TrainingDispatch:
         **顺序契约**：调用点固定在 `step_record_iteration` 的**最后**（`_record_iteration` →
         `_write_iter_stats` → 巡检之后）——前三步还要读内存账 / local 腿的盘上 shard。
         """
-        parts = self._payload_parts
+        parts = self._host.payload_parts
         if int(getattr(parts, "it", -1)) != int(it):
             return
         from trainer.zero_disk import finalize_round_shards
 
-        finalize_round_shards(self._traj_dir, parts.manifests(), it=int(it))
-
+        finalize_round_shards(self._host.traj_dir, parts.manifests(), it=int(it))

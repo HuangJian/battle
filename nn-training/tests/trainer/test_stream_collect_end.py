@@ -209,7 +209,8 @@ def test_step_rollout_gate_refcount_survives_drain_refill_cycles(monkeypatch) ->
         on_collect_end()
         on_dispatch_drained()  # 收官后重复 drain：不得把计数打成负数
 
-    monkeypatch.setattr(steps, "_rollout_phase", fake_rollout)
+    # P0-1 第四刀：`_rollout_phase` 是组合根上的壳（裸 `RoundSteps` 没有它）⇒ 直接注入实例属性。
+    monkeypatch.setattr(steps, "_rollout_phase", fake_rollout, raising=False)
     ctx = RoundContext(it=1, pairs=[], collect_mode=COLLECT_LOCAL, eval_on_round=False)
 
     assert steps.step_rollout(ctx) is None

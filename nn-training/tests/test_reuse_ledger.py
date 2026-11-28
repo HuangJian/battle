@@ -235,7 +235,12 @@ BASELINE_CLONE = 18
 #: `traj_root`（`BundleHost` 里的只读 property）——连同 `loop_core.traj_root` 的 getter 与
 #: `hub/queue_peer.py` / `hub/queue_resume.py` 的同名读数凑成 ≥3。同上一格：**同一个概念、
 #: 同一个名字**，不是又抄了一份实现（导出侧的 est 必须按「轨迹根」而不是「本轮目录」反解）。
-BASELINE_SAME_NAME_GE3 = 149
+#: **2026-11-28 再抬同名 4 格（149 → 153）的账**：P0-1 第四刀把 `TrainingDispatch` 拆成
+#: 协作对象 `Dispatcher` 后，`DispatchHost` 声明了宿主已有的四个公开读数（`course_fp` /
+#: `corpus_fp` / `eval_every` / `jsonl_path`）。它们与既有的 `IterWorkspaceHost` /
+#: `BaselineHost` / `BundleHost` 共同构成**同一组宿主接口**——同一个概念、同一个名字；
+#: 换名等于让「本轮目录」/「课程指纹」在四个协作对象里各叫一个东西（与前三格同判）。
+BASELINE_SAME_NAME_GE3 = 153
 
 
 def _stems(modules: frozenset[str]) -> frozenset[str]:

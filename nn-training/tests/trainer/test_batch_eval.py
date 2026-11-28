@@ -141,9 +141,11 @@ def test_hooks_decoupled_from_a_eval() -> None:
     # **持有者**在整个 `trainer/` 源码树里读，不按写死的文件路径读（同 S16 的修法：写死路径的守卫
     # 会在下一次搬家时静默失效或假红——本文件已因此修过两次）。
     rl_dir = ROOT / "trainer"
+    # P0-1 第四刀：`_evalboard_yield` 的实现搬进协作对象 `Dispatcher`，组合根留一行壳
+    # （`loop_*.py` 的 glob 本来就含 `loop_core.py`；旧写法又追加了一份，壳就会被数两次）。
     loop_src = "".join(
         p.read_text(encoding="utf-8") for p in sorted(rl_dir.glob("loop_*.py"))
-    ) + (rl_dir / "loop_core.py").read_text(encoding="utf-8")
+    )
     loop_tree = ast.parse(loop_src)
     defined = [n.name for n in ast.walk(loop_tree) if isinstance(n, ast.FunctionDef)]
     for name in ("_evalboard_idle", "_evalboard_yield"):

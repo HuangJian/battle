@@ -68,11 +68,6 @@ ROUND_STEPS_PY = NN_ROOT / "trainer/loop_round_steps.py"
 LIFE_PY = NN_ROOT / "trainer/loop_lifecycle.py"
 EVAL_PY = NN_ROOT / "trainer/loop_eval.py"
 
-#: 三簇：新家路径 → (类名, 成员闭集)。
-CLUSTERS = {
-    "trainer/loop_dispatch.py": ("TrainingDispatch", ("_eval_on_round", "_evalboard_yield", "_rollout_phase", "_finalize_returned_shards")),
-}
-
 #: 已改成**协作对象**的簇（P0-1：第一刀 = 本轮目录，第二刀 = it0 基线）。
 #: 模块 → (类名, 宿主上的属性名, 协议类名, 公开方法闭集, 组装后**归对象**的状态名, 壳表)。
 #: 逻辑与状态都在对象里；组合根只留一行转发壳，装配在 `TrainingLoop.__init__`。
@@ -114,6 +109,20 @@ COLLABORATORS: dict[str, tuple[str, str, str, tuple[str, ...], set[str], dict[st
             "ts_code_view": "ts_code_view",
         },
     ),
+    # P0-1 第四刀：派发与让位（无自有状态 —— 轮级槽位归组合根，结果经 `land_rollout` 落位）。
+    "trainer/loop_dispatch.py": (
+        "Dispatcher",
+        "dispatch",
+        "DispatchHost",
+        ("eval_on_round", "evalboard_yield", "rollout_phase", "finalize_returned_shards"),
+        set(),
+        {
+            "_eval_on_round": "eval_on_round",
+            "_evalboard_yield": "evalboard_yield",
+            "_rollout_phase": "rollout_phase",
+            "_finalize_returned_shards": "finalize_returned_shards",
+        },
+    ),
 }
 #: 组合根的转发壳：壳名 → 协作对象的方法名（壳体必须**恰好**一行委派）。
 SHELLS = {shell: target for spec in COLLABORATORS.values() for shell, target in spec[5].items()}
@@ -151,6 +160,21 @@ STAYS = (
     "_export_offline_bundle",
     "_export_weights",
     "ts_code_view",
+    # P0-1 第四刀：派发协作对象的读面、写面与四个壳。
+    "start_it",
+    "model",
+    "opt",
+    "device",
+    "ref_model",
+    "eval_at_set",
+    "eb_window",
+    "eb_thread",
+    "payload_parts",
+    "land_rollout",
+    "_eval_on_round",
+    "_evalboard_yield",
+    "_rollout_phase",
+    "_finalize_returned_shards",
 )
 
 #: 组装（本文件是这两条的唯一所有者）：`RoundSteps` 的基类元组与全量 MRO 名单。
@@ -159,7 +183,7 @@ STAYS = (
 #: 见 `tests/trainer/test_loop_transport_split.py` / `test_loop_eval_split.py` / `test_loop_lifecycle_split.py`）。
 #: P0-1（2026-11-28）：`TrainingIterDir` / `TrainingBaseline` 不再是基类
 #: ⇒ 两个协作对象（`IterWorkspace` / `BaselineEval`）不在这张表里。
-ROUND_STEPS_BASES = ("TrainingVolume", "TrainingDispatch")
+ROUND_STEPS_BASES = ("TrainingVolume",)
 #: `TrainingLoop` 的**全量 MRO 名单**（本文件是这份名单的**唯一所有者**；S18/S19/S20 那几处
 #: 只钉相对位置，避开同一份名单三处各自漂）。S4 第二十二刀把 `TrainingRemote` 变成组合根
 #: （`Push ← Job ← {Fail, Job} ← Drive`）⇒ 四个新混入插在 `TrainingRemote` 之后、`TrainingEval` 之前。
@@ -167,7 +191,6 @@ MRO_NAMES = [
     "TrainingLoop",
     "RoundSteps",
     "TrainingVolume",
-    "TrainingDispatch",
     "TrainingSteps",
     "TrainingRemote",
     "TrainingRemoteDrive",
@@ -195,18 +218,15 @@ INBOUND_CALLS = {
     # S4 第二十三刀：唯一的呼叫点 `self._eval_on_round(it)` 随 `_gate` 迁到 `loop_guards_gate.py`。
     "_eval_on_round": {"loop_eval.py": 1, "loop_guards_gate.py": 1, "loop_round_steps.py": 1},
     "_evalboard_yield": {"loop_round_steps.py": 1},
+    "_finalize_returned_shards": {"loop_round_steps.py": 1},
     "_maybe_dispatch_baseline_eval": {"loop_round_steps.py": 1},
 }
 
 #: 槽位读者闭集（S4 第十九刀那条表移交过来的）：槽位 → **本刀三簇里**的读者。
 #: 写手另有所有权断言（`test_slot_writer_is_unique`：赋值点只许在 `loop_lifecycle._setup_common`）。
-SLOT_READERS = {
-    # P0-1 第一刀：`IterWorkspace` 经宿主读面 `host.course_fp` / `host.corpus_fp` 取值
-    # （协议声明，见 `test_collaborator_host_surface_is_declared`）⇒ 直接 `self._course_fp`
-    # 的读者只剩派发簇这一处。
-    "_course_fp": {"trainer/loop_dispatch.py": "_rollout_phase"},
-    "_corpus_fp": {"trainer/loop_dispatch.py": "_rollout_phase"},
-}
+#: 这两个槽位**归组合根独占**：协作对象只经宿主读面 `host.course_fp` / `host.corpus_fp` 取值
+#: （协议声明，见 `test_collaborator_host_surface_is_declared`）⇒ 生产面零直接读者，写手唯一。
+WRITE_OWNED_SLOTS = ("_course_fp", "_corpus_fp")
 
 #: 顶层 import 闭集（非 stdlib）：本模块不许长出重依赖。
 TOP_IMPORTS = {
@@ -216,9 +236,11 @@ TOP_IMPORTS = {
     ),
     # 2026-11-14：加 `common.log` —— `_evalboard_yield` 的心跳失败留痕（`warn_once`）。
     # 这是 L0 日志出口，同簇的 `loop_baseline` / `loop_iter_dir` 早已登记同一项；不是重依赖。
-    "trainer/loop_dispatch.py": frozenset({"common.log", "trainer.rollout_phase"}),
+    "trainer/loop_dispatch.py": frozenset(
+        {"common.log", "remote.payload_pack", "trainer.rollout_phase"}
+    ),
 }
-STDLIB_IMPORTS = frozenset({"dataclasses", "pathlib", "threading", "typing"})
+STDLIB_IMPORTS = frozenset({"collections.abc", "dataclasses", "pathlib", "threading", "typing"})
 
 #: 反向边（禁）：成环或把叶子拉回编排上游。
 FORBIDDEN_IMPORTS = frozenset(
@@ -350,17 +372,9 @@ def _self_calls(path: Path, cls_name: str, method: str) -> set[str]:
 
 
 def test_members_live_in_the_new_homes_only() -> None:
-    """三簇成员定义只在新家；旧家（`TrainingLoop` / `RoundSteps`）零同名定义。"""
-    for rel, (cls, members) in CLUSTERS.items():
-        path = NN_ROOT / rel
-        got = set(_methods(path, cls))
-        assert got == set(members), f"{rel}: {sorted(got ^ set(members))}"
+    """协作对象的实现只在新家；壳只在组合根；`RoundSteps` 里零同名定义。"""
     core = set(_methods(CORE_PY, "TrainingLoop"))
     steps = set(_methods(ROUND_STEPS_PY, "RoundSteps"))
-    for _, members in CLUSTERS.values():
-        assert sorted(set(members) & core) == []
-        assert sorted(set(members) & steps) == []
-    # 协作对象（P0-1）：实现只在对象里，壳只在组合根上，两边不重叠。
     for rel, (cls, _attr, _proto, cnames, _owned, shells) in COLLABORATORS.items():
         home = set(_methods(NN_ROOT / rel, cls))
         assert set(cnames) <= home, f"{rel}: 少了 {sorted(set(cnames) - home)}"
@@ -368,37 +382,37 @@ def test_members_live_in_the_new_homes_only() -> None:
         assert sorted((set(cnames) - set(shells)) & core) == [], (
             "协作对象的方法不许在组合根再定义一份"
         )
+        assert sorted(set(cnames) & steps) == [], f"{rel}: 实现又住回 RoundSteps"
         # 壳名与对象方法同名（`ts_code_view`）不算「实现又住回家」。
         assert sorted(set(shells) - set(cnames) & home) == [], f"{rel}: 转发壳只许住组合根"
         assert sorted(set(shells) - core) == [], f"组合根缺壳：{sorted(set(shells) - core)}"
 
 
-def test_wiring_is_object_identity() -> None:
-    """仍是混入的那簇：`TrainingLoop.X is <簇>.X`（同一个函数对象，不是同名副本）。"""
-    import trainer.loop_core as core_mod
-    import trainer.loop_dispatch as dp
-
-    homes = {"trainer/loop_dispatch.py": dp}
-    for rel, (cls, members) in CLUSTERS.items():
-        home = getattr(homes[rel], cls)
-        for name in members:
-            got = getattr(core_mod.TrainingLoop, name)
-            assert got is getattr(home, name), name
-            assert got.__module__ == rel[: -len(".py")].replace("/", "."), name
+def _is_host_ref(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == "_host"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    )
 
 
 def _host_reads(path: Path, cls_name: str) -> set[str]:
-    """协作对象经 `self._host.<name>` 触达的宿主名（读 + 写都算）。"""
+    """协作对象经宿主触达的名字（`self._host.<x>` 与 `host = self._host` 别名，读 + 写都算）。"""
     out: set[str] = set()
     for node in _methods(path, cls_name).values():
+        aliases = {
+            t.id
+            for n in ast.walk(node)
+            if isinstance(n, ast.Assign) and _is_host_ref(n.value)
+            for t in n.targets
+            if isinstance(t, ast.Name)
+        }
         for n in ast.walk(node):
-            if (
-                isinstance(n, ast.Attribute)
-                and isinstance(n.value, ast.Attribute)
-                and n.value.attr == "_host"
-                and isinstance(n.value.value, ast.Name)
-                and n.value.value.id == "self"
-            ):
+            if not isinstance(n, ast.Attribute):
+                continue
+            base = n.value
+            if _is_host_ref(base) or (isinstance(base, ast.Name) and base.id in aliases):
                 out.add(n.attr)
     return out
 
@@ -518,9 +532,15 @@ def test_composition_is_exact() -> None:
     assert tuple(c.__name__ for c in RoundSteps.__bases__) == ROUND_STEPS_BASES
     assert tuple(c.__name__ for c in TrainingLoop.__bases__) == TRAINING_LOOP_BASES
     assert [c.__name__ for c in TrainingLoop.__mro__] == MRO_NAMES
-    # 方向：本刀的三簇**不是**组合类的直接基类（挂的是调用者一侧）。
-    for name in ROUND_STEPS_BASES[1:]:
-        assert name not in TRAINING_LOOP_BASES
+    # P0-1：四个协作对象都**不在** MRO / 直接基类里（它们归组合根持有，不是基类）。
+    from trainer.loop_baseline import BaselineEval
+    from trainer.loop_dispatch import Dispatcher
+    from trainer.loop_export import BundleExporter
+    from trainer.loop_iter_dir import IterWorkspace
+
+    for cls in (IterWorkspace, BaselineEval, BundleExporter, Dispatcher):
+        assert cls not in TrainingLoop.__bases__
+        assert cls not in TrainingLoop.__mro__
 
 
 def test_composition_root_keeps_only_the_structural_pair() -> None:
@@ -531,27 +551,6 @@ def test_composition_root_keeps_only_the_structural_pair() -> None:
     top = _top_names(CORE_PY)
     assert {"run_inspect"} <= top
     assert "run_inspect" not in _top_names(LIFE_PY)
-
-
-def test_borrowed_declarations_are_exactly_the_touched_set() -> None:
-    """三簇的借用声明闭集 = 派生集（碰到的、不属于本模块的名字）；类体零带值槽位。"""
-    for rel, (cls, _) in CLUSTERS.items():
-        path = NN_ROOT / rel
-        touched: set[str] = set()
-        for names in _self_slots(path, cls).values():
-            touched |= names
-        borrowed = {
-            n for n in touched - set(_methods(path, cls)) - _top_names(path) if not n.startswith("__")
-        }
-        assert borrowed, f"{rel}: 派生集为空说明重建坏了"
-        from importlib import import_module
-
-        mod = import_module(rel[: -len(".py")].replace("/", "."))
-        assert set(getattr(mod, cls).__annotations__) == borrowed, rel
-        # 类体零带值槽位：**声明块**只许写注解（`x: T`），不许写 `x: T = ...` 或 `x = ...`。
-        body = _cls(path, cls).body
-        assert not [n for n in body if isinstance(n, ast.Assign)], rel
-        assert not [n for n in body if isinstance(n, ast.AnnAssign) and n.value is not None], rel
 
 
 # ─────────────────────── 入边 / 出边 / 槽位（三张表） ───────────────────────
@@ -566,9 +565,8 @@ def test_inbound_hands_closed_set() -> None:
     only = frozenset(INBOUND_CALLS)
     calls = {p.name: _self_call_counts(p, only) for p in files}
     defined = {p.name: _defined_names(p, only) for p in files}
-    owners = {m: rel.split("/")[-1] for rel, (_, members) in CLUSTERS.items() for m in members}
-    # P0-1：两个壳的定义面在组合根（实现已在协作对象里）。
-    owners.update({shell: CORE_PY.name for shell in SHELLS})
+    # P0-1：所有登记成员都是组合根上的转发壳（实现已在协作对象里）。
+    owners = {shell: CORE_PY.name for shell in SHELLS}
     for member, want in INBOUND_CALLS.items():
         got = {name: c[member] for name, c in calls.items() if member in c}
         assert got == want, f"{member} 的入边变了：{got}"
@@ -576,33 +574,6 @@ def test_inbound_hands_closed_set() -> None:
         definers = {name for name, names in defined.items() if member in names}
         want_definers = {owners[member]} | set(PLACEHOLDERS.get(member, ()))
         assert definers == want_definers, f"{member} 的定义面：{sorted(definers)}"
-
-
-def test_outbound_hands_are_empty() -> None:
-    """出边为空：三簇成员不调任何兄弟混入的方法（它们只读写自己的槽位）。"""
-    for rel, (cls, members) in CLUSTERS.items():
-        path = NN_ROOT / rel
-        own = set(_methods(path, cls))
-        for name in members:
-            ext = {
-                c
-                for c in _self_calls(path, cls, name)
-                if c not in own and not c.startswith("__")
-            }
-            assert ext == set(), f"{rel}:{name} 调了兄弟方法 {sorted(ext)}"
-
-
-def test_slot_readers_closed_set() -> None:
-    """槽位读者闭集（自 S4 第十九刀移交）：`_course_fp` / `_corpus_fp` 在本刀三簇里各恰一处。"""
-    for slot, want in SLOT_READERS.items():
-        got: dict[str, str] = {}
-        for rel in CLUSTERS:
-            path = NN_ROOT / rel
-            cls = CLUSTERS[rel][0]
-            for m, names in _self_slots(path, cls).items():
-                if slot in names:
-                    got[rel] = m
-        assert got == want, f"{slot} 的读者变了：{got}"
 
 
 def test_slot_writer_is_unique() -> None:
@@ -613,7 +584,7 @@ def test_slot_writer_is_unique() -> None:
     （S4 第十九刀的守卫曾用这个宽松口径，反探针 ⑬ 实测抓不住改名写手）。
     """
     assigns = _self_assigns(LIFE_PY, "TrainingLifecycle")
-    for slot in SLOT_READERS:
+    for slot in WRITE_OWNED_SLOTS:
         assert {m for m, names in assigns.items() if slot in names} == {"_setup_common"}, slot
 
 
@@ -669,15 +640,22 @@ def test_quota_incident_runs_from_the_collaborator(tmp_path, monkeypatch) -> Non
 
 
 def test_eval_on_round_position_contract() -> None:
-    """★ 顺序契约：真实现压住 `TrainingEval` 的占位；占位被直接调用时**响亮报错**。"""
+    """★ 顺序契约：真实现压住 `TrainingEval` 的占位；占位被直接调用时**响亮报错**。
+
+    P0-1 第四刀把 `TrainingDispatch` 改成协作对象后，胜出者从「MRO 里更靠前的混入」变成
+    **组合根类体里的转发壳**：`TrainingLoop` 是 MRO 的第一项，且壳就定义在它自己的
+    `__dict__` 里 ⇒ 永远先于任何基类的占位解析。判据随之改成钉这件事（而不是下标比较）。
+    """
+    import inspect
+
     from trainer.loop_core import TrainingLoop
-    from trainer.loop_dispatch import TrainingDispatch
     from trainer.loop_eval import TrainingEval
 
-    assert TrainingLoop._eval_on_round is TrainingDispatch._eval_on_round
+    assert "_eval_on_round" in TrainingLoop.__dict__, "壳不在组合根类体里——占位可能上位"
     assert TrainingLoop._eval_on_round is not TrainingEval._eval_on_round
-    mro = [c.__name__ for c in TrainingLoop.__mro__]
-    assert mro.index("TrainingDispatch") < mro.index("TrainingEval"), "占位会反过来胜出"
+    # 壳是一行委派（由 `test_shells_delegate_to_the_collaborator` 钉形状）；这里只钉「它真的转发」。
+    src = inspect.getsource(TrainingLoop._eval_on_round)
+    assert "eval_on_round" in src and "dispatch" in src, src
     # 占位的语义：MRO 被改坏时必须响亮失败，而不是静默返回 falsy 把 eval 全关掉。
     probe = object.__new__(TrainingEval)
     try:

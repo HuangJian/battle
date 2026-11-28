@@ -31,13 +31,14 @@ import subprocess
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from common.log import log
 from common.paths import REPO_ROOT
 from common.proc import run_capture
 from remote.payload_pack import ShardSegments
 from trainer.loop_baseline import BaselineEval, BaselineEvalView
+from trainer.loop_dispatch import Dispatcher, RolloutOutcome
 from trainer.loop_export import BundleExporter, TsCodeView
 from trainer.loop_guards import TrainingGuards
 from trainer.loop_iter_dir import IterWorkspace
@@ -148,6 +149,7 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         self.iter_ws = IterWorkspace(self)
         self.baseline = BaselineEval(self)
         self.exporter = BundleExporter(self)
+        self.dispatch = Dispatcher(self)
 
     def _init_core_state(self, args, ppo_backend, bun, update_kwargs) -> None:
         """构造入参与宿主句柄 / 迭代起点与派发状态 / 轨迹根与 JSONL 落点 / M2 启动清场。"""
@@ -327,7 +329,7 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
     #     `trainer/loop_lifecycle.py::TrainingLifecycle`（S4 第十九刀；宿主判据见该模块头注）。
     #   剩余的 7 个叶子分三簇（S4 第二十刀，2026-09-25）：
     #     it0 基线评估 → `trainer/loop_baseline.py::TrainingBaseline` · 本轮派发与让位
-    #     （采集三路 / A-eval 稀疏化 / EvalBoard 关窗）→ `trainer/loop_dispatch.py::TrainingDispatch`；
+    #     （采集三路 / A-eval 稀疏化 / EvalBoard 关窗）→ 协作对象 `loop_dispatch.Dispatcher`；
     #     两簇都挂 `RoundSteps` 一侧（唯一 mixin 调用者），组合根因此不必再长基类。
     #     ★ 2026-11-28（P0-1 第一刀）：本轮目录与产出健康那一簇改成了**协作对象**
     #     `trainer/loop_iter_dir.py::IterWorkspace`（不再是基类）——见本类尾部的读面与转发壳。
@@ -390,13 +392,62 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         return int(self._rotate_seed or 0)
 
     @property
+    def start_it(self) -> int:
+        """本课程起始轮（resume 后可能 > 1；派发侧只读）。"""
+        return int(self._start_it)
+
+    @property
+    def model(self) -> object:
+        """当前学生模型（`_setup` 建成；派发侧只透传，不碰方法）。"""
+        return self._model
+
+    @property
+    def opt(self) -> object:
+        """当前优化器（同上）。"""
+        return self._opt
+
+    @property
+    def device(self) -> str:
+        """训练设备串（`_setup` 解析后的 "cpu"/"cuda"；派发侧只透传）。"""
+        return cast("str", self._device)
+
+    @property
+    def ref_model(self) -> object:
+        """参考模型（KL 用；同上）。"""
+        return self._ref_model
+
+    @property
+    def eval_at_set(self) -> set[int]:
+        """显式指定的评估轮集合（空集 = 不按 eval_at 过滤）。"""
+        return self._eval_at_set
+
+    @property
+    def eb_window(self) -> threading.Event:
+        """EvalBoard 开窗标志（rollout 抢占时 clear）。"""
+        return cast("threading.Event", self._eb_window)
+
+    @property
+    def eb_thread(self) -> threading.Thread | None:
+        """EvalBoard 心跳线程句柄（关窗后置 None）。"""
+        return self._eb_thread
+
+    @eb_thread.setter
+    def eb_thread(self, value: threading.Thread | None) -> None:
+        self._eb_thread = value
+
+    @property
+    def payload_parts(self) -> ShardSegments:
+        """本轮零落盘段账（`ShardSegments`；首波/补波写、远端发布读）。"""
+        return cast("ShardSegments", self._payload_parts)
+
+    @property
     def eval_every(self) -> int:
         """in-loop eval 的间隔轮数（`_setup` 每轮重解；`0` = 关闭）。"""
         return int(self._eval_every or 0)
 
     @property
     def extra_wver(self) -> str | None:
-        """本轮预采快照 wver（`IterWorkspace` 写；`TrainingVolume` / `TrainingDispatch` 读）。"""
+        """本轮预采快照 wver（`IterWorkspace` 写；`TrainingVolume` / `Dispatcher` 读）。"""
         return self._extra_wver
 
     @extra_wver.setter
@@ -436,6 +487,44 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
 
     def ts_code_view(self) -> TsCodeView:
         return self.exporter.ts_code_view()
+
+    def land_rollout(self, outcome: RolloutOutcome) -> None:
+        """一轮采集派发的六个结果落位（`Dispatcher` 的唯一写面；槽位归组合根）。"""
+        self._report = outcome.report
+        self._stream_meta = outcome.stream_meta
+        self._eval_thread = outcome.eval_thread
+        self._eval_gate = outcome.eval_gate
+        self._collect_child = outcome.collect_child
+        self._spawned_early = outcome.spawned_early
+
+    def _eval_on_round(self, it: int) -> bool:
+        return self.dispatch.eval_on_round(it)
+
+    def _evalboard_yield(self) -> None:
+        self.dispatch.evalboard_yield()
+
+    def _rollout_phase(
+        self,
+        it: int,
+        pairs: list[tuple[int, int]],
+        dist_cfg: dict | None,
+        eval_on_round: bool,
+        on_collect_end: Callable[..., object] | None = None,
+        on_dispatch_drained: Callable[..., object] | None = None,
+        on_dispatch_active: Callable[..., object] | None = None,
+    ) -> None:
+        self.dispatch.rollout_phase(
+            it,
+            pairs,
+            dist_cfg,
+            eval_on_round,
+            on_collect_end,
+            on_dispatch_drained,
+            on_dispatch_active,
+        )
+
+    def _finalize_returned_shards(self, it: int) -> None:
+        self.dispatch.finalize_returned_shards(it)
 
     def remote_ppo(
         self,
