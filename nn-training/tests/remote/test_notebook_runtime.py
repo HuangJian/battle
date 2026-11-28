@@ -42,7 +42,7 @@ import remote.push_tunnel as pt
 
 #: autouse fixture `_torch_backend` 会把 `_resolve_backend` 换成「torch」假货 ⇒
 #: 钉「真货只调用 worker 那一份判据」的用例要留一份原始引用（模块级取，fixture 还没生效）。
-_REAL_RESOLVE_BACKEND = nbr._resolve_backend
+_REAL_RESOLVE_BACKEND = nbr.PROBES.backend
 
 # ------------------------------------------------------------------ fakes
 
@@ -99,6 +99,25 @@ class _FakeProc:
 
     def kill(self) -> None:
         self.killed = True
+
+
+def _set_probes(monkeypatch, *, backend=None, cuda=None, paddle=None, hub_open=None) -> None:
+    """只覆盖要替换的那几个探针（其余仍是 `RuntimeProbes` 的真实现）。
+
+    逐字段构造而不是 `dataclasses.replace(**over)`：后者在 mypy 下是「`**dict` 撞逐字段签名」，
+    要么加 `Any` 注解（G14），要么加 `type: ignore`（G6）—— 两个账本都不该为一层测试夹具让路。
+    """
+    base = nbr.PROBES
+    monkeypatch.setattr(
+        nbr,
+        "PROBES",
+        nbr.RuntimeProbes(
+            backend=backend or base.backend,
+            cuda=cuda or base.cuda,
+            paddle=paddle or base.paddle,
+            hub_open=hub_open or base.hub_open,
+        ),
+    )
 
 
 def _fake_probe(n: int, names: list[str] | None = None) -> dict:
@@ -166,20 +185,20 @@ def _torch_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     走到 paddle 腿（真子进程探测），用例名与行为脱节。paddle 腿的用例在自己的用例体里
     再 `setattr` 覆盖（后设的赢）。
     """
-    monkeypatch.setattr(nbr, "_resolve_backend", lambda: "torch")
+    _set_probes(monkeypatch, backend=lambda: "torch")
 
 
 def test_resolve_device_torch_missing_returns_cpu(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(nbr, "_probe_cuda", lambda log: None)  # torch 未装/探测失败
+    _set_probes(monkeypatch, cuda=lambda log: None)  # torch 未装/探测失败
     assert nbr.resolve_device(_base_cfg(tmp_path), lambda m: None) == "cpu"
 
 
 def test_resolve_device_no_cuda_no_tpu_returns_cpu(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(nbr, "_probe_cuda", lambda log: _fake_probe(n=0))
+    _set_probes(monkeypatch, cuda=lambda log: _fake_probe(n=0))
     # torch_xla 未安装（本机即为真——find_spec 不注入）
     assert nbr.resolve_device(_base_cfg(tmp_path), lambda m: None) == "cpu"
 
@@ -196,11 +215,8 @@ def test_resolve_device_torch_broken_is_fatal_not_cpu(
     判据：`{"err": ...}`（探测明确拿到 import 失败）⇒ SystemExit；`None`（探不起来，
     真未知）仍然回落 CPU —— 两者不能混。
     """
-    monkeypatch.setattr(
-        nbr,
-        "_probe_cuda",
-        lambda log: {"err": "OSError: libcudart.so.11.0: cannot open shared object file"},
-    )
+    _set_probes(monkeypatch, cuda=lambda log: {"err": "OSError: libcudart.so.11.0: cannot open shared object file"})
+
     with pytest.raises(SystemExit) as ei:
         nbr.resolve_device(_base_cfg(tmp_path), lambda m: None)
     msg = str(ei.value.code)
@@ -212,9 +228,8 @@ def test_resolve_device_torch_broken_is_fatal_not_cpu(
 def test_resolve_device_cuda_single_and_multi(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        nbr, "_probe_cuda", lambda log: _fake_probe(n=2, names=["FakeGPU0", "FakeGPU1"])
-    )
+    _set_probes(monkeypatch, cuda=lambda log: _fake_probe(n=2, names=["FakeGPU0", "FakeGPU1"]))
+
     cfg_one = _base_cfg(tmp_path)
     assert nbr.resolve_device(cfg_one, lambda m: None) == "cuda"  # 只用第 0 张
     # ★ 2026-10-21：卡数要留给下流的 argv 生成（`workers>1` 是「一卡一 worker」还是
@@ -227,9 +242,8 @@ def test_resolve_device_cuda_single_and_multi(
 def test_resolve_device_cuda_explicit_override_wins(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        nbr, "_probe_cuda", lambda log: _fake_probe(n=2, names=["FakeGPU0", "FakeGPU1"])
-    )
+    _set_probes(monkeypatch, cuda=lambda log: _fake_probe(n=2, names=["FakeGPU0", "FakeGPU1"]))
+
     cfg = _base_cfg(tmp_path, device="cuda", use_multi_gpu=True)
     # 显式 "cuda" ≠ "cuda-dp"：显式指定优先，不悄悄包 DP
     assert nbr.resolve_device(cfg, lambda m: None) == "cuda"
@@ -238,7 +252,7 @@ def test_resolve_device_cuda_explicit_override_wins(
 def test_resolve_device_tpu_sets_pjrt_and_reports_holders(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(nbr, "_probe_cuda", lambda log: _fake_probe(n=0))
+    _set_probes(monkeypatch, cuda=lambda log: _fake_probe(n=0))
     monkeypatch.setattr(
         nbr, "_tpu_holders", lambda: [(123, "/dev/vfio/0", "python -m remote.worker")]
     )
@@ -265,7 +279,7 @@ def test_resolve_device_tpu_sets_pjrt_and_reports_holders(
 def test_resolve_device_tpu_present_but_cpu_requested(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(nbr, "_probe_cuda", lambda log: _fake_probe(n=0))
+    _set_probes(monkeypatch, cuda=lambda log: _fake_probe(n=0))
     real_find_spec = importlib.util.find_spec
     monkeypatch.setattr(
         importlib.util,
@@ -291,11 +305,10 @@ def test_resolve_device_paddle_gpu_is_cuda_and_never_probes_torch(
     判据：后端落 paddle ⇒ ① torch 探测**一次都不跑**（跑了就是没必要的 60s 子进程 + 噪音）；
     ② device = cuda 且 `gpu_count` 写回（下游 `worker_restart_argv` 靠它判一卡一 worker）。
     """
-    monkeypatch.setattr(nbr, "_resolve_backend", lambda: "paddle")
-    monkeypatch.setattr(
-        nbr, "_probe_cuda", lambda log: pytest.fail("paddle 后端不该探测 torch")
-    )
-    monkeypatch.setattr(nbr, "_probe_paddle", lambda log: _paddle_probe(n=1, names=["A100"]))
+    _set_probes(monkeypatch, backend=lambda: "paddle")
+    _set_probes(monkeypatch, cuda=lambda log: pytest.fail("paddle 后端不该探测 torch"))
+
+    _set_probes(monkeypatch, paddle=lambda log: _paddle_probe(n=1, names=["A100"]))
     cfg = _base_cfg(tmp_path)
     assert nbr.resolve_device(cfg, lambda m: None) == "cuda"
     assert cfg["gpu_count"] == 1
@@ -305,8 +318,8 @@ def test_resolve_device_paddle_gpu_is_cuda_and_never_probes_torch(
 def test_resolve_device_paddle_cpu_only_stays_cpu(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(nbr, "_resolve_backend", lambda: "paddle")
-    monkeypatch.setattr(nbr, "_probe_paddle", lambda log: _paddle_probe(n=0))
+    _set_probes(monkeypatch, backend=lambda: "paddle")
+    _set_probes(monkeypatch, paddle=lambda log: _paddle_probe(n=0))
     cfg = _base_cfg(tmp_path)
     assert nbr.resolve_device(cfg, lambda m: None) == "cpu"
     # 没卡就别留个 gpu_count=0 让下游当「未知」和「0 张」混用（结构化判据，不数文本）
@@ -317,8 +330,8 @@ def test_resolve_device_paddle_probe_unknown_falls_back_to_cpu_loudly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """探测子进程没起来/输出不可解析 ⇒ 与 torch 腿同口径：按 cpu 开跑但留日志。"""
-    monkeypatch.setattr(nbr, "_resolve_backend", lambda: "paddle")
-    monkeypatch.setattr(nbr, "_probe_paddle", lambda log: None)
+    _set_probes(monkeypatch, backend=lambda: "paddle")
+    _set_probes(monkeypatch, paddle=lambda log: None)
     logs: list[str] = []
     assert nbr.resolve_device(_base_cfg(tmp_path), logs.append) == "cpu"
     assert any("未知" in m and "CPU" in m for m in logs), logs
@@ -328,12 +341,9 @@ def test_resolve_device_paddle_broken_is_fatal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """paddle 装了但 import 崩 ⇒ 与 torch 腿同一处置：开跑前 FATAL，绝不回落 CPU。"""
-    monkeypatch.setattr(nbr, "_resolve_backend", lambda: "paddle")
-    monkeypatch.setattr(
-        nbr,
-        "_probe_paddle",
-        lambda log: {"err": "OSError: libcudart.so.11.0: cannot open shared object file"},
-    )
+    _set_probes(monkeypatch, backend=lambda: "paddle")
+    _set_probes(monkeypatch, paddle=lambda log: {"err": "OSError: libcudart.so.11.0: cannot open shared object file"})
+
     with pytest.raises(SystemExit) as ei:
         nbr.resolve_device(_base_cfg(tmp_path), lambda m: None)
     msg = str(ei.value.code)
@@ -352,9 +362,9 @@ def test_resolve_device_paddle_rejects_torch_only_arms(
 ) -> None:
     """`cuda-dp` / `tpu` 这些 torch 专属实验臂：开跑前拒，别等 PPO 里才
     `paddle_env.check_device` 抛（那要 hub 推完 job 才看得见）。"""
-    monkeypatch.setattr(nbr, "_probe_paddle", lambda log: pytest.fail("被拒的设备不该探测"))
+    _set_probes(monkeypatch, paddle=lambda log: pytest.fail("被拒的设备不该探测"))
     for dev in ("tpu", "cuda-dp", "mps"):
-        monkeypatch.setattr(nbr, "_resolve_backend", lambda: "paddle")
+        _set_probes(monkeypatch, backend=lambda: "paddle")
         with pytest.raises(SystemExit) as ei:
             nbr.resolve_device(_base_cfg(tmp_path, device=dev), lambda m: None)
         assert "torch 专属实验臂" in str(ei.value.code), dev
@@ -363,8 +373,8 @@ def test_resolve_device_paddle_rejects_torch_only_arms(
 def test_resolve_device_paddle_explicit_cpu_wins_on_gpu_box(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(nbr, "_resolve_backend", lambda: "paddle")
-    monkeypatch.setattr(nbr, "_probe_paddle", lambda log: _paddle_probe(n=2))
+    _set_probes(monkeypatch, backend=lambda: "paddle")
+    _set_probes(monkeypatch, paddle=lambda log: _paddle_probe(n=2))
     assert nbr.resolve_device(_base_cfg(tmp_path, device="cpu"), lambda m: None) == "cpu"
 
 
@@ -380,9 +390,8 @@ def test_backend_comes_from_the_worker_resolver_not_a_local_copy(
     from remote import bc_job
 
     real = bc_job.resolve_ppo_backend
-    monkeypatch.setattr(
-        nbr, "_resolve_backend", _REAL_RESOLVE_BACKEND
-    )  # 撤掉 autouse 的 torch 假货
+    _set_probes(monkeypatch, backend=_REAL_RESOLVE_BACKEND)
+  # 撤掉 autouse 的 torch 假货
     monkeypatch.setattr(bc_job, "resolve_ppo_backend", lambda req: f"paddle:{req}")
     backend = nbr._resolve_backend()
     assert backend == "paddle:auto"
@@ -495,7 +504,7 @@ def _patch_hub_open(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
             )
         return _FakeResp(status)
 
-    monkeypatch.setattr(nbr, "_hub_open", _open)
+    _set_probes(monkeypatch, hub_open=_open)
 
 
 def test_pull_ping_401_returns_minus2_without_restart(
@@ -1426,7 +1435,7 @@ def test_pull_unreachable_hub_still_exits_minus2(
     def _down(req: Any, timeout: float = 15) -> Any:
         raise OSError("tunnel expired")
 
-    monkeypatch.setattr(nbr, "_hub_open", _down)
+    _set_probes(monkeypatch, hub_open=_down)
     assert nbr.run_pull_worker(_base_cfg(tmp_path), lambda m: None) == -2
 
 
@@ -1443,7 +1452,7 @@ def test_pull_programmer_error_is_not_reported_as_an_unreachable_hub(
     def _buggy(req: Any, timeout: float = 15) -> Any:
         raise AttributeError("'NoneType' object has no attribute 'read'")
 
-    monkeypatch.setattr(nbr, "_hub_open", _buggy)
+    _set_probes(monkeypatch, hub_open=_buggy)
     with pytest.raises(AttributeError):
         nbr.run_pull_worker(_base_cfg(tmp_path), lambda m: None)
 

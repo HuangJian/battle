@@ -110,8 +110,10 @@
 **批三（同日）**：`remote/http._request` 21 处 + `download._get_with_retry` 3 处 ——
 `_attempt_once` 是唯一发请求点（一处 `WIRE.request` 收住整条重试/重抽），`download` 另立
 `FetchPair`（「拿到整份字节」与「发一次」不是同一个协议）。G19 **304 / 71 → 280 / 69**
-（累计 384 / 91 → 280 / 69）。**下一个已知口径**：`offline_boot`（生成物，改 `.pyfrag`）、
-`notebook_runtime` / `rollout_node` 的探针族（各 20~50 处）、`TrainingLoop._*` 15 处（与 P0-1 同批）。
+（累计 384 / 91 → 280 / 69）。**批四（同日）**：`notebook_runtime` 26 处收进 `RuntimeProbes`（`backend` / `cuda` / `paddle` /
+`hub_open` 四字段 + `PROBES`），G19 **280 / 69 → 254 / 68**（累计 384 / 91 → 254 / 68）。
+**下一个已知口径**：`offline_boot`（生成物，改 `.pyfrag`）、`rollout_node`（~50 处，要 `NodePorts`）、
+`TrainingLoop._*` 15 处（与 P0-1 同批）。
 全文 → `docs/nn/engineering.md` §389。
 
 ## 0. 执行摘要

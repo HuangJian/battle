@@ -16,36 +16,18 @@ import urllib.request
 from typing import Protocol
 
 from common import net_http
-
-
-class NetResponse(Protocol):
-    """`urlopen` 返回值里本模块真正用到的两项（只读响应体 + 上下文管理）。"""
-
-    def read(self, amt: int | None = None) -> bytes: ...
-
-    def __enter__(self) -> NetResponse: ...
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: object,
-    ) -> None: ...
+from common.ports import OpenResponse
 
 
 class NetPort(Protocol):
     """hub 出站 HTTP 的唯一端口；替身只需实现 `open`。"""
 
-    def open(
-        self, req: urllib.request.Request, timeout: float = 30.0
-    ) -> NetResponse: ...
+    def open(self, req: urllib.request.Request, timeout: float = 30.0) -> OpenResponse: ...
 
 
 class _NetHTTP:
-    def open(
-        self, req: urllib.request.Request, timeout: float = 30.0
-    ) -> NetResponse:
-        resp: NetResponse = net_http.urlopen(req, timeout=timeout)
+    def open(self, req: urllib.request.Request, timeout: float = 30.0) -> OpenResponse:
+        resp: OpenResponse = net_http.urlopen(req, timeout=timeout)
         return resp
 
 

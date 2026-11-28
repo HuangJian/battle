@@ -40,6 +40,8 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -48,6 +50,7 @@ from common.env_probe import probe_cloud_env
 from common.errors import NET_ERRORS as _BASE_NET_ERRORS
 from common.logutil import tag_logger
 from common.pid_probe import pid_alive
+from common.ports import OpenResponse
 from common.proc import run_capture
 from common.scratch import warn_if_tmpfs
 from remote.push_tunnel import find_cloudflared, start_quick_tunnel, tunnel_url_of
@@ -72,6 +75,7 @@ NET_ERRORS: tuple[type[BaseException], ...] = (*_BASE_NET_ERRORS, http.client.HT
 #: `/ping` 类**探针**：网络面 + 回执读不出来（200 但 body 不是 JSON ⇒ `ValueError`）。探针的义务是
 #: 「这一拍拿没拿到可用状态」，读不出来与连不上同档；而看字段的错（形状变了）仍照抛。
 PROBE_ERRORS: tuple[type[BaseException], ...] = (*NET_ERRORS, ValueError)
+
 
 def _epoch_mult_of(cfg: dict[str, Any]) -> float:
     """`CFG.epoch_mult`：PPO 每轮更新遍数 × N（缺省 1.0 = 课程/manifest 原样）。
@@ -118,7 +122,9 @@ def _hub_open(req: Any, timeout: float = 15) -> Any:
             proxies["https"] = v
             break
     if proxies:
-        return urllib.request.build_opener(urllib.request.ProxyHandler(proxies)).open(req, timeout=timeout)
+        return urllib.request.build_opener(urllib.request.ProxyHandler(proxies)).open(
+            req, timeout=timeout
+        )
     return urllib.request.urlopen(req, timeout=timeout)
 
 
@@ -272,6 +278,29 @@ def _resolve_backend() -> str:
     return resolve_ppo_backend("auto")
 
 
+@dataclass(frozen=True)
+class RuntimeProbes:
+    """notebook 侧「问本机」的四类能力（P0-8 第三代，2026-11-28）。
+
+    为什么收成一个对象：这四样都是**进程级的环境事实**（后端解析 / 两个设备探针 /
+    代理感知的 `urlopen`），用例原先靠 `monkeypatch.setattr(nbr, "_probe_cuda", …)`
+    逐个替换私有名 —— 实现改名就得改用例，而它们只是「这台机器长什么样」的读数。
+
+    字段缺省 = 本模块的真实现；测试只覆盖自己要的那一个
+    （`dataclasses.replace(nbr.PROBES, cuda=fake)`），其余仍是真代码。
+    `backend()` 是一次**委托**（问 worker 的同一个函数），不是第二份判据。
+    """
+
+    backend: Callable[[], str] = _resolve_backend
+    cuda: Callable[..., dict | None] = _probe_cuda
+    paddle: Callable[..., dict | None] = _probe_paddle
+    hub_open: Callable[..., OpenResponse] = _hub_open
+
+
+#: 生产缺省端口。调用点只碰这个对象（`PROBES.cuda(log)`），测试也打它（公开名）。
+PROBES: RuntimeProbes = RuntimeProbes()
+
+
 def _resolve_device_paddle(cfg: dict[str, Any], log) -> str:
     """Paddle 后端的设备解析（AI Studio 训练镜像：paddlepaddle-gpu 在、torch 不存在）。
 
@@ -290,7 +319,7 @@ def _resolve_device_paddle(cfg: dict[str, Any], log) -> str:
             "（DataParallel / XLA / MPS）—— 用 auto / cuda / cpu。\n"
             '  多卡请走 CFG["workers"]（一卡一 worker），不要用 cuda-dp。'
         )
-    info = _probe_paddle(log)
+    info = PROBES.paddle(log)
     if info is not None and info.get("err"):
         raise SystemExit(
             f"[FATAL] paddle 不可用（{info['err']}）——拒绝开始训练。\n"
@@ -332,12 +361,12 @@ def resolve_device(cfg: dict[str, Any], log) -> str:
     探测一律走子进程；TPU 探测仍用 find_spec + /dev 扫描 —— 三条路 kernel 本体都不
     import torch / paddle / torch_xla。
     """
-    backend = _resolve_backend()
+    backend = PROBES.backend()
     cfg["backend_resolved"] = backend
     log(f"设备探测中（device={cfg['device']}，backend=auto→{backend}）…")
     if backend == "paddle":
         return _resolve_device_paddle(cfg, log)
-    info = _probe_cuda(log)
+    info = PROBES.cuda(log)
     # ★ 2026-10-26：**torch 装坏了必须在开跑前就 FATAL**，不能回落 CPU。
     #   现场（云机 python 3.10）：`torch` 装了但 CUDA runtime 缺 ⇒ `import torch` 抛
     #   `OSError: libcudart.so.11.0: cannot open shared object file`。旧实现把这档并进
@@ -377,14 +406,18 @@ def resolve_device(cfg: dict[str, Any], log) -> str:
         d = str(cfg["device"])
         if d == "cuda-dp":
             if n_gpu > 1:
-                log(f"  -> DataParallel 跨 {n_gpu} 卡（梯度归约顺序变化，与单卡 run 数值不可逐位比）")
+                log(
+                    f"  -> DataParallel 跨 {n_gpu} 卡（梯度归约顺序变化，与单卡 run 数值不可逐位比）"
+                )
                 return "cuda-dp"
             log(f"  -> 指定 cuda-dp 但只可见 {n_gpu} 张卡——退化为单卡 cuda（与 worker 同语义）")
             return "cuda"
         if d in ("auto", "cuda"):
             # DP 只在 auto + use_multi_gpu + 真多卡时启用——显式 "cuda" 绝不悄悄升级
             if d == "auto" and cfg["use_multi_gpu"] and n_gpu > 1:
-                log(f"  -> DataParallel 跨 {n_gpu} 卡（梯度归约顺序变化，与单卡 run 数值不可逐位比）")
+                log(
+                    f"  -> DataParallel 跨 {n_gpu} 卡（梯度归约顺序变化，与单卡 run 数值不可逐位比）"
+                )
                 return "cuda-dp"
             if n_gpu > 1:
                 log("  -> 只用第 0 张卡（要跨卡把 use_multi_gpu 改 True 或显式 cuda-dp）")
@@ -410,7 +443,9 @@ def resolve_device(cfg: dict[str, Any], log) -> str:
             tag = "★本内核★" if pid == os.getpid() else "其它进程"
             log(f"  ⚠ {tgt} 已被占用: pid={pid} [{tag}] {cmd[:90]}")
         if holders:
-            log("  ⚠ 占用存在时 worker 子进程必报 busy；占用者是本内核 → 只能 Runtime → Restart session")
+            log(
+                "  ⚠ 占用存在时 worker 子进程必报 busy；占用者是本内核 → 只能 Runtime → Restart session"
+            )
         else:
             log("  vfio 无占用 —— 设备空闲，worker 子进程可正常领取")
         if cfg["device"] in ("auto", "tpu"):
@@ -471,18 +506,26 @@ def worker_restart_argv(
         device = str(cfg["device_resolved"])
         threads = str(explicit_threads) if explicit_threads > 0 else "0"
     argv = [
-        "--poll", hub_url,
-        "--token-file", str(token_file),
-        "--out", str(work_dir),
-        "--device", device,
-        "--threads", threads,
-        "--poll-sec", str(cfg["poll_interval_sec"]),
-        "--max-idle-sec", str(max_idle),
+        "--poll",
+        hub_url,
+        "--token-file",
+        str(token_file),
+        "--out",
+        str(work_dir),
+        "--device",
+        device,
+        "--threads",
+        threads,
+        "--poll-sec",
+        str(cfg["poll_interval_sec"]),
+        "--max-idle-sec",
+        str(max_idle),
         # ★ 2026-10-20（plan/ppo-worker-transfer-isolation）：云机 PPO worker 的回传腿跑在
         # **独立子进程**里（`remote/upload_worker.py`）——与自主 worker 的补传腿同形
         # （`plan/offline-deliver-isolation` §P1）。不这么开场，云机 PPO 线程会继续与
         # `json.dumps` + gzip + HTTP 抢 GIL（2026-10-06 那条 40× 事故的通道）。
-        "--result-upload", "process",
+        "--result-upload",
+        "process",
     ]
     if str(cfg.get("cache_dir") or "").strip():
         argv += ["--cache-dir", str(cfg["cache_dir"])]
@@ -513,12 +556,16 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
 
     log(f"连接 hub: {hub_url}（/ping 探测…）")
     try:
-        req = Request(f"{hub_url.rstrip('/')}/ping", headers={"Authorization": f"Bearer {hub_token}"})
-        with _hub_open(req, timeout=15) as resp:
+        req = Request(
+            f"{hub_url.rstrip('/')}/ping", headers={"Authorization": f"Bearer {hub_token}"}
+        )
+        with PROBES.hub_open(req, timeout=15) as resp:
             resp.read()
         log("hub ping OK")
     except HTTPError as e:
-        log(f"FATAL: hub /ping HTTP {e.code} — {'token 不匹配' if e.code in (401, 403) else 'hub 异常'}")
+        log(
+            f"FATAL: hub /ping HTTP {e.code} — {'token 不匹配' if e.code in (401, 403) else 'hub 异常'}"
+        )
         return -2
     except NET_ERRORS as e:
         log(f"FATAL: hub 不可达（{type(e).__name__}: {e}）——检查隧道 URL 是否过期")
@@ -534,7 +581,9 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
     # （argv 顺序与字面量都不变）；N>1 时每个实例单卡 + 各自 `--out` + 共享 `--cache-dir`。
     n_workers = max(1, int(cfg.get("workers") or 1))
     if n_workers > 1 and not str(cfg.get("device_resolved", "")).startswith("cuda"):
-        log(f"workers={n_workers} 但 device={cfg.get('device_resolved')} 不是 cuda ⇒ 只起 1 个 worker")
+        log(
+            f"workers={n_workers} 但 device={cfg.get('device_resolved')} 不是 cuda ⇒ 只起 1 个 worker"
+        )
         n_workers = 1
     elif n_workers > 1 and 0 < int(cfg.get("gpu_count") or 0) < n_workers:
         # 可见卡数不够 ⇒ 全部落到设备 0。写清楚：这不是「一卡一 worker」。
@@ -668,7 +717,7 @@ def _push_registry(cfg: dict[str, Any], log) -> Any:
             #   opener（`urlopen()` 不读 HTTP_PROXY，2026-09-16 实测）。注册/注销与下载共用同一条
             #   opener，`_hub_open` 无代理时本就回落 `urlopen` ⇒ 非 tailnet 部署逐字节不变。
             #   守门：`tests/remote/test_notebook_runtime.py::test_push_registry_register_goes_through_proxy_aware_opener`
-            urlopen=_hub_open,
+            urlopen=PROBES.hub_open,
         )
     )
 
@@ -792,8 +841,7 @@ def _wait_existing_serving(cfg, log, reg, already: dict) -> int:
                     elif now - last_beat_at >= _HEARTBEAT_SEC:
                         last_beat_at = now
                         log(
-                            f"守候中… busy={busy} queued={queued} done={done}"
-                            f" wait={int(now - t0)}s"
+                            f"守候中… busy={busy} queued={queued} done={done} wait={int(now - t0)}s"
                         )
                 else:
                     log("worker /ping 暂不可达（瞬断/重启中）——继续守候")
@@ -1000,20 +1048,35 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
 
     # ── 启动 worker_server ──
     serve_env = dict(os.environ)
-    serve_env["PYTHONPATH"] = (str(boot_dir) + os.pathsep + serve_env.get("PYTHONPATH", "")).rstrip(os.pathsep)
+    serve_env["PYTHONPATH"] = (str(boot_dir) + os.pathsep + serve_env.get("PYTHONPATH", "")).rstrip(
+        os.pathsep
+    )
     # 结果就绪通知的目标（与注册同址）；缺 hub 地址 ⇒ 不传，服务端回落纯轮询。
     hub_base = _hub_base_of(cfg)
     with open(serve_log, "w") as log_f:
-        serve_argv = [sys.executable, "-u", "-m", "remote.remote_worker_serve",
-                      "--port", str(cfg["push_port"]), "--token", str(cfg["push_token"]),
-                      "--work", str(work_dir), "--device", str(cfg["device_resolved"])]
+        serve_argv = [
+            sys.executable,
+            "-u",
+            "-m",
+            "remote.remote_worker_serve",
+            "--port",
+            str(cfg["push_port"]),
+            "--token",
+            str(cfg["push_token"]),
+            "--work",
+            str(work_dir),
+            "--device",
+            str(cfg["device_resolved"]),
+        ]
         if epoch_mult != 1.0:
             serve_argv += ["--epoch-mult", f"{epoch_mult:g}"]
         if hub_base:
             serve_argv += ["--hub-url", hub_base]
         serve_proc = subprocess.Popen(
             serve_argv,
-            stdout=log_f, stderr=subprocess.STDOUT, env=serve_env,
+            stdout=log_f,
+            stderr=subprocess.STDOUT,
+            env=serve_env,
         )
     log(f"worker_server 启动 (PID {serve_proc.pid})，等就绪…")
 
@@ -1124,9 +1187,11 @@ def run_notebook(cfg: dict[str, Any]) -> int:
     rc = 0
     print("\n" + "=" * 62)
     _em = _epoch_mult_of(cfg)
-    print(f"  Battle GPU Worker | mode={cfg['mode']} device={cfg.get('device_resolved')} "
-          f"backend={cfg.get('backend_resolved') or '?'} "
-          f"| 任务类型 ppo+bc" + (f" | PPO epochs×{_em:g}" if _em != 1.0 else ""))
+    print(
+        f"  Battle GPU Worker | mode={cfg['mode']} device={cfg.get('device_resolved')} "
+        f"backend={cfg.get('backend_resolved') or '?'} "
+        f"| 任务类型 ppo+bc" + (f" | PPO epochs×{_em:g}" if _em != 1.0 else "")
+    )
     print(f"  会话上限 {cfg['max_session_hours']}h | 停止 = 中断本 cell")
     print("=" * 62 + "\n")
     try:
@@ -1146,7 +1211,9 @@ def run_notebook(cfg: dict[str, Any]) -> int:
                 log(f"FATAL: worker 连续失败 {attempt} 次（rc={rc}）——放弃自动重启")
                 break
             backoff = min(30 * attempt, 300)
-            log(f"worker 异常退出 (rc={rc})——{backoff}s 后第 {attempt}/{cfg['max_worker_restarts']} 次自动重启")
+            log(
+                f"worker 异常退出 (rc={rc})——{backoff}s 后第 {attempt}/{cfg['max_worker_restarts']} 次自动重启"
+            )
             time.sleep(backoff)
         return rc
     finally:

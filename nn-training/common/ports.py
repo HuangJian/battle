@@ -66,6 +66,25 @@ class PortPair:
     add: Callable[..., None] = _noop
 
 
+class OpenResponse(Protocol):
+    """`urlopen` 系返回值的本仓口径（只读响应体 + 上下文管理）。
+
+    `notebook_runtime` 的 `hub_open` 与 `hub/seams.py::NET.open` 都在「替一个 urlopen」，
+    但前者要 `read()`、后者要 `read(amt)`（分块下载）—— 两份口径必然漂开，收进这里。
+    """
+
+    def read(self, amt: int | None = None) -> bytes: ...
+
+    def __enter__(self) -> OpenResponse: ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: object,
+    ) -> None: ...
+
+
 class FetchPort(Protocol):
     """「拿到整份字节」的端口（`remote.download` 那一层：重试/重抽/记账都已封在实现里）。
 
@@ -83,4 +102,4 @@ class FetchPair:
     get: Callable[..., bytes]
 
 
-__all__ = ["FetchPair", "FetchPort", "PortPair", "WirePort"]
+__all__ = ["FetchPair", "FetchPort", "OpenResponse", "PortPair", "WirePort"]

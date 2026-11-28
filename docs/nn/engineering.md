@@ -125,8 +125,19 @@ hub 控制面是 7 个位置参数。钉死任一个都会逼出第二套协议�
 另立 `FetchPair`（`FETCH.get`）—— 把两者混成一个协议就会让下载编排去伪造 status/body。
 G19 **304 / 71 → 280 / 69**（累计 384 / 91 → 280 / 69，−104 次 / −22 文件）。
 
-**下一步（未做）**：`remote/offline_boot`（生成物，改 `.pyfrag`）与 `notebook_runtime` /
-`rollout_node` 的探针族是剩余大头（各有 20~50 处）；`trainer/loop_core.TrainingLoop._*` 的
+**批四（同日）**：`remote/notebook_runtime` 26 处 —— `RuntimeProbes`（`backend` / `cuda` /
+`paddle` / `hub_open` 四个字段，缺省全是本模块真实现）+ 模块级 `PROBES`。四样都是「这台机器
+长什么样」的读数，收成一个端口后用例写 `dataclasses.replace(nbr.PROBES, cuda=fake)`，只换自己
+要的那一个。`_push_registry` 的 `urlopen=_hub_open` 改成 `PROBES.hub_open`（函数内求值 ⇒ patch
+仍生效）。G19 **280 / 69 → 254 / 68**（累计 384 / 91 → 254 / 68，−130 次 / −23 文件）。
+
+坑：`_REAL_RESOLVE_BACKEND = nbr._resolve_backend` 是「后端判据只许一份」守卫引用的真实现，
+端口落地后必须跟着改成 `nbr.PROBES.backend` —— 否则那条守卫测的是**没人调用**的旧函数（假绿）。
+文本断言口径 B 因此 +14（`tests/remote/test_wire_seam.py` 0 → 14：文件里出现 `.py` 字面量后
+整文件计入，是该口径的已知限边，理由写在基线表头）。
+
+**下一步（未做）**：`remote/offline_boot`（生成物，改 `.pyfrag`）与 `remote/rollout_node`
+（~50 处，节点监护步骤，要一个 `NodePorts`）是剩余大头；`trainer/loop_core.TrainingLoop._*` 的
 15 处与 P0-1 混入拆解同批。
 
 ---

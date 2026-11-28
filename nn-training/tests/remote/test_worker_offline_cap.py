@@ -18,6 +18,7 @@ job」（2026-09-25，plan/online-offline-role-routing.plan.md §1）。⇒ 一�
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
@@ -192,15 +193,27 @@ def test_notebook_pull_worker_adds_offline_flag(
 
     captured: list[list[str]] = []
 
-    @contextmanager
+    # 不用 @contextmanager：装饰器产物的 `__enter__` 返回 `Any`，塞不进
+    # `Callable[..., HubOpen]`（mypy 实测拒收）。替身自己就是「打开一次」的返回值。
     def _fake_open(req, timeout=15.0):
         class _Resp:
             def read(self) -> bytes:
                 return b"ok"
 
-        yield _Resp()
+            def __enter__(self) -> _Resp:
+                return self
 
-    monkeypatch.setattr(nbr, "_hub_open", _fake_open, raising=True)
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                tb: object,
+            ) -> None:
+                return None
+
+        return _Resp()
+
+    monkeypatch.setattr(nbr, "PROBES", dataclasses.replace(nbr.PROBES, hub_open=_fake_open))
     # `supervise_worker` 是**函数内**导入的（`from remote.worker import …`）⇒ 补它的源模块
     def _fake_supervise(argv):
         captured.append(list(argv))

@@ -203,6 +203,32 @@ def test_seams_module_has_no_project_imports() -> None:
     assert project == [], f"common/ports.py 抬层了：{project}"
 
 
+# ─────────────────── 3b. notebook 侧的「问本机」探针 ───────────────────
+
+PROBES_HOST = ROOT / "remote" / "notebook_runtime.py"
+PROBE_NAMES = ("_resolve_backend", "_probe_cuda", "_probe_paddle", "_hub_open")
+
+
+def test_notebook_runtime_calls_its_probes_through_the_port() -> None:
+    """四个探针只许作为 `RuntimeProbes` 的字段默认值出现，调用点一律 `PROBES.*`。
+
+    它们读的是「这台机器长什么样」（后端解析 / 两个设备探针 / 代理感知的 `urlopen`），
+    原先是 26 处 `monkeypatch.setattr(nbr, "_probe_cuda", …)` 的直接对象。
+    """
+    tree = _tree(PROBES_HOST)
+    calls = [
+        ast.unparse(n.func)
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and ast.unparse(n.func) in PROBE_NAMES
+    ]
+    assert calls == [], f"notebook_runtime 里又出现探针直调：{calls}"
+    value = _module_assign(tree, "PROBES")
+    assert isinstance(value, ast.Call), "缺 `PROBES = RuntimeProbes()` 组装行"
+    assert ast.unparse(value.func) == "RuntimeProbes", ast.unparse(value)
+    # 缺省必须**全用真实现**：带参数就说明有人把某个探针硬编码进了默认端口。
+    assert value.args == [] and value.keywords == [], ast.unparse(value)
+
+
 # ───────────────────────── 4. 替身真的被读到 ─────────────────────────
 
 

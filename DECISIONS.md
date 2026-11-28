@@ -11635,7 +11635,7 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **决定**：新增 `common/ports.py`：`WirePort` 协议（`request` / `add` 两项能力）+ `PortPair` frozen 组装壳。宿主用**自己已 import** 的原语拼缺省端口（`WIRE = PortPair(request=_request, add=_wire_add)`），调用点一律 `WIRE.request(…)` / `WIRE.add(…)`；测试改为 `monkeypatch.setattr(JL, "WIRE", PortPair(fake))`（公开名）。
 - **被否决**：① 照抄 `hub/seams.py` 的自带实现单例 —— `http`(L2) / `wire`(L1) 一 import 就抬到 L3，与 `job_lifecycle`(L3) 同秩；② 端口住 `remote/seams.py`（第一版）—— 批二撞墙：`hub_http` 自己是 L0，同层 import 被层账本判红（实测 `[('remote.seams', 0)]`），故落 `common/`；③ Protocol 用属性注解 —— frozen dataclass 的只读属性与「可写属性」语义冲突（mypy 实测）；④ 把 `request` 签名钉死 —— `http` 侧收 `WireRequest`、hub 控制面 7 个位置参数，钉死任一个都会逼出第二套协议；⑤ 给 12 个入口逐个加 `net=` —— 内部互调要全链透传，收益不抵风险。
 - **违反后果**：宿主里再出现 `_request(…)` / `_wire_add(…)` 直调 ⇒ `tests/remote/test_wire_seam.py` 红；把 `WIRE` 绑进缺省值 / 类属性 / 模块级别名 ⇒ 同文件红（patch 会静默打空）。`PortPair(fake)` 的 `add` 是 NoOp ⇒ 需要真实记账的用例必须写 `add=JL.WIRE.add`。**「按名字 import 私有原语」的读者必须一起改**（`trainer/bc_ingest` 的 4 处函数内 import，否则绕过端口真发请求 —— 表现为 60s 超时）。
-- **证明**：G19 `384 / 91 → 304 / 71`（−80 次 / −20 文件）；批一 250 passed、批二 134 passed；两条证伪（宿主直调 / `WIRE` 提前绑定）各红一次；层账本、形状、LOC、doc、复用（同名 +1 已记账）、文本断言（+2 已记账）全绿。
+- **证明**：G19 `384 / 91 → 254 / 68`（−130 次 / −23 文件；批一 job_lifecycle/bc_job、批二 hub_http/push_client、批三 传输核心/download、批四 notebook_runtime）；四批用例 250 / 158 / 184 / 71 条全绿；两条证伪（宿主直调 / `WIRE` 提前绑定）各红一次；层账本、形状、LOC、doc、复用（同名 +1 已记账）、文本断言（+2 → +14 已记账）全绿。
 
 —— 全文（形状理由 / 坑 / 下一步）→ `docs/nn/engineering.md` §389
 
