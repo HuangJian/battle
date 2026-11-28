@@ -216,7 +216,7 @@ def _node_loop(gq: dict) -> _NodeLoop:
     loop.args = SimpleNamespace(greedy_quota=gq)
     loop._remote_iter = lambda it, pairs: None
     # 上一轮残留：node 分支不跑采集，但发布相位仍会读这三个槽位。
-    loop.volume._greedy_plan = {"stale": True}
+    loop.volume._greedy_plan = cast(Any, {"stale": True})
     loop.volume._greedy_stats = {"stale": True}
     loop.volume._greedy_report = {"stale": True}
     loop.volume._greedy_waves = 2

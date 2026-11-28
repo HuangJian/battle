@@ -110,7 +110,6 @@
     "trainer/loop_serve.py": 24,
     "trainer/loop_steps.py": 25,
     "trainer/loop_transport.py": 13,
-    "trainer/loop_volume.py": 11,
     "trainer/queue_local.py": 5,
     "trainer/queue_worker.py": 6,
     "trainer/rollout_phase.py": 1,

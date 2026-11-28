@@ -106,12 +106,19 @@ HOST_READS = (
 #: 顶层 import 面的闭集（模块名）。
 TOP_LEVEL_ALLOWED = {
     "__future__",
+    "argparse",
     "collections.abc",
     "dataclasses",
     "pathlib",
+    "types",
     "typing",
     "biz.course",
     "common.log",
+    # P0-1 第五刀收尾（2026-11-28）：宿主面的具体类型。段账（`ShardSegments`）与
+    # WAL（`CommitJournal`）在 `RolloutPhaseSpec` 里本来就是具体类型 —— 协议照抄，
+    # 不再给它们各打一层 `Any`。
+    "remote.payload_pack",
+    "worker.commit_journal",
     "worker.reports",
     "worker.resume",
     "trainer.rollout_phase",
@@ -177,8 +184,11 @@ def _self_attr_roles(fn: ast.FunctionDef) -> dict[str, set[str]]:
 
 
 def _top_level_imports(path: Path) -> set[str]:
+    """运行期顶层 import（`if TYPE_CHECKING:` 只服务类型面，不算运行依赖）。"""
     out: set[str] = set()
     for node in _tree(path).body:
+        if isinstance(node, ast.If) and _is_type_checking(node.test):
+            continue
         body = node.body if isinstance(node, ast.If) else [node]
         for n in body:
             if isinstance(n, ast.Import):
@@ -186,6 +196,12 @@ def _top_level_imports(path: Path) -> set[str]:
             elif isinstance(n, ast.ImportFrom) and n.module:
                 out.add(n.module)
     return out
+
+
+def _is_type_checking(test: ast.expr) -> bool:
+    return (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
+        isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+    )
 
 
 def _in_function_imports(path: Path) -> set[str]:

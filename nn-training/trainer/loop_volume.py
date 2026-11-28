@@ -40,17 +40,22 @@ volume_collect_greedy（结果配额）──► greedy_scan / greedy_budget / g
 
 from __future__ import annotations
 
+import argparse
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Protocol
 
 from biz.course import build_pairs
 from common.log import log
+from remote.payload_pack import ShardSegments
 from trainer.rollout_phase import (
     RolloutPhaseSpec,
     begin_payload_parts,
     dispatch_rollout_phase,
 )
+from worker.commit_journal import CommitJournal
 from worker.reports import combine_reports
 from worker.resume import settled_stage_totals, trailing_samples_per_game
 from worker.volume_wave_plan import (
@@ -59,6 +64,12 @@ from worker.volume_wave_plan import (
     plan_continuous_wave,
     remember_first_est,
 )
+
+if TYPE_CHECKING:  # 仅类型面：这两个模块是延迟 import 的 DI 目标（运行期不加载）
+    import threading
+
+    from worker.greedy_quota import GreedyQuotaPlan
+    from worker.volume_waves import WaveRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,10 +207,10 @@ class _GreedyBudget:
 class VolumeHost(Protocol):
     """`VolumePlanner` 需要的宿主面（活读数走 property；写面只有 `land_collect` / `commit_journal`）。"""
 
-    args: Any
-    bun: Any
-    ppo_backend: Any
-    update_kwargs: Any
+    args: argparse.Namespace | SimpleNamespace
+    bun: str
+    ppo_backend: object
+    update_kwargs: Callable[..., dict]
 
     @property
     def model(self) -> object: ...
@@ -241,7 +252,7 @@ class VolumeHost(Protocol):
     def extra_wver(self) -> str | None: ...
 
     @property
-    def payload_parts(self) -> Any: ...
+    def payload_parts(self) -> ShardSegments: ...
 
     @property
     def report(self) -> dict: ...
@@ -249,7 +260,7 @@ class VolumeHost(Protocol):
     @property
     def stream_meta(self) -> dict | None: ...
 
-    def commit_journal(self) -> Any: ...
+    def commit_journal(self) -> CommitJournal: ...
 
     def land_collect(self, report: dict, stream_meta: dict | None = None) -> None: ...
 
@@ -274,7 +285,7 @@ class VolumePlanner:
         self._volume_halted = False
         self._volume_stage_ests: dict[int, int] | None = None
         self._volume_stage_stats: dict | None = None
-        self._greedy_plan: Any = None
+        self._greedy_plan: GreedyQuotaPlan | None = None
         self._greedy_stats: dict | None = None
         self._greedy_report: dict | None = None
         self._greedy_waves = 0
@@ -475,10 +486,9 @@ class VolumePlanner:
         pairs: list[tuple[int, int]],
         dist_cfg: dict | None,
         *,
-        # `Any` 而不是 `threading.Event`：本模块顶层不许 import threading（import 面闭集守卫），
         # 句柄由 `_volume_collect_continuous` 内部构造并透传——它只需要"能被 set / is_set"。
-        halt_event: Any = None,
-        on_result: Any = None,
+        halt_event: threading.Event | None = None,
+        on_result: Callable[..., None] | None = None,
         # `halt` 的来源：True = 逐关满额（候选池语义，没派的不算缺口）；
         # False = 外部熔断（KL 等，没派的局照旧报 missing）。
         pool_halt: bool = False,
@@ -523,7 +533,7 @@ class VolumePlanner:
             raise SystemExit("[volume] 补波落到 stream 路径——v1 只支持串行路径")
         return report
 
-    def volume_journal_replay(self, it: int) -> Any:
+    def volume_journal_replay(self, it: int) -> WaveRecord | None:
         """读 WAL：把本迭代的波次预算推到现在，并返回**未闭环**的那一波（待重放）。
 
         为何不能只靠账本重算（2026-09-15 e2e 证伪）：`wave_idx` 是**决策**而不是账本的
@@ -987,7 +997,7 @@ class VolumePlanner:
         live = {"total": int(total)}
 
         # 绑定本轮的 live/halt：回调可能在下一轮开始后才被调（避免串轮）
-        def _watch(summary: object, live: dict[str, int] = live, halt: Any = halt) -> None:
+        def _watch(summary: object, live: dict[str, int] = live, halt: threading.Event = halt) -> None:
             if not isinstance(summary, dict):
                 return
             # 单局摘要的字段口径：本地 TS shard 写 nSamples，远端/队列 path 经
