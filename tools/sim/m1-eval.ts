@@ -166,6 +166,12 @@ async function main(): Promise<void> {
   }
   const weightsDir = arg('weights-dir')
   const intentWeights = arg('intent-weights')
+  if (policy === 'hier-option' && !intentWeights) {
+    process.stderr.write(
+      '[m1-eval] --policy hier-option 需要 --intent-weights（option 线 6 维权重）\n',
+    )
+    process.exit(2)
+  }
   const goalWeights = arg('goal-weights')
   const promiseTicks = parseInt(arg('promise', '0')!, 10) // goal 承诺期 T（0 = 默认 240）
   const replan = parseInt(arg('replan', '0')!, 10) // M7① cadence 扫描（0 = 策略默认）
@@ -203,10 +209,15 @@ async function main(): Promise<void> {
   const nnWeightsPath = policy === 'nn' ? resolveNnWeights(weightsDir, process.cwd()) : null
   // P′-1：权重指纹 + wver 的权重字节。此前 nn 的 wver 是 `local-nn`（不读权重字节），
   // 换权重后续跑会命中旧账本 ⇒ 静默跑错版本。报告必列 weightsSha（P′-1 口径）。
+  // P′-4a：hier-option 也带权重文件（6 维 option 线），报告必列同一份指纹。
   const nnWeightsBytes = policy === 'nn' && nnWeightsPath ? readFileSync(nnWeightsPath) : null
+  const optionWeightsBytes =
+    policy === 'hier-option' && intentWeights ? readFileSync(intentWeights) : null
   const weightsSha = nnWeightsBytes
     ? new Bun.CryptoHasher('sha256').update(nnWeightsBytes).digest('hex')
-    : null
+    : optionWeightsBytes
+      ? new Bun.CryptoHasher('sha256').update(optionWeightsBytes).digest('hex')
+      : null
   const physical = physicalCores()
   const fixedWorkers = parseInt(arg('fixed-workers', '0')!, 10) // 0 = 自适应并发（默认）
   const workers =
@@ -324,6 +335,7 @@ async function main(): Promise<void> {
   if (nnWeightsBytes) wverBytes = nnWeightsBytes
   else if (policy === 'goal' && goalWeights) wverBytes = readFileSync(goalWeights)
   else if (policy === 'intent-exec' && intentWeights) wverBytes = readFileSync(intentWeights)
+  else if (policy === 'hier-option' && intentWeights) wverBytes = readFileSync(intentWeights)
   else if (policy === 'intent-search')
     // P′-2a-B：搜索参数进 wver —— 不同 H/every 不得共用账本（无权重策略同样如此）。
     wverBytes = Buffer.from(JSON.stringify({ policy, h: searchHorizon, every: searchEvery }))
@@ -526,7 +538,7 @@ async function main(): Promise<void> {
   const weightsArg =
     policy === 'goal'
       ? (goalWeights ?? '')
-      : policy === 'intent-exec'
+      : policy === 'intent-exec' || policy === 'hier-option'
         ? (intentWeights ?? '')
         : policy === 'nn'
           ? (nnWeightsPath ?? '')
@@ -730,7 +742,11 @@ async function main(): Promise<void> {
     // P′-1：报告自描述（口径与版本必须随读数走）。
     codeHash: computeCodeHash(),
     weightsSha,
-    weightsFile: nnWeightsPath ? resolve(nnWeightsPath) : null,
+    weightsFile: nnWeightsPath
+      ? resolve(nnWeightsPath)
+      : policy === 'hier-option' && intentWeights
+        ? resolve(intentWeights)
+        : null,
     playerLevel: playerLevel ?? null,
     openingConnect: false, // m1-eval 不套 OpeningController（NN 的历史 39.7% 走训练评估链）
     dodge: policy === 'nn' ? 'none' : 'builtin',

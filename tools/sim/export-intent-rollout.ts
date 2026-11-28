@@ -2,16 +2,21 @@
  * export-intent-rollout.ts — M8 意图 RL on-policy rollout collector（意图步 semi-MDP）。
  *
  * 与 export-rl-rollout.ts（per-tick move/fire）相对，本采集器按 **意图步** 记录：
- *   决策只在 replan tick（默认 replanEvery=30）发生；动作 = 采样的意图（8 类，
- *   ESCAPE 依死类掩码剔除）；窗口内意图冻结（IntentExecutor rlPick → God-AI 白名单
- *   子链共享委托）；奖励按窗口累计（intent-rl-reward.ts：击杀/清砖/拾取/阵亡/基地墙损
- *   + potential shaping + 无产出切换成本 + 终局）。
+ *   决策只在 replan tick（默认 replanEvery=30）发生；动作 = 采样的意图窗口动作；
+ *   窗口内动作冻结（IntentExecutor / HierOptionExecutor 的 God-AI 子链共享委托）；
+ *   奖励按窗口累计（intent-rl-reward.ts：击杀/清砖/拾取/阵亡/基地墙损 + potential
+ *   shaping + 无产出切换成本 + 终局）。
+ *
+ * P′-4a：动作维由**权重的 `arch.intentDim`** 决定（单一来源）：
+ *   8 = legacy intent 线（IntentExecutor，ESCAPE 死类掩码）；
+ *   6 = option 联合槽线（HierOptionExecutor，HOLD_break 掩码，target 走执行器规则）。
+ *   两种档位共用同一 shard 字段集（`inject` 宽 = actDim+1，`mask` 宽 = actDim）。
  *
  * 输出 shards（每局一个目录，npy + manifest；行宽 SSOT = 编码器常量
  * OBS_CHANNELS/BOARD/SCALAR_DIM，加/减通道只改编码器，禁止回字面量）：
- *   obs (N,C,H,W) u1 | scalars (N,S) f4 | inject (N,9) f4（prev one-hot 8 + duration）
+ *   obs (N,C,H,W) u1 | scalars (N,S) f4 | inject (N,actDim+1) f4（prev one-hot + duration）
  *   a_intent (N,) u1 | lp_intent (N,) f4 | value (N,) f4 | reward (N,) f4
- *   done (N,) u1 | mask (N,8) u1（死类掩码）| dt (N,) u2（窗口时长 tick，GAE 变步长 γ）
+ *   done (N,) u1 | mask (N,actDim) u1（死类/非法槽掩码）| dt (N,) u2（窗口时长 tick，GAE 变步长 γ）
  * ——ppo_intent.py 消费（γ_step = γ_tick^Δt）。
  *
  * 确定性：采样 RNG = mulberry32(seed ^ 0x85ebca6b)（与 export-rl-rollout 同族，独立于
@@ -23,6 +28,7 @@
  */
 import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
+import { decodeStageGrid } from '../../src/nn/config-stage'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { STAGES } from '../../src/config/stages'
@@ -30,6 +36,13 @@ import { START_LIVES, BASE_POS } from '../../src/constants'
 import { OBS_SCHEMA_MAJOR, OBS_CHANNELS, BOARD, SCALAR_DIM } from '../../src/nn/obs-encoder'
 import { buildIntentModelFromText, type IntentModelLike } from '../../src/nn/infer'
 import { IntentExecutor } from '../../src/nn/intent-executor'
+import { HierOptionExecutor } from '../../src/nn/hier-option-executor'
+import {
+  OPTION_DIM,
+  OPTION_SLOT_IDS,
+  OPTION_SLOT_MASK,
+  optionSlotShapingMult,
+} from '../../src/ai/intent/options'
 import { writeNpy } from '../../src/nn/npy'
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs'
 import { RNG } from '../../src/utils/RNG'
@@ -56,7 +69,7 @@ import type { RunTelemetry } from './simulation-runner'
 
 const MAX_TICKS = 36000
 const DEFAULT_REPLAN = 30
-const INTENT_DIM = INTENT_IDS.length // 8
+const INTENT_DIM = INTENT_IDS.length // 8（legacy intent 档）
 
 // 死类掩码：ESCAPE（idx 7）reflex-only，不参与采样/训练（与 IntentExecutor MASKED_INTENTS 一致）。
 const INTENT_MASK = [1, 1, 1, 1, 1, 1, 1, 0] as const
@@ -173,6 +186,9 @@ interface RunResult {
   win: boolean
   kills: number
   intentCounts: number[]
+  /** 动作维 = 权重的 `arch.intentDim`（8 = legacy intent；6 = P′-4a option 线）。 */
+  actDim: number
+  optionLine: boolean
   /** v7 godai-score 诊断（HTML 报告 score_mean/baseIntegrity/击杀数；reward 另用意图窗口）。 */
   score: number
   dims: Record<string, { value: number | null; raw: number }>
@@ -200,6 +216,7 @@ export function runOne(
   maxTicks: number,
   weightsText: string,
   replanEvery: number,
+  customStage = false,
 ): RunResult {
   const world = new World()
   world.rng.reseed(seed)
@@ -210,6 +227,15 @@ export function runOne(
   world.lives = world.difficulty?.startLives ?? START_LIVES
 
   const model: IntentModelLike = buildIntentModelFromText(weightsText)
+  // P′-4a：动作维 = 权重 arch.intentDim 的单一来源（8 = legacy intent；6 = option 联合槽）。
+  const actDim = model.intentDim
+  const optionLine = actDim === OPTION_DIM
+  if (!optionLine && actDim !== INTENT_DIM) {
+    throw new Error(
+      `export-intent-rollout: 权重 intentDim=${actDim}（只认 ${INTENT_DIM} intent / ${OPTION_DIM} option）`,
+    )
+  }
+  const mask: readonly number[] = optionLine ? OPTION_SLOT_MASK : INTENT_MASK
   const shard = newShard()
   const rng = mulberry32((seed ^ 0x85ebca6b) >>> 0)
   const godRng = new RNG((seed ^ 0x9e3779b9) >>> 0)
@@ -226,10 +252,12 @@ export function runOne(
     if (!pending) return
     const dt = tick - windowStart
     const switched = !terminal && currentIntent !== prevIntent
-    // shaping 按本窗口意图加权（INTENT_SHAPING_MULT）：防守类窗口的守家梯度放大，
-    // 反制 HUNT 单点坍缩；dense 分量不加权（语义无区分是坍缩根因，见 reward 注释）。
+    // shaping 按本窗口动作加权（intent 8 类 / option 6 槽各自的表）：防守类窗口的
+    // 守家梯度放大，反制 HUNT 单点坍缩；dense 分量不加权（语义无区分是坍缩根因，
+    // 见 reward 注释）。
     pending.reward = settleWindow(
-      windowReward + windowShaping * shapingMult(prevIntent),
+      windowReward +
+        windowShaping * (optionLine ? optionSlotShapingMult(prevIntent) : shapingMult(prevIntent)),
       switched,
       windowOutput,
     )
@@ -247,7 +275,7 @@ export function runOne(
     tick: number,
   ): number => {
     model.intentForward(obs, scalars, inject)
-    const { idx, logp } = sampleCat(model.intentLogits, INTENT_MASK, rng)
+    const { idx, logp } = sampleCat(model.intentLogits, mask, rng)
     // 结算上一窗口（切换判定用新采样意图）。
     settle(idx, tick, false)
     // 记录新意图步。
@@ -270,16 +298,15 @@ export function runOne(
     return idx
   }
 
-  const executor = new IntentExecutor(world, {
-    rng: godRng,
-    rlPick,
-    replanEvery,
-    riskGated: false,
-  })
+  // P′-4a：option 线走 HierOptionExecutor（6 槽 + E2′ 注入），legacy 8 意图走 IntentExecutor。
+  const executor = optionLine
+    ? new HierOptionExecutor(world, { rng: godRng, rlPick, replanEvery })
+    : new IntentExecutor(world, { rng: godRng, rlPick, replanEvery, riskGated: false })
   const sim = new Simulation(world, executor as never)
-  world.loadStageData(stage as never, stageIdx)
+  // 自定义关（classic35，id 2000+）与 export-rl-rollout 同口径：World.stageIndex 记 0。
+  world.loadStageData(stage as never, customStage ? 0 : stageIdx)
 
-  const intentCounts = Array.from({ length: INTENT_DIM }, () => 0)
+  const intentCounts = Array.from({ length: actDim }, () => 0)
   let kills = 0
   let prevWalls = countBaseWall(world)
   const baseWallTotalInitial = prevWalls // 初始保护环格数（baseIntegrity 分母）
@@ -433,47 +460,56 @@ export function runOne(
     win: outcome === 'stage_clear',
     kills,
     intentCounts,
+    actDim,
+    optionLine,
     score: scored.score,
     dims,
   }
 }
 
-export function writeIntentShard(dir: string, d: ShardData, manifest: unknown): void {
+export function writeIntentShard(
+  dir: string,
+  d: ShardData,
+  manifest: unknown,
+  actDim: number = INTENT_DIM,
+): void {
   const N = d.n
   if (N === 0) return
   // 行宽 SSOT = 编码器常量（2026-09-14 x2-start it1 全灭回归同类）。
   const obs = new Uint8Array(N * OBS_CHANNELS * BOARD * BOARD)
   const scalars = new Float32Array(N * SCALAR_DIM)
-  const inject = new Float32Array(N * 9)
+  const injectDim = actDim + 1
+  const inject = new Float32Array(N * injectDim)
   const a = new Uint8Array(N)
   const lp = new Float32Array(N)
   const value = new Float32Array(N)
   const reward = new Float32Array(N)
   const done = new Uint8Array(N)
-  const mask = new Uint8Array(N * INTENT_DIM)
+  const mask = new Uint8Array(N * actDim)
   const dt = new Uint16Array(N)
+  const maskRow = actDim === INTENT_DIM ? INTENT_MASK : OPTION_SLOT_MASK
   for (let i = 0; i < N; i++) {
     const s = d.steps[i]
     obs.set(s.obs, i * OBS_CHANNELS * BOARD * BOARD)
     scalars.set(s.scalars, i * SCALAR_DIM)
-    inject.set(s.inject, i * 9)
+    inject.set(s.inject, i * injectDim)
     a[i] = s.a
     lp[i] = s.lp
     value[i] = s.value
     reward[i] = s.reward
     done[i] = s.done
-    for (let j = 0; j < INTENT_DIM; j++) mask[i * INTENT_DIM + j] = INTENT_MASK[j]
+    for (let j = 0; j < actDim; j++) mask[i * actDim + j] = maskRow[j]
     dt[i] = s.dt
   }
   writeNpy(`${dir}/obs.npy`, obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1')
   writeNpy(`${dir}/scalars.npy`, scalars, [N, SCALAR_DIM], 'f4')
-  writeNpy(`${dir}/inject.npy`, inject, [N, 9], 'f4')
+  writeNpy(`${dir}/inject.npy`, inject, [N, injectDim], 'f4')
   writeNpy(`${dir}/a_intent.npy`, a, [N], 'u1')
   writeNpy(`${dir}/lp_intent.npy`, lp, [N], 'f4')
   writeNpy(`${dir}/value.npy`, value, [N], 'f4')
   writeNpy(`${dir}/reward.npy`, reward, [N], 'f4')
   writeNpy(`${dir}/done.npy`, done, [N], 'u1')
-  writeNpy(`${dir}/mask.npy`, mask, [N, INTENT_DIM], 'u1')
+  writeNpy(`${dir}/mask.npy`, mask, [N, actDim], 'u1')
   writeNpy(`${dir}/dt.npy`, dt, [N], 'u2')
   writeFileSync(`${dir}/manifest.json`, JSON.stringify(manifest, null, 2))
 }
@@ -502,6 +538,10 @@ export function main(argv: string[] = process.argv.slice(2)): void {
   let wver = ''
   let nodeLabel = ''
   let packPath = ''
+  // M1d：课程自定义关（classic35，id 2000+）；意图线此前只跑内置关，P′-4a 起必须支持。
+  let stageJson = ''
+  let courseFp = ''
+  let corpusFp = ''
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--out') outDir = args[++i]
     else if (args[i] === '--difficulty') difficulty = args[++i]
@@ -513,6 +553,9 @@ export function main(argv: string[] = process.argv.slice(2)): void {
     else if (args[i] === '--wver') wver = args[++i]
     else if (args[i] === '--node-label') nodeLabel = args[++i]
     else if (args[i] === '--pack') packPath = args[++i]
+    else if (args[i] === '--stage-json') stageJson = args[++i]
+    else if (args[i] === '--course-fp') courseFp = args[++i]
+    else if (args[i] === '--corpus-fp') corpusFp = args[++i]
   }
   const stages = parseRange(stagesStr)
   const seeds = parseRange(seedsStr)
@@ -524,23 +567,35 @@ export function main(argv: string[] = process.argv.slice(2)): void {
   let totalTicks = 0
   let wins = 0
   let totalKills = 0
-  const intentAcc = Array.from({ length: INTENT_DIM }, () => 0)
+  // 动作维由首个 run 的权重 arch.intentDim 决定（全部 run 共用同一 weights 文件）。
+  let actDim = 0
+  let optionLine = false
+  const intentAcc: number[] = []
   const perGame: string[] = []
   const scoreList: number[] = []
   const dimAcc: Record<string, number[]> = {}
 
   for (const si of stages) {
-    const stage = STAGES[si]
-    if (!stage) {
+    const baseStage = STAGES[si]
+    if (!stageJson && !baseStage) {
       perGame.push(`[SKIP] stage ${si}: not found`)
       continue
     }
     for (const seed of seeds) {
-      const res = runOne(si, stage, seed, difficulty, maxTicks, weightsText, replan)
+      // 守卫①（同 export-rl-rollout）：--stage-json 时先解码自定义关，短路 STAGES 解析。
+      const stage = stageJson ? decodeStageGrid(stageJson, si, seed) : baseStage!
+      const res = runOne(si, stage, seed, difficulty, maxTicks, weightsText, replan, !!stageJson)
+      if (actDim === 0) {
+        actDim = res.actDim
+        optionLine = res.optionLine
+        for (let j = 0; j < actDim; j++) intentAcc.push(0)
+      } else if (res.actDim !== actDim) {
+        throw new Error(`export-intent-rollout: 动作维混用 ${actDim} vs ${res.actDim}`)
+      }
       outcomes[res.outcome] = (outcomes[res.outcome] ?? 0) + 1
       if (res.win) wins++
       totalKills += res.kills
-      for (let j = 0; j < INTENT_DIM; j++) intentAcc[j] += res.intentCounts[j]
+      for (let j = 0; j < actDim; j++) intentAcc[j] += res.intentCounts[j]
       scoreList.push(res.score)
       for (const [k, v] of Object.entries(res.dims)) {
         if (v.value !== null) (dimAcc[k] ??= []).push(v.value)
@@ -549,7 +604,9 @@ export function main(argv: string[] = process.argv.slice(2)): void {
       const manifest = {
         schemaMajor: OBS_SCHEMA_MAJOR,
         collector: 'INTENT-RL',
-        policy: 'intent-exec-rl',
+        policy: optionLine ? 'hier-option-rl' : 'intent-exec-rl',
+        vocab: optionLine ? 'option6' : 'intent8',
+        actionDim: actDim,
         rewardScheme: 'intent-window-v1',
         difficulty,
         stage: si,
@@ -564,9 +621,13 @@ export function main(argv: string[] = process.argv.slice(2)): void {
         // v7 诊断（HTML 报告 baseIntegrity 等读取）。
         score: res.score,
         dims: res.dims,
+        // M1d / D14：自定义关标记与语料血缘（PPO 远端装载校验用；自定义关会话级）。
+        ...(stageJson ? { customStages: '1' } : {}),
+        ...(courseFp ? { course_fp: courseFp } : {}),
+        ...(corpusFp ? { corpus_fp: corpusFp } : {}),
         ...(wver ? { wver, node: nodeLabel } : {}),
       }
-      if (res.shard.n > 0) writeIntentShard(`${outDir}/${shardName}`, res.shard, manifest)
+      if (res.shard.n > 0) writeIntentShard(`${outDir}/${shardName}`, res.shard, manifest, actDim)
       totalSamples += res.shard.n
       totalTicks += res.ticks
       perGame.push(
@@ -589,6 +650,9 @@ export function main(argv: string[] = process.argv.slice(2)): void {
     dimMeans[k] = +(xs.reduce((a, b) => a + b, 0) / xs.length).toFixed(4)
   const summary = {
     collector: 'INTENT-RL',
+    policy: optionLine ? 'hier-option-rl' : 'intent-exec-rl',
+    vocab: optionLine ? 'option6' : 'intent8',
+    actionDim: actDim,
     rewardScheme: 'intent-window-v1',
     difficulty,
     stages,
@@ -616,7 +680,8 @@ export function main(argv: string[] = process.argv.slice(2)): void {
   console.log(`\n=== INTENT-RL on-policy rollout (intent-window-v1) ===`)
   console.log(`games=${total} winRate=${winRate.toFixed(4)} outcomes=${JSON.stringify(outcomes)}`)
   console.log(`totalSamples=${totalSamples} totalTicks=${totalTicks} totalKills=${totalKills}`)
-  console.log(`intentDist=${INTENT_IDS.map((id, i) => `${id}=${intentAcc[i]}`).join(' ')}`)
+  const actionIds: readonly string[] = optionLine ? OPTION_SLOT_IDS : INTENT_IDS
+  console.log(`intentDist=${actionIds.map((id, i) => `${id}=${intentAcc[i] ?? 0}`).join(' ')}`)
   console.log(`shards under: ${outDir}  (consume with ppo_intent.py)`)
   writeFileSync(`${outDir}/_rl_report.json`, JSON.stringify(summary, null, 2))
 
