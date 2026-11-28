@@ -1,63 +1,48 @@
-"""loop_volume —— **动态采集（按样本量）编排** mixin（2026-09-25 从 trainer/loop_core.py 拆出，S4 第十八刀）。
+"""loop_volume —— 动态采集（按样本量）编排：协作对象 `VolumePlanner` + 宿主协议 `VolumeHost`
+（P0-1 第五刀，2026-11-28；前身是 S4 第十八刀的 `TrainingVolume` 混入）。
 
-这一簇是 `TrainingLoop` 里**唯一一条真正的方法间调用链**：12 个成员 / 445 行（占原模块 32%），
-其余方法都是被主循环各自调用的叶子。链的形状 = **入口（轮内预排表）→ 关集/估计解算 →
-逐关补波或连续配额派发 → 报告合并**（v2 起生产路径是 `_volume_collect_continuous`，
-`_volume_topup` 的 wave 规则只留给旧 e2e 与 `--collect-only` 之外的历史路径）：
+这一簇是回合里唯一一条真正的方法间调用链：**入口（轮内预排表）→ 关集/估计解算 →
+逐关补波或连续配额派发 → 报告合并 → WAL**（v2 起生产路径是 `volume_collect_continuous`；
+`volume_topup` 的 wave 规则只留给旧 e2e / 单测）：
 
 ```
-_iteration_pairs ─────┬─► _volume_active
-（轮内预排表入口）      ├─► _volume_est_samples ─┐
-                       └─► _volume_stages ──────┼─► _volume_stage_ests_map ─┐
-                                               │                           │
-_volume_topup ─┬─► _volume_journal_replay      │                           ├─► _dispatch_volume_wave
-（wave 规则）  └─► _volume_active ──────────────┘                           │
-_volume_collect_continuous（VOLUME_RULE_V2 生产路径）──► _dispatch_volume_wave
+iteration_pairs ──────┬─► volume_active
+（轮内预排表入口）     ├─► volume_est_samples ─┐
+                      └─► volume_stages ──────┼─► volume_stage_ests_map ─┐
+                                              │                          │
+volume_topup ─┬─► volume_journal_replay       │                          ├─► dispatch_volume_wave
+（wave 规则）  └─► volume_active ──────────────┘                          │
+volume_collect_continuous（生产路径）──► dispatch_volume_wave ────────────┘
+volume_collect_greedy（结果配额）──► greedy_scan / greedy_budget / greedy_wave_pairs / greedy_settle
 ```
 
-## 依赖方向：调用者依赖被调用者
+## 形状：状态归对象，宿主只给读面
 
-`trainer/loop_round_steps.py` 里是 `class RoundSteps(TrainingVolume)` —— 本簇的**生产入口全部**在
-`RoundSteps`：`step_course_iter` 调 `_iteration_pairs`，`step_rollout` 调 `_volume_active` /
-`_volume_collect_continuous`。与 S4 第二步（`class TrainingSteps(TrainingRemote)`）同源的规则：
-**调用者依赖被调用者** ⇒ 本簇当基类。
+15 个槽位只在 `VolumePlanner.__init__` 赋值；宿主经 `VolumeHost` 协议提供**活读数**
+（`report` / `stream_meta` / `traj_dir` / `rotate_seed` … 全是 property，不拷副本），写面只有
+`land_collect` / `commit_journal`。组合根 `TrainingLoop` 保留旧方法名的一行转发壳，
+所以既有调用点与 patch 点零改动；装配在 `TrainingLoop.__init__` 的一行。
 
-（`_volume_topup` 的**离散补波**规则自 2026-09-19 VOLUME_RULE_V2 起已退役：生产路径全部走
-`_volume_collect_continuous`，`step_volume_topup` 只是 `STEP_ORDER` 要求的**保留空步**，已经不调
-本簇任何方法。它仍留在此处，因为既有 e2e（`e2e/test_volume_e2e.py`）与单测
-（`tests/worker/test_rollout_volume.py`）以 unbound 形式直接驱动它，而 `volume_waves` 的纯逻辑是那条
-规则的可复算实现。）
+外簇（`loop_steps` / `loop_round_steps` / `loop_remote_job` …）只能经只读视图
+（`volume_view` / `greedy_view`）读、经三个命令（`reset_greedy` / `reset_ordinary_seeds` /
+`merge_greedy`）写——私有槽位不是公共 API。
 
-为什么不「给 `TrainingLoop` 加一个基类」：那要改组合类 + 四个「继承真混入」的测试宿主，并让
-`tests/trainer/test_loop_eval_split.py` 里「组合类三件套不变」那句失守。走 `RoundSteps` 这一侧，
-`TrainingLoop.__bases__ == (RoundSteps, TrainingSteps, TrainingGuards)` 与全部既有守卫**一行不改**
-（本刀零守卫改动，只有一处 patch 目标迁移，见下）。
+## ⚠ DI seam：`log` 是**本模块**的注入点
 
-## 状态归属：八个 volume 槽位随簇搬来（声明在 `TrainingVolume`）
+同名 seam 在两个命名空间里是两个各自真实的注入点：往 `trainer.loop_core.log` 打补丁对这里
+是**静默空操作**（S4 第二步的教训）。`build_pairs` / `combine_reports` /
+`dispatch_rollout_phase` / `settled_stage_totals` / `trailing_samples_per_game` 同理随簇住在
+本模块；`common.distribution` / `worker.volume_waves` / `worker.volume_quota` / `worker.resume`
+只在**方法体内**延迟 import（原有的 DI 面，测试 patch 的一直是实现模块）。
 
-`_volume_target` / `_volume_collected` / `_volume_waves` / `_volume_g0` / `_volume_est` /
-`_volume_capped` / `_volume_stage_ests` / `_volume_stage_stats`：只被这一簇读写。
-`TrainingLoop.__init__` 仍负责**赋值**
-（它持有全部跨轮字段），本模块提供**声明**——混入的状态契约必须在每个文件里对 mypy 可见。
 
-## ⚠ DI seam：`log` 是本模块**自己的**注入点（本刀唯一要迁的 patch 目标）
-
-`_volume_topup` 的「未达标 / 触单关局数硬顶」等日志按**模块全局**解析 ⇒ 原先
-`monkeypatch.setattr(trainer.loop_core, "log", …)`（`e2e/test_volume_e2e.py`）在搬家后**打不中**
-（假绿：断言「未达标清单进日志」会当场红，但只补 `trainer.loop_core` 的写法是静默空操作）——
-同名 seam 在两个命名空间里是两个各自真实的注入点，这是 S4 第二步的教训，已同步改到本模块。
-`build_pairs` / `combine_reports` / `dispatch_rollout_phase` / `settled_stage_totals` /
-`trailing_samples_per_game` 同理随簇搬来；`common.distribution` / `biz.volume_waves` / `biz.volume_quota` /
-`biz.resume` 本来就只在**方法体内**延迟 import（逐字保留：它们是原有的 DI 面，测试 patch 的一直是
-实现模块——`common.distribution` 是模块对象，补在哪个命名空间都算命中，所以顶层无需再导一次）。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from biz.course import build_pairs
 from common.log import log
@@ -68,6 +53,12 @@ from trainer.rollout_phase import (
 )
 from worker.reports import combine_reports
 from worker.resume import settled_stage_totals, trailing_samples_per_game
+from worker.volume_wave_plan import (
+    ContinuousState,
+    learned_samples_per_game,
+    plan_continuous_wave,
+    remember_first_est,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,22 +100,6 @@ class GreedyView:
     waves: int
 
 
-def _learned_samples_per_game(samples: int, games: int) -> int:
-    """**本轮自己**已结算的局 → 局均 samples（自校准；`0` = 还学不到/不可用）。
-
-    为什么需要它（plan/rollout-estfree-worksteal §4.1）：est 已从课程/CLI 面退场，首轮连
-    历史都没有 ⇒ 第一小批只能「不猜」（按宽度满铺），而**这一批本身就是最好的标定源**：
-    下一批起 `collected/games` 就是盘上事实，不需要任何估计。
-
-    口径与 `worker.resume.trailing_samples_per_game` 同：只认已结算 shard 的 `nSamples`
-    与**占过名额的局数**（掉局零样本 ⇒ samples=0 ⇒ 返回 0，让调用方继续「不猜」而不是
-    拿一个被瞬时掉局拖低的数去反解局数）。纯函数，无 IO。
-    """
-    g = int(games)
-    s = int(samples)
-    return max(1, round(s / g)) if g > 0 and s > 0 else 0
-
-
 def _greedy_collected(
     manifests: dict, stages: list[int]
 ) -> tuple[dict[int, int], dict[int, int]]:
@@ -159,7 +134,7 @@ def _greedy_plan_games(
     from worker.volume_alloc import pool_games_by_stage, spread_games_by_stage
 
     learned = {
-        s: _learned_samples_per_game(collected.get(s, 0), games.get(s, 0)) for s in stages
+        s: learned_samples_per_game(collected.get(s, 0), games.get(s, 0)) for s in stages
     }
     has_est = bool(est_global) or any(int(est_s.get(s, 0) or 0) > 0 for s in stages)
     if any(learned.values()) or has_est:
@@ -192,143 +167,6 @@ def _greedy_plan_games(
     )
 
 
-@dataclass
-class _Continuous:
-    """连续配额一轮的常量快照（循环段与收官段共用；不再靠 20+ 个局部量）。"""
-
-    stages: list[int]
-    target: int
-    quota: int
-    max_batches: int
-    width: int
-    game_cap: int
-    stage_caps: dict[int, int]
-    course_fp: str
-    corpus_fp: str
-    extra_wver: str
-    est_global: int
-    est_s: dict[int, int]
-    start_idx: dict[int, int]
-    first_est_used: dict[int, int]
-    first_est_raw: dict[int, int]
-    first_est_src: dict[int, str]
-
-
-@dataclass(frozen=True, slots=True)
-class _WavePlan:
-    """一波连续采集的派发表与读数（派发前一次算清，循环只消费）。"""
-
-    games: dict[int, int]
-    dispatch_est: dict[int, int]
-    raw_est: dict[int, int]
-    src: str
-    src_by_stage: dict[int, str]
-    shortfall: dict[int, int]
-    pool_note: str
-    capped: bool
-
-
-def _plan_continuous_wave(
-    state: _Continuous,
-    collected: dict[int, int],
-    games_done: dict[int, int],
-    pool_mult: float,
-) -> _WavePlan:
-    """按盘上账本算下一波：est → 候选池（或冷启动满铺）→ 派发表。"""
-    from worker.volume_alloc import (
-        pick_stage_est,
-        pool_games_by_stage,
-        pull_est_low,
-        spread_games_by_stage,
-    )
-
-    # 局均估计（plan/rollout-estfree-worksteal §4.1）：① **本轮自己**已结算的局
-    # （自校准 — 冷启动第一小批之后就有值了）；② 前几轮的**盘上历史**（est_s，最近一轮）。
-    # 顺序不能反（plan/rollout-corpus-supply §1.3/§3.1 A0-a）：旧代码是
-    # `trailing or learned`，而 trailing 永远有值 ⇒ 自校准**恒被短路**，est 一直跟着
-    # 历史窗口走（652 vs 实际 530，+23% ⇒ 少派局 ⇒ 多补一批）。
-    # 两者都拿不到（首轮第一小批）⇒ **不猜**：按宽度满铺一把（est-free），下一批起重校准。
-    est_s_now: dict[int, int] = {}
-    est_src_now: dict[int, str] = {}
-    for s in state.stages:
-        est_s_now[s], est_src_now[s] = pick_stage_est(
-            _learned_samples_per_game(collected.get(s, 0), games_done.get(s, 0)),
-            int(state.est_s.get(s, 0) or 0),
-        )
-    est_now = int(state.est_global or 0) or _learned_samples_per_game(
-        sum(collected.values()), sum(games_done.values())
-    )
-    # 派局用的 est 往低处拉（A0-c）：`ceil(缺口/est)` 因此多派 ~8% 局，把「局长继续变短」
-    # 的趋势误差吃掉一部分。只动派局，**不动硬顶**（`stage_caps` 仍由原 est 算）。
-    est_dispatch = {s: pull_est_low(v) for s, v in est_s_now.items()}
-    est_srcs = set(est_src_now.values())
-    est_src = next(iter(est_srcs)) if len(est_srcs) == 1 else "mixed"
-    shortfall = {
-        s: state.quota - int(collected.get(s, 0))
-        for s in state.stages
-        if int(collected.get(s, 0)) < state.quota
-    }
-    if est_now > 0:
-        # ★ 2026-10-21（用户口径）：派的是**候选池**，不是"刚好够的局数"。
-        #   池 = 缺口 × mult（默认 2）⇒ 队列里一直有活 ⇒ 每个槽从 t=0 起就满负荷；
-        #   结算一局就补一局（`on_result` 实时更新 `live`），逐关一满额就 `halt`，
-        #   池里剩下的候选**从不运行**。墙钟由「配额达成时刻」决定，与池多大无关，
-        #   因此 est 的 ±40% 跳变不再换来「第二批」。
-        games = pool_games_by_stage(
-            stages=state.stages,
-            collected=collected,
-            games_done=games_done,
-            target_transitions=state.target,
-            ests=est_dispatch,
-            game_caps=state.stage_caps,
-            width=0,  # 池远大于槽位 ⇒ 不需要（也没法）知道集群有几个槽
-            mult=pool_mult,
-        )
-        pool_note = f"池 {sum(games.values())} 局（×{pool_mult}）"
-        capped = False
-    else:
-        # 无估计（首轮无历史）⇒ 「不猜」档：与云机补差**同一个** est-free 原语满铺。
-        games = spread_games_by_stage(
-            stages=state.stages,
-            collected=collected,
-            games_done=games_done,
-            target_transitions=state.target,
-            game_caps=state.stage_caps,
-            width=state.width,
-        )
-        capped = False
-        est_src = "cold-start"
-        est_src_now = {s: "cold-start" for s in state.stages}
-        pool_note = f"池 {sum(games.values())} 局（冷启动按宽度 {state.width} 铺）"
-    return _WavePlan(
-        games=games,
-        dispatch_est=est_dispatch,
-        raw_est=est_s_now,
-        src=est_src,
-        src_by_stage=est_src_now,
-        shortfall=shortfall,
-        pool_note=pool_note,
-        capped=capped,
-    )
-
-
-def _remember_first_est(state: _Continuous, plan: _WavePlan) -> None:
-    """记首波读数：批数由首波决定，记末波的 est 等于「事后诸葛亮」。"""
-    if state.first_est_used:
-        return
-    # 冷启动档（无 learned、无 trailing）根本不是「用了某个估计」：那批是
-    # `spread_games_by_stage(width)` 按机器宽度铺的。记 `-1` 而不是 `0`
-    # （0 在下游是「无估计」的值，会和「估出来是 0」混成一件事）。
-    cold = all(v == "cold-start" for v in plan.src_by_stage.values())
-    state.first_est_used = {
-        s: (-1 if cold else int(plan.dispatch_est.get(s, 0))) for s in state.stages
-    }
-    state.first_est_raw = {
-        s: (-1 if cold else int(plan.raw_est.get(s, 0))) for s in state.stages
-    }
-    state.first_est_src = dict(plan.src_by_stage)
-
-
 @dataclass(frozen=True)
 class _GreedyTargets:
     """greedy 计划的**只读标量面**：读数与硬目标判据要的那五个数。"""
@@ -355,73 +193,92 @@ class _GreedyBudget:
     ordinary: set[tuple[int, int]]
 
 
-class TrainingVolume:
-    """动态采集（按样本量）编排 mixin：初波/补波/连续配额 → 派发 → 报告合并 → WAL。
+class VolumeHost(Protocol):
+    """`VolumePlanner` 需要的宿主面（活读数走 property；写面只有 `land_collect` / `commit_journal`）。"""
 
-    被 `RoundSteps` 继承（调用者依赖被调用者）；只有组合类 `TrainingLoop` 会被实例化。
-    """
-
-    # 依赖的 TrainingLoop 实例属性（声明类型供 mypy/阅读；实际赋值在 TrainingLoop /
-    # TrainingSteps）。与其它混入里的同类声明**有意并存**：混入的状态契约必须在**每个**
-    # 文件里对 mypy 可见，否则本文件里的 `self._report` 会被判成未声明属性。用 `Any`
-    # 而不是精确类型：同一名字在 `TrainingSteps` / `RoundSteps` 里已各有声明，精确类型
-    # 反而会撞成「多继承定义不兼容」（`Any` 与任何类型相容）。
     args: Any
     bun: Any
     ppo_backend: Any
     update_kwargs: Any
-    _model: Any
-    _opt: Any
-    _device: Any
-    _ref_model: Any
-    _start_it: Any
-    _traj_root: Any
-    _traj_dir: Any
-    _jsonl_path: Any
-    _rotate_seed: Any
-    _course_fp: Any
-    _corpus_fp: Any
-    _state_init: Any
-    _extra_wver: Any
-    _report: Any
-    _stream_meta: Any
-    #: 采集报告的**唯一写面**（组合根上的具名入口，P0-1 第五刀前置步）：本簇不再直接给
-    #: `self._report` 赋值（读仍走声明块；写一律经这里，宿主负责落位）。
-    land_collect: Callable[..., None]
-    #: 由 `TrainingSteps` 提供、在本模块里被**调用**的 WAL 句柄（组合实例上动态解析）。
-    #: 声明为 `Any` 的理由同 `trainer/loop_remote_push.py`：混入间互调的方法必须在每个文件里类型可见。
-    _commit_journal: Any
 
-    # ---- 本簇自己的状态（S4 第十八刀随簇搬来；只被这一簇读写）----------------------
-    #: 动态采集（plan/dynamic-rollout-volume）：None = 本轮课程未开该模式。
-    #: 零落盘（plan/payload-zero-disk）：本轮 shard 段账（`ShardSegments`，组合根建）。
-    #: 补波与首波共用同一份——`begin` 对同一 it 重入无副作用。
-    _payload_parts: Any
-    _volume_target: int | None
-    _volume_collected: int | None
-    #: 本轮已跑的波次/批次数（初波 = 1）与初波每关局数（硬顶默认值依赖后者）。
-    _volume_waves: int
-    _volume_g0: int
-    #: 局均 samples 估计（`_volume_est_samples` 的结果，循环里复用）。
-    _volume_est: int
-    _volume_capped: bool
-    #: 2026-10-21：逐关配额全部达成 ⇒ 已熔断（`halt_event`）；池里剩下的候选**没有派出去**。
-    _volume_halted: bool
-    #: 分关 est_s（`_volume_stage_ests_map` 的结果，循环里复用）。
-    _volume_stage_ests: dict[int, int] | None
-    #: 分关采集账（规则版本 + 分关 collected/games/est_s/cap_games + 缺口）——收官后写，
-    #: `TrainingSteps._record_iteration` 读进 iteration 事件。None = 本轮不在连续配额链。
-    #: 这里必须**显式**声明：只在方法体里赋值会让 mypy 把类型推成 `dict[str, Any]`，
-    #: 与 `TrainingSteps` 一侧的 `dict | None` 冲突（`trainer/loop_core.py` 多继承合并报错）。
-    _volume_stage_stats: dict | None
-    #: greedy 结果配额（plan/greedy-outcome-quota rev4）：采集阶段写 plan/stats，
-    #: 发布阶段读 plan 做分层预筛。声明为 `Any`，与 `TrainingLoop.__init__` 的赋值相容。
-    _greedy_plan: Any
-    _greedy_stats: Any
-    _greedy_report: Any
-    _greedy_waves: int
-    #: 普通连续配额已派出的 (stage, seed)；greedy 阶段过滤掉它们。
-    _volume_ordinary_seeds: Any
+    @property
+    def model(self) -> object: ...
+
+    @property
+    def opt(self) -> object: ...
+
+    @property
+    def device(self) -> str: ...
+
+    @property
+    def ref_model(self) -> object: ...
+
+    @property
+    def start_it(self) -> int: ...
+
+    @property
+    def traj_root(self) -> Path: ...
+
+    @property
+    def traj_dir(self) -> Path: ...
+
+    @property
+    def jsonl_path(self) -> Path: ...
+
+    @property
+    def rotate_seed(self) -> int: ...
+
+    @property
+    def course_fp(self) -> str | None: ...
+
+    @property
+    def corpus_fp(self) -> str | None: ...
+
+    @property
+    def state_init(self) -> bool: ...
+
+    @property
+    def extra_wver(self) -> str | None: ...
+
+    @property
+    def payload_parts(self) -> Any: ...
+
+    @property
+    def report(self) -> dict: ...
+
+    @property
+    def stream_meta(self) -> dict | None: ...
+
+    def commit_journal(self) -> Any: ...
+
+    def land_collect(self, report: dict, stream_meta: dict | None = None) -> None: ...
+
+
+class VolumePlanner:
+    """动态采集（按样本量）编排 mixin：初波/补波/连续配额 → 派发 → 报告合并 → WAL。
+
+    状态与逻辑都在对象里；组合根只留一行转发壳，装配在 `TrainingLoop.__init__`。
+    外簇只能经只读视图（`volume_view` / `greedy_view`）或三个命令
+    （`reset_greedy` / `reset_ordinary_seeds` / `merge_greedy`）碰它。
+    """
+
+    def __init__(self, host: VolumeHost) -> None:
+        self._host = host
+        # ---- 本簇自己的状态（S4 第十八刀随簇搬来；P0-1 第五刀起归本对象）------------
+        self._volume_target: int | None = None
+        self._volume_collected: int | None = None
+        self._volume_waves = 0
+        self._volume_g0 = 0
+        self._volume_est = 0
+        self._volume_capped = False
+        self._volume_halted = False
+        self._volume_stage_ests: dict[int, int] | None = None
+        self._volume_stage_stats: dict | None = None
+        self._greedy_plan: Any = None
+        self._greedy_stats: dict | None = None
+        self._greedy_report: dict | None = None
+        self._greedy_waves = 0
+        self._volume_ordinary_seeds: set[tuple[int, int]] = set()
 
     # ------------------------------------------------- 观测面
     def volume_view(self) -> VolumeView:
@@ -431,7 +288,7 @@ class TrainingVolume:
         视图不给调用方一个可写句柄，也不替生产逻辑做决定。
         """
         return VolumeView(
-            report=self._report,
+            report=self._host.report,
             target=self._volume_target,
             collected=self._volume_collected,
             waves=int(self._volume_waves),
@@ -440,7 +297,7 @@ class TrainingVolume:
             capped=bool(self._volume_capped),
             halted=bool(self._volume_halted),
             stage_stats=self._volume_stage_stats,
-            rotation_seed=int(self._rotate_seed),
+            rotation_seed=int(self._host.rotate_seed),
             greedy_plan=self._greedy_plan,
             greedy_stats=self._greedy_stats,
             greedy_waves=int(self._greedy_waves),
@@ -456,13 +313,13 @@ class TrainingVolume:
         )
 
     # ------------------------------------------------- 零落盘（按轮）
-    def _round_mem_shards(self, it: int) -> dict[str, dict] | None:
+    def round_mem_shards(self, it: int) -> dict[str, dict] | None:
         """零落盘：本轮 dispatch 腿回传 shard 的内存 manifest（轮号不符 ⇒ `None`）。
 
         dispatch 腿的 shard **从不落盘**（`write_shard` 见到段账就只交字节）——补波的
         「本波已采多少」只能读这份账，否则 `settled_stage_totals` 恒 0 ⇒ 白烧到波次上限。
         """
-        parts = self._payload_parts
+        parts = self._host.payload_parts
         if int(getattr(parts, "it", -1)) != int(it):
             return None
         return parts.manifests() or None
@@ -476,11 +333,11 @@ class TrainingVolume:
     # v1 边界（计划 §3-P0/P1 明确）：只接串行路径；stream/double-buffer 保持老语义
     # （不再动它是为了让双缓冲那套墙钟优化不被这一版搅动）。
 
-    def _volume_active(self) -> bool:
+    def volume_active(self) -> bool:
         """本课程是否开了动态采集（`target_transitions > 0`；缺席 = 一个函数都不调）。"""
-        return int(getattr(self.args, "target_transitions", 0) or 0) > 0
+        return int(getattr(self._host.args, "target_transitions", 0) or 0) > 0
 
-    def _volume_stages(self, it: int) -> list[int]:
+    def volume_stages(self, it: int) -> list[int]:
         """本轮动态采集的关集（分关配额的分母）= `--stages` 的**本轮窗口**。
 
         ★ 2026-10-27（plan/it-stage-ratation §3.4，评审 A2）：允许**逐轮窗口**
@@ -493,7 +350,7 @@ class TrainingVolume:
         它们的「窗口」是逐轮扩关/epoch 重排，与本模块的采样窗口不是同一件事，硬凑等于
         同一轮两套关集。要轮换请用 `rotation_mode`（它会同时管住配额分母）。
         """
-        args = self.args
+        args = self._host.args
         if (
             str(getattr(args, "curriculum_stages", "") or "")
             or int(getattr(args, "rotate_stages", 0) or 0) > 0
@@ -531,12 +388,12 @@ class TrainingVolume:
 
         try:
             return window_from_args(
-                args, int(it), stages, rotate_seed=int(getattr(self, "_rotate_seed", 0) or 0)
+                args, int(it), stages, rotate_seed=int(self._host.rotate_seed)
             )
         except ValueError as exc:  # 未知 mode / pinned 不在 --stages / per_it 非法
             raise SystemExit(f"[volume] it{it}: rotation 配置非法（{exc}）") from exc
 
-    def _volume_est_samples(self) -> int:
+    def volume_est_samples(self) -> int:
         """局均 **samples** 估计：jsonl 的 trailing 均值（可 replay）；**无历史 ⇒ `0`（无估计）**。
 
         2026-10-12（plan/rollout-estfree-worksteal §4.1）：课程/CLI 的声明值已退场 —— est
@@ -547,24 +404,24 @@ class TrainingVolume:
         **不是 ticks**——后者差 K 倍（x3 实测 samples/ticks≈0.1007），会让第二轮起
         采量偏离 10×（旧 `trailing_ticks_per_game` 就是这条 bug 的一半）。
         """
-        return trailing_samples_per_game(self._jsonl_path, window=5)
+        return trailing_samples_per_game(self._host.jsonl_path, window=5)
 
-    def _iteration_pairs(self, it: int) -> list[tuple[int, int]]:
+    def iteration_pairs(self, it: int) -> list[tuple[int, int]]:
         """本轮对局表：动态采集串行路径**不预排初波**（连续配额实时派发）；其余 build_pairs。
 
         volume 仍返回按全局 est 均分的保守表——仅供 `rollout_src=node` / export_bundle
         等需要固定 pairs 的路径；串行 ` _volume_collect_continuous` **不用**这张表。
         """
-        if not self._volume_active():
+        if not self.volume_active():
             self._volume_target = None
             self._volume_collected = None
-            return build_pairs(self.args, it, self._rotate_seed)
+            return build_pairs(self._host.args, it, self._host.rotate_seed)
         from worker.volume_quota import target_per_stage
         from worker.volume_waves import initial_games, initial_wave_pairs
 
-        args = self.args
-        stages = self._volume_stages(it)
-        est = self._volume_est_samples()
+        args = self._host.args
+        stages = self.volume_stages(it)
+        est = self.volume_est_samples()
         target = int(args.target_transitions)
         g0 = initial_games(target, len(stages), est)
         self._volume_target = target
@@ -576,7 +433,7 @@ class TrainingVolume:
         self._volume_stage_stats = None  # 分关账：连续配额收官时写（不跑该链 ⇒ 留 None）
         # 每关 G0 局的初波前缀（= 连续配额流的前 G0 个 seed）。**与 `biz/plan.pairs_for`
         # 同一个函数**：云端重放的语料因此与本地集群同一轮的前缀批逐位相同（2026-09-22）。
-        pairs = initial_wave_pairs(self._rotate_seed, it, stages=stages, games_per_stage=g0)
+        pairs = initial_wave_pairs(self._host.rotate_seed, it, stages=stages, games_per_stage=g0)
         log(
             f"[volume] it{it}: continuous quota mode target={target} "
             f"stages={stages} per_stage={target_per_stage(target, len(stages))} est_global={est} "
@@ -584,7 +441,7 @@ class TrainingVolume:
         )
         return pairs
 
-    def _volume_stage_ests_map(self, it: int) -> dict[int, int]:
+    def volume_stage_ests_map(self, it: int) -> dict[int, int]:
         """分关 est_s：近轮盘上 shard 局均 nSamples，缺省回退全局 est。
 
         `it` = **正在跑的这一轮**：必须排除它。`step_prepare_iter` 在本轮开跑前就
@@ -597,14 +454,14 @@ class TrainingVolume:
         # ⚠ 关集**只**来自 `_volume_stages(it)`（= 本轮窗口）。2026-10-27 起删掉了下面那段
         #   「按 `--stages` 全集再解析一次」的旧代码：它会把窗口静默抹回全集，于是 est 按
         #   全集取、配额按窗口算 —— 正是要防的那类「同一轮两份反解」（评审 B4）。
-        stages = self._volume_stages(it)
-        fallback = int(self._volume_est or self._volume_est_samples() or 0)  # 0 = 无估计（首轮）
+        stages = self.volume_stages(it)
+        fallback = int(self._volume_est or self.volume_est_samples() or 0)  # 0 = 无估计（首轮）
         # `agg` 可选（`--est-agg`，2026-10-21 评审 #8）：latest = 最近一个真有 shard 的轮（缺省）；
         # pooled = 近 3 轮池化（旧口径）。两侧（本链 / `loop_export`）必须同值——不一致
         # 就是「同一轮两份反解」（云机拿到的 G_s 与本地派局不同源）。
-        agg = str(getattr(self.args, "est_agg", "latest") or "latest")
+        agg = str(getattr(self._host.args, "est_agg", "latest") or "latest")
         return trailing_stage_samples_per_game(
-            self._traj_root,
+            self._host.traj_root,
             stages,
             window_iters=3,
             fallback=fallback,
@@ -612,7 +469,7 @@ class TrainingVolume:
             exclude_it=int(it),
         )
 
-    def _dispatch_volume_wave(
+    def dispatch_volume_wave(
         self,
         it: int,
         pairs: list[tuple[int, int]],
@@ -636,37 +493,37 @@ class TrainingVolume:
         取新任务（池里没派出去的候选**从不运行**），在飞副本按既有 dedup 路径丢弃。
         """
         # 零落盘（plan/payload-zero-disk §3.2）：补波与首波记同一份段账（同一 it ⇒ 不清）。
-        begin_payload_parts(self.args, it, self._payload_parts)
+        begin_payload_parts(self._host.args, it, self._host.payload_parts)
         (report, stream_meta, _thread, _gate, _child, _early) = dispatch_rollout_phase(
             RolloutPhaseSpec(
-                args=self.args,
-                bun=self.bun,
+                args=self._host.args,
+                bun=self._host.bun,
                 dist_cfg=dist_cfg,
                 it=it,
-                traj_dir=self._traj_dir,
+                traj_dir=self._host.traj_dir,
                 pairs=pairs,
-                jsonl_path=self._jsonl_path,
-                model=self._model,
-                opt=self._opt,
-                device=self._device,
-                ppo_backend=self.ppo_backend,
-                update_kwargs=self.update_kwargs,
-                start_it=self._start_it,
-                ref_model=self._ref_model,
-                extra_wver=self._extra_wver,
+                jsonl_path=self._host.jsonl_path,
+                model=self._host.model,
+                opt=self._host.opt,
+                device=self._host.device,
+                ppo_backend=self._host.ppo_backend,
+                update_kwargs=self._host.update_kwargs,
+                start_it=self._host.start_it,
+                ref_model=self._host.ref_model,
+                extra_wver=self._host.extra_wver,
                 eval_on_round=False,
-                course_fp=self._course_fp,
-                corpus_fp=self._corpus_fp,
+                course_fp=self._host.course_fp,
+                corpus_fp=self._host.corpus_fp,
                 halt_event=halt_event,
                 on_result=on_result,
-                on_shard=self._payload_parts.add,
+                on_shard=self._host.payload_parts.add,
             )
         )
         if stream_meta is not None:
             raise SystemExit("[volume] 补波落到 stream 路径——v1 只支持串行路径")
         return report
 
-    def _volume_journal_replay(self, it: int) -> Any:
+    def volume_journal_replay(self, it: int) -> Any:
         """读 WAL：把本迭代的波次预算推到现在，并返回**未闭环**的那一波（待重放）。
 
         为何不能只靠账本重算（2026-09-15 e2e 证伪）：`wave_idx` 是**决策**而不是账本的
@@ -679,7 +536,7 @@ class TrainingVolume:
         """
         from worker.volume_waves import parse_wave_records
 
-        path = Path(self._traj_dir) / "commit_journal.jsonl"
+        path = Path(self._host.traj_dir) / "commit_journal.jsonl"
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
         except OSError:
@@ -691,7 +548,7 @@ class TrainingVolume:
         self._volume_waves = max(self._volume_waves, last.wave_idx + 1)
         return None if last.finished else last
 
-    def _volume_topup(self, it: int, dist_cfg: dict | None) -> None:
+    def volume_topup(self, it: int, dist_cfg: dict | None) -> None:
         """按已结算 transitions 逐关补波直到达标/触顶（计划 §2.2.3/2.2.4）。
 
         账本口径：`settled_stage_totals`（只数已落盘 manifest 的 nSamples）——掉局零
@@ -701,10 +558,10 @@ class TrainingVolume:
         而非账本的函数，它同时是种子流的键（首版「纯函数就够、无需重放」的假设已被
         e2e 证伪，见 `_volume_journal_replay`）。
         """
-        if not self._volume_active():
+        if not self.volume_active():
             return
-        args = self.args
-        if self._stream_meta is not None:
+        args = self._host.args
+        if self._host.stream_meta is not None:
             log("[volume] 流式路径 v1 不补波（保持老语义）——本轮只按初波结算，配额缺口不在本轮补齐")
             return
         if int(getattr(args, "collect_only", 0) or 0):
@@ -727,33 +584,33 @@ class TrainingVolume:
             wave_round_key,
         )
 
-        stages = self._volume_stages(it)
+        stages = self.volume_stages(it)
         est = self._volume_est
         cap = int(getattr(args, "max_games_per_stage", 0) or 0)
         target = int(args.target_transitions)
-        journal = self._commit_journal()
+        journal = self._host.commit_journal()
         collected_total = 0
         # 重启续跑：先重放 WAL 里那一波未完成的决策（同 wave_idx + 同对局表 ⇒ 同种子流；
         # 已结算的由调度器剔除），再按账本继续后面的波。
-        replay = self._volume_journal_replay(it)
+        replay = self.volume_journal_replay(it)
         if replay is not None and replay.games:
-            replay_pairs = wave_pairs(self._rotate_seed, it, replay.games, replay.wave_idx)
+            replay_pairs = wave_pairs(self._host.rotate_seed, it, replay.games, replay.wave_idx)
             log(
                 f"[volume] it{it}: WAL 重放未完成的补波 w{replay.wave_idx} "
                 f"games={replay.games} → {len(replay_pairs)} 局（同种子流，不重抛硬币）"
             )
-            replay_report = self._dispatch_volume_wave(it, replay_pairs, dist_cfg)
-            self.land_collect(combine_reports([self._report, replay_report]))
+            replay_report = self.dispatch_volume_wave(it, replay_pairs, dist_cfg)
+            self._host.land_collect(combine_reports([self._host.report, replay_report]))
         while True:
-            wver = common.distribution.weights_fingerprint(self.args.out)
+            wver = common.distribution.weights_fingerprint(self._host.args.out)
             totals = settled_stage_totals(
-                self._traj_dir,
+                self._host.traj_dir,
                 wver,
-                extra_wver=self._extra_wver,
-                course_fp=self._course_fp,
-                corpus_fp=self._corpus_fp,
-                state_init=self._state_init,
-                mem=self._round_mem_shards(it),
+                extra_wver=self._host.extra_wver,
+                course_fp=self._host.course_fp,
+                corpus_fp=self._host.corpus_fp,
+                state_init=self._host.state_init,
+                mem=self.round_mem_shards(it),
             )
             collected = {s: totals.get(s, (0, 0))[1] for s in stages}
             games_done = {s: totals.get(s, (0, 0))[0] for s in stages}
@@ -789,7 +646,7 @@ class TrainingVolume:
                     f"达标关={len(met)}/{len(stages)}" + (f" 未达标={unmet}" if unmet else "")
                 )
                 break
-            pairs = wave_pairs(self._rotate_seed, it, plan.games_by_stage, plan.wave_idx)
+            pairs = wave_pairs(self._host.rotate_seed, it, plan.games_by_stage, plan.wave_idx)
             round_key = wave_round_key(it, plan.wave_idx)
             journal.start(
                 WAVE_PHASE,
@@ -805,9 +662,9 @@ class TrainingVolume:
                 f"[volume] it{it}: 补波 w{plan.wave_idx} "
                 f"games={plan.games_by_stage}（缺口 {plan.shortfall}）→ {len(pairs)} 局"
             )
-            wave_report = self._dispatch_volume_wave(it, pairs, dist_cfg)
+            wave_report = self.dispatch_volume_wave(it, pairs, dist_cfg)
             # 报告合并（既有多轮聚合口径：combine_reports 吃单轮报告，与远端单局摘要同构）
-            self.land_collect(combine_reports([self._report, wave_report]))
+            self._host.land_collect(combine_reports([self._host.report, wave_report]))
             self._volume_waves = plan.wave_idx + 1
             journal.finish(
                 WAVE_PHASE,
@@ -827,15 +684,15 @@ class TrainingVolume:
         # it 级 rollout 聚合（2026-09-19）：combine_reports 已把各波
         # weights_dist_start_ts / collect_end_ts 压成 pure_collect_sec
         # （首波分发 → 全部样本齐）。多波时打一条便于对照 dashboard。
-        if self._volume_waves > 1 and self._report.get("pure_collect_sec") is not None:
-            agg_ok = self._report.get("rollout_collect_aggregated")
+        if self._volume_waves > 1 and self._host.report.get("pure_collect_sec") is not None:
+            agg_ok = self._host.report.get("rollout_collect_aggregated")
             log(
-                f"[volume] it{it}: rollout 聚合 waves={self._report.get('rollout_collect_waves', self._volume_waves)} "
-                f"pure_collect_sec={self._report['pure_collect_sec']}"
+                f"[volume] it{it}: rollout 聚合 waves={self._host.report.get('rollout_collect_waves', self._volume_waves)} "
+                f"pure_collect_sec={self._host.report['pure_collect_sec']}"
                 f"（首波分发→样本齐；aggregated={agg_ok}）"
             )
 
-    def _volume_collect_continuous(self, it: int, dist_cfg: dict | None) -> None:
+    def volume_collect_continuous(self, it: int, dist_cfg: dict | None) -> None:
         """配额感知连续采集（2026-09-19 用户指令；VOLUME_RULE_V2）。
 
         **退役离散补波**：loop 读账本 → 按各关 `quota - collected - inflight*est_s`
@@ -845,30 +702,30 @@ class TrainingVolume:
         §15.5：相对 wave 规则的新语料语义 —— 课程若从 wave 迁到 continuous，
         应 fresh `--out/--traj`（用户已知）。
         """
-        if not self._volume_active():
+        if not self.volume_active():
             return
-        args = self.args
-        if self._stream_meta is not None:
+        args = self._host.args
+        if self._host.stream_meta is not None:
             log("[volume] 流式路径不支持连续配额 v2（保持 stream 老语义）")
             from worker.reports import adopt_volume_report
 
-            self.land_collect(adopt_volume_report(None))
+            self._host.land_collect(adopt_volume_report(None))
             return
         if int(getattr(args, "collect_only", 0) or 0):
             from worker.reports import adopt_volume_report
 
-            self.land_collect(adopt_volume_report(None))
+            self._host.land_collect(adopt_volume_report(None))
             return
         from worker.volume_alloc import default_game_caps
         from worker.volume_quota import DEFAULT_MAX_BATCHES, target_per_stage
 
-        stages = self._volume_stages(it)
+        stages = self.volume_stages(it)
         # greedy 阶段用它过滤普通批已派过的 (stage, seed)，保证两批种子不相交。
         self._volume_ordinary_seeds = set()
         target = int(args.target_transitions)
         quota = target_per_stage(target, len(stages))
-        est_global = int(self._volume_est or self._volume_est_samples() or 0)  # 0 = 无估计（首轮）
-        est_s = self._volume_stage_ests_map(it)
+        est_global = int(self._volume_est or self.volume_est_samples() or 0)  # 0 = 无估计（首轮）
+        est_s = self.volume_stage_ests_map(it)
         self._volume_stage_ests = est_s
         # 硬顶**分关**（2026-10-07，plan/rollout-stage-balance §4.2）：课程显式
         # `--max-games-per-stage` 优先；否则 `4 × ceil(quota/est_s)`。用全局 est 算 cap
@@ -883,9 +740,9 @@ class TrainingVolume:
             or int(getattr(args, "workers", 0) or 0)
             or len(stages)
         )
-        course_fp = self._course_fp
-        corpus_fp = self._corpus_fp
-        extra_wver = self._extra_wver
+        course_fp = self._host.course_fp
+        corpus_fp = self._host.corpus_fp
+        extra_wver = self._host.extra_wver
         start_idx = {s: 0 for s in stages}
         self._volume_capped = False
         self._volume_waves = 0
@@ -901,7 +758,7 @@ class TrainingVolume:
         first_est_src: dict[int, str] = {}
 
         self._volume_halted = False
-        state = _Continuous(
+        state = ContinuousState(
             stages=stages,
             target=target,
             quota=quota,
@@ -919,11 +776,11 @@ class TrainingVolume:
             first_est_raw=first_est_raw,
             first_est_src=first_est_src,
         )
-        combined = self._volume_continuous_loop(it, dist_cfg, state)
-        self._volume_continuous_settle(it, state, combined)
+        combined = self.volume_continuous_loop(it, dist_cfg, state)
+        self.volume_continuous_settle(it, state, combined)
 
-    def _volume_continuous_loop(
-        self, it: int, dist_cfg: dict | None, state: _Continuous
+    def volume_continuous_loop(
+        self, it: int, dist_cfg: dict | None, state: ContinuousState
     ) -> dict | None:
         import threading
 
@@ -940,7 +797,7 @@ class TrainingVolume:
         halt = threading.Event()
         live: dict[int, int] = {}
         stage_set = {int(s) for s in state.stages}
-        pool_mult = float(getattr(self.args, "volume_pool_mult", 0) or DEFAULT_POOL_MULT)
+        pool_mult = float(getattr(self._host.args, "volume_pool_mult", 0) or DEFAULT_POOL_MULT)
         combined: dict | None = None
 
         def _quota_watch(summary: object) -> None:
@@ -960,15 +817,15 @@ class TrainingVolume:
                 halt.set()
 
         while self._volume_waves < state.max_batches:
-            wver = common.distribution.weights_fingerprint(self.args.out)
+            wver = common.distribution.weights_fingerprint(self._host.args.out)
             totals = settled_stage_totals(
-                self._traj_dir,
+                self._host.traj_dir,
                 wver,
                 extra_wver=state.extra_wver,
                 course_fp=state.course_fp,
                 corpus_fp=state.corpus_fp,
-                state_init=self._state_init,
-                mem=self._round_mem_shards(it),
+                state_init=self._host.state_init,
+                mem=self.round_mem_shards(it),
             )
             collected = {s: int(totals.get(s, (0, 0))[1]) for s in state.stages}
             games_done = {s: int(totals.get(s, (0, 0))[0]) for s in state.stages}
@@ -978,13 +835,13 @@ class TrainingVolume:
             # 同步 dispatch：批间无在飞；批内调度器自己竞速。
             # （`inflight` 只喂给旧版 `plan_continuous_batch` 的软停；改成候选池后不再需要——
             #   满额判据由 `on_result` 的实时账本承担。）
-            plan = _plan_continuous_wave(state, collected, games_done, pool_mult)
+            plan = plan_continuous_wave(state, collected, games_done, pool_mult)
             if not plan.games:
                 break
             # 首波读数：进 iteration 事件（`est_used` / `est_src`）—— 批数由首波决定，
             # 记末波的 est 等于「事后诸葛亮」，会读不出「首波高估了多少」。
-            _remember_first_est(state, plan)
-            pairs = continuous_pairs(self._rotate_seed, it, plan.games, state.start_idx)
+            remember_first_est(state, plan)
+            pairs = continuous_pairs(self._host.rotate_seed, it, plan.games, state.start_idx)
             self._volume_ordinary_seeds.update(pairs)
             for s, n in plan.games.items():
                 state.start_idx[s] = state.start_idx.get(s, 0) + int(n)
@@ -1000,7 +857,7 @@ class TrainingVolume:
                     else "）"
                 )
             )
-            wave_report = self._dispatch_volume_wave(
+            wave_report = self.dispatch_volume_wave(
                 it, pairs, dist_cfg, halt_event=halt, on_result=_quota_watch, pool_halt=True
             )
             combined = wave_report if combined is None else combine_reports([combined, wave_report])
@@ -1013,22 +870,22 @@ class TrainingVolume:
                 break
         return combined
 
-    def _volume_continuous_settle(
-        self, it: int, state: _Continuous, combined: dict | None
+    def volume_continuous_settle(
+        self, it: int, state: ContinuousState, combined: dict | None
     ) -> None:
         import common.distribution
         from worker.resume import settled_stage_totals
         from worker.volume_alloc import VOLUME_ALLOC_RULE
 
-        wver = common.distribution.weights_fingerprint(self.args.out)
+        wver = common.distribution.weights_fingerprint(self._host.args.out)
         totals = settled_stage_totals(
-            self._traj_dir,
+            self._host.traj_dir,
             wver,
             extra_wver=state.extra_wver,
             course_fp=state.course_fp,
             corpus_fp=state.corpus_fp,
-            state_init=self._state_init,
-            mem=self._round_mem_shards(it),
+            state_init=self._host.state_init,
+            mem=self.round_mem_shards(it),
         )
         collected_total = sum(int(totals.get(s, (0, 0))[1]) for s in state.stages)
         unmet = {
@@ -1072,9 +929,9 @@ class TrainingVolume:
             "est_src": next(iter(_srcs)) if len(_srcs) == 1 else "mixed",
             # 聚合口径也进事件：`--est-agg` 的 A/B（latest vs pooled）会产出**同一形状**的读数，
             # 不写这一格就分不清「哪一轮用的是哪个口径」（P0-2 的偏差表要按它分组）。
-            "est_agg": str(getattr(self.args, "est_agg", "latest") or "latest"),
+            "est_agg": str(getattr(self._host.args, "est_agg", "latest") or "latest"),
             # `halted` = 逐关配额全部达成、池里剩下的候选没派出去（2026-10-21 用户口径）
-            "halted": bool(getattr(self, "_volume_halted", False)),
+            "halted": bool(self._volume_halted),
             "quota": int(state.quota),
             "stages": {str(s): stage_stats[s] for s in state.stages},
             "shortfall": {str(s): int(v) for s, v in unmet.items()},
@@ -1094,12 +951,12 @@ class TrainingVolume:
 
         disk_reports = resumed_manifests(
             ResumedSpec(
-                self._traj_dir,
+                self._host.traj_dir,
                 wver,
                 extra_wver=state.extra_wver,
                 course_fp=state.course_fp,
-                state_init=self._state_init,
-                mem=self._round_mem_shards(it),
+                state_init=self._host.state_init,
+                mem=self.round_mem_shards(it),
             )
         )
         if state.stages:
@@ -1110,15 +967,15 @@ class TrainingVolume:
                 if st is None or int(st) in stage_set:
                     filtered.append(r)
             disk_reports = filtered
-        self.land_collect(merge_volume_report(combined, disk_reports))
-        if self._volume_waves > 0 and self._report.get("pure_collect_sec") is not None:
+        self._host.land_collect(merge_volume_report(combined, disk_reports))
+        if self._volume_waves > 0 and self._host.report.get("pure_collect_sec") is not None:
             log(
-                f"[volume] it{it}: rollout 聚合 batches={self._report.get('rollout_collect_waves', self._volume_waves)} "
-                f"pure_collect_sec={self._report['pure_collect_sec']}"
-                f"（首批分发→样本齐；aggregated={self._report.get('rollout_collect_aggregated')}）"
+                f"[volume] it{it}: rollout 聚合 batches={self._host.report.get('rollout_collect_waves', self._volume_waves)} "
+                f"pure_collect_sec={self._host.report['pure_collect_sec']}"
+                f"（首批分发→样本齐；aggregated={self._host.report.get('rollout_collect_aggregated')}）"
             )
 
-    def _dispatch_greedy_wave(
+    def dispatch_greedy_wave(
         self, it: int, pairs, dist_cfg, total: int, plan, bins: dict, targets: dict
     ) -> bool:
         """派发一波 greedy 并合并报告；返回 halt（配额已满）是否置位（自调用点搬出）。"""
@@ -1143,11 +1000,11 @@ class TrainingVolume:
                     halt.set()
 
         self._greedy_waves += 1
-        args = self.args
+        args = self._host.args
         old_argmax = bool(getattr(args, "rollout_argmax", False))
         args.rollout_argmax = True
         try:
-            wave_report = self._dispatch_volume_wave(
+            wave_report = self.dispatch_volume_wave(
                 it,
                 pairs,
                 dist_cfg,
@@ -1168,7 +1025,7 @@ class TrainingVolume:
         )
         return halt.is_set()
 
-    def _greedy_budget(
+    def greedy_budget(
         self,
         it: int,
         stages: list[int],
@@ -1182,7 +1039,7 @@ class TrainingVolume:
         from worker.volume_alloc import default_game_caps
         from worker.volume_quota import DEFAULT_MAX_BATCHES
 
-        est_s = self._volume_stage_ests_map(it)
+        est_s = self.volume_stage_ests_map(it)
         est_global = int(self._volume_est or 0)
         # 硬顶按**全局** collect_target 算（`default_game_caps` 会再除以关数）；传
         # `per_stage_collect` 会把每关硬顶再除一次关数 ⇒ 第一波结算后即触顶，
@@ -1200,7 +1057,7 @@ class TrainingVolume:
         )
         max_batches = int(getattr(args, "volume_max_batches", 0) or DEFAULT_MAX_BATCHES)
         start_idx = {s: 0 for s in stages}
-        ordinary = set(getattr(self, "_volume_ordinary_seeds", set()))
+        ordinary = set(self._volume_ordinary_seeds)
 
         return _GreedyBudget(
             stages=stages,
@@ -1214,7 +1071,7 @@ class TrainingVolume:
             ordinary=ordinary,
         )
 
-    def _greedy_wave_pairs(
+    def greedy_wave_pairs(
         self,
         it: int,
         budget: _GreedyBudget,
@@ -1249,7 +1106,7 @@ class TrainingVolume:
         if not plan_g:
             return None
         pairs = continuous_pairs(
-            self._rotate_seed ^ seed_salt, it, plan_g, start_idx
+            self._host.rotate_seed ^ seed_salt, it, plan_g, start_idx
         )
         pairs = [(s, sd) for s, sd in pairs if (s, sd) not in ordinary]
         if not pairs:
@@ -1262,7 +1119,7 @@ class TrainingVolume:
 
         return pairs
 
-    def _greedy_settle(
+    def greedy_settle(
         self,
         it: int,
         quota: _GreedyTargets,
@@ -1277,19 +1134,19 @@ class TrainingVolume:
             manifest_samples,
         )
 
-        names, manifests, bins, total = self._greedy_scan(it)
+        names, manifests, bins, total = self.greedy_scan(it)
         degraded = any(int(bins[b]) < int(targets[b]) for b in targets)
         cap_hit = bool(degraded and total >= quota.collect_target)
         # 2026-11-10（用户裁决）：主 rollout report 改**全量**口径。此前 greedy 波只进
         # `_greedy_report`（死数据），`write_rollout_end` / `write_iteration` 读的是
-        # `self._report` ⇒ 控制台恒显示纯采样的 >98%，greedy 败局/超时局完全不可见。
+        # `self._host.report` ⇒ 控制台恒显示纯采样的 >98%，greedy 败局/超时局完全不可见。
         # 合并前各存一份 brief，供控制台下钻「采样 vs greedy」两份读数（实现与云机腿共用一份）。
         from worker.greedy_quota import report_brief as _brief
 
-        sampling_report = _brief(self._report)
+        sampling_report = _brief(self._host.report)
         greedy_report = _brief(self._greedy_report)
         if self._greedy_report:
-            self.land_collect(combine_reports([self._report, self._greedy_report]))
+            self._host.land_collect(combine_reports([self._host.report, self._greedy_report]))
         # 全量指标：`transitions_collected` 由 `_volume_collected` 落账（不读 report）。
         # 两边同加才守得住 e2e 的 `report.totalSamples == _volume_collected` 等式。
         if self._volume_collected is not None:
@@ -1343,18 +1200,18 @@ class TrainingVolume:
                 f"total={total}/{quota.collect_target}"
             )
 
-    def _greedy_scan(self, it: int):
+    def greedy_scan(self, it: int):
         """盘上 greedy 进度（自 `_volume_collect_greedy` 搬出）：`(names, manifests, bins, total)`。"""
         from worker.greedy_quota import greedy_progress, load_manifests, shard_dirs_for_round
 
-        mem = self._round_mem_shards(it) or {}
-        shard_dirs = shard_dirs_for_round(self._traj_root, it, mem)
+        mem = self.round_mem_shards(it) or {}
+        shard_dirs = shard_dirs_for_round(self._host.traj_root, it, mem)
         names = [p.name for p in shard_dirs]
         manifests = load_manifests(shard_dirs, mem)
         bins, total = greedy_progress(names, manifests)
         return names, manifests, bins, total
 
-    def _volume_collect_greedy(self, it: int, dist_cfg: dict | None) -> None:
+    def volume_collect_greedy(self, it: int, dist_cfg: dict | None) -> None:
         """greedy 结果配额采集阶段（plan/greedy-outcome-quota rev4）。
 
         **所有采集通道都支持**（2026-11-10）：本机串行池 / dist 队列节点 /
@@ -1369,14 +1226,14 @@ class TrainingVolume:
         候选」，不是倍率；把课程 quota 改大同时会改 `corpus_identity_fp` 与所有关的
         预算。独立阶段只多派 greedy 局，普通语料逐字节不变。
         """
-        args = self.args
+        args = self._host.args
         self._greedy_plan = None
         self._greedy_stats = None
         self._greedy_report = None
         self._greedy_waves = 0
         if getattr(args, "greedy_quota", None) is None:
             return
-        if self._stream_meta is not None:
+        if self._host.stream_meta is not None:
             raise RuntimeError(
                 "greedy_quota 不支持 stream 编排路径（该路径没有第二遍采集钩子，"
                 "不是节点能力限制；请走串行/队列节点通道）"
@@ -1389,7 +1246,7 @@ class TrainingVolume:
 
         from worker.greedy_quota import bin_targets, parse_greedy_quota
 
-        stages = self._volume_stages(it)
+        stages = self.volume_stages(it)
         plan = parse_greedy_quota(
             getattr(args, "greedy_quota", None),
             target_transitions=int(getattr(args, "target_transitions", 0) or 0),
@@ -1401,9 +1258,9 @@ class TrainingVolume:
 
         # 扫描根用 `_traj_root`：shard 在 `<traj_root>/it{it}/w*/rl_s*_seed*`，
         # 递归扫描由 `shard_dirs_for_round` 负责（生产布局，非 itN 直接子目录）。
-        names, manifests, bins, total = self._greedy_scan(it)
+        names, manifests, bins, total = self.greedy_scan(it)
         targets = bin_targets(plan)
-        budget = self._greedy_budget(
+        budget = self.greedy_budget(
             it, stages, targets, args, collect_target=plan.collect_target, cap=plan.cap
         )
         quota = _GreedyTargets(
@@ -1416,13 +1273,13 @@ class TrainingVolume:
         stopped_no_games = False
 
         while self._greedy_waves < budget.max_batches:
-            names, manifests, bins, total = self._greedy_scan(it)
+            names, manifests, bins, total = self.greedy_scan(it)
             if all(int(bins[b]) >= int(budget.targets[b]) for b in budget.targets):
                 break
             if total >= plan.collect_target:
                 break
 
-            pairs = self._greedy_wave_pairs(
+            pairs = self.greedy_wave_pairs(
                 it,
                 budget,
                 manifests,
@@ -1433,9 +1290,28 @@ class TrainingVolume:
                 stopped_no_games = True
                 break
 
-            if self._dispatch_greedy_wave(
+            if self.dispatch_greedy_wave(
                 it, pairs, dist_cfg, int(total), plan, bins, targets
             ):
                 break
 
-        self._greedy_settle(it, quota, targets, stopped_no_games=stopped_no_games)
+        self.greedy_settle(it, quota, targets, stopped_no_games=stopped_no_games)
+
+
+    # ------------------------------------------------- 跨簇命令（外簇唯一能碰状态的方式）
+    def reset_greedy(self) -> None:
+        """每轮清零（`loop_round_steps` 在采集前调）：上一轮的 greedy 留痕不得进发布相位。"""
+        self._greedy_plan = None
+        self._greedy_stats = None
+        self._greedy_report = None
+
+    def reset_ordinary_seeds(self) -> None:
+        """每轮清零普通连续配额的已派种子（greedy 阶段据此过滤，两批种子不相交）。"""
+        self._volume_ordinary_seeds = set()
+
+    def merge_greedy(self, stats: dict) -> None:
+        """把发布端预筛读数并进 greedy stats（`loop_remote_job` 的唯一写入口）。"""
+        from worker.greedy_quota import merge_greedy_stats
+
+        self._greedy_stats = merge_greedy_stats(self._greedy_stats, stats)
+

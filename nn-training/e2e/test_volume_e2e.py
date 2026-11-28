@@ -66,6 +66,7 @@ from common.schema import (
 from remote.payload_pack import ShardSegments
 from tests.helpers.http_server import serve_fast
 from trainer.loop_core import TrainingLoop
+from trainer.loop_volume import VolumePlanner
 
 #: 假节点的 ping 门（与 dispatch.bun_version / compute_code_hash 同源）。
 _BUN = shutil.which("bun")
@@ -299,6 +300,74 @@ class _Loop:
         self._report = report
         if stream_meta is not None:
             self._stream_meta = stream_meta
+    # ---- 宿主读面（P0-1 第五刀：协作对象只认公开名）----
+    @property
+    def report(self) -> dict:
+        return self._report
+
+    @property
+    def stream_meta(self) -> dict | None:
+        return self._stream_meta
+
+    @property
+    def rotate_seed(self) -> int:
+        return int(self._rotate_seed)
+
+    @property
+    def traj_dir(self) -> Path:
+        return self._traj_dir
+
+    @property
+    def traj_root(self) -> Path:
+        return self._traj_root
+
+    @property
+    def jsonl_path(self) -> Path:
+        return self._jsonl_path
+
+    @property
+    def course_fp(self) -> str | None:
+        return self._course_fp
+
+    @property
+    def corpus_fp(self) -> str:
+        return self._corpus_fp
+
+    @property
+    def state_init(self) -> bool:
+        return bool(self._state_init)
+
+    @property
+    def extra_wver(self) -> str | None:
+        return self._extra_wver
+
+    @property
+    def payload_parts(self) -> Any:
+        return self._payload_parts
+
+    @property
+    def model(self) -> Any:
+        return self._model
+
+    @property
+    def opt(self) -> Any:
+        return self._opt
+
+    @property
+    def device(self) -> Any:
+        return self._device
+
+    @property
+    def ref_model(self) -> Any:
+        return self._ref_model
+
+    @property
+    def start_it(self) -> int:
+        return int(self._start_it)
+
+    def commit_journal(self) -> Any:
+        return self._commit_journal()
+
     def _volume_active(self) -> bool:
         return TrainingLoop._volume_active(cast(Any, self))
 
@@ -314,8 +383,29 @@ class _Loop:
     def _dispatch_volume_wave(
         self, it: int, pairs: list[tuple[int, int]], dist_cfg: dict | None
     ) -> dict:
+        return self._record_and_dispatch(it, pairs, dist_cfg)
+
+    def _record_and_dispatch(
+        self,
+        it: int,
+        pairs: list[tuple[int, int]],
+        dist_cfg: dict | None,
+        *,
+        halt_event: Any = None,
+        on_result: Any = None,
+        pool_halt: bool = False,
+    ) -> dict:
+        """真调用边界记一笔，再走协作对象上的**真派发**（不回到本桩，避免递归）。"""
         self.waves.append(list(pairs))  # 真调用边界（供逐波对账）
-        return TrainingLoop._dispatch_volume_wave(cast(Any, self), it, pairs, dist_cfg)
+        return VolumePlanner.dispatch_volume_wave(
+            cast(Any, self.volume),
+            it,
+            pairs,
+            dist_cfg,
+            halt_event=halt_event,
+            on_result=on_result,
+            pool_halt=pool_halt,
+        )
 
     def _volume_collect_continuous(self, it: int, dist_cfg: dict | None) -> None:
         TrainingLoop._volume_collect_continuous(cast(Any, self), it, dist_cfg)
@@ -405,12 +495,6 @@ class _Loop:
         # 起始分布护栏（P3.5）：同一处建立（本桩无课程 ⇒ 恒 False）
         self._state_init = False
         self._extra_wver: str | None = None
-        self._volume_target: int | None = None
-        self._volume_collected: int | None = None
-        self._volume_waves: int = 0
-        self._volume_g0: int = 0
-        self._volume_est: int = 0
-        self._volume_capped: bool = False
         # 真补波循环需要的、串行 dist 路径用不到但 dispatch_rollout_phase 会转发的东西
         self._model = None
         self._opt = None
@@ -429,6 +513,10 @@ class _Loop:
         # 每波真派发的 pairs（真调用边界，供重启一致性断言）
         self.waves: list[list[tuple[int, int]]] = []
         self.wave0: list[tuple[int, int]] = []
+        # P0-1 第五刀：采集簇 = 协作对象（槽位归它，宿主只提供上面那组读面）。
+        self.volume = VolumePlanner(cast(Any, self))
+        # 补波走协作对象自己的派发入口 —— 桩在那条缝上记「真调用边界」。
+        self.volume.dispatch_volume_wave = self._record_and_dispatch  # type: ignore[method-assign]
 
     def _commit_journal(self) -> Any:
         if self._journal is None:
@@ -448,7 +536,7 @@ class _Loop:
     def run_iteration(self, cfg: dict) -> None:
         pairs = self._iteration_pairs(self.it)
         self.wave0 = list(pairs)
-        self._volume_waves = 1
+        self.volume._volume_waves = 1
         self._report = self._dispatch_volume_wave(self.it, pairs, cfg)
         self._volume_topup(self.it, cfg)
 
@@ -558,16 +646,16 @@ def _assert_accounting_matches_ledger(
     """
     disk_samples = sum(t for _g, t in settled.values())
     disk_games = sum(g for g, _t in settled.values())
-    assert disk_samples <= loop._volume_collected, (
-        f"盘上账本比采集记账还多：{settled} vs {loop._volume_collected}"
+    assert disk_samples <= loop.volume.volume_view().collected, (
+        f"盘上账本比采集记账还多：{settled} vs {loop.volume.volume_view().collected}"
     )
     unique = set(dispatched)
     assert disk_games <= len(unique), (
         f"盘上局数 > 去重派发对数（重复计数）：{settled} vs {len(unique)}"
     )
     dispatched_samples = sum(samples_of(st) for st, _sd in dispatched)
-    assert loop._volume_collected <= dispatched_samples, (
-        f"采集记账 > 真派发样本数（凭空多出局）：{loop._volume_collected} vs {dispatched_samples}"
+    assert loop.volume.volume_view().collected <= dispatched_samples, (
+        f"采集记账 > 真派发样本数（凭空多出局）：{loop.volume.volume_view().collected} vs {dispatched_samples}"
     )
 
 
@@ -595,14 +683,14 @@ def test_quota_converges_within_one_wave(tmp: Path, monkeypatch: pytest.MonkeyPa
             assert transitions - 100 < 14 * 2, f"stage {stage} 过冲过大: {transitions}"
             assert games <= 5 + 3 + 1, f"stage {stage} 局数超预算: {games}"
 
-        assert loop._volume_waves == 3, "应为 初波 + 2 补波"
-        assert loop._volume_collected == sum(t for _g, t in settled.values())
-        assert loop._volume_capped is False
+        assert loop.volume.volume_view().waves == 3, "应为 初波 + 2 补波"
+        assert loop.volume.volume_view().collected == sum(t for _g, t in settled.values())
+        assert loop.volume.volume_view().capped is False
         # WAL：每波补波决策都闭环（无 pending）
         assert loop._commit_journal().pending() == []
         # 报告覆盖全部补波（不是只有初波）
         assert loop._report["games"] == sum(g for g, _t in settled.values())
-        assert loop._report["totalSamples"] == loop._volume_collected
+        assert loop._report["totalSamples"] == loop.volume.volume_view().collected
     finally:
         srv.shutdown()
 
@@ -615,9 +703,9 @@ def test_no_topup_when_initial_wave_meets_quota(
     try:
         loop = _Loop(tmp, stages="0-1", target=200, est=20)
         loop.run_iteration(cfg)
-        assert loop._volume_waves == 1
+        assert loop.volume.volume_view().waves == 1
         assert len(srv.dispatched) == 10  # 2 关 × 5 局，零补波
-        assert loop._volume_collected == 200
+        assert loop.volume.volume_view().collected == 200
     finally:
         srv.shutdown()
 
@@ -643,7 +731,7 @@ def test_cross_restart_same_pairs_no_reroll(tmp: Path, monkeypatch: pytest.Monke
         first = _Loop(tmp, stages="0-1", target=200, est=20)
         first.run_iteration(cfg)
         assert len(first.waves) == 3, f"首跑应为 3 波，实际 {len(first.waves)}"
-        assert first._volume_waves == 3
+        assert first.volume.volume_view().waves == 3
         interrupted = len(first.waves) - 1  # 最后一波 = w2
         srv.dispatched.clear()
         first.crash_mid_wave(interrupted)
@@ -658,7 +746,7 @@ def test_cross_restart_same_pairs_no_reroll(tmp: Path, monkeypatch: pytest.Monke
         assert resumed.waves[1] == first.waves[interrupted]
         # ③ 预算不重领 ⇒ 重放后不再开新波
         assert len(resumed.waves) == 2, resumed.waves
-        assert resumed._volume_waves == 3
+        assert resumed.volume.volume_view().waves == 3
         # ④ 零落盘：崩溃前那几波的字节只在内存里 ⇒ 重启后不可恢复。重放波进账，
         #    缺口由补波填（受 wave_cap 约束）⇒ 本轮语料少于首跑，`missing` 响亮。
         settled = _settled(
@@ -693,11 +781,11 @@ def test_dropped_games_trigger_topup(tmp: Path, monkeypatch: pytest.MonkeyPatch)
         settled = _settled(loop._traj_dir, Path(loop.args.out), loop._payload_parts.manifests())
         assert settled[0][1] >= 100, f"掉局关未补到达标线: {settled[0]}"
         assert settled[0][0] == 8 + 2, f"掉局应占局数并额外补 2 局: {settled[0]}"
-        assert loop._volume_waves == 2, "应只补一波"
+        assert loop.volume.volume_view().waves == 2, "应只补一波"
         # 正常关：8 局一次到位，零补波，不受 stage 0 掉局牵连
         assert settled[1] == (8, 112)
         assert len([p for p in srv.dispatched if p[0] == 1]) == 8
-        assert loop._volume_capped is False
+        assert loop.volume.volume_view().capped is False
     finally:
         srv.shutdown()
 
@@ -728,12 +816,12 @@ def test_short_stage_does_not_starve_long_stage(
         assert len(games1) == 10, f"长局关被补波打扰: {len(games1)}"
         # 短局关：10 局 × 5 = 50 < 100 ⇒ 连补到波次上限
         assert len(games0) > 10, "短局关应当被补波"
-        assert loop._volume_waves == 3, "补到 max_waves 上限即停"
+        assert loop.volume.volume_view().waves == 3, "补到 max_waves 上限即停"
 
         settled = _settled(loop._traj_dir, Path(loop.args.out), loop._payload_parts.manifests())
         assert settled[1][1] >= 100  # 长局关达标
         assert settled[0][1] < 100  # 短局关仍未达标 ⇒ 停因是波次上限
-        assert loop._volume_capped is False  # 不是硬顶（是波次上限）
+        assert loop.volume.volume_view().capped is False  # 不是硬顶（是波次上限）
         # 两种 schema 都进了账本（长局关若漏认 totalSamples 会显示 0 ⇒ 会被反复补波）
         assert settled[1][1] == 500
         assert settled[0][1] == 10 * 5 + 5 * 5 + 3 * 5
@@ -787,7 +875,7 @@ def test_racing_duplicates_do_not_distort_the_ledger(
             n_unique = len([p for p in unique if p[0] == stage])
             assert settled[stage] == (n_unique, n_unique * 14), f"stage {stage}: {settled[stage]}"
         # est 估准（14）⇒ 初波 8 局/关即达标，零补波（副本不占配额也不拖慢收敛）
-        assert loop._volume_waves == 1
+        assert loop.volume.volume_view().waves == 1
         assert all(t >= 100 for _g, t in settled.values())
         assert loop._commit_journal().pending() == []
     finally:
@@ -841,9 +929,9 @@ def test_racing_double_settle_never_inflates_and_quota_stays_sound(
         # 达标，或响亮停（硬顶 / 波次上限）——不允许静默短采
         met = all(t >= 100 for _g, t in settled.values())
         # 缺口只允许出现在预算耗尽时：预算没用完却未达标 = 静默短采（本用例最硬的一条）
-        if not loop._volume_capped and loop._volume_waves < 3:
+        if not loop.volume.volume_view().capped and loop.volume.volume_view().waves < 3:
             assert met, f"波次预算未耗尽却未达标: {settled}"
-        assert met or loop._volume_capped or loop._volume_waves >= 3, f"静默短采: {settled}"
+        assert met or loop.volume.volume_view().capped or loop.volume.volume_view().waves >= 3, f"静默短采: {settled}"
         # iteration 事件的采集量与账本**同口径**（缺口如实上报，不假报达标）。
         # ★ 2026-09-29：此处原是等式，满机下周期性假红——采集记账是「退休之前那一刻」
         # 的盘上扫描，输家副本的退休在其后的异步线程里，等式比较的是两个时刻。
@@ -853,7 +941,7 @@ def test_racing_double_settle_never_inflates_and_quota_stays_sound(
         assert loop._commit_journal().pending() == []
         print(
             f"[race] double-settle 边界: dispatched={len(srv.dispatched)} "
-            f"unique={len(unique)} settled={settled} waves={loop._volume_waves}"
+            f"unique={len(unique)} settled={settled} waves={loop.volume.volume_view().waves}"
         )
     finally:
         srv.shutdown()
@@ -893,9 +981,9 @@ def test_dup_settle_shard_loss_is_compensated(tmp: Path, monkeypatch: pytest.Mon
         settled = _settled(loop._traj_dir, Path(loop.args.out), loop._payload_parts.manifests())
         # 缺口 16t/关 ⇒ 补 ceil(16/14)=2 局/关 ⇒ 6+2=8 局；丢掉的局一局不欠
         assert settled == {0: (8, 112), 1: (8, 112)}, settled
-        assert loop._volume_waves == 2
-        assert loop._volume_capped is False
-        assert loop._volume_collected == 224
+        assert loop.volume.volume_view().waves == 2
+        assert loop.volume.volume_view().capped is False
+        assert loop.volume.volume_view().collected == 224
         assert loop._commit_journal().pending() == []
     finally:
         srv.shutdown()
@@ -927,7 +1015,7 @@ def test_racing_with_tight_budget_stops_loud_not_silent(
         loop.run_iteration(cfg)
 
         settled = _settled(loop._traj_dir, Path(loop.args.out), loop._payload_parts.manifests())
-        assert loop._volume_waves == 3, "补到波次上限即停，不无限补"
+        assert loop.volume.volume_view().waves == 3, "补到波次上限即停，不无限补"
         # 不重复计数（竞速副本不得被当成额外一局）
         for stage, (games, transitions) in settled.items():
             assert transitions == games * (5 if stage == 0 else 50), f"stage {stage}: {settled}"
@@ -936,7 +1024,7 @@ def test_racing_with_tight_budget_stops_loud_not_silent(
         # 停采必须响亮：未达标清单进日志（iteration 事件的 transitions_collected 也如实上报）
         unmet = [ln for ln in lines if "未达标" in ln and "wave_cap" in ln]
         assert unmet, f"未达标清单缺失（响亮性回归）: {lines}"
-        assert loop._volume_collected == sum(t for _g, t in settled.values())
+        assert loop.volume.volume_view().collected == sum(t for _g, t in settled.values())
         assert loop._commit_journal().pending() == []
     finally:
         srv.shutdown()
@@ -948,7 +1036,7 @@ def test_game_cap_stops_short_stage_with_marker(tmp: Path, monkeypatch: pytest.M
     try:
         loop = _Loop(tmp, stages="0-1", target=200, est=10, max_games_per_stage=12)
         loop.run_iteration(cfg)
-        assert loop._volume_capped is True
+        assert loop.volume.volume_view().capped is True
         assert len([p for p in srv.dispatched if p[0] == 0]) == 12  # 初波 10 + 补 2 触顶
         assert loop._commit_journal().pending() == []
     finally:

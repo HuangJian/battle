@@ -190,8 +190,11 @@ def test_step_rollout_gate_refcount_survives_drain_refill_cycles(monkeypatch) ->
 
     steps = RoundSteps()
     steps.args = types.SimpleNamespace(course_path="c.jsonc")
-    steps._greedy_plan = None
-    monkeypatch.setattr(steps, "_volume_active", lambda: False)
+    # P0-1 第五刀：采集簇是协作对象（每轮清零 + 关集判据都在它上面）。
+    steps.volume = types.SimpleNamespace(
+        reset_greedy=lambda: None, volume_active=lambda: False
+    )
+    steps._volume_active = lambda: False  # 组合根壳（生产经 MRO 解析到它）
 
     def fake_rollout(
         _it: int,

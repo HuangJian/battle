@@ -15,11 +15,12 @@ from __future__ import annotations
 
 import math
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
 from trainer.loop_steps import TrainingSteps
-from trainer.loop_volume import TrainingVolume
+from trainer.loop_volume import VolumePlanner
 from worker.stage_rotation import window_from_args
 from worker.volume_waves import parse_stages_arg, validate_volume_block, volume_block
 
@@ -54,13 +55,14 @@ class _Quota(TrainingSteps):
         self._rotate_seed = int(getattr(self.args, "rotate_seed", 0) or 0)
 
 
-class _Vol(TrainingVolume):
-    """最小宿主：`_volume_stages` 只读 `self.args` / `self._rotate_seed`。"""
+class _Vol:
+    """最小宿主 + 采集协作对象：`volume_stages` 只读 `args` / `rotate_seed`。"""
 
     def __init__(self, **over: object) -> None:
         self.args = _args(**over)
         self._rotate_seed = int(getattr(self.args, "rotate_seed", 0) or 0)
-        self._volume_est = 0
+        self.rotate_seed = self._rotate_seed
+        self.volume = VolumePlanner(cast(Any, self))
 
 
 def test_per_stage_quota_follows_the_window() -> None:
@@ -96,26 +98,26 @@ def test_without_rotation_the_quota_is_byte_identical() -> None:
 def test_volume_stages_returns_the_window_for_the_round() -> None:
     """本机连续配额链的关集 = 同一窗口（配额/硬顶/unmet/分关账全部自动跟着它走）。"""
     vol = _Vol()
-    w = vol._volume_stages(7)
+    w = vol.volume.volume_stages(7)
     assert w == window_from_args(vol.args, 7, parse_stages_arg(FULL))
     assert len(w) == 12 and w == sorted(w)
     # 换一轮就换窗口（不是固定子集）
-    other = vol._volume_stages(8)
+    other = vol.volume.volume_stages(8)
     assert other != w
 
 
 def test_legacy_rotate_stages_is_still_refused() -> None:
     """旧门控仍响亮拒收：`--rotate-stages` 是 `build_pairs` 那一套，与按关配额混用无解。"""
     with pytest.raises(SystemExit, match="rotate-stages"):
-        _Vol(rotate_stages=3)._volume_stages(1)
+        _Vol(rotate_stages=3).volume.volume_stages(1)
     with pytest.raises(SystemExit, match="curriculum-stages"):
-        _Vol(curriculum_stages="0-9")._volume_stages(1)
+        _Vol(curriculum_stages="0-9").volume.volume_stages(1)
 
 
 def test_bad_rotation_config_is_a_system_exit_not_a_traceback() -> None:
     """pinned 里写了不在 `--stages` 的关号 ⇒ SystemExit（带可操作文案），不是 ValueError 冒泡。"""
     with pytest.raises(SystemExit, match="rotation 配置非法"):
-        _Vol(rotation_mode="pinned", rotation_pinned="99")._volume_stages(1)
+        _Vol(rotation_mode="pinned", rotation_pinned="99").volume.volume_stages(1)
 
 
 # ★ 2026-10-28：原先这里钉的是「轮换 + 多轮包 ⇒ 拒导」（评审 A4 / §3.7）。云机轮换落地后

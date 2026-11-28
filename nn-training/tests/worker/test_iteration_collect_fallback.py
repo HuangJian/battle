@@ -66,6 +66,19 @@ def test_fallback_round_carries_its_reason(tmp_path: Path) -> None:
     assert row["collect_fallback"] == "hold_stale"
 
 
+def _volume_view_for(ns: Any) -> Any:
+    """最小采集读面（P0-1 第五刀）：`_record_iteration` 只经视图读这四个读数。"""
+    return types.SimpleNamespace(
+        volume_view=lambda: types.SimpleNamespace(
+            target=ns._volume_target,
+            collected=ns._volume_collected,
+            capped=ns._volume_capped,
+            stage_stats=ns._volume_stage_stats,
+        ),
+        greedy_view=lambda: types.SimpleNamespace(stats=None, plan=None),
+    )
+
+
 def test_record_iteration_forwards_the_engine_fact(monkeypatch) -> None:
     """`_record_iteration` 从引擎属性取值（不是第二轮计算）——与 `step_course_iter` 同源。"""
     import trainer.loop_steps as ls
@@ -101,5 +114,6 @@ def test_record_iteration_forwards_the_engine_fact(monkeypatch) -> None:
         _collect_fallback="node_unavailable",
         _ledger_apply=lambda _ev: None,
     )
+    host.volume = _volume_view_for(host)
     ls.TrainingSteps._record_iteration(host, 3)
     assert seen["collect_fallback"] == "node_unavailable"

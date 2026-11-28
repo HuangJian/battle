@@ -189,12 +189,8 @@ class TrainingSteps(TrainingRemote, TrainingEval):
     _tail_drain_sec: Any
     _waves_n: Any
     #: 动态采集（plan/dynamic-rollout-volume）：None = 本轮课程未开该模式。
-    _volume_target: int | None
-    _volume_collected: int | None
-    _volume_capped: bool
     #: 分关账（plan/rollout-stage-balance §4.2）：规则版本 + 分关 collected/games/est_s/
     #: cap_games + 缺口。None = 本轮不在连续配额链（旧路径/未开该模式）⇒ 事件里那两键为 None。
-    _volume_stage_stats: dict | None
     #: bun 可执行文件路径（TrainingLoop 持有；延迟 eval 派发传给评估子进程）。
     bun: str
     #: 上轮节点配置快照（loop 每轮热读；drain 复用最近一份）。
@@ -622,8 +618,8 @@ class TrainingSteps(TrainingRemote, TrainingEval):
                 rotation=_rotation_event(
                     self.args, it, getattr(self, "_rotate_seed", 0)
                 ),
-                volume_stage_stats=getattr(self, "_volume_stage_stats", None),
-                greedy_quota_stats=getattr(self, "_greedy_stats", None),
+                volume_stage_stats=self.volume.volume_view().stage_stats,
+                greedy_quota_stats=self.volume.greedy_view().stats,
             )
         )
 
@@ -633,6 +629,8 @@ class TrainingSteps(TrainingRemote, TrainingEval):
         R2a：写入后立刻并入 `LedgerView`（`_ledger_apply`）——视图因此始终 == 盘上
         账本，且没有第二次全文件扫描（用户 2026-09-18 裁决：每课只读一遍）。
         """
+        volume = self.volume.volume_view()
+        greedy = self.volume.greedy_view()
         self._ledger_apply(
             write_iteration(
                 self._jsonl_path,
@@ -656,30 +654,26 @@ class TrainingSteps(TrainingRemote, TrainingEval):
                     "tail_drain_sec": self._tail_drain_sec,
                     "eval_join_sec": self._eval_join_sec,
                     # 动态采集（None = 未开该模式；additive 字段，旧行无此键）
-                    "transitions_target": self._volume_target,
-                    "transitions_collected": self._volume_collected,
+                    "transitions_target": volume.target,
+                    "transitions_collected": volume.collected,
                     # 降级轮的可归因（plan/offline-hold-stale-fallback §3-S1e）：空串 = 不写键。
                     "collect_fallback": self._collect_fallback,
-                    "transitions_capped": True if self._volume_capped else None,
+                    "transitions_capped": True if volume.capped else None,
                     # 分关采样分配（2026-10-07，plan/rollout-stage-balance §4.2）：规则版本与
                     # 分关账（additive，旧行无此键 → None）。分关分配**不进** `corpus_identity_fp`
                     # （与 est 同类），所以「哪一轮起换了分配口径」只能在这里读。
                     "volume_alloc_rule": (
-                        self._volume_stage_stats.get("rule") if self._volume_stage_stats else None
+                        volume.stage_stats.get("rule") if volume.stage_stats else None
                     ),
-                    "volume_stage_stats": self._volume_stage_stats,
-                    "greedy_quota_stats": getattr(self, "_greedy_stats", None),
+                    "volume_stage_stats": volume.stage_stats,
+                    "greedy_quota_stats": greedy.stats,
                     # est 隔离：主 report 是全量，这两个键只带采样口径（见 events.py）。
-                    "sampling_samples": (
-                        (getattr(self, "_greedy_stats", None) or {})
-                        .get("sampling_report", {})
-                        .get("samples")
-                    ),
-                    "sampling_games": (
-                        (getattr(self, "_greedy_stats", None) or {})
-                        .get("sampling_report", {})
-                        .get("games")
-                    ),
+                    "sampling_samples": (greedy.stats or {})
+                    .get("sampling_report", {})
+                    .get("samples"),
+                    "sampling_games": (greedy.stats or {})
+                    .get("sampling_report", {})
+                    .get("games"),
                     # 采样子集读数（plan §9.1；`rotation_mode` 缺席 ⇒ None ⇒ 不写键）。
                     "rotation": _rotation_event(
                         self.args, it, getattr(self, "_rotate_seed", 0)

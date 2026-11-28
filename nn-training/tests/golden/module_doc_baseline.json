@@ -8,6 +8,5 @@
   "remote/opt_delta.py": 60,
   "trainer/__init__.py": 90,
   "trainer/loop_lifecycle.py": 53,
-  "trainer/loop_volume.py": 53,
   "worker/stream_collect.py": 55
 }

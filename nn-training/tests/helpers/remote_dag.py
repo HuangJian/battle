@@ -692,6 +692,9 @@ LAYERS: dict[str, int] = {
     # **一份公式，不抄第二份**）；2026-10-11 S3：alloc 升到 L2 ⇒ 本模块 **L3**。
     # 唯一账本内读者 `worker.plan`(L4) 仍在它上面。
     "worker.volume_waves": 3,
+    # 连续配额的一波规划（P0-1 第五刀从 `trainer/loop_volume` 切出的纯函数）：
+    # 顶层只延迟 import `worker.volume_alloc`(L2) 的取局/估计助手 ⇒ 秩 3。
+    "worker.volume_wave_plan": 3,
     # 云端采样覆盖（2026-11-15）：顶层只靠 `worker.volume_waves`(L3) 的 `parse_stages_arg`
     # ⇒ 秩 4（与 `worker.plan` 同级）；唯一账本内读者 `remote.plan_run`(L5) 在它上面。
     "worker.cloud_sampling": 4,

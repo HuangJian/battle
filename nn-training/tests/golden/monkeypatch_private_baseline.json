@@ -53,7 +53,7 @@
   "tests/trainer/test_rollout_dispatch_resilience.py": 2,
   "tests/trainer/test_serve_aborted_revival.py": 1,
   "tests/trainer/test_serve_bc.py": 3,
-  "tests/trainer/test_stream_collect_end.py": 2,
+  "tests/trainer/test_stream_collect_end.py": 1,
   "tests/worker/test_bc_xla.py": 5,
   "tests/worker/test_commit_journal.py": 3,
   "tests/worker/test_eval_replays_once.py": 1,

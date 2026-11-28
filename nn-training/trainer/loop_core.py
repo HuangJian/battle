@@ -45,6 +45,7 @@ from trainer.loop_iter_dir import IterWorkspace
 from trainer.loop_lifecycle import TrainingLifecycle
 from trainer.loop_round_steps import RoundSteps
 from trainer.loop_steps import TrainingSteps
+from trainer.loop_volume import GreedyView, VolumePlanner, VolumeView
 
 # 一轮的终态与轮内上下文（R2c-3 起由 `biz.loop_round` 定义）——本模块**原样再导出**：
 # `from trainer.loop_core import ROUND_NEXT` 这类既有调用点（loop_runner / CLI）不受影响。
@@ -137,10 +138,12 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
     → 本类（__init__ 槽位声明 / 迭代目录 / 采集派发 / 基线评估 / EvalBoard 窗）。
     """
 
+    #: 动态采集协作对象（P0-1 第五刀；旧名壳经它转发）。
+    volume: VolumePlanner
+
     def __init__(self, args, ppo_backend, bun, update_kwargs) -> None:
         """槽位声明分五段；顺序 = 旧 `__init__` 的赋值顺序，各 mixin 只读写。"""
         self._init_core_state(args, ppo_backend, bun, update_kwargs)
-        self._init_volume_state()
         self._init_remote_state()
         self._init_eval_state()
         self._init_ledger_state()
@@ -150,6 +153,7 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         self.baseline = BaselineEval(self)
         self.exporter = BundleExporter(self)
         self.dispatch = Dispatcher(self)
+        self.volume = VolumePlanner(self)
 
     def _init_core_state(self, args, ppo_backend, bun, update_kwargs) -> None:
         """构造入参与宿主句柄 / 迭代起点与派发状态 / 轨迹根与 JSONL 落点 / M2 启动清场。"""
@@ -225,32 +229,6 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         except Exception as e:  # 清理失败不能阻断开关课（下一拍/下一进程还有机会）
             log(f"[run_rl] WARN 启动清理上一 runId 残留未完成（不影响开课）：{type(e).__name__}: {e}")
         self._rotate_seed = 0
-
-    def _init_volume_state(self) -> None:
-        """动态采集与 greedy 配额的槽位（未开该模式的轮读到 None）。"""
-        # 动态采集（plan/dynamic-rollout-volume）：None = 本轮课程未开该模式，
-        # 事件字段随之留空（additive，旧行无此键）；开启时 = 目标/已结算 transitions。
-        self._volume_target: int | None = None
-        self._volume_collected: int | None = None
-        #: 本轮已跑的波次数（初波 = 1）与初波每关局数（硬顶默认值依赖它）。
-        self._volume_waves = 0
-        self._volume_g0 = 0
-        self._volume_est = 0
-        self._volume_capped = False
-        self._volume_stage_ests: dict[int, int] | None = None
-        #: 分关采集账（规则版本 + 分关 collected/games/est_s/cap_games + 缺口）；连续配额
-        #: 收官时写，`_record_iteration` 读进 iteration 事件。**必须在 `__init__` 初值**：
-        #: 只在 `_volume_collect_continuous` 里赋值会让「未开该模式 / stream / collect-only」
-        #: 的轮在落账时 AttributeError（e2e 当场抓到，2026-10-07）。
-        self._volume_stage_stats: dict | None = None
-        #: greedy 结果配额（plan/greedy-outcome-quota rev4）：采集阶段写 plan/stats，
-        #: 发布阶段读 plan 做分层预筛。必须在 __init__ 初值（同 _volume_stage_stats 的教训）。
-        self._greedy_plan: Any = None
-        self._greedy_stats: dict | None = None
-        self._greedy_report: dict | None = None
-        self._greedy_waves = 0
-        #: 普通连续配额已派出的 (stage, seed)；greedy 阶段过滤掉它们，保证两批种子不相交。
-        self._volume_ordinary_seeds: set[tuple[int, int]] = set()
 
     def _init_remote_state(self) -> None:
         """本轮计量（rollout/PPO 秒）/ 节点采集标志 / iteration 事件共享面。"""
@@ -441,6 +419,20 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         return cast("ShardSegments", self._payload_parts)
 
     @property
+    def report(self) -> dict:
+        """本轮采集报告（`land_collect` 落位；协作对象只读）。"""
+        return self._report
+
+    @property
+    def stream_meta(self) -> dict | None:
+        """stream 采集的元数据（`land_rollout` 落位；无 stream 轮为 None）。"""
+        return self._stream_meta
+
+    def commit_journal(self) -> Any:
+        """PPO 提交台账（`TrainingSteps._commit_journal` 的公开入口；`VolumePlanner` 用）。"""
+        return self._commit_journal()
+
+    @property
     def eval_every(self) -> int:
         """in-loop eval 的间隔轮数（`_setup` 每轮重解；`0` = 关闭）。"""
         return int(self._eval_every or 0)
@@ -535,6 +527,131 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
 
     def _finalize_returned_shards(self, it: int) -> None:
         self.dispatch.finalize_returned_shards(it)
+
+    def _round_mem_shards(self, it: int) -> dict[str, dict[str, int]] | None:
+        return self.volume.round_mem_shards(it)
+
+    def _volume_active(self) -> bool:
+        return self.volume.volume_active()
+
+    def _volume_stages(self, it: int) -> list[int]:
+        return self.volume.volume_stages(it)
+
+    def _volume_est_samples(self) -> int:
+        return self.volume.volume_est_samples()
+
+    def _iteration_pairs(self, it: int) -> list[tuple[int, int]]:
+        return self.volume.iteration_pairs(it)
+
+    def _volume_stage_ests_map(self, it: int) -> dict[int, int]:
+        return self.volume.volume_stage_ests_map(it)
+
+    def _dispatch_volume_wave(
+        self,
+        it: int,
+        pairs: list[tuple[int, int]],
+        dist_cfg: dict | None,
+        *,
+        halt_event: Any = None,
+        on_result: Any = None,
+        pool_halt: bool = False,
+    ) -> dict:
+        return self.volume.dispatch_volume_wave(
+            it,
+            pairs,
+            dist_cfg,
+            halt_event=halt_event,
+            on_result=on_result,
+            pool_halt=pool_halt,
+        )
+
+    def _volume_journal_replay(self, it: int) -> Any:
+        return self.volume.volume_journal_replay(it)
+
+    def _volume_topup(self, it: int, dist_cfg: dict | None) -> None:
+        self.volume.volume_topup(it, dist_cfg)
+
+    def _volume_collect_continuous(self, it: int, dist_cfg: dict | None) -> None:
+        self.volume.volume_collect_continuous(it, dist_cfg)
+
+    def _volume_collect_greedy(self, it: int, dist_cfg: dict | None) -> None:
+        self.volume.volume_collect_greedy(it, dist_cfg)
+
+    def _volume_continuous_loop(
+        self, it: int, dist_cfg: dict | None, state: Any
+    ) -> dict | None:
+        return self.volume.volume_continuous_loop(it, dist_cfg, state)
+
+    def _volume_continuous_settle(
+        self, it: int, state: Any, combined: dict | None
+    ) -> None:
+        self.volume.volume_continuous_settle(it, state, combined)
+
+    def _dispatch_greedy_wave(
+        self,
+        it: int,
+        pairs: list[tuple[int, int]],
+        dist_cfg: dict | None,
+        total: int,
+        plan: Any,
+        bins: dict,
+        targets: dict,
+    ) -> bool:
+        return self.volume.dispatch_greedy_wave(
+            it, pairs, dist_cfg, total, plan, bins, targets
+        )
+
+    def _greedy_budget(
+        self,
+        it: int,
+        stages: list[int],
+        targets: dict[str, int],
+        args: object,
+        *,
+        collect_target: int,
+        cap: float,
+    ) -> Any:
+        return self.volume.greedy_budget(
+            it, stages, targets, args, collect_target=collect_target, cap=cap
+        )
+
+    def _greedy_wave_pairs(
+        self,
+        it: int,
+        budget: Any,
+        manifests: dict,
+        *,
+        seed_salt: int,
+        collect_target: int,
+    ) -> list[tuple[int, int]] | None:
+        return self.volume.greedy_wave_pairs(
+            it,
+            budget,
+            manifests,
+            seed_salt=seed_salt,
+            collect_target=collect_target,
+        )
+
+    def _greedy_settle(
+        self,
+        it: int,
+        quota: Any,
+        targets: dict[str, int],
+        *,
+        stopped_no_games: bool,
+    ) -> None:
+        self.volume.greedy_settle(
+            it, quota, targets, stopped_no_games=stopped_no_games
+        )
+
+    def _greedy_scan(self, it: int) -> Any:
+        return self.volume.greedy_scan(it)
+
+    def volume_view(self) -> VolumeView:
+        return self.volume.volume_view()
+
+    def greedy_view(self) -> GreedyView:
+        return self.volume.greedy_view()
 
     def remote_ppo(
         self,

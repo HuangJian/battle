@@ -38,7 +38,6 @@ from trainer.loop_steps import (
     _run_segment_iters,
     node_volume_conflict,
 )
-from trainer.loop_volume import TrainingVolume
 from trainer.rollout_phase import join_precollect_child, precollect_ready, spawn_next_collect
 from worker.config import course_key_of, global_corpus_fmt, resolve_course_quota
 from worker.eval_gate import eval_gate
@@ -74,18 +73,26 @@ HELD_LEG_HINT = "battle.offline.ipynb（/offline/tasks 清单 → /offline/task-
 HELD_WAIT_HINT = "云机接管中：自主 worker 正在跑这段（15 分钟无回传自动恢复协作派发）"
 
 
-class RoundSteps(TrainingVolume):
+class RoundSteps:
     """轮内 13 步（mixin；与 `TrainingSteps` / `TrainingGuards` 以 `self.*` 共享引擎状态）。
 
     MRO 里排在最前（`TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards)`）：它只定义
     `step_*` 与本文件新引入的名字，不与既有方法重名。
 
-    基类 `TrainingVolume`（`trainer/loop_volume.py`，S4 第十八刀）= 动态采集（按样本量）编排：
+    采集簇（`trainer/loop_volume.py::VolumePlanner`，P0-1 第五刀）= 动态采集（按样本量）编排：
     本类的 `step_course_iter`（`_iteration_pairs`）与 `step_rollout`（`_volume_active` /
-    `_volume_collect_continuous`）是那一簇的**全部生产入口**，所以方向是「调用者依赖被调用者」
-    （同 `class TrainingSteps(TrainingRemote)`；`TrainingLoop.__bases__` 因此一行不改）。
+    `_volume_collect_continuous` / `_volume_collect_greedy`）是那一簇的**全部生产入口**，
+    经协作对象（或组合根上的一行壳）调用——本类已无基类。
     （`step_volume_topup` 是保留的**空步**：离散补波退役于 VOLUME_RULE_V2，它不调那一簇。）
     """
+
+    #: 采集协作对象（P0-1 第五刀）：装配在 `TrainingLoop.__init__`，本类只经它调采集簇。
+    volume: Any
+    #: 组合根上的旧名转发壳（生产经 MRO 解析到它们；本类不持有实现）。
+    _iteration_pairs: Any
+    _volume_active: Any
+    _volume_collect_continuous: Any
+    _volume_collect_greedy: Any
 
     # 依赖的 TrainingLoop 实例属性（声明类型供 mypy/阅读；实际赋值在 TrainingLoop）
     args: Any
@@ -456,9 +463,7 @@ class RoundSteps(TrainingVolume):
         it = ctx.it
         # 每轮清零：上一轮的 greedy plan/stats/report 不得影响本轮发布
         #（held 分支不跑采集，但发布相位仍会读这三个槽位）。
-        self._greedy_plan = None
-        self._greedy_stats = None
-        self._greedy_report = None
+        self.volume.reset_greedy()
         # 2026-11-10：greedy 采集已做成全节点能力（队列 / kind=iter / 半离线都带
         # --teacher-argmax），不再按 collect_mode 拒绝。node 分支的整轮编排由
         # `_remote_iter` 自己发 greedy 批次；本机侧无第二遍钩子时也不会静默降级
@@ -512,7 +517,7 @@ class RoundSteps(TrainingVolume):
             elif self._volume_active():
                 # 连续配额采集（2026-09-19）：替代「初波 + 补波」；实时按分关差额 + 软停
                 # 派发。必须在 `_log_report` 之前（本轮报告要含全部批）。
-                self._volume_ordinary_seeds = set()
+                self.volume.reset_ordinary_seeds()
                 self._volume_collect_continuous(it, ctx.dist_cfg)
                 # greedy 结果配额（plan/greedy-outcome-quota rev4）：独立种子流 + 自己的
                 # target/cap；课程 volume 块保持原样。

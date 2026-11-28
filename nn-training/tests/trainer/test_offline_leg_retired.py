@@ -221,6 +221,13 @@ def _bare_steps(*, held: bool = True) -> Any:
     steps._course_iter = lambda _it: None
     steps._iteration_pairs = lambda _it: []
     steps._evalboard_yield = lambda: None
+    # P0-1 第五刀：采集簇是协作对象（本步只碰它的「每轮清零」）。
+    steps.volume = SimpleNamespace(
+        reset_greedy=lambda: None,
+        reset_ordinary_seeds=lambda: None,
+        volume_active=lambda: False,
+        volume_collect_continuous=lambda *_a: None,
+    )
     steps._eval_on_round = lambda _it: False
     return steps
 

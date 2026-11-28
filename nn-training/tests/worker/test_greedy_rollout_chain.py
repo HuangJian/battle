@@ -28,7 +28,7 @@ if str(ROOT) not in sys.path:
 
 from trainer.loop_remote_job import _trim_shards_to_quota
 from trainer.loop_round_steps import RoundSteps
-from trainer.loop_volume import TrainingVolume
+from trainer.loop_volume import VolumePlanner
 from worker.events import write_iteration, write_rollout_end
 from worker.greedy_quota import (
     greedy_progress,
@@ -198,10 +198,17 @@ class _Gate:
         pass
 
 
-class _NodeLoop(TrainingVolume):
+class _NodeLoop:
     """node 腿的最小脚手架：字段与旧 `SimpleNamespace` 一致，另带 `greedy_view()`。"""
 
     _remote_iter: Any
+    args: Any
+
+    def __init__(self) -> None:
+        self.volume = VolumePlanner(cast(Any, self))
+
+    def greedy_view(self) -> Any:
+        return self.volume.greedy_view()
 
 
 def _node_loop(gq: dict) -> _NodeLoop:
@@ -209,10 +216,10 @@ def _node_loop(gq: dict) -> _NodeLoop:
     loop.args = SimpleNamespace(greedy_quota=gq)
     loop._remote_iter = lambda it, pairs: None
     # 上一轮残留：node 分支不跑采集，但发布相位仍会读这三个槽位。
-    loop._greedy_plan = {"stale": True}
-    loop._greedy_stats = {"stale": True}
-    loop._greedy_report = {"stale": True}
-    loop._greedy_waves = 2
+    loop.volume._greedy_plan = {"stale": True}
+    loop.volume._greedy_stats = {"stale": True}
+    loop.volume._greedy_report = {"stale": True}
+    loop.volume._greedy_waves = 2
     return loop
 
 

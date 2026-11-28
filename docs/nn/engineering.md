@@ -160,13 +160,57 @@ stream_meta=None)` 成为 `_report` / `_stream_meta` 的唯一写入口，`Train
 
 口径 A 1539 → **1541**（+2，见 `tests/test_source_text_assert_budget.py` 表头）。
 
+### 第五刀：动态采集 → `VolumePlanner`（同日）
+
+`trainer/loop_volume.py::TrainingVolume`（`RoundSteps` 的最后一个基类，20 方法 / 1437 行）→
+`VolumePlanner` **协作对象** + `VolumeHost` **Protocol**。这是 P0-1 里状态面最大的一刀：
+
+* **状态全部归对象**：`_volume_*` 10 格 + `_greedy_*` 4 格（含 `_volume_halted` /
+  `_volume_ordinary_seeds`）只在 `VolumePlanner.__init__` 赋值；组合根的 `_init_volume_state`
+  整段删除；
+* **读面 = 宿主 property**：`report` / `stream_meta` / `rotate_seed` / `traj_dir` / `traj_root` /
+  `jsonl_path` / `course_fp` / `corpus_fp` / `state_init` / `extra_wver` / `payload_parts` /
+  `model` / `opt` / `device` / `ref_model` / `start_it` 十六个活读数（`VolumeHost` 逐个声明），
+  写面仍是上一刀收口的 `land_collect` + `commit_journal`；
+* **外簇只经视图 / 命令**：`loop_steps` 的 iteration 事件改读 `volume_view()` / `greedy_view()`
+  （活引用），`loop_round_steps` 的每轮清零改调 `reset_greedy()` / `reset_ordinary_seeds()`，
+  `loop_remote_job` 的 greedy 合并改调 `merge_greedy(stats)`、预筛改读 `greedy_view().plan`；
+* **壳只留一行**：18 个旧方法名 + 两个视图在 `TrainingLoop` 上各一行转发（调用点与 patch 点
+  零改动），`RoundSteps` 从此**无基类**；
+* **纯逻辑切出去**：连续配额的一波规划（`plan_continuous_wave` / `ContinuousState` /
+  `WavePlan` / `remember_first_est` / `learned_samples_per_game`）搬进
+  `worker/volume_wave_plan.py`（165 行、零 `self`）——`loop_volume` 的 LOC 因此回到 1000 以下
+  的预算，波次算术也能单独喂表测。
+
+量到的结果：`TrainingLoop.__mro__` **17 → 16**；`loop_volume.py` 1437 → **1317**、
+`loop_core.py` 397 → **674**（22 个壳 + 3 个读面）、`loop_round_steps.py` 771。
+`Any` 记账：`loop_volume` **29 → 11**（借用声明全换成 Protocol 的具体形状），
+`loop_core` 11 → **21**、`loop_round_steps` 38 → **43**——两处都是「壳/借手的签名与对象逐字对齐」
+（`halt_event` 之类的回调句柄仍是 `Any`；换成 `object` 会把 mypy 的形参对账让给 `cast`）。
+
+守卫重写（不是放宽）：`test_loop_volume_split.py` 从「`TrainingLoop.X is TrainingVolume.X`」
+改成 AST 形状 —— 成员闭集住在对象里、组合根**每个旧名恰好一行**且转发到 `volume.<新名>(…)`、
+宿主读面集合 == Protocol 声明集、`__init__` 只赋 `_host` + 槽位、外簇只许调视图与三个命令、
+`_report` 零 `Store` 且落位点仍恰好 6 处。`test_loop_core_tail_split.py` 的
+`COLLABORATORS` 加第五项、`ROUND_STEPS_BASES` → `("object",)`、MRO 名单去掉 `TrainingVolume`。
+测试桩（`_StubLoop` / `e2e _Loop`）按宿主 API 补上读面与 `setattr` 不了的两个接缝
+（假派发 / 无段账）——它们挂在**协作对象实例**上，否则「桩替换派生入口」会静默失效。
+
+计数记账：同名散落 **153 → 163**（`VolumeHost` 的读数与 `volume` 句柄按同一名字出现在组合根与
+四个消费者）、G5 私有断言 `test_loop_volume_split` 3 → **1**、私有 monkeypatch
+`test_stream_collect_end` 2 → **1**、抑制符 `e2e/test_volume_e2e.py` 1 → **2** /
+`tests/worker/test_rollout_volume.py` 4 → **6**（`method-assign`：替身替换对象上的真实方法，
+没有比 `# type: ignore[method-assign]` 更诚实的写法）；口径 A 维持 **1541**（两条弱文本判据
+换成上面的结构判据，一增一减相抵）；模块 doc 基线删掉 `trainer/loop_volume.py` 那一行。
+
+nn python 门禁 **7106 passed / 4 skipped**，ruff / mypy 绿。
+
 ### 下一刀的口径（照同一形状）
 
-P0-1 的剩余簇见 `python.refactor.md` 的处理状态表：`TrainingVolume`（含 `VolumeView` 读数）是
-下一个候选，但它被 `RoundSteps` / 派发 / 远端三面读写，状态面（`_report` / `_stream_meta` /
-`_payload_parts`）与 `Dispatcher` 共享 ⇒ 要么先把那三格也升成宿主只读 property，要么接受
-「读多写少」的接口扩容（同名散落会再涨，需先想清楚）。`TrainingRemote*` 四簇与 `TrainingEval`
-的入边最多，应放在最后。
+P0-1 的剩余簇见 `python.refactor.md` 的处理状态表：下一个候选是 `TrainingSteps`（9 方法 / 15 处
+入边），它的迭代账本槽（`_agg` / `_chunks_n` / `_total_steps` / `_ppo_sec` / `_kl_cum` / `_hr_*`）
+被 Remote/Steps 读、`_eval_thread` 与 Eval 共享 ⇒ 先立 `IterLedgerView`（照 `VolumeView` 的形状）
+再把写面收成具名入口。`TrainingRemote*` 四簇与 `TrainingEval` 的入边最多，应放在最后。
 每刀都要：对象拥有自己的状态、宿主读面走 Protocol、组合根只留一行壳、
 守卫从 `is` 同一性改成 AST 形状 —— **不要**把 `self.host._private` 当捷径（那就只是多绕一层）。
 

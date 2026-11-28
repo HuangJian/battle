@@ -135,7 +135,6 @@ SLOT_WRITERS: dict[str, frozenset[str]] = {
     "_demo_raw": frozenset({"loop_remote_job.py"}),
     # greedy 结果配额（plan/greedy-outcome-quota rev4）：发布阶段预筛完后写；
     # 采集阶段在 `loop_volume` 自己那份槽位写，本族只登记这一处。
-    "_greedy_stats": frozenset({"loop_remote_job.py"}),
     "_kl_cum": frozenset({"loop_remote_job.py"}),
     "_ppo_cloud_sec": frozenset({"loop_remote_job.py"}),
     "_ppo_sec": frozenset({"loop_remote_job.py"}),

@@ -240,7 +240,12 @@ BASELINE_CLONE = 18
 #: `corpus_fp` / `eval_every` / `jsonl_path`）。它们与既有的 `IterWorkspaceHost` /
 #: `BaselineHost` / `BundleHost` 共同构成**同一组宿主接口**——同一个概念、同一个名字；
 #: 换名等于让「本轮目录」/「课程指纹」在四个协作对象里各叫一个东西（与前三格同判）。
-BASELINE_SAME_NAME_GE3 = 153
+#: **2026-11-28 再抬同名 10 格（153 → 163）的账**：P0-1 第五刀把 `TrainingVolume` 混入拆成
+#: 协作对象 `VolumePlanner` 后，`VolumeHost` 声明了宿主已有的公开读数（`report` / `stream_meta`
+#: / `rotate_seed` / `traj_dir` / `payload_parts` …），且 `volume` 这个句柄要按**同一个名字**
+#: 出现在组合根、`RoundSteps`、`TrainingSteps`、`TrainingRemoteJob` 里（旧名壳转发 +
+#: 跨簇只读视图都经它）。它们与前四格同判：同一个概念、同一个名字，不是又抄了一份实现。
+BASELINE_SAME_NAME_GE3 = 163
 
 
 def _stems(modules: frozenset[str]) -> frozenset[str]:

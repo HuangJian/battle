@@ -135,7 +135,22 @@ def _host(tmp_path: Path, **over: Any) -> Any:
         "_ledger_apply": lambda _ev: None,
     }
     base.update(over)
-    return types.SimpleNamespace(**base)
+    ns = types.SimpleNamespace(**base)
+    ns.volume = _volume_view_for(ns)
+    return ns
+
+
+def _volume_view_for(ns: Any) -> Any:
+    """最小采集读面（P0-1 第五刀）：`_record_iteration` 只经视图读这四个读数。"""
+    return types.SimpleNamespace(
+        volume_view=lambda: types.SimpleNamespace(
+            target=ns._volume_target,
+            collected=ns._volume_collected,
+            capped=ns._volume_capped,
+            stage_stats=ns._volume_stage_stats,
+        ),
+        greedy_view=lambda: types.SimpleNamespace(stats=None, plan=None),
+    )
 
 
 def _last(jsonl: Path) -> Any:

@@ -260,7 +260,6 @@ def test_composition_appends_the_new_mixin() -> None:
     from trainer.loop_remote import TrainingRemote
     from trainer.loop_round_steps import RoundSteps
     from trainer.loop_steps import TrainingEval, TrainingSteps
-    from trainer.loop_volume import TrainingVolume
 
     assert TrainingLoop.__bases__ == (
         RoundSteps,
@@ -273,8 +272,8 @@ def test_composition_appends_the_new_mixin() -> None:
 
     assert TrainingSteps.__bases__ == (TrainingRemote, TrainingEval)
     assert TrainingSteps.__mro__[1] is TrainingRemote
-    assert RoundSteps.__bases__[0] is TrainingVolume
-    assert RoundSteps.__mro__[1] is TrainingVolume
+    # P0-1 第五刀：采集簇是协作对象 ⇒ `RoundSteps` 已无基类。
+    assert RoundSteps.__bases__ == (object,)
     # 本簇只要**在场**（入边要它同时被 RoundSteps 与 TrainingRemote 看到）；顺序无契约。
     # 全量 MRO 名单的唯一所有者在 `test_loop_core_tail_split.py`（S4 第二十刀收尾那份）。
     assert TrainingLifecycle in TrainingLoop.__mro__

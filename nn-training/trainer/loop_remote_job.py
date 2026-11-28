@@ -169,7 +169,6 @@ class TrainingRemoteJob(TrainingRemotePush):
     _traj_dir: Any
     _jsonl_path: Any
     #: greedy 结果配额（plan/greedy-outcome-quota rev4）：预筛阶段写；plan 只经 getattr 读。
-    _greedy_stats: Any
     _ppo_sec: float
     #: 云端 worker **自报**的真训练秒（load+chunk+update，不含上传/排队/下载）。
     #: 与 `_ppo_sec`（往返墙钟）分开记——后者打包传输与排队，用于诊断/配额，
@@ -199,6 +198,8 @@ class TrainingRemoteJob(TrainingRemotePush):
     _ensure_ts_code: Any
     #: 产物出包协作对象（P0-1 第三刀）：TS 运行时缓存的读者改问它的公开读数。
     exporter: BundleExporter
+    #: 采集协作对象（P0-1 第五刀）：greedy 槽位只经只读视图读、经 `merge_greedy` 写。
+    volume: Any
     #: P2：replay 转换器 bundle 的懒构建（实现在 `trainer/loop_export.py`）。
     _ensure_replay_converter: Any
     #: `_remote_ppo_publish` 里以 `hasattr`/`getattr` 动态访问（EvalBoard 让位属于编排层）——
@@ -641,13 +642,12 @@ class TrainingRemoteJob(TrainingRemotePush):
         #   `exporting` 档（`--export-bundle`，只读快照 + 不训练）不裁：那份包是给人看的全量。
         quota = self._per_stage_quota(it)
         protected: set[str] = set()
-        plan = getattr(self, "_greedy_plan", None)
+        plan = self.volume.greedy_view().plan
         if plan is not None and export_path is None and shard_dirs:
             # greedy 分层预筛（plan/greedy-outcome-quota rev4）：必须在配额裁剪**之前**，
             # 把多余 greedy 局按 outcome/逐关丢掉，保住子集交给 trim 的 protected。
             from worker.greedy_quota import (
                 load_manifests,
-                merge_greedy_stats,
                 select_greedy_shards,
             )
 
@@ -661,9 +661,7 @@ class TrainingRemoteJob(TrainingRemotePush):
             # 读数覆盖：本方法在 `step_rollout` 之后、`record_iteration` 之前跑，两处事件
             # 读的是同一个槽位。预筛读数挂子键 ⇒ iteration 事件同时可归因采集与预筛
             # （plan rev4 §5.1/§5.2 的「是否触发降级要写 iteration 事件」）。
-            self._greedy_stats = merge_greedy_stats(
-                getattr(self, "_greedy_stats", None), sel.stats
-            )
+            self.volume.merge_greedy(sel.stats)
             log(f"it{it}: greedy 预筛 stats={sel.stats}")
         if quota > 0 and export_path is None:
             kept, n_trimmed, n_kept = _trim_shards_to_quota(

@@ -1,50 +1,27 @@
-"""拆分的**契约守卫**：`TrainingLoop` 的动态采集（按样本量）编排永住 `trainer/loop_volume.py`
-（S4 第十八刀，2026-09-25）。
+"""拆分的**契约守卫**：动态采集（按样本量）编排是**协作对象** `VolumePlanner`
+（P0-1 第五刀，2026-11-28；前身是 S4 第十八刀的 `TrainingVolume` 混入）。
 
 ## 这一刀切了什么
 
-`trainer/loop_core.py` 1386 → 923 行；`TrainingLoop`（25 方法）里**唯一一条真正的方法间调用链**
-——12 个成员 / 445 行（占原模块 32%，且恰好是旧类的**尾块**）——搬到
-`trainer/loop_volume.py::TrainingVolume`：
+混入 → 对象：状态（15 个槽位）与逻辑（18 个方法）都归 `trainer/loop_volume.py::VolumePlanner`，
+组合根 `TrainingLoop` 只留**恰好一行**转发壳（旧方法名不改，调用点零改动），装配在
+`__init__` 里一行 `self.volume = VolumePlanner(self)`。
 
-```
-_iteration_pairs ─┬─► _volume_active
-                  ├─► _volume_est_samples ─► _volume_stage_ests_map ─┐
-                  └─► _volume_stages ─────────────────────────────────┼─► _dispatch_volume_wave
-_volume_topup ─┬─► _volume_journal_replay                             │
-               └─► _volume_active                                     │
-_volume_collect_continuous（VOLUME_RULE_V2 生产路径）───────────────────┘
-```
-
-切法是**混入**（与第十四/十五/十七刀同源）：同一把锁、同一个 `self`、**零行为变化**。
-组装方向按本仓既有规则「调用者依赖被调用者」：本簇的外部入口**全部**在 `RoundSteps`
-（`step_rollout` / `step_volume_topup`）⇒ `class RoundSteps(TrainingVolume)`，
-**不是**给 `TrainingLoop` 加基类 —— 后者要改组合类 + 四个「继承真混入」的测试宿主，并让
-`tests/trainer/test_loop_eval_split.py` 的「组合类直接基类」断言失守。本刀**零守卫改动**。
-
-（2026-09-25 S4 第十九刀补：主循环骨架那一簇**不得不**动用组合根——它的入边让 sibling
- 宿主不存在；那刀把组合类元组追加成四件，并同步登记了本文件与 `test_loop_eval_split.py`
- 的两处断言。本文件钉的 `RoundSteps.__bases__` / `__mro__[1]` 逐字不变。）
+宿主读面用 `VolumeHost(Protocol)` + property（活读数，不拷副本）：
+`report` / `stream_meta` / `rotate_seed` / `traj_dir` / `traj_root` / `jsonl_path` / `course_fp` /
+`corpus_fp` / `state_init` / `extra_wver` / `payload_parts` / `model` / `opt` / `device` /
+`ref_model` / `start_it`；写面只有 `land_collect` / `commit_journal`。
 
 ## 本文件钉住什么
 
-1. 12 个成员**定义**在新家，`TrainingLoop` 里**零同名定义**（门面只能是门面）；
-2. 接线是**对象级同一**（`TrainingLoop.X is TrainingVolume.X`），不是同名副本——既有用例
-   （`tests/worker/test_rollout_volume.py` / `e2e/test_volume_e2e.py`）用的就是
-   `TrainingLoop._volume_topup(cast(Any, stub), …)` 这种 **unbound 绑定**；
-3. 组装是 `RoundSteps.__bases__[0] is TrainingVolume` 且 `__mro__[1]` 就是它（**末位追加**、
-   不插队——S4 第十九/二十刀在它后面长过四件：`TrainingLifecycle` 与三个轮内实现混入）。
-   逐字元组与全量 MRO 名单的唯一所有者在 `test_loop_core_tail_split.py`；
-4. **状态归属**：七个 volume 槽位在 `TrainingVolume` 声明；`TrainingLoop.__init__` 仍负责
-   **赋值**（跨轮字段的持有者不变）。另有三处在 `TrainingSteps` 里**有意并存**的声明——
-   那个 sibling mixin 继承不到 `TrainingVolume`，不给声明 mypy 就报 attr-defined；
-5. **跨模块手闭集**：除 `__init__`（Store × 7）与 `TrainingSteps._record_iteration`
-   （Load × 3）外，任何宿主方法碰 volume 槽位都要显式改这张表；
-6. 顶层 import 面**闭合**；`biz.volume_waves` / `biz.volume_quota` 只许在方法体内延迟 import
-   （那是原有的 DI 面，测试 patch 的一直是实现模块）；
-7. 不得反向 import `trainer.loop_core` / `trainer.loop_steps` / `trainer.loop_round_steps`；
-8. **★ 两条功能性**：`log` seam 住在**本模块**（打 `trainer.loop_core.log` 是静默空操作——
-   本刀的题眼）· unbound 绑定经 MRO 取到真实现。
+1. 簇成员**定义**在 `VolumePlanner`，`TrainingLoop` 里只有一行壳（门面只能是门面）；
+2. 壳逐条转发到 `self.volume.<新名>(…)`——**不再有对象级同一**（那是混入时代的事）；
+3. 组装：`RoundSteps` 已无基类；`TrainingLoop.__bases__` 四件套不变；
+4. **状态归属**：槽位只在 `VolumePlanner.__init__` 赋值；宿主/兄弟簇零写入；
+5. **跨簇读面闭集**：外簇只许 `volume_view()` / `greedy_view()` 读，只许三个命令写；
+6. 顶层 import 面闭合；`worker.volume_waves` / `worker.volume_quota` 仍只延迟 import；
+7. 不得反向 import `trainer.loop_core` / `loop_steps` / `loop_round_steps`；
+8. **★ 两条功能性**：`log` seam 住在**本模块** · `land_collect` 是报告唯一写面。
 """
 
 from __future__ import annotations
@@ -60,63 +37,71 @@ CORE_PY = NN_ROOT / "trainer" / "loop_core.py"
 STEPS_PY = NN_ROOT / "trainer" / "loop_steps.py"
 ROUND_STEPS_PY = NN_ROOT / "trainer" / "loop_round_steps.py"
 
-#: 这一簇的成员（闭集）：18 个方法 —— 新方法要么住在 `TrainingLoop`，要么改这张表。
-CLUSTER = (
-    "_volume_active",
-    "_volume_stages",
-    "_volume_est_samples",
-    "_iteration_pairs",
-    "_volume_stage_ests_map",
-    "_dispatch_volume_wave",
-    "_volume_journal_replay",
-    "_volume_topup",
-    "_volume_collect_continuous",
-    # 2026-11-18（长函数存量）：`_volume_collect_continuous` 拆出的循环段与收官段。
-    "_volume_continuous_loop",
-    "_volume_continuous_settle",
-    # greedy 结果配额（plan/greedy-outcome-quota rev4）：独立采集阶段。
-    "_volume_collect_greedy",
-    # 2026-11-18（长函数存量）：`_volume_collect_greedy` 拆出的派发波与盘上扫描。
-    "_dispatch_greedy_wave",
-    "_greedy_scan",
-    # 2026-11-24（长函数存量）：`_volume_collect_greedy` 拆出的预算 / 取局 / 收官三段。
-    "_greedy_budget",
-    "_greedy_wave_pairs",
-    "_greedy_settle",
-    # 2026-10-28（零落盘）：补波的「本波已采多少」要读本轮内存账（回传 shard 不在盘上）。
-    "_round_mem_shards",
-    # 2026-11-18（G5）：公开只读观测面 —— 测试断言配额/分关账/greedy 读数走它，
-    # 不再逐条伸进私有槽位（`tests/worker/test_rollout_volume.py` 46 → 2）。
-    "volume_view",
-    # 2026-11-18（G5）：greedy 槽位的只读快照 —— 跨轮清零的契约改读它
-    # （`tests/worker/test_greedy_rollout_chain.py` 6 → 0）。
-    "greedy_view",
-)
+#: 协作对象的成员（闭集）：新名 → 组合根上的旧名壳。
+PLANNER_METHODS: dict[str, str] = {
+    "round_mem_shards": "_round_mem_shards",
+    "volume_active": "_volume_active",
+    "volume_stages": "_volume_stages",
+    "volume_est_samples": "_volume_est_samples",
+    "iteration_pairs": "_iteration_pairs",
+    "volume_stage_ests_map": "_volume_stage_ests_map",
+    "dispatch_volume_wave": "_dispatch_volume_wave",
+    "volume_journal_replay": "_volume_journal_replay",
+    "volume_topup": "_volume_topup",
+    "volume_collect_continuous": "_volume_collect_continuous",
+    "volume_continuous_loop": "_volume_continuous_loop",
+    "volume_continuous_settle": "_volume_continuous_settle",
+    "volume_collect_greedy": "_volume_collect_greedy",
+    "dispatch_greedy_wave": "_dispatch_greedy_wave",
+    "greedy_budget": "_greedy_budget",
+    "greedy_wave_pairs": "_greedy_wave_pairs",
+    "greedy_settle": "_greedy_settle",
+    "greedy_scan": "_greedy_scan",
+}
 
-#: 随簇搬走的七个槽位（新家 = `TrainingVolume`）。
-CLUSTER_SLOTS = (
+#: 只读观测面（组合根同名壳 + 外簇的唯一读入口）。
+VIEWS = ("volume_view", "greedy_view")
+
+#: 协作对象的写命令（外簇只许经这三个改它的状态）。
+COMMANDS = ("reset_greedy", "reset_ordinary_seeds", "merge_greedy")
+
+#: 槽位（`VolumePlanner.__init__` 是唯一初值点）。
+PLANNER_SLOTS = (
     "_volume_target",
     "_volume_collected",
     "_volume_waves",
     "_volume_g0",
     "_volume_est",
     "_volume_capped",
+    "_volume_halted",
     "_volume_stage_ests",
+    "_volume_stage_stats",
+    "_greedy_plan",
+    "_greedy_stats",
+    "_greedy_report",
+    "_greedy_waves",
+    "_volume_ordinary_seeds",
 )
 
-#: 旧类里对这几个槽位的**跨模块使用**：宿主 `__init__` 赋值七个 + `TrainingSteps._record_iteration`
-#: 读三个（落 iteration 事件）。任何新增读写都要显式改这张表。
-CROSS_MODULE_HANDS: frozenset[str] = frozenset(
-    [f"_init_volume_state|{slot}|Store" for slot in CLUSTER_SLOTS]
-    + [
-        "_record_iteration|_volume_capped|Load",
-        "_record_iteration|_volume_collected|Load",
-        "_record_iteration|_volume_target|Load",
-    ]
+#: 宿主读面（`VolumeHost` 的 property；组合根同名 property 返回私有槽）。
+HOST_READS = (
+    "model",
+    "opt",
+    "device",
+    "ref_model",
+    "start_it",
+    "traj_root",
+    "traj_dir",
+    "jsonl_path",
+    "rotate_seed",
+    "course_fp",
+    "corpus_fp",
+    "state_init",
+    "extra_wver",
+    "payload_parts",
+    "report",
+    "stream_meta",
 )
-
-#: `TrainingSteps` 里**有意并存**的槽位声明（该 sibling mixin 不继承 `TrainingVolume`）。
-SIBLING_DECLARED = ("_volume_capped", "_volume_collected", "_volume_target")
 
 #: 顶层 import 面的闭集（模块名）。
 TOP_LEVEL_ALLOWED = {
@@ -130,10 +115,27 @@ TOP_LEVEL_ALLOWED = {
     "worker.reports",
     "worker.resume",
     "trainer.rollout_phase",
+    "worker.volume_wave_plan",
 }
 
 #: DI 目标：只许**方法体内**延迟 import（测试 patch 的是这些实现模块）。
 LAZY_ONLY = ("worker.volume_waves", "worker.volume_quota")
+
+#: 外簇（除组合根与协作对象自己）扫描面。
+SIBLING_SOURCES = (
+    (STEPS_PY, "TrainingSteps"),
+    (ROUND_STEPS_PY, "RoundSteps"),
+    (NN_ROOT / "trainer" / "loop_remote.py", "TrainingRemote"),
+    (NN_ROOT / "trainer" / "loop_remote_drive.py", "TrainingRemoteDrive"),
+    (NN_ROOT / "trainer" / "loop_remote_job.py", "TrainingRemoteJob"),
+    (NN_ROOT / "trainer" / "loop_remote_fail.py", "TrainingRemoteFail"),
+    (NN_ROOT / "trainer" / "loop_remote_push.py", "TrainingRemotePush"),
+    (NN_ROOT / "trainer" / "loop_guards.py", "TrainingGuards"),
+    (NN_ROOT / "worker" / "loop_guards_trip.py", "TrainingGuardsTrip"),
+    (NN_ROOT / "worker" / "loop_guards_leg.py", "TrainingGuardsLeg"),
+    (NN_ROOT / "worker" / "loop_guards_gate.py", "TrainingGuardsGate"),
+    (NN_ROOT / "worker" / "loop_guards_sweep.py", "TrainingGuardsSweep"),
+)
 
 
 def _tree(path: Path) -> ast.Module:
@@ -146,19 +148,17 @@ def _class_node(path: Path, cls: str) -> ast.ClassDef:
     )
 
 
+def _classes(path: Path) -> dict[str, ast.ClassDef]:
+    return {
+        n.name: n
+        for n in ast.walk(_tree(path))
+        if isinstance(n, ast.ClassDef)
+    }
+
+
 def _methods(path: Path, cls: str) -> dict[str, ast.FunctionDef]:
     node = _class_node(path, cls)
     return {m.name: m for m in node.body if isinstance(m, ast.FunctionDef)}
-
-
-def _declared(path: Path, cls: str) -> set[str]:
-    """类体里**声明**的实例属性名（有注解，无值也算）。"""
-    node = _class_node(path, cls)
-    out: set[str] = set()
-    for m in node.body:
-        if isinstance(m, ast.AnnAssign) and isinstance(m.target, ast.Name):
-            out.add(m.target.id)
-    return out
 
 
 def _self_attr_roles(fn: ast.FunctionDef) -> dict[str, set[str]]:
@@ -202,74 +202,105 @@ def _in_function_imports(path: Path) -> set[str]:
 # ─────────────────────────────── 定义面 ───────────────────────────────
 
 
-def test_cluster_is_defined_in_loop_volume_only() -> None:
-    """13 个成员定义在 `TrainingVolume`；`TrainingLoop` 里**不得**再有同名定义。
+def test_cluster_is_defined_in_the_planner_only() -> None:
+    """成员定义在 `VolumePlanner`；组合根只有一行壳，混入类已消失。"""
+    in_planner = set(_methods(VOLUME_PY, "VolumePlanner")) - {"__init__"}
+    assert in_planner == {*PLANNER_METHODS, *VIEWS, *COMMANDS}, sorted(
+        in_planner ^ {*PLANNER_METHODS, *VIEWS, *COMMANDS}
+    )
+    assert "TrainingVolume" not in _classes(VOLUME_PY), (
+        "混入类没删干净——两套实现会各自漂"
+    )
+    core = _methods(CORE_PY, "TrainingLoop")
+    for legacy in (*PLANNER_METHODS.values(), *VIEWS, "_greedy_halted"):
+        if legacy == "_greedy_halted":
+            continue
+        assert legacy in core, f"旧调用点的壳不见了：{legacy}"
+    # 新名不得在组合根上冒出第二份实现（只许壳，且壳里只有一次调用 + 可选 return）。
+    for name in PLANNER_METHODS:
+        assert name not in core, f"{name} 不该出现在组合根（那是协作对象自己的名字）"
+    for legacy, name in ((old, new) for new, old in PLANNER_METHODS.items()):
+        fn = core[legacy]
+        body = [
+            stmt
+            for stmt in fn.body
+            if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant))
+        ]
+        assert len(body) == 1, f"{legacy} 的壳不止一行：{len(body)}"
+        stmt = body[0]
+        call = getattr(stmt, "value", None)
+        assert isinstance(call, ast.Call), f"{legacy} 的壳不是一次调用"
+        callee = call.func
+        assert isinstance(callee, ast.Attribute) and callee.attr == name, (
+            f"{legacy} 没有转发到 volume.{name}（实际：{ast.dump(callee)[:60]}）"
+        )
+        owner = callee.value
+        assert isinstance(owner, ast.Attribute) and owner.attr == "volume", legacy
 
-    这条挡的是「就地补一个同名方法」——那会让 `TrainingVolume` 里那份变成死代码，而测试
-    （跑在组合实例上，MRO 取到旧类那份）照样绿。
-    """
-    in_volume = set(_methods(VOLUME_PY, "TrainingVolume"))
-    in_core = set(_methods(CORE_PY, "TrainingLoop"))
-    assert set(CLUSTER) <= in_volume, sorted(set(CLUSTER) - in_volume)
-    crept_back = sorted(set(CLUSTER) & in_core)
-    assert crept_back == [], f"这些方法又回到 TrainingLoop 了：{crept_back}"
-    # 闭集：新家只装这 13 个方法（顺手往里塞 helper 会在这里红）
-    assert in_volume == set(CLUSTER), sorted(in_volume ^ set(CLUSTER))
-    # 旧模块里只剩**指路注释**（不是实现）：读者找 `_volume_topup` 时不会两手空空。
-    core_src = CORE_PY.read_text(encoding="utf-8")
-    assert "已整体搬到" in core_src and "trainer/loop_volume.py::TrainingVolume" in core_src
-    for name in CLUSTER:
-        assert f"def {name}" not in core_src, name
 
-
-def test_wiring_is_by_object_identity_not_copies() -> None:
-    """`TrainingLoop.X is TrainingVolume.X`（同一个函数对象，不是同名副本）。"""
+def test_host_reads_are_live_properties_not_copies() -> None:
+    """宿主读面全是 property（活读数）：`VolumeHost` 声明的名字与组合根逐个对上。"""
     from trainer.loop_core import TrainingLoop
-    from trainer.loop_volume import TrainingVolume
 
-    for name in CLUSTER:
-        assert getattr(TrainingLoop, name) is getattr(TrainingVolume, name), name
+    host = _class_node(VOLUME_PY, "VolumeHost")
+    declared = {
+        m.name
+        for m in host.body
+        if isinstance(m, ast.FunctionDef)
+        and any(_is_property(d) for d in m.decorator_list)
+    }
+    assert declared == set(HOST_READS), sorted(declared ^ set(HOST_READS))
+    for name in HOST_READS:
+        assert isinstance(getattr(TrainingLoop, name), property), name
+    # 协作对象只认协议上的名字：`self._host.X` 必须在闭集里。
+    used = {
+        sub.attr
+        for fn in _methods(VOLUME_PY, "VolumePlanner").values()
+        for sub in ast.walk(fn)
+        if isinstance(sub, ast.Attribute)
+        and isinstance(sub.value, ast.Attribute)
+        and sub.value.attr == "_host"
+    }
+    allowed = set(HOST_READS) | {
+        "args",
+        "bun",
+        "ppo_backend",
+        "update_kwargs",
+        "commit_journal",
+        "land_collect",
+    }
+    assert used <= allowed, sorted(used - allowed)
 
 
-def test_composition_is_on_the_caller_side() -> None:
-    """组装在**调用者一侧**：`RoundSteps(TrainingVolume)`；第一个判据逐项均成立。
+def _is_property(dec: ast.expr) -> bool:
+    return isinstance(dec, ast.Name) and dec.id == "property"
 
-    2026-09-25（S4 第十九/二十刀）**演进登记**：组合类元组尾多了 `TrainingLifecycle`；
-    `RoundSteps` 又在**末位**长了三个轮内实现混入（S4 第二十刀）。旧一刀钉的把心仍逐字成立：
-    本簇是 `RoundSteps.__bases__` 的**第一位**、`__mro__[1]` 就是它（= 追加不插队）。
-    **逐字元组与全量 MRO 名单的唯一所有者**是 `test_loop_core_tail_split.py`（本刀收尾的那份）；
-    本用例只钉与本簇有关的结构关系，免得同一事实在三个文件里各写一份、各自漂。
-    """
+
+def test_composition_root_only_forwards() -> None:
+    """组装：`RoundSteps` 无基类；`TrainingLoop.__bases__` 四件套；装配一行。"""
     from trainer.loop_core import TrainingLoop
     from trainer.loop_guards import TrainingGuards
     from trainer.loop_lifecycle import TrainingLifecycle
-    from trainer.loop_remote import TrainingRemote
     from trainer.loop_round_steps import RoundSteps
-    from trainer.loop_steps import TrainingEval, TrainingSteps
-    from trainer.loop_volume import TrainingVolume
+    from trainer.loop_steps import TrainingSteps
 
-    assert RoundSteps.__bases__[0] is TrainingVolume
-    assert RoundSteps.__mro__[1] is TrainingVolume
-    # 判据：走调用者一侧 ⇒ 组合类与四个「继承真混入」的测试宿主一行不改。
+    assert RoundSteps.__bases__ == (object,)
     assert TrainingLoop.__bases__ == (
         RoundSteps,
         TrainingSteps,
         TrainingGuards,
         TrainingLifecycle,
     )
-    assert TrainingVolume not in TrainingLoop.__bases__
-    assert TrainingLifecycle not in RoundSteps.__bases__
-    # 相对位置（两簇各自必须压在被它取代的那些实现之前）：本簇仍在 RoundSteps 的第一位。
-    assert RoundSteps.__mro__[1] is TrainingVolume
-    assert TrainingVolume not in TrainingSteps.__mro__
-    # 方向对得上：**生产**入口全在 RoundSteps（它才是调用者）
+    init = _methods(CORE_PY, "TrainingLoop")["__init__"]
+    init_src = ast.get_source_segment(CORE_PY.read_text(encoding="utf-8"), init) or ""
+    assert "self.volume = VolumePlanner(self)" in init_src
+    # 初始化归协作对象（`_init_volume_state` 已从组合根删除，`STAYS` 闭集在
+    # `test_loop_core_tail_split.py` 里挡它回来）。
+    # 生产入口全在 RoundSteps（它才是调用者），且只经协作对象/壳。
     round_src = ROUND_STEPS_PY.read_text(encoding="utf-8")
     for name in ("_iteration_pairs", "_volume_active", "_volume_collect_continuous"):
         assert f"self.{name}(" in round_src, f"RoundSteps 不再调 {name}——方向判断失效"
-        assert f"def {name}" not in round_src, f"{name} 被就地重新定义在 RoundSteps 里了"
-    # `_volume_topup`（离散补波）自 VOLUME_RULE_V2 起已退役：`step_volume_topup` 只是
-    # `STEP_ORDER` 要求的**空步**，生产路径不调本簇任何方法——它只由既有 e2e/单测以 unbound
-    # 形式驱动。这条同时挡住「把退役规则又接回生产路径」而没人注意。
+    # 退役的离散补波：生产路径零调用（只由既有 e2e/单测以 unbound 形式驱动）。
     assert "self._volume_topup(" not in round_src
     topup_step = _methods(ROUND_STEPS_PY, "RoundSteps")["step_volume_topup"]
     topup_src = ast.get_source_segment(round_src, topup_step)
@@ -279,71 +310,51 @@ def test_composition_is_on_the_caller_side() -> None:
 # ─────────────────────────────── 状态面 ───────────────────────────────
 
 
-def test_volume_slots_are_declared_in_the_new_home() -> None:
-    """七个槽位在 `TrainingVolume` 声明；`TrainingSteps` 的三处**有意并存**（并集闭合）。"""
-    from trainer.loop_steps import TrainingSteps
-    from trainer.loop_volume import TrainingVolume
-
-    declared_here = _declared(VOLUME_PY, "TrainingVolume")
-    for slot in CLUSTER_SLOTS:
-        assert slot in declared_here, slot
-        assert slot in TrainingVolume.__annotations__, slot
-    # sibling mixin（TrainingSteps）继承不到 TrainingVolume ⇒ 它读的三个必须自己声明。
-    sibling = set(_declared(STEPS_PY, "TrainingSteps")) & set(CLUSTER_SLOTS)
-    assert sorted(sibling) == sorted(SIBLING_DECLARED), sorted(sibling)
-    assert sorted(set(TrainingSteps.__annotations__) & set(CLUSTER_SLOTS)) == sorted(
-        SIBLING_DECLARED
-    )
-
-
-def test_host_still_initializes_the_slots() -> None:
-    """`TrainingLoop` 仍**赋值**全部七个槽位（2026-11-27 §385：声明段 `_init_volume_state`）。"""
-    methods = _methods(CORE_PY, "TrainingLoop")
-    writes = {
-        n.attr
-        for name in ("__init__", "_init_volume_state")
-        for n in ast.walk(methods[name])
-        if isinstance(n, ast.Attribute)
-        and isinstance(n.value, ast.Name)
-        and n.value.id == "self"
+def test_slots_are_initialized_in_the_planner_only() -> None:
+    """槽位只在 `VolumePlanner.__init__` 赋值；宿主与兄弟簇零写入。"""
+    init = _methods(VOLUME_PY, "VolumePlanner")["__init__"]
+    stores = {
+        attr for attr, roles in _self_attr_roles(init).items() if "Store" in roles
     }
-    assert set(CLUSTER_SLOTS) <= writes, sorted(set(CLUSTER_SLOTS) - writes)
+    missing = sorted(set(PLANNER_SLOTS) - stores)
+    assert missing == [], f"协作对象没初始化这些槽：{missing}"
 
-
-def test_cross_module_hands_are_the_declared_ones() -> None:
-    """除申报的两处外，无人碰 volume 槽位——否则状态归属会悄悄裂成「谁都能写」。"""
-    found: set[str] = set()
-    # S4 第二十二刀把 `loop_remote` 的类体切成四个混入 ⇒ 远端一族的覆盖改成“四个新家 + 组合根”
-    # （组合根现在零方法，保留它是为了钉住「没被顺手塞回」；只读旧文件会让本用例**静默失去覆盖**）。
-    remote_family = (
-        (NN_ROOT / "trainer" / "loop_remote.py", "TrainingRemote"),
-        (NN_ROOT / "trainer" / "loop_remote_drive.py", "TrainingRemoteDrive"),
-        (NN_ROOT / "trainer" / "loop_remote_job.py", "TrainingRemoteJob"),
-        (NN_ROOT / "trainer" / "loop_remote_fail.py", "TrainingRemoteFail"),
-        (NN_ROOT / "trainer" / "loop_remote_push.py", "TrainingRemotePush"),
-    )
-    # S4 第二十三刀同款：`loop_guards` 的 12 个成员切进四个新混入 ⇒ 覆盖也改成「四新家 + 组合根」。
-    # **只读旧文件会让本用例静默失去那 12 个成员的覆盖**（组合根现在只剩 4 个 sink）。
-    guards_family = (
-        (NN_ROOT / "trainer" / "loop_guards.py", "TrainingGuards"),
-        (NN_ROOT / "worker" / "loop_guards_trip.py", "TrainingGuardsTrip"),
-        (NN_ROOT / "worker" / "loop_guards_leg.py", "TrainingGuardsLeg"),
-        (NN_ROOT / "worker" / "loop_guards_gate.py", "TrainingGuardsGate"),
-        (NN_ROOT / "worker" / "loop_guards_sweep.py", "TrainingGuardsSweep"),
-    )
-    for path, cls in (
-        (CORE_PY, "TrainingLoop"),
-        (STEPS_PY, "TrainingSteps"),
-        *remote_family,
-        *guards_family,
-        (ROUND_STEPS_PY, "RoundSteps"),
-    ):
-        for fn in _methods(path, cls).values():
+    offenders: set[str] = set()
+    for path, cls in ((CORE_PY, "TrainingLoop"), *SIBLING_SOURCES):
+        for name, fn in _methods(path, cls).items():
             for attr, roles in _self_attr_roles(fn).items():
-                if attr in CLUSTER_SLOTS:
-                    for role in roles:
-                        found.add(f"{fn.name}|{attr}|{role}")
-    assert found == set(CROSS_MODULE_HANDS), sorted(found ^ set(CROSS_MODULE_HANDS))
+                if attr in PLANNER_SLOTS and "Store" in roles:
+                    offenders.add(f"{path.name}|{name}|{attr}")
+    assert offenders == set(), sorted(offenders)
+
+
+def test_sibling_clusters_only_touch_views_and_commands() -> None:
+    """外簇只许经只读视图读、经三个命令写——否则状态归属会裂成「谁都能改」。"""
+    reads: dict[str, set[str]] = {}
+    commands: set[str] = set()
+    for path, cls in SIBLING_SOURCES:
+        for fn in _methods(path, cls).values():
+            for sub in ast.walk(fn):
+                if not isinstance(sub, ast.Call) or not isinstance(sub.func, ast.Attribute):
+                    continue
+                owner = sub.func.value
+                if not (
+                    isinstance(owner, ast.Attribute)
+                    and owner.attr == "volume"
+                    and isinstance(owner.value, ast.Name)
+                    and owner.value.id == "self"
+                ):
+                    continue
+                if sub.func.attr in VIEWS:
+                    reads.setdefault(sub.func.attr, set()).add(path.name)
+                elif sub.func.attr in COMMANDS:
+                    commands.add(sub.func.attr)
+                else:
+                    raise AssertionError(
+                        f"{path.name} 绕过视图直接调 volume.{sub.func.attr}()"
+                    )
+    assert "volume_view" in reads and "greedy_view" in reads, reads
+    assert commands == {"reset_greedy", "reset_ordinary_seeds", "merge_greedy"}, commands
 
 
 # ─────────────────────────────── 依赖面 ───────────────────────────────
@@ -365,7 +376,7 @@ def test_lazy_targets_stay_lazy() -> None:
 
 
 def test_loop_volume_does_not_import_the_hosts() -> None:
-    """不得成环：新家不许 import `trainer.loop_core` / `trainer.loop_steps` / `trainer.loop_round_steps`。"""
+    """不得成环：协作对象不许 import `trainer.loop_core` / `loop_steps` / `loop_round_steps`。"""
     got = _top_level_imports(VOLUME_PY) | _in_function_imports(VOLUME_PY)
     for bad in ("trainer.loop_core", "trainer.loop_steps", "trainer.loop_round_steps"):
         assert bad not in got, bad
@@ -374,60 +385,52 @@ def test_loop_volume_does_not_import_the_hosts() -> None:
 # ─────────────────────────────── 功能性 ───────────────────────────────
 
 
-def test_log_seam_lives_here_not_in_loop_core(monkeypatch) -> None:
-    """★ 本刀的题眼：`_volume_topup` 的日志按**本模块**的 `log` 解析。
+def _stream_host() -> Any:
+    """最小宿主：流式轮的 `volume_topup` 只读 `args` / `stream_meta` 就返回。"""
+    ns = SimpleNamespace(
+        args=SimpleNamespace(target_transitions=100),
+        stream_meta={"stream": True},
+    )
+    ns.volume = __import__(
+        "trainer.loop_volume", fromlist=["VolumePlanner"]
+    ).VolumePlanner(ns)
+    return ns
 
-    方法一搬走，`monkeypatch.setattr(trainer.loop_core, "log", …)` 就成了**静默空操作**（同名 seam
-    在两个命名空间里是两个各自真实的注入点——S4 第二步的教训）。这里把两个方向都钉住：
-    打在本模块 → 命中；打在 `trainer.loop_core` → 一个字节都收不到。
-    """
+
+def test_log_seam_lives_here_not_in_loop_core(monkeypatch) -> None:
+    """★ 本簇的日志按**本模块**的 `log` 解析（同名 seam 在旧命名空间是静默空操作）。"""
     import trainer.loop_core as core_mod
     import trainer.loop_volume as vol_mod
 
-    # 真的 mixin 实例（不是 SimpleNamespace）：`_volume_topup` 内部要 `self._volume_active()`，
-    # 而那条只能经真类解析——这本身就说明「这一簇是一个整体」。
-    host = vol_mod.TrainingVolume()
-    host.args = SimpleNamespace(target_transitions=100)
-    host._stream_meta = {"stream": True}  # 流式轮：v1 不补波，走一条只写日志就返回的分支
-
+    host = _stream_host()
     seen: list[str] = []
     monkeypatch.setattr(vol_mod, "log", lambda m: seen.append(str(m)))
     core_seen: list[str] = []
     monkeypatch.setattr(core_mod, "log", lambda m: core_seen.append(str(m)))
 
-    vol_mod.TrainingVolume._volume_topup(host, 1, None)
+    host.volume.volume_topup(1, None)
     assert seen and "流式路径" in seen[0], seen
     assert core_seen == [], f"补丁打在了旧命名空间上却仍有输出：{core_seen}"
 
 
 def test_report_is_landed_through_the_host_entry() -> None:
-    """★ P0-1 第五刀前置步：`_report` 只有**一个写面**（宿主的 `land_collect`）。
-
-    为什么先做这一步：volume 从混入变成协作对象后，对象不能再直接给 `self._report` 赋值
-    （那是宿主的槽）。把写面先收成具名入口，对象的调用点就与搬家前逐字相同，守卫也能在
-    搬家前先钉住「没有别的路径能改写它」。
-    """
-    from trainer.loop_core import TrainingLoop
-
+    """★ 报告只有**一个写面**（宿主的 `land_collect`）：协作对象零 `self._report` 写入。"""
     writes = {
         name: roles["_report"]
-        for name, fn in _methods(VOLUME_PY, "TrainingVolume").items()
+        for name, fn in _methods(VOLUME_PY, "VolumePlanner").items()
         if (roles := _self_attr_roles(fn)).get("_report")
     }
-    assert "Store" not in {r for roles in writes.values() for r in roles}, (
-        f"还有方法直接给 self._report 赋值：{sorted(writes)}"
-    )
+    assert "Store" not in {r for roles in writes.values() for r in roles}, sorted(writes)
     calls = sum(
         1
-        for fn in _methods(VOLUME_PY, "TrainingVolume").values()
+        for fn in _methods(VOLUME_PY, "VolumePlanner").values()
         for sub in ast.walk(fn)
         if isinstance(sub, ast.Call)
         and isinstance(sub.func, ast.Attribute)
         and sub.func.attr == "land_collect"
     )
     assert calls == 6, f"报告落位点从 6 处变了：{calls}（新路径要显式记账）"
-    # 宿主入口确实落位两个槽（读 `land_collect` 的源形状：恰好两次 self.<槽> 赋值）。
-    host = _methods(NN_ROOT / "trainer" / "loop_core.py", "TrainingLoop")["land_collect"]
+    host = _methods(CORE_PY, "TrainingLoop")["land_collect"]
     stores = {
         sub.attr
         for sub in ast.walk(host)
@@ -437,31 +440,27 @@ def test_report_is_landed_through_the_host_entry() -> None:
         and sub.value.id == "self"
     }
     assert stores == {"_report", "_stream_meta"}, sorted(stores)
-    # `Dispatcher` 的六格落位也必须走同一个写面（不再各写一份）。
-    disp = (NN_ROOT / "trainer" / "loop_core.py").read_text(encoding="utf-8")
+    disp = CORE_PY.read_text(encoding="utf-8")
     assert "self.land_collect(outcome.report, outcome.stream_meta)" in disp
 
 
-def test_unbound_lookup_through_the_composition_class_still_works() -> None:
-    """★ 既有用例的形态：`TrainingLoop._volume_active(cast(Any, stub))` —— 经 MRO 取真实现。"""
+def test_legacy_shells_drive_the_collaborator() -> None:
+    """★ 既有用例的形态：`TrainingLoop._volume_*(stub, …)` —— 壳把活派给 `stub.volume`。
+
+    壳里的 `self.volume` 在 unbound 调用下解析到桩自己挂的对象；这里用一个只实现
+    「关集解析所需读面」的最小宿主钉住这条路径。
+    """
     from trainer.loop_core import TrainingLoop
 
-    off = cast(Any, SimpleNamespace(args=SimpleNamespace(target_transitions=0)))
-    on = cast(Any, SimpleNamespace(args=SimpleNamespace(target_transitions=7)))
-    assert TrainingLoop._volume_active(off) is False
-    assert TrainingLoop._volume_active(on) is True
-    # 关集解析缺席/坏值 → 响亮 SystemExit（不是静默取一个关集）
-    assert TrainingLoop._volume_stages(
-        cast(
-            Any,
-            SimpleNamespace(
-                args=SimpleNamespace(
-                    stages="0-3",
-                    curriculum_stages="",
-                    rotate_stages=0,
-                    # 2026-10-27 起关集带 `it`：窗口是 `(rotate_seed, it)` 的函数
-                )
-            ),
-        ),
-        1,
-    ) == [0, 1, 2, 3]
+    calls: list[str] = []
+
+    def fake_active() -> bool:
+        calls.append("active")
+        return False
+
+    host = SimpleNamespace(
+        args=SimpleNamespace(target_transitions=0, stages="0-3", curriculum_stages="", rotate_stages=0),
+        volume=SimpleNamespace(volume_active=fake_active),
+    )
+    assert TrainingLoop._volume_active(cast(Any, host)) is False
+    assert calls == ["active"]

@@ -20,7 +20,7 @@ from pydantic import ValidationError
 from biz.course import build_pairs
 from tests.conftest import bp_args
 from trainer.loop_core import TrainingLoop
-from trainer.loop_volume import TrainingVolume, VolumeView
+from trainer.loop_volume import GreedyView, VolumePlanner, VolumeView
 from worker.commit_journal import CommitJournal
 from worker.config import CourseConfig, corpus_identity_fp
 from worker.greedy_quota import GREEDY_QUOTA_RULE_V1
@@ -600,6 +600,54 @@ class _StubLoop:
     _report: dict
     _stream_meta: dict | None
 
+    @property
+    def report(self) -> dict:
+        return self._report
+
+    @property
+    def stream_meta(self) -> dict | None:
+        return self._stream_meta
+
+    # ---- 宿主读面（P0-1 第五刀：协作对象只认这些公开名，桩照生产的形状提供）----
+    @property
+    def rotate_seed(self) -> int:
+        return int(self._rotate_seed)
+
+    @property
+    def traj_dir(self) -> Path:
+        return self._traj_dir
+
+    @property
+    def traj_root(self) -> Path:
+        return self._traj_root
+
+    @property
+    def jsonl_path(self) -> Path:
+        return self._jsonl_path
+
+    @property
+    def course_fp(self) -> str | None:
+        return self._course_fp
+
+    @property
+    def corpus_fp(self) -> str | None:
+        return self._corpus_fp
+
+    @property
+    def state_init(self) -> bool:
+        return bool(self._state_init)
+
+    @property
+    def extra_wver(self) -> str | None:
+        return self._extra_wver
+
+    @property
+    def payload_parts(self) -> Any:
+        return self._payload_parts
+
+    def commit_journal(self) -> Any:
+        return self._commit_journal()
+
     def land_collect(self, report: dict, stream_meta: dict | None = None) -> None:
         """宿主落位：本桩只持有这两个槽，照生产的写法落位。"""
         self._report = report
@@ -698,7 +746,10 @@ class _StubLoop:
         )
 
     def volume_view(self) -> VolumeView:
-        return TrainingVolume.volume_view(cast(Any, self))
+        return self.volume.volume_view()
+
+    def greedy_view(self) -> GreedyView:
+        return self.volume.greedy_view()
 
     #: 零落盘（2026-10-28）：桩上没有段账 ⇒ `settled_stage_totals` 只读盘上 shard
     #: （本文件测的正是「重启后从盘上回填」那条老路径）。
@@ -765,32 +816,23 @@ class _StubLoop:
             "dimLists": {},
         }
         self._stream_meta = None
+        # P0-1 第五刀：动态采集簇是协作对象（桩提供它要的宿主面）。
+        self.volume = VolumePlanner(cast(Any, self))
+        # 两个可替换接缝：桩的假派发 / 无段账 —— 挂到协作对象实例上（生产里就是真方法）。
+        self.volume.dispatch_volume_wave = self._dispatch_volume_wave  # type: ignore[method-assign]
+        self.volume.round_mem_shards = self._round_mem_shards  # type: ignore[method-assign]
         self._course_fp: str | None = None
         # D14 语义身份（§2/A）：与 `_course_fp` 成对（生产端在 `_setup` 里一起设）
         self._corpus_fp: str = ""
         # 起始分布护栏（P3.5）：同样在 `_setup` 里与上面两个一起设（本桩无课程 ⇒ 恒 False）
         self._state_init = False
         self._extra_wver = None
-        self._volume_target: int | None = None
-        self._volume_collected: int | None = None
-        self._volume_waves: int = 0
-        self._volume_g0 = 0
-        self._volume_est = 0
-        self._volume_capped = False
-        # greedy 采集（本文件只测跨波读盘；生产在方法内先清空再写）。
-        self._greedy_plan: Any = None
-        self._greedy_stats: dict | None = None
-        self._greedy_report: dict | None = None
-        self._greedy_waves = 0
-        # 生产在 `_volume_collect_continuous` 末尾写入（分关账 + est 口径）；
-        # 桩先声明，测试才能断言首波读数（mypy 也才看得见这个属性）。
-        self._volume_stage_stats: dict = {}
+        # 采集簇的槽位归 `VolumePlanner`（P0-1 第五刀）；本桩只留宿主面。
         # 与生产同路径（loop_steps._commit_journal = <traj_dir>/commit_journal.jsonl）
         self.journal = CommitJournal(self._traj_dir / "commit_journal.jsonl")
         self.dispatched: list[list[tuple[int, int]]] = []
         #: 熔断后**没派出去**的候选局数（新语义：它们从不运行）
         self.undispatched: int = 0
-        self._volume_halted: bool = False
 
     def _commit_journal(self) -> CommitJournal:
         return self.journal
@@ -1073,7 +1115,7 @@ def test_volume_topup_quota_met_in_first_wave(tmp_path: Path, _patch_wver: None)
     """初波就达标：不补波，只记账（est 估准的正常情形）。"""
     stub = _StubLoop(tmp_path, target=_TARGET_VOLUME, est=967, samples=967)
     stub._iteration_pairs(1)
-    stub._volume_waves = 1  # wave 测试：初波已跑（生产连续配额不再预置）
+    stub.volume._volume_waves = 1  # wave 测试：初波已跑（生产连续配额不再预置）
     _settle_first_wave(stub)
     stub._volume_topup(1, None)
     assert stub.dispatched == []  # 无需补波
@@ -1085,7 +1127,7 @@ def test_volume_topup_iterates_until_wave_cap(tmp_path: Path, _patch_wver: None)
     """每局 samples 偏少（est 声明值偏大）⇒ 逐关补波，至多 3 波后停（不无限补）。"""
     stub = _StubLoop(tmp_path, target=_TARGET_VOLUME, est=967, samples=500)
     stub._iteration_pairs(1)
-    stub._volume_waves = 1
+    stub.volume._volume_waves = 1
     _settle_first_wave(stub)
     stub._volume_topup(1, None)
     sizes = [len(w) for w in stub.dispatched]
@@ -1107,7 +1149,7 @@ def test_volume_topup_hard_cap_marks_capped(tmp_path: Path, _patch_wver: None) -
     """局数硬顶：本波截断到剩余额度，触顶后停采并打标（配额未满但停）。"""
     stub = _StubLoop(tmp_path, target=_TARGET_VOLUME, est=967, samples=500, max_games_per_stage=20)
     stub._iteration_pairs(1)
-    stub._volume_waves = 1
+    stub.volume._volume_waves = 1
     _settle_first_wave(stub)
     stub._volume_topup(1, None)
     assert [len(w) for w in stub.dispatched] == [4 * 4]  # 20-16 剩余额度（本波想要 8）
@@ -1134,7 +1176,7 @@ def test_volume_topup_partial_ledger_replays_same_continuation(
     _T, _EST, _S = 60000, 967, 500
     full = _StubLoop(tmp_path / "full", target=_T, est=_EST, samples=_S)
     full._iteration_pairs(1)
-    full._volume_waves = 1
+    full.volume._volume_waves = 1
     _settle_first_wave(full)
     full._volume_topup(1, None)
     assert len(full.dispatched) == 2
@@ -1190,7 +1232,7 @@ def test_volume_topup_replays_unfinished_wave(tmp_path: Path, _patch_wver: None)
 
     stub = _StubLoop(tmp_path, target=_TARGET_VOLUME, est=967, samples=500)
     stub._iteration_pairs(1)
-    stub._volume_waves = 1
+    stub.volume._volume_waves = 1
     _settle_first_wave(stub)
     # 造「崩在 w2 中间」的 WAL：w2 有 start、无 finish（对局表 = 每关 8 局）
     games = {0: 8, 1: 8, 2: 8, 3: 8}
@@ -1211,7 +1253,7 @@ def test_volume_topup_does_not_replay_finished_wave(tmp_path: Path, _patch_wver:
 
     stub = _StubLoop(tmp_path, target=_TARGET_VOLUME, est=967, samples=500)
     stub._iteration_pairs(1)
-    stub._volume_waves = 1
+    stub.volume._volume_waves = 1
     _settle_first_wave(stub)
     stub.journal.start(WAVE_PHASE, wave_round_key(1, 2), games={"0": 8})
     stub.journal.finish(WAVE_PHASE, wave_round_key(1, 2))
@@ -1224,7 +1266,7 @@ def test_volume_topup_skips_stream_path(tmp_path: Path, _patch_wver: None) -> No
     """v1 边界：stream 路径保持老语义（只记日志，不补波）。"""
     stub = _StubLoop(tmp_path, target=_TARGET_VOLUME, est=967, samples=500)
     stub._iteration_pairs(1)
-    stub._volume_waves = 1
+    stub.volume._volume_waves = 1
     _settle_first_wave(stub)
     stub._stream_meta = {"rollout_sec": 1.0}
     stub._volume_topup(1, None)
@@ -1249,7 +1291,7 @@ def _topup_from_ledger(
     """造一个「初波已结算 + 第二波只落了一半」的循环桩，然后跑补波（崩后续跑）。"""
     stub = _StubLoop(tmp, target=target, est=est, samples=samples)
     stub._iteration_pairs(1)
-    stub._volume_waves = 1
+    stub.volume._volume_waves = 1
     _settle_first_wave(stub)
     for stage, seed in half:
         _manifest(stub._traj_dir, stage, seed, _WVER, stub.samples)
@@ -1259,7 +1301,7 @@ def _topup_from_ledger(
 
 def _initial(stub: _StubLoop) -> list[tuple[int, int]]:
     """重算「初波 pairs」（_iteration_pairs 的返回值已被消费，此处按同一键重推）。"""
-    return wave_pairs(stub._rotate_seed, stub.it, {s: stub._volume_g0 for s in range(4)}, 0)
+    return wave_pairs(stub._rotate_seed, stub.it, {s: stub.volume.volume_view().g0 for s in range(4)}, 0)
 
 
 def _settle_first_wave(stub: _StubLoop) -> None:
@@ -1338,7 +1380,7 @@ def test_greedy_collect_reads_current_round_dir(tmp_path: Path) -> None:
             "dimLists": {},
         }
 
-    stub._dispatch_volume_wave = fake_dispatch  # type: ignore[method-assign]
+    stub.volume.dispatch_volume_wave = fake_dispatch  # type: ignore[method-assign]
     stub._volume_collect_greedy(1, None)
 
     flat = [pair for wave in stub.dispatched for pair in wave]
@@ -1412,7 +1454,7 @@ def test_greedy_halt_accepts_queue_total_samples(tmp_path: Path) -> None:
             "dimLists": {},
         }
 
-    stub._dispatch_volume_wave = fake_dispatch  # type: ignore[method-assign]
+    stub.volume.dispatch_volume_wave = fake_dispatch  # type: ignore[method-assign]
     stub._volume_collect_greedy(1, None)
 
     assert len(stub.dispatched) == 1, "halt 置位后不该再开新波"
@@ -1495,7 +1537,7 @@ def _install_greedy_dispatch(
             "dimLists": {},
         }
 
-    stub._dispatch_volume_wave = fake  # type: ignore[method-assign]
+    stub.volume.dispatch_volume_wave = fake  # type: ignore[method-assign]
 
 
 def _greedy_stub(tmp_path: Path, quota: dict, *, target: int = 1000) -> _StubLoop:
@@ -1522,7 +1564,7 @@ def test_greedy_all_bins_met_is_not_degraded(tmp_path: Path) -> None:
     )
     stub._volume_collect_greedy(1, None)
 
-    st = stub._greedy_stats
+    st = stub.greedy_view().stats
     assert st is not None
     assert st["degraded"] is False and st["cap_hit"] is False
     assert st["bins"]["win"] >= 500 and st["bins"]["timeout"] >= 500
@@ -1542,7 +1584,7 @@ def test_greedy_cap_degrades_softly(tmp_path: Path) -> None:
     _install_greedy_dispatch(stub, lambda wave, i: ("stage_clear", 100))
     stub._volume_collect_greedy(1, None)
 
-    st = stub._greedy_stats
+    st = stub.greedy_view().stats
     assert st is not None
     assert st["degraded"] is True and st["cap_hit"] is True
     assert st["bins"]["timeout"] == 0, "缺额不得从 win 档重分配过去"
@@ -1603,8 +1645,8 @@ def test_greedy_waves_merge_into_main_report(tmp_path: Path) -> None:
         "scoreList": [],
         "dimLists": {},
     }
-    stub._volume_collected = 1000
-    stub._volume_stage_stats = {"rule": 1, "stages": {}}
+    stub.volume._volume_collected = 1000
+    stub.volume._volume_stage_stats = {"rule": 1, "stages": {}}
     _install_greedy_dispatch(
         stub,
         lambda wave, i: ("stage_clear", 50),

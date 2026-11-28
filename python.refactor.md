@@ -170,7 +170,7 @@ Protocol property / 组合根留一行壳 / 写面收成具名落位方法」。
 
 | # | 簇（文件 / 方法数） | 外部入边 | 自有状态面 | 跨簇调用与共享槽 | 前置条件 |
 |---|---|---|---|---|---|
-| 1 | `TrainingVolume`（`loop_volume.py` / 20） | 4 处（全在 `loop_round_steps`） | `_volume_*` 11 格 + `_greedy_*` 4 格 | 借 `_commit_journal()`；写 `_report`（7 模块读）、`_greedy_plan/stats`（Job 读写）、`_volume_stage_stats`（Steps 读） | ✅ 前置步已落：`_report` / `_stream_meta` 的唯一写面 = 宿主 `land_collect` |
+| 1 | ~~`TrainingVolume`（`loop_volume.py` / 20）~~ ✅ **第五刀已落（2026-11-28）** | 4 处（全在 `loop_round_steps`） | `_volume_*` 10 格 + `_greedy_*` 4 格 —— 已归 `VolumePlanner` | 外簇只经 `volume_view()` / `greedy_view()` 读、经 `reset_greedy` / `reset_ordinary_seeds` / `merge_greedy` 写；纯波次算术切到 `worker/volume_wave_plan.py` | 已完成：`VolumeHost` 16 个读面 + `land_collect` / `commit_journal` 写面；MRO 17 → 16，`RoundSteps.__bases__` = `("object",)` |
 | 2 | `TrainingSteps`（`loop_steps.py` / 9） | 15 处（Job 8 · RoundSteps 6 · Volume 1） | 迭代账本 `_agg` / `_chunks_n` / `_total_steps` / `_ppo_sec` / `_kl_cum` / `_hr_*` | 被 Volume/Remote/Steps 读；自身写 `_eval_thread`（与 Eval 共享） | 先立 `IterLedgerView`（照 `VolumeView`） |
 | 3 | `TrainingEval`（`loop_eval.py` / 17） | 7 处（lifecycle 3 · round_steps 3 · gate 1） | `_eval_*` 10 格 | 读 `_eval_at_set` / `_eval_every` / `_traj_dir` / `_jsonl_path`；`_eval_thread` 被 Steps/Job 读写 | 占位 `_eval_on_round` 已由组合根壳压住，可随簇平移 |
 | 4 | `TrainingRemoteFail`（4） | 7 处（全在 Drive） | `_leg_abort` | 只写 `_leg_abort`（Drive/gate/core/round_steps 读） | 无（叶子，远程腿热身刀） |
