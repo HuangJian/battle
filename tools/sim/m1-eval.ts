@@ -40,7 +40,12 @@
 import { STAGES } from '../../src/config/stages'
 import { DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../../src/ai/GodAIInput'
 import { AdaptiveSimWorkerPool, physicalCores } from './sim-pool'
-import type { RunTelemetry } from './simulation-runner'
+import {
+  assertSimPolicy,
+  LOCAL_ONLY_POLICIES,
+  type RunTelemetry,
+  type SimPolicy,
+} from './simulation-runner'
 import type { SimTask, SimTaskResult } from './sim-worker'
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -129,14 +134,54 @@ async function main(): Promise<void> {
   const stageSpec = arg('stages', 'all')!
   const seedSpec = arg('seeds', '1-10')!
   const maxTicks = parseInt(arg('max-ticks', '36000')!, 10)
-  const policy =
-    (arg('policy', 'nn') as
-      'god' | 'nn' | 'intent' | 'intent-exec' | 'intent-oracle' | 'goal' | 'goal-god') ?? 'nn'
+  // P′-1：任务口径 0★。hard 的 difficulty.playerStartLevel=1，必须显式覆盖。
+  const playerLevelRaw = arg('player-level')
+  const playerLevel = playerLevelRaw === undefined ? undefined : parseInt(playerLevelRaw, 10)
+  if (
+    playerLevelRaw !== undefined &&
+    (!Number.isInteger(playerLevel) || (playerLevel as number) < 0)
+  ) {
+    process.stderr.write(`[m1-eval] --player-level 非法（${playerLevelRaw}；必须 ≥0 的整数）\n`)
+    process.exit(2)
+  }
+  // P′-0 fail-closed：policy 只认白名单；未知值 exit 2，绝不让 worker 静默跑 God。
+  const policyArg = arg('policy', 'nn')!
+  let policy: SimPolicy
+  try {
+    policy = assertSimPolicy(policyArg)
+  } catch (e) {
+    process.stderr.write(`[m1-eval] ${(e as Error).message}\n`)
+    process.exit(2)
+  }
+  // P′-0：B8/B10 透传到 NNInput（同机制不组合，与 export-eval-game 同规）。
+  const suppressUselessFire = flag('suppress-useless-fire')
+  const suppressLeadMissFire = flag('suppress-lead-miss-fire')
+  const wantBranchTotals = flag('branch-totals')
+  if (suppressUselessFire && suppressLeadMissFire) {
+    process.stderr.write(
+      '[m1-eval] --suppress-useless-fire 与 --suppress-lead-miss-fire 同机制，不得同时开启\n',
+    )
+    process.exit(2)
+  }
   const weightsDir = arg('weights-dir')
   const intentWeights = arg('intent-weights')
   const goalWeights = arg('goal-weights')
   const promiseTicks = parseInt(arg('promise', '0')!, 10) // goal 承诺期 T（0 = 默认 240）
   const replan = parseInt(arg('replan', '0')!, 10) // M7① cadence 扫描（0 = 策略默认）
+  // P′-2a-B：oracle-search 的视界与搜索周期（默认 120 / =视界）。
+  const searchHorizonRaw = arg('search-horizon', '120')!
+  const searchEveryRaw = arg('search-every', '0')!
+  const searchHorizon = parseInt(searchHorizonRaw, 10)
+  const searchEveryArg = parseInt(searchEveryRaw, 10)
+  if (!Number.isInteger(searchHorizon) || searchHorizon < 1) {
+    process.stderr.write(`[m1-eval] --search-horizon 非法（${searchHorizonRaw}；必须 ≥1 的整数）\n`)
+    process.exit(2)
+  }
+  if (!Number.isInteger(searchEveryArg) || searchEveryArg < 0) {
+    process.stderr.write(`[m1-eval] --search-every 非法（${searchEveryRaw}；0 = 同视界）\n`)
+    process.exit(2)
+  }
+  const searchEvery = searchEveryArg > 0 ? searchEveryArg : searchHorizon
   const riskGated = arg('risk-gated') === '1' || arg('risk-gated') === 'true'
   const baseCadence = parseInt(arg('base-cadence', '0')!, 10)
   const dangerCadence = parseInt(arg('danger-cadence', '0')!, 10)
@@ -146,6 +191,12 @@ async function main(): Promise<void> {
   //   load > 90% → −1 worker ; load < 85% → +1 worker ; floor = 1.
   // nn 策略的权重文件（分派要文件路径；本机池按目录自动发现——同一解析函数）
   const nnWeightsPath = policy === 'nn' ? resolveNnWeights(weightsDir, process.cwd()) : null
+  // P′-1：权重指纹 + wver 的权重字节。此前 nn 的 wver 是 `local-nn`（不读权重字节），
+  // 换权重后续跑会命中旧账本 ⇒ 静默跑错版本。报告必列 weightsSha（P′-1 口径）。
+  const nnWeightsBytes = policy === 'nn' && nnWeightsPath ? readFileSync(nnWeightsPath) : null
+  const weightsSha = nnWeightsBytes
+    ? new Bun.CryptoHasher('sha256').update(nnWeightsBytes).digest('hex')
+    : null
   const physical = physicalCores()
   const fixedWorkers = parseInt(arg('fixed-workers', '0')!, 10) // 0 = 自适应并发（默认）
   const workers =
@@ -166,6 +217,9 @@ async function main(): Promise<void> {
   // rollout 同源（tools/lib/dist-node-gate.ts）：逐条跳过日志 + 收尾聚合 WARN +
   // provenance（`node:<id>`/`local` 计数）+ `--upgrade-nodes`（复用训练循环守卫）。
   const noDist = flag('no-dist')
+  // P′-0：区分「用户显式给了 --dist-nodes」与「默认配置自动发现」——local-only
+  // policy 与显式分派同现是配置错误，必须 exit 2，不能静默降级本机。
+  const explicitDist = arg('dist-nodes') !== undefined
   let distNodesPath = arg('dist-nodes', '')
   if (!distNodesPath && !noDist) {
     const defaultCfg = 'nn-training/rl-config.json'
@@ -174,6 +228,18 @@ async function main(): Promise<void> {
     } catch {
       /* 无配置文件 → 纯本地 */
     }
+  }
+  if ((LOCAL_ONLY_POLICIES as readonly string[]).includes(policy)) {
+    if (explicitDist) {
+      process.stderr.write(
+        `[m1-eval] policy ${policy} is local-only — --dist-nodes is not allowed (remove it or use --no-dist)\n`,
+      )
+      process.exit(2)
+    }
+    if (distNodesPath) {
+      process.stderr.write(`[m1-eval] policy ${policy} is local-only — running local\n`)
+    }
+    distNodesPath = ''
   }
   const iterId = arg('iter-id', `m1eval-${Date.now()}`)!
 
@@ -217,9 +283,18 @@ async function main(): Promise<void> {
         goalWeightsDir: goalWeights,
         promiseTicks: promiseTicks || undefined,
         replanEvery: replan || undefined,
+        // P′-2a-B：oracle-search 参数（仅 policy=intent-search 生效）。
+        intentSearchHorizon: policy === 'intent-search' ? searchHorizon : undefined,
+        intentSearchEvery: policy === 'intent-search' ? searchEvery : undefined,
         riskGated,
         baseCadence: baseCadence || undefined,
         dangerCadence: dangerCadence || undefined,
+        // P′-0：B8/B10 与 branchTotals 透传（默认关 = 旧行为）。
+        suppressUselessFire: suppressUselessFire || undefined,
+        suppressLeadMissFire: suppressLeadMissFire || undefined,
+        branchTotals: wantBranchTotals || undefined,
+        // P′-1：0★ 口径。
+        playerLevel,
         telemetry: true,
       })
     }
@@ -233,8 +308,12 @@ async function main(): Promise<void> {
   // 两套各自完整，不叠加（叠加只会让「谁在续跑」说不清）。
   const noFresh = arg('fresh') === undefined
   let wverBytes: Buffer | null = null
-  if (policy === 'goal' && goalWeights) wverBytes = readFileSync(goalWeights)
+  if (nnWeightsBytes) wverBytes = nnWeightsBytes
+  else if (policy === 'goal' && goalWeights) wverBytes = readFileSync(goalWeights)
   else if (policy === 'intent-exec' && intentWeights) wverBytes = readFileSync(intentWeights)
+  else if (policy === 'intent-search')
+    // P′-2a-B：搜索参数进 wver —— 不同 H/every 不得共用账本（无权重策略同样如此）。
+    wverBytes = Buffer.from(JSON.stringify({ policy, h: searchHorizon, every: searchEvery }))
   else if (policy === 'god' || policy === 'goal-god') wverBytes = Buffer.from('{}')
   const wver = wverBytes
     ? new Bun.CryptoHasher('sha256').update(wverBytes).digest('hex')
@@ -630,6 +709,23 @@ async function main(): Promise<void> {
   const report = {
     policy,
     difficulty,
+    // P′-1：报告自描述（口径与版本必须随读数走）。
+    codeHash: computeCodeHash(),
+    weightsSha,
+    weightsFile: nnWeightsPath ? resolve(nnWeightsPath) : null,
+    playerLevel: playerLevel ?? null,
+    openingConnect: false, // m1-eval 不套 OpeningController（NN 的历史 39.7% 走训练评估链）
+    dodge: policy === 'nn' ? 'none' : 'builtin',
+    // P′-2a-B：搜索臂必须自描述（H / 搜索周期随读数走）。
+    searchHorizon: policy === 'intent-search' ? searchHorizon : null,
+    searchEvery: policy === 'intent-search' ? searchEvery : null,
+    // P′-0：推理侧规则臂必须能自描述（B8/B10 各一臂，不组合）。
+    b8: suppressUselessFire,
+    b10: suppressLeadMissFire,
+    inferenceRules: [
+      ...(suppressUselessFire ? ['suppressUselessFire'] : []),
+      ...(suppressLeadMissFire ? ['suppressLeadMissFire'] : []),
+    ],
     stages: stages.length,
     seeds: seeds.length,
     total,
@@ -644,6 +740,8 @@ async function main(): Promise<void> {
     avgTicks: nTicks > 0 ? Math.round(totalTicks / nTicks) : 0,
     scoreV7,
     perStage: stageReports,
+    // P′-0：--branch-totals 时给出跨局汇总（逐 key 求和；P′-1 的 branchCounts 表）。
+    ...(wantBranchTotals ? { branchTotals: sumBranchTotals(results) } : {}),
     /**
      * 逐局行（EvalBench D5(a) 入账用：eval_m1.py 逐行写 eval_log.jsonl）。
      * m1 跑的是 sim-worker（非 export-eval-game），天然缺 playerHits/enemyHits/
@@ -658,6 +756,8 @@ async function main(): Promise<void> {
       cleared: r?.cleared === true || r?.outcome === 'stage_clear',
       ticks: r?.ticks ?? 0,
       kills: r?.killCount ?? 0,
+      // P′-1：基毁率的分母/分子（worker 恒回填；此前 perGame 漏了这一列）。
+      baseAlive: r?.baseAlive ?? null,
       lives: r?.lives ?? null,
       firstKillTick: r?.firstKillTick ?? null,
       enemyTotal: r?.telemetry?.enemyTotal ?? null,
@@ -731,6 +831,21 @@ async function main(): Promise<void> {
 // 退避重试/rescan/失败停用/权重下发/wver 409/本机份额全在 `nn-training/trainer/eval_m1_once.py`
 // → `trainer/batch_eval.BatchEvalRunner` + `common.distribution`（训练循环长期实战的那套）——本文件
 // 不再有第二份实现（2026-09-19 用户裁定：Python 端已有这些机制，别再在 TS 里重建）。
+
+/**
+ * P′-0：--branch-totals 的跨局汇总（逐 key 求和；只读输入）。
+ * 空洞（未结算/账本跳过的任务）按 undefined 跳过。
+ */
+export function sumBranchTotals(
+  results: Array<{ branchTotals?: Record<string, number> } | undefined>,
+): Record<string, number> {
+  const out: Record<string, number> = {}
+  for (const r of results) {
+    if (!r?.branchTotals) continue
+    for (const [k, v] of Object.entries(r.branchTotals)) out[k] = (out[k] ?? 0) + v
+  }
+  return out
+}
 
 /** 分派上下文（main 构造；runPythonDist 只读；测试直接构造）。 */
 export interface DistCtx {

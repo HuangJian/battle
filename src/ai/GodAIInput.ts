@@ -167,6 +167,105 @@ export function godAIParamsOverride(): Partial<GodAIParams> | null {
   return paramsOverride
 }
 
+/**
+ * P′-0：GodAIInput 决策状态快照（分支 rollout / 状态恢复用）。
+ *
+ * 只覆盖「会影响后续决策」的 AI 内部状态；World 状态由
+ * `cloneWorld/restoreWorld`（src/snapshot/WorldSerializer.ts）单独负责。
+ * 二者必须取自同一 tick，且恢复顺序为：restoreWorld → restoreDecisionState。
+ *
+ * 字段分类（新增字段时必须重新归类）：
+ *   · capture     跨 tick 决策状态 = DECISION_STATE_FIELDS，深拷贝；
+ *   · 诊断        纯观察、不进决策（branchCounts/_lastBranch/...），不恢复；
+ *   · 身份/配置   world/rng/params/controlledTank/... 由构造方持有，不克隆；
+ *   · 纯 memo     见 §3.3 缓存注册表；restore 时整体清空——restoreWorld 会重建
+ *                 Tank 数组并使 tileMap.revision++，持引用/旧地形的缓存必须丢弃。
+ */
+export interface GodAIDecisionState {
+  version: 1
+  /** executor RNG 内部状态（RNG.getState()）。 */
+  rngState: number
+  fields: Record<string, unknown>
+}
+
+/**
+ * capture/restore 的字段清单（顺序即语义分组）。新增决策字段必须加在这里；
+ * 漏加会在分支对账里表现为「restore 后轨迹分叉」。
+ */
+const DECISION_STATE_FIELDS = [
+  // 本拍输出与 think 生命周期
+  '_moveDir',
+  '_fire',
+  '_pressGuard',
+  '_pressFrenzy',
+  '_thought',
+  // 导航
+  'path',
+  'replanTimer',
+  'reactionCounter',
+  'lastThreatId',
+  'aggressive',
+  '_lastPathCell',
+  // stuck / commit 状态
+  '_campTrack',
+  '_antiCampSuppress',
+  '_aggCampTrack',
+  '_aggNavTrack',
+  '_navStuckTrack',
+  '_pickupCommitActive',
+  '_pickupCommitTicks',
+  '_pickupCommitCol',
+  '_pickupCommitRow',
+  '_pickupCommitItemCol',
+  '_pickupCommitItemRow',
+  // dodge / sticky
+  '_lastDodgeDir',
+  '_lastDodgeThreatId',
+  '_dodgeFlipCount',
+  '_threatStickyHold',
+  '_midLaneStickyHold',
+  // hunt / defense / intent
+  '_huntCommitId',
+  '_huntCommitUntil',
+  '_defenseReturnLatch',
+  '_intent',
+  // coverage
+  '_coverageCell',
+  '_coverageUntil',
+  '_coverageMinDeadline',
+  '_coverageThreatIds',
+  '_coverageThreatCount',
+  '_coveragePlanFrame',
+  '_coverageIdSignature',
+  // 自杀交易 / 节流 / 执行器 override
+  '_suicideStanding',
+  '_suicideStandTicks',
+  '_suicideStandSuppress',
+  '_thinkCounter',
+  '_candidateOverride',
+  // 开局清墙 / carve-dig
+  '_baseConnectClearActive',
+  '_baseConnectClearActiveTicks',
+  '_carveDigActive',
+  '_carveDigTicks',
+  '_carveDigTarget',
+  '_digBlockTicks',
+  '_digAnchorX',
+  '_digAnchorY',
+  // seal / 目标黑名单
+  '_sealLastCol',
+  '_sealLastRow',
+  '_sealStillTicks',
+  '_sealSuppressUntil',
+  '_blacklistEnemyId',
+  '_blacklistExpiryFrame',
+  '_lastSelectTargetId',
+  '_targetStuckTicks',
+  // 敌情感知模型
+  '_enemyModel',
+  '_enemyModelLastHp',
+] as const
+
 export class GodAIInput implements InputLike {
   // Shared state — public so the extracted ./god/* sub-modules can read/write
   // it via the `self: GodAIInput` they receive. This is the §0.5 split;
@@ -1360,6 +1459,58 @@ export class GodAIInput implements InputLike {
         }
       }
     }
+  }
+
+  // ================================================================
+  // P′-0: decision-state capture / restore (branch rollout contract)
+  // ================================================================
+
+  /**
+   * P′-0：捕获决策状态（深拷贝；字段分类见 GodAIDecisionState）。
+   * 与 cloneWorld 配对：同一 tick 取二者才能复现分支。
+   */
+  captureDecisionState(): GodAIDecisionState {
+    const self = this as unknown as Record<string, unknown>
+    const fields: Record<string, unknown> = {}
+    for (const name of DECISION_STATE_FIELDS) fields[name] = structuredClone(self[name])
+    return { version: 1, rngState: this.rng.getState(), fields }
+  }
+
+  /**
+   * P′-0：恢复决策状态。必须在 restoreWorld(world, snap) 之后调用，且二者来自
+   * 同一 tick。restore 内再次深拷贝，因此同一份 state 可重复用于多个分支而不会
+   * 在分支之间串味。
+   */
+  restoreDecisionState(state: GodAIDecisionState): void {
+    if (!state || state.version !== 1) {
+      throw new Error(
+        `GodAIDecisionState: unsupported version ${(state as { version?: unknown })?.version}`,
+      )
+    }
+    const fields = state.fields
+    if (!fields || typeof fields !== 'object') {
+      throw new Error('GodAIDecisionState: missing fields')
+    }
+    for (const name of DECISION_STATE_FIELDS) {
+      if (!(name in fields)) throw new Error(`GodAIDecisionState: missing field ${name}`)
+    }
+    // 纯 memo / 引用型缓存整体作废：restoreWorld 重建 Tank 数组（旧引用失效）并让
+    // tileMap.revision++（rev-keyed 路径缓存不可能再命中旧地形）。
+    this.invalidatePerTickCaches()
+    this.invalidateStageCaches()
+    this._decisionCtx = null
+    this._enemies = []
+    this._otherTanks = []
+    this._scanAligned.length = 0
+    this._chokepointPlan = null
+    this._baseGuardAnchor = null
+    this._firingLaneCell = null
+    this._defCellValid = false
+    this._pathCostEId.fill(-1)
+    this._pathCostNext = 0
+    const self = this as unknown as Record<string, unknown>
+    for (const name of DECISION_STATE_FIELDS) self[name] = structuredClone(fields[name])
+    this.rng.reseed(state.rngState)
   }
 
   // ================================================================

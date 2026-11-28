@@ -15,6 +15,7 @@ import {
   type RunForensics,
   type ThreatLedgerRun,
   type SimResult,
+  type SimPolicy,
 } from './simulation-runner'
 import type { GodAIParams } from '../../src/ai/GodAIInput'
 import type { StageData } from '../../src/types'
@@ -30,6 +31,8 @@ export interface SimTask {
   stage: StageData
   difficulty: string
   params: GodAIParams
+  /** P′-1：显式玩家星级覆盖（任务口径 0★）。缺省 = difficulty.playerStartLevel。 */
+  playerLevel?: number
   maxTicks: number
   /**
    * 0-based stage index (scoring scale). Omitted ⇒ 0, which is what every
@@ -70,9 +73,19 @@ export interface SimTask {
   powerupCensus?: boolean
   /** Player policy: 'god' (default), 'nn', 'intent' (stub), 'intent-exec' (M6),
    *  'intent-oracle' (M7① 探针) or 'goal' (T8.5 goal-space 执行器). */
-  policy?: 'god' | 'nn' | 'intent' | 'intent-exec' | 'intent-oracle' | 'goal' | 'goal-god'
+  policy?: SimPolicy
+  /** P′-0：B8 通用废射门（NNInput；与 suppressLeadMissFire 互斥）。 */
+  suppressUselessFire?: boolean
+  /** P′-0：B10 预测前移门（NNInput；与 suppressUselessFire 互斥）。 */
+  suppressLeadMissFire?: boolean
+  /** P′-0：返回本局完整的 input.branchCounts 快照（只读观察）。 */
+  branchTotals?: boolean
   /** M7① cadence 扫描：意图 replan 周期覆盖（0/缺省 = 策略默认）。 */
   replanEvery?: number
+  /** P′-2a-B：oracle-search 搜索/承诺周期（tick）。 */
+  intentSearchEvery?: number
+  /** P′-2a-B：oracle-search 分支 rollout 视界（tick）。 */
+  intentSearchHorizon?: number
   /** M7① risk-gated（Q7）：危险窗口 cadence 动态压缩。 */
   riskGated?: boolean
   baseCadence?: number
@@ -120,6 +133,8 @@ export interface SimTaskResult {
   /** Full SimResult (incl. replay frames) — only when the task set `recordReplay`.
    *  Lets the caller persist a .replay for losing runs without re-running them. */
   replayResult?: SimResult
+  /** P′-0：本局 branchCounts 快照（only when the task requested branchTotals）。 */
+  branchTotals?: Record<string, number>
 }
 
 declare var self: Worker
@@ -133,6 +148,7 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       stage: task.stage,
       difficulty: task.difficulty,
       godAIParams: task.params,
+      playerLevel: task.playerLevel,
       stageIndex: task.stageIndex,
       maxTicks: task.maxTicks,
       sampleInterval: 60, // same as the serial path (metrics are discarded)
@@ -146,11 +162,16 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       record: task.recordReplay === true,
       livesOverride: task.livesOverride,
       policy: task.policy,
+      suppressUselessFire: task.suppressUselessFire,
+      suppressLeadMissFire: task.suppressLeadMissFire,
+      branchTotals: task.branchTotals === true,
       nnWeightsDir: task.nnWeightsDir,
       intentWeightsDir: task.intentWeightsDir,
       goalWeightsDir: task.goalWeightsDir,
       promiseTicks: task.promiseTicks,
       replanEvery: task.replanEvery,
+      intentSearchEvery: task.intentSearchEvery,
+      intentSearchHorizon: task.intentSearchHorizon,
       riskGated: task.riskGated,
       baseCadence: task.baseCadence,
       dangerCadence: task.dangerCadence,
@@ -187,6 +208,7 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
     }
     if (task.threatLedger === true) msg.ledger = result.ledger
     if (task.powerupCensus === true) msg.powerupCensus = result.powerupCensus
+    if (task.branchTotals === true) msg.branchTotals = result.branchTotals
   } catch {
     msg = { id: task.id, ok: false, outcome: 'error', ticks: 0, killCount: 0, baseAlive: false }
   }

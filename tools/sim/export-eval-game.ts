@@ -2347,6 +2347,15 @@ export function main(argv: string[]): void {
     else if (argv[i] === '--ablate-extra') ablateSpec = argv[++i]
     else if (argv[i] === '--ablate-ch') ablateChSpec = argv[++i]
   }
+  // P′-0 fail-closed：--policy 只认本工具真正实现的集合；未知名此前会静默落到
+  // ScriptedInput（策略基线错路），现在直接拒绝。
+  const KNOWN_EVAL_POLICIES = ['nn', 'nn-goal', 'god', 'goal', 'goal-god', 'intent-exec'] as const
+  if (!(KNOWN_EVAL_POLICIES as readonly string[]).includes(policy)) {
+    console.error(
+      `[export-eval-game] unknown --policy ${policy} (known: ${KNOWN_EVAL_POLICIES.join('|')})`,
+    )
+    process.exit(2)
+  }
   if (!Number.isInteger(decisionK) || decisionK < 1) {
     console.error(`[export-eval-game] --decision-k 非法（${decisionK}；必须 ≥1 的整数）`)
     process.exit(2)

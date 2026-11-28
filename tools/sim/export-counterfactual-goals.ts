@@ -49,17 +49,11 @@ import { RNG } from '../../src/utils/RNG'
 import { writeNpy } from '../../src/nn/npy'
 import { writeFileSync, mkdirSync } from 'node:fs'
 import { WorkerPool, defaultWorkerCount } from '../lib/worker-pool'
+import { counterfactualWindowScore, countEnemies } from './window-score'
 import type { Tank } from '../../src/types'
 
 const MAX_TICKS = 36000
 const UNREACH = 65535
-
-/** 窗口打分权重（§11.3；分量原始值入库，权重可 trainer 侧重推导）。 */
-const W_KILL = 4.0
-const W_DEATH = -5.0
-const W_WALL = -3.0
-const W_PRESSURE = 10.0
-const W_ENEMIES = 2.0
 
 export interface CfDecision {
   tick: number
@@ -478,11 +472,8 @@ export function runCounterfactualGame(
         const phi1 = basePressure(world)
         const enemies1 = countEnemies(world)
         scoresW[wi].push(
-          W_KILL * kills +
-            W_DEATH * deaths +
-            W_WALL * wallLoss +
-            W_PRESSURE * (phi0 - phi1) +
-            W_ENEMIES * (enemiesB - enemies1),
+          // 公式/权重的单一实现 = tools/sim/window-score.ts（P′-2a-B 搜索同式）。
+          counterfactualWindowScore(kills, deaths, wallLoss, phi0 - phi1, enemiesB - enemies1),
         )
       }
     }
@@ -554,16 +545,6 @@ function countBaseWall(world: World): number {
       const t = world.tileMap.get(col, row)
       if (t === 'brick' || t === 'steel') n++
     }
-  }
-  return n
-}
-
-function countEnemies(world: World): number {
-  let n = 0
-  const tanks = world.allTanks
-  for (let i = 0; i < tanks.length; i++) {
-    const t = tanks[i]
-    if (t.alive && !t.isPlayer && t.spawnTimer <= 0) n++
   }
   return n
 }

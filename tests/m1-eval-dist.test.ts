@@ -8,14 +8,17 @@
  *   3. `DIST_POLICIES`：能分派的 policy 白名单（与 Python `eval_m1_once.DISPATCHABLE` 对齐）。
  */
 import { describe, it, expect } from 'bun:test'
+import { join } from 'node:path'
 import type { SimTask } from '../tools/sim/sim-worker'
 import {
   DIST_POLICIES,
   buildDistSpec,
   rowToSimResult,
+  sumBranchTotals,
   type DistCtx,
   type M1DistRow,
 } from '../tools/sim/m1-eval'
+import { assertSimPolicy } from '../tools/sim/simulation-runner'
 
 const ctx: DistCtx = {
   cfgPath: 'nn-training/rl-config.json',
@@ -137,5 +140,62 @@ describe('m1-eval 分派白名单', () => {
     // nn 于 2026-09-19 入列：--weights-dir 解析出最新权重文件后经集群跑
     // （本地池与节点引擎的语义一致性由 tests/sim/eval-game-parity.test.ts 钉住）。
     expect([...DIST_POLICIES]).toEqual(['nn', 'intent-exec', 'goal', 'god'])
+  })
+})
+
+describe('m1-eval P′-0 fail-closed', () => {
+  const repoRoot = join(import.meta.dir, '..')
+  const runCli = (...args: string[]) =>
+    Bun.spawnSync({
+      cmd: [process.execPath, 'tools/sim/m1-eval.ts', ...args],
+      cwd: repoRoot,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+
+  it('未知 policy exit 2（绝不静默当 God 跑）', () => {
+    expect(() => assertSimPolicy('bogus')).toThrow(/unknown policy/)
+    const r = runCli('--policy', 'bogus', '--stages', '1', '--seeds', '1', '--no-dist')
+    expect(r.exitCode).toBe(2)
+  })
+
+  it('B8 与 B10 同开 exit 2', () => {
+    const r = runCli(
+      '--policy',
+      'god',
+      '--stages',
+      '1',
+      '--seeds',
+      '1',
+      '--no-dist',
+      '--suppress-useless-fire',
+      '--suppress-lead-miss-fire',
+    )
+    expect(r.exitCode).toBe(2)
+  })
+
+  it('非法 --player-level exit 2', () => {
+    const r = runCli(
+      '--policy',
+      'god',
+      '--stages',
+      '1',
+      '--seeds',
+      '1',
+      '--no-dist',
+      '--player-level',
+      'x',
+    )
+    expect(r.exitCode).toBe(2)
+  })
+
+  it('sumBranchTotals 逐 key 求和、空洞跳过', () => {
+    expect(
+      sumBranchTotals([
+        { branchTotals: { navigate: 2, dodge: 1 } },
+        undefined,
+        { branchTotals: { navigate: 3 } },
+      ]),
+    ).toEqual({ navigate: 5, dodge: 1 })
   })
 })

@@ -244,6 +244,25 @@ export const LABEL_TO_CANDIDATE: Record<string, readonly string[]> = {
 }
 
 /**
+ * 意图 → 执行器 `_candidateOverride` 集合（E1 白名单子链的**唯一构造入口**）。
+ *
+ * 三层契约：window 行构成主行为；reflex 行（dodge）保留闪避；`suppressDodge`
+ * （仅 suicideReturn）显式压制 dodge。集合为空 ⇒ null（执行器不设 override）。
+ * IntentOracleProbe 与 P′-2a-B oracle-search 共用本函数，禁止第二份白名单展开。
+ */
+export function candidateOverrideForIntent(intent: IntentId): ReadonlySet<string> | null {
+  const ids = new Set<string>()
+  let suppressDodge = false
+  for (const r of WHITELISTS[intent]) {
+    if (r.layer === 'window' && r.suppressDodge === true) suppressDodge = true
+    const mapped = LABEL_TO_CANDIDATE[r.branch]
+    if (mapped) for (const c of mapped) ids.add(c)
+  }
+  if (suppressDodge) ids.delete('dodge')
+  return ids.size > 0 ? ids : null
+}
+
+/**
  * 父意图→激活头矩阵（§3.5 / 预注册 #9）。非激活头：训练损失权重置 0（不产梯度、
  * 不计 acc、不喂占位标签）；推理时仅当意图头选中该类后才解释其激活头；执行器
  * 契约写明"未激活头输出必须忽略"。草案定稿：enemy 头 ⊆ {INTERCEPT,HUNT,CRUISE}；

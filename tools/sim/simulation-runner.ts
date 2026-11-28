@@ -8,6 +8,7 @@ import { GoalExecutor } from '../../src/nn/goal-executor'
 import { IntentPlayer } from '../../src/nn/intent-player'
 import { IntentExecutor } from '../../src/nn/intent-executor'
 import { IntentOracleProbe } from '../../src/nn/intent-oracle-probe'
+import { IntentSearchInput } from './intent-search-input'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { CELL, GRID, BASE_POS, ENEMIES_PER_STAGE, START_LIVES } from '../../src/constants'
@@ -423,6 +424,44 @@ export interface RunForensics {
 /** Maximum ticks before forcing a stop (10 minutes at 60fps = 36000). */
 export const MAX_TICKS = 36000
 
+/**
+ * P′-0：headless 运行支持的 player policy 全集（单一白名单）。
+ * 未知名必须响亮失败，绝不能静默落回 GodAIInput（基线静默错路的根因）。
+ */
+export const SIM_POLICIES = [
+  'god',
+  'nn',
+  'intent',
+  'intent-exec',
+  'intent-oracle',
+  'intent-search',
+  'goal',
+  'goal-god',
+] as const
+export type SimPolicy = (typeof SIM_POLICIES)[number]
+
+/** 只能本机跑、不可经 dist 分派的 policy（m1-eval 用它做 fail-closed）。 */
+export const LOCAL_ONLY_POLICIES = ['intent', 'intent-oracle', 'intent-search', 'goal-god'] as const
+
+export function assertSimPolicy(p: string | undefined): SimPolicy {
+  const policy = p ?? 'god'
+  if (!(SIM_POLICIES as readonly string[]).includes(policy)) {
+    throw new Error(`unknown policy '${policy}' (known: ${SIM_POLICIES.join('|')})`)
+  }
+  return policy as SimPolicy
+}
+
+/**
+ * P′-0 / CRN：executor RNG 的派生种子（单一来源）。
+ *
+ * world 流由 WorldSnapshot.rngState 共享；每个分支用同一 executorSeed 新建/恢复
+ * 执行器即可得到 common random numbers。分支内在决策点抽的语义 key（如采样均匀数）
+ * 必须在分支前预采样——分支内重抽会破坏 CRN。
+ */
+export function executorSeed(seed: number): number {
+  return (seed ^ 0x9e3779b9) >>> 0
+}
+
 export interface RunOptions {
   seed: number
   stage: StageData
@@ -437,9 +476,15 @@ export interface RunOptions {
   stageIndex?: number
   /** God AI parameters (defaults to DEFAULT_GOD_AI_PARAMS). */
   godAIParams?: GodAIParams
+  /** P′-1：显式玩家星级覆盖（任务口径 0★）。缺省 = difficulty.playerStartLevel。 */
+  playerLevel?: number
   /** Player policy for the headless run: 'god' (default), 'nn', 'intent',
    *  'intent-exec', 'intent-oracle' or 'goal' (T8.5 goal-space 执行器). */
-  policy?: 'god' | 'nn' | 'intent' | 'intent-exec' | 'intent-oracle' | 'goal' | 'goal-god'
+  policy?: SimPolicy
+  /** P′-0：B8 通用废射门（NNInput 推理侧；与 suppressLeadMissFire 互斥）。 */
+  suppressUselessFire?: boolean
+  /** P′-0：B10 预测前移门（NNInput 推理侧；与 suppressUselessFire 互斥）。 */
+  suppressLeadMissFire?: boolean
   /** Weights directory for the 'nn' policy (auto-discovers latest). */
   nnWeightsDir?: string
   /**
@@ -456,6 +501,10 @@ export interface RunOptions {
   promiseTicks?: number
   /** M7① cadence 扫描：意图 replan 周期覆盖（0/缺省 = 策略默认）。 */
   replanEvery?: number
+  /** P′-2a-B：oracle-search 的搜索/承诺周期（tick；缺省 120）。 */
+  intentSearchEvery?: number
+  /** P′-2a-B：oracle-search 的分支 rollout 视界（tick；缺省 = 搜索周期）。 */
+  intentSearchHorizon?: number
   /** M7① risk-gated（Q7）：危险窗口 cadence 动态压缩。 */
   riskGated?: boolean
   baseCadence?: number
@@ -595,6 +644,13 @@ function countBaseWall(world: World): number {
  */
 export function runSimulation(opts: RunOptions): SimResult {
   const { seed, stage, difficulty } = opts
+  // P′-0 fail-closed：未知名在这里就炸，绝不静默落到 GodAIInput。
+  const policy = assertSimPolicy(opts.policy)
+  // B8/B10 是同一机制（抑制空枪），按 plan/nn-input-inference-rules.plan.md §3.1
+  // 不组合；同开 = 配置文件错误，响亮拒。
+  if (opts.suppressUselessFire === true && opts.suppressLeadMissFire === true) {
+    throw new Error('suppressUselessFire and suppressLeadMissFire are mutually exclusive (B8/B10)')
+  }
   const maxTicks = opts.maxTicks ?? MAX_TICKS
   const sampleInterval = opts.sampleInterval ?? 1
   const collectMetrics = opts.collectMetrics !== false
@@ -626,26 +682,30 @@ export function runSimulation(opts: RunOptions): SimResult {
   // (loadStageData) therefore diverged: gates/A/Bs measured a "first life 0★,
   // 3 lives" baseline that understates the shipped config. Sync both here so
   // the simulation matches the real game on the first life.
-  world.playerLevel = world.difficulty?.playerStartLevel ?? 0
+  // P′-1: an explicit `playerLevel` (task口径 0★) wins over the difficulty default.
+  world.playerLevel = opts.playerLevel ?? world.difficulty?.playerStartLevel ?? 0
   world.lives = opts.livesOverride ?? world.difficulty?.startLives ?? START_LIVES
 
   // Create the God AI input with an independent RNG (DECISIONS #47).
   // This decouples God AI decisions from the world RNG stream, enabling
   // faithful replay playback where the God AI is absent.
-  const godRng = new RNG((seed ^ 0x9e3779b9) >>> 0)
+  const godRng = new RNG(executorSeed(seed))
   const input: GodAIInput =
-    opts.policy === 'nn'
+    policy === 'nn'
       ? (new NNInput(world, {
           weightsDir: opts.nnWeightsDir,
           // x2 事件 rung（R2）：与 export-eval-game 的 `--decision-events` 同值（parity 测试钉住）。
           decisionEvents: opts.nnDecisionEvents,
+          // P′-0：B8/B10 走 NNInput 的单一实现（export-eval-game 的内联臂是历史路径）。
+          suppressUselessFire: opts.suppressUselessFire,
+          suppressLeadMissFire: opts.suppressLeadMissFire,
         }) as unknown as GodAIInput)
-      : opts.policy === 'intent'
+      : policy === 'intent'
         ? (new IntentPlayer(world, {
             weightsText: readFileSync(opts.intentWeightsDir ?? '', 'utf8'),
             replanEvery: opts.replanEvery,
           }) as unknown as GodAIInput)
-        : opts.policy === 'intent-exec'
+        : policy === 'intent-exec'
           ? (new IntentExecutor(world, {
               weightsText: readFileSync(opts.intentWeightsDir ?? '', 'utf8'),
               rng: godRng, // §47：执行器内部 God-AI 独立 RNG，与 world 解耦
@@ -655,24 +715,28 @@ export function runSimulation(opts: RunOptions): SimResult {
               dangerCadence: opts.dangerCadence,
               recordReplanTrace: opts.recordIntentTrace,
             }) as unknown as GodAIInput)
-          : opts.policy === 'intent-oracle'
+          : policy === 'intent-oracle'
             ? (new IntentOracleProbe(world, {
                 seed, // 内部派生 oracle/exec 两个独立 RNG（§47）
                 replanEvery: opts.replanEvery,
               }) as unknown as GodAIInput)
-            : opts.policy === 'goal' || opts.policy === 'goal-god'
-              ? (new GoalExecutor(world, {
-                  weightsText:
-                    opts.policy === 'goal-god'
-                      ? ''
-                      : readFileSync(opts.goalWeightsDir ?? '', 'utf8'),
-                  rng: godRng, // §47：执行器内部 God-AI 独立 RNG（兜底/物理层）
-                  promiseTicks: opts.promiseTicks || undefined,
-                  // 诊断模式（§T9a 归因）：goal-god = 不跑网络，追逐 God-AI 导航目标，
-                  // 测执行器上限。不构建模型 ⇒ weights 可缺。
-                  followGodNav: opts.policy === 'goal-god',
+            : policy === 'intent-search'
+              ? (new IntentSearchInput(world, {
+                  seed, // exec RNG 与 intent-oracle 的 exec 同源（两臂 CRN）
+                  searchEvery: opts.intentSearchEvery ?? opts.intentSearchHorizon ?? 120,
+                  horizon: opts.intentSearchHorizon ?? 120,
                 }) as unknown as GodAIInput)
-              : new GodAIInput(world, godAIParams, godRng)
+              : policy === 'goal' || policy === 'goal-god'
+                ? (new GoalExecutor(world, {
+                    weightsText:
+                      policy === 'goal-god' ? '' : readFileSync(opts.goalWeightsDir ?? '', 'utf8'),
+                    rng: godRng, // §47：执行器内部 God-AI 独立 RNG（兜底/物理层）
+                    promiseTicks: opts.promiseTicks || undefined,
+                    // 诊断模式（§T9a 归因）：goal-god = 不跑网络，追逐 God-AI 导航目标，
+                    // 测执行器上限。不构建模型 ⇒ weights 可缺。
+                    followGodNav: policy === 'goal-god',
+                  }) as unknown as GodAIInput)
+                : new GodAIInput(world, godAIParams, godRng)
   const sim = new Simulation(world, input)
 
   // Lie-Back-Win-Mode: when --coop, set up player2 with God AI.
@@ -1185,12 +1249,12 @@ export function runSimulation(opts: RunOptions): SimResult {
     result.branchTotals = { ...input.branchCounts }
   }
 
-  if (opts.policy === 'nn' && opts.nnDecisionEvents === true) {
+  if (policy === 'nn' && opts.nnDecisionEvents === true) {
     // R2.3：只在显式开启事件模式时挂读数（既有产物不加字段）。
     result.nnDecisionReadout = (input as unknown as NNInput).readDecisionStats()
   }
 
-  if (opts.recordGoalTrace === true && opts.policy === 'goal') {
+  if (opts.recordGoalTrace === true && policy === 'goal') {
     const gx = input as unknown as {
       reselectTrace?: Array<{ tick: number; cell: number; clause: string; outcome: string }>
     }
@@ -1199,10 +1263,7 @@ export function runSimulation(opts: RunOptions): SimResult {
     }
   }
 
-  if (
-    opts.recordIntentTrace === true &&
-    (opts.policy === 'intent-exec' || opts.policy === 'intent')
-  ) {
+  if (opts.recordIntentTrace === true && (policy === 'intent-exec' || policy === 'intent')) {
     const ex = input as unknown as {
       replanTrace?: Array<{ tick: number; intent: number; margin: number }>
       intentTrace?: number[]
