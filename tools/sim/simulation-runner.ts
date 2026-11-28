@@ -10,6 +10,7 @@ import { IntentExecutor } from '../../src/nn/intent-executor'
 import { IntentOracleProbe } from '../../src/nn/intent-oracle-probe'
 import { IntentOptionProbe } from '../../src/nn/intent-option-probe'
 import { IntentSearchInput } from './intent-search-input'
+import { IntentOptionSearch, type ModifierLevel } from './intent-option-search'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { CELL, GRID, BASE_POS, ENEMIES_PER_STAGE, START_LIVES } from '../../src/constants'
@@ -436,6 +437,7 @@ export const SIM_POLICIES = [
   'intent-exec',
   'intent-oracle',
   'intent-option',
+  'intent-option-search',
   'intent-search',
   'goal',
   'goal-god',
@@ -447,6 +449,7 @@ export const LOCAL_ONLY_POLICIES = [
   'intent',
   'intent-oracle',
   'intent-option',
+  'intent-option-search',
   'intent-search',
   'goal-god',
 ] as const
@@ -513,6 +516,8 @@ export interface RunOptions {
   intentSearchEvery?: number
   /** P′-2a-B：oracle-search 的分支 rollout 视界（tick；缺省 = 搜索周期）。 */
   intentSearchHorizon?: number
+  /** P′-2a2：intent-option-search 的累积消融档（0..4；缺省 4 = 全修饰）。 */
+  modifierLevel?: ModifierLevel
   /** M7① risk-gated（Q7）：危险窗口 cadence 动态压缩。 */
   riskGated?: boolean
   baseCadence?: number
@@ -733,25 +738,32 @@ export function runSimulation(opts: RunOptions): SimResult {
                   seed, // 与 intent-oracle 同源 RNG ⇒ 两臂可逐字节对账
                   replanEvery: opts.replanEvery,
                 }) as unknown as GodAIInput)
-              : policy === 'intent-search'
-                ? (new IntentSearchInput(world, {
-                    seed, // exec RNG 与 intent-oracle 的 exec 同源（两臂 CRN）
+              : policy === 'intent-option-search'
+                ? (new IntentOptionSearch(world, {
+                    seed, // exec RNG 与 intent-option 同源（两臂 CRN）
                     searchEvery: opts.intentSearchEvery ?? opts.intentSearchHorizon ?? 120,
                     horizon: opts.intentSearchHorizon ?? 120,
+                    modifierLevel: opts.modifierLevel,
                   }) as unknown as GodAIInput)
-                : policy === 'goal' || policy === 'goal-god'
-                  ? (new GoalExecutor(world, {
-                      weightsText:
-                        policy === 'goal-god'
-                          ? ''
-                          : readFileSync(opts.goalWeightsDir ?? '', 'utf8'),
-                      rng: godRng, // §47：执行器内部 God-AI 独立 RNG（兜底/物理层）
-                      promiseTicks: opts.promiseTicks || undefined,
-                      // 诊断模式（§T9a 归因）：goal-god = 不跑网络，追逐 God-AI 导航目标，
-                      // 测执行器上限。不构建模型 ⇒ weights 可缺。
-                      followGodNav: policy === 'goal-god',
+                : policy === 'intent-search'
+                  ? (new IntentSearchInput(world, {
+                      seed, // exec RNG 与 intent-oracle 的 exec 同源（两臂 CRN）
+                      searchEvery: opts.intentSearchEvery ?? opts.intentSearchHorizon ?? 120,
+                      horizon: opts.intentSearchHorizon ?? 120,
                     }) as unknown as GodAIInput)
-                  : new GodAIInput(world, godAIParams, godRng)
+                  : policy === 'goal' || policy === 'goal-god'
+                    ? (new GoalExecutor(world, {
+                        weightsText:
+                          policy === 'goal-god'
+                            ? ''
+                            : readFileSync(opts.goalWeightsDir ?? '', 'utf8'),
+                        rng: godRng, // §47：执行器内部 God-AI 独立 RNG（兜底/物理层）
+                        promiseTicks: opts.promiseTicks || undefined,
+                        // 诊断模式（§T9a 归因）：goal-god = 不跑网络，追逐 God-AI 导航目标，
+                        // 测执行器上限。不构建模型 ⇒ weights 可缺。
+                        followGodNav: policy === 'goal-god',
+                      }) as unknown as GodAIInput)
+                    : new GodAIInput(world, godAIParams, godRng)
   const sim = new Simulation(world, input)
 
   // Lie-Back-Win-Mode: when --coop, set up player2 with God AI.

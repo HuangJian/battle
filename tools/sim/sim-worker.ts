@@ -18,6 +18,7 @@ import {
   type SimPolicy,
 } from './simulation-runner'
 import type { GodAIParams } from '../../src/ai/GodAIInput'
+import type { ModifierLevel } from './intent-option-search'
 import type { StageData } from '../../src/types'
 
 export interface SimTask {
@@ -86,6 +87,8 @@ export interface SimTask {
   intentSearchEvery?: number
   /** P′-2a-B：oracle-search 分支 rollout 视界（tick）。 */
   intentSearchHorizon?: number
+  /** P′-2a2：intent-option-search 的累积消融档（0..4）。 */
+  modifierLevel?: ModifierLevel
   /** M7① risk-gated（Q7）：危险窗口 cadence 动态压缩。 */
   riskGated?: boolean
   baseCadence?: number
@@ -172,6 +175,7 @@ self.onmessage = (event: MessageEvent<SimTask>) => {
       replanEvery: task.replanEvery,
       intentSearchEvery: task.intentSearchEvery,
       intentSearchHorizon: task.intentSearchHorizon,
+      modifierLevel: task.modifierLevel,
       riskGated: task.riskGated,
       baseCadence: task.baseCadence,
       dangerCadence: task.dangerCadence,

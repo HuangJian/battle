@@ -47,6 +47,7 @@ import {
   type SimPolicy,
 } from './simulation-runner'
 import type { SimTask, SimTaskResult } from './sim-worker'
+import type { ModifierLevel } from './intent-option-search'
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import {
@@ -182,6 +183,15 @@ async function main(): Promise<void> {
     process.exit(2)
   }
   const searchEvery = searchEveryArg > 0 ? searchEveryArg : searchHorizon
+  // P′-2a2：修饰维度累积消融档（0..4）。
+  const modifierLevelRaw = arg('modifier-level', '4')!
+  const modifierLevel = parseInt(modifierLevelRaw, 10)
+  if (!Number.isInteger(modifierLevel) || modifierLevel < 0 || modifierLevel > 4) {
+    process.stderr.write(
+      `[m1-eval] --modifier-level 非法（${modifierLevelRaw}；必须为 0..4 的整数）\n`,
+    )
+    process.exit(2)
+  }
   const riskGated = arg('risk-gated') === '1' || arg('risk-gated') === 'true'
   const baseCadence = parseInt(arg('base-cadence', '0')!, 10)
   const dangerCadence = parseInt(arg('danger-cadence', '0')!, 10)
@@ -286,6 +296,9 @@ async function main(): Promise<void> {
         // P′-2a-B：oracle-search 参数（仅 policy=intent-search 生效）。
         intentSearchHorizon: policy === 'intent-search' ? searchHorizon : undefined,
         intentSearchEvery: policy === 'intent-search' ? searchEvery : undefined,
+        // P′-2a2：修饰维度搜索（仅 policy=intent-option-search 生效）。
+        modifierLevel:
+          policy === 'intent-option-search' ? (modifierLevel as ModifierLevel) : undefined,
         riskGated,
         baseCadence: baseCadence || undefined,
         dangerCadence: dangerCadence || undefined,
@@ -314,6 +327,11 @@ async function main(): Promise<void> {
   else if (policy === 'intent-search')
     // P′-2a-B：搜索参数进 wver —— 不同 H/every 不得共用账本（无权重策略同样如此）。
     wverBytes = Buffer.from(JSON.stringify({ policy, h: searchHorizon, every: searchEvery }))
+  else if (policy === 'intent-option-search')
+    // P′-2a2：修饰档位同样进 wver（M0..M4 是不同实验臂）。
+    wverBytes = Buffer.from(
+      JSON.stringify({ policy, h: searchHorizon, every: searchEvery, level: modifierLevel }),
+    )
   else if (policy === 'god' || policy === 'goal-god') wverBytes = Buffer.from('{}')
   const wver = wverBytes
     ? new Bun.CryptoHasher('sha256').update(wverBytes).digest('hex')
@@ -717,8 +735,12 @@ async function main(): Promise<void> {
     openingConnect: false, // m1-eval 不套 OpeningController（NN 的历史 39.7% 走训练评估链）
     dodge: policy === 'nn' ? 'none' : 'builtin',
     // P′-2a-B：搜索臂必须自描述（H / 搜索周期随读数走）。
-    searchHorizon: policy === 'intent-search' ? searchHorizon : null,
-    searchEvery: policy === 'intent-search' ? searchEvery : null,
+    searchHorizon:
+      policy === 'intent-search' || policy === 'intent-option-search' ? searchHorizon : null,
+    searchEvery:
+      policy === 'intent-search' || policy === 'intent-option-search' ? searchEvery : null,
+    // P′-2a2：修饰维度臂自描述。
+    modifierLevel: policy === 'intent-option-search' ? modifierLevel : null,
     // P′-0：推理侧规则臂必须能自描述（B8/B10 各一臂，不组合）。
     b8: suppressUselessFire,
     b10: suppressLeadMissFire,
