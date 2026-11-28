@@ -15,11 +15,26 @@ import { type Direction } from '../constants'
 import type { InputLike } from '../game/Input'
 import type { World } from '../game/World'
 import { RNG } from '../utils/RNG'
-import { GodAIInput, DEFAULT_GOD_AI_PARAMS, type GodAIParams } from '../ai/GodAIInput'
+import {
+  GodAIInput,
+  DEFAULT_GOD_AI_PARAMS,
+  type GodAIParams,
+  type GodAIDecisionState,
+} from '../ai/GodAIInput'
 import { currentIntent } from '../ai/intent/tagger'
 import { INTENT_IDS, type IntentId } from '../ai/intent/vocab'
 import { INTENT_REPLAN_TICKS } from '../ai/intent/tagger'
 import type { NNOptionCommand } from '../ai/god/NNOption'
+
+/**
+ * P′-2b1：probe 的 oracle + executor 决策状态快照（分支 rollout 用）。
+ * 与 `cloneWorld/restoreWorld` 同一 tick 取；恢复顺序 `restoreWorld → restoreDecisionState`。
+ */
+export interface IntentOptionProbeState {
+  version: 1
+  oracle: GodAIDecisionState
+  exec: GodAIDecisionState
+}
 
 export interface IntentOptionProbeOptions {
   godParams?: GodAIParams
@@ -112,5 +127,34 @@ export class IntentOptionProbe implements InputLike {
     }
     this.exec._optionCmd = cmd
     this.exec._candidateOverride = new Set(['nnOption'])
+  }
+
+  // ================================================================
+  // P′-2b1: decision-state capture / restore (executor branch rollout)
+  // ================================================================
+
+  /** 捕获 oracle + executor 的跨 tick 决策状态（深拷贝；与 cloneWorld 同一 tick 取）。 */
+  captureDecisionState(): IntentOptionProbeState {
+    return {
+      version: 1,
+      oracle: this.oracle.captureDecisionState(),
+      exec: this.exec.captureDecisionState(),
+    }
+  }
+
+  /** 恢复决策状态（restoreWorld 之后调用；内部深拷贝，同一份 state 可复用于多个分支）。 */
+  restoreDecisionState(state: IntentOptionProbeState): void {
+    if (!state || state.version !== 1) {
+      throw new Error(
+        `IntentOptionProbeState: unsupported version ${(state as { version?: unknown })?.version}`,
+      )
+    }
+    this.oracle.restoreDecisionState(state.oracle)
+    this.exec.restoreDecisionState(state.exec)
+  }
+
+  /** 当前注入的 option 指令（只读；P′-2b1 option 分支的基线）。 */
+  readOptionCommand(): NNOptionCommand | null {
+    return this.exec._optionCmd
   }
 }

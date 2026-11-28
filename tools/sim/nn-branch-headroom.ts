@@ -49,13 +49,13 @@ const DECISION_K = 10
 const PRESSURE_SAMPLE_TICKS = 6
 
 /** 状态分层（顺序即判据优先级）。 */
-const STRATA = ['opening_300', 'base_pressure', 'ring_enemy', 'combat', 'free_nav'] as const
-type Stratum = (typeof STRATA)[number]
+export const STRATA = ['opening_300', 'base_pressure', 'ring_enemy', 'combat', 'free_nav'] as const
+export type Stratum = (typeof STRATA)[number]
 
 /** 动作编码：hold(2) × move(4) × fire(3) = 24；index = hold*12 + move*3 + fire。 */
-const ACTION_COUNT = 24
+export const ACTION_COUNT = 24
 
-function actionOf(
+export function actionOf(
   index: number,
 ): ForcedAction & { holdIdx: number; moveIdx: number; fireIdx: number } {
   const holdIdx = Math.floor(index / 12)
@@ -83,7 +83,7 @@ function flag(name: string): boolean {
   return process.argv.includes(`--${name}`)
 }
 
-interface Tel {
+export interface Tel {
   enemyTotal: number
   startLives: number
   playerShots: number
@@ -95,7 +95,7 @@ interface Tel {
   firstKillTick: number | undefined
 }
 
-function phiOf(tel: Tel, world: World): number {
+export function phiOf(tel: Tel, world: World): number {
   const c: PhiCounters = {
     enemyTotal: tel.enemyTotal,
     startLives: tel.startLives,
@@ -117,7 +117,7 @@ function phiOf(tel: Tel, world: World): number {
 }
 
 /** 无 id 的世界签名（self-check 用：分支之间新生成实体的 id 必然不同）。 */
-function worldSig(w: World): string {
+export function worldSig(w: World): string {
   const parts: Array<number | string> = [
     w.frame,
     w.killCount,
@@ -142,7 +142,7 @@ function worldSig(w: World): string {
   return parts.join(',')
 }
 
-function outcomeOf(world: World): string {
+export function outcomeOf(world: World): string {
   if (world.state === 'stageclear' || world.state === 'victory') return 'stage_clear'
   if (world.state === 'gameover')
     return world.tileMap.isBaseDestroyed() ? 'base_destroyed' : 'lives_exhausted'
@@ -195,7 +195,7 @@ function combatNow(world: World): boolean {
   return false
 }
 
-function classify(world: World): Stratum {
+export function classify(world: World): Stratum {
   if (world.frame <= 300) return 'opening_300'
   if (ringEnemy(world)) return 'ring_enemy'
   if (sampleBasePressure(world) >= 0.5) return 'base_pressure'
@@ -437,7 +437,10 @@ function runGame(
 }
 
 /** 均值 + 正态近似 CI（90/95 由 z 决定；筛查用 90%，确认用 95%）。 */
-function meanCi(values: number[], z: number): { mean: number; lo: number; hi: number; n: number } {
+export function meanCi(
+  values: number[],
+  z: number,
+): { mean: number; lo: number; hi: number; n: number } {
   const n = values.length
   if (n === 0) return { mean: 0, lo: 0, hi: 0, n: 0 }
   let sum = 0

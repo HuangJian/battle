@@ -29,6 +29,18 @@ export interface ForcedAction {
   fireBeforeTurn?: boolean
 }
 
+export interface ForcedTickOptions {
+  /**
+   * P′-2b1：强制窗口内**先查询 inner 再覆盖输出**（默认 false = 不查询 inner）。
+   *
+   * b0 的 NNInput 无跨 tick 决策状态（encoder 每次重算），跳过 inner 无影响；
+   * b1 的 executor（GodAIInput）有 tracker / 计数器，跳过一拍 think 会让后续决策
+   * 与「只替换动作」的真实语义分叉。开此档后 inner 的决策状态照常推进，只有
+   * 对外提供的动作被替换 ⇒ 自检（强制=实际动作 ≡ 不强制）才能逐字段成立。
+   */
+  decideFirst?: boolean
+}
+
 export class ForcedTickInput implements InputLike {
   private remaining: number
 
@@ -36,6 +48,7 @@ export class ForcedTickInput implements InputLike {
     private readonly inner: InputLike,
     private readonly forced: ForcedAction,
     private readonly ticks = 1,
+    private readonly opts: ForcedTickOptions = {},
   ) {
     if (!Number.isInteger(ticks) || ticks < 1) {
       throw new Error(`ForcedTickInput: ticks must be a positive integer (got ${ticks})`)
@@ -49,21 +62,27 @@ export class ForcedTickInput implements InputLike {
   }
 
   getMoveDirection(): Direction | null {
-    return this.remaining > 0 ? this.forced.moveDir : this.inner.getMoveDirection()
+    if (this.remaining <= 0) return this.inner.getMoveDirection()
+    if (this.opts.decideFirst) this.inner.getMoveDirection()
+    return this.forced.moveDir
   }
 
   isFiring(): boolean {
-    return this.remaining > 0 ? this.forced.fire : this.inner.isFiring()
+    if (this.remaining <= 0) return this.inner.isFiring()
+    if (this.opts.decideFirst) this.inner.isFiring()
+    return this.forced.fire
   }
 
   isHolding(): boolean {
-    return this.remaining > 0 ? this.forced.holding === true : (this.inner.isHolding?.() ?? false)
+    if (this.remaining <= 0) return this.inner.isHolding?.() ?? false
+    if (this.opts.decideFirst) this.inner.isHolding?.()
+    return this.forced.holding === true
   }
 
   isFireBeforeTurn(): boolean {
-    return this.remaining > 0
-      ? this.forced.fireBeforeTurn === true
-      : (this.inner.isFireBeforeTurn?.() ?? false)
+    if (this.remaining <= 0) return this.inner.isFireBeforeTurn?.() ?? false
+    if (this.opts.decideFirst) this.inner.isFireBeforeTurn?.()
+    return this.forced.fireBeforeTurn === true
   }
 
   usesHoldFire3(): boolean {
