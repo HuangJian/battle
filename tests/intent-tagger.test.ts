@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { mkdirSync, rmSync } from 'fs'
 import { probeBucketOf, processJob, type TaggerPayload } from '../tools/sim/intent-label-core'
-import { ObsEncoder } from '../src/nn/obs-encoder'
+import { ObsEncoder, OBS_CHANNELS } from '../src/nn/obs-encoder'
 import { RING_CELLS } from '../src/ai/god/ThreatBudget'
 import { seedWorld, clearArena, placeEnemy } from './helpers'
 
@@ -96,7 +96,7 @@ describe('processJob — 两遍法确定性（预注册 #15 同源纪律）', ()
     }
   })
 
-  it('shard 内容健全性：帧索引严格递增、段序列合法', async () => {
+  it('shard 内容健全性：obs 形状随 OBS_CHANNELS（不是写死的 14）、帧索引严格递增、段序列合法', async () => {
     const dir = 'tmp/intent-tagger-test/run-a/s01-seed3-hard'
     const manifest = JSON.parse(await Bun.file(`${dir}/manifest.json`).text()) as {
       ticks: number
@@ -104,6 +104,12 @@ describe('processJob — 两遍法确定性（预注册 #15 同源纪律）', ()
       segments: Array<{ start: number; end: number; intent: string }>
     }
     expect(manifest.sampled).toBeGreaterThan(0)
+    // P′-4a 前置修复：obs.npy 头部的通道维必须 = 当前 OBS_CHANNELS（写死 14 会让
+    // numpy 读出截断帧，P′-4a 的 option 探针在 conv 层直接炸）。
+    const obsHead = Buffer.from(await Bun.file(`${dir}/obs.npy`).slice(0, 128).bytes()).toString(
+      'utf8',
+    )
+    expect(obsHead).toContain(`(${manifest.sampled}, ${OBS_CHANNELS}, 26, 26)`)
     expect(manifest.segments.length).toBeGreaterThan(0)
     let prevEnd = -1
     for (const s of manifest.segments) {

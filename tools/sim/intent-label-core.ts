@@ -246,7 +246,7 @@ export function processJob(payload: TaggerPayload, job: TaggerJob): TaggerAggreg
   }
 
   mkdirSync(dirName, { recursive: true })
-  writeNpy(`${dirName}/obs.npy`, obsOut, [idxList.length, 14, 26, 26], 'u1')
+  writeNpy(`${dirName}/obs.npy`, obsOut, [idxList.length, OBS_CHANNELS, BOARD, BOARD], 'u1')
   writeNpy(`${dirName}/scalars.npy`, scalarsOut, [idxList.length, SCALAR_DIM], 'f4')
   writeNpy(`${dirName}/intent.npy`, intentOut, [idxList.length], 'u1')
   writeNpy(`${dirName}/bucket.npy`, bucketOut, [idxList.length], 'u1')

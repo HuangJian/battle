@@ -750,6 +750,7 @@ LAYERS: dict[str, int] = {
     "worker.scripts.init_scratch_weights": 4,
     "worker.train.goal_bc": 4,
     "worker.train.intent_probe": 4,
+    "worker.train.option_probe": 5,
     # L5（3 个）
     "worker.model_build": 5,
     "worker.ppo.config": 5,
