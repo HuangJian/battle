@@ -72,3 +72,36 @@ def test_pretrained_value_head_is_not_zeroed() -> None:
     assert got.params["value_head.weight"].zeroed is False
     assert got.params["value_head.weight"].scale == 1.0
     assert got.params["move_head.weight"].scale == 3.0
+
+
+def test_intent_init_uses_module_entry(monkeypatch) -> None:
+    """2026-11-28 回归：flat 脚本并包后，init 子进程必须走 `-m worker.ppo.intent`。
+
+    旧实现拼 `nn-training/ppo_intent.py`（cwd=nn-training）⇒ 路径不存在，
+    mode=intent/goal 首启直接 CalledProcessError（P′-4a 课程无法启动）。
+    """
+    import worker.model_build as mb
+    import worker.ppo.intent as ppo_intent
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        captured["kw"] = kw
+
+    class _FakeModel:
+        def parameters(self):
+            return []
+
+    monkeypatch.setattr(mb.os.path, "exists", lambda _p: False)
+    monkeypatch.setattr(mb.subprocess, "run", _fake_run)
+    monkeypatch.setattr(ppo_intent, "build_rl_net", lambda _p: _FakeModel())
+    monkeypatch.setattr(ppo_intent, "load_intent_weights", lambda _m, _p: None)
+
+    mb._build_intent_or_goal("bc.json", "rl.json", "intent", 4)
+
+    cmd = captured["cmd"]
+    assert cmd[1:3] == ["-m", "worker.ppo.intent"]
+    assert not any(str(part).endswith("ppo_intent.py") for part in cmd)
+    assert captured["kw"]["cwd"] == str(mb.REPO_ROOT)
+    assert captured["kw"]["check"] is True

@@ -90,6 +90,19 @@ def test_defaults_are_frozen(head):
     assert vars(ns) == {**_DEFAULTS, "out": "o.json"}
 
 
+def test_intent_cli_update_binds_port_shape():
+    """2026-11-28 回归：CLI update 模式必须能接住端口调用形状。
+
+    `cli.run` 调 `spec.update(model, opt, chunks, epochs, device, seed=..., ...)`；
+    曾绑 `ppo_update_intent`（只收 HeadUpdateSpec）⇒ update 模式 TypeError。
+    """
+    import inspect
+
+    params = inspect.signature(ppo_intent._spec().update).parameters
+    assert {"model", "opt", "chunks", "epochs", "device"} <= set(params)
+    assert any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
 @pytest.mark.parametrize("head", ["goal", "intent"])
 def test_main_is_a_thin_shell(head):
     """`main()` 只有一句 `run_cli(_spec())`；参数定义只住 `cli._parser`。"""

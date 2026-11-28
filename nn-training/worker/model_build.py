@@ -35,12 +35,18 @@ def _build_intent_or_goal(
     PPO = get_backend(mode)
     resume = os.path.exists(rl_path)
     if not resume:
-        script = "ppo_goal.py" if mode == "goal" else "ppo_intent.py"
+        # 2026-11-28 修复：flat 脚本已并包（commit 3c831690），旧路径
+        # `nn-training/{ppo_intent,ppo_goal}.py` 已不存在，且 cwd=nn-training ⇒
+        # 拼成 nn-training/nn-training/... 必然 FileNotFoundError（mode=intent/goal
+        # 首启静默不可用）。改用模块入口 `-m worker.ppo.intent`：cwd 在 nn-training，
+        # 既解析到包，又避免 `worker/ppo/common.py` 遮蔽顶层 `common` 包。
+        module = "worker.ppo.goal" if mode == "goal" else "worker.ppo.intent"
         log(f"init RL weights from BC ({bc_path}) -> {rl_path} ({mode} backend)")
         subprocess.run(
             [
                 sys.executable,
-                f"nn-training/{script}",
+                "-m",
+                module,
                 "--init-from",
                 bc_path,
                 "--out",

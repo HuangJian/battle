@@ -94,6 +94,10 @@ def build_rollout_cmd(spec: RolloutCmdSpec) -> list[str]:
             "--replan",
             str(getattr(args, "replan", 30)),
         ]
+        # M1d / D14（2026-11-28，P′-4a）：意图线与 per-tick 同规——自定义关
+        # （classic35 id 2000+）与语料血缘必须随命令走，否则 2000+i 在导出器侧
+        # 走到 STAGES[2000] 未定义，整批静默 SKIP；远端 PPO 还会因缺 course_fp 拒收。
+        _append_stage_lineage(cmd, args, stage)
     else:
         cmd = [
             bun,
@@ -152,24 +156,8 @@ def build_rollout_cmd(spec: RolloutCmdSpec) -> list[str]:
         _dk = int(getattr(args, "decision_k", 10))
         if _dk != 10:
             cmd += ["--decision-k", str(_dk)]
-        # M1d：课程自定义关 stageJson + 命数/星级覆盖（plan §5.2；四守卫在导出器端）。
-        # stageJson 只有 stage ∈ [2000..] 的自定义关才有；arena/真实关恒 None。
-        from worker.config import args_rollout_overrides, stage_json_for_args
-
-        sj = stage_json_for_args(args, stage)
-        if sj:
-            cmd += ["--stage-json", sj]
-        # D14：语料血缘 course_fp 进 shard manifest（远程 PPO 装载校验
-        # job.course_fp == shard.course_fp，跨课程语料绝不混训）。
-        cfp = course_fp_for_args(args)
-        if cfp:
-            cmd += ["--course-fp", cfp]
-        # D14 语义版：corpus_fp = 语料身份（env+reward 解析值哈希）与文件血缘并存。
-        # 预算/路径/注释类编辑只动 course_fp，不动 corpus_fp ⇒ 不触发混训拒收
-        # （DECISIONS §2026-09-13-level-extraction · 全文 → docs/nn/training-stack.md §25；worker 侧优先比 corpus_fp）。
-        cfp2 = corpus_fp_for_args(args)
-        if cfp2:
-            cmd += ["--corpus-fp", cfp2]
+        # M1d：课程自定义关 stageJson + D14 语料血缘（per-tick / intent 共用一份）。
+        _append_stage_lineage(cmd, args, stage)
         # 起始分布（plan/x20-state-init.plan.md P1/P3）：人类中段快照注入，一局一个快照。
         # 派生（哪一局哪个切点）住 `biz/state_init`：纯函数、key 含 (rotate_seed, it, stage, seed)
         # ⇒ 断点续跑不会换起始状态，每轮换（§15.1）。课程没开 state_init ⇒ None（零回归）。
@@ -178,11 +166,33 @@ def build_rollout_cmd(spec: RolloutCmdSpec) -> list[str]:
         init = argv_init_for(args, stage=int(stage), seed=int(seed), node_side=node_side)
         if init is not None:
             cmd += ["--init-snapshot", init.path]
+        from worker.config import args_rollout_overrides
+
         for k, v in args_rollout_overrides(args).items():
             # 键是下划线（lives_override），导出器只认连字符（--lives-override，
             # 未知 flag 静默忽略）——c6-gae 本地 3命1星事故根因，见 tests/worker/test_rl_cmd.py。
             cmd += [f"--{k.replace('_', '-')}", v]
     return cmd
+
+
+def _append_stage_lineage(cmd: list[str], args: object, stage: int) -> None:
+    """M1d / D14：自定义关 stageJson + 语料血缘（per-tick 与 intent 共用）。
+
+    - `stageJson` 只有 stage ∈ [2000..] 的自定义关才有（arena/真实关恒 None）。缺它 ⇒
+      导出器按 `STAGES[stage]` 走：2000+i 未定义 ⇒ 整批静默 SKIP（意图线旧行为）。
+    - `course_fp` / `corpus_fp` = 远端 PPO 的 D14 装载校验（job 与 shard 必须同源）。
+    """
+    from worker.config import stage_json_for_args
+
+    sj = stage_json_for_args(args, stage)
+    if sj:
+        cmd += ["--stage-json", sj]
+    cfp = course_fp_for_args(args)
+    if cfp:
+        cmd += ["--course-fp", cfp]
+    cfp2 = corpus_fp_for_args(args)
+    if cfp2:
+        cmd += ["--corpus-fp", cfp2]
 
 
 @functools.cache

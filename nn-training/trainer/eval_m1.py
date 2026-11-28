@@ -2,7 +2,7 @@
 RL 入口整合，plan/RL-Entry-Consolidation.md P3）。
 
 与 trainer/eval_dispatch.py（per-tick 模式）双轨并存（DECISIONS §307 D3）：两者的
-语料/判门协议不同——本模块走 `tools/sim/m1-eval.ts --policy intent-exec|goal`
+语料/判门协议不同——本模块走 `tools/sim/m1-eval.ts --policy intent-exec|hier-option|goal`
 固定语料（35 关 × eval_seeds）整批贪心局 + error 局整批重跑；eval_dispatch 走
 逐局派发 + eval_log.jsonl wver 键对账。入口统一在 trainer/run_rl.py，按 --mode 分派。
 
@@ -76,6 +76,22 @@ def parse_m1_eval_report(text: str) -> dict:
 CLEAN_EVAL_MAX_RETRY = 3
 
 
+def intent_eval_policy(rl_path: str) -> str:
+    """intent 档的评估执行器：由权重 `arch.intentDim` 决定（单一来源）。
+
+    - 8 = legacy intent 线 → `intent-exec`（IntentExecutor，8 意图）；
+    - 6 = P′-4a option 联合槽 → `hier-option`（HierOptionExecutor，6 槽 + E2′）。
+    读不到/异常 ⇒ 回退 `intent-exec`（历史行为；解析失败不静默换语义，但也不阻断评估）。
+    """
+    try:
+        with open(rl_path, encoding="utf-8") as f:
+            meta = json.load(f)
+        dim = int((meta.get("arch") or {}).get("intentDim", 8))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return "intent-exec"
+    return "hier-option" if dim == 6 else "intent-exec"
+
+
 def run_clean_eval(bun: str, rl_path: str, args, _runner=None) -> dict:
     """m1-eval intent-exec/goal 固定语料贪心评估（35 关 × eval_seeds/关，**派发远端 agents**）。
 
@@ -93,6 +109,7 @@ def run_clean_eval(bun: str, rl_path: str, args, _runner=None) -> dict:
     `_runner` 供测试注入 fake runner（替换 subprocess 执行）。
     """
     seeds = args.eval_seeds
+    policy = "goal" if args.goal else intent_eval_policy(rl_path)
     cmd = [
         bun,
         "tools/sim/m1-eval.ts",
@@ -103,7 +120,7 @@ def run_clean_eval(bun: str, rl_path: str, args, _runner=None) -> dict:
         "--difficulty",
         args.difficulty,
         "--policy",
-        "goal" if args.goal else "intent-exec",
+        policy,
         "--goal-weights" if args.goal else "--intent-weights",
         rl_path,
         "--dist-nodes",
@@ -200,7 +217,7 @@ def dispatch_eval_bg_m1(
                     list(er.get("perGame") or []),
                     it=it,
                     wver16=_wver16,
-                    policy="goal" if args.goal else "intent-exec",
+                    policy="goal" if args.goal else intent_eval_policy(rl_path),
                 )
                 log(f"eval it{it}: m1 per-game rows={_n} -> eval_log.jsonl")
             except Exception as e_rows:

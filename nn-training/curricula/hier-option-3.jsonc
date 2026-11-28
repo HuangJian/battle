@@ -1,0 +1,88 @@
+// 课程 hier-option-3 — P′-4a 选择层（option 联合槽 PPO；2026-11-28）
+// ═══════════════════════════════════════════════════════════════════════════
+// 作用：在 **3 类 option × pathMode** 的 6 个联合槽上做意图步 PPO（semi-MDP）；
+//   执行器 = E2′ `nn-option`（HierOptionExecutor），target 由 `src/ai/intent/options.ts`
+//   的规则决定（P′-2a2 实测：break 独活；targetKind/target/param 砍掉）。
+//
+// 动作空间（预注册 p4 / plan §4.1）：
+//   0 HUNT_direct · 1 HUNT_break · 2 INTERCEPT_BASE_direct · 3 INTERCEPT_BASE_break
+//   4 HOLD_direct · 5 HOLD_break（**mask=0**：L0 禁止为拆墙走向基地锚点）
+//   8 意图标签 → 槽：CLEAR→HUNT_break，其余按 option3 映射 + direct。
+//
+// 起点（bc）= `option_probe.py --slots 6 --save` 的产物：StudentNet 主干 + 6 槽线性头，
+//   注入列零初始化；`arch.intentDim=6` 是训练/推理两侧的**唯一动作维来源**。
+//   同目录 probe6.json 记录可学习性：option3 折叠 top-1 **0.8375**（门 0.65）、
+//   HOLD_direct recall **0.528**、balancedAcc 0.726、无类坍缩（HOLD_break 无标签）。
+//
+// 评估：intent 模式的干净评估由 `trainer/eval_m1.py::intent_eval_policy` 读权重
+//   `arch.intentDim` 自动选 `--policy hier-option`（6）/ `intent-exec`（8）——
+//   不允许用 8 意图执行器评估 6 槽权重（槽 id 会被当意图，语义全错）。
+//
+// 判门（plan §9.7 P′-4a）：A 已过（+25.5pp）才开本课；本题内看
+//   ① top-1 复现（probe6 option3 折叠 ≥0.65 ✓）；
+//   ② 对 per-tick 非劣/正收益（700 筛查 → 2100 确认）；
+//   ③ option 不坍缩（per-slot 分布 + entropy；HOLD_break 恒 0）。
+//   ⚠ 700 局只做开发点估计（目标 85%），不作最终 LCB 声称。
+//
+// 启动：控制台开课 `hier-option-3`（mode=intent）；或同源 API。
+//   自检：首轮日志出现 `intent RL weights <- ...init.bc...`、shard manifest
+//   `"vocab": "option6"` / `actionDim: 6`；PPO 首轮 `entropy` 应≈1.0（槽多样），
+//   若单槽 >95% ⇒ 先查 mask 与注入维（7）而不是加熵系数。
+{
+  "version": 5,
+  "name": "hier-option-3",
+  "mode": "intent",
+  // 任务侧一个字不动：classic35 / hard / 3 命 / 0 星 / 20 敌 / 36000 拍 / 原版砖环。
+  // 环境语义由 level 文件唯一持有（课程不得再声明 difficulty/max_ticks）。
+  "level": "classic35",
+
+  // 语料轮换（intent 模式：每轮每关抽 seed_rotate 个全新 seed，按 (rotateSeed, it)
+  // 键控 ⇒ 断点可复现、AGENTS §15.1 每轮换语料；35 关 × 1 = 35 局/轮）。
+  "seed_rotate": 1,
+
+  // P′-4a 起点：6 槽 BC 头（option_probe --slots 6 --save 产物；本地产物，不入库）。
+  "bc": "nn-training/weights/hier-option-3/hier-option-3.init.bc.20261128.json",
+
+  // 缰绳：ref = 上述 BC 冻结快照；decay 0.99 ⇒ 前 ~500 轮仍有锚（与 g11 同形）。
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "kickstart_decay": 0.99,
+  // 首轮只训 value（B′ 冷启动 value 随机；warmup 期策略冻结）。
+  "warmup_iters": 1,
+
+  // 预算与优化器（intent PPO 的模块常量：LR=1e-4 / ENT=0.08 / target_kl=0.02）。
+  // iters=0 = 无限（靠 max_hours / 控制台停课）；本题预算先给 48h。
+  "iters": 0,
+  "max_hours": 48.0,
+  "lr": 0.0001,
+  "epochs": 4,
+  "mb": 512,
+  "normalize_ret": true,
+  // γ 为 per-tick 折扣：intent 步的 γ_step = γ^Δt（Δt≈30 ⇒ ≈0.86/步）。
+  "gamma": 0.995,
+  "lam": 0.95,
+
+  // 采样量：intent 是 per-game spawn、不支持 serve（plan §9.7）；每轮 35 局
+  // （seed_rotate=1），每局 ~30 意图步 ⇒ 千级 intent-steps/轮。
+  "paired_rotate_seed": 20261128,
+
+  // 本课的 rollout 是 export-intent-rollout.ts；OpeningController 不在该链路，
+  // 显式 false 防误读为"已套开局接管"。
+  "opening_connect": false,
+
+  // 评估：intent 模式的干净评估 = m1-eval `-1..-35` × eval_seeds（默认 10 = 350 局/点）；
+  // eval_stages/eval_every 保留给控制台读数（700 点估计走 --eval-seeds 20 的手工腿）。
+  "eval_stages": "2000-2034",
+  "eval_every": 10,
+
+  // 过程熔断：热启动权重天生低熵，放宽熵熔断并加连续代阈值（与 g11 同口径）。
+  "ent_break": 0.25,
+  "ent_break_consec": 8,
+  "ent_break_max_winrate": 0.0,
+
+  // 产物路径（新实验 ⇒ 新目录；不与任何既有腿续跑）。
+  "out": "tmp/hier-option-3/weights.json",
+  "traj": "tmp/hier-option-3",
+  "backup_dir": "nn-training/weights/hier-option-3",
+  "backup_prefix": "hier-option-3",
+}

@@ -277,7 +277,9 @@ def _spec() -> CliSpec:
         load_weights=load_intent_weights,
         export_weights=export_intent_weights,
         load_episodes=load_episodes_intent,
-        update=ppo_update_intent,
+        # CLI 的 update 调用面是 backend 端口形状（model/opt/chunks/epochs/device/**kw）——
+        # 绑 `ppo_update_intent`（只收 HeadUpdateSpec）会在 update 模式 TypeError（2026-11-28 修）。
+        update=update,
     )
 
 

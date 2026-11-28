@@ -68,6 +68,24 @@ def test_no_overrides_no_flags() -> None:
     assert "--player_level" not in cmd
 
 
+def test_intent_cmd_supports_custom_stage_json() -> None:
+    """P′-4a（2026-11-28）：意图线必须能跑自定义关（classic35 id 2000+）。
+
+    旧命令不传 `--stage-json` ⇒ 导出器 `STAGES[2000]` 未定义 ⇒ 整批静默 SKIP。
+    """
+
+    class _Course:
+        name = "fake-intent-course"
+
+        def stage_json(self, stage: int) -> str:
+            return '{"grid": [[0]]}'
+
+    cmd = _cmd(intent_rollout=True, replan=30, course_obj=_Course(), course_path="")
+    assert cmd[1] == "tools/sim/export-intent-rollout.ts"
+    assert cmd[cmd.index("--stage-json") + 1] == '{"grid": [[0]]}'
+    assert cmd[cmd.index("--replan") + 1] == "30"
+
+
 def test_replay_corpus_passes_local_code_sha() -> None:
     """2026-11-17（docs/nn/remote-transport.md §154）：replay 语料透传本机 codeHash。
 
