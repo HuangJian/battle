@@ -66,6 +66,9 @@ init 落后 −14.3pp 与 probe 的 HOLD 召回 0.53 一致：**起点偏低但�
 **下一步**：控制台开 `hier-option-3`；首轮自检 `intent RL weights <- ...init.bc`、manifest
 `option6`、entropy≈1；600–1000 轮后按 700 筛查 → 2100 确认对 per-tick 非劣/正收益。
 
+**Paddle 边界**：`IntentNet` 无 Paddle twin（只有 `student_paddle` / `engine_paddle`）⇒ 本卡
+option 线只支持 torch（本地 / GPU 云），AI Studio TPU 排除；要上 TPU 需另立 twin/parity。
+
 ---
 ## §170 P′-4a 前置：option3 top-1 **0.885（加权）/0.973（不加权）**；不加权坍缩到全 HUNT，HOLD 自然窗口仅 93（2026-11-28）
 
