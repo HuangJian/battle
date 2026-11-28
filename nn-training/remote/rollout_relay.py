@@ -291,7 +291,7 @@ def _port_sweep(
 
     def _sweep_port(port: int) -> None:
         url = f"https://{host}:{port}/relay/{node_id}/_poll?wait=0"
-        verdict, _human = _probe_one_route("direct", url, token, timeout)
+        verdict, _human = PORTS.probe_one_route("direct", url, token, timeout)
         out[port] = verdict
 
     threads = [
@@ -516,7 +516,7 @@ def probe_hub(
     对照）→ 备用端口；每层都比上一层贵，且只在前一层给出「还值得往下查」时问。
     """
     host, port = _host_port(hub_url)
-    ips = _resolve_ips(host, port)  # 只解析**一次**：DNS 轮转会让两条日志自相矛盾
+    ips = PORTS.resolve_ips(host, port)  # 只解析**一次**：DNS 轮转会让两条日志自相矛盾
     dns = _dns_summary(host, port, ips)
     facts: RelayFacts = {"host": host, "port": port, "dns": dns, "routes": {}}
     url = f"{str(hub_url).rstrip('/')}/relay/{node_id}/_poll?wait=0"
@@ -584,7 +584,7 @@ def _probe_routes(
     got: dict[str, tuple[str, str]] = {}
 
     def _run(route: str) -> None:
-        got[route] = _probe_one_route(route, url, token, timeout)
+        got[route] = PORTS.probe_one_route(route, url, token, timeout)
 
     if len(routes) == 1:
         _run(routes[0])
@@ -625,7 +625,7 @@ def _unreachable_tail(ctx: _ProbeCtx) -> str:
         line += f"（{','.join(gw)}：中间层回话快但到不了 hub —— 代理/CF 边缘那一跳断了，不算通）"
     # HTTPS 全不通时补一层**逐 IP 的裸 TCP**：把「IP 黑洞 / TLS 被掐 / 没有 v6 路由」
     # 分开 —— 三者都只表现为 timeout，却对应完全不同的修法（2026-11-18 DSW 现场）。
-    tcp = _tcp_sweep(ctx.ips, ctx.port, TCP_PROBE_SEC)
+    tcp = PORTS.tcp_sweep(ctx.ips, ctx.port, TCP_PROBE_SEC)
     ctx.facts["tcp"] = tcp
     if tcp:
         line += " ｜ TCP=" + ",".join(
@@ -657,9 +657,9 @@ def _tls_readings(ctx: _ProbeCtx, tcp: dict[str, str]) -> _TlsReadings:
 
     def _ctl_probe(ctl_host: str) -> None:
         # 对照恒用 443：要问的是「本机到那边的 TLS 起不起得来」，与 hub 的端口无关。
-        ctl_ips = _resolve_ips(ctl_host, 443)
+        ctl_ips = PORTS.resolve_ips(ctl_host, 443)
         if ctl_ips:
-            swept = _tls_sweep(ctl_ips, 443, ctl_host, TLS_PROBE_SEC)
+            swept = PORTS.tls_sweep(ctl_ips, 443, ctl_host, TLS_PROBE_SEC)
             ctl_out[ctl_host] = {ip: v for ip, (v, _h) in swept.items()}
 
     # 两条对照与 hub 那轮 TLS **并行**：多问一家不该再加一份预算。
@@ -669,7 +669,7 @@ def _tls_readings(ctx: _ProbeCtx, tcp: dict[str, str]) -> _TlsReadings:
     ]
     for t in ctl_threads:
         t.start()
-    tls_out = _tls_sweep(ok_ips, ctx.port, ctx.host, TLS_PROBE_SEC)
+    tls_out = PORTS.tls_sweep(ok_ips, ctx.port, ctx.host, TLS_PROBE_SEC)
     for t in ctl_threads:
         t.join()
     tls = {ip: v for ip, (v, _h) in tls_out.items()}
@@ -717,7 +717,7 @@ def _alt_port_advice(ctx: _ProbeCtx, kind: str) -> _PortAdvice:
     cands = tuple(p for p in (443, *ALT_HTTPS_PORTS) if p != ctx.port)
     if not (ctx.scheme == "https" and kind in _SWEEP_HINTS and cands):
         return _PortAdvice("", kind, "")
-    swept = _port_sweep(
+    swept = PORTS.port_sweep(
         ctx.host, cands, ctx.token, ctx.node_id, min(ctx.timeout, PROBE_TIMEOUT_SEC)
     )
     ctx.facts["alt_ports"] = {str(p): v for p, v in swept.items()}
@@ -742,7 +742,7 @@ def _dns_summary(host: str, port: int, ips: list[str] | None = None) -> str:
     地址族要显式标出来：云机上「解析出 IPv6 但没有可用 IPv6 路由」是最常见的假死，
     而这一点在 `URLError` 一句话里永远看不见。
     """
-    ips = _resolve_ips(host, port) if ips is None else ips
+    ips = PORTS.resolve_ips(host, port) if ips is None else ips
     if not ips:
         return "fail"
     return ",".join(f"{ip}({'v6' if ':' in ip else 'v4'})" for ip in ips[:6])
@@ -765,6 +765,41 @@ def _resolve_ips(host: str, port: int) -> list[str]:
         if ip not in out:
             out.append(ip)
     return out
+
+
+@dataclass(frozen=True)
+class RelayPorts:
+    """反向通道预检「量与网络打交道」的五步（P0-8 端口对象，2026-11-28）。
+
+    预检本身是纯决策，但这五步会真的解析/拨号；测试面原先靠 `monkeypatch.setattr(rr, "_tls_sweep",
+    …)` 打桩（`test_rollout_relay` 9 处），等于把五个私有名冻结成 API。端口只把它们收成字段，
+    缺省实现就是本模块已有的函数，调用点一律 `PORTS.x(...)`（**调用时**读模块全局）。
+
+    为什么不收 `_route_open` / `RelayLink._post_reply` / `RelayLink._worker`：那三个分别是
+    「一条请求怎么发」与两个类内执行体（其中一个还是线程入口）—— 它们的返回值是 urllib 的
+    响应对象、绑定在实例上；改成端口会把 `Any` 或 `self` 塞进数据面，收益只是少 4 处打桩。
+    """
+
+    #: 域名 → 去重后的地址表（v4/v6 混排，保持解析顺序）。
+    resolve_ips: Callable[[str, int], list[str]]
+    #: 逐 IP 裸 TCP 结论。
+    tcp_sweep: Callable[[list[str], int, float], dict[str, str]]
+    #: 逐 IP 裸 TLS 握手结论。
+    tls_sweep: Callable[[list[str], int, str, float], dict[str, tuple[str, str]]]
+    #: 备用端口各发一次真 HTTPS 预检。
+    port_sweep: Callable[[str, tuple[int, ...], str, str, float], dict[int, str]]
+    #: 单条路由的一次 HTTPS 预检 → `(verdict, 人读片段)`。
+    probe_one_route: Callable[[str, str, str, float], tuple[str, str]]
+
+
+#: 缺省端口：五个实现此刻都已定义；这一行是它们唯一的点名处（套用 `NODE` / `BOOT` 同款形状）。
+PORTS = RelayPorts(
+    resolve_ips=_resolve_ips,
+    tcp_sweep=_tcp_sweep,
+    tls_sweep=_tls_sweep,
+    port_sweep=_port_sweep,
+    probe_one_route=_probe_one_route,
+)
 
 
 def _pick_route(facts: RelayFacts) -> str:

@@ -120,9 +120,12 @@ G19 **254 / 68 → 202 / 66**（累计 384 / 91 → 202 / 66，−182 次 / −2
 收进 `BootPorts`（NamedTuple，5 字段：两个延迟 loader / `post_json` / `run_batch` / `explicit_leases`；
 为什么不是 dataclass 见 §392），`BOOT` 装配住 `12_entry`。G19 **178 / 64**（累计 384 / 91 → 178 / 64，
 −206 次 / −27 文件）；G14 +2（两个 loader 必须是 `Any`，已在基线记明）。
+**批七（同日）**：`remote/rollout_relay` 9 处（预检的五个量网络步骤）收进 `RelayPorts`；
+`_route_open` 与 `RelayLink._post_reply` / `_worker` 有意不收（实例/线程入口，见 §393）。
+G19 **169 / 63**（累计 384 / 91 → 169 / 63，−215 次 / −28 文件）。
 **下一个已知口径**：`TrainingLoop._*` 15 处（与 P0-1 同批），然后按 G19 存量降序
-（`test_rollout_relay` 14 · `test_finish_course_drains_eval` 11 · …）。
-全文 → `docs/nn/engineering.md` §389 / §391 / §392。
+（`test_finish_course_drains_eval` 11 · `test_ppo_backend_switch` 9 · `test_to_cpu_batch` 9 · …）。
+全文 → `docs/nn/engineering.md` §389 / §391 / §392 / §393。
 
 ## 0. 执行摘要
 

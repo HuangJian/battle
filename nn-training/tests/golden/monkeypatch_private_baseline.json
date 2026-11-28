@@ -31,7 +31,7 @@
   "tests/remote/test_prefetch_adaptive.py": 1,
   "tests/remote/test_prefetch_proc.py": 2,
   "tests/remote/test_remote_hotswap.py": 1,
-  "tests/remote/test_rollout_relay.py": 14,
+  "tests/remote/test_rollout_relay.py": 5,
   "tests/remote/test_rollout_scratch.py": 1,
   "tests/remote/test_soft_hold_prefetch.py": 6,
   "tests/remote/test_train_core_split.py": 2,

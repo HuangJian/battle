@@ -29,6 +29,21 @@
 
 ---
 
+## §393 P0-8 第五代：反向通道预检端口（`remote/rollout_relay.py::RelayPorts`，2026-11-28）
+
+`test_rollout_relay` 的 14 处私有打桩里 9 处落在预检的五个量网络步骤上（`_resolve_ips` ×2 ·
+`_tcp_sweep` · `_tls_sweep` · `_port_sweep` ×3 · `_probe_one_route` ×2）。收进
+`RelayPorts`（frozen dataclass，5 字段）+ 模块级 `PORTS`，装配行在 `_resolve_ips` 之后（那里
+五个实现齐全），调用点一律 `PORTS.x(...)`。
+
+**有意不收的三处**（写在类 docstring）：`_route_open`（返回 urllib 响应对象，入端口会把 `Any`
+塞进数据面）与 `RelayLink._post_reply` / `_worker`（绑定在实例上、后者还是线程入口）——
+为少 4 处打桩去把 `self` 塞进端口，代价大于收益。
+
+G19 **178 / 64 → 169 / 63**；`test_rollout_relay` 41 passed；mypy/ruff 零问题。
+
+---
+
 ## §392 P0-8 第四代：离线引导端口（`remote/offline_boot.py::BootPorts`，2026-11-28）
 
 **背景**：§391 结尾点名的另一个大头。离线引导是 **standalone 运输单元**（notebook 从 GitHub raw

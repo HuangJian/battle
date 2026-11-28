@@ -20,6 +20,7 @@ import threading
 import time
 import urllib.error
 from collections.abc import Iterator
+from dataclasses import replace
 from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
@@ -438,9 +439,9 @@ def test_probe_hub_sweeps_every_resolved_ip_when_https_fails(
     port = free_port()
     monkeypatch.setattr(net_http, "bypass_proxy", lambda _u: False)
     monkeypatch.setattr(
-        rr, "_probe_one_route", lambda route, url, token, timeout: ("fail", f"{route}=stub")
+        rr, "PORTS", replace(rr.PORTS, probe_one_route=lambda route, url, token, timeout: ("fail", f"{route}=stub"))
     )
-    monkeypatch.setattr(rr, "_resolve_ips", lambda _h, _p: ["127.0.0.1", "::1"])
+    monkeypatch.setattr(rr, "PORTS", replace(rr.PORTS, resolve_ips=lambda _h, _p: ["127.0.0.1", "::1"]))
     ok, _line, facts = probe_hub(f"http://127.0.0.1:{port}", "t", "n1", timeout=1.0)
     assert ok is False
     # 两个地址各探一次、各给一个**具体**结论（Windows 沙箱里连闭合的回环口是 timeout 而不是
@@ -647,7 +648,7 @@ def _stub_layers(
     """
     monkeypatch.setattr(net_http, "bypass_proxy", lambda _u: False)
     monkeypatch.setattr(
-        rr, "_probe_one_route", lambda route, url, token, timeout: ("fail", f"{route}=stub")
+        rr, "PORTS", replace(rr.PORTS, probe_one_route=lambda route, url, token, timeout: ("fail", f"{route}=stub"))
     )
     ips = {
         rr.CTRL_HOST: ["104.16.230.132"],
@@ -669,9 +670,9 @@ def _stub_layers(
             spec = tls
         return {ip: spec for ip in ips_}
 
-    monkeypatch.setattr(rr, "_resolve_ips", _ips)
-    monkeypatch.setattr(rr, "_tcp_sweep", lambda ips_, port, t: {ip: "ok" for ip in ips_})
-    monkeypatch.setattr(rr, "_tls_sweep", _sweep)
+    monkeypatch.setattr(rr, "PORTS", replace(rr.PORTS, resolve_ips=_ips))
+    monkeypatch.setattr(rr, "PORTS", replace(rr.PORTS, tcp_sweep=lambda ips_, port, t: {ip: "ok" for ip in ips_}))
+    monkeypatch.setattr(rr, "PORTS", replace(rr.PORTS, tls_sweep=_sweep))
 
 
 def test_hint_names_cf_block_when_cf_stalls_but_non_cf_handshakes(
@@ -772,7 +773,7 @@ def test_probe_falls_back_to_a_working_alternate_port(monkeypatch: pytest.Monkey
         net=("ok:TLSv1.3", "TLSv1.3（60ms）"),
     )
     swept = {2083: "http-401", 2096: "fail", 2053: "fail", 2087: "fail", 8443: "fail"}
-    monkeypatch.setattr(rr, "_port_sweep", lambda host, ports, token, node_id, t: dict(swept))
+    monkeypatch.setattr(rr, "PORTS", replace(rr.PORTS, port_sweep=lambda host, ports, token, node_id, t: dict(swept)))
     _ok, _line, facts = probe_hub("https://hub.example.com", "t", "n1", timeout=0.2)
     assert facts["hint"] == "port-blocked", facts
     assert facts["alt_port"] == 2083, facts
@@ -801,7 +802,7 @@ def test_probe_re_sweeps_when_the_configured_port_is_already_an_alt_port(
         seen["ports"] = tuple(ports)  # type: ignore[arg-type]
         return dict(swept)
 
-    monkeypatch.setattr(rr, "_port_sweep", fake_sweep)
+    monkeypatch.setattr(rr, "PORTS", replace(rr.PORTS, port_sweep=fake_sweep))
     _ok, _line, facts = probe_hub("https://hub.example.com:2083", "t", "n1", timeout=0.2)
     assert facts["hint"] == "port-blocked", facts
     assert facts["alt_port"] == 2053, facts
@@ -827,7 +828,7 @@ def test_probe_skips_the_port_sweep_when_the_hub_side_is_down(
     def _boom(*_args: object, **_kwargs: object) -> dict[int, str]:
         raise AssertionError("app-stall 不该触发端口扫描")
 
-    monkeypatch.setattr(rr, "_port_sweep", _boom)
+    monkeypatch.setattr(rr, "PORTS", replace(rr.PORTS, port_sweep=_boom))
     _ok, _line, facts = probe_hub("https://hub.example.com", "t", "n1", timeout=0.2)
     assert facts["hint"] == "app-stall", facts
     assert {"alt_port", "alt_ports"}.isdisjoint(facts), facts
