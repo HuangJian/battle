@@ -1,4 +1,15 @@
 # ═══ part 12/12: 12_entry — 入口：run（三步曲编排）+ _redact ═══
+#: 缺省端口：五个实现此时都已定义（`02_consts` / `07_queue` / `09_session` / `10_batch`），
+#: 这一行是它们在本模块唯一的点名处。
+BOOT = BootPorts(
+    load_deliverable=_load_deliverable,
+    load_tailscale_boot=_load_tailscale_boot,
+    post_json=_post_json,
+    run_batch=_run_batch,
+    explicit_leases=_explicit_leases,
+)
+
+
 def run(
     cfg: dict,
     log: Callable[[str], None],
@@ -34,12 +45,12 @@ def run(
         "TS_AUTHKEY": secret("TS_AUTHKEY", cfg.get("ts_authkey")),
     }
     log("凭据就绪（值不落日志）：" + (", ".join(k for k, v in creds.items() if v) or "（一个都没读到）"))
-    explicit = _load_deliverable().requested_courses(cfg)
+    explicit = BOOT.load_deliverable().requested_courses(cfg)
     if explicit:
         log(f"课程队列（{len(explicit)} 门，串行，CFG 点名）：{', '.join(explicit)}")
         explicit_kinds = _explicit_kinds(cfg, creds, log)
         # 老 hub 没有 `kind`（空表）⇒ 逐字旧行为：全部按 RL 跑。
-        return _run_batch(
+        return BOOT.run_batch(
             BatchRunSpec(
                 cfg,
                 creds,
@@ -47,7 +58,7 @@ def run(
                 keepalive_stop,
                 explicit,
                 multi=len(explicit) > 1,
-                leases=_explicit_leases(cfg, creds, log),
+                leases=BOOT.explicit_leases(cfg, creds, log),
                 kinds=explicit_kinds or None,
             )
         )

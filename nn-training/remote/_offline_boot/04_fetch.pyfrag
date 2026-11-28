@@ -10,7 +10,7 @@ def _fetch_guarded(
     都没多，干等」——绝不静默降级。
     """
     try:
-        ts = _load_tailscale_boot()
+        ts = BOOT.load_tailscale_boot()
     except ImportError as e:
         log(f"引导传输护栏不可用（{e}）——本次取包只有整超时，无停滞/低速判据")
         req = urllib.request.Request(url, headers=headers)
@@ -421,7 +421,7 @@ def ensure_tailscale(cfg: dict, creds: dict, log: Callable[[str], None]) -> str:
         log("没有 TS_AUTHKEY —— 跳过 tailscale（只走公网 hub_url / 手动送包）")
         return ""
     try:
-        ts = _load_tailscale_boot().ensure(
+        ts = BOOT.load_tailscale_boot().ensure(
             {
                 "ts_authkey": key,
                 "ts_ephemeral": bool(cfg.get("ts_ephemeral", True)),

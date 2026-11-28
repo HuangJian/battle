@@ -33,7 +33,7 @@ def _post_json(url: str, token: str, log: Callable[[str], None], *, timeout: flo
 def _queue_work_dir(cfg: dict) -> Path:
     """worker 身份的落点：显式 `work_dir`，否则 `<download_dir>/battle-offline`（与 `course_work_dir` 同源）。"""
     explicit = str(cfg.get("work_dir") or "").strip()
-    return Path(explicit).expanduser() if explicit else _load_deliverable().download_dir(cfg) / "battle-offline"
+    return Path(explicit).expanduser() if explicit else BOOT.load_deliverable().download_dir(cfg) / "battle-offline"
 
 
 def worker_id_of(work: Path, log: Callable[[str], None]) -> str:
@@ -156,7 +156,7 @@ def claim_course(
         f"&course={urllib.parse.quote(course)}"
         f"&worker={urllib.parse.quote(worker)}" + ("&takeover=1" if takeover else "")
     )
-    code, doc = _post_json(url, token, log, timeout=timeout)
+    code, doc = BOOT.post_json(url, token, log, timeout=timeout)
     lease = doc.get("lease")
     if code == 200 and isinstance(lease, dict):
         log(f"领到租约（{lease.get('ttl_sec')}s，worker={worker}）")
@@ -233,7 +233,7 @@ def heartbeat_loop(
 
     def _beat() -> None:
         while not done.wait(interval):
-            code, doc = _post_json(url, token, log)
+            code, doc = BOOT.post_json(url, token, log)
             if code == 200:
                 continue
             if code == 409:

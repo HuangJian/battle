@@ -116,8 +116,13 @@
 收进模块自带的 `NodePorts`（17 字段 frozen dataclass，`NODE` 是唯一装配行；调用点一律
 `NODE.x(...)`），另 3 条打的是公开包装 `ensure_bun`，不计 G19 但随同一端口一起迁。
 G19 **254 / 68 → 202 / 66**（累计 384 / 91 → 202 / 66，−182 次 / −25 文件，两个文件归零）。
-**下一个已知口径**：`offline_boot`（生成物，改 `.pyfrag`）、`TrainingLoop._*` 15 处（与 P0-1 同批）。
-全文 → `docs/nn/engineering.md` §389 / §391。
+**批六（同日）**：`remote/offline_boot`（生成物；改 `remote/_offline_boot/*.pyfrag` 后重建）24 处
+收进 `BootPorts`（NamedTuple，5 字段：两个延迟 loader / `post_json` / `run_batch` / `explicit_leases`；
+为什么不是 dataclass 见 §392），`BOOT` 装配住 `12_entry`。G19 **178 / 64**（累计 384 / 91 → 178 / 64，
+−206 次 / −27 文件）；G14 +2（两个 loader 必须是 `Any`，已在基线记明）。
+**下一个已知口径**：`TrainingLoop._*` 15 处（与 P0-1 同批），然后按 G19 存量降序
+（`test_rollout_relay` 14 · `test_finish_course_drains_eval` 11 · …）。
+全文 → `docs/nn/engineering.md` §389 / §391 / §392。
 
 ## 0. 执行摘要
 

@@ -217,6 +217,41 @@ def _load_tailscale_boot() -> Any:
     raise ImportError("找不到 tailscale_boot（远端引导模块拉取失败？）")
 
 
+class BootPorts(NamedTuple):
+    """离线引导「与这台机器打交道」的五步（P0-8 端口对象，2026-11-28）。
+
+    本模块是 **standalone 运输单元**（notebook 从 GitHub raw 拉单个文件），所以协作者都是
+    本文件里的模块级函数 —— 测试面只能用 `monkeypatch.setattr(offline_boot, "_run_batch", …)`
+    打桩（两个文件 18 处），等于把五个私有名冻结成 API。
+
+    端口只把这五步收成字段：缺省实现在本文件，装配行在 `12_entry`（那里五个实现都已定义），
+    用例改一个字段只换自己关心的那一步：
+
+        monkeypatch.setattr(ob, "BOOT", ob.BOOT._replace(run_batch=fake))
+
+    ★ 为什么是 `NamedTuple` 而不是 `dataclass(frozen=True)`：本模块会被 `spec_from_file_location`
+      **不注册 `sys.modules`** 地装载（`test_module_imports_without_remote_on_sys_path` 就是这么
+      钉单文件运输契约的），而 dataclass 解析字符串注解时要回查 `sys.modules[cls.__module__]`
+      ⇒ 实测 `AttributeError: 'NoneType' object has no attribute '__dict__'`。NamedTuple 惰性
+      存注解，没有这个前提；`_replace` 就是「换一个字段」的同义面。
+
+    ★ 调用点一律 `BOOT.x(...)`（调用时读模块全局）；绑成缺省参数会让 `patch … BOOT` 静默打空。
+      两个 loader 的返回类型只能是 `Any`：`importlib.import_module` 拿到的兄弟模块没有静态
+      声明面（本模块既不能静态 import 它，也不应替它复制一份字段表）。
+    """
+
+    #: `_load_deliverable`：交付面兄弟模块（可报错 —— 拉取名单缺它时响亮说）。
+    load_deliverable: Callable[[], Any]
+    #: `_load_tailscale_boot`：tailscale 引导模块（同样按兄弟文件 / 包内两种形态找）。
+    load_tailscale_boot: Callable[[], Any]
+    #: `_post_json`：控制面小 POST → `(状态码, dict)`（连不上 = `(0, {})`）。
+    post_json: Callable[..., tuple[int, dict]]
+    #: `_run_batch`：一批课程的串行执行腿。
+    run_batch: Callable[[BatchRunSpec], int]
+    #: `_explicit_leases`：点名腿先 claim 再取包（单个真源是 hold）。
+    explicit_leases: Callable[[dict, dict, Callable[[str], None]], dict]
+
+
 def _build_opener() -> urllib.request.OpenerDirector:
     """显式 ProxyHandler —— Colab 的 `urlopen()` 不读 HTTP_PROXY 环境变量（2026-09-16 实测）。
 

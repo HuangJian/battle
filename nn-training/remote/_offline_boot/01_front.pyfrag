@@ -183,7 +183,7 @@ def package_pending_full(
     """
     if full_for is None:
         full_for = _landing_provider(cfg, log)
-    packs: list[Path] = _load_deliverable().package_pending(
+    packs: list[Path] = BOOT.load_deliverable().package_pending(
         cfg, log, courses=courses, full_for=full_for
     )
     return packs
@@ -209,5 +209,5 @@ def __getattr__(name: str) -> Any:
     交付面）；要 patch 交付面的行为请打 `offline_deliverable.<名>`——门面只改副本（本仓纪律）。
     """
     if name in _DELIVERABLE_NAMES:
-        return getattr(_load_deliverable(), name)
+        return getattr(BOOT.load_deliverable(), name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

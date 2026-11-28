@@ -254,7 +254,7 @@ def _run_task_round(
     # 只在真有 BC 课时多传一个参数：RL-only 的批保持旧调用形状（测试桩 / 旧调用方都不用改），
     # 而 BC 课一旦出现就与 RL 课走同一次 `_run_batch`。
     batch_kwargs = {"kinds": kind_map} if "bc" in kind_map.values() else {}
-    rc = _run_batch(BatchRunSpec(
+    rc = BOOT.run_batch(BatchRunSpec(
         cfg,
         creds,
         log,

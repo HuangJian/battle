@@ -166,7 +166,8 @@ def test_credentials_are_read_before_any_network_change() -> None:
     src = Path(offline_boot.__file__).read_text(encoding="utf-8")
     body = src[src.index("def run(") :]
     body = body[: body.index("\ndef ")]  # run() 的函数体（下一个顶层 def 之前）
-    for call in ("_run_batch(", "_run_auto("):
+    # 2026-11-28（P0-8）：`run` 里的批执行走端口对象（`BOOT.run_batch(`），判据按被调名认。
+    for call in ("run_batch(", "_run_auto("):
         assert body.index("creds = {") < body.index(call), (
             f"{call} 是碰网络的下一步，必须晚于凭据读取（2026-09-17 Kaggle 事故的时序约束）"
         )

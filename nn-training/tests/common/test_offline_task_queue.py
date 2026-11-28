@@ -833,7 +833,7 @@ def test_run_auto_waits_for_the_export_without_burning_idle_budget(
         return 0
 
     monkeypatch.setattr(offline_boot, "resolve_courses", fake_resolve)
-    monkeypatch.setattr(offline_boot, "_run_batch", fake_batch)
+    monkeypatch.setattr(offline_boot, "BOOT", offline_boot.BOOT._replace( run_batch=fake_batch))
     monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
     lines: list[str] = []
     rc = offline_boot._run_auto(
@@ -894,7 +894,7 @@ def test_run_auto_claims_runs_and_releases(monkeypatch: pytest.MonkeyPatch, tmp_
         return 0
 
     monkeypatch.setattr(offline_boot, "resolve_courses", fake_resolve)
-    monkeypatch.setattr(offline_boot, "_run_batch", fake_batch)
+    monkeypatch.setattr(offline_boot, "BOOT", offline_boot.BOOT._replace( run_batch=fake_batch))
     monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
     # drain 但 idle_wait=0 ⇒ 第一轮跑完立刻到「已等满」⇒ 收工（不会真 sleep）。
     rc = offline_boot._run_auto(
@@ -947,7 +947,7 @@ def test_run_auto_keeps_the_per_course_layout_when_the_next_round_has_one_course
         return 1  # 段内失败（真实 rc 不为 0）
 
     monkeypatch.setattr(offline_boot, "resolve_courses", fake_resolve)
-    monkeypatch.setattr(offline_boot, "_run_batch", fake_batch)
+    monkeypatch.setattr(offline_boot, "BOOT", offline_boot.BOOT._replace( run_batch=fake_batch))
     monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
     rc = offline_boot._run_auto(
         {"work_dir": str(tmp_path), "idle_wait_sec": 0},
@@ -1104,7 +1104,7 @@ def test_run_auto_all_terminal_uses_the_short_window(
     def _no_batch(*_a: Any, **_k: Any) -> int:
         raise AssertionError("全终态 ⇒ 本拍不该跑任何课")
 
-    monkeypatch.setattr(offline_boot, "_run_batch", _no_batch)
+    monkeypatch.setattr(offline_boot, "BOOT", offline_boot.BOOT._replace( run_batch=_no_batch))
     monkeypatch.setattr(offline_boot, "resolve_courses", lambda cfg, creds, log, **kw: ([], [], manifest))
     lines: list[str] = []
     rc = offline_boot._run_auto(
@@ -1151,7 +1151,7 @@ def test_run_auto_stops_when_a_served_pack_comes_back_ready(
         return 0
 
     monkeypatch.setattr(offline_boot, "resolve_courses", fake_resolve)
-    monkeypatch.setattr(offline_boot, "_run_batch", fake_batch)
+    monkeypatch.setattr(offline_boot, "BOOT", offline_boot.BOOT._replace( run_batch=fake_batch))
     monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
     lines: list[str] = []
     rc = offline_boot._run_auto(
@@ -1232,7 +1232,7 @@ def test_heartbeat_loop_beats_then_stops(monkeypatch: pytest.MonkeyPatch) -> Non
         hits.append(url)
         return (200, {})
 
-    monkeypatch.setattr(offline_boot, "_post_json", fake_post)
+    monkeypatch.setattr(offline_boot, "BOOT", offline_boot.BOOT._replace( post_json=fake_post))
     done = offline_boot.heartbeat_loop(
         "http://hub", "tok", "c5-gae", "lease1", lambda _m: None, interval=0.01
     )
@@ -1300,10 +1300,12 @@ def test_claim_course_reports_a_foreign_holder(monkeypatch: pytest.MonkeyPatch) 
     """409「被持有」⇒ `("", "held")`（照旧跑）+ 一行「已被谁持有、多久后过期」。"""
     monkeypatch.setattr(
         offline_boot,
-        "_post_json",
-        lambda url, token, log, *, timeout=0.0: (
-            409,
-            {"holder": {"worker_id": "w9", "expires_in": 120.0}, "held": True},
+        "BOOT",
+        offline_boot.BOOT._replace(
+            post_json=lambda url, token, log, *, timeout=0.0: (
+                409,
+                {"holder": {"worker_id": "w9", "expires_in": 120.0}, "held": True},
+            ),
         ),
     )
     lines: list[str] = []
@@ -1331,8 +1333,10 @@ def test_claim_course_maps_auto_handoff_states(monkeypatch: pytest.MonkeyPatch) 
     for doc, want in cases:
         monkeypatch.setattr(
             offline_boot,
-            "_post_json",
-            lambda url, token, log, *, timeout=0.0, _doc=doc: (409, _doc),
+            "BOOT",
+            offline_boot.BOOT._replace(
+                post_json=lambda url, token, log, *, timeout=0.0, _doc=doc: (409, _doc),
+            ),
         )
         got = offline_boot.claim_course("http://hub", "tok", "c5-gae", "w1", lambda _m: None)
         assert got == ("", want), (doc, got)
@@ -1350,7 +1354,7 @@ def test_heartbeat_loop_stops_on_revoked(monkeypatch: pytest.MonkeyPatch) -> Non
         hits.append(url)
         return (409, {"revoked": True})
 
-    monkeypatch.setattr(offline_boot, "_post_json", fake_post)
+    monkeypatch.setattr(offline_boot, "BOOT", offline_boot.BOOT._replace( post_json=fake_post))
     lines: list[str] = []
     done = offline_boot.heartbeat_loop(
         "http://hub", "tok", "c5-gae", "lease1", lines.append, interval=0.01
@@ -1920,7 +1924,7 @@ def test_run_auto_does_not_reclaim_a_revoked_course(
         return 0
 
     monkeypatch.setattr(offline_boot, "resolve_courses", fake_resolve)
-    monkeypatch.setattr(offline_boot, "_run_batch", fake_batch)
+    monkeypatch.setattr(offline_boot, "BOOT", offline_boot.BOOT._replace( run_batch=fake_batch))
     monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
     lines: list[str] = []
     rc = offline_boot._run_auto(
@@ -1976,16 +1980,16 @@ def test_run_hands_the_lease_context_to_the_batch_for_explicit_courses(
     """★M3：点名腿的接线（`run()` → `_run_batch(BatchRunSpec(leases=…))`）——旧行为是 `leases=None`。"""
     seen: dict = {}
 
-    monkeypatch.setattr(offline_boot, "_load_deliverable", lambda: _StubDeliverable())
+    monkeypatch.setattr(offline_boot, "BOOT", offline_boot.BOOT._replace( load_deliverable=lambda: _StubDeliverable()))
     monkeypatch.setattr(
-        offline_boot, "_explicit_leases", lambda cfg, creds, log: {"hub": "h", "worker": "w"}
+        offline_boot, "BOOT", offline_boot.BOOT._replace( explicit_leases=lambda cfg, creds, log: {"hub": "h", "worker": "w"})
     )
 
     def spy(spec) -> int:
         seen.update(courses=list(spec.courses), leases=spec.leases, multi=spec.multi)
         return 0
 
-    monkeypatch.setattr(offline_boot, "_run_batch", spy)
+    monkeypatch.setattr(offline_boot, "BOOT", offline_boot.BOOT._replace( run_batch=spy))
     rc = offline_boot.run(
         {"course": ["c5-gae"], "work_dir": str(tmp_path)},
         lambda _m: None,
@@ -2074,7 +2078,7 @@ def test_run_one_course_wires_the_progress_pinger_around_the_loop(
         order.append("run")
         return 0
 
-    monkeypatch.setattr(offline_boot, "_load_deliverable", lambda: _StubDeliverable())
+    monkeypatch.setattr(offline_boot, "BOOT", offline_boot.BOOT._replace( load_deliverable=lambda: _StubDeliverable()))
     monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
     monkeypatch.setattr(offline_boot, "probe_hub", lambda hub, token, log: True)
     monkeypatch.setattr(offline_boot, "obtain_pack", lambda *a, **k: None)
@@ -2105,7 +2109,7 @@ def test_run_one_course_does_not_arm_the_pinger_without_a_lease(
     """没领到租约（老 hub / 纯离线）⇒ 不装打点层：没有 hold 就没有「进度」这回事（Q1）。"""
     armed: list[int] = []
 
-    monkeypatch.setattr(offline_boot, "_load_deliverable", lambda: _StubDeliverable())
+    monkeypatch.setattr(offline_boot, "BOOT", offline_boot.BOOT._replace( load_deliverable=lambda: _StubDeliverable()))
     monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: [])
     monkeypatch.setattr(offline_boot, "obtain_pack", lambda *a, **k: None)
     monkeypatch.setattr(offline_boot, "ensure_code", lambda *a, **k: None)

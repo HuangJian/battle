@@ -29,6 +29,46 @@
 
 ---
 
+## §392 P0-8 第四代：离线引导端口（`remote/offline_boot.py::BootPorts`，2026-11-28）
+
+**背景**：§391 结尾点名的另一个大头。离线引导是 **standalone 运输单元**（notebook 从 GitHub raw
+只拉这一个文件），协作者只能是本文件里的模块级函数 ⇒ 测试面把 5 个私有名打成了事实 API。
+实测 **24 处 / 6 个测试文件**：`test_offline_task_queue`(15) · `test_offline_local_first`(3) ·
+`test_offline_boot`(3) · `test_boot_wire_guard`(1) · `test_offline_bc_course`(1) · `test_offline_bc_leg`(1)。
+（后半四个只在全量门禁里暴露 —— 单看 §391 点名的两个文件会漏掉它们。）
+
+**形状**：`BootPorts(NamedTuple)` 住 `02_consts.pyfrag`，五个字段 = 五步：`load_deliverable` /
+`load_tailscale_boot`（延迟装载兄弟模块）· `post_json`（控制面小 POST）· `run_batch`（批执行腿）·
+`explicit_leases`（点名腿先 claim）。装配行 `BOOT = BootPorts(...)` 在 `12_entry.pyfrag`（那里
+五个实现都已定义），调用点一律 `BOOT.x(...)`。改分片后必须跑 `tools/build_offline_boot.py`
+重建发行物（守卫 `test_offline_boot_is_generated`）。
+
+**坑（第一个是硬的）**：
+
+1. **`dataclass(frozen=True)` 不行**：本模块会被 `spec_from_file_location` **不注册
+   `sys.modules`** 地装载（`test_module_imports_without_remote_on_sys_path` 就是这么钉单文件
+   运输契约的），而 dataclass 在解析字符串注解时要回查 `sys.modules[cls.__module__]` ⇒
+   实测 `AttributeError: 'NoneType' object has no attribute '__dict__'`。改成 `NamedTuple`
+   （惰性存注解），用例用 `BOOT._replace(field=…)`。**这条件在仓内其它端口不存在**（它们都是
+   正常 import 的模块），所以别把这里当先例。
+2. **`Any` +2 是真实边界**：两个 loader 是 `importlib.import_module` 拿到的兄弟模块，没有静态
+   声明面（本模块不能静态 import 它，也不应复制一份字段表）⇒ `Callable[[], Any]`；
+   `any_baseline.json` 的 `remote/offline_boot.py` 14 → **16**，理由写在此处与提交信息。
+   其余三个字段都能写成具体形状（`tuple[int, dict]` / `Callable[[BatchRunSpec], int]` / `dict`）。
+3. **源码形状守卫跟着口径改**：`test_offline_notebook` 原来在 `run` 里找字串 `"_run_batch("`，
+   端口化后是 `BOOT.run_batch(`；改成找 `"run_batch("`（被调名不变，只是多了前缀）。
+4. **单文件里的顺序不是可选的**：类住 `02_consts`（最早的非平凡段），装配住 `12_entry`（最后
+   一段）—— 装配行若提前到 `02`，`_run_batch` 还没定义就会 `NameError`。
+
+**证明**：G19 `monkeypatch_private_baseline.json` **202 / 66 → 178 / 64**（−24 次 / −2 文件，
+其中两个条目归零删除、另四个各减 1–3）；G14 1207 → **1209**（已在 1 注明）；相关 7 个文件
+300 passed；`nn-python-gate.sh` 全绿（ruff + mypy + 7107 passed / 4 skipped）。
+
+**下一步（未做）**：`trainer/loop_core.TrainingLoop._*` 的 15 处与 P0-1 混入拆解同批；
+之后按 G19 存量降序（`test_rollout_relay` 14 · `test_finish_course_drains_eval` 11 · …）。
+
+---
+
 ## §391 P0-8 第三代：采样节点端口（`remote/rollout_node.py::NodePorts`，2026-11-28）
 
 **背景**：§389 结尾点名的剩余大头之一是「`remote/rollout_node` ~50 处，要一个 `NodePorts`」。

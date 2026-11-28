@@ -57,7 +57,7 @@ def test_run_auto_puts_bc_and_rl_in_the_same_batch_with_kinds(
     monkeypatch.setattr(ob, "resolve_courses", fake_resolve)
     monkeypatch.setattr(ob, "worker_id_of", lambda work, log: "w1")
     monkeypatch.setattr(ob, "hub_candidates", lambda cfg, creds: ["http://hub"])
-    monkeypatch.setattr(ob, "_run_batch", fake_batch)
+    monkeypatch.setattr(ob, "BOOT", ob.BOOT._replace(run_batch=fake_batch))
     with pytest.raises(SystemExit, match="batch-ran"):
         ob._run_auto({}, {"HUB_TOKEN": "t"}, lambda _m: None, None)
     assert seen["courses"] == ["rl1", "bc1"]

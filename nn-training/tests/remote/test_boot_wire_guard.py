@@ -481,7 +481,11 @@ def test_offline_task_pack_survives_without_tailscale_boot(monkeypatch, tmp_path
     lines: list[str] = []
     monkeypatch.setattr(ob, "_build_opener", lambda: _Opener())
     monkeypatch.setattr(
-        ob, "_load_tailscale_boot", lambda: (_ for _ in ()).throw(ImportError("没有 tailscale_boot"))
+        ob,
+        "BOOT",
+        ob.BOOT._replace(
+            load_tailscale_boot=lambda: (_ for _ in ()).throw(ImportError("没有 tailscale_boot"))
+        ),
     )
     got = ob.fetch_task_pack("http://hub", "tok", "c5-gae", tmp_path, lines.append)
     assert got is not None and got.read_bytes() == b"PK\x03\x04 fallback"

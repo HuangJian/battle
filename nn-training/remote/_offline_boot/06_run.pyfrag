@@ -128,7 +128,7 @@ def _prepare_roots(
     cfg: dict, course: str, multi: bool, log: Callable[[str], None]
 ):
     """工作目录 + 两个产物根（网络侧 / 本地根）+ 备份恢复。"""
-    deliverable = _load_deliverable()
+    deliverable = BOOT.load_deliverable()
     # 本课自己的 cfg：`course` 恒是**单个字符串**（下游放包路径/交付物名/`--hub-course`
     # 都按它拼；传原样的列表会拼出 "['a', 'b']" 这种目录名）。
     ccfg = {**cfg, "course": course}

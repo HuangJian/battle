@@ -149,7 +149,7 @@ def restore_from_backup(dest: str | Path, backup_root: str | Path, log: Callable
     if local is not None:
         log(f"本地产物齐全（it{local['last_it']}）—— 不看网络盘备份（恢复只在本地空时发生）")
         return local
-    deliverable = _load_deliverable()
+    deliverable = BOOT.load_deliverable()
     ready = deliverable.backup_ready(backup_root)
     if ready is None:
         log(f"本地产物空（{dest}），网络盘备份也不齐（{backup_root}）——按老规矩取包起跑")
@@ -393,7 +393,7 @@ def hub_candidates(cfg: dict, creds: dict) -> list[str]:
     ip = "" if is_kaggle() else str(creds.get("HUB_IP") or "").strip()
     if ip:
         try:
-            resolved = _load_tailscale_boot().resolve_hub_url("", ip, int(cfg.get("hub_port") or 0))
+            resolved = BOOT.load_tailscale_boot().resolve_hub_url("", ip, int(cfg.get("hub_port") or 0))
         except (ImportError, ValueError, TypeError):
             # 两类**真**失败：① 兄弟文件没拉下来（`ImportError`，引导形态常态）；② 配置里的
             # `hub_port` 是脏值（`ValueError` / `TypeError`）。`resolve_hub_url` 本身是纯字符串函数

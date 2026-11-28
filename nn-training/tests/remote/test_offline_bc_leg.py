@@ -127,8 +127,10 @@ def test_run_auto_does_not_take_bc_while_courses_are_runnable(
     monkeypatch.setattr(ob, "try_take_bc_job", nope)
     monkeypatch.setattr(
         ob,
-        "_run_batch",
-        lambda *a, **kw: (_ for _ in ()).throw(SystemExit("batch-ran")),
+        "BOOT",
+        ob.BOOT._replace(
+            run_batch=lambda *a, **kw: (_ for _ in ()).throw(SystemExit("batch-ran")),
+        ),
     )
     monkeypatch.setattr(ob, "hub_candidates", lambda cfg, creds: ["http://hub"])
     with pytest.raises(SystemExit, match="batch-ran"):

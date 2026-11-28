@@ -734,8 +734,12 @@ def test_kaggle_skips_tailscale_entirely(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("KAGGLE_KERNEL_RUN_TYPE", "Batch")
     monkeypatch.setattr(
         offline_boot,
-        "_load_tailscale_boot",
-        lambda: (_ for _ in ()).throw(AssertionError("Kaggle 上不该去加载/启动 tailscale")),
+        "BOOT",
+        offline_boot.BOOT._replace(
+            load_tailscale_boot=lambda: (_ for _ in ()).throw(
+                AssertionError("Kaggle 上不该去加载/启动 tailscale")
+            ),
+        ),
     )
     logs: list[str] = []
     assert offline_boot.ensure_tailscale({"ts_ephemeral": True}, {"TS_AUTHKEY": "k"}, logs.append) == ""
@@ -1112,7 +1116,7 @@ def test_hub_candidates_tolerates_a_missing_sibling_only(
         def resolve_hub_url(self, *_a: object) -> str:
             raise ImportError("tailscale_boot.py was not pulled")
 
-    monkeypatch.setattr(offline_boot, "_load_tailscale_boot", lambda: _MissingSibling())
+    monkeypatch.setattr(offline_boot, "BOOT", offline_boot.BOOT._replace( load_tailscale_boot=lambda: _MissingSibling()))
     only_public = offline_boot.hub_candidates(cfg, creds)
     assert only_public == ["http://hub.tailnet.ts.net:8787"], only_public
 
@@ -1120,6 +1124,6 @@ def test_hub_candidates_tolerates_a_missing_sibling_only(
         def resolve_hub_url(self, *_a: object) -> str:
             raise AttributeError("resolve_hub_url lost .split")
 
-    monkeypatch.setattr(offline_boot, "_load_tailscale_boot", lambda: _BuggySibling())
+    monkeypatch.setattr(offline_boot, "BOOT", offline_boot.BOOT._replace( load_tailscale_boot=lambda: _BuggySibling()))
     with pytest.raises(AttributeError):
         offline_boot.hub_candidates(cfg, creds)

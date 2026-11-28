@@ -158,7 +158,7 @@ def install_progress_pinger(spec: PingerSpec) -> Callable[[], str]:
     hub, token, course, lease = spec.hub, spec.token, spec.course, spec.lease
     log, interval, timeout = spec.log, spec.interval, spec.timeout
     post, reclaim, clock = spec.post, spec.reclaim, spec.clock
-    post_fn = post or _post_json
+    post_fn = post or BOOT.post_json
     now_fn = clock or time.monotonic
     url = progress_url(hub, course, lease)
     state: _PingState = {
@@ -347,7 +347,7 @@ def release_course(
         f"{hub.rstrip('/')}{OFFLINE_RELEASE_PATH}?course={urllib.parse.quote(course)}"
         f"&lease={urllib.parse.quote(lease)}"
     )
-    code, doc = _post_json(url, token, log, timeout=timeout)
+    code, doc = BOOT.post_json(url, token, log, timeout=timeout)
     if code == 200:
         log("租约已交还")
     elif code == 409:

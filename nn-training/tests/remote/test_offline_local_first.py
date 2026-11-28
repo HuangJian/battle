@@ -1236,7 +1236,7 @@ def test_fetch_task_pack_logs_the_hub_diagnostics_on_404(
             "give_up": False,
         }
     ).encode("utf-8")
-    monkeypatch.setattr(offline_boot, "_load_tailscale_boot", lambda: _RaisingFetcher(_http_error(404, body)))
+    monkeypatch.setattr(offline_boot, "BOOT", offline_boot.BOOT._replace(load_tailscale_boot=lambda: _RaisingFetcher(_http_error(404, body))))
     lines: list[str] = []
     got = offline_boot.fetch_task_pack("http://hub", "tok", "c5-gae", tmp_path, lines.append)
     assert got is None
@@ -1254,7 +1254,7 @@ def test_fetch_task_pack_flags_a_course_the_hub_does_not_know(
     body = json.dumps(
         {"error": "没有任务包", "course": "c5-gae", "known_courses": ["other"], "triggered": False}
     ).encode("utf-8")
-    monkeypatch.setattr(offline_boot, "_load_tailscale_boot", lambda: _RaisingFetcher(_http_error(404, body)))
+    monkeypatch.setattr(offline_boot, "BOOT", offline_boot.BOOT._replace(load_tailscale_boot=lambda: _RaisingFetcher(_http_error(404, body))))
     lines: list[str] = []
     offline_boot.fetch_task_pack("http://hub", "tok", "c5-gae", tmp_path, lines.append)
     joined = "\n".join(lines)
@@ -1266,7 +1266,7 @@ def test_fetch_task_pack_prints_the_409_body(
 ) -> None:
     """409（过期）的正文就是下一步——只打一个数字等于把原因留在云机上。"""
     body = json.dumps({"error": "任务包已过期（起点权重 sha 不符）", "stale": True}).encode("utf-8")
-    monkeypatch.setattr(offline_boot, "_load_tailscale_boot", lambda: _RaisingFetcher(_http_error(409, body)))
+    monkeypatch.setattr(offline_boot, "BOOT", offline_boot.BOOT._replace(load_tailscale_boot=lambda: _RaisingFetcher(_http_error(409, body))))
     lines: list[str] = []
     offline_boot.fetch_task_pack("http://hub", "tok", "c5-gae", tmp_path, lines.append)
     joined = "\n".join(lines)

@@ -122,7 +122,7 @@ def resolve_courses(
     之后不再每轮刷一个必然失败的端点。`holds` 同形（`{"mine": [课…]}`）：★M5 的 BC
     前置闸读它（「本盘还带着课程 hold 吗」——Q5 的 hold×BC 互斥）。
     """
-    explicit = _load_deliverable().requested_courses(cfg)
+    explicit = BOOT.load_deliverable().requested_courses(cfg)
     if explicit:
         # 点名腿先按 RL 算；`run()` 会用 `_explicit_kinds` 查一次清单覆盖它。
         return [{"course": c, "pack_sha256": "", "kind": "rl"} for c in explicit], [], []

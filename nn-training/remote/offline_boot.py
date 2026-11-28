@@ -189,7 +189,7 @@ def package_pending_full(
     """
     if full_for is None:
         full_for = _landing_provider(cfg, log)
-    packs: list[Path] = _load_deliverable().package_pending(
+    packs: list[Path] = BOOT.load_deliverable().package_pending(
         cfg, log, courses=courses, full_for=full_for
     )
     return packs
@@ -215,7 +215,7 @@ def __getattr__(name: str) -> Any:
     交付面）；要 patch 交付面的行为请打 `offline_deliverable.<名>`——门面只改副本（本仓纪律）。
     """
     if name in _DELIVERABLE_NAMES:
-        return getattr(_load_deliverable(), name)
+        return getattr(BOOT.load_deliverable(), name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # ═══ part 2/12: 02_consts — 常量与超时：包名 / 端点 / 心跳与打点预算 / 取包超时 / opener ═══
@@ -437,6 +437,41 @@ def _load_tailscale_boot() -> Any:
     raise ImportError("找不到 tailscale_boot（远端引导模块拉取失败？）")
 
 
+class BootPorts(NamedTuple):
+    """离线引导「与这台机器打交道」的五步（P0-8 端口对象，2026-11-28）。
+
+    本模块是 **standalone 运输单元**（notebook 从 GitHub raw 拉单个文件），所以协作者都是
+    本文件里的模块级函数 —— 测试面只能用 `monkeypatch.setattr(offline_boot, "_run_batch", …)`
+    打桩（两个文件 18 处），等于把五个私有名冻结成 API。
+
+    端口只把这五步收成字段：缺省实现在本文件，装配行在 `12_entry`（那里五个实现都已定义），
+    用例改一个字段只换自己关心的那一步：
+
+        monkeypatch.setattr(ob, "BOOT", ob.BOOT._replace(run_batch=fake))
+
+    ★ 为什么是 `NamedTuple` 而不是 `dataclass(frozen=True)`：本模块会被 `spec_from_file_location`
+      **不注册 `sys.modules`** 地装载（`test_module_imports_without_remote_on_sys_path` 就是这么
+      钉单文件运输契约的），而 dataclass 解析字符串注解时要回查 `sys.modules[cls.__module__]`
+      ⇒ 实测 `AttributeError: 'NoneType' object has no attribute '__dict__'`。NamedTuple 惰性
+      存注解，没有这个前提；`_replace` 就是「换一个字段」的同义面。
+
+    ★ 调用点一律 `BOOT.x(...)`（调用时读模块全局）；绑成缺省参数会让 `patch … BOOT` 静默打空。
+      两个 loader 的返回类型只能是 `Any`：`importlib.import_module` 拿到的兄弟模块没有静态
+      声明面（本模块既不能静态 import 它，也不应替它复制一份字段表）。
+    """
+
+    #: `_load_deliverable`：交付面兄弟模块（可报错 —— 拉取名单缺它时响亮说）。
+    load_deliverable: Callable[[], Any]
+    #: `_load_tailscale_boot`：tailscale 引导模块（同样按兄弟文件 / 包内两种形态找）。
+    load_tailscale_boot: Callable[[], Any]
+    #: `_post_json`：控制面小 POST → `(状态码, dict)`（连不上 = `(0, {})`）。
+    post_json: Callable[..., tuple[int, dict]]
+    #: `_run_batch`：一批课程的串行执行腿。
+    run_batch: Callable[[BatchRunSpec], int]
+    #: `_explicit_leases`：点名腿先 claim 再取包（单个真源是 hold）。
+    explicit_leases: Callable[[dict, dict, Callable[[str], None]], dict]
+
+
 def _build_opener() -> urllib.request.OpenerDirector:
     """显式 ProxyHandler —— Colab 的 `urlopen()` 不读 HTTP_PROXY 环境变量（2026-09-16 实测）。
 
@@ -612,7 +647,7 @@ def restore_from_backup(dest: str | Path, backup_root: str | Path, log: Callable
     if local is not None:
         log(f"本地产物齐全（it{local['last_it']}）—— 不看网络盘备份（恢复只在本地空时发生）")
         return local
-    deliverable = _load_deliverable()
+    deliverable = BOOT.load_deliverable()
     ready = deliverable.backup_ready(backup_root)
     if ready is None:
         log(f"本地产物空（{dest}），网络盘备份也不齐（{backup_root}）——按老规矩取包起跑")
@@ -856,7 +891,7 @@ def hub_candidates(cfg: dict, creds: dict) -> list[str]:
     ip = "" if is_kaggle() else str(creds.get("HUB_IP") or "").strip()
     if ip:
         try:
-            resolved = _load_tailscale_boot().resolve_hub_url("", ip, int(cfg.get("hub_port") or 0))
+            resolved = BOOT.load_tailscale_boot().resolve_hub_url("", ip, int(cfg.get("hub_port") or 0))
         except (ImportError, ValueError, TypeError):
             # 两类**真**失败：① 兄弟文件没拉下来（`ImportError`，引导形态常态）；② 配置里的
             # `hub_port` 是脏值（`ValueError` / `TypeError`）。`resolve_hub_url` 本身是纯字符串函数
@@ -897,7 +932,7 @@ def _fetch_guarded(
     都没多，干等」——绝不静默降级。
     """
     try:
-        ts = _load_tailscale_boot()
+        ts = BOOT.load_tailscale_boot()
     except ImportError as e:
         log(f"引导传输护栏不可用（{e}）——本次取包只有整超时，无停滞/低速判据")
         req = urllib.request.Request(url, headers=headers)
@@ -1308,7 +1343,7 @@ def ensure_tailscale(cfg: dict, creds: dict, log: Callable[[str], None]) -> str:
         log("没有 TS_AUTHKEY —— 跳过 tailscale（只走公网 hub_url / 手动送包）")
         return ""
     try:
-        ts = _load_tailscale_boot().ensure(
+        ts = BOOT.load_tailscale_boot().ensure(
             {
                 "ts_authkey": key,
                 "ts_ephemeral": bool(cfg.get("ts_ephemeral", True)),
@@ -1854,7 +1889,7 @@ def _prepare_roots(
     cfg: dict, course: str, multi: bool, log: Callable[[str], None]
 ):
     """工作目录 + 两个产物根（网络侧 / 本地根）+ 备份恢复。"""
-    deliverable = _load_deliverable()
+    deliverable = BOOT.load_deliverable()
     # 本课自己的 cfg：`course` 恒是**单个字符串**（下游放包路径/交付物名/`--hub-course`
     # 都按它拼；传原样的列表会拼出 "['a', 'b']" 这种目录名）。
     ccfg = {**cfg, "course": course}
@@ -2391,7 +2426,7 @@ def _post_json(url: str, token: str, log: Callable[[str], None], *, timeout: flo
 def _queue_work_dir(cfg: dict) -> Path:
     """worker 身份的落点：显式 `work_dir`，否则 `<download_dir>/battle-offline`（与 `course_work_dir` 同源）。"""
     explicit = str(cfg.get("work_dir") or "").strip()
-    return Path(explicit).expanduser() if explicit else _load_deliverable().download_dir(cfg) / "battle-offline"
+    return Path(explicit).expanduser() if explicit else BOOT.load_deliverable().download_dir(cfg) / "battle-offline"
 
 
 def worker_id_of(work: Path, log: Callable[[str], None]) -> str:
@@ -2514,7 +2549,7 @@ def claim_course(
         f"&course={urllib.parse.quote(course)}"
         f"&worker={urllib.parse.quote(worker)}" + ("&takeover=1" if takeover else "")
     )
-    code, doc = _post_json(url, token, log, timeout=timeout)
+    code, doc = BOOT.post_json(url, token, log, timeout=timeout)
     lease = doc.get("lease")
     if code == 200 and isinstance(lease, dict):
         log(f"领到租约（{lease.get('ttl_sec')}s，worker={worker}）")
@@ -2591,7 +2626,7 @@ def heartbeat_loop(
 
     def _beat() -> None:
         while not done.wait(interval):
-            code, doc = _post_json(url, token, log)
+            code, doc = BOOT.post_json(url, token, log)
             if code == 200:
                 continue
             if code == 409:
@@ -2873,7 +2908,7 @@ def install_progress_pinger(spec: PingerSpec) -> Callable[[], str]:
     hub, token, course, lease = spec.hub, spec.token, spec.course, spec.lease
     log, interval, timeout = spec.log, spec.interval, spec.timeout
     post, reclaim, clock = spec.post, spec.reclaim, spec.clock
-    post_fn = post or _post_json
+    post_fn = post or BOOT.post_json
     now_fn = clock or time.monotonic
     url = progress_url(hub, course, lease)
     state: _PingState = {
@@ -3062,7 +3097,7 @@ def release_course(
         f"{hub.rstrip('/')}{OFFLINE_RELEASE_PATH}?course={urllib.parse.quote(course)}"
         f"&lease={urllib.parse.quote(lease)}"
     )
-    code, doc = _post_json(url, token, log, timeout=timeout)
+    code, doc = BOOT.post_json(url, token, log, timeout=timeout)
     if code == 200:
         log("租约已交还")
     elif code == 409:
@@ -3194,7 +3229,7 @@ def resolve_courses(
     之后不再每轮刷一个必然失败的端点。`holds` 同形（`{"mine": [课…]}`）：★M5 的 BC
     前置闸读它（「本盘还带着课程 hold 吗」——Q5 的 hold×BC 互斥）。
     """
-    explicit = _load_deliverable().requested_courses(cfg)
+    explicit = BOOT.load_deliverable().requested_courses(cfg)
     if explicit:
         # 点名腿先按 RL 算；`run()` 会用 `_explicit_kinds` 查一次清单覆盖它。
         return [{"course": c, "pack_sha256": "", "kind": "rl"} for c in explicit], [], []
@@ -3688,7 +3723,7 @@ def _run_task_round(
     # 只在真有 BC 课时多传一个参数：RL-only 的批保持旧调用形状（测试桩 / 旧调用方都不用改），
     # 而 BC 课一旦出现就与 RL 课走同一次 `_run_batch`。
     batch_kwargs = {"kinds": kind_map} if "bc" in kind_map.values() else {}
-    rc = _run_batch(BatchRunSpec(
+    rc = BOOT.run_batch(BatchRunSpec(
         cfg,
         creds,
         log,
@@ -4296,6 +4331,17 @@ def try_take_bc_job(
 
 
 # ═══ part 12/12: 12_entry — 入口：run（三步曲编排）+ _redact ═══
+#: 缺省端口：五个实现此时都已定义（`02_consts` / `07_queue` / `09_session` / `10_batch`），
+#: 这一行是它们在本模块唯一的点名处。
+BOOT = BootPorts(
+    load_deliverable=_load_deliverable,
+    load_tailscale_boot=_load_tailscale_boot,
+    post_json=_post_json,
+    run_batch=_run_batch,
+    explicit_leases=_explicit_leases,
+)
+
+
 def run(
     cfg: dict,
     log: Callable[[str], None],
@@ -4331,12 +4377,12 @@ def run(
         "TS_AUTHKEY": secret("TS_AUTHKEY", cfg.get("ts_authkey")),
     }
     log("凭据就绪（值不落日志）：" + (", ".join(k for k, v in creds.items() if v) or "（一个都没读到）"))
-    explicit = _load_deliverable().requested_courses(cfg)
+    explicit = BOOT.load_deliverable().requested_courses(cfg)
     if explicit:
         log(f"课程队列（{len(explicit)} 门，串行，CFG 点名）：{', '.join(explicit)}")
         explicit_kinds = _explicit_kinds(cfg, creds, log)
         # 老 hub 没有 `kind`（空表）⇒ 逐字旧行为：全部按 RL 跑。
-        return _run_batch(
+        return BOOT.run_batch(
             BatchRunSpec(
                 cfg,
                 creds,
@@ -4344,7 +4390,7 @@ def run(
                 keepalive_stop,
                 explicit,
                 multi=len(explicit) > 1,
-                leases=_explicit_leases(cfg, creds, log),
+                leases=BOOT.explicit_leases(cfg, creds, log),
                 kinds=explicit_kinds or None,
             )
         )
