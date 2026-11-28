@@ -29,6 +29,8 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -218,6 +220,30 @@ def _xla_fetch_cpu(tensors: list) -> list:
     return list(fn(list(tensors)))
 
 
+@dataclass(frozen=True)
+class D2HPorts:
+    """XLA 批量取回的三步（P0-8 端口对象，2026-11-28）。
+
+    取回策略本身是数据（"cat" → "xlac" → 逐张量），但这三步会真的搬设备内存；测试面原先靠
+    `monkeypatch.setattr(common, "_xla_fetch_cat", …)` 打桩（`test_to_cpu_batch` 8 处），
+    等于把两个私有名冻结成 API。端口只把它们收成字段，缺省实现就是本模块已有的函数，
+    调用点一律 `D2H.x(...)`（**调用时**读模块全局）。
+
+    `is_xla` 一起收进来：它是同一个判据的另一半 —— 只换取回函数而判据还看真实设备，
+    就是「测了一条永远不会走的分支」。
+    """
+
+    #: 这个 device 是不是 XLA 设备。
+    is_xla: Callable[[object], bool]
+    #: 便携路径：按 dtype 分组，每组一次 `cat` + 一次 `.cpu()`。
+    fetch_cat: Callable[[list], list]
+    #: torch_xla 内部批量 API（第二选择）。
+    fetch_cpu: Callable[[list], list]
+
+
+#: 缺省端口：三个实现此刻都已定义；这一行是它们唯一的点名处。
+D2H = D2HPorts(is_xla=is_xla, fetch_cat=_xla_fetch_cat, fetch_cpu=_xla_fetch_cpu)
+
 #: 批量取回慢过这个秒数就**说出来**（否则它会以「art= 莫名其妙 30s」的形式静默存在）。
 FETCH_SLOW_WARN_SEC = 5.0
 
@@ -236,7 +262,7 @@ def to_cpu_batch(tensors: list) -> list:
     out: list = [None] * len(tensors)
     idx = []
     for i, t in enumerate(tensors):
-        if torch.is_tensor(t) and is_xla(getattr(t, "device", None)):
+        if torch.is_tensor(t) and D2H.is_xla(getattr(t, "device", None)):
             idx.append(i)
         else:
             out[i] = t.detach().cpu() if torch.is_tensor(t) else t
@@ -245,7 +271,7 @@ def to_cpu_batch(tensors: list) -> list:
     picked = [tensors[i] for i in idx]
     xla_mark_step(picked[0].device)  # 一次图执行边界（之后的取回不再各自等设备）
     got: list | None = None
-    for name, fn in (("cat", _xla_fetch_cat), ("xlac", _xla_fetch_cpu)):
+    for name, fn in (("cat", D2H.fetch_cat), ("xlac", D2H.fetch_cpu)):
         t0 = time.monotonic()
         try:
             fetched = fn(picked)

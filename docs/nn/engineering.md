@@ -29,6 +29,20 @@
 
 ---
 
+## §394 P0-8 第六代：设备→主机取回端口（`worker/ppo/common.py::D2HPorts`，2026-11-28）
+
+`test_to_cpu_batch` 的 9 处私有打桩里 8 处是「取回路径」的两步（`_xla_fetch_cat` ×5 ·
+`_xla_fetch_cpu` ×3）。收进模块自带 `D2HPorts`（frozen dataclass：`is_xla` / `fetch_cat` /
+`fetch_cpu`）+ `D2H`，`to_cpu_batch` 的判据与策略表都读 `D2H`。
+
+`is_xla` 本来是**公开名**（不计 G19），但它必须一起进端口：只换取回函数、判据还看真实设备，
+用例测的就是一条永不执行的分支——同批把 5 处 `is_xla` 也迁了（否则门禁绿而用例全红）。
+剩下 1 处是 `torch.nn.Module._apply`（第三方库内部方法，不是在冻结我们自己的实现）。
+
+G19 **169 / 63 → 161 / 62**；`test_to_cpu_batch` + `test_bc_xla` 22 passed；全量门禁 7107 passed。
+
+---
+
 ## §393 P0-8 第五代：反向通道预检端口（`remote/rollout_relay.py::RelayPorts`，2026-11-28）
 
 `test_rollout_relay` 的 14 处私有打桩里 9 处落在预检的五个量网络步骤上（`_resolve_ips` ×2 ·

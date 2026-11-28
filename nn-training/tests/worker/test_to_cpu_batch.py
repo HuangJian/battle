@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from dataclasses import replace
 
 import pytest
 import torch
@@ -33,9 +34,9 @@ def fake_xla(monkeypatch):
         calls.append(len(tensors))
         return [t.detach().clone() for t in tensors]
 
-    monkeypatch.setattr(common, "is_xla", lambda _dev: True)
-    monkeypatch.setattr(common, "_xla_fetch_cat", _fetch)
-    monkeypatch.setattr(common, "_xla_fetch_cpu", lambda ts: pytest.fail("主路没坏，不该落到内部 API"))
+    monkeypatch.setattr(common, "D2H", replace(common.D2H, is_xla=lambda _dev: True))
+    monkeypatch.setattr(common, "D2H", replace(common.D2H, fetch_cat=_fetch))
+    monkeypatch.setattr(common, "D2H", replace(common.D2H, fetch_cpu=lambda ts: pytest.fail("主路没坏，不该落到内部 API")))
     return calls
 
 
@@ -73,9 +74,9 @@ def test_to_cpu_batch_falls_back_to_internal_api(monkeypatch) -> None:
         used.append(len(tensors))
         return [t.detach().clone() for t in tensors]
 
-    monkeypatch.setattr(common, "is_xla", lambda _dev: True)
-    monkeypatch.setattr(common, "_xla_fetch_cat", boom)
-    monkeypatch.setattr(common, "_xla_fetch_cpu", _alt)
+    monkeypatch.setattr(common, "D2H", replace(common.D2H, is_xla=lambda _dev: True))
+    monkeypatch.setattr(common, "D2H", replace(common.D2H, fetch_cat=boom))
+    monkeypatch.setattr(common, "D2H", replace(common.D2H, fetch_cpu=_alt))
     out = common.to_cpu_batch([torch.full((2,), 1.5), torch.full((2,), 2.5)])
     assert used == [2], "主路失败应当轮到内部 API（一次）"
     assert [float(t.sum()) for t in out] == [3.0, 5.0]
@@ -91,9 +92,9 @@ def test_to_cpu_batch_last_resort_is_loud(monkeypatch) -> None:
 
         return _f
 
-    monkeypatch.setattr(common, "is_xla", lambda _dev: True)
-    monkeypatch.setattr(common, "_xla_fetch_cat", boom("cat"))
-    monkeypatch.setattr(common, "_xla_fetch_cpu", boom("xlac"))
+    monkeypatch.setattr(common, "D2H", replace(common.D2H, is_xla=lambda _dev: True))
+    monkeypatch.setattr(common, "D2H", replace(common.D2H, fetch_cat=boom("cat")))
+    monkeypatch.setattr(common, "D2H", replace(common.D2H, fetch_cpu=boom("xlac")))
     monkeypatch.setattr(common, "log", warns.append)
     out = common.to_cpu_batch([torch.full((2,), 1.5), torch.full((2,), 2.5)])
     assert [float(t.sum()) for t in out] == [3.0, 5.0]
@@ -106,8 +107,8 @@ def test_to_cpu_batch_slow_fetch_is_reported(monkeypatch) -> None:
     warns: list[str] = []
     clock = iter([0.0, 99.0])  # 一次调用：起点 0，结束 99
 
-    monkeypatch.setattr(common, "is_xla", lambda _dev: True)
-    monkeypatch.setattr(common, "_xla_fetch_cat", lambda ts: [t.clone() for t in ts])
+    monkeypatch.setattr(common, "D2H", replace(common.D2H, is_xla=lambda _dev: True))
+    monkeypatch.setattr(common, "D2H", replace(common.D2H, fetch_cat=lambda ts: [t.clone() for t in ts]))
     monkeypatch.setattr(common, "log", warns.append)
     monkeypatch.setattr(common.time, "monotonic", lambda: next(clock))
     common.to_cpu_batch([torch.zeros(2), torch.ones(2)])
@@ -127,8 +128,8 @@ def test_to_cpu_state_one_fetch_keeps_container_types(fake_xla) -> None:
 
 
 def test_to_cpu_state_returns_object_when_no_tensor(monkeypatch) -> None:
-    monkeypatch.setattr(common, "is_xla", lambda _dev: True)
-    monkeypatch.setattr(common, "_xla_fetch_cat", lambda ts: pytest.fail("不该被调用"))
+    monkeypatch.setattr(common, "D2H", replace(common.D2H, is_xla=lambda _dev: True))
+    monkeypatch.setattr(common, "D2H", replace(common.D2H, fetch_cat=lambda ts: pytest.fail("不该被调用")))
     obj = {"a": 1, "b": [2, 3]}
     same = common._to_cpu_state(obj)
     assert same == obj

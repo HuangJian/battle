@@ -123,9 +123,13 @@ G19 **254 / 68 → 202 / 66**（累计 384 / 91 → 202 / 66，−182 次 / −2
 **批七（同日）**：`remote/rollout_relay` 9 处（预检的五个量网络步骤）收进 `RelayPorts`；
 `_route_open` 与 `RelayLink._post_reply` / `_worker` 有意不收（实例/线程入口，见 §393）。
 G19 **169 / 63**（累计 384 / 91 → 169 / 63，−215 次 / −28 文件）。
-**下一个已知口径**：`TrainingLoop._*` 15 处（与 P0-1 同批），然后按 G19 存量降序
-（`test_finish_course_drains_eval` 11 · `test_ppo_backend_switch` 9 · `test_to_cpu_batch` 9 · …）。
-全文 → `docs/nn/engineering.md` §389 / §391 / §392 / §393。
+**批八（同日）**：`worker/ppo/common` 8 处（`_xla_fetch_cat` / `_xla_fetch_cpu`）收进 `D2HPorts`
+（`is_xla` 一并迁，否则判据仍看真实设备）；G19 **161 / 62**（累计 384 / 91 → 161 / 62，
+−223 次 / −29 文件）。
+**下一个已知口径**：`TrainingLoop._*` 15 处（与 P0-1 同批 —— 它们是**类方法**，需要的是协作者/
+公开读数，而不是模块级端口），然后按 G19 存量降序（`test_finish_course_drains_eval` 11 ·
+`test_ppo_backend_switch` 9 · `test_offline_bc_course` / `test_loop_park` 7 · …）。
+全文 → `docs/nn/engineering.md` §389 / §391 / §392 / §393 / §394。
 
 ## 0. 执行摘要
 

@@ -62,5 +62,5 @@
   "tests/worker/test_rl_resume.py": 1,
   "tests/worker/test_serve_course_overrides.py": 1,
   "tests/worker/test_sibling_reuse.py": 1,
-  "tests/worker/test_to_cpu_batch.py": 9
+  "tests/worker/test_to_cpu_batch.py": 1
 }
