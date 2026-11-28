@@ -11700,3 +11700,11 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **被否决**：① 直接复用 b0 的 `actionOf`（hold=1 仍展开成方向）：GodAIInput 的 hold 输出是 null，强制「实际动作」会在 null-move 拍分叉（self-check 红）；② 用 `ForcedTickInput` 默认档（跳过 inner think）：executor 有 tracker/计数器，后续决策与「只替换动作」语义分叉；③ option 臂基线用 oracle 重规划（会把 cadence 收益混进 option 价值）；④ 用 terminal 副读数当主判决（H 内几乎无终局，CI 跨 0）。
 - **证明/复现**：全文/分层表 → `docs/nn/experiments.md` §169；产物 `tmp/p2b1/{pilot-h60,confirm-h30,confirm-h120}.json`（一次性，未入库）；工具 `tools/sim/executor-branch-headroom.ts`；`IntentOptionProbe.captureDecisionState/restoreDecisionState` + `readOptionCommand`，`ForcedTickInput(decideFirst)`；`tests/nn/intent-option-probe-state.test.ts`；`bun run check` 2924 pass。
 - **违反后果**：probe 快照只存 exec 不存 oracle ⇒ 分支里 oracle 意图分叉；option 分支不恢复 `st.exec` 而用新鲜 GodAIInput ⇒ 冷启动分支（不是同状态反事实）；`decideFirst` 覆盖 `isHolding/isFireBeforeTurn` 时不查询 inner ⇒ 自检与真实轨迹漂移。
+
+## §2026-11-28-hier-p4a-top1-probe（2026-11-28，P′-4a 前置：option3 top-1 0.885；不加权坍缩全 HUNT；HOLD 仅 93 窗口）
+
+- **口径**：classic35 / hard / seeds 1-4（140 局，28,376 采样帧；语料 = `tools/sim/export-intent-labels.ts`）。option3 映射（预注册 `p4.option3Mapping`）：HUNT←HUNT/CLEAR/PICKUP/CRUISE；INTERCEPT_BASE←INTERCEPT/RETURN_DEFENSE；HOLD←HOLD_LANE/ESCAPE。探针 `worker/train/option_probe.py`：StudentNet 主干 + linear head(3)，无注入，按局切分，2 epochs。门 = top-1 ≥ 0.65（`p4.top1Acc`）。
+- **决定**：① **修复语料导出 bug**：`intent-label-core.ts` 的 `obs.npy` 头写死 `14` 通道（当前 `OBS_CHANNELS=17`）⇒ numpy 读出截断帧；改为 `OBS_CHANNELS` 并加回归断言。② **top-1 门通过**：balanced CE 下 val top-1 **0.8854**（majority 0.9726）、balancedAcc **0.6064**、IB recall **0.50** / HOLD **0.42**；不加权 CE 完全坍缩到全 HUNT（recall IB/HOLD = 0）⇒ **训练侧必须类平衡/熵约束**。③ 自然分布 HOLD 仅 **93 窗口 < 200**（§6.1 rare-mode 阈值），RETURN_DEFENSE/ESCAPE 结构性 0 ⇒ **P′-4a 首版掩码 HOLD（有效 2 类）或明确论证保留**；不得为凑数开 God 默认参数。
+- **被否决**：① 用不加权的 0.9726 当门通过（= majority，零信息）；② 把 ESCAPE/RETURN_DEFENSE 塞进 option 标签（白名单结构性不可达）；③ 不修 obs 形状而在探针里裁通道（会把 bug 留在语料里）。
+- **证明/复现**：全文/混淆矩阵/分层 → `docs/nn/experiments.md` §170；产物 `tmp/option-probe-hard/probe-report-{unweighted,balanced}.json`（一次性，未入库）；测试 `nn-training/tests/worker/test_option_probe_mapping.py`、`tests/intent-tagger.test.ts`（obs 形状回归）；`bun run check` 2924 pass。
+- **违反后果**：obs 头通道回写死 ⇒ P′-4a 所有 shard 帧截断；不加权 CE 直接进 PPO ⇒ option 坍缩到 HUNT；HOLD 不掩码 ⇒ 1.2% 帧的类在策略里永远不选（防守全丢）。

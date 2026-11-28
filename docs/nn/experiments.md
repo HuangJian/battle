@@ -7,6 +7,54 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 ---
 
+## §170 P′-4a 前置：option3 top-1 **0.885（加权）/0.973（不加权）**；不加权坍缩到全 HUNT，HOLD 自然窗口仅 93（2026-11-28）
+
+**背景**：P′-1 遗留的「top-1 ≥65%（tagger vs 规则链）未测」是 P′-4a 的前置。本卡先修
+语料导出器的 obs 形状 bug（`intent-label-core.ts` 写死 14 通道 vs 当前 `OBS_CHANNELS=17`
+⇒ numpy 读出截断帧，option 探针在 conv 层炸），再用
+`export-intent-labels.ts`（classic35 / hard / seeds 1-4 = 140 局）生成 28,376 个采样帧，
+把机械 tagger 的 8 意图按**预注册映射**折叠成 option3：
+
+- HUNT ← HUNT / CLEAR / PICKUP / CRUISE
+- INTERCEPT_BASE ← INTERCEPT / RETURN_DEFENSE
+- HOLD ← HOLD_LANE / ESCAPE
+
+探针 = `worker/train/option_probe.py`（StudentNet 主干 + linear head(3)，无注入，
+按局切 train/val，2 epochs）。预注册门：top-1 ≥ 0.65（`p4.top1Acc`）。
+
+**语料（自然分布，窗口口径）**：INTERCEPT 237 · RETURN_DEFENSE 0 · HUNT 1126 ·
+HOLD_LANE 93 · CLEAR 185 · PICKUP 1607 · CRUISE 1109 · ESCAPE 0（总 4,357 窗口）。
+⇒ option3 的 HOLD 只有 **93 窗口 < 200**（plan §6.1 rare-mode 阈值），
+RETURN_DEFENSE/ESCAPE 在白名单里结构性不可达（0）。
+
+**帧级标签（train / val）**：HUNT 22,366 / 5,389 · INTERCEPT_BASE 296 / 88 ·
+HOLD 173 / 64（HUNT 占 97.3%）。
+
+**读数**
+
+| 臂 | val top-1 | majority | balancedAcc | HUNT recall | IB recall | HOLD recall |
+|---|---:|---:|---:|---:|---:|---:|
+| 不加权 CE | 0.9726 | 0.9726 | — | 1.0 | 0.0 | 0.0 |
+| balanced CE | **0.8854** | 0.9726 | **0.6064** | 0.897 | **0.50** | **0.42** |
+
+- 不加权 = **完全坍缩到全 HUNT**（混淆矩阵只有第一列）：绝对 top-1 门「通过」但零信息。
+- balanced CE 下三类都有召回：IB 50%、HOLD 42%，balancedAcc 0.606（3 类 chance 0.333）。
+- 分桶（balanced）：base acc 0.756（majority 0.942）、combat 0.985、cruise 1.0 ⇒
+  基地压力帧是唯一有实质区分度的层，也是 option 层要学的核心。
+
+**判决**：top-1 预注册门（≥0.65）**通过**（balanced 0.885）；但「option 不坍缩」必须
+靠训练侧的类平衡/熵约束，且 **HOLD 低于 rare-mode 阈值**。§6.1 的规则是「<200 窗口先
+mask/禁用」，⇒ P′-4a 首版应把 HOLD 掩码（有效 2 类：HUNT / INTERCEPT_BASE），
+或明确论证保留；RETURN_DEFENSE/ESCAPE 不进 option 标签。
+
+**产物/复现**：`tmp/option-probe-hard/{probe-report-unweighted,probe-report-balanced}.json`
+（一次性，未入库）；语料 `tmp/option-probe-hard/shards`；`bun run check` 2924 pass。
+**下一步（P′-4a 施工前需定）**：3 类 option PPO 需要新 rollout/PPO/课程/模型维度链路
+（当前 intent 线硬编码 8 类 + inject 9）；是否先以「HUNT/INTERCEPT_BASE 2 类」或
+「复用 8 类 intent 线做 option-only 基线」推进，见 DECISIONS。
+
+---
+
 ## §169 P′-2b1 executor→executor 单拍 headroom：**动作 0.049 / option 0.039（H=120）**，全层 CI>0（2026-11-28）
 
 **口径**：classic35 / hard / 3 命 / 0★ / 20 敌 / 36000 拍；执行器轨迹 = E2′
