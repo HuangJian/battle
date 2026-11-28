@@ -85,6 +85,9 @@ STAYS = (
     "_record_iteration",
     "_record_rollout",
     "_write_iter_stats",
+    # P0-1 第六刀前置步：结算账本的只读读数面与唯一写面（两者同住本文件）。
+    "iter_ledger",
+    "land_iter_ledger",
 )
 
 #: 组装：`TrainingSteps` 的基类元组（本刀末位追加第三项）。
@@ -459,11 +462,16 @@ def test_top_level_imports_closed_no_reverse_edges() -> None:
 
 
 def test_loop_steps_left_has_zero_intra_calls() -> None:
-    """★ 搬走后 `loop_steps` **零方法间调用**（本刀切掉的是它最后一条链）。"""
+    """★ `loop_steps` 的方法间调用只剩**结算账本的唯一写面**（P0-1 第六刀前置步）。
+
+    本刀切掉的是导出那条链；`_log_report` → `land_iter_ledger(fields)` 是新增的唯一
+    具名落位入口（写面收口），除此之外仍然零互调。
+    """
     per_method = _self_attrs(STEPS_PY, "TrainingSteps")
     own = set(per_method)
+    landing = {"land_iter_ledger"}
     for name, names in per_method.items():
-        intra = {n for n in names & own if n != name}
+        intra = {n for n in names & own if n != name} - landing
         assert intra == set(), f"{name} 与 {sorted(intra)} 又连上了"
 
 

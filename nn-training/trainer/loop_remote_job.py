@@ -170,14 +170,9 @@ class TrainingRemoteJob(TrainingRemotePush):
     _jsonl_path: Any
     #: greedy 结果配额（plan/greedy-outcome-quota rev4）：预筛阶段写；plan 只经 getattr 读。
     _ppo_sec: float
-    #: 云端 worker **自报**的真训练秒（load+chunk+update，不含上传/排队/下载）。
-    #: 与 `_ppo_sec`（往返墙钟）分开记——后者打包传输与排队，用于诊断/配额，
-    #: 不应当作"训练量"（排队越久越"达标"是错的，且本地采样期间云端空转它看不到）。
-    _ppo_cloud_sec: float
     _total_steps: int
     _chunks_n: int
     _agg: Any
-    _kl_cum: Any
     #: 零落盘（plan/payload-zero-disk §3.2）：本轮 dispatch 腿已打好的 shard 段账
     #: （`remote.payload_pack.ShardSegments`，组合根建、派发注入点填）。本模块只读：
     #: `_remote_ppo_publish` 用 `take(it, wire_diet=…)` 取本轮那份，交给 `publish_job`。
@@ -196,6 +191,8 @@ class TrainingRemoteJob(TrainingRemotePush):
     #: 在每个文件里类型可见，否则 mypy 报 attr-defined。
     _commit_journal: Any
     _ensure_ts_code: Any
+    #: 结算账本唯一写面（P0-1 第六刀前置步；实现在 `TrainingSteps`，组合实例上解析）。
+    land_iter_ledger: Any
     #: 产物出包协作对象（P0-1 第三刀）：TS 运行时缓存的读者改问它的公开读数。
     exporter: BundleExporter
     #: 采集协作对象（P0-1 第五刀）：greedy 槽位只经只读视图读、经 `merge_greedy` 写。
@@ -961,14 +958,21 @@ class TrainingRemoteJob(TrainingRemotePush):
     def _land_settle_fields(self, sess: RemotePpoJob, result: dict) -> None:
         """结算字段（下游 breaker / stop-loss / events 账本原样消费，D4）+ 传输读数。"""
         args = self.args
-        self._agg = _remote_forward_agg(result.get("agg", {}))
-        self._chunks_n = int(result.get("agg", {}).get("chunks", 0))
-        self._total_steps = int(result.get("agg", {}).get("steps", 0))
-        self._kl_cum = self._agg["kl"]
+        agg = _remote_forward_agg(result.get("agg", {}))
         # 往返墙钟（含打包/上传/排队/下载）：分母是**发布时刻**，跨步也认同一份
-        self._ppo_sec = round(time.time() - sess.t_ppo, 1)
-        # 真训练秒：云端 worker 自报的 load+chunk+update（旧 worker / echo 无此字段 → 回落往返）
-        self._ppo_cloud_sec = float(result.get("ppo_sec") or 0.0) or self._ppo_sec
+        ppo_sec = round(time.time() - sess.t_ppo, 1)
+        # 结算账本只经宿主唯一写面落位（P0-1 第六刀前置步：`_log_report` 同一条入口）。
+        self.land_iter_ledger(
+            {
+                "_agg": agg,
+                "_chunks_n": int(result.get("agg", {}).get("chunks", 0)),
+                "_total_steps": int(result.get("agg", {}).get("steps", 0)),
+                "_kl_cum": agg["kl"],
+                "_ppo_sec": ppo_sec,
+                # 真训练秒：云端 worker 自报的 load+chunk+update（旧 worker / echo 无此字段 → 回落往返）
+                "_ppo_cloud_sec": float(result.get("ppo_sec") or 0.0) or ppo_sec,
+            }
+        )
         # M0 统一计量：传输层实测（字节/秒）汇总进 iteration 事件的 wire 子字典。
         # protocol/edge_ip/slim 由 M1/M2 的配置面注入（未配 = None，旧行为）。
         _cf_tunnel = _course_cf_tunnel(args)

@@ -205,12 +205,31 @@ stream_meta=None)` 成为 `_report` / `_stream_meta` 的唯一写入口，`Train
 
 nn python 门禁 **7106 passed / 4 skipped**，ruff / mypy 绿。
 
+### 第六刀的前置步：迭代账本只剩一个写面（同日）
+
+`TrainingSteps` 的账本槽（`_agg` / `_chunks_n` / `_total_steps` / `_kl_cum` / `_ppo_sec` /
+`_ppo_cloud_sec` / `_rollout_sec` / `_halted_flag` / `_dropped_games` / `_load_sec` /
+`_tail_drain_sec` / `_waves_n`）原先有两个写面：`loop_steps._log_report` 直接给 12 格赋值，
+`loop_remote_job._land_settle_fields` 又直接写其中 6 格 —— 同一份账本在两个文件各写一遍。
+先把写面收口：`TrainingSteps.land_iter_ledger(fields)` 成为唯一写入口，只接受
+`LEDGER_WRITE_SLOTS`（拼错槽位当场 `TypeError`），两个写者都经它落位；读面新增
+`iter_ledger() -> IterLedgerView`（frozen dataclass，`agg` / `kl_cum` 等保持活引用，不拷副本）。
+`_eval_thread` 刻意**不在**写面：它归评估簇（`TrainingEval` 三处会写它），只在读面出现。
+
+这一步单独成立：对象化时调用点逐字不变，守卫先钉住「没有第二条写路径」。守卫在
+`tests/trainer/test_loop_steps_split.py`：两个写者文件对账本槽的 `self._x = …` 零直接赋值、
+未知槽位响亮 `TypeError`、`_log_report` 的 12 个值逐字落位（stream 与本地两条分支）、
+`iter_ledger()` 读活槽位。`test_loop_remote_split.py` 的槽位写手表把六格登记为空集
+（本族从此不许直接写），`test_loop_eval_split.py` 的跨模块手登记 `iter_ledger → _eval_thread`
+（Load），`test_loop_export_split.py` 的「零互调」只放行 `_log_report → land_iter_ledger`。
+
+门禁 **7111 passed / 4 skipped**，ruff / mypy 绿。
+
 ### 下一刀的口径（照同一形状）
 
 P0-1 的剩余簇见 `python.refactor.md` 的处理状态表：下一个候选是 `TrainingSteps`（9 方法 / 15 处
-入边），它的迭代账本槽（`_agg` / `_chunks_n` / `_total_steps` / `_ppo_sec` / `_kl_cum` / `_hr_*`）
-被 Remote/Steps 读、`_eval_thread` 与 Eval 共享 ⇒ 先立 `IterLedgerView`（照 `VolumeView` 的形状）
-再把写面收成具名入口。`TrainingRemote*` 四簇与 `TrainingEval` 的入边最多，应放在最后。
+入边），它的前置步（`IterLedgerView` + 唯一写面）已落，接下来把账本槽搬进协作对象、宿主读面走
+Protocol、组合根只留一行壳。`TrainingRemote*` 四簇与 `TrainingEval` 的入边最多，应放在最后。
 每刀都要：对象拥有自己的状态、宿主读面走 Protocol、组合根只留一行壳、
 守卫从 `is` 同一性改成 AST 形状 —— **不要**把 `self.host._private` 当捷径（那就只是多绕一层）。
 

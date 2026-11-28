@@ -126,21 +126,22 @@ HELPER_HANDS: dict[str, str] = {
 
 #: 槽位写手闭集：槽位 → {写它的文件}（跨模块共享的只能是登记的那几处）。
 SLOT_WRITERS: dict[str, frozenset[str]] = {
-    "_agg": frozenset({"loop_remote_job.py"}),
+    # 结算账本槽（`_agg` / `_chunks_n` / `_total_steps` / `_kl_cum` / `_ppo_sec` /
+    # `_ppo_cloud_sec`）自 P0-1 第六刀前置步起只经 `TrainingSteps.land_iter_ledger`
+    # 落位（`loop_steps.py`）；本族一个都不许直接写，所以登记为空集。
+    "_agg": frozenset(),
     "_bundle_index": frozenset({"loop_remote_job.py"}),
-    "_chunks_n": frozenset({"loop_remote_job.py"}),
+    "_chunks_n": frozenset(),
     "_code_sha256": frozenset({"loop_remote_job.py"}),
     "_code_zip_path": frozenset({"loop_remote_job.py"}),
     "_collect_child": frozenset({"loop_remote_job.py"}),
     "_demo_raw": frozenset({"loop_remote_job.py"}),
-    # greedy 结果配额（plan/greedy-outcome-quota rev4）：发布阶段预筛完后写；
-    # 采集阶段在 `loop_volume` 自己那份槽位写，本族只登记这一处。
-    "_kl_cum": frozenset({"loop_remote_job.py"}),
-    "_ppo_cloud_sec": frozenset({"loop_remote_job.py"}),
-    "_ppo_sec": frozenset({"loop_remote_job.py"}),
+    "_kl_cum": frozenset(),
+    "_ppo_cloud_sec": frozenset(),
+    "_ppo_sec": frozenset(),
     # 零落盘（2026-10-28）：发布那一刻的 `name → manifest` 快照，验收相位的活目录对账要读它。
     "_published_mem": frozenset({"loop_remote_job.py"}),
-    "_total_steps": frozenset({"loop_remote_job.py"}),
+    "_total_steps": frozenset(),
     "_wire": frozenset({"loop_remote_job.py"}),
     # 停腿标记与连败计数：判据（Fail）与驱动（Drive）都要碰——这是**有意**的两处。
     "_leg_abort": frozenset({"loop_remote_fail.py", "loop_remote_drive.py"}),

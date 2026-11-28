@@ -88,6 +88,8 @@ CLUSTER_SLOTS = (
 CROSS_MODULE_HANDS = (
     ("_log_report", "_eval_thread", "Store"),
     ("_record_iteration", "_eval_join_sec", "Load"),
+    # P0-1 第六刀前置步：迭代账本的只读观测面也把 eval 句柄读进去（`IterLedgerView.eval_thread`）。
+    ("iter_ledger", "_eval_thread", "Load"),
 )
 
 #: 顶层 import 面的闭集（模块名）。

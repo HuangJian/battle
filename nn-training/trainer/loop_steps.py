@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -126,6 +127,49 @@ __all__ = [
     "resolve_hub_push",
     "resolve_transport",
 ]
+
+
+#: 结算账本（iteration 事件 / 下游 breaker / stop-loss 的读数面）的槽位 —— `_log_report`
+#: 与 `TrainingRemoteJob._land_settle_fields` 是仅有的两个写者，都只经宿主 `land_iter_ledger`。
+#: `_eval_thread` 不在表内：它归评估簇（`TrainingEval` 的派生 / 收拢 / drain 三处会写它）。
+LEDGER_WRITE_SLOTS = (
+    "_agg",
+    "_chunks_n",
+    "_total_steps",
+    "_kl_cum",
+    "_ppo_sec",
+    "_ppo_cloud_sec",
+    "_rollout_sec",
+    "_halted_flag",
+    "_dropped_games",
+    "_load_sec",
+    "_tail_drain_sec",
+    "_waves_n",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class IterLedgerView:
+    """本轮结算账本的**只读观测面**（iteration 事件的读数契约，不是内部布局的镜像）。
+
+    `_agg` / `_kl_cum` / `_dropped_games` 等是活引用（dict 不复制）；`eval_thread` 是
+    评估簇的句柄（`None` = 本轮没有延迟评估），`node_rollout_sec` 是 M3 节点自报墙钟。
+    """
+
+    agg: object | None
+    chunks_n: int
+    total_steps: int
+    kl_cum: object | None
+    ppo_sec: float
+    ppo_cloud_sec: float
+    rollout_sec: float
+    halted: bool
+    dropped_games: object | None
+    load_sec: object | None
+    tail_drain_sec: object | None
+    waves_n: object | None
+    eval_thread: object | None
+    node_rollout_sec: float | None
 
 
 class TrainingSteps(TrainingRemote, TrainingEval):
@@ -402,45 +446,80 @@ class TrainingSteps(TrainingRemote, TrainingEval):
         except Exception as e:  # 统计失败不打断训练（warn-only，评审 P1-4）
             log(f"[run_rl] WARN metrics_stats failed (non-fatal): {e}")
 
+    def land_iter_ledger(self, fields: dict[str, object]) -> None:
+        """结算账本的**唯一写面**（`_log_report` 与 `TrainingRemoteJob._land_settle_fields`）。
+
+        只接受 `LEDGER_WRITE_SLOTS` 里的槽位：多写一个（或拼错名字）当场 TypeError，
+        而不是在实例上长出一个没人读的字段。值原样落位（`None` 也是合法值）。
+        """
+        unknown = sorted(set(fields) - set(LEDGER_WRITE_SLOTS))
+        if unknown:
+            raise TypeError(f"[ledger] 未知的结算账本槽位：{unknown}")
+        for name, value in fields.items():
+            setattr(self, name, value)
+
+    def iter_ledger(self) -> IterLedgerView:
+        """本轮结算账本的只读快照（字段语义见 `IterLedgerView`；不改变任何状态）。"""
+        return IterLedgerView(
+            agg=self._agg,
+            chunks_n=int(self._chunks_n),
+            total_steps=int(self._total_steps),
+            kl_cum=self._kl_cum,
+            ppo_sec=float(self._ppo_sec),
+            ppo_cloud_sec=float(self._ppo_cloud_sec),
+            rollout_sec=float(self._rollout_sec),
+            halted=bool(self._halted_flag),
+            dropped_games=self._dropped_games,
+            load_sec=self._load_sec,
+            tail_drain_sec=self._tail_drain_sec,
+            waves_n=self._waves_n,
+            eval_thread=self._eval_thread,
+            node_rollout_sec=(
+                None if self._node_rollout_sec is None else float(self._node_rollout_sec)
+            ),
+        )
+
     def _log_report(self, it: int, t_rollout: float) -> None:
         """报告结算：stream 报告拆解（eval 线程句柄 / 阶段耗时 / 遥测）与日志行。"""
         report = self._report
         stream_meta = self._stream_meta
-        kl_cum = None
-        halted_flag = False
-        dropped_games = None
-        load_sec = None
-        tail_drain_sec = None
-        waves_n = None
+        ledger: dict[str, object] = {
+            "_kl_cum": None,
+            "_halted_flag": False,
+            "_dropped_games": None,
+            "_load_sec": None,
+            "_tail_drain_sec": None,
+            "_waves_n": None,
+        }
         if stream_meta is not None:
             # 流式评估线程句柄随报告回传（R4）：jsonl 写回前 join。
-            # 槽位声明在 `TrainingEval`（S4 第十七刀）——两处写者经继承看同一个实例属性。
+            # `_eval_thread` 归评估簇（不在 `LEDGER_WRITE_SLOTS` 里），这里直写它的槽。
             self._eval_thread = report.pop("_eval_thread", None)
             _sm = report.pop("_stream")
-            self._rollout_sec = _sm["rollout_sec"]
-            self._ppo_sec = _sm["ppo_sec"]
-            self._ppo_cloud_sec = float(_sm.get("ppo_sec") or 0.0) or self._ppo_sec
-            self._total_steps = _sm["steps"]
-            self._chunks_n = _sm["chunks"]
-            self._agg = _sm["agg"]
-            tail_drain_sec = _sm.get("tail_drain_sec")
-            kl_cum = _sm.get("kl_cum")
-            halted_flag = bool(_sm.get("halted", False))
-            dropped_games = _sm.get("dropped_games")
-            load_sec = _sm.get("load_sec")
-            waves_n = _sm.get("waves")
+            ppo_sec = _sm["ppo_sec"]
+            ledger.update(
+                {
+                    "_rollout_sec": _sm["rollout_sec"],
+                    "_ppo_sec": ppo_sec,
+                    "_ppo_cloud_sec": float(_sm.get("ppo_sec") or 0.0) or ppo_sec,
+                    "_total_steps": _sm["steps"],
+                    "_chunks_n": _sm["chunks"],
+                    "_agg": _sm["agg"],
+                    "_tail_drain_sec": _sm.get("tail_drain_sec"),
+                    "_kl_cum": _sm.get("kl_cum"),
+                    "_halted_flag": bool(_sm.get("halted", False)),
+                    "_dropped_games": _sm.get("dropped_games"),
+                    "_load_sec": _sm.get("load_sec"),
+                    "_waves_n": _sm.get("waves"),
+                }
+            )
         elif self._node_rollout_sec is not None:
             # M3 上云轮：t_rollout 含「等待节点跑完 rollout + PPO」的整段墙钟，拿它当
             # rollout_sec 会把 PPO/传输全算进采集（假指标）。用节点自报的采集墙钟。
-            self._rollout_sec = float(self._node_rollout_sec)
+            ledger["_rollout_sec"] = float(self._node_rollout_sec)
         else:
-            self._rollout_sec = round(time.time() - t_rollout, 1)
-        self._kl_cum = kl_cum
-        self._halted_flag = halted_flag
-        self._dropped_games = dropped_games
-        self._load_sec = load_sec
-        self._tail_drain_sec = tail_drain_sec
-        self._waves_n = waves_n
+            ledger["_rollout_sec"] = round(time.time() - t_rollout, 1)
+        self.land_iter_ledger(ledger)
         log(
             f"[run_rl] rollout it{it}: games={report.get('games', 0)} "
             f"winRate={report.get('winRate', 0.0)} "
