@@ -11648,3 +11648,30 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **附带**：`tests/hub/test_relay_ping_cache.py` 的单飞断言从「总次数 == 1」（在刷新落地后数）改成「挂起期间并发互斥 + 落地后载荷变新」——落地后 TTL 再到期时重刷是合法行为。
 
 —— 全文 → `docs/nn/engineering.md` §390
+
+## §2026-11-28-hier-p0-contracts（2026-11-28，P′-0 工具与状态契约：测量先可信）
+
+- **背景**：分层 options 计划（`plan/nn-hierarchical-options.plan.md` §9.1）开工前有三条静默错路：① `m1-eval --policy` 未知值会落到 `runSimulation` 默认分支当 God 跑；② B8/B10 只在 `export-eval-game` 内联实现、`branchTotals` 不通 `SimTask`/worker，P′-1 无法用同一批量入口跑这两臂；③ 分支工具只 `cloneWorld/restoreWorld` 后新建执行器 = cold-start，`GodAIInput` 无决策状态 capture/restore。
+- **决定**：① policy 白名单单点 = `simulation-runner.SIM_POLICIES + assertSimPolicy`；`m1-eval` 未知名 exit 2，local-only（`intent`/`intent-oracle`/`goal-god`）显式拒绝 `--dist-nodes`（自动发现的配置只降级本机并打日志）；`export-eval-game` 同样白名单 exit 2。② B8/B10 走 `RunOptions → NNInput` 单一实现（两 flag 同开 throw），`branchTotals` 从 m1-eval 透传到 worker，报告带 `b8/b10` 与跨局汇总。③ `GodAIInput.captureDecisionState/restoreDecisionState` 用**显式字段清单**（不用通用 Object.keys 深拷贝，避免 world/rng/params 等身份字段被克隆）；restore 必须在 `restoreWorld` 之后、清空全部纯 memo（restore 会重建 Tank 数组并让 `tileMap.revision++`）并恢复 executor RNG 状态；同一 capture 可重复 restore（restore 内再次深拷贝）。④ `executorSeed(seed)` 单点化，CRN 契约写进注释；`ForcedTickInput` 提供强制拍/endFrame 钩子，不碰 `Simulation`。⑤ 三池 seed 写进 `plan/hier-options-prereg.v1.json`，`tools/sim/prereg.ts` 断言池互斥/阈值/命令/口径。
+- **被否决**：① 通用深拷贝（`Object.keys` + structuredClone 全字段）——新身份字段会被静默克隆成游离对象；② 回拨 `genId()` 计数器换逐字节 id 相等——违反 `src/game/ids.ts` 的进程级单调契约（会与 replay/undo 历史 live id 冲突）；分支等价口径定为「全字段一致、id 一一对应」（测试用 `tests/support/canonicalize-ids.ts`）；③ B8/B10 另写批量脚本——会形成第二套推理实现；④ local-only policy 带 `--dist-nodes` 时静默跑本机——配置错误必须响。
+- **违反后果**：新增决策字段漏进 `DECISION_STATE_FIELDS` ⇒ 分支 restore 轨迹分叉（`tests/godai-decision-state.test.ts` 红）；未知名静默回退 ⇒ `tests/m1-eval-dist.test.ts` / `tests/simulation-runner-contracts.test.ts` 红；B8+B10 同开 ⇒ throw。
+- **证明**：P′-0 新增/追加 25 条用例全绿（决策状态回档两次等价、同 seed replay frames 相等、未知 policy exit 2、预注册断言）；`bun run check` 绿。零训练、零任务侧改动、零 God 默认参数改动。
+- **P′-1 追加（2026-11-28）**：`m1-eval` 增加 `--player-level` 覆盖（hard 的 `playerStartLevel=1` 与任务口径 0★ 冲突，必须显式传 0）并把 `codeHash / weightsSha / playerLevel / openingConnect / dodge / inferenceRules` 写进报告；nn 的 wver 改为读权重字节（原 `local-nn` 换权重不失效账本）。NN 臂的 `opening_connect=true` 口径仍走训练评估链（`worker/eval_local.py` + `export-eval-game`），m1-eval 报告显式写 `openingConnect:false`，不得拿两套口径相减。
+
+—— 施工计划 → `plan/nn-hierarchical-options.plan.md` §9.1；预注册 → `plan/hier-options-prereg.v1.json`
+
+## §2026-11-28-hier-p1-board（2026-11-28，P′-1 证据板：A 追平 +28.2pp、E1 不是 God 地板、B8/B10 不复现）
+
+- **口径**：classic35 / hard / 3 命 / 0★ / 20 敌 / 36000 拍；seeds 2000000001–2000000020（700 局），同 (stage,seed) 配对；NN 臂 `opening_connect=true`（训练评估链），另跑 `g11-bare` 对照；m1-eval 臂 `openingConnect=false`。codeHash `aa8f0cdd…`、g11 sha `0b58484a…`、g7 sha `cc2d763e…`。
+- **决定**：① **A 追平 = +28.2pp**（intent-oracle 64.3% − g11-bare 36.1%，配对 p=6.1e-26；对 opening 版 g11 是 +24.6pp）⇒ **P1 开**，P′-2a 做 2100 确认。② **E1 地板门失败**：intent-oracle 比 God 低 **16.1pp**（64.3 vs 80.4，未过 `God−3pp`）⇒ E1 只作下界 / option-only，**E2′ 的优先级上调**为补齐这 16pp 的必要路径。③ goal-god **0.0%**（0/700）⇒ E3 仍最后。④ **B8/B10 不设 interim baseline**：在 g11.it580 上 39.4 / 38.1 vs 39.7（−0.3 / −1.6pp，p=.95 / .54），环内击杀率 19.6 / 20.4 低于 21.9 ⇒ 历史 +16.29 / +13.29pp（ep80）不可外推；起跑线保持 **39.7%**。⑤ `opening_connect` 本身 **+3.6pp**（39.7 vs 36.1，p=.015）⇒ NN 读数必须带开关标记，不同开关的局不得混池。⑥ top-1≥65%（tagger vs 规则链）**无仪器**，列为 P′-4a 前置，不阻塞 P′-2。
+- **被否决**：① 用 B8/B10 的 ep80 增量把起跑线抬到 50%+（现役权重不复现，且环内转化更差）；② 把 g11（opening）与 m1-eval 臂（无 opening）直接相减当 A（口径不同）；③ 用 1 seed × 35 关的 pilot 当判决（pilot 只验通路）；④ 因 E1 不是 God 地板就停 P1（A 的 +28.2pp 来自规则选择器+E1 的组合，仍显著）。
+- **证明/复现**：g11 39.7%（=计划基线）、g11 环内 21.9%（§163 21.87%）、g7 44.4%（=44.43/44.29）、God 80.4%（§161 78.9%）⇒ 工具链口径可信。全文/四格表/三表 → `docs/nn/experiments.md` §164；实施计划已同步 `plan/nn-hierarchical-options.plan.md` §9.2；产物 `tmp/p1/board.md`（一次性，未入库）。
+
+## §2026-11-28-hier-p2a-p2b0（2026-11-28，P′-2a 确认：A +25.5pp / B +3.0~3.2pp；P′-2b0 低层 headroom 全层非零）
+
+- **口径**：classic35 / hard / 3 命 / 0★ / 20 敌 / 36000 拍；seeds **2000000001–2000000060**（35×60=2100；预注册 selection 池在跑数前扩到 60，note 已记）；同 (stage,seed) 配对。A 的 per-tick 臂 = **g11-bare**（`opening_connect=false`，与 m1-eval intent-oracle 的 `openingConnect=false` 同开关）；B 的搜索执行器 RNG = `seed ^ 0x9e3779b9`（与 intent-oracle 的 exec 同源 ⇒ CRN）。codeHash `5c3b82a1…`、weightsSha `0b58484a…`。
+- **决定**：① **A 确认**：intent-oracle 63.6% − g11-bare 38.0% = **+25.5pp**（McNemar p=1e-63；stage-cluster bootstrap 单侧 95% LCB **+20.38pp**）⇒ **P1 开**（P′-1 的 +28.2pp 在 60 seeds 上收缩到 +25.5，仍远超门）。② **B 确认**：`oracle-search − intent-oracle`：H=120 **+3.0pp**（LCB +1.00，p=.028）、H=240 **+3.2pp**（LCB +1.05，p=.017）、H=480 +3.1pp（LCB +0.90）、**H=60 +1.3pp（LCB −0.62，不过）** ⇒ **搜索/参数化线开，承诺/搜索周期 ≥120 拍**。③ **P′-2b0**：24 动作替 1 拍 + 交还 NN，全部 5 层 headroom 95% CI > 0（H=30 overall 0.059、H=120 0.059）；H=120 的 base_pressure 0.112 / ring_enemy 0.091 最高 ⇒ **P′-4b 低层线有 headroom**（不等于可学习，也不等于在线搜索可部署）。④ b0 的 `ring_enemy` 判据修正为「先于 `base_pressure`、≤2 格」；首跑（seed 1000000001）因判据顺序导致该层 n=0，整批作废。
+- **被否决**：① 用 g11(open) 做 A 的 per-tick 臂（与 m1-eval 的 `openingConnect=false` 不同源）；② 只跑 H=120 就收工（预注册 `H_first={120,240}` 两个都跑，B 为正再补 60/480）；③ 用 H=60 的 +1.3pp 当 B 通过（LCB 跨 0）；④ 把 b0 的 0.06 headroom 当动作策略上界（这是状态级、1 拍替换的搜索上界，不是逐拍在线搜索）；⑤ 把 b0 的 `ring_enemy` 并入 `base_pressure`（会丢掉「已进环」这一层）。
+- **证明/复现**：全文/六臂 board/四格/CI → `docs/nn/experiments.md` §165–§166；产物 `tmp/p2a/summary.md`、`tmp/p2b0/confirm-h30.json`、`confirm-h120.json`（一次性，未入库）。新增 local-only policy `intent-search`（`tools/sim/intent-search-input.ts`，窗口分单一实现 `tools/sim/window-score.ts`）；NNInput 决策状态契约 + `valueEstimate`（`src/nn/policy-input.ts`）；`bun run check` **2902 pass**。零训练、零任务侧改动、零 God 默认参数改动。
+- **违反后果**：搜索参数（H/every）不进 ledger wver ⇒ 不同 H 串账本（已修：wver 由 `{policy,h,every}` 派生）；NNInput 新增决策字段漏进 capture 清单 ⇒ 分支 restore 分叉（`tests/nn/nn-input-decision-state.test.ts` 红）；`ring_enemy` 判据顺序回退 ⇒ 该层永远 n=0（pilot 已复现一次）。
+

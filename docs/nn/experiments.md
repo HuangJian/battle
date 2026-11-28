@@ -7,6 +7,201 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 ---
 
+## §166 P′-2b0 NN→NN 单拍 headroom：**全层非零**，基地压力/环内有敌最大（2026-11-28）
+
+**口径**：g11-ringkill.it580（weightsSha `0b58484a…`），NN 自身轨迹；在每个决策拍
+（`frame % 10 == 0`）把**下一拍**替换成 24 个动作之一（hold2 × move4 × fire3），
+随后交还 NN 跑 H−1 拍。强制拍走 P′-0 的 `ForcedTickInput`（不碰 Simulation/World）；
+每分支 = `cloneWorld` + `NNInput.captureDecisionState` 起跑，结束 `restoreWorld` +
+`restoreDecisionState`（CRN：世界 RNG 共享快照；NN 贪心、无 RNG）。
+评分 **主** = `Σ γ^k·ΔΦ + γ^H·V(s_H)`（γ=0.995；Φ 与训练同式 `tools/sim/rl-reward.ts`；
+终局改折现 `REWARD_SCALE·gatedScore`），**副** = raw terminal。self-check：
+「实际动作」分支必须与「不强制」分支在 H 拍后逐字段一致（逐状态 + 单测双保险）。
+
+**分层**（判据优先序）：`opening_300`（frame≤300）→ `ring_enemy`（任一活敌
+Manhattan 距基地 ≤2 格）→ `base_pressure`（`sampleBasePressure≥0.5`）→ `combat`
+（最近活敌 ≤4 格或有 incoming bullet）→ `free_nav`。首跑（seed 1000000001）把
+`base_pressure` 放前面导致 `ring_enemy` 永远采不到（n=0）⇒ 该批作废；修正为
+环内优先 + ≤2 格后再跑，以下数据全部来自修正后实现。
+
+**Pilot（H=60，500 状态，seeds 1000000002–3；90% CI）**
+
+| stratum | n | mean headroom | 90% CI | positiveRate |
+|---|---:|---:|---|---:|
+| opening_300 | 100 | 0.0354 | [0.0272, 0.0435] | 0.90 |
+| base_pressure | 100 | 0.0526 | [0.0337, 0.0714] | 0.67 |
+| ring_enemy | 100 | 0.0715 | [0.0507, 0.0923] | 0.81 |
+| combat | 100 | 0.0316 | [0.0215, 0.0417] | 0.71 |
+| free_nav | 100 | 0.0457 | [0.0360, 0.0554] | 0.85 |
+| **overall** | **500** | **0.0473** | **[0.0408, 0.0539]** | — |
+
+**确认 H=30（1776 状态，seeds 1000000004–6；95% CI）**
+
+| stratum | n | mean headroom | 95% CI |
+|---|---:|---:|---|
+| opening_300 | 400 | 0.0343 | [0.0290, 0.0397] |
+| base_pressure | 400 | 0.0742 | [0.0609, 0.0874] |
+| ring_enemy | 176 | **0.1332** | [0.0988, 0.1676] |
+| combat | 400 | 0.0538 | [0.0426, 0.0650] |
+| free_nav | 400 | 0.0406 | [0.0349, 0.0464] |
+| **overall** | **1776** | **0.0589** | **[0.0533, 0.0645]** |
+
+**确认 H=120（1836 状态，seeds 1000000007–9；95% CI）**
+
+| stratum | n | mean headroom | 95% CI |
+|---|---:|---:|---|
+| opening_300 | 400 | 0.0239 | [0.0203, 0.0274] |
+| base_pressure | 400 | **0.1120** | [0.0844, 0.1395] |
+| ring_enemy | 236 | 0.0909 | [0.0613, 0.1204] |
+| combat | 400 | 0.0456 | [0.0365, 0.0547] |
+| free_nav | 400 | 0.0361 | [0.0298, 0.0424] |
+| **overall** | **1836** | **0.0591** | **[0.0514, 0.0668]** |
+
+**结论**
+
+1. **b0 headroom 不为零**（与计划预期一致）：H=30 overall +0.059、H=120 +0.059（Φ 量纲），
+   全部 5 层 95% CI 下界 > 0 ⇒ 低层 residual/option 有可测 headroom，P′-4b 的低层线有理由开。
+2. **防守局是主矿**：H=120 的 base_pressure（0.112）与 ring_enemy（0.091）最高；
+   H=30 的 ring_enemy 更高（0.133）⇒ 短视界救环、长视界守基地。opening 层最小
+   （0.034/0.024），且首 20 拍大量 24 动作同分（早期动作不改结局，属预期）。
+3. **value 头已经在定价危险**：防守层的 mean V 为负（base_pressure −1.10/−0.53、
+   ring_enemy −0.63/−0.46），而 opening/free_nav/combat 为正 ⇒ headroom 来自
+   「在这些局面选更好的动作」，不是 value 看不见状态。
+4. **样本量**：`ring_enemy` 在 80 局里只采到 176/236（配额 400 未满），95% CI 仍排除 0；
+   其余四层按 400/层满额。
+5. **边界**：这是**状态级搜索上界**（1 拍替换 + H 拍回交），不证明可学习策略，
+   也不证明逐拍在线搜索值得部署；后者按 P′-4b/P′-5 的条件门另行裁决。
+
+**产物**（一次性，未入库）：`tools/sim/nn-branch-headroom.ts`；状态契约
+`NNInput.captureDecisionState/restoreDecisionState` + `valueEstimate`（`src/nn/policy-input.ts`，
+`StudentModel.hasValueHead` 判据）；产物 `tmp/p2b0/pilot2-h60.json` · `confirm-h30.json` ·
+`confirm-h120.json` + 同名 jsonl/log；单测 `tests/nn/nn-input-decision-state.test.ts`、
+`tests/nn/b0-branch-selfcheck.test.ts`。
+
+---
+
+## §165 P′-2a 确认（2100 局）：A **+25.5pp**（LCB +20.4）；B oracle-search **+3.0~3.2pp**（LCB +0.9~1.1）；H=60 不够（2026-11-28）
+
+**口径**：classic35 / hard / 3 命 / 0★ / 20 敌 / 36000 拍；seeds **2000000001–2000000060**
+（35 关 × 60 = 2100），同 (stage,seed) 配对。A 的 per-tick 臂 = **g11-bare**
+（`opening_connect=false`，与 m1-eval intent-oracle 的 `openingConnect=false` 同开关；
+g11(open) 不参与 A 判决）。weightsSha `0b58484a…`；codeHash `5c3b82a1…`。
+B 的搜索执行器 RNG = `seed ^ 0x9e3779b9`（与 intent-oracle 的 exec 同源 ⇒ 两臂 CRN）；
+搜索/承诺周期 = H（`--search-every H`），分支视界 = H，评分 = T6 窗口分
+（`tools/sim/window-score.ts`，与语料导出同一实现）。
+
+**Board（2100 局）**
+
+| arm | n | win | winRate | 95% CI | avgKills | avgTicks | 基毁率 | avgDeaths |
+|---|---:|---:|---:|---|---:|---:|---:|---:|
+| g11-bare | 2100 | 799 | 38.0% | [36.0, 40.1] | 13.00 | 5670 | 55.9% | 0.96 |
+| intent-oracle（E1） | 2100 | 1335 | 63.6% | [61.5, 65.6] | 16.48 | 5664 | 30.6% | 1.27 |
+| search H=60 | 2100 | 1362 | 64.9% | [62.8, 66.9] | 16.63 | 5599 | 28.8% | 1.25 |
+| search H=120 | 2100 | 1398 | 66.6% | [64.5, 68.6] | 16.84 | 5545 | 27.5% | 1.26 |
+| search H=240 | 2100 | 1403 | 66.8% | [64.8, 68.8] | 16.84 | 5494 | 26.6% | 1.27 |
+| search H=480 | 2100 | 1400 | 66.7% | [64.6, 68.7] | 16.80 | 5593 | 27.1% | 1.27 |
+
+**配对判决（A 在前）**
+
+| pair | both-win | A-only | B-only | both-lose | Δ | McNemar p | stage-cluster LCB95 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| A: intent-oracle − g11-bare | 539 | 796 | 260 | 505 | **+25.5pp** | 1e-63 | **+20.38pp** |
+| B(H=120): search − intent-oracle | 968 | 430 | 367 | 335 | **+3.0pp** | 0.028 | **+1.00pp** |
+| B(H=240): search − intent-oracle | 978 | 425 | 357 | 340 | **+3.2pp** | 0.017 | **+1.05pp** |
+| B(H=480): search − intent-oracle | 966 | 434 | 369 | 331 | **+3.1pp** | 0.024 | **+0.90pp** |
+| B(H=60): search − intent-oracle | 950 | 412 | 385 | 353 | +1.3pp | 0.36 | −0.62pp |
+| diag: search(H=120) − g11-bare | 571 | 827 | 228 | 474 | +28.5pp | 3e-80 | +22.90pp |
+
+**结论**
+
+1. **A 追平确认**：+25.5pp（700 池是 +28.2pp；新 40 seeds 回归到 25.5 属正常收缩），
+   LCB95 **+20.38pp > 0** ⇒ **P1 确认开线**。
+2. **B 超越确认**：H=120/240/480 均 LCB95 > 0，效应 **+3.0~3.2pp**（比计划预估 0.7–1.6pp
+   更大）；**H=60 不够**（+1.3pp，LCB −0.62）⇒ 搜索/参数化层开，承诺周期至少 120 拍。
+3. 搜索臂的伴随读数一致：基毁率 27% vs 36 E1 的 30.6% / bare 的 55.9%；avgKills 16.84
+   vs 16.48 / 13.00；avgTicks 相当 ⇒ 增益来自“少丢基地 + 多清场”，不是拖时间。
+4. **最弱关仍是 s2033**（search 22–30%、E1 32%、bare 13%）；s2019/s2007 次之。
+5. B 是**选择器上界**（真模拟 8 候选 × H 拍 + 手写窗口分），不是可部署策略；它只证明
+   「option 类选择有 3pp 级 headroom」⇒ P1 的选择层值得训练，搜索/参数化线可开。
+6. H=60 的失败同时说明 B 的效应需要跨过约 2 个 replan 窗（30 tick 的 tagger cadence）才显现。
+
+**实现/产物**（一次性，未入库）：`tools/sim/intent-search-input.ts`（新 policy
+`intent-search`，local-only）；`tools/sim/window-score.ts`（T6 窗口分唯一实现）；
+`tools/sim/m1-eval.ts --search-horizon/--search-every`；产物 `tmp/p2a/summary.md` ·
+`summary.json` · 六个臂的 json/log/html；汇总器 `tmp/p2a_summarize.py`。
+
+---
+
+## §164 P′-1 证据板（700 局池）：A 追平 **+28.2pp**；E1 不是 God 地板；B8/B10 在 g11 上不复现（2026-11-28）
+
+**口径**：classic35 / hard / 3 命 / 0★ / 20 敌 / 36000 拍；seeds 2000000001–2000000020
+（35 关 × 20 = 700），同 (stage,seed) 配对。NN 臂 `opening_connect=true`（训练评估链），
+另加一条 `g11-bare` 对照；m1-eval 臂 `openingConnect=false`（God 不受影响）。
+codeHash `aa8f0cdd…`；g11 sha `0b58484a…`；g7-def sha `cc2d763e…`。
+
+**五基线 + B8/B10**
+
+| arm | n | win | winRate | 95% CI | avgKills | k/1000 | ringKillRate | 基毁率 |
+|---|---:|---:|---:|---|---:|---:|---:|---:|
+| God | 700 | 563 | 80.4% | [77.3, 83.2] | 18.33 | 3.363 | — | 17.0% |
+| intent-oracle（E1） | 700 | 450 | 64.3% | [60.7, 67.8] | 16.51 | 2.926 | — | 31.3% |
+| goal-god | 700 | 0 | 0.0% | [0.0, 0.5] | 0.91 | 0.246 | — | 95.1% |
+| g11-ringkill.it580 | 700 | 278 | 39.7% | [36.2, 43.4] | 13.51 | 2.415 | 21.9% | 54.1% |
+| g11-ringkill.it580（bare） | 700 | 253 | 36.1% | [32.7, 39.8] | 12.92 | 2.297 | 20.8% | 57.0% |
+| g7-def.it120 | 700 | 311 | 44.4% | [40.8, 48.1] | 14.35 | 2.651 | 21.3% | 49.6% |
+| g11 + B8 | 700 | 276 | 39.4% | [35.9, 43.1] | 13.74 | 2.557 | 19.6% | 53.1% |
+| g11 + B10 | 700 | 267 | 38.1% | [34.6, 41.8] | 13.33 | 2.447 | 20.4% | 54.3% |
+
+**四格表 / McNemar**（A 在前）
+
+| pair | both-win | A-only | B-only | both-lose | p |
+|---|---:|---:|---:|---:|---:|
+| God vs intent-oracle | 376 | 187 | 74 | 63 | 1.9e-12 |
+| God vs g11 | 222 | 341 | 56 | 81 | 6.0e-51 |
+| intent-oracle vs g11-bare | 169 | 281 | 84 | 166 | 6.1e-26 |
+| g11(open) vs g11-bare | 216 | 62 | 37 | 385 | 0.0154 |
+| intent-oracle vs g11(open) | 191 | 259 | 87 | 163 | 5.6e-21 |
+| g11 vs g7-def | 155 | 123 | 156 | 266 | 0.0552 |
+| g11 vs B8 | 151 | 127 | 125 | 297 | 0.9498 |
+| g11 vs B10 | 137 | 141 | 130 | 292 | 0.5436 |
+
+**三张附表**
+
+1. **authority-audit**（`bun tools/intent/authority-audit.ts`）：7 个名义意图 → 6 种有效候选集；
+   `HUNT ≡ CRUISE`、`PICKUP ⊂` 其余（除 CLEAR）；名义 2.81 bit/30tick → 有效 2.00 bit/30tick。
+2. **branchCounts（God，3,552,535 label ticks）**：navigate 2,712,619 · powerup 403,494 ·
+   aggressive 171,685 · dodge 113,819 · baseConnectClear 54,779 · t2a 43,417 · defenseIntercept
+   19,951 · baseLaneSeal 16,942 · baseLaneSentry 8,830 · midLaneDefense 3,750 · chokepoint 3,003 ·
+   t8 246；`carvePath/firingLane/midLaneHold/suicideReturn/survive/unifiedCandidates/dead/hold = 0`。
+3. **OTHER**：未知标签只有 `chokepoint` = 3,003 ticks = **0.085%**；shell 0；reflex（dodge）3.2%。
+
+**结论**
+
+1. **A 追平 = +28.2pp**：intent-oracle 64.3% − g11-bare 36.1%（配对 A-only 281 / B-only 84，
+   p=6.1e-26）；用 opening 版 g11 则是 **+24.6pp**。A 显著，P1 开。
+2. **E1 不是 God 地板**：64.3 vs 80.4 = **−16.1pp**，未过 `God−3pp`。E1 只能当下界 /
+   option-only；E2′（P′-3）从「主候选」升级为「补齐这 16pp 的必要路径」。
+3. **goal-god 0.0%**（0/700）⇒ E3 仍排最后。
+4. **B8/B10 在 g11.it580 上无增量**：39.4 / 38.1 vs 39.7（−0.3 / −1.6pp，p=.95 / .54），
+   环内击杀率反而降到 19.6 / 20.4（基线 21.9）⇒ 历史 +16.29 / +13.29pp（ep80）不可外推到
+   当前权重；**不设 interim baseline**，g11 39.7% 保持起跑线。
+5. **opening_connect 本身 +3.6pp**（39.7 vs 36.1，p=.015）⇒ 所有 NN 读数必须带开关标记，
+   不同开关的局不得混池。
+6. **g7-def.it120 比 g11.it580 高 +4.7pp**（p=.055，边缘）；g11 课没有超过自己的起点，
+   与 g11 结课结论一致。
+7. **复现校验**：g11 39.7%（计划基线）· g11 环内 21.9%（§163 报 21.87%）· g7 44.4%
+   （= 44.43 / 44.29）· God 80.4%（§161 报 78.9%）⇒ 工具链口径可信。
+8. **top-1 ≥65%（tagger vs 规则链）未测**：仓库没有该比较的仪器；列为 **P′-4a 前置**，
+   不阻塞 P′-2a / P′-2b。
+
+**产物**（一次性，未入库）：`tmp/p1/board.md` · `board.json` · `authority-audit.json` ·
+`campaign.log`；汇总器 `tmp/p1_summarize.py`；NN 臂驱动 `tmp/p1_nn_eval.py`。
+
+**下一步**：P′-2a A 确认（700 筛查已正 → 2100 确认）；P′-2b0 NN→NN 低层读数；
+P′-3 E2′ 先做 byte-identical 再测能否补上 E1 的 16pp。
+
+---
+
 ## §148 g7-lam98 / g7-hot11 判死（it100）——**λ 与采样密度都不动机制；"守家"在现有 obs/动作下不是可学技能**（2026-11-20）
 
 **背景**：§147 立的两条单旋钮腿各跑到 it101/103（2.16 min/轮，3.6h；5 条 `iter_error` 全在 16:22–16:23
