@@ -158,6 +158,14 @@ const ALLOWLIST: Record<string, { cls: string; why: string }> = {
   _tankCellBuf: { cls: 'B', why: 'tankCellImpl shared Cell buffer' },
   _turnSnapScan: { cls: 'B', why: 'scanAheadImpl out-buffer (§3.2), all fields written pre-read' },
   // ---- C: keyed cache companions (guarding flag IS lifecycle-covered) ----
+  _optionChains: {
+    cls: 'C',
+    why: 'P′-3 E2′ option→subchain memo, rebuilt by rebuildOptionChains() at ctor/reset',
+  },
+  _orderedCandidatesE2: {
+    cls: 'C',
+    why: 'P′-3 E2′ extended pool (ordered + NN_OPTION), rebuilt at ctor/reset',
+  },
   _canMoveResult: { cls: 'C', why: 'bitmask payload of _canMoveComputed' },
   _playerCellCache: { cls: 'C', why: 'payload of _playerCellValid' },
   // A8 (2026-10-21): resolved standable defense cell — flag `_defCellValid` is

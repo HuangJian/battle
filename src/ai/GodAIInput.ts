@@ -20,6 +20,8 @@ import type { ActionIntent } from './god/StrategyPlanner'
 import { makeCandidateVerdict } from './god/ActionCandidates'
 import { thinkImpl, CANDIDATES } from './god/think'
 import { orderedCandidates, type DecisionContext, type Candidate } from './god/DecisionCore'
+import { NN_OPTION, type NNOptionCommand } from './god/NNOption'
+import { INTENT_IDS, candidateOverrideForIntent, type IntentId } from './intent/vocab'
 import {
   DEFAULT_GOD_AI_PARAMS,
   computeStageAdaptedParams,
@@ -243,6 +245,8 @@ const DECISION_STATE_FIELDS = [
   '_suicideStandSuppress',
   '_thinkCounter',
   '_candidateOverride',
+  // P′-3 / E2′：注入的 option 指令（决定后续动作 ⇒ 必须进分支回档）
+  '_optionCmd',
   // 开局清墙 / carve-dig
   '_baseConnectClearActive',
   '_baseConnectClearActiveTicks',
@@ -685,6 +689,22 @@ export class GodAIInput implements InputLike {
   _candidateOverride: ReadonlySet<string> | null = null
 
   /**
+   * P′-3 / E2′: 注入的 option 指令（plan §9.6）。null = 未启用；默认链不受影响。
+   * 只有 `_candidateOverride` 含 `'nnOption'` 时 `NN_OPTION` 才会读它。
+   * reset() 清空；分支回档走 DECISION_STATE_FIELDS（与 `_candidateOverride` 同组）。
+   */
+  _optionCmd: NNOptionCommand | null = null
+
+  /**
+   * P′-3 / E2′: option → 候选子链（每 reset 按 `_orderedCandidates` 预构建一次；
+   * 禁止逐 tick filter/alloc，AGENTS §14.1/14.3）。键 = 8 类意图词表。
+   */
+  _optionChains: Map<IntentId, Candidate[]> = new Map()
+
+  /** P′-3 / E2′: 含 `NN_OPTION` 的候选池；仅 override 含 'nnOption' 时使用。 */
+  _orderedCandidatesE2: Candidate[] = []
+
+  /**
    * Reusable scan results for scanAheadImpl — one buffer per direction index
    * (0=up, 1=down, 2=left, 3=right). Avoids allocating a result object per call.
    *
@@ -1068,6 +1088,7 @@ export class GodAIInput implements InputLike {
     }
     this.params = this._baseParams
     this._orderedCandidates = orderedCandidates(CANDIDATES, this._baseParams.actionWeights)
+    this.rebuildOptionChains()
     // M3: initialize the EnemyModel (active flag resolved in reset() from the
     // stage-adapted params — the base params may not have the mode set).
     this._enemyModel = initEnemyModel(false)
@@ -1190,6 +1211,7 @@ export class GodAIInput implements InputLike {
     this._pressFrenzy = false // §167
     resetIntentTagger(this)
     this._candidateOverride = null // M6：执行器子链 override 每关重置
+    this._optionCmd = null // P′-3：E2′ 注入指令每关重置（调用方在 reset 后再注入）
     // §3.3: stage-scoped cache invalidation — the full registry lives in
     // invalidateStageCaches() above (scan memos + nav/carve/dig/ring/parry/
     // memo/pickup families).
@@ -1314,6 +1336,26 @@ export class GodAIInput implements InputLike {
     // M2: rebuild the candidate chain in effective-weight order from the
     // (possibly stage-adapted) params. Default = M1 chain order.
     this._orderedCandidates = orderedCandidates(CANDIDATES, this.params.actionWeights)
+    this.rebuildOptionChains()
+  }
+
+  /**
+   * P′-3 / E2′：按当前 `_orderedCandidates` 预构建「意图 → 候选子链」。
+   *
+   * 子链 = `candidateOverrideForIntent(intent)` 白名单在**同一有序池**上的 filter
+   * ——与 E1 的 `_candidateOverride` 子集同源、同序，故委托路径逐字节等价。
+   * 只在构造/reset（stage 切换）时调用一次；逐 tick 零分配。
+   */
+  private rebuildOptionChains(): void {
+    this._optionChains.clear()
+    for (const id of INTENT_IDS) {
+      const subset = candidateOverrideForIntent(id)
+      this._optionChains.set(
+        id,
+        subset ? this._orderedCandidates.filter((c) => subset.has(c.id)) : [],
+      )
+    }
+    this._orderedCandidatesE2 = [...this._orderedCandidates, NN_OPTION]
   }
 
   /**

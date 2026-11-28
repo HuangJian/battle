@@ -88,6 +88,8 @@ describe('M1 decision-chain invariants', () => {
       hunt: 200,
       // M3: survive 默认 0 — 不激活（byte-identical）；M4 经 actionWeights 提升。
       survive: 0,
+      // P′-3 / E2′: nnOption 不进默认链（CANDIDATES 不含它），只经 override opt-in。
+      nnOption: 0,
     })
   })
 

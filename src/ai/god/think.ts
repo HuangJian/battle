@@ -16,6 +16,7 @@ import { ALL_DIRS } from '../../utils/direction'
 import { scanAheadImpl, shouldFireInDirImpl } from './FireControl'
 import { turnWillCommit } from './turn-gate'
 import { runChain, type Candidate } from './DecisionCore'
+import { NN_OPTION } from './NNOption'
 import { updateEnemyModel } from './EnemyModel'
 import { superItemPressesImpl } from './SuperItems'
 
@@ -279,7 +280,6 @@ export function thinkImpl(self: GodAIInput): void {
   // undefended (the #1 cause of 330-tick base losses in classic).
   const shielded = (p.shieldTimer ?? 0) > 0
 
-
   // ---- S8: Set aggressive mode (freeze only, NOT shield) ----
   self.aggressive = frozen
 
@@ -472,12 +472,17 @@ export function thinkImpl(self: GodAIInput): void {
   // (intent whitelist) via runChain on the same candidates; a null override
   // keeps the full chain (byte-identical). Fallback to HUNT on total decline.
   const subset = self._candidateOverride
+  // P′-3 / E2′: 只有 override 显式含 'nnOption' 时才用扩展池；默认链仍严格是
+  // `_orderedCandidates`（不含 NN_OPTION）⇒ 无注入的局逐字节不变。
+  const pool =
+    subset !== null && subset.has(NN_OPTION.id)
+      ? self._orderedCandidatesE2
+      : self._orderedCandidates
   if (subset === null) {
-    if (!runChain(self, ctx, self._orderedCandidates)) HUNT.evaluate(self, ctx)
+    if (!runChain(self, ctx, pool)) HUNT.evaluate(self, ctx)
   } else {
-    const active = self._orderedCandidates.filter((c) => subset.has(c.id))
-    if (!runChain(self, ctx, active.length > 0 ? active : self._orderedCandidates))
-      HUNT.evaluate(self, ctx)
+    const active = pool.filter((c) => subset.has(c.id))
+    if (!runChain(self, ctx, active.length > 0 ? active : pool)) HUNT.evaluate(self, ctx)
   }
 
   // §167 / B4: super-item press flags ride the same tick's decision context

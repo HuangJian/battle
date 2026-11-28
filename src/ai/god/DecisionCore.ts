@@ -105,6 +105,10 @@ export type ActionId =
   // Weight 270 > carvePath(250)、< firingLane(300) — 高于普通开路，但低于一切
   // 战斗/道具/瞭望格候选。默认 baseConnectClearMode=0 OFF。
   | 'baseConnectClear'
+  // P′-3 / E2′: 合成 nn-option candidate（plan/nn-hierarchical-options.plan.md §9.6）。
+  // 只经 `_candidateOverride = {'nnOption'}` opt-in，不进默认链（权重 0，且
+  // `CANDIDATES` 不含它）——默认链与 M1 parity 逐字节不变。
+  | 'nnOption'
 
 /**
  * M1 default weights — THE authoritative weight-order record (refactor.trae.md
@@ -161,6 +165,9 @@ export const ACTION_WEIGHTS: Record<ActionId, number> = {
   baseLaneSeal: 542,
   // M4: 统一行动候选 — interceptBase(900) 之下、baseLaneSentry(850) 之上。
   unifiedCandidates: 860,
+  // P′-3 / E2′: 不进默认链（CANDIDATES 不含它；只经 _candidateOverride opt-in）。
+  // 0 = 即使被 actionWeights 误排序也最低；未注入 option 时 evaluate 恒 false。
+  nnOption: 0,
 }
 
 /**
