@@ -74,10 +74,25 @@
 计数代价按门禁自己的口径记账：口径 A 1536 → **1537**、口径 B 1257 → **1276**（该文件带 `.py`
 字面量 ⇒ 整文件计入，属已知限边；19 条全是结构/身份判据，没有运行期出口）。
 
+### 第二刀：it0 基线 → `BaselineEval`（同日）
+
+同一形状再走一遍，验证第一刀的口径能复制：`trainer/loop_baseline.py::TrainingBaseline`（2 方法）→
+`BaselineEval` 对象 + `BaselineHost` Protocol（`args` / `bun` / `traj_dir` / `eval_every`）。
+`_baseline_eval_thread` / `_baseline_landed_wver` 搬进对象（`_thread` / `_landed_wver`），
+组合根留两个壳（`_maybe_dispatch_baseline_eval` / `baseline_eval_state`）。`weights` 是纯判断，
+原 `_baseline_eval_weights` 不再单独留壳：只被 `maybe_dispatch` 与用例调用，用例改问对象。
+
+`TrainingLoop.__mro__` **20 → 19**（含 `object`；`RoundSteps.__bases__` = `(TrainingVolume,
+TrainingDispatch)`）；`loop_baseline.py` 的 `Any` **6 → 2**；G5 基线 `test_loop_core_tail_split` 3 → 2。
+守卫的协作对象表从单个 `COLLABORATOR` 元组扩成 `COLLABORATORS` 字典（类 / 宿主属性 / 协议 /
+方法集 / 归对象的状态 / 壳表），三条形状判据对两刀一视同仁；新增一条「归对象的状态不得在
+组合根的声明段里再出现一份」（双真相）。同名散落账 **147 → 148**（`traj_dir` 现在同时出现在
+两个 Protocol 与宿主 getter —— 同一概念同一个名字，换名反而更差）。
+
 ### 下一刀的口径（照同一形状）
 
-候选按「叶子 + 入边少」排序：`TrainingBaseline`（2 方法，状态 2 格，inbound 1）→
-`TrainingDispatch`（4 方法）→ `TrainingExport`（6 方法，1 条 outbound 到 `_remote_ppo`）。
+候选按「叶子 + 入边少」排序：`TrainingDispatch`（4 方法，inbound 4）→
+`TrainingExport`（6 方法，1 条 outbound 到 `_remote_ppo`，需要先把它变成宿主公开入口）。
 每刀都要：对象拥有自己的状态、宿主读面走 Protocol、组合根只留一行壳、
 守卫从 `is` 同一性改成 AST 形状 —— **不要**把 `self.host._private` 当捷径（那就只是多绕一层）。
 

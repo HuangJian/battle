@@ -227,7 +227,11 @@ BASELINE_CLONE = 18
 #: 凑成 ≥3。与前几格同款：**协议镜像，不是实现**（`def request` 的体只有 `...`；真正的收发仍是
 #: `remote.http._request`，端口只是它的具名入口）。取这个名字是判据本身：调用点写
 #: `WIRE.request(spec)`，改名会让「一次线路往返」这个语义从调用点消失。exact / clone 未动（16 / 17）。
-BASELINE_SAME_NAME_GE3 = 147
+#: **2026-11-28 再抬同名 1 格（147 → 148）的账**：P0-1 第二刀让 `BaselineEval` 与
+#: `IterWorkspace` 都从宿主读 `traj_dir`（各自 Protocol 里是只读 property）——连同
+#: `loop_core.traj_dir` 的 getter 凑成 ≥3。这不是「又复制了一份实现」：三个落点是**同一个概念、
+#: 同一个名字**（换名反而让「本轮目录」在两个协作对象里叫两个东西）。
+BASELINE_SAME_NAME_GE3 = 148
 
 
 def _stems(modules: frozenset[str]) -> frozenset[str]:

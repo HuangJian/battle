@@ -140,8 +140,16 @@ G19 **169 / 63**（累计 384 / 91 → 169 / 63，−215 次 / −28 文件）�
 G5 基线该文件 5 → 3、`test_remote_iter` 1 → 0。守卫从 `TrainingLoop.X is <簇>.X` 换成 AST 形状判据
 （壳恰好一行、`__init__` 恰好一次装配、宿主读面 == 协议声明、对象不调宿主方法），**没放宽**。
 nn 门禁 **7110 passed / 4 skipped**。全文 → `docs/nn/engineering.md` §395。
-**下一刀**：`TrainingBaseline`（2 方法 / 2 格状态 / inbound 1）→ `TrainingDispatch` →
-`TrainingExport`（唯一 outbound 是 `_remote_ppo`，需要先把它变成宿主公开入口）。
+**P0-1 第二刀（同日）**：同一形状再走一遍 —— `trainer/loop_baseline.py::TrainingBaseline`
+→ `BaselineEval` + `BaselineHost`（`args` / `bun` / `traj_dir` / `eval_every`），
+`_thread` / `_landed_wver` 归对象，组合根两个壳（`_maybe_dispatch_baseline_eval` /
+`baseline_eval_state`）；`weights` 不留壳，用例改问对象。MRO **20 → 19**，
+`RoundSteps.__bases__` = `(TrainingVolume, TrainingDispatch)`；`loop_baseline` 的 `Any` 6 → 2；
+G5 `test_loop_core_tail_split` 3 → 2；同名散落 147 → 148（`traj_dir` 两个 Protocol + 宿主 getter）。
+守卫的协作对象表扩成 `COLLABORATORS` 字典，两刀一视同仁，并新增「归对象的状态不得在组合根
+再出现一份」。
+**下一刀**：`TrainingDispatch`（4 方法 / inbound 4）→ `TrainingExport`（唯一 outbound 是
+`_remote_ppo`，需要先把它变成宿主公开入口）。
 
 ## 0. 执行摘要
 

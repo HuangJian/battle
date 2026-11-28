@@ -9,9 +9,9 @@
   - eval_done_keys 双向隔离：基线按 iter==0（排除同 wver 的 it1 行与 B/C source
     行）；A-eval 按 min_iter=1（排除 it0 行、保留缺 iter 旧行与跨 iter 复用）。
   - baseline_summary_landed：同 wver 的 it0 summary 才算落账。
-  - TrainingLoop._baseline_eval_weights 的前置条件（逐条反证）。
-  - TrainingLoop._maybe_dispatch_baseline_eval：落账前每轮派、在飞跳过、
-    复用当轮 eval_gate、带 it=0/baseline=True/独立 iter_id、失败不抛出。
+  - `BaselineEval.weights` 的前置条件（逐条反证）。
+  - `BaselineEval.maybe_dispatch`（组合根 `_maybe_dispatch_baseline_eval` 是一行转发壳）：
+    落账前每轮派、在飞跳过、带 it=0/baseline=True/独立 iter_id、失败不抛出。
 """
 
 from __future__ import annotations
@@ -200,7 +200,7 @@ def test_dispatch_retries_baseline_when_gap_large(tmp_path, monkeypatch) -> None
     # 预算用尽（账本里第 4 条 it0 summary）⇒ 落账停派（旧语义的收敛保证仍在）
     rows = [_summ_row(0, wver, 105, 95) for _ in range(BASELINE_RETRY_MAX + 1)]
     (tmp_path / "eval_log.jsonl").write_text("\n".join(rows) + "\n", encoding="utf-8")
-    loop._baseline_eval_thread = None
+    loop.baseline._thread = None
     loop._maybe_dispatch_baseline_eval(NODES)
     assert len(calls) == 1
     assert loop.baseline_eval_state().landed_wver == wver
@@ -262,33 +262,33 @@ def test_baseline_weights_guards(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     bc = tmp_path / "bc.json"
     bc.write_text("{}", encoding="utf-8")
     ok = _loop(tmp_path, bc=str(bc))
-    got = ok._baseline_eval_weights(NODES)
+    got = ok.baseline.weights(NODES)
     assert got == str(bc)
 
     # 逐条反证：任一前置条件不满足 → None（不派基线，行为与旧版一致）
-    got = _loop(tmp_path, bc=str(bc), mode="intent")._baseline_eval_weights(NODES)
+    got = _loop(tmp_path, bc=str(bc), mode="intent").baseline.weights(NODES)
     assert got is None
-    got = _loop(tmp_path, bc=str(bc), course_obj=None)._baseline_eval_weights(NODES)
+    got = _loop(tmp_path, bc=str(bc), course_obj=None).baseline.weights(NODES)
     assert got is None
-    got = _loop(tmp_path, bc=str(bc), eval_games_per_stage=0)._baseline_eval_weights(NODES)
+    got = _loop(tmp_path, bc=str(bc), eval_games_per_stage=0).baseline.weights(NODES)
     assert got is None
     no_eval = _loop(tmp_path, bc=str(bc))
     no_eval._eval_every = 0  # eval 关闭（--eval-every 0）
-    got = no_eval._baseline_eval_weights(NODES)
+    got = no_eval.baseline.weights(NODES)
     assert got is None
     # nodes=[] / 全 disabled → 纯本地路径本就不派 A-eval，也不派基线
-    got = _loop(tmp_path, bc=str(bc))._baseline_eval_weights(None)
+    got = _loop(tmp_path, bc=str(bc)).baseline.weights(None)
     assert got is None
-    got = _loop(tmp_path, bc=str(bc))._baseline_eval_weights({"nodes": []})
+    got = _loop(tmp_path, bc=str(bc)).baseline.weights({"nodes": []})
     assert got is None
-    got = _loop(tmp_path, bc=str(bc))._baseline_eval_weights(
+    got = _loop(tmp_path, bc=str(bc)).baseline.weights(
         {"nodes": [{"id": "n1", "enabled": False}]}
     )
     assert got is None
     # bc 路径不存在（换机器漏同步）→ 不派，绝不裸奔
-    got = _loop(tmp_path, bc=str(tmp_path / "missing.json"))._baseline_eval_weights(NODES)
+    got = _loop(tmp_path, bc=str(tmp_path / "missing.json")).baseline.weights(NODES)
     assert got is None
-    got = _loop(tmp_path, bc="")._baseline_eval_weights(NODES)
+    got = _loop(tmp_path, bc="").baseline.weights(NODES)
     assert got is None
 
 
@@ -347,10 +347,10 @@ def test_dispatch_retries_until_landed(
     assert len(calls) == 2
 
     # 在飞（线程还活着）→ 跳过
-    loop._baseline_eval_thread = _FakeThread(True)
+    loop.baseline._thread = _FakeThread(True)
     loop._maybe_dispatch_baseline_eval(NODES)
     assert len(calls) == 2
-    loop._baseline_eval_thread = None
+    loop.baseline._thread = None
 
     # 落账（同 wver 的 it0 summary）→ 停止派发（缓存命中，连账都不再扫）
     wver = common.distribution.weights_fingerprint(str(bc))

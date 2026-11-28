@@ -36,6 +36,7 @@ from common.log import log
 from common.paths import REPO_ROOT
 from common.proc import run_capture
 from remote.payload_pack import ShardSegments
+from trainer.loop_baseline import BaselineEval, BaselineEvalView
 from trainer.loop_guards import TrainingGuards
 from trainer.loop_iter_dir import IterWorkspace
 from trainer.loop_lifecycle import TrainingLifecycle
@@ -143,6 +144,7 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         # P0-1（2026-11-28）：第一个**协作对象**。逻辑与它自己的状态住在 `IterWorkspace`，
         # 宿主只提供 `IterWorkspaceHost` 声明的读面（下面那组 property）与两个一行转发壳。
         self.iter_ws = IterWorkspace(self)
+        self.baseline = BaselineEval(self)
 
     def _init_core_state(self, args, ppo_backend, bun, update_kwargs) -> None:
         """构造入参与宿主句柄 / 迭代起点与派发状态 / 轨迹根与 JSONL 落点 / M2 启动清场。"""
@@ -285,11 +287,8 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         # 收拢（_sweep_eval_tail，不站等固定秒数）。
         self._eval_tail: tuple[threading.Thread, float] | None = None
         self._eval_tail_start: float | None = None
-        # it0 基线评估（bc 权重）：rollout 收官后派发、落账前每轮重试（见
-        # _maybe_dispatch_baseline_eval）。线程只作在飞守卫，不参与 join；
-        # _baseline_landed_wver = 已落账基线的权重指纹（命中即不再派）。
-        self._baseline_eval_thread: threading.Thread | None = None
-        self._baseline_landed_wver: str | None = None
+        # it0 基线评估（bc 权重）的在飞线程与已落账指纹已随 `BaselineEval` 搬走
+        # （2026-11-28，P0-1 第二刀）：那只被 `BaselineEval.maybe_dispatch` 读写。
         # EvalBoard idle 窗（2026-09-11 用户）：置位 = 可派 B/C 批；清位 = yield 给 rollout。
         # 与 A-eval 轮解耦——训练不在 rollout/eval 时才领取队列。
         self._eb_window = threading.Event()
@@ -373,6 +372,11 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         return bool(self._node_rollout)
 
     @property
+    def eval_every(self) -> int:
+        """in-loop eval 的间隔轮数（`_setup` 每轮重解；`0` = 关闭）。"""
+        return int(self._eval_every or 0)
+
+    @property
     def extra_wver(self) -> str | None:
         """本轮预采快照 wver（`IterWorkspace` 写；`TrainingVolume` / `TrainingDispatch` 读）。"""
         return self._extra_wver
@@ -393,5 +397,11 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
 
     def _check_quota_incident(self, it: int) -> None:
         self.iter_ws.check_quota(it)
+
+    def _maybe_dispatch_baseline_eval(self, dist_cfg: dict | None) -> None:
+        self.baseline.maybe_dispatch(dist_cfg)
+
+    def baseline_eval_state(self) -> BaselineEvalView:
+        return self.baseline.state()
 
 

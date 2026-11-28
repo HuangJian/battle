@@ -92,7 +92,7 @@
     "trainer/bc_round_job.py": 2,
     "trainer/dispatch_state.py": 3,
     "trainer/eval_dispatch.py": 4,
-    "trainer/loop_baseline.py": 6,
+    "trainer/loop_baseline.py": 2,
     "trainer/loop_core.py": 11,
     "trainer/loop_dispatch.py": 25,
     "trainer/loop_eval.py": 8,
