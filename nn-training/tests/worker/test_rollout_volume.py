@@ -595,6 +595,16 @@ class _StubLoop:
     # `cast(Any, self)` 是必要的：mypy 看不到「桩 self 具备真方法要的全部属性」这件事，
     # 而这些方法确实只碰 args/_traj_dir/_report/_volume_*/_commit_journal（无模型/无 bun）。
 
+
+    #: 宿主持有的两个采集结果槽（P0-1 第五刀前置步：写面只剩 `land_collect`）。
+    _report: dict
+    _stream_meta: dict | None
+
+    def land_collect(self, report: dict, stream_meta: dict | None = None) -> None:
+        """宿主落位：本桩只持有这两个槽，照生产的写法落位。"""
+        self._report = report
+        if stream_meta is not None:
+            self._stream_meta = stream_meta
     def _volume_active(self) -> bool:
         return TrainingLoop._volume_active(cast(Any, self))
 
@@ -745,7 +755,7 @@ class _StubLoop:
             )
         self._traj_dir = self._traj_root / f"it{it}"
         self._traj_dir.mkdir(parents=True, exist_ok=True)
-        self._report: dict = {
+        self._report = {
             "games": 0,
             "winRate": 0.0,
             "outcomes": {},
@@ -754,7 +764,7 @@ class _StubLoop:
             "scoreList": [],
             "dimLists": {},
         }
-        self._stream_meta: dict | None = None
+        self._stream_meta = None
         self._course_fp: str | None = None
         # D14 语义身份（§2/A）：与 `_course_fp` 成对（生产端在 `_setup` 里一起设）
         self._corpus_fp: str = ""

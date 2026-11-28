@@ -121,6 +121,7 @@ SIBLING_DECLARED = ("_volume_capped", "_volume_collected", "_volume_target")
 #: 顶层 import 面的闭集（模块名）。
 TOP_LEVEL_ALLOWED = {
     "__future__",
+    "collections.abc",
     "dataclasses",
     "pathlib",
     "typing",
@@ -397,6 +398,48 @@ def test_log_seam_lives_here_not_in_loop_core(monkeypatch) -> None:
     vol_mod.TrainingVolume._volume_topup(host, 1, None)
     assert seen and "流式路径" in seen[0], seen
     assert core_seen == [], f"补丁打在了旧命名空间上却仍有输出：{core_seen}"
+
+
+def test_report_is_landed_through_the_host_entry() -> None:
+    """★ P0-1 第五刀前置步：`_report` 只有**一个写面**（宿主的 `land_collect`）。
+
+    为什么先做这一步：volume 从混入变成协作对象后，对象不能再直接给 `self._report` 赋值
+    （那是宿主的槽）。把写面先收成具名入口，对象的调用点就与搬家前逐字相同，守卫也能在
+    搬家前先钉住「没有别的路径能改写它」。
+    """
+    from trainer.loop_core import TrainingLoop
+
+    writes = {
+        name: roles["_report"]
+        for name, fn in _methods(VOLUME_PY, "TrainingVolume").items()
+        if (roles := _self_attr_roles(fn)).get("_report")
+    }
+    assert "Store" not in {r for roles in writes.values() for r in roles}, (
+        f"还有方法直接给 self._report 赋值：{sorted(writes)}"
+    )
+    calls = sum(
+        1
+        for fn in _methods(VOLUME_PY, "TrainingVolume").values()
+        for sub in ast.walk(fn)
+        if isinstance(sub, ast.Call)
+        and isinstance(sub.func, ast.Attribute)
+        and sub.func.attr == "land_collect"
+    )
+    assert calls == 6, f"报告落位点从 6 处变了：{calls}（新路径要显式记账）"
+    # 宿主入口确实落位两个槽（读 `land_collect` 的源形状：恰好两次 self.<槽> 赋值）。
+    host = _methods(NN_ROOT / "trainer" / "loop_core.py", "TrainingLoop")["land_collect"]
+    stores = {
+        sub.attr
+        for sub in ast.walk(host)
+        if isinstance(sub, ast.Attribute)
+        and isinstance(sub.ctx, ast.Store)
+        and isinstance(sub.value, ast.Name)
+        and sub.value.id == "self"
+    }
+    assert stores == {"_report", "_stream_meta"}, sorted(stores)
+    # `Dispatcher` 的六格落位也必须走同一个写面（不再各写一份）。
+    disp = (NN_ROOT / "trainer" / "loop_core.py").read_text(encoding="utf-8")
+    assert "self.land_collect(outcome.report, outcome.stream_meta)" in disp
 
 
 def test_unbound_lookup_through_the_composition_class_still_works() -> None:

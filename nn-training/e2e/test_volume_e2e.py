@@ -289,6 +289,16 @@ class _VolAgent(BaseHTTPRequestHandler):
 class _Loop:
     """真 TrainingLoop 方法 + 最小 self（采集侧零桩：真调度器、真账本、真补波）。"""
 
+
+    #: 宿主持有的两个采集结果槽（P0-1 第五刀前置步：写面只剩 `land_collect`）。
+    _report: dict
+    _stream_meta: dict | None
+
+    def land_collect(self, report: dict, stream_meta: dict | None = None) -> None:
+        """宿主落位：本桩只持有这两个槽，照生产的写法落位。"""
+        self._report = report
+        if stream_meta is not None:
+            self._stream_meta = stream_meta
     def _volume_active(self) -> bool:
         return TrainingLoop._volume_active(cast(Any, self))
 
@@ -379,7 +389,7 @@ class _Loop:
         )
         self._traj_dir = traj / f"it{it}"
         self._traj_dir.mkdir(parents=True, exist_ok=True)
-        self._report: dict = {
+        self._report = {
             "games": 0,
             "winRate": 0.0,
             "outcomes": {},
@@ -388,7 +398,7 @@ class _Loop:
             "scoreList": [],
             "dimLists": {},
         }
-        self._stream_meta: dict | None = None
+        self._stream_meta = None
         self._course_fp: str | None = None
         # D14 语义身份（§2/A）：与 `_course_fp` 成对（生产端在 `_setup` 里一起设）
         self._corpus_fp: str = ""

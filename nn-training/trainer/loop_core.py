@@ -488,10 +488,20 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
     def ts_code_view(self) -> TsCodeView:
         return self.exporter.ts_code_view()
 
+    def land_collect(self, report: dict, stream_meta: dict | None = None) -> None:
+        """一轮采集报告落位（`report` / `stream_meta` 的唯一写面；槽位归组合根）。
+
+        `TrainingVolume` 与 `Dispatcher` 都只经这里改写 `_report`（后者另用 `land_rollout`
+        写评估侧四格）——P0-1 第五刀的前置步：把「谁来写这两个槽」从混入的私有赋值
+        收成一个具名宿主入口，后续把 volume 拆成对象时对象只调这个入口。
+        """
+        self._report = report
+        if stream_meta is not None:
+            self._stream_meta = stream_meta
+
     def land_rollout(self, outcome: RolloutOutcome) -> None:
         """一轮采集派发的六个结果落位（`Dispatcher` 的唯一写面；槽位归组合根）。"""
-        self._report = outcome.report
-        self._stream_meta = outcome.stream_meta
+        self.land_collect(outcome.report, outcome.stream_meta)
         self._eval_thread = outcome.eval_thread
         self._eval_gate = outcome.eval_gate
         self._collect_child = outcome.collect_child

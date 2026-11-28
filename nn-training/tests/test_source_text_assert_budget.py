@@ -626,7 +626,11 @@ ROOT = Path(__file__).resolve().parents[1]
 #: `Dispatcher`）把顺序契约的判据从「比 MRO 下标」换成「壳住在 `TrainingLoop.__dict__` 里」，
 #: 并在成员闭集里加了「实现不得住回 `RoundSteps`」一条 —— 两条都是结构判据（被测物是代码长
 #: 什么样：壳多一行逻辑照样能跑）。口径 B 不动。
-BASELINE_FORM = 1539
+#: 2026-11-28 再抬口径 A 到 **1541**（+2，实测）：P0-1 第五刀前置步（`_report` 的唯一写面 =
+#: 宿主的 `land_collect`）在 `tests/trainer/test_loop_volume_split.py` 新增一条 AST 形状判据
+#: （混入里零 Store、落位点恰好 6 处、宿主入口恰好写两个槽、Dispatcher 走同一入口）——
+#: 被测物是「还有没有第二条写路径」，没有运行期出口（第二条写路径照样能跑）。
+BASELINE_FORM = 1541
 BASELINE_SRC = 1278
 
 

@@ -170,6 +170,7 @@ STAYS = (
     "eb_window",
     "eb_thread",
     "payload_parts",
+    "land_collect",
     "land_rollout",
     "_eval_on_round",
     "_evalboard_yield",

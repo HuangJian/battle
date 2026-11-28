@@ -143,6 +143,23 @@ MRO 下标；现在是组合根**类体里的一行壳** —— `TrainingLoop` �
 宿主 getter 之间同名，同一组宿主接口）；口径 A **1537 → 1539**（顺序契约与「实现在 `RoundSteps`
 不得再出现」两条结构判据）；测试删掉 4 条只对「混入簇」成立的用例（CLUSTERS 表退场）。
 
+### 第五刀的前置步：`_report` 只剩一个写面
+
+`TrainingVolume` 是本轮最大的一刀（`loop_volume.py` 1437 行 / 20 方法），它的状态面不只归自己：
+`_report` 被 7 个模块读、`_greedy_plan` / `_greedy_stats` 被 `loop_remote_job` 读写、
+`_volume_stage_stats` 被 `loop_steps` 读。所以先把**写面**收口：`TrainingLoop.land_collect(report,
+stream_meta=None)` 成为 `_report` / `_stream_meta` 的唯一写入口，`TrainingVolume` 的 6 处
+`self._report = …` 全部改成 `self.land_collect(…)`，`Dispatcher.land_rollout` 也把前两格委派给它。
+
+这一步单独成立：搬家前就钉住「没有第二条写路径」，对象的调用点与混入时代逐字相同（下一刀只需
+把 `self.land_collect` 换成 `self._host.land_collect`）。守卫在
+`tests/trainer/test_loop_volume_split.py::test_report_is_landed_through_the_host_entry`：
+混入里零 `Store`、落位点恰好 6 处（新路径要显式记账）、宿主入口恰好写两个槽、`Dispatcher`
+走同一入口。测试桩（`tests/worker/test_rollout_volume.py::_StubLoop` / `e2e/test_volume_e2e.py::_Loop`）
+按宿主 API 补上两行 `land_collect`——它们是「最小宿主」，本就该具备这个面。
+
+口径 A 1539 → **1541**（+2，见 `tests/test_source_text_assert_budget.py` 表头）。
+
 ### 下一刀的口径（照同一形状）
 
 P0-1 的剩余簇见 `python.refactor.md` 的处理状态表：`TrainingVolume`（含 `VolumeView` 读数）是

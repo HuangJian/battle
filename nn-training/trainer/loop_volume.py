@@ -54,6 +54,7 @@ _volume_collect_continuous（VOLUME_RULE_V2 生产路径）──► _dispatch_v
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -384,6 +385,9 @@ class TrainingVolume:
     _extra_wver: Any
     _report: Any
     _stream_meta: Any
+    #: 采集报告的**唯一写面**（组合根上的具名入口，P0-1 第五刀前置步）：本簇不再直接给
+    #: `self._report` 赋值（读仍走声明块；写一律经这里，宿主负责落位）。
+    land_collect: Callable[..., None]
     #: 由 `TrainingSteps` 提供、在本模块里被**调用**的 WAL 句柄（组合实例上动态解析）。
     #: 声明为 `Any` 的理由同 `trainer/loop_remote_push.py`：混入间互调的方法必须在每个文件里类型可见。
     _commit_journal: Any
@@ -739,7 +743,7 @@ class TrainingVolume:
                 f"games={replay.games} → {len(replay_pairs)} 局（同种子流，不重抛硬币）"
             )
             replay_report = self._dispatch_volume_wave(it, replay_pairs, dist_cfg)
-            self._report = combine_reports([self._report, replay_report])
+            self.land_collect(combine_reports([self._report, replay_report]))
         while True:
             wver = common.distribution.weights_fingerprint(self.args.out)
             totals = settled_stage_totals(
@@ -803,7 +807,7 @@ class TrainingVolume:
             )
             wave_report = self._dispatch_volume_wave(it, pairs, dist_cfg)
             # 报告合并（既有多轮聚合口径：combine_reports 吃单轮报告，与远端单局摘要同构）
-            self._report = combine_reports([self._report, wave_report])
+            self.land_collect(combine_reports([self._report, wave_report]))
             self._volume_waves = plan.wave_idx + 1
             journal.finish(
                 WAVE_PHASE,
@@ -848,12 +852,12 @@ class TrainingVolume:
             log("[volume] 流式路径不支持连续配额 v2（保持 stream 老语义）")
             from worker.reports import adopt_volume_report
 
-            self._report = adopt_volume_report(None)
+            self.land_collect(adopt_volume_report(None))
             return
         if int(getattr(args, "collect_only", 0) or 0):
             from worker.reports import adopt_volume_report
 
-            self._report = adopt_volume_report(None)
+            self.land_collect(adopt_volume_report(None))
             return
         from worker.volume_alloc import default_game_caps
         from worker.volume_quota import DEFAULT_MAX_BATCHES, target_per_stage
@@ -1106,7 +1110,7 @@ class TrainingVolume:
                 if st is None or int(st) in stage_set:
                     filtered.append(r)
             disk_reports = filtered
-        self._report = merge_volume_report(combined, disk_reports)
+        self.land_collect(merge_volume_report(combined, disk_reports))
         if self._volume_waves > 0 and self._report.get("pure_collect_sec") is not None:
             log(
                 f"[volume] it{it}: rollout 聚合 batches={self._report.get('rollout_collect_waves', self._volume_waves)} "
@@ -1285,7 +1289,7 @@ class TrainingVolume:
         sampling_report = _brief(self._report)
         greedy_report = _brief(self._greedy_report)
         if self._greedy_report:
-            self._report = combine_reports([self._report, self._greedy_report])
+            self.land_collect(combine_reports([self._report, self._greedy_report]))
         # 全量指标：`transitions_collected` 由 `_volume_collected` 落账（不读 report）。
         # 两边同加才守得住 e2e 的 `report.totalSamples == _volume_collected` 等式。
         if self._volume_collected is not None:
