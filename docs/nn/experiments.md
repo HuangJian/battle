@@ -7,6 +7,73 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 ---
 
+## §169 P′-2b1 executor→executor 单拍 headroom：**动作 0.049 / option 0.039（H=120）**，全层 CI>0（2026-11-28）
+
+**口径**：classic35 / hard / 3 命 / 0★ / 20 敌 / 36000 拍；执行器轨迹 = E2′
+`intent-option`（oracle 全链给 option，exec 走 `nnOption` 委托子链；`replanEvery=30`）；
+V bootstrap 权重 = g11-ringkill.it580（weightsSha `0b58484a…`，与 b0 同源）。采样点 =
+`frame % 10 == 0`，状态分层与配额同 b0。**动作臂**：24 动作（hold2 × move4 × fire3；
+执行器口径 **hold=1 ⇒ moveDir=null 原地不动**），强制拍走 `ForcedTickInput(decideFirst)`
+（inner 决策照常推进，只覆盖对外动作）；**option 臂**：把当前 option 换成 8 类之一并
+保持 H 拍（`execBranch` 从 `st.exec` 恢复、不跑 oracle 重规划），基线 = 保持当前 option。
+每分支 = `cloneWorld` + `IntentOptionProbe.captureDecisionState` 起跑，结束 restore
+（CRN）。self-check：强制实际动作 ≡ 不强制（H 拍后逐字段）—— 全程开启。
+
+**语料（b0 未用过的 seed 段）**：pilot H=60 seed0=1000000031（500 states）；
+confirm H=30 seed0=1000000041（1789 states）、H=120 seed0=1000000044（1774 states）。
+筛查 90% CI / 确认 95% CI（预注册 p2b）。
+
+**pilot（H=60；500 states；90% CI）**
+
+| 层 | n | action headroom | 90% CI | option headroom | option n |
+|---|---:|---:|---|---:|---:|
+| opening_300 | 100 | 0.0215 | [0.0154, 0.0275] | 0.0057 | 68 |
+| base_pressure | 100 | 0.1047 | [0.0500, 0.1593] | 0.1154 | 100 |
+| ring_enemy | 100 | 0.0937 | [0.0644, 0.1231] | 0.0811 | 100 |
+| combat | 100 | 0.0616 | [0.0390, 0.0842] | 0.0373 | 100 |
+| free_nav | 100 | 0.0456 | [0.0317, 0.0595] | 0.0242 | 100 |
+| **overall** | 500 | **0.0654** | [0.0517, 0.0791] | **0.0559** | 468 |
+
+**confirm（95% CI）**
+
+| 层 | H=30 action | 95% CI | H=120 action | 95% CI | H=30 option | H=120 option |
+|---|---:|---|---:|---|---:|---:|
+| opening_300 | 0.0260 | [0.0215, 0.0306] | 0.0197 | [0.0153, 0.0241] | 0.0093 | 0.0170 |
+| base_pressure | 0.0814 | [0.0648, 0.0981] | 0.0761 | [0.0606, 0.0916] | 0.0432 | 0.0697 |
+| ring_enemy | 0.0984 | [0.0693, 0.1275] | 0.0957 | [0.0530, 0.1384] | 0.0507 | 0.0565 |
+| combat | 0.0398 | [0.0303, 0.0493] | 0.0464 | [0.0345, 0.0584] | 0.0150 | 0.0291 |
+| free_nav | 0.0438 | [0.0355, 0.0521] | 0.0331 | [0.0258, 0.0404] | 0.0200 | 0.0275 |
+| **overall** | **0.0531** | [0.0473, 0.0589] | **0.0489** | [0.0425, 0.0554] | **0.0260** | **0.0392** |
+
+- 副读数（raw terminal）几乎为 0：H=30 actionTerminal 0.00126（CI [0.00051, 0.00201]）、
+  H=120 0.00020（CI 跨 0）⇒ H 内极少终局，主读数由 Φ + V bootstrap 承载。
+- `option` 列全部 95% CI > 0（H=30 [0.0210, 0.0309]；H=120 [0.0342, 0.0442]）；
+  n=1677/1662（少数状态尚未提交过 option，跳过）。
+
+**对照 b0（NN 轨迹，§166）**：b0 H=120 overall **0.059**；b1 H=120 action **0.049**
+≈ b0 的 83%。分层形状一致：**base_pressure / ring_enemy 最大**（b1 0.076/0.096，
+b0 0.112/0.091）。⇒ 低层 headroom 不是 NN 轨迹的 artifact，执行器轨迹上同样存在；
+P′-4b 的开门条件（b0/b1 有 headroom）成立。
+
+**边界**
+
+- option 臂的基线是「保持当前 option 到 H 拍」，不是「30 拍后由 oracle 重规划」；
+  它测的是**同状态改 option 的即时价值**，不能与 P′-2a-B 的窗口搜索读数直接相加。
+- option 臂的候选命令一律 `targetKind='none'`（纯委托），不含 P′-2a2 的 break 分支。
+- V 是 NN value 头在执行器状态上的**离分布**估计；主读数用它做 bootstrap，跨层比较
+  仍以同式为准，绝对值不作胜率解释。
+- 执行器轨迹 = option-only E2′；P′-2a2 的 **L3（option+break）**轨迹未测（后验）。
+
+**结论**：① b1 动作/option 两层 headroom 均显著 > 0，低层 residual（P′-4b）立项成立；
+② 最大 headroom 仍在基地压力/环内有敌，与 b0 一致；③ 下一步 = P′-4a（option+pathMode
+选择层）与 P′-4b（单 option residual）二选一/并行，按 plan §9.7 的门。
+
+**复现**：`tmp/p2b1/confirm-{h30,h120}.json` + `pilot-h60.json`（一次性，未入库）；
+工具 = `tools/sim/executor-branch-headroom.ts`；`bun run check` **2924 pass**
+（Campaign 前一次）。
+
+---
+
 ## §168 P′-2a2 修饰维度 headroom：**pathMode=break 独活（+5.2pp，LCB +3.1）**，targetKind/target/param 全砍（2026-11-28）
 
 **口径**：classic35 / hard / 3 命 / 0★ / 20 敌 / 36000 拍；seeds 2000000001–2000000060
