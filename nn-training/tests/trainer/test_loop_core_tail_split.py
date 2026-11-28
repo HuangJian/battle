@@ -8,7 +8,7 @@
 | 新家 | 成员 | 判据（谁调它 / 同源在哪） |
 |---|---|---|
 | `trainer/loop_baseline.py::TrainingBaseline` | `_baseline_eval_weights` · `_maybe_dispatch_baseline_eval` | it0 基线（wver 指纹 + 落地摘）——`step_course_iter` |
-| `trainer/loop_iter_dir.py::TrainingIterDir` | `_prepare_iter_dir` · `_check_quota_incident` | **`self._traj_dir` 里有没有本轮的活**——`step_prepare_iter` / `step_course_iter` |
+| `trainer/loop_iter_dir.py::IterWorkspace` | `prepare` · `check_quota`（组合根留一行转发壳 `_prepare_iter_dir` / `_check_quota_incident`） | **本轮目录里有没有本轮的活**——`step_prepare_iter` / `step_course_iter` |
 | `trainer/loop_dispatch.py::TrainingDispatch` | `_rollout_phase` · `_eval_on_round` · `_evalboard_yield` | **本轮把活派给谁 / 让位给谁**——`step_rollout` / `step_eval_dispatch` / `step_record_iteration` |
 
 组合根余下 **只有** `__init__`（槽位持有者）与 `_run_inspect`（见下）。
@@ -41,8 +41,9 @@ S18/S19 的守卫各自钉过一份（两处逐字重复、会各自漂）⇒ �
 ## 本文件钉住什么
 
 1. 三簇的成员**定义**只在新家（`TrainingLoop` / `RoundSteps` 里零同名定义）；
-2. 接线是**对象级**同一（`TrainingLoop.X is <簇>.X`）；
-3. 组装逐字：`RoundSteps.__bases__` 四件套 + `TrainingLoop.__bases__` 四件套 + **全量 MRO 名单**；
+2. 仍是混入的簇接线是**对象级**同一（`TrainingLoop.X is <簇>.X`）；已改协作对象的簇
+   （`IterWorkspace`，P0-1 第一刀）则由组合根上**恰好一行**的转发壳委派，装配在 `__init__`；
+3. 组装逐字：`RoundSteps.__bases__` + `TrainingLoop.__bases__` 四件套 + **全量 MRO 名单**；
 4. 组合根的方法闭集**恰好** `{__init__, _run_inspect}`；
 5. 三簇的**借用声明**闭集 = 派生集（同 `trainer/loop_volume.py` 的约定），且类体零带值槽位；
 6. **入边闭集**（谁以 `self.` 调本簇成员）+ **出边为空**（三簇互不调兄弟方法）
@@ -73,9 +74,14 @@ CLUSTERS = {
         "TrainingBaseline",
         ("_baseline_eval_weights", "_maybe_dispatch_baseline_eval", "baseline_eval_state"),
     ),
-    "trainer/loop_iter_dir.py": ("TrainingIterDir", ("_check_quota_incident", "_prepare_iter_dir")),
     "trainer/loop_dispatch.py": ("TrainingDispatch", ("_eval_on_round", "_evalboard_yield", "_rollout_phase", "_finalize_returned_shards")),
 }
+
+#: 已改成**协作对象**的一簇（2026-11-28，P0-1 第一刀）：模块 → (类名, 公开方法闭集)。
+#: 逻辑与状态都在对象里；组合根只留一行转发壳，装配在 `TrainingLoop.__init__`。
+COLLABORATOR = ("trainer/loop_iter_dir.py", "IterWorkspace", ("check_quota", "prepare"))
+#: 组合根的转发壳：壳名 → 协作对象的方法名（壳体必须**恰好**一行委派）。
+SHELLS = {"_check_quota_incident": "check_quota", "_prepare_iter_dir": "prepare"}
 
 #: 组合根**只许**留这些成员：`__init__` 与五个**纯声明段**（`_init_*` 只做 `self.*` 赋值，
 #: 2026-11-27 §385 按声明族切开）；`_run_inspect` 是结构性例外。
@@ -87,13 +93,24 @@ STAYS = (
     "_init_remote_state",
     "_init_eval_state",
     "_init_ledger_state",
+    # P0-1（2026-11-28）：协作对象 `IterWorkspace` 的宿主读面（property，全部是**活**读数）
+    # 与两个**零逻辑**转发壳（ADT 由 `test_shells_delegate_to_the_collaborator` 钉住）。
+    "traj_dir",
+    "course_fp",
+    "corpus_fp",
+    "state_init",
+    "node_rollout",
+    "extra_wver",
+    "_prepare_iter_dir",
+    "_check_quota_incident",
 )
 
 #: 组装（本文件是这两条的唯一所有者）：`RoundSteps` 的基类元组与全量 MRO 名单。
 #: 2026-09-25（S4 第二十一刀）：`TrainingSteps` 末位追加 `TrainingExport` ⇒ 全量 MRO 名单里
 #: 在 `TrainingEval` 之后插入一项（`TrainingSteps.__bases__` 那三处断言由各刀的守卫自己演进——
 #: 见 `tests/trainer/test_loop_transport_split.py` / `test_loop_eval_split.py` / `test_loop_lifecycle_split.py`）。
-ROUND_STEPS_BASES = ("TrainingVolume", "TrainingBaseline", "TrainingIterDir", "TrainingDispatch")
+#: P0-1 第一刀（2026-11-28）：`TrainingIterDir` 不再是基类 ⇒ `IterWorkspace` 从这里消失。
+ROUND_STEPS_BASES = ("TrainingVolume", "TrainingBaseline", "TrainingDispatch")
 #: `TrainingLoop` 的**全量 MRO 名单**（本文件是这份名单的**唯一所有者**；S18/S19/S20 那几处
 #: 只钉相对位置，避开同一份名单三处各自漂）。S4 第二十二刀把 `TrainingRemote` 变成组合根
 #: （`Push ← Job ← {Fail, Job} ← Drive`）⇒ 四个新混入插在 `TrainingRemote` 之后、`TrainingEval` 之前。
@@ -102,7 +119,6 @@ MRO_NAMES = [
     "RoundSteps",
     "TrainingVolume",
     "TrainingBaseline",
-    "TrainingIterDir",
     "TrainingDispatch",
     "TrainingSteps",
     "TrainingRemote",
@@ -138,14 +154,11 @@ INBOUND_CALLS = {
 #: 槽位读者闭集（S4 第十九刀那条表移交过来的）：槽位 → **本刀三簇里**的读者。
 #: 写手另有所有权断言（`test_slot_writer_is_unique`：赋值点只许在 `loop_lifecycle._setup_common`）。
 SLOT_READERS = {
-    "_course_fp": {
-        "trainer/loop_iter_dir.py": "_prepare_iter_dir",
-        "trainer/loop_dispatch.py": "_rollout_phase",
-    },
-    "_corpus_fp": {
-        "trainer/loop_iter_dir.py": "_prepare_iter_dir",
-        "trainer/loop_dispatch.py": "_rollout_phase",
-    },
+    # P0-1 第一刀：`IterWorkspace` 经宿主读面 `host.course_fp` / `host.corpus_fp` 取值
+    # （协议声明，见 `test_collaborator_host_surface_is_declared`）⇒ 直接 `self._course_fp`
+    # 的读者只剩派发簇这一处。
+    "_course_fp": {"trainer/loop_dispatch.py": "_rollout_phase"},
+    "_corpus_fp": {"trainer/loop_dispatch.py": "_rollout_phase"},
 }
 
 #: 顶层 import 闭集（非 stdlib）：本模块不许长出重依赖。
@@ -300,22 +313,124 @@ def test_members_live_in_the_new_homes_only() -> None:
     for _, members in CLUSTERS.values():
         assert sorted(set(members) & core) == []
         assert sorted(set(members) & steps) == []
+    # 协作对象（P0-1）：实现只在对象里，壳只在组合根上，两边不重叠。
+    rel, cls, members = COLLABORATOR
+    home = set(_methods(NN_ROOT / rel, cls))
+    assert set(members) <= home, f"{rel}: 少了 {sorted(set(members) - home)}"
+    assert sorted(set(members) & core) == [], "协作对象的方法不许在组合根再定义一份"
+    assert sorted(set(SHELLS) & home) == [], "转发壳只许住组合根"
+    assert sorted(set(SHELLS) - core) == [], f"组合根缺壳：{sorted(set(SHELLS) - core)}"
 
 
 def test_wiring_is_object_identity() -> None:
-    """`TrainingLoop.X is <簇>.X`（同一个函数对象，不是同名副本）。"""
+    """仍是混入的两簇：`TrainingLoop.X is <簇>.X`（同一个函数对象，不是同名副本）。"""
     import trainer.loop_baseline as bl
     import trainer.loop_core as core_mod
     import trainer.loop_dispatch as dp
-    import trainer.loop_iter_dir as lid
 
-    homes = {"trainer/loop_baseline.py": bl, "trainer/loop_iter_dir.py": lid, "trainer/loop_dispatch.py": dp}
+    homes = {"trainer/loop_baseline.py": bl, "trainer/loop_dispatch.py": dp}
     for rel, (cls, members) in CLUSTERS.items():
         home = getattr(homes[rel], cls)
         for name in members:
             got = getattr(core_mod.TrainingLoop, name)
             assert got is getattr(home, name), name
             assert got.__module__ == rel[: -len(".py")].replace("/", "."), name
+
+
+def _host_reads(path: Path, cls_name: str) -> set[str]:
+    """协作对象经 `self._host.<name>` 触达的宿主名（读 + 写都算）。"""
+    out: set[str] = set()
+    for node in _methods(path, cls_name).values():
+        for n in ast.walk(node):
+            if (
+                isinstance(n, ast.Attribute)
+                and isinstance(n.value, ast.Attribute)
+                and n.value.attr == "_host"
+                and isinstance(n.value.value, ast.Name)
+                and n.value.value.id == "self"
+            ):
+                out.add(n.attr)
+    return out
+
+
+def test_shells_delegate_to_the_collaborator() -> None:
+    """协作对象：组装在 `__init__`，组合根上的壳**恰好一行**委派（加逻辑就红）。"""
+    from importlib import import_module
+
+    import trainer.loop_iter_dir as lid
+
+    rel, cls, members = COLLABORATOR
+    assert getattr(lid, cls) is getattr(import_module(rel[: -len(".py")].replace("/", ".")), cls)
+    shells = _methods(CORE_PY, "TrainingLoop")
+    for shell, target in SHELLS.items():
+        body = [n for n in shells[shell].body if not isinstance(n, ast.Expr) or not isinstance(n.value, ast.Constant)]
+        assert len(body) == 1 and isinstance(body[0], ast.Expr), f"{shell} 的壳体不是单条语句"
+        call = body[0].value
+        assert isinstance(call, ast.Call), f"{shell} 的壳体不是调用"
+        fn = call.func
+        assert isinstance(fn, ast.Attribute) and fn.attr == target, f"{shell} 没委派到 {target}"
+        recv = fn.value
+        assert (
+            isinstance(recv, ast.Attribute)
+            and recv.attr == "iter_ws"
+            and isinstance(recv.value, ast.Name)
+            and recv.value.id == "self"
+        ), f"{shell} 的接收者不是 self.iter_ws"
+    asm = [
+        n
+        for n in shells["__init__"].body
+        if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Attribute) and t.attr == "iter_ws" for t in n.targets)
+    ]
+    assert len(asm) == 1, "协作对象不在 __init__ 里装配（或装配了两次）"
+    val = asm[0].value
+    assert isinstance(val, ast.Call) and isinstance(val.func, ast.Name) and val.func.id == cls
+    assert len(val.args) == 1 and isinstance(val.args[0], ast.Name) and val.args[0].id == "self"
+
+
+def test_collaborator_host_surface_is_declared() -> None:
+    """协作对象的宿主读面 = `IterWorkspaceHost` 的声明集；自己的状态只在自己的 `__init__`。"""
+    import trainer.loop_iter_dir as lid
+    from trainer.loop_core import TrainingLoop
+
+    rel, cls, _ = COLLABORATOR
+    path = NN_ROOT / rel
+    proto = lid.IterWorkspaceHost
+    declared = set(proto.__annotations__) | {
+        n for n, v in vars(proto).items() if isinstance(v, property)
+    }
+    assert _host_reads(path, cls) == declared, sorted(_host_reads(path, cls) ^ declared)
+    # 自己的状态：`__init__` 只赋 `_host` + 本簇槽位；其余一个不带。
+    owned = {
+        t.attr
+        for node in _methods(path, cls)["__init__"].body
+        if isinstance(node, ast.Assign)
+        for t in node.targets
+        if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) and t.value.id == "self"
+    }
+    assert owned == {"_host", "_zero_shard_streak"}, sorted(owned)
+    # 宿主侧：每个声明名都得是**活**的读面（property），不是 `__init__` 里的副本。
+    for name in declared - {"args"}:
+        assert isinstance(getattr(TrainingLoop, name, None), property), name
+    assert "_zero_shard_streak" not in _self_slots(CORE_PY, "TrainingLoop")["_init_ledger_state"], (
+        "配额计数应归 IterWorkspace；组合根又写了一份就是双真相"
+    )
+
+
+def test_collaborator_calls_no_sibling_method() -> None:
+    """协作对象只读宿主**数据**：不调宿主方法（协议里没有方法 ⇒ AST 里也不许有）。"""
+    rel, cls, members = COLLABORATOR
+    path = NN_ROOT / rel
+    for name in members:
+        called = {
+            n.func.attr
+            for n in ast.walk(_methods(path, cls)[name])
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and isinstance(n.func.value, ast.Attribute)
+            and n.func.value.attr == "_host"
+        }
+        assert called == set(), f"{name} 调了宿主方法 {sorted(called)}"
 
 
 def test_composition_is_exact() -> None:
@@ -375,6 +490,8 @@ def test_inbound_hands_closed_set() -> None:
     calls = {p.name: _self_call_counts(p, only) for p in files}
     defined = {p.name: _defined_names(p, only) for p in files}
     owners = {m: rel.split("/")[-1] for rel, (_, members) in CLUSTERS.items() for m in members}
+    # P0-1：两个壳的定义面在组合根（实现已在协作对象里）。
+    owners.update({shell: CORE_PY.name for shell in SHELLS})
     for member, want in INBOUND_CALLS.items():
         got = {name: c[member] for name, c in calls.items() if member in c}
         assert got == want, f"{member} 的入边变了：{got}"
@@ -436,10 +553,9 @@ def test_top_level_imports_closed_no_reverse_edges() -> None:
 # ─────────────────────────────── ★ 功能性 ───────────────────────────────
 
 
-def test_quota_incident_runs_from_the_new_home(tmp_path, monkeypatch) -> None:
-    """★ `_check_quota_incident` 真跑：`log` seam 在**本模块**（打旧家收不到）。"""
+def test_quota_incident_runs_from_the_collaborator(tmp_path, monkeypatch) -> None:
+    """★ `IterWorkspace.check_quota` 真跑：`log` seam 在**本模块**（打旧家收不到）。"""
     import types
-    from typing import Any, cast
 
     import trainer.loop_core as core_mod
     import trainer.loop_iter_dir as lid
@@ -449,24 +565,29 @@ def test_quota_incident_runs_from_the_new_home(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(lid, "log", lambda m: seen.append(str(m)))
     monkeypatch.setattr(core_mod, "log", lambda m: core_seen.append(str(m)))  # 旧家：收不到
 
-    def _stub(node_rollout: bool) -> Any:
+    def _host(node_rollout: bool) -> types.SimpleNamespace:
         return types.SimpleNamespace(
-            _traj_dir=tmp_path, _node_rollout=node_rollout, _zero_shard_streak=0,
+            traj_dir=tmp_path,
+            node_rollout=node_rollout,
+            extra_wver=None,
+            course_fp=None,
+            corpus_fp="",
+            state_init=False,
             args=types.SimpleNamespace(course_name="probe"),
         )
 
-    obj = _stub(False)
-    cast(Any, lid.TrainingIterDir._check_quota_incident)(obj, 7)  # 第 1 轮：零 shard，计数 1
-    assert obj._zero_shard_streak == 1
-    cast(Any, lid.TrainingIterDir._check_quota_incident)(obj, 8)  # 第 2 轮：响亮告警
-    assert obj._zero_shard_streak == 2
+    ws = lid.IterWorkspace(_host(False))
+    ws.check_quota(7)  # 第 1 轮：零 shard，计数 1
+    assert ws.quota_state().zero_shard_streak == 1
+    ws.check_quota(8)  # 第 2 轮：响亮告警
+    assert ws.quota_state().zero_shard_streak == 2
     assert any("quota" in m for m in seen), seen
     assert core_seen == [], "打 trainer.loop_core.log 竟收到了——seam 的落点不对"
     # 上云轮：本地零 shard 是**预期** ⇒ 不喊、计数归零
-    node = _stub(True)
+    node = lid.IterWorkspace(_host(True))
     node._zero_shard_streak = 5
-    cast(Any, lid.TrainingIterDir._check_quota_incident)(node, 9)
-    assert node._zero_shard_streak == 0
+    node.check_quota(9)
+    assert node.quota_state().zero_shard_streak == 0
     assert not any("quota" in m for m in seen[1:])
 
 

@@ -131,6 +131,18 @@ G19 **169 / 63**（累计 384 / 91 → 169 / 63，−215 次 / −28 文件）�
 `test_ppo_backend_switch` 9 · `test_offline_bc_course` / `test_loop_park` 7 · …）。
 全文 → `docs/nn/engineering.md` §389 / §391 / §392 / §393 / §394。
 
+**P0-1 第一刀（同日，混入 → 协作对象）**：`trainer/loop_iter_dir.py::TrainingIterDir`（`RoundSteps`
+第三个基类，2 方法）→ `IterWorkspace` 对象 + `IterWorkspaceHost` Protocol。状态归对象
+（`_zero_shard_streak` 搬出组合根 `__init__`）、宿主读面全走 property（`traj_dir` / `course_fp` /
+`corpus_fp` / `state_init` / `node_rollout` / `extra_wver`）、组合根只留两个**一行**转发壳
+（`_prepare_iter_dir` / `_check_quota_incident`），轮内调用点与 patch 点不动。`TrainingLoop.__mro__`
+**21 → 20**，`RoundSteps.__bases__` 四件套 → 三件套；`loop_iter_dir` 的 `Any` **7 → 1**；
+G5 基线该文件 5 → 3、`test_remote_iter` 1 → 0。守卫从 `TrainingLoop.X is <簇>.X` 换成 AST 形状判据
+（壳恰好一行、`__init__` 恰好一次装配、宿主读面 == 协议声明、对象不调宿主方法），**没放宽**。
+nn 门禁 **7110 passed / 4 skipped**。全文 → `docs/nn/engineering.md` §395。
+**下一刀**：`TrainingBaseline`（2 方法 / 2 格状态 / inbound 1）→ `TrainingDispatch` →
+`TrainingExport`（唯一 outbound 是 `_remote_ppo`，需要先把它变成宿主公开入口）。
+
 ## 0. 执行摘要
 
 ### 0.1 一句话结论

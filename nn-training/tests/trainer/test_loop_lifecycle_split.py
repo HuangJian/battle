@@ -104,8 +104,9 @@ OUTBOUND_OWNERS = {
 }
 
 #: 槽位写手：本模块**写**的槽位（跨模块手，必须显式登记）。
-#: 读者侧（`_prepare_iter_dir` / `_rollout_phase`）在 S4 第二十刀随它们搬出了旧家 ⇒ 那条
-#: 闭集表归 `test_loop_core_tail_split.py`；本文件只钉写手 + 「旧家不再有读者」。
+#: 读者侧（`IterWorkspace.prepare` / `_rollout_phase`）在 S4 第二十刀与 2026-11-28 的 P0-1
+#: 第一刀后都不在旧家 ⇒ 那条闭集表归 `test_loop_core_tail_split.py`；本文件钉写手 +
+#: 「旧家只剩协作对象那一扇**具名**读面」（property getter，见下）。
 SLOT_HANDS_WRITTEN_BY = {
     "_setup_common": {"_course_fp", "_corpus_fp", "_state_init"},
 }
@@ -378,7 +379,10 @@ def test_slot_hands_closed_set() -> None:
         assert got == slots, f"{writer} 不再写 {sorted(slots - got)}"
     for slot in SLOT_HANDS_WRITTEN_BY["_setup_common"]:
         readers = {m for m, names in core_slots.items() if slot in names}
-        assert readers == set(), f"旧家仍有 {slot} 的读者：{sorted(readers)}"
+        # P0-1 第一刀（2026-11-28）：组合根留了一扇**具名**读面给 `IterWorkspace`——
+        # `course_fp` / `corpus_fp` / `state_init` 三个 property getter，各自只读同名私有槽位。
+        # 除它之外不许再有人伸手（多一个读者 = 又回到「谁都在读 self._x」）。
+        assert readers == {slot.lstrip("_")}, f"{slot} 的读者变了：{sorted(readers)}"
 
 
 def test_top_level_imports_closed_no_reverse_edges() -> None:

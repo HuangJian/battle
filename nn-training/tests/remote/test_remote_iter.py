@@ -2222,37 +2222,34 @@ def test_iter_stats_and_quota_check_skip_on_node_rollout(
 
 def test_quota_incident_not_triggered_on_node_rollout(tmp_path: Path, monkeypatch) -> None:
     from trainer import loop_iter_dir as lid
-    from trainer.loop_core import TrainingLoop
 
     msgs: list[str] = []
-    # `_check_quota_incident` 自 S4 第二十刀起住 `trainer/loop_iter_dir.py`——`log` 是它**自己模块**
+    # `check_quota` 自 2026-11-28（P0-1）起住在协作对象 `IterWorkspace`——`log` 是**本模块**
     # 的全局，打 `trainer.loop_core.log` 会变成**静默空操作**（本仓撞过多次的同族陷阱）。
     monkeypatch.setattr(lid, "log", lambda m: msgs.append(m))
-    args = SimpleNamespace(course_name="c4")
-    # 被测方法只碰这三个属性 + args ⇒ 用 cast 声明「这是测试替身」
-    # （照 test_remote_degrade.py 的 stub 口径，不构造真 TrainingLoop 的 torch 栈）。
+    # 被测对象只读宿主这几个声明面 ⇒ 用 SimpleNamespace 当宿主（不构造真 TrainingLoop 的 torch 栈）。
 
-    def _stub(node_rollout: bool) -> TrainingLoop:
-        return cast(
-            TrainingLoop,
-            SimpleNamespace(
-                _traj_dir=tmp_path,
-                _node_rollout=node_rollout,
-                _zero_shard_streak=0,
-                args=args,
-            ),
+    def _host(node_rollout: bool) -> SimpleNamespace:
+        return SimpleNamespace(
+            traj_dir=tmp_path,
+            node_rollout=node_rollout,
+            extra_wver=None,
+            course_fp=None,
+            corpus_fp="",
+            state_init=False,
+            args=SimpleNamespace(course_name="c4"),
         )
 
     # 上云轮：本地零 shard 是**预期**（采集在节点），连续三轮也不该喊配额事故
-    node = _stub(True)
+    node = lid.IterWorkspace(_host(True))
     for it in (1, 2, 3):
-        TrainingLoop._check_quota_incident(node, it)
-    assert msgs == [] and node._zero_shard_streak == 0
+        node.check_quota(it)
+    assert msgs == [] and node.quota_state().zero_shard_streak == 0
     # 对照：本机轮行为逐字不变（连续 2 轮零 shard → 响亮告警）
-    local = _stub(False)
-    TrainingLoop._check_quota_incident(local, 1)
+    local = lid.IterWorkspace(_host(False))
+    local.check_quota(1)
     assert msgs == []
-    TrainingLoop._check_quota_incident(local, 2)
+    local.check_quota(2)
     assert any("连续 2 轮零 shard" in m for m in msgs), msgs
 
 

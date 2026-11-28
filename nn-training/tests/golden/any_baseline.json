@@ -99,7 +99,7 @@
     "trainer/loop_export.py": 11,
     "trainer/loop_guards.py": 12,
     "trainer/loop_hold.py": 10,
-    "trainer/loop_iter_dir.py": 7,
+    "trainer/loop_iter_dir.py": 1,
     "trainer/loop_lifecycle.py": 47,
     "trainer/loop_plan.py": 1,
     "trainer/loop_remote_fail.py": 1,

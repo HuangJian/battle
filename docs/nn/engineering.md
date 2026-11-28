@@ -29,6 +29,60 @@
 
 ---
 
+## §395 P0-1 第一刀：混入组合开始让位给协作对象（`IterWorkspace`，2026-11-28）
+
+`python.refactor.md` §P0-1 的病灶是「12 个混入 + 全靠 `__init__` 里那几十行赋值」：改 `_prepare_iter_dir`
+要读遍八个文件才知道 `self._traj_dir` 谁在写。B7（`_HubQueue`）已给出可复用的手法——
+**先切一个域成真对象，混入文件保留为一行的转发壳，测试语义不动**。本节是 `TrainingLoop` 上的第一刀。
+
+### 切了什么
+
+`trainer/loop_iter_dir.py::TrainingIterDir`（`RoundSteps` 的第三个基类，2 方法）→
+`IterWorkspace` **协作对象** + `IterWorkspaceHost` **Protocol**：
+
+* **状态归自己**：`_zero_shard_streak` 从 `loop_core._init_ledger_state` 搬进对象的 `__init__`；
+* **依赖有声明**：宿主必须提供的读面逐项列在 Protocol（`args` / `traj_dir` / `course_fp` /
+  `corpus_fp` / `state_init` / `node_rollout` / `extra_wver`），其中除 `args` 与可写的
+  `extra_wver` 外全是 **property**——`_traj_dir` 每轮重指，`__init__` 里拷一份就会读到上一轮的值；
+* **组装一处**：`TrainingLoop.__init__` 末尾 `self.iter_ws = IterWorkspace(self)`；
+* **壳只留一行**：`_prepare_iter_dir` / `_check_quota_incident` 在组合根上是
+  `self.iter_ws.prepare(it)` / `self.iter_ws.check_quota(it)`，轮内步骤与既有 patch 点不动；
+* **公共读数**：`quota_state()`（`QuotaView.zero_shard_streak`）替掉了用例里对 `_zero_shard_streak`
+  的白盒读——G5 基线 `test_loop_core_tail_split` 5 → **3**、`test_remote_iter` 1 → **0**。
+
+`extra_wver` 刻意**不**搬：`TrainingVolume` / `TrainingDispatch` 也读它，属跨簇宿主状态；
+对象经 `host.extra_wver`（property setter）写回，所有权仍在组合根。
+
+### 量到的结果
+
+* `TrainingLoop.__mro__` **21 → 20**（含 `object`；`TrainingIterDir` 出列），`RoundSteps.__bases__`
+  四件套 → 三件套；
+* `trainer/loop_iter_dir.py` **96 → 155 行**（对象 + 协议 + 读数；逻辑一个字符没改），`loop_core`
+  334 → 397（6 个读面 property + 2 个壳 + 注释）；
+* G14 `Any`：`loop_iter_dir.py` 7 → **1**（原声明块的借用槽全部换成 Protocol 的具体形状）；
+* nn python 门禁 **7110 passed / 4 skipped**，ruff / mypy 绿。
+
+### 守卫怎么演进（不是放宽）
+
+`test_loop_core_tail_split.py` 原先把三簇钉成「`TrainingLoop.X is <簇>.X`」。协作对象不能那样钉
+（组合根上是壳，不是同一个函数对象），于是换成**同强度**的结构判据：
+`self.iter_ws.<m>(…)` 恰好一条语句、`__init__` 里恰好一次装配且参数是 `self`、
+宿主读面集合 == Protocol 声明集、`__init__` 只赋 `_host` + 本簇槽位、
+协作对象不调宿主方法、壳名不许在对象里再定义一份。`test_loop_lifecycle_split` 的
+「旧家没有槽位读者」也改成「只剩同名 property getter 这一个具名读者」。
+
+计数代价按门禁自己的口径记账：口径 A 1536 → **1537**、口径 B 1257 → **1276**（该文件带 `.py`
+字面量 ⇒ 整文件计入，属已知限边；19 条全是结构/身份判据，没有运行期出口）。
+
+### 下一刀的口径（照同一形状）
+
+候选按「叶子 + 入边少」排序：`TrainingBaseline`（2 方法，状态 2 格，inbound 1）→
+`TrainingDispatch`（4 方法）→ `TrainingExport`（6 方法，1 条 outbound 到 `_remote_ppo`）。
+每刀都要：对象拥有自己的状态、宿主读面走 Protocol、组合根只留一行壳、
+守卫从 `is` 同一性改成 AST 形状 —— **不要**把 `self.host._private` 当捷径（那就只是多绕一层）。
+
+---
+
 ## §394 P0-8 第六代：设备→主机取回端口（`worker/ppo/common.py::D2HPorts`，2026-11-28）
 
 `test_to_cpu_batch` 的 9 处私有打桩里 8 处是「取回路径」的两步（`_xla_fetch_cat` ×5 ·

@@ -66,7 +66,7 @@ biz/<mod>.py  ⇔  <旧 rl 树里不属于 TRAINER_ORCHESTRATION 的模块>
 | | `loop_eval` | `TrainingEval` mixin（in-loop 评估链：派发 / 尾巴收拢 / join / drain） |
 | | `loop_dispatch` | `TrainingDispatch` mixin（采集三路 / A-eval 稀疏化 / EvalBoard 关窗） |
 | | `loop_baseline` | `TrainingBaseline` mixin（it0 基线评估：指纹 + 落地摘 → 派/不派） |
-| | `loop_iter_dir` | `TrainingIterDir` mixin（本轮目录续跑保留/重建 + 零 shard 配额告警） |
+| | `loop_iter_dir` | `IterWorkspace` 协作对象（本轮目录续跑保留/重建 + 零 shard 配额告警；宿主读面 = `IterWorkspaceHost`） |
 | **批处理（B 层）** | `batch_eval` | 批评估**门面**（`BatchEvalRunner` 的公开面） |
 | | `batch_plan` | 批语料规划 + 瞬时判据的薄转发（409 自愈的 B 层落点） |
 | | `batch_runner` | `BatchEvalRunner` / `dispatch_batch_bg`（执行面） |

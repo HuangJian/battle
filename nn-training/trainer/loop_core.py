@@ -8,11 +8,16 @@
 
 
 MRO（组合根，全仓唯一被实例化的类）：RoundSteps（轮内 13 步；基类 = TrainingVolume
-动态采集编排 + TrainingBaseline it0 基线评估 + TrainingIterDir 本轮目录与产出健康 +
-TrainingDispatch 本轮派发与让位）→ TrainingSteps（结算/导出/落账；基类 = TrainingRemote
-远端 PPO 腿 + TrainingEval in-loop 评估链）→ TrainingGuards（熔断/止损/轮转）→
-TrainingLifecycle（主循环骨架）→ 本类（__init__ + _run_inspect）。
+动态采集编排 + TrainingBaseline it0 基线评估 + TrainingDispatch 本轮派发与让位）→
+TrainingSteps（结算/导出/落账；基类 = TrainingRemote 远端 PPO 腿 + TrainingEval in-loop
+评估链）→ TrainingGuards（熔断/止损/轮转）→ TrainingLifecycle（主循环骨架）→
+本类（__init__ + _run_inspect + 协作对象读面/转发壳）。
 mixin 方法以 self.* 共享同一实例状态；**槽位声明全在 `__init__`**，各 mixin 只赋值/读取。
+
+P0-1（2026-11-28，第一刀）：混入组合开始让位给**协作对象**。第一个搬走的是
+`trainer/loop_iter_dir.py::IterWorkspace`（本轮目录与产出健康）——它自己的状态住对象里，
+宿主只按 `IterWorkspaceHost` 暴露活读数（property），组合根留两个**一行**转发壳。
+其余簇（基线 / 派发 / 远端腿 / 评估 / 出包 / 采集 / 骨架 / 护栏）仍是混入，逐步迁移。
 
 
 重构纪律：控制流与日志逐字节沿用旧 run_training 内联实现——每段提取为私有
@@ -32,6 +37,7 @@ from common.paths import REPO_ROOT
 from common.proc import run_capture
 from remote.payload_pack import ShardSegments
 from trainer.loop_guards import TrainingGuards
+from trainer.loop_iter_dir import IterWorkspace
 from trainer.loop_lifecycle import TrainingLifecycle
 from trainer.loop_round_steps import RoundSteps
 from trainer.loop_steps import TrainingSteps
@@ -134,6 +140,9 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         self._init_remote_state()
         self._init_eval_state()
         self._init_ledger_state()
+        # P0-1（2026-11-28）：第一个**协作对象**。逻辑与它自己的状态住在 `IterWorkspace`，
+        # 宿主只提供 `IterWorkspaceHost` 声明的读面（下面那组 property）与两个一行转发壳。
+        self.iter_ws = IterWorkspace(self)
 
     def _init_core_state(self, args, ppo_backend, bun, update_kwargs) -> None:
         """构造入参与宿主句柄 / 迭代起点与派发状态 / 轨迹根与 JSONL 落点 / M2 启动清场。"""
@@ -303,8 +312,8 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         self._tail_drain_sec = None
         self._waves_n = None
         self._eval_join_sec = 0.0
-        # 配额事故计数（plan P4-W3）：连续零 shard 落盘的轮数（每课一进程一本）。
-        self._zero_shard_streak = 0
+        # 配额事故计数（plan P4-W3）已随 `IterWorkspace` 搬走（2026-11-28，P0-1）：
+        # 它只被 `IterWorkspace.check_quota` 读写 ⇒ 状态归那个对象，不再住组合根。
 
 
     # ------------------------------------------------------------------ 编排
@@ -315,10 +324,11 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
     #   主循环骨架（setup / run 编排 / 轮派发 / 收官 / 停车；7 成员）→
     #     `trainer/loop_lifecycle.py::TrainingLifecycle`（S4 第十九刀；宿主判据见该模块头注）。
     #   剩余的 7 个叶子分三簇（S4 第二十刀，2026-09-25）：
-    #     it0 基线评估 → `trainer/loop_baseline.py::TrainingBaseline` · 本轮目录与产出健康 →
-    #     `trainer/loop_iter_dir.py::TrainingIterDir` · 本轮派发与让位（采集三路 / A-eval
-    #     稀疏化 / EvalBoard 关窗）→ `trainer/loop_dispatch.py::TrainingDispatch`；三簇都挂
-    #     `RoundSteps` 一侧（唯一 mixin 调用者），组合根因此不必再长基类。
+    #     it0 基线评估 → `trainer/loop_baseline.py::TrainingBaseline` · 本轮派发与让位
+    #     （采集三路 / A-eval 稀疏化 / EvalBoard 关窗）→ `trainer/loop_dispatch.py::TrainingDispatch`；
+    #     两簇都挂 `RoundSteps` 一侧（唯一 mixin 调用者），组合根因此不必再长基类。
+    #     ★ 2026-11-28（P0-1 第一刀）：本轮目录与产出健康那一簇改成了**协作对象**
+    #     `trainer/loop_iter_dir.py::IterWorkspace`（不再是基类）——见本类尾部的读面与转发壳。
     #
     # **本类余下的唯一方法**是 `_run_inspect`：它与模块级 `run_inspect` 必须同住一个模块
     # （`_run_inspect` 按**模块全局**解析 `run_inspect`），而那个模块不能 import `trainer.loop_core`
@@ -330,5 +340,58 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         保留 `trainer.loop_core.run_inspect` 作为可替换点（`trainer.loop.py` 再导出它、测试也替换它）。
         """
         run_inspect(*args, **kwargs)
+
+    # ------------------------------------------------- 协作对象的宿主读面（P0-1）
+    #
+    # `IterWorkspace` 不碰宿主的私有槽位：它按 `IterWorkspaceHost` 取这几个**公开读数**。
+    # 全部是 property（不是 `__init__` 里的副本）——`_traj_dir` / `node_rollout` 每轮会变，
+    # 拷一份就会读到上一轮的值。
+
+    @property
+    def traj_dir(self) -> Path:
+        """本轮目录（`traj_root/it{it}`；`_setup` 每轮重指）。"""
+        return self._traj_dir
+
+    @property
+    def course_fp(self) -> str | None:
+        """D14 文件血缘（课程文件 sha256；`None` = 无课程）。"""
+        return None if self._course_fp is None else str(self._course_fp)
+
+    @property
+    def corpus_fp(self) -> str | None:
+        """语料身份指纹（`None` 视为 `""`，语义见 `worker/cmd.corpus_fp_for_args`）。"""
+        return None if self._corpus_fp is None else str(self._corpus_fp)
+
+    @property
+    def state_init(self) -> bool:
+        """D14 初始化状态过滤是否开启。"""
+        return bool(self._state_init)
+
+    @property
+    def node_rollout(self) -> bool:
+        """本轮是否在节点采集（本地零 shard 是预期，不是配额事故）。"""
+        return bool(self._node_rollout)
+
+    @property
+    def extra_wver(self) -> str | None:
+        """本轮预采快照 wver（`IterWorkspace` 写；`TrainingVolume` / `TrainingDispatch` 读）。"""
+        return self._extra_wver
+
+    @extra_wver.setter
+    def extra_wver(self, value: str | None) -> None:
+        self._extra_wver = value
+
+    # ------------------------------------------------------ 转发壳（零逻辑）
+    #
+    # 轮内步骤（`RoundSteps.step_prepare_iter` / `step_course_iter`）与既有用例都按
+    # `self._prepare_iter_dir(...)` / `loop._check_quota_incident(...)` 调用；壳保持这两个名字
+    # 在组合根上可解析，实现只在 `IterWorkspace` 一份。`test_loop_core_tail_split` 用 AST 钉住
+    # 「壳体恰好一行委派」——加逻辑进去就红。
+
+    def _prepare_iter_dir(self, it: int) -> None:
+        self.iter_ws.prepare(it)
+
+    def _check_quota_incident(self, it: int) -> None:
+        self.iter_ws.check_quota(it)
 
 
