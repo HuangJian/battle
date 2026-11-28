@@ -7,6 +7,48 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 ---
 
+## §167 P′-3 E2′：委托层 **byte-identical**、700 局 **0 差异**；目标执行层落地（2026-11-28）
+
+**口径**：classic35 / hard / 3 命 / 0★ / 20 敌 / 36000 拍；seeds 2000000001–2000000020
+（700 局）；codeHash `1af986f7…`。E1 = `intent-oracle`（`_candidateOverride` 子链）；
+E2′ = `intent-option`（`_candidateOverride={'nnOption'}` + `_optionCmd.option`，
+`NN_OPTION` 委托到 `candidateOverrideForIntent` 的同一份子链）。
+
+**门 1：byte-identical（通过）**
+
+- 8 类意图 × 300 拍固定意图：`_moveDir/_fire` 逐拍相同、终局 `cloneWorld` 全字段相同、
+  AI RNG 状态相同（`tests/god/nn-option-parity.test.ts`）。
+- oracle 探针整局 800 拍：`intentTrace`、world.state/frame、终局快照全等
+  （`tests/god/intent-option-parity.test.ts`）。
+- 默认链不含 `nnOption`（`CANDIDATES` 未变、权重 0）；无注入时行为与 M1 parity 逐字节一致。
+
+**门 2：700 局质量门（通过，0 差异）**
+
+| arm | n | win | winRate | per-game 差异 |
+|---|---:|---:|---:|---:|
+| intent-oracle（E1） | 700 | 450 | 64.29% | — |
+| intent-option（E2′） | 700 | 450 | 64.29% | **0**（outcome/ticks/kills 全同） |
+
+⇒ `E2′ − E1 = 0.0pp`，远高于 ≥−3pp 的门；forced coverage / OTHER 与 E1 同步
+（委托候选的 `_lastBranch` 原样保留；`_candidateOverride` 的差异在白名单内）。
+
+**目标执行层（P′-2a2 / P′-4 的前置）**
+
+- `targetKind=powerup/enemy` + 显式 `target`；`pathMode=direct/detour` →
+  `navigateTowards`（默认 A* 不穿砖）；`pathMode=break` → `carvePathInfoCached`
+  （允许砖的代价路径）+ `carveFire` 逐块拆。
+- 无目标/无路 ⇒ 回退 option 子链（不吞 fallback）；非法 pathMode 在运行期 mask 回 direct。
+- 单测 4 例：powerup/direct、break 拆整列砖墙、无道具回退、非法 mode mask
+  （`tests/god/nn-option-exec.test.ts`）。
+- **边界**：本卡只把 target/pathMode 的执行面接通；这些注入臂的**收益**属于
+  P′-2a2（E2′ 后）与 P′-4，不在 P′-3 判决。
+
+**结论**：E2′ 的第一/第二门均过，且是**零差异**（不是 −3pp 边缘）；执行器路线可以从
+E1 切到 E2′，后续 target/param/mode 的实验都在同一生命周期里做。全文/复现 →
+`tmp/p3/`；`bun run check` 2915 pass。
+
+---
+
 ## §166 P′-2b0 NN→NN 单拍 headroom：**全层非零**，基地压力/环内有敌最大（2026-11-28）
 
 **口径**：g11-ringkill.it580（weightsSha `0b58484a…`），NN 自身轨迹；在每个决策拍

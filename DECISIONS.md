@@ -11675,3 +11675,12 @@ P0-3 第九刀：`remote/download.py` 的三个解析器（`_resolve_blob` 9 参
 - **证明/复现**：全文/六臂 board/四格/CI → `docs/nn/experiments.md` §165–§166；产物 `tmp/p2a/summary.md`、`tmp/p2b0/confirm-h30.json`、`confirm-h120.json`（一次性，未入库）。新增 local-only policy `intent-search`（`tools/sim/intent-search-input.ts`，窗口分单一实现 `tools/sim/window-score.ts`）；NNInput 决策状态契约 + `valueEstimate`（`src/nn/policy-input.ts`）；`bun run check` **2902 pass**。零训练、零任务侧改动、零 God 默认参数改动。
 - **违反后果**：搜索参数（H/every）不进 ledger wver ⇒ 不同 H 串账本（已修：wver 由 `{policy,h,every}` 派生）；NNInput 新增决策字段漏进 capture 清单 ⇒ 分支 restore 分叉（`tests/nn/nn-input-decision-state.test.ts` 红）；`ring_enemy` 判据顺序回退 ⇒ 该层永远 n=0（pilot 已复现一次）。
 
+## §2026-11-28-hier-p3-e2prime（2026-11-28，P′-3 E2′：委托层 byte-identical + 700 局 0 差异；目标执行层落地）
+
+- **口径**：classic35 / hard / 3 命 / 0★ / 20 敌 / 36000 拍；E1 = `intent-oracle`（`_candidateOverride` 子链），E2′ = `intent-option`（`_candidateOverride={'nnOption'}` + `_optionCmd.option`，`NN_OPTION` 委托到 `candidateOverrideForIntent` 的同一份子链）；seeds 2000000001–2000000020（700 局）；codeHash `1af986f7…`。
+- **决定**：① **第一门过**：8 类意图 × 300 拍固定意图 + oracle 探针 800 拍，`_moveDir/_fire`、终局 World 全字段、AI RNG 全等。② **第二门过**：700 局 E1 450/700 vs E2′ 450/700，**per-game outcome/ticks/kills 0 差异**（0.0pp，远高于 ≥−3pp）。③ 默认链不含 `nnOption`（`CANDIDATES` 不变、权重 0；只有 override 含它才用扩展池）⇒ 无注入的局逐字节不变。④ **目标执行层落地**：`targetKind=powerup/enemy` + 显式 target；`pathMode=direct/detour` → `navigateTowards`；`break` → `carvePathInfoCached + carveFire`；无目标/无路回退 option 子链；非法 mode mask 回 direct。⑤ E1→E2′ 可切换；target/param/mode 的**收益**属 P′-2a2/P′-4，不在 P′-3 判决。
+- **被否决**：① 把 `nnOption` 放进默认 CANDIDATES（会改 M1 parity 的链序/权重契约）；② 让 `NN_OPTION` 自己吞 HUNT fallback（与 E1 的 shell 级 fallback 分叉）；③ 用委托层的 0pp 当 target/pathMode 的收益证据（它们还没测）；④ 为 E2′ 另写一套巡路/开火（复用 `navigateTowards`/`carvePathInfoCached`/`carveFire`，保持单一实现）。
+- **证明/复现**：`tests/god/nn-option-parity.test.ts` · `tests/god/intent-option-parity.test.ts` · `tests/god/nn-option-exec.test.ts`；`tmp/p3/intent-{oracle,option}-700.json`（一次性，未入库）；全文 → `docs/nn/experiments.md` §167；`bun run check` **2915 pass**。
+- **违反后果**：`_optionCmd` 漏进 DECISION_STATE_FIELDS ⇒ 分支回档分叉；`_optionChains` 不在 reset 重建 ⇒ stage 切换后用旧链；新增 GodAIInput 字段不进 hub-fields allowlist ⇒ 结构门红。
+
+
