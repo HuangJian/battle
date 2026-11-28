@@ -49,14 +49,25 @@ INJECT_DIM = 9  # one-hot(8) + duration(1)
 
 
 class IntentNet(StudentNet):
-    """StudentNet 主干 + 三意图头（+可选 value 头，M8）。"""
+    """StudentNet 主干 + 意图头（+可选 value 头，M8）。
 
-    def __init__(self, spec: NetSpec, inject: bool = False, with_value: bool = False):
+    `intent_dim` 默认 8（现役 intent 线）；P′-4a 的 option 线用 6
+    （3 option × 2 pathMode 的联合槽位）。注入维 = intent_dim + 1。
+    """
+
+    def __init__(
+        self,
+        spec: NetSpec,
+        inject: bool = False,
+        with_value: bool = False,
+        intent_dim: int = INTENT_DIM,
+    ):
         self.inject = inject
-        self.inject_dim = INJECT_DIM
+        self.intent_dim = intent_dim
+        self.inject_dim = intent_dim + 1
         super().__init__(spec)
-        head_in = self.head_hidden + INJECT_DIM  # 137
-        self.intent_head = nn.Linear(head_in, INTENT_DIM)
+        head_in = self.head_hidden + self.inject_dim
+        self.intent_head = nn.Linear(head_in, intent_dim)
         self.enemy_head = nn.Linear(head_in, ENEMY_HEAD_DIM)
         self.anchor_head = nn.Linear(head_in, ANCHOR_HEAD_DIM)
         self.value_head = nn.Linear(head_in, 1) if with_value else None
@@ -95,10 +106,10 @@ class IntentNet(StudentNet):
         d.update(
             {
                 "kind": "intent",
-                "intentDim": INTENT_DIM,
+                "intentDim": self.intent_dim,
                 "enemyDim": ENEMY_HEAD_DIM,
                 "anchorDim": ANCHOR_HEAD_DIM,
-                "injectDim": INJECT_DIM,
+                "injectDim": self.inject_dim,
             }
         )
         return d
@@ -149,6 +160,7 @@ def build_intent_model(meta: dict, params: dict) -> IntentNet:
             head_hidden=arch.get("head_hidden", 128),
         ),
         inject=True,
+        intent_dim=int(arch.get("intentDim", INTENT_DIM)),
     )
     model.load_state_dict(params, strict=False)
     model.eval()

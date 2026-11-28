@@ -75,6 +75,9 @@ interface WeightsJson {
     /** v4（plan/policy-spatial-head.plan.md）：腿 A（头 137）/ 腿 B（塔 + 头 151）档。 */
     policyExtra?: boolean
     spatialTower?: boolean
+    /** M4：intent 头维度与注入维（缺省 8 / 9；P′-4a option 线 6 / 7）。 */
+    intentDim?: number
+    injectDim?: number
   }
   params: Record<string, Param>
 }
@@ -366,6 +369,9 @@ export class StudentModel implements ModelLike {
   /** P′-2b0：value_head 真实加载（无 value 头的 BC 档 = false，valueOut 恒 0）。 */
   readonly hasValueHead: boolean
   readonly extraDim: number
+  /** M4：intent 头维度（现役 8；P′-4a option 线 6）与注入维（intentDim+1）。 */
+  readonly intentDim: number
+  readonly injectDim: number
   // Per-tick value head: **吃与策略头同一份 `pf`**（obs-v5，plan §2.6）——宽度随档位：
   // legacy 128（= hidden）/ 腿 A 165（hidden+extra37）/ 腿 B 189（tower+scalars40+extra37）。
   // 旧稿的「value 只吃 hidden 128」已由 DECISIONS §2026-10-12-goalnn-obs-v5-critic-superset 推翻，
@@ -435,6 +441,9 @@ export class StudentModel implements ModelLike {
       spatialTower?: boolean
       /** 权重自带的融合宽度（`nn-training/common/schema.py::SCALAR_DIM` 产出时的值）。 */
       scalar_dim?: number
+      /** M4：intent 头维度（缺省 8）与注入维（缺省 intentDim+1）。 */
+      intentDim?: number
+      injectDim?: number
     },
     intentHeads?: boolean,
   ) {
@@ -446,6 +455,8 @@ export class StudentModel implements ModelLike {
     this.h = arch.h ?? 64
     this.d = arch.d ?? 8
     this.headHidden = 128
+    this.intentDim = arch.intentDim ?? 8
+    this.injectDim = arch.injectDim ?? this.intentDim + 1
     this.policyExtra = arch.policyExtra === true
     this.spatialTower = arch.spatialTower === true
     if (this.spatialTower && !this.policyExtra) {
@@ -540,7 +551,7 @@ export class StudentModel implements ModelLike {
       : this.policyExtra
         ? pfLen - this.headHidden
         : 0
-    const v137Len = this.headHidden + INJECT_DIM
+    const v137Len = this.headHidden + this.injectDim
     const strict = this.spatialTower || this.policyExtra || intentHeads === true
     const want = this.spatialTower || this.policyExtra ? pfLen : v137Len
     this.valueW137 = null
@@ -638,7 +649,7 @@ export class StudentModel implements ModelLike {
     this.bufC = new Float32Array(h * sp)
     this.pooled = new Float32Array(h)
     this.hidden = new Float32Array(this.headHidden)
-    this.hiddenInject = new Float32Array(this.headHidden + 9)
+    this.hiddenInject = new Float32Array(this.headHidden + this.injectDim)
     // v4：头输入宽度 —— legacy 128 / 腿 A 137 / 腿 B 151（复用缓冲，零分配）。
     // v5：extra 9→37 ⇒ 腿 A 165 / 腿 B 189（宽度一律由 schema 常量派生，不写字面量）。
     const headInLen = pfLen
@@ -650,7 +661,7 @@ export class StudentModel implements ModelLike {
     this.fireLogits = new Float32Array(this.fireDim)
     this.holdLogits = this.usesHoldFire3 ? new Float32Array(HOLD_DIM) : null
     this.valueOut = new Float32Array(1)
-    this.intentLogits = new Float32Array(8)
+    this.intentLogits = new Float32Array(this.intentDim)
     this.enemyLogits = new Float32Array(5)
     this.anchorLogits = new Float32Array(16)
     this.goalHeatmap = new Float32Array(sp)
@@ -735,18 +746,26 @@ export class StudentModel implements ModelLike {
     const ew = this.enemyW
     const aw = this.anchorW
     if (!iw || !ew || !aw) {
-      for (let i = 0; i < 8; i++) this.intentLogits[i] = 0
-      for (let i = 0; i < 5; i++) this.enemyLogits[i] = 0
-      for (let i = 0; i < 16; i++) this.anchorLogits[i] = 0
+      this.intentLogits.fill(0)
+      this.enemyLogits.fill(0)
+      this.anchorLogits.fill(0)
       this.valueOut[0] = 0
       return
     }
+    const inDim = this.hiddenInject.length
     this.features(obs, scalars)
     this.hiddenInject.set(this.hidden)
     this.hiddenInject.set(inject, this.headHidden)
-    this.linear(this.hiddenInject, iw, this.intentB as Float32Array, this.intentLogits, 8, 137)
-    this.linear(this.hiddenInject, ew, this.enemyB as Float32Array, this.enemyLogits, 5, 137)
-    this.linear(this.hiddenInject, aw, this.anchorB as Float32Array, this.anchorLogits, 16, 137)
+    this.linear(
+      this.hiddenInject,
+      iw,
+      this.intentB as Float32Array,
+      this.intentLogits,
+      this.intentDim,
+      inDim,
+    )
+    this.linear(this.hiddenInject, ew, this.enemyB as Float32Array, this.enemyLogits, 5, inDim)
+    this.linear(this.hiddenInject, aw, this.anchorB as Float32Array, this.anchorLogits, 16, inDim)
     if (this.valueW137) {
       this.linear(
         this.hiddenInject,
@@ -754,7 +773,7 @@ export class StudentModel implements ModelLike {
         this.valueB137 as Float32Array,
         this.valueOut,
         1,
-        137,
+        inDim,
       )
     } else {
       this.valueOut[0] = 0
@@ -789,8 +808,9 @@ export class StudentModel implements ModelLike {
     }
     this.hiddenInject.set(this.hidden)
     this.hiddenInject.set(inject, this.headHidden)
+    const inDim = this.hiddenInject.length
     if (this.engageW && this.engageB) {
-      this.linear(this.hiddenInject, this.engageW, this.engageB, this.engageLogits, 2, 137)
+      this.linear(this.hiddenInject, this.engageW, this.engageB, this.engageLogits, 2, inDim)
     } else {
       this.engageLogits.fill(0)
     }
@@ -801,7 +821,7 @@ export class StudentModel implements ModelLike {
         this.valueB137 as Float32Array,
         this.valueOut,
         1,
-        137,
+        inDim,
       )
     } else {
       this.valueOut[0] = 0
@@ -874,10 +894,12 @@ export function buildModelFromJson(json: WeightsJson): ModelLike {
 /** M4: intent 三头模型的推理面（intentForward + 三组 logits）。M8: + valueOut。 */
 export interface IntentModelLike {
   intentForward(obs: Uint8Array, scalars: Float32Array, inject: Float32Array): void
-  readonly intentLogits: Float32Array // [8]
+  readonly intentLogits: Float32Array // [intentDim]（现役 8；P′-4a option 线 6）
   readonly enemyLogits: Float32Array // [5]
   readonly anchorLogits: Float32Array // [16]
-  readonly valueOut: Float32Array // [1] — value head over the 137 hidden+inject (P1-5②)
+  readonly valueOut: Float32Array // [1] — value head over the hidden+inject (P1-5②)
+  readonly intentDim: number
+  readonly injectDim: number
 }
 
 /** 解析 intent 权重 JSON（arch.kind === 'intent'）→ IntentModelLike。 */
@@ -887,7 +909,7 @@ export function buildIntentModelFromJson(json: WeightsJson): IntentModelLike {
     params[name] = b64ToF32(param.data)
   }
   const arch = json.arch ?? {}
-  return new StudentModel(params, arch as { h?: number; d?: number }, true)
+  return new StudentModel(params, arch, true)
 }
 
 /** 从 JSON 文本解析 intent 模型。 */

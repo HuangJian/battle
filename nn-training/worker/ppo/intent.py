@@ -98,14 +98,18 @@ HB_SEC = 60.0
 
 
 class IntentRLNet(IntentNet):
-    """IntentNet + value 头（M8 默认 inject=True, with_value=True）。"""
+    """IntentNet + value 头（M8 默认 inject=True, with_value=True）。
 
-    def __init__(self, spec: NetSpec):
-        super().__init__(spec, inject=True, with_value=True)
+    `intent_dim` 默认 8（现役 intent）；P′-4a 的 option 线从 weights 的
+    `arch.intentDim=6` 传入。
+    """
+
+    def __init__(self, spec: NetSpec, intent_dim: int = INTENT_DIM):
+        super().__init__(spec, inject=True, with_value=True, intent_dim=intent_dim)
 
 
 def build_rl_net(weights_path: str | None) -> IntentRLNet:
-    h = d = None
+    h = d = dim = None
     if weights_path and os.path.exists(weights_path):
         try:
             from worker.data.weights_io import load_weights_json
@@ -114,9 +118,10 @@ def build_rl_net(weights_path: str | None) -> IntentRLNet:
             a = meta.get("arch", {})
             h = a.get("h", 64)
             d = a.get("d", 8)
+            dim = a.get("intentDim", INTENT_DIM)
         except Exception as e:  # 权重损坏/格式不符 → 回落默认架构（保留原行为，仅不再静默）
             log(f"[ppo_intent] WARN build_rl_net: ignoring {weights_path}: {e!r}")
-    return IntentRLNet(NetSpec(h=h or 64, d=d or 8))
+    return IntentRLNet(NetSpec(h=h or 64, d=d or 8), intent_dim=int(dim or INTENT_DIM))
 
 
 # ---------------- trajectory loading ----------------
