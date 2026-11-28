@@ -214,15 +214,14 @@ def test_composition_appends_the_new_mixin() -> None:
     from trainer.loop_core import TrainingLoop
     from trainer.loop_eval import TrainingEval
 
-    # S4 第二十一刀又在**末位**追加了 `TrainingExport`（产物出包）——本簇仍在原位置。
-    from trainer.loop_export import TrainingExport
+    # S4 第二十一刀曾追加 `TrainingExport`；P0-1 第三刀把它改成协作对象（不再是基类）——本簇仍在原位置。
     from trainer.loop_guards import TrainingGuards
     from trainer.loop_lifecycle import TrainingLifecycle
     from trainer.loop_remote import TrainingRemote
     from trainer.loop_round_steps import RoundSteps
     from trainer.loop_steps import TrainingSteps
 
-    assert TrainingSteps.__bases__ == (TrainingRemote, TrainingEval, TrainingExport)
+    assert TrainingSteps.__bases__ == (TrainingRemote, TrainingEval)
     # 追加（而不是插队）的判据：2026-09-23 写下的 MRO 第 2 位断言逐字仍成立。
     assert TrainingSteps.__mro__[1] is TrainingRemote
     # 组合类与四个「继承真混入」的测试宿主都不必改：本簇**不是**组合类的直接基类。

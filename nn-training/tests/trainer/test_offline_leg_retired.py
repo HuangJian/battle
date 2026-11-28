@@ -107,14 +107,14 @@ def test_run_manifest_is_published_from_exactly_one_place_with_export_path() -> 
     行为面的兜底在 `test_publish_choke_point_refuses_a_run_queue_job_loudly`。
     """
     # 三处家随本地拆分（S4 第二十一/二十二刀）分散了：
-    #   · **生产点**（交出计划那一处）：`trainer/loop_export.py::_export_offline_bundle`；
+    #   · **生产点**（交出计划那一处）：`trainer/loop_export.py::BundleExporter.export_offline_bundle`；
     #   · **转发跳**（`_remote_ppo` → `_remote_ppo_publish`）：`trainer/loop_remote_job.py`；
     #   · **真发布点**（`publish_job`）：同一个 `trainer/loop_remote_job.py`。
     # 继续只读 `trainer/loop_steps.py` 会让这条守卫**静默空过**（那里已经没有调用点）。
     prod = (ROOT / "trainer" / "loop_export.py").read_text(encoding="utf-8")
     producers = [
         _call_args(prod, m.start())
-        for m in re.finditer(r"self\._remote_ppo\(", prod)
+        for m in re.finditer(r"self\._host\.remote_ppo\(", prod)
         if "plan_bytes" in _call_args(prod, m.start())
     ]
     # ① 「源点」= 真的**交出一份计划**的调用（它就是唯一那个带字面实参的调用）。
@@ -328,7 +328,7 @@ def test_infinite_course_exports_an_open_ended_segment(
     """
     import trainer.loop_export as lx
     import trainer.loop_round_steps as lrs
-    from trainer.loop_export import TrainingExport
+    from trainer.loop_export import BundleExporter
     from trainer.loop_lifecycle import export_refusal
 
     # ① 启动期闸（`loop_lifecycle.export_refusal`）：无限 ⇒ 放行
@@ -354,12 +354,16 @@ def test_infinite_course_exports_an_open_ended_segment(
     steps_x.args.iters = 0
     steps_x.args.out = "w.json"  # 起点权重（指纹函数已被替身，不真读盘）
     # `it` 是 2026-10-21 评审 P0 加的（分关 est 必须排除正在导出的那一轮，否则读到空目录）
-    steps_x._volume_plan_block = lambda _it: None
-    steps_x._rotate_seed = 1
-    # `_bare_steps()` 是**裸** `RoundSteps`（MRO 没拼）：`_export_offline_bundle` 住
-    # `TrainingExport` ⇒ 按未绑定函数调（组合根才是生产形态）。
+    steps_x.rotate_seed = 1
+    steps_x.traj_root = Path(".").resolve()
+    steps_x.jsonl_path = None
+    steps_x.bun = "bun"
+    exporter = BundleExporter(steps_x)
+    monkeypatch.setattr(exporter, "volume_plan_block", lambda _it: None)  # 替身：只钉控制流
+    # `_bare_steps()` 是**裸** `RoundSteps`（MRO 没拼）：P0-1 第三刀后导出实现住
+    # `BundleExporter`，所以显式构造协作对象（组合根才是生产形态）。
     with pytest.raises(_ReachedPlanError):
-        TrainingExport._export_offline_bundle(steps_x, 1, [], -1)
+        exporter.export_offline_bundle(1, [], -1)
     assert [spec.iters_total for spec in seen] == [0], seen
     # 放行不等于静默：段长默认值与含义变了，必须留一行给操作员
     assert any("开区间段" in ln for ln in lines), lines

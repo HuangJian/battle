@@ -231,7 +231,11 @@ BASELINE_CLONE = 18
 #: `IterWorkspace` 都从宿主读 `traj_dir`（各自 Protocol 里是只读 property）——连同
 #: `loop_core.traj_dir` 的 getter 凑成 ≥3。这不是「又复制了一份实现」：三个落点是**同一个概念、
 #: 同一个名字**（换名反而让「本轮目录」在两个协作对象里叫两个东西）。
-BASELINE_SAME_NAME_GE3 = 148
+#: **2026-11-28 再抬同名 1 格（148 → 149）的账**：P0-1 第三刀让 `BundleExporter` 从宿主读
+#: `traj_root`（`BundleHost` 里的只读 property）——连同 `loop_core.traj_root` 的 getter 与
+#: `hub/queue_peer.py` / `hub/queue_resume.py` 的同名读数凑成 ≥3。同上一格：**同一个概念、
+#: 同一个名字**，不是又抄了一份实现（导出侧的 est 必须按「轨迹根」而不是「本轮目录」反解）。
+BASELINE_SAME_NAME_GE3 = 149
 
 
 def _stems(modules: frozenset[str]) -> frozenset[str]:

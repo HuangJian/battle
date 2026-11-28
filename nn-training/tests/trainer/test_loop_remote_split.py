@@ -80,7 +80,9 @@ INBOUND_CALLS: dict[str, dict[str, int]] = {
     "_abort_node_failure": {"loop_remote_drive.py": 1, "loop_remote_fail.py": 1},
     "_handle_remote_failure": {"loop_remote_drive.py": 4},
     # 2026-09-25：drive 侧少一个呼叫点（退役的 `_remote_run_segment` 是原来第二个）。
-    "_remote_ppo": {"loop_export.py": 1, "loop_remote_drive.py": 1},
+    # P0-1 第三刀（2026-11-28）：导出簇改成协作对象后，它的那条入边改走组合根的公开入口
+    # `remote_ppo`（壳本身也解析 `_remote_ppo`）⇒ 呼叫点从 loop_export 挪到 loop_core。
+    "_remote_ppo": {"loop_core.py": 1, "loop_remote_drive.py": 1},
     "_remote_ppo_fetch": {"loop_remote_drive.py": 1, "loop_remote_job.py": 1},
     "_remote_ppo_land": {"loop_remote_drive.py": 1, "loop_remote_job.py": 1},
     "_remote_ppo_probe": {"loop_remote_drive.py": 1},
@@ -414,7 +416,7 @@ def test_composition_is_exact() -> None:
         assert tuple(c.__name__ for c in cls.__bases__) == want, fname
     # 组合根仍在原文件、仍是被 `TrainingSteps` 继承的第一个基类。
     assert root.TrainingRemote.__module__ == "trainer.loop_remote"
-    assert steps.TrainingSteps.__bases__ == (root.TrainingRemote, steps.TrainingEval, steps.TrainingExport)
+    assert steps.TrainingSteps.__bases__ == (root.TrainingRemote, steps.TrainingEval)
     assert steps.TrainingSteps.__mro__[1] is root.TrainingRemote
     assert core.TrainingLoop.__bases__ == (
         core.RoundSteps,

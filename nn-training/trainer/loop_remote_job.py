@@ -43,6 +43,7 @@ from worker.loop_round import RemotePpoJob
 
 if TYPE_CHECKING:
     from biz.course_spec import CourseConfig
+    from trainer.loop_export import BundleExporter
 
 
 def _trim_shards_to_quota(
@@ -196,6 +197,8 @@ class TrainingRemoteJob(TrainingRemotePush):
     #: 在每个文件里类型可见，否则 mypy 报 attr-defined。
     _commit_journal: Any
     _ensure_ts_code: Any
+    #: 产物出包协作对象（P0-1 第三刀）：TS 运行时缓存的读者改问它的公开读数。
+    exporter: BundleExporter
     #: P2：replay 转换器 bundle 的懒构建（实现在 `trainer/loop_export.py`）。
     _ensure_replay_converter: Any
     #: `_remote_ppo_publish` 里以 `hasattr`/`getattr` 动态访问（EvalBoard 让位属于编排层）——
@@ -467,10 +470,10 @@ class TrainingRemoteJob(TrainingRemotePush):
                 register=export_path is None,
                 # hub 中介推送的意图（hub 读它决定「这份活由我推」；缺席 = pull，字节不变）。
                 dispatch="push" if setup.hub_push else "",
-                ts_code_sha256=(
-                    str(getattr(self, "_ts_code_sha256", "") or "") if rollout_spec else ""
+                ts_code_sha256=(self.exporter.ts_code_view().sha256 if rollout_spec else ""),
+                ts_code_zip_path=(
+                    self.exporter.ts_code_view().zip_path if rollout_spec else None
                 ),
-                ts_code_zip_path=getattr(self, "_ts_code_zip_path", None) if rollout_spec else None,
             ),
             log=log,
         )

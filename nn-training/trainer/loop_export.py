@@ -1,54 +1,51 @@
-"""loop_export —— **产物出包** mixin（2026-09-25 从 trainer/loop_steps.py 拆出，S4 第二十一刀）。
+"""loop_export —— **产物出包**：协作对象 `BundleExporter`（2026-11-28，P0-1 第三刀）。
 
 这一簇 4 个成员共享一个判据：**「这一轮要给出去的东西」**——把产物打成能被别人拿走 / 上传的东西。
 
-- `_ensure_ts_code`：把 rollout 用的 TS 运行时打成 `ts_code.zip`（内容寻址，同源码只传一次；
+- `ensure_ts_code`：把 rollout 用的 TS 运行时打成 `ts_code.zip`（内容寻址，同源码只传一次；
   2026-10-10 起与 `code.zip` 共用**集群会话快照**，见 `remote/code_snapshot.py`）。
-- `_volume_plan_block`：离线计划里必须带上的**动态采集块**——节点没有 hub 的 jsonl，est 只能被钉在
+- `volume_plan_block`：离线计划里必须带上的**动态采集块**——节点没有 hub 的 jsonl，est 只能被钉在
   计划里（`--stages` 不可解析 / est ≤ 0 一律**响亮退出**，静默降级回老口径正是要防的事）。
-- `_export_offline_bundle`：`--export-bundle`——it..it+n-1 打成**可上传云机**的全离线任务包。
-- `_export_weights`：权重归档（只归档不自动清理）。
+- `export_offline_bundle`：`--export-bundle`——it..it+n-1 打成**可上传云机**的全离线任务包。
+- `export_weights`：权重归档（只归档不自动清理）。
+- `ts_code_view`：上面那份懒建缓存的公开读数。
 
-**本文件里唯一一条方法间调用链**就在这一簇：`_export_offline_bundle` → `_volume_plan_block`
-（实测连通分量）。`loop_steps` 其余 8 个成员彼此零互调（全是叶子），搬走后那边**零方法间调用**。
+本文件里唯一一条方法间调用链就在这一簇：`export_offline_bundle` → `volume_plan_block`。
 
-## 宿主：`TrainingSteps` 的**末位**基类（追加不插队）
+## 为什么从混入改成协作对象（P0-1 第三刀）
 
-调用者两处，都在 MRO 上更靠前：
+原先这是 `TrainingSteps` 的第三个基类（`TrainingExport`），与 `TrainingRemote` / `TrainingEval`
+平摊同一个实例：4 个惰性缓存槽写在组合根、由远端两簇读；`args` / `_rotate_seed` / `_traj_root` /
+`bun` 是借来的槽位，`_remote_ppo` 是借来的方法。现在：
 
-  · `RoundSteps`（`step_export_offline_bundle` / `step_export_weights`）——组合根的第一个基类；
-  · `TrainingRemote`（`_remote_ppo_publish` → `_ensure_ts_code`；`_remote_run_segment` →
-    `_volume_plan_block`）——`TrainingSteps` 的第一个基类。
+* **状态归自己**：`_ts_code_sha256` / `_ts_code_zip_path` / `_replay_converter_sha256` /
+  `_replay_converter_path` 只存这里（原先在 `TrainingLoop.__init__` 声明）；
+* **依赖有声明**：`BundleHost` 是 `Protocol`（`args` / `bun` / 三个只读 property / `remote_ppo`）；
+* **组装一处**：`TrainingLoop.__init__` 造 `self.exporter = BundleExporter(self)`；
+* **调用点不动**：组合根留 5 个一行转发壳（`_ensure_ts_code` / `_ensure_replay_converter` /
+  `_export_offline_bundle` / `_export_weights` / `ts_code_view`）。
 
-⇒ `class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport)`，`TrainingLoop.__bases__`
-一行不改。依据（实测）：4 个成员名在既有混入里**零同名定义** ⇒ 末位追加不会被 MRO 遮罩。
+`remote_ppo` 是**宿主公开入口**（`TrainingLoop.remote_ppo`，一行转发 `_remote_ppo`）：
+导出要整段发布 + 等结果，而那条组合路径属于远端腿；协作对象不伸手进 `_remote_ppo`，
+只调协议里声明过的公开入口（调用时解析 ⇒ 既有 patch 仍命中）。
 
-## 依赖方向
-
-本模块**不 import** `trainer.loop_steps` / `trainer.loop_remote`（调用者依赖被调用者，反向即环）。它调用的
-兄弟方法 `_remote_ppo` 只在**组合实例**上动态解析（混入常态，理由同 `trainer/loop_volume.py` 头注）。
+`volume_plan_block` **不**留壳：它只被本簇与用例调用（`export_offline_bundle` → 自己）。
 
 ## DI seam / 模块全局
 
 `common.distribution`（`weights_fingerprint`）· `log` · `backup_weights` / `_MODE_BACKUP_PREFIX` 是**本模块**的
-模块全局。搬家前它们是 `trainer.loop_steps` 的；实测**没有任何测试 patch 过它们**（`trainer.loop_steps` 命名
-空间被 patch 的只有 `log`，而那处测的是留守的 `_write_iter_stats`）⇒ 无 patch 点迁移；旧家删掉这些
-import 后，陈旧的 `trainer.loop_steps.<名字>` 会**响亮** `AttributeError`，不是静默空操作。
-三处**延迟** import（`biz.iter_job` / `biz.plan` / `remote.hub_client`）是原有注入面，保留在方法体内。
-
-## 跨模块槽位（写-读手）
-
-`_ts_code_sha256` / `_ts_code_zip_path`：**本模块写**（`_ensure_ts_code` 懒建缓存），
-`TrainingRemote._remote_ppo_publish` **读**（决定 payload 里要不要带那份 zip）。
+模块全局（patch 只有打在这里才生效）。三处**延迟** import（`biz.iter_job` / `worker.plan` /
+`remote.code_snapshot` 等）是原有注入面，保留在方法体内。
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import common.distribution
 from common.log import log
@@ -62,9 +59,9 @@ from worker.modes import _MODE_BACKUP_PREFIX
 
 @dataclass(frozen=True)
 class TsCodeView:
-    """TS 运行时 zip 的**进程内缓存读数**（`_ensure_ts_code` 懒建的结果）。
+    """TS 运行时 zip 的**进程内缓存读数**（`ensure_ts_code` 懒建的结果）。
 
-    `sha256 == ""` 就是「还没建」——那枚空串是 `_ensure_ts_code` 自己的「无需重建」标记，
+    `sha256 == ""` 就是「还没建」——那枚空串是 `ensure_ts_code` 自己的「无需重建」标记，
     所以读数不另造一个 `built: bool`（两个字段说是同一件事时，迟早会不一致）。
     """
 
@@ -72,39 +69,62 @@ class TsCodeView:
     zip_path: Path | None
 
 
-class TrainingExport:
-    """产物出包（4 方法；见本模块头注）。"""
+class BundleHost(Protocol):
+    """`BundleExporter` 需要的宿主面（`TrainingLoop` 提供；三个路径/种子都是**活**读数）。"""
 
-    # 依赖的 `TrainingLoop` 实例属性（声明类型供 mypy/阅读；实际赋值在 `TrainingLoop.__init__`
-    # 与各兄弟混入）。与其它混入里的同类声明**有意并存**：混入的状态契约必须在**每个**文件里对
-    # mypy 可见，运行期的唯一真相仍是同一实例上的那一份。
     args: Any
-    _rotate_seed: Any
-    #: 轨迹根（`tmp/<课>/`，含 `it*` 轮目录）——分关 est 从这里的历史 shard 读。
-    _traj_root: Any
-    #: 本簇自己的懒建缓存：写在这里、被 `TrainingRemote` 读（见头注「跨模块槽位」）。
-    _ts_code_sha256: Any
-    _ts_code_zip_path: Any
-    #: P2（plan/replay-corpus.plan.md）：replay 转换器 bundle（trainer 侧预构建，
-    #: 随 kind=ppo job 附件下发；worker 只跑不建）。
-    _replay_converter_sha256: Any
-    _replay_converter_path: Any
-    #: 训练进程的 bun 可执行（组合根注入；build 转换器用）。
     bun: Any
 
-    #: 兄弟混入的方法（混入常态：在组合实例上解析）——声明类型，理由同 `trainer/loop_volume.py`。
-    _remote_ppo: Any
+    @property
+    def traj_root(self) -> Path:
+        """轨迹根（`tmp/<课>/`，含 `it*` 轮目录）——分关 est 从这里的历史 shard 读。"""
+        ...
+
+    @property
+    def jsonl_path(self) -> Path:
+        """`training_log.jsonl` 的落点（全局 est 从它派生）。"""
+        ...
+
+    @property
+    def rotate_seed(self) -> int:
+        """本轮实际用的 rotateSeed（resume 后是继承值，不是 `args.rotate_seed` 的声明值）。"""
+        ...
+
+    def remote_ppo(
+        self,
+        it: int,
+        rollout_spec: dict | None = None,
+        *,
+        plan_bytes: bytes | None = None,
+        wait_timeout_sec: float = 0.0,
+        export_path: str | Path | None = None,
+    ) -> dict:
+        """远端 PPO 的**组合入口**（发布 → 等结果 → 落位；`TrainingLoop.remote_ppo`）。"""
+        ...
+
+
+class BundleExporter:
+    """产物出包（6 成员；见本模块头注）。"""
+
+    def __init__(self, host: BundleHost) -> None:
+        self._host = host
+        #: TS 运行时 zip 的懒建缓存（写在这里、由远端两簇经 `ts_code_view()` 读）。
+        self._ts_code_sha256 = ""
+        self._ts_code_zip_path: Path | None = None
+        #: P2（plan/replay-corpus.plan.md）：replay 转换器 bundle（trainer 侧预构建，
+        #: 随 kind=ppo job 附件下发；worker 只跑不建）。
+        self._replay_converter_sha256 = ""
+        self._replay_converter_path = ""
 
     def ts_code_view(self) -> TsCodeView:
-        """本簇懒建缓存的公开读数（用例 / 诊断共用；不触发打包、不写任何东西）。"""
-        zp = getattr(self, "_ts_code_zip_path", None)
+        """本簇懒建缓存的公开读数（用例 / 诊断 / 远端腿共用；不触发打包、不写任何东西）。"""
         return TsCodeView(
-            sha256=str(getattr(self, "_ts_code_sha256", "") or ""),
-            zip_path=None if zp is None else Path(zp),
+            sha256=str(self._ts_code_sha256 or ""),
+            zip_path=None if self._ts_code_zip_path is None else Path(self._ts_code_zip_path),
         )
 
-    def _ensure_ts_code(self, job_root: str, *, log: Any) -> None:
-        """M3：打包 rollout 用的 TS 运行时 zip（一次，缓存在 self 上）。
+    def ensure_ts_code(self, job_root: str, *, log: Callable[[str], None]) -> None:
+        """M3：打包 rollout 用的 TS 运行时 zip（一次，缓存在本对象上）。
 
         为什么在训练侧打而不是节点侧 `bun install`：`tools/sim/export-rl-rollout.ts`
         的链路**零第三方运行时依赖**（非相对 import 只有 node 内建 `fs`/`path`），所以
@@ -116,7 +136,7 @@ class TrainingExport:
         快照优先；缺失/坏 ⇒ 回落 per-course 打包 + WARN；消费侧**只读、永不换代**
         （见 `remote/code_snapshot.py::published_ts_code_zip`）。进程内缓存保留：一进程一份。
         """
-        if str(getattr(self, "_ts_code_sha256", "") or ""):
+        if str(self._ts_code_sha256 or ""):
             return
         from remote.code_snapshot import published_ts_code_zip
 
@@ -127,7 +147,7 @@ class TrainingExport:
         self._ts_code_sha256 = sha
         self._ts_code_zip_path = zp
 
-    def _ensure_replay_converter(self, job_root: str, *, log: Any) -> tuple[str, str]:
+    def ensure_replay_converter(self, job_root: str, *, log: Callable[[str], None]) -> tuple[str, str]:
         """P2：把 `tools/sim/replay-to-shard.ts` 预构建成单文件 Node bundle，返回 `(path, sha256)`。
 
         为什么在 trainer 侧建（plan D5）：2 vCPU 的 PPO worker 不该付 `bun build` 的
@@ -135,15 +155,15 @@ class TrainingExport:
         worker 只跑不建。缓存键 = 进程内一份（源码在训练进程生命周期内不变；实验臂换代码
         会换 runId/进程，不会跨版本复用）。
         """
-        cached = str(getattr(self, "_replay_converter_path", "") or "")
+        cached = str(self._replay_converter_path or "")
         if cached and Path(cached).exists():
-            return cached, str(getattr(self, "_replay_converter_sha256", "") or "")
+            return cached, str(self._replay_converter_sha256 or "")
         repo_root = REPO_ROOT
-        out_dir = Path(self._traj_root) / ".cache" / "replay_converter"
+        out_dir = Path(self._host.traj_root) / ".cache" / "replay_converter"
         out_dir.mkdir(parents=True, exist_ok=True)
         out = out_dir / "replay-to-shard.node.js"
         tmp = out_dir / "replay-to-shard.node.js.tmp"
-        bun = str(self.bun or "bun")
+        bun = str(self._host.bun or "bun")
         p = run_capture(
             [
                 bun,
@@ -167,7 +187,7 @@ class TrainingExport:
         log(f"[run_rl] replay 转换器 bundle: {out.name} sha={sha[:12]}… ({out.stat().st_size} B)")
         return str(out), sha
 
-    def _volume_plan_block(self, it: int) -> dict | None:
+    def volume_plan_block(self, it: int) -> dict | None:
         """计划要带上的**动态采集块**（`target_transitions > 0` 时；见 `biz/volume_waves`）。
 
         为什么必须进计划：全离线/半离线腿（kind=run）的逐轮语料由 `biz/plan.pairs_for` 重放
@@ -189,7 +209,7 @@ class TrainingExport:
         `--stages` 缺失/不可解析一律**响亮退出**：静默降级回老口径正是要防的事。
         （est 为 0 **不再**是错误：那是「首轮无历史」的正常状态，计划里钉 0 = 每关 1 局。）
         """
-        args = self.args
+        args = self._host.args
         if str(getattr(args, "mode", "")) != "per-tick":
             return None
         if int(getattr(args, "target_transitions", 0) or 0) <= 0:
@@ -197,7 +217,7 @@ class TrainingExport:
         from worker.resume import trailing_samples_per_game, trailing_stage_samples_per_game
         from worker.volume_waves import parse_stages_arg, volume_block
 
-        jsonl = getattr(self, "_jsonl_path", None)
+        jsonl = self._host.jsonl_path
         # est = **盘上历史派生量**（课程/CLI 的声明值已退场，2026-10-12）；0 = 无估计。
         est = int(trailing_samples_per_game(jsonl, window=5) or 0) if jsonl else 0
         # 分关 est（2026-10-07，plan/rollout-stage-balance §4.3）：与本地链
@@ -208,9 +228,8 @@ class TrainingExport:
         # `--stages` 用**共享解析器**再解一次（同一函数 ⇒ 同一结果；解析失败这里的
         # SystemExit 与 volume_block 内部同源）。
         #
-        # `self._traj_root` 直读、不给 `getattr(..., None)` 兜底：拿不到历史就响亮
+        # `self._host.traj_root` 直读、不给 `getattr(..., None)` 兜底：拿不到历史就响亮
         # AttributeError，绝不静默退回「全局 est 一套 G」——那正是本设计要消灭的静默少采。
-        # （且本模块的依赖面守卫按「`self.x` 触达集 == 声明集」推导，`getattr` 形式的读会漏出闭集。）
         try:
             stages = parse_stages_arg(str(getattr(args, "stages", "") or ""))
         except ValueError as e:
@@ -224,10 +243,10 @@ class TrainingExport:
         from worker.stage_rotation import window_from_args as _window_from_args
 
         try:
-            # ★ 窗口键 = **本轮实际用的** rotateSeed（`self._rotate_seed`，resume 后是继承值）；
+            # ★ 窗口键 = **本轮实际用的** rotateSeed（`rotate_seed`，resume 后是继承值）；
             #   直接读 `args.rotate_seed` 会是「声明值」——与种子流的键不是同一个数。
             window = _window_from_args(
-                args, int(it), stages, rotate_seed=int(getattr(self, "_rotate_seed", 0) or 0)
+                args, int(it), stages, rotate_seed=int(self._host.rotate_seed or 0)
             )
         except ValueError as e:
             raise SystemExit(f"[run_rl] it{it}: rotation 配置非法（{e}）——修好课程再导出") from e
@@ -241,13 +260,13 @@ class TrainingExport:
         #   （`tests/trainer/test_stage_rotation_export.py` 钉住）。
         rotation_on = bool(str(getattr(args, "rotation_mode", "") or "").strip())
         ests = trailing_stage_samples_per_game(
-            self._traj_root,
+            self._host.traj_root,
             stages if rotation_on else window,
             window_iters=3,
             fallback=est,
             agg=agg,
             # ★ `it` = 正在导出的这一轮：`step_prepare_iter` 已经 mkdir 了 `traj_root/it{it}`
-            #   （导出在本轮 rollout **之前**跑，`loop_export.py:229`）⇒ 不排除它，
+            #   （导出在本轮 rollout **之前**跑）⇒ 不排除它，
             #   `latest` 会读到一个空目录并整份回退 `fallback`（全关同值），
             #   云机 `est_s_by_stage` 退化成「每关同一个 G」（评审 P0，2026-10-21）。
             exclude_it=int(it),
@@ -283,7 +302,7 @@ class TrainingExport:
             block["est_s_all"] = {int(s): int(v) for s, v in (ests or {}).items()}
         return block
 
-    def _export_offline_bundle(self, it: int, pairs: list[tuple[int, int]], n: int) -> None:
+    def export_offline_bundle(self, it: int, pairs: list[tuple[int, int]], n: int) -> None:
         """`--export-bundle`：把 it..it+n-1 打成**可上传云机**的全离线任务包（本轮不训练）。
 
         用户需求（2026-09-17）：「hub 支持打包导出训练任务（课程、初始权重、代码），以
@@ -300,7 +319,7 @@ class TrainingExport:
         ★ 2026-10-15（J1）：课程 `iters<=0` = **无限** ⇒ 不再拒导，改为发**开区间段**
         （`plan.open_ended=true`，终点 = 段长）。有限模式的算术与包内容逐字节不变。
         """
-        args = self.args
+        args = self._host.args
         # ★ 2026-10-27（评审 A4）/ 2026-10-28（云机轮换）：轮换的窗口是 `it` 的函数，而计划里的
         #   `volume` 块是**单份**（块内钉着导出那一轮的 `stages`/`rotate_seed`）⇒ 一份块配多个
         #   窗口必然错，且错法是**静默**的（第 2 轮起还在用第 1 轮的窗口）。
@@ -346,7 +365,7 @@ class TrainingExport:
             wver=wver,
             workers=workers,
             game_timeout_sec=game_timeout,
-            hub_bun=str(getattr(self, "bun", "bun") or "bun"),
+            hub_bun=str(self._host.bun or "bun"),
             node_label=RUN_NODE_LABEL,
         )
         plan = build_plan(
@@ -354,12 +373,12 @@ class TrainingExport:
                 args=args,
                 it=it - 1,
                 iters_total=iters_total,
-                rotate_seed=int(self._rotate_seed),
+                rotate_seed=int(self._host.rotate_seed),
                 max_iters=0 if n < 0 else n,
                 workers=workers,
                 game_timeout_sec=game_timeout,
                 budget_sec=float(getattr(args, "run_budget_sec", 0.0) or 0.0),
-                volume=self._volume_plan_block(it),
+                volume=self.volume_plan_block(it),
                 # 配方缺席（`rotation_mode` 空）⇒ None ⇒ 计划不长这个键（老包逐字节不变）。
                 rotation=recipe_from_args(args),
                 # 开区间段的段长（`--run-max-iters`；0 = 用缺省段长）——有限课程上只缩短、
@@ -378,16 +397,18 @@ class TrainingExport:
             )
         )
         # export_path 非空 ⇒ `_remote_ppo` 只建 job 目录（打包源）+ 写包 + 抛 BundleExportedError。
-        self._remote_ppo(it, spec, plan_bytes=dump_plan(plan), export_path=str(args.export_bundle))
+        self._host.remote_ppo(
+            it, spec, plan_bytes=dump_plan(plan), export_path=str(args.export_bundle)
+        )
 
-    def _export_weights(self, it: int) -> None:
+    def export_weights(self, it: int) -> None:
         """权重归档（只归档不自动清理）。
 
         ★ 2026-09-21（§3 单一 PPO 路径）：weights_json 恒由**认领到 job 的 worker** 产出、
         经 `_remote_ppo` 三重校验落位到 args.out（D2/D12）——本机不再有 torch 导出路径
         （goal/intent 导出分支随本机 PPO 一并退役），这里只归档 + 日志。
         """
-        args = self.args
+        args = self._host.args
         # 课程声明 backup_prefix/backup_dir 时优先（D6 课程单一事实来源）；缺省
         # 退回按模式前缀 + 默认 nn-training/weights（旧行为）。
         bak_prefix = str(getattr(args, "backup_prefix", "") or "") or _MODE_BACKUP_PREFIX[args.mode]

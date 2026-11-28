@@ -463,7 +463,6 @@ def test_composition_is_exact() -> None:
     import trainer.loop_guards as root
     from trainer.loop_core import TrainingLoop
     from trainer.loop_eval import TrainingEval
-    from trainer.loop_export import TrainingExport
     from trainer.loop_guards import TrainingGuards
     from trainer.loop_lifecycle import TrainingLifecycle
     from trainer.loop_remote import TrainingRemote
@@ -489,7 +488,7 @@ def test_composition_is_exact() -> None:
         TrainingGuards,
         TrainingLifecycle,
     )
-    assert TrainingSteps.__bases__ == (TrainingRemote, TrainingEval, TrainingExport)
+    assert TrainingSteps.__bases__ == (TrainingRemote, TrainingEval)
     quads = (TrainingGuardsTrip, TrainingGuardsLeg, TrainingGuardsGate, TrainingGuardsSweep)
     for k in quads:
         assert k not in TrainingLoop.__bases__

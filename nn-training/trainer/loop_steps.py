@@ -30,7 +30,6 @@ from common.log import log
 # `_drain_pending_eval`），所以 `TrainingEval` 是基类。**追加**在既有基类之后：两混入
 # 零重名、零互调、零 `super()` ⇒ 顺序在今天是惰性的，没有理由动已记录的 MRO。
 from trainer.loop_eval import TrainingEval
-from trainer.loop_export import TrainingExport
 from trainer.loop_remote import TrainingRemote
 from worker.events import write_iteration, write_rollout_end
 
@@ -129,7 +128,7 @@ __all__ = [
 ]
 
 
-class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
+class TrainingSteps(TrainingRemote, TrainingEval):
     """单轮结算与账 mixin。
 
     三个基类按「调用者依赖被调用者」挂在本类**末位之后**（追加不插队，`__mro__[1]` 仍是

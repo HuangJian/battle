@@ -17,12 +17,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from trainer.loop_steps import TrainingSteps
+from trainer.loop_export import BundleExporter
 from worker.stage_rotation import window_from_args
 from worker.volume_waves import parse_stages_arg
 
@@ -49,24 +50,39 @@ def _args(**over: object) -> SimpleNamespace:
     return SimpleNamespace(**base)
 
 
-class _Export(TrainingSteps):
-    """最小宿主：`_volume_plan_block` 只读 `args` / `_rotate_seed` / `_traj_root`。"""
+class _Export(BundleExporter):
+    """最小宿主 + 协作对象：`volume_plan_block` 只读 `args` / `rotate_seed` / `traj_root`。"""
 
     def __init__(self, traj_root: Path, **over: object) -> None:
-        self.args = _args(**over)
-        self._rotate_seed = int(self.args.rotate_seed)
-        self._traj_root = traj_root
-        self._jsonl_path = None
+        args = _args(**over)
+        super().__init__(
+            SimpleNamespace(
+                args=args,
+                rotate_seed=int(args.rotate_seed),
+                traj_root=traj_root,
+                jsonl_path=None,
+                bun="bun",
+            )
+        )
+
+    @property
+    def args(self) -> SimpleNamespace:
+        """公开读面（= 宿主 args；用例不该伸手进 `_host`）。"""
+        return cast(SimpleNamespace, self._host.args)
+
+    @property
+    def rotate_seed(self) -> int:
+        return int(self._host.rotate_seed)
 
 
 def test_rotation_export_pins_the_all_stage_est_table(tmp_path: Path) -> None:
     """★ 开轮换 ⇒ `est_s_all` 覆盖**全关**；窗口块本身与派生口径同源。"""
     stub = _Export(tmp_path)
-    block = stub._volume_plan_block(5)
+    block = stub.volume_plan_block(5)
     assert block is not None
     all_stages = parse_stages_arg(FULL)
     assert sorted(int(k) for k in block["est_s_all"]) == all_stages
-    window = window_from_args(stub.args, 5, all_stages, rotate_seed=stub._rotate_seed)
+    window = window_from_args(stub.args, 5, all_stages, rotate_seed=stub.rotate_seed)
     assert len(window) == 12
     assert block["stages"] == window
     assert block["per_stage_quota"] == -(-TARGET // len(window))
@@ -78,16 +94,16 @@ def test_rotation_export_pins_the_all_stage_est_table(tmp_path: Path) -> None:
 
 def test_export_sched_defaults_to_alpha_and_quota_is_explicit(tmp_path: Path) -> None:
     """计划导出缺省写 alpha；显式 quota 必须落成 `"quota"`，不能靠「没有键」。"""
-    alpha_block = _Export(tmp_path)._volume_plan_block(5)
+    alpha_block = _Export(tmp_path).volume_plan_block(5)
     assert alpha_block is not None and alpha_block["sched"] == "alpha"
-    quota_block = _Export(tmp_path, volume_sched="quota")._volume_plan_block(5)
+    quota_block = _Export(tmp_path, volume_sched="quota").volume_plan_block(5)
     assert quota_block is not None and quota_block["sched"] == "quota"
 
 
 def test_without_rotation_the_block_has_no_est_s_all(tmp_path: Path) -> None:
     """未开轮换 ⇒ 块里没有 `est_s_all`（轮换字段不泄漏）。"""
     stub = _Export(tmp_path, rotation_mode="", rotation_per_it=0)
-    block = stub._volume_plan_block(5)
+    block = stub.volume_plan_block(5)
     assert block is not None
     assert block.get("est_s_all") is None
     assert block["stages"] == parse_stages_arg(FULL)
@@ -100,6 +116,10 @@ def test_exported_recipe_matches_the_args(tmp_path: Path) -> None:
     stub = _Export(tmp_path)
     assert recipe_from_args(stub.args) == {"mode": "even", "per_it": 12, "pinned": []}
     pinned = _Export(tmp_path, rotation_mode="pinned", rotation_per_it=10, rotation_pinned="20-22")
-    assert recipe_from_args(pinned.args) == {"mode": "pinned", "per_it": 10, "pinned": [20, 21, 22]}
+    assert recipe_from_args(pinned.args) == {
+        "mode": "pinned",
+        "per_it": 10,
+        "pinned": [20, 21, 22],
+    }
     # 缺席 ⇒ None（计划不落键）
     assert recipe_from_args(_Export(tmp_path, rotation_mode="").args) is None

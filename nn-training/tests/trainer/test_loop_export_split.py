@@ -58,15 +58,16 @@ EXPORT_PY = NN_ROOT / "trainer/loop_export.py"
 STEPS_PY = NN_ROOT / "trainer/loop_steps.py"
 ROUND_STEPS_PY = NN_ROOT / "trainer/loop_round_steps.py"
 
-CLASS = "TrainingExport"
+#: P0-1 第三刀（2026-11-28）：这一簇从混入改成**协作对象** `BundleExporter`。
+CLASS = "BundleExporter"
 #: 本簇成员（含 2026-11-19 新增的公开读数 `ts_code_view`：G5 第十四批 —— 缓存槽位以前
 #: 只有用例伸手进去问，现在有一个不触发打包的只读面；成员集故意逐格列举，加一个就得改这里）。
 MEMBERS = (
-    "_ensure_ts_code",
-    "_ensure_replay_converter",
-    "_volume_plan_block",
-    "_export_offline_bundle",
-    "_export_weights",
+    "ensure_ts_code",
+    "ensure_replay_converter",
+    "volume_plan_block",
+    "export_offline_bundle",
+    "export_weights",
     "ts_code_view",
 )
 
@@ -87,32 +88,26 @@ STAYS = (
 )
 
 #: 组装：`TrainingSteps` 的基类元组（本刀末位追加第三项）。
-STEPS_BASES = ("TrainingRemote", "TrainingEval", "TrainingExport")
+#: P0-1 第三刀：`TrainingExport` 出列 ⇒ 两件套。
+STEPS_BASES = ("TrainingRemote", "TrainingEval")
 
-#: 入边闭集：成员 → {rl 模块: 呼叫点数}（`self.<成员>(` 的真实形态；新入边必须改这张表）。
-#: S4 第二十二刀把 `loop_remote` 切成四簇后，两条入边各自换了落点（实现所在模块）：
-#: `_ensure_ts_code` 的呼叫者在 `_remote_ppo_publish`（→ `loop_remote_job.py`），
-#: `_volume_plan_block` 的另一个呼叫者曾住 `_remote_run_segment`（`loop_remote_drive.py`）——
-#: 它随**半离线整段退役**（2026-09-25 并入 origin）一起消失 ⇒ 现在只剩 loop_export 自己那条链
-#: （`_export_offline_bundle` → 它）。退役的正面守卫在 `tests/trainer/test_offline_leg_retired.py`。
+#: 入边闭集：**转发壳** → {rl 模块: 呼叫点数}（`self.<壳>(` 的真实形态；新入边必须改这张表）。
+#: 壳的实现住在协作对象；调用侧（`loop_remote_job` / `loop_round_steps`）与搬家前逐字相同。
 INBOUND_CALLS: dict[str, dict[str, int]] = {
     "_ensure_ts_code": {"loop_remote_job.py": 1},
     # P2：replay 转换器 bundle 的懒构建（`_remote_ppo_publish` 在 corpus_fmt=replay 时调）。
     "_ensure_replay_converter": {"loop_remote_job.py": 1},
-    # 只剩 loop_export 自己那条链（`_export_offline_bundle` → 它）。
-    "_volume_plan_block": {"loop_export.py": 1},
     "_export_offline_bundle": {"loop_round_steps.py": 1},
     "_export_weights": {"loop_round_steps.py": 1},
 }
 
-#: 出边闭集：本模块成员调用的**兄弟**方法（混入常态的动态解析；声明块里必须有它）。
-OUTBOUND_HANDS = frozenset({"_remote_ppo"})
+#: 出边闭集：协作对象调宿主的方法 —— 只许 `BundleHost` **声明过**的那一个
+#: （`remote_ppo` = 远端 PPO 的组合入口；调用时解析 ⇒ 既有 patch 仍命中）。
+OUTBOUND_HANDS = frozenset({"remote_ppo"})
 
-#: 槽位写-读手：本模块**写**、别处**读**的槽（写-读手契约；读者少一个也红）。
-#: S4 第二十二刀后读者在两个新家里：`_remote_ppo_publish`（Job）与 `_push_submit_node`（Push）。
+#: 槽位读者：TS 运行时缓存改由**公开读数** `ts_code_view()` 读（两个远端簇各一处）。
 SLOT_HANDS: dict[str, tuple[str, ...]] = {
-    "_ts_code_sha256": ("trainer/loop_remote_job.py",),
-    "_ts_code_zip_path": ("trainer/loop_remote_job.py", "trainer/loop_remote_push.py"),
+    "ts_code_view": ("trainer/loop_remote_job.py", "trainer/loop_remote_push.py"),
 }
 
 #: 顶层 import 闭集（非 stdlib；本模块不许长出重依赖）。
@@ -142,7 +137,7 @@ TOP_IMPORTS = frozenset(
 )
 #: `dataclasses` 随 `TsCodeView` 进来（2026-11-19）；`hashlib` 随 replay 转换器（2026-11-15）；
 #: `pathlib` 原文就有（`Path`），只是在头部注里没被点名。
-STDLIB_IMPORTS = frozenset({"hashlib", "os", "pathlib", "typing", "dataclasses"})
+STDLIB_IMPORTS = frozenset({"collections.abc", "hashlib", "os", "pathlib", "typing", "dataclasses"})
 
 #: 反向边（禁）：成环或把叶子拉回编排上游。
 FORBIDDEN_IMPORTS = frozenset(
@@ -285,64 +280,103 @@ def _self_calls(path: Path, cls_name: str, method: str) -> set[str]:
 
 def test_members_live_in_the_new_home_only() -> None:
     """五成员定义只在新家；旧家（`TrainingSteps`）零同名定义。"""
-    got = set(_methods(EXPORT_PY, CLASS))
+    got = set(_methods(EXPORT_PY, CLASS)) - {"__init__"}
     assert got == set(MEMBERS), f"新家成员集变了：{sorted(got ^ set(MEMBERS))}"
     left = set(_methods(STEPS_PY, "TrainingSteps"))
     assert sorted(left & set(MEMBERS)) == [], "成员又回到 TrainingSteps 了"
     assert sorted(left) == sorted(STAYS), f"留守成员集变了：{sorted(left)}"
 
 
-def test_wiring_is_object_identity() -> None:
-    """`TrainingSteps.X is TrainingExport.X`（同一个函数对象，不是同名副本）。"""
+def test_assembly_is_a_single_line_and_not_on_the_mro() -> None:
+    """协作对象：`__init__` 里一行装配；它**不在** MRO（不再是基类）。"""
     import trainer.loop_export as exp_mod
-    from trainer.loop_steps import TrainingSteps
+    from trainer.loop_core import TrainingLoop
 
-    home = exp_mod.TrainingExport
-    for name in MEMBERS:
-        got = getattr(TrainingSteps, name)
-        assert got is getattr(home, name), name
-        assert got.__module__ == "trainer.loop_export", name
+    assert exp_mod.BundleExporter.__module__ == "trainer.loop_export"
+    assert exp_mod.BundleExporter not in TrainingLoop.__mro__
+    asm = [
+        n
+        for n in _methods(NN_ROOT / "trainer/loop_core.py", "TrainingLoop")["__init__"].body
+        if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Attribute) and t.attr == "exporter" for t in n.targets)
+    ]
+    assert len(asm) == 1
+    val = asm[0].value
+    assert isinstance(val, ast.Call) and isinstance(val.func, ast.Name) and val.func.id == CLASS
 
 
 def test_composition_is_exact() -> None:
-    """组装逐字：基类三件套 + `__mro__[1]` + 本簇**不在**组合类直接基类里。"""
+    """组装逐字：基类两件套 + `__mro__[1]` + 本簇**不在**组合类直接基类里。"""
     from trainer.loop_core import TrainingLoop
     from trainer.loop_eval import TrainingEval
-    from trainer.loop_export import TrainingExport
+    from trainer.loop_export import BundleExporter
     from trainer.loop_remote import TrainingRemote
     from trainer.loop_steps import TrainingSteps
 
     assert tuple(c.__name__ for c in TrainingSteps.__bases__) == STEPS_BASES
-    assert TrainingSteps.__bases__ == (TrainingRemote, TrainingEval, TrainingExport)
+    assert TrainingSteps.__bases__ == (TrainingRemote, TrainingEval)
     # 「追加不插队」的把心：2026-09-23 写下的第 2 位断言逐字仍成立。
     assert TrainingSteps.__mro__[1] is TrainingRemote
-    # 本簇**不是**组合类的直接基类（挂的是 `TrainingSteps` 一侧）⇒ 组合类与四个「继承真混入」
-    # 的测试宿主都不必改。
-    assert TrainingExport not in TrainingLoop.__bases__
-    assert TrainingExport in TrainingLoop.__mro__
-    assert TrainingLoop._export_weights is TrainingExport._export_weights
+    # 本簇**不是**组合类的直接基类，也（P0-1 第三刀后）不在 MRO 里。
+    assert BundleExporter not in TrainingLoop.__bases__
+    assert BundleExporter not in TrainingLoop.__mro__
+    assert TrainingLoop.__bases__[1] is TrainingSteps
 
 
-def test_borrowed_declarations_are_exactly_the_touched_set() -> None:
-    """借用声明闭集 = 派生集；类体零带值槽位。"""
-    touched: set[str] = set()
-    for names in _self_attrs(EXPORT_PY, CLASS).values():
-        touched |= names
-    own = set(_methods(EXPORT_PY, CLASS))
-    top: set[str] = set()
-    for n in ast.parse(EXPORT_PY.read_text(encoding="utf-8")).body:
-        if isinstance(n, (ast.FunctionDef, ast.ClassDef)):
-            top.add(n.name)
-        elif isinstance(n, ast.Assign):
-            top.update(t.id for t in n.targets if isinstance(t, ast.Name))
-    borrowed = {n for n in touched - own - top if not n.startswith("__")}
-    assert borrowed, "派生集为空说明重建坏了"
+def test_host_surface_is_declared_and_owned_state_is_object_local() -> None:
+    """宿主读面 = `BundleHost` 声明集；4 个缓存槽只在本对象的 `__init__`。"""
     import trainer.loop_export as exp_mod
+    from trainer.loop_core import TrainingLoop
 
-    assert set(exp_mod.TrainingExport.__annotations__) == borrowed, sorted(borrowed)
-    body = _cls(EXPORT_PY, CLASS).body
-    assert not [n for n in body if isinstance(n, ast.Assign)]
-    assert not [n for n in body if isinstance(n, ast.AnnAssign) and n.value is not None]
+    proto = exp_mod.BundleHost
+    declared = set(proto.__annotations__) | {
+        n for n, v in vars(proto).items() if isinstance(v, property)
+    } | {
+        n
+        for n, v in vars(proto).items()
+        if callable(v) and not isinstance(v, property) and not n.startswith("__")
+    }
+    assert _host_reads(EXPORT_PY, CLASS) == declared, sorted(_host_reads(EXPORT_PY, CLASS) ^ declared)
+    owned = {
+        t.attr
+        for node in _methods(EXPORT_PY, CLASS)["__init__"].body
+        for t in (
+            list(node.targets)
+            if isinstance(node, ast.Assign)
+            else [node.target] if isinstance(node, ast.AnnAssign) else []
+        )
+        if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) and t.value.id == "self"
+    }
+    assert owned == {
+        "_host",
+        "_ts_code_sha256",
+        "_ts_code_zip_path",
+        "_replay_converter_sha256",
+        "_replay_converter_path",
+    }, sorted(owned)
+    for name in declared - {"args", "bun", "remote_ppo"}:
+        assert isinstance(getattr(TrainingLoop, name, None), property), name
+    assert callable(getattr(TrainingLoop, "remote_ppo", None))
+    # 组合根不再声明这四个缓存槽（双真相）。
+    core_slots: set[str] = set()
+    for names in _self_attrs(NN_ROOT / "trainer/loop_core.py", "TrainingLoop").values():
+        core_slots |= names
+    assert sorted(owned - {"_host"} & core_slots) == []
+
+
+def _host_reads(path: Path, cls_name: str) -> set[str]:
+    out: set[str] = set()
+    for node in _methods(path, cls_name).values():
+        for n in ast.walk(node):
+            if (
+                isinstance(n, ast.Attribute)
+                and isinstance(n.value, ast.Attribute)
+                and n.value.attr == "_host"
+                and isinstance(n.value.value, ast.Name)
+                and n.value.value.id == "self"
+            ):
+                out.add(n.attr)
+    return out
 
 
 # ─────────────────────── 入边 / 出边 / 槽位（三张表） ───────────────────────
@@ -350,7 +384,6 @@ def test_borrowed_declarations_are_exactly_the_touched_set() -> None:
 
 def test_inbound_hands_closed_set() -> None:
     """入边闭集：只有登记的调用者，且呼叫点数逐一对账（AST，见 S20 的教训）。"""
-    # 2026-09-30（刀 4）：调用者两棵树上都有（`trainer/` 编排 + `biz/` 纯逻辑）⇒ 走两棵树扫描面。
     files = source_scan.logic_py_files(str(NN_ROOT))
     only = frozenset(INBOUND_CALLS)
     calls = {p.name: _self_call_counts(p, only) for p in files}
@@ -358,36 +391,47 @@ def test_inbound_hands_closed_set() -> None:
     for member, want in INBOUND_CALLS.items():
         got = {name: c[member] for name, c in calls.items() if member in c}
         assert got == want, f"{member} 的入边变了：{got}"
+        # P0-1 第三刀：壳的定义面在组合根，实现只在协作对象。
         definers = {name for name, names in defined.items() if member in names}
-        assert definers == {"loop_export.py"}, f"{member} 的定义面：{sorted(definers)}"
+        assert definers == {"loop_core.py"}, f"{member} 的定义面：{sorted(definers)}"
 
 
 def test_outbound_hands_closed_set() -> None:
-    """出边闭集：本模块只许调声明过的那一个兄弟方法。"""
-    own = set(_methods(EXPORT_PY, CLASS))
-    ext: set[str] = set()
-    for name in MEMBERS:
-        ext |= {
-            c for c in _self_calls(EXPORT_PY, CLASS, name) if c not in own and not c.startswith("__")
-        }
-    assert ext == set(OUTBOUND_HANDS), f"出边变了：{sorted(ext)}"
-    # 声明块里必须有它（混入常态：在组合实例上解析，故声明类型）。
+    """出边闭集：协作对象只调 `BundleHost` 声明过的宿主方法（当前仅 `remote_ppo`）。"""
     import trainer.loop_export as exp_mod
 
-    for hand in OUTBOUND_HANDS:
-        assert hand in exp_mod.TrainingExport.__annotations__, hand
+    proto_methods = {
+        n
+        for n, v in vars(exp_mod.BundleHost).items()
+        if callable(v) and not isinstance(v, property) and not n.startswith("__")
+    }
+    ext = {
+        n.func.attr
+        for name in MEMBERS
+        for n in ast.walk(_methods(EXPORT_PY, CLASS)[name])
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and isinstance(n.func.value, ast.Attribute)
+        and n.func.value.attr == "_host"
+    }
+    assert ext == set(OUTBOUND_HANDS), f"出边变了：{sorted(ext)}"
+    assert set(OUTBOUND_HANDS) <= proto_methods, "协议里没声明它——宿主方法调用就成了暗式依赖"
 
 
 def test_slot_write_read_hands() -> None:
-    """槽位写-读手：本模块写、远端两簇读（写手在这里，读者不能在别处丢）。"""
+    """槽位写-读手：缓存写在协作对象，读者只许走 `ts_code_view()`（两个远端簇各一处）。"""
     assigns = _self_assigns(EXPORT_PY, CLASS)
-    for slot, readers in SLOT_HANDS.items():
+    for slot in ("_ts_code_sha256", "_ts_code_zip_path"):
         writers = {m for m, names in assigns.items() if slot in names}
-        assert writers == {"_ensure_ts_code"}, f"{slot} 的写手变了：{sorted(writers)}"
+        assert writers == {"__init__", "ensure_ts_code"}, f"{slot} 的写手变了：{sorted(writers)}"
+    for hand, readers in SLOT_HANDS.items():
         for reader in readers:
-            assert slot in (NN_ROOT / reader).read_text(encoding="utf-8"), (
-                f"{slot} 的读者 {reader} 丢了"
-            )
+            text = (NN_ROOT / reader).read_text(encoding="utf-8")
+            assert hand in text, f"{hand} 的读者 {reader} 丢了"
+    # 远端簇不再直接读那两个私有槽（它们已搬进对象）。
+    for reader in ("trainer/loop_remote_job.py", "trainer/loop_remote_push.py"):
+        text = (NN_ROOT / reader).read_text(encoding="utf-8")
+        assert "_ts_code_sha256" not in text and "_ts_code_zip_path" not in text, reader
 
 
 def test_old_home_no_longer_absorbs_patches() -> None:
@@ -427,11 +471,29 @@ def test_loop_steps_left_has_zero_intra_calls() -> None:
 
 
 def _stub(**kw: Any) -> Any:
+    """最小宿主 + 协作对象（P0-1 第三刀）：`BundleExporter` 只读 `BundleHost` 那几个面。"""
     import types
 
-    base = dict(mode="per-tick", target_transitions=0, stages="", out="w.json", iters=3)
+    from trainer.loop_export import BundleExporter
+
+    base: dict[str, Any] = dict(
+        mode="per-tick",
+        target_transitions=0,
+        stages="",
+        out="w.json",
+        iters=3,
+        rotate_seed=0,
+    )
     base.update(kw)
-    return types.SimpleNamespace(args=types.SimpleNamespace(**base), _jsonl_path=None)
+    host = types.SimpleNamespace(
+        args=types.SimpleNamespace(**base),
+        bun="bun",
+        rotate_seed=int(base["rotate_seed"] or 0),
+        traj_root=Path("."),
+        jsonl_path=None,
+        remote_ppo=lambda *a, **k: {},
+    )
+    return BundleExporter(host)
 
 
 def test_volume_plan_block_gates_run_from_the_new_home() -> None:
@@ -440,11 +502,8 @@ def test_volume_plan_block_gates_run_from_the_new_home() -> None:
     `it` 是 2026-10-21 评审 P0 加的（当时导出侧会读到本轮的空目录，分关 est 全变 fallback）；
     两道门都在用它**之前**返回，所以门内行为与旧签名逐字一致。
     """
-    from trainer.loop_export import TrainingExport
-
-    fn = cast(Any, TrainingExport._volume_plan_block)
-    assert fn(_stub(mode="intent", target_transitions=100), 1) is None  # mode 门
-    assert fn(_stub(mode="per-tick", target_transitions=0), 1) is None  # target 门
+    assert _stub(mode="intent", target_transitions=100).volume_plan_block(1) is None  # mode 门
+    assert _stub(mode="per-tick", target_transitions=0).volume_plan_block(1) is None  # target 门
 
 
 def test_ensure_ts_code_cache_semantics(monkeypatch, tmp_path) -> None:
@@ -456,7 +515,7 @@ def test_ensure_ts_code_cache_semantics(monkeypatch, tmp_path) -> None:
     只与那一个函数打交道：快照优先 / 缺失回落都封在它里面）。
     """
     import remote.code_snapshot as code_snapshot
-    from trainer.loop_export import TrainingExport, TsCodeView
+    from trainer.loop_export import TsCodeView
 
     calls: list[str] = []
 
@@ -467,13 +526,13 @@ def test_ensure_ts_code_cache_semantics(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(code_snapshot, "published_ts_code_zip", fake_published)
     # 真实例（不是 `_stub()` 的 SimpleNamespace）：缓存要经公开读数 `ts_code_view()` 问
     # （G5 第十四批） —— 裸 `__new__` 的实例没有 `__init__` 赋值，正好等于「还没建」。
-    obj = TrainingExport.__new__(TrainingExport)
+    obj = _stub()
     assert obj.ts_code_view() == TsCodeView(sha256="", zip_path=None), "初态 = 未建"
-    cast(Any, TrainingExport._ensure_ts_code)(obj, str(tmp_path), log=lambda m: None)
+    obj.ensure_ts_code(str(tmp_path), log=lambda m: None)
     view = obj.ts_code_view()
     assert view.sha256 == "deadbeef"
     assert view.zip_path == Path(tmp_path) / "ts_code.zip"
-    cast(Any, TrainingExport._ensure_ts_code)(obj, str(tmp_path), log=lambda m: None)  # 第二次
+    obj.ensure_ts_code(str(tmp_path), log=lambda m: None)  # 第二次
     assert len(calls) == 1, "缓存没生效——第二次又走了一遍发布路径"
 
 
@@ -485,7 +544,6 @@ def test_ensure_ts_code_falls_back_through_the_snapshot_seam(monkeypatch, tmp_pa
     真打一份 zip 出来（seam = `code_snapshot.pack_ts_code_zip`，**延迟** import 的面）。
     """
     import remote.code_snapshot as code_snapshot
-    from trainer.loop_export import TrainingExport
 
     snap_dir = tmp_path / "no-snapshot"
     monkeypatch.setenv("BCITY_CODE_SNAPSHOT_DIR", str(snap_dir))
@@ -498,8 +556,8 @@ def test_ensure_ts_code_falls_back_through_the_snapshot_seam(monkeypatch, tmp_pa
 
     monkeypatch.setattr(code_snapshot, "pack_ts_code_zip", fake_pack_ts)
     job_root = tmp_path / "traj" / "course" / "remote-jobs"
-    obj = TrainingExport.__new__(TrainingExport)
-    cast(Any, TrainingExport._ensure_ts_code)(obj, str(job_root), log=lines.append)
+    obj = _stub()
+    obj.ensure_ts_code(str(job_root), log=lines.append)
     view = obj.ts_code_view()
     assert view.sha256 == "cafebabe"
     assert view.zip_path == job_root / "ts_code.zip"
@@ -513,7 +571,6 @@ def test_export_weights_runs_and_log_seam_lands_here(monkeypatch, tmp_path) -> N
     """★ `_export_weights` 真跑，且 `log` seam **在本模块**（打旧家 `trainer.loop_steps.log` 收不到）。"""
     import trainer.loop_export as exp_mod
     import trainer.loop_steps as steps_mod
-    from trainer.loop_export import TrainingExport
 
     seen: list[str] = []
     old_seen: list[str] = []
@@ -522,9 +579,9 @@ def test_export_weights_runs_and_log_seam_lands_here(monkeypatch, tmp_path) -> N
     monkeypatch.setattr(exp_mod, "backup_weights", lambda *a, **k: "bak/it1.json")
 
     obj = _stub(out=str(tmp_path / "w.json"), mode="per-tick")
-    obj.args.backup_prefix = "x"
-    obj.args.backup_dir = ""
-    cast(Any, TrainingExport._export_weights)(obj, 1)
+    obj._host.args.backup_prefix = "x"
+    obj._host.args.backup_dir = ""
+    obj.export_weights(1)
     assert any("already landed" in m for m in seen), seen
     assert any("archived" in m for m in seen), seen
     assert old_seen == [], "打 trainer.loop_steps.log 竟收到了——seam 的落点不对"
@@ -543,14 +600,13 @@ def test_export_offline_bundle_fails_loud_without_start_weights(tmp_path, monkey
     那道门在生产盘上永远走不到，替身才让它回落到同一条 SystemExit。
     """
     import trainer.loop_export as lx
-    from trainer.loop_export import TrainingExport
 
     monkeypatch.setattr(lx.common.distribution, "weights_fingerprint", lambda _p: "")
     obj = _stub(out=str(tmp_path / "w.json"), iters=3)
-    obj._rotate_seed = 0
-    obj.bun = "bun"
+    obj._host.rotate_seed = 0
+    obj._host.bun = "bun"
     try:
-        cast(Any, TrainingExport._export_offline_bundle)(obj, 1, [(1, 1)], 2)
+        obj.export_offline_bundle(1, [(1, 1)], 2)
     except SystemExit as e:
         assert "没有起点权重" in str(e), e
     else:  # pragma: no cover - 失败分支

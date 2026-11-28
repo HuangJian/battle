@@ -252,7 +252,7 @@ def test_remote_leg_is_defined_in_the_remote_family_only() -> None:
 
 
 def test_training_steps_inherits_training_remote() -> None:
-    """方向是**调用者依赖被调用者**：`TrainingSteps(TrainingRemote, TrainingEval, TrainingExport)`。
+    """方向是**调用者依赖被调用者**：`TrainingSteps(TrainingRemote, TrainingEval)`（产物出包自 2026-11-28 起是协作对象）。
 
     S4 第十七刀**追加**了 `TrainingEval`：追加而不是插队 ⇒ 2026-09-23 写下的那句
     `__mro__[1] is TrainingRemote` 逐字仍然成立（追加时特意保住它，见
@@ -264,11 +264,11 @@ def test_training_steps_inherits_training_remote() -> None:
     assert issubclass(steps.TrainingSteps, TrainingRemote)
     assert not issubclass(TrainingRemote, steps.TrainingSteps)
     assert steps.TrainingSteps.__mro__[1] is TrainingRemote
-    # S4 第二十一刀再**追加**了 `TrainingExport`（产物出包 4 方法）——同样是末位追加；
+    # S4 第二十一刀曾**追加** `TrainingExport`；P0-1 第三刀（2026-11-28）把它改成协作对象
+    # `BundleExporter`（不再是基类）——本簇位置未动。
     # 上面那句 `__mro__[1] is TrainingRemote` 仍然逐字成立。
-    from trainer.loop_export import TrainingExport
 
-    assert steps.TrainingSteps.__bases__ == (TrainingRemote, TrainingEval, TrainingExport)
+    assert steps.TrainingSteps.__bases__ == (TrainingRemote, TrainingEval)
     # 组合类与四个「继承真混入」的测试宿主因此都不必改；组合根仍在 trainer/loop_remote.py，
     # 但 13 个方法已按判据同源搬到四个新家（`_remote_ppo` ∈ Job）。
     assert TrainingRemote.__module__ == "trainer.loop_remote"

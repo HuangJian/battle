@@ -93,6 +93,27 @@ COLLABORATORS: dict[str, tuple[str, str, str, tuple[str, ...], set[str], dict[st
         {"_thread", "_landed_wver"},
         {"_maybe_dispatch_baseline_eval": "maybe_dispatch", "baseline_eval_state": "state"},
     ),
+    "trainer/loop_export.py": (
+        "BundleExporter",
+        "exporter",
+        "BundleHost",
+        (
+            "ensure_ts_code",
+            "ensure_replay_converter",
+            "volume_plan_block",
+            "export_offline_bundle",
+            "export_weights",
+            "ts_code_view",
+        ),
+        {"_ts_code_sha256", "_ts_code_zip_path", "_replay_converter_sha256", "_replay_converter_path"},
+        {
+            "_ensure_ts_code": "ensure_ts_code",
+            "_ensure_replay_converter": "ensure_replay_converter",
+            "_export_offline_bundle": "export_offline_bundle",
+            "_export_weights": "export_weights",
+            "ts_code_view": "ts_code_view",
+        },
+    ),
 }
 #: 组合根的转发壳：壳名 → 协作对象的方法名（壳体必须**恰好**一行委派）。
 SHELLS = {shell: target for spec in COLLABORATORS.values() for shell, target in spec[5].items()}
@@ -120,6 +141,16 @@ STAYS = (
     "_check_quota_incident",
     "_maybe_dispatch_baseline_eval",
     "baseline_eval_state",
+    # P0-1 第三刀：产物出包协作对象的读面与壳。
+    "traj_root",
+    "jsonl_path",
+    "rotate_seed",
+    "remote_ppo",
+    "_ensure_ts_code",
+    "_ensure_replay_converter",
+    "_export_offline_bundle",
+    "_export_weights",
+    "ts_code_view",
 )
 
 #: 组装（本文件是这两条的唯一所有者）：`RoundSteps` 的基类元组与全量 MRO 名单。
@@ -144,7 +175,6 @@ MRO_NAMES = [
     "TrainingRemoteJob",
     "TrainingRemotePush",
     "TrainingEval",
-    "TrainingExport",
     "TrainingGuards",
     # S4 第二十三刀把 `TrainingGuards` 的 13 个成员按判据同源切成四簇；组合根仍在原位，
     # 四簇作为它的基类紧随其后（互不调用、零重名 ⇒ 元组顺序惰性，但 MRO 名单是**全量**）。
@@ -334,8 +364,12 @@ def test_members_live_in_the_new_homes_only() -> None:
     for rel, (cls, _attr, _proto, cnames, _owned, shells) in COLLABORATORS.items():
         home = set(_methods(NN_ROOT / rel, cls))
         assert set(cnames) <= home, f"{rel}: 少了 {sorted(set(cnames) - home)}"
-        assert sorted(set(cnames) & core) == [], "协作对象的方法不许在组合根再定义一份"
-        assert sorted(set(shells) & home) == [], f"{rel}: 转发壳只许住组合根"
+        # 壳名允许与对象的方法同名（壳是一行委派）；其余实现不许在组合根再有一份。
+        assert sorted((set(cnames) - set(shells)) & core) == [], (
+            "协作对象的方法不许在组合根再定义一份"
+        )
+        # 壳名与对象方法同名（`ts_code_view`）不算「实现又住回家」。
+        assert sorted(set(shells) - set(cnames) & home) == [], f"{rel}: 转发壳只许住组合根"
         assert sorted(set(shells) - core) == [], f"组合根缺壳：{sorted(set(shells) - core)}"
 
 
@@ -418,9 +452,13 @@ def test_collaborator_host_surface_is_declared() -> None:
     for rel, (cls, _attr, proto_name, _cnames, owned, _table) in COLLABORATORS.items():
         path = NN_ROOT / rel
         proto = getattr(import_module(rel[: -len(".py")].replace("/", ".")), proto_name)
-        declared = set(proto.__annotations__) | {
-            n for n, v in vars(proto).items() if isinstance(v, property)
+        proto_props = {n for n, v in vars(proto).items() if isinstance(v, property)}
+        proto_methods = {
+            n
+            for n, v in vars(proto).items()
+            if callable(v) and not isinstance(v, property) and not n.startswith("__")
         }
+        declared = set(proto.__annotations__) | proto_props | proto_methods
         assert _host_reads(path, cls) == declared, sorted(_host_reads(path, cls) ^ declared)
         # 自己的状态：`__init__` 只赋 `_host` + 本簇槽位；其余一个不带。
         got_owned = {
@@ -435,8 +473,10 @@ def test_collaborator_host_surface_is_declared() -> None:
         }
         assert got_owned == {"_host"} | owned, sorted(got_owned)
         # 宿主侧：每个声明名都得是**活**的读面（property），不是 `__init__` 里的副本。
-        for name in declared - {"args", "bun"}:
+        for name in proto_props:
             assert isinstance(getattr(TrainingLoop, name, None), property), name
+        for name in proto_methods:
+            assert callable(getattr(TrainingLoop, name, None)), name
         # 归对象的状态不许在组合根的声明段里再出现一份（双真相）。
         core_slots: set[str] = set()
         for names in _self_slots(CORE_PY, "TrainingLoop").values():
@@ -445,7 +485,17 @@ def test_collaborator_host_surface_is_declared() -> None:
 
 
 def test_collaborator_calls_no_sibling_method() -> None:
-    """协作对象只读宿主**数据**：不调宿主方法（协议里没有方法 ⇒ AST 里也不许有）。"""
+    """协作对象只许调 Protocol **声明过**的宿主方法（其余一律只能读数据）。"""
+    from importlib import import_module
+
+    allowed = {}
+    for rel, (_c, _attr, proto_name, _cn, _own, _tb) in COLLABORATORS.items():
+        proto = getattr(import_module(rel[: -len(".py")].replace("/", ".")), proto_name)
+        allowed[rel] = {
+            n
+            for n, v in vars(proto).items()
+            if callable(v) and not isinstance(v, property) and not n.startswith("__")
+        }
     for rel, (cls, _attr, _proto, cnames, _owned, _table) in COLLABORATORS.items():
         path = NN_ROOT / rel
         for name in cnames:
@@ -457,7 +507,7 @@ def test_collaborator_calls_no_sibling_method() -> None:
                 and isinstance(n.func.value, ast.Attribute)
                 and n.func.value.attr == "_host"
             }
-            assert called == set(), f"{name} 调了宿主方法 {sorted(called)}"
+            assert called <= allowed.get(rel, set()), f"{name} 调了协议外的宿主方法 {sorted(called)}"
 
 
 def test_composition_is_exact() -> None:

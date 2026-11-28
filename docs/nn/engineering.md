@@ -89,10 +89,40 @@ TrainingDispatch)`）；`loop_baseline.py` 的 `Any` **6 → 2**；G5 基线 `te
 组合根的声明段里再出现一份」（双真相）。同名散落账 **147 → 148**（`traj_dir` 现在同时出现在
 两个 Protocol 与宿主 getter —— 同一概念同一个名字，换名反而更差）。
 
+### 第三刀：产物出包 → `BundleExporter`（同日）
+
+`trainer/loop_export.py::TrainingExport`（`TrainingSteps` 的末位基类，6 方法）→ `BundleExporter`
+对象 + `BundleHost` Protocol（`args` / `bun` / `traj_root` / `jsonl_path` / `rotate_seed` + 公开入口
+`remote_ppo`）。`_ts_code_sha256` / `_ts_code_zip_path` / `_replay_converter_sha256` /
+`_replay_converter_path` 四个惰性缓存槽搬进对象（`loop_core._init_*` 里不再声明）。
+
+* **唯一的 outbound 先升成宿主公开入口**：`TrainingLoop.remote_ppo(it, rollout_spec=None, *,
+  plan_bytes=None, wait_timeout_sec=0.0, export_path=None)` 一行转发 `_remote_ppo`——**调用时**解析，
+  所以既有 `monkeypatch.setattr(loop, "_remote_ppo", …)` 全都仍然命中；协作对象只调协议里声明的名字，
+  不伸手进 `_remote_ppo`。
+* **组合根留 5 个一行壳**：`_ensure_ts_code` / `_ensure_replay_converter` / `_export_offline_bundle` /
+  `_export_weights` / `ts_code_view`；`volume_plan_block` **不**留壳（只被本簇与用例调用）。
+* **远端两簇改问公开读数**：`loop_remote_job` 的 `getattr(self, "_ts_code_sha256"…)` 与
+  `loop_remote_push` 的 `Path(self._ts_code_zip_path)` 都换成 `self.exporter.ts_code_view()`（`TsCodeView`
+  早就是这一簇的唯一读数形状），槽位名不再出现在两个远端文件里。
+* `TrainingLoop.__mro__` **19 → 18**；`TrainingSteps.__bases__` = `(TrainingRemote, TrainingEval)`；
+  `loop_export.py` 的 `Any` **11 → 2**（协议读面全部具体化，两个 `log` 参数改 `Callable[[str], None]`）。
+
+行为面用例（`test_ensure_ts_code_cache_semantics` / `test_export_weights_runs_and_log_seam_lands_here` /
+`test_export_offline_bundle_fails_loud_without_start_weights`）改成显式构造 `BundleExporter(host)`——
+替身宿主就是个 `SimpleNamespace`，比原先 `TrainingExport.__new__` 的白盒更干净。
+
+计数记账：`Any` 基线 `loop_export` 11 → **2**、`loop_remote_push` 3 → **2**（`loop_core` 仍 11 —— 两个
+`log: Any` 改成 `Callable` 后不多一格）；同名散落 **148 → 149**（`traj_root` 现在同时出现在
+`BundleHost` / 宿主 getter / hub 两处 —— 同一概念同一名字）；口径 B **1276 → 1278**（两个守卫文件
+本就带 `.py` 字面量，新增的全是结构判据）。
+
 ### 下一刀的口径（照同一形状）
 
-候选按「叶子 + 入边少」排序：`TrainingDispatch`（4 方法，inbound 4）→
-`TrainingExport`（6 方法，1 条 outbound 到 `_remote_ppo`，需要先把它变成宿主公开入口）。
+`TrainingDispatch`（4 方法，inbound 4）**不能照抄**：`_eval_on_round` 在 `TrainingEval` 里有个
+`raise` 占位，而今天的胜出者靠 MRO 顺序（`Dispatch` 在 `Eval` 之前）。移出基类前必须先定「真实现」
+的归属——要么把占位删掉、要么给宿主立一个公开入口并在协议里声明顺序契约，否则占位的 `raise`
+会静默上位（`test_eval_on_round_position_contract` 正是钉这一点的那条用例）。
 每刀都要：对象拥有自己的状态、宿主读面走 Protocol、组合根只留一行壳、
 守卫从 `is` 同一性改成 AST 形状 —— **不要**把 `self.host._private` 当捷径（那就只是多绕一层）。
 

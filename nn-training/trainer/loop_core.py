@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import subprocess
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,7 @@ from common.paths import REPO_ROOT
 from common.proc import run_capture
 from remote.payload_pack import ShardSegments
 from trainer.loop_baseline import BaselineEval, BaselineEvalView
+from trainer.loop_export import BundleExporter, TsCodeView
 from trainer.loop_guards import TrainingGuards
 from trainer.loop_iter_dir import IterWorkspace
 from trainer.loop_lifecycle import TrainingLifecycle
@@ -145,6 +147,7 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         # 宿主只提供 `IterWorkspaceHost` 声明的读面（下面那组 property）与两个一行转发壳。
         self.iter_ws = IterWorkspace(self)
         self.baseline = BaselineEval(self)
+        self.exporter = BundleExporter(self)
 
     def _init_core_state(self, args, ppo_backend, bun, update_kwargs) -> None:
         """构造入参与宿主句柄 / 迭代起点与派发状态 / 轨迹根与 JSONL 落点 / M2 启动清场。"""
@@ -372,6 +375,21 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         return bool(self._node_rollout)
 
     @property
+    def traj_root(self) -> Path:
+        """轨迹根（`tmp/<课>/`；`it*` 轮目录都在下面）。"""
+        return Path(self._traj_root)
+
+    @property
+    def jsonl_path(self) -> Path:
+        """本轮账本落点（`training_log.jsonl`）。"""
+        return Path(self._jsonl_path)
+
+    @property
+    def rotate_seed(self) -> int:
+        """本轮实际用的 rotateSeed（resume 后是继承值）。"""
+        return int(self._rotate_seed or 0)
+
+    @property
     def eval_every(self) -> int:
         """in-loop eval 的间隔轮数（`_setup` 每轮重解；`0` = 关闭）。"""
         return int(self._eval_every or 0)
@@ -403,5 +421,38 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
 
     def baseline_eval_state(self) -> BaselineEvalView:
         return self.baseline.state()
+
+    def _ensure_ts_code(self, job_root: str, *, log: Callable[[str], None]) -> None:
+        self.exporter.ensure_ts_code(job_root, log=log)
+
+    def _ensure_replay_converter(self, job_root: str, *, log: Callable[[str], None]) -> tuple[str, str]:
+        return self.exporter.ensure_replay_converter(job_root, log=log)
+
+    def _export_offline_bundle(self, it: int, pairs: list[tuple[int, int]], n: int) -> None:
+        self.exporter.export_offline_bundle(it, pairs, n)
+
+    def _export_weights(self, it: int) -> None:
+        self.exporter.export_weights(it)
+
+    def ts_code_view(self) -> TsCodeView:
+        return self.exporter.ts_code_view()
+
+    def remote_ppo(
+        self,
+        it: int,
+        rollout_spec: dict | None = None,
+        *,
+        plan_bytes: bytes | None = None,
+        wait_timeout_sec: float = 0.0,
+        export_path: str | Path | None = None,
+    ) -> dict:
+        """远端 PPO 的**宿主公开入口**（`BundleHost` 用；调用时解析 `_remote_ppo`，patch 不失效）。"""
+        return self._remote_ppo(
+            it,
+            rollout_spec,
+            plan_bytes=plan_bytes,
+            wait_timeout_sec=wait_timeout_sec,
+            export_path=export_path,
+        )
 
 

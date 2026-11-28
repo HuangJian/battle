@@ -148,8 +148,16 @@ nn 门禁 **7110 passed / 4 skipped**。全文 → `docs/nn/engineering.md` §39
 G5 `test_loop_core_tail_split` 3 → 2；同名散落 147 → 148（`traj_dir` 两个 Protocol + 宿主 getter）。
 守卫的协作对象表扩成 `COLLABORATORS` 字典，两刀一视同仁，并新增「归对象的状态不得在组合根
 再出现一份」。
-**下一刀**：`TrainingDispatch`（4 方法 / inbound 4）→ `TrainingExport`（唯一 outbound 是
-`_remote_ppo`，需要先把它变成宿主公开入口）。
+**P0-1 第三刀（同日，产物出包）**：`trainer/loop_export.py::TrainingExport` → `BundleExporter` +
+`BundleHost`（`args` / `bun` / `traj_root` / `jsonl_path` / `rotate_seed` + 公开入口 `remote_ppo`）；
+四个 TS/replay 缓存槽归对象，远端两簇改问 `ts_code_view()`。`remote_ppo` 是**宿主公开入口**
+（一行转发 `_remote_ppo`，调用时解析 ⇒ 既有 patch 不失效），协作对象不伸手进 `_remote_ppo`。
+MRO **19 → 18**，`TrainingSteps.__bases__` = `(TrainingRemote, TrainingEval)`；`loop_export` 的
+`Any` 11 → 2（两个 `log` 改 `Callable`），`loop_remote_push` 3 → 2；同名散落 148 → 149
+（`traj_root` 的协议声明）；口径 B 1276 → 1278（结构判据）。
+**下一刀**：`TrainingDispatch`（4 方法 / inbound 4）—— 不能照抄：`TrainingEval._eval_on_round`
+是 `raise` 占位，今天的胜出者靠 MRO 顺序（`Dispatch` 在 `Eval` 之前），移出基类前先定真实现
+的宿主入口/顺序契约（`test_eval_on_round_position_contract` 钉的就是这一点）。
 
 ## 0. 执行摘要
 

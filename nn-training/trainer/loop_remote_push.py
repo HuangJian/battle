@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from common.log import log
 from common.protocol import ProtocolError, find_payload
@@ -25,6 +25,9 @@ from remote.push_client import submit_job as _push_submit
 from remote.push_client import wait_result as _push_wait_result
 from trainer.loop_transport import _push_over_nodes
 from worker.loop_round import RemotePpoJob
+
+if TYPE_CHECKING:
+    from trainer.loop_export import BundleExporter
 
 
 class TrainingRemotePush:
@@ -37,7 +40,8 @@ class TrainingRemotePush:
     args: Any
     #:`_remote_ppo_publish` 写入、本簇读取的两个传输产物（内容寻址的 code / TS 码 zip）。
     _code_zip_path: Any
-    _ts_code_zip_path: Any
+    #: 产物出包协作对象（P0-1 第三刀）：TS 运行时 zip 的读者改问 `ts_code_view()`。
+    exporter: BundleExporter
 
     def _push_submit_node(self, sess: RemotePpoJob, i: int) -> None:
         """向第 i 个直推节点提交 job（**发布**动作），并把传输读数记进会话。
@@ -58,6 +62,7 @@ class TrainingRemotePush:
             if (bp := blob_path(job_dir, n)).exists()
         }
         # M0：submit_job 返回本轮实测传输账（body/payload/code 字节 + 上传秒）
+        ts_zip = self.exporter.ts_code_view().zip_path if sess.rollout_spec else None
         sess.submit_wire = _push_submit(
             str(node["url"]),
             str(node.get("authKey", "")),
@@ -66,9 +71,7 @@ class TrainingRemotePush:
                 payload_zip=_pl.read_bytes(),
                 code_zip=self._code_zip_path.read_bytes(),
                 blobs=blobs,
-                ts_code_zip=(
-                    Path(self._ts_code_zip_path).read_bytes() if sess.rollout_spec else None
-                ),
+                ts_code_zip=Path(ts_zip).read_bytes() if ts_zip is not None else None,
                 echo=bool(getattr(self.args, "smoke", False)),
                 log=log,
             ),
