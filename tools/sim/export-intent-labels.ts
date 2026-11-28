@@ -11,7 +11,7 @@
  * 结果按任务 id 归并 = 串行逐字典序（池的确定性注记），ghost 表与并行度无关。
  *
  * 输出：
- *   shards/<sNN-seedN-difficulty>/  obs.npy (N,14,26,26,u1) / scalars.npy
+ *   shards/<sNN-seedN-difficulty>/  obs.npy (N,17,26,26,u1) / scalars.npy
  *                                   intent.npy (N,u1) / frame.npy (N,f8)
  *                                   manifest.json（含段序列）
  *   ghost.json                      类分布幽灵表（自然分布口径）+ ±5 tick 翻转
