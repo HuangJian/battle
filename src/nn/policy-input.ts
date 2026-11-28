@@ -136,6 +136,32 @@ export interface NNInputOptions {
 let cachedModel: ModelLike | null = null
 let cachedModelPath: string | null = null
 
+/**
+ * P′-2b0：NNInput 的跨 tick 决策状态快照（分支 rollout 用）。
+ *
+ * 与 `cloneWorld/restoreWorld` 配对，二者必须取自同一 tick，恢复顺序为
+ * `restoreWorld → restoreDecisionState`。只覆盖会影响后续决策的字段：
+ *   gate（决策门：prevThreat/lastDecisionTick/读数）、已提交动作（moveDir/firing/
+ *   holding/fireBeforeTurn）、committed、ruleApplyCount（诊断计数）。
+ * `encoder` / `model` / `puCenter` 不是跨 tick 状态：`decide()` 每次都重新编码，
+ * 且 NNInput 是贪心 argmax（无采样、无 RNG）⇒ 分支 CRN 天然成立。
+ */
+export interface NNInputDecisionState {
+  version: 1
+  fields: Record<string, unknown>
+}
+
+/** capture/restore 的字段清单（新增决策字段必须加在这里）。 */
+const NN_DECISION_STATE_FIELDS = [
+  'gate',
+  'moveDir',
+  'firing',
+  'holding',
+  'fireBeforeTurn',
+  'committed',
+  'ruleApplyCount',
+] as const
+
 function loadModel(opts: NNInputOptions): ModelLike {
   let path = opts.weightsPath
   if (!path) {
@@ -302,6 +328,52 @@ export class NNInput implements InputLike {
   /** 本局规则实际改写动作的次数（诊断读数；只读）。 */
   readRuleApplications(): number {
     return this.ruleApplyCount
+  }
+
+  // ================================================================
+  // P′-2b0: decision-state capture / restore (branch rollout contract)
+  // ================================================================
+
+  /** 捕获跨 tick 决策状态（深拷贝；与 cloneWorld 同一 tick 取）。 */
+  captureDecisionState(): NNInputDecisionState {
+    const self = this as unknown as Record<string, unknown>
+    const fields: Record<string, unknown> = {}
+    for (const name of NN_DECISION_STATE_FIELDS) fields[name] = structuredClone(self[name])
+    return { version: 1, fields }
+  }
+
+  /**
+   * 恢复决策状态。必须在 restoreWorld(world, snap) 之后调用；内部再次深拷贝，
+   * 因此同一份 state 可重复用于多个分支而不会串味（镜像 GodAIInput 的同一契约）。
+   */
+  restoreDecisionState(state: NNInputDecisionState): void {
+    if (!state || state.version !== 1) {
+      throw new Error(
+        `NNInputDecisionState: unsupported version ${(state as { version?: unknown })?.version}`,
+      )
+    }
+    const fields = state.fields
+    if (!fields || typeof fields !== 'object') {
+      throw new Error('NNInputDecisionState: missing fields')
+    }
+    for (const name of NN_DECISION_STATE_FIELDS) {
+      if (!(name in fields)) throw new Error(`NNInputDecisionState: missing field ${name}`)
+    }
+    const self = this as unknown as Record<string, unknown>
+    for (const name of NN_DECISION_STATE_FIELDS) self[name] = structuredClone(fields[name])
+  }
+
+  /**
+   * P′-2b0：当前状态的 V 估计（只读；不做决策、不改决策状态）。
+   * 无 value 头（纯 BC 权重）或玩家已死 ⇒ null（调用方必须回退 raw terminal）。
+   */
+  valueEstimate(): number | null {
+    if (this.model.hasValueHead !== true || !this.model.valueOut) return null
+    const p = this.world.player
+    if (!p || !p.alive) return null
+    this.encoder.encode(this.world)
+    this.model.forward(this.encoder.obs, this.encoder.scalars, this.encoder.extra)
+    return this.model.valueOut[0]
   }
 
   /**

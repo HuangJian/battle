@@ -52,6 +52,10 @@ export interface ModelLike {
   readonly moveDim?: number
   readonly fireDim?: number
   readonly usesHoldFire3?: boolean
+  /** P′-2b0：价值头是否真实加载（`valueOut` 恒有缓冲，不能用「字段存在」判定）。 */
+  readonly hasValueHead?: boolean
+  /** P′-2b0：per-tick value head 输出（仅 StudentModel 档；BC NNModel 无此字段）。 */
+  readonly valueOut?: Float32Array
 }
 
 const RELU = (x: number): number => (x > 0 ? x : 0)
@@ -359,6 +363,8 @@ export class StudentModel implements ModelLike {
   readonly moveDim: number
   readonly fireDim: number
   readonly usesHoldFire3: boolean
+  /** P′-2b0：value_head 真实加载（无 value 头的 BC 档 = false，valueOut 恒 0）。 */
+  readonly hasValueHead: boolean
   readonly extraDim: number
   // Per-tick value head: **吃与策略头同一份 `pf`**（obs-v5，plan §2.6）——宽度随档位：
   // legacy 128（= hidden）/ 腿 A 165（hidden+extra37）/ 腿 B 189（tower+scalars40+extra37）。
@@ -541,6 +547,7 @@ export class StudentModel implements ModelLike {
     this.valueB137 = null
     this.valuePfW = null
     this.valuePfB = new Float32Array(1)
+    this.hasValueHead = false
     if (vh && (strict ? vh.length === want : vh.length === pfLen || vh.length === v137Len)) {
       if (vh.length === v137Len) {
         this.valueW137 = vh
@@ -549,6 +556,7 @@ export class StudentModel implements ModelLike {
         this.valuePfW = vh
         this.valuePfB = vb
       }
+      this.hasValueHead = true
     } else if (vh) {
       throw new Error(
         `StudentModel: value_head.width=${vh.length} 与本档不符` +
